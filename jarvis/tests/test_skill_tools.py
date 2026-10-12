@@ -27,7 +27,12 @@ from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import (
 	prefetch_child_values as _real_prefetch,
 )
-from jarvis.permissions import JARVIS_USER_ROLE, ensure_jarvis_user_role
+from jarvis.permissions import (
+	JARVIS_ADMIN_ROLE,
+	JARVIS_USER_ROLE,
+	ensure_jarvis_admin_role,
+	ensure_jarvis_user_role,
+)
 from jarvis.tools.create_custom_skill import create_custom_skill
 from jarvis.tools.find_skills import _maybe_prefetch_children, find_skills
 from jarvis.tools.get_skill import (
@@ -47,6 +52,7 @@ OWNER = "sttool-owner@example.com"
 PEER = "sttool-peer@example.com"
 THIRD = "sttool-third@example.com"
 WEB = "sttool-web@example.com"
+JADMIN = "sttool-jadmin@example.com"
 
 ERROR_LOG = "Error Log"
 AUDIT_TITLE = "Jarvis: learned skill fetch missed"
@@ -128,6 +134,30 @@ def _ensure_system_user(email: str) -> str:
 		frappe.clear_cache(user=email)
 	if "System Manager" in set(frappe.get_roles(email)):
 		frappe.get_doc("User", email).remove_roles("System Manager")
+	return email
+
+
+def _ensure_jarvis_admin_only_user(email: str) -> str:
+	"""A System User whose only Jarvis role is Jarvis Admin: it passes the chat
+	gate (``JARVIS_ACCESS_ROLES``) but holds no DocType read on the skill."""
+	ensure_jarvis_admin_role()
+	if not frappe.db.exists("User", email):
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "sttool-jadmin",
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "System User",
+				"roles": [{"role": JARVIS_ADMIN_ROLE}],
+			}
+		)
+		u.flags.ignore_permissions = True
+		u.insert(ignore_permissions=True)
+	extra = {JARVIS_USER_ROLE, "System Manager"} & set(frappe.get_roles(email))
+	if extra:
+		frappe.get_doc("User", email).remove_roles(*extra)
 	return email
 
 
@@ -287,6 +317,105 @@ class TestFindSkills(SkillToolsTestCase):
 		with _as(WEB):
 			with self.assertRaises(PermissionDeniedError):
 				find_skills("marker beta")
+
+
+class TestFindSkillsPagesPastUnreadable(SkillToolsTestCase):
+	"""Audit F06: matches the caller cannot use, sorting ahead of one they can,
+	must not fill the candidate page and hide it. The page is shrunk to 2 rows so
+	THIRD's three private ``aa`` rows outnumber it."""
+
+	def setUp(self):
+		super().setUp()
+		pager = patch("jarvis.tools.find_skills._CANDIDATE_ROWS", 2)
+		pager.start()
+		self.addCleanup(pager.stop)
+
+	def _unreadable_ahead(self, token: str, count: int = 3, **kw):
+		for i in range(count):
+			_make_skill(THIRD, f"{PFX}-aa-{token}-{i}", f"sttool {token} steps", scope="User", **kw)
+
+	def _found(self, token: str, **kw) -> list[str]:
+		return [s["skill_name"] for s in find_skills(token, **kw)["skills"]]
+
+	def test_own_skill_found_behind_unreadable_page(self):
+		self._unreadable_ahead("pgown")
+		_make_skill(OWNER, f"{PFX}-zz-pgown", "sttool pgown steps", scope="User")
+		with _as(OWNER):
+			self.assertEqual(self._found("pgown"), [f"{PFX}-zz-pgown"])
+
+	def test_shared_skill_found_behind_unreadable_page(self):
+		self._unreadable_ahead("pgshare")
+		_make_skill(OWNER, f"{PFX}-zz-pgshare", "sttool pgshare steps", scope="User", shared_with=[PEER])
+		with _as(PEER):
+			self.assertEqual(self._found("pgshare"), [f"{PFX}-zz-pgshare"])
+
+	def test_role_skill_found_behind_unreadable_page(self):
+		self._unreadable_ahead("pgrole")
+		_make_skill(OWNER, f"{PFX}-zz-pgrole", "sttool pgrole steps", scope="Role", target_role="Sales User")
+		with _as(PEER):  # PEER holds Sales User
+			self.assertEqual(self._found("pgrole"), [f"{PFX}-zz-pgrole"])
+
+	def test_role_narrowed_org_skill_found_behind_unreadable_page(self):
+		# The managed learned-skill shape: Org narrowed by allowed_roles.
+		self._unreadable_ahead("pgnarrow")
+		_make_skill(OWNER, f"{PFX}-zz-pgnarrow", "sttool pgnarrow steps", allowed_roles=["Sales User"])
+		with _as(PEER):
+			self.assertEqual(self._found("pgnarrow"), [f"{PFX}-zz-pgnarrow"])
+
+	def test_armed_chat_pages_past_visible_rows_it_does_not_control(self):
+		# THIRD's private rows are shared with OWNER: visible to OWNER, so the SQL
+		# keeps them, but not controlled by OWNER, so the armed filter drops them.
+		from jarvis.permissions import ARMED_SKILL_OWNER_FLAG
+
+		self._unreadable_ahead("pgarmed", shared_with=[OWNER])
+		_make_skill(OWNER, f"{PFX}-zz-pgarmed", "sttool pgarmed steps", scope="User")
+		with _as(OWNER):
+			self.assertEqual(len(self._found("pgarmed")), 4)
+			frappe.flags[ARMED_SKILL_OWNER_FLAG] = OWNER
+			self.addCleanup(frappe.flags.pop, ARMED_SKILL_OWNER_FLAG, None)
+			self.assertEqual(self._found("pgarmed"), [f"{PFX}-zz-pgarmed"])
+
+	def test_only_unreadable_matches_find_nothing(self):
+		self._unreadable_ahead("pgnone", count=5)
+		with _as(PEER):
+			self.assertEqual(find_skills("pgnone"), {"skills": [], "count": 0})
+
+	def test_caller_without_doctype_read_finds_what_get_skill_serves(self):
+		# Review round 1: frappe.get_list demanded DocType read and refused this
+		# caller outright, while get_skill still served the skill to them.
+		user = _ensure_jarvis_admin_only_user(JADMIN)
+		self._unreadable_ahead("pgadmin")
+		_make_skill(OWNER, f"{PFX}-zz-pgadmin", "sttool pgadmin steps")
+		with _as(user):
+			self.assertFalse(frappe.has_permission(SKILL, "read"))
+			self.assertEqual(self._found("pgadmin"), [f"{PFX}-zz-pgadmin"])
+			self.assertEqual(
+				get_skill(f"{PFX}-zz-pgadmin")["instructions"], f"instructions for {PFX}-zz-pgadmin"
+			)
+
+	def test_role_name_with_percent_still_matches(self):
+		# The hook's values arrive with "%" already doubled; escaping them again
+		# made a role (or user) carrying "%" stop matching its own skills.
+		role = "sttool 100% role"
+		if not frappe.db.exists("Role", role):
+			frappe.get_doc({"doctype": "Role", "role_name": role, "desk_access": 1}).insert(
+				ignore_permissions=True
+			)
+		frappe.get_doc("User", PEER).add_roles(role)
+		frappe.clear_cache(user=PEER)
+		self.addCleanup(frappe.clear_cache, user=PEER)
+		self.addCleanup(lambda: frappe.get_doc("User", PEER).remove_roles(role))
+		self._unreadable_ahead("pgpct")
+		_make_skill(OWNER, f"{PFX}-zz-pgpct", "sttool pgpct steps", scope="Role", target_role=role)
+		with _as(PEER):
+			self.assertEqual(self._found("pgpct"), [f"{PFX}-zz-pgpct"])
+
+	def test_limit_caps_results_across_pages(self):
+		for i in range(5):
+			_make_skill(OWNER, f"{PFX}-pglim-{i}", "sttool pglim steps", scope="User")
+		with _as(OWNER):
+			self.assertEqual(self._found("pglim", limit=3), [f"{PFX}-pglim-{i}" for i in range(3)])
+			self.assertEqual(len(self._found("pglim", limit=10)), 5)
 
 
 class TestGetSkill(SkillToolsTestCase):
