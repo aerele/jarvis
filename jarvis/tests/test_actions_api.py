@@ -262,6 +262,24 @@ class TestApplyAction(FrappeTestCase):
 		out = load_doc("Contact", c.name)
 		self.assertEqual(out["tables"]["email_ids"][0]["name"], c.email_ids[0].name)
 
+	def test_a_statement_limit_on_apply_is_not_translated_as_a_read(self):
+		# #707 B3: a human Apply is a write, so database error 1969 is not answered
+		# with the read advice ("add a filter or a date range"). It is unexpected
+		# here and surfaces as itself.
+		err = frappe.db.OperationalError(1969, "max_statement_time exceeded")
+		with patch("jarvis.tools.create_doc.create_doc", side_effect=err):
+			with self.assertRaises(frappe.db.OperationalError):
+				apply_action(
+					frappe.as_json(
+						{
+							"verb": "create",
+							"doctype": "ToDo",
+							"values": {"description": "B3 apply under a statement limit"},
+							"conversation": self._conv(),
+						}
+					)
+				)
+
 	def test_confirm_verbs_rejected_here(self):
 		# submit/cancel/delete/amend are confirm-as-proposed actions: they must
 		# go through the token gate (confirm_tool), never the human-edit path.
