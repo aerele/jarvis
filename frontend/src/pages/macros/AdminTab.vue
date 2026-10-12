@@ -353,15 +353,15 @@
 									</span>
 								</div>
 
-								<!-- Every action is a button on the row, in one fixed order so
-								     the lanes line up down the list: Stop run (only while a run
-								     is going), Hold or Release, Hand over, Delete. None is in a
-								     menu: this app's menus do not take keyboard focus, and what
-								     an admin does to someone's macro has to be reachable by
-								     keyboard and stay beside the macro it acts on. Each is named
-								     for its row ("Delete Weekly stock check, owned by ..."): the
-								     name goes in `label`, which is what the Button reads out, and
-								     the short word in the slot is what it shows. -->
+								<!-- Stop run is a button on the row: it is the urgent one, and only
+								     a row with a run going shows it. Everything else is in one
+								     "Actions" menu, in one fixed order with Delete set apart at the
+								     end, so every row ends the same way and a narrow row has room.
+								     The menu is named for its row ("Actions for Weekly stock
+								     check, owned by ..."): the name goes in `label`, which is what
+								     the Button reads out, and the short word in the slot is what
+								     it shows. While its menu is open the button is ringed, so it
+								     is plain which row the menu belongs to. -->
 								<div role="cell" class="jv-macro-admin-cell-actions">
 									<Button
 										v-if="row.live_run"
@@ -375,48 +375,25 @@
 										@click="stop(row)"
 										>Stop run</Button
 									>
-									<Button
-										v-if="!row.admin_hold && !isMine(row)"
-										class="jv-macro-admin-hold"
-										size="sm"
-										variant="subtle"
-										:label="actionName('Hold', row)"
-										:disabled="busy"
-										@click="askHold(row)"
-										>Hold</Button
+									<Dropdown
+										:options="actionsFor(row)"
+										:placement="cardLayout ? 'left' : 'right'"
+										@update:open="(open) => open && focusOpenMenu()"
 									>
-									<Button
-										v-if="row.admin_hold && !isMine(row)"
-										class="jv-macro-admin-release"
-										size="sm"
-										variant="subtle"
-										:label="actionName('Release', row)"
-										:loading="acting === `release:${row.name}`"
-										:disabled="busy"
-										@click="release(row)"
-										>Release</Button
-									>
-									<Button
-										v-if="!isMine(row)"
-										class="jv-macro-admin-handover"
-										size="sm"
-										variant="subtle"
-										:label="actionName('Hand over', row)"
-										:disabled="busy"
-										@click="askHandover(row)"
-										>Hand over</Button
-									>
-									<Button
-										class="jv-macro-admin-delete"
-										size="sm"
-										variant="ghost"
-										theme="red"
-										:label="actionName('Delete', row)"
-										:loading="acting === `delete:${row.name}`"
-										:disabled="busy"
-										@click="remove(row)"
-										>Delete</Button
-									>
+										<Button
+											class="jv-macro-admin-actions ring-outline-gray-3 data-[state=open]:ring-2"
+											size="sm"
+											variant="subtle"
+											iconRight="chevron-down"
+											:label="actionName('Actions for', row)"
+											:loading="
+												acting === `release:${row.name}` ||
+												acting === `delete:${row.name}`
+											"
+											:disabled="busy"
+											>Actions</Button
+										>
+									</Dropdown>
 								</div>
 							</div>
 						</div>
@@ -487,7 +464,16 @@
 // every call (jarvis.chat.macros_admin_api), so a stale client gate can only hide
 // the tab.
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { Badge, Breadcrumbs, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
+import {
+	Badge,
+	Breadcrumbs,
+	Button,
+	Dropdown,
+	FeatherIcon,
+	FormControl,
+	Tooltip,
+	toast,
+} from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import MacroAdminDialog from "./MacroAdminDialog.vue";
 import MacroHoldDialog from "./MacroHoldDialog.vue";
@@ -831,6 +817,99 @@ function actionName(verb, row) {
 	return `${verb} ${row.macro_name || row.name}, owned by ${ownerText(row)}`;
 }
 
+// ── the Actions menu ─────────────────────────────────────────────────────────
+// What may be done to a row, in one order: Hold or Release, Hand over, then Delete
+// in a group of its own. An admin's own macro has Delete only (they hold and hand
+// over nothing of their own: the "Yours" badge says why).
+function actionsFor(row) {
+	const mine = isMine(row);
+	const item = (key, label, run, extra = {}) => ({
+		key,
+		label,
+		disabled: busy.value,
+		onClick: () => fromMenu(row, run),
+		...extra,
+	});
+	const first = [];
+	if (!mine && !row.admin_hold) first.push(item("hold", "Hold", askHold));
+	if (!mine && row.admin_hold) first.push(item("release", "Release", release));
+	if (!mine) first.push(item("handover", "Hand over", askHandover));
+	const groups = [];
+	if (first.length) groups.push({ group: "Macro", hideLabel: true, items: first });
+	groups.push({
+		group: "Delete",
+		hideLabel: true,
+		items: [item("delete", "Delete", remove, { theme: "red" })],
+	});
+	return groups;
+}
+
+// Below this width the list draws each macro as a card (the styles' 48rem), with
+// the Actions button at the card's start: its menu then opens from that side, or
+// it would be pushed against the window's edge.
+const CARD_BELOW_PX = 768;
+const cardLayout = ref(false);
+let listWidth = null;
+watch(listEl, (el) => {
+	if (listWidth) listWidth.disconnect();
+	listWidth = null;
+	if (!el) return;
+	cardLayout.value = el.clientWidth < CARD_BELOW_PX;
+	if (typeof ResizeObserver === "undefined") return;
+	listWidth = new ResizeObserver(() => {
+		cardLayout.value = el.clientWidth < CARD_BELOW_PX;
+	});
+	listWidth.observe(el);
+});
+
+// The menu library does not move focus into a menu it opens, so the arrow keys and
+// Enter would not reach the items: focus it once it is drawn (as the list filters do).
+function focusOpenMenu() {
+	requestAnimationFrame(() => document.querySelector("[data-reka-menu-content]")?.focus());
+}
+
+// An item was chosen. Two things have to settle before its action runs. The menu is
+// still closing, and a confirmation opened while it is there would not take the
+// keyboard. And the item that had focus goes away with the menu: focus is put on the
+// row's Actions button, so the dialog or confirmation has somewhere to give focus
+// back to when it is cancelled.
+//
+// One pick at a time: an item still takes a press while its menu fades out, and a
+// second pick would move focus out of the confirmation the first one opened.
+const MENU_CLOSE_FRAMES = 40;
+const menuStillOpen = () => !!document.querySelector("[data-reka-menu-content]");
+let picking = false;
+async function fromMenu(row, run) {
+	if (picking) return;
+	picking = true;
+	try {
+		await nextTick();
+		let waited = false;
+		for (let i = 0; i < MENU_CLOSE_FRAMES && menuStillOpen(); i++) {
+			waited = true;
+			await new Promise((done) => requestAnimationFrame(done));
+		}
+		// Once it is gone the menu hands focus back to its button, a moment later: let
+		// that happen first, or it would take focus out of what opens next.
+		if (waited) await new Promise((done) => setTimeout(done, 0));
+		// A menu is open after all (another row's, opened meanwhile), the tab was
+		// left, or something is already asking: this pick is dropped.
+		if (menuStillOpen() || !listEl.value || dialogOpen()) return;
+		const button = actionsButton(row.name);
+		if (button && !button.disabled) button.focus();
+		await run(row);
+	} finally {
+		picking = false;
+	}
+}
+function actionsButton(name) {
+	const list = listEl.value;
+	const el =
+		list &&
+		[...list.querySelectorAll(".jv-macro-admin-row")].find((r) => r.dataset.macro === name);
+	return el ? el.querySelector(".jv-macro-admin-actions") : null;
+}
+
 // ── open one, read-only ──────────────────────────────────────────────────────
 const opened = ref("");
 const detailOpen = ref(false);
@@ -1039,6 +1118,7 @@ onMounted(() => {
 	loadOwners();
 });
 onBeforeUnmount(() => {
+	if (listWidth) listWidth.disconnect();
 	clearTimeout(searchTimer);
 	latest++; // an answer still on its way is nobody's now
 });
@@ -1069,13 +1149,13 @@ onBeforeUnmount(() => {
 	container-type: inline-size;
 }
 
-/* Wide: five lanes. The last holds every action on one line and is as wide as
-   the most a row can show (Stop run, Hold, Hand over, Delete), so the lanes do
-   not shift from row to row. */
+/* Wide: five lanes. The last holds the row's actions on one line and is as wide
+   as the most a row can show (Stop run and the Actions menu with its spinner),
+   so the lanes do not shift from row to row. */
 .jv-macro-admin-head,
 .jv-macro-admin-row {
 	display: grid;
-	grid-template-columns: 2fr 1.4fr 1.6fr minmax(9.5rem, 1.1fr) 19rem;
+	grid-template-columns: 2fr 1.4fr 1.6fr minmax(9.5rem, 1.1fr) 12rem;
 	align-items: center;
 	column-gap: 1rem;
 }
@@ -1102,7 +1182,7 @@ onBeforeUnmount(() => {
 		padding: 0;
 	}
 	.jv-macro-admin-row {
-		grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) 19rem;
+		grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) 12rem;
 		grid-template-areas:
 			"macro owner actions"
 			"schedule last actions";
