@@ -41,7 +41,7 @@ test("a reload re-reads only the newest page and keeps the older pages on screen
 });
 
 test("an older page loads near the top, above the rows on screen", () => {
-	assert.match(fnBody("function onScroll("), /loadOlder\(\)/);
+	assert.match(fnBody("function onScroll("), /loadOlder\(\{ auto: true \}\)/);
 	const older = fnBody("async function loadOlder(");
 	assert.match(older, /api\.getConversation\(cid, \{ before: paging\.before \}\)/);
 	assert.match(older, /prependOlderPage\(messages\.value, historyPaging\.value, d\)/);
@@ -66,4 +66,26 @@ test("switching chats drops the paging state of the chat left behind", () => {
 	const body = sw.slice(0, sw.indexOf("\n);"));
 	assert.match(body, /historyPaging\.value = \{ hasMore: false, before: null, newest: null \};/);
 	assert.match(body, /olderPending\.value = \[\];/);
+});
+
+test("a failed older page pauses the scroll trigger and says so", () => {
+	const older = fnBody("async function loadOlder(");
+	assert.match(
+		older,
+		/if \(auto && Date\.now\(\) - olderFailedAt < OLDER_RETRY_PAUSE_MS\) return;/
+	);
+	const fail = older.slice(older.indexOf("} catch (e) {"));
+	assert.match(fail, /olderFailedAt = Date\.now\(\);/);
+	assert.match(fail, /errorBanner\.value =\s+"Couldn't load earlier messages\./);
+	assert.match(chat, /const OLDER_RETRY_PAUSE_MS = 10000;/);
+});
+
+test("the load button stays focusable while loading and the load is announced", () => {
+	const at = chat.indexOf('v-if="historyPaging.hasMore && messages.length"');
+	const block = chat.slice(at, chat.indexOf("</div>\n\t\t</div>", at));
+	assert.doesNotMatch(block, /:disabled=/);
+	assert.match(block, /:aria-disabled="loadingOlder \? 'true' : 'false'"/);
+	assert.match(block, /@click="loadOlder\(\)"/);
+	assert.match(block, /role="status" aria-live="polite"/);
+	assert.match(block, /Loading earlier messages…/);
 });

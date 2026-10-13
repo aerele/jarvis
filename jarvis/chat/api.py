@@ -805,6 +805,8 @@ HISTORY_PAGE_MAX = 200
 HISTORY_TURN_WIDEN_MAX = 200
 # Most stale rows one call refreshes (the client's older pending cards).
 HISTORY_REFRESH_MAX = 50
+# Most older pending cards one newest page carries (see _older_pending).
+HISTORY_OLDER_PENDING_MAX = 20
 # A tool result longer than this rides a page compact; get_tool_detail has it whole.
 TOOL_RESULT_INLINE_MAX = 2048
 # What the chat UIs read off a compact tool result (lib/reportScope.js,
@@ -852,14 +854,7 @@ def _history_page(conversation: str, fields: list, limit, before, refresh) -> di
 		has_more = any((h.seq or 0) < (start or 0) for h in heads[cut + 1 :])
 	page_filters = [*base, ["seq", ">=", start]] if start is not None else base
 	messages = frappe.get_all(MSG, filters=page_filters, fields=fields, order_by="seq asc")
-	older_pending = []
-	if start is not None and before <= 0:
-		older_pending = frappe.get_all(
-			MSG,
-			filters=[*base, ["seq", "<", start], ["role", "=", "tool"], ["tool_status", "=", "pending"]],
-			fields=fields,
-			order_by="seq asc",
-		)
+	older_pending = _older_pending(conversation, fields, start) if start is not None and before <= 0 else []
 	on_page = {m.name for m in messages}
 	names = [n for n in _refresh_names(refresh) if n not in on_page]
 	refreshed = (
@@ -878,6 +873,33 @@ def _history_page(conversation: str, fields: list, limit, before, refresh) -> di
 		"older_pending": older_pending,
 		"refreshed": refreshed,
 	}
+
+
+def _older_pending(conversation: str, fields: list, start: int) -> list:
+	"""The still-live pending cards older than the newest page (which starts at seq
+	``start``), oldest first.
+
+	Every newest-page read ships these rows whole, card included, and that read runs
+	on every open and resync, so the set is bounded: an expired card (``expires_at``
+	past) can no longer be confirmed and is left out, and only the newest
+	``HISTORY_OLDER_PENDING_MAX`` ride along. A card left out still shows when its own
+	page loads, and the clients' list_pending backstop surfaces any live one.
+	"""
+	m = frappe.qb.DocType(MSG)
+	rows = (
+		frappe.qb.from_(m)
+		.select(*(m[f] for f in fields))
+		.where(m.conversation == conversation)
+		.where(m.hidden == 0)
+		.where(m.seq < start)
+		.where(m.role == "tool")
+		.where(m.tool_status == "pending")
+		.where(m.expires_at.isnull() | (m.expires_at > frappe.utils.now_datetime()))
+		.orderby(m.seq, order=Order.desc)
+		.limit(HISTORY_OLDER_PENDING_MAX)
+		.run(as_dict=True)
+	)
+	return rows[::-1]
 
 
 def _refresh_names(refresh) -> list:
