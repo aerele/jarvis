@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import unicodedata
 
 import frappe
 from frappe import _
@@ -497,6 +498,8 @@ _FORCE_MIN_TOKEN_LEN = 4
 # Cap each token's length so a pasted wall of text (one giant "word") can't
 # become an unbounded LIKE pattern scanned over every page's body.
 _FORCE_MAX_TOKEN_LEN = 40
+# Only the start of a message is tokenized; a huge paste must not cost a per-char loop.
+_FORCE_MAX_TEXT_CHARS = 2000
 _FORCE_STOPWORDS = frozenset(
 	{
 		"about",
@@ -542,6 +545,189 @@ _FORCE_STOPWORDS = frozenset(
 		"like",
 		"know",
 		"help",
+	}
+)
+
+
+# Hindi and Tamil function words (NFC). Content words such as दिन, वेतन, பணி, சம்பளம் must
+# stay out: the Indic base-letter minimum below lets short words through, so this
+# list is what keeps the fillers from becoming OR'd LIKE terms.
+_FORCE_INDIC_STOPWORDS = frozenset(
+	{
+		"आप",
+		"यह",
+		"वह",
+		"हम",
+		"कब",
+		"कौन",
+		"में",
+		"है",
+		"हैं",
+		"का",
+		"की",
+		"के",
+		"को",
+		"से",
+		"पर",
+		"और",
+		"भी",
+		"तो",
+		"कि",
+		"था",
+		"थी",
+		"थे",
+		"मैं",
+		"मेरे",
+		"मेरा",
+		"मेरी",
+		"हमारे",
+		"हमारा",
+		"हमारी",
+		"तुम",
+		"इस",
+		"उस",
+		"इन",
+		"उन",
+		"कैसे",
+		"क्यों",
+		"कहाँ",
+		"कहां",
+		"कोई",
+		"नहीं",
+		"एक",
+		"क्या",
+		"कितना",
+		"कितने",
+		"कितनी",
+		"मुझे",
+		"बताइए",
+		"बताओ",
+		"बताएं",
+		"ने",
+		"ही",
+		"तक",
+		"लिए",
+		"जो",
+		"या",
+		"अब",
+		"जब",
+		"तब",
+		"सब",
+		"कुछ",
+		"बहुत",
+		"होता",
+		"होती",
+		"होते",
+		"रहा",
+		"रही",
+		"रहे",
+		"गया",
+		"गई",
+		"गए",
+		"दिया",
+		"किया",
+		"करें",
+		"करना",
+		"करने",
+		"करता",
+		"करती",
+		"सकते",
+		"सकता",
+		"सकती",
+		"चाहिए",
+		"वाले",
+		"वाला",
+		"वाली",
+		"अपने",
+		"अपना",
+		"अपनी",
+		"हो",
+		"हूं",
+		"हूँ",
+		"थीं",
+		"लेकिन",
+		"अगर",
+		"तथा",
+		"जिस",
+		"जिन",
+		"किस",
+		"किसी",
+		"यहां",
+		"वहां",
+		"ऐसा",
+		"ऐसे",
+		"इसके",
+		"उसके",
+		"इसमें",
+		"उसमें",
+		"साथ",
+		"बाद",
+		"पहले",
+		"फिर",
+		"केवल",
+		"இது",
+		"அது",
+		"நான்",
+		"என்",
+		"எந்த",
+		"இந்த",
+		"அந்த",
+		"ஒரு",
+		"யார்",
+		"ஏன்",
+		"எப்படி",
+		"எப்போது",
+		"எங்கே",
+		"உங்கள்",
+		"எங்கள்",
+		"என்று",
+		"வேண்டும்",
+		"இல்லை",
+		"மற்றும்",
+		"என்ன",
+		"எனக்கு",
+		"எத்தனை",
+		"எவ்வளவு",
+		"உள்ளது",
+		"ஆனால்",
+		"மேலும்",
+		"போது",
+		"பற்றி",
+		"இருந்து",
+		"வரை",
+		"கொண்ட",
+		"செய்ய",
+		"முடியும்",
+		"இருக்கும்",
+		"என்பது",
+		"அல்லது",
+		"ஆகும்",
+		"உள்ள",
+		"இருக்கிறது",
+		"இருந்தது",
+		"என்ற",
+		"அவர்",
+		"அவள்",
+		"அவர்கள்",
+		"நாங்கள்",
+		"நாம்",
+		"நீங்கள்",
+		"உன்",
+		"தான்",
+		"கூட",
+		"மிக",
+		"மிகவும்",
+		"எல்லா",
+		"சில",
+		"பல",
+		"இங்கே",
+		"அங்கே",
+		"ஏனெனில்",
+		"ஆக",
+		"ஆம்",
+		"இல்ல",
+		"இன்னும்",
+		"சொல்லுங்கள்",
 	}
 )
 
@@ -654,15 +840,49 @@ def _message_search_slugs(message_text: str | None, user: str, limit: int) -> li
 	return [r.slug for r in rows if r.slug]
 
 
-def _significant_tokens(message_text: str | None) -> list[str]:
-	import re
+_JOINERS = ("\u200c", "\u200d")
 
-	words = re.findall(r"[A-Za-z0-9]+", (message_text or "").lower())
+
+def _long_enough(w: str) -> bool:
+	"""Words keep the plain 4-character minimum, except words in an Indic script
+	(U+0900 to U+0DFF), whose vowel signs and viramas inflate the codepoint count:
+	दिन is 3 codepoints but 2 letters, a real word. Those are measured in base
+	letters (L*) with a floor of 2. Cyrillic, Greek, Arabic etc. keep the 4 minimum
+	so their 2-letter fillers stay out. Unspaced scripts (CJK, Thai) are out of
+	scope here: they have no word boundaries to split on."""
+	if any("\u0900" <= c <= "\u0dff" for c in w):
+		return sum(1 for c in w if unicodedata.category(c).startswith("L")) >= 2
+	return len(w) >= _FORCE_MIN_TOKEN_LEN
+
+
+def _split_words(text: str) -> list[str]:
+	"""Split into words of letters, digits and combining marks. ``\\w`` is not used
+	because it drops Mn/Mc marks, which would cut Tamil and Devanagari words apart
+	at every vowel sign and virama. Pure ASCII text splits exactly as ``[A-Za-z0-9]+``."""
+	words: list[str] = []
+	buf: list[str] = []
+	for ch in text:
+		# ZWJ/ZWNJ (Cf) only shape how conjuncts render; people type the same word
+		# with or without them, so they are dropped and the word continues.
+		if ch in _JOINERS:
+			continue
+		if ch.isalnum() or (buf and unicodedata.category(ch) in ("Mn", "Mc")):
+			buf.append(ch)
+		elif buf:
+			words.append("".join(buf))
+			buf = []
+	if buf:
+		words.append("".join(buf))
+	return words
+
+
+def _significant_tokens(message_text: str | None) -> list[str]:
+	words = _split_words(unicodedata.normalize("NFC", (message_text or "")[:_FORCE_MAX_TEXT_CHARS]).lower())
 	out: list[str] = []
 	seen: set[str] = set()
 	for w in words:
 		w = w[:_FORCE_MAX_TOKEN_LEN]
-		if len(w) < _FORCE_MIN_TOKEN_LEN or w in _FORCE_STOPWORDS or w in seen:
+		if not _long_enough(w) or w in _FORCE_STOPWORDS or w in _FORCE_INDIC_STOPWORDS or w in seen:
 			continue
 		seen.add(w)
 		out.append(w)
