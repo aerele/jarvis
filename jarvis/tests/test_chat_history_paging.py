@@ -158,6 +158,19 @@ class TestHistoryPaging(FrappeTestCase):
 		self.assertEqual([p["content"] for p in capped], ["prompt 4", "prompt 5"])
 		self.assertEqual(self._page(limit=2, before=out["paging"]["before"])["recent_prompts"], [])
 
+	def test_a_page_counts_the_shown_rows_below_it(self):
+		for _ in range(5):
+			self._turn(2)  # user, assistant, 2 tool rows: 20 rows
+		self._msg("tool", tool_name="submit_doc", tool_status="completed", action_outcome="confirmed")
+		self._msg("user", content="hidden", hidden=1)
+		self._turn(0)
+		out = self._page(limit=2)
+		self.assertEqual(out["paging"]["older_counts"], {"user": 5, "assistant": 5, "receipt": 1})
+		older = self._page(limit=4, before=out["paging"]["before"])
+		self.assertEqual(older["paging"]["older_counts"], {"user": 4, "assistant": 4, "receipt": 0})
+		whole = self._page(limit=200)
+		self.assertEqual(whole["paging"]["older_counts"], {"user": 0, "assistant": 0, "receipt": 0})
+
 	def test_hidden_rows_never_ride_a_page(self):
 		self._turn(1)
 		hidden = self._msg("user", content="continue", hidden=1)
