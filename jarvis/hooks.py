@@ -361,6 +361,12 @@ scheduler_events = {
 			# SWEEP_TIME_BUDGET_S.
 			# Cheap no-op (one query on a small table) when nothing is due.
 			"jarvis.chat.agent_scheduler.run_due_agent_audits",
+			# Feedback outbox retry (admin-v2#715 F17): re-send stored feedback that
+			# admin has not acknowledged yet, with backoff, at most 10 rows a run, and
+			# stop at the first transient failure. Self-gating (skips un-onboarded),
+			# never raises on an admin failure. Cheap no-op (one indexed query on a
+			# small table) when nothing is due.
+			"jarvis.chat.feedback_outbox.retry_due",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -501,6 +507,10 @@ scheduler_events = {
 		# admin past the retention window (the durable record lives in the admin's
 		# Jarvis Tenant Error). Keeps the local buffer small.
 		"jarvis.error_push.prune_pushed_client_errors",
+		# Feedback outbox hygiene (admin-v2#715 F17): delivered rows after 7 days,
+		# undelivered after 30, then the oldest above a 5000-row ceiling. Admin
+		# holds the durable copy of everything delivered.
+		"jarvis.chat.feedback_outbox.prune",
 		# Usage-dashboard Part A (task U1): Jarvis Turn Usage is an append-only
 		# per-turn accounting row written on every completed turn (see
 		# jarvis.chat.usage.record_turn_usage); without a sweep it grows

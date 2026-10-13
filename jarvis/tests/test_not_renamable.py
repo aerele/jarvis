@@ -56,6 +56,7 @@ NOT_RENAMABLE = (
 	"Jarvis Relay Pump",
 	"Jarvis Agent Model Choice",
 	"Jarvis Client Error",
+	"Jarvis Feedback Outbox",
 	"Jarvis Import Announcement",
 	"Jarvis Pattern Detector State",
 	"Jarvis Pattern Run",

@@ -1,23 +1,25 @@
 """Post-reply chat feedback: a thumbs up/down (with an optional note on a down)
 on an assistant reply, forwarded to the admin fleet dashboard.
 
-Direct-send, no local table: this bench keeps NO copy. ``submit_feedback``
-derives every piece of metadata server-side (tenant is derived on the admin side
-from the authenticated principal), then forwards it best-effort. A failed forward
-is dropped silently - feedback is low-stakes, and a blocked tap is not acceptable.
-The reply text is never sent; only the rating, refs, and a bounded optional note.
+``submit_feedback`` derives every piece of metadata server-side (tenant is
+derived on the admin side from the authenticated principal) and stores the item
+in the feedback outbox (``jarvis.chat.feedback_outbox``), which delivers it to
+admin after the request and retries until admin acknowledges it. The tap never
+waits on admin and never surfaces an admin error, yet an answer acknowledged as
+``ok`` is no longer lost when admin is down. The reply text is never stored or
+sent; only the rating, refs, and a bounded optional note.
 
 Only the caller's OWN assistant messages can be rated (ownership via the same
 gate the rest of the chat surface uses, ``chat.api._get_owned_conversation``).
 
-The same direct-send, no-local-table rule governs the once-per-session popup
-("How did this session go?") at the bottom of this module: only the popup's
-own metadata (``Jarvis Conversation.session_feedback_asked_at``, and the
+The once-per-session popup ("How did this session go?") at the bottom of this
+module is still forwarded directly, with no local copy: only the popup's own
+metadata (``Jarvis Conversation.session_feedback_asked_at``, and the
 ``turn_count`` that triggers it) is kept on the bench - the response itself
 lives only on the admin side.
 
-The periodic "business pulse" survey (last section) follows the same rule and
-keeps exactly two fields, both on ``Jarvis User Settings``:
+The periodic "business pulse" survey (last section) follows the same direct
+rule and keeps exactly two fields, both on ``Jarvis User Settings``:
 ``pulse_last_period_key`` and ``pulse_offer_count``. There is no cron behind
 it - the fleet scheduler is paused, so a scheduled survey would silently never
 run. Instead it reuses the lazy period-key rollover the per-user token cap
@@ -60,18 +62,23 @@ _SESSION_CHIP_VALUES = {"Great", "Good", "Okay", "Not great", "Frustrating"}
 _SESSION_LOW_CHIPS = {"Okay", "Not great", "Frustrating"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def submit_feedback(message_id: str, rating: str, note: str | None = None) -> dict:
-	"""Record a thumbs up/down on one assistant reply and forward it to admin.
+	"""Record a thumbs up/down on one assistant reply and queue it for admin.
 
 	Args:
 		message_id: the Jarvis Chat Message name of the assistant reply.
 		rating: "up" or "down".
 		note: optional free text, kept only on a "down".
 
-	The rating commits on the first call (thumbs tap); a later call carrying the
-	note folds onto the same admin row (upsert). Returns ``{"ok": True}`` even when
-	the forward fails - the tap must never surface an error.
+	The rating is stored on the first call (thumbs tap); a later call carrying the
+	note replaces the same outbox row, as admin folds it onto the same row (upsert).
+	Returns ``{"ok": True, "delivered": False}`` once the rating is stored:
+	delivery to admin happens after the request, so it is never already done here.
+
+	POST-only: it writes, Frappe commits only for unsafe methods, and the delivery
+	is queued for after that commit, so over GET the rating would be rolled back
+	and never sent.
 	"""
 	require_jarvis_access()
 	rating = (rating or "").strip()
@@ -103,25 +110,16 @@ def submit_feedback(message_id: str, rating: str, note: str | None = None) -> di
 		"reply_duration_ms": msg.reply_duration_ms or 0,
 		"note": (note or "").strip()[:_MAX_NOTE] if rating == "down" else "",
 	}
-	_forward(payload)
-	return {"ok": True}
+	from jarvis.chat.feedback_outbox import accept
+
+	accept("Reply", message_id, payload)
+	return {"ok": True, "delivered": False}
 
 
 def _session_uuid(session_key: str | None) -> str:
 	"""Bare agent session UUID from a composite session_key, or "" when absent."""
 	tail = (session_key or "").rsplit(":", 1)[-1]
 	return tail if _SESSION_UUID_RE.match(tail) else ""
-
-
-def _forward(payload: dict) -> None:
-	"""Best-effort forward to admin. NEVER raises to the caller: a lost rating is
-	acceptable (low-stakes), a blocked or errored tap is not."""
-	try:
-		from jarvis import admin_client
-
-		admin_client.push_chat_feedback(payload)
-	except Exception:
-		frappe.log_error(title="chat feedback forward failed")
 
 
 # --------------------------------------------------------------------------- #
@@ -240,8 +238,8 @@ def _claim_session_feedback(conversation: str) -> bool:
 
 
 def _forward_session(payload: dict) -> None:
-	"""Best-effort forward to admin, same contract as ``_forward`` above: a lost
-	response is acceptable, a blocked popup is not. Named verbatim in
+	"""Best-effort forward to admin: a lost response is acceptable, a blocked
+	popup is not. Named verbatim in
 	``admin_client.push_session_feedback``'s docstring - keep the two in step."""
 	try:
 		from jarvis import admin_client
@@ -656,9 +654,8 @@ def submit_pulse_feedback(
 
 
 def _forward_pulse(payload: dict) -> None:
-	"""Best-effort forward to admin, same contract as ``_forward`` and
-	``_forward_session`` above: a lost response is acceptable, a blocked dialog
-	is not. Named verbatim in ``admin_client.push_pulse_feedback``'s docstring -
+	"""Best-effort forward to admin, same contract as ``_forward_session``
+	above: a lost response is acceptable, a blocked dialog is not. Named verbatim in ``admin_client.push_pulse_feedback``'s docstring -
 	keep the two in step."""
 	try:
 		from jarvis import admin_client
