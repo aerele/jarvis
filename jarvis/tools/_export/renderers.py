@@ -3,6 +3,7 @@ import io
 
 from jarvis import compat
 from jarvis._xlsx_highlights import validate_highlights
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._export.model import ExportModel
 from jarvis.tools._export.safety import escape_formula
 
@@ -84,6 +85,11 @@ def xlsx(model: ExportModel, *, highlights=None) -> bytes:
 	body = [[_xlsx_cell(c, model, handle_html) for c in row] for row in model.rows]
 	title = (model.meta.get("title") or "Export")[:31]
 	data = [header] + body
-	rules = validate_highlights(_rules_by_header(highlights, model, labels), data)
+	try:
+		rules = validate_highlights(_rules_by_header(highlights, model, labels), data)
+	except InvalidArgumentError as e:
+		# The headers are labels the caller never saw: name the columns it can use.
+		names = ", ".join(f"{h} ({k})" if h != k else h for k, h in zip(model.columns, labels, strict=True))
+		raise InvalidArgumentError(f"{e} Columns in this export: {names}.") from None
 	model.meta["highlight_count"] = len(rules)
 	return compat.xlsx_bytes([(title, data)], highlights=[rules])

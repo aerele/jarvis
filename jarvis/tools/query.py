@@ -207,15 +207,41 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	return {"sql": resolved_sql, "rows": rows}
 
 
-def compile_spec(spec: dict, *, export_limit: int | None = None):
+def compile_spec(spec: dict):
 	"""Steps 1-6 of ``query``: validate the spec, run every permission gate, and
-	build the permission-woven qb query, NOT executed. ``query`` runs it with its
-	row guard; ``export_query`` runs it server-side for a file.
+	build the permission-woven qb query, NOT executed."""
+	return _compile(spec)[0]
 
-	``export_limit`` (the export path): the query's LIMIT instead of the spec's own
-	``limit`` / ``MAX_LIMIT``, which cap what reaches the model, not a file. A
-	spec ``limit`` still applies when it is smaller (a deliberate "top 50"), and an
-	``offset`` is refused: an export is the whole result, never a page of it."""
+
+def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:
+	"""``compile_spec`` for ``export_query``: ``(query, tables, export_doctypes)``.
+	``tables`` maps each FROM / join alias to its DocType; ``export_doctypes`` are
+	the DocTypes whose Export permission the file needs.
+
+	``export_limit`` is the query's LIMIT instead of the spec's own ``limit`` /
+	``MAX_LIMIT``, which cap what reaches the model, not a file. A spec ``limit``
+	still applies when it is smaller (a deliberate "top 50"), and an ``offset`` is
+	refused: an export is the whole result, never a page of it.
+
+	A child table's rows are the record-level scope of ONE owning parent (the one
+	``_weave_record_gate`` scopes it to), so its Export permission is that
+	parent's, exactly as Desk exports a child through its parent. Administrator
+	has no scoping parent and exports everything anyway."""
+	q, alias_map = _compile(spec, export_limit=export_limit)
+	tables = {alias: dt for alias, (dt, _table) in alias_map.items()}
+	export_doctypes = []
+	for alias, (dt, _table) in alias_map.items():
+		if frappe.get_meta(dt).istable:
+			if frappe.session.user == "Administrator":
+				continue
+			dt = _child_scoping_parent(dt, alias, spec, alias_map)
+		if dt not in export_doctypes:
+			export_doctypes.append(dt)
+	return q, tables, export_doctypes
+
+
+def _compile(spec: dict, *, export_limit: int | None = None) -> tuple:
+	"""The body of ``compile_spec``: ``(query, alias_map)``."""
 	if not isinstance(spec, dict):
 		raise InvalidArgumentError("spec must be a dict")
 
@@ -386,7 +412,7 @@ def compile_spec(spec: dict, *, export_limit: int | None = None):
 	)
 	for alias, (resolved_dt, table) in alias_map.items():
 		q = _weave_record_gate(q, engine, alias, resolved_dt, table, spec, alias_map)
-	return q
+	return q, alias_map
 
 
 # ---- Spec validation ------------------------------------------------
