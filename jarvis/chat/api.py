@@ -830,7 +830,7 @@ def _history_page(conversation: str, fields: list, limit, before, refresh, after
 
 	``paging.start`` is the page's lower ``seq`` bound (None when it reaches the
 	first row) and ``paging.before`` the cursor for the next older page, which exists
-	when ``paging.has_more``. Rows that share a seq always share a page (``>=`` here,
+	when ``paging.has_more``; ``paging.older_counts`` counts the shown rows below it. Rows that share a seq always share a page (``>=`` here,
 	``<`` on the next call), so none is skipped.
 
 	A resync passes ``after``, the newest seq the client already holds. When every
@@ -874,6 +874,7 @@ def _history_page(conversation: str, fields: list, limit, before, refresh, after
 		has_more = truncated or any((h.seq or 0) < start for h in heads)
 	page_filters = [*base, ["seq", ">=", start]] if start is not None else base
 	messages = frappe.get_all(MSG, filters=page_filters, fields=fields, order_by="seq asc")
+	older_counts = _older_counts(conversation, start) if has_more else None
 	newest_page = start is not None and before <= 0
 	older_pending = _older_pending(conversation, fields, start) if newest_page else []
 	recent_prompts = _recent_prompts(conversation, start) if newest_page else []
@@ -896,11 +897,34 @@ def _history_page(conversation: str, fields: list, limit, before, refresh, after
 			"start": start,
 			"before": start if has_more else None,
 			"has_more": has_more,
+			"older_counts": older_counts or {"user": 0, "assistant": 0, "receipt": 0},
 		},
 		"older_pending": older_pending,
 		"refreshed": refreshed,
 		"recent_prompts": recent_prompts,
 	}
+
+
+def _older_counts(conversation: str, start: int) -> dict:
+	"""How many rows the chat shows sit below the page (seq < ``start``): user and
+	assistant messages and receipts (tool rows with an ``action_outcome``). The chat
+	header and the usage pane add them to the loaded rows, so their totals cover the
+	whole thread while only some pages are loaded."""
+	m = frappe.qb.DocType(MSG)
+	rows = (
+		frappe.qb.from_(m)
+		.select(m.role, Count("*").as_("n"))
+		.where(m.conversation == conversation)
+		.where(m.hidden == 0)
+		.where(m.seq < start)
+		.where(
+			m.role.isin(["user", "assistant"]) | ((m.role == "tool") & (IfNull(m.action_outcome, "") != ""))
+		)
+		.groupby(m.role)
+		.run(as_dict=True)
+	)
+	n = {r.role: frappe.utils.cint(r.n) for r in rows}
+	return {"user": n.get("user", 0), "assistant": n.get("assistant", 0), "receipt": n.get("tool", 0)}
 
 
 def _recent_prompts(conversation: str, start: int) -> list:

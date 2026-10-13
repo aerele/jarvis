@@ -12,6 +12,7 @@ import {
 	prependOlderPage,
 	promptRows,
 	refreshNames,
+	threadCounts,
 	withToolDetail,
 } from "./historyPaging.js";
 
@@ -23,14 +24,21 @@ const page = (from, to, paging = {}, extra = {}) => ({
 	...extra,
 });
 const names = (list) => list.map((m) => m.name);
+const NONE_BELOW = { user: 0, assistant: 0, receipt: 0 };
 
 test("a whole-thread answer has no older page", () => {
 	assert.deepEqual(pagingOf({ messages: rows(1, 3) }), {
 		hasMore: false,
 		before: null,
 		newest: 3,
+		older: NONE_BELOW,
 	});
-	assert.deepEqual(pagingOf(page(5, 9)), { hasMore: true, before: 5, newest: 9 });
+	assert.deepEqual(pagingOf(page(5, 9)), {
+		hasMore: true,
+		before: 5,
+		newest: 9,
+		older: NONE_BELOW,
+	});
 	assert.deepEqual(pagingOf(page(1, 9, { has_more: false, before: null })).hasMore, false);
 });
 
@@ -59,7 +67,7 @@ test("a page that starts past the newest held row starts over instead of leaving
 	const held = rows(20, 40);
 	const merged = mergeNewestPage(held, { hasMore: true, before: 20, newest: 40 }, page(60, 70));
 	assert.deepEqual(names(merged.messages), names(rows(60, 70)));
-	assert.deepEqual(merged.paging, { hasMore: true, before: 60, newest: 70 });
+	assert.deepEqual(merged.paging, { hasMore: true, before: 60, newest: 70, older: NONE_BELOW });
 });
 
 test("optimistic rows without a seq never survive as held rows", () => {
@@ -105,7 +113,7 @@ test("an older page goes above the held rows without duplicates and moves the cu
 	const held = rows(30, 40);
 	const out = prependOlderPage(held, { hasMore: true, before: 30, newest: 40 }, page(20, 30));
 	assert.deepEqual(names(out.messages), names(rows(20, 40)));
-	assert.deepEqual(out.paging, { hasMore: true, before: 20, newest: 40 });
+	assert.deepEqual(out.paging, { hasMore: true, before: 20, newest: 40, older: NONE_BELOW });
 	const first = prependOlderPage(
 		held,
 		{ hasMore: true, before: 30, newest: 40 },
@@ -189,6 +197,35 @@ test("prompt recall walks the earlier prompts plus loaded user rows, once each, 
 	);
 });
 
+test("message totals cover the whole chat while only some pages are loaded", () => {
+	const shown = [
+		{ name: "u1", role: "user" },
+		{ name: "a1", role: "assistant" },
+		{ name: "r1", role: "tool", action_outcome: "confirmed" },
+	];
+	// The newest page of a 500-message chat: the server counted what sits below it.
+	const d = page(480, 482, { older_counts: { user: 240, assistant: 238, receipt: 3 } });
+	const paging = pagingOf(d);
+	assert.deepEqual(threadCounts(shown, paging), { total: 484, user: 241, assistant: 239 });
+	// Loading the page above moves the count below it; the total stays the same.
+	const older = prependOlderPage(
+		rows(480, 482),
+		paging,
+		page(470, 479, { older_counts: { user: 235, assistant: 233, receipt: 3 } })
+	);
+	const shownMore = [
+		...shown,
+		...Array.from({ length: 5 }, (_, i) => ({ name: `u${i + 2}`, role: "user" })),
+		...Array.from({ length: 5 }, (_, i) => ({ name: `a${i + 2}`, role: "assistant" })),
+	];
+	assert.equal(threadCounts(shownMore, older.paging).total, 484);
+	// A resync that keeps the older pages keeps their count; a whole thread counts only what is shown.
+	const merged = mergeNewestPage(rows(470, 482), older.paging, page(481, 483));
+	assert.deepEqual(merged.paging.older, older.paging.older);
+	assert.equal(threadCounts(shown, pagingOf({ messages: rows(1, 3) })).total, 3);
+	assert.equal(threadCounts(shown, null).total, 3);
+});
+
 // ---- wiring: who reads pages, who keeps whole threads ----
 const src = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
 const fnBody = (text, head) => {
@@ -224,6 +261,9 @@ test("the desktop chat merges the newest page, seeds old cards and loads older p
 	assert.match(fnBody(chat, "function toggleTool("), /loadToolDetail\(name\)/);
 	assert.match(chat, /prettyJson\(\s*toolShown\(item\.row\)\.tool_result\s*\)/);
 	assert.match(chat, /<Button\s+variant="subtle"\s+label="Load earlier messages"/);
+	// The header's "N messages" and the usage pane count the whole chat, not the loaded rows.
+	assert.match(chat, /const msgCount = computed\(\(\) => threadTotals\.value\.total\);/);
+	assert.match(fnBody(chat, "const headerSub = computed("), /const n = msgCount\.value;/);
 	// Up-arrow recall reaches the prompts older than every loaded page.
 	assert.match(load, /recentPrompts = d\?\.recent_prompts \|\| \[\];/);
 	assert.match(

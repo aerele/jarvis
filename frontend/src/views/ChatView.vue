@@ -4270,6 +4270,7 @@ import {
 	prependOlderPage,
 	promptRows,
 	refreshNames,
+	threadCounts,
 	withToolDetail,
 } from "@/lib/historyPaging";
 import { markParked, parkedByCard, parkedNoteFor } from "@/lib/draftParked";
@@ -6516,12 +6517,19 @@ const showWelcome = computed(
 
 // settings/overview derived metrics (all from data we already hold)
 const convCount = computed(() => store.conversations.length);
-const msgCount = computed(() => visibleMessages.value.length);
-const toolCount = computed(() => jarvisTools.value.length);
-const userMsgCount = computed(() => visibleMessages.value.filter((m) => m.role === "user").length);
-const assistantMsgCount = computed(
-	() => visibleMessages.value.filter((m) => m.role === "assistant").length
+// Paged history (#715 F13): the shown rows on screen plus the ones the server counted
+// below the oldest loaded page, so the totals cover the whole chat (as on develop,
+// which held every row) while only some pages are loaded.
+const threadTotals = computed(() =>
+	threadCounts(
+		visibleMessages.value,
+		historyPaging.value.conv === currentId.value ? historyPaging.value : null
+	)
 );
+const msgCount = computed(() => threadTotals.value.total);
+const toolCount = computed(() => jarvisTools.value.length);
+const userMsgCount = computed(() => threadTotals.value.user);
+const assistantMsgCount = computed(() => threadTotals.value.assistant);
 const avgTokensPerMsg = computed(() => {
 	const n = msgCount.value;
 	if (!usage.value || !n) return "-";
@@ -6535,7 +6543,7 @@ const starredCount = computed(() => store.conversations.filter((c) => c.starred)
 // ten tool cards (#551). They now come from the persisted rows via
 // jarvis.chat.api.get_tool_activity / get_usage.chat_tool_calls.
 const headerSub = computed(() => {
-	const n = visibleMessages.value.length;
+	const n = msgCount.value;
 	return n ? `${Math.ceil(n / 2)} message${n > 2 ? "s" : ""}` : "Your AI Teammate";
 });
 const canSend = computed(
