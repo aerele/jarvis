@@ -21,6 +21,7 @@
   "schedule_section",
   "schedule_enabled",
   "schedule_frequency",
+  "schedule_date",
   "schedule_weekday",
   "schedule_day_of_month",
   "schedule_time",
@@ -128,9 +129,16 @@
    "fieldname": "schedule_frequency",
    "fieldtype": "Select",
    "label": "Frequency",
-   "options": "daily\nweekly\nmonthly",
+   "options": "daily\nweekly\nmonthly\nonce",
    "default": "daily",
    "depends_on": "eval:doc.schedule_enabled"
+  },
+  {
+   "fieldname": "schedule_date",
+   "fieldtype": "Date",
+   "label": "Date",
+   "depends_on": "eval:doc.schedule_enabled && doc.schedule_frequency=='once'",
+   "description": "The day a one-time schedule runs. The schedule switches itself off after that run."
   },
   {
    "fieldname": "schedule_weekday",
