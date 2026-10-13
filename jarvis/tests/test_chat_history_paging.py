@@ -154,6 +154,25 @@ class TestHistoryPaging(FrappeTestCase):
 		older = self._page(limit=4, before=out["paging"]["before"])
 		self.assertEqual(older["older_pending"], [])
 
+	def test_older_pending_skips_expired_cards_and_keeps_only_the_newest(self):
+		self._turn(0)
+		past = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-1)
+		future = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=1)
+		expired = self._msg("tool", tool_name="submit_doc", tool_status="pending", expires_at=past)
+		live = [
+			self._msg("tool", tool_name="submit_doc", tool_status="pending", expires_at=future)
+			for _ in range(4)
+		]
+		no_expiry = self._msg("tool", tool_name="submit_doc", tool_status="pending")
+		for _ in range(6):
+			self._turn(2)
+		names = [m.name for m in self._page(limit=4)["older_pending"]]
+		self.assertNotIn(expired, names)
+		self.assertEqual(names, [*live, no_expiry], "oldest first, a card without expiry kept")
+		with patch.object(chat_api, "HISTORY_OLDER_PENDING_MAX", 3):
+			capped = [m.name for m in self._page(limit=4)["older_pending"]]
+		self.assertEqual(capped, [live[2], live[3], no_expiry], "the newest ones, oldest first")
+
 	def test_refresh_returns_current_state_and_drops_hidden_or_foreign_rows(self):
 		self._turn(0)
 		card = self._msg("tool", tool_name="submit_doc", tool_status="pending", tool_call_id="paging-tok-2")

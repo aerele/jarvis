@@ -445,7 +445,7 @@ function atBottom() {
 const follow = ref(true);
 function onScroll() {
 	follow.value = atBottom();
-	if (scroller.value && scroller.value.scrollTop < 200) loadOlder();
+	if (scroller.value && scroller.value.scrollTop < 200) loadOlder({ auto: true });
 }
 // Follow the newest text only while `follow` holds (parked at the bottom) AND no
 // reply is streaming (`live`): chasing the bottom mid-stream drags the line you
@@ -512,12 +512,17 @@ async function load(force = false) {
 }
 
 // The page above the oldest loaded row, put in place with the rows the reader was
-// looking at held still (their distance from the bottom does not change).
-async function loadOlder() {
+// looking at held still (their distance from the bottom does not change). A failed
+// fetch pauses the scroll trigger for a while (the button still works), so scrolling
+// at the top of a chat that cannot load does not repeat the request and its banner.
+let olderFailedAt = 0;
+const OLDER_RETRY_PAUSE_MS = 10000;
+async function loadOlder({ auto = false } = {}) {
 	const cid = convId.value;
 	const generation = viewGeneration;
 	const paging = historyPaging.value;
 	if (!cid || !paging.hasMore || loadingOlder.value) return;
+	if (auto && Date.now() - olderFailedAt < OLDER_RETRY_PAUSE_MS) return;
 	loadingOlder.value = true;
 	try {
 		const d = await api.getConversation(cid, { before: paging.before });
@@ -536,6 +541,10 @@ async function loadOlder() {
 		requestAnimationFrame(hold); // again once late layout (charts, images) lands
 	} catch (e) {
 		console.error("Jarvis PWA: failed to load earlier messages", e);
+		olderFailedAt = Date.now();
+		if (isCurrent(cid, generation))
+			errorBanner.value =
+				"Couldn't load earlier messages. Tap Load earlier messages to try again.";
 	} finally {
 		loadingOlder.value = false;
 	}
@@ -1429,16 +1438,20 @@ onUnmounted(() => {
 
 	<div ref="scroller" class="jv-scroll jv-thread" @scroll.passive="onScroll">
 		<!-- History paging (#715 F13): older pages load near the top; same action. -->
+		<!-- Stays focusable while loading (aria-disabled, loadOlder ignores the tap);
+		     the status line announces the load. -->
 		<div v-if="historyPaging.hasMore && messages.length" style="text-align: center">
 			<button
 				type="button"
 				class="jv-btn is-ghost"
-				:disabled="loadingOlder"
-				:aria-busy="loadingOlder"
-				@click="loadOlder"
+				:aria-disabled="loadingOlder ? 'true' : 'false'"
+				@click="loadOlder()"
 			>
-				{{ loadingOlder ? "Loading…" : "Load earlier messages" }}
+				Load earlier messages
 			</button>
+			<div role="status" aria-live="polite" style="font-size: 13px; color: var(--ink5)">
+				{{ loadingOlder ? "Loading earlier messages…" : "" }}
+			</div>
 		</div>
 		<div v-if="!items.length && !localRequests.length && !live && !loading" class="jv-empty">
 			<BrandMark :size="52" :mood="holdActive ? 'upgrading' : 'star'" />
