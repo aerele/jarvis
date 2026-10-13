@@ -240,3 +240,80 @@ class TestGetComments(FrappeTestCase):
 			with self.assertRaises(PermissionDeniedError) as ctx:
 				query({"from": "Comment", "select": ["name"]})
 			self.assertIn("get_comments", str(ctx.exception))
+
+	def test_a_scan_spanning_several_chunks_finds_every_comment(self):
+		for minutes in (50, 40, 30, 20, 10):
+			_comment(self.todo_a, f"<p>chunked {minutes}</p>", minutes_ago=minutes)
+		with _as(USER_A), patch.object(gc_module, "_SCAN_CHUNK", 2):
+			out = get_comments("ToDo", search="chunked")
+		self.assertEqual(len(out["comments"]), 5)
+		self.assertFalse(out["has_more"])
+
+	def test_a_page_that_holds_every_comment_has_no_more(self):
+		for minutes in (20, 10):
+			_comment(self.todo_a, f"<p>Exact {minutes}</p>", minutes_ago=minutes)
+		with _as(USER_A):
+			out = get_comments("ToDo", self.todo_a, limit=2)
+		self.assertEqual(out["count"], 2)
+		self.assertFalse(out["has_more"])
+		self.assertIsNone(out["next_before"])
+
+	def test_comments_sharing_a_timestamp_are_neither_skipped_nor_repeated(self):
+		names = [_comment(self.todo_a, f"<p>Same {i}</p>", minutes_ago=15) for i in range(3)]
+		same = frappe.db.get_value("Comment", names[0], "creation")
+		for n in names:
+			frappe.db.set_value("Comment", n, {"creation": same, "modified": same}, update_modified=False)
+		seen = []
+		before = None
+		with _as(USER_A):
+			for _ in range(4):
+				out = get_comments("ToDo", self.todo_a, limit=1, before=before)
+				seen += [c["name"] for c in out["comments"]]
+				if not out["has_more"]:
+					break
+				before = out["next_before"]
+		self.assertEqual(sorted(seen), sorted(names))
+
+	def test_a_comment_on_a_deleted_record_does_not_break_the_scan(self):
+		_comment(self.todo_a, "<p>still here</p>", minutes_ago=20)
+		# A record removed under its comment (a raw delete, a restore): the comment stays.
+		gone = _todo(USER_A, "deleted under its comment")
+		_comment(gone, "<p>orphan here</p>", minutes_ago=10)
+		frappe.db.delete("ToDo", gone)
+		with _as(USER_A):
+			out = get_comments("ToDo", search="here")
+		self.assertEqual([c["text"] for c in out["comments"]], ["still here"])
+
+	def test_search_matches_percent_and_underscore_literally(self):
+		_comment(self.todo_a, "<p>discount 100% applied</p>", minutes_ago=20)
+		_comment(self.todo_a, "<p>discount 1000 pending</p>", minutes_ago=10)
+		_comment(self.todo_a, "<p>file a_b.pdf</p>", minutes_ago=5)
+		with _as(USER_A):
+			pct = get_comments("ToDo", self.todo_a, search="100%")
+			under = get_comments("ToDo", self.todo_a, search="a_b")
+			loose = get_comments("ToDo", self.todo_a, search="axb")
+		self.assertEqual([c["text"] for c in pct["comments"]], ["discount 100% applied"])
+		self.assertEqual([c["text"] for c in under["comments"]], ["file a_b.pdf"])
+		self.assertEqual(loose["comments"], [])
+
+	def test_a_scan_out_of_time_says_so_and_where_to_continue(self):
+		_comment(self.todo_a, "<p>Later</p>", minutes_ago=5)
+		with _as(USER_A), patch.object(gc_module, "_TIME_BUDGET_S", -1):
+			out = get_comments("ToDo")
+		self.assertTrue(out["has_more"])
+		self.assertIn("before=next_before", out["note"])
+		self.assertTrue(out["next_before"])
+
+	def test_since_with_an_offset_is_read_on_the_site_clock(self):
+		_comment(self.todo_a, "<p>Recent</p>", minutes_ago=30)
+		from zoneinfo import ZoneInfo
+
+		site = ZoneInfo(frappe.utils.get_system_timezone())
+		hour_ago = (now_datetime() - timedelta(hours=1)).replace(tzinfo=site).astimezone(ZoneInfo("UTC"))
+		with _as(USER_A):
+			out = get_comments("ToDo", self.todo_a, since=hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ"))
+		self.assertEqual([c["text"] for c in out["comments"]], ["Recent"])
+
+	def test_arguments_must_be_text(self):
+		with _as(USER_A), self.assertRaisesRegex(InvalidArgumentError, "name must be text"):
+			get_comments("ToDo", {"name": ["like", "%"]})
