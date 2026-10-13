@@ -179,8 +179,16 @@
 							:disabled="saving || armedLocked"
 							@update:modelValue="(v) => (form.schedule_frequency = v)"
 						/>
-						<div class="flex-1">
-							<label class="mb-1.5 block text-xs text-ink-gray-5">Time</label>
+						<div
+							class="flex-1"
+							role="group"
+							aria-labelledby="macro-schedule-time-label"
+						>
+							<label
+								id="macro-schedule-time-label"
+								class="mb-1.5 block text-xs text-ink-gray-5"
+								>Time</label
+							>
 							<TimePicker
 								v-model="form.schedule_time"
 								placeholder="09:00"
@@ -206,15 +214,25 @@
 							@update:modelValue="(v) => (form.schedule_day = v)"
 						/>
 						<!-- A one-time schedule runs on one date, then switches itself off. -->
-						<div v-if="form.schedule_frequency === 'once'" class="flex-1">
-							<label class="mb-1.5 block text-xs text-ink-gray-5">Date</label>
+						<div
+							v-if="form.schedule_frequency === 'once'"
+							ref="dateField"
+							class="flex-1"
+							role="group"
+							aria-labelledby="macro-schedule-date-label"
+						>
+							<label
+								id="macro-schedule-date-label"
+								class="mb-1.5 block text-xs text-ink-gray-5"
+								>Date</label
+							>
 							<DatePicker
 								:modelValue="form.schedule_date"
 								placeholder="Pick a date"
-								aria-label="Date"
 								:disabled="saving || armedLocked"
 								@update:modelValue="(v) => (form.schedule_date = v || '')"
 							/>
+							<ErrorMessage :message="fieldErrors.schedule_date" class="mt-2" />
 						</div>
 					</div>
 					<div v-if="scheduleSummary" class="text-sm text-ink-gray-5">
@@ -352,13 +370,7 @@ import CommentsSection from "@/components/doc/CommentsSection.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import StepsBuilder from "./StepsBuilder.vue";
 import { takeMacroPrefill } from "@/composables/macroPrefill";
-import {
-	exactDate,
-	formatDate,
-	formatTime12h,
-	onAnotherClock,
-	siteTimezone,
-} from "@/utils/datetime";
+import { exactDate, formatTime12h, onAnotherClock, siteTimezone } from "@/utils/datetime";
 import {
 	WEEKDAY_OPTIONS,
 	DAY_OF_MONTH_OPTIONS,
@@ -390,14 +402,25 @@ const socket = inject("$socket");
 const DOCTYPE = "Jarvis Macro";
 
 const FREQUENCY_OPTIONS = [
-	{ label: "Once", value: "once" },
 	{ label: "Daily", value: "daily" },
 	{ label: "Weekly", value: "weekly" },
 	{ label: "Monthly", value: "monthly" },
+	{ label: "Once", value: "once" },
 ];
-// The first date a one-time schedule offers: tomorrow, on the viewer's calendar.
+// A one-time schedule's date and time are read on the SITE's clock (the one the
+// scheduler fires on, and the one the Time field already uses), so its dates are
+// counted on the site's calendar too, not the viewer's.
+function siteToday() {
+	const zone = siteTimezone();
+	return zone ? dayjs().tz(zone) : dayjs();
+}
+// The first date a one-time schedule offers: tomorrow on the site's calendar.
 function tomorrow() {
-	return dayjs().add(1, "day").format("YYYY-MM-DD");
+	return siteToday().add(1, "day").format("YYYY-MM-DD");
+}
+// "Mon, 2 Nov 2026 at 9:00 am": a stored site date and time, read as stored.
+function siteSlotText(date, time) {
+	return `${dayjs(date).format("ddd, D MMM YYYY")} at ${formatTime12h(time)}`;
 }
 
 // ── state ────────────────────────────────────────────────────────────────────
@@ -492,7 +515,24 @@ const snapshot = ref(null);
 // Inline save errors (TriggerDetail's pattern: an ErrorMessage under the field,
 // set all at once by save(), each clearing itself the moment its field is put
 // right). Toast-only, the owner was told once and then had to find the field.
-const fieldErrors = reactive({ macro_name: "" });
+const fieldErrors = reactive({ macro_name: "", schedule_date: "" });
+watch(
+	() => [form.schedule_date, form.schedule_frequency, form.schedule_enabled],
+	() => {
+		fieldErrors.schedule_date = "";
+	}
+);
+// Switching a one-time schedule back on whose date has passed (it already ran):
+// start it from tomorrow instead of a date the save would refuse.
+watch(
+	() => form.schedule_enabled,
+	(on) => {
+		if (seedingSchedule || !on || form.schedule_frequency !== "once") return;
+		if (!form.schedule_date || form.schedule_date <= siteToday().format("YYYY-MM-DD")) {
+			form.schedule_date = tomorrow();
+		}
+	}
+);
 watch(
 	() => form.macro_name,
 	() => {
@@ -627,7 +667,10 @@ const dirty = computed(() => {
 		(form.schedule_frequency || "daily") !== snap.schedule_frequency ||
 		(form.schedule_time || "") !== snap.schedule_time ||
 		(form.schedule_day || "") !== (snap.schedule_day || "") ||
-		(form.schedule_date || "") !== (snap.schedule_date || "") ||
+		// The date matters only to a one-time schedule: picking Once and going back
+		// leaves a date behind that is not saved and is not a change.
+		((form.schedule_frequency === "once" || snap.schedule_frequency === "once") &&
+			(form.schedule_date || "") !== (snap.schedule_date || "")) ||
 		JSON.stringify(cleanSteps(form.steps)) !== snap.stepsJson ||
 		(form.merged_prompt || "") !== snap.merged_prompt
 	);
@@ -661,6 +704,8 @@ const scheduleBlocked = computed(() =>
 const scheduleSummary = computed(() => {
 	const snap = snapshot.value;
 	if (!snap || props.isNew || dirty.value || !snap.schedule_enabled) return "";
+	// A one-time slot due but not yet swept has no next run: still say when it runs.
+	if (snap.schedule_frequency === "once" && !nextRunAt.value) return oneTimeSummary(snap, "");
 	if (!nextRunAt.value) return "";
 	const anchor = scheduleAnchorPhrase(snap.schedule_frequency, snap.schedule_day);
 	// A failed scheduled run is retried at a time the owner did not choose; say so,
@@ -676,19 +721,25 @@ const scheduleSummary = computed(() => {
 	const next = nextRunIsRetry.value
 		? `The last scheduled run failed (Runs, on the Macros page, says why). Retrying: ${stamp}`
 		: `Next run: ${stamp}`;
-	if (snap.schedule_frequency === "once") {
-		if (nextRunIsRetry.value) return `Runs once. ${next}`;
-		return (
-			`Runs once on ${formatDate(nextRunRaw.value, "ddd, D MMM YYYY [at] h:mm a")}` +
-			`${zone && onAnotherClock(nextRunRaw.value) ? " (your time)" : ""}. ` +
-			"The schedule switches itself off after that run."
-		);
-	}
+	if (snap.schedule_frequency === "once") return oneTimeSummary(snap, next);
 	return (
 		`Scheduled ${snap.schedule_frequency}${anchor ? ` ${anchor}` : ""} ` +
 		`at ${formatTime12h(snap.schedule_time)}${zone ? `, ${zone} time` : ""}. ${next}`
 	);
 });
+
+// "Runs once on Mon, 2 Nov 2026 at 9:00 am, Asia/Kolkata time. ...": the slot as the
+// owner set it, on the site's clock like the recurring summary. A retry of a slot
+// that failed says so instead.
+function oneTimeSummary(snap, next) {
+	if (nextRunIsRetry.value) return `Runs once. ${next}`;
+	const zone = siteTimezone();
+	return (
+		`Runs once on ${siteSlotText(snap.schedule_date, snap.schedule_time)}` +
+		`${zone ? `, ${zone} time` : ""}. It starts within a few minutes of that time, ` +
+		"and the schedule switches itself off after it."
+	);
+}
 
 // A one-time schedule that ran has switched itself off: the saved form says when it
 // ran ("" for anything else, or while the form has unsaved changes).
@@ -700,16 +751,24 @@ const oneTimeDoneNote = computed(() => {
 	// switched off before its date still carries the old last_run_at.
 	const slot = `${snap.schedule_date || ""} ${snap.schedule_time || "00:00"}`;
 	if (!snap.schedule_date || String(lastRunAt.value) < slot) return "";
-	return `Ran once on ${formatDate(
-		lastRunAt.value,
-		"ddd, D MMM YYYY [at] h:mm a"
-	)}. The schedule is off now.`;
+	const zone = siteTimezone();
+	const [day, time] = String(lastRunAt.value).split(" ");
+	return (
+		`Ran once on ${siteSlotText(day, time)}${zone ? `, ${zone} time` : ""}. ` +
+		"The schedule is off now."
+	);
 });
-// "Schedule again": the schedule back on, one-time, from tomorrow at the same time.
+// "Schedule again": the schedule back on, one-time, from tomorrow at the same time,
+// then the date field, so the owner sees what will be saved and can change it.
+const dateField = ref(null);
 function scheduleAgain() {
 	form.schedule_frequency = "once";
 	form.schedule_date = tomorrow();
 	form.schedule_enabled = true;
+	nextTick(() => {
+		const input = dateField.value && dateField.value.querySelector("input, button");
+		if (input) input.focus();
+	});
 }
 
 const overflowOptions = computed(() => {
@@ -912,16 +971,29 @@ const notStartedToast = (macroName, reasonHtml) =>
 	`The summary of ${quoted(macroName)} was not started: ${asSentence(reasonHtml)}`;
 
 // ── save (round-2 MacrosView semantics, ported) ──────────────────────────────
+// Why the one-time date cannot be saved, or "": checked here so the owner is told
+// at the field, not by the server after Save (which checks the time of day too).
+function oneTimeDateProblem() {
+	if (!form.schedule_enabled || form.schedule_frequency !== "once") return "";
+	if (!form.schedule_date) return "Pick the date this one-time schedule runs on.";
+	if (form.schedule_date < siteToday().format("YYYY-MM-DD")) {
+		return "That date has passed. Pick today or a later date.";
+	}
+	return "";
+}
+
 async function save() {
 	if (saving.value || !dirty.value) return;
 	// Everything that is wrong is marked AT ONCE, each under its own field, with
 	// one toast naming them (never a toast per attempt).
 	const name = (form.macro_name || "").trim();
 	fieldErrors.macro_name = name ? "" : "Give the macro a name.";
+	fieldErrors.schedule_date = oneTimeDateProblem();
 	stepErrors.value = promptlessSteps(form.steps);
 	const promptless = Object.keys(stepErrors.value).map((i) => Number(i) + 1);
 	const problems = [
 		fieldErrors.macro_name,
+		fieldErrors.schedule_date,
 		promptless.length &&
 			`Step${promptless.length === 1 ? "" : "s"} ${promptless.join(", ")} ` +
 				`need${promptless.length === 1 ? "s" : ""} a prompt.`,

@@ -64,8 +64,10 @@ class TestScheduleRun(MacroSchedulerBase):
 	def test_a_past_or_bad_time_is_refused(self):
 		with self.assertRaisesRegex(InvalidArgumentError, "already passed"):
 			schedule_run(run_at=_at(days=-1).strftime("%Y-%m-%d %H:%M"), prompt="x")
-		with self.assertRaisesRegex(InvalidArgumentError, "date and time"):
+		with self.assertRaisesRegex(InvalidArgumentError, "needs a time of day"):
 			schedule_run(run_at="next monday", prompt="x")
+		with self.assertRaisesRegex(InvalidArgumentError, "must be a date and time"):
+			schedule_run(run_at="2030-13-45 10:00", prompt="x")
 		with self.assertRaisesRegex(InvalidArgumentError, "run_at is required"):
 			schedule_run(run_at="", prompt="x")
 
@@ -159,3 +161,77 @@ class TestScheduleRunGate(MacroSchedulerBase):
 		self.assertIn(
 			"run_at=2030-01-15 09:30", api._describe_call("schedule_run", {"run_at": "2030-01-15 09:30"})
 		)
+
+
+class TestScheduleRunInputs(MacroSchedulerBase):
+	def setUp(self):
+		super().setUp()
+		frappe.set_user(OWNER_OK)
+		self.addCleanup(frappe.set_user, "Administrator")
+
+	def test_an_offset_is_converted_to_site_time(self):
+		from zoneinfo import ZoneInfo
+
+		when = _at(days=3, hour=4, minute=0)
+		site = ZoneInfo(frappe.utils.get_system_timezone())
+		as_utc = when.replace(tzinfo=site).astimezone(ZoneInfo("UTC"))
+		out = schedule_run(run_at=as_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), prompt="x", title=f"{PFX}-utc")
+		self.assertEqual(get_datetime(out["run_at"]), when)
+
+	def test_a_date_without_a_time_is_refused(self):
+		with self.assertRaisesRegex(InvalidArgumentError, "needs a time of day"):
+			schedule_run(run_at=_at().strftime("%Y-%m-%d"), prompt="x")
+
+	def test_seconds_round_up_to_the_next_minute(self):
+		soon = add_to_date(now_datetime(), seconds=40)
+		out = schedule_run(run_at=soon.strftime("%Y-%m-%d %H:%M:%S"), prompt="x", title=f"{PFX}-soon")
+		slot = get_datetime(out["run_at"])
+		self.assertGreater(slot, now_datetime())
+		self.assertEqual(slot.second, 0)
+
+	def test_arguments_must_be_text(self):
+		with self.assertRaisesRegex(InvalidArgumentError, "title must be text"):
+			schedule_run(run_at=_at().strftime("%Y-%m-%d %H:%M"), prompt="x", title=["x"])
+		with self.assertRaisesRegex(InvalidArgumentError, "macro must be text"):
+			schedule_run(run_at=_at().strftime("%Y-%m-%d %H:%M"), macro={"like": "%"})
+
+	def test_an_over_long_prompt_is_refused(self):
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_PROMPT_LEN
+
+		with self.assertRaisesRegex(InvalidArgumentError, "prompt must be at most"):
+			schedule_run(run_at=_at().strftime("%Y-%m-%d %H:%M"), prompt="x" * (MAX_PROMPT_LEN + 1))
+
+	def test_before_the_migrate_it_says_to_wait(self):
+		with patch("jarvis.chat.macro_scheduler.once_ready", return_value=False):
+			with self.assertRaisesRegex(InvalidArgumentError, "being set up"):
+				schedule_run(run_at=_at().strftime("%Y-%m-%d %H:%M"), prompt="x")
+
+	def test_a_held_macro_is_refused(self):
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import hold_fields_exist
+
+		if not hold_fields_exist():
+			self.skipTest("hold fields not migrated")
+		frappe.set_user("Administrator")
+		m = frappe.get_doc({"doctype": MACRO, "macro_name": f"{PFX}-held", "steps": [{"prompt": "x"}]})
+		m.insert()
+		frappe.db.set_value(MACRO, m.name, {"owner": OWNER_OK, "admin_hold": 1})
+		frappe.db.commit()
+		frappe.set_user(OWNER_OK)
+		with self.assertRaisesRegex(InvalidArgumentError, "on hold"):
+			schedule_run(run_at=_at().strftime("%Y-%m-%d %H:%M"), macro=m.name)
+
+	def test_the_cap_does_not_count_spent_one_time_macros(self):
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_MACROS_PER_OWNER
+
+		when = _at().strftime("%Y-%m-%d %H:%M")
+		names = [
+			schedule_run(run_at=when, prompt="x", title=f"{PFX}-cap-{i}")["macro"]
+			for i in range(MAX_MACROS_PER_OWNER - frappe.db.count(MACRO, {"owner": OWNER_OK}))
+		]
+		with self.assertRaisesRegex(InvalidArgumentError, "most allowed"):
+			schedule_run(run_at=when, prompt="x", title=f"{PFX}-cap-over")
+		frappe.db.set_value(
+			MACRO, names[0], {"schedule_enabled": 0, "next_run_at": None, "last_run_at": now_datetime()}
+		)
+		frappe.db.commit()
+		self.assertTrue(schedule_run(run_at=when, prompt="x", title=f"{PFX}-cap-after")["macro"])

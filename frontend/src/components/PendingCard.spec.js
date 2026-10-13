@@ -695,7 +695,8 @@ describe("PendingCard schedule kind", () => {
 		expect(text).toContain("Tue, 15 Jan 2030 at 9:30 am (Asia/Kolkata)");
 		expect(text).toContain("Check the comments on HR-EMP-0001");
 		expect(text).toContain("then the schedule switches itself off");
-		expect(text).toContain("still asks for your confirmation");
+		expect(text).toContain("it waits for you to confirm it in that chat");
+		expect(text).toContain("To cancel or move it later");
 	});
 
 	it("names an existing macro instead of a prompt", () => {

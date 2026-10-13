@@ -22,10 +22,15 @@ FAILED is retried 55 minutes later, not on every sweep (``_retry_later``). Model
   limbs matter because the schedule arithmetic used to run OUTSIDE the per-macro
   try/except, so one bad row aborted the sweep for every other macro on the bench.
 * **One-time schedules** (``schedule_frequency = "once"``, on ``schedule_date`` at
-  ``schedule_time``): the claim that takes the slot also switches the schedule off,
-  in the same locked write, so the macro can never fire twice. A slot that failed
-  to start is retried ONCE, 55 minutes later, by switching it back on at the retry
-  time; after that it stays off and the owner is told.
+  ``schedule_time``): the claim takes the slot by moving ``next_run_at`` to a LEASE
+  55 minutes out, not by switching the schedule off, so a worker that dies before
+  the run starts leaves a slot that comes due again instead of a reminder lost
+  with no trace. A run that started (or was refused for good) switches the
+  schedule off. When the lease comes due, the claim first looks for the run the
+  first attempt started: found, the schedule just switches off; not found, it is
+  the one retry, and the schedule switches off as it is taken. The owner is told
+  of every one-time slot that did not run, never promised a slot that will not
+  come.
 """
 
 import calendar
@@ -48,10 +53,6 @@ from jarvis.chat.macros import (
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
 ONCE = "once"
-# What a one-time slot's claim hands the failure paths in place of a next
-# occurrence (it has none): ``_retry_later`` reads it as "the claim switched this
-# schedule off", the state a retry has to undo.
-_ONCE_CLAIMED = "once-claimed"
 
 _DEFAULT_SECONDS = 9 * 3600  # 09:00 when no schedule_time set
 _MAX_SECONDS = 24 * 3600 - 1  # 23:59:59, the last representable time of day
@@ -87,6 +88,17 @@ _DISPATCH_FAILED = "Scheduled run could not be started."
 _WILL_RETRY = " It will retry within the hour."
 _NO_RETRY = " It will run again at its next scheduled time."
 _ONCE_NO_RETRY = " It was a one-time schedule, so it will not run again: schedule it again from the macro."
+
+# A one-time slot refused for a reason that does not clear within the hour: said
+# without the recurring "runs resume ..." promise, which there is no slot to keep.
+_ONCE_BLOCK_SENTENCE = {
+	"usage_limit": "One-time run skipped: this user's monthly usage limit is reached.",
+	"subscription_suspended": "One-time run skipped: the subscription does not currently include chat.",
+	"llm_not_configured": "One-time run skipped: no AI model connection is configured.",
+	BLOCK_STEP_BUDGET: "One-time run skipped: this month's budget for scheduled macro runs is used up.",
+}
+_ONCE_SKIPPED_OFF = "One-time run skipped: the macro was switched off at its time."
+_ONCE_SKIPPED_HELD = "One-time run skipped: the macro was on hold by an admin at its time."
 
 # admin-v2#675: how long a slot that should be retried waits before the sweep tries it
 # again. The sweep runs every five minutes; retrying on every sweep would record a
@@ -159,10 +171,8 @@ def run_due_macros() -> None:
 			"schedule_weekday",
 			"schedule_day_of_month",
 			"next_run_at",
-			# One-time schedules: the day, and the stamp an owner's save moves, which
-			# is how a one-time retry knows the owner has not changed it meanwhile.
-			*(["schedule_date"] if _once_ready() else []),
-			"modified",
+			# One-time schedules: the day (with the time, the slot the owner chose).
+			*(["schedule_date"] if once_ready() else []),
 			# Before the migrate the column is not there: nothing is held.
 			*([HOLD_FIELD] if hold_fields_exist() else []),
 		],
@@ -224,6 +234,12 @@ def _sweep_one(m, now, barred_owners: set) -> None:
 	# claim finds `next_run_at` cleared and skips, and a hold after the claim is
 	# `run_macro`'s quiet BLOCK_MACRO_HELD, settled like a disabled macro.
 	if not cint(m.enabled) or cint(m.get("admin_hold")):
+		if is_once(m):
+			# A one-time slot has nothing later to move to: it ends here, and the owner
+			# is told, or the reminder would vanish without a word.
+			_end_once(m, expected=m.next_run_at)
+			_tell_once_skipped(m, _ONCE_SKIPPED_HELD if cint(m.get("admin_hold")) else _ONCE_SKIPPED_OFF)
+			return
 		_consume_slot(m, now, stamp_last_run=False)
 		return
 
@@ -276,6 +292,8 @@ def _settle(m, now, out: dict, claimed) -> None:
 	The claim already moved ``next_run_at`` on. What is left to decide is whether the
 	slot counts as run (stamp ``last_run_at``) or must be retried (``_retry_later``)."""
 	if out.get("ok"):
+		if is_once(m):
+			_end_once(m, expected=claimed)
 		_stamp_last_run(m, now)
 		return
 	reason = str(out.get("reason") or "").strip()
@@ -283,6 +301,10 @@ def _settle(m, now, out: dict, claimed) -> None:
 		# Raced: disabled, deleted, put on hold or handed to someone else, between the
 		# due query and the dispatch. Same handling as the pre-dispatch branch: no failure, nothing ran,
 		# nothing stamped.
+		if is_once(m):
+			_end_once(m, expected=claimed)
+			if reason in ("macro disabled", BLOCK_MACRO_HELD):
+				_tell_once_skipped(m, _ONCE_SKIPPED_HELD if reason == BLOCK_MACRO_HELD else _ONCE_SKIPPED_OFF)
 		return
 	sentence = _BLOCK_SENTENCE.get(reason) or f"Scheduled run was refused: {reason or 'unknown'}."
 	if reason == BLOCK_DISPATCH_FAILED:
@@ -295,6 +317,14 @@ def _settle(m, now, out: dict, claimed) -> None:
 		sentence += _retry_clause(_retry_later(m, now, expected=claimed), m)
 		_record_failed(m, sentence)
 		_notify_owner(m, sentence)
+		return
+	if is_once(m):
+		# Refused for good: the one-time schedule ends, nothing is stamped as run (the
+		# page would read "Ran once"), and the owner is told it will not run again.
+		_end_once(m, expected=claimed)
+		_tell_once_skipped(
+			m, _ONCE_BLOCK_SENTENCE.get(reason) or f"One-time run was refused: {reason or 'unknown'}."
+		)
 		return
 	_record_failed(m, sentence)
 	_notify_owner(m, sentence)
@@ -321,13 +351,9 @@ def _claim_slot(m, now):
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 		return None
 	if is_once(m):
-		# A one-time slot has no next occurrence: taking it switches the schedule off
-		# in this same locked write, so no later sweep can run it again.
-		frappe.db.set_value(
-			MACRO, m.name, {"next_run_at": None, "schedule_enabled": 0}, update_modified=False
-		)
+		claimed = _claim_once(m, now, get_datetime(current))
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
-		return _ONCE_CLAIMED
+		return claimed
 	claimed = _next_occurrence(m, now)
 	frappe.db.set_value(MACRO, m.name, "next_run_at", claimed, update_modified=False)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
@@ -373,42 +399,91 @@ def _retry_later(m, now, *, expected) -> bool:
 		return False
 
 
+def _first_once_attempt(m) -> bool:
+	"""Whether the due ``next_run_at`` is the slot the owner chose, not the lease a
+	first attempt left (which is the one retry)."""
+	return get_datetime(m.get("next_run_at")) == once_slot(m.get("schedule_date"), m.get("schedule_time"))
+
+
+def _claim_once(m, now, current):
+	"""Take a one-time slot under the claim's row lock (no commit; the caller does).
+
+	The owner's slot: lease it, moving ``next_run_at`` ``_RETRY_AFTER_S`` out and
+	leaving the schedule on. Whatever happens next, the slot is not lost: a run
+	that starts or is refused for good ends the schedule (``_end_once``), a
+	failure to start leaves the lease as the one retry, and a worker that dies in
+	between leaves the lease to come due.
+
+	The lease, come due: look for a run the first attempt started (a scheduled run
+	of this macro with a conversation, since the slot; the failed rows the sweep
+	records itself have none). Found, the worker died after starting it: the
+	schedule ends without running it twice, and None says there is nothing to
+	dispatch. Not found, this is the one retry: the schedule ends as it is taken."""
+	slot = once_slot(m.get("schedule_date"), m.get("schedule_time"))
+	if current == slot:
+		lease = add_to_date(now, seconds=_RETRY_AFTER_S)
+		frappe.db.set_value(MACRO, m.name, "next_run_at", lease, update_modified=False)
+		return lease
+	values = {"next_run_at": None, "schedule_enabled": 0}
+	started = frappe.db.get_value(
+		RUN,
+		{"macro": m.name, "trigger": "scheduled", "conversation": ["is", "set"], "creation": [">=", slot]},
+		"creation",
+	)
+	if started:
+		values["last_run_at"] = started
+	frappe.db.set_value(MACRO, m.name, values, update_modified=False)
+	return None if started else now
+
+
 def _retry_once_later(m, now, *, expected) -> bool:
 	"""``_retry_later`` for a one-time schedule: ONE retry, ``_RETRY_AFTER_S`` from
-	now, and none for a slot that already was that retry (it sits off the slot the
-	owner chose). Raises like the body it is called from; that caller logs.
+	now. Raises like the body it is called from; that caller logs.
 
-	Before the claim (``expected`` is the due ``next_run_at``) the row is still on,
-	so the retry just moves ``next_run_at``, the same compare-and-set as a recurring
-	macro. After the claim (``_ONCE_CLAIMED``) the claim switched the schedule off,
-	so the retry switches it back on at the retry time, but only while the row is
-	exactly as the claim left it and the owner has not saved it since (``modified``
-	moves on every save, never on the scheduler's writes): a schedule the owner
-	switched off or changed meanwhile is theirs and stays as it is."""
-	if get_datetime(m.get("next_run_at")) != _once_slot(m.get("schedule_date"), m.get("schedule_time")):
+	After a first attempt's claim (``expected`` is the lease it wrote, not the due
+	slot) the lease already is the retry: nothing to write. Before a claim the slot
+	moves to the same distance, the compare-and-set a recurring macro uses. The
+	attempt after that is the last: no retry."""
+	if not _first_once_attempt(m):
 		return False
-	retry_at = add_to_date(now, seconds=_RETRY_AFTER_S)
-	if expected == _ONCE_CLAIMED:
-		frappe.db.sql(
-			"UPDATE `tabJarvis Macro` SET next_run_at=%(retry_at)s, schedule_enabled=1"
-			" WHERE name=%(name)s AND next_run_at IS NULL AND schedule_enabled=0 AND modified=%(modified)s",
-			{"retry_at": retry_at, "name": m.name, "modified": m.get("modified")},
-		)
-	else:
-		frappe.db.sql(
-			"UPDATE `tabJarvis Macro` SET next_run_at=%(retry_at)s WHERE name=%(name)s AND next_run_at=%(expected)s",
-			{"retry_at": retry_at, "name": m.name, "expected": expected},
-		)
+	if get_datetime(expected) != get_datetime(m.get("next_run_at")):
+		return True
+	frappe.db.sql(
+		"UPDATE `tabJarvis Macro` SET next_run_at=%(retry_at)s WHERE name=%(name)s AND next_run_at=%(expected)s",
+		{"retry_at": add_to_date(now, seconds=_RETRY_AFTER_S), "name": m.name, "expected": expected},
+	)
 	cursor = getattr(frappe.db, "_cursor", None)
 	landed = bool(cursor and cursor.rowcount == 1)  # read BEFORE commit resets it
 	frappe.db.commit()
 	return landed
 
 
-def _retry_clause(retry_scheduled: bool, m=None) -> str:
+def _end_once(m, *, expected) -> None:
+	"""Switch a one-time schedule off, only while ``next_run_at`` still holds
+	``expected`` (the lease this sweep wrote, or the due slot): a schedule the
+	owner saved meanwhile is theirs. A final attempt's claim already switched it
+	off, so then nothing matches, which is right."""
+	frappe.db.set_value(
+		MACRO,
+		{"name": m.name, "next_run_at": expected},
+		{"next_run_at": None, "schedule_enabled": 0},
+		update_modified=False,
+	)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the end of the schedule
+
+
+def _tell_once_skipped(m, sentence: str) -> None:
+	"""A one-time slot that will not run: a failed run the owner can see, and a
+	notification saying it will not run again."""
+	sentence += _ONCE_NO_RETRY
+	_record_failed(m, sentence)
+	_notify_owner(m, sentence)
+
+
+def _retry_clause(retry_scheduled: bool, m) -> str:
 	if retry_scheduled:
 		return _WILL_RETRY
-	return _ONCE_NO_RETRY if m is not None and is_once(m) else _NO_RETRY
+	return _ONCE_NO_RETRY if is_once(m) else _NO_RETRY
 
 
 def _report_failure_before_claim(m, now) -> None:
@@ -421,6 +496,11 @@ def _report_failure_before_claim(m, now) -> None:
 	row holds the next occurrence, so nothing matches: the macro WAS dispatched, the
 	schedule has already moved on, and reporting a failed run would be false."""
 	if not _retry_later(m, now, expected=m.next_run_at):
+		if is_once(m) and not _first_once_attempt(m):
+			# The one retry raised too: the schedule ends here, said, rather than
+			# coming due on every sweep with nobody told.
+			_end_once(m, expected=m.next_run_at)
+			_tell_once_skipped(m, _DISPATCH_FAILED.rstrip("."))
 		return
 	sentence = _DISPATCH_FAILED + _WILL_RETRY
 	_record_failed(m, sentence)
@@ -432,10 +512,13 @@ def is_once(m) -> bool:
 	return str(m.get("schedule_frequency") or "").strip().lower() == ONCE
 
 
-def _once_ready() -> bool:
+def once_ready() -> bool:
 	"""``schedule_date`` exists: the code can be served ahead of the migrate that adds
-	it, and a sweep reading a missing column would fail for every macro."""
-	return frappe.db.has_column(MACRO, "schedule_date")
+	it, and a sweep reading a missing column would fail for every macro. Read from
+	the DocType meta, like ``jarvis_macro.hold_fields_exist``: ``db.has_column``
+	asks information_schema by table name only, which on a MariaDB server shared by
+	several sites answers for whichever site migrated first."""
+	return bool(frappe.get_meta(MACRO).has_field("schedule_date"))
 
 
 def is_retry_pending(row, now=None) -> bool:
@@ -796,7 +879,7 @@ def compute_next_run(
 	base = get_datetime(from_dt) if from_dt else now_datetime()
 	freq = str(frequency or "daily").strip().lower()
 	if freq == ONCE:
-		slot = _once_slot(schedule_date, schedule_time)
+		slot = once_slot(schedule_date, schedule_time)
 		return slot if slot and slot > base else None
 	secs = _time_to_seconds(schedule_time)
 	hour, minute = secs // 3600, (secs % 3600) // 60
@@ -822,7 +905,7 @@ def compute_next_run(
 	return cand
 
 
-def _once_slot(schedule_date, schedule_time) -> datetime.datetime | None:
+def once_slot(schedule_date, schedule_time) -> datetime.datetime | None:
 	"""The moment a one-time schedule fires: ``schedule_date`` at ``schedule_time``
 	(09:00 when unset), or None when the date is missing or not a date. Never raises,
 	like ``compute_next_run``."""

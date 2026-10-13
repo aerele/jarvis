@@ -23,3 +23,10 @@ export function scheduleLabel(row) {
 	const t = formatTime12h(row.schedule_time);
 	return t ? `${label} · ${t}` : label;
 }
+
+// A one-time schedule that ran (it switched itself off): "Ran once · Mon, 2 Nov".
+// "" for anything else. The stamp is the site's, read as stored like the label above.
+export function ranOnceLabel(row) {
+	if (row.schedule_enabled || row.schedule_frequency !== "once" || !row.last_run_at) return "";
+	return `Ran once · ${dayjs(String(row.last_run_at).split(" ")[0]).format("ddd, D MMM")}`;
+}
