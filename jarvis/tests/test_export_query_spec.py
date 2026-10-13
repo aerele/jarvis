@@ -56,24 +56,32 @@ def _sheet(env: dict) -> list[tuple]:
 	return list(wb.worksheets[0].iter_rows(values_only=True))
 
 
+def _seed() -> None:
+	frappe.set_user("Administrator")
+	_purge()
+	for i in range(TOTAL):
+		todo = frappe.get_doc({"doctype": "ToDo", "description": f"{PFX}{i:04d}"}).insert()
+		if i < WITH_COMMENT:
+			todo.add_comment("Comment", text="followed up")
+	frappe.db.commit()
+
+
+def _purge() -> None:
+	names = frappe.get_all("ToDo", filters={"description": ["like", f"{PFX}%"]}, pluck="name")
+	frappe.db.delete("Comment", {"reference_doctype": "ToDo", "reference_name": ["in", names or [""]]})
+	frappe.db.delete("ToDo", {"description": ["like", f"{PFX}%"]})
+	frappe.db.commit()
+
+
 class TestExportQuerySpec(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		frappe.set_user("Administrator")
-		frappe.db.delete("ToDo", {"description": ["like", f"{PFX}%"]})
-		for i in range(TOTAL):
-			todo = frappe.get_doc({"doctype": "ToDo", "description": f"{PFX}{i:04d}"}).insert()
-			if i < WITH_COMMENT:
-				todo.add_comment("Comment", text="followed up")
-		frappe.db.commit()
+		_seed()
 
 	@classmethod
 	def tearDownClass(cls):
-		names = frappe.get_all("ToDo", filters={"description": ["like", f"{PFX}%"]}, pluck="name")
-		frappe.db.delete("Comment", {"reference_doctype": "ToDo", "reference_name": ["in", names or [""]]})
-		frappe.db.delete("ToDo", {"description": ["like", f"{PFX}%"]})
-		frappe.db.commit()
+		_purge()
 		super().tearDownClass()
 
 	def setUp(self):
@@ -161,3 +169,150 @@ class TestExportQuerySpec(FrappeTestCase):
 	def test_the_doctype_form_now_has_label_headers(self):
 		env = export_query("ToDo", filters={"description": ["like", f"{PFX}%"]}, fields=["name", "status"])
 		self.assertEqual(_sheet(env)[0], ("ID", "Status"))
+
+
+class TestExportQuerySpecLimitsAndHeaders(FrappeTestCase):
+	"""The rules beyond the happy path: an export is not held to query's model-facing
+	caps, a slow query is stopped and refused, shared labels are told apart."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_seed()
+
+	@classmethod
+	def tearDownClass(cls):
+		_purge()
+		super().tearDownClass()
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+
+	def test_query_caps_do_not_cut_an_export(self):
+		from jarvis.tools import query as query_module
+
+		with (
+			mock.patch.object(query_module, "MAX_LIMIT", 50),
+			mock.patch.object(query_module, "ROW_GUARD", 20),
+		):
+			env = export_query(spec=_no_comment_spec())
+		self.assertEqual(env["total"], TOTAL - WITH_COMMENT)
+
+	def test_a_query_stopped_at_the_time_limit_is_refused_with_what_to_do(self):
+		timed_out = frappe.db.OperationalError(
+			1969, "Query execution was interrupted (max_statement_time exceeded)"
+		)
+		with (
+			mock.patch("jarvis.api._agent_read_timeout_s", return_value=25),
+			mock.patch.object(frappe.db, "db_type", "mariadb"),
+			mock.patch.object(frappe.db, "sql", side_effect=timed_out),
+		):
+			with self.assertRaisesRegex(InvalidArgumentError, "ran past the 25-second limit"):
+				resolvers.from_spec(_no_comment_spec())
+
+	def test_the_select_runs_under_the_statement_limit(self):
+		seen = []
+		real_sql = frappe.db.sql
+
+		def spy(query, *a, **k):
+			seen.append(str(query))
+			return real_sql(query, *a, **k)
+
+		with (
+			mock.patch("jarvis.api._agent_read_timeout_s", return_value=25),
+			mock.patch.object(frappe.db, "sql", side_effect=spy),
+		):
+			resolvers.from_spec(_no_comment_spec())
+		if frappe.db.db_type == "mariadb":
+			self.assertTrue(any(q.startswith("SET STATEMENT max_statement_time=25 FOR SELECT") for q in seen))
+
+	def test_shared_labels_are_told_apart(self):
+		cols = [
+			resolvers._Column("name", "Supplier", None),
+			resolvers._Column("invoice", "Purchase Invoice", "ID"),
+			resolvers._Column("status", "ToDo", None),
+		]
+		self.assertEqual(resolvers._unique_headers(cols), ["Supplier ID", "Purchase Invoice ID", "Status"])
+		same_doctype = [resolvers._Column("a", None, "Total"), resolvers._Column("b", None, "Total")]
+		self.assertEqual(resolvers._unique_headers(same_doctype), ["Total (a)", "Total (b)"])
+
+	def test_a_bad_highlight_column_names_the_columns_there_are(self):
+		with self.assertRaisesRegex(
+			InvalidArgumentError, "Columns in this export: ID \\(name\\), Description"
+		):
+			export_query(
+				spec=_no_comment_spec(),
+				highlights=[{"column": "nope", "operator": "eq", "value": "x", "style": "warning"}],
+			)
+
+
+class TestExportQuerySpecExportPermission(FrappeTestCase):
+	"""The Export DocPerm is needed on every table a spec export's columns come from:
+	a joined table, and for a child table the parent its rows are scoped to (read
+	alone is enough for query, never for a bulk file)."""
+
+	READER = "xqs-si-reader@example.com"  # read on Sales Invoice, no export
+	EXPORTER = "xqs-si-exporter@example.com"  # read + export on Sales Invoice, read on Customer
+	ROLES = ("XQS SI Reader", "XQS SI Exporter")
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		for role in cls.ROLES:
+			if not frappe.db.exists("Role", role):
+				frappe.get_doc({"doctype": "Role", "role_name": role, "desk_access": 1}).insert()
+		# A new DocPerm row has export on by default: set it explicitly both ways.
+		for dt, role, export in (
+			("Sales Invoice", "XQS SI Reader", 0),
+			("Sales Invoice", "XQS SI Exporter", 1),
+			("Customer", "XQS SI Exporter", 0),
+		):
+			frappe.permissions.add_permission(dt, role, 0)
+			frappe.permissions.update_permission_property(dt, role, 0, "export", export)
+		for user, role in ((cls.READER, "XQS SI Reader"), (cls.EXPORTER, "XQS SI Exporter")):
+			if not frappe.db.exists("User", user):
+				frappe.get_doc(
+					{"doctype": "User", "email": user, "first_name": "xqs", "send_welcome_email": 0}
+				).insert(ignore_permissions=True)
+			frappe.get_doc("User", user).add_roles(role)
+		frappe.db.commit()
+		frappe.clear_cache()
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		for dt in ("Sales Invoice", "Customer"):
+			frappe.db.delete("Custom DocPerm", {"parent": dt, "role": ["in", cls.ROLES]})
+		frappe.db.commit()
+		frappe.clear_cache()
+		super().tearDownClass()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		super().tearDown()
+
+	def test_a_child_table_needs_export_on_its_parent(self):
+		frappe.set_user(self.READER)
+		self.assertTrue(frappe.has_permission("Sales Invoice", "read"))
+		self.assertFalse(frappe.permissions.can_export("Sales Invoice"))
+		with self.assertRaisesRegex(PermissionDeniedError, "no export permission on Sales Invoice"):
+			export_query(spec={"from": "Sales Invoice Item", "select": ["item_code", "amount"]})
+
+	def test_a_joined_table_needs_export_too(self):
+		frappe.set_user(self.EXPORTER)
+		spec = {
+			"from": "Sales Invoice",
+			"alias": "si",
+			"joins": [{"doctype": "Customer", "alias": "c", "on": {"c.name": "si.customer"}}],
+			"select": ["si.name", "c.customer_group"],
+		}
+		with self.assertRaisesRegex(PermissionDeniedError, "no export permission on Customer"):
+			export_query(spec=spec)
+
+	def test_a_child_through_an_exportable_parent_is_allowed(self):
+		frappe.set_user(self.EXPORTER)
+		with mock.patch.object(resolvers, "_run_bounded", return_value=[{"item_code": "X", "amount": 1}]):
+			model = resolvers.from_spec({"from": "Sales Invoice Item", "select": ["item_code", "amount"]})
+		self.assertEqual(model.total, 1)

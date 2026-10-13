@@ -439,3 +439,18 @@ class TestDocumentBudget(unittest.TestCase):
 		self.assertEqual(out["coverage"]["next_start"], 40 + shown)
 		self.assertEqual(out["coverage"]["total"], 300)
 		self.assertEqual(out["child_table"], "items")
+
+
+class TestNoteNeverPushesPastTheCap(unittest.TestCase):
+	"""The PARTIAL note is longer than the zero-row note the overhead used to be
+	measured with: the envelope must still fit for every row width."""
+
+	def test_every_row_width_fits(self):
+		from jarvis.tools import _result_guard as guard
+
+		for width in range(1, 400, 7):
+			rows = [{"v": "x" * width} for _ in range(3000)]
+			out, _event = guard.enforce_result_budget({"rows": rows}, "query")
+			self.assertLessEqual(guard._size(out), guard.MAX_RESULT_CHARS, width)
+			if out.get("_truncated") and out.get("shown"):
+				self.assertIn("export_query", out["note"])
