@@ -3,7 +3,13 @@
 
   {"kind": "tool", ts, site, user_hash, conversation, tool, duration_ms,
    result_chars, custom_target}
-  {"kind": "turn", ts, site, conversation, run_id, duration_ms, touched_custom}
+  {"kind": "turn", ts, site, conversation, run_id, duration_ms, touched_custom,
+   queue_ms, approval_wait_ms}
+
+A turn's duration_ms is the measured run:start -> terminal span (the same
+baseline as the persisted reply_duration_ms), or null when a timestamp is
+missing. It is never a placeholder zero. queue_ms is enqueue -> dispatch.
+approval_wait_ms is null: the turn records no approval-wait timestamps yet.
 
 analyze.py computes the activation rate from these. Every public function
 swallows everything - telemetry must never break a tool call or turn.
@@ -127,9 +133,15 @@ def record_export_event(
 		pass
 
 
-def emit_turn(conversation: str | None, run_id: str | None, duration_ms: int) -> None:
+def emit_turn(
+	conversation: str | None,
+	run_id: str | None,
+	duration_ms: int | None,
+	queue_ms: int | None = None,
+	approval_wait_ms: int | None = None,
+) -> None:
 	"""One line per completed turn; reads and clears the per-turn custom
-	flag. Never raises."""
+	flag. A duration that was not measured is None (null), never 0. Never raises."""
 	try:
 		if not conversation:
 			return
@@ -140,7 +152,9 @@ def emit_turn(conversation: str | None, run_id: str | None, duration_ms: int) ->
 				"site": getattr(frappe.local, "site", None),
 				"conversation": conversation,
 				"run_id": run_id,
-				"duration_ms": int(duration_ms),
+				"duration_ms": None if duration_ms is None else int(duration_ms),
+				"queue_ms": None if queue_ms is None else int(queue_ms),
+				"approval_wait_ms": None if approval_wait_ms is None else int(approval_wait_ms),
 				"touched_custom": _read_and_clear_turn_flag(conversation),
 			}
 		)
