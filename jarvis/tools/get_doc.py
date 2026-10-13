@@ -1,11 +1,16 @@
 import frappe
+from frappe.model import table_fields
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._bulk import _MAX_BATCH
+from jarvis.tools._result_guard import _json_text, _size
 from jarvis.tools.get_list import LIST_PAGE_V1, MAX_LIMIT
 
-_MAX_START = 100_000
+MAX_START = 100_000
 _DEFAULT_CHILD_LIMIT = 20
+# Most JSON chars one text window returns: well under the agent's 35,000-char
+# result budget, so a window always reaches the model whole.
+TEXT_WINDOW_CHARS = 30_000
 
 _NO_NAME_MESSAGE = (
 	"Pass name (one document) or names (a non-empty list). For a single "
@@ -21,6 +26,8 @@ def get_doc(
 	child_table: str | None = None,
 	start: int = 0,
 	limit: int | None = None,
+	text_offset: int | None = None,
+	text_length: int | None = None,
 ) -> dict:
 	"""Return one document as a dict - or a batch when ``names`` is given.
 
@@ -47,14 +54,17 @@ def get_doc(
 	check and field masking as the whole document, so it never shows more:
 	``fields`` returns just those fields plus doctype and name; ``child_table``
 	returns one page of that table's rows (``start``, ``limit``) in the
-	list-page-v1 rows/coverage shape, with ``fields`` naming the row fields.
-	The agent's result-size guard points a cut document at these calls.
+	list-page-v1 rows/coverage shape, with ``fields`` naming the row fields;
+	``fields=[one field]`` with ``text_offset`` / ``text_length`` returns a window
+	of that value's text (a list or dict as its JSON) plus ``_text_window``
+	saying where it ends and how to continue. The agent's result-size guard
+	points a cut document at these calls.
 	"""
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
 	if not frappe.db.exists("DocType", doctype):
 		raise InvalidArgumentError(f"unknown doctype: {doctype}")
-	part = _DocPart(fields, child_table, start, limit)
+	part = _DocPart(fields, child_table, start, limit, text_offset, text_length)
 
 	if frappe.get_meta(doctype).issingle:
 		# names=[...] on a Single is meaningless as a name list (its one
@@ -134,30 +144,19 @@ def _get_doc_batch(doctype: str, names: list) -> dict:
 
 class _DocPart:
 	"""The part of one readable document a caller asked for: all of it, some
-	fields, or one page of a child table. Applied to the dict ``_get_doc_one`` /
-	``_get_single`` already permission-checked and masked."""
+	fields, a window of one field's text, or one page of a child table. Applied
+	to the dict ``_get_doc_one`` / ``_get_single`` already permission-checked
+	and masked, so a part never shows more than the whole."""
 
-	def __init__(self, fields, child_table, start, limit):
+	def __init__(self, fields, child_table, start, limit, text_offset=None, text_length=None):
 		# Models fill unused optional arguments with [] or "": those mean absent.
-		fields = None if fields == [] else fields
-		child_table = None if child_table == "" else child_table
-		if fields is not None and (
-			not isinstance(fields, list) or not fields or not all(isinstance(f, str) and f for f in fields)
-		):
-			raise InvalidArgumentError("fields must be a non-empty list of field names")
-		if child_table is not None and (not isinstance(child_table, str) or not child_table):
-			raise InvalidArgumentError("child_table must be a child table field name, e.g. 'items'")
-		if isinstance(start, bool) or not isinstance(start, int) or not 0 <= start <= _MAX_START:
-			raise InvalidArgumentError(f"start must be an integer between 0 and {_MAX_START}")
-		if limit is not None and (
-			isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LIMIT
-		):
-			raise InvalidArgumentError(f"limit must be between 1 and {MAX_LIMIT}")
-		if (start or limit is not None) and not child_table:
-			raise InvalidArgumentError("start and limit page a child table; pass child_table too.")
-		self.fields = fields
-		self.child_table = child_table
-		self.start = start
+		self.fields = None if fields == [] else fields
+		self.child_table = None if child_table == "" else child_table
+		self.start, self.limit = start, limit
+		self.text_offset, self.text_length = text_offset, text_length
+		self._check_names()
+		self._check_paging()
+		self._check_window()
 		self.limit = limit or _DEFAULT_CHILD_LIMIT
 
 	def refuse_with_batch(self, batch: bool) -> None:
@@ -167,19 +166,76 @@ class _DocPart:
 	def of(self, doc: dict) -> dict:
 		if self.child_table:
 			return self._child_page(doc)
-		if self.fields:
-			_refuse_unknown(doc["doctype"], self.fields, doc)
-			return {"doctype": doc["doctype"], "name": doc["name"], **{f: doc[f] for f in self.fields}}
-		return doc
+		if not self.fields:
+			return doc
+		_refuse_unknown(doc["doctype"], self.fields, doc)
+		if self._windowed:
+			return self._text_window(doc)
+		return {"doctype": doc["doctype"], "name": doc["name"], **{f: doc[f] for f in self.fields}}
+
+	@property
+	def _windowed(self) -> bool:
+		return self.text_offset is not None or self.text_length is not None
+
+	def _check_names(self) -> None:
+		if self.fields is not None and (
+			not isinstance(self.fields, list) or not all(isinstance(f, str) and f for f in self.fields)
+		):
+			raise InvalidArgumentError("fields must be a non-empty list of field names")
+		if self.child_table is not None and not isinstance(self.child_table, str):
+			raise InvalidArgumentError("child_table must be a child table field name, e.g. 'items'")
+
+	def _check_paging(self) -> None:
+		if not _is_int(self.start, 0, MAX_START):
+			raise InvalidArgumentError(f"start must be an integer between 0 and {MAX_START}")
+		if self.limit is not None and not _is_int(self.limit, 1, MAX_LIMIT):
+			raise InvalidArgumentError(f"limit must be between 1 and {MAX_LIMIT}")
+		if (self.start or self.limit is not None) and not self.child_table:
+			raise InvalidArgumentError("start and limit page a child table; pass child_table too.")
+
+	def _check_window(self) -> None:
+		if not self._windowed:
+			return
+		if self.text_offset is not None and not _is_int(self.text_offset, 0):
+			raise InvalidArgumentError("text_offset must be an integer of 0 or more")
+		if self.text_length is not None and not _is_int(self.text_length, 1, TEXT_WINDOW_CHARS):
+			raise InvalidArgumentError(f"text_length must be between 1 and {TEXT_WINDOW_CHARS}")
+		if self.child_table or not self.fields or len(self.fields) != 1:
+			raise InvalidArgumentError(
+				"text_offset and text_length read one field: pass fields=[that field] and no child_table."
+			)
+
+	def _text_window(self, doc: dict) -> dict:
+		field = self.fields[0]
+		value = doc[field]
+		text = value if isinstance(value, str) else "" if value is None else _json_text(value)
+		offset = self.text_offset or 0
+		if offset > len(text):
+			raise InvalidArgumentError(
+				f"text_offset {offset} is past the end of {field} ({len(text)} chars)."
+			)
+		piece = _text_slice(text, offset, self.text_length or TEXT_WINDOW_CHARS)
+		end = offset + len(piece)
+		window = {
+			"field": field,
+			"offset": offset,
+			"returned_chars": len(piece),
+			"total_chars": len(text),
+			"next_offset": end if end < len(text) else None,
+		}
+		if value is not None and not isinstance(value, str):
+			window["as_json"] = True
+		if end < len(text):
+			args = {"doctype": doc["doctype"], "name": doc["name"], "fields": [field], "text_offset": end}
+			if self.text_length:
+				args["text_length"] = self.text_length
+			window["next_call"] = {"tool": "get_doc", "args": args}
+		return {"doctype": doc["doctype"], "name": doc["name"], "_text_window": window, field: piece}
 
 	def _child_page(self, doc: dict) -> dict:
 		doctype, table = doc["doctype"], self.child_table
 		df = frappe.get_meta(doctype).get_field(table)
-		if (
-			not df
-			or df.fieldtype not in ("Table", "Table MultiSelect")
-			or not isinstance(doc.get(table), list)
-		):
+		if not df or df.fieldtype not in table_fields or not isinstance(doc.get(table), list):
 			tables = ", ".join(k for k, v in doc.items() if isinstance(v, list)) or "none"
 			raise InvalidArgumentError(f"{doctype} has no child table '{table}'. Its child tables: {tables}.")
 		if self.fields:
@@ -203,7 +259,7 @@ class _DocPart:
 				"returned": len(page),
 				"total": len(rows),
 				"has_more": has_more,
-				"next_start": end if has_more and end <= _MAX_START else None,
+				"next_start": end if has_more and end <= MAX_START else None,
 				"complete": self.start == 0 and not has_more,
 				"order_by": "idx asc",
 				"scope": "this document's rows, as the current user can read them",
@@ -218,3 +274,28 @@ def _refuse_unknown(doctype: str, fields: list, known) -> None:
 		raise InvalidArgumentError(
 			f"{doctype} has no field(s) {', '.join(unknown)}; get_schema lists its fields."
 		)
+
+
+def _text_slice(text: str, offset: int, length: int) -> str:
+	"""``text[offset:offset + length]``, shortened until its JSON fits the window:
+	quotes, backslashes and control characters take more than one JSON char."""
+	piece = text[offset : offset + length]
+	if _size(piece) <= TEXT_WINDOW_CHARS:
+		return piece
+	low, high = 1, len(piece)  # one char always fits
+	while low < high:
+		mid = (low + high + 1) // 2
+		if _size(piece[:mid]) <= TEXT_WINDOW_CHARS:
+			low = mid
+		else:
+			high = mid - 1
+	return piece[:low]
+
+
+def _is_int(value, low: int, high: int | None = None) -> bool:
+	return (
+		not isinstance(value, bool)
+		and isinstance(value, int)
+		and value >= low
+		and (high is None or value <= high)
+	)

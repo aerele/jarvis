@@ -270,9 +270,15 @@ class TestDocumentBudget(unittest.TestCase):
 			{
 				"returned_chars": 2000,
 				"total_chars": 20_000,
+				"next_offset": 2000,
 				"next_call": {
 					"tool": "get_doc",
-					"args": {"doctype": "Sales Invoice", "name": "SINV-0001", "fields": ["terms"]},
+					"args": {
+						"doctype": "Sales Invoice",
+						"name": "SINV-0001",
+						"fields": ["terms"],
+						"text_offset": 2000,
+					},
 				},
 			},
 		)
@@ -293,8 +299,11 @@ class TestDocumentBudget(unittest.TestCase):
 		entry = out["_partial"]["text_fields"]["content"]
 		self.assertEqual(entry["total_chars"], 100_040)
 		self.assertGreater(entry["returned_chars"], 30_000)
-		# Longer than any one result: no call could return it whole, so none is offered.
-		self.assertNotIn("next_call", entry)
+		self.assertEqual(entry["next_offset"], entry["returned_chars"])
+		self.assertEqual(
+			entry["next_call"]["args"],
+			{"doctype": "Note", "name": "N-1", "fields": ["content"], "text_offset": entry["returned_chars"]},
+		)
 		self.assertTrue(out["content"].startswith("x" * entry["returned_chars"] + " [TRUNCATED"))
 
 	def test_tables_share_the_budget(self):
@@ -305,7 +314,8 @@ class TestDocumentBudget(unittest.TestCase):
 		self.assertGreater(tables["items"]["returned"], 0)
 		self.assertLessEqual(abs(tables["items"]["returned"] - tables["taxes"]["returned"]), 1)
 
-	def test_document_with_a_table_called_rows_is_still_a_document(self):
+	def test_document_with_a_list_called_rows_is_still_a_document(self):
+		# Not the row envelope: its top-level total/note would clobber real fields.
 		data = {
 			"name": "X-1",
 			"doctype": "Odd",
@@ -313,7 +323,31 @@ class TestDocumentBudget(unittest.TestCase):
 		}
 		out, _ = self.bound(data)
 		self.assertNotIn("shown", out)
-		self.assertEqual(out["_partial"]["child_tables"]["rows"]["total"], 500)
+		self.assertIn("rows", out["_partial"]["text_fields"])
+
+	def test_a_list_that_is_not_a_child_table_is_cut_as_json_text(self):
+		# Only the doctype's Table fields are paged by child_table; get_doc refuses
+		# any other key there, so a list of strings must not point at one.
+		data = _doc(rows=5, terms=10)
+		data["tags"] = ["t" * 50] * 2000
+		out, _ = self.bound(data)
+		self.assertNotIn("child_tables", out["_partial"])
+		entry = out["_partial"]["text_fields"]["tags"]
+		self.assertIs(entry["as_json"], True)
+		self.assertEqual(entry["total_chars"], _size(data["tags"]))
+		self.assertEqual(entry["next_call"]["args"]["fields"], ["tags"])
+		self.assertNotIn("child_table", entry["next_call"]["args"])
+		self.assertTrue(out["tags"].startswith(json.dumps(data["tags"], separators=(",", ":"))[:2000]))
+		self.assertEqual(out["items"], data["items"])
+
+	def test_too_many_fields_lists_their_names(self):
+		data = {"name": "B-1", "doctype": "Sales Invoice", **{f"f{i}": 123456.75 for i in range(4000)}}
+		out, _ = self.bound(data)
+		partial = out["_partial"]
+		self.assertEqual(set(out), {"_truncated", "_partial", "name", "doctype"})
+		self.assertEqual(partial["fields"][:3], ["name", "doctype", "f0"])
+		self.assertEqual((len(partial["fields"]), partial["field_count"]), (300, 4002))
+		self.assertIn("fields=[...]", partial["note"])
 
 	def test_batch_keeps_whole_documents_and_names_the_rest(self):
 		docs = [_doc(rows=30, terms=10, name=f"SINV-{i}") for i in range(6)]
