@@ -267,6 +267,7 @@ class TestOnceSweep(MacroSchedulerBase):
 				"status": "running",
 				"trigger": "scheduled",
 				"conversation": conv.name,
+				"current_step": 1,  # its first step was sent
 			}
 		)
 		run.flags.ignore_permissions = True
@@ -277,6 +278,39 @@ class TestOnceSweep(MacroSchedulerBase):
 		state = _state(m.name)
 		self.assertEqual(state.schedule_enabled, 0)
 		self.assertTrue(state.last_run_at)
+
+	def test_a_run_that_was_not_dispatched_is_retried_not_counted_as_run(self):
+		m = _mk_once("undispatched")
+
+		def run_row_then_fail(*a, **k):
+			# What run_macro leaves when the dispatch fails: a run row with its
+			# conversation, ended failed, no step sent.
+			conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "x"}).insert(
+				ignore_permissions=True
+			)
+			run = frappe.get_doc(
+				{
+					"doctype": RUN,
+					"macro": m.name,
+					"status": "failed",
+					"trigger": "scheduled",
+					"conversation": conv.name,
+					"current_step": 0,
+					"error": macros._DISPATCH_FAILED_ERROR,
+				}
+			)
+			run.flags.ignore_permissions = True
+			run.insert()
+			frappe.db.commit()
+			return {"ok": False, "reason": macros.BLOCK_DISPATCH_FAILED}
+
+		with patch("jarvis.chat.macros.run_macro", side_effect=run_row_then_fail):
+			macro_scheduler.run_due_macros()
+		_leased(self, m.name)
+		_due_now(m.name)
+		self.assertEqual(self._run_due(), [m.name], "the promised retry did not run")
+		state = _state(m.name)
+		self.assertEqual(state.schedule_enabled, 0)
 
 	def test_a_refusal_for_good_ends_it_without_a_resume_promise(self):
 		m = _mk_once("refused")
@@ -420,3 +454,16 @@ class TestSpentOneTimeMacrosDoNotFillTheCap(MacroSchedulerBase):
 		total = frappe.db.count(MACRO, {"owner": OWNER_OK})
 		self.assertEqual(macros_counted_toward_cap(OWNER_OK), total - 1)
 		self.assertLess(macros_counted_toward_cap(OWNER_OK), MAX_MACROS_PER_OWNER)
+
+	def test_a_refused_one_time_macro_is_spent_but_one_switched_off_early_is_not(self):
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import macros_counted_toward_cap
+
+		refused = _mk_once("cap-refused")
+		with patch("jarvis.chat.macros.run_macro", return_value={"ok": False, "reason": "usage_limit"}):
+			macro_scheduler.run_due_macros()
+		early = _mk_once("cap-early", minutes_from_now=120)
+		frappe.db.set_value(MACRO, early.name, {"schedule_enabled": 0, "next_run_at": None})
+		frappe.db.commit()
+		total = frappe.db.count(MACRO, {"owner": OWNER_OK})
+		self.assertEqual(_state(refused.name).schedule_enabled, 0)
+		self.assertEqual(macros_counted_toward_cap(OWNER_OK), total - 1)

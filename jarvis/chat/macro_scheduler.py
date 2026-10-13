@@ -31,6 +31,13 @@ FAILED is retried 55 minutes later, not on every sweep (``_retry_later``). Model
   the one retry, and the schedule switches off as it is taken. The owner is told
   of every one-time slot that did not run, never promised a slot that will not
   come.
+
+  ROLLBACK: code from before one-time schedules reads an unknown frequency as
+  daily, so a reverted bench would run every pending one-time macro again every
+  day. Before reverting, switch them off on each site::
+
+      UPDATE `tabJarvis Macro` SET schedule_enabled=0, next_run_at=NULL
+      WHERE schedule_frequency='once';
 """
 
 import calendar
@@ -414,11 +421,14 @@ def _claim_once(m, now, current):
 	failure to start leaves the lease as the one retry, and a worker that dies in
 	between leaves the lease to come due.
 
-	The lease, come due: look for a run the first attempt started (a scheduled run
-	of this macro with a conversation, since the slot; the failed rows the sweep
-	records itself have none). Found, the worker died after starting it: the
-	schedule ends without running it twice, and None says there is nothing to
-	dispatch. Not found, this is the one retry: the schedule ends as it is taken."""
+	The lease, come due: look for a run the first attempt started, a scheduled run
+	of this macro since the slot that SENT a step (``current_step`` >= 1, set once
+	a step's turn exists). A run row that never sent one does not count: the
+	failed rows the sweep records itself, one ``run_macro`` ended as not
+	dispatched, one the reconciler ended as never started. Found, the worker died
+	after starting it: the schedule ends without running it twice, and None says
+	there is nothing to dispatch. Not found, this is the one retry: the schedule
+	ends as it is taken."""
 	slot = once_slot(m.get("schedule_date"), m.get("schedule_time"))
 	if current == slot:
 		lease = add_to_date(now, seconds=_RETRY_AFTER_S)
@@ -427,7 +437,7 @@ def _claim_once(m, now, current):
 	values = {"next_run_at": None, "schedule_enabled": 0}
 	started = frappe.db.get_value(
 		RUN,
-		{"macro": m.name, "trigger": "scheduled", "conversation": ["is", "set"], "creation": [">=", slot]},
+		{"macro": m.name, "trigger": "scheduled", "current_step": [">=", 1], "creation": [">=", slot]},
 		"creation",
 	)
 	if started:
@@ -458,18 +468,20 @@ def _retry_once_later(m, now, *, expected) -> bool:
 	return landed
 
 
-def _end_once(m, *, expected) -> None:
+def _end_once(m, *, expected) -> bool:
 	"""Switch a one-time schedule off, only while ``next_run_at`` still holds
 	``expected`` (the lease this sweep wrote, or the due slot): a schedule the
 	owner saved meanwhile is theirs. A final attempt's claim already switched it
-	off, so then nothing matches, which is right."""
-	frappe.db.set_value(
-		MACRO,
-		{"name": m.name, "next_run_at": expected},
-		{"next_run_at": None, "schedule_enabled": 0},
-		update_modified=False,
+	off, so then nothing matches, which is right. True when this call ended it."""
+	frappe.db.sql(
+		"UPDATE `tabJarvis Macro` SET next_run_at=NULL, schedule_enabled=0"
+		" WHERE name=%(name)s AND next_run_at=%(expected)s",
+		{"name": m.name, "expected": expected},
 	)
+	cursor = getattr(frappe.db, "_cursor", None)
+	ended = bool(cursor and cursor.rowcount == 1)  # read BEFORE commit resets it
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the end of the schedule
+	return ended
 
 
 def _tell_once_skipped(m, sentence: str) -> None:
@@ -496,10 +508,10 @@ def _report_failure_before_claim(m, now) -> None:
 	row holds the next occurrence, so nothing matches: the macro WAS dispatched, the
 	schedule has already moved on, and reporting a failed run would be false."""
 	if not _retry_later(m, now, expected=m.next_run_at):
-		if is_once(m) and not _first_once_attempt(m):
-			# The one retry raised too: the schedule ends here, said, rather than
-			# coming due on every sweep with nobody told.
-			_end_once(m, expected=m.next_run_at)
+		if is_once(m) and not _first_once_attempt(m) and _end_once(m, expected=m.next_run_at):
+			# The one retry raised before its claim: the schedule ends here, said,
+			# rather than coming due on every sweep with nobody told. (Raised after
+			# its claim, the claim already ended it and the run went its way.)
 			_tell_once_skipped(m, _DISPATCH_FAILED.rstrip("."))
 		return
 	sentence = _DISPATCH_FAILED + _WILL_RETRY

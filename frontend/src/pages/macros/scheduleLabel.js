@@ -28,5 +28,12 @@ export function scheduleLabel(row) {
 // "" for anything else. The stamp is the site's, read as stored like the label above.
 export function ranOnceLabel(row) {
 	if (row.schedule_enabled || row.schedule_frequency !== "once" || !row.last_run_at) return "";
+	// Only a run of this one-time slot (as on the macro's page): a macro that ran
+	// daily and was then set to once still carries its old last run.
+	const time = /^(\d{1,2}):(\d{2})/.exec(String(row.schedule_time || "00:00"));
+	const slot = `${row.schedule_date || ""} ${
+		time ? `${time[1].padStart(2, "0")}:${time[2]}` : "00:00"
+	}`;
+	if (!row.schedule_date || String(row.last_run_at) < slot) return "";
 	return `Ran once · ${dayjs(String(row.last_run_at).split(" ")[0]).format("ddd, D MMM")}`;
 }
