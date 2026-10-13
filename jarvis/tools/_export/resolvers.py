@@ -106,5 +106,120 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 		columns=cols,
 		rows=[[row.get(c) for c in cols] for row in rows],
 		total=len(rows),
-		meta={"doctype": doctype},
+		meta={"doctype": doctype, "headers": _unique_headers([(doctype, c, None) for c in cols])},
 	)
+
+
+def from_spec(spec) -> ExportModel:
+	"""Resolve a ``query`` spec (joins, aggregates, EXISTS / NOT EXISTS) to an
+	ExportModel, SERVER-SIDE. The spec goes through the query tool's own compiler
+	(``compile_spec``), so it gets exactly the same gates as ``query``: DocType read
+	on every table it touches, the per-site allowlist, the field-level (permlevel)
+	ACL on every column, and the record-level permission weave. On top, an export
+	needs the Export DocPerm on each table its columns come from (FROM and joins; a
+	child table's comes through the parent it is joined to).
+
+	Every row is fetched (not the model-facing ``query`` caps), FAIL-CLOSED above
+	``_HARD_ROW_CEILING`` like ``from_query``. A spec ``limit`` below that still
+	applies (a deliberate "top 50"); an ``offset`` is refused."""
+	from jarvis.tools._doctype_name import canonical_doctype
+	from jarvis.tools.query import compile_spec
+
+	q = compile_spec(spec, export_limit=_HARD_ROW_CEILING + 1)
+	aliases = _spec_aliases(spec)
+	for dt in dict.fromkeys(aliases.values()):
+		if frappe.get_meta(dt).istable:
+			continue
+		if not frappe.permissions.can_export(dt):
+			raise PermissionDeniedError(f"no export permission on {dt}")
+	columns = _spec_columns(spec, aliases)
+	rows = q.run(as_dict=True)
+	from_dt = canonical_doctype(spec.get("from"))
+	if len(rows) > _HARD_ROW_CEILING:
+		raise InvalidArgumentError(
+			f"this query matches more than {_HARD_ROW_CEILING:,} rows for your permissions - too many "
+			f"to export in full. Narrow it (e.g. by date or status), or split it by a filter into a "
+			f"few exports."
+		)
+	return ExportModel(
+		columns=[c for c, _dt, _label in columns],
+		rows=[[row.get(c) for c, _dt, _label in columns] for row in rows],
+		total=len(rows),
+		meta={"doctype": from_dt, "headers": _unique_headers([(dt, c, label) for c, dt, label in columns])},
+	)
+
+
+def _spec_aliases(spec: dict) -> dict:
+	"""Alias -> DocType for the spec's FROM and joins (each also under its own name)."""
+	from jarvis.tools._doctype_name import canonical_doctype
+
+	out = {}
+	from_dt = canonical_doctype(spec.get("from"))
+	if from_dt:
+		out[spec.get("alias") or from_dt] = from_dt
+	for j in spec.get("joins") or []:
+		if isinstance(j, dict) and j.get("doctype"):
+			dt = canonical_doctype(j["doctype"])
+			out[j.get("alias") or dt] = dt
+	return out
+
+
+def _spec_columns(spec: dict, aliases: dict) -> list[tuple[str, str | None, str | None]]:
+	"""``(row key, DocType, label)`` for each select entry, in order. A plain column
+	keys by its field name and takes the field's label; a computed one keys and is
+	labelled by its ``as`` name, which an export requires (without it the column's
+	name is whatever SQL makes of the expression). Two columns with the same key
+	would overwrite each other in the row, so that is refused with the fix."""
+	from_dt = next(iter(aliases.values()), None)
+	out = []
+	for item in spec.get("select") or ["name"]:
+		if isinstance(item, str):
+			alias, _, field = item.rpartition(".")
+			out.append((field, aliases.get(alias, from_dt) if alias else from_dt, None))
+		elif isinstance(item, dict) and item.get("as"):
+			out.append((item["as"], None, _humanize(item["as"])))
+		else:
+			raise InvalidArgumentError(
+				"give every computed column (an aggregate or expression) an 'as' name in an export"
+			)
+	keys = [c for c, _dt, _label in out]
+	clash = sorted({k for k in keys if keys.count(k) > 1})
+	if clash:
+		raise InvalidArgumentError(
+			f"two columns are both named {clash[0]!r}: rename one with "
+			f'{{"expr": {{"field": "<alias>.{clash[0]}"}}, "as": "<new_name>"}}'
+		)
+	return out
+
+
+def _humanize(name: str) -> str:
+	return " ".join(w.capitalize() for w in str(name).replace("_", " ").split()) or str(name)
+
+
+def _field_label(doctype: str | None, fieldname: str) -> str:
+	"""What a person calls the column: the field's label ("ID" for the record name),
+	else the field name made readable."""
+	if fieldname == "name":
+		return "ID"
+	label = None
+	if doctype:
+		try:
+			label = frappe.get_meta(doctype).get_label(fieldname)
+		except Exception:
+			label = None
+	if not label or label == fieldname or label == "No Label":
+		return _humanize(fieldname)
+	return label
+
+
+def _unique_headers(columns: list[tuple[str | None, str, str | None]]) -> list[str]:
+	"""Header text per column. A label two columns share (two "ID"s, or "Status" on
+	the order and on its invoice) is told apart by its DocType: "Supplier ID",
+	"Purchase Invoice ID"; a label still shared after that keeps its field name."""
+	labels = [label or _field_label(dt, key) for dt, key, label in columns]
+	out = []
+	for (dt, key, _label), label in zip(columns, labels, strict=True):
+		if labels.count(label) > 1 and dt:
+			label = f"{dt} {label}"
+		out.append(label)
+	return [f"{h} ({key})" if out.count(h) > 1 else h for (_dt, key, _l), h in zip(columns, out, strict=True)]
