@@ -85,7 +85,7 @@ vi.mock("frappe-ui", async () => ({
 	},
 	DatePicker: {
 		name: "DatePicker",
-		props: ["modelValue", "placeholder", "disabled"],
+		props: ["modelValue", "placeholder", "disabled", "format"],
 		emits: ["update:modelValue"],
 		template: `<button data-testid="date-picker" :disabled="disabled" @click="$emit('update:modelValue', '2026-11-02')">{{ modelValue }}</button>`,
 	},

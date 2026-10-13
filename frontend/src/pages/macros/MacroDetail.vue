@@ -218,20 +218,35 @@
 							v-if="form.schedule_frequency === 'once'"
 							ref="dateField"
 							class="flex-1"
-							role="group"
-							aria-labelledby="macro-schedule-date-label"
 						>
 							<label
-								id="macro-schedule-date-label"
+								for="macro-schedule-date"
 								class="mb-1.5 block text-xs text-ink-gray-5"
 								>Date</label
 							>
+							<!-- The picker's own input takes no id: this one does, so the label
+							     above names it, and it shows the date as people read it. -->
 							<DatePicker
 								:modelValue="form.schedule_date"
+								format="ddd, D MMM YYYY"
 								placeholder="Pick a date"
 								:disabled="saving || armedLocked"
 								@update:modelValue="(v) => (form.schedule_date = v || '')"
-							/>
+							>
+								<template #target="{ togglePopover, displayLabel }">
+									<TextInput
+										id="macro-schedule-date"
+										class="w-full cursor-pointer"
+										readonly
+										:modelValue="displayLabel"
+										placeholder="Pick a date"
+										:disabled="saving || armedLocked"
+										@click="togglePopover()"
+										@keydown.enter.prevent="togglePopover()"
+										@keydown.space.prevent="togglePopover()"
+									/>
+								</template>
+							</DatePicker>
 							<ErrorMessage :message="fieldErrors.schedule_date" class="mt-2" />
 						</div>
 					</div>
@@ -357,6 +372,7 @@ import {
 	ErrorMessage,
 	FormControl,
 	Switch,
+	TextInput,
 	TimePicker,
 	dayjs,
 	toast,
