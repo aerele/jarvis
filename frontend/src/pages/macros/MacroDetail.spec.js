@@ -1921,4 +1921,16 @@ describe("MacroDetail Schedule section: a one-time schedule", () => {
 		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
 		expect(w.text()).not.toContain("Ran once on");
 	});
+
+	it("an older last run, from before the one-time slot, is not called its run", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				schedule_enabled: 0,
+				schedule_frequency: "once",
+				schedule_date: "2026-11-02",
+				last_run_at: "2026-10-01 09:00:02",
+			})
+		);
+		expect(w.text()).not.toContain("Ran once on");
+	});
 });
