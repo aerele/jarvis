@@ -70,6 +70,12 @@ def _json_text(obj) -> str:
 	return json.dumps(obj, default=str, ensure_ascii=False, separators=(",", ":"))
 
 
+def _is_list_page(data: dict) -> bool:
+	"""A list-page-v1 page (get_doc's child_table page), not a document that merely
+	has a field called list_contract."""
+	return data.get("list_contract") == "list-page-v1" and isinstance(data.get("rows"), list)
+
+
 def _find_list(data) -> tuple[str | None, str | None, list | None]:
 	if isinstance(data, list):
 		return "bare", None, data
@@ -175,7 +181,7 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 	if total <= MAX_RESULT_CHARS:
 		return data, None
 
-	if tool == "get_doc" and isinstance(data, dict) and "list_contract" not in data:
+	if tool == "get_doc" and isinstance(data, dict) and not _is_list_page(data):
 		# A document is checked before _find_list: a child table named "rows" or
 		# "result" must not get the row envelope, whose top-level total/note
 		# would overwrite real fields of the same name. A child-table page is a
@@ -184,6 +190,7 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 		from jarvis.tools._doc_budget import bound_get_doc_result
 
 		out, shown, parts = bound_get_doc_result(data, MAX_RESULT_CHARS - _SAFETY)
+		# shown/total count child rows (documents, for a batch), not chars.
 		return out, {"kind": "bounded_document", "original_chars": total, "shown": shown, "total": parts}
 
 	kind, key, rows = _find_list(data)
