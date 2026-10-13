@@ -4,9 +4,9 @@ Spec: ``docs/superpowers/specs/2026-08-16-role-profile-agents-design.md``.
 
 Two independent axes, both curated data (spec §5), never runtime discovery:
 
-* **Tool tier**: the jarvis-plane role decides ``full`` (today's 98 tools)
-  vs ``standard`` (69 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
-  list), 98 in all. Since spec §3's 68/26: the fleet-denied built-ins
+* **Tool tier**: the jarvis-plane role decides ``full`` (today's 99 tools)
+  vs ``standard`` (70 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
+  list), 99 in all. Since spec §3's 68/26: the fleet-denied built-ins
   (``session_status``, native ``memory_get`` / ``memory_search``) moved to the
   drop list, and the MCP connector tools plus the per-user memory tools
   (``jarvis__remember`` / ``jarvis__recall``) joined the allow list.
@@ -82,7 +82,7 @@ STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 	}
 )
 
-# The full 98-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
+# The full 99-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
 # sorted (spec §2 evidence capture: ~/.claude/jobs/bce488ac/tmp/postfix-cap.jsonl,
 # plus jarvis__call_connector / jarvis__list_connector_actions added after the
 # MCP connectors feature landed - a standard-tier user gets both like any other
@@ -117,6 +117,7 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__export_query",
 	"jarvis__find_skills",
 	"jarvis__follow_document",
+	"jarvis__get_comments",
 	"jarvis__get_creation_context",
 	"jarvis__get_doc",
 	"jarvis__get_file_pages",
@@ -163,11 +164,12 @@ _STANDARD_TOOLS_ALLOW = [
 
 
 def standard_tools_allow() -> list[str]:
-	"""The 69-tool allow list for the ``standard`` tier (spec §3 sized 68;
+	"""The 70-tool allow list for the ``standard`` tier (spec §3 sized 68;
 	session_status pulled to the drop list for the fleet-wide white-label deny;
 	the two MCP connector tools added after; memory_get/memory_search pulled to
 	the drop list for the fleet-wide native cross-user memory deny; the per-user
-	bench memory tools remember/recall added so standard-tier memory works)."""
+	bench memory tools remember/recall added so standard-tier memory works;
+	get_comments added as the read side of add_comment)."""
 	return list(_STANDARD_TOOLS_ALLOW)
 
 
