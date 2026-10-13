@@ -6749,8 +6749,23 @@ const canSaveAsMacro = computed(
 			(m) => m.role === "user" && m.content && !m.content.startsWith("▶ Running macro")
 		)
 );
-function saveConversationAsMacro() {
-	const steps = messages.value
+// The macro takes every eligible prompt in the chat. With paged history (#715 F13)
+// the rows on screen may be only the newest pages, so it reads the whole thread
+// first (the unpaged get_conversation, owner-gated like every read of it).
+async function saveConversationAsMacro() {
+	const id = currentId.value;
+	let rows = messages.value;
+	if (id && (historyPaging.value.conv !== id || historyPaging.value.hasMore)) {
+		try {
+			const d = await api.getWholeConversation(id);
+			if (currentId.value !== id) return;
+			rows = d?.messages || [];
+		} catch (e) {
+			notifyActionError("Couldn't read this chat", e);
+			return;
+		}
+	}
+	const steps = rows
 		.filter((m) => m.role === "user" && m.content && !m.content.startsWith("▶ Running macro"))
 		.map((m) => ({ label: "", prompt: m.content }));
 	if (!steps.length) return;
