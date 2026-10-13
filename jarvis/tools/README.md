@@ -653,6 +653,10 @@ Every **mutating** tool call is logged from the `_run_tool` choke-point
 2. Register the name in `jarvis/tools/registry.py` `_TOOL_NAMES`.
 3. If it mutates, add it to `_WRITE_TOOLS` in `jarvis/api.py` (and `_PREVIEWABLE`
    if a dry-run makes sense).
+   A write the user must confirm also goes in `_GATED_WRITES`; one an armed macro,
+   an approved skill or auto mode must never run uncarded goes in `_BRAKE` too, and
+   then in `macros_api._ARM_NOTICE_ASKS` (the arm notice names what still asks).
+   A tool a standard-tier user gets goes in `role_profiles._STANDARD_TOOLS_ALLOW`.
 4. Regenerate the contract artifact from the bench root:
    `env/bin/python -m jarvis.tools._tool_contract --write`. Until you do,
    `test_tool_contract` fails. (A tool that must stay bench-side goes in

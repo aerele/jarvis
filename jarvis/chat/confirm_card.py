@@ -1101,13 +1101,14 @@ def _schedule_card(args: dict) -> dict:
 def _schedule_when(run_at) -> str:
 	"""``run_at`` as people read it, on the site's clock and naming that clock (the
 	time the scheduler fires on): "Tue, 15 Jan 2030 at 9:30 am (Asia/Kolkata)". The
-	raw text when it is not a date and time (the tool then refuses it anyway)."""
-	from frappe.utils import get_datetime, get_system_timezone
+	raw text when it is not a date and time (the tool then refuses it anyway). Read
+	exactly as the tool reads it (``site_datetime``), so an offset is converted the
+	same way on the card and in the run."""
+	from frappe.utils import get_system_timezone
 
-	try:
-		moment = get_datetime(run_at)
-	except Exception:
-		moment = None
+	from jarvis.tools.schedule_run import site_datetime
+
+	moment = site_datetime(run_at)
 	if not moment:
 		return fmt(str(run_at or ""))
 	hour = moment.hour % 12 or 12

@@ -181,9 +181,9 @@ _FREQUENCIES = {"daily", "weekly", "monthly", "once"}
 def _schedule_date_column() -> list[str]:
 	"""``schedule_date`` among the fields read, once the migrate that adds it ran: the
 	code can be served before it, and a missing column fails the whole query."""
-	from jarvis.chat.macro_scheduler import _once_ready
+	from jarvis.chat.macro_scheduler import once_ready
 
-	return ["schedule_date"] if _once_ready() else []
+	return ["schedule_date"] if once_ready() else []
 
 
 # C08-5: ``_lk`` / ``_clamp_page`` / ``_bool01`` / ``_load_filters`` /
@@ -248,10 +248,11 @@ def list_macros_page(
 	order = _order_by(sort_field, sort_dir, _MACROS_SORTABLE, "macro_name", "asc")
 
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params)[0][0]
+	once_columns = "schedule_date, " if _schedule_date_column() else ""
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, macro_name, description, enabled, stop_on_error, skip_confirmation,
 		schedule_enabled, schedule_frequency, schedule_weekday, schedule_day_of_month,
-		schedule_time, {"".join(c + ", " for c in _schedule_date_column())}next_run_at,
+		schedule_time, {once_columns}next_run_at,
 		last_run_at, modified, merge_status,
 		CASE WHEN TRIM(COALESCE(merged_prompt, '')) != '' THEN 1 ELSE 0 END AS has_summary
 		FROM `tabJarvis Macro`
@@ -653,6 +654,10 @@ def _schedule_block_reason(owner: str) -> str:
 			"access to Jarvis. Switch the schedule off to save this macro."
 		).format(owner)
 	return ""
+
+
+# The name other modules use (schedule_run): the rule is this module's.
+schedule_block_reason = _schedule_block_reason
 
 
 # The macro form's two writers. POST only: a GET is not checked for the CSRF token,

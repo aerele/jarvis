@@ -355,6 +355,38 @@ function pluralize(word, n) {
 	return /[^aeiou]y$/i.test(word) ? word.slice(0, -1) + "ies" : word + "s";
 }
 
+// A prompt's start, for a receipt with no name to show: "Check the comments on …".
+function shortPrompt(prompt) {
+	const text = String(prompt || "")
+		.replace(/\s+/g, " ")
+		.trim();
+	return text.length > 40 ? `${text.slice(0, 40).trimEnd()}…` : text;
+}
+
+// "2 Nov 2026, 9:30 am" from a site-time "YYYY-MM-DD HH:MM[:SS]" (read as stored, the
+// clock the run fires on), or "" when it is not one.
+function scheduleWhen(value) {
+	const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})/.exec(String(value || ""));
+	if (!m) return "";
+	const months = [
+		"Jan",
+		"Feb",
+		"Mar",
+		"Apr",
+		"May",
+		"Jun",
+		"Jul",
+		"Aug",
+		"Sep",
+		"Oct",
+		"Nov",
+		"Dec",
+	];
+	const hour = Number(m[4]);
+	const clock = `${hour % 12 || 12}:${m[5]} ${hour < 12 ? "am" : "pm"}`;
+	return `${Number(m[3])} ${months[Number(m[2]) - 1]} ${m[1]}, ${clock}`;
+}
+
 export function docUrl(doctype, name) {
 	if (!doctype || !name) return "";
 	return `/app/${String(doctype).toLowerCase().replace(/ /g, "-")}/${encodeURIComponent(name)}`;
@@ -456,9 +488,11 @@ export function receiptView(tool, args, result, outcome) {
 
 	let subject;
 	if (tool === "schedule_run") {
-		// The macro it made or scheduled, linked to its page in the app.
-		const label = data.macro_name || args.title || args.macro || "the work";
-		subject = `“${label}” to run once`;
+		// The macro it made or scheduled, linked to its page in the app, and when.
+		const label =
+			data.macro_name || args.title || args.macro || shortPrompt(args.prompt) || "the work";
+		const when = scheduleWhen(data.run_at || args.run_at);
+		subject = `“${label}” to run once${when ? ` on ${when}` : ""}`;
 		targets = data.macro
 			? [{ name: data.macro_name || data.macro, url: data.link || "" }]
 			: [];

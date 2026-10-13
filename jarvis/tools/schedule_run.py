@@ -20,8 +20,12 @@ The macro is never armed here, so its own writes still ask when it runs.
 
 from __future__ import annotations
 
+import datetime
+import re
+from zoneinfo import ZoneInfo
+
 import frappe
-from frappe.utils import get_datetime, now_datetime
+from frappe.utils import add_to_date, cint, get_datetime, get_system_timezone, now_datetime
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 
@@ -38,41 +42,74 @@ def schedule_run(
 	"""Schedule ``prompt`` (a new one-time macro) or ``macro`` (an existing one) to
 	run once at ``run_at`` (site time, "YYYY-MM-DD HH:MM").
 
-	Returns ``{macro, macro_name, run_at, link, note}``."""
-	from jarvis.chat.macros_api import _schedule_block_reason
+	Returns ``{macro, macro_name, run_at, link, note}``, plus ``doctype`` / ``name``
+	so the write audit records which macro the confirmed card made or changed."""
+	from jarvis.chat.macro_scheduler import once_ready
+	from jarvis.chat.macros_api import schedule_block_reason
 
+	for arg, value in (("run_at", run_at), ("prompt", prompt), ("title", title), ("macro", macro)):
+		if value is not None and not isinstance(value, str):
+			raise InvalidArgumentError(f"{arg} must be text")
+	if not once_ready():
+		raise InvalidArgumentError(
+			"Scheduling a one-time run is being set up on this site; try again in a few minutes."
+		)
 	prompt = (prompt or "").strip()
 	if bool(prompt) == bool(macro):
 		raise InvalidArgumentError("pass exactly one of prompt (new work) or macro (an existing macro)")
 	slot = _parse_run_at(run_at)
 	user = frappe.session.user
-	blocked = _schedule_block_reason(user)
+	blocked = schedule_block_reason(user)
 	if blocked:
 		raise PermissionDeniedError(blocked)
 	doc = _schedule_existing(macro, slot) if macro else _schedule_new(prompt, title, slot, user)
 	return {
+		"doctype": MACRO,
+		"name": doc.name,
 		"macro": doc.name,
 		"macro_name": doc.macro_name,
 		"run_at": str(doc.next_run_at or slot),
 		"link": f"/jarvis/macros/{doc.name}",
 		"note": (
-			"Scheduled to run once at run_at (site time). It runs as the user, the schedule "
-			"switches itself off afterwards, and the user gets a notification when it finishes. "
-			"Its steps that change records still ask for confirmation when it runs."
+			"Scheduled to run once at run_at (site time); it starts within about 5 minutes of "
+			"that time. It runs as the user, the schedule switches itself off afterwards, and "
+			"the user gets a notification when it finishes. Changes it makes still wait for "
+			"their confirmation in that chat. To cancel or move it: the macro's page (link), "
+			"switch off Run on a schedule or change the date."
 		),
 	}
 
 
-def _parse_run_at(run_at) -> object:
+# A run_at with a time of day: "...T09:30", "... 9:30", "...09:30:00".
+_HAS_TIME = re.compile(r"[T ]\d{1,2}:\d{2}")
+
+
+def site_datetime(value) -> datetime.datetime | None:
+	"""``value`` as a naive datetime on the site's clock (the scheduler's clock), or
+	None when it is not a date and time. One that carries its own offset ("Z",
+	"+05:30") is converted to the site's zone, not read as site time."""
+	try:
+		moment = get_datetime(value)
+	except Exception:
+		return None
+	if moment is not None and moment.tzinfo is not None:
+		moment = moment.astimezone(ZoneInfo(get_system_timezone())).replace(tzinfo=None)
+	return moment
+
+
+def _parse_run_at(run_at) -> datetime.datetime:
+	"""The slot for ``run_at``: site time, to the minute (seconds round up, so a time
+	a few seconds out is not refused as passed)."""
 	if not run_at:
 		raise InvalidArgumentError("run_at is required (site time, YYYY-MM-DD HH:MM)")
-	try:
-		slot = get_datetime(run_at)
-	except Exception:
-		raise InvalidArgumentError(f"run_at must be a date and time, got {run_at!r}") from None
-	if slot is None:
+	if not _HAS_TIME.search(run_at):
+		raise InvalidArgumentError(f"run_at needs a time of day too (YYYY-MM-DD HH:MM), got {run_at!r}")
+	moment = site_datetime(run_at)
+	if moment is None:
 		raise InvalidArgumentError(f"run_at must be a date and time, got {run_at!r}")
-	slot = slot.replace(second=0, microsecond=0)
+	slot = moment.replace(second=0, microsecond=0)
+	if slot < moment:
+		slot = add_to_date(slot, minutes=1)
 	if slot <= now_datetime():
 		raise InvalidArgumentError(
 			f"run_at {slot:%Y-%m-%d %H:%M} has already passed on the site clock; pick a time in the future."
@@ -94,15 +131,18 @@ def _schedule_new(prompt: str, title: str | None, slot, user: str):
 		MAX_MACROS_PER_OWNER,
 		MAX_NAME_LEN,
 		MAX_PROMPT_LEN,
+		macros_counted_toward_cap,
 	)
 
+	# The doctype enforces both limits too; checked here first for a message the
+	# agent can relay as it is.
 	if len(prompt) > MAX_PROMPT_LEN:
 		raise InvalidArgumentError(f"prompt must be at most {MAX_PROMPT_LEN} characters")
-	if frappe.db.count(MACRO, {"owner": user}) >= MAX_MACROS_PER_OWNER:
+	if macros_counted_toward_cap(user) >= MAX_MACROS_PER_OWNER:
 		raise InvalidArgumentError(
-			f"The user already has {MAX_MACROS_PER_OWNER} macros, the most allowed. One-time "
-			"macros that already ran still count: they can delete the ones they no longer need "
-			"on the Macros page, then ask again."
+			f"The user already has {MAX_MACROS_PER_OWNER} macros, the most allowed (one-time ones "
+			"that already ran do not count). They can delete ones they no longer need on the "
+			"Macros page, then ask again."
 		)
 	doc = frappe.get_doc(
 		{
@@ -152,14 +192,14 @@ def _schedule_existing(macro: str, slot):
 	where = "set its schedule on the Macros page instead"
 	if is_held(doc):
 		raise InvalidArgumentError(f"{doc.macro_name} is on hold by an admin, so it cannot be scheduled.")
-	if not frappe.utils.cint(doc.enabled):
+	if not cint(doc.enabled):
 		raise InvalidArgumentError(
 			f"{doc.macro_name} is switched off (a draft), so a scheduled run would be skipped: "
 			"switch it on on the Macros page, then ask again."
 		)
-	if frappe.utils.cint(doc.skip_confirmation):
+	if cint(doc.skip_confirmation):
 		raise InvalidArgumentError(f"{doc.macro_name} is armed (it skips confirmation): {where}.")
-	if frappe.utils.cint(doc.schedule_enabled):
+	if cint(doc.schedule_enabled):
 		raise InvalidArgumentError(
 			f"{doc.macro_name} already has a schedule; running it once would replace it: {where}."
 		)

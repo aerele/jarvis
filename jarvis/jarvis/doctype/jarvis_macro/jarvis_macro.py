@@ -54,6 +54,27 @@ def hold_fields_exist() -> bool:
 	return bool(frappe.get_meta("Jarvis Macro").has_field(HOLD_FIELD))
 
 
+def macros_counted_toward_cap(owner: str) -> int:
+	"""How many of ``owner``'s macros count toward ``MAX_MACROS_PER_OWNER``: all but
+	the one-time macros that already ran (their schedule switched itself off). A
+	reminder set from chat is a one-time macro, and a cap they all counted toward
+	would fill up with spent reminders and refuse the next one, or a real macro."""
+	spent = 0
+	from jarvis.chat.macro_scheduler import once_ready
+
+	if once_ready():
+		spent = frappe.db.count(
+			"Jarvis Macro",
+			{
+				"owner": owner,
+				"schedule_frequency": "once",
+				"schedule_enabled": 0,
+				"last_run_at": ["is", "set"],
+			},
+		)
+	return frappe.db.count("Jarvis Macro", {"owner": owner}) - spent
+
+
 def arm_on_form_only() -> str:
 	return _("Skip confirmation can be switched on only on the macro's own page in Jarvis, by its owner.")
 
@@ -420,7 +441,7 @@ class JarvisMacro(NotRenamable, Document):
 		if not self.is_new():
 			return
 		owner = self.owner or frappe.session.user
-		if frappe.db.count("Jarvis Macro", {"owner": owner}) >= MAX_MACROS_PER_OWNER:
+		if macros_counted_toward_cap(owner) >= MAX_MACROS_PER_OWNER:
 			frappe.throw(_("You can have at most {0} macros.").format(MAX_MACROS_PER_OWNER))
 
 	def _validate_schedule_time(self):
@@ -459,7 +480,7 @@ class JarvisMacro(NotRenamable, Document):
 		Judged only when the schedule is switched on or changed, so saving an
 		unrelated field of a macro whose one-time slot is due but not yet swept still
 		works."""
-		from jarvis.chat.macro_scheduler import ONCE, _once_slot
+		from jarvis.chat.macro_scheduler import ONCE, once_slot
 
 		if not frappe.utils.cint(self.schedule_enabled) or (self.schedule_frequency or "") != ONCE:
 			return
@@ -467,7 +488,7 @@ class JarvisMacro(NotRenamable, Document):
 			frappe.throw(_("Pick the date a one-time schedule runs on."))
 		if not self._schedule_changed():
 			return
-		slot = _once_slot(self.schedule_date, self.schedule_time)
+		slot = once_slot(self.schedule_date, self.schedule_time)
 		if not slot or slot <= frappe.utils.now_datetime():
 			frappe.throw(_("Pick a date and time in the future for a one-time schedule."))
 

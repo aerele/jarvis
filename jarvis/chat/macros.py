@@ -3402,7 +3402,13 @@ def notify_owner(owner: str, *, subject: str, body: str, link: str | None = None
 		).insert(ignore_permissions=True)
 		frappe.db.commit()
 	except Exception:
-		pass
+		# Never raises (see above), but never silent either: for a one-time schedule
+		# this notice is the only word the owner gets. No rollback: the caller's own
+		# writes in this transaction are not this courtesy's to undo.
+		try:
+			frappe.log_error(title="jarvis.macro.notify_owner_failed", message=frappe.get_traceback())
+		except Exception:
+			pass
 
 
 _OWNER_MISMATCH_ERROR = "This run was stopped: its macro and conversation do not belong to one user."
@@ -3628,11 +3634,13 @@ def _announce(run, macro_doc, status: str, error: str = "") -> None:
 	if not error:
 		# A one-time schedule is usually something the owner asked to be done or
 		# reminded of at a moment: that it ran is the news, so it is told too.
-		if status == "completed" and str(macro_doc.get("schedule_frequency") or "") == "once":
+		from jarvis.chat.macro_scheduler import is_once
+
+		if status == "completed" and is_once(macro_doc):
 			notify_owner(
 				macro_doc.owner,
-				subject=f"One-time macro finished: {macro_doc.macro_name}",
-				body="It ran as scheduled. Open the conversation to see what it did.",
+				subject=f"Your scheduled run finished: {macro_doc.macro_name}",
+				body="It ran at the time you set. Open the conversation to see what it found or did.",
 				link=f"/jarvis/c/{run.conversation}" if run.get("conversation") else None,
 			)
 		return
