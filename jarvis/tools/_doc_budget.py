@@ -55,7 +55,7 @@ def bound_get_doc_result(data: dict, budget: int) -> tuple[dict, int, int]:
 	"""``(bounded result, parts shown, parts total)`` for an over-budget get_doc
 	result: rows of one document, or documents of a batch."""
 	tables = _table_fieldnames(data.get("doctype"))
-	if isinstance(data.get("docs"), list):
+	if _is_batch(data):
 		out, shown, total = _bound_batch(data, tables, budget)
 	else:
 		out, shown, total = _DocumentCut(data, tables).within(budget)
@@ -190,6 +190,19 @@ class _DocumentCut:
 		if self.identity:
 			entry["next_call"] = _call({**self.identity, "fields": [field], "text_offset": cap})
 		return entry
+
+
+def _is_batch(data: dict) -> bool:
+	"""get_doc's batch envelope, exactly: doctype, docs and count. A document always
+	has a name, so one with a field or child table called docs is never a batch."""
+	docs = data.get("docs")
+	return (
+		set(data) == {"doctype", "docs", "count"}
+		and isinstance(docs, list)
+		and bool(docs)
+		and data["count"] == len(docs)
+		and all(isinstance(d, dict) for d in docs)
+	)
 
 
 def _bound_batch(data: dict, tables: frozenset, budget: int) -> tuple[dict, int, int]:

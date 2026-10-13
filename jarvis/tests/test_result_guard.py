@@ -394,6 +394,18 @@ class TestDocumentBudget(unittest.TestCase):
 		)
 		self.assertEqual((ev["shown"], ev["total"]), (shown, 6))
 
+	def test_a_document_with_a_docs_field_is_not_a_batch(self):
+		# Codex on #1964: any list under "docs" took the batch path, so an empty
+		# one raised IndexError and a full one was cut as documents.
+		for docs in ([], [{"name": f"d{i}", "blob": "d" * 100} for i in range(50)]):
+			with self.subTest(rows=len(docs)):
+				data = {"name": "X-1", "doctype": "Odd", "docs": docs, "content": "x" * 50_000}
+				out, _ = self.bound(data)
+				self.assertEqual(out["name"], "X-1")
+				self.assertNotIn("count", out)
+				self.assertNotIn("docs", out["_partial"])
+				self.assertIn("content", out["_partial"]["text_fields"])
+
 	def test_batch_whose_first_document_alone_is_too_big_cuts_that_document(self):
 		docs = [_doc(name="SINV-A"), _doc(rows=2, terms=10, name="SINV-B")]
 		out, _ = self.bound({"doctype": "Sales Invoice", "docs": docs, "count": 2})
