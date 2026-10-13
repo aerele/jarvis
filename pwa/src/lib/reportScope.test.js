@@ -44,19 +44,26 @@ test("each answer gets only the receipts of its own tool calls", () => {
 		receipt("t2", "c2", { company: "Globex", currency: "USD" }),
 	];
 	const by = reportToolsByAssistant(messages);
-	assert.deepEqual(reportScopes(by.a1).map((s) => [s.id, s.company, s.currency]), [
-		["t1", "Acme", "INR"],
-	]);
-	assert.deepEqual(reportScopes(by.a2).map((s) => [s.id, s.company, s.currency]), [
-		["t2", "Globex", "USD"],
-	]);
+	assert.deepEqual(
+		reportScopes(by.a1).map((s) => [s.id, s.company, s.currency]),
+		[["t1", "Acme", "INR"]]
+	);
+	assert.deepEqual(
+		reportScopes(by.a2).map((s) => [s.id, s.company, s.currency]),
+		[["t2", "Globex", "USD"]]
+	);
 });
 
 test("a refused report and prose naming a company show no scope", () => {
 	const refused = receipt("t1", "c1");
 	refused.tool_result = JSON.stringify({ ok: false, error: { code: "PermissionError" } });
 	const messages = [
-		{ name: "a1", role: "assistant", content: "Acme, INR, as of 2026-09-24", tool_call_ids: ["c1"] },
+		{
+			name: "a1",
+			role: "assistant",
+			content: "Acme, INR, as of 2026-09-24",
+			tool_call_ids: ["c1"],
+		},
 		refused,
 	];
 	assert.deepEqual(reportScopes(reportToolsByAssistant(messages).a1), []);
@@ -66,7 +73,11 @@ test("mixed currencies and stale prepared reports keep their visible differences
 	const mixed = receipt("t1", "c1", { currencies: ["INR", "USD"] });
 	const prepared = receipt("t2", "c1");
 	const data = JSON.parse(prepared.tool_result);
-	Object.assign(data.data, { prepared_report: true, status: "ready", as_of: "2026-09-20 08:00:00" });
+	Object.assign(data.data, {
+		prepared_report: true,
+		status: "ready",
+		as_of: "2026-09-20 08:00:00",
+	});
 	prepared.tool_result = JSON.stringify(data);
 	const out = reportScopes([mixed, prepared]);
 	assert.equal(out[0].currency, "INR, USD");

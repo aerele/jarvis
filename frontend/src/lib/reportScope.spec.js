@@ -72,11 +72,17 @@ describe("reportScopes from receipts", () => {
 	});
 	it("separates a prepared report's generation time from its as-of date", () => {
 		const [s] = reportScopes([
-			run("t1", {}, { prepared_report: true, status: "ready", as_of: "2026-09-20 08:00:00" }),
+			run(
+				"t1",
+				{},
+				{ prepared_report: true, status: "ready", as_of: "2026-09-20 08:00:00" }
+			),
 		]);
 		expect(s.report_date).toBe("2026-09-24");
 		expect(s.generated_at).toBe("2026-09-20 08:00:00");
-		const [unknown] = reportScopes([run("t2", {}, { prepared_report: true, status: "ready" })]);
+		const [unknown] = reportScopes([
+			run("t2", {}, { prepared_report: true, status: "ready" }),
+		]);
 		expect(unknown.generated_at).toBe("Unknown");
 	});
 	it("shows nothing for a permission-refused or failed report", () => {
