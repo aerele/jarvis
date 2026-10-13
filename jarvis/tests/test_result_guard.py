@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from jarvis.tools._doc_parts import DocPart
 from jarvis.tools._result_guard import MAX_RESULT_CHARS, enforce_result_budget
 
 
@@ -244,6 +245,7 @@ class TestDocumentBudget(unittest.TestCase):
 		shown = partial["child_tables"]["items"]["returned"]
 		self.assertGreater(shown, 0)
 		self.assertEqual(out["items"], data["items"][:shown])  # whole rows, in order
+		limit = partial["child_tables"]["items"]["next_call"]["args"]["limit"]
 		self.assertEqual(
 			partial["child_tables"]["items"],
 			{
@@ -258,10 +260,15 @@ class TestDocumentBudget(unittest.TestCase):
 						"name": "SINV-0001",
 						"child_table": "items",
 						"start": shown,
+						"limit": limit,
 					},
 				},
 			},
 		)
+		# The limit is as many rows as one page carries uncut, and no more.
+		room = MAX_RESULT_CHARS - 1_000
+		self.assertLessEqual(_size(data["items"][shown : shown + limit]), room)
+		self.assertGreater(_size(data["items"][shown : shown + limit + 1]), room)
 		self.assertNotIn("taxes", partial["child_tables"])
 		self.assertTrue(out["terms"].startswith("T" * 2000))
 		self.assertIn("[TRUNCATED", out["terms"])
@@ -339,6 +346,26 @@ class TestDocumentBudget(unittest.TestCase):
 		self.assertNotIn("child_table", entry["next_call"]["args"])
 		self.assertTrue(out["tags"].startswith(json.dumps(data["tags"], separators=(",", ":"))[:2000]))
 		self.assertEqual(out["items"], data["items"])
+
+	def test_a_table_that_keeps_no_rows_points_at_a_page_that_fits(self):
+		data = _doc(rows=40, terms=10)
+		for row in data["items"]:
+			row["blob"] = "r" * 10_000
+		data.update({f"f{i}": 1234567.5 for i in range(1500)})  # header fills most of the budget
+		out, _ = self.bound(data)
+		entry = out["_partial"]["child_tables"]["items"]
+		self.assertEqual((entry["returned"], out["items"]), (0, []))
+		args = entry["next_call"]["args"]
+		self.assertEqual((args["start"], args["limit"]), (0, 3))  # three 10K rows fit, four do not
+		page = DocPart(None, args["child_table"], args["start"], args["limit"]).of(data)
+		self.assertIsNone(enforce_result_budget(page, tool="get_doc")[1])  # reaches the model uncut
+		self.assertEqual(page["rows"], data["items"][:3])
+
+	def test_a_field_called_list_contract_does_not_skip_the_budget(self):
+		for value in ("anything", "list-page-v1"):
+			data = {"name": "N-1", "doctype": "Note", "list_contract": value, "content": "x" * 100_000}
+			out, _ = self.bound(data)
+			self.assertEqual(out["list_contract"], value)
 
 	def test_too_many_fields_lists_their_names(self):
 		data = {"name": "B-1", "doctype": "Sales Invoice", **{f"f{i}": 123456.75 for i in range(4000)}}
