@@ -9,7 +9,7 @@ on this site's queue. ``deliver`` and ``retry_due`` are called directly instead.
 
 import json
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import frappe
 
@@ -22,16 +22,19 @@ from jarvis.chat.feedback import (
 	submit_session_feedback,
 )
 from jarvis.exceptions import (
+	AdminAuthError,
 	AdminContractError,
 	AdminRateLimitedError,
 	AdminUnreachableError,
+	AdminValidationError,
 )
 from jarvis.tests.test_chat_feedback import TEST_USER, _add_msg, _FeedbackTestCase
 
 OUTBOX = "Jarvis Feedback Outbox"
 _PUSH = "jarvis.admin_client.push_chat_feedback"
-#: The real function, captured before the fixture patches it out.
+#: The real functions, captured before the fixture patches them out.
 _REAL_ENQUEUE = outbox._enqueue_delivery
+_REAL_CONFIGURED = outbox._admin_configured
 #: Free text longer than every per-field cap (1000), so the callers clip it.
 _TAMIL = "நன்றி தமிழ் " * 200
 _HINDI = "धन्यवाद हिन्दी " * 200
@@ -155,21 +158,28 @@ class TestAccept(_OutboxTestCase):
 
 
 class TestEnqueue(_OutboxTestCase):
-	def test_delivery_is_queued_after_commit_and_deduplicated_per_row(self):
+	def test_delivery_is_queued_after_commit_and_deduplicated_per_revision(self):
 		with patch("frappe.enqueue") as enqueue:
-			_REAL_ENQUEUE("Reply-abc")
+			_REAL_ENQUEUE("Reply-abc", 3)
 		enqueue.assert_called_once_with(
 			"jarvis.chat.feedback_outbox.deliver",
 			queue="short",
-			job_id="jarvis-feedback-outbox::Reply-abc",
+			job_id="jarvis-feedback-outbox::Reply-abc::3",
 			deduplicate=True,
 			enqueue_after_commit=True,
 			name="Reply-abc",
 		)
 
+	def test_a_newer_answer_gets_its_own_job(self):
+		# A job still queued or running for the older answer must not swallow the
+		# newer one's enqueue: the job id carries the revision.
+		submit_feedback(message_id=self.msg, rating="up")
+		submit_feedback(message_id=self.msg, rating="down", note="changed")
+		self.assertEqual(self.enqueue.call_args_list, [call(self._name(), 1), call(self._name(), 2)])
+
 	def test_a_queue_failure_never_loses_the_stored_answer(self):
 		with patch("frappe.enqueue", side_effect=ConnectionError("redis down")):
-			_REAL_ENQUEUE("Reply-abc")  # must not raise: the sweep sends the row instead
+			_REAL_ENQUEUE("Reply-abc", 1)  # must not raise: the sweep sends the row instead
 
 
 class TestDelivery(_OutboxTestCase):
@@ -243,6 +253,58 @@ class TestDelivery(_OutboxTestCase):
 			outbox.deliver(self._name())
 		push.assert_not_called()
 
+	def test_admin_refusing_this_benchs_credentials_spends_no_attempt(self):
+		submit_feedback(message_id=self.msg, rating="up")
+		for status in (401, 403):
+			with self.subTest(status=status):
+				refused = AdminAuthError("not onboarded", status_code=status)
+				frappe.db.set_value(OUTBOX, self._name(), {"next_retry_at": None, "last_error": ""})
+				with patch(_PUSH, side_effect=refused):
+					outbox.deliver(self._name())
+				row = self._row()
+				self.assertEqual((row.status, row.attempts), ("Pending", 0))
+				self._assert_near(row.next_retry_at, _now() + timedelta(seconds=outbox.AUTH_DEFER_SECONDS))
+				with patch(_PUSH) as push:
+					outbox.deliver(self._name())
+				push.assert_not_called()
+		# Credentials fixed: the waiting row goes out on the next sweep.
+		self._make_due()
+		with patch(_PUSH) as push:
+			outbox.retry_due()
+		push.assert_called_once()
+		self.assertEqual(self._row().status, "Delivered")
+
+	def test_only_admins_own_payload_validators_are_final(self):
+		cases = [
+			(AdminContractError("bad item", code="InvalidChatFeedback", http_status=400), "Failed"),
+			(AdminContractError("bad item", code="InvalidFeedbackResponse", http_status=400), "Failed"),
+			(AdminContractError("not json", code="InvalidArgument", http_status=400), "Failed"),
+			(AdminValidationError("row changed", exc_type="TimestampMismatchError"), "Pending"),
+			(AdminValidationError("deadlock", exc_type="QueryDeadlockError"), "Pending"),
+			(AdminValidationError("exists", exc_type="DuplicateEntryError"), "Pending"),
+			(AdminValidationError("something else", exc_type="ValidationError"), "Pending"),
+			(AdminContractError("busy", code="NoRunningTenant", http_status=409), "Pending"),
+		]
+		submit_feedback(message_id=self.msg, rating="up")
+		for error, status in cases:
+			with self.subTest(error=str(error), exc_type=error.exc_type):
+				frappe.db.set_value(
+					OUTBOX,
+					self._name(),
+					{"status": "Pending", "attempts": 0, "next_retry_at": None, "last_error": ""},
+				)
+				with patch(_PUSH, side_effect=error):
+					outbox.deliver(self._name())
+				row = self._row()
+				self.assertEqual((row.status, row.attempts), (status, 1))
+
+	def test_the_give_up_window_is_about_a_week(self):
+		waited = sum(outbox._backoff_minutes(n) for n in range(1, outbox.MAX_ATTEMPTS))
+		self.assertGreater(waited, 6.5 * 24 * 60)
+		self.assertLess(waited, 7.5 * 24 * 60)
+		self.assertLess(waited, outbox.UNDELIVERED_RETENTION_DAYS * 24 * 60 / 2)
+		self.assertEqual(outbox._backoff_minutes(outbox.MAX_ATTEMPTS), outbox.BACKOFF_MINUTES[-1])
+
 	def test_gives_up_after_max_attempts(self):
 		submit_feedback(message_id=self.msg, rating="down", note="private words")
 		frappe.db.set_value(OUTBOX, self._name(), "attempts", outbox.MAX_ATTEMPTS - 1)
@@ -314,6 +376,51 @@ class TestDelivery(_OutboxTestCase):
 		self.assertEqual(row.status, "Failed")
 		self.assertIsNone(row.next_retry_at)
 		self.log_error.assert_not_called()
+
+	def test_a_bench_with_a_url_but_no_credentials_sends_nothing(self):
+		submit_feedback(message_id=self.msg, rating="up")
+		self._make_due()
+		with (
+			patch("jarvis.chat.usage_push._admin_configured", return_value=True),
+			patch("jarvis.admin_client.has_credentials", return_value=False),
+			patch("jarvis.chat.feedback_outbox._admin_configured", _REAL_CONFIGURED),
+			patch(_PUSH) as push,
+		):
+			self.assertFalse(outbox._admin_configured())
+			outbox.deliver(self._name())
+			outbox.retry_due()
+		push.assert_not_called()
+		row = self._row()
+		self.assertEqual((row.status, row.attempts), ("Pending", 0))
+		self.assertFalse(row.last_error, "nothing was attempted, so nothing failed")
+
+	def test_has_credentials_needs_a_full_set(self):
+		class _Settings:
+			def __init__(self, email="", password="", key="", secret=""):
+				self.jarvis_admin_customer_email = email
+				self._secrets = {
+					"jarvis_admin_customer_password": password,
+					"jarvis_admin_api_key": key,
+					"jarvis_admin_api_secret": secret,
+				}
+
+			def get_password(self, field, raise_exception=True):
+				return self._secrets[field]
+
+		from jarvis import admin_client
+
+		cases = [
+			(_Settings(), False),
+			(_Settings(email="a@x"), False),
+			(_Settings(password="pw"), False),
+			(_Settings(key="k"), False),
+			(_Settings(email="a@x", password="pw"), True),
+			(_Settings(key="k", secret="s"), True),
+		]
+		for settings, expected in cases:
+			with self.subTest(expected=expected, secrets=settings._secrets):
+				with patch("frappe.get_cached_doc", return_value=settings):
+					self.assertIs(admin_client.has_credentials(), expected)
 
 	def test_a_bench_that_is_not_onboarded_sends_nothing(self):
 		submit_feedback(message_id=self.msg, rating="up")
@@ -494,6 +601,10 @@ class TestPrune(_OutboxTestCase):
 		survivors = frappe.db.count(OUTBOX) - 2
 		with patch.object(outbox, "MAX_ROWS", survivors - 1):
 			outbox.prune()
+		self.log_error.assert_called_once()
+		logged = self.log_error.call_args.kwargs
+		self.assertEqual(logged["title"], "Feedback outbox: undelivered feedback dropped")
+		self.assertTrue(logged["message"].startswith("2 undelivered answers dropped: 1 with no activity"))
 		names = (old_delivered, fresh_delivered, old_failed, fresh_pending, oldest_pending)
 		self.assertEqual(
 			{n: bool(frappe.db.exists(OUTBOX, n)) for n in names},
@@ -505,3 +616,20 @@ class TestPrune(_OutboxTestCase):
 				oldest_pending: False,
 			},
 		)
+
+	def test_the_ceiling_is_trimmed_in_chunks(self):
+		names = [self._stored(f"chunk-{i}", modified=_now() - timedelta(days=20 - i)) for i in range(3)]
+		with (
+			patch.object(outbox, "MAX_ROWS", frappe.db.count(OUTBOX) - 2),
+			patch.object(outbox, "_PRUNE_CHUNK", 1),
+			patch("frappe.db.delete", wraps=frappe.db.delete) as delete,
+		):
+			outbox.prune()
+		chunked = [c for c in delete.call_args_list if "name" in (c.args[1] if len(c.args) > 1 else {})]
+		self.assertEqual(len(chunked), 2, "two deletes of one row each")
+		self.assertEqual([bool(frappe.db.exists(OUTBOX, n)) for n in names], [False, False, True])
+
+	def test_nothing_dropped_logs_nothing(self):
+		self._stored("quiet-a")
+		outbox.prune()
+		self.log_error.assert_not_called()

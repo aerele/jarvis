@@ -2642,6 +2642,17 @@ def _has_legacy_credentials(settings) -> bool:
 	return all(_legacy_credentials(settings))
 
 
+def has_credentials() -> bool:
+	"""True when this bench holds a credential set ``_post`` can sign in with: the
+	OAuth customer email and password, or the legacy api_key and api_secret.
+	Without either, ``_post`` raises AdminAuthError("not onboarded"). A local read,
+	no network: background senders use it to skip a push rather than fail it."""
+	settings = frappe.get_cached_doc("Jarvis Settings")
+	username = (settings.jarvis_admin_customer_email or "").strip()
+	password = (settings.get_password("jarvis_admin_customer_password", raise_exception=False) or "").strip()
+	return bool(username and password) or _has_legacy_credentials(settings)
+
+
 def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	"""Authenticated POST. Prefers a short-lived OAuth bearer token (password
 	grant, cached in Redis) and falls back to the legacy native

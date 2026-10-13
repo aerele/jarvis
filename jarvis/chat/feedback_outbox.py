@@ -13,7 +13,10 @@ A later answer for the same identity, such as the note that follows a thumbs
 down, REPLACES the row's payload, the same fold admin applies on its side.
 
 States: ``Pending`` (stored, admin has not acknowledged it) -> ``Delivered``, or
-``Failed`` (admin refused the payload, or ``MAX_ATTEMPTS`` transient failures).
+``Failed`` (admin's validator refused the payload, or ``MAX_ATTEMPTS`` transient
+failures over about a week). A bench without admin credentials, or one admin
+refuses to authenticate, sends nothing and burns no attempt: its rows wait, so a
+credential fix delivers the backlog.
 Every new answer bumps ``revision`` and restarts the row as a fresh Pending, and a
 delivery marks the row Delivered only while the revision it sent is current.
 
@@ -21,7 +24,8 @@ Bounds and privacy: the payload is exactly the item admin's ingest takes (never
 the reply text; notes are already clipped by the caller), it sits at permlevel 1
 so Desk shows delivery state without the answer itself, and ``prune`` deletes
 delivered rows after ``DELIVERED_RETENTION_DAYS``, undelivered ones after
-``UNDELIVERED_RETENTION_DAYS`` and the oldest rows above ``MAX_ROWS``.
+``UNDELIVERED_RETENTION_DAYS`` and the oldest rows above ``MAX_ROWS``, logging
+how many undelivered answers it dropped.
 
 Idempotency: admin upserts every kind on a natural key ((tenant, message_ref),
 (tenant, session_ref), (tenant, period_key, user_ref)), so a re-send after an
@@ -45,7 +49,6 @@ import frappe
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
-	AdminRejectedError,
 	AdminUnreachableError,
 	AdminValidationError,
 )
@@ -55,22 +58,30 @@ KINDS = ("Reply", "Session", "Pulse")
 PENDING, DELIVERED, FAILED = "Pending", "Delivered", "Failed"
 
 #: Transient failures before a row is given up as Failed. With the backoff below
-#: that spans about a day and a half of admin outage.
-MAX_ATTEMPTS = 10
-#: Wait after the Nth failed attempt (the last value repeats). The sweep runs
+#: the last attempt comes about seven days after the first: long enough for a real
+#: admin outage or a tenant re-provision (409 NoRunningTenant), and well inside
+#: UNDELIVERED_RETENTION_DAYS.
+MAX_ATTEMPTS = 32
+#: Wait after the Nth failed attempt; the last value repeats. The sweep runs
 #: every five minutes, so nothing shorter is meaningful.
 BACKOFF_MINUTES = (5, 15, 60, 180, 360)
+#: Wait after admin refuses this bench's credentials (401/403). Not an attempt:
+#: the payload is fine, and a credential fix later must still deliver it.
+AUTH_DEFER_SECONDS = 3600
 #: How long the sweep leaves a fresh row to the job queued for it at accept time.
 FIRST_JOB_GRACE_SECONDS = 120
 #: Rows one sweep may send. Admin's ingest allows 120 pushes per tenant per hour
-#: and counts refused ones too; 10 every 5 minutes stays inside that.
-SWEEP_BATCH = 10
+#: per kind and counts refused ones too. 6 every 5 minutes is 72 an hour, which
+#: leaves the rest of that bucket to fresh taps while a backlog drains.
+SWEEP_BATCH = 6
 #: Floor on a rate-limit deferral when admin sends no usable retry_after.
 MIN_RATE_LIMIT_DEFER_SECONDS = 60
 DELIVERED_RETENTION_DAYS = 7
 UNDELIVERED_RETENTION_DAYS = 30
 #: Hard ceiling on the table between daily prunes; the oldest rows beyond it go.
 MAX_ROWS = 5000
+#: Rows one DELETE removes when trimming to the ceiling.
+_PRUNE_CHUNK = 500
 #: Backstop on one payload, counted in the characters of its own text (keys and
 #: values, see ``_content_chars``), never in its JSON encoding: escaping can turn
 #: one character into six (a control character becomes a \u escape), and this
@@ -80,9 +91,12 @@ MAX_ROWS = 5000
 #: admin bound, is under 3,200 characters. Anything near this is a bug.
 MAX_PAYLOAD_CHARS = 8000
 _MAX_ERROR = 200
-#: Admin contract codes on a 4xx that mean "not now" rather than "never": the
-#: tenant is being re-provisioned and will be Running again.
-_RETRYABLE_CODES = frozenset({"NoRunningTenant"})
+#: Admin contract codes for its own validators refusing the payload itself (a
+#: malformed item, or one that is not JSON). Re-sending the same payload can never
+#: pass, so these alone fail a row at once. Every other 4xx is retried: a 409
+#: NoRunningTenant, and a concurrency error such as TimestampMismatchError or
+#: DuplicateEntryError from two writes racing on the same admin row, pass later.
+_PAYLOAD_REJECTION_CODES = frozenset({"InvalidChatFeedback", "InvalidFeedbackResponse", "InvalidArgument"})
 _LOG_THROTTLE_KEY = "jarvis_feedback_outbox_last_log_hour"
 _ROW_FIELDS = ["name", "kind", "payload", "status", "attempts", "revision", "next_retry_at", "last_error"]
 
@@ -90,7 +104,7 @@ _ROW_FIELDS = ["name", "kind", "payload", "status", "attempts", "revision", "nex
 class _Outcome(NamedTuple):
 	"""What one push did. ``kind`` is ``delivered``, ``rejected`` (admin will never
 	take this payload), ``retry`` (transient, counts an attempt) or ``deferred``
-	(rate limited, does not)."""
+	(rate limited, or this bench's credentials refused: does not)."""
 
 	kind: str
 	error: str = ""
@@ -124,7 +138,9 @@ def accept(kind: str, ref: str, payload: dict) -> str:
 	# A plain existence read first, not an UPDATE: an UPDATE that matches nothing
 	# takes a gap lock, and two first taps holding the same gap would deadlock on
 	# their inserts.
-	if not (frappe.db.exists(DT, name) and _replace(name, body, due)):
+	revision = _replace(name, body, due) if frappe.db.exists(DT, name) else None
+	if revision is None:
+		revision = 1
 		try:
 			frappe.get_doc(
 				{
@@ -141,14 +157,14 @@ def accept(kind: str, ref: str, payload: dict) -> str:
 			).insert(ignore_permissions=True)
 		except frappe.DuplicateEntryError:
 			# A second tap on the same reply won the insert; take its row over.
-			_replace(name, body, due)
-	_enqueue_delivery(name)
+			revision = _replace(name, body, due) or revision
+	_enqueue_delivery(name, revision)
 	return name
 
 
-def _replace(name: str, body: str, due) -> bool:
-	"""Put a new answer on an existing row and restart it as Pending. True if the
-	row was there to update."""
+def _replace(name: str, body: str, due) -> int | None:
+	"""Put a new answer on an existing row and restart it as Pending. Returns the
+	row's new revision, or None if there was no row to update."""
 	t = frappe.qb.DocType(DT)
 	(
 		frappe.qb.update(t)
@@ -162,13 +178,17 @@ def _replace(name: str, body: str, due) -> bool:
 		.set(t.modified, frappe.utils.now_datetime())
 		.where(t.name == name)
 	).run()
-	return _affected() == 1
+	if _affected() != 1:
+		return None
+	return frappe.db.get_value(DT, name, "revision")
 
 
-def _enqueue_delivery(name: str) -> None:
-	"""Queue ``deliver`` for after the commit. Deduplicated per row, so a job
-	already queued or running for this row is not doubled: two pushes of the same
-	row in flight could land at admin in the wrong order.
+def _enqueue_delivery(name: str, revision: int) -> None:
+	"""Queue ``deliver`` for after the commit, deduplicated per row AND revision:
+	a repeat for the same answer is not doubled, while a newer answer gets its own
+	job even if one for the older answer is still queued or running. Two jobs on
+	one row are safe: each records only onto the revision it sent, and ``_record``
+	re-sends when an older push may have reached admin last.
 
 	Never raises. The queue is checked here, inside the request, and a Redis
 	hiccup must not roll back an answer that is otherwise stored; the sweep
@@ -177,7 +197,7 @@ def _enqueue_delivery(name: str) -> None:
 		frappe.enqueue(
 			"jarvis.chat.feedback_outbox.deliver",
 			queue="short",
-			job_id=f"jarvis-feedback-outbox::{name}",
+			job_id=f"jarvis-feedback-outbox::{name}::{revision}",
 			deduplicate=True,
 			enqueue_after_commit=True,
 			name=name,
@@ -198,8 +218,8 @@ def deliver(name: str) -> None:
 	row = frappe.db.get_value(DT, name, _ROW_FIELDS, as_dict=True)
 	if not row or row.status != PENDING:
 		return
-	# A row that already failed or was rate limited waits out its retry time; the
-	# sweep owns it then. A freshly accepted row (no attempt, no error yet) goes at
+	# A row that already failed, was rate limited or had this bench's credentials
+	# refused waits out its retry time; the sweep owns it then. A freshly accepted row (no attempt, no error yet) goes at
 	# once: its retry time is only the grace the sweep gives this job.
 	waiting = row.next_retry_at and row.next_retry_at > frappe.utils.now_datetime()
 	if waiting and (row.attempts or row.last_error):
@@ -248,19 +268,21 @@ def _push(row) -> _Outcome:
 	except AdminRateLimitedError as e:
 		wait = max(int(e.retry_after_seconds or 0), MIN_RATE_LIMIT_DEFER_SECONDS)
 		return _Outcome("deferred", "admin rate limit", wait)
+	except AdminAuthError as e:
+		# This bench's credentials, not the payload: wait for a fix without
+		# spending the row's attempts.
+		return _Outcome("deferred", str(e) or "admin refused this bench's credentials", AUTH_DEFER_SECONDS)
 	except AdminValidationError as e:
-		# A 4xx from admin. Most mean this payload can never be accepted; a tenant
-		# that is mid re-provision (409) or a lost insert race (DuplicateEntryError,
-		# the row now exists and the next upsert folds onto it) will pass later.
-		if getattr(e, "code", "") in _RETRYABLE_CODES or e.exc_type == "DuplicateEntryError":
-			return _Outcome("retry", str(e))
-		return _Outcome("rejected", str(e))
-	except AdminRejectedError as e:
-		# Before AdminUnreachableError, its base: admin answered and refused for good.
-		return _Outcome("rejected", str(e))
-	except (AdminAuthError, AdminUnreachableError) as e:
-		# Network, timeout, 5xx, or a credential admin may accept again. Ingest is
-		# idempotent, so a send that may already have landed is safe to repeat.
+		# A 4xx from admin. Only its own validators refusing the payload are final;
+		# see _PAYLOAD_REJECTION_CODES for what else a 4xx can be.
+		if getattr(e, "code", "") in _PAYLOAD_REJECTION_CODES:
+			return _Outcome("rejected", str(e))
+		return _Outcome("retry", str(e))
+	except AdminUnreachableError as e:
+		# Network, timeout, 5xx (AdminRejectedError included: nothing in feedback
+		# ingest raises a permanent fleet code, so it is not trusted as final here).
+		# Ingest is idempotent, so a send that may already have landed is safe to
+		# repeat.
 		return _Outcome("retry", str(e))
 	except Exception as e:
 		_log_unexpected_throttled()
@@ -283,7 +305,11 @@ def _record(row, outcome: _Outcome) -> None:
 	newer answer saved meanwhile keeps its own fresh Pending state."""
 	t = frappe.qb.DocType(DT)
 	now = frappe.utils.now_datetime()
-	query = frappe.qb.update(t).set(t.modified, now)
+	query = frappe.qb.update(t)
+	if outcome.kind != "deferred":
+		# A deferral is not activity on the row: leaving ``modified`` alone lets an
+		# answer that waits on credentials forever still age out in ``prune``.
+		query = query.set(t.modified, now)
 	terminal = False
 	if outcome.kind == "delivered":
 		query = (
@@ -346,32 +372,50 @@ def _backoff_minutes(attempts: int) -> int:
 
 def prune() -> None:
 	"""Daily: keep the outbox bounded. Deletes delivered rows past their
-	retention, undelivered rows nobody has touched in a long time (admin has been
-	unreachable that long, or this bench is not onboarded), then the oldest rows
-	above ``MAX_ROWS``. Admin holds the durable copy of everything delivered."""
+	retention, undelivered rows with no activity in a long time (admin unreachable
+	or refusing this bench that long, or the bench never onboarded), then the
+	oldest rows above ``MAX_ROWS``, in chunks. Admin holds the durable copy of
+	everything delivered; an undelivered answer is gone for good, so every run
+	that drops any logs one line saying how many."""
 	now = frappe.utils.now_datetime()
 	frappe.db.delete(
 		DT,
 		{"status": DELIVERED, "delivered_at": ["<", frappe.utils.add_days(now, -DELIVERED_RETENTION_DAYS)]},
 	)
-	frappe.db.delete(
-		DT,
-		{
-			"status": ["!=", DELIVERED],
-			"modified": ["<", frappe.utils.add_days(now, -UNDELIVERED_RETENTION_DAYS)],
-		},
-	)
+	stale = {
+		"status": ["!=", DELIVERED],
+		"modified": ["<", frappe.utils.add_days(now, -UNDELIVERED_RETENTION_DAYS)],
+	}
+	expired = frappe.db.count(DT, stale)
+	if expired:
+		frappe.db.delete(DT, stale)
+	trimmed = 0
 	overflow = frappe.db.count(DT) - MAX_ROWS
-	if overflow > 0:
+	while overflow > 0:
 		# Scheduler context: no session user whose permissions could apply.
-		oldest = frappe.get_all(DT, order_by="modified asc", limit=overflow, pluck="name")
-		frappe.db.delete(DT, {"name": ["in", oldest]})
+		oldest = frappe.get_all(
+			DT, fields=["name", "status"], order_by="modified asc", limit=min(overflow, _PRUNE_CHUNK)
+		)
+		if not oldest:
+			break
+		frappe.db.delete(DT, {"name": ["in", [r.name for r in oldest]]})
+		trimmed += sum(1 for r in oldest if r.status != DELIVERED)
+		overflow -= len(oldest)
+	if expired or trimmed:
+		frappe.log_error(
+			title="Feedback outbox: undelivered feedback dropped",
+			message=f"{expired + trimmed} undelivered answers dropped: {expired} with no activity for "
+			f"{UNDELIVERED_RETENTION_DAYS} days, {trimmed} over the {MAX_ROWS}-row ceiling",
+		)
 
 
 def _admin_configured() -> bool:
-	from jarvis.chat.usage_push import _admin_configured as configured
+	"""An admin URL and a credential set the admin client can sign in with. A
+	bench missing either sends nothing and spends no attempt; its rows wait."""
+	from jarvis import admin_client
+	from jarvis.chat.usage_push import _admin_configured as url_configured
 
-	return configured()
+	return url_configured() and admin_client.has_credentials()
 
 
 def _affected() -> int:
