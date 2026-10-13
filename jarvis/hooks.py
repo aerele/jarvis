@@ -362,8 +362,9 @@ scheduler_events = {
 			# Cheap no-op (one query on a small table) when nothing is due.
 			"jarvis.chat.agent_scheduler.run_due_agent_audits",
 			# Feedback outbox retry (admin-v2#715 F17): re-send stored feedback that
-			# admin has not acknowledged yet, with backoff, at most 10 rows a run, and
-			# stop at the first transient failure. Self-gating (skips un-onboarded),
+			# admin has not acknowledged yet, with backoff, at most 6 rows a run, and
+			# stop at the first transient failure. Self-gating (skips a bench with no
+			# admin URL or credentials),
 			# never raises on an admin failure. Cheap no-op (one indexed query on a
 			# small table) when nothing is due.
 			"jarvis.chat.feedback_outbox.retry_due",
