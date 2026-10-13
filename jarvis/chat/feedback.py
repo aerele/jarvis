@@ -13,13 +13,13 @@ Only the caller's OWN assistant messages can be rated (ownership via the same
 gate the rest of the chat surface uses, ``chat.api._get_owned_conversation``).
 
 The once-per-session popup ("How did this session go?") at the bottom of this
-module is still forwarded directly, with no local copy: only the popup's own
-metadata (``Jarvis Conversation.session_feedback_asked_at``, and the
-``turn_count`` that triggers it) is kept on the bench - the response itself
-lives only on the admin side.
+module goes through the same outbox. Its own metadata
+(``Jarvis Conversation.session_feedback_asked_at``, and the ``turn_count`` that
+triggers it) is the only state on the chat tables; the response itself lives in
+the outbox until admin has it, and only on the admin side after that.
 
-The periodic "business pulse" survey (last section) follows the same direct
-rule and keeps exactly two fields, both on ``Jarvis User Settings``:
+The periodic "business pulse" survey (last section) uses the outbox the same
+way and keeps exactly two fields, both on ``Jarvis User Settings``:
 ``pulse_last_period_key`` and ``pulse_offer_count``. There is no cron behind
 it - the fleet scheduler is paused, so a scheduled survey would silently never
 run. Instead it reuses the lazy period-key rollover the per-user token cap
@@ -162,21 +162,24 @@ def submit_session_feedback(
 
 	The response is recorded AT MOST ONCE per conversation. Claiming the popup and
 	stamping ``session_feedback_asked_at`` is a single compare-and-set (see
-	``_claim_session_feedback``) that is committed before the admin forward, so two
-	tabs - or a double-click that beats the dialog's own disable - cannot both
-	forward: the loser returns ``recorded: False`` and forwards nothing, and the
-	winner never holds a row lock across the network call. A Skip claims the popup exactly the
-	same way and is never forwarded to admin (there is no response to store); a
-	real reaction is forwarded best-effort. The optional note is kept only on
-	"Okay" or worse - the popup only reveals the field there, and a note typed
-	before switching to a positive reaction must not ride along.
+	``_claim_session_feedback``), so two tabs - or a double-click that beats the
+	dialog's own disable - cannot both record: the loser returns ``recorded:
+	False`` and stores nothing. A Skip claims the popup exactly the same way and
+	is never sent to admin (there is no response to store); a real reaction is
+	stored in the feedback outbox (``jarvis.chat.feedback_outbox``) in the SAME
+	transaction as the claim, so the popup is never burned without its answer
+	kept, and delivered to admin after the request. The optional note is kept
+	only on "Okay" or worse - the popup only reveals the field there, and a note
+	typed before switching to a positive reaction must not ride along.
 
 	A malformed reaction is rejected BEFORE the claim: the one-shot popup is the
 	user's only chance to answer in this conversation, so a broken client must
 	not silently burn it.
 
-	Returns ``{"ok": True, "recorded": <bool>}`` even when the forward fails: like
-	the thumbs tap, a lost response is acceptable and a blocked popup is not.
+	Returns ``{"ok": True, "recorded": True, "delivered": False}`` once a reaction
+	is stored (delivery happens after the request), ``{"ok": True, "recorded":
+	False}`` for a Skip or a repeat. Never waits on admin, never surfaces an admin
+	error.
 	"""
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
@@ -187,16 +190,10 @@ def submit_session_feedback(
 	# a second tab opened later), then settle a genuine race with the CAS.
 	if conv.session_feedback_asked_at or not _claim_session_feedback(conversation):
 		return {"ok": True, "recorded": False}
-	# Durability-before-external-call (the ONE sanctioned reason for an explicit
-	# commit here, and the same thing api.create_conversation does): make the claim
-	# durable and RELEASE the conversation row lock BEFORE the admin HTTPS forward
-	# below. Frappe would otherwise not commit until the end of the request, holding
-	# that row lock for the whole admin round-trip - up to admin_client's timeout
-	# when admin is unreachable. Anything touching this conversation meanwhile would
-	# block on it: settlement's turn-count bump (delaying a run:end), and
-	# admission.accept_or_queue's _lock_conversation - which waits while holding the
-	# SITE-WIDE shard lock, turning one slow popup into a shard-wide send stall.
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before slow work
+	# No mid-request commit. One used to release the conversation row lock before a
+	# synchronous admin call; the answer now goes to the outbox and nothing slow
+	# follows the claim, so the request's own commit releases the lock moments
+	# later, and the claim and the stored answer commit (or roll back) together.
 	if not chip_value:
 		return {"ok": True, "recorded": False}
 
@@ -207,8 +204,10 @@ def submit_session_feedback(
 		"user_ref": frappe.session.user,
 		"note": (note or "").strip()[:_MAX_NOTE] if chip_value in _SESSION_LOW_CHIPS else "",
 	}
-	_forward_session(payload)
-	return {"ok": True, "recorded": True}
+	from jarvis.chat.feedback_outbox import accept
+
+	accept("Session", conversation, payload)
+	return {"ok": True, "recorded": True, "delivered": False}
 
 
 def _claim_session_feedback(conversation: str) -> bool:
@@ -217,8 +216,9 @@ def _claim_session_feedback(conversation: str) -> bool:
 
 	A conditional UPDATE rather than ``db.set_value``, because a read-then-write
 	leaves a window in which two tabs (or a double-click that beats the dialog's
-	disable) both decide the popup is unanswered and both forward. The admin side
-	upserts on ``(tenant, kind, session_ref)``, so the second push would silently
+	disable) both decide the popup is unanswered and both record. The outbox row
+	and the admin side are both keyed on the conversation (admin upserts on
+	``(tenant, kind, session_ref)``), so the second answer would silently
 	OVERWRITE the user's real first answer rather than duplicate it - a lost
 	response, not just a noisy one. ``session_feedback_asked_at IS NULL`` in the
 	WHERE makes the claim atomic: exactly one caller sees rowcount 1.
@@ -235,18 +235,6 @@ def _claim_session_feedback(conversation: str) -> bool:
 	# discipline jarvis.chat.turn_state._run_cas and admission._run_cas follow.
 	cursor = getattr(frappe.db, "_cursor", None)
 	return bool(cursor and int(cursor.rowcount) == 1)
-
-
-def _forward_session(payload: dict) -> None:
-	"""Best-effort forward to admin: a lost response is acceptable, a blocked
-	popup is not. Named verbatim in
-	``admin_client.push_session_feedback``'s docstring - keep the two in step."""
-	try:
-		from jarvis import admin_client
-
-		admin_client.push_session_feedback(payload)
-	except Exception:
-		frappe.log_error(title="session feedback forward failed")
 
 
 # --------------------------------------------------------------------------- #
@@ -597,12 +585,12 @@ def submit_pulse_feedback(
 	use_case_text: str = "",
 	note: str | None = None,
 ) -> dict:
-	"""Record one business-pulse response: forward it to admin, then silence the
-	survey for the rest of this period.
+	"""Record one business-pulse response for admin, then silence the survey for
+	the rest of this period.
 
 	POST-only for the same reason as ``pulse_context`` above: it writes, and a
-	GET would be rolled back - here that would forward the answer to admin and
-	then re-offer the survey on the next chat open.
+	GET would be rolled back - here that would drop the stored answer and then
+	re-offer the survey on the next chat open.
 
 	The full set that was OFFERED rides along with the subset the user picked as
 	most used, so the admin dashboard can tell "used it but did not pick it as
@@ -612,15 +600,13 @@ def submit_pulse_feedback(
 	broken client cannot burn the user's survey for the month on a value that
 	was never a real answer.
 
-	Forward first, THEN write: ``frappe.db.set_value`` holds the settings row
-	lock until the request commits, and that row is the one every turn's usage
-	accounting also updates. Writing first would hold that lock across the admin
-	HTTPS round-trip - up to ``admin_client``'s timeout when admin is
-	unreachable - and stall this user's own chat, the same hazard
-	``submit_session_feedback`` commits early to avoid. The write still happens
-	when the forward fails: the user answered, and asking them again is worse
-	than losing one low-stakes response (the trade the thumbs tap already
-	makes)."""
+	The answer is stored in the feedback outbox (``jarvis.chat.feedback_outbox``)
+	and delivered to admin after the request, retried until admin acknowledges
+	it, so the request never waits on admin and holds the settings row lock (the
+	row every turn's usage accounting also updates) only for its own two local
+	writes. The stored answer and the silenced survey commit together.
+
+	Returns ``{"ok": True, "delivered": False}`` once the answer is stored."""
 	require_jarvis_access()
 	try:
 		stars = int(stars)
@@ -644,22 +630,9 @@ def submit_pulse_feedback(
 		"user_ref": frappe.session.user,
 		"note": (note or "").strip()[:_MAX_NOTE],
 	}
-	_forward_pulse(payload)
-	# Resolved AFTER the forward for the same reason the write is: on a user
-	# whose settings row does not exist yet this INSERTs one, and an uncommitted
-	# insert holds its own row lock just as an update does.
+	from jarvis.chat.feedback_outbox import accept
+
+	accept("Pulse", current_key, payload)
 	row = get_or_create_user_settings(frappe.session.user)
 	_store_pulse_state(row.name, current_key, PULSE_MAX_OFFERS)
-	return {"ok": True}
-
-
-def _forward_pulse(payload: dict) -> None:
-	"""Best-effort forward to admin, same contract as ``_forward_session``
-	above: a lost response is acceptable, a blocked dialog is not. Named verbatim in ``admin_client.push_pulse_feedback``'s docstring -
-	keep the two in step."""
-	try:
-		from jarvis import admin_client
-
-		admin_client.push_pulse_feedback(payload)
-	except Exception:
-		frappe.log_error(title="pulse feedback forward failed")
+	return {"ok": True, "delivered": False}

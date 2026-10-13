@@ -5,9 +5,12 @@ Runs as a dedicated fixture user so cleanups stay scoped to disposable rows,
 and mirrors ``test_chat_feedback.py``'s fixture shape rather than a
 rollback-based one: ``settlement._bump_turn_count`` commits its own tiny
 transaction by design, so an ``addCleanup(frappe.db.rollback)`` would be
-hollow. The admin forward is always mocked - these never hit a real admin.
+hollow. A reaction is stored in the feedback outbox; its delivery job is patched
+out (the fixtures commit, which would otherwise queue a real job), and the admin
+push is mocked wherever it appears - these never hit a real admin.
 """
 
+import json
 from unittest.mock import patch
 
 import frappe
@@ -19,11 +22,13 @@ from jarvis.chat.feedback import (
 	session_feedback_status,
 	submit_session_feedback,
 )
+from jarvis.chat.feedback_outbox import outbox_name
 from jarvis.chat.settlement import _bump_turn_count
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
 TURN = "Jarvis Chat Turn"
+OUTBOX = "Jarvis Feedback Outbox"
 TEST_USER = "jarvis-session-feedback-test@example.com"
 
 _PUSH = "jarvis.admin_client.push_session_feedback"
@@ -60,6 +65,8 @@ def _delete_conv(name: str) -> None:
 def _cleanup_user_conversations(user: str = TEST_USER) -> None:
 	for name in frappe.get_all(CONV, filters={"owner": user}, pluck="name"):
 		_delete_conv(name)
+	frappe.db.delete(OUTBOX, {"user": user})
+	frappe.db.commit()
 
 
 class _SessionFeedbackTestCase(FrappeTestCase):
@@ -67,6 +74,9 @@ class _SessionFeedbackTestCase(FrappeTestCase):
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
+		enqueue = patch("jarvis.chat.feedback_outbox._enqueue_delivery")
+		enqueue.start()
+		self.addCleanup(enqueue.stop)
 		_cleanup_user_conversations()
 		self.conv = create_conversation()
 
@@ -222,19 +232,26 @@ class TestSubmitSessionFeedback(_SessionFeedbackTestCase):
 		super().setUp()
 		self._set_turns(SESSION_FEEDBACK_TURN_THRESHOLD)
 
+	def _stored(self, conversation=None):
+		name = outbox_name("Session", conversation or self.conv, TEST_USER)
+		return frappe.db.get_value(OUTBOX, name, "payload")
+
 	def _item(self, push):
-		push.assert_called_once()
-		return push.call_args.args[0]
+		"""The stored answer. The request itself never calls admin."""
+		push.assert_not_called()
+		payload = self._stored()
+		self.assertTrue(payload, "the reaction was not stored")
+		return json.loads(payload)
 
 	def _reopen(self):
 		"""Clear the claim so the next submit is a first submit again - the popup
 		is genuinely one-shot per conversation, so a loop over chips has to."""
 		frappe.db.set_value(CONV, self.conv, "session_feedback_asked_at", None, update_modified=False)
 
-	def test_chip_forwards_derived_payload(self):
+	def test_chip_stores_derived_payload(self):
 		with patch(_PUSH) as push:
 			res = submit_session_feedback(self.conv, "Good")
-		self.assertEqual(res, {"ok": True, "recorded": True})
+		self.assertEqual(res, {"ok": True, "recorded": True, "delivered": False})
 		item = self._item(push)
 		self.assertEqual(item["kind"], "Session")
 		self.assertEqual(item["session_ref"], self.conv)
@@ -253,6 +270,7 @@ class TestSubmitSessionFeedback(_SessionFeedbackTestCase):
 			res = submit_session_feedback(self.conv)
 		self.assertEqual(res, {"ok": True, "recorded": False})
 		push.assert_not_called()
+		self.assertIsNone(self._stored(), "a Skip has no response to store")
 		self.assertTrue(frappe.db.get_value(CONV, self.conv, "session_feedback_asked_at"))
 		self.assertFalse(session_feedback_status(self.conv)["due"])
 
@@ -284,17 +302,18 @@ class TestSubmitSessionFeedback(_SessionFeedbackTestCase):
 			with self.assertRaises(frappe.ValidationError):
 				submit_session_feedback(self.conv, "not-a-real-chip")
 		push.assert_not_called()
+		self.assertIsNone(self._stored())
 		# A broken client must not consume the user's one chance to answer.
 		self.assertFalse(frappe.db.get_value(CONV, self.conv, "session_feedback_asked_at"))
 		self.assertTrue(session_feedback_status(self.conv)["due"])
 
-	def test_a_second_submit_records_and_forwards_nothing(self):
+	def test_a_second_submit_records_nothing(self):
 		"""Two tabs, or a double-click that beats the dialog's disable: the claim
-		is a compare-and-set, so only the first call forwards."""
+		is a compare-and-set, so only the first call stores an answer."""
 		with patch(_PUSH) as push:
 			first = submit_session_feedback(self.conv, "Great")
 			second = submit_session_feedback(self.conv, "Frustrating", note="second tab")
-		self.assertEqual(first, {"ok": True, "recorded": True})
+		self.assertEqual(first, {"ok": True, "recorded": True, "delivered": False})
 		self.assertEqual(second, {"ok": True, "recorded": False})
 		self.assertEqual(self._item(push)["chip_value"], "Great", "the first answer is the one kept")
 
@@ -304,6 +323,7 @@ class TestSubmitSessionFeedback(_SessionFeedbackTestCase):
 			second = submit_session_feedback(self.conv)
 		self.assertEqual(second, {"ok": True, "recorded": False})
 		push.assert_not_called()
+		self.assertIsNone(self._stored())
 
 	def test_a_chip_after_a_skip_is_not_recorded(self):
 		# Skip is final for the conversation - a later chip must not sneak in.
@@ -312,11 +332,13 @@ class TestSubmitSessionFeedback(_SessionFeedbackTestCase):
 			late = submit_session_feedback(self.conv, "Great")
 		self.assertEqual(late, {"ok": True, "recorded": False})
 		push.assert_not_called()
+		self.assertIsNone(self._stored())
 
-	def test_a_failed_forward_never_surfaces(self):
-		with patch(_PUSH, side_effect=RuntimeError("admin down")):
+	def test_the_request_never_calls_admin(self):
+		with patch(_PUSH, side_effect=RuntimeError("admin down")) as push:
 			res = submit_session_feedback(self.conv, "Great")
-		self.assertEqual(res, {"ok": True, "recorded": True})
+		self.assertEqual(res, {"ok": True, "recorded": True, "delivered": False})
+		self.assertEqual(self._item(push)["chip_value"], "Great")
 
 	def test_rejects_another_users_conversation(self):
 		frappe.set_user("Administrator")
@@ -327,6 +349,7 @@ class TestSubmitSessionFeedback(_SessionFeedbackTestCase):
 				with self.assertRaises(frappe.PermissionError):
 					submit_session_feedback(other, "Good")
 			push.assert_not_called()
+			self.assertIsNone(self._stored(other))
 			self.assertFalse(frappe.db.get_value(CONV, other, "session_feedback_asked_at"))
 		finally:
 			frappe.set_user("Administrator")
@@ -334,8 +357,9 @@ class TestSubmitSessionFeedback(_SessionFeedbackTestCase):
 			frappe.set_user(TEST_USER)
 
 	def test_is_post_only(self):
-		"""It WRITES (a compare-and-set claim plus an explicit commit) and forwards
-		to admin, exactly like its pulse siblings (see
+		"""It WRITES (a compare-and-set claim plus the stored answer, committed
+		with the request) and queues delivery for after that commit, exactly like
+		its pulse siblings (see
 		test_pulse_feedback.py::test_both_endpoints_are_post_only) - reached over
 		GET, Frappe would not enforce CSRF on it."""
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[submit_session_feedback], ["POST"])
