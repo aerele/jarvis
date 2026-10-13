@@ -21,6 +21,10 @@ export const getConversation = (conversation, { before, refresh, after } = {}) =
 		...(after ? { after } : {}),
 		...(refresh && refresh.length ? { refresh: JSON.stringify(refresh) } : {}),
 	});
+// The whole visible thread, unpaged, for an action that needs every row (Save as
+// macro) rather than what is on screen.
+export const getWholeConversation = (conversation) =>
+	call("jarvis.chat.api.get_conversation", { conversation });
 // A compact tool row's whole input and output, for the Activity view (#715 F13).
 export const getToolDetail = (message) => call("jarvis.chat.api.get_tool_detail", { message });
 // Rich outputs: fetch one canvas/chart artifact's render-ready HTML for an
