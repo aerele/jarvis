@@ -422,8 +422,8 @@ def _claim_once(m, now, current):
 	between leaves the lease to come due.
 
 	The lease, come due: look for a run the first attempt started, a scheduled run
-	of this macro since the slot that SENT a step (``current_step`` >= 1, set once
-	a step's turn exists). A run row that never sent one does not count: the
+	of this macro since the slot that sent its first step (``_run_started``). A run
+	row that never sent one does not count: the
 	failed rows the sweep records itself, one ``run_macro`` ended as not
 	dispatched, one the reconciler ended as never started. Found, the worker died
 	after starting it: the schedule ends without running it twice, and None says
@@ -435,15 +435,35 @@ def _claim_once(m, now, current):
 		frappe.db.set_value(MACRO, m.name, "next_run_at", lease, update_modified=False)
 		return lease
 	values = {"next_run_at": None, "schedule_enabled": 0}
-	started = frappe.db.get_value(
-		RUN,
-		{"macro": m.name, "trigger": "scheduled", "current_step": [">=", 1], "creation": [">=", slot]},
-		"creation",
+	started = next(
+		(
+			run.creation
+			for run in frappe.get_all(
+				RUN,
+				filters={"macro": m.name, "trigger": "scheduled", "creation": [">=", slot]},
+				fields=["name", "creation", "current_step", "status", "conversation"],
+				order_by="creation asc",
+			)
+			if _run_started(run)
+		),
+		None,
 	)
 	if started:
 		values["last_run_at"] = started
 	frappe.db.set_value(MACRO, m.name, values, update_modified=False)
 	return None if started else now
+
+
+def _run_started(run) -> bool:
+	"""Whether a scheduled run got as far as sending its first step: its cursor
+	moved, it is parked for capacity (the resume sends it later), or its first
+	step's turn exists (a worker killed between that turn's commit and the cursor's
+	leaves the cursor at 0)."""
+	from jarvis.chat import macros
+
+	if cint(run.current_step) >= 1 or run.status == "waiting_capacity":
+		return True
+	return bool(run.conversation) and macros._step_is_out(run, 0)
 
 
 def _retry_once_later(m, now, *, expected) -> bool:
