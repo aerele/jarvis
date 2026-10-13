@@ -597,6 +597,8 @@ def _effect_telemetry(ctx: _Ctx) -> None:
 	try:
 		from jarvis import telemetry
 
+		# Pump-mode turns emit exactly this one line; the legacy path in turn_handler
+		# emits its own line with handler wall time.
 		timing = _turn_timing(ctx.turn, ctx.run_id)
 		telemetry.emit_turn(
 			ctx.conversation,
@@ -619,21 +621,39 @@ def _span_ms(start, end) -> int | None:
 	return ms if ms >= 0 else None
 
 
-def _approval_wait_ms(run_id: str) -> int | None:
-	"""Human approval wait for this run: the sum of (decided_at - creation) over its
-	Pending Actions that were decided. 0 when it had none; None when a decided action
-	cannot be measured. Concurrent approvals are summed, so active_ms is nulled if the
-	sum exceeds the run."""
+def _approval_wait_ms(run_id: str, start, end) -> int | None:
+	"""Human approval wait inside this run's window [start, end] (dispatching_at to
+	terminal): each decided Pending Action's creation -> decided_at span is clamped to
+	the window, and overlapping spans are merged so concurrent approvals are not double
+	counted. 0 when none overlap; None when the window or a decided span is unusable."""
+	if not (start and end):
+		return None
+	start, end = frappe.utils.get_datetime(start), frappe.utils.get_datetime(end)
 	# System context (post-turn effect): no user session, so get_all is intended.
 	rows = frappe.get_all(
 		"Jarvis Pending Action",
 		filters={"run_id": run_id, "decided_at": ["is", "set"]},
 		fields=["creation", "decided_at"],
 	)
-	spans = [_span_ms(r.creation, r.decided_at) for r in rows]
-	if any(sp is None for sp in spans):
-		return None
-	return sum(spans)
+	spans = []
+	for r in rows:
+		if _span_ms(r.creation, r.decided_at) is None:
+			return None
+		lo = max(frappe.utils.get_datetime(r.creation), start)
+		hi = min(frappe.utils.get_datetime(r.decided_at), end)
+		if hi > lo:
+			spans.append((lo, hi))
+	total, cur_lo, cur_hi = 0, None, None
+	for lo, hi in sorted(spans):
+		if cur_hi is None or lo > cur_hi:
+			if cur_hi is not None:
+				total += _span_ms(cur_lo, cur_hi)
+			cur_lo, cur_hi = lo, hi
+		else:
+			cur_hi = max(cur_hi, hi)
+	if cur_hi is not None:
+		total += _span_ms(cur_lo, cur_hi)
+	return total
 
 
 def _turn_timing(turn: dict, run_id: str) -> dict:
@@ -644,7 +664,7 @@ def _turn_timing(turn: dict, run_id: str) -> dict:
 	dispatching_at is kept/re-stamped on recovery re-dispatch, so queue_ms includes
 	recovery time. A missing stamp gives None, never a fabricated zero."""
 	duration_ms = _span_ms(turn.get("dispatching_at"), turn.get("terminal_observed_at"))
-	approval_wait_ms = _approval_wait_ms(run_id)
+	approval_wait_ms = _approval_wait_ms(run_id, turn.get("dispatching_at"), turn.get("terminal_observed_at"))
 	active_ms = None
 	if duration_ms is not None and approval_wait_ms is not None and approval_wait_ms <= duration_ms:
 		active_ms = duration_ms - approval_wait_ms
