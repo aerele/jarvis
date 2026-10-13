@@ -2265,13 +2265,12 @@ def push_bench_heartbeat(heartbeat: dict) -> dict:
 
 
 # Short timeout for the three feedback pushes below. Admin's ingest is a single
-# upsert; 10s is generous for it. The two popup pushes run SYNCHRONOUSLY inside a
-# customer web request (submit_session_feedback / submit_pulse_feedback), so at
-# the DEFAULT_TIMEOUT_S = 150 an admin that hangs rather than refuses would pin
-# a web worker for 2.5 minutes per submit. The chat-reply rating is sent from
-# the feedback outbox's job and sweep instead, where a hung admin would hold a
-# short-queue worker, and the sweep's whole batch, just as long; a timeout there
-# is one failed attempt the outbox retries.
+# upsert; 10s is generous for it. All three are sent by the feedback outbox's
+# delivery job and retry sweep (jarvis.chat.feedback_outbox), never inside a
+# customer web request; at the DEFAULT_TIMEOUT_S = 150 an admin that hangs
+# rather than refuses would hold a short-queue worker, and the sweep's whole
+# batch, for 2.5 minutes per row. A timeout is one failed attempt the outbox
+# retries.
 _FEEDBACK_TIMEOUT_S = 10
 
 
@@ -2310,10 +2309,11 @@ _FEEDBACK_TIMEOUT_S = 10
 
 
 def push_session_feedback(item: dict) -> dict:
-	"""Push one once-per-session popup response to admin. Called best-effort
-	from jarvis.chat.feedback._forward_session, which swallows failures -- a
-	lost response is acceptable, a blocked popup is not.
-	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
+	"""Push one once-per-session popup response to admin, which upserts on
+	(tenant, session_ref). Called from jarvis.chat.feedback_outbox, which records
+	the failure and retries.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError /
+	AdminRateLimitedError."""
 	return _post(
 		path=_m("api.tenant.ingest_session_feedback"),
 		body={"item": item},
@@ -2322,8 +2322,8 @@ def push_session_feedback(item: dict) -> dict:
 
 
 def push_pulse_feedback(item: dict) -> dict:
-	"""Push one periodic business-pulse response to admin. Same best-effort
-	contract as push_session_feedback."""
+	"""Push one periodic business-pulse response to admin, which upserts on
+	(tenant, period_key, user_ref). Same outbox contract as push_session_feedback."""
 	return _post(
 		path=_m("api.tenant.ingest_pulse_feedback"),
 		body={"item": item},

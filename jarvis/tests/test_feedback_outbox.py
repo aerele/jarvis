@@ -38,6 +38,10 @@ class _OutboxTestCase(_FeedbackTestCase):
 		configured = patch("jarvis.chat.feedback_outbox._admin_configured", return_value=True)
 		configured.start()
 		self.addCleanup(configured.stop)
+		# The fixtures commit, so a real Error Log row would outlive the test.
+		log_error = patch("frappe.log_error")
+		self.log_error = log_error.start()
+		self.addCleanup(log_error.stop)
 
 	def _row(self, name=None):
 		return frappe.db.get_value(
@@ -227,7 +231,7 @@ class TestDelivery(_OutboxTestCase):
 		push.assert_not_called()
 
 	def test_gives_up_after_max_attempts(self):
-		submit_feedback(message_id=self.msg, rating="up")
+		submit_feedback(message_id=self.msg, rating="down", note="private words")
 		frappe.db.set_value(OUTBOX, self._name(), "attempts", outbox.MAX_ATTEMPTS - 1)
 		self._make_due()
 		with patch(_PUSH, side_effect=AdminUnreachableError("admin is unreachable")):
@@ -235,6 +239,12 @@ class TestDelivery(_OutboxTestCase):
 		row = self._row()
 		self.assertEqual((row.status, row.attempts), ("Failed", outbox.MAX_ATTEMPTS))
 		self.assertIsNone(row.next_retry_at)
+		# Logged once when it gives up, naming the row but never the answer.
+		self.log_error.assert_called_once()
+		logged = self.log_error.call_args.kwargs
+		self.assertEqual(logged["title"], "Feedback outbox: delivery gave up")
+		self.assertIn(self._name(), logged["message"])
+		self.assertNotIn("private words", logged["message"])
 
 	def test_a_newer_answer_saved_during_the_push_is_not_marked_delivered(self):
 		submit_feedback(message_id=self.msg, rating="up")
@@ -275,6 +285,23 @@ class TestDelivery(_OutboxTestCase):
 				outbox.retry_due()
 		push.assert_not_called()
 		self.assertEqual((self._row().status, self._row().attempts), ("Pending", 0))
+
+
+class TestKinds(_OutboxTestCase):
+	def test_each_kind_goes_to_its_own_admin_endpoint(self):
+		session = outbox.accept("Session", self.conv, {"kind": "Session", "session_ref": self.conv})
+		pulse = outbox.accept("Pulse", "M:2026-09", {"kind": "Pulse", "period_key": "M:2026-09"})
+		with (
+			patch("jarvis.admin_client.push_session_feedback") as push_session,
+			patch("jarvis.admin_client.push_pulse_feedback") as push_pulse,
+			patch(_PUSH) as push_reply,
+		):
+			outbox.deliver(session)
+			outbox.deliver(pulse)
+		push_session.assert_called_once_with({"kind": "Session", "session_ref": self.conv})
+		push_pulse.assert_called_once_with({"kind": "Pulse", "period_key": "M:2026-09"})
+		push_reply.assert_not_called()
+		self.assertEqual({self._row(session).status, self._row(pulse).status}, {"Delivered"})
 
 
 class TestSweep(_OutboxTestCase):
