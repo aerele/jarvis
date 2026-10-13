@@ -87,7 +87,15 @@ vi.mock("frappe-ui", async () => ({
 		name: "DatePicker",
 		props: ["modelValue", "placeholder", "disabled", "format"],
 		emits: ["update:modelValue"],
-		template: `<button data-testid="date-picker" :disabled="disabled" @click="$emit('update:modelValue', '2026-11-02')">{{ modelValue }}</button>`,
+		// Renders the page's own #target slot (as the real picker does), with the
+		// display label the real one would give it.
+		template: `<div><slot name="target" :togglePopover="() => {}" :isOpen="false" :displayLabel="modelValue ? 'shown:' + modelValue : ''" /><button data-testid="date-picker" :disabled="disabled" @click="$emit('update:modelValue', '2026-11-02')">pick</button></div>`,
+	},
+	TextInput: {
+		name: "TextInput",
+		inheritAttrs: false,
+		props: ["modelValue", "placeholder", "disabled", "readonly"],
+		template: `<input v-bind="$attrs" :value="modelValue" :disabled="disabled" :readonly="readonly" />`,
 	},
 	TimePicker: {
 		name: "TimePicker",
@@ -1898,6 +1906,23 @@ describe("MacroDetail Schedule section: a one-time schedule", () => {
 		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
 		await control(w, "Frequency").vm.$emit("update:modelValue", "daily");
 		expect(saveBtn(w).attributes("disabled")).toBeDefined();
+	});
+
+	it("the Date input is named by its label and shows the date as people read it", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				schedule_frequency: "once",
+				schedule_date: "2026-11-02",
+				next_run_at: "2026-11-02 09:00:00",
+			})
+		);
+		const label = w.findAll("label").find((l) => l.text() === "Date");
+		const input = w.find("#macro-schedule-date");
+		expect(label.attributes("for")).toBe("macro-schedule-date");
+		expect(input.exists()).toBe(true);
+		expect(input.element.value).toBe("shown:2026-11-02");
+		expect(input.attributes("aria-haspopup")).toBe("dialog");
+		expect(w.findComponent({ name: "DatePicker" }).props("format")).toBe("ddd, D MMM YYYY");
 	});
 
 	it("a recurring schedule sends no date", async () => {

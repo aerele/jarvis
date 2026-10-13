@@ -233,11 +233,13 @@
 								:disabled="saving || armedLocked"
 								@update:modelValue="(v) => (form.schedule_date = v || '')"
 							>
-								<template #target="{ togglePopover, displayLabel }">
+								<template #target="{ togglePopover, isOpen, displayLabel }">
 									<TextInput
 										id="macro-schedule-date"
 										class="w-full cursor-pointer"
 										readonly
+										aria-haspopup="dialog"
+										:aria-expanded="isOpen ? 'true' : 'false'"
 										:modelValue="displayLabel"
 										placeholder="Pick a date"
 										:disabled="saving || armedLocked"
