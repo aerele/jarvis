@@ -11,6 +11,7 @@ import { prefs, setPrefs } from "../lib/prefs";
 import { feed } from "../lib/notifications";
 import { DEFAULT_STARTERS, normalizeStarters, starterTint } from "../lib/starters";
 import { pickStarterPrompt } from "../lib/fillComposer";
+import { enterSends } from "../lib/composerEnter";
 import Sheet from "../components/Sheet.vue";
 import AutoModeToggle from "../components/AutoModeToggle.vue";
 import { autoModeView } from "../lib/autoMode";
@@ -301,7 +302,7 @@ function removeAttachment(key) {
 }
 
 function onKeydown(e) {
-	if (e.key === "Enter" && !e.shiftKey && !/Mobi|Android/i.test(navigator.userAgent)) {
+	if (enterSends(e, navigator.userAgent)) {
 		e.preventDefault();
 		send();
 	}

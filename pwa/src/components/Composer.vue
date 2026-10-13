@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { agentName } from "@/branding";
 import AutoModeToggle from "./AutoModeToggle.vue";
 import { autoModeView } from "../lib/autoMode";
+import { enterSends } from "../lib/composerEnter";
 
 // Attachments + dictation + send/stop. Split out of ChatView so the thread
 // screen stays about the thread.
@@ -57,10 +58,9 @@ function autoGrow() {
 	el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
 }
 
-// Enter sends on a physical keyboard; on a phone the on-screen Return key should
-// insert a newline, so only intercept when there is no soft keyboard.
+// Send rules live in enterSends (physical keyboard only, never mid-IME).
 function onKeydown(e) {
-	if (e.key === "Enter" && !e.shiftKey && !/Mobi|Android/i.test(navigator.userAgent)) {
+	if (enterSends(e, navigator.userAgent)) {
 		e.preventDefault();
 		if (canSend.value) emit("send");
 	}
