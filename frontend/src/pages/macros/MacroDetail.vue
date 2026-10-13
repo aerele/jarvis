@@ -696,6 +696,10 @@ const oneTimeDoneNote = computed(() => {
 	const snap = snapshot.value;
 	if (!snap || props.isNew || dirty.value) return "";
 	if (snap.schedule_enabled || snap.schedule_frequency !== "once" || !lastRunAt.value) return "";
+	// Only a run of THIS one-time slot: a macro that ran daily, was then set to once and
+	// switched off before its date still carries the old last_run_at.
+	const slot = `${snap.schedule_date || ""} ${snap.schedule_time || "00:00"}`;
+	if (!snap.schedule_date || String(lastRunAt.value) < slot) return "";
 	return `Ran once on ${formatDate(
 		lastRunAt.value,
 		"ddd, D MMM YYYY [at] h:mm a"
