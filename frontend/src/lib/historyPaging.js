@@ -29,8 +29,28 @@ export function pagingOf(d) {
 	const page = (d && d.messages) || [];
 	const last = page.length ? page[page.length - 1].seq : null;
 	const newest = typeof last === "number" ? last : null;
-	if (!p || !p.has_more || p.before == null) return { hasMore: false, before: null, newest };
-	return { hasMore: true, before: p.before, newest };
+	if (!p || !p.has_more || p.before == null)
+		return { hasMore: false, before: null, newest, older: olderOf(null) };
+	return { hasMore: true, before: p.before, newest, older: olderOf(p.older_counts) };
+}
+
+// How many shown rows sit below the oldest loaded page (paging.older_counts).
+function olderOf(c) {
+	const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+	return { user: n(c && c.user), assistant: n(c && c.assistant), receipt: n(c && c.receipt) };
+}
+
+// The chat's message totals while only some pages are loaded: the shown rows on
+// screen (`visible`) plus the ones the server counted below the oldest loaded page.
+// With the whole thread loaded this is exactly a count of `visible`.
+export function threadCounts(visible, paging) {
+	const o = olderOf(paging && paging.older);
+	const rows = visible || [];
+	return {
+		total: o.user + o.assistant + o.receipt + rows.length,
+		user: o.user + rows.filter((m) => m.role === "user").length,
+		assistant: o.assistant + rows.filter((m) => m.role === "assistant").length,
+	};
 }
 
 // The newest seq the rows on screen reach: the last page's, or any later server row
@@ -104,10 +124,10 @@ export function prependOlderPage(held, heldPaging, d) {
 	const rows = held || [];
 	const names = new Set(rows.map((m) => m && m.name));
 	const older = ((d && d.messages) || []).filter((m) => !names.has(m.name));
-	const { hasMore, before } = pagingOf(d);
+	const { hasMore, before, older: below } = pagingOf(d);
 	return {
 		messages: [...older, ...rows],
-		paging: { hasMore, before, newest: heldNewestSeq(rows, heldPaging) },
+		paging: { hasMore, before, older: below, newest: heldNewestSeq(rows, heldPaging) },
 	};
 }
 
