@@ -14,7 +14,13 @@ from unittest.mock import patch
 import frappe
 
 from jarvis.chat import feedback_outbox as outbox
-from jarvis.chat.feedback import submit_feedback
+from jarvis.chat.feature_usage import FEATURES
+from jarvis.chat.feedback import (
+	_pulse_period,
+	submit_feedback,
+	submit_pulse_feedback,
+	submit_session_feedback,
+)
 from jarvis.exceptions import (
 	AdminContractError,
 	AdminRateLimitedError,
@@ -26,6 +32,13 @@ OUTBOX = "Jarvis Feedback Outbox"
 _PUSH = "jarvis.admin_client.push_chat_feedback"
 #: The real function, captured before the fixture patches it out.
 _REAL_ENQUEUE = outbox._enqueue_delivery
+#: Free text longer than every per-field cap (1000), so the callers clip it.
+_TAMIL = "நன்றி தமிழ் " * 200
+_HINDI = "धन्यवाद हिन्दी " * 200
+_EMOJI = "😀🙏" * 600
+#: Characters JSON has to escape even with ensure_ascii=False: a quote, a
+#: backslash and a control character, worth up to six encoded characters each.
+_ESCAPED = '"\\\x01' * 400
 
 
 def _now():
@@ -276,6 +289,32 @@ class TestDelivery(_OutboxTestCase):
 		self.assertEqual((row.status, row.revision), ("Pending", 2))
 		self._assert_near(row.next_retry_at, _now())
 
+	def test_a_stale_push_leaves_a_newer_pending_revision_on_its_backoff(self):
+		submit_feedback(message_id=self.msg, rating="up")
+		stale = frappe._dict(self._row(), kind="Reply")
+		submit_feedback(message_id=self.msg, rating="down")
+		later = _now() + timedelta(hours=1)
+		frappe.db.set_value(OUTBOX, self._name(), {"attempts": 3, "next_retry_at": later})
+		outbox._record(stale, outbox._Outcome("delivered"))
+		row = self._row()
+		self.assertEqual((row.status, row.attempts, row.revision), ("Pending", 3, 2))
+		self._assert_near(row.next_retry_at, later, slack_s=2)
+
+	def test_a_stale_push_leaves_a_newer_refused_revision_failed(self):
+		submit_feedback(message_id=self.msg, rating="up")
+		stale = frappe._dict(self._row(), kind="Reply")
+		submit_feedback(message_id=self.msg, rating="down")
+		refused = AdminContractError("bad", code="InvalidChatFeedback", http_status=400)
+		with patch(_PUSH, side_effect=refused):
+			outbox.deliver(self._name())
+		self.assertEqual(self._row().status, "Failed")
+		self.log_error.reset_mock()
+		outbox._record(stale, outbox._Outcome("delivered"))
+		row = self._row()
+		self.assertEqual(row.status, "Failed")
+		self.assertIsNone(row.next_retry_at)
+		self.log_error.assert_not_called()
+
 	def test_a_bench_that_is_not_onboarded_sends_nothing(self):
 		submit_feedback(message_id=self.msg, rating="up")
 		self._make_due()
@@ -302,6 +341,92 @@ class TestKinds(_OutboxTestCase):
 		push_pulse.assert_called_once_with({"kind": "Pulse", "period_key": "M:2026-09"})
 		push_reply.assert_not_called()
 		self.assertEqual({self._row(session).status, self._row(pulse).status}, {"Delivered"})
+
+
+class TestTextAtTheFieldCaps(_OutboxTestCase):
+	"""An answer the per-field caps accept is always stored and delivered as
+	written, whatever script or escaping it needs."""
+
+	def _deliver(self, name, push_path):
+		with patch(push_path) as push:
+			outbox.deliver(name)
+		push.assert_called_once()
+		self.assertEqual(self._row(name).status, "Delivered")
+		return push.call_args.args[0]
+
+	def _stored(self, name):
+		raw = self._row(name).payload
+		return raw, json.loads(raw)
+
+	def test_a_tamil_thumbs_note_at_the_cap(self):
+		submit_feedback(message_id=self.msg, rating="down", note=_TAMIL)
+		raw, item = self._stored(self._name())
+		self.assertEqual(item["note"], _TAMIL.strip()[:1000])
+		self.assertEqual(len(item["note"]), 1000)
+		self.assertIn("தமிழ்", raw, "stored as written, not as escapes")
+		self.assertEqual(self._deliver(self._name(), _PUSH), item)
+
+	def test_an_astral_emoji_thumbs_note_at_the_cap(self):
+		submit_feedback(message_id=self.msg, rating="down", note=_EMOJI)
+		_raw, item = self._stored(self._name())
+		self.assertEqual(item["note"], _EMOJI[:1000])
+		self.assertEqual(self._deliver(self._name(), _PUSH), item)
+
+	def test_a_hindi_session_note_at_the_cap(self):
+		res = submit_session_feedback(self.conv, "Frustrating", note=_HINDI)
+		self.assertEqual(res, {"ok": True, "recorded": True, "delivered": False})
+		name = outbox.outbox_name("Session", self.conv, TEST_USER)
+		_raw, item = self._stored(name)
+		self.assertEqual(item["note"], _HINDI.strip()[:1000])
+		self.assertEqual(self._deliver(name, "jarvis.admin_client.push_session_feedback"), item)
+
+	def test_a_pulse_answer_with_every_field_at_its_cap(self):
+		for use_case, note in ((_TAMIL, _HINDI), (_EMOJI, _TAMIL), (_ESCAPED, _ESCAPED)):
+			with self.subTest(use_case=use_case[:4], note=note[:4]):
+				res = submit_pulse_feedback(
+					stars=1,
+					features_offered=list(FEATURES),
+					features_selected=list(FEATURES),
+					use_case_text=use_case,
+					note=note,
+				)
+				self.assertEqual(res, {"ok": True, "delivered": False})
+				name = outbox.outbox_name("Pulse", _pulse_period()[0], TEST_USER)
+				_raw, item = self._stored(name)
+				self.assertEqual(item["use_case_text"], use_case.strip()[:1000])
+				self.assertEqual(item["note"], note.strip()[:1000])
+				self.assertEqual(item["features_offered"], list(FEATURES))
+				self.assertEqual(self._deliver(name, "jarvis.admin_client.push_pulse_feedback"), item)
+
+	def test_the_cap_sits_far_above_the_largest_answer_the_field_caps_allow(self):
+		# Every free-text field at 1000 characters of the worst escaping case,
+		# every ref at admin's 140-char bound, all feature keys twice.
+		ref = "r" * 140
+		largest = {
+			"kind": "Pulse",
+			"period_key": "M:2026-09",
+			"stars": 5,
+			"features_offered": list(FEATURES),
+			"features_selected": list(FEATURES),
+			"use_case_text": _ESCAPED[:1000],
+			"user_ref": ref,
+			"note": _ESCAPED[:1000],
+		}
+		reply = {
+			"rating": "down",
+			"message_ref": ref,
+			"conversation_ref": ref,
+			"session_id": ref,
+			"model": ref,
+			"user_ref": ref,
+			"reply_duration_ms": 10**12,
+			"note": _ESCAPED[:1000],
+		}
+		for payload in (largest, reply):
+			self.assertLess(outbox._content_chars(payload) * 2, outbox.MAX_PAYLOAD_CHARS)
+		# The JSON form of the same answer is far bigger, which is why it is not
+		# what the cap counts.
+		self.assertGreater(len(json.dumps(largest, ensure_ascii=False)), 4000)
 
 
 class TestSweep(_OutboxTestCase):

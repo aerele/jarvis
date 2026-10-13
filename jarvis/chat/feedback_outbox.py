@@ -71,8 +71,13 @@ DELIVERED_RETENTION_DAYS = 7
 UNDELIVERED_RETENTION_DAYS = 30
 #: Hard ceiling on the table between daily prunes; the oldest rows beyond it go.
 MAX_ROWS = 5000
-#: A payload is a few hundred bytes; the largest legitimate one (a pulse answer
-#: with both free-text fields full) is about 3 KB. Anything bigger is a bug.
+#: Backstop on one payload, counted in the characters of its own text (keys and
+#: values, see ``_content_chars``), never in its JSON encoding: escaping can turn
+#: one character into six (a control character becomes a \u escape), and this
+#: cap must never refuse an answer the callers' per-field caps already accepted.
+#: The largest such answer, a pulse survey with the 1000-char use-case text and
+#: the 1000-char note, all seven feature keys twice and every ref at its 140-char
+#: admin bound, is under 3,200 characters. Anything near this is a bug.
 MAX_PAYLOAD_CHARS = 8000
 _MAX_ERROR = 200
 #: Admin contract codes on a 4xx that mean "not now" rather than "never": the
@@ -107,9 +112,12 @@ def accept(kind: str, ref: str, payload: dict) -> str:
 	The caller has already derived and bounded ``payload``; it is stored as is."""
 	if kind not in KINDS:
 		frappe.throw(f"unknown feedback kind {kind!r}", frappe.ValidationError)
-	body = json.dumps(payload, separators=(",", ":"), default=str)
-	if len(body) > MAX_PAYLOAD_CHARS:
+	if _content_chars(payload) > MAX_PAYLOAD_CHARS:
 		frappe.throw("feedback payload is too large", frappe.ValidationError)
+	# ensure_ascii=False: store the text as written. The default escapes every
+	# non-ASCII character to \uXXXX (two of them for an emoji), six to twelve
+	# times its size, which is no reason to make a Tamil note any bigger.
+	body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str)
 	user = frappe.session.user
 	name = outbox_name(kind, ref, user)
 	due = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=FIRST_JOB_GRACE_SECONDS)
@@ -308,15 +316,28 @@ def _record(row, outcome: _Outcome) -> None:
 			)
 		return
 	if outcome.kind == "delivered":
-		# A newer answer was saved while this push was in flight, and this older
-		# one may have reached admin after it. Send the current revision again.
+		# A newer answer was saved while this push was in flight. If that newer
+		# revision is already Delivered, admin may still hold THIS older one: both
+		# upsert the same admin row, and this push can commit there last even
+		# though it left first. Send the current revision once more. A newer
+		# revision that is Pending goes out on its own schedule (its backoff is
+		# left alone), and a Failed one admin has refused, so neither is touched.
 		(
 			frappe.qb.update(t)
 			.set(t.status, PENDING)
 			.set(t.next_retry_at, now)
 			.set(t.modified, now)
-			.where((t.name == row.name) & (t.revision != row.revision))
+			.where((t.name == row.name) & (t.revision != row.revision) & (t.status == DELIVERED))
 		).run()
+
+
+def _content_chars(value) -> int:
+	"""Characters of text in a payload, keys included, with no encoding overhead."""
+	if isinstance(value, dict):
+		return sum(_content_chars(k) + _content_chars(v) for k, v in value.items())
+	if isinstance(value, list | tuple):
+		return sum(_content_chars(v) for v in value)
+	return len(value if isinstance(value, str) else str(value))
 
 
 def _backoff_minutes(attempts: int) -> int:
