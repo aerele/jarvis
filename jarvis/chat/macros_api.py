@@ -150,6 +150,7 @@ def list_macros() -> list[dict]:
 			"schedule_weekday",
 			"schedule_day_of_month",
 			"schedule_time",
+			*_schedule_date_column(),
 			"next_run_at",
 			"last_run_at",
 			"modified",
@@ -174,7 +175,15 @@ _MACROS_SORTABLE = {
 	"next_run_at": "next_run_at",
 }
 _MACROS_FILTERS = {"enabled", "schedule_enabled", "schedule_frequency"}
-_FREQUENCIES = {"daily", "weekly", "monthly"}
+_FREQUENCIES = {"daily", "weekly", "monthly", "once"}
+
+
+def _schedule_date_column() -> list[str]:
+	"""``schedule_date`` among the fields read, once the migrate that adds it ran: the
+	code can be served before it, and a missing column fails the whole query."""
+	from jarvis.chat.macro_scheduler import _once_ready
+
+	return ["schedule_date"] if _once_ready() else []
 
 
 # C08-5: ``_lk`` / ``_clamp_page`` / ``_bool01`` / ``_load_filters`` /
@@ -242,7 +251,7 @@ def list_macros_page(
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, macro_name, description, enabled, stop_on_error, skip_confirmation,
 		schedule_enabled, schedule_frequency, schedule_weekday, schedule_day_of_month,
-		schedule_time, next_run_at,
+		schedule_time, {"".join(c + ", " for c in _schedule_date_column())}next_run_at,
 		last_run_at, modified, merge_status,
 		CASE WHEN TRIM(COALESCE(merged_prompt, '')) != '' THEN 1 ELSE 0 END AS has_summary
 		FROM `tabJarvis Macro`
@@ -277,6 +286,8 @@ def list_macros_page(
 		# Time renders as a timedelta over raw SQL; stringify for a stable payload.
 		if r.get("schedule_time") is not None:
 			r["schedule_time"] = str(r["schedule_time"])
+		if r.get("schedule_date") is not None:
+			r["schedule_date"] = str(r["schedule_date"])
 
 	return {
 		"rows": rows,
@@ -473,7 +484,9 @@ def get_macro(name: str) -> dict:
 		# `is None`, not truthiness: midnight is timedelta(0), which is falsy, so
 		# `or ""` sent the form "" and it fell back to (then saved) its 09:00 default.
 		"schedule_time": "" if doc.schedule_time is None else str(doc.schedule_time),
+		"schedule_date": str(doc.get("schedule_date") or ""),
 		"next_run_at": str(doc.next_run_at or ""),
+		"last_run_at": str(doc.last_run_at or ""),
 		"merged_prompt": doc.merged_prompt or "",
 		"merge_status": doc.merge_status or "",
 		# An admin's hold (0 and "" on a site without the fields): the form shows the
@@ -658,6 +671,7 @@ def create_macro(
 	schedule_time: str | None = None,
 	schedule_weekday: str | None = None,
 	schedule_day_of_month: int | None = None,
+	schedule_date: str | None = None,
 ) -> dict:
 	"""Create a macro. Validation (name/steps/caps, and the two schedule anchors'
 	ranges) runs in the doctype validate(). Per-step tagged skills arrive INSIDE
@@ -678,6 +692,7 @@ def create_macro(
 			"schedule_time": schedule_time or None,
 			"schedule_weekday": schedule_weekday or None,
 			"schedule_day_of_month": frappe.utils.cint(schedule_day_of_month) or None,
+			"schedule_date": schedule_date or None,
 			"steps": _parse_steps(steps),
 		}
 	)
@@ -704,6 +719,7 @@ def update_macro(
 	schedule_time: str | None = None,
 	schedule_weekday: str | None = None,
 	schedule_day_of_month: int | None = None,
+	schedule_date: str | None = None,
 	merged_prompt: str | None = None,
 	merged_prompt_edited: int | None = None,
 ) -> dict:
@@ -764,6 +780,8 @@ def update_macro(
 		# cint (not the raw arg) so a stray "" or a non-numeric SPA payload lands
 		# on the doctype's own 1-31 validate() rather than a TypeError here.
 		doc.schedule_day_of_month = frappe.utils.cint(schedule_day_of_month) or None
+	if schedule_date is not None:
+		doc.schedule_date = schedule_date or None
 	if steps is not None:
 		rows = _parse_steps(steps)
 		# Unchanged steps are left as they are: the rows are not deleted and inserted

@@ -3373,7 +3373,7 @@ def _announce_reaped(run_name: str) -> None:
 		pass
 
 
-def notify_owner(owner: str, *, subject: str, body: str) -> None:
+def notify_owner(owner: str, *, subject: str, body: str, link: str | None = None) -> None:
 	"""Best-effort Notification Log for a macro owner (#471). A scheduled macro that
 	fails at 03:00 reaches nobody through the realtime channel — ``publish_to_user``
 	is delivered only to an open socket, and there is none — and ``frappe.log_error``
@@ -3396,6 +3396,8 @@ def notify_owner(owner: str, *, subject: str, body: str) -> None:
 				"type": "Alert",
 				"subject": subject[:140],
 				"email_content": body,
+				# Where the bell takes the owner (the run's conversation), when given.
+				**({"link": link} if link else {}),
 			}
 		).insert(ignore_permissions=True)
 		frappe.db.commit()
@@ -3621,7 +3623,18 @@ def _announce(run, macro_doc, status: str, error: str = "") -> None:
 		_publish_done(run, macro_doc, status, error)
 	except Exception:
 		frappe.log_error(title="jarvis macro done event failed", message=frappe.get_traceback())
-	if (run.get("trigger") or "manual") != "scheduled" or not error:
+	if (run.get("trigger") or "manual") != "scheduled":
+		return
+	if not error:
+		# A one-time schedule is usually something the owner asked to be done or
+		# reminded of at a moment: that it ran is the news, so it is told too.
+		if status == "completed" and str(macro_doc.get("schedule_frequency") or "") == "once":
+			notify_owner(
+				macro_doc.owner,
+				subject=f"One-time macro finished: {macro_doc.macro_name}",
+				body="It ran as scheduled. Open the conversation to see what it did.",
+				link=f"/jarvis/c/{run.conversation}" if run.get("conversation") else None,
+			)
 		return
 	notify_owner(
 		macro_doc.owner,

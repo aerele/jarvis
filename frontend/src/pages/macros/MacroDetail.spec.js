@@ -37,7 +37,8 @@ vi.mock("vue-router", () => ({
 const siteConfig = vi.hoisted(() => ({ systemTimezone: "", viewerClock: "" }));
 vi.mock("frappe-ui", () => ({
 	getConfig: (key) => siteConfig[key],
-	dayjs: () => ({ format: () => "" }),
+	// tomorrow(): the first date a one-time schedule offers.
+	dayjs: () => ({ format: () => "", add: () => ({ format: () => "2026-10-20" }) }),
 	ErrorMessage: {
 		name: "ErrorMessage",
 		props: ["message"],
@@ -80,6 +81,12 @@ vi.mock("frappe-ui", () => ({
 		props: ["modelValue", "label", "disabled", "description"],
 		emits: ["update:modelValue"],
 		template: `<button :disabled="disabled" @click="$emit('update:modelValue', !modelValue)">{{ label }}</button>`,
+	},
+	DatePicker: {
+		name: "DatePicker",
+		props: ["modelValue", "placeholder", "disabled"],
+		emits: ["update:modelValue"],
+		template: `<button data-testid="date-picker" @click="$emit('update:modelValue', '2026-11-02')">{{ modelValue }}</button>`,
 	},
 	TimePicker: {
 		name: "TimePicker",
@@ -1851,5 +1858,67 @@ describe("MacroDetail: an armed macro seen by someone other than its owner", () 
 		expect(summary(w).props("disabled")).toBe(false);
 		expect(switchNamed(w, "Run on a schedule").props("disabled")).toBe(false);
 		expect(switchNamed(w, "Stop on error").props("disabled")).toBe(false);
+	});
+});
+
+describe("MacroDetail Schedule section: a one-time schedule", () => {
+	const control = (w, label) =>
+		w.findAllComponents({ name: "FormControl" }).find((c) => c.attributes("label") === label);
+
+	it("Once swaps the Day control for a date, starting tomorrow, and saves that date", async () => {
+		api.updateMacro.mockResolvedValue({});
+		const w = await mountDetail(baseMacro({ next_run_at: null }));
+		await control(w, "Frequency").vm.$emit("update:modelValue", "once");
+		expect(control(w, "Day")).toBeUndefined();
+		const picker = w.findComponent({ name: "DatePicker" });
+		expect(picker.props("modelValue")).toBe("2026-10-20");
+		await w.find('[data-testid="date-picker"]').trigger("click");
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		const sent = api.updateMacro.mock.calls[0][0];
+		expect(sent.schedule_frequency).toBe("once");
+		expect(sent.schedule_date).toBe("2026-11-02");
+	});
+
+	it("a recurring schedule sends no date", async () => {
+		api.updateMacro.mockResolvedValue({});
+		const w = await mountDetail(baseMacro({ schedule_date: "2026-11-02", next_run_at: null }));
+		await nameField(w).vm.$emit("update:modelValue", "Renamed");
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(api.updateMacro.mock.calls[0][0].schedule_date).toBe("");
+	});
+
+	it("a saved one-time schedule says it runs once and then switches itself off", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				schedule_frequency: "once",
+				schedule_date: "2026-11-02",
+				next_run_at: "2026-11-02 09:00:00",
+			})
+		);
+		expect(w.text()).toContain("Runs once on 2026-11-02 09:00:00.");
+		expect(w.text()).toContain("The schedule switches itself off after that run.");
+		expect(w.text()).not.toContain("Next run:");
+		expect(saveBtn(w).attributes("disabled")).toBeDefined();
+	});
+
+	it("one that ran says when, and Schedule again turns it back on from tomorrow", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				schedule_enabled: 0,
+				schedule_frequency: "once",
+				schedule_date: "2026-10-12",
+				last_run_at: "2026-10-12 09:00:04",
+			})
+		);
+		expect(w.text()).toContain("Ran once on 2026-10-12 09:00:04. The schedule is off now.");
+		const again = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Schedule again");
+		await again.trigger("click");
+		expect(w.findComponent({ name: "DatePicker" }).props("modelValue")).toBe("2026-10-20");
+		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
+		expect(w.text()).not.toContain("Ran once on");
 	});
 });
