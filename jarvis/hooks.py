@@ -929,6 +929,19 @@ has_permission.update(
 # spanned a watchdog tick failed with "Your sign-in session was lost" (unknown_nonce). The
 # hash has no key TTL; each entry carries its own 10-minute expiry, and the sweep on every
 # begin (``oauth.api._gc_expired_nonces``) drops expired ones, so the hash stays bounded.
+<<<<<<< HEAD
+=======
+#
+# jarvis:mcp_oauth_state: and jarvis:mcp_oauth_signin_error: (2026-10-08): a connector
+# sign-in's in-flight state and its parked callback error (``connectors.mcp_oauth_store``).
+# Without them the same tick sent a sign-in back to an unknown state. Both keys keep their
+# 10-minute TTL.
+#
+# jarvis:memory_seen: (#715 F09): the memory version each chat session was last shown
+# (``tools._user_memory.SEEN_PREFIX``), the base a memory save without ``base_version`` is
+# checked against. Without it every tick wiped every chat's base, and each chat's next
+# save came back as a conflict it had to re-read and merge. One-week TTL.
+>>>>>>> 38e9a15 (fix(memory): keep each chat's memory base through cache clears and lock waits)
 persistent_cache_keys = [
 	"jarvis:llm_switch",
 	"jarvis:macro_reconcile",
@@ -936,4 +949,10 @@ persistent_cache_keys = [
 	"jarvis:heartbeat_macro_health_log_hour",
 	"jarvis:subscription_",
 	"jarvis.oauth.codex_signin",
+<<<<<<< HEAD
+=======
+	"jarvis:mcp_oauth_state:",
+	"jarvis:mcp_oauth_signin_error:",
+	"jarvis:memory_seen:",
+>>>>>>> 38e9a15 (fix(memory): keep each chat's memory base through cache clears and lock waits)
 ]

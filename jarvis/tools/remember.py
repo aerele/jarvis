@@ -12,63 +12,77 @@ Full replace with compare-and-swap (#715 F09): pass the whole updated blob and t
 ``base_version``. When the stored blob has moved on, nothing is written: the reply
 is ``saved: false, conflict: true`` with the current blob and its version, so the
 agent merges and retries, asking the user when two facts contradict. Without a
-``base_version`` the session's last-seen version is used (``_user_memory``), and with
-neither the save is last-write-wins, as before F09.
+``base_version`` a plugin session is checked against the version it was last shown,
+and a session the cache holds nothing for gets a conflict whenever a blob is stored
+(``_user_memory``). Only a caller with no session key (REST / API token) is
+last-write-wins, as before F09. With no row at all there is nothing to overwrite, so
+the blob is inserted whatever the base.
 
-The compare runs under a row lock, so two overlapping saves are serialised by the
-database: the second sees the first's blob, or fails with a lock error, and never
-gets a receipt for an overwrite. Capped to keep it terse and to bound the context
-it later consumes.
+The compare reads the row with FOR UPDATE, so two overlapping saves are serialised
+by the database: the second sees the first's blob, or its lock wait fails and it
+gets a RetryLaterError saying nothing was saved, never a receipt for an overwrite.
+Capped to keep it terse and to bound the context it later consumes.
 """
 
 import frappe
 
-from jarvis.exceptions import InvalidArgumentError
+from jarvis.exceptions import InvalidArgumentError, RetryLaterError
 from jarvis.tools import _user_memory
-from jarvis.tools._user_memory import DOCTYPE, EMPTY_VERSION, version_of
+from jarvis.tools._user_memory import DOCTYPE, version_of
 
 MAX_BYTES = 8192
 
 CONFLICT_MESSAGE = (
-	"Not saved: this person's memory changed since you read it (another chat saved first). "
-	"`content` is the memory as it stands now. Merge your new facts into it, keeping every "
+	"Not saved: the stored memory is not the version this save was built on (another chat "
+	"may have saved since you read it). `content` is the memory as it stands now. Merge your new facts into it, keeping every "
 	"line already there unless your fact replaces it. If a new fact contradicts a stored one, "
 	"ask the user which holds before saving. Then call remember again with the merged blob "
 	"and base_version set to `version`."
 )
 
+BUSY_MESSAGE = (
+	"Another chat was saving this person's memory at the same moment, so nothing was saved. "
+	"Call recall, merge your new facts into the content it returns, and call remember again "
+	"with its version."
+)
+
 
 def remember(content: str, base_version: str | None = None) -> dict:
 	content = _checked_content(content)
-	base = _checked_base(base_version) or _user_memory.last_seen()
-	user = frappe.session.user
-	if not frappe.db.get_value(DOCTYPE, {"user": user}, "name"):
-		result = _insert_first(user, content, base)
-		if result:
-			return result
-	return _replace_locked(user, content, base)
+	base = _checked_base(base_version) or _user_memory.session_base()
+	try:
+		return _save(frappe.session.user, content, base)
+	except (frappe.QueryDeadlockError, frappe.QueryTimeoutError) as e:
+		# A lock wait that failed (deadlock, timeout, or MariaDB's snapshot check:
+		# the row changed after this request began). The database has rolled the
+		# statement back; retrying here would hit the same snapshot.
+		raise RetryLaterError(BUSY_MESSAGE) from e
 
 
-def _insert_first(user: str, content: str, base: str | None) -> dict | None:
-	"""First save for this user. None when another chat created the row meanwhile."""
-	if base and base != EMPTY_VERSION:
-		return _conflict("")
+def _save(user: str, content: str, base: str | None) -> dict:
+	"""Compare and write under the row lock. A second pass only when another chat's
+	first save took the user's row between this one's read and its insert."""
+	for _attempt in range(2):
+		row = frappe.db.get_value(DOCTYPE, {"user": user}, ["name", "content"], as_dict=True, for_update=True)
+		if row:
+			return _replace(row, content, base)
+		if _insert(user, content):
+			return _saved(content)
+	raise RetryLaterError(BUSY_MESSAGE)
+
+
+def _insert(user: str, content: str) -> bool:
+	"""No row, so nothing to overwrite: insert whatever the base was. False when the
+	unique ``user`` index caught a concurrent first save."""
 	try:
 		frappe.get_doc({"doctype": DOCTYPE, "user": user, "content": content}).insert(ignore_permissions=True)
 	except frappe.UniqueValidationError:
-		# The unique ``user`` index caught a concurrent first save: compare against
-		# that row under the lock instead.
 		frappe.clear_messages()
-		return None
-	return _saved(content)
+		return False
+	return True
 
 
-def _replace_locked(user: str, content: str, base: str | None) -> dict:
-	"""Replace the row, refusing when it no longer matches ``base``. The read takes
-	the row lock, so no other save can land between the compare and the write."""
-	row = frappe.db.get_value(DOCTYPE, {"user": user}, ["name", "content"], as_dict=True, for_update=True)
-	if not row:
-		raise InvalidArgumentError("memory changed while saving; call recall, then retry")
+def _replace(row: dict, content: str, base: str | None) -> dict:
 	current = row.content or ""
 	if base and base != version_of(current):
 		return _conflict(current)
@@ -80,7 +94,7 @@ def _replace_locked(user: str, content: str, base: str | None) -> dict:
 
 def _saved(content: str) -> dict:
 	version = version_of(content)
-	_user_memory.note_seen(version)
+	_user_memory.note_seen(version, after_commit=True)
 	return {"saved": True, "bytes": len(content.encode("utf-8")), "version": version}
 
 
