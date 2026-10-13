@@ -499,14 +499,15 @@ class TestToolTelemetry(_CustDiscFixtures):
 class TestTurnTelemetryDuration(FrappeTestCase):
 	"""The finalize turn event carries the measured span, or None, never a zero."""
 
-	def _emitted(self, row):
+	def _emitted(self, turn, approvals=()):
 		from jarvis.chat import finalize
 
 		ctx = finalize._Ctx(
-			run_id="r-dur", turn={}, conversation="c-dur", owner="u", errored=False, payload={}
+			run_id="r-dur", turn=turn, conversation="c-dur", owner="u", errored=False, payload={}
 		)
+		rows = [frappe._dict(creation=c, decided_at=d) for c, d in approvals]
 		with (
-			patch("jarvis.chat.finalize.frappe.db.get_value", return_value=row),
+			patch("jarvis.chat.finalize.frappe.get_all", return_value=rows),
 			patch("jarvis.telemetry._emit") as emit,
 		):
 			finalize._effect_telemetry(ctx)
@@ -522,10 +523,54 @@ class TestTurnTelemetryDuration(FrappeTestCase):
 		)
 		self.assertEqual(rec["duration_ms"], 10500)
 		self.assertEqual(rec["queue_ms"], 2000)
-		self.assertIsNone(rec["approval_wait_ms"])
+		self.assertEqual(rec["approval_wait_ms"], 0)
+		self.assertEqual(rec["active_ms"], 10500)
 		self.assertEqual(rec["run_id"], "r-dur")
 
+	def test_real_datetimes(self):
+		from datetime import datetime
+
+		rec = self._emitted(
+			{
+				"enqueued_at": datetime(2026, 10, 13, 10, 0, 0),
+				"dispatching_at": datetime(2026, 10, 13, 10, 0, 1),
+				"terminal_observed_at": datetime(2026, 10, 13, 10, 0, 4),
+			}
+		)
+		self.assertEqual((rec["duration_ms"], rec["queue_ms"]), (3000, 1000))
+
 	def test_missing_start_is_null_not_zero(self):
-		rec = self._emitted({"enqueued_at": "2026-10-13 10:00:00", "terminal_observed_at": "2026-10-13 10:00:05"})
+		rec = self._emitted(
+			{"enqueued_at": "2026-10-13 10:00:00", "terminal_observed_at": "2026-10-13 10:00:05"}
+		)
 		self.assertIsNone(rec["duration_ms"])
 		self.assertIsNone(rec["queue_ms"])
+		self.assertIsNone(rec["active_ms"])
+
+	def test_negative_span_is_null_not_zero(self):
+		rec = self._emitted(
+			{
+				"enqueued_at": "2026-10-13 10:00:00",
+				"dispatching_at": "2026-10-13 10:00:09",
+				"terminal_observed_at": "2026-10-13 10:00:05",
+			}
+		)
+		self.assertIsNone(rec["duration_ms"])
+		self.assertIsNone(rec["active_ms"])
+
+	def test_turn_with_no_stamps_is_null(self):
+		rec = self._emitted({})
+		self.assertIsNone(rec["duration_ms"])
+		self.assertIsNone(rec["queue_ms"])
+
+	def test_approval_wait_is_separated(self):
+		rec = self._emitted(
+			{
+				"dispatching_at": "2026-10-13 10:00:00",
+				"terminal_observed_at": "2026-10-13 10:01:00",
+			},
+			approvals=[("2026-10-13 10:00:10", "2026-10-13 10:00:40")],
+		)
+		self.assertEqual(rec["duration_ms"], 60000)
+		self.assertEqual(rec["approval_wait_ms"], 30000)
+		self.assertEqual(rec["active_ms"], 30000)

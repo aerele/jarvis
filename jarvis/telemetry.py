@@ -4,12 +4,14 @@
   {"kind": "tool", ts, site, user_hash, conversation, tool, duration_ms,
    result_chars, custom_target}
   {"kind": "turn", ts, site, conversation, run_id, duration_ms, touched_custom,
-   queue_ms, approval_wait_ms}
+   queue_ms, approval_wait_ms, active_ms}
 
 A turn's duration_ms is the measured run:start -> terminal span (the same
 baseline as the persisted reply_duration_ms), or null when a timestamp is
 missing. It is never a placeholder zero. queue_ms is enqueue -> dispatch.
-approval_wait_ms is null: the turn records no approval-wait timestamps yet.
+duration_ms INCLUDES any human approval wait; approval_wait_ms is the summed
+Pending Action creation -> decided_at wait and active_ms = duration_ms minus it
+(null when either is unknown).
 
 analyze.py computes the activation rate from these. Every public function
 swallows everything - telemetry must never break a tool call or turn.
@@ -139,6 +141,7 @@ def emit_turn(
 	duration_ms: int | None,
 	queue_ms: int | None = None,
 	approval_wait_ms: int | None = None,
+	active_ms: int | None = None,
 ) -> None:
 	"""One line per completed turn; reads and clears the per-turn custom
 	flag. A duration that was not measured is None (null), never 0. Never raises."""
@@ -155,6 +158,7 @@ def emit_turn(
 				"duration_ms": None if duration_ms is None else int(duration_ms),
 				"queue_ms": None if queue_ms is None else int(queue_ms),
 				"approval_wait_ms": None if approval_wait_ms is None else int(approval_wait_ms),
+				"active_ms": None if active_ms is None else int(active_ms),
 				"touched_custom": _read_and_clear_turn_flag(conversation),
 			}
 		)
