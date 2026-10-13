@@ -3,13 +3,21 @@ and the get_doc calls it names read exactly the omitted part, through the same
 permission check and field masking as the whole document."""
 
 import json
+from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.exceptions import InvalidArgumentError, InvalidFieldValueError, PermissionDeniedError
+from jarvis.tools import _doc_parts
+from jarvis.tools._doc_parts import TEXT_WINDOW_CHARS, DocPart
 from jarvis.tools._result_guard import MAX_RESULT_CHARS, enforce_result_budget
-from jarvis.tools.get_doc import TEXT_WINDOW_CHARS, _DocPart, get_doc
+from jarvis.tools.create_doc import create_doc
+from jarvis.tools.get_doc import get_doc
+from jarvis.tools.registry import dispatch
+from jarvis.tools.update_doc import update_doc
+
+PART_ARGS = ("fields", "child_table", "start", "limit", "text_offset", "text_length")
 
 DESK_USER = "jv-f11-desk@example.com"
 SEEN_ROWS = 250
@@ -125,7 +133,7 @@ class TestGetDocParts(FrappeTestCase):
 		doc = {"doctype": "Note", "name": "N-1", "tags": ['a "quoted" tag'] * 6000}
 
 		def read(fields, text_offset=None, text_length=None, **_identity):
-			return _DocPart(fields, None, 0, None, text_offset, text_length).of(doc)
+			return DocPart(fields, None, 0, None, text_offset, text_length).of(doc)
 
 		first = read(fields=["tags"], text_offset=0)
 		self.assertIs(first["_text_window"]["as_json"], True)
@@ -139,9 +147,9 @@ class TestGetDocParts(FrappeTestCase):
 		length = len(get_doc(doctype="Note", name=name)["content"])
 		cases = (
 			({"fields": ["content"], "text_offset": length + 1}, "past the end of content"),
-			({"fields": ["content", "title"], "text_offset": 0}, "read one field"),
-			({"child_table": "seen_by", "fields": ["user"], "text_offset": 0}, "read one field"),
-			({"text_offset": 0}, "read one field"),
+			({"fields": ["content", "title"], "text_offset": 5}, "read one field"),
+			({"child_table": "seen_by", "fields": ["user"], "text_offset": 5}, "read one field"),
+			({"text_offset": 5}, "read one field"),
 			({"fields": ["content"], "text_offset": -1}, "text_offset must be"),
 			({"fields": ["content"], "text_length": TEXT_WINDOW_CHARS + 1}, "text_length must be"),
 		)
@@ -184,10 +192,35 @@ class TestGetDocParts(FrappeTestCase):
 		frappe.set_user(_desk_user())
 		name = _note(content_chars=10)
 		whole = get_doc(doctype="Note", name=name)
-		self.assertEqual(whole["seen_by"], [])
-		page = get_doc(doctype="Note", name=name, child_table="seen_by")
-		self.assertEqual((page["rows"], page["coverage"]["total"]), ([], 0))
-		self.assertEqual(get_doc(doctype="Note", name=name, fields=["seen_by"])["seen_by"], [])
+		self.assertEqual(whole["seen_by"], [])  # masked: looks empty in the whole read
+		# A part read says why instead of passing the mask off as no data.
+		for args in (
+			{"child_table": "seen_by"},
+			{"fields": ["seen_by"]},
+			{"fields": ["seen_by"], "text_offset": 0},
+		):
+			with (
+				self.subTest(args=args),
+				self.assertRaisesRegex(
+					PermissionDeniedError, "no read permission on Note field\\(s\\) seen_by"
+				),
+			):
+				get_doc(doctype="Note", name=name, **args)
+		self.assertEqual(get_doc(doctype="Note", name=name, fields=["public"])["public"], 0)
+
+	def test_a_child_field_the_user_cannot_read_is_left_out_and_named(self):
+		name = _note(content_chars=10, rows=3)
+		real = _doc_parts._unreadable
+
+		def unreadable(doctype, of=None):
+			return {"user"} if of == "Note Seen By" else real(doctype, of)
+
+		with patch.object(_doc_parts, "_unreadable", side_effect=unreadable):
+			for fields in (None, ["user"]):
+				page = get_doc(doctype="Note", name=name, child_table="seen_by", fields=fields)
+				self.assertEqual(page["omitted_fields"], ["user"])
+				self.assertTrue(all("user" not in row and row["name"] for row in page["rows"]))
+				self.assertIn("omitted_fields", page["note"])
 
 	def test_part_reads_refuse_a_document_the_user_cannot_read(self):
 		name = _note(content_chars=10)  # private, owned by Administrator
@@ -203,7 +236,11 @@ class TestGetDocParts(FrappeTestCase):
 			({"fields": ["nope"]}, "no field\\(s\\) nope"),
 			({"child_table": "seen_by", "fields": ["nope"]}, "Note Seen By has no field"),
 			({"start": 5}, "pass child_table too"),
-			({"child_table": "seen_by", "limit": 0}, "limit must be"),
+			({"child_table": "seen_by", "limit": 1001}, "limit must be"),
+			({"child_table": "seen_by", "limit": 2.5}, "limit must be"),
+			({"child_table": "seen_by", "start": "ten"}, "start must be"),
+			({"child_table": "seen_by", "start": -1}, "start must be"),
+			({"child_table": "seen_by", "start": True}, "start must be"),
 		)
 		for args, message in cases:
 			with self.subTest(args=args), self.assertRaisesRegex(InvalidArgumentError, message):
@@ -212,9 +249,27 @@ class TestGetDocParts(FrappeTestCase):
 			get_doc(doctype="Note", names=[name], child_table="seen_by")
 
 	def test_unused_empty_part_arguments_mean_a_whole_read(self):
+		# Models fill unused optional arguments with null, [], "" or 0: through the
+		# registry, as a tool call arrives, a plain read must stay a plain read.
 		name = _note(content_chars=10)
+		whole = get_doc(doctype="Note", name=name)
+		fillers = (
+			dict.fromkeys(PART_ARGS),
+			{"fields": [], "child_table": "", "start": 0, "limit": 0, "text_offset": 0, "text_length": 0},
+		)
+		for filler in fillers:
+			with self.subTest(filler=filler):
+				self.assertEqual(dispatch("get_doc", {"doctype": "Note", "name": name, **filler}), whole)
+
+	def test_numbers_sent_as_strings_or_floats_are_read_as_numbers(self):
+		name = _note(content_chars=100, rows=30)
+		page = get_doc(doctype="Note", name=name, child_table="seen_by", start=10, limit=5)
 		self.assertEqual(
-			get_doc(doctype="Note", name=name, fields=[], child_table=""), get_doc(doctype="Note", name=name)
+			get_doc(doctype="Note", name=name, child_table="seen_by", start="10", limit="5.0"), page
+		)
+		window = get_doc(doctype="Note", name=name, fields=["content"], text_offset=20, text_length=10)
+		self.assertEqual(
+			get_doc(doctype="Note", name=name, fields=["content"], text_offset="20", text_length=10.0), window
 		)
 
 	def test_single_doctype_child_page(self):
@@ -273,3 +328,38 @@ class TestSalesInvoiceBudget(FrappeTestCase):
 		self.assertIsNone(event)
 		self.assertIs(out, whole)
 		self.assertEqual(json.dumps(out, default=str, ensure_ascii=False, separators=(",", ":")), before)
+
+
+class TestCutValuesAreNeverWrittenBack(FrappeTestCase):
+	"""A cut value carries its TRUNCATED marker; written back, it would replace the
+	real data with a fragment. Every create / update path refuses it."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+		self.name = _note(content_chars=50_000, rows=2)
+		cut = _agent_read(doctype="Note", name=self.name)
+		self.cut_content = cut["content"]
+		self.assertIn(" [TRUNCATED: ", self.cut_content)
+
+	def test_update_refuses_a_cut_value(self):
+		with self.assertRaisesRegex(
+			InvalidFieldValueError, "content.*TRUNCATED.*get_doc fields=\\['content'\\]"
+		):
+			update_doc("Note", self.name, {"content": self.cut_content})
+		with self.assertRaisesRegex(InvalidFieldValueError, "TRUNCATED"):
+			update_doc("Note", updates=[{"name": self.name, "changes": {"title": self.cut_content}}])
+
+	def test_create_refuses_a_cut_value_also_in_a_row(self):
+		cases = (
+			{"doctype": "Note", "values": {"title": "copy", "content": self.cut_content}},
+			{
+				"doctype": "Note",
+				"values": {"title": "copy", "seen_by": [{"user": "Administrator [TRUNCATED: 3 more chars]"}]},
+			},
+		)
+		for case in cases:
+			with self.subTest(case=case), self.assertRaisesRegex(InvalidFieldValueError, "TRUNCATED"):
+				create_doc(**case)
+		with self.assertRaisesRegex(InvalidFieldValueError, "TRUNCATED"):
+			create_doc(docs=[cases[0]])

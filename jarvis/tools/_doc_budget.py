@@ -8,16 +8,24 @@ call that reads the rest. Its words match a cut list page: returned, total,
 has_more, next_start.
 """
 
+import re
+
 import frappe
 from frappe.model import table_fields
 
-from jarvis.tools._result_guard import _json_text, _size
-from jarvis.tools.get_doc import MAX_START
+from jarvis.tools._doc_parts import MAX_START
+from jarvis.tools._result_guard import MAX_RESULT_CHARS, _json_text, _size
+from jarvis.tools.get_list import MAX_LIMIT
 
 # In a cut document a longer value shows only this much, so the rows get the
 # room. With no child table to share with, values get all the room there is.
 TEXT_PREVIEW_CHARS = 2_000
 _MARKER = " [TRUNCATED: {more} more chars]"
+# The marker as it appears inside a cut value. The write tools refuse a value
+# holding it: it is a cut read, not the real data.
+CUT_MARKER = re.compile(r" \[TRUNCATED: \d+ more chars\]")
+# Room a child_table page needs besides its rows (coverage, note, identity).
+_PAGE_OVERHEAD = 1_000
 _BARE_FIELD_NAMES = 300
 _GUARD_KEYS = ("_truncated", "_partial")
 _IDENTITY_KEYS = ("doctype", "name")
@@ -137,7 +145,9 @@ class _DocumentCut:
 	def _partial(self, cap: int, kept: dict, worst: bool = False) -> dict:
 		partial = {"note": _DOC_NOTE}
 		tables = {
-			t: self._table_entry(t, kept[t]) for t in self.tables if worst or kept[t] < len(self.doc[t])
+			t: self._table_entry(t, kept[t], worst)
+			for t in self.tables
+			if worst or kept[t] < len(self.doc[t])
 		}
 		texts = {k: self._text_entry(k, text, cap) for k, text in self.texts.items() if _cut_text(text, cap)}
 		if tables:
@@ -146,7 +156,7 @@ class _DocumentCut:
 			partial["text_fields"] = texts
 		return partial
 
-	def _table_entry(self, table: str, returned: int) -> dict:
+	def _table_entry(self, table: str, returned: int, worst: bool = False) -> dict:
 		next_start = returned if returned <= MAX_START else None
 		entry = {
 			"returned": returned,
@@ -155,8 +165,23 @@ class _DocumentCut:
 			"next_start": next_start,
 		}
 		if self.identity and next_start is not None:
-			entry["next_call"] = _call({**self.identity, "child_table": table, "start": next_start})
+			# The worst case reserves the widest limit; the real one is what fits.
+			limit = MAX_LIMIT if worst else self._page_limit(table, next_start)
+			entry["next_call"] = _call(
+				{**self.identity, "child_table": table, "start": next_start, "limit": limit}
+			)
 		return entry
+
+	def _page_limit(self, table: str, start: int) -> int:
+		"""Rows from ``start`` that one child_table page carries uncut (at least 1:
+		a row too big alone comes back as a page cut to zero rows, which says so)."""
+		room, count = MAX_RESULT_CHARS - _PAGE_OVERHEAD, 0
+		for row in self.doc[table][start : start + MAX_LIMIT]:
+			room -= _size(row) + (1 if count else 0)
+			if room < 0:
+				break
+			count += 1
+		return max(count, 1)
 
 	def _text_entry(self, field: str, text: str, cap: int) -> dict:
 		entry = {"returned_chars": cap, "total_chars": len(text), "next_offset": cap}
