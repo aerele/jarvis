@@ -5,7 +5,13 @@ import { enterSends } from "./composerEnter.js";
 const DESKTOP = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15";
 const PHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile/15E148";
 const ANDROID = "Mozilla/5.0 (Linux; Android 14) Chrome/120 Mobile";
-const enter = (over = {}) => ({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 13, ...over });
+const enter = (over = {}) => ({
+	key: "Enter",
+	shiftKey: false,
+	isComposing: false,
+	keyCode: 13,
+	...over,
+});
 
 test("plain Enter on a desktop keyboard sends", () => {
 	assert.equal(enterSends(enter(), DESKTOP), true);
