@@ -56,23 +56,25 @@ def hold_fields_exist() -> bool:
 
 def macros_counted_toward_cap(owner: str) -> int:
 	"""How many of ``owner``'s macros count toward ``MAX_MACROS_PER_OWNER``: all but
-	the one-time macros that already ran (their schedule switched itself off). A
-	reminder set from chat is a one-time macro, and a cap they all counted toward
-	would fill up with spent reminders and refuse the next one, or a real macro."""
-	spent = 0
+	the spent one-time macros, whose schedule ended after its slot came (it ran, or
+	was refused or skipped; either way a scheduled run row exists). A reminder set
+	from chat is a one-time macro, and a cap they all counted toward would fill up
+	with spent reminders and refuse the next one, or a real macro. A one-time
+	macro switched off before its slot still counts: nothing was spent."""
 	from jarvis.chat.macro_scheduler import once_ready
 
-	if once_ready():
-		spent = frappe.db.count(
-			"Jarvis Macro",
-			{
-				"owner": owner,
-				"schedule_frequency": "once",
-				"schedule_enabled": 0,
-				"last_run_at": ["is", "set"],
-			},
-		)
-	return frappe.db.count("Jarvis Macro", {"owner": owner}) - spent
+	total = frappe.db.count("Jarvis Macro", {"owner": owner})
+	if not once_ready():
+		return total
+	spent = frappe.db.sql(
+		"""SELECT COUNT(*) FROM `tabJarvis Macro` m
+		WHERE m.owner = %(owner)s AND m.schedule_frequency = 'once' AND m.schedule_enabled = 0
+		AND (m.last_run_at IS NOT NULL OR EXISTS (
+			SELECT 1 FROM `tabJarvis Macro Run` r WHERE r.macro = m.name AND r.trigger = 'scheduled'
+		))""",
+		{"owner": owner},
+	)[0][0]
+	return total - spent
 
 
 def arm_on_form_only() -> str:

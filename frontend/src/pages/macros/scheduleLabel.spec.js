@@ -38,9 +38,23 @@ describe("ranOnceLabel", () => {
 			ranOnceLabel({
 				schedule_enabled: 0,
 				schedule_frequency: "once",
+				schedule_date: "2026-11-02",
+				schedule_time: "09:00:00",
 				last_run_at: "2026-11-02 09:00:04",
 			})
 		).toBe("Ran once · Mon, 2 Nov");
+	});
+
+	it("is empty for a last run older than the one-time slot", () => {
+		expect(
+			ranOnceLabel({
+				schedule_enabled: 0,
+				schedule_frequency: "once",
+				schedule_date: "2026-11-02",
+				schedule_time: "09:00:00",
+				last_run_at: "2026-10-01 09:00:04",
+			})
+		).toBe("");
 	});
 
 	it("is empty for anything else", () => {

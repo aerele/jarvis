@@ -366,7 +366,11 @@ function shortPrompt(prompt) {
 // "2 Nov 2026, 9:30 am" from a site-time "YYYY-MM-DD HH:MM[:SS]" (read as stored, the
 // clock the run fires on), or "" when it is not one.
 function scheduleWhen(value) {
-	const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})/.exec(String(value || ""));
+	const text = String(value || "");
+	// One with its own offset ("...Z", "+05:30") is another clock than the site's the
+	// run fires on: say no time rather than the wrong one.
+	if (/(Z|[+-]\d{2}:?\d{2})$/.test(text.trim())) return "";
+	const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})/.exec(text);
 	if (!m) return "";
 	const months = [
 		"Jan",
