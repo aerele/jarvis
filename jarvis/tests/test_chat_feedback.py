@@ -119,7 +119,7 @@ class TestSubmitFeedback(_FeedbackTestCase):
 		self.assertEqual(item["reply_duration_ms"], 84000)
 		self.assertEqual(item["user_ref"], TEST_USER)
 		self.assertEqual(item["note"], "")
-		self.enqueue.assert_called_once_with(self._rows()[0].name)
+		self.enqueue.assert_called_once_with(self._rows()[0].name, 1)
 
 	def test_down_keeps_stripped_note(self):
 		submit_feedback(message_id=self.msg, rating="down", note="  too slow  ")
