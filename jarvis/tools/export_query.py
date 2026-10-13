@@ -25,6 +25,11 @@ _FORMATS = {
 }
 
 
+def _detail(spec, exc: Exception) -> str:
+	"""Which form failed and why, short, for the export telemetry."""
+	return (f"spec: {exc}" if spec else str(exc))[:200]
+
+
 def _outcome_for(exc: Exception) -> str:
 	if isinstance(exc, NoDataError):
 		return "no_data"
@@ -96,7 +101,19 @@ def export_query(
 		env = save_export_file(f"x.{fmt}", content, title=title or source, mime_type=mime)
 	except (NoDataError, PermissionDeniedError, InvalidArgumentError) as e:
 		telemetry.record_export_event(
-			tool="export_query", fmt=fmt, rows=0, mode="sync", outcome=_outcome_for(e)
+			tool="export_query",
+			fmt=fmt,
+			rows=0,
+			mode="sync",
+			outcome=_outcome_for(e),
+			detail=_detail(spec, e),
+		)
+		raise
+	except Exception as e:
+		# A database error or an unexpected failure is still an export that did not
+		# happen: count it, then let the caller's error handling report it.
+		telemetry.record_export_event(
+			tool="export_query", fmt=fmt, rows=0, mode="sync", outcome="error", detail=_detail(spec, e)
 		)
 		raise
 
