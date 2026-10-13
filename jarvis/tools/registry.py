@@ -141,6 +141,9 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"remove_tag",
 	"follow_document",
 	"unfollow_document",
+	# A one-time macro from chat ("remind me / do this on Monday at 9"): gated and a
+	# brake, so it always parks a card.
+	"schedule_run",
 	# Tier 4 analytics + visualization: dataset stats + dashboard/chart
 	# creation (independent reimplementations of capability gaps).
 	"summarize_dataset",
