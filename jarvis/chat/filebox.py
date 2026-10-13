@@ -220,40 +220,45 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 
 	Never fails the create: returns ``{"attached_file": <File name>}``, ``{}`` when
 	the run has no source file, or ``{"attach_error": <reason>}`` with the error
-	logged. Idempotent: a draft that already has this file is left as it is."""
-	src = _source_file(conv, ("name", "file_url", "file_name"))
-	if not src or not src.get("file_url"):
-		return {}
-	existing = frappe.db.get_value(
-		"File",
-		{"file_url": src["file_url"], "attached_to_doctype": doctype, "attached_to_name": name},
-		"name",
-	)
-	if existing:
-		return {"attached_file": existing}
+	logged. Idempotent: a draft that already has this file is left as it is. Every
+	document draft the run makes gets the file (each was made from it)."""
 	from frappe.utils.file_manager import add_attachments
 
 	savepoint = "jarvis_filebox_attach"
-	frappe.db.savepoint(savepoint)
+	messages_before = len(frappe.local.message_log or [])
+	src = None
 	try:
+		src = _source_file(conv, ("name", "file_url", "file_name"))
+		if not src or not src.get("file_url"):
+			return {}
+		existing = frappe.db.get_value(
+			"File",
+			{"file_url": src["file_url"], "attached_to_doctype": doctype, "attached_to_name": name},
+			"name",
+		)
+		if existing:
+			return {"attached_file": existing}
+		frappe.db.savepoint(savepoint)
 		files = add_attachments(doctype, name, [src["name"]])
+		return {"attached_file": files[0].name if files else None}
 	except Exception as e:
-		frappe.db.rollback(save_point=savepoint)
-		# add_attachments reports through frappe.throw; keep its message out of the
-		# tool response, the reason travels in attach_error instead.
-		frappe.clear_messages()
+		if src and src.get("file_url"):
+			frappe.db.rollback(save_point=savepoint)
+		# add_attachments reports through frappe.throw: drop the messages it added
+		# (the create's own stay), the reason travels in attach_error instead.
+		del frappe.local.message_log[messages_before:]
+		file_name = (src or {}).get("file_name") or "the dropped file"
 		frappe.log_error(
 			title="jarvis.file_box.attach_failed",
-			message=f"{conv}: {src['file_name']} -> {doctype} {name}\n{frappe.get_traceback()}",
+			message=f"{conv}: {file_name} -> {doctype} {name}\n{frappe.get_traceback()}",
 		)
 		reason = _first_line(str(e)) or type(e).__name__
 		return {
 			"attach_error": (
-				f"The dropped file {src['file_name']} could not be attached to {doctype} {name}: "
+				f"The dropped file {file_name} could not be attached to {doctype} {name}: "
 				f"{reason}. Tell the user so they can attach it from the form."
 			)
 		}
-	return {"attached_file": files[0].name if files else None}
 
 
 def _send_inbound(conv: str, file_doc, pinned: str | None, preamble: str | None = None) -> dict:
@@ -801,8 +806,9 @@ _FAILURES = {
 _DRAFT_STATE = {1: "submitted", 2: "cancelled", None: "deleted"}
 
 
-# Whether the dropped file reached the draft (``_source_attached``); None says nothing.
-_SOURCE_ATTACHED = {True: " · file attached", False: " · file not attached"}
+# Whether the dropped file reached the (first) draft (``_source_attached``); None
+# says nothing. Not attached says what to do, not just that it failed.
+_SOURCE_ATTACHED = {True: " with the file attached", False: " (file not attached: attach it from the draft)"}
 
 
 def _draft_line(r: dict) -> str:
@@ -811,8 +817,8 @@ def _draft_line(r: dict) -> str:
 	later = _DRAFT_STATE.get(r.get("result_docstatus", 0))
 	if later:
 		line = f"{r['filebox_result_doctype']} {r['filebox_result_name']} {later}"
-	line += f" and {more} more" if more > 0 else ""
-	return line + _SOURCE_ATTACHED.get(r.get("source_attached"), "")
+	line += _SOURCE_ATTACHED.get(r.get("source_attached"), "")
+	return line + (f" and {more} more" if more > 0 else "")
 
 
 def _result_docstatus(rows: list[dict]) -> None:
@@ -866,6 +872,7 @@ def _source_attached(rows: list[dict]) -> None:
 		for f in frappe.get_all(
 			"File",
 			filters={
+				"attached_to_doctype": ["in", sorted({r["filebox_result_doctype"] for r in rows})],
 				"attached_to_name": ["in", sorted({r["filebox_result_name"] for r in rows})],
 				"file_url": ["in", sorted(set(urls.values()))],
 			},

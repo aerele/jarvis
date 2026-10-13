@@ -1387,7 +1387,7 @@ class TestSalesInvoiceToPurchaseE2E(_Base):
 			self.assertEqual([(i.item_code, i.qty, i.rate) for i in pi.items], [(E2E_ITEM, qty, rate)])
 			row = self.ladder()[convs[no]]
 			self.assertEqual(row["status"], "draft_created")
-			self.assertIn(f"Draft {PI} {name} created · file attached", row["result"])
+			self.assertIn(f"Draft {PI} {name} created with the file attached", row["result"])
 		self.assertFalse(frappe.db.exists(SI, {"company": E2E_CO}))
 
 
