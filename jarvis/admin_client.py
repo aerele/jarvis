@@ -2264,8 +2264,20 @@ def push_bench_heartbeat(heartbeat: dict) -> dict:
 	return _post(path=_m("api.tenant.ingest_bench_heartbeat"), body={"heartbeat": heartbeat})
 
 
+# Short timeout for the three feedback pushes below. Admin's ingest is a single
+# upsert; 10s is generous for it. The two popup pushes run SYNCHRONOUSLY inside a
+# customer web request (submit_session_feedback / submit_pulse_feedback), so at
+# the DEFAULT_TIMEOUT_S = 150 an admin that hangs rather than refuses would pin
+# a web worker for 2.5 minutes per submit. The chat-reply rating is sent from
+# the feedback outbox's job and sweep instead, where a hung admin would hold a
+# short-queue worker, and the sweep's whole batch, just as long; a timeout there
+# is one failed attempt the outbox retries.
+_FEEDBACK_TIMEOUT_S = 10
+
+
 def push_chat_feedback(item: dict) -> dict:
 	"""Push one chat-reply rating (thumbs up/down + optional note) to admin for the
+<<<<<<< HEAD
 	tenant-wise Feedback dashboard. Admin upserts on (tenant, message). Called
 	best-effort from jarvis.chat.feedback.submit_feedback, which swallows failures
 	so a lost rating never blocks the tap.
@@ -2283,6 +2295,18 @@ def push_chat_feedback(item: dict) -> dict:
 # push_chat_feedback above predates this and keeps the default on purpose: it
 # is out of this change's scope, not a considered exception.
 _FEEDBACK_TIMEOUT_S = 10
+=======
+	tenant-wise Feedback dashboard. Admin upserts on (tenant, message), so a re-send
+	folds onto the same row. Called from jarvis.chat.feedback_outbox (the delivery
+	job and the retry sweep), which records the failure and retries.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError /
+	AdminRateLimitedError."""
+	return _post(
+		path=_m("api.tenant.ingest_chat_feedback"),
+		body={"item": item},
+		timeout_s=_FEEDBACK_TIMEOUT_S,
+	)
+>>>>>>> 870a6b0 (fix(feedback): store thumbs ratings in a durable outbox before acknowledging them)
 
 
 def push_session_feedback(item: dict) -> dict:
