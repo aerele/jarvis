@@ -18,7 +18,11 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
+<<<<<<< HEAD
   "digest": "sha256:c738a8130419f039a7d4b583398ad2288cc096c172c589bde72f2d94596fa159",
+=======
+  "digest": "sha256:263669602bc7d2ca4c388e9f9d0325617304160671bf1e29e1760bd4f40d2684",
+>>>>>>> 0f54379 (feat(tools): get_comments, read a record's comments under Desk's rule)
   "tools": [
     "add_comment",
     "add_tag",
@@ -43,6 +47,7 @@
     "follow_document",
     "get_balance_on",
     "get_bank_recon_inputs",
+    "get_comments",
     "get_creation_context",
     "get_customer_outstanding",
     "get_doc",
