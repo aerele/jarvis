@@ -97,7 +97,7 @@ class _DocumentCut:
 	def _text_cap(self, budget: int) -> int | None:
 		"""The largest text length, up to the preview when there are rows to share
 		with, at which the document without rows fits. None if nothing fits."""
-		longest = max(map(len, self.texts.values()), default=0)
+		longest = max((len(t) for t in self.texts.values()), default=0)
 		high = min(TEXT_PREVIEW_CHARS, longest) if self.tables else longest
 		if self._fits(high, budget):
 			return high
