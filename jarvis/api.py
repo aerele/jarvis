@@ -248,7 +248,17 @@ def _agent_read_time_limit(tool: str):
 	``max_statement_time`` is per STATEMENT, so a tool that runs several can take
 	longer in total. A breach aborts the statement, not the transaction, and comes
 	back as ``QueryTooSlowError`` (``_translate_write_error``)."""
-	limit = _agent_read_timeout_s() if tool not in _WRITE_TOOLS else 0
+	with statement_time_limit(_agent_read_timeout_s() if tool not in _WRITE_TOOLS else 0):
+		yield
+
+
+@contextmanager
+def statement_time_limit(limit: int):
+	"""Cap each database statement run inside at ``limit`` seconds (MariaDB
+	``max_statement_time``, set on the session and put back after), keeping a
+	tighter limit the session already has. ``limit`` 0, or another database: no
+	limit. The statements themselves run as usual (parameterised), which is why a
+	caller with one heavy statement uses this rather than prefixing its SQL."""
 	if not limit or frappe.db.db_type != "mariadb":
 		yield
 		return
@@ -260,7 +270,7 @@ def _agent_read_time_limit(tool: str):
 			frappe.db.set_execution_timeout(limit)
 	except Exception:
 		# A server without max_statement_time (MySQL reports itself as mariadb
-		# here): run the tool unlimited rather than fail every read.
+		# here): run unlimited rather than fail every read.
 		_log_limit_unsettable()
 		previous = None
 	if previous is None:
@@ -270,7 +280,7 @@ def _agent_read_time_limit(tool: str):
 		yield
 	finally:
 		# The exact previous value (it can be fractional), and never at the cost of
-		# the tool's own result or error.
+		# the caller's own result or error.
 		try:
 			frappe.db.sql("SET SESSION max_statement_time = %s", (previous,))
 		except Exception:

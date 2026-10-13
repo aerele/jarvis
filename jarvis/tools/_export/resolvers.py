@@ -151,19 +151,18 @@ def from_spec(spec) -> ExportModel:
 
 def _run_bounded(q) -> list:
 	"""Run the export SELECT under the same per-statement limit agent reads get
-	(``api._agent_read_timeout_s``, MariaDB ``max_statement_time``). Exports are
-	write tools, so the agent path leaves them unlimited; a spec export is an
-	agent-built query, and past the plugin's call timeout nobody would receive the
-	file. A query stopped at the limit is refused with what to do instead."""
+	(``api._agent_read_timeout_s``). Exports are write tools, so the agent path
+	leaves them unlimited; a spec export is an agent-built query, and past the
+	plugin's call timeout nobody would receive the file. The query runs through
+	``q.run`` (its values parameterised), never as a rendered SQL string. A query
+	stopped at the limit is refused with what to do instead."""
 	from jarvis import _failure_kind
-	from jarvis.api import _agent_read_timeout_s
-	from jarvis.learning.compat import statement_timeout_prefix
+	from jarvis.api import _agent_read_timeout_s, statement_time_limit
 
 	limit = _agent_read_timeout_s()
-	if not limit or frappe.db.db_type != "mariadb":
-		return q.run(as_dict=True)
 	try:
-		return frappe.db.sql(statement_timeout_prefix(q.get_sql(), limit), as_dict=True)
+		with statement_time_limit(limit):
+			return q.run(as_dict=True)
 	except Exception as e:
 		if _failure_kind.too_slow(e):
 			raise InvalidArgumentError(
