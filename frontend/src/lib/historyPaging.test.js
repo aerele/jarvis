@@ -4,11 +4,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+	heldNewestSeq,
 	mergeNewestPage,
 	needsToolDetail,
 	pagingOf,
 	pendingSeedRows,
 	prependOlderPage,
+	promptRows,
 	refreshNames,
 	withToolDetail,
 } from "./historyPaging.js";
@@ -129,6 +131,64 @@ test("a compact tool row is fetched once, then shown whole", () => {
 	assert.equal(withToolDetail(row(8), details).name, "m8");
 });
 
+test("a long live session keeps the older pages: the resync page reaches back to the held rows", () => {
+	// Loaded: an older page 20..29 and the newest page 30..40. Then 300 rows arrived
+	// through realtime events only (no seq on screen), so paging.newest is still 40.
+	const realtime = Array.from({ length: 300 }, (_, i) => ({
+		name: `live${i}`,
+		role: "assistant",
+	}));
+	const held = [...rows(20, 40), ...realtime];
+	const heldPaging = { hasMore: true, before: 20, newest: 40 };
+	assert.equal(heldNewestSeq(held, heldPaging), 40, "realtime rows never count");
+	// The resync passes after=40 and the server's page starts there (paging.start).
+	const d = page(40, 340, { start: 40, before: 40 });
+	const merged = mergeNewestPage(held, heldPaging, d);
+	assert.deepEqual(names(merged.messages), names(rows(20, 340)));
+	assert.deepEqual(merged.paging, { hasMore: true, before: 20, newest: 340 });
+});
+
+test("the newest seq held counts server rows merged after the last page", () => {
+	const held = rows(20, 60);
+	assert.equal(heldNewestSeq(held, { newest: 40 }), 60);
+	const merged = mergeNewestPage(held, { hasMore: true, before: 20, newest: 40 }, page(55, 70));
+	assert.deepEqual(names(merged.messages), names(rows(20, 70)), "no false gap");
+	assert.equal(heldNewestSeq(rows(1, 3), null), 3);
+});
+
+test("pending cards an older page brought in mid-read are named for one more refresh", () => {
+	const late = row(12, { role: "tool", tool_status: "pending" });
+	const held = [late, ...rows(13, 40)];
+	const merged = mergeNewestPage(
+		held,
+		{ hasMore: true, before: 12, newest: 40 },
+		page(35, 41),
+		[]
+	);
+	assert.deepEqual(merged.stale, ["m12"]);
+	const again = mergeNewestPage(held, { hasMore: true, before: 12, newest: 40 }, page(35, 41), [
+		"m12",
+	]);
+	assert.deepEqual(again.stale, [], "asked for: refreshed or dropped, never stale");
+});
+
+test("prompt recall walks the earlier prompts plus loaded user rows, once each, oldest first", () => {
+	const recent = [
+		{ name: "u1", seq: 1, role: "user", content: "first" },
+		{ name: "u5", seq: 5, role: "user", content: "second" },
+	];
+	const loaded = [
+		{ name: "u5", seq: 5, role: "user", content: "second" },
+		{ name: "a6", seq: 6, role: "assistant", content: "reply" },
+		{ name: "u9", seq: 9, role: "user", content: "third" },
+		{ name: "opt", role: "user", content: "unsent bubble" },
+	];
+	assert.deepEqual(
+		promptRows(recent, loaded).map((m) => m.content),
+		["first", "second", "third"]
+	);
+});
+
 // ---- wiring: who reads pages, who keeps whole threads ----
 const src = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
 const fnBody = (text, head) => {
@@ -164,7 +224,43 @@ test("the desktop chat merges the newest page, seeds old cards and loads older p
 	assert.match(fnBody(chat, "function toggleTool("), /loadToolDetail\(name\)/);
 	assert.match(chat, /prettyJson\(\s*toolShown\(item\.row\)\.tool_result\s*\)/);
 	assert.match(chat, /<Button\s+variant="subtle"\s+label="Load earlier messages"/);
+	// Up-arrow recall reaches the prompts older than every loaded page.
+	assert.match(load, /recentPrompts = d\?\.recent_prompts \|\| \[\];/);
+	assert.match(
+		load,
+		/promptHistory\.value = promptsOf\(promptRows\(recentPrompts, page\.messages\)\);/
+	);
+	assert.match(
+		older,
+		/promptHistory\.value = promptsOf\(promptRows\(recentPrompts, messages\.value\)\);/
+	);
+	// A resync reaches back to the newest seq held; a mid-read older page gets one retry.
+	assert.match(
+		load,
+		/const after = holding \? heldNewestSeq\(messages\.value, historyPaging\.value\) : null;/
+	);
+	assert.match(
+		load,
+		/if \(page\.stale\.length && staleRetry\)\s+loadConversation\(id, \{ staleRetry: false \}\)/
+	);
 	// a chat switch drops the paging state that belonged to the chat left behind
 	const sw = chat.slice(chat.indexOf("watch(currentId, (id) => {"));
 	assert.match(sw.slice(0, sw.indexOf("\n});")), /historyPaging\.value = \{ conv: null/);
+});
+
+test("the desktop scroll trigger waits for an open or a prepend to land", () => {
+	const chat = src("../views/ChatView.vue");
+	assert.match(
+		fnBody(chat, "function onThreadScroll("),
+		/if \(_olderArmed && el && el\.scrollTop < OLDER_PAGE_TRIGGER_PX\) loadOlder\(\{ auto: true \}\);/
+	);
+	const load = fnBody(chat, "async function loadConversation(");
+	assert.ok(
+		load.indexOf("if (!_sameConv) _olderArmed = false;") <
+			load.indexOf("await api.getConversation")
+	);
+	assert.ok(load.indexOf("armOlderNextFrame();") > load.indexOf("scrollBottom();"));
+	const older = fnBody(chat, "async function loadOlder(");
+	assert.ok(older.indexOf("_olderArmed = false;") < older.indexOf("prependOlderPage("));
+	assert.ok(older.indexOf("armOlderNextFrame();") > older.indexOf("holdFromBottom(fromBottom)"));
 });

@@ -4,10 +4,13 @@
 // the older rows it already holds. Shared by the desktop chat and the PWA.
 //
 // Server contract (jarvis.chat.api.get_conversation with `limit`): `messages` is one
-// page, oldest first, opening on a user row; `paging` is {limit, before, has_more},
-// where `before` is the cursor for the next older page; `older_pending` holds the
-// pending cards older than the newest page; `refreshed` is the current state of
-// the held rows a call named in `refresh`.
+// page, oldest first, opening on a user row; `paging` is {limit, start, before,
+// has_more}, where `start` is the page's lower seq bound and `before` the cursor for
+// the next older page; `older_pending` holds the pending cards older than the newest
+// page; `refreshed` is the current state of the held rows a call named in `refresh`;
+// `recent_prompts` are the user messages older than the newest page (Up-arrow
+// recall). A resync passes `after` (heldNewestSeq) so the newest page reaches back to
+// the rows already held whenever that stays within the server's widening.
 
 // Rows per page. A page widens back to the start of its oldest turn (by at most 200
 // rows, HISTORY_TURN_WIDEN_MAX on the server), so a reply never loads without its
@@ -30,6 +33,15 @@ export function pagingOf(d) {
 	return { hasMore: true, before: p.before, newest };
 }
 
+// The newest seq the rows on screen reach: the last page's, or any later server row
+// held since. Realtime rows carry no seq, so they never count.
+export function heldNewestSeq(held, heldPaging) {
+	let newest = heldPaging && typeof heldPaging.newest === "number" ? heldPaging.newest : null;
+	for (const m of held || [])
+		if (m && typeof m.seq === "number" && (newest === null || m.seq > newest)) newest = m.seq;
+	return newest;
+}
+
 // Held rows whose state can change while the reader looks elsewhere: pending cards,
 // which resolve into receipts. A resync names them so the server sends them fresh.
 export function refreshNames(held) {
@@ -46,8 +58,10 @@ export function pendingSeedRows(d, messages) {
 }
 
 // Merge a freshly read newest page into the rows on screen. `heldPaging` is the
-// state the held rows were loaded with; `asked` is what the call passed as
-// `refresh`. Returns {messages, paging}.
+// state the held rows were loaded with (null when they belong to another chat);
+// `asked` is what the call passed as `refresh`. Returns {messages, paging, stale}:
+// `stale` names held pending cards this read neither refreshed nor listed (an older
+// page loaded them while it was in flight), for one more resync to refresh.
 //
 // When the page reaches the first row of the thread (no older page), it IS the
 // thread: nothing held survives, so a cleared or rebuilt chat cannot keep ghosts.
@@ -61,11 +75,12 @@ export function pendingSeedRows(d, messages) {
 export function mergeNewestPage(held, heldPaging, d, asked = []) {
 	const page = (d && d.messages) || [];
 	const fresh = pagingOf(d);
-	const start = page.length ? page[0].seq : null;
-	if (!fresh.hasMore || typeof start !== "number") return { messages: page, paging: fresh };
-	const heldNewest = heldPaging && heldPaging.newest;
-	if (typeof heldNewest !== "number" || heldNewest < start)
-		return { messages: page, paging: fresh };
+	const bound = d && d.paging && d.paging.start;
+	const start = typeof bound === "number" ? bound : page.length ? page[0].seq : null;
+	const restart = { messages: page, paging: fresh, stale: [] };
+	if (!fresh.hasMore || typeof start !== "number") return restart;
+	const heldNewest = heldPaging ? heldNewestSeq(held, heldPaging) : null;
+	if (typeof heldNewest !== "number" || heldNewest < start) return restart;
 	const byName = new Map();
 	for (const m of [...((d && d.older_pending) || []), ...((d && d.refreshed) || [])])
 		byName.set(m.name, m);
@@ -74,8 +89,13 @@ export function mergeNewestPage(held, heldPaging, d, asked = []) {
 		.filter((m) => m && typeof m.seq === "number" && m.seq < start)
 		.filter((m) => !askedSet.has(m.name) || byName.has(m.name))
 		.map((m) => byName.get(m.name) || m);
-	if (!kept.length) return { messages: page, paging: fresh };
-	return { messages: [...kept, ...page], paging: { ...heldPaging, newest: fresh.newest } };
+	if (!kept.length) return restart;
+	const stale = refreshNames(kept.filter((m) => !askedSet.has(m.name) && !byName.has(m.name)));
+	return {
+		messages: [...kept, ...page],
+		paging: { ...heldPaging, newest: fresh.newest },
+		stale,
+	};
 }
 
 // Put an older page above the rows on screen (no duplicates). The cursor moves to
@@ -85,8 +105,20 @@ export function prependOlderPage(held, heldPaging, d) {
 	const names = new Set(rows.map((m) => m && m.name));
 	const older = ((d && d.messages) || []).filter((m) => !names.has(m.name));
 	const { hasMore, before } = pagingOf(d);
-	const newest = heldPaging && typeof heldPaging.newest === "number" ? heldPaging.newest : null;
-	return { messages: [...older, ...rows], paging: { hasMore, before, newest } };
+	return {
+		messages: [...older, ...rows],
+		paging: { hasMore, before, newest: heldNewestSeq(rows, heldPaging) },
+	};
+}
+
+// The user messages Up-arrow recall walks, oldest first, once each: the earlier
+// prompts the newest page carried (recent_prompts) plus every server row loaded.
+export function promptRows(recent, rows) {
+	const byName = new Map();
+	for (const m of [...(recent || []), ...(rows || [])])
+		if (m && m.name && m.role === "user" && m.content && typeof m.seq === "number")
+			byName.set(m.name, m);
+	return [...byName.values()].sort((a, b) => a.seq - b.seq);
 }
 
 // A tool row as the Activity view shows it: whole once its detail has been fetched

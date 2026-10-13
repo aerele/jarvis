@@ -19,7 +19,9 @@ const fnBody = (head) => {
 
 test("a reload re-reads only the newest page and keeps the older pages on screen", () => {
 	const load = fnBody("async function load(");
-	assert.match(load, /api\.getConversation\(cid, \{ refresh \}\)/);
+	assert.match(load, /api\.getConversation\(cid, \{ refresh, after \}\)/);
+	assert.match(load, /const after = heldNewestSeq\(messages\.value, historyPaging\.value\);/);
+	assert.match(load, /if \(page\.stale\.length && staleRetry\) load\(false, false\);/);
 	assert.match(load, /mergeNewestPage\(messages\.value, historyPaging\.value, d, refresh\)/);
 	assert.match(load, /olderPending\.value = d\?\.older_pending \|\| \[\];/);
 	const held = [
@@ -72,7 +74,7 @@ test("a failed older page pauses the scroll trigger and says so", () => {
 	const older = fnBody("async function loadOlder(");
 	assert.match(
 		older,
-		/if \(auto && Date\.now\(\) - olderFailedAt < OLDER_RETRY_PAUSE_MS\) return;/
+		/if \(auto && \(!olderArmed \|\| Date\.now\(\) - olderFailedAt < OLDER_RETRY_PAUSE_MS\)\) return;/
 	);
 	const fail = older.slice(older.indexOf("} catch (e) {"));
 	assert.match(fail, /olderFailedAt = Date\.now\(\);/);
@@ -88,4 +90,15 @@ test("the load button stays focusable while loading and the load is announced", 
 	assert.match(block, /@click="loadOlder\(\)"/);
 	assert.match(block, /role="status" aria-live="polite"/);
 	assert.match(block, /Loading earlier messages…/);
+});
+
+test("the scroll trigger waits for an open or a prepend to land", () => {
+	const older = fnBody("async function loadOlder(");
+	assert.ok(older.indexOf("olderArmed = false;") < older.indexOf("prependOlderPage("));
+	assert.ok(
+		older.indexOf("armOlderNextFrame();") > older.indexOf("requestAnimationFrame(hold)")
+	);
+	const load = fnBody("async function load(");
+	assert.match(load, /if \(!messages\.value\.length\) olderArmed = false;/);
+	assert.match(load.slice(load.indexOf("} finally {")), /armOlderNextFrame\(\);/);
 });
