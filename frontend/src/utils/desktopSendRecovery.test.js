@@ -8,6 +8,7 @@ import { createPendingSends, planRejectedSend, injectPendingBubbles } from "./vo
 import { deliveryFailureCopy } from "../lib/sendDelivery.js";
 import { stampDeltaTime } from "../lib/replyBar.js";
 import { firstSendPicks } from "../lib/firstSendPicks.js";
+import { mergeNewestPage, refreshNames } from "../lib/historyPaging.js";
 const source = readFileSync(
 	process.env.DESKTOP_CHAT_SOURCE || new URL("../views/ChatView.vue", import.meta.url),
 	"utf8"
@@ -30,6 +31,8 @@ function harness(pendingStore) {
 	Object.assign(s, {
 		_NEW_CHAT_SCOPE: "NEW",
 		injectPendingBubbles,
+		mergeNewestPage,
+		refreshNames,
 		deliveryFailureCopy,
 		toLocalMs: (value) => Date.parse(value),
 		RUN_ENDED_STATES: new Set(["done", "failed", "cancelled"]),

@@ -40,6 +40,7 @@ import { spanBetween } from "../lib/time";
 import { proposedLabel } from "../lib/cardAge.js";
 import { sortPendingCards } from "../lib/sortPendingCards.js";
 import { mergePendingSources, withExcluded } from "../lib/pendingResync.js";
+import { mergeNewestPage, prependOlderPage, refreshNames } from "@shared/lib/historyPaging.js";
 import {
 	discardedTokens,
 	isRecentCard,
@@ -85,6 +86,11 @@ const webChatUrl = computed(() =>
 	convId.value ? `/jarvis/c/${encodeURIComponent(convId.value)}` : "/jarvis/"
 );
 const messages = ref([]);
+// History paging (#715 F13): `messages` is the newest page plus the older pages the
+// reader scrolled up to; pending cards older than all of them ride in olderPending.
+const historyPaging = ref({ hasMore: false, before: null, newest: null });
+const olderPending = ref([]);
+const loadingOlder = ref(false);
 const input = ref("");
 const loading = ref(false);
 const sendBusy = ref(false);
@@ -439,6 +445,7 @@ function atBottom() {
 const follow = ref(true);
 function onScroll() {
 	follow.value = atBottom();
+	if (scroller.value && scroller.value.scrollTop < 200) loadOlder();
 }
 // Follow the newest text only while `follow` holds (parked at the bottom) AND no
 // reply is streaming (`live`): chasing the bottom mid-stream drags the line you
@@ -464,10 +471,15 @@ async function load(force = false) {
 	follow.value = true;
 	loading.value = true;
 	try {
-		const d = await api.getConversation(cid);
+		// Only the newest page is re-read; older rows on screen stay (#715 F13).
+		const refresh = refreshNames(messages.value);
+		const d = await api.getConversation(cid, { refresh });
 		if (!current()) return;
 		conversation.value = d?.conversation || null;
-		messages.value = d?.messages || [];
+		const page = mergeNewestPage(messages.value, historyPaging.value, d, refresh);
+		messages.value = page.messages;
+		historyPaging.value = page.paging;
+		olderPending.value = d?.older_pending || [];
 		sendRecovery.reconcile(cid, messages.value);
 		const row = store.conversations.find((c) => c.name === convId.value);
 		if (row) starred.value = !!row.starred;
@@ -496,6 +508,36 @@ async function load(force = false) {
 		console.error("Jarvis PWA: failed to load conversation", e);
 	} finally {
 		if (current()) loading.value = false;
+	}
+}
+
+// The page above the oldest loaded row, put in place with the rows the reader was
+// looking at held still (their distance from the bottom does not change).
+async function loadOlder() {
+	const cid = convId.value;
+	const generation = viewGeneration;
+	const paging = historyPaging.value;
+	if (!cid || !paging.hasMore || loadingOlder.value) return;
+	loadingOlder.value = true;
+	try {
+		const d = await api.getConversation(cid, { before: paging.before });
+		if (!isCurrent(cid, generation) || historyPaging.value.before !== paging.before) return;
+		const el = scroller.value;
+		const fromBottom = el ? el.scrollHeight - el.scrollTop : null;
+		const page = prependOlderPage(messages.value, historyPaging.value, d);
+		messages.value = page.messages;
+		historyPaging.value = page.paging;
+		await nextTick();
+		const hold = () => {
+			if (scroller.value && fromBottom !== null)
+				scroller.value.scrollTop = scroller.value.scrollHeight - fromBottom;
+		};
+		hold();
+		requestAnimationFrame(hold); // again once late layout (charts, images) lands
+	} catch (e) {
+		console.error("Jarvis PWA: failed to load earlier messages", e);
+	} finally {
+		loadingOlder.value = false;
 	}
 }
 
@@ -545,7 +587,7 @@ async function recheckPending() {
 async function loadPending(source) {
 	const cid = convId.value;
 	if (!cid) return;
-	const fromRows = (messages.value || [])
+	const fromRows = [...olderPending.value, ...(messages.value || [])]
 		.filter(
 			(m) =>
 				m.role === "tool" &&
@@ -1293,6 +1335,8 @@ watch(
 		restoreDraft();
 		store.clearUnread(convId.value);
 		messages.value = [];
+		historyPaging.value = { hasMore: false, before: null, newest: null };
+		olderPending.value = [];
 		conversation.value = null;
 		pending.value = [];
 		settledTokens.value = new Set(); // a settled token belonged to the previous conversation
@@ -1384,6 +1428,18 @@ onUnmounted(() => {
 	</div>
 
 	<div ref="scroller" class="jv-scroll jv-thread" @scroll.passive="onScroll">
+		<!-- History paging (#715 F13): older pages load near the top; same action. -->
+		<div v-if="historyPaging.hasMore && messages.length" style="text-align: center">
+			<button
+				type="button"
+				class="jv-btn is-ghost"
+				:disabled="loadingOlder"
+				:aria-busy="loadingOlder"
+				@click="loadOlder"
+			>
+				{{ loadingOlder ? "Loading…" : "Load earlier messages" }}
+			</button>
+		</div>
 		<div v-if="!items.length && !localRequests.length && !live && !loading" class="jv-empty">
 			<BrandMark :size="52" :mood="holdActive ? 'upgrading' : 'star'" />
 			<div style="font-size: 16px; font-weight: 600; color: var(--ink9)">
