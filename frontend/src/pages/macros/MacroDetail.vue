@@ -196,7 +196,7 @@
 						     rule, app-wide for every plain Select, not here (nothing to add
 						     on this control itself). -->
 						<FormControl
-							v-if="form.schedule_frequency !== 'daily'"
+							v-if="hasDayAnchor"
 							class="flex-1"
 							type="select"
 							label="Day"
@@ -205,9 +205,36 @@
 							:disabled="saving || armedLocked"
 							@update:modelValue="(v) => (form.schedule_day = v)"
 						/>
+						<!-- A one-time schedule runs on one date, then switches itself off. -->
+						<div v-if="form.schedule_frequency === 'once'" class="flex-1">
+							<label class="mb-1.5 block text-xs text-ink-gray-5">Date</label>
+							<DatePicker
+								:modelValue="form.schedule_date"
+								placeholder="Pick a date"
+								aria-label="Date"
+								:disabled="saving || armedLocked"
+								@update:modelValue="(v) => (form.schedule_date = v || '')"
+							/>
+						</div>
 					</div>
 					<div v-if="scheduleSummary" class="text-sm text-ink-gray-5">
 						{{ scheduleSummary }}
+					</div>
+					<!-- A one-time schedule that has run switched itself off: say when it
+					     ran, and offer to set it up again in one click. -->
+					<div
+						v-else-if="oneTimeDoneNote"
+						class="flex flex-wrap items-center gap-2 text-sm text-ink-gray-5"
+					>
+						<span>{{ oneTimeDoneNote }}</span>
+						<Button
+							v-if="!heldOff(false) && !armedOff(false) && !scheduleBlocked"
+							size="sm"
+							variant="subtle"
+							label="Schedule again"
+							:disabled="saving"
+							@click="scheduleAgain"
+						/>
 					</div>
 				</div>
 			</DocSection>
@@ -307,11 +334,13 @@ import { useRouter, onBeforeRouteLeave } from "vue-router";
 import {
 	Button,
 	Badge,
+	DatePicker,
 	Dropdown,
 	ErrorMessage,
 	FormControl,
 	Switch,
 	TimePicker,
+	dayjs,
 	toast,
 	confirmDialog,
 } from "frappe-ui";
@@ -323,7 +352,13 @@ import CommentsSection from "@/components/doc/CommentsSection.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import StepsBuilder from "./StepsBuilder.vue";
 import { takeMacroPrefill } from "@/composables/macroPrefill";
-import { exactDate, formatTime12h, onAnotherClock, siteTimezone } from "@/utils/datetime";
+import {
+	exactDate,
+	formatDate,
+	formatTime12h,
+	onAnotherClock,
+	siteTimezone,
+} from "@/utils/datetime";
 import {
 	WEEKDAY_OPTIONS,
 	DAY_OF_MONTH_OPTIONS,
@@ -355,10 +390,15 @@ const socket = inject("$socket");
 const DOCTYPE = "Jarvis Macro";
 
 const FREQUENCY_OPTIONS = [
+	{ label: "Once", value: "once" },
 	{ label: "Daily", value: "daily" },
 	{ label: "Weekly", value: "weekly" },
 	{ label: "Monthly", value: "monthly" },
 ];
+// The first date a one-time schedule offers: tomorrow, on the viewer's calendar.
+function tomorrow() {
+	return dayjs().add(1, "day").format("YYYY-MM-DD");
+}
 
 // ── state ────────────────────────────────────────────────────────────────────
 const macro = ref(null); // last server copy (null while new)
@@ -371,6 +411,9 @@ const nextRunRaw = ref("");
 // The server's `last_run` for this macro (null when it never ran, undefined from a
 // server that does not send it yet).
 const lastRun = ref(null);
+// When the scheduler last consumed a slot (the saved last_run_at), for the
+// one-time schedule's "Ran once on ..." line.
+const lastRunAt = ref("");
 const lastRunNote = computed(() => lastRunLine(lastRun.value));
 const LAST_RUN_BANNER = { bad: "error", warn: "warning" };
 const nextRunIsRetry = ref(false);
@@ -394,6 +437,7 @@ const form = reactive({
 	schedule_frequency: "daily",
 	schedule_time: "09:00",
 	schedule_day: "",
+	schedule_date: "",
 	steps: [],
 	merged_prompt: "",
 });
@@ -402,6 +446,10 @@ const form = reactive({
 // instant Frequency changes, before any save.
 const dayOptions = computed(() =>
 	form.schedule_frequency === "weekly" ? WEEKDAY_OPTIONS : DAY_OF_MONTH_OPTIONS
+);
+// Weekly and monthly pick a day; daily needs none; once picks a date instead.
+const hasDayAnchor = computed(
+	() => form.schedule_frequency === "weekly" || form.schedule_frequency === "monthly"
 );
 // jarvis#653: guards the interactive-frequency-change watcher below from firing
 // off `seed()`'s own frequency+day assignment (which legitimately sets day to
@@ -429,6 +477,8 @@ watch(
 			!DAY_OF_MONTH_OPTIONS.some((o) => o.value === form.schedule_day)
 		) {
 			form.schedule_day = "1";
+		} else if (freq === "once" && !form.schedule_date) {
+			form.schedule_date = tomorrow();
 		}
 	}
 );
@@ -577,6 +627,7 @@ const dirty = computed(() => {
 		(form.schedule_frequency || "daily") !== snap.schedule_frequency ||
 		(form.schedule_time || "") !== snap.schedule_time ||
 		(form.schedule_day || "") !== (snap.schedule_day || "") ||
+		(form.schedule_date || "") !== (snap.schedule_date || "") ||
 		JSON.stringify(cleanSteps(form.steps)) !== snap.stepsJson ||
 		(form.merged_prompt || "") !== snap.merged_prompt
 	);
@@ -625,11 +676,37 @@ const scheduleSummary = computed(() => {
 	const next = nextRunIsRetry.value
 		? `The last scheduled run failed (Runs, on the Macros page, says why). Retrying: ${stamp}`
 		: `Next run: ${stamp}`;
+	if (snap.schedule_frequency === "once") {
+		if (nextRunIsRetry.value) return `Runs once. ${next}`;
+		return (
+			`Runs once on ${formatDate(nextRunRaw.value, "ddd, D MMM YYYY [at] h:mm a")}` +
+			`${zone && onAnotherClock(nextRunRaw.value) ? " (your time)" : ""}. ` +
+			"The schedule switches itself off after that run."
+		);
+	}
 	return (
 		`Scheduled ${snap.schedule_frequency}${anchor ? ` ${anchor}` : ""} ` +
 		`at ${formatTime12h(snap.schedule_time)}${zone ? `, ${zone} time` : ""}. ${next}`
 	);
 });
+
+// A one-time schedule that ran has switched itself off: the saved form says when it
+// ran ("" for anything else, or while the form has unsaved changes).
+const oneTimeDoneNote = computed(() => {
+	const snap = snapshot.value;
+	if (!snap || props.isNew || dirty.value) return "";
+	if (snap.schedule_enabled || snap.schedule_frequency !== "once" || !lastRunAt.value) return "";
+	return `Ran once on ${formatDate(
+		lastRunAt.value,
+		"ddd, D MMM YYYY [at] h:mm a"
+	)}. The schedule is off now.`;
+});
+// "Schedule again": the schedule back on, one-time, from tomorrow at the same time.
+function scheduleAgain() {
+	form.schedule_frequency = "once";
+	form.schedule_date = tomorrow();
+	form.schedule_enabled = true;
+}
 
 const overflowOptions = computed(() => {
 	const opts = [];
@@ -716,6 +793,8 @@ function seed(data) {
 		data.schedule_weekday,
 		data.schedule_day_of_month
 	);
+	form.schedule_date = data.schedule_date || "";
+	lastRunAt.value = data.last_run_at || "";
 	nextTick(() => {
 		seedingSchedule = false;
 	});
@@ -745,6 +824,7 @@ function formSnapshot() {
 		schedule_frequency: form.schedule_frequency,
 		schedule_time: form.schedule_time,
 		schedule_day: form.schedule_day,
+		schedule_date: form.schedule_date,
 		stepsJson: JSON.stringify(cleanSteps(form.steps)),
 		merged_prompt: form.merged_prompt,
 	};
@@ -873,6 +953,7 @@ async function save() {
 			schedule_weekday: form.schedule_frequency === "weekly" ? form.schedule_day || "" : "",
 			schedule_day_of_month:
 				form.schedule_frequency === "monthly" ? Number(form.schedule_day) || 0 : 0,
+			schedule_date: form.schedule_frequency === "once" ? form.schedule_date || "" : "",
 		};
 		// The SERVER decides whether the steps changed (it clears a stale summary)
 		// and whether a new summary is due (`summarize`). The form used to guess
