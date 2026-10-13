@@ -25,6 +25,7 @@ import { renderMarkdown } from "@shared/markdown.js";
 import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
 import { isShowCardRequest } from "../lib/showCardRequest.js";
+import { isImeKey } from "../lib/composerEnter.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
@@ -1046,6 +1047,12 @@ async function toggleStar() {
 	}
 }
 
+// Enter that confirms an IME candidate must not save a half-typed title.
+function onRenameEnter(e) {
+	if (isImeKey(e)) return;
+	saveRename();
+}
+
 async function saveRename() {
 	const t = renameText.value.trim();
 	if (!t) return;
@@ -1690,7 +1697,7 @@ onUnmounted(() => {
 					v-model="renameText"
 					class="jv-input"
 					placeholder="Chat title"
-					@keydown.enter="saveRename"
+					@keydown.enter="onRenameEnter"
 				/>
 				<div v-if="menuError" class="jv-menu-error">{{ menuError }}</div>
 				<div class="jv-menu-actions">
