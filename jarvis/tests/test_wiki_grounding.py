@@ -21,6 +21,29 @@ USER_B = "ground-b@example.com"
 
 _SLUGS = ("ground-test--credit", "ground-test--user-secret")
 
+# The same leave policy written in three languages (realistic prose, not
+# transliteration), each paired with a question a user would ask in that language.
+_LEAVE_POLICY = {
+	"en": (
+		"Leave policy",
+		"Employees get 24 days of paid leave every year. Salary is paid on the last working day.",
+		"how many days of paid leave do I get?",
+		"24 days of paid leave",
+	),
+	"ta": (
+		"விடுப்பு கொள்கை",
+		"ஊழியர்களுக்கு ஆண்டுக்கு 24 நாட்கள் சம்பளத்துடன் கூடிய விடுப்பு வழங்கப்படும். சம்பளம் கடைசி வேலை நாளில் வழங்கப்படும்.",
+		"எனக்கு எத்தனை நாட்கள் சம்பளத்துடன் விடுப்பு கிடைக்கும்?",
+		"24 நாட்கள் சம்பளத்துடன்",
+	),
+	"hi": (
+		"छुट्टी नीति",
+		"कर्मचारियों को हर साल 24 दिन की वेतन सहित छुट्टी मिलती है। वेतन अंतिम कार्य दिवस पर दिया जाता है।",
+		"मुझे कितने दिन की वेतन सहित छुट्टी मिलती है?",
+		"24 दिन की वेतन सहित छुट्टी",
+	),
+}
+
 
 def _ensure_user(email: str) -> str:
 	if not frappe.db.exists("User", email):
@@ -241,3 +264,99 @@ class TestSignificantTokens(WikiGroundingTestCase):
 		# A pasted wall of text (one giant "word") can't become an unbounded LIKE.
 		toks = wiki._significant_tokens("x" * 200000)
 		self.assertTrue(all(len(t) <= wiki._FORCE_MAX_TOKEN_LEN for t in toks))
+
+
+class TestMultilingualFallback(WikiGroundingTestCase):
+	def _ground(self, user, question):
+		frappe.set_user(user)
+		try:
+			return wiki.forced_wiki_block("c", None, question)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_tokenizer_keeps_indic_words_whole(self):
+		# \w alone splits these at vowel signs and viramas (Mn/Mc marks).
+		self.assertIn("சம்பளம்", wiki._significant_tokens("எனக்கு சம்பளம் எவ்வளவு"))
+		self.assertIn("वेतन", wiki._significant_tokens("मेरा वेतन कितना है"))
+		self.assertEqual(
+			wiki._significant_tokens("What are the credit terms for wholesale?"),
+			["credit", "terms", "wholesale"],
+		)
+
+	def test_fallback_finds_same_policy_in_english_tamil_and_hindi(self):
+		for lang, (title, body, _q, _needle) in _LEAVE_POLICY.items():
+			_make_page(f"ground-test--leave-{lang}", title, body_md=body, scope="Org")
+		self._clear_active_cache()
+		for lang, (_title, _body, question, needle) in _LEAVE_POLICY.items():
+			with self.subTest(lang=lang):
+				block = self._ground(USER_A, question)
+				self.assertIn(needle, block)
+				# Grounded on its own language page only: the other two do not match.
+				for other, (_t, _b, _q, other_needle) in _LEAVE_POLICY.items():
+					if other != lang:
+						self.assertNotIn(other_needle, block)
+
+	def test_unreadable_non_latin_page_stays_hidden(self):
+		_make_page(
+			"ground-test--user-secret",
+			"தனிப்பட்ட குறிப்பு",
+			body_md="என் சம்பளம் மாதம் 50000 ரூபாய்.",
+			scope="User",
+			target_user=USER_B,
+		)
+		self._clear_active_cache()
+		self.assertNotIn("50000", self._ground(USER_A, "என் சம்பளம் எவ்வளவு?"))
+		self.assertIn("50000", self._ground(USER_B, "என் சம்பளம் எவ்வளவு?"))
+
+	def test_joiners_are_ignored_in_the_question(self):
+		_make_page("ground-test--joiner", "संस्था", body_md="कर्म और क्षमता की नीति।", scope="Org")
+		self._clear_active_cache()
+		for q in ("कर्‍म नीति क्या है", "क्‌षमता नीति क्या है", "कर्म नीति क्या है"):
+			with self.subTest(q=q):
+				self.assertIn("क्षमता", self._ground(USER_A, q))
+		self.assertIn("कर्म", wiki._significant_tokens("कर्‍म"))
+
+	def test_decomposed_question_matches_nfc_page(self):
+		import unicodedata
+
+		# Tamil "கொ" is stored as one codepoint in NFC page text, but can arrive
+		# split into vowel-sign parts (NFD) from some keyboards.
+		_make_page("ground-test--nfc", "Pay", body_md="கொடுப்பனவு கொள்கை மாதம் ஒருமுறை.", scope="Org")
+		self._clear_active_cache()
+		decomposed = unicodedata.normalize("NFD", "கொடுப்பனவு எப்போது")
+		self.assertNotEqual(decomposed, unicodedata.normalize("NFC", decomposed))
+		self.assertEqual(wiki._significant_tokens(decomposed), ["கொடுப்பனவு"])
+		self.assertIn("மாதம் ஒருமுறை", self._ground(USER_A, decomposed))
+
+	def test_short_indic_words_are_kept(self):
+		self.assertIn("दिन", wiki._significant_tokens("कितने दिन"))
+		self.assertIn("பணி", wiki._significant_tokens("பணி நேரம் என்ன"))
+		self.assertEqual(wiki._significant_tokens("आप यह वह हम कब कौन में"), [])
+		self.assertEqual(wiki._significant_tokens("இது அது நான் என் எந்த"), [])
+		_make_page("ground-test--short", "Hours", body_md="बैठक का दिन सोमवार है।", scope="Org")
+		self._clear_active_cache()
+		self.assertIn("सोमवार", self._ground(USER_A, "बैठक का दिन"))
+
+	def test_english_tokens_unchanged(self):
+		self.assertEqual(
+			wiki._significant_tokens("Is the GST-rate for item_code 123 a net-45 term? Please tell Jarvis"),
+			["rate", "item", "code", "term"],
+		)
+
+	def test_non_indic_two_letter_fillers_stay_out(self):
+		self.assertEqual(wiki._significant_tokens("на не это в"), [])
+		self.assertEqual(wiki._significant_tokens("في من"), [])
+		self.assertIn("зарплата", wiki._significant_tokens("на зарплата"))
+
+	def test_hindi_and_tamil_fillers_leave_only_content_words(self):
+		self.assertEqual(
+			wiki._significant_tokens("क्या आप मुझे बता सकते हैं कि वेतन के लिए कितने दिन लगते हैं"),
+			["बता", "वेतन", "दिन", "लगते"],
+		)
+		self.assertEqual(
+			wiki._significant_tokens("சம்பளம் பற்றி எனக்கு சொல்ல முடியும் ஆனால் பணி இருந்து"),
+			["சம்பளம்", "சொல்ல", "பணி"],
+		)
+
+	def test_huge_message_is_capped(self):
+		self.assertEqual(wiki._significant_tokens(("x " * 3000) + "latecomer"), [])
