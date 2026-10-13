@@ -127,6 +127,37 @@ class TestHistoryPaging(FrappeTestCase):
 		self.assertEqual(len(whole["messages"]), 14)
 		self.assertEqual(whole["messages"][0].role, "user")
 
+	def test_a_resync_reaches_back_to_the_newest_row_the_client_holds(self):
+		for _ in range(8):
+			self._turn(2)  # 32 rows; the client holds up to seq 10
+		joined = self._page(limit=4, after=10)
+		self.assertEqual(joined["paging"]["start"], 10)
+		self.assertEqual([m.seq for m in joined["messages"]], list(range(10, 33)))
+		self.assertTrue(joined["paging"]["has_more"])
+		self.assertEqual(joined["paging"]["before"], 10)
+		# Without `after`, or beyond the widening, the page is just the newest turn.
+		self.assertEqual(self._page(limit=4)["paging"]["start"], 29)
+		with patch.object(chat_api, "HISTORY_TURN_WIDEN_MAX", 5):
+			self.assertEqual(self._page(limit=4, after=10)["paging"]["start"], 29)
+		# An older page ignores `after`.
+		self.assertEqual(self._page(limit=4, before=29, after=10)["paging"]["start"], 25)
+
+	def test_the_newest_page_carries_earlier_prompts_for_recall(self):
+		for n in range(6):
+			self._msg("user", content=f"prompt {n}")
+			self._msg("assistant", content="answer")
+		self._msg("user", content="hidden prompt", hidden=1)
+		self._msg("user", content="latest")
+		self._msg("assistant", content="answer")
+		out = self._page(limit=2)
+		self.assertEqual([m.content for m in out["messages"] if m.role == "user"], ["latest"])
+		self.assertEqual([p["content"] for p in out["recent_prompts"]], [f"prompt {n}" for n in range(6)])
+		self.assertEqual({p["role"] for p in out["recent_prompts"]}, {"user"})
+		with patch.object(chat_api, "HISTORY_RECENT_PROMPTS", 2):
+			capped = self._page(limit=2)["recent_prompts"]
+		self.assertEqual([p["content"] for p in capped], ["prompt 4", "prompt 5"])
+		self.assertEqual(self._page(limit=2, before=out["paging"]["before"])["recent_prompts"], [])
+
 	def test_hidden_rows_never_ride_a_page(self):
 		self._turn(1)
 		hidden = self._msg("user", content="continue", hidden=1)

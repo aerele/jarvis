@@ -40,7 +40,12 @@ import { spanBetween } from "../lib/time";
 import { proposedLabel } from "../lib/cardAge.js";
 import { sortPendingCards } from "../lib/sortPendingCards.js";
 import { mergePendingSources, withExcluded } from "../lib/pendingResync.js";
-import { mergeNewestPage, prependOlderPage, refreshNames } from "@shared/lib/historyPaging.js";
+import {
+	heldNewestSeq,
+	mergeNewestPage,
+	prependOlderPage,
+	refreshNames,
+} from "@shared/lib/historyPaging.js";
 import {
 	discardedTokens,
 	isRecentCard,
@@ -460,7 +465,7 @@ async function scrollToBottom(force = false) {
 }
 
 // ── loading ─────────────────────────────────────────────────────────────────
-async function load(force = false) {
+async function load(force = false, staleRetry = true) {
 	const cid = convId.value;
 	const generation = viewGeneration;
 	const ticket = ++loadGeneration;
@@ -471,9 +476,12 @@ async function load(force = false) {
 	follow.value = true;
 	loading.value = true;
 	try {
-		// Only the newest page is re-read; older rows on screen stay (#715 F13).
+		// Only the newest page is re-read; older rows on screen stay (#715 F13). `after`
+		// lets the page reach back to the newest row held so the older pages join it.
 		const refresh = refreshNames(messages.value);
-		const d = await api.getConversation(cid, { refresh });
+		const after = heldNewestSeq(messages.value, historyPaging.value);
+		if (!messages.value.length) olderArmed = false; // an open, not a resync
+		const d = await api.getConversation(cid, { refresh, after });
 		if (!current()) return;
 		conversation.value = d?.conversation || null;
 		const page = mergeNewestPage(messages.value, historyPaging.value, d, refresh);
@@ -504,10 +512,14 @@ async function load(force = false) {
 			queueGeneration++;
 		}
 		await scrollToBottom(force);
+		// An older page loaded while this read was in flight brought pending cards it
+		// did not ask about: refresh once more so none stays confirmable once resolved.
+		if (page.stale.length && staleRetry) load(false, false);
 	} catch (e) {
 		console.error("Jarvis PWA: failed to load conversation", e);
 	} finally {
 		if (current()) loading.value = false;
+		armOlderNextFrame();
 	}
 }
 
@@ -517,18 +529,28 @@ async function load(force = false) {
 // at the top of a chat that cannot load does not repeat the request and its banner.
 let olderFailedAt = 0;
 const OLDER_RETRY_PAUSE_MS = 10000;
+// The scroll trigger waits for an open to land on the newest message, and for a
+// prepend's hold to be applied: the scrollTop of those in-between frames is not
+// the reader's.
+let olderArmed = false;
+function armOlderNextFrame() {
+	requestAnimationFrame(() => {
+		olderArmed = true;
+	});
+}
 async function loadOlder({ auto = false } = {}) {
 	const cid = convId.value;
 	const generation = viewGeneration;
 	const paging = historyPaging.value;
 	if (!cid || !paging.hasMore || loadingOlder.value) return;
-	if (auto && Date.now() - olderFailedAt < OLDER_RETRY_PAUSE_MS) return;
+	if (auto && (!olderArmed || Date.now() - olderFailedAt < OLDER_RETRY_PAUSE_MS)) return;
 	loadingOlder.value = true;
 	try {
 		const d = await api.getConversation(cid, { before: paging.before });
 		if (!isCurrent(cid, generation) || historyPaging.value.before !== paging.before) return;
 		const el = scroller.value;
 		const fromBottom = el ? el.scrollHeight - el.scrollTop : null;
+		olderArmed = false;
 		const page = prependOlderPage(messages.value, historyPaging.value, d);
 		messages.value = page.messages;
 		historyPaging.value = page.paging;
@@ -539,6 +561,7 @@ async function loadOlder({ auto = false } = {}) {
 		};
 		hold();
 		requestAnimationFrame(hold); // again once late layout (charts, images) lands
+		armOlderNextFrame();
 	} catch (e) {
 		console.error("Jarvis PWA: failed to load earlier messages", e);
 		olderFailedAt = Date.now();

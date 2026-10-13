@@ -555,7 +555,8 @@ test("ChatView binds the origin to the conversation it was read for", () => {
 		/originPage\.value = d\?\.conversation\?\.origin_page \|\| "";\n\toriginOf\.value = id;/
 	);
 	assert.ok(
-		load.indexOf("await api.getConversation(id, { refresh })") < load.indexOf("originOf.value = id;"),
+		load.indexOf("await api.getConversation(id, { refresh, after })") <
+			load.indexOf("originOf.value = id;"),
 		"the pair is written from the response, not before it"
 	);
 	// NOTHING blanks the pair ahead of the round trip. Eight of loadConversation's
@@ -563,7 +564,10 @@ test("ChatView binds the origin to the conversation it was read for", () => {
 	// after every canvas enrichment, onResync on every socket connect and tab
 	// focus) — a pre-fetch blanking removes "Open in Dashboards" from the DOM for
 	// a full RTT there, and for good when that refetch rejects.
-	const preFetch = load.slice(0, load.indexOf("const d = await api.getConversation(id, { refresh })"));
+	const preFetch = load.slice(
+		0,
+		load.indexOf("const d = await api.getConversation(id, { refresh, after })")
+	);
 	assert.equal(
 		(preFetch.match(/originPage\.value = "";/g) || []).length,
 		1,
