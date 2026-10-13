@@ -9,6 +9,7 @@ server-side, complete, under the same permission gates.
 
 from __future__ import annotations
 
+import contextlib
 import io
 from unittest import mock
 
@@ -16,7 +17,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from openpyxl import load_workbook
 
-from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.exceptions import InvalidArgumentError, NoDataError, PermissionDeniedError
 from jarvis.tools._export import resolvers
 from jarvis.tools.export_query import export_query
 
@@ -205,27 +206,35 @@ class TestExportQuerySpecLimitsAndHeaders(FrappeTestCase):
 		)
 		with (
 			mock.patch("jarvis.api._agent_read_timeout_s", return_value=25),
-			mock.patch.object(frappe.db, "db_type", "mariadb"),
+			mock.patch("jarvis.api.statement_time_limit", return_value=contextlib.nullcontext()),
 			mock.patch.object(frappe.db, "sql", side_effect=timed_out),
 		):
 			with self.assertRaisesRegex(InvalidArgumentError, "ran past the 25-second limit"):
 				resolvers.from_spec(_no_comment_spec())
 
 	def test_the_select_runs_under_the_statement_limit(self):
-		seen = []
-		real_sql = frappe.db.sql
-
-		def spy(query, *a, **k):
-			seen.append(str(query))
-			return real_sql(query, *a, **k)
-
+		if frappe.db.db_type != "mariadb":
+			self.skipTest("max_statement_time is MariaDB's")
 		with (
 			mock.patch("jarvis.api._agent_read_timeout_s", return_value=25),
-			mock.patch.object(frappe.db, "sql", side_effect=spy),
+			mock.patch.object(
+				frappe.db, "set_execution_timeout", wraps=frappe.db.set_execution_timeout
+			) as cap,
 		):
 			resolvers.from_spec(_no_comment_spec())
-		if frappe.db.db_type == "mariadb":
-			self.assertTrue(any(q.startswith("SET STATEMENT max_statement_time=25 FOR SELECT") for q in seen))
+		cap.assert_called_with(25)
+
+	def test_a_value_cannot_break_out_of_its_quotes(self):
+		# A backslash before a quote ends a MariaDB string early when values are
+		# inlined; a spec value must stay a value (parameterised), so this matches
+		# nothing instead of every row.
+		spec = {
+			"from": "ToDo",
+			"select": ["name"],
+			"where": [{"field": "description", "op": "=", "value": "a\\' OR 1=1 -- -"}],
+		}
+		with self.assertRaises(NoDataError):
+			export_query(spec=spec)
 
 	def test_shared_labels_are_told_apart(self):
 		cols = [
