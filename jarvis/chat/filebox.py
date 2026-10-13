@@ -227,6 +227,7 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 	savepoint = "jarvis_filebox_attach"
 	messages_before = len(frappe.local.message_log or [])
 	src = None
+	frappe.db.savepoint(savepoint)
 	try:
 		src = _source_file(conv, ("name", "file_url", "file_name"))
 		if not src or not src.get("file_url"):
@@ -238,12 +239,10 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 		)
 		if existing:
 			return {"attached_file": existing}
-		frappe.db.savepoint(savepoint)
 		files = add_attachments(doctype, name, [src["name"]])
 		return {"attached_file": files[0].name if files else None}
 	except Exception as e:
-		if src and src.get("file_url"):
-			frappe.db.rollback(save_point=savepoint)
+		frappe.db.rollback(save_point=savepoint)
 		# add_attachments reports through frappe.throw: drop the messages it added
 		# (the create's own stay), the reason travels in attach_error instead.
 		del frappe.local.message_log[messages_before:]
