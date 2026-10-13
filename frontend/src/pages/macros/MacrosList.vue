@@ -123,8 +123,21 @@
 			</template>
 
 			<template #cell-schedule="{ row }">
-				<div v-if="row.schedule_enabled" class="truncate text-base">
+				<div
+					v-if="row.schedule_enabled"
+					class="truncate text-base"
+					:title="scheduleLabel(row)"
+				>
 					{{ scheduleLabel(row) }}
+				</div>
+				<!-- A one-time schedule switches itself off once it ran: say so, or the row
+				     reads like a macro that was never scheduled. -->
+				<div
+					v-else-if="ranOnceLabel(row)"
+					class="truncate text-base text-ink-gray-5"
+					:title="ranOnceLabel(row)"
+				>
+					{{ ranOnceLabel(row) }}
 				</div>
 				<span v-else class="text-base text-ink-gray-4">-</span>
 			</template>
@@ -200,7 +213,7 @@ import { macrosListFetch } from "@/pages/list/listFetchers";
 import RunsTab from "./RunsTab.vue";
 import AdminTab from "./AdminTab.vue";
 import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
-import { scheduleLabel } from "./scheduleLabel";
+import { ranOnceLabel, scheduleLabel } from "./scheduleLabel";
 import { ARMED_HELP, LAST_RUN_TONE, NEXT_RUN_TONE, enabledLabel } from "./runDisplay";
 import { nextRunCell as describeNextRun } from "@/lib/macroSchedule";
 import {

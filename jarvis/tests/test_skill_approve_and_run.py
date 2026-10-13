@@ -1727,9 +1727,19 @@ class TestSkillAutorunPartition(FrappeTestCase):
 		)
 
 	def test_never_set_is_the_trio_plus_create_custom_skill_and_call_connector(self):
+		# schedule_run joined the brake: an approved skill never sets up a later run.
 		self.assertEqual(
 			api._SKILL_AUTORUN_NEVER,
-			frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill", "call_connector"}),
+			frozenset(
+				{
+					"delete_doc",
+					"cancel_doc",
+					"amend_doc",
+					"create_custom_skill",
+					"call_connector",
+					"schedule_run",
+				}
+			),
 		)
 
 	def test_create_custom_skill_is_now_braked_in_both_modes(self):

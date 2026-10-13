@@ -195,14 +195,14 @@ def admin_list_macros(
 		elif on_hold:
 			conditions.append("1=0")  # before the migrate nothing is held
 
-	from jarvis.chat.macro_scheduler import _once_ready
+	from jarvis.chat.macro_scheduler import once_ready
 
 	where = " AND ".join(conditions)
 	order = list_filters.order_by(sort_field, sort_dir, _SORTABLE, "macro_name", "asc", prefix="m.")
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` m WHERE {where}", params)[0][0]
 	rows = list_filters.bounded_sql(
 		f"""SELECT {_LIST_COLUMNS}{", m.admin_hold, m.admin_hold_reason" if held_column else ""}{
-			", m.schedule_date" if _once_ready() else ""
+			", m.schedule_date" if once_ready() else ""
 		}
 		FROM `tabJarvis Macro` m
 		WHERE {where}

@@ -17,7 +17,15 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, get_datetime, now_datetime
 
 from jarvis.chat import macro_scheduler, macros, macros_api
-from jarvis.tests.test_macro_scheduler import MACRO, OWNER_OK, PFX, MacroSchedulerBase, _runs_for
+from jarvis.tests.test_macro_scheduler import (
+	MACRO,
+	OWNER_OK,
+	PFX,
+	RUN,
+	MacroSchedulerBase,
+	_Killed,
+	_runs_for,
+)
 
 
 def _slot(minutes_from_now: int) -> datetime.datetime:
@@ -60,7 +68,24 @@ def _mk_once(tag: str, *, minutes_from_now: int = -60, enabled: int = 1):
 
 
 def _state(name: str):
-	return frappe.db.get_value(MACRO, name, ["schedule_enabled", "next_run_at", "last_run_at"], as_dict=True)
+	return frappe.db.get_value(
+		MACRO, name, ["schedule_enabled", "next_run_at", "last_run_at", "schedule_date"], as_dict=True
+	)
+
+
+def _due_now(name: str) -> None:
+	"""Make the row's current ``next_run_at`` (a lease) come due, as time would."""
+	frappe.db.set_value(MACRO, name, "next_run_at", _slot(-1), update_modified=False)
+	frappe.db.commit()
+
+
+def _leased(test, name: str) -> None:
+	"""The slot is held by a lease about _RETRY_AFTER_S out, the schedule still on."""
+	state = _state(name)
+	test.assertEqual(state.schedule_enabled, 1, "the one-time slot was switched off before it ran")
+	wait = macro_scheduler._RETRY_AFTER_S
+	test.assertGreater(get_datetime(state.next_run_at), add_to_date(now_datetime(), seconds=wait - 120))
+	test.assertLessEqual(get_datetime(state.next_run_at), add_to_date(now_datetime(), seconds=wait))
 
 
 def _notes(tag: str) -> list:
@@ -192,28 +217,105 @@ class TestOnceSweep(MacroSchedulerBase):
 		self.assertIn("will not run again", _notes("retry")[-1].email_content)
 		self.assertEqual([r.status for r in _runs_for(m.name)], ["failed", "failed"])
 
-	def test_no_retry_over_an_owner_change_made_during_the_run(self):
+	def test_an_owner_save_during_the_run_is_kept(self):
 		m = _mk_once("owner-edit")
+		later = add_to_date(now_datetime(), days=3).date()
 
-		def edit_then_fail(*a, **k):
-			# The owner saves the macro while it is being dispatched.
-			frappe.db.set_value(MACRO, m.name, "modified", add_to_date(now_datetime(), seconds=5))
+		def owner_moves_it(*a, **k):
+			# While the run is being dispatched, the owner moves the schedule.
+			doc = frappe.get_doc(MACRO, m.name)
+			doc.schedule_date = later
+			doc.flags.ignore_permissions = True
+			doc.save()
 			frappe.db.commit()
-			raise RuntimeError("gateway down")
+			return {"ok": True}
 
-		with patch("jarvis.chat.macros.run_macro", side_effect=edit_then_fail):
+		with patch("jarvis.chat.macros.run_macro", side_effect=owner_moves_it):
 			macro_scheduler.run_due_macros()
-		self.assertEqual(_state(m.name).schedule_enabled, 0, "a retry overwrote the owner's save")
-		self.assertIn("will not run again", _notes("owner-edit")[-1].email_content)
+		state = _state(m.name)
+		self.assertEqual(
+			state.schedule_enabled, 1, "the end of the run switched off the owner's new schedule"
+		)
+		self.assertEqual(get_datetime(state.next_run_at).date(), later)
 
-	def test_a_switched_off_macro_loses_the_slot_without_a_run(self):
+	def test_a_worker_killed_before_the_run_leaves_the_slot_to_come_due(self):
+		m = _mk_once("killed")
+		with patch("jarvis.chat.macros.run_macro", side_effect=_Killed()):
+			with self.assertRaises(_Killed):
+				macro_scheduler.run_due_macros()
+		frappe.db.rollback()
+		_leased(self, m.name)
+		# The lease comes due: no run was started, so this is the one retry, and it runs.
+		_due_now(m.name)
+		self.assertEqual(self._run_due(), [m.name])
+		self.assertEqual(_state(m.name).schedule_enabled, 0)
+
+	def test_a_worker_killed_after_the_run_started_does_not_run_it_twice(self):
+		m = _mk_once("killed-late")
+		with patch("jarvis.chat.macros.run_macro", side_effect=_Killed()):
+			with self.assertRaises(_Killed):
+				macro_scheduler.run_due_macros()
+		frappe.db.rollback()
+		# The run had started (its row and conversation exist) when the worker died.
+		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "x"}).insert(
+			ignore_permissions=True
+		)
+		run = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"macro": m.name,
+				"status": "running",
+				"trigger": "scheduled",
+				"conversation": conv.name,
+			}
+		)
+		run.flags.ignore_permissions = True
+		run.insert()
+		frappe.db.commit()
+		_due_now(m.name)
+		self.assertEqual(self._run_due(), [], "the run that already started was dispatched again")
+		state = _state(m.name)
+		self.assertEqual(state.schedule_enabled, 0)
+		self.assertTrue(state.last_run_at)
+
+	def test_a_refusal_for_good_ends_it_without_a_resume_promise(self):
+		m = _mk_once("refused")
+		with patch("jarvis.chat.macros.run_macro", return_value={"ok": False, "reason": "usage_limit"}):
+			macro_scheduler.run_due_macros()
+		state = _state(m.name)
+		self.assertEqual(state.schedule_enabled, 0)
+		self.assertFalse(state.last_run_at, "a refused one-time slot was stamped as run")
+		note = _notes("refused")[-1].email_content
+		self.assertIn("One-time run skipped", note)
+		self.assertIn("will not run again", note)
+		self.assertNotIn("resume", note)
+
+	def test_a_dispatch_that_did_not_start_keeps_the_lease_as_the_retry(self):
+		m = _mk_once("not-dispatched")
+		with patch(
+			"jarvis.chat.macros.run_macro",
+			return_value={"ok": False, "reason": macros.BLOCK_DISPATCH_FAILED},
+		):
+			macro_scheduler.run_due_macros()
+		_leased(self, m.name)
+		self.assertIn("retry within the hour", _notes("not-dispatched")[-1].email_content)
+
+	def test_a_failure_before_the_claim_moves_the_slot_once(self):
+		m = _mk_once("pre-claim")
+		with patch.object(macro_scheduler, "_claim_slot", side_effect=RuntimeError("db blip")):
+			macro_scheduler.run_due_macros()
+		_leased(self, m.name)
+		self.assertIn("retry within the hour", _notes("pre-claim")[-1].email_content)
+
+	def test_a_switched_off_macro_loses_the_slot_and_the_owner_is_told(self):
 		m = _mk_once("off", enabled=0)
 		self.assertNotIn(m.name, self._run_due())
 		state = _state(m.name)
 		self.assertEqual(state.schedule_enabled, 0)
 		self.assertIsNone(state.next_run_at)
 		self.assertFalse(state.last_run_at)
-		self.assertEqual(_runs_for(m.name), [])
+		self.assertIn("switched off at its time", _notes("off")[-1].email_content)
+		self.assertEqual([r.status for r in _runs_for(m.name)], ["failed"])
 
 
 class TestOnceFinishedNotice(MacroSchedulerBase):
@@ -226,7 +328,7 @@ class TestOnceFinishedNotice(MacroSchedulerBase):
 		m = _mk_once("done")
 		self._announce(m, "completed")
 		[note] = _notes("done")
-		self.assertIn("One-time macro finished", note.subject)
+		self.assertIn("Your scheduled run finished", note.subject)
 		self.assertEqual(note.link, "/jarvis/c/conv-once-1")
 
 	def test_recurring_and_manual_successes_stay_quiet(self):
@@ -259,3 +361,62 @@ class TestOnceApi(MacroSchedulerBase):
 		self.assertEqual(get_datetime(got["next_run_at"]), datetime.datetime.combine(day, datetime.time(11)))
 		[row] = [r for r in page["rows"] if r["name"] == made["data"]["name"]]
 		self.assertEqual(row["schedule_date"], str(day))
+
+
+class TestOnceSaveThroughTheForm(MacroSchedulerBase):
+	"""The form posts the date as text ("2026-11-02"); the row holds a date."""
+
+	def test_saving_the_same_date_is_not_a_change(self):
+		m = _mk_once("same-date")
+		before = _state(m.name)
+		frappe.set_user(OWNER_OK)
+		try:
+			macros_api.update_macro(m.name, description="noted", schedule_date=str(before.schedule_date))
+		finally:
+			frappe.set_user("Administrator")
+		after = _state(m.name)
+		self.assertEqual(after.next_run_at, before.next_run_at, "an unrelated save moved the due slot")
+		self.assertEqual(after.schedule_enabled, 1)
+
+	def test_a_new_date_moves_the_run(self):
+		m = _mk_once("new-date")
+		day = add_to_date(now_datetime(), days=6).date()
+		frappe.set_user(OWNER_OK)
+		try:
+			macros_api.update_macro(m.name, schedule_date=str(day))
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(get_datetime(_state(m.name).next_run_at).date(), day)
+
+
+class TestBeforeTheMigrate(MacroSchedulerBase):
+	"""Code served before the migrate adds schedule_date: nothing reads the column."""
+
+	def test_the_sweep_and_the_lists_work_without_the_column(self):
+		_mk_once("pre-migrate", minutes_from_now=120)
+		with patch.object(macro_scheduler, "once_ready", return_value=False):
+			macro_scheduler.run_due_macros()
+			frappe.set_user(OWNER_OK)
+			try:
+				page = macros_api.list_macros_page()
+				macros_api.list_macros()
+			finally:
+				frappe.set_user("Administrator")
+		self.assertTrue(all("schedule_date" not in r for r in page["rows"]))
+
+
+class TestSpentOneTimeMacrosDoNotFillTheCap(MacroSchedulerBase):
+	def test_a_spent_one_time_macro_does_not_count(self):
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import (
+			MAX_MACROS_PER_OWNER,
+			macros_counted_toward_cap,
+		)
+
+		spent = _mk_once("spent")
+		frappe.db.set_value(
+			MACRO, spent.name, {"schedule_enabled": 0, "next_run_at": None, "last_run_at": now_datetime()}
+		)
+		frappe.db.commit()
+		total = frappe.db.count(MACRO, {"owner": OWNER_OK})
+		self.assertEqual(macros_counted_toward_cap(OWNER_OK), total - 1)
+		self.assertLess(macros_counted_toward_cap(OWNER_OK), MAX_MACROS_PER_OWNER)

@@ -783,7 +783,7 @@ test("schedule_run: a schedule card is recognised, and its receipt names the mac
 		{ ok: true, data: { macro: "m1", macro_name: "Review", link: "/jarvis/macros/m1" } },
 		"confirmed"
 	);
-	assert.equal(done.title, "Scheduled “Review” to run once");
+	assert.equal(done.title, "Scheduled “Review” to run once on 15 Jan 2030, 9:30 am");
 	assert.deepEqual(done.targets, [{ name: "Review", url: "/jarvis/macros/m1" }]);
 	const no = receiptView(
 		"schedule_run",
@@ -791,5 +791,21 @@ test("schedule_run: a schedule card is recognised, and its receipt names the mac
 		null,
 		"discarded"
 	);
-	assert.equal(no.title, "Discarded, did not schedule “Review” to run once");
+	assert.equal(
+		no.title,
+		"Discarded, did not schedule “Review” to run once on 15 Jan 2030, 9:30 am"
+	);
+	const untitled = receiptView(
+		"schedule_run",
+		{
+			run_at: "2030-01-15 21:05",
+			prompt: "Check the comments on Employee HR-EMP-0001 and tell me",
+		},
+		null,
+		"discarded"
+	);
+	assert.equal(
+		untitled.title,
+		"Discarded, did not schedule “Check the comments on Employee HR-EMP-00…” to run once on 15 Jan 2030, 9:05 pm"
+	);
 });

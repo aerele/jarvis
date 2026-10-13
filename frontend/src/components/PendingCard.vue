@@ -504,10 +504,12 @@ function tableNote(t) {
 				<summary>What it will do</summary>
 				<pre class="jv-pcard-body">{{ card.prompt }}</pre>
 			</details>
-			<div class="jv-pcard-caption">
-				Runs once as you, then the schedule switches itself off. You get a notification
-				when it finishes, and any change it makes still asks for your confirmation.
-			</div>
+			<p class="jv-pcard-caption jv-pcard-caption--after">
+				Runs once as you, within a few minutes of that time, then the schedule switches
+				itself off. You get a notification when it finishes. If it needs to change
+				something, it waits for you to confirm it in that chat. To cancel or move it later,
+				open the macro from the receipt.
+			</p>
 		</template>
 
 		<!-- run_method -->
@@ -1031,6 +1033,9 @@ html[data-theme="dark"] .jv-pcard {
 	font-size: 11.5px;
 	color: var(--pc-text-3);
 	margin: 0 0 8px;
+}
+.jv-pcard-caption--after {
+	margin-top: 8px;
 }
 .jv-pcard-recs {
 	display: flex;
