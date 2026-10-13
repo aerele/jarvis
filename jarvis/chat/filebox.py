@@ -192,10 +192,10 @@ def _refuse_foreign_attachment(fdoc) -> None:
 	)
 
 
-def _source_file(conv: str):
+def _source_file(conv: str, fields: tuple = ("file_url", "file_name")):
 	"""The dropped File (``file_url``, ``file_name``) a resume re-attaches: the one
 	stamped at drop, else the conversation's earliest attachment."""
-	fields = ["file_url", "file_name"]
+	fields = list(fields)
 	name = frappe.db.get_value(CONV, conv, "filebox_source_file")
 	row = frappe.db.get_value("File", name, fields, as_dict=True) if name else None
 	if row:
@@ -208,6 +208,52 @@ def _source_file(conv: str):
 		limit=1,
 	)
 	return rows[0] if rows else None
+
+
+def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
+	"""Attach the file this File Box run was dropped with to the draft it created,
+	so the invoice opens with its source document in the sidebar. A record can only
+	take attachments once it exists, so this runs right after the create, as the
+	run's user, through Frappe's own ``add_attachments`` (write on the draft, read
+	on the File). It adds a new File row for the same bytes: the conversation keeps
+	its own link, which resumes and duplicate detection rely on.
+
+	Never fails the create: returns ``{"attached_file": <File name>}``, ``{}`` when
+	the run has no source file, or ``{"attach_error": <reason>}`` with the error
+	logged. Idempotent: a draft that already has this file is left as it is."""
+	src = _source_file(conv, ("name", "file_url", "file_name"))
+	if not src or not src.get("file_url"):
+		return {}
+	existing = frappe.db.get_value(
+		"File",
+		{"file_url": src["file_url"], "attached_to_doctype": doctype, "attached_to_name": name},
+		"name",
+	)
+	if existing:
+		return {"attached_file": existing}
+	from frappe.utils.file_manager import add_attachments
+
+	savepoint = "jarvis_filebox_attach"
+	frappe.db.savepoint(savepoint)
+	try:
+		files = add_attachments(doctype, name, [src["name"]])
+	except Exception as e:
+		frappe.db.rollback(save_point=savepoint)
+		# add_attachments reports through frappe.throw; keep its message out of the
+		# tool response, the reason travels in attach_error instead.
+		frappe.clear_messages()
+		frappe.log_error(
+			title="jarvis.file_box.attach_failed",
+			message=f"{conv}: {src['file_name']} -> {doctype} {name}\n{frappe.get_traceback()}",
+		)
+		reason = _first_line(str(e)) or type(e).__name__
+		return {
+			"attach_error": (
+				f"The dropped file {src['file_name']} could not be attached to {doctype} {name}: "
+				f"{reason}. Tell the user so they can attach it from the form."
+			)
+		}
+	return {"attached_file": files[0].name if files else None}
 
 
 def _send_inbound(conv: str, file_doc, pinned: str | None, preamble: str | None = None) -> dict:
@@ -604,7 +650,7 @@ def _inbound_inner_sql(extra: str) -> str:
 	       END AS status
 	FROM (
 	  SELECT c.name, c.title, c.creation, c.filebox_result_doctype, c.filebox_result_name,
-	         c.filebox_result_count, c.filebox_last_error, lm.name AS lm_name,
+	         c.filebox_result_count, c.filebox_last_error, c.filebox_source_file, lm.name AS lm_name,
 	         {dup_of} AS duplicate_of,
 	         COALESCE(pa.n, 0) AS pending_approvals,
 	         COALESCE(bt.behind, 0) AS behind_chat,
@@ -755,13 +801,18 @@ _FAILURES = {
 _DRAFT_STATE = {1: "submitted", 2: "cancelled", None: "deleted"}
 
 
+# Whether the dropped file reached the draft (``_source_attached``); None says nothing.
+_SOURCE_ATTACHED = {True: " · file attached", False: " · file not attached"}
+
+
 def _draft_line(r: dict) -> str:
 	more = int(r.get("filebox_result_count") or 1) - 1
 	line = f"Draft {r['filebox_result_doctype']} {r['filebox_result_name']} created"
 	later = _DRAFT_STATE.get(r.get("result_docstatus", 0))
 	if later:
 		line = f"{r['filebox_result_doctype']} {r['filebox_result_name']} {later}"
-	return line + (f" and {more} more" if more > 0 else "")
+	line += f" and {more} more" if more > 0 else ""
+	return line + _SOURCE_ATTACHED.get(r.get("source_attached"), "")
 
 
 def _result_docstatus(rows: list[dict]) -> None:
@@ -783,6 +834,48 @@ def _result_docstatus(rows: list[dict]) -> None:
 			r["result_docstatus"] = found.get((r["filebox_result_doctype"], r["filebox_result_name"]))
 		# The pill follows the draft: "" while it is still a draft (or none was made).
 		r["result_state"] = _DRAFT_STATE.get(r.get("result_docstatus", 0)) or ""
+	_source_attached(rows)
+
+
+def _source_attached(rows: list[dict]) -> None:
+	"""``source_attached`` on each row whose first draft still exists: True when the
+	dropped file is attached to it, False when not. Left unset (the line says
+	nothing) for a deleted draft or a row with no recorded source file. Two queries
+	for the whole page."""
+	rows = [
+		r
+		for r in rows
+		if r.get("filebox_result_name")
+		and r.get("filebox_source_file")
+		and r.get("result_docstatus") is not None
+	]
+	if not rows:
+		return
+	urls = dict(
+		frappe.get_all(
+			"File",
+			filters={"name": ["in", sorted({r["filebox_source_file"] for r in rows})]},
+			fields=["name", "file_url"],
+			as_list=True,
+		)
+	)
+	if not urls:
+		return
+	attached = {
+		(f.attached_to_doctype, f.attached_to_name, f.file_url)
+		for f in frappe.get_all(
+			"File",
+			filters={
+				"attached_to_name": ["in", sorted({r["filebox_result_name"] for r in rows})],
+				"file_url": ["in", sorted(set(urls.values()))],
+			},
+			fields=["attached_to_doctype", "attached_to_name", "file_url"],
+		)
+	}
+	for r in rows:
+		url = urls.get(r["filebox_source_file"])
+		if url:
+			r["source_attached"] = (r["filebox_result_doctype"], r["filebox_result_name"], url) in attached
 
 
 def _result(r: dict, wait, msg) -> tuple[str, str | None]:
@@ -854,6 +947,8 @@ _INTERNAL = (
 	"filebox_result_name",
 	"filebox_result_count",
 	"filebox_last_error",
+	"filebox_source_file",
+	"source_attached",
 	"result_docstatus",
 	"prior",
 )
@@ -1039,7 +1134,7 @@ def list_inbound_page(
 	rows = frappe.db.sql(
 		f"""SELECT t.name, t.title, t.creation, t.status, t.pending_approvals, t.behind_chat,
 		t.lm_name, t.fail_code, t.skipped, t.filebox_result_doctype, t.filebox_result_name,
-		t.filebox_result_count, t.filebox_last_error, t.duplicate_of
+		t.filebox_result_count, t.filebox_last_error, t.filebox_source_file, t.duplicate_of
 		FROM ({inner}) t {outer}
 		ORDER BY {order}
 		LIMIT %(page_length)s OFFSET %(start)s""",
