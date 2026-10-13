@@ -574,3 +574,22 @@ class TestTurnTelemetryDuration(FrappeTestCase):
 		self.assertEqual(rec["duration_ms"], 60000)
 		self.assertEqual(rec["approval_wait_ms"], 30000)
 		self.assertEqual(rec["active_ms"], 30000)
+
+	def test_approval_wait_is_clamped_and_merged(self):
+		rec = self._emitted(
+			{
+				"dispatching_at": "2026-10-13 10:00:10",
+				"terminal_observed_at": "2026-10-13 10:01:10",
+			},
+			approvals=[
+				# created before dispatch: counts from 10:00:10 to 10:00:30 (20s)
+				("2026-10-13 10:00:00", "2026-10-13 10:00:30"),
+				# overlaps the first: merged, adds 10:00:30 to 10:00:40 (10s)
+				("2026-10-13 10:00:20", "2026-10-13 10:00:40"),
+				# decided after terminal: counts 10:01:00 to 10:01:10 (10s)
+				("2026-10-13 10:01:00", "2026-10-13 10:05:00"),
+			],
+		)
+		self.assertEqual(rec["duration_ms"], 60000)
+		self.assertEqual(rec["approval_wait_ms"], 40000)
+		self.assertEqual(rec["active_ms"], 20000)
