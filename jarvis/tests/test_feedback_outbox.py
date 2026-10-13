@@ -22,6 +22,7 @@ from jarvis.chat.feedback import (
 	submit_session_feedback,
 )
 from jarvis.exceptions import (
+	AdminAmbiguousError,
 	AdminAuthError,
 	AdminContractError,
 	AdminRateLimitedError,
@@ -121,6 +122,20 @@ class TestAccept(_OutboxTestCase):
 		self.assertEqual(json.loads(row.payload)["note"], "changed my mind")
 		self._assert_near(row.next_retry_at, _now() + timedelta(seconds=outbox.FIRST_JOB_GRACE_SECONDS))
 
+	def test_a_lost_insert_race_leaves_no_duplicate_message(self):
+		"""Two first taps on one reply: the loser's insert collides, its handler
+		takes the row over, and the response must not carry Frappe's red
+		"Duplicate Name" message, which the Desk widget would show as a failure."""
+		submit_feedback(message_id=self.msg, rating="up")  # the tap that won the insert
+		frappe.clear_messages()
+		with patch.object(frappe.db, "exists", return_value=False):  # this tap saw no row yet
+			res = submit_feedback(message_id=self.msg, rating="down", note="second tap")
+		self.assertEqual(res, {"ok": True, "delivered": False})
+		self.assertEqual(frappe.local.message_log, [], "no server message on a handled race")
+		row = self._row()
+		self.assertEqual((row.status, row.revision), ("Pending", 2))
+		self.assertEqual(json.loads(row.payload)["note"], "second tap")
+
 	def test_the_payload_is_exactly_the_admin_item(self):
 		# Privacy bound: nothing beyond what admin's ingest takes, never the reply text.
 		submit_feedback(message_id=self.msg, rating="down", note="n" * 5000)
@@ -136,9 +151,11 @@ class TestAccept(_OutboxTestCase):
 				"user_ref",
 				"reply_duration_ms",
 				"note",
+				"revision",
 			},
 		)
 		self.assertEqual(len(item["note"]), 1000)
+		self.assertLess(abs(outbox.answer_revision() - item["revision"]), 60 * 10**6, "answered moments ago")
 		self.assertNotIn("answer", json.dumps(item))  # the fixture reply's content
 
 	def test_the_name_is_the_identity(self):
@@ -377,6 +394,56 @@ class TestDelivery(_OutboxTestCase):
 		self.assertIsNone(row.next_retry_at)
 		self.log_error.assert_not_called()
 
+	def test_each_new_answer_carries_a_larger_revision_even_after_a_prune(self):
+		# Admin orders answers by this key, so it must grow from one answer to
+		# the next, including when a pruned row is re-created at counter 1.
+		seen = []
+		for rating in ("up", "down"):
+			submit_feedback(message_id=self.msg, rating=rating)
+			seen.append(json.loads(self._row().payload)["revision"])
+		frappe.db.delete(OUTBOX, {"name": self._name()})
+		submit_feedback(message_id=self.msg, rating="up")
+		row = self._row()
+		self.assertEqual(row.revision, 1, "the row counter restarted")
+		seen.append(json.loads(row.payload)["revision"])
+		self.assertEqual(seen, sorted(set(seen)), f"not strictly increasing: {seen}")
+
+	def test_a_timed_out_push_and_the_newer_answer_reach_admin_in_revision_order(self):
+		"""Revision 1 times out here while admin may still apply it; the user then
+		re-rates and revision 2 is delivered. Admin can only discard revision 1 if
+		it arrives carrying the older key, which is what this pins (admin's own
+		test covers the discard)."""
+		sent = []
+
+		def ambiguous(item):
+			sent.append(item)
+			raise AdminAmbiguousError("admin did not answer in time; the request may already be running")
+
+		submit_feedback(message_id=self.msg, rating="up")
+		with patch(_PUSH, side_effect=ambiguous):
+			outbox.deliver(self._name())
+		self.assertEqual((self._row().status, self._row().attempts), ("Pending", 1))
+		submit_feedback(message_id=self.msg, rating="down", note="actually wrong")
+		with patch(_PUSH, side_effect=sent.append):
+			outbox.deliver(self._name())
+		self.assertEqual(self._row().status, "Delivered")
+		older, newer = sent
+		self.assertEqual((older["rating"], newer["rating"]), ("up", "down"))
+		self.assertLess(older["revision"], newer["revision"])
+
+	def test_a_stale_reply_from_admin_counts_as_delivered(self):
+		submit_feedback(message_id=self.msg, rating="up")
+		stale = {"stored": 0, "stale": True, "name": "JCF-t-m", "tenant": "t"}
+		with patch(_PUSH, return_value=stale):
+			outbox.deliver(self._name())
+		row = self._row()
+		self.assertEqual(
+			(row.status, row.attempts, row.last_error), ("Delivered", 1, "admin kept a newer answer")
+		)
+		with patch(_PUSH) as push:
+			outbox.retry_due()
+		push.assert_not_called()
+
 	def test_a_bench_with_a_url_but_no_credentials_sends_nothing(self):
 		submit_feedback(message_id=self.msg, rating="up")
 		self._make_due()
@@ -444,8 +511,10 @@ class TestKinds(_OutboxTestCase):
 		):
 			outbox.deliver(session)
 			outbox.deliver(pulse)
-		push_session.assert_called_once_with({"kind": "Session", "session_ref": self.conv})
-		push_pulse.assert_called_once_with({"kind": "Pulse", "period_key": "M:2026-09"})
+		push_session.assert_called_once_with(json.loads(self._row(session).payload))
+		push_pulse.assert_called_once_with(json.loads(self._row(pulse).payload))
+		self.assertEqual(push_session.call_args.args[0]["session_ref"], self.conv)
+		self.assertEqual(push_pulse.call_args.args[0]["period_key"], "M:2026-09")
 		push_reply.assert_not_called()
 		self.assertEqual({self._row(session).status, self._row(pulse).status}, {"Delivered"})
 

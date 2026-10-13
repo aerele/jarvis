@@ -27,9 +27,18 @@ delivered rows after ``DELIVERED_RETENTION_DAYS``, undelivered ones after
 ``UNDELIVERED_RETENTION_DAYS`` and the oldest rows above ``MAX_ROWS``, logging
 how many undelivered answers it dropped.
 
-Idempotency: admin upserts every kind on a natural key ((tenant, message_ref),
-(tenant, session_ref), (tenant, period_key, user_ref)), so a re-send after an
-ambiguous timeout folds onto the same admin row instead of counting twice.
+Idempotency and order: admin upserts every kind on a natural key ((tenant,
+message_ref), (tenant, session_ref), (tenant, period_key, user_ref)), so a re-send
+after an ambiguous timeout folds onto the same admin row instead of counting
+twice. Every payload also carries ``revision``, the time the user answered in
+microseconds (``answer_revision``). Admin applies an answer only when its
+revision is newer than the stored one, under a row lock, and answers an older
+one ``stale: true``: a push that timed out here but finished at admin after a
+newer answer landed can no longer overwrite it. The key is a clock reading, not
+the row's ``revision`` counter, because the counter restarts at 1 when a pruned
+row is re-created and admin would then refuse every later answer as stale. An
+admin older than this ignores the key (its validators keep only known fields),
+so the bench always sends it.
 
 No explicit commit anywhere: the request path commits with the request, the
 delivery job and the sweep are committed by the job runtime. Neither holds a row
@@ -123,9 +132,11 @@ def accept(kind: str, ref: str, payload: dict) -> str:
 	request commits. A row that already exists for this identity takes the new
 	payload and starts over. Returns the row name.
 
-	The caller has already derived and bounded ``payload``; it is stored as is."""
+	The caller has already derived and bounded ``payload``; it is stored as is,
+	plus the ``revision`` admin orders answers by (``answer_revision``)."""
 	if kind not in KINDS:
 		frappe.throw(f"unknown feedback kind {kind!r}", frappe.ValidationError)
+	payload = {**payload, "revision": answer_revision()}
 	if _content_chars(payload) > MAX_PAYLOAD_CHARS:
 		frappe.throw("feedback payload is too large", frappe.ValidationError)
 	# ensure_ascii=False: store the text as written. The default escapes every
@@ -141,6 +152,10 @@ def accept(kind: str, ref: str, payload: dict) -> str:
 	revision = _replace(name, body, due) if frappe.db.exists(DT, name) else None
 	if revision is None:
 		revision = 1
+		# Frappe queues a red "Duplicate Name" message before it raises on a
+		# collision; this race is handled below, so that message must not reach
+		# the response, where the Desk widget would show a saved answer as failed.
+		queued = len(frappe.local.message_log)
 		try:
 			frappe.get_doc(
 				{
@@ -157,9 +172,19 @@ def accept(kind: str, ref: str, payload: dict) -> str:
 			).insert(ignore_permissions=True)
 		except frappe.DuplicateEntryError:
 			# A second tap on the same reply won the insert; take its row over.
+			frappe.local.message_log = frappe.local.message_log[:queued]
 			revision = _replace(name, body, due) or revision
 	_enqueue_delivery(name, revision)
 	return name
+
+
+def answer_revision() -> int:
+	"""Admin's ordering key for an answer: this bench's clock when the user
+	answered, in microseconds. It only has to grow from one answer to the next for
+	the same identity, which are seconds apart at least, far more than any clock
+	correction NTP makes by slewing; it keeps growing when a pruned outbox row is
+	re-created, which a per-row counter would not."""
+	return time.time_ns() // 1000
 
 
 def _replace(name: str, body: str, due) -> int | None:
@@ -264,7 +289,7 @@ def _push(row) -> _Outcome:
 	if not isinstance(payload, dict):
 		return _Outcome("rejected", "stored payload is unreadable")
 	try:
-		_pusher(row.kind)(payload)
+		result = _pusher(row.kind)(payload)
 	except AdminRateLimitedError as e:
 		wait = max(int(e.retry_after_seconds or 0), MIN_RATE_LIMIT_DEFER_SECONDS)
 		return _Outcome("deferred", "admin rate limit", wait)
@@ -287,6 +312,11 @@ def _push(row) -> _Outcome:
 	except Exception as e:
 		_log_unexpected_throttled()
 		return _Outcome("retry", type(e).__name__)
+	# ``stale: true`` means admin already holds a newer answer for this identity
+	# and kept it. Nothing is left to send for this one, so it counts as
+	# delivered; the note says why admin's copy differs from this row.
+	if isinstance(result, dict) and result.get("stale"):
+		return _Outcome("delivered", "admin kept a newer answer")
 	return _Outcome("delivered")
 
 
@@ -316,7 +346,7 @@ def _record(row, outcome: _Outcome) -> None:
 			query.set(t.status, DELIVERED)
 			.set(t.delivered_at, now)
 			.set(t.next_retry_at, None)
-			.set(t.last_error, "")
+			.set(t.last_error, outcome.error[:_MAX_ERROR])
 			.set(t.attempts, t.attempts + 1)
 		)
 	elif outcome.kind == "deferred":
