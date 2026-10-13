@@ -70,8 +70,10 @@ class TestEnforceResultBudget(unittest.TestCase):
 		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
 
 	def test_non_list_passes_through_with_event(self):
+		# A document-shaped result from any tool but get_doc has no continuation to
+		# offer, so it still passes through and is only counted.
 		data = {"doctype": "Sales Invoice", "items": [{"x": "y" * 50} for _ in range(2000)]}
-		out, ev = enforce_result_budget(data, tool="get_doc")
+		out, ev = enforce_result_budget(data, tool="create_doc")
 		self.assertIs(out, data)
 		self.assertEqual(ev["kind"], "uncapped")
 
@@ -188,3 +190,179 @@ class TestEnforceResultBudget(unittest.TestCase):
 		self.assertIn("PARTIAL", out["note"])  # guard's note, not "data note"
 		self.assertEqual(ev["total"], 3000)
 		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
+
+
+def _doc(rows=300, terms=20_000, name="SINV-0001"):
+	"""A get_doc-shaped invoice: header scalars, a long text field, a big and a
+	small child table whose rows carry what as_dict gives every child row."""
+
+	def row(table, child, i, width):
+		return {
+			"name": f"{table}-{i}",
+			"idx": i + 1,
+			"parent": name,
+			"parentfield": table,
+			"parenttype": "Sales Invoice",
+			"doctype": child,
+			"blob": "r" * width,
+		}
+
+	return {
+		"name": name,
+		"doctype": "Sales Invoice",
+		"customer": "Acme",
+		"total": 123.5,
+		"note": "a field called note",
+		"terms": "T" * terms,
+		"items": [row("items", "Sales Invoice Item", i, 300) for i in range(rows)],
+		"taxes": [row("taxes", "Sales Taxes and Charges", i, 50) for i in range(3)],
+		"payments": [],
+	}
+
+
+class TestDocumentBudget(unittest.TestCase):
+	"""F11 (#715): an over-budget get_doc document is bounded, keeps its shape,
+	says what was cut and how to read it."""
+
+	def bound(self, data):
+		out, ev = enforce_result_budget(data, tool="get_doc")
+		self.assertEqual(ev["kind"], "bounded_document")
+		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
+		self.assertEqual(json.loads(json.dumps(out)), out)  # plain, valid JSON
+		self.assertEqual(list(out)[:2], ["_truncated", "_partial"])  # survive a head slice
+		self.assertIs(out["_truncated"], True)
+		return out, ev
+
+	def test_document_over_budget_is_bounded_with_its_shape(self):
+		data = _doc()
+		out, ev = self.bound(data)
+		partial = out["_partial"]
+		self.assertEqual(set(out) - {"_truncated", "_partial"}, set(data))
+		for key in ("name", "doctype", "customer", "total", "note", "payments"):
+			self.assertEqual(out[key], data[key])  # never clobbered by guard metadata
+		self.assertEqual(out["taxes"], data["taxes"])  # small table kept whole
+		shown = partial["child_tables"]["items"]["returned"]
+		self.assertGreater(shown, 0)
+		self.assertEqual(out["items"], data["items"][:shown])  # whole rows, in order
+		self.assertEqual(
+			partial["child_tables"]["items"],
+			{
+				"returned": shown,
+				"total": 300,
+				"has_more": True,
+				"next_start": shown,
+				"next_call": {
+					"tool": "get_doc",
+					"args": {
+						"doctype": "Sales Invoice",
+						"name": "SINV-0001",
+						"child_table": "items",
+						"start": shown,
+					},
+				},
+			},
+		)
+		self.assertNotIn("taxes", partial["child_tables"])
+		self.assertTrue(out["terms"].startswith("T" * 2000))
+		self.assertIn("[TRUNCATED", out["terms"])
+		self.assertEqual(
+			partial["text_fields"]["terms"],
+			{
+				"returned_chars": 2000,
+				"total_chars": 20_000,
+				"next_call": {
+					"tool": "get_doc",
+					"args": {"doctype": "Sales Invoice", "name": "SINV-0001", "fields": ["terms"]},
+				},
+			},
+		)
+		self.assertIn("PARTIAL", partial["note"])
+		self.assertEqual((ev["shown"], ev["total"]), (shown + 3, 303))
+		self.assertEqual(ev["original_chars"], _size(data))
+
+	def test_document_under_budget_is_untouched(self):
+		data = _doc(rows=5, terms=100)
+		out, ev = enforce_result_budget(data, tool="get_doc")
+		self.assertIs(out, data)
+		self.assertIsNone(ev)
+
+	def test_text_only_document_shows_as_much_text_as_fits(self):
+		# The audit's probe: a 100,040-char document crossed the budget unchanged.
+		data = {"name": "N-1", "doctype": "Note", "content": "x" * 100_040}
+		out, _ = self.bound(data)
+		entry = out["_partial"]["text_fields"]["content"]
+		self.assertEqual(entry["total_chars"], 100_040)
+		self.assertGreater(entry["returned_chars"], 30_000)
+		# Longer than any one result: no call could return it whole, so none is offered.
+		self.assertNotIn("next_call", entry)
+		self.assertTrue(out["content"].startswith("x" * entry["returned_chars"] + " [TRUNCATED"))
+
+	def test_tables_share_the_budget(self):
+		data = _doc(rows=200, terms=10)
+		data["taxes"] = [dict(r, name=f"t-{i}", parentfield="taxes") for i, r in enumerate(data["items"])]
+		out, _ = self.bound(data)
+		tables = out["_partial"]["child_tables"]
+		self.assertGreater(tables["items"]["returned"], 0)
+		self.assertLessEqual(abs(tables["items"]["returned"] - tables["taxes"]["returned"]), 1)
+
+	def test_document_with_a_table_called_rows_is_still_a_document(self):
+		data = {
+			"name": "X-1",
+			"doctype": "Odd",
+			"rows": [{"name": f"r{i}", "blob": "b" * 200} for i in range(500)],
+		}
+		out, _ = self.bound(data)
+		self.assertNotIn("shown", out)
+		self.assertEqual(out["_partial"]["child_tables"]["rows"]["total"], 500)
+
+	def test_batch_keeps_whole_documents_and_names_the_rest(self):
+		docs = [_doc(rows=30, terms=10, name=f"SINV-{i}") for i in range(6)]
+		data = {"doctype": "Sales Invoice", "docs": docs, "count": 6}
+		out, ev = self.bound(data)
+		shown = out["_partial"]["docs"]["returned"]
+		self.assertGreater(shown, 0)
+		self.assertLess(shown, 6)
+		self.assertEqual(out["docs"], docs[:shown])
+		self.assertEqual(out["count"], shown)
+		self.assertEqual(
+			out["_partial"]["docs"]["next_call"],
+			{
+				"tool": "get_doc",
+				"args": {"doctype": "Sales Invoice", "names": [f"SINV-{i}" for i in range(shown, 6)]},
+			},
+		)
+		self.assertEqual((ev["shown"], ev["total"]), (shown, 6))
+
+	def test_batch_whose_first_document_alone_is_too_big_cuts_that_document(self):
+		docs = [_doc(name="SINV-A"), _doc(rows=2, terms=10, name="SINV-B")]
+		out, _ = self.bound({"doctype": "Sales Invoice", "docs": docs, "count": 2})
+		self.assertEqual(len(out["docs"]), 1)
+		self.assertIs(out["docs"][0]["_truncated"], True)
+		self.assertEqual(out["docs"][0]["name"], "SINV-A")
+		self.assertEqual(out["_partial"]["docs"]["next_call"]["args"]["names"], ["SINV-B"])
+
+	def test_child_table_page_is_cut_like_a_list_page(self):
+		rows = [{"name": f"r{i}", "idx": i + 1, "blob": "b" * 2000} for i in range(40, 60)]
+		data = {
+			"list_contract": "list-page-v1",
+			"doctype": "Sales Invoice",
+			"name": "SINV-0001",
+			"child_table": "items",
+			"rows": rows,
+			"coverage": {
+				"start": 40,
+				"limit": 20,
+				"returned": 20,
+				"total": 300,
+				"has_more": True,
+				"next_start": 60,
+			},
+			"note": "page",
+		}
+		out, ev = enforce_result_budget(data, tool="get_doc")
+		self.assertEqual(ev["kind"], "truncated")
+		shown = len(out["rows"])
+		self.assertEqual(out["rows"], rows[:shown])
+		self.assertEqual(out["coverage"]["next_start"], 40 + shown)
+		self.assertEqual(out["coverage"]["total"], 300)
+		self.assertEqual(out["child_table"], "items")

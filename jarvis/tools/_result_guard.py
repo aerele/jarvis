@@ -143,8 +143,14 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 
 	  * ``"truncated"``       - a list-shaped result was cut to the rows that fit;
 	                            ``data`` is replaced by a PARTIAL envelope.
+	  * ``"bounded_document"`` - a get_doc document (or batch) was cut to fit:
+	                            child tables to their first rows, long text to a
+	                            preview, with a ``_partial`` block naming each cut
+	                            part and the get_doc call that reads it.
+	                            ``shown``/``total`` count child rows (documents
+	                            for a batch).
 	  * ``"uncapped"``        - no truncatable top-level row list; passed through
-	                            unchanged (bounding a document is out of scope).
+	                            unchanged.
 	  * ``"uncapped_nonrow"`` - a row list exists but the surrounding non-row
 	                            content (e.g. a huge SQL string) alone exceeds the
 	                            budget, so ALL rows are dropped to bound the blast
@@ -162,6 +168,17 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 		return data, {"kind": "measure_failed", "original_chars": None, "shown": None, "total": None}
 	if total <= MAX_RESULT_CHARS:
 		return data, None
+
+	if tool == "get_doc" and isinstance(data, dict) and "list_contract" not in data:
+		# A document is checked before _find_list: a child table named "rows" or
+		# "result" must not get the row envelope, whose top-level total/note
+		# would overwrite real fields of the same name. A child-table page is a
+		# list page and takes the row path. Imported here because _doc_budget
+		# measures with this module's _size.
+		from jarvis.tools._doc_budget import bound_get_doc_result
+
+		out, shown, parts = bound_get_doc_result(data, MAX_RESULT_CHARS - _SAFETY)
+		return out, {"kind": "bounded_document", "original_chars": total, "shown": shown, "total": parts}
 
 	kind, key, rows = _find_list(data)
 	if rows is None:
