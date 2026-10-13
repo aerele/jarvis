@@ -44,10 +44,21 @@ class TestUnifiedBrakeCovered(FrappeTestCase):
 	covered sets (a deliberate behaviour change from the old macro set, which used
 	to cover it)."""
 
-	def test_brake_is_the_five_always_ask_tools(self):
+	def test_brake_is_the_six_always_ask_tools(self):
+		# schedule_run: scheduling work to run later, unattended, is the user's call
+		# every time, never an armed macro's or an approved skill's.
 		self.assertEqual(
 			api._BRAKE,
-			frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill", "call_connector"}),
+			frozenset(
+				{
+					"delete_doc",
+					"cancel_doc",
+					"amend_doc",
+					"create_custom_skill",
+					"call_connector",
+					"schedule_run",
+				}
+			),
 		)
 
 	def test_covered_is_gated_minus_brake_unified_across_modes(self):

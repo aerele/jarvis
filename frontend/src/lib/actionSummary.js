@@ -129,6 +129,7 @@ const CARD_KINDS = new Set([
 	"skill",
 	"wiki",
 	"import",
+	"schedule",
 ]);
 
 // The structured card for a parked action ({kind, ...}), or null when the server
@@ -345,6 +346,8 @@ const RECEIPT_VERB = {
 	// job) - "Ran"/"Created" would falsely claim it already finished (Slice A ends at
 	// the queue; the completion tell is Slice B).
 	run_import: { past: "Queued", present: "queue" },
+	// A one-time macro: "Scheduled “Review comments” to run once".
+	schedule_run: { past: "Scheduled", present: "schedule" },
 };
 
 function pluralize(word, n) {
@@ -452,7 +455,14 @@ export function receiptView(tool, args, result, outcome) {
 	}
 
 	let subject;
-	if (isEmail) {
+	if (tool === "schedule_run") {
+		// The macro it made or scheduled, linked to its page in the app.
+		const label = data.macro_name || args.title || args.macro || "the work";
+		subject = `“${label}” to run once`;
+		targets = data.macro
+			? [{ name: data.macro_name || data.macro, url: data.link || "" }]
+			: [];
+	} else if (isEmail) {
 		subject = `${count} ${count === 1 ? "recipient" : "recipients"}`;
 	} else if (count === 1 && names.length === 1) {
 		subject = `${doctype} ${names[0]}`;

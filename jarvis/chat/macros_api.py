@@ -552,6 +552,7 @@ _ARM_NOTICE_ASKS = (
 	(_lt("deleting, cancelling and amending records"), ("delete_doc", "cancel_doc", "amend_doc")),
 	(_lt("creating or changing skills"), ("create_custom_skill",)),
 	(_lt("calling connectors"), ("call_connector",)),
+	(_lt("scheduling work to run later"), ("schedule_run",)),
 )
 # Writes the write-risk guard treats as sensitive configuration park a card in every
 # mode, an armed macro's run included (``api._run_tool``, ``_must_card``): one phrase per

@@ -489,6 +489,27 @@ function tableNote(t) {
 			</details>
 		</template>
 
+		<!-- schedule_run: work set to run once, later, as the user -->
+		<template v-else-if="card.kind === 'schedule'">
+			<div class="jv-pcard-head">
+				Run once<template v-if="card.name"> · {{ card.name }}</template>
+			</div>
+			<div class="jv-pcard-kv">
+				<span>When</span><b>{{ card.when }}</b>
+			</div>
+			<div v-if="card.macro" class="jv-pcard-kv">
+				<span>Macro</span><b>{{ card.macro }}</b>
+			</div>
+			<details v-if="card.prompt" class="jv-pcard-expand" open>
+				<summary>What it will do</summary>
+				<pre class="jv-pcard-body">{{ card.prompt }}</pre>
+			</details>
+			<div class="jv-pcard-caption">
+				Runs once as you, then the schedule switches itself off. You get a notification
+				when it finishes, and any change it makes still asks for your confirmation.
+			</div>
+		</template>
+
 		<!-- run_method -->
 		<template v-else-if="card.kind === 'method'">
 			<div class="jv-pcard-kv">
