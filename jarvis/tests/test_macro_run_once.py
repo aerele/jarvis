@@ -312,6 +312,32 @@ class TestOnceSweep(MacroSchedulerBase):
 		state = _state(m.name)
 		self.assertEqual(state.schedule_enabled, 0)
 
+	def test_a_run_parked_for_capacity_counts_as_started(self):
+		m = _mk_once("parked")
+		with patch("jarvis.chat.macros.run_macro", side_effect=_Killed()):
+			with self.assertRaises(_Killed):
+				macro_scheduler.run_due_macros()
+		frappe.db.rollback()
+		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "x"}).insert(
+			ignore_permissions=True
+		)
+		run = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"macro": m.name,
+				"status": "waiting_capacity",
+				"trigger": "scheduled",
+				"conversation": conv.name,
+				"current_step": 0,
+			}
+		)
+		run.flags.ignore_permissions = True
+		run.insert()
+		frappe.db.commit()
+		_due_now(m.name)
+		self.assertEqual(self._run_due(), [], "a run parked for capacity was started a second time")
+		self.assertEqual(_state(m.name).schedule_enabled, 0)
+
 	def test_a_refusal_for_good_ends_it_without_a_resume_promise(self):
 		m = _mk_once("refused")
 		with patch("jarvis.chat.macros.run_macro", return_value={"ok": False, "reason": "usage_limit"}):
