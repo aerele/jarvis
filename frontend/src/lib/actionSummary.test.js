@@ -772,3 +772,24 @@ test("copyText: true when the clipboard took it, false when it refused or is mis
 	assert.equal(await copyText("pa-1", null), false);
 	assert.equal(await copyText("", { writeText: async () => {} }), false);
 });
+
+test("schedule_run: a schedule card is recognised, and its receipt names the macro", () => {
+	assert.ok(
+		pendingCardOf({ preview: { card: { kind: "schedule", when: "2030-01-15 09:30" } } })
+	);
+	const done = receiptView(
+		"schedule_run",
+		{ run_at: "2030-01-15 09:30", prompt: "x", title: "Review" },
+		{ ok: true, data: { macro: "m1", macro_name: "Review", link: "/jarvis/macros/m1" } },
+		"confirmed"
+	);
+	assert.equal(done.title, "Scheduled “Review” to run once");
+	assert.deepEqual(done.targets, [{ name: "Review", url: "/jarvis/macros/m1" }]);
+	const no = receiptView(
+		"schedule_run",
+		{ run_at: "2030-01-15 09:30", title: "Review" },
+		null,
+		"discarded"
+	);
+	assert.equal(no.title, "Discarded, did not schedule “Review” to run once");
+});
