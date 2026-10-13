@@ -7,9 +7,12 @@ rollback-only one: the settings row is created by
 ``usage.get_or_create_user_settings`` and other tests commit, so every case
 resets the two pulse fields itself instead of trusting a clean row.
 
-The admin forward is always mocked - these never hit a real admin.
+An answer is stored in the feedback outbox; its delivery job is patched out (the
+fixtures commit, which would otherwise queue a real job), and the admin push is
+mocked wherever it appears - these never hit a real admin.
 """
 
+import json
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
@@ -28,12 +31,14 @@ from jarvis.chat.feedback import (
 	pulse_context,
 	submit_pulse_feedback,
 )
+from jarvis.chat.feedback_outbox import outbox_name
 from jarvis.chat.usage import get_or_create_user_settings
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
 TURN = "Jarvis Chat Turn"
 SETTINGS = "Jarvis User Settings"
+OUTBOX = "Jarvis Feedback Outbox"
 TEST_USER = "jarvis-pulse-feedback-test@example.com"
 
 _PUSH = "jarvis.admin_client.push_pulse_feedback"
@@ -75,6 +80,8 @@ def _delete_conv(name: str) -> None:
 def _cleanup_user_conversations(user: str = TEST_USER) -> None:
 	for name in frappe.get_all(CONV, filters={"owner": user}, pluck="name"):
 		_delete_conv(name)
+	frappe.db.delete(OUTBOX, {"user": user})
+	frappe.db.commit()
 
 
 def _reviewed_month_activity():
@@ -92,6 +99,9 @@ class _PulseTestCase(FrappeTestCase):
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
+		enqueue = patch("jarvis.chat.feedback_outbox._enqueue_delivery")
+		enqueue.start()
+		self.addCleanup(enqueue.stop)
 		_cleanup_user_conversations()
 		self.settings = get_or_create_user_settings(TEST_USER).name
 		self._set_pulse(None, 0)
@@ -480,11 +490,17 @@ class TestPulseContext(_PulseTestCase):
 
 
 class TestSubmitPulseFeedback(_PulseTestCase):
-	def _item(self, push):
-		push.assert_called_once()
-		return push.call_args.args[0]
+	def _stored(self):
+		return frappe.db.get_value(OUTBOX, outbox_name("Pulse", _pulse_period()[0], TEST_USER), "payload")
 
-	def test_forwards_a_derived_payload(self):
+	def _item(self, push):
+		"""The stored answer. The request itself never calls admin."""
+		push.assert_not_called()
+		payload = self._stored()
+		self.assertTrue(payload, "the answer was not stored")
+		return json.loads(payload)
+
+	def test_stores_a_derived_payload(self):
 		with patch(_PUSH) as push:
 			res = submit_pulse_feedback(
 				stars=4,
@@ -493,7 +509,7 @@ class TestSubmitPulseFeedback(_PulseTestCase):
 				use_case_text="  saves us hours a week  ",
 				note="  more charts please  ",
 			)
-		self.assertEqual(res, {"ok": True})
+		self.assertEqual(res, {"ok": True, "delivered": False})
 		item = self._item(push)
 		self.assertEqual(item["kind"], "Pulse")
 		self.assertEqual(item["stars"], 4)
@@ -533,6 +549,7 @@ class TestSubmitPulseFeedback(_PulseTestCase):
 					with self.assertRaises((frappe.ValidationError, FrappeTypeError)):
 						submit_pulse_feedback(stars=bad, features_offered=[], features_selected=[])
 				push.assert_not_called()
+				self.assertIsNone(self._stored(), "a rejected submit stores nothing")
 				self.assertIsNone(
 					self._pulse().pulse_last_period_key, "a rejected submit must not silence the survey"
 				)
@@ -562,10 +579,11 @@ class TestSubmitPulseFeedback(_PulseTestCase):
 		with patch(_FEATURES, return_value={}):
 			self.assertTrue(pulse_context()["due"])
 
-	def test_a_failed_forward_never_surfaces_and_still_silences(self):
-		with patch(_PUSH, side_effect=RuntimeError("admin down")):
+	def test_the_request_never_calls_admin_and_still_silences(self):
+		with patch(_PUSH, side_effect=RuntimeError("admin down")) as push:
 			res = submit_pulse_feedback(stars=2, features_offered=[], features_selected=[])
-		self.assertEqual(res, {"ok": True})
+		self.assertEqual(res, {"ok": True, "delivered": False})
+		self.assertEqual(self._item(push)["stars"], 2)
 		self.assertEqual(self._pulse().pulse_offer_count, PULSE_MAX_OFFERS)
 
 	def test_free_text_is_bounded(self):
