@@ -528,7 +528,8 @@ watch(
 	() => form.schedule_enabled,
 	(on) => {
 		if (seedingSchedule || !on || form.schedule_frequency !== "once") return;
-		if (!form.schedule_date || form.schedule_date <= siteToday().format("YYYY-MM-DD")) {
+		// Today stays: a time later today is still ahead (the server judges the time).
+		if (!form.schedule_date || form.schedule_date < siteToday().format("YYYY-MM-DD")) {
 			form.schedule_date = tomorrow();
 		}
 	}

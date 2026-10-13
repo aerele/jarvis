@@ -804,6 +804,13 @@ test("schedule_run: a schedule card is recognised, and its receipt names the mac
 		null,
 		"discarded"
 	);
+	const offset = receiptView(
+		"schedule_run",
+		{ run_at: "2030-01-15T04:00:00Z", title: "Review" },
+		null,
+		"discarded"
+	);
+	assert.equal(offset.title, "Discarded, did not schedule “Review” to run once");
 	assert.equal(
 		untitled.title,
 		"Discarded, did not schedule “Check the comments on Employee HR-EMP-00…” to run once on 15 Jan 2030, 9:05 pm"
