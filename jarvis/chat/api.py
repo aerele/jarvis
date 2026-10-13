@@ -675,7 +675,9 @@ def create_or_focus_empty(origin_page: str = "") -> str:
 
 
 @frappe.whitelist()
-def get_conversation(conversation: str, limit: int = 0, before: int = 0, refresh: str | None = None) -> dict:
+def get_conversation(
+	conversation: str, limit: int = 0, before: int = 0, refresh: str | None = None, after: int = 0
+) -> dict:
 	"""Return conversation metadata + ordered messages: the whole visible thread, or
 	with ``limit`` one page of it (contract on ``_history_page``, #715 F13).
 
@@ -735,7 +737,7 @@ def get_conversation(conversation: str, limit: int = 0, before: int = 0, refresh
 	# IS its conversation's owner (chat_permissions), which that gate just proved, and
 	# the Jarvis Admin role reaches chat without a role row on the message doctype.
 	if paged:
-		page = _history_page(conversation, fields, limit, before, refresh)
+		page = _history_page(conversation, fields, limit, before, refresh, after)
 	else:
 		page = {
 			"messages": frappe.get_all(
@@ -807,6 +809,8 @@ HISTORY_TURN_WIDEN_MAX = 200
 HISTORY_REFRESH_MAX = 50
 # Most older pending cards one newest page carries (see _older_pending).
 HISTORY_OLDER_PENDING_MAX = 20
+# Earlier prompts a newest page carries for Up-arrow recall (see _recent_prompts).
+HISTORY_RECENT_PROMPTS = 50
 # A tool result longer than this rides a page compact; get_tool_detail has it whole.
 TOOL_RESULT_INLINE_MAX = 2048
 # What the chat UIs read off a compact tool result (lib/reportScope.js,
@@ -816,7 +820,7 @@ _COMPACT_RESULT_KEYS = ("ok", "error")
 _COMPACT_DATA_KEYS = ("doctype", "name", "report_scope", "prepared_report", "status", "as_of", "row_note")
 
 
-def _history_page(conversation: str, fields: list, limit, before, refresh) -> dict:
+def _history_page(conversation: str, fields: list, limit, before, refresh, after=0) -> dict:
 	"""One page of the visible thread, oldest first, for ``get_conversation(limit=...)``.
 
 	The page holds the ``limit`` newest visible rows older than ``before`` (or the
@@ -824,18 +828,27 @@ def _history_page(conversation: str, fields: list, limit, before, refresh) -> di
 	a reply, its run state and its tool rows never straddle two pages. The widening
 	stops after ``HISTORY_TURN_WIDEN_MAX`` more rows; a longer turn is cut at the count.
 
-	``paging.before`` is the oldest ``seq`` on the page: pass it back as ``before`` for
-	the next older page, which exists when ``paging.has_more``. Rows that share a seq
-	always share a page (``>=`` here, ``<`` on the next call), so none is skipped.
+	``paging.start`` is the page's lower ``seq`` bound (None when it reaches the
+	first row) and ``paging.before`` the cursor for the next older page, which exists
+	when ``paging.has_more``. Rows that share a seq always share a page (``>=`` here,
+	``<`` on the next call), so none is skipped.
+
+	A resync passes ``after``, the newest seq the client already holds. When every
+	row newer than that fits within the widening, the newest page reaches back to
+	it, so the older pages on screen join this one however many turns arrived
+	through realtime events alone (they carry no seq); otherwise the client starts
+	over from this page.
 
 	Only the newest page (no ``before``) carries ``older_pending``: the still-pending
-	action rows older than it, so a parked card shows however little is loaded.
+	action rows older than it, so a parked card shows however little is loaded, and
+	``recent_prompts``: the user messages older than it, for Up-arrow recall.
 	``refresh`` is a JSON list of row names the client holds from older pages (its
 	pending cards, which can resolve while it is not looking); ``refreshed`` is their
 	current state, and a name missing from it was deleted or hidden.
 	"""
 	limit = max(1, min(frappe.utils.cint(limit), HISTORY_PAGE_MAX))
 	before = frappe.utils.cint(before)
+	after = frappe.utils.cint(after) if before <= 0 else 0
 	base = [["conversation", "=", conversation], ["hidden", "=", 0]]
 	if before > 0:
 		base.append(["seq", "<", before])
@@ -851,10 +864,19 @@ def _history_page(conversation: str, fields: list, limit, before, refresh) -> di
 			limit - 1,
 		)
 		start = heads[cut].seq
-		has_more = any((h.seq or 0) < (start or 0) for h in heads[cut + 1 :])
+		# Join the rows the client holds: every row newer than `after` is among the
+		# heads when the oldest head is at or below it, so the reach stays bounded.
+		if after > 0 and start is not None and start > after and (heads[-1].seq or 0) <= after:
+			start = after
+	if start is not None:
+		# A full heads read may stop short of older rows that exist.
+		truncated = len(heads) > limit + widen and (heads[-1].seq or 0) >= start
+		has_more = truncated or any((h.seq or 0) < start for h in heads)
 	page_filters = [*base, ["seq", ">=", start]] if start is not None else base
 	messages = frappe.get_all(MSG, filters=page_filters, fields=fields, order_by="seq asc")
-	older_pending = _older_pending(conversation, fields, start) if start is not None and before <= 0 else []
+	newest_page = start is not None and before <= 0
+	older_pending = _older_pending(conversation, fields, start) if newest_page else []
+	recent_prompts = _recent_prompts(conversation, start) if newest_page else []
 	on_page = {m.name for m in messages}
 	names = [n for n in _refresh_names(refresh) if n not in on_page]
 	refreshed = (
@@ -869,10 +891,37 @@ def _history_page(conversation: str, fields: list, limit, before, refresh) -> di
 	)
 	return {
 		"messages": messages,
-		"paging": {"limit": limit, "before": start if has_more else None, "has_more": has_more},
+		"paging": {
+			"limit": limit,
+			"start": start,
+			"before": start if has_more else None,
+			"has_more": has_more,
+		},
 		"older_pending": older_pending,
 		"refreshed": refreshed,
+		"recent_prompts": recent_prompts,
 	}
+
+
+def _recent_prompts(conversation: str, start: int) -> list:
+	"""The newest ``HISTORY_RECENT_PROMPTS`` visible user messages older than the page
+	(which starts at seq ``start``), oldest first, as {name, seq, role, content}. The
+	composer's Up-arrow recall reads them with the page's own user rows, so a long
+	chat's earlier prompts stay reachable without loading their pages."""
+	rows = frappe.get_all(
+		MSG,
+		filters=[
+			["conversation", "=", conversation],
+			["hidden", "=", 0],
+			["role", "=", "user"],
+			["seq", "<", start],
+			["content", "is", "set"],
+		],
+		fields=["name", "seq", "role", "content"],
+		order_by="seq desc",
+		limit=HISTORY_RECENT_PROMPTS,
+	)
+	return rows[::-1]
 
 
 def _older_pending(conversation: str, fields: list, start: int) -> list:

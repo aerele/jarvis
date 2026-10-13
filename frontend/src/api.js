@@ -10,13 +10,15 @@ export const listConversations = () => call("jarvis.chat.api.list_conversations"
 export const listTools = () => call("jarvis.chat.api.list_tools");
 // The open chat reads its history a page at a time (#715 F13): the newest page, or
 // with {before} the page older than that cursor; {refresh} names held older rows
-// the server should send fresh. Dashboards and Triggers read whole threads through
+// the server should send fresh, and {after} (the newest seq held) lets the newest
+// page reach back to the rows already on screen. Dashboards and Triggers read whole threads through
 // their own wrappers (api/dashboards.js, api/triggers.js).
-export const getConversation = (conversation, { before, refresh } = {}) =>
+export const getConversation = (conversation, { before, refresh, after } = {}) =>
 	call("jarvis.chat.api.get_conversation", {
 		conversation,
 		limit: HISTORY_PAGE_SIZE,
 		...(before ? { before } : {}),
+		...(after ? { after } : {}),
 		...(refresh && refresh.length ? { refresh: JSON.stringify(refresh) } : {}),
 	});
 // A compact tool row's whole input and output, for the Activity view (#715 F13).

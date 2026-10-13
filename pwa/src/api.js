@@ -14,12 +14,14 @@ const CHAT = "jarvis.chat.api.";
 
 export const listConversations = () => call(CHAT + "list_conversations");
 // The newest page of the thread, or with {before} the page older than that cursor;
-// {refresh} names held older rows to send fresh (#715 F13, @shared/lib/historyPaging.js).
-export const getConversation = (conversation, { before, refresh } = {}) =>
+// {refresh} names held older rows to send fresh and {after} is the newest seq held
+// (#715 F13, @shared/lib/historyPaging.js).
+export const getConversation = (conversation, { before, refresh, after } = {}) =>
 	call(CHAT + "get_conversation", {
 		conversation,
 		limit: HISTORY_PAGE_SIZE,
 		...(before ? { before } : {}),
+		...(after ? { after } : {}),
 		...(refresh && refresh.length ? { refresh: JSON.stringify(refresh) } : {}),
 	});
 export const archiveConversation = (conversation) =>
