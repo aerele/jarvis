@@ -61,7 +61,13 @@ _NOTE_NONROW = (
 
 
 def _size(obj) -> int:
-	return len(json.dumps(obj, default=str, ensure_ascii=False, separators=(",", ":")))
+	return len(_json_text(obj))
+
+
+def _json_text(obj) -> str:
+	"""The compact JSON the agent runtime feeds the model. get_doc's text window
+	slices a list or dict value in this same form."""
+	return json.dumps(obj, default=str, ensure_ascii=False, separators=(",", ":"))
 
 
 def _find_list(data) -> tuple[str | None, str | None, list | None]:

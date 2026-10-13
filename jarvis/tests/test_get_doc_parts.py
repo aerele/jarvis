@@ -9,7 +9,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._result_guard import MAX_RESULT_CHARS, enforce_result_budget
-from jarvis.tools.get_doc import get_doc
+from jarvis.tools.get_doc import TEXT_WINDOW_CHARS, _DocPart, get_doc
 
 DESK_USER = "jv-f11-desk@example.com"
 SEEN_ROWS = 250
@@ -40,7 +40,7 @@ def _desk_user() -> str:
 	return DESK_USER
 
 
-def _note(content_chars: int, public: int = 0) -> str:
+def _note(content_chars: int, public: int = 0, text: str = "x", rows: int = SEEN_ROWS) -> str:
 	"""A Note with long content and many seen_by rows (permlevel 2: System
 	Manager reads them, a Desk User does not), owned by the session user."""
 	return (
@@ -49,8 +49,8 @@ def _note(content_chars: int, public: int = 0) -> str:
 				"doctype": "Note",
 				"title": "F11 bounded document",
 				"public": public,
-				"content": "<p>" + "x" * content_chars + "</p>",
-				"seen_by": [{"user": "Administrator"} for _ in range(SEEN_ROWS)],
+				"content": "<p>" + (text * content_chars)[:content_chars] + "</p>",
+				"seen_by": [{"user": "Administrator"} for _ in range(rows)],
 			}
 		)
 		.insert(ignore_permissions=True)
@@ -66,6 +66,21 @@ class TestGetDocParts(FrappeTestCase):
 	def tearDown(self):
 		frappe.set_user("Administrator")
 		super().tearDown()
+
+	def read_rest(self, shown: str, call: dict | None, read=None) -> str:
+		"""A cut value's shown part plus every window its next_call chain returns."""
+		read = read or _agent_read
+		text = shown
+		for _ in range(100):
+			if not call:
+				return text
+			out = read(**call["args"])
+			window = out["_text_window"]
+			self.assertEqual(window["offset"], len(text))
+			self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
+			text += out[window["field"]]
+			call = window.get("next_call")
+		self.fail("the window chain did not end")
 
 	def test_cut_document_continuation_reads_exactly_the_omitted_rows(self):
 		name = _note(content_chars=20_000)
@@ -91,7 +106,52 @@ class TestGetDocParts(FrappeTestCase):
 
 		text = cut["_partial"]["text_fields"]["content"]
 		self.assertEqual(text["total_chars"], len(whole["content"]))
-		self.assertEqual(_agent_read(**text["next_call"]["args"])["content"], whole["content"])
+		shown = cut["content"][: text["returned_chars"]]
+		self.assertEqual(self.read_rest(shown, text["next_call"]), whole["content"])
+
+	def test_text_far_over_the_budget_reads_back_byte_identical(self):
+		# The audit's own case: a text field larger than any one result. Quotes
+		# and newlines take two JSON chars each, so windows shrink to fit.
+		name = _note(content_chars=100_040, text='He said "ok" and left.\n', rows=2)
+		whole = get_doc(doctype="Note", name=name)
+		self.assertGreater(_size(whole["content"]), 2 * MAX_RESULT_CHARS)
+		cut = _agent_read(doctype="Note", name=name)
+		self.assertLessEqual(_size(cut), MAX_RESULT_CHARS)
+		text = cut["_partial"]["text_fields"]["content"]
+		shown = cut["content"][: text["returned_chars"]]
+		self.assertEqual(self.read_rest(shown, text["next_call"]), whole["content"])
+
+	def test_a_list_value_reads_back_as_its_json_text(self):
+		doc = {"doctype": "Note", "name": "N-1", "tags": ['a "quoted" tag'] * 6000}
+
+		def read(fields, text_offset=None, text_length=None, **_identity):
+			return _DocPart(fields, None, 0, None, text_offset, text_length).of(doc)
+
+		first = read(fields=["tags"], text_offset=0)
+		self.assertIs(first["_text_window"]["as_json"], True)
+		self.assertEqual(
+			json.loads(self.read_rest("", {"args": {"fields": ["tags"], "text_offset": 0}}, read)),
+			doc["tags"],
+		)
+
+	def test_text_window_arguments_are_checked(self):
+		name = _note(content_chars=100, rows=1)
+		length = len(get_doc(doctype="Note", name=name)["content"])
+		cases = (
+			({"fields": ["content"], "text_offset": length + 1}, "past the end of content"),
+			({"fields": ["content", "title"], "text_offset": 0}, "read one field"),
+			({"child_table": "seen_by", "fields": ["user"], "text_offset": 0}, "read one field"),
+			({"text_offset": 0}, "read one field"),
+			({"fields": ["content"], "text_offset": -1}, "text_offset must be"),
+			({"fields": ["content"], "text_length": TEXT_WINDOW_CHARS + 1}, "text_length must be"),
+		)
+		for args, message in cases:
+			with self.subTest(args=args), self.assertRaisesRegex(InvalidArgumentError, message):
+				get_doc(doctype="Note", name=name, **args)
+		window = get_doc(doctype="Note", name=name, fields=["content"], text_offset=10, text_length=20)
+		self.assertEqual(window["content"], get_doc(doctype="Note", name=name)["content"][10:30])
+		self.assertEqual(window["_text_window"]["next_call"]["args"]["text_length"], 20)
+		self.assertEqual(window["_text_window"]["next_offset"], 30)
 
 	def test_child_page_returns_named_fields_plus_row_identity(self):
 		name = _note(content_chars=10)

@@ -2,29 +2,35 @@
 
 Slicing the JSON would hand the model a broken document, so a document keeps
 every top-level field: each child table keeps its first whole rows, and a long
-text field keeps its start plus a marker. A ``_partial`` block, placed first so
-a head slice of the result still shows it, names each cut part with the get_doc
-call that reads it. Its words match a cut list page: returned, total, has_more,
-next_start.
+value keeps its start plus a marker. A ``_partial`` block, placed first so a
+head slice of the result still shows it, names each cut part with the get_doc
+call that reads the rest. Its words match a cut list page: returned, total,
+has_more, next_start.
 """
 
-from jarvis.tools._result_guard import MAX_RESULT_CHARS, _size
+import frappe
+from frappe.model import table_fields
 
-# In a cut document a longer text field shows only this much, so the rows get the
-# room. With no child table to share with, text gets all the room there is.
+from jarvis.tools._result_guard import _json_text, _size
+from jarvis.tools.get_doc import MAX_START
+
+# In a cut document a longer value shows only this much, so the rows get the
+# room. With no child table to share with, values get all the room there is.
 TEXT_PREVIEW_CHARS = 2_000
 _MARKER = " [TRUNCATED: {more} more chars]"
-_MAX_START = 100_000
+_BARE_FIELD_NAMES = 300
 _GUARD_KEYS = ("_truncated", "_partial")
 _IDENTITY_KEYS = ("doctype", "name")
 
 _DOC_NOTE = (
 	"PARTIAL document, cut to fit the context window: each table in child_tables "
-	"shows only its first rows and each field in text_fields ends in a TRUNCATED "
-	"marker. Do not treat it as complete or write a cut value back. Read an omitted "
-	"part by calling get_doc with its next_call args; on a child_table call, "
-	"fields=[...] and a larger limit read more rows per call. A text field with no "
-	"next_call is longer than any one result."
+	"shows only its first rows, and each field in text_fields shows only its first "
+	"returned_chars chars, then a TRUNCATED marker (as_json: the value's JSON text). "
+	"Do not treat it as complete or write a cut value back. Read an omitted part by "
+	"calling get_doc with its next_call args. A child_table page continues at "
+	"next_start; fields=[...] and a larger limit read more rows per call. A text "
+	"window continues at next_offset: append it, then follow the window's own "
+	"next_call until it has none."
 )
 _BATCH_NOTE = (
 	"PARTIAL batch: only the first {returned} of {total} documents fit the context "
@@ -32,30 +38,39 @@ _BATCH_NOTE = (
 )
 _BARE_NOTE = (
 	"Document too large: even its top-level fields exceed the size budget, so none "
-	"are shown. Ask get_doc for the fields you need with fields=[...]."
+	"are shown. fields names them (field_count in all); ask get_doc for the ones you "
+	"need with fields=[...]."
 )
 
 
 def bound_get_doc_result(data: dict, budget: int) -> tuple[dict, int, int]:
 	"""``(bounded result, parts shown, parts total)`` for an over-budget get_doc
 	result: rows of one document, or documents of a batch."""
+	tables = _table_fieldnames(data.get("doctype"))
 	if isinstance(data.get("docs"), list):
-		out, shown, total = _bound_batch(data, budget)
+		out, shown, total = _bound_batch(data, tables, budget)
 	else:
-		out, shown, total = _DocumentCut(data).within(budget)
+		out, shown, total = _DocumentCut(data, tables).within(budget)
 	if _size(out) > budget:
 		return _bare(data), 0, total
 	return out, shown, total
 
 
 class _DocumentCut:
-	"""One document dict cut to a char budget: tables to row prefixes, long text
-	to a preview, guard metadata first."""
+	"""One document dict cut to a char budget: child tables to row prefixes, other
+	long values to a preview, guard metadata first."""
 
-	def __init__(self, doc: dict):
+	def __init__(self, doc: dict, table_names: frozenset):
 		self.doc = doc
-		self.tables = [k for k, v in doc.items() if isinstance(v, list) and v and k not in _GUARD_KEYS]
+		self.tables = [k for k, v in doc.items() if k in table_names and isinstance(v, list) and v]
 		self.row_total = sum(len(doc[t]) for t in self.tables)
+		# Every other text, list or dict value is cut as text: a list or dict as its JSON.
+		skip = {*self.tables, *_IDENTITY_KEYS, *_GUARD_KEYS}
+		self.texts = {
+			k: v if isinstance(v, str) else _json_text(v)
+			for k, v in doc.items()
+			if isinstance(v, str | list | dict) and k not in skip
+		}
 		identity = {k: doc.get(k) for k in _IDENTITY_KEYS}
 		self.identity = identity if all(isinstance(v, str) and v for v in identity.values()) else None
 
@@ -74,7 +89,7 @@ class _DocumentCut:
 	def _text_cap(self, budget: int) -> int | None:
 		"""The largest text length, up to the preview when there are rows to share
 		with, at which the document without rows fits. None if nothing fits."""
-		longest = max((len(v) for k, v in self._texts()), default=0)
+		longest = max(map(len, self.texts.values()), default=0)
 		high = min(TEXT_PREVIEW_CHARS, longest) if self.tables else longest
 		if self._fits(high, budget):
 			return high
@@ -111,22 +126,20 @@ class _DocumentCut:
 		return kept
 
 	def _skeleton(self, cap: int) -> dict:
-		cut = dict(self._texts())
-		return {
-			k: [] if k in self.tables else _cut_text(v, cap) if k in cut else v
-			for k, v in self.doc.items()
-			if k not in _GUARD_KEYS
-		}
-
-	def _texts(self):
-		return ((k, v) for k, v in self.doc.items() if isinstance(v, str) and k not in _IDENTITY_KEYS)
+		skeleton = {}
+		for k, v in self.doc.items():
+			if k in _GUARD_KEYS:
+				continue
+			cut = _cut_text(self.texts[k], cap) if k in self.texts else None
+			skeleton[k] = [] if k in self.tables else cut if cut is not None else v
+		return skeleton
 
 	def _partial(self, cap: int, kept: dict, worst: bool = False) -> dict:
 		partial = {"note": _DOC_NOTE}
 		tables = {
 			t: self._table_entry(t, kept[t]) for t in self.tables if worst or kept[t] < len(self.doc[t])
 		}
-		texts = {k: self._text_entry(k, v, cap) for k, v in self._texts() if _cut_text(v, cap) is not v}
+		texts = {k: self._text_entry(k, text, cap) for k, text in self.texts.items() if _cut_text(text, cap)}
 		if tables:
 			partial["child_tables"] = tables
 		if texts:
@@ -134,7 +147,7 @@ class _DocumentCut:
 		return partial
 
 	def _table_entry(self, table: str, returned: int) -> dict:
-		next_start = returned if returned <= _MAX_START else None
+		next_start = returned if returned <= MAX_START else None
 		entry = {
 			"returned": returned,
 			"total": len(self.doc[table]),
@@ -145,15 +158,16 @@ class _DocumentCut:
 			entry["next_call"] = _call({**self.identity, "child_table": table, "start": next_start})
 		return entry
 
-	def _text_entry(self, field: str, value: str, cap: int) -> dict:
-		entry = {"returned_chars": cap, "total_chars": len(value)}
-		# Offer the fields call only when its result passes the guard uncut.
-		if self.identity and _size({**self.identity, field: value}) <= MAX_RESULT_CHARS:
-			entry["next_call"] = _call({**self.identity, "fields": [field]})
+	def _text_entry(self, field: str, text: str, cap: int) -> dict:
+		entry = {"returned_chars": cap, "total_chars": len(text), "next_offset": cap}
+		if not isinstance(self.doc[field], str):
+			entry["as_json"] = True
+		if self.identity:
+			entry["next_call"] = _call({**self.identity, "fields": [field], "text_offset": cap})
 		return entry
 
 
-def _bound_batch(data: dict, budget: int) -> tuple[dict, int, int]:
+def _bound_batch(data: dict, tables: frozenset, budget: int) -> tuple[dict, int, int]:
 	"""Keep the longest run of whole documents that fits; when not even the first
 	does, cut that one to the room left. The rest are named for a next call."""
 	docs = data["docs"]
@@ -164,7 +178,7 @@ def _bound_batch(data: dict, budget: int) -> tuple[dict, int, int]:
 	if shown:
 		return _batch_envelope(data, docs[:shown], shown), shown, total
 	room = budget - _size(_batch_envelope(data, [], 1))
-	first, _, _ = _DocumentCut(docs[0]).within(room)
+	first, _, _ = _DocumentCut(docs[0], tables).within(room)
 	return _batch_envelope(data, [first], 1), 1, total
 
 
@@ -178,8 +192,18 @@ def _batch_envelope(data: dict, kept: list, returned: int) -> dict:
 	return _wrap({**data, "docs": kept, "count": len(kept)}, partial)
 
 
+def _table_fieldnames(doctype) -> frozenset:
+	"""The doctype's child table fields. Any other list is a value, cut as text."""
+	if not isinstance(doctype, str) or not frappe.db.exists("DocType", doctype):
+		return frozenset()
+	return frozenset(df.fieldname for df in frappe.get_meta(doctype).fields if df.fieldtype in table_fields)
+
+
 def _bare(data: dict) -> dict:
-	return _wrap({k: data[k] for k in _IDENTITY_KEYS if isinstance(data.get(k), str)}, {"note": _BARE_NOTE})
+	"""Identity only, plus the field names, so the model can ask for some of them."""
+	names = [k for k in data if k not in _GUARD_KEYS]
+	partial = {"note": _BARE_NOTE, "fields": names[:_BARE_FIELD_NAMES], "field_count": len(names)}
+	return _wrap({k: data[k] for k in _IDENTITY_KEYS if isinstance(data.get(k), str)}, partial)
 
 
 def _wrap(body: dict, partial: dict) -> dict:
@@ -191,12 +215,12 @@ def _wrap(body: dict, partial: dict) -> dict:
 	}
 
 
-def _cut_text(value: str, cap: int) -> str:
-	"""``value`` cut to ``cap`` chars plus a marker, or ``value`` itself when the
-	marker would cost more than the cut saves."""
-	more = len(value) - cap
+def _cut_text(text: str, cap: int) -> str | None:
+	"""``text`` cut to ``cap`` chars plus a marker, or None when the marker would
+	cost more than the cut saves (the value is then kept as it is)."""
+	more = len(text) - cap
 	marker = _MARKER.format(more=more)
-	return value[:cap] + marker if more > len(marker) else value
+	return text[:cap] + marker if more > len(marker) else None
 
 
 def _call(args: dict) -> dict:
