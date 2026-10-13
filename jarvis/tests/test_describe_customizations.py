@@ -494,3 +494,38 @@ class TestToolTelemetry(_CustDiscFixtures):
 
 		clear_clause_cache()
 		self.assertIsNone(frappe.cache().get_value(telemetry.DOCTYPE_SET_CACHE_KEY))
+
+
+class TestTurnTelemetryDuration(FrappeTestCase):
+	"""The finalize turn event carries the measured span, or None, never a zero."""
+
+	def _emitted(self, row):
+		from jarvis.chat import finalize
+
+		ctx = finalize._Ctx(
+			run_id="r-dur", turn={}, conversation="c-dur", owner="u", errored=False, payload={}
+		)
+		with (
+			patch("jarvis.chat.finalize.frappe.db.get_value", return_value=row),
+			patch("jarvis.telemetry._emit") as emit,
+		):
+			finalize._effect_telemetry(ctx)
+		return emit.call_args.args[0]
+
+	def test_duration_is_the_measured_span(self):
+		rec = self._emitted(
+			{
+				"enqueued_at": "2026-10-13 10:00:00",
+				"dispatching_at": "2026-10-13 10:00:02",
+				"terminal_observed_at": "2026-10-13 10:00:12.500",
+			}
+		)
+		self.assertEqual(rec["duration_ms"], 10500)
+		self.assertEqual(rec["queue_ms"], 2000)
+		self.assertIsNone(rec["approval_wait_ms"])
+		self.assertEqual(rec["run_id"], "r-dur")
+
+	def test_missing_start_is_null_not_zero(self):
+		rec = self._emitted({"enqueued_at": "2026-10-13 10:00:00", "terminal_observed_at": "2026-10-13 10:00:05"})
+		self.assertIsNone(rec["duration_ms"])
+		self.assertIsNone(rec["queue_ms"])

@@ -588,9 +588,38 @@ def _effect_telemetry(ctx: _Ctx) -> None:
 	try:
 		from jarvis import telemetry
 
-		telemetry.emit_turn(ctx.conversation, ctx.run_id, 0)
+		timing = _turn_timing(ctx.run_id)
+		telemetry.emit_turn(
+			ctx.conversation,
+			ctx.run_id,
+			timing["duration_ms"],
+			queue_ms=timing["queue_ms"],
+		)
 	except Exception:
 		pass
+
+
+def _span_ms(start, end) -> int | None:
+	"""Whole milliseconds from start to end, or None when either is missing."""
+	if not (start and end):
+		return None
+	return int(max(0, frappe.utils.time_diff_in_seconds(end, start) * 1000))
+
+
+def _turn_timing(run_id: str) -> dict:
+	"""Measured spans from the turn's own stamps. duration_ms is run:start (dispatching_at)
+	to the terminal, the baseline reply_duration_ms uses; queue_ms is enqueue to dispatch.
+	A missing stamp gives None, never a fabricated zero."""
+	row = (
+		frappe.db.get_value(
+			TURN, run_id, ["enqueued_at", "dispatching_at", "terminal_observed_at"], as_dict=True
+		)
+		or {}
+	)
+	return {
+		"duration_ms": _span_ms(row.get("dispatching_at"), row.get("terminal_observed_at")),
+		"queue_ms": _span_ms(row.get("enqueued_at"), row.get("dispatching_at")),
+	}
 
 
 def _note_resend_outcome(ctx: _Ctx) -> None:
