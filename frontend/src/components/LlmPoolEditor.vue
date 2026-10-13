@@ -3327,15 +3327,27 @@ function copyTextWithFallback(text) {
 		ta.style.position = "fixed";
 		ta.style.left = "-9999px";
 		ta.style.top = "0";
-		document.body.appendChild(ta);
+		// Inside the open dialog when there is one: its focus trap pulls focus
+		// straight back off anything appended to <body>, and execCommand then
+		// "succeeds" having copied nothing.
+		const active = document.activeElement;
+		// A click whose button got disabled meanwhile leaves <body> active, so
+		// fall back to the topmost open dialog before <body> itself.
+		const dialogs = document.querySelectorAll('[role="dialog"]');
+		const host =
+			(active && active.closest && active.closest('[role="dialog"]')) ||
+			dialogs[dialogs.length - 1] ||
+			document.body;
+		host.appendChild(ta);
 		ta.focus();
 		ta.select();
 		try {
-			const ok = document.execCommand("copy");
-			document.body.removeChild(ta);
+			const ok = document.execCommand("copy") && document.activeElement === ta;
+			host.removeChild(ta);
+			if (active && active.focus) active.focus();
 			ok ? resolve() : reject(new Error("copy failed"));
 		} catch (e) {
-			document.body.removeChild(ta);
+			host.removeChild(ta);
 			reject(e);
 		}
 	});
@@ -4868,6 +4880,7 @@ function copyConnectUrl(m, url) {
 	const c = m._connect;
 	copyTextWithFallback(url)
 		.then(() => {
+			c.error = "";
 			c.copied = true;
 			setTimeout(() => {
 				if (m._connect === c) c.copied = false;

@@ -135,6 +135,72 @@ async function makeApiKeyRow(
 	return w.vm.rows[0];
 }
 
+describe("copy sign-in link inside a dialog on HTTP", () => {
+	let dialog;
+	let button;
+	let wrapper;
+	let trap;
+
+	beforeEach(() => {
+		vi.stubGlobal("isSecureContext", false);
+		dialog = document.createElement("div");
+		dialog.setAttribute("role", "dialog");
+		button = document.createElement("button");
+		dialog.appendChild(button);
+		document.body.appendChild(dialog);
+		trap = (event) => {
+			if (!dialog.contains(event.target)) button.focus();
+		};
+		document.addEventListener("focusin", trap);
+	});
+
+	afterEach(() => {
+		wrapper?.unmount();
+		document.removeEventListener("focusin", trap);
+		dialog.remove();
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+	});
+
+	it.each([true, false])("copies the URL with the trigger focused: %s", async (focused) => {
+		wrapper = await mountOnboarding();
+		const row = wrapper.vm.rows[0];
+		row._connect.authorizeUrl = "https://provider.example/authorize";
+		row._connect.error = "Could not copy. Select the URL above and copy manually.";
+		if (focused) button.focus();
+		const previousFocus = document.activeElement;
+		let clipboard = "";
+		// Like execCommand, report success even if the focus trap stole the
+		// selection. Only an actually selected textarea supplies clipboard text.
+		const originalCopy = Object.getOwnPropertyDescriptor(document, "execCommand");
+		Object.defineProperty(document, "execCommand", {
+			configurable: true,
+			value: vi.fn(() => {
+				const selected = document.activeElement;
+				if (selected instanceof HTMLTextAreaElement) {
+					clipboard = selected.value.slice(
+						selected.selectionStart,
+						selected.selectionEnd
+					);
+				}
+				return true;
+			}),
+		});
+		try {
+			await wrapper.vm.copySigninLink(row);
+			await flushPromises();
+			expect(clipboard).toBe(row._connect.authorizeUrl);
+			expect(row._connect.copied).toBe(true);
+			expect(row._connect.error).toBe("");
+			expect(dialog.querySelector("textarea")).toBeNull();
+			if (focused) expect(document.activeElement).toBe(previousFocus);
+		} finally {
+			if (originalCopy) Object.defineProperty(document, "execCommand", originalCopy);
+			else delete document.execCommand;
+		}
+	});
+});
+
 describe("§10.3 API-key probe gate (P0-09)", () => {
 	it("a freshly-typed remote key cannot Start until it has a PASSING probe", async () => {
 		const w = await mountOnboarding();
