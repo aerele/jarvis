@@ -30,7 +30,7 @@ from jarvis.chat.custom_skills import (
 	pushable_org_skill_count,
 	role_scoped_skill_rows,
 )
-from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
+from jarvis.permissions import has_jarvis_admin_access, refuse_in_tool_dispatch, require_jarvis_user
 
 SKILL = "Jarvis Custom Skill"
 _SETTINGS = "Jarvis Settings"
@@ -97,6 +97,23 @@ def _file_box_cols(*fields: str) -> list[str]:
 	return [f for f in fields if meta.has_field(f)]
 
 
+def _hold_cols() -> list[str]:
+	"""The admin hold's two columns, once migrated (code may be served ahead of migrate)."""
+	from jarvis.jarvis.doctype.jarvis_custom_skill import jarvis_custom_skill as skill_doctype
+
+	if not skill_doctype.hold_fields_exist():
+		return []
+	return [skill_doctype.HOLD_FIELD, skill_doctype.HOLD_REASON_FIELD]
+
+
+def _set_hold(row, mine: bool) -> None:
+	"""The hold as the skill APIs show it, in place: 0 / "" when not held or before the
+	migrate. The reason is the admin's word to the owner, so only the owner reads it."""
+	held = frappe.utils.cint(row.get("admin_hold"))
+	row["admin_hold"] = held
+	row["admin_hold_reason"] = (row.get("admin_hold_reason") or "") if held and mine else ""
+
+
 def _shared_fields() -> list[str]:
 	# ``use_in_file_box``: the File Box pin picker offers only skills File Box may use.
 	return [
@@ -131,6 +148,7 @@ def list_custom_skills() -> list[dict]:
 			"enabled",
 			*_file_box_cols("use_in_file_box"),
 			"modified",
+			*_hold_cols(),
 		],
 		order_by="skill_name asc",
 	)
@@ -149,6 +167,7 @@ def list_custom_skills() -> list[dict]:
 	for s in own:
 		s["mine"] = 1
 		s["shared_count"] = share_counts.get(s["name"], 0)
+		_set_hold(s, mine=True)
 
 	shared_names = _skill_names_shared_with(me)
 	shared = []
@@ -161,6 +180,7 @@ def list_custom_skills() -> list[dict]:
 		)
 		for s in rows:
 			s["mine"] = 0
+			_set_hold(s, mine=False)  # shared rows are enabled, so never held
 			shared.append(s)
 
 	# #628: Role-promoted skills. Invocation already accepted these (#477 / #478 via
@@ -181,6 +201,7 @@ def list_custom_skills() -> list[dict]:
 	via_role = []
 	for s in role_rows:
 		s["mine"] = 0
+		_set_hold(s, mine=False)
 		# ``via_role`` lets the composer label these differently from a person-to-person
 		# share: nobody shared it with this user, their ROLE grants it, and revoking the
 		# role removes it. ``shared_by`` is still populated so a client that does not know
@@ -312,7 +333,9 @@ def list_custom_skills_page(
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Custom Skill` WHERE {where}", params)[
 		0
 	][0]
-	file_box = "".join(f", {c}" for c in _file_box_cols("use_in_file_box", "file_box_creates"))
+	file_box = "".join(
+		f", {c}" for c in [*_file_box_cols("use_in_file_box", "file_box_creates"), *_hold_cols()]
+	)
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, skill_name, description, user_invocable, enabled, modified, owner,
 			ifnull(scope, 'Org') AS scope{file_box}
@@ -340,7 +363,10 @@ def list_custom_skills_page(
 		r["mine"] = mine
 		r["shared_by"] = "" if mine else _full_name(r.owner)
 		r["shared_count"] = share_counts.get(r.name, 0) if mine else 0
+		_set_hold(r, mine=bool(mine))
 		r.pop("owner", None)
+
+	from jarvis.chat import skills_admin
 
 	return {
 		"rows": rows,
@@ -348,7 +374,34 @@ def list_custom_skills_page(
 		"has_more": start + len(rows) < total,
 		"start": start,
 		"page_length": pl,
+		# Additive: what an admin did to the caller's skills (a delete leaves no row).
+		"notices": skills_admin.owner_notices(me, _NOTICES_MAX),
 	}
+
+
+# How many admin notices the Skills list shows at once.
+_NOTICES_MAX = 5
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def dismiss_skill_notices(names: str | list | None = None) -> dict:
+	"""Mark the caller's admin notices about their skills read: those named, or all of
+	them when none are. Another user's notification, or one of another kind, is never
+	touched: the filter is the caller's own and the kind's own."""
+	from jarvis.chat import skills_admin
+
+	refuse_in_tool_dispatch()
+	refused = _("Notices must be a list of names.")
+	try:
+		raw = frappe.parse_json(names) if isinstance(names, str) and names.strip() else names
+	except ValueError:
+		frappe.throw(refused, frappe.ValidationError)
+	if raw is not None and not isinstance(raw, list):
+		frappe.throw(refused, frappe.ValidationError)
+	if raw and not all(isinstance(n, str) and n for n in raw):
+		frappe.throw(refused, frappe.ValidationError)
+	return {"ok": True, "dismissed": skills_admin.dismiss_notices(frappe.session.user, raw or None)}
 
 
 @frappe.whitelist()
@@ -394,7 +447,14 @@ def get_custom_skill(name: str) -> dict:
 		"can_arm": int(has_jarvis_admin_access(me)),
 		"use_in_file_box": int(doc.get("use_in_file_box") or 0),
 		"file_box_creates": doc.get("file_box_creates") or "",
+		**_hold_of(doc, is_owner),
 	}
+
+
+def _hold_of(doc, mine: bool) -> dict:
+	row = {"admin_hold": doc.get("admin_hold"), "admin_hold_reason": doc.get("admin_hold_reason")}
+	_set_hold(row, mine)
+	return row
 
 
 @frappe.whitelist(methods=["POST"])
@@ -850,6 +910,9 @@ def request_skill_promotion(
 	# The lock is released when this request's own commit (below) ends the
 	# transaction, so it never outlives this function.
 	frappe.db.get_value(SKILL, doc.name, "name", for_update=True)
+	# D2: a held skill is not promoted. Read under the row lock just taken, which an
+	# admin's hold also takes, so a hold either committed before it or waits for this.
+	_refuse_held(doc.name, for_update=True)
 	if frappe.db.exists(PROMO, {"skill": doc.name, "status": "Pending"}):
 		frappe.throw(_("A promotion request for this skill is already pending review."))
 	# Multi-role: a Role-scope request may name several roles; ``target_role`` is
@@ -898,6 +961,28 @@ def request_skill_promotion(
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before notifying
 	_notify_skill_reviewers(req.name)
 	return {"ok": True, "request": req.name, "skill": doc.skill_name}
+
+
+def _refuse_held(skill: str, *, for_update: bool = False) -> None:
+	"""Refuse when an admin has put ``skill`` on hold, naming the hold and its reason.
+	``for_update``: a locking read, which sees the latest committed row whatever
+	snapshot the transaction opened earlier. A row another connection changed after
+	that snapshot fails such a read (1020, ``jarvis.chat.txn``); that is said as a
+	sentence the reviewer can act on. Nothing is held before the migrate."""
+	from jarvis.jarvis.doctype.jarvis_custom_skill import jarvis_custom_skill as skill_doctype
+
+	if not skill_doctype.hold_fields_exist():
+		return
+	fields = [skill_doctype.HOLD_FIELD, skill_doctype.HOLD_REASON_FIELD]
+	try:
+		row = frappe.db.get_value(SKILL, skill, fields, as_dict=True, for_update=for_update)
+	except frappe.QueryDeadlockError:
+		frappe.throw(_("This skill changed a moment ago. Try again."))
+	if row and frappe.utils.cint(row.get(skill_doctype.HOLD_FIELD)):
+		frappe.throw(
+			skill_doctype.held_message(row.get(skill_doctype.HOLD_REASON_FIELD)),
+			skill_doctype.SkillOnHoldError,
+		)
 
 
 def _stamp_decision(
@@ -1050,6 +1135,11 @@ def decide_skill_promotion(
 		# having acknowledged this exact (fresh, under-lock) projection. A clear (room
 		# to spare) catalog never needs a reconfirm, so a well-formed under-budget
 		# approval is unaffected.
+		# D2 (plan check item 3): the source's hold, read FOR UPDATE now, inside the
+		# catalog lock: an admin's hold takes the request row and the catalog lock in
+		# this same order, so it either committed before this or waits for it. A
+		# refusal leaves the request Pending (nothing here has committed).
+		_refuse_held(req.skill, for_update=True)
 		if (req.to_scope or "") == "Org":
 			fresh = project_org_promotion_push(req.skill, req.skill_name or "")
 			warned = bool(fresh and (fresh.get("over_budget") or fresh.get("at_budget")))
@@ -1100,6 +1190,11 @@ def _materialize_promotion(req, roles=None) -> dict:
 	existing_name, effective_scope = _effective_shared_scope(req.skill)
 	if _SCOPE_RANK.get(req.to_scope, 0) <= _SCOPE_RANK.get(effective_scope, 0):
 		frappe.throw(_("This skill is already shared at {0} scope or wider.").format(effective_scope))
+	# D2: widening onto a published copy an admin has put on hold is refused, with the
+	# hold named, before anything is saved (the controller guard would refuse the
+	# re-enable too, with less to go on).
+	if existing_name is not None:
+		_refuse_held(existing_name, for_update=True)
 
 	# R2-SP-1 + R3-SP-4: approval binds to the IMMUTABLE request-time snapshot and
 	# NEVER reads the (mutable) live source at decision time — a live fallback would
