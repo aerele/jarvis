@@ -1,5 +1,6 @@
 <script setup>
 import { parkedByCard } from "@shared/lib/draftParked.js";
+import { reportToolsByAssistant } from "@shared/lib/reportScope.js";
 import {
 	computed,
 	defineAsyncComponent,
@@ -48,6 +49,7 @@ import {
 } from "../lib/typedCardReply.js";
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
+import ReportScope from "../components/ReportScope.vue";
 import Composer from "../components/Composer.vue";
 import {
 	boundedDelivery,
@@ -412,6 +414,9 @@ const items = computed(() => {
 	}
 	return out;
 });
+
+// Report receipts bound to their answer by tool_call_ids, never by position.
+const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value));
 
 const lastAssistantKey = computed(() => {
 	const assistants = items.value.filter((i) => i.type === "assistant" && i.msg);
@@ -1409,6 +1414,7 @@ onUnmounted(() => {
 			     bubble is what made this screen look like a toy next to the app. -->
 			<div v-else class="jv-msg-agent">
 				<template v-if="it.msg">
+					<ReportScope :tools="reportToolsByTurn[it.key] || []" />
 					<div v-if="it.view.html" class="jv-md" v-html="it.view.html" />
 					<div v-else-if="it.view.empty" class="jv-msg-error">
 						{{ agentName }} didn't return a reply for this turn. Try asking again.
