@@ -41,6 +41,9 @@ vi.mock("@/markdown", () => markdown);
 const api = vi.hoisted(() => ({ adminGetSkill: vi.fn() }));
 vi.mock("@/api/skillsAdmin", () => api);
 
+const router = vi.hoisted(() => ({ push: vi.fn() }));
+vi.mock("vue-router", () => ({ useRouter: () => router }));
+
 import SkillAdminDialog from "./SkillAdminDialog.vue";
 
 const HOSTILE = `<img src=x onerror=alert(1)> **bold** # not a heading`;
@@ -245,5 +248,51 @@ describe("SkillAdminDialog", () => {
 		slow(skill({ skill_name: "first" }));
 		await flushPromises();
 		expect(w.find("h4").text()).toBe("second");
+	});
+});
+
+// 5c: the way in for a reviewer. A Role or company skill opens on its own form; a
+// private or learned one does not.
+describe("SkillAdminDialog: the shared skill's form", () => {
+	const editButton = (w) => w.find("button.jv-skill-admin-edit");
+
+	it("links a Role or company skill to its form, and closes", async () => {
+		for (const scope of ["Role", "Org"]) {
+			router.push.mockClear();
+			const w = await open({ scope, target_role: scope === "Role" ? "Sales User" : "" });
+			expect(editButton(w).text()).toBe("Edit skill");
+			await editButton(w).trigger("click");
+			expect(router.push).toHaveBeenCalledWith({
+				name: "SkillDetail",
+				params: { id: "s1" },
+			});
+			expect(w.emitted("update:modelValue")).toEqual([[false]]);
+			w.unmount();
+		}
+	});
+
+	it("offers no form for a private or a learned skill", async () => {
+		let w = await open({ scope: "User" });
+		expect(editButton(w).exists()).toBe(false);
+		w.unmount();
+		w = await open({ scope: "Org", is_learned: 1 });
+		expect(editButton(w).exists()).toBe(false);
+	});
+
+	it("names a reviewer's edit in the history", async () => {
+		const w = await open({
+			history: [
+				{
+					at: "2026-10-14 10:00:00",
+					admin: "rev@example.test",
+					admin_name: "Ravi",
+					verb: "edit",
+					reason: "Changed: instructions",
+				},
+			],
+		});
+		const cells = w.findAll(".jv-skill-admin-history td").map((c) => c.text());
+		expect(cells).toContain("Edited by a skill reviewer");
+		expect(cells).toContain("Changed: instructions");
 	});
 });
