@@ -313,6 +313,16 @@ def warm_prefix() -> bool:
 			_log_skip("not_configured")
 			return False
 		model, provider = _resolve_default_model_and_provider(settings)
+		from jarvis.chat.turn_handler import one_shot_runs_on_claude_plan
+
+		if one_shot_runs_on_claude_plan(settings, model, provider):
+			# On the Claude plan the warm runs in its own claude-cli process that the real
+			# first turn never reuses (each session gets its own), so it buys nothing and
+			# holds ~290 MB until the agent's idle timer closes it (admin-v2#657). Arm the
+			# full cooldown so chat-surface loads stop enqueueing jobs that only skip.
+			cache.set_value(key, "1", expires_in_sec=_WARM_COOLDOWN_S)
+			_log_skip("claude_plan")
+			return False
 		t0 = time.monotonic()
 		sess = AgentSession.connect(gateway_url)
 		try:

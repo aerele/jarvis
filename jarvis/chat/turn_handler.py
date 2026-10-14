@@ -556,6 +556,37 @@ def _is_native_claude_pick(settings, model_id: str) -> bool:
 	return model_id in set(SUBSCRIPTION_MODELS.get("Anthropic") or [])
 
 
+def one_shot_runs_on_claude_plan(settings, model: str, provider: str | None) -> bool:
+	"""True when a one-shot turn sent with ``model``/``provider`` would run on the Claude plan.
+
+	A Claude-plan turn runs in its own claude-cli process (about 290 MB, and about a core
+	for several seconds while it starts) that the agent keeps alive after the turn. A
+	one-shot (prewarm, auto-title) runs on its own throwaway session, so no real turn ever
+	reuses that process; it only adds memory until the agent's idle timer closes it
+	(admin-v2#657). Mirrors the routing in ``_resolve_model_and_provider``: a native Claude
+	pin, else the enabled row the model names, else (no model) the pool's head row."""
+	if not has_native_claude_subscription(settings):
+		return False
+	if provider == NATIVE_CLAUDE_PROVIDER:
+		return True
+	from jarvis.jarvis.pool_serialize import (
+		_credential_type,
+		_enabled_models,
+		_fleet_sort_key,
+		_subscription_upstream,
+	)
+
+	enabled = sorted(_enabled_models(settings), key=_fleet_sort_key)
+	if model:
+		rows = [m for m in enabled if (getattr(m, "model", None) or "").strip() == model]
+	else:
+		rows = enabled[:1]
+	return any(
+		_credential_type(m) == "subscription" and _subscription_upstream(m) == NATIVE_CLAUDE_PROVIDER
+		for m in rows
+	)
+
+
 def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 	"""Return (effective_model, agent_provider_id_or_None) for this conv.
 
