@@ -31,6 +31,8 @@ import re
 
 import frappe
 
+from jarvis.chat.wiki_permissions import _NON_TARGETABLE_ROLES
+
 SKILL = "Jarvis Custom Skill"
 SHARE = "Jarvis Custom Skill Share"
 ALLOWED_ROLE = "Jarvis Custom Skill Allowed Role"
@@ -109,6 +111,33 @@ def has_skill_permission(doc, ptype: str = "read", user: str | None = None) -> b
 	# reviewer branch saves with ignore_permissions); generic REST writes fall back to
 	# Frappe's "does not have access" message.
 	return (doc.get("owner") or "") == user
+
+
+# --------------------------------------------------------------------------- #
+# Which roles a skill may be given (a Role skill's audience)
+# --------------------------------------------------------------------------- #
+def own_targetable_roles(user: str) -> list[str]:
+	"""The roles ``user`` may name for a skill's audience as its author or a promotion
+	requester: their own desk roles minus the blanket ones (the wiki's
+	``_NON_TARGETABLE_ROLES``). A requester widens to a team they belong to."""
+	return sorted(r for r in frappe.get_roles(user) if r and r not in _NON_TARGETABLE_ROLES)
+
+
+def reviewer_targetable_roles() -> list[str]:
+	"""The roles a skill reviewer may give a shared skill (5c): any enabled desk role
+	minus the blanket ones, the set a System Manager targets on the wiki
+	(``wiki_permissions.manageable_roles``). Approving a promotion only narrows the
+	request's own roles, so it names no wider set to reuse."""
+	# Role names are not secret and the caller is already gated as a reviewer; a
+	# Jarvis Skill Reviewer has no read on Role, so the list ignores permissions.
+	roles = frappe.get_list(
+		"Role",
+		filters={"disabled": 0, "desk_access": 1},
+		order_by="name asc",
+		pluck="name",
+		ignore_permissions=True,
+	)
+	return [r for r in roles if r not in _NON_TARGETABLE_ROLES]
 
 
 # --------------------------------------------------------------------------- #
