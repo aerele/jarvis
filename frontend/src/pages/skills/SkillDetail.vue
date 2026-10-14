@@ -31,6 +31,15 @@
 		</template>
 
 		<template #main>
+			<!-- An admin's hold: the one thing on this page the owner cannot change. -->
+			<Banner
+				v-if="hold"
+				class="mb-4"
+				data-testid="hold-banner"
+				type="warning"
+				title="On hold"
+				:message="holdBanner"
+			/>
 			<DocSection label="Details">
 				<div class="space-y-4">
 					<FormControl
@@ -356,6 +365,8 @@ import "@/assets/settings.css"; // shared jv-* primitives (overlay, jv-btn) for 
 import * as api from "@/api";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { isCreatesError } from "@/lib/fileboxSkills";
+import { holdText, skillHold } from "@/lib/skillHold";
+import Banner from "@/components/Banner.vue";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -420,6 +431,15 @@ onMounted(async () => {
 	}
 });
 
+// An admin's hold (null when not held): the skill is off and cannot be switched on
+// or allowed to write without asking until an admin releases it.
+const hold = computed(() => skillHold(skill.value));
+const holdLine = computed(() => holdText(hold.value));
+const holdBanner = computed(
+	() =>
+		`${holdLine.value.replace(/\.+$/, "")}. The assistant does not use this skill until an admin releases it.`
+);
+
 const canEdit = computed(() => props.isNew || !!(skill.value && skill.value.can_edit));
 const readonly = computed(() => !canEdit.value || saving.value);
 const sharedBy = computed(() => (skill.value && skill.value.shared_by) || "");
@@ -435,8 +455,12 @@ const sharedBy = computed(() => (skill.value && skill.value.shared_by) || "");
 // without a browser. savedArmed reads the SAVED state (snapshot), not the live
 // form, so toggling doesn't self-unlock the guard.
 const savedArmed = computed(() => !!snapshot.value.allow_approve_run);
-const armLocked = computed(() => armToggleLocked(readonly.value, savedArmed.value, canArm.value));
-const armDescription = computed(() => armToggleDescription(savedArmed.value, canArm.value));
+const armLocked = computed(
+	() => !!hold.value || armToggleLocked(readonly.value, savedArmed.value, canArm.value)
+);
+const armDescription = computed(() =>
+	hold.value ? holdLine.value : armToggleDescription(savedArmed.value, canArm.value)
+);
 
 // ── promotion (requester side, Skills-area promotion surfacing) ───────────────
 // The owner of a private (User-scope) skill can ask a reviewer to widen it to a
@@ -505,9 +529,10 @@ const fileBoxGated = computed(
 // reviewer, so the switch is locked once it is saved off (the server refuses it).
 const ENABLED_HELP = "Off = saved as a draft, not used by the assistant.";
 const enabledLocked = computed(
-	() => readonly.value || (fileBoxGated.value && !snapshot.value.enabled)
+	() => readonly.value || !!hold.value || (fileBoxGated.value && !snapshot.value.enabled)
 );
 const enabledDescription = computed(() => {
+	if (hold.value) return holdLine.value;
 	if (!fileBoxGated.value) return ENABLED_HELP;
 	return snapshot.value.enabled
 		? `${ENABLED_HELP} Once off, only a System Manager can turn a shared skill back on.`
