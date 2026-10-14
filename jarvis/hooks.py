@@ -616,7 +616,13 @@ doc_events["Jarvis Conversation"] = {
 
 # A pending action never blocks deleting the conversation it points at; the
 # on_trash hook above cleans it up instead.
-ignore_links_on_delete = ["Jarvis Pending Action"]
+# A skill promotion request never blocks deleting the skill it names, for its owner
+# or an admin (jarvis-admin-v2#720, D3). Its ``skill`` Link may then dangle: that is
+# expected, and the request's ``skill_name`` and content snapshots are the history.
+# The decide path already tolerates a deleted skill (a reject goes through, an
+# approve is refused). The hook is keyed on the doctype that HOLDS the Link, so a
+# Role or User a request names is not blocked by it either.
+ignore_links_on_delete = ["Jarvis Pending Action", "Jarvis Skill Promotion Request"]
 
 # ---------------------------------------------------------------------------
 # Jarvis Triggers (user-defined doc-event automations)
