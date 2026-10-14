@@ -297,6 +297,10 @@ describe("the Markdown flavour for pasting back into the chat", () => {
 		expect(data[MARKDOWN_TYPE]).toBe("**6**");
 		expect(data["text/plain"]).not.toContain("**");
 	});
+	it("names the type so no other app takes it for Markdown or text", () => {
+		expect(MARKDOWN_TYPE).toBe("application/x-jarvis-reply");
+		expect(MARKDOWN_TYPE).not.toMatch(/markdown|^text\//i);
+	});
 	it("copyRich adds no Markdown type when none is given", async () => {
 		const data = fakeExecCommand();
 		await copyRich(html(), { win: {} });

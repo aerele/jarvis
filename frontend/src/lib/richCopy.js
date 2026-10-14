@@ -5,8 +5,12 @@
 // A third, Jarvis-only flavour carries the reply's Markdown, so pasting it back
 // into the chat box gives the same message, not the flattened plain text.
 
+// Every web page open in the browser can read this type on paste, and some
+// editors paste any type whose name says "markdown" (or any text/* type) in
+// preference to text/plain. So the name is neither: other apps fall back to
+// the clean plain text or the HTML, and only the chat box reads it.
 /** Clipboard type for the Markdown of a copied reply. Only the chat box reads it. */
-export const MARKDOWN_TYPE = "text/x-jarvis-markdown";
+export const MARKDOWN_TYPE = "application/x-jarvis-reply";
 
 const BLOCK = new Set([
 	"P",
