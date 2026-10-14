@@ -114,32 +114,44 @@ def user_can_use_skill(skill, user: str | None = None, user_roles: list[str] | N
 	  * ``Org``   — everyone, UNLESS ``allowed_roles`` is set (managed learned
 	    rows + legacy "Org narrowed by roles"), in which case role-match.
 
-	System Manager (and Administrator) always passes. ``skill`` may be a Document
+	System Manager and Administrator pass every Role and Org skill, but a private
+	(``User``) skill only as its owner or a ``shared_with`` user, like anyone else
+	(jarvis-admin-v2#720, D6): this rule decides what an assistant may fetch, and an
+	admin's assistant must not read a colleague's private skill. Administrator is
+	treated as a System Manager here. Desk read/list is unaffected:
+	``skill_permissions`` passes a System Manager before it reaches this rule.
+
+	``skill`` may be a Document
 	or any dict-like row; child tables absent from a ``frappe.get_all`` row are
 	fetched by parent name. Instruction-level enforcement — see TASK 11 for why
 	role-restricted skills must ALSO be kept off the shared container push (their
 	name and description would show to every user's agent).
 	"""
 	user = user or frappe.session.user
+	if (skill.get("owner") or "") == user:
+		return True
+	scope = skill_scope(skill)
+	if scope == "User":
+		# Private: a share is the only way in, for a System Manager too.
+		return _shared_with(skill, user)
 	if user == "Administrator":
 		return True
 	if user_roles is None:
 		user_roles = frappe.get_roles(user)
-	if "System Manager" in user_roles:
+	if "System Manager" in user_roles or _shared_with(skill, user):
 		return True
-	if (skill.get("owner") or "") == user:
-		return True
-	if user in _child_values(skill, "shared_with", "user", "Jarvis Custom Skill Share"):
-		return True
-	# NULL/empty scope == Org (pre-migration rows); "Personal" is the pre-ladder
-	# spelling of User (safe until the migration backfills the DB).
-	scope = (skill.get("scope") or "Org").strip() or "Org"
-	if scope == "Personal":
-		scope = "User"
-	if scope == "User":
-		# Private: owner/shared/SM already handled above.
-		return False
 	return scope_admits(skill, "Role" if scope == "Role" else "Org", user_roles)
+
+
+def skill_scope(skill) -> str:
+	"""``skill``'s ladder scope. NULL/empty is Org (pre-migration rows); "Personal"
+	is the pre-ladder spelling of User (safe until the migration backfills the DB)."""
+	scope = (skill.get("scope") or "Org").strip() or "Org"
+	return "User" if scope == "Personal" else scope
+
+
+def _shared_with(skill, user: str) -> bool:
+	return user in _child_values(skill, "shared_with", "user", "Jarvis Custom Skill Share")
 
 
 def scope_admits(skill, scope: str, user_roles) -> bool:
@@ -200,9 +212,9 @@ def prefetch_child_values(skills: list) -> None:
 	  ``parent in names`` could pull a promotion request's rows.
 	- Drop falsy values, mirroring ``_child_values``' ``if value`` filter.
 
-	Caller must SKIP this for Administrator / System Manager (they short-circuit
-	``user_can_use_skill`` before any child read); it is also pointless for a
-	single-row batch.
+	Pointless for a single-row batch, and for an Administrator / System Manager
+	unless a row is another user's private skill: they pass every Role and Org row
+	before any child read (``find_skills._maybe_prefetch_children`` gates this).
 	"""
 	names = [s.get("name") for s in skills if s.get("name")]
 	if not names:
