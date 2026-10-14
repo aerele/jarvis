@@ -227,8 +227,8 @@ def _is_greeting(text: str) -> bool:
 	return t in _GREETINGS
 
 
-def normalize_title(raw: str | None) -> str:
-	"""agent-style normalisation: first meaningful line, unwrapped, capped."""
+def normalize_title(raw: str | None, max_len: int = _TITLE_MAX_LEN) -> str:
+	"""agent-style normalisation: first meaningful line, unwrapped, capped at ``max_len``."""
 	if not raw:
 		return ""
 	first_line = ""
@@ -248,7 +248,7 @@ def normalize_title(raw: str | None) -> str:
 		current = re.sub(r"^__(.+)__$", r"\1", current).strip()
 		current = re.sub(r"^#+\s*", "", current).strip()  # leading markdown heading
 	current = current.rstrip(".").strip()
-	return current[:_TITLE_MAX_LEN]
+	return current[:max_len]
 
 
 def _opening_user_messages(conversation_id: str, *, limit: int = 6) -> str:
@@ -280,28 +280,45 @@ def _opening_user_texts(conversation_id: str, *, limit: int = 6) -> list[str]:
 	return parts
 
 
+# Words in _GREETINGS that also start real requests ("test the report", "evening sales",
+# "ok, now list ...") are a whole-message greeting only, never stripped from the front.
+_NOT_A_LEADING_GREETING = {"test", "ok", "okay", "thanks", "thank you", "morning", "evening", "greetings"}
+
+
+def _strip_leading_greeting(line: str) -> str:
+	"""``line`` without an opening salutation ("Hi, show me ..." -> "show me ...")."""
+	low = line.lower()
+	for g in sorted(_GREETINGS - _NOT_A_LEADING_GREETING, key=len, reverse=True):
+		if low.startswith(g) and (len(line) == len(g) or line[len(g)] in " ,!.:;-~"):
+			rest = line[len(g) :].lstrip(" ,!.:;-~")
+			rest = re.sub(r"^(jarvis|there|bot|buddy)\b[\s,!.:;-]*", "", rest, flags=re.IGNORECASE)
+			return rest.strip()
+	return line
+
+
 def plain_title(conversation_id: str) -> str:
-	"""A title from the first non-greeting user message, with no model call.
+	"""A title from the first non-greeting line the user wrote, with no model call.
 
 	Used where an LLM title would start its own Claude CLI process (admin-v2#657). Same
-	shape as a generated title: first meaningful line, unwrapped, at most
-	``_TITLE_MAX_LEN`` characters, cut at a word boundary. "" while the chat holds only
-	greetings, which leaves it "New chat" and retries on the next turn, like the LLM path."""
+	shape as a generated title: one line, unwrapped, at most ``_TITLE_MAX_LEN`` characters,
+	cut at a word boundary. A leading greeting ("Hi, ...") is dropped and a greeting-only
+	line is skipped. "" while the chat holds only greetings, which leaves it "New chat" and
+	retries on the next turn, like the LLM path."""
 	for text in _opening_user_texts(conversation_id):
-		if _is_greeting(text):
-			continue
-		title = normalize_title(text)
-		# The same line normalize_title titles from (it skips an opening code fence),
-		# so the length test below sees the text that was actually cut.
-		first_line = next(
-			(ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("```")),
-			"",
-		)
-		if len(first_line) > _TITLE_MAX_LEN and " " in title:
-			title = title.rsplit(" ", 1)[0]  # normalize_title cut mid-word; drop the stub
-		title = title.rstrip(" ,;:-").strip()
-		if title:
-			return title[:1].upper() + title[1:]
+		for raw_line in text.splitlines():
+			line = raw_line.strip()
+			if not line or line.startswith("```"):
+				continue
+			line = _strip_leading_greeting(line)
+			if not line or _is_greeting(line):
+				continue
+			full = normalize_title(line, max_len=len(line))
+			title = full[:_TITLE_MAX_LEN]
+			if len(full) > _TITLE_MAX_LEN and full[_TITLE_MAX_LEN] != " " and " " in title:
+				title = title.rsplit(" ", 1)[0]  # the cap fell inside a word; drop the stub
+			title = title.rstrip(" ,;:-").strip()
+			if title:
+				return title[:1].upper() + title[1:]
 	return ""
 
 
