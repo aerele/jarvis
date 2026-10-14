@@ -18,6 +18,11 @@ conversation. Best-effort throughout: the model itself decides greeting-vs-topic
 (it answers ``SKIP`` for greetings / small talk in any language), and a greeting
 or any failure simply leaves the chat "New chat" to be retried on the next turn —
 we never guess a title, and it never breaks the chat turn that triggered it.
+
+One deliberate exception: on the Claude plan every model turn starts its own
+claude-cli process, so there the title is the first non-greeting user message
+(``plain_title``), with greetings filtered by the ``_GREETINGS`` list instead of
+the model (admin-v2#657).
 """
 
 from __future__ import annotations
@@ -62,6 +67,25 @@ _GREETINGS = {
 	"ola",
 	"hola",
 	"namaste",
+	# The plain (no-model) title on the Claude plan relies on this list to skip a
+	# greeting, so it carries the common non-English ones too, in Latin and native
+	# script (admin-v2#657).
+	"namaskar",
+	"namaskaram",
+	"vanakkam",
+	"salaam",
+	"salam",
+	"assalamu alaikum",
+	"hallo",
+	"bonjour",
+	"ciao",
+	"नमस्ते",
+	"नमस्कार",
+	"வணக்கம்",
+	"నమస్కారం",
+	"നമസ്കാരം",
+	"ನಮಸ್ಕಾರ",
+	"নমস্কার",
 	"morning",
 	"evening",
 	"thanks",
@@ -267,7 +291,12 @@ def plain_title(conversation_id: str) -> str:
 		if _is_greeting(text):
 			continue
 		title = normalize_title(text)
-		first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+		# The same line normalize_title titles from (it skips an opening code fence),
+		# so the length test below sees the text that was actually cut.
+		first_line = next(
+			(ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("```")),
+			"",
+		)
 		if len(first_line) > _TITLE_MAX_LEN and " " in title:
 			title = title.rsplit(" ", 1)[0]  # normalize_title cut mid-word; drop the stub
 		title = title.rstrip(" ,;:-").strip()
@@ -435,7 +464,8 @@ def maybe_autotitle(
 		if not source:
 			return  # no user message yet
 		new_title = _generate_via_gateway(gateway_url, source, model=model, provider=provider)
-	# ONLY a real title from the model names the chat. SKIP / a generic greeting label / an empty
+	# Off the Claude plan, ONLY a real title from the model names the chat (the plain path is the
+	# documented exception in the module docstring). SKIP / a generic greeting label / an empty
 	# result (a title-model failure) all leave the chat "New chat", retried on the next turn — so a
 	# greeting is NEVER titled, even during a title-model outage, and no deterministic fallback
 	# guesses one; a real chat simply gets its title once the model answers.

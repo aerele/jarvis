@@ -90,6 +90,16 @@ class TestPlainTitle(FrappeTestCase):
 		self.assertEqual(msg[len(got)], " ")  # ended on a word boundary
 		self.assertTrue(got.startswith("Can you list"))
 
+	def test_common_non_english_greetings_are_skipped(self):
+		for greeting in ("வணக்கம்", "Vanakkam!", "नमस्ते", "bonjour"):
+			self.assertEqual(self._title(greeting, "reset my password"), "Reset my password", greeting)
+
+	def test_a_code_fence_opening_does_not_cut_mid_word(self):
+		long_line = "explain why this query takes forty seconds on the production sales invoice list"
+		got = self._title("```\n" + long_line + "\n```")
+		self.assertTrue(long_line.lower().startswith(got.lower()))
+		self.assertEqual(long_line[len(got)], " ")
+
 	def test_first_line_only_and_trailing_dot_dropped(self):
 		self.assertEqual(self._title("reset my password.\nmore detail here"), "Reset my password")
 
