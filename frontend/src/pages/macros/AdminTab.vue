@@ -492,6 +492,7 @@ import { nextRunCell } from "@/lib/macroSchedule";
 import { scheduleLabel } from "@/pages/macros/scheduleLabel";
 import { ARMED_HELP, LAST_RUN_TONE, NEXT_RUN_TONE, enabledLabel } from "@/pages/macros/runDisplay";
 import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
+import { focusOpenMenu } from "@/lib/focusOpenMenu";
 
 const PAGE = 20;
 // The server returns at most 100 rows a page.
@@ -876,12 +877,6 @@ watch(listEl, (el) => {
 	});
 	listWidth.observe(el);
 });
-
-// The menu library does not move focus into a menu it opens, so the arrow keys and
-// Enter would not reach the items: focus it once it is drawn (as the list filters do).
-function focusOpenMenu() {
-	requestAnimationFrame(() => document.querySelector("[data-reka-menu-content]")?.focus());
-}
 
 // An item was chosen. Two things have to settle before its action runs. The menu is
 // still closing, and a confirmation opened while it is there would not take the
