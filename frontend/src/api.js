@@ -4,11 +4,29 @@ import { boundedDelivery, settledSendResult } from "./lib/sendDelivery.js";
 // stay consistent across surfaces.
 import { call } from "frappe-ui";
 import { listPageArgs as _page } from "./api/listPageArgs";
+import { HISTORY_PAGE_SIZE } from "./lib/historyPaging.js";
 
 export const listConversations = () => call("jarvis.chat.api.list_conversations");
 export const listTools = () => call("jarvis.chat.api.list_tools");
-export const getConversation = (conversation) =>
+// The open chat reads its history a page at a time (#715 F13): the newest page, or
+// with {before} the page older than that cursor; {refresh} names held older rows
+// the server should send fresh, and {after} (the newest seq held) lets the newest
+// page reach back to the rows already on screen. Dashboards and Triggers read whole threads through
+// their own wrappers (api/dashboards.js, api/triggers.js).
+export const getConversation = (conversation, { before, refresh, after } = {}) =>
+	call("jarvis.chat.api.get_conversation", {
+		conversation,
+		limit: HISTORY_PAGE_SIZE,
+		...(before ? { before } : {}),
+		...(after ? { after } : {}),
+		...(refresh && refresh.length ? { refresh: JSON.stringify(refresh) } : {}),
+	});
+// The whole visible thread, unpaged, for an action that needs every row (Save as
+// macro) rather than what is on screen.
+export const getWholeConversation = (conversation) =>
 	call("jarvis.chat.api.get_conversation", { conversation });
+// A compact tool row's whole input and output, for the Activity view (#715 F13).
+export const getToolDetail = (message) => call("jarvis.chat.api.get_tool_detail", { message });
 // Rich outputs: fetch one canvas/chart artifact's render-ready HTML for an
 // assistant message (sandboxed-iframe srcdoc). `name` selects which artifact
 // when a message has several.
