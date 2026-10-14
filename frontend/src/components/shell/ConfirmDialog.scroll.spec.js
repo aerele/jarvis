@@ -141,3 +141,46 @@ describe("ConfirmDialog, a question that fits", () => {
 		expect(document.activeElement).toBe(buttons()[0]);
 	});
 });
+
+describe("ConfirmDialog, a message whose size changes while it is open", () => {
+	const observers = [];
+	class FakeObserver {
+		constructor(cb) {
+			this.cb = cb;
+			observers.push(this);
+		}
+		observe() {}
+		unobserve() {}
+		disconnect() {}
+	}
+	const resizeTo = async (size) => {
+		restore();
+		restore = layout(size);
+		observers.forEach((o) => o.cb());
+		await flushPromises();
+	};
+
+	afterEach(() => {
+		observers.length = 0;
+		vi.unstubAllGlobals();
+	});
+
+	it("moves focus to Cancel when the message stops scrolling under it", async () => {
+		vi.stubGlobal("ResizeObserver", FakeObserver);
+		await ask(LONG);
+		expect(document.activeElement).toBe(body());
+		await resizeTo(SHORT);
+		expect(body().hasAttribute("tabindex")).toBe(false);
+		expect(document.activeElement).toBe(buttons()[0]);
+	});
+
+	it("gives the message a tab stop when it starts to scroll", async () => {
+		vi.stubGlobal("ResizeObserver", FakeObserver);
+		await ask(SHORT);
+		expect(body().hasAttribute("tabindex")).toBe(false);
+		await resizeTo(LONG);
+		expect(body().getAttribute("tabindex")).toBe("0");
+		// Focus stays where the user had it.
+		expect(document.activeElement).toBe(buttons()[0]);
+	});
+});

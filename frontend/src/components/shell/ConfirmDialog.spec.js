@@ -214,6 +214,18 @@ describe("ConfirmDialog, keyboard focus", () => {
 		expect(heard).toEqual(["F8", "k"]);
 	});
 
+	it("lets a key through to the app when focus is outside the dialog", async () => {
+		await setup();
+		ask();
+		await flushPromises();
+		opener.focus();
+		opener.dispatchEvent(new KeyboardEvent("keydown", { key: "n", bubbles: true }));
+		expect(heard).toEqual(["n"]);
+		buttons()[0].focus();
+		press("n");
+		expect(heard).toEqual(["n"]);
+	});
+
 	it("leaves what a key does by itself alone", async () => {
 		// Only the journey to the app's listeners is stopped: Enter or Space on the
 		// focused button, and the browser's own shortcuts, are not cancelled.

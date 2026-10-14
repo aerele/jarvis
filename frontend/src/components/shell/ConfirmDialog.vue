@@ -174,6 +174,34 @@ function measure() {
 	scrolls.value = !!el && el.scrollHeight > el.clientHeight;
 }
 
+// The message can start or stop scrolling while the dialog is open (the window is
+// resized, a font loads). Watched on the element where the browser can say so, else
+// on the window's resize.
+const watchesSize = typeof ResizeObserver !== "undefined";
+let sizeObserver = null;
+if (watchesSize) {
+	sizeObserver = new ResizeObserver(measure);
+	watch(bodyEl, (el, was) => {
+		if (was) sizeObserver.unobserve(was);
+		if (el) sizeObserver.observe(el);
+	});
+}
+
+// Taking the tab stop off a focused message would drop focus to <body>: Cancel gets
+// it first. Runs before the page is redrawn, while the message is still focusable.
+watch(scrolls, (now) => {
+	if (!now && bodyEl.value && document.activeElement === bodyEl.value) {
+		cancelEl.value?.focus({ preventScroll: true });
+	}
+});
+
+function hasFocus(e) {
+	const dialog = dialogEl.value;
+	if (!dialog) return false;
+	const target = e.target instanceof Node && dialog.contains(e.target);
+	return target || dialog.contains(document.activeElement);
+}
+
 // What Tab visits, in order: the message when it scrolls, then the two buttons.
 function tabStops() {
 	const buttons = [...dialogEl.value.querySelectorAll("button")];
@@ -194,8 +222,9 @@ function onKey(e) {
 	// A key pressed while this dialog has the focus is not also one of the app's
 	// shortcuts. Only the journey to the app's own listeners is stopped: what the
 	// key does by itself (Enter or Space on the focused button, Space paging the
-	// message, the browser's own shortcuts) is untouched.
-	if (!/^F\d+$/.test(e.key)) e.stopPropagation();
+	// message, the browser's own shortcuts) is untouched. Not when focus is elsewhere
+	// (a toast, say): that key is not meant for this dialog.
+	if (!/^F\d+$/.test(e.key) && hasFocus(e)) e.stopPropagation();
 	// Plain Tab and Shift+Tab only: with Ctrl, Alt or Meta it is the browser's.
 	if (e.key !== "Tab" || e.ctrlKey || e.altKey || e.metaKey) return;
 	if (!dialogEl.value) return;
@@ -211,11 +240,12 @@ function onKey(e) {
 }
 onMounted(() => {
 	window.addEventListener("keydown", onKey, true);
-	window.addEventListener("resize", measure);
+	if (!watchesSize) window.addEventListener("resize", measure);
 });
 onBeforeUnmount(() => {
 	window.removeEventListener("keydown", onKey, true);
 	window.removeEventListener("resize", measure);
+	sizeObserver?.disconnect();
 });
 </script>
 
