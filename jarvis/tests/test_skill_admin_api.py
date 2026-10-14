@@ -66,8 +66,10 @@ ENDPOINTS = (
 	"admin_hold",
 	"admin_release",
 	"admin_delete",
+	"admin_handover",
+	"admin_handover_targets",
 )
-WRITES = ("admin_hold", "admin_release", "admin_delete")
+WRITES = ("admin_hold", "admin_release", "admin_delete", "admin_handover")
 ROW_KEYS = {
 	"name",
 	"skill_name",
@@ -245,6 +247,8 @@ class TestTheGates(SkillAdminBase):
 			"admin_hold": {"skill": skill, "reason": "Paused for review"},
 			"admin_release": {"skill": skill},
 			"admin_delete": {"skill": skill},
+			"admin_handover": {"skill": skill, "new_owner": OTHER, "expected_owner": OWNER},
+			"admin_handover_targets": {},
 		}
 
 	def test_every_endpoint_is_post_only(self):
@@ -373,7 +377,8 @@ class TestTheGates(SkillAdminBase):
 		own = self._skill(ADMIN, "mine")
 		frappe.set_user(ADMIN)
 		for endpoint, kwargs in self._calls(own).items():
-			if endpoint not in WRITES:
+			# Handing one's own skill away is allowed (test_skill_admin_handover).
+			if endpoint not in WRITES or endpoint == "admin_handover":
 				continue
 			with self.subTest(endpoint=endpoint):
 				with self.assertRaises(frappe.ValidationError) as ctx:
