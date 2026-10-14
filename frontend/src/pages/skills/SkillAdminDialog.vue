@@ -1,6 +1,7 @@
 <template>
 	<!-- One skill of another user, to look at. Nothing here edits or saves it: an admin
-	     does not act as the owner. A dialog over the Skills page's Admin tab: Escape
+	     does not act as the owner. A Role or company skill links to its own form,
+	     where a skill reviewer may edit it (5c). A dialog over the Skills page's Admin tab: Escape
 	     closes it and focus returns to the row that opened it. -->
 	<Dialog v-model="show" :options="{ title, size: '3xl' }">
 		<template #body-content>
@@ -210,7 +211,17 @@
 			</div>
 		</template>
 		<template #actions>
-			<div class="flex justify-end">
+			<div class="flex justify-end gap-2">
+				<!-- 5c: a Role or company skill is edited on its own form, where every
+				     change is recorded and its owner told. A private one never is. -->
+				<Button
+					v-if="canOpenForm"
+					class="jv-skill-admin-edit"
+					variant="subtle"
+					label="Edit skill"
+					iconLeft="edit-2"
+					@click="openForm"
+				/>
 				<Button label="Close" @click="show = false" />
 			</div>
 		</template>
@@ -223,6 +234,7 @@
 // how many macros use it. Every value is rendered as text ({{ }}), never as HTML or
 // Markdown: the instructions are another user's free text.
 import { computed, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { Badge, Button, Dialog, FeatherIcon } from "frappe-ui";
 import { adminGetSkill } from "@/api/skillsAdmin";
 import { errMessage } from "@/lib/errors";
@@ -232,6 +244,7 @@ import {
 	audienceDetail,
 	audienceLabel,
 	enabledLabel,
+	isShared,
 	macroUse,
 	ownerText as ownerOf,
 	skillLabel,
@@ -300,6 +313,17 @@ watch(
 	},
 	{ immediate: true }
 );
+
+const router = useRouter();
+// Not a learned skill: the learning board manages those.
+const canOpenForm = computed(
+	() => !!skill.value && isShared(skill.value) && !skill.value.is_learned
+);
+function openForm() {
+	const id = skill.value.name;
+	show.value = false;
+	router.push({ name: "SkillDetail", params: { id } });
+}
 
 const title = computed(() => (skill.value ? skillLabel(skill.value) : "Skill"));
 const ownerText = computed(() => (skill.value ? ownerOf(skill.value) : "its owner"));

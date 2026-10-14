@@ -43,7 +43,8 @@ HOLD_REASON_FIELD = skill_doctype.HOLD_REASON_FIELD
 ADMIN_HOLD_NOTICE = "Skill put on hold by an admin"
 ADMIN_RELEASE_NOTICE = "Skill released by an admin"
 ADMIN_DELETE_NOTICE = "Skill deleted by an admin"
-NOTICE_KINDS = (ADMIN_HOLD_NOTICE, ADMIN_RELEASE_NOTICE, ADMIN_DELETE_NOTICE)
+REVIEWER_EDIT_NOTICE = "Skill changed by a skill reviewer"
+NOTICE_KINDS = (ADMIN_HOLD_NOTICE, ADMIN_RELEASE_NOTICE, ADMIN_DELETE_NOTICE, REVIEWER_EDIT_NOTICE)
 
 ROW_FIELDS = (
 	"name",
@@ -407,12 +408,14 @@ def catalog_update_pending() -> bool:
 # --------------------------------------------------------------------------- #
 # Notices
 # --------------------------------------------------------------------------- #
-def notify(row, kind: str, body: str) -> None:
+def notify(row, kind: str, body: str, users: set[str] | None = None) -> None:
 	"""A Notification Log for whoever the skill is theirs: the owner, or for a published
 	copy its lineage author and the skill reviewers (the reviewers only once the source
-	is gone; D5, plan check item 9). Never the acting admin. No document link. Each one
-	in a savepoint: a failure is logged and never fails the committed act."""
-	for user in sorted(_recipients(row) - {frappe.session.user}):
+	is gone; D5, plan check item 9), or ``users`` when given. Never the acting admin. No
+	document link. Each one in a savepoint: a failure is logged and never fails the
+	committed act."""
+	recipients = _recipients(row) if users is None else _valid(users)
+	for user in sorted(recipients - {frappe.session.user}):
 		savepoint = "jarvis_skill_admin_notice"
 		try:
 			frappe.db.savepoint(savepoint)
@@ -434,8 +437,6 @@ def notify(row, kind: str, body: str) -> None:
 
 
 def _recipients(row) -> set[str]:
-	from jarvis.permissions import is_valid_unattended_owner
-
 	if is_published(row):
 		users = _skill_reviewers()
 		author = lineage_author(row)
@@ -443,7 +444,13 @@ def _recipients(row) -> set[str]:
 			users.add(author)
 	else:
 		users = {row.owner} if row.get("owner") else set()
-	return {u for u in users if is_valid_unattended_owner(u)}
+	return _valid(users)
+
+
+def _valid(users) -> set[str]:
+	from jarvis.permissions import is_valid_unattended_owner
+
+	return {u for u in users if u and is_valid_unattended_owner(u)}
 
 
 def _skill_reviewers() -> set[str]:

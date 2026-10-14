@@ -1,10 +1,12 @@
 """Jarvis Skill Admin Log: what a Jarvis Admin did to someone else's skill.
 
 One row per act (hold, release, delete), written by ``jarvis.chat.skills_admin_api``
-with ``ignore_permissions`` and never changed afterwards. Nobody has a write or a
-delete row on the doctype, so an admin cannot edit the record of their own act;
-this controller refuses a change to a stored row even where permissions are
-ignored. It outlives the skill (no Link to it) and holds no instructions text.
+with ``ignore_permissions`` and never changed afterwards. A skill reviewer's edit of a
+shared skill they do not own is an act too (``edit``, ``jarvis.chat.skill_reviewer_edit``).
+Nobody has a write or a delete row on the doctype, so an admin cannot edit the record
+of their own act; this controller refuses a change to a stored row even where
+permissions are ignored. It outlives the skill (no Link to it) and holds no
+instructions text.
 """
 
 from __future__ import annotations
