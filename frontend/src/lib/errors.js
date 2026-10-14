@@ -28,12 +28,6 @@ function isInternalCrash(e) {
 	return e instanceof TypeError && INTERNAL_CRASH_MESSAGE.test((e && e.message) || "");
 }
 
-// Frappe HTML-escapes throw() messages before they reach the client, so a
-// backend "Settings -> Developer" arrives here as "Settings -&gt; Developer"
-// and would render literally if shown as-is. Decode entities + strip any
-// wrapping tags via a detached element (never inserted into the live DOM, so
-// nothing in the message - script/img/etc. - ever executes) before handing
-// the string to a caller.
 // The sentence shown when the error carries nothing specific. Exported so a
 // caller never has to spell it out to detect it: an earlier pass at #699 gave
 // each site a custom fallback by comparing errMessage()'s RESULT against this
@@ -75,11 +69,41 @@ export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
 	if (!specific && e && (e.status === 401 || e.status === 403)) {
 		return SESSION_EXPIRED_MESSAGE;
 	}
-	const raw = specific || fallback;
-	if (typeof document === "undefined") return raw;
-	const d = document.createElement("div");
-	d.innerHTML = raw; // decodes &gt; &amp; &#39; etc; detached, so no script/img runs
-	return (d.textContent || d.innerText || raw).trim();
+	return messageText(typeof specific === "string" && specific ? specific : fallback);
+}
+
+// Frappe HTML-escapes throw() messages before they reach the client, so a backend
+// "Settings -> Developer" arrives as "Settings -&gt; Developer" and would render
+// literally if shown as-is. Decode entities and drop tags by parsing into an inert
+// document (DOMParser: no script runs and no image loads, which a detached
+// element's innerHTML does not guarantee). Text only, and bounded in length.
+export const MAX_MESSAGE_CHARS = 500;
+const MAX_SOURCE_CHARS = 5000;
+
+export function messageText(raw) {
+	const src = String(raw ?? "").slice(0, MAX_SOURCE_CHARS);
+	if (typeof DOMParser === "undefined") return clip(src.trim());
+	const doc = new DOMParser().parseFromString(src, "text/html");
+	// A message that is nothing but a tag has no text: show it as it came, as text.
+	return clip((doc.body.textContent || src).trim());
+}
+
+function clip(text) {
+	return text.length > MAX_MESSAGE_CHARS ? text.slice(0, MAX_MESSAGE_CHARS - 1) + "…" : text;
+}
+
+// The first message in a response's `_server_messages` (a JSON array of JSON
+// strings), or "". Never throws, whatever the payload looks like.
+export function firstServerMessage(raw) {
+	if (typeof raw !== "string" || raw.length > MAX_SOURCE_CHARS * 4) return "";
+	try {
+		const list = JSON.parse(raw);
+		const first = Array.isArray(list) ? list[0] : list;
+		const entry = typeof first === "string" ? JSON.parse(first) : first;
+		return entry && typeof entry.message === "string" ? entry.message : "";
+	} catch {
+		return "";
+	}
 }
 
 // errMessage() returns PLAIN TEXT: it decodes entities so a text sink renders
