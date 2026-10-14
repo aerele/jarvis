@@ -63,7 +63,9 @@ vi.mock("@/components/doc/CommentsSection.vue", () => ({ default: { template: "<
 vi.mock("@/composables/useDocmeta", () => ({ useDocmeta: vi.fn(() => ({ reload: vi.fn() })) }));
 vi.mock("@/composables/useShortcuts", () => ({ useShortcuts: vi.fn() }));
 vi.mock("./SyncPill.vue", () => ({ default: { template: "<i/>" } }));
-vi.mock("./ShareDialog.vue", () => ({ default: { template: "<i/>" } }));
+vi.mock("./ShareDialog.vue", () => ({
+	default: { name: "ShareDialog", props: ["modelValue", "skill"], template: "<i/>" },
+}));
 vi.mock("@/components/skills/PromotionRequestDialog.vue", () => ({
 	default: { template: "<i/>" },
 }));
@@ -497,16 +499,40 @@ describe("SkillDetail: a skill reviewer editing someone else's shared skill", ()
 		expect(switchOf(w, "User invocable").props("disabled")).toBe(false);
 	});
 
-	it("hides the owner's promote, delete and sharing, and never asks for them", async () => {
+	it("hides the owner's promote and delete, and never asks for them", async () => {
 		w = await mountSkill({ id: "SK-1" }, SHARED);
 		expect(w.findComponent({ name: "Dropdown" }).exists()).toBe(false);
 		expect(w.find(".docmeta-panel").exists()).toBe(false);
 		expect(w.find(".jv-skill-reviewer-card").text()).toContain("Asha Rao");
 		expect(useDocmeta).not.toHaveBeenCalled();
-		expect(api.getSkillShares).not.toHaveBeenCalled();
 		expect(mySkillPromotion).not.toHaveBeenCalled();
 		// Still the editor: Save is there.
 		expect(w.findAll("button").some((b) => b.text() === "Save")).toBe(true);
+	});
+
+	it("lets the reviewer see and manage who it is shared with", async () => {
+		api.getSkillShares.mockResolvedValueOnce({
+			users: [{ name: "ben@example.test", full_name: "Ben Rao" }],
+		});
+		w = await mountSkill({ id: "SK-1" }, SHARED);
+		expect(api.getSkillShares).toHaveBeenCalledWith("SK-1");
+		const block = w.find(".jv-skill-reviewer-card .jv-skill-shares");
+		expect(block.text()).toContain("Shared with");
+		expect(block.text()).not.toContain("Not shared");
+		const dialog = w.findComponent({ name: "ShareDialog" });
+		expect(dialog.props("modelValue")).toBe(false);
+		await block
+			.findAll("button")
+			.find((b) => b.text() === "Manage")
+			.trigger("click");
+		expect(dialog.props("modelValue")).toBe(true);
+		expect(dialog.props("skill")).toEqual({ name: "SK-1", skill_name: "bills" });
+	});
+
+	it("shows a reader no shares and does not ask for them", async () => {
+		w = await mountSkill({ id: "SK-1" }, { ...SHARED, can_edit: false });
+		expect(w.find(".jv-skill-shares").exists()).toBe(false);
+		expect(api.getSkillShares).not.toHaveBeenCalled();
 	});
 
 	it("gives the owner the overflow, the panel and the shares", async () => {
