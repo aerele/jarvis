@@ -265,9 +265,9 @@
 										type="button"
 										class="jv-skill-admin-open max-w-full truncate rounded text-left text-sm font-medium text-ink-gray-9 underline-offset-2 hover:underline focus-visible:underline"
 										:title="skillLabel(row)"
-										:aria-label="`Open ${skillLabel(row)}, owned by ${ownerText(
+										:aria-label="`Open ${skillLabel(
 											row
-										)}. Read-only.`"
+										)}, owned by ${ownerText(row)}. Read-only.`"
 										@click="open(row)"
 									>
 										{{ skillLabel(row) }}
@@ -400,9 +400,8 @@
 
 					<div class="flex flex-wrap items-center justify-between gap-3">
 						<span class="text-xs text-ink-gray-5" aria-live="polite">
-							Showing {{ rows.length }}{{
-								total > rows.length ? ` of ${total}` : hasMore ? " so far" : ""
-							}}
+							Showing {{ rows.length
+							}}{{ total > rows.length ? ` of ${total}` : hasMore ? " so far" : "" }}
 						</span>
 						<!-- A next page that failed is said here, where the admin is
 						     looking: the banner above the list is a screen away. -->

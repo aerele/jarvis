@@ -439,7 +439,10 @@ const hold = computed(() => skillHold(skill.value));
 const holdLine = computed(() => holdText(hold.value));
 const holdBanner = computed(
 	() =>
-		`${holdLine.value.replace(/\.+$/, "")}. The assistant does not use this skill until an admin releases it.`
+		`${holdLine.value.replace(
+			/\.+$/,
+			""
+		)}. The assistant does not use this skill until an admin releases it.`
 );
 
 const canEdit = computed(() => props.isNew || !!(skill.value && skill.value.can_edit));

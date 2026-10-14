@@ -55,7 +55,9 @@ function open(props = {}) {
 	});
 }
 const holdButton = (w) =>
-	w.findAll("button.stub-button").find((b) => /^(Put on hold|Hold for everyone)$/.test(b.text()));
+	w
+		.findAll("button.stub-button")
+		.find((b) => /^(Put on hold|Hold for everyone)$/.test(b.text()));
 const used = (total, armed = 0) => ({ total, armed });
 
 beforeEach(() => {
@@ -67,15 +69,21 @@ describe("SkillHoldDialog", () => {
 	it("names the skill and its owner, and says what a hold does and does not undo", () => {
 		const w = open();
 		expect(w.find("h3").text()).toBe("Put on hold: month-end");
-		expect(w.find(".jv-skill-hold-owner").text()).toBe("Owned by Asha Rao (asha@example.test)");
+		expect(w.find(".jv-skill-hold-owner").text()).toBe(
+			"Owned by Asha Rao (asha@example.test)"
+		);
 		expect(w.find("h3").classes()).toContain("jv-skill-dialog-title");
-		expect(w.text()).toContain("The assistant stops using this skill until an admin releases it");
+		expect(w.text()).toContain(
+			"The assistant stops using this skill until an admin releases it"
+		);
 		expect(w.text()).toContain("Its owner sees the reason on the skill.");
 		// Releasing is not "resume": said before the hold, not after.
 		expect(w.find(".jv-skill-hold-note").text()).toContain(
 			"Releasing the hold later does not undo these"
 		);
-		expect(w.find(".jv-skill-hold-note").text()).toContain("does not write without asking again");
+		expect(w.find(".jv-skill-hold-note").text()).toContain(
+			"does not write without asking again"
+		);
 		expect(w.find(".jv-skill-hold-company").exists()).toBe(false);
 		expect(w.text()).not.toMatch(/\bOrg\b|scope|armed/i);
 	});
@@ -116,7 +124,11 @@ describe("SkillHoldDialog", () => {
 	});
 
 	it("holds with the reason as typed, says so, tells the tab and closes", async () => {
-		api.adminHold.mockResolvedValue({ ok: true, needs_apply: true, used_by_macros: used(2, 1) });
+		api.adminHold.mockResolvedValue({
+			ok: true,
+			needs_apply: true,
+			used_by_macros: used(2, 1),
+		});
 		const w = open();
 		await w.find(".stub-reason").setValue("  Emails customers  ");
 		await holdButton(w).trigger("click");
