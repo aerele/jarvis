@@ -71,6 +71,36 @@ class TestOnboardingHostGuard(FrappeTestCase):
 		with patch.dict(frappe.conf, {"host_name": "https://foo.localhost"}, clear=False):
 			self.assertFalse(admin_client._onboarding_host_ok())
 
+	def test_public_ipv4_host_name_allows(self):
+		for host in ("https://167.86.84.99", "167.86.84.99"):
+			with self.subTest(host=host):
+				with patch.dict(frappe.conf, {"host_name": host}, clear=False):
+					self.assertTrue(admin_client._onboarding_host_ok())
+					admin_client.assert_public_onboarding_host()
+					self.assertEqual(admin_client._public_origin(), "https://167.86.84.99")
+
+	def test_http_public_ipv4_host_name_blocked(self):
+		with patch.dict(frappe.conf, {"host_name": "http://167.86.84.99"}, clear=False):
+			self.assertFalse(admin_client._onboarding_host_ok())
+
+	def test_non_public_ip_host_name_blocked(self):
+		for host in (
+			"127.0.0.1",
+			"10.0.0.1",
+			"172.16.0.1",
+			"192.168.1.5",
+			"169.254.169.254",
+			"100.64.0.1",
+			"0.0.0.0",
+			"224.0.0.1",
+			"240.0.0.1",
+			"255.255.255.255",
+			"[::1]",
+		):
+			with self.subTest(host=host):
+				with patch.dict(frappe.conf, {"host_name": f"https://{host}"}, clear=False):
+					self.assertFalse(admin_client._onboarding_host_ok())
+
 	def test_ip_host_name_blocked(self):
 		with patch.dict(frappe.conf, {"host_name": "https://203.0.113.5"}, clear=False):
 			self.assertFalse(admin_client._onboarding_host_ok())
