@@ -109,6 +109,29 @@ class TestUserCanUseSkill(FrappeTestCase):
 		skill = _skill(allowed_roles=[{"role": "Sales User"}])
 		self.assertTrue(user_can_use_skill(skill, "Administrator"))
 
+	# jarvis-admin-v2#720 (D6): a private skill admits a System Manager only as its
+	# owner or a share, like anyone else; Role and Org rows still pass them.
+	def test_system_manager_does_not_pass_another_users_private_skill(self):
+		for scope in ("User", "Personal"):
+			with self.subTest(scope=scope):
+				skill = _skill(scope=scope)
+				self.assertFalse(user_can_use_skill(skill, "sm@example.com", ["System Manager"]))
+
+	def test_system_manager_in_shared_with_passes_a_private_skill(self):
+		skill = _skill(scope="User", shared_with=[{"user": "sm@example.com"}])
+		self.assertTrue(user_can_use_skill(skill, "sm@example.com", ["System Manager"]))
+
+	def test_system_manager_owner_passes_a_private_skill(self):
+		skill = _skill(scope="User", owner="sm@example.com")
+		self.assertTrue(user_can_use_skill(skill, "sm@example.com", ["System Manager"]))
+
+	def test_administrator_does_not_pass_another_users_private_skill(self):
+		self.assertFalse(user_can_use_skill(_skill(scope="User"), "Administrator"))
+
+	def test_system_manager_still_passes_a_role_skill_they_do_not_hold(self):
+		skill = _skill(scope="Role", target_role="Accounts Manager")
+		self.assertTrue(user_can_use_skill(skill, "sm@example.com", ["System Manager"]))
+
 	def test_child_rows_as_objects_and_strings(self):
 		# Document child rows (attribute access) and pre-plucked strings both work.
 		class Row:

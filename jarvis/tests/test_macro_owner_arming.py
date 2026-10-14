@@ -1023,15 +1023,17 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 		self.assertEqual(skills_outside_control(OWNER, slugs={"armskill-pair"}), [])
 
 	def test_a_system_manager_is_judged_on_the_skill_they_would_be_served(self):
-		# A System Manager reads every skill: another user's private one, shared with
-		# nobody, is what ``get_skill`` serves them for that name.
+		# Another user's private skill, shared with nobody, is not served to a System
+		# Manager (jarvis-admin-v2#720): naming it serves nothing, so the run stays armed.
+		from jarvis.chat.skill_permissions import served_row, skills_outside_control
+
 		self._skill(OTHER, "priv")
 		macro = self._tagged(SM, None, tag="sm", armed=True, prompt="do it with /armskill-priv")
 		_data, [(_prompt, armed)] = self._run(macro, user=SM)
-		self.assertEqual(armed, 0)
-		from jarvis.chat.skill_permissions import skills_outside_control
-
-		self.assertEqual(skills_outside_control("Administrator", slugs={"armskill-priv"}), ["armskill-priv"])
+		self.assertEqual(armed, 1)
+		for user in (SM, "Administrator"):
+			self.assertIsNone(served_row("armskill-priv", user))
+		self.assertEqual(skills_outside_control("Administrator", slugs={"armskill-priv"}), [])
 
 	def test_a_step_parked_for_capacity_says_why_when_it_is_sent_again(self):
 		from jarvis.chat import macros
@@ -1227,14 +1229,16 @@ class TestASkillFetchedByAnArmedRun(ArmedChatBase):
 		self.assertEqual(self._armed(conv), 1)
 
 	def test_a_system_manager_and_administrator_are_judged_on_the_row_served(self):
-		# They may read every skill, so a private one nobody shared is served to them.
+		# A private skill nobody shared is refused to them too (jarvis-admin-v2#720):
+		# no body goes back, so nothing disarms the chat.
 		self._skill(OTHER, "priv")
 		for owner in (SM, "Administrator"):
 			with self.subTest(owner=owner):
 				conv = self._armed_conv(owner)
 				res = self._fetch(conv, "armskill-priv", user=owner)
-				self.assertTrue(res["ok"], res)
-				self.assertEqual(self._armed(conv), 0)
+				self.assertFalse(res["ok"], res)
+				self.assertEqual(res["error"]["code"], "PermissionDeniedError", res)
+				self.assertEqual(self._armed(conv), 1)
 
 	def test_an_unarmed_chat_is_left_alone(self):
 		self._skill(OTHER, "shared", share_with=OWNER)

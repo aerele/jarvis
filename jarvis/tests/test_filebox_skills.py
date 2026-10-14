@@ -86,7 +86,7 @@ def _denied():
 
 
 def same_slug(private_first: bool):
-	"""A peer's private copy (SM see-all shows it) and a reviewed Org row of one slug,
+	"""A peer's private copy (SM see-all once showed it) and a reviewed Org row of one slug,
 	inserted in either order (the query leaves their tie unordered). Returns the Org row."""
 	if private_first:
 		skill(OWNER, "same", creates=SI)
@@ -388,8 +388,9 @@ class TestEligibility(_Base):
 		self.assertFalse(self.eligible(row))  # ...but never automatic
 
 	def test_no_system_manager_see_all(self):
+		# Another user's private skill is not a System Manager's (jarvis-admin-v2#720).
 		row = skill(PEER, "sm-private")
-		self.assertTrue(user_can_use_skill(frappe.get_doc(SKILL, row.name), SM))
+		self.assertFalse(user_can_use_skill(frappe.get_doc(SKILL, row.name), SM))
 		self.assertFalse(self.eligible(row, dropper=SM))
 
 	def test_the_recorded_pin_is_eligible_but_still_needs_use_in_file_box(self):
