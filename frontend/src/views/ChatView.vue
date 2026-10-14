@@ -830,7 +830,7 @@
 							:timestamp="msgTime(m)"
 							:timestampFull="msgTimeFull(m)"
 							:copied="copiedId === m.name"
-							@copy="copyMsg(m.name, stripBlocks(m.content))"
+							@copy="copyReplyMsg(m.name, m.content)"
 							@open-attachment="openArtifact(m, $event)"
 						>
 							<template #avatar>
@@ -1896,8 +1896,9 @@
 													: 'visibility: hidden'
 											"
 											:disabled="!replyBarParts(m).showCopy"
-											@click="copyMsg(m.name, stripBlocks(m.content))"
-											:title="copiedId === m.name ? 'Copied' : 'Copy'"
+											@click="copyReplyMsg(m.name, m.content)"
+											:title="replyCopyLabel(m.name)"
+											:aria-label="replyCopyLabel(m.name)"
 										>
 											<svg
 												v-if="copiedId === m.name"
@@ -1911,6 +1912,20 @@
 												stroke-linejoin="round"
 											>
 												<path d="M20 6 9 17l-5-5" />
+											</svg>
+											<svg
+												v-else-if="copyFailedId === m.name"
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="var(--red)"
+												stroke-width="2"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<circle cx="12" cy="12" r="9" />
+												<path d="M12 8v5M12 16h.01" />
 											</svg>
 											<svg
 												v-else
@@ -4420,6 +4435,8 @@ import { BOOT_TIMEOUT_MS, withDeadline } from "@/utils/bootDeadline";
 import { createEnrichmentPending, ENRICHMENT_CUE_DELAY_MS } from "@/lib/enrichmentPending";
 import { currentThreadModel, modelBadgeFor, modelBadgeTitleFor } from "@/utils/modelBadge";
 import { renderMarkdown } from "@/markdown";
+import { copyReply } from "@/lib/richCopy";
+import { report as reportError } from "@/lib/errorReporter";
 import JvChart from "@/charts/JvChart.vue";
 import ConnectPhoneDialog from "@/components/ConnectPhoneDialog.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
@@ -7081,12 +7098,17 @@ const docNameRegex = computed(() => {
 		.slice(0, 400);
 	if (!names.length) return null;
 	try {
-		return new RegExp(`(?<![\\w-])(${names.map(_escapeRegex).join("|")})(?![\\w-])`, "g");
+		return new RegExp(`(?<![\\w&-])(${names.map(_escapeRegex).join("|")})(?![\\w-])`, "g");
 	} catch (e) {
 		return null; // e.g. a browser without lookbehind — degrade to no links
 	}
 });
-const _deskSlug = (dt) => dt.toLowerCase().replace(/ /g, "-");
+const _deskSlug = (dt) => String(dt).toLowerCase().replace(/ /g, "-");
+const _escAttr = (s) =>
+	String(s).replace(
+		/[&<>"']/g,
+		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+	);
 // Turn known document IDs in the rendered markdown HTML into Desk links, without
 // touching text already inside an <a> (so markdown links stay intact).
 function linkifyDocs(html) {
@@ -7110,8 +7132,15 @@ function linkifyDocs(html) {
 			return text.replace(re, (name) => {
 				const dt = refs[name];
 				if (!dt) return name;
-				const url = `/app/${_deskSlug(dt)}/${encodeURIComponent(name)}`;
-				return `<a href="${url}" target="_blank" rel="noopener" class="jv-doclink" title="Open ${dt} in ERPNext">${name}</a>`;
+				// `dt` comes from tool args/results (LLM- or user-written data), so it is
+				// encoded for the URL and escaped for the attribute. `name` already matched
+				// escaped text.
+				const url = `/app/${encodeURIComponent(_deskSlug(dt))}/${encodeURIComponent(
+					name
+				)}`;
+				return `<a href="${url}" target="_blank" rel="noopener" class="jv-doclink" title="Open ${_escAttr(
+					dt
+				)} in ERPNext">${name}</a>`;
 			});
 		}
 	);
@@ -8519,7 +8548,46 @@ const copiedId = ref("");
 let _copyTimer = null;
 function copyMsg(id, text) {
 	copyText(text);
+	showCopied(id);
+}
+// A reply copies as its rendered form (lib/richCopy.js); the tick shows only
+// once the clipboard took it, and a refusal says so instead of staying silent.
+const copyFailedId = ref("");
+function copyReplyMsg(id, content) {
+	copyReply(id, content, {
+		render: (text) => render(text, false),
+		onCopied: showCopied,
+		onFailed: (failedId, reason) => {
+			copiedId.value = "";
+			copyFailedId.value = failedId;
+			announceSR(
+				reason === "empty"
+					? "Nothing to copy."
+					: "Couldn't copy. Select the text and copy it instead."
+			);
+			clearTimeout(_copyTimer);
+			_copyTimer = setTimeout(() => {
+				copyFailedId.value = "";
+			}, 2500);
+		},
+		report: (reason) =>
+			reportError({
+				surface: "chat",
+				error_code: "copy_reply_failed",
+				message: reason,
+				conversation: currentId.value,
+			}),
+	});
+}
+function replyCopyLabel(id) {
+	if (copiedId.value === id) return "Copied";
+	if (copyFailedId.value === id) return "Couldn't copy. Select the text and copy it instead.";
+	return "Copy";
+}
+function showCopied(id) {
+	copyFailedId.value = "";
 	copiedId.value = id;
+	announceSR("Copied.");
 	clearTimeout(_copyTimer);
 	_copyTimer = setTimeout(() => {
 		copiedId.value = "";
