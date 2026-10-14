@@ -51,7 +51,9 @@ export function useAdminRowMenu(o) {
 
 	const rowEl = (name) =>
 		listEl.value &&
-		[...listEl.value.querySelectorAll(o.rowSelector)].find((r) => r.dataset[o.rowKey] === name);
+		[...listEl.value.querySelectorAll(o.rowSelector)].find(
+			(r) => r.dataset[o.rowKey] === name
+		);
 	const actionsButton = (name) => {
 		const el = rowEl(name);
 		return el ? el.querySelector(o.actionsSelector) : null;

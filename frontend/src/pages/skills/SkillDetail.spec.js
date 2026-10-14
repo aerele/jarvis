@@ -45,7 +45,8 @@ vi.mock("@/components/doc/DocSection.vue", () => ({
 vi.mock("@/components/Banner.vue", () => ({
 	default: {
 		props: ["type", "title", "message"],
-		template: '<div class="banner" :data-type="type"><b>{{ title }}</b><span class="msg">{{ message }}</span></div>',
+		template:
+			'<div class="banner" :data-type="type"><b>{{ title }}</b><span class="msg">{{ message }}</span></div>',
 	},
 }));
 vi.mock("@/components/doc/DocMetaPanel.vue", () => ({ default: { template: "<div/>" } }));
@@ -350,7 +351,7 @@ describe("SkillDetail: an administrator's hold", () => {
 
 	it("says it is on hold, with the reason, above the form", async () => {
 		w = await mountSkill({ id: "SK-1" }, HELD);
-		const banner = w.find('.banner');
+		const banner = w.find(".banner");
 		expect(banner.attributes("data-type")).toBe("warning");
 		expect(banner.text()).toContain("On hold");
 		expect(banner.find(".msg").text()).toBe(
@@ -384,7 +385,9 @@ describe("SkillDetail: an administrator's hold", () => {
 	it("says it is on hold even when no reason was given", async () => {
 		w = await mountSkill({ id: "SK-1" }, { ...HELD, admin_hold_reason: "" });
 		expect(switchOf(w, "Enabled").props("description")).toBe("On hold by an administrator");
-		expect(w.find(".banner .msg").text()).toContain("On hold by an administrator. The assistant");
+		expect(w.find(".banner .msg").text()).toContain(
+			"On hold by an administrator. The assistant"
+		);
 	});
 
 	it("shows nothing of it on a skill that is not held, or from a server that sends no hold", async () => {

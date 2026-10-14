@@ -148,9 +148,15 @@ describe("SkillAdminDialog", () => {
 		let w = await open();
 		expect(w.find(".jv-skill-admin-lineage").exists()).toBe(false);
 		w = await open({
-			lineage: { source_skill: "month-end-draft", author: "asha@example.test", author_name: "Asha Rao" },
+			lineage: {
+				source_skill: "month-end-draft",
+				author: "asha@example.test",
+				author_name: "Asha Rao",
+			},
 		});
-		expect(w.find(".jv-skill-admin-lineage").text()).toBe("month-end-draft, written by Asha Rao");
+		expect(w.find(".jv-skill-admin-lineage").text()).toBe(
+			"month-end-draft, written by Asha Rao"
+		);
 	});
 
 	it("says how many macros use it, in plain words", async () => {
@@ -176,12 +182,18 @@ describe("SkillAdminDialog", () => {
 					reason: HOSTILE,
 					at: "2026-10-02 09:00:00",
 				},
-				{ admin: "boss@example.test", admin_name: "", verb: "release", reason: "", at: "2026-10-03 09:00:00" },
+				{
+					admin: "boss@example.test",
+					admin_name: "",
+					verb: "release",
+					reason: "",
+					at: "2026-10-03 09:00:00",
+				},
 			],
 		});
-		const cells = w.findAll(".jv-skill-admin-history tbody tr").map((tr) =>
-			tr.findAll("td").map((td) => td.text())
-		);
+		const cells = w
+			.findAll(".jv-skill-admin-history tbody tr")
+			.map((tr) => tr.findAll("td").map((td) => td.text()));
 		expect(cells).toEqual([
 			["a while ago", "Boss Person", "Put on hold", HOSTILE],
 			["a while ago", "boss@example.test", "Released", "-"],
@@ -214,7 +226,10 @@ describe("SkillAdminDialog", () => {
 		await flushPromises();
 		expect(w.find("[role='alert']").text()).toContain("Server is busy");
 		api.adminGetSkill.mockResolvedValue(skill());
-		await w.findAll("button.stub-button").find((b) => b.text() === "Try again").trigger("click");
+		await w
+			.findAll("button.stub-button")
+			.find((b) => b.text() === "Try again")
+			.trigger("click");
 		await flushPromises();
 		expect(w.find("[role='alert']").exists()).toBe(false);
 		expect(w.find("pre").exists()).toBe(true);
