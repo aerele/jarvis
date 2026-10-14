@@ -8,6 +8,7 @@
 //     applyRemoteNew (DA-04) — called from ChatView's socket handlers and the
 //     AppShell-level global notifier (notify/globalNotifier.js).
 //   - unreadConvs: the global notifier marks, ChatView clears on open.
+//   - runningConvs: the global notifier writes from live run events (#591).
 import { reactive, ref, computed } from "vue";
 import { useStorage } from "@vueuse/core";
 import { toast } from "frappe-ui";
@@ -26,6 +27,9 @@ const streamingConvId = ref(null); // written by ChatView only
 // the sidebar's unread dot (distinct from the streaming dot). Replaced
 // wholesale on every write so Set mutations stay reactive.
 const unreadConvs = ref(new Set());
+// Chats with a run in progress, from live socket events (global notifier). The open
+// chat also has streamingConvId; this set is what lets an off-screen chat show its dot.
+const runningConvs = ref(new Set());
 const approvalsCount = ref(0);
 // Pending review work for a skill reviewer (skill + wiki promotions and
 // surfaced learned patterns): the same total as the Skills page Review tab.
@@ -589,6 +593,16 @@ function applyRemoteNew() {
 // ---- unread signal (NOTIFY-APPROVALS Part 1) --------------------------------
 // The global notifier marks a conversation unread when its run ends off-screen;
 // ChatView clears it the moment that conversation is opened.
+function markRunning(id) {
+	if (!id || runningConvs.value.has(id)) return;
+	runningConvs.value = new Set(runningConvs.value).add(id);
+}
+function clearRunning(id) {
+	if (!id || !runningConvs.value.has(id)) return;
+	const next = new Set(runningConvs.value);
+	next.delete(id);
+	runningConvs.value = next;
+}
 function markUnread(id) {
 	if (!id || unreadConvs.value.has(id)) return;
 	unreadConvs.value = new Set(unreadConvs.value).add(id);
@@ -609,6 +623,7 @@ const store = reactive({
 	currentConvId,
 	streamingConvId,
 	unreadConvs,
+	runningConvs,
 	approvalsCount,
 	reviewCount,
 	settingsOpen,
@@ -659,6 +674,8 @@ const store = reactive({
 	applyRemoteNew,
 	markUnread,
 	clearUnread,
+	markRunning,
+	clearRunning,
 	bumpLlmConfig,
 });
 

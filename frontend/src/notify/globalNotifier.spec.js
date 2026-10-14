@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 /**
  * The bug: a reply produced TWO "Reply ready" toasts.
@@ -13,6 +13,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
  */
 
 const store = {
+	markRunning: vi.fn(),
+	clearRunning: vi.fn(),
 	markUnread: vi.fn(),
 	applyRemoteNew: vi.fn(),
 	currentConvId: null,
@@ -388,5 +390,117 @@ describe("import:finished marks the sidebar unread, never a toast", () => {
 			router.currentRoute.value = savedRoute;
 			store.currentConvId = null;
 		}
+	});
+});
+
+describe("sidebar running chats (#591)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		store.currentConvId = "conv-a";
+		router.currentRoute.value = { name: "Chat", params: {}, meta: { chat: true } };
+	});
+	afterEach(() => {
+		detach();
+		for (const t of [...useToasts().value]) dismissToast(t.id);
+		vi.useRealTimers();
+	});
+
+	it.each([
+		"run:start",
+		"run:status",
+		"run:step",
+		"assistant:delta",
+		"tool:start",
+		"tool:end",
+		"run:recovering",
+	])("marks an off-screen chat running on %s without attention signals", (kind) => {
+		socket.emit({ kind, conversation_id: "conv-b" });
+		expect(store.markRunning).toHaveBeenCalledWith("conv-b");
+		expect(store.markUnread).not.toHaveBeenCalled();
+		expect(store.applyRemoteNew).not.toHaveBeenCalled();
+		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it.each([
+		{ kind: "run:end" },
+		{ kind: "run:end", stopped: true },
+		{ kind: "run:error" },
+		{ kind: "run:end", conversation_id: "conv-a" },
+	])("clears running on terminal $kind (stopped=$stopped, chat=$conversation_id)", (over) => {
+		const event = terminal({ conversation_id: "conv-b", ...over });
+		socket.emit({ ...event, kind: "run:start", event_seq: 1 });
+		socket.emit(event);
+		expect(store.clearRunning).toHaveBeenCalledWith(event.conversation_id);
+		store.clearRunning.mockClear();
+		vi.advanceTimersByTime(3 * 60 * 1000);
+		expect(store.clearRunning).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["TriggersPage", "jarvis-triggers-conv-u@example.com"],
+		["DashboardsPage", "jarvis-dash-conv-u@example.com"],
+	])("clears before the visible %s pane early return", (name, key) => {
+		router.currentRoute.value = { name, params: {}, meta: {} };
+		localStorage.setItem(key, "conv-b");
+		socket.emit({ kind: "run:start", conversation_id: "conv-b" });
+		socket.emit(terminal({ conversation_id: "conv-b" }));
+		expect(store.clearRunning).toHaveBeenCalledWith("conv-b");
+		expect(useToasts().value).toHaveLength(0);
+		store.clearRunning.mockClear();
+		vi.advanceTimersByTime(3 * 60 * 1000);
+		expect(store.clearRunning).not.toHaveBeenCalled();
+	});
+
+	it("does not re-light a chat on a stale delta after an accepted terminal", () => {
+		const event = terminal({ conversation_id: "conv-b", pump_epoch: 1, event_seq: 5 });
+		socket.emit({ ...event, kind: "run:start", event_seq: 1 });
+		expect(store.markRunning).toHaveBeenCalledOnce();
+		socket.emit(event);
+		store.markRunning.mockClear();
+		socket.emit({ ...event, kind: "assistant:delta", event_seq: 4 });
+		expect(store.markRunning).not.toHaveBeenCalled();
+	});
+
+	it("clears after three minutes of silence", () => {
+		socket.emit({ kind: "run:start", conversation_id: "conv-b" });
+		vi.advanceTimersByTime(3 * 60 * 1000 - 1);
+		expect(store.clearRunning).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(store.clearRunning).toHaveBeenCalledOnce();
+		expect(store.clearRunning).toHaveBeenCalledWith("conv-b");
+	});
+
+	it("resets only that chat's silence timer on another event", () => {
+		socket.emit({ kind: "run:start", conversation_id: "conv-b" });
+		socket.emit({ kind: "run:start", conversation_id: "conv-c" });
+		vi.advanceTimersByTime(2 * 60 * 1000);
+		socket.emit({ kind: "assistant:delta", conversation_id: "conv-b" });
+		vi.advanceTimersByTime(60 * 1000);
+		expect(store.clearRunning).toHaveBeenCalledOnce();
+		expect(store.clearRunning).toHaveBeenCalledWith("conv-c");
+		store.clearRunning.mockClear();
+		vi.advanceTimersByTime(2 * 60 * 1000 - 1);
+		expect(store.clearRunning).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(store.clearRunning).toHaveBeenCalledOnce();
+		expect(store.clearRunning).toHaveBeenCalledWith("conv-b");
+	});
+
+	it("cancels every silence timer on detach", () => {
+		socket.emit({ kind: "run:start", conversation_id: "conv-b" });
+		socket.emit({ kind: "tool:start", conversation_id: "conv-c" });
+		expect(vi.getTimerCount()).toBe(2);
+		detach();
+		expect(vi.getTimerCount()).toBe(0);
+		vi.advanceTimersByTime(3 * 60 * 1000);
+		socket.emit({ kind: "run:start", conversation_id: "conv-d" });
+		expect(store.clearRunning).not.toHaveBeenCalled();
+		expect(store.markRunning).not.toHaveBeenCalledWith("conv-d");
+	});
+
+	it("ignores running events without a conversation", () => {
+		socket.emit({ kind: "run:start" });
+		expect(store.markRunning).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
 	});
 });

@@ -23,8 +23,10 @@
 			/>
 			<span class="flex-1 truncate">{{ conv.title || "New chat" }}</span>
 			<span
-				v-if="store.streamingConvId === conv.name"
+				v-if="store.streamingConvId === conv.name || store.runningConvs.has(conv.name)"
 				class="ml-1.5 size-1.5 shrink-0 animate-pulse rounded-full bg-blue-500"
+				title="Replying…"
+				aria-label="Replying"
 			/>
 			<!-- unread: a finished reply the user hasn't opened yet (global
 			     notifier marks, opening clears) — solid + slightly larger, so it
