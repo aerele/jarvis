@@ -119,7 +119,8 @@ class DocPart:
 			raise InvalidArgumentError(f"{doctype} has no child table '{table}'. Its child tables: {tables}.")
 		_refuse_unreadable(doctype, [table])
 		if self.fields:
-			_refuse_unknown(df.options, self.fields, set(frappe.get_meta(df.options).get_valid_fields()))
+			# get_valid_columns: Frappe v15 has no get_valid_fields (same list on v16).
+			_refuse_unknown(df.options, self.fields, set(frappe.get_meta(df.options).get_valid_columns()))
 		hidden = _unreadable(doctype, df.options)
 		omitted = sorted(hidden.intersection(self.fields) if self.fields else hidden)
 		rows = doc[table]
