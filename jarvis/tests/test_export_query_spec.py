@@ -215,6 +215,11 @@ class TestExportQuerySpecLimitsAndHeaders(FrappeTestCase):
 	def test_the_select_runs_under_the_statement_limit(self):
 		if frappe.db.db_type != "mariadb":
 			self.skipTest("max_statement_time is MariaDB's")
+		# The limit keeps a tighter one the session already has, which an earlier
+		# test in the same process may have left behind: start from none.
+		previous = frappe.db.sql("SELECT @@max_statement_time")[0][0]
+		frappe.db.sql("SET SESSION max_statement_time = 0")
+		self.addCleanup(frappe.db.sql, "SET SESSION max_statement_time = %s", (previous,))
 		with (
 			mock.patch("jarvis.api._agent_read_timeout_s", return_value=25),
 			mock.patch.object(
