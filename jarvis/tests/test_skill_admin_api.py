@@ -570,7 +570,8 @@ class TestHelperParity(FrappeTestCase):
 	answer every input as the originals do: the same value, or the same exception
 	class. Messages differ where they name a macro."""
 
-	def _outcome(self, fn, *args):
+	def _result_of(self, fn, *args):
+		# Not ``_outcome``: unittest's TestCase keeps its own ``_outcome`` attribute.
 		try:
 			return ("value", fn(*args))
 		except Exception as e:
@@ -581,7 +582,7 @@ class TestHelperParity(FrappeTestCase):
 		mine, theirs = getattr(skills_admin_api, name), getattr(macros_admin_api, name)
 		for args in inputs:
 			with self.subTest(helper=name, args=args):
-				self.assertEqual(self._outcome(mine, *args), self._outcome(theirs, *args))
+				self.assertEqual(self._result_of(mine, *args), self._result_of(theirs, *args))
 
 	def test_name_and_text(self):
 		values = (None, "", "  ", "x", "  x  ", ["x"], {"owner": "a"}, 7, 0, True)
