@@ -697,6 +697,19 @@
 						gap: 26px;
 					"
 				>
+					<!-- History paging (#715 F13): older pages load as the reader nears
+					     the top; this is the same action for keyboard and screen readers. -->
+					<div
+						v-if="historyPaging.hasMore && historyPaging.conv === currentId"
+						style="display: flex; justify-content: center"
+					>
+						<Button
+							variant="subtle"
+							label="Load earlier messages"
+							:loading="loadingOlder"
+							@click="loadOlder()"
+						/>
+					</div>
 					<!-- An existing titled conversation (e.g. opened via an agent run's
 					     "Open chat") whose first message hasn't landed yet - render a
 					     quiet placeholder instead of an empty scroll area, since
@@ -926,19 +939,38 @@
 													class="jv-tool-detail"
 												>
 													<template
-														v-if="prettyJson(item.row.tool_args)"
+														v-if="
+															prettyJson(
+																toolShown(item.row).tool_args
+															)
+														"
 													>
 														<div class="jv-tool-io-k">Input</div>
 														<pre class="jv-tool-io">{{
-															prettyJson(item.row.tool_args)
+															prettyJson(
+																toolShown(item.row).tool_args
+															)
 														}}</pre>
 													</template>
+													<div
+														v-if="toolLoading(item.row)"
+														class="jv-tool-io-k"
+														role="status"
+													>
+														Loading output…
+													</div>
 													<template
-														v-if="prettyJson(item.row.tool_result)"
+														v-else-if="
+															prettyJson(
+																toolShown(item.row).tool_result
+															)
+														"
 													>
 														<div class="jv-tool-io-k">Output</div>
 														<pre class="jv-tool-io">{{
-															prettyJson(item.row.tool_result)
+															prettyJson(
+																toolShown(item.row).tool_result
+															)
 														}}</pre>
 													</template>
 												</div>
@@ -4223,13 +4255,24 @@ import {
 	watchEffect,
 } from "vue";
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
-import { Dropdown } from "frappe-ui";
+import { Button, Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { reportToolsByAssistant } from "@/lib/reportScope";
 import { toolRowFromResult, upsertToolRow, withLiveToolRows } from "@/lib/liveToolRows";
 import { collectDocRefs } from "@/lib/docRefs";
+import {
+	heldNewestSeq,
+	mergeNewestPage,
+	needsToolDetail,
+	pendingSeedRows,
+	prependOlderPage,
+	promptRows,
+	refreshNames,
+	threadCounts,
+	withToolDetail,
+} from "@/lib/historyPaging";
 import { markParked, parkedByCard, parkedNoteFor } from "@/lib/draftParked";
 import { applyActionPayload, draftSaveOutcome, stampDraftModel } from "@/lib/draftSave";
 import UsagePill from "@/components/chat/UsagePill.vue";
@@ -4471,6 +4514,11 @@ watch(currentId, (id) => {
 	contextInfo.value = null;
 	compactedChip.value = false;
 	compacting.value = false;
+	// History paging (#715 F13): older pages and fetched tool details belong to the
+	// chat they were read for.
+	historyPaging.value = { conv: null, hasMore: false, before: null, newest: null };
+	toolDetails.value = {};
+	recentPrompts = [];
 	try {
 		id
 			? localStorage.setItem("jarvis-last-conv", id)
@@ -4478,6 +4526,16 @@ watch(currentId, (id) => {
 	} catch (e) {}
 });
 const messages = ref([]);
+// History paging (#715 F13): `messages` holds the newest page plus any older pages
+// the reader scrolled up to (@/lib/historyPaging). `conv` is the chat this state
+// was read for: a resync keeps older rows only for that same chat.
+const historyPaging = ref({ conv: null, hasMore: false, before: null, newest: null });
+const loadingOlder = ref(false);
+// Whole input/output of compact tool rows, fetched when the row is expanded.
+const toolDetails = ref({});
+// The user messages older than the newest page (its recent_prompts), so Up-arrow
+// recall reaches a long chat's earlier prompts without loading their pages.
+let recentPrompts = [];
 const input = ref("");
 // Per-conversation composer drafts: switching chats stashes the leaving
 // chat's unsent text here and restores the target chat's own draft, so a
@@ -6386,6 +6444,37 @@ function toggleActivity(name) {
 }
 function toggleTool(name) {
 	toolOpen.value = { ...toolOpen.value, [name]: !toolOpen.value[name] };
+	if (toolOpen.value[name]) loadToolDetail(name);
+}
+// A history page sends a large tool result compact (#715 F13): the whole input and
+// output load the first time its row is expanded, and stay for this chat.
+const _toolDetailInflight = new Set();
+async function loadToolDetail(name) {
+	const id = currentId.value;
+	const row = transcript.value.find((m) => m.name === name);
+	if (!needsToolDetail(row, toolDetails.value) || _toolDetailInflight.has(name)) return;
+	_toolDetailInflight.add(name);
+	try {
+		const d = await api.getToolDetail(name);
+		if (currentId.value === id && d && d.name === name)
+			toolDetails.value = { ...toolDetails.value, [name]: d };
+	} catch (e) {
+		toolOpen.value = { ...toolOpen.value, [name]: false };
+		notifyActionError("Couldn't load this step's details", e);
+	} finally {
+		_toolDetailInflight.delete(name);
+	}
+}
+// A row opened while its turn was live held the whole result; the settle reload
+// brings it back compact, so fetch the detail of any row still open.
+watch(transcript, (rows) => {
+	for (const m of rows) if (toolOpen.value[m.name]) loadToolDetail(m.name);
+});
+function toolShown(row) {
+	return withToolDetail(row, toolDetails.value);
+}
+function toolLoading(row) {
+	return needsToolDetail(row, toolDetails.value);
 }
 function toolLabel(n) {
 	return (n || "tool").replace(/^jarvis__/, "");
@@ -6428,12 +6517,19 @@ const showWelcome = computed(
 
 // settings/overview derived metrics (all from data we already hold)
 const convCount = computed(() => store.conversations.length);
-const msgCount = computed(() => visibleMessages.value.length);
-const toolCount = computed(() => jarvisTools.value.length);
-const userMsgCount = computed(() => visibleMessages.value.filter((m) => m.role === "user").length);
-const assistantMsgCount = computed(
-	() => visibleMessages.value.filter((m) => m.role === "assistant").length
+// Paged history (#715 F13): the shown rows on screen plus the ones the server counted
+// below the oldest loaded page, so the totals cover the whole chat (as on develop,
+// which held every row) while only some pages are loaded.
+const threadTotals = computed(() =>
+	threadCounts(
+		visibleMessages.value,
+		historyPaging.value.conv === currentId.value ? historyPaging.value : null
+	)
 );
+const msgCount = computed(() => threadTotals.value.total);
+const toolCount = computed(() => jarvisTools.value.length);
+const userMsgCount = computed(() => threadTotals.value.user);
+const assistantMsgCount = computed(() => threadTotals.value.assistant);
 const avgTokensPerMsg = computed(() => {
 	const n = msgCount.value;
 	if (!usage.value || !n) return "-";
@@ -6447,7 +6543,7 @@ const starredCount = computed(() => store.conversations.filter((c) => c.starred)
 // ten tool cards (#551). They now come from the persisted rows via
 // jarvis.chat.api.get_tool_activity / get_usage.chat_tool_calls.
 const headerSub = computed(() => {
-	const n = visibleMessages.value.length;
+	const n = msgCount.value;
 	return n ? `${Math.ceil(n / 2)} message${n > 2 ? "s" : ""}` : "Your AI Teammate";
 });
 const canSend = computed(
@@ -6653,8 +6749,23 @@ const canSaveAsMacro = computed(
 			(m) => m.role === "user" && m.content && !m.content.startsWith("▶ Running macro")
 		)
 );
-function saveConversationAsMacro() {
-	const steps = messages.value
+// The macro takes every eligible prompt in the chat. With paged history (#715 F13)
+// the rows on screen may be only the newest pages, so it reads the whole thread
+// first (the unpaged get_conversation, owner-gated like every read of it).
+async function saveConversationAsMacro() {
+	const id = currentId.value;
+	let rows = messages.value;
+	if (id && (historyPaging.value.conv !== id || historyPaging.value.hasMore)) {
+		try {
+			const d = await api.getWholeConversation(id);
+			if (currentId.value !== id) return;
+			rows = d?.messages || [];
+		} catch (e) {
+			notifyActionError("Couldn't read this chat", e);
+			return;
+		}
+	}
+	const steps = rows
 		.filter((m) => m.role === "user" && m.content && !m.content.startsWith("▶ Running macro"))
 		.map((m) => ({ label: "", prompt: m.content }));
 	if (!steps.length) return;
@@ -8891,9 +9002,97 @@ function onThreadScroll() {
 	// A deliberate scroll always wins over a position being held across a
 	// re-render: stop re-applying it the moment the reader moves themselves.
 	_restoreTop = null;
+	// The older-page hold sets scrollTop itself; any other scroll is the reader's.
+	const el = threadEl.value;
+	if (_holdFromBottom !== null && el && Math.abs(el.scrollTop - _heldTop) > 2)
+		_holdFromBottom = null;
 	const d = distanceFromBottom();
 	pinnedToBottom.value = d <= 80;
 	showScrollDown.value = arrowNeeded();
+	// Reading up toward the oldest loaded message: fetch the page above it. Not before
+	// an open has landed on the newest message, or a prepend has been put in place:
+	// the scrollTop of those in-between frames is not the reader's.
+	if (_olderArmed && el && el.scrollTop < OLDER_PAGE_TRIGGER_PX) loadOlder({ auto: true });
+}
+
+// ── History paging (#715 F13) ──────────────────────────────────────────────
+// The thread holds the newest page plus the older pages the reader scrolled up to;
+// the next one loads when they come within this distance of the top (or press
+// "Load earlier messages").
+const OLDER_PAGE_TRIGGER_PX = 200;
+// After an older page lands above the reader, hold the distance from the content's
+// bottom to the viewport top, so the rows they were reading stay put while the new
+// rows (charts, images, diagrams) finish laying out. Their own scroll ends it.
+let _holdFromBottom = null;
+let _holdUntil = 0;
+let _heldTop = null;
+// A failed fetch pauses the scroll trigger (the button still works), so scrolling
+// at the top of a chat that cannot load does not repeat the request and its toast.
+let _olderFailedAt = 0;
+// Whether the scroll trigger may fire: off from a chat switch until the open has
+// scrolled to the newest message, and from a prepend until its hold is applied.
+let _olderArmed = false;
+function armOlderNextFrame() {
+	requestAnimationFrame(() => {
+		_olderArmed = true;
+	});
+}
+function holdFromBottom(fromBottom) {
+	const el = threadEl.value;
+	if (!el) return;
+	_holdFromBottom = fromBottom;
+	_holdUntil = performance.now() + 1500;
+	el.scrollTop = _heldTop = el.scrollHeight - fromBottom;
+}
+// Re-apply the hold on growth; true while one is active.
+function applyHeldBottom() {
+	const el = threadEl.value;
+	if (_holdFromBottom === null || !el) return false;
+	if (performance.now() > _holdUntil) {
+		_holdFromBottom = null;
+		return false;
+	}
+	const top = el.scrollHeight - _holdFromBottom;
+	if (Math.abs(el.scrollTop - top) > 2) el.scrollTop = _heldTop = top;
+	return true;
+}
+function promptsOf(rows) {
+	// Strip the trailing "📎 name" attachment marker so recall yields the typed text.
+	return rows
+		.filter((m) => m.role === "user" && m.content)
+		.map((m) => m.content.replace(/\n*📎[^\n]*$/, "").trim())
+		.filter(Boolean);
+}
+async function loadOlder({ auto = false } = {}) {
+	const id = currentId.value;
+	const paging = historyPaging.value;
+	if (!id || paging.conv !== id || !paging.hasMore || loadingOlder.value) return;
+	if (auto && Date.now() - _olderFailedAt < 10000) return;
+	loadingOlder.value = true;
+	try {
+		const d = await api.getConversation(id, { before: paging.before });
+		// A switch, or a resync that started the thread over, owns the rows now.
+		if (currentId.value !== id || historyPaging.value.before !== paging.before) return;
+		const el = threadEl.value;
+		const fromBottom = el ? el.scrollHeight - el.scrollTop : null;
+		_olderArmed = false;
+		const page = prependOlderPage(messages.value, historyPaging.value, d);
+		messages.value = page.messages;
+		historyPaging.value = { ...page.paging, conv: id };
+		promptHistory.value = promptsOf(promptRows(recentPrompts, messages.value));
+		for (const m of d?.messages || []) {
+			if (Array.isArray(m.canvas) && m.canvas.length) ensureCanvas(m);
+		}
+		await nextTick();
+		if (fromBottom !== null) holdFromBottom(fromBottom);
+		armOlderNextFrame();
+		processMermaid();
+	} catch (e) {
+		_olderFailedAt = Date.now();
+		notifyActionError("Couldn't load earlier messages", e);
+	} finally {
+		loadingOlder.value = false;
+	}
 }
 // Arrow click: smooth-scroll to the newest message and re-pin.
 function jumpToBottom() {
@@ -8915,6 +9114,11 @@ watch(threadInnerEl, (el) => {
 	}
 	if (el && typeof ResizeObserver !== "undefined") {
 		threadRO = new ResizeObserver(() => {
+			// An older page just landed above the reader: keep their rows in place.
+			if (applyHeldBottom()) {
+				showScrollDown.value = arrowNeeded();
+				return;
+			}
 			// Re-apply a held position until the thread's real height has arrived, so
 			// a re-render cannot strand the reader at the top by clamping.
 			if (_restoreTop !== null && threadEl.value) {
@@ -9138,11 +9342,14 @@ let _lastRunSignalAt = Date.now();
 function noteRunSignal() {
 	_lastRunSignalAt = Date.now();
 }
-async function loadConversation(id) {
+async function loadConversation(id, { staleRetry = true } = {}) {
 	_recoveryRefreshEpoch++;
 	// Preserve the reader's position across an in-place resync. Captured BEFORE
 	// the message array is swapped, restored after the re-render.
 	const _sameConv = _shownConvId === id;
+	// A new chat opens at the top before it lands on the newest message: no older
+	// page loads off that until it has (armed again at the end of this load).
+	if (!_sameConv) _olderArmed = false;
 	if (!_sameConv) {
 		// another chat's cards must not linger (or be acted on) while this one loads
 		fileboxWaits.value = [];
@@ -9172,7 +9379,13 @@ async function loadConversation(id) {
 		contextInfo.value = null;
 		return;
 	}
-	const d = await api.getConversation(id);
+	// History paging (#715 F13): only the newest page is re-read. Older rows already
+	// on screen stay, and their pending cards ride along to come back fresh.
+	const holding = historyPaging.value.conv === id;
+	const refresh = holding ? refreshNames(messages.value) : [];
+	// The newest seq held, so the page reaches back to it and the older pages join.
+	const after = holding ? heldNewestSeq(messages.value, historyPaging.value) : null;
+	const d = await api.getConversation(id, { refresh, after });
 	// Stale-response guard: if the user navigated to a different conversation
 	// while this request was in flight, drop the result. Without this, a slow
 	// get_conversation response clobbers the conversation you actually switched
@@ -9199,7 +9412,15 @@ async function loadConversation(id) {
 	// (blank candidate or not) is discarded immediately in favour of the
 	// server-authoritative row.
 	flushReveal();
-	messages.value = d?.messages || [];
+	const page = mergeNewestPage(
+		messages.value,
+		historyPaging.value.conv === id ? historyPaging.value : null,
+		d,
+		refresh
+	);
+	messages.value = page.messages;
+	historyPaging.value = { ...page.paging, conv: id };
+	recentPrompts = d?.recent_prompts || [];
 	// VR4-2: re-inject any failed optimistic bubbles whose send was rejected while THIS conversation
 	// was off-screen (their rendered copy was dropped when messages was replaced). They are kept
 	// origin-scoped and carry the voice-release token, so the resend affordance survives a mid-send
@@ -9237,7 +9458,8 @@ async function loadConversation(id) {
 	// when the best-effort action:pending push was missed — the card rides the same
 	// reliable message pipeline as the reply text. resyncPendingConfirmations (the Redis
 	// backstop) below reconciles; enqueuePending dedups by token.
-	seedPendingFromRows(messages.value, id);
+	// Paged history: a card older than every loaded page rides in d.older_pending.
+	seedPendingFromRows(pendingSeedRows(d, messages.value), id);
 	resyncPendingConfirmations(id);
 	// SUXI-1: rebuild the queued chip from server truth (reload / switch / second
 	// tab / reconnect all lose the client-only chip otherwise).
@@ -9249,10 +9471,8 @@ async function loadConversation(id) {
 	// after a reload or when opening an existing chat the arrows did nothing.
 	// Strip the trailing "📎 name" attachment marker so recall yields the
 	// actual typed text.
-	promptHistory.value = (d?.messages || [])
-		.filter((m) => m.role === "user" && m.content)
-		.map((m) => m.content.replace(/\n*📎[^\n]*$/, "").trim())
-		.filter(Boolean);
+	// Paged history: earlier prompts ride in d.recent_prompts (#715 F13).
+	promptHistory.value = promptsOf(promptRows(recentPrompts, page.messages));
 	histIdx.value = null;
 	histDraft.value = "";
 	for (const m of messages.value) {
@@ -9409,7 +9629,12 @@ async function loadConversation(id) {
 		showScrollDown.value = false;
 		scrollBottom();
 	}
+	armOlderNextFrame();
 	processMermaid();
+	// An older page loaded while this read was in flight brought pending cards it did
+	// not ask about: refresh once more so none stays confirmable after it resolved.
+	if (page.stale.length && staleRetry)
+		loadConversation(id, { staleRetry: false }).catch(() => {});
 }
 
 // Render any ```mermaid blocks (the agent's inline pie/flow charts) into SVG.
@@ -9847,7 +10072,11 @@ async function refreshRecoveredSend(m, r) {
 		]);
 	const before = snapshot();
 	try {
-		const data = await api.getConversation(id);
+		// Paged history (#715 F13): re-read the newest page, keep older rows held.
+		const holding = historyPaging.value?.conv === id;
+		const refresh = holding ? refreshNames(messages.value) : [];
+		const after = holding ? heldNewestSeq(messages.value, historyPaging.value) : null;
+		const data = await api.getConversation(id, { refresh, after });
 		if (
 			!_recoveryViewActive ||
 			currentId.value !== id ||
@@ -9856,10 +10085,17 @@ async function refreshRecoveredSend(m, r) {
 		)
 			return;
 		if (!Array.isArray(data?.messages)) return;
+		const page = mergeNewestPage(
+			messages.value,
+			historyPaging.value?.conv === id ? historyPaging.value : null,
+			data,
+			refresh
+		);
+		historyPaging.value = { ...page.paging, conv: id };
 		// Only a fresh read can restore run controls; a receipt's run/queue state
 		// describes the past. No navigation or composer/preferences reload here.
-		_pendingSends.reconcile(id, data.messages);
-		messages.value = injectPendingBubbles(data.messages, _pendingSends.peek(id));
+		_pendingSends.reconcile(id, page.messages);
+		messages.value = injectPendingBubbles(page.messages, _pendingSends.peek(id));
 		convAutoMode.value = data.conversation?.auto_mode ? 1 : 0;
 		const live = [...data.messages]
 			.reverse()
