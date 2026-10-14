@@ -940,6 +940,11 @@ has_permission.update(
 # spanned a watchdog tick failed with "Your sign-in session was lost" (unknown_nonce). The
 # hash has no key TTL; each entry carries its own 10-minute expiry, and the sweep on every
 # begin (``oauth.api._gc_expired_nonces``) drops expired ones, so the hash stays bounded.
+#
+# jarvis:memory_seen: (#715 F09): the memory version each chat session was last shown
+# (``tools._user_memory.SEEN_PREFIX``), the base a memory save without ``base_version`` is
+# checked against. Without it every tick wiped every chat's base, and each chat's next
+# save came back as a conflict it had to re-read and merge. One-week TTL.
 persistent_cache_keys = [
 	"jarvis:llm_switch",
 	"jarvis:macro_reconcile",
@@ -947,4 +952,5 @@ persistent_cache_keys = [
 	"jarvis:heartbeat_macro_health_log_hour",
 	"jarvis:subscription_",
 	"jarvis.oauth.codex_signin",
+	"jarvis:memory_seen:",
 ]
