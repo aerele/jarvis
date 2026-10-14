@@ -171,6 +171,10 @@ export function attachGlobalNotifier({ socket, router }) {
 	// frame, and a shared fence would let whichever ran first accept the terminal and
 	// the other reject it, silently breaking one of the two.
 	const fence = {};
+	// #591: background runs need a sidebar pulse too. Bound a missed terminal
+	// (e.g. a socket drop) so it cannot leave a chat looking busy forever.
+	const RUNNING_SILENCE_MS = 3 * 60 * 1000;
+	const runningTimers = new Map();
 
 	// hidden → browser notification; visible-but-elsewhere → toast;
 	// visible on the conversation → nothing.
@@ -185,6 +189,26 @@ export function attachGlobalNotifier({ socket, router }) {
 	function onEvent(p) {
 		if (!p || !p.kind) return;
 		switch (p.kind) {
+			case "run:start":
+			case "run:status":
+			case "run:step":
+			case "assistant:delta":
+			case "tool:start":
+			case "tool:end":
+			case "run:recovering": {
+				const conv = p.conversation_id;
+				if (!conv || fenceReject(fence, p, false)) return;
+				store.markRunning(conv);
+				clearTimeout(runningTimers.get(conv));
+				runningTimers.set(
+					conv,
+					setTimeout(() => {
+						store.clearRunning(conv);
+						runningTimers.delete(conv);
+					}, RUNNING_SILENCE_MS)
+				);
+				return;
+			}
 			case "run:end":
 			case "run:error": {
 				// One-shot per (run, epoch): a re-published terminal must not signal
@@ -193,6 +217,11 @@ export function attachGlobalNotifier({ socket, router }) {
 				if (fenceReject(fence, p, true)) return;
 				fenceAccept(fence, p, true);
 				const conv = p.conversation_id;
+				// #591: clear even for stopped, pane and on-screen runs, before
+				// any attention-signal early return below.
+				store.clearRunning(conv);
+				clearTimeout(runningTimers.get(conv));
+				runningTimers.delete(conv);
 				// A failed turn is the most common error a user faces. Report it
 				// (classified, with the run id) regardless of on-screen state - this
 				// is a socket event, so the global handlers never see it.
@@ -396,5 +425,9 @@ export function attachGlobalNotifier({ socket, router }) {
 	}
 
 	socket.on("jarvis:event", onEvent);
-	return () => socket.off("jarvis:event", onEvent);
+	return () => {
+		socket.off("jarvis:event", onEvent);
+		for (const timer of runningTimers.values()) clearTimeout(timer);
+		runningTimers.clear();
+	};
 }
