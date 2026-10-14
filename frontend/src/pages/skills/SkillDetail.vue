@@ -207,34 +207,17 @@
 			<DocMetaPanel v-else-if="isOwner && docmeta" :docmeta="docmeta" :can-write="true">
 				<!-- skills keep the child-table share model (§14 F1/DA-09) -->
 				<template #extra>
-					<div class="px-5 py-4">
-						<div class="flex items-center justify-between">
-							<div class="text-sm text-ink-gray-5">Shared with</div>
-							<Button label="Manage" @click="shareOpen = true" />
-						</div>
-						<div v-if="shares.length" class="mt-2 flex items-center">
-							<Tooltip
-								v-for="u in shares.slice(0, 8)"
-								:key="u.name"
-								:text="u.full_name || u.name"
-							>
-								<Avatar
-									size="md"
-									:label="u.full_name || u.name"
-									class="-mr-1.5 ring-2 ring-outline-white hover:z-10 hover:scale-110"
-								/>
-							</Tooltip>
-							<span v-if="shares.length > 8" class="ml-3 text-sm text-ink-gray-5">
-								+{{ shares.length - 8 }}
-							</span>
-						</div>
-						<div v-else class="mt-2 text-sm text-ink-gray-4">Not shared</div>
-					</div>
+					<SkillSharesBlock
+						class="px-5 py-4"
+						:shares="shares"
+						@manage="shareOpen = true"
+					/>
 				</template>
 			</DocMetaPanel>
 
-			<!-- A skill reviewer on someone else's shared skill: who owns it, no docmeta
-			     (its read gate is the owner's), no sharing, comments or delete. -->
+			<!-- A skill reviewer on someone else's shared skill: who owns it and its
+			     shares (a reviewer may change them, 5c). No docmeta (its read gate is the
+			     owner's), so no comments; no rename, promote or delete. -->
 			<div
 				v-else-if="reviewerEditing"
 				class="jv-skill-reviewer-card m-5 space-y-3 rounded-md border p-4"
@@ -250,6 +233,11 @@
 				<div v-if="skill.modified" class="text-sm text-ink-gray-5">
 					Updated {{ timeAgo(skill.modified) }}
 				</div>
+				<SkillSharesBlock
+					class="border-t pt-3"
+					:shares="shares"
+					@manage="shareOpen = true"
+				/>
 			</div>
 
 			<!-- shared-with-me: read-only info card (no docmeta - the docmeta read
@@ -373,7 +361,6 @@ import {
 	Button,
 	Badge,
 	Avatar,
-	Tooltip,
 	Dropdown,
 	FormControl,
 	Switch,
@@ -390,6 +377,7 @@ import { useShortcuts } from "@/composables/useShortcuts";
 import SyncPill from "./SyncPill.vue";
 import ShareDialog from "./ShareDialog.vue";
 import SkillRolesField from "./SkillRolesField.vue";
+import SkillSharesBlock from "./SkillSharesBlock.vue";
 import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
 import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
 import { getSkillsAreaCaps } from "@/api/personalise";
@@ -754,7 +742,10 @@ async function init() {
 		skill.value = full;
 		canArm.value = !!full.can_arm;
 		seed(full);
-		if (full.can_edit) loadCreates("");
+		if (full.can_edit) {
+			loadCreates("");
+			loadShares(); // a reviewer manages a shared skill's shares too (5c)
+		}
 		// The owner's panel only: a reviewer's docmeta read would be refused.
 		if (isOwner.value) {
 			docmeta.value = useDocmeta(DOCTYPE, props.id);
@@ -762,7 +753,6 @@ async function init() {
 			// explicitly rather than relying on the composable's auto-load
 			if (docmeta.value && typeof docmeta.value.reload === "function")
 				docmeta.value.reload();
-			loadShares();
 			loadMyPromo();
 		}
 	} catch (e) {
@@ -775,12 +765,12 @@ async function init() {
 watch(() => [props.id, props.isNew], init, { immediate: true });
 
 async function loadShares() {
-	if (props.isNew || !props.id || !isOwner.value) return;
+	if (props.isNew || !props.id || !canEdit.value) return;
 	try {
 		const res = (await api.getSkillShares(props.id)) || {};
 		shares.value = res.users || [];
 	} catch (e) {
-		// owner-only endpoint; best-effort
+		// owner or reviewer-on-shared endpoint; best-effort
 	}
 }
 
