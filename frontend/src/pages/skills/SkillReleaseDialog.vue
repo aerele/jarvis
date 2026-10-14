@@ -17,8 +17,8 @@
 					Owned by {{ ownerLabel }}
 				</p>
 				<p class="text-p-sm text-ink-gray-7">
-					The assistant may use the skill again once it is switched on. Releasing does not
-					let it write without asking: that stays off until it is set up again.
+					The assistant may use the skill again once it is switched on. Releasing does
+					not let it write without asking: that stays off until it is set up again.
 				</p>
 				<Checkbox
 					v-if="shared"
@@ -97,8 +97,7 @@ async function save() {
 	saving.value = true;
 	error.value = "";
 	try {
-		const res =
-			(await adminRelease(props.name, props.shared && restore.value)) || {};
+		const res = (await adminRelease(props.name, props.shared && restore.value)) || {};
 		toast.success(
 			`Released the hold on “${escapeHtml(label.value)}”` +
 				(res.restored ? " and switched it back on" : "")
