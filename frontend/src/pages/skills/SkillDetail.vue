@@ -380,7 +380,7 @@ import SkillSharesBlock from "./SkillSharesBlock.vue";
 import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
 import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
 import { getSkillsAreaCaps } from "@/api/personalise";
-import { requestSkillPromotion, mySkillPromotion, promotableTargetRoles } from "@/api/skills";
+import { requestSkillPromotion, mySkillPromotion } from "@/api/skills";
 import { renderMarkdown } from "@/markdown";
 import { timeAgo } from "@/utils/datetime";
 import { useJarvisTheme } from "@/theme";
@@ -490,24 +490,15 @@ const reviewerBanner = computed(
 );
 
 // A Role skill's roles, which a skill reviewer may change. The options are the roles
-// they may add (promotable_target_roles) and the ones the skill already has.
+// the server says this editor may add (role_options) and the ones the skill has.
 const rolesEditable = computed(
 	() => !props.isNew && canEdit.value && isReviewer.value && skill.value?.scope === "Role"
 );
-const targetableRoles = ref([]);
 const roleOptions = computed(() => {
 	const saved = snapshot.value.allowed_roles || [];
-	return [...new Set([...saved, ...targetableRoles.value])].sort();
+	const offered = (skill.value && skill.value.role_options) || [];
+	return [...new Set([...saved, ...offered])].sort();
 });
-async function loadTargetableRoles() {
-	try {
-		const res = await promotableTargetRoles();
-		targetableRoles.value = (res && res.roles) || [];
-	} catch {
-		targetableRoles.value = [];
-	}
-}
-watch(rolesEditable, (on) => on && !targetableRoles.value.length && loadTargetableRoles());
 
 // "Approve & run" arming (skill approve-and-run, D-CONTROL). Enabling (off -> on)
 // is Jarvis Admin / System Manager only; disabling is always free for the owner -

@@ -16,8 +16,9 @@ from __future__ import annotations
 import frappe
 from frappe import _
 
-from jarvis.chat import skills_admin
+from jarvis.chat import skill_permissions, skills_admin
 from jarvis.jarvis.doctype.jarvis_skill_admin_log import jarvis_skill_admin_log as admin_log
+from jarvis.permissions import is_skill_reviewer, refuse_in_tool_dispatch, require_jarvis_access
 
 OWNER = "owner"
 REVIEWER = "reviewer"
@@ -34,14 +35,9 @@ _LABELS = {
 	"allowed_roles": "roles",
 	"shared_with": "shared with",
 }
-
-
-def may_edit(row, user: str) -> bool:
-	"""Whether ``user`` may edit ``row`` as a reviewer: a Role or company skill that the
-	learning board does not manage, and ``user`` is in the reviewer set."""
-	from jarvis.permissions import is_skill_reviewer
-
-	return skills_admin.is_shared(row) and not skills_admin.is_learned(row) and is_skill_reviewer(user)
+# What the company catalog push carries: a change to one of these waits for an Apply.
+# Shares are not pushed.
+_PUSHED = frozenset(_LABELS) - {"shared_with"}
 
 
 def require_editor(doc, action: str = "edit") -> str:
@@ -52,7 +48,6 @@ def require_editor(doc, action: str = "edit") -> str:
 	me = frappe.session.user
 	if (doc.get("owner") or "") == me:
 		return OWNER
-	from jarvis.permissions import is_skill_reviewer, refuse_in_tool_dispatch, require_jarvis_access
 	from jarvis.tools import _write_risk
 
 	if not is_skill_reviewer(me):
@@ -88,13 +83,20 @@ def refuse_fields(doc, *, skill_name=None, allow_approve_run=None) -> None:
 		)
 
 
-def set_allowed_roles(doc, roles) -> None:
-	"""Replace a Role skill's roles. A role added must be one the caller may target, as
-	a promotion request's are (``promotable_target_roles``); a role it already has may
-	stay, and dropping one is always allowed. The target role follows the set, or the
-	controller would reset the set to the target role alone."""
-	from jarvis.chat.custom_skills_api import promotable_target_roles
+def targetable_roles(reviewer: bool) -> list[str]:
+	"""The roles a skill may be given: a reviewer's are any team role
+	(``skill_permissions.reviewer_targetable_roles``); the owner's are their own, as a
+	promotion request's are."""
+	if reviewer:
+		return skill_permissions.reviewer_targetable_roles()
+	return skill_permissions.own_targetable_roles(frappe.session.user)
 
+
+def set_allowed_roles(doc, roles, *, reviewer: bool) -> None:
+	"""Replace a Role skill's roles. A role added must be one ``targetable_roles``
+	allows; a role it already has may stay, and dropping one is always allowed. The
+	target role follows the set, or the controller would reset the set to the target
+	role alone."""
 	roles = _role_list(roles)
 	current = [r.role for r in doc.get("allowed_roles") or [] if r.role]
 	if roles == current:
@@ -104,8 +106,9 @@ def set_allowed_roles(doc, roles) -> None:
 	if not roles:
 		frappe.throw(_("Keep at least one role."), frappe.ValidationError)
 	kept = set(current) | {doc.get("target_role") or ""}
-	targetable = set(promotable_target_roles().get("roles") or [])
-	bad = [r for r in roles if r not in kept and r not in targetable]
+	added = [r for r in roles if r not in kept]
+	allowed = set(targetable_roles(reviewer)) if added else set()
+	bad = [r for r in added if r not in allowed]
 	if bad:
 		frappe.throw(
 			_("You cannot share this skill with these roles: {0}.").format(", ".join(bad)),
@@ -117,44 +120,43 @@ def set_allowed_roles(doc, roles) -> None:
 
 
 def snapshot(doc) -> dict:
-	"""The values an edit record compares, before and after the save, and whether the
-	skill is in the company catalog as stored (read before the save)."""
+	"""The values an edit record compares, taken before the change and after the save."""
 	values = {f: doc.get(f) for f in _LABELS if f not in ("allowed_roles", "shared_with")}
 	values["allowed_roles"] = sorted(r.role for r in doc.get("allowed_roles") or [] if r.role)
 	values["shared_with"] = sorted(r.user for r in doc.get("shared_with") or [] if r.user)
-	values["in_catalog"] = skills_admin.in_company_catalog(doc.name)
 	return values
 
 
-def record(doc, before: dict) -> list[str]:
+def record(doc, before: dict, *, was_in_catalog: bool) -> list[str]:
 	"""Write the edit record for what changed since ``before`` (nothing when nothing
 	did), in the caller's transaction: the edit and its record land together. It waits
-	for an Apply when the skill was in the company catalog or is now: switching one off
-	takes it out, and that is what most needs the Apply."""
+	for an Apply only when a field the push carries changed and the skill was in the
+	company catalog (``was_in_catalog``, read under the catalog lock before the save) or
+	is now: switching one off takes it out, and that most needs the Apply."""
 	after = snapshot(doc)
-	changed = [_LABELS[f] for f in _LABELS if _norm(before.get(f)) != _norm(after.get(f))]
-	if not changed:
+	fields = [f for f in _LABELS if _norm(before.get(f)) != _norm(after.get(f))]
+	if not fields:
 		return []
+	pushed = bool(_PUSHED.intersection(fields))
 	admin_log.write(
 		verb=EDIT_VERB,
 		skill=doc.name,
 		skill_name=doc.skill_name,
 		skill_owner=doc.owner,
-		reason=_("Changed: {0}").format(", ".join(changed)),
-		needs_apply=bool(before.get("in_catalog") or after["in_catalog"]),
+		reason=_("Changed: {0}").format(", ".join(_LABELS[f] for f in fields)),
+		needs_apply=pushed and (was_in_catalog or skills_admin.in_company_catalog(doc.name)),
 	)
-	return changed
+	return fields
 
 
 def tell_author(doc) -> None:
 	"""Tell the skill's author: its owner, or for a published copy the owner of the
-	private skill it came from (nobody once that is deleted)."""
-	author = skills_admin.lineage_author(doc)
+	private skill it came from, and the skill reviewers when that is gone (D5)."""
 	skills_admin.notify(
 		doc,
 		skills_admin.REVIEWER_EDIT_NOTICE,
 		_("A skill reviewer changed your skill {0}.").format(doc.skill_name),
-		users={author} if author else set(),
+		users=skills_admin.author_or_reviewers(doc),
 	)
 
 

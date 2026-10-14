@@ -7,16 +7,18 @@ What is pinned here:
   company skill and a published copy, never a private, shared-with or learned one;
   a plain Jarvis User edits nothing of anyone else's;
 * a reviewer may not rename the skill, change "Approve & run", re-scope or delete it;
-  the roles they change are checked as a promotion request's are;
+  a role they add is any team role (the owner's own roles on the owner's path);
 * each reviewer edit writes one admin log row (verb ``edit``, the changed fields in
-  ``reason``) and tells the author (the lineage author for a published copy), and an
-  edit that changes nothing writes neither;
+  ``reason``; it waits for an Apply only for a pushed field of a catalog skill) and
+  tells the author (the lineage author for a published copy, the reviewers once that
+  is gone), and an edit that changes nothing writes neither;
 * a held skill keeps its hold: text may change, switching it on is refused;
 * the reviewer branch is refused inside a tool call and from a job one queued;
 * the share endpoints admit a reviewer on a shared skill, recorded the same way;
-* ``get_custom_skill`` carries ``is_owner`` and ``can_edit``, and a reviewer reads a
-  Role skill outside their own roles;
-* the approved promotion row names the shared copy (``_shared_copies``).
+* ``get_custom_skill`` carries ``is_owner`` and ``can_edit``, the editor fields only to
+  an editor, and a reviewer reads a Role skill outside their own roles;
+* the approved promotion row names the shared copy (``_shared_copies``), a copy
+  widened in place under its source and itself.
 
 The admin log's ``edit`` verb arrives with a migrate: a site that has not run it
 refuses a reviewer edit rather than make one without its record.
@@ -199,11 +201,30 @@ class TestRoles(ReviewerEditBase):
 		self.assertEqual(self._roles(skill), [TEAM])
 		self.assertEqual(self._row(skill, "target_role").target_role, TEAM)
 
+	def test_a_reviewer_adds_a_team_role_they_do_not_hold(self):
+		# Any enabled desk role but the blanket ones (skill_permissions.reviewer_targetable_roles).
+		self.assertNotIn(FOREIGN, frappe.get_roles(REVIEWER))
+		skill = self._skill(OWNER, "foreign", scope="Role")
+		self._edit(REVIEWER, skill, allowed_roles=[base.AUDIENCE, FOREIGN])
+		self.assertEqual(self._roles(skill), [base.AUDIENCE, FOREIGN])
+
+	def test_the_owner_adds_only_a_role_they_hold(self):
+		# The owner's path is a promotion request's rule, unchanged: their own roles.
+		skill = self._skill(REVIEWER, "ownroles", scope="Role")
+		with self.assertRaises(frappe.PermissionError):
+			self._edit(REVIEWER, skill, allowed_roles=[base.AUDIENCE, FOREIGN])
+		frappe.db.rollback()
+		self.assertEqual(self._roles(skill), [base.AUDIENCE])
+		self._edit(REVIEWER, skill, allowed_roles=[base.AUDIENCE, TEAM])
+		self.assertEqual(self._roles(skill), [base.AUDIENCE, TEAM])
+		self.assertEqual(self._log(skill), [])  # the owner's own edit
+
 	def test_refused_roles(self):
 		role_skill = self._skill(OWNER, "badroles", scope="Role")
 		org_skill = self._skill(OWNER, "orgroles", scope="Org")
 		for skill, roles, error in (
-			(role_skill, [base.AUDIENCE, FOREIGN], frappe.PermissionError),  # one they do not hold
+			(role_skill, [base.AUDIENCE, "System Manager"], frappe.PermissionError),  # a blanket role
+			(role_skill, [base.AUDIENCE, "zz-no-such-role"], frappe.PermissionError),
 			(role_skill, [], frappe.ValidationError),  # none left
 			(role_skill, "not json", frappe.ValidationError),
 			(role_skill, [{"role": TEAM}], frappe.ValidationError),
@@ -272,6 +293,27 @@ class TestRecordAndNotice(ReviewerEditBase):
 		self.assertEqual((row.verb, row.skill_owner), ("edit", "Administrator"))
 		self.assertEqual(len(self._edit_notes(OWNER)), 1)
 		self.assertEqual(self._edit_notes(ADMIN), [])
+
+	def test_a_published_copy_with_no_author_tells_the_reviewers(self):
+		# D5: its source deleted, nobody is its author; the skill reviewers are told
+		# instead, never the reviewer who made the change.
+		kinds = self._kinds()
+		frappe.delete_doc(SKILL, kinds["private"], force=True, ignore_permissions=True)
+		self.assertIsNone(skills_admin.lineage_author(self._row(kinds["published"], "owner", "source_skill")))
+		self._edit(REVIEWER, kinds["published"], instructions="tidied, author gone")
+		self.assertEqual(self._edit_notes(OWNER), [])
+		self.assertEqual(len(self._edit_notes(ADMIN)), 1)
+		self.assertEqual(len(self._edit_notes(SYSMGR)), 1)
+		self.assertEqual(self._edit_notes(REVIEWER), [])
+
+	def test_a_share_change_does_not_wait_for_an_apply(self):
+		# The catalog push carries no shares.
+		skill = self._skill(OWNER, "orgshare", scope="Org")
+		self.assertTrue(skills_admin.in_company_catalog(skill))
+		frappe.set_user(REVIEWER)
+		custom_skills_api.share_custom_skill(skill, [OTHER])
+		(row,) = self._log(skill)
+		self.assertEqual((row.reason, row.needs_apply), ("Changed: shared with", 0))
 
 
 # --------------------------------------------------------------------------- #
@@ -403,6 +445,24 @@ class TestThePayload(ReviewerEditBase):
 		with self.assertRaises(frappe.DoesNotExistError):
 			self._get(OWNER, "zz-no-such-skill")
 
+	def test_a_reader_gets_no_editor_fields(self):
+		kinds = self._kinds()
+		for user, kind in ((OTHER, "shared_with"), (REVIEWER, "learned_org")):
+			with self.subTest(user=user, kind=kind):
+				out = self._get(user, kinds[kind])
+				self.assertFalse(out["can_edit"])
+				self.assertEqual((out["owner_name"], out["allowed_roles"], out["role_options"]), ("", [], []))
+
+	def test_the_roles_the_picker_offers(self):
+		kinds = self._kinds()
+		offered = self._get(REVIEWER, kinds["role"])["role_options"]
+		self.assertIn(TEAM, offered)
+		self.assertIn(FOREIGN, offered)  # a reviewer: any team role
+		self.assertNotIn("System Manager", offered)
+		self.assertNotIn(base.AUDIENCE, offered)
+		self.assertEqual(self._get(OWNER, kinds["role"])["role_options"], [])  # owns only blanket roles
+		self.assertEqual(self._get(REVIEWER, kinds["org"])["role_options"], [])
+
 
 class TestTheReviewTabLink(ReviewerEditBase):
 	def test_an_approved_promotion_names_its_shared_copy(self):
@@ -410,3 +470,12 @@ class TestTheReviewTabLink(ReviewerEditBase):
 		copies = custom_skills_api._shared_copies([kinds["private"], kinds["role"], kinds["held"]])
 		self.assertEqual(copies, {kinds["private"]: kinds["published"], kinds["role"]: kinds["role"]})
 		self.assertEqual(custom_skills_api._shared_copies([]), {})
+
+	def test_a_copy_widened_in_place_keys_under_its_source_and_itself(self):
+		# A Role copy later widened to the company keeps its row: a request on the private
+		# source and one on the copy itself both lead to it.
+		kinds = self._kinds()
+		published = kinds["published"]
+		frappe.db.set_value(SKILL, published, "scope", "Org", update_modified=False)
+		copies = custom_skills_api._shared_copies([kinds["private"], published])
+		self.assertEqual(copies, {kinds["private"]: published, published: published})

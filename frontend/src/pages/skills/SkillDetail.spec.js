@@ -74,7 +74,6 @@ vi.mock("@/api/personalise", () => ({ getSkillsAreaCaps: vi.fn(async () => ({}))
 vi.mock("@/api/skills", () => ({
 	requestSkillPromotion: vi.fn(),
 	mySkillPromotion: vi.fn(async () => ({})),
-	promotableTargetRoles: vi.fn(async () => ({ roles: ["Sales User", "Stock User"] })),
 }));
 vi.mock("@/markdown", () => ({ renderMarkdown: () => "" }));
 vi.mock("@/utils/datetime", () => ({ timeAgo: () => "now" }));
@@ -94,7 +93,7 @@ vi.mock("@/api", () => ({
 
 import * as api from "@/api";
 import { getSkillsAreaCaps } from "@/api/personalise";
-import { mySkillPromotion, promotableTargetRoles } from "@/api/skills";
+import { mySkillPromotion } from "@/api/skills";
 import { useDocmeta } from "@/composables/useDocmeta";
 import { toast } from "frappe-ui";
 import SkillDetail from "./SkillDetail.vue";
@@ -441,6 +440,7 @@ describe("SkillDetail: a skill reviewer editing someone else's shared skill", ()
 		scope: "Role",
 		target_role: "Sales User",
 		allowed_roles: ["Sales User"],
+		role_options: ["Stock User", "Sales User"],
 		can_edit: true,
 		is_owner: false,
 		mine: 0,
@@ -547,7 +547,6 @@ describe("SkillDetail: a skill reviewer editing someone else's shared skill", ()
 	it("edits a Role skill's roles and saves only them", async () => {
 		w = await mountSkill({ id: "SK-1" }, SHARED);
 		await flushPromises();
-		expect(promotableTargetRoles).toHaveBeenCalled();
 		const roles = () => w.findAll(".jv-skill-role");
 		expect(roles().map((b) => b.text())).toEqual(["Sales User", "Stock User"]);
 		await roles()[1].trigger("click");
