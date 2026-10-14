@@ -395,7 +395,6 @@
 <script setup>
 import { computed, ref, watch } from "vue";
 import JvSpinner from "@/components/JvSpinner.vue";
-import { insertAtCursor, pastedMarkdown } from "@/lib/richCopy";
 
 const props = defineProps({
 	// The composed text. Use with v-model on the host.
@@ -522,15 +521,7 @@ function onPasteInternal(e) {
 			}
 		}
 	}
-	if (!imgs.length) {
-		// A reply copied with its Copy button also carries its Markdown: paste that,
-		// so the message comes out as the reply looked, not as flattened text.
-		const md = pastedMarkdown(cd);
-		if (!md || !inputEl.value) return;
-		e.preventDefault();
-		insertAtCursor(inputEl.value, md);
-		return;
-	}
+	if (!imgs.length) return;
 	e.preventDefault();
 	emit("files-added", imgs);
 }
