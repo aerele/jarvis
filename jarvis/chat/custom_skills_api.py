@@ -366,8 +366,6 @@ def list_custom_skills_page(
 		_set_hold(r, mine=bool(mine))
 		r.pop("owner", None)
 
-	from jarvis.chat import skills_admin
-
 	return {
 		"rows": rows,
 		"total": total,
@@ -375,7 +373,7 @@ def list_custom_skills_page(
 		"start": start,
 		"page_length": pl,
 		# Additive: what an admin did to the caller's skills (a delete leaves no row).
-		"notices": skills_admin.owner_notices(me, _NOTICES_MAX),
+		"notices": _owner_notices(me, start),
 	}
 
 
@@ -383,11 +381,28 @@ def list_custom_skills_page(
 _NOTICES_MAX = 5
 
 
+def _owner_notices(me: str, start: int) -> list[dict]:
+	"""The admin notices, on the first page only. A failed read is logged and shows
+	none: the notices must never break the Skills list."""
+	if start:
+		return []
+	from jarvis.chat import skills_admin
+
+	try:
+		return skills_admin.owner_notices(me, _NOTICES_MAX)
+	except Exception:
+		frappe.log_error(
+			title="jarvis.chat.custom_skills_api.owner_notices_failed", message=frappe.get_traceback()
+		)
+		return []
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def dismiss_skill_notices(names: str | list | None = None) -> dict:
 	"""Mark the caller's admin notices about their skills read: those named, or all of
-	them when none are. Another user's notification, or one of another kind, is never
+	them when ``names`` is omitted (an empty list marks none). Another user's
+	notification, or one of another kind, is never
 	touched: the filter is the caller's own and the kind's own."""
 	from jarvis.chat import skills_admin
 
@@ -401,7 +416,7 @@ def dismiss_skill_notices(names: str | list | None = None) -> dict:
 		frappe.throw(refused, frappe.ValidationError)
 	if raw and not all(isinstance(n, str) and n for n in raw):
 		frappe.throw(refused, frappe.ValidationError)
-	return {"ok": True, "dismissed": skills_admin.dismiss_notices(frappe.session.user, raw or None)}
+	return {"ok": True, "dismissed": skills_admin.dismiss_notices(frappe.session.user, raw)}
 
 
 @frappe.whitelist()
@@ -604,10 +619,13 @@ def file_box_doctypes(txt: str = "") -> list[str]:
 @require_jarvis_user
 def delete_custom_skill(name: str) -> dict:
 	"""Delete a skill row (owner-gated). The delete only propagates to the
-	container on the next Apply (the fleet endpoint does a full reconcile)."""
-	_require_skill_owner(frappe.get_doc(SKILL, name), "delete")
-	frappe.delete_doc(SKILL, name)  # ORM hook also enforces owner-only delete
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
+	container on the next Apply (the fleet endpoint does a full reconcile). Its
+	Pending promotion request is rejected in the same commit (``delete_own``)."""
+	from jarvis.chat import skills_admin
+
+	row = skills_admin.load(name)
+	_require_skill_owner(row, "delete")
+	skills_admin.delete_own(row)  # ORM hook also enforces owner-only delete
 	return {"ok": True}
 
 
@@ -620,6 +638,8 @@ def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 	One deduped skills-apply enqueue at the end (mirrors the save/delete
 	auto-apply) — only when something was actually deleted.
 	Returns ``{deleted, skipped: [{name, reason}]}``."""
+	from jarvis.chat import skills_admin
+
 	raw = frappe.parse_json(names) if isinstance(names, str) else (names or [])
 	items = [str(n) for n in raw if n] if isinstance(raw, list) else []
 	me = frappe.session.user
@@ -627,11 +647,12 @@ def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 	skipped: list[dict] = []
 	for n in items:
 		try:
-			doc = frappe.get_doc(SKILL, n)
-			if doc.owner != me:
+			row = skills_admin.load(n)
+			if row.owner != me:
 				skipped.append({"name": n, "reason": "not owner"})
 				continue
-			frappe.delete_doc(SKILL, n)  # same path as delete_custom_skill (if_owner)
+			# Same path as delete_custom_skill: one commit per row, a failure undone.
+			skills_admin.delete_own(row)
 			deleted += 1
 		except frappe.DoesNotExistError:
 			skipped.append({"name": n, "reason": "not found"})
@@ -974,10 +995,10 @@ def _refuse_held(skill: str, *, for_update: bool = False) -> None:
 	if not skill_doctype.hold_fields_exist():
 		return
 	fields = [skill_doctype.HOLD_FIELD, skill_doctype.HOLD_REASON_FIELD]
-	try:
+	from jarvis.chat import skills_admin
+
+	with skills_admin.busy_as_retry():
 		row = frappe.db.get_value(SKILL, skill, fields, as_dict=True, for_update=for_update)
-	except frappe.QueryDeadlockError:
-		frappe.throw(_("This skill changed a moment ago. Try again."))
 	if row and frappe.utils.cint(row.get(skill_doctype.HOLD_FIELD)):
 		frappe.throw(
 			skill_doctype.held_message(row.get(skill_doctype.HOLD_REASON_FIELD)),

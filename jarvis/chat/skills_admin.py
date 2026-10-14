@@ -5,11 +5,17 @@ delete another user's skill, each as ONE transaction, and what follows the commi
 Locks, in the order ``decide_skill_promotion`` takes them, so the two cannot wait on
 each other (jarvis-admin-v2#720, plan check item 3):
 
-1. the skill's Pending promotion request rows, FOR UPDATE (the first read of a fresh
-   transaction: a locking read on a row changed since an older snapshot fails with
-   1020, see ``jarvis.chat.txn``);
+1. the skill's Pending promotion request rows: their names read plainly (the first
+   read of a fresh transaction), then exactly those rows locked by name, FOR UPDATE.
+   By name, so record locks only: a range read on (skill, status) would also lock the
+   gap ``request_skill_promotion`` inserts into while it holds the skill row, and the
+   two would deadlock (1213);
 2. the catalog lock (``custom_skills_api._catalog_lock``), for a Role or company skill;
-3. the skill row, FOR UPDATE, read again: everything decided after it is the present.
+3. the skill row, FOR UPDATE, read again: everything decided after it is the present;
+4. the Pending names again, as a LOCKING read (a plain one reads step 1's snapshot).
+   ``request_skill_promotion`` takes the skill row before it files a request, so none
+   can be in flight now and the range lock waits on nobody. A request filed between
+   steps 1 and 3 fails this read (1020) or changes the set: "try again".
 
 The act commits once, inside the catalog lock (held through the commit, as the
 approval holds it). Nothing here pushes to the assistant: the answer says
@@ -70,10 +76,10 @@ def hold(row, reason: str) -> dict:
 	audit row and the Comment, one commit. A repeat updates the reason."""
 	admin = frappe.session.user
 	refuse(row, _("Switch it off on the skill's own page instead."))
+	used = used_by_macros(row.name)  # informational: kept out of the locked transaction
 	with locked(row, requests=True) as cur:
 		refuse(cur, _("Switch it off on the skill's own page instead."))
 		needs_apply = in_company_catalog(cur.name)
-		used = used_by_macros(cur.name)
 		set_skill_raw(
 			cur.name,
 			{HOLD_FIELD: 1, HOLD_REASON_FIELD: reason, "enabled": 0, "allow_approve_run": 0},
@@ -146,10 +152,10 @@ def delete(row) -> dict:
 	the row), then the delete with permissions ignored, one commit, then the notice
 	(no document link: there is no document)."""
 	refuse(row, _("Delete it from your Skills list instead."))
+	used = used_by_macros(row.name)  # informational: kept out of the locked transaction
 	with locked(row, requests=True) as cur:
 		refuse(cur, _("Delete it from your Skills list instead."))
 		needs_apply = in_company_catalog(cur.name)
-		used = used_by_macros(cur.name)
 		reject_pending(cur.pending, _("Rejected: an admin deleted this skill."))
 		admin_log.write(
 			verb="delete",
@@ -163,6 +169,22 @@ def delete(row) -> dict:
 	after_commit(cur, "delete")
 	notify(cur, ADMIN_DELETE_NOTICE, _("An admin deleted your skill {0}.").format(cur.skill_name))
 	return {"ok": True, "needs_apply": needs_apply, "used_by_macros": used}
+
+
+def delete_own(row) -> None:
+	"""The owner's delete (``custom_skills_api``, single and bulk). The request's Link
+	is exempt from link checks (``hooks.ignore_links_on_delete``), so a Pending request
+	would outlive the skill as one no reviewer can approve: it is rejected first, under
+	the admin delete's locks, one commit. A failure undoes the row's work, so the bulk
+	delete never commits a rejection whose skill survived."""
+	with locked(row, requests=True) as cur:
+		try:
+			reject_pending(cur.pending, _("Rejected: the owner deleted this skill."))
+			frappe.delete_doc(SKILL, cur.name)  # the owner's own permission, as before
+		except Exception:
+			frappe.db.rollback()
+			raise
+		commit_act()
 
 
 # --------------------------------------------------------------------------- #
@@ -224,35 +246,54 @@ def locked(row, *, requests: bool):
 
 	hold_fields_exist()  # warm the meta: a miss below the lock would open a snapshot
 	txn.fresh_snapshot(owned=True)
-	pending = _lock_pending_requests(row.name) if requests else []
+	pending = lock_requests(pending_requests(row.name)) if requests else []
 	shared = is_shared(row)
 	with _catalog_lock() if shared else contextlib.nullcontext():
 		cur = _lock_row(row.name)
-		if is_shared(cur) != shared:
+		moved = requests and set(pending_requests(cur.name, lock=True)) != set(pending)
+		if moved or is_shared(cur) != shared:
 			frappe.throw(_("This skill changed while you acted on it. Try again."), frappe.ValidationError)
 		cur.pending = pending
 		yield cur
 
 
-def _lock_pending_requests(skill: str) -> list[str]:
+@contextlib.contextmanager
+def busy_as_retry():
+	"""A locking read that waited too long, or lost a race (1213, or 1020 on a row
+	changed since the snapshot, ``jarvis.chat.txn``), refused as a sentence to act on."""
+	try:
+		yield
+	except (frappe.QueryDeadlockError, frappe.QueryTimeoutError):
+		frappe.throw(_("This skill is busy right now. Try again in a moment."), frappe.ValidationError)
+
+
+def pending_requests(skill: str, *, lock: bool = False) -> list[str]:
+	"""The skill's Pending request names. ``lock`` only once the skill row is held
+	(module docstring, step 4): before it, the range lock can deadlock."""
 	P = frappe.qb.DocType(PROMO)
-	return (
-		frappe.qb.from_(P)
-		.select(P.name)
-		.where((P.skill == skill) & (P.status == "Pending"))
-		.for_update()
-		.run(pluck=True)
-	)
+	query = frappe.qb.from_(P).select(P.name).where((P.skill == skill) & (P.status == "Pending"))
+	if not lock:
+		return query.run(pluck=True)
+	with busy_as_retry():
+		return query.for_update().run(pluck=True)
+
+
+def lock_requests(names: list[str]) -> list[str]:
+	"""Lock exactly these request rows by name (record locks, no gap); none, no query."""
+	if not names:
+		return []
+	P = frappe.qb.DocType(PROMO)
+	with busy_as_retry():
+		frappe.qb.from_(P).select(P.name).where(P.name.isin(names)).for_update().run()
+	return list(names)
 
 
 def _lock_row(name: str) -> frappe._dict:
 	fields = list(ROW_FIELDS)
 	if hold_fields_exist():
 		fields += [HOLD_FIELD, HOLD_REASON_FIELD]
-	try:
+	with busy_as_retry():
 		row = frappe.db.get_value(SKILL, name, fields, as_dict=True, for_update=True)
-	except frappe.QueryTimeoutError:
-		frappe.throw(_("This skill is busy right now. Try again in a moment."), frappe.ValidationError)
 	if not row:
 		frappe.throw(_("This skill was deleted."), frappe.DoesNotExistError)
 	return row
@@ -319,9 +360,9 @@ def in_company_catalog(name: str) -> bool:
 	"""Whether the skill is in the company catalog the Apply pushes (the exact
 	``build_push_payload`` eligibility, uncapped): an act that changes that membership
 	is waiting for the next Apply."""
-	from jarvis.chat.custom_skills import _PUSHABLE_LIGHT_FIELDS, _pushable_org_rows
+	from jarvis.chat.custom_skills import is_pushable_org_row
 
-	return any(r.name == name for r in _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS))
+	return is_pushable_org_row(name)
 
 
 def used_by_macros(name: str) -> dict:
@@ -441,9 +482,12 @@ def notice_kinds() -> list:
 
 
 def dismiss_notices(user: str, names: list[str] | None) -> int:
-	"""Mark ``user``'s own notices of these kinds read: those named, or all."""
+	"""Mark ``user``'s own notices of these kinds read: those named, or all when
+	``names`` is None. An empty list marks none."""
+	if names is not None and not names:
+		return 0
 	filters = _notice_filters(user)
-	if names:
+	if names is not None:
 		filters["name"] = ["in", names]
 	marked = frappe.get_list("Notification Log", filters=filters, or_filters=notice_kinds(), pluck="name")
 	if marked:
