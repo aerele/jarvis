@@ -932,7 +932,9 @@ describe("Macros AdminTab, rows", () => {
 	it("leaves focus alone when the pointer was used while it loaded", async () => {
 		const added = vi.spyOn(document, "addEventListener");
 		const w = await longList();
-		const [, pageListener, capture] = added.mock.calls.find(([type]) => type === "pointerdown");
+		const [, pageListener, capture] = added.mock.calls.find(
+			([type]) => type === "pointerdown"
+		);
 		added.mockRestore();
 		const answer = pending();
 		await press(w.find(".jv-macro-admin-refresh"));
