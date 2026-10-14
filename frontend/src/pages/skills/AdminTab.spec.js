@@ -75,7 +75,10 @@ const api = vi.hoisted(() => ({
 vi.mock("@/api/skillsAdmin", () => api);
 
 // The apply call the Skills list's sync pill makes.
-const shared = vi.hoisted(() => ({ applyCustomSkills: vi.fn(), getCustomSkillsSyncStatus: vi.fn() }));
+const shared = vi.hoisted(() => ({
+	applyCustomSkills: vi.fn(),
+	getCustomSkillsSyncStatus: vi.fn(),
+}));
 vi.mock("@/api", () => shared);
 
 // The page header teleports in the app; here it renders in place.
@@ -174,7 +177,10 @@ const rowsOf = (w) => w.findAll(".jv-skill-admin-row");
 const control = (w, label) =>
 	w.findAll(".stub-control").find((c) => c.find(".stub-label").text() === label);
 const lastCall = () => api.adminListSkills.mock.calls.at(-1)[0];
-const menuItem = (w, name, key) => rowsOf(w).find((r) => r.attributes("data-skill") === name).find(`.jv-skill-admin-${key}`);
+const menuItem = (w, name, key) =>
+	rowsOf(w)
+		.find((r) => r.attributes("data-skill") === name)
+		.find(`.jv-skill-admin-${key}`);
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -183,7 +189,11 @@ beforeEach(() => {
 	api.adminSkillOwners.mockReset();
 	api.adminSkillOwners.mockResolvedValue({ owners: OWNERS, more: false });
 	api.adminGetSkill.mockResolvedValue({ used_by_macros: { total: 0, armed: 0 } });
-	api.adminDelete.mockResolvedValue({ ok: true, needs_apply: false, used_by_macros: { total: 0, armed: 0 } });
+	api.adminDelete.mockResolvedValue({
+		ok: true,
+		needs_apply: false,
+		used_by_macros: { total: 0, armed: 0 },
+	});
 	shared.applyCustomSkills.mockResolvedValue({});
 	shared.getCustomSkillsSyncStatus.mockResolvedValue({ pending: false });
 });
@@ -242,7 +252,10 @@ describe("Skills AdminTab, rows", () => {
 	});
 
 	it("shows the owner by name with the address under it, and the change time", async () => {
-		const w = await mountWith([row("a"), row("b", { owner: "ben@example.test", owner_name: "ben@example.test" })]);
+		const w = await mountWith([
+			row("a"),
+			row("b", { owner: "ben@example.test", owner_name: "ben@example.test" }),
+		]);
 		const owner = (i) => rowsOf(w)[i].find(".jv-skill-admin-cell-owner").text();
 		expect(owner(0)).toBe("Asha Raoasha@example.test");
 		expect(owner(1)).toBe("ben@example.test");
@@ -260,13 +273,20 @@ describe("Skills AdminTab, rows", () => {
 		);
 		await button(w, "Filters").trigger("click");
 		expect(w.text()).not.toMatch(/\bOrg\b|scope|armed/i);
-		for (const m of w.findAll(".stub-menu-item")) expect(m.text()).not.toMatch(/\bOrg\b|scope|armed/i);
+		for (const m of w.findAll(".stub-menu-item"))
+			expect(m.text()).not.toMatch(/\bOrg\b|scope|armed/i);
 	});
 
 	it("gives an admin's own skill Delete only, and says why", async () => {
-		const w = await mountWith([row("a", { is_mine: 1 }), row("b", { is_mine: 1, admin_hold: 1 })]);
+		const w = await mountWith([
+			row("a", { is_mine: 1 }),
+			row("b", { is_mine: 1, admin_hold: 1 }),
+		]);
 		for (const i of [0, 1]) {
-			const items = rowsOf(w)[i].findAll(".stub-menu-item").map((m) => m.text());
+			const items = rowsOf(w)
+				.at(i)
+				.findAll(".stub-menu-item")
+				.map((m) => m.text());
 			expect(items).toEqual(["Delete"]);
 		}
 		expect(rowsOf(w)[0].find(".jv-skill-admin-own").text()).toContain("Yours");
@@ -284,8 +304,13 @@ describe("Skills AdminTab, rows", () => {
 	});
 
 	it("names each Actions button for its row, starting with its visible word", async () => {
-		const w = await mountWith([row("a"), row("b", { owner: "ben@example.test", owner_name: "Ben" })]);
-		const names = [...w.findAll(".jv-skill-admin-actions")].map((b) => b.attributes("aria-label"));
+		const w = await mountWith([
+			row("a"),
+			row("b", { owner: "ben@example.test", owner_name: "Ben" }),
+		]);
+		const names = [...w.findAll(".jv-skill-admin-actions")].map((b) =>
+			b.attributes("aria-label")
+		);
 		expect(names).toEqual([
 			"Actions for skill-a, owned by Asha Rao (asha@example.test)",
 			"Actions for skill-b, owned by Ben (ben@example.test)",
@@ -299,7 +324,9 @@ describe("Skills AdminTab, filters", () => {
 	it("asks for the first page with nothing filtered, and lists the owners", async () => {
 		const w = await mountWith([row("a")]);
 		expect(lastCall()).toEqual({ search: "", filters: {}, page: 1, pageSize: 20 });
-		const options = control(w, "Owner").findAll("option").map((o) => o.text());
+		const options = control(w, "Owner")
+			.findAll("option")
+			.map((o) => o.text());
 		expect(options).toEqual(["All owners", "Asha Rao", "ben@example.test"]);
 	});
 
@@ -353,12 +380,11 @@ describe("Skills AdminTab, filters", () => {
 	it("labels the audiences in plain words", async () => {
 		const w = await mountWith([row("a")]);
 		await button(w, "Filters").trigger("click");
-		expect(control(w, "Audience").findAll("option").map((o) => o.text())).toEqual([
-			"All audiences",
-			"Private",
-			"Shared with a role",
-			"Everyone",
-		]);
+		expect(
+			control(w, "Audience")
+				.findAll("option")
+				.map((o) => o.text())
+		).toEqual(["All audiences", "Private", "Shared with a role", "Everyone"]);
 	});
 
 	it("the preset sets the company audience and writes-without-asking in one step, and again undoes both", async () => {
@@ -613,11 +639,18 @@ describe("Skills AdminTab, the Actions menu", () => {
 	it("offers Hold on a skill that is not held, Release on one that is, and Delete apart", async () => {
 		const w = await mountWith([row("a"), row("b", { admin_hold: 1 })]);
 		const items = (i) =>
-			rowsOf(w)[i]
+			rowsOf(w)
+				.at(i)
 				.findAll(".stub-menu-item")
 				.map((m) => [m.text(), m.attributes("data-group")]);
-		expect(items(0)).toEqual([["Hold", "Skill"], ["Delete", "Delete"]]);
-		expect(items(1)).toEqual([["Release", "Skill"], ["Delete", "Delete"]]);
+		expect(items(0)).toEqual([
+			["Hold", "Skill"],
+			["Delete", "Delete"],
+		]);
+		expect(items(1)).toEqual([
+			["Release", "Skill"],
+			["Delete", "Delete"],
+		]);
 		expect(menuItem(w, "a", "delete").attributes("data-theme")).toBe("red");
 	});
 
@@ -627,7 +660,11 @@ describe("Skills AdminTab, the Actions menu", () => {
 			row("b", { scope: "Org", admin_hold: 1 }),
 			row("c", { scope: "Role", target_role: "Accounts User" }),
 		]);
-		const items = (i) => rowsOf(w)[i].findAll(".stub-menu-item").map((m) => m.text());
+		const items = (i) =>
+			rowsOf(w)
+				.at(i)
+				.findAll(".stub-menu-item")
+				.map((m) => m.text());
 		expect(items(0)).toEqual(["Hold for everyone", "Delete for everyone"]);
 		expect(items(1)).toEqual(["Release", "Delete for everyone"]);
 		expect(items(2)).toEqual(["Hold", "Delete"]);
@@ -640,7 +677,11 @@ describe("Skills AdminTab, the Actions menu", () => {
 
 	it("does not let a learned skill be deleted here", async () => {
 		const w = await mountWith([row("a", { is_learned: 1 })]);
-		expect(rowsOf(w)[0].findAll(".stub-menu-item").map((m) => m.text())).toEqual(["Delete"]);
+		expect(
+			rowsOf(w)[0]
+				.findAll(".stub-menu-item")
+				.map((m) => m.text())
+		).toEqual(["Delete"]);
 		expect(menuItem(w, "a", "delete").attributes("disabled")).toBeDefined();
 	});
 
@@ -680,10 +721,17 @@ describe("Skills AdminTab, the Actions menu", () => {
 		await flushPromises();
 		api.adminListSkills.mockClear();
 		api.adminListSkills.mockResolvedValue(page([row("a", { scope: "Org", admin_hold: 1 })]));
-		w.findComponent({ name: "SkillHoldDialog" }).vm.$emit("held", { name: "a", needs_apply: true });
+		w.findComponent({ name: "SkillHoldDialog" }).vm.$emit("held", {
+			name: "a",
+			needs_apply: true,
+		});
 		await flushPromises();
 		expect(api.adminListSkills).toHaveBeenCalledTimes(1);
-		expect(rowsOf(w)[0].findAll(".badge").map((b) => b.text())).toContain("On hold");
+		expect(
+			rowsOf(w)[0]
+				.findAll(".badge")
+				.map((b) => b.text())
+		).toContain("On hold");
 		expect(w.find(".jv-skill-admin-catalog").exists()).toBe(true);
 	});
 
@@ -692,7 +740,10 @@ describe("Skills AdminTab, the Actions menu", () => {
 		await menuItem(w, "a", "release").trigger("click");
 		await flushPromises();
 		api.adminListSkills.mockResolvedValue(page([row("a")]));
-		w.findComponent({ name: "SkillReleaseDialog" }).vm.$emit("released", { name: "a", needs_apply: false });
+		w.findComponent({ name: "SkillReleaseDialog" }).vm.$emit("released", {
+			name: "a",
+			needs_apply: false,
+		});
 		await flushPromises();
 		expect(menuItem(w, "a", "hold")).toBeDefined();
 		expect(w.find(".jv-skill-admin-catalog").exists()).toBe(false);
@@ -776,7 +827,11 @@ describe("Skills AdminTab, Delete", () => {
 	});
 
 	it("shows the Apply notice when the delete says the catalog changed", async () => {
-		api.adminDelete.mockResolvedValue({ ok: true, needs_apply: true, used_by_macros: { total: 0, armed: 0 } });
+		api.adminDelete.mockResolvedValue({
+			ok: true,
+			needs_apply: true,
+			used_by_macros: { total: 0, armed: 0 },
+		});
 		const w = await mountWith([row("a", { scope: "Org" })]);
 		expect(w.find(".jv-skill-admin-catalog").exists()).toBe(false);
 		await menuItem(w, "a", "delete").trigger("click");
@@ -792,7 +847,9 @@ describe("Skills AdminTab, Delete", () => {
 		await flushPromises();
 		expect(confirm).not.toHaveBeenCalled();
 		expect(api.adminDelete).not.toHaveBeenCalled();
-		expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("This skill was deleted."));
+		expect(toast.error).toHaveBeenCalledWith(
+			expect.stringContaining("This skill was deleted.")
+		);
 		// The row is stale: the list is read again.
 		expect(api.adminListSkills).toHaveBeenCalledTimes(1);
 	});
@@ -878,7 +935,9 @@ describe("Skills AdminTab, the catalog update", () => {
 		const w = await mountWith([row("a")], needsApply);
 		await w.find(".jv-skill-admin-apply").trigger("click");
 		await flushPromises();
-		expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("Skills sync is locked."));
+		expect(toast.error).toHaveBeenCalledWith(
+			expect.stringContaining("Skills sync is locked.")
+		);
 		expect(w.find(".jv-skill-admin-catalog").exists()).toBe(true);
 		expect(w.find(".jv-skill-admin-apply").attributes("data-loading")).toBe("");
 	});

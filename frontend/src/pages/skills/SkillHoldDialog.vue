@@ -127,7 +127,9 @@ watch(
 );
 
 const label = computed(() => props.skillName || props.name);
-const title = computed(() => `${props.company ? "Hold for everyone" : "Put on hold"}: ${label.value}`);
+const title = computed(
+	() => `${props.company ? "Hold for everyone" : "Put on hold"}: ${label.value}`
+);
 const tooLong = computed(() => reason.value.trim().length > REASON_MAX);
 const canSave = computed(() => !saving.value && !!reason.value.trim() && !tooLong.value);
 

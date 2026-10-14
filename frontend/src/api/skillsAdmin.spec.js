@@ -18,7 +18,12 @@ beforeEach(() => call.mockClear());
 
 describe("skills admin api", () => {
 	it("lists a page, with the filters as JSON and the page size it wants", async () => {
-		await api.adminListSkills({ search: "bills", filters: { owner: "a@x.test" }, page: 3, pageSize: 20 });
+		await api.adminListSkills({
+			search: "bills",
+			filters: { owner: "a@x.test" },
+			page: 3,
+			pageSize: 20,
+		});
 		expect(sent()).toEqual([
 			SA + "admin_list_skills",
 			{ filters: '{"owner":"a@x.test"}', search: "bills", page: 3, page_size: 20 },
