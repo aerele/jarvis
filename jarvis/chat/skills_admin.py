@@ -447,6 +447,17 @@ def _recipients(row) -> set[str]:
 	return _valid(users)
 
 
+def author_or_reviewers(row) -> set[str]:
+	"""Who hears of a reviewer's change to ``row`` (5c): its author (``lineage_author``),
+	or for a published copy whose author is gone or cannot be told, the skill
+	reviewers (D5)."""
+	author = lineage_author(row)
+	users = _valid({author} if author else set())
+	if not users and is_published(row):
+		users = _valid(_skill_reviewers())
+	return users
+
+
 def _valid(users) -> set[str]:
 	from jarvis.permissions import is_valid_unattended_owner
 

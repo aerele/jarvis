@@ -20,7 +20,7 @@ from frappe import _
 from frappe.query_builder.functions import Coalesce, Count
 from pypika.terms import Criterion
 
-from jarvis.chat import list_filters
+from jarvis.chat import list_filters, skill_permissions, skill_reviewer_edit
 from jarvis.chat.custom_skills import (
 	MANAGED_OWNER,
 	MAX_SKILLS_PER_PUSH,
@@ -88,8 +88,6 @@ def _require_skill_editor(doc, action: str = "edit") -> str:
 	PermissionError. The reviewer branch refuses tool calls, private and learned
 	skills (``skill_reviewer_edit.require_editor``). Delete stays owner-only
 	(``_require_skill_owner``)."""
-	from jarvis.chat import skill_reviewer_edit
-
 	return skill_reviewer_edit.require_editor(doc, action)
 
 
@@ -437,8 +435,9 @@ def get_custom_skill(name: str) -> dict:
 	a user it's shared with, or a skill reviewer when it is a Role or company skill
 	(5c: a reviewer may read one outside their own roles). ``is_owner`` drives the
 	owner's affordances (promote, delete, shares); ``can_edit`` the form: the owner,
-	or a reviewer on a shared skill that is not learned."""
-	from jarvis.chat import skill_reviewer_edit, skills_admin
+	or a reviewer on a shared skill that is not learned. Who it is edited for, its
+	roles and the roles it may be given go to an editor only, not to a recipient."""
+	from jarvis.chat import skills_admin
 	from jarvis.permissions import is_skill_reviewer
 
 	doc = _skill_row(name)
@@ -447,6 +446,8 @@ def get_custom_skill(name: str) -> dict:
 	reviewer = not is_owner and skills_admin.is_shared(doc) and is_skill_reviewer(me)
 	if not (is_owner or reviewer or frappe.db.exists(SHARE, {"parent": doc.name, "user": me})):
 		frappe.throw(_("You don't have access to this skill."), frappe.PermissionError)
+	reviewer_edits = reviewer and not skills_admin.is_learned(doc)
+	can_edit = is_owner or reviewer_edits
 	# ``scope`` / ``target_role`` / ``managed_by_learning`` let the SPA gate the
 	# "Request promotion…" affordance (owner + User-scope + not learned) and show
 	# the current scope on the promotion status chip - the requester UI can't
@@ -465,13 +466,17 @@ def get_custom_skill(name: str) -> dict:
 		"modified": str(doc.modified or ""),
 		"mine": int(is_owner),
 		"is_owner": is_owner,
-		"can_edit": is_owner or skill_reviewer_edit.may_edit(doc, me),
+		"can_edit": can_edit,
 		"shared_by": "" if is_owner else _full_name(doc.owner),
 		# Whose skill a reviewer edits: for a published copy, its author's.
-		"owner_name": "" if is_owner else _full_name(skills_admin.lineage_author(doc) or doc.owner),
+		"owner_name": (_full_name(skills_admin.lineage_author(doc) or doc.owner) if reviewer_edits else ""),
 		"scope": scope,
 		"target_role": doc.get("target_role") or "",
-		"allowed_roles": _allowed_roles(doc.name),
+		"allowed_roles": _allowed_roles(doc.name) if can_edit else [],
+		# The roles the form's picker offers (the server checks the same rule).
+		"role_options": (
+			skill_reviewer_edit.targetable_roles(reviewer_edits) if can_edit and scope == "Role" else []
+		),
 		"managed_by_learning": int(doc.get("managed_by_learning") or 0),
 		# "Approve & run" arming (skill approve-and-run, D-CONTROL): the current
 		# state so the editor can show the toggle, plus whether THIS viewer may
@@ -633,7 +638,7 @@ def update_custom_skill(
 	``save`` below), never here, so the one gate can't drift. Disabling (1 -> 0) is
 	free for the owner: the toggle is the kill switch. A reviewer may change neither
 	it nor the name; each reviewer edit is recorded and the author is told."""
-	from jarvis.chat import skill_reviewer_edit
+	from jarvis.chat import skills_admin
 
 	doc = frappe.get_doc(SKILL, name)
 	reviewer = _require_skill_editor(doc, "edit") == skill_reviewer_edit.REVIEWER
@@ -657,7 +662,7 @@ def update_custom_skill(
 	if file_box_creates is not None:
 		doc.file_box_creates = file_box_creates or None
 	if allowed_roles is not None:
-		skill_reviewer_edit.set_allowed_roles(doc, allowed_roles)
+		skill_reviewer_edit.set_allowed_roles(doc, allowed_roles, reviewer=reviewer)
 	# SR4-2: editing a SHARED (Role/Org) skill - an enable/disable, a rename, a
 	# reviewer content edit - changes the shared push budget or the reserved slug, so
 	# serialize it with promotion approvals on the catalog-wide lock, held THROUGH
@@ -668,9 +673,11 @@ def update_custom_skill(
 	scope = (doc.scope or "Org").strip() or "Org"
 	if scope in ("Role", "Org"):
 		with _catalog_lock():
+			# Read under the lock: the record's "waits for an Apply" needs the stored state.
+			was_in_catalog = reviewer and skills_admin.in_company_catalog(doc.name)
 			doc.save(ignore_permissions=reviewer)
 			if reviewer:
-				changed = skill_reviewer_edit.record(doc, before)
+				changed = skill_reviewer_edit.record(doc, before, was_in_catalog=was_in_catalog)
 	else:
 		doc.save()
 	if changed:
@@ -801,13 +808,37 @@ def share_custom_skill(name: str, users: str | list | None = None) -> dict:
 	ids). Its owner, or a skill reviewer on a shared skill they do not own (5c: the
 	edit is recorded and the author told). Recipients get read-only use; they can
 	never re-share."""
-	from jarvis.chat import skill_reviewer_edit
-
 	doc = frappe.get_doc(SKILL, name)
 	reviewer = _require_skill_editor(doc, "share") == skill_reviewer_edit.REVIEWER
 	if not reviewer:
 		doc.check_permission("write")  # owner-gate
-	before = skill_reviewer_edit.snapshot(doc) if reviewer else None
+		clean = _set_shares(doc, users)
+		doc.save()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
+		return {"ok": True, "data": {"count": len(clean)}}
+	from jarvis.chat import skills_admin
+
+	# A reviewer's change is to a shared skill: under the catalog lock, as
+	# update_custom_skill takes it, held through the commit with its record.
+	with _catalog_lock():
+		try:
+			before = skill_reviewer_edit.snapshot(doc)
+			was_in_catalog = skills_admin.in_company_catalog(doc.name)
+			clean = _set_shares(doc, users)
+			doc.save(ignore_permissions=True)
+			changed = skill_reviewer_edit.record(doc, before, was_in_catalog=was_in_catalog)
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- held through the catalog lock
+		except Exception:
+			frappe.db.rollback()  # the shares and their record land together or not at all
+			raise
+	if changed:
+		skill_reviewer_edit.tell_author(doc)
+	return {"ok": True, "data": {"count": len(clean)}}
+
+
+def _set_shares(doc, users) -> list[str]:
+	"""Replace ``doc``'s share list with ``users`` (a JSON array or a list of user
+	ids): real users only, never its owner or Guest, each once. Returns the list."""
 	raw = frappe.parse_json(users) if isinstance(users, str) else (users or [])
 	clean, seen = [], set()
 	for u in raw if isinstance(raw, list) else []:
@@ -819,12 +850,7 @@ def share_custom_skill(name: str, users: str | list | None = None) -> dict:
 		seen.add(u)
 		clean.append(u)
 	doc.set("shared_with", [{"user": u} for u in clean])
-	doc.save(ignore_permissions=reviewer)
-	changed = skill_reviewer_edit.record(doc, before) if reviewer else []
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
-	if changed:
-		skill_reviewer_edit.tell_author(doc)
-	return {"ok": True, "data": {"count": len(clean)}}
+	return clean
 
 
 # --------------------------------------------------------------------------- #
@@ -1677,8 +1703,8 @@ def list_skill_promotion_requests(
 
 def _shared_copies(sources: list[str]) -> dict[str, str]:
 	"""``{source: shared row}``: the live Role / company copy each promoted skill has
-	now, in one query. A source that is itself shared (a Role skill widened in place)
-	maps to itself; a private one to the newest copy materialized from it (#595)."""
+	now, in one query. A private source maps to the newest copy materialized from it
+	(#595); a source that is itself shared (a copy widened in place) maps to itself."""
 	if not sources:
 		return {}
 	sk = frappe.qb.DocType(SKILL)
@@ -1691,9 +1717,14 @@ def _shared_copies(sources: list[str]) -> dict[str, str]:
 		.orderby(sk.creation, order=frappe.qb.desc)
 		.run(as_dict=True)
 	)
+	# A copy keys under its source; one that is itself a source (widened in place,
+	# Role to company) under its own name too. Newest first, so the live copy wins.
+	wanted = set(sources)
 	out: dict[str, str] = {}
 	for r in rows:
-		out.setdefault(r.name if r.name in sources else r.source_skill, r.name)
+		for key in (r.source_skill, r.name):
+			if key in wanted:
+				out.setdefault(key, r.name)
 	return out
 
 
@@ -1797,11 +1828,7 @@ def promotable_target_roles() -> dict:
 	Gated with ``@require_jarvis_user`` (SAR-2) — no cross-user leak (it only
 	ever reflects the caller's OWN session roles), but it carries the module's
 	name-your-caller gate for surface uniformity with every sibling read."""
-	from jarvis.chat.wiki_permissions import _NON_TARGETABLE_ROLES
-
-	me = frappe.session.user
-	roles = sorted(r for r in frappe.get_roles(me) if r and r not in _NON_TARGETABLE_ROLES)
-	return {"roles": roles}
+	return {"roles": skill_permissions.own_targetable_roles(frappe.session.user)}
 
 
 # --------------------------------------------------------------------------- #
