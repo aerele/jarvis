@@ -492,7 +492,7 @@ import { nextRunCell } from "@/lib/macroSchedule";
 import { scheduleLabel } from "@/pages/macros/scheduleLabel";
 import { ARMED_HELP, LAST_RUN_TONE, NEXT_RUN_TONE, enabledLabel } from "@/pages/macros/runDisplay";
 import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
-import { focusOpenMenu } from "@/lib/focusOpenMenu";
+import { focusOpenMenu, REKA_MENU } from "@/lib/focusOpenMenu";
 
 const PAGE = 20;
 // The server returns at most 100 rows a page.
@@ -887,7 +887,7 @@ watch(listEl, (el) => {
 // One pick at a time: an item still takes a press while its menu fades out, and a
 // second pick would move focus out of the confirmation the first one opened.
 const MENU_CLOSE_FRAMES = 40;
-const menuStillOpen = () => !!document.querySelector("[data-reka-menu-content]");
+const menuStillOpen = () => !!document.querySelector(REKA_MENU);
 let picking = false;
 async function fromMenu(row, run) {
 	if (picking) return;
