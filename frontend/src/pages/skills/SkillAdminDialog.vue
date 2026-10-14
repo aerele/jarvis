@@ -124,12 +124,19 @@
 				</section>
 
 				<section aria-labelledby="jv-skill-admin-shares">
-					<h3 id="jv-skill-admin-shares" class="mb-1 text-sm font-medium text-ink-gray-7">
+					<h3
+						id="jv-skill-admin-shares"
+						class="mb-1 text-sm font-medium text-ink-gray-7"
+					>
 						Shared with
 					</h3>
 					<ul v-if="skill.shared_with.length" class="jv-skill-admin-shares text-sm">
 						<li v-for="u in skill.shared_with" :key="u.user" class="break-words">
-							{{ u.full_name && u.full_name !== u.user ? `${u.full_name} (${u.user})` : u.user }}
+							{{
+								u.full_name && u.full_name !== u.user
+									? `${u.full_name} (${u.user})`
+									: u.user
+							}}
 						</li>
 					</ul>
 					<p v-else class="text-sm text-ink-gray-5">Nobody.</p>
@@ -173,7 +180,11 @@
 								</tr>
 							</thead>
 							<tbody>
-								<tr v-for="(h, i) in skill.history" :key="i" class="border-t align-top">
+								<tr
+									v-for="(h, i) in skill.history"
+									:key="i"
+									class="border-t align-top"
+								>
 									<td
 										class="whitespace-nowrap py-1.5 pr-3 text-ink-gray-8"
 										:title="exactDate(h.at)"
