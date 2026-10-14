@@ -64,6 +64,11 @@ class TestOneShotRunsOnClaudePlan(FrappeTestCase):
 		s = _settings(CLAUDE_PLAN, CHATGPT_PLAN)
 		self.assertTrue(one_shot_runs_on_claude_plan(s, "claude-sonnet-5", NATIVE_CLAUDE_PROVIDER))
 
+	def test_an_api_key_row_for_the_same_id_wins(self):
+		key_row = _row("claude-opus-5", provider="anthropic", order=2)
+		s = _settings(CLAUDE_PLAN, CHATGPT_PLAN, key_row)
+		self.assertFalse(one_shot_runs_on_claude_plan(s, "claude-opus-5", None))
+
 	def test_a_disabled_claude_plan_does_not_count(self):
 		off = _row("claude-opus-5", cred="subscription", upstream="anthropic", order=0, enabled=0)
 		self.assertFalse(one_shot_runs_on_claude_plan(_settings(off, CHATGPT_PLAN), "", None))
@@ -99,6 +104,22 @@ class TestPlainTitle(FrappeTestCase):
 		got = self._title("```\n" + long_line + "\n```")
 		self.assertTrue(long_line.lower().startswith(got.lower()))
 		self.assertEqual(long_line[len(got)], " ")
+
+	def test_a_cut_on_a_word_boundary_keeps_the_last_word(self):
+		head = "abcd " * 11 + "abcde"  # exactly 60 characters, ending on a whole word
+		words = head + " tail words"
+		self.assertEqual((len(head), words[60]), (60, " "))  # the cap lands between two words
+		self.assertEqual(self._title(words), "A" + head[1:])
+
+	def test_a_leading_greeting_is_dropped(self):
+		self.assertEqual(self._title("Hi, show me overdue invoices"), "Show me overdue invoices")
+		self.assertEqual(self._title("hello jarvis! list my companies"), "List my companies")
+		self.assertEqual(self._title("Hello\n\nWhy is my GL report empty?"), "Why is my GL report empty?")
+
+	def test_request_words_that_are_also_greetings_are_kept(self):
+		self.assertEqual(self._title("test the stock report"), "Test the stock report")
+		self.assertEqual(self._title("evening sales by territory"), "Evening sales by territory")
+		self.assertEqual(self._title("history of item A-100"), "History of item A-100")
 
 	def test_first_line_only_and_trailing_dot_dropped(self):
 		self.assertEqual(self._title("reset my password.\nmore detail here"), "Reset my password")

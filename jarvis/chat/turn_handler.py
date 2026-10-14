@@ -579,6 +579,9 @@ def one_shot_runs_on_claude_plan(settings, model: str, provider: str | None) -> 
 	enabled = sorted(_enabled_models(settings), key=_fleet_sort_key)
 	if model:
 		rows = [m for m in enabled if (getattr(m, "model", None) or "").strip() == model]
+		# Same precedence as _is_native_claude_pick: an API-key row for this id wins.
+		if any(_credential_type(m) != "subscription" for m in rows):
+			return False
 	else:
 		rows = enabled[:1]
 	return any(
