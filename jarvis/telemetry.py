@@ -66,8 +66,8 @@ def record_budget_event(
 	"""One line per agent-boundary result-size guard event (truncation or an
 	uncapped-but-oversized result). Unlike ``record_tool``, this is not gated
 	on a custom-doctype target - every event is signal for sizing the budget
-	itself. The guard outcome rides under ``outcome`` (truncated / uncapped /
-	uncapped_nonrow / measure_failed) - NOT ``event`` - so it does not collide
+	itself. The guard outcome rides under ``outcome`` (truncated / bounded_document /
+	uncapped / uncapped_nonrow / measure_failed) - NOT ``event`` - so it does not collide
 	with this line's own ``kind`` discriminator. Never raises."""
 	try:
 		_emit(
