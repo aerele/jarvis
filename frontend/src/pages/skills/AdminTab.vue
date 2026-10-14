@@ -805,7 +805,7 @@ function holdServed() {
 	return name;
 }
 watch(rows, holdServed);
-// The dialog closed. It gave focus back to the Hold button that opened it, which is
+// The dialog closed. It gave focus back to the Actions button that opened it, which is
 // not there any more when the skill is on hold (the row shows Release): focus goes
 // to the row instead of being left on the page.
 watch(holdOpen, async () => {
@@ -1031,6 +1031,9 @@ onBeforeUnmount(stopSyncPoll);
 	align-items: center;
 	justify-content: flex-end;
 	gap: 0.25rem;
+	/* Room for the 2px ring on the open Actions button: the list box clips at its
+	   edge, and the button sits right on it (on its left in a card). */
+	padding: 0.25rem;
 }
 
 /* Too narrow for five lanes: no sideways scrolling, the row folds. The header row
