@@ -403,9 +403,11 @@ class TestTheList(SkillAdminBase):
 		kinds = self._kinds()
 		res = self._list()
 		self.assertEqual(
-			set(res), {"rows", "page", "page_size", "has_more", "total", "hold_available", "sync"}
+			set(res),
+			{"rows", "page", "page_size", "has_more", "total", "hold_available", "delete_available", "sync"},
 		)
 		self.assertTrue(res["hold_available"])
+		self.assertTrue(res["delete_available"])
 		self.assertEqual(set(res["sync"]), {"pending", "needs_apply", "last_synced_at"})
 		by_name = {r["name"]: r for r in res["rows"]}
 		for row in res["rows"]:
@@ -621,16 +623,19 @@ class TestHelperParity(FrappeTestCase):
 class TestCatalogUpdatePending(SkillAdminBase):
 	def setUp(self):
 		super().setUp()
-		prev = frappe.db.get_single_value(SETTINGS, "custom_skills_synced_at")
+		fields = ["custom_skills_synced_at", "custom_skills_sync_status"]
+		prev = frappe.db.get_value(SETTINGS, SETTINGS, fields)
 		self.addCleanup(self._restore_synced_at, prev)
 
 	@staticmethod
 	def _restore_synced_at(prev):
-		frappe.db.set_single_value(SETTINGS, "custom_skills_synced_at", prev, update_modified=False)
+		fields = {"custom_skills_synced_at": prev[0], "custom_skills_sync_status": prev[1]}
+		frappe.db.set_single_value(SETTINGS, fields, update_modified=False)
 		frappe.db.commit()
 
-	def _synced(self, when):
-		frappe.db.set_single_value(SETTINGS, "custom_skills_synced_at", when, update_modified=False)
+	def _synced(self, when, status="ok (applied 1 via admin)"):
+		fields = {"custom_skills_synced_at": when, "custom_skills_sync_status": status}
+		frappe.db.set_single_value(SETTINGS, fields, update_modified=False)
 		frappe.db.commit()
 
 	def test_pending_after_an_act_on_a_company_skill_until_the_next_apply(self):
@@ -647,6 +652,17 @@ class TestCatalogUpdatePending(SkillAdminBase):
 		self.assertFalse(skills_admin.catalog_update_pending())
 		self.assertFalse(self._list()["sync"]["needs_apply"])
 
+	def test_a_failed_apply_keeps_the_catalog_pending(self):
+		self._synced("2000-01-01 00:00:00")
+		org = self._skill(OWNER, "cat-failed", scope="Org")
+		frappe.set_user(ADMIN)
+		skills_admin_api.admin_hold(org, "Company")
+		later = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=1)
+		self._synced(later, "failed: admin unreachable: boom")
+		self.assertTrue(skills_admin.catalog_update_pending())
+		self._synced(later)
+		self.assertFalse(skills_admin.catalog_update_pending())
+
 
 # --------------------------------------------------------------------------- #
 # A site before the migrate
@@ -660,6 +676,7 @@ class TestBeforeTheMigrate(SkillAdminBase):
 		with self._unmigrated():
 			res = self._list()
 			self.assertFalse(res["hold_available"])
+			self.assertTrue(res["delete_available"])
 			row = next(r for r in res["rows"] if r["name"] == skill)
 			self.assertEqual((row["admin_hold"], row["admin_hold_reason"]), (0, ""))
 			self.assertEqual(self._names(self._list(filters={"on_hold": 1})), [])

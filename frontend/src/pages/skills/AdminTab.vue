@@ -54,6 +54,14 @@
 					Holding is not available yet on this site.
 				</p>
 
+				<p
+					v-if="!deleteAvailable"
+					class="jv-skill-admin-undeletable text-p-sm text-ink-gray-6"
+					role="status"
+				>
+					Deleting is not available yet on this site.
+				</p>
+
 				<div class="jv-skill-admin-toolbar flex flex-col gap-2">
 					<div class="flex items-center gap-2">
 						<div class="jv-skill-admin-search min-w-0 max-w-md flex-1">
@@ -529,6 +537,7 @@ const rootEl = ref(null);
 const sync = ref({ pending: false, needs_apply: false });
 // False on a site not yet migrated: Hold and Release are then switched off.
 const holdAvailable = ref(true);
+const deleteAvailable = ref(true);
 // An act just said the catalog needs an Apply (the list may not say it yet).
 const needsApply = ref(false);
 const applying = ref(false);
@@ -612,6 +621,7 @@ function fetchPage({ search: text, filters: active, start }) {
 function keepEnvelope(res) {
 	sync.value = res.sync || { pending: false, needs_apply: false };
 	holdAvailable.value = res.hold_available !== false;
+	deleteAvailable.value = res.delete_available !== false;
 	if (sync.value.pending) startSyncPoll();
 }
 
@@ -703,7 +713,7 @@ function actionsFor(row) {
 		items: [
 			item("delete", everyone ? "Delete for everyone" : "Delete", remove, {
 				theme: "red",
-				disabled: busy.value || !!row.is_learned,
+				disabled: busy.value || !!row.is_learned || !deleteAvailable.value,
 			}),
 		],
 	});
