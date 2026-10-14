@@ -28,9 +28,9 @@ vi.mock("@/stores/shell", () => ({
 vi.mock("wiki-graph-core", () => ({ renderer3dEnabled: () => false }));
 vi.mock("@/pages/wiki/KnowledgeGraph.vue", () => ({ default: { template: "<i />" } }));
 
-const tab = vi.hoisted(
-	() => (name) => ({ default: { name, template: `<div class="tab-${name}" />` } })
-);
+const tab = vi.hoisted(() => (name) => ({
+	default: { name, template: `<div class="tab-${name}" />` },
+}));
 vi.mock("./SkillsList.vue", () => tab("skills"));
 vi.mock("./AnalysisTab.vue", () => tab("analysis"));
 vi.mock("./ReviewTab.vue", () => tab("review"));
@@ -56,7 +56,10 @@ async function mountAs(flags, hash = "") {
 	return w;
 }
 const labels = (w) => w.findAll('[role="tab"]').map((t) => t.text());
-const body = (w) => ["skills", "analysis", "review", "personalise", "wiki", "admin"].filter((n) => w.find(`.tab-${n}`).exists());
+const body = (w) =>
+	["skills", "analysis", "review", "personalise", "wiki", "admin"].filter((n) =>
+		w.find(`.tab-${n}`).exists()
+	);
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -114,10 +117,16 @@ describe("SkillsPage, the Admin tab", () => {
 
 	it("puts #admin in the address when the tab is clicked, and takes it out for Skills", async () => {
 		const w = await mountAs({ analysis: true });
-		await w.findAll('[role="tab"]').find((t) => t.text() === "Admin").trigger("click");
+		await w
+			.findAll('[role="tab"]')
+			.find((t) => t.text() === "Admin")
+			.trigger("click");
 		expect(body(w)).toEqual(["admin"]);
 		expect(router.push).toHaveBeenCalledWith({ hash: "#admin", query: {} });
-		await w.findAll('[role="tab"]').find((t) => t.text() === "Skills").trigger("click");
+		await w
+			.findAll('[role="tab"]')
+			.find((t) => t.text() === "Skills")
+			.trigger("click");
 		expect(router.push).toHaveBeenLastCalledWith({ hash: "", query: {} });
 	});
 

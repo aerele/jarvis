@@ -23,6 +23,7 @@ NOT_RENAMABLE = (
 	"Jarvis Conversation",
 	"Jarvis Macro",
 	"Jarvis Macro Run",
+	"Jarvis Skill Admin Log",
 	"Jarvis Agent Activity",
 	"Jarvis Agent Finding",
 	"Jarvis Agent Run",

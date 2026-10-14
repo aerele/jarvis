@@ -56,7 +56,11 @@ _SCOPES = ("User", "Role", "Org")
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def admin_list_skills(
-	filters=None, search: str = "", sort: str = "", page: int = 1, page_size: int = PAGE_SIZE
+	filters: str | dict | None = None,
+	search: str = "",
+	sort: str = "",
+	page: int = 1,
+	page_size: int = PAGE_SIZE,
 ):
 	"""Every non-learned skill, private and shared, published company copies labelled.
 	No instructions: those are read one skill at a time (``admin_get_skill``).
@@ -186,7 +190,7 @@ def admin_hold(skill: str, reason: str = "") -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def admin_release(skill: str, restore=False) -> dict:
+def admin_release(skill: str, restore: bool | int | str = False) -> dict:
 	"""Lift an admin's hold. ``restore`` (a Role or company skill only) switches it
 	back on; arming is never restored. ``{ok, restored, needs_apply}``."""
 	_write_gate()
