@@ -1,5 +1,5 @@
 <template>
-	<Dropdown :options="menuOptions">
+	<Dropdown :options="menuOptions" @update:open="(open) => open && focusOpenMenu()">
 		<template #trigger="{ open }">
 			<button
 				class="jv-focus-ring relative flex h-12 items-center rounded-md py-2 duration-300 ease-in-out"
@@ -52,6 +52,7 @@ import { computed, inject, onMounted, onUnmounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { Dropdown, FeatherIcon } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
+import { focusOpenMenu } from "@/lib/focusOpenMenu";
 import { useShellStore } from "@/stores/shell";
 import { useSupportStore } from "@/stores/support";
 import { useJarvisTheme } from "@/theme";

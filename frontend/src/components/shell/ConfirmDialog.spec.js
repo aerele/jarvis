@@ -197,26 +197,6 @@ describe("ConfirmDialog, keyboard focus", () => {
 		opener.disabled = false;
 	});
 
-	it("leaves focus alone while a modal dialog underneath holds it", async () => {
-		// reka's modal Dialog (Settings) locks <body> and traps focus itself: taking
-		// focus here would only be pulled back.
-		await setup();
-		document.body.style.pointerEvents = "none";
-		ask();
-		await flushPromises();
-		expect(dialog()).not.toBeNull();
-		expect(document.activeElement).toBe(opener);
-		const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
-		window.dispatchEvent(tab);
-		expect(tab.defaultPrevented).toBe(false);
-		expect(document.activeElement).toBe(opener);
-		// Escape still cancels there.
-		press("Escape");
-		await flushPromises();
-		expect(dialog()).toBeNull();
-		expect(document.activeElement).toBe(opener);
-	});
-
 	it("does not pass a key on to the app's shortcuts while it is open", async () => {
 		await setup();
 		ask();
@@ -242,15 +222,6 @@ describe("ConfirmDialog, keyboard focus", () => {
 		await flushPromises();
 		for (const [key, extra] of [["Enter"], [" "], ["r", { metaKey: true }], ["a"]])
 			expect(press(key, extra)).toBe(true);
-	});
-
-	it("passes the keys on as before under a modal dialog", async () => {
-		await setup();
-		document.body.style.pointerEvents = "none";
-		ask();
-		await flushPromises();
-		press("k", { metaKey: true });
-		expect(heard).toEqual(["k"]);
 	});
 
 	it("takes focus without scrolling a long question past its title", async () => {

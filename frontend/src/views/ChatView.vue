@@ -132,6 +132,7 @@
 					<!-- Create: save this chat as a macro, or build a trigger from it. -->
 					<div class="jv-create-wrap jv-hide-narrow" style="position: relative">
 						<button
+							ref="createBtnEl"
 							class="jv-modelpill"
 							@click.stop="createMenuOpen = !createMenuOpen"
 							:aria-expanded="String(createMenuOpen)"
@@ -185,6 +186,7 @@
 							></div>
 							<div
 								role="menu"
+								@keydown.esc.stop="closeCreateMenu"
 								style="
 									position: absolute;
 									right: 0;
@@ -202,6 +204,7 @@
 									v-if="canSaveAsMacro"
 									role="menuitem"
 									class="jv-create-item"
+									data-create-item
 									@click="onCreateMacro"
 								>
 									<svg
@@ -228,6 +231,7 @@
 								<button
 									role="menuitem"
 									class="jv-create-item"
+									data-create-item
 									@click="startTriggerCreation"
 								>
 									<svg
@@ -4277,6 +4281,7 @@ import ReportScope from "@/components/chat/ReportScope.vue";
 import { reportToolsByAssistant } from "@/lib/reportScope";
 import { toolRowFromResult, upsertToolRow, withLiveToolRows } from "@/lib/liveToolRows";
 import { collectDocRefs } from "@/lib/docRefs";
+import { focusOpenMenu } from "@/lib/focusOpenMenu";
 import {
 	heldNewestSeq,
 	mergeNewestPage,
@@ -6812,6 +6817,14 @@ function openMacroFromCard(card) {
 // proposes surfaces as the existing action:pending Approve card. Cleared on New
 // chat / conversation switch / dismiss.
 const createMenuOpen = ref(false);
+// Opening it moves focus to its first item (the hand-made menu has no library to do
+// it); Escape closes it and gives focus back to the button.
+const createBtnEl = ref(null);
+watch(createMenuOpen, (open) => open && focusOpenMenu("[data-create-item]"));
+function closeCreateMenu() {
+	createMenuOpen.value = false;
+	createBtnEl.value?.focus();
+}
 const triggerMode = ref(false);
 // While building a trigger the composer placeholder becomes a faded example (the
 // "Ask Jarvis" style) instead of a chip list, and a small marker sits above it.
