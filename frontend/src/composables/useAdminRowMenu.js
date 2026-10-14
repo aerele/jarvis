@@ -4,11 +4,12 @@
 // button again after the list was re-read. Shared by the Macros and Skills tabs.
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 
-// Below this width the list draws each row as a card (the styles' 48rem), with
-// the Actions button at the card's start: its menu then opens from that side, or
-// it would be pushed against the window's edge.
-const CARD_BELOW_PX = 768;
+// Up to this width the list draws each row as a card (the styles' `max-width: 48rem`
+// container query), with the Actions button at the card's start: its menu then opens
+// from that side, or it would be pushed against the window's edge.
+const CARD_MAX_REM = 48;
 const MENU_CLOSE_FRAMES = 40;
+
 const menuStillOpen = () => !!document.querySelector("[data-reka-menu-content]");
 
 /**
@@ -29,10 +30,10 @@ export function useAdminRowMenu(o) {
 		if (listWidth) listWidth.disconnect();
 		listWidth = null;
 		if (!el) return;
-		cardLayout.value = el.clientWidth < CARD_BELOW_PX;
+		cardLayout.value = isCardWidth(el.clientWidth);
 		if (typeof ResizeObserver === "undefined") return;
 		listWidth = new ResizeObserver(() => {
-			cardLayout.value = el.clientWidth < CARD_BELOW_PX;
+			cardLayout.value = isCardWidth(el.clientWidth);
 		});
 		listWidth.observe(el);
 	});
@@ -62,6 +63,10 @@ export function useAdminRowMenu(o) {
 	//
 	// One pick at a time: an item still takes a press while its menu fades out, and a
 	// second pick would move focus out of the confirmation the first one opened.
+	//
+	// Known gap, only seen on a real machine: the flag is held until the menu has gone
+	// and the action has run, so a pick in a second row's menu within about half a
+	// second of a pick in the first is dropped and must be made again.
 	let picking = false;
 	async function fromMenu(row, run) {
 		if (picking) return;
@@ -78,6 +83,10 @@ export function useAdminRowMenu(o) {
 			if (waited) await new Promise((done) => setTimeout(done, 0));
 			// A menu is open after all (another row's, opened meanwhile), the tab was
 			// left, or something is already asking: this pick is dropped.
+			//
+			// Known gap, only seen on a real machine: a cancelled question stays in the
+			// page while it fades out, so a keyboard pick made within about 150 ms of
+			// cancelling one finds it still asking and does nothing.
 			if (menuStillOpen() || !listEl.value || dialogOpen()) return;
 			const button = actionsButton(row.name);
 			if (button && !button.disabled) button.focus();
@@ -99,4 +108,12 @@ export function useAdminRowMenu(o) {
 	}
 
 	return { cardLayout, focusOpenMenu, fromMenu, focusRow };
+}
+
+// The styles count in rem, so the script must too: with a root font size other than
+// 16px the same width is a card in one and not in the other. The query includes its
+// limit, hence `<=`.
+export function isCardWidth(px) {
+	const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+	return px <= CARD_MAX_REM * rem;
 }

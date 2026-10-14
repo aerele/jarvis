@@ -163,6 +163,13 @@
 	--ink-gray-4: #6a6a74;
 }
 
+/* A red menu item (Delete) is 4.6:1 at rest in the library's dark red and 3.4:1 on
+   its highlight (#621b18). This lighter one is 6.3:1 at rest and 4.7:1 on the
+   highlight. Scoped to open menus: the variable is the item's own text. */
+[data-theme="dark"] [data-reka-menu-content] {
+	--text-ink-red-3: 252 116 116;
+}
+
 /* App-wide keyboard-focus outline (app-shell sidebar controls: SidebarLink,
    Sidebar's reset-order/edit-toggle buttons, UserMenu, AppShell's mobile
    hamburger). Suppresses the browser's default outline on a mouse click,

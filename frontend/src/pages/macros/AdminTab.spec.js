@@ -170,8 +170,15 @@ async function mountWith(rows, extra, options) {
 	api.adminListMacros.mockResolvedValue(page(rows, extra));
 	const w = mount(AdminTab, options);
 	await flushPromises();
+	// The four selects sit behind "Filters": most cases need them in reach.
+	if (!options || options.filtersClosed !== true) await openFilters(w);
 	return w;
 }
+const openFilters = async (w) => {
+	const toggle = w.find(".jv-macro-admin-filters-toggle");
+	if (toggle.exists() && toggle.attributes("aria-expanded") !== "true")
+		await toggle.trigger("click");
+};
 
 // By its words, or by its name when it is an icon alone (Refresh).
 const button = (w, label) =>
@@ -525,6 +532,29 @@ describe("Macros AdminTab, layout", () => {
 		w = await mountWith([row("a")]);
 		expect(w.findComponent({ name: "Dropdown" }).props("placement")).toBe("left");
 		w.unmount();
+		width.mockRestore();
+	});
+
+	it("decides card or row by the styles' own 48rem: the limit included, whatever the root font size", async () => {
+		// The styles say `max-width: 48rem`, so exactly 48rem is a card, and 48rem is
+		// 960 px when the browser's default font size is 20px.
+		const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get");
+		const side = async () => {
+			const w = await mountWith([row("a")]);
+			const placement = w.findComponent({ name: "Dropdown" }).props("placement");
+			w.unmount();
+			return placement;
+		};
+		width.mockReturnValue(768);
+		expect(await side()).toBe("left");
+		width.mockReturnValue(769);
+		expect(await side()).toBe("right");
+		document.documentElement.style.fontSize = "20px";
+		width.mockReturnValue(900);
+		expect(await side()).toBe("left");
+		width.mockReturnValue(961);
+		expect(await side()).toBe("right");
+		document.documentElement.style.fontSize = "";
 		width.mockRestore();
 	});
 
@@ -886,7 +916,10 @@ describe("Macros AdminTab, rows", () => {
 	});
 
 	it("leaves focus alone when the pointer was used while it loaded", async () => {
+		const added = vi.spyOn(document, "addEventListener");
 		const w = await longList();
+		const [, pageListener, capture] = added.mock.calls.find(([type]) => type === "pointerdown");
+		added.mockRestore();
 		const answer = pending();
 		await press(w.find(".jv-macro-admin-refresh"));
 		at().blur();
@@ -908,10 +941,10 @@ describe("Macros AdminTab, rows", () => {
 		expect(at()).toBe(document.body);
 		outside.remove();
 
-		// The page's listener goes with the tab.
+		// The page's own listener goes with the tab: the same function, the same phase.
 		const removed = vi.spyOn(document, "removeEventListener");
 		w.unmount();
-		expect(removed.mock.calls.some(([type]) => type === "pointerdown")).toBe(true);
+		expect(removed).toHaveBeenCalledWith("pointerdown", pageListener, capture);
 		removed.mockRestore();
 	});
 
@@ -1145,6 +1178,35 @@ describe("Macros AdminTab, rows", () => {
 });
 
 describe("Macros AdminTab, filters", () => {
+	it("keeps the four selects behind one Filters control, owner and search in sight", async () => {
+		const w = await mountWith([row("a")], undefined, { filtersClosed: true });
+		const names = () => w.findAll(".stub-label").map((l) => l.text());
+		expect(names()).toEqual(["Search", "Owner"]);
+		const toggle = w.find(".jv-macro-admin-filters-toggle");
+		expect(toggle.text()).toBe("Filters");
+		expect(toggle.attributes("aria-expanded")).toBe("false");
+		await toggle.trigger("click");
+		expect(names()).toEqual(["Search", "Owner", "Armed", "Schedule", "Runs", "Hold"]);
+		expect(toggle.attributes("aria-expanded")).toBe("true");
+		expect(w.find("#jv-macro-admin-more-filters").exists()).toBe(true);
+		expect(toggle.attributes("aria-controls")).toBe("jv-macro-admin-more-filters");
+		await toggle.trigger("click");
+		expect(names()).toEqual(["Search", "Owner"]);
+	});
+
+	it("counts the filters set behind it, and opens them for the Armed and scheduled preset", async () => {
+		const w = await mountWith([row("a")], undefined, { filtersClosed: true });
+		await button(w, "Armed and scheduled").trigger("click");
+		await flushPromises();
+		expect(w.find("#jv-macro-admin-more-filters").exists()).toBe(true);
+		expect(w.find(".jv-macro-admin-filters-toggle").text()).toBe("Filters (2)");
+		await control(w, "Runs").find("select").setValue("1");
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-filters-toggle").text()).toBe("Filters (3)");
+		await w.find(".jv-macro-admin-filters-toggle").trigger("click");
+		expect(w.find(".jv-macro-admin-filters-toggle").text()).toBe("Filters (3)");
+	});
+
 	it("labels every control", async () => {
 		const w = await mountWith([row("a")]);
 		expect(w.findAll(".stub-label").map((l) => l.text())).toEqual([
@@ -1711,7 +1773,7 @@ describe("Macros AdminTab, hold, release and delete", () => {
 	});
 
 	it("puts focus on the row when the dialog that is taken away had given it to a button that is gone", async () => {
-		// The dialog hands focus back to the Hold button, and the row now shows Release.
+		// The dialog hands focus back to the Actions button, and the row now shows Release.
 		const w = await mountWith([row("a")], undefined, { attachTo: document.body });
 		await holdButton(w).trigger("click");
 		api.adminListMacros.mockResolvedValue(page([held()]));
@@ -1722,6 +1784,35 @@ describe("Macros AdminTab, hold, release and delete", () => {
 		dialog.vm.$emit("update:modelValue", false);
 		await flushPromises();
 		expect(document.activeElement).toBe(rowsOf(w)[0].find(".jv-macro-admin-open").element);
+		w.unmount();
+	});
+
+	it("puts focus on the list when a filter dropped the held macro from it", async () => {
+		// Under "Not on hold" the hold removes the macro: its button is gone, and so is its row.
+		const w = await mountWith([row("z"), row("a")], undefined, { attachTo: document.body });
+		await holdButton(w, 1).trigger("click");
+		api.adminListMacros.mockResolvedValue(page([row("z")]));
+		const dialog = w.findComponent({ name: "MacroHoldDialog" });
+		dialog.vm.$emit("failed", { name: "a" });
+		await flushPromises();
+		document.activeElement.blur();
+		dialog.vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(document.activeElement).toBe(w.find(".jv-macro-admin-scroll").element);
+		w.unmount();
+	});
+
+	it("puts focus on the search box when the filter left no list at all", async () => {
+		const w = await mountWith([row("a")], undefined, { attachTo: document.body });
+		await holdButton(w).trigger("click");
+		api.adminListMacros.mockResolvedValue(page([]));
+		const dialog = w.findComponent({ name: "MacroHoldDialog" });
+		dialog.vm.$emit("failed", { name: "a" });
+		await flushPromises();
+		document.activeElement.blur();
+		dialog.vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(document.activeElement).toBe(control(w, "Search").find("input").element);
 		w.unmount();
 	});
 
