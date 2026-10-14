@@ -91,7 +91,7 @@
 						/>
 					</div>
 					<div
-						v-if="filtersOpen"
+						v-show="filtersOpen"
 						id="jv-macro-admin-more-filters"
 						class="jv-macro-admin-filters grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center"
 					>
@@ -376,7 +376,10 @@
 								     the Button reads out, and the short word in the slot is what
 								     it shows. While its menu is open the button is ringed, so it
 								     is plain which row the menu belongs to. -->
-								<div role="cell" class="jv-macro-admin-cell-actions">
+								<div
+									role="cell"
+									class="jv-macro-admin-cell-actions jv-admin-actions-cell"
+								>
 									<Button
 										v-if="row.live_run"
 										class="jv-macro-admin-stop"
@@ -450,8 +453,8 @@
 			:name="holding.name"
 			:macroName="holding.macro_name || ''"
 			:ownerLabel="ownerText(holding)"
-			@held="onHeld"
-			@failed="onHeld"
+			@held="onHoldMade"
+			@failed="onHoldMade"
 		/>
 		<MacroHandoverDialog
 			v-if="handingOver"
@@ -477,7 +480,7 @@
 // when window.is_jarvis_admin. The server checks the Jarvis Admin role itself on
 // every call (jarvis.chat.macros_admin_api), so a stale client gate can only hide
 // the tab.
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import {
 	Badge,
 	Breadcrumbs,
@@ -494,7 +497,7 @@ import MacroHoldDialog from "./MacroHoldDialog.vue";
 import MacroHandoverDialog from "./MacroHandoverDialog.vue";
 import { session } from "@/data/session";
 import { useConfirm } from "@/composables/useConfirm";
-import { focusLost, useAdminList } from "@/composables/useAdminList";
+import { useAdminList } from "@/composables/useAdminList";
 import { useAdminRowMenu } from "@/composables/useAdminRowMenu";
 import {
 	adminDelete,
@@ -588,6 +591,7 @@ const {
 	loadMore,
 	onSearch,
 	searchBox,
+	settled,
 	usedKeyboard,
 } = useAdminList({
 	fetchPage: (args) => adminListMacros(args),
@@ -725,9 +729,13 @@ function actionsFor(row) {
 	return groups;
 }
 
-const { cardLayout, focusOpenMenu, fromMenu, focusRow } = useAdminRowMenu({
+const { cardLayout, focusOpenMenu, fromMenu, focusRow, focusAfterHold } = useAdminRowMenu({
 	listEl,
 	dialogOpen,
+	rows,
+	error,
+	settled,
+	searchBox,
 	rowSelector: ".jv-macro-admin-row",
 	rowKey: "macro",
 	actionsSelector: ".jv-macro-admin-actions",
@@ -835,26 +843,18 @@ function holdServed() {
 // The list was read again: the draft goes quietly. Focus is the business of
 // whatever started that read.
 watch(rows, holdServed);
-// The dialog closed. It gave focus back to the Actions button that opened it, which
-// is not there any more when the macro is on hold (the row shows Release) or when a
-// filter drops it from the list: focus goes to the row, or when the row is gone to
-// the list (the search box when no list is drawn), instead of being left on the page.
-watch(holdOpen, async () => {
-	const gone = holdRowGone();
-	const name = holdServed();
-	if (!name && !gone) return;
-	await nextTick();
-	if (!focusLost() || dialogOpen()) return;
-	if (name) await focusRow(name);
-	else (listEl.value || searchBox())?.focus();
+// The dialog closed: the draft is looked at now, and focus is decided once the reload
+// has settled (see focusAfterHold). `holdMade` is the macro a hold was made for, as
+// the dialog said, even when it answered an error.
+let holdMade = "";
+watch(holdOpen, (open) => {
+	if (open || !holding.value) return;
+	const name = holding.value.name;
+	const made = holdMade === name;
+	holdMade = "";
+	holdServed();
+	return focusAfterHold(name, { made });
 });
-// A hold was asked for a macro that this list no longer shows: a held one that the
-// filter in force leaves out. (A macro still listed keeps its Actions button.)
-function holdRowGone() {
-	return (
-		!holdOpen.value && !!holding.value && !rows.value.some((r) => r.name === holding.value.name)
-	);
-}
 
 function holdReason(row) {
 	return (row.admin_hold_reason || "").trim();
@@ -876,6 +876,10 @@ function askHandover(row) {
 // row as re-read, so its owner is the one the server now has: a macro that changed
 // hands would otherwise be refused at every retry. One no longer listed closes it,
 // its message in a toast.
+function onHoldMade(payload) {
+	holdMade = payload.name;
+	return onHeld(payload);
+}
 async function onHeld({ name, message }) {
 	await load("keep");
 	if (handoverOpen.value && handingOver.value && handingOver.value.name === name) {
@@ -998,9 +1002,6 @@ onMounted(() => {
 	align-items: center;
 	justify-content: flex-end;
 	gap: 0.25rem;
-	/* Room for the 2px ring on the open Actions button: the list box clips at its
-	   edge, and the button sits right on it (on its left in a card). */
-	padding: 0.25rem;
 }
 
 /* Too narrow for five lanes: no sideways scrolling, the row folds. The header row

@@ -178,3 +178,9 @@
 .jv-deskbtn:hover svg {
 	stroke: var(--surface-white) !important;
 }
+
+/* An Admin tab's actions cell: room for the 2px ring on the open Actions button. The
+   list box clips at its edge and the button sits right on it (on its left in a card). */
+.jv-admin-actions-cell {
+	padding: 0.25rem;
+}
