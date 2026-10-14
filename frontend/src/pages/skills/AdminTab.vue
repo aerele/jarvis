@@ -450,14 +450,26 @@
 			@released="onActed"
 			@failed="onActed"
 		/>
-		<!-- Hand over is piece 5b: its dialog and its menu item go here. -->
+		<SkillHandoverDialog
+			v-if="handingOver"
+			v-model="handoverOpen"
+			:name="handingOver.name"
+			:skillName="skillLabel(handingOver)"
+			:owner="handingOver.owner"
+			:ownerLabel="ownerText(handingOver)"
+			:shared="isShared(handingOver)"
+			@handed="onHandedOver"
+			@failed="onHandoverFailed"
+			@reload="refreshHandover"
+		/>
 	</div>
 </template>
 
 <script setup>
 // A Jarvis Admin's view of every user's skills: who owns each, whether it is on,
 // who can use it, whether it writes without asking, whether it is on hold.
-// Actions: Hold (SkillHoldDialog asks why), Release (SkillReleaseDialog), Delete.
+// Actions: Hold (SkillHoldDialog asks why), Release (SkillReleaseDialog), Hand over
+// (SkillHandoverDialog picks who), Delete.
 // Opening a row shows the skill read-only (SkillAdminDialog). Nothing here edits a
 // skill.
 //
@@ -478,6 +490,7 @@ import {
 } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import SkillAdminDialog from "./SkillAdminDialog.vue";
+import SkillHandoverDialog from "./SkillHandoverDialog.vue";
 import SkillHoldDialog from "./SkillHoldDialog.vue";
 import SkillReleaseDialog from "./SkillReleaseDialog.vue";
 import { useConfirm } from "@/composables/useConfirm";
@@ -676,14 +689,16 @@ function dialogOpen() {
 	return (
 		holdOpen.value ||
 		releaseOpen.value ||
+		handoverOpen.value ||
 		detailOpen.value ||
 		!!document.querySelector('[role="alertdialog"]')
 	);
 }
 
 // ── the Actions menu ─────────────────────────────────────────────────────────
-// What may be done to a row, in one order: Hold or Release, then Delete in a group
-// of its own. An admin's own skill has Delete only (the "Yours" badge says why).
+// What may be done to a row, in one order: Hold or Release, Hand over, then Delete
+// in a group of its own. An admin's own skill has Hand over and Delete only (the
+// "Yours" badge says why). A learned skill and a Published copy cannot be handed over.
 // For a skill shared with everyone every item says so. On a site not yet migrated
 // Hold and Release are disabled, not hidden.
 function actionsFor(row) {
@@ -703,7 +718,9 @@ function actionsFor(row) {
 	if (!row.is_mine && !row.is_learned && row.admin_hold) {
 		first.push(item("release", "Release", askRelease, holdOff));
 	}
-	// Hand over (piece 5b) goes here, between Hold or Release and Delete.
+	if (!row.is_learned && !row.is_published) {
+		first.push(item("handover", "Hand over", askHandover));
+	}
 	const groups = [];
 	if (first.length) groups.push({ group: "Skill", hideLabel: true, items: first });
 	groups.push({
@@ -741,17 +758,21 @@ function onGone() {
 	load("keep");
 }
 
-// ── hold, release, delete ────────────────────────────────────────────────────
+// ── hold, release, hand over, delete ─────────────────────────────────────────
 // One action at a time across the list: `acting` is "<verb>:<row>" while a delete
-// is in flight, and the hold and release dialogs are open for `holding` and
-// `releasing`. Nothing is shown changed until the server says so: each ends with a
+// is in flight, and the hold, release and hand over dialogs are open for `holding`,
+// `releasing` and `handingOver`. Nothing is shown changed until the server says so: each ends with a
 // re-read of the list.
 const acting = ref("");
 const holding = ref(null);
 const holdOpen = ref(false);
 const releasing = ref(null);
 const releaseOpen = ref(false);
-const busy = computed(() => !!acting.value || holdOpen.value || releaseOpen.value);
+const handingOver = ref(null);
+const handoverOpen = ref(false);
+const busy = computed(
+	() => !!acting.value || holdOpen.value || releaseOpen.value || handoverOpen.value
+);
 
 // The hold dialog keeps a reason that was typed and not sent, for the skill it was
 // typed for. Once that skill is on hold, the reason has served: the closed dialog
@@ -792,7 +813,50 @@ function askRelease(row) {
 	releaseOpen.value = true;
 }
 
-// After a hold or a release, answered or refused: the row's state on the server
+function askHandover(row) {
+	if (busy.value) return;
+	handingOver.value = row;
+	handoverOpen.value = true;
+}
+
+// A hand over was refused. A refusal about the owner having changed waits for the
+// dialog's Reload; any other may mean the row is stale, so it is re-read now.
+function onHandoverFailed({ name, changed }) {
+	if (!changed) return refreshHandover({ name });
+}
+
+// The list is read again and the open dialog is given the row as re-read, so its
+// owner is the one the server now has: a skill that changed hands would otherwise be
+// refused at every retry. A skill no longer listed (deleted, or filtered out by its
+// new owner) closes it. Focus stays in the dialog while it is open.
+async function refreshHandover({ name }) {
+	await load("keep");
+	const fresh = rows.value.find((r) => r.name === name);
+	if (fresh && handingOver.value && handingOver.value.name === name) {
+		handingOver.value = fresh;
+		return;
+	}
+	if (!handoverOpen.value) return;
+	handoverOpen.value = false;
+	toast.create({ message: "That skill is no longer in the list.", type: "info" });
+	await focusRow(name);
+}
+
+// The skill was handed over: the row is read again (its owner changes, it is Off)
+// and focus goes back to its Actions button, where the admin started.
+async function onHandedOver({ name, needs_apply }) {
+	if (needs_apply) needsApply.value = true;
+	await load("keep");
+	await nextTick();
+	const mine = [...listEl.value.querySelectorAll(".jv-skill-admin-row")].find(
+		(r) => r.dataset.skill === name
+	);
+	const button = mine && mine.querySelector(".jv-skill-admin-actions");
+	if (button) button.focus();
+	else await focusRow(name);
+}
+
+// After a hold, a release or a hand over, answered or refused: the row's state on the server
 // may have changed either way.
 async function onActed({ name, needs_apply }) {
 	if (needs_apply) needsApply.value = true;
