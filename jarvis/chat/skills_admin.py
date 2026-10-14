@@ -347,11 +347,15 @@ def used_by_macros(name: str) -> dict:
 def catalog_update_pending() -> bool:
 	"""Whether an admin act changed the company catalog after the last Apply (D1):
 	derived, not stored. The audit log's ``needs_apply`` rows newer than
-	``custom_skills_synced_at``. A failed Apply stamps that time too, so after one this
-	answers False and the sync status shows the failure instead."""
+	``custom_skills_synced_at``. A failed Apply stamps that time too (there is no separate
+	success stamp), so the stamp counts only while the sync status reads ``ok``."""
 	if not admin_log_exists():
 		return False
-	synced_at = frappe.db.get_single_value("Jarvis Settings", "custom_skills_synced_at")
+	synced_at, status = frappe.db.get_value(
+		"Jarvis Settings", "Jarvis Settings", ["custom_skills_synced_at", "custom_skills_sync_status"]
+	)
+	if not (status or "").startswith("ok"):
+		synced_at = None
 	log = frappe.qb.DocType(admin_log.DT)
 	query = frappe.qb.from_(log).select(log.name).where(log.needs_apply == 1).limit(1)
 	if synced_at:
