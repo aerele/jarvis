@@ -2276,25 +2276,6 @@ _FEEDBACK_TIMEOUT_S = 10
 
 def push_chat_feedback(item: dict) -> dict:
 	"""Push one chat-reply rating (thumbs up/down + optional note) to admin for the
-<<<<<<< HEAD
-	tenant-wise Feedback dashboard. Admin upserts on (tenant, message). Called
-	best-effort from jarvis.chat.feedback.submit_feedback, which swallows failures
-	so a lost rating never blocks the tap.
-	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
-	return _post(path=_m("api.tenant.ingest_chat_feedback"), body={"item": item})
-
-
-# Short timeout for the two feedback pushes below, for the same reason as
-# _MODEL_CATALOG_TIMEOUT_S: they run SYNCHRONOUSLY inside a customer web request
-# (submit_session_feedback / submit_pulse_feedback, neither is enqueued), so at
-# the DEFAULT_TIMEOUT_S = 150 an admin that hangs rather than refuses would pin
-# a web worker for 2.5 minutes per submit. Both callers already treat any
-# failure as "lost response, acceptable", so a timeout is just the same loss
-# reached sooner. Admin's ingest is a single upsert; 10s is generous for it.
-# push_chat_feedback above predates this and keeps the default on purpose: it
-# is out of this change's scope, not a considered exception.
-_FEEDBACK_TIMEOUT_S = 10
-=======
 	tenant-wise Feedback dashboard. Admin upserts on (tenant, message), so a re-send
 	folds onto the same row. Called from jarvis.chat.feedback_outbox (the delivery
 	job and the retry sweep), which records the failure and retries.
@@ -2305,7 +2286,6 @@ _FEEDBACK_TIMEOUT_S = 10
 		body={"item": item},
 		timeout_s=_FEEDBACK_TIMEOUT_S,
 	)
->>>>>>> 870a6b0 (fix(feedback): store thumbs ratings in a durable outbox before acknowledging them)
 
 
 def push_session_feedback(item: dict) -> dict:
