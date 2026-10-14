@@ -109,6 +109,7 @@ def admin_list_skills(
 		"has_more": (page - 1) * page_size + len(rows) < total,
 		"total": total,
 		"hold_available": held_column,
+		"delete_available": skills_admin.admin_log_exists(),
 		"sync": status,
 	}
 

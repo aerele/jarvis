@@ -593,6 +593,15 @@ describe("Skills AdminTab, a site not yet migrated", () => {
 		expect(w.find(".stub-hold").exists()).toBe(false);
 	});
 
+	it("says deleting is not available and disables Delete", async () => {
+		const w = await mountWith([row("a")], { delete_available: false });
+		expect(w.find(".jv-skill-admin-undeletable").text()).toBe(
+			"Deleting is not available yet on this site."
+		);
+		expect(menuItem(w, "a", "delete").attributes("disabled")).toBeDefined();
+		expect(menuItem(w, "a", "hold").attributes("disabled")).toBeUndefined();
+	});
+
 	it("says nothing about it on a migrated site", async () => {
 		const w = await mountWith([row("a")]);
 		expect(w.find(".jv-skill-admin-unmigrated").exists()).toBe(false);
