@@ -161,7 +161,8 @@
   {
    "fieldname": "run_id",
    "fieldtype": "Data",
-   "label": "Run ID"
+   "label": "Run ID",
+   "search_index": 1
   },
   {
    "description": "Groups a typed multi-card approval so it settles with one continuation.",
@@ -360,7 +361,7 @@
  "in_create": 1,
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-07 12:00:00.000000",
+ "modified": "2026-10-13 12:00:00.000000",
  "module": "Jarvis",
  "name": "Jarvis Pending Action",
  "naming_rule": "Random",

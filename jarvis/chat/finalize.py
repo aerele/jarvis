@@ -69,7 +69,16 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 	turn = frappe.db.get_value(
 		TURN,
 		run_id,
-		["state", "conversation", "assistant_message", "seed_message", "dispatch_payload"],
+		[
+			"state",
+			"conversation",
+			"assistant_message",
+			"seed_message",
+			"dispatch_payload",
+			"enqueued_at",
+			"dispatching_at",
+			"terminal_observed_at",
+		],
 		as_dict=True,
 	)
 	if not turn:
@@ -588,9 +597,83 @@ def _effect_telemetry(ctx: _Ctx) -> None:
 	try:
 		from jarvis import telemetry
 
-		telemetry.emit_turn(ctx.conversation, ctx.run_id, 0)
+		# Pump-mode turns emit exactly this one line; the legacy path in turn_handler
+		# emits its own line with handler wall time.
+		timing = _turn_timing(ctx.turn, ctx.run_id)
+		telemetry.emit_turn(
+			ctx.conversation,
+			ctx.run_id,
+			timing["duration_ms"],
+			queue_ms=timing["queue_ms"],
+			approval_wait_ms=timing["approval_wait_ms"],
+			active_ms=timing["active_ms"],
+		)
 	except Exception:
 		pass
+
+
+def _span_ms(start, end) -> int | None:
+	"""Whole milliseconds from start to end, or None when either is missing or the
+	span is negative (clock skew, a re-stamped start): unavailable, never a fake 0."""
+	if not (start and end):
+		return None
+	ms = int(frappe.utils.time_diff_in_seconds(end, start) * 1000)
+	return ms if ms >= 0 else None
+
+
+def _approval_wait_ms(run_id: str, start, end) -> int | None:
+	"""Human approval wait inside this run's window [start, end] (dispatching_at to
+	terminal): each decided Pending Action's creation -> decided_at span is clamped to
+	the window, and overlapping spans are merged so concurrent approvals are not double
+	counted. 0 when none overlap; None when the window or a decided span is unusable."""
+	if not (start and end):
+		return None
+	start, end = frappe.utils.get_datetime(start), frappe.utils.get_datetime(end)
+	# System context (post-turn effect): no user session, so get_all is intended.
+	rows = frappe.get_all(
+		"Jarvis Pending Action",
+		filters={"run_id": run_id, "decided_at": ["is", "set"]},
+		fields=["creation", "decided_at"],
+	)
+	spans = []
+	for r in rows:
+		if _span_ms(r.creation, r.decided_at) is None:
+			return None
+		lo = max(frappe.utils.get_datetime(r.creation), start)
+		hi = min(frappe.utils.get_datetime(r.decided_at), end)
+		if hi > lo:
+			spans.append((lo, hi))
+	total, cur_lo, cur_hi = 0, None, None
+	for lo, hi in sorted(spans):
+		if cur_hi is None or lo > cur_hi:
+			if cur_hi is not None:
+				total += _span_ms(cur_lo, cur_hi)
+			cur_lo, cur_hi = lo, hi
+		else:
+			cur_hi = max(cur_hi, hi)
+	if cur_hi is not None:
+		total += _span_ms(cur_lo, cur_hi)
+	return total
+
+
+def _turn_timing(turn: dict, run_id: str) -> dict:
+	"""Measured spans from the turn's own stamps (read once by run_finalize).
+	duration_ms is run:start (dispatching_at) to the terminal, the baseline
+	reply_duration_ms uses, and INCLUDES human approval wait; approval_wait_ms is
+	that wait and active_ms is duration_ms minus it. queue_ms is enqueue to dispatch;
+	dispatching_at is kept/re-stamped on recovery re-dispatch, so queue_ms includes
+	recovery time. A missing stamp gives None, never a fabricated zero."""
+	duration_ms = _span_ms(turn.get("dispatching_at"), turn.get("terminal_observed_at"))
+	approval_wait_ms = _approval_wait_ms(run_id, turn.get("dispatching_at"), turn.get("terminal_observed_at"))
+	active_ms = None
+	if duration_ms is not None and approval_wait_ms is not None and approval_wait_ms <= duration_ms:
+		active_ms = duration_ms - approval_wait_ms
+	return {
+		"duration_ms": duration_ms,
+		"queue_ms": _span_ms(turn.get("enqueued_at"), turn.get("dispatching_at")),
+		"approval_wait_ms": approval_wait_ms,
+		"active_ms": active_ms,
+	}
 
 
 def _note_resend_outcome(ctx: _Ctx) -> None:
