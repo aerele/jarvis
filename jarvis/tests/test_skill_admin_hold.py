@@ -30,6 +30,7 @@ from jarvis.chat import custom_skills_api, skill_permissions, skills_admin, skil
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import SkillOnHoldError
 from jarvis.tests import test_skill_admin_api as base
+from jarvis.tests.race_harness import other_connection
 
 SKILL = base.SKILL
 PROMO = base.PROMO
@@ -405,6 +406,36 @@ class TestDelete(HoldBase):
 					self.assertEqual(custom_skills_api.delete_custom_skill(skill), {"ok": True})
 				self.assertFalse(frappe.db.exists(SKILL, skill))
 
+	def test_the_owner_deletes_a_skill_with_a_pending_request(self):
+		# The request's Link is exempt from link checks, so without the rejection a
+		# reviewer would be left a request for a skill that no longer exists.
+		for bulk in (False, True):
+			with self.subTest(bulk=bulk):
+				skill = self._skill(OWNER, f"own-del-pending-{int(bulk)}")
+				request = self._request(skill)
+				frappe.set_user(OWNER)
+				if bulk:
+					out = custom_skills_api.delete_custom_skills_bulk(json.dumps([skill]))
+					self.assertEqual(out, {"deleted": 1, "skipped": []})
+				else:
+					self.assertEqual(custom_skills_api.delete_custom_skill(skill), {"ok": True})
+				self.assertFalse(frappe.db.exists(SKILL, skill))
+				status = self._status(request)
+				self.assertEqual(
+					(status.status, status.decision_note),
+					("Rejected", "Rejected: the owner deleted this skill."),
+				)
+
+	def test_a_failed_bulk_delete_leaves_the_request_pending(self):
+		skill = self._skill(OWNER, "own-del-fails")
+		request = self._request(skill)
+		frappe.set_user(OWNER)
+		with patch.object(frappe, "delete_doc", side_effect=RuntimeError("delete fails")):
+			out = custom_skills_api.delete_custom_skills_bulk(json.dumps([skill]))
+		self.assertEqual(out, {"deleted": 0, "skipped": [{"name": skill, "reason": "error"}]})
+		self.assertTrue(frappe.db.exists(SKILL, skill))
+		self.assertEqual(self._status(request).status, "Pending")
+
 	def test_a_company_skill_needs_an_apply(self):
 		skill = self._skill(OWNER, "del-org", scope="Org")
 		frappe.set_user(ADMIN)
@@ -417,6 +448,48 @@ class TestDelete(HoldBase):
 		with self.assertRaises(frappe.ValidationError):
 			skills_admin_api.admin_delete(skill)
 		self.assertTrue(frappe.db.exists(SKILL, skill))
+
+
+# --------------------------------------------------------------------------- #
+# Locks (skills_admin module docstring)
+# --------------------------------------------------------------------------- #
+class TestLocks(HoldBase):
+	def test_the_requests_are_locked_by_name_with_no_range(self):
+		# A range lock on (skill, status) before the skill row deadlocks with
+		# request_skill_promotion, which inserts into that range holding the row.
+		skill = self._skill(OWNER, "lock-by-name")
+		request = self._request(skill)
+		with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as spy:
+			self.assertEqual(skills_admin.lock_requests([]), [])
+			spy.assert_not_called()
+			self.assertEqual(skills_admin.lock_requests([request]), [request])
+		(sql,) = [str(c.args[0]) for c in spy.call_args_list if "FOR UPDATE" in str(c.args[0])]
+		self.assertIn("`name` IN", sql)
+		self.assertNotIn("status", sql.lower())
+		frappe.db.rollback()
+
+	def test_a_request_filed_while_acting_refuses_the_act(self):
+		# Filed (here: a rejected one made Pending again, committed on another
+		# connection) between the request locks and the skill row lock: the locking
+		# re-read sees it, where a plain one would read the old snapshot.
+		skill = self._skill(OWNER, "lock-moved")
+		request = self._request(skill)
+		self._reject(request)
+		real_lock_row = skills_admin._lock_row
+
+		def file_then_lock(name):
+			with other_connection() as other:
+				other.sql(f"UPDATE `tab{PROMO}` SET status = 'Pending' WHERE name = %s", request)
+				other.commit()
+			return real_lock_row(name)
+
+		frappe.set_user(ADMIN)
+		with patch.object(skills_admin, "_lock_row", side_effect=file_then_lock):
+			with self.assertRaises(frappe.ValidationError):
+				skills_admin_api.admin_hold(skill, "Too late")
+		frappe.db.rollback()
+		self.assertEqual(self._row(skill, "admin_hold").admin_hold, 0)
+		self.assertEqual(self._status(request).status, "Pending")
 
 
 # --------------------------------------------------------------------------- #
@@ -453,8 +526,21 @@ class TestNotices(HoldBase):
 		frappe.set_user(OTHER)
 		self.assertEqual(custom_skills_api.dismiss_skill_notices([notices[1]["name"]])["dismissed"], 0)
 		frappe.set_user(OWNER)
+		# An empty list dismisses none; only an omitted one dismisses them all.
+		self.assertEqual(custom_skills_api.dismiss_skill_notices([])["dismissed"], 0)
+		self.assertEqual(custom_skills_api.dismiss_skill_notices("[]")["dismissed"], 0)
 		self.assertEqual(custom_skills_api.dismiss_skill_notices()["dismissed"], 5)
 		self.assertEqual(custom_skills_api.list_custom_skills_page(search=TAG)["notices"], [])
+
+	def test_notices_ride_the_first_page_only_and_never_break_it(self):
+		self._hold(self._skill(OWNER, "notice-page"))
+		frappe.set_user(OWNER)
+		self.assertEqual(len(custom_skills_api.list_custom_skills_page(search=TAG)["notices"]), 1)
+		self.assertEqual(custom_skills_api.list_custom_skills_page(search=TAG, start=20)["notices"], [])
+		with patch.object(skills_admin, "owner_notices", side_effect=RuntimeError("log down")):
+			page = custom_skills_api.list_custom_skills_page(search=TAG)
+		self.assertEqual(page["notices"], [])
+		self.assertTrue(page["rows"])
 
 	def test_dismiss_refuses_what_is_not_a_list_of_names(self):
 		frappe.set_user(OWNER)

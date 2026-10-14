@@ -55,8 +55,5 @@ const VERBS = {
 	hold: "Put on hold",
 	release: "Released",
 	delete: "Deleted",
-	handover: "Handed over",
-	hand_over: "Handed over",
-	"hand over": "Handed over",
 };
 export const verbText = (verb) => VERBS[String(verb || "").toLowerCase()] || String(verb || "");
