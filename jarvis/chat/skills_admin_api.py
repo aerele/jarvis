@@ -1,12 +1,13 @@
 """A Jarvis Admin's view of every user's skills: list them, open one read-only, put
-one on hold or release it, delete it (jarvis-admin-v2#720, piece 5a).
+one on hold or release it, delete it (jarvis-admin-v2#720, piece 5a), hand it to
+another owner (piece 5b).
 
 The owner's endpoints (``jarvis.chat.custom_skills_api``) stay owner-scoped, and
 nothing here changes who may save a skill: an admin still cannot edit another
 user's private skill. These endpoints act with the role gate instead of the
 document permission; their writes are the two hold fields (switching the skill off
-and disarming it with them), a release, and a delete. The acts themselves are in
-``jarvis.chat.skills_admin``.
+and disarming it with them), a release, a delete and a hand-over. The acts themselves
+are in ``jarvis.chat.skills_admin`` and ``jarvis.chat.skills_handover``.
 
 Every endpoint is POST-only, carries ``@require_jarvis_user`` and starts with
 ``refuse_in_tool_dispatch()`` and ``require_jarvis_admin()``, as the macro admin
@@ -31,7 +32,7 @@ import frappe
 from frappe import _
 from frappe.query_builder.functions import Coalesce, Count
 
-from jarvis.chat import list_filters, skills_admin
+from jarvis.chat import list_filters, skills_admin, skills_handover
 from jarvis.chat.skills_admin import HOLD_FIELD, HOLD_REASON_FIELD, SKILL
 from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_admin, require_jarvis_user
 
@@ -213,6 +214,44 @@ def admin_delete(skill: str) -> dict:
 	return skills_admin.delete(skills_admin.load(name))
 
 
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def admin_handover(skill: str, new_owner: str, expected_owner: str | None = None) -> dict:
+	"""Hand any user's skill to ``new_owner`` (``skills_handover``): it arrives switched
+	off and disarmed, with no shares, no File Box opt-in, no assignments and no hold,
+	and the old owner's Pending promotion requests are rejected. ``expected_owner`` is the
+	owner the dialog showed (required). An admin may hand a skill to themselves and may
+	hand their own skill away.
+	``{ok, new_owner, cleared: {shares, armed, file_box, assignments}, hold_lifted,
+	requests_cancelled, needs_apply}``."""
+	_write_gate()
+	name = _name_arg(skill, _("Skill"))
+	new_owner = _new_owner_arg(new_owner)
+	# As stored, as the new owner is: a name in another case is the same person.
+	expected_owner = _name_arg(expected_owner, _("Current owner"))
+	expected_owner = skills_handover.stored_user(expected_owner) or expected_owner
+	if not skills_handover.available():
+		frappe.throw(_("Handing over a skill is not available yet on this site."), frappe.ValidationError)
+	return skills_handover.handover(skills_admin.load(name), new_owner, expected_owner)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def admin_handover_targets(search: str = "", skill: str | None = None) -> dict:
+	"""Who a skill can be handed to, for the dialog's search: enabled desk users with
+	the Jarvis User role, not Administrator or Guest, nor the current owner of ``skill``
+	(optional), matching ``search`` on their address or full name, at most
+	``skills_handover.TARGETS_MAX``. ``{targets: [{user, full_name, at_cap}], more}``.
+	The hand-over checks everything again."""
+	refuse_in_tool_dispatch()
+	require_jarvis_admin()
+	search = _text_arg(search, _("Search"))[:SEARCH_MAX]
+	owner = None
+	if skill is not None and skill != "":
+		owner = skills_admin.load(_name_arg(skill, _("Skill"))).owner
+	return skills_handover.targets(search, exclude=owner)
+
+
 def _write_gate() -> None:
 	refuse_in_tool_dispatch()
 	require_jarvis_admin()
@@ -367,13 +406,17 @@ def _lineage(row) -> dict | None:
 
 
 def _history(skill: str) -> list[dict]:
-	"""The admin acts on this skill, newest first, from the audit log."""
+	"""The admin acts on this skill, newest first, from the audit log. ``new_owner`` is
+	a hand-over's ("" for the other acts, and before the hand-over's migrate)."""
 	if not skills_admin.admin_log_exists():
 		return []
 	log = frappe.qb.DocType("Jarvis Skill Admin Log")
+	columns = [log.admin, log.verb, log.reason, log.acted_at]
+	if skills_handover.available():
+		columns.append(log.new_owner)
 	rows = (
 		frappe.qb.from_(log)
-		.select(log.admin, log.verb, log.reason, log.acted_at)
+		.select(*columns)
 		.where(log.skill == skill)
 		.orderby(log.acted_at, order=frappe.qb.desc)
 		.orderby(log.creation, order=frappe.qb.desc)
@@ -387,6 +430,7 @@ def _history(skill: str) -> list[dict]:
 			"admin_name": names.get(r.admin) or r.admin,
 			"verb": r.verb,
 			"reason": r.reason or "",
+			"new_owner": r.get("new_owner") or "",
 			"at": str(r.acted_at or ""),
 		}
 		for r in rows
@@ -453,6 +497,19 @@ def _reason_arg(value) -> str:
 			_("The reason must be at most {0} characters.").format(HOLD_REASON_MAX), frappe.ValidationError
 		)
 	return reason
+
+
+def _new_owner_arg(value) -> str:
+	"""The new owner as ``User.name`` exactly as stored (``skills_handover.stored_user``),
+	or a refusal. Modelled on ``macros_admin_api._new_owner_arg``."""
+	name = _name_arg(value, _("New owner"))
+	stored = skills_handover.stored_user(name)
+	if not stored:
+		frappe.throw(
+			_("There is no user {0}.").format(frappe.utils.escape_html(name)),
+			skills_handover.SkillHandoverError,
+		)
+	return stored
 
 
 def _bool_arg(value, what: str) -> bool:

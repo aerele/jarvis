@@ -1,6 +1,6 @@
 """Jarvis Skill Admin Log: what a Jarvis Admin did to someone else's skill.
 
-One row per act (hold, release, delete), written by ``jarvis.chat.skills_admin_api``
+One row per act (hold, release, delete, handover), written by ``jarvis.chat.skills_admin_api``
 with ``ignore_permissions`` and never changed afterwards. Nobody has a write or a
 delete row on the doctype, so an admin cannot edit the record of their own act;
 this controller refuses a change to a stored row even where permissions are
@@ -16,6 +16,9 @@ from frappe.model.document import Document
 from jarvis.permissions import NotRenamable
 
 DT = "Jarvis Skill Admin Log"
+# The hand-over's column (5b). Code served ahead of its migrate must not write a
+# hand-over: the verb is not yet a Select option there and the column is missing.
+NEW_OWNER_FIELD = "new_owner"
 
 
 class JarvisSkillAdminLog(NotRenamable, Document):
@@ -25,10 +28,18 @@ class JarvisSkillAdminLog(NotRenamable, Document):
 
 
 def write(
-	*, verb: str, skill: str, skill_name: str, skill_owner: str, reason: str = "", needs_apply: bool = False
+	*,
+	verb: str,
+	skill: str,
+	skill_name: str,
+	skill_owner: str,
+	reason: str = "",
+	needs_apply: bool = False,
+	new_owner: str = "",
 ) -> None:
 	"""Insert one row for the session user's act. No commit: the act's own
-	transaction carries it, so the act and its record land together or not at all."""
+	transaction carries it, so the act and its record land together or not at all.
+	``new_owner`` is a hand-over's; ``skill_owner`` is then the owner it was taken from."""
 	frappe.get_doc(
 		{
 			"doctype": DT,
@@ -38,7 +49,13 @@ def write(
 			"skill": skill,
 			"skill_name": skill_name or "",
 			"skill_owner": skill_owner or "",
+			"new_owner": new_owner or None,
 			"needs_apply": int(bool(needs_apply)),
 			"reason": reason or None,
 		}
 	).insert(ignore_permissions=True)
+
+
+def handover_available() -> bool:
+	"""Whether this site's log has the hand-over's column (its migrate ran)."""
+	return bool(frappe.db.table_exists(DT) and frappe.get_meta(DT).has_field(NEW_OWNER_FIELD))

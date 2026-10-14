@@ -1,6 +1,7 @@
 """What the skill admin verbs do (``jarvis.chat.skills_admin_api``): hold, release and
 delete another user's skill, each as ONE transaction, and what follows the commit
-(the owner's notice, the operator's log line).
+(the owner's notice, the operator's log line). The hand-over (``skills_handover``)
+takes the same locks through ``locked``.
 
 Locks, in the order ``decide_skill_promotion`` takes them, so the two cannot wait on
 each other (jarvis-admin-v2#720, plan check item 3):
@@ -43,7 +44,8 @@ HOLD_REASON_FIELD = skill_doctype.HOLD_REASON_FIELD
 ADMIN_HOLD_NOTICE = "Skill put on hold by an admin"
 ADMIN_RELEASE_NOTICE = "Skill released by an admin"
 ADMIN_DELETE_NOTICE = "Skill deleted by an admin"
-NOTICE_KINDS = (ADMIN_HOLD_NOTICE, ADMIN_RELEASE_NOTICE, ADMIN_DELETE_NOTICE)
+ADMIN_HANDOVER_NOTICE = "Skill handed over by an admin"
+NOTICE_KINDS = (ADMIN_HOLD_NOTICE, ADMIN_RELEASE_NOTICE, ADMIN_DELETE_NOTICE, ADMIN_HANDOVER_NOTICE)
 
 ROW_FIELDS = (
 	"name",
@@ -238,9 +240,10 @@ def refuse(row, own_hint: str) -> None:
 # Locks and writes
 # --------------------------------------------------------------------------- #
 @contextlib.contextmanager
-def locked(row, *, requests: bool):
+def locked(row, *, requests: bool, extra_fields: tuple = ()):
 	"""Hold the act's locks (module docstring) and yield the row as read under them,
-	with ``pending``: the Pending request rows locked in step 1."""
+	with ``pending``: the Pending request rows locked in step 1. ``extra_fields`` are
+	read with ``ROW_FIELDS`` in the locking read."""
 	from jarvis.chat import txn
 	from jarvis.chat.custom_skills_api import _catalog_lock
 
@@ -249,7 +252,7 @@ def locked(row, *, requests: bool):
 	pending = lock_requests(pending_requests(row.name)) if requests else []
 	shared = is_shared(row)
 	with _catalog_lock() if shared else contextlib.nullcontext():
-		cur = _lock_row(row.name)
+		cur = _lock_row(row.name, *extra_fields)
 		moved = requests and set(pending_requests(cur.name, lock=True)) != set(pending)
 		if moved or is_shared(cur) != shared:
 			frappe.throw(_("This skill changed while you acted on it. Try again."), frappe.ValidationError)
@@ -288,8 +291,8 @@ def lock_requests(names: list[str]) -> list[str]:
 	return list(names)
 
 
-def _lock_row(name: str) -> frappe._dict:
-	fields = list(ROW_FIELDS)
+def _lock_row(name: str, *extra_fields: str) -> frappe._dict:
+	fields = [*ROW_FIELDS, *extra_fields]
 	if hold_fields_exist():
 		fields += [HOLD_FIELD, HOLD_REASON_FIELD]
 	with busy_as_retry():
@@ -341,16 +344,19 @@ def commit_act() -> None:
 		raise
 
 
-def after_commit(row, verb: str) -> None:
+def after_commit(row, verb: str, *, new_owner: str | None = None) -> None:
 	"""Drop the owner's personal-skill count (``jarvis:pskills:{user}``) once the change
-	is committed, so a recount cannot cache the old state, and log the act (ids only)."""
+	is committed, so a recount cannot cache the old state, and log the act (ids only).
+	A hand-over passes ``new_owner``: their count changed too."""
 	from jarvis.chat.custom_skills import personal_skills_cache_key
 
-	if row.get("owner"):
-		frappe.cache().delete_value(personal_skills_cache_key(row.owner))
-	frappe.logger("jarvis").info(
-		f"skills_admin.{verb} skill={row.name} owner={row.get('owner')} admin={frappe.session.user}"
-	)
+	for user in (row.get("owner"), new_owner):
+		if user:
+			frappe.cache().delete_value(personal_skills_cache_key(user))
+	line = f"skills_admin.{verb} skill={row.name} owner={row.get('owner')} admin={frappe.session.user}"
+	if new_owner:
+		line += f" new_owner={new_owner}"
+	frappe.logger("jarvis").info(line)
 
 
 # --------------------------------------------------------------------------- #
@@ -413,24 +419,29 @@ def notify(row, kind: str, body: str) -> None:
 	is gone; D5, plan check item 9). Never the acting admin. No document link. Each one
 	in a savepoint: a failure is logged and never fails the committed act."""
 	for user in sorted(_recipients(row) - {frappe.session.user}):
-		savepoint = "jarvis_skill_admin_notice"
-		try:
-			frappe.db.savepoint(savepoint)
-			frappe.get_doc(
-				{
-					"doctype": "Notification Log",
-					"for_user": user,
-					"type": "Alert",
-					"subject": f"{kind}: {row.skill_name}"[:140],
-					"email_content": body,
-				}
-			).insert(ignore_permissions=True)
-			frappe.db.release_savepoint(savepoint)
-		except Exception:
-			frappe.db.rollback(save_point=savepoint)
-			frappe.log_error(
-				title=f"jarvis.chat.skills_admin.notify_failed: {row.name}", message=frappe.get_traceback()
-			)
+		notify_user(user, row, kind, body)
+
+
+def notify_user(user: str, row, kind: str, body: str) -> None:
+	"""One notice of ``notify``'s, to ``user``, in its own savepoint."""
+	savepoint = "jarvis_skill_admin_notice"
+	try:
+		frappe.db.savepoint(savepoint)
+		frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": user,
+				"type": "Alert",
+				"subject": f"{kind}: {row.skill_name}"[:140],
+				"email_content": body,
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.release_savepoint(savepoint)
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		frappe.log_error(
+			title=f"jarvis.chat.skills_admin.notify_failed: {row.name}", message=frappe.get_traceback()
+		)
 
 
 def _recipients(row) -> set[str]:
