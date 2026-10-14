@@ -175,3 +175,40 @@ describe("shell store: reviewer badge (sidebar Skills)", () => {
 		delete window.is_skill_reviewer;
 	});
 });
+
+describe("shell store: running conversations (#591)", () => {
+	beforeEach(() => {
+		store.runningConvs = new Set();
+	});
+
+	it("adds and removes chats by replacing the reactive Set", () => {
+		const empty = store.runningConvs;
+		store.markRunning("conv-a");
+		const one = store.runningConvs;
+		expect(one).not.toBe(empty);
+		expect([...one]).toEqual(["conv-a"]);
+		store.markRunning("conv-b");
+		const two = store.runningConvs;
+		expect(two).not.toBe(one);
+		expect([...two]).toEqual(["conv-a", "conv-b"]);
+		store.clearRunning("conv-a");
+		expect(store.runningConvs).not.toBe(two);
+		expect([...store.runningConvs]).toEqual(["conv-b"]);
+		expect([...two]).toEqual(["conv-a", "conv-b"]);
+	});
+
+	it("ignores empty ids and redundant changes without replacing the Set", () => {
+		const empty = store.runningConvs;
+		for (const id of [null, undefined, ""]) {
+			store.markRunning(id);
+			store.clearRunning(id);
+		}
+		store.clearRunning("missing");
+		expect(store.runningConvs).toBe(empty);
+		store.markRunning("conv-a");
+		const one = store.runningConvs;
+		store.markRunning("conv-a");
+		store.clearRunning("missing");
+		expect(store.runningConvs).toBe(one);
+	});
+});
