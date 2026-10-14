@@ -69,7 +69,7 @@ export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
 	if (!specific && e && (e.status === 401 || e.status === 403)) {
 		return SESSION_EXPIRED_MESSAGE;
 	}
-	return messageText(typeof specific === "string" && specific ? specific : fallback);
+	return (typeof specific === "string" && messageText(specific)) || messageText(fallback);
 }
 
 // Frappe HTML-escapes throw() messages before they reach the client, so a backend
@@ -77,15 +77,18 @@ export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
 // literally if shown as-is. Decode entities and drop tags by parsing into an inert
 // document (DOMParser: no script runs and no image loads, which a detached
 // element's innerHTML does not guarantee). Text only, and bounded in length.
-export const MAX_MESSAGE_CHARS = 500;
-const MAX_SOURCE_CHARS = 5000;
+// The caps are guards against an absurd payload, not formatting: a long validation
+// message is shown whole.
+export const MAX_MESSAGE_CHARS = 4000;
+const MAX_SOURCE_CHARS = 50000;
+const MAX_PAYLOAD_CHARS = 200000;
 
 export function messageText(raw) {
 	const src = String(raw ?? "").slice(0, MAX_SOURCE_CHARS);
 	if (typeof DOMParser === "undefined") return clip(src.trim());
 	const doc = new DOMParser().parseFromString(src, "text/html");
-	// A message that is nothing but a tag has no text: show it as it came, as text.
-	return clip((doc.body.textContent || src).trim());
+	// A message that is nothing but markup has no text: the caller's fallback speaks.
+	return clip((doc.body.textContent || "").trim());
 }
 
 function clip(text) {
@@ -95,7 +98,7 @@ function clip(text) {
 // The first message in a response's `_server_messages` (a JSON array of JSON
 // strings), or "". Never throws, whatever the payload looks like.
 export function firstServerMessage(raw) {
-	if (typeof raw !== "string" || raw.length > MAX_SOURCE_CHARS * 4) return "";
+	if (typeof raw !== "string" || raw.length > MAX_PAYLOAD_CHARS) return "";
 	try {
 		const list = JSON.parse(raw);
 		const first = Array.isArray(list) ? list[0] : list;

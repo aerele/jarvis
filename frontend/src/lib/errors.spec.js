@@ -55,13 +55,20 @@ describe("messageText", () => {
 		expect(host.querySelector("img")).toBeNull();
 	});
 
-	it("shows a message that is only a tag as the text it came as", () => {
-		expect(messageText("<img src=x onerror=1>")).toBe("<img src=x onerror=1>");
+	it("returns nothing for markup with no text, so the caller's own sentence is used", () => {
+		expect(messageText("<img src=x onerror=1>")).toBe("");
+		expect(errMessage({ message: "<img src=x onerror=1>" })).toBe(GENERIC_ERROR_MESSAGE);
+		expect(errMessage({ message: "<br>" }, "Could not save.")).toBe("Could not save.");
+	});
+
+	it("keeps a long, legitimate message whole", () => {
+		const long = "Row 12 is missing a value. ".repeat(100);
+		expect(messageText(long)).toBe(long.trim());
 	});
 
 	it("bounds the length", () => {
-		const out = messageText("x".repeat(100000));
-		expect(out.length).toBeLessThanOrEqual(MAX_MESSAGE_CHARS);
+		const out = messageText("x".repeat(500000));
+		expect(out.length).toBe(MAX_MESSAGE_CHARS);
 		expect(out.endsWith("…")).toBe(true);
 		expect(messageText("short")).toBe("short");
 	});
@@ -79,7 +86,7 @@ describe("errMessage", () => {
 		expect(errMessage({ messages: ["<p>Could not save &amp; close</p>"] })).toBe(
 			"Could not save & close"
 		);
-		expect(errMessage({ message: "y".repeat(9000) }).length).toBeLessThanOrEqual(
+		expect(errMessage({ message: "y".repeat(90000) }).length).toBeLessThanOrEqual(
 			MAX_MESSAGE_CHARS
 		);
 	});
@@ -124,7 +131,7 @@ describe("firstServerMessage", () => {
 
 	it("does not parse an oversized payload", () => {
 		const parse = vi.spyOn(JSON, "parse");
-		expect(firstServerMessage(wrap("z".repeat(100000)))).toBe("");
+		expect(firstServerMessage(wrap("z".repeat(300000)))).toBe("");
 		expect(parse).not.toHaveBeenCalled();
 	});
 });
