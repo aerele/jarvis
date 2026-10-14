@@ -484,7 +484,7 @@ def _retry_once_later(m, now, *, expected) -> bool:
 	)
 	cursor = getattr(frappe.db, "_cursor", None)
 	landed = bool(cursor and cursor.rowcount == 1)  # read BEFORE commit resets it
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the retry slot
 	return landed
 
 
