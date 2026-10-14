@@ -44,3 +44,10 @@ export const mySkillPromotion = (name) => call(CS + "my_skill_promotion", { name
 // Role options for the promotion Role picker: MY OWN targetable desk roles
 // (a requester promotes to a team they belong to). -> { roles: [...] }
 export const promotableTargetRoles = () => call(CS + "promotable_target_roles");
+
+// An administrator's act on one of MY skills (hold, release, delete) leaves a
+// notice on my Skills list (`notices` on the list envelope). Dismissing marks the
+// ones named read on the server (all of them when `names` is empty).
+// -> { ok, dismissed }
+export const dismissSkillNotices = (names) =>
+	call(CS + "dismiss_skill_notices", { names: JSON.stringify(Array.from(names || [])) });

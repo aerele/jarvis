@@ -32,6 +32,8 @@ export const SEARCH_WAIT_MS = 300;
  * @param {string} o.searchSelector  the search box, inside rootEl (its input gets focus)
  * @param {string} o.openSelector    each row's "open" button, inside listEl
  * @param {string} o.failureText     the sentence for a load that failed with no message
+ * @param {Function} [o.onEnvelope]  (answer) called with each answer this list keeps, for a
+ *                                   page that reads an extra key of it (a sync status)
  * @param {number} [o.pageSize]      rows of the first page and of each Load more
  * @param {number} [o.pageMax]       most rows one request may ask for
  * @param {number} [o.keepMaxPages]  most requests a "keep" makes; past it the list
@@ -86,7 +88,8 @@ export function useAdminList(o) {
 			start += pageLength;
 			if (!res.has_more) break;
 		}
-		return { rows: out, total: res.total, has_more: !!res.has_more };
+		// The last answer's other keys (a page's extras) ride along with the joined rows.
+		return { ...res, rows: out, has_more: !!res.has_more };
 	}
 
 	async function load(mode = "reset") {
@@ -127,6 +130,7 @@ export function useAdminList(o) {
 			error.value = "";
 			moreFailed.value = false;
 			loaded.value = true;
+			if (o.onEnvelope) o.onEnvelope(res);
 		} catch (e) {
 			if (mine !== latest) return;
 			error.value = errMessage(e, o.failureText);
