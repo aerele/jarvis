@@ -29,6 +29,7 @@ describe("reply Copy wiring", () => {
 		const fn = body("copyReplyMsg");
 		expect(fn).toMatch(/copyReply\(id, content, \{/);
 		expect(fn).toMatch(/render: \(text\) => render\(text, false\)/);
+		expect(fn).toMatch(/markdown: \(text\) => stripBlocks\(text\)/);
 		expect(fn).toMatch(/onCopied: showCopied/);
 		expect(fn).toMatch(/reportError\(/);
 	});

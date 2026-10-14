@@ -8556,6 +8556,7 @@ const copyFailedId = ref("");
 function copyReplyMsg(id, content) {
 	copyReply(id, content, {
 		render: (text) => render(text, false),
+		markdown: (text) => stripBlocks(text),
 		onCopied: showCopied,
 		onFailed: (failedId, reason) => {
 			copiedId.value = "";

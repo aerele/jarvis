@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderMarkdown } from "@/markdown";
-import { copyReply, copyRich, plainText, prepareRich } from "./richCopy";
+import {
+	MARKDOWN_TYPE,
+	copyReply,
+	copyRich,
+	insertAtCursor,
+	pastedMarkdown,
+	plainText,
+	prepareRich,
+} from "./richCopy";
 
 const REPLY = [
 	"## Outstanding summary",
@@ -279,5 +287,63 @@ describe("copyReply (the chat's Copy on a reply)", () => {
 		releaseFirst({ ok: true });
 		await a;
 		expect(d.onCopied.mock.calls).toEqual([["new"]]);
+	});
+});
+
+describe("the Markdown flavour for pasting back into the chat", () => {
+	it("copyRich adds the Markdown on the copy event when given", async () => {
+		const data = fakeExecCommand();
+		await copyRich(html(), { win: {}, markdown: "**6**" });
+		expect(data[MARKDOWN_TYPE]).toBe("**6**");
+		expect(data["text/plain"]).not.toContain("**");
+	});
+	it("copyRich adds no Markdown type when none is given", async () => {
+		const data = fakeExecCommand();
+		await copyRich(html(), { win: {} });
+		expect(MARKDOWN_TYPE in data).toBe(false);
+	});
+	it("copyReply hands copy the cleaned Markdown", async () => {
+		const copy = vi.fn().mockResolvedValue({ ok: true });
+		await copyReply("m1", "**x** [[block]]", {
+			render: (md) => renderMarkdown(md),
+			markdown: (t) => t.replace(" [[block]]", ""),
+			onCopied: vi.fn(),
+			copy,
+		});
+		expect(copy.mock.calls[0][1]).toEqual({ markdown: "**x**" });
+	});
+	it("pastedMarkdown reads the type and tolerates a missing or throwing clipboard", () => {
+		expect(pastedMarkdown({ getData: (t) => (t === MARKDOWN_TYPE ? "# a" : "a") })).toBe(
+			"# a"
+		);
+		expect(pastedMarkdown({ getData: () => "" })).toBe("");
+		expect(pastedMarkdown(null)).toBe("");
+		expect(
+			pastedMarkdown({
+				getData: () => {
+					throw new Error("x");
+				},
+			})
+		).toBe("");
+	});
+	it("insertAtCursor replaces the selection and fires input when insertText is unavailable", () => {
+		const ta = document.createElement("textarea");
+		document.body.appendChild(ta);
+		ta.value = "a XX b";
+		ta.setSelectionRange(2, 4);
+		let fired = 0;
+		ta.addEventListener("input", () => fired++);
+		insertAtCursor(ta, "**m**");
+		expect(ta.value).toBe("a **m** b");
+		expect(ta.selectionStart).toBe(7);
+		expect(fired).toBe(1);
+		ta.remove();
+	});
+	it("insertAtCursor uses insertText when the browser supports it", () => {
+		const ta = document.createElement("textarea");
+		document.execCommand = vi.fn(() => true);
+		insertAtCursor(ta, "x");
+		expect(document.execCommand).toHaveBeenCalledWith("insertText", false, "x");
+		expect(ta.value).toBe("");
 	});
 });

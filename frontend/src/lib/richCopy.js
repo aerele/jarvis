@@ -2,6 +2,11 @@
 // Word, Sheets) take the text/html flavour with headings, lists and tables
 // intact, plain ones (a terminal, WhatsApp) take text/plain, which keeps list
 // numbers, bullets and table cells but no Markdown markers like ** or |---|.
+// A third, Jarvis-only flavour carries the reply's Markdown, so pasting it back
+// into the chat box gives the same message, not the flattened plain text.
+
+/** Clipboard type for the Markdown of a copied reply. Only the chat box reads it. */
+export const MARKDOWN_TYPE = "text/x-jarvis-markdown";
 
 const BLOCK = new Set([
 	"P",
@@ -176,7 +181,12 @@ export function prepareRich(html, doc = globalThis.document) {
 // `copy` event filled in by hand: it runs inside the click's user activation in
 // every browser and leaves the user's selection and focus alone. Only when the
 // browser refuses that does it try the async Clipboard API.
-export function copyRich(html, { win = globalThis.window, doc = globalThis.document } = {}) {
+// `markdown` rides along on the synchronous path only: the async Clipboard API
+// accepts no custom types, and that path is the rare fallback.
+export function copyRich(
+	html,
+	{ win = globalThis.window, doc = globalThis.document, markdown = "" } = {}
+) {
 	let payload;
 	try {
 		payload = prepareRich(html, doc);
@@ -184,7 +194,7 @@ export function copyRich(html, { win = globalThis.window, doc = globalThis.docum
 		return Promise.resolve({ ok: false, reason: `prepare_failed:${e?.name || "Error"}` });
 	}
 	if (!payload.text) return Promise.resolve({ ok: false, reason: "empty" });
-	if (copyViaEvent(payload, doc)) return Promise.resolve({ ok: true });
+	if (copyViaEvent({ ...payload, markdown }, doc)) return Promise.resolve({ ok: true });
 	const clip = win?.navigator?.clipboard;
 	if (!clip?.write || typeof win.ClipboardItem !== "function") {
 		return Promise.resolve({ ok: false, reason: "no_clipboard_api" });
@@ -206,12 +216,13 @@ export function copyRich(html, { win = globalThis.window, doc = globalThis.docum
 	);
 }
 
-function copyViaEvent({ html, text }, doc) {
+function copyViaEvent({ html, text, markdown }, doc) {
 	let filled = false;
 	const onCopy = (e) => {
 		if (!e.clipboardData) return;
 		e.clipboardData.setData("text/html", html);
 		e.clipboardData.setData("text/plain", text);
+		if (markdown) e.clipboardData.setData(MARKDOWN_TYPE, markdown);
 		e.preventDefault();
 		filled = true;
 	};
@@ -231,17 +242,22 @@ function copyViaEvent({ html, text }, doc) {
 // Only the latest click may move the tick: a slow async write for an older
 // reply must not replace the newer one's.
 let _latest = 0;
-export function copyReply(id, content, { render, onCopied, onFailed, report, copy = copyRich }) {
+export function copyReply(
+	id,
+	content,
+	{ render, markdown = (t) => t, onCopied, onFailed, report, copy = copyRich }
+) {
 	const token = ++_latest;
-	let html;
+	let html, md;
 	try {
 		html = render(content);
+		md = markdown(content);
 	} catch (e) {
 		report?.(`render_failed:${e?.name || "Error"}`);
 		onFailed?.(id, "render_failed");
 		return Promise.resolve(false);
 	}
-	return copy(html).then(({ ok, reason }) => {
+	return copy(html, { markdown: md }).then(({ ok, reason }) => {
 		if (token !== _latest) return ok;
 		if (ok) onCopied(id);
 		else {
@@ -250,4 +266,29 @@ export function copyReply(id, content, { render, onCopied, onFailed, report, cop
 		}
 		return ok;
 	});
+}
+
+/** The Markdown of a copied Jarvis reply in a paste, or "" when there is none. */
+export function pastedMarkdown(clipboardData) {
+	try {
+		return clipboardData?.getData?.(MARKDOWN_TYPE) || "";
+	} catch (e) {
+		return "";
+	}
+}
+
+// Put text at the textarea's caret, replacing any selection. insertText keeps
+// the browser's undo history and fires `input` itself, so v-model follows; the
+// fallback edits the value directly and fires `input` by hand.
+export function insertAtCursor(el, text, doc = globalThis.document) {
+	el.focus();
+	let done = false;
+	try {
+		done = doc.execCommand("insertText", false, text);
+	} catch (e) {
+		done = false;
+	}
+	if (done) return;
+	el.setRangeText(text, el.selectionStart, el.selectionEnd, "end");
+	el.dispatchEvent(new Event("input", { bubbles: true }));
 }
