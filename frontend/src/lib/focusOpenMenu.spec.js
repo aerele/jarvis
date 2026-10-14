@@ -68,6 +68,24 @@ describe("focusOpenMenu", () => {
 		expect(document.activeElement).toBe(item);
 	});
 
+	it("focuses the menu a trigger controls, not another open one", () => {
+		vi.stubGlobal("requestAnimationFrame", (cb) => cb());
+		const other = drawMenu();
+		const mine = drawMenu({ "data-reka-menu-content": "", id: "menu-mine" });
+		const trigger = document.createElement("button");
+		trigger.setAttribute("aria-controls", "menu-mine");
+		focusOpenMenu(trigger);
+		expect(document.activeElement).toBe(mine);
+		expect(document.activeElement).not.toBe(other);
+	});
+
+	it("does nothing for a trigger that controls nothing yet", () => {
+		vi.stubGlobal("requestAnimationFrame", (cb) => cb());
+		const other = drawMenu();
+		focusOpenMenu(document.createElement("button"));
+		expect(document.activeElement).not.toBe(other);
+	});
+
 	it("does nothing when there is no menu", () => {
 		vi.stubGlobal("requestAnimationFrame", (cb) => cb());
 		expect(() => focusOpenMenu()).not.toThrow();
@@ -77,17 +95,21 @@ describe("focusOpenMenu", () => {
 describe("sidebar user menu", () => {
 	it("moves focus into the menu when it opens, and only then", () => {
 		vi.stubGlobal("requestAnimationFrame", (cb) => cb());
-		const menu = drawMenu();
+		// Another menu is open too: the one this button controls is the one taken.
+		const other = drawMenu();
+		const menu = drawMenu({ "data-reka-menu-content": "", id: "user-menu" });
 		const w = mount(UserMenu, {
 			global: {
 				provide: { $session: { user: "a@b.c", logout: vi.fn() } },
 			},
 		});
+		w.find("button").element.setAttribute("aria-controls", "user-menu");
 		const dropdown = w.findComponent({ name: "Dropdown" });
 		dropdown.vm.$emit("update:open", false);
 		expect(document.activeElement).not.toBe(menu);
 		dropdown.vm.$emit("update:open", true);
 		expect(document.activeElement).toBe(menu);
+		expect(document.activeElement).not.toBe(other);
 		w.unmount();
 	});
 });

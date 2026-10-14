@@ -443,9 +443,14 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 			],
 			["error", (p) => p.reject(new Error("Network down")), "Network down"],
 			[
-				"markup in an error",
+				"markup only in an error: its own sentence",
 				(p) => p.reject(new Error("<img src=x onerror=1>")),
-				"&lt;img src=x onerror=1&gt;",
+				"Couldn&#39;t retry that.",
+			],
+			[
+				"markup beside text in an error",
+				(p) => p.reject(new Error("Rate <b>limit</b> hit: a < b")),
+				"Rate limit hit: a &lt; b",
 			],
 		]) {
 			toast.error.mockClear();
