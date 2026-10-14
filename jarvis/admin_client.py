@@ -582,8 +582,8 @@ def _public_origin(trust_host: bool = False) -> str:
 def _onboarding_host_ok() -> bool:
 	"""True only when this bench has a CONFIGURED public https host. Reads only
 	site_config ``host_name`` (never the request Host header, which is
-	spoofable), validates it with ``_is_real_public_host``. No ``host_name``, a
-	non-https scheme, or a localhost/reserved/IP ``host_name``, blocks. Drives
+	spoofable). Accepts public domains and globally routable IPv4 addresses.
+	No ``host_name``, a non-https scheme, or a local/reserved host blocks. Drives
 	the localhost onboarding hard-block.
 
 	Dev/e2e benches that need onboarding to work set a public-looking
@@ -596,7 +596,7 @@ def _onboarding_host_ok() -> bool:
 	calls start_signup would fail on CI's fresh DB.
 
 	Fails OPEN on any error: a probe failure must never block a legitimate
-	signup - only a CONFIDENT localhost/reserved/IP reading blocks."""
+	signup - only a CONFIDENT non-public host reading blocks."""
 	if frappe.flags.in_test and not frappe.flags.get("test_host_guard"):
 		return True
 	try:
@@ -614,7 +614,12 @@ def _onboarding_host_ok() -> bool:
 			# not pass the guard.
 			return False
 		host = (parts.hostname or "").lower().rstrip(".")
-		return _is_real_public_host(host)
+		try:
+			address = ipaddress.ip_address(host)
+		except ValueError:
+			return _is_real_public_host(host)
+		# _public_origin does not yet preserve bracketed IPv6 authorities.
+		return address.version == 4 and address.is_global and not address.is_multicast
 	except Exception:
 		return True
 
