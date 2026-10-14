@@ -128,7 +128,7 @@
 						/>
 					</div>
 					<div
-						v-if="filtersOpen"
+						v-show="filtersOpen"
 						id="jv-skill-admin-more-filters"
 						class="jv-skill-admin-filters grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center"
 					>
@@ -376,7 +376,10 @@
 								     out, and the short word in the slot is what it shows. While its
 								     menu is open the button is ringed, so it is plain which row
 								     the menu belongs to. -->
-								<div role="cell" class="jv-skill-admin-cell-actions">
+								<div
+									role="cell"
+									class="jv-skill-admin-cell-actions jv-admin-actions-cell"
+								>
 									<Dropdown
 										:options="actionsFor(row)"
 										:placement="cardLayout ? 'left' : 'right'"
@@ -438,8 +441,8 @@
 			:skillName="skillLabel(holding)"
 			:ownerLabel="ownerText(holding)"
 			:company="isCompany(holding)"
-			@held="onActed"
-			@failed="onActed"
+			@held="onHoldMade"
+			@failed="onHoldMade"
 		/>
 		<SkillReleaseDialog
 			v-if="releasing"
@@ -466,7 +469,7 @@
 // caps probe says `analysis` (the Jarvis Admin and System Manager roles). The
 // server checks the role itself on every call (jarvis.chat.skills_admin_api), so a
 // stale client gate can only hide the tab.
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
 	Badge,
 	Breadcrumbs,
@@ -482,7 +485,7 @@ import SkillAdminDialog from "./SkillAdminDialog.vue";
 import SkillHoldDialog from "./SkillHoldDialog.vue";
 import SkillReleaseDialog from "./SkillReleaseDialog.vue";
 import { useConfirm } from "@/composables/useConfirm";
-import { focusLost, useAdminList } from "@/composables/useAdminList";
+import { useAdminList } from "@/composables/useAdminList";
 import { useAdminRowMenu } from "@/composables/useAdminRowMenu";
 import { adminDelete, adminGetSkill, adminListSkills, adminSkillOwners } from "@/api/skillsAdmin";
 import { applyCustomSkills, getCustomSkillsSyncStatus } from "@/api";
@@ -585,6 +588,7 @@ const {
 	loadMore,
 	onSearch,
 	searchBox,
+	settled,
 	usedKeyboard,
 } = useAdminList({
 	fetchPage,
@@ -720,9 +724,13 @@ function actionsFor(row) {
 	return groups;
 }
 
-const { cardLayout, focusOpenMenu, fromMenu, focusRow } = useAdminRowMenu({
+const { cardLayout, focusOpenMenu, fromMenu, focusRow, focusAfterHold } = useAdminRowMenu({
 	listEl,
 	dialogOpen,
+	rows,
+	error,
+	settled,
+	searchBox,
 	rowSelector: ".jv-skill-admin-row",
 	rowKey: "skill",
 	actionsSelector: ".jv-skill-admin-actions",
@@ -771,14 +779,17 @@ function holdServed() {
 	return name;
 }
 watch(rows, holdServed);
-// The dialog closed. It gave focus back to the Actions button that opened it, which is
-// not there any more when the skill is on hold (the row shows Release): focus goes
-// to the row instead of being left on the page.
-watch(holdOpen, async () => {
-	const name = holdServed();
-	if (!name) return;
-	await nextTick();
-	if (focusLost() && !dialogOpen()) await focusRow(name);
+// The dialog closed: the draft is looked at now, and focus is decided once the reload
+// has settled (see focusAfterHold). `holdMade` is the skill a hold was made for, as
+// the dialog said, even when it answered an error.
+let holdMade = "";
+watch(holdOpen, (open) => {
+	if (open || !holding.value) return;
+	const name = holding.value.name;
+	const made = holdMade === name;
+	holdMade = "";
+	holdServed();
+	return focusAfterHold(name, { made });
 });
 
 function askHold(row) {
@@ -795,6 +806,10 @@ function askRelease(row) {
 
 // After a hold or a release, answered or refused: the row's state on the server
 // may have changed either way.
+function onHoldMade(payload) {
+	holdMade = payload.name;
+	return onActed(payload);
+}
 async function onActed({ name, needs_apply }) {
 	if (needs_apply) needsApply.value = true;
 	await load("keep");
@@ -954,9 +969,6 @@ onBeforeUnmount(stopSyncPoll);
 	align-items: center;
 	justify-content: flex-end;
 	gap: 0.25rem;
-	/* Room for the 2px ring on the open Actions button: the list box clips at its
-	   edge, and the button sits right on it (on its left in a card). */
-	padding: 0.25rem;
 }
 
 /* Too narrow for five lanes: no sideways scrolling, the row folds. The header row

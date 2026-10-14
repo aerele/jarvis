@@ -1,25 +1,21 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { isCardWidth } from "./useAdminRowMenu";
+import { cardLimitPx } from "./useAdminRowMenu";
 
 // The Admin tabs' styles fold a row into a card at `max-width: 48rem`.
-describe("isCardWidth", () => {
+describe("cardLimitPx", () => {
 	afterEach(() => {
 		document.documentElement.style.fontSize = "";
 	});
 
-	it("counts 48rem as a card, with the limit included", () => {
+	it("is 48rem: 768px at a 16px root font size", () => {
 		document.documentElement.style.fontSize = "16px";
-		expect(isCardWidth(767)).toBe(true);
-		expect(isCardWidth(768)).toBe(true);
-		expect(isCardWidth(769)).toBe(false);
+		expect(cardLimitPx()).toBe(768);
 	});
 
 	it("follows the root font size, as rem does", () => {
 		document.documentElement.style.fontSize = "20px";
-		expect(isCardWidth(960)).toBe(true);
-		expect(isCardWidth(961)).toBe(false);
+		expect(cardLimitPx()).toBe(960);
 		document.documentElement.style.fontSize = "12px";
-		expect(isCardWidth(576)).toBe(true);
-		expect(isCardWidth(577)).toBe(false);
+		expect(cardLimitPx()).toBe(576);
 	});
 });

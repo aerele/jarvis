@@ -326,12 +326,17 @@ describe("Skills AdminTab, filters", () => {
 
 	it("keeps Audience, State and Hold in a disclosure, closed until opened", async () => {
 		const w = await mountWith([row("a")]);
-		for (const name of ["Audience", "State", "Hold"]) expect(control(w, name)).toBeUndefined();
+		// Kept in the page (hidden), so the toggle's aria-controls always has its target.
+		const shown = () =>
+			["Audience", "State", "Hold"].map(
+				(n) => !control(w, n).element.closest('[style*="display: none"]')
+			);
+		expect(shown()).toEqual([false, false, false]);
 		const toggle = button(w, "Filters");
 		expect(toggle.attributes("aria-expanded")).toBe("false");
 		await toggle.trigger("click");
 		expect(toggle.attributes("aria-expanded")).toBe("true");
-		for (const name of ["Audience", "State", "Hold"]) expect(control(w, name)).toBeDefined();
+		expect(shown()).toEqual([true, true, true]);
 		expect(button(w, "Filters")).toBeDefined();
 	});
 
@@ -711,6 +716,35 @@ describe("Skills AdminTab, the Actions menu", () => {
 		await flushPromises();
 		expect(w.find(".stub-hold").attributes("data-open")).toBe("1");
 		expect(w.findAll(".stub-hold")).toHaveLength(1);
+	});
+
+	it("puts focus on the list when a hold was made and a filter drops the skill", async () => {
+		const w = await mountWith([row("z"), row("a")], undefined, { attachTo: document.body });
+		await menuItem(w, "a", "hold").trigger("click");
+		await flushPromises();
+		api.adminListSkills.mockResolvedValue(page([row("z")]));
+		const dialog = w.findComponent({ name: "SkillHoldDialog" });
+		dialog.vm.$emit("failed", { name: "a" });
+		await flushPromises();
+		document.activeElement.blur();
+		dialog.vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(document.activeElement).toBe(w.find(".jv-skill-admin-scroll").element);
+		w.unmount();
+	});
+
+	it("moves focus nowhere on a plain Cancel of the hold dialog", async () => {
+		const w = await mountWith([row("z"), row("a")], undefined, { attachTo: document.body });
+		await menuItem(w, "a", "hold").trigger("click");
+		await flushPromises();
+		api.adminListSkills.mockResolvedValue(page([row("z")]));
+		await button(w, "Refresh").trigger("click");
+		await flushPromises();
+		document.activeElement.blur();
+		w.findComponent({ name: "SkillHoldDialog" }).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(document.activeElement).toBe(document.body);
+		w.unmount();
 	});
 
 	it("takes the closed hold dialog away once the list shows the skill held", async () => {
