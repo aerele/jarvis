@@ -105,8 +105,9 @@ def has_skill_permission(doc, ptype: str = "read", user: str | None = None) -> b
 	# a bool (never frappe.throw) — get_doc_permissions calls this hook for every
 	# ptype while building a doc's perm dict, so a throw here would break plain
 	# reads. The clear user-facing "you can only edit your own skills" message is
-	# raised by the SPA write endpoints (custom_skills_api._require_skill_owner);
-	# generic REST writes fall back to Frappe's "does not have access" message.
+	# raised by the SPA write endpoints (custom_skills_api._require_skill_editor, whose
+	# reviewer branch saves with ignore_permissions); generic REST writes fall back to
+	# Frappe's "does not have access" message.
 	return (doc.get("owner") or "") == user
 
 
