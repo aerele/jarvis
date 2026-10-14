@@ -86,7 +86,9 @@ describe("SkillsList: an administrator's hold", () => {
 		await flushPromises();
 		const held = (name) => w.find(`.row[data-name="${name}"] .jv-skill-held`);
 		expect(held("S4").text()).toBe("On hold by an administrator: Emails customers");
-		expect(held("S4").attributes("title")).toBe("On hold by an administrator: Emails customers");
+		expect(held("S4").attributes("title")).toBe(
+			"On hold by an administrator: Emails customers"
+		);
 		expect(held("S5").text()).toBe("On hold by an administrator");
 		expect(held("S1").exists()).toBe(false);
 		w.unmount();
@@ -123,7 +125,9 @@ describe("SkillsList: what an administrator did", () => {
 		list.onEnvelope({ notices: [notice(1), notice(2)] });
 		await flushPromises();
 		expect(shown(w)).toEqual(["N1", "N2"]);
-		expect(w.find(".jv-skill-notice").text()).toContain('An administrator deleted your skill "s1".');
+		expect(w.find(".jv-skill-notice").text()).toContain(
+			'An administrator deleted your skill "s1".'
+		);
 		w.unmount();
 	});
 
