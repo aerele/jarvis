@@ -33,6 +33,10 @@ or silently corrupt, and it accepts everything Frappe accepts.
   (``naming_series``, empty options, a falsy value) and for ``status``, which controllers set
   themselves before Frappe validates the Select.
 
+- Any field: a value holding the `` [TRUNCATED: N more chars]`` marker is a value
+  the agent's result budget cut on the way to the model (#715 F11). Saving it would
+  replace real data with a fragment, so it is rejected.
+
 Child rows (Table fields) are checked against the child doctype, and the message
 names the table and row. A rejection raises ``InvalidFieldValueError`` (FIXABLE)
 naming the field and the bad value, before anything is written."""
@@ -47,6 +51,7 @@ import frappe
 from frappe.utils import cint, cstr, flt
 
 from jarvis.exceptions import InvalidFieldValueError
+from jarvis.tools._doc_budget import CUT_MARKER
 
 _INT_TYPES = frozenset({"Int", "Long Int"})
 _FLOAT_TYPES = frozenset({"Float", "Currency", "Percent"})
@@ -84,6 +89,7 @@ def check_values(doctype: str, values: dict, *, where: str = "") -> dict:
 			if any(new is not old for new, old in zip(rows, value, strict=True)):
 				changed[fieldname] = rows
 		else:
+			_refuse_cut(df, value, where)
 			checked = _check(df, value, where)
 			if checked is not value:
 				changed[fieldname] = checked
@@ -407,6 +413,17 @@ def _check_select(df, value, where: str) -> None:
 	if cstr(value).strip() not in options:
 		listed = ", ".join(f'"{o}"' for o in options if o)
 		_reject(df, value, where, f"must be one of {listed}")
+
+
+def _refuse_cut(df, value, where: str) -> None:
+	text = value if isinstance(value, str) else cstr(value) if isinstance(value, list | dict) else ""
+	if CUT_MARKER.search(text):
+		raise InvalidFieldValueError(
+			f"{where}{df.label or df.fieldname} ({df.fieldname}) holds a value get_doc cut to fit the "
+			"context window (it contains a [TRUNCATED: N more chars] marker), not the real data. Read "
+			f"the whole field first: get_doc fields=['{df.fieldname}'] with text_offset, following "
+			"next_call, then write the full value."
+		)
 
 
 def _reject(df, value, where: str, rule: str) -> None:
