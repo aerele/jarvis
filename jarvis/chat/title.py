@@ -234,6 +234,11 @@ def _opening_user_messages(conversation_id: str, *, limit: int = 6) -> str:
 	find the real topic even when it follows a greeting, and decide greeting-vs-topic ITSELF — in
 	any language — rather than us pre-filtering against a hardcoded English greeting list. Returns
 	"" when there is no user message yet."""
+	return "\n".join(_opening_user_texts(conversation_id, limit=limit))
+
+
+def _opening_user_texts(conversation_id: str, *, limit: int = 6) -> list[str]:
+	"""The first few user messages, cleaned, one entry per message, empties dropped."""
 	rows = frappe.get_all(
 		MSG,
 		filters={"conversation": conversation_id, "role": "user"},
@@ -248,7 +253,27 @@ def _opening_user_messages(conversation_id: str, *, limit: int = 6) -> str:
 		c = re.sub(r"\n*📎.*$", "", c).strip()
 		if c:
 			parts.append(c)
-	return "\n".join(parts)
+	return parts
+
+
+def plain_title(conversation_id: str) -> str:
+	"""A title from the first non-greeting user message, with no model call.
+
+	Used where an LLM title would start its own Claude CLI process (admin-v2#657). Same
+	shape as a generated title: first meaningful line, unwrapped, at most
+	``_TITLE_MAX_LEN`` characters, cut at a word boundary. "" while the chat holds only
+	greetings, which leaves it "New chat" and retries on the next turn, like the LLM path."""
+	for text in _opening_user_texts(conversation_id):
+		if _is_greeting(text):
+			continue
+		title = normalize_title(text)
+		first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+		if len(first_line) > _TITLE_MAX_LEN and " " in title:
+			title = title.rsplit(" ", 1)[0]  # normalize_title cut mid-word; drop the stub
+		title = title.rstrip(" ,;:-").strip()
+		if title:
+			return title[:1].upper() + title[1:]
+	return ""
 
 
 def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
@@ -364,7 +389,7 @@ def autotitle_job(conversation_id: str, user: str) -> None:
 	logged, never affects the finished turn.
 	"""
 	try:
-		from jarvis.chat.turn_handler import _resolve_model_and_provider
+		from jarvis.chat.turn_handler import _resolve_model_and_provider, one_shot_runs_on_claude_plan
 
 		settings = frappe.get_single("Jarvis Settings")
 		gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
@@ -380,6 +405,7 @@ def autotitle_job(conversation_id: str, user: str) -> None:
 			gateway_url=gateway_url,
 			model=model,
 			provider=provider,
+			plain=one_shot_runs_on_claude_plan(settings, model, provider),
 		)
 	except Exception:
 		frappe.log_error(
@@ -388,22 +414,27 @@ def autotitle_job(conversation_id: str, user: str) -> None:
 		)
 
 
-def maybe_autotitle(conversation_id: str, user: str, *, gateway_url, model, provider) -> None:
+def maybe_autotitle(
+	conversation_id: str, user: str, *, gateway_url, model, provider, plain: bool = False
+) -> None:
 	"""Generate + set a concise title for a still-unnamed conversation.
 
 	No-op when the conversation already has a title (renamed by the user or
 	already auto-titled) or when nothing but greetings has been sent yet.
 	Publishes a ``conversation:renamed`` event so the sidebar updates live.
+	``plain`` takes the title from the first real message instead of a model turn.
 	"""
 	title = frappe.db.get_value(CONV, conversation_id, "title")
 	if title and title != "New chat":
 		return  # user renamed it, or we already titled it
 
-	source = _opening_user_messages(conversation_id)
-	if not source:
-		return  # no user message yet
-
-	new_title = _generate_via_gateway(gateway_url, source, model=model, provider=provider)
+	if plain:
+		new_title = plain_title(conversation_id)
+	else:
+		source = _opening_user_messages(conversation_id)
+		if not source:
+			return  # no user message yet
+		new_title = _generate_via_gateway(gateway_url, source, model=model, provider=provider)
 	# ONLY a real title from the model names the chat. SKIP / a generic greeting label / an empty
 	# result (a title-model failure) all leave the chat "New chat", retried on the next turn — so a
 	# greeting is NEVER titled, even during a title-model outage, and no deterministic fallback
