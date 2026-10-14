@@ -2264,32 +2264,36 @@ def push_bench_heartbeat(heartbeat: dict) -> dict:
 	return _post(path=_m("api.tenant.ingest_bench_heartbeat"), body={"heartbeat": heartbeat})
 
 
-def push_chat_feedback(item: dict) -> dict:
-	"""Push one chat-reply rating (thumbs up/down + optional note) to admin for the
-	tenant-wise Feedback dashboard. Admin upserts on (tenant, message). Called
-	best-effort from jarvis.chat.feedback.submit_feedback, which swallows failures
-	so a lost rating never blocks the tap.
-	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
-	return _post(path=_m("api.tenant.ingest_chat_feedback"), body={"item": item})
-
-
-# Short timeout for the two feedback pushes below, for the same reason as
-# _MODEL_CATALOG_TIMEOUT_S: they run SYNCHRONOUSLY inside a customer web request
-# (submit_session_feedback / submit_pulse_feedback, neither is enqueued), so at
-# the DEFAULT_TIMEOUT_S = 150 an admin that hangs rather than refuses would pin
-# a web worker for 2.5 minutes per submit. Both callers already treat any
-# failure as "lost response, acceptable", so a timeout is just the same loss
-# reached sooner. Admin's ingest is a single upsert; 10s is generous for it.
-# push_chat_feedback above predates this and keeps the default on purpose: it
-# is out of this change's scope, not a considered exception.
+# Short timeout for the three feedback pushes below. Admin's ingest is a single
+# upsert; 10s is generous for it. All three are sent by the feedback outbox's
+# delivery job and retry sweep (jarvis.chat.feedback_outbox), never inside a
+# customer web request; at the DEFAULT_TIMEOUT_S = 150 an admin that hangs
+# rather than refuses would hold a short-queue worker, and the sweep's whole
+# batch, for 2.5 minutes per row. A timeout is one failed attempt the outbox
+# retries.
 _FEEDBACK_TIMEOUT_S = 10
 
 
+def push_chat_feedback(item: dict) -> dict:
+	"""Push one chat-reply rating (thumbs up/down + optional note) to admin for the
+	tenant-wise Feedback dashboard. Admin upserts on (tenant, message), so a re-send
+	folds onto the same row. Called from jarvis.chat.feedback_outbox (the delivery
+	job and the retry sweep), which records the failure and retries.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError /
+	AdminRateLimitedError."""
+	return _post(
+		path=_m("api.tenant.ingest_chat_feedback"),
+		body={"item": item},
+		timeout_s=_FEEDBACK_TIMEOUT_S,
+	)
+
+
 def push_session_feedback(item: dict) -> dict:
-	"""Push one once-per-session popup response to admin. Called best-effort
-	from jarvis.chat.feedback._forward_session, which swallows failures -- a
-	lost response is acceptable, a blocked popup is not.
-	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
+	"""Push one once-per-session popup response to admin, which upserts on
+	(tenant, session_ref). Called from jarvis.chat.feedback_outbox, which records
+	the failure and retries.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError /
+	AdminRateLimitedError."""
 	return _post(
 		path=_m("api.tenant.ingest_session_feedback"),
 		body={"item": item},
@@ -2298,8 +2302,8 @@ def push_session_feedback(item: dict) -> dict:
 
 
 def push_pulse_feedback(item: dict) -> dict:
-	"""Push one periodic business-pulse response to admin. Same best-effort
-	contract as push_session_feedback."""
+	"""Push one periodic business-pulse response to admin, which upserts on
+	(tenant, period_key, user_ref). Same outbox contract as push_session_feedback."""
 	return _post(
 		path=_m("api.tenant.ingest_pulse_feedback"),
 		body={"item": item},
@@ -2616,6 +2620,17 @@ def _legacy_credentials(settings) -> tuple[str, str]:
 
 def _has_legacy_credentials(settings) -> bool:
 	return all(_legacy_credentials(settings))
+
+
+def has_credentials() -> bool:
+	"""True when this bench holds a credential set ``_post`` can sign in with: the
+	OAuth customer email and password, or the legacy api_key and api_secret.
+	Without either, ``_post`` raises AdminAuthError("not onboarded"). A local read,
+	no network: background senders use it to skip a push rather than fail it."""
+	settings = frappe.get_cached_doc("Jarvis Settings")
+	username = (settings.jarvis_admin_customer_email or "").strip()
+	password = (settings.get_password("jarvis_admin_customer_password", raise_exception=False) or "").strip()
+	return bool(username and password) or _has_legacy_credentials(settings)
 
 
 def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:

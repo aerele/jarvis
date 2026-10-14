@@ -1,0 +1,141 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-10-13 10:00:00.000000",
+ "description": "The bench's copy of a feedback answer until admin has it (jarvis.chat.feedback_outbox). One row per feedback identity, named {kind}-{sha1(kind:ref:user)[:20]} by the controller, so a re-rating replaces the row rather than adding one. No 'autoname' key by design: 'hash' would turn a name collision into a silent new random name instead of a DuplicateEntryError.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "kind",
+  "ref",
+  "user",
+  "column_break_1",
+  "status",
+  "attempts",
+  "next_retry_at",
+  "delivered_at",
+  "revision",
+  "detail_section",
+  "last_error",
+  "payload"
+ ],
+ "fields": [
+  {
+   "fieldname": "kind",
+   "fieldtype": "Select",
+   "label": "Kind",
+   "options": "Reply\nSession\nPulse",
+   "reqd": 1,
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Reply = a thumbs rating on one assistant reply; Session = the once-per-session popup; Pulse = the periodic business survey."
+  },
+  {
+   "fieldname": "ref",
+   "fieldtype": "Data",
+   "label": "Reference",
+   "length": 140,
+   "reqd": 1,
+   "read_only": 1,
+   "description": "What was rated: the Jarvis Chat Message (Reply), the Jarvis Conversation (Session) or the survey period key (Pulse)."
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Data",
+   "label": "User",
+   "length": 140,
+   "reqd": 1,
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "The session user who answered. Data, not a Link, so a pending row never blocks deleting the user."
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Pending\nDelivered\nFailed",
+   "default": "Pending",
+   "read_only": 1,
+   "search_index": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Pending = stored, admin has not acknowledged it yet. Delivered = admin acknowledged it. Failed = admin refused it, or every retry failed."
+  },
+  {
+   "fieldname": "attempts",
+   "fieldtype": "Int",
+   "label": "Attempts",
+   "default": "0",
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "Delivery attempts for the current revision. A rate-limited attempt is not counted."
+  },
+  {
+   "fieldname": "next_retry_at",
+   "fieldtype": "Datetime",
+   "label": "Next Retry At",
+   "read_only": 1,
+   "search_index": 1,
+   "in_list_view": 1,
+   "description": "When the retry sweep may send a Pending row again. Empty once Delivered or Failed."
+  },
+  {
+   "fieldname": "delivered_at",
+   "fieldtype": "Datetime",
+   "label": "Delivered At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "revision",
+   "fieldtype": "Int",
+   "label": "Revision",
+   "default": "1",
+   "read_only": 1,
+   "description": "Bumped on every new answer for this identity. A delivery marks the row Delivered only while the revision it sent is still current."
+  },
+  {
+   "fieldname": "detail_section",
+   "fieldtype": "Section Break",
+   "label": "Detail"
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Small Text",
+   "label": "Last Error",
+   "read_only": 1,
+   "description": "Why the last attempt did not deliver, bounded to 200 chars. Admin error text is already scrubbed by admin_client; any other failure records its class name only."
+  },
+  {
+   "fieldname": "payload",
+   "fieldtype": "Long Text",
+   "label": "Payload",
+   "permlevel": 1,
+   "read_only": 1,
+   "description": "The exact item admin's ingest takes, as JSON: ratings, refs and the bounded optional note. Never the reply text. Permlevel 1 with no role granted, so Desk shows delivery state without the answer itself."
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-13 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Feedback Outbox",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "delete": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
