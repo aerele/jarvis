@@ -4,6 +4,7 @@
 // `transcribeAudio`, which must POST a multipart body (the recorded blob), so
 // it uses a raw fetch like src/api.js uploadFile instead of frappe-ui `call`.
 import { call } from "frappe-ui";
+import { firstServerMessage, messageText } from "../lib/errors.js";
 
 const VN = "jarvis.chat.voice_notes_api.";
 export const TRANSCRIPTION_TIMEOUT_MS = 150000;
@@ -22,15 +23,11 @@ function _audioFilename(blob) {
 // Pull the human reason out of a Frappe error response so the caller's
 // notifyActionError shows more than "(417)".
 function _frappeErr(data, status) {
-	try {
-		if (data && data._server_messages) {
-			const msgs = JSON.parse(data._server_messages);
-			const first = typeof msgs[0] === "string" ? JSON.parse(msgs[0]) : msgs[0];
-			if (first && first.message) return String(first.message).replace(/<[^>]*>/g, "");
-		}
-		if (data && data.exception) return String(data.exception).split(":").pop().trim();
-	} catch (e) {
-		/* fall through to the status code */
+	const message = messageText(firstServerMessage(data && data._server_messages));
+	if (message) return message;
+	if (data && typeof data.exception === "string") {
+		const tail = messageText(data.exception.split(":").pop());
+		if (tail) return tail;
 	}
 	return `transcription failed (${status})`;
 }
