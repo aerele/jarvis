@@ -1635,3 +1635,46 @@ describe("first load paints once (settings loading flicker)", () => {
 		await idle();
 	});
 });
+
+describe("load() starts its fetches together", () => {
+	it("asks for the catalog, sync status and presets without waiting for the pool", async () => {
+		api.getLlmConfig.mockImplementation(() => new Promise(() => {}));
+		mount(LlmPoolEditor, { props: { editable: true } });
+		await idle();
+
+		expect(api.getModelCatalogUi).toHaveBeenCalledTimes(1);
+		expect(api.getLlmSyncStatus).toHaveBeenCalledTimes(1);
+		expect(api.getPresetCatalog).toHaveBeenCalledTimes(1);
+	});
+
+	it("still gives a blank onboarding row its default model when the catalog lands first", async () => {
+		const cfg = deferred();
+		api.getLlmConfig.mockImplementation(() => cfg.promise);
+		const w = mount(LlmPoolEditor, {
+			props: { editable: true, modes: ["quick"], footerless: true },
+		});
+		await idle();
+		expect(w.vm.catalogReady).toBe(true);
+
+		cfg.resolve(clone(serverPool)); // empty pool: onboarding seeds one blank row
+		await idle();
+
+		expect(w.vm.rows).toHaveLength(1);
+		expect((w.vm.rows[0].model || "").trim()).not.toBe("");
+		expect(w.vm.loaded).toBe(true);
+	});
+
+	it("does not fetch presets in onboarding", async () => {
+		await mountEditor({ editable: true, modes: ["quick"], footerless: true });
+		expect(api.getPresetCatalog).not.toHaveBeenCalled();
+	});
+
+	it("keeps the last preset list when the preset fetch fails", async () => {
+		api.getPresetCatalog.mockImplementationOnce(async () => [{ name: "p1" }]);
+		const w = await mountEditor({ editable: true });
+		api.getPresetCatalog.mockRejectedValueOnce(new Error("x"));
+		await w.vm.load();
+		await idle();
+		expect(w.vm.catalog).toEqual([{ name: "p1" }]);
+	});
+});
