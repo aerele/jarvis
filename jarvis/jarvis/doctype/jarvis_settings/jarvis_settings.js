@@ -153,9 +153,115 @@ frappe.ui.form.on("Jarvis Settings", {
 			)
 		);
 
-		// Reset onboarding moved to the `bench reset-onboarding` CLI command
-		// (jarvis.commands); a destructive dev reset no longer belongs on the
-		// HTTP form.
+		// Developer mode only (owner directive 2026-09-11): this is an operator
+		// recovery tool for staging/local benches, not a customer-facing control.
+		// The endpoint itself stays System Manager only regardless of this gate.
+		if (frappe.boot.developer_mode && frappe.user.has_role("System Manager")) {
+			// Reset onboarding: the bench-side half of a fresh start. Clears this
+			// bench's admin connection + LLM credentials (and, by default, all
+			// workspace content) so the setup wizard runs from step 1 again. Needed
+			// when the customer was purged on admin and the bench still holds the
+			// old credentials, which otherwise loops the wizard. The admin-side
+			// purge is separate and stays on admin. System Manager only (the
+			// endpoint enforces it); the dialog requires typing RESET so a stray
+			// click cannot wipe a workspace.
+			frm.add_custom_button(
+				__("Reset Onboarding"),
+				() => {
+					const d = new frappe.ui.Dialog({
+						title: __("Reset Onboarding"),
+						fields: [
+							{
+								fieldname: "warning",
+								fieldtype: "HTML",
+								options: `<p>${__(
+									"This disconnects the workspace from the admin plane and removes the saved AI credentials. The setup wizard starts from step 1. Billing on the admin plane is not changed."
+								)}</p>`,
+							},
+							{
+								fieldname: "wipe_data",
+								fieldtype: "Check",
+								label: __("Also delete all workspace content"),
+								default: 0,
+								description: __(
+									"Chats, skills, macros, triggers, learning data, wiki and dashboards. Off by default: only the connection and AI credentials are cleared."
+								),
+							},
+							{
+								fieldname: "confirm_text",
+								fieldtype: "Data",
+								label: __("Type RESET to confirm"),
+								reqd: 1,
+							},
+						],
+						primary_action_label: __("Reset Now"),
+						primary_action(values) {
+							if ((values.confirm_text || "").trim() !== "RESET") {
+								frappe.msgprint({
+									title: __("Not Reset"),
+									message: __("Type RESET (all capitals) to confirm."),
+									indicator: "orange",
+								});
+								return;
+							}
+							d.hide();
+							frappe
+								.call({
+									method: "jarvis.onboarding.reset_onboarding",
+									args: { wipe_data: values.wipe_data ? 1 : 0 },
+									freeze: true,
+									freeze_message: __("Resetting the workspace…"),
+								})
+								.then((r) => {
+									// The endpoint raises on failure (frappe.call shows the server
+									// message); a resolved call is always {ok: true}.
+									const data = (r.message && r.message.data) || {};
+									const wiped = (data.wiped_doctypes || []).length;
+									frappe.msgprint({
+										title: __("Onboarding Reset"),
+										message: wiped
+											? __(
+													"Connection cleared and {0} content types deleted. Open Jarvis to run setup again.",
+													[wiped]
+											  )
+											: __(
+													"Connection cleared; workspace content kept. Open Jarvis to run setup again."
+											  ),
+										indicator: "green",
+										primary_action: {
+											label: __("Open Jarvis"),
+											action() {
+												window.location.href = "/jarvis";
+											},
+										},
+									});
+									frm.reload_doc();
+								})
+								.catch(() => {
+									// Request-level failure (network, timeout, or a server
+									// exception mid-teardown): say so, and reload so the form
+									// shows whatever state the reset reached.
+									frappe.msgprint({
+										title: __("Reset Failed"),
+										message: __(
+											"The reset did not complete. Reload the page and check the connection fields before trying again."
+										),
+										indicator: "red",
+									});
+									frm.reload_doc();
+								});
+						},
+					});
+					d.show();
+				},
+				__("Agent Recovery")
+			)?.attr(
+				"title",
+				__(
+					"Start onboarding from step 1 on this bench: clears the admin connection and AI credentials, optionally all workspace content. Use after the customer was purged on admin. System Manager only."
+				)
+			);
+		}
 
 		frm.add_custom_button(
 			__("Force Resync"),
