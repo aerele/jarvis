@@ -2907,7 +2907,7 @@ def _api_key_models(catalog: list | None = None) -> dict[str, list[dict]]:
 	return out
 
 
-def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
+def _catalog_models_for_pool(settings, *, routable_only: bool = False) -> dict[str, list[dict]]:
 	"""Provider id -> catalog models the chat picker may offer BEYOND the exact ids
 	saved in the pool, for the providers this tenant has ALREADY configured.
 
@@ -2947,6 +2947,13 @@ def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 	it in pool_serialize, and keep this in step with the fleet render's
 	``any_model``. Feeds BOTH the picker (``catalog_models``) and the pin
 	validation (``_allowed_pin_models``): if it is offered, it is pinnable.
+
+	``routable_only`` (the picker, jarvis#1999): in a POOL only the agent's native
+	Claude plan serves an id the pool spec never named (fleet binds it ``anthropic/*``).
+	Every other leg routes by the saved ids alone: ``_resolve_model_and_provider``
+	drops an unsaved pin to the pool head, and Bifrost answers an unknown id with the
+	pool's own model. So the picker offers only the Claude-plan extras there. Pin
+	validation keeps the full set, so a chat already pinned to such a model still sends.
 	"""
 	from jarvis import admin_client
 	from jarvis.jarvis.pool_serialize import (
@@ -3001,10 +3008,23 @@ def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 			seen.add(mid)
 			bucket.append({"model": mid, "label": m.get("label") or mid})
 
+	pool_routes_extras_only_to_claude = False
+	if routable_only:
+		from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription
+
+		pool_routes_extras_only_to_claude = compute_pool_mode(settings)
+		claude_plan = has_native_claude_subscription(settings)
 	for provider in admin_client.get_model_catalog() or []:
 		models = provider.get("models") or []
 		pid = (provider.get("catalog_id") or provider.get("provider_id") or "").strip()
-		if pid and pid in wanted_api:
+		if pool_routes_extras_only_to_claude:
+			upstream = agent_provider_for(provider.get("subscription_label") or provider.get("label") or "")
+			if not (claude_plan and "anthropic" in {pid, upstream}):
+				continue
+			wanted_api_here = set()  # an Anthropic api-key extra would route to the plan, not the key
+		else:
+			wanted_api_here = wanted_api
+		if pid and pid in wanted_api_here:
 			_add(pid, [m for m in models if m.get("tier") == "api_key"])
 		if wanted_sub:
 			sub_rows = [m for m in models if m.get("tier") == "subscription"]
@@ -3188,7 +3208,7 @@ def get_chat_ui_settings() -> dict:
 		# Catalog models the customer may switch to IN CHAT without re-saving
 		# Settings, keyed by the same provider id the ``pool_models`` rows carry.
 		# See _catalog_models_for_pool.
-		"catalog_models": _catalog_models_for_pool(settings),
+		"catalog_models": _catalog_models_for_pool(settings, routable_only=True),
 		# Effort levels, minus the empty "auto" entry the UI renders separately.
 		# Empty when no route this tenant has can think: the clients then hide the
 		# effort control (see turn_handler.offered_thinking_levels).
