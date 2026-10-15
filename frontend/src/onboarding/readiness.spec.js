@@ -23,6 +23,9 @@ const {
 	isLlmApplying,
 	isLlmApplyStuck,
 	isContainerUnavailable,
+	needsNetworkCheck,
+	hasNetworkIntent,
+	NETWORK_INTENT_URL,
 	RECONNECT_INTENT_URL,
 } = await import("./readiness.js");
 
@@ -877,5 +880,33 @@ describe("network_check_required (private network)", () => {
 		verdict({ ready: false, reason: "network_check_required", detail: sentence });
 		expect(await readinessDetailOf()).toBe(sentence);
 		expect(await needsOnboarding()).toBe(false);
+	});
+
+	it("needsNetworkCheck is true for this reason alone", async () => {
+		verdict({ ready: false, reason: "network_check_required", detail: "x" });
+		expect(await needsNetworkCheck()).toBe(true);
+		forgetReady();
+		verdict({ ready: false, reason: "container_provisioning", detail: "x" });
+		expect(await needsNetworkCheck()).toBe(false);
+		forgetReady();
+		verdict({ ready: true });
+		expect(await needsNetworkCheck()).toBe(false);
+	});
+
+	it("the Connect-panel link round-trips through hasNetworkIntent", () => {
+		expect(NETWORK_INTENT_URL).toBe("/jarvis/onboarding?network=1");
+		expect(hasNetworkIntent("?network=1")).toBe(true);
+		expect(hasNetworkIntent("?reconnect=1")).toBe(false);
+		expect(hasNetworkIntent("")).toBe(false);
+	});
+
+	it("ChatView gives the customer a route to the Connect panel, ahead of the generic banner", () => {
+		const HERE = path.dirname(fileURLToPath(import.meta.url));
+		const src = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
+		const specific = src.indexOf('v-else-if="networkCheckRequired"');
+		const generic = src.indexOf('v-else-if="notReadyNotice"');
+		expect(specific, "ChatView must render the network_check_required banner").not.toBe(-1);
+		expect(specific).toBeLessThan(generic);
+		expect(src).toContain('@click="goNetworkCheck"');
 	});
 });

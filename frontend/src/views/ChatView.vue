@@ -2448,6 +2448,27 @@
 					:message="notReadyNotice || 'We\'re working to bring your workspace back.'"
 					style="margin-bottom: 10px"
 				/>
+				<!-- Private network: an established workspace must re-pass the connection test (for
+					 example after an operator-confirmed host move). Specific before the generic
+					 banner below, because it carries the only route to the Connect panel (rules and
+					 Test connection). Admin's own sentence is the message. -->
+				<Banner
+					v-else-if="networkCheckRequired"
+					type="warning"
+					title="Allow your Jarvis server"
+					:message="notReadyNotice"
+					style="margin-bottom: 10px"
+				>
+					<template #action>
+						<button
+							v-if="canConnectModel"
+							class="jv-btn jv-btn--sm"
+							@click="goNetworkCheck"
+						>
+							Open connection test
+						</button>
+					</template>
+				</Banner>
 				<!-- Not chat-ready for a NON-billing reason (e.g. the connected LLM account
 					 itself is out of quota, or a container is still coming up). No CTA: unlike
 					 a lapsed subscription there's nothing to renew via us here - the detail
@@ -4602,6 +4623,8 @@ import {
 	isLlmApplying,
 	isLlmApplyStuck,
 	isContainerUnavailable,
+	needsNetworkCheck,
+	NETWORK_INTENT_URL,
 	subscriptionExpiredBanner,
 	forgetReady,
 } from "@/onboarding/readiness.js";
@@ -4821,6 +4844,10 @@ const notReadyNotice = ref("");
 // message body still reads notReadyNotice's text - readinessDetailOf() now
 // covers this reason too, so admin's own words are never duplicated.
 const containerUnavailable = ref(false);
+// Private network: the workspace must re-pass the connection test (readiness reason
+// network_check_required). Own flag so the banner can carry a route to the Connect panel; the
+// message body is still admin's sentence from notReadyNotice.
+const networkCheckRequired = ref(false);
 // No AI connected at all (is_ready_for_chat reason "llm_credentials"): the customer
 // disconnected their model, or the credential expired. Until now this reason was
 // handled by NEITHER the onboarding gate (correctly - see readiness.js) nor any
@@ -4894,6 +4921,10 @@ const noAiConnectedMessage = computed(() =>
 		? "Connect a model to start chatting again"
 		: "Ask your administrator to reconnect a model"
 );
+function goNetworkCheck() {
+	// A full load, like the desk banner's link: the wizard re-reads readiness on mount.
+	window.location.assign(NETWORK_INTENT_URL);
+}
 function goConnectModel() {
 	store.openSettings("aimodels");
 }
@@ -4971,6 +5002,7 @@ const hasUrgentAlert = computed(
 				suspendedNotice.value ||
 				noAiConnected.value ||
 				containerUnavailable.value ||
+				networkCheckRequired.value ||
 				llmApplyStuck.value ||
 				notReadyNotice.value
 			)
@@ -13293,6 +13325,12 @@ onMounted(async () => {
 	isContainerUnavailable()
 		.then((v) => {
 			containerUnavailable.value = v;
+		})
+		.catch(() => {});
+	// ...and the network_check_required half: same fail-open posture.
+	needsNetworkCheck()
+		.then((v) => {
+			networkCheckRequired.value = v;
 		})
 		.catch(() => {});
 	// ...and the llm_credentials half of the same boot promise. Same fail-open

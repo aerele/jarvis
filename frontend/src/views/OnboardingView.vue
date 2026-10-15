@@ -2821,7 +2821,12 @@ import {
 	connectHeadline,
 	phaseProgress,
 } from "@/onboarding/waitPhases.js";
-import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
+import {
+	forgetReady,
+	hasNetworkIntent,
+	hasReconnectIntent,
+	landingStep,
+} from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
 import { brand, WORKER_WARNING_TITLE, workerWarningMessage } from "@/branding";
@@ -6147,6 +6152,18 @@ function onTerminal(status) {
 	if (ui.phase === OP_PHASE.REJECTED || ui.phase === OP_PHASE.SUPERSEDED) forgetIdem();
 }
 
+// The wizard's own Connect wait, started cold: the first readiness poll names
+// network_check_required and noteReadiness opens the network panel (or navigates to chat if
+// the workspace is ready by now).
+function openNetworkCheck() {
+	state.step = "connect";
+	state.reconciledConnect = true; // no local pay context
+	navigated.value = false;
+	state.finishing = true;
+	state.connectPhase = "working";
+	waitForChatReadiness();
+}
+
 function enterSupport() {
 	state.finishing = true;
 	state.connectPhase = "support";
@@ -6828,6 +6845,13 @@ onMounted(async () => {
 	// The pay page told us where they came from, so honour that.
 	if (checkoutReturn && state.step === "intro") {
 		state.step = "pay";
+	}
+	// Opened from the chat banner for network_check_required: land on the Connect panel (rules and
+	// Test connection) rather than the intro tour. Private benches only, and never over a
+	// resumed apply.
+	if (privateBench.value && hasNetworkIntent(window.location.search) && !state.finishing) {
+		openNetworkCheck();
+		return;
 	}
 	// Prefetch the plan catalog behind the intro tour so the Plan step rarely
 	// first-paints in its loading state. Reconciled resumes land past "plan"

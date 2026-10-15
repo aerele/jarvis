@@ -92,6 +92,7 @@ const forgetReadySpy = vi.hoisted(() => vi.fn());
 vi.mock("@/onboarding/readiness.js", () => ({
 	forgetReady: forgetReadySpy,
 	hasReconnectIntent: () => false,
+	hasNetworkIntent: (search) => /(^|[?&])network=1/.test(search || ""),
 	landingStep: ({ resumedStep }) => resumedStep,
 }));
 
@@ -2090,6 +2091,41 @@ describe("private network: network_check_required is a STOP with the rules and a
 		await vi.advanceTimersByTimeAsync(40 * 3000);
 		await flushPromises();
 		expect(api.isReadyForChat.mock.calls.length).toBe(1);
+	});
+
+	it("opened from the chat banner (?network=1) it lands on the panel without walking the wizard", async () => {
+		blocked();
+		// An earlier describe leaves a never-resolving hydrate behind: restore the benign one.
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue({
+			status: 200,
+			body: {
+				message: {
+					ok: true,
+					contract_version: 2,
+					data: { code: "BENCH_NO_SIGNUP_CONTEXT" },
+					context: {},
+				},
+			},
+		});
+		window.history.replaceState({}, "", "/jarvis/onboarding?network=1");
+		try {
+			const w = mount(OnboardingView);
+			await vi.waitFor(() => expect(w.vm.state.connectPhase).toBe("network"));
+			expect(w.vm.state.step).toBe("connect");
+			expect(w.text()).toContain("Rules for your network team");
+			expect(labels(w)).toContain("Test connection");
+			w.unmount();
+		} finally {
+			window.history.replaceState({}, "", "/");
+		}
+	});
+
+	it("without the link a mount does not jump to the panel", async () => {
+		blocked();
+		const w = mount(OnboardingView);
+		await flushPromises();
+		expect(w.vm.state.connectPhase).not.toBe("network");
+		w.unmount();
 	});
 
 	it("renders admin's own sentence, not a reworded one", async () => {
