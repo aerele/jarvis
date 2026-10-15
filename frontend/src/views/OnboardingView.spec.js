@@ -2154,3 +2154,185 @@ describe("private network: Network step plumbing", () => {
 		expect(w.vm.net.state.draftTouched).toBe(true);
 	});
 });
+
+describe("private network: allow the held server, then test, then pay", () => {
+	const PAYABLE = () =>
+		ENVELOPE({
+			code: "PAYMENT_PAGE_REDIRECT",
+			attempt_id: "att_1",
+			generation: 1,
+			payment_provider: "razorpay",
+			pay_page_token: "tok_1",
+			pay_origin: "https://fleet.klerk.in",
+			pay_origin_attested: true,
+			can_check_status: true,
+			email: "owner@acme.example.com",
+			company: "Acme",
+		});
+	let assign;
+	let realLocation;
+
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+		window.jarvis_network_mode = "private";
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(PAYABLE());
+		assign = vi.fn();
+		realLocation = window.location;
+		Object.defineProperty(window, "location", {
+			configurable: true,
+			value: { ...realLocation, assign },
+		});
+	});
+	afterEach(() => {
+		Object.defineProperty(window, "location", { configurable: true, value: realLocation });
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+		vi.useRealTimers();
+	});
+
+	async function atAllowServer() {
+		api.networkStatus.mockResolvedValueOnce(privateStatus());
+		const w = mountView();
+		await flushPromises();
+		return w;
+	}
+
+	it("replaces the recovery card once the email is confirmed, and reserves the held server", async () => {
+		const w = await atAllowServer();
+		expect(w.vm.state.step).toBe("pay");
+		expect(w.vm.showPrivateServerStep).toBe(true);
+		expect(api.reserveHost).toHaveBeenCalledTimes(1);
+		const text = w.text();
+		expect(text).toContain("Allow your Jarvis server");
+		expect(text).toContain("Rules for your network team");
+		expect(text).toContain("198.51.100.27");
+		expect(text).toContain("8.8.8.8");
+		expect(text).toContain("your public address");
+		expect(text).toContain(
+			"Allow only this address. Don't open port 443 to everyone. We hold this server for you for 3 days."
+		);
+		expect(buttonByLabel(w, "Test connection")).toBeTruthy();
+		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
+		expect(w.vm.pay.value).not.toBe(STATES.CHECKOUT_OPEN);
+		expect(assign).not.toHaveBeenCalled();
+	});
+
+	it("does not poll the rate-limited provider check while the customer edits a firewall", async () => {
+		vi.useFakeTimers();
+		const w = await atAllowServer();
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+		expect(w.vm.pendingPollStuck).toBe(false);
+	});
+
+	it("both tests passing shows Continue to payment, which clears the hold and leaves for checkout", async () => {
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(api.startConnectionTest).toHaveBeenCalledTimes(1);
+		expect(w.find('banner-stub[title="Connection OK"]').exists()).toBe(true);
+		expect(buttonByLabel(w, "Test connection")).toBeFalsy();
+		await buttonByLabel(w, "Continue to payment").trigger("click");
+		await flushPromises();
+		expect(w.vm.net.state.cleared).toBe(true);
+		expect(window.sessionStorage.getItem("jvpriv:cleared")).toBe("1");
+		expect(assign).toHaveBeenCalledWith("https://fleet.klerk.in/jarvis-checkout#t=tok_1");
+	});
+
+	it("an unreachable public address keeps the customer here with the inbound hint and Test again", async () => {
+		api.connectionTestStatus.mockResolvedValueOnce({
+			ok: true,
+			status: "Unreachable",
+			reason: "timeout",
+			checked_at: "",
+		});
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(
+			w.find('banner-stub[title="We couldn’t reach your public address"]').attributes("message")
+		).toBe(
+			"Check the inbound rule: allow TCP 443 from 198.51.100.27 to 8.8.8.8. New rules can take a few minutes to apply."
+		);
+		expect(buttonByLabel(w, "Test again")).toBeTruthy();
+		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
+		expect(assign).not.toHaveBeenCalled();
+	});
+
+	it("a failed outbound half names the outbound rule even when the inbound half verified", async () => {
+		api.startConnectionTest.mockResolvedValueOnce({
+			ok: true,
+			check: "JCC-000123",
+			outbound: { ok: false, reason: "timeout" },
+		});
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(
+			w.find('banner-stub[title="Your ERPNext can’t reach the Jarvis server"]').exists()
+		).toBe(true);
+		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
+	});
+
+	it("a hold that ended while the customer was away shows the new server and asks for new rules", async () => {
+		api.startConnectionTest.mockResolvedValueOnce({
+			ok: false,
+			code: "PRIVATE_HOLD_UNAVAILABLE",
+			message: "x",
+		});
+		api.reserveHost
+			.mockResolvedValueOnce({
+				ok: true,
+				host_ip: "198.51.100.27",
+				reach_url: "https://reach.h3.fleet.example/",
+				hold_until: "2026-10-17 09:10:00",
+			})
+			.mockResolvedValueOnce({
+				ok: true,
+				host_ip: "198.51.100.45",
+				reach_url: "https://reach.h5.fleet.example/",
+				hold_until: "2026-10-20 09:10:00",
+			});
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(
+			w.find('banner-stub[title="Your server hold has ended"]').attributes("message")
+		).toBe(
+			"We held 198.51.100.27 for 3 days. We’ve set aside a new server for you: 198.51.100.45. Update both rules, then test again."
+		);
+		expect(w.text()).toContain("198.51.100.45");
+	});
+
+	it("when no server can be held it says so, with a retry, and offers no test", async () => {
+		api.reserveHost.mockResolvedValueOnce({
+			ok: false,
+			code: "PRIVATE_HOLD_UNAVAILABLE",
+			message: "No host fits right now.",
+		});
+		const w = await atAllowServer();
+		expect(w.find('banner-stub[title="We couldn’t set aside a server right now"]').exists()).toBe(true);
+		expect(buttonByLabel(w, "Try again")).toBeTruthy();
+		expect(buttonByLabel(w, "Test connection").attributes("disabled")).toBeDefined();
+	});
+
+	it("a customer who already cleared the hold in this tab is not asked again after the pay-page round trip", async () => {
+		window.sessionStorage.setItem("jvpriv:cleared", "1");
+		const w = await atAllowServer();
+		expect(w.vm.showPrivateServerStep).toBe(false);
+		expect(api.reserveHost).not.toHaveBeenCalled();
+		expect(w.text()).not.toContain("Allow your Jarvis server");
+	});
+
+	it("a public bench in the same state is NOT held and keeps polling the provider check", async () => {
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+		vi.useFakeTimers();
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(false);
+		await vi.advanceTimersByTimeAsync(16_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalled();
+		expect(api.reserveHost).not.toHaveBeenCalled();
+	});
+});

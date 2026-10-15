@@ -15,6 +15,7 @@
 		<div
 			class="min-w-0 overflow-x-auto rounded-lg border border-outline-gray-1"
 			tabindex="0"
+			role="region"
 			:aria-label="`${title} (scrolls sideways on a narrow screen)`"
 		>
 			<!-- min-width as an inline style rather than a fixed-width Tailwind class: the mobile guard

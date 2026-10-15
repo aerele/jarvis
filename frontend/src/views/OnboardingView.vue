@@ -1433,7 +1433,95 @@
 									</div>
 								</div>
 							</template>
-							<!-- Confirming: the customer paid on the admin-hosted page and came
+							<!-- Private network (design §3 steps 7-9): the email is confirmed and admin has set
+									 a server aside. The customer allows it in their firewall and tests the connection
+									 BEFORE paying; "Continue to payment" appears only when both halves pass. The
+									 mockup's Back is omitted: the email is already confirmed, so there is no earlier
+									 screen to return to. -->
+								<template v-else-if="showPrivateServerStep">
+									<div class="ob-body">
+										<div class="ob-head">
+											<h1 ref="recoveryHeading" tabindex="-1">Allow your Jarvis server</h1>
+											<p>
+												We've set aside the server that will run Jarvis for you. Ask your
+												network team to add these two rules, then test the connection.
+											</p>
+										</div>
+										<div class="mx-auto flex w-full max-w-[680px] flex-col gap-3">
+											<div
+												v-if="net.state.holdLoading && !net.state.hold"
+												class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5"
+												role="status"
+											>
+												<JvSpinner :size="20" />
+												Setting aside your server…
+											</div>
+											<template v-else-if="net.state.holdErr && !net.state.hold">
+												<Banner
+													type="error"
+													:title="holdErrCard.title"
+													:message="holdErrCard.text"
+													role="alert"
+												/>
+												<div class="flex justify-center gap-2">
+													<Button label="Try again" @click="net.loadHold()" />
+													<Button label="Contact support" @click="onPayAction(A.SUPPORT)" />
+												</div>
+											</template>
+											<template v-if="net.state.hold">
+												<NetworkRulesTable
+													variant="server"
+													title="Rules for your network team"
+													copy-label="Copy rules"
+													:rows="serverRows"
+												/>
+												<p class="text-p-sm text-ink-gray-5">
+													Allow only this address. Don't open port 443 to everyone. We hold
+													this server for you for 3 days.
+												</p>
+											</template>
+											<Banner
+												v-if="holdEndedCard"
+												:type="holdEndedCard.type"
+												:title="holdEndedCard.title"
+												:message="holdEndedCard.text"
+												role="alert"
+											/>
+											<ConnectionTestResult
+												:rows="serverTest.rows"
+												:banner="serverTest.banner"
+											/>
+											<Banner
+												v-if="net.state.test.err"
+												type="warning"
+												:message="net.state.test.err"
+												role="alert"
+											/>
+										</div>
+									</div>
+									<div class="ob-foot">
+										<span v-if="testWait > 0" class="text-p-sm text-ink-gray-5" role="status">
+												Try again in {{ testWait }}s
+											</span>
+											<span v-else></span>
+										<Button
+											v-if="privateTestsPassed"
+											variant="solid"
+											label="Continue to payment"
+											@click="onPrivateContinue"
+										/>
+										<Button
+											v-else
+											variant="solid"
+											:disabled="!net.state.hold || net.state.test.phase === 'testing' || testWait > 0"
+											:loading="net.state.test.phase === 'testing'"
+											loading-text="Testing…"
+											:label="net.state.test.phase === 'done' ? 'Test again' : 'Test connection'"
+											@click="net.runTest()"
+										/>
+									</div>
+								</template>
+								<!-- Confirming: the customer paid on the admin-hosted page and came
 								 back, and we are asking the control plane whether it landed. Money
 								 has left them and no verdict exists yet.
 								 jarvis#728: this used to render PaymentConfirmingArt here, but the
@@ -2442,7 +2530,17 @@ import TourIntro from "@/onboarding/TourIntro.vue";
 import SetupNeuralNet from "@/onboarding/SetupNeuralNet.vue";
 import NetworkRulesTable from "@/onboarding/NetworkRulesTable.vue";
 import { createPrivateNetwork } from "@/onboarding/usePrivateNetwork";
-import { adminRuleRows, checkAddress, SETUP_UNAVAILABLE } from "@/onboarding/privateNetwork";
+import ConnectionTestResult from "@/onboarding/ConnectionTestResult.vue";
+import {
+	adminRuleRows,
+	checkAddress,
+	serverRuleRows,
+	describeServerTest,
+	holdEndedBanner,
+	publicHostOf,
+	SETUP_UNAVAILABLE,
+	HOLD_UNAVAILABLE,
+} from "@/onboarding/privateNetwork";
 import cashfreeLogo from "@/assets/cashfree.png";
 import {
 	stepsFor,
@@ -2581,7 +2679,14 @@ const net = createPrivateNetwork({
 		},
 	},
 });
-const { privateBench, complete: privateComplete, onboardingHostOk, draftError } = net;
+const {
+	privateBench,
+	complete: privateComplete,
+	onboardingHostOk,
+	draftError,
+	holdsCheckout,
+	testsPassed: privateTestsPassed,
+} = net;
 
 // Non-blocking: warns without gating any step's CTA (Task 5's boot flag).
 const workerWarning = !!window.jarvis_worker_warning;
@@ -3820,6 +3925,8 @@ function readCheckoutOutcome() {
 
 const flow = createPaymentFlow({
 	api: onboardingPaymentApi,
+	// Private network: no route to checkout until the connection test has passed.
+	holdCheckout: () => holdsCheckout.value,
 	// The DOM half of the top-level navigation (WS7): stamp the external-nav
 	// marker with the live attempt id BEFORE the browser leaves, so the return
 	// path can recognise this attempt's checkout, then same-tab navigate. The URL
@@ -4032,6 +4139,76 @@ const provisioningProgress = computed(() => phaseProgress(provisioningStage.valu
 const payBusyView = computed(
 	() => pay.value.value === S.STARTING_SIGNUP || pay.value.value === S.CHECKOUT_OPEN
 );
+// ---- Private network: allow the held server, then test, then pay (design §3 steps 7-9) ------
+// Shown once the email is confirmed (the machine holds a live, navigable pay-page token) and
+// the customer has not yet passed the connection test in this tab. It sits ahead of the
+// recovery card on purpose: the machine is UNKNOWN with a token here, and that card would
+// offer to go straight to checkout.
+const showPrivateServerStep = computed(
+	() => holdsCheckout.value && !payBusyView.value && canNavigateToPay(pay.value)
+);
+const serverRows = computed(() =>
+	net.state.hold
+		? serverRuleRows({
+				hostIp: net.state.hold.hostIp,
+				publicHost: publicHostOf(net.state.publicAddress) || net.state.publicAddress,
+		  })
+		: []
+);
+const serverTest = computed(() =>
+	describeServerTest({
+		phase: net.state.test.phase,
+		inbound: net.state.test.inbound,
+		outbound: net.state.test.outbound,
+		hostIp: net.state.hold ? net.state.hold.hostIp : "",
+		publicAddress: net.state.publicAddress,
+		siteName: window.site_name || "",
+	})
+);
+const holdEndedCard = computed(() =>
+	net.state.holdEnded ? holdEndedBanner(net.state.holdEnded) : null
+);
+// Admin's own sentence for any refusal but the plain "no host fits" one, which has copy of its own.
+const holdErrCard = computed(() => ({
+	title: HOLD_UNAVAILABLE.title,
+	text: net.state.holdErrCode === "PRIVATE_HOLD_UNAVAILABLE" ? HOLD_UNAVAILABLE.text : net.state.holdErr,
+}));
+// Entering the screen reserves (or re-reads) the held server. That is also what refreshes a
+// hold that expired while the customer was away.
+watch(
+	showPrivateServerStep,
+	(on) => {
+		if (on) net.loadHold();
+	},
+	{ immediate: true }
+);
+function onPrivateContinue() {
+	net.markCleared();
+	flow.navigateToPay();
+}
+// A rate-limit refusal asks the customer to wait: count it down and keep "Test connection"
+// disabled meanwhile, so the button never hammers the provider check.
+const testWait = ref(0);
+let testWaitTimer = null;
+watch(
+	() => net.state.test.retryAfter,
+	(secs) => {
+		clearInterval(testWaitTimer);
+		testWait.value = secs > 0 ? Math.ceil(secs) : 0;
+		if (testWait.value <= 0) return;
+		testWaitTimer = setInterval(() => {
+			testWait.value -= 1;
+			if (testWait.value <= 0) clearInterval(testWaitTimer);
+		}, 1000);
+	},
+	{ immediate: true }
+);
+onUnmounted(() => clearInterval(testWaitTimer));
+// Leaving the screen ends any test poll still running.
+watch(showPrivateServerStep, (on, was) => {
+	if (was && !on) net.dispose();
+});
+onUnmounted(() => net.dispose());
 const checking = computed(() => pay.value.busy === "checking");
 const initiating = computed(() => pay.value.busy === "initiating");
 // The verify round trip OPENS the checkout on success, so an unguarded
@@ -4402,7 +4579,10 @@ async function runPendingAutoPoll(myRun) {
 function restartPendingAutoPoll() {
 	pendingPollRun += 1; // supersede whatever was already running
 	pendingPollStuck.value = false;
-	if (isAutoPollable(pay.value.value) && state.step === "pay") {
+	// Not while the allow-your-server screen is up: the customer is editing a firewall, and
+	// the rate-limited provider-truth check would run every 15 s and then announce "we stopped
+	// auto-checking" over a screen that has nothing to do with the payment.
+	if (isAutoPollable(pay.value.value) && state.step === "pay" && !showPrivateServerStep.value) {
 		runPendingAutoPoll(pendingPollRun);
 	}
 	// NOTE: the value-change watch fires restartPendingAutoPoll on a

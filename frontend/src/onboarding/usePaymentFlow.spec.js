@@ -807,3 +807,63 @@ describe("Plan 01: billing rides the first signup", () => {
 		expect(billing.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Private network: the connection test must pass before ANY route to checkout.
+// ---------------------------------------------------------------------------
+describe("private network: the connection test holds checkout", () => {
+	const held = () => {
+		let hold = true;
+		return { isHeld: () => hold, release: () => (hold = false) };
+	};
+
+	test("the email-verification click does not navigate while held, and leaves a navigable machine", async () => {
+		const h = held();
+		const api = makeApi({ getOnboardingState: vi.fn(async () => ENVELOPE(TOKEN_DATA())) });
+		const { flow, navigate } = makeFlow({ api, options: { holdCheckout: h.isHeld } });
+		await flow.verifyAndContinue();
+		expect(navigate).not.toHaveBeenCalled();
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+		expect(flow.state.value.busy).toBeNull();
+		expect(canNavigateToPay(flow.state.value)).toBe(true);
+		h.release();
+		expect(flow.navigateToPay()).toBe(true);
+		expect(navigate).toHaveBeenCalledTimes(1);
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+	});
+
+	test("the first signup does not navigate while held", async () => {
+		const h = held();
+		const { flow, navigate } = makeFlow({ options: { holdCheckout: h.isHeld } });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		expect(navigate).not.toHaveBeenCalled();
+		expect(flow.state.value.value).not.toBe(STATES.CHECKOUT_OPEN);
+		expect(flow.state.value.busy).toBeNull();
+	});
+
+	test("a payment retry (initiate) does not navigate while held", async () => {
+		const h = held();
+		const api = makeApi({ getOnboardingState: vi.fn(async () => ENVELOPE(TOKEN_DATA())) });
+		const { flow, navigate } = makeFlow({ api, options: { holdCheckout: h.isHeld } });
+		await flow.hydrate();
+		await flow.initiatePayment({ plan: "pro", provider: "razorpay" });
+		expect(navigate).not.toHaveBeenCalled();
+	});
+
+	test("the recovery card's RESUME (navigateToPay itself) is refused while held", async () => {
+		const h = held();
+		const api = makeApi({ getOnboardingState: vi.fn(async () => ENVELOPE(TOKEN_DATA())) });
+		const { flow, navigate } = makeFlow({ api, options: { holdCheckout: h.isHeld } });
+		await flow.hydrate();
+		expect(flow.navigateToPay()).toBe(false);
+		expect(navigate).not.toHaveBeenCalled();
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+	});
+
+	test("a flow built without the dependency behaves exactly as before", async () => {
+		const api = makeApi({ getOnboardingState: vi.fn(async () => ENVELOPE(TOKEN_DATA())) });
+		const { flow, navigate } = makeFlow({ api });
+		await flow.verifyAndContinue();
+		expect(navigate).toHaveBeenCalledTimes(1);
+	});
+});
