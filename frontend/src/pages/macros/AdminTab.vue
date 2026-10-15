@@ -63,6 +63,38 @@
 								@update:modelValue="(v) => setFilter('owner', v)"
 							/>
 						</div>
+						<Button
+							class="jv-macro-admin-filters-toggle min-w-0 sm:shrink-0"
+							variant="subtle"
+							iconRight="chevron-down"
+							:label="filtersLabel"
+							:aria-expanded="filtersOpen ? 'true' : 'false'"
+							aria-controls="jv-macro-admin-more-filters"
+							@click="filtersOpen = !filtersOpen"
+						/>
+						<!-- The combination an admin looks for, in one step: it sets the two
+						     selects beside it, so what is filtered stays in plain sight. -->
+						<Button
+							class="jv-macro-admin-preset col-span-2 min-w-0 sm:col-span-1 sm:shrink-0"
+							:variant="armedAndScheduled ? 'solid' : 'subtle'"
+							label="Armed and scheduled"
+							:aria-pressed="armedAndScheduled ? 'true' : 'false'"
+							title="Macros that write without asking for confirmation and run on a schedule"
+							@click="toggleArmedAndScheduled"
+						/>
+						<Button
+							v-if="filtering"
+							class="jv-macro-admin-clear shrink-0"
+							variant="ghost"
+							label="Clear"
+							@click="clearFilters"
+						/>
+					</div>
+					<div
+						v-show="filtersOpen"
+						id="jv-macro-admin-more-filters"
+						class="jv-macro-admin-filters grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center"
+					>
 						<div class="jv-macro-admin-filter min-w-0 sm:w-40">
 							<FormControl
 								class="w-full"
@@ -104,23 +136,6 @@
 								@update:modelValue="(v) => setFilter('on_hold', v)"
 							/>
 						</div>
-						<!-- The combination an admin looks for, in one step: it sets the two
-						     selects beside it, so what is filtered stays in plain sight. -->
-						<Button
-							class="jv-macro-admin-preset min-w-0 sm:shrink-0"
-							:variant="armedAndScheduled ? 'solid' : 'subtle'"
-							label="Armed and scheduled"
-							:aria-pressed="armedAndScheduled ? 'true' : 'false'"
-							title="Macros that write without asking for confirmation and run on a schedule"
-							@click="toggleArmedAndScheduled"
-						/>
-						<Button
-							v-if="filtering"
-							class="jv-macro-admin-clear shrink-0"
-							variant="ghost"
-							label="Clear"
-							@click="clearFilters"
-						/>
 					</div>
 				</div>
 
@@ -361,7 +376,10 @@
 								     the Button reads out, and the short word in the slot is what
 								     it shows. While its menu is open the button is ringed, so it
 								     is plain which row the menu belongs to. -->
-								<div role="cell" class="jv-macro-admin-cell-actions">
+								<div
+									role="cell"
+									class="jv-macro-admin-cell-actions jv-admin-actions-cell"
+								>
 									<Button
 										v-if="row.live_run"
 										class="jv-macro-admin-stop"
@@ -435,8 +453,8 @@
 			:name="holding.name"
 			:macroName="holding.macro_name || ''"
 			:ownerLabel="ownerText(holding)"
-			@held="onHeld"
-			@failed="onHeld"
+			@held="onHoldMade"
+			@failed="onHoldMade"
 		/>
 		<MacroHandoverDialog
 			v-if="handingOver"
@@ -462,7 +480,7 @@
 // when window.is_jarvis_admin. The server checks the Jarvis Admin role itself on
 // every call (jarvis.chat.macros_admin_api), so a stale client gate can only hide
 // the tab.
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import {
 	Badge,
 	Breadcrumbs,
@@ -479,6 +497,8 @@ import MacroHoldDialog from "./MacroHoldDialog.vue";
 import MacroHandoverDialog from "./MacroHandoverDialog.vue";
 import { session } from "@/data/session";
 import { useConfirm } from "@/composables/useConfirm";
+import { useAdminList } from "@/composables/useAdminList";
+import { useAdminRowMenu } from "@/composables/useAdminRowMenu";
 import {
 	adminDelete,
 	adminListMacros,
@@ -486,21 +506,13 @@ import {
 	adminRelease,
 	adminStopRun,
 } from "@/api/macrosAdmin";
-import { errMessage, errHtml, escapeHtml } from "@/lib/errors";
+import { errHtml, escapeHtml } from "@/lib/errors";
 import { isLiveRun, lastRunCell } from "@/lib/macroRunOutcome";
 import { nextRunCell } from "@/lib/macroSchedule";
 import { scheduleLabel } from "@/pages/macros/scheduleLabel";
 import { ARMED_HELP, LAST_RUN_TONE, NEXT_RUN_TONE, enabledLabel } from "@/pages/macros/runDisplay";
 import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
-import { focusOpenMenu, REKA_MENU } from "@/lib/focusOpenMenu";
 
-const PAGE = 20;
-// The server returns at most 100 rows a page.
-const PAGE_MAX = 100;
-// A re-read of what is on screen fetches this many pages at most. Past that the
-// list falls back to its first 500 rows, and Load more continues from there.
-const KEEP_MAX_PAGES = 5;
-const SEARCH_WAIT_MS = 300;
 // Why an admin's own macro shows fewer actions.
 const OWN_HELP = "You cannot hold, release or hand over your own macro.";
 
@@ -531,17 +543,8 @@ const HOLD_OPTIONS = [
 
 const { confirm } = useConfirm();
 
-const rows = ref([]);
-const total = ref(0);
-const hasMore = ref(false);
 const owners = ref([]);
 const moreOwners = ref(false);
-const loading = ref(false);
-const reloading = ref(false);
-const loaded = ref(false);
-const error = ref("");
-// The load that failed was a next page (Load more): its message goes beside that button.
-const moreFailed = ref(false);
 const listEl = ref(null);
 const rootEl = ref(null);
 
@@ -561,118 +564,46 @@ const ownerOptions = computed(() => [
 		? [{ label: "More owners: use Search", value: "__more", disabled: true }]
 		: []),
 ]);
+// The four selects beside the owner sit behind one "Filters" control: on a phone
+// they took half the screen. The label counts those set, since they are out of sight.
+const filtersOpen = ref(false);
+const MORE_FILTERS = ["armed", "scheduled", "live_run", "on_hold"];
+const filtersLabel = computed(() => {
+	const n = MORE_FILTERS.filter((k) => filters[k] !== "").length;
+	return n ? `Filters (${n})` : "Filters";
+});
 const armedAndScheduled = computed(() => filters.armed === "1" && filters.scheduled === "1");
 
 // ── data ─────────────────────────────────────────────────────────────────────
-// Three kinds of load, as the Macros Runs tab has (RunsTab.vue, #1597):
-//   "reset"  page 1, replaces the list (first load, a filter or search change,
-//            Try again with nothing on screen)
-//   "more"   the next page, appended (Load more)
-//   "keep"   every page already on screen again, replacing the list (Refresh,
-//            after a stop, after a macro turned out to be deleted)
-// Only the newest request may write to the list: a slow answer to an earlier
-// filter must not replace the rows of the one chosen after it.
-//
-// The rows on screen were always fetched under ONE search and set of filters
-// (`loadedUnder`), and are only ever joined with rows fetched under the same.
-// A filter change that fails therefore clears them: they belong to the filter
-// that was left, and Load more would otherwise append the new filter's second
-// page to the old filter's rows.
-let latest = 0;
-let loadedUnder = "";
-let searchTimer = null;
-
-function query() {
-	const active = {};
-	for (const [k, v] of Object.entries(filters)) if (v !== "") active[k] = v;
-	return { search: search.value.trim(), filters: active };
-}
-
-// Every row on screen again, in pages of PAGE_MAX, one request after the other,
-// all under `q`. A "keep" used to ask for one page of at most 100, so a Refresh
-// or a stop cut a longer list back to its first 100 rows. Returns null when a
-// newer load took over part-way.
-async function fetchLoadedPages(q, mine) {
-	const want = Math.min(Math.max(rows.value.length, PAGE), PAGE_MAX * KEEP_MAX_PAGES);
-	const out = [];
-	const seen = new Set();
-	let res = {};
-	let start = 0;
-	while (start < want) {
-		const pageLength = Math.min(PAGE_MAX, want - start);
-		res = (await adminListMacros({ ...q, start, pageLength })) || {};
-		if (mine !== latest) return null;
-		// A macro made between two requests pushes a row from the end of one page
-		// to the top of the next: list it once.
-		for (const r of res.rows || []) {
-			if (!seen.has(r.name)) {
-				seen.add(r.name);
-				out.push(r);
-			}
-		}
-		start += pageLength;
-		if (!res.has_more) break;
-	}
-	return { rows: out, total: res.total, has_more: !!res.has_more };
-}
-
-async function load(mode = "reset") {
-	// Every load carries what is typed in the search box: one still waiting to run
-	// would only ask the same again (and take the focus a second time).
-	clearTimeout(searchTimer);
-	const q = query();
-	const under = JSON.stringify(q);
-	// The search box is typed in and the rows are still the old search's (the wait
-	// before it searches): there is no "next page" or "same rows again" of those.
-	if (mode !== "reset" && under !== loadedUnder) mode = "reset";
-	const mine = ++latest;
-	loading.value = true;
-	// The rows on screen are another filter's until this answers: shown as such.
-	reloading.value = mode === "reset" && under !== loadedUnder && rows.value.length > 0;
-	try {
-		const res =
-			mode === "keep"
-				? await fetchLoadedPages(q, mine)
-				: (await adminListMacros({
-						...q,
-						start: mode === "more" ? rows.value.length : 0,
-						pageLength: PAGE,
-				  })) || {};
-		if (mine !== latest || !res) return;
-		const page = res.rows || [];
-		if (mode === "more") {
-			// A macro made or deleted between two pages shifts the rows: never list
-			// one twice.
-			const seen = new Set(rows.value.map((r) => r.name));
-			rows.value = [...rows.value, ...page.filter((r) => !seen.has(r.name))];
-		} else {
-			rows.value = page;
-		}
-		total.value = Number(res.total) || 0;
-		hasMore.value = !!res.has_more;
-		loadedUnder = under;
-		error.value = "";
-		moreFailed.value = false;
-		loaded.value = true;
-	} catch (e) {
-		if (mine !== latest) return;
-		error.value = errMessage(e, "Could not load the macros.");
-		moreFailed.value = mode === "more";
-		loaded.value = true;
-		// A refresh that fails keeps the last-good rows. A FILTER CHANGE that fails
-		// does not: the rows on screen belong to the filter that was left.
-		if (under !== loadedUnder) {
-			rows.value = [];
-			total.value = 0;
-			hasMore.value = false;
-		}
-	} finally {
-		if (mine === latest) {
-			loading.value = false;
-			reloading.value = false;
-		}
-	}
-}
+// The load state machine, the focus a reload keeps and the search debounce are
+// shared with the Skills tab (composables/useAdminList).
+const {
+	rows,
+	total,
+	hasMore,
+	loading,
+	reloading,
+	loaded,
+	error,
+	moreFailed,
+	load,
+	loadKeepingFocus,
+	loadMore,
+	onSearch,
+	searchBox,
+	settled,
+	usedKeyboard,
+} = useAdminList({
+	fetchPage: (args) => adminListMacros(args),
+	search,
+	filters,
+	rootEl,
+	listEl,
+	dialogOpen,
+	searchSelector: ".jv-macro-admin-search",
+	openSelector: ".jv-macro-admin-open",
+	failureText: "Could not load the macros.",
+});
 
 // The owner filter's choices: asked for when the tab opens and on Refresh, not
 // with every page or keystroke. Without them the select offers "All owners" only
@@ -687,36 +618,6 @@ async function loadOwners() {
 	}
 }
 
-// A button that is loading is disabled, and the browser takes focus off a disabled
-// button: a keyboard user would be dropped at the top of the page. So a load that a
-// control here starts goes through `loadKeepingFocus`, which puts focus back where
-// it was once the load has answered.
-//
-// Only for a press made without a pointer. A mouse click focuses a button too, but
-// putting focus back after one opens that button's tooltip with nothing to close
-// it, and in a text box it raises a phone's keyboard over the list. And never while
-// a dialog is open over the tab, or when the user has moved focus themselves.
-//
-// Which it was is read off the click: one that comes from a key, or from assistive
-// technology pressing the button, counts no pointer clicks (`detail` 0). The typed
-// search has no click, so it goes by the last thing used in the tab.
-//
-// A pointer pressed anywhere on the page counts, not only in the tab: the sidebar
-// and the page header are outside it, and a click there while a load runs means
-// the user has gone elsewhere just the same.
-let keyboard = false;
-let pointerUses = 0;
-function usedKeyboard(yes) {
-	keyboard = yes;
-	if (!yes) pointerUses += 1;
-}
-const onPagePointer = () => usedKeyboard(false);
-const withoutPointer = (event) =>
-	event && typeof event.detail === "number" ? event.detail === 0 : keyboard;
-function focusLost() {
-	const el = document.activeElement;
-	return !el || el === document.body;
-}
 function dialogOpen() {
 	return (
 		holdOpen.value ||
@@ -725,37 +626,10 @@ function dialogOpen() {
 		!!document.querySelector('[role="alertdialog"]')
 	);
 }
-// `event` is the click that started the load (none for the typed search).
-// `after(lost)` picks where focus goes, given the element that had it (which may
-// be gone or disabled by now); the default is that element, else the list.
-async function loadKeepingFocus(mode, event, after) {
-	const at = document.activeElement;
-	const mine = withoutPointer(event) && !!rootEl.value && rootEl.value.contains(at);
-	const pointerBefore = pointerUses;
-	await load(mode);
-	// A pointer used while it loaded: the user is somewhere else now.
-	if (!mine || pointerUses !== pointerBefore) return;
-	await nextTick();
-	if (!focusLost() || dialogOpen() || !rootEl.value) return;
-	const usable = (el) => !!el && el.isConnected && !el.disabled;
-	const target = (after && after(at)) || (usable(at) ? at : null) || listEl.value || searchBox();
-	if (usable(target)) target.focus();
-}
-const searchBox = () => rootEl.value && rootEl.value.querySelector(".jv-macro-admin-search input");
 
 function refresh(event) {
 	loadOwners();
 	return loadKeepingFocus("keep", event);
-}
-
-// The next page. Focus goes to the first row it brought, so the next Tab carries on
-// down the list; when it brought none, or failed, it stays on the button.
-function loadMore(event) {
-	const before = rows.value.length;
-	return loadKeepingFocus("more", event, () => {
-		const opens = listEl.value ? listEl.value.querySelectorAll(".jv-macro-admin-open") : [];
-		return opens.length > before ? opens[before] : null;
-	});
 }
 
 function setFilter(key, value) {
@@ -768,14 +642,9 @@ function toggleArmedAndScheduled() {
 	const on = !armedAndScheduled.value;
 	filters.armed = on ? "1" : "";
 	filters.scheduled = on ? "1" : "";
+	// Open the two it sets, so what is filtered stays in sight.
+	if (on) filtersOpen.value = true;
 	load();
-}
-
-function onSearch(value) {
-	search.value = value == null ? "" : String(value);
-	clearTimeout(searchTimer);
-	// Tab from the box lands on Refresh, which this load disables for a moment.
-	searchTimer = setTimeout(() => loadKeepingFocus("reset"), SEARCH_WAIT_MS);
 }
 
 // Clear takes itself away (nothing is filtered any more): for a keyboard user
@@ -860,65 +729,18 @@ function actionsFor(row) {
 	return groups;
 }
 
-// Below this width the list draws each macro as a card (the styles' 48rem), with
-// the Actions button at the card's start: its menu then opens from that side, or
-// it would be pushed against the window's edge.
-const CARD_BELOW_PX = 768;
-const cardLayout = ref(false);
-let listWidth = null;
-watch(listEl, (el) => {
-	if (listWidth) listWidth.disconnect();
-	listWidth = null;
-	if (!el) return;
-	cardLayout.value = el.clientWidth < CARD_BELOW_PX;
-	if (typeof ResizeObserver === "undefined") return;
-	listWidth = new ResizeObserver(() => {
-		cardLayout.value = el.clientWidth < CARD_BELOW_PX;
-	});
-	listWidth.observe(el);
+const { cardLayout, focusOpenMenu, fromMenu, focusRow, focusAfterHold } = useAdminRowMenu({
+	listEl,
+	dialogOpen,
+	rows,
+	error,
+	settled,
+	searchBox,
+	rowSelector: ".jv-macro-admin-row",
+	rowKey: "macro",
+	actionsSelector: ".jv-macro-admin-actions",
+	openSelector: ".jv-macro-admin-open",
 });
-
-// An item was chosen. Two things have to settle before its action runs. The menu is
-// still closing, and a confirmation opened while it is there would not take the
-// keyboard. And the item that had focus goes away with the menu: focus is put on the
-// row's Actions button, so the dialog or confirmation has somewhere to give focus
-// back to when it is cancelled.
-//
-// One pick at a time: an item still takes a press while its menu fades out, and a
-// second pick would move focus out of the confirmation the first one opened.
-const MENU_CLOSE_FRAMES = 40;
-const menuStillOpen = () => !!document.querySelector(REKA_MENU);
-let picking = false;
-async function fromMenu(row, run) {
-	if (picking) return;
-	picking = true;
-	try {
-		await nextTick();
-		let waited = false;
-		for (let i = 0; i < MENU_CLOSE_FRAMES && menuStillOpen(); i++) {
-			waited = true;
-			await new Promise((done) => requestAnimationFrame(done));
-		}
-		// Once it is gone the menu hands focus back to its button, a moment later: let
-		// that happen first, or it would take focus out of what opens next.
-		if (waited) await new Promise((done) => setTimeout(done, 0));
-		// A menu is open after all (another row's, opened meanwhile), the tab was
-		// left, or something is already asking: this pick is dropped.
-		if (menuStillOpen() || !listEl.value || dialogOpen()) return;
-		const button = actionsButton(row.name);
-		if (button && !button.disabled) button.focus();
-		await run(row);
-	} finally {
-		picking = false;
-	}
-}
-function actionsButton(name) {
-	const list = listEl.value;
-	const el =
-		list &&
-		[...list.querySelectorAll(".jv-macro-admin-row")].find((r) => r.dataset.macro === name);
-	return el ? el.querySelector(".jv-macro-admin-actions") : null;
-}
 
 // ── open one, read-only ──────────────────────────────────────────────────────
 const opened = ref("");
@@ -937,20 +759,6 @@ function onGone() {
 // The name of the row whose stop is in flight. One at a time: every Stop button
 // is disabled meanwhile, and nothing is shown as stopped until the server says so.
 const stopping = ref("");
-
-// After a stop the button that had focus is gone (the row has no live run any
-// more): put focus on the row's own button, or on the list when the row went too,
-// so a keyboard user is not dropped at the top of the page.
-async function focusRow(name) {
-	await nextTick();
-	const list = listEl.value;
-	if (!list) return;
-	const row = [...list.querySelectorAll(".jv-macro-admin-row")].find(
-		(el) => el.dataset.macro === name
-	);
-	const target = (row && row.querySelector(".jv-macro-admin-open")) || list;
-	target.focus();
-}
 
 // A stop ends one run. A macro that is on and scheduled starts another at its next time.
 function willRunAgain(row) {
@@ -1035,14 +843,17 @@ function holdServed() {
 // The list was read again: the draft goes quietly. Focus is the business of
 // whatever started that read.
 watch(rows, holdServed);
-// The dialog closed. It gave focus back to the Hold button that opened it, which is
-// not there any more when the macro is on hold (the row shows Release): focus goes
-// to the row instead of being left on the page.
-watch(holdOpen, async () => {
-	const name = holdServed();
-	if (!name) return;
-	await nextTick();
-	if (focusLost() && !dialogOpen()) await focusRow(name);
+// The dialog closed: the draft is looked at now, and focus is decided once the reload
+// has settled (see focusAfterHold). `holdMade` is the macro a hold was made for, as
+// the dialog said, even when it answered an error.
+let holdMade = "";
+watch(holdOpen, (open) => {
+	if (open || !holding.value) return;
+	const name = holding.value.name;
+	const made = holdMade === name;
+	holdMade = "";
+	holdServed();
+	return focusAfterHold(name, { made });
 });
 
 function holdReason(row) {
@@ -1065,6 +876,10 @@ function askHandover(row) {
 // row as re-read, so its owner is the one the server now has: a macro that changed
 // hands would otherwise be refused at every retry. One no longer listed closes it,
 // its message in a toast.
+function onHoldMade(payload) {
+	holdMade = payload.name;
+	return onHeld(payload);
+}
 async function onHeld({ name, message }) {
 	await load("keep");
 	if (handoverOpen.value && handingOver.value && handingOver.value.name === name) {
@@ -1142,15 +957,8 @@ async function act(key, name, fn) {
 }
 
 onMounted(() => {
-	document.addEventListener("pointerdown", onPagePointer, true);
 	load();
 	loadOwners();
-});
-onBeforeUnmount(() => {
-	document.removeEventListener("pointerdown", onPagePointer, true);
-	if (listWidth) listWidth.disconnect();
-	clearTimeout(searchTimer);
-	latest++; // an answer still on its way is nobody's now
 });
 </script>
 
@@ -1272,5 +1080,11 @@ onBeforeUnmount(() => {
 		flex-wrap: wrap;
 		align-self: start;
 	}
+}
+
+/* Dark theme: the library's red text on Stop run is 2.4:1 (2.0:1 on hover). This
+   red is 5.6:1, and 4.7:1 on hover. The Delete item has its own rule in index.css. */
+:root[data-theme="dark"] .jv-macro-admin-stop {
+	color: rgb(252 116 116);
 }
 </style>

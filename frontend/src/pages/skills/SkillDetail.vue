@@ -9,7 +9,7 @@
 	>
 		<template #actions>
 			<SyncPill ref="syncPill" />
-			<PromotionStatusChip v-if="canEdit && myPromo" :req="myPromo" noun="skill" />
+			<PromotionStatusChip v-if="isOwner && myPromo" :req="myPromo" noun="skill" />
 			<Badge
 				v-if="skill && !canEdit"
 				variant="subtle"
@@ -17,7 +17,7 @@
 				size="lg"
 				:label="`Shared by ${sharedBy || 'another user'} · read-only`"
 			/>
-			<Dropdown v-if="canEdit && !isNew" :options="overflowOptions">
+			<Dropdown v-if="isOwner && !isNew" :options="overflowOptions">
 				<Button icon="more-horizontal" variant="ghost" />
 			</Dropdown>
 			<Button
@@ -31,6 +31,24 @@
 		</template>
 
 		<template #main>
+			<!-- An admin's hold: the one thing on this page the owner cannot change. -->
+			<Banner
+				v-if="hold"
+				class="mb-4"
+				data-testid="hold-banner"
+				type="warning"
+				title="On hold"
+				:message="holdBanner"
+			/>
+			<!-- A skill reviewer editing a shared skill someone else owns (5c). After the
+			     hold banner: the hold is the more urgent thing to say. -->
+			<Banner
+				v-if="reviewerEditing"
+				class="mb-4"
+				data-testid="reviewer-banner"
+				type="info"
+				:message="reviewerBanner"
+			/>
 			<DocSection label="Details">
 				<div class="space-y-4">
 					<FormControl
@@ -39,7 +57,7 @@
 						required
 						placeholder="e.g. monthly-close"
 						:modelValue="form.skill_name"
-						:disabled="!isNew || saving"
+						:disabled="!isNew || reviewerEditing || saving"
 						:description="
 							isNew
 								? `Lowercase letters, digits and hyphens - trigger it in chat with /${
@@ -81,6 +99,12 @@
 						label="Allow Approve & run"
 						:description="armDescription"
 						:disabled="armLocked"
+					/>
+					<SkillRolesField
+						v-if="rolesEditable"
+						v-model="form.allowed_roles"
+						:options="roleOptions"
+						:disabled="saving"
 					/>
 				</div>
 			</DocSection>
@@ -180,34 +204,41 @@
 				Save to enable comments, attachments and sharing.
 			</div>
 
-			<DocMetaPanel v-else-if="canEdit && docmeta" :docmeta="docmeta" :can-write="true">
+			<DocMetaPanel v-else-if="isOwner && docmeta" :docmeta="docmeta" :can-write="true">
 				<!-- skills keep the child-table share model (§14 F1/DA-09) -->
 				<template #extra>
-					<div class="px-5 py-4">
-						<div class="flex items-center justify-between">
-							<div class="text-sm text-ink-gray-5">Shared with</div>
-							<Button label="Manage" @click="shareOpen = true" />
-						</div>
-						<div v-if="shares.length" class="mt-2 flex items-center">
-							<Tooltip
-								v-for="u in shares.slice(0, 8)"
-								:key="u.name"
-								:text="u.full_name || u.name"
-							>
-								<Avatar
-									size="md"
-									:label="u.full_name || u.name"
-									class="-mr-1.5 ring-2 ring-outline-white hover:z-10 hover:scale-110"
-								/>
-							</Tooltip>
-							<span v-if="shares.length > 8" class="ml-3 text-sm text-ink-gray-5">
-								+{{ shares.length - 8 }}
-							</span>
-						</div>
-						<div v-else class="mt-2 text-sm text-ink-gray-4">Not shared</div>
-					</div>
+					<SkillSharesBlock
+						class="px-5 py-4"
+						:shares="shares"
+						@manage="shareOpen = true"
+					/>
 				</template>
 			</DocMetaPanel>
+
+			<!-- A skill reviewer on someone else's shared skill: who owns it and its
+			     shares (a reviewer may change them, 5c). No docmeta (its read gate is the
+			     owner's), so no comments; no rename, promote or delete. -->
+			<div
+				v-else-if="reviewerEditing"
+				class="jv-skill-reviewer-card m-5 space-y-3 rounded-md border p-4"
+			>
+				<div class="flex items-center gap-2">
+					<Avatar size="md" :label="ownerName" />
+					<div class="text-base font-medium text-ink-gray-8">{{ ownerName }}</div>
+				</div>
+				<div class="text-sm text-ink-gray-5">
+					Owner. You can edit this skill as a skill reviewer; only its owner can rename,
+					promote or delete it.
+				</div>
+				<div v-if="skill.modified" class="text-sm text-ink-gray-5">
+					Updated {{ timeAgo(skill.modified) }}
+				</div>
+				<SkillSharesBlock
+					class="border-t pt-3"
+					:shares="shares"
+					@manage="shareOpen = true"
+				/>
+			</div>
 
 			<!-- shared-with-me: read-only info card (no docmeta - the docmeta read
 			     gate covers owner/SM/DocShare only; child-table shares would 403) -->
@@ -230,7 +261,7 @@
 
 		<template #footer>
 			<CommentsSection
-				v-if="!isNew && canEdit && docmeta"
+				v-if="!isNew && isOwner && docmeta"
 				:docmeta="docmeta"
 				:can-comment="true"
 			/>
@@ -329,7 +360,6 @@ import {
 	Button,
 	Badge,
 	Avatar,
-	Tooltip,
 	Dropdown,
 	FormControl,
 	Switch,
@@ -345,6 +375,8 @@ import { useDocmeta } from "@/composables/useDocmeta";
 import { useShortcuts } from "@/composables/useShortcuts";
 import SyncPill from "./SyncPill.vue";
 import ShareDialog from "./ShareDialog.vue";
+import SkillRolesField from "./SkillRolesField.vue";
+import SkillSharesBlock from "./SkillSharesBlock.vue";
 import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
 import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
 import { getSkillsAreaCaps } from "@/api/personalise";
@@ -356,6 +388,8 @@ import "@/assets/settings.css"; // shared jv-* primitives (overlay, jv-btn) for 
 import * as api from "@/api";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { isCreatesError } from "@/lib/fileboxSkills";
+import { holdText, skillHold } from "@/lib/skillHold";
+import Banner from "@/components/Banner.vue";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -376,6 +410,7 @@ const FIELDS = [
 	"allow_approve_run",
 	"use_in_file_box",
 	"file_box_creates",
+	"allowed_roles",
 ];
 
 // ── state ────────────────────────────────────────────────────────────────────
@@ -393,6 +428,7 @@ const form = reactive({
 	allow_approve_run: false,
 	use_in_file_box: true,
 	file_box_creates: "",
+	allowed_roles: [],
 });
 // Whether THIS viewer may ENABLE "Approve & run" (Jarvis Admin / System Manager).
 // Server-provided (get_custom_skill.can_arm); the doctype guard is the real gate,
@@ -420,9 +456,49 @@ onMounted(async () => {
 	}
 });
 
+// An admin's hold (null when not held): the skill is off and cannot be switched on
+// or allowed to write without asking until an admin releases it.
+const hold = computed(() => skillHold(skill.value));
+const holdLine = computed(() => holdText(hold.value));
+const holdBanner = computed(
+	() =>
+		`${holdLine.value.replace(
+			/\.+$/,
+			""
+		)}. The assistant does not use this skill until an admin releases it.`
+);
+
 const canEdit = computed(() => props.isNew || !!(skill.value && skill.value.can_edit));
+// The owner's own affordances (promote, delete, the overflow, sharing, comments)
+// follow is_owner; editing follows can_edit, which a skill reviewer also has on a
+// shared skill they do not own (5c). A server without is_owner: only the owner edits.
+const isOwner = computed(() => {
+	if (props.isNew) return true;
+	const s = skill.value;
+	if (!s) return false;
+	return s.is_owner == null ? !!s.can_edit : !!s.is_owner;
+});
+const reviewerEditing = computed(() => canEdit.value && !isOwner.value);
 const readonly = computed(() => !canEdit.value || saving.value);
 const sharedBy = computed(() => (skill.value && skill.value.shared_by) || "");
+const ownerName = computed(
+	() => (skill.value && (skill.value.owner_name || skill.value.shared_by)) || "another user"
+);
+const reviewerBanner = computed(
+	() =>
+		`You are editing ${ownerName.value}'s skill. Changes apply to everyone it is shared with.`
+);
+
+// A Role skill's roles, which a skill reviewer may change. The options are the roles
+// the server says this editor may add (role_options) and the ones the skill has.
+const rolesEditable = computed(
+	() => !props.isNew && canEdit.value && isReviewer.value && skill.value?.scope === "Role"
+);
+const roleOptions = computed(() => {
+	const saved = snapshot.value.allowed_roles || [];
+	const offered = (skill.value && skill.value.role_options) || [];
+	return [...new Set([...saved, ...offered])].sort();
+});
 
 // "Approve & run" arming (skill approve-and-run, D-CONTROL). Enabling (off -> on)
 // is Jarvis Admin / System Manager only; disabling is always free for the owner -
@@ -435,8 +511,19 @@ const sharedBy = computed(() => (skill.value && skill.value.shared_by) || "");
 // without a browser. savedArmed reads the SAVED state (snapshot), not the live
 // form, so toggling doesn't self-unlock the guard.
 const savedArmed = computed(() => !!snapshot.value.allow_approve_run);
-const armLocked = computed(() => armToggleLocked(readonly.value, savedArmed.value, canArm.value));
-const armDescription = computed(() => armToggleDescription(savedArmed.value, canArm.value));
+// A skill reviewer never changes it on someone else's skill (the server refuses).
+const REVIEWER_ARM_HELP = "A skill reviewer cannot change this on someone else's skill.";
+const armLocked = computed(
+	() =>
+		!!hold.value ||
+		reviewerEditing.value ||
+		armToggleLocked(readonly.value, savedArmed.value, canArm.value)
+);
+const armDescription = computed(() => {
+	if (hold.value) return holdLine.value;
+	if (reviewerEditing.value) return REVIEWER_ARM_HELP;
+	return armToggleDescription(savedArmed.value, canArm.value);
+});
 
 // ── promotion (requester side, Skills-area promotion surfacing) ───────────────
 // The owner of a private (User-scope) skill can ask a reviewer to widen it to a
@@ -447,7 +534,7 @@ const promoBusy = ref(false);
 const canPromote = computed(
 	() =>
 		!props.isNew &&
-		canEdit.value &&
+		isOwner.value &&
 		!!skill.value &&
 		(skill.value.scope || "User") === "User" &&
 		!skill.value.managed_by_learning
@@ -458,7 +545,7 @@ const promoPending = computed(() => !!(myPromo.value && myPromo.value.status ===
 
 async function loadMyPromo() {
 	myPromo.value = null;
-	if (props.isNew || !props.id || !canEdit.value) return;
+	if (props.isNew || !props.id || !isOwner.value) return;
 	try {
 		const res = await mySkillPromotion(props.id);
 		myPromo.value = res && res.status ? res : null;
@@ -490,11 +577,12 @@ async function submitPromotion({ to_scope, target_role, target_roles, note }) {
 // ── File Box: "Use in File Box" + "File Box creates" ─────────────────────────
 // A shared (Role/Org) skill: opting out is free, opting back in needs a reviewer
 // (the doctype's content guard), so a non-reviewer can't turn it on here. The hint
-// names a System Manager: only the owner or a System Manager can save the skill,
-// and the owner reading this is not a reviewer.
+// names a skill reviewer: one may edit a shared skill they do not own (5c), and the
+// owner reading this is not one.
 const FILE_BOX_HELP = "Let File Box use this skill automatically for matching documents";
 const fileBoxGated = computed(
 	() =>
+		isOwner.value &&
 		canEdit.value &&
 		!isReviewer.value &&
 		!!skill.value &&
@@ -505,13 +593,14 @@ const fileBoxGated = computed(
 // reviewer, so the switch is locked once it is saved off (the server refuses it).
 const ENABLED_HELP = "Off = saved as a draft, not used by the assistant.";
 const enabledLocked = computed(
-	() => readonly.value || (fileBoxGated.value && !snapshot.value.enabled)
+	() => readonly.value || !!hold.value || (fileBoxGated.value && !snapshot.value.enabled)
 );
 const enabledDescription = computed(() => {
+	if (hold.value) return holdLine.value;
 	if (!fileBoxGated.value) return ENABLED_HELP;
 	return snapshot.value.enabled
-		? `${ENABLED_HELP} Once off, only a System Manager can turn a shared skill back on.`
-		: `${ENABLED_HELP} Only a System Manager can turn a shared skill back on.`;
+		? `${ENABLED_HELP} Once off, only a skill reviewer can turn a shared skill back on.`
+		: `${ENABLED_HELP} Only a skill reviewer can turn a shared skill back on.`;
 });
 const fileBoxLocked = computed(
 	() => readonly.value || (fileBoxGated.value && !snapshot.value.use_in_file_box)
@@ -519,8 +608,8 @@ const fileBoxLocked = computed(
 const fileBoxDescription = computed(() => {
 	if (!fileBoxGated.value) return FILE_BOX_HELP;
 	return snapshot.value.use_in_file_box
-		? `${FILE_BOX_HELP}. Once off, only a System Manager can turn it back on for a shared skill.`
-		: `${FILE_BOX_HELP}. Only a System Manager can turn it on for a shared skill.`;
+		? `${FILE_BOX_HELP}. Once off, only a skill reviewer can turn it back on for a shared skill.`
+		: `${FILE_BOX_HELP}. Only a skill reviewer can turn it on for a shared skill.`;
 });
 
 // The picker searches the types the server accepts there (submittable, not in a
@@ -571,6 +660,7 @@ const instructionsPreviewHtml = computed(() =>
 
 function normalize(v) {
 	if (typeof v === "boolean") return v ? 1 : 0;
+	if (Array.isArray(v)) return [...v].sort().join("\n"); // a role set: order is not a change
 	return v == null ? "" : v;
 }
 const dirty = computed(() => {
@@ -606,6 +696,7 @@ function seed(data) {
 	form.allow_approve_run = !!data.allow_approve_run;
 	form.use_in_file_box = data.use_in_file_box == null ? true : !!data.use_in_file_box;
 	form.file_box_creates = data.file_box_creates || "";
+	form.allowed_roles = [...(data.allowed_roles || [])];
 	snapshot.value = { ...form };
 }
 
@@ -634,12 +725,15 @@ async function init() {
 		seed(full);
 		if (full.can_edit) {
 			loadCreates("");
+			loadShares(); // a reviewer manages a shared skill's shares too (5c)
+		}
+		// The owner's panel only: a reviewer's docmeta read would be refused.
+		if (isOwner.value) {
 			docmeta.value = useDocmeta(DOCTYPE, props.id);
 			// created outside setup (async load / post-create replace) - fetch
 			// explicitly rather than relying on the composable's auto-load
 			if (docmeta.value && typeof docmeta.value.reload === "function")
 				docmeta.value.reload();
-			loadShares();
 			loadMyPromo();
 		}
 	} catch (e) {
@@ -657,7 +751,7 @@ async function loadShares() {
 		const res = (await api.getSkillShares(props.id)) || {};
 		shares.value = res.users || [];
 	} catch (e) {
-		// owner-only endpoint; best-effort
+		// owner or reviewer-on-shared endpoint; best-effort
 	}
 }
 
@@ -675,6 +769,10 @@ async function save() {
 	}
 	if (!(form.instructions || "").trim()) {
 		toast.error("Instructions are required.");
+		return;
+	}
+	if (rolesEditable.value && !form.allowed_roles.length) {
+		toast.error("Keep at least one role.");
 		return;
 	}
 	saving.value = true;
@@ -702,14 +800,15 @@ async function save() {
 			toast.success("Saved");
 			if (newName) router.replace("/skills/" + newName);
 		} else {
-			// send only the changed fields
+			// send only the changed fields (the roles only exist on an update)
+			const full = { ...payload, allowed_roles: [...form.allowed_roles] };
 			const changed = {};
 			for (const k of FIELDS) {
-				if (normalize(form[k]) !== normalize(snapshot.value[k])) changed[k] = payload[k];
+				if (normalize(form[k]) !== normalize(snapshot.value[k])) changed[k] = full[k];
 			}
 			await api.updateCustomSkill({ name: props.id, ...changed });
 			snapshot.value = { ...form };
-			skill.value = { ...skill.value, ...payload };
+			skill.value = { ...skill.value, ...full };
 			// Reviewers only (see create branch): the shared push is reviewer-gated.
 			if (isReviewer.value) syncPill.value && syncPill.value.apply();
 			toast.success("Saved");

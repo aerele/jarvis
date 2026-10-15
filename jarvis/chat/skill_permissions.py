@@ -31,6 +31,8 @@ import re
 
 import frappe
 
+from jarvis.chat.wiki_permissions import _NON_TARGETABLE_ROLES
+
 SKILL = "Jarvis Custom Skill"
 SHARE = "Jarvis Custom Skill Share"
 ALLOWED_ROLE = "Jarvis Custom Skill Allowed Role"
@@ -105,9 +107,37 @@ def has_skill_permission(doc, ptype: str = "read", user: str | None = None) -> b
 	# a bool (never frappe.throw) — get_doc_permissions calls this hook for every
 	# ptype while building a doc's perm dict, so a throw here would break plain
 	# reads. The clear user-facing "you can only edit your own skills" message is
-	# raised by the SPA write endpoints (custom_skills_api._require_skill_owner);
-	# generic REST writes fall back to Frappe's "does not have access" message.
+	# raised by the SPA write endpoints (custom_skills_api._require_skill_editor, whose
+	# reviewer branch saves with ignore_permissions); generic REST writes fall back to
+	# Frappe's "does not have access" message.
 	return (doc.get("owner") or "") == user
+
+
+# --------------------------------------------------------------------------- #
+# Which roles a skill may be given (a Role skill's audience)
+# --------------------------------------------------------------------------- #
+def own_targetable_roles(user: str) -> list[str]:
+	"""The roles ``user`` may name for a skill's audience as its author or a promotion
+	requester: their own desk roles minus the blanket ones (the wiki's
+	``_NON_TARGETABLE_ROLES``). A requester widens to a team they belong to."""
+	return sorted(r for r in frappe.get_roles(user) if r and r not in _NON_TARGETABLE_ROLES)
+
+
+def reviewer_targetable_roles() -> list[str]:
+	"""The roles a skill reviewer may give a shared skill (5c): any enabled desk role
+	minus the blanket ones, the set a System Manager targets on the wiki
+	(``wiki_permissions.manageable_roles``). Approving a promotion only narrows the
+	request's own roles, so it names no wider set to reuse."""
+	# Role names are not secret and the caller is already gated as a reviewer; a
+	# Jarvis Skill Reviewer has no read on Role, so the list ignores permissions.
+	roles = frappe.get_list(
+		"Role",
+		filters={"disabled": 0, "desk_access": 1},
+		order_by="name asc",
+		pluck="name",
+		ignore_permissions=True,
+	)
+	return [r for r in roles if r not in _NON_TARGETABLE_ROLES]
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +202,27 @@ def shared_skills_no_reviewer_owns() -> list[dict]:
 			}
 		)
 	return found
+
+
+def held_skills() -> list[dict]:
+	"""Every skill an admin has put on hold, with who owns it and why. Reads only.
+
+	For an operator, and for a rollback: a revert of the admin hold leaves held skills
+	switched off with no visible reason, and this is the list to release them from
+	(``skills_admin_api.admin_release`` before the revert, or a raw write after it).
+	Empty before the migrate that adds the hold fields.
+	``bench --site <site> execute jarvis.chat.skill_permissions.held_skills``."""
+	from jarvis.jarvis.doctype.jarvis_custom_skill import jarvis_custom_skill as skill_doctype
+
+	if not skill_doctype.hold_fields_exist():
+		return []
+	# System context (bench execute): no permission applies.
+	return frappe.get_all(
+		SKILL,
+		filters={skill_doctype.HOLD_FIELD: 1},
+		fields=["name", "skill_name", "scope", "owner", "modified", skill_doctype.HOLD_REASON_FIELD],
+		order_by="modified desc",
+	)
 
 
 def skills_outside_control(user: str, *, names=(), slugs=()) -> list[str]:
