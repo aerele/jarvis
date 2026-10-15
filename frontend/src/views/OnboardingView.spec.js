@@ -1861,6 +1861,21 @@ describe("private network: the Network step replaces the dead-end host block", (
 		expect(buttonByLabel(w, "Copy rule")).toBeTruthy();
 	});
 
+	it("the setup server rule names the port the bench sent", async () => {
+		api.privateSetupTargets.mockResolvedValueOnce({
+			admin_host: "fleet.klerk.in",
+			admin_ips: ["178.104.214.114"],
+			port: 8443,
+			scheme: "https",
+		});
+		const w = mountView();
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		expect(w.text()).toContain("TCP 8443 (HTTPS)");
+		expect(w.text()).not.toContain("TCP 443");
+	});
+
 	it("Check connection, then Continue, lands on the public address screen pre-filled", async () => {
 		const w = mountView();
 		await flushPromises();
@@ -2305,6 +2320,25 @@ describe("private network: allow the held server, then test, then pay", () => {
 		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
 		expect(w.vm.pay.value).not.toBe(STATES.CHECKOUT_OPEN);
 		expect(assign).not.toHaveBeenCalled();
+	});
+
+	it("the rules and the warning name the ports of the saved address and the reach URL", async () => {
+		api.networkStatus.mockResolvedValueOnce(
+			privateStatus({ public_address: "https://erp.acme.com:8443" })
+		);
+		api.reserveHost.mockResolvedValueOnce({
+			ok: true,
+			host_ip: "198.51.100.27",
+			reach_url: "http://127.0.0.1:18810/",
+			hold_until: "2026-10-18 10:00:00",
+		});
+		const w = mountView();
+		await flushPromises();
+		const text = w.text();
+		expect(text).toContain("TCP 8443");
+		expect(text).toContain("TCP 18810");
+		expect(text).not.toContain("TCP 443");
+		expect(text).toContain("Don't open port 8443 to everyone");
 	});
 
 	it("a blank saved address shows a retry card, no Test and no dead Continue", async () => {

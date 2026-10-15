@@ -143,11 +143,28 @@ class TestPrivateSetupTargets(_AdminUser):
 		out = self._targets(
 			"https://fleet.klerk.in", resolved=["178.104.214.114", "178.104.214.114", "1.2.3.4"]
 		)
-		self.assertEqual(out, {"admin_host": "fleet.klerk.in", "admin_ips": ["1.2.3.4", "178.104.214.114"]})
+		self.assertEqual(
+			out,
+			{
+				"admin_host": "fleet.klerk.in",
+				"admin_ips": ["1.2.3.4", "178.104.214.114"],
+				"port": 443,
+				"scheme": "https",
+			},
+		)
+
+	def test_the_port_of_the_admin_url_is_kept_or_defaulted_by_scheme(self):
+		self.assertEqual(self._targets("https://fleet.klerk.in:8443")["port"], 8443)
+		self.assertEqual(self._targets("https://fleet.klerk.in")["port"], 443)
+		out = self._targets("http://fleet.klerk.in")
+		self.assertEqual((out["port"], out["scheme"]), (80, "http"))
 
 	def test_an_ip_literal_admin_url_needs_no_dns(self):
 		out = self._targets("http://144.91.75.43:8083", error=AssertionError("no dns for a literal"))
-		self.assertEqual(out, {"admin_host": "144.91.75.43", "admin_ips": ["144.91.75.43"]})
+		self.assertEqual(
+			out,
+			{"admin_host": "144.91.75.43", "admin_ips": ["144.91.75.43"], "port": 8083, "scheme": "http"},
+		)
 
 	def test_falls_back_to_site_config_when_dns_fails(self):
 		out = self._targets(
@@ -167,7 +184,9 @@ class TestPrivateSetupTargets(_AdminUser):
 
 	def test_no_dns_and_no_fallback_is_an_empty_list_not_an_error(self):
 		out = self._targets("https://fleet.klerk.in", error=socket.gaierror("x"))
-		self.assertEqual(out, {"admin_host": "fleet.klerk.in", "admin_ips": []})
+		self.assertEqual(
+			out, {"admin_host": "fleet.klerk.in", "admin_ips": [], "port": 443, "scheme": "https"}
+		)
 
 	def test_requires_a_jarvis_admin(self):
 		frappe.set_user("Guest")

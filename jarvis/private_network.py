@@ -178,8 +178,19 @@ def private_setup_targets() -> dict:
 		return {"admin_host": "", "admin_ips": []}
 	configured = frappe.db.get_single_value("Jarvis Settings", "jarvis_admin_url")
 	url = admin_client._admin_url(frappe._dict(jarvis_admin_url=configured))
-	host = (urlsplit(url).hostname or "").lower()
-	return {"admin_host": host, "admin_ips": _resolve_ipv4(host)}
+	parts = urlsplit(url)
+	host = (parts.hostname or "").lower()
+	try:
+		port = parts.port
+	except ValueError:
+		port = None
+	scheme = parts.scheme if parts.scheme in ("http", "https") else "https"
+	return {
+		"admin_host": host,
+		"admin_ips": _resolve_ipv4(host),
+		"port": port or (80 if scheme == "http" else 443),
+		"scheme": scheme,
+	}
 
 
 @frappe.whitelist(methods=["POST"])

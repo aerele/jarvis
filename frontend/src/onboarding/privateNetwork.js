@@ -12,8 +12,6 @@ export const SETUP_UNAVAILABLE = "Private network setup isn't available yet. Con
 
 const IN_LABEL = "Jarvis server → your ERPNext";
 const OUT_LABEL = "Your ERPNext → Jarvis server";
-const ADMIN_PORT = "TCP 443 (HTTPS)";
-const SERVER_PORT = "TCP 443";
 
 // ---- the public address ---------------------------------------------------------------
 // A port of jarvis/network_address.py (itself a verbatim copy of admin's address_rules.py)
@@ -253,6 +251,16 @@ export function publicHostOf(address) {
 		: `${host}:${port}`;
 }
 
+/** The port a firewall rule must name for this address: the explicit port, else 443 for https
+ *  and 80 for http. `fallback` when the address is blank or cannot be read. */
+export function portOf(address, fallback = 443) {
+	const parts = typeof address === "string" ? splitUrl(address.trim()) : null;
+	if (!parts) return fallback;
+	const { port } = hostAndPort(parts.netloc);
+	if (port === "bad") return fallback;
+	return port === null ? DEFAULT_PORT[parts.scheme] || fallback : port;
+}
+
 // ---- the rules tables -------------------------------------------------------------------
 const mkRow = (direction, from, fromMono, to, toMono, toNote, port) => ({
 	direction,
@@ -265,25 +273,26 @@ const mkRow = (direction, from, fromMono, to, toMono, toNote, port) => ({
 });
 
 /** AllowAdmin: one outbound rule per Jarvis setup server address. */
-export function adminRuleRows({ ips, host }) {
+export function adminRuleRows({ ips, host, port = 443, scheme = "https" }) {
+	const adminPort = `TCP ${port}${scheme === "http" ? " (HTTP)" : " (HTTPS)"}`;
 	const list = Array.isArray(ips) ? ips.filter(Boolean) : [];
 	if (list.length) {
 		return list.map((ip) =>
-			mkRow("Outbound", "Your ERPNext server", false, ip, true, host || "", ADMIN_PORT)
+			mkRow("Outbound", "Your ERPNext server", false, ip, true, host || "", adminPort)
 		);
 	}
 	return host
-		? [mkRow("Outbound", "Your ERPNext server", false, host, true, "", ADMIN_PORT)]
+		? [mkRow("Outbound", "Your ERPNext server", false, host, true, "", adminPort)]
 		: [];
 }
 
 /** AllowServer: the outbound rule to the held host and the inbound rule from it. */
-export function serverRuleRows({ hostIp, publicHost }) {
+export function serverRuleRows({ hostIp, publicHost, inboundPort = 443, outboundPort = 443 }) {
 	// An empty hold (admin had no address to give) must never render as a blank "allow" rule.
 	if (!hostIp || !publicHost) return [];
 	return [
-		mkRow("Outbound", "Your ERPNext server", false, hostIp, true, "", SERVER_PORT),
-		mkRow("Inbound", hostIp, true, publicHost, true, "your public address", SERVER_PORT),
+		mkRow("Outbound", "Your ERPNext server", false, hostIp, true, "", `TCP ${outboundPort}`),
+		mkRow("Inbound", hostIp, true, publicHost, true, "your public address", `TCP ${inboundPort}`),
 	];
 }
 
@@ -357,7 +366,7 @@ function outboundRow(outbound, ctx) {
 	if (outbound.reason === "bad_target") {
 		return { state: "fail", detail: "We couldn’t run this check from your ERPNext." };
 	}
-	return { state: "fail", detail: `Couldn’t connect to ${ctx.hostIp} on port 443.` };
+	return { state: "fail", detail: `Couldn’t connect to ${ctx.hostIp} on port ${ctx.outboundPort}.` };
 }
 
 function inboundBanner(inbound, ctx) {
@@ -375,7 +384,7 @@ function inboundBanner(inbound, ctx) {
 		return {
 			type: "warning",
 			title: "We couldn’t reach your public address",
-			text: `Check the inbound rule: allow TCP 443 from ${ctx.hostIp} to ${ctx.publicHost}. New rules can take a few minutes to apply.`,
+			text: `Check the inbound rule: allow TCP ${ctx.inboundPort} from ${ctx.hostIp} to ${ctx.publicHost}. New rules can take a few minutes to apply.`,
 		};
 	}
 	if (reason === "tls") {
@@ -436,7 +445,7 @@ function outboundBanner(outbound, ctx) {
 	return {
 		type: "warning",
 		title: "Your ERPNext can’t reach the Jarvis server",
-		text: `Check the outbound rule: allow TCP 443 from your ERPNext server to ${ctx.hostIp}.`,
+		text: `Check the outbound rule: allow TCP ${ctx.outboundPort} from your ERPNext server to ${ctx.hostIp}.`,
 	};
 }
 
@@ -452,6 +461,7 @@ export function describeServerTest({
 	outbound,
 	hostIp,
 	publicAddress,
+	reachUrl = "",
 	siteName,
 	afterPayment = false,
 }) {
@@ -463,6 +473,8 @@ export function describeServerTest({
 		publicAddress,
 		publicHost: publicHostOf(publicAddress) || publicAddress,
 		siteName,
+		inboundPort: portOf(publicAddress),
+		outboundPort: portOf(reachUrl),
 	};
 	const checking = { state: "checking", detail: "Checking…" };
 	const inRes = done ? inboundRow(inbound, ctx) : checking;

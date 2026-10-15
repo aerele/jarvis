@@ -1556,7 +1556,7 @@
 												:rows="serverRows"
 											/>
 											<p class="text-p-sm text-ink-gray-5">
-												Allow only this address. Don't open port 443 to
+												Allow only this address. Don't open port {{ inboundPort }} to
 												everyone. We hold this server for you for 3 days.
 											</p>
 										</template>
@@ -2522,7 +2522,7 @@
 													:rows="serverRows"
 												/>
 												<p class="text-p-sm text-ink-gray-5">
-													Allow only this address. Don't open port 443 to
+													Allow only this address. Don't open port {{ inboundPort }} to
 													everyone.
 												</p>
 											</template>
@@ -2770,6 +2770,7 @@ import {
 	adminRuleRows,
 	checkAddress,
 	serverRuleRows,
+	portOf,
 	describeServerTest,
 	holdEndedBanner,
 	publicHostOf,
@@ -3579,7 +3580,12 @@ const NETWORK_OPTIONS = [
 // the lookup has answered, so nothing about the Jarvis setup server renders before that.
 const adminRows = computed(() =>
 	net.state.targets
-		? adminRuleRows({ ips: net.state.targets.admin_ips, host: net.state.targets.admin_host })
+		? adminRuleRows({
+				ips: net.state.targets.admin_ips,
+				host: net.state.targets.admin_host,
+				port: net.state.targets.port,
+				scheme: net.state.targets.scheme,
+		  })
 		: []
 );
 // "Use this" appears only once the customer has edited the pre-filled address.
@@ -4426,11 +4432,15 @@ function retryServerLookup() {
 	net.loadStatus();
 	net.loadHold();
 }
+// The inbound rule follows the saved public address, the outbound rule the hold's reach URL.
+const inboundPort = computed(() => portOf(net.state.publicAddress));
 const serverRows = computed(() =>
 	net.state.hold
 		? serverRuleRows({
 				hostIp: net.state.hold.hostIp,
 				publicHost: publicHostOf(net.state.publicAddress) || net.state.publicAddress,
+				inboundPort: inboundPort.value,
+				outboundPort: portOf(net.state.hold.reachUrl),
 		  })
 		: []
 );
@@ -4441,6 +4451,7 @@ const serverTest = computed(() =>
 		outbound: net.state.test.outbound,
 		hostIp: net.state.hold ? net.state.hold.hostIp : "",
 		publicAddress: net.state.publicAddress,
+		reachUrl: net.state.hold ? net.state.hold.reachUrl : "",
 		siteName: window.site_name || "",
 	})
 );
@@ -6492,6 +6503,7 @@ const connectTest = computed(() =>
 		outbound: net.state.test.outbound,
 		hostIp: net.state.hold ? net.state.hold.hostIp : "",
 		publicAddress: net.state.publicAddress,
+		reachUrl: net.state.hold ? net.state.hold.reachUrl : "",
 		siteName: window.site_name || "",
 		afterPayment: true,
 	})

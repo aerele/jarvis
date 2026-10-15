@@ -93,7 +93,7 @@ export function createPrivateNetwork(deps) {
 		pick: "private", // private | public
 		statusLoaded: false,
 		adminReachable: null, // true | false | null (not asked or unknown)
-		targets: null, // { admin_host, admin_ips }
+		targets: null, // { admin_host, admin_ips, port, scheme }
 		targetsLoading: false,
 		targetsErr: "",
 		adminCheck: "idle", // idle | checking | ok | fail | disabled

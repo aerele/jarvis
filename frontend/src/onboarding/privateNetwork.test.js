@@ -12,6 +12,7 @@ import {
 	rulesToText,
 	testPassed,
 	describeServerTest,
+	portOf,
 	holdEndedBanner,
 	HOLD_UNAVAILABLE,
 	checkAddress,
@@ -572,4 +573,59 @@ test("adminCheckState surfaces the optional busy message", () => {
 	assert.equal(busy.message, "Too many attempts. Try again in a minute.");
 	assert.equal(adminCheckState({ reachable: true, enabled: false }).message, SETUP_UNAVAILABLE);
 	assert.equal(adminCheckState(null).state, "unreachable");
+});
+
+// ---- rule ports follow each address ---------------------------------------------------
+test("portOf: the explicit port, else 443 for https and 80 for http, else the fallback", () => {
+	assert.equal(portOf("https://erp.acme.com:8443"), 8443);
+	assert.equal(portOf("https://erp.acme.com:8443/jarvis"), 8443);
+	assert.equal(portOf("https://erp.acme.com"), 443);
+	assert.equal(portOf("http://127.0.0.1:8000"), 8000);
+	assert.equal(portOf("http://127.0.0.1:18810/"), 18810);
+	assert.equal(portOf("http://reach.local"), 80);
+	assert.equal(portOf(""), 443);
+	assert.equal(portOf("nonsense"), 443);
+	assert.equal(portOf("https://h:99999"), 443);
+});
+
+test("serverRuleRows: the inbound rule names the address port, the outbound the reach port", () => {
+	const rows = serverRuleRows({
+		hostIp: "198.51.100.27",
+		publicHost: "erp.acme.com:8443",
+		inboundPort: 8443,
+		outboundPort: 18810,
+	});
+	assert.equal(rows[0].port, "TCP 18810");
+	assert.equal(rows[1].port, "TCP 8443");
+	const plain = serverRuleRows({ hostIp: "198.51.100.27", publicHost: "erp.acme.com" });
+	assert.deepEqual([plain[0].port, plain[1].port], ["TCP 443", "TCP 443"]);
+});
+
+test("adminRuleRows: the port and the scheme of the admin address", () => {
+	const https = adminRuleRows({ ips: ["1.2.3.4"], host: "h", port: 8443, scheme: "https" });
+	assert.equal(https[0].port, "TCP 8443 (HTTPS)");
+	const http = adminRuleRows({ ips: [], host: "h", port: 8083, scheme: "http" });
+	assert.equal(http[0].port, "TCP 8083 (HTTP)");
+	assert.equal(adminRuleRows({ ips: ["1.2.3.4"], host: "h" })[0].port, "TCP 443 (HTTPS)");
+});
+
+test("describeServerTest: the failure copy names the port of each address", () => {
+	const d = describe({
+		publicAddress: "https://erp.acme.com:8443",
+		reachUrl: "http://127.0.0.1:18810/",
+		inbound: { status: "Unreachable", reason: "timeout" },
+		outbound: { ok: false, reason: "refused" },
+	});
+	assert.equal(d.rows[1].detail, "Couldn’t connect to 198.51.100.27 on port 18810.");
+	assert.match(d.banner.text, /allow TCP 18810 from your ERPNext server/);
+	const inbound = describe({
+		publicAddress: "https://erp.acme.com:8443",
+		inbound: { status: "Unreachable", reason: "timeout" },
+	});
+	assert.match(inbound.banner.text, /allow TCP 8443 from 198.51.100.27 to erp.acme.com:8443/);
+	const local = describe({
+		publicAddress: "http://127.0.0.1:8000",
+		inbound: { status: "Unreachable", reason: "timeout" },
+	});
+	assert.match(local.banner.text, /allow TCP 8000 from/);
 });
