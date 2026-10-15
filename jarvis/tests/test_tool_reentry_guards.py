@@ -45,6 +45,8 @@ POST_ONLY = (
 	"jarvis.chat.skills_admin_api.admin_hold",
 	"jarvis.chat.skills_admin_api.admin_release",
 	"jarvis.chat.skills_admin_api.admin_delete",
+	"jarvis.chat.skills_admin_api.admin_handover",
+	"jarvis.chat.skills_admin_api.admin_handover_targets",
 	"jarvis.chat.admission.cancel_queued_turn",
 	"jarvis.chat.agents_api.take_finding_to_chat",
 	"jarvis.chat.agents_api.install_agent",  # writes the tenant-wide model: never on a GET
@@ -81,6 +83,12 @@ NESTED_REFUSED = {
 	"jarvis.chat.skills_admin_api.admin_hold": {"skill": "zz-no-skill", "reason": "zz"},
 	"jarvis.chat.skills_admin_api.admin_release": {"skill": "zz-no-skill"},
 	"jarvis.chat.skills_admin_api.admin_delete": {"skill": "zz-no-skill"},
+	"jarvis.chat.skills_admin_api.admin_handover": {
+		"skill": "zz-no-skill",
+		"new_owner": "zz-no-user",
+		"expected_owner": "zz-no-user",
+	},
+	"jarvis.chat.skills_admin_api.admin_handover_targets": {},
 	"jarvis.chat.approvals_api.decide": {"name": "zz-no-ar", "decision": "yes"},
 	"jarvis.chat.approvals_api.dismiss_approval": {"name": "zz-no-ar"},
 	"jarvis.chat.approvals_api.restore_approval": {"name": "zz-no-ar"},
@@ -265,6 +273,11 @@ class TestRunMethodDenylist(FrappeTestCase):
 		("jarvis.chat.skills_admin_api.admin_hold", {"skill": "zz", "reason": "zz"}),
 		("jarvis.chat.skills_admin_api.admin_release", {"skill": "zz"}),
 		("jarvis.chat.skills_admin_api.admin_delete", {"skill": "zz"}),
+		(
+			"jarvis.chat.skills_admin_api.admin_handover",
+			{"skill": "zz", "new_owner": "zz", "expected_owner": "zz"},
+		),
+		("jarvis.chat.skills_admin_api.admin_handover_targets", {}),
 		("jarvis.api.call_tool", {"tool": "get_schema", "args": {"doctype": "ToDo"}}),
 		("jarvis.chat.pending_actions.operator_fail", {"name": "zz"}),
 		("jarvis.chat.pending_actions.operator_settle", {"name": "zz"}),

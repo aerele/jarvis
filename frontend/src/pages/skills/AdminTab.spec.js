@@ -3,8 +3,8 @@ import { mount, flushPromises } from "@vue/test-utils";
 
 /**
  * The Jarvis Admin's tab on the Skills page (#admin): every user's skills, the
- * filters, the loading / empty / error states, and the row actions Hold, Release
- * and Delete. The dialogs are stubs here (their own specs read them); the load
+ * filters, the loading / empty / error states, and the row actions Hold, Release,
+ * Hand over and Delete. The dialogs are stubs here (their own specs read them); the load
  * state machine and its focus rules are the Macros tab's, shared through
  * useAdminList and covered in full by that tab's spec, so only what a Skills row
  * adds is checked for focus.
@@ -111,6 +111,15 @@ vi.mock("./SkillReleaseDialog.vue", () => ({
 		props: ["modelValue", "name", "skillName", "ownerLabel", "shared"],
 		emits: ["update:modelValue", "released", "failed"],
 		template: `<div class="stub-release" :data-name="name" :data-open="modelValue ? '1' : ''" :data-shared="shared ? '1' : ''" />`,
+	},
+}));
+
+vi.mock("./SkillHandoverDialog.vue", () => ({
+	default: {
+		name: "SkillHandoverDialog",
+		props: ["modelValue", "name", "skillName", "owner", "ownerLabel", "shared"],
+		emits: ["update:modelValue", "handed", "failed", "reload"],
+		template: `<div class="stub-handover" :data-name="name" :data-open="modelValue ? '1' : ''" :data-owner="owner" :data-owner-label="ownerLabel" :data-shared="shared ? '1' : ''" />`,
 	},
 }));
 
@@ -277,7 +286,7 @@ describe("Skills AdminTab, rows", () => {
 			expect(m.text()).not.toMatch(/\bOrg\b|scope|armed/i);
 	});
 
-	it("gives an admin's own skill Delete only, and says why", async () => {
+	it("gives an admin's own skill no Hold or Release, and says why", async () => {
 		const w = await mountWith([
 			row("a", { is_mine: 1 }),
 			row("b", { is_mine: 1, admin_hold: 1 }),
@@ -287,7 +296,7 @@ describe("Skills AdminTab, rows", () => {
 				.at(i)
 				.findAll(".stub-menu-item")
 				.map((m) => m.text());
-			expect(items).toEqual(["Delete"]);
+			expect(items).toEqual(["Hand over", "Delete"]);
 		}
 		expect(rowsOf(w)[0].find(".jv-skill-admin-own").text()).toContain("Yours");
 		expect(rowsOf(w)[0].find(".jv-skill-admin-own .sr-only").text()).toBe(
@@ -628,9 +637,21 @@ describe("Skills AdminTab, a site not yet migrated", () => {
 		expect(menuItem(w, "a", "hold").attributes("disabled")).toBeUndefined();
 	});
 
+	it("says handing over is not available and disables Hand over", async () => {
+		const w = await mountWith([row("a")], { handover_available: false });
+		expect(w.find(".jv-skill-admin-no-handover").text()).toBe(
+			"Handing over is not available yet on this site."
+		);
+		expect(menuItem(w, "a", "handover").attributes("disabled")).toBeDefined();
+		expect(menuItem(w, "a", "hold").attributes("disabled")).toBeUndefined();
+		expect(menuItem(w, "a", "delete").attributes("disabled")).toBeUndefined();
+	});
+
 	it("says nothing about it on a migrated site", async () => {
 		const w = await mountWith([row("a")]);
 		expect(w.find(".jv-skill-admin-unmigrated").exists()).toBe(false);
+		expect(w.find(".jv-skill-admin-no-handover").exists()).toBe(false);
+		expect(menuItem(w, "a", "handover").attributes("disabled")).toBeUndefined();
 		expect(menuItem(w, "a", "hold").attributes("disabled")).toBeUndefined();
 	});
 });
@@ -645,10 +666,12 @@ describe("Skills AdminTab, the Actions menu", () => {
 				.map((m) => [m.text(), m.attributes("data-group")]);
 		expect(items(0)).toEqual([
 			["Hold", "Skill"],
+			["Hand over", "Skill"],
 			["Delete", "Delete"],
 		]);
 		expect(items(1)).toEqual([
 			["Release", "Skill"],
+			["Hand over", "Skill"],
 			["Delete", "Delete"],
 		]);
 		expect(menuItem(w, "a", "delete").attributes("data-theme")).toBe("red");
@@ -665,14 +688,9 @@ describe("Skills AdminTab, the Actions menu", () => {
 				.at(i)
 				.findAll(".stub-menu-item")
 				.map((m) => m.text());
-		expect(items(0)).toEqual(["Hold for everyone", "Delete for everyone"]);
-		expect(items(1)).toEqual(["Release", "Delete for everyone"]);
-		expect(items(2)).toEqual(["Hold", "Delete"]);
-	});
-
-	it("leaves a clearly marked place for Hand over, and has none yet", async () => {
-		const w = await mountWith([row("a")]);
-		expect(w.text()).not.toContain("Hand over");
+		expect(items(0)).toEqual(["Hold for everyone", "Hand over", "Delete for everyone"]);
+		expect(items(1)).toEqual(["Release", "Hand over", "Delete for everyone"]);
+		expect(items(2)).toEqual(["Hold", "Hand over", "Delete"]);
 	});
 
 	it("does not let a learned skill be deleted here", async () => {
@@ -774,6 +792,179 @@ describe("Skills AdminTab, the Actions menu", () => {
 		await button(w, "Refresh").trigger("click");
 		await flushPromises();
 		expect(w.find(".stub-hold").exists()).toBe(false);
+	});
+});
+
+describe("Skills AdminTab, Hand over", () => {
+	it("is offered on a skill, an admin's own included, between Hold and Delete", async () => {
+		const w = await mountWith([row("a"), row("m", { is_mine: 1 })]);
+		expect(
+			rowsOf(w)[1]
+				.findAll(".stub-menu-item")
+				.map((m) => m.text())
+		).toEqual(["Hand over", "Delete"]);
+		expect(menuItem(w, "a", "handover").attributes("data-group")).toBe("Skill");
+		expect(menuItem(w, "a", "handover").attributes("disabled")).toBeUndefined();
+	});
+
+	it("is not offered on a learned skill or a Published copy", async () => {
+		const w = await mountWith([row("l", { is_learned: 1 }), row("p", { is_published: 1 })]);
+		expect(menuItem(w, "l", "handover").exists()).toBe(false);
+		expect(menuItem(w, "p", "handover").exists()).toBe(false);
+		// A Published copy still has the rest of its menu.
+		expect(menuItem(w, "p", "hold").exists()).toBe(true);
+	});
+
+	it("opens the dialog with the skill, its owner as loaded, and whether it is shared", async () => {
+		const w = await mountWith([
+			row("a"),
+			row("b", { scope: "Role", target_role: "Accounts User" }),
+			row("c", { scope: "Org" }),
+		]);
+		const opened = async (name) => {
+			await menuItem(w, name, "handover").trigger("click");
+			await flushPromises();
+			const d = w.find(".stub-handover");
+			const seen = [
+				d.attributes("data-open"),
+				d.attributes("data-owner"),
+				d.attributes("data-owner-label"),
+				d.attributes("data-shared"),
+			];
+			w.findComponent({ name: "SkillHandoverDialog" }).vm.$emit("update:modelValue", false);
+			await flushPromises();
+			return seen;
+		};
+		const label = "Asha Rao (asha@example.test)";
+		expect(await opened("a")).toEqual(["1", "asha@example.test", label, ""]);
+		expect(await opened("b")).toEqual(["1", "asha@example.test", label, "1"]);
+		expect(await opened("c")).toEqual(["1", "asha@example.test", label, "1"]);
+	});
+
+	it("blocks the other actions while its dialog is open", async () => {
+		const w = await mountWith([row("a")]);
+		await menuItem(w, "a", "handover").trigger("click");
+		await flushPromises();
+		expect(menuItem(w, "a", "hold").attributes("disabled")).toBeDefined();
+		expect(menuItem(w, "a", "delete").attributes("disabled")).toBeDefined();
+	});
+
+	it("re-reads after a hand over: the new owner shows, and a shared skill's Apply notice appears", async () => {
+		const w = await mountWith([row("a", { scope: "Org", enabled: 1 })]);
+		await menuItem(w, "a", "handover").trigger("click");
+		await flushPromises();
+		expect(rowsOf(w)[0].text()).toContain("Asha Rao");
+		api.adminListSkills.mockClear();
+		api.adminListSkills.mockResolvedValue(
+			page([
+				row("a", {
+					scope: "Org",
+					enabled: 0,
+					owner: "ben@example.test",
+					owner_name: "Ben Ode",
+				}),
+			])
+		);
+		w.findComponent({ name: "SkillHandoverDialog" }).vm.$emit("handed", {
+			name: "a",
+			new_owner: "ben@example.test",
+			needs_apply: true,
+		});
+		await flushPromises();
+		expect(api.adminListSkills).toHaveBeenCalledTimes(1);
+		expect(rowsOf(w)[0].text()).toContain("Ben Ode");
+		expect(rowsOf(w)[0].text()).not.toContain("Asha Rao");
+		expect(
+			rowsOf(w)[0]
+				.findAll(".badge")
+				.map((b) => b.text())
+		).toContain("Off");
+		expect(w.find(".jv-skill-admin-catalog").exists()).toBe(true);
+	});
+
+	it("says no Apply is pending when none is needed", async () => {
+		const w = await mountWith([row("a")]);
+		await menuItem(w, "a", "handover").trigger("click");
+		await flushPromises();
+		w.findComponent({ name: "SkillHandoverDialog" }).vm.$emit("handed", {
+			name: "a",
+			needs_apply: false,
+		});
+		await flushPromises();
+		expect(w.find(".jv-skill-admin-catalog").exists()).toBe(false);
+	});
+
+	it("puts focus back on the row's Actions button when the dialog is done", async () => {
+		const w = await mountWith([row("z"), row("a")], undefined, { attachTo: document.body });
+		await rowsOf(w)[1].find(".jv-skill-admin-handover").trigger("click");
+		await flushPromises();
+		// Opening it leaves focus on the button that opened it; the dialog's own
+		// restore on close is not what this checks, so focus is moved off first.
+		expect(document.activeElement).toBe(rowsOf(w)[1].find(".jv-skill-admin-actions").element);
+		document.activeElement.blur();
+		w.findComponent({ name: "SkillHandoverDialog" }).vm.$emit("update:modelValue", false);
+		w.findComponent({ name: "SkillHandoverDialog" }).vm.$emit("handed", {
+			name: "a",
+			needs_apply: false,
+		});
+		await flushPromises();
+		expect(document.activeElement).toBe(rowsOf(w)[1].find(".jv-skill-admin-actions").element);
+		w.unmount();
+	});
+
+	it("re-reads after a refusal and gives the open dialog the row as re-read", async () => {
+		const w = await mountWith([row("a")]);
+		await menuItem(w, "a", "handover").trigger("click");
+		await flushPromises();
+		api.adminListSkills.mockResolvedValue(
+			page([row("a", { owner: "cara@example.test", owner_name: "Cara" })])
+		);
+		w.findComponent({ name: "SkillHandoverDialog" }).vm.$emit("failed", {
+			name: "a",
+			message: "ben@example.test already has a skill named skill-a.",
+			changed: false,
+		});
+		await flushPromises();
+		expect(w.find(".stub-handover").attributes("data-open")).toBe("1");
+		expect(w.find(".stub-handover").attributes("data-owner")).toBe("cara@example.test");
+	});
+
+	it("waits for Reload after a changed owner refusal, then re-reads and hands the dialog the new owner", async () => {
+		const w = await mountWith([row("a")]);
+		await menuItem(w, "a", "handover").trigger("click");
+		await flushPromises();
+		api.adminListSkills.mockClear();
+		api.adminListSkills.mockResolvedValue(
+			page([row("a", { owner: "cara@example.test", owner_name: "Cara" })])
+		);
+		const dialog = w.findComponent({ name: "SkillHandoverDialog" });
+		dialog.vm.$emit("failed", {
+			name: "a",
+			message: "changed hands. Reload and try again.",
+			changed: true,
+		});
+		await flushPromises();
+		expect(api.adminListSkills).not.toHaveBeenCalled();
+		expect(w.find(".stub-handover").attributes("data-owner")).toBe("asha@example.test");
+		dialog.vm.$emit("reload", { name: "a" });
+		await flushPromises();
+		expect(api.adminListSkills).toHaveBeenCalledTimes(1);
+		expect(w.find(".stub-handover").attributes("data-owner")).toBe("cara@example.test");
+		expect(w.find(".stub-handover").attributes("data-open")).toBe("1");
+	});
+
+	it("closes the dialog and says so when the skill is no longer listed", async () => {
+		const w = await mountWith([row("a")]);
+		await menuItem(w, "a", "handover").trigger("click");
+		await flushPromises();
+		api.adminListSkills.mockResolvedValue(page([]));
+		w.findComponent({ name: "SkillHandoverDialog" }).vm.$emit("reload", { name: "a" });
+		await flushPromises();
+		expect(w.find(".stub-handover").attributes("data-open")).toBe("");
+		expect(toast.create).toHaveBeenCalledWith({
+			message: "That skill is no longer in the list.",
+			type: "info",
+		});
 	});
 });
 
