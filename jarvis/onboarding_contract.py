@@ -711,8 +711,10 @@ def error_object(err) -> tuple[dict, int]:
 			out.setdefault("retry_after_seconds", err.retry_after_seconds)
 		return out, 429
 	if isinstance(err, AdminAuthError):
+		# A refusal that carries admin's own code (a 403 EMAIL_NOT_CONFIRMED) is not an
+		# authentication failure; only a bare 401/403 is.
 		return {
-			"code": BENCH_ADMIN_AUTH_FAILED,
+			"code": getattr(err, "code", None) or BENCH_ADMIN_AUTH_FAILED,
 			"message": str(err),
 			"recovery": RECOVERY_CONTACT_SUPPORT,
 		}, (err.status_code or 401)
