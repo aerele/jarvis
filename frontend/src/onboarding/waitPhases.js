@@ -339,6 +339,24 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				reconnect: true,
 				title: "Your AI subscription needs reconnecting",
 			};
+		case "network_check_required":
+			// Private network: admin is withholding the plugin env until the connection test
+			// passes for the current binding (jarvis/account.py, network_check_required).
+			// Waiting cannot resolve it - the customer has to act on their firewall - so it
+			// STOPS the wait. `network: true` tells the caller to show the rules and a Test
+			// connection button instead of the generic stop card. Admin's own sentence (`say`)
+			// is the body; not `paged`, since nobody was notified.
+			return {
+				observed: true,
+				state: PHASE_STATE.UNKNOWN,
+				kind: PHASE_KIND.NONE,
+				label: "Waiting for your network to allow your Jarvis server",
+				detail: say,
+				stop: true,
+				paged: false,
+				network: true,
+				title: "Allow your Jarvis server",
+			};
 		default:
 			// A reason this build does not know about gets the neutral line. It
 			// must not be given a phase name invented here - and, for the same

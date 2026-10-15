@@ -869,3 +869,12 @@ describe("ChatView subscription-expired wiring", () => {
 		expect(chatSrc).toContain("unwatchSubscriptionNotice()");
 	});
 });
+
+describe("network_check_required (private network)", () => {
+	it("hands admin's sentence to the generic not-ready banner and is not a setup-poster reason", async () => {
+		const sentence = "Allow your Jarvis server through your firewall, then test the connection.";
+		verdict({ ready: false, reason: "network_check_required", detail: sentence });
+		expect(await readinessDetailOf()).toBe(sentence);
+		expect(await needsOnboarding()).toBe(false);
+	});
+});

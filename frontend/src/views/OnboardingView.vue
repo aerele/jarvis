@@ -2357,6 +2357,83 @@
 											</p>
 										</div>
 									</template>
+									<!-- Private network: admin is withholding the plugin env until the connection
+										 test passes (is_ready_for_chat reason network_check_required). Waiting cannot
+										 clear it - the customer has to act on their firewall - so the wait STOPS here
+										 with the rules and a Test connection button; passing both halves resumes it. -->
+									<template v-else-if="state.connectPhase === 'network'">
+										<div class="ob-head">
+											<h1>{{ state.connectTitle || "Allow your Jarvis server" }}</h1>
+											<p>
+												Jarvis can't finish setting up until your network allows your
+												Jarvis server. Add these two rules, then test the connection.
+											</p>
+										</div>
+										<div class="mx-auto mt-4 flex w-full max-w-[680px] flex-col gap-3">
+											<Banner v-if="state.connectMessage" type="info" :message="state.connectMessage" />
+											<Banner
+												v-if="networkHoldFresh && net.state.holdErr"
+												type="warning"
+												:title="holdErrCard.title"
+												:message="holdErrCard.text"
+												role="alert"
+											/>
+											<template v-if="networkHoldFresh && net.state.hold && !net.state.holdErr">
+												<NetworkRulesTable
+													variant="server"
+													title="Rules for your network team"
+													copy-label="Copy rules"
+													:rows="connectServerRows"
+												/>
+												<p class="text-p-sm text-ink-gray-5">
+													Allow only this address. Don't open port 443 to everyone.
+												</p>
+											</template>
+											<Banner
+												v-if="holdEndedCard"
+												:type="holdEndedCard.type"
+												:title="holdEndedCard.title"
+												:message="holdEndedCard.text"
+												role="alert"
+											/>
+											<ConnectionTestResult :rows="connectTest.rows" :banner="connectTest.banner" />
+											<Banner
+												v-if="net.state.test.err"
+												type="warning"
+												:message="net.state.test.err"
+												role="alert"
+											/>
+											<div class="mt-1 flex flex-wrap justify-center gap-2">
+												<Button
+													v-if="privateTestsPassed"
+													variant="solid"
+													label="Continue"
+													@click="resumeAfterNetwork"
+												/>
+												<Button
+													v-else-if="networkHoldFresh && net.state.holdErr"
+													label="Try again"
+													@click="retryNetworkHold"
+												/>
+												<Button
+													v-else
+													variant="solid"
+													:disabled="!networkHoldFresh || !net.state.hold || !!net.state.holdErr || net.state.test.phase === 'testing' || testWait > 0"
+													:loading="net.state.test.phase === 'testing'"
+													loading-text="Testing…"
+													:label="net.state.test.phase === 'done' ? 'Test again' : 'Test connection'"
+													@click="net.runTest()"
+												/>
+												<span v-if="testWait > 0" class="self-center text-p-sm text-ink-gray-5" role="status">
+													Try again in {{ testWait }}s
+												</span>
+											</div>
+											<p class="mx-auto mt-2 max-w-[420px] text-center text-p-sm text-ink-gray-5">
+												Not sure what to do?
+												<button class="ob-link" @click="openSupport">Contact support</button>
+											</p>
+										</div>
+									</template>
 									<!-- A non-ready terminal (retry / superseded / support) or a
 										 deadline timeout: stay HERE with a real recovery action.
 										 Never a "continue anyway" jump into a chat that cannot yet
@@ -2866,6 +2943,9 @@ const state = reactive({
 // "We couldn't reach your workspace to check" on the first frame after a
 // successful save, announcing a failed check before one had been attempted.
 const readinessSeen = ref(null);
+// Private network: the host admin named in the last network_check_required verdict, so the
+// Connect panel can show its address before its own reserve_host call answers.
+const networkCheckSeen = ref(null);
 // jarvis#752: the apply-operation poll's OWN chat_readiness_reason, mirrored from
 // the last onOpUpdate tick. This is a DIFFERENT source than readinessSeen above -
 // the operation carries admin's free-text explanation from the moment a save is
@@ -5644,6 +5724,7 @@ function noteReadiness(o) {
 		answered: !!(o && o.answered),
 		reason: (o && o.reason) || "",
 		detail: (o && o.detail) || "",
+		networkCheck: (o && o.networkCheck) || null,
 	};
 	readinessSeen.value = seen;
 	const stage = readinessPhase(seen);
@@ -5677,6 +5758,18 @@ function noteReadiness(o) {
 		state.connectPhase = "reconnect";
 		state.connectTitle = stage.title || "Your AI subscription needs reconnecting";
 		state.connectMessage = stage.detail;
+		connectModelChangeOffered.value = false;
+		return stage;
+	}
+	// Private network: admin is withholding the plugin env until the connection test passes.
+	// The customer acts on their firewall (rules + Test connection) right here; the wait
+	// resumes when both halves pass (resumeAfterNetwork). Not a model problem, not paged.
+	if (stage.network) {
+		state.connectPhase = "network";
+		state.connectTitle = stage.title || "Allow your Jarvis server";
+		state.connectMessage = stage.detail;
+		state.connectPaged = false;
+		networkCheckSeen.value = seen.networkCheck;
 		connectModelChangeOffered.value = false;
 		return stage;
 	}
@@ -5761,6 +5854,7 @@ async function waitForChatReadiness() {
 			answered: !!r,
 			reason: r && r.reason,
 			detail: r && r.detail,
+			networkCheck: r && r.network_check,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
 		// Any verdict waiting cannot resolve is terminal for this wait (stage.stop):
@@ -6021,6 +6115,7 @@ async function followLegacyReadiness(result) {
 			answered: !!r,
 			reason: r && r.reason,
 			detail: r && r.detail,
+			networkCheck: r && r.network_check,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
 		// See waitForChatReadiness: stage.stop is every verdict waiting cannot resolve
@@ -6159,6 +6254,67 @@ function reconnectFromStall() {
 	returnToConnectForm(
 		"Reconnect your AI subscription below, then start again to finish setting up."
 	);
+}
+
+// ---- Private network: the Connect panel for network_check_required -------------------------
+// What the panel renders for the test it runs. `afterPayment` only changes the success line.
+// The customer's own address for the inbound rule: the saved private address, else the one they
+// are browsing this bench on.
+const connectPublicAddress = computed(() => net.state.publicAddress || window.location.origin);
+const connectServerRows = computed(() =>
+	net.state.hold
+		? serverRuleRows({
+				hostIp: net.state.hold.hostIp,
+				publicHost: publicHostOf(connectPublicAddress.value) || connectPublicAddress.value,
+		  })
+		: []
+);
+const connectTest = computed(() =>
+	describeServerTest({
+		phase: net.state.test.phase,
+		inbound: net.state.test.inbound,
+		outbound: net.state.test.outbound,
+		hostIp: net.state.hold ? net.state.hold.hostIp : "",
+		publicAddress: connectPublicAddress.value,
+		siteName: window.site_name || "",
+		afterPayment: true,
+	})
+);
+// Entering the panel re-reads the held server from admin (for a customer with a tenant admin
+// returns that tenant's host), which refreshes a stale one.
+// The rule is only shown once that re-read has answered: after an operator-confirmed host move
+// the stored hold (and the host in the verdict) can be stale, and a stale "allow this IP" rule
+// is worse than a moment of waiting. The browser never sends a target; reserveHost() is keyed on
+// the signed-in customer. A PRIVATE_HOLD_UNAVAILABLE refusal re-reserves inside loadHold.
+const networkHoldFresh = ref(false);
+watch(
+	() => state.connectPhase,
+	(phase, prev) => {
+		if (prev === "network" && phase !== "network") net.dispose();
+		if (phase !== "network") {
+			networkHoldFresh.value = false;
+			return;
+		}
+		networkHoldFresh.value = false;
+		net.state.networkGated = true;
+		Promise.all([net.loadStatus(), net.loadHold()]).then(() => {
+			if (state.connectPhase === "network") networkHoldFresh.value = true;
+		});
+	}
+);
+// Both halves passed, so admin will push the plugin env on its next reconcile. Resume the
+// readiness wait where it stopped. If admin has not caught up yet the first poll may stop here
+// again, with a clean panel to test from.
+function retryNetworkHold() {
+	net.loadHold();
+}
+function resumeAfterNetwork() {
+	net.resetTest();
+	state.connectPhase = "";
+	state.connectMessage = "";
+	state.connectTitle = "";
+	state.finishing = true;
+	waitForChatReadiness();
 }
 
 // (An unreferenced `editConnect` lived here: a partial return-to-the-form that

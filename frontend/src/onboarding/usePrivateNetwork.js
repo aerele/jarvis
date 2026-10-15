@@ -101,11 +101,16 @@ export function createPrivateNetwork(deps) {
 		holdEnded: null, // { oldIp, newIp }
 		test: freshTest(),
 		cleared: readCleared(),
+		networkGated: false,
 	});
 
 	// A bench is "private" when it has no public host (it may take the private route) or has
 	// finished the private setup. A public bench is neither.
-	const privateBench = computed(() => !state.hostOk || state.mode === "private");
+	// `networkGated`: the bench's readiness verdict carried a network_check, which only a private
+	// customer's bench ever does (the Connect panel sets it), so the hold/test calls are allowed.
+	const privateBench = computed(
+		() => !state.hostOk || state.mode === "private" || state.networkGated
+	);
 	const complete = computed(() => state.mode === "private");
 	const onboardingHostOk = computed(() => state.hostOk || state.mode === "private");
 	const holdsCheckout = computed(() => privateBench.value && !state.cleared);

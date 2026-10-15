@@ -264,7 +264,8 @@ export async function readinessDetailOf() {
 	if (
 		r.reason === "container_provisioning" ||
 		r.reason === "authority_repair_required" ||
-		r.reason === "container_unavailable"
+		r.reason === "container_unavailable" ||
+		r.reason === "network_check_required"
 	)
 		return r.detail || "";
 	return "";
