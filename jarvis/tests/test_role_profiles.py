@@ -89,11 +89,7 @@ class TestRoleProfiles(FrappeTestCase):
 
 	def test_standard_tools_allow_excludes_drops_keeps_features(self):
 		allow = set(role_profiles.standard_tools_allow())
-<<<<<<< HEAD
-		self.assertEqual(len(allow), 67)
-=======
-		self.assertEqual(len(allow), 70)
->>>>>>> 0f54379 (feat(tools): get_comments, read a record's comments under Desk's rule)
+		self.assertEqual(len(allow), 68)
 		for kept in (
 			"exec",
 			"read",
@@ -127,27 +123,15 @@ class TestRoleProfiles(FrappeTestCase):
 		):
 			self.assertNotIn(dropped, allow)
 
-<<<<<<< HEAD
-	def test_tool_universe_is_96(self):
-		# standard_tools_allow() (67) + STANDARD_DROP_TOOLS (29) must
+	def test_tool_universe_is_97(self):
+		# standard_tools_allow() (68) + STANDARD_DROP_TOOLS (29) must
 		# reconstruct the evidence-captured 94-tool universe plus the two
-		# per-user memory tools (96), with no overlap and no gap (spec §2).
-=======
-	def test_tool_universe_is_99(self):
-		# standard_tools_allow() (70) + STANDARD_DROP_TOOLS (29) must
-		# reconstruct the evidence-captured 94-tool universe plus the two MCP
-		# connector tools, the two per-user memory tools and get_comments added after (99),
-		# with no overlap and no gap.
->>>>>>> 0f54379 (feat(tools): get_comments, read a record's comments under Desk's rule)
+		# per-user memory tools and get_comments (97), with no overlap and no gap (spec §2).
 		allow = set(role_profiles.standard_tools_allow())
 		drop = set(role_profiles.STANDARD_DROP_TOOLS)
 		self.assertEqual(len(drop), 29)
 		self.assertEqual(allow & drop, set())
-<<<<<<< HEAD
-		self.assertEqual(len(allow | drop), 96)
-=======
-		self.assertEqual(len(allow | drop), 99)
->>>>>>> 0f54379 (feat(tools): get_comments, read a record's comments under Desk's rule)
+		self.assertEqual(len(allow | drop), 97)
 
 	def test_shared_core_membership(self):
 		shared = role_profiles.SHARED_CORE_SKILLS
@@ -1015,11 +999,7 @@ class TestSessionProfilePick(FrappeTestCase):
 		row = frappe.get_doc(SESSION, {"session_key": key})
 		self.assertEqual(row.profile_agent_id, "role-hr")
 		self.assertEqual(row.profile_tier, "standard")
-<<<<<<< HEAD
-		self.assertEqual(row.profile_n_tools, 67)
-=======
-		self.assertEqual(row.profile_n_tools, 70)
->>>>>>> 0f54379 (feat(tools): get_comments, read a record's comments under Desk's rule)
+		self.assertEqual(row.profile_n_tools, 68)
 
 	def test_flag_off_uses_legacy_create_session_path(self):
 		settings = self._fake_settings(enable_role_profiles=False)
