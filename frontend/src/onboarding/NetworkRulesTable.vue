@@ -1,5 +1,5 @@
 <template>
-	<div class="flex w-full flex-col gap-2">
+	<div v-if="rows.length" class="flex w-full flex-col gap-2">
 		<div class="flex items-center justify-between gap-3">
 			<span class="text-[11px] font-semibold uppercase tracking-wide text-ink-gray-5">{{
 				title
@@ -12,11 +12,15 @@
 				@click="copy"
 			/>
 		</div>
-		<div class="overflow-x-auto rounded-lg border border-outline-gray-1">
+		<div
+			class="min-w-0 overflow-x-auto rounded-lg border border-outline-gray-1"
+			tabindex="0"
+			:aria-label="`${title} (scrolls sideways on a narrow screen)`"
+		>
 			<!-- min-width as an inline style rather than a fixed-width Tailwind class: the mobile guard
 				 (tests/mobile-responsive.spec.js) scans source text for those, and this width
 				 genuinely lives inside its own horizontal scroller. -->
-			<div style="min-width: 560px" role="table" :aria-label="title">
+			<div ref="tableEl" :style="{ minWidth: variant === 'admin' ? '460px' : '560px' }" role="table" :aria-label="title">
 				<div
 					class="grid gap-3 border-b border-outline-gray-1 bg-surface-gray-1 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-ink-gray-5"
 					:style="gridStyle"
@@ -36,6 +40,7 @@
 						<FeatherIcon
 							:name="row.direction === 'Outbound' ? 'arrow-up-right' : 'arrow-down-left'"
 							class="h-3.5 w-3.5 text-ink-gray-5"
+							aria-hidden="true"
 						/>{{ row.direction }}
 					</span>
 					<span
@@ -45,22 +50,15 @@
 						>{{ row.from }}</span
 					>
 					<span class="flex min-w-0 flex-col gap-0.5" role="cell">
-						<span :class="row.toMono ? 'font-mono text-ink-gray-9' : ''"
-							>{{ row.to
-							}}<span
-								v-if="variant === 'admin' && row.toNote"
-								class="ml-2 font-sans text-ink-gray-5"
-								>{{ row.toNote }}</span
-							></span
-						>
-						<span v-if="variant === 'server' && row.toNote" class="text-p-xs text-ink-gray-5">{{
-							row.toNote
-						}}</span>
+						<span :class="row.toMono ? 'font-mono text-ink-gray-9' : ''">{{ row.to }}</span>
+						<span v-if="row.toNote" class="text-p-xs text-ink-gray-5">{{ row.toNote }}</span>
 					</span>
 					<span role="cell">{{ row.port }}</span>
 				</div>
 			</div>
 		</div>
+		<span v-if="hint" class="text-p-xs text-ink-gray-5">{{ hint }}</span>
+		<span class="sr-only" role="status">{{ copied ? "Copied" : "" }}</span>
 	</div>
 </template>
 
@@ -72,6 +70,7 @@
 import { computed, onBeforeUnmount, ref } from "vue";
 import { Button, FeatherIcon } from "frappe-ui";
 
+import { copyText } from "@/lib/actionSummary.js";
 import { rulesToText } from "./privateNetwork.js";
 
 const props = defineProps({
@@ -89,21 +88,33 @@ const columns = computed(() =>
 const gridStyle = computed(() => ({
 	gridTemplateColumns:
 		props.variant === "admin"
-			? "110px minmax(0, 1fr) 150px"
+			? "120px minmax(0, 1fr) 130px"
 			: "110px minmax(0, 1fr) minmax(0, 1fr) 80px",
 }));
 
 const copied = ref(false);
+const hint = ref("");
+const tableEl = ref(null);
 let timer = null;
 async function copy() {
-	try {
-		await navigator.clipboard.writeText(rulesToText(props.rows, props.variant));
-	} catch (e) {
-		return; // clipboard blocked or missing: keep the label, the table is still selectable
+	hint.value = "";
+	if (!(await copyText(rulesToText(props.rows, props.variant)))) {
+		selectTable();
+		hint.value = "Select and copy";
+		return;
 	}
 	copied.value = true;
 	clearTimeout(timer);
 	timer = setTimeout(() => (copied.value = false), 2000);
+}
+// Clipboard blocked or missing: select the rules so the person can copy them by hand.
+function selectTable() {
+	const sel = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
+	if (!tableEl.value || !sel) return;
+	const range = document.createRange();
+	range.selectNodeContents(tableEl.value);
+	sel.removeAllRanges();
+	sel.addRange(range);
 }
 onBeforeUnmount(() => clearTimeout(timer));
 </script>

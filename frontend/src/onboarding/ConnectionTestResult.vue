@@ -22,7 +22,9 @@
 					<FeatherIcon v-else name="x-circle" class="h-4 w-4 text-ink-red-3" />
 				</span>
 				<span class="flex min-w-0 flex-col gap-0.5">
-					<span class="font-medium text-ink-gray-9">{{ row.label }}</span>
+					<span class="font-medium text-ink-gray-9"
+						><span class="sr-only">{{ stateWord(row.state) }}: </span>{{ row.label }}</span
+					>
 					<span class="text-p-xs text-ink-gray-5">{{ row.detail }}</span>
 				</span>
 			</div>
@@ -45,6 +47,10 @@ import { FeatherIcon } from "frappe-ui";
 
 import Banner from "@/components/Banner.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
+
+function stateWord(state) {
+	return state === "pass" ? "Passed" : state === "checking" ? "Checking" : "Failed";
+}
 
 defineProps({
 	rows: { type: Array, default: () => [] },

@@ -54,6 +54,11 @@ describe("NetworkRulesTable", () => {
 		]);
 		expect(w.text()).toContain("178.104.214.114");
 		expect(w.text()).toContain("fleet.klerk.in");
+		// stacked under the IP (the approved mockup), not beside it
+		const ip = w.findAll("span").find((x) => x.text() === "178.104.214.114");
+		const host = w.findAll("span").find((x) => x.text() === "fleet.klerk.in");
+		expect(ip.element.parentElement).toBe(host.element.parentElement);
+		expect(w.get('[role="table"]').attributes("style")).toContain("460px");
 		expect(w.text()).toContain("TCP 443 (HTTPS)");
 		expect(w.find("button").text()).toBe("Copy rule");
 	});
@@ -85,6 +90,39 @@ describe("NetworkRulesTable", () => {
 	});
 });
 
+describe("NetworkRulesTable (fix round 1)", () => {
+	it("renders nothing for an empty hold", () => {
+		const w = mount(NetworkRulesTable, { props: { rows: [], variant: "server" } });
+		expect(w.text()).toBe("");
+		expect(w.find("button").exists()).toBe(false);
+	});
+
+	it("scrolls inside its own overflow-x-auto container", () => {
+		const w = mount(NetworkRulesTable, { props: { rows: SERVER_ROWS, variant: "server" } });
+		const table = w.get('[role="table"]');
+		expect(table.attributes("style")).toContain("560px");
+		let el = table.element.parentElement;
+		expect(el.classList.contains("overflow-x-auto")).toBe(true);
+		expect(el.getAttribute("tabindex")).toBe("0");
+	});
+
+	it("announces Copied in a status region", async () => {
+		setClipboard(vi.fn(async () => {}));
+		const w = mount(NetworkRulesTable, { props: { rows: SERVER_ROWS, variant: "server" } });
+		await w.find("button").trigger("click");
+		await flushPromises();
+		expect(w.get('.sr-only[role="status"]').text()).toBe("Copied");
+	});
+
+	it("a refused copy shows the Select and copy hint", async () => {
+		setClipboard(vi.fn(async () => { throw new Error("denied"); }));
+		const w = mount(NetworkRulesTable, { props: { rows: SERVER_ROWS, variant: "server" } });
+		await w.find("button").trigger("click");
+		await flushPromises();
+		expect(w.text()).toContain("Select and copy");
+	});
+});
+
 describe("ConnectionTestResult", () => {
 	const ROWS = [
 		{ label: "Jarvis server → your ERPNext", state: "pass", detail: "Connected. The right ERPNext site answered." },
@@ -98,6 +136,12 @@ describe("ConnectionTestResult", () => {
 		expect(w.text()).toContain("Couldn’t connect to 198.51.100.27 on port 443.");
 		expect(w.find('[data-icon="check-circle"]').exists()).toBe(true);
 		expect(w.find('[data-icon="x-circle"]').exists()).toBe(true);
+	});
+
+	it("each row carries a screen-reader state word", () => {
+		const w = mount(ConnectionTestResult, { props: { rows: ROWS, banner: null } });
+		const words = w.findAll(".sr-only").map((x) => x.text());
+		expect(words).toEqual(["Passed:", "Failed:"]);
 	});
 
 	it("a checking row shows the spinner, not a result icon", () => {
