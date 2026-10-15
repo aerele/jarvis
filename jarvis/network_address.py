@@ -245,7 +245,7 @@ def _message_for(reason: str, raw: str) -> str:
 		return MSG_NO_HOST if "://" in raw else MSG_SCHEME
 	if reason == REASON_SCHEME:
 		return MSG_HTTP if raw.lower().startswith("http://") else MSG_SCHEME
-	return _MESSAGES[reason]
+	return _MESSAGES.get(reason, MSG_DOMAIN)  # unknown admin code: generic copy, never a crash
 
 
 def check_public_address(address, *, test_mode: bool = False) -> tuple[str, str]:

@@ -149,8 +149,6 @@ class TestAddressParity(FrappeTestCase):
 			with self.subTest(given=given):
 				self.assertEqual(check_public_address(given, test_mode=True), (expected, ""))
 		for given, _ in TEST_MODE_ACCEPT:
-			if given.startswith("http://8.8.8.8") or given.startswith("http://erp"):
-				continue
 			with self.subTest(outside_test_mode=given):
 				self.assertNotEqual(check_public_address(given)[1], "")
 
@@ -194,8 +192,14 @@ class TestCustomerCopy(FrappeTestCase):
 				self.assertEqual(check_public_address(given), ("", expected))
 
 	def test_every_reason_code_has_copy(self):
-		for reason in PARITY_REFUSE:
-			self.assertTrue(na._message_for(reason[1], "https://x"))
+		codes = [v for k, v in vars(na).items() if k.startswith("REASON_")]
+		self.assertGreater(len(codes), 10)
+		for code in codes:
+			with self.subTest(code=code):
+				self.assertIn(code, na._MESSAGES.keys() | {na.REASON_BAD_URL, na.REASON_SCHEME})
+
+	def test_unknown_admin_reason_falls_back_to_generic_copy(self):
+		self.assertEqual(na._message_for("brand_new_code", "https://x.com"), na.MSG_DOMAIN)
 
 
 class TestPrivateTestModeSwitch(FrappeTestCase):
