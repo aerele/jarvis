@@ -77,7 +77,7 @@ const summary = (w) => w.find(".jv-skill-handover-summary");
 beforeEach(() => {
 	vi.clearAllMocks();
 	me.session.user = "boss@example.test";
-	api.adminHandoverTargets.mockResolvedValue({ targets: TARGETS, more: false });
+	api.adminHandoverTargets.mockResolvedValue({ targets: TARGETS, more: false, cap: 25 });
 	api.adminHandover.mockResolvedValue({
 		ok: true,
 		new_owner: "ben@example.test",
@@ -109,6 +109,21 @@ describe("SkillHandoverDialog, the picker", () => {
 			expect(w.find(`#${r.attributes("aria-describedby")}`).text()).toBe(why);
 		}
 		expect(radio(w, "ben@example.test").attributes("aria-disabled")).toBeUndefined();
+	});
+
+	it("says the cap the server gives, and no number when it gives none", async () => {
+		api.adminHandoverTargets.mockResolvedValue({ targets: TARGETS, more: false, cap: 30 });
+		let w = await open();
+		expect(radio(w, "full@example.test").attributes("aria-describedby")).toBeTruthy();
+		expect(w.find('.jv-skill-handover-user[data-user="full@example.test"]').text()).toContain(
+			"has 30 skills already"
+		);
+		w.unmount();
+		api.adminHandoverTargets.mockResolvedValue({ targets: TARGETS, more: false });
+		w = await open();
+		expect(w.find('.jv-skill-handover-user[data-user="full@example.test"]').text()).toContain(
+			"has the most skills one person may"
+		);
 	});
 
 	it("does not let an unavailable person be chosen, and keeps a pick it has", async () => {
@@ -405,7 +420,10 @@ describe("SkillHandoverDialog, handing over", () => {
 
 describe("SkillHandoverDialog, refusals", () => {
 	const CLASH = "ben@example.test already has a skill named Month end.";
-	const CHANGED = "This skill changed hands since the list was loaded. Reload and try again.";
+	const CHANGED = "This skill changed while you acted on it. Reload.";
+	// The server's refusal for a changed owner carries its own exception class.
+	const changedError = () =>
+		Object.assign(new Error(CHANGED), { exc_type: "SkillOwnerChangedError" });
 
 	it("shows a name clash in place, stays open and asks the tab to re-read", async () => {
 		api.adminHandover.mockRejectedValue(new Error(CLASH));
@@ -423,8 +441,23 @@ describe("SkillHandoverDialog, refusals", () => {
 		expect(toast.success).not.toHaveBeenCalled();
 	});
 
+	it("offers no Reload for a refusal that only mentions a change", async () => {
+		// A clash with a skill named "changed": the words are the skill's, not the refusal's.
+		const words = "ben@example.test already has a skill named changed. Reload?";
+		api.adminHandover.mockRejectedValue(
+			Object.assign(new Error(words), { exc_type: "SkillHandoverError" })
+		);
+		const w = await open();
+		await pick(w, "ben@example.test");
+		await handButton(w).trigger("click");
+		await flushPromises();
+		expect(w.find(".stub-error").text()).toBe(words);
+		expect(w.find(".jv-skill-handover-reload").exists()).toBe(false);
+		expect(w.emitted("failed")).toEqual([[{ name: "s1", message: words, changed: false }]]);
+	});
+
 	it("shows the changed owner refusal with Reload, which asks the tab for the row", async () => {
-		api.adminHandover.mockRejectedValue(new Error(CHANGED));
+		api.adminHandover.mockRejectedValue(changedError());
 		const w = await open();
 		await pick(w, "ben@example.test");
 		await handButton(w).trigger("click");
@@ -439,7 +472,7 @@ describe("SkillHandoverDialog, refusals", () => {
 	});
 
 	it("sends the owner it is given now: the tab refreshes it after a reload", async () => {
-		api.adminHandover.mockRejectedValue(new Error(CHANGED));
+		api.adminHandover.mockRejectedValue(changedError());
 		const w = await open();
 		await pick(w, "ben@example.test");
 		await handButton(w).trigger("click");
