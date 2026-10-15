@@ -37,6 +37,42 @@ const api = vi.hoisted(() => ({
 	// Capability probe fires on entering Details; default "unavailable" keeps the Fetch button hidden.
 	gstinAutofillAvailable: vi.fn(async () => ({ available: false })),
 	gstinAutofill: vi.fn(async () => ({ found: false, reason: "unavailable" })),
+	// Private-network onboarding. A public bench never calls any of these; the describe
+	// blocks below that exercise a private bench set the answers they need.
+	networkStatus: vi.fn(async () => ({
+		host_public: false,
+		admin_reachable: true,
+		network_mode: "",
+		public_address: "",
+		test_mode: false,
+	})),
+	privateSetupTargets: vi.fn(async () => ({
+		admin_host: "fleet.klerk.in",
+		admin_ips: ["178.104.214.114"],
+	})),
+	checkAdminConnection: vi.fn(async () => ({
+		reachable: true,
+		enabled: true,
+		caller_ip: "8.8.8.8",
+	})),
+	savePublicAddress: vi.fn(async (address) => ({ ok: true, public_address: address })),
+	reserveHost: vi.fn(async () => ({
+		ok: true,
+		host_ip: "198.51.100.27",
+		reach_url: "https://reach.h3.fleet.example/",
+		hold_until: "2026-10-17 09:10:00",
+	})),
+	startConnectionTest: vi.fn(async () => ({
+		ok: true,
+		check: "JCC-000123",
+		outbound: { ok: true, reason: "ok" },
+	})),
+	connectionTestStatus: vi.fn(async () => ({
+		ok: true,
+		status: "Verified",
+		reason: "ok",
+		checked_at: "",
+	})),
 	onboardingPaymentApi: {
 		getOnboardingState: vi.fn(async () => ENVELOPE({ code: "BENCH_NO_SIGNUP_CONTEXT" })),
 		startSignup: vi.fn(),
@@ -1709,5 +1745,218 @@ describe("Address consistency: State <-> Pincode <-> GSTIN (India)", () => {
 		wrapper.vm.billing.setUserValue("gstin", "33ABCDE1234F1Z7"); // Tamil Nadu GSTIN -> mismatch
 		expect(wrapper.vm.billingDetailsInvalid()).toBe(true);
 		expect(wrapper.vm.detailsFieldErrors.gstin).toMatch(/GSTIN/i);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Private network: the Network step (design: private-network-onboarding §3).
+// ---------------------------------------------------------------------------
+const buttonByLabel = (w, label) =>
+	w.findAll("button").find((b) => b.attributes("label") === label);
+
+// What the bench reports once the private setup is done (the saved address is 8.8.8.8).
+const privateStatus = (over = {}) => ({
+	host_public: false,
+	admin_reachable: null,
+	network_mode: "private",
+	public_address: "https://8.8.8.8",
+	test_mode: false,
+	...over,
+});
+
+const PRIVATE_APIS = () => [
+	api.networkStatus,
+	api.privateSetupTargets,
+	api.checkAdminConnection,
+	api.savePublicAddress,
+	api.reserveHost,
+	api.startConnectionTest,
+	api.connectionTestStatus,
+];
+
+describe("a public bench is untouched by the private-network code", () => {
+	it("mounts on the intro tour and calls no private-network api function", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("intro");
+		for (const fn of PRIVATE_APIS()) expect(fn).not.toHaveBeenCalled();
+		expect(wrapper.vm.RAIL.map((r) => r.label)).toEqual(["Details", "Plan", "Pay", "Connect"]);
+	});
+});
+
+describe("private network: the Network step replaces the dead-end host block", () => {
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+		delete window.jarvis_network_mode;
+	});
+	afterEach(() => {
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+	});
+
+	it("opens on the Network step with the private-network choice and no admin address", async () => {
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.state.step).toBe("network");
+		expect(w.text()).toContain("This site is on a private network");
+		expect(w.text()).not.toContain("Setup isn't available on this address");
+		expect(api.networkStatus).toHaveBeenCalledTimes(1);
+		// The Jarvis setup server's address stays out until the customer picks the option.
+		expect(api.privateSetupTargets).not.toHaveBeenCalled();
+		expect(api.checkAdminConnection).not.toHaveBeenCalled();
+		expect(w.html()).not.toContain("fleet.klerk.in");
+		expect(w.html()).not.toContain("178.104.214.114");
+	});
+
+	it("the rail has five segments with Network first and active", async () => {
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.RAIL.map((r) => r.label)).toEqual(["Network", "Details", "Plan", "Pay", "Connect"]);
+		expect(w.vm.railIndex).toBe(0);
+	});
+
+	it("says so when Jarvis cannot be reached from this site", async () => {
+		api.networkStatus.mockResolvedValueOnce({
+			host_public: false,
+			admin_reachable: false,
+			network_mode: "",
+			public_address: "",
+			test_mode: false,
+		});
+		const w = mountView();
+		await flushPromises();
+		expect(w.text()).toContain("We can't reach Jarvis from this site");
+		expect(w.text()).not.toContain("This site is on a private network");
+	});
+
+	it("choosing the public option explains it and offers a reload, not Continue", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.net.pickOption("public");
+		await flushPromises();
+		expect(w.text()).toContain("Ask your administrator to set a public host name for this site");
+		expect(buttonByLabel(w, "Reload page")).toBeTruthy();
+		expect(buttonByLabel(w, "Continue")).toBeFalsy();
+	});
+
+	it("Continue fetches the Jarvis setup server's address and shows the rule", async () => {
+		const w = mountView();
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		expect(w.vm.net.state.screen).toBe("allow_admin");
+		expect(api.privateSetupTargets).toHaveBeenCalledTimes(1);
+		expect(w.text()).toContain("Allow the Jarvis setup server");
+		expect(w.text()).toContain("178.104.214.114");
+		expect(w.text()).toContain("fleet.klerk.in");
+		expect(w.text()).toContain("TCP 443 (HTTPS)");
+		expect(buttonByLabel(w, "Copy rule")).toBeTruthy();
+	});
+
+	it("Check connection, then Continue, lands on the public address screen pre-filled", async () => {
+		const w = mountView();
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		await buttonByLabel(w, "Check connection").trigger("click");
+		await flushPromises();
+		expect(api.checkAdminConnection).toHaveBeenCalledTimes(1);
+		expect(w.find('banner-stub[title="Connected"]').exists()).toBe(true);
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		expect(w.vm.net.state.screen).toBe("address");
+		expect(w.vm.net.state.draft).toBe("https://8.8.8.8");
+		expect(w.text()).toContain("Your public address");
+		expect(w.text()).toContain("Detected from your connection:");
+		expect(w.text()).toContain("This address must");
+	});
+
+	it("a connection that cannot reach Jarvis keeps the customer here with the retry copy", async () => {
+		api.checkAdminConnection.mockResolvedValueOnce({ reachable: false, enabled: false, caller_ip: "" });
+		const w = mountView();
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		await buttonByLabel(w, "Check connection").trigger("click");
+		await flushPromises();
+		expect(w.find('banner-stub[title="Still can\'t reach the Jarvis setup server"]').exists()).toBe(true);
+		expect(buttonByLabel(w, "Check again")).toBeTruthy();
+		expect(buttonByLabel(w, "Continue")).toBeFalsy();
+	});
+
+	it("private setup switched off says it isn't available yet", async () => {
+		api.checkAdminConnection.mockResolvedValueOnce({ reachable: true, enabled: false, caller_ip: "" });
+		const w = mountView();
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		await buttonByLabel(w, "Check connection").trigger("click");
+		await flushPromises();
+		expect(w.find('banner-stub[message="Private network setup isn\'t available yet. Contact support."]').exists()).toBe(true);
+	});
+
+	it("saving the address moves on to Details", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.net.openAddress();
+		w.vm.net.state.draft = "https://erp.example.com";
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		expect(api.savePublicAddress).toHaveBeenCalledWith("https://erp.example.com");
+		expect(w.vm.state.step).toBe("details");
+		expect(w.vm.privateComplete).toBe(true);
+	});
+
+	it("a bad address disables Continue and shows why", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.net.openAddress();
+		w.vm.net.state.draft = "http://erp.example.com";
+		await flushPromises();
+		expect(w.text()).toContain("Use an https:// address. Plain HTTP is not allowed.");
+		expect(buttonByLabel(w, "Continue").attributes("disabled")).toBeDefined();
+	});
+
+	it("a bench with no usable host cannot be walked past the Network step", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "plan";
+		await flushPromises();
+		expect(w.vm.state.step).toBe("network");
+	});
+});
+
+describe("private network: a finished setup (reload mid-onboarding)", () => {
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+		window.jarvis_network_mode = "private";
+		api.networkStatus.mockResolvedValueOnce(privateStatus());
+	});
+	afterEach(() => {
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+	});
+
+	it("opens on the intro tour with the five-segment rail and knows its address", async () => {
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.state.step).toBe("intro");
+		expect(w.vm.RAIL.length).toBe(5);
+		expect(w.vm.net.state.publicAddress).toBe("https://8.8.8.8");
+		expect(w.vm.onboardingHostOk).toBe(true);
+	});
+
+	it("the tour skips the Network step, and Back from Details reopens the address screen", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.startWizard();
+		expect(w.vm.state.step).toBe("details");
+		w.vm.goBack();
+		expect(w.vm.state.step).toBe("network");
+		expect(w.vm.net.state.screen).toBe("address");
+		expect(w.vm.net.state.draft).toBe("https://8.8.8.8");
+		// Already confirmed: no Back to a screen that no longer applies.
+		expect(w.findAll("button.ob-back").length).toBe(0);
 	});
 });
