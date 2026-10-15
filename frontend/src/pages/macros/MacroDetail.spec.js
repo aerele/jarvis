@@ -35,6 +35,9 @@ vi.mock("vue-router", () => ({
 // `viewerClock`: what a server datetime reads as on the VIEWER's clock. Unset, the
 // viewer is in the site's zone and a datetime reads as stored.
 const siteConfig = vi.hoisted(() => ({ systemTimezone: "", viewerClock: "" }));
+// The date the DatePicker stub emits when clicked. Set per test from the clock (a
+// fixed date would expire: the page refuses dates before today).
+const picker = vi.hoisted(() => ({ date: "" }));
 vi.mock("frappe-ui", async () => ({
 	getConfig: (key) => siteConfig[key],
 	// The real dayjs (with frappe-ui's tz plugin): the one-time schedule's dates are
@@ -89,7 +92,12 @@ vi.mock("frappe-ui", async () => ({
 		emits: ["update:modelValue"],
 		// Renders the page's own #target slot (as the real picker does), with the
 		// display label the real one would give it.
-		template: `<div><slot name="target" :togglePopover="() => {}" :isOpen="false" :displayLabel="modelValue ? 'shown:' + modelValue : ''" /><button data-testid="date-picker" :disabled="disabled" @click="$emit('update:modelValue', '2026-11-02')">pick</button></div>`,
+		template: `<div><slot name="target" :togglePopover="() => {}" :isOpen="false" :displayLabel="modelValue ? 'shown:' + modelValue : ''" /><button data-testid="date-picker" :disabled="disabled" @click="pick">pick</button></div>`,
+		methods: {
+			pick() {
+				this.$emit("update:modelValue", picker.date);
+			},
+		},
 	},
 	TextInput: {
 		name: "TextInput",
@@ -201,6 +209,7 @@ beforeEach(() => {
 	session.user = "priya@example.com";
 	siteConfig.systemTimezone = "";
 	siteConfig.viewerClock = "";
+	picker.date = testDayjs().add(30, "day").format("YYYY-MM-DD");
 });
 
 function saveBtn(w) {
@@ -1897,7 +1906,7 @@ describe("MacroDetail Schedule section: a one-time schedule", () => {
 		await flushPromises();
 		const sent = api.updateMacro.mock.calls[0][0];
 		expect(sent.schedule_frequency).toBe("once");
-		expect(sent.schedule_date).toBe("2026-11-02");
+		expect(sent.schedule_date).toBe(picker.date);
 	});
 
 	it("picking Once and going back leaves nothing to save", async () => {
