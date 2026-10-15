@@ -409,10 +409,21 @@ class TestTheList(SkillAdminBase):
 		res = self._list()
 		self.assertEqual(
 			set(res),
-			{"rows", "page", "page_size", "has_more", "total", "hold_available", "delete_available", "sync"},
+			{
+				"rows",
+				"page",
+				"page_size",
+				"has_more",
+				"total",
+				"hold_available",
+				"delete_available",
+				"handover_available",
+				"sync",
+			},
 		)
 		self.assertTrue(res["hold_available"])
 		self.assertTrue(res["delete_available"])
+		self.assertTrue(res["handover_available"])
 		self.assertEqual(set(res["sync"]), {"pending", "needs_apply", "last_synced_at"})
 		by_name = {r["name"]: r for r in res["rows"]}
 		for row in res["rows"]:
