@@ -469,6 +469,88 @@ class TestAdminChatGate(FrappeTestCase):
 				{"ready": False, "reason": "container_unavailable", "detail": "", "billing_notice": {}},
 			)
 
+	_NETWORK_CHECK = {
+		"host_ip": "198.51.100.27",
+		"reach_url": "https://reach.h3.fleet.example/",
+		"status": "Unreachable",
+		"reason": "timeout",
+		"checked_at": "2026-10-14 09:12:03",
+	}
+
+	def test_network_check_blocks_with_its_own_reason(self):
+		"""Private network (design 8.5): the plugin env is withheld until the connection test
+		passes. Admin's real reason is the bare token; it is never forwarded as customer copy."""
+		for admin_reason in (
+			"network_check_required",
+			"waiting for an LLM key or subscription; network_check_required",
+		):
+			with patch.object(
+				admin_client,
+				"get_connection",
+				return_value={
+					"chat_readiness": "Configuring",
+					"chat_readiness_reason": admin_reason,
+					"network_check": self._NETWORK_CHECK,
+				},
+			):
+				out = account._admin_chat_gate()
+			self.assertEqual(
+				out,
+				{
+					"ready": False,
+					"reason": "network_check_required",
+					"detail": account.NETWORK_CHECK_DETAIL,
+					"billing_notice": {},
+					"network_check": self._NETWORK_CHECK,
+				},
+			)
+			self.assertIsNone(self._cached_verdict())  # a rendered block is never cached
+
+	def test_network_check_without_admin_reason_uses_the_bench_sentence(self):
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={"chat_readiness": "Configuring", "network_check": self._NETWORK_CHECK},
+		):
+			out = account._admin_chat_gate()
+		self.assertEqual(out["detail"], account.NETWORK_CHECK_DETAIL)
+
+	def test_network_check_passes_only_its_five_keys_as_strings(self):
+		raw = {**self._NETWORK_CHECK, "internal": "x", "checked_at": None}
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={"chat_readiness": "Configuring", "network_check": raw},
+		):
+			out = account._admin_chat_gate()
+		self.assertEqual(
+			set(out["network_check"]), {"host_ip", "reach_url", "status", "reason", "checked_at"}
+		)
+		self.assertEqual(out["network_check"]["checked_at"], "")
+
+	def test_no_network_check_leaves_the_provisioning_verdict_alone(self):
+		with patch.object(
+			admin_client, "get_connection", return_value={"chat_readiness": "Configuring", "network_check": {}}
+		):
+			self.assertEqual(account._admin_chat_gate()["reason"], "container_provisioning")
+
+	def test_a_suspended_subscription_wins_over_the_network_check(self):
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={"chat_readiness": "Suspended", "network_check": self._NETWORK_CHECK},
+		):
+			self.assertEqual(account._admin_chat_gate()["reason"], "subscription_suspended")
+
+	def test_a_ready_workspace_ignores_a_stray_network_check(self):
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={"chat_readiness": "Ready", "network_check": self._NETWORK_CHECK},
+		):
+			out = account._admin_chat_gate()
+		self.assertEqual(out, {"ready": True, "reason": None, "billing_notice": {}})
+
 	def test_allows_when_admin_ready(self):
 		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
 			self.assertEqual(
