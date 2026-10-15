@@ -102,6 +102,7 @@ import SettingsPane from "@/components/settings/SettingsPane.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { isSyncDisconnected } from "@/lib/syncStatus";
 import { brand } from "@/branding";
+import { firstServerMessage, messageText } from "@/lib/errors";
 import { useShellStore } from "@/stores/shell";
 import {
 	subscriptionNotice,
@@ -193,7 +194,9 @@ async function loadDirectSub() {
 		// button say the refresh failed.
 		if (!directSubReady.value) directSub.value = { is_direct_subscription: false };
 		directSubErr.value =
-			(e && (e.message || e._server_messages)) || "Couldn't load your AI connection.";
+			messageText(e && e.message) ||
+			messageText(firstServerMessage(e && e._server_messages)) ||
+			"Couldn't load your AI connection.";
 		errorMessage.value = "Couldn't load your AI connection.";
 	} finally {
 		directSubLoading.value = false;
