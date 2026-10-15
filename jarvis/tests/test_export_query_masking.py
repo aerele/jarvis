@@ -158,8 +158,14 @@ class TestExportQueryMasking(FrappeTestCase):
 	def test_users_who_may_see_the_values_get_them(self):
 		for user in ("Administrator", USER_MASK):
 			frappe.set_user(user)
-			rows = _cells(export_query(spec=_spec()))
+			env = export_query(spec=_spec())
+			rows = _cells(env)
 			self.assertEqual(rows[1], ("xqs-mask-0", PHONE, "private-0"), user)
+			# Both users export the same bytes, and save_file reuses a file with the same
+			# content: the second save would then hit the first user's PRIVATE File and be
+			# refused (File.validate_private_file_access). Drop this user's file first.
+			frappe.set_user("Administrator")
+			frappe.delete_doc("File", env["name"], ignore_permissions=True, force=True)
 
 	def test_a_computed_column_over_a_masked_field_is_refused(self):
 		frappe.set_user(USER_PLAIN)
