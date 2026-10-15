@@ -63,6 +63,38 @@
 								@update:modelValue="(v) => setFilter('owner', v)"
 							/>
 						</div>
+						<Button
+							class="jv-macro-admin-filters-toggle min-w-0 sm:shrink-0"
+							variant="subtle"
+							iconRight="chevron-down"
+							:label="filtersLabel"
+							:aria-expanded="filtersOpen ? 'true' : 'false'"
+							aria-controls="jv-macro-admin-more-filters"
+							@click="filtersOpen = !filtersOpen"
+						/>
+						<!-- The combination an admin looks for, in one step: it sets the two
+						     selects beside it, so what is filtered stays in plain sight. -->
+						<Button
+							class="jv-macro-admin-preset col-span-2 min-w-0 sm:col-span-1 sm:shrink-0"
+							:variant="armedAndScheduled ? 'solid' : 'subtle'"
+							label="Armed and scheduled"
+							:aria-pressed="armedAndScheduled ? 'true' : 'false'"
+							title="Macros that write without asking for confirmation and run on a schedule"
+							@click="toggleArmedAndScheduled"
+						/>
+						<Button
+							v-if="filtering"
+							class="jv-macro-admin-clear shrink-0"
+							variant="ghost"
+							label="Clear"
+							@click="clearFilters"
+						/>
+					</div>
+					<div
+						v-show="filtersOpen"
+						id="jv-macro-admin-more-filters"
+						class="jv-macro-admin-filters grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center"
+					>
 						<div class="jv-macro-admin-filter min-w-0 sm:w-40">
 							<FormControl
 								class="w-full"
@@ -104,23 +136,6 @@
 								@update:modelValue="(v) => setFilter('on_hold', v)"
 							/>
 						</div>
-						<!-- The combination an admin looks for, in one step: it sets the two
-						     selects beside it, so what is filtered stays in plain sight. -->
-						<Button
-							class="jv-macro-admin-preset min-w-0 sm:shrink-0"
-							:variant="armedAndScheduled ? 'solid' : 'subtle'"
-							label="Armed and scheduled"
-							:aria-pressed="armedAndScheduled ? 'true' : 'false'"
-							title="Macros that write without asking for confirmation and run on a schedule"
-							@click="toggleArmedAndScheduled"
-						/>
-						<Button
-							v-if="filtering"
-							class="jv-macro-admin-clear shrink-0"
-							variant="ghost"
-							label="Clear"
-							@click="clearFilters"
-						/>
 					</div>
 				</div>
 
@@ -361,7 +376,10 @@
 								     the Button reads out, and the short word in the slot is what
 								     it shows. While its menu is open the button is ringed, so it
 								     is plain which row the menu belongs to. -->
-								<div role="cell" class="jv-macro-admin-cell-actions">
+								<div
+									role="cell"
+									class="jv-macro-admin-cell-actions jv-admin-actions-cell"
+								>
 									<Button
 										v-if="row.live_run"
 										class="jv-macro-admin-stop"
@@ -435,8 +453,8 @@
 			:name="holding.name"
 			:macroName="holding.macro_name || ''"
 			:ownerLabel="ownerText(holding)"
-			@held="onHeld"
-			@failed="onHeld"
+			@held="onHoldMade"
+			@failed="onHoldMade"
 		/>
 		<MacroHandoverDialog
 			v-if="handingOver"
@@ -462,7 +480,7 @@
 // when window.is_jarvis_admin. The server checks the Jarvis Admin role itself on
 // every call (jarvis.chat.macros_admin_api), so a stale client gate can only hide
 // the tab.
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import {
 	Badge,
 	Breadcrumbs,
@@ -479,7 +497,7 @@ import MacroHoldDialog from "./MacroHoldDialog.vue";
 import MacroHandoverDialog from "./MacroHandoverDialog.vue";
 import { session } from "@/data/session";
 import { useConfirm } from "@/composables/useConfirm";
-import { focusLost, useAdminList } from "@/composables/useAdminList";
+import { useAdminList } from "@/composables/useAdminList";
 import { useAdminRowMenu } from "@/composables/useAdminRowMenu";
 import {
 	adminDelete,
@@ -546,6 +564,14 @@ const ownerOptions = computed(() => [
 		? [{ label: "More owners: use Search", value: "__more", disabled: true }]
 		: []),
 ]);
+// The four selects beside the owner sit behind one "Filters" control: on a phone
+// they took half the screen. The label counts those set, since they are out of sight.
+const filtersOpen = ref(false);
+const MORE_FILTERS = ["armed", "scheduled", "live_run", "on_hold"];
+const filtersLabel = computed(() => {
+	const n = MORE_FILTERS.filter((k) => filters[k] !== "").length;
+	return n ? `Filters (${n})` : "Filters";
+});
 const armedAndScheduled = computed(() => filters.armed === "1" && filters.scheduled === "1");
 
 // ── data ─────────────────────────────────────────────────────────────────────
@@ -565,6 +591,7 @@ const {
 	loadMore,
 	onSearch,
 	searchBox,
+	settled,
 	usedKeyboard,
 } = useAdminList({
 	fetchPage: (args) => adminListMacros(args),
@@ -615,6 +642,8 @@ function toggleArmedAndScheduled() {
 	const on = !armedAndScheduled.value;
 	filters.armed = on ? "1" : "";
 	filters.scheduled = on ? "1" : "";
+	// Open the two it sets, so what is filtered stays in sight.
+	if (on) filtersOpen.value = true;
 	load();
 }
 
@@ -700,9 +729,13 @@ function actionsFor(row) {
 	return groups;
 }
 
-const { cardLayout, focusOpenMenu, fromMenu, focusRow } = useAdminRowMenu({
+const { cardLayout, focusOpenMenu, fromMenu, focusRow, focusAfterHold } = useAdminRowMenu({
 	listEl,
 	dialogOpen,
+	rows,
+	error,
+	settled,
+	searchBox,
 	rowSelector: ".jv-macro-admin-row",
 	rowKey: "macro",
 	actionsSelector: ".jv-macro-admin-actions",
@@ -810,14 +843,17 @@ function holdServed() {
 // The list was read again: the draft goes quietly. Focus is the business of
 // whatever started that read.
 watch(rows, holdServed);
-// The dialog closed. It gave focus back to the Hold button that opened it, which is
-// not there any more when the macro is on hold (the row shows Release): focus goes
-// to the row instead of being left on the page.
-watch(holdOpen, async () => {
-	const name = holdServed();
-	if (!name) return;
-	await nextTick();
-	if (focusLost() && !dialogOpen()) await focusRow(name);
+// The dialog closed: the draft is looked at now, and focus is decided once the reload
+// has settled (see focusAfterHold). `holdMade` is the macro a hold was made for, as
+// the dialog said, even when it answered an error.
+let holdMade = "";
+watch(holdOpen, (open) => {
+	if (open || !holding.value) return;
+	const name = holding.value.name;
+	const made = holdMade === name;
+	holdMade = "";
+	holdServed();
+	return focusAfterHold(name, { made });
 });
 
 function holdReason(row) {
@@ -840,6 +876,10 @@ function askHandover(row) {
 // row as re-read, so its owner is the one the server now has: a macro that changed
 // hands would otherwise be refused at every retry. One no longer listed closes it,
 // its message in a toast.
+function onHoldMade(payload) {
+	holdMade = payload.name;
+	return onHeld(payload);
+}
 async function onHeld({ name, message }) {
 	await load("keep");
 	if (handoverOpen.value && handingOver.value && handingOver.value.name === name) {
@@ -1040,5 +1080,11 @@ onMounted(() => {
 		flex-wrap: wrap;
 		align-self: start;
 	}
+}
+
+/* Dark theme: the library's red text on Stop run is 2.4:1 (2.0:1 on hover). This
+   red is 5.6:1, and 4.7:1 on hover. The Delete item has its own rule in index.css. */
+:root[data-theme="dark"] .jv-macro-admin-stop {
+	color: rgb(252 116 116);
 }
 </style>
