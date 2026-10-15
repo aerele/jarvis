@@ -2235,7 +2235,7 @@ describe("private network: allow the held server, then test, then pay", () => {
 		await buttonByLabel(w, "Continue to payment").trigger("click");
 		await flushPromises();
 		expect(w.vm.net.state.cleared).toBe(true);
-		expect(window.sessionStorage.getItem("jvpriv:cleared")).toBe("1");
+		expect(window.sessionStorage.getItem("jvpriv:cleared")).toBe("198.51.100.27|https://8.8.8.8");
 		expect(assign).toHaveBeenCalledWith("https://fleet.klerk.in/jarvis-checkout#t=tok_1");
 	});
 
@@ -2317,11 +2317,52 @@ describe("private network: allow the held server, then test, then pay", () => {
 	});
 
 	it("a customer who already cleared the hold in this tab is not asked again after the pay-page round trip", async () => {
-		window.sessionStorage.setItem("jvpriv:cleared", "1");
+		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
 		const w = await atAllowServer();
 		expect(w.vm.showPrivateServerStep).toBe(false);
 		expect(api.reserveHost).not.toHaveBeenCalled();
 		expect(w.text()).not.toContain("Allow your Jarvis server");
+	});
+
+	it("a lost cleared flag does not show the screen to a customer returning from checkout", async () => {
+		window.sessionStorage.setItem("jvpriv:cleared", "");
+		const w = await atAllowServer();
+		w.vm.confirmingReturn = true;
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(false);
+	});
+
+	it("leaving the screen mid-test leaves no stuck Testing state on return", async () => {
+		api.connectionTestStatus.mockImplementation(() => new Promise(() => {}));
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(w.vm.net.state.test.phase).toBe("testing");
+		w.vm.confirmingReturn = true;
+		await flushPromises();
+		w.vm.confirmingReturn = false;
+		await flushPromises();
+		expect(w.vm.net.state.test.phase).toBe("idle");
+	});
+
+	it("counts the wait down, caps it at 60 s, and re-enables Test connection", async () => {
+		vi.useFakeTimers();
+		api.startConnectionTest.mockResolvedValueOnce({
+			ok: false,
+			code: "RATE_LIMITED_PRIVATE_NETWORK",
+			message: "Slow down.",
+			retry_after_seconds: 900,
+		});
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(w.vm.testWait).toBe(60);
+		expect(buttonByLabel(w, "Test connection").attributes("disabled")).toBeDefined();
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(w.vm.testWait).toBe(30);
+		await vi.advanceTimersByTimeAsync(31_000);
+		expect(w.vm.testWait).toBe(0);
+		expect(buttonByLabel(w, "Test connection").attributes("disabled")).toBeUndefined();
 	});
 
 	it("a public bench in the same state is NOT held and keeps polling the provider check", async () => {

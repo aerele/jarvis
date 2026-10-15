@@ -1434,93 +1434,93 @@
 								</div>
 							</template>
 							<!-- Private network (design §3 steps 7-9): the email is confirmed and admin has set
-									 a server aside. The customer allows it in their firewall and tests the connection
-									 BEFORE paying; "Continue to payment" appears only when both halves pass. The
-									 mockup's Back is omitted: the email is already confirmed, so there is no earlier
-									 screen to return to. -->
-								<template v-else-if="showPrivateServerStep">
-									<div class="ob-body">
-										<div class="ob-head">
-											<h1 ref="recoveryHeading" tabindex="-1">Allow your Jarvis server</h1>
-											<p>
-												We've set aside the server that will run Jarvis for you. Ask your
-												network team to add these two rules, then test the connection.
-											</p>
+								 a server aside. The customer allows it in their firewall and tests the connection
+								 BEFORE paying; "Continue to payment" appears only when both halves pass. The
+								 mockup's Back is omitted: the email is already confirmed, so there is no earlier
+								 screen to return to. -->
+							<template v-else-if="showPrivateServerStep">
+								<div class="ob-body">
+									<div class="ob-head">
+										<h1 ref="recoveryHeading" tabindex="-1">Allow your Jarvis server</h1>
+										<p>
+											We've set aside the server that will run Jarvis for you. Ask your
+											network team to add these two rules, then test the connection.
+										</p>
+									</div>
+									<div class="mx-auto flex w-full max-w-[680px] flex-col gap-3">
+										<div
+											v-if="net.state.holdLoading && !net.state.hold"
+											class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5"
+											role="status"
+										>
+											<JvSpinner :size="20" />
+											Setting aside your server…
 										</div>
-										<div class="mx-auto flex w-full max-w-[680px] flex-col gap-3">
-											<div
-												v-if="net.state.holdLoading && !net.state.hold"
-												class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5"
-												role="status"
-											>
-												<JvSpinner :size="20" />
-												Setting aside your server…
+										<template v-else-if="net.state.holdErr && !net.state.hold">
+											<Banner
+												type="error"
+												:title="holdErrCard.title"
+												:message="holdErrCard.text"
+												role="alert"
+											/>
+											<div class="flex justify-center gap-2">
+												<Button label="Try again" @click="net.loadHold()" />
+												<Button label="Contact support" @click="onPayAction(A.SUPPORT)" />
 											</div>
-											<template v-else-if="net.state.holdErr && !net.state.hold">
-												<Banner
-													type="error"
-													:title="holdErrCard.title"
-													:message="holdErrCard.text"
-													role="alert"
-												/>
-												<div class="flex justify-center gap-2">
-													<Button label="Try again" @click="net.loadHold()" />
-													<Button label="Contact support" @click="onPayAction(A.SUPPORT)" />
-												</div>
-											</template>
-											<template v-if="net.state.hold">
-												<NetworkRulesTable
-													variant="server"
-													title="Rules for your network team"
-													copy-label="Copy rules"
-													:rows="serverRows"
-												/>
-												<p class="text-p-sm text-ink-gray-5">
-													Allow only this address. Don't open port 443 to everyone. We hold
-													this server for you for 3 days.
-												</p>
-											</template>
-											<Banner
-												v-if="holdEndedCard"
-												:type="holdEndedCard.type"
-												:title="holdEndedCard.title"
-												:message="holdEndedCard.text"
-												role="alert"
+										</template>
+										<template v-if="net.state.hold">
+											<NetworkRulesTable
+												variant="server"
+												title="Rules for your network team"
+												copy-label="Copy rules"
+												:rows="serverRows"
 											/>
-											<ConnectionTestResult
-												:rows="serverTest.rows"
-												:banner="serverTest.banner"
-											/>
-											<Banner
-												v-if="net.state.test.err"
-												type="warning"
-												:message="net.state.test.err"
-												role="alert"
-											/>
-										</div>
-									</div>
-									<div class="ob-foot">
-										<span v-if="testWait > 0" class="text-p-sm text-ink-gray-5" role="status">
-												Try again in {{ testWait }}s
-											</span>
-											<span v-else></span>
-										<Button
-											v-if="privateTestsPassed"
-											variant="solid"
-											label="Continue to payment"
-											@click="onPrivateContinue"
+											<p class="text-p-sm text-ink-gray-5">
+												Allow only this address. Don't open port 443 to everyone. We hold
+												this server for you for 3 days.
+											</p>
+										</template>
+										<Banner
+											v-if="holdEndedCard"
+											:type="holdEndedCard.type"
+											:title="holdEndedCard.title"
+											:message="holdEndedCard.text"
+											role="alert"
 										/>
-										<Button
-											v-else
-											variant="solid"
-											:disabled="!net.state.hold || net.state.test.phase === 'testing' || testWait > 0"
-											:loading="net.state.test.phase === 'testing'"
-											loading-text="Testing…"
-											:label="net.state.test.phase === 'done' ? 'Test again' : 'Test connection'"
-											@click="net.runTest()"
+										<ConnectionTestResult
+											:rows="serverTest.rows"
+											:banner="serverTest.banner"
+										/>
+										<Banner
+											v-if="net.state.test.err"
+											type="warning"
+											:message="net.state.test.err"
+											role="alert"
 										/>
 									</div>
-								</template>
+								</div>
+								<div class="ob-foot">
+									<span v-if="testWait > 0" class="text-p-sm text-ink-gray-5" role="status">
+											Try again in {{ testWait }}s
+										</span>
+										<span v-else></span>
+									<Button
+										v-if="privateTestsPassed"
+										variant="solid"
+										label="Continue to payment"
+										@click="onPrivateContinue"
+									/>
+									<Button
+										v-else
+										variant="solid"
+										:disabled="!net.state.hold || net.state.test.phase === 'testing' || testWait > 0"
+										:loading="net.state.test.phase === 'testing'"
+										loading-text="Testing…"
+										:label="net.state.test.phase === 'done' ? 'Test again' : 'Test connection'"
+										@click="net.runTest()"
+									/>
+								</div>
+							</template>
 								<!-- Confirming: the customer paid on the admin-hosted page and came
 								 back, and we are asking the control plane whether it landed. Money
 								 has left them and no verdict exists yet.
@@ -4224,15 +4224,16 @@ const payBusyView = computed(
 // the customer has not yet passed the connection test in this tab. It sits ahead of the
 // recovery card on purpose: the machine is UNKNOWN with a token here, and that card would
 // offer to go straight to checkout.
+const confirmingReturn = ref(false); // the customer is back from the pay page (declared here: the step reads it)
 const showPrivateServerStep = computed(
-	() => holdsCheckout.value && !payBusyView.value && canNavigateToPay(pay.value)
+	() => holdsCheckout.value && !payBusyView.value && !confirmingReturn.value && canNavigateToPay(pay.value)
 );
 const serverRows = computed(() =>
 	net.state.hold
 		? serverRuleRows({
 				hostIp: net.state.hold.hostIp,
 				publicHost: publicHostOf(net.state.publicAddress) || net.state.publicAddress,
-		  })
+			})
 		: []
 );
 const serverTest = computed(() =>
@@ -4268,13 +4269,14 @@ function onPrivateContinue() {
 }
 // A rate-limit refusal asks the customer to wait: count it down and keep "Test connection"
 // disabled meanwhile, so the button never hammers the provider check.
+const RETRY_WAIT_CAP_S = 60;
 const testWait = ref(0);
 let testWaitTimer = null;
 watch(
 	() => net.state.test.retryAfter,
 	(secs) => {
 		clearInterval(testWaitTimer);
-		testWait.value = secs > 0 ? Math.ceil(secs) : 0;
+		testWait.value = secs > 0 ? Math.min(Math.ceil(secs), RETRY_WAIT_CAP_S) : 0;
 		if (testWait.value <= 0) return;
 		testWaitTimer = setInterval(() => {
 			testWait.value -= 1;
@@ -4288,7 +4290,6 @@ onUnmounted(() => clearInterval(testWaitTimer));
 watch(showPrivateServerStep, (on, was) => {
 	if (was && !on) net.dispose();
 });
-onUnmounted(() => net.dispose());
 const checking = computed(() => pay.value.busy === "checking");
 const initiating = computed(() => pay.value.busy === "initiating");
 // The verify round trip OPENS the checkout on success, so an unguarded
@@ -4316,7 +4317,6 @@ const resending = computed(() => pay.value.busy === "resending");
 //     must NOT have its buttons replaced by a full-screen indefinite spinner;
 //     they are disabled in place on the recovery card instead. So this is the
 //     return reconcile only, never any status check.
-const confirmingReturn = ref(false);
 const showConfirming = computed(() => !payBusyView.value && confirmingReturn.value);
 
 // PROOF the customer actually finished checkout on this mount: the pay page appends
@@ -4928,6 +4928,7 @@ async function onPayAction(a) {
 		const privateRefusal = PRIVATE_NETWORK_CODES.includes(pay.value.code);
 		const { reset } = flow.restart();
 		if (reset) {
+			net.clearCleared();
 			restartHeldNote.value = "";
 			if (privateRefusal) {
 				state.step = "network";

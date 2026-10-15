@@ -581,7 +581,7 @@ describe("fix round 1", () => {
 		const { net } = make({ connectionTestStatus }, { sleep: async () => { if (++n === 2) net.dispose(); } });
 		await net.runTest();
 		expect(connectionTestStatus).toHaveBeenCalledTimes(2);
-		expect(net.state.test.phase).toBe("testing");
+		expect(net.state.test.phase).toBe("idle");
 	});
 
 	it("a blank ok reserve keeps the previous hold, raises no hold-ended, and says contact support", async () => {
@@ -635,5 +635,78 @@ describe("fix round 1", () => {
 		expect(sleep).toHaveBeenCalledWith(5000);
 		expect(connectionTestStatus).toHaveBeenNthCalledWith(2, "JCC-000123");
 		expect(net.testsPassed.value).toBe(true);
+	});
+});
+
+describe("the cleared checkout is bound to the server and address it was tested against", () => {
+	const memory = () => {
+		const store = new Map();
+		return { get: (k) => store.get(k) ?? null, set: (k, v) => store.set(k, v) };
+	};
+	async function clearedNet(over = {}, storage = memory()) {
+		const { net, api } = make(over, { storage });
+		net.state.publicAddress = "https://8.8.8.8";
+		await net.loadHold();
+		net.markCleared();
+		return { net, api, storage };
+	}
+
+	it("the same address after a declined card is not held again", async () => {
+		const { net } = await clearedNet();
+		expect(net.holdsCheckout.value).toBe(false);
+		net.state.draft = "https://8.8.8.8";
+		await net.saveAddress();
+		expect(net.holdsCheckout.value).toBe(false);
+	});
+
+	it("a different saved address holds checkout again, in storage too", async () => {
+		const { net, storage } = await clearedNet();
+		net.state.draft = "https://9.9.9.9";
+		expect(await net.saveAddress()).toBe(true);
+		expect(net.holdsCheckout.value).toBe(true);
+		expect(net.state.cleared).toBe(false);
+		const reloaded = make({}, { storage });
+		expect(reloaded.net.state.cleared).toBe(false);
+	});
+
+	it("a stored flag for another server or address does not clear a reloaded tab", async () => {
+		const storage = memory();
+		storage.set("jvpriv:cleared", "203.0.113.9|https://8.8.8.8");
+		const { net } = make({}, { storage });
+		net.state.publicAddress = "https://8.8.8.8";
+		await net.loadHold();
+		expect(net.holdsCheckout.value).toBe(true);
+	});
+
+	it("a bare legacy flag clears nothing", () => {
+		const storage = memory();
+		storage.set("jvpriv:cleared", "1");
+		const { net } = make({}, { storage });
+		expect(net.holdsCheckout.value).toBe(true);
+	});
+
+	it("a hold that ended clears it", async () => {
+		const { net, api } = await clearedNet();
+		api.reserveHost.mockResolvedValueOnce({ ok: true, host_ip: "198.51.100.99", reach_url: "", hold_until: null });
+		await net.loadHold();
+		expect(net.state.holdEnded).toBeTruthy();
+		expect(net.state.cleared).toBe(false);
+		expect(net.holdsCheckout.value).toBe(true);
+	});
+
+	it("clearCleared (Start again) holds checkout", async () => {
+		const { net } = await clearedNet();
+		net.clearCleared();
+		expect(net.holdsCheckout.value).toBe(true);
+	});
+
+	it("dispose ends a test in flight and leaves the panel idle, not stuck on Testing", async () => {
+		const { net } = make({ connectionTestStatus: vi.fn(() => new Promise(() => {})) });
+		await net.loadHold();
+		net.runTest();
+		await Promise.resolve();
+		await Promise.resolve();
+		net.dispose();
+		expect(net.state.test.phase).not.toBe("testing");
 	});
 });

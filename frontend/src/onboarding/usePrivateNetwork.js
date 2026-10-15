@@ -62,11 +62,15 @@ export function createPrivateNetwork(deps) {
 		storage = { get: () => null, set: () => {} },
 	} = deps;
 
+	// What the cleared flag is bound to: "<host ip>|<public address>", the values the passing test
+	// ran against. A bare flag could be carried over to a different address (decline, Back, save
+	// another address, Pay) and skip the test for a server nobody tested.
 	function readCleared() {
 		try {
-			return storage.get(CLEARED_KEY) === "1";
+			const v = storage.get(CLEARED_KEY);
+			return typeof v === "string" && v.includes("|") ? v : "";
 		} catch (e) {
-			return false;
+			return "";
 		}
 	}
 
@@ -100,7 +104,7 @@ export function createPrivateNetwork(deps) {
 		holdErrCode: "",
 		holdEnded: null, // { oldIp, newIp }
 		test: freshTest(),
-		cleared: readCleared(),
+		clearedFor: readCleared(),
 		networkGated: false,
 	});
 
@@ -113,7 +117,20 @@ export function createPrivateNetwork(deps) {
 	);
 	const complete = computed(() => state.mode === "private");
 	const onboardingHostOk = computed(() => state.hostOk || state.mode === "private");
-	const holdsCheckout = computed(() => privateBench.value && !state.cleared);
+	// Cleared means: a flag exists AND it still names the hold and address in force. An unknown
+	// side (hold or address not loaded yet) is not a mismatch; a known one that differs is.
+	const cleared = computed(() => {
+		const key = state.clearedFor;
+		if (!key) return false;
+		const cut = key.indexOf("|");
+		const ip = key.slice(0, cut);
+		const addr = key.slice(cut + 1);
+		if (state.hold && state.hold.hostIp && state.hold.hostIp !== ip) return false;
+		if (state.publicAddress && state.publicAddress !== addr) return false;
+		return true;
+	});
+	state.cleared = cleared; // a ref on a reactive object reads as its value
+	const holdsCheckout = computed(() => privateBench.value && !cleared.value);
 	const draftError = computed(() => {
 		if (!state.draft.trim() && !state.draftTouched) return "";
 		return validateAddress(state.draft, { testMode: state.testMode });
@@ -216,6 +233,7 @@ export function createPrivateNetwork(deps) {
 				return false;
 			}
 			state.mode = "private";
+			if (state.publicAddress !== r.public_address) clearCleared();
 			state.publicAddress = r.public_address;
 			state.draft = r.public_address;
 			return true;
@@ -233,8 +251,10 @@ export function createPrivateNetwork(deps) {
 		state.test = freshTest();
 	}
 
+	// Ends any poll in flight; a test left mid-way is reset so re-entry is not stuck on "Testing".
 	function dispose() {
 		run++;
+		if (state.test.phase === "testing") state.test = freshTest();
 	}
 
 	// Refreshes the hold. Entering AllowServer and the Connect panel call this even when a hold
@@ -271,6 +291,7 @@ export function createPrivateNetwork(deps) {
 				// The rules the customer set up named the old address: nothing about the
 				// previous results holds any more.
 				state.holdEnded = { oldIp: prev.hostIp, newIp: next.hostIp };
+				clearCleared();
 				resetTest();
 			}
 			state.hold = next;
@@ -381,12 +402,23 @@ export function createPrivateNetwork(deps) {
 	}
 
 	function markCleared() {
-		state.cleared = true;
+		const ip = state.hold ? state.hold.hostIp : "";
+		state.clearedFor = `${ip}|${state.publicAddress}`;
+		writeCleared(state.clearedFor);
+	}
+
+	function writeCleared(value) {
 		try {
-			storage.set(CLEARED_KEY, "1");
+			storage.set(CLEARED_KEY, value);
 		} catch (e) {
 			/* storage unavailable: the hold simply comes back after a reload */
 		}
+	}
+
+	// The tested server or address no longer applies (new address, hold ended, Start again).
+	function clearCleared() {
+		state.clearedFor = "";
+		writeCleared("");
 	}
 
 	return {
@@ -411,5 +443,6 @@ export function createPrivateNetwork(deps) {
 		resetTest,
 		dispose,
 		markCleared,
+		clearCleared,
 	};
 }
