@@ -116,6 +116,26 @@ class TestAttachSourceToDraft(fbh._Base):
 		self.assertEqual(_attachments("ToDo", todo), [], "the savepoint did not undo the File row")
 		self.assertTrue(frappe.db.exists("ToDo", todo))
 
+	def test_a_failure_keeps_a_draft_that_is_not_committed_yet(self):
+		# In production the draft INSERT is still uncommitted when the attach runs.
+		# A bare rollback() on failure would delete it; only the savepoint is undone.
+		conv = self.conv()
+		doc = frappe.get_doc({"doctype": "ToDo", "description": "fba draft", "allocated_to": OWNER})
+		doc.insert(ignore_permissions=True)  # no commit: the open transaction holds it
+		written = []
+
+		def save_then_fail(*args, **kwargs):
+			written.append(save_url(*args, **kwargs).name)  # the File row is written...
+			raise RuntimeError("disk full")  # ...and then the attach fails
+
+		with as_user(OWNER), patch("frappe.utils.file_manager.save_url", side_effect=save_then_fail):
+			out = filebox.attach_source_to_draft(conv, "ToDo", doc.name)
+		self.assertIn("disk full", out["attach_error"])
+		self.assertEqual(len(written), 1, "the attach never got as far as writing the File row")
+		self.assertFalse(frappe.db.exists("File", written[0]), "the failed File row is still there")
+		self.assertEqual(_attachments("ToDo", doc.name), [])
+		self.assertTrue(frappe.db.exists("ToDo", doc.name), "the failed attach took the draft with it")
+
 	def test_a_database_error_looking_up_the_file_is_reported_not_raised(self):
 		conv = self.conv()
 		todo = _todo(OWNER)
