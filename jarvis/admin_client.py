@@ -749,12 +749,15 @@ def signup(
 	one), so there is no "omit when absent" case to preserve; an older admin that
 	does not declare either kwarg drops it silently, same as any unknown kwarg.
 	"""
+	# Read once: two reads could straddle a settings change and send a Private-mode body
+	# with a non-private URL (or the reverse).
+	private_address = private_public_address()
 	body = {
 		"email": email,
 		"company_name": company_name,
 		"plan": plan,
 		# signup is the only trust_host=True caller (new account, self-scoped).
-		"frappe_site_url": _public_origin(trust_host=True),
+		"frappe_site_url": private_address or _public_origin(trust_host=True),
 		"supported_providers": list(SUPPORTED_PROVIDERS),
 		"client_capabilities": _client_capabilities(),
 		"terms_accepted": terms_accepted,
@@ -768,7 +771,7 @@ def signup(
 		body["billing"] = billing
 	if partner_code:
 		body["partner_code"] = partner_code
-	if is_private_mode():
+	if private_address:
 		# Contract 4.2: network_mode only in Private mode, with the capability that admin
 		# requires for it (CLIENT_UPGRADE_REQUIRED otherwise). frappe_site_url above is
 		# already the public address via _public_origin.
