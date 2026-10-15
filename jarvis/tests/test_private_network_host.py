@@ -22,20 +22,23 @@ class TestPrivateOrigin(FrappeTestCase):
 			self.assertEqual(admin_client._public_origin(trust_host=True), PUBLIC)
 
 	def test_not_private_keeps_the_host_name_behaviour(self):
-		with _private(mode="", address=""), patch.dict(
-			frappe.conf, {"host_name": "https://tenant.example.com"}, clear=False
+		with (
+			_private(mode="", address=""),
+			patch.dict(frappe.conf, {"host_name": "https://tenant.example.com"}, clear=False),
 		):
 			self.assertEqual(admin_client._public_origin(), "https://tenant.example.com")
 
 	def test_private_mode_with_an_invalid_address_falls_back(self):
-		with _private(address="http://nope.example.com"), patch.dict(
-			frappe.conf, {"host_name": "https://tenant.example.com"}, clear=False
+		with (
+			_private(address="http://nope.example.com"),
+			patch.dict(frappe.conf, {"host_name": "https://tenant.example.com"}, clear=False),
 		):
 			self.assertEqual(admin_client._public_origin(), "https://tenant.example.com")
 
 	def test_test_mode_accepts_a_loopback_http_address(self):
-		with _private(address="http://127.0.0.1:8000/"), patch.dict(
-			frappe.conf, {"jarvis_private_network_test_mode": 1}, clear=False
+		with (
+			_private(address="http://127.0.0.1:8000/"),
+			patch.dict(frappe.conf, {"jarvis_private_network_test_mode": 1}, clear=False),
 		):
 			self.assertEqual(admin_client._public_origin(), "http://127.0.0.1:8000")
 
@@ -79,8 +82,9 @@ class TestOnboardingHostGate(FrappeTestCase):
 		"""The Private branch reads stored settings only. A request Host that looks public
 		changes nothing (the original guard's reason for existing)."""
 		self._no_host_name()
-		with _private(mode="", address=""), patch(
-			"frappe.utils.get_url", return_value="https://evil.example.com"
+		with (
+			_private(mode="", address=""),
+			patch("frappe.utils.get_url", return_value="https://evil.example.com"),
 		):
 			self.assertFalse(admin_client._onboarding_host_ok())
 
@@ -90,8 +94,9 @@ class TestOnboardingHostGate(FrappeTestCase):
 			self.assertFalse(admin_client._onboarding_host_ok())
 
 	def test_public_host_behaviour_is_unchanged(self):
-		with _private(mode="", address=""), patch.dict(
-			frappe.conf, {"host_name": "https://jarvis-e2e.aerele.in"}, clear=False
+		with (
+			_private(mode="", address=""),
+			patch.dict(frappe.conf, {"host_name": "https://jarvis-e2e.aerele.in"}, clear=False),
 		):
 			self.assertTrue(admin_client._public_host_configured())
 			self.assertTrue(admin_client._onboarding_host_ok())

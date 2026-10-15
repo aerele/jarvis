@@ -725,7 +725,9 @@ def error_object(err) -> tuple[dict, int]:
 
 		code = getattr(err, "code", None)
 		return {
-			"code": code if isinstance(code, str) and code in _PRIVATE_NETWORK_CODES else BENCH_ADMIN_AUTH_FAILED,
+			"code": code
+			if isinstance(code, str) and code in _PRIVATE_NETWORK_CODES
+			else BENCH_ADMIN_AUTH_FAILED,
 			"message": str(err),
 			"recovery": RECOVERY_CONTACT_SUPPORT,
 		}, (err.status_code or 401)

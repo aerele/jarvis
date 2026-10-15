@@ -116,7 +116,9 @@ class TestStartConnectionTest(_Fresh):
 	def test_starts_the_admin_check_and_runs_the_outbound_test_against_the_stored_hold(self):
 		onboarding_contract.store_private_hold(HOLD)
 		with (
-			patch.object(admin_client, "start_connection_check", return_value={"check": "JCC-000123"}) as start,
+			patch.object(
+				admin_client, "start_connection_check", return_value={"check": "JCC-000123"}
+			) as start,
 			patch("requests.Session.get", return_value=_response(200)) as get,
 		):
 			out = private_network.start_connection_test()

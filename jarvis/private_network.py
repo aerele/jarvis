@@ -13,9 +13,9 @@ a bug) still raise.
 
 import ipaddress
 import re
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-import socket
 from urllib.parse import urlsplit
 
 import frappe

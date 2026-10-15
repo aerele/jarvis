@@ -557,9 +557,7 @@ def _private_network_settings() -> tuple[str, str]:
 	that state is simply not private."""
 	try:
 		mode = (frappe.db.get_single_value("Jarvis Settings", "network_mode", cache=False) or "").strip()
-		address = (
-			frappe.db.get_single_value("Jarvis Settings", "public_address", cache=False) or ""
-		).strip()
+		address = (frappe.db.get_single_value("Jarvis Settings", "public_address", cache=False) or "").strip()
 	except Exception:
 		return "", ""
 	return mode, address

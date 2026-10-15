@@ -41,7 +41,11 @@ class TestCallShapes(FrappeTestCase):
 		self.assertEqual(guest.call_args.kwargs["timeout_s"], 5)
 
 	def test_reserve_private_host_is_authenticated_and_has_no_arguments(self):
-		reply = {"host_ip": "198.51.100.27", "reach_url": "https://reach.h3.fleet.example/", "hold_until": None}
+		reply = {
+			"host_ip": "198.51.100.27",
+			"reach_url": "https://reach.h3.fleet.example/",
+			"hold_until": None,
+		}
 		with (
 			patch.object(admin_client, "_post", return_value=reply) as post,
 			patch.object(admin_client, "_post_guest", side_effect=AssertionError("must authenticate")),
@@ -61,7 +65,9 @@ class TestCallShapes(FrappeTestCase):
 		reply = {"status": "Verified", "reason": "ok", "checked_at": "2026-10-14 09:12:03"}
 		with patch.object(admin_client, "_post", return_value=reply) as post:
 			self.assertEqual(admin_client.get_connection_check("JCC-000123"), reply)
-		post.assert_called_once_with(path=NS + "get_connection_check", body={"check": "JCC-000123"}, timeout_s=15)
+		post.assert_called_once_with(
+			path=NS + "get_connection_check", body={"check": "JCC-000123"}, timeout_s=15
+		)
 
 	def test_the_admin_app_namespace_override_is_honoured(self):
 		import frappe
@@ -140,9 +146,11 @@ class TestRefusalsReachTheBenchWithTheirCode(FrappeTestCase):
 		self.assertEqual(caught.exception.code, "PRIVATE_HOLD_UNAVAILABLE")
 
 	def test_a_403_without_a_private_code_is_still_an_auth_failure(self):
-		body = {"exc_type": _PERMISSION, "exception": "x", "_server_messages": json.dumps(
-			[json.dumps({"message": "Not permitted"})]
-		)}
+		body = {
+			"exc_type": _PERMISSION,
+			"exception": "x",
+			"_server_messages": json.dumps([json.dumps({"message": "Not permitted"})]),
+		}
 		with self.assertRaises(AdminAuthError) as caught:
 			self._do_post(403, body)
 		self.assertEqual(caught.exception.status_code, 403)
@@ -153,9 +161,10 @@ class TestRefusalsReachTheBenchWithTheirCode(FrappeTestCase):
 				self._do_post(400, _thrown(_INVALID, "PRIVATE_ADDRESS_INVALID"))
 			# also when the code is absent (an older admin): the class alone is recognised
 			with self.assertRaises(AdminValidationError):
-				self._do_post(400, {"exc_type": _INVALID, "_server_messages": json.dumps(
-					[json.dumps({"message": "bad"})]
-				)})
+				self._do_post(
+					400,
+					{"exc_type": _INVALID, "_server_messages": json.dumps([json.dumps({"message": "bad"})])},
+				)
 		log.assert_not_called()
 
 	def test_a_returned_shape_under_message_still_works(self):

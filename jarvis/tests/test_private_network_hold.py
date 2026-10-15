@@ -170,7 +170,11 @@ class TestReserveHost(_Fresh):
 		self.assertTrue(out["message"])
 
 	def test_an_empty_answer_is_still_unexpected(self):
-		for raw in ({}, {"host_ip": "", "reach_url": ""}, {"host_ip": "", "reach_url": "", "hold_until": "x"}):
+		for raw in (
+			{},
+			{"host_ip": "", "reach_url": ""},
+			{"host_ip": "", "reach_url": "", "hold_until": "x"},
+		):
 			with self.subTest(raw=raw), patch.object(admin_client, "reserve_private_host", return_value=raw):
 				out = private_network.reserve_host()
 				self.assertEqual(out["message"], private_network._UNEXPECTED)

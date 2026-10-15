@@ -530,7 +530,9 @@ class TestAdminChatGate(FrappeTestCase):
 
 	def test_no_network_check_leaves_the_provisioning_verdict_alone(self):
 		with patch.object(
-			admin_client, "get_connection", return_value={"chat_readiness": "Configuring", "network_check": {}}
+			admin_client,
+			"get_connection",
+			return_value={"chat_readiness": "Configuring", "network_check": {}},
 		):
 			self.assertEqual(account._admin_chat_gate()["reason"], "container_provisioning")
 

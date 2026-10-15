@@ -5,9 +5,8 @@ import json
 import socket
 from unittest.mock import MagicMock, patch
 
-import requests
-
 import frappe
+import requests
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import admin_client, private_network
@@ -49,9 +48,7 @@ class TestNetworkStatus(_AdminUser):
 			(AdminUnreachableError("down"), False),
 		):
 			with self.subTest(expected=expected):
-				probe = (
-					{"side_effect": info} if isinstance(info, Exception) else {"return_value": info}
-				)
+				probe = {"side_effect": info} if isinstance(info, Exception) else {"return_value": info}
 				with (
 					patch.object(admin_client, "_public_host_configured", return_value=False),
 					patch.object(admin_client, "private_public_address", return_value=""),
@@ -63,7 +60,8 @@ class TestNetworkStatus(_AdminUser):
 				self.assertEqual(out["network_mode"], "")
 				# The admin address and the caller's own IP stay out until the customer picks.
 				self.assertEqual(
-					set(out), {"host_public", "admin_reachable", "network_mode", "public_address", "test_mode"}
+					set(out),
+					{"host_public", "admin_reachable", "network_mode", "public_address", "test_mode"},
 				)
 
 	def test_a_finished_private_setup_reports_mode_and_address_without_probing(self):
@@ -131,7 +129,9 @@ class TestPrivateSetupTargets(_AdminUser):
 				private_network.socket,
 				"getaddrinfo",
 				side_effect=error,
-				return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0)) for ip in (resolved or [])],
+				return_value=[
+					(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0)) for ip in (resolved or [])
+				],
 			),
 		]
 		for p in patches:
@@ -140,7 +140,9 @@ class TestPrivateSetupTargets(_AdminUser):
 		return private_network.private_setup_targets()
 
 	def test_resolves_ipv4_server_side_sorted_and_unique(self):
-		out = self._targets("https://fleet.klerk.in", resolved=["178.104.214.114", "178.104.214.114", "1.2.3.4"])
+		out = self._targets(
+			"https://fleet.klerk.in", resolved=["178.104.214.114", "178.104.214.114", "1.2.3.4"]
+		)
 		self.assertEqual(out, {"admin_host": "fleet.klerk.in", "admin_ips": ["1.2.3.4", "178.104.214.114"]})
 
 	def test_an_ip_literal_admin_url_needs_no_dns(self):
@@ -157,7 +159,9 @@ class TestPrivateSetupTargets(_AdminUser):
 
 	def test_the_fallback_accepts_a_comma_separated_string(self):
 		out = self._targets(
-			"https://fleet.klerk.in", error=socket.gaierror("x"), conf={"jarvis_admin_ips": "1.1.1.1, 8.8.8.8"}
+			"https://fleet.klerk.in",
+			error=socket.gaierror("x"),
+			conf={"jarvis_admin_ips": "1.1.1.1, 8.8.8.8"},
 		)
 		self.assertEqual(out["admin_ips"], ["1.1.1.1", "8.8.8.8"])
 
@@ -271,7 +275,9 @@ class TestRefusalEndToEnd(_AdminUser):
 		self.assertEqual((out["code"], out["message"]), ("INVALID_REQUEST", private_network._UNEXPECTED))
 
 	def test_a_coded_rate_limit_keeps_its_wait(self):
-		body = _thrown("RateLimitExceededError", "RATE_LIMITED_PRIVATE_NETWORK", "Slow down.", retry_after_seconds=90)
+		body = _thrown(
+			"RateLimitExceededError", "RATE_LIMITED_PRIVATE_NETWORK", "Slow down.", retry_after_seconds=90
+		)
 		out = private_network._refusal(self._raised(429, body))
 		self.assertEqual(out["code"], "RATE_LIMITED_PRIVATE_NETWORK")
 		self.assertEqual(out["retry_after_seconds"], 90)

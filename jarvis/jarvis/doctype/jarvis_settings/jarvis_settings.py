@@ -908,9 +908,7 @@ class JarvisSettings(Document):
 			return
 		from jarvis.network_address import check_public_address, private_test_mode
 
-		normalized, problem = check_public_address(
-			self.get("public_address"), test_mode=private_test_mode()
-		)
+		normalized, problem = check_public_address(self.get("public_address"), test_mode=private_test_mode())
 		if problem:
 			frappe.throw(problem, frappe.ValidationError, title="Public Address")
 		self.public_address = normalized
