@@ -369,3 +369,34 @@ describe("saved dashboard refresh", () => {
 		w.unmount();
 	});
 });
+
+
+describe("refresh with an older request still in flight", () => {
+	it("ignores the previous frame's data and keeps the new frame loading", async () => {
+		let finishOld;
+		api.runDashboardSource.mockImplementationOnce(() => new Promise((resolve) => {
+			finishOld = resolve;
+		}));
+		const w = mount(DashboardCanvas, {
+			attachTo: document.body,
+			props: { mode: "view", html: "live sources", dashboard: { name: "d1" } },
+		});
+		await flushPromises();
+		sendFrameMessage(w, { type: "ready" });
+		sendFrameMessage(w, { type: "data", id: "1", name: "s1" });
+		await flushPromises();
+		await w.vm.rebuild();
+		await flushPromises();
+		sendFrameMessage(w, { type: "ready" });
+		const post = vi.spyOn(w.find("iframe").element.contentWindow, "postMessage");
+		finishOld({ ok: true, data: { rows: [{ stale: true }] } });
+		await flushPromises();
+		expect(post).not.toHaveBeenCalled();
+		expect(w.vm.loading).toBe(true);
+		sendFrameMessage(w, { type: "data", id: "1", name: "s1" });
+		await flushPromises();
+		expect(w.vm.loading).toBe(false);
+		post.mockRestore();
+		w.unmount();
+	});
+});

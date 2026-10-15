@@ -226,6 +226,7 @@ function dataPayload(data) {
 }
 
 async function handleData(d) {
+	const gen = rebuildSeq;
 	pendingData++;
 	let reply;
 	try {
@@ -263,6 +264,9 @@ async function handleData(d) {
 				: "InternalError";
 		reply = { ok: false, error: { code, message: errMsg(e) } };
 	}
+	// A refresh may have replaced the frame while this request was in flight.
+	// Never send an old response (or clear the new spinner) in the new frame.
+	if (gen !== rebuildSeq) return;
 	// Data failures render per-widget INSIDE the iframe (jarvis.renderError) -
 	// never a toast out here.
 	postToFrame({ type: "data:result", id: d.id, ...reply });
