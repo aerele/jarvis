@@ -2357,6 +2357,28 @@ describe("private network: allow the held server, then test, then pay", () => {
 		expect(assign).not.toHaveBeenCalled();
 	});
 
+	it("a pending check that turns into AllowServer never lets the provider poll run over it", async () => {
+		vi.useFakeTimers();
+		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
+		let release;
+		api.reserveHost.mockImplementationOnce(
+			() =>
+				new Promise((r) => {
+					release = () =>
+						r({ ok: true, host_ip: "198.51.100.45", reach_url: "https://r/", hold_until: "2026-10-20 09:10:00" });
+				})
+		);
+		const w = await atAllowServer();
+		expect(w.text()).toContain("Checking your server");
+		release();
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(true);
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(150_000);
+		expect(w.vm.pendingPollStuck).toBe(false);
+	});
+
 	it("a lost cleared flag does not show the screen to a customer returning from checkout", async () => {
 		window.sessionStorage.setItem("jvpriv:cleared", "");
 		const w = await atAllowServer();

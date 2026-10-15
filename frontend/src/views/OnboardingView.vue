@@ -1433,7 +1433,7 @@
 									</div>
 								</div>
 							</template>
-<template v-else-if="checkingServer">
+							<template v-else-if="checkingServer">
 								<div class="ob-body">
 									<div class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5" role="status">
 										<JvSpinner :size="20" />
@@ -4253,7 +4253,8 @@ watch(
 	(on) => {
 		if (on) {
 			net.loadHold();
-			net.loadStatus();
+			// onMounted already asked; each failed probe writes a server Error Log row.
+			if (!net.state.statusLoaded) net.loadStatus();
 		}
 	},
 	{ immediate: true }
@@ -4692,7 +4693,7 @@ function restartPendingAutoPoll() {
 	// Not while the allow-your-server screen is up: the customer is editing a firewall, and
 	// the rate-limited provider-truth check would run every 15 s and then announce "we stopped
 	// auto-checking" over a screen that has nothing to do with the payment.
-	if (isAutoPollable(pay.value.value) && state.step === "pay" && !showPrivateServerStep.value) {
+	if (isAutoPollable(pay.value.value) && state.step === "pay" && !showPrivateServerStep.value && !checkingServer.value) {
 		runPendingAutoPoll(pendingPollRun);
 	}
 	// NOTE: the value-change watch fires restartPendingAutoPoll on a
@@ -4703,6 +4704,9 @@ function restartPendingAutoPoll() {
 	// ceiling on each, never a forever-spinner.
 }
 watch(() => pay.value.value, restartPendingAutoPoll);
+// Entering or leaving the server check / AllowServer screen supersedes a loop already running:
+// its own guards only look at the run token and the machine state.
+watch([showPrivateServerStep, checkingServer], () => restartPendingAutoPoll());
 // Clear the completed-checkout proof the instant a (new or resumed) checkout opens.
 // From CHECKOUT_OPEN, the ONLY thing that may re-arm the calm settling hold is a
 // fresh ?pay=done full-navigation return (set in onMounted). This does two things:
