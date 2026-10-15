@@ -1,291 +1,299 @@
 <template>
 	<SettingsPane title="General" description="Chat behavior, notifications and token usage.">
-		<h3 class="text-base font-semibold text-ink-gray-9">Connection</h3>
-		<div class="mt-2">
-			<!-- A failover pool has no single Model/Provider. Those rows were filled
-			     from the legacy models[0] mirror, so a 4-model pool described member
-			     one and presented it as the whole connection, under a Model row
-			     naming the synthetic Bifrost endpoint nobody chose. AI models owns
-			     the per-model story (every model in failover order, with its own
-			     status); this is a summary that points at it. The pair stays for a
-			     single-credential tenant, where it is accurate. -->
-			<!-- No rows until a real answer: a failed first load shows the error
-			     line below, not the "Auto" placeholder. -->
-			<template v-if="!connLoaded">
-				<div v-if="!connErr" class="py-2 text-p-sm text-ink-gray-6">Loading…</div>
+		<!-- One spinner until the three first fetches have all answered
+		     (ConnectorsPane's markup). The body stays mounted underneath, hidden,
+		     so it paints once with real values instead of filling in section by
+		     section. A kept-alive refresh never shows it again. -->
+		<div v-if="!firstLoaded" class="grid place-items-center py-10">
+			<JvSpinner />
+		</div>
+		<div v-show="firstLoaded">
+			<h3 class="text-base font-semibold text-ink-gray-9">Connection</h3>
+			<div class="mt-2">
+				<!-- A failover pool has no single Model/Provider. Those rows were filled
+				     from the legacy models[0] mirror, so a 4-model pool described member
+				     one and presented it as the whole connection, under a Model row
+				     naming the synthetic Bifrost endpoint nobody chose. AI models owns
+				     the per-model story (every model in failover order, with its own
+				     status); this is a summary that points at it. The pair stays for a
+				     single-credential tenant, where it is accurate. -->
+				<!-- No rows until a real answer: a failed first load shows the error
+				     line below, not the "Auto" placeholder. -->
+				<template v-if="connLoaded">
+					<KvRow v-if="isPool" label="Models" :value="poolSummary" />
+					<template v-else>
+						<KvRow label="Model" :value="modelLabel" />
+						<KvRow label="Provider" :value="ui.llm_provider || '-'" />
+					</template>
+				</template>
+				<KvRow label="Status">
+					<Badge :label="statusLabel" :theme="statusTheme" variant="subtle" />
+				</KvRow>
+				<!-- The badge alone sent people looking in the wrong place (#678): it
+				     names a state but not what to do about it. This says what the
+				     workspace can actually tell. It deliberately does not guess WHY a
+				     turn failed (the turn's own wording is unreliable, #702), but it
+				     does now say WHICH of the three attention causes applies (#714) -
+				     one hint that claimed every cause was a failed chat message kept
+				     reading as current even once the true cause (a stale sync or
+				     subscription snapshot) had nothing left to do with a chat at all. -->
+				<div v-if="statusHint" class="flex items-center gap-2 pb-2">
+					<p class="text-p-sm text-ink-gray-5">{{ statusHint }}</p>
+					<!-- Every attention cause's copy below points the reader at AI
+					     models EXCEPT turn_error, which names a specific chat to open
+					     instead - so every one of them but that gets the button that
+					     actually takes them there. Review round 1 caught sync_failed
+					     alone getting the button while subscription_unverified's
+					     identical "Open AI models" sentence had no way to act on it.
+
+					     isSM-only (jarvis#711): a member has no attention_reason, so
+					     they would pass the turn_error test and get the button, and
+					     AI models is a gated section that falls back to General
+					     silently - the button would look like a dead control. Their
+					     copy names no destination for the same reason. -->
+					<Button
+						v-if="isSM && statusState === 'attention' && attentionReason !== 'turn_error'"
+						variant="subtle"
+						label="Open AI models"
+						iconLeft="cpu"
+						@click="store.openSettings('aimodels')"
+					/>
+				</div>
+				<KvRow
+					v-if="isProxy && connStatus && connStatus.oauth_expires_at"
+					label="Expires"
+					:value="expiresLabel"
+				/>
+				<div v-if="isPool" class="mt-2">
+					<Button
+						variant="subtle"
+						label="Manage models"
+						iconLeft="cpu"
+						@click="store.openSettings('aimodels')"
+					/>
+				</div>
+				<!-- A failed status fetch must not look like a healthy workspace. Without
+				     this the catch below leaves Status on its placeholder, which reads as
+				     an answer rather than as "we could not ask". Shown to members too
+				     since jarvis#711: they now query a status endpoint of their own, so
+				     the fetch they make can fail the same way, and the badge beside this
+				     stays on its neutral placeholder until a retry lands. -->
+				<div v-if="connErr" class="mt-2 flex items-center gap-2">
+					<span class="text-p-sm text-ink-gray-6">
+						Connection status is unavailable right now.
+					</span>
+					<Button
+						variant="subtle"
+						label="Retry"
+						iconLeft="refresh-cw"
+						:loading="connLoading"
+						@click="loadConnStatus"
+					/>
+				</div>
+			</div>
+
+			<hr class="my-8" />
+
+			<h3 class="text-base font-semibold text-ink-gray-9">Behavior</h3>
+			<div class="mt-2">
+				<ToggleRow
+					title="Show tool activity"
+					help="Show the tools each reply used, with their inputs and outputs."
+					:modelValue="showActivityDetail"
+					@update:modelValue="setActivityDetail"
+				/>
+				<ToggleRow
+					:title="AUTO_MODE_COPY.settingsTitle"
+					:help="AUTO_MODE_COPY.settingsHelp"
+					:modelValue="defaultAutoMode"
+					@update:modelValue="setDefaultAutoMode"
+				/>
+				<ToggleRow
+					title="Notify when a reply is ready"
+					:help="`Browser notification when ${brand.agentName} finishes while you are in another tab.`"
+					:modelValue="notifyEnabled"
+					:disabled="!notifySupported"
+					@update:modelValue="onToggleNotify"
+				/>
+				<!-- The store gates notifyEnabled on Notification.permission as well as
+				     the stored preference, so this switch can read off while the server
+				     row says on. Without a line here that looks like a broken toggle. -->
+				<p v-if="!notifySupported" class="pb-2 text-p-sm text-ink-gray-5">
+					This browser does not support notifications.
+				</p>
+				<p v-else-if="notifyBlocked" class="pb-2 text-p-sm text-ink-gray-5">
+					Notifications are blocked for this site. Allow them in your browser settings to
+					turn this on.
+				</p>
+			</div>
+
+			<hr class="my-8" />
+
+			<h3 class="text-base font-semibold text-ink-gray-9">Context</h3>
+			<div class="mt-2">
+				<KvRow label="This chat" :value="context.text" />
+			</div>
+
+			<hr class="my-8" />
+
+			<h3 class="flex items-center gap-2 text-base font-semibold text-ink-gray-9">
+				Token usage
+				<Badge label="est." theme="gray" variant="subtle" size="sm" />
+			</h3>
+			<div class="mt-2">
+				<KvRow
+					:label="usage ? usage.month_label : 'This month'"
+					:value="usage ? fmtTokens(usage.month_tokens) : '-'"
+				/>
+				<KvRow label="All time" :value="usage ? fmtTokens(usage.total_tokens) : '-'" />
+			</div>
+			<template v-if="usage && usage.budget_monthly">
+				<div class="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-gray-3">
+					<div class="h-full bg-surface-gray-7" :style="{ width: usagePct + '%' }" />
+				</div>
+				<p class="mt-2 text-p-sm text-ink-gray-5">
+					{{ fmtTokens(usage.month_tokens) }} of {{ fmtTokens(usage.budget_monthly) }} this
+					month, {{ usagePct }}%
+				</p>
 			</template>
-			<KvRow v-else-if="isPool" label="Models" :value="poolSummary" />
-			<template v-else>
-				<KvRow label="Model" :value="modelLabel" />
-				<KvRow label="Provider" :value="ui.llm_provider || '-'" />
-			</template>
-			<KvRow label="Status">
-				<Badge :label="statusLabel" :theme="statusTheme" variant="subtle" />
-			</KvRow>
-			<!-- The badge alone sent people looking in the wrong place (#678): it
-			     names a state but not what to do about it. This says what the
-			     workspace can actually tell. It deliberately does not guess WHY a
-			     turn failed (the turn's own wording is unreliable, #702), but it
-			     does now say WHICH of the three attention causes applies (#714) -
-			     one hint that claimed every cause was a failed chat message kept
-			     reading as current even once the true cause (a stale sync or
-			     subscription snapshot) had nothing left to do with a chat at all. -->
-			<div v-if="statusHint" class="flex items-center gap-2 pb-2">
-				<p class="text-p-sm text-ink-gray-5">{{ statusHint }}</p>
-				<!-- Every attention cause's copy below points the reader at AI
-				     models EXCEPT turn_error, which names a specific chat to open
-				     instead - so every one of them but that gets the button that
-				     actually takes them there. Review round 1 caught sync_failed
-				     alone getting the button while subscription_unverified's
-				     identical "Open AI models" sentence had no way to act on it.
-
-				     isSM-only (jarvis#711): a member has no attention_reason, so
-				     they would pass the turn_error test and get the button, and
-				     AI models is a gated section that falls back to General
-				     silently - the button would look like a dead control. Their
-				     copy names no destination for the same reason. -->
-				<Button
-					v-if="isSM && statusState === 'attention' && attentionReason !== 'turn_error'"
-					variant="subtle"
-					label="Open AI models"
-					iconLeft="cpu"
-					@click="store.openSettings('aimodels')"
-				/>
-			</div>
-			<KvRow
-				v-if="isProxy && connStatus && connStatus.oauth_expires_at"
-				label="Expires"
-				:value="expiresLabel"
-			/>
-			<div v-if="isPool" class="mt-2">
-				<Button
-					variant="subtle"
-					label="Manage models"
-					iconLeft="cpu"
-					@click="store.openSettings('aimodels')"
-				/>
-			</div>
-			<!-- A failed status fetch must not look like a healthy workspace. Without
-			     this the catch below leaves Status on its placeholder, which reads as
-			     an answer rather than as "we could not ask". Shown to members too
-			     since jarvis#711: they now query a status endpoint of their own, so
-			     the fetch they make can fail the same way, and the badge beside this
-			     stays on its neutral placeholder until a retry lands. -->
-			<div v-if="connErr" class="mt-2 flex items-center gap-2">
-				<span class="text-p-sm text-ink-gray-6">
-					Connection status is unavailable right now.
-				</span>
-				<Button
-					variant="subtle"
-					label="Retry"
-					iconLeft="refresh-cw"
-					:loading="connLoading"
-					@click="loadConnStatus"
-				/>
-			</div>
-		</div>
-
-		<hr class="my-8" />
-
-		<h3 class="text-base font-semibold text-ink-gray-9">Behavior</h3>
-		<div class="mt-2">
-			<ToggleRow
-				title="Show tool activity"
-				help="Show the tools each reply used, with their inputs and outputs."
-				:modelValue="showActivityDetail"
-				@update:modelValue="setActivityDetail"
-			/>
-			<ToggleRow
-				:title="AUTO_MODE_COPY.settingsTitle"
-				:help="AUTO_MODE_COPY.settingsHelp"
-				:modelValue="defaultAutoMode"
-				@update:modelValue="setDefaultAutoMode"
-			/>
-			<ToggleRow
-				title="Notify when a reply is ready"
-				:help="`Browser notification when ${brand.agentName} finishes while you are in another tab.`"
-				:modelValue="notifyEnabled"
-				:disabled="!notifySupported"
-				@update:modelValue="onToggleNotify"
-			/>
-			<!-- The store gates notifyEnabled on Notification.permission as well as
-			     the stored preference, so this switch can read off while the server
-			     row says on. Without a line here that looks like a broken toggle. -->
-			<p v-if="!notifySupported" class="pb-2 text-p-sm text-ink-gray-5">
-				This browser does not support notifications.
+			<p v-else class="mt-2 text-p-sm text-ink-gray-5">
+				No monthly budget set. Counts are estimated from message text.
 			</p>
-			<p v-else-if="notifyBlocked" class="pb-2 text-p-sm text-ink-gray-5">
-				Notifications are blocked for this site. Allow them in your browser settings to
-				turn this on.
-			</p>
-		</div>
 
-		<hr class="my-8" />
+			<hr class="my-8" />
 
-		<h3 class="text-base font-semibold text-ink-gray-9">Context</h3>
-		<div class="mt-2">
-			<KvRow label="This chat" :value="context.text" />
-		</div>
-
-		<hr class="my-8" />
-
-		<h3 class="flex items-center gap-2 text-base font-semibold text-ink-gray-9">
-			Token usage
-			<Badge label="est." theme="gray" variant="subtle" size="sm" />
-		</h3>
-		<div class="mt-2">
-			<KvRow
-				:label="usage ? usage.month_label : 'This month'"
-				:value="usage ? fmtTokens(usage.month_tokens) : '-'"
-			/>
-			<KvRow label="All time" :value="usage ? fmtTokens(usage.total_tokens) : '-'" />
-		</div>
-		<template v-if="usage && usage.budget_monthly">
-			<div class="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-gray-3">
-				<div class="h-full bg-surface-gray-7" :style="{ width: usagePct + '%' }" />
-			</div>
-			<p class="mt-2 text-p-sm text-ink-gray-5">
-				{{ fmtTokens(usage.month_tokens) }} of {{ fmtTokens(usage.budget_monthly) }} this
-				month, {{ usagePct }}%
-			</p>
-		</template>
-		<p v-else class="mt-2 text-p-sm text-ink-gray-5">
-			No monthly budget set. Counts are estimated from message text.
-		</p>
-
-		<hr class="my-8" />
-
-		<!-- Danger zone: plain heading, red SUBTLE button. The red solid lives in
-		     the confirm the action opens, never resting on the pane
-		     (design.md §4.1). -->
-		<h3 class="text-base font-semibold text-ink-gray-9">Danger zone</h3>
-		<div class="mt-2 flex items-start justify-between gap-4">
-			<div class="flex flex-col gap-0.5">
-				<span class="text-base font-medium text-ink-gray-8">Delete all chat history</span>
-				<span class="max-w-lg text-p-sm text-ink-gray-6">
-					Every conversation and message, permanently. Chats still waiting for a reply
-					are kept. Macros and skills stay.
-				</span>
-				<!-- clearAllHistory is registered by ChatView at runtime, so it is
-				     absent on non-chat routes. Say why rather than showing a dead
-				     disabled button. -->
-				<span v-if="!canClear" class="max-w-lg text-p-sm text-ink-gray-5">
-					Open a conversation to use this.
-				</span>
-			</div>
-			<Button
-				variant="subtle"
-				theme="red"
-				label="Delete all"
-				:loading="clearing"
-				:disabled="!canClear"
-				@click="onClearAllHistory"
-			/>
-		</div>
-
-		<!-- Reset workspace (jarvis.onboarding.*): self-serve container rebuild.
-		     Admin-tier only; the red solid lives in the useConfirm dialog, per the
-		     danger-zone rule above. While a reset runs the pane polls back to
-		     Ready and hard-reloads /jarvis (drops the memoized readiness verdict). -->
-		<template v-if="isSM">
-			<div class="mt-6 flex items-start justify-between gap-4">
+			<!-- Danger zone: plain heading, red SUBTLE button. The red solid lives in
+			     the confirm the action opens, never resting on the pane
+			     (design.md §4.1). -->
+			<h3 class="text-base font-semibold text-ink-gray-9">Danger zone</h3>
+			<div class="mt-2 flex items-start justify-between gap-4">
 				<div class="flex flex-col gap-0.5">
-					<span class="text-base font-medium text-ink-gray-8">Reset workspace</span>
+					<span class="text-base font-medium text-ink-gray-8">Delete all chat history</span>
 					<span class="max-w-lg text-p-sm text-ink-gray-6">
-						Destroys this workspace's container and attaches a fresh one, then
-						reconnects automatically. Use it when the workspace is stuck or won't
-						connect. Chat is unavailable while it runs (usually a few minutes). Your
-						subscription, chat history and AI connections are kept unless you tick the
-						options.
+						Every conversation and message, permanently. Chats still waiting for a reply
+						are kept. Macros and skills stay.
+					</span>
+					<!-- clearAllHistory is registered by ChatView at runtime, so it is
+					     absent on non-chat routes. Say why rather than showing a dead
+					     disabled button. -->
+					<span v-if="!canClear" class="max-w-lg text-p-sm text-ink-gray-5">
+						Open a conversation to use this.
 					</span>
 				</div>
 				<Button
-					v-if="!resetting && !resetOpen"
 					variant="subtle"
 					theme="red"
-					label="Reset workspace"
-					@click="openReset"
+					label="Delete all"
+					:loading="clearing"
+					:disabled="!canClear"
+					@click="onClearAllHistory"
 				/>
 			</div>
 
-			<div v-if="resetting" class="mt-3">
-				<Badge :label="resetStatusLabel" theme="blue" variant="subtle" />
-				<p class="mt-2 text-p-sm text-ink-gray-6">{{ resetNote }}</p>
-			</div>
-
-			<div v-else-if="resetOpen" class="mt-3 max-w-lg">
-				<textarea
-					v-model="resetReason"
-					rows="2"
-					class="w-full rounded-md border bg-surface-white p-2 text-p-sm text-ink-gray-8"
-					placeholder="What's wrong? (optional)"
-				/>
-				<label class="mt-3 flex cursor-pointer items-start gap-2.5">
-					<input v-model="wipeData" type="checkbox" class="mt-0.5" />
-					<span>
-						<span class="block text-p-sm font-medium text-ink-gray-8">
-							Also delete workspace content
+			<!-- Reset workspace (jarvis.onboarding.*): self-serve container rebuild.
+			     Admin-tier only; the red solid lives in the useConfirm dialog, per the
+			     danger-zone rule above. While a reset runs the pane polls back to
+			     Ready and hard-reloads /jarvis (drops the memoized readiness verdict). -->
+			<template v-if="isSM">
+				<div class="mt-6 flex items-start justify-between gap-4">
+					<div class="flex flex-col gap-0.5">
+						<span class="text-base font-medium text-ink-gray-8">Reset workspace</span>
+						<span class="max-w-lg text-p-sm text-ink-gray-6">
+							Destroys this workspace's container and attaches a fresh one, then
+							reconnects automatically. Use it when the workspace is stuck or won't
+							connect. Chat is unavailable while it runs (usually a few minutes). Your
+							subscription, chat history and AI connections are kept unless you tick the
+							options.
 						</span>
-						<span class="block text-p-sm text-ink-gray-6">
-							Permanently deletes chats, skills, macros, triggers, learned patterns,
-							wiki pages and dashboards. Cannot be undone.
-						</span>
-					</span>
-				</label>
-				<label class="mt-2 flex cursor-pointer items-start gap-2.5">
-					<input v-model="revokeLlm" type="checkbox" class="mt-0.5" />
-					<span>
-						<span class="block text-p-sm font-medium text-ink-gray-8">
-							Also disconnect AI model connections
-						</span>
-						<span class="block text-p-sm text-ink-gray-6">
-							Removes every connected model and key; you'll set them up again after
-							the reset.
-						</span>
-					</span>
-				</label>
-				<div ref="resetFormEl" class="mt-4 flex items-center gap-2">
+					</div>
 					<Button
+						v-if="!resetting && !resetOpen"
 						variant="subtle"
 						theme="red"
 						label="Reset workspace"
-						iconLeft="refresh-cw"
-						:loading="resetBusy"
-						@click="doReset"
-					/>
-					<Button
-						variant="ghost"
-						label="Cancel"
-						:disabled="resetBusy"
-						@click="closeReset"
+						@click="openReset"
 					/>
 				</div>
-			</div>
 
-			<!-- Reset onboarding (jarvis.onboarding.reset_onboarding): clears the
-			     connection + all workspace content and re-runs the setup wizard.
-			     Synchronous — no container rebuild, so no poll; on success we hard-
-			     reload into /jarvis/onboarding. Full wipe always (the bench
-			     reset-onboarding CLI); the red solid lives in the useConfirm. -->
-			<div v-if="isSystemManager" class="mt-6 flex items-start justify-between gap-4">
-				<div class="flex flex-col gap-0.5">
-					<span class="text-base font-medium text-ink-gray-8">Reset to onboarding</span>
-					<span class="max-w-lg text-p-sm text-ink-gray-6">
-						Clears this workspace's connection and AI setup and permanently deletes all
-						content (chats, skills, macros, triggers, learned patterns, wiki pages and
-						dashboards), then restarts the setup wizard. Your subscription is kept.
-						This cannot be undone.
-					</span>
+				<div v-if="resetting" class="mt-3">
+					<Badge :label="resetStatusLabel" theme="blue" variant="subtle" />
+					<p class="mt-2 text-p-sm text-ink-gray-6">{{ resetNote }}</p>
 				</div>
-				<Button
-					variant="subtle"
-					theme="red"
-					label="Reset to onboarding"
-					:loading="onboardingResetBusy"
-					@click="doResetOnboarding"
-				/>
-			</div>
-		</template>
+
+				<div v-else-if="resetOpen" class="mt-3 max-w-lg">
+					<textarea
+						v-model="resetReason"
+						rows="2"
+						class="w-full rounded-md border bg-surface-white p-2 text-p-sm text-ink-gray-8"
+						placeholder="What's wrong? (optional)"
+					/>
+					<label class="mt-3 flex cursor-pointer items-start gap-2.5">
+						<input v-model="wipeData" type="checkbox" class="mt-0.5" />
+						<span>
+							<span class="block text-p-sm font-medium text-ink-gray-8">
+								Also delete workspace content
+							</span>
+							<span class="block text-p-sm text-ink-gray-6">
+								Permanently deletes chats, skills, macros, triggers, learned patterns,
+								wiki pages and dashboards. Cannot be undone.
+							</span>
+						</span>
+					</label>
+					<label class="mt-2 flex cursor-pointer items-start gap-2.5">
+						<input v-model="revokeLlm" type="checkbox" class="mt-0.5" />
+						<span>
+							<span class="block text-p-sm font-medium text-ink-gray-8">
+								Also disconnect AI model connections
+							</span>
+							<span class="block text-p-sm text-ink-gray-6">
+								Removes every connected model and key; you'll set them up again after
+								the reset.
+							</span>
+						</span>
+					</label>
+					<div ref="resetFormEl" class="mt-4 flex items-center gap-2">
+						<Button
+							variant="subtle"
+							theme="red"
+							label="Reset workspace"
+							iconLeft="refresh-cw"
+							:loading="resetBusy"
+							@click="doReset"
+						/>
+						<Button
+							variant="ghost"
+							label="Cancel"
+							:disabled="resetBusy"
+							@click="closeReset"
+						/>
+					</div>
+				</div>
+
+				<!-- Reset onboarding (jarvis.onboarding.reset_onboarding): clears the
+				     connection + all workspace content and re-runs the setup wizard.
+				     Synchronous — no container rebuild, so no poll; on success we hard-
+				     reload into /jarvis/onboarding. Full wipe always (the bench
+				     reset-onboarding CLI); the red solid lives in the useConfirm. -->
+				<div v-if="isSystemManager" class="mt-6 flex items-start justify-between gap-4">
+					<div class="flex flex-col gap-0.5">
+						<span class="text-base font-medium text-ink-gray-8">Reset to onboarding</span>
+						<span class="max-w-lg text-p-sm text-ink-gray-6">
+							Clears this workspace's connection and AI setup and permanently deletes all
+							content (chats, skills, macros, triggers, learned patterns, wiki pages and
+							dashboards), then restarts the setup wizard. Your subscription is kept.
+							This cannot be undone.
+						</span>
+					</div>
+					<Button
+						variant="subtle"
+						theme="red"
+						label="Reset to onboarding"
+						:loading="onboardingResetBusy"
+						@click="doResetOnboarding"
+					/>
+				</div>
+			</template>
+		</div>
 	</SettingsPane>
 </template>
 
@@ -300,6 +308,7 @@ import { AUTO_MODE_COPY } from "@/lib/autoMode";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import KvRow from "@/components/settings/KvRow.vue";
 import ToggleRow from "@/components/settings/ToggleRow.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { brand } from "@/branding";
 import * as api from "@/api";
@@ -564,7 +573,15 @@ async function loadSettings() {
 // after another. A refresh swaps values in place and never blanks the pane.
 // SettingsDialog keeps this pane alive, so useKeptAlive owns the mount load and
 // the stale / config-changed refresh on re-activation.
-useKeptAlive(async () => (await Promise.all([loadUsage(), loadConnStatus(), loadSettings()]))[1]);
+// The pane paints once, when all three first fetches have answered. Each loader
+// swallows its own failure, so this always settles; it is never reset, so a
+// kept-alive refresh swaps values in place without the spinner.
+const firstLoaded = ref(false);
+useKeptAlive(async () => {
+	const results = await Promise.all([loadUsage(), loadConnStatus(), loadSettings()]);
+	firstLoaded.value = true;
+	return results[1];
+});
 
 // Device-local prefs live in the shell store (single source of truth) so that
 // toggling here also updates ChatView's live gating same-tab. Read + delegate.
