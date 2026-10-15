@@ -23,10 +23,15 @@
 			/>
 			<span class="flex-1 truncate">{{ conv.title || "New chat" }}</span>
 			<span
-				v-if="store.streamingConvId === conv.name || store.runningConvs.has(conv.name)"
-				class="ml-1.5 size-1.5 shrink-0 animate-pulse rounded-full bg-blue-500"
-				title="Replying…"
-				aria-label="Replying"
+				v-if="activity"
+				class="ml-1.5 size-1.5 shrink-0 rounded-full"
+				:class="[
+					activity.pulse ? 'animate-pulse' : '',
+					activity.state === 'recovering' ? 'bg-amber-500' : 'bg-blue-500',
+				]"
+				role="img"
+				:title="activity.label + '…'"
+				:aria-label="activity.label"
 			/>
 			<!-- unread: a finished reply the user hasn't opened yet (global
 			     notifier marks, opening clears) — solid + slightly larger, so it
@@ -67,6 +72,8 @@ const props = defineProps({
 const store = useShellStore();
 const route = useRoute();
 const router = useRouter();
+
+const activity = computed(() => store.conversationIndicator(props.conv.name));
 
 const active = computed(() => store.currentConvId === props.conv.name && !!route.meta.chat);
 

@@ -13,8 +13,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
  */
 
 const store = {
-	markRunning: vi.fn(),
-	clearRunning: vi.fn(),
+	startConversationActivity: vi.fn(),
+	stopConversationActivity: vi.fn(),
+	refreshConversationActivity: vi.fn(),
+	scheduleConversationActivityRefresh: vi.fn(),
 	markUnread: vi.fn(),
 	applyRemoteNew: vi.fn(),
 	currentConvId: null,
@@ -46,14 +48,17 @@ const { attachGlobalNotifier, useToasts, dismissToast } = await import("./global
 
 /** A socket that hands every emitted payload to the attached listener. */
 function fakeSocket() {
-	const handlers = [];
+	const handlers = new Map();
+	const emit = (event, payload) => (handlers.get(event) || []).forEach((fn) => fn(payload));
 	return {
-		on: (_evt, fn) => handlers.push(fn),
-		off: (_evt, fn) => {
-			const i = handlers.indexOf(fn);
-			if (i !== -1) handlers.splice(i, 1);
-		},
-		emit: (payload) => handlers.forEach((fn) => fn(payload)),
+		on: (event, fn) => handlers.set(event, [...(handlers.get(event) || []), fn]),
+		off: (event, fn) =>
+			handlers.set(
+				event,
+				(handlers.get(event) || []).filter((handler) => handler !== fn)
+			),
+		emit: (payload) => emit("jarvis:event", payload),
+		connect: () => emit("connect"),
 	};
 }
 
@@ -95,6 +100,8 @@ beforeEach(() => {
 	socket = fakeSocket();
 	detach = attachGlobalNotifier({ socket, router });
 });
+
+afterEach(() => detach());
 
 describe("a re-published terminal signals once", () => {
 	it("toasts ONCE for the same terminal delivered twice", () => {
@@ -393,114 +400,55 @@ describe("import:finished marks the sidebar unread, never a toast", () => {
 	});
 });
 
-describe("sidebar running chats (#591)", () => {
+describe("authoritative activity reconciliation (#591)", () => {
 	beforeEach(() => {
+		detach();
 		vi.useFakeTimers();
-		store.currentConvId = "conv-a";
-		router.currentRoute.value = { name: "Chat", params: {}, meta: { chat: true } };
+		store.refreshConversationActivity.mockClear();
+		store.startConversationActivity.mockClear();
+		detach = attachGlobalNotifier({ socket, router });
 	});
 	afterEach(() => {
 		detach();
-		for (const t of [...useToasts().value]) dismissToast(t.id);
 		vi.useRealTimers();
 	});
-
-	it.each([
-		"run:start",
-		"run:status",
-		"run:step",
-		"assistant:delta",
-		"tool:start",
-		"tool:end",
-		"run:recovering",
-	])("marks an off-screen chat running on %s without attention signals", (kind) => {
-		socket.emit({ kind, conversation_id: "conv-b" });
-		expect(store.markRunning).toHaveBeenCalledWith("conv-b");
-		expect(store.markUnread).not.toHaveBeenCalled();
-		expect(store.applyRemoteNew).not.toHaveBeenCalled();
-		expect(useToasts().value).toHaveLength(0);
+	it("starts and refreshes activity on attach", () => {
+		expect(store.startConversationActivity).toHaveBeenCalledOnce();
+		expect(store.refreshConversationActivity).toHaveBeenCalledOnce();
 	});
-
-	it.each([
-		{ kind: "run:end" },
-		{ kind: "run:end", stopped: true },
-		{ kind: "run:error" },
-		{ kind: "run:end", conversation_id: "conv-a" },
-	])("clears running on terminal $kind (stopped=$stopped, chat=$conversation_id)", (over) => {
-		const event = terminal({ conversation_id: "conv-b", ...over });
-		socket.emit({ ...event, kind: "run:start", event_seq: 1 });
-		socket.emit(event);
-		expect(store.clearRunning).toHaveBeenCalledWith(event.conversation_id);
-		store.clearRunning.mockClear();
-		vi.advanceTimersByTime(3 * 60 * 1000);
-		expect(store.clearRunning).not.toHaveBeenCalled();
+	it("invalidates even a new or legacy conversation event without deriving activity", () => {
+		socket.emit({ kind: "turn:cancelled", conversation_id: "conv-b", run_id: "queued" });
+		socket.emit({ kind: "future:activity", conversation_id: "conv-b" });
+		expect(store.scheduleConversationActivityRefresh).toHaveBeenCalledTimes(2);
 	});
-
-	it.each([
-		["TriggersPage", "jarvis-triggers-conv-u@example.com"],
-		["DashboardsPage", "jarvis-dash-conv-u@example.com"],
-	])("clears before the visible %s pane early return", (name, key) => {
-		router.currentRoute.value = { name, params: {}, meta: {} };
-		localStorage.setItem(key, "conv-b");
-		socket.emit({ kind: "run:start", conversation_id: "conv-b" });
-		socket.emit(terminal({ conversation_id: "conv-b" }));
-		expect(store.clearRunning).toHaveBeenCalledWith("conv-b");
-		expect(useToasts().value).toHaveLength(0);
-		store.clearRunning.mockClear();
-		vi.advanceTimersByTime(3 * 60 * 1000);
-		expect(store.clearRunning).not.toHaveBeenCalled();
+	it("late lossy, legacy and seq-less events only request server reconciliation", () => {
+		socket.emit(terminal());
+		socket.emit(terminal({ kind: "run:step", event_seq: 14 }));
+		socket.emit(terminal({ kind: "run:start", event_seq: undefined }));
+		socket.emit({ kind: "tool:start", conversation_id: "conv-a", run_id: "run-1" });
+		expect(store.scheduleConversationActivityRefresh).toHaveBeenCalledTimes(4);
+		expect(useToasts().value).toHaveLength(1);
 	});
-
-	it("does not re-light a chat on a stale delta after an accepted terminal", () => {
-		const event = terminal({ conversation_id: "conv-b", pump_epoch: 1, event_seq: 5 });
-		socket.emit({ ...event, kind: "run:start", event_seq: 1 });
-		expect(store.markRunning).toHaveBeenCalledOnce();
-		socket.emit(event);
-		store.markRunning.mockClear();
-		socket.emit({ ...event, kind: "assistant:delta", event_seq: 4 });
-		expect(store.markRunning).not.toHaveBeenCalled();
+	it("asks the server periodically through more than three minutes of silence", () => {
+		vi.advanceTimersByTime(4 * 60 * 1000);
+		expect(store.refreshConversationActivity).toHaveBeenCalledTimes(9);
 	});
-
-	it("clears after three minutes of silence", () => {
-		socket.emit({ kind: "run:start", conversation_id: "conv-b" });
-		vi.advanceTimersByTime(3 * 60 * 1000 - 1);
-		expect(store.clearRunning).not.toHaveBeenCalled();
-		vi.advanceTimersByTime(1);
-		expect(store.clearRunning).toHaveBeenCalledOnce();
-		expect(store.clearRunning).toHaveBeenCalledWith("conv-b");
-	});
-
-	it("resets only that chat's silence timer on another event", () => {
-		socket.emit({ kind: "run:start", conversation_id: "conv-b" });
-		socket.emit({ kind: "run:start", conversation_id: "conv-c" });
-		vi.advanceTimersByTime(2 * 60 * 1000);
-		socket.emit({ kind: "assistant:delta", conversation_id: "conv-b" });
+	it("reconciles on reconnect and visibility return; hidden polling stays quiet", () => {
+		store.refreshConversationActivity.mockClear();
+		setHidden(true);
 		vi.advanceTimersByTime(60 * 1000);
-		expect(store.clearRunning).toHaveBeenCalledOnce();
-		expect(store.clearRunning).toHaveBeenCalledWith("conv-c");
-		store.clearRunning.mockClear();
-		vi.advanceTimersByTime(2 * 60 * 1000 - 1);
-		expect(store.clearRunning).not.toHaveBeenCalled();
-		vi.advanceTimersByTime(1);
-		expect(store.clearRunning).toHaveBeenCalledOnce();
-		expect(store.clearRunning).toHaveBeenCalledWith("conv-b");
+		expect(store.refreshConversationActivity).not.toHaveBeenCalled();
+		setHidden(false);
+		document.dispatchEvent(new Event("visibilitychange"));
+		expect(store.refreshConversationActivity).toHaveBeenCalledOnce();
+		socket.connect();
+		expect(store.refreshConversationActivity).toHaveBeenCalledTimes(2);
 	});
-
-	it("cancels every silence timer on detach", () => {
-		socket.emit({ kind: "run:start", conversation_id: "conv-b" });
-		socket.emit({ kind: "tool:start", conversation_id: "conv-c" });
-		expect(vi.getTimerCount()).toBe(2);
+	it("detach stops activity and cancels the interval", () => {
 		detach();
-		expect(vi.getTimerCount()).toBe(0);
-		vi.advanceTimersByTime(3 * 60 * 1000);
-		socket.emit({ kind: "run:start", conversation_id: "conv-d" });
-		expect(store.clearRunning).not.toHaveBeenCalled();
-		expect(store.markRunning).not.toHaveBeenCalledWith("conv-d");
-	});
-
-	it("ignores running events without a conversation", () => {
-		socket.emit({ kind: "run:start" });
-		expect(store.markRunning).not.toHaveBeenCalled();
-		expect(vi.getTimerCount()).toBe(0);
+		store.refreshConversationActivity.mockClear();
+		vi.advanceTimersByTime(4 * 60 * 1000);
+		expect(store.stopConversationActivity).toHaveBeenCalled();
+		expect(store.refreshConversationActivity).not.toHaveBeenCalled();
 	});
 });
