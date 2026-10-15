@@ -544,6 +544,45 @@ def _is_real_public_host(host: str) -> bool:
 	return tld.isalpha() and tld not in _RESERVED_TLDS
 
 
+# Advertised in the signup body only when this bench is in Private mode (contract 4.2).
+PRIVATE_NETWORK_CAPABILITY = "v1"
+
+
+def _private_network_settings() -> tuple[str, str]:
+	"""``(network_mode, public_address)`` from Jarvis Settings, blank when unset.
+
+	Read with get_single_value (no document load). ``cache=False`` so a value written
+	earlier in the same process is seen. Never raises: between a code deploy and its
+	``bench migrate`` the fields do not exist and get_single_value throws, and a bench in
+	that state is simply not private."""
+	try:
+		mode = (frappe.db.get_single_value("Jarvis Settings", "network_mode", cache=False) or "").strip()
+		address = (
+			frappe.db.get_single_value("Jarvis Settings", "public_address", cache=False) or ""
+		).strip()
+	except Exception:
+		return "", ""
+	return mode, address
+
+
+def private_public_address() -> str:
+	"""The canonical public address when this bench finished the private setup (mode is
+	Private AND the address passes the rules), else ``""``. Reads stored settings only -
+	never the request Host, which is spoofable."""
+	from jarvis.network_address import check_public_address, private_test_mode
+
+	mode, address = _private_network_settings()
+	if mode != "Private":
+		return ""
+	normalized, problem = check_public_address(address, test_mode=private_test_mode())
+	return "" if problem else normalized
+
+
+def is_private_mode() -> bool:
+	"""True when the private setup is complete (see ``private_public_address``)."""
+	return bool(private_public_address())
+
+
 def _public_origin(trust_host: bool = False) -> str:
 	"""The public origin the bench sends admin as ``frappe_site_url``. A configured ``host_name``
 	(https) always wins; else ``get_url`` derives it from the request Host only when
@@ -552,7 +591,15 @@ def _public_origin(trust_host: bool = False) -> str:
 	Only ``signup`` passes ``trust_host=True`` - a NEW account, so trusting the authenticated
 	admin's own Host is self-scoped. Reconnect / replacement / lead keep it OFF: they target an
 	EXISTING account by email, so a spoofed Host must not choose its URL. A real public domain
-	reached over http is normalized to https."""
+	reached over http is normalized to https.
+
+	In Private mode (a completed private-network setup) the customer's confirmed public
+	address wins over everything else: it is the only address the Jarvis server can use to
+	call this site, and ``host_name`` keeps pointing at the private address for the links
+	Frappe builds for staff (design 5.2)."""
+	private = private_public_address()
+	if private:
+		return private
 	from urllib.parse import urlsplit
 
 	host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
@@ -579,7 +626,7 @@ def _public_origin(trust_host: bool = False) -> str:
 	return base
 
 
-def _onboarding_host_ok() -> bool:
+def _public_host_configured() -> bool:
 	"""True only when this bench has a CONFIGURED public https host. Reads only
 	site_config ``host_name`` (never the request Host header, which is
 	spoofable). Accepts public domains and globally routable IPv4 addresses.
@@ -622,6 +669,17 @@ def _onboarding_host_ok() -> bool:
 		return address.version == 4 and address.is_global and not address.is_multicast
 	except Exception:
 		return True
+
+
+def _onboarding_host_ok() -> bool:
+	"""May this bench onboard? True with a configured public host (the original rule,
+	``_public_host_configured``) OR a completed private-network setup (design 5.3). Drives
+	``assert_public_onboarding_host`` in ``start_signup``. The boot flag
+	``jarvis_public_host_ok`` deliberately does NOT use this: it keeps meaning "a public
+	host is configured", and the SPA reads ``jarvis_network_mode`` for the private case."""
+	if _public_host_configured():
+		return True
+	return is_private_mode()
 
 
 def assert_public_onboarding_host() -> None:
@@ -710,6 +768,15 @@ def signup(
 		body["billing"] = billing
 	if partner_code:
 		body["partner_code"] = partner_code
+	if is_private_mode():
+		# Contract 4.2: network_mode only in Private mode, with the capability that admin
+		# requires for it (CLIENT_UPGRADE_REQUIRED otherwise). frappe_site_url above is
+		# already the public address via _public_origin.
+		body["network_mode"] = "private"
+		body["client_capabilities"] = {
+			**_client_capabilities(),
+			"private_network": PRIVATE_NETWORK_CAPABILITY,
+		}
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
 
 

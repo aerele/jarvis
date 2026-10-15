@@ -151,9 +151,16 @@ def get_context(context):
 	from jarvis.chat import pump
 
 	try:
-		context.boot["jarvis_public_host_ok"] = admin_client._onboarding_host_ok()
+		context.boot["jarvis_public_host_ok"] = admin_client._public_host_configured()
 	except Exception:
 		context.boot["jarvis_public_host_ok"] = True  # never falsely block the wizard
+	# Private-network setup finished ("private") or not (""). The SPA shows the private
+	# choice screen when the host is not public and this is blank, and lets Review & pay
+	# through when it is "private". Fails to blank: a probe error must not claim a setup.
+	try:
+		context.boot["jarvis_network_mode"] = "private" if admin_client.is_private_mode() else ""
+	except Exception:
+		context.boot["jarvis_network_mode"] = ""
 	try:
 		context.boot["jarvis_worker_warning"] = bool(pump.chat_worker_status().get("degraded"))
 	except Exception:
