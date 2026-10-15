@@ -10,8 +10,9 @@ What this endpoint deliberately does NOT do:
   reconnected without the private setup must still answer.
 - It keeps no nonce store and writes nothing. Admin enforces single use, so a replayed
   answer is useless.
-- It never explains a refusal. Every cause (bad shape, stale clock, no secret, rate limit)
-  returns the same ``{"ok": False}`` with HTTP 200, so the endpoint is not an oracle.
+- It never explains a refusal. Every cause the handler sees (bad shape, stale clock, no
+  secret, rate limit) returns the same ``{"ok": False}`` with HTTP 200, so the endpoint is
+  not an oracle. Framework-level errors (invalid JSON, a GET) are answered by Frappe itself.
 """
 
 import hashlib
@@ -47,18 +48,30 @@ def _refuse() -> dict:
 	return {"ok": False}
 
 
+def _rate_limit_key() -> str:
+	"""Keyed by a digest of the caller IP: X-Forwarded-For is attacker-controlled, so the
+	raw value must not size the key."""
+	ip = getattr(frappe.local, "request_ip", None) or "unknown"
+	digest = hashlib.sha256(str(ip).encode()).hexdigest()[:32]
+	return f"jarvis:netcheck_rl:{frappe.local.site}:{digest}"
+
+
 def _rate_limited() -> bool:
-	"""60 calls a minute per source IP. The counter is created with its TTL in one atomic
-	step (SET NX EX), so a crash between creating and expiring it cannot leave a counter
-	that blocks an address forever. Fails open on cache trouble, like
-	``jarvis._plugin_auth._enforce_rate_limit``: the endpoint proves nothing secret, and a
-	Redis blip must not fail a customer's connection test."""
+	"""60 calls a minute per source IP. Same idiom as ``jarvis.mobile.auth._throttle_pairing``:
+	``incr`` and ``ttl`` in one pipeline, and a counter found without a TTL (evicted and
+	recreated by INCR, or left by a crash) is re-armed, so an address can never be blocked
+	forever. Fails open on cache trouble, like ``jarvis._plugin_auth._enforce_rate_limit``:
+	the endpoint proves nothing secret, and a Redis blip must not fail a connection test."""
 	try:
-		ip = getattr(frappe.local, "request_ip", None) or "unknown"
-		key = f"jarvis:netcheck_rl:{frappe.local.site}:{ip}"
+		key = _rate_limit_key()
 		cache = frappe.cache()
-		cache.set(key, 0, ex=RATE_WINDOW_S, nx=True)
-		return cache.incr(key) > RATE_LIMIT
+		pipe = cache.pipeline()
+		pipe.incr(key)
+		pipe.ttl(key)
+		attempts, ttl = pipe.execute()
+		if ttl < 0:
+			cache.expire(key, RATE_WINDOW_S)
+		return int(attempts) > RATE_LIMIT
 	except Exception:
 		return False
 

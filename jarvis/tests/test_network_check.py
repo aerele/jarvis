@@ -55,8 +55,10 @@ class TestAnswer(FrappeTestCase):
 		self._clear_limiter()
 
 	def _clear_limiter(self):
-		frappe.cache().delete(f"jarvis:netcheck_rl:{frappe.local.site}:{self._ip}")
-		frappe.cache().delete(f"jarvis:netcheck_rl:{frappe.local.site}:198.51.100.10")
+		for ip in (self._ip, "198.51.100.10"):
+			frappe.local.request_ip = ip
+			frappe.cache().delete(network_check._rate_limit_key())
+		frappe.local.request_ip = self._ip
 
 	def _ok(self, **over):
 		args = {"v": 1, "cid": CID, "nonce": NONCE, "exp": NOW + 60}
@@ -135,3 +137,37 @@ class TestAnswer(FrappeTestCase):
 	def test_a_cache_failure_does_not_take_the_endpoint_down(self):
 		with patch.object(network_check.frappe, "cache", side_effect=Exception("redis down")):
 			self.assertFalse(network_check._rate_limited())
+
+	def test_a_counter_left_without_a_ttl_is_re_armed(self):
+		key = network_check._rate_limit_key()
+		frappe.cache().set(key, network_check.RATE_LIMIT + 5)  # no TTL, already over the limit
+		self.assertTrue(network_check._rate_limited())
+		self.assertGreater(frappe.cache().ttl(key), 0)
+
+	def test_the_key_does_not_grow_with_the_caller_ip(self):
+		frappe.local.request_ip = "1.2.3.4, " + "x" * 5000
+		self.assertLess(len(network_check._rate_limit_key()), 120)
+
+
+class TestAnswerRealSecretRead(FrappeTestCase):
+	"""No patch of ``_api_secret``: the real get_decrypted_password path, no writes."""
+
+	def setUp(self):
+		frappe.local.request_ip = "198.51.100.11"
+		frappe.cache().delete(network_check._rate_limit_key())
+		self.addCleanup(lambda: frappe.cache().delete(network_check._rate_limit_key()))
+		patcher = patch("jarvis.network_check._now", return_value=NOW)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
+	def test_the_real_read_answers_or_refuses_without_writing(self):
+		secret = network_check._api_secret()
+		before = frappe.db.transaction_writes
+		with patch("frappe.db.get_single_value", side_effect=AssertionError("settings read")):
+			out = answer(v=1, cid=CID, nonce=NONCE, exp=NOW + 60)
+		self.assertEqual(frappe.db.transaction_writes, before)
+		if secret:
+			site = frappe.local.site
+			self.assertEqual(out["mac"], compute_mac(secret, CID, NONCE, NOW + 60, site))
+		else:
+			self.assertEqual(out, REFUSED)
