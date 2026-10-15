@@ -3,6 +3,7 @@ import { boundedDelivery, settledSendResult } from "./lib/sendDelivery.js";
 // the session cookie + CSRF). Same backend the Desk chat uses, so conversations
 // stay consistent across surfaces.
 import { call } from "frappe-ui";
+import { firstServerMessage, messageText } from "./lib/errors.js";
 import { listPageArgs as _page } from "./api/listPageArgs";
 import { HISTORY_PAGE_SIZE } from "./lib/historyPaging.js";
 
@@ -1043,16 +1044,8 @@ export const supportDownloadUrl = (ticket, fileUrl) =>
 // the support store shows "file too large" / "no file provided" rather than
 // a generic status-code string.
 function _uploadErrorMessage(data, status) {
-	try {
-		if (data && data._server_messages) {
-			const msgs = JSON.parse(data._server_messages);
-			const first = typeof msgs[0] === "string" ? JSON.parse(msgs[0]) : msgs[0];
-			if (first && first.message) return String(first.message);
-		}
-	} catch (e) {
-		/* fall through to the status code */
-	}
-	return `upload failed (${status})`;
+	const message = messageText(firstServerMessage(data && data._server_messages));
+	return message || `upload failed (${status})`;
 }
 
 export async function supportUpload(ticket, file, comm) {
