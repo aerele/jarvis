@@ -2032,6 +2032,20 @@ describe("private network: Review & pay", () => {
 		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
 	});
 
+	it("does not flash an empty 'Private, via' row while the saved address is still loading", async () => {
+		let release;
+		api.networkStatus.mockImplementationOnce(() => new Promise((r) => (release = r)));
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "pay";
+		w.vm.state.planName = "pro";
+		await flushPromises();
+		expect(w.text()).not.toContain("Private, via");
+		release(privateStatus());
+		await flushPromises();
+		expect(w.text()).toContain("Private, via https://8.8.8.8");
+	});
+
 	it("accepts a completed private setup where a public host would have been required", async () => {
 		const w = await atReview();
 		expect(w.vm.onboardingHostOk).toBe(true);
@@ -2460,6 +2474,46 @@ describe("private network: allow the held server, then test, then pay", () => {
 		expect(w.text()).toContain("Checking your server");
 		await vi.advanceTimersByTimeAsync(20_000);
 		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+	});
+
+	it("a customer back from checkout (?pay=pending) with a lost flag is never shown the screen", async () => {
+		// beforeEach swapped window.location for a plain copy: the pay-page return is read from href.
+		window.location.href = "http://localhost:3000/jarvis/onboarding?pay=pending";
+		// A pending answer that still carries a live pay token (the reviewer's probe).
+		const stillPayable = () =>
+			ENVELOPE({ ...PAYABLE().body.message.data, code: "PAYMENT_CONFIRMATION_PENDING" });
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(stillPayable());
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(stillPayable());
+		const w = await atAllowServer();
+		expect(w.vm.returnedFromCompletedCheckout).toBe(true);
+		expect(w.vm.canNavigateToPay(w.vm.pay)).toBe(true);
+		expect(w.vm.showPrivateServerStep).toBe(false);
+		expect(w.text()).not.toContain("Allow your Jarvis server");
+	});
+
+	it("moves focus to the heading when the screen appears after the check", async () => {
+		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
+		let release;
+		api.reserveHost.mockImplementationOnce(
+			() =>
+				new Promise((r) => {
+					release = () =>
+						r({
+							ok: true,
+							host_ip: "198.51.100.45",
+							reach_url: "https://r/",
+							hold_until: "2026-10-20 09:10:00",
+						});
+				})
+		);
+		const w = mount(OnboardingView, { global: { stubs: STUBS }, attachTo: document.body });
+		await flushPromises();
+		release();
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(true);
+		expect(document.activeElement && document.activeElement.tagName).toBe("H1");
+		expect(document.activeElement.textContent).toContain("Allow your Jarvis server");
+		w.unmount();
 	});
 
 	it("a lost cleared flag does not show the screen to a customer returning from checkout", async () => {

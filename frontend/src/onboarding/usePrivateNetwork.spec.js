@@ -300,15 +300,6 @@ describe("the held server", () => {
 		await net.loadHold();
 		expect(net.state.holdEnded).toBeNull();
 	});
-
-	it("seedHold uses the readiness verdict's host without an api call, and only once", async () => {
-		const { net, api } = make();
-		net.seedHold({ host_ip: "198.51.100.27", reach_url: "https://reach.h3.fleet.example/" });
-		expect(net.state.hold.hostIp).toBe("198.51.100.27");
-		net.seedHold({ host_ip: "9.9.9.9", reach_url: "" });
-		expect(net.state.hold.hostIp).toBe("198.51.100.27");
-		expect(api.reserveHost).not.toHaveBeenCalled();
-	});
 });
 
 describe("the two-way test", () => {
@@ -553,20 +544,6 @@ describe("controller rulings", () => {
 		await net.runTest();
 		for (const fn of Object.values(api)) expect(fn).not.toHaveBeenCalled();
 		expect(net.state.statusLoaded).toBe(true);
-	});
-
-	it("seeds the first paint from the stored private_hold, then a refresh to another host raises hold-ended", async () => {
-		const reserveHost = vi.fn(async () => ({ ...HOLD, host_ip: "198.51.100.45" }));
-		const { net } = make({ reserveHost });
-		net.seedHold({
-			host_ip: "198.51.100.27",
-			reach_url: "https://r/",
-			hold_until: "2026-10-17 09:10:00",
-		});
-		expect(net.state.hold.holdUntil).toBe("2026-10-17 09:10:00");
-		expect(reserveHost).not.toHaveBeenCalled();
-		await net.loadHold();
-		expect(net.state.holdEnded).toEqual({ oldIp: "198.51.100.27", newIp: "198.51.100.45" });
 	});
 
 	it("a cached hold is a normal hold", async () => {
@@ -858,5 +835,54 @@ describe("the cleared checkout is bound to the server and address it was tested 
 		await Promise.resolve();
 		net.dispose();
 		expect(net.state.test.phase).not.toBe("testing");
+	});
+});
+
+describe("final review hardening", () => {
+	const writes = () => {
+		const set = vi.fn();
+		return { storage: { get: () => null, set }, set };
+	};
+
+	it("a public bench never writes the cleared flag, not even to clear it", () => {
+		const { storage, set } = writes();
+		const { net } = make({}, { hostOk: true, storage });
+		net.clearCleared();
+		expect(set).not.toHaveBeenCalled();
+	});
+
+	it("a private bench still clears the stored flag", () => {
+		const { storage, set } = writes();
+		const { net } = make({}, { storage });
+		net.clearCleared();
+		expect(set).toHaveBeenCalledWith("jvpriv:cleared", "");
+	});
+
+	it("saving a different address wipes the test results; the same address keeps them", async () => {
+		const { net } = make();
+		await net.loadHold();
+		net.state.publicAddress = "https://8.8.8.8";
+		await net.runTest();
+		expect(net.state.test.phase).toBe("done");
+		net.state.draft = "https://8.8.8.8";
+		await net.saveAddress();
+		expect(net.state.test.phase).toBe("done");
+		net.state.draft = "https://9.9.9.9";
+		await net.saveAddress();
+		expect(net.state.test.phase).toBe("idle");
+		expect(net.testsPassed.value).toBe(false);
+	});
+
+	it("overlapping loadStatus calls share one bench call", async () => {
+		const { net, api } = make();
+		await Promise.all([net.loadStatus(), net.loadStatus()]);
+		expect(api.networkStatus).toHaveBeenCalledTimes(1);
+		await net.loadStatus();
+		expect(api.networkStatus).toHaveBeenCalledTimes(2);
+	});
+
+	it("seedHold is gone: the hold only ever comes from the bench", () => {
+		const { net } = make();
+		expect(net.seedHold).toBeUndefined();
 	});
 });

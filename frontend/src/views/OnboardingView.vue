@@ -1929,7 +1929,7 @@
 											}}</b>
 										</div>
 										<div
-											v-if="privateComplete"
+											v-if="privateComplete && net.state.publicAddress"
 											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
 										>
 											<span class="text-ink-gray-5">Network</span
@@ -2510,7 +2510,7 @@
 													variant="server"
 													title="Rules for your network team"
 													copy-label="Copy rules"
-													:rows="connectServerRows"
+													:rows="serverRows"
 												/>
 												<p class="text-p-sm text-ink-gray-5">
 													Allow only this address. Don't open port 443 to
@@ -4380,8 +4380,17 @@ const payBusyView = computed(
 // recovery card on purpose: the machine is UNKNOWN with a token here, and that card would
 // offer to go straight to checkout.
 const confirmingReturn = ref(false); // the customer is back from the pay page (declared here: the step reads it)
+// PROOF the customer finished checkout on this mount (?pay=done|pending). Declared here because
+// onPayableCard reads it; the long note on what it gates is further down, at showConfirming.
+const returnedFromCompletedCheckout = ref(false);
+// Not after a completed checkout either: a lost cleared flag (second tab, blocked storage) must
+// never put this screen over the post-payment screens.
 const onPayableCard = computed(
-	() => !payBusyView.value && !confirmingReturn.value && canNavigateToPay(pay.value)
+	() =>
+		!payBusyView.value &&
+		!confirmingReturn.value &&
+		!returnedFromCompletedCheckout.value &&
+		canNavigateToPay(pay.value)
 );
 // A stored "tested OK" is waiting for the hold and the saved address to load (a reload after the
 // pay-page round trip). Fail closed: checkout stays held meanwhile and the recovery card's
@@ -4519,7 +4528,7 @@ const showConfirming = computed(() => !payBusyView.value && confirmingReturn.val
 // ?pay= outcome, so they cannot prove completion and keep the recovery card. The
 // flag is reset to false whenever a checkout (re)opens - see the CHECKOUT_OPEN watch
 // below - so proof from one attempt can never soften a later, unrelated wait.
-const returnedFromCompletedCheckout = ref(false);
+// (Declared above, next to onPayableCard, which reads it.)
 
 /** Hold the confirming screen for the duration of a post-checkout reconcile. */
 async function whileConfirmingReturn(run) {
@@ -5167,6 +5176,14 @@ watch(
 		if (el && typeof el.focus === "function") el.focus();
 	}
 );
+// The held-server screen replaces the verify button the customer just pressed (or a "Checking
+// your server" spinner): move focus to its heading so a keyboard user does not land on <body>.
+watch(showPrivateServerStep, async (on) => {
+	if (!on) return;
+	await nextTick();
+	const el = recoveryHeading.value;
+	if (el && typeof el.focus === "function") el.focus();
+});
 
 // Click handler for the review card's single Pay CTA. Fires start_signup exactly
 // once through the flow; the machine takes it from there (verify / checkout /
@@ -6460,14 +6477,6 @@ function reconnectFromStall() {
 // ---- Private network: the Connect panel for network_check_required -------------------------
 // The customer's own saved private address for the inbound rule. Never the browser origin: on a
 // private bench that is the internal address, and a firewall team must not be told to allow it.
-const connectServerRows = computed(() =>
-	net.state.hold
-		? serverRuleRows({
-				hostIp: net.state.hold.hostIp,
-				publicHost: publicHostOf(net.state.publicAddress) || net.state.publicAddress,
-		  })
-		: []
-);
 // What the panel renders for the test it runs. `afterPayment` only changes the success line.
 const connectTest = computed(() =>
 	describeServerTest({

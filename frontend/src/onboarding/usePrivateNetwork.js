@@ -111,7 +111,6 @@ export function createPrivateNetwork(deps) {
 		holdEnded: null, // { oldIp, newIp }
 		test: freshTest(),
 		clearedFor: readCleared(),
-		holdFresh: false, // loadHold succeeded in this page life (a seeded hold is not fresh)
 	});
 
 	// A bench is "private" when it has no public host (it may take the private route) or has
@@ -119,16 +118,15 @@ export function createPrivateNetwork(deps) {
 	const privateBench = computed(() => !state.hostOk || state.mode === "private");
 	const complete = computed(() => state.mode === "private");
 	const onboardingHostOk = computed(() => state.hostOk || state.mode === "private");
-	// Cleared means: a stored pair exists AND this page life has loaded the hold (non-empty
-	// host IP) and the saved address, AND both equal the pair. Fails closed: a side that has not
+	// Cleared means: a stored pair exists AND this page life has loaded the hold (it only ever comes
+	// from loadHold; non-empty host IP) and the saved address, AND both equal the pair. Fails closed: a side that has not
 	// loaded counts as held, so a RESUME or retry after a reload can never go to checkout
 	// against rules for an old host.
 	const cleared = computed(() => {
 		const key = state.clearedFor;
 		if (!key) return false;
 		const cut = key.indexOf("|");
-		if (!state.holdFresh || !state.hold || !state.hold.hostIp || !state.publicAddress)
-			return false;
+		if (!state.hold || !state.hold.hostIp || !state.publicAddress) return false;
 		return (
 			state.hold.hostIp === key.slice(0, cut) && state.publicAddress === key.slice(cut + 1)
 		);
@@ -138,7 +136,7 @@ export function createPrivateNetwork(deps) {
 		() =>
 			privateBench.value &&
 			!!state.clearedFor &&
-			((!state.holdFresh && !state.holdErr) || !state.statusLoaded)
+			((!state.hold && !state.holdErr) || !state.statusLoaded)
 	);
 	state.cleared = cleared; // a ref on a reactive object reads as its value
 	const holdsCheckout = computed(() => privateBench.value && !cleared.value);
@@ -151,11 +149,19 @@ export function createPrivateNetwork(deps) {
 	);
 
 	// ---- Network step --------------------------------------------------------------------
-	async function loadStatus() {
+	// Callers that fire together (mount, the checking-server watch, the Connect lookup) share the
+	// one in flight: each failed probe writes a server Error Log row.
+	let statusInFlight = null;
+	function loadStatus() {
 		if (!privateBench.value) {
 			state.statusLoaded = true;
-			return;
+			return Promise.resolve();
 		}
+		if (!statusInFlight) statusInFlight = fetchStatus().finally(() => (statusInFlight = null));
+		return statusInFlight;
+	}
+
+	async function fetchStatus() {
 		try {
 			const r = (await api.networkStatus()) || {};
 			if (r.ok === false) throw new Error("refused");
@@ -244,7 +250,11 @@ export function createPrivateNetwork(deps) {
 				return false;
 			}
 			state.mode = "private";
-			if (state.publicAddress !== r.public_address) clearCleared();
+			if (state.publicAddress !== r.public_address) {
+				// Neither the cleared flag nor the results of a test run against the old address apply.
+				clearCleared();
+				resetTest();
+			}
 			state.publicAddress = r.public_address;
 			state.draft = r.public_address;
 			return true;
@@ -307,7 +317,6 @@ export function createPrivateNetwork(deps) {
 			// After a reload there is no previous hold in memory: the stored cleared pair names
 			// the server the customer was last tested against.
 			const prevIp = prev && prev.hostIp ? prev.hostIp : state.clearedFor.split("|")[0];
-			state.holdFresh = true;
 			if (prevIp && prevIp !== next.hostIp) {
 				// The rules the customer set up named the old address: nothing about the
 				// previous results holds any more.
@@ -323,17 +332,6 @@ export function createPrivateNetwork(deps) {
 		} finally {
 			state.holdLoading = false;
 		}
-	}
-
-	// First paint: the readiness verdict's network_check or the poll's stored private_hold
-	// ({host_ip, reach_url[, hold_until]}). Shown at once, then loadHold() refreshes it.
-	function seedHold(stored) {
-		if (state.hold || !stored || !stored.host_ip) return;
-		state.hold = {
-			hostIp: stored.host_ip,
-			reachUrl: stored.reach_url || "",
-			holdUntil: stored.hold_until || null,
-		};
 	}
 
 	// ---- the two-way test ------------------------------------------------------------------
@@ -438,6 +436,7 @@ export function createPrivateNetwork(deps) {
 	}
 
 	function writeCleared(value) {
+		if (!privateBench.value) return; // a public bench is untouched, storage included
 		try {
 			storage.set(CLEARED_KEY, value);
 		} catch (e) {
@@ -469,7 +468,6 @@ export function createPrivateNetwork(deps) {
 		useDetected,
 		saveAddress,
 		loadHold,
-		seedHold,
 		runTest,
 		resetTest,
 		dispose,
