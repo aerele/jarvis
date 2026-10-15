@@ -64,3 +64,25 @@ describe("AiModelsPane reconnect intent", () => {
 		expect(store.settingsIntent).toBeNull();
 	});
 });
+
+describe("AiModelsPane connection probe error", () => {
+	const wrap = (message) => JSON.stringify([JSON.stringify({ message })]);
+	const failWith = async (err) => {
+		api.getDirectSubscriptionStatus.mockRejectedValueOnce(err);
+		const w = mountPane();
+		await flushPromises();
+		return w.vm.directSubErr;
+	};
+
+	it("keeps the server's sentence as text, not the raw payload", async () => {
+		const err = { _server_messages: wrap("<b>Plan</b> unavailable") };
+		expect(await failWith(err)).toBe("Plan unavailable");
+	});
+
+	it("prefers the error's own message, and falls back when there is none", async () => {
+		expect(await failWith(new Error("Timed out"))).toBe("Timed out");
+		expect(await failWith({ _server_messages: "not json" })).toBe(
+			"Couldn't load your AI connection."
+		);
+	});
+});
