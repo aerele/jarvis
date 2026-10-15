@@ -27,7 +27,7 @@ vi.hoisted(() => {
 // shell.js pulls in frappe-ui + @/api (a frappe-ui resource tree that does not
 // resolve under vitest). None of it is exercised by these sidebar-state tests.
 vi.mock("frappe-ui", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
-vi.mock("@/api", () => ({ approvalsBadge: vi.fn() }));
+vi.mock("@/api", () => ({ approvalsBadge: vi.fn(), listConversations: vi.fn() }));
 const getReviewAccess = vi.fn();
 vi.mock("@/api/learning", () => ({ getReviewAccess }));
 vi.mock("@/lib/errors", () => ({ errHtml: (e) => String(e) }));
@@ -176,39 +176,175 @@ describe("shell store: reviewer badge (sidebar Skills)", () => {
 	});
 });
 
-describe("shell store: running conversations (#591)", () => {
+describe("shell store: server activity (#591)", () => {
+	const rows = (activity = [{ run_id: "run-b", message_id: "msg-b", state: "streaming" }]) => [
+		{ name: "conv-b", title: "Chat B", activity },
+	];
 	beforeEach(() => {
-		store.runningConvs = new Set();
+		vi.useFakeTimers();
+		store.stopConversationActivity();
+		store.startConversationActivity();
+		store.currentConvId = null;
+		store.activeConversationActivity = null;
+		api.listConversations.mockReset().mockResolvedValue(rows());
+	});
+	afterEach(() => {
+		store.stopConversationActivity();
+		vi.useRealTimers();
 	});
 
-	it("adds and removes chats by replacing the reactive Set", () => {
-		const empty = store.runningConvs;
-		store.markRunning("conv-a");
-		const one = store.runningConvs;
-		expect(one).not.toBe(empty);
-		expect([...one]).toEqual(["conv-a"]);
-		store.markRunning("conv-b");
-		const two = store.runningConvs;
-		expect(two).not.toBe(one);
-		expect([...two]).toEqual(["conv-a", "conv-b"]);
-		store.clearRunning("conv-a");
-		expect(store.runningConvs).not.toBe(two);
-		expect([...store.runningConvs]).toEqual(["conv-b"]);
-		expect([...two]).toEqual(["conv-a", "conv-b"]);
+	it("seeds background activity from a full list load", async () => {
+		await store.loadConversations();
+		expect(store.conversationIndicator("conv-b")?.label).toBe("Replying");
+		expect(api.listConversations).toHaveBeenCalledWith({ refresh: false });
 	});
-
-	it("ignores empty ids and redundant changes without replacing the Set", () => {
-		const empty = store.runningConvs;
-		for (const id of [null, undefined, ""]) {
-			store.markRunning(id);
-			store.clearRunning(id);
-		}
-		store.clearRunning("missing");
-		expect(store.runningConvs).toBe(empty);
-		store.markRunning("conv-a");
-		const one = store.runningConvs;
-		store.markRunning("conv-a");
-		store.clearRunning("missing");
-		expect(store.runningConvs).toBe(one);
+	it("reconciles without prewarm, badge refresh or full row replacement", async () => {
+		await store.loadConversations();
+		const conversations = store.conversations;
+		await store.refreshConversationActivity();
+		expect(api.listConversations).toHaveBeenLastCalledWith({ refresh: true });
+		expect(store.conversations).toBe(conversations);
+	});
+	it("keeps a silent tool and recovery visible beyond three minutes", async () => {
+		await store.refreshConversationActivity();
+		await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
+		expect(store.conversationIndicator("conv-b")?.label).toBe("Replying");
+		api.listConversations.mockResolvedValue(rows([{ run_id: "run-b", state: "recovering" }]));
+		await store.refreshConversationActivity();
+		expect(store.conversationIndicator("conv-b")?.label).toBe("Recovering");
+	});
+	it("retains last known truth on a failed refresh", async () => {
+		await store.refreshConversationActivity();
+		api.listConversations.mockRejectedValue(new Error("offline"));
+		await store.refreshConversationActivity();
+		expect(store.conversationIndicator("conv-b")?.label).toBe("Replying");
+	});
+	it("coalesces event bursts and follows an invalidation during a request", async () => {
+		let release;
+		api.listConversations.mockImplementationOnce(
+			() =>
+				new Promise((r) => {
+					release = r;
+				})
+		);
+		const first = store.refreshConversationActivity();
+		for (let i = 0; i < 20; i++) store.scheduleConversationActivityRefresh();
+		release(rows());
+		await first;
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(api.listConversations).toHaveBeenCalledTimes(2);
+	});
+	it("serializes a full list read and a later refresh so older data cannot win", async () => {
+		let release;
+		api.listConversations
+			.mockImplementationOnce(
+				() =>
+					new Promise((r) => {
+						release = r;
+					})
+			)
+			.mockResolvedValueOnce(rows([]));
+		const first = store.loadConversations();
+		store.refreshConversationActivity();
+		expect(api.listConversations).toHaveBeenCalledTimes(1);
+		release(rows());
+		await first;
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(api.listConversations).toHaveBeenCalledTimes(2);
+		expect(store.conversationIndicator("conv-b")).toBeNull();
+	});
+	it("does not swallow a full list reload behind a background refresh", async () => {
+		let release;
+		api.listConversations
+			.mockImplementationOnce(
+				() =>
+					new Promise((r) => {
+						release = r;
+					})
+			)
+			.mockResolvedValueOnce(rows([]));
+		const refresh = store.refreshConversationActivity();
+		const full = store.loadConversations();
+		release(rows());
+		await refresh;
+		await full;
+		expect(api.listConversations).toHaveBeenCalledTimes(2);
+		expect(api.listConversations).toHaveBeenLastCalledWith({ refresh: false });
+		expect(store.conversations[0].activity).toEqual([]);
+	});
+	it("updates only a changed key and preserves equal activity references", async () => {
+		await store.refreshConversationActivity();
+		const original = store.conversationActivity.get("conv-b");
+		api.listConversations.mockResolvedValue([
+			...rows(),
+			{ name: "conv-c", activity: [{ run_id: "run-c", state: "streaming" }] },
+		]);
+		await store.refreshConversationActivity();
+		expect(store.conversationActivity.get("conv-b")).toBe(original);
+	});
+	it("suppresses Stop immediately, including a stale pre-stop read", async () => {
+		await store.refreshConversationActivity();
+		let release;
+		api.listConversations.mockImplementationOnce(
+			() =>
+				new Promise((r) => {
+					release = r;
+				})
+		);
+		const pending = store.refreshConversationActivity();
+		store.stopConversationRun("conv-b", "run-b", "msg-b");
+		expect(store.conversationIndicator("conv-b")).toBeNull();
+		release(rows([]));
+		await pending;
+		api.listConversations.mockResolvedValue(rows());
+		await store.refreshConversationActivity();
+		expect(store.conversationIndicator("conv-b")).toBeNull();
+	});
+	it("does not let stopping/cancelling one run hide another run", async () => {
+		api.listConversations.mockResolvedValue(
+			rows([
+				{ run_id: "run-b", state: "streaming" },
+				{ run_id: "queued-b", state: "queued" },
+			])
+		);
+		await store.refreshConversationActivity();
+		store.stopConversationRun("conv-b", "queued-b");
+		expect(store.conversationIndicator("conv-b")?.label).toBe("Replying");
+		store.stopConversationRun("conv-b", "run-b");
+		api.listConversations.mockResolvedValue(rows([{ run_id: "new-run", state: "streaming" }]));
+		await store.refreshConversationActivity();
+		expect(store.conversationIndicator("conv-b")?.label).toBe("Replying");
+	});
+	it("suppresses pure legacy work by message identity", async () => {
+		api.listConversations.mockResolvedValue(
+			rows([{ run_id: null, message_id: "legacy-msg", state: "streaming" }])
+		);
+		await store.refreshConversationActivity();
+		store.stopConversationRun("conv-b", "legacy-transport-id", "legacy-msg");
+		expect(store.conversationIndicator("conv-b")).toBeNull();
+	});
+	it("ignores an in-flight response after detach and clears snapshots", async () => {
+		await store.refreshConversationActivity();
+		let release;
+		api.listConversations.mockImplementationOnce(
+			() =>
+				new Promise((r) => {
+					release = r;
+				})
+		);
+		const pending = store.refreshConversationActivity();
+		store.stopConversationActivity();
+		release(rows());
+		await pending;
+		expect(store.conversationActivity.size).toBe(0);
+		expect(store.conversationIndicator("conv-b")).toBeNull();
+	});
+	it("keeps open-chat idle/recovering authoritative over server running", async () => {
+		await store.refreshConversationActivity();
+		store.currentConvId = "conv-b";
+		store.activeConversationActivity = { conversation_id: "conv-b", state: null };
+		expect(store.conversationIndicator("conv-b")).toBeNull();
+		store.activeConversationActivity = { conversation_id: "conv-b", state: "recovering" };
+		expect(store.conversationIndicator("conv-b")?.label).toBe("Recovering");
 	});
 });

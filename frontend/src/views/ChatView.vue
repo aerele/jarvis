@@ -4407,6 +4407,7 @@ import { Button, Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
 import ReportScope from "@/components/chat/ReportScope.vue";
+import { useConversationActivity } from "@/lib/useConversationActivity";
 import { reportToolsByAssistant } from "@/lib/reportScope";
 import { toolRowFromResult, upsertToolRow, withLiveToolRows } from "@/lib/liveToolRows";
 import { collectDocRefs } from "@/lib/docRefs";
@@ -4638,7 +4639,8 @@ const router = useRouter();
 
 // Shared shell state (DESIGN-V3 §4): the sidebar/conversation list lives in
 // the app shell now; ChatView is the only writer of currentConvId /
-// streamingConvId and the only caller of applyRemote* (socket contract DA-04).
+// streamingConvId. The global notifier also applies remote sidebar updates;
+// useConversationActivity mirrors this view's local lifecycle decisions (#591).
 const store = useShellStore();
 
 const currentId = ref(null);
@@ -10088,6 +10090,8 @@ function downloadSvgAsPng(svgEl) {
 // send() bails on sending) because the leaving run's run:end event is dropped
 // by the conversation guard in onEvent.
 function resetRunState() {
+	// Recovery belongs to the conversation being left, never to the next draft.
+	recovering.value = null;
 	// Leaving the conversation: apply whatever is mid-reveal to the rows we are
 	// about to drop, so a reload of this chat cannot find a truncated message.
 	//
@@ -13217,6 +13221,18 @@ watch(
 		}
 	}
 );
+
+useConversationActivity({
+	store,
+	currentId,
+	recovering,
+	queuedTurn,
+	sending,
+	waiting,
+	stoppedRunId,
+	stoppedMsgIds,
+	currentMsgId,
+});
 
 onMounted(async () => {
 	// Latency plan, Phase 1.3: bootstrap calls run concurrently and are

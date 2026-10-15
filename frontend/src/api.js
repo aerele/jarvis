@@ -6,7 +6,8 @@ import { call } from "frappe-ui";
 import { listPageArgs as _page } from "./api/listPageArgs";
 import { HISTORY_PAGE_SIZE } from "./lib/historyPaging.js";
 
-export const listConversations = () => call("jarvis.chat.api.list_conversations");
+export const listConversations = ({ refresh = false } = {}) =>
+	call("jarvis.chat.api.list_conversations", refresh ? { refresh: 1 } : {});
 export const listTools = () => call("jarvis.chat.api.list_tools");
 // The open chat reads its history a page at a time (#715 F13): the newest page, or
 // with {before} the page older than that cursor; {refresh} names held older rows
