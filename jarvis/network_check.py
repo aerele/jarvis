@@ -30,7 +30,9 @@ _NONCE_RE = re.compile(r"[0-9a-f]{64}")
 _PAST_S = 30
 _AHEAD_S = 300
 
-RATE_LIMIT = 60
+# A flood ceiling, not a per-caller quota: behind a gateway every caller (the fleet host and
+# any attacker) shares the gateway's IP, so a low limit would let junk block the real probe.
+RATE_LIMIT = 600
 RATE_WINDOW_S = 60
 
 
@@ -58,7 +60,7 @@ def _rate_limit_key() -> str:
 
 
 def _rate_limited() -> bool:
-	"""60 calls a minute per source IP. Same idiom as ``jarvis.mobile.auth._throttle_pairing``:
+	"""600 well-formed calls a minute per source IP. Same idiom as ``jarvis.mobile.auth._throttle_pairing``:
 	``incr`` and ``ttl`` in one pipeline, and a counter found without a TTL (evicted and
 	recreated by INCR, or left by a crash) is re-armed, so an address can never be blocked
 	forever. Fails open on cache trouble, like ``jarvis._plugin_auth._enforce_rate_limit``:
@@ -98,9 +100,10 @@ def _well_formed(v: Any, cid: Any, nonce: Any, exp: Any) -> bool:
 def answer(v: Any = None, cid: Any = None, nonce: Any = None, exp: Any = None):
 	# ``Any`` on purpose: Frappe's strict-bench check demands annotations, and any narrower
 	# type would coerce input before the shape check below. Refusals stay byte-identical.
-	if _rate_limited():
-		return _refuse()
+	# Shape first, so junk never spends the budget; the limiter still runs before any secret read.
 	if not _well_formed(v, cid, nonce, exp):
+		return _refuse()
+	if _rate_limited():
 		return _refuse()
 	now = _now()
 	if exp < now - _PAST_S or exp > now + _AHEAD_S:

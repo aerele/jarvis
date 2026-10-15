@@ -130,9 +130,24 @@ class TestAnswer(FrappeTestCase):
 	def test_rate_limited_per_ip(self):
 		for _ in range(network_check.RATE_LIMIT):
 			self.assertNotEqual(self._ok(), REFUSED)
-		self.assertEqual(self._ok(), REFUSED)  # the 61st inside the window
+		self.assertEqual(self._ok(), REFUSED)  # one past the limit inside the window
 		frappe.local.request_ip = "198.51.100.10"  # another caller is not affected
 		self.assertNotEqual(self._ok(), REFUSED)
+
+	def test_the_limit_is_a_flood_ceiling_for_a_shared_gateway_ip(self):
+		# Behind a gateway every caller shares one IP, so the limit must sit far above any
+		# real probe rate (documented deviation from the plan's 60 a minute).
+		self.assertEqual(network_check.RATE_LIMIT, 600)
+
+	def test_malformed_requests_do_not_spend_the_budget(self):
+		"""Junk POSTs must not be able to lock out the real probe that shares the IP."""
+		for _ in range(network_check.RATE_LIMIT + 5):
+			self.assertEqual(self._ok(v=2), REFUSED)
+		self.assertNotEqual(self._ok(), REFUSED)
+
+	def test_the_shape_check_runs_before_any_secret_read(self):
+		with patch("jarvis.network_check._api_secret", side_effect=AssertionError("secret read")):
+			self.assertEqual(self._ok(v=2), REFUSED)
 
 	def test_a_cache_failure_does_not_take_the_endpoint_down(self):
 		with patch.object(network_check.frappe, "cache", side_effect=Exception("redis down")):
