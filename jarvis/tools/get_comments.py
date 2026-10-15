@@ -12,6 +12,13 @@ Desk, and nothing more:
 - **Across a DocType** (``name`` omitted): read permission on the DocType, then each
   matching comment is kept only when the caller can read the record it is on
   (checked per record, cached per call). ``search`` / ``since`` narrow the scan.
+- **A set of records** (``filters`` given, not together with ``name``): ``filters`` has
+  the syntax of the get_list tool. The matching records are listed once as the caller
+  (so unreadable ones are left out, as get_list leaves them out), up to
+  ``_MAX_FILTER_RECORDS``; more than that is refused, never cut short. Only the comments
+  on those records are scanned, each still checked against its record as above. The set
+  is listed afresh on every call, so keep ``filters`` unchanged while paging with
+  ``before``. Nothing matching gives an empty page with a ``note``.
 
 Only ``comment_type = "Comment"`` rows are returned (what the Desk timeline shows as
 comments; not likes, assignments or attachment notes). Content is converted from
@@ -21,6 +28,7 @@ HTML to plain text so @mentions read as ``@Name``. Newest first; page with
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import NamedTuple
@@ -46,6 +54,10 @@ _PAGE_TEXT_BUDGET = 24_000
 # gets a bounded call and a cursor to continue from, never an unbounded scan.
 _SCAN_CHUNK = 200
 _MAX_SCANNED = 2_000
+# The most records ``filters`` may match. One bounded IN list on Comment's
+# (reference_doctype, reference_name) index; past it the call fails rather than
+# silently reading a partial set.
+_MAX_FILTER_RECORDS = 1_000
 # A DocType-wide scan also stops after this many seconds, well inside the agent's
 # tool call timeout, and hands back where to continue.
 _TIME_BUDGET_S = 15
@@ -76,6 +88,7 @@ def get_comments(
 	since: str | None = None,
 	before: str | None = None,
 	limit: int | None = None,
+	filters: dict | list | str | None = None,
 ) -> dict:
 	"""Return ``{doctype, name, comments, count, has_more, next_before, note?}``.
 
@@ -83,14 +96,21 @@ def get_comments(
 	edited, text_truncated?}``. ``title`` is the record's title when the DocType
 	has a title field distinct from its name. ``has_more`` with ``next_before``
 	means older matching comments may exist: call again with ``before`` set to
-	``next_before`` exactly as given. ``note`` says when a DocType-wide scan
-	stopped before the page filled.
+	``next_before`` exactly as given. ``note`` says when a scan stopped before the
+	page filled, or that no readable record matched ``filters``. With ``filters``
+	``name`` in the result is None; keep ``filters`` unchanged while paging.
 	"""
 	for arg, value in (("doctype", doctype), ("name", name), ("search", search)):
 		if value is not None and not isinstance(value, str):
 			raise InvalidArgumentError(f"{arg} must be text")
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
+	filters = _normalise_filters(filters)
+	if name and filters:
+		raise InvalidArgumentError(
+			"pass name for one record or filters for a set, not both; for several named "
+			'records use filters={"name": ["in", [...]]}'
+		)
 	if not frappe.db.exists("DocType", doctype):
 		raise InvalidArgumentError(f"unknown DocType: {doctype}")
 	if doctype == "Comment":
@@ -107,16 +127,80 @@ def get_comments(
 	elif not frappe.has_permission(doctype, "read"):
 		raise PermissionDeniedError(f"no read permission on {doctype}")
 
+	names = _resolve_names(doctype, filters) if filters else None
+	if names is not None and not names:
+		return _no_matching_record(doctype)
+
 	scan = _Scan(
 		doctype=doctype,
 		name=name or None,
 		search=search or None,
 		since=_parse_datetime(since, "since") if since else None,
 		cursor=_parse_cursor(before) if before else None,
+		names=names,
 	)
 	result = _collect(scan, limit)
 	_attach_titles(doctype, result["comments"])
 	return {"doctype": doctype, "name": name, **result, "count": len(result["comments"])}
+
+
+_FILTERS_ERROR = (
+	'filters must be an object such as {"status": "Open"} or a list of [field, operator, value] conditions'
+)
+
+
+def _normalise_filters(filters) -> dict | list | None:
+	"""``filters`` as a non-empty dict or list, or None for "no filters" (None, "",
+	{}, []). A JSON string is parsed first. Anything else is refused here, so a bad
+	type never reaches Frappe as a raw error. The content is Frappe's to judge."""
+	if filters is None:
+		return None
+	if isinstance(filters, str):
+		if not filters.strip():
+			return None
+		try:
+			filters = json.loads(filters)
+		except (ValueError, RecursionError):  # deep nesting raises RecursionError
+			raise InvalidArgumentError(_FILTERS_ERROR) from None
+	if not isinstance(filters, dict | list):
+		raise InvalidArgumentError(_FILTERS_ERROR)
+	return filters or None
+
+
+def _resolve_names(doctype: str, filters: dict | list) -> tuple[str, ...]:
+	"""Names of the ``doctype`` records the caller can list that match ``filters``.
+
+	One ``get_list`` as the caller (roles, user permissions, shares and query conditions
+	apply in SQL). DISTINCT, because a child-table filter joins the child and repeats
+	the parent. The order_by is table-qualified: Frappe 15 passes it through as written,
+	so a bare ``name`` is ambiguous once a child filter joins a second table."""
+	names = frappe.get_list(
+		doctype,
+		filters=filters,
+		pluck="name",
+		distinct=True,
+		order_by=f"`tab{doctype}`.`name` asc",
+		limit=_MAX_FILTER_RECORDS + 1,
+	)
+	if len(names) > _MAX_FILTER_RECORDS:
+		raise InvalidArgumentError(
+			f"filters match more than {_MAX_FILTER_RECORDS:,} {doctype} records; narrow the "
+			"filter, or omit filters and use search / since to scan the DocType"
+		)
+	return tuple(dict.fromkeys(names))
+
+
+def _no_matching_record(doctype: str) -> dict:
+	"""The normal empty page, with a note: no record, not records without comments."""
+	return {
+		"doctype": doctype,
+		"name": None,
+		"comments": [],
+		"count": 0,
+		"has_more": False,
+		"next_before": None,
+		"note": f"No {doctype} record you can read matches these filters.",
+	}
 
 
 def _clamp_limit(limit) -> int:
@@ -167,6 +251,7 @@ class _Scan(NamedTuple):
 	search: str | None
 	since: object
 	cursor: tuple | None
+	names: tuple | None = None  # set mode: the resolved records; never empty when set
 
 
 def _chunk(scan: _Scan, cursor: tuple | None) -> list:
@@ -181,6 +266,8 @@ def _chunk(scan: _Scan, cursor: tuple | None) -> list:
 	)
 	if scan.name:
 		q = q.where(c.reference_name == scan.name)
+	if scan.names is not None:
+		q = q.where(c.reference_name.isin(scan.names))
 	if scan.search:
 		q = q.where(c.content.like(f"%{_escape_like(scan.search)}%"))
 	if scan.since:
@@ -203,16 +290,18 @@ def _escape_like(text: str) -> str:
 
 def _collect(scan: _Scan, limit: int) -> dict:
 	"""Walk matching comments newest first; keep the readable ones until the page is
-	full, the text budget is spent, or (DocType-wide) the scan cap or time budget
-	is reached, then hand back where to continue."""
+	full, the text budget is spent, or (DocType-wide or set) the scan cap or time
+	budget is reached, then hand back where to continue."""
 	readable = _Readable(scan.doctype)
+	if scan.names is not None:
+		readable.seed(scan.names)
 	out: list[dict] = []
 	spent = scanned = 0
 	cursor = scan.cursor
 	started = time.monotonic()
 	while True:
 		rows = _chunk(scan, cursor)
-		if not scan.name:
+		if not scan.name and scan.names is None:
 			readable.prefetch([r.reference_name for r in rows])
 		for row in rows:
 			if scan.name or readable.can_read(row.reference_name):
@@ -228,20 +317,21 @@ def _collect(scan: _Scan, limit: int) -> dict:
 			cursor = (row.creation, row.name)
 			scanned += 1
 			if not scan.name and (scanned >= _MAX_SCANNED or time.monotonic() - started > _TIME_BUDGET_S):
-				return _stopped(out, cursor, scanned)
+				return _stopped(out, cursor, scanned, scan.names is not None)
 		if len(rows) < _SCAN_CHUNK:
 			return {"comments": _strip(out), "has_more": False, "next_before": None}
 
 
-def _stopped(out: list, cursor: tuple, scanned: int) -> dict:
-	"""A DocType-wide scan that stopped before the page filled: continue from the
-	last comment looked at, and say so (an empty page is not "none")."""
+def _stopped(out: list, cursor: tuple, scanned: int, for_set: bool) -> dict:
+	"""A scan that stopped before the page filled: continue from the last comment
+	looked at, and say so (an empty page is not "none")."""
+	where = "the matching records" if for_set else "this DocType"
 	return {
 		"comments": _strip(out),
 		"has_more": True,
 		"next_before": f"{cursor[0]}{_CURSOR_SEP}{cursor[1]}",
 		"note": (
-			f"Looked through {scanned} comments on this DocType; more may match. Call again "
+			f"Looked through {scanned} comments on {where}; more may match. Call again "
 			"with before=next_before to continue, or narrow with search / since."
 		),
 	}
@@ -254,7 +344,7 @@ def _strip(out: list) -> list:
 
 
 class _Readable:
-	"""Which records of ``doctype`` the caller can read, for a DocType-wide scan.
+	"""Which records of ``doctype`` the caller can read, for a DocType-wide or set scan.
 
 	One ``get_list`` per chunk of names (role, user-permission, share and query
 	conditions applied in SQL) instead of a document load per record; a name it
@@ -266,6 +356,12 @@ class _Readable:
 	def __init__(self, doctype: str):
 		self.doctype = doctype
 		self.state: dict[str, bool | None] = {}  # None: listed, full check not run yet
+
+	def seed(self, names) -> None:
+		"""Mark records already listed as the caller (a set's resolved names): only
+		the full ``has_permission`` is left, run when one of their comments is shown."""
+		for n in names:
+			self.state[n] = None
 
 	def prefetch(self, names: list) -> None:
 		unknown = sorted({n for n in names if n and n not in self.state})
