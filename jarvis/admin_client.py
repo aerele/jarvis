@@ -624,6 +624,25 @@ def _public_origin(trust_host: bool = False) -> str:
 	return base
 
 
+def _request_origin() -> str:
+	"""``scheme://host[:port]`` of the CURRENT browser request: lowercase, default port dropped,
+	no path. Blank when there is no request or its scheme is not http or https."""
+	from urllib.parse import urlsplit
+
+	request = getattr(frappe.local, "request", None)
+	try:
+		parts = urlsplit(getattr(request, "host_url", "") or "")
+		host, port = (parts.hostname or "").lower(), parts.port
+	except ValueError:
+		return ""
+	if parts.scheme not in ("http", "https") or not host:
+		return ""
+	if ":" in host:
+		host = f"[{host}]"
+	default = 443 if parts.scheme == "https" else 80
+	return f"{parts.scheme}://{host}" + (f":{port}" if port and port != default else "")
+
+
 def _public_host_configured() -> bool:
 	"""True only when this bench has a CONFIGURED public https host. Reads only
 	site_config ``host_name`` (never the request Host header, which is
@@ -778,6 +797,11 @@ def signup(
 			**_client_capabilities(),
 			"private_network": PRIVATE_NETWORK_CAPABILITY,
 		}
+		# Where this customer's staff open the bench: admin returns the browser there after
+		# payment, as the public address is often unreachable from the customer's own network.
+		staff_origin = _request_origin()
+		if staff_origin:
+			body["staff_origin"] = staff_origin
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
 
 

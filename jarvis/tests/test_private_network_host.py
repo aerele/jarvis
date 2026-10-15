@@ -1,6 +1,7 @@
 """admin_client: the Private-mode origin, the widened onboarding host gate and the
 signup body (design spec 5.2, 5.3; contract section 4.2)."""
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
@@ -122,6 +123,35 @@ class TestSignupBody(FrappeTestCase):
 		self.assertEqual(body["client_capabilities"]["private_network"], "v1")
 		self.assertEqual(body["client_capabilities"]["pay_page"], admin_client.PAY_PAGE_CAPABILITY)
 		self.assertEqual(body["frappe_site_url"], PUBLIC)
+
+	def _staff_origin(self, host_url, mode="Private"):
+		request = (
+			SimpleNamespace(host_url=host_url, host=host_url.split("/")[2], headers={})
+			if host_url is not None
+			else None
+		)
+		with patch.object(frappe.local, "request", request, create=True), _private(mode=mode):
+			return self._signup()
+
+	def test_private_signup_sends_the_staff_origin_of_the_request(self):
+		body = self._staff_origin("http://erp.office.local:8000/api/method/x")
+		self.assertEqual(body["staff_origin"], "http://erp.office.local:8000")
+
+	def test_the_staff_origin_is_lowercase_and_drops_the_default_port(self):
+		body = self._staff_origin("https://ERP.Office.Local:443/")
+		self.assertEqual(body["staff_origin"], "https://erp.office.local")
+		body = self._staff_origin("http://erp.office.local:80/")
+		self.assertEqual(body["staff_origin"], "http://erp.office.local")
+
+	def test_the_staff_origin_is_absent_without_a_request(self):
+		self.assertNotIn("staff_origin", self._staff_origin(None))
+
+	def test_the_staff_origin_is_absent_for_a_non_http_scheme(self):
+		self.assertNotIn("staff_origin", self._staff_origin("ftp://erp.office.local/"))
+
+	def test_the_staff_origin_is_never_sent_in_public_mode(self):
+		body = self._staff_origin("http://erp.office.local:8000/", mode="")
+		self.assertNotIn("staff_origin", body)
 
 	def test_the_capability_constant_is_exact(self):
 		self.assertEqual(admin_client.PRIVATE_NETWORK_CAPABILITY, "v1")
