@@ -30,7 +30,7 @@
 
 import { reactive, computed } from "vue";
 
-import { adminCheckState, refusalOf, testPassed, validateAddress } from "./privateNetwork.js";
+import { HOLD_UNAVAILABLE, adminCheckState, refusalOf, testPassed, validateAddress } from "./privateNetwork.js";
 
 // Admin turns a lost job into Unreachable/timeout at 60 s; 45 polls at 2 s is the backstop.
 const POLL_MS = 2000;
@@ -254,9 +254,15 @@ export function createPrivateNetwork(deps) {
 				return false;
 			}
 			// `cached: true` is a normal hold.
-			const next = { hostIp: r.host_ip || "", reachUrl: r.reach_url || "", holdUntil: r.hold_until || null };
+			if (!r.host_ip) {
+				// A blank hold is no hold: keep the one we had (if any) and show the
+				// "couldn't set aside a server / contact support" state.
+				state.holdErr = HOLD_UNAVAILABLE.title;
+				return false;
+			}
+			const next = { hostIp: r.host_ip, reachUrl: r.reach_url || "", holdUntil: r.hold_until || null };
 			const prev = state.hold;
-			if (prev && prev.hostIp && next.hostIp && prev.hostIp !== next.hostIp) {
+			if (prev && prev.hostIp && prev.hostIp !== next.hostIp) {
 				// The rules the customer set up named the old address: nothing about the
 				// previous results holds any more.
 				state.holdEnded = { oldIp: prev.hostIp, newIp: next.hostIp };
@@ -300,10 +306,13 @@ export function createPrivateNetwork(deps) {
 		const refusal = refusalOf(started);
 		if (refusal || !started.ok) {
 			resetTest();
+			const again = run;
 			if (refusal && refusal.code === "PRIVATE_HOLD_UNAVAILABLE") {
 				// The hold ended while the customer was away. Re-reserve; a different host raises
 				// the hold-ended banner (loadHold), the same host just needs another click.
-				if (!(await loadHold())) {
+				const reserved = await loadHold();
+				if (again !== run) return; // a newer test (or a reset) took over while we waited
+				if (!reserved) {
 					state.test.err = state.holdErr;
 				} else if (!state.holdEnded) {
 					state.test.err = "We’ve set your server aside again. Test the connection once more.";

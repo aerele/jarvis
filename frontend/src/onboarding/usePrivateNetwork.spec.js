@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 
 import { createPrivateNetwork } from "@/onboarding/usePrivateNetwork";
-import { GENERIC_REFUSAL } from "@/onboarding/privateNetwork";
+import { GENERIC_REFUSAL, HOLD_UNAVAILABLE } from "@/onboarding/privateNetwork";
 
 const HOLD = {
 	ok: true,
@@ -584,13 +584,36 @@ describe("fix round 1", () => {
 		expect(net.state.test.phase).toBe("testing");
 	});
 
-	it("an empty host_ip does not raise hold-ended", async () => {
+	it("a blank ok reserve keeps the previous hold, raises no hold-ended, and says contact support", async () => {
 		const reserveHost = vi.fn().mockResolvedValueOnce({ ...HOLD }).mockResolvedValueOnce({ ...HOLD, host_ip: "" });
 		const { net } = make({ reserveHost });
 		await net.loadHold();
-		await net.loadHold();
+		expect(await net.loadHold()).toBe(false);
 		expect(net.state.holdEnded).toBeNull();
-		expect(net.state.hold.hostIp).toBe("");
+		expect(net.state.hold.hostIp).toBe("198.51.100.27");
+		expect(net.state.holdErr).toBe(HOLD_UNAVAILABLE.title);
+	});
+
+	it("a test started during the re-reserve keeps its own state (no stale err from the first run)", async () => {
+		let release;
+		const reserveHost = vi
+			.fn()
+			.mockResolvedValueOnce({ ...HOLD })
+			.mockImplementationOnce(() => new Promise((r) => (release = r)));
+		const startConnectionTest = vi
+			.fn()
+			.mockResolvedValueOnce({ ok: false, code: "PRIVATE_HOLD_UNAVAILABLE", message: "x" })
+			.mockResolvedValueOnce({ ok: true, check: "JCC-B", outbound: { ok: true, reason: "ok" } });
+		const { net } = make({ reserveHost, startConnectionTest });
+		await net.loadHold();
+		const a = net.runTest();
+		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+		await net.runTest(); // B, while A's re-reserve is in flight
+		release({ ...HOLD });
+		await a;
+		expect(net.state.test.err).toBe("");
+		expect(net.state.test.check).toBe("JCC-B");
+		expect(net.testsPassed.value).toBe(true);
 	});
 
 	it("every poll throwing ends with a connection-lost error, not Unreachable", async () => {
