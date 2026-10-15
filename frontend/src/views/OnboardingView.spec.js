@@ -2452,6 +2452,16 @@ describe("private network: allow the held server, then test, then pay", () => {
 		expect(w.vm.pendingPollStuck).toBe(false);
 	});
 
+	it("the checking-server window itself never starts the provider poll", async () => {
+		vi.useFakeTimers();
+		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
+		api.reserveHost.mockImplementationOnce(() => new Promise(() => {}));
+		const w = await atAllowServer();
+		expect(w.text()).toContain("Checking your server");
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+	});
+
 	it("a lost cleared flag does not show the screen to a customer returning from checkout", async () => {
 		window.sessionStorage.setItem("jvpriv:cleared", "");
 		const w = await atAllowServer();
