@@ -155,9 +155,9 @@ import { errMessage, escapeHtml } from "@/lib/errors";
 
 // The same pause as the tab's own search.
 const SEARCH_WAIT_MS = 300;
-// What the server's refusal for a skill that changed hands says ("changed hands since
-// the list was loaded. Reload and try again.").
-const CHANGED = /\b(changed|reload)\b/i;
+// The server's refusal for a skill that changed hands, by its exception class: the
+// message is free text (a skill may be named "changed"), so it is never read for this.
+const OWNER_CHANGED = "SkillOwnerChangedError";
 // The framework's answer when the method does not exist: the server runs a release
 // from before skill hand overs (this SPA is newer than the app on the site).
 const NOT_UPDATED =
@@ -193,6 +193,8 @@ const loadError = ref("");
 const chosen = ref(null);
 // The signed-in user as a target, once the server has listed them.
 const me = ref(null);
+// How many skills one person may own, as the server says (null until it does).
+const cap = ref(null);
 const saving = ref(false);
 const error = ref("");
 // The refusal in `error` is the one for a changed owner: Reload is offered.
@@ -210,7 +212,10 @@ function userLabel(u) {
 // Why a user cannot be picked, or "" when they can. The server checks again.
 function unavailable(u) {
 	if (u.user === props.owner) return "is already its owner";
-	if (u.at_cap) return "has 25 skills already";
+	if (u.at_cap)
+		return cap.value
+			? `has ${cap.value} skills already`
+			: "has the most skills one person may";
 	return "";
 }
 // Unique per dialog, for the reasons' ids.
@@ -247,6 +252,7 @@ async function load() {
 		if (mine !== latest) return;
 		targets.value = Array.isArray(res.targets) ? res.targets : [];
 		more.value = !!res.more;
+		cap.value = Number.isInteger(res.cap) ? res.cap : cap.value;
 		loadError.value = "";
 		me.value = targets.value.find((u) => u.user === session.user) || me.value;
 		// A choice the new results no longer show is no choice, except the shortcut's.
@@ -340,7 +346,7 @@ async function save() {
 		show.value = false;
 	} catch (e) {
 		error.value = errorText(e, "Could not hand the skill over.");
-		changed.value = CHANGED.test(error.value);
+		changed.value = !!e && e.exc_type === OWNER_CHANGED;
 		emit("failed", { name: props.name, message: error.value, changed: changed.value });
 	} finally {
 		saving.value = false;
