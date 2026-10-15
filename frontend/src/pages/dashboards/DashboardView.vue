@@ -11,6 +11,13 @@
 			</template>
 			<template #right-header>
 				<template v-if="detail">
+					<Button
+						label="Refresh"
+						iconLeft="refresh-cw"
+						:loading="canvas?.loading"
+						:disabled="loading || !canvas || exporting || canvas?.loading"
+						@click="refreshData"
+					/>
 					<Dropdown v-if="moreOptions.length" :options="moreOptions">
 						<!-- label → aria-label on icon-only buttons (frappe-ui) -->
 						<Button icon="more-horizontal" variant="ghost" label="Dashboard actions" />
@@ -286,6 +293,12 @@ async function load() {
 	} finally {
 		loading.value = false;
 	}
+}
+
+function refreshData() {
+	if (!canvas.value || canvas.value.loading || exporting.value) return;
+	filterErrors.value = {};
+	canvas.value.rebuild();
 }
 
 function goBack() {
