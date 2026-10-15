@@ -1062,6 +1062,8 @@ def _stamp_decision(req, reviewer: str, approved: bool, note: str) -> None:
 	req.reviewer = reviewer
 	req.decided_at = frappe.utils.now_datetime()
 	req.decision_note = (note or "").strip()[:140] or None
+	# The source skill may be gone by now; a dangling Link must not block the decision.
+	req.flags.ignore_links = True
 	req.save(ignore_permissions=True)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- decision survives later failure
 
@@ -1224,6 +1226,8 @@ def _materialize_promotion(req, roles=None) -> dict:
 	reviewers by the controller guard. Called INSIDE the catalog-wide lock held by
 	:func:`decide_skill_promotion`. Returns ``{skill, materialized, push_projection?}``
 	folded into the decision result."""
+	if not frappe.db.exists(SKILL, req.skill):
+		frappe.throw(_("The source skill was deleted. Reject this request."))
 	src = frappe.get_doc(SKILL, req.skill)
 	live = (src.scope or "Org").strip() or "Org"
 	if live == "Personal":

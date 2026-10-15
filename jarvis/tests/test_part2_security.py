@@ -355,6 +355,34 @@ class TestSkillPromotionWorkflow(Part2Base):
 			with self.assertRaises(frappe.PermissionError):
 				custom_skills_api.decide_skill_promotion(req["request"], 1)
 
+	def _request_then_delete_source(self, slug):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-{slug}", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		# Deleted outside the owner's endpoint (Desk, REST, the learning compiler).
+		frappe.delete_doc(SKILL, skill.name, force=True, ignore_permissions=True)
+		return req["request"]
+
+	def test_reject_closes_a_request_whose_skill_was_deleted(self):
+		from jarvis.chat import custom_skills_api
+
+		request = self._request_then_delete_source("gone-reject")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(request, 0, note="gone")
+		self.assertTrue(out["ok"])
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, request, "status"), "Rejected")
+
+	def test_approve_of_a_request_whose_skill_was_deleted_says_so(self):
+		from jarvis.chat import custom_skills_api
+
+		request = self._request_then_delete_source("gone-approve")
+		with _as(REVIEWER):
+			with self.assertRaisesRegex(frappe.ValidationError, "The source skill was deleted"):
+				custom_skills_api.decide_skill_promotion(request, 1)
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, request, "status"), "Pending")
+
 	def test_reviewer_discovers_pending_requests(self):
 		# TASK D: a reviewer-only user must be able to SEE pending requests (the
 		# doctype perms are owner-scoped, so a reviewer needs the gated list
