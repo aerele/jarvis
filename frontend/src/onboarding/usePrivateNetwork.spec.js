@@ -456,6 +456,7 @@ describe("controller rulings", () => {
 		const { net, api } = make({}, { hostOk: true });
 		await net.loadStatus();
 		await net.continueFromChoice();
+		await net.loadTargets();
 		await net.runAdminCheck();
 		net.state.draft = "https://erp.example.com";
 		expect(await net.saveAddress()).toBe(false);
@@ -549,5 +550,67 @@ describe("controller rulings", () => {
 		await net.runTest();
 		expect(api.networkStatus).toHaveBeenCalledTimes(1);
 		expect(api.checkAdminConnection).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("fix round 1", () => {
+	it("reset then rerun mid-poll: only the new test's results land", async () => {
+		const gates = [];
+		const checks = ["JCC-A", "JCC-B"];
+		const startConnectionTest = vi.fn(async () => ({ ok: true, check: checks.shift(), outbound: { ok: true, reason: "ok" } }));
+		const connectionTestStatus = vi.fn((check) => new Promise((r) => gates.push([check, r])));
+		const { net } = make({ startConnectionTest, connectionTestStatus });
+		const a = net.runTest();
+		await vi.waitFor(() => expect(gates.length).toBe(1));
+		net.resetTest();
+		const b = net.runTest();
+		await vi.waitFor(() => expect(gates.length).toBe(2));
+		gates[0][1]({ ok: true, status: "Verified", reason: "ok" }); // A answers late
+		await a;
+		expect(net.state.test.phase).toBe("testing");
+		expect(net.testsPassed.value).toBe(false);
+		gates[1][1]({ ok: true, status: "Unreachable", reason: "timeout" });
+		await b;
+		expect(net.state.test.check).toBe("JCC-B");
+		expect(net.state.test.inbound).toEqual({ status: "Unreachable", reason: "timeout" });
+	});
+
+	it("dispose ends the poll: no further status calls", async () => {
+		let n = 0;
+		const connectionTestStatus = vi.fn(async () => ({ ok: true, status: "Checking", reason: "" }));
+		const { net } = make({ connectionTestStatus }, { sleep: async () => { if (++n === 2) net.dispose(); } });
+		await net.runTest();
+		expect(connectionTestStatus).toHaveBeenCalledTimes(2);
+		expect(net.state.test.phase).toBe("testing");
+	});
+
+	it("an empty host_ip does not raise hold-ended", async () => {
+		const reserveHost = vi.fn().mockResolvedValueOnce({ ...HOLD }).mockResolvedValueOnce({ ...HOLD, host_ip: "" });
+		const { net } = make({ reserveHost });
+		await net.loadHold();
+		await net.loadHold();
+		expect(net.state.holdEnded).toBeNull();
+		expect(net.state.hold.hostIp).toBe("");
+	});
+
+	it("every poll throwing ends with a connection-lost error, not Unreachable", async () => {
+		const { net } = make({ connectionTestStatus: vi.fn(async () => { throw new Error("offline"); }) });
+		await net.runTest();
+		expect(net.state.test.phase).toBe("idle");
+		expect(net.state.test.err).toMatch(/lost the connection/);
+		expect(net.state.test.inbound).toBeNull();
+	});
+
+	it("a rate-limited poll waits retry_after_seconds and keeps polling the same check", async () => {
+		const connectionTestStatus = vi
+			.fn()
+			.mockResolvedValueOnce({ ok: false, code: "RATE_LIMITED_PRIVATE_NETWORK", message: "Slow.", retry_after_seconds: 5 })
+			.mockResolvedValueOnce({ ok: true, status: "Verified", reason: "ok" });
+		const sleep = vi.fn(async () => {});
+		const { net } = make({ connectionTestStatus }, { sleep });
+		await net.runTest();
+		expect(sleep).toHaveBeenCalledWith(5000);
+		expect(connectionTestStatus).toHaveBeenNthCalledWith(2, "JCC-000123");
+		expect(net.testsPassed.value).toBe(true);
 	});
 });

@@ -15,8 +15,18 @@
 // - network_status and check_admin_connection are never polled on a timer: each failed probe
 //   writes a server Error Log row. They run on a customer action or step entry only. The one
 //   loop is the test-result poll, which reads a stored result.
+// - The test-result poll carries a run token: resetTest() and dispose() end any poll in flight,
+//   so a stale loop can never write into a newer test or release checkout.
 // - Checkout stays held (holdsCheckout) until markCleared, which the view calls only after
 //   both halves of the test passed and the customer pressed "Continue to payment".
+//
+// For the views (extras beyond the state list in the plan):
+// - state.adminCheckMessage: admin's own sentence from the last runAdminCheck (the busy or
+//   switched-off wording), "" otherwise. Show it instead of default copy when set.
+// - state.test.retryAfter: seconds from a RATE_LIMITED_PRIVATE_NETWORK refusal (0 when none),
+//   alongside state.test.err.
+// - dispose(): call when the view unmounts; it ends any running test poll (no further
+//   connectionTestStatus calls). resetTest() does the same for the poll it replaces.
 
 import { reactive, computed } from "vue";
 
@@ -25,6 +35,9 @@ import { adminCheckState, refusalOf, testPassed, validateAddress } from "./priva
 // Admin turns a lost job into Unreachable/timeout at 60 s; 45 polls at 2 s is the backstop.
 const POLL_MS = 2000;
 const POLL_MAX = 45;
+const POLL_BUDGET_MS = POLL_MS * POLL_MAX;
+const RATE_LIMIT_WAIT_CAP_S = 30;
+const CONNECTION_LOST = "We lost the connection while testing. Check your internet and try again.";
 
 const freshTest = () => ({
 	phase: "idle",
@@ -58,6 +71,7 @@ export function createPrivateNetwork(deps) {
 	}
 
 	let holdInFlight = null;
+	let run = 0; // test generation: bumped by resetTest() and dispose()
 
 	const state = reactive({
 		hostOk,
@@ -133,6 +147,7 @@ export function createPrivateNetwork(deps) {
 	}
 
 	async function loadTargets() {
+		if (!privateBench.value) return;
 		state.targetsLoading = true;
 		state.targetsErr = "";
 		try {
@@ -209,7 +224,12 @@ export function createPrivateNetwork(deps) {
 
 	// ---- held server -----------------------------------------------------------------------
 	function resetTest() {
+		run++;
 		state.test = freshTest();
+	}
+
+	function dispose() {
+		run++;
 	}
 
 	// Refreshes the hold. Entering AllowServer and the Connect panel call this even when a hold
@@ -236,7 +256,7 @@ export function createPrivateNetwork(deps) {
 			// `cached: true` is a normal hold.
 			const next = { hostIp: r.host_ip || "", reachUrl: r.reach_url || "", holdUntil: r.hold_until || null };
 			const prev = state.hold;
-			if (prev && prev.hostIp && prev.hostIp !== next.hostIp) {
+			if (prev && prev.hostIp && next.hostIp && prev.hostIp !== next.hostIp) {
 				// The rules the customer set up named the old address: nothing about the
 				// previous results holds any more.
 				state.holdEnded = { oldIp: prev.hostIp, newIp: next.hostIp };
@@ -267,6 +287,8 @@ export function createPrivateNetwork(deps) {
 	async function runTest() {
 		if (!privateBench.value || state.test.phase === "testing") return;
 		state.holdEnded = null;
+		resetTest(); // bumps the generation: this run owns the token from here
+		const mine = run;
 		state.test = { ...freshTest(), phase: "testing", inbound: { status: "Checking", reason: "" } };
 		let started;
 		try {
@@ -274,6 +296,7 @@ export function createPrivateNetwork(deps) {
 		} catch (e) {
 			started = {};
 		}
+		if (mine !== run) return;
 		const refusal = refusalOf(started);
 		if (refusal || !started.ok) {
 			resetTest();
@@ -293,14 +316,31 @@ export function createPrivateNetwork(deps) {
 		}
 		state.test.check = started.check;
 		state.test.outbound = started.outbound || { ok: false, reason: "bad_target" };
-		for (let i = 0; i < POLL_MAX; i++) {
+		await pollResult(mine, started.check);
+	}
+
+	// Polls a stored result within one time budget. Every await is followed by the token check.
+	async function pollResult(mine, check) {
+		let spent = 0;
+		let answered = false; // at least one poll got a reply (so the bench was reachable)
+		while (spent < POLL_BUDGET_MS) {
 			let r = null;
 			try {
-				r = (await api.connectionTestStatus(started.check)) || {};
+				r = (await api.connectionTestStatus(check)) || {};
 			} catch (e) {
 				r = null; // a blip: ask again
 			}
+			if (mine !== run) return;
+			if (r) answered = true;
 			const stop = refusalOf(r);
+			if (stop && stop.code === "RATE_LIMITED_PRIVATE_NETWORK" && stop.retryAfterSeconds) {
+				// Wait as long as asked, then carry on with the same check.
+				const wait = Math.min(stop.retryAfterSeconds, RATE_LIMIT_WAIT_CAP_S) * 1000;
+				spent += wait;
+				await sleep(wait);
+				if (mine !== run) return;
+				continue;
+			}
 			if (stop) {
 				resetTest();
 				state.test.err = stop.message;
@@ -312,7 +352,15 @@ export function createPrivateNetwork(deps) {
 				state.test.phase = "done";
 				return;
 			}
+			spent += POLL_MS;
 			await sleep(POLL_MS);
+			if (mine !== run) return;
+		}
+		if (!answered) {
+			// Every poll failed in transit: that says nothing about the customer's server.
+			resetTest();
+			state.test.err = CONNECTION_LOST;
+			return;
 		}
 		state.test.inbound = { status: "Unreachable", reason: "timeout" };
 		state.test.phase = "done";
@@ -347,6 +395,7 @@ export function createPrivateNetwork(deps) {
 		seedHold,
 		runTest,
 		resetTest,
+		dispose,
 		markCleared,
 	};
 }
