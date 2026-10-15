@@ -625,22 +625,28 @@ def _public_origin(trust_host: bool = False) -> str:
 
 
 def _request_origin() -> str:
-	"""``scheme://host[:port]`` of the CURRENT browser request: lowercase, default port dropped,
-	no path. Blank when there is no request or its scheme is not http or https."""
+	"""``scheme://host[:port]`` of the CURRENT browser request, as Frappe's own
+	``get_host_name_from_request`` reads it: the first ``X-Forwarded-Proto`` token when it is
+	http or https, else the request scheme; the request host. Lowercase, user info and default
+	port dropped, no path. Blank when there is no request or the scheme is not http or https."""
 	from urllib.parse import urlsplit
 
 	request = getattr(frappe.local, "request", None)
+	if request is None:
+		return ""
+	forwarded = (frappe.get_request_header("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+	scheme = forwarded if forwarded in ("http", "https") else (request.scheme or "").lower()
 	try:
-		parts = urlsplit(getattr(request, "host_url", "") or "")
+		parts = urlsplit(f"{scheme}://{request.host or ''}")
 		host, port = (parts.hostname or "").lower(), parts.port
 	except ValueError:
 		return ""
-	if parts.scheme not in ("http", "https") or not host:
+	if scheme not in ("http", "https") or not host:
 		return ""
 	if ":" in host:
 		host = f"[{host}]"
-	default = 443 if parts.scheme == "https" else 80
-	return f"{parts.scheme}://{host}" + (f":{port}" if port and port != default else "")
+	default = 443 if scheme == "https" else 80
+	return f"{scheme}://{host}" + (f":{port}" if port and port != default else "")
 
 
 def _public_host_configured() -> bool:

@@ -32,7 +32,11 @@ class TestPrivateOrigin(FrappeTestCase):
 	def test_private_mode_with_an_invalid_address_falls_back(self):
 		with (
 			_private(address="http://nope.example.com"),
-			patch.dict(frappe.conf, {"host_name": "https://tenant.example.com"}, clear=False),
+			patch.dict(
+				frappe.conf,
+				{"host_name": "https://tenant.example.com", "jarvis_private_network_test_mode": 0},
+				clear=False,
+			),
 		):
 			self.assertEqual(admin_client._public_origin(), "https://tenant.example.com")
 
@@ -124,14 +128,20 @@ class TestSignupBody(FrappeTestCase):
 		self.assertEqual(body["client_capabilities"]["pay_page"], admin_client.PAY_PAGE_CAPABILITY)
 		self.assertEqual(body["frappe_site_url"], PUBLIC)
 
-	def _staff_origin(self, host_url, mode="Private"):
-		request = (
-			SimpleNamespace(host_url=host_url, host=host_url.split("/")[2], headers={})
-			if host_url is not None
-			else None
-		)
+	def _staff_origin(self, url, mode="Private", proto=None):
+		request = None
+		if url is not None:
+			scheme, _, rest = url.partition("://")
+			headers = {"X-Forwarded-Proto": proto} if proto else {}
+			request = SimpleNamespace(scheme=scheme, host=rest.split("/")[0], headers=headers)
 		with patch.object(frappe.local, "request", request, create=True), _private(mode=mode):
 			return self._signup()
+
+	def test_the_staff_origin_follows_x_forwarded_proto(self):
+		body = self._staff_origin("http://erp.office.local/", proto="https, http")
+		self.assertEqual(body["staff_origin"], "https://erp.office.local")
+		body = self._staff_origin("https://erp.office.local/", proto="gopher")
+		self.assertEqual(body["staff_origin"], "https://erp.office.local")
 
 	def test_private_signup_sends_the_staff_origin_of_the_request(self):
 		body = self._staff_origin("http://erp.office.local:8000/api/method/x")

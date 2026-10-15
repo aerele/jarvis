@@ -274,7 +274,8 @@ const mkRow = (direction, from, fromMono, to, toMono, toNote, port) => ({
 
 /** AllowAdmin: one outbound rule per Jarvis setup server address. */
 export function adminRuleRows({ ips, host, port = 443, scheme = "https" }) {
-	const adminPort = `TCP ${port}${scheme === "http" ? " (HTTP)" : " (HTTPS)"}`;
+	const portNumber = Number.isInteger(port) && port > 0 ? port : scheme === "http" ? 80 : 443;
+	const adminPort = `TCP ${portNumber}${scheme === "http" ? " (HTTP)" : " (HTTPS)"}`;
 	const list = Array.isArray(ips) ? ips.filter(Boolean) : [];
 	if (list.length) {
 		return list.map((ip) =>

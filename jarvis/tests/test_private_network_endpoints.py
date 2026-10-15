@@ -26,6 +26,7 @@ class _AdminUser(FrappeTestCase):
 class TestNetworkStatus(_AdminUser):
 	def test_a_public_bench_is_not_probed(self):
 		with (
+			patch.dict(frappe.conf, {"jarvis_private_network_test_mode": 0}, clear=False),
 			patch.object(admin_client, "_public_host_configured", return_value=True),
 			patch.object(admin_client, "private_public_address", return_value=""),
 			patch.object(admin_client, "private_setup_info", side_effect=AssertionError("probed")),
@@ -200,6 +201,23 @@ class TestSavePublicAddress(_AdminUser):
 		patcher = patch.object(admin_client, "_public_host_configured", return_value=False)
 		patcher.start()
 		self.addCleanup(patcher.stop)
+		# Hermetic on any dev site: test mode off and no recorded signup or credentials.
+		conf = patch.dict(frappe.conf, {"jarvis_private_network_test_mode": 0}, clear=False)
+		conf.start()
+		self.addCleanup(conf.stop)
+		self._lock_scenario(recorded="", creds=False)
+
+	def _lock_scenario(self, *, recorded, creds):
+		from jarvis import onboarding, onboarding_contract
+
+		saved = onboarding_contract.load()
+		self.addCleanup(onboarding_contract.save, saved)
+		onboarding_contract.save({})
+		if recorded:
+			onboarding_contract.record_signup_address(recorded)
+		patcher = patch.object(onboarding, "_has_admin_credentials", return_value=creds)
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
 	def test_a_good_address_sets_private_mode_in_canonical_form(self):
 		out = private_network.save_public_address("HTTPS://Erp.Example.com/")
@@ -223,18 +241,6 @@ class TestSavePublicAddress(_AdminUser):
 		self.assertEqual(out["code"], "PRIVATE_ADDRESS_INVALID")
 		self.assertEqual(out["message"], "Use an https:// address. Plain HTTP is not allowed.")
 		self.assertEqual((_read("network_mode"), _read("public_address")), before)
-
-	def _lock_scenario(self, *, recorded, creds):
-		from jarvis import onboarding, onboarding_contract
-
-		saved = onboarding_contract.load()
-		self.addCleanup(onboarding_contract.save, saved)
-		onboarding_contract.save({})
-		if recorded:
-			onboarding_contract.record_signup_address(recorded)
-		patcher = patch.object(onboarding, "_has_admin_credentials", return_value=creds)
-		patcher.start()
-		self.addCleanup(patcher.stop)
 
 	def test_a_different_address_after_signup_is_locked(self):
 		self._lock_scenario(recorded="https://erp.example.com", creds=True)

@@ -629,3 +629,14 @@ test("describeServerTest: the failure copy names the port of each address", () =
 	});
 	assert.match(local.banner.text, /allow TCP 8000 from/);
 });
+
+test("adminRuleRows: a null or non-numeric port falls back to the scheme default", () => {
+	assert.equal(
+		adminRuleRows({ ips: ["1.2.3.4"], host: "h", port: null })[0].port,
+		"TCP 443 (HTTPS)"
+	);
+	assert.equal(
+		adminRuleRows({ ips: ["1.2.3.4"], host: "h", port: "x", scheme: "http" })[0].port,
+		"TCP 80 (HTTP)"
+	);
+});
