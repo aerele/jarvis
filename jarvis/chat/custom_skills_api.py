@@ -1053,15 +1053,22 @@ def _refuse_held(skill: str, *, for_update: bool = False) -> None:
 		)
 
 
-def _stamp_decision(req, reviewer: str, approved: bool, note: str) -> None:
+def _stamp_decision(
+	req, reviewer: str, approved: bool, note: str, *, skip_link_validation: bool = False
+) -> None:
 	"""Write the terminal decision fields and commit. Shared by the approve and
 	reject branches of :func:`decide_skill_promotion`; the approve branch calls it
 	INSIDE the slug lock so the commit that publishes the shared copy happens while
-	the lock is still held (R2-SP-3a)."""
+	the lock is still held (R2-SP-3a).
+
+	``skip_link_validation``: the caller has confirmed the request's skill is gone, so
+	its ``skill`` Link dangles and a plain save would raise LinkValidationError."""
 	req.status = "Approved" if approved else "Rejected"
 	req.reviewer = reviewer
 	req.decided_at = frappe.utils.now_datetime()
 	req.decision_note = (note or "").strip()[:140] or None
+	if skip_link_validation:
+		req.flags.ignore_links = True
 	req.save(ignore_permissions=True)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- decision survives later failure
 
@@ -1123,7 +1130,10 @@ def decide_skill_promotion(
 
 	out: dict = {"ok": True, "status": "Approved" if approved else "Rejected"}
 	if not approved:
-		_stamp_decision(req, reviewer, False, note)
+		# A skill deleted after the request (a delete leaves its requests as history)
+		# must not keep the request Pending: the reviewer only acknowledges it is gone.
+		skill_deleted = not frappe.db.exists(SKILL, req.skill)
+		_stamp_decision(req, reviewer, False, note, skip_link_validation=skill_deleted)
 		return out
 
 	# Multi-role reviewer trim: the reviewer may NARROW a Role promotion to a SUBSET
@@ -1224,6 +1234,9 @@ def _materialize_promotion(req, roles=None) -> dict:
 	reviewers by the controller guard. Called INSIDE the catalog-wide lock held by
 	:func:`decide_skill_promotion`. Returns ``{skill, materialized, push_projection?}``
 	folded into the decision result."""
+	# A delete leaves its requests behind: say so plainly, not as a DoesNotExistError.
+	if not frappe.db.exists(SKILL, req.skill):
+		frappe.throw(_("The source skill was deleted. Reject this request."))
 	src = frappe.get_doc(SKILL, req.skill)
 	live = (src.scope or "Org").strip() or "Org"
 	if live == "Personal":
