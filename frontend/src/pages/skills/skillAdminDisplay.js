@@ -56,6 +56,7 @@ const VERBS = {
 	release: "Released",
 	delete: "Deleted",
 	handover: "Handed over",
+	edit: "Edited by a skill reviewer",
 };
 // A hand over says to whom, when the history row carries the new owner.
 export function verbText(verb, newOwner = "") {
