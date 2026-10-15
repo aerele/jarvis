@@ -11,13 +11,6 @@
 			</template>
 			<template #right-header>
 				<template v-if="detail">
-					<Button
-						label="Refresh"
-						iconLeft="refresh-cw"
-						:loading="canvas?.loading"
-						:disabled="loading || !canvas || exporting || canvas?.loading"
-						@click="refreshData"
-					/>
 					<Dropdown v-if="moreOptions.length" :options="moreOptions">
 						<!-- label → aria-label on icon-only buttons (frappe-ui) -->
 						<Button icon="more-horizontal" variant="ghost" label="Dashboard actions" />
@@ -124,6 +117,14 @@
 					label="Everyone"
 				/>
 				<Badge v-else variant="subtle" theme="gray" label="Private" />
+				<Button
+					class="ml-auto"
+					label="Refresh"
+					iconLeft="refresh-cw"
+					:loading="canvas?.loading"
+					:disabled="!canvas || exporting || canvas?.loading"
+					@click="refreshData"
+				/>
 			</div>
 			<p v-if="detail.description" class="px-5 pt-1 text-p-sm text-ink-gray-6">
 				{{ detail.description }}
