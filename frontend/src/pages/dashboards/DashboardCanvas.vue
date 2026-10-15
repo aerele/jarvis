@@ -311,7 +311,7 @@ async function exportAs(format, title) {
 // iframe keeps loading while `display:none`, so charts initialise against a
 // 0x0 container and ECharts does not self-heal when it reappears. The builder
 // page re-drives it when the canvas becomes visible again.
-defineExpose({ exportAs, rebuild });
+defineExpose({ exportAs, rebuild, loading });
 
 // ── frame messages (validated: our iframe's window + the jarvis:1 stamp) ─────
 function onMessage(e) {

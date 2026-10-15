@@ -94,6 +94,13 @@
 							>
 								View dashboard
 							</router-link>
+							<Button
+								label="Refresh"
+								iconLeft="refresh-cw"
+								:loading="canvasRef?.loading"
+								:disabled="!builderHtml || !canvasRef || canvasRef?.loading || repairing"
+								@click="refreshData"
+							/>
 							<!-- named render theme - the dashboard's look, not the app's -->
 							<Dropdown :options="themeOptions">
 								<Button
@@ -369,6 +376,11 @@ function initBuilderFilters(defs) {
 const saveOpen = ref(false);
 const chatPane = ref(null);
 const canvasRef = ref(null);
+function refreshData() {
+	if (!builderHtml.value || !canvasRef.value || canvasRef.value.loading || repairing.value) return;
+	builderFilterErrors.value = {};
+	canvasRef.value.rebuild();
+}
 // Named render theme; "Jarvis" (the app's design language) unless picked or
 // seeded from the edited dashboard.
 const builderTheme = ref(DEFAULT_THEME);
