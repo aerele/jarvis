@@ -111,7 +111,10 @@ function splitUrl(raw) {
 	if (netloc.includes("[") || netloc.includes("]")) {
 		// STRICTER: only a whole "[...]" host, optionally after user info and before a port. The bench's
 		// urlsplit raises (or, on older Pythons, reads a host out of "a[1.2.3.4]"); either way refuse.
-		if (!/^(?:[^@]*@)?\[[^[\]]+\](?::[^[\]]*)?$/.test(netloc)) return null;
+		const shape = /^(?:[^@]*@)?\[([^[\]]+)\](?::[^[\]]*)?$/.exec(netloc);
+		// Only an IPv6 literal (it has a colon) reaches the "IPv6 isn't supported" refusal. The bench
+		// reads "[1.2.3.4]" and "[example.com]" as not a URL; never strip the brackets and judge the host.
+		if (!shape || !shape[1].includes(":")) return null;
 	}
 	return { scheme: m[1].toLowerCase(), netloc, path };
 }
@@ -481,8 +484,10 @@ export const HOLD_UNAVAILABLE = {
 
 // ---- refusals and the admin check (bench answers are DATA with HTTP 200) --------------------
 export const GENERIC_REFUSAL = "Something went wrong on our side. Please try again, or contact support.";
-// Codes the SPA has copy for (the bench's _KNOWN_CODES plus its own). A code outside this set,
-// or any BENCH_* the bench invented, reads as generic copy: a newer bench or admin must never
+// Codes the SPA has copy for: the bench's _KNOWN_CODES plus three the bench endpoints return
+// themselves (CLIENT_UPGRADE_REQUIRED, PUBLIC_HOST_CONFIGURED, INVALID_REQUEST). Any BENCH_*
+// code also keeps its sentence: the bench writes that message itself. A code outside both
+// reads as generic copy: a newer bench or admin must never
 // crash or blank a screen.
 const KNOWN_CODES = new Set([
 	"EMAIL_NOT_CONFIRMED",

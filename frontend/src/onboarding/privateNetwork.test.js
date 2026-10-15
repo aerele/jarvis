@@ -130,7 +130,7 @@ function benchCopy(reason, given) {
 test("parity table sizes (copied from the bench test)", () => {
 	assert.deepEqual(
 		[PARITY_ACCEPT.length, PARITY_REFUSE.length, TEST_MODE_ACCEPT.length, TEST_MODE_REFUSE.length],
-		[15, 66, 7, 12]
+		[15, 71, 7, 12]
 	);
 });
 
@@ -164,7 +164,7 @@ test("parity: test mode still refuses everything else", () => {
 });
 
 // Cases where JS is deliberately STRICTER than the bench (never looser). Each is listed in the task report.
-test("stricter than the bench: odd whitespace, the 192.0.0.0/24 exceptions, 6to4 relay, stray brackets", () => {
+test("stricter than the bench: odd whitespace, the 192.0.0.0/24 exceptions, 6to4 relay, bracketed hosts without a colon", () => {
 	// Python's str.strip() removes the C0 separators \x1c-\x1f, JS trim() does not: refuse.
 	assert.equal(validateAddress("https://erp.acme.com\u001f"), "The address can't contain spaces or control characters.");
 	// Python calls 192.0.0.9 and 192.0.0.10 global; the whole /24 is refused here.
