@@ -135,6 +135,16 @@ async function idle() {
 	await flushPromises();
 }
 
+// A promise the test settles by hand, to hold one fetch open.
+function deferred() {
+	let resolve, reject;
+	const promise = new Promise((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
 async function mountEditor(props = {}) {
 	const w = mount(LlmPoolEditor, { props });
 	await idle();
@@ -1560,5 +1570,68 @@ describe("saved Anthropic subscription flows", () => {
 		await w.vm.save();
 		expect(api.saveLlmPool).not.toHaveBeenCalled();
 		expect(w.text()).toContain("Keep it first or last");
+	});
+});
+
+describe("first load paints once (settings loading flicker)", () => {
+	it("shows no empty state and no Add button before the pool has loaded", async () => {
+		const cfg = deferred();
+		api.getLlmConfig.mockImplementation(() => cfg.promise);
+		const w = mount(LlmPoolEditor, { props: { editable: true } });
+		await idle();
+
+		expect(w.vm.loaded).toBe(false);
+		expect(w.find(".jv-flist-empty").exists()).toBe(false);
+		expect(w.text()).not.toContain("No models yet");
+		expect(w.text()).not.toContain("Loading models");
+		expect(w.find(".jv-flist-addbtn").exists()).toBe(false);
+
+		cfg.resolve(clone(serverPool));
+		await idle();
+
+		// The box's words depend on the sync status (an "Applied" pill here, since
+		// the fake server reports ok), so check the box itself, not its text.
+		expect(w.vm.loaded).toBe(true);
+		expect(w.find(".jv-flist-empty").exists()).toBe(true);
+		expect(w.find(".jv-flist-addbtn").attributes("disabled")).toBeUndefined();
+	});
+
+	it("still finishes loading when the pool fetch fails", async () => {
+		api.getLlmConfig.mockRejectedValueOnce(new Error("network"));
+		const w = await mountEditor({ editable: true });
+
+		expect(w.vm.loaded).toBe(true);
+		expect(w.text()).toContain("Retry");
+	});
+
+	// Guard: onboarding has no host spinner, so it keeps its own line.
+	it("keeps the onboarding 'Loading models' line while the catalog loads", async () => {
+		const cat = deferred();
+		api.getModelCatalogUi.mockImplementation(() => cat.promise);
+		const w = await mountEditor({ editable: true, modes: ["quick"], footerless: true });
+
+		expect(w.text()).toContain("Loading models");
+
+		cat.resolve(clone(MODEL_CATALOG_UI));
+		await idle();
+		expect(w.text()).not.toContain("Loading models");
+	});
+
+	// Every save reseeds through load(), which refetches the catalog. That refetch
+	// must swap in place: no "Loading models" line and no faded Add button.
+	it("does not flash 'Loading models' or fade Add on a reload after the first load", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const w = await mountEditor({ editable: true });
+		const cat = deferred();
+		api.getModelCatalogUi.mockImplementation(() => cat.promise);
+
+		w.vm.load();
+		await idle();
+
+		expect(w.vm.catalogState).toBe("ready");
+		expect(w.text()).not.toContain("Loading models");
+		expect(w.find(".jv-flist-addbtn").attributes("disabled")).toBeUndefined();
+		cat.resolve(clone(MODEL_CATALOG_UI));
+		await idle();
 	});
 });

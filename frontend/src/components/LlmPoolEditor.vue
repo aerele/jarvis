@@ -23,7 +23,7 @@
 			<button type="button" class="jv-mon-retry" @click="load">Retry</button>
 		</div>
 		<p
-			v-if="catalogState === 'loading'"
+			v-if="catalogState === 'loading' && (singleMode || loaded)"
 			class="text-p-sm text-ink-gray-5"
 			style="margin: 0 0 12px"
 		>
@@ -148,7 +148,10 @@
 	           add panel is open: that panel IS the next step, so a second "Add a
 	           model" trigger above it would compete with it, not help (mirrors the
 	           end-aligned button's own !panel.open guard). -->
-			<div v-if="!rows.length && !showDirectRow && !panel.open" class="jv-flist-empty">
+			<div
+				v-if="loaded && !rows.length && !showDirectRow && !panel.open"
+				class="jv-flist-empty"
+			>
 				<!-- 'failed' is deliberately excluded here: the savebar below owns that
 	             status (it is the one place with a Resync button), so painting it a
 	             second time in this box - with no way to retry from it - would be the
@@ -2531,13 +2534,20 @@ const modelCatalog = ref({
 // catalogReady) instead of guessing an id.
 const catalogState = ref("loading");
 const catalogReady = computed(() => catalogState.value === "ready");
+// False until the FIRST load() settles (success or failure), then true for good.
+// Until then rows is [] only because nothing has answered yet, so the empty state
+// would be a false "No models yet". AiModelsPane reads this through defineExpose
+// to hold one spinner over the whole first load.
+const loaded = ref(false);
 // Only work that would have to guess a model id waits for the catalog. A row that
 // already names its model (re-authorizing a saved account) never does.
 function needsCatalog(row) {
 	return !catalogReady.value && !((row && row.model) || "").trim();
 }
 async function loadModelCatalog(retry = false) {
-	catalogState.value = "loading";
+	// A refetch over a catalog we already have (every reseed after a save) swaps it
+	// in place; flipping to "loading" here faded every Add button for a moment.
+	if (retry || !catalogReady.value) catalogState.value = "loading";
 	try {
 		const res = await api.getModelCatalogUi(retry);
 		if (res) modelCatalog.value = res;
@@ -5113,6 +5123,7 @@ async function load(opts = {}) {
 		}
 	}
 	await loadModelCatalog();
+	loaded.value = true;
 }
 
 // Stable string of the savable pool + preset - the cheap key the dirty-notice
@@ -5608,6 +5619,7 @@ onBeforeUnmount(() => {
 defineExpose({
 	save,
 	busy,
+	loaded,
 	canStart: singleModeCanStart,
 	startBlockedReason,
 	subscriptionTesting: computed(() => subTest.value.testing),
