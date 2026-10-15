@@ -42,6 +42,13 @@ vi.mock("@/components/doc/DocPage.vue", () => ({
 vi.mock("@/components/doc/DocSection.vue", () => ({
 	default: { props: ["label"], template: '<section :data-label="label"><slot /></section>' },
 }));
+vi.mock("@/components/Banner.vue", () => ({
+	default: {
+		props: ["type", "title", "message"],
+		template:
+			'<div class="banner" :data-type="type"><b>{{ title }}</b><span class="msg">{{ message }}</span></div>',
+	},
+}));
 vi.mock("@/components/doc/DocMetaPanel.vue", () => ({ default: { template: "<div/>" } }));
 vi.mock("@/components/doc/CommentsSection.vue", () => ({ default: { template: "<div/>" } }));
 vi.mock("@/composables/useDocmeta", () => ({ useDocmeta: () => ({ reload: vi.fn() }) }));
@@ -328,5 +335,76 @@ describe("SkillDetail: File Box", () => {
 		expect(shown.text()).toBe("Purchase Invoice");
 		expect(shown.attributes("data-disabled")).toBe("true");
 		expect(api.fileBoxDoctypes).not.toHaveBeenCalled();
+	});
+});
+
+// An administrator's hold on the owner's own skill: said first, the switches locked
+// with the reason in text, and nothing the form sends can switch it back on.
+describe("SkillDetail: an administrator's hold", () => {
+	let w;
+	beforeEach(() => vi.clearAllMocks());
+	afterEach(() => w && w.unmount());
+
+	const HELD = { ...SAVED, enabled: 0, admin_hold: 1, admin_hold_reason: "Emails customers" };
+	const switchOf = (w, label) =>
+		w.findAllComponents({ name: "Switch" }).find((s) => s.props("label") === label);
+
+	it("says it is on hold, with the reason, above the form", async () => {
+		w = await mountSkill({ id: "SK-1" }, HELD);
+		const banner = w.find(".banner");
+		expect(banner.attributes("data-type")).toBe("warning");
+		expect(banner.text()).toContain("On hold");
+		expect(banner.find(".msg").text()).toBe(
+			"On hold by an administrator: Emails customers. The assistant does not use this skill until an admin releases it."
+		);
+	});
+
+	it("does not double a full stop the reason already has", async () => {
+		w = await mountSkill({ id: "SK-1" }, { ...HELD, admin_hold_reason: "Paused." });
+		expect(w.find(".banner .msg").text()).toContain("administrator: Paused. The assistant");
+		expect(w.find(".banner .msg").text()).not.toContain("..");
+	});
+
+	it("locks Enabled off, with the reason as its text", async () => {
+		w = await mountSkill({ id: "SK-1" }, HELD);
+		expect(switchOf(w, "Enabled").props("disabled")).toBe(true);
+		expect(switchOf(w, "Enabled").props("modelValue")).toBe(false);
+		expect(switchOf(w, "Enabled").props("description")).toBe(
+			"On hold by an administrator: Emails customers"
+		);
+	});
+
+	it("locks Allow Approve & run too, with the same reason", async () => {
+		w = await mountSkill({ id: "SK-1" }, { ...HELD, can_arm: 1 });
+		expect(switchOf(w, "Allow Approve & run").props("disabled")).toBe(true);
+		expect(switchOf(w, "Allow Approve & run").props("description")).toBe(
+			"On hold by an administrator: Emails customers"
+		);
+	});
+
+	it("says it is on hold even when no reason was given", async () => {
+		w = await mountSkill({ id: "SK-1" }, { ...HELD, admin_hold_reason: "" });
+		expect(switchOf(w, "Enabled").props("description")).toBe("On hold by an administrator");
+		expect(w.find(".banner .msg").text()).toContain(
+			"On hold by an administrator. The assistant"
+		);
+	});
+
+	it("shows nothing of it on a skill that is not held, or from a server that sends no hold", async () => {
+		w = await mountSkill({ id: "SK-1" }, { ...SAVED, admin_hold: 0, admin_hold_reason: "" });
+		expect(w.find(".banner").exists()).toBe(false);
+		expect(switchOf(w, "Enabled").props("disabled")).toBe(false);
+		w.unmount();
+		w = await mountSkill({ id: "SK-1" });
+		expect(w.find(".banner").exists()).toBe(false);
+	});
+
+	it("is released when a later load shows no hold", async () => {
+		w = await mountSkill({ id: "SK-1" }, HELD);
+		api.getCustomSkill.mockResolvedValue({ ...SAVED, enabled: 0 });
+		await w.setProps({ id: "SK-2" });
+		await flushPromises();
+		expect(w.find(".banner").exists()).toBe(false);
+		expect(switchOf(w, "Enabled").props("disabled")).toBe(false);
 	});
 });
