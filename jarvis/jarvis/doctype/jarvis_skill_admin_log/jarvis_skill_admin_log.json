@@ -1,0 +1,122 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-10-14 20:00:00.000000",
+ "description": "What a Jarvis Admin did to someone else's skill (put on hold, released, deleted, handed over). One row per act, written by the admin endpoints only, never changed afterwards. It survives the skill's deletion and holds no instructions text.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "verb",
+  "admin",
+  "acted_at",
+  "skill",
+  "skill_name",
+  "skill_owner",
+  "new_owner",
+  "needs_apply",
+  "reason"
+ ],
+ "fields": [
+  {
+   "fieldname": "verb",
+   "fieldtype": "Select",
+   "label": "Verb",
+   "options": "hold\nrelease\ndelete\nhandover",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "admin",
+   "fieldtype": "Data",
+   "label": "Admin",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1,
+   "description": "The user who acted. Data, not a Link: a Link would block deleting that user, and this row must outlive both people and the skill."
+  },
+  {
+   "fieldname": "acted_at",
+   "fieldtype": "Datetime",
+   "label": "Acted at",
+   "reqd": 1,
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "skill",
+   "fieldtype": "Data",
+   "label": "Skill",
+   "reqd": 1,
+   "search_index": 1,
+   "in_standard_filter": 1,
+   "read_only": 1,
+   "description": "The skill's document name. Data, not a Link: the skill may be deleted, and this row is its history."
+  },
+  {
+   "fieldname": "skill_name",
+   "fieldtype": "Data",
+   "label": "Skill Name",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "skill_owner",
+   "fieldtype": "Data",
+   "label": "Owner at the time",
+   "in_standard_filter": 1,
+   "read_only": 1,
+   "description": "Who owned the skill when the admin acted (Administrator for a published company copy)."
+  },
+  {
+   "fieldname": "new_owner",
+   "fieldtype": "Data",
+   "label": "Handed to",
+   "in_standard_filter": 1,
+   "read_only": 1,
+   "description": "For a hand-over, who the skill was handed to. Data, not a Link, like Admin."
+  },
+  {
+   "fieldname": "needs_apply",
+   "fieldtype": "Check",
+   "label": "Changed the assistant's catalog",
+   "default": "0",
+   "read_only": 1,
+   "description": "Set when the act took a skill out of, or put one back into, the company catalog pushed to the assistant. Such an act is waiting for the next Apply until the skills are applied after it."
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "label": "Reason",
+   "read_only": 1,
+   "hidden": 1,
+   "description": "The admin's reason for a hold. Hidden in Desk: the text is stored as typed, and the Desk form would show it as HTML. The Admin tab of the Skills page shows it as plain text."
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-14 22:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Skill Admin Log",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "role": "Jarvis Admin"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

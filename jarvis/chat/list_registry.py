@@ -460,6 +460,32 @@ _VIEWS: tuple[ListView, ...] = (
 		),
 	),
 	ListView(
+		view_key="skills_admin",
+		label="Skills → Admin tab (every user's skills)",
+		classification=DOCUMENT_LIST,
+		root_doctype="Jarvis Custom Skill",
+		endpoints=("jarvis.chat.skills_admin_api.admin_list_skills",),
+		surface="frontend/src/pages/skills/AdminTab.vue",
+		wave=3,
+		curated_filters={
+			"owner": "owner",
+			"scope": "scope",
+			"enabled": "enabled",
+			"armed": "allow_approve_run",
+			"on_hold": None,
+		},
+		# The list shows who owns a skill and its state, never its instructions: those
+		# are read one skill at a time. A filter on them would let an admin's search
+		# rebuild every user's private skill text one LIKE at a time.
+		excluded_fields=("instructions",),
+		notes=(
+			"Cross-user, Jarvis-Admin gated, paginated with five server-authored "
+			"filters. `on_hold` is a pseudo filter over the permlevel-1 hold column, "
+			"which may not exist before the migrate. It does not take filters_v2, for "
+			"the reason the macro admin list gives."
+		),
+	),
+	ListView(
 		view_key="settings_tool_activity",
 		label="Settings → Activity (tool-run feed)",
 		classification=EXCLUDED_NOT_A_LIST,

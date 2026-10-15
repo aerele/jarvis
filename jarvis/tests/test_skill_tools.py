@@ -522,8 +522,8 @@ class TestGetSkill(SkillToolsTestCase):
 			self.assertEqual(get_skill(f"{PFX}-dup-hidden")["description"], "sttool peer copy")
 
 	def test_a_system_manager_is_served_the_reviewed_row_too(self):
-		# A System Manager may read every skill, so a Role skill for a role they do
-		# not hold is usable for them, and it comes before their own like any other.
+		# A System Manager may use every Role and Org skill, so a Role skill for a role
+		# they do not hold is usable for them, and it comes before their own like any other.
 		from jarvis.tools.get_skill import resolve_skill
 
 		manager = _ensure_system_user("sttool-sysmgr@example.com")
@@ -535,6 +535,31 @@ class TestGetSkill(SkillToolsTestCase):
 		_make_skill(manager, f"{PFX}-dup-sm", "sttool manager copy", scope="User")
 		self.assertNotIn("Accounts Manager", frappe.get_roles(manager))
 		self.assertEqual(resolve_skill(f"{PFX}-dup-sm", manager).name, role)
+
+	def _system_manager(self) -> str:
+		manager = _ensure_system_user("sttool-sysmgr@example.com")
+		frappe.get_doc("User", manager).add_roles("System Manager")
+		self.addCleanup(lambda: frappe.get_doc("User", manager).remove_roles("System Manager"))
+		return manager
+
+	def test_a_system_manager_is_refused_another_users_private_skill(self):
+		# jarvis-admin-v2#720 (D6): their assistant may neither find nor fetch a
+		# private skill that is not theirs and not shared with them.
+		manager = self._system_manager()
+		_make_skill(OWNER, f"{PFX}-sm-priv", "sttool smprivmark body", scope="User")
+		with _as(manager):
+			with self.assertRaises(PermissionDeniedError):
+				get_skill(f"{PFX}-sm-priv")
+			self.assertEqual(find_skills("smprivmark")["count"], 0)
+
+	def test_a_system_manager_is_served_a_private_skill_shared_with_them(self):
+		manager = self._system_manager()
+		_make_skill(
+			OWNER, f"{PFX}-sm-shared", "sttool smsharedmark body", scope="User", shared_with=[manager]
+		)
+		with _as(manager):
+			self.assertEqual(get_skill(f"{PFX}-sm-shared")["skill_name"], f"{PFX}-sm-shared")
+			self.assertEqual(find_skills("smsharedmark")["count"], 1)
 
 	def test_a_disabled_reviewed_row_is_not_served(self):
 		row = _make_skill(OWNER, f"{PFX}-dup-off", "sttool off copy").name
@@ -982,6 +1007,15 @@ class TestSkillChildTableBatch(SkillToolsTestCase):
 		with patch(_PREFETCH) as pf:
 			_maybe_prefetch_children([{"name": "x"}, {"name": "y"}], "Administrator", [])
 		pf.assert_not_called()
+
+	def test_gate_fires_for_system_manager_on_another_users_private_row(self):
+		# A private row admits a System Manager only through its shares (#720), so
+		# their check reads that child table.
+		rows = [{"name": "x", "owner": "other@example.com", "scope": "User"}, {"name": "y"}]
+		for user, roles in (("u@example.com", ["System Manager"]), ("Administrator", [])):
+			with self.subTest(user=user), patch(_PREFETCH) as pf:
+				_maybe_prefetch_children(rows, user, roles)
+				pf.assert_called_once_with(rows)
 
 	def test_gate_fires_for_multi_row_normal_user(self):
 		with patch(_PREFETCH) as pf:

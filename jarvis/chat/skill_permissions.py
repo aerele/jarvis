@@ -174,6 +174,27 @@ def shared_skills_no_reviewer_owns() -> list[dict]:
 	return found
 
 
+def held_skills() -> list[dict]:
+	"""Every skill an admin has put on hold, with who owns it and why. Reads only.
+
+	For an operator, and for a rollback: a revert of the admin hold leaves held skills
+	switched off with no visible reason, and this is the list to release them from
+	(``skills_admin_api.admin_release`` before the revert, or a raw write after it).
+	Empty before the migrate that adds the hold fields.
+	``bench --site <site> execute jarvis.chat.skill_permissions.held_skills``."""
+	from jarvis.jarvis.doctype.jarvis_custom_skill import jarvis_custom_skill as skill_doctype
+
+	if not skill_doctype.hold_fields_exist():
+		return []
+	# System context (bench execute): no permission applies.
+	return frappe.get_all(
+		SKILL,
+		filters={skill_doctype.HOLD_FIELD: 1},
+		fields=["name", "skill_name", "scope", "owner", "modified", skill_doctype.HOLD_REASON_FIELD],
+		order_by="modified desc",
+	)
+
+
 def skills_outside_control(user: str, *, names=(), slugs=()) -> list[str]:
 	"""The ``skill_name`` of each skill, among the rows ``names`` and the slugs
 	``slugs``, that ``user`` does not control (``controlled_by``), sorted.
@@ -182,9 +203,9 @@ def skills_outside_control(user: str, *, names=(), slugs=()) -> list[str]:
 	can enable it again). ``slugs`` are names the agent may fetch: each is judged by
 	the row ``get_skill`` would serve ``user`` for it (``served_row``), so the
 	``custom-`` wire name and any case count, a reviewed Role/Org row of that name
-	comes before ``user``'s own as it does there, and a System Manager, who may read
-	every skill, is judged on the row they would be served and not on whether it was
-	shared with them."""
+	comes before ``user``'s own as it does there, and a System Manager, who may use
+	every Role and Org skill, is judged on the row they would be served and not on
+	whether it was shared with them."""
 	found = set()
 	names = [n for n in names or () if n]
 	if names:
