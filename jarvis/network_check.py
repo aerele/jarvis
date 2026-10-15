@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import re
 import time
+from typing import Any
 
 import frappe
 from frappe.utils.password import get_decrypted_password
@@ -83,7 +84,7 @@ def _api_secret() -> str:
 	return (secret or "").strip()
 
 
-def _well_formed(v, cid, nonce, exp) -> bool:
+def _well_formed(v: Any, cid: Any, nonce: Any, exp: Any) -> bool:
 	# ``type(x) is int`` on purpose: True is an int in Python, and a numeric string is not
 	# the integer the contract specifies.
 	if type(v) is not int or v != 1 or type(exp) is not int:
@@ -94,7 +95,9 @@ def _well_formed(v, cid, nonce, exp) -> bool:
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-def answer(v=None, cid=None, nonce=None, exp=None):
+def answer(v: Any = None, cid: Any = None, nonce: Any = None, exp: Any = None):
+	# ``Any`` on purpose: Frappe's strict-bench check demands annotations, and any narrower
+	# type would coerce input before the shape check below. Refusals stay byte-identical.
 	if _rate_limited():
 		return _refuse()
 	if not _well_formed(v, cid, nonce, exp):

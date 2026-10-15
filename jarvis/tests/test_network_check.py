@@ -171,3 +171,52 @@ class TestAnswerRealSecretRead(FrappeTestCase):
 			self.assertEqual(out["mac"], compute_mac(secret, CID, NONCE, NOW + 60, site))
 		else:
 			self.assertEqual(out, REFUSED)
+
+
+class TestAnswerThroughTheRealHandler(FrappeTestCase):
+	"""Dispatch through ``frappe.handler.execute_cmd`` so the whitelist wrapper (and, on a
+	strict bench, the type-annotation requirement) is exercised, not a bare function call."""
+
+	def setUp(self):
+		frappe.local.request_ip = "198.51.100.12"
+		frappe.cache().delete(network_check._rate_limit_key())
+		self.addCleanup(lambda: frappe.cache().delete(network_check._rate_limit_key()))
+		prev_request = getattr(frappe.local, "request", None)
+		prev_form = frappe.local.form_dict
+		self.addCleanup(setattr, frappe.local, "request", prev_request)
+		self.addCleanup(setattr, frappe.local, "form_dict", prev_form)
+		for patcher in (
+			patch("jarvis.network_check._now", return_value=NOW),
+			patch("jarvis.network_check._api_secret", return_value=SECRET),
+		):
+			patcher.start()
+			self.addCleanup(patcher.stop)
+
+	def _dispatch(self, body):
+		from frappe.handler import execute_cmd
+		from frappe.utils import set_request
+
+		set_request(method="POST", path="/api/method/jarvis.network_check.answer")
+		frappe.local.form_dict = frappe._dict(body)
+		return execute_cmd("jarvis.network_check.answer")
+
+	def test_every_parameter_is_annotated_and_not_coerced(self):
+		import typing
+
+		hints = typing.get_type_hints(answer)
+		params = {k: v for k, v in hints.items() if k != "return"}
+		self.assertEqual(params, dict.fromkeys(("v", "cid", "nonce", "exp"), typing.Any))
+
+	def test_a_well_formed_body_gets_the_mac(self):
+		out = self._dispatch({"v": 1, "cid": CID, "nonce": NONCE, "exp": NOW + 60})
+		self.assertEqual(out["mac"], compute_mac(SECRET, CID, NONCE, NOW + 60, frappe.local.site))
+
+	def test_a_malformed_body_is_the_bare_refusal_not_an_exception(self):
+		for body in (
+			{"v": "1", "cid": CID, "nonce": NONCE, "exp": NOW + 60},
+			{"v": 1, "cid": CID, "nonce": NONCE, "exp": str(NOW + 60)},
+			{"v": 1, "cid": ["x"], "nonce": {"a": 1}, "exp": 1.5},
+			{},
+		):
+			with self.subTest(body=body):
+				self.assertEqual(self._dispatch(body), REFUSED)
