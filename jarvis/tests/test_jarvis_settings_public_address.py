@@ -43,3 +43,20 @@ class TestPublicAddressFields(FrappeTestCase):
 		with patch.dict(frappe.conf, {"jarvis_private_network_test_mode": 1}, clear=False):
 			doc._validate_public_address()
 		self.assertEqual(doc.public_address, "http://127.0.0.1:8000")
+
+	def test_unchanged_stored_address_does_not_block_later_saves(self):
+		doc = self._doc("Private", "http://127.0.0.1:8000")  # valid only in test mode
+		with patch.object(doc, "has_value_changed", return_value=False):
+			doc._validate_public_address()  # test mode is off; must not raise
+
+	def test_changed_address_is_still_validated(self):
+		doc = self._doc("Private", "http://127.0.0.1:8000")
+		with patch.object(doc, "has_value_changed", side_effect=lambda f: f == "public_address"):
+			with self.assertRaises(frappe.ValidationError):
+				doc._validate_public_address()
+
+	def test_validate_calls_the_public_address_check(self):
+		doc = frappe.get_single("Jarvis Settings")
+		with patch.object(type(doc), "_validate_public_address") as check:
+			doc.validate()
+		check.assert_called_once()

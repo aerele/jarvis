@@ -903,6 +903,9 @@ class JarvisSettings(Document):
 		the address alone (inert)."""
 		if (self.get("network_mode") or "").strip() != "Private":
 			return
+		# Only on a change: a stored test-mode address must not block unrelated saves later.
+		if not (self.has_value_changed("network_mode") or self.has_value_changed("public_address")):
+			return
 		from jarvis.network_address import check_public_address, private_test_mode
 
 		normalized, problem = check_public_address(
