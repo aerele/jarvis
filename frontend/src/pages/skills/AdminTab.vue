@@ -488,7 +488,7 @@
 // caps probe says `analysis` (the Jarvis Admin and System Manager roles). The
 // server checks the role itself on every call (jarvis.chat.skills_admin_api), so a
 // stale client gate can only hide the tab.
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
 	Badge,
 	Breadcrumbs,
