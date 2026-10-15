@@ -306,7 +306,17 @@
 					</svg>
 				</button>
 			</slot>
-			<div style="margin-left: auto; display: flex; align-items: center; gap: 6px">
+			<!-- min-width: 0 lets this group shrink (the model picker truncates) so the
+			     send button never gets pushed past the edge on a narrow phone. -->
+			<div
+				style="
+					margin-left: auto;
+					display: flex;
+					align-items: center;
+					gap: 6px;
+					min-width: 0;
+				"
+			>
 				<!-- Host buttons on the RIGHT (chat: dictation mic + model picker),
 				     between the left cluster and the Enter hint + send button. -->
 				<slot name="right-toolbar" />
@@ -321,6 +331,7 @@
 					@click="emit('stop')"
 					title="Stop generating"
 					style="
+						flex-shrink: 0;
 						width: 32px;
 						height: 32px;
 						display: flex;
@@ -344,6 +355,7 @@
 					:disabled="!sendable"
 					:title="sendTitle || null"
 					:style="{
+						flexShrink: 0,
 						width: '32px',
 						height: '32px',
 						display: 'flex',
