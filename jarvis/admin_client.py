@@ -946,6 +946,43 @@ def check_signup_payment_status() -> dict:
 	)
 
 
+def private_setup_info(*, timeout_s: int = 8) -> dict:
+	"""Guest: is private-network onboarding on offer, and which public address does admin
+	see this bench calling from? Returns ``{"enabled": bool, "caller_ip": str}`` (contract
+	4.1). ``caller_ip`` is what the PublicAddress screen pre-fills. Short timeout: the
+	callers run on a network that may DROP traffic to admin, and a long wait would freeze
+	the first screen the customer sees."""
+	return _post_guest(path=_m("api.network.private_setup_info"), body={}, timeout_s=timeout_s)
+
+
+def reserve_private_host(*, timeout_s: int = 60) -> dict:
+	"""Authenticated: the fleet host admin holds for this private-network customer, as
+	``{"host_ip", "reach_url", "hold_until"}`` (contract 4.3). Admin makes the hold when the
+	email link is clicked; this call makes it synchronously if the job has not yet. For a
+	customer who already has a tenant it returns that tenant's host with ``hold_until`` null.
+	Refusals arrive as ``AdminContractError`` carrying ``NOT_PRIVATE_CUSTOMER``,
+	``EMAIL_NOT_CONFIRMED``, ``PRIVATE_HOLD_UNAVAILABLE`` or ``RATE_LIMITED_PRIVATE_NETWORK``.
+	The 60 s budget covers admin probing candidate hosts."""
+	return _post(path=_m("api.network.reserve_private_host"), body={}, timeout_s=timeout_s)
+
+
+def start_connection_check(site_name: str, *, timeout_s: int = 30) -> dict:
+	"""Authenticated: start the inbound half of the connection test. ``site_name`` is this
+	bench's own ``frappe.local.site`` - the owner's claim about which Frappe site must
+	answer, which admin binds to the customer's credentials. Returns ``{"check":
+	"JCC-000123"}`` to poll with ``get_connection_check``."""
+	return _post(
+		path=_m("api.network.start_connection_check"), body={"site_name": site_name}, timeout_s=timeout_s
+	)
+
+
+def get_connection_check(check: str, *, timeout_s: int = 15) -> dict:
+	"""Authenticated: the state of one test as ``{"status", "reason", "checked_at"}``.
+	``status`` is Checking, Verified, Failed, Unreachable or Unsupported; a customer can read
+	only their own checks."""
+	return _post(path=_m("api.network.get_connection_check"), body={"check": check}, timeout_s=timeout_s)
+
+
 def get_billing_payment_state() -> dict:
 	"""Passive read of the current BILLING checkout (renew / plan change), the
 	signup poll's sibling. A live attempt re-echoes its pay-page token, so a lost
@@ -2857,6 +2894,26 @@ def is_handover_unsupported(exc: Exception) -> bool:
 	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_HANDOVER_METHOD in text
 
 
+# Admin's private-network refusal codes (contract 4.3), plus the generic INVALID_REQUEST it
+# raises for a malformed argument on the same endpoints. ``_do_post`` reads these BEFORE the
+# HTTP-status / exc_type routing: admin sends them as 403 PermissionError, 409
+# DuplicateEntryError, 400 InvalidRequestError and 429, and the status routing alone would
+# turn the 403s into AdminAuthError (code lost) and a 503 into AdminUnreachableError.
+_PRIVATE_NETWORK_CODES = frozenset(
+	{
+		"PRIVATE_NETWORK_DISABLED",
+		"PRIVATE_ADDRESS_INVALID",
+		"PRIVATE_ADDRESS_TAKEN",
+		"NOT_PRIVATE_CUSTOMER",
+		"EMAIL_NOT_CONFIRMED",
+		"PRIVATE_HOLD_UNAVAILABLE",
+		"CONNECTION_CHECK_BUSY",
+		"RATE_LIMITED_PRIVATE_NETWORK",
+		"INVALID_REQUEST",
+	}
+)
+
+
 def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:
 	"""Build the known-4xx rejection, preserving admin's contract when it sent
 	one (returned for the caller to ``raise``).
@@ -3027,6 +3084,19 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		# (it came from _extract_frappe_message). Falling back to "" is fine.
 		return _envelope_error_message(envelope) or clean or ""
 
+	# Code first: a private-network refusal carries its machine code whatever status or
+	# exception class admin used. A 429 keeps the rate-limit path below (it carries the
+	# code and retry_after_seconds itself).
+	if resp.status_code != 429:
+		contract = _contract_error(payload)
+		if contract.get("code") in _PRIVATE_NETWORK_CODES:
+			raise _rejection(
+				_envelope_message() or f"admin returned {resp.status_code}",
+				payload=payload,
+				status=resp.status_code,
+				exc_type=exc_type,
+			)
+
 	# Status-based routing for the three unambiguous wire signals.
 	# The 2026-06-16 review caught that the previous shape ran the
 	# exc_type allowlist BEFORE the status check, so a 429 admin
@@ -3079,6 +3149,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			# unknown-exc_type branch and logging a spurious error on every rejected
 			# partner code.
 			"PartnerCodeRejected",
+			# Admin's 400 for a malformed argument (private-network address, site_name).
+			# A plain refusal; unlisted it logged an Error Log row per rejection.
+			"InvalidRequestError",
 		):
 			# The THROWN wire shape: admin's contract ``error`` object rides at
 			# the top level next to exc_type. Both survive here - the code for a
