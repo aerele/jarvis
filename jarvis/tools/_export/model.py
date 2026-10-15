@@ -7,8 +7,10 @@ class ExportModel:
 
 	Renderers must never touch a data source - they read only this. ``total`` is
 	the TRUE, permission-filtered source count (never a capped/shown count), so a
-	renderer or tool can disclose it honestly. ``meta`` carries render hints
-	(e.g. ``title``) and disclosure flags (e.g. ``cells_truncated``)."""
+	renderer or tool can disclose it honestly - except under a spec's own ``limit``,
+	where it is the rows in the file and ``meta["limited_by_spec"]`` says so. ``meta``
+	carries render hints (e.g. ``title``) and disclosure flags (e.g.
+	``cells_truncated``)."""
 
 	columns: list[str]
 	rows: list[list]

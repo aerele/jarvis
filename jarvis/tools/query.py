@@ -214,14 +214,17 @@ def compile_spec(spec: dict):
 
 
 def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:
-	"""``compile_spec`` for ``export_query``: ``(query, tables, export_doctypes)``.
-	``tables`` maps each FROM / join alias to its DocType; ``export_doctypes`` are
-	the DocTypes whose Export permission the file needs.
+	"""``compile_spec`` for ``export_query``: ``(query, tables, export_doctypes,
+	child_parents)``. ``tables`` maps each FROM / join alias to its DocType;
+	``export_doctypes`` are the DocTypes whose Export permission the file needs;
+	``child_parents`` maps each child-table alias to the parent its rows are scoped to.
 
 	``export_limit`` is the query's LIMIT instead of the spec's own ``limit`` /
 	``MAX_LIMIT``, which cap what reaches the model, not a file. A spec ``limit``
-	still applies when it is smaller (a deliberate "top 50"), and an ``offset`` is
-	refused: an export is the whole result, never a page of it.
+	still applies when it is smaller (a deliberate "top 50"), and the query asks for
+	ONE ROW PAST it, so the caller can tell whether the limit cut the result and
+	say so. An ``offset`` is refused: an export is the whole result, never a page
+	of it.
 
 	A child table's rows are the record-level scope of ONE owning parent (the one
 	``_weave_record_gate`` scopes it to), so its Export permission is that
@@ -230,14 +233,15 @@ def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:
 	q, alias_map = _compile(spec, export_limit=export_limit)
 	tables = {alias: dt for alias, (dt, _table) in alias_map.items()}
 	export_doctypes = []
+	child_parents = {}
 	for alias, (dt, _table) in alias_map.items():
 		if frappe.get_meta(dt).istable:
 			if frappe.session.user == "Administrator":
 				continue
-			dt = _child_scoping_parent(dt, alias, spec, alias_map)
+			dt = child_parents[alias] = _child_scoping_parent(dt, alias, spec, alias_map)
 		if dt not in export_doctypes:
 			export_doctypes.append(dt)
-	return q, tables, export_doctypes
+	return q, tables, export_doctypes, child_parents
 
 
 def _compile(spec: dict, *, export_limit: int | None = None) -> tuple:
@@ -371,10 +375,10 @@ def _compile(spec: dict, *, export_limit: int | None = None) -> tuple:
 	# the validation below catch 0 as the invalid value it is.
 	limit_raw = spec.get("limit")
 	if export_limit is not None:
-		limit = export_limit if limit_raw is None else int(limit_raw)
-		if limit <= 0:
+		if limit_raw is not None and int(limit_raw) <= 0:
 			raise InvalidArgumentError("limit must be a positive number")
-		limit = min(limit, export_limit)
+		# One past the spec's limit: a row beyond it proves the limit cut the result.
+		limit = export_limit if limit_raw is None else min(int(limit_raw) + 1, export_limit)
 		if spec.get("offset"):
 			raise InvalidArgumentError(
 				"an export is the whole result: drop offset (and narrow the filter if it is too large)"
