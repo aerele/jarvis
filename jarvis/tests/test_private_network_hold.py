@@ -80,6 +80,7 @@ class TestHoldStorage(_Fresh):
 			{"host_ip": "not-an-ip", "reach_url": HOLD["reach_url"]},
 			{"host_ip": HOLD["host_ip"], "reach_url": "ftp://reach.example/"},
 			{"host_ip": HOLD["host_ip"], "reach_url": "https://"},
+			{"host_ip": HOLD["host_ip"], "reach_url": "https://u:p@reach.example/"},
 			{"host_ip": HOLD["host_ip"]},
 			{"host_ip": "", "reach_url": "", "hold_until": None},
 			{**HOLD, "hold_until": 12345},

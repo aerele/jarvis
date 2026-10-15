@@ -850,7 +850,7 @@ def _clean_hold(hold) -> dict:
 		hostname = parts.hostname
 	except ValueError:
 		return {}
-	if parts.scheme not in ("https", "http") or not hostname:
+	if parts.scheme not in ("https", "http") or not hostname or parts.username or parts.password:
 		return {}
 	return {"host_ip": host_ip, "reach_url": reach_url, "hold_until": until or None}
 

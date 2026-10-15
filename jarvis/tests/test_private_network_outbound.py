@@ -28,7 +28,7 @@ def _response(status=200):
 
 class TestRunOutboundCheck(FrappeTestCase):
 	def _run(self, get_effect=None, status=200, url=REACH):
-		with patch("requests.get", side_effect=get_effect, return_value=_response(status)) as get:
+		with patch("requests.Session.get", side_effect=get_effect, return_value=_response(status)) as get:
 			out = private_network.run_outbound_check(url)
 		return out, get
 
@@ -42,9 +42,26 @@ class TestRunOutboundCheck(FrappeTestCase):
 		_, get = self._run()
 		args, kwargs = get.call_args
 		self.assertEqual(args[0], REACH)
-		self.assertEqual(kwargs["timeout"], 5)
+		self.assertEqual(kwargs["timeout"], (5, 5))
 		self.assertIs(kwargs["allow_redirects"], False)
 		self.assertTrue(kwargs.get("verify", True))
+
+	def test_the_body_is_not_read_and_the_connection_is_closed(self):
+		out, get = self._run()
+		self.assertIs(get.call_args.kwargs["stream"], True)
+		get.return_value.close.assert_called_once()
+		self.assertEqual([c[0] for c in get.return_value.method_calls], ["close"])
+
+	def test_the_probe_ignores_proxy_and_netrc_environment(self):
+		seen = []
+
+		def spy(session, *a, **kw):
+			seen.append(session.trust_env)
+			return _response(200)
+
+		with patch("requests.Session.get", spy):
+			private_network.run_outbound_check(REACH)
+		self.assertEqual(seen, [False])
 
 	def test_failures_map_to_the_four_reasons(self):
 		cases = [
@@ -73,7 +90,7 @@ class TestRunOutboundCheck(FrappeTestCase):
 		get.assert_called_once()
 
 	def test_a_malformed_target_is_refused(self):
-		for url in ("", "not a url", "ftp://reach.example/", "https://", None):
+		for url in ("", "not a url", "ftp://reach.example/", "https://", "https://u:p@reach.example/", None):
 			with self.subTest(url=url):
 				out, get = self._run(url=url)
 				self.assertEqual(out, {"ok": False, "reason": "bad_target"})
@@ -100,7 +117,7 @@ class TestStartConnectionTest(_Fresh):
 		onboarding_contract.store_private_hold(HOLD)
 		with (
 			patch.object(admin_client, "start_connection_check", return_value={"check": "JCC-000123"}) as start,
-			patch("requests.get", return_value=_response(200)) as get,
+			patch("requests.Session.get", return_value=_response(200)) as get,
 		):
 			out = private_network.start_connection_test()
 		self.assertEqual(out, {"ok": True, "check": "JCC-000123", "outbound": {"ok": True, "reason": "ok"}})
@@ -115,7 +132,7 @@ class TestStartConnectionTest(_Fresh):
 		self.addCleanup(frappe.form_dict.pop, "host_ip", None)
 		with (
 			patch.object(admin_client, "start_connection_check", return_value={"check": "JCC-000124"}),
-			patch("requests.get", return_value=_response(200)) as get,
+			patch("requests.Session.get", return_value=_response(200)) as get,
 		):
 			private_network.start_connection_test()
 		self.assertEqual(get.call_args.args[0], HOLD["reach_url"])
@@ -124,7 +141,7 @@ class TestStartConnectionTest(_Fresh):
 		with (
 			patch.object(admin_client, "reserve_private_host", return_value=HOLD) as reserve,
 			patch.object(admin_client, "start_connection_check", return_value={"check": "JCC-000125"}),
-			patch("requests.get", return_value=_response(200)) as get,
+			patch("requests.Session.get", return_value=_response(200)) as get,
 		):
 			out = private_network.start_connection_test()
 		reserve.assert_called_once()
@@ -137,7 +154,7 @@ class TestStartConnectionTest(_Fresh):
 		with (
 			patch.object(admin_client, "reserve_private_host", side_effect=AssertionError("reserved")),
 			patch.object(admin_client, "start_connection_check", return_value={"check": "JCC-000126"}),
-			patch("requests.get", return_value=_response(200)) as get,
+			patch("requests.Session.get", return_value=_response(200)) as get,
 		):
 			private_network.start_connection_test()
 		self.assertEqual(get.call_args.args[0], HOLD["reach_url"])
@@ -147,7 +164,7 @@ class TestStartConnectionTest(_Fresh):
 		with (
 			_admin_answers(403, body),
 			patch.object(admin_client, "start_connection_check", side_effect=AssertionError("started")),
-			patch("requests.get", side_effect=AssertionError("probed")),
+			patch("requests.Session.get", side_effect=AssertionError("probed")),
 		):
 			out = private_network.start_connection_test()
 		self.assertEqual((out["ok"], out["code"]), (False, "EMAIL_NOT_CONFIRMED"))
@@ -165,7 +182,7 @@ class TestStartConnectionTest(_Fresh):
 			with self.subTest(code=code):
 				with (
 					_admin_answers(status, _thrown(exc_type, code, "No.", **extra)),
-					patch("requests.get", side_effect=AssertionError("probed")),
+					patch("requests.Session.get", side_effect=AssertionError("probed")),
 				):
 					out = private_network.start_connection_test()
 				self.assertEqual((out["ok"], out["code"]), (False, code))
@@ -176,7 +193,7 @@ class TestStartConnectionTest(_Fresh):
 		onboarding_contract.store_private_hold(HOLD)
 		with (
 			_admin_answers(409, _thrown(_DUPLICATE, "SOMETHING_NEW", "Internal detail.")),
-			patch("requests.get", side_effect=AssertionError("probed")),
+			patch("requests.Session.get", side_effect=AssertionError("probed")),
 		):
 			out = private_network.start_connection_test()
 		self.assertFalse(out["ok"])
@@ -222,6 +239,11 @@ class TestConnectionTestStatus(_Fresh):
 		self.assertEqual(out["ok"], True)
 		self.assertEqual((out["status"], out["reason"]), ("Failed", "stale"))
 
+	def test_an_uncoded_validation_error_is_not_read_as_stale(self):
+		with _admin_answers(400, {"exc_type": "ValidationError", "exception": "x"}):
+			out = private_network.connection_test_status("JCC-000999")
+		self.assertFalse(out["ok"])
+
 	def test_a_malformed_admin_answer_does_not_crash(self):
 		with patch.object(admin_client, "get_connection_check", return_value=None):
 			out = private_network.connection_test_status("JCC-000123")
@@ -231,3 +253,14 @@ class TestConnectionTestStatus(_Fresh):
 		frappe.set_user("Guest")
 		with self.assertRaises(frappe.PermissionError):
 			private_network.connection_test_status("JCC-000123")
+
+
+class TestStateChangingEndpointsArePostOnly(FrappeTestCase):
+	def test_each_one_allows_only_post(self):
+		for fn in (
+			private_network.start_connection_test,
+			private_network.reserve_host,
+			private_network.save_public_address,
+		):
+			with self.subTest(fn=fn.__name__):
+				self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[fn], ["POST"])

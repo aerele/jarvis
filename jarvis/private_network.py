@@ -181,7 +181,7 @@ def private_setup_targets() -> dict:
 	return {"admin_host": host, "admin_ips": _resolve_ipv4(host)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_public_address(address: str = "") -> dict:
 	"""Validate the customer's public address and make this bench a private one: sets
 	``network_mode`` to Private and stores the canonical address. ``set_single_value`` and not
@@ -223,7 +223,7 @@ def _reserve_refusal(err) -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reserve_host() -> dict:
 	"""The host admin holds for this customer: ``{ok, host_ip, reach_url, hold_until}``.
 
@@ -293,16 +293,21 @@ def run_outbound_check(reach_url: str, *, timeout_s: int = OUTBOUND_TIMEOUT_S) -
 		hostname = parts.hostname
 	except (ValueError, AttributeError):
 		return {"ok": False, "reason": "bad_target"}
-	if parts.scheme not in allowed or not hostname:
+	if parts.scheme not in allowed or not hostname or parts.username or parts.password:
 		return {"ok": False, "reason": "bad_target"}
 	try:
-		response = requests.get(
-			reach_url,
-			timeout=timeout_s,
-			allow_redirects=False,
-			stream=True,
-			headers={"User-Agent": "jarvis-bench-reach-check/1"},
-		)
+		# trust_env off: an env proxy or ~/.netrc must not change what is being tested.
+		# The tuple is (connect, read): the worst case is their sum, 2 x timeout_s.
+		with requests.Session() as session:
+			session.trust_env = False
+			response = session.get(
+				reach_url,
+				timeout=(timeout_s, timeout_s),
+				allow_redirects=False,
+				stream=True,
+				headers={"User-Agent": "jarvis-bench-reach-check/1"},
+			)
+			response.close()
 	except requests.exceptions.SSLError:
 		return {"ok": False, "reason": "tls"}
 	except requests.exceptions.Timeout:
@@ -311,11 +316,10 @@ def run_outbound_check(reach_url: str, *, timeout_s: int = OUTBOUND_TIMEOUT_S) -
 		return {"ok": False, "reason": _connection_reason(e)}
 	except requests.exceptions.RequestException:
 		return {"ok": False, "reason": "bad_target"}
-	response.close()
 	return {"ok": True, "reason": "ok"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def start_connection_test() -> dict:
 	"""Start both halves of the connection test at once (design 6.1).
 
@@ -344,8 +348,13 @@ def start_connection_test() -> dict:
 
 def _is_unknown_check(err) -> bool:
 	"""Admin answers an unknown or foreign check name with a bare 404: a rejection with no
-	contract code (every coded refusal arrives as ``AdminContractError``)."""
-	return isinstance(err, AdminValidationError) and not isinstance(err, AdminContractError)
+	contract code (every coded refusal arrives as ``AdminContractError``). Only a
+	``DoesNotExistError`` counts; any other uncoded rejection gets the generic copy."""
+	return (
+		isinstance(err, AdminValidationError)
+		and not isinstance(err, AdminContractError)
+		and getattr(err, "exc_type", None) == "DoesNotExistError"
+	)
 
 
 @frappe.whitelist()
