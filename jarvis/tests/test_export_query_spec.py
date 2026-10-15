@@ -10,6 +10,7 @@ server-side, complete, under the same permission gates.
 from __future__ import annotations
 
 import contextlib
+import importlib
 import io
 from unittest import mock
 
@@ -17,9 +18,12 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from openpyxl import load_workbook
 
-from jarvis.exceptions import InvalidArgumentError, NoDataError, PermissionDeniedError
-from jarvis.tools._export import resolvers
+from jarvis.exceptions import ExportTooSlowError, InvalidArgumentError, NoDataError, PermissionDeniedError
+from jarvis.tools._export import resolvers, save_export_file
 from jarvis.tools.export_query import export_query
+
+# The module, not the function of the same name that the import above binds.
+export_module = importlib.import_module("jarvis.tools.export_query")
 
 PFX = "xqs-"
 TOTAL = 230  # past query's 200-row guard and the ~100-row chat cut
@@ -55,6 +59,26 @@ def _sheet(env: dict) -> list[tuple]:
 	content = frappe.get_doc("File", env["name"]).get_content()
 	wb = load_workbook(io.BytesIO(content if isinstance(content, bytes) else content.encode()))
 	return list(wb.worksheets[0].iter_rows(values_only=True))
+
+
+class _Clock:
+	"""Stands in for ``time`` in export_query: it only moves when a test says so."""
+
+	def __init__(self):
+		self.now = 1000.0
+
+	def monotonic(self) -> float:
+		return self.now
+
+	def after(self, seconds: float, real):
+		"""``real`` wrapped so the clock has moved ``seconds`` once it has run."""
+
+		def run(*args, **kwargs):
+			result = real(*args, **kwargs)
+			self.now += seconds
+			return result
+
+		return run
 
 
 def _seed() -> None:
@@ -112,9 +136,14 @@ class TestExportQuerySpec(FrappeTestCase):
 		self.assertTrue(text.startswith("Status,Todo Count"), text[:40])
 		self.assertIn(f"Open,{TOTAL}", text)
 
-	def test_a_small_deliberate_limit_still_applies(self):
+	def test_a_small_deliberate_limit_still_applies_and_says_so(self):
 		env = export_query(spec=_no_comment_spec(limit=50))
 		self.assertEqual(env["total"], 50)
+		# The file holds the 50 rows asked for, not the one fetched past them to find out.
+		self.assertEqual(len(_sheet(env)) - 1, 50)
+		self.assertEqual(env["limited_by_spec"], 50)
+		self.assertIn("first 50 rows", env["note"])
+		self.assertIn("without limit", env["note"])
 
 	def test_fails_closed_above_the_ceiling(self):
 		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 10):
@@ -209,8 +238,18 @@ class TestExportQuerySpecLimitsAndHeaders(FrappeTestCase):
 			mock.patch("jarvis.api.statement_time_limit", return_value=contextlib.nullcontext()),
 			mock.patch.object(frappe.db, "sql", side_effect=timed_out),
 		):
-			with self.assertRaisesRegex(InvalidArgumentError, "ran past the 25-second limit"):
+			# The export's own limit (12 s) is the smaller of the two.
+			with self.assertRaisesRegex(ExportTooSlowError, "ran past the 12-second limit"):
 				resolvers.from_spec(_no_comment_spec())
+
+	def test_the_select_limit_is_the_smaller_of_the_agent_and_export_limits(self):
+		for agent_limit, expected in ((25, 12), (5, 5), (0, 0)):  # 0: the site switched limits off
+			with (
+				mock.patch("jarvis.api._agent_read_timeout_s", return_value=agent_limit),
+				mock.patch("jarvis.api.statement_time_limit", return_value=contextlib.nullcontext()) as cap,
+			):
+				resolvers.from_spec(_no_comment_spec())
+			cap.assert_called_once_with(expected)
 
 	def test_the_select_runs_under_the_statement_limit(self):
 		if frappe.db.db_type != "mariadb":
@@ -227,7 +266,28 @@ class TestExportQuerySpecLimitsAndHeaders(FrappeTestCase):
 			) as cap,
 		):
 			resolvers.from_spec(_no_comment_spec())
-		cap.assert_called_with(25)
+		cap.assert_called_with(12)
+
+	def test_a_limit_that_cut_nothing_adds_no_note(self):
+		exact = TOTAL - WITH_COMMENT
+		for limit in (exact, exact + 800):
+			env = export_query(spec=_no_comment_spec(limit=limit))
+			self.assertEqual(env["total"], exact)
+			self.assertNotIn("limited_by_spec", env)
+			self.assertNotIn("note", env)
+
+	def test_a_limit_one_below_the_matches_is_disclosed(self):
+		env = export_query(spec=_no_comment_spec(limit=TOTAL - WITH_COMMENT - 1))
+		self.assertEqual(env["total"], TOTAL - WITH_COMMENT - 1)
+		self.assertEqual(env["limited_by_spec"], TOTAL - WITH_COMMENT - 1)
+
+	def test_a_limit_above_the_ceiling_still_fails_closed(self):
+		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 10):
+			with self.assertRaisesRegex(InvalidArgumentError, "too many to export in full"):
+				export_query(spec=_no_comment_spec(limit=50))
+			# A limit equal to the ceiling is a deliberate cap, not an overflow.
+			env = export_query(spec=_no_comment_spec(limit=10))
+		self.assertEqual((env["total"], env["limited_by_spec"]), (10, 10))
 
 	def test_a_value_cannot_break_out_of_its_quotes(self):
 		# A backslash before a quote ends a MariaDB string early when values are
@@ -330,3 +390,82 @@ class TestExportQuerySpecExportPermission(FrappeTestCase):
 		with mock.patch.object(resolvers, "_run_bounded", return_value=[{"item_code": "X", "amount": 1}]):
 			model = resolvers.from_spec({"from": "Sales Invoice Item", "select": ["item_code", "amount"]})
 		self.assertEqual(model.total, 1)
+
+
+class TestExportQueryDeadline(FrappeTestCase):
+	"""The whole export stays under the plugin's 30 s call abort: past the deadline
+	it is refused BEFORE the File is written, so nothing is orphaned and the agent
+	is told how to narrow it instead of retrying the same heavy query."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_seed()
+
+	@classmethod
+	def tearDownClass(cls):
+		_purge()
+		super().tearDownClass()
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+		self.clock = _Clock()
+
+	def _refused(self, patch_target: str, seconds: float, **call):
+		"""Run an export whose ``patch_target`` step takes ``seconds``; return what the
+		refusal did: the telemetry outcome, the File count change, and save calls."""
+		real = save_export_file
+		files = frappe.db.count("File")
+		with (
+			mock.patch.object(export_module, "time", self.clock),
+			mock.patch(patch_target, side_effect=self.clock.after(seconds, self._real(patch_target))),
+			mock.patch.object(export_module, "save_export_file", wraps=real) as save,
+			mock.patch("jarvis.telemetry.record_export_event") as event,
+		):
+			with self.assertRaisesRegex(ExportTooSlowError, "no file was saved"):
+				export_query(**call)
+		save.assert_not_called()
+		self.assertEqual(frappe.db.count("File"), files)
+		event.assert_called_once()
+		return event.call_args.kwargs["outcome"]
+
+	@staticmethod
+	def _real(patch_target: str):
+		module, _, name = patch_target.rpartition(".")
+		return getattr(importlib.import_module(module), name)
+
+	def test_a_slow_spec_query_is_refused_before_a_file_is_saved(self):
+		outcome = self._refused(
+			"jarvis.tools._export.resolvers.from_spec", 26, spec=_no_comment_spec(), title="slow"
+		)
+		self.assertEqual(outcome, "too_slow")
+
+	def test_a_slow_doctype_query_is_refused_too(self):
+		outcome = self._refused(
+			"jarvis.tools._export.resolvers.from_query",
+			26,
+			doctype="ToDo",
+			filters={"description": ["like", f"{PFX}%"]},
+			fields=["name"],
+		)
+		self.assertEqual(outcome, "too_slow")
+
+	def test_a_slow_render_is_refused_before_a_file_is_saved(self):
+		mime, render = export_module._FORMATS["xlsx"]
+		slow = self.clock.after(26, render)
+		with mock.patch.dict(export_module._FORMATS, {"xlsx": (mime, slow)}):
+			outcome = self._refused(
+				"jarvis.tools._export.resolvers.from_spec", 0, spec=_no_comment_spec(), title="slow"
+			)
+		self.assertEqual(outcome, "too_slow")
+
+	def test_an_export_inside_the_deadline_is_saved(self):
+		real = resolvers.from_spec
+		with (
+			mock.patch.object(export_module, "time", self.clock),
+			mock.patch.object(resolvers, "from_spec", side_effect=self.clock.after(24, real)),
+		):
+			env = export_query(spec=_no_comment_spec())
+		self.assertEqual(env["total"], TOTAL - WITH_COMMENT)
+		self.assertTrue(frappe.db.exists("File", env["name"]))
