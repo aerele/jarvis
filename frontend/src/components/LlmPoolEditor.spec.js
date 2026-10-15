@@ -1678,3 +1678,30 @@ describe("load() starts its fetches together", () => {
 		expect(w.vm.catalog).toEqual([{ name: "p1" }]);
 	});
 });
+
+describe("first load never waits forever", () => {
+	it("shows the list after 12 s even if the catalog stalls", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		api.getModelCatalogUi.mockImplementation(() => new Promise(() => {}));
+		vi.useFakeTimers();
+		const w = mount(LlmPoolEditor, { props: { editable: true } });
+		await vi.advanceTimersByTimeAsync(11000);
+		expect(w.vm.loaded).toBe(false);
+
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(w.vm.loaded).toBe(true);
+		expect(w.vm.rows).toHaveLength(1);
+		// The catalog is still on its way, so its own line says so.
+		expect(w.text()).toContain("Loading models");
+	});
+
+	it("ends a stalled pool fetch in an error with Retry, not an endless spinner", async () => {
+		api.getLlmConfig.mockImplementation(() => new Promise(() => {}));
+		vi.useFakeTimers();
+		const w = mount(LlmPoolEditor, { props: { editable: true } });
+		await vi.advanceTimersByTimeAsync(13000);
+
+		expect(w.vm.loaded).toBe(true);
+		expect(w.text()).toContain("Retry");
+	});
+});

@@ -2539,6 +2539,9 @@ const catalogReady = computed(() => catalogState.value === "ready");
 // would be a false "No models yet". AiModelsPane reads this through defineExpose
 // to hold one spinner over the whole first load.
 const loaded = ref(false);
+// How long one load() waits on its fetches before it draws what it has.
+const LOAD_WAIT_MS = 12000;
+const TIMED_OUT = Symbol("timed out");
 // Only work that would have to guess a model id waits for the catalog. A row that
 // already names its model (re-authorizing a saved account) never does.
 function needsCatalog(row) {
@@ -5033,6 +5036,14 @@ async function load(opts = {}) {
 	// the catalog fill and the capture rehydrate, which both read rows. Each fetch
 	// starts through .then() so even a synchronous throw stays a caught, non-fatal
 	// failure, as the old one-by-one try blocks treated it. `undefined` = failed.
+	// One wait budget for the whole load, the same 12 s cap AiModelsPane gives its
+	// probe: past it, load() stops WAITING (the fetches still run) and draws what it
+	// has. A late catalog then fills itself in; a late pool leaves the Retry below.
+	let waitTimer;
+	const deadline = new Promise((resolve) => {
+		waitTimer = setTimeout(() => resolve(TIMED_OUT), LOAD_WAIT_MS);
+	});
+	const within = (promise) => Promise.race([promise, deadline]);
 	const catalogDone = loadModelCatalog();
 	const syncAnswer = Promise.resolve()
 		.then(() => api.getLlmSyncStatus())
@@ -5048,7 +5059,9 @@ async function load(opts = {}) {
 				.catch(() => undefined);
 	try {
 		try {
-			cfg.value = (await api.getLlmConfig()) || cfg.value;
+			const answer = await within(api.getLlmConfig());
+			if (answer === TIMED_OUT) throw new Error("Loading your models took too long.");
+			cfg.value = answer || cfg.value;
 			rows.value = carry ? [...seedRows(cfg.value), carry] : seedRows(cfg.value);
 			selectedPreset.value = cfg.value.preset || "";
 			keysByVendor.value = {};
@@ -5119,25 +5132,26 @@ async function load(opts = {}) {
 		// load() - then resumes the SAME capture without a second sign-in. Needs the
 		// rows above, and runs after their clean baseline so a rehydrated capture
 		// reads as the unsaved work it is.
-		await rehydratePendingCaptures();
+		await within(rehydratePendingCaptures());
 		// A sync may already be in flight when the editor mounts (page reload
 		// mid-provisioning, wizard resume via reason llm_pool_provisioning): start
 		// the poller for a pending one - polling only from save() left a resumed
 		// session staring at a permanent "Syncing…" banner that never picked up
 		// the background job's ok/failed flip.
-		const syncNow = await syncAnswer;
-		if (syncNow !== undefined) {
+		const syncNow = await within(syncAnswer);
+		if (syncNow !== undefined && syncNow !== TIMED_OUT) {
 			sync.value = syncNow || sync.value;
 			if (sync.value && sync.value.pending) startPolling();
 		}
 		// presets are optional here: the backend serves its snapshot or []
-		const presets = await presetAnswer;
-		if (presets !== undefined) catalog.value = presets || [];
+		const presets = await within(presetAnswer);
+		if (presets !== undefined && presets !== TIMED_OUT) catalog.value = presets || [];
 		// The catalog may have landed before the rows were seeded, when its own
 		// fillBlankModels() had nothing to fill. Fill again now that rows exist.
-		await catalogDone;
+		await within(catalogDone);
 		if (catalogReady.value) fillBlankModels();
 	} finally {
+		clearTimeout(waitTimer);
 		loaded.value = true;
 	}
 }
