@@ -347,7 +347,8 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 	opacity: 0;
 	transition: opacity 0.12s ease;
 }
-.jv-umsg:hover .jv-msgbar {
+.jv-umsg:hover .jv-msgbar,
+.jv-umsg .jv-msgbar:focus-within {
 	opacity: 1;
 }
 .jv-msgtime {
@@ -483,7 +484,8 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 	opacity: 0;
 	transition: opacity 0.12s ease;
 }
-.jv-amsg:hover :deep(.jv-msgbar) {
+.jv-amsg:hover :deep(.jv-msgbar),
+.jv-amsg :deep(.jv-msgbar:focus-within) {
 	opacity: 1;
 }
 .jv-amsg :deep(.jv-msgtime) {

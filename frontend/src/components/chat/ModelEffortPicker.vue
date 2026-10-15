@@ -36,7 +36,8 @@
 				aria-label="Sign-in expired"
 			/>
 			<!-- kept in layout (visibility, not v-if) so toggling thinkingOverride
-			     does not shift the Enter hint / Send button beside this pill -->
+			     does not shift the Enter hint / Send button beside this pill; on a
+			     phone the hidden label gives its width back (see the 560px rule) -->
 			<span class="mep-dot" :class="{ 'mep-hide': !showEffort }">·</span>
 			<span class="mep-effort" :class="{ 'mep-hide': !showEffort }">{{ effortLabel }}</span>
 			<svg
@@ -300,7 +301,12 @@ const isExpired = (id) => !!id && expiredBare.value.has(bareModel(id));
 // a model id, so it never shows one.
 const pillExpired = computed(() => isExpired(pillModel.value));
 const pillTitle = computed(() => {
-	if (!pillExpired.value) return "Model and effort";
+	// The pill may truncate the model name on a narrow screen, so the tooltip names it.
+	if (!pillExpired.value) {
+		return pillModel.value && pillModel.value !== "Auto"
+			? `Model and effort: ${pillModel.value}`
+			: "Model and effort";
+	}
 	return props.canAddProvider
 		? "Sign-in expired. Reconnect it in AI models."
 		: "Sign-in expired. Ask your workspace admin to reconnect it.";
@@ -407,6 +413,8 @@ watch(open, (isOpen) => {
 .mep {
 	position: relative;
 	display: inline-flex;
+	/* shrinks before the composer's send button does; the model name truncates */
+	min-width: 0;
 }
 
 /* ---- trigger pill (matches the composer's neutral chrome) ---- */
@@ -425,6 +433,11 @@ watch(open, (isOpen) => {
 	font-size: 12px;
 	font-weight: 500;
 	transition: background-color 0.12s, border-color 0.12s;
+	min-width: 0;
+	max-width: 100%;
+}
+.mep-pill > svg {
+	flex-shrink: 0;
 }
 .mep-pill:hover {
 	background: var(--surface-2);
@@ -434,6 +447,7 @@ watch(open, (isOpen) => {
 	outline-offset: 2px;
 }
 .mep-model {
+	min-width: 0;
 	max-width: 22ch;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -603,6 +617,11 @@ watch(open, (isOpen) => {
 	background: var(--surface-1);
 }
 @media (max-width: 560px) {
+	/* On a phone the room matters more than avoiding a shift: a hidden effort
+	   label stops reserving its width. */
+	.mep-hide {
+		display: none;
+	}
 	.mep-flyout {
 		position: static;
 		width: auto;
