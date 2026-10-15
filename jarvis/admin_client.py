@@ -774,7 +774,7 @@ def signup(
 	if private_address:
 		# Contract 4.2: network_mode only in Private mode, with the capability that admin
 		# requires for it (CLIENT_UPGRADE_REQUIRED otherwise). frappe_site_url above is
-		# already the public address via _public_origin.
+		# the customer's ``private_address``, not the browser origin.
 		body["network_mode"] = "private"
 		body["client_capabilities"] = {
 			**_client_capabilities(),
@@ -3092,7 +3092,8 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 	# code and retry_after_seconds itself).
 	if resp.status_code != 429:
 		contract = _contract_error(payload)
-		if contract.get("code") in _PRIVATE_NETWORK_CODES:
+		code = contract.get("code")
+		if isinstance(code, str) and code in _PRIVATE_NETWORK_CODES:
 			raise _rejection(
 				_envelope_message() or f"admin returned {resp.status_code}",
 				payload=payload,

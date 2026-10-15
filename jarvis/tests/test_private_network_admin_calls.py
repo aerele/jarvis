@@ -119,6 +119,7 @@ class TestRefusalsReachTheBenchWithTheirCode(FrappeTestCase):
 				with self.assertRaises(AdminContractError) as caught:
 					self._do_post(status, _thrown(exc_type, code, f"Sentence for {code}."))
 				self.assertEqual(caught.exception.code, code)
+				self.assertEqual(caught.exception.http_status, status)
 				self.assertEqual(str(caught.exception), f"Sentence for {code}.")
 
 	def test_a_403_refusal_is_not_an_auth_failure(self):
@@ -162,3 +163,14 @@ class TestRefusalsReachTheBenchWithTheirCode(FrappeTestCase):
 		with self.assertRaises(AdminContractError) as caught:
 			self._do_post(409, body)
 		self.assertEqual(caught.exception.code, "EMAIL_NOT_CONFIRMED")
+
+	def test_a_200_with_a_top_level_private_code_is_a_refusal(self):
+		body = {"error": {"code": "PRIVATE_ADDRESS_TAKEN", "message": "Taken."}}
+		with self.assertRaises(AdminContractError) as caught:
+			self._do_post(200, body)
+		self.assertEqual(caught.exception.code, "PRIVATE_ADDRESS_TAKEN")
+
+	def test_an_unhashable_code_does_not_break_the_error_ladder(self):
+		body = {"exc_type": _INVALID, "error": {"code": ["x"], "message": "bad"}}
+		with self.assertRaises(AdminValidationError):
+			self._do_post(400, body)
