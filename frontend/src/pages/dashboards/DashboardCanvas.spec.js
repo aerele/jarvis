@@ -370,13 +370,15 @@ describe("saved dashboard refresh", () => {
 	});
 });
 
-
 describe("refresh with an older request still in flight", () => {
 	it("ignores the previous frame's data and keeps the new frame loading", async () => {
 		let finishOld;
-		api.runDashboardSource.mockImplementationOnce(() => new Promise((resolve) => {
-			finishOld = resolve;
-		}));
+		api.runDashboardSource.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishOld = resolve;
+				})
+		);
 		const w = mount(DashboardCanvas, {
 			attachTo: document.body,
 			props: { mode: "view", html: "live sources", dashboard: { name: "d1" } },
