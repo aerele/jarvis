@@ -407,25 +407,59 @@ describe("the two-way test", () => {
 		expect(net.state.test.err).toBe("Not yours.");
 	});
 
-	it("markCleared releases the checkout hold", () => {
+	it("markCleared releases the checkout hold", async () => {
 		const { net } = make();
+		net.state.publicAddress = "https://8.8.8.8";
+		await net.loadHold();
 		expect(net.holdsCheckout.value).toBe(true);
 		net.markCleared();
 		expect(net.holdsCheckout.value).toBe(false);
 	});
 
-	it("a cleared checkout survives a reload and the pay-page round trip (it is stored)", () => {
+	it("a cleared checkout survives a reload, but only once the hold and address load and match", async () => {
 		const store = new Map();
 		const storage = { get: (k) => store.get(k) ?? null, set: (k, v) => store.set(k, v) };
 		const first = make({}, { storage });
+		first.net.state.publicAddress = "https://8.8.8.8";
+		await first.net.loadHold();
 		expect(first.net.holdsCheckout.value).toBe(true);
 		first.net.markCleared();
 		const reloaded = make({}, { storage });
+		// Fails closed until both sides have loaded.
+		expect(reloaded.net.holdsCheckout.value).toBe(true);
+		expect(reloaded.net.clearedPending.value).toBe(true);
+		reloaded.net.state.publicAddress = "https://8.8.8.8";
+		await reloaded.net.loadHold();
+		reloaded.net.state.statusLoaded = true;
+		expect(reloaded.net.clearedPending.value).toBe(false);
 		expect(reloaded.net.state.cleared).toBe(true);
 		expect(reloaded.net.holdsCheckout.value).toBe(false);
 	});
 
-	it("storage that throws neither breaks creation nor markCleared", () => {
+	it("after a reload a moved hold raises hold-ended from the stored IP and clears the flag", async () => {
+		const storage = {
+			get: () => "203.0.113.9|https://8.8.8.8",
+			set: vi.fn(),
+		};
+		const { net } = make({}, { storage });
+		net.state.publicAddress = "https://8.8.8.8";
+		await net.loadHold();
+		expect(net.state.holdEnded).toEqual({ oldIp: "203.0.113.9", newIp: HOLD.host_ip });
+		expect(net.state.cleared).toBe(false);
+		expect(net.holdsCheckout.value).toBe(true);
+	});
+
+	it("a failed hold load is held, not pending", async () => {
+		const storage = { get: () => `${HOLD.host_ip}|https://8.8.8.8`, set: () => {} };
+		const { net } = make({ reserveHost: vi.fn(async () => ({ ok: false, code: "X", message: "no" })) }, { storage });
+		net.state.publicAddress = "https://8.8.8.8";
+		await net.loadHold();
+		net.state.statusLoaded = true;
+		expect(net.clearedPending.value).toBe(false);
+		expect(net.holdsCheckout.value).toBe(true);
+	});
+
+	it("storage that throws neither breaks creation nor markCleared", async () => {
 		const storage = {
 			get: () => {
 				throw new Error("blocked");
@@ -435,6 +469,8 @@ describe("the two-way test", () => {
 			},
 		};
 		const { net } = make({}, { storage });
+		net.state.publicAddress = "https://8.8.8.8";
+		await net.loadHold();
 		expect(net.state.cleared).toBe(false);
 		net.markCleared();
 		expect(net.holdsCheckout.value).toBe(false);

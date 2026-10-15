@@ -1433,6 +1433,14 @@
 									</div>
 								</div>
 							</template>
+<template v-else-if="checkingServer">
+								<div class="ob-body">
+									<div class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5" role="status">
+										<JvSpinner :size="20" />
+										Checking your server…
+									</div>
+								</div>
+							</template>
 							<!-- Private network (design §3 steps 7-9): the email is confirmed and admin has set
 								 a server aside. The customer allows it in their firewall and tests the connection
 								 BEFORE paying; "Continue to payment" appears only when both halves pass. The
@@ -1501,9 +1509,9 @@
 								</div>
 								<div class="ob-foot">
 									<span v-if="testWait > 0" class="text-p-sm text-ink-gray-5" role="status">
-											Try again in {{ testWait }}s
-										</span>
-										<span v-else></span>
+										Try again in {{ testWait }}s
+									</span>
+									<span v-else></span>
 									<Button
 										v-if="privateTestsPassed"
 										variant="solid"
@@ -1521,7 +1529,7 @@
 									/>
 								</div>
 							</template>
-								<!-- Confirming: the customer paid on the admin-hosted page and came
+							<!-- Confirming: the customer paid on the admin-hosted page and came
 								 back, and we are asking the control plane whether it landed. Money
 								 has left them and no verdict exists yet.
 								 jarvis#728: this used to render PaymentConfirmingArt here, but the
@@ -4230,8 +4238,25 @@ const payBusyView = computed(
 // recovery card on purpose: the machine is UNKNOWN with a token here, and that card would
 // offer to go straight to checkout.
 const confirmingReturn = ref(false); // the customer is back from the pay page (declared here: the step reads it)
+const onPayableCard = computed(
+	() => !payBusyView.value && !confirmingReturn.value && canNavigateToPay(pay.value)
+);
+// A stored "tested OK" is waiting for the hold and the saved address to load (a reload after the
+// pay-page round trip). Fail closed: checkout stays held meanwhile and the recovery card's
+// RESUME / retry are replaced by a short check, so nothing leaves for rules about an old host.
+const checkingServer = computed(() => net.clearedPending.value && onPayableCard.value);
 const showPrivateServerStep = computed(
-	() => holdsCheckout.value && !payBusyView.value && !confirmingReturn.value && canNavigateToPay(pay.value)
+	() => holdsCheckout.value && !net.clearedPending.value && onPayableCard.value
+);
+watch(
+	checkingServer,
+	(on) => {
+		if (on) {
+			net.loadHold();
+			net.loadStatus();
+		}
+	},
+	{ immediate: true }
 );
 const serverRows = computed(() =>
 	net.state.hold

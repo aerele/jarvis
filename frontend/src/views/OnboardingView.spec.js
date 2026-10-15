@@ -2320,8 +2320,41 @@ describe("private network: allow the held server, then test, then pay", () => {
 		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
 		const w = await atAllowServer();
 		expect(w.vm.showPrivateServerStep).toBe(false);
-		expect(api.reserveHost).not.toHaveBeenCalled();
+		expect(api.reserveHost).toHaveBeenCalledTimes(1); // re-read, to be sure it is still the same server
 		expect(w.text()).not.toContain("Allow your Jarvis server");
+		expect(w.text()).not.toContain("Checking your server");
+		await buttonByLabel(w, "Continue to payment").trigger("click");
+		await flushPromises();
+		expect(assign).toHaveBeenCalledWith("https://fleet.klerk.in/jarvis-checkout#t=tok_1");
+	});
+
+	it("after a reload a moved hold never reaches checkout: a check first, then the new server with the hold-ended notice", async () => {
+		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
+		let release;
+		api.reserveHost.mockImplementationOnce(
+			() =>
+				new Promise((r) => {
+					release = () =>
+						r({
+							ok: true,
+							host_ip: "198.51.100.45",
+							reach_url: "https://reach.h5.fleet.example/",
+							hold_until: "2026-10-20 09:10:00",
+						});
+				})
+		);
+		const w = await atAllowServer();
+		expect(w.text()).toContain("Checking your server");
+		expect(w.vm.showPrivateServerStep).toBe(false);
+		expect(w.vm.flow.navigateToPay()).toBe(false);
+		expect(assign).not.toHaveBeenCalled();
+		release();
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(true);
+		expect(w.text()).toContain("198.51.100.45");
+		expect(w.find('banner-stub[title="Your server hold has ended"]').exists()).toBe(true);
+		expect(w.vm.net.state.cleared).toBe(false);
+		expect(assign).not.toHaveBeenCalled();
 	});
 
 	it("a lost cleared flag does not show the screen to a customer returning from checkout", async () => {

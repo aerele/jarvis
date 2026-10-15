@@ -105,6 +105,7 @@ export function createPrivateNetwork(deps) {
 		holdEnded: null, // { oldIp, newIp }
 		test: freshTest(),
 		clearedFor: readCleared(),
+		holdFresh: false, // loadHold succeeded in this page life (a seeded hold is not fresh)
 	});
 
 	// A bench is "private" when it has no public host (it may take the private route) or has
@@ -112,18 +113,24 @@ export function createPrivateNetwork(deps) {
 	const privateBench = computed(() => !state.hostOk || state.mode === "private");
 	const complete = computed(() => state.mode === "private");
 	const onboardingHostOk = computed(() => state.hostOk || state.mode === "private");
-	// Cleared means: a flag exists AND it still names the hold and address in force. An unknown
-	// side (hold or address not loaded yet) is not a mismatch; a known one that differs is.
+	// Cleared means: a stored pair exists AND this page life has loaded the hold (non-empty
+	// host IP) and the saved address, AND both equal the pair. Fails closed: a side that has not
+	// loaded counts as held, so a RESUME or retry after a reload can never go to checkout
+	// against rules for an old host.
 	const cleared = computed(() => {
 		const key = state.clearedFor;
 		if (!key) return false;
 		const cut = key.indexOf("|");
-		const ip = key.slice(0, cut);
-		const addr = key.slice(cut + 1);
-		if (state.hold && state.hold.hostIp && state.hold.hostIp !== ip) return false;
-		if (state.publicAddress && state.publicAddress !== addr) return false;
-		return true;
+		if (!state.holdFresh || !state.hold || !state.hold.hostIp || !state.publicAddress) return false;
+		return state.hold.hostIp === key.slice(0, cut) && state.publicAddress === key.slice(cut + 1);
 	});
+	// A stored pair is waiting for the hold and the address to load, and neither load has failed.
+	const clearedPending = computed(
+		() =>
+			privateBench.value &&
+			!!state.clearedFor &&
+			((!state.holdFresh && !state.holdErr) || !state.statusLoaded)
+	);
 	state.cleared = cleared; // a ref on a reactive object reads as its value
 	const holdsCheckout = computed(() => privateBench.value && !cleared.value);
 	const draftError = computed(() => {
@@ -282,10 +289,14 @@ export function createPrivateNetwork(deps) {
 			}
 			const next = { hostIp: r.host_ip, reachUrl: r.reach_url || "", holdUntil: r.hold_until || null };
 			const prev = state.hold;
-			if (prev && prev.hostIp && prev.hostIp !== next.hostIp) {
+			// After a reload there is no previous hold in memory: the stored cleared pair names
+			// the server the customer was last tested against.
+			const prevIp = prev && prev.hostIp ? prev.hostIp : state.clearedFor.split("|")[0];
+			state.holdFresh = true;
+			if (prevIp && prevIp !== next.hostIp) {
 				// The rules the customer set up named the old address: nothing about the
 				// previous results holds any more.
-				state.holdEnded = { oldIp: prev.hostIp, newIp: next.hostIp };
+				state.holdEnded = { oldIp: prevIp, newIp: next.hostIp };
 				clearCleared();
 				resetTest();
 			}
@@ -422,6 +433,7 @@ export function createPrivateNetwork(deps) {
 		complete,
 		onboardingHostOk,
 		holdsCheckout,
+		clearedPending,
 		draftError,
 		testsPassed,
 		loadStatus,
