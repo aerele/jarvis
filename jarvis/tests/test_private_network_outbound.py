@@ -27,6 +27,12 @@ def _response(status=200):
 
 
 class TestRunOutboundCheck(FrappeTestCase):
+	def setUp(self):
+		# Hermetic on any dev site: tests that need test mode on set it themselves.
+		conf = patch.dict(frappe.conf, {"jarvis_private_network_test_mode": 0}, clear=False)
+		conf.start()
+		self.addCleanup(conf.stop)
+
 	def _run(self, get_effect=None, status=200, url=REACH):
 		with patch("requests.Session.get", side_effect=get_effect, return_value=_response(status)) as get:
 			out = private_network.run_outbound_check(url)
@@ -99,6 +105,10 @@ class TestRunOutboundCheck(FrappeTestCase):
 
 class _Fresh(FrappeTestCase):
 	def setUp(self):
+		# Hermetic on any dev site: tests that need test mode on set it themselves.
+		conf = patch.dict(frappe.conf, {"jarvis_private_network_test_mode": 0}, clear=False)
+		conf.start()
+		self.addCleanup(conf.stop)
 		frappe.set_user("Administrator")
 		self.addCleanup(frappe.set_user, "Administrator")
 		self._saved = frappe.db.get_single_value("Jarvis Settings", onboarding_contract.CONTEXT_FIELD)
