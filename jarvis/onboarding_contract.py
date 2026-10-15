@@ -27,6 +27,7 @@ executable half of this file's claims - see its PROVENANCE.md.
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import secrets
 from urllib.parse import urlsplit
@@ -808,3 +809,61 @@ def failure(error: dict, status: int, *, context: dict | None = None) -> dict:
 	status is a failure every reader has to be told about out of band."""
 	frappe.local.response.http_status_code = status
 	return {"ok": False, "error": error, "context": wire(context)}
+
+
+# --------------------------------------------------------------------------- #
+# private-network host hold (design spec 8.2)
+# --------------------------------------------------------------------------- #
+#: Context key for the fleet host admin set aside for a private-network customer:
+#: ``{host_ip, reach_url, hold_until}``. Non-secret by construction (the customer is told
+#: this IP so their network team can allow it) and written only from admin's own answers, so
+#: the outbound connection test can take its target from here and never from the browser.
+PRIVATE_HOLD_KEY = "private_hold"
+
+
+def _clean_hold(hold) -> dict:
+	"""The three hold fields, validated, or ``{}``. An IP that is not an address literal, or
+	a ``reach_url`` that is not http(s) with a host, is dropped rather than stored (which
+	includes a legacy tenant host admin knows by no address: both fields come back empty)."""
+	if not isinstance(hold, dict):
+		return {}
+	host_ip = str(hold.get("host_ip") or "").strip()
+	reach_url = str(hold.get("reach_url") or "").strip()
+	try:
+		ipaddress.ip_address(host_ip)
+		parts = urlsplit(reach_url)
+		hostname = parts.hostname
+	except ValueError:
+		return {}
+	if parts.scheme not in ("https", "http") or not hostname:
+		return {}
+	return {"host_ip": host_ip, "reach_url": reach_url, "hold_until": hold.get("hold_until") or None}
+
+
+def private_hold() -> dict:
+	"""The stored hold, or ``{}``."""
+	return _clean_hold(load().get(PRIVATE_HOLD_KEY))
+
+
+def store_private_hold(hold) -> dict:
+	"""Remember a hold (or, given a falsy or invalid one, forget it) and return what is now
+	stored. Writes only when something changed: the wizard polls every couple of seconds and
+	each poll re-reports the same hold."""
+	clean = _clean_hold(hold)
+	context = load()
+	if _clean_hold(context.get(PRIVATE_HOLD_KEY)) == clean:
+		return clean
+	if clean:
+		context[PRIVATE_HOLD_KEY] = clean
+	else:
+		context.pop(PRIVATE_HOLD_KEY, None)
+	save(context)
+	return clean
+
+
+def absorb_private_hold(payload) -> None:
+	"""Fold ``private_hold`` from a signup poll answer into the context. Present and valid:
+	stored. Present and null or malformed: forgotten, so an expired hold is not shown as
+	live. Absent (a public customer, an older admin): left alone."""
+	if isinstance(payload, dict) and PRIVATE_HOLD_KEY in payload:
+		store_private_hold(payload.get(PRIVATE_HOLD_KEY))

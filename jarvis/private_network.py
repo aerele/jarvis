@@ -16,6 +16,7 @@ import socket
 from urllib.parse import urlsplit
 
 import frappe
+from frappe.utils import get_datetime, now_datetime
 
 from jarvis import admin_client, onboarding_contract
 from jarvis.exceptions import AdminRateLimitedError, AdminUnreachableError
@@ -182,3 +183,56 @@ def save_public_address(address: str = "") -> dict:
 		update_modified=False,
 	)
 	return {"ok": True, "public_address": normalized}
+
+
+_NO_ADDRESS = "Jarvis could not get the address of your server. Please contact support."
+
+
+def _hold_is_live(hold: dict) -> bool:
+	"""A stored hold that can still be shown: not yet expired, or a tenant's own host
+	(``hold_until`` null), which admin never expires."""
+	until = hold.get("hold_until")
+	if not until:
+		return bool(hold)
+	try:
+		return get_datetime(until) > now_datetime()
+	except (ValueError, TypeError):
+		return False
+
+
+def _reserve_refusal(err) -> dict:
+	"""``_refusal``, except that a rate limit with a live stored hold is answered from the
+	store: admin counts every reserve call (10 per hour), even a read of a live hold, and
+	the SPA calls this on every screen entry and retry."""
+	out = _refusal(err)
+	if out["code"] == "RATE_LIMITED_PRIVATE_NETWORK":
+		stored = onboarding_contract.private_hold()
+		if stored and _hold_is_live(stored):
+			return {"ok": True, **stored, "cached": True}
+	return out
+
+
+@frappe.whitelist()
+def reserve_host() -> dict:
+	"""The host admin holds for this customer: ``{ok, host_ip, reach_url, hold_until}``.
+
+	Admin makes the hold when the email link is clicked, and here if that job has not run
+	yet. A repeat call during a live hold returns the same hold; for a customer who already
+	has a tenant it returns that tenant's host with ``hold_until`` null. The answer is stored
+	in the signup context so ``start_connection_test`` reads its outbound target from admin's
+	own words, never from the browser. The SPA calls this on entering the AllowServer screen
+	and the Connect panel, which is also what refreshes a hold that expired meanwhile."""
+	require_jarvis_admin()
+	try:
+		raw = admin_client.reserve_private_host()
+	except _ADMIN_ERRORS as e:
+		return _reserve_refusal(e)
+	hold = onboarding_contract.store_private_hold(raw)
+	if hold:
+		return {"ok": True, **hold}
+	if isinstance(raw, dict) and not raw.get("host_ip") and not raw.get("reach_url"):
+		# A tenant host admin has no public address for: not a malformed answer.
+		message = _NO_ADDRESS
+	else:
+		message = _UNEXPECTED
+	return {"ok": False, "code": onboarding_contract.BENCH_ADMIN_REJECTED, "message": message}

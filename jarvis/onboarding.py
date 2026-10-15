@@ -1281,6 +1281,9 @@ def _absorb_signup_state(data: dict, *, from_check: bool = False) -> dict:
 	``onboarding_contract.absorb_check``."""
 	if not isinstance(data, dict):
 		return onboarding_contract.load()
+	# Private network: the poll that follows the email click carries the held host
+	# (data.private_hold, contract 4.4). Stored before the context is read back below.
+	onboarding_contract.absorb_private_hold(data)
 	if data.get("customer_password"):
 		write_connection({"customer_password": data["customer_password"]})
 	if from_check:
