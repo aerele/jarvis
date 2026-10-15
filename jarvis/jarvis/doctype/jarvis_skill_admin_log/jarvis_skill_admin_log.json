@@ -22,7 +22,7 @@
    "fieldname": "verb",
    "fieldtype": "Select",
    "label": "Verb",
-   "options": "hold\nrelease\ndelete\nhandover",
+   "options": "hold\nrelease\ndelete\nhandover\nedit",
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,
