@@ -4,23 +4,15 @@ Spec: ``docs/superpowers/specs/2026-08-16-role-profile-agents-design.md``.
 
 Two independent axes, both curated data (spec §5), never runtime discovery:
 
-<<<<<<< HEAD
-* **Tool tier**: the jarvis-plane role decides ``full`` (today's 96 tools)
-  vs ``standard`` (67 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
+* **Tool tier**: the jarvis-plane role decides ``full`` (today's 97 tools)
+  vs ``standard`` (68 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
   list). Spec §3 sized these 68/26; ``session_status`` was later pulled to the
   drop list (denied fleet-wide for the white-label leak, not a tier call), and
   ``memory_get`` / ``memory_search`` were pulled to the drop list (native
   cross-user memory, denied fleet-wide by the fleet-agent; Jarvis uses per-user
   bench-owned memory), and the per-user memory tools (``jarvis__remember`` /
-  ``jarvis__recall``) joined the allow list, so the split is 67/29 of 96.
-=======
-* **Tool tier**: the jarvis-plane role decides ``full`` (today's 99 tools)
-  vs ``standard`` (70 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
-  list), 99 in all. Since spec §3's 68/26: the fleet-denied built-ins
-  (``session_status``, native ``memory_get`` / ``memory_search``) moved to the
-  drop list, and the MCP connector tools plus the per-user memory tools
-  (``jarvis__remember`` / ``jarvis__recall``) joined the allow list.
->>>>>>> 0f54379 (feat(tools): get_comments, read a record's comments under Desk's rule)
+  ``jarvis__recall``) joined the allow list, so the split is 68/29 of 97. ``jarvis__get_comments`` (the read side of
+  ``add_comment``) joined the allow list after that.
 * **Skill set**: ERPNext roles decide which of the 6 named skill sets
   (``SKILL_SETS``), plus the always-on ``SHARED_CORE_SKILLS``, a user's
   profile includes.
@@ -93,20 +85,10 @@ STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 	}
 )
 
-<<<<<<< HEAD
-# The full 96-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
+# The full 97-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
 # sorted (spec §2 evidence capture: ~/.claude/jobs/bce488ac/tmp/postfix-cap.jsonl).
 # An allow list must be explicit here: deriving it at runtime from a live
 # agent container is not possible bench-side.
-=======
-# The full 99-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
-# sorted (spec §2 evidence capture: ~/.claude/jobs/bce488ac/tmp/postfix-cap.jsonl,
-# plus jarvis__call_connector / jarvis__list_connector_actions added after the
-# MCP connectors feature landed - a standard-tier user gets both like any other
-# jarvis tool; the delegate gate and each connector's own configuration are the
-# actual authority, not tier membership). An allow list must be explicit here:
-# deriving it at runtime from a live agent container is not possible bench-side.
->>>>>>> 0f54379 (feat(tools): get_comments, read a record's comments under Desk's rule)
 _STANDARD_TOOLS_ALLOW = [
 	"agents_list",
 	"canvas",
@@ -180,20 +162,12 @@ _STANDARD_TOOLS_ALLOW = [
 
 
 def standard_tools_allow() -> list[str]:
-<<<<<<< HEAD
-	"""The 67-tool allow list for the ``standard`` tier (spec §3 sized 68;
+	"""The 68-tool allow list for the ``standard`` tier (spec §3 sized 68;
 	session_status pulled to the drop list for the fleet-wide white-label deny;
 	memory_get/memory_search pulled to the drop list for the fleet-wide native
 	cross-user memory deny; the per-user bench memory tools remember/recall
-	added so standard-tier memory works)."""
-=======
-	"""The 70-tool allow list for the ``standard`` tier (spec §3 sized 68;
-	session_status pulled to the drop list for the fleet-wide white-label deny;
-	the two MCP connector tools added after; memory_get/memory_search pulled to
-	the drop list for the fleet-wide native cross-user memory deny; the per-user
-	bench memory tools remember/recall added so standard-tier memory works;
+	added so standard-tier memory works;
 	get_comments added as the read side of add_comment)."""
->>>>>>> 0f54379 (feat(tools): get_comments, read a record's comments under Desk's rule)
 	return list(_STANDARD_TOOLS_ALLOW)
 
 
