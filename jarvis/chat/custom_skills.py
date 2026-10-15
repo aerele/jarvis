@@ -545,6 +545,14 @@ def is_pushable_org_row(name: str) -> bool:
 	return bool(rows) and name not in role_restricted_names(rows)
 
 
+def set_skill_raw(name: str, field_or_values, value=None, *, update_modified: bool = False) -> None:
+	"""Raw (validate()-bypassing) write to Jarvis Custom Skill ``name``, in
+	``frappe.db.set_value``'s two call shapes: ``(field, value)`` or ``{field: value}``.
+	This line has no pushable-rows memo, so there is nothing to clear after it."""
+	values = field_or_values if isinstance(field_or_values, dict) else {field_or_values: value}
+	frappe.db.set_value("Jarvis Custom Skill", name, values, update_modified=update_modified)
+
+
 def build_push_payload(
 	owner: str | None = None, strict: bool = False, *, log_truncation: bool = True
 ) -> list[dict]:
