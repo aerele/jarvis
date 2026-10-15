@@ -98,7 +98,9 @@
 								label="Refresh"
 								iconLeft="refresh-cw"
 								:loading="canvasRef?.loading"
-								:disabled="!builderHtml || !canvasRef || canvasRef?.loading || repairing"
+								:disabled="
+									!builderHtml || !canvasRef || canvasRef?.loading || repairing
+								"
 								@click="refreshData"
 							/>
 							<!-- named render theme - the dashboard's look, not the app's -->
@@ -377,7 +379,8 @@ const saveOpen = ref(false);
 const chatPane = ref(null);
 const canvasRef = ref(null);
 function refreshData() {
-	if (!builderHtml.value || !canvasRef.value || canvasRef.value.loading || repairing.value) return;
+	if (!builderHtml.value || !canvasRef.value || canvasRef.value.loading || repairing.value)
+		return;
 	builderFilterErrors.value = {};
 	canvasRef.value.rebuild();
 }
