@@ -164,7 +164,14 @@ test("the builder tab is v-show, so the chat pane keeps its socket listener", ()
 test("coming back to the builder re-drives the canvas that rendered hidden", () => {
 	// v-show means the iframe loads at 0x0 behind display:none; ECharts sized
 	// against a zero-width container draws nothing and never self-heals.
-	assert.match(canvasSrc, /defineExpose\(\{ exportAs, rebuild \}\)/);
+	// Additional exposed state (such as loading for Refresh) must not break
+	// this contract: the host still needs the export and rebuild methods.
+	const exposed = (canvasSrc.match(/defineExpose\(\{([^}]+)\}\)/)?.[1] || "")
+		.split(",")
+		.map((name) => name.trim());
+	for (const name of ["exportAs", "rebuild"]) {
+		assert.ok(exposed.includes(name), `DashboardCanvas must expose ${name}`);
+	}
 	assert.match(pageSrc, /<DashboardCanvas\n\t+ref="canvasRef"/);
 	const watcher = pageSrc.slice(pageSrc.indexOf("watch(\n\tactiveTab,"));
 	assert.notEqual(watcher, "", "the page must watch the active tab");
