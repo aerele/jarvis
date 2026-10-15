@@ -329,9 +329,18 @@ test("a private setup that cannot reach admin or is rate limited gets setup copy
 		assert.ok(!/payment/i.test(priv.headline + priv.body), code);
 		assert.deepEqual(priv.actions, pub.actions, code);
 	}
-	assert.equal(copyFor(CODES.BENCH_ADMIN_UNREACHABLE, { privateSetup: true }).headline, "We can't reach Jarvis right now.");
-	assert.equal(copyFor(CODES.BENCH_RATE_LIMITED, { privateSetup: true }).headline, "Too many attempts.");
+	assert.equal(
+		copyFor(CODES.BENCH_ADMIN_UNREACHABLE, { privateSetup: true }).headline,
+		"We can't reach Jarvis right now."
+	);
+	assert.equal(
+		copyFor(CODES.BENCH_RATE_LIMITED, { privateSetup: true }).headline,
+		"Too many attempts."
+	);
 	// Every other code, and any unknown one, is untouched by the flag.
-	assert.equal(copyFor(CODES.PAYMENT_DECLINED, { privateSetup: true }), copyFor(CODES.PAYMENT_DECLINED));
+	assert.equal(
+		copyFor(CODES.PAYMENT_DECLINED, { privateSetup: true }),
+		copyFor(CODES.PAYMENT_DECLINED)
+	);
 	assert.equal(copyFor("SOMETHING_NEW", { privateSetup: true }), UNKNOWN_COPY);
 });

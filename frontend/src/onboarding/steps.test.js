@@ -295,8 +295,17 @@ test("the public flow's step list is untouched", () => {
 });
 
 test("the rail gains a fifth Network segment in private mode only", () => {
-	assert.deepEqual(railFor(false).map((r) => r.id), ["details", "plan", "pay", "connect"]);
-	assert.deepEqual(railFor(true).map((r) => r.id), ["network", "details", "plan", "pay", "connect"]);
-	assert.deepEqual(railFor(true).map((r) => r.label), ["Network", "Details", "Plan", "Pay", "Connect"]);
+	assert.deepEqual(
+		railFor(false).map((r) => r.id),
+		["details", "plan", "pay", "connect"]
+	);
+	assert.deepEqual(
+		railFor(true).map((r) => r.id),
+		["network", "details", "plan", "pay", "connect"]
+	);
+	assert.deepEqual(
+		railFor(true).map((r) => r.label),
+		["Network", "Details", "Plan", "Pay", "Connect"]
+	);
 	assert.equal(railFor(false), railFor(false)); // stable identity: no re-render churn
 });

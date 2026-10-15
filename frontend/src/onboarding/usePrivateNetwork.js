@@ -30,7 +30,13 @@
 
 import { reactive, computed } from "vue";
 
-import { HOLD_UNAVAILABLE, adminCheckState, refusalOf, testPassed, validateAddress } from "./privateNetwork.js";
+import {
+	HOLD_UNAVAILABLE,
+	adminCheckState,
+	refusalOf,
+	testPassed,
+	validateAddress,
+} from "./privateNetwork.js";
 
 // Admin turns a lost job into Unreachable/timeout at 60 s; 45 polls at 2 s is the backstop.
 const POLL_MS = 2000;
@@ -121,8 +127,11 @@ export function createPrivateNetwork(deps) {
 		const key = state.clearedFor;
 		if (!key) return false;
 		const cut = key.indexOf("|");
-		if (!state.holdFresh || !state.hold || !state.hold.hostIp || !state.publicAddress) return false;
-		return state.hold.hostIp === key.slice(0, cut) && state.publicAddress === key.slice(cut + 1);
+		if (!state.holdFresh || !state.hold || !state.hold.hostIp || !state.publicAddress)
+			return false;
+		return (
+			state.hold.hostIp === key.slice(0, cut) && state.publicAddress === key.slice(cut + 1)
+		);
 	});
 	// A stored pair is waiting for the hold and the address to load, and neither load has failed.
 	const clearedPending = computed(
@@ -138,8 +147,7 @@ export function createPrivateNetwork(deps) {
 		return validateAddress(state.draft, { testMode: state.testMode });
 	});
 	const testsPassed = computed(
-		() =>
-			state.test.phase === "done" && testPassed(state.test.inbound, state.test.outbound)
+		() => state.test.phase === "done" && testPassed(state.test.inbound, state.test.outbound)
 	);
 
 	// ---- Network step --------------------------------------------------------------------
@@ -214,7 +222,8 @@ export function createPrivateNetwork(deps) {
 	function openAddress() {
 		state.screen = "address";
 		if (!state.draft) {
-			state.draft = state.publicAddress || (state.detectedIp ? `https://${state.detectedIp}` : "");
+			state.draft =
+				state.publicAddress || (state.detectedIp ? `https://${state.detectedIp}` : "");
 		}
 	}
 
@@ -276,7 +285,9 @@ export function createPrivateNetwork(deps) {
 			const r = (await api.reserveHost()) || {};
 			const refusal = refusalOf(r);
 			if (refusal || r.ok !== true) {
-				state.holdErr = refusal ? refusal.message : "We couldn't set aside a server just now.";
+				state.holdErr = refusal
+					? refusal.message
+					: "We couldn't set aside a server just now.";
 				state.holdErrCode = refusal ? refusal.code : "";
 				return false;
 			}
@@ -287,7 +298,11 @@ export function createPrivateNetwork(deps) {
 				state.holdErr = HOLD_UNAVAILABLE.title;
 				return false;
 			}
-			const next = { hostIp: r.host_ip, reachUrl: r.reach_url || "", holdUntil: r.hold_until || null };
+			const next = {
+				hostIp: r.host_ip,
+				reachUrl: r.reach_url || "",
+				holdUntil: r.hold_until || null,
+			};
 			const prev = state.hold;
 			// After a reload there is no previous hold in memory: the stored cleared pair names
 			// the server the customer was last tested against.
@@ -327,7 +342,11 @@ export function createPrivateNetwork(deps) {
 		state.holdEnded = null;
 		resetTest(); // bumps the generation: this run owns the token from here
 		const mine = run;
-		state.test = { ...freshTest(), phase: "testing", inbound: { status: "Checking", reason: "" } };
+		state.test = {
+			...freshTest(),
+			phase: "testing",
+			inbound: { status: "Checking", reason: "" },
+		};
 		let started;
 		try {
 			started = (await api.startConnectionTest()) || {};
@@ -347,7 +366,8 @@ export function createPrivateNetwork(deps) {
 				if (!reserved) {
 					state.test.err = state.holdErr;
 				} else if (!state.holdEnded) {
-					state.test.err = "We’ve set your server aside again. Test the connection once more.";
+					state.test.err =
+						"We’ve set your server aside again. Test the connection once more.";
 				}
 				return;
 			}

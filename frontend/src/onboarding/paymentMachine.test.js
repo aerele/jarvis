@@ -839,7 +839,15 @@ test("private-network refusals at signup: address problems are restart-safe, 'di
 	const refuse = (code) =>
 		reduce(initialState(), {
 			type: EVENTS.CONTRACT_STATE,
-			decoded: { ok: false, code, message: "m", recovery: "", data: {}, context: {}, httpStatus: 417 },
+			decoded: {
+				ok: false,
+				code,
+				message: "m",
+				recovery: "",
+				data: {},
+				context: {},
+				httpStatus: 417,
+			},
 		});
 	for (const code of [CODES.PRIVATE_ADDRESS_INVALID, CODES.PRIVATE_ADDRESS_TAKEN]) {
 		const s = refuse(code);

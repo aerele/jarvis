@@ -19,7 +19,12 @@ import {
 	adminCheckState,
 	GENERIC_REFUSAL,
 } from "./privateNetwork.js";
-import { PARITY_ACCEPT, PARITY_REFUSE, TEST_MODE_ACCEPT, TEST_MODE_REFUSE } from "./privateNetworkParity.js";
+import {
+	PARITY_ACCEPT,
+	PARITY_REFUSE,
+	TEST_MODE_ACCEPT,
+	TEST_MODE_REFUSE,
+} from "./privateNetworkParity.js";
 
 const EMPTY = "Enter the public address of your ERPNext.";
 const HTTP = "Use an https:// address. Plain HTTP is not allowed.";
@@ -59,10 +64,16 @@ test("validateAddress: refusals carry the mockup copy", () => {
 		["https://erp.example.com/#frag", "Enter only the address: no query string or fragment."],
 		["https://erp.example.com:99999", "The port must be a number between 1 and 65535."],
 		["https://erp.example.com:abc", "The port must be a number between 1 and 65535."],
-		["https://[::1]", "IPv6 addresses aren't supported yet. Use a domain name or an IPv4 address."],
+		[
+			"https://[::1]",
+			"IPv6 addresses aren't supported yet. Use a domain name or an IPv4 address.",
+		],
 		["https://ex ample.com", "The address can't contain spaces or control characters."],
 		["https://intranet", DOMAIN],
-		["https://erp.example.com/a//", "Enter a plain path: letters, digits, dots, dashes and single slashes only."],
+		[
+			"https://erp.example.com/a//",
+			"Enter a plain path: letters, digits, dots, dashes and single slashes only.",
+		],
 		["https://0x7f.1", DOMAIN],
 	];
 	for (const [given, expected] of cases) {
@@ -113,7 +124,8 @@ const COPY = {
 	bad_port: "The port must be a number between 1 and 65535.",
 	bad_path: "Enter a plain path: letters, digits, dots, dashes and single slashes only.",
 	bad_host: DOMAIN,
-	ipv6_not_supported: "IPv6 addresses aren't supported yet. Use a domain name or an IPv4 address.",
+	ipv6_not_supported:
+		"IPv6 addresses aren't supported yet. Use a domain name or an IPv4 address.",
 	not_a_public_ip: PRIVATE,
 	local_name: PRIVATE,
 	reserved_tld: PRIVATE,
@@ -123,13 +135,19 @@ const COPY = {
 function benchCopy(reason, given) {
 	const raw = typeof given === "string" ? given.trim() : "";
 	if (reason === "not_a_url") return raw.includes("://") ? NO_HOST : SCHEME;
-	if (reason === "scheme_not_https") return raw.toLowerCase().startsWith("http://") ? HTTP : SCHEME;
+	if (reason === "scheme_not_https")
+		return raw.toLowerCase().startsWith("http://") ? HTTP : SCHEME;
 	return COPY[reason];
 }
 
 test("parity table sizes (copied from the bench test)", () => {
 	assert.deepEqual(
-		[PARITY_ACCEPT.length, PARITY_REFUSE.length, TEST_MODE_ACCEPT.length, TEST_MODE_REFUSE.length],
+		[
+			PARITY_ACCEPT.length,
+			PARITY_REFUSE.length,
+			TEST_MODE_ACCEPT.length,
+			TEST_MODE_REFUSE.length,
+		],
 		[15, 71, 7, 12]
 	);
 });
@@ -142,14 +160,26 @@ test("parity: every address the bench accepts is accepted with the same canonica
 
 test("parity: every address the bench refuses is refused with the bench's sentence", () => {
 	for (const [given, reason] of PARITY_REFUSE) {
-		assert.deepEqual(checkAddress(given), { address: "", message: benchCopy(reason, given) }, String(given));
+		assert.deepEqual(
+			checkAddress(given),
+			{ address: "", message: benchCopy(reason, given) },
+			String(given)
+		);
 	}
 });
 
 test("parity: test mode accepts exactly the three relaxations, with the same canonical form", () => {
 	for (const [given, expected] of TEST_MODE_ACCEPT) {
-		assert.deepEqual(checkAddress(given, { testMode: true }), { address: expected, message: "" }, given);
-		assert.notEqual(checkAddress(given).message, "", `${given} must stay refused outside test mode`);
+		assert.deepEqual(
+			checkAddress(given, { testMode: true }),
+			{ address: expected, message: "" },
+			given
+		);
+		assert.notEqual(
+			checkAddress(given).message,
+			"",
+			`${given} must stay refused outside test mode`
+		);
 	}
 });
 
@@ -166,14 +196,20 @@ test("parity: test mode still refuses everything else", () => {
 // Cases where JS is deliberately STRICTER than the bench (never looser). Each is listed in the task report.
 test("stricter than the bench: odd whitespace, the 192.0.0.0/24 exceptions, 6to4 relay, bracketed hosts without a colon", () => {
 	// Python's str.strip() removes the C0 separators \x1c-\x1f, JS trim() does not: refuse.
-	assert.equal(validateAddress("https://erp.acme.com\u001f"), "The address can't contain spaces or control characters.");
+	assert.equal(
+		validateAddress("https://erp.acme.com\u001f"),
+		"The address can't contain spaces or control characters."
+	);
 	// Python calls 192.0.0.9 and 192.0.0.10 global; the whole /24 is refused here.
 	assert.equal(validateAddress("https://192.0.0.9"), PRIVATE);
 	assert.equal(validateAddress("https://192.88.99.1"), PRIVATE);
 	// A bracket that is not the whole host is not a URL.
 	assert.equal(validateAddress("https://a[1.2.3.4]"), NO_HOST);
 	// Non-ASCII (IDNA) is refused as on the bench: the customer types the xn-- form.
-	assert.equal(validateAddress("https://b\u00fccher.example.com"), "The address can't contain spaces or control characters.");
+	assert.equal(
+		validateAddress("https://b\u00fccher.example.com"),
+		"The address can't contain spaces or control characters."
+	);
 });
 
 test("a trailing colon with no port is accepted and dropped, as on the bench", () => {
@@ -238,7 +274,10 @@ test("serverRuleRows: the two rules of the AllowServer screen", () => {
 });
 
 test("rulesToText: tab separated, header first, the note in brackets", () => {
-	const text = rulesToText(serverRuleRows({ hostIp: "198.51.100.27", publicHost: "203.0.113.24" }), "server");
+	const text = rulesToText(
+		serverRuleRows({ hostIp: "198.51.100.27", publicHost: "203.0.113.24" }),
+		"server"
+	);
 	assert.equal(
 		text,
 		[
@@ -247,10 +286,16 @@ test("rulesToText: tab separated, header first, the note in brackets", () => {
 			"Inbound\t198.51.100.27\t203.0.113.24 (your public address)\tTCP 443",
 		].join("\n")
 	);
-	const admin = rulesToText(adminRuleRows({ ips: ["178.104.214.114"], host: "fleet.klerk.in" }), "admin");
+	const admin = rulesToText(
+		adminRuleRows({ ips: ["178.104.214.114"], host: "fleet.klerk.in" }),
+		"admin"
+	);
 	assert.equal(
 		admin,
-		["Direction\tDestination\tPort", "Outbound\t178.104.214.114 (fleet.klerk.in)\tTCP 443 (HTTPS)"].join("\n")
+		[
+			"Direction\tDestination\tPort",
+			"Outbound\t178.104.214.114 (fleet.klerk.in)\tTCP 443 (HTTPS)",
+		].join("\n")
 	);
 });
 
@@ -262,11 +307,16 @@ const CTX = {
 };
 const VERIFIED = { status: "Verified", reason: "ok" };
 const OUT_OK = { ok: true, reason: "ok" };
-const describe = (over) => describeServerTest({ phase: "done", inbound: VERIFIED, outbound: OUT_OK, ...CTX, ...over });
+const describe = (over) =>
+	describeServerTest({ phase: "done", inbound: VERIFIED, outbound: OUT_OK, ...CTX, ...over });
 
 test("idle shows nothing; testing shows both rows checking and no banner", () => {
 	assert.deepEqual(describe({ phase: "idle" }), { rows: [], banner: null, passed: false });
-	const t = describe({ phase: "testing", inbound: { status: "Checking", reason: "" }, outbound: null });
+	const t = describe({
+		phase: "testing",
+		inbound: { status: "Checking", reason: "" },
+		outbound: null,
+	});
 	assert.deepEqual(
 		t.rows.map((r) => [r.label, r.state, r.detail]),
 		[
@@ -350,7 +400,12 @@ test("card: Different site answered carries the Host-header hint only for wrong_
 		assert.ok(!d.banner.text.includes("Host header"), reason);
 	}
 	// no site name to quote: say so rather than print "undefined"
-	assert.ok(describe({ inbound: { status: "Failed", reason: "wrong_site" }, siteName: "" }).banner.text.includes("your site name"));
+	assert.ok(
+		describe({
+			inbound: { status: "Failed", reason: "wrong_site" },
+			siteName: "",
+		}).banner.text.includes("your site name")
+	);
 });
 
 test("card: Server hold ended (after 3 days)", () => {
@@ -365,7 +420,9 @@ test("results with no card in the mockup get honest copy of the same shape", () 
 	const priv = describe({ inbound: { status: "Failed", reason: "blocked_address" } });
 	assert.equal(priv.rows[0].detail, PRIVATE);
 	assert.equal(priv.banner.title, "This is a private address");
-	const unsupported = describe({ inbound: { status: "Unsupported", reason: "agent_unsupported" } });
+	const unsupported = describe({
+		inbound: { status: "Unsupported", reason: "agent_unsupported" },
+	});
 	assert.equal(unsupported.banner.title, "Contact support");
 	const stale = describe({ inbound: { status: "Verified", reason: "stale" } });
 	assert.equal(stale.passed, false);
@@ -374,7 +431,10 @@ test("results with no card in the mockup get honest copy of the same shape", () 
 	assert.equal(outTls.banner.title, "Your ERPNext can’t verify the Jarvis server");
 	const badTarget = describe({ outbound: { ok: false, reason: "bad_target" } });
 	assert.equal(badTarget.banner.title, "Contact support");
-	assert.equal(describe({ inbound: { status: "Failed", reason: "???" } }).rows[0].detail, "The test didn’t complete.");
+	assert.equal(
+		describe({ inbound: { status: "Failed", reason: "???" } }).rows[0].detail,
+		"The test didn’t complete."
+	);
 });
 
 test("when both halves fail the outbound banner wins (it is the first rule in the table)", () => {
@@ -407,12 +467,24 @@ test("a hold with no host_ip never renders a blank allow rule", () => {
 	assert.deepEqual(serverRuleRows({ hostIp: "198.51.100.27", publicHost: "" }), []);
 	assert.deepEqual(serverRuleRows({}), []);
 	assert.equal(rulesToText([], "server"), "Direction\tFrom\tTo\tPort");
-	const d = describeServerTest({ phase: "done", inbound: VERIFIED, outbound: OUT_OK, ...CTX, hostIp: "" });
+	const d = describeServerTest({
+		phase: "done",
+		inbound: VERIFIED,
+		outbound: OUT_OK,
+		...CTX,
+		hostIp: "",
+	});
 	assert.deepEqual(d.rows, []);
 	assert.equal(d.passed, false);
 	assert.equal(d.banner.title, "Contact support");
 	assert.ok(!d.banner.text.includes("undefined"));
-	const testing = describeServerTest({ phase: "testing", inbound: null, outbound: null, ...CTX, hostIp: "" });
+	const testing = describeServerTest({
+		phase: "testing",
+		inbound: null,
+		outbound: null,
+		...CTX,
+		hostIp: "",
+	});
 	assert.equal(testing.banner.title, "Contact support");
 	assert.equal(testPassed(VERIFIED, OUT_OK), true); // the verdict itself is the bench's; the screen cannot show a rule
 });
@@ -427,9 +499,22 @@ test("holdEndedBanner survives a missing address", () => {
 test("refusalOf: known codes keep the bench sentence, unknown codes read as generic copy", () => {
 	assert.equal(refusalOf({ ok: true }), null);
 	assert.equal(refusalOf(null), null);
-	const known = refusalOf({ ok: false, code: "PRIVATE_ADDRESS_TAKEN", message: "That address is in use." });
-	assert.deepEqual(known, { code: "PRIVATE_ADDRESS_TAKEN", message: "That address is in use.", retryAfterSeconds: 0 });
-	const busy = refusalOf({ ok: false, code: "RATE_LIMITED_PRIVATE_NETWORK", message: "Slow down.", retry_after_seconds: 42 });
+	const known = refusalOf({
+		ok: false,
+		code: "PRIVATE_ADDRESS_TAKEN",
+		message: "That address is in use.",
+	});
+	assert.deepEqual(known, {
+		code: "PRIVATE_ADDRESS_TAKEN",
+		message: "That address is in use.",
+		retryAfterSeconds: 0,
+	});
+	const busy = refusalOf({
+		ok: false,
+		code: "RATE_LIMITED_PRIVATE_NETWORK",
+		message: "Slow down.",
+		retry_after_seconds: 42,
+	});
 	assert.equal(busy.retryAfterSeconds, 42);
 	for (const res of [
 		{ ok: false, code: "SOMETHING_NEW", message: "raw admin prose" },
@@ -441,9 +526,19 @@ test("refusalOf: known codes keep the bench sentence, unknown codes read as gene
 		assert.equal(r.message, GENERIC_REFUSAL, JSON.stringify(res));
 	}
 	// a known code with no sentence still reads, never blank
-	assert.equal(refusalOf({ ok: false, code: "EMAIL_NOT_CONFIRMED", message: "" }).message, GENERIC_REFUSAL);
+	assert.equal(
+		refusalOf({ ok: false, code: "EMAIL_NOT_CONFIRMED", message: "" }).message,
+		GENERIC_REFUSAL
+	);
 	// the bench's own coded refusals pass through
-	assert.equal(refusalOf({ ok: false, code: "BENCH_ADMIN_REJECTED", message: "Jarvis could not get the address." }).message, "Jarvis could not get the address.");
+	assert.equal(
+		refusalOf({
+			ok: false,
+			code: "BENCH_ADMIN_REJECTED",
+			message: "Jarvis could not get the address.",
+		}).message,
+		"Jarvis could not get the address."
+	);
 });
 
 test("adminCheckState surfaces the optional busy message", () => {

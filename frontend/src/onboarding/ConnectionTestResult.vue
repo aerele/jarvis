@@ -23,7 +23,8 @@
 				</span>
 				<span class="flex min-w-0 flex-col gap-0.5">
 					<span class="font-medium text-ink-gray-9"
-						><span class="sr-only">{{ stateWord(row.state) }}: </span>{{ row.label }}</span
+						><span class="sr-only">{{ stateWord(row.state) }}: </span
+						>{{ row.label }}</span
 					>
 					<span class="text-p-xs text-ink-gray-5">{{ row.detail }}</span>
 				</span>

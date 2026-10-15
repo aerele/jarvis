@@ -27,7 +27,10 @@ const RAIL_MANAGED = Object.freeze([
 	Object.freeze({ id: "pay", label: "Pay" }),
 	Object.freeze({ id: "connect", label: "Connect" }),
 ]);
-const RAIL_PRIVATE = Object.freeze([Object.freeze({ id: "network", label: "Network" }), ...RAIL_MANAGED]);
+const RAIL_PRIVATE = Object.freeze([
+	Object.freeze({ id: "network", label: "Network" }),
+	...RAIL_MANAGED,
+]);
 
 export function railFor(privateBench) {
 	return privateBench ? RAIL_PRIVATE : RAIL_MANAGED;

@@ -1811,7 +1811,13 @@ describe("private network: the Network step replaces the dead-end host block", (
 	it("the rail has five segments with Network first and active", async () => {
 		const w = mountView();
 		await flushPromises();
-		expect(w.vm.RAIL.map((r) => r.label)).toEqual(["Network", "Details", "Plan", "Pay", "Connect"]);
+		expect(w.vm.RAIL.map((r) => r.label)).toEqual([
+			"Network",
+			"Details",
+			"Plan",
+			"Pay",
+			"Connect",
+		]);
 		expect(w.vm.railIndex).toBe(0);
 	});
 
@@ -1834,7 +1840,9 @@ describe("private network: the Network step replaces the dead-end host block", (
 		await flushPromises();
 		w.vm.net.pickOption("public");
 		await flushPromises();
-		expect(w.text()).toContain("Ask your administrator to set a public host name for this site");
+		expect(w.text()).toContain(
+			"Ask your administrator to set a public host name for this site"
+		);
 		expect(buttonByLabel(w, "Reload page")).toBeTruthy();
 		expect(buttonByLabel(w, "Continue")).toBeFalsy();
 	});
@@ -1872,27 +1880,43 @@ describe("private network: the Network step replaces the dead-end host block", (
 	});
 
 	it("a connection that cannot reach Jarvis keeps the customer here with the retry copy", async () => {
-		api.checkAdminConnection.mockResolvedValueOnce({ reachable: false, enabled: false, caller_ip: "" });
+		api.checkAdminConnection.mockResolvedValueOnce({
+			reachable: false,
+			enabled: false,
+			caller_ip: "",
+		});
 		const w = mountView();
 		await flushPromises();
 		await buttonByLabel(w, "Continue").trigger("click");
 		await flushPromises();
 		await buttonByLabel(w, "Check connection").trigger("click");
 		await flushPromises();
-		expect(w.find('banner-stub[title="Still can\'t reach the Jarvis setup server"]').exists()).toBe(true);
+		expect(
+			w.find('banner-stub[title="Still can\'t reach the Jarvis setup server"]').exists()
+		).toBe(true);
 		expect(buttonByLabel(w, "Check again")).toBeTruthy();
 		expect(buttonByLabel(w, "Continue")).toBeFalsy();
 	});
 
 	it("private setup switched off says it isn't available yet", async () => {
-		api.checkAdminConnection.mockResolvedValueOnce({ reachable: true, enabled: false, caller_ip: "" });
+		api.checkAdminConnection.mockResolvedValueOnce({
+			reachable: true,
+			enabled: false,
+			caller_ip: "",
+		});
 		const w = mountView();
 		await flushPromises();
 		await buttonByLabel(w, "Continue").trigger("click");
 		await flushPromises();
 		await buttonByLabel(w, "Check connection").trigger("click");
 		await flushPromises();
-		expect(w.find('banner-stub[message="Private network setup isn\'t available yet. Contact support."]').exists()).toBe(true);
+		expect(
+			w
+				.find(
+					'banner-stub[message="Private network setup isn\'t available yet. Contact support."]'
+				)
+				.exists()
+		).toBe(true);
 	});
 
 	it("saving the address moves on to Details", async () => {
@@ -2001,9 +2025,9 @@ describe("private network: Review & pay", () => {
 		).toBe(
 			"After you confirm your email, we'll show the address of your Jarvis server. Your network team allows it, and we test the connection. You pay only after the test passes."
 		);
-		expect(w.find('banner-stub[title="One more step before payment"]').attributes("type")).toBe(
-			"info"
-		);
+		expect(
+			w.find('banner-stub[title="One more step before payment"]').attributes("type")
+		).toBe("info");
 		expect(buttonByLabel(w, "Continue")).toBeTruthy();
 		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
 	});
@@ -2099,7 +2123,12 @@ describe("a public bench's Review & pay is unchanged", () => {
 		w.vm.state.step = "pay";
 		w.vm.state.planName = "pro";
 		await flushPromises();
-		await w.vm.flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await w.vm.flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
 		await flushPromises();
 		expect(w.vm.payCopy.headline).toBe("We could not reach the payment service.");
 	});
@@ -2235,7 +2264,9 @@ describe("private network: allow the held server, then test, then pay", () => {
 		await buttonByLabel(w, "Continue to payment").trigger("click");
 		await flushPromises();
 		expect(w.vm.net.state.cleared).toBe(true);
-		expect(window.sessionStorage.getItem("jvpriv:cleared")).toBe("198.51.100.27|https://8.8.8.8");
+		expect(window.sessionStorage.getItem("jvpriv:cleared")).toBe(
+			"198.51.100.27|https://8.8.8.8"
+		);
 		expect(assign).toHaveBeenCalledWith("https://fleet.klerk.in/jarvis-checkout#t=tok_1");
 	});
 
@@ -2250,7 +2281,9 @@ describe("private network: allow the held server, then test, then pay", () => {
 		await buttonByLabel(w, "Test connection").trigger("click");
 		await flushPromises();
 		expect(
-			w.find('banner-stub[title="We couldn’t reach your public address"]').attributes("message")
+			w
+				.find('banner-stub[title="We couldn’t reach your public address"]')
+				.attributes("message")
 		).toBe(
 			"Check the inbound rule: allow TCP 443 from 198.51.100.27 to 8.8.8.8. New rules can take a few minutes to apply."
 		);
@@ -2311,7 +2344,9 @@ describe("private network: allow the held server, then test, then pay", () => {
 			message: "No host fits right now.",
 		});
 		const w = await atAllowServer();
-		expect(w.find('banner-stub[title="We couldn’t set aside a server right now"]').exists()).toBe(true);
+		expect(
+			w.find('banner-stub[title="We couldn’t set aside a server right now"]').exists()
+		).toBe(true);
 		expect(buttonByLabel(w, "Try again")).toBeTruthy();
 		expect(buttonByLabel(w, "Test connection").attributes("disabled")).toBeDefined();
 	});
@@ -2365,7 +2400,12 @@ describe("private network: allow the held server, then test, then pay", () => {
 			() =>
 				new Promise((r) => {
 					release = () =>
-						r({ ok: true, host_ip: "198.51.100.45", reach_url: "https://r/", hold_until: "2026-10-20 09:10:00" });
+						r({
+							ok: true,
+							host_ip: "198.51.100.45",
+							reach_url: "https://r/",
+							hold_until: "2026-10-20 09:10:00",
+						});
 				})
 		);
 		const w = await atAllowServer();

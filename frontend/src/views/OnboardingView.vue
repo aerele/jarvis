@@ -159,18 +159,18 @@
 										<template v-else-if="net.state.adminReachable === false">
 											<h1>We can't reach Jarvis from this site</h1>
 											<p>
-												This site can't connect to the Jarvis setup server. If your
-												network blocks outgoing traffic, you can allow Jarvis through
-												it and continue.
+												This site can't connect to the Jarvis setup server.
+												If your network blocks outgoing traffic, you can
+												allow Jarvis through it and continue.
 											</p>
 										</template>
 										<template v-else>
 											<h1>This site is on a private network</h1>
 											<p>
-												Jarvis can't reach this site from the internet on its own. You
-												can still set it up: your network team allows a few Jarvis
-												addresses, and we test the connection before anything is
-												shared.
+												Jarvis can't reach this site from the internet on
+												its own. You can still set it up: your network team
+												allows a few Jarvis addresses, and we test the
+												connection before anything is shared.
 											</p>
 										</template>
 									</div>
@@ -199,13 +199,19 @@
 												class="grid size-8 flex-none place-items-center rounded-lg border border-outline-gray-1 bg-surface-gray-2"
 												aria-hidden="true"
 											>
-												<FeatherIcon :name="o.icon" class="h-4 w-4 text-ink-gray-6" />
+												<FeatherIcon
+													:name="o.icon"
+													class="h-4 w-4 text-ink-gray-6"
+												/>
 											</span>
 											<span class="flex flex-col gap-0.5">
-												<span class="text-base font-medium text-ink-gray-9">{{
-													o.title
+												<span
+													class="text-base font-medium text-ink-gray-9"
+													>{{ o.title }}</span
+												>
+												<span class="text-p-sm text-ink-gray-5">{{
+													o.text
 												}}</span>
-												<span class="text-p-sm text-ink-gray-5">{{ o.text }}</span>
 											</span>
 											<span
 												class="absolute right-4 top-4 grid h-4 w-4 place-items-center rounded-full border transition-colors"
@@ -227,8 +233,8 @@
 										v-if="net.state.pick === 'public'"
 										class="mx-auto mt-4 max-w-[560px] text-center text-p-sm text-ink-gray-5"
 									>
-										Ask your administrator to set a public host name for this site, then
-										reload this page.
+										Ask your administrator to set a public host name for this
+										site, then reload this page.
 									</p>
 								</div>
 								<div class="ob-foot justify-end">
@@ -238,7 +244,12 @@
 										label="Continue"
 										@click="net.continueFromChoice()"
 									/>
-									<Button v-else variant="solid" label="Reload page" @click="reloadConnect" />
+									<Button
+										v-else
+										variant="solid"
+										label="Reload page"
+										@click="reloadConnect"
+									/>
 								</div>
 							</template>
 							<!-- 2. Allow the Jarvis setup server -->
@@ -247,8 +258,8 @@
 									<div class="ob-head">
 										<h1>Allow the Jarvis setup server</h1>
 										<p>
-											Ask your network team to allow this outgoing connection from your
-											ERPNext server. Then check the connection.
+											Ask your network team to allow this outgoing connection
+											from your ERPNext server. Then check the connection.
 										</p>
 									</div>
 									<div class="mx-auto flex w-full max-w-[680px] flex-col gap-3">
@@ -261,9 +272,16 @@
 											Looking up the Jarvis setup server…
 										</div>
 										<template v-else-if="net.state.targetsErr">
-											<Banner type="error" :message="net.state.targetsErr" role="alert" />
+											<Banner
+												type="error"
+												:message="net.state.targetsErr"
+												role="alert"
+											/>
 											<div class="flex justify-center">
-												<Button label="Try again" @click="net.loadTargets()" />
+												<Button
+													label="Try again"
+													@click="net.loadTargets()"
+												/>
 											</div>
 										</template>
 										<NetworkRulesTable
@@ -274,8 +292,8 @@
 											:rows="adminRows"
 										/>
 										<p class="text-p-sm text-ink-gray-5">
-											Staff browsers also need to open this address, for sign-in links and
-											the payment page.
+											Staff browsers also need to open this address, for
+											sign-in links and the payment page.
 										</p>
 										<div
 											v-if="net.state.adminCheck === 'checking'"
@@ -296,20 +314,28 @@
 											v-else-if="net.state.adminCheck === 'fail'"
 											type="warning"
 											title="Still can't reach the Jarvis setup server"
-											:message="net.state.adminCheckMessage || 'New firewall rules can take a few minutes to apply. Check the rule, then try again.'"
+											:message="
+												net.state.adminCheckMessage ||
+												'New firewall rules can take a few minutes to apply. Check the rule, then try again.'
+											"
 											role="alert"
 										/>
 										<Banner
 											v-else-if="net.state.adminCheck === 'disabled'"
 											type="error"
-											:message="net.state.adminCheckMessage || SETUP_UNAVAILABLE"
+											:message="
+												net.state.adminCheckMessage || SETUP_UNAVAILABLE
+											"
 											role="alert"
 										/>
 									</div>
 								</div>
 								<div class="ob-foot">
 									<button class="ob-back" @click="net.state.screen = 'choose'">
-										<FeatherIcon name="chevron-left" class="h-3.5 w-3.5 text-ink-gray-5" />Back
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
 									</button>
 									<Button
 										v-if="net.state.adminCheck !== 'ok'"
@@ -317,10 +343,19 @@
 										:disabled="!net.state.targets"
 										:loading="net.state.adminCheck === 'checking'"
 										loading-text="Checking…"
-										:label="net.state.adminCheck === 'fail' ? 'Check again' : 'Check connection'"
+										:label="
+											net.state.adminCheck === 'fail'
+												? 'Check again'
+												: 'Check connection'
+										"
 										@click="net.runAdminCheck()"
 									/>
-									<Button v-else variant="solid" label="Continue" @click="net.openAddress()" />
+									<Button
+										v-else
+										variant="solid"
+										label="Continue"
+										@click="net.openAddress()"
+									/>
 								</div>
 							</template>
 							<!-- 3. Your public address -->
@@ -329,12 +364,14 @@
 									<div class="ob-head">
 										<h1>Your public address</h1>
 										<p>
-											Jarvis calls your ERPNext through this address. We filled in the
-											address your network used to reach us. Change it if your ERPNext
-											uses a different one.
+											Jarvis calls your ERPNext through this address. We
+											filled in the address your network used to reach us.
+											Change it if your ERPNext uses a different one.
 										</p>
 									</div>
-									<div class="mx-auto flex w-full max-w-[620px] flex-col gap-1.5">
+									<div
+										class="mx-auto flex w-full max-w-[620px] flex-col gap-1.5"
+									>
 										<FormControl
 											type="text"
 											variant="outline"
@@ -353,7 +390,9 @@
 											aria-required="true"
 											:aria-invalid="draftError ? 'true' : undefined"
 											:aria-describedby="
-												draftError || net.state.saveErr ? 'jv-ob-addr-err' : undefined
+												draftError || net.state.saveErr
+													? 'jv-ob-addr-err'
+													: undefined
 											"
 											@keydown.enter="onNetworkContinue"
 										/>
@@ -397,8 +436,9 @@
 													class="mt-0.5 h-3.5 w-3.5 flex-none text-ink-green-3"
 												/>
 												<span
-													>Serve HTTPS with a valid certificate. A domain name or a
-													public IP certificate both work.</span
+													>Serve HTTPS with a valid certificate. A domain
+													name or a public IP certificate both
+													work.</span
 												>
 											</div>
 											<div
@@ -418,22 +458,33 @@
 													class="mt-0.5 h-3.5 w-3.5 flex-none text-ink-red-3"
 												/>
 												<span
-													>Not plain HTTP. Your Jarvis key would cross the internet
-													unencrypted.</span
+													>Not plain HTTP. Your Jarvis key would cross
+													the internet unencrypted.</span
 												>
 											</div>
 										</div>
 									</div>
 								</div>
 								<div class="ob-foot">
-									<button v-if="!privateComplete" class="ob-back" @click="onNetworkBack">
-										<FeatherIcon name="chevron-left" class="h-3.5 w-3.5 text-ink-gray-5" />Back
+									<button
+										v-if="!privateComplete"
+										class="ob-back"
+										@click="onNetworkBack"
+									>
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
 									</button>
 									<span v-else></span>
 									<Button
 										variant="solid"
 										label="Continue"
-										:disabled="!!draftError || !net.state.draft.trim() || net.state.saving"
+										:disabled="
+											!!draftError ||
+											!net.state.draft.trim() ||
+											net.state.saving
+										"
 										:loading="net.state.saving"
 										loading-text="Saving…"
 										@click="onNetworkContinue"
@@ -1435,7 +1486,10 @@
 							</template>
 							<template v-else-if="checkingServer">
 								<div class="ob-body">
-									<div class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5" role="status">
+									<div
+										class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5"
+										role="status"
+									>
 										<JvSpinner :size="20" />
 										Checking your server…
 									</div>
@@ -1449,10 +1503,13 @@
 							<template v-else-if="showPrivateServerStep">
 								<div class="ob-body">
 									<div class="ob-head">
-										<h1 ref="recoveryHeading" tabindex="-1">Allow your Jarvis server</h1>
+										<h1 ref="recoveryHeading" tabindex="-1">
+											Allow your Jarvis server
+										</h1>
 										<p>
-											We've set aside the server that will run Jarvis for you. Ask your
-											network team to add these two rules, then test the connection.
+											We've set aside the server that will run Jarvis for
+											you. Ask your network team to add these two rules, then
+											test the connection.
 										</p>
 									</div>
 									<div class="mx-auto flex w-full max-w-[680px] flex-col gap-3">
@@ -1472,8 +1529,14 @@
 												role="alert"
 											/>
 											<div class="flex justify-center gap-2">
-												<Button label="Try again" @click="net.loadHold()" />
-												<Button label="Contact support" @click="onPayAction(A.SUPPORT)" />
+												<Button
+													label="Try again"
+													@click="net.loadHold()"
+												/>
+												<Button
+													label="Contact support"
+													@click="onPayAction(A.SUPPORT)"
+												/>
 											</div>
 										</template>
 										<template v-if="net.state.hold">
@@ -1484,8 +1547,8 @@
 												:rows="serverRows"
 											/>
 											<p class="text-p-sm text-ink-gray-5">
-												Allow only this address. Don't open port 443 to everyone. We hold
-												this server for you for 3 days.
+												Allow only this address. Don't open port 443 to
+												everyone. We hold this server for you for 3 days.
 											</p>
 										</template>
 										<Banner
@@ -1508,7 +1571,11 @@
 									</div>
 								</div>
 								<div class="ob-foot">
-									<span v-if="testWait > 0" class="text-p-sm text-ink-gray-5" role="status">
+									<span
+										v-if="testWait > 0"
+										class="text-p-sm text-ink-gray-5"
+										role="status"
+									>
 										Try again in {{ testWait }}s
 									</span>
 									<span v-else></span>
@@ -1521,10 +1588,18 @@
 									<Button
 										v-else
 										variant="solid"
-										:disabled="!net.state.hold || net.state.test.phase === 'testing' || testWait > 0"
+										:disabled="
+											!net.state.hold ||
+											net.state.test.phase === 'testing' ||
+											testWait > 0
+										"
 										:loading="net.state.test.phase === 'testing'"
 										loading-text="Testing…"
-										:label="net.state.test.phase === 'done' ? 'Test again' : 'Test connection'"
+										:label="
+											net.state.test.phase === 'done'
+												? 'Test again'
+												: 'Test connection'
+										"
 										@click="net.runTest()"
 									/>
 								</div>
@@ -2371,14 +2446,26 @@
 										 with the rules and a Test connection button; passing both halves resumes it. -->
 									<template v-else-if="state.connectPhase === 'network'">
 										<div class="ob-head">
-											<h1>{{ state.connectTitle || "Allow your Jarvis server" }}</h1>
+											<h1>
+												{{
+													state.connectTitle ||
+													"Allow your Jarvis server"
+												}}
+											</h1>
 											<p>
-												Jarvis can't finish setting up until your network allows your
-												Jarvis server. Add these two rules, then test the connection.
+												Jarvis can't finish setting up until your network
+												allows your Jarvis server. Add these two rules,
+												then test the connection.
 											</p>
 										</div>
-										<div class="mx-auto mt-4 flex w-full max-w-[680px] flex-col gap-3">
-											<Banner v-if="state.connectMessage" type="info" :message="state.connectMessage" />
+										<div
+											class="mx-auto mt-4 flex w-full max-w-[680px] flex-col gap-3"
+										>
+											<Banner
+												v-if="state.connectMessage"
+												type="info"
+												:message="state.connectMessage"
+											/>
 											<div
 												v-if="!networkLookupDone"
 												class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5"
@@ -2394,7 +2481,13 @@
 												:message="networkLookupErr.text"
 												role="alert"
 											/>
-											<template v-if="networkLookupDone && net.state.hold && !networkLookupErr">
+											<template
+												v-if="
+													networkLookupDone &&
+													net.state.hold &&
+													!networkLookupErr
+												"
+											>
 												<NetworkRulesTable
 													variant="server"
 													title="Rules for your network team"
@@ -2402,7 +2495,8 @@
 													:rows="connectServerRows"
 												/>
 												<p class="text-p-sm text-ink-gray-5">
-													Allow only this address. Don't open port 443 to everyone.
+													Allow only this address. Don't open port 443 to
+													everyone.
 												</p>
 											</template>
 											<Banner
@@ -2412,7 +2506,10 @@
 												:message="holdEndedCard.text"
 												role="alert"
 											/>
-											<ConnectionTestResult :rows="connectTest.rows" :banner="connectTest.banner" />
+											<ConnectionTestResult
+												:rows="connectTest.rows"
+												:banner="connectTest.banner"
+											/>
 											<Banner
 												v-if="net.state.test.err"
 												type="warning"
@@ -2434,19 +2531,37 @@
 												<Button
 													v-else
 													variant="solid"
-													:disabled="!networkLookupDone || !net.state.hold || !!networkLookupErr || net.state.test.phase === 'testing' || testWait > 0"
+													:disabled="
+														!networkLookupDone ||
+														!net.state.hold ||
+														!!networkLookupErr ||
+														net.state.test.phase === 'testing' ||
+														testWait > 0
+													"
 													:loading="net.state.test.phase === 'testing'"
 													loading-text="Testing…"
-													:label="net.state.test.phase === 'done' ? 'Test again' : 'Test connection'"
+													:label="
+														net.state.test.phase === 'done'
+															? 'Test again'
+															: 'Test connection'
+													"
 													@click="net.runTest()"
 												/>
-												<span v-if="testWait > 0" class="self-center text-p-sm text-ink-gray-5" role="status">
+												<span
+													v-if="testWait > 0"
+													class="self-center text-p-sm text-ink-gray-5"
+													role="status"
+												>
 													Try again in {{ testWait }}s
 												</span>
 											</div>
-											<p class="mx-auto mt-2 max-w-[420px] text-center text-p-sm text-ink-gray-5">
+											<p
+												class="mx-auto mt-2 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+											>
 												Not sure what to do?
-												<button class="ob-link" @click="openSupport">Contact support</button>
+												<button class="ob-link" @click="openSupport">
+													Contact support
+												</button>
 											</p>
 										</div>
 									</template>
@@ -3367,7 +3482,11 @@ const payProviderReady = computed(() => !!state.paymentProvider);
 // payBusyView is declared further down; safe to close over here since this
 // getter only runs at render, after the whole setup script has executed.
 const payDisabled = computed(
-	() => payBusyView.value || !payProviderReady.value || !state.termsAccepted || !onboardingHostOk.value
+	() =>
+		payBusyView.value ||
+		!payProviderReady.value ||
+		!state.termsAccepted ||
+		!onboardingHostOk.value
 );
 // #669: how long the checkout link is good for. Reads the machine's own
 // payTokenExpiresInS, which is cleared with the token it belongs to, so this
@@ -4264,7 +4383,7 @@ const serverRows = computed(() =>
 		? serverRuleRows({
 				hostIp: net.state.hold.hostIp,
 				publicHost: publicHostOf(net.state.publicAddress) || net.state.publicAddress,
-			})
+		  })
 		: []
 );
 const serverTest = computed(() =>
@@ -4283,7 +4402,10 @@ const holdEndedCard = computed(() =>
 // Admin's own sentence for any refusal but the plain "no host fits" one, which has copy of its own.
 const holdErrCard = computed(() => ({
 	title: HOLD_UNAVAILABLE.title,
-	text: net.state.holdErrCode === "PRIVATE_HOLD_UNAVAILABLE" ? HOLD_UNAVAILABLE.text : net.state.holdErr,
+	text:
+		net.state.holdErrCode === "PRIVATE_HOLD_UNAVAILABLE"
+			? HOLD_UNAVAILABLE.text
+			: net.state.holdErr,
 }));
 // Entering the screen reserves (or re-reads) the held server. That is also what refreshes a
 // hold that expired while the customer was away.
@@ -4693,7 +4815,12 @@ function restartPendingAutoPoll() {
 	// Not while the allow-your-server screen is up: the customer is editing a firewall, and
 	// the rate-limited provider-truth check would run every 15 s and then announce "we stopped
 	// auto-checking" over a screen that has nothing to do with the payment.
-	if (isAutoPollable(pay.value.value) && state.step === "pay" && !showPrivateServerStep.value && !checkingServer.value) {
+	if (
+		isAutoPollable(pay.value.value) &&
+		state.step === "pay" &&
+		!showPrivateServerStep.value &&
+		!checkingServer.value
+	) {
 		runPendingAutoPoll(pendingPollRun);
 	}
 	// NOTE: the value-change watch fires restartPendingAutoPoll on a

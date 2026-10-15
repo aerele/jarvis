@@ -19,8 +19,15 @@ function makeApi(over = {}) {
 			public_address: "",
 			test_mode: false,
 		})),
-		privateSetupTargets: vi.fn(async () => ({ admin_host: "fleet.klerk.in", admin_ips: ["178.104.214.114"] })),
-		checkAdminConnection: vi.fn(async () => ({ reachable: true, enabled: true, caller_ip: "8.8.8.8" })),
+		privateSetupTargets: vi.fn(async () => ({
+			admin_host: "fleet.klerk.in",
+			admin_ips: ["178.104.214.114"],
+		})),
+		checkAdminConnection: vi.fn(async () => ({
+			reachable: true,
+			enabled: true,
+			caller_ip: "8.8.8.8",
+		})),
 		savePublicAddress: vi.fn(async (address) => ({ ok: true, public_address: address })),
 		reserveHost: vi.fn(async () => ({ ...HOLD })),
 		startConnectionTest: vi.fn(async () => ({
@@ -28,7 +35,12 @@ function makeApi(over = {}) {
 			check: "JCC-000123",
 			outbound: { ok: true, reason: "ok" },
 		})),
-		connectionTestStatus: vi.fn(async () => ({ ok: true, status: "Verified", reason: "ok", checked_at: "" })),
+		connectionTestStatus: vi.fn(async () => ({
+			ok: true,
+			status: "Verified",
+			reason: "ok",
+			checked_at: "",
+		})),
 		...over,
 	};
 }
@@ -86,7 +98,11 @@ describe("the Network step", () => {
 	});
 
 	it("a status failure still unblocks the screen, with reachability unknown", async () => {
-		const { net } = make({ networkStatus: vi.fn(async () => { throw new Error("boom"); }) });
+		const { net } = make({
+			networkStatus: vi.fn(async () => {
+				throw new Error("boom");
+			}),
+		});
 		await net.loadStatus();
 		expect(net.state.statusLoaded).toBe(true);
 		expect(net.state.adminReachable).toBeNull();
@@ -119,11 +135,17 @@ describe("the Network step", () => {
 		await net.continueFromChoice();
 		expect(api.privateSetupTargets).toHaveBeenCalledTimes(1);
 		expect(net.state.screen).toBe("allow_admin");
-		expect(net.state.targets).toEqual({ admin_host: "fleet.klerk.in", admin_ips: ["178.104.214.114"] });
+		expect(net.state.targets).toEqual({
+			admin_host: "fleet.klerk.in",
+			admin_ips: ["178.104.214.114"],
+		});
 	});
 
 	it("a failed lookup of the admin address says so and can be retried", async () => {
-		const privateSetupTargets = vi.fn().mockRejectedValueOnce(new Error("x")).mockResolvedValueOnce({ admin_host: "h", admin_ips: [] });
+		const privateSetupTargets = vi
+			.fn()
+			.mockRejectedValueOnce(new Error("x"))
+			.mockResolvedValueOnce({ admin_host: "h", admin_ips: [] });
 		const { net } = make({ privateSetupTargets });
 		await net.continueFromChoice();
 		expect(net.state.targetsErr).toMatch(/couldn't look up/);
@@ -148,7 +170,11 @@ describe("the Network step", () => {
 			await net.runAdminCheck();
 			expect(net.state.adminCheck).toBe(expected);
 		}
-		const { net } = make({ checkAdminConnection: vi.fn(async () => { throw new Error("x"); }) });
+		const { net } = make({
+			checkAdminConnection: vi.fn(async () => {
+				throw new Error("x");
+			}),
+		});
 		await net.runAdminCheck();
 		expect(net.state.adminCheck).toBe("fail");
 	});
@@ -216,7 +242,11 @@ describe("the Network step", () => {
 
 	it("saveAddress shows the bench's own refusal", async () => {
 		const { net } = make({
-			savePublicAddress: vi.fn(async () => ({ ok: false, code: "PRIVATE_ADDRESS_INVALID", message: "Nope." })),
+			savePublicAddress: vi.fn(async () => ({
+				ok: false,
+				code: "PRIVATE_ADDRESS_INVALID",
+				message: "Nope.",
+			})),
 		});
 		net.state.draft = "https://erp.example.com";
 		expect(await net.saveAddress()).toBe(false);
@@ -238,7 +268,11 @@ describe("the held server", () => {
 
 	it("a refusal is kept with its code", async () => {
 		const { net } = make({
-			reserveHost: vi.fn(async () => ({ ok: false, code: "PRIVATE_HOLD_UNAVAILABLE", message: "No server fits." })),
+			reserveHost: vi.fn(async () => ({
+				ok: false,
+				code: "PRIVATE_HOLD_UNAVAILABLE",
+				message: "No server fits.",
+			})),
 		});
 		expect(await net.loadHold()).toBe(false);
 		expect(net.state.holdErr).toBe("No server fits.");
@@ -314,7 +348,11 @@ describe("the two-way test", () => {
 	});
 
 	it("a lost job ends as Unreachable/timeout once the poll budget is spent", async () => {
-		const connectionTestStatus = vi.fn(async () => ({ ok: true, status: "Checking", reason: "" }));
+		const connectionTestStatus = vi.fn(async () => ({
+			ok: true,
+			status: "Checking",
+			reason: "",
+		}));
 		const { net } = make({ connectionTestStatus });
 		await net.loadHold();
 		await net.runTest();
@@ -369,7 +407,11 @@ describe("the two-way test", () => {
 			.mockResolvedValueOnce({ ...HOLD, host_ip: "198.51.100.45" });
 		const { net } = make({
 			reserveHost,
-			startConnectionTest: vi.fn(async () => ({ ok: false, code: "PRIVATE_HOLD_UNAVAILABLE", message: "x" })),
+			startConnectionTest: vi.fn(async () => ({
+				ok: false,
+				code: "PRIVATE_HOLD_UNAVAILABLE",
+				message: "x",
+			})),
 		});
 		await net.loadHold();
 		await net.runTest();
@@ -381,7 +423,11 @@ describe("the two-way test", () => {
 
 	it("PRIVATE_HOLD_UNAVAILABLE with the same host says the hold was set aside again", async () => {
 		const { net } = make({
-			startConnectionTest: vi.fn(async () => ({ ok: false, code: "PRIVATE_HOLD_UNAVAILABLE", message: "x" })),
+			startConnectionTest: vi.fn(async () => ({
+				ok: false,
+				code: "PRIVATE_HOLD_UNAVAILABLE",
+				message: "x",
+			})),
 		});
 		await net.loadHold();
 		await net.runTest();
@@ -399,7 +445,11 @@ describe("the two-way test", () => {
 
 	it("a poll refusal ends the test with its message instead of spinning", async () => {
 		const { net } = make({
-			connectionTestStatus: vi.fn(async () => ({ ok: false, code: "NOT_PRIVATE_CUSTOMER", message: "Not yours." })),
+			connectionTestStatus: vi.fn(async () => ({
+				ok: false,
+				code: "NOT_PRIVATE_CUSTOMER",
+				message: "Not yours.",
+			})),
 		});
 		await net.loadHold();
 		await net.runTest();
@@ -451,7 +501,10 @@ describe("the two-way test", () => {
 
 	it("a failed hold load is held, not pending", async () => {
 		const storage = { get: () => `${HOLD.host_ip}|https://8.8.8.8`, set: () => {} };
-		const { net } = make({ reserveHost: vi.fn(async () => ({ ok: false, code: "X", message: "no" })) }, { storage });
+		const { net } = make(
+			{ reserveHost: vi.fn(async () => ({ ok: false, code: "X", message: "no" })) },
+			{ storage }
+		);
 		net.state.publicAddress = "https://8.8.8.8";
 		await net.loadHold();
 		net.state.statusLoaded = true;
@@ -505,7 +558,11 @@ describe("controller rulings", () => {
 	it("seeds the first paint from the stored private_hold, then a refresh to another host raises hold-ended", async () => {
 		const reserveHost = vi.fn(async () => ({ ...HOLD, host_ip: "198.51.100.45" }));
 		const { net } = make({ reserveHost });
-		net.seedHold({ host_ip: "198.51.100.27", reach_url: "https://r/", hold_until: "2026-10-17 09:10:00" });
+		net.seedHold({
+			host_ip: "198.51.100.27",
+			reach_url: "https://r/",
+			hold_until: "2026-10-17 09:10:00",
+		});
 		expect(net.state.hold.holdUntil).toBe("2026-10-17 09:10:00");
 		expect(reserveHost).not.toHaveBeenCalled();
 		await net.loadHold();
@@ -526,8 +583,16 @@ describe("controller rulings", () => {
 
 	it("an unknown refusal code reads as the generic copy", async () => {
 		const { net } = make({
-			reserveHost: vi.fn(async () => ({ ok: false, code: "SOMETHING_NEW", message: "internal" })),
-			startConnectionTest: vi.fn(async () => ({ ok: false, code: "SOMETHING_NEW", message: "internal" })),
+			reserveHost: vi.fn(async () => ({
+				ok: false,
+				code: "SOMETHING_NEW",
+				message: "internal",
+			})),
+			startConnectionTest: vi.fn(async () => ({
+				ok: false,
+				code: "SOMETHING_NEW",
+				message: "internal",
+			})),
 		});
 		await net.loadHold();
 		expect(net.state.holdErr).toBe(GENERIC_REFUSAL);
@@ -552,7 +617,12 @@ describe("controller rulings", () => {
 	it("a busy admin check surfaces admin's sentence and can be retried", async () => {
 		const checkAdminConnection = vi
 			.fn()
-			.mockResolvedValueOnce({ reachable: true, enabled: false, caller_ip: "", message: "Another check is running." })
+			.mockResolvedValueOnce({
+				reachable: true,
+				enabled: false,
+				caller_ip: "",
+				message: "Another check is running.",
+			})
 			.mockResolvedValueOnce({ reachable: true, enabled: true, caller_ip: "8.8.8.8" });
 		const { net } = make({ checkAdminConnection });
 		await net.runAdminCheck();
@@ -567,10 +637,18 @@ describe("controller rulings", () => {
 		const reserveHost = vi
 			.fn()
 			.mockResolvedValueOnce({ ...HOLD })
-			.mockResolvedValueOnce({ ok: false, code: "PRIVATE_HOLD_UNAVAILABLE", message: "No server fits." });
+			.mockResolvedValueOnce({
+				ok: false,
+				code: "PRIVATE_HOLD_UNAVAILABLE",
+				message: "No server fits.",
+			});
 		const { net } = make({
 			reserveHost,
-			startConnectionTest: vi.fn(async () => ({ ok: false, code: "PRIVATE_HOLD_UNAVAILABLE", message: "x" })),
+			startConnectionTest: vi.fn(async () => ({
+				ok: false,
+				code: "PRIVATE_HOLD_UNAVAILABLE",
+				message: "x",
+			})),
 		});
 		await net.loadHold();
 		await net.runTest();
@@ -593,7 +671,11 @@ describe("fix round 1", () => {
 	it("reset then rerun mid-poll: only the new test's results land", async () => {
 		const gates = [];
 		const checks = ["JCC-A", "JCC-B"];
-		const startConnectionTest = vi.fn(async () => ({ ok: true, check: checks.shift(), outbound: { ok: true, reason: "ok" } }));
+		const startConnectionTest = vi.fn(async () => ({
+			ok: true,
+			check: checks.shift(),
+			outbound: { ok: true, reason: "ok" },
+		}));
 		const connectionTestStatus = vi.fn((check) => new Promise((r) => gates.push([check, r])));
 		const { net } = make({ startConnectionTest, connectionTestStatus });
 		const a = net.runTest();
@@ -613,15 +695,29 @@ describe("fix round 1", () => {
 
 	it("dispose ends the poll: no further status calls", async () => {
 		let n = 0;
-		const connectionTestStatus = vi.fn(async () => ({ ok: true, status: "Checking", reason: "" }));
-		const { net } = make({ connectionTestStatus }, { sleep: async () => { if (++n === 2) net.dispose(); } });
+		const connectionTestStatus = vi.fn(async () => ({
+			ok: true,
+			status: "Checking",
+			reason: "",
+		}));
+		const { net } = make(
+			{ connectionTestStatus },
+			{
+				sleep: async () => {
+					if (++n === 2) net.dispose();
+				},
+			}
+		);
 		await net.runTest();
 		expect(connectionTestStatus).toHaveBeenCalledTimes(2);
 		expect(net.state.test.phase).toBe("idle");
 	});
 
 	it("a blank ok reserve keeps the previous hold, raises no hold-ended, and says contact support", async () => {
-		const reserveHost = vi.fn().mockResolvedValueOnce({ ...HOLD }).mockResolvedValueOnce({ ...HOLD, host_ip: "" });
+		const reserveHost = vi
+			.fn()
+			.mockResolvedValueOnce({ ...HOLD })
+			.mockResolvedValueOnce({ ...HOLD, host_ip: "" });
 		const { net } = make({ reserveHost });
 		await net.loadHold();
 		expect(await net.loadHold()).toBe(false);
@@ -639,7 +735,11 @@ describe("fix round 1", () => {
 		const startConnectionTest = vi
 			.fn()
 			.mockResolvedValueOnce({ ok: false, code: "PRIVATE_HOLD_UNAVAILABLE", message: "x" })
-			.mockResolvedValueOnce({ ok: true, check: "JCC-B", outbound: { ok: true, reason: "ok" } });
+			.mockResolvedValueOnce({
+				ok: true,
+				check: "JCC-B",
+				outbound: { ok: true, reason: "ok" },
+			});
 		const { net } = make({ reserveHost, startConnectionTest });
 		await net.loadHold();
 		const a = net.runTest();
@@ -653,7 +753,11 @@ describe("fix round 1", () => {
 	});
 
 	it("every poll throwing ends with a connection-lost error, not Unreachable", async () => {
-		const { net } = make({ connectionTestStatus: vi.fn(async () => { throw new Error("offline"); }) });
+		const { net } = make({
+			connectionTestStatus: vi.fn(async () => {
+				throw new Error("offline");
+			}),
+		});
 		await net.runTest();
 		expect(net.state.test.phase).toBe("idle");
 		expect(net.state.test.err).toMatch(/lost the connection/);
@@ -663,7 +767,12 @@ describe("fix round 1", () => {
 	it("a rate-limited poll waits retry_after_seconds and keeps polling the same check", async () => {
 		const connectionTestStatus = vi
 			.fn()
-			.mockResolvedValueOnce({ ok: false, code: "RATE_LIMITED_PRIVATE_NETWORK", message: "Slow.", retry_after_seconds: 5 })
+			.mockResolvedValueOnce({
+				ok: false,
+				code: "RATE_LIMITED_PRIVATE_NETWORK",
+				message: "Slow.",
+				retry_after_seconds: 5,
+			})
 			.mockResolvedValueOnce({ ok: true, status: "Verified", reason: "ok" });
 		const sleep = vi.fn(async () => {});
 		const { net } = make({ connectionTestStatus }, { sleep });
@@ -723,7 +832,12 @@ describe("the cleared checkout is bound to the server and address it was tested 
 
 	it("a hold that ended clears it", async () => {
 		const { net, api } = await clearedNet();
-		api.reserveHost.mockResolvedValueOnce({ ok: true, host_ip: "198.51.100.99", reach_url: "", hold_until: null });
+		api.reserveHost.mockResolvedValueOnce({
+			ok: true,
+			host_ip: "198.51.100.99",
+			reach_url: "",
+			hold_until: null,
+		});
 		await net.loadHold();
 		expect(net.state.holdEnded).toBeTruthy();
 		expect(net.state.cleared).toBe(false);

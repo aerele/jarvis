@@ -154,10 +154,12 @@ function hostReason(host, testMode) {
 	const labels = host.split(".");
 	if (!labels.every((label) => LABEL_RE.test(label))) return "bad_host";
 	if (testMode && (host === "localhost" || host.endsWith(".localhost"))) return null;
-	if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return "local_name";
+	if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local"))
+		return "local_name";
 	if (labels.length < 2) return "single_label_host";
 	const tld = labels[labels.length - 1];
-	if (RESERVED_TLDS.has(tld) || labels.slice(-2).join(".") === "home.arpa") return "reserved_tld";
+	if (RESERVED_TLDS.has(tld) || labels.slice(-2).join(".") === "home.arpa")
+		return "reserved_tld";
 	// A real TLD starts with a letter: refuses "127.1", "1.2.3.4.5" and other numeric spellings.
 	return /^[a-z]/.test(tld) ? null : "bad_host";
 }
@@ -179,7 +181,8 @@ function addressReason(raw, testMode) {
 	if (/[\u0000- \u007f\\]/.test(raw) || /[^\u0000-\u007f]/.test(raw)) return "bad_characters";
 	const parts = splitUrl(raw);
 	if (!parts) return "not_a_url";
-	if (parts.scheme !== "https" && !(testMode && parts.scheme === "http")) return "scheme_not_https";
+	if (parts.scheme !== "https" && !(testMode && parts.scheme === "http"))
+		return "scheme_not_https";
 	if (parts.netloc.includes("@")) return "has_user_info";
 	if (raw.includes("?") || raw.includes("#")) return "has_query_or_fragment";
 	const { host, port } = hostAndPort(parts.netloc);
@@ -208,7 +211,8 @@ const REASON_COPY = {
 
 function messageFor(reason, raw) {
 	if (reason === "not_a_url") return raw.includes("://") ? MSG.noHost : MSG.scheme;
-	if (reason === "scheme_not_https") return raw.toLowerCase().startsWith("http://") ? MSG.http : MSG.scheme;
+	if (reason === "scheme_not_https")
+		return raw.toLowerCase().startsWith("http://") ? MSG.http : MSG.scheme;
 	return REASON_COPY[reason] || MSG.domain; // unknown reason: generic copy, never a crash
 }
 
@@ -244,7 +248,9 @@ export function publicHostOf(address) {
 	if (!parts) return "";
 	const { host, port } = hostAndPort(parts.netloc);
 	if (!host) return "";
-	return port === null || port === "bad" || port === DEFAULT_PORT[parts.scheme] ? host : `${host}:${port}`;
+	return port === null || port === "bad" || port === DEFAULT_PORT[parts.scheme]
+		? host
+		: `${host}:${port}`;
 }
 
 // ---- the rules tables -------------------------------------------------------------------
@@ -262,9 +268,13 @@ const mkRow = (direction, from, fromMono, to, toMono, toNote, port) => ({
 export function adminRuleRows({ ips, host }) {
 	const list = Array.isArray(ips) ? ips.filter(Boolean) : [];
 	if (list.length) {
-		return list.map((ip) => mkRow("Outbound", "Your ERPNext server", false, ip, true, host || "", ADMIN_PORT));
+		return list.map((ip) =>
+			mkRow("Outbound", "Your ERPNext server", false, ip, true, host || "", ADMIN_PORT)
+		);
 	}
-	return host ? [mkRow("Outbound", "Your ERPNext server", false, host, true, "", ADMIN_PORT)] : [];
+	return host
+		? [mkRow("Outbound", "Your ERPNext server", false, host, true, "", ADMIN_PORT)]
+		: [];
 }
 
 /** AllowServer: the outbound rule to the held host and the inbound rule from it. */
@@ -283,7 +293,11 @@ export function rulesToText(rows, variant) {
 	const lines = [admin ? "Direction\tDestination\tPort" : "Direction\tFrom\tTo\tPort"];
 	for (const r of rows || []) {
 		const to = r.toNote ? `${r.to} (${r.toNote})` : r.to;
-		lines.push(admin ? [r.direction, to, r.port].join("\t") : [r.direction, r.from, to, r.port].join("\t"));
+		lines.push(
+			admin
+				? [r.direction, to, r.port].join("\t")
+				: [r.direction, r.from, to, r.port].join("\t")
+		);
 	}
 	return lines.join("\n");
 }
@@ -304,7 +318,8 @@ export function testPassed(inbound, outbound) {
 }
 
 function inboundRow(inbound, ctx) {
-	if (!inbound || inbound.status === "Checking") return { state: "checking", detail: "Checking…" };
+	if (!inbound || inbound.status === "Checking")
+		return { state: "checking", detail: "Checking…" };
 	if (inbound.reason === "stale") {
 		return { state: "fail", detail: "Your setup changed while we were testing." };
 	}
@@ -318,7 +333,10 @@ function inboundRow(inbound, ctx) {
 		return { state: "fail", detail: "We couldn’t run this check from your Jarvis server." };
 	}
 	if (inbound.reason === "tls") {
-		return { state: "fail", detail: `The certificate isn’t valid for ${hostnameOf(ctx.publicAddress)}.` };
+		return {
+			state: "fail",
+			detail: `The certificate isn’t valid for ${hostnameOf(ctx.publicAddress)}.`,
+		};
 	}
 	if (DIFFERENT_SITE.has(inbound.reason)) {
 		return { state: "fail", detail: "A different site answered at this address." };
@@ -331,7 +349,10 @@ function outboundRow(outbound, ctx) {
 	if (!outbound) return { state: "checking", detail: "Checking…" };
 	if (outbound.ok) return { state: "pass", detail: "Connected." };
 	if (outbound.reason === "tls") {
-		return { state: "fail", detail: `The certificate from ${ctx.hostIp} couldn’t be verified.` };
+		return {
+			state: "fail",
+			detail: `The certificate from ${ctx.hostIp} couldn’t be verified.`,
+		};
 	}
 	if (outbound.reason === "bad_target") {
 		return { state: "fail", detail: "We couldn’t run this check from your ERPNext." };
@@ -342,7 +363,11 @@ function outboundRow(outbound, ctx) {
 function inboundBanner(inbound, ctx) {
 	if (inbound && inbound.reason === "stale") {
 		// No mockup card: a test that finished after the address, site name or server changed.
-		return { type: "warning", title: "Your setup changed during the test", text: "Test again to confirm the connection." };
+		return {
+			type: "warning",
+			title: "Your setup changed during the test",
+			text: "Test again to confirm the connection.",
+		};
 	}
 	const status = inbound && inbound.status;
 	const reason = inbound && inbound.reason;
@@ -364,7 +389,9 @@ function inboundBanner(inbound, ctx) {
 		return {
 			type: "error",
 			title: "Your address reached a different site",
-			text: `Your gateway sends this address to another server or site. Set the Host header on your gateway to ${ctx.siteName || "your site name"}, then test again.`,
+			text: `Your gateway sends this address to another server or site. Set the Host header on your gateway to ${
+				ctx.siteName || "your site name"
+			}, then test again.`,
 		};
 	}
 	if (reason === "bad_answer" || reason === "redirect") {
@@ -431,7 +458,12 @@ export function describeServerTest({
 	if (phase === "idle") return { rows: [], banner: null, passed: false };
 	if (!hostIp) return { rows: [], banner: NO_HOST_BANNER, passed: false };
 	const done = phase === "done";
-	const ctx = { hostIp, publicAddress, publicHost: publicHostOf(publicAddress) || publicAddress, siteName };
+	const ctx = {
+		hostIp,
+		publicAddress,
+		publicHost: publicHostOf(publicAddress) || publicAddress,
+		siteName,
+	};
 	const checking = { state: "checking", detail: "Checking…" };
 	const inRes = done ? inboundRow(inbound, ctx) : checking;
 	const outRes = done ? outboundRow(outbound, ctx) : checking;
@@ -483,7 +515,8 @@ export const HOLD_UNAVAILABLE = {
 };
 
 // ---- refusals and the admin check (bench answers are DATA with HTTP 200) --------------------
-export const GENERIC_REFUSAL = "Something went wrong on our side. Please try again, or contact support.";
+export const GENERIC_REFUSAL =
+	"Something went wrong on our side. Please try again, or contact support.";
 // Codes the SPA has copy for: the bench's _KNOWN_CODES plus three the bench endpoints return
 // themselves (CLIENT_UPGRADE_REQUIRED, PUBLIC_HOST_CONFIGURED, INVALID_REQUEST). Any BENCH_*
 // code also keeps its sentence: the bench writes that message itself. A code outside both
@@ -530,6 +563,7 @@ export function adminCheckState(res) {
 	const message = typeof r.message === "string" ? r.message.trim() : "";
 	const callerIp = typeof r.caller_ip === "string" ? r.caller_ip : "";
 	if (!r.reachable) return { state: "unreachable", message, callerIp };
-	if (!r.enabled) return { state: "unavailable", message: message || SETUP_UNAVAILABLE, callerIp };
+	if (!r.enabled)
+		return { state: "unavailable", message: message || SETUP_UNAVAILABLE, callerIp };
 	return { state: "ready", message, callerIp };
 }

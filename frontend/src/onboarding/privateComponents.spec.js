@@ -45,7 +45,12 @@ describe("NetworkRulesTable", () => {
 
 	it("admin variant: Direction, Destination and Port, the host name beside the IP", () => {
 		const w = mount(NetworkRulesTable, {
-			props: { rows: ADMIN_ROWS, variant: "admin", title: "Rule for your network team", copyLabel: "Copy rule" },
+			props: {
+				rows: ADMIN_ROWS,
+				variant: "admin",
+				title: "Rule for your network team",
+				copyLabel: "Copy rule",
+			},
 		});
 		expect(w.findAll('[role="columnheader"]').map((h) => h.text())).toEqual([
 			"Direction",
@@ -75,7 +80,11 @@ describe("NetworkRulesTable", () => {
 	});
 
 	it("a blocked clipboard leaves the label alone and does not throw", async () => {
-		setClipboard(vi.fn(async () => { throw new Error("denied"); }));
+		setClipboard(
+			vi.fn(async () => {
+				throw new Error("denied");
+			})
+		);
 		const w = mount(NetworkRulesTable, { props: { rows: SERVER_ROWS, variant: "server" } });
 		await w.find("button").trigger("click");
 		await flushPromises();
@@ -115,7 +124,11 @@ describe("NetworkRulesTable (fix round 1)", () => {
 	});
 
 	it("a refused copy shows the Select and copy hint", async () => {
-		setClipboard(vi.fn(async () => { throw new Error("denied"); }));
+		setClipboard(
+			vi.fn(async () => {
+				throw new Error("denied");
+			})
+		);
 		const w = mount(NetworkRulesTable, { props: { rows: SERVER_ROWS, variant: "server" } });
 		await w.find("button").trigger("click");
 		await flushPromises();
@@ -125,8 +138,16 @@ describe("NetworkRulesTable (fix round 1)", () => {
 
 describe("ConnectionTestResult", () => {
 	const ROWS = [
-		{ label: "Jarvis server → your ERPNext", state: "pass", detail: "Connected. The right ERPNext site answered." },
-		{ label: "Your ERPNext → Jarvis server", state: "fail", detail: "Couldn’t connect to 198.51.100.27 on port 443." },
+		{
+			label: "Jarvis server → your ERPNext",
+			state: "pass",
+			detail: "Connected. The right ERPNext site answered.",
+		},
+		{
+			label: "Your ERPNext → Jarvis server",
+			state: "fail",
+			detail: "Couldn’t connect to 198.51.100.27 on port 443.",
+		},
 	];
 
 	it("renders one row per half with its icon and detail", () => {
@@ -146,7 +167,10 @@ describe("ConnectionTestResult", () => {
 
 	it("a checking row shows the spinner, not a result icon", () => {
 		const w = mount(ConnectionTestResult, {
-			props: { rows: [{ label: "A", state: "checking", detail: "Checking…" }], banner: null },
+			props: {
+				rows: [{ label: "A", state: "checking", detail: "Checking…" }],
+				banner: null,
+			},
 		});
 		expect(w.find('[data-icon="check-circle"]').exists()).toBe(false);
 		expect(w.find('[data-icon="x-circle"]').exists()).toBe(false);
@@ -155,13 +179,27 @@ describe("ConnectionTestResult", () => {
 
 	it("shows the banner title and text with the right alert role", () => {
 		const success = mount(ConnectionTestResult, {
-			props: { rows: ROWS, banner: { type: "success", title: "Connection OK", text: "Your network is ready for Jarvis. You can pay now." } },
+			props: {
+				rows: ROWS,
+				banner: {
+					type: "success",
+					title: "Connection OK",
+					text: "Your network is ready for Jarvis. You can pay now.",
+				},
+			},
 		});
 		expect(success.text()).toContain("Connection OK");
 		expect(success.text()).toContain("You can pay now.");
 		expect(success.find('[role="status"]').exists()).toBe(true);
 		const warning = mount(ConnectionTestResult, {
-			props: { rows: ROWS, banner: { type: "warning", title: "We couldn’t reach your public address", text: "Check the inbound rule." } },
+			props: {
+				rows: ROWS,
+				banner: {
+					type: "warning",
+					title: "We couldn’t reach your public address",
+					text: "Check the inbound rule.",
+				},
+			},
 		});
 		expect(warning.find('[role="alert"]').exists()).toBe(true);
 	});

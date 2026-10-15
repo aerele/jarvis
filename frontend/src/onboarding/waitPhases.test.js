@@ -528,13 +528,21 @@ test("readinessPhase: network_check_required STOPS the wait and is marked for th
 	assert.equal(p.state, PHASE_STATE.UNKNOWN);
 	assert.equal(p.kind, PHASE_KIND.NONE);
 	assert.equal(p.title, "Allow your Jarvis server");
-	assert.equal(p.detail, "Allow your Jarvis server through your firewall, then test the connection.");
+	assert.equal(
+		p.detail,
+		"Allow your Jarvis server through your firewall, then test the connection."
+	);
 	// it is not a config problem the customer can fix in the editable form, nor a reconnect
 	assert.ok(!p.editable && !p.reconnect);
 });
 
 test("readinessPhase: no other reason sets the network flag", () => {
-	for (const reason of ["container_provisioning", "llm_provisioning", "subscription_suspended", "???"]) {
+	for (const reason of [
+		"container_provisioning",
+		"llm_provisioning",
+		"subscription_suspended",
+		"???",
+	]) {
 		assert.ok(!readinessPhase({ answered: true, reason }).network, reason);
 	}
 });

@@ -21,7 +21,12 @@
 			<!-- min-width as an inline style rather than a fixed-width Tailwind class: the mobile guard
 				 (tests/mobile-responsive.spec.js) scans source text for those, and this width
 				 genuinely lives inside its own horizontal scroller. -->
-			<div ref="tableEl" :style="{ minWidth: variant === 'admin' ? '460px' : '560px' }" role="table" :aria-label="title">
+			<div
+				ref="tableEl"
+				:style="{ minWidth: variant === 'admin' ? '460px' : '560px' }"
+				role="table"
+				:aria-label="title"
+			>
 				<div
 					class="grid gap-3 border-b border-outline-gray-1 bg-surface-gray-1 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-ink-gray-5"
 					:style="gridStyle"
@@ -39,7 +44,9 @@
 				>
 					<span class="inline-flex items-center gap-1.5" role="cell">
 						<FeatherIcon
-							:name="row.direction === 'Outbound' ? 'arrow-up-right' : 'arrow-down-left'"
+							:name="
+								row.direction === 'Outbound' ? 'arrow-up-right' : 'arrow-down-left'
+							"
 							class="h-3.5 w-3.5 text-ink-gray-5"
 							aria-hidden="true"
 						/>{{ row.direction }}
@@ -51,8 +58,12 @@
 						>{{ row.from }}</span
 					>
 					<span class="flex min-w-0 flex-col gap-0.5" role="cell">
-						<span :class="row.toMono ? 'font-mono text-ink-gray-9' : ''">{{ row.to }}</span>
-						<span v-if="row.toNote" class="text-p-xs text-ink-gray-5">{{ row.toNote }}</span>
+						<span :class="row.toMono ? 'font-mono text-ink-gray-9' : ''">{{
+							row.to
+						}}</span>
+						<span v-if="row.toNote" class="text-p-xs text-ink-gray-5">{{
+							row.toNote
+						}}</span>
 					</span>
 					<span role="cell">{{ row.port }}</span>
 				</div>
@@ -110,7 +121,8 @@ async function copy() {
 }
 // Clipboard blocked or missing: select the rules so the person can copy them by hand.
 function selectTable() {
-	const sel = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
+	const sel =
+		typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
 	if (!tableEl.value || !sel) return;
 	const range = document.createRange();
 	range.selectNodeContents(tableEl.value);

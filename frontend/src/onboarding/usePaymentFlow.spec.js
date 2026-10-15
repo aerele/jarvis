@@ -835,7 +835,12 @@ describe("private network: the connection test holds checkout", () => {
 	test("the first signup does not navigate while held", async () => {
 		const h = held();
 		const { flow, navigate } = makeFlow({ options: { holdCheckout: h.isHeld } });
-		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
 		expect(navigate).not.toHaveBeenCalled();
 		expect(flow.state.value.value).not.toBe(STATES.CHECKOUT_OPEN);
 		expect(flow.state.value.busy).toBeNull();
