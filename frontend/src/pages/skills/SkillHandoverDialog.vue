@@ -243,7 +243,7 @@ async function load() {
 	const mine = ++latest;
 	searching.value = true;
 	try {
-		const res = (await adminHandoverTargets(search.value.trim())) || {};
+		const res = (await adminHandoverTargets(search.value.trim(), props.name)) || {};
 		if (mine !== latest) return;
 		targets.value = Array.isArray(res.targets) ? res.targets : [];
 		more.value = !!res.more;
@@ -271,7 +271,7 @@ const listed = (user) => targets.value.some((u) => u.user === user);
 async function findMe() {
 	if (!session.user || me.value) return;
 	try {
-		const res = (await adminHandoverTargets(session.user)) || {};
+		const res = (await adminHandoverTargets(session.user, props.name)) || {};
 		me.value = (res.targets || []).find((u) => u.user === session.user) || null;
 	} catch (e) {
 		// no shortcut; the picker still works

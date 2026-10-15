@@ -93,7 +93,8 @@ describe("SkillHandoverDialog, the picker", () => {
 	it("names the skill and offers the server's people, the owner and a person at the cap not pickable", async () => {
 		const w = await open();
 		expect(w.find("h3").text()).toBe("Hand over “Month end”");
-		expect(api.adminHandoverTargets).toHaveBeenCalledWith("");
+		// With the skill: the server leaves its owner out.
+		expect(api.adminHandoverTargets).toHaveBeenCalledWith("", "s1");
 		const rows = w.findAll(".jv-skill-handover-user");
 		expect(rows.map((r) => r.attributes("data-user"))).toEqual(TARGETS.map((u) => u.user));
 		// aria-disabled, not `disabled`: a keyboard or screen reader user hears why.
@@ -134,7 +135,7 @@ describe("SkillHandoverDialog, the picker", () => {
 		expect(api.adminHandoverTargets).toHaveBeenCalledTimes(1);
 		vi.advanceTimersByTime(300);
 		await flushPromises();
-		expect(api.adminHandoverTargets).toHaveBeenLastCalledWith("ful");
+		expect(api.adminHandoverTargets).toHaveBeenLastCalledWith("ful", "s1");
 		expect(w.findAll(".jv-skill-handover-user")).toHaveLength(1);
 		expect(handButton(w).attributes("disabled")).toBe("");
 		expect(summary(w).exists()).toBe(false);
@@ -265,7 +266,7 @@ describe("SkillHandoverDialog, hand to myself", () => {
 			)
 		);
 		const w = await open();
-		expect(api.adminHandoverTargets).toHaveBeenLastCalledWith("boss@example.test");
+		expect(api.adminHandoverTargets).toHaveBeenLastCalledWith("boss@example.test", "s1");
 		expect(selfButton(w).exists()).toBe(true);
 		// Picked, they stay picked though the list on screen does not show them.
 		await selfButton(w).trigger("click");

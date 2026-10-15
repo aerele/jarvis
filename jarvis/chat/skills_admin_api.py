@@ -115,6 +115,7 @@ def admin_list_skills(
 		"total": total,
 		"hold_available": held_column,
 		"delete_available": skills_admin.admin_log_exists(),
+		"handover_available": skills_handover.available(),
 		"sync": status,
 	}
 

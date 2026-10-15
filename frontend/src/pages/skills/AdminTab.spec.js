@@ -637,9 +637,21 @@ describe("Skills AdminTab, a site not yet migrated", () => {
 		expect(menuItem(w, "a", "hold").attributes("disabled")).toBeUndefined();
 	});
 
+	it("says handing over is not available and disables Hand over", async () => {
+		const w = await mountWith([row("a")], { handover_available: false });
+		expect(w.find(".jv-skill-admin-no-handover").text()).toBe(
+			"Handing over is not available yet on this site."
+		);
+		expect(menuItem(w, "a", "handover").attributes("disabled")).toBeDefined();
+		expect(menuItem(w, "a", "hold").attributes("disabled")).toBeUndefined();
+		expect(menuItem(w, "a", "delete").attributes("disabled")).toBeUndefined();
+	});
+
 	it("says nothing about it on a migrated site", async () => {
 		const w = await mountWith([row("a")]);
 		expect(w.find(".jv-skill-admin-unmigrated").exists()).toBe(false);
+		expect(w.find(".jv-skill-admin-no-handover").exists()).toBe(false);
+		expect(menuItem(w, "a", "handover").attributes("disabled")).toBeUndefined();
 		expect(menuItem(w, "a", "hold").attributes("disabled")).toBeUndefined();
 	});
 });

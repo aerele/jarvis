@@ -62,6 +62,14 @@
 					Deleting is not available yet on this site.
 				</p>
 
+				<p
+					v-if="!handoverAvailable"
+					class="jv-skill-admin-no-handover text-p-sm text-ink-gray-6"
+					role="status"
+				>
+					Handing over is not available yet on this site.
+				</p>
+
 				<div class="jv-skill-admin-toolbar flex flex-col gap-2">
 					<div class="flex items-center gap-2">
 						<div class="jv-skill-admin-search min-w-0 max-w-md flex-1">
@@ -550,6 +558,7 @@ const sync = ref({ pending: false, needs_apply: false });
 // False on a site not yet migrated: Hold and Release are then switched off.
 const holdAvailable = ref(true);
 const deleteAvailable = ref(true);
+const handoverAvailable = ref(true);
 // An act just said the catalog needs an Apply (the list may not say it yet).
 const needsApply = ref(false);
 const applying = ref(false);
@@ -634,6 +643,7 @@ function keepEnvelope(res) {
 	sync.value = res.sync || { pending: false, needs_apply: false };
 	holdAvailable.value = res.hold_available !== false;
 	deleteAvailable.value = res.delete_available !== false;
+	handoverAvailable.value = res.handover_available !== false;
 	if (sync.value.pending) startSyncPoll();
 }
 
@@ -700,7 +710,7 @@ function dialogOpen() {
 // in a group of its own. An admin's own skill has Hand over and Delete only (the
 // "Yours" badge says why). A learned skill and a Published copy cannot be handed over.
 // For a skill shared with everyone every item says so. On a site not yet migrated
-// Hold and Release are disabled, not hidden.
+// Hold and Release, Hand over and Delete are disabled, not hidden.
 function actionsFor(row) {
 	const everyone = isCompany(row);
 	const item = (key, label, run, extra = {}) => ({
@@ -719,7 +729,11 @@ function actionsFor(row) {
 		first.push(item("release", "Release", askRelease, holdOff));
 	}
 	if (!row.is_learned && !row.is_published) {
-		first.push(item("handover", "Hand over", askHandover));
+		first.push(
+			item("handover", "Hand over", askHandover, {
+				disabled: busy.value || !handoverAvailable.value,
+			})
+		);
 	}
 	const groups = [];
 	if (first.length) groups.push({ group: "Skill", hideLabel: true, items: first });
