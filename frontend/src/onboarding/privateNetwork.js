@@ -517,7 +517,7 @@ export const HOLD_UNAVAILABLE = {
 // ---- refusals and the admin check (bench answers are DATA with HTTP 200) --------------------
 export const GENERIC_REFUSAL =
 	"Something went wrong on our side. Please try again, or contact support.";
-// Codes the SPA has copy for: the bench's _KNOWN_CODES plus three the bench endpoints return
+// Codes the SPA has copy for: the bench's _KNOWN_CODES plus the ones the bench endpoints return
 // themselves (CLIENT_UPGRADE_REQUIRED, PUBLIC_HOST_CONFIGURED, INVALID_REQUEST). Any BENCH_*
 // code also keeps its sentence: the bench writes that message itself. A code outside both
 // reads as generic copy: a newer bench or admin must never
@@ -529,6 +529,7 @@ export const KNOWN_CODES = new Set([
 	"PRIVATE_HOLD_UNAVAILABLE",
 	"PRIVATE_ADDRESS_TAKEN",
 	"PRIVATE_ADDRESS_INVALID",
+	"PRIVATE_ADDRESS_LOCKED",
 	"CONNECTION_CHECK_BUSY",
 	"RATE_LIMITED_PRIVATE_NETWORK",
 	"CLIENT_UPGRADE_REQUIRED",

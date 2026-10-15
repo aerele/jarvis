@@ -2213,6 +2213,28 @@ describe("private network: Network step plumbing", () => {
 		w.unmount();
 	});
 
+	it("a locked address shows the bench sentence with a Contact support action", async () => {
+		const sentence = "The address can't be changed after sign-up. Contact support.";
+		api.savePublicAddress.mockResolvedValueOnce({
+			ok: false,
+			code: "PRIVATE_ADDRESS_LOCKED",
+			message: sentence,
+		});
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "network";
+		w.vm.net.openAddress();
+		w.vm.net.state.draft = "https://erp.example.com";
+		await flushPromises();
+		expect(buttonByLabel(w, "Contact support")).toBeFalsy();
+		await w.vm.onNetworkContinue();
+		await flushPromises();
+		expect(w.text()).toContain(sentence);
+		expect(buttonByLabel(w, "Contact support")).toBeTruthy();
+		await buttonByLabel(w, "Contact support").trigger("click");
+		expect(w.vm.supportOpen).toBe(true);
+	});
+
 	it("a locally invalid address never calls the API", async () => {
 		const w = mountView();
 		await flushPromises();

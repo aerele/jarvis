@@ -401,6 +401,12 @@
 											:message="draftError || net.state.saveErr"
 										/>
 										<div
+											v-if="!draftError && net.state.saveErrCode === 'PRIVATE_ADDRESS_LOCKED'"
+											class="mt-1"
+										>
+											<Button label="Contact support" @click="openSupport" />
+										</div>
+										<div
 											v-if="net.state.detectedIp"
 											class="mt-0.5 flex flex-wrap items-center gap-2"
 										>

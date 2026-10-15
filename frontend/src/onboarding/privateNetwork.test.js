@@ -496,6 +496,16 @@ test("holdEndedBanner survives a missing address", () => {
 	assert.ok(!b.text.includes("  "));
 });
 
+test("refusalOf: PRIVATE_ADDRESS_LOCKED keeps the bench sentence", () => {
+	const r = refusalOf({
+		ok: false,
+		code: "PRIVATE_ADDRESS_LOCKED",
+		message: "The address can't be changed after sign-up. Contact support.",
+	});
+	assert.equal(r.code, "PRIVATE_ADDRESS_LOCKED");
+	assert.equal(r.message, "The address can't be changed after sign-up. Contact support.");
+});
+
 test("refusalOf: known codes keep the bench sentence, unknown codes read as generic copy", () => {
 	assert.equal(refusalOf({ ok: true }), null);
 	assert.equal(refusalOf(null), null);

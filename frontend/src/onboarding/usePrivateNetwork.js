@@ -103,6 +103,7 @@ export function createPrivateNetwork(deps) {
 		draftTouched: false,
 		saving: false,
 		saveErr: "",
+		saveErrCode: "", // refusal code behind saveErr ("" for a local or network failure)
 		// Held server (after the email is confirmed) and the Connect panel
 		hold: null, // { hostIp, reachUrl, holdUntil }
 		holdLoading: false,
@@ -242,11 +243,13 @@ export function createPrivateNetwork(deps) {
 		if (!privateBench.value || draftError.value || state.saving) return false;
 		state.saving = true;
 		state.saveErr = "";
+		state.saveErrCode = "";
 		try {
 			const r = (await api.savePublicAddress(state.draft.trim())) || {};
 			const refusal = refusalOf(r);
 			if (refusal || !r.ok) {
 				state.saveErr = refusal ? refusal.message : "We couldn't save that address.";
+				state.saveErrCode = refusal ? refusal.code : "";
 				return false;
 			}
 			state.mode = "private";

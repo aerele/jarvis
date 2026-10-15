@@ -255,6 +255,23 @@ describe("the Network step", () => {
 	});
 });
 
+describe("a locked address", () => {
+	it("saveAddress keeps the bench sentence and its code, and a later success clears the code", async () => {
+		const sentence = "The address can't be changed after sign-up. Contact support.";
+		const savePublicAddress = vi
+			.fn()
+			.mockResolvedValueOnce({ ok: false, code: "PRIVATE_ADDRESS_LOCKED", message: sentence })
+			.mockResolvedValueOnce({ ok: true, public_address: "https://erp.example.com" });
+		const { net } = make({ savePublicAddress });
+		net.state.draft = "https://erp.example.com";
+		expect(await net.saveAddress()).toBe(false);
+		expect(net.state.saveErr).toBe(sentence);
+		expect(net.state.saveErrCode).toBe("PRIVATE_ADDRESS_LOCKED");
+		expect(await net.saveAddress()).toBe(true);
+		expect(net.state.saveErrCode).toBe("");
+	});
+});
+
 describe("the held server", () => {
 	it("loadHold records the hold", async () => {
 		const { net } = make();
