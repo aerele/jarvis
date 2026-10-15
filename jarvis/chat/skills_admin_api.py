@@ -242,7 +242,8 @@ def admin_handover_targets(search: str = "", skill: str | None = None) -> dict:
 	"""Who a skill can be handed to, for the dialog's search: enabled desk users with
 	the Jarvis User role, not Administrator or Guest, nor the current owner of ``skill``
 	(optional), matching ``search`` on their address or full name, at most
-	``skills_handover.TARGETS_MAX``. ``{targets: [{user, full_name, at_cap}], more}``.
+	``skills_handover.TARGETS_MAX``. ``{targets: [{user, full_name, at_cap}], more, cap}``:
+	``cap`` is the per-owner cap ``at_cap`` is measured against.
 	The hand-over checks everything again."""
 	refuse_in_tool_dispatch()
 	require_jarvis_admin()
@@ -407,8 +408,9 @@ def _lineage(row) -> dict | None:
 
 
 def _history(skill: str) -> list[dict]:
-	"""The admin acts on this skill, newest first, from the audit log. ``new_owner`` is
-	a hand-over's ("" for the other acts, and before the hand-over's migrate)."""
+	"""The admin acts on this skill, newest first, from the audit log. ``new_owner`` and
+	``new_owner_name`` are a hand-over's ("" for the other acts, and before the
+	hand-over's migrate)."""
 	if not skills_admin.admin_log_exists():
 		return []
 	log = frappe.qb.DocType("Jarvis Skill Admin Log")
@@ -424,7 +426,7 @@ def _history(skill: str) -> list[dict]:
 		.limit(HISTORY_MAX)
 		.run(as_dict=True)
 	)
-	names = _full_names(r.admin for r in rows)
+	names = _full_names([*(r.admin for r in rows), *(r.get("new_owner") for r in rows)])
 	return [
 		{
 			"admin": r.admin,
@@ -432,6 +434,7 @@ def _history(skill: str) -> list[dict]:
 			"verb": r.verb,
 			"reason": r.reason or "",
 			"new_owner": r.get("new_owner") or "",
+			"new_owner_name": (names.get(r.get("new_owner")) or r.get("new_owner") or ""),
 			"at": str(r.acted_at or ""),
 		}
 		for r in rows

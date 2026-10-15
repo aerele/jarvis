@@ -44,6 +44,11 @@ class SkillHandoverError(frappe.ValidationError):
 	"""The skill cannot go to that user."""
 
 
+class SkillOwnerChangedError(SkillHandoverError):
+	"""The skill changed hands since the dialog showed it. Its own class, so the dialog
+	offers Reload by the response's ``exc_type``, never by reading the message."""
+
+
 def available() -> bool:
 	"""Whether the audit log has the hand-over's column (the 5b migrate ran)."""
 	return admin_log.handover_available()
@@ -56,10 +61,10 @@ def handover(row, new_owner: str, expected_owner: str) -> dict:
 	"""Hand ``row`` to ``new_owner`` (module docstring). ``expected_owner`` is the owner
 	the dialog showed: a skill that changed hands since is refused with nothing written.
 	``{ok, new_owner, cleared, hold_lifted, requests_cancelled, needs_apply}``."""
-	refuse(row, new_owner, expected_owner)  # a plain answer before any lock
+	# A plain answer before any lock, then again under it on the target's LOCKED rows.
+	refuse(row, new_owner, expected_owner, _target_rows(new_owner))
 	with skills_admin.locked(row, requests=True, extra_fields=_extra_fields()) as cur:
-		refuse(cur, new_owner, expected_owner)
-		_refuse_clash(cur, new_owner)
+		refuse(cur, new_owner, expected_owner, _target_rows(new_owner, lock=True))
 		needs_apply = skills_admin.in_company_catalog(cur.name)
 		cleared = _clear(cur.name)
 		values, flags, held_for = _owner_values(cur, new_owner)
@@ -69,7 +74,7 @@ def handover(row, new_owner: str, expected_owner: str) -> dict:
 		_record(cur, new_owner, held_for, needs_apply)
 		skills_admin.commit_act()
 	skills_admin.after_commit(cur, "handover", new_owner=new_owner)
-	_tell_both_owners(cur, new_owner)
+	_tell_both_owners(cur, new_owner, hold_lifted=held_for is not None)
 	return {
 		"ok": True,
 		"new_owner": new_owner,
@@ -80,21 +85,24 @@ def handover(row, new_owner: str, expected_owner: str) -> dict:
 	}
 
 
-def refuse(row, new_owner: str, expected_owner: str) -> None:
-	reason = refusal(row, new_owner, expected_owner)
+def refuse(row, new_owner: str, expected_owner: str, owned: list) -> None:
+	"""Refuse a skill that changed hands since the dialog showed it, then anything
+	``refusal`` names. ``owned``: the target's skill rows (``_target_rows``)."""
+	if row.owner != expected_owner:
+		frappe.throw(_("This skill changed while you acted on it. Reload."), SkillOwnerChangedError)
+	reason = refusal(row, new_owner, owned)
 	if reason:
 		frappe.throw(frappe.utils.escape_html(reason), SkillHandoverError)
 
 
-def refusal(row, new_owner: str, expected_owner: str) -> str:
+def refusal(row, new_owner: str, owned: list) -> str:
 	"""Why ``row`` cannot go to ``new_owner``, or "". Read as the database is now: called
 	again under the lock. The target rules are the macro hand-over's
 	(``macros_admin_api._handover_refusal``): the Jarvis User ROLE, because only it has a
 	permission row on the skill doctype; a skill held by anyone else could never be
 	switched on, edited or deleted by them. The per-owner cap is checked here because the
-	controller checks it on insert only."""
-	if row.owner != expected_owner:
-		return _("This skill changed while you acted on it. Reload.")
+	controller checks it on insert only; it and the same-name clash are read off
+	``owned``, the target's rows (locked, under the lock)."""
 	if skills_admin.is_learned(row):
 		return _("Learned skills are managed on the learning board, not here.")
 	if skills_admin.is_published(row):
@@ -109,10 +117,10 @@ def refusal(row, new_owner: str, expected_owner: str) -> str:
 			new_owner
 		)
 	cap = skill_doctype.MAX_SKILLS_PER_OWNER
-	if frappe.db.count(SKILL, {"owner": new_owner}) >= cap:
+	if len(owned) >= cap:
 		return _("{0} already has {1} skills, the most one user can have.").format(new_owner, cap)
-	if _clash(row, new_owner):
-		return _clash_message(row, new_owner)
+	if any(r.skill_name == row.skill_name and r.name != row.name for r in owned):
+		return _("{0} already has a skill named {1}.").format(new_owner, row.skill_name)
 	return ""
 
 
@@ -138,34 +146,21 @@ def _is_reviewer(user: str) -> bool:
 	return is_skill_reviewer(user)
 
 
-def _clash(row, new_owner: str, *, lock: bool = False) -> bool:
-	"""Whether ``new_owner`` has another skill of this name. Per-owner uniqueness is a
-	SELECT in the controller (``_validate_unique_per_owner``), not an index, so under
-	the lock this is a LOCKING read: it sees a row the target committed after this
-	transaction's snapshot (or fails with 1020 where snapshot isolation is on, refused
-	as "busy"). Nothing indexes (owner, skill_name), so the read next-key-locks the rows
-	it scans until the commit: skill inserts wait behind a hand-over for that moment,
-	which is acceptable for a rare admin act on a narrow table."""
+def _target_rows(user: str, *, lock: bool = False) -> list:
+	"""``user``'s skill rows (name, skill_name), for the cap and the same-name clash in
+	one read. Neither is an index (the cap is counted on insert, uniqueness is a SELECT
+	in ``_validate_unique_per_owner``), so under the lock this is a LOCKING read: it
+	sees a row the target committed after this transaction's snapshot (or fails with
+	1020 where snapshot isolation is on, refused as "busy"). Nothing indexes ``owner``,
+	so the read next-key-locks the rows it scans until the commit: skill inserts wait
+	behind a hand-over for that moment, which is acceptable for a rare admin act on a
+	narrow table."""
 	s = frappe.qb.DocType(SKILL)
-	query = (
-		frappe.qb.from_(s)
-		.select(s.name)
-		.where((s.owner == new_owner) & (s.skill_name == row.skill_name) & (s.name != row.name))
-		.limit(1)
-	)
+	query = frappe.qb.from_(s).select(s.name, s.skill_name).where(s.owner == user)
 	if not lock:
-		return bool(query.run())
+		return query.run(as_dict=True)
 	with skills_admin.busy_as_retry():
-		return bool(query.for_update().run())
-
-
-def _refuse_clash(cur, new_owner: str) -> None:
-	if _clash(cur, new_owner, lock=True):
-		frappe.throw(frappe.utils.escape_html(_clash_message(cur, new_owner)), SkillHandoverError)
-
-
-def _clash_message(row, new_owner: str) -> str:
-	return _("{0} already has a skill named {1}.").format(new_owner, row.skill_name)
+		return query.for_update().run(as_dict=True)
 
 
 def _extra_fields() -> tuple:
@@ -238,20 +233,22 @@ def _record(cur, new_owner: str, held_for: str | None, needs_apply: bool) -> Non
 	skills_admin.comment(cur.name, text)
 
 
-def _tell_both_owners(cur, new_owner: str) -> None:
+def _tell_both_owners(cur, new_owner: str, *, hold_lifted: bool) -> None:
 	"""A notice to each owner, no document named, never to the admin about their own
-	act (handing a skill to oneself, or one's own skill away)."""
+	act (handing a skill to oneself, or one's own skill away). A hand-over lifts a hold
+	by design, and both notices say so."""
 	from jarvis.permissions import is_valid_unattended_owner
 
 	admin = frappe.session.user
 	kind = skills_admin.ADMIN_HANDOVER_NOTICE
+	lifted = (" " + _("The hold on it was lifted.")) if hold_lifted else ""
 	if cur.owner != admin and is_valid_unattended_owner(cur.owner):
 		name = frappe.utils.escape_html(_full_name(new_owner))
 		body = _("An admin handed your skill {0} to {1}.").format(cur.skill_name, name)
-		skills_admin.notify_user(cur.owner, cur, kind, body)
+		skills_admin.notify_user(cur.owner, cur, kind, body + lifted)
 	if new_owner != admin:
 		body = _("An admin handed you the skill {0}. It arrives switched off.").format(cur.skill_name)
-		skills_admin.notify_user(new_owner, cur, kind, body)
+		skills_admin.notify_user(new_owner, cur, kind, body + lifted)
 
 
 def _full_name(user: str) -> str:
@@ -272,7 +269,8 @@ def targets(search: str, exclude: str | None = None) -> dict:
 	"""Enabled desk users with the Jarvis User role, not Administrator or Guest, nor
 	``exclude`` (the skill's current owner), whose address or full name matches
 	``search``, by full name, at most ``TARGETS_MAX``. ``at_cap``: they own the most
-	skills one user can have. ``more``: others match too. The hand-over checks again.
+	skills one user can have (``cap``, the dialog says it). ``more``: others match too.
+	The hand-over checks again.
 
 	``frappe.qb`` skips permissions on purpose: the caller is behind
 	``require_jarvis_admin``, and a Jarvis Admin who is not a System Manager may not read
@@ -312,6 +310,7 @@ def targets(search: str, exclude: str | None = None) -> dict:
 			for x in users
 		],
 		"more": more,
+		"cap": cap,
 	}
 
 

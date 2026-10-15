@@ -59,8 +59,8 @@ export const adminDelete = (skill) => call(SA + "admin_delete", { skill });
 
 // Who `skill` can be handed to, matching `search` (an address or a name): enabled
 // users with the Jarvis User role, not its owner (the server leaves the owner of
-// `skill` out). `at_cap` is a user who already owns the most skills one person may.
-// -> { targets: [{ user, full_name, at_cap }], more }
+// `skill` out). `at_cap` is a user who already owns `cap` skills, the most one
+// person may. -> { targets: [{ user, full_name, at_cap }], more, cap }
 export const adminHandoverTargets = (search = "", skill = "") =>
 	call(SA + "admin_handover_targets", skill ? { search, skill } : { search });
 

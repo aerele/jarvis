@@ -15,8 +15,9 @@ What is pinned here:
   history carrying the new owner;
 * an admin may hand a skill to themselves and their own skill away;
 * a private source of a published copy takes the copy's lineage with it;
-* the clash race: a same-name skill the target saves between the first read and the
-  lock refuses the hand-over (the locking read under the lock).
+* the races: a same-name skill, or the skill that brings the target to the cap, saved
+  between the first read and the lock refuses the hand-over (the locking read of the
+  target's rows under the lock).
 
 The endpoints commit, so fixtures are committed and purged around each test, as the
 5a tests do (``test_skill_admin_api``).
@@ -228,7 +229,9 @@ class TestWhatArrives(HandoverBase):
 		(comment,) = self._comments(skill)
 		self.assertIn(f"{ADMIN} handed this skill over from {OWNER} to {TARGET}.", comment)
 		(entry,) = skills_admin_api.admin_get_skill(skill)["history"]
-		self.assertEqual((entry["verb"], entry["new_owner"]), ("handover", TARGET))
+		self.assertEqual(
+			(entry["verb"], entry["new_owner"], entry["new_owner_name"]), ("handover", TARGET, "skadm-target")
+		)
 
 	def test_both_owners_are_told_with_no_document_named(self):
 		skill = self._skill(OWNER, "told")
@@ -257,6 +260,11 @@ class TestWhatArrives(HandoverBase):
 		self.assertEqual(entry.reason, "Lifted the hold set for: Earlier hold")
 		(comment,) = self._comments(skill)
 		self.assertIn("Earlier hold", comment)
+		# Both owners are told it was lifted (never the reason: Desk renders it as HTML).
+		for user in (OWNER, TARGET):
+			(note,) = self._notices(user)
+			self.assertTrue(note.email_content.endswith(" The hold on it was lifted."))
+			self.assertNotIn("Earlier hold", note.email_content)
 
 	def test_the_old_owners_pending_request_is_rejected(self):
 		skill = self._skill(OWNER, "requested")
@@ -368,8 +376,22 @@ class TestRefusals(HandoverBase):
 			self._refused(skill, text="the most one user can have")
 
 	def test_a_skill_that_changed_hands_since_the_dialog_showed_it(self):
+		# Its own class: the dialog offers Reload by the response's exc_type.
 		skill = self._skill(OWNER, "stale")
-		self._refused(skill, expected_owner=OTHER, text="changed while you acted on it. Reload.")
+		self._refused(
+			skill,
+			expected_owner=OTHER,
+			text="changed while you acted on it. Reload.",
+			error=skills_handover.SkillOwnerChangedError,
+		)
+
+	def test_no_other_refusal_reads_as_a_changed_owner(self):
+		skill = self._skill(OWNER, "changed")
+		self._skill(TARGET, "changed")
+		with self.assertRaises(skills_handover.SkillHandoverError) as ctx:
+			self._handover(skill)
+		self.assertNotIsInstance(ctx.exception, skills_handover.SkillOwnerChangedError)
+		frappe.db.rollback()
 
 	def test_a_same_name_skill_of_the_targets(self):
 		skill = self._skill(OWNER, "twin")
@@ -425,37 +447,48 @@ class TestRefusals(HandoverBase):
 
 
 # --------------------------------------------------------------------------- #
-# The clash race
+# The races
 # --------------------------------------------------------------------------- #
 class TestRaces(HandoverBase):
-	def test_a_same_name_skill_the_target_saves_while_acting_refuses_it(self):
-		# The target's same-name skill is committed on another connection after the
-		# act's snapshot opened and before the skill row is locked: a plain re-read under
-		# the lock reads the old snapshot and misses it. The locking read sees it: as the
-		# clash where snapshot isolation is off, as 1020 ("busy") where it is on. Both
-		# refuse, with nothing written.
-		skill = self._skill(OWNER, "race")
-		twin = "skadm-race-twin"
+	"""The target's skill is committed on another connection after the act's snapshot
+	opened and before the skill row is locked: a plain re-read under the lock reads the
+	old snapshot and misses it. The locking read of the target's rows sees it: as the
+	refusal where snapshot isolation is off, as 1020 ("busy") where it is on. Both
+	refuse, with nothing written."""
+
+	def _race(self, skill, twin, skill_name):
 		real_lock_row = skills_admin._lock_row
 
-		def save_twin_then_lock(name, *extra_fields):
+		def save_then_lock(name, *extra_fields):
 			now = frappe.utils.now()
 			with other_connection() as other:
 				other.sql(
 					f"""INSERT INTO `tab{SKILL}` (name, owner, modified_by, creation, modified,
 					skill_name, scope, enabled) VALUES (%s, %s, %s, %s, %s, %s, 'User', 1)""",
-					(twin, TARGET, TARGET, now, now, f"{TAG}-race"),
+					(twin, TARGET, TARGET, now, now, skill_name),
 				)
 				other.commit()
 			return real_lock_row(name, *extra_fields)
 
 		before = self._state(skill)
 		frappe.set_user(ADMIN)
-		with patch.object(skills_admin, "_lock_row", side_effect=save_twin_then_lock):
+		with patch.object(skills_admin, "_lock_row", side_effect=save_then_lock):
 			with self.assertRaises(frappe.ValidationError):
 				skills_admin_api.admin_handover(skill, TARGET, OWNER)
 		self._untouched(skill, before)
 		self.assertEqual(frappe.db.get_value(SKILL, twin, "owner"), TARGET)
+
+	def test_a_same_name_skill_the_target_saves_while_acting_refuses_it(self):
+		skill = self._skill(OWNER, "race")
+		self._race(skill, "skadm-race-twin", f"{TAG}-race")
+
+	def test_the_skill_that_fills_the_targets_cap_while_acting_refuses_it(self):
+		# The cap patched to 2 stands in for 25: the target owns one, and the second
+		# (the one that reaches the cap) lands between the first read and the lock.
+		self._skill(TARGET, "cap-race-first")
+		skill = self._skill(OWNER, "cap-race")
+		with patch.object(skill_doctype, "MAX_SKILLS_PER_OWNER", 2):
+			self._race(skill, "skadm-cap-race-last", f"{TAG}-cap-race-last")
 
 
 # --------------------------------------------------------------------------- #
@@ -464,7 +497,8 @@ class TestRaces(HandoverBase):
 class TestTargets(HandoverBase):
 	def test_only_enabled_jarvis_users_are_offered(self):
 		res = self._targets()
-		self.assertEqual(set(res), {"targets", "more"})
+		self.assertEqual(set(res), {"targets", "more", "cap"})
+		self.assertEqual(res["cap"], skill_doctype.MAX_SKILLS_PER_OWNER)
 		users = {t["user"]: t for t in res["targets"]}
 		for user in (OWNER, OTHER, PLAIN, REVIEWER, ADMIN, TARGET):
 			self.assertIn(user, users)
