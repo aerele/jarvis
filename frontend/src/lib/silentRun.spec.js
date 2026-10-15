@@ -58,3 +58,13 @@ describe("shouldStopSpinning (#590)", () => {
 		expect(shouldStopSpinning({ busy: false, resumed: false, preStream: null })).toBe(false);
 	});
 });
+
+describe("server-owned legacy activity (#591)", () => {
+	it("uses authoritative status for old legacy work and stopped or settled rows", () => {
+		for (const state of ["streaming", "recovering"])
+			expect(
+				streamingRowIsLive({ modified: ago(60 * 60 * 1000), activity_state: state }, NOW)
+			).toBe(true);
+		expect(streamingRowIsLive({ modified: ago(1000), activity_state: null }, NOW)).toBe(false);
+	});
+});
