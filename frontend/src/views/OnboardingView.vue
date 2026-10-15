@@ -1539,7 +1539,7 @@
 												/>
 											</div>
 										</template>
-										<template v-if="net.state.hold">
+										<template v-if="net.state.hold && !serverAddressMissing">
 											<NetworkRulesTable
 												variant="server"
 												title="Rules for your network team"
@@ -1550,6 +1550,24 @@
 												Allow only this address. Don't open port 443 to
 												everyone. We hold this server for you for 3 days.
 											</p>
+										</template>
+										<template v-if="serverAddressMissing">
+											<Banner
+												type="warning"
+												:title="NO_ADDRESS_CARD.title"
+												:message="NO_ADDRESS_CARD.text"
+												role="alert"
+											/>
+											<div class="flex justify-center gap-2">
+												<Button
+													label="Try again"
+													@click="retryServerLookup"
+												/>
+												<Button
+													label="Contact support"
+													@click="onPayAction(A.SUPPORT)"
+												/>
+											</div>
 										</template>
 										<Banner
 											v-if="holdEndedCard"
@@ -1580,13 +1598,13 @@
 									</span>
 									<span v-else></span>
 									<Button
-										v-if="privateTestsPassed"
+										v-if="!serverAddressMissing && privateTestsPassed"
 										variant="solid"
 										label="Continue to payment"
 										@click="onPrivateContinue"
 									/>
 									<Button
-										v-else
+										v-else-if="!serverAddressMissing"
 										variant="solid"
 										:disabled="
 											!net.state.hold ||
@@ -4378,6 +4396,15 @@ watch(
 	},
 	{ immediate: true }
 );
+// The saved address came back blank (the status call failed or never answered): there are no
+// rules to show, and Test / Continue would only dead-end. Offer a retry instead.
+const serverAddressMissing = computed(
+	() => net.state.statusLoaded && !net.state.publicAddress
+);
+function retryServerLookup() {
+	net.loadStatus();
+	net.loadHold();
+}
 const serverRows = computed(() =>
 	net.state.hold
 		? serverRuleRows({
@@ -4417,8 +4444,7 @@ watch(
 	{ immediate: true }
 );
 function onPrivateContinue() {
-	net.markCleared();
-	flow.navigateToPay();
+	if (net.markCleared()) flow.navigateToPay();
 }
 // A rate-limit refusal asks the customer to wait: count it down and keep "Test connection"
 // disabled meanwhile, so the button never hammers the provider check.
@@ -6443,6 +6469,10 @@ const connectTest = computed(() =>
 // never sends a target; reserveHost() is keyed on the signed-in customer, and a
 // PRIVATE_HOLD_UNAVAILABLE refusal re-reserves inside loadHold.
 const networkLookupDone = ref(false);
+const NO_ADDRESS_CARD = {
+	title: "Contact support",
+	text: "We couldn't get your network address. Try again, or contact support.",
+};
 function lookUpNetworkServer() {
 	networkLookupDone.value = false;
 	Promise.all([net.loadStatus(), net.loadHold()]).then(() => {
@@ -6453,11 +6483,7 @@ function lookUpNetworkServer() {
 const networkLookupErr = computed(() => {
 	if (!networkLookupDone.value) return null;
 	if (net.state.holdErr) return holdErrCard.value;
-	if (!net.state.publicAddress)
-		return {
-			title: "Contact support",
-			text: "We couldn't get your network address. Try again, or contact support.",
-		};
+	if (!net.state.publicAddress) return NO_ADDRESS_CARD;
 	return null;
 });
 watch(

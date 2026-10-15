@@ -427,10 +427,14 @@ export function createPrivateNetwork(deps) {
 		state.test.phase = "done";
 	}
 
+	// Remembers the pair the passing test ran against. A blank hold IP or address binds to
+	// nothing (`cleared` would refuse it), so it stores nothing and returns false.
 	function markCleared() {
 		const ip = state.hold ? state.hold.hostIp : "";
+		if (!ip || !state.publicAddress) return false;
 		state.clearedFor = `${ip}|${state.publicAddress}`;
 		writeCleared(state.clearedFor);
+		return true;
 	}
 
 	function writeCleared(value) {

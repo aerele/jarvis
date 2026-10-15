@@ -2246,6 +2246,39 @@ describe("private network: allow the held server, then test, then pay", () => {
 		expect(assign).not.toHaveBeenCalled();
 	});
 
+	it("a blank saved address shows a retry card, no Test and no dead Continue", async () => {
+		api.networkStatus.mockResolvedValueOnce(
+			privateStatus({ network_mode: "", public_address: "" })
+		);
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(true);
+		const card = w.find('banner-stub[title="Contact support"]');
+		expect(card.attributes("message")).toBe(
+			"We couldn't get your network address. Try again, or contact support."
+		);
+		expect(buttonByLabel(w, "Test connection")).toBeFalsy();
+		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
+		expect(buttonByLabel(w, "Contact support")).toBeTruthy();
+		// Try again re-reads the address and the hold; once the address is back the rules show.
+		api.networkStatus.mockResolvedValueOnce(privateStatus());
+		const holds = api.reserveHost.mock.calls.length;
+		await buttonByLabel(w, "Try again").trigger("click");
+		await flushPromises();
+		expect(api.reserveHost.mock.calls.length).toBe(holds + 1);
+		expect(w.text()).toContain("Rules for your network team");
+		expect(buttonByLabel(w, "Test connection")).toBeTruthy();
+	});
+
+	it("markCleared with a blank address or hold is a no-op and Continue does not navigate", async () => {
+		const w = await atAllowServer();
+		w.vm.net.state.publicAddress = "";
+		expect(w.vm.net.markCleared()).toBe(false);
+		expect(window.sessionStorage.getItem("jvpriv:cleared")).toBeNull();
+		w.vm.onPrivateContinue();
+		expect(assign).not.toHaveBeenCalled();
+	});
+
 	it("does not poll the rate-limited provider check while the customer edits a firewall", async () => {
 		vi.useFakeTimers();
 		const w = await atAllowServer();
