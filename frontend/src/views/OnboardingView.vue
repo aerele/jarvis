@@ -1556,8 +1556,9 @@
 												:rows="serverRows"
 											/>
 											<p class="text-p-sm text-ink-gray-5">
-												Allow only this address. Don't open port {{ inboundPort }} to
-												everyone. We hold this server for you for 3 days.
+												Allow only this address. Don't open port
+												{{ inboundPort }} to everyone. We hold this server
+												for you for 3 days.
 											</p>
 										</template>
 										<template v-if="serverAddressMissing">
@@ -2522,8 +2523,8 @@
 													:rows="serverRows"
 												/>
 												<p class="text-p-sm text-ink-gray-5">
-													Allow only this address. Don't open port {{ inboundPort }} to
-													everyone.
+													Allow only this address. Don't open port
+													{{ inboundPort }} to everyone.
 												</p>
 											</template>
 											<Banner

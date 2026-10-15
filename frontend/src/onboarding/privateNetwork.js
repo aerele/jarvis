@@ -292,7 +292,15 @@ export function serverRuleRows({ hostIp, publicHost, inboundPort = 443, outbound
 	if (!hostIp || !publicHost) return [];
 	return [
 		mkRow("Outbound", "Your ERPNext server", false, hostIp, true, "", `TCP ${outboundPort}`),
-		mkRow("Inbound", hostIp, true, publicHost, true, "your public address", `TCP ${inboundPort}`),
+		mkRow(
+			"Inbound",
+			hostIp,
+			true,
+			publicHost,
+			true,
+			"your public address",
+			`TCP ${inboundPort}`
+		),
 	];
 }
 
@@ -366,7 +374,10 @@ function outboundRow(outbound, ctx) {
 	if (outbound.reason === "bad_target") {
 		return { state: "fail", detail: "We couldn’t run this check from your ERPNext." };
 	}
-	return { state: "fail", detail: `Couldn’t connect to ${ctx.hostIp} on port ${ctx.outboundPort}.` };
+	return {
+		state: "fail",
+		detail: `Couldn’t connect to ${ctx.hostIp} on port ${ctx.outboundPort}.`,
+	};
 }
 
 function inboundBanner(inbound, ctx) {
