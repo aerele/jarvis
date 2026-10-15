@@ -416,6 +416,12 @@ class TestRefusals(HandoverBase):
 		skill = self._skill(OWNER, "premigrate")
 		with patch.object(skills_handover.admin_log, "handover_available", return_value=False):
 			self._refused(skill, text="not available yet")
+			frappe.set_user(ADMIN)
+			res = skills_admin_api.admin_list_skills(search=TAG)
+			self.assertFalse(res["handover_available"])
+			self.assertTrue(res["delete_available"])
+			# The history reads without the column.
+			self.assertEqual(skills_admin_api.admin_get_skill(skill)["history"], [])
 
 
 # --------------------------------------------------------------------------- #
