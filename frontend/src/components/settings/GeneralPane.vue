@@ -19,6 +19,14 @@
 				     single-credential tenant, where it is accurate. -->
 				<!-- No rows until a real answer: a failed first load shows the error
 				     line below, not the "Auto" placeholder. -->
+				<!-- Only reachable when the pane showed at its 12 s cap while this call
+				     was still out: the block waits with a spinner of its own. -->
+				<div
+					v-if="firstLoaded && !connLoaded && !connErr"
+					class="grid place-items-center py-4"
+				>
+					<JvSpinner />
+				</div>
 				<template v-if="connLoaded">
 					<KvRow v-if="isPool" label="Models" :value="poolSummary" />
 					<template v-else>
@@ -583,11 +591,21 @@ async function loadSettings() {
 // swallows its own failure, so this always settles; it is never reset, so a
 // kept-alive refresh swaps values in place without the spinner.
 const firstLoaded = ref(false);
+// The longest the pane waits before it shows anyway (the AI models pane uses the
+// same 12 s cap): a stalled call must not hold the toggles and the Danger zone
+// behind the spinner. A section still waiting then shows its own state.
+const FIRST_PAINT_MAX_MS = 12000;
+let firstPaintTimer = null;
 useKeptAlive(async () => {
+	if (!firstLoaded.value && !firstPaintTimer) {
+		firstPaintTimer = setTimeout(() => (firstLoaded.value = true), FIRST_PAINT_MAX_MS);
+	}
 	const results = await Promise.all([loadUsage(), loadConnStatus(), loadSettings()]);
+	clearTimeout(firstPaintTimer);
 	firstLoaded.value = true;
 	return results[1];
 });
+onBeforeUnmount(() => clearTimeout(firstPaintTimer));
 
 // Device-local prefs live in the shell store (single source of truth) so that
 // toggling here also updates ChatView's live gating same-tab. Read + delegate.

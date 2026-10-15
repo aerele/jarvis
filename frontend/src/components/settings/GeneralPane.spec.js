@@ -427,6 +427,26 @@ describe("GeneralPane, first load (jarvis-admin-v2#641)", () => {
 		expect(w.text()).not.toContain("Provider");
 	});
 
+	it("shows the pane after 12 s even if a call stalls, with a small spinner on Connection", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			api.getLlmConnectionStatus.mockImplementation(PENDING);
+			const w = await mountAs({ admin: true });
+			expect(w.find('[style*="display: none"]').exists()).toBe(true);
+			expect(w.findAll(".stub-spinner")).toHaveLength(1);
+
+			await vi.advanceTimersByTimeAsync(12100);
+
+			// The pane-wide spinner is gone and the body shows; Connection, still
+			// waiting on its call, keeps a spinner of its own.
+			expect(w.find('[style*="display: none"]').exists()).toBe(false);
+			expect(w.findAll(".stub-spinner")).toHaveLength(1);
+			expect(w.text()).toContain("Danger zone");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("starts its fetches together instead of one after another", async () => {
 		api.getUsage.mockImplementation(PENDING);
 		await mountAs({ admin: true });
