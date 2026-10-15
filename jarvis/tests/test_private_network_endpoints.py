@@ -125,6 +125,7 @@ class TestCheckAdminConnection(_AdminUser):
 class TestPrivateSetupTargets(_AdminUser):
 	def _targets(self, url, resolved=None, error=None, conf=None):
 		patches = [
+			patch.object(admin_client, "_public_host_configured", return_value=False),
 			patch.dict(frappe.conf, {"jarvis_admin_url": url, **(conf or {})}, clear=False),
 			patch.object(
 				private_network.socket,
@@ -282,6 +283,10 @@ class TestRefusalEndToEnd(_AdminUser):
 		err = AdminAuthError("Confirm your email first.", status_code=403, code="EMAIL_NOT_CONFIRMED")
 		error, status = onboarding_contract.error_object(err)
 		self.assertEqual((error["code"], status), ("EMAIL_NOT_CONFIRMED", 403))
+		other = AdminAuthError("Pay first.", status_code=403, code="CUSTOMER_NOT_PAID")
+		self.assertEqual(
+			onboarding_contract.error_object(other)[0]["code"], onboarding_contract.BENCH_ADMIN_AUTH_FAILED
+		)
 		bare, _ = onboarding_contract.error_object(AdminAuthError("no", status_code=401))
 		self.assertEqual(bare["code"], onboarding_contract.BENCH_ADMIN_AUTH_FAILED)
 
@@ -322,3 +327,34 @@ class TestProbeEndToEnd(_AdminUser):
 		body = _thrown("PermissionError", "PRIVATE_NETWORK_DISABLED", "Off.")
 		out = self._probe(403, body)
 		self.assertEqual(out, {"reachable": True, "enabled": False, "caller_ip": ""})
+
+
+class TestFixRoundOne(_AdminUser):
+	def test_a_slow_resolver_is_bounded(self):
+		import time
+
+		def slow(*args, **kwargs):
+			time.sleep(1.5)
+			return []
+
+		with (
+			patch.object(private_network, "_DNS_TIMEOUT_S", 0.2),
+			patch.object(private_network.socket, "getaddrinfo", side_effect=slow),
+		):
+			started = time.monotonic()
+			self.assertEqual(private_network._resolve_ipv4("slow.example.com"), [])
+		self.assertLess(time.monotonic() - started, 1.0)
+
+	def test_targets_are_empty_on_a_public_host(self):
+		with (
+			patch.object(admin_client, "_public_host_configured", return_value=True),
+			patch.object(private_network.socket, "getaddrinfo", side_effect=AssertionError("dns")),
+		):
+			self.assertEqual(private_network.private_setup_targets(), {"admin_host": "", "admin_ips": []})
+
+	def test_a_non_dict_setup_answer_reads_as_unreachable(self):
+		for junk in ("oops", ["x"], 5):
+			with self.subTest(junk=junk):
+				with patch.object(admin_client, "private_setup_info", return_value=junk):
+					out = private_network.check_admin_connection()
+				self.assertEqual(out, {"reachable": False, "enabled": False, "caller_ip": ""})

@@ -12,6 +12,8 @@ a bug) still raise.
 """
 
 import ipaddress
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 import socket
 from urllib.parse import urlsplit
 
@@ -28,6 +30,8 @@ from jarvis.permissions import require_jarvis_admin
 # would freeze the first screen the customer sees.
 _PROBE_TIMEOUT_S = 5
 _MAX_ADMIN_IPS = 8
+# A resolver that hangs must not hold a web worker.
+_DNS_TIMEOUT_S = 4
 _UNEXPECTED = "Jarvis returned an unexpected answer. Please try again."
 _BUSY = "Too many attempts. Try again in a minute."
 # Codes the SPA has copy for. Anything else (an admin newer than this bench, INVALID_REQUEST
@@ -74,7 +78,7 @@ def _clean_ipv4(value) -> str:
 def _probe_admin() -> dict:
 	"""``{reachable, enabled, caller_ip}`` from one guest ``private_setup_info`` call."""
 	try:
-		info = admin_client.private_setup_info(timeout_s=_PROBE_TIMEOUT_S) or {}
+		info = admin_client.private_setup_info(timeout_s=_PROBE_TIMEOUT_S)
 	except AdminUnreachableError:
 		# Includes AdminAmbiguousError (a read timeout): either way this site cannot hold a
 		# conversation with admin.
@@ -86,6 +90,8 @@ def _probe_admin() -> dict:
 		# Admin ANSWERED with a refusal: an older admin without the method, a rate limit. It
 		# is reachable, and private setup is not on offer.
 		return {"reachable": True, "enabled": False, "caller_ip": ""}
+	if not isinstance(info, dict):
+		return {"reachable": False, "enabled": False, "caller_ip": ""}
 	return {
 		"reachable": True,
 		"enabled": bool(info.get("enabled")),
@@ -140,10 +146,15 @@ def _resolve_ipv4(host: str) -> list[str]:
 	literal = _clean_ipv4(host)
 	if literal:
 		return [literal]
+	pool = ThreadPoolExecutor(max_workers=1)
 	try:
-		infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
-	except OSError:
+		infos = pool.submit(socket.getaddrinfo, host, None, socket.AF_INET, socket.SOCK_STREAM).result(
+			timeout=_DNS_TIMEOUT_S
+		)
+	except (OSError, FutureTimeout):
 		return _configured_admin_ips()
+	finally:
+		pool.shutdown(wait=False)
 	found = sorted({_clean_ipv4(info[4][0]) for info in infos} - {""})
 	return found[:_MAX_ADMIN_IPS] or _configured_admin_ips()
 
@@ -155,6 +166,9 @@ def private_setup_targets() -> dict:
 	is not on the first screen (design 11). Resolved here, not in the browser, from the same
 	admin URL ``admin_client`` uses."""
 	require_jarvis_admin()
+	if admin_client._public_host_configured():
+		# A public bench never shows the setup server's address, even to an admin.
+		return {"admin_host": "", "admin_ips": []}
 	configured = frappe.db.get_single_value("Jarvis Settings", "jarvis_admin_url")
 	url = admin_client._admin_url(frappe._dict(jarvis_admin_url=configured))
 	host = (urlsplit(url).hostname or "").lower()

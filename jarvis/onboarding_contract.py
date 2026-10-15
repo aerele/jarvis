@@ -712,10 +712,13 @@ def error_object(err) -> tuple[dict, int]:
 			out.setdefault("retry_after_seconds", err.retry_after_seconds)
 		return out, 429
 	if isinstance(err, AdminAuthError):
-		# A refusal that carries admin's own code (a 403 EMAIL_NOT_CONFIRMED) is not an
-		# authentication failure; only a bare 401/403 is.
+		# A private-network refusal (a 403 EMAIL_NOT_CONFIRMED) is not an authentication
+		# failure; every other 401/403, coded or not, is, and the SPA has copy for that.
+		from jarvis.admin_client import _PRIVATE_NETWORK_CODES
+
+		code = getattr(err, "code", None)
 		return {
-			"code": getattr(err, "code", None) or BENCH_ADMIN_AUTH_FAILED,
+			"code": code if isinstance(code, str) and code in _PRIVATE_NETWORK_CODES else BENCH_ADMIN_AUTH_FAILED,
 			"message": str(err),
 			"recovery": RECOVERY_CONTACT_SUPPORT,
 		}, (err.status_code or 401)
