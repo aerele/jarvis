@@ -28,7 +28,9 @@
 			/>
 		</div>
 
-		<p v-else-if="loading && !users.length" class="text-p-base text-ink-gray-6">Loading…</p>
+		<div v-else-if="loading && !users.length" class="grid place-items-center py-10">
+			<JvSpinner />
+		</div>
 
 		<div v-else-if="!users.length" class="flex flex-col items-center gap-2 py-12 text-center">
 			<FeatherIcon name="users" class="size-8 text-ink-gray-4" />
@@ -182,6 +184,7 @@ import { timeAgo } from "@/utils/datetime";
 import { modelDisplayLabel } from "@/utils/usageModel";
 import { fmtTokens, limitWindow } from "@/lib/tokens.js";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import TokenLimitDialog from "@/components/settings/TokenLimitDialog.vue";
 import * as api from "@/api";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";

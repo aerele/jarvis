@@ -16,7 +16,7 @@
 			<Button variant="solid" iconLeft="plus" label="New template" @click="newTemplate" />
 		</template>
 
-		<div v-if="loading" class="text-p-sm text-ink-gray-6">Loading…</div>
+		<div v-if="loading" class="grid place-items-center py-10"><JvSpinner /></div>
 
 		<template v-else>
 			<!-- ═══════════ gallery: built in, then the workspace's own ═══════════ -->
@@ -713,6 +713,7 @@ import {
 	toast,
 } from "frappe-ui";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import KvRow from "@/components/settings/KvRow.vue";
 import {
 	deletePdfTemplate,
