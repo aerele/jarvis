@@ -140,6 +140,21 @@ describe("AiModelsPane first load", () => {
 		expect(w.find(".stub-spinner").exists()).toBe(false);
 	});
 
+	it("keeps the editor mounted through a failed first probe and its Retry", async () => {
+		api.getDirectSubscriptionStatus.mockRejectedValueOnce(new Error("boom"));
+		const w = mountPane();
+		await flushPromises();
+		expect(w.text()).toContain("Retry");
+		expect(editor(w).exists()).toBe(true);
+		expect(fill(w).attributes("style")).toContain("display: none");
+		const before = editor(w).vm;
+
+		await w.vm.loadDirectSub();
+		await flushPromises();
+		expect(editor(w).vm).toBe(before);
+		expect(fill(w).attributes("style") || "").not.toContain("display: none");
+	});
+
 	it("does not strand a non-admin on the spinner (no probe runs)", async () => {
 		window.is_system_manager = false;
 		window.is_jarvis_admin = false;

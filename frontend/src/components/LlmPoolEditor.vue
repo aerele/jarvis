@@ -149,7 +149,7 @@
 	           model" trigger above it would compete with it, not help (mirrors the
 	           end-aligned button's own !panel.open guard). -->
 			<div
-				v-if="loaded && !rows.length && !showDirectRow && !panel.open"
+				v-if="loaded && poolLoaded && !rows.length && !showDirectRow && !panel.open"
 				class="jv-flist-empty"
 			>
 				<!-- 'failed' is deliberately excluded here: the savebar below owns that
@@ -2539,9 +2539,13 @@ const catalogReady = computed(() => catalogState.value === "ready");
 // would be a false "No models yet". AiModelsPane reads this through defineExpose
 // to hold one spinner over the whole first load.
 const loaded = ref(false);
-// How long one load() waits on its fetches before it draws what it has.
+// True once the pool itself has been read. Until then an empty list means "not
+// known yet", not "no models": the empty box and its Add button would invite a
+// save over a pool that is really there.
+const poolLoaded = ref(false);
+// How long a load() lets the extra fetches (catalog, sync, presets, captures) hold
+// the spinner. A late one still applies itself when it lands.
 const LOAD_WAIT_MS = 12000;
-const TIMED_OUT = Symbol("timed out");
 // Only work that would have to guess a model id waits for the catalog. A row that
 // already names its model (re-authorizing a saved account) never does.
 function needsCatalog(row) {
@@ -5032,36 +5036,47 @@ async function load(opts = {}) {
 	err.value = "";
 	// None of these fetches needs another's answer, so start them all now instead
 	// of one after another (six round trips in a row is what made the settings
-	// pane crawl on a remote site). Only the reseed has an order: rows first, then
-	// the catalog fill and the capture rehydrate, which both read rows. Each fetch
-	// starts through .then() so even a synchronous throw stays a caught, non-fatal
-	// failure, as the old one-by-one try blocks treated it. `undefined` = failed.
-	// One wait budget for the whole load, the same 12 s cap AiModelsPane gives its
-	// probe: past it, load() stops WAITING (the fetches still run) and draws what it
-	// has. A late catalog then fills itself in; a late pool leaves the Retry below.
+	// pane crawl on a remote site). Each extra applies its own answer whenever it
+	// lands; the only order is rows first, then the catalog fill and the capture
+	// rehydrate, which both read rows. Each one starts through .then() so even a
+	// synchronous throw stays a caught, non-fatal failure, as the old one-by-one
+	// try blocks treated it.
 	let waitTimer;
 	const deadline = new Promise((resolve) => {
-		waitTimer = setTimeout(() => resolve(TIMED_OUT), LOAD_WAIT_MS);
+		waitTimer = setTimeout(resolve, LOAD_WAIT_MS);
 	});
-	const within = (promise) => Promise.race([promise, deadline]);
 	const catalogDone = loadModelCatalog();
-	const syncAnswer = Promise.resolve()
+	// A sync may already be in flight when the editor mounts (page reload
+	// mid-provisioning, wizard resume via reason llm_pool_provisioning): start
+	// the poller for a pending one - polling only from save() left a resumed
+	// session staring at a permanent "Syncing…" banner that never picked up
+	// the background job's ok/failed flip.
+	const syncDone = Promise.resolve()
 		.then(() => api.getLlmSyncStatus())
-		.catch(() => undefined);
+		.then((answer) => {
+			sync.value = answer || sync.value;
+			if (sync.value && sync.value.pending) startPolling();
+		})
+		.catch(() => {
+			/* non-fatal */
+		});
 	// Onboarding (singleMode) never renders the preset picker (modes=['quick']
 	// hides the "From a preset" tab) and nothing in the singleMode branch reads
 	// `catalog`, so skip the fetch there. The Account/Settings editor still loads it
 	// for resilient-by-default backups (expandApiKeyBackups) and the preset tab.
-	const presetAnswer = singleMode.value
-		? Promise.resolve(undefined)
+	const presetsDone = singleMode.value
+		? Promise.resolve()
 		: Promise.resolve()
 				.then(() => api.getPresetCatalog())
-				.catch(() => undefined);
+				.then((presets) => {
+					catalog.value = presets || [];
+				})
+				.catch(() => {
+					/* presets are optional here: the backend serves its snapshot or [] */
+				});
 	try {
 		try {
-			const answer = await within(api.getLlmConfig());
-			if (answer === TIMED_OUT) throw new Error("Loading your models took too long.");
-			cfg.value = answer || cfg.value;
+			cfg.value = (await api.getLlmConfig()) || cfg.value;
 			rows.value = carry ? [...seedRows(cfg.value), carry] : seedRows(cfg.value);
 			selectedPreset.value = cfg.value.preset || "";
 			keysByVendor.value = {};
@@ -5124,32 +5139,25 @@ async function load(opts = {}) {
 			savedSnapshot.value = poolSnapshot(
 				carry ? rows.value.filter((r) => r !== carry) : rows.value
 			);
+			poolLoaded.value = true;
 		} catch (e) {
 			err.value = _err(e);
 		}
+		// The catalog may land before or after the rows: fill blank models once both
+		// are in. Saved rows always name a model, so they are never touched.
+		const filled = catalogDone.then(() => {
+			if (catalogReady.value) fillBlankModels();
+		});
 		// Re-attach any still-active server-held OAuth capture (plan-05 D2 / P0-04,
 		// P1-05): a reload after a sign-in - and the error-banner Retry, which re-runs
 		// load() - then resumes the SAME capture without a second sign-in. Needs the
 		// rows above, and runs after their clean baseline so a rehydrated capture
 		// reads as the unsaved work it is.
-		await within(rehydratePendingCaptures());
-		// A sync may already be in flight when the editor mounts (page reload
-		// mid-provisioning, wizard resume via reason llm_pool_provisioning): start
-		// the poller for a pending one - polling only from save() left a resumed
-		// session staring at a permanent "Syncing…" banner that never picked up
-		// the background job's ok/failed flip.
-		const syncNow = await within(syncAnswer);
-		if (syncNow !== undefined && syncNow !== TIMED_OUT) {
-			sync.value = syncNow || sync.value;
-			if (sync.value && sync.value.pending) startPolling();
-		}
-		// presets are optional here: the backend serves its snapshot or []
-		const presets = await within(presetAnswer);
-		if (presets !== undefined && presets !== TIMED_OUT) catalog.value = presets || [];
-		// The catalog may have landed before the rows were seeded, when its own
-		// fillBlankModels() had nothing to fill. Fill again now that rows exist.
-		await within(catalogDone);
-		if (catalogReady.value) fillBlankModels();
+		const rehydrated = rehydratePendingCaptures();
+		// Draw once everything is in, but never let the extras hold the spinner past
+		// LOAD_WAIT_MS. The pool read above is not capped: drawing without it would
+		// show an empty pool that a save could write over.
+		await Promise.race([Promise.all([filled, rehydrated, syncDone, presetsDone]), deadline]);
 	} finally {
 		clearTimeout(waitTimer);
 		loaded.value = true;

@@ -1695,13 +1695,50 @@ describe("first load never waits forever", () => {
 		expect(w.text()).toContain("Loading models");
 	});
 
-	it("ends a stalled pool fetch in an error with Retry, not an endless spinner", async () => {
-		api.getLlmConfig.mockImplementation(() => new Promise(() => {}));
+	it("waits for a slow pool fetch and draws its answer when it lands, past 12 s", async () => {
+		const cfg = deferred();
+		api.getLlmConfig.mockImplementation(() => cfg.promise);
 		vi.useFakeTimers();
 		const w = mount(LlmPoolEditor, { props: { editable: true } });
 		await vi.advanceTimersByTimeAsync(13000);
+		// Never an empty pool someone could save over: the pool read is not capped.
+		expect(w.vm.loaded).toBe(false);
+		expect(w.find(".jv-flist-empty").exists()).toBe(false);
+
+		cfg.resolve({ ...clone(serverPool), models: [keyModel("openai", "gpt-4o", 0)] });
+		await vi.advanceTimersByTimeAsync(50);
+		expect(w.vm.loaded).toBe(true);
+		expect(w.vm.rows).toHaveLength(1);
+	});
+
+	it("shows only Retry when the pool fetch fails, never an empty pool with Add", async () => {
+		api.getLlmConfig.mockRejectedValueOnce(new Error("network"));
+		const w = await mountEditor({ editable: true });
 
 		expect(w.vm.loaded).toBe(true);
 		expect(w.text()).toContain("Retry");
+		expect(w.find(".jv-flist-empty").exists()).toBe(false);
+		expect(w.find(".jv-flist-addbtn").exists()).toBe(false);
+	});
+
+	it("still applies a sync status that lands after 12 s, and polls a pending one", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const late = deferred();
+		api.getLlmSyncStatus.mockImplementationOnce(() => late.promise);
+		vi.useFakeTimers();
+		const w = mount(LlmPoolEditor, { props: { editable: true } });
+		await vi.advanceTimersByTimeAsync(13000);
+		expect(w.vm.loaded).toBe(true);
+
+		expect(api.getLlmSyncStatus).toHaveBeenCalledTimes(1);
+
+		late.resolve({
+			...clone(syncStatus),
+			last_sync_status: "pending: provisioning",
+			pending: true,
+		});
+		// The late "pending" answer starts the poller, whose first poll asks again.
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(api.getLlmSyncStatus.mock.calls.length).toBeGreaterThan(1);
 	});
 });

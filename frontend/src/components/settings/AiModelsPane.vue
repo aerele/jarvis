@@ -22,10 +22,10 @@
 			}}</span>
 		</template>
 
-		<!-- FIRST probe failed: nothing trustworthy to show yet, so Retry replaces
-		     the editor. Only the first: once a probe has succeeded the editor stays
-		     mounted for the life of the pane. Unmounting it on a background re-probe
-		     rebuilt it with empty state and silently broke Disconnect (jarvis#574). -->
+		<!-- FIRST probe failed: nothing trustworthy to show yet, so Retry shows in
+		     place of the spinner and the editor below stays hidden. The editor itself
+		     stays mounted for the life of the pane: unmounting it rebuilt it with empty
+		     state and silently broke Disconnect (jarvis#574). -->
 		<Button
 			v-if="!directSubReady && directSubErr"
 			variant="subtle"
@@ -54,27 +54,28 @@
 				:loading="directSubLoading"
 				@click="loadDirectSub"
 			/>
-			<!-- Unified failover-list editor: a chat subscription, API keys, and
-			     multi-model failover pools all live in one list + master-detail
-			     config section. A legacy DIRECT (flat-field, no-proxy) subscription
-			     is probed above and passed down as directStatus - LlmPoolEditor
-			     synthesizes a read-oriented row for it (Reconnect embeds
-			     DirectSubscriptionCard inline; Remove disconnects) without ever
-			     round-tripping it through save_llm_pool. -->
-			<div v-show="firstLoadDone" class="jv-pane-fill h-full">
-				<LlmPoolEditor
-					ref="poolEditor"
-					:editable="isSM"
-					:directStatus="directSub"
-					:expiredEntries="subscriptionNotice.expired"
-					:reconnectRef="reconnectRef"
-					@reconnect-handled="reconnectRef = ''"
-					:hostScrim="true"
-					@saved="onSaved"
-					@direct-changed="onDirectChanged"
-				/>
-			</div>
 		</template>
+
+		<!-- Unified failover-list editor: a chat subscription, API keys, and
+		     multi-model failover pools all live in one list + master-detail
+		     config section. A legacy DIRECT (flat-field, no-proxy) subscription
+		     is probed above and passed down as directStatus - LlmPoolEditor
+		     synthesizes a read-oriented row for it (Reconnect embeds
+		     DirectSubscriptionCard inline; Remove disconnects) without ever
+		     round-tripping it through save_llm_pool. -->
+		<div v-show="firstLoadDone" class="jv-pane-fill h-full">
+			<LlmPoolEditor
+				ref="poolEditor"
+				:editable="isSM"
+				:directStatus="directSub"
+				:expiredEntries="subscriptionNotice.expired"
+				:reconnectRef="reconnectRef"
+				@reconnect-handled="reconnectRef = ''"
+				:hostScrim="true"
+				@saved="onSaved"
+				@direct-changed="onDirectChanged"
+			/>
+		</div>
 
 		<!-- Pane-wide busy scrim (jarvis#559): LlmPoolEditor's own scrim only ever
 		     covered its own box, so the pane's status line below it (same editor,
