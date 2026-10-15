@@ -205,6 +205,45 @@ class TestSavePublicAddress(_AdminUser):
 		self.assertEqual(out["message"], "Use an https:// address. Plain HTTP is not allowed.")
 		self.assertEqual((_read("network_mode"), _read("public_address")), before)
 
+	def _lock_scenario(self, *, recorded, creds):
+		from jarvis import onboarding, onboarding_contract
+
+		saved = onboarding_contract.load()
+		self.addCleanup(onboarding_contract.save, saved)
+		onboarding_contract.save({})
+		if recorded:
+			onboarding_contract.record_signup_address(recorded)
+		patcher = patch.object(onboarding, "_has_admin_credentials", return_value=creds)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
+	def test_a_different_address_after_signup_is_locked(self):
+		self._lock_scenario(recorded="https://erp.example.com", creds=True)
+		before = (_read("network_mode"), _read("public_address"))
+		out = private_network.save_public_address("https://other.example.com")
+		self.assertEqual(
+			out,
+			{
+				"ok": False,
+				"code": "PRIVATE_ADDRESS_LOCKED",
+				"message": "The address can't be changed after sign-up. Contact support.",
+			},
+		)
+		self.assertEqual((_read("network_mode"), _read("public_address")), before)
+
+	def test_the_same_address_after_signup_is_accepted(self):
+		self._lock_scenario(recorded="https://erp.example.com", creds=True)
+		out = private_network.save_public_address("HTTPS://Erp.Example.com/")
+		self.assertEqual(out, {"ok": True, "public_address": "https://erp.example.com"})
+
+	def test_a_different_address_without_credentials_is_accepted(self):
+		self._lock_scenario(recorded="https://erp.example.com", creds=False)
+		self.assertTrue(private_network.save_public_address("https://other.example.com")["ok"])
+
+	def test_a_different_address_with_no_recorded_signup_is_accepted(self):
+		self._lock_scenario(recorded="", creds=True)
+		self.assertTrue(private_network.save_public_address("https://other.example.com")["ok"])
+
 	def test_a_bench_with_a_public_host_is_refused(self):
 		with patch.object(admin_client, "_public_host_configured", return_value=True):
 			out = private_network.save_public_address("https://8.8.8.8")

@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 import frappe
 import requests
 
-from jarvis import admin_client, onboarding_contract
+from jarvis import admin_client, onboarding, onboarding_contract
 from jarvis.exceptions import (
 	AdminContractError,
 	AdminRateLimitedError,
@@ -38,6 +38,7 @@ _PROBE_TIMEOUT_S = 5
 _MAX_ADMIN_IPS = 8
 # A resolver that hangs must not hold a web worker.
 _DNS_TIMEOUT_S = 4
+_ADDRESS_LOCKED = "The address can't be changed after sign-up. Contact support."
 _UNEXPECTED = "Jarvis returned an unexpected answer. Please try again."
 _BUSY = PRIVATE_NETWORK_BUSY
 # Codes the SPA has copy for. Anything else (an admin newer than this bench, INVALID_REQUEST
@@ -197,6 +198,14 @@ def save_public_address(address: str = "") -> dict:
 	normalized, problem = check_public_address(address, test_mode=private_test_mode())
 	if problem:
 		return {"ok": False, "code": "PRIVATE_ADDRESS_INVALID", "message": problem}
+	recorded = onboarding_contract.signup_address()
+	if (
+		recorded
+		and recorded != normalized
+		and onboarding._has_admin_credentials(frappe.get_single("Jarvis Settings"))
+	):
+		# Admin holds the signup-time address and has no customer address-update endpoint.
+		return {"ok": False, "code": "PRIVATE_ADDRESS_LOCKED", "message": _ADDRESS_LOCKED}
 	frappe.db.set_single_value(
 		"Jarvis Settings",
 		{"network_mode": "Private", "public_address": normalized},

@@ -1215,6 +1215,11 @@ def start_signup(
 	# above: admin's envelope carries the account's real email and company, the
 	# plan label, and what is actually due today.
 	onboarding_contract.absorb(data)
+	# Private network: remember the address this signup succeeded with. Admin keeps it as the
+	# account's ``frappe_site_url``, so the bench must neither drift from it nor lose the
+	# proof that a later "address already taken" is this customer's own (see
+	# ``_own_address_taken``).
+	onboarding_contract.record_signup_address(admin_client.private_public_address())
 	# Credentials do not go back to the browser. This response is the one that
 	# CARRIES them — api_key, api_secret and (on the flag-off path) the OAuth
 	# login password — and write_connection above has already stored every one.
@@ -1267,7 +1272,7 @@ def _try_resume_pending_signup(
 	error. A resume that itself fails (e.g. a genuinely different account's
 	duplicate) also returns None: the original duplicate error is the honest
 	message for that case."""
-	if not onboarding_contract.is_duplicate_signup(err):
+	if not (onboarding_contract.is_duplicate_signup(err) or _own_address_taken(err)):
 		return None
 	settings = frappe.get_single("Jarvis Settings")
 	if not _has_admin_credentials(settings):
@@ -1290,6 +1295,18 @@ def _try_resume_pending_signup(
 			message=frappe.get_traceback(),
 		)
 		return None
+
+
+def _own_address_taken(err) -> bool:
+	"""``PRIVATE_ADDRESS_TAKEN`` raised by this customer's OWN earlier signup: admin runs its
+	address gate before its duplicate check, so a re-signup from the same account and the
+	same address answers "taken". Resumable only when the address now configured equals the
+	one recorded at the successful signup; the caller also requires stored credentials, which
+	authenticate the resume. Any other "taken" stays a refusal."""
+	if getattr(err, "code", "") != "PRIVATE_ADDRESS_TAKEN":
+		return False
+	recorded = onboarding_contract.signup_address()
+	return bool(recorded) and recorded == admin_client.private_public_address()
 
 
 def _reserve_idempotency_key(*, supplied: str | None = None, context: dict | None = None) -> str:

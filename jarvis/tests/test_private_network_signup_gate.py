@@ -215,3 +215,78 @@ class TestPrivateCodesAreNeverADuplicateSignup(FrappeTestCase):
 	def test_a_real_duplicate_still_is(self):
 		err = AdminContractError("x", code="ACCOUNT_ALREADY_EXISTS", exc_type="DuplicateEntryError")
 		self.assertTrue(onboarding_contract.is_duplicate_signup(err))
+
+
+class TestSameCustomerResignup(FrappeTestCase):
+	"""A declined card sends the customer back through ``start_signup`` on the same account
+	and address. Admin answers PRIVATE_ADDRESS_TAKEN (its address gate runs before its
+	duplicate check); the bench resumes only when the address is provably the customer's own."""
+
+	TAKEN = AdminContractError(
+		"Taken.", code="PRIVATE_ADDRESS_TAKEN", exc_type="DuplicateEntryError", http_status=409
+	)
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.addCleanup(frappe.set_user, "Administrator")
+		self.addCleanup(frappe.local.response.pop, "error", None)
+		saved = onboarding_contract.load()
+		self.addCleanup(onboarding_contract.save, saved)
+		onboarding_contract.save({})
+
+	def _start(self, *, current=ADDRESS, recorded=ADDRESS, creds=True, signup=None):
+		if recorded:
+			onboarding_contract.record_signup_address(recorded)
+		patches = (
+			patch.object(admin_client, "is_private_mode", return_value=bool(current)),
+			patch.object(admin_client, "private_public_address", return_value=current),
+			patch.object(admin_client, "private_setup_info", return_value={"enabled": True}),
+			patch.object(admin_client, "assert_public_onboarding_host"),
+			patch.object(onboarding, "_require_admin_url"),
+			patch.object(onboarding, "_has_admin_credentials", return_value=creds),
+			patch.object(onboarding, "write_connection"),
+			patch.object(onboarding, "grant_onboarding_admin"),
+			patch.object(admin_client, "signup", **(signup or {"side_effect": self.TAKEN})),
+		)
+		for p in patches:
+			p.start()
+			self.addCleanup(p.stop)
+		return onboarding.start_signup(
+			email="owner@acme.example.com",
+			company="Acme",
+			plan="Annual Plan",
+			billing=BILLING,
+			terms_accepted=True,
+		)
+
+	def test_taken_on_the_recorded_address_with_credentials_resumes(self):
+		with patch.object(admin_client, "resume_pending_signup", return_value={"order": "o1"}) as resume:
+			out = self._start()
+		resume.assert_called_once()
+		self.assertEqual(out["order"], "o1")
+
+	def test_taken_without_credentials_is_still_a_refusal(self):
+		with patch.object(admin_client, "resume_pending_signup") as resume:
+			with self.assertRaises(frappe.ValidationError):
+				self._start(creds=False)
+		resume.assert_not_called()
+
+	def test_taken_on_a_different_address_than_the_recorded_one_is_a_refusal(self):
+		with patch.object(admin_client, "resume_pending_signup") as resume:
+			with self.assertRaises(frappe.ValidationError):
+				self._start(current="https://other.acme.example.com")
+		resume.assert_not_called()
+
+	def test_taken_with_no_recorded_signup_address_is_a_refusal(self):
+		with patch.object(admin_client, "resume_pending_signup") as resume:
+			with self.assertRaises(frappe.ValidationError):
+				self._start(recorded="")
+		resume.assert_not_called()
+
+	def test_a_successful_private_signup_records_the_canonical_address(self):
+		self._start(recorded="", signup={"return_value": {}})
+		self.assertEqual(onboarding_contract.signup_address(), ADDRESS)
+
+	def test_a_public_signup_records_no_address(self):
+		self._start(current="", recorded="", signup={"return_value": {}})
+		self.assertEqual(onboarding_contract.signup_address(), "")

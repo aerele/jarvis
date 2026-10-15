@@ -857,6 +857,24 @@ def _clean_hold(hold) -> dict:
 	return {"host_ip": host_ip, "reach_url": reach_url, "hold_until": until or None}
 
 
+#: Context key for the canonical public address the bench signed up with. Non-secret. Admin
+#: keeps the signup-time ``frappe_site_url`` and has no customer-facing update endpoint, so the
+#: bench records what it sent and refuses to drift from it (see ``private_network.
+#: save_public_address``) or to resume on anyone else's claim to it (``onboarding``).
+SIGNUP_ADDRESS_KEY = "signup_address"
+
+
+def signup_address() -> str:
+	"""The canonical address used at a successful private signup, or ``""``."""
+	value = load().get(SIGNUP_ADDRESS_KEY)
+	return value.strip() if isinstance(value, str) else ""
+
+
+def record_signup_address(address: str) -> None:
+	"""Remember the address a signup succeeded with. A blank address is ignored."""
+	update(**{SIGNUP_ADDRESS_KEY: (address or "").strip()})
+
+
 def private_hold() -> dict:
 	"""The stored hold, or ``{}``."""
 	return _clean_hold(load().get(PRIVATE_HOLD_KEY))
