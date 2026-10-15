@@ -2846,7 +2846,7 @@ import {
 	actionLabelFor,
 	copyFor,
 	payLinkDeadlineNote,
-	PRIVATE_NETWORK_CODES,
+	PRIVATE_SIGNUP_REFUSAL_CODES,
 } from "@/onboarding/paymentCodes";
 import { CHECKOUT_NAV_KEY, shouldHonorCheckoutReturn } from "@/onboarding/checkoutNav";
 import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
@@ -5126,7 +5126,7 @@ async function onPayAction(a) {
 		// their recovery card (status/reconnect/support), never on a fresh review
 		// that would re-run start_signup over live money.
 		// An address refusal sends the customer back to the address, not to Details.
-		const privateRefusal = PRIVATE_NETWORK_CODES.includes(pay.value.code);
+		const privateRefusal = PRIVATE_SIGNUP_REFUSAL_CODES.includes(pay.value.code);
 		const { reset } = flow.restart();
 		if (reset) {
 			net.clearCleared();

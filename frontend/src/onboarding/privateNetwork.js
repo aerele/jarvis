@@ -522,7 +522,7 @@ export const GENERIC_REFUSAL =
 // code also keeps its sentence: the bench writes that message itself. A code outside both
 // reads as generic copy: a newer bench or admin must never
 // crash or blank a screen.
-const KNOWN_CODES = new Set([
+export const KNOWN_CODES = new Set([
 	"EMAIL_NOT_CONFIRMED",
 	"NOT_PRIVATE_CUSTOMER",
 	"PRIVATE_NETWORK_DISABLED",

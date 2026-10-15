@@ -7,6 +7,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { KNOWN_CODES } from "./privateNetwork.js";
+
 import {
 	CODES,
 	ADMIN_CODES,
@@ -16,7 +18,7 @@ import {
 	copyFor,
 	payLinkDeadlineNote,
 	UNKNOWN_COPY,
-	PRIVATE_NETWORK_CODES,
+	PRIVATE_SIGNUP_REFUSAL_CODES,
 } from "./paymentCodes.js";
 
 test("the vocabulary is 15 admin codes + 10 bench codes = 25", () => {
@@ -296,12 +298,12 @@ test("the wizard never grows its own renewal verb", () => {
 });
 
 test("private-network refusals: three codes, outside the 25-code vocabulary, each with its own copy", () => {
-	assert.deepEqual(PRIVATE_NETWORK_CODES, [
+	assert.deepEqual(PRIVATE_SIGNUP_REFUSAL_CODES, [
 		CODES.PRIVATE_NETWORK_DISABLED,
 		CODES.PRIVATE_ADDRESS_INVALID,
 		CODES.PRIVATE_ADDRESS_TAKEN,
 	]);
-	for (const code of PRIVATE_NETWORK_CODES) {
+	for (const code of PRIVATE_SIGNUP_REFUSAL_CODES) {
 		assert.ok(!ADMIN_CODES.includes(code) && !BENCH_CODES.includes(code), code);
 		const entry = copyFor(code);
 		assert.notEqual(entry, UNKNOWN_COPY, `${code} fell through to the unknown row`);
@@ -309,6 +311,14 @@ test("private-network refusals: three codes, outside the 25-code vocabulary, eac
 		assert.ok(entry.body.startsWith("Nothing has been charged."), code);
 		assert.ok(!entry.actions.includes(ACTIONS.INITIATE), `${code} must never offer a payment`);
 		assert.ok(entry.actions.includes(ACTIONS.SUPPORT), code);
+	}
+});
+
+test("every signup refusal code has bench sentence handling in privateNetwork.js", () => {
+	// The JS lists must not drift apart: a signup refusal the Network step cannot render
+	// would read as generic copy there.
+	for (const code of PRIVATE_SIGNUP_REFUSAL_CODES) {
+		assert.ok(KNOWN_CODES.has(code), `${code} missing from privateNetwork.js KNOWN_CODES`);
 	}
 });
 

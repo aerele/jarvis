@@ -2122,6 +2122,31 @@ describe("a public bench's Review & pay is unchanged", () => {
 		expect(w.find('banner-stub[title="One more step before payment"]').exists()).toBe(false);
 		expect(buttonByLabel(w, "Continue to payment")).toBeTruthy();
 		expect(w.text()).toContain("Confirm the details below. You'll complete payment securely.");
+		w.vm.state.termsAccepted = true;
+		w.vm.state.paymentProvider = "razorpay";
+		await flushPromises();
+		expect(w.vm.payDisabled).toBe(false);
+	});
+
+	it("onPayClick proceeds to start the signup on a public bench", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.email = "a@b.com";
+		w.vm.state.company = "Acme";
+		w.vm.state.planName = "pro";
+		w.vm.state.paymentProvider = "razorpay";
+		w.vm.state.termsAccepted = true;
+		fillRequiredBilling(w);
+		api.onboardingPaymentApi.startSignup.mockResolvedValue(
+			ENVELOPE({
+				code: "SIGNUP_VERIFICATION_REQUIRED",
+				pending_verification: true,
+				attempt_id: "att_1",
+				generation: 0,
+			})
+		);
+		await w.vm.onPayClick();
+		expect(api.onboardingPaymentApi.startSignup).toHaveBeenCalledTimes(1);
 	});
 
 	it("a public bench keeps payment-service copy for an unreachable gate", async () => {
@@ -2184,8 +2209,8 @@ describe("private network: Network step plumbing", () => {
 		w.vm.net.state.mode = "private";
 		w.vm.state.step = "details";
 		await flushPromises();
+		expect(spy).toHaveBeenCalledTimes(1); // the step-leave call, before any unmount
 		w.unmount();
-		expect(spy).toHaveBeenCalled();
 	});
 
 	it("a locally invalid address never calls the API", async () => {

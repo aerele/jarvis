@@ -121,7 +121,7 @@ export const BENCH_CODES = [
 // Kept apart from ADMIN_CODES and BENCH_CODES: paymentCodes.test.js pins those two lists to
 // the 15 + 10 = 25 code vocabulary of the contract's first release. These three are the
 // private-network additions; each has a copy row and a machine state of its own.
-export const PRIVATE_NETWORK_CODES = [
+export const PRIVATE_SIGNUP_REFUSAL_CODES = [
 	CODES.PRIVATE_NETWORK_DISABLED,
 	CODES.PRIVATE_ADDRESS_INVALID,
 	CODES.PRIVATE_ADDRESS_TAKEN,

@@ -135,6 +135,7 @@ vi.mock("@/components/LlmPoolEditor.vue", () => ({
 vi.mock("frappe-ui", () => {
 	const stub = (name, tag = "button") => ({
 		name,
+		emits: ["click"],
 		template: `<${tag} @click="$emit('click')"><slot/></${tag}>`,
 	});
 	return {
@@ -2292,7 +2293,7 @@ describe("private network: network_check_required is a STOP with the rules and a
 		expect(w.text()).toContain("Rules for your network team");
 	});
 
-	it("other readiness reasons are untouched", async () => {
+	it("a private bench with another readiness reason opens no network panel", async () => {
 		api.isReadyForChat.mockResolvedValue({
 			ready: false,
 			reason: "container_provisioning",
