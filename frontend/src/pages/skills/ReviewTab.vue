@@ -1247,6 +1247,15 @@
 											:theme="p.status === 'Approved' ? 'green' : 'red'"
 											:label="p.status"
 										/>
+										<!-- 5c: a reviewer maintains the shared copy on its own form. -->
+										<Button
+											v-if="p.shared_skill"
+											class="jv-open-shared-skill"
+											variant="subtle"
+											label="Open shared skill"
+											iconLeft="edit-2"
+											@click="openSharedSkill(p)"
+										/>
 									</template>
 								</div>
 							</div>
@@ -2507,6 +2516,13 @@ async function submitAsk() {
 function editSkill(row) {
 	if (!row.materialized_skill) return;
 	router.push({ name: "SkillDetail", params: { id: row.materialized_skill } });
+}
+
+// The live shared copy an approved promotion published, on its own form, where a
+// skill reviewer may edit it (5c).
+function openSharedSkill(p) {
+	if (!p.shared_skill) return;
+	router.push({ name: "SkillDetail", params: { id: p.shared_skill } });
 }
 
 // append dedupes by name so a reset racing a load-more can never mint duplicate

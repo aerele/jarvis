@@ -496,6 +496,10 @@ def personal_skill_clause(user: str | None = None) -> str:
 _PUSHABLE_FIELDS = ("name", "skill_name", "description", "user_invocable")
 # The identity-only projection: enough to rank and name a pushable row.
 _PUSHABLE_ID_FIELDS = ("name", "skill_name")
+# Which rows the push considers, before the role restriction. ("in", ("Org", "")),
+# not ("!=", "User"), because db_query wraps the "in" operator in ifnull(scope, ''),
+# so legacy NULL-scope rows match ''.
+_PUSHABLE_ORG_FILTERS = {"enabled": 1, "managed_by_learning": 0, "scope": ("in", ("Org", ""))}
 
 
 def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELDS) -> list:
@@ -508,9 +512,7 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 	``owner`` scopes tests only; ``fields`` trims the projection for callers that
 	only need identity (``name`` + ``skill_name`` are load-bearing here: the
 	role-restriction filter and the sort key both read them)."""
-	# ("in", ("Org", "")) — not ("!=", "User") — because db_query wraps the
-	# "in" operator in ifnull(scope, ''), so legacy NULL-scope rows match ''.
-	filters = {"enabled": 1, "managed_by_learning": 0, "scope": ("in", ("Org", ""))}
+	filters = dict(_PUSHABLE_ORG_FILTERS)
 	if owner:
 		filters["owner"] = owner
 	rows = frappe.get_all(
@@ -531,6 +533,24 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 	# never name different dropped skills across the push cap.
 	kept.sort(key=lambda r: _pushable_sort_key(r.skill_name, r.name))
 	return kept
+
+
+def is_pushable_org_row(name: str) -> bool:
+	"""Whether ``name`` is one of :func:`_pushable_org_rows` (same filters, same
+	role restriction), by one read of that row instead of the whole scan."""
+	# System context: callers are an admin act behind its role gate.
+	rows = frappe.get_all(
+		"Jarvis Custom Skill", filters={**_PUSHABLE_ORG_FILTERS, "name": name}, pluck="name", limit=1
+	)
+	return bool(rows) and name not in role_restricted_names(rows)
+
+
+def set_skill_raw(name: str, field_or_values, value=None, *, update_modified: bool = False) -> None:
+	"""Raw (validate()-bypassing) write to Jarvis Custom Skill ``name``, in either
+	``frappe.db.set_value`` call shape. Develop also clears its push memo here; this
+	line has no such memo, so it is a plain set_value."""
+	values = field_or_values if isinstance(field_or_values, dict) else {field_or_values: value}
+	frappe.db.set_value("Jarvis Custom Skill", name, values, update_modified=update_modified)
 
 
 def build_push_payload(
