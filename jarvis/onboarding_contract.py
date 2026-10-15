@@ -238,8 +238,15 @@ def is_duplicate_signup(err) -> bool:
 	The substring match this replaces (``"already registered or pending" in
 	str(err)``) is what made the failed-payment resume unreachable for every
 	real customer the day admin improved its wording."""
-	if getattr(err, "code", "") == ACCOUNT_ALREADY_EXISTS:
+	code = getattr(err, "code", "")
+	if code == ACCOUNT_ALREADY_EXISTS:
 		return True
+	# PRIVATE_ADDRESS_TAKEN is also a DuplicateEntryError (409), but a different address is
+	# the fix, not resuming this customer's pending payment.
+	from jarvis.admin_client import _PRIVATE_NETWORK_CODES
+
+	if isinstance(code, str) and code in _PRIVATE_NETWORK_CODES:
+		return False
 	return getattr(err, "exc_type", None) == "DuplicateEntryError"
 
 
