@@ -2371,14 +2371,22 @@
 										</div>
 										<div class="mx-auto mt-4 flex w-full max-w-[680px] flex-col gap-3">
 											<Banner v-if="state.connectMessage" type="info" :message="state.connectMessage" />
+											<div
+												v-if="!networkLookupDone"
+												class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5"
+												role="status"
+											>
+												<JvSpinner :size="20" />
+												Looking up your server…
+											</div>
 											<Banner
-												v-if="networkHoldFresh && net.state.holdErr"
+												v-else-if="networkLookupErr"
 												type="warning"
-												:title="holdErrCard.title"
-												:message="holdErrCard.text"
+												:title="networkLookupErr.title"
+												:message="networkLookupErr.text"
 												role="alert"
 											/>
-											<template v-if="networkHoldFresh && net.state.hold && !net.state.holdErr">
+											<template v-if="networkLookupDone && net.state.hold && !networkLookupErr">
 												<NetworkRulesTable
 													variant="server"
 													title="Rules for your network team"
@@ -2411,14 +2419,14 @@
 													@click="resumeAfterNetwork"
 												/>
 												<Button
-													v-else-if="networkHoldFresh && net.state.holdErr"
+													v-else-if="networkLookupErr"
 													label="Try again"
-													@click="retryNetworkHold"
+													@click="lookUpNetworkServer"
 												/>
 												<Button
 													v-else
 													variant="solid"
-													:disabled="!networkHoldFresh || !net.state.hold || !!net.state.holdErr || net.state.test.phase === 'testing' || testWait > 0"
+													:disabled="!networkLookupDone || !net.state.hold || !!networkLookupErr || net.state.test.phase === 'testing' || testWait > 0"
 													:loading="net.state.test.phase === 'testing'"
 													loading-text="Testing…"
 													:label="net.state.test.phase === 'done' ? 'Test again' : 'Test connection'"
@@ -2943,9 +2951,6 @@ const state = reactive({
 // "We couldn't reach your workspace to check" on the first frame after a
 // successful save, announcing a failed check before one had been attempted.
 const readinessSeen = ref(null);
-// Private network: the host admin named in the last network_check_required verdict, so the
-// Connect panel can show its address before its own reserve_host call answers.
-const networkCheckSeen = ref(null);
 // jarvis#752: the apply-operation poll's OWN chat_readiness_reason, mirrored from
 // the last onOpUpdate tick. This is a DIFFERENT source than readinessSeen above -
 // the operation carries admin's free-text explanation from the moment a save is
@@ -5725,7 +5730,6 @@ function noteReadiness(o) {
 		answered: !!(o && o.answered),
 		reason: (o && o.reason) || "",
 		detail: (o && o.detail) || "",
-		networkCheck: (o && o.networkCheck) || null,
 	};
 	readinessSeen.value = seen;
 	const stage = readinessPhase(seen);
@@ -5770,7 +5774,6 @@ function noteReadiness(o) {
 		state.connectTitle = stage.title || "Allow your Jarvis server";
 		state.connectMessage = stage.detail;
 		state.connectPaged = false;
-		networkCheckSeen.value = seen.networkCheck;
 		connectModelChangeOffered.value = false;
 		return stage;
 	}
@@ -5855,7 +5858,6 @@ async function waitForChatReadiness() {
 			answered: !!r,
 			reason: r && r.reason,
 			detail: r && r.detail,
-			networkCheck: r && r.network_check,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
 		// Any verdict waiting cannot resolve is terminal for this wait (stage.stop):
@@ -6116,7 +6118,6 @@ async function followLegacyReadiness(result) {
 			answered: !!r,
 			reason: r && r.reason,
 			detail: r && r.detail,
-			networkCheck: r && r.network_check,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
 		// See waitForChatReadiness: stage.stop is every verdict waiting cannot resolve
@@ -6258,57 +6259,62 @@ function reconnectFromStall() {
 }
 
 // ---- Private network: the Connect panel for network_check_required -------------------------
-// What the panel renders for the test it runs. `afterPayment` only changes the success line.
-// The customer's own address for the inbound rule: the saved private address, else the one they
-// are browsing this bench on.
-const connectPublicAddress = computed(() => net.state.publicAddress || window.location.origin);
+// The customer's own saved private address for the inbound rule. Never the browser origin: on a
+// private bench that is the internal address, and a firewall team must not be told to allow it.
 const connectServerRows = computed(() =>
 	net.state.hold
 		? serverRuleRows({
 				hostIp: net.state.hold.hostIp,
-				publicHost: publicHostOf(connectPublicAddress.value) || connectPublicAddress.value,
+				publicHost: publicHostOf(net.state.publicAddress) || net.state.publicAddress,
 		  })
 		: []
 );
+// What the panel renders for the test it runs. `afterPayment` only changes the success line.
 const connectTest = computed(() =>
 	describeServerTest({
 		phase: net.state.test.phase,
 		inbound: net.state.test.inbound,
 		outbound: net.state.test.outbound,
 		hostIp: net.state.hold ? net.state.hold.hostIp : "",
-		publicAddress: connectPublicAddress.value,
+		publicAddress: net.state.publicAddress,
 		siteName: window.site_name || "",
 		afterPayment: true,
 	})
 );
-// Entering the panel re-reads the held server from admin (for a customer with a tenant admin
-// returns that tenant's host), which refreshes a stale one.
-// The rule is only shown once that re-read has answered: after an operator-confirmed host move
-// the stored hold (and the host in the verdict) can be stale, and a stale "allow this IP" rule
-// is worse than a moment of waiting. The browser never sends a target; reserveHost() is keyed on
-// the signed-in customer. A PRIVATE_HOLD_UNAVAILABLE refusal re-reserves inside loadHold.
-const networkHoldFresh = ref(false);
+// The lookup is "done" once loadStatus + loadHold both answered. The rules show only after
+// that: after an operator-confirmed host move the stored hold (and the host in the verdict) can
+// be stale, and a stale "allow this IP" rule is worse than a moment of waiting. The browser
+// never sends a target; reserveHost() is keyed on the signed-in customer, and a
+// PRIVATE_HOLD_UNAVAILABLE refusal re-reserves inside loadHold.
+const networkLookupDone = ref(false);
+function lookUpNetworkServer() {
+	networkLookupDone.value = false;
+	Promise.all([net.loadStatus(), net.loadHold()]).then(() => {
+		if (state.connectPhase === "network") networkLookupDone.value = true;
+	});
+}
+// Why the rules cannot be shown: admin's hold refusal, a blank host, or no saved address to name.
+const networkLookupErr = computed(() => {
+	if (!networkLookupDone.value) return null;
+	if (net.state.holdErr) return holdErrCard.value;
+	if (!net.state.publicAddress)
+		return {
+			title: "Contact support",
+			text: "We couldn't get your network address. Try again, or contact support.",
+		};
+	return null;
+});
 watch(
 	() => state.connectPhase,
 	(phase, prev) => {
 		if (prev === "network" && phase !== "network") net.dispose();
-		if (phase !== "network") {
-			networkHoldFresh.value = false;
-			return;
-		}
-		networkHoldFresh.value = false;
-		net.state.networkGated = true;
-		Promise.all([net.loadStatus(), net.loadHold()]).then(() => {
-			if (state.connectPhase === "network") networkHoldFresh.value = true;
-		});
+		networkLookupDone.value = false;
+		if (phase === "network") lookUpNetworkServer();
 	}
 );
 // Both halves passed, so admin will push the plugin env on its next reconcile. Resume the
 // readiness wait where it stopped. If admin has not caught up yet the first poll may stop here
 // again, with a clean panel to test from.
-function retryNetworkHold() {
-	net.loadHold();
-}
 function resumeAfterNetwork() {
 	net.resetTest();
 	state.connectPhase = "";

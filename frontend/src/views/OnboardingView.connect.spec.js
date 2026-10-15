@@ -50,7 +50,10 @@ const api = vi.hoisted(() => ({
 		reason: "ok",
 		checked_at: "",
 	})),
-	networkStatus: vi.fn(async () => ({})),
+	networkStatus: vi.fn(async () => ({
+		network_mode: "private",
+		public_address: "https://erp.acme.example",
+	})),
 	// The cutover's payment flow (plan-09) instantiates from this map at setup and
 	// hydrates on mount. A benign no-signup envelope lets the view mount and reconcile
 	// to the intro tour, so maybeResumeConnect (the seam these tests exercise) runs.
@@ -2049,6 +2052,13 @@ describe("private network: network_check_required is a STOP with the rules and a
 		checked_at: "2026-10-14 09:12:03",
 	};
 	const labels = (w) => w.findAll("button").map((b) => b.attributes("label") || b.text());
+	// A private bench: no public host. Set before mount, which is when the composable reads it.
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+	});
+	afterEach(() => {
+		delete window.jarvis_public_host_ok;
+	});
 	const blocked = () =>
 		api.isReadyForChat.mockResolvedValue({
 			ready: false,
@@ -2069,6 +2079,7 @@ describe("private network: network_check_required is a STOP with the rules and a
 		expect(w.vm.state.finishing).toBe(true);
 		expect(w.text()).toContain("Allow your Jarvis server");
 		expect(w.text()).toContain("198.51.100.27");
+		expect(w.text()).toContain("erp.acme.example");
 		expect(w.text()).toContain("Rules for your network team");
 		expect(labels(w)).toContain("Test connection");
 		expect(labels(w)).not.toContain("Start chatting");
@@ -2154,12 +2165,70 @@ describe("private network: network_check_required is a STOP with the rules and a
 		expect(test).toBeUndefined();
 	});
 
+	it("shows a one-line lookup state until the host is re-read", async () => {
+		blocked();
+		let release;
+		api.reserveHost.mockImplementationOnce(
+			() => new Promise((r) => (release = () => r({ ok: true, host_ip: "198.51.100.27", reach_url: "", hold_until: null })))
+		);
+		const w = await mountConnect();
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		expect(w.text()).toContain("Looking up your server");
+		expect(w.text()).not.toContain("Rules for your network team");
+		release();
+		await flushPromises();
+		expect(w.text()).not.toContain("Looking up your server");
+		expect(w.text()).toContain("Rules for your network team");
+	});
+
+	it("no saved private address hides the rules and offers Try again (both lookups re-run)", async () => {
+		blocked();
+		api.networkStatus.mockResolvedValue({ network_mode: "private", public_address: "" });
+		const w = await mountConnect();
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		expect(w.text()).not.toContain("Rules for your network team");
+		expect(w.text()).toContain("couldn't get your network address");
+		expect(w.text()).toContain("Contact support");
+		expect(labels(w)).not.toContain("Test connection");
+		api.networkStatus.mockClear();
+		api.networkStatus.mockResolvedValue({
+			network_mode: "private",
+			public_address: "https://erp.acme.example",
+		});
+		api.reserveHost.mockClear();
+		await w.findAll("button").find((b) => b.attributes("label") === "Try again").trigger("click");
+		await flushPromises();
+		expect(api.networkStatus).toHaveBeenCalled();
+		expect(api.reserveHost).toHaveBeenCalledTimes(1);
+		expect(w.text()).toContain("Rules for your network team");
+		expect(labels(w)).toContain("Test connection");
+	});
+
+	it("a refused reserve shows the hold error and Try again re-reserves", async () => {
+		blocked();
+		api.reserveHost.mockResolvedValueOnce({ ok: false, code: "PRIVATE_HOLD_UNAVAILABLE", message: "x" });
+		const w = await mountConnect();
+		w.vm.onTerminal(readyChatBlockedStatus);
+		await flushPromises();
+		expect(w.text()).not.toContain("Rules for your network team");
+		expect(labels(w)).not.toContain("Test connection");
+		api.reserveHost.mockClear();
+		await w.findAll("button").find((b) => b.attributes("label") === "Try again").trigger("click");
+		await flushPromises();
+		expect(api.reserveHost).toHaveBeenCalledTimes(1);
+		expect(w.text()).toContain("Rules for your network team");
+	});
+
 	it("other readiness reasons are untouched", async () => {
 		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "container_provisioning", detail: "" });
 		const w = await mountConnect();
+		api.networkStatus.mockClear(); // mount's own status read is not the panel's
 		w.vm.noteReadiness({ answered: true, reason: "container_provisioning", detail: "" });
 		await flushPromises();
 		expect(w.vm.state.connectPhase).not.toBe("network");
 		expect(api.reserveHost).not.toHaveBeenCalled();
+		expect(api.networkStatus).not.toHaveBeenCalled();
 	});
 });
