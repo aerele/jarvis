@@ -260,7 +260,11 @@ describe("a locked address", () => {
 		const sentence = "The address can't be changed after sign-up. Contact support.";
 		const savePublicAddress = vi
 			.fn()
-			.mockResolvedValueOnce({ ok: false, code: "PRIVATE_ADDRESS_LOCKED", message: sentence })
+			.mockResolvedValueOnce({
+				ok: false,
+				code: "PRIVATE_ADDRESS_LOCKED",
+				message: sentence,
+			})
 			.mockResolvedValueOnce({ ok: true, public_address: "https://erp.example.com" });
 		const { net } = make({ savePublicAddress });
 		net.state.draft = "https://erp.example.com";

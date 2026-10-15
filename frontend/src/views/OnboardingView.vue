@@ -401,7 +401,10 @@
 											:message="draftError || net.state.saveErr"
 										/>
 										<div
-											v-if="!draftError && net.state.saveErrCode === 'PRIVATE_ADDRESS_LOCKED'"
+											v-if="
+												!draftError &&
+												net.state.saveErrCode === 'PRIVATE_ADDRESS_LOCKED'
+											"
 											class="mt-1"
 										>
 											<Button label="Contact support" @click="openSupport" />
@@ -4418,9 +4421,7 @@ watch(
 );
 // The saved address came back blank (the status call failed or never answered): there are no
 // rules to show, and Test / Continue would only dead-end. Offer a retry instead.
-const serverAddressMissing = computed(
-	() => net.state.statusLoaded && !net.state.publicAddress
-);
+const serverAddressMissing = computed(() => net.state.statusLoaded && !net.state.publicAddress);
 function retryServerLookup() {
 	net.loadStatus();
 	net.loadHold();
