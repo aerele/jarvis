@@ -5462,8 +5462,29 @@ class TestNativeClaudePickRouting(unittest.TestCase):
 	def test_saved_claude_row_is_prefixed_too(self):
 		self.assertEqual(self._resolve("claude-opus-5"), ("claude-opus-5", "anthropic"))
 
-	def test_saved_proxy_row_stays_bare(self):
-		self.assertEqual(self._resolve("gpt-5.6-terra"), ("gpt-5.6-terra", None))
+	def test_saved_proxy_row_names_the_bifrost_door_next_to_a_claude_plan(self):
+		"""jarvis#1999: with the Claude plan as the pool head the agent's default provider
+		is ``anthropic``, so a bare ChatGPT id ran on the Claude CLI and failed. The pick
+		names the Bifrost door instead."""
+		self.assertEqual(self._resolve("gpt-5.6-terra"), ("gpt-5.6-terra", "openai_compat"))
+
+	def test_saved_proxy_row_stays_bare_without_a_claude_plan(self):
+		self.assertEqual(self._resolve("gpt-5.6-terra", claude_leg=False), ("gpt-5.6-terra", None))
+
+	def test_proxy_door_pick_counts_as_the_proxy_route(self):
+		"""The thinking-level rules key on the proxy route; a door-named pick is on it."""
+		from jarvis.chat import turn_handler as th
+
+		with (
+			patch.object(th.frappe, "get_cached_doc", return_value=frappe._dict(proxy_active=1)),
+			patch.object(th, "_resolve_model_and_provider", return_value=("gpt-5.6-terra", "openai_compat")),
+		):
+			self.assertTrue(th._runs_on_proxy_route(frappe._dict()))
+		with (
+			patch.object(th.frappe, "get_cached_doc", return_value=frappe._dict(proxy_active=1)),
+			patch.object(th, "_resolve_model_and_provider", return_value=("claude-opus-5", "anthropic")),
+		):
+			self.assertFalse(th._runs_on_proxy_route(frappe._dict()))
 
 	def test_unsaved_proxy_catalog_id_still_lets_the_pool_route(self):
 		self.assertEqual(self._resolve("gpt-5.6-sol"), ("", None))

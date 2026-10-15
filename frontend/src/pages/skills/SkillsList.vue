@@ -39,9 +39,36 @@
 			/>
 		</template>
 
-		<!-- apply-pipeline status (renders nothing while idle) -->
+		<!-- apply-pipeline status (renders nothing while idle), then what an
+		     administrator did to one of my skills that the rows alone do not say
+		     (one that was deleted). One line per notice, until dismissed; at most
+		     five are drawn. -->
 		<template #banner>
 			<SyncPill ref="syncPill" class="mb-3" />
+			<div
+				v-if="shownNotices.length"
+				class="mb-3 flex flex-col gap-2"
+				data-testid="admin-notices"
+			>
+				<div
+					v-for="n in shownNotices"
+					:key="n.name"
+					class="jv-skill-notice flex items-center justify-between gap-3 rounded-md bg-surface-amber-2 px-3 py-2"
+					role="status"
+					:data-notice="n.name"
+				>
+					<span class="text-sm text-ink-gray-8">{{ noticeText(n) }}</span>
+					<Button
+						variant="ghost"
+						size="sm"
+						label="Dismiss"
+						:loading="dismissing === n.name"
+						:disabled="!!dismissing"
+						:aria-label="`Dismiss: ${noticeText(n)}`"
+						@click="dismiss(n)"
+					/>
+				</div>
+			</div>
 		</template>
 
 		<template #cell-skill_name="{ row }">
@@ -49,6 +76,15 @@
 				<div class="truncate text-base font-medium text-ink-gray-9">
 					{{ row.skill_name }}
 				</div>
+				<!-- Why it is off, in the row: the rows are one line tall, so the
+				     whole sentence is the line's tail and its title. -->
+				<span
+					v-if="skillHold(row)"
+					class="jv-skill-held min-w-0 truncate text-sm text-ink-red-4"
+					:title="holdText(skillHold(row))"
+				>
+					{{ holdText(skillHold(row)) }}
+				</span>
 				<Tooltip
 					v-if="row.scope === 'Personal'"
 					text="Personal skill - only you; never pushed to the shared assistant"
@@ -120,7 +156,7 @@
 // Skills list - DESIGN-V3 §5.6: scope/enabled quick filters, sync-pill banner
 // (apply pipeline status, 3s poll while pending), bulk delete with skip
 // reasons (owner-only rows), rows → /skills/:id, New Skill → /skills/new.
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Button, Badge, Avatar, Tooltip, Dropdown, toast, confirmDialog } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
@@ -132,6 +168,7 @@ import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiSkills from "@/api/skills";
 import { errHtml } from "@/lib/errors";
 import { createsChip } from "@/lib/fileboxSkills";
+import { holdText, skillHold } from "@/lib/skillHold";
 
 const router = useRouter();
 // /skills is a TABBED shell (Skills | Learning), so the `fv2` query param is
@@ -190,6 +227,34 @@ const sortOptions = [
 ];
 const DEFAULT_SORT = { field: "skill_name", dir: "asc" };
 
+// Admin acts on my skills ride the list's own answer (`notices`, additive to the
+// envelope); declared before useListPage, which may load at once.
+const notices = ref([]);
+const dismissing = ref("");
+const MAX_NOTICES = 5;
+const shownNotices = computed(() => notices.value.slice(0, MAX_NOTICES));
+
+// The server words each notice; `message` is its text.
+const noticeText = (n) => n.message || n.subject || "";
+
+function keepNotices(res) {
+	if (res && Array.isArray(res.notices)) notices.value = res.notices;
+}
+
+// Dismissing marks it read on the server; the line goes once the server says so.
+async function dismiss(notice) {
+	if (dismissing.value) return;
+	dismissing.value = notice.name;
+	try {
+		await apiSkills.dismissSkillNotices([notice.name]);
+		notices.value = notices.value.filter((n) => n.name !== notice.name);
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		dismissing.value = "";
+	}
+}
+
 const {
 	rows,
 	total,
@@ -211,6 +276,7 @@ const {
 	// searchSplitArgs moves `search` out of the whitelisted `filters` object and
 	// forwards everything else — filters_v2 included — through the spread (S6/D1).
 	fetchFn: skillsListFetch,
+	onEnvelope: keepNotices,
 	defaultSort: DEFAULT_SORT,
 	storageKey: "skills",
 	viewKey: "skills",

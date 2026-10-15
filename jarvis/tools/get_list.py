@@ -239,6 +239,10 @@ def get_list(
 		parent_doctype = None
 
 	if not frappe.has_permission(doctype, ptype="read", parent_doctype=parent_doctype):
+		if doctype == "Comment":
+			from jarvis.tools.get_comments import COMMENT_REDIRECT_HINT
+
+			raise PermissionDeniedError(f"no read permission on Comment. {COMMENT_REDIRECT_HINT}")
 		raise PermissionDeniedError(f"no read permission on {doctype}")
 	assert_child_query_fields_readable(doctype, parent_doctype, fields, filters, order_by)
 

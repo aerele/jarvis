@@ -3,7 +3,7 @@
 		<!-- Tab strip renders once the single get_skills_area_caps probe (below)
 		     has resolved with at least one true flag. Skills always shows;
 		     Personalise + Wiki (+ Knowledge Graph flag) gate on caps.personalise,
-		     Analysis on caps.analysis, Review on caps.review - two INDEPENDENT
+		     Analysis and Admin on caps.analysis, Review on caps.review - two INDEPENDENT
 		     flags now (a Jarvis Skill Reviewer without the admin role sees Review
 		     but not Analysis; a Jarvis Admin sees both, since the admin role set
 		     is a subset of the reviewer set server-side). Portal/guest sessions
@@ -14,7 +14,7 @@
 		     so exactly one LayoutHeader teleports to #app-header at a time, the
 		     Macros-page precedent). -->
 		<TabBar
-			v-if="personaliseAllowed || analysisAllowed || reviewAllowed"
+			v-if="personaliseAllowed || analysisAllowed || reviewAllowed || adminAllowed"
 			class="shrink-0"
 			:tabs="tabs"
 			:model-value="activeTab"
@@ -32,6 +32,7 @@
 			class="min-h-0 flex-1"
 			@changed="refreshBadge"
 		/>
+		<AdminTab v-else-if="activeTab === 'admin'" class="min-h-0 flex-1" />
 		<WikiTab v-else-if="activeTab === 'wiki'" class="min-h-0 flex-1" />
 		<KnowledgeGraph v-else-if="activeTab === 'graph'" class="min-h-0 flex-1" />
 		<PersonaliseTab v-else class="min-h-0 flex-1" :caps="capsSeed" />
@@ -45,7 +46,8 @@
 // tab "Personalise" (#personalise, the renamed/rebuilt former "Business" tab)
 // renders the Questions/Notes capture surface; tab "Wiki" (#wiki) renders the
 // scope-aware org wiki; tab "Analysis" (#analysis) renders the pattern-
-// learning settings + run telemetry; tab "Review" (#review) renders the
+// learning settings + run telemetry; tab "Admin" (#admin) lets an administrator
+// read, hold and delete other people's skills; tab "Review" (#review) renders the
 // pattern/promotion decision queue + decided log.
 //
 // Gating used to be two independent booleans from two probes
@@ -68,6 +70,7 @@ import TabBar from "@/components/list/TabBar.vue";
 import SkillsList from "./SkillsList.vue";
 import AnalysisTab from "./AnalysisTab.vue";
 import ReviewTab from "./ReviewTab.vue";
+import AdminTab from "./AdminTab.vue";
 import PersonaliseTab from "./PersonaliseTab.vue";
 import WikiTab from "./WikiTab.vue";
 import KnowledgeGraph from "@/pages/wiki/KnowledgeGraph.vue";
@@ -98,6 +101,7 @@ const capsSeed = ref({});
 // below - no polling.
 const unansweredCount = ref(0);
 const activeTab = ref("skills");
+const adminAllowed = computed(() => analysisAllowed.value);
 // Knowledge Graph tab is behind the per-surface renderer flag (R10, default off);
 // flip via localStorage.wg3d = "on" until the 3D renderer soaks in prod.
 const graph3dOn = renderer3dEnabled();
@@ -116,6 +120,9 @@ const tabs = computed(() => {
 	if (analysisAllowed.value) t.push({ label: "Analysis", value: "analysis" });
 	if (reviewAllowed.value)
 		t.push({ label: "Review", value: "review", count: learningPending.value || null });
+	// Other people's skills: the same people as Analysis (the Jarvis Admin and
+	// System Manager roles), so it rides the `analysis` flag.
+	if (adminAllowed.value) t.push({ label: "Admin", value: "admin" });
 	return t;
 });
 
@@ -133,6 +140,7 @@ function applyHash() {
 	const h = (route.hash || "").replace(/^#/, "").split("?")[0];
 	if (h === "review" && reviewAllowed.value) activeTab.value = "review";
 	else if (h === "analysis" && analysisAllowed.value) activeTab.value = "analysis";
+	else if (h === "admin" && adminAllowed.value) activeTab.value = "admin";
 	else if (h === "learning" && reviewAllowed.value) {
 		activeTab.value = "review";
 		router.replace({ hash: "#review", query: { ...route.query } });
@@ -157,6 +165,7 @@ let probeSettled = false;
 function setTab(v) {
 	if (v === activeTab.value) return;
 	if (v === "analysis" && !analysisAllowed.value) return;
+	if (v === "admin" && !adminAllowed.value) return;
 	if (v === "review" && !reviewAllowed.value) return;
 	if ((v === "personalise" || v === "wiki") && !personaliseAllowed.value) return;
 	if (v === "graph" && !(graph3dOn && personaliseAllowed.value)) return;

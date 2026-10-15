@@ -54,24 +54,26 @@ def _visible(row, user: str, user_roles: list[str]) -> bool:
 def _maybe_prefetch_children(rows: list, user: str, user_roles: list[str]) -> None:
 	"""Batch-load child tables (shared_with/allowed_roles) for the visibility
 	check, so ``_visible`` doesn't fire a per-row fallback query per candidate.
-	Skipped when it wouldn't help: a single candidate (no batching win), or an
-	Administrator / System Manager caller (``user_can_use_skill`` short-circuits
-	before any child read)."""
+	Skipped when it wouldn't help: a single candidate (no batching win), or no
+	row that needs a child read."""
 	if len(rows) <= 1:
-		return
-	if user == "Administrator" or "System Manager" in user_roles:
 		return
 	# Every row the caller OWNS short-circuits user_can_use_skill before any child
 	# read, so if the caller owns them all there is nothing to batch (those rows
 	# cost 0 child queries on the per-row path — batching would only add 2). Fire
-	# only when at least one row belongs to someone else.
-	if not any(r.get("owner") != user for r in rows):
-		return
+	# only when at least one row belongs to someone else. An Administrator / System
+	# Manager also passes every Role and Org row first: only another user's private
+	# row sends them to its shares.
 	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import (
 		prefetch_child_values,
+		skill_scope,
 	)
 
-	prefetch_child_values(rows)
+	foreign = [r for r in rows if r.get("owner") != user]
+	if user == "Administrator" or "System Manager" in user_roles:
+		foreign = [r for r in foreign if skill_scope(r) == "User"]
+	if foreign:
+		prefetch_child_values(rows)
 
 
 def _candidate_pages(q: str, user: str):
