@@ -12,16 +12,23 @@ a bug) still raise.
 """
 
 import ipaddress
+import re
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 import socket
 from urllib.parse import urlsplit
 
 import frappe
+import requests
 from frappe.utils import get_datetime, now_datetime
 
 from jarvis import admin_client, onboarding_contract
-from jarvis.exceptions import AdminRateLimitedError, AdminUnreachableError
+from jarvis.exceptions import (
+	AdminContractError,
+	AdminRateLimitedError,
+	AdminUnreachableError,
+	AdminValidationError,
+)
 from jarvis.network_address import check_public_address, private_test_mode
 from jarvis.onboarding import _ADMIN_ERRORS
 from jarvis.permissions import require_jarvis_admin
@@ -250,3 +257,118 @@ def reserve_host() -> dict:
 	else:
 		message = _UNEXPECTED
 	return {"ok": False, "code": onboarding_contract.BENCH_ADMIN_REJECTED, "message": message}
+
+
+# --------------------------------------------------------------------------- #
+# the connection test (design spec 6.1 and 6.6)
+# --------------------------------------------------------------------------- #
+OUTBOUND_TIMEOUT_S = 5
+_DNS_MARKERS = (
+	"name or service not known",
+	"temporary failure in name resolution",
+	"nodename nor servname",
+	"getaddrinfo failed",
+	"name resolution",
+)
+_CHECK_RE = re.compile(r"JCC-\d{1,12}")
+
+
+def _connection_reason(err) -> str:
+	"""A requests ConnectionError -> the reason the SPA words. Anything that is neither a name
+	failure nor a refusal ("no route", "network unreachable") reads as a timeout: from the
+	customer's chair it is the same "couldn't connect", and a firewall DROP is a timeout."""
+	text = str(err).lower()
+	if any(marker in text for marker in _DNS_MARKERS):
+		return "dns"
+	if "refused" in text or "reset by peer" in text:
+		return "refused"
+	return "timeout"
+
+
+def run_outbound_check(reach_url: str, *, timeout_s: int = OUTBOUND_TIMEOUT_S) -> dict:
+	"""Can THIS bench reach the held host over HTTPS? ``GET reach_url`` with a 5 s timeout and
+	normal certificate checks; a completed TLS handshake and ANY HTTP status mean pass (Traefik
+	answers a host name with no route). ``reach_url`` must come from admin's stored answer,
+	never from the browser. ``http`` is accepted only in local test mode. No redirect is
+	followed and no body is read."""
+	allowed = ("https", "http") if private_test_mode() else ("https",)
+	try:
+		parts = urlsplit(reach_url or "")
+		hostname = parts.hostname
+	except (ValueError, AttributeError):
+		return {"ok": False, "reason": "bad_target"}
+	if parts.scheme not in allowed or not hostname:
+		return {"ok": False, "reason": "bad_target"}
+	try:
+		response = requests.get(
+			reach_url,
+			timeout=timeout_s,
+			allow_redirects=False,
+			stream=True,
+			headers={"User-Agent": "jarvis-bench-reach-check/1"},
+		)
+	except requests.exceptions.SSLError:
+		return {"ok": False, "reason": "tls"}
+	except requests.exceptions.Timeout:
+		return {"ok": False, "reason": "timeout"}
+	except requests.exceptions.ConnectionError as e:
+		return {"ok": False, "reason": _connection_reason(e)}
+	except requests.exceptions.RequestException:
+		return {"ok": False, "reason": "bad_target"}
+	response.close()
+	return {"ok": True, "reason": "ok"}
+
+
+@frappe.whitelist()
+def start_connection_test() -> dict:
+	"""Start both halves of the connection test at once (design 6.1).
+
+	Inbound: admin's fleet host calls this bench's public address (``start_connection_check``,
+	bound to this site's name). Outbound: this bench calls the held host (``run_outbound_check``
+	against the stored ``reach_url``). Takes no argument on purpose - the browser chooses
+	nothing. With no live stored hold it reserves one first (which also refreshes a hold that
+	expired or moved), so a reload cannot strand the test. The SPA then polls
+	``connection_test_status`` for the inbound half; the outbound result is final here."""
+	require_jarvis_admin()
+	hold = onboarding_contract.private_hold()
+	if not hold or not _hold_is_live(hold):
+		reserved = reserve_host()
+		if not reserved.get("ok"):
+			return reserved
+		hold = onboarding_contract.private_hold()
+	try:
+		started = admin_client.start_connection_check(site_name=frappe.local.site)
+	except _ADMIN_ERRORS as e:
+		return _refusal(e)
+	check = str((started or {}).get("check") or "").strip() if isinstance(started, dict) else ""
+	if not check:
+		return {"ok": False, "code": onboarding_contract.BENCH_ADMIN_REJECTED, "message": _UNEXPECTED}
+	return {"ok": True, "check": check, "outbound": run_outbound_check(hold.get("reach_url"))}
+
+
+def _is_unknown_check(err) -> bool:
+	"""Admin answers an unknown or foreign check name with a bare 404: a rejection with no
+	contract code (every coded refusal arrives as ``AdminContractError``)."""
+	return isinstance(err, AdminValidationError) and not isinstance(err, AdminContractError)
+
+
+@frappe.whitelist()
+def connection_test_status(check: str = "") -> dict:
+	"""The inbound half's state, proxied from admin: ``{ok, status, reason, checked_at}``.
+	An unknown or foreign check name is a bare 404 from admin; it reads as an expired result."""
+	require_jarvis_admin()
+	if not (isinstance(check, str) and _CHECK_RE.fullmatch(check)):
+		return {"ok": False, "code": "INVALID_REQUEST", "message": "That test could not be found."}
+	try:
+		state = admin_client.get_connection_check(check)
+	except _ADMIN_ERRORS as e:
+		if _is_unknown_check(e):
+			return {"ok": True, "status": "Failed", "reason": "stale", "checked_at": ""}
+		return _refusal(e)
+	state = state if isinstance(state, dict) else {}
+	return {
+		"ok": True,
+		"status": str(state.get("status") or ""),
+		"reason": str(state.get("reason") or ""),
+		"checked_at": str(state.get("checked_at") or ""),
+	}
