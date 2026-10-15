@@ -164,7 +164,9 @@ const directSubReady = ref(false);
 // for a non-admin) AND the editor's own first load has settled. Neither flag goes
 // back to false, so a background re-probe or the reload after a save never puts
 // the spinner back over a live editor.
-const firstLoadDone = computed(() => (directSubReady.value || !isSM) && !!poolEditor.value?.loaded);
+const firstLoadDone = computed(
+	() => (directSubReady.value || !isSM) && !!poolEditor.value?.loaded
+);
 // SettingsPane's single error surface (design.md anti-pattern 16) takes a
 // short user-facing string; the retry Button sits in the body, the same
 // errorMessage/Retry split every migrated pane in this dialog uses.

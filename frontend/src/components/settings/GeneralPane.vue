@@ -52,7 +52,9 @@
 					     silently - the button would look like a dead control. Their
 					     copy names no destination for the same reason. -->
 					<Button
-						v-if="isSM && statusState === 'attention' && attentionReason !== 'turn_error'"
+						v-if="
+							isSM && statusState === 'attention' && attentionReason !== 'turn_error'
+						"
 						variant="subtle"
 						label="Open AI models"
 						iconLeft="cpu"
@@ -152,8 +154,8 @@
 					<div class="h-full bg-surface-gray-7" :style="{ width: usagePct + '%' }" />
 				</div>
 				<p class="mt-2 text-p-sm text-ink-gray-5">
-					{{ fmtTokens(usage.month_tokens) }} of {{ fmtTokens(usage.budget_monthly) }} this
-					month, {{ usagePct }}%
+					{{ fmtTokens(usage.month_tokens) }} of
+					{{ fmtTokens(usage.budget_monthly) }} this month, {{ usagePct }}%
 				</p>
 			</template>
 			<p v-else class="mt-2 text-p-sm text-ink-gray-5">
@@ -168,10 +170,12 @@
 			<h3 class="text-base font-semibold text-ink-gray-9">Danger zone</h3>
 			<div class="mt-2 flex items-start justify-between gap-4">
 				<div class="flex flex-col gap-0.5">
-					<span class="text-base font-medium text-ink-gray-8">Delete all chat history</span>
+					<span class="text-base font-medium text-ink-gray-8"
+						>Delete all chat history</span
+					>
 					<span class="max-w-lg text-p-sm text-ink-gray-6">
-						Every conversation and message, permanently. Chats still waiting for a reply
-						are kept. Macros and skills stay.
+						Every conversation and message, permanently. Chats still waiting for a
+						reply are kept. Macros and skills stay.
 					</span>
 					<!-- clearAllHistory is registered by ChatView at runtime, so it is
 					     absent on non-chat routes. Say why rather than showing a dead
@@ -201,9 +205,9 @@
 						<span class="max-w-lg text-p-sm text-ink-gray-6">
 							Destroys this workspace's container and attaches a fresh one, then
 							reconnects automatically. Use it when the workspace is stuck or won't
-							connect. Chat is unavailable while it runs (usually a few minutes). Your
-							subscription, chat history and AI connections are kept unless you tick the
-							options.
+							connect. Chat is unavailable while it runs (usually a few minutes).
+							Your subscription, chat history and AI connections are kept unless you
+							tick the options.
 						</span>
 					</div>
 					<Button
@@ -234,8 +238,8 @@
 								Also delete workspace content
 							</span>
 							<span class="block text-p-sm text-ink-gray-6">
-								Permanently deletes chats, skills, macros, triggers, learned patterns,
-								wiki pages and dashboards. Cannot be undone.
+								Permanently deletes chats, skills, macros, triggers, learned
+								patterns, wiki pages and dashboards. Cannot be undone.
 							</span>
 						</span>
 					</label>
@@ -246,8 +250,8 @@
 								Also disconnect AI model connections
 							</span>
 							<span class="block text-p-sm text-ink-gray-6">
-								Removes every connected model and key; you'll set them up again after
-								the reset.
+								Removes every connected model and key; you'll set them up again
+								after the reset.
 							</span>
 						</span>
 					</label>
@@ -276,12 +280,14 @@
 				     reset-onboarding CLI); the red solid lives in the useConfirm. -->
 				<div v-if="isSystemManager" class="mt-6 flex items-start justify-between gap-4">
 					<div class="flex flex-col gap-0.5">
-						<span class="text-base font-medium text-ink-gray-8">Reset to onboarding</span>
+						<span class="text-base font-medium text-ink-gray-8"
+							>Reset to onboarding</span
+						>
 						<span class="max-w-lg text-p-sm text-ink-gray-6">
-							Clears this workspace's connection and AI setup and permanently deletes all
-							content (chats, skills, macros, triggers, learned patterns, wiki pages and
-							dashboards), then restarts the setup wizard. Your subscription is kept.
-							This cannot be undone.
+							Clears this workspace's connection and AI setup and permanently deletes
+							all content (chats, skills, macros, triggers, learned patterns, wiki
+							pages and dashboards), then restarts the setup wizard. Your
+							subscription is kept. This cannot be undone.
 						</span>
 					</div>
 					<Button
