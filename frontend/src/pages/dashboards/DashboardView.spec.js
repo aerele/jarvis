@@ -38,8 +38,7 @@ vi.mock("frappe-ui", () => ({
 }));
 vi.mock("@/components/LayoutHeader.vue", () => ({
 	default: {
-		template:
-			'<header><slot name="left-header" /><slot name="right-header" /></header>',
+		template: '<header><slot name="left-header" /><slot name="right-header" /></header>',
 	},
 }));
 vi.mock("./SaveDashboardDialog.vue", () => ({ default: { template: "<div />" } }));
