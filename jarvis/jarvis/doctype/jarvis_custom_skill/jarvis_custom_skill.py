@@ -555,7 +555,7 @@ class JarvisCustomSkill(NotRenamable, Document):
 			_(
 				"Only a reviewer can change a shared (Role/Org) skill's name, description, "
 				"instructions, audience or File Box settings, or switch it back on. "
-				"Ask a System Manager to make the change."
+				"Ask a skill reviewer to make the change."
 			),
 			frappe.PermissionError,
 		)
