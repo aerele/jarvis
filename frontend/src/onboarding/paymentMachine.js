@@ -130,6 +130,11 @@ const RESTART_SAFE_CODES = new Set([
 	// behind it, so walking the customer back to the Details step to correct the
 	// offending field is provably safe and is the ONLY useful recovery.
 	CODES.BENCH_SIGNUP_DETAILS_REJECTED,
+	// Private-network address refusals are raised by admin before it builds any provider
+	// object, exactly like the details rejection above: nothing recoverable sits behind
+	// them, and changing the address is the only useful recovery.
+	CODES.PRIVATE_ADDRESS_INVALID,
+	CODES.PRIVATE_ADDRESS_TAKEN,
 	// jarvis#297 P0-2a: verification precedes payment by construction - admin's
 	// signup() mints no order/mandate on this path ("No Razorpay order yet - that
 	// gets created at confirm time"), so nothing recoverable can be sitting behind
@@ -283,6 +288,14 @@ function stateForCode(code, data) {
 		// offers no way forward, and this one has an obvious one.
 		case CODES.BENCH_SIGNUP_DETAILS_REJECTED:
 			return STATES.FAILED_RETRYABLE;
+		// Private network: the address was refused (invalid, or another account has it).
+		// Correct the address and the same signup succeeds.
+		case CODES.PRIVATE_ADDRESS_INVALID:
+		case CODES.PRIVATE_ADDRESS_TAKEN:
+			return STATES.FAILED_RETRYABLE;
+		// Private onboarding is switched off: no way forward from this screen.
+		case CODES.PRIVATE_NETWORK_DISABLED:
+			return STATES.FAILED_TERMINAL;
 		default:
 			return null;
 	}
@@ -302,6 +315,9 @@ const PAYMENT_STATE_CODES = new Set([
 	CODES.CLIENT_UPGRADE_REQUIRED,
 	CODES.BENCH_PAY_ORIGIN_UNCONFIGURED,
 	CODES.BENCH_SIGNUP_DETAILS_REJECTED,
+	CODES.PRIVATE_NETWORK_DISABLED,
+	CODES.PRIVATE_ADDRESS_INVALID,
+	CODES.PRIVATE_ADDRESS_TAKEN,
 ]);
 
 function recomputeCanCheck(next, nowMs) {

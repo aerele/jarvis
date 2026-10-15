@@ -16,6 +16,7 @@ import {
 	copyFor,
 	payLinkDeadlineNote,
 	UNKNOWN_COPY,
+	PRIVATE_NETWORK_CODES,
 } from "./paymentCodes.js";
 
 test("the vocabulary is 15 admin codes + 10 bench codes = 25", () => {
@@ -292,4 +293,45 @@ test("the wizard never grows its own renewal verb", () => {
 	const copy = copyFor(CODES.SIGNUP_TERMINAL);
 	assert.equal(copy.actions.includes(ACTIONS.INITIATE), false);
 	assert.equal(copy.actions.includes(ACTIONS.RESUME), false);
+});
+
+test("private-network refusals: three codes, outside the 25-code vocabulary, each with its own copy", () => {
+	assert.deepEqual(PRIVATE_NETWORK_CODES, [
+		CODES.PRIVATE_NETWORK_DISABLED,
+		CODES.PRIVATE_ADDRESS_INVALID,
+		CODES.PRIVATE_ADDRESS_TAKEN,
+	]);
+	for (const code of PRIVATE_NETWORK_CODES) {
+		assert.ok(!ADMIN_CODES.includes(code) && !BENCH_CODES.includes(code), code);
+		const entry = copyFor(code);
+		assert.notEqual(entry, UNKNOWN_COPY, `${code} fell through to the unknown row`);
+		assert.ok(entry.headline && entry.body, code);
+		assert.ok(entry.body.startsWith("Nothing has been charged."), code);
+		assert.ok(!entry.actions.includes(ACTIONS.INITIATE), `${code} must never offer a payment`);
+		assert.ok(entry.actions.includes(ACTIONS.SUPPORT), code);
+	}
+});
+
+test("an address refusal offers a way back to the address; 'disabled' offers only support", () => {
+	for (const code of [CODES.PRIVATE_ADDRESS_INVALID, CODES.PRIVATE_ADDRESS_TAKEN]) {
+		const entry = copyFor(code);
+		assert.ok(entry.actions.includes(ACTIONS.RESTART), code);
+		assert.equal(actionLabelFor(entry, ACTIONS.RESTART), "Change your address");
+	}
+	assert.deepEqual(copyFor(CODES.PRIVATE_NETWORK_DISABLED).actions, [ACTIONS.SUPPORT]);
+});
+
+test("a private setup that cannot reach admin or is rate limited gets setup copy, never payment-service copy", () => {
+	for (const code of [CODES.BENCH_ADMIN_UNREACHABLE, CODES.BENCH_RATE_LIMITED]) {
+		const pub = copyFor(code);
+		const priv = copyFor(code, { privateSetup: true });
+		assert.notEqual(priv, pub, code);
+		assert.ok(!/payment/i.test(priv.headline + priv.body), code);
+		assert.deepEqual(priv.actions, pub.actions, code);
+	}
+	assert.equal(copyFor(CODES.BENCH_ADMIN_UNREACHABLE, { privateSetup: true }).headline, "We can't reach Jarvis right now.");
+	assert.equal(copyFor(CODES.BENCH_RATE_LIMITED, { privateSetup: true }).headline, "Too many attempts.");
+	// Every other code, and any unknown one, is untouched by the flag.
+	assert.equal(copyFor(CODES.PAYMENT_DECLINED, { privateSetup: true }), copyFor(CODES.PAYMENT_DECLINED));
+	assert.equal(copyFor("SOMETHING_NEW", { privateSetup: true }), UNKNOWN_COPY);
 });

@@ -1960,3 +1960,197 @@ describe("private network: a finished setup (reload mid-onboarding)", () => {
 		expect(w.findAll("button.ob-back").length).toBe(0);
 	});
 });
+
+describe("private network: Review & pay", () => {
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+		window.jarvis_network_mode = "private";
+	});
+	afterEach(() => {
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+	});
+
+	async function atReview() {
+		api.networkStatus.mockResolvedValueOnce(privateStatus());
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "pay";
+		w.vm.state.planName = "pro";
+		w.vm.state.termsAccepted = true;
+		await flushPromises();
+		return w;
+	}
+
+	const signup = { email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" };
+	const refuseWith = (code, message = "m") =>
+		api.onboardingPaymentApi.startSignup.mockResolvedValue({
+			status: 417,
+			body: { exc_type: "ValidationError", error: { code, message, recovery: "retry" } },
+		});
+
+	it("shows the Network row, the one-more-step notice and a Continue button", async () => {
+		const w = await atReview();
+		expect(w.text()).toContain("Network");
+		expect(w.text()).toContain("Private, via https://8.8.8.8");
+		expect(w.text()).toContain(
+			"Confirm the details below. We'll email you a confirmation link before anything is charged."
+		);
+		expect(
+			w.find('banner-stub[title="One more step before payment"]').attributes("message")
+		).toBe(
+			"After you confirm your email, we'll show the address of your Jarvis server. Your network team allows it, and we test the connection. You pay only after the test passes."
+		);
+		expect(w.find('banner-stub[title="One more step before payment"]').attributes("type")).toBe(
+			"info"
+		);
+		expect(buttonByLabel(w, "Continue")).toBeTruthy();
+		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
+	});
+
+	it("accepts a completed private setup where a public host would have been required", async () => {
+		const w = await atReview();
+		expect(w.vm.onboardingHostOk).toBe(true);
+		expect(w.vm.payDisabled).toBe(false);
+	});
+
+	it("an incomplete private setup still cannot pay", async () => {
+		delete window.jarvis_network_mode; // the default networkStatus answer reports no setup
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.onboardingHostOk).toBe(false);
+		expect(w.vm.payDisabled).toBe(true);
+	});
+
+	it("a refusal of the address at signup offers 'Change your address' and walks back to it", async () => {
+		refuseWith("PRIVATE_ADDRESS_TAKEN", "That address already belongs to another account.");
+		const w = await atReview();
+		await w.vm.flow.submitReview(signup);
+		expect(w.vm.pay.code).toBe("PRIVATE_ADDRESS_TAKEN");
+		expect(w.vm.pay.value).toBe(STATES.FAILED_RETRYABLE);
+		await flushPromises();
+		expect(buttonByLabel(w, "Change your address")).toBeTruthy();
+		expect(w.text()).toContain("That address already belongs to another account.");
+		await w.vm.onPayAction(ACTIONS.RESTART);
+		await flushPromises();
+		expect(w.vm.state.step).toBe("network");
+		expect(w.vm.net.state.screen).toBe("address");
+		expect(w.vm.net.state.draft).toBe("https://8.8.8.8");
+	});
+
+	it("'disabled' offers support only", async () => {
+		refuseWith("PRIVATE_NETWORK_DISABLED");
+		const w = await atReview();
+		await w.vm.flow.submitReview(signup);
+		await flushPromises();
+		expect(w.vm.pay.value).toBe(STATES.FAILED_TERMINAL);
+		expect(w.vm.payCopy.headline).toBe("Private network setup isn't available yet.");
+		expect(buttonByLabel(w, "Change your address")).toBeFalsy();
+	});
+
+	it("an unreachable or rate-limited gate reads as setup copy, not payment-service copy", async () => {
+		for (const [code, headline] of [
+			["BENCH_ADMIN_UNREACHABLE", "We can't reach Jarvis right now."],
+			["BENCH_RATE_LIMITED", "Too many attempts."],
+		]) {
+			refuseWith(code);
+			const w = await atReview();
+			await w.vm.flow.submitReview(signup);
+			await flushPromises();
+			expect(w.vm.pay.code).toBe(code);
+			expect(w.vm.payCopy.headline).toBe(headline);
+			expect(w.text()).not.toContain("payment service");
+		}
+	});
+
+	it("an unknown refusal code still renders the generic copy, never blank", async () => {
+		refuseWith("SOMETHING_NEW");
+		const w = await atReview();
+		await w.vm.flow.submitReview(signup);
+		await flushPromises();
+		expect(w.vm.payCopy.headline).toBeTruthy();
+		expect(w.vm.payCopy.body).toBeTruthy();
+	});
+});
+
+describe("a public bench's Review & pay is unchanged", () => {
+	it("has no Network row, no notice and the original CTA", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "pay";
+		w.vm.state.planName = "pro";
+		await flushPromises();
+		expect(w.text()).not.toContain("Private, via");
+		expect(w.find('banner-stub[title="One more step before payment"]').exists()).toBe(false);
+		expect(buttonByLabel(w, "Continue to payment")).toBeTruthy();
+		expect(w.text()).toContain("Confirm the details below. You'll complete payment securely.");
+	});
+
+	it("a public bench keeps payment-service copy for an unreachable gate", async () => {
+		api.onboardingPaymentApi.startSignup.mockResolvedValue({
+			status: 417,
+			body: {
+				exc_type: "ValidationError",
+				error: { code: "BENCH_ADMIN_UNREACHABLE", message: "m", recovery: "retry" },
+			},
+		});
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "pay";
+		w.vm.state.planName = "pro";
+		await flushPromises();
+		await w.vm.flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" });
+		await flushPromises();
+		expect(w.vm.payCopy.headline).toBe("We could not reach the payment service.");
+	});
+});
+
+describe("private network: Network step plumbing", () => {
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+		delete window.jarvis_network_mode;
+	});
+	afterEach(() => {
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+	});
+
+	it("the address field links its error only when one exists", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.net.openAddress();
+		await flushPromises();
+		const field = () => w.find('input[placeholder="https://erp.example.com"]');
+		w.vm.net.state.draft = "";
+		w.vm.net.state.draftTouched = false;
+		await flushPromises();
+		expect(field().attributes("aria-describedby")).toBeUndefined();
+		w.vm.net.state.draft = "http://erp.example.com";
+		w.vm.net.state.draftTouched = true;
+		await flushPromises();
+		expect(field().attributes("aria-describedby")).toBe("jv-ob-addr-err");
+	});
+
+	it("disposes the composable when leaving the Network step and on unmount", async () => {
+		const w = mountView();
+		await flushPromises();
+		const spy = vi.spyOn(w.vm.net, "dispose");
+		w.vm.state.step = "network";
+		await flushPromises();
+		expect(spy).not.toHaveBeenCalled();
+		w.vm.net.state.mode = "private";
+		w.vm.state.step = "details";
+		await flushPromises();
+		w.unmount();
+		expect(spy).toHaveBeenCalled();
+	});
+
+	it("a locally invalid address never calls the API", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.net.state.draft = "http://erp.example.com";
+		await w.vm.onNetworkContinue();
+		expect(api.savePublicAddress).not.toHaveBeenCalled();
+		expect(w.vm.net.state.draftTouched).toBe(true);
+	});
+});

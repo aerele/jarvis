@@ -352,7 +352,9 @@
 											required
 											aria-required="true"
 											:aria-invalid="draftError ? 'true' : undefined"
-											aria-describedby="jv-ob-addr-err"
+											:aria-describedby="
+												draftError || net.state.saveErr ? 'jv-ob-addr-err' : undefined
+											"
 											@keydown.enter="onNetworkContinue"
 										/>
 										<ErrorMessage
@@ -1690,7 +1692,9 @@
 										<h1>Review &amp; pay</h1>
 										<p>
 											{{
-												isTrialPlan
+												privateComplete
+													? "Confirm the details below. We'll email you a confirmation link before anything is charged."
+													: isTrialPlan
 													? "Confirm the details below. You'll authorize auto-pay securely. Nothing is charged until your trial ends."
 													: "Confirm the details below. You'll complete payment securely."
 											}}
@@ -1734,6 +1738,15 @@
 											><b class="font-medium text-ink-gray-9">{{
 												state.email
 											}}</b>
+										</div>
+										<div
+											v-if="privateComplete"
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Network</span
+											><b class="font-medium text-ink-gray-9"
+												>Private, via {{ net.state.publicAddress }}</b
+											>
 										</div>
 										<div
 											v-for="row in billing.reviewRows.value"
@@ -1782,6 +1795,13 @@
 											}}</b>
 										</div>
 									</div>
+									<Banner
+										v-if="privateComplete"
+										type="info"
+										title="One more step before payment"
+										message="After you confirm your email, we'll show the address of your Jarvis server. Your network team allows it, and we test the connection. You pay only after the test passes."
+										class="mx-auto mt-4 max-w-[560px]"
+									/>
 									<!-- Plan 01: an Edit affordance under the review rows. Edit returns to
 										 Details WITHOUT touching the payment intent; once an intent exists
 										 the subsequent Continue persists through the authenticated
@@ -2497,6 +2517,7 @@ import {
 	actionLabelFor,
 	copyFor,
 	payLinkDeadlineNote,
+	PRIVATE_NETWORK_CODES,
 } from "@/onboarding/paymentCodes";
 import { CHECKOUT_NAV_KEY, shouldHonorCheckoutReturn } from "@/onboarding/checkoutNav";
 import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
@@ -3128,6 +3149,9 @@ async function loadPaymentProviders() {
 // payment"; an autopay trial keeps its trial wording (C02-4), since that click
 // authorizes the auto-pay mandate rather than charging today.
 const payCta = computed(() => {
+	// Private network: this first click only starts the signup and the email step; payment
+	// comes after the connection test, so "Continue" (as in the mockup) is the honest label.
+	if (privateComplete.value) return "Continue";
 	if (isTrialPlan.value) return "Start free trial";
 	return "Continue to payment";
 });
@@ -3145,7 +3169,7 @@ const payProviderReady = computed(() => !!state.paymentProvider);
 // payBusyView is declared further down; safe to close over here since this
 // getter only runs at render, after the whole setup script has executed.
 const payDisabled = computed(
-	() => payBusyView.value || !payProviderReady.value || !state.termsAccepted || !hostOk
+	() => payBusyView.value || !payProviderReady.value || !state.termsAccepted || !onboardingHostOk.value
 );
 // #669: how long the checkout link is good for. Reads the machine's own
 // payTokenExpiresInS, which is cleared with the token it belongs to, so this
@@ -3851,7 +3875,10 @@ const A = ACTIONS;
 // The coded copy for the current state (headline, body, tone, actions), with the
 // reconciliation flag switching the pending row to its money-parked variant.
 const payCopy = computed(() =>
-	copyFor(pay.value.code, { awaitingReconciliation: pay.value.awaitingReconciliation })
+	copyFor(pay.value.code, {
+		awaitingReconciliation: pay.value.awaitingReconciliation,
+		privateSetup: privateComplete.value,
+	})
 );
 
 // Server-truth identity for the resumed/recovery screens (C02-3 / P1-7: never the
@@ -4637,10 +4664,17 @@ async function onPayAction(a) {
 		// when the reset actually happened - a preserved state keeps the customer on
 		// their recovery card (status/reconnect/support), never on a fresh review
 		// that would re-run start_signup over live money.
+		// An address refusal sends the customer back to the address, not to Details.
+		const privateRefusal = PRIVATE_NETWORK_CODES.includes(pay.value.code);
 		const { reset } = flow.restart();
 		if (reset) {
 			restartHeldNote.value = "";
-			state.step = "details";
+			if (privateRefusal) {
+				state.step = "network";
+				net.openAddress();
+			} else {
+				state.step = "details";
+			}
 		} else {
 			// The reset was refused: a payment is still recoverable behind the current
 			// state (P1-3). Say so, rather than a button that appears to do nothing (X8).
@@ -4685,7 +4719,7 @@ watch(
 // once through the flow; the machine takes it from there (verify / checkout /
 // parked-money / duplicate all land on their own sub-screen).
 async function onPayClick() {
-	if (!hostOk) return; // localhost/non-public bench: server rejects signup anyway
+	if (!onboardingHostOk.value) return; // no public host and no private setup: server rejects signup anyway
 	// plan-09 07-c: the CTA is hidden behind the maintenance hold when the flag is
 	// off; guard the handler too so a stray/programmatic click cannot start a signup.
 	if (!state.paymentUiV2) return;
