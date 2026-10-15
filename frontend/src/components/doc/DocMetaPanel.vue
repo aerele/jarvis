@@ -232,7 +232,7 @@ import {
 } from "frappe-ui";
 import { listShareableUsers } from "@/api";
 import { timeAgo } from "@/utils/datetime";
-import { errHtml, escapeHtml } from "@/lib/errors";
+import { errHtml, escapeHtml, firstServerMessage, messageText } from "@/lib/errors";
 import { uploadEach } from "@/lib/uploadEach";
 
 const props = defineProps({
@@ -336,19 +336,11 @@ function onUploadError(e, file) {
 		"Portal accounts can attach JPG, PNG, GIF, PDF, TXT, CSV and MS Office files only.";
 }
 // Result goes to toast.error(), which binds `message` with v-html, so this
-// returns ESCAPED html rather than plain text. The _server_messages branch is
-// left as-is on purpose: Frappe has already escaped that payload once, so it
-// renders correctly (and inertly) in that sink, and escaping it a second time
-// would show the entities literally.
+// returns ESCAPED html rather than plain text: the server's message is read as
+// text first, then escaped again for that sink.
 function uploadErrMsg(e) {
-	if (e && e._server_messages) {
-		try {
-			return JSON.parse(JSON.parse(e._server_messages)[0]).message;
-		} catch (err) {
-			/* fall through */
-		}
-	}
-	return errHtml(e, "Upload failed");
+	const message = messageText(firstServerMessage(e && e._server_messages));
+	return message ? escapeHtml(message) : errHtml(e, "Upload failed");
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
