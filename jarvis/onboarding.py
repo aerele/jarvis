@@ -1040,7 +1040,7 @@ def _clear_llm_secrets(settings) -> None:
 #: Shown when private-network setup is off on admin (design 5.3, 10). Same sentence the
 #: Network step uses (frontend privateNetwork.js SETUP_UNAVAILABLE).
 PRIVATE_NETWORK_UNAVAILABLE = "Private network setup isn't available yet. Contact support."
-#: A bare 429 on the gate is a rate limit, not "off" (ruling R6). Same copy as private_network._BUSY.
+#: A bare 429 on the gate is a rate limit, not "off" (ruling R6). Shared with private_network.
 PRIVATE_NETWORK_BUSY = "Too many attempts. Try again in a minute."
 
 
@@ -1137,10 +1137,6 @@ def start_signup(
 	# callbacks built from this site's URL would silently fail. Dev/e2e benches
 	# set a public-looking host_name in site_config so this passes.
 	admin_client.assert_public_onboarding_host()
-	# Private network (design 5.3): the host gate above already passes for a completed
-	# private setup; this asks admin whether the feature is on before anything is typed in.
-	if admin_client.is_private_mode():
-		_require_private_setup_enabled()
 	# Money the gateway is holding that an operator has not been able to place
 	# stops the WHOLE endpoint, not just the resume half below. The context is
 	# bench-level, so a raised flag means THIS bench's money is parked — and
@@ -1151,6 +1147,11 @@ def start_signup(
 	if onboarding_contract.awaiting_reconciliation():
 		_refuse_while_money_is_parked()  # always raises
 	_require_contact_number(billing)
+	# Private network (design 5.3): the host gate above already passes for a completed
+	# private setup. Last of the local checks, so a parked-money refusal or a missing
+	# contact number never costs an admin call; asks admin whether the feature is on.
+	if admin_client.is_private_mode():
+		_require_private_setup_enabled()
 	# The identity the customer TYPED, before admin is asked anything. Two
 	# reasons it is written first: a response lost in transit still leaves the
 	# bench knowing whose signup this was (plan 03's "bench response lost after

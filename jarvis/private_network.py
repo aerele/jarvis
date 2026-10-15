@@ -29,7 +29,7 @@ from jarvis.exceptions import (
 	AdminValidationError,
 )
 from jarvis.network_address import check_public_address, private_test_mode
-from jarvis.onboarding import _ADMIN_ERRORS
+from jarvis.onboarding import _ADMIN_ERRORS, PRIVATE_NETWORK_BUSY
 from jarvis.permissions import require_jarvis_admin
 
 # Short budget for the guest probes: a blocked network DROPs packets, so a long timeout
@@ -39,7 +39,7 @@ _MAX_ADMIN_IPS = 8
 # A resolver that hangs must not hold a web worker.
 _DNS_TIMEOUT_S = 4
 _UNEXPECTED = "Jarvis returned an unexpected answer. Please try again."
-_BUSY = "Too many attempts. Try again in a minute."
+_BUSY = PRIVATE_NETWORK_BUSY
 # Codes the SPA has copy for. Anything else (an admin newer than this bench, INVALID_REQUEST
 # from an endpoint that has no field to blame) reads as the generic failure.
 _KNOWN_CODES = frozenset(

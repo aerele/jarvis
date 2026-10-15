@@ -242,10 +242,10 @@ def is_duplicate_signup(err) -> bool:
 	if code == ACCOUNT_ALREADY_EXISTS:
 		return True
 	# PRIVATE_ADDRESS_TAKEN is also a DuplicateEntryError (409), but a different address is
-	# the fix, not resuming this customer's pending payment.
-	from jarvis.admin_client import _PRIVATE_NETWORK_CODES
+	# the fix, not resuming this customer's pending payment (see the docstring).
+	from jarvis.admin_client import PRIVATE_NETWORK_CODES
 
-	if isinstance(code, str) and code in _PRIVATE_NETWORK_CODES:
+	if isinstance(code, str) and code in PRIVATE_NETWORK_CODES:
 		return False
 	return getattr(err, "exc_type", None) == "DuplicateEntryError"
 
@@ -721,12 +721,12 @@ def error_object(err) -> tuple[dict, int]:
 	if isinstance(err, AdminAuthError):
 		# A private-network refusal (a 403 EMAIL_NOT_CONFIRMED) is not an authentication
 		# failure; every other 401/403, coded or not, is, and the SPA has copy for that.
-		from jarvis.admin_client import _PRIVATE_NETWORK_CODES
+		from jarvis.admin_client import PRIVATE_NETWORK_CODES
 
 		code = getattr(err, "code", None)
 		return {
 			"code": code
-			if isinstance(code, str) and code in _PRIVATE_NETWORK_CODES
+			if isinstance(code, str) and code in PRIVATE_NETWORK_CODES
 			else BENCH_ADMIN_AUTH_FAILED,
 			"message": str(err),
 			"recovery": RECOVERY_CONTACT_SUPPORT,

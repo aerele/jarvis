@@ -529,7 +529,9 @@ def _admin_chat_gate() -> dict:
 	(jarvis#885: admin's health cron confirmed the container is dead/unhealthy -
 	an outage, not a wait) and ``"container_provisioning"`` otherwise (wait) -
 	each kept distinct so a customer isn't told to wait for a container that won't
-	come back, or to keep spinning on a strand that only a reconnect can clear.
+	come back, or to keep spinning on a strand that only a reconnect can clear. A
+	private-network customer whose server has not passed the connection test gets
+	``"network_check_required"`` (the SPA sends them to the Connect panel).
 
 	- v1-tolerance: an ABSENT ``chat_readiness`` key (v1 admin, or a v2 that
 	  doesn't surface it) means the control plane has no opinion → allow.

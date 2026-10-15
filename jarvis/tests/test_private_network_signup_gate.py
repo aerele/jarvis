@@ -8,9 +8,10 @@ import frappe
 import requests
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis import admin_client, onboarding
+from jarvis import admin_client, onboarding, onboarding_contract
 from jarvis.exceptions import (
 	AdminAuthError,
+	AdminContractError,
 	AdminRateLimitedError,
 	AdminUnreachableError,
 	AdminValidationError,
@@ -174,3 +175,43 @@ class TestSignupRefusalsOverTheWire(FrappeTestCase):
 			with self.assertRaises(frappe.ValidationError):
 				self._signup(409, _thrown("DuplicateEntryError", "PRIVATE_ADDRESS_TAKEN", "Taken."))
 		resume.assert_not_called()
+
+
+class TestGateOrder(FrappeTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.addCleanup(frappe.set_user, "Administrator")
+		self.addCleanup(frappe.local.response.pop, "error", None)
+
+	def test_parked_money_refuses_before_admin_is_asked(self):
+		with (
+			patch.object(admin_client, "is_private_mode", return_value=True),
+			patch.object(
+				admin_client, "private_setup_info", side_effect=AssertionError("asked admin")
+			) as asked,
+			patch.object(onboarding_contract, "awaiting_reconciliation", return_value=True),
+			patch.object(onboarding, "_refuse_while_money_is_parked", side_effect=_Reached),
+		):
+			with self.assertRaises(_Reached):
+				onboarding.start_signup(
+					email="owner@acme.example.com",
+					company="Acme",
+					plan="Annual Plan",
+					billing=BILLING,
+					terms_accepted=True,
+				)
+		asked.assert_not_called()
+
+
+class TestPrivateCodesAreNeverADuplicateSignup(FrappeTestCase):
+	def test_every_private_code_as_a_409_duplicate_entry_is_not_a_duplicate(self):
+		for code in sorted(admin_client.PRIVATE_NETWORK_CODES):
+			with self.subTest(code=code):
+				err = AdminContractError(
+					"Admin's sentence.", code=code, exc_type="DuplicateEntryError", http_status=409
+				)
+				self.assertFalse(onboarding_contract.is_duplicate_signup(err))
+
+	def test_a_real_duplicate_still_is(self):
+		err = AdminContractError("x", code="ACCOUNT_ALREADY_EXISTS", exc_type="DuplicateEntryError")
+		self.assertTrue(onboarding_contract.is_duplicate_signup(err))

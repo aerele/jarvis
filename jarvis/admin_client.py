@@ -2900,7 +2900,7 @@ def is_handover_unsupported(exc: Exception) -> bool:
 # HTTP-status / exc_type routing: admin sends them as 403 PermissionError, 409
 # DuplicateEntryError, 400 InvalidRequestError and 429, and the status routing alone would
 # turn the 403s into AdminAuthError (code lost) and a 503 into AdminUnreachableError.
-_PRIVATE_NETWORK_CODES = frozenset(
+PRIVATE_NETWORK_CODES = frozenset(
 	{
 		"PRIVATE_NETWORK_DISABLED",
 		"PRIVATE_ADDRESS_INVALID",
@@ -2913,6 +2913,7 @@ _PRIVATE_NETWORK_CODES = frozenset(
 		"INVALID_REQUEST",
 	}
 )
+_PRIVATE_NETWORK_CODES = PRIVATE_NETWORK_CODES  # old private name, kept for any importer
 
 
 def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:
@@ -3091,7 +3092,7 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 	if resp.status_code != 429:
 		contract = _contract_error(payload)
 		code = contract.get("code")
-		if isinstance(code, str) and code in _PRIVATE_NETWORK_CODES:
+		if isinstance(code, str) and code in PRIVATE_NETWORK_CODES:
 			raise _rejection(
 				_envelope_message() or f"admin returned {resp.status_code}",
 				payload=payload,
