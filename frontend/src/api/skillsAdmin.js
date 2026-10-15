@@ -13,11 +13,13 @@ const SA = "jarvis.chat.skills_admin_api.";
 // an empty value is "not filtering". The tab says `audience`; the server's filter is
 // named `scope`, so it is renamed here and nowhere else. `page` counts from 1 and
 // holds `pageSize` rows (the server's cap is 100).
-// -> { rows, page, page_size, has_more, total, hold_available, sync }
+// -> { rows, page, page_size, has_more, total, hold_available, delete_available,
+//      handover_available, sync }
 // Each row: name, skill_name, description, owner, owner_name, scope, target_role,
 // enabled, allow_approve_run, admin_hold, admin_hold_reason, shared_with_count,
 // modified, is_mine, is_published, is_learned. `sync`: { pending, needs_apply,
-// last_synced_at }. `hold_available` is false on a site not yet migrated.
+// last_synced_at }. `hold_available`, `delete_available` and `handover_available`
+// are false on a site not yet migrated for them.
 export const adminListSkills = ({ search = "", filters = {}, page = 1, pageSize = 20 } = {}) => {
 	const { audience, ...rest } = filters || {};
 	const sent = audience ? { ...rest, scope: audience } : rest;
@@ -54,3 +56,18 @@ export const adminRelease = (skill, restore = false) =>
 // Delete any user's skill. The owner sees a notice that it happened.
 // -> { ok, needs_apply, used_by_macros }
 export const adminDelete = (skill) => call(SA + "admin_delete", { skill });
+
+// Who `skill` can be handed to, matching `search` (an address or a name): enabled
+// users with the Jarvis User role, not its owner (the server leaves the owner of
+// `skill` out). `at_cap` is a user who already owns `cap` skills, the most one
+// person may. -> { targets: [{ user, full_name, at_cap }], more, cap }
+export const adminHandoverTargets = (search = "", skill = "") =>
+	call(SA + "admin_handover_targets", skill ? { search, skill } : { search });
+
+// Move any user's skill to another owner. `expected_owner` is the owner the admin
+// saw: the server refuses a skill that changed hands since. It arrives switched
+// off, with its shares, File Box opt-in and assignments cleared, and any hold lifted.
+// -> { ok, new_owner, cleared: { shares, armed, file_box, assignments },
+//      hold_lifted, requests_cancelled, needs_apply }
+export const adminHandover = (skill, new_owner, expected_owner) =>
+	call(SA + "admin_handover", { skill, new_owner, expected_owner });

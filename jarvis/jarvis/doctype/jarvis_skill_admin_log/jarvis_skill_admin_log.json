@@ -3,7 +3,7 @@
  "allow_rename": 0,
  "autoname": "hash",
  "creation": "2026-10-14 20:00:00.000000",
- "description": "What a Jarvis Admin did to someone else's skill (put on hold, released, deleted). One row per act, written by the admin endpoints only, never changed afterwards. It survives the skill's deletion and holds no instructions text.",
+ "description": "What a Jarvis Admin did to someone else's skill (put on hold, released, deleted, handed over). One row per act, written by the admin endpoints only, never changed afterwards. It survives the skill's deletion and holds no instructions text.",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
@@ -13,6 +13,7 @@
   "skill",
   "skill_name",
   "skill_owner",
+  "new_owner",
   "needs_apply",
   "reason"
  ],
@@ -21,7 +22,7 @@
    "fieldname": "verb",
    "fieldtype": "Select",
    "label": "Verb",
-   "options": "hold\nrelease\ndelete\nedit",
+   "options": "hold\nrelease\ndelete\nhandover\nedit",
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,
@@ -69,6 +70,14 @@
    "in_standard_filter": 1,
    "read_only": 1,
    "description": "Who owned the skill when the admin acted (Administrator for a published company copy)."
+  },
+  {
+   "fieldname": "new_owner",
+   "fieldtype": "Data",
+   "label": "Handed to",
+   "in_standard_filter": 1,
+   "read_only": 1,
+   "description": "For a hand-over, who the skill was handed to. Data, not a Link, like Admin."
   },
   {
    "fieldname": "needs_apply",

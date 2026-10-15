@@ -55,6 +55,12 @@ const VERBS = {
 	hold: "Put on hold",
 	release: "Released",
 	delete: "Deleted",
+	handover: "Handed over",
 	edit: "Edited by a skill reviewer",
 };
-export const verbText = (verb) => VERBS[String(verb || "").toLowerCase()] || String(verb || "");
+// A hand over says to whom, when the history row carries the new owner.
+export function verbText(verb, newOwner = "") {
+	const key = String(verb || "").toLowerCase();
+	if (key === "handover" && newOwner) return `Handed to ${newOwner}`;
+	return VERBS[key] || String(verb || "");
+}

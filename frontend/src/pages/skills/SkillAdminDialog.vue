@@ -196,7 +196,7 @@
 										{{ h.admin_name || h.admin }}
 									</td>
 									<td class="whitespace-nowrap py-1.5 pr-3 text-ink-gray-8">
-										{{ verbText(h.verb) }}
+										{{ verbText(h.verb, h.new_owner_name || h.new_owner) }}
 									</td>
 									<td
 										class="min-w-40 whitespace-pre-wrap py-1.5 text-ink-gray-7 [overflow-wrap:anywhere]"

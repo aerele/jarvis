@@ -204,6 +204,26 @@ describe("SkillAdminDialog", () => {
 		expect(w.find(".jv-skill-admin-history img").exists()).toBe(false);
 	});
 
+	it("says to whom a hand over went, or just that it happened", async () => {
+		const at = "2026-10-04 09:00:00";
+		const w = await open({
+			history: [
+				{
+					admin: "boss@example.test",
+					verb: "handover",
+					new_owner: "ben@example.test",
+					reason: "",
+					at,
+				},
+				{ admin: "boss@example.test", verb: "handover", reason: "", at },
+			],
+		});
+		const verbs = w
+			.findAll(".jv-skill-admin-history tbody tr")
+			.map((tr) => tr.findAll("td")[2].text());
+		expect(verbs).toEqual(["Handed to ben@example.test", "Handed over"]);
+	});
+
 	it("keeps the body in one scrolling region the keyboard can reach, with nothing to edit", async () => {
 		const w = await open();
 		const body = w.find(".jv-skill-admin-body");

@@ -61,6 +61,18 @@ describe("skills admin api", () => {
 		expect(sent()).toEqual([SA + "admin_release", { skill: "s1", restore: 1 }]);
 	});
 
+	it("asks for hand over targets with the skill, and hands over with the owner shown", async () => {
+		await api.adminHandoverTargets("be", "s1");
+		expect(sent()).toEqual([SA + "admin_handover_targets", { search: "be", skill: "s1" }]);
+		await api.adminHandoverTargets();
+		expect(sent()).toEqual([SA + "admin_handover_targets", { search: "" }]);
+		await api.adminHandover("s1", "ben@x.test", "asha@x.test");
+		expect(sent()).toEqual([
+			SA + "admin_handover",
+			{ skill: "s1", new_owner: "ben@x.test", expected_owner: "asha@x.test" },
+		]);
+	});
+
 	it("dismisses owner notices by name, as a JSON list", async () => {
 		await dismissSkillNotices(["N1", "N2"]);
 		expect(sent()).toEqual([
