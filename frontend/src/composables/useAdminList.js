@@ -16,7 +16,7 @@
 // A filter change that fails therefore clears them: they belong to the filter
 // that was left, and Load more would otherwise append the new filter's second
 // page to the old filter's rows.
-import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { errMessage } from "@/lib/errors";
 
 export const SEARCH_WAIT_MS = 300;
@@ -215,6 +215,19 @@ export function useAdminList(o) {
 		searchTimer = setTimeout(() => loadKeepingFocus("reset"), SEARCH_WAIT_MS);
 	}
 
+	// Resolves once no load is in flight (at once when none is): what a caller reads
+	// from `rows` after it is the answer, not a list half way through a reload.
+	function settled() {
+		if (!loading.value) return Promise.resolve();
+		return new Promise((done) => {
+			const stop = watch(loading, (now) => {
+				if (now) return;
+				stop();
+				done();
+			});
+		});
+	}
+
 	onMounted(() => document.addEventListener("pointerdown", onPagePointer, true));
 	onBeforeUnmount(() => {
 		document.removeEventListener("pointerdown", onPagePointer, true);
@@ -236,6 +249,7 @@ export function useAdminList(o) {
 		loadMore,
 		onSearch,
 		searchBox,
+		settled,
 		usedKeyboard,
 	};
 }
