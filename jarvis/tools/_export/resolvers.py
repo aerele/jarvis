@@ -2,7 +2,8 @@ from typing import NamedTuple
 
 import frappe
 
-from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.exceptions import ExportTooSlowError, InvalidArgumentError, PermissionDeniedError
+from jarvis.tools._export import masking
 from jarvis.tools._export.model import ExportModel
 from jarvis.tools.get_list import _child_table_parents, assert_child_query_fields_readable
 
@@ -15,6 +16,13 @@ from jarvis.tools.get_list import _child_table_parents, assert_child_query_field
 # a shared worker. Streaming/async for larger sets is a deferred follow-up (see the
 # export DEFERRED backlog); until then, 20k keeps the sync path inside the budget.
 _HARD_ROW_CEILING = 20_000
+
+# The export SELECT's own statement limit, in seconds. The plugin aborts the whole
+# call at 30 s and the rest of the export (render, save) runs after the SELECT, so
+# the agent read limit (25 s) leaves no room for it: a slow query plus a 20k-row
+# render passed 30 s, orphaned the File and made the agent retry the same heavy
+# query. export_query's overall deadline (see there) is the other half of this.
+_EXPORT_SELECT_LIMIT_S = 12
 
 
 def _default_fields(doctype: str) -> list[str]:
@@ -120,52 +128,75 @@ def from_spec(spec) -> ExportModel:
 	column, and the record-level permission weave. On top, an export needs the
 	Export DocPerm on each table its columns come from: FROM and joins, and for a
 	child table the owning parent its rows are scoped to (``query`` resolves it).
+	A column masked for the user (Frappe 16 ``mask``) is masked as ``get_list``
+	would, and a computed column over one is refused (``_export.masking``).
 
 	Every row is fetched (not the model-facing ``query`` caps), FAIL-CLOSED above
-	``_HARD_ROW_CEILING`` like ``from_query``, and the SELECT is stopped at the
-	agent read time limit so it cannot outlive the tool call. A spec ``limit``
-	below the ceiling still applies (a deliberate "top 50"); an ``offset`` is
-	refused."""
+	``_HARD_ROW_CEILING`` like ``from_query``, and the SELECT is stopped at
+	``_EXPORT_SELECT_LIMIT_S`` so it cannot outlive the tool call. A spec ``limit``
+	below the ceiling still applies (a deliberate "top 50"); when it actually cut
+	the result, ``meta["limited_by_spec"]`` holds it so the caller can say so. An
+	``offset`` is refused."""
 	from jarvis.tools.query import compile_spec_for_export
 
-	q, tables, export_doctypes = compile_spec_for_export(spec, _HARD_ROW_CEILING + 1)
+	q, tables, export_doctypes, child_parents = compile_spec_for_export(spec, _HARD_ROW_CEILING + 1)
 	for dt in export_doctypes:
 		if not frappe.permissions.can_export(dt):
 			raise PermissionDeniedError(f"no export permission on {dt}")
 	columns = _spec_columns(spec, tables)
-	rows = _run_bounded(q)
+	masked = masking.masked_fields(tables, child_parents)
+	masking.refuse_masked_expressions(columns, q, masked)
+	rows, limited_by_spec = _cut_to_spec_limit(spec, _run_bounded(q))
 	if len(rows) > _HARD_ROW_CEILING:
 		raise InvalidArgumentError(
 			f"this query matches more than {_HARD_ROW_CEILING:,} rows for your permissions - too many "
 			f"to export in full. Narrow it (e.g. by date or status), or split it by a filter into a "
 			f"few exports."
 		)
+	masking.mask_rows(columns, rows, masked)
 	from_dt = next(iter(tables.values()))
+	meta = {"doctype": from_dt, "headers": _unique_headers(columns)}
+	if limited_by_spec:
+		meta["limited_by_spec"] = limited_by_spec
 	return ExportModel(
 		columns=[c.key for c in columns],
 		rows=[[row.get(c.key) for c in columns] for row in rows],
 		total=len(rows),
-		meta={"doctype": from_dt, "headers": _unique_headers(columns)},
+		meta=meta,
 	)
 
 
+def _cut_to_spec_limit(spec: dict, rows: list) -> tuple[list, int | None]:
+	"""``(rows, limit)``: the query fetched one row past the spec's ``limit``, so a
+	row beyond it proves the limit cut the result. Drop that probe row and return the
+	limit; ``None`` when the spec's limit did not cut anything (or there is none)."""
+	limit = spec.get("limit")
+	if limit is None or len(rows) <= limit:
+		return rows, None
+	return rows[:limit], limit
+
+
 def _run_bounded(q) -> list:
-	"""Run the export SELECT under the same per-statement limit agent reads get
-	(``api._agent_read_timeout_s``). Exports are write tools, so the agent path
-	leaves them unlimited; a spec export is an agent-built query, and past the
-	plugin's call timeout nobody would receive the file. The query runs through
-	``q.run`` (its values parameterised), never as a rendered SQL string. A query
-	stopped at the limit is refused with what to do instead."""
+	"""Run the export SELECT under a per-statement limit: the agent read limit
+	(``api._agent_read_timeout_s``) or ``_EXPORT_SELECT_LIMIT_S``, whichever is
+	smaller. A site that switched the agent limit off (0) keeps no limit here; the
+	overall deadline in ``export_query`` still keeps the call under the plugin abort.
+	Exports are write tools, so the agent path leaves them unlimited; a spec export
+	is an agent-built query, and past the plugin's call timeout nobody would receive
+	the file. The query runs through ``q.run`` (its values parameterised), never as a
+	rendered SQL string. A query stopped at the limit is refused with what to do
+	instead."""
 	from jarvis import _failure_kind
 	from jarvis.api import _agent_read_timeout_s, statement_time_limit
 
-	limit = _agent_read_timeout_s()
+	agent_limit = _agent_read_timeout_s()
+	limit = min(agent_limit, _EXPORT_SELECT_LIMIT_S) if agent_limit else 0
 	try:
 		with statement_time_limit(limit):
 			return q.run(as_dict=True)
 	except Exception as e:
 		if _failure_kind.too_slow(e):
-			raise InvalidArgumentError(
+			raise ExportTooSlowError(
 				f"this export's query ran past the {limit}-second limit, so the database stopped "
 				f"it. Narrow it (a date range or a status filter), or split it into a few exports."
 			) from None
@@ -176,6 +207,7 @@ class _Column(NamedTuple):
 	key: str  # the row key (field name, or the `as` name of a computed column)
 	doctype: str | None  # the DocType a plain column belongs to
 	label: str | None  # a fixed header (computed columns), else the field's label
+	alias: str | None = None  # the spec alias of a plain column's table; None when computed
 
 
 def _spec_columns(spec: dict, tables: dict) -> list[_Column]:
@@ -184,12 +216,13 @@ def _spec_columns(spec: dict, tables: dict) -> list[_Column]:
 	``as`` name, which an export requires (without it the column's name is
 	whatever SQL makes of the expression). Two columns with the same key would
 	overwrite each other in the row, so that is refused with the fix."""
-	from_dt = next(iter(tables.values()), None)
+	from_alias = next(iter(tables), None)
 	out = []
 	for item in spec.get("select") or ["name"]:
 		if isinstance(item, str):
 			alias, _, field = item.rpartition(".")
-			out.append(_Column(field, tables.get(alias, from_dt) if alias else from_dt, None))
+			alias = alias or from_alias
+			out.append(_Column(field, tables.get(alias, tables[from_alias]), None, alias))
 		elif isinstance(item, dict) and item.get("as"):
 			out.append(_Column(item["as"], None, _humanize(item["as"])))
 		else:
