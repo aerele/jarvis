@@ -24,7 +24,7 @@ from jarvis.exceptions import (
 from jarvis.tools._export import renderers, resolvers, save_export_file
 
 # Seconds the whole export may take before it is refused instead of saved. The plugin
-# aborts every call_tool at 30 s (jarvis-openclaw-plugin src/frappe-client.ts): a file
+# aborts every call_tool at 30 s (its frappe-client call timeout): a file
 # finished after that is one nobody receives, and the agent retries the same heavy
 # query. Checked after the query and after the render, BEFORE the File is written,
 # so a refused export leaves nothing behind. The margin to 30 s is the save itself.
