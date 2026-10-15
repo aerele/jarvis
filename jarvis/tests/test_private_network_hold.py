@@ -3,7 +3,6 @@ email click, and read back by reserve_host (design spec 8.2, contract 4.3 and 4.
 
 import json
 from contextlib import contextmanager
-from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -83,6 +82,7 @@ class TestHoldStorage(_Fresh):
 			{"host_ip": HOLD["host_ip"], "reach_url": "https://"},
 			{"host_ip": HOLD["host_ip"]},
 			{"host_ip": "", "reach_url": "", "hold_until": None},
+			{**HOLD, "hold_until": 12345},
 		):
 			with self.subTest(bad=bad):
 				onboarding_contract.store_private_hold(HOLD)
@@ -168,6 +168,12 @@ class TestReserveHost(_Fresh):
 		self.assertNotEqual(out["message"], private_network._UNEXPECTED)
 		self.assertTrue(out["message"])
 
+	def test_an_empty_answer_is_still_unexpected(self):
+		for raw in ({}, {"host_ip": "", "reach_url": ""}, {"host_ip": "", "reach_url": "", "hold_until": "x"}):
+			with self.subTest(raw=raw), patch.object(admin_client, "reserve_private_host", return_value=raw):
+				out = private_network.reserve_host()
+				self.assertEqual(out["message"], private_network._UNEXPECTED)
+
 	def test_requires_a_jarvis_admin(self):
 		frappe.set_user("Guest")
 		with self.assertRaises(frappe.PermissionError):
@@ -197,14 +203,13 @@ class TestRateLimitedReserve(_Fresh):
 			out = private_network.reserve_host()
 		self.assertEqual(out, {"ok": True, **tenant, "cached": True})
 
-	def test_an_expired_stored_hold_is_not_served(self):
-		expired = {**HOLD, "hold_until": str(now_datetime() - timedelta(hours=1))[:19]}
-		onboarding_contract.store_private_hold(expired)
+	def test_a_stored_hold_is_served_whatever_its_hold_until(self):
+		# admin's zone is unknown to the bench: no time comparison
+		old = {**HOLD, "hold_until": "2020-01-01 00:00:00"}
+		onboarding_contract.store_private_hold(old)
 		with self._limited():
 			out = private_network.reserve_host()
-		self.assertFalse(out["ok"])
-		self.assertEqual(out["code"], "RATE_LIMITED_PRIVATE_NETWORK")
-		self.assertEqual(out["retry_after_seconds"], 300)
+		self.assertEqual(out, {"ok": True, **old, "cached": True})
 
 	def test_no_stored_hold_is_the_plain_refusal(self):
 		with self._limited():

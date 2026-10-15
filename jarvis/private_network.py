@@ -20,7 +20,6 @@ from urllib.parse import urlsplit
 
 import frappe
 import requests
-from frappe.utils import get_datetime, now_datetime
 
 from jarvis import admin_client, onboarding_contract
 from jarvis.exceptions import (
@@ -209,26 +208,17 @@ def save_public_address(address: str = "") -> dict:
 _NO_ADDRESS = "Jarvis could not get the address of your server. Please contact support."
 
 
-def _hold_is_live(hold: dict) -> bool:
-	"""A stored hold that can still be shown: not yet expired, or a tenant's own host
-	(``hold_until`` null), which admin never expires."""
-	until = hold.get("hold_until")
-	if not until:
-		return bool(hold)
-	try:
-		return get_datetime(until) > now_datetime()
-	except (ValueError, TypeError):
-		return False
-
-
 def _reserve_refusal(err) -> dict:
-	"""``_refusal``, except that a rate limit with a live stored hold is answered from the
-	store: admin counts every reserve call (10 per hour), even a read of a live hold, and
-	the SPA calls this on every screen entry and retry."""
+	"""``_refusal``, except that a rate limit with a stored hold is answered from the store:
+	admin counts every reserve call (10 per hour), even a read of a live hold, and the SPA
+	calls this on every screen entry and retry. No expiry check: ``hold_until`` is a naive
+	datetime in ADMIN's zone, so the bench cannot compare it to its own clock. Expiry is
+	admin's call, made through the poll (a null poll makes the bench forget the hold), and a
+	wrongly served hold self-heals via PRIVATE_HOLD_UNAVAILABLE -> re-reserve."""
 	out = _refusal(err)
 	if out["code"] == "RATE_LIMITED_PRIVATE_NETWORK":
 		stored = onboarding_contract.private_hold()
-		if stored and _hold_is_live(stored):
+		if stored:
 			return {"ok": True, **stored, "cached": True}
 	return out
 
@@ -251,8 +241,14 @@ def reserve_host() -> dict:
 	hold = onboarding_contract.store_private_hold(raw)
 	if hold:
 		return {"ok": True, **hold}
-	if isinstance(raw, dict) and not raw.get("host_ip") and not raw.get("reach_url"):
-		# A tenant host admin has no public address for: not a malformed answer.
+	if (
+		isinstance(raw, dict)
+		and raw.get("host_ip") == ""
+		and raw.get("reach_url") == ""
+		and "hold_until" in raw
+		and raw["hold_until"] is None
+	):
+		# A tenant host admin has no public address for (both keys present and empty).
 		message = _NO_ADDRESS
 	else:
 		message = _UNEXPECTED
@@ -326,12 +322,12 @@ def start_connection_test() -> dict:
 	Inbound: admin's fleet host calls this bench's public address (``start_connection_check``,
 	bound to this site's name). Outbound: this bench calls the held host (``run_outbound_check``
 	against the stored ``reach_url``). Takes no argument on purpose - the browser chooses
-	nothing. With no live stored hold it reserves one first (which also refreshes a hold that
-	expired or moved), so a reload cannot strand the test. The SPA then polls
+	nothing. With no stored hold it reserves one first, so a reload cannot strand the test.
+	The SPA then polls
 	``connection_test_status`` for the inbound half; the outbound result is final here."""
 	require_jarvis_admin()
 	hold = onboarding_contract.private_hold()
-	if not hold or not _hold_is_live(hold):
+	if not hold:
 		reserved = reserve_host()
 		if not reserved.get("ok"):
 			return reserved

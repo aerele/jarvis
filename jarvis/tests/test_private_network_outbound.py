@@ -131,16 +131,16 @@ class TestStartConnectionTest(_Fresh):
 		self.assertTrue(out["ok"])
 		self.assertEqual(get.call_args.args[0], HOLD["reach_url"])
 
-	def test_an_expired_stored_hold_is_refreshed_before_the_probe(self):
+	def test_any_stored_hold_is_used_without_a_time_comparison(self):
+		# hold_until is in admin's zone: the bench never judges expiry, admin does.
 		onboarding_contract.store_private_hold({**HOLD, "hold_until": "2020-01-01 00:00:00"})
-		fresh = {**HOLD, "reach_url": "https://reach.h9.fleet.example/"}
 		with (
-			patch.object(admin_client, "reserve_private_host", return_value=fresh),
+			patch.object(admin_client, "reserve_private_host", side_effect=AssertionError("reserved")),
 			patch.object(admin_client, "start_connection_check", return_value={"check": "JCC-000126"}),
 			patch("requests.get", return_value=_response(200)) as get,
 		):
 			private_network.start_connection_test()
-		self.assertEqual(get.call_args.args[0], fresh["reach_url"])
+		self.assertEqual(get.call_args.args[0], HOLD["reach_url"])
 
 	def test_a_reserve_refusal_stops_before_any_probe(self):
 		body = _thrown(_PERMISSION, "EMAIL_NOT_CONFIRMED", "Confirm first.")

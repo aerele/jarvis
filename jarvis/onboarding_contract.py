@@ -830,8 +830,13 @@ def _clean_hold(hold) -> dict:
 	includes a legacy tenant host admin knows by no address: both fields come back empty)."""
 	if not isinstance(hold, dict):
 		return {}
-	host_ip = str(hold.get("host_ip") or "").strip()
-	reach_url = str(hold.get("reach_url") or "").strip()
+	until = hold.get("hold_until")
+	if not all(isinstance(v, str) for v in (hold.get("host_ip"), hold.get("reach_url"))):
+		return {}
+	if until is not None and not isinstance(until, str):
+		return {}
+	host_ip = hold["host_ip"].strip()
+	reach_url = hold["reach_url"].strip()
 	try:
 		ipaddress.ip_address(host_ip)
 		parts = urlsplit(reach_url)
@@ -840,7 +845,7 @@ def _clean_hold(hold) -> dict:
 		return {}
 	if parts.scheme not in ("https", "http") or not hostname:
 		return {}
-	return {"host_ip": host_ip, "reach_url": reach_url, "hold_until": hold.get("hold_until") or None}
+	return {"host_ip": host_ip, "reach_url": reach_url, "hold_until": until or None}
 
 
 def private_hold() -> dict:
