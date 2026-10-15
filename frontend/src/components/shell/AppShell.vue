@@ -1,81 +1,88 @@
 <template>
 	<FrappeUIProvider>
 		<div class="flex h-dvh-safe w-full">
-			<!-- Hold a neutral surface until the onboarding verdict resolves AND a
-			     route commits — prevents both a sidebar flash on fresh sites and a
-			     poster flicker on a not-ready /onboarding deep-link. -->
-			<div v-if="!shellReady" class="flex-1 bg-surface-white" />
-			<!-- Onboarding gate (D11-safe): when the workspace has never finished
-			     onboarding, block the WHOLE app with a full-screen poster — no
-			     sidebar, no header — inviting setup. A RENDERED gate, not a
-			     redirect, so it can't reintroduce the old desk↔SPA loop that the
-			     forced D11 redirect caused. The /onboarding wizard itself is
-			     exempt so the poster's "Complete setup" button can reach it. -->
-			<OnboardingGate v-else-if="showGate" />
-			<!-- Release-notice gate: a hard block, shown only once the app would
-			     otherwise render. Exempts the wizard so a mid-onboarding workspace
-			     can still finish setup. -->
-			<UpdateNoticeGate v-else-if="showNotice && route.name !== 'Onboarding'" />
-			<template v-else>
-				<!-- Chrome-less routes (onboarding) drop the sidebar entirely — a
-				     not-yet-onboarded customer has no app to navigate. Desktop keeps
-				     the sidebar in-flow; phone width moves it off-canvas (drawer
-				     block below). -->
-				<div
-					v-if="!route.meta.chromeless && !store.mobile"
-					class="h-full shrink-0 border-r bg-surface-gray-1"
-				>
-					<Sidebar />
-				</div>
-				<!-- Phone: sidebar as an off-canvas drawer + tap-scrim. Translated
-				     off-screen until opened; slides over the content. -->
-				<template v-if="!route.meta.chromeless && store.mobile">
+			<!-- The app itself: inert while a confirmation is open, so Tab and the
+			     pointer cannot reach it. The dialogs, the palette and the notification
+			     toasts below stay outside it: a toast stays readable and clickable. -->
+			<div class="flex h-full w-full min-w-0" :inert="confirmOpen || undefined">
+				<!-- Hold a neutral surface until the onboarding verdict resolves AND a
+				     route commits — prevents both a sidebar flash on fresh sites and a
+				     poster flicker on a not-ready /onboarding deep-link. -->
+				<div v-if="!shellReady" class="flex-1 bg-surface-white" />
+				<!-- Onboarding gate (D11-safe): when the workspace has never finished
+				     onboarding, block the WHOLE app with a full-screen poster — no
+				     sidebar, no header — inviting setup. A RENDERED gate, not a
+				     redirect, so it can't reintroduce the old desk↔SPA loop that the
+				     forced D11 redirect caused. The /onboarding wizard itself is
+				     exempt so the poster's "Complete setup" button can reach it. -->
+				<OnboardingGate v-else-if="showGate" />
+				<!-- Release-notice gate: a hard block, shown only once the app would
+				     otherwise render. Exempts the wizard so a mid-onboarding workspace
+				     can still finish setup. -->
+				<UpdateNoticeGate v-else-if="showNotice && route.name !== 'Onboarding'" />
+				<template v-else>
+					<!-- Chrome-less routes (onboarding) drop the sidebar entirely — a
+					     not-yet-onboarded customer has no app to navigate. Desktop keeps
+					     the sidebar in-flow; phone width moves it off-canvas (drawer
+					     block below). -->
 					<div
-						v-if="store.mobileDrawerOpen"
-						data-testid="drawer-scrim"
-						class="fixed inset-0 z-40 bg-black/40"
-						@click="store.mobileDrawerOpen = false"
-					/>
-					<div
-						data-testid="mobile-drawer"
-						class="fixed inset-y-0 left-0 z-50 border-r bg-surface-gray-1 shadow-xl transition-transform duration-300 ease-in-out"
-						:class="store.mobileDrawerOpen ? 'translate-x-0' : '-translate-x-full'"
+						v-if="!route.meta.chromeless && !store.mobile"
+						class="h-full shrink-0 border-r bg-surface-gray-1"
 					>
 						<Sidebar />
 					</div>
-				</template>
-				<div class="flex flex-1 flex-col h-full min-w-0 overflow-auto bg-surface-white">
-					<!-- Phone top bar for chrome'd non-chat routes: the sidebar is a
-					     drawer now, so each such page needs a hamburger to reach nav.
-					     Chat renders its own hamburger inside its header. -->
-					<div
-						v-if="store.mobile && !route.meta.chat && !route.meta.chromeless"
-						class="flex h-12 shrink-0 items-center gap-2 border-b px-3"
-					>
-						<button
-							class="jv-focus-ring grid size-9 place-items-center rounded-md text-ink-gray-7"
-							aria-label="Open navigation"
-							@click="store.mobileDrawerOpen = true"
+					<!-- Phone: sidebar as an off-canvas drawer + tap-scrim. Translated
+					     off-screen until opened; slides over the content. -->
+					<template v-if="!route.meta.chromeless && store.mobile">
+						<div
+							v-if="store.mobileDrawerOpen"
+							data-testid="drawer-scrim"
+							class="fixed inset-0 z-40 bg-black/40"
+							@click="store.mobileDrawerOpen = false"
+						/>
+						<div
+							data-testid="mobile-drawer"
+							class="fixed inset-y-0 left-0 z-50 border-r bg-surface-gray-1 shadow-xl transition-transform duration-300 ease-in-out"
+							:class="store.mobileDrawerOpen ? 'translate-x-0' : '-translate-x-full'"
 						>
-							<FeatherIcon name="menu" class="size-5" />
-						</button>
-						<div id="app-header" class="min-w-0 flex-1" />
-					</div>
-					<!-- LayoutHeader teleport target — non-chat routes only (D41).
-					     The "Go to Desk" button is rendered INSIDE LayoutHeader's right
-					     cluster (leftmost, before each page's own actions) so it is
-					     uniform across pages and never displaces the page's primary
-					     action from the rightmost corner; chat has its own header button
-					     (ChatView openErpDesk), styled to match. -->
+							<Sidebar />
+						</div>
+					</template>
 					<div
-						v-else-if="!route.meta.chat && !route.meta.chromeless"
-						class="flex border-b"
+						class="flex flex-1 flex-col h-full min-w-0 overflow-auto bg-surface-white"
 					>
-						<div id="app-header" class="flex-1" />
+						<!-- Phone top bar for chrome'd non-chat routes: the sidebar is a
+						     drawer now, so each such page needs a hamburger to reach nav.
+						     Chat renders its own hamburger inside its header. -->
+						<div
+							v-if="store.mobile && !route.meta.chat && !route.meta.chromeless"
+							class="flex h-12 shrink-0 items-center gap-2 border-b px-3"
+						>
+							<button
+								class="jv-focus-ring grid size-9 place-items-center rounded-md text-ink-gray-7"
+								aria-label="Open navigation"
+								@click="store.mobileDrawerOpen = true"
+							>
+								<FeatherIcon name="menu" class="size-5" />
+							</button>
+							<div id="app-header" class="min-w-0 flex-1" />
+						</div>
+						<!-- LayoutHeader teleport target — non-chat routes only (D41).
+						     The "Go to Desk" button is rendered INSIDE LayoutHeader's right
+						     cluster (leftmost, before each page's own actions) so it is
+						     uniform across pages and never displaces the page's primary
+						     action from the rightmost corner; chat has its own header button
+						     (ChatView openErpDesk), styled to match. -->
+						<div
+							v-else-if="!route.meta.chat && !route.meta.chromeless"
+							class="flex border-b"
+						>
+							<div id="app-header" class="flex-1" />
+						</div>
+						<router-view v-if="booted" />
 					</div>
-					<router-view v-if="booted" />
-				</div>
-			</template>
+				</template>
+			</div>
 			<Dialogs />
 			<SettingsDialog />
 			<JarvisCommandPalette />
@@ -97,6 +104,7 @@ import { useRoute, useRouter } from "vue-router";
 import { FrappeUIProvider, Dialogs, setConfig, FeatherIcon } from "frappe-ui";
 import * as api from "@/api";
 import { useShellStore } from "@/stores/shell";
+import { confirmState } from "@/composables/useConfirm";
 import { useShortcuts } from "@/composables/useShortcuts";
 import { attachGlobalNotifier } from "@/notify/globalNotifier";
 import NotifyToaster from "@/notify/NotifyToaster.vue";
@@ -122,6 +130,7 @@ import "@/assets/settings.css";
 const route = useRoute();
 const router = useRouter();
 const store = useShellStore();
+const confirmOpen = computed(() => confirmState.value !== null);
 // The same shared socket ChatView injects (main.js provides it app-wide;
 // null under ?nosocket) — the global notifier listens on it for the whole
 // session, independent of which route is mounted.
