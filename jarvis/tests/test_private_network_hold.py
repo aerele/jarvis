@@ -169,6 +169,15 @@ class TestReserveHost(_Fresh):
 		self.assertNotEqual(out["message"], private_network._UNEXPECTED)
 		self.assertTrue(out["message"])
 
+	def test_a_half_empty_tenant_host_reads_as_no_address_either_way_round(self):
+		for host_ip, reach_url in (("203.0.113.9", ""), ("", "https://erp.example.com")):
+			raw = {"host_ip": host_ip, "reach_url": reach_url, "hold_until": None}
+			with self.subTest(raw=raw), patch.object(admin_client, "reserve_private_host", return_value=raw):
+				out = private_network.reserve_host()
+				self.assertFalse(out["ok"])
+				self.assertEqual(out["message"], private_network._NO_ADDRESS)
+				self.assertEqual(onboarding_contract.private_hold(), {})
+
 	def test_an_empty_answer_is_still_unexpected(self):
 		for raw in (
 			{},

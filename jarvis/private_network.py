@@ -232,6 +232,18 @@ def _reserve_refusal(err) -> dict:
 	return out
 
 
+def _is_addressless_tenant_host(raw) -> bool:
+	"""A tenant host admin has no complete public address for: ``hold_until`` null, both
+	address keys present as strings, and at least one of them empty (a legacy host with
+	neither, or one with a ``public_ip`` but no reach URL, or the reverse)."""
+	if not isinstance(raw, dict) or "hold_until" not in raw or raw["hold_until"] is not None:
+		return False
+	host_ip, reach_url = raw.get("host_ip"), raw.get("reach_url")
+	if not isinstance(host_ip, str) or not isinstance(reach_url, str):
+		return False
+	return not host_ip.strip() or not reach_url.strip()
+
+
 @frappe.whitelist(methods=["POST"])
 def reserve_host() -> dict:
 	"""The host admin holds for this customer: ``{ok, host_ip, reach_url, hold_until}``.
@@ -250,14 +262,7 @@ def reserve_host() -> dict:
 	hold = onboarding_contract.store_private_hold(raw)
 	if hold:
 		return {"ok": True, **hold}
-	if (
-		isinstance(raw, dict)
-		and raw.get("host_ip") == ""
-		and raw.get("reach_url") == ""
-		and "hold_until" in raw
-		and raw["hold_until"] is None
-	):
-		# A tenant host admin has no public address for (both keys present and empty).
+	if _is_addressless_tenant_host(raw):
 		message = _NO_ADDRESS
 	else:
 		message = _UNEXPECTED
