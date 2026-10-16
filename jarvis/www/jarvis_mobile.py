@@ -30,6 +30,9 @@ def get_context(context):
 	context.boot = {
 		"csrf_token": frappe.sessions.get_csrf_token(),
 		"site_name": str(frappe.local.site),
+		# The site's realtime port (site_config wins over common_site_config), the
+		# value Desk reads from frappe.boot. socket.js prefers it over the build-time one.
+		"socketio_port": frappe.conf.socketio_port,
 		"default_route": "/jarvis-mobile",
 		# Rendered on the Account screen without costing a request.
 		"frappe_user_id": frappe.session.user,

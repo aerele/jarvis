@@ -10,15 +10,24 @@ export default defineConfig({
 	plugins: [vue()],
 	resolve: {
 		// PWA modules tested here use this installation, including in frontend-only CI.
-		dedupe: ["vue", "vue-router", "frappe-ui"],
-		alias: {
-			"@": path.resolve(__dirname, "src"),
+		dedupe: ["vue", "vue-router", "frappe-ui", "socket.io-client"],
+		alias: [
+			// The bench config socket.js reads at build time (sites/common_site_config.json)
+			// does not exist in frontend-only CI, so tests read a fixture instead.
+			{
+				find: /^(\.\.\/)+sites\/common_site_config\.json$/,
+				replacement: path.resolve(__dirname, "tests/fixtures/common_site_config.json"),
+			},
+			{ find: "@", replacement: path.resolve(__dirname, "src") },
 			// The phone's components import the shared helpers as @shared (see
 			// pwa/vite.config.js); mapped the same way so a spec can mount them
 			// (src/components/PwaPendingCard.spec.js).
-			"@shared": path.resolve(__dirname, "src"),
-			"@jsshared": path.resolve(__dirname, "../jarvis/public/js/shared"),
-		},
+			{ find: "@shared", replacement: path.resolve(__dirname, "src") },
+			{
+				find: "@jsshared",
+				replacement: path.resolve(__dirname, "../jarvis/public/js/shared"),
+			},
+		],
 	},
 	test: {
 		environment: "jsdom",
