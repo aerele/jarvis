@@ -6,6 +6,46 @@ import { call } from "frappe-ui";
 import { firstServerMessage, messageText } from "./lib/errors.js";
 import { listPageArgs as _page } from "./api/listPageArgs";
 import { HISTORY_PAGE_SIZE } from "./lib/historyPaging.js";
+import { __ } from "./lib/i18n.js";
+
+// Binary GET: keep the SPA in place so refused exports can show an error toast.
+export async function downloadConversation(conversation, format) {
+	const query = new URLSearchParams({ conversation, format });
+	const response = await fetch(`/api/method/jarvis.chat.export.download_conversation?${query}`, {
+		method: "GET",
+		credentials: "same-origin",
+	});
+	if (!response.ok) {
+		let payload;
+		try {
+			payload = await response.json();
+		} catch {
+			// A proxy's HTML and raw exception bodies are never customer copy.
+		}
+		const message =
+			messageText(firstServerMessage(payload?._server_messages)) ||
+			__("Couldn't download this chat. Try again.");
+		throw Object.assign(new Error(message), { status: response.status });
+	}
+	const contentType = (response.headers.get("Content-Type") || "").split(";")[0].trim();
+	if (contentType !== (format === "pdf" ? "application/pdf" : "text/markdown")) {
+		throw new Error(__("Couldn't download this chat. Try again."));
+	}
+	const blob = await response.blob();
+	const disposition = response.headers.get("Content-Disposition") || "";
+	const filename = /filename="?([a-z0-9-]+\.(?:pdf|md))"?(?:;|$)/i.exec(disposition)?.[1];
+	const url = URL.createObjectURL(blob);
+	const anchor = document.createElement("a");
+	anchor.href = url;
+	anchor.download = filename || `jarvis-chat.${format === "pdf" ? "pdf" : "md"}`;
+	document.body.appendChild(anchor);
+	try {
+		anchor.click();
+	} finally {
+		anchor.remove();
+		setTimeout(() => URL.revokeObjectURL(url), 10000);
+	}
+}
 
 export const listConversations = ({ refresh = false } = {}) =>
 	call("jarvis.chat.api.list_conversations", refresh ? { refresh: 1 } : {});

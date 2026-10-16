@@ -18,6 +18,8 @@ import { reactive } from "vue";
 // the "routes the body through the sanitizer" test below.
 vi.mock("frappe-ui/editor-style.css", () => ({}));
 vi.mock("frappe-ui", () => ({
+	// FilePreview is mounted closed by the page; keep its dialog closed here too.
+	Dialog: { props: ["modelValue"], template: "<div v-if='modelValue'><slot/></div>" },
 	Badge: { name: "Badge", template: "<span/>" },
 	Button: {
 		// name so the refresh-on-close test below can pick the Resolve button
