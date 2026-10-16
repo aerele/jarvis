@@ -12,6 +12,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat.actions_api import get_doctype_form_meta, load_doc
+from jarvis.chat.api import _NON_EDIT_FIELDTYPES
 from jarvis.tests._transport_helpers import provision_legacy_site
 
 
@@ -1384,3 +1385,195 @@ class TestDraftComputed(FrappeTestCase):
 		frappe.db.set_value("Jarvis Conversation", self.conv.name, "owner", "Guest")
 		with self.assertRaises(frappe.PermissionError):
 			self._computed()
+
+
+class TestChildRowForm(FrappeTestCase):
+	"""A child row's full form on the card: every field Desk's row edit form shows,
+	laid out, while the grid keeps Desk's columns (the chat card used to show only
+	the in_list_view columns of a child table)."""
+
+	BREAKS = {"Section Break", "Column Break", "Tab Break"}
+
+	def _items(self):
+		return get_doctype_form_meta("Sales Order")["tables"]["items"]
+
+	def test_the_form_has_every_visible_field_in_form_order(self):
+		items = self._items()
+		data = [f["fieldname"] for f in items["form_fields"] if f["fieldtype"] not in self.BREAKS]
+		meta = frappe.get_meta("Sales Order Item")
+		expected = [
+			df.fieldname
+			for df in meta.fields
+			if df.fieldname
+			and not df.hidden
+			and df.fieldtype not in self.BREAKS
+			and df.fieldtype not in {"Table", "Table MultiSelect", "Password"}
+			and df.fieldtype not in _NON_EDIT_FIELDTYPES
+		]
+		self.assertEqual(data, expected)
+		self.assertIn("discount_percentage", data)  # not a grid column, now on the card
+		self.assertNotIn("discount_percentage", {c["fieldname"] for c in items["columns"]})
+		for c in items["columns"]:
+			self.assertIn(c["fieldname"], data)  # the grid is part of the form
+
+	def test_the_form_keeps_its_sections_with_their_labels(self):
+		breaks = [f for f in self._items()["form_fields"] if f["fieldtype"] == "Section Break"]
+		self.assertTrue(breaks)
+		labelled = {f["label"] for f in breaks if f["label"]}
+		meta_labels = {
+			df.label
+			for df in frappe.get_meta("Sales Order Item").fields
+			if df.fieldtype == "Section Break" and df.label and not df.hidden
+		}
+		self.assertTrue(labelled <= meta_labels)
+
+	def test_a_form_field_carries_its_rules(self):
+		f = next(x for x in self._items()["form_fields"] if x.get("fieldname") == "discount_percentage")
+		for key in ("depends_on", "mandatory_depends_on", "read_only_depends_on", "fieldtype", "label"):
+			self.assertIn(key, f)
+
+	def test_a_hidden_field_is_never_a_column_nor_in_the_form(self):
+		from copy import deepcopy
+		from unittest.mock import patch
+
+		real_get_meta = frappe.get_meta
+		meta = deepcopy(real_get_meta("Sales Order Item"))
+		qty = meta.get_field("qty")
+		qty.hidden, qty.in_list_view = 1, 1
+		with patch(
+			"frappe.get_meta",
+			side_effect=lambda dt, *a, **kw: meta
+			if dt == "Sales Order Item"
+			else real_get_meta(dt, *a, **kw),
+		):
+			items = self._items()
+		self.assertNotIn("qty", {c["fieldname"] for c in items["columns"]})
+		self.assertNotIn("qty", {f.get("fieldname") for f in items["form_fields"]})
+
+	def test_a_field_the_user_cannot_read_is_left_out(self):
+		from copy import deepcopy
+		from unittest.mock import patch
+
+		real_get_meta = frappe.get_meta
+		meta = deepcopy(real_get_meta("Sales Order Item"))
+		meta.get_field("discount_percentage").permlevel = 1
+		with (
+			patch(
+				"frappe.get_meta",
+				side_effect=lambda dt, *a, **kw: meta
+				if dt == "Sales Order Item"
+				else real_get_meta(dt, *a, **kw),
+			),
+			patch("jarvis.chat.actions_api._readable_permlevels", return_value={0}),
+		):
+			items = self._items()
+		self.assertNotIn("discount_percentage", {f.get("fieldname") for f in items["form_fields"]})
+
+	def _with_child_meta(self, change):
+		"""Sales Order's items with ``change(meta)`` applied to Sales Order Item."""
+		from copy import deepcopy
+		from unittest.mock import patch
+
+		real_get_meta = frappe.get_meta
+		meta = deepcopy(real_get_meta("Sales Order Item"))
+		change(meta)
+		with patch(
+			"frappe.get_meta",
+			side_effect=lambda dt, *a, **kw: meta
+			if dt == "Sales Order Item"
+			else real_get_meta(dt, *a, **kw),
+		):
+			return self._items()
+
+	def test_a_secret_field_is_never_in_the_form(self):
+		def make_secret(meta):
+			meta.get_field("discount_percentage").fieldtype = "Password"
+
+		items = self._with_child_meta(make_secret)
+		self.assertNotIn("discount_percentage", {f.get("fieldname") for f in items["form_fields"]})
+
+	def test_a_section_whose_fields_are_all_hidden_is_not_in_the_form(self):
+		def hide_a_section(meta):
+			fields = meta.fields
+			start = next(i for i, df in enumerate(fields) if df.fieldtype == "Section Break" and df.label)
+			self.section_label = fields[start].label
+			end = next(
+				(
+					i
+					for i in range(start + 1, len(fields))
+					if fields[i].fieldtype in ("Section Break", "Tab Break")
+				),
+				len(fields),
+			)
+			for df in fields[start + 1 : end]:
+				if df.fieldtype not in ("Column Break",):
+					df.hidden = 1
+
+		items = self._with_child_meta(hide_a_section)
+		labels = [f["label"] for f in items["form_fields"] if f["fieldtype"] == "Section Break"]
+		self.assertNotIn(self.section_label, labels)
+		kinds = [f["fieldtype"] for f in items["form_fields"]]
+		for i, k in enumerate(kinds):  # no break directly followed by another section, none at the end
+			if k in ("Section Break", "Tab Break"):
+				self.assertTrue(i + 1 < len(kinds) and kinds[i + 1] not in ("Section Break", "Tab Break"))
+
+	def test_the_users_own_grid_columns_are_the_columns(self):
+		from frappe.model.utils.user_settings import get_user_settings, update_user_settings
+
+		before = get_user_settings("Sales Order")
+		try:
+			# for_update=True replaces the cached settings with this JSON outright.
+			update_user_settings(
+				"Sales Order",
+				frappe.as_json(
+					{
+						"GridView": {
+							"Sales Order Item": [
+								{"fieldname": "warehouse"},
+								{"fieldname": "item_code"},
+								{"fieldname": "no_such_field"},
+							]
+						}
+					}
+				),
+				True,
+			)
+			cols = [c["fieldname"] for c in self._items()["columns"]]
+			self.assertEqual(cols, ["warehouse", "item_code"])
+		finally:
+			update_user_settings("Sales Order", before or "{}", True)
+
+	def test_empty_sections_and_dangling_columns_are_dropped(self):
+		from jarvis.chat.actions_api import _drop_empty_sections
+
+		S = lambda label="": {"fieldtype": "Section Break", "label": label, "fieldname": ""}  # noqa: E731
+		C = {"fieldtype": "Column Break", "label": "", "fieldname": ""}
+		F = lambda n: {"fieldtype": "Data", "fieldname": n}  # noqa: E731
+		out = _drop_empty_sections([F("a"), S("Empty"), C, S("Full"), F("b"), C, S("Tail"), C])
+		self.assertEqual(
+			[(x["fieldtype"], x.get("label") or x.get("fieldname")) for x in out],
+			[("Data", "a"), ("Section Break", "Full"), ("Data", "b")],
+		)
+
+	def test_load_doc_returns_every_form_field_of_a_saved_row(self):
+		c = frappe.get_doc(
+			{
+				"doctype": "Contact",
+				"first_name": "RowForm Test",
+				"email_ids": [{"email_id": "rowform@example.com", "is_primary": 1}],
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(lambda: frappe.delete_doc("Contact", c.name, force=True, ignore_permissions=True))
+		from unittest.mock import patch
+
+		# Only one grid column, so the row form certainly has fields beyond the grid.
+		with patch(
+			"jarvis.chat.actions_api._user_grid_columns", side_effect=lambda dt, p, visible: visible[:1]
+		):
+			spec = get_doctype_form_meta("Contact")["tables"]["email_ids"]
+			row = load_doc("Contact", c.name)["tables"]["email_ids"][0]
+		columns = {col["fieldname"] for col in spec["columns"]}
+		form = {f["fieldname"] for f in spec["form_fields"] if f["fieldtype"] not in self.BREAKS}
+		self.assertTrue(form - columns, "the test needs a form field outside the grid")
+		self.assertTrue(form <= set(row), form - set(row))
+		self.assertEqual(row["is_primary"], 1)

@@ -4156,129 +4156,90 @@
 										</tr>
 									</thead>
 									<tbody>
-										<tr v-for="(r, ri) in t.rows" :key="ri">
-											<td
-												v-for="c in t.columns"
-												:key="c.fieldname"
-												:class="{ 'jv-grid-ro': c.read_only }"
-											>
-												<span v-if="c.read_only">{{
-													r[c.fieldname]
-												}}</span>
-												<template v-else-if="c.fieldtype === 'Link'">
-													<input
-														class="jv-action-input"
-														v-model="r[c.fieldname]"
-														@input="
-															onDraftLink(
-																't:' +
-																	ti +
-																	':' +
-																	ri +
-																	':' +
-																	c.fieldname,
-																() => r[c.fieldname],
-																c.options,
-																$event
-															)
+										<template v-for="(r, ri) in t.rows" :key="ri">
+											<tr>
+												<td
+													v-for="c in t.columns"
+													:key="c.fieldname"
+													:class="{ 'jv-grid-ro': c.read_only }"
+												>
+													<DraftCell
+														:field="c"
+														:row="r"
+														:cell-key="
+															't:' +
+															ti +
+															':' +
+															ri +
+															':' +
+															c.fieldname
 														"
-														@focus="
-															onDraftLink(
-																't:' +
-																	ti +
-																	':' +
-																	ri +
-																	':' +
-																	c.fieldname,
-																() => r[c.fieldname],
-																c.options,
-																$event
-															)
-														"
-														@blur="closeDraftLink"
-														autocomplete="off"
-													/>
-													<DraftLinkMenu
-														v-if="
-															draftLink.open &&
-															draftLink.key ===
-																't:' +
-																	ti +
-																	':' +
-																	ri +
-																	':' +
-																	c.fieldname &&
-															draftLink.items.length
-														"
-														:anchor="draftLink.anchor"
-														:items="draftLink.items"
+														:read-only="!!c.read_only"
+														:label="c.label"
+														:draft-link="draftLink"
 														:palette="paletteVars"
-														@pick="
-															(it) =>
-																pickDraftLink((v) => {
-																	r[c.fieldname] = v;
-																}, it)
-														"
-														@close="draftLink.open = false"
+														@link-search="onDraftLink"
+														@link-blur="closeDraftLink"
+														@link-pick="pickDraftLink"
+														@link-close="draftLink.open = false"
 													/>
-												</template>
-												<input
-													v-else-if="
-														[
-															'Int',
-															'Float',
-															'Currency',
-															'Percent',
-														].includes(c.fieldtype)
-													"
-													type="number"
-													class="jv-action-input"
-													v-model="r[c.fieldname]"
-												/>
-												<input
-													v-else-if="c.fieldtype === 'Date'"
-													type="date"
-													class="jv-action-input"
-													v-model="r[c.fieldname]"
-												/>
-												<select
-													v-else-if="c.fieldtype === 'Select'"
-													class="jv-action-input jv-action-sel"
-													v-model="r[c.fieldname]"
-												>
-													<option
-														v-for="o in cellOptions(c, r[c.fieldname])"
-														:key="o"
-														:value="o"
+												</td>
+												<td class="jv-grid-x">
+													<button
+														v-if="t.formFields && t.formFields.length"
+														class="jv-grid-more"
+														:aria-expanded="
+															r.__open ? 'true' : 'false'
+														"
+														:aria-controls="
+															'jv-rowform-' + ti + '-' + ri
+														"
+														:title="
+															r.__open
+																? 'Hide other fields'
+																: 'Show all fields'
+														"
+														:aria-label="
+															(r.__open
+																? 'Hide other fields of row '
+																: 'Show all fields of row ') +
+															(ri + 1)
+														"
+														@click="r.__open = !r.__open"
 													>
-														{{ o }}
-													</option>
-												</select>
-												<select
-													v-else-if="c.fieldtype === 'Check'"
-													class="jv-action-input jv-action-sel"
-													v-model="r[c.fieldname]"
+														{{ r.__open ? "▾" : "▸" }}
+													</button>
+													<button
+														class="jv-grid-del"
+														@click="removeDraftRow(ti, ri)"
+														title="Remove row"
+														aria-label="Remove row"
+													>
+														✕
+													</button>
+												</td>
+											</tr>
+											<tr v-if="r.__open" class="jv-grid-formrow">
+												<td
+													:colspan="t.columns.length + 1"
+													:id="'jv-rowform-' + ti + '-' + ri"
 												>
-													<option value="1">Yes</option>
-													<option value="0">No</option>
-												</select>
-												<input
-													v-else
-													class="jv-action-input"
-													v-model="r[c.fieldname]"
-												/>
-											</td>
-											<td class="jv-grid-x">
-												<button
-													class="jv-grid-del"
-													@click="removeDraftRow(ti, ri)"
-													title="Remove row"
-													aria-label="Remove row"
-												>
-													✕
-												</button>
-											</td>
-										</tr>
+													<DraftRowForm
+														:table="t"
+														:row="r"
+														:parent="draftParentValues"
+														:table-index="ti"
+														:row-index="ri"
+														:draft-link="draftLink"
+														:palette="paletteVars"
+														@link-search="onDraftLink"
+														@link-blur="closeDraftLink"
+														@link-pick="pickDraftLink"
+														@link-close="draftLink.open = false"
+													/>
+												</td>
+											</tr>
+										</template>
 									</tbody>
 								</table>
 							</div>
@@ -4450,6 +4411,8 @@ import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import { Button, Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
+import DraftCell from "@/components/chat/DraftCell.vue";
+import DraftRowForm from "@/components/chat/DraftRowForm.vue";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { useConversationActivity } from "@/lib/useConversationActivity";
 import { reportToolsByAssistant } from "@/lib/reportScope";
@@ -4596,6 +4559,8 @@ import {
 	removedSavedRows,
 	rowKeyColumn,
 	toPanelRow,
+	allRowFields,
+	coerceOut,
 } from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { replyBarParts, stampDeltaTime, useClientStamp } from "@/lib/replyBar";
@@ -7420,6 +7385,15 @@ function _actField(meta, label) {
 // --- Record draft panel: the action JSON is the draft; edits are local; apply
 // posts to actions_api (no LLM round-trip). ---
 const draftPanel = ref(null);
+// The record's own values as Desk's `parent` holds them, for a child row's
+// depends_on rules in its full form (DraftRowForm).
+const draftParentValues = computed(() => {
+	const p = draftPanel.value;
+	if (!p) return {};
+	const doc = { ...p.linkContext, doctype: p.doctype, name: p.docName || "" };
+	for (const f of p.fields) doc[f.fieldname] = coerceOut(f);
+	return doc;
+});
 // Drafts the server turned into a gated confirmation card (sensitive
 // configuration): message name -> the note. Waiting, not saved, never re-applied.
 const parkedDrafts = ref(new Map());
@@ -7623,14 +7597,19 @@ async function buildDraftModel(a) {
 			}
 		}
 		const srcRows = proposedRows != null ? proposedRows : baseRows; // proposal REPLACES loaded rows
+		// Every field of the row form rides on each row (not just the grid's
+		// columns), so the row's full form shows its values and Apply sends edits.
+		const formFields = spec.form_fields || [];
+		const fieldsOfRow = allRowFields({ columns, formFields });
 		// Each row keeps its saved name (__name) so Apply edits THAT row (CR-3).
-		const rows = srcRows.map((r) => toPanelRow(columns, r));
-		if (!rows.length) rows.push(_blankRow(columns));
+		const rows = srcRows.map((r) => toPanelRow(fieldsOfRow, r));
+		if (!rows.length) rows.push(_blankRow(fieldsOfRow));
 		tables.push({
 			fieldname: tf,
 			label: spec.label,
 			child: spec.child_doctype,
 			columns,
+			formFields,
 			rows,
 			origJson: JSON.stringify(verb === "update" ? baseRows : null), // raw saved rows
 		});
@@ -7707,7 +7686,7 @@ function _blankRow(columns) {
 }
 function addDraftRow(ti) {
 	const t = draftPanel.value.tables[ti];
-	t.rows.push(_blankRow(t.columns));
+	t.rows.push(_blankRow(allRowFields(t)));
 }
 function removeDraftRow(ti, ri) {
 	draftPanel.value.tables[ti].rows.splice(ri, 1);
@@ -17344,6 +17323,31 @@ onUnmounted(() => {
 }
 .jv-grid-x {
 	width: 30px;
+	white-space: nowrap;
+}
+/* Opens a row's full form (DraftRowForm) under it. */
+.jv-grid-more {
+	background: none;
+	border: none;
+	color: var(--text-3);
+	cursor: pointer;
+	padding: 4px 6px;
+	border-radius: 6px;
+}
+.jv-grid-more:hover,
+.jv-grid-more[aria-expanded="true"] {
+	color: var(--cta);
+	background: var(--surface-1);
+}
+.jv-grid-more:focus-visible,
+.jv-grid-del:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 1px;
+}
+.jv-grid td.jv-grid-formrow,
+.jv-grid-formrow > td {
+	padding: 0;
+	min-width: 0;
 }
 .jv-grid-del {
 	background: none;

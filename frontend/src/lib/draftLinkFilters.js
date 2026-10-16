@@ -1,4 +1,4 @@
-import { coerceOut } from "./draftApply";
+import { allRowFields, coerceOut } from "./draftApply";
 
 export class DraftLinkFilterError extends Error {}
 
@@ -78,7 +78,8 @@ export function draftLinkSearch(model, key) {
 	} else {
 		const [, ti, ri, name] = key.split(":");
 		const table = model.tables[Number(ti)];
-		field = table?.columns.find((c) => c.fieldname === name);
+		// A grid cell or a field of the row form: both search with its meta.
+		field = table && allRowFields(table).find((c) => c.fieldname === name);
 		row = table?.rows[Number(ri)];
 		if (!row) throw unsupported();
 		row = {

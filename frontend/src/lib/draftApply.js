@@ -58,6 +58,21 @@ export function coerceOut(field) {
 	return field.value;
 }
 
+// Every field a row carries: the grid's columns, then the row form's other fields
+// (table.formFields, laid out by lib/rowForm.js). Without form fields (the PWA, an
+// older server) it is just the columns. Kept here because this file imports nothing.
+const BREAK_TYPES = new Set(["Section Break", "Column Break", "Tab Break"]);
+export function allRowFields(table) {
+	const out = [...(table.columns || [])];
+	const seen = new Set(out.map((c) => c.fieldname));
+	for (const f of table.formFields || []) {
+		if (BREAK_TYPES.has(f.fieldtype) || seen.has(f.fieldname)) continue;
+		seen.add(f.fieldname);
+		out.push(f);
+	}
+	return out;
+}
+
 function coerceCheck(v) {
 	return checkToYesNo(v) === "Yes" ? 1 : 0;
 }
@@ -73,7 +88,7 @@ export function coerceRow(table, row, verb) {
 	// A saved row's name rides along so update_doc edits THAT row and keeps every
 	// field the grid does not show (CR-3). A new row has none.
 	const out = row.__name ? { name: row.__name } : {};
-	for (const c of table.columns) {
+	for (const c of allRowFields(table)) {
 		if (c.read_only && verb !== "create") continue;
 		const v = row[c.fieldname];
 		if (v === "" || v == null) continue;
@@ -226,7 +241,7 @@ export function tableChanged(table, originalRows) {
 		.map((r) => coerceRow(table, r, "update"))
 		.filter((r) => Object.keys(r).length);
 	const before = (originalRows || []).map((r) =>
-		coerceRow(table, toPanelRow(table.columns, r), "update")
+		coerceRow(table, toPanelRow(allRowFields(table), r), "update")
 	);
 	return JSON.stringify(now) !== JSON.stringify(before);
 }
@@ -263,7 +278,7 @@ export function normDateVal(fieldtype, v) {
 export function tableRowsPayload(table, originalRows) {
 	const saved = new Map();
 	for (const r of originalRows || [])
-		if (r && r.name) saved.set(r.name, toPanelRow(table.columns, r));
+		if (r && r.name) saved.set(r.name, toPanelRow(allRowFields(table), r));
 	const out = [];
 	for (const row of table.rows) {
 		const before = row.__name ? saved.get(row.__name) : null;
@@ -273,7 +288,7 @@ export function tableRowsPayload(table, originalRows) {
 			continue;
 		}
 		const r = { name: row.__name };
-		for (const c of table.columns) {
+		for (const c of allRowFields(table)) {
 			if (c.read_only) continue;
 			const v = row[c.fieldname] == null ? "" : String(row[c.fieldname]);
 			if (v === before[c.fieldname]) continue;

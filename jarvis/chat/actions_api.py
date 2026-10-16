@@ -33,6 +33,8 @@ _TRIGGER_DOCTYPE = "Jarvis Trigger"
 # Child-grid columns can be any data-bearing fieldtype except nested tables
 # (no grid-in-grid in v1).
 _SKIP_CHILD_FIELDTYPES = _NON_EDIT_FIELDTYPES | {"Table", "Table MultiSelect"}
+# The breaks that shape a child row's form, as Desk's row edit form lays it out.
+_LAYOUT_FIELDTYPES = {"Section Break", "Column Break", "Tab Break"}
 
 
 def _field_dict(df, doctype=None, parent_doctype=None, parentfield=None) -> dict:
@@ -45,6 +47,10 @@ def _field_dict(df, doctype=None, parent_doctype=None, parentfield=None) -> dict
 		"read_only": int(df.read_only or 0),
 		"link_filters": df.get("link_filters") or "",
 		"link_query_filters": draft_link_query_filters(doctype or df.parent, df, parent_doctype, parentfield),
+		# Desk's form rules, which the card evaluates the same way on a child row.
+		"depends_on": df.get("depends_on") or "",
+		"mandatory_depends_on": df.get("mandatory_depends_on") or "",
+		"read_only_depends_on": df.get("read_only_depends_on") or "",
 	}
 
 
@@ -85,7 +91,11 @@ def _extra_child_columns(child_doctype: str, parent_doctype=None, parentfield=No
 
 def _grid_fields(child_doctype: str, parent_doctype=None) -> tuple[list, list]:
 	"""(the grid's columns, every other editable field) of a child doctype,
-	limited to the fields the user can read through ``parent_doctype``."""
+	limited to the fields the user can read through ``parent_doctype``.
+
+	The columns are what Desk's grid shows: the user's own column choice for this
+	table when they made one (GridView user settings), else the in_list_view
+	fields, else the first 4; a hidden field is never a column."""
 	meta = frappe.get_meta(child_doctype)
 	levels = _readable_permlevels(child_doctype, parent_doctype)
 	editable = [
@@ -93,8 +103,90 @@ def _grid_fields(child_doctype: str, parent_doctype=None) -> tuple[list, list]:
 		for df in meta.fields
 		if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES and _can_read_field(df, levels)
 	]
-	listed = [df for df in editable if df.in_list_view] or editable[:4]
+	visible = [df for df in editable if not df.hidden]
+	listed = (
+		_user_grid_columns(child_doctype, parent_doctype, visible)
+		or [df for df in visible if df.in_list_view]
+		or visible[:4]
+	)
 	return listed, [df for df in editable if df not in listed]
+
+
+def _user_grid_columns(child_doctype: str, parent_doctype, visible: list) -> list:
+	"""The columns the user picked for this table in Desk (the grid's column
+	settings, saved under the parent's GridView user settings), in their order,
+	limited to fields the card may show. Empty when they never picked any."""
+	if not parent_doctype:
+		return []
+	from frappe.model.utils.user_settings import get_user_settings
+
+	try:
+		saved = frappe.parse_json(get_user_settings(parent_doctype) or "{}") or {}
+		chosen = (saved.get("GridView") or {}).get(child_doctype) or []
+	except Exception:
+		return []
+	by_name = {df.fieldname: df for df in visible}
+	return [by_name[c["fieldname"]] for c in chosen if isinstance(c, dict) and c.get("fieldname") in by_name]
+
+
+def _child_form_fields(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
+	"""A child row's full form, as Desk's row edit form shows it: every field the
+	user can read that is not hidden, in form order, with the section, column and
+	tab breaks that lay it out (a break carries its label and depends_on). A
+	section left with no field is dropped. Fields the card cannot edit
+	(attachments, nested tables, layout-only HTML) and secrets are left out."""
+	meta = frappe.get_meta(child_doctype)
+	levels = _readable_permlevels(child_doctype, parent_doctype)
+	out: list[dict] = []
+	for df in meta.fields:
+		if df.hidden:
+			continue
+		if df.fieldtype in _LAYOUT_FIELDTYPES:
+			out.append(
+				{
+					"fieldname": df.fieldname or "",
+					"fieldtype": df.fieldtype,
+					"label": df.label or "",
+					"depends_on": df.get("depends_on") or "",
+				}
+			)
+			continue
+		if (
+			not df.fieldname
+			or df.fieldtype in _SKIP_CHILD_FIELDTYPES
+			or df.fieldtype == "Password"
+			or not _can_read_field(df, levels)
+		):
+			continue
+		out.append(_field_dict(df, child_doctype, parent_doctype, parentfield))
+	return _drop_empty_sections(out)
+
+
+def _drop_empty_sections(fields: list[dict]) -> list[dict]:
+	"""Remove the breaks that would frame nothing: a section or tab with no field
+	before the next section or tab, and a column break with no field after it."""
+	out: list[dict] = []
+	group: list[dict] = []
+
+	def flush():
+		if any(f["fieldtype"] not in _LAYOUT_FIELDTYPES for f in group):
+			out.extend(group)
+
+	for f in fields:
+		if f["fieldtype"] in ("Section Break", "Tab Break"):
+			flush()
+			group = [f]
+		else:
+			group.append(f)
+	flush()
+	# A column break directly followed by another break, or at the very end.
+	cleaned = []
+	for i, f in enumerate(out):
+		nxt = out[i + 1] if i + 1 < len(out) else None
+		if f["fieldtype"] == "Column Break" and (nxt is None or nxt["fieldtype"] in _LAYOUT_FIELDTYPES):
+			continue
+		cleaned.append(f)
+	return cleaned
 
 
 @frappe.whitelist()
@@ -123,6 +215,8 @@ def get_doctype_form_meta(doctype: str) -> dict:
 				"label": df.label or df.fieldname,
 				"columns": _child_columns(df.options, doctype, df.fieldname),
 				"extra_columns": _extra_child_columns(df.options, doctype, df.fieldname),
+				# The row edit form: every field Desk shows for a row, laid out.
+				"form_fields": _child_form_fields(df.options, doctype, df.fieldname),
 			}
 			continue
 		if df.fieldtype in _NON_EDIT_FIELDTYPES:
@@ -141,9 +235,9 @@ def get_doctype_form_meta(doctype: str) -> dict:
 @frappe.whitelist()
 @require_jarvis_user
 def load_doc(doctype: str, name: str) -> dict:
-	"""Current values of one document (main fields + child rows restricted to
-	the form-meta columns) so the panel can pre-fill an update draft. Gated on
-	WRITE permission - this endpoint exists to edit."""
+	"""Current values of one document (main fields + child rows with every field
+	of the row form) so the panel can pre-fill an update draft. Gated on WRITE
+	permission - this endpoint exists to edit."""
 	doctype = (doctype or "").strip()
 	name = (name or "").strip()
 	if not doctype or not name:
@@ -167,9 +261,16 @@ def load_doc(doctype: str, name: str) -> dict:
 		values[f["fieldname"]] = "" if v is None else v
 	tables = {}
 	for tf, spec in fm["tables"].items():
-		cols = [c["fieldname"] for c in spec["columns"]]
+		# Every field the row form shows, not just the grid's columns, so a saved
+		# value outside the grid is seen (and kept) rather than shown as blank.
+		cols = list(
+			dict.fromkeys(
+				[c["fieldname"] for c in spec["columns"]]
+				+ [f["fieldname"] for f in spec["form_fields"] if f["fieldtype"] not in _LAYOUT_FIELDTYPES]
+			)
+		)
 		# Each row carries its name so an update edits THAT row (update_doc merges
-		# by name); without it, fields the grid does not show would be lost.
+		# by name); without it, fields the card does not send would be lost.
 		tables[tf] = [{"name": row.name, **{c: row.get(c) for c in cols}} for row in (doc.get(tf) or [])]
 	return {
 		"ok": True,

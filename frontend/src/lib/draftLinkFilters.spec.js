@@ -115,6 +115,31 @@ describe("draft Link field filters", () => {
 		});
 		expect(JSON.stringify(model)).toBe(before);
 	});
+	it("searches a Link field shown only in the row's full form with its own filters", () => {
+		const model = {
+			doctype: "Custom Order",
+			docName: "",
+			linkContext: { company: "Company B" },
+			fields: [],
+			tables: [
+				{
+					fieldname: "lines",
+					child: "Custom Row",
+					columns: [],
+					formFields: [
+						{ fieldname: "", fieldtype: "Section Break", label: "Accounts" },
+						account({
+							link_filters: [["Account", "company", "=", "eval:parent.company"]],
+						}),
+					],
+					rows: [{ credit_to: "" }],
+				},
+			],
+		};
+		expect(draftLinkSearch(model, "t:0:0:credit_to").filters).toEqual([
+			["Account", "company", "=", "Company B"],
+		]);
+	});
 	it("leaves unconstrained and independently configured fields unconstrained", () => {
 		expect(resolveLinkFilters(account(), {})).toEqual([]);
 	});

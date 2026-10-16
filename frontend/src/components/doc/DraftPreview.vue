@@ -1,6 +1,8 @@
 <script setup>
 import { ref, computed, onBeforeUnmount } from "vue";
 import { isRequiredBlank, lineItemSummary } from "@/lib/actionSummary";
+import { coerceOut } from "@/lib/draftApply";
+import { rowExtraValues } from "@/lib/rowForm";
 
 const props = defineProps({
 	model: { type: Object, required: true },
@@ -28,12 +30,20 @@ const fields = computed(() =>
 );
 // Each table through the card's own summary, so a cell ERPNext calculated (#647)
 // reads the same here as on the card.
+// The record's values as a child row's rules read them (`parent`).
+const parentValues = computed(() => {
+	const doc = { ...(props.model.linkContext || {}), doctype: props.model.doctype };
+	for (const f of props.model.fields || []) doc[f.fieldname] = coerceOut(f);
+	return doc;
+});
 const tables = computed(() =>
 	(props.model.tables || [])
 		.filter((t) => (t.rows || []).length)
 		.map((t) => ({
 			...t,
 			view: lineItemSummary(t, (props.model.computed || {})[t.fieldname]),
+			// Per row, the filled fields the grid does not show (its full form).
+			extras: t.rows.map((r) => rowExtraValues(t, r, parentValues.value)),
 		}))
 );
 
@@ -190,6 +200,20 @@ onBeforeUnmount(() => {
 								</tbody>
 							</table>
 						</div>
+						<template v-for="(extra, ri) in t.extras" :key="'x' + ri">
+							<details v-if="extra.length" class="dp-rowmore">
+								<summary>
+									Row {{ ri + 1 }}: {{ extra.length }} more
+									{{ extra.length === 1 ? "field" : "fields" }}
+								</summary>
+								<dl class="dp-rowmore-list">
+									<template v-for="x in extra" :key="x.label">
+										<dt>{{ x.label }}</dt>
+										<dd>{{ x.value }}</dd>
+									</template>
+								</dl>
+							</details>
+						</template>
 						<div v-if="t.view.computedLabels.length" class="dp-computed-note">
 							{{ t.view.computedLabels.join(", ") }}: calculated by ERPNext, saved
 							when you confirm.
@@ -410,6 +434,36 @@ onBeforeUnmount(() => {
 .dp-grid td.dp-computed {
 	color: var(--text-2);
 	font-variant-numeric: tabular-nums;
+}
+/* A row's filled fields outside the grid (its full form). */
+.dp-rowmore {
+	margin-top: 6px;
+	font-size: 12.5px;
+	color: var(--text-2);
+}
+.dp-rowmore summary {
+	cursor: pointer;
+	color: var(--text-3);
+	padding: 2px 0;
+}
+.dp-rowmore summary:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 2px;
+	border-radius: 4px;
+}
+.dp-rowmore-list {
+	display: grid;
+	grid-template-columns: minmax(100px, max-content) minmax(0, 1fr);
+	gap: 4px 12px;
+	margin: 6px 0 0 14px;
+}
+.dp-rowmore-list dt {
+	color: var(--text-3);
+}
+.dp-rowmore-list dd {
+	margin: 0;
+	color: var(--text);
+	overflow-wrap: anywhere;
 }
 .dp-computed-note {
 	padding: 6px 0 0;

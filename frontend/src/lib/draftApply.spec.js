@@ -17,6 +17,7 @@ import {
 	tableChanged,
 	tableRowsPayload,
 	toPanelRow,
+	allRowFields,
 } from "./draftApply";
 
 describe("isFieldWritable", () => {
@@ -443,5 +444,89 @@ describe("alignComputedRows (#647)", () => {
 	it("gives up when ERPNext returns a different number of rows", () => {
 		expect(alignComputedRows(table, [{ amount: 10 }])).toBeNull();
 		expect(alignComputedRows(table, undefined)).toBeNull();
+	});
+});
+
+describe("row form fields: a row carries and saves every field of its form", () => {
+	const col = (fieldname, fieldtype = "Data", extra = {}) => ({
+		fieldname,
+		label: fieldname,
+		fieldtype,
+		options: "",
+		reqd: 0,
+		read_only: 0,
+		...extra,
+	});
+	const table = {
+		fieldname: "items",
+		columns: [col("item_code", "Link"), col("qty", "Float")],
+		formFields: [
+			col("item_code", "Link"),
+			col("qty", "Float"),
+			{ fieldname: "", fieldtype: "Section Break", label: "More" },
+			col("discount_percentage", "Percent"),
+			col("is_free_item", "Check"),
+			col("amount", "Currency", { read_only: 1 }),
+		],
+	};
+
+	it("allRowFields: columns, then the form's other fields, breaks and repeats left out", () => {
+		expect(allRowFields(table).map((f) => f.fieldname)).toEqual([
+			"item_code",
+			"qty",
+			"discount_percentage",
+			"is_free_item",
+			"amount",
+		]);
+		expect(allRowFields({ columns: [col("a")] }).map((f) => f.fieldname)).toEqual(["a"]);
+	});
+
+	it("a create sends a field filled in the row form, typed by its meta", () => {
+		const row = {
+			item_code: "I",
+			qty: "2",
+			discount_percentage: "10",
+			is_free_item: "1",
+			amount: "",
+		};
+		expect(coerceRow(table, row, "create")).toEqual({
+			item_code: "I",
+			qty: 2,
+			discount_percentage: 10,
+			is_free_item: 1,
+		});
+	});
+
+	it("an update sends only a changed row-form field of a saved row, never a read-only one", () => {
+		const saved = [
+			{
+				name: "r1",
+				item_code: "I",
+				qty: 2,
+				discount_percentage: 0,
+				is_free_item: 0,
+				amount: 200,
+			},
+		];
+		const t = { ...table, rows: [toPanelRow(allRowFields(table), saved[0])] };
+		expect(tableChanged(t, saved)).toBe(false);
+		t.rows[0].discount_percentage = "15";
+		t.rows[0].amount = "999";
+		expect(tableChanged(t, saved)).toBe(true);
+		expect(tableRowsPayload(t, saved)).toEqual([{ name: "r1", discount_percentage: 15 }]);
+	});
+
+	it("toPanelRow keeps a saved value outside the grid, so it is not shown blank", () => {
+		const r = toPanelRow(allRowFields(table), {
+			name: "r1",
+			item_code: "I",
+			discount_percentage: 5,
+		});
+		expect(r).toMatchObject({ __name: "r1", discount_percentage: "5" });
+	});
+
+	it("the panel-only open flag on a row is never sent", () => {
+		const row = { item_code: "I", qty: "1", __open: true };
+		expect(coerceRow(table, row, "create")).toEqual({ item_code: "I", qty: 1 });
 	});
 });
