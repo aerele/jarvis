@@ -3148,18 +3148,19 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	}
 
 
-def _stamp_file_box_draft(conv: str, data) -> None:
+def _stamp_file_box_draft(conv: str, data) -> bool:
 	"""Record a File Box run's created draft (a SUBMITTABLE doctype) on its
-	conversation: the first draft is the row's result, later ones only count."""
+	conversation: the first draft is the row's result, later ones only count.
+	True when ``data`` was such a draft (and so was stamped)."""
 	doctype = data.get("doctype") if isinstance(data, dict) else None
 	name = data.get("name") if isinstance(data, dict) else None
 	if not (doctype and name):
-		return
+		return False
 	try:
 		if not frappe.get_meta(doctype).is_submittable:
-			return
+			return False
 	except frappe.DoesNotExistError:
-		return
+		return False
 	frappe.db.sql(
 		"""UPDATE `tabJarvis Conversation`
 		SET filebox_result_doctype = IF(COALESCE(filebox_result_name, '') = '', %(dt)s, filebox_result_doctype),
@@ -3168,6 +3169,7 @@ def _stamp_file_box_draft(conv: str, data) -> None:
 		WHERE name = %(conv)s""",
 		{"dt": doctype, "name": name, "conv": conv},
 	)
+	return True
 
 
 def _single_flight_error() -> dict:
