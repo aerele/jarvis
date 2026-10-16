@@ -18,11 +18,7 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
-<<<<<<< HEAD
-  "digest": "sha256:6cfd4726ef8fde752905f272471fff5ea228ac06ae3f90ed40c38ea7fc546a08",
-=======
-  "digest": "sha256:b3bb33e005d15d41b7d10589c8e0627c5f01ad489a33cd097115749482b888ab",
->>>>>>> e160975 (feat(chat): schedule_run, set work to run once later from chat)
+  "digest": "sha256:cd45b92262c187acf6808c55d6f1841c4ee06b611c2117147d3b236a09295574",
   "tools": [
     "add_comment",
     "add_tag",
