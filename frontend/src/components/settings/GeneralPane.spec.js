@@ -72,6 +72,9 @@ vi.mock("@/composables/useConfirm", () => ({
 // Every network call the pane makes on mount. getUsage / getMySettings /
 // workspaceResetState are best-effort in the component and irrelevant here, so
 // they resolve empty; the two connection calls are what each test drives.
+vi.mock("@/components/JvSpinner.vue", () => ({
+	default: { name: "JvSpinner", template: `<span class="stub-spinner"/>` },
+}));
 vi.mock("@/api", () => ({
 	getUsage: vi.fn(() => Promise.resolve(null)),
 	getMySettings: vi.fn(() => Promise.resolve({ ok: false })),
@@ -386,30 +389,62 @@ describe("GeneralPane, Context section", () => {
 });
 
 describe("GeneralPane, first load (jarvis-admin-v2#641)", () => {
-	it("shows Loading, not the Auto/provider placeholder, until the connection answers", async () => {
+	it("shows one spinner, not Loading text or the Auto/provider rows, until the connection answers", async () => {
 		api.getLlmConnectionStatus.mockImplementation(PENDING);
 		const w = await mountAs({ admin: true });
-		expect(w.text()).toContain("Loading");
+		expect(w.findAll(".stub-spinner")).toHaveLength(1);
+		expect(w.text()).not.toContain("Loading");
 		expect(w.text()).not.toContain("Auto");
 		expect(w.text()).not.toContain("Provider");
 	});
 
-	it("shows the real rows once it answers", async () => {
+	it("waits for every first fetch, not just the connection", async () => {
+		api.getLlmConnectionStatus.mockImplementation(() =>
+			Promise.resolve({ pool_mode: true, model_count: 2, health: "ok" })
+		);
+		api.getUsage.mockImplementation(PENDING);
+		const w = await mountAs({ admin: true });
+		expect(w.find(".stub-spinner").exists()).toBe(true);
+	});
+
+	it("shows the real rows, and no spinner, once everything answers", async () => {
 		api.getLlmConnectionStatus.mockImplementation(() =>
 			Promise.resolve({ pool_mode: true, model_count: 2, health: "ok" })
 		);
 		const w = await mountAs({ admin: true });
+		expect(w.find(".stub-spinner").exists()).toBe(false);
 		expect(w.text()).not.toContain("Loading");
 		expect(w.text()).toContain("2 models");
 	});
 
-	it("shows the error line, not the placeholder rows, when the first load fails", async () => {
+	it("shows the error line, not a spinner or placeholder rows, when the first load fails", async () => {
 		api.getLlmConnectionStatus.mockImplementation(() => Promise.reject(new Error("x")));
 		const w = await mountAs({ admin: true });
+		expect(w.find(".stub-spinner").exists()).toBe(false);
 		expect(w.text()).toContain("Connection status is unavailable");
 		expect(w.text()).not.toContain("Loading");
 		expect(w.text()).not.toContain("Auto");
 		expect(w.text()).not.toContain("Provider");
+	});
+
+	it("shows the pane after 12 s even if a call stalls, with a small spinner on Connection", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			api.getLlmConnectionStatus.mockImplementation(PENDING);
+			const w = await mountAs({ admin: true });
+			expect(w.find('[style*="display: none"]').exists()).toBe(true);
+			expect(w.findAll(".stub-spinner")).toHaveLength(1);
+
+			await vi.advanceTimersByTimeAsync(12100);
+
+			// The pane-wide spinner is gone and the body shows; Connection, still
+			// waiting on its call, keeps a spinner of its own.
+			expect(w.find('[style*="display: none"]').exists()).toBe(false);
+			expect(w.findAll(".stub-spinner")).toHaveLength(1);
+			expect(w.text()).toContain("Danger zone");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("starts its fetches together instead of one after another", async () => {

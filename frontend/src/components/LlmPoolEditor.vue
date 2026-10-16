@@ -23,7 +23,7 @@
 			<button type="button" class="jv-mon-retry" @click="load">Retry</button>
 		</div>
 		<p
-			v-if="catalogState === 'loading'"
+			v-if="catalogState === 'loading' && (singleMode || loaded)"
 			class="text-p-sm text-ink-gray-5"
 			style="margin: 0 0 12px"
 		>
@@ -148,7 +148,10 @@
 	           add panel is open: that panel IS the next step, so a second "Add a
 	           model" trigger above it would compete with it, not help (mirrors the
 	           end-aligned button's own !panel.open guard). -->
-			<div v-if="!rows.length && !showDirectRow && !panel.open" class="jv-flist-empty">
+			<div
+				v-if="loaded && poolLoaded && !rows.length && !showDirectRow && !panel.open"
+				class="jv-flist-empty"
+			>
 				<!-- 'failed' is deliberately excluded here: the savebar below owns that
 	             status (it is the one place with a Resync button), so painting it a
 	             second time in this box - with no way to retry from it - would be the
@@ -2531,13 +2534,27 @@ const modelCatalog = ref({
 // catalogReady) instead of guessing an id.
 const catalogState = ref("loading");
 const catalogReady = computed(() => catalogState.value === "ready");
+// False until the FIRST load() settles (success or failure), then true for good.
+// Until then rows is [] only because nothing has answered yet, so the empty state
+// would be a false "No models yet". AiModelsPane reads this through defineExpose
+// to hold one spinner over the whole first load.
+const loaded = ref(false);
+// True once the pool itself has been read. Until then an empty list means "not
+// known yet", not "no models": the empty box and its Add button would invite a
+// save over a pool that is really there.
+const poolLoaded = ref(false);
+// How long a load() lets the extra fetches (catalog, sync, presets, captures) hold
+// the spinner. A late one still applies itself when it lands.
+const LOAD_WAIT_MS = 12000;
 // Only work that would have to guess a model id waits for the catalog. A row that
 // already names its model (re-authorizing a saved account) never does.
 function needsCatalog(row) {
 	return !catalogReady.value && !((row && row.model) || "").trim();
 }
 async function loadModelCatalog(retry = false) {
-	catalogState.value = "loading";
+	// A refetch over a catalog we already have (every reseed after a save) swaps it
+	// in place; flipping to "loading" here faded every Add button for a moment.
+	if (retry || !catalogReady.value) catalogState.value = "loading";
 	try {
 		const res = await api.getModelCatalogUi(retry);
 		if (res) modelCatalog.value = res;
@@ -5017,102 +5034,134 @@ async function rehydratePendingCaptures() {
 async function load(opts = {}) {
 	const carry = (opts && opts.carry) || null;
 	err.value = "";
-	try {
-		cfg.value = (await api.getLlmConfig()) || cfg.value;
-		rows.value = carry ? [...seedRows(cfg.value), carry] : seedRows(cfg.value);
-		selectedPreset.value = cfg.value.preset || "";
-		keysByVendor.value = {};
-		// Open on the tab that matches what's stored (mirrors seedLlmSetupFromConfig).
-		if (selectedPreset.value) llmMode.value = "preset";
-		else if (
-			rows.value.length >= 2 ||
-			rows.value.some((r) => r.credentialType === "subscription")
-		)
-			llmMode.value = "custom";
-		else {
-			llmMode.value = "quick";
-			// Deliberately no blank placeholder row here. For an EMPTY pool - no preset,
-			// no rows, which is exactly what a disconnect leaves - this branch is the one
-			// that runs, so this was the line that put a placeholder back no matter which
-			// editor came after it. Onboarding still gets its row from the singleMode
-			// branch immediately below, which is the only place that actually needs one
-			// (its whole UI is rows[0]); the settings list wants its real empty state.
-		}
-		// Onboarding is quick-only (singleMode): the editor shows a single editable
-		// row (editorRows renders rows[0]) but we KEEP any seeded tail rows so a
-		// returning customer's existing failover pool round-trips through save()
-		// instead of being silently dropped. Only the preset (which quick can't
-		// represent) is cleared.
-		if (singleMode.value) {
-			llmMode.value = props.modes[0] || "quick";
-			selectedPreset.value = "";
-			if (!rows.value.length) rows.value = [newRow()];
-			// Onboarding default = Chat subscription (the common path). Only flip a
-			// pristine row so a returning customer's saved API-key setup is preserved.
-			const r0 = rows.value[0];
-			if (
-				r0 &&
-				r0.credentialType === "api_key" &&
-				!(r0.model || "").trim() &&
-				!(r0.apiKey || "").trim() &&
-				!r0.hasKey &&
-				!(r0.accounts && r0.accounts.length)
-			) {
-				setCredType(r0, "subscription");
-			}
-		} else {
-			// Settings (!singleMode) editor: always the unified failover-list view -
-			// Quick/Preset tabs are gone, "From a preset" now lives inside the
-			// config-section add flow (seedFromPreset/selectPreset), so llmMode never
-			// needs to be "preset" or "quick" here.
-			llmMode.value = "custom";
-			selectedPreset.value = "";
-			// No blank placeholder row here, deliberately. Onboarding (above) needs one
-			// because its whole UI IS rows[0], but this list renders an explicit empty
-			// state ("No models yet. Add one below.") plus an always-present "Add a
-			// model" button. Seeding a blank row instead meant an empty pool - the state
-			// a disconnect leaves behind - showed a half-rendered row numbered "1" with
-			// no provider and no model, which reads as "something is still connected".
-		}
-		// Baseline for the unsaved-changes notice - the pool as just loaded is clean.
-		// The carried row is deliberately NOT in the baseline: it is unsaved work, and
-		// it should read as unsaved here exactly as it does the moment "+ Add a model"
-		// appends it.
-		savedSnapshot.value = poolSnapshot(
-			carry ? rows.value.filter((r) => r !== carry) : rows.value
-		);
-	} catch (e) {
-		err.value = _err(e);
-	}
-	// Re-attach any still-active server-held OAuth capture (plan-05 D2 / P0-04,
-	// P1-05): a reload after a sign-in - and the error-banner Retry, which re-runs
-	// load() - then resumes the SAME capture without a second sign-in. Runs after the
-	// clean baseline above so a rehydrated capture reads as the unsaved work it is.
-	await rehydratePendingCaptures();
+	// None of these fetches needs another's answer, so start them all now instead
+	// of one after another (six round trips in a row is what made the settings
+	// pane crawl on a remote site). Each extra applies its own answer whenever it
+	// lands; the only order is rows first, then the catalog fill and the capture
+	// rehydrate, which both read rows. Each one starts through .then() so even a
+	// synchronous throw stays a caught, non-fatal failure, as the old one-by-one
+	// try blocks treated it.
+	let waitTimer;
+	const deadline = new Promise((resolve) => {
+		waitTimer = setTimeout(resolve, LOAD_WAIT_MS);
+	});
+	const catalogDone = loadModelCatalog();
 	// A sync may already be in flight when the editor mounts (page reload
 	// mid-provisioning, wizard resume via reason llm_pool_provisioning): start
 	// the poller for a pending one - polling only from save() left a resumed
 	// session staring at a permanent "Syncing…" banner that never picked up
 	// the background job's ok/failed flip.
-	try {
-		sync.value = (await api.getLlmSyncStatus()) || sync.value;
-		if (sync.value && sync.value.pending) startPolling();
-	} catch (e) {
-		/* non-fatal */
-	}
+	const syncDone = Promise.resolve()
+		.then(() => api.getLlmSyncStatus())
+		.then((answer) => {
+			sync.value = answer || sync.value;
+			if (sync.value && sync.value.pending) startPolling();
+		})
+		.catch(() => {
+			/* non-fatal */
+		});
 	// Onboarding (singleMode) never renders the preset picker (modes=['quick']
-	// hides the "From a preset" tab, which is disabled/"Soon" anyway) and
-	// nothing in the singleMode branch reads `catalog`, so skip the fetch
-	// there. The Account/Settings editor (!singleMode) still loads it for
-	// resilient-by-default backups (expandApiKeyBackups) and the preset tab.
-	if (!singleMode.value) {
+	// hides the "From a preset" tab) and nothing in the singleMode branch reads
+	// `catalog`, so skip the fetch there. The Account/Settings editor still loads it
+	// for resilient-by-default backups (expandApiKeyBackups) and the preset tab.
+	const presetsDone = singleMode.value
+		? Promise.resolve()
+		: Promise.resolve()
+				.then(() => api.getPresetCatalog())
+				.then((presets) => {
+					catalog.value = presets || [];
+				})
+				.catch(() => {
+					/* presets are optional here: the backend serves its snapshot or [] */
+				});
+	try {
 		try {
-			catalog.value = (await api.getPresetCatalog()) || [];
+			cfg.value = (await api.getLlmConfig()) || cfg.value;
+			rows.value = carry ? [...seedRows(cfg.value), carry] : seedRows(cfg.value);
+			selectedPreset.value = cfg.value.preset || "";
+			keysByVendor.value = {};
+			// Open on the tab that matches what's stored (mirrors seedLlmSetupFromConfig).
+			if (selectedPreset.value) llmMode.value = "preset";
+			else if (
+				rows.value.length >= 2 ||
+				rows.value.some((r) => r.credentialType === "subscription")
+			)
+				llmMode.value = "custom";
+			else {
+				llmMode.value = "quick";
+				// Deliberately no blank placeholder row here. For an EMPTY pool - no preset,
+				// no rows, which is exactly what a disconnect leaves - this branch is the one
+				// that runs, so this was the line that put a placeholder back no matter which
+				// editor came after it. Onboarding still gets its row from the singleMode
+				// branch immediately below, which is the only place that actually needs one
+				// (its whole UI is rows[0]); the settings list wants its real empty state.
+			}
+			// Onboarding is quick-only (singleMode): the editor shows a single editable
+			// row (editorRows renders rows[0]) but we KEEP any seeded tail rows so a
+			// returning customer's existing failover pool round-trips through save()
+			// instead of being silently dropped. Only the preset (which quick can't
+			// represent) is cleared.
+			if (singleMode.value) {
+				llmMode.value = props.modes[0] || "quick";
+				selectedPreset.value = "";
+				if (!rows.value.length) rows.value = [newRow()];
+				// Onboarding default = Chat subscription (the common path). Only flip a
+				// pristine row so a returning customer's saved API-key setup is preserved.
+				const r0 = rows.value[0];
+				if (
+					r0 &&
+					r0.credentialType === "api_key" &&
+					!(r0.model || "").trim() &&
+					!(r0.apiKey || "").trim() &&
+					!r0.hasKey &&
+					!(r0.accounts && r0.accounts.length)
+				) {
+					setCredType(r0, "subscription");
+				}
+			} else {
+				// Settings (!singleMode) editor: always the unified failover-list view -
+				// Quick/Preset tabs are gone, "From a preset" now lives inside the
+				// config-section add flow (seedFromPreset/selectPreset), so llmMode never
+				// needs to be "preset" or "quick" here.
+				llmMode.value = "custom";
+				selectedPreset.value = "";
+				// No blank placeholder row here, deliberately. Onboarding (above) needs one
+				// because its whole UI IS rows[0], but this list renders an explicit empty
+				// state ("No models yet. Add one below.") plus an always-present "Add a
+				// model" button. Seeding a blank row instead meant an empty pool - the state
+				// a disconnect leaves behind - showed a half-rendered row numbered "1" with
+				// no provider and no model, which reads as "something is still connected".
+			}
+			// Baseline for the unsaved-changes notice - the pool as just loaded is clean.
+			// The carried row is deliberately NOT in the baseline: it is unsaved work, and
+			// it should read as unsaved here exactly as it does the moment "+ Add a model"
+			// appends it.
+			savedSnapshot.value = poolSnapshot(
+				carry ? rows.value.filter((r) => r !== carry) : rows.value
+			);
+			poolLoaded.value = true;
 		} catch (e) {
-			/* presets are optional here: the backend serves its snapshot or [] */
+			err.value = _err(e);
 		}
+		// The catalog may land before or after the rows: fill blank models once both
+		// are in. Saved rows always name a model, so they are never touched.
+		const filled = catalogDone.then(() => {
+			if (catalogReady.value) fillBlankModels();
+		});
+		// Re-attach any still-active server-held OAuth capture (plan-05 D2 / P0-04,
+		// P1-05): a reload after a sign-in - and the error-banner Retry, which re-runs
+		// load() - then resumes the SAME capture without a second sign-in. Needs the
+		// rows above, and runs after their clean baseline so a rehydrated capture
+		// reads as the unsaved work it is.
+		const rehydrated = rehydratePendingCaptures();
+		// Draw once everything is in, but never let the extras hold the spinner past
+		// LOAD_WAIT_MS. The pool read above is not capped: drawing without it would
+		// show an empty pool that a save could write over.
+		await Promise.race([Promise.all([filled, rehydrated, syncDone, presetsDone]), deadline]);
+	} finally {
+		clearTimeout(waitTimer);
+		loaded.value = true;
 	}
-	await loadModelCatalog();
 }
 
 // Stable string of the savable pool + preset - the cheap key the dirty-notice
@@ -5608,6 +5657,7 @@ onBeforeUnmount(() => {
 defineExpose({
 	save,
 	busy,
+	loaded,
 	canStart: singleModeCanStart,
 	startBlockedReason,
 	subscriptionTesting: computed(() => subTest.value.testing),

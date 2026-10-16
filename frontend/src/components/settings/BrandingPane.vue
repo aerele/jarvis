@@ -7,7 +7,7 @@
 		description="Your assistant's name, logo and favicon."
 		:error="error"
 	>
-		<div v-if="loading" class="text-p-sm text-ink-gray-6">Loading…</div>
+		<div v-if="loading" class="grid place-items-center py-10"><JvSpinner /></div>
 		<template v-else>
 			<FormControl
 				type="text"
@@ -141,6 +141,7 @@
 import { ref, computed, onMounted } from "vue";
 import { Button, FormControl, toast } from "frappe-ui";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import * as api from "@/api";
 import { applyBranding } from "@/branding";
 
