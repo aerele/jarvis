@@ -109,6 +109,11 @@ export function createPaymentFlow(deps) {
 		// recovery). Both default to no-ops; NEITHER touches the reducer.
 		onBillingSaved = () => {},
 		onServerBilling = () => {},
+		// Private network: true while the connection test has not passed. navigateToPay is the
+		// ONE place the customer leaves for checkout (the verify click, the first signup, the
+		// retry and the recovery card's RESUME all end there), so the hold lives here and not on
+		// a screen: a screen can be walked around, "I've confirmed my email" cannot.
+		holdCheckout = () => false,
 	} = deps;
 
 	const state = ref(initialState());
@@ -261,6 +266,13 @@ export function createPaymentFlow(deps) {
 	// is not navigable (no attested token), nothing happens and the caller's state
 	// renders as it stands (an honest hold, never a fallback sheet).
 	function navigateToPay() {
+		if (holdCheckout()) {
+			// Release the busy flag the caller took, as the not-navigable branch below does, so
+			// the card the customer is left on is usable. The machine stays navigable: the
+			// screen releases the hold and calls this again.
+			if (state.value.busy !== null) state.value = { ...state.value, busy: null };
+			return false;
+		}
 		if (!canNavigateToPay(state.value)) {
 			// Not navigable: release any busy flag the caller took so the honest-hold
 			// card the customer is left on is usable.
