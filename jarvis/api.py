@@ -1174,6 +1174,8 @@ _WRITE_TOOLS = frozenset(
 		"save_dashboard",
 		"create_custom_skill",
 		"update_wiki",
+		# A one-time macro: work the user asked to run later, as them.
+		"schedule_run",
 		# Audited but NOT gated (see _GATED_WRITES comment below):
 		# download_pdf/export_excel both insert a private, unattached File doc
 		# - real DB writes that need an audit trail, not a
@@ -1270,6 +1272,8 @@ _GATED_WRITES = frozenset(
 		"attach_to_doc",
 		"unshare_doc",
 		"unassign_from",
+		# Sets work to run later, unattended, as the user (a one-time macro).
+		"schedule_run",
 	}
 )
 # #493: the agent-facing wiki surface, refused wholesale when the operator has
@@ -1346,6 +1350,9 @@ _BRAKE = frozenset(
 		"amend_doc",
 		"create_custom_skill",
 		"call_connector",
+		# Scheduling work to run later is the user's call every time: an armed macro
+		# or an approved skill never sets up more unattended runs on its own.
+		"schedule_run",
 	}
 )
 # The unified COVERED set (design §3 A4): every gated write that is NOT a brake
@@ -1918,6 +1925,8 @@ def _describe_call(tool: str, args: dict) -> str:
 		"slug",
 		"title",
 		"scope",
+		"run_at",
+		"macro",
 	):
 		val = a.get(key)
 		if val:

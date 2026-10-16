@@ -232,9 +232,20 @@ class TestArmedSkipPartition(FrappeTestCase):
 		# always park. The macro and skill modes now share ONE brake, so
 		# create_custom_skill NO LONGER skips inside an armed macro - a deliberate
 		# behaviour change from the pre-unification macro set that covered it.
+		# schedule_run (setting up an unattended run for later) is the user's call
+		# every time, so it is in the brake as well.
 		self.assertEqual(
 			_ARMED_SKIP_NEVER,
-			frozenset({"cancel_doc", "delete_doc", "amend_doc", "create_custom_skill", "call_connector"}),
+			frozenset(
+				{
+					"cancel_doc",
+					"delete_doc",
+					"amend_doc",
+					"create_custom_skill",
+					"call_connector",
+					"schedule_run",
+				}
+			),
 		)
 
 	def test_run_method_is_covered(self):

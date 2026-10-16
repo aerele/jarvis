@@ -195,11 +195,15 @@ def admin_list_macros(
 		elif on_hold:
 			conditions.append("1=0")  # before the migrate nothing is held
 
+	from jarvis.chat.macro_scheduler import once_ready
+
 	where = " AND ".join(conditions)
 	order = list_filters.order_by(sort_field, sort_dir, _SORTABLE, "macro_name", "asc", prefix="m.")
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` m WHERE {where}", params)[0][0]
 	rows = list_filters.bounded_sql(
-		f"""SELECT {_LIST_COLUMNS}{", m.admin_hold, m.admin_hold_reason" if held_column else ""}
+		f"""SELECT {_LIST_COLUMNS}{", m.admin_hold, m.admin_hold_reason" if held_column else ""}{
+			", m.schedule_date" if once_ready() else ""
+		}
 		FROM `tabJarvis Macro` m
 		WHERE {where}
 		ORDER BY {order}
@@ -226,6 +230,8 @@ def admin_list_macros(
 		# Time renders as a timedelta over raw SQL; stringify for a stable payload.
 		if r.get("schedule_time") is not None:
 			r["schedule_time"] = str(r["schedule_time"])
+		if r.get("schedule_date") is not None:
+			r["schedule_date"] = str(r["schedule_date"])
 
 	return {
 		"rows": rows,
@@ -382,6 +388,7 @@ def admin_get_macro(name: str) -> dict:
 		"schedule_day_of_month": doc.schedule_day_of_month or None,
 		# `is None`, not truthiness: midnight is timedelta(0), which is falsy.
 		"schedule_time": "" if doc.schedule_time is None else str(doc.schedule_time),
+		"schedule_date": str(doc.get("schedule_date") or ""),
 		"next_run_at": str(doc.next_run_at or ""),
 		"next_run_is_retry": int(is_retry_pending(doc)),
 		"modified": str(doc.modified or ""),
