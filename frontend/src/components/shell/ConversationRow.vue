@@ -46,7 +46,7 @@
 					<Button
 						variant="ghost"
 						icon="more-horizontal"
-						class="!h-5 !w-5 opacity-0 group-hover:opacity-100 focus-visible:!opacity-100"
+						class="conversation-more !h-5 !w-5 opacity-0 group-hover:opacity-100 focus-visible:!opacity-100"
 						:aria-label="'Options for ' + (conv.title || 'chat')"
 						@click.stop
 					/>
@@ -64,6 +64,7 @@ import { useRoute, useRouter } from "vue-router";
 import { Button, Dropdown, FeatherIcon, confirmDialog } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { escapeHtml } from "@/lib/errors";
+import { useConversationExport } from "@/composables/useConversationExport";
 
 const props = defineProps({
 	conv: { type: Object, required: true }, // {name, title, starred, last_active_at}
@@ -72,6 +73,7 @@ const props = defineProps({
 const store = useShellStore();
 const route = useRoute();
 const router = useRouter();
+const { downloadOptions } = useConversationExport(() => props.conv.name);
 
 const activity = computed(() => store.conversationIndicator(props.conv.name));
 
@@ -114,6 +116,7 @@ const menuOptions = computed(() => [
 		onClick: () => store.toggleStar(props.conv.name),
 	},
 	{ label: "Rename", icon: "edit-3", onClick: startRename },
+	...downloadOptions.value,
 	{ label: "Delete", icon: "trash-2", theme: "red", onClick: confirmDelete },
 ]);
 
@@ -128,3 +131,11 @@ function confirmDelete() {
 	});
 }
 </script>
+
+<style scoped>
+@media (hover: none) {
+	:deep(.conversation-more) {
+		opacity: 1;
+	}
+}
+</style>

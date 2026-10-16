@@ -256,6 +256,17 @@
 										>
 									</span>
 								</button>
+								<button
+									v-for="option in downloadOptions"
+									:key="option.key"
+									role="menuitem"
+									class="jv-create-item"
+									:class="{ 'jv-unavailable': option.disabled }"
+									:aria-disabled="option.disabled ? 'true' : undefined"
+									@click="!option.disabled && option.onClick()"
+								>
+									<span class="jv-create-item-t">{{ option.label }}</span>
+								</button>
 							</div>
 						</template>
 					</div>
@@ -4465,6 +4476,7 @@ import {
 	clearHistoryOutcome,
 } from "@/lib/clearHistory";
 import { useAutoModeConsent } from "@/composables/useAutoModeConsent";
+import { useConversationExport } from "@/composables/useConversationExport";
 import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
 import { shouldOfferFeedback, markRated, markIgnored } from "@/lib/feedbackGate";
@@ -7044,6 +7056,7 @@ function openMacroFromCard(card) {
 // proposes surfaces as the existing action:pending Approve card. Cleared on New
 // chat / conversation switch / dismiss.
 const createMenuOpen = ref(false);
+const { downloadOptions } = useConversationExport(() => currentId.value);
 // Opening it moves focus to its first item (the hand-made menu has no library to do
 // it); Escape closes it and gives focus back to the button.
 const createBtnEl = ref(null);
