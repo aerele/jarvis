@@ -37,6 +37,42 @@ const api = vi.hoisted(() => ({
 	// Capability probe fires on entering Details; default "unavailable" keeps the Fetch button hidden.
 	gstinAutofillAvailable: vi.fn(async () => ({ available: false })),
 	gstinAutofill: vi.fn(async () => ({ found: false, reason: "unavailable" })),
+	// Private-network onboarding. A public bench never calls any of these; the describe
+	// blocks below that exercise a private bench set the answers they need.
+	networkStatus: vi.fn(async () => ({
+		host_public: false,
+		admin_reachable: true,
+		network_mode: "",
+		public_address: "",
+		test_mode: false,
+	})),
+	privateSetupTargets: vi.fn(async () => ({
+		admin_host: "fleet.klerk.in",
+		admin_ips: ["178.104.214.114"],
+	})),
+	checkAdminConnection: vi.fn(async () => ({
+		reachable: true,
+		enabled: true,
+		caller_ip: "8.8.8.8",
+	})),
+	savePublicAddress: vi.fn(async (address) => ({ ok: true, public_address: address })),
+	reserveHost: vi.fn(async () => ({
+		ok: true,
+		host_ip: "198.51.100.27",
+		reach_url: "https://reach.h3.fleet.example/",
+		hold_until: "2026-10-17 09:10:00",
+	})),
+	startConnectionTest: vi.fn(async () => ({
+		ok: true,
+		check: "JCC-000123",
+		outbound: { ok: true, reason: "ok" },
+	})),
+	connectionTestStatus: vi.fn(async () => ({
+		ok: true,
+		status: "Verified",
+		reason: "ok",
+		checked_at: "",
+	})),
 	onboardingPaymentApi: {
 		getOnboardingState: vi.fn(async () => ENVELOPE({ code: "BENCH_NO_SIGNUP_CONTEXT" })),
 		startSignup: vi.fn(),
@@ -1709,5 +1745,908 @@ describe("Address consistency: State <-> Pincode <-> GSTIN (India)", () => {
 		wrapper.vm.billing.setUserValue("gstin", "33ABCDE1234F1Z7"); // Tamil Nadu GSTIN -> mismatch
 		expect(wrapper.vm.billingDetailsInvalid()).toBe(true);
 		expect(wrapper.vm.detailsFieldErrors.gstin).toMatch(/GSTIN/i);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Private network: the Network step (design: private-network-onboarding §3).
+// ---------------------------------------------------------------------------
+const buttonByLabel = (w, label) =>
+	w.findAll("button").find((b) => b.attributes("label") === label);
+
+// What the bench reports once the private setup is done (the saved address is 8.8.8.8).
+const privateStatus = (over = {}) => ({
+	host_public: false,
+	admin_reachable: null,
+	network_mode: "private",
+	public_address: "https://8.8.8.8",
+	test_mode: false,
+	...over,
+});
+
+const PRIVATE_APIS = () => [
+	api.networkStatus,
+	api.privateSetupTargets,
+	api.checkAdminConnection,
+	api.savePublicAddress,
+	api.reserveHost,
+	api.startConnectionTest,
+	api.connectionTestStatus,
+];
+
+describe("a public bench is untouched by the private-network code", () => {
+	it("mounts on the intro tour and calls no private-network api function", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("intro");
+		for (const fn of PRIVATE_APIS()) expect(fn).not.toHaveBeenCalled();
+		expect(wrapper.vm.RAIL.map((r) => r.label)).toEqual(["Details", "Plan", "Pay", "Connect"]);
+	});
+});
+
+describe("private network: the Network step replaces the dead-end host block", () => {
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+		delete window.jarvis_network_mode;
+	});
+	afterEach(() => {
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+	});
+
+	it("opens on the Network step with the private-network choice and no admin address", async () => {
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.state.step).toBe("network");
+		expect(w.text()).toContain("This site is on a private network");
+		expect(w.text()).not.toContain("Setup isn't available on this address");
+		expect(api.networkStatus).toHaveBeenCalledTimes(1);
+		// The Jarvis setup server's address stays out until the customer picks the option.
+		expect(api.privateSetupTargets).not.toHaveBeenCalled();
+		expect(api.checkAdminConnection).not.toHaveBeenCalled();
+		expect(w.html()).not.toContain("fleet.klerk.in");
+		expect(w.html()).not.toContain("178.104.214.114");
+	});
+
+	it("the rail has five segments with Network first and active", async () => {
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.RAIL.map((r) => r.label)).toEqual([
+			"Network",
+			"Details",
+			"Plan",
+			"Pay",
+			"Connect",
+		]);
+		expect(w.vm.railIndex).toBe(0);
+	});
+
+	it("says so when Jarvis cannot be reached from this site", async () => {
+		api.networkStatus.mockResolvedValueOnce({
+			host_public: false,
+			admin_reachable: false,
+			network_mode: "",
+			public_address: "",
+			test_mode: false,
+		});
+		const w = mountView();
+		await flushPromises();
+		expect(w.text()).toContain("We can't reach Jarvis from this site");
+		expect(w.text()).not.toContain("This site is on a private network");
+	});
+
+	it("choosing the public option explains it and offers a reload, not Continue", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.net.pickOption("public");
+		await flushPromises();
+		expect(w.text()).toContain(
+			"Ask your administrator to set a public host name for this site"
+		);
+		expect(buttonByLabel(w, "Reload page")).toBeTruthy();
+		expect(buttonByLabel(w, "Continue")).toBeFalsy();
+	});
+
+	it("Continue fetches the Jarvis setup server's address and shows the rule", async () => {
+		const w = mountView();
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		expect(w.vm.net.state.screen).toBe("allow_admin");
+		expect(api.privateSetupTargets).toHaveBeenCalledTimes(1);
+		expect(w.text()).toContain("Allow the Jarvis setup server");
+		expect(w.text()).toContain("178.104.214.114");
+		expect(w.text()).toContain("fleet.klerk.in");
+		expect(w.text()).toContain("TCP 443 (HTTPS)");
+		expect(buttonByLabel(w, "Copy rule")).toBeTruthy();
+	});
+
+	it("the setup server rule names the port the bench sent", async () => {
+		api.privateSetupTargets.mockResolvedValueOnce({
+			admin_host: "fleet.klerk.in",
+			admin_ips: ["178.104.214.114"],
+			port: 8443,
+			scheme: "https",
+		});
+		const w = mountView();
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		expect(w.text()).toContain("TCP 8443 (HTTPS)");
+		expect(w.text()).not.toContain("TCP 443");
+	});
+
+	it("Check connection, then Continue, lands on the public address screen pre-filled", async () => {
+		const w = mountView();
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		await buttonByLabel(w, "Check connection").trigger("click");
+		await flushPromises();
+		expect(api.checkAdminConnection).toHaveBeenCalledTimes(1);
+		expect(w.find('banner-stub[title="Connected"]').exists()).toBe(true);
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		expect(w.vm.net.state.screen).toBe("address");
+		expect(w.vm.net.state.draft).toBe("https://8.8.8.8");
+		expect(w.text()).toContain("Your public address");
+		expect(w.text()).toContain("Detected from your connection:");
+		expect(w.text()).toContain("This address must");
+	});
+
+	it("a connection that cannot reach Jarvis keeps the customer here with the retry copy", async () => {
+		api.checkAdminConnection.mockResolvedValueOnce({
+			reachable: false,
+			enabled: false,
+			caller_ip: "",
+		});
+		const w = mountView();
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		await buttonByLabel(w, "Check connection").trigger("click");
+		await flushPromises();
+		expect(
+			w.find('banner-stub[title="Still can\'t reach the Jarvis setup server"]').exists()
+		).toBe(true);
+		expect(buttonByLabel(w, "Check again")).toBeTruthy();
+		expect(buttonByLabel(w, "Continue")).toBeFalsy();
+	});
+
+	it("private setup switched off says it isn't available yet", async () => {
+		api.checkAdminConnection.mockResolvedValueOnce({
+			reachable: true,
+			enabled: false,
+			caller_ip: "",
+		});
+		const w = mountView();
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		await buttonByLabel(w, "Check connection").trigger("click");
+		await flushPromises();
+		expect(
+			w
+				.find(
+					'banner-stub[message="Private network setup isn\'t available yet. Contact support."]'
+				)
+				.exists()
+		).toBe(true);
+	});
+
+	it("saving the address moves on to Details", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.net.openAddress();
+		w.vm.net.state.draft = "https://erp.example.com";
+		await flushPromises();
+		await buttonByLabel(w, "Continue").trigger("click");
+		await flushPromises();
+		expect(api.savePublicAddress).toHaveBeenCalledWith("https://erp.example.com");
+		expect(w.vm.state.step).toBe("details");
+		expect(w.vm.privateComplete).toBe(true);
+	});
+
+	it("a bad address disables Continue and shows why", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.net.openAddress();
+		w.vm.net.state.draft = "http://erp.example.com";
+		await flushPromises();
+		expect(w.text()).toContain("Use an https:// address. Plain HTTP is not allowed.");
+		expect(buttonByLabel(w, "Continue").attributes("disabled")).toBeDefined();
+	});
+
+	it("a bench with no usable host cannot be walked past the Network step", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "plan";
+		await flushPromises();
+		expect(w.vm.state.step).toBe("network");
+	});
+});
+
+describe("private network: a finished setup (reload mid-onboarding)", () => {
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+		window.jarvis_network_mode = "private";
+		api.networkStatus.mockResolvedValueOnce(privateStatus());
+	});
+	afterEach(() => {
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+	});
+
+	it("opens on the intro tour with the five-segment rail and knows its address", async () => {
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.state.step).toBe("intro");
+		expect(w.vm.RAIL.length).toBe(5);
+		expect(w.vm.net.state.publicAddress).toBe("https://8.8.8.8");
+		expect(w.vm.onboardingHostOk).toBe(true);
+	});
+
+	it("the tour skips the Network step, and Back from Details reopens the address screen", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.startWizard();
+		expect(w.vm.state.step).toBe("details");
+		w.vm.goBack();
+		expect(w.vm.state.step).toBe("network");
+		expect(w.vm.net.state.screen).toBe("address");
+		expect(w.vm.net.state.draft).toBe("https://8.8.8.8");
+		// Already confirmed: no Back to a screen that no longer applies.
+		expect(w.findAll("button.ob-back").length).toBe(0);
+	});
+});
+
+describe("private network: Review & pay", () => {
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+		window.jarvis_network_mode = "private";
+	});
+	afterEach(() => {
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+	});
+
+	async function atReview() {
+		api.networkStatus.mockResolvedValueOnce(privateStatus());
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "pay";
+		w.vm.state.planName = "pro";
+		w.vm.state.termsAccepted = true;
+		await flushPromises();
+		return w;
+	}
+
+	const signup = { email: "a@b.com", company: "Acme", plan: "pro", provider: "razorpay" };
+	const refuseWith = (code, message = "m") =>
+		api.onboardingPaymentApi.startSignup.mockResolvedValue({
+			status: 417,
+			body: { exc_type: "ValidationError", error: { code, message, recovery: "retry" } },
+		});
+
+	it("shows the Network row, the one-more-step notice and a Continue button", async () => {
+		const w = await atReview();
+		expect(w.text()).toContain("Network");
+		expect(w.text()).toContain("Private, via https://8.8.8.8");
+		expect(w.text()).toContain(
+			"Confirm the details below. We'll email you a confirmation link before anything is charged."
+		);
+		expect(
+			w.find('banner-stub[title="One more step before payment"]').attributes("message")
+		).toBe(
+			"After you confirm your email, we'll show the address of your Jarvis server. Your network team allows it, and we test the connection. You pay only after the test passes."
+		);
+		expect(
+			w.find('banner-stub[title="One more step before payment"]').attributes("type")
+		).toBe("info");
+		expect(buttonByLabel(w, "Continue")).toBeTruthy();
+		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
+	});
+
+	it("does not flash an empty 'Private, via' row while the saved address is still loading", async () => {
+		let release;
+		api.networkStatus.mockImplementationOnce(() => new Promise((r) => (release = r)));
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "pay";
+		w.vm.state.planName = "pro";
+		await flushPromises();
+		expect(w.text()).not.toContain("Private, via");
+		release(privateStatus());
+		await flushPromises();
+		expect(w.text()).toContain("Private, via https://8.8.8.8");
+	});
+
+	it("accepts a completed private setup where a public host would have been required", async () => {
+		const w = await atReview();
+		expect(w.vm.onboardingHostOk).toBe(true);
+		expect(w.vm.payDisabled).toBe(false);
+	});
+
+	it("an incomplete private setup still cannot pay", async () => {
+		delete window.jarvis_network_mode; // the default networkStatus answer reports no setup
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.onboardingHostOk).toBe(false);
+		expect(w.vm.payDisabled).toBe(true);
+	});
+
+	it("a refusal of the address at signup offers 'Change your address' and walks back to it", async () => {
+		refuseWith("PRIVATE_ADDRESS_TAKEN", "That address already belongs to another account.");
+		const w = await atReview();
+		await w.vm.flow.submitReview(signup);
+		expect(w.vm.pay.code).toBe("PRIVATE_ADDRESS_TAKEN");
+		expect(w.vm.pay.value).toBe(STATES.FAILED_RETRYABLE);
+		await flushPromises();
+		expect(buttonByLabel(w, "Change your address")).toBeTruthy();
+		expect(w.text()).toContain("That address already belongs to another account.");
+		await w.vm.onPayAction(ACTIONS.RESTART);
+		await flushPromises();
+		expect(w.vm.state.step).toBe("network");
+		expect(w.vm.net.state.screen).toBe("address");
+		expect(w.vm.net.state.draft).toBe("https://8.8.8.8");
+	});
+
+	it("'disabled' offers support only", async () => {
+		refuseWith("PRIVATE_NETWORK_DISABLED");
+		const w = await atReview();
+		await w.vm.flow.submitReview(signup);
+		await flushPromises();
+		expect(w.vm.pay.value).toBe(STATES.FAILED_TERMINAL);
+		expect(w.vm.payCopy.headline).toBe("Private network setup isn't available yet.");
+		expect(buttonByLabel(w, "Change your address")).toBeFalsy();
+	});
+
+	it("an unreachable or rate-limited gate reads as setup copy, not payment-service copy", async () => {
+		for (const [code, headline] of [
+			["BENCH_ADMIN_UNREACHABLE", "We can't reach Jarvis right now."],
+			["BENCH_RATE_LIMITED", "Too many attempts."],
+		]) {
+			refuseWith(code);
+			const w = await atReview();
+			await w.vm.flow.submitReview(signup);
+			await flushPromises();
+			expect(w.vm.pay.code).toBe(code);
+			expect(w.vm.payCopy.headline).toBe(headline);
+			expect(w.text()).not.toContain("payment service");
+		}
+	});
+
+	it("an unknown refusal code still renders the generic copy, never blank", async () => {
+		refuseWith("SOMETHING_NEW");
+		const w = await atReview();
+		await w.vm.flow.submitReview(signup);
+		await flushPromises();
+		expect(w.vm.payCopy.headline).toBeTruthy();
+		expect(w.vm.payCopy.body).toBeTruthy();
+	});
+});
+
+describe("a public bench's Review & pay is unchanged", () => {
+	it("has no Network row, no notice and the original CTA", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "pay";
+		w.vm.state.planName = "pro";
+		await flushPromises();
+		expect(w.text()).not.toContain("Private, via");
+		expect(w.find('banner-stub[title="One more step before payment"]').exists()).toBe(false);
+		expect(buttonByLabel(w, "Continue to payment")).toBeTruthy();
+		expect(w.text()).toContain("Confirm the details below. You'll complete payment securely.");
+		w.vm.state.termsAccepted = true;
+		w.vm.state.paymentProvider = "razorpay";
+		await flushPromises();
+		expect(w.vm.payDisabled).toBe(false);
+	});
+
+	it("onPayClick proceeds to start the signup on a public bench", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.email = "a@b.com";
+		w.vm.state.company = "Acme";
+		w.vm.state.planName = "pro";
+		w.vm.state.paymentProvider = "razorpay";
+		w.vm.state.termsAccepted = true;
+		fillRequiredBilling(w);
+		api.onboardingPaymentApi.startSignup.mockResolvedValue(
+			ENVELOPE({
+				code: "SIGNUP_VERIFICATION_REQUIRED",
+				pending_verification: true,
+				attempt_id: "att_1",
+				generation: 0,
+			})
+		);
+		await w.vm.onPayClick();
+		expect(api.onboardingPaymentApi.startSignup).toHaveBeenCalledTimes(1);
+	});
+
+	it("a public bench keeps payment-service copy for an unreachable gate", async () => {
+		api.onboardingPaymentApi.startSignup.mockResolvedValue({
+			status: 417,
+			body: {
+				exc_type: "ValidationError",
+				error: { code: "BENCH_ADMIN_UNREACHABLE", message: "m", recovery: "retry" },
+			},
+		});
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "pay";
+		w.vm.state.planName = "pro";
+		await flushPromises();
+		await w.vm.flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
+		await flushPromises();
+		expect(w.vm.payCopy.headline).toBe("We could not reach the payment service.");
+	});
+});
+
+describe("private network: Network step plumbing", () => {
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+		delete window.jarvis_network_mode;
+	});
+	afterEach(() => {
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+	});
+
+	it("the address field links its error only when one exists", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.net.openAddress();
+		await flushPromises();
+		const field = () => w.find('input[placeholder="https://erp.example.com"]');
+		w.vm.net.state.draft = "";
+		w.vm.net.state.draftTouched = false;
+		await flushPromises();
+		expect(field().attributes("aria-describedby")).toBeUndefined();
+		w.vm.net.state.draft = "http://erp.example.com";
+		w.vm.net.state.draftTouched = true;
+		await flushPromises();
+		expect(field().attributes("aria-describedby")).toBe("jv-ob-addr-err");
+	});
+
+	it("disposes the composable when leaving the Network step and on unmount", async () => {
+		const w = mountView();
+		await flushPromises();
+		const spy = vi.spyOn(w.vm.net, "dispose");
+		w.vm.state.step = "network";
+		await flushPromises();
+		expect(spy).not.toHaveBeenCalled();
+		w.vm.net.state.mode = "private";
+		w.vm.state.step = "details";
+		await flushPromises();
+		expect(spy).toHaveBeenCalledTimes(1); // the step-leave call, before any unmount
+		w.unmount();
+	});
+
+	it("a locked address shows the bench sentence with a Contact support action", async () => {
+		const sentence = "The address can't be changed after sign-up. Contact support.";
+		api.savePublicAddress.mockResolvedValueOnce({
+			ok: false,
+			code: "PRIVATE_ADDRESS_LOCKED",
+			message: sentence,
+		});
+		const w = mountView();
+		await flushPromises();
+		w.vm.state.step = "network";
+		w.vm.net.openAddress();
+		w.vm.net.state.draft = "https://erp.example.com";
+		await flushPromises();
+		expect(buttonByLabel(w, "Contact support")).toBeFalsy();
+		await w.vm.onNetworkContinue();
+		await flushPromises();
+		expect(w.text()).toContain(sentence);
+		expect(buttonByLabel(w, "Contact support")).toBeTruthy();
+		await buttonByLabel(w, "Contact support").trigger("click");
+		expect(w.vm.supportOpen).toBe(true);
+	});
+
+	it("a locally invalid address never calls the API", async () => {
+		const w = mountView();
+		await flushPromises();
+		w.vm.net.state.draft = "http://erp.example.com";
+		await w.vm.onNetworkContinue();
+		expect(api.savePublicAddress).not.toHaveBeenCalled();
+		expect(w.vm.net.state.draftTouched).toBe(true);
+	});
+});
+
+describe("private network: allow the held server, then test, then pay", () => {
+	const PAYABLE = () =>
+		ENVELOPE({
+			code: "PAYMENT_PAGE_REDIRECT",
+			attempt_id: "att_1",
+			generation: 1,
+			payment_provider: "razorpay",
+			pay_page_token: "tok_1",
+			pay_origin: "https://fleet.klerk.in",
+			pay_origin_attested: true,
+			can_check_status: true,
+			email: "owner@acme.example.com",
+			company: "Acme",
+		});
+	let assign;
+	let realLocation;
+
+	beforeEach(() => {
+		window.jarvis_public_host_ok = false;
+		window.jarvis_network_mode = "private";
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(PAYABLE());
+		assign = vi.fn();
+		realLocation = window.location;
+		Object.defineProperty(window, "location", {
+			configurable: true,
+			value: { ...realLocation, assign },
+		});
+	});
+	afterEach(() => {
+		Object.defineProperty(window, "location", { configurable: true, value: realLocation });
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+		vi.useRealTimers();
+	});
+
+	async function atAllowServer() {
+		api.networkStatus.mockResolvedValueOnce(privateStatus());
+		const w = mountView();
+		await flushPromises();
+		return w;
+	}
+
+	it("replaces the recovery card once the email is confirmed, and reserves the held server", async () => {
+		const w = await atAllowServer();
+		expect(w.vm.state.step).toBe("pay");
+		expect(w.vm.showPrivateServerStep).toBe(true);
+		expect(api.reserveHost).toHaveBeenCalledTimes(1);
+		const text = w.text();
+		expect(text).toContain("Allow your Jarvis server");
+		expect(text).toContain("Rules for your network team");
+		expect(text).toContain("198.51.100.27");
+		expect(text).toContain("8.8.8.8");
+		expect(text).toContain("your public address");
+		expect(text).toContain(
+			"Allow only this address. Don't open port 443 to everyone. We hold this server for you for 3 days."
+		);
+		expect(buttonByLabel(w, "Test connection")).toBeTruthy();
+		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
+		expect(w.vm.pay.value).not.toBe(STATES.CHECKOUT_OPEN);
+		expect(assign).not.toHaveBeenCalled();
+	});
+
+	it("the rules and the warning name the ports of the saved address and the reach URL", async () => {
+		api.networkStatus.mockResolvedValueOnce(
+			privateStatus({ public_address: "https://erp.acme.com:8443" })
+		);
+		api.reserveHost.mockResolvedValueOnce({
+			ok: true,
+			host_ip: "198.51.100.27",
+			reach_url: "http://127.0.0.1:18810/",
+			hold_until: "2026-10-18 10:00:00",
+		});
+		const w = mountView();
+		await flushPromises();
+		const text = w.text();
+		expect(text).toContain("TCP 8443");
+		expect(text).toContain("TCP 18810");
+		expect(text).not.toContain("TCP 443");
+		expect(text).toContain("Don't open port 8443 to everyone");
+	});
+
+	it("a blank saved address shows a retry card, no Test and no dead Continue", async () => {
+		api.networkStatus.mockResolvedValueOnce(
+			privateStatus({ network_mode: "", public_address: "" })
+		);
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(true);
+		const card = w.find('banner-stub[title="Contact support"]');
+		expect(card.attributes("message")).toBe(
+			"We couldn't get your network address. Try again, or contact support."
+		);
+		expect(buttonByLabel(w, "Test connection")).toBeFalsy();
+		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
+		expect(buttonByLabel(w, "Contact support")).toBeTruthy();
+		// Try again re-reads the address and the hold; once the address is back the rules show.
+		api.networkStatus.mockResolvedValueOnce(privateStatus());
+		const holds = api.reserveHost.mock.calls.length;
+		await buttonByLabel(w, "Try again").trigger("click");
+		await flushPromises();
+		expect(api.reserveHost.mock.calls.length).toBe(holds + 1);
+		expect(w.text()).toContain("Rules for your network team");
+		expect(buttonByLabel(w, "Test connection")).toBeTruthy();
+	});
+
+	it("markCleared with a blank address or hold is a no-op and Continue does not navigate", async () => {
+		const w = await atAllowServer();
+		w.vm.net.state.publicAddress = "";
+		expect(w.vm.net.markCleared()).toBe(false);
+		expect(window.sessionStorage.getItem("jvpriv:cleared")).toBeNull();
+		w.vm.onPrivateContinue();
+		expect(assign).not.toHaveBeenCalled();
+	});
+
+	it("does not poll the rate-limited provider check while the customer edits a firewall", async () => {
+		vi.useFakeTimers();
+		const w = await atAllowServer();
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+		expect(w.vm.pendingPollStuck).toBe(false);
+	});
+
+	it("both tests passing shows Continue to payment, which clears the hold and leaves for checkout", async () => {
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(api.startConnectionTest).toHaveBeenCalledTimes(1);
+		expect(w.find('banner-stub[title="Connection OK"]').exists()).toBe(true);
+		expect(buttonByLabel(w, "Test connection")).toBeFalsy();
+		await buttonByLabel(w, "Continue to payment").trigger("click");
+		await flushPromises();
+		expect(w.vm.net.state.cleared).toBe(true);
+		expect(window.sessionStorage.getItem("jvpriv:cleared")).toBe(
+			"198.51.100.27|https://8.8.8.8"
+		);
+		expect(assign).toHaveBeenCalledWith("https://fleet.klerk.in/jarvis-checkout#t=tok_1");
+	});
+
+	it("an unreachable public address keeps the customer here with the inbound hint and Test again", async () => {
+		api.connectionTestStatus.mockResolvedValueOnce({
+			ok: true,
+			status: "Unreachable",
+			reason: "timeout",
+			checked_at: "",
+		});
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(
+			w
+				.find('banner-stub[title="We couldn’t reach your public address"]')
+				.attributes("message")
+		).toBe(
+			"Check the inbound rule: allow TCP 443 from 198.51.100.27 to 8.8.8.8. New rules can take a few minutes to apply."
+		);
+		expect(buttonByLabel(w, "Test again")).toBeTruthy();
+		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
+		expect(assign).not.toHaveBeenCalled();
+	});
+
+	it("a failed outbound half names the outbound rule even when the inbound half verified", async () => {
+		api.startConnectionTest.mockResolvedValueOnce({
+			ok: true,
+			check: "JCC-000123",
+			outbound: { ok: false, reason: "timeout" },
+		});
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(
+			w.find('banner-stub[title="Your ERPNext can’t reach the Jarvis server"]').exists()
+		).toBe(true);
+		expect(buttonByLabel(w, "Continue to payment")).toBeFalsy();
+	});
+
+	it("a hold that ended while the customer was away shows the new server and asks for new rules", async () => {
+		api.startConnectionTest.mockResolvedValueOnce({
+			ok: false,
+			code: "PRIVATE_HOLD_UNAVAILABLE",
+			message: "x",
+		});
+		api.reserveHost
+			.mockResolvedValueOnce({
+				ok: true,
+				host_ip: "198.51.100.27",
+				reach_url: "https://reach.h3.fleet.example/",
+				hold_until: "2026-10-17 09:10:00",
+			})
+			.mockResolvedValueOnce({
+				ok: true,
+				host_ip: "198.51.100.45",
+				reach_url: "https://reach.h5.fleet.example/",
+				hold_until: "2026-10-20 09:10:00",
+			});
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(
+			w.find('banner-stub[title="Your server hold has ended"]').attributes("message")
+		).toBe(
+			"We held 198.51.100.27 for 3 days. We’ve set aside a new server for you: 198.51.100.45. Update both rules, then test again."
+		);
+		expect(w.text()).toContain("198.51.100.45");
+	});
+
+	it("when no server can be held it says so, with a retry, and offers no test", async () => {
+		api.reserveHost.mockResolvedValueOnce({
+			ok: false,
+			code: "PRIVATE_HOLD_UNAVAILABLE",
+			message: "No host fits right now.",
+		});
+		const w = await atAllowServer();
+		expect(
+			w.find('banner-stub[title="We couldn’t set aside a server right now"]').exists()
+		).toBe(true);
+		expect(buttonByLabel(w, "Try again")).toBeTruthy();
+		expect(buttonByLabel(w, "Test connection").attributes("disabled")).toBeDefined();
+	});
+
+	it("a customer who already cleared the hold in this tab is not asked again after the pay-page round trip", async () => {
+		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
+		const w = await atAllowServer();
+		expect(w.vm.showPrivateServerStep).toBe(false);
+		expect(api.reserveHost).toHaveBeenCalledTimes(1); // re-read, to be sure it is still the same server
+		expect(w.text()).not.toContain("Allow your Jarvis server");
+		expect(w.text()).not.toContain("Checking your server");
+		await buttonByLabel(w, "Continue to payment").trigger("click");
+		await flushPromises();
+		expect(assign).toHaveBeenCalledWith("https://fleet.klerk.in/jarvis-checkout#t=tok_1");
+	});
+
+	it("after a reload a moved hold never reaches checkout: a check first, then the new server with the hold-ended notice", async () => {
+		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
+		let release;
+		api.reserveHost.mockImplementationOnce(
+			() =>
+				new Promise((r) => {
+					release = () =>
+						r({
+							ok: true,
+							host_ip: "198.51.100.45",
+							reach_url: "https://reach.h5.fleet.example/",
+							hold_until: "2026-10-20 09:10:00",
+						});
+				})
+		);
+		const w = await atAllowServer();
+		expect(w.text()).toContain("Checking your server");
+		expect(w.vm.showPrivateServerStep).toBe(false);
+		expect(w.vm.flow.navigateToPay()).toBe(false);
+		expect(assign).not.toHaveBeenCalled();
+		release();
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(true);
+		expect(w.text()).toContain("198.51.100.45");
+		expect(w.find('banner-stub[title="Your server hold has ended"]').exists()).toBe(true);
+		expect(w.vm.net.state.cleared).toBe(false);
+		expect(assign).not.toHaveBeenCalled();
+	});
+
+	it("a pending check that turns into AllowServer never lets the provider poll run over it", async () => {
+		vi.useFakeTimers();
+		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
+		let release;
+		api.reserveHost.mockImplementationOnce(
+			() =>
+				new Promise((r) => {
+					release = () =>
+						r({
+							ok: true,
+							host_ip: "198.51.100.45",
+							reach_url: "https://r/",
+							hold_until: "2026-10-20 09:10:00",
+						});
+				})
+		);
+		const w = await atAllowServer();
+		expect(w.text()).toContain("Checking your server");
+		release();
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(true);
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(150_000);
+		expect(w.vm.pendingPollStuck).toBe(false);
+	});
+
+	it("the checking-server window itself never starts the provider poll", async () => {
+		vi.useFakeTimers();
+		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
+		api.reserveHost.mockImplementationOnce(() => new Promise(() => {}));
+		const w = await atAllowServer();
+		expect(w.text()).toContain("Checking your server");
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+	});
+
+	it("a customer back from checkout (?pay=pending) with a lost flag is never shown the screen", async () => {
+		// beforeEach swapped window.location for a plain copy: the pay-page return is read from href.
+		window.location.href = "http://localhost:3000/jarvis/onboarding?pay=pending";
+		// A pending answer that still carries a live pay token (the reviewer's probe).
+		const stillPayable = () =>
+			ENVELOPE({ ...PAYABLE().body.message.data, code: "PAYMENT_CONFIRMATION_PENDING" });
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(stillPayable());
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(stillPayable());
+		const w = await atAllowServer();
+		expect(w.vm.returnedFromCompletedCheckout).toBe(true);
+		expect(w.vm.canNavigateToPay(w.vm.pay)).toBe(true);
+		expect(w.vm.showPrivateServerStep).toBe(false);
+		expect(w.text()).not.toContain("Allow your Jarvis server");
+	});
+
+	it("moves focus to the heading when the screen appears after the check", async () => {
+		window.sessionStorage.setItem("jvpriv:cleared", "198.51.100.27|https://8.8.8.8");
+		let release;
+		api.reserveHost.mockImplementationOnce(
+			() =>
+				new Promise((r) => {
+					release = () =>
+						r({
+							ok: true,
+							host_ip: "198.51.100.45",
+							reach_url: "https://r/",
+							hold_until: "2026-10-20 09:10:00",
+						});
+				})
+		);
+		const w = mount(OnboardingView, { global: { stubs: STUBS }, attachTo: document.body });
+		await flushPromises();
+		release();
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(true);
+		expect(document.activeElement && document.activeElement.tagName).toBe("H1");
+		expect(document.activeElement.textContent).toContain("Allow your Jarvis server");
+		w.unmount();
+	});
+
+	it("a lost cleared flag does not show the screen to a customer returning from checkout", async () => {
+		window.sessionStorage.setItem("jvpriv:cleared", "");
+		const w = await atAllowServer();
+		w.vm.confirmingReturn = true;
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(false);
+	});
+
+	it("leaving the screen mid-test leaves no stuck Testing state on return", async () => {
+		api.connectionTestStatus.mockImplementation(() => new Promise(() => {}));
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(w.vm.net.state.test.phase).toBe("testing");
+		w.vm.confirmingReturn = true;
+		await flushPromises();
+		w.vm.confirmingReturn = false;
+		await flushPromises();
+		expect(w.vm.net.state.test.phase).toBe("idle");
+	});
+
+	it("counts the wait down, caps it at 60 s, and re-enables Test connection", async () => {
+		vi.useFakeTimers();
+		api.startConnectionTest.mockResolvedValueOnce({
+			ok: false,
+			code: "RATE_LIMITED_PRIVATE_NETWORK",
+			message: "Slow down.",
+			retry_after_seconds: 900,
+		});
+		const w = await atAllowServer();
+		await buttonByLabel(w, "Test connection").trigger("click");
+		await flushPromises();
+		expect(w.vm.testWait).toBe(60);
+		expect(buttonByLabel(w, "Test connection").attributes("disabled")).toBeDefined();
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(w.vm.testWait).toBe(30);
+		await vi.advanceTimersByTimeAsync(31_000);
+		expect(w.vm.testWait).toBe(0);
+		expect(buttonByLabel(w, "Test connection").attributes("disabled")).toBeUndefined();
+	});
+
+	it("a public bench in the same state is NOT held and keeps polling the provider check", async () => {
+		delete window.jarvis_public_host_ok;
+		delete window.jarvis_network_mode;
+		vi.useFakeTimers();
+		const w = mountView();
+		await flushPromises();
+		expect(w.vm.showPrivateServerStep).toBe(false);
+		await vi.advanceTimersByTimeAsync(16_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalled();
+		expect(api.reserveHost).not.toHaveBeenCalled();
 	});
 });

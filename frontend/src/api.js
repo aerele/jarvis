@@ -121,6 +121,23 @@ export const checkAccountReconnect = (requestId, code) =>
 export const redeemReconnectCode = (code, email) =>
 	call("jarvis.onboarding.redeem_reconnect_code", { code: code || "", email: email || "" });
 
+// ---- private network onboarding (jarvis/private_network.py) ---------------------------
+// call() always POSTs, which save_public_address, reserve_host and start_connection_test
+// require (the bench refuses a GET). Expected refusals come back as DATA ({ok:false, code,
+// message}), not as a rejected call, because call() discards the body of a 4xx and the
+// screens branch on the code.
+export const networkStatus = () => call("jarvis.private_network.network_status");
+export const privateSetupTargets = () => call("jarvis.private_network.private_setup_targets");
+export const checkAdminConnection = () => call("jarvis.private_network.check_admin_connection");
+export const savePublicAddress = (address) =>
+	call("jarvis.private_network.save_public_address", { address });
+export const reserveHost = () => call("jarvis.private_network.reserve_host");
+// No arguments, on purpose: the bench takes the outbound target from the hold admin
+// reported, never from the browser.
+export const startConnectionTest = () => call("jarvis.private_network.start_connection_test");
+export const connectionTestStatus = (check) =>
+	call("jarvis.private_network.connection_test_status", { check });
+
 export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
 // Re-drive this workspace's saved AI config through admin - the customer lever
 // for a stuck apply (jarvis#825, reason "llm_apply_stuck"). Probes admin first

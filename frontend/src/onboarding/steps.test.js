@@ -14,6 +14,9 @@ import {
 	planDueToday,
 	planPricing,
 	planSubtitleFor,
+	STEPS_PRIVATE,
+	stepsFor,
+	railFor,
 } from "./steps.js";
 
 test("managed step order", () => {
@@ -276,4 +279,33 @@ test("planDueToday: a fractional GST total on a trial plan renders exactly in th
 		}),
 		"₹0 today · then ₹4,100.50/mo after 7 days"
 	);
+});
+
+test("private benches get a Network step after the intro tour and before Details", () => {
+	assert.deepEqual(STEPS_PRIVATE, ["intro", "network", "details", "plan", "pay", "connect"]);
+	assert.equal(nextStep(STEPS_PRIVATE, "intro"), "network");
+	assert.equal(nextStep(STEPS_PRIVATE, "network"), "details");
+	assert.equal(prevStep(STEPS_PRIVATE, "details"), "network");
+	assert.equal(stepsFor(true), STEPS_PRIVATE);
+});
+
+test("the public flow's step list is untouched", () => {
+	assert.equal(stepsFor(false), STEPS_MANAGED);
+	assert.deepEqual(STEPS_MANAGED, ["intro", "details", "plan", "pay", "connect"]);
+});
+
+test("the rail gains a fifth Network segment in private mode only", () => {
+	assert.deepEqual(
+		railFor(false).map((r) => r.id),
+		["details", "plan", "pay", "connect"]
+	);
+	assert.deepEqual(
+		railFor(true).map((r) => r.id),
+		["network", "details", "plan", "pay", "connect"]
+	);
+	assert.deepEqual(
+		railFor(true).map((r) => r.label),
+		["Network", "Details", "Plan", "Pay", "Connect"]
+	);
+	assert.equal(railFor(false), railFor(false)); // stable identity: no re-render churn
 });

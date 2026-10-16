@@ -495,6 +495,23 @@ def _diagnostic_class(err) -> tuple[str, bool]:
 	return "admin_error", True
 
 
+#: Admin's ``get_connection.network_check`` keys (contract 4.4). Anything else admin adds is
+#: not forwarded to the browser.
+_NETWORK_CHECK_KEYS = ("host_ip", "reach_url", "status", "reason", "checked_at")
+#: Customer-facing copy for the network gate. Admin's ``chat_readiness_reason`` is the bare
+#: token ``network_check_required`` (possibly joined with other blockers by "; "), never prose.
+NETWORK_CHECK_DETAIL = "Allow your Jarvis server through your firewall, then test the connection."
+
+
+def _network_check_of(conn) -> dict:
+	"""The five contract keys of ``conn["network_check"]`` as strings, or ``{}`` when admin did
+	not send the block (it is absent whenever the plugin env gate does not block)."""
+	raw = conn.get("network_check")
+	if not isinstance(raw, dict) or not raw:
+		return {}
+	return {key: str(raw.get(key) or "") for key in _NETWORK_CHECK_KEYS}
+
+
 def _admin_chat_gate() -> dict:
 	"""Last managed ready-gate: ask admin whether the customer's container is
 	actually provisioned enough to serve chat. v1-tolerant.
@@ -512,7 +529,9 @@ def _admin_chat_gate() -> dict:
 	(jarvis#885: admin's health cron confirmed the container is dead/unhealthy -
 	an outage, not a wait) and ``"container_provisioning"`` otherwise (wait) -
 	each kept distinct so a customer isn't told to wait for a container that won't
-	come back, or to keep spinning on a strand that only a reconnect can clear.
+	come back, or to keep spinning on a strand that only a reconnect can clear. A
+	private-network customer whose server has not passed the connection test gets
+	``"network_check_required"`` (the SPA sends them to the Connect panel).
 
 	- v1-tolerance: an ABSENT ``chat_readiness`` key (v1 admin, or a v2 that
 	  doesn't surface it) means the control plane has no opinion → allow.
@@ -620,6 +639,20 @@ def _admin_chat_gate() -> dict:
 				"reason": "container_unavailable",
 				"billing_notice": {},
 				"detail": conn.get("chat_readiness_reason") or "",
+			}
+		# Private network (design 8.5): admin withholds the plugin env until the connection
+		# test passes for the current binding, and says so with ``network_check``. Its own
+		# reason, so the Connect screen shows the rules and a Test connection button instead
+		# of the endless "coming online" spinner. A paused subscription still wins.
+		network_check = _network_check_of(conn)
+		if network_check and conn["chat_readiness"] != "Suspended":
+			return {
+				"ready": False,
+				"reason": "network_check_required",
+				"billing_notice": {},
+				# Never admin's reason string: it is a machine token, not customer copy.
+				"detail": NETWORK_CHECK_DETAIL,
+				"network_check": network_check,
 			}
 		suspended = conn["chat_readiness"] == "Suspended"
 		return {
@@ -760,6 +793,10 @@ def is_ready_for_chat() -> dict:
 	  the container isn't chat-ready yet (chat_readiness != "Ready"). Set only by
 	  the final ``_admin_chat_gate`` at the managed ready-exits; fail-open and
 	  v1-tolerant (see ``_admin_chat_gate``).
+	- ``"network_check_required"`` - a private-network workspace whose plugin env admin is
+	  withholding until the connection test passes. ``detail`` is the bench's own sentence
+	  and ``network_check`` carries ``{host_ip, reach_url, status, reason, checked_at}`` for
+	  the Connect screen's rules and Test connection button.
 	- ``"readiness_unconfirmed"`` - admin could not be asked AND this workspace
 	  has never been confirmed ready, so nothing knows whether a container is
 	  serving it. Carries ``retryable: True``: it is the absence of a verdict,

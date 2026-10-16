@@ -145,6 +145,7 @@ test("isSuppressedReason: the outage/incident reasons hide the nudge entirely", 
     "container_unavailable",
     "authority_repair_required",
     "site_replaced",
+    "network_check_required",
   ]) {
     assert.equal(isSuppressedReason(reason), true, `reason=${reason}`);
   }

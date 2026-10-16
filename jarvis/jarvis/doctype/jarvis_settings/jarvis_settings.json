@@ -165,6 +165,9 @@
   "jarvis_admin_customer_email",
   "jarvis_admin_customer_password",
   "signup_context",
+  "private_network_section",
+  "network_mode",
+  "public_address",
   "maintenance_notice_section",
   "maintenance_active",
   "maintenance_message",
@@ -1205,6 +1208,29 @@
    "label": "Signup Context",
    "read_only": 1,
    "description": "Non-secret JSON snapshot of the in-flight signup: attempt id, the customer's real email + company as admin holds them, plan/provider, the amount and what is due today, the last contract code, and the contract version. Written by jarvis.onboarding_contract so a reloaded payment page renders whose signup it is showing instead of the site admin's prefill. NO SECRETS EVER GO IN THIS FIELD - permlevel is not a container for one: a Single's value is reachable through frappe.client.get_value / get_single_value by anyone who can read the doctype, and the permlevel only governs the form. Secrets belong in the Password fields above, which encrypt into __Auth. jarvis_admin_customer_email above holds admin's SYNTHETIC login (cust-<hash>@jarvis.invalid), which is not an address and must never be shown to anyone."
+  },
+  {
+   "fieldname": "private_network_section",
+   "fieldtype": "Section Break",
+   "label": "Private Network",
+   "collapsible": 1,
+   "description": "For a site on a private network behind a public gateway. Set by the onboarding wizard once the customer confirms the public address; a System Manager can edit it here."
+  },
+  {
+   "fieldname": "network_mode",
+   "fieldtype": "Select",
+   "permlevel": 1,
+   "label": "Network Mode",
+   "options": "\nPrivate",
+   "description": "Private makes the bench report the public address below as this site's URL and lifts the localhost onboarding block."
+  },
+  {
+   "fieldname": "public_address",
+   "fieldtype": "Data",
+   "permlevel": 1,
+   "label": "Public Address",
+   "depends_on": "eval:doc.network_mode==\"Private\"",
+   "description": "The public HTTPS address the Jarvis server uses to call this site, for example https://erp.example.com. Must be reachable from the internet through your gateway."
   },
   {
    "fieldname": "maintenance_notice_section",

@@ -202,6 +202,18 @@ export function hasReconnectIntent(search) {
 	}
 }
 
+// Where the chat banner for network_check_required sends the customer: the wizard opens
+// straight on the Connect panel (rules + Test connection) instead of the intro tour.
+export const NETWORK_INTENT_URL = "/jarvis/onboarding?network=1";
+
+export function hasNetworkIntent(search) {
+	try {
+		return new URLSearchParams(search || "").get("network") === "1";
+	} catch {
+		return false;
+	}
+}
+
 // Copy for that banner. `moved_to` is the site now holding the account - both
 // belong to the same account holder, so naming it is what makes this actionable.
 export function replacedBanner(notice) {
@@ -264,10 +276,20 @@ export async function readinessDetailOf() {
 	if (
 		r.reason === "container_provisioning" ||
 		r.reason === "authority_repair_required" ||
-		r.reason === "container_unavailable"
+		r.reason === "container_unavailable" ||
+		r.reason === "network_check_required"
 	)
 		return r.detail || "";
 	return "";
+}
+
+// True when an already-onboarded private-network workspace must re-pass the connection test
+// (e.g. after an operator-confirmed host move). Its own accessor, same "one reason, one
+// accessor" convention as the rest: ChatView shows a banner with a route to the Connect
+// panel (NETWORK_INTENT_URL) instead of the generic CTA-less "Chat may not work yet".
+export async function needsNetworkCheck() {
+	const r = await checkReady();
+	return !!(r && !r.ready && r.reason === "network_check_required");
 }
 
 // True when the workspace is not chat-ready because admin's health cron

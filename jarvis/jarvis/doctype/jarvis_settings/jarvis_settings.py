@@ -893,8 +893,25 @@ class JarvisSettings(Document):
 		self._validate_pattern_window()
 		self._validate_conversation_retention()
 		self._validate_branding()
+		self._validate_public_address()
 		# The Desk boot carries the name and the logo; on_update drops its cache on a change.
 		self.flags.brand_changed = any(self.has_value_changed(f) for f in ("agent_name", "brand_logo"))
+
+	def _validate_public_address(self):
+		"""Private network (design 5.2): in Private mode the public address must pass the
+		same rules the wizard applies, and is stored in canonical form. A blank mode leaves
+		the address alone (inert)."""
+		if (self.get("network_mode") or "").strip() != "Private":
+			return
+		# Only on a change: a stored test-mode address must not block unrelated saves later.
+		if not (self.has_value_changed("network_mode") or self.has_value_changed("public_address")):
+			return
+		from jarvis.network_address import check_public_address, private_test_mode
+
+		normalized, problem = check_public_address(self.get("public_address"), test_mode=private_test_mode())
+		if problem:
+			frappe.throw(problem, frappe.ValidationError, title="Public Address")
+		self.public_address = normalized
 
 	def _validate_conversation_retention(self):
 		"""Retention floor. The daily sweep frees idle chats' agent sessions

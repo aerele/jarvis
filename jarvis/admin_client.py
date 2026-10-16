@@ -544,6 +544,43 @@ def _is_real_public_host(host: str) -> bool:
 	return tld.isalpha() and tld not in _RESERVED_TLDS
 
 
+# Advertised in the signup body only when this bench is in Private mode (contract 4.2).
+PRIVATE_NETWORK_CAPABILITY = "v1"
+
+
+def _private_network_settings() -> tuple[str, str]:
+	"""``(network_mode, public_address)`` from Jarvis Settings, blank when unset.
+
+	Read with get_single_value (no document load). ``cache=False`` so a value written
+	earlier in the same process is seen. Never raises: between a code deploy and its
+	``bench migrate`` the fields do not exist and get_single_value throws, and a bench in
+	that state is simply not private."""
+	try:
+		mode = (frappe.db.get_single_value("Jarvis Settings", "network_mode", cache=False) or "").strip()
+		address = (frappe.db.get_single_value("Jarvis Settings", "public_address", cache=False) or "").strip()
+	except Exception:
+		return "", ""
+	return mode, address
+
+
+def private_public_address() -> str:
+	"""The canonical public address when this bench finished the private setup (mode is
+	Private AND the address passes the rules), else ``""``. Reads stored settings only -
+	never the request Host, which is spoofable."""
+	from jarvis.network_address import check_public_address, private_test_mode
+
+	mode, address = _private_network_settings()
+	if mode != "Private":
+		return ""
+	normalized, problem = check_public_address(address, test_mode=private_test_mode())
+	return "" if problem else normalized
+
+
+def is_private_mode() -> bool:
+	"""True when the private setup is complete (see ``private_public_address``)."""
+	return bool(private_public_address())
+
+
 def _public_origin(trust_host: bool = False) -> str:
 	"""The public origin the bench sends admin as ``frappe_site_url``. A configured ``host_name``
 	(https) always wins; else ``get_url`` derives it from the request Host only when
@@ -552,7 +589,15 @@ def _public_origin(trust_host: bool = False) -> str:
 	Only ``signup`` passes ``trust_host=True`` - a NEW account, so trusting the authenticated
 	admin's own Host is self-scoped. Reconnect / replacement / lead keep it OFF: they target an
 	EXISTING account by email, so a spoofed Host must not choose its URL. A real public domain
-	reached over http is normalized to https."""
+	reached over http is normalized to https.
+
+	In Private mode (a completed private-network setup) the customer's confirmed public
+	address wins over everything else: it is the only address the Jarvis server can use to
+	call this site, and ``host_name`` keeps pointing at the private address for the links
+	Frappe builds for staff (design 5.2)."""
+	private = private_public_address()
+	if private:
+		return private
 	from urllib.parse import urlsplit
 
 	host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
@@ -579,7 +624,32 @@ def _public_origin(trust_host: bool = False) -> str:
 	return base
 
 
-def _onboarding_host_ok() -> bool:
+def _request_origin() -> str:
+	"""``scheme://host[:port]`` of the CURRENT browser request, as Frappe's own
+	``get_host_name_from_request`` reads it: the first ``X-Forwarded-Proto`` token when it is
+	http or https, else the request scheme; the request host. Lowercase, user info and default
+	port dropped, no path. Blank when there is no request or the scheme is not http or https."""
+	from urllib.parse import urlsplit
+
+	request = getattr(frappe.local, "request", None)
+	if request is None:
+		return ""
+	forwarded = (frappe.get_request_header("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+	scheme = forwarded if forwarded in ("http", "https") else (request.scheme or "").lower()
+	try:
+		parts = urlsplit(f"{scheme}://{request.host or ''}")
+		host, port = (parts.hostname or "").lower(), parts.port
+	except ValueError:
+		return ""
+	if scheme not in ("http", "https") or not host:
+		return ""
+	if ":" in host:
+		host = f"[{host}]"
+	default = 443 if scheme == "https" else 80
+	return f"{scheme}://{host}" + (f":{port}" if port and port != default else "")
+
+
+def _public_host_configured() -> bool:
 	"""True only when this bench has a CONFIGURED public https host. Reads only
 	site_config ``host_name`` (never the request Host header, which is
 	spoofable). Accepts public domains and globally routable IPv4 addresses.
@@ -622,6 +692,17 @@ def _onboarding_host_ok() -> bool:
 		return address.version == 4 and address.is_global and not address.is_multicast
 	except Exception:
 		return True
+
+
+def _onboarding_host_ok() -> bool:
+	"""May this bench onboard? True with a configured public host (the original rule,
+	``_public_host_configured``) OR a completed private-network setup (design 5.3). Drives
+	``assert_public_onboarding_host`` in ``start_signup``. The boot flag
+	``jarvis_public_host_ok`` deliberately does NOT use this: it keeps meaning "a public
+	host is configured", and the SPA reads ``jarvis_network_mode`` for the private case."""
+	if _public_host_configured():
+		return True
+	return is_private_mode()
 
 
 def assert_public_onboarding_host() -> None:
@@ -691,12 +772,15 @@ def signup(
 	one), so there is no "omit when absent" case to preserve; an older admin that
 	does not declare either kwarg drops it silently, same as any unknown kwarg.
 	"""
+	# Read once: two reads could straddle a settings change and send a Private-mode body
+	# with a non-private URL (or the reverse).
+	private_address = private_public_address()
 	body = {
 		"email": email,
 		"company_name": company_name,
 		"plan": plan,
 		# signup is the only trust_host=True caller (new account, self-scoped).
-		"frappe_site_url": _public_origin(trust_host=True),
+		"frappe_site_url": private_address or _public_origin(trust_host=True),
 		"supported_providers": list(SUPPORTED_PROVIDERS),
 		"client_capabilities": _client_capabilities(),
 		"terms_accepted": terms_accepted,
@@ -710,6 +794,20 @@ def signup(
 		body["billing"] = billing
 	if partner_code:
 		body["partner_code"] = partner_code
+	if private_address:
+		# Contract 4.2: network_mode only in Private mode, with the capability that admin
+		# requires for it (CLIENT_UPGRADE_REQUIRED otherwise). frappe_site_url above is
+		# the customer's ``private_address``, not the browser origin.
+		body["network_mode"] = "private"
+		body["client_capabilities"] = {
+			**_client_capabilities(),
+			"private_network": PRIVATE_NETWORK_CAPABILITY,
+		}
+		# Where this customer's staff open the bench: admin returns the browser there after
+		# payment, as the public address is often unreachable from the customer's own network.
+		staff_origin = _request_origin()
+		if staff_origin:
+			body["staff_origin"] = staff_origin
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
 
 
@@ -877,6 +975,43 @@ def check_signup_payment_status() -> dict:
 		path=_m("billing.signup.check_signup_payment_status"),
 		body={},
 	)
+
+
+def private_setup_info(*, timeout_s: int = 8) -> dict:
+	"""Guest: is private-network onboarding on offer, and which public address does admin
+	see this bench calling from? Returns ``{"enabled": bool, "caller_ip": str}`` (contract
+	4.1). ``caller_ip`` is what the PublicAddress screen pre-fills. Short timeout: the
+	callers run on a network that may DROP traffic to admin, and a long wait would freeze
+	the first screen the customer sees."""
+	return _post_guest(path=_m("api.network.private_setup_info"), body={}, timeout_s=timeout_s)
+
+
+def reserve_private_host(*, timeout_s: int = 60) -> dict:
+	"""Authenticated: the fleet host admin holds for this private-network customer, as
+	``{"host_ip", "reach_url", "hold_until"}`` (contract 4.3). Admin makes the hold when the
+	email link is clicked; this call makes it synchronously if the job has not yet. For a
+	customer who already has a tenant it returns that tenant's host with ``hold_until`` null.
+	Refusals arrive as ``AdminContractError`` carrying ``NOT_PRIVATE_CUSTOMER``,
+	``EMAIL_NOT_CONFIRMED``, ``PRIVATE_HOLD_UNAVAILABLE`` or ``RATE_LIMITED_PRIVATE_NETWORK``.
+	The 60 s budget covers admin probing candidate hosts."""
+	return _post(path=_m("api.network.reserve_private_host"), body={}, timeout_s=timeout_s)
+
+
+def start_connection_check(site_name: str, *, timeout_s: int = 30) -> dict:
+	"""Authenticated: start the inbound half of the connection test. ``site_name`` is this
+	bench's own ``frappe.local.site`` - the owner's claim about which Frappe site must
+	answer, which admin binds to the customer's credentials. Returns ``{"check":
+	"JCC-000123"}`` to poll with ``get_connection_check``."""
+	return _post(
+		path=_m("api.network.start_connection_check"), body={"site_name": site_name}, timeout_s=timeout_s
+	)
+
+
+def get_connection_check(check: str, *, timeout_s: int = 15) -> dict:
+	"""Authenticated: the state of one test as ``{"status", "reason", "checked_at"}``.
+	``status`` is Checking, Verified, Failed, Unreachable or Unsupported; a customer can read
+	only their own checks."""
+	return _post(path=_m("api.network.get_connection_check"), body={"check": check}, timeout_s=timeout_s)
 
 
 def get_billing_payment_state() -> dict:
@@ -2790,6 +2925,27 @@ def is_handover_unsupported(exc: Exception) -> bool:
 	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_HANDOVER_METHOD in text
 
 
+# Admin's private-network refusal codes (contract 4.3), plus the generic INVALID_REQUEST it
+# raises for a malformed argument on the same endpoints. ``_do_post`` reads these BEFORE the
+# HTTP-status / exc_type routing: admin sends them as 403 PermissionError, 409
+# DuplicateEntryError, 400 InvalidRequestError and 429, and the status routing alone would
+# turn the 403s into AdminAuthError (code lost) and a 503 into AdminUnreachableError.
+PRIVATE_NETWORK_CODES = frozenset(
+	{
+		"PRIVATE_NETWORK_DISABLED",
+		"PRIVATE_ADDRESS_INVALID",
+		"PRIVATE_ADDRESS_TAKEN",
+		"NOT_PRIVATE_CUSTOMER",
+		"EMAIL_NOT_CONFIRMED",
+		"PRIVATE_HOLD_UNAVAILABLE",
+		"CONNECTION_CHECK_BUSY",
+		"RATE_LIMITED_PRIVATE_NETWORK",
+		"INVALID_REQUEST",
+	}
+)
+_PRIVATE_NETWORK_CODES = PRIVATE_NETWORK_CODES  # old private name, kept for any importer
+
+
 def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:
 	"""Build the known-4xx rejection, preserving admin's contract when it sent
 	one (returned for the caller to ``raise``).
@@ -2960,6 +3116,20 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		# (it came from _extract_frappe_message). Falling back to "" is fine.
 		return _envelope_error_message(envelope) or clean or ""
 
+	# Code first: a private-network refusal carries its machine code whatever status or
+	# exception class admin used. A 429 keeps the rate-limit path below (it carries the
+	# code and retry_after_seconds itself).
+	if resp.status_code != 429:
+		contract = _contract_error(payload)
+		code = contract.get("code")
+		if isinstance(code, str) and code in PRIVATE_NETWORK_CODES:
+			raise _rejection(
+				_envelope_message() or f"admin returned {resp.status_code}",
+				payload=payload,
+				status=resp.status_code,
+				exc_type=exc_type,
+			)
+
 	# Status-based routing for the three unambiguous wire signals.
 	# The 2026-06-16 review caught that the previous shape ran the
 	# exc_type allowlist BEFORE the status check, so a 429 admin
@@ -3012,6 +3182,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			# unknown-exc_type branch and logging a spurious error on every rejected
 			# partner code.
 			"PartnerCodeRejected",
+			# Admin's 400 for a malformed argument (private-network address, site_name).
+			# A plain refusal; unlisted it logged an Error Log row per rejection.
+			"InvalidRequestError",
 		):
 			# The THROWN wire shape: admin's contract ``error`` object rides at
 			# the top level next to exc_type. Both survive here - the code for a

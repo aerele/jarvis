@@ -27,6 +27,7 @@ executable half of this file's claims - see its PROVENANCE.md.
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import secrets
 from urllib.parse import urlsplit
@@ -237,8 +238,15 @@ def is_duplicate_signup(err) -> bool:
 	The substring match this replaces (``"already registered or pending" in
 	str(err)``) is what made the failed-payment resume unreachable for every
 	real customer the day admin improved its wording."""
-	if getattr(err, "code", "") == ACCOUNT_ALREADY_EXISTS:
+	code = getattr(err, "code", "")
+	if code == ACCOUNT_ALREADY_EXISTS:
 		return True
+	# PRIVATE_ADDRESS_TAKEN is also a DuplicateEntryError (409), but a different address is
+	# the fix, not resuming this customer's pending payment (see the docstring).
+	from jarvis.admin_client import PRIVATE_NETWORK_CODES
+
+	if isinstance(code, str) and code in PRIVATE_NETWORK_CODES:
+		return False
 	return getattr(err, "exc_type", None) == "DuplicateEntryError"
 
 
@@ -711,8 +719,15 @@ def error_object(err) -> tuple[dict, int]:
 			out.setdefault("retry_after_seconds", err.retry_after_seconds)
 		return out, 429
 	if isinstance(err, AdminAuthError):
+		# A private-network refusal (a 403 EMAIL_NOT_CONFIRMED) is not an authentication
+		# failure; every other 401/403, coded or not, is, and the SPA has copy for that.
+		from jarvis.admin_client import PRIVATE_NETWORK_CODES
+
+		code = getattr(err, "code", None)
 		return {
-			"code": BENCH_ADMIN_AUTH_FAILED,
+			"code": code
+			if isinstance(code, str) and code in PRIVATE_NETWORK_CODES
+			else BENCH_ADMIN_AUTH_FAILED,
 			"message": str(err),
 			"recovery": RECOVERY_CONTACT_SUPPORT,
 		}, (err.status_code or 401)
@@ -806,3 +821,84 @@ def failure(error: dict, status: int, *, context: dict | None = None) -> dict:
 	status is a failure every reader has to be told about out of band."""
 	frappe.local.response.http_status_code = status
 	return {"ok": False, "error": error, "context": wire(context)}
+
+
+# --------------------------------------------------------------------------- #
+# private-network host hold (design spec 8.2)
+# --------------------------------------------------------------------------- #
+#: Context key for the fleet host admin set aside for a private-network customer:
+#: ``{host_ip, reach_url, hold_until}``. Non-secret by construction (the customer is told
+#: this IP so their network team can allow it) and written only from admin's own answers, so
+#: the outbound connection test can take its target from here and never from the browser.
+PRIVATE_HOLD_KEY = "private_hold"
+
+
+def _clean_hold(hold) -> dict:
+	"""The three hold fields, validated, or ``{}``. An IP that is not an address literal, or
+	a ``reach_url`` that is not http(s) with a host, is dropped rather than stored (which
+	includes a legacy tenant host admin knows by no address: both fields come back empty)."""
+	if not isinstance(hold, dict):
+		return {}
+	until = hold.get("hold_until")
+	if not all(isinstance(v, str) for v in (hold.get("host_ip"), hold.get("reach_url"))):
+		return {}
+	if until is not None and not isinstance(until, str):
+		return {}
+	host_ip = hold["host_ip"].strip()
+	reach_url = hold["reach_url"].strip()
+	try:
+		ipaddress.ip_address(host_ip)
+		parts = urlsplit(reach_url)
+		hostname = parts.hostname
+	except ValueError:
+		return {}
+	if parts.scheme not in ("https", "http") or not hostname or parts.username or parts.password:
+		return {}
+	return {"host_ip": host_ip, "reach_url": reach_url, "hold_until": until or None}
+
+
+#: Context key for the canonical public address the bench signed up with. Non-secret. Admin
+#: keeps the signup-time ``frappe_site_url`` and has no customer-facing update endpoint, so the
+#: bench records what it sent and refuses to drift from it (see ``private_network.
+#: save_public_address``) or to resume on anyone else's claim to it (``onboarding``).
+SIGNUP_ADDRESS_KEY = "signup_address"
+
+
+def signup_address() -> str:
+	"""The canonical address used at a successful private signup, or ``""``."""
+	value = load().get(SIGNUP_ADDRESS_KEY)
+	return value.strip() if isinstance(value, str) else ""
+
+
+def record_signup_address(address: str) -> None:
+	"""Remember the address a signup succeeded with. A blank address is ignored."""
+	update(**{SIGNUP_ADDRESS_KEY: (address or "").strip()})
+
+
+def private_hold() -> dict:
+	"""The stored hold, or ``{}``."""
+	return _clean_hold(load().get(PRIVATE_HOLD_KEY))
+
+
+def store_private_hold(hold) -> dict:
+	"""Remember a hold (or, given a falsy or invalid one, forget it) and return what is now
+	stored. Writes only when something changed: the wizard polls every couple of seconds and
+	each poll re-reports the same hold."""
+	clean = _clean_hold(hold)
+	context = load()
+	if _clean_hold(context.get(PRIVATE_HOLD_KEY)) == clean:
+		return clean
+	if clean:
+		context[PRIVATE_HOLD_KEY] = clean
+	else:
+		context.pop(PRIVATE_HOLD_KEY, None)
+	save(context)
+	return clean
+
+
+def absorb_private_hold(payload) -> None:
+	"""Fold ``private_hold`` from a signup poll answer into the context. Present and valid:
+	stored. Present and null or malformed: forgotten, so an expired hold is not shown as
+	live. Absent (a public customer, an older admin): left alone."""
+	if isinstance(payload, dict) and PRIVATE_HOLD_KEY in payload:
+		store_private_hold(payload.get(PRIVATE_HOLD_KEY))
