@@ -534,6 +534,26 @@ def _subscription_agent_provider(settings) -> str | None:
 # ``anthropic/*`` bound to claude-cli). Mirrors pool_serialize's upstream value.
 NATIVE_CLAUDE_PROVIDER = "anthropic"
 
+# Wire provider of the Bifrost door in a pool that also holds a Claude plan: fleet
+# renders the proxy-backed legs behind one synthetic ``openai_compat`` provider
+# (jarvis-fleet-agent pool_render.py, ``native_primaries`` branch). With the plan as
+# the pool head, the agent's default provider is ``anthropic``, so a BARE proxy-leg
+# id is sent to the Claude CLI and fails (jarvis#1999); naming this door routes it.
+PROXY_DOOR_PROVIDER = "openai_compat"
+
+
+def _is_proxy_subscription_pick(settings, model_id: str) -> bool:
+	"""True when ``model_id`` names an enabled subscription row that the Claude plan
+	does not serve (e.g. a ChatGPT plan row), i.e. a leg behind the Bifrost door."""
+	from jarvis.jarvis.pool_serialize import _credential_type, _enabled_models, _subscription_upstream
+
+	return any(
+		(getattr(m, "model", None) or "").strip() == model_id
+		and _credential_type(m) == "subscription"
+		and _subscription_upstream(m) != NATIVE_CLAUDE_PROVIDER
+		for m in _enabled_models(settings)
+	)
+
 
 def _is_native_claude_pick(settings, model_id: str) -> bool:
 	"""True when ``model_id`` is an Anthropic subscription-tier id and this pool has a
@@ -587,6 +607,8 @@ def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 			# catch-all answers it from the ChatGPT leg (seen live 2026-09-23).
 			return override, NATIVE_CLAUDE_PROVIDER
 		if override and override in enabled_names:
+			if has_native_claude_subscription(settings) and _is_proxy_subscription_pick(settings, override):
+				return override, PROXY_DOOR_PROVIDER  # a bare id would land on the Claude CLI
 			return override, None  # Validated override accepted
 		return "", None  # Let the pool route
 
@@ -735,6 +757,8 @@ def _runs_on_proxy_route(conv) -> bool:
 	if not settings.proxy_active:
 		return False
 	model, provider = _resolve_model_and_provider(conv)
+	if provider == PROXY_DOOR_PROVIDER:  # a proxy-leg pick named through the Bifrost door
+		return True
 	if provider:  # a Claude-plan pick, served by claude-cli
 		return False
 	# A pinned bare id resolves through the proxy; an unpinned turn runs the pool primary.
