@@ -229,6 +229,12 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 					f"readable only through a parent DocType, and you cannot read "
 					f"any of its parents ({', '.join(owning)})"
 				)
+		if dt == "Comment":
+			from jarvis.tools.get_comments import COMMENT_REDIRECT_HINT
+
+			raise PermissionDeniedError(
+				f"no read permission on referenced DocType: Comment. {COMMENT_REDIRECT_HINT}"
+			)
 		raise PermissionDeniedError(f"no read permission on referenced DocType: {dt}")
 
 	# Step 4: per-site DocType allowlist (defense-in-depth).

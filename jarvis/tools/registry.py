@@ -129,6 +129,10 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"send_email",
 	"add_comment",
 	"update_comment",
+	# Read side of the comment pair: a record's timeline comments under the
+	# parent record's read permission (Desk's rule), since the Comment DocType
+	# itself is System Manager / Website Manager only.
+	"get_comments",
 	"share_doc",
 	"unshare_doc",
 	"assign_to",
