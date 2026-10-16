@@ -772,3 +772,47 @@ test("copyText: true when the clipboard took it, false when it refused or is mis
 	assert.equal(await copyText("pa-1", null), false);
 	assert.equal(await copyText("", { writeText: async () => {} }), false);
 });
+
+test("schedule_run: a schedule card is recognised, and its receipt names the macro", () => {
+	assert.ok(
+		pendingCardOf({ preview: { card: { kind: "schedule", when: "2030-01-15 09:30" } } })
+	);
+	const done = receiptView(
+		"schedule_run",
+		{ run_at: "2030-01-15 09:30", prompt: "x", title: "Review" },
+		{ ok: true, data: { macro: "m1", macro_name: "Review", link: "/jarvis/macros/m1" } },
+		"confirmed"
+	);
+	assert.equal(done.title, "Scheduled “Review” to run once on 15 Jan 2030, 9:30 am");
+	assert.deepEqual(done.targets, [{ name: "Review", url: "/jarvis/macros/m1" }]);
+	const no = receiptView(
+		"schedule_run",
+		{ run_at: "2030-01-15 09:30", title: "Review" },
+		null,
+		"discarded"
+	);
+	assert.equal(
+		no.title,
+		"Discarded, did not schedule “Review” to run once on 15 Jan 2030, 9:30 am"
+	);
+	const untitled = receiptView(
+		"schedule_run",
+		{
+			run_at: "2030-01-15 21:05",
+			prompt: "Check the comments on Employee HR-EMP-0001 and tell me",
+		},
+		null,
+		"discarded"
+	);
+	const offset = receiptView(
+		"schedule_run",
+		{ run_at: "2030-01-15T04:00:00Z", title: "Review" },
+		null,
+		"discarded"
+	);
+	assert.equal(offset.title, "Discarded, did not schedule “Review” to run once");
+	assert.equal(
+		untitled.title,
+		"Discarded, did not schedule “Check the comments on Employee HR-EMP-00…” to run once on 15 Jan 2030, 9:05 pm"
+	);
+});
