@@ -19,6 +19,9 @@ export function isSilentRun(busy, lastSignalAt, now = Date.now()) {
 // writes nothing for minutes, and reopening that chat used to show it stopped, #591).
 export function streamingRowIsLive(row, now = Date.now()) {
 	if (!row) return false;
+	// #591: current servers report liveness for pure legacy messages too.
+	// Explicit idle must override freshness, just as live overrides old age.
+	if ("activity_state" in row) return !!row.activity_state;
 	if (row.turn_state && !TERMINAL_TURN_STATES.has(row.turn_state)) return true;
 	const modified = Date.parse(String(row.modified || "").replace(" ", "T"));
 	return Number.isFinite(modified) && now - modified < FRESH_ROW_MS;
