@@ -55,6 +55,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from contextvars import ContextVar
 
 import frappe
 import pdfkit
@@ -66,6 +67,23 @@ from .sanitizer import sanitize_letterhead, sanitize_rich
 from .theme import HEADER_RESERVE_MM, cover_height_pt
 
 _SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
+
+_DEFER_FAILURE_LOGGING: ContextVar[bool] = ContextVar("pdf_defer_failure_logging", default=False)
+
+
+@contextlib.contextmanager
+def defer_failure_logging():
+	"""Let a sensitive export caller log one safe failure itself.
+
+	Context-local so a concurrent document render retains its normal diagnostics;
+	the caller must catch failures and write its metadata-only deferred Error Log.
+	"""
+	token = _DEFER_FAILURE_LOGGING.set(True)
+	try:
+		yield
+	finally:
+		_DEFER_FAILURE_LOGGING.reset(token)
+
 
 # Header/footer/watermark are agent-influenced; cap them so a runaway model can't
 # hand the pre-render sanitize an unbounded fragment (the body itself is capped in
@@ -905,5 +923,7 @@ def _log_infra_failure(title: str, message: str) -> None:
 	"""Write an infra-caused render failure to the Error Log, best-effort. Logging
 	must NEVER replace the real error the caller is about to raise, so every failure
 	here (including a missing site in a unit test) is swallowed."""
+	if _DEFER_FAILURE_LOGGING.get():
+		return
 	with contextlib.suppress(Exception):
 		frappe.log_error(title=f"jarvis.rich_pdf: {title}"[:140], message=message or title)
