@@ -11,6 +11,31 @@
 // plan, so the two are free to swap.
 export const STEPS_MANAGED = ["intro", "details", "plan", "pay", "connect"];
 
+// Private-network benches (no public host name, or one that finished the private setup) get
+// a Network step in front of Details. The public list above is untouched.
+export const STEPS_PRIVATE = ["intro", "network", "details", "plan", "pay", "connect"];
+
+export function stepsFor(privateBench) {
+	return privateBench ? STEPS_PRIVATE : STEPS_MANAGED;
+}
+
+// The labelled progress rail. The intro tour is chromeless and "reconnect" is deliberately
+// absent, so neither has a segment. Frozen and module-level: callers get a stable identity.
+const RAIL_MANAGED = Object.freeze([
+	Object.freeze({ id: "details", label: "Details" }),
+	Object.freeze({ id: "plan", label: "Plan" }),
+	Object.freeze({ id: "pay", label: "Pay" }),
+	Object.freeze({ id: "connect", label: "Connect" }),
+]);
+const RAIL_PRIVATE = Object.freeze([
+	Object.freeze({ id: "network", label: "Network" }),
+	...RAIL_MANAGED,
+]);
+
+export function railFor(privateBench) {
+	return privateBench ? RAIL_PRIVATE : RAIL_MANAGED;
+}
+
 // RELATIVE, not "@/account/format": this file's tests run under `node --test`
 // (package.json test:node), which resolves no bundler alias. format.js is plain ESM
 // with zero imports of its own, so pulling it in here keeps this module cheap to test.
