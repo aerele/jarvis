@@ -54,6 +54,29 @@ def hold_fields_exist() -> bool:
 	return bool(frappe.get_meta("Jarvis Macro").has_field(HOLD_FIELD))
 
 
+def macros_counted_toward_cap(owner: str) -> int:
+	"""How many of ``owner``'s macros count toward ``MAX_MACROS_PER_OWNER``: all but
+	the spent one-time macros, whose schedule ended after its slot came (it ran, or
+	was refused or skipped; either way a scheduled run row exists). A reminder set
+	from chat is a one-time macro, and a cap they all counted toward would fill up
+	with spent reminders and refuse the next one, or a real macro. A one-time
+	macro switched off before its slot still counts: nothing was spent."""
+	from jarvis.chat.macro_scheduler import once_ready
+
+	total = frappe.db.count("Jarvis Macro", {"owner": owner})
+	if not once_ready():
+		return total
+	spent = frappe.db.sql(
+		"""SELECT COUNT(*) FROM `tabJarvis Macro` m
+		WHERE m.owner = %(owner)s AND m.schedule_frequency = 'once' AND m.schedule_enabled = 0
+		AND (m.last_run_at IS NOT NULL OR EXISTS (
+			SELECT 1 FROM `tabJarvis Macro Run` r WHERE r.macro = m.name AND r.trigger = 'scheduled'
+		))""",
+		{"owner": owner},
+	)[0][0]
+	return total - spent
+
+
 def arm_on_form_only() -> str:
 	return _("Skip confirmation can be switched on only on the macro's own page in Jarvis, by its owner.")
 
@@ -128,6 +151,7 @@ class JarvisMacro(NotRenamable, Document):
 		self._validate_owner_cap()
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
+		self._validate_one_time_schedule()
 		self._guard_admin_hold()
 		self._guard_summary_state()
 		self._guard_arming()
@@ -374,6 +398,7 @@ class JarvisMacro(NotRenamable, Document):
 			or self._time_changed()
 			or self._anchor_changed("schedule_weekday")
 			or self._anchor_changed("schedule_day_of_month")
+			or self._date_changed()
 		):
 			changes.append(_("schedule"))
 		return changes
@@ -418,7 +443,7 @@ class JarvisMacro(NotRenamable, Document):
 		if not self.is_new():
 			return
 		owner = self.owner or frappe.session.user
-		if frappe.db.count("Jarvis Macro", {"owner": owner}) >= MAX_MACROS_PER_OWNER:
+		if macros_counted_toward_cap(owner) >= MAX_MACROS_PER_OWNER:
 			frappe.throw(_("You can have at most {0} macros.").format(MAX_MACROS_PER_OWNER))
 
 	def _validate_schedule_time(self):
@@ -451,6 +476,51 @@ class JarvisMacro(NotRenamable, Document):
 
 		validate_schedule_day_of_month_or_throw(self.schedule_day_of_month)
 
+	def _validate_one_time_schedule(self):
+		"""A one-time schedule needs its date, and a moment still ahead when it is
+		set: a past one would be switched off by the next sweep without ever running.
+		Judged only when the schedule is switched on or changed, so saving an
+		unrelated field of a macro whose one-time slot is due but not yet swept still
+		works."""
+		from jarvis.chat.macro_scheduler import ONCE, once_slot
+
+		if not frappe.utils.cint(self.schedule_enabled) or (self.schedule_frequency or "") != ONCE:
+			return
+		if not self.schedule_date:
+			frappe.throw(_("Pick the date a one-time schedule runs on."))
+		if not self._schedule_changed():
+			return
+		slot = once_slot(self.schedule_date, self.schedule_time)
+		if not slot or slot <= frappe.utils.now_datetime():
+			frappe.throw(_("Pick a date and time in the future for a one-time schedule."))
+
+	def _schedule_changed(self) -> bool:
+		"""The schedule was switched on, or what it fires on changed, in this save."""
+		return (
+			self.is_new()
+			or self.has_value_changed("schedule_enabled")
+			or self.has_value_changed("schedule_frequency")
+			or self._time_changed()
+			or self._anchor_changed("schedule_weekday")
+			or self._anchor_changed("schedule_day_of_month")
+			or self._date_changed()
+		)
+
+	def _date_changed(self) -> bool:
+		"""Whether a one-time schedule's day changed, compared as dates: the row holds
+		a date, the form posts "2026-10-19"."""
+		before = self.get_doc_before_save()
+		if not before:
+			return True
+
+		def day(value):
+			try:
+				return frappe.utils.getdate(value) if value else None
+			except Exception:
+				return value
+
+		return day(before.get("schedule_date")) != day(self.get("schedule_date"))
+
 	def _recompute_next_run(self):
 		"""Keep ``next_run_at`` in sync with the schedule fields. The scheduler
 		(``jarvis.chat.macro_scheduler``) advances it after each run via a raw
@@ -459,16 +529,7 @@ class JarvisMacro(NotRenamable, Document):
 		if not self.schedule_enabled:
 			self.next_run_at = None
 			return
-		changed = (
-			self.is_new()
-			or self.has_value_changed("schedule_enabled")
-			or self.has_value_changed("schedule_frequency")
-			or self._time_changed()
-			or self._anchor_changed("schedule_weekday")
-			or self._anchor_changed("schedule_day_of_month")
-			or not self.next_run_at
-		)
-		if changed:
+		if self._schedule_changed() or not self.next_run_at:
 			from jarvis.chat.macro_scheduler import compute_next_run
 
 			self.next_run_at = compute_next_run(
@@ -476,6 +537,7 @@ class JarvisMacro(NotRenamable, Document):
 				self.schedule_time,
 				weekday=self.schedule_weekday,
 				day_of_month=self.schedule_day_of_month,
+				schedule_date=self.get("schedule_date"),
 			)
 
 	def _anchor_changed(self, fieldname: str) -> bool:
