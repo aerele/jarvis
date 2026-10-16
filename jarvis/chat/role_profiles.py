@@ -4,14 +4,15 @@ Spec: ``docs/superpowers/specs/2026-08-16-role-profile-agents-design.md``.
 
 Two independent axes, both curated data (spec §5), never runtime discovery:
 
-* **Tool tier**: the jarvis-plane role decides ``full`` (today's 96 tools)
-  vs ``standard`` (67 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
+* **Tool tier**: the jarvis-plane role decides ``full`` (today's 97 tools)
+  vs ``standard`` (68 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
   list). Spec §3 sized these 68/26; ``session_status`` was later pulled to the
   drop list (denied fleet-wide for the white-label leak, not a tier call), and
   ``memory_get`` / ``memory_search`` were pulled to the drop list (native
   cross-user memory, denied fleet-wide by the fleet-agent; Jarvis uses per-user
   bench-owned memory), and the per-user memory tools (``jarvis__remember`` /
-  ``jarvis__recall``) joined the allow list, so the split is 67/29 of 96.
+  ``jarvis__recall``) joined the allow list, so the split is 68/29 of 97. ``jarvis__get_comments`` (the read side of
+  ``add_comment``) joined the allow list after that.
 * **Skill set**: ERPNext roles decide which of the 6 named skill sets
   (``SKILL_SETS``), plus the always-on ``SHARED_CORE_SKILLS``, a user's
   profile includes.
@@ -84,7 +85,7 @@ STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 	}
 )
 
-# The full 96-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
+# The full 97-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
 # sorted (spec §2 evidence capture: ~/.claude/jobs/bce488ac/tmp/postfix-cap.jsonl).
 # An allow list must be explicit here: deriving it at runtime from a live
 # agent container is not possible bench-side.
@@ -115,6 +116,7 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__export_query",
 	"jarvis__find_skills",
 	"jarvis__follow_document",
+	"jarvis__get_comments",
 	"jarvis__get_creation_context",
 	"jarvis__get_doc",
 	"jarvis__get_file_pages",
@@ -160,11 +162,12 @@ _STANDARD_TOOLS_ALLOW = [
 
 
 def standard_tools_allow() -> list[str]:
-	"""The 67-tool allow list for the ``standard`` tier (spec §3 sized 68;
+	"""The 68-tool allow list for the ``standard`` tier (spec §3 sized 68;
 	session_status pulled to the drop list for the fleet-wide white-label deny;
 	memory_get/memory_search pulled to the drop list for the fleet-wide native
 	cross-user memory deny; the per-user bench memory tools remember/recall
-	added so standard-tier memory works)."""
+	added so standard-tier memory works;
+	get_comments added as the read side of add_comment)."""
 	return list(_STANDARD_TOOLS_ALLOW)
 
 
