@@ -335,3 +335,70 @@ describe("DashboardCanvas filters", () => {
 		wrapper.unmount();
 	});
 });
+
+describe("saved dashboard refresh", () => {
+	it("fetches sources again with the current filters and exposes data loading", async () => {
+		const filters = { item: "ITEM-1" };
+		const w = mount(DashboardCanvas, {
+			attachTo: document.body,
+			props: {
+				mode: "view",
+				html: "live sources",
+				dashboard: { name: "d1" },
+				filters,
+			},
+		});
+		await flushPromises();
+		sendFrameMessage(w, { type: "ready" });
+		sendFrameMessage(w, { type: "data", id: "1", name: "s1" });
+		await flushPromises();
+		expect(w.vm.loading).toBe(false);
+		const originalFrame = w.find("iframe").element;
+		api.runDashboardSource.mockClear();
+		await w.vm.rebuild();
+		await flushPromises();
+		expect(w.find("iframe").element).not.toBe(originalFrame);
+		expect(w.vm.loading).toBe(true);
+		sendFrameMessage(w, { type: "ready" });
+		expect(w.vm.loading).toBe(true);
+		sendFrameMessage(w, { type: "data", id: "1", name: "s1" });
+		await flushPromises();
+		expect(api.runDashboardSource).toHaveBeenCalledTimes(1);
+		expect(api.runDashboardSource).toHaveBeenCalledWith("d1", "s1", filters);
+		expect(w.vm.loading).toBe(false);
+		w.unmount();
+	});
+});
+
+describe("refresh with an older request still in flight", () => {
+	it("ignores the previous frame's data and keeps the new frame loading", async () => {
+		let finishOld;
+		api.runDashboardSource.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishOld = resolve;
+				})
+		);
+		const w = mount(DashboardCanvas, {
+			attachTo: document.body,
+			props: { mode: "view", html: "live sources", dashboard: { name: "d1" } },
+		});
+		await flushPromises();
+		sendFrameMessage(w, { type: "ready" });
+		sendFrameMessage(w, { type: "data", id: "1", name: "s1" });
+		await flushPromises();
+		await w.vm.rebuild();
+		await flushPromises();
+		sendFrameMessage(w, { type: "ready" });
+		const post = vi.spyOn(w.find("iframe").element.contentWindow, "postMessage");
+		finishOld({ ok: true, data: { rows: [{ stale: true }] } });
+		await flushPromises();
+		expect(post).not.toHaveBeenCalled();
+		expect(w.vm.loading).toBe(true);
+		sendFrameMessage(w, { type: "data", id: "1", name: "s1" });
+		await flushPromises();
+		expect(w.vm.loading).toBe(false);
+		post.mockRestore();
+		w.unmount();
+	});
+});
