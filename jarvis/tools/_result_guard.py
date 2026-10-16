@@ -17,23 +17,24 @@ _ROW_KEYS = ("rows", "result")
 _META_KEYS = ("_truncated", "shown", "total", "note")
 _SAFETY = 200  # pad for note-digit / separator variance below the hard cap
 
-# Routing help (model-facing): the full-data escapes are report_pdf for a saved
-# report (runs server-side, returns a file, bypasses this cap) and
-# export_document / export_excel for record exports on already-narrowed data.
+# Routing help (model-facing): the full-data escape is a FILE built server-side,
+# which this cap never touches: export_query for records (doctype + filters, or the
+# same query spec the agent just ran, joins and NOT EXISTS included) and report_pdf
+# for a saved report. export_excel is not one: its rows pass through the model.
 # Generic/legacy results have no reliable continuation. Paged get_list below
 # updates its own next_start to the rows actually retained by this guard.
 _NOTE = (
 	"Result truncated to fit the context window: showing the first {shown} of "
 	"{total} rows. PARTIAL - do not treat as complete; any file, summary, or count "
 	"built from these rows is partial too. For the full answer: narrow the filter, "
-	"aggregate with query, export narrowed records with export_document / "
-	"export_excel, or use report_pdf for a saved report (server-side, no cap)."
+	"aggregate with query, or put every row in a file with export_query (pass the "
+	"same spec, or doctype + filters; built server-side, complete). A saved report: "
+	"report_pdf. Never rebuild the full set in chunks through chat."
 )
 _NOTE_NONE = (
 	"Result too large: even one row exceeds the size budget. Request fewer fields "
-	"(avoid fields=['*']), narrow the filter, aggregate with query, or use "
-	"report_pdf for a saved report (server-side, returns the full data as a file, "
-	"no cap)."
+	"(avoid fields=['*']), narrow the filter, aggregate with query, or put the rows "
+	"in a file with export_query (server-side, complete); a saved report: report_pdf."
 )
 # A paged get_list page: the guard keeps a prefix, so the walk simply resumes after
 # it. No "of N" here - N would be the page size, which reads as the match count.
@@ -198,7 +199,10 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 		return data, {"kind": "uncapped", "original_chars": total, "shown": None, "total": None}
 
 	n = len(rows)
-	overhead = _size(_envelope(data, kind, key, [], n, _NOTE_NONE))
+	# Measured with the longer of the two notes the envelope can carry, so the note
+	# itself can never push the result past the cap (_SAFETY pads digits only).
+	longest = max(_NOTE.format(shown=n, total=n), _NOTE_NONE, key=len)
+	overhead = _size(_envelope(data, kind, key, [], n, longest))
 	row_budget = MAX_RESULT_CHARS - overhead - _SAFETY
 	if row_budget <= 0:
 		# Non-row bulk (e.g. a huge query `sql`) is itself over budget: truncating

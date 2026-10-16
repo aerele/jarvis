@@ -104,7 +104,7 @@ def record_export_event(
 	detail: str | None = None,
 ) -> None:
 	"""One line per server-side export ATTEMPT (export_query etc.): format, row
-	count, sync/background, and ``outcome`` (ok / degraded / no_data / rejected).
+	count, sync/background, and ``outcome`` (ok / degraded / no_data / rejected / too_slow).
 	Emitting on the fail-closed paths too is the point - the refused large exports
 	are exactly the signal that would justify raising the ceiling / building the
 	async path.

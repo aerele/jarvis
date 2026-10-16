@@ -3,6 +3,7 @@ import io
 
 from jarvis import compat
 from jarvis._xlsx_highlights import validate_highlights
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._export.model import ExportModel
 from jarvis.tools._export.safety import escape_formula
 
@@ -33,12 +34,33 @@ def _xlsx_cell(value, model: ExportModel, unwrap):
 	return _clip(escape_formula(value), model)
 
 
+def _headers(model: ExportModel) -> list:
+	"""The header row: the resolver's labels ("Supplier Group"), else the column keys."""
+	headers = model.meta.get("headers")
+	return list(headers) if headers and len(headers) == len(model.columns) else list(model.columns)
+
+
+def _rules_by_header(highlights, model: ExportModel, headers: list):
+	"""Highlight rules match the header row. A rule may name its column by the field
+	name the caller asked for (``supplier_group``) or by its label; a field name is
+	read as that column's label here."""
+	if not isinstance(highlights, list):
+		return highlights
+	by_key = {k: h for k, h in zip(model.columns, headers, strict=True) if k != h}
+	out = []
+	for rule in highlights:
+		if isinstance(rule, dict) and rule.get("column") in by_key and rule["column"] not in headers:
+			rule = {**rule, "column": by_key[rule["column"]]}
+		out.append(rule)
+	return out
+
+
 def csv(model: ExportModel) -> bytes:
 	"""Plain CSV: escaped header + escaped rows, UTF-8. An empty rowset yields a
 	valid header-only file (an honest 'no rows' export, not an error)."""
 	buf = io.StringIO()
 	w = _csv.writer(buf, quoting=_csv.QUOTE_MINIMAL)
-	w.writerow([escape_formula(c) for c in model.columns])
+	w.writerow([escape_formula(c) for c in _headers(model)])
 	for row in model.rows:
 		w.writerow([escape_formula(c) for c in row])
 	return buf.getvalue().encode("utf-8")
@@ -54,7 +76,8 @@ def xlsx(model: ExportModel, *, highlights=None) -> bytes:
 	# which compat.py deliberately keeps out of module import for Frappe 15.
 	from frappe.utils.xlsxutils import ILLEGAL_CHARACTERS_RE, handle_html
 
-	header = [_xlsx_cell(c, model, handle_html) for c in model.columns]
+	labels = _headers(model)
+	header = [_xlsx_cell(c, model, handle_html) for c in labels]
 	# Writer sanitation also strips XML control characters. Match those headers
 	# before resolving highlight columns, so a rule cannot target an alias that
 	# becomes ambiguous only when the workbook is written.
@@ -62,6 +85,11 @@ def xlsx(model: ExportModel, *, highlights=None) -> bytes:
 	body = [[_xlsx_cell(c, model, handle_html) for c in row] for row in model.rows]
 	title = (model.meta.get("title") or "Export")[:31]
 	data = [header] + body
-	rules = validate_highlights(highlights, data)
+	try:
+		rules = validate_highlights(_rules_by_header(highlights, model, labels), data)
+	except InvalidArgumentError as e:
+		# The headers are labels the caller never saw: name the columns it can use.
+		names = ", ".join(f"{h} ({k})" if h != k else h for k, h in zip(model.columns, labels, strict=True))
+		raise InvalidArgumentError(f"{e} Columns in this export: {names}.") from None
 	model.meta["highlight_count"] = len(rules)
 	return compat.xlsx_bytes([(title, data)], highlights=[rules])
