@@ -5,6 +5,7 @@
 // owns the one shared popup, so this only reports focus/typing and the pick.
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
 import { cellOptions } from "@/lib/docFields";
+import { checkToYesNo } from "@/lib/draftApply";
 
 const props = defineProps({
 	field: { type: Object, required: true },
@@ -23,8 +24,24 @@ const props = defineProps({
 });
 const emit = defineEmits(["link-search", "link-blur", "link-pick", "link-close"]);
 
-const NUMBER = ["Int", "Float", "Currency", "Percent"];
-const LONG_TEXT = ["Small Text", "Text", "Long Text", "Text Editor", "Code", "Markdown Editor"];
+const NUMBER = ["Int", "Float", "Currency", "Percent", "Rating"];
+const LONG_TEXT = [
+	"Small Text",
+	"Text",
+	"Long Text",
+	"Text Editor",
+	"Code",
+	"Markdown Editor",
+	"JSON",
+];
+// A "Read Only" fieldtype is a computed display field: never an input.
+const isReadOnly = () => props.readOnly || props.field.fieldtype === "Read Only";
+// A read-only Check reads Yes/No, as its control would.
+const shown = () => {
+	const v = props.row[props.field.fieldname];
+	if (props.field.fieldtype === "Check") return checkToYesNo(v);
+	return v == null || v === "" ? "-" : v;
+};
 
 function search(ev) {
 	emit(
@@ -38,7 +55,15 @@ function search(ev) {
 </script>
 
 <template>
-	<span v-if="readOnly" class="jv-cell-ro">{{ row[field.fieldname] }}</span>
+	<span
+		v-if="isReadOnly()"
+		class="jv-cell-ro"
+		:id="controlId || undefined"
+		role="textbox"
+		aria-readonly="true"
+		:aria-label="label || undefined"
+		>{{ shown() }}</span
+	>
 	<template v-else-if="field.fieldtype === 'Link'">
 		<input
 			class="jv-action-input"
@@ -62,6 +87,14 @@ function search(ev) {
 	<input
 		v-else-if="NUMBER.includes(field.fieldtype)"
 		type="number"
+		class="jv-action-input"
+		:id="controlId || undefined"
+		:aria-label="label || undefined"
+		v-model="row[field.fieldname]"
+	/>
+	<input
+		v-else-if="field.fieldtype === 'Datetime' || field.fieldtype === 'Time'"
+		:type="field.fieldtype === 'Datetime' ? 'datetime-local' : 'time'"
 		class="jv-action-input"
 		:id="controlId || undefined"
 		:aria-label="label || undefined"

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ruleHolds, rowExtraValues, rowFields, rowFormLayout, typedRow } from "./rowForm";
+import { allRowFields as rowFields } from "./draftApply";
+import { ruleHolds, rowExtraValues, rowFormLayout, rowStatus, typedRow } from "./rowForm";
 
 const F = (fieldname, fieldtype = "Data", extra = {}) => ({
 	fieldname,
@@ -137,14 +138,93 @@ describe("rowExtraValues", () => {
 	it("lists the filled fields the grid does not show, never a grid column", () => {
 		const out = rowExtraValues(table, row({ discount_percentage: "10", rate: "5" }), {});
 		expect(out).toEqual([
-			{ label: "discount percentage", value: "10" },
-			{ label: "is free item", value: "0" },
+			{ fieldname: "discount_percentage", label: "discount percentage", value: "10" },
 		]);
 	});
-	it("leaves out a field its depends_on hides", () => {
+	it("skips zeros and an unticked Check, and reads a ticked Check as Yes", () => {
+		const out = rowExtraValues(
+			table,
+			row({ discount_percentage: "0", is_free_item: "1" }),
+			{}
+		);
+		expect(out).toEqual([{ fieldname: "is_free_item", label: "is free item", value: "Yes" }]);
+	});
+	it("still lists a filled field its rule would hide, so nothing saved is out of sight", () => {
 		const out = rowExtraValues(table, row({ free_reason: "promo" }), {});
-		expect(out.map((x) => x.label)).not.toContain("free reason");
-		const shown = rowExtraValues(table, row({ free_reason: "promo", is_free_item: "1" }), {});
-		expect(shown.map((x) => x.label)).toContain("free reason");
+		expect(out.map((x) => x.fieldname)).toContain("free_reason");
+	});
+});
+
+describe("rules see what Desk's doc and parent hold", () => {
+	it("a row carries docstatus, idx, name and __islocal", () => {
+		const fresh = typedRow([], {}, { index: 2, docstatus: 1 });
+		expect(fresh).toEqual({ docstatus: 1, idx: 3, name: "", __islocal: 1 });
+		expect(typedRow([], { __name: "r1" }).__islocal).toBe(0);
+	});
+	it("keeps a field whose rule reads them, as Desk does", () => {
+		const t = {
+			columns: [],
+			formFields: [
+				F("a", "Data", { depends_on: "eval:doc.docstatus==0" }),
+				F("b", "Data", { depends_on: "eval:!doc.__islocal" }),
+			],
+		};
+		const shown = (r, p) =>
+			rowFormLayout(t, r, p).flatMap((s) => s.columns.flat().map((i) => i.field.fieldname));
+		expect(shown({}, {})).toEqual(["a"]); // a new row: __islocal hides b
+		expect(shown({ __name: "r1" }, {})).toEqual(["a", "b"]);
+		expect(shown({ __name: "r1" }, { docstatus: 1 })).toEqual(["b"]);
+	});
+	it("a broken mandatory or read-only rule neither demands a value nor locks the field", () => {
+		const t = {
+			columns: [],
+			formFields: [
+				F("x", "Data", {
+					mandatory_depends_on: "eval:doc.nope.deeper",
+					read_only_depends_on: "fn:some_method",
+				}),
+			],
+		};
+		const [item] = rowFormLayout(t, { x: "" }, {})[0].columns[0];
+		expect(item.reqd).toBe(false);
+		expect(item.readOnly).toBe(false);
+		expect(ruleHolds("eval:doc.(", {}, {}, false)).toBe(false);
+	});
+	it("a tab's rule hides the sections inside it", () => {
+		const t = {
+			columns: [],
+			formFields: [
+				BREAK("Tab Break", "Stock", { depends_on: "eval:parent.update_stock" }),
+				BREAK("Section Break", "Bins"),
+				F("bin"),
+				BREAK("Tab Break", "Other"),
+				F("note"),
+			],
+		};
+		const labels = (p) => rowFormLayout(t, { bin: "", note: "" }, p).map((s) => s.label);
+		expect(labels({ update_stock: 0 })).toEqual(["Other"]);
+		expect(labels({ update_stock: 1 })).toEqual(["Bins", "Other"]);
+	});
+});
+
+describe("rowStatus", () => {
+	it("counts blank required fields, including ones a failed save named", () => {
+		const s = rowStatus(table, row({ qty: "3", warehouse: "" }), { update_stock: 1 }, null);
+		expect(s.missing).toBe(1); // warehouse, required because qty > 0
+		const named = rowStatus(
+			table,
+			{ ...row({ qty: "0" }), __missing: ["serial_no"] },
+			{ update_stock: 1 },
+			null
+		);
+		expect(named.missing).toBe(1);
+	});
+	it("on an update, finds what differs from the saved row and counts non-grid changes", () => {
+		// A saved row has every field of the form (load_doc returns them all).
+		const saved = { ...row({ qty: "2", discount_percentage: "0" }), name: "r1" };
+		const r = { ...row(), __name: "r1", qty: "5", discount_percentage: "15" };
+		const s = rowStatus(table, r, { update_stock: 1 }, saved);
+		expect([...s.changedFields].sort()).toEqual(["discount_percentage", "qty"]);
+		expect(s.changed).toBe(1); // qty is a grid column; only the discount counts
 	});
 });

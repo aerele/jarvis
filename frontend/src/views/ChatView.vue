@@ -4185,64 +4185,112 @@
 													/>
 												</td>
 												<td class="jv-grid-x">
-													<button
-														v-if="t.formFields && t.formFields.length"
-														class="jv-grid-more"
-														:aria-expanded="
-															r.__open ? 'true' : 'false'
-														"
-														:aria-controls="
-															'jv-rowform-' + ti + '-' + ri
-														"
-														:title="
-															r.__open
-																? 'Hide other fields'
-																: 'Show all fields'
-														"
-														:aria-label="
-															(r.__open
-																? 'Hide other fields of row '
-																: 'Show all fields of row ') +
-															(ri + 1)
-														"
-														@click="r.__open = !r.__open"
-													>
-														{{ r.__open ? "▾" : "▸" }}
-													</button>
-													<button
-														class="jv-grid-del"
-														@click="removeDraftRow(ti, ri)"
-														title="Remove row"
-														aria-label="Remove row"
-													>
-														✕
-													</button>
-												</td>
-											</tr>
-											<tr v-if="r.__open" class="jv-grid-formrow">
-												<td
-													:colspan="t.columns.length + 1"
-													:id="'jv-rowform-' + ti + '-' + ri"
-												>
-													<DraftRowForm
-														:table="t"
-														:row="r"
-														:parent="draftParentValues"
-														:table-index="ti"
-														:row-index="ri"
-														:draft-link="draftLink"
-														:palette="paletteVars"
-														@link-search="onDraftLink"
-														@link-blur="closeDraftLink"
-														@link-pick="pickDraftLink"
-														@link-close="draftLink.open = false"
-													/>
+													<span class="jv-grid-acts">
+														<button
+															v-if="
+																t.formFields && t.formFields.length
+															"
+															type="button"
+															class="jv-grid-more"
+															:class="{
+																'jv-grid-more-warn': rowStatusFor(
+																	t,
+																	r,
+																	ri
+																).missing,
+															}"
+															:aria-expanded="
+																r.__open ? 'true' : 'false'
+															"
+															:aria-controls="
+																r.__open
+																	? 'jv-rowform-' + ti + '-' + ri
+																	: undefined
+															"
+															:title="
+																'All fields of row ' + (ri + 1)
+															"
+															:aria-label="rowToggleLabel(t, r, ri)"
+															@click="r.__open = !r.__open"
+														>
+															<span aria-hidden="true">{{
+																r.__open ? "▾" : "▸"
+															}}</span>
+															<span
+																v-if="
+																	rowStatusFor(t, r, ri).missing
+																"
+																class="jv-grid-badge jv-grid-badge-warn"
+																aria-hidden="true"
+																>{{
+																	rowStatusFor(t, r, ri).missing
+																}}</span
+															>
+															<span
+																v-else-if="
+																	rowStatusFor(t, r, ri).changed
+																"
+																class="jv-grid-badge"
+																aria-hidden="true"
+																>{{
+																	rowStatusFor(t, r, ri).changed
+																}}</span
+															>
+														</button>
+														<button
+															type="button"
+															class="jv-grid-del"
+															@click="removeDraftRow(ti, ri)"
+															title="Remove row"
+															:aria-label="'Remove row ' + (ri + 1)"
+														>
+															✕
+														</button>
+													</span>
 												</td>
 											</tr>
 										</template>
 									</tbody>
 								</table>
 							</div>
+							<template v-for="(r, ri) in t.rows" :key="'form-' + ri">
+								<section
+									v-if="r.__open"
+									:id="'jv-rowform-' + ti + '-' + ri"
+									class="jv-rowform-block"
+									:aria-label="'All fields of row ' + (ri + 1)"
+								>
+									<div class="jv-rowform-head">
+										<span class="jv-rowform-title"
+											>Row {{ ri + 1
+											}}<template v-if="rowTitle(t, r)">
+												· {{ rowTitle(t, r) }}</template
+											></span
+										>
+										<button
+											type="button"
+											class="jv-rowform-close"
+											@click="r.__open = false"
+										>
+											Done
+										</button>
+									</div>
+									<DraftRowForm
+										:table="t"
+										:row="r"
+										:parent="draftParentValues"
+										:table-index="ti"
+										:row-index="ri"
+										:changed-fields="rowStatusFor(t, r, ri).changedFields"
+										:draft-link="draftLink"
+										:palette="paletteVars"
+										@link-search="onDraftLink"
+										@link-blur="closeDraftLink"
+										@link-pick="pickDraftLink"
+										@link-close="draftLink.open = false"
+									/>
+								</section>
+							</template>
 							<button class="jv-draft-addrow" @click="addDraftRow(ti)">
 								＋ Add row
 							</button>
@@ -4545,7 +4593,7 @@ import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTool
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
-import { cellOptions, markMissing, panelField as _panelField } from "@/lib/docFields";
+import { markMissing, panelField as _panelField } from "@/lib/docFields";
 import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
 import {
 	alignComputedRows,
@@ -4554,14 +4602,18 @@ import {
 	draftValues,
 	isFieldMissing,
 	readonlyDisplay,
-	isRowKeyColumn,
-	overlaySavedRows,
 	removedSavedRows,
-	rowKeyColumn,
-	toPanelRow,
 	allRowFields,
-	coerceOut,
+	draftParentDoc,
 } from "@/lib/draftApply";
+import {
+	blankRow,
+	buildDraftTable,
+	markMissingRows,
+	parentDefaults,
+	savedRowFor,
+} from "@/lib/draftTables";
+import { rowStatus } from "@/lib/rowForm";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { replyBarParts, stampDeltaTime, useClientStamp } from "@/lib/replyBar";
 import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
@@ -7387,13 +7439,26 @@ function _actField(meta, label) {
 const draftPanel = ref(null);
 // The record's own values as Desk's `parent` holds them, for a child row's
 // depends_on rules in its full form (DraftRowForm).
-const draftParentValues = computed(() => {
-	const p = draftPanel.value;
-	if (!p) return {};
-	const doc = { ...p.linkContext, doctype: p.doctype, name: p.docName || "" };
-	for (const f of p.fields) doc[f.fieldname] = coerceOut(f);
-	return doc;
-});
+const draftParentValues = computed(() => draftParentDoc(draftPanel.value));
+// A row's form status for its toggle and form: blank required fields, and (on an
+// update) what differs from the saved row.
+function rowStatusFor(t, r, ri) {
+	return rowStatus(t, r, draftParentValues.value, savedRowFor(t, r), { index: ri });
+}
+// The toggle's accessible name: which row, and what needs attention in it.
+function rowToggleLabel(t, r, ri) {
+	const s = rowStatusFor(t, r, ri);
+	let label = `All fields of row ${ri + 1}`;
+	if (s.missing)
+		label += `, ${s.missing} required ${s.missing === 1 ? "field" : "fields"} blank`;
+	else if (s.changed) label += `, ${s.changed} ${s.changed === 1 ? "field" : "fields"} changed`;
+	return label;
+}
+// The row's first grid value (its item, usually), to name it above its form.
+function rowTitle(t, r) {
+	const c = t.columns.find((x) => !x.read_only) || t.columns[0];
+	return c ? String(r[c.fieldname] ?? "").trim() : "";
+}
 // Drafts the server turned into a gated confirmation card (sensitive
 // configuration): message name -> the note. Waiting, not saved, never re-applied.
 const parkedDrafts = ref(new Map());
@@ -7581,38 +7646,15 @@ async function buildDraftModel(a) {
 	for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
 	for (const [tf, spec] of Object.entries(meta.tables || {})) {
 		const metaField = meta.fields.find((f) => f.fieldname === tf) || { reqd: 0 };
-		const baseRows = (base.tables || {})[tf] || [];
-		const proposedRows = aTables[tf] && overlaySavedRows(aTables[tf], baseRows);
-		if (!proposedRows && !metaField.reqd && !baseRows.length) continue;
-		// columns = child meta columns ∪ keys the agent used, each typed from the
-		// child's meta (unknown keys → data input)
-		const columns = spec.columns.slice();
-		const known = new Set(columns.map((c) => c.fieldname));
-		for (const r of proposedRows || []) {
-			for (const k of Object.keys(r)) {
-				if (!known.has(k) && isRowKeyColumn(k)) {
-					known.add(k);
-					columns.push(rowKeyColumn(k, spec.extra_columns));
-				}
-			}
-		}
-		const srcRows = proposedRows != null ? proposedRows : baseRows; // proposal REPLACES loaded rows
-		// Every field of the row form rides on each row (not just the grid's
-		// columns), so the row's full form shows its values and Apply sends edits.
-		const formFields = spec.form_fields || [];
-		const fieldsOfRow = allRowFields({ columns, formFields });
-		// Each row keeps its saved name (__name) so Apply edits THAT row (CR-3).
-		const rows = srcRows.map((r) => toPanelRow(fieldsOfRow, r));
-		if (!rows.length) rows.push(_blankRow(fieldsOfRow));
-		tables.push({
+		const table = buildDraftTable({
 			fieldname: tf,
-			label: spec.label,
-			child: spec.child_doctype,
-			columns,
-			formFields,
-			rows,
-			origJson: JSON.stringify(verb === "update" ? baseRows : null), // raw saved rows
+			spec,
+			required: !!metaField.reqd,
+			proposed: aTables[tf],
+			saved: (base.tables || {})[tf] || [],
+			verb,
 		});
+		if (table) tables.push(table);
 	}
 	// A Prompt-autonamed DocType (e.g. Server Script) carries its document name as a
 	// proposed "name" field, not a real DocField, so it never lands in `fields`.
@@ -7640,6 +7682,9 @@ async function buildDraftModel(a) {
 		// stages the next step without the user typing "continue".
 		cont: a.continue ? 1 : 0,
 		linkContext: { ...base.values, ...proposed },
+		// For child rows' rules: Desk's new-form defaults and the record's docstatus.
+		parentDefaults: verb === "create" ? parentDefaults(meta.fields) : {},
+		docstatus: Number(base.docstatus || 0),
 		fields,
 		tables,
 		tableMeta: meta.tables || {},
@@ -7679,14 +7724,9 @@ async function openDraftPanel(a) {
 	return true;
 }
 
-function _blankRow(columns) {
-	const o = {};
-	for (const c of columns) o[c.fieldname] = "";
-	return o;
-}
 function addDraftRow(ti) {
 	const t = draftPanel.value.tables[ti];
-	t.rows.push(_blankRow(allRowFields(t)));
+	t.rows.push(blankRow(t));
 }
 function removeDraftRow(ti, ri) {
 	draftPanel.value.tables[ti].rows.splice(ri, 1);
@@ -7787,8 +7827,10 @@ const draftTotals = computed(() => {
 		hasQty = false,
 		hasAmt = false;
 	for (const t of p.tables) {
-		const q = t.columns.find((c) => c.fieldname === "qty");
-		const r = t.columns.find((c) => c.fieldname === "rate");
+		// Any field of the row, not only the grid's columns: a user's own grid columns
+		// may leave qty or rate out, and the totals must still add up.
+		const q = allRowFields(t).find((c) => c.fieldname === "qty");
+		const r = allRowFields(t).find((c) => c.fieldname === "rate");
 		if (!q) continue;
 		hasQty = true;
 		for (const row of t.rows) {
@@ -7909,6 +7951,7 @@ async function openDraftForMissing(a, error) {
 	const p = draftPanel.value;
 	if (!p) return;
 	markMissing(p, error.fields, (_formMetaCache[p.doctype] || {}).fields);
+	markMissingRows(p, error.fields);
 	p.error = error;
 }
 
@@ -8008,6 +8051,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			p.applying = false;
 			p.error = outcome.error;
 			markMissing(p, p.error.fields, (_formMetaCache[p.doctype] || {}).fields);
+			markMissingRows(p, p.error.fields);
 			return;
 		}
 		// Sensitive configuration: nothing was saved, a confirmation card now waits in
@@ -17322,32 +17366,96 @@ onUnmounted(() => {
 	color: var(--text-3);
 }
 .jv-grid-x {
-	width: 30px;
+	width: 1%;
 	white-space: nowrap;
+	min-width: 0 !important;
 }
-/* Opens a row's full form (DraftRowForm) under it. */
+.jv-grid-acts {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+/* Opens a row's full form (DraftRowForm, below the grid). A ~32px target, kept
+   apart from Remove so a thumb aimed at one does not hit the other. */
+.jv-grid-more,
+.jv-grid-del {
+	min-width: 32px;
+	min-height: 32px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 3px;
+}
 .jv-grid-more {
 	background: none;
-	border: none;
+	border: 1px solid var(--border);
 	color: var(--text-3);
 	cursor: pointer;
-	padding: 4px 6px;
-	border-radius: 6px;
+	padding: 2px 6px;
+	border-radius: 7px;
 }
 .jv-grid-more:hover,
 .jv-grid-more[aria-expanded="true"] {
 	color: var(--cta);
 	background: var(--surface-1);
 }
+.jv-grid-more-warn {
+	border-color: var(--amber-bd);
+}
+.jv-grid-badge {
+	font-size: 10.5px;
+	font-weight: 650;
+	line-height: 16px;
+	min-width: 16px;
+	padding: 0 4px;
+	border-radius: 8px;
+	background: var(--surface-1);
+	color: var(--text-2);
+}
+.jv-grid-badge-warn {
+	background: var(--amber-bg);
+	color: var(--amber);
+}
 .jv-grid-more:focus-visible,
-.jv-grid-del:focus-visible {
+.jv-grid-del:focus-visible,
+.jv-rowform-close:focus-visible {
 	outline: 2px solid var(--cta);
 	outline-offset: 1px;
 }
-.jv-grid td.jv-grid-formrow,
-.jv-grid-formrow > td {
-	padding: 0;
+/* A row's full form, below the grid's sideways scroller so it fits the panel. */
+.jv-rowform-block {
+	margin-top: 8px;
+	border: 1px solid var(--border);
+	border-radius: 9px;
+	overflow: hidden;
+}
+.jv-rowform-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 6px 8px 6px 12px;
+	background: var(--surface-1);
+	border-bottom: 1px solid var(--border);
+}
+.jv-rowform-title {
+	font-size: 12px;
+	font-weight: 650;
+	color: var(--text-2);
 	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.jv-rowform-close {
+	background: none;
+	border: none;
+	color: var(--cta);
+	font-weight: 600;
+	font-size: 12.5px;
+	cursor: pointer;
+	padding: 4px 6px;
+	min-height: 32px;
 }
 .jv-grid-del {
 	background: none;

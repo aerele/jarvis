@@ -15,13 +15,25 @@ const props = defineProps({
 	// Link-search keys are "t:{table index}:{row index}:{fieldname}".
 	tableIndex: { type: Number, required: true },
 	rowIndex: { type: Number, required: true },
+	// Fields that differ from the saved row (an update), shown as changed.
+	changedFields: { type: Object, default: () => new Set() },
 	draftLink: { type: Object, required: true },
 	palette: { type: Object, default: () => ({}) },
 });
 const emit = defineEmits(["link-search", "link-blur", "link-pick", "link-close"]);
 
-const sections = computed(() => rowFormLayout(props.table, props.row, props.parent));
-const keyFor = (field) => `t:${props.tableIndex}:${props.rowIndex}:${field.fieldname}`;
+const sections = computed(() =>
+	rowFormLayout(props.table, props.row, props.parent, { index: props.rowIndex })
+);
+// The form's own link-search key: a grid column also shown here must not open a
+// second suggestion menu over the same field (draftLinkSearch reads the first
+// four parts, so the suffix changes nothing else).
+const keyFor = (field) => `t:${props.tableIndex}:${props.rowIndex}:${field.fieldname}:form`;
+const serverMissing = computed(() => new Set(props.row.__missing || []));
+const isMissing = (item) =>
+	!item.readOnly &&
+	((item.reqd && !String(props.row[item.field.fieldname] ?? "").trim()) ||
+		serverMissing.value.has(item.field.fieldname));
 const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${field.fieldname}`;
 </script>
 
@@ -36,10 +48,8 @@ const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${fie
 						:key="item.field.fieldname"
 						class="jv-rowform-field"
 						:class="{
-							'jv-rowform-missing':
-								item.reqd &&
-								!item.readOnly &&
-								!String(row[item.field.fieldname] ?? '').trim(),
+							'jv-rowform-missing': isMissing(item),
+							'jv-rowform-changed': changedFields.has(item.field.fieldname),
 						}"
 					>
 						<label :for="idFor(item.field)" class="jv-rowform-label">
@@ -68,7 +78,7 @@ const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${fie
 				</div>
 			</div>
 		</section>
-		<p v-if="!sections.length" class="jv-rowform-empty">No other fields for this row.</p>
+		<p v-if="!sections.length" class="jv-rowform-empty">No other fields apply to this row.</p>
 	</div>
 </template>
 
@@ -111,7 +121,16 @@ const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${fie
 	color: var(--red);
 }
 .jv-rowform-missing :deep(.jv-action-input) {
-	border-color: var(--amber);
+	border-color: var(--amber-bd);
+}
+/* Differs from the saved row (an update), like a changed main field. */
+.jv-rowform-changed .jv-rowform-label {
+	color: var(--cta);
+	font-weight: 600;
+}
+.jv-rowform-changed :deep(.jv-action-input),
+.jv-rowform-changed :deep(.jv-cell-ro) {
+	box-shadow: inset 3px 0 0 var(--cta);
 }
 .jv-rowform-ctl {
 	min-width: 0;

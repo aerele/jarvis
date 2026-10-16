@@ -18,6 +18,7 @@ import {
 	tableRowsPayload,
 	toPanelRow,
 	allRowFields,
+	draftParentDoc,
 } from "./draftApply";
 
 describe("isFieldWritable", () => {
@@ -444,6 +445,28 @@ describe("alignComputedRows (#647)", () => {
 	it("gives up when ERPNext returns a different number of rows", () => {
 		expect(alignComputedRows(table, [{ amount: 10 }])).toBeNull();
 		expect(alignComputedRows(table, undefined)).toBeNull();
+	});
+});
+
+describe("draftParentDoc: the record as a child row's rules read it", () => {
+	it("defaults, then saved and proposed values, then the panel's values, plus name and docstatus", () => {
+		const doc = draftParentDoc({
+			doctype: "Sales Order",
+			docName: "SO-1",
+			docstatus: 1,
+			parentDefaults: { update_stock: "1", currency: "INR" },
+			linkContext: { currency: "USD", customer: "A" },
+			fields: [{ fieldname: "customer", control: "data", value: "B" }],
+		});
+		expect(doc).toEqual({
+			update_stock: "1",
+			currency: "USD",
+			customer: "B",
+			doctype: "Sales Order",
+			name: "SO-1",
+			docstatus: 1,
+		});
+		expect(draftParentDoc(null)).toEqual({});
 	});
 });
 

@@ -1,7 +1,6 @@
 <script setup>
 import { ref, computed, onBeforeUnmount } from "vue";
 import { isRequiredBlank, lineItemSummary } from "@/lib/actionSummary";
-import { coerceOut } from "@/lib/draftApply";
 import { rowExtraValues } from "@/lib/rowForm";
 
 const props = defineProps({
@@ -30,20 +29,15 @@ const fields = computed(() =>
 );
 // Each table through the card's own summary, so a cell ERPNext calculated (#647)
 // reads the same here as on the card.
-// The record's values as a child row's rules read them (`parent`).
-const parentValues = computed(() => {
-	const doc = { ...(props.model.linkContext || {}), doctype: props.model.doctype };
-	for (const f of props.model.fields || []) doc[f.fieldname] = coerceOut(f);
-	return doc;
-});
 const tables = computed(() =>
 	(props.model.tables || [])
 		.filter((t) => (t.rows || []).length)
 		.map((t) => ({
 			...t,
 			view: lineItemSummary(t, (props.model.computed || {})[t.fieldname]),
-			// Per row, the filled fields the grid does not show (its full form).
-			extras: t.rows.map((r) => rowExtraValues(t, r, parentValues.value)),
+			// Per row, the filled fields the grid does not show (its full form). A filled
+			// field is listed whatever its rule says, so no record values are needed.
+			extras: t.rows.map((r, ri) => rowExtraValues(t, r, {}, { index: ri })),
 		}))
 );
 
@@ -207,7 +201,7 @@ onBeforeUnmount(() => {
 									{{ extra.length === 1 ? "field" : "fields" }}
 								</summary>
 								<dl class="dp-rowmore-list">
-									<template v-for="x in extra" :key="x.label">
+									<template v-for="x in extra" :key="x.fieldname">
 										<dt>{{ x.label }}</dt>
 										<dd>{{ x.value }}</dd>
 									</template>

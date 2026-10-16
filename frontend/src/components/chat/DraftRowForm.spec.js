@@ -38,6 +38,28 @@ const mountForm = (row) =>
 	});
 
 describe("a child row's full form in the draft panel", () => {
+	it("marks a field a failed save named as missing, and a changed field", () => {
+		const w = mount(DraftRowForm, {
+			props: {
+				table,
+				row: reactive({
+					item_code: "I",
+					discount_percentage: "9",
+					__missing: ["discount_percentage"],
+				}),
+				tableIndex: 0,
+				rowIndex: 2,
+				changedFields: new Set(["discount_percentage"]),
+				draftLink: { key: "", items: [], open: false, anchor: null },
+			},
+		});
+		const field = w
+			.find('label[for="jv-rowform-0-2-discount_percentage"]')
+			.element.closest(".jv-rowform-field");
+		expect(field.classList.contains("jv-rowform-missing")).toBe(true);
+		expect(field.classList.contains("jv-rowform-changed")).toBe(true);
+	});
+
 	it("shows the fields the grid does not, with labels tied to their controls", () => {
 		const w = mountForm(
 			reactive({ item_code: "I", discount_percentage: "5", is_free_item: "0", amount: "10" })
@@ -47,8 +69,11 @@ describe("a child row's full form in the draft panel", () => {
 		expect(label.exists()).toBe(true);
 		expect(w.find("#jv-rowform-0-2-discount_percentage").element.value).toBe("5");
 		expect(w.find("textarea#jv-rowform-0-2-description").exists()).toBe(true);
-		expect(w.find(".jv-cell-ro").text()).toBe("10"); // read-only shown, not editable
-		expect(w.find("#jv-rowform-0-2-amount").exists()).toBe(false);
+		// Read-only: shown, not editable, and still named by its label.
+		const amount = w.find("#jv-rowform-0-2-amount");
+		expect(amount.element.tagName).toBe("SPAN");
+		expect(amount.attributes("aria-readonly")).toBe("true");
+		expect(amount.text()).toBe("10");
 	});
 
 	it("shows a depends_on field as soon as the row meets its rule", async () => {
@@ -72,7 +97,7 @@ describe("a child row's full form in the draft panel", () => {
 		const w = mountForm(reactive({ item_code: "I", warehouse: "" }));
 		await w.find("#jv-rowform-0-2-warehouse").trigger("focus");
 		const [key, getter, doctype] = w.emitted("link-search")[0];
-		expect(key).toBe("t:0:2:warehouse");
+		expect(key).toBe("t:0:2:warehouse:form"); // its own key: the grid's copy has another
 		expect(doctype).toBe("Warehouse");
 		expect(getter()).toBe("");
 	});

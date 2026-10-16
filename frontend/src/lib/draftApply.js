@@ -61,7 +61,7 @@ export function coerceOut(field) {
 // Every field a row carries: the grid's columns, then the row form's other fields
 // (table.formFields, laid out by lib/rowForm.js). Without form fields (the PWA, an
 // older server) it is just the columns. Kept here because this file imports nothing.
-const BREAK_TYPES = new Set(["Section Break", "Column Break", "Tab Break"]);
+export const BREAK_TYPES = new Set(["Section Break", "Column Break", "Tab Break"]);
 export function allRowFields(table) {
 	const out = [...(table.columns || [])];
 	const seen = new Set(out.map((c) => c.fieldname));
@@ -71,6 +71,20 @@ export function allRowFields(table) {
 		out.push(f);
 	}
 	return out;
+}
+
+// The record as Desk's `parent` holds it for a child row's rules: the form's plain
+// defaults (what a new form would hold), the saved and proposed values, then the
+// panel's current values, plus name and docstatus. One builder for the edit panel,
+// the preview and the link search, so a rule reads the same record everywhere.
+export function draftParentDoc(model) {
+	if (!model) return {};
+	const doc = { ...(model.parentDefaults || {}), ...(model.linkContext || {}) };
+	for (const f of model.fields || []) doc[f.fieldname] = coerceOut(f);
+	doc.doctype = model.doctype;
+	doc.name = model.docName || "";
+	doc.docstatus = Number(model.docstatus || 0);
+	return doc;
 }
 
 function coerceCheck(v) {
@@ -114,11 +128,13 @@ function coerceCell(column, v) {
 // (a Datetime column used to differ and resend - and wipe - the whole table).
 export function toPanelRow(columns, src) {
 	const out = src && src.name ? { __name: src.name } : {};
-	for (const c of columns)
-		out[c.fieldname] = normDateVal(
-			c.fieldtype,
-			src[c.fieldname] == null ? "" : String(src[c.fieldname])
-		);
+	for (const c of columns) {
+		const v = src[c.fieldname];
+		// A JSON field arrives as an object: show (and compare) it as JSON text,
+		// never as "[object Object]".
+		const s = v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+		out[c.fieldname] = normDateVal(c.fieldtype, s);
+	}
 	return out;
 }
 

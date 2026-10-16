@@ -1,4 +1,4 @@
-import { allRowFields, coerceOut } from "./draftApply";
+import { allRowFields, draftParentDoc } from "./draftApply";
 
 export class DraftLinkFilterError extends Error {}
 
@@ -70,8 +70,7 @@ export function resolveLinkFilters(field, doc, parent = null) {
 
 export function draftLinkSearch(model, key) {
 	if (!model || !key) throw unsupported();
-	const doc = { ...model.linkContext, doctype: model.doctype, name: model.docName || "" };
-	for (const f of model.fields) doc[f.fieldname] = coerceOut(f);
+	const doc = draftParentDoc(model);
 	let field, row;
 	if (key.startsWith("f:")) {
 		field = model.fields.find((f) => f.fieldname === key.slice(2));
