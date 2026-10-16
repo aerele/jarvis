@@ -4,7 +4,7 @@
 		description="Your subscription, renewal and upgrade options."
 		:error="accountErr"
 	>
-		<p v-if="accountLoading" class="text-p-base text-ink-gray-6">Loading…</p>
+		<div v-if="accountLoading" class="grid place-items-center py-10"><JvSpinner /></div>
 
 		<!-- The error copy itself rides SettingsPane's :error prop; only the
 		     recovery control lives here, so retry is one pattern across the whole
@@ -176,6 +176,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import { useShellStore } from "@/stores/shell";
 import { errMessage as errMsg } from "@/lib/errors";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 
 const { confirm } = useConfirm();
 const router = useRouter();
