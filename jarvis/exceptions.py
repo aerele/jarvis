@@ -172,6 +172,15 @@ class NoDataError(InvalidArgumentError):
 	error envelopes route it the same way."""
 
 
+class ExportTooSlowError(InvalidArgumentError):
+	"""An export would outlast the plugin's call abort, so it was stopped before a
+	File was written (a file nobody receives is an orphan, and the agent retries the
+	same heavy query). Telemetry tells it from other refusals (``too_slow``); the
+	envelope keeps the ``InvalidArgumentError`` code every consumer already knows."""
+
+	envelope_code = "InvalidArgumentError"
+
+
 class ResultTooLargeError(InvalidArgumentError):
 	"""Raised when a row-dumping tool's result exceeds the guard threshold
 	and the caller did not opt in with ``confirm_large=True``.
