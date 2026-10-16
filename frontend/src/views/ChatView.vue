@@ -4611,7 +4611,7 @@ import {
 	buildDraftTable,
 	markMissingRows,
 	parentDefaults,
-	savedRowFor,
+	savedRowsByName,
 } from "@/lib/draftTables";
 import { rowStatus } from "@/lib/rowForm";
 import { stripBlocks } from "@/lib/chatBlocks";
@@ -7442,8 +7442,23 @@ const draftPanel = ref(null);
 const draftParentValues = computed(() => draftParentDoc(draftPanel.value));
 // A row's form status for its toggle and form: blank required fields, and (on an
 // update) what differs from the saved row.
+// Each row's status is worked out once per change for the whole panel, not once
+// per place the template shows it (a row's toggle reads it several times).
+const draftRowStatuses = computed(() => {
+	const p = draftPanel.value;
+	if (!p) return [];
+	const parent = draftParentValues.value;
+	return p.tables.map((t) => {
+		const saved = savedRowsByName(t);
+		return t.rows.map((r, ri) =>
+			rowStatus(t, r, parent, (r.__name && saved.get(r.__name)) || null, { index: ri })
+		);
+	});
+});
+const NO_STATUS = { missing: 0, changed: 0, changedFields: new Set() };
 function rowStatusFor(t, r, ri) {
-	return rowStatus(t, r, draftParentValues.value, savedRowFor(t, r), { index: ri });
+	const ti = draftPanel.value ? draftPanel.value.tables.indexOf(t) : -1;
+	return (draftRowStatuses.value[ti] || [])[ri] || NO_STATUS;
 }
 // The toggle's accessible name: which row, and what needs attention in it.
 function rowToggleLabel(t, r, ri) {

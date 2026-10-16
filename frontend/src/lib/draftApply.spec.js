@@ -468,6 +468,15 @@ describe("draftParentDoc: the record as a child row's rules read it", () => {
 		});
 		expect(draftParentDoc(null)).toEqual({});
 	});
+	it("a blank panel field leaves its default in place", () => {
+		const doc = draftParentDoc({
+			doctype: "Sales Order",
+			parentDefaults: { currency: "INR" },
+			linkContext: {},
+			fields: [{ fieldname: "currency", control: "link", value: "" }],
+		});
+		expect(doc.currency).toBe("INR");
+	});
 });
 
 describe("row form fields: a row carries and saves every field of its form", () => {

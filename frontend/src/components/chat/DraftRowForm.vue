@@ -30,10 +30,11 @@ const sections = computed(() =>
 // four parts, so the suffix changes nothing else).
 const keyFor = (field) => `t:${props.tableIndex}:${props.rowIndex}:${field.fieldname}:form`;
 const serverMissing = computed(() => new Set(props.row.__missing || []));
+// Required and blank, or named by a failed save and still blank.
 const isMissing = (item) =>
 	!item.readOnly &&
-	((item.reqd && !String(props.row[item.field.fieldname] ?? "").trim()) ||
-		serverMissing.value.has(item.field.fieldname));
+	!String(props.row[item.field.fieldname] ?? "").trim() &&
+	(item.reqd || serverMissing.value.has(item.field.fieldname));
 const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${field.fieldname}`;
 </script>
 
@@ -96,6 +97,7 @@ const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${fie
 	font-weight: 650;
 	color: var(--text-2);
 	margin-bottom: 6px;
+	overflow-wrap: anywhere;
 }
 .jv-rowform-cols {
 	display: grid;
@@ -116,6 +118,9 @@ const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${fie
 .jv-rowform-label {
 	font-size: 12px;
 	color: var(--text-3);
+	/* A long label (or one long word) wraps instead of widening its column past a
+	   phone screen. */
+	overflow-wrap: anywhere;
 }
 .jv-rowform-req {
 	color: var(--red);
@@ -137,7 +142,12 @@ const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${fie
 }
 .jv-rowform-ctl :deep(.jv-action-input) {
 	width: 100%;
+	max-width: 100%;
+	min-width: 0;
 	box-sizing: border-box;
+}
+.jv-rowform-ctl :deep(.jv-cell-ro) {
+	overflow-wrap: anywhere;
 }
 .jv-rowform-ctl :deep(.jv-cell-ro) {
 	color: var(--text-3);

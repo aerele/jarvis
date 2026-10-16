@@ -79,8 +79,14 @@ export function allRowFields(table) {
 // the preview and the link search, so a rule reads the same record everywhere.
 export function draftParentDoc(model) {
 	if (!model) return {};
-	const doc = { ...(model.parentDefaults || {}), ...(model.linkContext || {}) };
-	for (const f of model.fields || []) doc[f.fieldname] = coerceOut(f);
+	const defaults = model.parentDefaults || {};
+	const doc = { ...defaults, ...(model.linkContext || {}) };
+	// A blank panel field leaves its default in place (a required field shown empty
+	// must not erase what Desk's new form would hold).
+	for (const f of model.fields || []) {
+		const blank = String(f.value ?? "").trim() === "";
+		if (!(blank && f.fieldname in defaults)) doc[f.fieldname] = coerceOut(f);
+	}
 	doc.doctype = model.doctype;
 	doc.name = model.docName || "";
 	doc.docstatus = Number(model.docstatus || 0);

@@ -114,14 +114,31 @@ describe("savedRowFor / parentDefaults / markMissingRows", () => {
 		expect(
 			parentDefaults([
 				{ fieldname: "update_stock", fieldtype: "Check", default: "1" },
+				{ fieldname: "is_return", fieldtype: "Check", default: "0" },
+				{ fieldname: "currency", fieldtype: "Link", default: "INR" },
 				{ fieldname: "items", fieldtype: "Table", default: "x" },
 				{ fieldname: "title", fieldtype: "Data", default: "" },
 			])
-		).toEqual({ update_stock: "1" });
+		).toEqual({ update_stock: 1, is_return: 0, currency: "INR" }); // a "0" is falsy, as in Desk
+	});
+
+	it("counts only the rows the save sent: a blank new row is skipped", () => {
+		const create = buildDraftTable({
+			fieldname: "items",
+			spec,
+			proposed: [{ item_code: "" }, { item_code: "A" }, { item_code: "B" }],
+			verb: "create",
+		});
+		create.rows[0] = { item_code: "", qty: "", discount_percentage: "", warehouse: "" };
+		markMissingRows({ verb: "create", tables: [create] }, [
+			{ parentfield: "items", idx: 2, fieldname: "warehouse" },
+		]);
+		expect(create.rows[2].__missing).toEqual(["warehouse"]); // the 2nd SENT row is panel row 3
+		expect(create.rows[1].__missing).toBeUndefined();
 	});
 
 	it("marks and opens the rows a failed save names, and clears old marks", () => {
-		const model = { tables: [t] };
+		const model = { verb: "update", tables: [t] };
 		t.rows[0].__missing = ["stale"];
 		const n = markMissingRows(model, [
 			{ parentfield: "items", idx: 2, fieldname: "warehouse" },

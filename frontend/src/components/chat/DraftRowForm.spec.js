@@ -45,7 +45,8 @@ describe("a child row's full form in the draft panel", () => {
 				row: reactive({
 					item_code: "I",
 					discount_percentage: "9",
-					__missing: ["discount_percentage"],
+					description: "",
+					__missing: ["discount_percentage", "description"],
 				}),
 				tableIndex: 0,
 				rowIndex: 2,
@@ -56,7 +57,12 @@ describe("a child row's full form in the draft panel", () => {
 		const field = w
 			.find('label[for="jv-rowform-0-2-discount_percentage"]')
 			.element.closest(".jv-rowform-field");
-		expect(field.classList.contains("jv-rowform-missing")).toBe(true);
+		const blank = w
+			.find('label[for="jv-rowform-0-2-description"]')
+			.element.closest(".jv-rowform-field");
+		expect(blank.classList.contains("jv-rowform-missing")).toBe(true); // named and still blank
+		// Named by a failed save but already filled: not missing; still changed.
+		expect(field.classList.contains("jv-rowform-missing")).toBe(false);
 		expect(field.classList.contains("jv-rowform-changed")).toBe(true);
 	});
 

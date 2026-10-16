@@ -6,6 +6,7 @@
 // values and Apply can send what the user edits there.
 import {
 	allRowFields,
+	coerceRow,
 	isRowKeyColumn,
 	overlaySavedRows,
 	rowKeyColumn,
@@ -54,36 +55,58 @@ export function buildDraftTable({ fieldname, spec, required, proposed, saved = [
 }
 
 // The saved row a panel row came from (by its name), for showing what changed.
-export function savedRowFor(table, row) {
-	if (!row || !row.__name) return null;
+// The table's saved rows by name, parsed once (the card renders a status per row).
+export function savedRowsByName(table) {
 	let saved = [];
 	try {
 		saved = JSON.parse(table.origJson || "null") || [];
 	} catch {
 		saved = [];
 	}
-	return saved.find((r) => r && r.name === row.__name) || null;
+	const out = new Map();
+	for (const r of saved) if (r && r.name) out.set(r.name, r);
+	return out;
+}
+
+export function savedRowFor(table, row) {
+	return (row && row.__name && savedRowsByName(table).get(row.__name)) || null;
 }
 
 // The plain defaults of the record's own fields (what Desk's new form holds), so a
 // child rule reading `parent.update_stock` on a create sees Desk's default.
+// A Check or number default is a number, as Desk's doc holds it: the string "0" is
+// truthy, and `eval:!parent.x` would read it the wrong way.
+const NUMERIC_TYPES = new Set(["Check", "Int", "Float", "Currency", "Percent", "Rating"]);
 export function parentDefaults(metaFields) {
 	const out = {};
-	for (const f of metaFields || [])
-		if (f.fieldtype !== "Table" && f.default) out[f.fieldname] = f.default;
+	for (const f of metaFields || []) {
+		if (f.fieldtype === "Table" || !f.default) continue;
+		const n = Number(f.default);
+		out[f.fieldname] = NUMERIC_TYPES.has(f.fieldtype) && !Number.isNaN(n) ? n : f.default;
+	}
 	return out;
+}
+
+// The panel rows the save sent, in the order it sent them: a blank new row is never
+// sent (draftValues / tableRowsPayload), so the server's row numbers count only the
+// rest. A saved row is always sent on an update (by name), even unchanged.
+function sentRows(table, verb) {
+	return table.rows.filter(
+		(r) => (verb === "update" && r.__name) || Object.keys(coerceRow(table, r, verb)).length
+	);
 }
 
 // Put a failed save's missing child fields on their rows and open those rows, so
 // the user sees what is missing instead of a silent failure (entries carry
-// parentfield, idx and fieldname). Returns how many rows were marked.
+// parentfield, idx and fieldname; idx counts the rows the save sent). Returns how
+// many rows were marked.
 export function markMissingRows(model, missing) {
 	for (const t of model.tables || []) for (const r of t.rows) delete r.__missing;
 	let marked = 0;
 	for (const m of missing || []) {
 		if (!m || !m.parentfield || !m.idx) continue;
 		const t = (model.tables || []).find((x) => x.fieldname === m.parentfield);
-		const row = t && t.rows[Number(m.idx) - 1];
+		const row = t && sentRows(t, model.verb)[Number(m.idx) - 1];
 		if (!row) continue;
 		if (!row.__missing) {
 			row.__missing = [];

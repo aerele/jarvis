@@ -167,7 +167,8 @@ export function rowStatus(table, row, parent, savedRow, ctx = {}) {
 			for (const item of col) {
 				const name = item.field.fieldname;
 				const v = row[name] == null ? "" : String(row[name]);
-				if (!item.readOnly && ((item.reqd && !v.trim()) || serverMissing.has(name)))
+				// A field a failed save named stays flagged only while it is still blank.
+				if (!item.readOnly && !v.trim() && (item.reqd || serverMissing.has(name)))
 					missing++;
 				if (before && !item.readOnly && v !== (before[name] ?? "")) {
 					changedFields.add(name);

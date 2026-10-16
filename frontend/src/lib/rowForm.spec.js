@@ -218,6 +218,14 @@ describe("rowStatus", () => {
 			null
 		);
 		expect(named.missing).toBe(1);
+		// Once the user fills it, it is no longer missing.
+		const filled = rowStatus(
+			table,
+			{ ...row({ qty: "0", serial_no: "SN-1" }), __missing: ["serial_no"] },
+			{ update_stock: 1 },
+			null
+		);
+		expect(filled.missing).toBe(0);
 	});
 	it("on an update, finds what differs from the saved row and counts non-grid changes", () => {
 		// A saved row has every field of the form (load_doc returns them all).
