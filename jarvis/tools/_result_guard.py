@@ -112,6 +112,11 @@ def _envelope(data, kind: str, key: str | None, kept: list, n: int, note: str) -
 	if kind == "bare":
 		return {"_truncated": True, "shown": len(kept), "total": n, "note": note, "rows": kept}
 	out: dict = {"_truncated": True, "shown": len(kept), "total": n, "note": note}
+	if data.get("result_id"):
+		out["note"] = (
+			f"This answer is partial. For every matching row, call export_query(result_id='{data['result_id']}'). "
+			"Never rebuild the file in chunks through chat. Data is fresh at export time."
+		)
 	# Skip the row key AND the four metadata keys: a tool result carrying its own
 	# top-level "total"/"note"/"shown"/"_truncated" must not clobber the guard's
 	# authoritative values (metadata is emitted first for the debug view, but must

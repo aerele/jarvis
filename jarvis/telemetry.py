@@ -94,6 +94,26 @@ def record_budget_event(
 		pass
 
 
+def record_export_intent(message: str) -> None:
+	"""Count English status/cancel requests, without logging the user's text.
+
+	A conservative demand signal for a future agent status/cancel tool, not an
+	intent router. This never cancels work or changes the reply.
+	"""
+	import re
+
+	text = (message or "").lower()
+	if not re.search(r"\bexport(?:s|ing)?\b", text):
+		return
+	outcome = None
+	if re.search(r"\b(cancel|stop|abort)\b", text):
+		outcome = "text_cancel_requested"
+	elif re.search(r"\b(status|ready|finished|progress|done|how long)\b", text):
+		outcome = "status_requested"
+	if outcome:
+		record_export_event("export_query", "unknown", 0, mode="intent", outcome=outcome)
+
+
 def record_export_event(
 	tool: str,
 	fmt: str,
