@@ -185,7 +185,10 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	q = compile_spec(spec)
 
 	# Step 7: execute.
-	rows = q.run(as_dict=True)
+	limit = int(spec.get("limit") or DEFAULT_LIMIT)
+	rows = q.limit(limit + 1).run(as_dict=True)
+	partial = len(rows) > limit
+	rows = rows[:limit]
 
 	# Step 8: row guard (post-execute - we can't know the row count
 	# without running, and limiting earlier would break aggregates).
@@ -204,7 +207,20 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	except Exception:
 		resolved_sql = "<sql resolution failed>"
 
-	return {"sql": resolved_sql, "rows": rows}
+	result = {"sql": resolved_sql, "rows": rows}
+	from jarvis.tools._result_guard import enforce_result_budget
+
+	_, budget_event = enforce_result_budget(result, tool="query")
+	if partial or budget_event:
+		from jarvis.tools._export.saved_queries import save
+
+		result["result_id"] = save(spec)
+		result["partial"] = True
+		result["note"] = (
+			"This answer is partial. For every matching row, call "
+			f"export_query(result_id='{result['result_id']}'). Data is fresh at export time."
+		)
+	return result
 
 
 def compile_spec(spec: dict):

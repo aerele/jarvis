@@ -155,6 +155,40 @@ class TestExportQueryMasking(FrappeTestCase):
 		rows = _cells(export_query(DT, fields=["public_field", "secret_phone"], order_by="public_field asc"))
 		self.assertEqual(rows[1], ("xqs-mask-0", "987XXXXXX"))
 
+	def test_background_filter_compiles_sql_then_masks_without_database_reads(self):
+		import tempfile
+		from pathlib import Path
+
+		from jarvis.tools._export import streaming
+		from jarvis.tools._export.database import MariaDBStream, connection_settings
+
+		frappe.set_user(USER_PLAIN)
+		prepared = streaming.prepare(
+			{"doctype": DT, "fields": ["public_field", "secret_phone"], "order_by": "public_field asc"}, 100
+		)
+		db = MariaDBStream(connection_settings()).open()
+		try:
+			with (
+				tempfile.TemporaryDirectory() as directory,
+				mock.patch.object(frappe.db, "sql", side_effect=AssertionError("STREAM queried DB")),
+			):
+				path = Path(directory) / "masked.csv"
+				streaming.write(
+					prepared,
+					db.stream_rows(prepared.sql, prepared.params),
+					path,
+					"csv",
+					100,
+					1024 * 1024,
+					lambda: None,
+					lambda n: None,
+				)
+				text = path.read_text()
+				self.assertIn("987XXXXXX", text)
+				self.assertNotIn(PHONE, text)
+		finally:
+			db.close()
+
 	def test_users_who_may_see_the_values_get_them(self):
 		for user in ("Administrator", USER_MASK):
 			frappe.set_user(user)
