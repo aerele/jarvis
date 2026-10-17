@@ -219,3 +219,30 @@ describe("PdfTemplatesPane Duplicate to edit", () => {
 		expect(payload.based_on).toBeUndefined();
 	});
 });
+
+describe("PdfTemplatesPane first load", () => {
+	it("asks for the options without waiting for the template list", async () => {
+		window.is_jarvis_admin = true;
+		api.listPdfTemplates.mockImplementation(() => new Promise(() => {}));
+		mount(PdfTemplatesPane, { global: { stubs: { SettingsPane: false } } });
+		await flushPromises();
+
+		expect(api.pdfTemplateOptions).toHaveBeenCalledTimes(1);
+	});
+
+	it("shows New template together with the gallery, not before it", async () => {
+		window.is_jarvis_admin = true;
+		listWith([BRANDED, FORMAL]);
+		let finishOptions;
+		api.pdfTemplateOptions.mockImplementation(
+			() => new Promise((resolve) => (finishOptions = resolve))
+		);
+		const w = mount(PdfTemplatesPane, { global: { stubs: { SettingsPane: false } } });
+		await flushPromises();
+		expect(labels(w)).not.toContain("New template");
+
+		finishOptions({ data: { companies: [], letter_heads: [], fonts: [] } });
+		await flushPromises();
+		expect(labels(w)).toContain("New template");
+	});
+});

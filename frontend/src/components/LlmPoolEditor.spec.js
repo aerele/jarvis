@@ -138,6 +138,16 @@ async function idle() {
 	await flushPromises();
 }
 
+// A promise the test settles by hand, to hold one fetch open.
+function deferred() {
+	let resolve, reject;
+	const promise = new Promise((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
 async function mountEditor(props = {}) {
 	const w = mount(LlmPoolEditor, { props });
 	await idle();
@@ -1519,5 +1529,141 @@ describe("saved Anthropic subscription flows", () => {
 		await w.vm.save();
 		expect(api.saveLlmPool).not.toHaveBeenCalled();
 		expect(w.text()).toContain("Keep it first or last");
+	});
+});
+
+describe("first load paints once (settings loading flicker)", () => {
+	it("shows no empty state and no Add button before the pool has loaded", async () => {
+		const cfg = deferred();
+		api.getLlmConfig.mockImplementation(() => cfg.promise);
+		const w = mount(LlmPoolEditor, { props: { editable: true } });
+		await idle();
+
+		expect(w.vm.loaded).toBe(false);
+		expect(w.find(".jv-flist-empty").exists()).toBe(false);
+		expect(w.text()).not.toContain("No models yet");
+		expect(w.text()).not.toContain("Loading models");
+		expect(w.find(".jv-flist-addbtn").exists()).toBe(false);
+
+		cfg.resolve(clone(serverPool));
+		await idle();
+
+		// The box's words depend on the sync status (an "Applied" pill here, since
+		// the fake server reports ok), so check the box itself, not its text.
+		expect(w.vm.loaded).toBe(true);
+		expect(w.find(".jv-flist-empty").exists()).toBe(true);
+		expect(w.find(".jv-flist-addbtn").attributes("disabled")).toBeUndefined();
+	});
+
+	it("still finishes loading when the pool fetch fails", async () => {
+		api.getLlmConfig.mockRejectedValueOnce(new Error("network"));
+		const w = await mountEditor({ editable: true });
+
+		expect(w.vm.loaded).toBe(true);
+		expect(w.text()).toContain("Retry");
+	});
+});
+
+describe("load() starts its fetches together", () => {
+	it("asks for the catalog, sync status and presets without waiting for the pool", async () => {
+		api.getLlmConfig.mockImplementation(() => new Promise(() => {}));
+		mount(LlmPoolEditor, { props: { editable: true } });
+		await idle();
+
+		expect(api.getModelCatalogUi).toHaveBeenCalledTimes(1);
+		expect(api.getLlmSyncStatus).toHaveBeenCalledTimes(1);
+		expect(api.getPresetCatalog).toHaveBeenCalledTimes(1);
+	});
+
+	it("still gives a blank onboarding row its default model when the catalog lands first", async () => {
+		const cfg = deferred();
+		api.getLlmConfig.mockImplementation(() => cfg.promise);
+		const w = mount(LlmPoolEditor, {
+			props: { editable: true, modes: ["quick"], footerless: true },
+		});
+		await idle();
+
+		cfg.resolve(clone(serverPool)); // empty pool: onboarding seeds one blank row
+		await idle();
+
+		expect(w.vm.rows).toHaveLength(1);
+		expect((w.vm.rows[0].model || "").trim()).not.toBe("");
+		expect(w.vm.loaded).toBe(true);
+	});
+
+	it("does not fetch presets in onboarding", async () => {
+		await mountEditor({ editable: true, modes: ["quick"], footerless: true });
+		expect(api.getPresetCatalog).not.toHaveBeenCalled();
+	});
+
+	it("keeps the last preset list when the preset fetch fails", async () => {
+		api.getPresetCatalog.mockImplementationOnce(async () => [{ name: "p1" }]);
+		const w = await mountEditor({ editable: true });
+		api.getPresetCatalog.mockRejectedValueOnce(new Error("x"));
+		await w.vm.load();
+		await idle();
+		expect(w.vm.catalog).toEqual([{ name: "p1" }]);
+	});
+});
+
+describe("first load never waits forever", () => {
+	it("shows the list after 12 s even if the catalog stalls", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		api.getModelCatalogUi.mockImplementation(() => new Promise(() => {}));
+		vi.useFakeTimers();
+		const w = mount(LlmPoolEditor, { props: { editable: true } });
+		await vi.advanceTimersByTimeAsync(11000);
+		expect(w.vm.loaded).toBe(false);
+
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(w.vm.loaded).toBe(true);
+		expect(w.vm.rows).toHaveLength(1);
+	});
+
+	it("waits for a slow pool fetch and draws its answer when it lands, past 12 s", async () => {
+		const cfg = deferred();
+		api.getLlmConfig.mockImplementation(() => cfg.promise);
+		vi.useFakeTimers();
+		const w = mount(LlmPoolEditor, { props: { editable: true } });
+		await vi.advanceTimersByTimeAsync(13000);
+		// Never an empty pool someone could save over: the pool read is not capped.
+		expect(w.vm.loaded).toBe(false);
+		expect(w.find(".jv-flist-empty").exists()).toBe(false);
+
+		cfg.resolve({ ...clone(serverPool), models: [keyModel("openai", "gpt-4o", 0)] });
+		await vi.advanceTimersByTimeAsync(50);
+		expect(w.vm.loaded).toBe(true);
+		expect(w.vm.rows).toHaveLength(1);
+	});
+
+	it("shows only Retry when the pool fetch fails, never an empty pool with Add", async () => {
+		api.getLlmConfig.mockRejectedValueOnce(new Error("network"));
+		const w = await mountEditor({ editable: true });
+
+		expect(w.vm.loaded).toBe(true);
+		expect(w.text()).toContain("Retry");
+		expect(w.find(".jv-flist-empty").exists()).toBe(false);
+		expect(w.find(".jv-flist-addbtn").exists()).toBe(false);
+	});
+
+	it("still applies a sync status that lands after 12 s, and polls a pending one", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const late = deferred();
+		api.getLlmSyncStatus.mockImplementationOnce(() => late.promise);
+		vi.useFakeTimers();
+		const w = mount(LlmPoolEditor, { props: { editable: true } });
+		await vi.advanceTimersByTimeAsync(13000);
+		expect(w.vm.loaded).toBe(true);
+
+		expect(api.getLlmSyncStatus).toHaveBeenCalledTimes(1);
+
+		late.resolve({
+			...clone(syncStatus),
+			last_sync_status: "pending: provisioning",
+			pending: true,
+		});
+		// The late "pending" answer starts the poller, whose first poll asks again.
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(api.getLlmSyncStatus.mock.calls.length).toBeGreaterThan(1);
 	});
 });

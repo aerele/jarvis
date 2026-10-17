@@ -2,7 +2,7 @@
 	<SettingsPane title="Activity" description="Recent tool calls in this chat.">
 		<h3 class="text-base font-semibold text-ink-gray-9">Recent tool runs</h3>
 
-		<div v-if="loading" class="mt-2 text-p-sm text-ink-gray-6">Loading…</div>
+		<div v-if="loading" class="grid place-items-center py-10"><JvSpinner /></div>
 
 		<div v-else-if="!runs.length" class="flex flex-col items-center gap-2 py-12 text-center">
 			<FeatherIcon name="activity" class="size-8 text-ink-gray-4" />
@@ -38,6 +38,7 @@ import { ref, computed, onMounted, watch } from "vue";
 import { FeatherIcon } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import * as api from "@/api";
 
 const shell = useShellStore();
