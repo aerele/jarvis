@@ -355,6 +355,7 @@ scheduler_events = {
 			# SWEEP_TIME_BUDGET_S.
 			# Cheap no-op (one query on a small table) when nothing is due.
 			"jarvis.chat.agent_scheduler.run_due_agent_audits",
+			"jarvis.tools._export.jobs.reap",
 			# Feedback outbox retry (admin-v2#715 F17): re-send stored feedback that
 			# admin has not acknowledged yet, with backoff, at most 6 rows a run, and
 			# stop at the first transient failure. Self-gating (skips a bench with no
@@ -608,6 +609,7 @@ doc_events["Jarvis Conversation"] = {
 		# Slice B: delete the conversation's Jarvis Import Announcement rows so the
 		# Link never blocks deletion (LinkExistsError) or orphans the poll.
 		"jarvis.chat.import_announce.on_conversation_trash",
+		"jarvis.tools._export.jobs.on_conversation_trash",
 		# Pending actions: cancel + delete its chat cards (never an Executing one) and
 		# drop it from held rows' waiters.
 		"jarvis.chat.pending_actions.on_conversation_trash",
@@ -960,3 +962,11 @@ persistent_cache_keys = [
 	"jarvis.oauth.codex_signin",
 	"jarvis:memory_seen:",
 ]
+
+# Durable background export state is owner-scoped, including direct REST reads.
+permission_query_conditions["Jarvis Export Job"] = (
+	"jarvis.jarvis.doctype.jarvis_export_job.jarvis_export_job.get_permission_query_conditions"
+)
+has_permission["Jarvis Export Job"] = (
+	"jarvis.jarvis.doctype.jarvis_export_job.jarvis_export_job.has_permission"
+)

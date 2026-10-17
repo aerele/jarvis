@@ -990,6 +990,7 @@
 								     detail. See chat-report-scope.spec.js (upstream/develop
 								     version, restored). -->
 								<ReportScope :tools="reportToolsByTurn[m.name] || []" />
+								<ExportCard v-if="exportSummary(m)" :summary="exportSummary(m)" />
 								<!-- Phase-0 admission (SUXI-4): a cancelled/aged-out queued turn
 								     leaves a durable marker. Render it as a MUTED note, not the
 								     red error alert - the user (or the system) cancelled it; it
@@ -4277,6 +4278,8 @@ import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import { Button, Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
+import ExportCard from "@/components/chat/ExportCard.vue";
+import { exportSummary } from "@/lib/exportJobs.js";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { reportToolsByAssistant } from "@/lib/reportScope";
 import { toolRowFromResult, upsertToolRow, withLiveToolRows } from "@/lib/liveToolRows";
@@ -11526,6 +11529,7 @@ function onEvent(p) {
 			loadConversation(currentId.value);
 			break;
 		}
+		case "export:changed":
 		case "import:finished": {
 			// Slice B: a background CSV import finished and the bench already
 			// posted the "✓ ..." completion message into this conversation
