@@ -12,11 +12,11 @@
 		description="The look Jarvis applies to the PDFs it generates. Pick the workspace default here or build your own; anyone can reformat a single document from its download card."
 		:error="error"
 	>
-		<template v-if="isAdmin && loaded" #actions>
+		<template v-if="isAdmin && loaded && !loading" #actions>
 			<Button variant="solid" iconLeft="plus" label="New template" @click="newTemplate" />
 		</template>
 
-		<div v-if="loading" class="text-p-sm text-ink-gray-6">Loading…</div>
+		<div v-if="loading" class="grid place-items-center py-10"><JvSpinner /></div>
 
 		<template v-else>
 			<!-- ═══════════ gallery: built in, then the workspace's own ═══════════ -->
@@ -713,6 +713,7 @@ import {
 	toast,
 } from "frappe-ui";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import KvRow from "@/components/settings/KvRow.vue";
 import {
 	deletePdfTemplate,
@@ -950,12 +951,11 @@ async function loadOptions() {
 	}
 }
 
+// Both first calls start together, and the spinner covers both, so the gallery
+// and the New template button appear at the same moment.
 onMounted(async () => {
-	await load();
-	if (isAdmin) {
-		await loadOptions();
-		selectDefaultOrFirst();
-	}
+	await Promise.all([load(), isAdmin ? loadOptions() : null]);
+	if (isAdmin) selectDefaultOrFirst();
 	loading.value = false;
 });
 

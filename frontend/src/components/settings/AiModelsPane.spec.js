@@ -16,13 +16,17 @@ vi.mock("@/components/LlmPoolEditor.vue", () => ({
 		name: "LlmPoolEditor",
 		props: ["reconnectRef", "expiredEntries", "directStatus", "editable", "hostScrim"],
 		emits: ["reconnect-handled", "saved", "direct-changed"],
+		// The real editor exposes `loaded`: true once its first load settles.
+		data: () => ({ loaded: true }),
 		template: `<div class="editor" :data-ref="reconnectRef"></div>`,
 	},
 }));
 vi.mock("@/components/settings/SettingsPane.vue", () => ({
 	default: { name: "SettingsPane", template: "<div><slot /></div>" },
 }));
-vi.mock("@/components/JvSpinner.vue", () => ({ default: { template: "<span/>" } }));
+vi.mock("@/components/JvSpinner.vue", () => ({
+	default: { template: `<span class="stub-spinner"/>` },
+}));
 
 import AiModelsPane from "./AiModelsPane.vue";
 import { useShellStore } from "@/stores/shell";
@@ -30,6 +34,7 @@ import { useShellStore } from "@/stores/shell";
 beforeEach(() => {
 	useShellStore().settingsIntent = null;
 	window.is_system_manager = true;
+	window.is_jarvis_admin = false;
 	api.getDirectSubscriptionStatus.mockResolvedValue({ is_direct_subscription: false });
 	api.getSubscriptionNotice.mockResolvedValue({ expired: [], upstreams: [] });
 });
@@ -84,5 +89,81 @@ describe("AiModelsPane connection probe error", () => {
 		expect(await failWith({ _server_messages: "not json" })).toBe(
 			"Couldn't load your AI connection."
 		);
+	});
+});
+
+describe("AiModelsPane first load", () => {
+	const pending = () => new Promise(() => {});
+	const editor = (w) => w.findComponent({ name: "LlmPoolEditor" });
+	const fill = (w) => w.find(".jv-pane-fill");
+
+	it("mounts the editor while the probe is in flight, hidden behind one spinner", async () => {
+		api.getDirectSubscriptionStatus.mockImplementation(pending);
+		const w = mountPane();
+		await flushPromises();
+
+		expect(editor(w).exists()).toBe(true);
+		expect(fill(w).attributes("style")).toContain("display: none");
+		expect(w.findAll(".stub-spinner")).toHaveLength(1);
+		expect(w.text()).not.toContain("Loading");
+	});
+
+	it("keeps the spinner until the probe AND the editor have both loaded", async () => {
+		const w = mountPane();
+		editor(w).vm.loaded = false;
+		await flushPromises(); // the probe has answered
+		expect(w.find(".stub-spinner").exists()).toBe(true);
+
+		editor(w).vm.loaded = true;
+		await flushPromises();
+		expect(w.find(".stub-spinner").exists()).toBe(false);
+		expect(fill(w).attributes("style") || "").not.toContain("display: none");
+	});
+
+	it("does not bring the spinner back on a background re-probe", async () => {
+		const w = mountPane();
+		await flushPromises();
+		api.getDirectSubscriptionStatus.mockImplementation(pending);
+		editor(w).vm.$emit("direct-changed");
+		await flushPromises();
+
+		expect(w.find(".stub-spinner").exists()).toBe(false);
+		expect(editor(w).exists()).toBe(true);
+	});
+
+	it("shows Retry, not a spinner, when the first probe fails", async () => {
+		api.getDirectSubscriptionStatus.mockRejectedValue(new Error("boom"));
+		const w = mountPane();
+		await flushPromises();
+
+		expect(w.text()).toContain("Retry");
+		expect(w.find(".stub-spinner").exists()).toBe(false);
+	});
+
+	it("keeps the editor mounted through a failed first probe and its Retry", async () => {
+		api.getDirectSubscriptionStatus.mockRejectedValueOnce(new Error("boom"));
+		const w = mountPane();
+		await flushPromises();
+		expect(w.text()).toContain("Retry");
+		expect(editor(w).exists()).toBe(true);
+		expect(fill(w).attributes("style")).toContain("display: none");
+		const before = editor(w).vm;
+
+		await w.vm.loadDirectSub();
+		await flushPromises();
+		expect(editor(w).vm).toBe(before);
+		expect(fill(w).attributes("style") || "").not.toContain("display: none");
+	});
+
+	it("does not strand a non-admin on the spinner (no probe runs)", async () => {
+		window.is_system_manager = false;
+		window.is_jarvis_admin = false;
+		// This spec never clears call counts between tests.
+		api.getDirectSubscriptionStatus.mockClear();
+		const w = mountPane();
+		await flushPromises();
+
+		expect(api.getDirectSubscriptionStatus).not.toHaveBeenCalled();
+		expect(w.find(".stub-spinner").exists()).toBe(false);
 	});
 });
