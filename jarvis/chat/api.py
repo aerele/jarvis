@@ -2660,6 +2660,10 @@ def send_message(
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the job before enqueue
 
 	# R1: the typed reply acts only now that the user row is committed.
+	if not _delegated and not int(background or 0):
+		from jarvis.telemetry import record_export_intent
+
+		record_export_intent(message)
 	_typed_out = _apply_typed_reply(conversation, _typed_snap)
 
 	# Upfront request-scoped "confirm all" (design Layer B): a compound message that
