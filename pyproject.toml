@@ -8,6 +8,7 @@ requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
 dependencies = [
+    "xlsxwriter>=3.2,<4",
     # "frappe~=15.0.0" # Installed and managed by bench.
     "websocket-client>=1.6,<2",
     # PDF -> image rasterization for native LLM vision (jarvis/chat/vision.py).
