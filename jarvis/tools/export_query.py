@@ -14,6 +14,8 @@ query the ``query`` tool takes, compiled under the same permission gates."""
 
 import time
 
+import frappe
+
 from jarvis import telemetry
 from jarvis.exceptions import (
 	ExportTooSlowError,
@@ -23,7 +25,7 @@ from jarvis.exceptions import (
 )
 from jarvis.tools._export import renderers, resolvers, save_export_file
 
-# Seconds the whole export may take before it is refused instead of saved. The plugin
+# Seconds the immediate export may take before handing off to a background job. The plugin
 # aborts every call_tool at 30 s (its frappe-client call timeout): a file
 # finished after that is one nobody receives, and the agent retries the same heavy
 # query. Checked after the query and after the render, BEFORE the File is written,
@@ -64,10 +66,13 @@ def export_query(
 	parent_doctype=None,
 	highlights=None,
 	spec=None,
+	result_id=None,
 ) -> dict:
 	"""Export ``doctype`` rows matching ``filters`` - or every row of the ``query``
-	``spec`` - to ``format`` (``xlsx``|``csv``). Exactly one of ``doctype`` and
-	``spec``; ``filters`` / ``fields`` / ``order_by`` / ``parent_doctype`` belong to
+	``spec`` - to ``format`` (``xlsx``|``csv``). Exactly one of ``doctype``,
+	``spec``, or an owner-bound ``result_id`` from a partial query; saved IDs export
+	all matching rows without the query's limit/offset. ``filters`` / ``fields`` /
+	``order_by`` / ``parent_doctype`` belong to
 	the ``doctype`` form. Headers are the fields' labels.
 
 	Returns the download-card envelope ``{file_url, filename, title, mime_type,
@@ -89,9 +94,11 @@ def export_query(
 
 	A column masked for the user (Frappe 16 field masking) is masked in the file as
 	in a list; a computed column over a masked field is refused. An export that
-	would outlast the call timeout (a slow query or a very large render) is refused
-	before any file is saved (``ExportTooSlowError``): narrow it or split it by a
-	filter.
+	exceeds the immediate row, time or upload-size budget returns an ``export_job``
+	state instead. Its owner-scoped chat card receives progress and the finished
+	file. Background exports have a 200,000-row, 50 MB, ten-minute ceiling and
+	never deliver partial files. Repeated calls join active work or reuse a recent
+	file after rechecking permissions.
 
 	``highlights`` (xlsx only) uses the same column/operator/value/style/scope
 	rules as export_excel, referring to exact exported field headers. Formatting
@@ -102,6 +109,31 @@ def export_query(
 		raise InvalidArgumentError(f"format must be one of {sorted(_FORMATS)}, got {format!r}")
 	mime, render = _FORMATS[fmt]
 	budget = _Budget(_EXPORT_DEADLINE_S)
+	if sum(value is not None for value in (doctype, spec, result_id)) != 1:
+		raise InvalidArgumentError("Pass exactly one of doctype + filters, spec, or result_id.")
+	if result_id is not None:
+		if any(v is not None for v in (filters, fields, order_by, parent_doctype)):
+			raise InvalidArgumentError(
+				"With result_id, do not pass filters, fields, order_by or parent_doctype."
+			)
+		from jarvis.tools._export.saved_queries import resolve
+
+		spec = resolve(result_id)
+	source_args = (
+		{"spec": spec}
+		if spec is not None
+		else {
+			"doctype": doctype,
+			"filters": filters,
+			"fields": fields,
+			"order_by": order_by,
+			"parent_doctype": parent_doctype,
+		}
+	)
+	from jarvis.tools._export import jobs
+
+	# Older benches may receive code before migrate; synchronous exports still work.
+	background_available = frappe.db.table_exists(jobs.DOCTYPE)
 
 	# Every fail-closed exit emits a telemetry outcome too (not just success), so the
 	# refused exports - the ones that would justify raising the ceiling - are visible.
@@ -119,6 +151,18 @@ def export_query(
 					"with spec, put the filters, columns and order in the spec itself "
 					"(where / select / order_by)"
 				)
+		if background_available:
+			found = jobs.existing(source_args, fmt, highlights, join=True)
+			if found:
+				telemetry.record_export_event(
+					"export_query",
+					fmt,
+					found.get("rows_written", 0),
+					mode="background",
+					outcome="state_requested",
+				)
+				return found
+		if spec:
 			model = resolvers.from_spec(spec)
 		else:
 			model = resolvers.from_query(
@@ -131,7 +175,24 @@ def export_query(
 		model.meta["title"] = title or source
 		content = render(model, highlights=highlights) if fmt == "xlsx" else render(model)
 		budget.check()
+		if background_available:
+			from frappe.utils.file_manager import get_max_file_size
+
+			if len(content) > get_max_file_size():
+				raise resolvers.NeedsBackground("The export exceeds the immediate upload-size limit.")
 		env = save_export_file(f"x.{fmt}", content, title=title or source, mime_type=mime)
+	except (resolvers.NeedsBackground, ExportTooSlowError) as e:
+		telemetry.record_export_event(
+			tool="export_query",
+			fmt=fmt,
+			rows=0,
+			mode="sync",
+			outcome=_outcome_for(e),
+			detail=_detail(spec, e),
+		)
+		if not background_available:
+			raise
+		return jobs.enqueue(source_args, fmt, title, highlights)
 	except (NoDataError, PermissionDeniedError, InvalidArgumentError) as e:
 		telemetry.record_export_event(
 			tool="export_query",
