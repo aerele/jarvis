@@ -1,0 +1,218 @@
+{
+ "doctype": "DocType",
+ "name": "Jarvis Export Job",
+ "module": "Jarvis",
+ "autoname": "hash",
+ "engine": "InnoDB",
+ "field_order": [
+  "conversation",
+  "card_message",
+  "title",
+  "source",
+  "highlights",
+  "fingerprint",
+  "permission_fingerprint",
+  "format",
+  "status",
+  "rows_written",
+  "started_at",
+  "finished_at",
+  "heartbeat",
+  "attempts",
+  "retries",
+  "attempt_token",
+  "next_attempt",
+  "cancel_requested",
+  "file",
+  "expires_at",
+  "size_bytes",
+  "limited_by_spec",
+  "cells_truncated",
+  "error",
+  "announced_status"
+ ],
+ "fields": [
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "read_only": 1,
+   "search_index": 1,
+   "options": "Jarvis Conversation",
+   "reqd": 1
+  },
+  {
+   "fieldname": "card_message",
+   "fieldtype": "Data",
+   "label": "Card Message",
+   "read_only": 1
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title",
+   "read_only": 1
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Long Text",
+   "label": "Source",
+   "read_only": 1
+  },
+  {
+   "fieldname": "highlights",
+   "fieldtype": "Long Text",
+   "label": "Highlights",
+   "read_only": 1
+  },
+  {
+   "fieldname": "fingerprint",
+   "fieldtype": "Data",
+   "label": "Fingerprint",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "permission_fingerprint",
+   "fieldtype": "Data",
+   "label": "Permission Fingerprint",
+   "read_only": 1
+  },
+  {
+   "fieldname": "format",
+   "fieldtype": "Select",
+   "label": "Format",
+   "read_only": 1,
+   "options": "xlsx\ncsv",
+   "reqd": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "read_only": 1,
+   "search_index": 1,
+   "options": "queued\nrunning\npaused\nready\ntoo large\ntoo slow\nfailed\ncancelled\nexpired",
+   "default": "queued",
+   "reqd": 1
+  },
+  {
+   "fieldname": "rows_written",
+   "fieldtype": "Int",
+   "label": "Rows Written",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "started_at",
+   "fieldtype": "Datetime",
+   "label": "Started At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "finished_at",
+   "fieldtype": "Datetime",
+   "label": "Finished At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "heartbeat",
+   "fieldtype": "Datetime",
+   "label": "Heartbeat",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "attempts",
+   "fieldtype": "Int",
+   "label": "Attempts",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "retries",
+   "fieldtype": "Int",
+   "label": "Retries",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "attempt_token",
+   "fieldtype": "Data",
+   "label": "Attempt Token",
+   "read_only": 1
+  },
+  {
+   "fieldname": "next_attempt",
+   "fieldtype": "Datetime",
+   "label": "Next Attempt",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cancel_requested",
+   "fieldtype": "Check",
+   "label": "Cancel Requested",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "file",
+   "fieldtype": "Link",
+   "label": "File",
+   "read_only": 1,
+   "options": "File"
+  },
+  {
+   "fieldname": "expires_at",
+   "fieldtype": "Datetime",
+   "label": "Expires At",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "size_bytes",
+   "fieldtype": "Int",
+   "label": "Size Bytes",
+   "read_only": 1
+  },
+  {
+   "fieldname": "limited_by_spec",
+   "fieldtype": "Int",
+   "label": "Limited By Spec",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cells_truncated",
+   "fieldtype": "Check",
+   "label": "Cells Truncated",
+   "read_only": 1
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error",
+   "read_only": 1
+  },
+  {
+   "fieldname": "announced_status",
+   "fieldtype": "Data",
+   "label": "Announced Status",
+   "read_only": 1,
+   "default": ""
+  }
+ ],
+ "permissions": [
+  {
+   "role": "All",
+   "read": 1,
+   "if_owner": 1
+  },
+  {
+   "role": "System Manager",
+   "read": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

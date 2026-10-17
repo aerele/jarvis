@@ -25,6 +25,10 @@ _HARD_ROW_CEILING = 20_000
 _EXPORT_SELECT_LIMIT_S = 12
 
 
+class NeedsBackground(InvalidArgumentError):
+	"""The immediate row ceiling was exceeded, with all access gates satisfied."""
+
+
 def _default_fields(doctype: str) -> list[str]:
 	"""Never bulk-export every field by default; a caller opts into wide fields.
 	Default to name + the title field (if distinct)."""
@@ -90,7 +94,7 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 	# Fetch one past the ceiling so we can FAIL CLOSED on an over-large export
 	# instead of shipping a silently-truncated file. Under the ceiling, len(rows)
 	# is the true permission-filtered total.
-	rows = frappe.get_list(
+	rows = _get_list_bounded(
 		doctype,
 		filters=filters or {},
 		fields=cols,
@@ -101,7 +105,7 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 		# projection below keys on - the column-alignment fix.
 	)
 	if len(rows) > _HARD_ROW_CEILING:
-		raise InvalidArgumentError(
+		raise NeedsBackground(
 			f"{doctype} matches more than {_HARD_ROW_CEILING:,} rows for your permissions "
 			f"- too many to export in full. Narrow the filter (e.g. by date or status); "
 			f"streamed export of larger sets is not yet available."
@@ -118,6 +122,19 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 		total=len(rows),
 		meta={"doctype": doctype, "headers": _unique_headers([_Column(c, doctype, None) for c in cols])},
 	)
+
+
+def _get_list_bounded(*args, **kwargs):
+	from jarvis import _failure_kind
+	from jarvis.api import statement_time_limit
+
+	try:
+		with statement_time_limit(_EXPORT_SELECT_LIMIT_S):
+			return frappe.get_list(*args, **kwargs)
+	except Exception as exc:
+		if _failure_kind.too_slow(exc):
+			raise ExportTooSlowError("This export's query exceeded the immediate time limit.") from None
+		raise
 
 
 def from_spec(spec) -> ExportModel:
@@ -148,7 +165,7 @@ def from_spec(spec) -> ExportModel:
 	masking.refuse_masked_expressions(columns, q, masked)
 	rows, limited_by_spec = _cut_to_spec_limit(spec, _run_bounded(q))
 	if len(rows) > _HARD_ROW_CEILING:
-		raise InvalidArgumentError(
+		raise NeedsBackground(
 			f"this query matches more than {_HARD_ROW_CEILING:,} rows for your permissions - too many "
 			f"to export in full. Narrow it (e.g. by date or status), or split it by a filter into a "
 			f"few exports."
