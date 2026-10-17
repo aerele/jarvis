@@ -235,6 +235,8 @@ def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress):
 	iterator = transformed()
 	check()
 	if fmt == "csv":
+		# Server-created private attempt path; no caller-supplied filename reaches this writer.
+		# nosemgrep: frappe-security-file-traversal
 		with open(path, "w", encoding="utf-8", newline="") as output:
 			writer = csv.writer(output)
 			writer.writerow([escape_formula(h) for h in prepared.headers])
@@ -294,6 +296,8 @@ def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress):
 							"too large",
 							"The workbook exceeds the export disk budget. Narrow or split the filters.",
 						)
+					# xlsxwriter generated this spool inside the private attempt directory.
+					# nosemgrep: frappe-security-file-traversal
 					with open(sheet.row_data_filename, "rb") as spool:
 						spool.seek(spool_offset)
 						while block := spool.read(64 * 1024):

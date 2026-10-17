@@ -203,7 +203,7 @@
  ],
  "permissions": [
   {
-   "role": "All",
+   "role": "Jarvis User",
    "read": 1,
    "if_owner": 1
   },
