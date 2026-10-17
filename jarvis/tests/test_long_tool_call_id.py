@@ -1,4 +1,4 @@
-"""Long OpenClaw execution ids must survive receipt storage and correlation."""
+"""Long nested execution ids must survive receipt storage and correlation."""
 
 from unittest.mock import patch
 
