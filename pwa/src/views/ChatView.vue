@@ -56,6 +56,8 @@ import {
 } from "../lib/typedCardReply.js";
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
+import ExportCard from "@shared/components/chat/ExportCard.vue";
+import { exportSummary } from "@shared/lib/exportJobs.js";
 import ReportScope from "../components/ReportScope.vue";
 import Composer from "../components/Composer.vue";
 import {
@@ -1332,6 +1334,7 @@ function onEvent(p) {
 			load();
 			break;
 
+		case "export:changed":
 		case "import:finished":
 			// Slice B: a background CSV import finished; the bench already posted
 			// the "✓ ..." completion message into this conversation. The guard
@@ -1514,6 +1517,7 @@ onUnmounted(() => {
 			<div v-else class="jv-msg-agent">
 				<template v-if="it.msg">
 					<ReportScope :tools="reportToolsByTurn[it.key] || []" />
+					<ExportCard v-if="exportSummary(it.msg)" :summary="exportSummary(it.msg)" />
 					<div v-if="it.view.html" class="jv-md" v-html="it.view.html" />
 					<div v-else-if="it.view.empty" class="jv-msg-error">
 						{{ agentName }} didn't return a reply for this turn. Try asking again.
