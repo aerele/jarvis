@@ -252,6 +252,42 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				jobs.cancel(job.name)
 
+	def test_jarvis_role_reads_only_owned_jobs(self):
+		users = []
+		job = self.job()
+		try:
+			for label in ("owner", "peer"):
+				user = frappe.get_doc(
+					{
+						"doctype": "User",
+						"email": f"export-{label}-{frappe.generate_hash(length=8)}@example.com",
+						"first_name": label,
+						"send_welcome_email": 0,
+						"user_type": "System User",
+						"roles": [{"role": "Jarvis User"}],
+					}
+				).insert(ignore_permissions=True)
+				users.append(user.name)
+			frappe.db.set_value(jobs.DOCTYPE, job.name, "owner", users[0])
+			frappe.db.commit()
+			job.reload()
+			with impersonate(users[0]):
+				self.assertTrue(frappe.has_permission(jobs.DOCTYPE, "read", doc=job))
+				self.assertEqual(
+					frappe.get_list(jobs.DOCTYPE, filters={"name": job.name}, pluck="name"), [job.name]
+				)
+			with impersonate(users[1]):
+				self.assertFalse(frappe.has_permission(jobs.DOCTYPE, "read", doc=job))
+				self.assertEqual(frappe.get_list(jobs.DOCTYPE, filters={"name": job.name}, pluck="name"), [])
+				with self.assertRaises(frappe.PermissionError):
+					jobs.get_jobs([job.name])
+		finally:
+			frappe.set_user("Administrator")
+			frappe.db.delete(jobs.DOCTYPE, {"name": job.name})
+			for user in users:
+				frappe.delete_doc("User", user, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
 	def test_filter_prepare_runs_real_stream(self):
 		p = streaming.prepare({"doctype": "DocType", "fields": ["name"], "filters": {"name": "ToDo"}}, 100)
 		db = MariaDBStream(connection_settings()).open()

@@ -51,7 +51,8 @@ def limits():
 @contextlib.contextmanager
 def _lock():
 	"""One site-wide admission/dedup lock, held only for short database work."""
-	frappe.db.commit()
+	# End the request snapshot before serializing admission with other connections.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	key = "jv-export:" + fingerprint(frappe.local.site)[:40]
 	if not frappe.db.sql("SELECT GET_LOCK(%s, 5)", (key,))[0][0]:
 		raise InvalidArgumentError("Exports are busy; please try again shortly.")
@@ -165,7 +166,8 @@ def enqueue(source, fmt, title=None, highlights=None):
 		)
 		job.flags.jarvis_server_write = True
 		job.insert(ignore_permissions=True)
-		frappe.db.commit()
+		# Persist the new job before another transaction creates its card or dispatches it.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	announce(job.name, initial=True)
 	dispatch()
 	return public(frappe.get_doc(DOCTYPE, job.name))
@@ -269,7 +271,8 @@ def cancel(name):
 			frappe.db.set_value(DOCTYPE, name, "cancel_requested", 1)
 			if job.status != "running" or not job.started_at:
 				frappe.db.set_value(DOCTYPE, name, {"status": "cancelled", "finished_at": now_datetime()})
-			frappe.db.commit()
+			# Make the cancellation visible to the independent watchdog immediately.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	announce(name)
 	if job.status != "running" or not job.started_at:
 		dispatch()
@@ -323,7 +326,8 @@ def dispatch():
 				},
 			)
 			# Reserve before enqueue. A failed enqueue is recovered by the reaper.
-			frappe.db.commit()
+			# Persist the capacity reservation before RQ can start this attempt.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 			frappe.enqueue(
 				"jarvis.tools._export.jobs.run",
 				queue="long",
@@ -371,7 +375,8 @@ def run(name, token):
 				"heartbeat=%s WHERE name=%s AND attempt_token=%s AND status='running'",
 				(now_datetime(), now_datetime(), name, token),
 			)
-			frappe.db.commit()
+			# Expose the running attempt before starting its independent heartbeat connection.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 			row_cap, size_cap = limits()
 			prepared = prepare(json.loads(job.source), row_cap, json.loads(job.highlights or "null"))
 			directory.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -446,7 +451,8 @@ def run(name, token):
 def _publish_file(job, token, path, result, permission_key):
 	from jarvis.tools._export.envelope import _safe_base
 
-	frappe.db.commit()
+	# Read current subscription/deletion state before locking publication.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	# Conversation deletion takes this same row lock before its trash hooks.
 	# Serialize publication with deletion before locking the job itself.
 	# A deleted original chat can have transferred this shared job to another
@@ -462,7 +468,8 @@ def _publish_file(job, token, path, result, permission_key):
 		if frappe.db.get_value(DOCTYPE, job.name, "conversation") == conversation:
 			_finish(job.name, token, "cancelled", "The export's conversation was deleted.")
 			return
-		frappe.db.commit()
+		# End the stale lookup snapshot before retrying a transferred conversation.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	row = frappe.db.get_value(
 		DOCTYPE, job.name, ["attempt_token", "status", "cancel_requested"], as_dict=True, for_update=True
 	)
@@ -505,7 +512,8 @@ def _publish_file(job, token, path, result, permission_key):
 				"error": "",
 			},
 		)
-		frappe.db.commit()
+		# Publish File and ready state atomically before any delivery transaction.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	except Exception:
 		frappe.db.rollback()
 		target.unlink(missing_ok=True)
@@ -536,7 +544,8 @@ def _finish(name, token, status, error):
 		else:
 			values.update(retries=1, next_attempt=add_to_date(now_datetime(), minutes=5), finished_at=None)
 	frappe.db.set_value(DOCTYPE, name, values)
-	frappe.db.commit()
+	# Persist the fenced terminal/retry state before notification and dispatch.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 
 def _cards(name, *, for_update=False):
@@ -585,7 +594,8 @@ def announce(name, initial=False, recovery=False, conversation=None):
 				f"export:{name}:{'retry' if recovery else job.status}",
 			),
 		)
-		frappe.db.commit()
+		# Persist delivery reconciliation so the independent reaper sees it.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 
 def _announce_one(name, conversation, *, initial, recovery):
@@ -593,7 +603,8 @@ def _announce_one(name, conversation, *, initial, recovery):
 	from jarvis.api import _locked_insert_chat_message
 	from jarvis.chat.events import publish_to_user
 
-	frappe.db.commit()
+	# Start a fresh snapshot before locking the conversation and job for delivery.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	# All delivery, subscription and deletion paths lock conversation then job.
 	owner = frappe.db.get_value("Jarvis Conversation", conversation, "owner", for_update=True)
 	if not owner or not frappe.db.get_value(DOCTYPE, name, "name", for_update=True):
@@ -681,7 +692,8 @@ def _announce_one(name, conversation, *, initial, recovery):
 						}
 					),
 				)
-		frappe.db.commit()
+		# Commit the message, bell and subscription together before realtime publication.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	if message:
 		publish_to_user(
 			job.owner,
@@ -759,7 +771,8 @@ def reap():
 							+ ("Retrying once." if status == "queued" else "Please run it again."),
 						},
 					)
-					frappe.db.commit()
+					# Revoke the old attempt durably before deleting its files or retrying.
+					frappe.db.commit()  # nosemgrep: frappe-manual-commit
 				if job.attempt_token:
 					shutil.rmtree(_directory(job.name, job.attempt_token), ignore_errors=True)
 				job.reload()
@@ -768,19 +781,22 @@ def reap():
 			if job.status == "ready" and job.expires_at and get_datetime(job.expires_at) < now_datetime():
 				_delete_file(job)
 				frappe.db.set_value(DOCTYPE, job.name, {"status": "expired", "file": None})
-				frappe.db.commit()
+				# Persist expiry and run after-commit file cleanup before notifying the owner.
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit
 				job.reload()
 			announce(job.name)
 			if job.status in TERMINAL and get_datetime(job.creation) < cutoffs["old"]:
 				_delete_file(job)
 				frappe.db.delete(DOCTYPE, {"name": job.name})
-				frappe.db.commit()
+				# Persist retention deletion and run its after-commit file cleanup.
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(title="Export recovery failed", message=frappe.get_traceback())
 	# A deletion transaction may have started before a just-published File became
 	# visible in its repeatable-read snapshot. Sweep registered orphans too.
-	frappe.db.commit()
+	# End the sweep snapshot so concurrently published orphan Files are visible.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	for (file_name,) in frappe.db.sql(
 		"SELECT f.name FROM `tabFile` f LEFT JOIN `tabJarvis Export Job` j "
 		"ON j.name=f.attached_to_name WHERE f.attached_to_doctype=%s "
@@ -788,7 +804,8 @@ def reap():
 		(DOCTYPE,),
 	):
 		_delete_generated_file(file_name)
-	frappe.db.commit()
+	# Commit orphan deletion and execute its after-commit filesystem cleanup.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	root = Path(frappe.get_site_path("private", "jarvis_exports"))
 	if root.exists():
 		for directory in root.iterdir():
