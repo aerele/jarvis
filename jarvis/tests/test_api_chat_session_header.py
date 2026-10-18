@@ -1,5 +1,6 @@
 """Tests for the X-Jarvis-Session header support on jarvis.api.call_tool."""
 
+import json
 from unittest.mock import patch
 
 import frappe
@@ -66,6 +67,11 @@ def _cleanup_for_session(session_key: str):
 	sess_rows = frappe.get_all(SESS, filters={"session_key": session_key}, pluck="name")
 	for s in sess_rows:
 		frappe.delete_doc(SESS, s, ignore_permissions=True, force=True)
+	frappe.db.commit()
+
+
+def _delete_turn(run_id: str):
+	frappe.db.delete("Jarvis Chat Turn", {"name": run_id})
 	frappe.db.commit()
 
 
@@ -148,6 +154,35 @@ class TestCallToolWithSessionHeader(FrappeTestCase):
 		self.assertEqual(kwargs["tool_call_id"], "call_live_1")
 		saved = frappe.db.get_value(MSG, kwargs["tool_message_id"], "tool_call_id")
 		self.assertEqual(saved, "call_live_1")
+
+	def test_a_callback_tool_is_bound_to_the_running_reply(self):
+		# A Claude CLI turn sends no tool events, so the callback binds its tool to the
+		# running turn's reply, or "Reports consulted" loses the report on reload.
+		def message(role, seq):
+			return frappe.get_doc(
+				{"doctype": MSG, "conversation": self.conv_name, "seq": seq, "role": role}
+			).insert(ignore_permissions=True)
+
+		seed, reply = message("user", 1), message("assistant", 2)
+		run_id = frappe.generate_hash(length=12)
+		frappe.get_doc(
+			{
+				"doctype": "Jarvis Chat Turn",
+				"run_id": run_id,
+				"conversation": self.conv_name,
+				"relay_target_id": "test-target",
+				"turn_class": "interactive",
+				"state": "streaming",
+				"seed_message": seed.name,
+				"assistant_message": reply.name,
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(_delete_turn, run_id)
+		headers = {**_plugin_headers(self.session_key), "X-Jarvis-Tool-Call-Id": "mcp-live-1"}
+		with _patch_request(_FakeRequest(headers)):
+			with patch("jarvis.api.publish_realtime_tool_result"):
+				call_tool("get_schema", args={"doctype": "Customer"})
+		self.assertEqual(json.loads(frappe.db.get_value(MSG, reply.name, "tool_call_ids")), ["mcp-live-1"])
 
 	def test_missing_session_header_now_rejected(self):
 		"""Path A v2 requires X-Jarvis-Session - there is no user header any
