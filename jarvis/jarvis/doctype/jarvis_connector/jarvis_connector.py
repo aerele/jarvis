@@ -48,6 +48,7 @@ class JarvisConnector(NotRenamable, Document):
 		self._normalize_key()
 		self._normalize_label()
 		self._pin_preset_base_url()
+		self._guard_disabled_preset()
 		self._validate_base_url()
 		self._guard_shared_scope()
 		self._guard_oauth_fields()
@@ -67,6 +68,19 @@ class JarvisConnector(NotRenamable, Document):
 			pinned = catalog.base_urls().get(self.preset)
 			if pinned:
 				self.base_url = pinned
+
+	def _guard_disabled_preset(self) -> None:
+		"""A preset the operator switched off fleet-wide (``jarvis.connector_catalogue``)
+		may not back a NEW connector, or an existing row moved onto it, on any write path:
+		the defense-in-depth copy of ``add_connector``'s refusal for a raw DocType write.
+		Like ``_pin_preset_base_url`` it does not skip ``ignore_permissions``; it is a
+		catalog policy, not a permission. An unchanged existing row still saves."""
+		from jarvis import connector_catalogue
+
+		if not (self.is_new() or self.has_value_changed("preset")):
+			return
+		if connector_catalogue.is_disabled(self.preset or ""):
+			frappe.throw(_("This app is turned off for your workspace."))
 
 	def _normalize_key(self) -> None:
 		key = (self.key or "").strip().lower()[:MAX_KEY]
