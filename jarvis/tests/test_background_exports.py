@@ -154,13 +154,41 @@ class TestSavedQueries(FrappeTestCase):
 			q.run.return_value = [{"name": "one"}]
 			self.assertNotIn("result_id", query({"from": "ToDo", "limit": 2}))
 			q.run.return_value = [{"name": "one"}] * 3
-			result = query({"from": "ToDo", "limit": 2})
+			with patch("jarvis.tools.query.DEFAULT_LIMIT", 2):
+				result = query({"from": "ToDo"})
 			self.assertIn("result_id", result)
 			self.assertEqual(len(result["rows"]), 2)
 			q.run.return_value = [{"name": "x" * 40_000}]
 			result = query({"from": "ToDo", "limit": 2})
 			guarded, _ = enforce_result_budget(result, "query")
 			self.assertEqual(guarded["result_id"], result["result_id"])
+			self.assertEqual(saved_queries.resolve(result["result_id"])["limit"], 2)
+
+	def test_explicit_top_n_is_complete_even_when_more_rows_match(self):
+		from jarvis.tools.query import query
+
+		with patch("jarvis.tools.query.compile_spec") as compile_query:
+			q = compile_query.return_value
+			q.limit.return_value = q
+			q.get_sql.return_value = "SELECT"
+			q.run.return_value = [{"name": str(i)} for i in range(11)]
+			result = query({"from": "ToDo", "limit": 10})
+		self.assertEqual(len(result["rows"]), 10)
+		self.assertTrue(result["more_rows"])
+		self.assertNotIn("partial", result)
+		self.assertNotIn("result_id", result)
+
+	def test_result_id_survives_site_cache_clear_with_its_ttl(self):
+		frappe.set_user("Administrator")
+		key = saved_queries.save({"from": "ToDo"})
+		try:
+			frappe.clear_cache()
+			self.assertEqual(saved_queries.resolve(key)["from"], "ToDo")
+			ttl = frappe.cache().ttl(frappe.cache().make_key("jarvis:query:" + key))
+			self.assertGreater(ttl, 0)
+			self.assertLessEqual(ttl, saved_queries.TTL)
+		finally:
+			frappe.cache().delete_value("jarvis:query:" + key)
 
 
 class TestBackgroundExportJobs(FrappeTestCase):
@@ -226,6 +254,113 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		)
 		self.assertEqual(frappe.db.count("Notification Log", {"document_name": job.name}), 1)
 
+	def test_no_limit_exports_publish_from_saved_id_and_filters(self):
+		from openpyxl import load_workbook
+
+		from jarvis.tools._export import resolvers
+		from jarvis.tools.export_query import export_query
+
+		# Real handoff, worker, publication, bytes and state; only RQ scheduling is stubbed.
+		key = saved_queries.save({"from": "DocType", "select": ["name"], "limit": 1})
+		try:
+			for fmt, source in (
+				("xlsx", {"result_id": key}),
+				("csv", {"doctype": "DocType", "fields": ["name"]}),
+			):
+				with (
+					self.subTest(format=fmt),
+					patch.object(resolvers, "_HARD_ROW_CEILING", 2),
+					patch.object(jobs, "_conversation", return_value=self.conversation),
+					patch.object(jobs, "dispatch"),
+				):
+					state = export_query(**source, format=fmt)
+					name = state["export_job"]
+					self.names.append(name)
+					frappe.db.set_value(jobs.DOCTYPE, name, {"status": "running", "attempt_token": "abc123"})
+					frappe.db.commit()
+					jobs.run(name, "abc123")
+					job = frappe.get_doc(jobs.DOCTYPE, name)
+					self.assertEqual(job.status, "ready", job.error)
+					self.assertEqual(job.limited_by_spec, 0)
+					self.assertGreater(job.rows_written, 2)
+					file = frappe.get_doc("File", job.file)
+					self.assertRegex(file.file_name, r"jarvis-export-Export-[0-9a-f]{6}\." + fmt)
+					if fmt == "csv":
+						with open(file.get_full_path()) as handle:
+							self.assertEqual(sum(1 for _ in csv.reader(handle)), job.rows_written + 1)
+					else:
+						book = load_workbook(file.get_full_path(), read_only=True)
+						try:
+							self.assertEqual(sum(1 for _ in book.active.rows), job.rows_written + 1)
+						finally:
+							book.close()
+		finally:
+			frappe.cache().delete_value("jarvis:query:" + key)
+
+	def test_cancel_before_worker_start_has_cancelled_chat_and_bell(self):
+		for status in ("queued", "paused"):
+			with self.subTest(status=status):
+				job = self.job(status=status)
+				with patch.object(jobs, "dispatch"):
+					result = jobs.cancel(job.name)
+				self.assertEqual(result["status"], "cancelled")
+				self.assertEqual(result["error"], "Export cancelled.")
+				self.assertEqual(
+					frappe.db.get_value(
+						"Jarvis Chat Message", {"tool_call_id": f"export:{job.name}:cancelled"}, "content"
+					),
+					"Export cancelled.",
+				)
+				self.assertEqual(
+					frappe.db.get_value("Notification Log", {"document_name": job.name}, "subject"),
+					"Export cancelled.",
+				)
+
+	def test_dispatch_unknown_or_stale_registry_but_not_confirmed_absence(self):
+		for count, stale, expected in ((None, False, 1), (0, True, 1), (0, False, 0)):
+			with self.subTest(count=count, stale=stale):
+				job = self.job(status="queued")
+				with (
+					patch("jarvis.chat.pump._probe_worker_count", return_value=count),
+					patch("jarvis.chat.pump._registry_is_stale", return_value=stale),
+					patch("frappe.enqueue") as enqueue,
+				):
+					jobs.dispatch()
+				self.assertEqual(enqueue.call_count, expected)
+				self.assertEqual(job.reload().status, "running" if expected else "queued")
+				frappe.db.delete(jobs.DOCTYPE, {"name": job.name})
+				frappe.db.commit()
+
+	def test_failed_cancellation_commit_rolls_back_state(self):
+		job = self.job(status="queued")
+		commit = frappe.db.commit
+		calls = 0
+
+		def fail_cancellation():
+			nonlocal calls
+			calls += 1
+			if calls == 2:
+				raise RuntimeError("commit failed")
+			return commit()
+
+		with (
+			patch.object(frappe.db, "commit", side_effect=fail_cancellation),
+			self.assertRaisesRegex(RuntimeError, "commit failed"),
+		):
+			jobs.cancel(job.name)
+		self.assertEqual(job.reload().status, "queued")
+		self.assertFalse(job.cancel_requested)
+
+	def test_failed_notification_rolls_back_message_and_card(self):
+		job = self.job()
+		with (
+			patch.object(jobs, "_commit", side_effect=[None, RuntimeError("commit failed")]),
+			self.assertRaisesRegex(RuntimeError, "commit failed"),
+		):
+			jobs.announce(job.name, initial=True)
+		self.assertFalse(frappe.db.exists("Jarvis Chat Message", {"tool_call_id": f"export:{job.name}:card"}))
+		self.assertFalse(job.reload().card_message)
+
 	def test_stale_attempt_cannot_change_state(self):
 		job = self.job()
 		jobs._finish(job.name, "stale", "failed", "wrong worker")
@@ -279,8 +414,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			with impersonate(users[1]):
 				self.assertFalse(frappe.has_permission(jobs.DOCTYPE, "read", doc=job))
 				self.assertEqual(frappe.get_list(jobs.DOCTYPE, filters={"name": job.name}, pluck="name"), [])
-				with self.assertRaises(frappe.PermissionError):
-					jobs.get_jobs([job.name])
+				self.assertEqual(jobs.get_jobs([job.name]), {job.name: None})
 		finally:
 			frappe.set_user("Administrator")
 			frappe.db.delete(jobs.DOCTYPE, {"name": job.name})
@@ -675,12 +809,12 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		with patch.object(jobs, "dispatch"):
 			jobs.run(first.name, "abc123")
 			jobs.run(second.name, "abc123")
-		with patch.object(frappe, "get_all", wraps=frappe.get_all) as get_all:
+		with patch.object(frappe, "get_list", wraps=frappe.get_list) as get_list:
 			states = jobs.get_jobs([first.name, second.name, "missing"])
 		self.assertEqual(states[first.name]["status"], "ready")
 		self.assertEqual(states[second.name]["status"], "ready")
 		self.assertIsNone(states["missing"])
-		self.assertEqual([c.args[0] for c in get_all.call_args_list], [jobs.DOCTYPE, "File"])
+		self.assertEqual([c.args[0] for c in get_list.call_args_list], [jobs.DOCTYPE, "File"])
 
 
 class TestBackgroundFilterPermissions(FrappeTestCase):

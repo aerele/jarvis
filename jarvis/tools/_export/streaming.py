@@ -317,6 +317,6 @@ def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress):
 	progress(count)
 	return {
 		"rows_written": count,
-		"limited_by_spec": prepared.limit if limited else None,
+		"limited_by_spec": prepared.limit if limited else 0,
 		"cells_truncated": bool(model.meta.get("cells_truncated")),
 	}

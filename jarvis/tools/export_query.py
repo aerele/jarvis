@@ -71,7 +71,7 @@ def export_query(
 	"""Export ``doctype`` rows matching ``filters`` - or every row of the ``query``
 	``spec`` - to ``format`` (``xlsx``|``csv``). Exactly one of ``doctype``,
 	``spec``, or an owner-bound ``result_id`` from a partial query; saved IDs export
-	all matching rows without the query's limit/offset. ``filters`` / ``fields`` /
+	all matching rows beyond the default limit, preserving an explicit top-N limit. ``filters`` / ``fields`` /
 	``order_by`` / ``parent_doctype`` belong to
 	the ``doctype`` form. Headers are the fields' labels.
 

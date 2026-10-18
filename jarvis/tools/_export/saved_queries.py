@@ -12,9 +12,10 @@ from jarvis.exceptions import InvalidArgumentError
 TTL = 24 * 60 * 60
 
 
-def normalized(spec):
+def normalized(spec, *, preserve_limit=False):
 	value = copy.deepcopy(spec)
-	value.pop("limit", None)
+	if not preserve_limit:
+		value.pop("limit", None)
 	value.pop("offset", None)
 	value.setdefault("select", ["name"])
 	return value
@@ -24,8 +25,8 @@ def fingerprint(value):
 	return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def save(spec):
-	value = normalized(spec)
+def save(spec, *, preserve_limit=False):
+	value = normalized(spec, preserve_limit=preserve_limit)
 	result_id = "q_" + secrets.token_urlsafe(24)
 	frappe.cache().set_value(
 		"jarvis:query:" + result_id,

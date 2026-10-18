@@ -23,6 +23,7 @@ async function request(method, args) {
 
 export function exportSummary(message) {
 	try {
+		if (!message?.tool_call_id?.endsWith(":card")) return null;
 		const raw = message?.tool_result;
 		const result = typeof raw === "string" ? JSON.parse(raw) : raw;
 		return result?.ok && result.data?.export_job ? result.data : null;
@@ -31,10 +32,11 @@ export function exportSummary(message) {
 	}
 }
 
-export async function refreshExports(force = true) {
+export async function refreshExports(force = true, names = null) {
 	if (inFlight || !subscribers.size) return;
 	if (!force && document.visibilityState === "hidden") return;
 	const ids = [...subscribers.keys()].filter((id) => {
+		if (names && !names.includes(id)) return false;
 		if (force) return true;
 		const entry = exportJobs[id];
 		const state = entry?.state;
@@ -62,6 +64,12 @@ export async function refreshExports(force = true) {
 	}
 }
 
+function onExportEvent(event) {
+	if (document.visibilityState === "hidden") return;
+	const { kind, export_job: id } = event.detail || {};
+	if (id) refreshExports(kind !== "export:update", [id]);
+}
+
 function schedule() {
 	clearTimeout(scheduled);
 	scheduled = setTimeout(refreshExports, 0);
@@ -70,6 +78,7 @@ function schedule() {
 export function watchExport(id) {
 	subscribers.set(id, (subscribers.get(id) || 0) + 1);
 	if (!timer) {
+		window.addEventListener("jarvis:export-event", onExportEvent);
 		timer = setInterval(() => refreshExports(false), 5000);
 		for (const event of ["focus", "online", "jarvis:export-refresh"])
 			window.addEventListener(event, schedule);
@@ -83,6 +92,7 @@ export function watchExport(id) {
 			delete exportJobs[id];
 		}
 		if (!subscribers.size) {
+			window.removeEventListener("jarvis:export-event", onExportEvent);
 			clearInterval(timer);
 			timer = null;
 			clearTimeout(scheduled);
