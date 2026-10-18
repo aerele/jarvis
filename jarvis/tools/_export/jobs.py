@@ -144,6 +144,10 @@ def _key(source, fmt, highlights):
 
 def existing(source, fmt, highlights=None, *, join=False):
 	"""Revalidate access before returning either active state or a recent private file."""
+	# Reuse is optional. Users without job access can still use immediate exports
+	# under the source DocTypes' read/export permissions.
+	if not frappe.has_permission(DOCTYPE, "read"):
+		return None
 	rows = frappe.get_list(
 		DOCTYPE,
 		filters={
@@ -185,6 +189,7 @@ def _join(name):
 
 def enqueue(source, fmt, title=None, highlights=None):
 	_supported()
+	frappe.has_permission(DOCTYPE, "read", throw=True)
 	conversation = _conversation()
 	prepared = prepare(source, limits()[0], highlights)
 	with _lock():
