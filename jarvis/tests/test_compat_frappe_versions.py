@@ -511,3 +511,15 @@ class TestCacheGetMemoizedAcrossMajors(FrappeTestCase):
 		self.assertNotIn(cache.make_key(key), frappe.local.cache)  # not poisoned
 		cache.set_value(key, {"v": 2}, expires_in_sec=60)
 		self.assertEqual(compat.cache_get_memoized(key), {"v": 2})
+
+
+class TestMaskedFieldsAcrossFrappe16Builds(FrappeTestCase):
+	"""``compat.masked_fields_of`` must call the installed ``Meta.get_masked_fields``
+	in the shape it accepts. ``parenttype`` arrived in Frappe 16 in July 2026, and an
+	older 16 build raised a TypeError on it. Runs against the real installed Meta."""
+
+	def test_the_installed_meta_answers_for_a_child_table(self):
+		meta = frappe.get_meta("Has Role")
+		if not hasattr(meta, "get_masked_fields"):
+			self.skipTest("Frappe 15 has no field masking")
+		self.assertIsInstance(compat.masked_fields_of(meta, "User"), list)
