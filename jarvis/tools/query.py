@@ -187,7 +187,8 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	# Step 7: execute.
 	limit = int(spec.get("limit") or DEFAULT_LIMIT)
 	rows = q.limit(limit + 1).run(as_dict=True)
-	partial = len(rows) > limit
+	more_rows = len(rows) > limit
+	partial = more_rows and not spec.get("limit")
 	rows = rows[:limit]
 
 	# Step 8: row guard (post-execute - we can't know the row count
@@ -208,16 +209,19 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 		resolved_sql = "<sql resolution failed>"
 
 	result = {"sql": resolved_sql, "rows": rows}
+	if more_rows and spec.get("limit"):
+		result["more_rows"] = True
+		result["note"] = f"Showing the requested first {limit} rows; more rows match."
 	from jarvis.tools._result_guard import enforce_result_budget
 
 	_, budget_event = enforce_result_budget(result, tool="query")
 	if partial or budget_event:
 		from jarvis.tools._export.saved_queries import save
 
-		result["result_id"] = save(spec)
+		result["result_id"] = save(spec, preserve_limit=bool(spec.get("limit")))
 		result["partial"] = True
 		result["note"] = (
-			"This answer is partial. For every matching row, call "
+			"This answer is partial. To export the requested result, call "
 			f"export_query(result_id='{result['result_id']}'). Data is fresh at export time."
 		)
 	return result

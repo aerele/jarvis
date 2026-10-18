@@ -16,7 +16,7 @@ export function initSocket() {
 	socket.on("connect", () => window.dispatchEvent(new Event("jarvis:export-refresh")));
 	socket.on("jarvis:event", (event) => {
 		if (event?.kind?.startsWith("export:"))
-			window.dispatchEvent(new Event("jarvis:export-refresh"));
+			window.dispatchEvent(new CustomEvent("jarvis:export-event", { detail: event }));
 	});
 	return socket;
 }

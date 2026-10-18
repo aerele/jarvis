@@ -2,7 +2,7 @@
 
 `query` probes one row beyond its requested limit and also checks the model's
 35,000-character budget. Partial answers receive a random owner-bound Redis ID
-lasting 24 hours. The cache contains the validated spec, without limit/offset,
+lasting 24 hours. The cache contains the validated spec, without the default limit/offset (an explicit top-N limit survives a response-size truncation),
 owner, creation time and fingerprint; never rows. `export_query` accepts exactly
 one of that ID, a spec, or doctype/filters. Explicit spec limits remain top-N.
 
