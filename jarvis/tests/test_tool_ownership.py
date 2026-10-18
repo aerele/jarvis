@@ -41,10 +41,10 @@ class TestBindToLiveReply(FrappeTestCase):
 	the plugin callback. The callback binds each one to the reply of the running turn,
 	or "Reports consulted" never finds its reports once the chat reloads."""
 
-	def _turn(self, state):
-		conversation = _conversation("Callback ownership")
-		seed = _message(conversation, "user", 1)
-		answer = _message(conversation, "assistant", 2)
+	def _turn(self, state, conversation=None, seq=1):
+		conversation = conversation or _conversation("Callback ownership")
+		seed = _message(conversation, "user", seq)
+		answer = _message(conversation, "assistant", seq + 1)
 		frappe.get_doc(
 			{
 				"doctype": "Jarvis Chat Turn",
@@ -58,6 +58,13 @@ class TestBindToLiveReply(FrappeTestCase):
 			}
 		).insert(ignore_permissions=True)
 		return conversation, answer
+
+	def test_a_queued_follow_up_does_not_take_the_running_turn_s_tool(self):
+		conversation, running = self._turn("streaming")
+		_, queued = self._turn("queued", conversation, seq=3)
+		bind_to_live_reply(conversation.name, "mcp-1")
+		self.assertEqual(json.loads(running.reload().tool_call_ids), ["mcp-1"])
+		self.assertFalse(queued.reload().tool_call_ids)
 
 	def test_the_running_turn_s_reply_owns_a_callback_tool(self):
 		conversation, answer = self._turn("streaming")
