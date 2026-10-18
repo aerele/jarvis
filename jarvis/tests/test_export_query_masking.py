@@ -237,6 +237,17 @@ class _MetaWithParenttype:
 		return [frappe._dict(fieldname="phone")]
 
 
+class _MetaBehindAKwargsWrapper:
+	"""A wrapper that hides the real parameter names behind ``**kwargs``."""
+
+	def __init__(self):
+		self.calls = []
+
+	def get_masked_fields(self, **kwargs):
+		self.calls.append(kwargs.get("parenttype"))
+		return [frappe._dict(fieldname="phone")]
+
+
 class TestMaskingAcrossFrappe16Builds(FrappeTestCase):
 	"""``pyproject.toml`` allows every Frappe 16 build, but ``get_masked_fields`` only
 	grew ``parenttype`` in July 2026. Passing it to an older build raised a TypeError,
@@ -259,5 +270,11 @@ class TestMaskingAcrossFrappe16Builds(FrappeTestCase):
 
 	def test_a_build_with_parenttype_masks_a_child_by_its_parent(self):
 		meta = _MetaWithParenttype()
+		self.assertEqual(sorted(self._masked(meta)), ["si", "sii"])
+		self.assertEqual(meta.calls, [None, "Sales Invoice"])
+
+	def test_a_kwargs_wrapper_still_gets_the_parent(self):
+		# Fail closed: a hidden signature must not drop the parent's stricter rule.
+		meta = _MetaBehindAKwargsWrapper()
 		self.assertEqual(sorted(self._masked(meta)), ["si", "sii"])
 		self.assertEqual(meta.calls, [None, "Sales Invoice"])
