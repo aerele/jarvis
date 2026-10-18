@@ -53,6 +53,9 @@ vi.mock("../../../pwa/src/components/ThinkingIndicator.vue", () => ({
 vi.mock("../../../pwa/src/components/VersionPill.vue", () => ({
 	default: { template: "<div />" },
 }));
+// Export rendering has its own suite; keep this recovery harness independent
+// of frappe-ui's browser-only resources, as with the sibling card components.
+vi.mock("./chat/ExportCard.vue", () => ({ default: { template: "<div />" } }));
 import ChatView from "../../../pwa/src/views/ChatView.vue";
 import Composer from "../../../pwa/src/components/Composer.vue";
 import SendRecoveryCard from "../../../pwa/src/components/SendRecoveryCard.vue";
