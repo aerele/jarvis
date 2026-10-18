@@ -1660,6 +1660,32 @@ class TestCancelCreditLeak(_AdmissionTestCase):
 		self.assertEqual(self._state(rid), "dispatching", "dispatched turn untouched")
 
 
+class TestStopOnAWaitingReply(_AdmissionTestCase):
+	"""The composer's Stop calls ``stop_run``. A reply still waiting for a slot was never
+	cancelled by it: Stop said "Stopped." and the reply ran later. The composer sends
+	no run id until run:start, so both shapes are covered."""
+
+	def test_stop_with_the_waiting_run_id_cancels_it(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q1", self._mk_msg(conv, 1), "queued", version=0)
+		self.assertTrue(chat_api.stop_run(conv, "adm_stop_q1")["ok"])
+		self.assertEqual(self._state("adm_stop_q1"), "cancelled")
+
+	def test_stop_without_a_run_id_cancels_the_waiting_reply(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q2", self._mk_msg(conv, 1), "queued", version=0)
+		self.assertTrue(chat_api.stop_run(conv)["ok"])
+		self.assertEqual(self._state("adm_stop_q2"), "cancelled")
+
+	def test_stop_on_a_running_reply_leaves_a_waiting_follow_up(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_run", self._mk_msg(conv, 1), "dispatching", version=3)
+		self._insert_turn(conv, "adm_stop_next", self._mk_msg(conv, 2), "queued", version=0)
+		chat_api.stop_run(conv)
+		chat_api.stop_run(conv, "adm_stop_run")
+		self.assertEqual(self._state("adm_stop_next"), "queued")
+
+
 # --------------------------------------------------------------------------- #
 # CDX-9 — enqueue-failure compensation (both admit + promote paths)
 # --------------------------------------------------------------------------- #
