@@ -10,7 +10,9 @@ from datetime import timezone
 from pathlib import Path
 
 import frappe
+from frappe.query_builder.functions import Coalesce
 from frappe.utils import add_to_date, get_datetime
+from pypika.terms import ExistsCriterion
 
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._export.clock import now_datetime
@@ -41,6 +43,44 @@ STATE_FIELDS = [
 ]
 
 
+JOB_FIELDS = STATE_FIELDS + [
+	"conversation",
+	"source",
+	"highlights",
+	"permission_fingerprint",
+	"attempt_token",
+	"heartbeat",
+	"attempts",
+	"retries",
+	"card_message",
+	"announced_status",
+	"creation",
+]
+
+
+def _get_job(name, *, for_update=False):
+	job = frappe.db.get_value(DOCTYPE, name, JOB_FIELDS, as_dict=True, for_update=for_update)
+	if not job:
+		frappe.throw("Export not found", frappe.DoesNotExistError)
+	return job
+
+
+@contextlib.contextmanager
+def _rollback_on_error():
+	"""Release row locks and discard partial writes if a transaction boundary fails."""
+	try:
+		yield
+	except Exception:
+		frappe.db.rollback()
+		raise
+
+
+def _commit():
+	# Call sites document why independent workers/delivery need this boundary.
+	with _rollback_on_error():
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
+
+
 def limits():
 	return (
 		max(1, min(200_000, int(frappe.conf.get("jarvis_export_row_limit", 200_000)))),
@@ -52,12 +92,13 @@ def limits():
 def _lock():
 	"""One site-wide admission/dedup lock, held only for short database work."""
 	# End the request snapshot before serializing admission with other connections.
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit
+	_commit()
 	key = "jv-export:" + fingerprint(frappe.local.site)[:40]
 	if not frappe.db.sql("SELECT GET_LOCK(%s, 5)", (key,))[0][0]:
 		raise InvalidArgumentError("Exports are busy; please try again shortly.")
 	try:
-		yield
+		with _rollback_on_error():
+			yield
 	finally:
 		frappe.db.sql("SELECT RELEASE_LOCK(%s)", (key,))
 
@@ -103,7 +144,7 @@ def _key(source, fmt, highlights):
 
 def existing(source, fmt, highlights=None, *, join=False):
 	"""Revalidate access before returning either active state or a recent private file."""
-	rows = frappe.get_all(
+	rows = frappe.get_list(
 		DOCTYPE,
 		filters={
 			"owner": frappe.session.user,
@@ -119,7 +160,7 @@ def existing(source, fmt, highlights=None, *, join=False):
 	prepared = prepare(source, limits()[0], highlights)
 	permission_key = _permission_fingerprint(prepared)
 	for row in rows:
-		job = frappe.get_doc(DOCTYPE, row.name)
+		job = _get_job(row.name)
 		if job.status in ACTIVE:
 			if join:
 				_join(job.name)
@@ -167,18 +208,17 @@ def enqueue(source, fmt, title=None, highlights=None):
 		job.flags.jarvis_server_write = True
 		job.insert(ignore_permissions=True)
 		# Persist the new job before another transaction creates its card or dispatches it.
-		frappe.db.commit()  # nosemgrep: frappe-manual-commit
+		_commit()
 	announce(job.name, initial=True)
 	dispatch()
-	return public(frappe.get_doc(DOCTYPE, job.name))
+	return public(_get_job(job.name))
 
 
 def _ready_file(job, files=None):
 	if not job.file:
 		return None
 	if files is None:
-		rows = frappe.get_all("File", filters={"name": job.file}, fields=FILE_FIELDS)
-		file = rows[0] if rows else None
+		file = frappe.db.get_value("File", job.file, FILE_FIELDS, as_dict=True)
 	else:
 		file = files.get(job.file)
 	if not file or file.owner != job.owner or not file.is_private:
@@ -232,7 +272,7 @@ def _check_owner(job, *, cancel=False):
 
 
 @frappe.whitelist()
-def get_jobs(names):
+def get_jobs(names: str | list[str]):
 	if isinstance(names, str):
 		names = json.loads(names)
 	if not isinstance(names, list) or len(names) > 100 or any(not isinstance(n, str) for n in names):
@@ -240,7 +280,7 @@ def get_jobs(names):
 	out = dict.fromkeys(names)
 	if not names:
 		return out
-	rows = frappe.get_all(
+	rows = frappe.get_list(
 		DOCTYPE, filters={"name": ["in", list(out)]}, fields=STATE_FIELDS, limit_page_length=100
 	)
 	for job in rows:
@@ -249,7 +289,7 @@ def get_jobs(names):
 	files = (
 		{
 			file.name: file
-			for file in frappe.get_all(
+			for file in frappe.get_list(
 				"File", filters={"name": ["in", list(file_names)]}, fields=FILE_FIELDS, limit_page_length=100
 			)
 		}
@@ -262,29 +302,35 @@ def get_jobs(names):
 
 
 @frappe.whitelist(methods=["POST"])
-def cancel(name):
-	job = frappe.get_doc(DOCTYPE, name)
+def cancel(name: str):
+	job = _get_job(name)
 	_check_owner(job, cancel=True)
 	with _lock():
-		job.reload()
+		job = _get_job(job.name)
 		if job.status in ACTIVE:
 			frappe.db.set_value(DOCTYPE, name, "cancel_requested", 1)
 			if job.status != "running" or not job.started_at:
-				frappe.db.set_value(DOCTYPE, name, {"status": "cancelled", "finished_at": now_datetime()})
+				frappe.db.set_value(
+					DOCTYPE,
+					name,
+					{"status": "cancelled", "finished_at": now_datetime(), "error": "Export cancelled."},
+				)
 			# Make the cancellation visible to the independent watchdog immediately.
-			frappe.db.commit()  # nosemgrep: frappe-manual-commit
+			_commit()
 	announce(name)
 	if job.status != "running" or not job.started_at:
 		dispatch()
-	return public(frappe.get_doc(DOCTYPE, name))
+	return public(_get_job(name))
 
 
 def dispatch():
 	if frappe.conf.maintenance_mode or frappe.db.db_type != "mariadb":
 		return
-	from frappe.utils.background_jobs import generate_qname, get_workers
+	from jarvis.chat.pump import _probe_worker_count, _registry_is_stale
 
-	workers = sum(generate_qname("long") in w.queue_names() for w in get_workers())
+	workers = _probe_worker_count("long")
+	if workers is None or (workers == 0 and _registry_is_stale()):
+		workers = 1
 	if not workers:
 		return
 	capacity = max(1, workers - 1)
@@ -295,20 +341,17 @@ def dispatch():
 		while slots:
 			# Filter before LIMIT and reselect after each owner reservation. A large
 			# backlog belonging to one owner cannot hide another owner's runnable job.
-			params = {"now": now_datetime()}
-			owner_clause = ""
-			if owners:
-				params["owners"] = tuple(owners)
-				owner_clause = " AND owner NOT IN %(owners)s"
-			waiting = frappe.db.sql(
-				"SELECT name, owner FROM `tabJarvis Export Job` "
-				"WHERE status IN ('queued','paused') AND COALESCE(cancel_requested,0)=0 "
-				"AND (next_attempt IS NULL OR next_attempt <= %(now)s)"
-				+ owner_clause
-				+ " ORDER BY creation, name LIMIT 1",
-				params,
-				as_dict=True,
+			j = frappe.qb.DocType(DOCTYPE)
+			query = (
+				frappe.qb.from_(j)
+				.select(j.name, j.owner)
+				.where(j.status.isin(["queued", "paused"]))
+				.where(Coalesce(j.cancel_requested, 0) == 0)
+				.where(j.next_attempt.isnull() | (j.next_attempt <= now_datetime()))
 			)
+			if owners:
+				query = query.where(j.owner.notin(list(owners)))
+			waiting = query.orderby(j.creation, j.name).limit(1).run(as_dict=True)
 			if not waiting:
 				break
 			row = waiting[0]
@@ -327,7 +370,7 @@ def dispatch():
 			)
 			# Reserve before enqueue. A failed enqueue is recovered by the reaper.
 			# Persist the capacity reservation before RQ can start this attempt.
-			frappe.db.commit()  # nosemgrep: frappe-manual-commit
+			_commit()
 			frappe.enqueue(
 				"jarvis.tools._export.jobs.run",
 				queue="long",
@@ -360,7 +403,7 @@ def run(name, token):
 		_finish(name, token, "cancelled", "Export cancelled.")
 		announce(name)
 		return
-	job = frappe.get_doc(DOCTYPE, name)
+	job = _get_job(name)
 	directory = _directory(name, token)
 	db = watchdog = None
 	started = time.monotonic()
@@ -370,13 +413,16 @@ def run(name, token):
 				raise ExportLimit("failed", "The export owner no longer has an active account.")
 			if frappe.conf.maintenance_mode:
 				raise ExportLimit("paused", "Paused for a site update; retrying in about five minutes.")
-			frappe.db.sql(
-				"UPDATE `tabJarvis Export Job` SET attempts=attempts+1, started_at=%s, "
-				"heartbeat=%s WHERE name=%s AND attempt_token=%s AND status='running'",
-				(now_datetime(), now_datetime(), name, token),
-			)
+			j = frappe.qb.DocType(DOCTYPE)
+			(
+				frappe.qb.update(j)
+				.set(j.attempts, j.attempts + 1)
+				.set(j.started_at, now_datetime())
+				.set(j.heartbeat, now_datetime())
+				.where((j.name == name) & (j.attempt_token == token) & (j.status == "running"))
+			).run()
 			# Expose the running attempt before starting its independent heartbeat connection.
-			frappe.db.commit()  # nosemgrep: frappe-manual-commit
+			_commit()
 			row_cap, size_cap = limits()
 			prepared = prepare(json.loads(job.source), row_cap, json.loads(job.highlights or "null"))
 			directory.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -436,7 +482,7 @@ def run(name, token):
 		if frappe.db.exists(DOCTYPE, name):
 			from jarvis.telemetry import record_export_event
 
-			finished = frappe.get_doc(DOCTYPE, name)
+			finished = _get_job(name)
 			record_export_event(
 				"export_query",
 				finished.format,
@@ -452,7 +498,7 @@ def _publish_file(job, token, path, result, permission_key):
 	from jarvis.tools._export.envelope import _safe_base
 
 	# Read current subscription/deletion state before locking publication.
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit
+	_commit()
 	# Conversation deletion takes this same row lock before its trash hooks.
 	# Serialize publication with deletion before locking the job itself.
 	# A deleted original chat can have transferred this shared job to another
@@ -469,7 +515,7 @@ def _publish_file(job, token, path, result, permission_key):
 			_finish(job.name, token, "cancelled", "The export's conversation was deleted.")
 			return
 		# End the stale lookup snapshot before retrying a transferred conversation.
-		frappe.db.commit()  # nosemgrep: frappe-manual-commit
+		_commit()
 	row = frappe.db.get_value(
 		DOCTYPE, job.name, ["attempt_token", "status", "cancel_requested"], as_dict=True, for_update=True
 	)
@@ -477,10 +523,18 @@ def _publish_file(job, token, path, result, permission_key):
 		frappe.db.rollback()
 		_finish(job.name, token, "cancelled", "Export cancelled.")
 		return
-	filename = f"jarvis-export-{token}-{_safe_base(job.title)}.{job.format}"
-	target = Path(frappe.get_site_path("private", "files", filename))
+	# A short display suffix must never overwrite an existing file on collision.
+	# Both paths are on the site's private filesystem; link is atomic and exclusive.
+	while True:
+		filename = f"jarvis-export-{_safe_base(job.title)}-{secrets.token_hex(3)}.{job.format}"
+		target = Path(frappe.get_site_path("private", "files", filename))
+		try:
+			os.link(path, target)
+			break
+		except FileExistsError:
+			continue
 	size = path.stat().st_size
-	os.replace(path, target)
+	path.unlink()
 	try:
 		file = frappe.get_doc(
 			{
@@ -513,7 +567,7 @@ def _publish_file(job, token, path, result, permission_key):
 			},
 		)
 		# Publish File and ready state atomically before any delivery transaction.
-		frappe.db.commit()  # nosemgrep: frappe-manual-commit
+		_commit()
 	except Exception:
 		frappe.db.rollback()
 		target.unlink(missing_ok=True)
@@ -545,26 +599,39 @@ def _finish(name, token, status, error):
 			values.update(retries=1, next_attempt=add_to_date(now_datetime(), minutes=5), finished_at=None)
 	frappe.db.set_value(DOCTYPE, name, values)
 	# Persist the fenced terminal/retry state before notification and dispatch.
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit
+	_commit()
 
 
 def _cards(name, *, for_update=False):
-	return frappe.db.sql(
-		"SELECT m.name, m.conversation FROM `tabJarvis Chat Message` m "
-		"INNER JOIN `tabJarvis Conversation` c ON c.name=m.conversation "
-		"INNER JOIN `tabJarvis Export Job` j ON j.name=m.ref_name AND j.owner=c.owner "
-		"WHERE m.ref_doctype=%s AND m.ref_name=%s AND m.role='assistant' "
-		"AND m.tool_call_id=%s ORDER BY m.creation, m.name" + (" FOR UPDATE" if for_update else ""),
-		(DOCTYPE, name, f"export:{name}:card"),
-		as_dict=True,
+	m = frappe.qb.DocType("Jarvis Chat Message")
+	c = frappe.qb.DocType("Jarvis Conversation")
+	j = frappe.qb.DocType(DOCTYPE)
+	query = (
+		frappe.qb.from_(m)
+		.inner_join(c)
+		.on(c.name == m.conversation)
+		.inner_join(j)
+		.on((j.name == m.ref_name) & (j.owner == c.owner))
+		.select(m.name, m.conversation)
+		.where(
+			(m.ref_doctype == DOCTYPE)
+			& (m.ref_name == name)
+			& (m.role == "assistant")
+			& (m.tool_call_id == f"export:{name}:card")
+		)
+		.orderby(m.creation, m.name)
 	)
+	if for_update:
+		query = query.for_update()
+	return query.run(as_dict=True)
 
 
+@_rollback_on_error()
 def announce(name, initial=False, recovery=False, conversation=None):
 	"""Each participating chat receives a card and idempotent state messages."""
 	if not frappe.db.exists(DOCTYPE, name):
 		return
-	job = frappe.get_doc(DOCTYPE, name)
+	job = _get_job(name)
 	if not initial and not recovery and job.status not in (*TERMINAL, "paused"):
 		return
 	conversations = (
@@ -577,40 +644,57 @@ def announce(name, initial=False, recovery=False, conversation=None):
 	if not initial:
 		# Concurrent transitions and new subscriptions must remain recoverable.
 		# Checking delivered cards in the UPDATE closes the subscribe/fanout race.
-		frappe.db.sql(
-			"UPDATE `tabJarvis Export Job` j SET announced_status=%s WHERE j.name=%s AND j.status=%s "
-			"AND NOT EXISTS (SELECT 1 FROM `tabJarvis Chat Message` card "
-			"INNER JOIN `tabJarvis Conversation` c ON c.name=card.conversation AND c.owner=j.owner "
-			"WHERE card.ref_name=j.name AND card.ref_doctype=%s AND card.tool_call_id=%s "
-			"AND card.role='assistant' AND NOT EXISTS (SELECT 1 FROM `tabJarvis Chat Message` delivered "
-			"WHERE delivered.conversation=card.conversation AND delivered.role='assistant' "
-			"AND delivered.tool_call_id=%s))",
-			(
-				job.status,
-				name,
-				job.status,
-				DOCTYPE,
-				f"export:{name}:card",
-				f"export:{name}:{'retry' if recovery else job.status}",
-			),
+		j = frappe.qb.DocType(DOCTYPE)
+		card = frappe.qb.DocType("Jarvis Chat Message").as_("card")
+		delivered = frappe.qb.DocType("Jarvis Chat Message").as_("delivered")
+		c = frappe.qb.DocType("Jarvis Conversation")
+		delivery = (
+			frappe.qb.from_(delivered)
+			.select(delivered.name)
+			.where(
+				(delivered.conversation == card.conversation)
+				& (delivered.role == "assistant")
+				& (delivered.tool_call_id == f"export:{name}:{'retry' if recovery else job.status}")
+			)
 		)
+		pending = (
+			frappe.qb.from_(card)
+			.inner_join(c)
+			.on(c.name == card.conversation)
+			.where(c.owner == j.owner)
+			.select(card.name)
+			.where(
+				(card.ref_name == j.name)
+				& (card.ref_doctype == DOCTYPE)
+				& (card.tool_call_id == f"export:{name}:card")
+				& (card.role == "assistant")
+			)
+			.where(~ExistsCriterion(delivery))
+		)
+		(
+			frappe.qb.update(j)
+			.set(j.announced_status, job.status)
+			.where((j.name == name) & (j.status == job.status))
+			.where(~ExistsCriterion(pending))
+		).run()
 		# Persist delivery reconciliation so the independent reaper sees it.
-		frappe.db.commit()  # nosemgrep: frappe-manual-commit
+		_commit()
 
 
+@_rollback_on_error()
 def _announce_one(name, conversation, *, initial, recovery):
 	from jarvis._session import impersonate
 	from jarvis.api import _locked_insert_chat_message
 	from jarvis.chat.events import publish_to_user
 
 	# Start a fresh snapshot before locking the conversation and job for delivery.
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit
+	_commit()
 	# All delivery, subscription and deletion paths lock conversation then job.
 	owner = frappe.db.get_value("Jarvis Conversation", conversation, "owner", for_update=True)
 	if not owner or not frappe.db.get_value(DOCTYPE, name, "name", for_update=True):
 		frappe.db.rollback()
 		return
-	job = frappe.get_doc(DOCTYPE, name)
+	job = _get_job(name)
 	if owner != job.owner:
 		frappe.db.rollback()
 		frappe.throw("Export chat not found", frappe.PermissionError)
@@ -693,7 +777,7 @@ def _announce_one(name, conversation, *, initial, recovery):
 					),
 				)
 		# Commit the message, bell and subscription together before realtime publication.
-		frappe.db.commit()  # nosemgrep: frappe-manual-commit
+		_commit()
 	if message:
 		publish_to_user(
 			job.owner,
@@ -715,24 +799,22 @@ def reap():
 	# Each worklist is bounded independently so old rows cannot starve live jobs.
 	names = set()
 	cutoffs = {"now": now_datetime(), "old": add_to_date(frappe.utils.now_datetime(), days=-30)}
+	j = frappe.qb.DocType(DOCTYPE)
 	for condition in (
-		"status='running'",
-		"status IN ('queued','paused') AND COALESCE(card_message,'') = ''",
-		"status NOT IN ('queued','running') AND COALESCE(announced_status,'') <> status",
-		"status='ready' AND expires_at < %(now)s",
-		"status NOT IN ('queued','running','paused') AND creation < %(old)s",
+		j.status == "running",
+		j.status.isin(["queued", "paused"]) & (Coalesce(j.card_message, "") == ""),
+		j.status.notin(["queued", "running"]) & (Coalesce(j.announced_status, "") != j.status),
+		(j.status == "ready") & (j.expires_at < cutoffs["now"]),
+		j.status.notin(list(ACTIVE)) & (j.creation < cutoffs["old"]),
 	):
 		names.update(
 			r[0]
-			for r in frappe.db.sql(
-				"SELECT name FROM `tabJarvis Export Job` WHERE " + condition + " ORDER BY creation LIMIT 200",
-				cutoffs,
-			)
+			for r in frappe.qb.from_(j).select(j.name).where(condition).orderby(j.creation).limit(200).run()
 		)
 	rows = [frappe._dict(name=name) for name in names]
 	for row in rows:
 		try:
-			job = frappe.get_doc(DOCTYPE, row.name)
+			job = _get_job(row.name)
 			if not job.card_message:
 				announce(job.name, initial=True)
 			if job.status == "running" and get_datetime(job.heartbeat) < add_to_date(
@@ -750,7 +832,7 @@ def reap():
 					# A plain reload followed by UPDATE could overwrite a just-ready job.
 					if not frappe.db.get_value(DOCTYPE, job.name, "name", for_update=True):
 						continue
-					job.reload()
+					job = _get_job(job.name)
 					if job.status != "running" or get_datetime(job.heartbeat) >= add_to_date(
 						now_datetime(), minutes=-1
 					):
@@ -772,40 +854,43 @@ def reap():
 						},
 					)
 					# Revoke the old attempt durably before deleting its files or retrying.
-					frappe.db.commit()  # nosemgrep: frappe-manual-commit
+					_commit()
 				if job.attempt_token:
 					shutil.rmtree(_directory(job.name, job.attempt_token), ignore_errors=True)
-				job.reload()
+				job = _get_job(job.name)
 				if job.status == "queued":
 					announce(job.name, recovery=True)
 			if job.status == "ready" and job.expires_at and get_datetime(job.expires_at) < now_datetime():
 				_delete_file(job)
 				frappe.db.set_value(DOCTYPE, job.name, {"status": "expired", "file": None})
 				# Persist expiry and run after-commit file cleanup before notifying the owner.
-				frappe.db.commit()  # nosemgrep: frappe-manual-commit
-				job.reload()
+				_commit()
+				job = _get_job(job.name)
 			announce(job.name)
 			if job.status in TERMINAL and get_datetime(job.creation) < cutoffs["old"]:
 				_delete_file(job)
 				frappe.db.delete(DOCTYPE, {"name": job.name})
 				# Persist retention deletion and run its after-commit file cleanup.
-				frappe.db.commit()  # nosemgrep: frappe-manual-commit
+				_commit()
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(title="Export recovery failed", message=frappe.get_traceback())
 	# A deletion transaction may have started before a just-published File became
 	# visible in its repeatable-read snapshot. Sweep registered orphans too.
 	# End the sweep snapshot so concurrently published orphan Files are visible.
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit
-	for (file_name,) in frappe.db.sql(
-		"SELECT f.name FROM `tabFile` f LEFT JOIN `tabJarvis Export Job` j "
-		"ON j.name=f.attached_to_name WHERE f.attached_to_doctype=%s "
-		"AND j.name IS NULL LIMIT 200",
-		(DOCTYPE,),
-	):
+	_commit()
+	f = frappe.qb.DocType("File")
+	for (file_name,) in (
+		frappe.qb.from_(f)
+		.left_join(j)
+		.on(j.name == f.attached_to_name)
+		.select(f.name)
+		.where((f.attached_to_doctype == DOCTYPE) & j.name.isnull())
+		.limit(200)
+	).run():
 		_delete_generated_file(file_name)
 	# Commit orphan deletion and execute its after-commit filesystem cleanup.
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit
+	_commit()
 	root = Path(frappe.get_site_path("private", "jarvis_exports"))
 	if root.exists():
 		for directory in root.iterdir():
@@ -829,7 +914,7 @@ def _delete_file(job):
 
 
 def _delete_generated_file(name):
-	file = frappe.get_doc("File", name)
+	file = frappe.get_doc({"doctype": "File", **frappe.db.get_value("File", name, FILE_FIELDS, as_dict=True)})
 	path = Path(file.get_full_path()).resolve()
 	frappe.delete_doc("File", name, ignore_permissions=True)
 	# Prewritten Files intentionally have no content hash. Frappe's normal trash
@@ -848,7 +933,7 @@ def on_conversation_trash(doc, method=None):
 	# Cards are subscriptions. Removing the last chat revokes the attempt;
 	# otherwise transfer the primary delivery address to a surviving chat.
 	for row in frappe.get_all(DOCTYPE, filters={"conversation": doc.name}, fields=["name"]):
-		job = frappe.get_doc(DOCTYPE, row.name, for_update=True)
+		job = _get_job(row.name, for_update=True)
 		remaining = [card for card in _cards(job.name, for_update=True) if card.conversation != doc.name]
 		if remaining:
 			frappe.db.set_value(

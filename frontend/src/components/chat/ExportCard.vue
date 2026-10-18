@@ -1,4 +1,5 @@
 <script setup>
+import { Button, LoadingIndicator } from "frappe-ui";
 import { computed, onUnmounted, ref, watch } from "vue";
 import { cancelExport, exportJobs, refreshExports, watchExport } from "../../lib/exportJobs.js";
 
@@ -57,6 +58,15 @@ const elapsed = computed(() => {
 	);
 	return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 });
+function downloadFile() {
+	if (!download.value) return;
+	const link = document.createElement("a");
+	link.href = download.value;
+	link.download = state.value.filename || "";
+	document.body.appendChild(link);
+	link.click();
+	link.remove();
+}
 async function cancel() {
 	cancelling.value = true;
 	cancelError.value = "";
@@ -77,7 +87,11 @@ async function cancel() {
 				<strong>{{ state?.title || summary.title || "Export" }}</strong>
 				<p role="status">{{ label }}</p>
 			</div>
-			<span v-if="state?.status === 'running'" class="jv-export-pulse" aria-hidden="true" />
+			<LoadingIndicator
+				v-if="state?.status === 'running'"
+				class="h-4 w-4"
+				aria-hidden="true"
+			/>
 		</div>
 		<p v-if="state">
 			{{ Number(state.rows_written || 0).toLocaleString() }} rows<span v-if="elapsed">
@@ -99,26 +113,30 @@ async function cancel() {
 			Some long cells were shortened; the row count is complete.
 		</p>
 		<template v-if="download">
-			<p>{{ state.filename }} · {{ (state.size_bytes / 1024 / 1024).toFixed(2) }} MB</p>
+			<p class="jv-file-chip">
+				{{ state.filename }} · {{ (state.size_bytes / 1024 / 1024).toFixed(2) }} MB
+			</p>
 			<p>Made at {{ date(state.finished_at) }} from the data at that time.</p>
 			<p>Available until {{ date(state.expires_at) }}</p>
-			<a :href="download" download class="jv-export-button"
-				>Download {{ state.format?.toUpperCase() }}</a
-			>
+			<Button variant="subtle" data-testid="download-export" @click="downloadFile">
+				Download {{ state.format?.toUpperCase() }}
+			</Button>
 		</template>
-		<button
+		<Button
 			v-if="active"
-			class="jv-export-button"
+			variant="subtle"
+			:loading="cancelling"
 			:disabled="cancelling || state.cancel_requested"
 			@click="cancel"
 		>
 			{{
 				cancelling || state.cancel_requested ? "Cancellation requested…" : "Cancel export"
 			}}
-		</button>
+		</Button>
 		<p v-if="active">Cancellation can take about five seconds.</p>
 		<p v-if="entry?.error || cancelError" role="alert">
-			{{ cancelError || entry.error }} <button @click="refreshExports">Retry</button>
+			{{ cancelError || entry.error }}
+			<Button variant="subtle" @click="refreshExports()">Retry</Button>
 		</p>
 	</section>
 </template>
@@ -127,7 +145,7 @@ async function cancel() {
 .jv-export-card {
 	border: 1px solid var(--border);
 	border-radius: 12px;
-	background: var(--surface-1, var(--surface));
+	background: var(--surface-1, var(--card));
 	color: var(--text, var(--ink9));
 	padding: 16px;
 	margin: 12px 0;
@@ -146,46 +164,17 @@ async function cancel() {
 	justify-content: space-between;
 	gap: 12px;
 }
-.jv-export-button {
+.jv-file-chip {
 	display: inline-flex;
-	justify-content: center;
-	padding: 9px 14px;
-	margin-top: 8px;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	padding: 6px 11px;
 	border: 1px solid var(--border);
-	border-radius: 8px;
-	font: inherit;
-	color: inherit;
-	background: var(--surface-2, transparent);
-	cursor: pointer;
-	text-decoration: none;
-}
-.jv-export-button:disabled {
-	opacity: 0.6;
-	cursor: default;
-}
-.jv-export-pulse {
-	width: 12px;
-	height: 12px;
-	border: 2px solid var(--border);
-	border-top-color: currentColor;
-	border-radius: 50%;
-	animation: export-spin 1s linear infinite;
-}
-@keyframes export-spin {
-	to {
-		transform: rotate(360deg);
-	}
-}
-@media (prefers-reduced-motion: reduce) {
-	.jv-export-pulse {
-		animation: none;
-	}
-}
-@media (max-width: 480px) {
-	.jv-export-button {
-		display: flex;
-		box-sizing: border-box;
-		width: 100%;
-	}
+	border-radius: 10px;
+	background: var(--surface-2, var(--card2));
+	font-size: 12.5px;
+	line-height: 1.3;
+	overflow-wrap: anywhere;
 }
 </style>

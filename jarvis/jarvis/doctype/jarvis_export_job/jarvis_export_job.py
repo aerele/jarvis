@@ -1,8 +1,10 @@
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisExportJob(Document):
+
+class JarvisExportJob(NotRenamable, Document):
 	def validate(self):
 		if not self.flags.jarvis_server_write:
 			frappe.throw("Export jobs are managed by the export service.", frappe.PermissionError)
