@@ -11,10 +11,15 @@ would carry the real value in a form no helper can mask.
 
 Frappe 15 has no masking (no ``mask_field_value``, no ``Meta.get_masked_fields``),
 so there every function here is a no-op. Detected by the helper's presence, not by
-version. Administrator is never masked (``get_masked_fields`` answers empty)."""
+version. Administrator is never masked (``get_masked_fields`` answers empty).
+
+A Frappe 16 build before July 2026 masks a child table by its own rules, not its
+parent's, because its ``get_masked_fields`` takes no ``parenttype``. There the
+lookup follows that build (``compat.masked_fields_of``), as its ``get_list`` does."""
 
 import frappe
 
+from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError
 
 try:
@@ -31,7 +36,7 @@ def masked_fields(tables: dict, child_parents: dict) -> dict[str, dict]:
 		return {}
 	out = {}
 	for alias, doctype in tables.items():
-		fields = frappe.get_meta(doctype).get_masked_fields(parenttype=child_parents.get(alias))
+		fields = compat.masked_fields_of(frappe.get_meta(doctype), child_parents.get(alias))
 		if fields:
 			out[alias] = {df.fieldname: df for df in fields}
 	return out

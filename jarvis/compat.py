@@ -146,6 +146,33 @@ def file_bytes(fdoc) -> bytes:
 	return content
 
 
+@functools.cache
+def _get_masked_fields_takes_parenttype(cls) -> bool:
+	"""Does this Meta class accept ``get_masked_fields(parenttype=...)``? (Frappe 16, July 2026)
+
+	Fails closed: an unreadable signature or a ``**kwargs`` wrapper counts as the new
+	shape. A wrong guess then raises, instead of quietly masking a child table by the
+	weaker rule."""
+	try:
+		params = inspect.signature(cls.get_masked_fields).parameters
+	except (AttributeError, TypeError, ValueError):
+		return True
+	return "parenttype" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def masked_fields_of(meta, parenttype: str | None = None) -> list:
+	"""``meta.get_masked_fields`` in the shape the installed Frappe 16 accepts.
+
+	Frappe 16 builds from July 2026 mask a child table by its parent's rules, through
+	``parenttype``. An older 16 build has no such argument and raised a TypeError on
+	it. There the call is bare, which is how that build's own ``Document`` masks child
+	rows, so the result matches what the site itself shows.
+	"""
+	if _get_masked_fields_takes_parenttype(type(meta)):
+		return meta.get_masked_fields(parenttype=parenttype)
+	return meta.get_masked_fields()
+
+
 # Number formats for inferred numeric columns: ERPNext's own report export uses
 # the same thousands-grouped shapes (``XLSXStyleBuilder._build_number_format``).
 # Decimals get a fixed 2 places: exported figures are overwhelmingly amounts.
