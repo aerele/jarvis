@@ -148,11 +148,16 @@ def file_bytes(fdoc) -> bytes:
 
 @functools.cache
 def _get_masked_fields_takes_parenttype(cls) -> bool:
-	"""Does this Meta class accept ``get_masked_fields(parenttype=...)``? (Frappe 16, July 2026)"""
+	"""Does this Meta class accept ``get_masked_fields(parenttype=...)``? (Frappe 16, July 2026)
+
+	Fails closed: an unreadable signature or a ``**kwargs`` wrapper counts as the new
+	shape. A wrong guess then raises, instead of quietly masking a child table by the
+	weaker rule."""
 	try:
-		return "parenttype" in inspect.signature(cls.get_masked_fields).parameters
+		params = inspect.signature(cls.get_masked_fields).parameters
 	except (AttributeError, TypeError, ValueError):
-		return False
+		return True
+	return "parenttype" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
 
 
 def masked_fields_of(meta, parenttype: str | None = None) -> list:
