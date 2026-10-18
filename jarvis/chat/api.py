@@ -4002,10 +4002,9 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
 	# A reply still waiting for a slot has nothing with the agent to abort, so Stop
-	# cancels its turn instead, the same cancel as the queued chip's. Before this, Stop
-	# said "Stopped." and the reply ran later.
-	if admission.cancel_waiting_on_stop(conversation, run_id):
-		return {"ok": True}
+	# cancels its turn, the same cancel as the queued chip's. Before this, Stop said
+	# "Stopped." and the reply ran later. The sweeps below still run either way.
+	nothing_with_agent = admission.cancel_waiting_on_stop(conversation)
 	# Phase-0 admission (flag ON): record cancel intent on this conversation's
 	# dispatching Turn row (D2's dispatching->cancel-intent transition). This is
 	# NOT terminal - the legacy worker observes agent's aborted-terminal and
@@ -4086,7 +4085,7 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		api._skill_autorun_clear(conversation)
 	except Exception:
 		frappe.log_error(title="stop_run skill_autorun clear", message=frappe.get_traceback())
-	if not conv.session_key:
+	if nothing_with_agent or not conv.session_key:
 		return {"ok": True}  # nothing running yet
 	settings = frappe.get_cached_doc("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
