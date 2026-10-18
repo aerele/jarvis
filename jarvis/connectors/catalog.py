@@ -20,7 +20,8 @@ Design:
     it can never change what an existing name already means (its key,
     base_url, auth or category), because an admin push that silently
     redirected an existing preset's traffic would defeat the allowlist.
-    Implemented and tested here; nothing calls it yet.
+    `jarvis.connector_catalogue` calls it to hide the presets the operator
+    switched off fleet-wide.
 
 Catalog order: the four presets already shipping (GitHub, Atlassian, Linear,
 Stripe) come first in their existing order, so an already-familiar dropdown
@@ -1053,8 +1054,8 @@ def apply_overlay(
 	    (`logo`/`help_url`/`hint`/`enabled` are optional, defaulting like the
 	    dataclass does).
 
-	Implemented and tested; nothing calls this yet, a later phase wires it to
-	an admin-editable Settings row."""
+	Called from `jarvis.connector_catalogue.providers()` with the operator's
+	switched-off presets (disable only; the add path is unused)."""
 	by_existing = {provider.name: provider for provider in providers}
 	result = list(providers)
 	fixed_fields = (
