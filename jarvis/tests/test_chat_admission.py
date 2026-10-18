@@ -1663,7 +1663,7 @@ class TestCancelCreditLeak(_AdmissionTestCase):
 class TestStopOnAWaitingReply(_AdmissionTestCase):
 	"""The composer's Stop calls ``stop_run``. A reply still waiting for a slot was never
 	cancelled by it: Stop said "Stopped." and the reply ran later. The composer sends
-	no run id until run:start, so both shapes are covered."""
+	no run id until run:start, so both shapes are covered; the run id does not pick."""
 
 	def test_stop_with_the_waiting_run_id_cancels_it(self):
 		conv = self._mk_conv()
@@ -1676,6 +1676,16 @@ class TestStopOnAWaitingReply(_AdmissionTestCase):
 		self._insert_turn(conv, "adm_stop_q2", self._mk_msg(conv, 1), "queued", version=0)
 		self.assertTrue(chat_api.stop_run(conv)["ok"])
 		self.assertEqual(self._state("adm_stop_q2"), "cancelled")
+
+	def test_stop_cancels_every_waiting_turn_and_still_sweeps(self):
+		# Stop means nothing more runs, and its card and approval sweeps still apply.
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q3", self._mk_msg(conv, 1), "queued", version=0)
+		self._insert_turn(conv, "adm_stop_q4", self._mk_msg(conv, 2), "queued", version=0)
+		with patch("jarvis.api._request_autorun_clear") as autorun_clear:
+			chat_api.stop_run(conv)
+		self.assertEqual([self._state(r) for r in ("adm_stop_q3", "adm_stop_q4")], ["cancelled"] * 2)
+		autorun_clear.assert_called_once_with(conv)
 
 	def test_stop_on_a_running_reply_leaves_a_waiting_follow_up(self):
 		conv = self._mk_conv()
