@@ -830,11 +830,11 @@ def persist_tool_receipt(
 				),
 			)
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist receipt before reply
-		if tool_call_id and not flip_token:
-			_bind_callback_tool(conv_name, tool_call_id)
 		if msg_name is None:
 			# Duplicate callback for the same tool call — already recorded (R-6 idempotent).
 			return
+		if tool_call_id and not flip_token:
+			_bind_callback_tool(conv_name, tool_call_id)
 		publish_realtime_tool_result(
 			user=conv_owner,
 			conversation_id=conv_name,
