@@ -1412,7 +1412,13 @@ def cancel_queued_on_stop(conversation: str, run_id: str | None) -> bool:
 				rid, owner_of=_assert_owner, label=f"admission.cancel_queued_on_stop {rid}", attempts=2
 			)
 		except Exception as e:
-			txn.report_lost_race(e, title="admission.cancel_queued_on_stop")
+			# Stop must not fail here: a lost race or any other error leaves this turn to
+			# the caller's abort, and the turns already cancelled still get their hand-over.
+			if txn.is_write_conflict(e):
+				txn.report_lost_race(e, title="admission.cancel_queued_on_stop")
+			else:
+				frappe.db.rollback()
+				frappe.log_error(title="admission.cancel_queued_on_stop", message=frappe.get_traceback())
 			all_cancelled = False
 			continue
 		if result["path"]:
@@ -1420,14 +1426,18 @@ def cancel_queued_on_stop(conversation: str, run_id: str | None) -> bool:
 		else:
 			all_cancelled = False
 	for rid, result in won:
-		_finish_pre_dispatch_cancel(
-			rid,
-			result["row"],
-			result["owner"],
-			result["path"],
-			reason=USER_CANCEL_REASON,
-			source="chat.stop_run",
-		)
+		try:
+			_finish_pre_dispatch_cancel(
+				rid,
+				result["row"],
+				result["owner"],
+				result["path"],
+				reason=USER_CANCEL_REASON,
+				source="chat.stop_run",
+			)
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title="admission.cancel_queued_on_stop finish", message=frappe.get_traceback())
 	return all_cancelled
 
 
