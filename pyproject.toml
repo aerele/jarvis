@@ -45,6 +45,17 @@ name = "jarvis"
 [tool.bench.frappe-dependencies]
 frappe = ">=15.0.0,<17.0.0"
 
+# The two SPAs, for prebuilt assets (Pilot) and Frappe Cloud builds.
+[[tool.bench.assets]]
+build_dir = "./frontend"
+out_dir = "./jarvis/public/frontend"
+index_html_path = "./jarvis/www/jarvis.html"
+
+[[tool.bench.assets]]
+build_dir = "./pwa"
+out_dir = "./jarvis/public/pwa"
+index_html_path = "./jarvis/www/jarvis_mobile.html"
+
 # These dependencies are only installed when developer mode is enabled
 [tool.bench.dev-dependencies]
 # package_name = "~=1.1.0"
