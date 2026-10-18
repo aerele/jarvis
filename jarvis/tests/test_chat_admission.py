@@ -1658,9 +1658,9 @@ class TestCancelCreditLeak(_AdmissionTestCase):
 
 
 class TestStopOnAWaitingReply(_AdmissionTestCase):
-	"""The composer's Stop calls ``stop_run``. A reply still waiting for a slot was never
+	"""The composer's Stop calls ``stop_run``. A reply still queued for a slot was never
 	cancelled by it: Stop said "Stopped." and the reply ran later. The composer sends
-	no run id until run:start, so both shapes are covered; the run id does not pick."""
+	no run id until run:start, so both shapes are covered."""
 
 	def test_stop_with_the_waiting_run_id_cancels_it(self):
 		conv = self._mk_conv()
@@ -1691,6 +1691,12 @@ class TestStopOnAWaitingReply(_AdmissionTestCase):
 		chat_api.stop_run(conv)
 		chat_api.stop_run(conv, "adm_stop_run")
 		self.assertEqual(self._state("adm_stop_next"), "queued")
+
+	def test_stop_for_another_run_leaves_a_queued_reply(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q5", self._mk_msg(conv, 1), "queued", version=0)
+		chat_api.stop_run(conv, "some-other-run")
+		self.assertEqual(self._state("adm_stop_q5"), "queued")
 
 
 # --------------------------------------------------------------------------- #

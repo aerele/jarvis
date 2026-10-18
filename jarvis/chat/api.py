@@ -4101,10 +4101,10 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
-	# A reply still waiting for a slot has nothing with the agent to abort, so Stop
+	# A reply still queued for a slot has nothing with the agent to abort, so Stop
 	# cancels its turn, the same cancel as the queued chip's. Before this, Stop said
 	# "Stopped." and the reply ran later. The sweeps below still run either way.
-	nothing_with_agent = admission.cancel_waiting_on_stop(conversation)
+	nothing_with_agent = admission.cancel_queued_on_stop(conversation, run_id)
 	# Phase-0 admission (flag ON): record cancel intent on this conversation's
 	# dispatching Turn row (D2's dispatching->cancel-intent transition). This is
 	# NOT terminal - the legacy worker observes agent's aborted-terminal and
