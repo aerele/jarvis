@@ -1,4 +1,4 @@
-"""Persist tool ownership from a run event, independently of callback arrival order."""
+"""Persist tool ownership from a run event or the plugin callback, in either order."""
 
 import json
 
@@ -26,3 +26,25 @@ def record_tool_owner(conversation: str, assistant_message: str | None, tool_cal
 		frappe.db.set_value(
 			"Jarvis Chat Message", assistant_message, "tool_call_ids", json.dumps(ids), update_modified=False
 		)
+
+
+def bind_to_live_reply(conversation: str, tool_call_id: str | None) -> None:
+	"""Bind a tool that reached the bench through the plugin callback to the reply of
+	the turn that is running now. Joins the caller's transaction, like ``record_tool_owner``.
+
+	A Claude CLI turn sends no tool events, so ``record_tool_owner`` is never fed from
+	the run for its tools, and the callback id (``X-Jarvis-Tool-Call-Id``) is the only
+	one there is. Admission keeps at most one unfinished turn per conversation, so that
+	turn's reply is the owner. A chat with no turn row (the legacy path) stays unbound.
+	"""
+	if not tool_call_id:
+		return
+	from jarvis.chat import turn_state
+
+	reply = frappe.db.get_value(
+		turn_state.TURN,
+		{"conversation": conversation, "state": ["in", turn_state.NONTERMINAL_STATES]},
+		"assistant_message",
+		order_by="creation desc",
+	)
+	record_tool_owner(conversation, reply, tool_call_id)
