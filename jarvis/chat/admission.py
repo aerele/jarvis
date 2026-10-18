@@ -1374,45 +1374,52 @@ def cancel_queued_turn(run_id: str) -> dict:
 	return {"ok": True, "run_id": run_id, "path": path}
 
 
-def cancel_waiting_on_stop(conversation: str, run_id: str | None) -> bool:
-	"""The composer's Stop on a reply that has not reached the agent yet: cancel its turn
-	the way the queued chip's Cancel does, since the agent abort cannot reach it.
+def cancel_waiting_on_stop(conversation: str) -> bool:
+	"""The composer's Stop when nothing of this conversation is with the agent yet:
+	cancel every turn still waiting for a slot, the way the queued chip's Cancel does,
+	since the agent abort cannot reach them.
 
-	``run_id`` is the turn the composer stops. The composer has none until run:start, so
-	without one the conversation's waiting turn is meant, unless a turn already runs:
-	Stop then aborts that one and a follow-up queued behind it stays. Returns whether a
-	turn was cancelled; on False (also a lost race) the caller goes on with the abort."""
+	While a turn of the conversation runs, Stop aborts that one and leaves a follow-up
+	queued behind it, so nothing is cancelled here. Returns True when nothing is left
+	for the agent abort: no turn ran and every waiting turn was cancelled. A turn the
+	pump promoted mid-cancel returns False, and the caller's abort then reaches it."""
 	from jarvis.chat import turn_state as ts
 
 	waiting_states = ("queued", "preparing", "ready")
-	if run_id:
-		row = frappe.db.get_value(TURN, run_id, ["conversation", "state"], as_dict=True)
-		if not row or row.conversation != conversation or row.state not in waiting_states:
-			return False
-	else:
-		running = tuple(s for s in ts.NONTERMINAL_STATES if s not in waiting_states)
-		waiting = ts.unfinished_turn(conversation, states=waiting_states)
-		if not waiting or ts.unfinished_turn(conversation, states=running):
-			return False
-		run_id = waiting[0]
-	try:
-		result = _cancel_pre_dispatch(
-			run_id, owner_of=_assert_owner, label=f"admission.cancel_waiting_on_stop {run_id}", attempts=2
-		)
-	except Exception as e:
-		txn.report_lost_race(e, title="admission.cancel_waiting_on_stop")
+	running_states = tuple(s for s in ts.NONTERMINAL_STATES if s not in waiting_states)
+	if ts.unfinished_turn(conversation, states=running_states):
 		return False
-	if not result["path"]:
-		return False
-	_finish_pre_dispatch_cancel(
-		run_id,
-		result["row"],
-		result["owner"],
-		result["path"],
-		reason=USER_CANCEL_REASON,
-		source="chat.stop_run",
+	waiting = frappe.db.get_values(
+		TURN,
+		{"conversation": conversation, "state": ["in", waiting_states]},
+		"name",
+		order_by="creation asc",
+		pluck=True,
 	)
-	return True
+	if not waiting:
+		return False
+	all_cancelled = True
+	for run_id in waiting:
+		try:
+			result = _cancel_pre_dispatch(
+				run_id, owner_of=_assert_owner, label=f"admission.cancel_waiting_on_stop {run_id}", attempts=2
+			)
+		except Exception as e:
+			txn.report_lost_race(e, title="admission.cancel_waiting_on_stop")
+			all_cancelled = False
+			continue
+		if not result["path"]:
+			all_cancelled = False
+			continue
+		_finish_pre_dispatch_cancel(
+			run_id,
+			result["row"],
+			result["owner"],
+			result["path"],
+			reason=USER_CANCEL_REASON,
+			source="chat.stop_run",
+		)
+	return all_cancelled
 
 
 @frappe.whitelist()
