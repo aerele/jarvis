@@ -1374,45 +1374,54 @@ def cancel_queued_turn(run_id: str) -> dict:
 	return {"ok": True, "run_id": run_id, "path": path}
 
 
-def cancel_waiting_on_stop(conversation: str) -> bool:
-	"""The composer's Stop when nothing of this conversation is with the agent yet:
-	cancel every turn still waiting for a slot, the way the queued chip's Cancel does,
-	since the agent abort cannot reach them.
+def cancel_queued_on_stop(conversation: str, run_id: str | None) -> bool:
+	"""The composer's Stop on a reply still queued for a slot: cancel it the way the queued
+	chip's Cancel does, since the agent abort cannot reach a turn the agent never had.
 
-	While a turn of the conversation runs, Stop aborts that one and leaves a follow-up
-	queued behind it, so nothing is cancelled here. Returns True when nothing is left
-	for the agent abort: no turn ran and every waiting turn was cancelled. A turn the
-	pump promoted mid-cancel returns False, and the caller's abort then reaches it."""
+	``run_id`` names the turn Stop is for; only a queued turn of this conversation is
+	cancelled. The composer has no run id until run:start, so without one every queued
+	turn of the conversation is cancelled. While another of its turns is under way
+	(preparing, ready, a re-send or a running reply), Stop is for that one, as before,
+	and nothing is cancelled here. Returns True when every turn meant was cancelled, so
+	nothing is left for the agent abort; a turn promoted mid-cancel returns False."""
 	from jarvis.chat import turn_state as ts
 
-	waiting_states = ("queued", "preparing", "ready")
-	running_states = tuple(s for s in ts.NONTERMINAL_STATES if s not in waiting_states)
-	if ts.unfinished_turn(conversation, states=running_states):
+	under_way = tuple(s for s in ts.NONTERMINAL_STATES if s != "queued")
+	if ts.unfinished_turn(conversation, states=under_way):
 		return False
-	waiting = frappe.db.get_values(
-		TURN,
-		{"conversation": conversation, "state": ["in", waiting_states]},
-		"name",
-		order_by="creation asc",
-		pluck=True,
-	)
-	if not waiting:
+	if run_id:
+		row = frappe.db.get_value(TURN, run_id, ["conversation", "state"], as_dict=True)
+		if not row or row.conversation != conversation or row.state != "queued":
+			return False
+		queued = [run_id]
+	else:
+		queued = frappe.db.get_values(
+			TURN,
+			{"conversation": conversation, "state": "queued"},
+			"name",
+			order_by="creation asc",
+			pluck=True,
+		)
+	if not queued:
 		return False
-	all_cancelled = True
-	for run_id in waiting:
+	# Cancel them all before any of them hands its slot on, or the hand-over promotes the next.
+	won, all_cancelled = [], True
+	for rid in queued:
 		try:
 			result = _cancel_pre_dispatch(
-				run_id, owner_of=_assert_owner, label=f"admission.cancel_waiting_on_stop {run_id}", attempts=2
+				rid, owner_of=_assert_owner, label=f"admission.cancel_queued_on_stop {rid}", attempts=2
 			)
 		except Exception as e:
-			txn.report_lost_race(e, title="admission.cancel_waiting_on_stop")
+			txn.report_lost_race(e, title="admission.cancel_queued_on_stop")
 			all_cancelled = False
 			continue
-		if not result["path"]:
+		if result["path"]:
+			won.append((rid, result))
+		else:
 			all_cancelled = False
-			continue
+	for rid, result in won:
 		_finish_pre_dispatch_cancel(
-			run_id,
+			rid,
 			result["row"],
 			result["owner"],
 			result["path"],
