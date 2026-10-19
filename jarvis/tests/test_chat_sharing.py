@@ -196,6 +196,30 @@ class TestShareWrites(SharingCase):
 				{"doctype": SHARE, "conversation": self.conversation, "user": RECIPIENT, "shared_by": OWNER}
 			).insert()
 
+	def test_controller_identity_guard_is_required_inside_write_context(self):
+		from jarvis.chat.sharing import share_write
+
+		for actor, shared_by in ((MANAGER, OWNER), (OWNER, OUTSIDER), (OUTSIDER, OUTSIDER)):
+			with (
+				self.subTest(actor=actor, shared_by=shared_by),
+				as_user(actor),
+				share_write(),
+				self.assertRaises(frappe.PermissionError),
+			):
+				frappe.get_doc(
+					{
+						"doctype": SHARE,
+						"conversation": self.conversation,
+						"user": RECIPIENT,
+						"shared_by": shared_by,
+					}
+				).insert(ignore_permissions=True)
+		self.assertFalse(frappe.db.exists(SHARE, {"conversation": self.conversation}))
+
+	def test_shared_by_lookup_has_a_database_index(self):
+		indexes = frappe.db.sql("SHOW INDEX FROM `tabJarvis Conversation Share`", as_dict=True)
+		self.assertTrue(any(row.Column_name == "shared_by" and row.Seq_in_index == 1 for row in indexes))
+
 	def test_controller_context_and_immutability(self):
 		from jarvis.chat.sharing import share_write
 
@@ -580,6 +604,43 @@ class TestShareLifecycleAndUnseen(SharingCase):
 			queries.call_count, small.call_count + 2, "List queries must stay bounded as shares grow."
 		)
 
+	def test_shared_index_and_direct_read_apply_the_same_visibility_rules(self):
+		from jarvis.chat.sharing import list_shared_with_me
+
+		self.share()
+		for case in (
+			"disabled_owner",
+			"owner_without_access",
+			"file_box",
+			"dashboard",
+			"admin_owner",
+			"empty",
+		):
+			frappe.db.savepoint("index_visibility")
+			try:
+				with self.subTest(case=case):
+					if case == "disabled_owner":
+						frappe.db.set_value("User", OWNER, "enabled", 0)
+					elif case == "owner_without_access":
+						frappe.db.delete("Has Role", {"parent": OWNER, "parenttype": "User"})
+					elif case == "file_box":
+						frappe.db.set_value("Jarvis Conversation", self.conversation, "file_box", 1)
+					elif case == "dashboard":
+						frappe.db.set_value(
+							"Jarvis Conversation", self.conversation, "origin_page", "dashboards"
+						)
+					elif case == "admin_owner":
+						frappe.db.set_value(
+							"Jarvis Conversation", self.conversation, "owner", "Administrator"
+						)
+					else:
+						frappe.db.delete(MESSAGE, {"conversation": self.conversation})
+					with as_user(RECIPIENT):
+						self.assertNotIn(self.conversation, {row["name"] for row in list_shared_with_me()})
+					self.assert_refused()
+			finally:
+				frappe.db.rollback(save_point="index_visibility")
+
 	def test_archive_and_hard_delete_remove_rows(self):
 		self.share()
 		with as_user(OWNER):
@@ -669,6 +730,9 @@ class TestShareLifecycleAndUnseen(SharingCase):
 		for user in (OWNER, RECIPIENT):
 			with as_user(user), self.assertRaises(frappe.PermissionError):
 				sharing.get_sharing_setting()
+			with as_user(user), self.assertRaises(frappe.PermissionError):
+				sharing.set_sharing_setting(False)
+			self.assertTrue(sharing.sharing_enabled())
 		with (
 			patch.object(sharing, "invalidate_all_recipients") as invalidate,
 			patch.object(sharing, "_audit") as audit,

@@ -10,6 +10,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, get_datetime
 
+from jarvis.chat import txn
 from jarvis.chat.api import _get_owned_conversation
 from jarvis.chat.personalise_api import _single_bool
 from jarvis.permissions import (
@@ -241,17 +242,20 @@ def set_shares(conversation: str, users: str | list) -> dict:
 			frappe.throw(_("Recipients must be a list of users."))
 	if not isinstance(users, list) or any(not isinstance(user, str) or not user for user in users):
 		frappe.throw(_("Recipients must be a list of users."))
+	return txn.replay_on_conflict(lambda: _set_shares(conversation, set(users)), label="share.set")
+
+
+def _set_shares(conversation: str, wanted: set[str]) -> dict:
 	# Serialize the entire read/diff/write so duplicate requests cannot race
 	# the unique constraint or exceed the cap.
 	doc = frappe.get_doc(CONVERSATION, conversation, for_update=True)
-	# The initial owner gate can precede a lock wait. Re-read the locked row,
-	# rather than retaining a repeatable-read snapshot of its earlier state.
+	# The initial gate can precede a lock wait. Snapshot checking may reject
+	# this lock with 1020; the endpoint replays the whole unit, reloading all
+	# authorization and recipients, only if no earlier caller work is lost.
 	if doc.owner != frappe.session.user:
 		frappe.throw(_("Only the owner can share this chat."), frappe.PermissionError)
 	# Synchronize additions with User saves/deletes before taking share-row
-	# locks. A current read also detects users deleted after the owner gate's
-	# repeatable-read snapshot; an old snapshot must never create an orphan.
-	wanted = set(users)
+	# locks, including users removed while the initial owner gate was waiting.
 	locked_users = {
 		row.name: row
 		for row in frappe.db.get_values(
@@ -381,6 +385,14 @@ def get_shared_conversation(
 	refresh: str | None = None,
 ) -> dict:
 	require_jarvis_access()
+	return txn.replay_on_conflict(
+		lambda: _read_shared_conversation(conversation, limit, before, after, refresh), label="share.read"
+	)
+
+
+def _read_shared_conversation(conversation, limit, before, after, refresh) -> dict:
+	# Replay the projection and authorization too: a retry must not return an
+	# earlier payload after a concurrent revoke or eligibility change.
 	latest = _latest_activity(conversation)
 	doc, share, reason = _visible_share(conversation, for_update=True)
 	if reason:
@@ -491,6 +503,10 @@ def list_all_shares(start: int = 0, page_length: int = 50, search: str = "") -> 
 def revoke_share(name: str) -> dict:
 	require_jarvis_access()
 	require_jarvis_admin()
+	return txn.replay_on_conflict(lambda: _revoke_share(name), label="share.revoke")
+
+
+def _revoke_share(name: str) -> dict:
 	row = frappe.db.get_value(SHARE, name, ["conversation", "user"], as_dict=True, for_update=True)
 	if row:
 		_delete_share(name)
@@ -506,6 +522,9 @@ def _delete_share(name: str) -> None:
 	# grant committed after this request's snapshot would otherwise be skipped.
 	# A real write to the locked row makes it visible to those reads. Keep
 	# deletion/hooks in the same transaction; rollback also undoes this touch.
+	# With snapshot checking enabled, a conflicting lock/write raises 1020.
+	# Let the transaction owner replay or abort the WHOLE operation. Replaying
+	# a lifecycle hook alone could discard the caller's earlier writes/locks.
 	frappe.db.set_value(
 		SHARE, name, "modified", get_datetime(modified) + timedelta(microseconds=1), update_modified=False
 	)
