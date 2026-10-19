@@ -3,6 +3,7 @@ import { turnErrorInfo } from "../../../jarvis/public/js/turn_errors.mjs";
 
 import { agentName } from "@/branding";
 import { report as reportError } from "@shared/lib/errorReporter";
+import { exportFeedEntry } from "./exportFeed.js";
 
 // The notification feed, assembled client-side from realtime events — the bench
 // has no persistent notification store (the desktop uses live toasts, the native
@@ -133,6 +134,11 @@ export function recordEvent(e) {
 			at,
 			read: false,
 		});
+	} else if (e.kind === "export:changed") {
+		// A background export reached an outcome; the card in the chat has the details.
+		// Bell feed only, no push toast (like the import below).
+		const entry = exportFeedEntry(e, at);
+		if (entry) push(entry);
 	} else if (e.kind === "import:finished" && conv) {
 		// Slice B: the completion message already landed in the conversation
 		// (this event carries no filename/tally — just the pointer); the feed
