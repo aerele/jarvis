@@ -3947,7 +3947,7 @@
 				v-if="draftPanel"
 				class="jv-artifact-overlay"
 				@mousedown="onOverlayMouseDown"
-				@click.self="onOverlayBackdropClick(closeDraftPanel)"
+				@click.self="onOverlayBackdropClick(dismissDraftPanel)"
 			>
 				<aside
 					ref="draftPanelEl"
@@ -4471,7 +4471,9 @@ import { markParked, parkedByCard, parkedNoteFor } from "@/lib/draftParked";
 import {
 	applyActionPayload,
 	draftActionKey,
+	draftIsDirty,
 	draftSaveOutcome,
+	markDraftBaseline,
 	openPanelFor,
 	stampDraftModel,
 } from "@/lib/draftSave";
@@ -7682,6 +7684,7 @@ async function openDraftPanel(a) {
 		return false;
 	}
 	if (!model) return false;
+	markDraftBaseline(model);
 	// Only the open panel can be edited after a failure (R2-9, lib/draftSave).
 	draftPanel.value = stampDraftModel(model, { messageKey, card, editable: true, actionKey });
 	return true;
@@ -7698,6 +7701,16 @@ function addDraftRow(ti) {
 }
 function removeDraftRow(ti, ri) {
 	draftPanel.value.tables[ti].rows.splice(ri, 1);
+}
+// A click outside the panel closes it only when nothing would be lost. With edits, or
+// a failed save's marked fields, it stays open (the dimmed chat behind it, its card's
+// buttons included, is not a way out); the X still closes it on purpose.
+function dismissDraftPanel() {
+	if (draftIsDirty(draftPanel.value)) {
+		if (draftPanelEl.value) draftPanelEl.value.focus();
+		return;
+	}
+	closeDraftPanel();
 }
 function closeDraftPanel() {
 	draftLinkGeneration++;

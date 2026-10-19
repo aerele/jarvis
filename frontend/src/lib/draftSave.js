@@ -10,6 +10,7 @@
 //   there. The summary card cannot be edited, so it sends `editable: 0` and the
 //   server never tells the assistant someone is fixing it (the card then stays, with
 //   its error, instead of the person being left with neither card nor panel).
+import { draftValues } from "./draftApply.js";
 import { draftFailureOf } from "./draftFailure.js";
 import { parkedNoteOf } from "./draftParked.js";
 
@@ -69,4 +70,19 @@ export function draftSaveOutcome(r, agent) {
 	const parked = parkedNoteOf(r);
 	if (parked) return { kind: "parked", note: parked };
 	return { kind: "saved" };
+}
+
+// What the panel would save when it opened, so a click outside it can tell whether
+// closing would throw the person's work away.
+export function markDraftBaseline(model) {
+	model.baseline = JSON.stringify(draftValues(model));
+	return model;
+}
+
+// Whether closing the panel would lose something: a value changed since it opened, or
+// a failed save's error and marked fields still showing. A model with no baseline
+// (never opened as a panel) is never dirty.
+export function draftIsDirty(model) {
+	if (!model || model.baseline === undefined) return false;
+	return !!model.error || JSON.stringify(draftValues(model)) !== model.baseline;
 }
