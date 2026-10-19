@@ -52,5 +52,32 @@ export function useConversationExport(conversation) {
 			onClick: () => download(format),
 		}));
 	});
-	return { downloadOptions };
+	const downloadMenuOption = computed(() => {
+		const id = conversation();
+		const running = pending.get(id);
+		return {
+			key: "download",
+			value: "download",
+			label: running
+				? running === "pdf"
+					? __("Preparing PDF…")
+					: __("Preparing Markdown…")
+				: __("Download"),
+			icon: "download",
+			// Keep the disclosure focusable while busy; only its format choices
+			// are disabled, so keyboard users can still open/leave the menu.
+			disabled: !id,
+			submenu: downloadOptions.value.map((option) => ({
+				...option,
+				value: option.key,
+				label:
+					running === option.key
+						? option.label
+						: option.key === "pdf"
+						? __("PDF")
+						: __("Markdown"),
+			})),
+		};
+	});
+	return { downloadOptions, downloadMenuOption };
 }

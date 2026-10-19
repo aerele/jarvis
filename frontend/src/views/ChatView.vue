@@ -256,17 +256,27 @@
 										>
 									</span>
 								</button>
-								<button
-									v-for="option in downloadOptions"
-									:key="option.key"
-									role="menuitem"
-									class="jv-create-item"
-									:class="{ 'jv-unavailable': option.disabled }"
-									:aria-disabled="option.disabled ? 'true' : undefined"
-									@click="!option.disabled && option.onClick()"
+								<Dropdown
+									:options="downloadMenuOption.submenu"
+									:disabled="downloadMenuOption.disabled"
+									side="right"
+									align="start"
 								>
-									<span class="jv-create-item-t">{{ option.label }}</span>
-								</button>
+									<template #trigger>
+										<button
+											role="menuitem"
+											class="jv-create-item"
+											:disabled="downloadMenuOption.disabled"
+										>
+											<span class="jv-create-item-t">{{
+												downloadMenuOption.label
+											}}</span>
+											<span aria-hidden="true" style="margin-left: auto"
+												>›</span
+											>
+										</button>
+									</template>
+								</Dropdown>
 							</div>
 						</template>
 					</div>
@@ -6831,7 +6841,7 @@ function openMacroFromCard(card) {
 // proposes surfaces as the existing action:pending Approve card. Cleared on New
 // chat / conversation switch / dismiss.
 const createMenuOpen = ref(false);
-const { downloadOptions } = useConversationExport(() => currentId.value);
+const { downloadMenuOption } = useConversationExport(() => currentId.value);
 // Opening it moves focus to its first item (the hand-made menu has no library to do
 // it); Escape closes it and gives focus back to the button.
 const createBtnEl = ref(null);
