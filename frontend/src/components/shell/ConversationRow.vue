@@ -22,6 +22,13 @@
 				class="mr-1.5 size-3 shrink-0 text-ink-gray-5"
 			/>
 			<span class="flex-1 truncate">{{ conv.title || "New chat" }}</span>
+			<FeatherIcon
+				v-if="conv.shared_count > 0"
+				name="users"
+				class="ml-1 size-3 shrink-0 text-ink-gray-5"
+				role="img"
+				:aria-label="__('Shared with {0} people', [conv.shared_count])"
+			/>
 			<span
 				v-if="activity"
 				class="ml-1.5 size-1.5 shrink-0 rounded-full"
@@ -47,7 +54,7 @@
 						variant="ghost"
 						icon="more-horizontal"
 						class="conversation-more !h-5 !w-5 opacity-0 group-hover:opacity-100 focus-visible:!opacity-100"
-						:aria-label="'Options for ' + (conv.title || 'chat')"
+						:label="__('Options for {0}', [conv.title || __('chat')])"
 						@click.stop
 					/>
 				</template>
@@ -65,6 +72,8 @@ import { Button, Dropdown, FeatherIcon, confirmDialog } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { escapeHtml } from "@/lib/errors";
 import { useConversationExport } from "@/composables/useConversationExport";
+import { openChatShare } from "@/composables/useChatSharing";
+import { __ } from "@/lib/i18n";
 
 const props = defineProps({
 	conv: { type: Object, required: true }, // {name, title, starred, last_active_at}
@@ -154,6 +163,15 @@ const menuOptions = computed(() => [
 		onClick: () => store.toggleStar(props.conv.name),
 	},
 	{ label: "Rename", icon: "edit-3", onClick: startRename },
+	...(!props.conv.file_box && props.conv.origin_page !== "dashboards"
+		? [
+				{
+					label: __("Share…"),
+					icon: "users",
+					onClick: () => openChatShare(props.conv.name, props.conv.title),
+				},
+		  ]
+		: []),
 	inlineDownloadOption.value,
 	...(formatsOpen.value
 		? downloadMenuOption.value.submenu.map((option) => ({

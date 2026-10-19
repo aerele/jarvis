@@ -85,6 +85,7 @@
 			</div>
 			<Dialogs />
 			<SettingsDialog />
+			<ChatShareDialog />
 			<JarvisCommandPalette />
 			<NotifyToaster />
 			<ConfirmDialog />
@@ -112,6 +113,7 @@ import { needsOnboarding, regateOnRouteChange } from "@/onboarding/readiness.js"
 import Sidebar from "./Sidebar.vue";
 import JarvisCommandPalette from "./JarvisCommandPalette.vue";
 import SettingsDialog from "./SettingsDialog.vue";
+import ChatShareDialog from "@/components/chat/ChatShareDialog.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 // Mounted here (not in ChatView) so a route change away from Chat can never
 // unmount it mid-prompt - same reasoning as ConfirmDialog living here.
@@ -202,6 +204,7 @@ const SETTINGS_DEEP_LINK_KEYS = new Set([
 	"billing", // legacy alias, not a PANES key - SettingsDialog maps it to "usage"
 	"branding",
 	"usageadmin",
+	"sharedchats",
 	"macroadmin", // moved: no longer a pane, see openSettingsFromQuery
 ]);
 // Only ever OPENS a pane - an absent or unrecognised key is silently ignored
@@ -266,6 +269,7 @@ function stopInterval() {
 }
 let _visTimer = null;
 function onVisibility() {
+	if (document.visibilityState === "visible") store.loadSharedConversations?.({ refresh: true });
 	if (document.visibilityState === "visible") {
 		startInterval();
 		clearTimeout(_visTimer);
@@ -294,6 +298,8 @@ onMounted(async () => {
 
 	// Sidebar fills without ChatView needing to be mounted (§3.1).
 	store.loadConversations();
+	store.loadSharedConversations?.();
+	window.addEventListener("focus", refreshSharedIndex);
 	store.refreshBadges();
 
 	// Fallback only (vite dev server serves index.html without the jinja boot
@@ -321,7 +327,11 @@ onMounted(async () => {
 	// stale /onboarding link.
 });
 
+function refreshSharedIndex() {
+	store.loadSharedConversations?.({ refresh: true });
+}
 onBeforeUnmount(() => {
+	window.removeEventListener("focus", refreshSharedIndex);
 	document.removeEventListener("visibilitychange", onVisibility);
 	clearTimeout(_visTimer);
 	stopInterval();
