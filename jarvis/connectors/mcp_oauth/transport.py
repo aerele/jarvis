@@ -271,7 +271,9 @@ def provider_error_detail(result: HttpResult) -> str:
 	"""A short, sanitized reason for a non-2xx OAuth response, in the
 	PROVIDER'S own words: RFC 6749/7591's ``error``/``error_description`` JSON
 	fields when the body parsed as a JSON document, else up to 200 chars of
-	whatever text it sent back. ``""`` when there is nothing usable.
+	whatever text it sent back. ``""`` when there is nothing usable. With no
+	``error_description``, a per-field ``errors`` object stands in for it
+	(Calendly: ``{"errors": {"name": ["may only contain ..."]}}``).
 
 	Reads only the RESPONSE - never the request we sent - and never returns
 	more than :data:`_MAX_PROVIDER_DETAIL_CHARS` chars with newlines/control
@@ -280,7 +282,7 @@ def provider_error_detail(result: HttpResult) -> str:
 	sentence."""
 	if isinstance(result.json, dict):
 		code = result.json.get("error")
-		description = result.json.get("error_description")
+		description = result.json.get("error_description") or _field_errors(result.json.get("errors"))
 		parts = [p.strip() for p in (code, description) if isinstance(p, str) and p.strip()]
 		if parts:
 			return _sanitize_provider_text(": ".join(parts))
@@ -291,6 +293,23 @@ def provider_error_detail(result: HttpResult) -> str:
 	if text and not text.startswith("<"):
 		return _sanitize_provider_text(text)
 	return ""
+
+
+def _field_errors(errors) -> str:
+	"""``{"name": ["may only contain ..."]}`` as ``"name may only contain ..."``
+	(the messages are written to follow the field name), one per message, joined
+	by ``"; "``. Anything not shaped like a field-to-messages mapping reads as
+	``""``."""
+	if not isinstance(errors, dict):
+		return ""
+	parts = []
+	for field, messages in errors.items():
+		if isinstance(messages, str):
+			messages = [messages]
+		if not isinstance(messages, list):
+			continue
+		parts.extend(f"{field} {m.strip()}" for m in messages if isinstance(m, str) and m.strip())
+	return "; ".join(parts)
 
 
 def _sanitize_provider_text(text: str) -> str:

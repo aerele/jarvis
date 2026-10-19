@@ -93,6 +93,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, get_datetime, get_system_timezone, get_url, now_datetime
 
+from jarvis import connector_catalogue
 from jarvis.connectors import action_rows, broker, catalog, mcp_oauth, mcp_oauth_store, mcp_wire, oauth
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 
@@ -303,7 +304,14 @@ _OAUTH_ERROR_MESSAGES = {
 	"too_many_redirects": "That address redirects too many times.",
 	"cross_host_redirect": "That address redirects somewhere we cannot follow.",
 	"insecure_redirect": "That address redirects to an insecure address.",
+	"no_401_challenge": "This app did not ask for a sign-in. Add it with a key, or with no sign-in.",
+	"client_address_mismatch": "This connector's address changed. Remove it and add it again.",
 }
+
+
+# A registered client name keeps only these characters (see _dcr_client_name).
+_CLIENT_NAME_DROP_RE = re.compile(r"[^A-Za-z0-9 -]+")
+_CLIENT_NAME_RUNS_RE = re.compile(r" {2,}|-{2,}")
 
 
 #: Codes that DO carry a provider-supplied detail worth showing (see
@@ -462,8 +470,8 @@ def _merge_allowed_actions(existing_children, tools: list[dict]) -> list[dict]:
 	``allowed``/``read_only``/``destructive`` flags are PRESERVED as-is; they are
 	NOT recomputed from the server's ``annotations``. This closes a relabel attack:
 	a compromised server could otherwise mark a known destructive action
-	``readOnlyHint: true`` on the next re-test and have ``policy.action_decision``
-	auto-allow it (it auto-allows read-only, non-destructive actions). Re-testing
+	``readOnlyHint: true`` on the next re-test and have the safe-read check
+	(``api._connector_call_is_safe_read``) skip the confirm card for it. Re-testing
 	must never silently revoke an admin's earlier grant either, and preserving the
 	stored row does both.
 
@@ -675,7 +683,8 @@ def list_connectors() -> dict:
 	not only after a row's own ``_oauth_status``/``_mcp_oauth_status`` carries it.
 
 	``catalog`` is the in-app provider list (public fields only, no ``base_url``,
-	no secrets, disabled entries absent) the SPA builds its preset picker, logos,
+	no secrets, disabled entries absent, including the presets the operator
+	switched off via ``jarvis.connector_catalogue``) the SPA builds its preset picker, logos,
 	hints, help links and per-preset flow from, so the flow a preset takes is
 	decided once, here, rather than duplicated in the client."""
 	rows = frappe.get_list(
@@ -693,6 +702,9 @@ def list_connectors() -> dict:
 			"last_test_status",
 			"last_test_at",
 		],
+		# Administrator bypasses connector_query_conditions, so this keeps other
+		# users' Personal rows out of the SPA for them too (Desk is the admin view).
+		or_filters=[["scope", "=", "Shared"], ["owner", "=", frappe.session.user]],
 		order_by="scope asc, label asc",
 	)
 	summaries = _action_summaries([r["name"] for r in rows])
@@ -716,7 +728,7 @@ def list_connectors() -> dict:
 
 	return {
 		"oauth_redirect_uri": oauth_redirect_uri(),
-		"catalog": catalog.to_public(),
+		"catalog": catalog.to_public(providers=connector_catalogue.providers()),
 		"shared": shared,
 		"mine": mine,
 	}
@@ -782,6 +794,10 @@ def add_connector(
 
 	if preset not in _PRESETS:
 		frappe.throw(_("Unknown connector preset."))
+	if connector_catalogue.is_disabled(preset):
+		# The operator switched this preset off fleet-wide. Refused again in the
+		# connector controller so a raw DocType insert cannot slip past.
+		frappe.throw(_("This app is turned off for your workspace."))
 	if scope not in _SCOPES:
 		frappe.throw(_("Scope must be Shared or Personal."))
 	if auth_method not in _AUTH_METHODS:
@@ -1025,11 +1041,24 @@ def _brand_name() -> str:
 def _dcr_client_name(redirect_uri: str) -> str:
 	"""The RFC 7591 ``client_name`` to register with: some servers (Atlassian,
 	at least) answer a body with none with a bare HTTP 400, so this is always
-	sent. "<brand> (<host>)" so the provider's own app-management screen shows
+	sent. "<brand> <host>" so the provider's own app-management screen shows
 	which tenant a registration belongs to, not an identical "Jarvis" across
-	every tenant that self-registers there."""
-	netloc = urlparse(redirect_uri).netloc
-	return f"{_brand_name()} ({netloc})" if netloc else _brand_name()
+	every tenant that self-registers there.
+
+	Letters, digits, spaces and hyphens only: Calendly refuses any other
+	character in a name (a dot or a bracket included), and a plain name reads
+	the same everywhere. The host's dots become hyphens; a brand that cleans to
+	nothing (all non-ASCII) falls back to "Jarvis"."""
+	brand = _client_name_part(_brand_name()) or "Jarvis"
+	host = _client_name_part((urlparse(redirect_uri).hostname or "").replace(".", "-"))
+	return f"{brand} {host}" if host else brand
+
+
+def _client_name_part(text: str) -> str:
+	"""``text`` with every character outside ``[A-Za-z0-9 -]`` dropped and runs of
+	spaces or hyphens collapsed to one."""
+	kept = _CLIENT_NAME_DROP_RE.sub("", text)
+	return _CLIENT_NAME_RUNS_RE.sub(lambda run: run.group(0)[0], kept).strip(" -")
 
 
 def _provider_declares_endpoints(provider) -> bool:
