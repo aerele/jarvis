@@ -13,6 +13,7 @@ from jarvis import (
 	announcement,
 	catalogue_visibility,
 	compat,
+	connector_catalogue,
 	maintenance_notice,
 	onboarding_contract,
 	release_notice,
@@ -312,6 +313,10 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	# Marker-aware + KEEP-on-doubt (jarvis.catalogue_visibility) so an old/rolled-back CP
 	# never un-hides a withdrawn agent fleet-wide.
 	catalogue_visibility.persist_from_connection(data)
+	# Same cadence: mirror the operator's fleet-global connector catalogue policy.
+	# Marker-aware + KEEP-on-doubt (jarvis.connector_catalogue) so an old/rolled-back CP
+	# never re-enables a switched-off preset fleet-wide.
+	connector_catalogue.persist_from_connection(data)
 	if data.get("agent_url"):
 		write_connection(data)
 		return {"synced": True, "tenant_status": data.get("tenant_status")}

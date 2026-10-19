@@ -101,6 +101,9 @@ class _ConnectorApiTestCase(FrappeTestCase):
 			frappe.db.sql("delete from tabSingles where doctype=%s and field=%s", (SETTINGS, field))
 			if value is not None:
 				frappe.db.set_single_value(SETTINGS, field, value, update_modified=False)
+		# The raw delete above skips the document cache; a cached Settings doc would
+		# otherwise leak this test's singles into the next one.
+		frappe.clear_document_cache(SETTINGS, SETTINGS)
 		frappe.db.commit()
 
 	def _mk(self, scope: str, key: str, owner: str | None = None, **kw) -> str:
@@ -308,6 +311,100 @@ class TestDisabledCatalogPreset(_ConnectorApiTestCase):
 		frappe.set_user(PLAIN_A)
 		names = {row["name"] for row in connectors_api.list_connectors()["catalog"]}
 		self.assertNotIn(self.DISABLED_PRESET, names)
+
+
+class TestOperatorDisabledPreset(_ConnectorApiTestCase):
+	"""A preset the operator switched off fleet-wide (jarvis.connector_catalogue).
+	It leaves the picker and refuses new rows on every path; a row saved before
+	the switch keeps resolving, saving and testing, as catalog.by_name promises."""
+
+	PRESET = "PayPal"
+
+	def _disable(self, *names: str) -> None:
+		self._set_single("connector_catalogue_disabled", json.dumps(list(names)))
+
+	def _paypal_doc(self, key: str = "paypal"):
+		return frappe.get_doc(
+			{
+				"doctype": CONNECTOR,
+				"key": key,
+				"label": self.PRESET,
+				"preset": self.PRESET,
+				"scope": "Personal",
+				"base_url": catalog.base_urls()[self.PRESET],
+				"credential": "tok",
+			}
+		)
+
+	def test_the_preset_ships_enabled(self):
+		self.assertTrue(catalog.by_name(self.PRESET).enabled)
+
+	def test_list_connectors_drops_it_from_the_catalog(self):
+		self._disable(self.PRESET)
+		frappe.set_user(PLAIN_A)
+		names = {row["name"] for row in connectors_api.list_connectors()["catalog"]}
+		self.assertNotIn(self.PRESET, names)
+		self.assertIn("Stripe", names, "only the switched-off preset leaves")
+		self.assertEqual(len(names), sum(1 for p in catalog.PROVIDERS if p.enabled) - 1)
+
+	def test_add_connector_refuses_it(self):
+		self._disable(self.PRESET)
+		frappe.set_user(PLAIN_A)
+		before = frappe.db.count(CONNECTOR, {"preset": self.PRESET})
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			connectors_api.add_connector(preset=self.PRESET, scope="Personal", credential="tok")
+		self.assertIn("turned off for your workspace", str(ctx.exception))
+		self.assertEqual(frappe.db.count(CONNECTOR, {"preset": self.PRESET}), before)
+
+	def test_controller_refuses_a_raw_insert(self):
+		self._disable(self.PRESET)
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._paypal_doc().insert(ignore_permissions=True)
+		self.assertIn("turned off for your workspace", str(ctx.exception))
+
+	def test_controller_refuses_moving_a_row_onto_it(self):
+		name = self._mk("Personal", "gh-move", owner=PLAIN_A, preset="GitHub")
+		self._disable(self.PRESET)
+		doc = frappe.get_doc(CONNECTOR, name)
+		doc.preset = self.PRESET
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			doc.save(ignore_permissions=True)
+		self.assertIn("turned off for your workspace", str(ctx.exception))
+
+	def test_custom_url_is_never_governed(self):
+		self._disable(catalog.CUSTOM_URL)
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.add_connector(
+			preset=catalog.CUSTOM_URL,
+			base_url="https://mcp.example.com/mcp",
+			scope="Personal",
+			credential="tok",
+		)
+		self._connectors.append(out["name"])
+		self.assertEqual(out["preset"], catalog.CUSTOM_URL)
+
+	def test_an_existing_row_still_resolves_saves_and_tests(self):
+		# Saved BEFORE the switch: the guard refuses a new row, which this is not.
+		name = self._mk(
+			"Personal",
+			"paypal-old",
+			owner=PLAIN_A,
+			preset=self.PRESET,
+			base_url=catalog.base_urls()[self.PRESET],
+		)
+		self._disable(self.PRESET)
+		self.assertIsNotNone(catalog.by_name(self.PRESET))
+		frappe.set_user(PLAIN_A)
+
+		renamed = connectors_api.update_connector(name, label="PayPal (old)")
+		self.assertEqual(renamed["label"], "PayPal (old)")
+
+		with patch.object(broker, "test_connector", return_value={"ok": True, "tools": _TOOLS}) as probe:
+			out = connectors_api.test_connector(name)
+		self.assertTrue(out["ok"])
+		self.assertEqual(probe.call_args.args[0].base_url, catalog.base_urls()[self.PRESET])
+		self.assertEqual(frappe.db.get_value(CONNECTOR, name, "last_test_status"), "Passed")
 
 
 class TestListConnectors(_ConnectorApiTestCase):
