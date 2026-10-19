@@ -85,3 +85,20 @@ export function draftIsDirty(model) {
 	if (!model || model.baseline === undefined) return false;
 	return JSON.stringify(draftValues(model)) !== model.baseline;
 }
+
+// The message that owns the live draft card. Normally `last` (the last assistant
+// message). After a save failed on a value the person is fixing in the panel, the
+// assistant only acknowledges ("I'll wait while you fix it"): that reply has no card
+// and must not retire the draft's, or closing the panel would leave no Edit. So when
+// `last` has no action, walk back over assistant replies, and only those, to the draft
+// `fixingKey` names. A user message or a receipt chip in between means it moved on.
+export function liveDraftMessage(visible, last, fixingKey, hasAction) {
+	if (!last || !fixingKey || hasAction(last)) return last;
+	for (let i = visible.indexOf(last) - 1; i >= 0; i--) {
+		const m = visible[i];
+		if (m.role !== "assistant") return last;
+		if (m.name === fixingKey) return hasAction(m) ? m : last;
+		if (hasAction(m)) return last;
+	}
+	return last;
+}

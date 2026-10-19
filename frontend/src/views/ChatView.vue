@@ -4473,6 +4473,7 @@ import {
 	draftActionKey,
 	draftIsDirty,
 	draftSaveOutcome,
+	liveDraftMessage,
 	markDraftBaseline,
 	openPanelFor,
 	stampDraftModel,
@@ -7357,10 +7358,22 @@ const _lastAssistant = computed(() => {
 	}
 	return last && last.role === "assistant" && !last.streaming ? last : null;
 });
-const activeAction = computed(() =>
-	_lastAssistant.value ? actionOf(_lastAssistant.value) : null
+// The draft whose save failed on a value the person is fixing in the panel (its
+// message name). The assistant's "I'll wait" reply to that failure must not retire the
+// draft's card, or closing the panel would leave no Edit to reopen it.
+const fixingDraft = ref("");
+watch(currentId, () => {
+	fixingDraft.value = "";
+});
+// The message that owns the live draft card: the last assistant message, or the draft
+// being fixed when only the assistant's replies follow it (lib/draftSave).
+const _cardMessage = computed(() =>
+	liveDraftMessage(visibleMessages.value, _lastAssistant.value, fixingDraft.value, (m) =>
+		Boolean(actionOf(m))
+	)
 );
-const actionFor = computed(() => (activeAction.value ? _lastAssistant.value.name : null));
+const activeAction = computed(() => (_cardMessage.value ? actionOf(_cardMessage.value) : null));
+const actionFor = computed(() => (activeAction.value ? _cardMessage.value.name : null));
 const confirmFor = computed(() =>
 	_lastAssistant.value && !activeAction.value && confirmLabel(_lastAssistant.value)
 		? _lastAssistant.value.name
@@ -8000,6 +8013,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			// the chat explains (or the note says to ask, when it could not be sent).
 			closeDraftPanel();
 			notify(outcome.note, { type: "error" });
+			fixingDraft.value = "";
 			await loadConversation(currentId.value);
 			store.loadConversations();
 			showQueuedContinuation(r);
@@ -8013,6 +8027,8 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			p.applying = false;
 			p.error = outcome.error;
 			markMissing(p, p.error.fields, (_formMetaCache[p.doctype] || {}).fields);
+			// The panel's draft stays live through the assistant's acknowledgement.
+			if (p.editable) fixingDraft.value = draftKey;
 			return;
 		}
 		// Sensitive configuration: nothing was saved, a confirmation card now waits in
@@ -8020,6 +8036,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 		// draft so it can't park a second card.
 		if (outcome.kind === "parked") {
 			const parked = outcome.note;
+			fixingDraft.value = "";
 			p.applying = false;
 			p.parked = parked;
 			parkedDrafts.value = markParked(parkedDrafts.value, draftKey, parked);
@@ -8028,6 +8045,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			await loadConversation(currentId.value);
 			return;
 		}
+		fixingDraft.value = "";
 		closeDraftPanel();
 		await loadConversation(currentId.value);
 		store.loadConversations();
