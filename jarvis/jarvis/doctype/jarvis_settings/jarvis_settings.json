@@ -10,6 +10,7 @@
   "account_tab",
   "account_section",
   "enabled",
+  "hide_shortcut_without_access",
   "token_budget_monthly",
   "conversation_retention_days",
   "budgets_section",
@@ -185,6 +186,13 @@
    "fieldtype": "Check",
    "label": "Enabled",
    "default": "1"
+  },
+  {
+   "fieldname": "hide_shortcut_without_access",
+   "fieldtype": "Check",
+   "label": "Hide Jarvis shortcut for users without access",
+   "default": "0",
+   "description": "Hide the floating Desk shortcut for users who cannot access Jarvis. Reload Desk after changing this setting."
   },
   {
    "fieldname": "token_budget_monthly",

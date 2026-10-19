@@ -23,9 +23,21 @@ export const HIDE_ON_ROUTES = [
   "setup-wizard",
 ];
 
+// Boot publishes normalized booleans. Missing preference preserves the old
+// launcher; when enabled, require the same affirmative verdict used by clicks.
+export function shouldHideWidgetForAccess(hasAccess, hideWithoutAccess) {
+  return hideWithoutAccess === true && hasAccess !== true;
+}
+
 // `route` is frappe.get_route() (an array; route[0] is the page).
 // `siteSetupComplete` is frappe.boot.jarvis_site_setup_complete.
-export function shouldHideWidget(route, siteSetupComplete) {
+export function shouldHideWidget(
+  route,
+  siteSetupComplete,
+  hasAccess,
+  hideWithoutAccess
+) {
+  if (shouldHideWidgetForAccess(hasAccess, hideWithoutAccess)) return true;
   const page = (Array.isArray(route) && route[0]) || "";
   if (HIDE_ON_ROUTES.indexOf(page) !== -1) return true;
   return siteSetupComplete === false;
