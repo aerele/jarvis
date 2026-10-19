@@ -833,6 +833,8 @@ def persist_tool_receipt(
 		if msg_name is None:
 			# Duplicate callback for the same tool call — already recorded (R-6 idempotent).
 			return
+		if tool_call_id and not flip_token:
+			_bind_callback_tool(conv_name, tool_call_id)
 		publish_realtime_tool_result(
 			user=conv_owner,
 			conversation_id=conv_name,
@@ -959,6 +961,25 @@ def cancel_pending_action_rows(conversation: str) -> None:
 				title="cancel_pending_action_rows: flip failed",
 				message=frappe.get_traceback(),
 			)
+
+
+def _bind_callback_tool(conv_name: str, tool_call_id: str) -> None:
+	"""Bind a callback tool to the running turn's reply ("Reports consulted" reads it).
+
+	A Claude CLI turn sends no tool events, so this callback is the only place its tools
+	can be bound. Runs in its own transaction after the receipt's commit, so a failed
+	bind never costs the receipt; it only locks the reply row. Best-effort."""
+	from jarvis.chat.tool_ownership import bind_to_live_reply
+
+	try:
+		txn.replay_on_conflict(
+			lambda: bind_to_live_reply(conv_name, tool_call_id),
+			label=f"bind tool {conv_name}:{tool_call_id}",
+		)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release the reply row lock now
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="jarvis.tool_owner.bind_failed", message=frappe.get_traceback())
 
 
 def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
