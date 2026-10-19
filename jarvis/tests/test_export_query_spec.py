@@ -147,8 +147,10 @@ class TestExportQuerySpec(FrappeTestCase):
 
 	def test_above_the_ceiling_requires_a_chat_for_delivery(self):
 		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 10):
-			with self.assertRaisesRegex(InvalidArgumentError, "Start a large export from a Jarvis chat"):
+			with self.assertRaises(InvalidArgumentError) as ctx:
 				export_query(spec=_no_comment_spec())
+		self.assertIn("Narrow", str(ctx.exception))
+		self.assertIn("Start it from a Jarvis chat", str(ctx.exception))
 
 	def test_shapes_an_export_refuses(self):
 		with self.assertRaisesRegex(InvalidArgumentError, "drop offset"):
@@ -283,8 +285,10 @@ class TestExportQuerySpecLimitsAndHeaders(FrappeTestCase):
 
 	def test_a_limit_above_the_ceiling_requires_a_chat(self):
 		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 10):
-			with self.assertRaisesRegex(InvalidArgumentError, "Start a large export from a Jarvis chat"):
+			with self.assertRaises(InvalidArgumentError) as ctx:
 				export_query(spec=_no_comment_spec(limit=50))
+			self.assertIn("Narrow", str(ctx.exception))
+			self.assertIn("Start it from a Jarvis chat", str(ctx.exception))
 			# A limit equal to the ceiling is a deliberate cap, not an overflow.
 			env = export_query(spec=_no_comment_spec(limit=10))
 		self.assertEqual((env["total"], env["limited_by_spec"]), (10, 10))

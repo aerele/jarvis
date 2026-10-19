@@ -58,7 +58,43 @@ class TestFromQuery(FrappeTestCase):
 		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 2):
 			with self.assertRaises(InvalidArgumentError) as ctx:
 				from_query("ToDo", filters={"description": ["like", "resolver-test-%"]}, fields=["name"])
-		self.assertIn("too many to export", str(ctx.exception))
+		message = str(ctx.exception)
+		self.assertIn("more than 2 rows", message)
+		self.assertIn("Narrow the filter", message)
+		self.assertNotIn("not yet available", message)
+
+	def test_site_setting_can_only_lower_the_immediate_row_limit(self):
+		def limit_for(value):
+			with mock.patch.dict(frappe.conf, {"jarvis_export_immediate_row_limit": value}):
+				return resolvers.immediate_row_limit()
+
+		self.assertEqual(resolvers.immediate_row_limit(), 20_000)
+		self.assertEqual(limit_for(5000), 5000)
+		self.assertEqual(limit_for("5000"), 5000)
+		# Raising is refused: the plugin aborts a call at 30 s, which is why 20,000 exists.
+		self.assertEqual(limit_for(50_000), 20_000)
+		# Unusable values fall back to the default instead of disabling or breaking exports.
+		for bad in ("abc", "", 0, -5, "0", None, True, False, [], 1.5e-3):
+			with self.subTest(value=bad):
+				self.assertEqual(limit_for(bad), 20_000)
+		# The upper clamp follows the module ceiling, which tests lower on purpose.
+		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 2):
+			self.assertEqual(limit_for(50_000), 2)
+
+	def test_lowered_site_setting_moves_the_split_and_names_the_number(self):
+		filters = {"description": ["like", "resolver-test-%"]}
+		with mock.patch.dict(frappe.conf, {"jarvis_export_immediate_row_limit": 2}):
+			with self.assertRaisesRegex(resolvers.NeedsBackground, "more than 2 rows"):
+				from_query("ToDo", filters=filters, fields=["name"])
+			spec = {
+				"from": "ToDo",
+				"select": ["name"],
+				"where": [{"field": "description", "op": "like", "value": "resolver-test-%"}],
+			}
+			with self.assertRaisesRegex(resolvers.NeedsBackground, "more than 2 rows"):
+				resolvers.from_spec(spec)
+		# Without the setting the same three rows are exported at once.
+		self.assertEqual(from_query("ToDo", filters=filters, fields=["name"]).total, 3)
 
 	def test_stray_parent_doctype_is_dropped_for_a_normal_doctype(self):
 		# parent_doctype means something only for a child table; it must not turn a
