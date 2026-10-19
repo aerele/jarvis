@@ -1,0 +1,277 @@
+[
+  {
+    "name": "bar",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"bar\", \"title\": \"Bar fixture\", \"x\": [\"Alpha\", \"Beta\"], \"series\": [{\"name\": \"Revenue\", \"data\": [0, 20]}, {\"name\": \"Costs\", \"data\": [5, 9]}]}",
+    "expected_headers": [
+      "Revenue",
+      "Costs"
+    ],
+    "expected_rows": [
+      [
+        "Alpha",
+        "0",
+        "5"
+      ],
+      [
+        "Beta",
+        "20",
+        "9"
+      ]
+    ]
+  },
+  {
+    "name": "line",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"line\", \"title\": \"Line fixture\", \"x\": [\"Alpha\", \"Beta\"], \"series\": [{\"name\": \"Revenue\", \"data\": [10, 20]}, {\"name\": \"Costs\", \"data\": [5, 9]}]}",
+    "expected_headers": [
+      "Revenue",
+      "Costs"
+    ],
+    "expected_rows": [
+      [
+        "Alpha",
+        "10",
+        "5"
+      ],
+      [
+        "Beta",
+        "20",
+        "9"
+      ]
+    ]
+  },
+  {
+    "name": "area",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"area\", \"title\": \"Area fixture\", \"x\": [\"Alpha\", \"Beta\"], \"series\": [{\"name\": \"Revenue\", \"data\": [10, 20]}, {\"name\": \"Costs\", \"data\": [5, 9]}]}",
+    "expected_headers": [
+      "Revenue",
+      "Costs"
+    ],
+    "expected_rows": [
+      [
+        "Alpha",
+        "10",
+        "5"
+      ],
+      [
+        "Beta",
+        "20",
+        "9"
+      ]
+    ]
+  },
+  {
+    "name": "scatter",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"scatter\", \"title\": \"Scatter fixture\", \"series\": [{\"name\": \"Revenue\", \"data\": [[1, 0], [1, 7], [3, 4]]}]}",
+    "expected_headers": [
+      "x",
+      "Revenue"
+    ],
+    "expected_rows": [
+      [
+        "1",
+        "[0, 7]"
+      ],
+      [
+        "3",
+        "4"
+      ]
+    ]
+  },
+  {
+    "name": "bubble",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"bubble\", \"title\": \"Bubble fixture\", \"series\": [{\"name\": \"Revenue\", \"data\": [[1, 0, 3], [4, 5, 6]]}]}",
+    "expected_headers": [
+      "x",
+      "Revenue"
+    ],
+    "expected_rows": [
+      [
+        "1",
+        "[0, 3]"
+      ],
+      [
+        "4",
+        "[5, 6]"
+      ]
+    ]
+  },
+  {
+    "name": "heatmap",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"heatmap\", \"title\": \"Heatmap fixture\", \"x\": [\"Mon\", \"Tue\"], \"y\": [\"AM\", \"PM\"], \"series\": [{\"name\": \"Sales\", \"data\": [[0, 0, 0], [0, 1, 7], [1, 0, 8], [1, 1, 9]]}]}",
+    "expected_headers": [
+      "x",
+      "Sales"
+    ],
+    "expected_rows": [
+      [
+        "Mon",
+        "[[\"AM\", 0], [\"PM\", 7]]"
+      ],
+      [
+        "Tue",
+        "[[\"AM\", 8], [\"PM\", 9]]"
+      ]
+    ]
+  },
+  {
+    "name": "boxplot",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"boxplot\", \"title\": \"Boxplot fixture\", \"x\": [\"Alpha\", \"Beta\"], \"series\": [{\"name\": \"Revenue\", \"data\": [[1, 2, 3, 4, 5], [2, 3, 4, 5, 6]]}, {\"name\": \"Costs\", \"data\": [5, 9]}]}",
+    "expected_headers": [
+      "Revenue",
+      "Costs"
+    ],
+    "expected_rows": [
+      [
+        "Alpha",
+        "[1, 2, 3, 4, 5]",
+        "5"
+      ],
+      [
+        "Beta",
+        "[2, 3, 4, 5, 6]",
+        "9"
+      ]
+    ]
+  },
+  {
+    "name": "radar",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"radar\", \"title\": \"Radar fixture\", \"x\": [\"Alpha\", \"Beta\"], \"series\": [{\"name\": \"Revenue\", \"data\": [10, 20]}, {\"name\": \"Costs\", \"data\": [5, 9]}]}",
+    "expected_headers": [
+      "Revenue",
+      "Costs"
+    ],
+    "expected_rows": [
+      [
+        "Alpha",
+        "10",
+        "5"
+      ],
+      [
+        "Beta",
+        "20",
+        "9"
+      ]
+    ]
+  },
+  {
+    "name": "funnel",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"funnel\", \"title\": \"Funnel fixture\", \"x\": [\"Alpha\", \"Beta\"], \"series\": [{\"name\": \"Revenue\", \"data\": [10, 20]}, {\"name\": \"Costs\", \"data\": [5, 9]}]}",
+    "expected_headers": [
+      "Revenue",
+      "Costs"
+    ],
+    "expected_rows": [
+      [
+        "Alpha",
+        "10",
+        "5"
+      ],
+      [
+        "Beta",
+        "20",
+        "9"
+      ]
+    ]
+  },
+  {
+    "name": "pie",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"pie\", \"title\": \"Pie fixture\", \"x\": [\"Alpha\", \"Beta\"], \"series\": [{\"name\": \"Revenue\", \"data\": [10, 20]}]}",
+    "expected_headers": [
+      "Label",
+      "Value"
+    ],
+    "expected_rows": [
+      [
+        "Alpha",
+        "10"
+      ],
+      [
+        "Beta",
+        "20"
+      ]
+    ]
+  },
+  {
+    "name": "donut",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"donut\", \"title\": \"Donut fixture\", \"x\": [\"Alpha\", \"Beta\"], \"series\": [{\"name\": \"Revenue\", \"data\": [10, 20]}]}",
+    "expected_headers": [
+      "Label",
+      "Value"
+    ],
+    "expected_rows": [
+      [
+        "Alpha",
+        "10"
+      ],
+      [
+        "Beta",
+        "20"
+      ]
+    ]
+  },
+  {
+    "name": "gauge",
+    "tag": "jarvis-chart",
+    "body": "{\"type\": \"gauge\", \"title\": \"Gauge fixture\", \"series\": [{\"name\": \"Completion\", \"data\": [73]}]}",
+    "expected_headers": [
+      "Label",
+      "Value"
+    ],
+    "expected_rows": [
+      [
+        "Completion",
+        "73"
+      ]
+    ]
+  },
+  {
+    "name": "xychart",
+    "tag": "mermaid",
+    "body": "xychart-beta\n title \"Quarterly fixture\"\n x-axis [\"Q1\", \"Q2\"]\n y-axis \"Sales\" 0 --> 100\n bar [25, 75]\n line \"Costs\" [10, 20]",
+    "expected_headers": [
+      "Sales",
+      "Costs"
+    ],
+    "expected_rows": [
+      [
+        "Q1",
+        "25",
+        "10"
+      ],
+      [
+        "Q2",
+        "75",
+        "20"
+      ]
+    ]
+  },
+  {
+    "name": "xychart-horizontal",
+    "tag": "mermaid",
+    "body": "xychart-beta horizontal\n title \"Horizontal fixture\"\n x-axis [\"North\", \"South\"]\n bar \"Orders\" [3, 8]",
+    "expected_headers": [
+      "Orders"
+    ],
+    "expected_rows": [
+      [
+        "North",
+        "3"
+      ],
+      [
+        "South",
+        "8"
+      ]
+    ]
+  }
+]
