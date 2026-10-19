@@ -1387,10 +1387,9 @@ class TestDraftComputed(FrappeTestCase):
 			self._computed()
 
 
-class TestChildRowForm(FrappeTestCase):
-	"""A child row's full form on the card: every field Desk's row edit form shows,
-	laid out, while the grid keeps Desk's columns (the chat card used to show only
-	the in_list_view columns of a child table)."""
+class _ChildRowFormHelpers:
+	"""Shared helpers of the child-row-form tests. A mixin, not a base TestCase, so
+	each test class below runs only its own tests."""
 
 	BREAKS = {"Section Break", "Column Break", "Tab Break"}
 
@@ -1406,7 +1405,10 @@ class TestChildRowForm(FrappeTestCase):
 				if skip and df.fieldtype in skip:
 					skip = set()
 				if df.hidden:
-					skip = {"Tab Break"} if df.fieldtype == "Tab Break" else {"Section Break", "Tab Break"}
+					if df.fieldtype == "Tab Break":
+						skip = {"Tab Break"}
+					elif not skip:  # a hidden section does not narrow a hidden tab
+						skip = {"Section Break", "Tab Break"}
 			if skip or df.hidden or not df.fieldname or df.fieldtype in self.BREAKS:
 				continue
 			if df.fieldtype in _NON_EDIT_FIELDTYPES or df.fieldtype in {
@@ -1425,6 +1427,26 @@ class TestChildRowForm(FrappeTestCase):
 			for f in items["form_fields"]
 			if f["fieldtype"] not in self.BREAKS and f["fieldname"] not in cols
 		)
+
+	def _with_child_meta(self, change, child="Sales Order Item", parent="Sales Order", table="items"):
+		"""``parent``'s ``table`` spec with ``change(meta)`` applied to ``child``'s meta."""
+		from copy import deepcopy
+		from unittest.mock import patch
+
+		real_get_meta = frappe.get_meta
+		meta = deepcopy(real_get_meta(child))
+		change(meta)
+		with patch(
+			"frappe.get_meta",
+			side_effect=lambda dt, *a, **kw: meta if dt == child else real_get_meta(dt, *a, **kw),
+		):
+			return get_doctype_form_meta(parent)["tables"][table]
+
+
+class TestChildRowForm(_ChildRowFormHelpers, FrappeTestCase):
+	"""A child row's full form on the card: every field Desk's row edit form shows,
+	laid out, while the grid keeps Desk's columns (the chat card used to show only
+	the in_list_view columns of a child table)."""
 
 	def test_the_form_has_every_visible_field_in_form_order(self):
 		items = self._items()
@@ -1491,22 +1513,6 @@ class TestChildRowForm(FrappeTestCase):
 		):
 			items = self._items()
 		self.assertNotIn(target, {f.get("fieldname") for f in items["form_fields"]})
-
-	def _with_child_meta(self, change):
-		"""Sales Order's items with ``change(meta)`` applied to Sales Order Item."""
-		from copy import deepcopy
-		from unittest.mock import patch
-
-		real_get_meta = frappe.get_meta
-		meta = deepcopy(real_get_meta("Sales Order Item"))
-		change(meta)
-		with patch(
-			"frappe.get_meta",
-			side_effect=lambda dt, *a, **kw: meta
-			if dt == "Sales Order Item"
-			else real_get_meta(dt, *a, **kw),
-		):
-			return self._items()
 
 	def test_a_secret_field_is_never_in_the_form(self):
 		target = self._a_non_grid_field(self._items())
@@ -1604,7 +1610,7 @@ class TestChildRowForm(FrappeTestCase):
 		self.assertEqual(row["is_primary"], 1)
 
 
-class TestChildRowFormReview(TestChildRowForm):
+class TestChildRowFormReview(_ChildRowFormHelpers, FrappeTestCase):
 	"""Review fixes: hidden sections and tabs, write permlevels, defaults, and bad
 	grid settings."""
 
@@ -1694,3 +1700,228 @@ class TestChildRowFormReview(TestChildRowForm):
 
 		items = self._with_child_meta(make_column_secret)
 		self.assertNotIn("qty", {c["fieldname"] for c in items["columns"]})
+
+	def test_a_hidden_tab_hides_every_field_after_it(self):
+		state = {}
+
+		def hide_tab(meta):
+			fields = meta.fields
+			labelled = [i for i, df in enumerate(fields) if df.fieldtype == "Section Break" and df.label]
+			start = labelled[1]  # leave some fields before it
+			fields[start].fieldtype, fields[start].hidden = "Tab Break", 1
+			state["before"] = {df.fieldname for df in fields[:start] if df.fieldname and not df.hidden}
+			state["after"] = {df.fieldname for df in fields[start + 1 :] if df.fieldname}
+
+		items = self._with_child_meta(hide_tab)
+		names = {f.get("fieldname") for f in items["form_fields"]}
+		self.assertTrue(state["after"])
+		# a later Section Break does not end a hidden TAB: only another Tab Break would
+		self.assertFalse(names & state["after"])
+		self.assertTrue(names & state["before"])
+
+	def test_a_saved_grid_column_that_is_hidden_or_unreadable_is_skipped(self):
+		from unittest.mock import patch
+
+		def lock_down(meta):
+			meta.get_field("warehouse").hidden = 1
+			meta.get_field("item_code").permlevel = 1
+
+		saved = frappe.as_json(
+			{
+				"GridView": {
+					"Sales Order Item": [
+						{"fieldname": "warehouse"},
+						{"fieldname": "qty"},
+						{"fieldname": "item_code"},
+					]
+				}
+			}
+		)
+		with (
+			patch("frappe.model.utils.user_settings.get_user_settings", return_value=saved),
+			patch("jarvis.chat.actions_api._readable_permlevels", return_value={0}),
+		):
+			items = self._with_child_meta(lock_down)
+		self.assertEqual([c["fieldname"] for c in items["columns"]], ["qty"])
+
+	def _bad_settings_run(self, bad):
+		"""Open the card twice with ``bad`` as the saved settings; (log_error mock, columns)."""
+		from unittest.mock import patch
+
+		key = f"jarvis:card_grid_settings_err:{frappe.session.user}:Sales Order:Sales Order Item"
+		frappe.cache().delete_value(key)
+		self.addCleanup(lambda: frappe.cache().delete_value(key))
+		with (
+			patch("frappe.model.utils.user_settings.get_user_settings", **bad),
+			patch.object(frappe, "log_error") as log_error,
+		):
+			first = get_doctype_form_meta("Sales Order")
+			second = get_doctype_form_meta("Sales Order")
+		self.assertTrue(first["ok"] and second["ok"])
+		return log_error, first["tables"]["items"]["columns"]
+
+	def test_corrupt_grid_settings_open_the_card_and_log_once(self):
+		log_error, columns = self._bad_settings_run({"side_effect": ValueError("corrupt")})
+		self.assertTrue(columns)  # Desk's default columns
+		log_error.assert_called_once()
+		text = " ".join(str(v) for v in (*log_error.call_args.args, *log_error.call_args.kwargs.values()))
+		for name in ("Sales Order", "Sales Order Item", frappe.session.user):
+			self.assertIn(name, text)
+
+	def test_corrupt_grid_settings_log_once_per_child_table(self):
+		from unittest.mock import patch
+
+		from jarvis.chat.actions_api import _log_bad_grid_settings
+
+		user = frappe.session.user
+		keys = [f"jarvis:card_grid_settings_err:{user}:Purchase Invoice:{c}" for c in ("A Item", "B Item")]
+		for k in keys:
+			frappe.cache().delete_value(k)
+			self.addCleanup(lambda k=k: frappe.cache().delete_value(k))
+		with patch.object(frappe, "log_error") as log_error:
+			_log_bad_grid_settings("A Item", "Purchase Invoice")
+			_log_bad_grid_settings("A Item", "Purchase Invoice")  # throttled
+			_log_bad_grid_settings("B Item", "Purchase Invoice")  # another table: logged
+		self.assertEqual(log_error.call_count, 2)
+
+	def test_grid_settings_that_are_not_an_object_count_as_none(self):
+		for bad in ("[1, 2]", '"text"', "7", "null"):
+			log_error, columns = self._bad_settings_run({"return_value": bad})
+			self.assertTrue(columns)
+			log_error.assert_not_called()  # not corrupt: simply no settings
+
+	def test_rule_fields_hold_the_hidden_fields_the_rules_read(self):
+		items = get_doctype_form_meta("Purchase Invoice")["tables"]["items"]
+		by_name = {f["fieldname"]: f for f in items["rule_fields"]}
+		# asset_category / asset_location depend on the hidden flag `is_fixed_asset`
+		self.assertIn("is_fixed_asset", by_name)
+		self.assertEqual(by_name["is_fixed_asset"]["fieldtype"], "Check")
+		self.assertEqual(by_name["is_fixed_asset"]["default"], "0")
+		self.assertEqual(by_name["is_fixed_asset"]["fetch_from"], "item_code.is_fixed_asset")
+		shown = {c["fieldname"] for c in items["columns"]} | {f["fieldname"] for f in items["form_fields"]}
+		self.assertFalse(set(by_name) & shown)  # only what the card shows nowhere else
+		rules = " ".join(f.get("depends_on", "") for f in items["form_fields"])
+		self.assertIn("is_fixed_asset", rules)
+		self.assertEqual(set(by_name["is_fixed_asset"]), {"fieldname", "fieldtype", "default", "fetch_from"})
+
+	def test_rule_fields_leave_out_what_the_user_may_not_read(self):
+		from unittest.mock import patch
+
+		def lock(meta):
+			meta.get_field("is_fixed_asset").permlevel = 1
+
+		with patch("jarvis.chat.actions_api._readable_permlevels", return_value={0}):
+			items = self._with_child_meta(lock, "Purchase Invoice Item", "Purchase Invoice", "items")
+		self.assertNotIn("is_fixed_asset", {f["fieldname"] for f in items["rule_fields"]})
+
+		def secret(meta):
+			meta.get_field("is_fixed_asset").fieldtype = "Password"
+
+		items = self._with_child_meta(secret, "Purchase Invoice Item", "Purchase Invoice", "items")
+		self.assertNotIn("is_fixed_asset", {f["fieldname"] for f in items["rule_fields"]})
+
+	def test_the_rule_field_names_come_from_eval_and_bare_rules(self):
+		from jarvis.chat.actions_api import _rule_field_names
+
+		fields = [
+			{"depends_on": "eval:!doc.is_fixed_asset && doc.use_serial_batch_fields === 1 && parent.x"},
+			{"mandatory_depends_on": "eval:doc['margin_type'] && doc.__islocal"},
+			{"read_only_depends_on": "eval:in_list(['A'], parent.purpose) || cint(doc.qty) > 1"},
+			{"depends_on": "price_list_rate"},
+			{"depends_on": "fn:some_method"},
+			{"depends_on": "eval:parent.only_parent"},
+			{"depends_on": ""},
+		]
+		self.assertEqual(
+			_rule_field_names(fields),
+			{"is_fixed_asset", "use_serial_batch_fields", "margin_type", "__islocal", "qty"}
+			| {"price_list_rate"},
+		)
+
+	def test_the_card_field_predicate_rejects_breaks_secrets_and_unreadable_fields(self):
+		from jarvis.chat.actions_api import _card_field_ok
+
+		mk = lambda **kw: frappe._dict(fieldname="f", fieldtype="Data", permlevel=0, **kw)  # noqa: E731
+		self.assertTrue(_card_field_ok(mk(), None))
+		self.assertTrue(_card_field_ok(mk(hidden=1), None))  # hidden is each caller's call
+		self.assertFalse(_card_field_ok(frappe._dict(fieldname="", fieldtype="Data", permlevel=0), None))
+		for fieldtype in ("Section Break", "Column Break", "Tab Break", "Password", "Table", "HTML"):
+			df = frappe._dict(fieldname="f", fieldtype=fieldtype, permlevel=0)
+			self.assertFalse(_card_field_ok(df, None))
+		high = frappe._dict(fieldname="f", fieldtype="Data", permlevel=1)
+		self.assertFalse(_card_field_ok(high, {0}))
+		self.assertTrue(_card_field_ok(high, {0, 1}))
+
+	def test_load_doc_returns_the_values_the_rules_read(self):
+		def hide_the_flag(meta):
+			meta.get_field("is_primary").hidden = 1
+			meta.get_field("email_id").depends_on = "eval:doc.is_primary"
+
+		c = frappe.get_doc(
+			{
+				"doctype": "Contact",
+				"first_name": "RuleField Test",
+				"email_ids": [{"email_id": "rulefield@example.com", "is_primary": 1}],
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(lambda: frappe.delete_doc("Contact", c.name, force=True, ignore_permissions=True))
+		from copy import deepcopy
+		from unittest.mock import patch
+
+		real_get_meta = frappe.get_meta
+		meta = deepcopy(real_get_meta("Contact Email"))
+		hide_the_flag(meta)
+		with patch(
+			"frappe.get_meta",
+			side_effect=lambda dt, *a, **kw: meta if dt == "Contact Email" else real_get_meta(dt, *a, **kw),
+		):
+			spec = get_doctype_form_meta("Contact")["tables"]["email_ids"]
+			row = load_doc("Contact", c.name)["tables"]["email_ids"][0]
+		self.assertEqual([f["fieldname"] for f in spec["rule_fields"]], ["is_primary"])
+		self.assertNotIn("is_primary", {f.get("fieldname") for f in spec["form_fields"]})
+		# The hidden value the rule reads must come from load_doc itself: the card has no
+		# other source for it. Fails if load_doc returns only the grid and form fields.
+		self.assertIn("is_primary", row)
+		self.assertEqual(row["is_primary"], 1)
+		self.assertEqual(row["email_id"], "rulefield@example.com")
+
+	def test_a_hidden_section_inside_a_hidden_tab_does_not_end_the_tab(self):
+		"""Built explicitly, so it holds whatever property setters the site has: a hidden
+		section inside a hidden tab must not narrow the tab's skip (a later visible
+		section is still inside the tab), while a hidden section on its own ends at the
+		next section and a hidden tab ends only at the next tab."""
+
+		def lay_out(meta):
+			from copy import deepcopy
+
+			real = meta.fields
+			data = next(df for df in real if df.fieldtype == "Data")
+			section = next(df for df in real if df.fieldtype == "Section Break" and df.label)
+
+			def mk(template, fieldtype, name, hidden=0):
+				df = deepcopy(template)
+				df.fieldtype, df.fieldname, df.label, df.hidden = fieldtype, name, name, hidden
+				df.depends_on = df.mandatory_depends_on = df.read_only_depends_on = ""
+				df.reqd = df.in_list_view = 0
+				return df
+
+			real[:] = [
+				mk(section, "Section Break", "sec_hidden", 1),
+				mk(data, "Data", "x1"),  # inside the hidden section
+				mk(section, "Section Break", "sec_y"),  # ends that section
+				mk(data, "Data", "y1"),
+				mk(section, "Tab Break", "tab_hidden", 1),
+				mk(section, "Section Break", "sec_in_hidden_tab", 1),
+				mk(data, "Data", "a1"),
+				mk(section, "Section Break", "sec_visible_in_hidden_tab"),
+				mk(data, "Data", "b1"),  # still inside the hidden tab
+				mk(section, "Tab Break", "tab_visible"),  # ends it
+				mk(section, "Section Break", "sec_c"),
+				mk(data, "Data", "c1"),
+			]
+
+		items = self._with_child_meta(lay_out)
+		data = [f["fieldname"] for f in items["form_fields"] if f["fieldtype"] not in self.BREAKS]
+		self.assertEqual(data, ["y1", "c1"])
+		breaks = [f["fieldname"] for f in items["form_fields"] if f["fieldtype"] in self.BREAKS]
+		self.assertEqual(breaks, ["sec_y", "tab_visible", "sec_c"])
