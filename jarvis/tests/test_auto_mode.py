@@ -20,7 +20,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import admission, user_settings_api
 from jarvis.chat.api import create_conversation, get_conversation, rename_conversation, send_message
-from jarvis.permissions import JARVIS_USER_ROLE, ensure_jarvis_user_role
+from jarvis.permissions import JARVIS_USER_ROLE, ensure_jarvis_user_role, message_origin
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -147,7 +147,8 @@ class TestAutoMode(FrappeTestCase):
 		self.assertEqual(frappe.db.get_value(CONV, conv, "auto_mode"), 0)
 		# A background send is not an interactive human either.
 		conv_bg = self._new_conv()
-		res_bg = _send(conv_bg, auto_mode=1, background=1)
+		with message_origin("file_box"):  # a real background send carries a server origin
+			res_bg = _send(conv_bg, auto_mode=1, background=1)
 		self.assertEqual(res_bg["auto_mode"], 0)
 		self.assertEqual(frappe.db.get_value(CONV, conv_bg, "auto_mode"), 0)
 
