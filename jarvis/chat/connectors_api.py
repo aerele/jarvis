@@ -93,6 +93,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, get_datetime, get_system_timezone, get_url, now_datetime
 
+from jarvis import connector_catalogue
 from jarvis.connectors import action_rows, broker, catalog, mcp_oauth, mcp_oauth_store, mcp_wire, oauth
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 
@@ -675,7 +676,8 @@ def list_connectors() -> dict:
 	not only after a row's own ``_oauth_status``/``_mcp_oauth_status`` carries it.
 
 	``catalog`` is the in-app provider list (public fields only, no ``base_url``,
-	no secrets, disabled entries absent) the SPA builds its preset picker, logos,
+	no secrets, disabled entries absent, including the presets the operator
+	switched off via ``jarvis.connector_catalogue``) the SPA builds its preset picker, logos,
 	hints, help links and per-preset flow from, so the flow a preset takes is
 	decided once, here, rather than duplicated in the client."""
 	rows = frappe.get_list(
@@ -716,7 +718,7 @@ def list_connectors() -> dict:
 
 	return {
 		"oauth_redirect_uri": oauth_redirect_uri(),
-		"catalog": catalog.to_public(),
+		"catalog": catalog.to_public(providers=connector_catalogue.providers()),
 		"shared": shared,
 		"mine": mine,
 	}
@@ -782,6 +784,10 @@ def add_connector(
 
 	if preset not in _PRESETS:
 		frappe.throw(_("Unknown connector preset."))
+	if connector_catalogue.is_disabled(preset):
+		# The operator switched this preset off fleet-wide. Refused again in the
+		# connector controller so a raw DocType insert cannot slip past.
+		frappe.throw(_("This app is turned off for your workspace."))
 	if scope not in _SCOPES:
 		frappe.throw(_("Scope must be Shared or Personal."))
 	if auth_method not in _AUTH_METHODS:
