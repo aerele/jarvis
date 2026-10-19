@@ -25,8 +25,11 @@ def action_decision(row, action: str) -> tuple[str, str] | None:
 
 	  * no child row for the action  -> deny (``action_unknown``)
 	  * child ``allowed`` is truthy  -> allow
-	  * child is ``read_only`` and NOT ``destructive`` -> allow (auto-allowed)
-	  * otherwise (destructive, or not marked allowed) -> deny (``action_denied``)
+	  * otherwise -> deny (``action_denied``)
+
+	``allowed`` is the ONLY allow bit. ``read_only`` never grants on its own: a
+	new read-only tool is pre-checked (``allowed=1``) when it is first stored, so
+	an ``allowed=0`` read-only row is one a user switched off, and must stay off.
 
 	The child rows live on the ``allowed_actions`` table of ``Jarvis Connector``
 	(a ``Jarvis Connector Action`` each: ``action``, ``allowed``, ``read_only``,
@@ -35,8 +38,6 @@ def action_decision(row, action: str) -> tuple[str, str] | None:
 		if child.get("action") != action:
 			continue
 		if child.get("allowed"):
-			return None
-		if child.get("read_only") and not child.get("destructive"):
 			return None
 		return ("action_denied", f"The action {action!r} is not enabled for this connector.")
 	return ("action_unknown", f"The action {action!r} is not configured on this connector.")
