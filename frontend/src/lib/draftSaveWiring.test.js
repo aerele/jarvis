@@ -69,6 +69,19 @@ test("a re-sent proposal toasts 'updated' only when the panel was rebuilt", () =
 });
 
 test("the card's Confirm and Preview read the same model", () => {
-	assert.match(src, /:disabled="!cardModel \|\| cardModel\.applying \|\| convStreaming"/);
+	assert.match(
+		src,
+		/:disabled="\s*!cardModel \|\|\s*cardModel\.applying \|\|\s*convStreaming\s*"/
+	);
 	assert.match(src, /:model="cardModel"/);
+});
+
+test("a click outside the panel closes it only when nothing would be lost", () => {
+	assert.match(src, /@click\.self="onOverlayBackdropClick\(dismissDraftPanel\)"/);
+	const fn = body("dismissDraftPanel");
+	assert.match(
+		fn,
+		/if \(draftIsDirty\(draftPanel\.value\)\) \{[\s\S]*?return;\s*\}\s*closeDraftPanel\(\);/
+	);
+	assert.match(body("openDraftPanel"), /markDraftBaseline\(model\);/);
 });
