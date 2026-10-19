@@ -179,7 +179,10 @@ def export_query(
 			from frappe.utils.file_manager import get_max_file_size
 
 			if len(content) > get_max_file_size():
-				raise resolvers.NeedsBackground("The export exceeds the immediate upload-size limit.")
+				raise resolvers.NeedsBackground(
+					"The file is larger than this site's immediate upload limit. Narrow the filter or "
+					"export fewer fields, or split it by a filter into a few exports."
+				)
 		env = save_export_file(f"x.{fmt}", content, title=title or source, mime_type=mime)
 	except (resolvers.NeedsBackground, ExportTooSlowError) as e:
 		telemetry.record_export_event(
@@ -192,7 +195,20 @@ def export_query(
 		)
 		if not background_available:
 			raise
-		return jobs.enqueue(source_args, fmt, title, highlights)
+		try:
+			return jobs.enqueue(source_args, fmt, title, highlights)
+		except jobs.BackgroundUnavailable as refused:
+			# Keep the original advice: the agent must still hear "narrow it" when the
+			# background route is not available.
+			telemetry.record_export_event(
+				tool="export_query",
+				fmt=fmt,
+				rows=0,
+				mode="background",
+				outcome="background_unavailable",
+				detail=str(refused)[:200],
+			)
+			raise InvalidArgumentError(f"{e} A background export is not available here: {refused}") from None
 	except (NoDataError, PermissionDeniedError, InvalidArgumentError) as e:
 		telemetry.record_export_event(
 			tool="export_query",

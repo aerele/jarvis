@@ -272,7 +272,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 				with (
 					self.subTest(format=fmt),
 					patch.object(resolvers, "_HARD_ROW_CEILING", 2),
-					patch.object(jobs, "_conversation", return_value=self.conversation),
+					patch.object(jobs, "current_conversation", return_value=self.conversation),
 					patch.object(jobs, "dispatch"),
 				):
 					state = export_query(**source, format=fmt)
@@ -621,7 +621,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 	def test_same_query_joins_job_and_highlights_do_not_collide(self):
 		source = {"spec": {"from": "DocType", "select": ["name"], "limit": 2}}
 		with (
-			patch.object(jobs, "_conversation", return_value=self.conversation),
+			patch.object(jobs, "current_conversation", return_value=self.conversation),
 			patch.object(jobs, "dispatch"),
 		):
 			first = jobs.enqueue(source, "csv", "First")
@@ -694,7 +694,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		key = saved_queries.save({"from": "DocType", "select": ["name"], "limit": 1})
 		with (
 			patch.object(resolvers, "_HARD_ROW_CEILING", 2),
-			patch.object(jobs, "_conversation", return_value=self.conversation),
+			patch.object(jobs, "current_conversation", return_value=self.conversation),
 			patch.object(jobs, "dispatch"),
 		):
 			state = export_query(result_id=key, format="csv")
@@ -710,7 +710,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 
 		with (
 			patch("frappe.utils.file_manager.get_max_file_size", return_value=1),
-			patch.object(jobs, "_conversation", return_value=self.conversation),
+			patch.object(jobs, "current_conversation", return_value=self.conversation),
 			patch.object(jobs, "dispatch"),
 		):
 			state = export_query(spec={"from": "DocType", "select": ["name"], "limit": 2}, format="csv")
@@ -797,11 +797,11 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		try:
 			with (
 				patch.object(jobs, "dispatch"),
-				patch.object(jobs, "_conversation", return_value=self.conversation),
+				patch.object(jobs, "current_conversation", return_value=self.conversation),
 			):
 				first = jobs.enqueue(source, "csv")
 			self.names.append(first["export_job"])
-			with patch.object(jobs, "_conversation", return_value=other.name):
+			with patch.object(jobs, "current_conversation", return_value=other.name):
 				second = export_query(spec=source["spec"], format="csv")
 			self.assertEqual(first["export_job"], second["export_job"])
 			name = first["export_job"]
@@ -862,7 +862,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			self.assertEqual(job.reload().announced_status, "")
 			with patch.object(jobs, "dispatch"):
 				jobs.reap()
-			with patch.object(jobs, "_conversation", return_value=other.name):
+			with patch.object(jobs, "current_conversation", return_value=other.name):
 				for _ in range(2):
 					self.assertEqual(jobs.existing(source, "csv", join=True)["export_job"], job.name)
 			for conversation in (self.conversation, other.name):
@@ -961,7 +961,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		source = {"spec": {"from": "DocType", "select": ["name"], "limit": 2}}
 		with (
 			patch.dict(frappe.conf, {"jarvis_background_export_disabled": "0"}),
-			patch.object(jobs, "_conversation", return_value=self.conversation),
+			patch.object(jobs, "current_conversation", return_value=self.conversation),
 			patch.object(jobs, "dispatch"),
 		):
 			state = jobs.enqueue(source, "csv")
@@ -972,7 +972,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		source = {"spec": {"from": "DocType", "select": ["name"], "limit": 2}}
 		with (
 			patch.object(jobs, "_xlsxwriter_available", return_value=False),
-			patch.object(jobs, "_conversation", return_value=self.conversation),
+			patch.object(jobs, "current_conversation", return_value=self.conversation),
 			patch.object(jobs, "dispatch"),
 		):
 			with self.assertRaisesRegex(jobs.BackgroundUnavailable, "export it as CSV"):
@@ -986,6 +986,66 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		job.reload()
 		self.assertEqual(job.status, "failed")
 		self.assertIn("export it as CSV", job.error)
+
+	def test_refused_handoff_keeps_the_narrowing_advice(self):
+		from jarvis.tools.export_query import export_query
+
+		real_has_permission = frappe.has_permission
+
+		def no_job_access(doctype=None, *args, **kwargs):
+			if doctype == jobs.DOCTYPE:
+				return False
+			return real_has_permission(doctype, *args, **kwargs)
+
+		busy = InvalidArgumentError("Exports are busy; please try again shortly.")
+		unsupported = InvalidArgumentError("x does not support background streaming")
+		# (label, a patch that makes the background route refuse, the reason the agent must see)
+		blockers = [
+			(
+				"no job access",
+				lambda: patch.object(frappe, "has_permission", side_effect=no_job_access),
+				"role cannot",
+			),
+			(
+				"no chat",
+				lambda: patch.object(jobs, "current_conversation", return_value=None),
+				"Start it from a Jarvis chat",
+			),
+			(
+				"kill switch",
+				lambda: patch.dict(frappe.conf, {"jarvis_background_export_disabled": 1}),
+				"turned off",
+			),
+			("busy", lambda: patch.object(jobs, "_lock", side_effect=busy), "Exports are busy"),
+			(
+				"prepare",
+				lambda: patch.object(jobs, "prepare", side_effect=unsupported),
+				"background streaming",
+			),
+		]
+		spec = {"from": "DocType", "select": ["name"]}
+		for label, blocker, reason in blockers:
+			with (
+				self.subTest(blocker=label),
+				patch.object(resolvers, "_HARD_ROW_CEILING", 1),
+				patch.object(jobs, "current_conversation", return_value=self.conversation),
+				patch.object(jobs, "dispatch"),
+				blocker(),
+				self.assertRaises(InvalidArgumentError) as ctx,
+			):
+				export_query(spec=spec, format="csv")
+			self.assertNotIsInstance(ctx.exception, frappe.PermissionError)
+			self.assertIn("Narrow", str(ctx.exception))
+			self.assertIn(reason, str(ctx.exception))
+		# The upload-size route carries its own advice too.
+		with (
+			patch("frappe.utils.file_manager.get_max_file_size", return_value=1),
+			patch.object(jobs, "current_conversation", return_value=None),
+			self.assertRaises(InvalidArgumentError) as ctx,
+		):
+			export_query(spec={"from": "DocType", "select": ["name"], "limit": 2}, format="csv")
+		self.assertIn("Narrow", str(ctx.exception))
+		self.assertIn("Start it from a Jarvis chat", str(ctx.exception))
 
 
 class TestBackgroundFilterPermissions(FrappeTestCase):
