@@ -639,6 +639,14 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			self.names.append(first["export_job"])
 			second = jobs.enqueue(source, "csv", "Second")
 		self.assertEqual(first["export_job"], second["export_job"])
+		# Joining inserts nothing: the card already lives in this chat.
+		self.assertEqual(
+			frappe.db.count(
+				"Jarvis Chat Message",
+				{"conversation": self.conversation, "tool_call_id": f"export:{first['export_job']}:card"},
+			),
+			1,
+		)
 		self.assertNotEqual(
 			jobs._key(source, "xlsx", None),
 			jobs._key(source, "xlsx", [{"column": "name", "operator": "eq", "value": "A"}]),
@@ -693,10 +701,13 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		job = self.job(fingerprint=jobs._key(source, "csv", None))
 		with patch.object(jobs, "dispatch"):
 			jobs.run(job.name, "abc123")
-		self.assertEqual(jobs.existing(source, "csv")["export_job"], job.name)
+		self.assertEqual(jobs.existing(source, "csv", conversation=job.conversation)["export_job"], job.name)
+		# Another chat never reuses it, and neither does a caller with no chat.
+		self.assertIsNone(jobs.existing(source, "csv", conversation="another-chat"))
+		self.assertIsNone(jobs.existing(source, "csv", conversation=None))
 		changed = replace(streaming.prepare(source, 200_000), sql="Changed row-permission scope")
 		with patch.object(jobs, "prepare", return_value=changed):
-			self.assertIsNone(jobs.existing(source, "csv"))
+			self.assertIsNone(jobs.existing(source, "csv", conversation=job.conversation))
 
 	def test_export_query_handoff_and_saved_id(self):
 		from jarvis.tools._export import resolvers
@@ -799,100 +810,6 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			self.assertEqual(job.reload().status, "expired")
 		finally:
 			frappe.db.sql("SET SESSION time_zone=%s", (previous,))
-
-	def test_cross_chat_join_delivery_and_deletion(self):
-		from jarvis.tools.export_query import export_query
-
-		other = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "joined export"}).insert()
-		source = {"spec": {"from": "DocType", "select": ["name"], "limit": 2}}
-		try:
-			with (
-				patch.object(jobs, "dispatch"),
-				patch.object(jobs, "current_conversation", return_value=self.conversation),
-			):
-				first = jobs.enqueue(source, "csv")
-			self.names.append(first["export_job"])
-			with patch.object(jobs, "current_conversation", return_value=other.name):
-				second = export_query(spec=source["spec"], format="csv")
-			self.assertEqual(first["export_job"], second["export_job"])
-			name = first["export_job"]
-			self.assertEqual(len(jobs._cards(name)), 2)
-			frappe.db.set_value(jobs.DOCTYPE, name, {"status": "running", "attempt_token": "abc123"})
-			frappe.db.commit()
-			# Keep the worker's original snapshot, then delete the original chat.
-			original = frappe.get_doc(jobs.DOCTYPE, name)
-			frappe.delete_doc("Jarvis Conversation", self.conversation, force=True, ignore_permissions=True)
-			frappe.db.commit()
-			self.assertEqual(frappe.db.get_value(jobs.DOCTYPE, name, "conversation"), other.name)
-			with tempfile.TemporaryDirectory() as directory:
-				path = Path(directory) / "export.part"
-				path.write_text("Name\nToDo\n")
-				jobs._publish_file(original, "abc123", path, {"rows_written": 1}, "permission")
-			jobs.announce(name)
-			jobs.announce(name)
-			self.assertEqual(
-				frappe.db.count(
-					"Jarvis Chat Message",
-					{
-						"conversation": other.name,
-						"tool_call_id": f"export:{name}:ready",
-					},
-				),
-				1,
-			)
-			self.assertEqual(frappe.db.count("Notification Log", {"document_name": name}), 1)
-			file_name = frappe.db.get_value(jobs.DOCTYPE, name, "file")
-			self.assertTrue(file_name)
-			frappe.delete_doc("Jarvis Conversation", other.name, force=True, ignore_permissions=True)
-			frappe.db.commit()
-			self.assertFalse(frappe.db.exists(jobs.DOCTYPE, name))
-			self.assertFalse(frappe.db.exists("File", file_name))
-		finally:
-			frappe.db.delete("Jarvis Chat Message", {"conversation": other.name})
-			frappe.db.delete("Jarvis Conversation", {"name": other.name})
-			frappe.db.commit()
-
-	def test_ready_join_delivers_once_to_each_chat(self):
-		other = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "ready export"}).insert()
-		source = {"spec": {"from": "DocType", "select": ["name"], "limit": 2}}
-		job = self.job(fingerprint=jobs._key(source, "csv", None))
-		try:
-			with patch.object(jobs, "dispatch"):
-				jobs.announce(job.name, initial=True)
-				jobs.run(job.name, "abc123")
-			# Join after fanout selected its recipients, then interrupt the join
-			# before completion. The old fanout must not clear this pending delivery.
-			announce_one = jobs._announce_one
-
-			def subscribe_during_delivery(*args, **kwargs):
-				announce_one(*args, **kwargs)
-				announce_one(job.name, other.name, initial=True, recovery=False)
-
-			with patch.object(jobs, "_announce_one", side_effect=subscribe_during_delivery):
-				jobs.announce(job.name)
-			self.assertEqual(job.reload().announced_status, "")
-			with patch.object(jobs, "dispatch"):
-				jobs.reap()
-			with patch.object(jobs, "current_conversation", return_value=other.name):
-				for _ in range(2):
-					self.assertEqual(jobs.existing(source, "csv", join=True)["export_job"], job.name)
-			for conversation in (self.conversation, other.name):
-				for suffix in ("card", "ready"):
-					self.assertEqual(
-						frappe.db.count(
-							"Jarvis Chat Message",
-							{
-								"conversation": conversation,
-								"tool_call_id": f"export:{job.name}:{suffix}",
-							},
-						),
-						1,
-					)
-			self.assertEqual(frappe.db.count("Notification Log", {"document_name": job.name}), 1)
-		finally:
-			frappe.db.delete("Jarvis Chat Message", {"conversation": other.name})
-			frappe.db.delete("Jarvis Conversation", {"name": other.name})
-			frappe.db.commit()
 
 	def test_dispatch_finds_eligible_owner_beyond_200_waiting_jobs(self):
 		from unittest.mock import MagicMock
@@ -1253,6 +1170,133 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		):
 			jobs.reap()
 		self.assertFalse(frappe.db.exists(jobs.DOCTYPE, job.name))
+
+	def test_same_request_in_another_chat_starts_its_own_export(self):
+		from jarvis.tools.export_query import export_query
+
+		other = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "second export chat"}).insert()
+		spec = {"from": "DocType", "select": ["name"]}
+		try:
+			with patch.object(jobs, "dispatch"):
+				with patch.object(jobs, "current_conversation", return_value=self.conversation):
+					first = jobs.enqueue({"spec": spec}, "csv")
+				with (
+					patch.object(resolvers, "_HARD_ROW_CEILING", 2),
+					patch.object(jobs, "current_conversation", return_value=other.name),
+				):
+					second = export_query(spec=spec, format="csv")
+			a, b = first["export_job"], second["export_job"]
+			self.names.extend([a, b])
+			self.assertNotEqual(a, b)
+			self.assertEqual(frappe.db.get_value(jobs.DOCTYPE, b, "conversation"), other.name)
+			for job_name, chat in ((a, self.conversation), (b, other.name)):
+				filters = {"conversation": chat, "tool_call_id": f"export:{job_name}:card"}
+				self.assertEqual(frappe.db.count("Jarvis Chat Message", filters), 1)
+			self.assertEqual(
+				frappe.db.count(
+					"Jarvis Chat Message", {"conversation": other.name, "tool_call_id": f"export:{a}:card"}
+				),
+				0,
+			)
+			# One export per user at a time: the second queues behind the first.
+			frappe.db.set_value(jobs.DOCTYPE, a, {"status": "running", "attempt_token": "abc123"})
+			frappe.db.commit()
+			with (
+				patch("jarvis.chat.pump._probe_worker_count", return_value=3),
+				patch.object(frappe, "enqueue") as enqueue,
+			):
+				jobs.dispatch()
+			self.assertEqual(frappe.db.get_value(jobs.DOCTYPE, b, "status"), "queued")
+			self.assertEqual([c for c in enqueue.call_args_list if c.kwargs.get("name") == b], [])
+			# Deleting the second chat deletes its job and file and leaves the first job alone.
+			frappe.db.set_value(jobs.DOCTYPE, b, {"status": "running", "attempt_token": "abc123"})
+			frappe.db.commit()
+			snapshot = frappe.get_doc(jobs.DOCTYPE, b)
+			with tempfile.TemporaryDirectory() as directory:
+				path = Path(directory) / "export.part"
+				path.write_text("Name\nToDo\n")
+				jobs._publish_file(snapshot, "abc123", path, {"rows_written": 1}, "permission")
+			file_name = frappe.db.get_value(jobs.DOCTYPE, b, "file")
+			self.assertTrue(file_name)
+			frappe.delete_doc("Jarvis Conversation", other.name, force=True, ignore_permissions=True)
+			frappe.db.commit()
+			self.assertFalse(frappe.db.exists(jobs.DOCTYPE, b))
+			self.assertFalse(frappe.db.exists("File", file_name))
+			self.assertTrue(frappe.db.exists(jobs.DOCTYPE, a))
+		finally:
+			frappe.db.delete("Jarvis Chat Message", {"conversation": other.name})
+			frappe.db.delete("Jarvis Conversation", {"name": other.name})
+			frappe.db.commit()
+
+	def test_state_messages_post_once_to_the_jobs_own_chat(self):
+		job = self.job()
+		key = f"export:{job.name}:ready"
+
+		def ready_messages():
+			return frappe.get_all(
+				"Jarvis Chat Message",
+				filters={"conversation": self.conversation, "tool_call_id": key},
+				fields=["content"],
+			)
+
+		def bells():
+			return frappe.get_all("Notification Log", filters={"document_name": job.name}, fields=["subject"])
+
+		with patch.object(jobs, "dispatch"):
+			jobs.announce(job.name, initial=True)
+			self.assertEqual(
+				frappe.db.get_value(
+					"Jarvis Chat Message",
+					{"conversation": self.conversation, "tool_call_id": f"export:{job.name}:card"},
+					"content",
+				),
+				"Export started: Export test.",
+			)
+			jobs.run(job.name, "abc123")
+			jobs.announce(job.name)
+			jobs.announce(job.name)
+			messages = ready_messages()
+			self.assertEqual(len(messages), 1)
+			self.assertIn("Export test", messages[0].content)
+			self.assertIn("rows", messages[0].content)
+			self.assertEqual([b.subject for b in bells()], [messages[0].content])
+			self.assertEqual(job.reload().announced_status, "ready")
+			# The reaper re-announces what it believes undelivered: nothing is posted twice, and
+			# the marker is set again even though the keyed message already existed.
+			frappe.db.set_value(jobs.DOCTYPE, job.name, "announced_status", "")
+			frappe.db.commit()
+			jobs.reap()
+		self.assertEqual(len(ready_messages()), 1)
+		self.assertEqual(len(bells()), 1)
+		self.assertEqual(job.reload().announced_status, "ready")
+
+	def test_publish_refuses_when_the_chat_was_deleted(self):
+		job = self.job()
+		files = Path(frappe.get_site_path("private", "files"))
+		before = set(files.glob("jarvis-export-*"))
+		# Straight to the table: the job row must survive to show what happened to it.
+		frappe.db.delete("Jarvis Conversation", {"name": self.conversation})
+		frappe.db.commit()
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "export.part"
+			path.write_text("Name\nToDo\n")
+			jobs._publish_file(job, "abc123", path, {"rows_written": 1}, "permission")
+		job.reload()
+		self.assertEqual(job.status, "cancelled")
+		self.assertIn("conversation was deleted", job.error)
+		self.assertFalse(job.file)
+		self.assertFalse(
+			frappe.db.exists("File", {"attached_to_doctype": jobs.DOCTYPE, "attached_to_name": job.name})
+		)
+		self.assertEqual(set(files.glob("jarvis-export-*")), before)
+
+	def test_conversation_trash_before_migrate_is_a_no_op(self):
+		doc = frappe.get_doc("Jarvis Conversation", self.conversation)
+		with (
+			patch.object(frappe.db, "table_exists", return_value=False),
+			patch.object(frappe, "get_all", side_effect=AssertionError("queried a missing table")),
+		):
+			jobs.on_conversation_trash(doc)
 
 
 class TestBackgroundFilterPermissions(FrappeTestCase):

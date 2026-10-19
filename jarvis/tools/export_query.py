@@ -152,7 +152,7 @@ def export_query(
 					"(where / select / order_by)"
 				)
 		if background_available:
-			found = jobs.existing(source_args, fmt, highlights, join=True)
+			found = jobs.existing(source_args, fmt, highlights, conversation=jobs.current_conversation())
 			if found:
 				telemetry.record_export_event(
 					"export_query",

@@ -14,7 +14,6 @@ from pathlib import Path
 import frappe
 from frappe.query_builder.functions import Coalesce
 from frappe.utils import add_to_date, cint, get_datetime
-from pypika.terms import ExistsCriterion
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._export.clock import now_datetime
@@ -233,16 +232,20 @@ def _key(source, fmt, highlights):
 	return fingerprint({"source": source, "format": fmt, "highlights": highlights or []})
 
 
-def existing(source, fmt, highlights=None, *, join=False):
-	"""Revalidate access before returning either active state or a recent private file."""
+def existing(source, fmt, highlights=None, *, conversation, prepared=None):
+	"""Revalidate access before returning either active state or a recent private file.
+
+	Per chat: the card lives in one conversation, so a request in another chat starts its own
+	export. A caller with no chat (a macro, a delegate) never reuses one."""
 	# Reuse is optional. Users without job access can still use immediate exports
 	# under the source DocTypes' read/export permissions.
-	if not frappe.has_permission(DOCTYPE, "read"):
+	if not conversation or not frappe.has_permission(DOCTYPE, "read"):
 		return None
 	rows = frappe.get_list(
 		DOCTYPE,
 		filters={
 			"owner": frappe.session.user,
+			"conversation": conversation,
 			"fingerprint": _key(source, fmt, highlights),
 			"status": ["in", [*ACTIVE, "ready"]],
 		},
@@ -252,13 +255,11 @@ def existing(source, fmt, highlights=None, *, join=False):
 	)
 	if not rows:
 		return None
-	prepared = prepare(source, limits()[0], highlights)
+	prepared = prepared or prepare(source, limits()[0], highlights)
 	permission_key = _permission_fingerprint(prepared)
 	for row in rows:
 		job = _get_job(row.name)
 		if job.status in ACTIVE:
-			if join:
-				_join(job.name)
 			return public(job)
 		if (
 			job.permission_fingerprint == permission_key
@@ -266,19 +267,8 @@ def existing(source, fmt, highlights=None, *, join=False):
 			and get_datetime(job.finished_at) >= add_to_date(now_datetime(), minutes=-10)
 			and _file_exists(job)
 		):
-			if join:
-				_join(job.name)
 			return public(job)
 	return None
-
-
-def _join(name):
-	# A persistent initial card is also the subscription to this shared job.
-	conversation = current_conversation()
-	if not conversation:
-		raise BackgroundUnavailable(NO_CHAT)
-	announce(name, initial=True, conversation=conversation)
-	announce(name)
 
 
 def enqueue(source, fmt, title=None, highlights=None):
@@ -296,7 +286,7 @@ def enqueue(source, fmt, title=None, highlights=None):
 		raise BackgroundUnavailable(str(exc)) from None
 	try:
 		with _lock():
-			found = existing(source, fmt, highlights, join=True)
+			found = existing(source, fmt, highlights, conversation=conversation, prepared=prepared)
 			if found:
 				return found
 			job = frappe.get_doc(
@@ -685,25 +675,17 @@ def _record_telemetry(name):
 def _publish_file(job, token, path, result, permission_key):
 	from jarvis.tools._export.envelope import _safe_base
 
-	# Read current subscription/deletion state before locking publication.
+	# Read current deletion state before locking publication.
 	_commit()
-	# Conversation deletion takes this same row lock before its trash hooks.
-	# Serialize publication with deletion before locking the job itself.
-	# A deleted original chat can have transferred this shared job to another
-	# subscriber while the worker was streaming. Read the current destination.
-	while True:
-		conversation = frappe.db.get_value(DOCTYPE, job.name, "conversation")
-		if not conversation:
-			frappe.db.rollback()
-			return
-		if frappe.db.get_value("Jarvis Conversation", conversation, "name", for_update=True):
-			break
+	# Conversation deletion takes this same row lock before its trash hooks, so lock the
+	# chat first: a deleted chat cancels the export instead of publishing into the void.
+	conversation = frappe.db.get_value(DOCTYPE, job.name, "conversation")
+	if not conversation or not frappe.db.get_value(
+		"Jarvis Conversation", conversation, "name", for_update=True
+	):
 		frappe.db.rollback()
-		if frappe.db.get_value(DOCTYPE, job.name, "conversation") == conversation:
-			_finish(job.name, token, "cancelled", "The export's conversation was deleted.")
-			return
-		# End the stale lookup snapshot before retrying a transferred conversation.
-		_commit()
+		_finish(job.name, token, "cancelled", "The export's conversation was deleted.")
+		return
 	row = frappe.db.get_value(
 		DOCTYPE, job.name, ["attempt_token", "status", "cancel_requested"], as_dict=True, for_update=True
 	)
@@ -790,95 +772,38 @@ def _finish(name, token, status, error):
 	_commit()
 
 
-def _cards(name, *, for_update=False):
-	m = frappe.qb.DocType("Jarvis Chat Message")
-	c = frappe.qb.DocType("Jarvis Conversation")
-	j = frappe.qb.DocType(DOCTYPE)
-	query = (
-		frappe.qb.from_(m)
-		.inner_join(c)
-		.on(c.name == m.conversation)
-		.inner_join(j)
-		.on((j.name == m.ref_name) & (j.owner == c.owner))
-		.select(m.name, m.conversation)
-		.where(
-			(m.ref_doctype == DOCTYPE)
-			& (m.ref_name == name)
-			& (m.role == "assistant")
-			& (m.tool_call_id == f"export:{name}:card")
-		)
-		.orderby(m.creation, m.name)
-	)
-	if for_update:
-		query = query.for_update()
-	return query.run(as_dict=True)
-
-
 @_rollback_on_error()
-def announce(name, initial=False, recovery=False, conversation=None):
-	"""Each participating chat receives a card and idempotent state messages."""
+def announce(name, initial=False, recovery=False):
+	"""Deliver the card or a state message to the job's own chat. Idempotent."""
 	if not frappe.db.exists(DOCTYPE, name):
 		return
 	job = _get_job(name)
 	if not initial and not recovery and job.status not in (*TERMINAL, "paused"):
 		return
-	conversations = (
-		[conversation or job.conversation]
-		if initial
-		else list(dict.fromkeys([job.conversation, *(card.conversation for card in _cards(name))]))
-	)
-	for destination in conversations:
-		_announce_one(name, destination, initial=initial, recovery=recovery)
-	if not initial:
-		# Concurrent transitions and new subscriptions must remain recoverable.
-		# Checking delivered cards in the UPDATE closes the subscribe/fanout race.
-		j = frappe.qb.DocType(DOCTYPE)
-		card = frappe.qb.DocType("Jarvis Chat Message").as_("card")
-		delivered = frappe.qb.DocType("Jarvis Chat Message").as_("delivered")
-		c = frappe.qb.DocType("Jarvis Conversation")
-		delivery = (
-			frappe.qb.from_(delivered)
-			.select(delivered.name)
-			.where(
-				(delivered.conversation == card.conversation)
-				& (delivered.role == "assistant")
-				& (delivered.tool_call_id == f"export:{name}:{'retry' if recovery else job.status}")
-			)
-		)
-		pending = (
-			frappe.qb.from_(card)
-			.inner_join(c)
-			.on(c.name == card.conversation)
-			.where(c.owner == j.owner)
-			.select(card.name)
-			.where(
-				(card.ref_name == j.name)
-				& (card.ref_doctype == DOCTYPE)
-				& (card.tool_call_id == f"export:{name}:card")
-				& (card.role == "assistant")
-			)
-			.where(~ExistsCriterion(delivery))
-		)
-		(
-			frappe.qb.update(j)
-			.set(j.announced_status, job.status)
-			.where((j.name == name) & (j.status == job.status))
-			.where(~ExistsCriterion(pending))
-		).run()
-		# Persist delivery reconciliation so the independent reaper sees it.
-		_commit()
+	_announce_one(name, initial=initial, recovery=recovery)
+
+
+def _message_text(job, initial):
+	if initial:
+		return f"Export started: {job.title}."
+	if job.status == "ready":
+		return f"{job.title} is ready ({(job.rows_written or 0):,} rows)."
+	return job.error or "This export has expired; ask again."
 
 
 @_rollback_on_error()
-def _announce_one(name, conversation, *, initial, recovery):
+def _announce_one(name, *, initial, recovery):
 	from jarvis._session import impersonate
 	from jarvis.api import _locked_insert_chat_message
 	from jarvis.chat.events import publish_to_user
 
 	# Start a fresh snapshot before locking the conversation and job for delivery.
 	_commit()
-	# All delivery, subscription and deletion paths lock conversation then job.
-	owner = frappe.db.get_value("Jarvis Conversation", conversation, "owner", for_update=True)
+	# All delivery and deletion paths lock conversation then job.
+	conversation = frappe.db.get_value(DOCTYPE, name, "conversation")
+	owner = conversation and frappe.db.get_value(
+		"Jarvis Conversation", conversation, "owner", for_update=True
+	)
 	if not owner or not frappe.db.get_value(DOCTYPE, name, "name", for_update=True):
 		frappe.db.rollback()
 		return
@@ -890,13 +815,7 @@ def _announce_one(name, conversation, *, initial, recovery):
 		frappe.db.rollback()
 		return
 	key = f"export:{name}:{'card' if initial else 'retry' if recovery else job.status}"
-	content = (
-		"Your export is ready."
-		if job.status == "ready"
-		else "Preparing your export."
-		if initial
-		else job.error or "This export has expired; ask again."
-	)
+	content = _message_text(job, initial)
 	with impersonate(job.owner):
 		message = _locked_insert_chat_message(
 			conversation,
@@ -911,60 +830,16 @@ def _announce_one(name, conversation, *, initial, recovery):
 			},
 			dedupe_filters={"conversation": conversation, "role": "assistant", "tool_call_id": key},
 		)
-		if initial and message and conversation == job.conversation:
+		if initial and message:
 			frappe.db.set_value(DOCTYPE, name, "card_message", message)
-		if initial and message and job.status in (*TERMINAL, "paused"):
-			# Joining a finished job must remain recoverable if delivery stops after
-			# the new subscription commits but before its completion message.
-			frappe.db.set_value(DOCTYPE, name, "announced_status", "")
-		if not initial:
-			# Serialized on the job row: one owner bell even with many chat deliveries.
-			if message and not frappe.db.exists(
-				"Notification Log",
-				{
-					"document_type": DOCTYPE,
-					"document_name": name,
-					"subject": content,
-				},
-			):
-				frappe.get_doc(
-					{
-						"doctype": "Notification Log",
-						"for_user": job.owner,
-						"from_user": job.owner,
-						"type": "Alert",
-						"subject": content,
-						"document_type": DOCTYPE,
-						"document_name": name,
-					}
-				).insert(ignore_permissions=True)
-			card = frappe.db.get_value(
-				"Jarvis Chat Message",
-				{
-					"conversation": conversation,
-					"role": "assistant",
-					"tool_call_id": f"export:{name}:card",
-				},
-				"name",
-			)
-			if card:
-				frappe.db.set_value(
-					"Jarvis Chat Message",
-					card,
-					"tool_result",
-					json.dumps(
-						{
-							"ok": True,
-							"data": {
-								"export_job": name,
-								"title": job.title,
-								"rows_written": job.rows_written,
-								"finished_at": public(job)["finished_at"],
-							},
-						}
-					),
-				)
-		# Commit the message, bell and subscription together before realtime publication.
+		if not initial and not recovery:
+			if message:
+				_notify_owner(job, content)
+			_refresh_card_summary(job, conversation)
+			# Set with the message, inserted or already there: the reaper re-announces any
+			# row whose marker differs from its status, so a dedupe hit must still settle it.
+			frappe.db.set_value(DOCTYPE, name, "announced_status", job.status)
+		# Commit the message, bell and marker together before realtime publication.
 		_commit()
 	if message:
 		publish_to_user(
@@ -974,7 +849,56 @@ def _announce_one(name, conversation, *, initial, recovery):
 				"conversation_id": conversation,
 				"export_job": name,
 				"message_id": message,
+				"status": job.status,
+				"title": job.title,
+				"initial": bool(initial),
 			},
+		)
+
+
+def _notify_owner(job, subject):
+	# Serialized on the job row: one owner bell per state.
+	if not frappe.db.exists("User", job.owner) or frappe.db.exists(
+		"Notification Log", {"document_type": DOCTYPE, "document_name": job.name, "subject": subject}
+	):
+		return
+	frappe.get_doc(
+		{
+			"doctype": "Notification Log",
+			"for_user": job.owner,
+			"from_user": job.owner,
+			"type": "Alert",
+			"subject": subject,
+			"document_type": DOCTYPE,
+			"document_name": job.name,
+		}
+	).insert(ignore_permissions=True)
+
+
+def _refresh_card_summary(job, conversation):
+	"""The card keeps a durable summary for the day the job row is gone."""
+	card = frappe.db.get_value(
+		"Jarvis Chat Message",
+		{"conversation": conversation, "role": "assistant", "tool_call_id": f"export:{job.name}:card"},
+		"name",
+	)
+	if card:
+		frappe.db.set_value(
+			"Jarvis Chat Message",
+			card,
+			"tool_result",
+			json.dumps(
+				{
+					"ok": True,
+					"data": {
+						"export_job": job.name,
+						"title": job.title,
+						"status": job.status,
+						"rows_written": job.rows_written,
+						"finished_at": public(job)["finished_at"],
+					},
+				}
+			),
 		)
 
 
@@ -1004,7 +928,8 @@ def _reap_worklist(old):
 	for condition in (
 		j.status == "running",
 		j.status.isin(["queued", "paused"]) & (Coalesce(j.card_message, "") == ""),
-		j.status.notin(["queued", "running"]) & (Coalesce(j.announced_status, "") != j.status),
+		# Expiry is quiet: an expired job is never announced.
+		j.status.notin(["queued", "running", "expired"]) & (Coalesce(j.announced_status, "") != j.status),
 		(j.status == "ready") & (j.expires_at < now),
 		j.status.notin(list(ACTIVE)) & (j.creation < old),
 	):
@@ -1166,22 +1091,12 @@ def _delete_generated_file(name):
 
 
 def on_conversation_trash(doc, method=None):
-	# Cards are subscriptions. Removing the last chat revokes the attempt;
-	# otherwise transfer the primary delivery address to a surviving chat.
+	# A job belongs to one chat: deleting the chat revokes the attempt and removes its files.
+	# The hook can run before the DocType is migrated in.
+	if not frappe.db.table_exists(DOCTYPE):
+		return
 	for row in frappe.get_all(DOCTYPE, filters={"conversation": doc.name}, fields=["name"]):
 		job = _get_job(row.name, for_update=True)
-		remaining = [card for card in _cards(job.name, for_update=True) if card.conversation != doc.name]
-		if remaining:
-			frappe.db.set_value(
-				DOCTYPE,
-				job.name,
-				{
-					"conversation": remaining[0].conversation,
-					"card_message": remaining[0].name,
-					"announced_status": "",
-				},
-			)
-			continue
 		_delete_file(job)
 		if job.attempt_token:
 			shutil.rmtree(_directory(job.name, job.attempt_token), ignore_errors=True)
