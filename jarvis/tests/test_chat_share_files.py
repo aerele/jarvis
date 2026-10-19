@@ -75,6 +75,59 @@ class TestSharedFiles(SharingCase):
 		with self.assertRaises(frappe.PermissionError):
 			self.download(doc.file_url)
 
+	def test_collation_matches_never_select_a_different_canvas_url(self):
+		from jarvis.chat.shared_files import read_file
+		from jarvis.chat.sharing import _require_share
+
+		self.share()
+		docs = [
+			self.file("/private/files/ShareCase.pdf", "ShareCase.pdf"),
+			self.file("/private/files/sharecase.pdf", "sharecase.pdf"),
+		]
+		docs.sort(key=lambda doc: doc.name)
+		requested = docs[1]
+		for doc in docs:
+			self.assertTrue(frappe.has_permission("File", "read", doc=doc, user=OWNER))
+		frappe.db.set_value(
+			MESSAGE,
+			self.message,
+			"canvas",
+			json.dumps([{"name": "exact", "type": "file", "file_url": requested.file_url}]),
+		)
+		with as_user(RECIPIENT):
+			conversation, _ = _require_share(self.conversation)
+			selected = read_file(conversation, requested.file_url)
+		self.assertEqual(selected.name, requested.name)
+		self.assertEqual(selected.file_url, requested.file_url)
+
+	def test_real_private_file_permissions_and_bytes(self):
+		from pathlib import Path
+		from uuid import uuid4
+
+		self.share()
+		filename = f"share-permission-{uuid4().hex}.txt"
+		path = Path(frappe.get_site_path("private", "files", filename))
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_bytes(b"owner-authorized fixture bytes")
+		self.addCleanup(path.unlink, missing_ok=True)
+		doc = self.file(f"/private/files/{filename}", filename)
+		self.download(doc.file_url)
+		content = frappe.local.response.filecontent
+		self.assertEqual(
+			content.encode() if isinstance(content, str) else content, b"owner-authorized fixture bytes"
+		)
+		# The File is still a visible canvas attachment, but its real attached
+		# document now belongs to an outsider. No permission/byte mock is used.
+		from jarvis.tests._share_helpers import make_chat
+
+		other, _ = make_chat(OUTSIDER)
+		frappe.db.set_value("File", doc.name, {"attached_to_name": other, "owner": OUTSIDER})
+		self.assertFalse(
+			frappe.has_permission("File", "read", doc=frappe.get_doc("File", doc.name), user=OWNER)
+		)
+		with self.assertRaises(frappe.PermissionError):
+			self.download(doc.file_url)
+
 	def test_path_variants_and_remote_urls_refused_even_if_exact_canvas_item(self):
 		self.share()
 		doc = self.file()

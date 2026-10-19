@@ -1,17 +1,28 @@
 """Real connections exercise the conversation lock and unique recipient pair."""
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 from threading import Barrier
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
+from frappe.utils import get_datetime, now_datetime
 
 from jarvis.tests._share_helpers import OWNER, RECIPIENT, SHARE, as_user, make_chat, make_user
+from jarvis.tests.race_harness import (
+	assert_fix_closes_race,
+	open_read_view,
+	snapshot_isolation_off,
+	snapshot_isolation_on,
+)
 
 
 class TestShareConcurrency(FrappeTestCase):
 	def test_two_connections_adding_same_user_are_idempotent(self):
+		self._duplicate_grants(snapshot_check=False)
+
+	def _duplicate_grants(self, *, snapshot_check):
 		self.assertNotIn(
 			frappe.local.site, {"jarvis.localhost", "jarvis_admin.localhost", "jarvis_helpdesk.localhost"}
 		)
@@ -45,10 +56,12 @@ class TestShareConcurrency(FrappeTestCase):
 					frappe.set_user(OWNER)
 					from jarvis.chat.sharing import set_shares
 
-					barrier.wait(timeout=10)
-					result = set_shares(conversation, [RECIPIENT])
-					frappe.db.commit()
-					return result
+					with snapshot_isolation_on() if snapshot_check else snapshot_isolation_off():
+						open_read_view()
+						barrier.wait(timeout=10)
+						result = set_shares(conversation, [RECIPIENT])
+						frappe.db.commit()
+						return result
 				finally:
 					frappe.db.rollback()
 					frappe.destroy()
@@ -107,7 +120,13 @@ class TestShareConcurrency(FrappeTestCase):
 					frappe.get_doc("User", recipient).add_roles("Accounts User")
 			conversation, _ = make_chat(owner)
 			frappe.db.set_single_value("Jarvis Settings", "chat_sharing_enabled", 1)
-			if action == "read_after_role_removed":
+			initial_share = action in (
+				"read_after_role_removed",
+				"read_marker",
+				"read_prior_write",
+				"delete_conflict",
+			)
+			if initial_share:
 				from jarvis.chat.sharing import set_shares
 
 				with as_user(owner):
@@ -119,13 +138,14 @@ class TestShareConcurrency(FrappeTestCase):
 			self.assertTrue(frappe.db.exists("User", recipient))
 			self.assertEqual(
 				frappe.db.count(SHARE, {"conversation": conversation}),
-				int(action == "read_after_role_removed"),
+				int(initial_share),
 			)
 
 			def other_request():
 				frappe.init(site=site, sites_path=sites)
 				frappe.connect()
 				try:
+					result = None
 					if action == "grant_after_delete":
 						frappe.set_user("Administrator")
 						frappe.delete_doc("User", recipient, ignore_permissions=True, force=True)
@@ -134,18 +154,34 @@ class TestShareConcurrency(FrappeTestCase):
 						frappe.get_doc("User", recipient).remove_roles("Jarvis User")
 						assert frappe.db.get_value("User", recipient, "user_type") == "System User"
 						assert not frappe.db.exists("Has Role", {"parent": recipient, "role": "Jarvis User"})
+					elif action in ("read_marker", "read_prior_write"):
+						name = frappe.db.get_value(SHARE, {"conversation": conversation}, "name")
+						result = now_datetime() + timedelta(seconds=1)
+						frappe.db.set_value(SHARE, name, "seen_marker", result, update_modified=False)
+					elif action == "delete_conflict":
+						name = frappe.db.get_value(SHARE, {"conversation": conversation}, "name")
+						modified = frappe.db.get_value(SHARE, name, "modified")
+						frappe.db.set_value(
+							SHARE,
+							name,
+							"modified",
+							get_datetime(modified) + timedelta(microseconds=1),
+							update_modified=False,
+						)
 					else:
 						frappe.set_user(owner)
 						from jarvis.chat.sharing import set_shares
 
 						set_shares(conversation, [recipient])
+						result = frappe.db.get_value(SHARE, {"conversation": conversation}, "name")
 					frappe.db.commit()
+					return result
 				finally:
 					frappe.db.rollback()
 					frappe.destroy()
 
 			with ThreadPoolExecutor(max_workers=1) as pool:
-				pool.submit(other_request).result(timeout=30)
+				competing = pool.submit(other_request).result(timeout=30)
 			if action in ("grant_after_role_removed", "read_after_role_removed"):
 				# Force a miss in this request too; warming B's shared roles
 				# cache would mask an ordinary-read stale Has Role snapshot.
@@ -176,7 +212,43 @@ class TestShareConcurrency(FrappeTestCase):
 					response = pool.submit(recipient_request).result(timeout=30)
 				self.assertIn(response, ({"refused": "not_shared"}, {"refused": "app_access"}))
 				return
-			if action == "archive":
+			if action in ("read_marker", "read_prior_write"):
+				from jarvis.chat.sharing import get_shared_conversation
+
+				if action == "read_prior_write":
+					frappe.db.set_value("Jarvis Conversation", conversation, "title", "UNCOMMITTED-READ")
+					with as_user(recipient), self.assertRaises(frappe.QueryDeadlockError):
+						get_shared_conversation(conversation)
+					frappe.db.rollback()
+					self.assertEqual(
+						frappe.db.get_value("Jarvis Conversation", conversation, "title"), doc.title
+					)
+				with as_user(recipient):
+					response = get_shared_conversation(conversation)
+				self.assertEqual(response["conversation"]["name"], conversation)
+				self.assertEqual(
+					frappe.db.get_value(SHARE, {"conversation": conversation}, "seen_marker"),
+					get_datetime(competing),
+				)
+				frappe.db.commit()
+				return
+			if action == "delete_conflict":
+				frappe.db.set_value("Jarvis Conversation", conversation, "title", "UNCOMMITTED-DELETE")
+				with as_user("Administrator"), self.assertRaises(frappe.QueryDeadlockError):
+					frappe.delete_doc("User", recipient, ignore_permissions=True, force=True)
+				frappe.db.rollback()
+				self.assertEqual(frappe.db.get_value("Jarvis Conversation", conversation, "title"), doc.title)
+				self.assertTrue(frappe.db.exists("User", recipient))
+				self.assertEqual(frappe.db.count(SHARE, {"conversation": conversation}), 1)
+				# A new request may retry the whole User deletion; a hook may
+				# never replay its fragment after losing the caller's writes/locks.
+				with as_user("Administrator"):
+					frappe.delete_doc("User", recipient, ignore_permissions=True, force=True)
+			elif action == "archive_endpoint":
+				from jarvis.chat.api import archive_conversation
+
+				archive_conversation(conversation)
+			elif action == "archive":
 				doc.status = "Archived"
 				doc.save(ignore_permissions=True)
 			elif action == "delete":
@@ -189,9 +261,8 @@ class TestShareConcurrency(FrappeTestCase):
 			elif action == "admin_revoke":
 				from jarvis.chat.sharing import revoke_share
 
-				name = frappe.db.get_value(SHARE, {"conversation": conversation}, "name", for_update=True)
 				with as_user("Administrator"):
-					revoke_share(name)
+					revoke_share(competing)
 			else:
 				from jarvis.chat.sharing import set_shares
 
@@ -199,7 +270,8 @@ class TestShareConcurrency(FrappeTestCase):
 					set_shares(conversation, [recipient])
 			frappe.db.commit()
 			self.assertEqual(frappe.db.count(SHARE, {"conversation": conversation}), 0)
-			if action == "archive":
+			if action in ("archive", "archive_endpoint"):
+				doc = frappe.get_doc("Jarvis Conversation", conversation)
 				doc.status = "Active"
 				doc.save(ignore_permissions=True)
 				frappe.db.commit()
@@ -226,23 +298,64 @@ class TestShareConcurrency(FrappeTestCase):
 				frappe.db.commit()
 			frappe.set_user(previous)
 
+	def _legacy_timeline(self, action):
+		# These cases pin current-lock semantics without engine snapshot
+		# checking. The explicit ON-mode tests below cover rejection/replay.
+		with snapshot_isolation_off():
+			self._run_lifecycle_timeline(action)
+
 	def test_archive_removes_grant_committed_after_its_snapshot(self):
-		self._run_lifecycle_timeline("archive")
+		self._legacy_timeline("archive")
 
 	def test_user_deletion_removes_grant_committed_after_its_snapshot(self):
-		self._run_lifecycle_timeline("delete")
+		self._legacy_timeline("delete")
 
 	def test_share_cannot_outlive_recipient_deleted_after_owner_snapshot(self):
-		self._run_lifecycle_timeline("grant_after_delete")
+		self._legacy_timeline("grant_after_delete")
 
 	def test_owner_removal_sees_grant_committed_after_its_snapshot(self):
-		self._run_lifecycle_timeline("owner_remove")
+		self._legacy_timeline("owner_remove")
 
 	def test_admin_revoke_sees_grant_committed_after_its_snapshot(self):
-		self._run_lifecycle_timeline("admin_revoke")
+		self._legacy_timeline("admin_revoke")
 
 	def test_share_refuses_recipient_role_removed_after_owner_snapshot(self):
-		self._run_lifecycle_timeline("grant_after_role_removed")
+		self._legacy_timeline("grant_after_role_removed")
 
 	def test_old_owner_read_cannot_restore_revoked_access_through_roles_cache(self):
-		self._run_lifecycle_timeline("read_after_role_removed")
+		self._legacy_timeline("read_after_role_removed")
+
+	def test_snapshot_duplicate_grants_replay_from_the_conversation_lock(self):
+		assert_fix_closes_race(self, lambda: self._duplicate_grants(snapshot_check=True))
+
+	def test_snapshot_owner_removal_replays_the_whole_diff(self):
+		with snapshot_isolation_on():
+			assert_fix_closes_race(self, lambda: self._run_lifecycle_timeline("owner_remove"))
+
+	def test_snapshot_admin_revoke_replays_its_whole_unit(self):
+		with snapshot_isolation_on():
+			assert_fix_closes_race(self, lambda: self._run_lifecycle_timeline("admin_revoke"))
+
+	def test_snapshot_deleted_recipient_is_revalidated_after_replay(self):
+		with snapshot_isolation_on():
+			assert_fix_closes_race(self, lambda: self._run_lifecycle_timeline("grant_after_delete"))
+
+	def test_snapshot_revoked_role_is_revalidated_after_replay(self):
+		with snapshot_isolation_on():
+			assert_fix_closes_race(self, lambda: self._run_lifecycle_timeline("grant_after_role_removed"))
+
+	def test_snapshot_transcript_read_replays_and_preserves_newer_seen_marker(self):
+		with snapshot_isolation_on():
+			assert_fix_closes_race(self, lambda: self._run_lifecycle_timeline("read_marker"))
+
+	def test_snapshot_archive_uses_existing_whole_operation_replay(self):
+		with snapshot_isolation_on():
+			assert_fix_closes_race(self, lambda: self._run_lifecycle_timeline("archive_endpoint"))
+
+	def test_snapshot_read_conflict_must_not_replay_after_a_callers_write(self):
+		with snapshot_isolation_on():
+			self._run_lifecycle_timeline("read_prior_write")
+
+	def test_snapshot_user_delete_conflict_rolls_back_all_the_callers_work(self):
+		with snapshot_isolation_on():
+			self._run_lifecycle_timeline("delete_conflict")
