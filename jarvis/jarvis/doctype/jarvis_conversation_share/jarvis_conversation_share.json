@@ -1,0 +1,27 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-10-19 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": ["conversation", "user", "shared_by", "seen_marker"],
+ "fields": [
+  {"fieldname": "conversation", "fieldtype": "Link", "label": "Conversation", "options": "Jarvis Conversation", "reqd": 1, "search_index": 1},
+  {"fieldname": "user", "fieldtype": "Link", "label": "Recipient", "options": "User", "reqd": 1, "search_index": 1},
+  {"fieldname": "shared_by", "fieldtype": "Link", "label": "Shared By", "options": "User", "reqd": 1},
+  {"fieldname": "seen_marker", "fieldtype": "Datetime", "label": "Seen Marker", "read_only": 1}
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-19 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Conversation Share",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}
