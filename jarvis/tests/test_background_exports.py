@@ -151,6 +151,44 @@ class TestStreamingWriter(TestCase):
 		self.assertTrue(cell.is_date)
 		self.assertEqual(cell.number_format, "yyyy-mm-dd")
 
+	def test_xlsx_abort_does_not_finalise_the_workbook(self):
+		import xlsxwriter
+
+		def too_many():
+			streaming.write(
+				prepared(), iter([{"value": 1}] * 3), directory / "a.part", "xlsx", 2, 10**8, noop, noop1
+			)
+
+		def cancelled():
+			calls = []
+
+			def check():
+				calls.append(1)
+				if len(calls) > 1:  # the first call is the one before any row
+					raise streaming.ExportLimit("cancelled", "Cancelled.")
+
+			streaming.write(
+				prepared(),
+				({"value": i} for i in range(5000)),
+				directory / "b.part",
+				"xlsx",
+				10_000,
+				10**8,
+				check,
+				noop1,
+			)
+
+		noop, noop1 = (lambda: None), (lambda n: None)
+		with tempfile.TemporaryDirectory() as tmp:
+			directory = Path(tmp)
+			for call, status in ((too_many, "too large"), (cancelled, "cancelled")):
+				with self.subTest(status=status), patch.object(xlsxwriter.Workbook, "close") as close:
+					with self.assertRaises(streaming.ExportLimit) as caught:
+						call()
+					self.assertEqual(caught.exception.status, status)
+					close.assert_not_called()
+			self.assertFalse(list(directory.glob("*.part")))  # the .part only exists once closed
+
 
 class TestSavedQueries(FrappeTestCase):
 	def test_owner_expiry_and_no_rows(self):

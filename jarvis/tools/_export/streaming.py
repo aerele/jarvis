@@ -291,8 +291,13 @@ def _write_xlsx(prepared, iterator, path, size_cap, check, progress):
 	try:
 		count = _fill_sheet(book, sheet, prepared, iterator, size_cap, check, progress)
 		add_xlsxwriter_highlights(book, sheet, _Range(prepared.headers, count), prepared.rules)
-	finally:
-		book.close()
+	except BaseException:
+		# close() would zip the whole spool of a workbook nobody will read, and could replace
+		# this error with its own. The attempt directory is removed by the caller.
+		with contextlib.suppress(Exception):
+			sheet.row_data_fh.close()
+		raise
+	book.close()
 
 
 def _fill_sheet(book, sheet, prepared, iterator, size_cap, check, progress) -> int:
