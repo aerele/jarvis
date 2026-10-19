@@ -15,7 +15,7 @@ from frappe.query_builder.functions import Coalesce
 from frappe.utils import add_to_date, cint, get_datetime
 from pypika.terms import ExistsCriterion
 
-from jarvis.exceptions import InvalidArgumentError
+from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._export.clock import now_datetime
 from jarvis.tools._export.saved_queries import fingerprint
 from jarvis.tools._export.streaming import ExportLimit, prepare
@@ -135,18 +135,20 @@ def _supported(fmt=None):
 		raise BackgroundUnavailable(XLSXWRITER_MISSING)
 
 
-def _conversation():
+NO_CHAT = "Start it from a Jarvis chat so the file can be delivered there."
+
+
+def current_conversation():
+	"""The caller's current Jarvis chat (their own), or None. Never raises."""
 	from jarvis.tools._agent_run_ctx import get_session_key
 
 	key = get_session_key()
 	if not key:
-		raise InvalidArgumentError("Start a large export from a Jarvis chat so its file can be delivered.")
-	name = frappe.db.get_value(
-		"Jarvis Conversation", {"session_key": key, "owner": frappe.session.user}, "name"
+		return None
+	return (
+		frappe.db.get_value("Jarvis Conversation", {"session_key": key, "owner": frappe.session.user}, "name")
+		or None
 	)
-	if not name:
-		raise InvalidArgumentError("The export needs a current chat owned by you. Start it again in chat.")
-	return name
 
 
 def _permission_fingerprint(prepared):
@@ -208,37 +210,54 @@ def existing(source, fmt, highlights=None, *, join=False):
 
 def _join(name):
 	# A persistent initial card is also the subscription to this shared job.
-	announce(name, initial=True, conversation=_conversation())
+	conversation = current_conversation()
+	if not conversation:
+		raise BackgroundUnavailable(NO_CHAT)
+	announce(name, initial=True, conversation=conversation)
 	announce(name)
 
 
 def enqueue(source, fmt, title=None, highlights=None):
 	_supported(fmt)
-	frappe.has_permission(DOCTYPE, "read", throw=True)
-	conversation = _conversation()
-	prepared = prepare(source, limits()[0], highlights)
-	with _lock():
-		found = existing(source, fmt, highlights, join=True)
-		if found:
-			return found
-		job = frappe.get_doc(
-			{
-				"doctype": DOCTYPE,
-				"owner": frappe.session.user,
-				"conversation": conversation,
-				"title": (title or "Export")[:140],
-				"format": fmt,
-				"source": json.dumps(source),
-				"highlights": json.dumps(highlights),
-				"status": "queued",
-				"fingerprint": _key(source, fmt, highlights),
-				"permission_fingerprint": _permission_fingerprint(prepared),
-			}
-		)
-		job.flags.jarvis_server_write = True
-		job.insert(ignore_permissions=True)
-		# Persist the new job before another transaction creates its card or dispatches it.
-		_commit()
+	# Every refusal below is a BackgroundUnavailable: export_query composes its reason with
+	# the original "narrow it" advice, so the agent always hears both.
+	if not frappe.has_permission(DOCTYPE, "read"):
+		raise BackgroundUnavailable("Your role cannot run background exports.")
+	conversation = current_conversation()
+	if not conversation:
+		raise BackgroundUnavailable(NO_CHAT)
+	try:
+		prepared = prepare(source, limits()[0], highlights)
+	except (InvalidArgumentError, PermissionDeniedError) as exc:
+		raise BackgroundUnavailable(str(exc)) from None
+	try:
+		with _lock():
+			found = existing(source, fmt, highlights, join=True)
+			if found:
+				return found
+			job = frappe.get_doc(
+				{
+					"doctype": DOCTYPE,
+					"owner": frappe.session.user,
+					"conversation": conversation,
+					"title": (title or "Export")[:140],
+					"format": fmt,
+					"source": json.dumps(source),
+					"highlights": json.dumps(highlights),
+					"status": "queued",
+					"fingerprint": _key(source, fmt, highlights),
+					"permission_fingerprint": _permission_fingerprint(prepared),
+				}
+			)
+			job.flags.jarvis_server_write = True
+			job.insert(ignore_permissions=True)
+			# Persist the new job before another transaction creates its card or dispatches it.
+			_commit()
+	except BackgroundUnavailable:
+		raise
+	except InvalidArgumentError as exc:
+		# The site lock timed out before any row was written.
+		raise BackgroundUnavailable(str(exc)) from None
 	announce(job.name, initial=True)
 	dispatch()
 	return public(_get_job(job.name))
