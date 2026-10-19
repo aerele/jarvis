@@ -95,10 +95,11 @@ def export_query(
 	A column masked for the user (Frappe 16 field masking) is masked in the file as
 	in a list; a computed column over a masked field is refused. An export that
 	exceeds the immediate row, time or upload-size budget returns an ``export_job``
-	state instead. Its owner-scoped chat card receives progress and the finished
-	file. Background exports have a 200,000-row, 50 MB, ten-minute ceiling and
-	never deliver partial files. Repeated calls join active work or reuse a recent
-	file after rechecking permissions.
+	state instead. That chat's export card shows progress, offers Cancel and receives
+	the finished file. Background exports have a 200,000-row, 50 MB, ten-minute
+	ceiling and never deliver partial files. Do not call again to check on one: in
+	the same chat a repeat returns the running export, or the file it made in the
+	last 10 minutes (after rechecking permissions), and otherwise starts a new one.
 
 	``highlights`` (xlsx only) uses the same column/operator/value/style/scope
 	rules as export_excel, referring to exact exported field headers. Formatting
