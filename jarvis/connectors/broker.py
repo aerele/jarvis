@@ -12,8 +12,7 @@ This module:
      a SHARED one of the same key), honouring ``enabled``.
   2. Reads the encrypted credential.
   3. Gates the action against the row's ``Jarvis Connector Action`` children
-     (deny unknown; ``allowed`` wins; else auto-allow a read-only, non-
-     destructive action; else deny).
+     (deny unknown; allow only when ``allowed`` is set; else deny).
   4. Validates the arguments against the tool's cached ``inputSchema``.
   5. Runs the outbound MCP call under a per-connector circuit breaker and a
      per-(tenant, connector) concurrency cap, through the SSRF-guarded, IP-pinned

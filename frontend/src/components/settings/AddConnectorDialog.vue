@@ -596,7 +596,9 @@
 //
 // isPlaceholder is the one predicate that reconciles every tension the spec
 // itself narrates: a row THIS dialog created that nobody has invested in yet
-// (no saved client, no live sign-in, no passing test) is disposable. It
+// (no saved client, no live sign-in) is disposable. A passing Connect test is
+// not investment: Save is the commit point, so Cancel after a test still
+// deletes the row (otherwise it lingers, disabled, and blocks a re-add). It
 // drives three things at once: the Cancel-rule cleanup below, whether "Who
 // can use it" is still a live toggle or already plain text, and whether the
 // "use a key/sign in instead" switch links still show. Switching the auth
@@ -620,6 +622,7 @@ import { CUSTOM_URL_TOKEN_HINT } from "@/components/settings/connectorHelp.js";
 // oauthSignin.js's signIn() - opens the vendor tab synchronously and returns
 // a promise (with a .cancel()) that resolves once the flow has a verdict.
 import { signIn } from "@/components/settings/oauthSignin";
+import { isDisposableRow } from "@/components/settings/connectorRowState";
 import {
 	addConnector,
 	deleteConnector,
@@ -736,13 +739,13 @@ const signinHost = ref("");
 const testState = reactive({ status: "idle", tools: [], message: "" }); // idle | passed | failed
 
 // A row THIS session created that nobody has invested in yet - see the state
-// machine note above. This is also, verbatim, the Cancel-rule predicate.
-const isPlaceholder = computed(
-	() =>
-		createdThisSession.value &&
-		!rowOauthConnected.value &&
-		!savedClientThisSession.value &&
-		testState.status !== "passed"
+// machine note above. onClosed() applies the same rule to an unsaved close.
+const isPlaceholder = computed(() =>
+	isDisposableRow({
+		createdThisSession: createdThisSession.value,
+		oauthConnected: rowOauthConnected.value,
+		savedClient: savedClientThisSession.value,
+	})
 );
 // "Who can use it" only stays a live toggle while no row exists yet - once
 // one does (even a placeholder), scope is locked, never discarded-and-redone.
@@ -1440,14 +1443,16 @@ async function onClosed() {
 	const wasCreatedThisSession = createdThisSession.value;
 	const wasSavedClientThisSession = savedClientThisSession.value;
 	const wasRowOauthConnected = rowOauthConnected.value;
-	const hadPassedTest = testState.status === "passed";
 	const wasSavedThisClose = savedThisClose.value;
 	const hadSignInStarted = signInStartedThisSession.value;
+	// Save deletes nothing: it already flipped the row to enabled.
 	const wasPlaceholder =
-		wasCreatedThisSession &&
-		!wasRowOauthConnected &&
-		!wasSavedClientThisSession &&
-		!hadPassedTest;
+		!wasSavedThisClose &&
+		isDisposableRow({
+			createdThisSession: wasCreatedThisSession,
+			oauthConnected: wasRowOauthConnected,
+			savedClient: wasSavedClientThisSession,
+		});
 
 	let keep = !wasPlaceholder && wasRowOauthConnected;
 	if (wasPlaceholder && name) {

@@ -144,7 +144,7 @@ class TestMergeNoRecomputeOnExistingRow(unittest.TestCase):
 	def test_stored_flags_survive_a_relabel_attack(self):
 		# Stored: delete_issue is destructive, not allowed. A compromised server now
 		# relabels it read-only + non-destructive. The stored flags must win, or
-		# policy.action_decision would auto-allow it.
+		# the safe-read check would skip the confirm card for it.
 		existing = [
 			{"action": "delete_issue", "allowed": 0, "read_only": 0, "destructive": 1, "description": "d"}
 		]
