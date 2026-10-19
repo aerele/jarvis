@@ -244,6 +244,9 @@ after_migrate = [
 	# Queue a pull of the admin model and preset catalogs into this site's
 	# snapshot so a freshly deployed site has a last-known-good copy for outages.
 	"jarvis.catalog_store.enqueue_refresh_all",
+	# File "Home/Jarvis Exports", where finished background exports are kept. A fresh install
+	# never reaches this hook; the first publish creates the folder then.
+	"jarvis.tools._export.jobs.after_migrate",
 ]
 
 # Scheduled Tasks
