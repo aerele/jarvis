@@ -252,6 +252,35 @@ class TestDoCallPassthrough(unittest.TestCase):
 		self.assertEqual(kwargs["header_params"], {"Mcp-Param-X-Tenant": "acme"})
 
 
+class TestCallHonoursSwitchedOffAction(unittest.TestCase):
+	"""``broker.call`` on a read-only action the user switched off (allowed=0)
+	returns the ``action_denied`` envelope and never reaches the remote server."""
+
+	def _row(self, allowed):
+		action = {"action": "fetch_doc", "allowed": allowed, "read_only": 1, "destructive": 0}
+		return _Row(name="conn-1", enabled=1, allowed_actions=[action], tools_cache=None)
+
+	def _call(self, row):
+		with (
+			mock.patch.object(broker, "_resolve_row", return_value=row),
+			mock.patch.object(broker, "_execute", return_value={"content": []}) as execute,
+			mock.patch.object(broker, "_log"),
+			mock.patch.object(broker.refresh, "after_call"),
+		):
+			return broker.call("docs", "fetch_doc", {}), execute
+
+	def test_switched_off_read_only_action_is_denied(self):
+		out, execute = self._call(self._row(allowed=0))
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "action_denied")
+		execute.assert_not_called()
+
+	def test_allowed_read_only_action_runs(self):
+		out, execute = self._call(self._row(allowed=1))
+		self.assertTrue(out["ok"])
+		execute.assert_called_once()
+
+
 class _DoesNotExist(Exception):
 	"""Stand-in for ``frappe.DoesNotExistError`` - a REAL class so ``_resolve_row``'s
 	``except frappe.DoesNotExistError`` can catch it under a mocked frappe."""

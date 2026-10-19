@@ -2898,10 +2898,8 @@ def _connector_call_is_safe_read(args) -> bool:
 	SAFE_READ (all four required, read off the resolved ``Jarvis Connector Action``
 	child row): the child row for ``action`` EXISTS, ``allowed`` == 1,
 	``read_only`` == 1, and ``destructive`` == 0. This is intentionally STRICTER
-	than ``policy.action_decision``'s allow rule (which also auto-allows an
-	unmarked read-only action): skipping the human card requires the user to have
-	positively enabled the action in the picker, not merely that the broker would
-	permit it.
+	than ``policy.action_decision``'s allow rule (``allowed`` alone): skipping the
+	human card also requires the action to be a non-destructive read.
 
 	SECURITY (owner-approved tradeoff). SAFE_READ trusts the STORED
 	``read_only``/``destructive`` flags. Those are NOT client-settable: the SPA's

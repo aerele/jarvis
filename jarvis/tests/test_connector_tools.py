@@ -185,7 +185,7 @@ class TestListConnectorActionsShape(unittest.TestCase):
 				{"name": "conn-personal", "key": "github", "label": "My GitHub", "scope": "Personal"},
 				{"name": "conn-shared", "key": "github", "label": "Team GitHub", "scope": "Shared"},
 			],
-			[self._action("conn-personal", "read_issue", read_only=1)],
+			[self._action("conn-personal", "read_issue", read_only=1, allowed=1)],
 		)
 		result = self._run(fake)
 		self.assertEqual(len(result["connectors"]), 1)
@@ -206,7 +206,7 @@ class TestListConnectorActionsShape(unittest.TestCase):
 		fake = self._fake_frappe(
 			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
 			[
-				self._action("conn-1", "read_issue", read_only=1, destructive=0),
+				self._action("conn-1", "read_issue", read_only=1, destructive=0, allowed=1),
 				self._action("conn-1", "delete_repo", read_only=0, destructive=1, allowed=0),
 				self._action("conn-1", "create_issue", allowed=1),
 			],
@@ -216,6 +216,19 @@ class TestListConnectorActionsShape(unittest.TestCase):
 		self.assertEqual(actions, {"read_issue", "create_issue"})
 		self.assertNotIn("delete_repo", actions)
 
+	def test_switched_off_read_only_action_is_omitted(self):
+		# allowed=0 on a read-only action means the user unchecked it: the model
+		# must not see it, since call_connector would deny it.
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "docs", "label": "Docs", "scope": "Shared"}],
+			[
+				self._action("conn-1", "search_docs", read_only=1, allowed=1),
+				self._action("conn-1", "fetch_doc", read_only=1, allowed=0),
+			],
+		)
+		result = self._run(fake)
+		self.assertEqual([a["action"] for a in result["connectors"][0]["actions"]], ["search_docs"])
+
 	def test_child_rows_are_grouped_per_connector_in_query_order(self):
 		fake = self._fake_frappe(
 			[
@@ -223,7 +236,7 @@ class TestListConnectorActionsShape(unittest.TestCase):
 				{"name": "conn-jira", "key": "jira", "label": "Jira", "scope": "Shared"},
 			],
 			[
-				self._action("conn-gh", "read_issue", read_only=1),
+				self._action("conn-gh", "read_issue", read_only=1, allowed=1),
 				self._action("conn-jira", "create_issue", allowed=1),
 				self._action("conn-gh", "create_pr", allowed=1),
 			],
@@ -297,7 +310,7 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 		schema = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
 		fake = self._fake_frappe(
 			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
-			[self._action("conn-1", "read_issue", read_only=1)],
+			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
 			caches={"conn-1": self._cache({"read_issue": schema})},
 		)
 		result = self._run(fake, connector="github", action="read_issue")
@@ -335,10 +348,20 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 		# Denied -> the untrusted schema blob is never pulled.
 		fake.db.get_values.assert_not_called()
 
+	def test_switched_off_read_only_action_returns_no_schema(self):
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "docs", "label": "Docs", "scope": "Shared"}],
+			[self._action("conn-1", "fetch_doc", read_only=1, allowed=0)],
+			caches={"conn-1": self._cache({"fetch_doc": {"type": "object"}})},
+		)
+		result = self._run(fake, connector="docs", action="fetch_doc")
+		self.assertEqual(result["connectors"][0]["actions"], [])
+		fake.db.get_values.assert_not_called()
+
 	def test_unknown_action_returns_empty_actions_and_never_reads_cache(self):
 		fake = self._fake_frappe(
 			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
-			[self._action("conn-1", "read_issue", read_only=1)],
+			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
 		)
 		result = self._run(fake, connector="github", action="does_not_exist")
 		self.assertEqual(result["connectors"][0]["actions"], [])
@@ -353,7 +376,7 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 	def test_allowed_but_cache_lacks_the_tool_returns_null_schema(self):
 		fake = self._fake_frappe(
 			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
-			[self._action("conn-1", "read_issue", read_only=1)],
+			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
 			# cache lists a DIFFERENT tool, so there is no schema for read_issue.
 			caches={"conn-1": self._cache({"other": {"type": "object"}})},
 		)
@@ -366,7 +389,7 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 	def test_allowed_but_cache_missing_returns_null_schema(self):
 		fake = self._fake_frappe(
 			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
-			[self._action("conn-1", "read_issue", read_only=1)],
+			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
 			caches={"conn-1": None},
 		)
 		result = self._run(fake, connector="github", action="read_issue")
@@ -379,7 +402,7 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 				{"name": "conn-personal", "key": "github", "label": "My GitHub", "scope": "Personal"},
 				{"name": "conn-shared", "key": "github", "label": "Team GitHub", "scope": "Shared"},
 			],
-			[self._action("conn-personal", "read_issue", read_only=1)],
+			[self._action("conn-personal", "read_issue", read_only=1, allowed=1)],
 			caches={"conn-personal": self._cache({"read_issue": schema})},
 		)
 		result = self._run(fake, connector="github", action="read_issue")
@@ -398,7 +421,7 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 				{"name": "conn-jira", "key": "jira", "label": "Jira", "scope": "Shared"},
 			],
 			[
-				self._action("conn-gh", "read_issue", read_only=1),
+				self._action("conn-gh", "read_issue", read_only=1, allowed=1),
 				# jira does not offer read_issue at all.
 				self._action("conn-jira", "create_ticket", allowed=1),
 			],
@@ -414,7 +437,7 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 		schema = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
 		fake = self._fake_frappe(
 			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
-			[self._action("conn-1", "read_issue", read_only=1)],
+			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
 			caches={"conn-1": self._cache({"read_issue": schema})},
 		)
 		result = self._run(fake, connector="github", action="read_issue")
@@ -430,7 +453,7 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 		self.assertGreater(len(json.dumps(big)), 16 * 1024)
 		fake = self._fake_frappe(
 			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
-			[self._action("conn-1", "read_issue", read_only=1)],
+			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
 			caches={"conn-1": self._cache({"read_issue": big})},
 		)
 		result = self._run(fake, connector="github", action="read_issue")
@@ -441,7 +464,7 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 
 	def test_no_action_path_is_unchanged_and_reads_no_cache(self):
 		connectors = [{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}]
-		fake = self._fake_frappe(connectors, [self._action("conn-1", "read_issue", read_only=1)])
+		fake = self._fake_frappe(connectors, [self._action("conn-1", "read_issue", read_only=1, allowed=1)])
 		for action in (None, ""):
 			result = self._run(fake, action=action)
 			self.assertEqual(
