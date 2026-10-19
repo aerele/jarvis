@@ -41,12 +41,12 @@
 				class="ml-1.5 size-2 shrink-0 rounded-full bg-blue-500"
 				title="New reply"
 			/>
-			<Dropdown :options="menuOptions" placement="right">
+			<Dropdown :options="menuOptions" placement="right" @update:open="formatsOpen = false">
 				<template #trigger>
 					<Button
 						variant="ghost"
 						icon="more-horizontal"
-						class="!h-5 !w-5 opacity-0 group-hover:opacity-100 focus-visible:!opacity-100"
+						class="conversation-more !h-5 !w-5 opacity-0 group-hover:opacity-100 focus-visible:!opacity-100"
 						:aria-label="'Options for ' + (conv.title || 'chat')"
 						@click.stop
 					/>
@@ -59,11 +59,12 @@
 <script setup>
 // Recent-chats row (DESIGN-V3 §3.4): hover ⋯ menu (Star/Rename/Delete),
 // inline rename, streaming + unread dots; click navigates to /c/:id.
-import { ref, computed, nextTick } from "vue";
+import { ref, computed, nextTick, h, defineComponent } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Button, Dropdown, FeatherIcon, confirmDialog } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { escapeHtml } from "@/lib/errors";
+import { useConversationExport } from "@/composables/useConversationExport";
 
 const props = defineProps({
 	conv: { type: Object, required: true }, // {name, title, starred, last_active_at}
@@ -72,6 +73,7 @@ const props = defineProps({
 const store = useShellStore();
 const route = useRoute();
 const router = useRouter();
+const { downloadMenuOption } = useConversationExport(() => props.conv.name);
 
 const activity = computed(() => store.conversationIndicator(props.conv.name));
 
@@ -107,6 +109,44 @@ function commitRename() {
 }
 
 // ---- ⋯ menu -----------------------------------------------------------------
+const formatsOpen = ref(false);
+// Keep revealed formats inside this popup. The pinned library's portaled
+// submenu cannot escape its parent's focus trap with keyboard or touch.
+// The pinned full-row slot renderer creates an anonymous component on every
+// update; a stable component preserves this disclosure's focus and handlers.
+const DownloadDisclosure = defineComponent({
+	name: "ConversationDownloadDisclosure",
+	setup: () => () =>
+		h(
+			"button",
+			{
+				type: "button",
+				class: "flex h-7 w-full items-center gap-2 rounded px-2 text-sm text-ink-gray-7 outline-none focus:bg-surface-gray-2 data-[highlighted]:bg-surface-gray-2",
+				"aria-expanded": formatsOpen.value,
+			},
+			[
+				h(FeatherIcon, { name: "download", class: "size-4", "aria-hidden": true }),
+				h("span", { class: "flex-1 text-left" }, downloadMenuOption.value.label),
+				h(FeatherIcon, {
+					name: formatsOpen.value ? "chevron-up" : "chevron-down",
+					class: "size-4",
+					"aria-hidden": true,
+				}),
+			]
+		),
+});
+const inlineDownloadOption = computed(() => {
+	const option = { ...downloadMenuOption.value };
+	delete option.submenu;
+	return {
+		...option,
+		component: DownloadDisclosure,
+		onClick: (event) => {
+			event.preventDefault();
+			formatsOpen.value = !formatsOpen.value;
+		},
+	};
+});
 const menuOptions = computed(() => [
 	{
 		label: props.conv.starred ? "Unstar" : "Star",
@@ -114,6 +154,13 @@ const menuOptions = computed(() => [
 		onClick: () => store.toggleStar(props.conv.name),
 	},
 	{ label: "Rename", icon: "edit-3", onClick: startRename },
+	inlineDownloadOption.value,
+	...(formatsOpen.value
+		? downloadMenuOption.value.submenu.map((option) => ({
+				...option,
+				slots: { label: ({ item }) => h("span", { class: "pl-4" }, item.label) },
+		  }))
+		: []),
 	{ label: "Delete", icon: "trash-2", theme: "red", onClick: confirmDelete },
 ]);
 
@@ -128,3 +175,11 @@ function confirmDelete() {
 	});
 }
 </script>
+
+<style scoped>
+@media (hover: none) {
+	:deep(.conversation-more) {
+		opacity: 1;
+	}
+}
+</style>
