@@ -1657,6 +1657,69 @@ class TestCancelCreditLeak(_AdmissionTestCase):
 		self.assertEqual(self._state(rid), "dispatching", "dispatched turn untouched")
 
 
+class TestFileBoxHasItsOwnQueue(_AdmissionTestCase):
+	"""#1567: File Box drops (background turns) wait in their own line. A big batch no
+	longer fills the queue that typed messages use, and it is not cancelled after the
+	15 minutes a typed message may wait."""
+
+	def _queue(self, count, turn_class, minutes_ago=0):
+		conv = self._mk_conv()
+		at = frappe.utils.add_to_date(None, minutes=-minutes_ago)
+		runs = []
+		for i in range(count):
+			rid = f"adm_fb_{turn_class[:2]}_{minutes_ago}_{i}"
+			self._insert_turn(
+				conv,
+				rid,
+				self._mk_msg(conv, i + 1),
+				"queued",
+				version=0,
+				turn_class=turn_class,
+				enqueued_at=at,
+			)
+			runs.append(rid)
+		return runs
+
+	def test_a_full_file_box_line_does_not_refuse_typed_chat(self):
+		self._queue(admission.MAX_QUEUE_DEPTH, "background")
+		conv = self._mk_conv()
+		self.assertFalse(admission.shard_overloaded(conv))
+		self.assertTrue(self._accept(conv, "adm_fb_typed", self._mk_msg(conv, 1))["ok"])
+
+	def test_typed_chat_keeps_its_limit_of_25(self):
+		self._queue(admission.MAX_QUEUE_DEPTH, "interactive")
+		conv = self._mk_conv()
+		self.assertTrue(admission.shard_overloaded(conv))
+		res = self._accept(conv, "adm_fb_typed_full", self._mk_msg(conv, 1))
+		self.assertTrue(res.get("overloaded"))
+
+	def test_the_file_box_line_has_its_own_limit(self):
+		self._queue(3, "background")
+		conv = self._mk_conv()
+		with patch.object(admission, "MAX_BACKGROUND_QUEUE_DEPTH", 3):
+			self.assertTrue(admission.shard_overloaded(conv, background=True))
+			res = self._accept(conv, "adm_fb_drop_full", self._mk_msg(conv, 1), turn_class="background")
+			self.assertTrue(res.get("overloaded"))
+			self.assertFalse(admission.shard_overloaded(conv))
+
+	def test_a_queued_file_drop_outlives_the_typed_age_out(self):
+		typed = self._queue(1, "interactive", minutes_ago=20)
+		drop = self._queue(1, "background", minutes_ago=20)
+		old_drop = self._queue(1, "background", minutes_ago=5 * 60)
+		admission._sweep_age_out(set())
+		self.assertEqual(self._state(typed[0]), "cancelled")
+		self.assertEqual(self._state(drop[0]), "queued")
+		self.assertEqual(self._state(old_drop[0]), "cancelled")
+
+	def test_the_age_out_guard_reads_the_turn_class(self):
+		from jarvis.chat import turn_state as ts
+
+		drop = self._queue(1, "background", minutes_ago=20)
+		old_drop = self._queue(1, "background", minutes_ago=5 * 60)
+		self.assertFalse(ts.cancel_queued_max_age(drop[0], 0, "aged"))
+		self.assertTrue(ts.cancel_queued_max_age(old_drop[0], 0, "aged"))
+
+
 class TestStopOnAWaitingReply(_AdmissionTestCase):
 	"""The composer's Stop calls ``stop_run``. A reply still queued for a slot was never
 	cancelled by it: Stop said "Stopped." and the reply ran later. The composer sends
@@ -2298,7 +2361,7 @@ class TestEnqueueOverloadFourCallers(_AdmissionTestCase):
 		conv = self._mk_conv()
 		u = self._mk_msg(conv, 1, role="user")
 		with (
-			patch.object(admission, "MAX_QUEUE_DEPTH", 0),
+			patch.object(admission, "MAX_BACKGROUND_QUEUE_DEPTH", 0),  # the re-dispatch is background
 			patch.object(chat_api, "_dispatch_turn", side_effect=lambda *a, **k: None),
 		):
 			res = chat_api._redispatch_orphan(conv, u)
@@ -2311,7 +2374,7 @@ class TestEnqueueOverloadFourCallers(_AdmissionTestCase):
 		conv = self._mk_conv()
 		u = self._mk_msg(conv, 1, role="user")
 		with (
-			patch.object(admission, "MAX_QUEUE_DEPTH", 0),
+			patch.object(admission, "MAX_BACKGROUND_QUEUE_DEPTH", 0),  # the re-dispatch is background
 			patch.object(chat_api, "_dispatch_turn", side_effect=lambda *a, **k: None),
 		):
 			res1 = chat_api._redispatch_orphan(conv, u)

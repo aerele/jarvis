@@ -87,6 +87,29 @@ LEASE_TTL_S = 30
 
 # System age-out for a queued turn (SUX-5).
 QUEUED_MAX_AGE_S = 15 * 60
+# A File Box drop (turn_class "background") waits behind people typing and drains a few
+# at a time, so a large batch needs far longer before it is given up (#1567).
+BACKGROUND_QUEUED_MAX_AGE_S = 4 * 60 * 60
+
+
+def queued_max_age(turn_class: str | None) -> int:
+	"""How long a queued turn of ``turn_class`` may wait before the system cancels it."""
+	return BACKGROUND_QUEUED_MAX_AGE_S if turn_class == "background" else QUEUED_MAX_AGE_S
+
+
+def queued_age_cutoffs() -> dict:
+	"""SQL parameters ``cut`` (typed) and ``bcut`` (File Box) for the age-out guard below."""
+	return {
+		"cut": frappe.utils.add_to_date(None, seconds=-QUEUED_MAX_AGE_S),
+		"bcut": frappe.utils.add_to_date(None, seconds=-BACKGROUND_QUEUED_MAX_AGE_S),
+	}
+
+
+def queued_age_out_sql(alias: str = "") -> str:
+	"""The age-out guard by turn class (typed 15 minutes, File Box 4 hours). ``alias``
+	prefixes the columns in a join, e.g. ``"t."``. Takes the ``queued_age_cutoffs`` params."""
+	return f"{alias}enqueued_at < CASE WHEN {alias}turn_class='background' THEN %(bcut)s ELSE %(cut)s END"
+
 
 # THE canonical turn-effect vocabulary (D2 §1a + R-4) — the SINGLE authority every
 # other site derives from: settlement's owed sets (`settlement.FINAL_EFFECTS` /
@@ -857,20 +880,20 @@ def cancel_queued(run_id: str, version: int) -> bool:
 
 def cancel_queued_max_age(run_id: str, version: int, reason: str) -> bool:
 	"""D2 row 15 (queued -> cancelled, system max-age SUX-5), sys, ACTOR-fenced.
-	The guard adds ``now > enqueued_at + QUEUED_MAX_AGE_S`` (=900s). Release
+	The guard adds ``now > enqueued_at + queued_max_age(turn_class)`` (900 s for a typed
+	turn, 4 h for a File Box drop). Release
 	reservation, record the user-visible ``reason`` (both ``cancel_reason`` and
 	``error``), ``done_at``, ``version+1``. Caller publishes the terminal carrying
 	the reason. Returns won/lost. No commit."""
 	now = _now()
-	cutoff = frappe.utils.add_to_date(None, seconds=-QUEUED_MAX_AGE_S)
 	return (
 		_run_cas(
 			f"""UPDATE `tab{TURN}`
 			SET state='cancelled', reserved=0, reservation_expires_at=NULL,
 			    cancel_reason=%(reason)s, error=%(reason)s, done_at=%(now)s, version=version+1
 			WHERE name=%(r)s AND state='queued' AND version=%(v)s
-			  AND enqueued_at IS NOT NULL AND enqueued_at < %(cut)s""",
-			{"r": run_id, "reason": reason, "now": now, "v": version, "cut": cutoff},
+			  AND enqueued_at IS NOT NULL AND {queued_age_out_sql()}""",
+			{"r": run_id, "reason": reason, "now": now, "v": version, **queued_age_cutoffs()},
 		)
 		== 1
 	)

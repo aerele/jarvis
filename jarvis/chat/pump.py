@@ -4140,7 +4140,7 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 	rows = frappe.db.sql(
 		"""SELECT run_id, state, version, reserved, reservation_expires_at, enqueued_at,
 		       preparing_at, deadline_at, dispatching_at, recovery_started_at, conversation,
-		       assistant_message, seed_message
+		       assistant_message, seed_message, turn_class
 		FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s AND state IN %(states)s""",
 		{"t": target, "states": ts.NONTERMINAL_STATES},
@@ -4176,7 +4176,8 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 				continue
 			# Age-out (SUX-5): genuinely-waiting UNRESERVED queued turns only (a
 			# reserved turn is reclaimed above, never cancelled by this path).
-			if not reserved and _older_than(r.get("enqueued_at"), ts.QUEUED_MAX_AGE_S):
+			# A File Box drop waits longer than a typed message (#1567).
+			if not reserved and _older_than(r.get("enqueued_at"), ts.queued_max_age(r.get("turn_class"))):
 				if ts.cancel_queued_max_age(run_id, v, _AGE_OUT_REASON):
 					# The cancel is committed BEFORE its side effects, as on the other
 					# cancel edges: the marker below runs its own transaction and rolls

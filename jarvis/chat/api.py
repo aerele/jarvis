@@ -2473,7 +2473,11 @@ def send_message(
 	if admission.turn_machine_enabled():
 		# A held File Box resume continues an already-decided approval: it queues,
 		# never bounces on overload (frappe.flags.jarvis_resume_exempt, server-set).
-		if admission.shard_overloaded(conversation) and not frappe.flags.get("jarvis_resume_exempt"):
+		# A background send checks its own waiting line, as accept_or_queue does (#1567).
+		_bg_line = bool(int(background or 0))
+		if admission.shard_overloaded(conversation, background=_bg_line) and not frappe.flags.get(
+			"jarvis_resume_exempt"
+		):
 			return {"ok": False, "reason": _("The site is busy. Please try again in a moment.")}
 		if _rej := _compacting_reject(conversation):
 			return _rej
