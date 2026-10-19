@@ -156,6 +156,7 @@
   "announcement_interval_days",
   "announcement_expires_on",
   "system_tab",
+  "chat_sharing_enabled",
   "deployment_section",
   "deployment_mode",
   "admin_connection_section",
@@ -1146,6 +1147,12 @@
    "fieldname": "system_tab",
    "fieldtype": "Tab Break",
    "label": "System"
+  },
+  {
+   "fieldname": "chat_sharing_enabled",
+   "fieldtype": "Check",
+   "label": "Allow sharing chats",
+   "default": "1"
   },
   {
    "fieldname": "deployment_section",

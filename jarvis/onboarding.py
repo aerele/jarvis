@@ -2173,6 +2173,7 @@ _RESETTING_RECONNECT_LLM_STATUS = _RESETTING_STATUS + " (reconnect llm)"
 # installations, relay pump, File rows.
 _WIPE_DOCTYPES = (
 	# chats
+	"Jarvis Conversation Share",
 	"Jarvis Chat Message",
 	"Jarvis Chat Turn",
 	"Jarvis Turn Effect",

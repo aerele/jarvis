@@ -502,6 +502,31 @@ _VIEWS: tuple[ListView, ...] = (
 	),
 	# ------------------------------------------------ explicit non-lists ----
 	ListView(
+		view_key="shared_chat_sidebar",
+		label="Shared with me sidebar",
+		classification=EXCLUDED_NOT_A_LIST,
+		endpoints=("jarvis.chat.sharing.list_shared_with_me",),
+		status=NOT_APPLICABLE,
+		reason=(
+			"Navigation to the recipient's visible shared chats: at most fifty recent "
+			"entries with an unseen marker, without columns, sorting or paging controls. "
+			"The separate read-only viewer and sidebar UI arrive in PR 2b."
+		),
+	),
+	ListView(
+		view_key="settings_chat_shares_admin",
+		label="Chat shares administration",
+		classification=EXCLUDED_DORMANT,
+		root_doctype="Jarvis Conversation Share",
+		endpoints=("jarvis.chat.sharing.list_all_shares",),
+		status=NOT_APPLICABLE,
+		reason=(
+			"PR 2a provides the admin-only share-grant metadata endpoint; its Settings "
+			"table is not reachable until PR 2b. Register the dormant surface now so "
+			"its activation and projection/filter policy are reviewed with that UI."
+		),
+	),
+	ListView(
 		view_key="chat_conversation_sidebar",
 		label="Chat conversation sidebar",
 		classification=EXCLUDED_NOT_A_LIST,

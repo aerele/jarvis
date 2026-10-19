@@ -1137,6 +1137,11 @@ class JarvisSettings(Document):
 		return result
 
 	def on_update(self):
+		from jarvis.chat.sharing import on_sharing_setting_changed
+
+		before = self.get_doc_before_save()
+		if before and self.has_value_changed("chat_sharing_enabled"):
+			on_sharing_setting_changed(before.get("chat_sharing_enabled"), self.get("chat_sharing_enabled"))
 		# #731: runs BEFORE the unified-LLM early returns below so a settings save
 		# that both reconfigures the LLM and disables the wiki still scrubs.
 		self._maybe_scrub_wiki_on_disable()

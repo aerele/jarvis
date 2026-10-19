@@ -22,6 +22,7 @@ NOT_RENAMABLE = (
 	"Jarvis Connector",
 	"Jarvis Agent Installation",
 	"Jarvis Conversation",
+	"Jarvis Conversation Share",
 	"Jarvis Macro",
 	"Jarvis Macro Run",
 	"Jarvis Skill Admin Log",
