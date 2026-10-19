@@ -39,7 +39,7 @@ Two things the live registration taught the engine (both fixed 2026-09-06):
   declaration (`canonical.resource_covers`), as the reference client SDK does. Asana's
   401 also points at the ROOT well-known document, not `/.well-known/.../mcp`.
 
-## Sign-in advertised, but closed to third-party apps: 5 (listed, `enabled=False`)
+## Sign-in advertised, but closed to third-party apps: 6 (listed, `enabled=False`)
 
 Each advertises a registration endpoint, and each refuses a self-hosted tenant:
 
@@ -50,6 +50,7 @@ Each advertises a registration endpoint, and each refuses a self-hosted tenant:
 | Figma | `https://mcp.figma.com/mcp` | `403 Forbidden` from `api.figma.com/v1/oauth/mcp/register` for every request shape (public or confidential, any user agent) |
 | Dropbox | `https://mcp.dropbox.com/mcp` | `registration_not_supported`: "only pre-registered MCP trusted partners are allowed" |
 | Vercel | `https://mcp.vercel.com/` | `invalid_redirect_uri`: "redirect URIs are not approved for use by this authorization server" |
+| Pipedrive | `https://mcp.pipedrive.ai/mcp` | `invalid_redirect_uri` for every tenant host; only localhost, 127.0.0.1, claude.ai, chatgpt.com and pipedrive.com register (probed 2026-10-18, a 09-07 addition) |
 
 They stay in the catalog (logos, endpoints) switched off, like Plaid, so turning one
 on when its vendor opens registration is a one-line change.
@@ -104,7 +105,7 @@ Open servers need a **no-credential** path (the broker already sends no
   `open` → no credential field.
 - ERPNext-relevant picks by category (offered today; the closed sign-in vendors and
   Shopify are listed but off): payments (Razorpay, PayPal, Stripe, Cashfree), accounting
-  (Xero), crm (HubSpot, Pipedrive), work (Atlassian, Linear, Notion, Monday.com, Slack,
+  (Xero), crm (HubSpot), work (Atlassian, Linear, Notion, Monday.com, Slack,
   ClickUp, Docusign), communication (Gmail, Google Calendar, Calendly, Zoom, Mailchimp
   Transactional), files (Box, Google Drive, Google Sheets, Google Docs), design (Canva),
   support (Intercom, Zendesk), data/infra (Supabase, Neon, Airtable, Sentry, Cloudflare,
@@ -121,17 +122,16 @@ Read-only probe of the vendors the 09-05 sweep missed, same hops as the engine
 there a `registration_endpoint`). Classes below are what the metadata SAYS; only the
 09-06 rows above have been proven by a real registration from a tenant host.
 
-## Sign-in, self-registering per the metadata: 5 (tenant-host registration NOT yet proven)
+## Sign-in, self-registering per the metadata: 4 (tenant-host registration NOT yet proven)
 
 The 09-06 lesson applies: Asana, Square and Vercel advertised a registration endpoint
-too and refused every public callback. These five ship enabled because a refusal
+too and refused every public callback. These four ship enabled because a refusal
 surfaces as an inline `registration_failed` on Connect (the row is discarded), never
 as a broken row; run the throwaway-registration sweep from a tenant host before
 relying on them, and switch off any that refuse.
 
 | Provider | MCP endpoint | Auth server | Note |
 |---|---|---|---|
-| Pipedrive | `https://mcp.pipedrive.ai/mcp` | oauth.pipedrive.com | every plan |
 | ClickUp | `https://mcp.clickup.com/mcp` | mcp.clickup.com | OAuth only, public beta, per-plan daily call caps |
 | Calendly | `https://mcp.calendly.com/` | calendly.com | server is the origin; `/mcp` is 404 |
 | GitLab | `https://gitlab.com/api/v4/mcp` | gitlab.com | gitlab.com only; a self-hosted instance is a Custom URL on the same path |

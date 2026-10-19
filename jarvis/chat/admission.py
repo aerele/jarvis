@@ -1162,10 +1162,11 @@ def settle_conversation_dispatching(conversation: str, terminal_state: str, erro
 		_try_llm_switch_apply()
 
 
-def mark_cancel_requested(conversation: str) -> None:
+def mark_cancel_requested(conversation: str, run_id: str | None = None) -> None:
 	"""stop_run hook: record cancel intent on the dispatching Turn (D2's
 	dispatching->cancel-intent transition). NOT terminal - the legacy worker's
-	aborted-terminal settles + promotes. Flag-gated, best-effort.
+	aborted-terminal settles + promotes. Flag-gated, best-effort. ``run_id`` is the run
+	the Stop names: a dispatching turn it does not name is left alone (#448).
 
 	W2: the read + CAS is one unit, replayed whole by ``txn.replay_on_conflict``
 	if it loses a snapshot race against the pump's own CASes on this row (a lost
@@ -1178,13 +1179,15 @@ def mark_cancel_requested(conversation: str) -> None:
 	if not admission_enabled():
 		return
 
+	from jarvis.chat import pump
+
 	def unit() -> None:
-		run_id = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
-		if run_id:
+		turn = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
+		if turn and pump.stop_names_turn(turn, run_id):
 			_run_cas(
 				f"""UPDATE `tab{TURN}` SET cancel_requested=1, version=version+1
 				WHERE name=%(r)s AND state='dispatching'""",
-				{"r": run_id},
+				{"r": turn},
 			)
 			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist cancel marker
 

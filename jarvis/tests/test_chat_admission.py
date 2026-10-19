@@ -1737,6 +1737,44 @@ class TestFileBoxHasItsOwnQueue(_AdmissionTestCase):
 		self.assertEqual(frappe.db.get_value(TURN, {"conversation": drop}, "turn_class"), "background")
 
 
+class TestStopForAFinishedRun(_AdmissionTestCase):
+	"""#448: a Stop for run A that arrives after A ended, while turn B of the same chat is
+	unfinished (a continuation, a macro step, a queued follow-up), must leave B alone:
+	no cancel, no card or approval sweep, and an honest ``ok`` False."""
+
+	def _cancel_requested(self, run_id):
+		return int(frappe.db.get_value(TURN, run_id, "cancel_requested") or 0)
+
+	def test_a_late_stop_leaves_the_running_turn_alone(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_448_a", self._mk_msg(conv, 1), "done", version=5)
+		self._insert_turn(conv, "adm_448_b", self._mk_msg(conv, 2), "dispatching", version=3)
+		with patch("jarvis.api._request_autorun_clear") as autorun_clear:
+			res = chat_api.stop_run(conv, "adm_448_a")
+		self.assertFalse(res["ok"])
+		self.assertEqual(self._cancel_requested("adm_448_b"), 0)
+		autorun_clear.assert_not_called()
+
+	def test_a_late_stop_leaves_a_queued_follow_up_alone(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_448_c", self._mk_msg(conv, 1), "done", version=5)
+		self._insert_turn(conv, "adm_448_d", self._mk_msg(conv, 2), "queued", version=0)
+		self.assertFalse(chat_api.stop_run(conv, "adm_448_c")["ok"])
+		self.assertEqual(self._state("adm_448_d"), "queued")
+
+	def test_a_stop_naming_the_running_turn_still_marks_it(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_448_e", self._mk_msg(conv, 1), "dispatching", version=3)
+		chat_api.stop_run(conv, "adm_448_e")
+		self.assertEqual(self._cancel_requested("adm_448_e"), 1)
+
+	def test_a_stop_naming_another_run_does_not_mark_the_running_turn(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_448_f", self._mk_msg(conv, 1), "dispatching", version=3)
+		chat_api.stop_run(conv, "not-a-turn-of-this-chat")
+		self.assertEqual(self._cancel_requested("adm_448_f"), 0)
+
+
 class TestStopOnAWaitingReply(_AdmissionTestCase):
 	"""The composer's Stop calls ``stop_run``. A reply still queued for a slot was never
 	cancelled by it: Stop said "Stopped." and the reply ran later. The composer sends

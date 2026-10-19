@@ -3798,6 +3798,8 @@ def request_cancel_conversation(relay_or_conversation: str, run_id: str | None =
 			if not _is_stoppable_ready(row, run_id):
 				return False, None
 			won = _cancel_ready_turn(row)
+		elif not stop_names_turn(row["run_id"], run_id):
+			return False, None  # #448: a Stop for another run leaves this one running
 		else:
 			won = ts.request_cancel(row["run_id"], int(row["version"]))
 		if won:
@@ -3824,10 +3826,16 @@ def _rollback_and_check_resent(run_id: str) -> bool:
 	return empty_reply_recovery.resent_turn(run_id)
 
 
+def stop_names_turn(turn_run_id: str, run_id: str | None) -> bool:
+	"""Is a Stop for ``run_id`` meant for this turn? Yes when ``run_id`` is absent or names
+	it (its run id or its ``-r1`` key)."""
+	return not run_id or run_id in (turn_run_id, resent_gateway_key(turn_run_id))
+
+
 def _is_stoppable_ready(row: dict, run_id: str | None) -> bool:
 	"""A ``ready`` turn Stop cancels: one the empty-reply re-send put back, when ``run_id``
 	is absent or names it (its run id or its ``-r1`` key)."""
-	if run_id and run_id not in (row["run_id"], resent_gateway_key(row["run_id"])):
+	if not stop_names_turn(row["run_id"], run_id):
 		return False
 	return empty_reply_recovery.resent_turn(row["run_id"])
 

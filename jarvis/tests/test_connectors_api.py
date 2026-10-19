@@ -101,6 +101,9 @@ class _ConnectorApiTestCase(FrappeTestCase):
 			frappe.db.sql("delete from tabSingles where doctype=%s and field=%s", (SETTINGS, field))
 			if value is not None:
 				frappe.db.set_single_value(SETTINGS, field, value, update_modified=False)
+		# The raw delete above skips the document cache; a cached Settings doc would
+		# otherwise leak this test's singles into the next one.
+		frappe.clear_document_cache(SETTINGS, SETTINGS)
 		frappe.db.commit()
 
 	def _mk(self, scope: str, key: str, owner: str | None = None, **kw) -> str:
@@ -310,6 +313,100 @@ class TestDisabledCatalogPreset(_ConnectorApiTestCase):
 		self.assertNotIn(self.DISABLED_PRESET, names)
 
 
+class TestOperatorDisabledPreset(_ConnectorApiTestCase):
+	"""A preset the operator switched off fleet-wide (jarvis.connector_catalogue).
+	It leaves the picker and refuses new rows on every path; a row saved before
+	the switch keeps resolving, saving and testing, as catalog.by_name promises."""
+
+	PRESET = "PayPal"
+
+	def _disable(self, *names: str) -> None:
+		self._set_single("connector_catalogue_disabled", json.dumps(list(names)))
+
+	def _paypal_doc(self, key: str = "paypal"):
+		return frappe.get_doc(
+			{
+				"doctype": CONNECTOR,
+				"key": key,
+				"label": self.PRESET,
+				"preset": self.PRESET,
+				"scope": "Personal",
+				"base_url": catalog.base_urls()[self.PRESET],
+				"credential": "tok",
+			}
+		)
+
+	def test_the_preset_ships_enabled(self):
+		self.assertTrue(catalog.by_name(self.PRESET).enabled)
+
+	def test_list_connectors_drops_it_from_the_catalog(self):
+		self._disable(self.PRESET)
+		frappe.set_user(PLAIN_A)
+		names = {row["name"] for row in connectors_api.list_connectors()["catalog"]}
+		self.assertNotIn(self.PRESET, names)
+		self.assertIn("Stripe", names, "only the switched-off preset leaves")
+		self.assertEqual(len(names), sum(1 for p in catalog.PROVIDERS if p.enabled) - 1)
+
+	def test_add_connector_refuses_it(self):
+		self._disable(self.PRESET)
+		frappe.set_user(PLAIN_A)
+		before = frappe.db.count(CONNECTOR, {"preset": self.PRESET})
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			connectors_api.add_connector(preset=self.PRESET, scope="Personal", credential="tok")
+		self.assertIn("turned off for your workspace", str(ctx.exception))
+		self.assertEqual(frappe.db.count(CONNECTOR, {"preset": self.PRESET}), before)
+
+	def test_controller_refuses_a_raw_insert(self):
+		self._disable(self.PRESET)
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._paypal_doc().insert(ignore_permissions=True)
+		self.assertIn("turned off for your workspace", str(ctx.exception))
+
+	def test_controller_refuses_moving_a_row_onto_it(self):
+		name = self._mk("Personal", "gh-move", owner=PLAIN_A, preset="GitHub")
+		self._disable(self.PRESET)
+		doc = frappe.get_doc(CONNECTOR, name)
+		doc.preset = self.PRESET
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			doc.save(ignore_permissions=True)
+		self.assertIn("turned off for your workspace", str(ctx.exception))
+
+	def test_custom_url_is_never_governed(self):
+		self._disable(catalog.CUSTOM_URL)
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.add_connector(
+			preset=catalog.CUSTOM_URL,
+			base_url="https://mcp.example.com/mcp",
+			scope="Personal",
+			credential="tok",
+		)
+		self._connectors.append(out["name"])
+		self.assertEqual(out["preset"], catalog.CUSTOM_URL)
+
+	def test_an_existing_row_still_resolves_saves_and_tests(self):
+		# Saved BEFORE the switch: the guard refuses a new row, which this is not.
+		name = self._mk(
+			"Personal",
+			"paypal-old",
+			owner=PLAIN_A,
+			preset=self.PRESET,
+			base_url=catalog.base_urls()[self.PRESET],
+		)
+		self._disable(self.PRESET)
+		self.assertIsNotNone(catalog.by_name(self.PRESET))
+		frappe.set_user(PLAIN_A)
+
+		renamed = connectors_api.update_connector(name, label="PayPal (old)")
+		self.assertEqual(renamed["label"], "PayPal (old)")
+
+		with patch.object(broker, "test_connector", return_value={"ok": True, "tools": _TOOLS}) as probe:
+			out = connectors_api.test_connector(name)
+		self.assertTrue(out["ok"])
+		self.assertEqual(probe.call_args.args[0].base_url, catalog.base_urls()[self.PRESET])
+		self.assertEqual(frappe.db.get_value(CONNECTOR, name, "last_test_status"), "Passed")
+
+
 class TestListConnectors(_ConnectorApiTestCase):
 	def test_never_returns_credential_and_splits_shared_vs_mine(self):
 		shared = self._mk("Shared", "shared-key", credential="shared-secret")
@@ -327,6 +424,22 @@ class TestListConnectors(_ConnectorApiTestCase):
 			self.assertNotIn("credential", row)
 			self.assertIn("allowed_actions", row)
 
+	def test_administrator_mine_holds_only_own_personal_rows(self):
+		# Administrator bypasses connector_query_conditions; the SPA payload must
+		# still drop other users' Personal rows (they stay visible in Desk).
+		shared = self._mk("Shared", "admin-shared-key")
+		own = self._mk("Personal", "admin-own-key")
+		other = self._mk("Personal", "admin-other-key", owner=PLAIN_A)
+
+		frappe.set_user("Administrator")
+		out = connectors_api.list_connectors()
+
+		mine_names = {r["name"] for r in out["mine"]}
+		self.assertIn(shared, {r["name"] for r in out["shared"]})
+		self.assertIn(own, mine_names)
+		self.assertNotIn(other, mine_names)
+		self.assertNotIn(other, {r["name"] for r in out["shared"]})
+
 
 class TestListConnectorsCatalog(_ConnectorApiTestCase):
 	"""The SPA builds its whole preset picker from ``list_connectors()["catalog"]``,
@@ -337,14 +450,14 @@ class TestListConnectorsCatalog(_ConnectorApiTestCase):
 		entries = connectors_api.list_connectors()["catalog"]
 
 		self.assertEqual(len(entries), sum(1 for p in catalog.PROVIDERS if p.enabled))
-		self.assertEqual(len(entries), 40, "the SPA is built against this count")
+		self.assertEqual(len(entries), 39, "the SPA is built against this count")
 
 		names = {e["name"] for e in entries}
 		self.assertIn("Razorpay", names)
 		self.assertNotIn("Plaid", names, "a disabled catalog entry is never offered")
 		# Sign-in vendors that refuse every self-hosted tenant's callback
 		# (CONNECTOR_PROVIDERS.md, probed 2026-09-06) are listed but off.
-		for closed in ("Asana", "Square", "Figma", "Dropbox", "Vercel"):
+		for closed in ("Asana", "Square", "Figma", "Dropbox", "Vercel", "Pipedrive"):
 			self.assertNotIn(closed, names, f"{closed} only admits approved partner apps")
 		self.assertNotIn("Custom URL", names, "Custom URL is a flow, not a provider")
 
@@ -761,6 +874,11 @@ class _ScriptedTransport:
 		raise AssertionError(f"no form was posted to {url}")
 
 
+def _name_host(redirect_uri: str) -> str:
+	"""The host part of a registered client name: the hostname, dots as hyphens."""
+	return urlparse(redirect_uri).hostname.replace(".", "-")
+
+
 def _json_result(payload, status: int = 200) -> HttpResult:
 	return HttpResult(
 		status=status,
@@ -1071,7 +1189,7 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 		posted = json.loads(
 			next(c["body"] for c in transport.calls if c["url"] == MCP_REGISTER).decode("utf-8")
 		)
-		self.assertEqual(posted["client_name"], f"Acme Bot ({netloc})")
+		self.assertEqual(posted["client_name"], f"Acme Bot {_name_host(redirect_uri)}")
 		if urlparse(redirect_uri).scheme == "https":
 			self.assertEqual(posted["client_uri"], f"https://{netloc}")
 		else:
@@ -1089,11 +1207,49 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 			)
 		self._connectors.append(out["name"])
 
-		netloc = urlparse(connectors_api.oauth_redirect_uri()).netloc
 		posted = json.loads(
 			next(c["body"] for c in transport.calls if c["url"] == MCP_REGISTER).decode("utf-8")
 		)
-		self.assertEqual(posted["client_name"], f"Jarvis ({netloc})")
+		self.assertEqual(posted["client_name"], f"Jarvis {_name_host(connectors_api.oauth_redirect_uri())}")
+
+	def test_registration_client_name_keeps_only_letters_digits_spaces_hyphens(self):
+		# Calendly refuses a client_name with any other character (a dot or a
+		# bracket included) with invalid_client_metadata, and the row never saves.
+		self._set_single("agent_name", "Acme, Inc. (Bot)")
+		script = _discovery_script()
+		script[MCP_REGISTER] = _json_result({"client_id": "dcr-client"}, status=201)
+		transport = _ScriptedTransport(script)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self._connectors.append(out["name"])
+
+		posted = json.loads(
+			next(c["body"] for c in transport.calls if c["url"] == MCP_REGISTER).decode("utf-8")
+		)
+		self.assertRegex(posted["client_name"], r"^[A-Za-z0-9 -]+$")
+		self.assertEqual(
+			posted["client_name"], f"Acme Inc Bot {_name_host(connectors_api.oauth_redirect_uri())}"
+		)
+
+	def test_a_long_encoded_client_id_is_stored_whole(self):
+		# Netlify issues a 619-character encoded client_id. A Data(500) column
+		# refused that insert and the person read the generic sentence.
+		long_id = "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0.." + "x" * 578
+		self.assertEqual(len(long_id), 619)
+		script = _discovery_script()
+		script[MCP_REGISTER] = _json_result({"client_id": long_id}, status=201)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", _ScriptedTransport(script)):
+			out = connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self._connectors.append(out["name"])
+
+		self.assertTrue(out["oauth_configured"])
+		self.assertEqual(frappe.db.get_value(CLIENT_DT, out["name"], "client_id"), long_id)
 
 	def test_the_registered_client_auth_method_is_stored(self):
 		# We ASK for the secret in the body; a service that registers us for the
@@ -1272,6 +1428,33 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 		message = str(ctx.exception)
 		self.assertIn("invalid_redirect_uri: must use https", message)
 		self.assertTrue(message.startswith("The sign-in service"), "the friendly sentence still comes first")
+
+	def test_registration_failure_surfaces_a_per_field_reason(self):
+		# Calendly names the refused field in an `errors` object and sends no
+		# error_description; that reason must still reach the person.
+		script = _discovery_script()
+		script[MCP_REGISTER] = HttpResult(
+			status=400,
+			headers={"content-type": "application/json"},
+			json={
+				"error": "invalid_client_metadata",
+				"errors": {"name": ["may only contain alphanumeric characters, hyphens, and spaces."]},
+			},
+			text="",
+		)
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", _ScriptedTransport(script)),
+			self.assertRaises(frappe.ValidationError) as ctx,
+		):
+			connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self.assertEqual(
+			str(ctx.exception),
+			"The sign-in service would not set this workspace up (invalid_client_metadata: "
+			"name may only contain alphanumeric characters, hyphens, and spaces).",
+		)
 
 	def test_permission_is_checked_before_any_outbound_request(self):
 		# A plain user asking for a Shared row is refused by the controller. That
@@ -2620,8 +2803,62 @@ class TestSelfHealGuards(_McpOauthTestCase):
 		out = connectors_api.connect_oauth(name)
 		self.assertFalse(out.get("ok"))
 		self.assertEqual(out["error"]["code"], "oauth_not_configured")
+		self.assertEqual(
+			out["error"]["message"], "This connector's address changed. Remove it and add it again."
+		)
 		self.assertFalse(
 			frappe.db.get_value(CONNECTOR, name, "mcp_oauth_client"), "stale client not relinked"
+		)
+
+
+class TestDcrClientName(unittest.TestCase):
+	"""The registered name keeps only what Calendly accepts: letters, digits,
+	spaces and hyphens."""
+
+	def _name(self, brand, redirect_uri):
+		with patch.object(connectors_api, "_brand_name", return_value=brand):
+			return connectors_api._dcr_client_name(redirect_uri)
+
+	def test_host_dots_become_hyphens(self):
+		# The exact name Calendly accepted in the 2026-10-18 registration probe.
+		name = self._name("Jarvis", "https://jarvis-develop.frappe.cloud/api/method/x")
+		self.assertEqual(name, "Jarvis jarvis-develop-frappe-cloud")
+
+	def test_the_port_is_not_part_of_the_name(self):
+		self.assertEqual(self._name("Jarvis", "http://test.localhost:8000/cb"), "Jarvis test-localhost")
+
+	def test_punctuation_is_dropped_and_runs_collapse(self):
+		name = self._name("Acme  --  Bot!", "https://a.example/cb")
+		self.assertEqual(name, "Acme - Bot a-example")
+
+	def test_a_brand_that_cleans_to_nothing_falls_back_to_jarvis(self):
+		self.assertEqual(self._name("Джарвис", "https://a.example/cb"), "Jarvis a-example")
+
+	def test_no_host_is_the_brand_alone(self):
+		self.assertEqual(self._name("Acme Bot", ""), "Acme Bot")
+
+
+class TestOauthErrorMessages(unittest.TestCase):
+	"""Every code the setup path can raise reads as a plain sentence, never the
+	generic fallback."""
+
+	def test_no_challenge_has_its_own_sentence(self):
+		message = connectors_api._oauth_error_message("no_401_challenge", "Expected 401, got HTTP 200.")
+		self.assertEqual(
+			message, "This app did not ask for a sign-in. Add it with a key, or with no sign-in."
+		)
+		self.assertNotIn("401", message, "the engine's detail is not shown")
+
+	def test_address_mismatch_has_its_own_sentence(self):
+		self.assertEqual(
+			connectors_api._oauth_error_message("client_address_mismatch"),
+			"This connector's address changed. Remove it and add it again.",
+		)
+
+	def test_unknown_code_keeps_the_generic_sentence(self):
+		self.assertEqual(
+			connectors_api._oauth_error_message("something_new"),
+			"We could not set up sign-in for this address.",
 		)
 
 
