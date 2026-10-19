@@ -64,6 +64,60 @@ describe("downloadConversation", () => {
 		expect(anchorClick).not.toHaveBeenCalled();
 		expect(URL.createObjectURL).not.toHaveBeenCalled();
 	});
+	it.each([
+		[401, "AuthenticationError", true],
+		[403, "PermissionError", true],
+		[404, "DoesNotExistError", true],
+		[429, "RateLimitExceededError", true],
+		[429, "_ExportRateLimitError", true],
+		[417, "_ExportRefusedError", true],
+		[409, "_ExportRefusedError", true],
+		[417, "ValidationError", false],
+		[417, "_ExportRenderError", false],
+		[500, "_ExportRefusedError", false],
+		[502, "RateLimitExceededError", false],
+	])(
+		"classifies HTTP%s / %s without retaining the server payload",
+		async (status, excType, expectedRefusal) => {
+			fetch.mockResolvedValue({
+				ok: false,
+				status,
+				json: vi.fn().mockResolvedValue({
+					exc_type: excType,
+					exception: "RAW-SERVER-EXCEPTION-SENTINEL",
+					exc: ["RAW-STACK-SENTINEL"],
+					_server_messages: JSON.stringify([
+						JSON.stringify({ message: "Actionable export message" }),
+					]),
+				}),
+			});
+			const error = await downloadConversation("chat", "pdf").catch((failure) => failure);
+			expect(error).toMatchObject({
+				status,
+				exc_type: excType,
+				expectedRefusal,
+				message: "Actionable export message",
+			});
+			expect(JSON.stringify(error)).not.toContain("SENTINEL");
+			expect(error).not.toHaveProperty("exception");
+			expect(error).not.toHaveProperty("exc");
+			expect(anchorClick).not.toHaveBeenCalled();
+		}
+	);
+	it.each(["<img onerror=alert(1)>", "x".repeat(200), { name: "_ExportRefusedError" }])(
+		"does not propagate malformed exception class %s",
+		async (excType) => {
+			fetch.mockResolvedValue({
+				ok: false,
+				status: 417,
+				json: vi.fn().mockResolvedValue({ exc_type: excType }),
+			});
+			const error = await downloadConversation("chat", "pdf").catch((failure) => failure);
+			expect(error.exc_type).toBeUndefined();
+			expect(error.expectedRefusal).toBe(false);
+			expect(anchorClick).not.toHaveBeenCalled();
+		}
+	);
 	it("does not expose an HTML proxy error or raw server exception", async () => {
 		fetch.mockResolvedValue({
 			ok: false,

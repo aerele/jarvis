@@ -455,6 +455,55 @@ class TestChatExportEndpoint(FrappeTestCase):
 			for field in ("tool_args", "tool_result", "pending_card", "model", "provider"):
 				self.assertNotIn(field, call.kwargs["fields"])
 
+	def test_review_secrets_and_safe_prose_through_both_export_formats(self):
+		self._message(
+			"user",
+			content="Before ASIAIOSFODNN7EXAMPLE after\n"
+			"-----BEGIN PRIVATE KEY-----\nUEVNLVNFTlRJTkVM\n-----END PRIVATE KEY-----\n"
+			"Authorization: bearer S2",
+		)
+		self._message(
+			content="Company Secretary: Mr. Rao\nStock item SK-1001\n"
+			"The bearer cheque was deposited.\n\n**Key:** Keep the invoice reference."
+		)
+		for format in ("md", "pdf"):
+			with (
+				self.subTest(format=format),
+				patch.object(furniture, "render_pdf", return_value=b"%PDF-fixture") as renderer,
+			):
+				response = self._download(format)
+				text = response["filecontent"].decode() if format == "md" else renderer.call_args.args[0]
+				for secret in ("ASIAIOSFODNN7EXAMPLE", "UEVNLVNFTlRJTkVM", "S2"):
+					self.assertNotIn(secret, text)
+				for ordinary in ("Company Secretary: Mr. Rao", "SK-1001", "bearer cheque"):
+					self.assertIn(ordinary, _readable(text))
+				self.assertIn("**Key:**" if format == "md" else "<strong>Key:</strong>", text)
+
+	def test_malformed_chart_and_deep_json_do_not_block_either_format(self):
+		malformed = {
+			"type": "bar",
+			"title": "Malformed records",
+			"x": "label",
+			"data": [{"label": "A", "amount": 10}],
+			"series": [{"name": "Amount", "field": ["amount"]}],
+		}
+		self._message(content="```jarvis-chart\n" + json.dumps(malformed) + "\n```")
+		self._message("user", content="[" * 600 + '{"access_token":"DEEP-EXPORT-SENTINEL"}' + "]" * 600)
+		self._message(
+			content='```jarvis-chart\n{"type":"bar","x":["A"],"series":[{"name":"Sales","data":[203,307]}]}\n```'
+		)
+		for format in ("md", "pdf"):
+			with (
+				self.subTest(format=format),
+				patch.object(furniture, "render_pdf", return_value=b"%PDF-fixture") as renderer,
+			):
+				response = self._download(format)
+				text = response["filecontent"].decode() if format == "md" else renderer.call_args.args[0]
+				self.assertIn("[Chart: Malformed records]", _readable(text))
+				self.assertNotIn("DEEP-EXPORT-SENTINEL", text)
+				self.assertIn("203", text)
+				self.assertIn("307", text)
+
 	def test_attachments_links_receipts_errors_and_stopped(self):
 		self._message(
 			content="[Invoice](/app/sales-invoice/SINV-001)",
@@ -650,6 +699,41 @@ class TestChatExportEndpoint(FrappeTestCase):
 		with self.assertRaisesRegex(frappe.ValidationError, "Unknown format"):
 			self._download("html")
 
+	def test_busy_owner_refusals_are_429_and_do_not_use_quota(self):
+		with redis_lock(_site_lock_name(f"export:{OWNER}"), timeout_s=90):
+			for _ in range(6):
+				with self.assertRaises(frappe.RateLimitExceededError) as caught:
+					self._download()
+				self.assertEqual(caught.exception.http_status_code, 429)
+		self.assertIsNone(self.cache.get(self.cache.make_key(f"jarvis:export:rl:{OWNER}")))
+		self.assertIn("No messages yet", self._markdown())
+
+	def test_busy_pdf_slots_do_not_use_quota(self):
+		with (
+			redis_lock(_site_lock_name("export:pdf:slot:1"), timeout_s=90),
+			redis_lock(_site_lock_name("export:pdf:slot:2"), timeout_s=90),
+		):
+			with self.assertRaises(frappe.RateLimitExceededError) as caught:
+				self._download("pdf")
+			self.assertEqual(caught.exception.http_status_code, 429)
+		self.assertIsNone(self.cache.get(self.cache.make_key(f"jarvis:export:rl:{OWNER}")))
+
+	def test_pdf_length_refusal_does_not_use_quota_or_snapshot_content(self):
+		self._message(content="x" * (chat_export.MAX_PDF_CHARS + 1))
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._download("pdf")
+		self.assertIsInstance(caught.exception, frappe.SecurityException)
+		self.assertEqual(type(caught.exception).__name__, "_ExportRefusedError")
+		self.assertIsNone(self.cache.get(self.cache.make_key(f"jarvis:export:rl:{OWNER}")))
+
+	def test_quota_refusal_is_429_and_excludes_transcript_snapshots(self):
+		for _ in range(5):
+			self._download()
+		with self.assertRaises(frappe.RateLimitExceededError) as caught:
+			self._download()
+		self.assertIsInstance(caught.exception, frappe.SecurityException)
+		self.assertEqual(caught.exception.http_status_code, 429)
+
 	def test_non_ascii_title_yields_safe_ascii_filename(self):
 		frappe.db.set_value("Jarvis Conversation", self.conv.name, "title", "日本語 😀")
 		name = self._download()["filename"]
@@ -768,6 +852,49 @@ class TestChatExportRateRecovery(unittest.TestCase):
 
 
 class TestChatExportRendererLogging(unittest.TestCase):
+	def test_scoped_degradations_remain_visible_without_raw_brand_details(self):
+		with (
+			patch.object(furniture, "resolve_letterhead", return_value=("", "", None)),
+			patch("frappe.db.exists", side_effect=RuntimeError("PRIVATE-BRAND-DETAIL")),
+			patch.object(furniture, "render_pdf", return_value=b"%PDF-success"),
+			patch("frappe.log_error") as log,
+		):
+			self.assertEqual(chat_export._pdf(frappe._dict(name="degraded"), "Visible"), b"%PDF-success")
+		log.assert_called_once()
+		metadata = json.loads(log.call_args.kwargs["message"])
+		self.assertEqual(metadata["causes"], ["company_lookup_failed"])
+		self.assertEqual(set(metadata), {"conversation", "format", "duration", "causes"})
+		self.assertTrue(log.call_args.kwargs["defer_insert"])
+		self.assertNotIn("PRIVATE-BRAND-DETAIL", str(log.call_args))
+
+	def test_renderer_failures_have_distinct_fixed_cause_codes(self):
+		cases = (
+			("missing", None, None, "binary_missing"),
+			("timeout", subprocess.TimeoutExpired("renderer", 60), None, "timeout"),
+			(
+				"exit",
+				None,
+				subprocess.CompletedProcess([], 5, stdout=b"", stderr=b"PRIVATE-STDERR"),
+				"render_nonzero_exit",
+			),
+		)
+		for kind, error, result, expected in cases:
+			with self.subTest(kind=kind):
+				with (
+					patch.object(furniture, "resolve_brand", return_value={}),
+					patch.object(furniture.pdfkit, "configuration", side_effect=OSError("PRIVATE-PATH"))
+					if kind == "missing"
+					else patch.object(furniture, "_resolve_binary", return_value="/fake/renderer"),
+					patch.object(furniture.shutil, "which", return_value=None),
+					patch.object(furniture.subprocess, "run", side_effect=error, return_value=result),
+					patch("frappe.log_error") as log,
+				):
+					with self.assertRaises(chat_export._ExportRenderError):
+						chat_export._pdf(frappe._dict(name="fixed-causes"), "Visible transcript")
+				log.assert_called_once()
+				self.assertEqual(json.loads(log.call_args.kwargs["message"])["causes"], [expected])
+				self.assertNotIn("PRIVATE-", str(log.call_args))
+
 	def test_failed_error_log_cannot_replace_safe_pdf_failure(self):
 		with (
 			patch.object(furniture, "resolve_brand", return_value={}),

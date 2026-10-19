@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import html
 import json
+import math
 import re
 import time
 import unicodedata
@@ -37,6 +38,14 @@ return count
 
 class _ExportRenderError(frappe.ValidationError, frappe.SecurityException):
 	"""Safe failure: prevent Frappe snapshots from collecting transcript locals."""
+
+
+class _ExportRefusedError(frappe.ValidationError, frappe.SecurityException):
+	"""Expected size refusal; never snapshot transcript locals."""
+
+
+class _ExportRateLimitError(frappe.RateLimitExceededError, frappe.SecurityException):
+	"""Expected admission refusal with HTTP 429 and no transcript snapshot."""
 
 
 BLOCK_TAGS = frozenset(
@@ -169,7 +178,7 @@ def _render_chart(body: str, mermaid: bool = False) -> str:
 	spec = _xychart(body) if mermaid else _json(body)
 	title = spec.get("title") or "Chart" if isinstance(spec, dict) else "Chart"
 	fallback = "[Chart: " + _escape(title) + "]"
-	if not isinstance(spec, dict) or spec.get("type") not in CHART_TYPES:
+	if not isinstance(spec, dict) or not isinstance(spec.get("type"), str) or spec["type"] not in CHART_TYPES:
 		return fallback
 	series = spec.get("series")
 	if not isinstance(series, list) or not series or not all(isinstance(s, dict) for s in series):
@@ -177,18 +186,31 @@ def _render_chart(body: str, mermaid: bool = False) -> str:
 	x = spec.get("x")
 	data = spec.get("data")
 	# Same records-form normalization as chartTheme.js; leave the stored spec alone.
-	if isinstance(data, list) and isinstance(x, str) and all(isinstance(r, dict) for r in data):
-		x = [r.get(x, "") for r in data]
-		series = [
-			{**s, "data": [r.get(s["field"], 0) for r in data]}
-			if s.get("field") and not isinstance(s.get("data"), list)
-			else s
-			for s in series
-		]
+	if isinstance(data, list) and data and all(isinstance(r, dict) for r in data):
+		if isinstance(x, str):
+			x = [r.get(x, "") for r in data]
+		normalized = []
+		for s in series:
+			field = s.get("field")
+			if field and not isinstance(s.get("data"), list):
+				if not isinstance(field, str):
+					return fallback
+				values = []
+				for row in data:
+					try:
+						value = float(row.get(field) or 0)
+					except (TypeError, ValueError, OverflowError):
+						value = 0
+					values.append(
+						(int(value) if value == int(value) else value) if math.isfinite(value) else 0
+					)
+				s = {**s, "data": values}
+			normalized.append(s)
+		series = normalized
 	if not any(isinstance(s.get("data"), list) and s["data"] for s in series):
 		return fallback
-	if not all(isinstance(s.get("data"), list) for s in series):
-		return fallback
+	# The UI treats a missing series as empty; retain the other series' points.
+	series = [{**s, "data": s["data"] if isinstance(s.get("data"), list) else []} for s in series]
 	if not isinstance(x, list):
 		x = []
 	if spec["type"] in {"scatter", "bubble"}:
@@ -245,10 +267,12 @@ def _render_chart(body: str, mermaid: bool = False) -> str:
 		headers = ["Label", "Value"]
 	else:
 		headers = ["x"] + [s.get("name") or "Value" for s in series]
+		length = max([len(x)] + [len(s["data"]) for s in series])
+		labels = x + [f"#{i + 1}" for i in range(len(x), length)]
 		rows = [
 			[label]
 			+ [s["data"][i] if isinstance(s.get("data"), list) and i < len(s["data"]) else "" for s in series]
-			for i, label in enumerate(x)
+			for i, label in enumerate(labels)
 		]
 	if not rows:
 		return fallback
@@ -418,37 +442,45 @@ def _rate_limit(user: str) -> None:
 	# increment without expiry. Also repair counters left by an interrupted call.
 	count = cache.eval(_RATE_COUNTER, 1, key, 60)
 	if count > 5:
-		frappe.throw(_("Too many exports. Try again in a minute."))
+		frappe.throw(_("Too many exports. Try again in a minute."), _ExportRateLimitError)
 
 
 def _pdf(conversation, markdown: str) -> bytes:
 	started = time.monotonic()
+	causes: set[str] = set()
+	failed = False
 	try:
-		with furniture.defer_failure_logging():
+		with furniture.defer_failure_logging() as causes:
 			body = sanitize_rich(md_to_html(markdown))
 			brand = furniture.resolve_brand(None)
 			# The Markdown source already owns the transcript title and metadata.
 			masthead = furniture.build_title_block(None, brand=brand)
-			return furniture.render_pdf(
+			content = furniture.render_pdf(
 				"<style>" + component_css() + "</style>" + masthead + body, timeout=PDF_TIMEOUT
 			)
 	except Exception:
 		# Leave the exception context before logging: Frappe telemetry otherwise
 		# captures the original exception instead of the supplied safe message.
-		pass
-	with contextlib.suppress(Exception):
-		frappe.log_error(
-			title="Jarvis chat export failed",
-			message=json.dumps(
-				{
-					"conversation": conversation.name,
-					"format": "pdf",
-					"duration": round(time.monotonic() - started, 3),
-				}
-			),
-			defer_insert=True,
-		)
-	frappe.throw(_("We couldn't create the PDF. Try Markdown instead."), _ExportRenderError)
+		failed = True
+	if failed and not causes.intersection(furniture.RENDER_FAILURE_CAUSES):
+		causes.add("render_failed")
+	if causes:
+		with contextlib.suppress(Exception):
+			frappe.log_error(
+				title="Jarvis chat export failed" if failed else "Jarvis chat export degraded",
+				message=json.dumps(
+					{
+						"conversation": conversation.name,
+						"format": "pdf",
+						"duration": round(time.monotonic() - started, 3),
+						"causes": sorted(causes),
+					}
+				),
+				defer_insert=True,
+			)
+	if failed:
+		frappe.throw(_("We couldn't create the PDF. Try Markdown instead."), _ExportRenderError)
+	return content
 
 
 @frappe.whitelist(methods=["GET"])
@@ -460,16 +492,17 @@ def download_conversation(conversation: str, format: str) -> None:
 		doc = _get_owned_conversation(conversation)
 		if format not in {"pdf", "md"}:
 			frappe.throw(_("Unknown format"), frappe.ValidationError)
-		_rate_limit(user)
 		with ExitStack() as locks:
 			if not locks.enter_context(redis_lock(_lock_name("export:" + user), timeout_s=90)):
-				frappe.throw(_("An export is already running. Try again in a moment."))
+				frappe.throw(_("An export is already running. Try again in a moment."), _ExportRateLimitError)
 			if format == "pdf":
 				for slot in (1, 2):
 					if locks.enter_context(redis_lock(_lock_name(f"export:pdf:slot:{slot}"), timeout_s=90)):
 						break
 				else:
-					frappe.throw(_("Too many exports are running. Try again in a moment."))
+					frappe.throw(
+						_("Too many exports are running. Try again in a moment."), _ExportRateLimitError
+					)
 			rows = frappe.get_all(
 				"Jarvis Chat Message",
 				filters={"conversation": conversation, "hidden": 0},
@@ -479,7 +512,12 @@ def download_conversation(conversation: str, format: str) -> None:
 			_live_turn_steps(rows)
 			markdown = _markdown(doc, rows)
 			if format == "pdf" and len(markdown) > MAX_PDF_CHARS:
-				frappe.throw(_("This chat is too long for a PDF. Download it as Markdown instead."))
+				frappe.throw(
+					_("This chat is too long for a PDF. Download it as Markdown instead."),
+					_ExportRefusedError,
+				)
+			# Only an admitted attempt spends quota; busy/oversized retries do not.
+			_rate_limit(user)
 			content = _pdf(doc, markdown) if format == "pdf" else markdown.encode("utf-8")
 			title = (
 				unicodedata.normalize("NFKD", _safe_text(doc.title or "")).encode("ascii", "ignore").decode()
