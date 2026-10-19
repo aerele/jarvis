@@ -58,6 +58,10 @@ def read_file(conversation, url: str):
 		order_by="name",
 	):
 		row = frappe.get_doc("File", name)
+		# SQL collations can equate case/accent variants or trailing spaces.
+		# They must never widen the exact canvas URL's authorization.
+		if row.file_url != url:
+			continue
 		if frappe.has_permission("File", "read", doc=row, user=conversation.owner):
 			return row
 	_refuse()
