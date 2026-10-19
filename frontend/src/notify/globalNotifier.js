@@ -93,6 +93,14 @@ function _excerpt(s, n = 120) {
 // ---- the listener --------------------------------------------------------------
 // Returns a detach function; AppShell calls attach in onMounted and the
 // detacher in onBeforeUnmount (same socket instance ChatView injects).
+// Outcomes of a background export that the user is waiting for. A retry that queues itself, a
+// pause (it restarts by itself), their own cancel, a quiet expiry and the card's first
+// announcement are not worth a dot. The phone app applies the same rule (pwa/src/lib/exportFeed.js).
+const EXPORT_OUTCOMES = new Set(["ready", "too large", "too slow", "failed"]);
+function exportSignals(p) {
+	return !!p.conversation_id && !p.initial && EXPORT_OUTCOMES.has(p.status);
+}
+
 export function attachGlobalNotifier({ socket, router }) {
 	if (!socket) return () => {};
 	const store = useShellStore();
@@ -392,6 +400,14 @@ export function attachGlobalNotifier({ socket, router }) {
 					// ChatView's own proactive toast covers visible chat routes
 					pushToast({ title, body, onClick: open });
 				}
+				return;
+			}
+			case "export:changed": {
+				// A background export reached an outcome. Like import:finished this owns only
+				// the off-screen unread dot, with no toast or browser notification; ChatView
+				// refreshes the card itself when the conversation is on screen.
+				const conv = p.conversation_id;
+				if (exportSignals(p) && conv !== onScreenConv()) store.markUnread(conv);
 				return;
 			}
 			case "import:finished": {
