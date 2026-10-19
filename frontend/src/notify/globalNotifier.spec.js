@@ -400,6 +400,65 @@ describe("import:finished marks the sidebar unread, never a toast", () => {
 	});
 });
 
+// A background export finishing off-screen: the sidebar unread dot, nothing louder. Only an
+// outcome the user is waiting for counts (ready, too large, too slow, failed). A queued retry,
+// a pause (it restarts by itself), the user's own cancel, a quiet expiry and the card's first
+// announcement ("initial") stay silent.
+describe("export:changed marks the sidebar unread, never a toast", () => {
+	const exported = (over = {}) => ({
+		kind: "export:changed",
+		conversation_id: "conv-a",
+		export_job: "job-1",
+		message_id: "msg-1",
+		status: "ready",
+		title: "Suppliers",
+		initial: false,
+		...over,
+	});
+
+	it("marks an off-screen conversation unread for each outcome that matters", () => {
+		for (const status of ["ready", "too large", "too slow", "failed"]) {
+			store.markUnread.mockClear();
+			socket.emit(exported({ status }));
+			expect(store.markUnread, status).toHaveBeenCalledWith("conv-a");
+		}
+		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it("stays quiet for states that are not an outcome", () => {
+		for (const status of ["queued", "running", "paused", "cancelled", "expired"]) {
+			socket.emit(exported({ status }));
+		}
+		socket.emit(exported({ initial: true }));
+		socket.emit(exported({ conversation_id: undefined }));
+		expect(store.markUnread).not.toHaveBeenCalled();
+	});
+
+	it("never raises a toast or a browser notification, even while the tab is hidden", () => {
+		setHidden(true);
+		socket.emit(exported());
+		expect(store.markUnread).toHaveBeenCalledWith("conv-a");
+		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it("leaves the on-screen conversation to ChatView", () => {
+		const savedRoute = router.currentRoute.value;
+		store.currentConvId = "conv-a";
+		router.currentRoute.value = {
+			name: "Chat",
+			params: { id: "conv-a" },
+			meta: { chat: true },
+		};
+		try {
+			socket.emit(exported());
+			expect(store.markUnread).not.toHaveBeenCalled();
+		} finally {
+			router.currentRoute.value = savedRoute;
+			store.currentConvId = null;
+		}
+	});
+});
+
 describe("authoritative activity reconciliation (#591)", () => {
 	beforeEach(() => {
 		detach();
