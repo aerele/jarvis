@@ -10,7 +10,7 @@ from pathlib import Path
 import frappe
 
 from jarvis._xlsx_highlights import add_xlsxwriter_highlights, validate_highlights
-from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._export import masking, renderers, resolvers
 from jarvis.tools._export.model import ExportModel
 from jarvis.tools._export.safety import escape_formula
@@ -115,40 +115,30 @@ def _filter_sql(doctype, parent, **kwargs):
 
 
 def prepare(source, row_cap, highlights=None):
-	"""Compile fresh under the caller, including every Export gate, before streaming."""
-	from jarvis.tools.query import compile_spec_for_export
+	"""Compile fresh under the caller, including every Export gate, before streaming.
 
+	The gates are the immediate export's own (``resolvers.authorize_spec`` /
+	``authorize_filter``), so both paths refuse the same input in the same words.
+	What stays here is only what the raw-SQL executor needs."""
 	if "spec" in source:
 		spec = source["spec"]
-		q, tables, export_doctypes, parents = compile_spec_for_export(spec, row_cap + 1)
-		for dt in export_doctypes:
-			if not frappe.permissions.can_export(dt):
-				raise PermissionDeniedError(f"no export permission on {dt}")
-		columns = resolvers._spec_columns(spec, tables)
+		q, tables, columns, masked = resolvers.authorize_spec(spec, row_cap + 1)
 		types = [_fieldtype(item, tables) for item in spec.get("select") or ["name"]]
-		masked = masking.masked_fields(tables, parents)
-		masking.refuse_masked_expressions(columns, q, masked)
 		sql, params = q.walk()
 		limit = spec.get("limit")
 		source_doctype = next(iter(tables.values()))
 	else:
-		from jarvis.tools.get_list import assert_child_query_fields_readable
-
-		dt = source["doctype"]
-		parent = source.get("parent_doctype") if frappe.get_meta(dt).istable else None
-		if frappe.get_meta(dt).istable and not parent:
-			raise InvalidArgumentError("A child-table export requires parent_doctype.")
-		if not frappe.has_permission(dt, "read", parent_doctype=parent):
-			raise PermissionDeniedError(f"no read permission on {dt}")
-		if not frappe.permissions.can_export(parent or dt):
-			raise PermissionDeniedError(f"no export permission on {parent or dt}")
-		fields = source.get("fields") or resolvers._default_fields(dt)
-		if isinstance(fields, str):
-			fields = [fields]
-		# This path is for plain fields; expression queries use the structured compiler.
+		dt, parent, fields, columns, masked = resolvers.authorize_filter(
+			source.get("doctype"),
+			source.get("fields"),
+			source.get("filters"),
+			source.get("order_by"),
+			source.get("parent_doctype"),
+		)
+		# An executor constraint of the raw SQL path, not a permission gate: this path
+		# is for plain fields; expression queries use the structured compiler.
 		if any(not isinstance(f, str) or not f.replace("_", "").isalnum() for f in fields):
 			raise InvalidArgumentError("Name plain fields for a filter export; use spec for expressions.")
-		assert_child_query_fields_readable(dt, parent, fields, source.get("filters"), source.get("order_by"))
 		sql, params = _filter_sql(
 			dt,
 			parent,
@@ -158,9 +148,7 @@ def prepare(source, row_cap, highlights=None):
 			parent_doctype=parent,
 			limit_page_length=row_cap + 1,
 		)
-		columns = [resolvers._Column(f, dt, None, "base") for f in fields]
 		types = [_fieldtype(f, {"base": dt}) for f in fields]
-		masked = masking.masked_fields({"base": dt}, {"base": parent})
 		limit = None
 		source_doctype = dt
 	labels = resolvers._unique_headers(columns)
