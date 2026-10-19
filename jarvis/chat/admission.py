@@ -65,7 +65,8 @@ MAX_QUEUE_DEPTH = 25
 # limit, so a large batch never fills the line typed messages use (#1567).
 MAX_BACKGROUND_QUEUE_DEPTH = 200
 
-# Sweep age-out (SUX-5): a queued turn older than this is system-cancelled.
+# Sweep age-out (SUX-5) for a typed turn, kept for callers; the sweep itself reads
+# turn_state.queued_max_age, which gives a background turn 4 hours (#1567).
 QUEUED_MAX_AGE_S = 15 * 60
 
 # Durable transcript marker copy (SUXI-4).
@@ -784,7 +785,7 @@ def accept_or_queue(
 			# (single-flight) AND the shard has a free credit.
 			conv_busy = _conv_has_other_active_turn(conversation, run_id) or _conv_legacy_busy(conversation)
 			inflight = _shard_inflight(target)
-			queue_depth_at_accept = _shard_queued_depth(target)
+			queue_depth_at_accept = _shard_queued_depth(target, turn_class == "background")
 			admit = (not conv_busy) and (inflight < _max_inflight())
 
 			if admit:

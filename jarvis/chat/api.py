@@ -2446,6 +2446,11 @@ def send_message(
 	# A typed "no" (or a "yes" that bound nothing) is NOT consumed: it goes on as an
 	# ordinary send. R0 only snapshots here; nothing is written until the user row
 	# commits (R1 below), so every gate between them can still refuse cleanly.
+	# ``background`` is a server-only argument, like ``origin``: only a send that carries a
+	# server-set origin (File Box, an approval resume) may be unattended. A browser that
+	# passes it gets an ordinary typed send, so it cannot pick the longer background line
+	# or its 4-hour wait (#1567).
+	background = 1 if (int(background or 0) and frappe.flags.get("jarvis_message_origin")) else 0
 	_typed_snap = None
 	if _typed_approval_eligible(_delegated, atts, background):
 		_typed = _typed_confirmation(user, conversation, message, approval_tokens)
@@ -2474,8 +2479,7 @@ def send_message(
 		# A held File Box resume continues an already-decided approval: it queues,
 		# never bounces on overload (frappe.flags.jarvis_resume_exempt, server-set).
 		# A background send checks its own waiting line, as accept_or_queue does (#1567).
-		_bg_line = bool(int(background or 0))
-		if admission.shard_overloaded(conversation, background=_bg_line) and not frappe.flags.get(
+		if admission.shard_overloaded(conversation, background=bool(background)) and not frappe.flags.get(
 			"jarvis_resume_exempt"
 		):
 			return {"ok": False, "reason": _("The site is busy. Please try again in a moment.")}

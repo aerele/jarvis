@@ -1719,6 +1719,23 @@ class TestFileBoxHasItsOwnQueue(_AdmissionTestCase):
 		self.assertFalse(ts.cancel_queued_max_age(drop[0], 0, "aged"))
 		self.assertTrue(ts.cancel_queued_max_age(old_drop[0], 0, "aged"))
 
+	def test_a_browser_cannot_pick_the_background_line(self):
+		# background=1 from a request is ignored: only a server-set origin makes a send
+		# unattended, so a user cannot skip the typed limit of 25.
+		from jarvis.permissions import message_origin
+
+		def send(conv):
+			with patch.object(chat_api, "_dispatch_turn", side_effect=lambda *a, **k: None):
+				return chat_api.send_message(conversation=conv, message="hello there", background=1)
+
+		browser = self._mk_conv()
+		self.assertTrue(send(browser)["ok"])
+		self.assertEqual(frappe.db.get_value(TURN, {"conversation": browser}, "turn_class"), "interactive")
+		drop = self._mk_conv()
+		with message_origin("file_box"):
+			self.assertTrue(send(drop)["ok"])
+		self.assertEqual(frappe.db.get_value(TURN, {"conversation": drop}, "turn_class"), "background")
+
 
 class TestStopOnAWaitingReply(_AdmissionTestCase):
 	"""The composer's Stop calls ``stop_run``. A reply still queued for a slot was never
