@@ -39,7 +39,7 @@ Two things the live registration taught the engine (both fixed 2026-09-06):
   declaration (`canonical.resource_covers`), as the reference client SDK does. Asana's
   401 also points at the ROOT well-known document, not `/.well-known/.../mcp`.
 
-## Sign-in advertised, but closed to third-party apps: 5 (listed, `enabled=False`)
+## Sign-in advertised, but closed to third-party apps: 6 (listed, `enabled=False`)
 
 Each advertises a registration endpoint, and each refuses a self-hosted tenant:
 
@@ -50,6 +50,7 @@ Each advertises a registration endpoint, and each refuses a self-hosted tenant:
 | Figma | `https://mcp.figma.com/mcp` | `403 Forbidden` from `api.figma.com/v1/oauth/mcp/register` for every request shape (public or confidential, any user agent) |
 | Dropbox | `https://mcp.dropbox.com/mcp` | `registration_not_supported`: "only pre-registered MCP trusted partners are allowed" |
 | Vercel | `https://mcp.vercel.com/` | `invalid_redirect_uri`: "redirect URIs are not approved for use by this authorization server" |
+| WhatsApp Business | `https://mcp.facebook.com/whatsapp_business_tools` | `invalid_client_metadata`: "Dynamic registration is not available for this client" for every callback (tenant host, localhost) and token auth method (probed 2026-10-19). Discovery itself passes: a 401 challenge, metadata at the path-inserted well-known URL, issuer `https://www.facebook.com/whatsapp_business_tools` |
 
 They stay in the catalog (logos, endpoints) switched off, like Plaid, so turning one
 on when its vendor opens registration is a one-line change.
@@ -110,9 +111,10 @@ Open servers need a **no-credential** path (the broker already sends no
   support (Intercom, Zendesk), data/infra (Supabase, Neon, Airtable, Sentry, Cloudflare,
   Netlify), web (Webflow, Wix), automation (Zapier), docs (Microsoft Learn, Cloudflare
   Docs, Hugging Face), dev (GitHub, GitLab).
-- India-specific gaps with no public MCP today (GST/IRP, Tally, Shiprocket, WhatsApp
-  Business) are candidates for our own MCP servers, a separate project. Cashfree closed
-  its gap on its own (self-registering server, listed 2026-09-07).
+- India-specific gaps with no public MCP today (GST/IRP, Tally, Shiprocket) are
+  candidates for our own MCP servers, a separate project. Cashfree closed its gap on its
+  own (self-registering server, listed 2026-09-07). WhatsApp Business now has Meta's own
+  server (listed 2026-10-19, off until Meta opens registration).
 
 # Gap analysis additions (2026-09-07)
 
@@ -188,4 +190,4 @@ People servers exist at the same pattern and are not listed.
 | Salesforce | `https://api.salesforce.com/platform/mcp/v1/{server}` per org, External Client App consumer key, Enterprise+: Custom URL + sign-in (a public client, blank secret) |
 | Freshdesk | `https://<domain>/mcp`, API key, Enterprise early access: Custom URL + token |
 | Xero self-hosted, Cashfree npm, Tally community servers | stdio; out of scope by design |
-| WhatsApp Business, Amazon Seller, Tally, Shiprocket, GST | no first-party or hosted server |
+| Amazon Seller, Tally, Shiprocket, GST | no first-party or hosted server |
