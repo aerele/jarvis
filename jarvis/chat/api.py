@@ -208,7 +208,7 @@ def list_tools() -> list[str]:
 
 
 @frappe.whitelist()
-def list_conversations() -> list[dict]:
+def list_conversations(refresh: bool = False) -> list[dict]:
 	"""Return active, non-empty conversations owned by the current user, newest
 	first.
 
@@ -216,6 +216,8 @@ def list_conversations() -> list[dict]:
 	hidden so a stray draft never lingers in the sidebar; it surfaces the moment
 	it gets its first message (the send path reloads this list). ``message_count``
 	is still returned for the UI, and is always >= 1 given the EXISTS filter.
+	``activity`` carries unfinished run/message identities. ``refresh`` is an
+	observational sidebar reconciliation: it never queues billed prewarming.
 	``create_or_focus_empty`` queries the DB directly, so it still finds and
 	reuses the hidden empty row.
 	"""
@@ -229,7 +231,8 @@ def list_conversations() -> list[dict]:
 	# "the prefix is already hot" guard, not by anything here.
 	from jarvis.chat import prewarm
 
-	prewarm.enqueue_warm_if_due()
+	if not frappe.utils.cint(refresh):
+		prewarm.enqueue_warm_if_due()
 	user = frappe.session.user
 	rows = frappe.db.sql(
 		"""
@@ -248,6 +251,48 @@ def list_conversations() -> list[dict]:
 		(user,),
 		as_dict=True,
 	)
+	# #591: sidebar status is a server fact, including silent tools and parked
+	# recovery. Batch by the already owner-filtered list; never probe per row.
+	from jarvis.chat.turn_state import NONTERMINAL_STATES
+
+	by_conversation = {row.name: row for row in rows}
+	for row in rows:
+		row["activity"] = []
+	if rows:
+		turns = frappe.db.sql(
+			"""SELECT conversation, name AS run_id, assistant_message AS message_id, state
+			FROM `tabJarvis Chat Turn`
+			WHERE conversation IN %(conversations)s AND state IN %(states)s
+			ORDER BY name""",
+			{"conversations": tuple(by_conversation), "states": NONTERMINAL_STATES},
+			as_dict=True,
+		)
+		for turn in turns:
+			by_conversation[turn.conversation]["activity"].append(
+				{"run_id": turn.run_id, "message_id": turn.message_id, "state": turn.state}
+			)
+		# Pure legacy work has no Turn/run id. A terminal owning Turn must also
+		# exclude a stale streaming flag. Keep older recovering messages even
+		# when a newer reply has finished; recovery unlocks the composer.
+		legacy = frappe.db.sql(
+			"""SELECT m.conversation, m.name AS message_id, m.recovering
+			FROM `tabJarvis Chat Message` m
+			WHERE m.conversation IN %(conversations)s AND m.role = 'assistant'
+			  AND m.streaming = 1 AND COALESCE(m.stopped, 0) = 0
+			  AND NOT EXISTS (SELECT 1 FROM `tabJarvis Chat Turn` t
+			      WHERE t.conversation = m.conversation AND t.assistant_message = m.name)
+			ORDER BY m.name""",
+			{"conversations": tuple(by_conversation)},
+			as_dict=True,
+		)
+		for message in legacy:
+			by_conversation[message.conversation]["activity"].append(
+				{
+					"run_id": None,
+					"message_id": message.message_id,
+					"state": "recovering" if message.recovering else "streaming",
+				}
+			)
 	return rows
 
 
@@ -1120,6 +1165,7 @@ def _live_turn_steps(messages: list) -> None:
 		return
 	from jarvis.chat.pump import _read_run_step_lines, _read_run_steps
 	from jarvis.chat.steps import display_line, remove_steps
+	from jarvis.chat.turn_state import NONTERMINAL_STATES
 
 	t = frappe.qb.DocType(TURN)
 	turns = (
@@ -1130,9 +1176,21 @@ def _live_turn_steps(messages: list) -> None:
 	)
 	by_message = {row.assistant_message: row for row in turns}
 	for m in messages:
+		if not m.get("streaming"):
+			continue
 		turn = by_message.get(m["name"])
 		if turn is None:
+			# #591: pure legacy recovery/tools have no Turn watermark. Return
+			# the same durable liveness fact as the sidebar, without an age guess.
+			m["activity_state"] = (
+				None if m.get("stopped") else "recovering" if m.get("recovering") else "streaming"
+			)
 			continue
+		m["activity_state"] = (
+			turn.state
+			if turn.state in NONTERMINAL_STATES and turn.state not in ("terminal_observed", "finalizing")
+			else None
+		)
 		steps = _read_run_steps(turn.name)
 		m["content"] = remove_steps(m.get("content") or "", steps)
 		# The raw cache is unredacted (it must match the raw stream above), so the list

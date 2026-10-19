@@ -11,7 +11,9 @@
 //     tag `jarvis-<conversation>` + renotify so bursts alert again.
 //   - visible but elsewhere → in-app toast (bottom-right, see NotifyToaster),
 //     never a browser notification.
-//   - visible on the event's conversation → nothing (ChatView renders it).
+//   - visible on the event's conversation → no attention signal (ChatView renders it).
+// All conversation events, including the open chat, invalidate server-owned
+// sidebar activity. They never infer running/ended state from event delivery (#591).
 // "On screen" = the /c/:id param or, on the chat home, the store's
 // currentConvId (ChatView mirrors its selection there); any non-chat route
 // means no conversation is on screen.
@@ -171,6 +173,14 @@ export function attachGlobalNotifier({ socket, router }) {
 	// frame, and a shared fence would let whichever ran first accept the terminal and
 	// the other reject it, silently breaking one of the two.
 	const fence = {};
+	store.startConversationActivity();
+	const refreshActivity = () => {
+		if (!document.hidden) store.refreshConversationActivity();
+	};
+	refreshActivity();
+	const activityPoll = setInterval(refreshActivity, 30 * 1000);
+	socket.on("connect", refreshActivity);
+	document.addEventListener("visibilitychange", refreshActivity);
 
 	// hidden → browser notification; visible-but-elsewhere → toast;
 	// visible on the conversation → nothing.
@@ -184,6 +194,7 @@ export function attachGlobalNotifier({ socket, router }) {
 
 	function onEvent(p) {
 		if (!p || !p.kind) return;
+		if (p.conversation_id) store.scheduleConversationActivityRefresh();
 		switch (p.kind) {
 			case "run:end":
 			case "run:error": {
@@ -396,5 +407,11 @@ export function attachGlobalNotifier({ socket, router }) {
 	}
 
 	socket.on("jarvis:event", onEvent);
-	return () => socket.off("jarvis:event", onEvent);
+	return () => {
+		socket.off("jarvis:event", onEvent);
+		socket.off("connect", refreshActivity);
+		document.removeEventListener("visibilitychange", refreshActivity);
+		clearInterval(activityPoll);
+		store.stopConversationActivity();
+	};
 }
