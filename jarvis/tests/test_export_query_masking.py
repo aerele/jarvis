@@ -213,3 +213,68 @@ class TestMaskingWhereFrappeHasNone(FrappeTestCase):
 		# Frappe 15: no mask_field_value to import, so nothing is looked up or masked.
 		with mock.patch.object(masking, "mask_field_value", None):
 			self.assertEqual(masking.masked_fields({"t": "ToDo"}, {}), {})
+
+
+class _MetaBeforeParenttype:
+	"""Frappe 16 before 2026-07-12: ``get_masked_fields`` takes no argument."""
+
+	def __init__(self):
+		self.calls = []
+
+	def get_masked_fields(self):
+		self.calls.append("bare")
+		return [frappe._dict(fieldname="phone")]
+
+
+class _MetaWithParenttype:
+	"""Frappe 16 from 2026-07-12: a child table is masked by its parent's rules."""
+
+	def __init__(self):
+		self.calls = []
+
+	def get_masked_fields(self, parenttype=None):
+		self.calls.append(parenttype)
+		return [frappe._dict(fieldname="phone")]
+
+
+class _MetaBehindAKwargsWrapper:
+	"""A wrapper that hides the real parameter names behind ``**kwargs``."""
+
+	def __init__(self):
+		self.calls = []
+
+	def get_masked_fields(self, **kwargs):
+		self.calls.append(kwargs.get("parenttype"))
+		return [frappe._dict(fieldname="phone")]
+
+
+class TestMaskingAcrossFrappe16Builds(FrappeTestCase):
+	"""``pyproject.toml`` allows every Frappe 16 build, but ``get_masked_fields`` only
+	grew ``parenttype`` in July 2026. Passing it to an older build raised a TypeError,
+	so every spec export failed with HTTP 500 there. CI runs the newest Frappe, so a
+	stand-in carries the older shape."""
+
+	def _masked(self, meta):
+		with (
+			mock.patch.object(masking, "mask_field_value", object()),
+			mock.patch.object(masking.frappe, "get_meta", return_value=meta),
+		):
+			return masking.masked_fields(
+				{"si": "Sales Invoice", "sii": "Sales Invoice Item"}, {"sii": "Sales Invoice"}
+			)
+
+	def test_a_build_without_parenttype_masks_without_raising(self):
+		meta = _MetaBeforeParenttype()
+		self.assertEqual(sorted(self._masked(meta)), ["si", "sii"])
+		self.assertEqual(meta.calls, ["bare", "bare"])
+
+	def test_a_build_with_parenttype_masks_a_child_by_its_parent(self):
+		meta = _MetaWithParenttype()
+		self.assertEqual(sorted(self._masked(meta)), ["si", "sii"])
+		self.assertEqual(meta.calls, [None, "Sales Invoice"])
+
+	def test_a_kwargs_wrapper_still_gets_the_parent(self):
+		# Fail closed: a hidden signature must not drop the parent's stricter rule.
+		meta = _MetaBehindAKwargsWrapper()
+		self.assertEqual(sorted(self._masked(meta)), ["si", "sii"])
+		self.assertEqual(meta.calls, [None, "Sales Invoice"])
