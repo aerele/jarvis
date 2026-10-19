@@ -286,7 +286,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 					self.assertEqual(job.limited_by_spec, 0)
 					self.assertGreater(job.rows_written, 2)
 					file = frappe.get_doc("File", job.file)
-					self.assertRegex(file.file_name, r"jarvis-export-Export-[0-9a-f]{6}\." + fmt)
+					self.assertRegex(file.file_name, r"jarvis-export-DocType-[0-9a-f]{6}\." + fmt)
 					if fmt == "csv":
 						with open(file.get_full_path()) as handle:
 							self.assertEqual(sum(1 for _ in csv.reader(handle)), job.rows_written + 1)
@@ -1046,6 +1046,19 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			export_query(spec={"from": "DocType", "select": ["name"], "limit": 2}, format="csv")
 		self.assertIn("Narrow", str(ctx.exception))
 		self.assertIn("Start it from a Jarvis chat", str(ctx.exception))
+
+	def test_background_title_defaults_to_source_doctype(self):
+		with (
+			patch.object(jobs, "current_conversation", return_value=self.conversation),
+			patch.object(jobs, "dispatch"),
+		):
+			first = jobs.enqueue({"spec": {"from": "ToDo", "select": ["name"]}}, "csv")
+			second = jobs.enqueue({"doctype": "DocType", "fields": ["name"]}, "csv")
+			third = jobs.enqueue({"spec": {"from": "ToDo", "select": ["name", "owner"]}}, "csv", "Open tasks")
+		self.names.extend(state["export_job"] for state in (first, second, third))
+		self.assertEqual(first["title"], "ToDo")
+		self.assertEqual(second["title"], "DocType")
+		self.assertEqual(third["title"], "Open tasks")
 
 
 class TestBackgroundFilterPermissions(FrappeTestCase):
