@@ -7,6 +7,7 @@ import os
 import secrets
 import shutil
 import time
+import traceback
 from datetime import timezone
 from pathlib import Path
 
@@ -80,6 +81,69 @@ def _commit():
 	# Call sites document why independent workers/delivery need this boundary.
 	with _rollback_on_error():
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit
+
+
+def _traceback_text(exc, cause):
+	errors = [error for error in (exc, cause) if error is not None]
+	if len(errors) == 2 and errors[0] is errors[1]:
+		errors.pop()
+	chunks = ["".join(traceback.format_exception(type(e), e, e.__traceback__)) for e in errors]
+	return "\n".join(chunks) or frappe.get_traceback()
+
+
+def _log_failure(name, title, exc=None, *, cause=None, token=None, doctype=DOCTYPE, **context):
+	"""Leave a committed Error Log that names the job. Never raises.
+
+	Durable on purpose: ``log_error`` joins the open transaction and ``_finish`` starts with a
+	rollback, so a log written the plain way is lost with the failed work. Roll back first
+	(that work is discarded anyway), insert, commit. The job's ``source`` and ``highlights``
+	hold filter values and are never written; the message is always explicit, because without
+	one Frappe dumps the caller's local variables. A stale attempt (``token`` no longer matches)
+	is not a failure and logs nothing."""
+	with contextlib.suppress(Exception):
+		trace = _traceback_text(exc, cause)
+		if getattr(frappe.local, "request", None):
+			# A web request: Frappe 16 attaches the request's form_dict (the tool arguments)
+			# to an Error Log, so these tails go to the log file instead.
+			frappe.logger("jarvis.export").error(f"{title}: {name}: {exc!r}\n{trace}")
+			return
+		frappe.db.rollback()
+		if token is not None and frappe.db.get_value(DOCTYPE, name, "attempt_token") != token:
+			return
+		lines = [f"{doctype or 'subject'}: {name}"]
+		if doctype == DOCTYPE:
+			row = frappe.db.get_value(
+				DOCTYPE,
+				name,
+				["owner", "format", "status", "attempts", "retries", "rows_written"],
+				as_dict=True,
+			)
+			lines += [f"{key}: {value}" for key, value in (row or {}).items()]
+		lines += [f"{key}: {value}" for key, value in context.items()]
+		for label, error in (("error", exc), ("cause", cause)):
+			if error is not None:
+				lines.append(f"{label}: {type(error).__name__}: {error}")
+		frappe.log_error(
+			title=f"jarvis.export {title}: {name}"[:140],
+			message="\n".join([*lines, "", trace]),
+			reference_doctype=doctype,
+			reference_name=name if doctype else None,
+		)
+		_commit()
+
+
+def _safely(step, name, call, *args, doctype=DOCTYPE, **kwargs):
+	"""Run one step whose failure must not stop the steps after it; log the failure."""
+	try:
+		return call(*args, **kwargs)
+	except Exception as exc:
+		_log_failure(name, step, exc, doctype=doctype)
+
+
+def _after(name):
+	"""The tail every attempt ends with. A failing announce must not skip dispatch."""
+	_safely("announce", name, announce, name)
+	_safely("dispatch", name, dispatch)
 
 
 def limits():
@@ -258,8 +322,9 @@ def enqueue(source, fmt, title=None, highlights=None):
 	except InvalidArgumentError as exc:
 		# The site lock timed out before any row was written.
 		raise BackgroundUnavailable(str(exc)) from None
-	announce(job.name, initial=True)
-	dispatch()
+	# The job is committed: nothing below may fail the tool call.
+	_safely("announce", job.name, announce, job.name, initial=True)
+	_safely("dispatch", job.name, dispatch)
 	return public(_get_job(job.name))
 
 
@@ -366,9 +431,10 @@ def cancel(name: str):
 				)
 			# Make the cancellation visible to the independent watchdog immediately.
 			_commit()
-	announce(name)
+	# The cancel is committed: nothing below may fail the tool call.
+	_safely("announce", name, announce, name)
 	if job.status != "running" or not job.started_at:
-		dispatch()
+		_safely("dispatch", name, dispatch)
 	return public(_get_job(name))
 
 
@@ -418,17 +484,24 @@ def dispatch():
 					"error": "",
 				},
 			)
-			# Reserve before enqueue. A failed enqueue is recovered by the reaper.
+			# Reserve before enqueue. A failed enqueue hands the reservation back.
 			# Persist the capacity reservation before RQ can start this attempt.
 			_commit()
-			frappe.enqueue(
-				"jarvis.tools._export.jobs.run",
-				queue="long",
-				timeout=900,
-				job_id="export-" + token,
-				name=row.name,
-				token=token,
-			)
+			try:
+				frappe.enqueue(
+					"jarvis.tools._export.jobs.run",
+					queue="long",
+					timeout=900,
+					job_id="export-" + token,
+					name=row.name,
+					token=token,
+				)
+			except Exception as exc:
+				# Redis is likely down. Give the reservation back, so the reaper does not charge
+				# it against the one retry, and reserve nothing more.
+				_return_to_queue(row.name, token)
+				_log_failure(row.name, "enqueue", exc)
+				break
 			owners.add(row.owner)
 			slots -= 1
 
@@ -457,17 +530,39 @@ def _attempt(name, token):
 	return bool(row and row.attempt_token == token and row.status == "running" and not row.cancel_requested)
 
 
+GENERIC_FAILURE = (
+	"The export could not finish. Ask again in a few minutes; if it keeps failing, your "
+	'administrator can find "jarvis.export" in the Error Log.'
+)
+
+
+class _NoRecords(ExportLimit):
+	"""Nothing matches the caller's permissions and filters: a normal outcome, not logged."""
+
+
 def run(name, token):
+	"""One attempt, fenced by its token. Nothing in it may skip the announce/dispatch tail."""
+	try:
+		if not _attempt(name, token):
+			_settle(name, token, "cancelled", "Export cancelled.")
+			_after(name)
+			return
+		job = _get_job(name)
+		directory = _directory(name, token)
+	except Exception as exc:
+		_log_failure(name, "start", exc, token=token)
+		_settle(name, token, "failed", GENERIC_FAILURE)
+		_after(name)
+		return
+	_execute(job, token, directory)
+
+
+def _execute(job, token, directory):
 	from jarvis._session import impersonate
 	from jarvis.tools._export.database import MariaDBStream, Watchdog, connection_settings
 	from jarvis.tools._export.streaming import write
 
-	if not _attempt(name, token):
-		_finish(name, token, "cancelled", "Export cancelled.")
-		announce(name)
-		return
-	job = _get_job(name)
-	directory = _directory(name, token)
+	name = job.name
 	db = watchdog = None
 	handed_back = False
 	started = time.monotonic()
@@ -527,42 +622,64 @@ def run(name, token):
 				db.close()
 			watchdog.check()
 			if result["rows_written"] == 0:
-				raise ExportLimit("failed", "No records match your current permissions and filters.")
+				raise _NoRecords("failed", "No records match your current permissions and filters.")
 			_publish_file(job, token, path, result, _permission_fingerprint(prepared))
 	except ExportLimit as exc:
-		_finish(name, token, exc.status, str(exc))
+		if exc.status == "failed" and not isinstance(exc, _NoRecords):
+			# The watchdog's own exception is the interesting one; re-raising its reason erased it.
+			cause = watchdog.cause if watchdog else None
+			_log_failure(name, "failed", exc, cause=cause, token=token, elapsed_s=_elapsed(started))
+		_settle(name, token, exc.status, str(exc))
 	except Exception as exc:
 		from jarvis import _failure_kind
 		from jarvis.exceptions import PermissionDeniedError
 
 		status = "too slow" if _failure_kind.too_slow(exc) else "failed"
-		message = (
-			str(exc)
-			if isinstance(exc, (PermissionDeniedError, InvalidArgumentError))
-			else ("The export could not finish. Please run it again or narrow the filters.")
-		)
-		_finish(name, token, status, message)
-		frappe.log_error(title="Background export failed", message=frappe.get_traceback())
+		known = isinstance(exc, (PermissionDeniedError, InvalidArgumentError))
+		_log_failure(name, status, exc, token=token, elapsed_s=_elapsed(started))
+		_settle(name, token, status, str(exc) if known else GENERIC_FAILURE)
 	finally:
+		# Every step is isolated: a stuck watchdog or a lock timeout must neither fail the RQ
+		# job nor skip dispatch(), which would leave queued exports waiting for the reaper.
 		if watchdog and watchdog.thread.is_alive():
-			watchdog.stop()
+			_safely("tail", name, watchdog.stop)
 		if db:
-			db.close()
-		if directory.exists():
-			shutil.rmtree(directory)
-		if not handed_back and frappe.db.exists(DOCTYPE, name):
-			from jarvis.telemetry import record_export_event
+			_safely("tail", name, db.close)
+		_safely("tail", name, _remove_directory, directory)
+		if not handed_back:
+			_safely("tail", name, _record_telemetry, name)
+		_after(name)
 
-			finished = _get_job(name)
-			record_export_event(
-				"export_query",
-				finished.format,
-				finished.rows_written or 0,
-				mode="background",
-				outcome=finished.status,
-			)
-		announce(name)
-		dispatch()
+
+def _elapsed(started):
+	return round(time.monotonic() - started, 1)
+
+
+def _settle(name, token, status, error):
+	"""``_finish`` that cannot raise. A lost terminal write is recovered by the reaper."""
+	try:
+		_finish(name, token, status, error)
+	except Exception as exc:
+		_log_failure(name, "finish", exc)
+
+
+def _remove_directory(directory):
+	if directory.exists():
+		shutil.rmtree(directory)
+
+
+def _record_telemetry(name):
+	if frappe.db.exists(DOCTYPE, name):
+		from jarvis.telemetry import record_export_event
+
+		finished = _get_job(name)
+		record_export_event(
+			"export_query",
+			finished.format,
+			finished.rows_written or 0,
+			mode="background",
+			outcome=finished.status,
+		)
 
 
 def _publish_file(job, token, path, result, permission_key):
@@ -865,117 +982,162 @@ def reap():
 	"""Five-minute recovery, expiry, notification reconciliation, orphan sweep."""
 	if frappe.db.db_type != "mariadb" or not frappe.db.table_exists(DOCTYPE):
 		return
-	from frappe.utils.background_jobs import get_job
+	try:
+		old = add_to_date(frappe.utils.now_datetime(), days=-30)
+		for name in _reap_worklist(old):
+			_reap_row(name, old)
+		# A deletion transaction may have started before a just-published File became
+		# visible in its repeatable-read snapshot. Sweep registered orphans too.
+		_safely("orphan sweep", "reaper", _sweep_orphan_files, doctype=None)
+		_safely("scratch sweep", "reaper", _sweep_attempt_directories, doctype=None)
+		# A process can die between rename and the File/ready transaction committing.
+		_safely("straggler sweep", "reaper", _sweep_stragglers, doctype=None)
+	finally:
+		_safely("dispatch", "reaper", dispatch, doctype=None)
 
+
+def _reap_worklist(old):
 	# Each worklist is bounded independently so old rows cannot starve live jobs.
 	names = set()
-	cutoffs = {"now": now_datetime(), "old": add_to_date(frappe.utils.now_datetime(), days=-30)}
+	now = now_datetime()
 	j = frappe.qb.DocType(DOCTYPE)
 	for condition in (
 		j.status == "running",
 		j.status.isin(["queued", "paused"]) & (Coalesce(j.card_message, "") == ""),
 		j.status.notin(["queued", "running"]) & (Coalesce(j.announced_status, "") != j.status),
-		(j.status == "ready") & (j.expires_at < cutoffs["now"]),
-		j.status.notin(list(ACTIVE)) & (j.creation < cutoffs["old"]),
+		(j.status == "ready") & (j.expires_at < now),
+		j.status.notin(list(ACTIVE)) & (j.creation < old),
 	):
 		names.update(
 			r[0]
 			for r in frappe.qb.from_(j).select(j.name).where(condition).orderby(j.creation).limit(200).run()
 		)
-	rows = [frappe._dict(name=name) for name in names]
-	for row in rows:
-		try:
-			job = _get_job(row.name)
-			if not job.card_message:
-				announce(job.name, initial=True)
-			if job.status == "running" and get_datetime(job.heartbeat) < add_to_date(
+	return names
+
+
+def _reap_row(name, old):
+	"""Isolated steps: a row whose recovery or announce keeps failing is still purged at 30 days."""
+	_safely("recovery", name, _recover_row, name)
+	_safely("retention", name, _purge_if_old, name, old)
+	_safely("announce", name, _announce_if_present, name)
+
+
+def _recover_row(name):
+	from frappe.utils.background_jobs import get_job
+
+	job = _get_job(name)
+	if not job.card_message:
+		announce(job.name, initial=True)
+	if job.status == "running" and get_datetime(job.heartbeat) < add_to_date(now_datetime(), minutes=-1):
+		rq_job = get_job("export-" + job.attempt_token)
+		if not job.started_at and rq_job and str(rq_job.get_status()).lower().split(".")[-1] == "queued":
+			return
+		with _lock():
+			# Serialize with final File publication, which fences on this row.
+			# A plain reload followed by UPDATE could overwrite a just-ready job.
+			if not frappe.db.get_value(DOCTYPE, job.name, "name", for_update=True):
+				return
+			job = _get_job(job.name)
+			if job.status != "running" or get_datetime(job.heartbeat) >= add_to_date(
 				now_datetime(), minutes=-1
 			):
-				rq_job = get_job("export-" + job.attempt_token)
-				if (
-					not job.started_at
-					and rq_job
-					and str(rq_job.get_status()).lower().split(".")[-1] == "queued"
-				):
-					continue
-				with _lock():
-					# Serialize with final File publication, which fences on this row.
-					# A plain reload followed by UPDATE could overwrite a just-ready job.
-					if not frappe.db.get_value(DOCTYPE, job.name, "name", for_update=True):
-						continue
-					job = _get_job(job.name)
-					if job.status != "running" or get_datetime(job.heartbeat) >= add_to_date(
-						now_datetime(), minutes=-1
-					):
-						continue
-					status = "cancelled" if job.cancel_requested else ("failed" if job.retries else "queued")
-					frappe.db.set_value(
-						DOCTYPE,
-						job.name,
-						{
-							"status": status,
-							"attempt_token": "",
-							"retries": 1,
-							"next_attempt": now_datetime(),
-							"finished_at": now_datetime() if status != "queued" else None,
-							"error": "Export cancelled."
-							if job.cancel_requested
-							else "The export worker stopped. "
-							+ ("Retrying once." if status == "queued" else "Please run it again."),
-						},
-					)
-					# Revoke the old attempt durably before deleting its files or retrying.
-					_commit()
-				if job.attempt_token:
-					shutil.rmtree(_directory(job.name, job.attempt_token), ignore_errors=True)
-				job = _get_job(job.name)
-				if job.status == "queued":
-					announce(job.name, recovery=True)
-			if job.status == "ready" and job.expires_at and get_datetime(job.expires_at) < now_datetime():
-				_delete_file(job)
-				frappe.db.set_value(DOCTYPE, job.name, {"status": "expired", "file": None})
-				# Persist expiry and run after-commit file cleanup before notifying the owner.
-				_commit()
-				job = _get_job(job.name)
-			announce(job.name)
-			if job.status in TERMINAL and get_datetime(job.creation) < cutoffs["old"]:
-				_delete_file(job)
-				frappe.db.delete(DOCTYPE, {"name": job.name})
-				# Persist retention deletion and run its after-commit file cleanup.
-				_commit()
-		except Exception:
-			frappe.db.rollback()
-			frappe.log_error(title="Export recovery failed", message=frappe.get_traceback())
-	# A deletion transaction may have started before a just-published File became
-	# visible in its repeatable-read snapshot. Sweep registered orphans too.
+				return
+			status = "cancelled" if job.cancel_requested else ("failed" if job.retries else "queued")
+			frappe.db.set_value(
+				DOCTYPE,
+				job.name,
+				{
+					"status": status,
+					"attempt_token": "",
+					"retries": 1,
+					"next_attempt": now_datetime(),
+					"finished_at": now_datetime() if status != "queued" else None,
+					"error": "Export cancelled."
+					if job.cancel_requested
+					else "The export worker stopped. "
+					+ ("Retrying once." if status == "queued" else "Please run it again."),
+				},
+			)
+			# Revoke the old attempt durably before deleting its files or retrying.
+			_commit()
+		if job.attempt_token:
+			shutil.rmtree(_directory(job.name, job.attempt_token), ignore_errors=True)
+		job = _get_job(job.name)
+		if job.status == "queued":
+			announce(job.name, recovery=True)
+	if job.status == "ready" and job.expires_at and get_datetime(job.expires_at) < now_datetime():
+		_delete_file(job)
+		frappe.db.set_value(DOCTYPE, job.name, {"status": "expired", "file": None})
+		# Persist expiry and run after-commit file cleanup before notifying the owner.
+		_commit()
+
+
+def _purge_if_old(name, old):
+	if not frappe.db.exists(DOCTYPE, name):
+		return
+	job = _get_job(name)
+	if job.status in TERMINAL and get_datetime(job.creation) < old:
+		_delete_file(job)
+		frappe.db.delete(DOCTYPE, {"name": job.name})
+		# Persist retention deletion and run its after-commit file cleanup.
+		_commit()
+
+
+def _announce_if_present(name):
+	if frappe.db.exists(DOCTYPE, name):
+		announce(name)
+
+
+def _sweep_orphan_files():
 	# End the sweep snapshot so concurrently published orphan Files are visible.
 	_commit()
 	f = frappe.qb.DocType("File")
-	for (file_name,) in (
+	j = frappe.qb.DocType(DOCTYPE)
+	orphans = (
 		frappe.qb.from_(f)
 		.left_join(j)
 		.on(j.name == f.attached_to_name)
 		.select(f.name)
 		.where((f.attached_to_doctype == DOCTYPE) & j.name.isnull())
 		.limit(200)
-	).run():
-		_delete_generated_file(file_name)
-	# Commit orphan deletion and execute its after-commit filesystem cleanup.
+	).run()
+	for (file_name,) in orphans:
+		_safely("orphan file", file_name, _delete_orphan, file_name, doctype="File")
+
+
+def _delete_orphan(file_name):
+	_delete_generated_file(file_name)
+	# One commit per file: a failure must not undo the deletes before it.
 	_commit()
+
+
+def _sweep_attempt_directories():
 	root = Path(frappe.get_site_path("private", "jarvis_exports"))
 	if root.exists():
 		for directory in root.iterdir():
-			if directory.is_dir() and directory.stat().st_mtime < time.time() - 900:
-				name, _, token = directory.name.partition("-")
-				if not _attempt(name, token):
-					shutil.rmtree(directory)
-	# A process can die between rename and the File/ready transaction committing.
+			_safely("scratch directory", directory.name, _remove_stale_directory, directory, doctype=None)
+
+
+def _remove_stale_directory(directory):
+	# These race with run()'s own cleanup, so a vanished entry is not an error.
+	with contextlib.suppress(FileNotFoundError):
+		if directory.is_dir() and directory.stat().st_mtime < time.time() - 900:
+			name, _, token = directory.name.partition("-")
+			if not _attempt(name, token):
+				shutil.rmtree(directory)
+
+
+def _sweep_stragglers():
 	for path in Path(frappe.get_site_path("private", "files")).glob("jarvis-export-*.*"):
+		_safely("straggler file", path.name, _remove_straggler, path, doctype=None)
+
+
+def _remove_straggler(path):
+	with contextlib.suppress(FileNotFoundError):
 		if path.stat().st_mtime < time.time() - 900 and not frappe.db.exists(
 			"File", {"file_url": "/private/files/" + path.name}
 		):
 			path.unlink()
-	dispatch()
 
 
 def _delete_file(job):
@@ -985,7 +1147,10 @@ def _delete_file(job):
 
 
 def _delete_generated_file(name):
-	file = frappe.get_doc({"doctype": "File", **frappe.db.get_value("File", name, FILE_FIELDS, as_dict=True)})
+	row = frappe.db.get_value("File", name, FILE_FIELDS, as_dict=True)
+	if not row:
+		return  # already gone (a concurrent sweep or a deleted chat)
+	file = frappe.get_doc({"doctype": "File", **row})
 	path = Path(file.get_full_path()).resolve()
 	frappe.delete_doc("File", name, ignore_permissions=True)
 	# Prewritten Files intentionally have no content hash. Frappe's normal trash

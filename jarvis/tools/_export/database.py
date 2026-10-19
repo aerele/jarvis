@@ -84,6 +84,9 @@ class Watchdog:
 		self.seconds = seconds
 		self.rows = 0
 		self.reason = None
+		# The exception behind a replaced reason. run() re-raises the reason `from None`,
+		# which erases __cause__, so the original is kept here for the Error Log.
+		self.cause = None
 		self.stop_event = threading.Event()
 		self.thread = threading.Thread(target=self._run, daemon=True, name="jarvis-export-watchdog")
 
@@ -133,7 +136,8 @@ class Watchdog:
 			# Thread-local site context for Redis realtime only. DB writes use control.
 			try:
 				frappe.init(site=self.site)
-			except Exception:
+			except Exception as exc:
+				self.cause = exc
 				self.reason = ExportLimit(
 					"failed", "The export could not start its safety monitor. Please run it again."
 				)
@@ -152,6 +156,8 @@ class Watchdog:
 							},
 						)
 				except Exception as exc:
+					if not isinstance(exc, ExportLimit):
+						self.cause = exc
 					self.reason = (
 						exc
 						if isinstance(exc, ExportLimit)
