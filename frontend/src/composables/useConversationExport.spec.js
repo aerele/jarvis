@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
 
 vi.mock("@/api", () => ({ downloadConversation: vi.fn() }));
@@ -10,7 +10,13 @@ import { report } from "@/lib/errorReporter";
 import { useConversationExport } from "./useConversationExport";
 
 describe("chat export menu state", () => {
-	beforeEach(() => vi.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		document.cookie = "user_id=export-owner@example.com; path=/";
+	});
+	afterEach(() => {
+		document.cookie = "user_id=; max-age=0; path=/";
+	});
 	it.each([
 		["pdf", "Preparing PDF…", 0],
 		["md", "Preparing Markdown…", 1],
@@ -61,6 +67,62 @@ describe("chat export menu state", () => {
 		await menu.downloadOptions.value[1].onClick();
 		expect(downloadConversation).toHaveBeenCalledTimes(2);
 	});
+	it.each([
+		[429, "RateLimitExceededError", "Too many exports. Try again in a minute."],
+		[429, "_ExportRateLimitError", "Too many exports are running. Try again in a moment."],
+		[417, "_ExportRefusedError", "An export is already running. Try again in a moment."],
+		[
+			417,
+			"_ExportRefusedError",
+			"This chat is too long for a PDF. Download it as Markdown instead.",
+		],
+		[403, "PermissionError", "This chat isn't available."],
+	])(
+		"shows an actionable toast for expected HTTP%s / %s without error telemetry",
+		async (status, excType, message) => {
+			downloadConversation.mockRejectedValue(
+				Object.assign(new Error(message), {
+					status,
+					exc_type: excType,
+					expectedRefusal: true,
+				})
+			);
+			const menu = useConversationExport(() => "expected-refusal");
+			await menu.downloadOptions.value[0].onClick();
+			expect(toast.error).toHaveBeenCalledTimes(1);
+			expect(toast.error.mock.calls[0][0]).toContain(message.replaceAll("'", "&#39;"));
+			expect(report).not.toHaveBeenCalled();
+			expect(menu.downloadOptions.value.every((option) => !option.disabled)).toBe(true);
+		}
+	);
+	it.each([
+		[undefined, undefined, "Network failed with PRIVATE-CONTENT-SENTINEL"],
+		[417, "_ExportRenderError", "We couldn't create the PDF. Try Markdown instead."],
+		[500, "_ExportRefusedError", "Unexpected server failure PRIVATE-CONTENT-SENTINEL"],
+	])(
+		"reports unexpected HTTP%s / %s once without including server or network details",
+		async (status, excType, message) => {
+			downloadConversation.mockRejectedValue(
+				Object.assign(new Error(message), {
+					status,
+					exc_type: excType,
+					expectedRefusal: false,
+				})
+			);
+			const menu = useConversationExport(() => "unexpected-export-failure");
+			await menu.downloadOptions.value[0].onClick();
+			expect(toast.error).toHaveBeenCalledTimes(1);
+			expect(report).toHaveBeenCalledTimes(1);
+			expect(report).toHaveBeenCalledWith(
+				expect.objectContaining({
+					error_code: "chat_export",
+					error_class: "ChatExportError",
+					message: "Chat PDF export failed",
+				})
+			);
+			expect(JSON.stringify(report.mock.calls)).not.toContain("PRIVATE-CONTENT-SENTINEL");
+		}
+	);
 	it("uses the selected chat, and disables export before a chat exists", async () => {
 		downloadConversation.mockResolvedValue(undefined);
 		const conversation = ref(null);

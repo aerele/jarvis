@@ -17,14 +17,19 @@ export function useConversationExport(conversation) {
 			await downloadConversation(id, format);
 		} catch (error) {
 			toast.error(errHtml(error, __("Couldn't download this chat. Try again.")));
-			// Only operation metadata: no transcript, URL, or server payload.
-			report({
-				conversation: id,
-				error_code: "chat_export",
-				error_class: "ChatExportError",
-				message:
-					format === "pdf" ? "Chat PDF export failed" : "Chat Markdown export failed",
-			});
+			// Expected access, quota and size refusals are actionable user states.
+			// Unexpected failures report operation metadata only, never server data.
+			if (error?.expectedRefusal !== true) {
+				report({
+					conversation: id,
+					error_code: "chat_export",
+					error_class: "ChatExportError",
+					message:
+						format === "pdf"
+							? "Chat PDF export failed"
+							: "Chat Markdown export failed",
+				});
+			}
 		} finally {
 			pending.delete(id);
 		}
