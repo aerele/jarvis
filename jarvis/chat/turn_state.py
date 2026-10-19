@@ -98,17 +98,11 @@ def queued_max_age(turn_class: str | None) -> int:
 
 
 def queued_age_cutoffs() -> dict:
-	"""SQL parameters ``cut`` (typed) and ``bcut`` (File Box) for the age-out guard below."""
+	"""The age-out cutoffs: ``cut`` for a typed turn, ``bcut`` for a File Box drop."""
 	return {
 		"cut": frappe.utils.add_to_date(None, seconds=-QUEUED_MAX_AGE_S),
 		"bcut": frappe.utils.add_to_date(None, seconds=-BACKGROUND_QUEUED_MAX_AGE_S),
 	}
-
-
-def queued_age_out_sql(alias: str = "") -> str:
-	"""The age-out guard by turn class (typed 15 minutes, File Box 4 hours). ``alias``
-	prefixes the columns in a join, e.g. ``"t."``. Takes the ``queued_age_cutoffs`` params."""
-	return f"{alias}enqueued_at < CASE WHEN {alias}turn_class='background' THEN %(bcut)s ELSE %(cut)s END"
 
 
 # THE canonical turn-effect vocabulary (D2 §1a + R-4) — the SINGLE authority every
@@ -892,7 +886,8 @@ def cancel_queued_max_age(run_id: str, version: int, reason: str) -> bool:
 			SET state='cancelled', reserved=0, reservation_expires_at=NULL,
 			    cancel_reason=%(reason)s, error=%(reason)s, done_at=%(now)s, version=version+1
 			WHERE name=%(r)s AND state='queued' AND version=%(v)s
-			  AND enqueued_at IS NOT NULL AND {queued_age_out_sql()}""",
+			  AND enqueued_at IS NOT NULL
+			  AND enqueued_at < CASE WHEN turn_class='background' THEN %(bcut)s ELSE %(cut)s END""",
 			{"r": run_id, "reason": reason, "now": now, "v": version, **queued_age_cutoffs()},
 		)
 		== 1

@@ -40,6 +40,8 @@ import json
 import time
 
 import frappe
+from frappe.query_builder import Case
+from frappe.query_builder.functions import Count, IfNull
 
 from jarvis.chat import txn
 from jarvis.chat.events import publish_to_user
@@ -309,13 +311,16 @@ def _shard_inflight(target: str) -> int:
 
 def _shard_queued_depth(target: str, background: bool | None = None) -> int:
 	"""Queued turns on ``target``: all of them, or only one line (``background``)."""
-	line = ""
+	turn = frappe.qb.DocType(TURN)
+	query = (
+		frappe.qb.from_(turn)
+		.select(Count("*"))
+		.where((turn.relay_target_id == target) & (turn.state == "queued"))
+	)
 	if background is not None:
-		line = " AND turn_class='background'" if background else " AND turn_class!='background'"
-	return frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tabJarvis Chat Turn` WHERE relay_target_id=%(t)s AND state='queued'{line}",
-		{"t": target},
-	)[0][0]
+		is_background = IfNull(turn.turn_class, "interactive") == "background"
+		query = query.where(is_background if background else is_background.negate())
+	return query.run()[0][0]
 
 
 def _line_full(target: str, background: bool) -> bool:
@@ -2061,14 +2066,17 @@ def _sweep_age_out(targets: set[str]) -> int:
 	File Box 4 hours, #1567) with a recorded reason + publish (SUX-5)."""
 	from jarvis.chat import turn_state as ts
 
-	rows = frappe.db.sql(
-		f"""
-		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message, c.owner
-		FROM `tabJarvis Chat Turn` t INNER JOIN `tabJarvis Conversation` c ON c.name = t.conversation
-		WHERE t.state='queued' AND t.enqueued_at IS NOT NULL AND {ts.queued_age_out_sql("t.")}
-		""",
-		ts.queued_age_cutoffs(),
-		as_dict=True,
+	turn = frappe.qb.DocType(TURN)
+	conv = frappe.qb.DocType(CONV)
+	cutoffs = ts.queued_age_cutoffs()
+	cutoff = Case().when(turn.turn_class == "background", cutoffs["bcut"]).else_(cutoffs["cut"])
+	rows = (
+		frappe.qb.from_(turn)
+		.inner_join(conv)
+		.on(conv.name == turn.conversation)
+		.select(turn.run_id, turn.conversation, turn.relay_target_id, turn.seed_message, conv.owner)
+		.where((turn.state == "queued") & turn.enqueued_at.isnotnull() & (turn.enqueued_at < cutoff))
+		.run(as_dict=True)
 	)
 	reason = AGE_OUT_REASON
 	cancelled = 0
