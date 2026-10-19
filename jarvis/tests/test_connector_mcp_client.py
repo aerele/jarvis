@@ -104,6 +104,60 @@ class TestResponseMatching(unittest.TestCase):
 	def test_wrong_id_is_not_matched(self):
 		self.assertFalse(mcp_client._matches_response({"jsonrpc": "2.0", "id": 9, "result": {}}, 2))
 
+	def test_null_id_error_is_the_reply_to_our_request(self):
+		# JSON-RPC 2.0 allows a null id on an error the server could not tie to a
+		# request id (Mailchimp Transactional answers a bad key this way).
+		msg = {"jsonrpc": "2.0", "error": {"code": -32001, "message": "Invalid API key"}, "id": None}
+		self.assertTrue(mcp_client._matches_response(msg, 1))
+
+	def test_null_id_result_is_not_matched(self):
+		self.assertFalse(mcp_client._matches_response({"jsonrpc": "2.0", "id": None, "result": {}}, 1))
+
+	def test_null_id_error_alongside_a_result_is_not_matched(self):
+		msg = {"jsonrpc": "2.0", "id": None, "result": {}, "error": {"code": 1, "message": "x"}}
+		self.assertFalse(mcp_client._matches_response(msg, 1))
+
+	def test_null_id_server_request_is_not_matched(self):
+		msg = {"jsonrpc": "2.0", "id": None, "method": "x", "error": {"code": 1, "message": "x"}}
+		self.assertFalse(mcp_client._matches_response(msg, 1))
+
+	def test_error_without_an_id_key_is_not_matched(self):
+		self.assertFalse(mcp_client._matches_response({"jsonrpc": "2.0", "error": {"code": 1}}, 1))
+
+	def test_wrong_non_null_id_error_is_not_matched(self):
+		msg = {"jsonrpc": "2.0", "id": 9, "error": {"code": -32001, "message": "x"}}
+		self.assertFalse(mcp_client._matches_response(msg, 2))
+
+
+def _null_id_error(message="Invalid API key"):
+	return {"jsonrpc": "2.0", "error": {"code": -32001, "message": message}, "id": None}
+
+
+class TestNullIdErrorReply(unittest.TestCase):
+	"""A server that refuses the key before reading the body answers every POST
+	with HTTP 200 and a null-id JSON-RPC error. That must read as the server's own
+	error, not as a transport fault."""
+
+	def test_probe_raises_the_servers_error_as_an_rpc_error(self):
+		# server/discover gets the error, era detection falls back to initialize,
+		# which gets the same error: that one is what the person reads.
+		seam = _Seam([_json_resp(_null_id_error()), _json_resp(_null_id_error())])
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			with self.assertRaises(mcp_client.McpError) as ctx:
+				mcp_client.probe("https://api.example.com/mcp", "bad-key")
+		self.assertEqual(ctx.exception.kind, mcp_client.ERR_RPC)
+		self.assertEqual(ctx.exception.code, -32001)
+		self.assertEqual(str(ctx.exception), "Invalid API key")
+
+	def test_null_id_error_on_an_sse_stream_is_returned_not_skipped(self):
+		frame = "data: " + json.dumps(_null_id_error()) + "\n\n"
+		seam = _Seam([_sse_resp([frame]), _sse_resp([frame])])
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			with self.assertRaises(mcp_client.McpError) as ctx:
+				mcp_client.probe("https://api.example.com/mcp", "bad-key")
+		self.assertEqual(ctx.exception.kind, mcp_client.ERR_RPC)
+		self.assertEqual(str(ctx.exception), "Invalid API key")
+
 
 LEGACY = "2025-06-18"
 MODERN = mcp_client.MODERN_PROTOCOL_VERSION

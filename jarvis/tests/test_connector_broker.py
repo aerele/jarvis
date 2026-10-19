@@ -166,6 +166,31 @@ class TestGuardedTestProbe(unittest.TestCase):
 				out = broker.test_connector(row)
 				self.assertEqual(out["error"]["code"], "ssrf_blocked")
 
+	def test_a_bad_key_rpc_error_does_not_open_the_circuit(self):
+		# Mailchimp Transactional answers a bad key with HTTP 200 and a null-id
+		# JSON-RPC error. Through the real client that is an rpc_error carrying the
+		# server's reason, and an auth problem never counts toward the breaker.
+		store = InMemoryStore()
+		reply = {"jsonrpc": "2.0", "error": {"code": -32001, "message": "Invalid API key"}, "id": None}
+
+		def seam(url, **_kw):
+			resp = mock.MagicMock(status=200, headers={"Content-Type": "application/json"})
+			resp.stream.return_value = iter([json.dumps(reply).encode("utf-8")])
+			resp.read1 = None
+			return resp, mock.MagicMock(), url
+
+		with (
+			mock.patch.object(broker, "_store", return_value=store),
+			mock.patch.object(broker, "_credential", return_value="bad-key"),
+			mock.patch.object(mcp_client.ssrf, "open_pinned_request", side_effect=seam),
+			mock.patch.object(broker.CircuitBreaker, "record_failure") as record_failure,
+		):
+			row = self._row()
+			for _ in range(broker.CB_THRESHOLD + 2):
+				out = broker.test_connector(row)
+				self.assertEqual(out["error"], {"code": "rpc_error", "message": "Invalid API key"})
+		record_failure.assert_not_called()
+
 	def test_at_capacity_when_cap_full(self):
 		store = InMemoryStore()
 		# Pre-fill the per-connector concurrency counter to its limit so the probe's
