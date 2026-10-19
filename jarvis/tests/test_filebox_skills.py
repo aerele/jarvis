@@ -1372,6 +1372,15 @@ class TestSalesInvoiceToPurchaseE2E(_Base):
 		values = {"company": E2E_CO, "supplier": E2E_SUPPLIER, "bill_no": invoice_no, "items": [line]}
 		made = self.call("create_doc", {"doctype": PI, "values": values}, conv)
 		self.assertTrue(made["ok"], made)
+		# The dropped file is attached to the draft the run created.
+		source_url = frappe.db.get_value(
+			"File", frappe.db.get_value(CONV, conv, "filebox_source_file"), "file_url"
+		)
+		attached = frappe.db.get_value(
+			"File", {"attached_to_doctype": PI, "attached_to_name": made["data"]["name"]}, "file_url"
+		)
+		self.assertEqual(attached, source_url)
+		self.assertTrue(made["data"]["attached_file"])
 		return made["data"]["name"]
 
 	def test_two_sales_invoices_become_two_draft_purchase_invoices(self):
@@ -1384,7 +1393,7 @@ class TestSalesInvoiceToPurchaseE2E(_Base):
 			self.assertEqual([(i.item_code, i.qty, i.rate) for i in pi.items], [(E2E_ITEM, qty, rate)])
 			row = self.ladder()[convs[no]]
 			self.assertEqual(row["status"], "draft_created")
-			self.assertIn(f"Draft {PI} {name} created", row["result"])
+			self.assertIn(f"Draft {PI} {name} created with the file attached", row["result"])
 		self.assertFalse(frappe.db.exists(SI, {"company": E2E_CO}))
 
 
