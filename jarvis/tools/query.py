@@ -215,16 +215,30 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	from jarvis.tools._result_guard import enforce_result_budget
 
 	_, budget_event = enforce_result_budget(result, tool="query")
-	if partial or budget_event:
+	# Only a cut answer gets a saved id; an event that cut nothing ("uncapped", "measure_failed")
+	# is a complete answer and must not tell the agent to export it again.
+	if partial or (budget_event and budget_event["kind"] in _CUTTING_EVENTS):
 		from jarvis.tools._export.saved_queries import save
 
 		result["result_id"] = save(spec, preserve_limit=bool(spec.get("limit")))
 		result["partial"] = True
-		result["note"] = (
-			"This answer is partial. To export the requested result, call "
-			f"export_query(result_id='{result['result_id']}'). Data is fresh at export time."
-		)
+		result["note"] = _saved_note(result["result_id"], spec.get("limit"))
 	return result
+
+
+# Budget events that mean the answer was cut (see _result_guard.enforce_result_budget).
+_CUTTING_EVENTS = ("truncated", "uncapped_nonrow")
+
+
+def _saved_note(result_id: str, limit) -> str:
+	"""How to get the whole result. An explicit limit stays in the saved query, so say so."""
+	call = f"export_query(result_id='{result_id}'). Data is fresh at export time."
+	if limit:
+		return (
+			f"This answer is partial. To export every row of this query (its limit of {limit} stays), "
+			f"call {call}"
+		)
+	return f"This answer is partial. For every matching row, call {call}"
 
 
 def compile_spec(spec: dict):
