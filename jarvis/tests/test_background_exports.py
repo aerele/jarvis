@@ -2,9 +2,12 @@
 
 import csv
 import datetime
+import errno
 import inspect
 import json
+import os
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -145,6 +148,20 @@ class TestSavedQueries(FrappeTestCase):
 		frappe.cache().delete_value("jarvis:query:" + key)
 		with self.assertRaisesRegex(InvalidArgumentError, "expired"):
 			saved_queries.resolve(key)
+
+	def test_saved_result_read_is_fresh(self):
+		frappe.set_user("Administrator")
+		key = saved_queries.save({"from": "ToDo"})
+		try:
+			# Populates any request-local copy of the key.
+			saved_queries.resolve(key)
+			# Straight to Redis, as another worker or the TTL would: the local copy stays behind.
+			cache = frappe.cache()
+			cache.delete(cache.make_key("jarvis:query:" + key))
+			with self.assertRaisesRegex(InvalidArgumentError, "expired"):
+				saved_queries.resolve(key)
+		finally:
+			frappe.cache().delete_value("jarvis:query:" + key)
 
 	def test_partial_only_ids_at_row_and_character_limits(self):
 		from jarvis.tools._result_guard import enforce_result_budget
@@ -1148,6 +1165,69 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			export_query(spec={"from": "DocType", "select": ["name"], "limit": 2}, format="csv")
 		self.assertIn("Narrow", str(ctx.exception))
 		self.assertIn("Start it from a Jarvis chat", str(ctx.exception))
+
+	def test_cancel_after_ready_does_not_flag_the_job(self):
+		job = self.ready_job()
+		real = jobs._get_job
+		stale = real(job.name)
+		stale.status, stale.started_at = "running", jobs.now_datetime()
+		seen = []
+
+		def lagging(name, **kwargs):
+			# The first two reads (owner check, locked re-read) see the job as still running:
+			# the publish committed in between. The fenced write must not flag it.
+			seen.append(kwargs)
+			return stale if len(seen) <= 2 else real(name, **kwargs)
+
+		with patch.object(jobs, "_get_job", side_effect=lagging), patch.object(jobs, "dispatch"):
+			state = jobs.cancel(job.name)
+		self.assertTrue(seen[1].get("for_update"))
+		self.assertEqual(state["status"], "ready")
+		self.assertFalse(job.reload().cancel_requested)
+		self.assertEqual(job.status, "ready")
+
+	def test_cancel_still_flags_a_running_job(self):
+		job = self.job(started_at=jobs.now_datetime())
+		with patch.object(jobs, "dispatch"):
+			jobs.cancel(job.name)
+		self.assertTrue(job.reload().cancel_requested)
+
+	def test_publish_falls_back_to_copy_across_devices(self):
+		files = Path(frappe.get_site_path("private", "files"))
+		spool = Path(frappe.get_site_path("private", "jarvis_exports"))
+		real_link, real_copy, real_get = os.link, shutil.copyfile, frappe.db.get_value
+		events = []
+
+		def across_devices(source, target, *args, **kwargs):
+			if Path(source).is_relative_to(spool):
+				events.append("link-refused")
+				raise OSError(errno.EXDEV, "Invalid cross-device link")
+			return real_link(source, target, *args, **kwargs)
+
+		def copy(source, target, *args, **kwargs):
+			events.append("copy")
+			return real_copy(source, target, *args, **kwargs)
+
+		def get_value(*args, **kwargs):
+			if kwargs.get("for_update"):
+				events.append("lock")
+			return real_get(*args, **kwargs)
+
+		job = self.job()
+		with (
+			patch.object(jobs.os, "link", side_effect=across_devices),
+			patch.object(jobs.shutil, "copyfile", side_effect=copy),
+			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		job.reload()
+		self.assertEqual(job.status, "ready", job.error)
+		self.assertEqual(events[:2], ["link-refused", "copy"])
+		self.assertLess(events.index("copy"), events.index("lock"))
+		with open(frappe.get_doc("File", job.file).get_full_path(), newline="") as source:
+			self.assertEqual(len(list(csv.reader(source))), 3)
+		self.assertEqual(list(files.glob("jarvis-export-tmp-*")), [])
 
 	def test_public_state_carries_the_card_fields(self):
 		before = jobs.now_datetime() - datetime.timedelta(seconds=2)
