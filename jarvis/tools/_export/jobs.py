@@ -658,7 +658,9 @@ def _execute(job, token, directory):
 			# Expose the running attempt before starting its independent heartbeat connection.
 			_commit()
 			row_cap, size_cap = limits()
-			prepared = prepare(json.loads(job.source), row_cap, json.loads(job.highlights or "null"))
+			prepared = prepare(
+				json.loads(job.source), row_cap, json.loads(job.highlights or "null"), title=job.title
+			)
 			directory.mkdir(parents=True, exist_ok=False, mode=0o700)
 			path = directory / "export.part"
 			db = MariaDBStream(connection_settings())

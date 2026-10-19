@@ -239,6 +239,49 @@ def _xlsx_number(v) -> bool:
 	return isinstance(v, (int, float, Decimal)) and not isinstance(v, bool)
 
 
+def xlsx_date_formats() -> tuple[str, str, str]:
+	"""``(date, datetime, time)`` number formats the immediate export writes on this bench.
+
+	Frappe 16 reads them from ``XLSXStyleBuilder``. Frappe 15 has none: its openpyxl
+	path gets the same pair from ``get_excel_date_format`` (which turns ``mm`` into
+	``MM`` for Excel). Both import lazily, as xlsxwriter must stay out of module
+	import on 15."""
+	try:
+		from frappe.utils.xlsxutils import XLSXStyleBuilder
+	except ImportError:
+		from frappe.utils.xlsxutils import get_excel_date_format
+
+		date_format, time_format = get_excel_date_format()
+		return date_format, f"{date_format} {time_format}", time_format
+	return (
+		XLSXStyleBuilder.get_date_format(),
+		XLSXStyleBuilder.get_datetime_format(),
+		XLSXStyleBuilder.get_time_format(),
+	)
+
+
+def xlsx_cell_style(value, kind: str) -> str | None:
+	"""How one cell is formatted: ``"datetime"``, ``"date"``, ``"time"``, ``"int"``,
+	``"float"`` or ``None`` (as written). The rule every workbook writer shares.
+
+	A date or time is formatted by its own type, wherever it sits. A number takes its
+	column's kind (``kind`` from :func:`_sheet_layout`), so a code in a text column
+	stays as written. MariaDB returns a Time field as a ``timedelta``."""
+	import datetime
+
+	if isinstance(value, datetime.datetime):  # a date subclass: test it first
+		return "datetime"
+	if isinstance(value, datetime.date):
+		return "date"
+	if isinstance(value, (datetime.time, datetime.timedelta)):
+		return "time"
+	if kind in ("int", "float") and _xlsx_number(value):
+		# A writer that fixed the kind from a sample can meet a decimal in an "int" column:
+		# it keeps its decimals rather than showing them rounded.
+		return "int" if kind == "int" and isinstance(value, int) else "float"
+	return None
+
+
 def xlsx_bytes(sheet_data: list[tuple[str, list]], *, charts=None, highlights=None) -> bytes:
 	"""Build a one-or-many-tab .xlsx workbook and return its bytes.
 
@@ -349,7 +392,13 @@ def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]], *, charts=None, hig
 
 	wb = openpyxl.Workbook(write_only=True)
 	date_format, time_format = get_excel_date_format()
-	number_formats = {"int": XLSX_INT_FORMAT, "float": XLSX_FLOAT_FORMAT}
+	# No "time" entry: openpyxl gives a time or timedelta its own format.
+	cell_formats = {
+		"datetime": f"{date_format} {time_format}",
+		"date": date_format,
+		"int": XLSX_INT_FORMAT,
+		"float": XLSX_FLOAT_FORMAT,
+	}
 
 	for index, (sheet_name, data) in enumerate(sheet_data):
 		ws = wb.create_sheet(INVALID_TITLE_REGEX.sub(" ", sheet_name))
@@ -368,18 +417,13 @@ def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]], *, charts=None, hig
 				value = handle_html(item) if isinstance(item, str) else item
 				if isinstance(value, str) and next(ILLEGAL_CHARACTERS_RE.finditer(value), None):
 					value = ILLEGAL_CHARACTERS_RE.sub("", value)
-				kind = kinds[c] if c < len(kinds) else "text"
+				# the header row takes no number format (a date there keeps its own)
+				kind = kinds[c] if r and c < len(kinds) else "text"
+				number_format = cell_formats.get(xlsx_cell_style(value, kind))
 				cell = None
-				if isinstance(value, datetime.date):  # datetime is a date subclass
+				if number_format:
 					cell = WriteOnlyCell(ws, value=value)
-					cell.number_format = (
-						f"{date_format} {time_format}"
-						if isinstance(value, datetime.datetime)
-						else date_format
-					)
-				elif r and kind in number_formats and _xlsx_number(value):
-					cell = WriteOnlyCell(ws, value=value)
-					cell.number_format = number_formats[kind]
+					cell.number_format = number_format
 				if r == 0:
 					# the row-level font above does not reach written cells in a
 					# write-only sheet; bold each header cell itself
