@@ -79,10 +79,9 @@ export function markDraftBaseline(model) {
 	return model;
 }
 
-// Whether closing the panel would lose something: a value changed since it opened, or
-// a failed save's error and marked fields still showing. A model with no baseline
-// (never opened as a panel) is never dirty.
+// Whether closing the panel would lose the person's work: a value changed since it
+// opened. A model with no baseline (never opened as a panel) is never dirty.
 export function draftIsDirty(model) {
 	if (!model || model.baseline === undefined) return false;
-	return !!model.error || JSON.stringify(draftValues(model)) !== model.baseline;
+	return JSON.stringify(draftValues(model)) !== model.baseline;
 }

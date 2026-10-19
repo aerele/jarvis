@@ -7411,13 +7411,10 @@ async function openDraftPanel(a) {
 	const actionKey = draftActionKey(a);
 	// The panel already edits this very draft (Edit clicked again, a failed Confirm, or
 	// the agent re-sending the same proposal): keep it, with the person's edits and the
-	// marked fields, instead of rebuilding it from the agent's proposal. Returns whether
-	// it rebuilt.
-	const open = openPanelFor(draftPanel.value, actionKey);
-	if (open) {
-		stampDraftModel(open, { messageKey, card, editable: true, actionKey });
-		return false;
-	}
+	// marked fields, instead of rebuilding it from the agent's proposal. Its stamp stays
+	// too, so the draft keeps one identity for parking and the server's once-per-draft
+	// note. Returns whether it rebuilt.
+	if (openPanelFor(draftPanel.value, actionKey)) return false;
 	let model;
 	// Deliberate: swallow to the SAME dead-end the old `if (!model) return` gave, so
 	// a guard throw cannot escape a @click handler. The summary card already shows
@@ -7446,9 +7443,9 @@ function addDraftRow(ti) {
 function removeDraftRow(ti, ri) {
 	draftPanel.value.tables[ti].rows.splice(ri, 1);
 }
-// A click outside the panel closes it only when nothing would be lost. With edits, or
-// a failed save's marked fields, it stays open (the dimmed chat behind it, its card's
-// buttons included, is not a way out); the X still closes it on purpose.
+// A click outside the panel closes it only when nothing would be lost. With edits it
+// stays open (the dimmed chat behind it, its card's buttons included, is not a way
+// out); the X still closes it on purpose.
 function dismissDraftPanel() {
 	if (draftIsDirty(draftPanel.value)) {
 		if (draftPanelEl.value) draftPanelEl.value.focus();
