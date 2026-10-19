@@ -68,7 +68,29 @@ from .theme import HEADER_RESERVE_MM, cover_height_pt
 
 _SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
 
-_DEFER_FAILURE_LOGGING: ContextVar[bool] = ContextVar("pdf_defer_failure_logging", default=False)
+RENDER_FAILURE_CAUSES = frozenset(
+	{
+		"binary_missing",
+		"binary_exec_failed",
+		"timeout",
+		"render_nonzero_exit",
+		"output_empty",
+		"output_invalid",
+		"render_failed",
+	}
+)
+_FAILURE_CAUSES = RENDER_FAILURE_CAUSES | frozenset(
+	{
+		"letterhead_unexpected",
+		"company_lookup_failed",
+		"company_address_failed",
+		"letterhead_lookup_failed",
+		"company_footer_too_large",
+		"company_footer_failed",
+		"letterhead_too_large",
+	}
+)
+_DEFER_FAILURE_LOGGING: ContextVar[set[str] | None] = ContextVar("pdf_defer_failure_logging", default=None)
 
 
 @contextlib.contextmanager
@@ -78,9 +100,10 @@ def defer_failure_logging():
 	Context-local so a concurrent document render retains its normal diagnostics;
 	the caller must catch failures and write its metadata-only deferred Error Log.
 	"""
-	token = _DEFER_FAILURE_LOGGING.set(True)
+	causes: set[str] = set()
+	token = _DEFER_FAILURE_LOGGING.set(causes)
 	try:
-		yield
+		yield causes
 	finally:
 		_DEFER_FAILURE_LOGGING.reset(token)
 
@@ -258,29 +281,31 @@ def render_pdf(
 		except subprocess.TimeoutExpired as exc:
 			# Hard bound hit: the child was killed, no usable output. Surface a
 			# clean, actionable error rather than the raw TimeoutExpired.
-			_log_infra_failure("rich-pdf render timed out", f"exceeded {timeout}s")
+			_log_infra_failure("rich-pdf render timed out", f"exceeded {timeout}s", cause="timeout")
 			raise InvalidArgumentError(f"PDF render exceeded {timeout}s — reduce content/charts") from exc
 		except OSError as exc:
 			# The resolved binary failed to EXECUTE (not-executable, bad format,
 			# removed between resolve and run, fork failure under memory pressure).
-			_log_infra_failure("rich-pdf binary failed to execute", str(exc))
+			_log_infra_failure("rich-pdf binary failed to execute", str(exc), cause="binary_exec_failed")
 			raise InvalidArgumentError("PDF render could not start — the renderer failed to execute") from exc
 
 		if result.returncode != 0:
 			# stderr can carry the /tmp/jv-pdf-<hash>.html temp path — log it for
 			# operators, but keep it OUT of the user-facing message.
 			tail = (result.stderr or b"").decode("utf-8", "replace").strip()[-500:]
-			_log_infra_failure(f"rich-pdf render exit {result.returncode}", tail)
+			_log_infra_failure(f"rich-pdf render exit {result.returncode}", tail, cause="render_nonzero_exit")
 			raise InvalidArgumentError(f"PDF render failed (renderer exited {result.returncode})")
 		if not result.stdout:
 			# A zero-byte result is a failed render, never a valid empty PDF.
 			tail = (result.stderr or b"").decode("utf-8", "replace").strip()[-500:]
-			_log_infra_failure("rich-pdf render produced no output", tail)
+			_log_infra_failure("rich-pdf render produced no output", tail, cause="output_empty")
 			raise InvalidArgumentError("PDF render produced no output")
 		if not result.stdout.startswith(b"%PDF-"):
 			# Non-empty but not a PDF: a corrupt/error render slipping past exit 0.
 			_log_infra_failure(
-				"rich-pdf render output is not a PDF", result.stdout[:80].decode("latin-1", "replace")
+				"rich-pdf render output is not a PDF",
+				result.stdout[:80].decode("latin-1", "replace"),
+				cause="output_invalid",
 			)
 			raise InvalidArgumentError("PDF render produced invalid output (not a PDF)")
 		return result.stdout
@@ -307,7 +332,9 @@ def _resolve_binary() -> str:
 	path = shutil.which("wkhtmltopdf")
 	if path:
 		return path
-	_log_infra_failure("rich-pdf binary not found", "wkhtmltopdf missing from PATH and pdfkit config")
+	_log_infra_failure(
+		"rich-pdf binary not found", "wkhtmltopdf missing from PATH and pdfkit config", cause="binary_missing"
+	)
 	raise InvalidArgumentError(
 		"wkhtmltopdf binary not found — rich PDF rendering needs wkhtmltopdf "
 		"(present on the Frappe Cloud bench; absent in local dev)"
@@ -489,7 +516,9 @@ def resolve_brand(letterhead: str | None) -> dict:
 	except Exception:
 		# resolve_letterhead is contracted never to raise; if a future change ever
 		# breaks that, degrade to no logo but leave a signal, not a silent swallow.
-		_log_infra_failure("rich-pdf letterhead resolution raised unexpectedly", "")
+		_log_infra_failure(
+			"rich-pdf letterhead resolution raised unexpectedly", "", cause="letterhead_unexpected"
+		)
 		logo_html, footer_logo, note = "", "", None
 	company, address_lines, company_note = _resolve_company_identity()
 	return {
@@ -525,13 +554,15 @@ def _resolve_company_identity() -> tuple[str | None, list[str], str | None]:
 			return None, [], None
 		company_name = frappe.db.get_value("Company", company, "company_name") or company
 	except Exception as exc:
-		_log_infra_failure("rich-pdf company resolution failed", str(exc))
+		_log_infra_failure("rich-pdf company resolution failed", str(exc), cause="company_lookup_failed")
 		return None, [], "company branding could not be resolved — rendered without it"
 	# The address is a nice-to-have; a transient error here must not drop the name.
 	try:
 		address_lines = _resolve_company_address_lines(company)
 	except Exception as exc:
-		_log_infra_failure("rich-pdf company address resolution failed", str(exc))
+		_log_infra_failure(
+			"rich-pdf company address resolution failed", str(exc), cause="company_address_failed"
+		)
 		address_lines = []
 	return company_name, address_lines, None
 
@@ -686,7 +717,9 @@ def resolve_letterhead(letterhead: str | None) -> tuple[str, str, str | None]:
 		return header, footer, None
 	except Exception:
 		# Letterhead is a nicety, never a hard failure of the export.
-		_log_infra_failure("rich-pdf letterhead resolution failed", f"letterhead={named!r}")
+		_log_infra_failure(
+			"rich-pdf letterhead resolution failed", f"letterhead={named!r}", cause="letterhead_lookup_failed"
+		)
 		return "", "", (f"letterhead {named!r} could not be applied" if named else None)
 
 
@@ -746,12 +779,20 @@ def resolve_company_letterhead_footer(
 		if not raw.strip():
 			return "", None
 		if len(raw) > _MAX_FURNITURE_CHARS:
-			_log_infra_failure("rich-pdf company letterhead footer too large", f"{len(raw)} chars")
+			_log_infra_failure(
+				"rich-pdf company letterhead footer too large",
+				f"{len(raw)} chars",
+				cause="company_footer_too_large",
+			)
 			return "", "letter head footer is too large — rendered without it"
 		footer_html = sanitize_letterhead(_inline_letterhead_images(_render_company_footer(raw, comp)))
 		return footer_html, None
 	except Exception:
-		_log_infra_failure("rich-pdf company letterhead footer failed", f"company={comp!r} lh={lh_name!r}")
+		_log_infra_failure(
+			"rich-pdf company letterhead footer failed",
+			f"company={comp!r} lh={lh_name!r}",
+			cause="company_footer_failed",
+		)
 		return "", "letter head footer could not be applied"
 
 
@@ -792,7 +833,7 @@ def _letterhead_logos(raw: str) -> str:
 	if not raw or "<img" not in raw.lower():
 		return ""
 	if len(raw) > _MAX_FURNITURE_CHARS:
-		_log_infra_failure("rich-pdf letterhead too large", f"{len(raw)} chars")
+		_log_infra_failure("rich-pdf letterhead too large", f"{len(raw)} chars", cause="letterhead_too_large")
 		return ""
 	return "".join(_IMG_TAG_RE.findall(raw))
 
@@ -919,11 +960,13 @@ def _remove_quietly(path: str) -> None:
 		os.remove(path)
 
 
-def _log_infra_failure(title: str, message: str) -> None:
+def _log_infra_failure(title: str, message: str, *, cause: str = "render_failed") -> None:
 	"""Write an infra-caused render failure to the Error Log, best-effort. Logging
 	must NEVER replace the real error the caller is about to raise, so every failure
 	here (including a missing site in a unit test) is swallowed."""
-	if _DEFER_FAILURE_LOGGING.get():
+	causes = _DEFER_FAILURE_LOGGING.get()
+	if causes is not None:
+		causes.add(cause if cause in _FAILURE_CAUSES else "render_failed")
 		return
 	with contextlib.suppress(Exception):
 		frappe.log_error(title=f"jarvis.rich_pdf: {title}"[:140], message=message or title)

@@ -25,7 +25,19 @@ export async function downloadConversation(conversation, format) {
 		const message =
 			messageText(firstServerMessage(payload?._server_messages)) ||
 			__("Couldn't download this chat. Try again.");
-		throw Object.assign(new Error(message), { status: response.status });
+		const excType =
+			typeof payload?.exc_type === "string" &&
+			/^[A-Za-z_][A-Za-z0-9_]{0,79}$/.test(payload.exc_type)
+				? payload.exc_type
+				: undefined;
+		const expectedRefusal =
+			[401, 403, 404, 429].includes(response.status) ||
+			(response.status >= 400 && response.status < 500 && excType === "_ExportRefusedError");
+		throw Object.assign(new Error(message), {
+			status: response.status,
+			...(excType ? { exc_type: excType } : {}),
+			expectedRefusal,
+		});
 	}
 	const contentType = (response.headers.get("Content-Type") || "").split(";")[0].trim();
 	if (contentType !== (format === "pdf" ? "application/pdf" : "text/markdown")) {
