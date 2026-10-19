@@ -451,6 +451,34 @@ class TestDispatch(_TriggerTestCase):
 			engine._flush_llm_queue()
 		self.assertEqual(enq.call_count, 2)
 
+	def test_a_cache_failure_still_queues_every_job(self):
+		# The queue count is a guard, not the authority: losing it must not lose jobs.
+		self._make_llm_trigger(cap=1)
+		self._burst(3)
+		with (
+			patch.object(llm_action, "_bump", side_effect=ConnectionError("cache down")),
+			patch("frappe.enqueue") as enq,
+		):
+			engine._flush_llm_queue()
+		self.assertEqual(enq.call_count, 3)
+
+	def test_a_job_for_a_disabled_trigger_gives_its_slot_back(self):
+		trig = self._make_llm_trigger(cap=1)
+		self._burst(2)
+		with patch("frappe.enqueue"):
+			engine._flush_llm_queue()
+		self.assertEqual(llm_action.queued_count(trig.name), 2)
+		frappe.db.set_value(TRIGGER, trig.name, "enabled", 0, update_modified=False)
+		llm_action.run_llm_action(
+			trigger=trig.name,
+			doctype="ToDo",
+			docname="x",
+			doc_event="on_update",
+			snapshot_json="{}",
+			fired_by="Administrator",
+		)
+		self.assertEqual(llm_action.queued_count(trig.name), 1)
+
 	def test_llm_snapshot_filters_private_keys(self):
 		self._make_llm_trigger()
 		todo = self._make_todo()
