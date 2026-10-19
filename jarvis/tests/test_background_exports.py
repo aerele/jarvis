@@ -1149,6 +1149,31 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		self.assertIn("Narrow", str(ctx.exception))
 		self.assertIn("Start it from a Jarvis chat", str(ctx.exception))
 
+	def test_public_state_carries_the_card_fields(self):
+		before = jobs.now_datetime() - datetime.timedelta(seconds=2)
+		with (
+			patch.object(jobs, "current_conversation", return_value=self.conversation),
+			patch.object(jobs, "dispatch"),
+		):
+			state = jobs.enqueue({"spec": {"from": "ToDo", "select": ["name", "owner"]}}, "csv")
+		self.names.append(state["export_job"])
+		fresh = jobs.get_jobs([state["export_job"]])[state["export_job"]]
+		for shown in (state, fresh):
+			self.assertEqual(shown["source_doctype"], "ToDo")
+			self.assertEqual(shown["column_count"], 2)
+			self.assertEqual((shown["attempts"], shown["retries"]), (0, 0))
+			self.assertTrue(shown["asked_at"].endswith("+00:00"))
+			asked = frappe.utils.get_datetime(shown["asked_at"].replace("+00:00", ""))
+			self.assertGreaterEqual(asked, before)
+			self.assertIn("last 10 minutes", shown["note"])
+			self.assertNotIn("check its state", shown["note"])
+			self.assertNotIn("\u2014", shown["note"])
+		# Rows made before the fields existed stay readable: nothing raises, the card hides the parts.
+		old = self.job(status="queued", attempt_token="")
+		shown = jobs.public(old)
+		self.assertIsNone(shown["asked_at"])
+		self.assertEqual((shown["source_doctype"], shown["column_count"]), (None, 0))
+
 	def test_background_title_defaults_to_source_doctype(self):
 		with (
 			patch.object(jobs, "current_conversation", return_value=self.conversation),
