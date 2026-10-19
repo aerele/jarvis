@@ -1,7 +1,13 @@
 // The desktop draft save (round 2, R2-9): stamping, the payload, and what the screen does.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyActionPayload, draftSaveOutcome, stampDraftModel } from "./draftSave.js";
+import {
+	applyActionPayload,
+	draftActionKey,
+	draftSaveOutcome,
+	openPanelFor,
+	stampDraftModel,
+} from "./draftSave.js";
 
 const base = () => ({ verb: "create", doctype: "ToDo", docName: "", cont: 0 });
 
@@ -59,4 +65,35 @@ test("R2-9: a fixable failure never leaves neither panel nor card", () => {
 	]) {
 		assert.equal(draftSaveOutcome({ ok: false, error }).kind, "keep", error.message);
 	}
+});
+
+test("a proposal's key names what it would write", () => {
+	const a = {
+		verb: "create",
+		doctype: "Sales Order",
+		fields: [{ fieldname: "customer", value: "C1" }],
+	};
+	assert.equal(draftActionKey(a), draftActionKey({ ...a }));
+	assert.equal(
+		draftActionKey({ ...a, verb: undefined }),
+		draftActionKey(a),
+		"create is the default verb"
+	);
+	const changed = { ...a, fields: [{ fieldname: "customer", value: "C2" }] };
+	assert.notEqual(draftActionKey(changed), draftActionKey(a));
+});
+
+test("the open panel is found only for the draft it edits", () => {
+	const key = draftActionKey({ verb: "create", doctype: "ToDo" });
+	const panel = stampDraftModel(base(), {
+		messageKey: "m1",
+		card: null,
+		editable: true,
+		actionKey: key,
+	});
+	assert.equal(openPanelFor(panel, key), panel);
+	assert.equal(openPanelFor(panel, draftActionKey({ verb: "create", doctype: "Note" })), null);
+	assert.equal(openPanelFor(null, key), null);
+	// a panel built before the key existed, or a card without one, never matches
+	assert.equal(openPanelFor(stampDraftModel(base(), { editable: true }), ""), null);
 });
