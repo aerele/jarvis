@@ -925,6 +925,68 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		self.assertIsNone(states["missing"])
 		self.assertEqual([c.args[0] for c in get_list.call_args_list], [jobs.DOCTYPE, "File"])
 
+	def test_kill_switch_refuses_enqueue_and_holds_the_queue(self):
+		source = {"spec": {"from": "DocType", "select": ["name"], "limit": 2}}
+		with patch.dict(frappe.conf, {"jarvis_background_export_disabled": 1}):
+			with self.assertRaisesRegex(jobs.BackgroundUnavailable, "turned off"):
+				jobs.enqueue(source, "csv")
+			# A queued job waits: dispatch() reserves nothing while the switch is on.
+			queued = self.job(status="queued", attempt_token="")
+			with (
+				patch("jarvis.chat.pump._probe_worker_count", return_value=3),
+				patch.object(frappe, "enqueue") as enqueue,
+			):
+				jobs.dispatch()
+			self.assertEqual(queued.reload().status, "queued")
+			self.assertEqual([c for c in enqueue.call_args_list if c.kwargs.get("name") == queued.name], [])
+			# An attempt reserved just before the flip goes back to the queue, unspent.
+			reserved = self.job()
+			with patch.object(jobs, "dispatch"):
+				jobs.run(reserved.name, "abc123")
+			reserved.reload()
+			self.assertEqual(reserved.status, "queued")
+			self.assertEqual(reserved.attempt_token or "", "")
+			self.assertEqual((reserved.retries or 0, reserved.attempts or 0), (0, 0))
+		# Without the switch the same queued job is reserved.
+		with (
+			patch("jarvis.chat.pump._probe_worker_count", return_value=3),
+			patch.object(frappe, "enqueue") as enqueue,
+		):
+			jobs.dispatch()
+		self.assertEqual(len([c for c in enqueue.call_args_list if c.kwargs.get("name") == queued.name]), 1)
+		self.assertEqual(queued.reload().status, "running")
+
+	def test_kill_switch_string_zero_is_off(self):
+		# bench set-config without -p stores "0" as a string; it must not disable exports.
+		source = {"spec": {"from": "DocType", "select": ["name"], "limit": 2}}
+		with (
+			patch.dict(frappe.conf, {"jarvis_background_export_disabled": "0"}),
+			patch.object(jobs, "_conversation", return_value=self.conversation),
+			patch.object(jobs, "dispatch"),
+		):
+			state = jobs.enqueue(source, "csv")
+		self.names.append(state["export_job"])
+		self.assertEqual(state["status"], "queued")
+
+	def test_xlsx_needs_xlsxwriter_but_csv_does_not(self):
+		source = {"spec": {"from": "DocType", "select": ["name"], "limit": 2}}
+		with (
+			patch.object(jobs, "_xlsxwriter_available", return_value=False),
+			patch.object(jobs, "_conversation", return_value=self.conversation),
+			patch.object(jobs, "dispatch"),
+		):
+			with self.assertRaisesRegex(jobs.BackgroundUnavailable, "export it as CSV"):
+				jobs.enqueue(source, "xlsx")
+			state = jobs.enqueue(source, "csv")
+			self.names.append(state["export_job"])
+			self.assertEqual(state["status"], "queued")
+			# A job queued before the package vanished fails with the same text, not a retry loop.
+			job = self.job(format="xlsx")
+			jobs.run(job.name, "abc123")
+		job.reload()
+		self.assertEqual(job.status, "failed")
+		self.assertIn("export it as CSV", job.error)
+
 
 class TestBackgroundFilterPermissions(FrappeTestCase):
 	@classmethod

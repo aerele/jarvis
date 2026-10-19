@@ -1,6 +1,7 @@
 """Durable background exports. All state transitions are fenced by an attempt token."""
 
 import contextlib
+import importlib.util
 import json
 import os
 import secrets
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import frappe
 from frappe.query_builder.functions import Coalesce
-from frappe.utils import add_to_date, get_datetime
+from frappe.utils import add_to_date, cint, get_datetime
 from pypika.terms import ExistsCriterion
 
 from jarvis.exceptions import InvalidArgumentError
@@ -103,11 +104,35 @@ def _lock():
 		frappe.db.sql("SELECT RELEASE_LOCK(%s)", (key,))
 
 
-def _supported():
+class BackgroundUnavailable(InvalidArgumentError):
+	"""A short, user-readable reason a background export cannot be started."""
+
+
+XLSXWRITER_MISSING = (
+	"Excel files this large need a server update (the xlsxwriter package). "
+	"I can export it as CSV instead, which works now."
+)
+
+
+def _xlsxwriter_available():
+	# Frappe 16 pins xlsxwriter; a Frappe 15 bench only has it after `bench setup requirements`.
+	return importlib.util.find_spec("xlsxwriter") is not None
+
+
+def kill_switch_on():
+	# cint, so a "0" stored as a string (bench set-config without -p) does not disable exports.
+	return bool(cint(frappe.conf.get("jarvis_background_export_disabled")))
+
+
+def _supported(fmt=None):
+	if kill_switch_on():
+		raise BackgroundUnavailable("Background exports are turned off on this site.")
 	if frappe.db.db_type != "mariadb":
-		raise InvalidArgumentError("Background exports require MariaDB. Narrow or split this export.")
+		raise BackgroundUnavailable("This site's database does not support background exports.")
 	if frappe.conf.maintenance_mode:
-		raise InvalidArgumentError("This site is being updated. Please export again after the update.")
+		raise BackgroundUnavailable("This site is being updated. Please export again after the update.")
+	if fmt == "xlsx" and not _xlsxwriter_available():
+		raise BackgroundUnavailable(XLSXWRITER_MISSING)
 
 
 def _conversation():
@@ -188,7 +213,7 @@ def _join(name):
 
 
 def enqueue(source, fmt, title=None, highlights=None):
-	_supported()
+	_supported(fmt)
 	frappe.has_permission(DOCTYPE, "read", throw=True)
 	conversation = _conversation()
 	prepared = prepare(source, limits()[0], highlights)
@@ -329,7 +354,8 @@ def cancel(name: str):
 
 
 def dispatch():
-	if frappe.conf.maintenance_mode or frappe.db.db_type != "mariadb":
+	# The kill switch holds the queue: queued jobs wait and resume when it is switched back off.
+	if frappe.conf.maintenance_mode or frappe.db.db_type != "mariadb" or kill_switch_on():
 		return
 	from jarvis.chat.pump import _probe_worker_count, _registry_is_stale
 
@@ -394,6 +420,19 @@ def _directory(name, token):
 	return Path(frappe.get_site_path("private", "jarvis_exports", name + "-" + token))
 
 
+def _return_to_queue(name, token):
+	"""Hand a reserved attempt back to the queue, unspent. Fenced: a stale token changes nothing."""
+	j = frappe.qb.DocType(DOCTYPE)
+	(
+		frappe.qb.update(j)
+		.set(j.status, "queued")
+		.set(j.attempt_token, "")
+		.set(j.started_at, None)
+		.where((j.name == name) & (j.attempt_token == token) & (j.status == "running"))
+	).run()
+	_commit()
+
+
 def _attempt(name, token):
 	row = frappe.db.get_value(DOCTYPE, name, ["attempt_token", "status", "cancel_requested"], as_dict=True)
 	return bool(row and row.attempt_token == token and row.status == "running" and not row.cancel_requested)
@@ -411,6 +450,7 @@ def run(name, token):
 	job = _get_job(name)
 	directory = _directory(name, token)
 	db = watchdog = None
+	handed_back = False
 	started = time.monotonic()
 	try:
 		with impersonate(job.owner):
@@ -418,6 +458,13 @@ def run(name, token):
 				raise ExportLimit("failed", "The export owner no longer has an active account.")
 			if frappe.conf.maintenance_mode:
 				raise ExportLimit("paused", "Paused for a site update; retrying in about five minutes.")
+			if kill_switch_on():
+				# An attempt reserved just before the flip waits in the queue. No retry is spent.
+				_return_to_queue(name, token)
+				handed_back = True
+				return
+			if job.format == "xlsx" and not _xlsxwriter_available():
+				raise ExportLimit("failed", XLSXWRITER_MISSING)
 			j = frappe.qb.DocType(DOCTYPE)
 			(
 				frappe.qb.update(j)
@@ -484,7 +531,7 @@ def run(name, token):
 			db.close()
 		if directory.exists():
 			shutil.rmtree(directory)
-		if frappe.db.exists(DOCTYPE, name):
+		if not handed_back and frappe.db.exists(DOCTYPE, name):
 			from jarvis.telemetry import record_export_event
 
 			finished = _get_job(name)
