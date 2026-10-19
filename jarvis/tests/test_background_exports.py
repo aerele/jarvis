@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from unittest import TestCase, expectedFailure
+from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -1693,9 +1693,8 @@ class TestExportGateParity(FrappeTestCase):
 
 	Each path is asserted on its own, against the text the immediate path gives today, so
 	deleting a check from one path cannot hide behind the other (a deleted DocType check makes
-	both fail later and alike, which an equality test would accept). The cases where the
-	background path words it differently today are expected failures; the refactor that gives
-	both paths one gate removes the decorator, and an unexpected success fails the run."""
+	both fail later and alike, which an equality test would accept). Both paths run the same
+	gate (``resolvers.authorize_spec`` / ``authorize_filter``)."""
 
 	def setUp(self):
 		super().setUp()
@@ -1711,7 +1710,7 @@ class TestExportGateParity(FrappeTestCase):
 		with self.assertRaisesRegex(error, text):
 			call()
 
-	# Unknown DocType: the background path fails later, in get_meta.
+	# Unknown DocType.
 	def test_unknown_doctype_immediate(self):
 		self.refused(
 			lambda: self.immediate(doctype="JV No Such", fields=["name"]),
@@ -1719,7 +1718,6 @@ class TestExportGateParity(FrappeTestCase):
 			"unknown DocType: JV No Such",
 		)
 
-	@expectedFailure
 	def test_unknown_doctype_background(self):
 		self.refused(
 			lambda: self.background(doctype="JV No Such", fields=["name"]),
@@ -1727,7 +1725,7 @@ class TestExportGateParity(FrappeTestCase):
 			"unknown DocType: JV No Such",
 		)
 
-	# fields=["*"]: the background path words it for its own plain-field rule.
+	# fields=["*"].
 	def test_star_fields_immediate(self):
 		self.refused(
 			lambda: self.immediate(doctype="ToDo", fields=["*"]),
@@ -1735,7 +1733,6 @@ class TestExportGateParity(FrappeTestCase):
 			"name the columns you want",
 		)
 
-	@expectedFailure
 	def test_star_fields_background(self):
 		self.refused(
 			lambda: self.background(doctype="ToDo", fields=["*"]),
@@ -1743,7 +1740,7 @@ class TestExportGateParity(FrappeTestCase):
 			"name the columns you want",
 		)
 
-	# A child table without its parent: the background path has a shorter text with no hint.
+	# A child table without its parent: the text names a parent to use.
 	def test_child_table_without_parent_immediate(self):
 		self.refused(
 			lambda: self.immediate(doctype="DocField", fields=["fieldname"]),
@@ -1751,7 +1748,6 @@ class TestExportGateParity(FrappeTestCase):
 			"is a child table; pass parent_doctype",
 		)
 
-	@expectedFailure
 	def test_child_table_without_parent_background(self):
 		self.refused(
 			lambda: self.background(doctype="DocField", fields=["fieldname"]),
@@ -1759,7 +1755,7 @@ class TestExportGateParity(FrappeTestCase):
 			"is a child table; pass parent_doctype",
 		)
 
-	# The cases below already agree; they stay plain tests through the refactor.
+	# Permission and masking refusals.
 	def test_no_export_permission_on_both_paths(self):
 		with patch("frappe.permissions.can_export", return_value=False):
 			for call in (
@@ -1767,6 +1763,18 @@ class TestExportGateParity(FrappeTestCase):
 				lambda: self.background(doctype="ToDo", fields=["name"]),
 			):
 				self.refused(call, PermissionDeniedError, "no export permission on ToDo")
+
+	def test_child_export_checks_the_parent_on_both_paths(self):
+		# The Export permission of a child table lives on its parent.
+		def only_user_is_denied(doctype, *args, **kwargs):
+			return doctype != "User"
+
+		with patch("frappe.permissions.can_export", side_effect=only_user_is_denied):
+			for call in (
+				lambda: self.immediate(doctype="Has Role", parent_doctype="User", fields=["role"]),
+				lambda: self.background(doctype="Has Role", parent_doctype="User", fields=["role"]),
+			):
+				self.refused(call, PermissionDeniedError, "no export permission on User")
 
 	def test_no_read_permission_on_both_paths(self):
 		with patch.object(frappe, "has_permission", return_value=False):
