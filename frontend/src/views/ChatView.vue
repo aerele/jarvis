@@ -3293,7 +3293,7 @@
 								<span v-if="groundNextTurn">Wiki</span>
 							</button>
 							<!-- Connector-focus pill: scope this conversation to one connected +
-							     enabled app (soft prompt-level nudge — see sendCtx.focus_connector
+							     enabled app (the bench limits the turn's tools to it, see sendCtx.focus_connector
 							     in send()). Connectors are a default feature, so this is always
 							     shown, even before the first app is connected, so the picker's
 							     "Browse connectors" row is the way in; a focus already armed still
@@ -5345,10 +5345,10 @@ watch(
 		if (!convAutoMode.value && autoView.value.visible) autoModeArmed.value = !!v;
 	}
 );
-// Connector-focus pill (composer control, MCP_CONNECTORS_PLAN.md): a soft
-// prompt-level nudge scoping this conversation to ONE connected+enabled
-// connector — NOT tool gating, the agent can still reach for anything, this
-// only tells it what to prefer. { key, label, preset } | null. Persisted per
+// Connector-focus pill (composer control, MCP_CONNECTORS_PLAN.md): scopes this
+// conversation to ONE connected+enabled connector. Each turn sent with it is
+// bound to that connector: the bench refuses every other tool for the turn
+// (jarvis.chat.connector_focus). { key, label, preset } | null. Persisted per
 // conversation (see connectorFocusStore below) so it survives across turns
 // until the user clears it, unlike the one-shot groundNextTurn above.
 const connectorFocus = ref(null);

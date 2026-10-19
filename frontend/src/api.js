@@ -446,8 +446,8 @@ export async function sendMessage(
 	// wiki" flag (which can arrive without a doc), a page marker ("triggers" /
 	// "dashboards") that primes the agent for that surface's flow from the main
 	// chat, OR the composer's connector-focus pill ({key, label} of the one
-	// connector the user scoped this turn to — a soft prompt-level nudge, never
-	// tool gating). The backend re-applies the same allow-list
+	// connector the user scoped this turn to; the bench limits the turn's tools
+	// to that connector). The backend re-applies the same allow-list
 	// (chat.api.send_message).
 	if (
 		context &&
