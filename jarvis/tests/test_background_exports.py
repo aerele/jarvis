@@ -198,6 +198,54 @@ class TestSavedQueries(FrappeTestCase):
 		self.assertNotIn("partial", result)
 		self.assertNotIn("result_id", result)
 
+	def test_top_n_saved_id_note_keeps_the_limit(self):
+		from jarvis.tools._result_guard import enforce_result_budget
+		from jarvis.tools.query import query
+
+		with patch("jarvis.tools.query.compile_spec") as compile_query:
+			q = compile_query.return_value
+			q.limit.return_value = q
+			q.get_sql.return_value = "SELECT"
+			q.run.return_value = [{"name": "x" * 40_000}]
+			top_n = query({"from": "ToDo", "limit": 5000})
+			q.run.return_value = [{"name": "one"}] * 3
+			with patch("jarvis.tools.query.DEFAULT_LIMIT", 2):
+				uncapped = query({"from": "ToDo"})
+		for result, rule in ((top_n, "its limit of 5000 stays"), (uncapped, "For every matching row")):
+			guarded, _ = enforce_result_budget(result, "query")
+			for shown in (result, guarded):
+				with self.subTest(rule=rule, where="query" if shown is result else "guard"):
+					self.assertIn(rule, shown["note"])
+					self.assertIn(f"result_id='{result['result_id']}'", shown["note"])
+		# The guard keeps the query's own sentence instead of restating a rule that is not true.
+		self.assertNotIn("For every matching row", enforce_result_budget(top_n, "query")[0]["note"])
+		self.assertIn("Never rebuild", enforce_result_budget(top_n, "query")[0]["note"])
+
+	def test_uncapped_budget_event_is_not_partial(self):
+		from jarvis.tools.query import query
+
+		for kind, minted in (
+			("uncapped", False),
+			("measure_failed", False),
+			("truncated", True),
+			("uncapped_nonrow", True),
+		):
+			with (
+				self.subTest(kind=kind),
+				patch("jarvis.tools.query.compile_spec") as compile_query,
+				patch(
+					"jarvis.tools._result_guard.enforce_result_budget",
+					return_value=({}, {"kind": kind}),
+				),
+			):
+				q = compile_query.return_value
+				q.limit.return_value = q
+				q.get_sql.return_value = "SELECT"
+				q.run.return_value = [{"name": "one"}]
+				result = query({"from": "ToDo", "limit": 2})
+				self.assertEqual("result_id" in result, minted)
+				self.assertEqual("partial" in result, minted)
+
 	def test_result_id_survives_site_cache_clear_with_its_ttl(self):
 		frappe.set_user("Administrator")
 		key = saved_queries.save({"from": "ToDo"})
