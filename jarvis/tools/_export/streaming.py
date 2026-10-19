@@ -36,6 +36,8 @@ class Prepared:
 	limit: int | None
 	number_format: str = "#,##0.00"
 	spool_cap: int = 1024 * 1024 * 1024
+	# The DocType the rows come from (a spec's FROM table); the default title of the export.
+	doctype: str = ""
 
 
 def _fieldtype(item, tables):
@@ -128,6 +130,7 @@ def prepare(source, row_cap, highlights=None):
 		masking.refuse_masked_expressions(columns, q, masked)
 		sql, params = q.walk()
 		limit = spec.get("limit")
+		source_doctype = next(iter(tables.values()))
 	else:
 		from jarvis.tools.get_list import assert_child_query_fields_readable
 
@@ -159,6 +162,7 @@ def prepare(source, row_cap, highlights=None):
 		types = [_fieldtype(f, {"base": dt}) for f in fields]
 		masked = masking.masked_fields({"base": dt}, {"base": parent})
 		limit = None
+		source_doctype = dt
 	labels = resolvers._unique_headers(columns)
 	model = ExportModel(columns=[c.key for c in columns], rows=[], total=0, meta={"headers": labels})
 	from frappe.utils.xlsxutils import ILLEGAL_CHARACTERS_RE, handle_html
@@ -180,6 +184,7 @@ def prepare(source, row_cap, highlights=None):
 		limit,
 		"#,##0." + "0" * min(12, max(0, int(frappe.get_system_settings("float_precision") or 2))),
 		int(frappe.conf.get("jarvis_export_spool_max_mb", 1024)) * 1024 * 1024,
+		source_doctype,
 	)
 
 

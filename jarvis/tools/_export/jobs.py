@@ -240,7 +240,7 @@ def enqueue(source, fmt, title=None, highlights=None):
 					"doctype": DOCTYPE,
 					"owner": frappe.session.user,
 					"conversation": conversation,
-					"title": (title or "Export")[:140],
+					"title": (title or prepared.doctype or "Export")[:140],
 					"format": fmt,
 					"source": json.dumps(source),
 					"highlights": json.dumps(highlights),
