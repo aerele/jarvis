@@ -440,6 +440,9 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo=None,
 		help_url=None,
 		hint=None,
+		# Its sign-in service only accepts return addresses on a fixed host list (localhost,
+		# claude.ai, chatgpt.com, pipedrive.com), so a tenant host can never register.
+		enabled=False,
 	),
 	# --- commerce ------------------------------------------------------------
 	Provider(
@@ -738,7 +741,12 @@ PROVIDERS: tuple[Provider, ...] = (
 		category="support",
 		logo="intercom",
 		help_url="https://developers.intercom.com/docs/build-an-integration/learn-more/authentication",
-		hint="Paste an access token from your Intercom developer hub.",
+		# Intercom checks the token only when a tool runs (probed 2026-10-18), so the
+		# Test passes with any token; say so on the key card.
+		hint=(
+			"Paste an access token from your Intercom developer hub. It is checked "
+			"only when an action runs, so a wrong token looks connected until then."
+		),
 	),
 	Provider(
 		name="Zendesk",

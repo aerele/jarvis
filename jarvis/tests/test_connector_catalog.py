@@ -703,6 +703,17 @@ class TestGapAnalysisEntries(unittest.TestCase):
 		self.assertFalse(catalog.by_name("Shopify").enabled)
 		self.assertNotIn("Shopify", catalog.preset_names())
 
+	def test_pipedrive_ships_switched_off(self):
+		# Its sign-in service registers only a fixed list of return hosts, never a
+		# tenant's (probed 2026-10-18).
+		self.assertFalse(catalog.by_name("Pipedrive").enabled)
+		self.assertNotIn("Pipedrive", catalog.preset_names())
+
+	def test_intercom_hint_warns_the_token_is_checked_on_first_use(self):
+		# Intercom accepts any token until a tool runs, so the Test passes with a
+		# wrong one; the key card has to say so.
+		self.assertIn("checked only when an action runs", catalog.by_name("Intercom").hint)
+
 	def test_docusign_requests_only_the_esignature_floor(self):
 		self.assertEqual(catalog.by_name("Docusign").scopes, "signature")
 

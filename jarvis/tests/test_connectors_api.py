@@ -337,14 +337,14 @@ class TestListConnectorsCatalog(_ConnectorApiTestCase):
 		entries = connectors_api.list_connectors()["catalog"]
 
 		self.assertEqual(len(entries), sum(1 for p in catalog.PROVIDERS if p.enabled))
-		self.assertEqual(len(entries), 40, "the SPA is built against this count")
+		self.assertEqual(len(entries), 39, "the SPA is built against this count")
 
 		names = {e["name"] for e in entries}
 		self.assertIn("Razorpay", names)
 		self.assertNotIn("Plaid", names, "a disabled catalog entry is never offered")
 		# Sign-in vendors that refuse every self-hosted tenant's callback
 		# (CONNECTOR_PROVIDERS.md, probed 2026-09-06) are listed but off.
-		for closed in ("Asana", "Square", "Figma", "Dropbox", "Vercel"):
+		for closed in ("Asana", "Square", "Figma", "Dropbox", "Vercel", "Pipedrive"):
 			self.assertNotIn(closed, names, f"{closed} only admits approved partner apps")
 		self.assertNotIn("Custom URL", names, "Custom URL is a flow, not a provider")
 
@@ -761,6 +761,11 @@ class _ScriptedTransport:
 		raise AssertionError(f"no form was posted to {url}")
 
 
+def _name_host(redirect_uri: str) -> str:
+	"""The host part of a registered client name: the hostname, dots as hyphens."""
+	return urlparse(redirect_uri).hostname.replace(".", "-")
+
+
 def _json_result(payload, status: int = 200) -> HttpResult:
 	return HttpResult(
 		status=status,
@@ -1071,7 +1076,7 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 		posted = json.loads(
 			next(c["body"] for c in transport.calls if c["url"] == MCP_REGISTER).decode("utf-8")
 		)
-		self.assertEqual(posted["client_name"], f"Acme Bot ({netloc})")
+		self.assertEqual(posted["client_name"], f"Acme Bot {_name_host(redirect_uri)}")
 		if urlparse(redirect_uri).scheme == "https":
 			self.assertEqual(posted["client_uri"], f"https://{netloc}")
 		else:
@@ -1089,11 +1094,49 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 			)
 		self._connectors.append(out["name"])
 
-		netloc = urlparse(connectors_api.oauth_redirect_uri()).netloc
 		posted = json.loads(
 			next(c["body"] for c in transport.calls if c["url"] == MCP_REGISTER).decode("utf-8")
 		)
-		self.assertEqual(posted["client_name"], f"Jarvis ({netloc})")
+		self.assertEqual(posted["client_name"], f"Jarvis {_name_host(connectors_api.oauth_redirect_uri())}")
+
+	def test_registration_client_name_keeps_only_letters_digits_spaces_hyphens(self):
+		# Calendly refuses a client_name with any other character (a dot or a
+		# bracket included) with invalid_client_metadata, and the row never saves.
+		self._set_single("agent_name", "Acme, Inc. (Bot)")
+		script = _discovery_script()
+		script[MCP_REGISTER] = _json_result({"client_id": "dcr-client"}, status=201)
+		transport = _ScriptedTransport(script)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self._connectors.append(out["name"])
+
+		posted = json.loads(
+			next(c["body"] for c in transport.calls if c["url"] == MCP_REGISTER).decode("utf-8")
+		)
+		self.assertRegex(posted["client_name"], r"^[A-Za-z0-9 -]+$")
+		self.assertEqual(
+			posted["client_name"], f"Acme Inc Bot {_name_host(connectors_api.oauth_redirect_uri())}"
+		)
+
+	def test_a_long_encoded_client_id_is_stored_whole(self):
+		# Netlify issues a 619-character encoded client_id. A Data(500) column
+		# refused that insert and the person read the generic sentence.
+		long_id = "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0.." + "x" * 578
+		self.assertEqual(len(long_id), 619)
+		script = _discovery_script()
+		script[MCP_REGISTER] = _json_result({"client_id": long_id}, status=201)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", _ScriptedTransport(script)):
+			out = connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self._connectors.append(out["name"])
+
+		self.assertTrue(out["oauth_configured"])
+		self.assertEqual(frappe.db.get_value(CLIENT_DT, out["name"], "client_id"), long_id)
 
 	def test_the_registered_client_auth_method_is_stored(self):
 		# We ASK for the secret in the body; a service that registers us for the
@@ -1272,6 +1315,33 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 		message = str(ctx.exception)
 		self.assertIn("invalid_redirect_uri: must use https", message)
 		self.assertTrue(message.startswith("The sign-in service"), "the friendly sentence still comes first")
+
+	def test_registration_failure_surfaces_a_per_field_reason(self):
+		# Calendly names the refused field in an `errors` object and sends no
+		# error_description; that reason must still reach the person.
+		script = _discovery_script()
+		script[MCP_REGISTER] = HttpResult(
+			status=400,
+			headers={"content-type": "application/json"},
+			json={
+				"error": "invalid_client_metadata",
+				"errors": {"name": ["may only contain alphanumeric characters, hyphens, and spaces."]},
+			},
+			text="",
+		)
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", _ScriptedTransport(script)),
+			self.assertRaises(frappe.ValidationError) as ctx,
+		):
+			connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self.assertEqual(
+			str(ctx.exception),
+			"The sign-in service would not set this workspace up (invalid_client_metadata: "
+			"name may only contain alphanumeric characters, hyphens, and spaces).",
+		)
 
 	def test_permission_is_checked_before_any_outbound_request(self):
 		# A plain user asking for a Shared row is refused by the controller. That
@@ -2620,8 +2690,62 @@ class TestSelfHealGuards(_McpOauthTestCase):
 		out = connectors_api.connect_oauth(name)
 		self.assertFalse(out.get("ok"))
 		self.assertEqual(out["error"]["code"], "oauth_not_configured")
+		self.assertEqual(
+			out["error"]["message"], "This connector's address changed. Remove it and add it again."
+		)
 		self.assertFalse(
 			frappe.db.get_value(CONNECTOR, name, "mcp_oauth_client"), "stale client not relinked"
+		)
+
+
+class TestDcrClientName(unittest.TestCase):
+	"""The registered name keeps only what Calendly accepts: letters, digits,
+	spaces and hyphens."""
+
+	def _name(self, brand, redirect_uri):
+		with patch.object(connectors_api, "_brand_name", return_value=brand):
+			return connectors_api._dcr_client_name(redirect_uri)
+
+	def test_host_dots_become_hyphens(self):
+		# The exact name Calendly accepted in the 2026-10-18 registration probe.
+		name = self._name("Jarvis", "https://jarvis-develop.frappe.cloud/api/method/x")
+		self.assertEqual(name, "Jarvis jarvis-develop-frappe-cloud")
+
+	def test_the_port_is_not_part_of_the_name(self):
+		self.assertEqual(self._name("Jarvis", "http://test.localhost:8000/cb"), "Jarvis test-localhost")
+
+	def test_punctuation_is_dropped_and_runs_collapse(self):
+		name = self._name("Acme  --  Bot!", "https://a.example/cb")
+		self.assertEqual(name, "Acme - Bot a-example")
+
+	def test_a_brand_that_cleans_to_nothing_falls_back_to_jarvis(self):
+		self.assertEqual(self._name("Джарвис", "https://a.example/cb"), "Jarvis a-example")
+
+	def test_no_host_is_the_brand_alone(self):
+		self.assertEqual(self._name("Acme Bot", ""), "Acme Bot")
+
+
+class TestOauthErrorMessages(unittest.TestCase):
+	"""Every code the setup path can raise reads as a plain sentence, never the
+	generic fallback."""
+
+	def test_no_challenge_has_its_own_sentence(self):
+		message = connectors_api._oauth_error_message("no_401_challenge", "Expected 401, got HTTP 200.")
+		self.assertEqual(
+			message, "This app did not ask for a sign-in. Add it with a key, or with no sign-in."
+		)
+		self.assertNotIn("401", message, "the engine's detail is not shown")
+
+	def test_address_mismatch_has_its_own_sentence(self):
+		self.assertEqual(
+			connectors_api._oauth_error_message("client_address_mismatch"),
+			"This connector's address changed. Remove it and add it again.",
+		)
+
+	def test_unknown_code_keeps_the_generic_sentence(self):
+		self.assertEqual(
+			connectors_api._oauth_error_message("something_new"),
+			"We could not set up sign-in for this address.",
 		)
 
 
