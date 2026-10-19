@@ -13,11 +13,32 @@
 import { draftFailureOf } from "./draftFailure.js";
 import { parkedNoteOf } from "./draftParked.js";
 
-export function stampDraftModel(model, { messageKey, card, editable }) {
+export function stampDraftModel(model, { messageKey, card, editable, actionKey }) {
 	model.messageKey = messageKey || "";
 	model.card = card || null;
 	model.editable = !!editable;
+	model.actionKey = actionKey || "";
 	return model;
+}
+
+// What a proposed create/update would write. Two actions with the same key propose the
+// same record, so the panel open on one is the panel for the other.
+export function draftActionKey(a) {
+	return JSON.stringify([
+		a.verb || "create",
+		a.doctype,
+		a.name || "",
+		a.fields || [],
+		a.tables || [],
+	]);
+}
+
+// The open panel when it edits the draft `actionKey` names, else null. The summary
+// card's Confirm, Preview and Edit act on it, so a value the person changed there is
+// never bypassed (Confirm saving the card's copy) or dropped (a rebuild from the
+// agent's proposal). An empty key never matches.
+export function openPanelFor(panel, actionKey) {
+	return panel && actionKey && panel.actionKey === actionKey ? panel : null;
 }
 
 // The apply_action payload for `model`. `fallback` ({messageKey, card}) covers a

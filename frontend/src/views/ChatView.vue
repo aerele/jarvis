@@ -1474,9 +1474,8 @@
 												<button
 													class="jv-action-primary"
 													:disabled="
-														!summaryState.model ||
-														(summaryState.model &&
-															summaryState.model.applying) ||
+														!cardModel ||
+														cardModel.applying ||
 														convStreaming
 													"
 													:title="
@@ -1487,8 +1486,7 @@
 													@click="confirmSummary"
 												>
 													{{
-														summaryState.model &&
-														summaryState.model.applying
+														cardModel && cardModel.applying
 															? "Saving..."
 															: activeAction.verb === "update"
 															? "Confirm update"
@@ -4386,9 +4384,9 @@
 		</transition>
 		<DraftPreview
 			v-if="previewOpen && summaryState.model"
-			:model="summaryState.model"
+			:model="cardModel"
 			:headline="(summaryState.view && summaryState.view.headline) || ''"
-			:disabled="convStreaming || !!(summaryState.model && summaryState.model.applying)"
+			:disabled="convStreaming || !!(cardModel && cardModel.applying)"
 			@close="previewOpen = false"
 			@edit="onPreviewEdit"
 			@confirm="onPreviewConfirm"
@@ -4470,7 +4468,13 @@ import {
 	withToolDetail,
 } from "@/lib/historyPaging";
 import { markParked, parkedByCard, parkedNoteFor } from "@/lib/draftParked";
-import { applyActionPayload, draftSaveOutcome, stampDraftModel } from "@/lib/draftSave";
+import {
+	applyActionPayload,
+	draftActionKey,
+	draftSaveOutcome,
+	openPanelFor,
+	stampDraftModel,
+} from "@/lib/draftSave";
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
@@ -7658,6 +7662,16 @@ async function openDraftPanel(a) {
 	// name another draft (the server sends "fixing it in the panel" once per draft).
 	const messageKey = actionFor.value || "";
 	const card = activeAction.value || null;
+	const actionKey = draftActionKey(a);
+	// The panel already edits this very draft (Edit clicked again, a failed Confirm, or
+	// the agent re-sending the same proposal): keep it, with the person's edits and the
+	// marked fields, instead of rebuilding it from the agent's proposal. Returns whether
+	// it rebuilt.
+	const open = openPanelFor(draftPanel.value, actionKey);
+	if (open) {
+		stampDraftModel(open, { messageKey, card, editable: true, actionKey });
+		return false;
+	}
 	let model;
 	// Deliberate: swallow to the SAME dead-end the old `if (!model) return` gave, so
 	// a guard throw cannot escape a @click handler. The summary card already shows
@@ -7665,11 +7679,12 @@ async function openDraftPanel(a) {
 	try {
 		model = await buildDraftModel(a);
 	} catch (e) {
-		return;
+		return false;
 	}
-	if (!model) return;
+	if (!model) return false;
 	// Only the open panel can be edited after a failure (R2-9, lib/draftSave).
-	draftPanel.value = stampDraftModel(model, { messageKey, card, editable: true });
+	draftPanel.value = stampDraftModel(model, { messageKey, card, editable: true, actionKey });
+	return true;
 }
 
 function _blankRow(columns) {
@@ -7800,14 +7815,14 @@ const draftCta = computed(() => {
 });
 // Summary-first: the read-only model + view for the current create/update action.
 const summaryState = ref({ key: "", model: null, view: null, error: "" });
+// What the card's Confirm and Preview act on: the open panel when it edits this draft
+// (lib/draftSave openPanelFor), else the card's own read-only copy.
+const cardModel = computed(() => {
+	const m = summaryState.value.model;
+	return (m && openPanelFor(draftPanel.value, m.actionKey)) || m;
+});
 async function ensureActionSummary(a) {
-	const key = JSON.stringify([
-		a.verb || "create",
-		a.doctype,
-		a.name || "",
-		a.fields || [],
-		a.tables || [],
-	]);
+	const key = draftActionKey(a);
 	if (summaryState.value.key === key) return;
 	const messageKey = actionFor.value || ""; // this draft's message, before the build
 	const card = activeAction.value || null;
@@ -7832,7 +7847,7 @@ async function ensureActionSummary(a) {
 		return;
 	}
 	if (summaryState.value.key !== key) return; // a newer action superseded this build
-	stampDraftModel(model, { messageKey, card, editable: false });
+	stampDraftModel(model, { messageKey, card, editable: false, actionKey: key });
 	summaryState.value = { key, model, view: summarize(model, a), error: "" };
 	if (model.verb === "create") fillComputedCells(key, model, a);
 }
@@ -7872,6 +7887,13 @@ async function confirmSummary() {
 	// Captured before the round-trip: a newer turn may replace the active action.
 	const a = activeAction.value;
 	if (!model || model.applying || convStreaming.value) return;
+	// The panel is open on this draft: Confirm saves what the person sees there (their
+	// edits, not the card's copy), and a failure marks the fields in that same panel.
+	const panel = openPanelFor(draftPanel.value, model.actionKey);
+	if (panel) {
+		await applyDraft(0, panel);
+		return;
+	}
 	await applyDraft(0, model);
 	const stillShown = summaryState.value.model === model;
 	if (model.error && model.error.fields && stillShown) await openDraftForMissing(a, model.error);
@@ -7921,9 +7943,10 @@ watch(actionFor, () => {
 	if (!a || a.kind === "email" || !isEditVerb(a)) return;
 	ensureActionSummary(a); // keep the summary card in sync with the latest action
 	if (draftPanel.value) {
-		// panel is open (user is editing) and the action re-emitted -> refresh it too
-		openDraftPanel({ verb: a.verb || "create", ...a }).then(() => {
-			if (draftPanel.value) draftPanel.value.updatedToast = true;
+		// panel is open (user is editing) and the action re-emitted: rebuilt only when the
+		// agent proposed something different (openDraftPanel keeps the same draft's edits)
+		openDraftPanel({ verb: a.verb || "create", ...a }).then((rebuilt) => {
+			if (rebuilt && draftPanel.value) draftPanel.value.updatedToast = true;
 		});
 	}
 });
