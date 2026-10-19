@@ -3537,6 +3537,35 @@ class TestStopRunOnAResentTurn(_EmptyReplyCase):
 			sess = self._stop(conv, rid)
 		sess.chat_abort.assert_called_once_with(f"sess-{rid}", rid)
 
+	def test_a_late_stop_leaves_the_next_running_turn_alone(self):
+		# #448: a Stop for run A that arrives after A ended must not flag or abort turn B,
+		# the continuation now streaming in the same chat.
+		from jarvis.chat.turn_message_binding import clear_run_cancel
+
+		conv, _amsg = self._ready("pmp_448_a", None, "done")
+		seed = self._human_msg(conv, "and the next one")
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		self._mk_turn(conv, "pmp_448_b", seed, "streaming", assistant_message=amsg, version=6, pump_epoch=7)
+		sess = MagicMock()
+
+		@contextmanager
+		def checkout(_url):
+			yield sess
+
+		try:
+			with (
+				patch.object(pump, "pump_lifecycle_configured", return_value=True),
+				patch.object(pump, "ensure_pump"),
+				patch.object(pump, "lpush_wake"),
+				patch("jarvis.chat.agent_session_pool.checkout", checkout),
+			):
+				out = chat_api.stop_run(conv, "pmp_448_a")
+		finally:
+			clear_run_cancel(conv)
+		self.assertFalse(out["ok"])
+		self.assertEqual(int(self._val("pmp_448_b", "cancel_requested")), 0)
+		sess.chat_abort.assert_not_called()
+
 
 class TestEmptyReplyOutcome(_EmptyReplyCase):
 	"""When a turn sent again for an empty reply settles, finalize writes its outcome with
