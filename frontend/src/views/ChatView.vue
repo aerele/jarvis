@@ -4145,10 +4145,42 @@
 								{{ removedSavedRows(t).length === 1 ? "row" : "rows" }}:
 								{{ removedSavedRows(t).join(", ") }}
 							</div>
+							<div
+								v-if="draftChangeSummaries[ti]"
+								class="jv-rows-changed"
+								role="note"
+							>
+								<template v-if="draftChangeSummaries[ti].grouped">
+									<span>{{ draftChangeSummaries[ti].text }}</span>
+									<button
+										type="button"
+										class="jv-rows-changed-open"
+										@click="openChangedRows(t, draftChangeSummaries[ti])"
+									>
+										{{ draftChangeSummaries[ti].openLabel }}
+									</button>
+								</template>
+								<template v-else>
+									<span>{{ draftChangeSummaries[ti].lead }}</span>
+									<button
+										v-for="i in draftChangeSummaries[ti].rows"
+										:key="i"
+										type="button"
+										class="jv-rows-changed-open"
+										:aria-label="'Open row ' + (i + 1)"
+										@click="showRowForm(ti, t.rows[i])"
+									>
+										{{ i + 1 }}
+									</button>
+								</template>
+							</div>
 							<div class="jv-draft-gridwrap">
 								<table class="jv-grid">
 									<thead>
 										<tr>
+											<th class="jv-grid-lead">
+												<span class="jv-sr">Row</span>
+											</th>
 											<th v-for="c in t.columns" :key="c.fieldname">
 												{{ c.label }}
 											</th>
@@ -4156,8 +4188,58 @@
 										</tr>
 									</thead>
 									<tbody>
-										<template v-for="(r, ri) in t.rows" :key="ri">
+										<template v-for="(r, ri) in t.rows" :key="r.__key">
 											<tr>
+												<td class="jv-grid-lead">
+													<div class="jv-grid-lead-in">
+														<span class="jv-grid-num">{{
+															ri + 1
+														}}</span>
+														<button
+															v-if="
+																t.formFields && t.formFields.length
+															"
+															type="button"
+															:id="rowToggleId(ti, r.__key)"
+															class="jv-grid-more"
+															:class="{
+																'jv-grid-more-warn': rowStatusFor(
+																	t,
+																	r,
+																	ri
+																).missing,
+															}"
+															:aria-expanded="
+																r.__open ? 'true' : 'false'
+															"
+															:aria-controls="
+																r.__open
+																	? rowFormId(ti, r.__key)
+																	: undefined
+															"
+															:title="rowToggleLabel(t, r, ri)"
+															:aria-label="rowToggleLabel(t, r, ri)"
+															@click="toggleRowForm(ti, r)"
+														>
+															<span aria-hidden="true">{{
+																r.__open ? "▾" : "▸"
+															}}</span>
+															<span
+																v-for="part in toggleParts(
+																	rowStatusFor(t, r, ri)
+																)"
+																:key="part.kind"
+																class="jv-grid-badge"
+																:class="{
+																	'jv-grid-badge-warn':
+																		part.kind === 'missing',
+																}"
+																aria-hidden="true"
+																>{{ part.text }}</span
+															>
+														</button>
+													</div>
+												</td>
 												<td
 													v-for="c in t.columns"
 													:key="c.fieldname"
@@ -4170,7 +4252,7 @@
 															't:' +
 															ti +
 															':' +
-															ri +
+															r.__key +
 															':' +
 															c.fieldname
 														"
@@ -4187,57 +4269,6 @@
 												<td class="jv-grid-x">
 													<span class="jv-grid-acts">
 														<button
-															v-if="
-																t.formFields && t.formFields.length
-															"
-															type="button"
-															class="jv-grid-more"
-															:class="{
-																'jv-grid-more-warn': rowStatusFor(
-																	t,
-																	r,
-																	ri
-																).missing,
-															}"
-															:aria-expanded="
-																r.__open ? 'true' : 'false'
-															"
-															:aria-controls="
-																r.__open
-																	? 'jv-rowform-' + ti + '-' + ri
-																	: undefined
-															"
-															:title="
-																'All fields of row ' + (ri + 1)
-															"
-															:aria-label="rowToggleLabel(t, r, ri)"
-															@click="r.__open = !r.__open"
-														>
-															<span aria-hidden="true">{{
-																r.__open ? "▾" : "▸"
-															}}</span>
-															<span
-																v-if="
-																	rowStatusFor(t, r, ri).missing
-																"
-																class="jv-grid-badge jv-grid-badge-warn"
-																aria-hidden="true"
-																>{{
-																	rowStatusFor(t, r, ri).missing
-																}}</span
-															>
-															<span
-																v-else-if="
-																	rowStatusFor(t, r, ri).changed
-																"
-																class="jv-grid-badge"
-																aria-hidden="true"
-																>{{
-																	rowStatusFor(t, r, ri).changed
-																}}</span
-															>
-														</button>
-														<button
 															type="button"
 															class="jv-grid-del"
 															@click="removeDraftRow(ti, ri)"
@@ -4253,43 +4284,24 @@
 									</tbody>
 								</table>
 							</div>
-							<template v-for="(r, ri) in t.rows" :key="'form-' + ri">
-								<section
+							<template v-for="(r, ri) in t.rows" :key="'form-' + r.__key">
+								<DraftRowBlock
 									v-if="r.__open"
-									:id="'jv-rowform-' + ti + '-' + ri"
-									class="jv-rowform-block"
-									:aria-label="'All fields of row ' + (ri + 1)"
-								>
-									<div class="jv-rowform-head">
-										<span class="jv-rowform-title"
-											>Row {{ ri + 1
-											}}<template v-if="rowTitle(t, r)">
-												· {{ rowTitle(t, r) }}</template
-											></span
-										>
-										<button
-											type="button"
-											class="jv-rowform-close"
-											@click="r.__open = false"
-										>
-											Done
-										</button>
-									</div>
-									<DraftRowForm
-										:table="t"
-										:row="r"
-										:parent="draftParentValues"
-										:table-index="ti"
-										:row-index="ri"
-										:changed-fields="rowStatusFor(t, r, ri).changedFields"
-										:draft-link="draftLink"
-										:palette="paletteVars"
-										@link-search="onDraftLink"
-										@link-blur="closeDraftLink"
-										@link-pick="pickDraftLink"
-										@link-close="draftLink.open = false"
-									/>
-								</section>
+									:table="t"
+									:row="r"
+									:parent="rowMemo.parentFor(t)"
+									:table-index="ti"
+									:row-index="ri"
+									:changed-fields="rowStatusFor(t, r, ri).changedFields"
+									:saved-row="rowStatusFor(t, r, ri).savedRow"
+									:draft-link="draftLink"
+									:palette="paletteVars"
+									@close="closeRowForm(ti, r)"
+									@link-search="onDraftLink"
+									@link-blur="closeDraftLink"
+									@link-pick="pickDraftLink"
+									@link-close="draftLink.open = false"
+								/>
 							</template>
 							<button class="jv-draft-addrow" @click="addDraftRow(ti)">
 								＋ Add row
@@ -4460,7 +4472,7 @@ import { Button, Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
 import DraftCell from "@/components/chat/DraftCell.vue";
-import DraftRowForm from "@/components/chat/DraftRowForm.vue";
+import DraftRowBlock from "@/components/chat/DraftRowBlock.vue";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { useConversationActivity } from "@/lib/useConversationActivity";
 import { reportToolsByAssistant } from "@/lib/reportScope";
@@ -4604,16 +4616,25 @@ import {
 	readonlyDisplay,
 	removedSavedRows,
 	allRowFields,
-	draftParentDoc,
 } from "@/lib/draftApply";
 import {
+	applyAutoOpen,
 	blankRow,
 	buildDraftTable,
 	markMissingRows,
+	openChangedRows,
 	parentDefaults,
-	savedRowsByName,
+	toggleLabel,
+	toggleParts,
 } from "@/lib/draftTables";
-import { rowStatus } from "@/lib/rowForm";
+import { createRowStatusMemo } from "@/lib/rowStatusMemo";
+import {
+	closeRowForm,
+	rowFormId,
+	rowToggleId,
+	showRowForm,
+	toggleRowForm,
+} from "@/lib/rowFormFocus";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { replyBarParts, stampDeltaTime, useClientStamp } from "@/lib/replyBar";
 import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
@@ -7437,42 +7458,19 @@ function _actField(meta, label) {
 // --- Record draft panel: the action JSON is the draft; edits are local; apply
 // posts to actions_api (no LLM round-trip). ---
 const draftPanel = ref(null);
-// The record's own values as Desk's `parent` holds them, for a child row's
-// depends_on rules in its full form (DraftRowForm).
-const draftParentValues = computed(() => draftParentDoc(draftPanel.value));
 // A row's form status for its toggle and form: blank required fields, and (on an
-// update) what differs from the saved row.
-// Each row's status is worked out once per change for the whole panel, not once
-// per place the template shows it (a row's toggle reads it several times).
-const draftRowStatuses = computed(() => {
-	const p = draftPanel.value;
-	if (!p) return [];
-	const parent = draftParentValues.value;
-	return p.tables.map((t) => {
-		const saved = savedRowsByName(t);
-		return t.rows.map((r, ri) =>
-			rowStatus(t, r, parent, (r.__name && saved.get(r.__name)) || null, { index: ri })
-		);
-	});
-});
-const NO_STATUS = { missing: 0, changed: 0, changedFields: new Set() };
-function rowStatusFor(t, r, ri) {
-	const ti = draftPanel.value ? draftPanel.value.tables.indexOf(t) : -1;
-	return (draftRowStatuses.value[ti] || [])[ri] || NO_STATUS;
-}
+// update) what differs from the saved row. One computed per row that keeps its
+// object while nothing in the status changed, and one parent object per table with
+// just the record values its rules read (lib/rowStatusMemo.js): typing in a row, or
+// in a main field no rule reads, does not re-render the other rows.
+const rowMemo = createRowStatusMemo(() => draftPanel.value);
+// Above each grid, the rows the agent (or the user) changed outside it: named when
+// few, grouped by field when many, with a button that opens them (draftTables).
+const draftChangeSummaries = rowMemo.summaries;
+const rowStatusFor = rowMemo.rowStatusFor;
 // The toggle's accessible name: which row, and what needs attention in it.
 function rowToggleLabel(t, r, ri) {
-	const s = rowStatusFor(t, r, ri);
-	let label = `All fields of row ${ri + 1}`;
-	if (s.missing)
-		label += `, ${s.missing} required ${s.missing === 1 ? "field" : "fields"} blank`;
-	else if (s.changed) label += `, ${s.changed} ${s.changed === 1 ? "field" : "fields"} changed`;
-	return label;
-}
-// The row's first grid value (its item, usually), to name it above its form.
-function rowTitle(t, r) {
-	const c = t.columns.find((x) => !x.read_only) || t.columns[0];
-	return c ? String(r[c.fieldname] ?? "").trim() : "";
+	return toggleLabel(ri + 1, rowStatusFor(t, r, ri));
 }
 // Drafts the server turned into a gated confirmation card (sensitive
 // configuration): message name -> the note. Waiting, not saved, never re-applied.
@@ -7543,7 +7541,7 @@ function onOverlayBackdropClick(close) {
 	if (_overlayPressOnBackdrop) close();
 }
 
-// one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<ri>:<col>"
+// one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<row __key>:<col>"
 const draftLink = ref({ key: "", items: [], open: false, anchor: null });
 // The shared popup belongs to one search, not merely one field key. A blur
 // timer or response from an older search must not mutate the current popup.
@@ -7734,6 +7732,16 @@ async function openDraftPanel(a) {
 	}
 	if (!model) return false;
 	markDraftBaseline(model);
+	// An update's changed rows (1 to 3) open on the first build, or when a re-emit changes
+	// what the agent proposed (the same draft re-sent keeps its panel above). A rebuild
+	// closes every row, so the same proposal opens none again; focus never moves. A throw
+	// here must not stop the panel opening. Opening rows is not an edit: the baseline is
+	// draftValues, which never carries a row's `__` keys.
+	try {
+		applyAutoOpen(model, draftPanel.value);
+	} catch (e) {
+		console.warn("Jarvis card: could not auto-open the changed rows", e);
+	}
 	// Only the open panel can be edited after a failure (R2-9, lib/draftSave).
 	draftPanel.value = stampDraftModel(model, { messageKey, card, editable: true, actionKey });
 	return true;
@@ -17331,6 +17339,35 @@ onUnmounted(() => {
 	color: var(--text-2);
 	word-break: break-word;
 }
+.jv-rows-changed {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 10px;
+	padding: 6px 10px;
+	margin-bottom: 6px;
+	border-radius: 6px;
+	border: 1px solid var(--cta-bd);
+	background: var(--cta-bg);
+	color: var(--cta);
+	font-size: 12.5px;
+	overflow-wrap: anywhere;
+}
+.jv-rows-changed-open {
+	background: none;
+	border: 1px solid var(--cta-bd);
+	border-radius: 7px;
+	color: var(--cta);
+	font-weight: 600;
+	font-size: 12.5px;
+	cursor: pointer;
+	padding: 2px 10px;
+	min-height: 32px;
+}
+.jv-rows-changed-open:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 1px;
+}
 .jv-rows-removed {
 	padding: 6px 10px;
 	margin-bottom: 6px;
@@ -17385,6 +17422,38 @@ onUnmounted(() => {
 	white-space: nowrap;
 	min-width: 0 !important;
 }
+/* The leading cell: row number + the row-form toggle, first in the row so they are on
+   screen at scrollLeft 0 on a phone without sticky CSS. At most 96px; the extra
+   specificity beats `.jv-grid td { min-width: 90px }`. The badges wrap under the arrow
+   rather than widening it. */
+.jv-grid td.jv-grid-lead,
+.jv-grid th.jv-grid-lead {
+	width: 96px;
+	max-width: 96px;
+	min-width: 0;
+	box-sizing: border-box;
+}
+.jv-grid th.jv-grid-lead {
+	position: relative; /* anchors the visually-hidden "Row" label */
+}
+/* Inside the cell, not on it: a flex td would leave table layout. */
+.jv-grid-lead-in {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+}
+.jv-grid-num {
+	min-width: 1.4em;
+	font-size: 11.5px;
+	font-variant-numeric: tabular-nums;
+	color: var(--text-3);
+}
+.jv-grid-lead .jv-grid-more {
+	flex-wrap: wrap;
+	max-width: 100%;
+	box-sizing: border-box;
+}
 .jv-grid-acts {
 	display: inline-flex;
 	align-items: center;
@@ -17432,45 +17501,9 @@ onUnmounted(() => {
 	color: var(--amber);
 }
 .jv-grid-more:focus-visible,
-.jv-grid-del:focus-visible,
-.jv-rowform-close:focus-visible {
+.jv-grid-del:focus-visible {
 	outline: 2px solid var(--cta);
 	outline-offset: 1px;
-}
-/* A row's full form, below the grid's sideways scroller so it fits the panel. */
-.jv-rowform-block {
-	margin-top: 8px;
-	border: 1px solid var(--border);
-	border-radius: 9px;
-	overflow: hidden;
-}
-.jv-rowform-head {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 8px;
-	padding: 6px 8px 6px 12px;
-	background: var(--surface-1);
-	border-bottom: 1px solid var(--border);
-}
-.jv-rowform-title {
-	font-size: 12px;
-	font-weight: 650;
-	color: var(--text-2);
-	min-width: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-.jv-rowform-close {
-	background: none;
-	border: none;
-	color: var(--cta);
-	font-weight: 600;
-	font-size: 12.5px;
-	cursor: pointer;
-	padding: 4px 6px;
-	min-height: 32px;
 }
 .jv-grid-del {
 	background: none;

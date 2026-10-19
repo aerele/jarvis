@@ -10,7 +10,7 @@ import { checkToYesNo } from "@/lib/draftApply";
 const props = defineProps({
 	field: { type: Object, required: true },
 	row: { type: Object, required: true },
-	// The link-search key for this value ("t:{table index}:{row index}:{fieldname}").
+	// The link-search key for this value ("t:{table index}:{row __key}:{fieldname}", the row's stable key).
 	cellKey: { type: String, required: true },
 	readOnly: { type: Boolean, default: false },
 	// In the row form a long-text field gets a textarea; a grid cell stays one line.
@@ -18,7 +18,14 @@ const props = defineProps({
 	// The grid has no visible label per cell, so it names the control; the row form
 	// ties a real <label> to the control through its id instead.
 	label: { type: String, default: "" },
+	// A read-only value is named by the id of the visible label that sits beside it
+	// (the row form), instead of an aria-label that would repeat the text.
+	labelledby: { type: String, default: "" },
 	controlId: { type: String, default: "" },
+	// The ids of the texts that describe this value ("Required", "was X"), and whether
+	// the field is required: both go on the control for a screen reader.
+	describedby: { type: String, default: "" },
+	required: { type: Boolean, default: false },
 	draftLink: { type: Object, required: true },
 	palette: { type: Object, default: () => ({}) },
 });
@@ -43,6 +50,30 @@ const shown = () => {
 	return v == null || v === "" ? "-" : v;
 };
 
+// The option a Check select shows. The row may hold what the agent proposed
+// ("Yes", "false", true), so map it to the 1/0 options for display only; the row is
+// rewritten when the user picks. A blank cell shows no option, as before.
+const checkValue = () => {
+	const v = props.row[props.field.fieldname];
+	if (v === "" || v == null) return "";
+	return checkToYesNo(v) === "Yes" ? "1" : "0";
+};
+
+// Escape with this input's suggestion menu open closes only the menu: the key stops
+// here, so the row form around it stays open. With no menu it goes on up and closes
+// the form.
+function onEscape(ev) {
+	if (
+		props.draftLink.open &&
+		props.draftLink.key === props.cellKey &&
+		props.draftLink.items.length
+	) {
+		ev.preventDefault();
+		ev.stopPropagation();
+		emit("link-close");
+	}
+}
+
 function search(ev) {
 	emit(
 		"link-search",
@@ -62,6 +93,8 @@ function search(ev) {
 		role="textbox"
 		aria-readonly="true"
 		:aria-label="label || undefined"
+		:aria-labelledby="labelledby || undefined"
+		:aria-describedby="describedby || undefined"
 		>{{ shown() }}</span
 	>
 	<template v-else-if="field.fieldtype === 'Link'">
@@ -70,8 +103,11 @@ function search(ev) {
 			v-model="row[field.fieldname]"
 			:id="controlId || undefined"
 			:aria-label="label || undefined"
+			:aria-describedby="describedby || undefined"
+			:aria-required="required ? 'true' : undefined"
 			@input="search"
 			@focus="search"
+			@keydown.esc="onEscape"
 			@blur="emit('link-blur', $event)"
 			autocomplete="off"
 		/>
@@ -90,6 +126,8 @@ function search(ev) {
 		class="jv-action-input"
 		:id="controlId || undefined"
 		:aria-label="label || undefined"
+		:aria-describedby="describedby || undefined"
+		:aria-required="required ? 'true' : undefined"
 		v-model="row[field.fieldname]"
 	/>
 	<input
@@ -98,6 +136,8 @@ function search(ev) {
 		class="jv-action-input"
 		:id="controlId || undefined"
 		:aria-label="label || undefined"
+		:aria-describedby="describedby || undefined"
+		:aria-required="required ? 'true' : undefined"
 		v-model="row[field.fieldname]"
 	/>
 	<input
@@ -106,6 +146,8 @@ function search(ev) {
 		class="jv-action-input"
 		:id="controlId || undefined"
 		:aria-label="label || undefined"
+		:aria-describedby="describedby || undefined"
+		:aria-required="required ? 'true' : undefined"
 		v-model="row[field.fieldname]"
 	/>
 	<select
@@ -113,6 +155,8 @@ function search(ev) {
 		class="jv-action-input jv-action-sel"
 		:id="controlId || undefined"
 		:aria-label="label || undefined"
+		:aria-describedby="describedby || undefined"
+		:aria-required="required ? 'true' : undefined"
 		v-model="row[field.fieldname]"
 	>
 		<option v-for="o in cellOptions(field, row[field.fieldname])" :key="o" :value="o">
@@ -124,7 +168,10 @@ function search(ev) {
 		class="jv-action-input jv-action-sel"
 		:id="controlId || undefined"
 		:aria-label="label || undefined"
-		v-model="row[field.fieldname]"
+		:aria-describedby="describedby || undefined"
+		:aria-required="required ? 'true' : undefined"
+		:value="checkValue()"
+		@change="row[field.fieldname] = $event.target.value"
 	>
 		<option value="1">Yes</option>
 		<option value="0">No</option>
@@ -135,6 +182,8 @@ function search(ev) {
 		rows="3"
 		:id="controlId || undefined"
 		:aria-label="label || undefined"
+		:aria-describedby="describedby || undefined"
+		:aria-required="required ? 'true' : undefined"
 		v-model="row[field.fieldname]"
 	></textarea>
 	<input
@@ -142,6 +191,8 @@ function search(ev) {
 		class="jv-action-input"
 		:id="controlId || undefined"
 		:aria-label="label || undefined"
+		:aria-describedby="describedby || undefined"
+		:aria-required="required ? 'true' : undefined"
 		v-model="row[field.fieldname]"
 	/>
 </template>

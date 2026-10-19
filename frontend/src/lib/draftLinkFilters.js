@@ -75,11 +75,13 @@ export function draftLinkSearch(model, key) {
 	if (key.startsWith("f:")) {
 		field = model.fields.find((f) => f.fieldname === key.slice(2));
 	} else {
-		const [, ti, ri, name] = key.split(":");
+		// "t:{table index}:{row __key}:{fieldname}[:form]". The row is found by its
+		// __key, not its position: a row removed above it moves it up a place.
+		const [, ti, rk, name] = key.split(":");
 		const table = model.tables[Number(ti)];
 		// A grid cell or a field of the row form: both search with its meta.
 		field = table && allRowFields(table).find((c) => c.fieldname === name);
-		row = table?.rows[Number(ri)];
+		row = table?.rows.find((r) => r.__key != null && String(r.__key) === rk);
 		if (!row) throw unsupported();
 		row = {
 			...row,

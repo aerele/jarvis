@@ -61,6 +61,8 @@ export function coerceOut(field) {
 // Every field a row carries: the grid's columns, then the row form's other fields
 // (table.formFields, laid out by lib/rowForm.js). Without form fields (the PWA, an
 // older server) it is just the columns. Kept here because this file imports nothing.
+// table.ruleFields (hidden fields a rule reads) are NOT part of it, by design: every
+// payload builder below walks this list, so a rule field here would be sent on Save.
 export const BREAK_TYPES = new Set(["Section Break", "Column Break", "Tab Break"]);
 export function allRowFields(table) {
 	const out = [...(table.columns || [])];
@@ -71,6 +73,14 @@ export function allRowFields(table) {
 		out.push(f);
 	}
 	return out;
+}
+
+// The source link of a field Desk fills by fetch_from ("item_code.is_fixed_asset"
+// -> "item_code"), or "" when it has none. Used for the hidden fields a row's rules
+// read (table.ruleFields): once the row's source changes, a saved value no longer holds.
+export function ruleFetchSource(field) {
+	const m = /^([A-Za-z_]\w*)\.[A-Za-z_]\w*$/.exec(String((field && field.fetch_from) || ""));
+	return m ? m[1] : "";
 }
 
 // The record as Desk's `parent` holds it for a child row's rules: the form's plain
@@ -240,16 +250,40 @@ export function alignComputedRows(table, serverRows) {
 	return out;
 }
 
+// A table's loaded rows (origJson) parsed, and by name. A big table's origJson is
+// ~2 ms to parse and the card asks for it on every render, so the last few strings
+// are kept (a string is the key: the table object may be a reactive proxy or not).
+// The rows are shared: callers read them, never change them.
+const SAVED_CACHE_MAX = 12;
+const savedCache = new Map();
+function savedEntry(json) {
+	const key = json || "";
+	let e = savedCache.get(key);
+	if (!e) {
+		let rows = [];
+		try {
+			rows = JSON.parse(key || "null") || [];
+		} catch {
+			rows = [];
+		}
+		const byName = new Map();
+		for (const r of rows) if (r && r.name) byName.set(r.name, r);
+		e = { rows, byName };
+		if (savedCache.size >= SAVED_CACHE_MAX) savedCache.delete(savedCache.keys().next().value);
+		savedCache.set(key, e);
+	}
+	return e;
+}
+export const parseSavedRows = (json) => savedEntry(json).rows;
+export const savedRowsMap = (json) => savedEntry(json).byName;
+
 // Saved rows an update would delete: every loaded row (origJson) whose name no
 // panel row carries any more. Returned as short labels (first shown column's value,
 // else the row id) so the card can say WHICH rows go, not only how many (CR-3).
+// Only the parse is kept; this depends on the panel rows' names, so it is worked out
+// on every call.
 export function removedSavedRows(table) {
-	let saved = [];
-	try {
-		saved = JSON.parse(table.origJson || "null") || [];
-	} catch {
-		saved = [];
-	}
+	const saved = parseSavedRows(table.origJson);
 	const kept = new Set((table.rows || []).map((r) => r.__name).filter(Boolean));
 	const first = (table.columns || []).find((c) => !c.read_only) || (table.columns || [])[0];
 	return saved

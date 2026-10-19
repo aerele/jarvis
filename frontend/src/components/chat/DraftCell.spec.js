@@ -53,6 +53,41 @@ describe("one editable value of a child row", () => {
 		]);
 	});
 
+	it("a Check shows a proposed Yes/No/true/false as its 1/0 option, without rewriting the row", () => {
+		const shown = (v) => {
+			const row = reactive({ c: v });
+			const sel = cell(F("c", "Check"), row).find("select");
+			const out = [sel.element.value, row.c];
+			return out;
+		};
+		for (const [raw, opt] of [
+			["Yes", "1"],
+			["yes", "1"],
+			["true", "1"],
+			[true, "1"],
+			[1, "1"],
+			["1", "1"],
+			["No", "0"],
+			["false", "0"],
+			[false, "0"],
+			[0, "0"],
+			["0", "0"],
+			["", ""], // a blank cell shows no option, as before
+		]) {
+			// the row keeps what the agent sent; only the display is normalised
+			expect(shown(raw)).toEqual([opt, raw]);
+		}
+	});
+
+	it("choosing a Check option writes 1 or 0", async () => {
+		const row = reactive({ c: "Yes" });
+		const sel = cell(F("c", "Check"), row).find("select");
+		await sel.setValue("0");
+		expect(row.c).toBe("0");
+		await sel.setValue("1");
+		expect(row.c).toBe("1");
+	});
+
 	it("long text is one line in the grid and a textarea in the row form", () => {
 		const row = reactive({ x: "hello" });
 		expect(cell(F("x", "Text Editor"), row).find("textarea").exists()).toBe(false);
@@ -114,5 +149,40 @@ describe("one editable value of a child row", () => {
 			draftLink: link({ open: true, key: "t:0:0:w:form", items: [{ value: "A" }] }),
 		});
 		expect(other.findComponent({ name: "DraftLinkMenu" }).exists()).toBe(false);
+	});
+});
+
+describe("a cell passes its description and required state to the control", () => {
+	const row = reactive({ a: "", s: "", c: "", l: "", t: "", ro: "x" });
+	const extra = { describedby: "d-1 d-2", required: true };
+	it("sets aria-describedby and aria-required on every kind of control", () => {
+		const kinds = [
+			["a", "Data", "input"],
+			["s", "Select", "select"],
+			["c", "Check", "select"],
+			["l", "Link", "input"],
+			["t", "Text", "input"],
+			["n", "Float", "input"],
+			["d", "Date", "input"],
+			["dt", "Datetime", "input"],
+		];
+		for (const [name, type, tag] of kinds) {
+			const el = cell(F(name, type, { options: "A" }), row, extra).get(tag).element;
+			expect(el.getAttribute("aria-describedby")).toBe("d-1 d-2");
+			expect(el.getAttribute("aria-required")).toBe("true");
+		}
+		const area = cell(F("t", "Small Text"), row, { ...extra, wide: true }).get("textarea");
+		expect(area.attributes("aria-describedby")).toBe("d-1 d-2");
+		expect(area.attributes("aria-required")).toBe("true");
+	});
+	it("sets neither without the props", () => {
+		const el = cell(F("a", "Data"), row).get("input").element;
+		expect(el.hasAttribute("aria-describedby")).toBe(false);
+		expect(el.hasAttribute("aria-required")).toBe(false);
+	});
+	it("a read-only value takes the description but is never aria-required", () => {
+		const el = cell(F("ro", "Data"), row, { ...extra, readOnly: true }).get("span").element;
+		expect(el.getAttribute("aria-describedby")).toBe("d-1 d-2");
+		expect(el.hasAttribute("aria-required")).toBe(false);
 	});
 });

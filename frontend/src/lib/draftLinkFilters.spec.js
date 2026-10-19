@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { draftLinkSearch, resolveLinkFilters } from "./draftLinkFilters";
+import { draftLinkContext, draftLinkSearch, resolveLinkFilters } from "./draftLinkFilters";
 import { panelField } from "./docFields";
 
 const companyFilter = [["Account", "company", "=", "eval:doc.company"]];
@@ -99,12 +99,19 @@ describe("draft Link field filters", () => {
 							],
 						}),
 					],
-					rows: [{ __name: "row-1", credit_to: "Existing account", currency: "INR" }],
+					rows: [
+						{
+							__key: 11,
+							__name: "row-1",
+							credit_to: "Existing account",
+							currency: "INR",
+						},
+					],
 				},
 			],
 		};
 		const before = JSON.stringify(model);
-		expect(draftLinkSearch(model, "t:0:0:credit_to")).toEqual({
+		expect(draftLinkSearch(model, "t:0:11:credit_to")).toEqual({
 			doctype: "Account",
 			referenceDoctype: "Custom Order",
 			linkFieldname: "credit_to",
@@ -132,15 +139,70 @@ describe("draft Link field filters", () => {
 							link_filters: [["Account", "company", "=", "eval:parent.company"]],
 						}),
 					],
-					rows: [{ credit_to: "" }],
+					rows: [{ __key: 11, credit_to: "" }],
 				},
 			],
 		};
-		expect(draftLinkSearch(model, "t:0:0:credit_to").filters).toEqual([
+		expect(draftLinkSearch(model, "t:0:11:credit_to").filters).toEqual([
 			["Account", "company", "=", "Company B"],
 		]);
 	});
 	it("leaves unconstrained and independently configured fields unconstrained", () => {
 		expect(resolveLinkFilters(account(), {})).toEqual([]);
+	});
+});
+
+// a link search is keyed by the row's __key, not its position.
+describe("a link search finds its row by __key", () => {
+	const model = () => ({
+		doctype: "Custom Order",
+		docName: "",
+		linkContext: {},
+		fields: [],
+		tables: [
+			{
+				fieldname: "lines",
+				child: "Custom Row",
+				columns: [
+					account({
+						link_filters: [["Account", "currency", "=", "eval:doc.currency"]],
+					}),
+					{ fieldname: "currency", fieldtype: "Data" },
+				],
+				rows: [
+					{ __key: 5, credit_to: "", currency: "USD" },
+					{ __key: 6, credit_to: "", currency: "EUR" },
+					{ __key: 7, credit_to: "", currency: "GBP" },
+				],
+			},
+		],
+	});
+	const filtersFor = (m, key) => draftLinkSearch(m, key).filters[0][3];
+
+	it("keeps searching the original row after a row above it is removed", () => {
+		const m = model();
+		const key = "t:0:6:credit_to"; // row 2, opened before the removal
+		expect(filtersFor(m, key)).toBe("EUR");
+		m.tables[0].rows.splice(0, 1); // remove row 1
+		expect(filtersFor(m, key)).toBe("EUR"); // by position it would now be GBP
+		expect(draftLinkContext(m, key)).toBe(
+			JSON.stringify(draftLinkSearch(m, "t:0:6:credit_to"))
+		);
+	});
+	it("a removed row's key no longer resolves (and is not another row's)", () => {
+		const m = model();
+		m.tables[0].rows.splice(1, 1);
+		expect(() => draftLinkSearch(m, "t:0:6:credit_to")).toThrow("need ERPNext");
+		expect(draftLinkContext(m, "t:0:6:credit_to")).toBeNull();
+	});
+	it("a row with no __key never matches, not even the key text 'undefined'", () => {
+		const m = model();
+		delete m.tables[0].rows[1].__key;
+		expect(() => draftLinkSearch(m, "t:0:undefined:credit_to")).toThrow("need ERPNext");
+		expect(draftLinkContext(m, "t:0:undefined:credit_to")).toBeNull();
+	});
+	it("the form's copy of a field has its own suffix and resolves the same row", () => {
+		const m = model();
+		expect(filtersFor(m, "t:0:7:credit_to:form")).toBe("GBP");
 	});
 });

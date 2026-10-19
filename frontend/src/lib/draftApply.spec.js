@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
 	alignComputedRows,
@@ -560,5 +560,42 @@ describe("row form fields: a row carries and saves every field of its form", () 
 	it("the panel-only open flag on a row is never sent", () => {
 		const row = { item_code: "I", qty: "1", __open: true };
 		expect(coerceRow(table, row, "create")).toEqual({ item_code: "I", qty: 1 });
+	});
+});
+
+describe("the parsed saved rows are cached for the last 12 tables", () => {
+	const json = (tag, n) => JSON.stringify([{ name: `${tag}-${n}`, v: n }]);
+	it("keeps the last 12 strings and parses an older one again", async () => {
+		const { parseSavedRows } = await import("./draftApply");
+		const parse = vi.spyOn(JSON, "parse");
+		const parsed = (s) => parse.mock.calls.filter(([x]) => x === s).length;
+		try {
+			for (let n = 0; n < 12; n++) parseSavedRows(json("cap", n));
+			for (let n = 0; n < 12; n++) parseSavedRows(json("cap", n)); // all 12 still cached
+			for (let n = 0; n < 12; n++) expect(parsed(json("cap", n))).toBe(1);
+			parseSavedRows(json("cap", 12)); // a 13th pushes the oldest out
+			parseSavedRows(json("cap", 0));
+			expect(parsed(json("cap", 0))).toBe(2);
+			parseSavedRows(json("cap", 12)); // the newest is still there
+			expect(parsed(json("cap", 12))).toBe(1);
+		} finally {
+			parse.mockRestore();
+		}
+	});
+	it("a record with 6 filled tables parses each once across repeated renders", async () => {
+		const { parseSavedRows, savedRowsMap } = await import("./draftApply");
+		const parse = vi.spyOn(JSON, "parse");
+		try {
+			const tables = Array.from({ length: 6 }, (_, n) => json("six", n));
+			for (let render = 0; render < 5; render++)
+				for (const t of tables) {
+					parseSavedRows(t);
+					savedRowsMap(t);
+				}
+			for (const t of tables)
+				expect(parse.mock.calls.filter(([x]) => x === t)).toHaveLength(1);
+		} finally {
+			parse.mockRestore();
+		}
 	});
 });

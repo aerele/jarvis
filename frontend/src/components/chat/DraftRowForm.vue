@@ -5,42 +5,90 @@
 // columns; this shows the rest, so nothing the record would save is out of reach.
 import { computed } from "vue";
 import DraftCell from "@/components/chat/DraftCell.vue";
-import { rowFormLayout } from "@/lib/rowForm";
+import { allRowFields, toPanelRow } from "@/lib/draftApply";
+import { changeDisplay, clipText, rowFormLayout } from "@/lib/rowForm";
 
 const props = defineProps({
 	table: { type: Object, required: true },
 	row: { type: Object, required: true },
 	// The record's own values, for rules that read `parent`.
 	parent: { type: Object, default: () => ({}) },
-	// Link-search keys are "t:{table index}:{row index}:{fieldname}".
+	// Link-search keys are "t:{table index}:{row.__key}:{fieldname}": the row's stable
+	// key, not its position (a row removed above would move it). `rowIndex` is only the
+	// row's place, for the rules' `doc.idx`.
 	tableIndex: { type: Number, required: true },
 	rowIndex: { type: Number, required: true },
-	// Fields that differ from the saved row (an update), shown as changed.
+	// Fields that differ from the saved row (an update), shown as changed, and the saved
+	// row itself (null for a new row): a changed field says what it was, and a field a
+	// rule hides stays hidden while unchanged.
 	changedFields: { type: Object, default: () => new Set() },
+	savedRow: { type: Object, default: null },
 	draftLink: { type: Object, required: true },
 	palette: { type: Object, default: () => ({}) },
 });
 const emit = defineEmits(["link-search", "link-blur", "link-pick", "link-close"]);
 
 const sections = computed(() =>
-	rowFormLayout(props.table, props.row, props.parent, { index: props.rowIndex })
+	rowFormLayout(props.table, props.row, props.parent, {
+		index: props.rowIndex,
+		changed: props.savedRow ? props.changedFields : null,
+	})
 );
+const before = computed(() =>
+	props.savedRow ? toPanelRow(allRowFields(props.table), props.savedRow) : null
+);
+// What a changed field was, worded as the preview words it. The text can be long (a
+// saved description), so the shown text is clipped (clipText) and the title has it all.
+const wasFull = (item) =>
+	before.value && props.changedFields.has(item.field.fieldname)
+		? `was ${changeDisplay(item.field, before.value[item.field.fieldname])}`
+		: "";
+const wasText = (item) => clipText(wasFull(item));
 // The form's own link-search key: a grid column also shown here must not open a
 // second suggestion menu over the same field (draftLinkSearch reads the first
 // four parts, so the suffix changes nothing else).
-const keyFor = (field) => `t:${props.tableIndex}:${props.rowIndex}:${field.fieldname}:form`;
+const keyFor = (field) => `t:${props.tableIndex}:${props.row.__key}:${field.fieldname}:form`;
 const serverMissing = computed(() => new Set(props.row.__missing || []));
-// Required and blank, or named by a failed save and still blank.
+const isBlank = (name) => !String(props.row[name] ?? "").trim();
+// DraftCell shows these as a static value, not a control (so no <label for> fits).
+const isStatic = (item) => item.readOnly || item.field.fieldtype === "Read Only";
+// Required and blank, or named by a failed save and still blank. A static value has no
+// control to fill: it is listed under "Also needed" instead (below).
 const isMissing = (item) =>
-	!item.readOnly &&
-	!String(props.row[item.field.fieldname] ?? "").trim() &&
+	!isStatic(item) &&
+	isBlank(item.field.fieldname) &&
 	(item.reqd || serverMissing.value.has(item.field.fieldname));
-const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${field.fieldname}`;
+const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.row.__key}-${field.fieldname}`;
+// The visible label's id, which names a read-only value (it has no <label for>).
+const labelIdFor = (field) => `${idFor(field)}-label`;
+// The ids of the "Required" and "was X" texts, which describe the control beside them.
+const reqIdFor = (field) => `${idFor(field)}-req`;
+const wasIdFor = (field) => `${idFor(field)}-was`;
+const describedBy = (item) =>
+	[isMissing(item) && reqIdFor(item.field), wasText(item) && wasIdFor(item.field)]
+		.filter(Boolean)
+		.join(" ");
+const isRequired = (item) =>
+	!isStatic(item) && (!!item.reqd || serverMissing.value.has(item.field.fieldname));
+// Names a failed save asked for that the user cannot fill here and that are still blank:
+// a name the form has no field for (hidden, unreadable, or not in the form meta), or one
+// it shows read-only. Each is listed once.
+const needed = computed(() => {
+	const fillable = new Set(
+		sections.value
+			.flatMap((s) => s.columns.flat())
+			.filter((i) => !isStatic(i))
+			.map((i) => i.field.fieldname)
+	);
+	const labels = new Map(allRowFields(props.table).map((f) => [f.fieldname, f.label]));
+	const names = (props.row.__missing || []).filter((n) => !fillable.has(n) && isBlank(n));
+	return [...new Set(names)].map((n) => labels.get(n) || n);
+});
 </script>
 
 <template>
 	<div class="jv-rowform">
-		<section v-for="(s, si) in sections" :key="si" class="jv-rowform-section">
+		<section v-for="s in sections" :key="s.id" class="jv-rowform-section">
 			<div v-if="s.label" class="jv-rowform-section-title">{{ s.label }}</div>
 			<div class="jv-rowform-cols">
 				<div v-for="(col, ci) in s.columns" :key="ci" class="jv-rowform-col">
@@ -53,7 +101,11 @@ const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${fie
 							'jv-rowform-changed': changedFields.has(item.field.fieldname),
 						}"
 					>
-						<label :for="idFor(item.field)" class="jv-rowform-label">
+						<label
+							:id="labelIdFor(item.field)"
+							:for="isStatic(item) ? undefined : idFor(item.field)"
+							class="jv-rowform-label"
+						>
 							{{ item.field.label
 							}}<span v-if="item.reqd && !item.readOnly" class="jv-rowform-req">
 								*</span
@@ -66,6 +118,9 @@ const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${fie
 								:cell-key="keyFor(item.field)"
 								:read-only="item.readOnly"
 								:control-id="idFor(item.field)"
+								:labelledby="labelIdFor(item.field)"
+								:describedby="describedBy(item)"
+								:required="isRequired(item)"
 								wide
 								:draft-link="draftLink"
 								:palette="palette"
@@ -74,12 +129,32 @@ const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${fie
 								@link-pick="(...a) => emit('link-pick', ...a)"
 								@link-close="emit('link-close')"
 							/>
+							<div
+								v-if="wasText(item)"
+								:id="wasIdFor(item.field)"
+								class="jv-rowform-was"
+								:title="wasFull(item)"
+							>
+								{{ wasText(item) }}
+							</div>
+							<div
+								v-if="isMissing(item)"
+								:id="reqIdFor(item.field)"
+								class="jv-rowform-reqtext"
+							>
+								Required
+							</div>
 						</div>
 					</div>
 				</div>
 			</div>
 		</section>
-		<p v-if="!sections.length" class="jv-rowform-empty">No other fields apply to this row.</p>
+		<p v-for="n in needed" :key="n" class="jv-rowform-needed" role="note">
+			Also needed: {{ n }}
+		</p>
+		<p v-if="!sections.length && !needed.length" class="jv-rowform-empty">
+			No other fields apply to this row.
+		</p>
 	</div>
 </template>
 
@@ -139,6 +214,20 @@ const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.rowIndex}-${fie
 }
 .jv-rowform-ctl {
 	min-width: 0;
+}
+.jv-rowform-was {
+	margin-top: 3px;
+	font-size: 11.5px;
+	color: var(--text-3);
+	overflow-wrap: anywhere;
+}
+/* Words as well as the amber border, so a blank required field is not colour only. */
+.jv-rowform-reqtext,
+.jv-rowform-needed {
+	margin: 3px 0 0;
+	font-size: 11.5px;
+	font-weight: 600;
+	color: var(--amber);
 }
 .jv-rowform-ctl :deep(.jv-action-input) {
 	width: 100%;
