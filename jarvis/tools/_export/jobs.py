@@ -1,6 +1,7 @@
 """Durable background exports. All state transitions are fenced by an attempt token."""
 
 import contextlib
+import errno
 import importlib.util
 import json
 import os
@@ -28,6 +29,8 @@ TERMINAL = ("ready", "too large", "too slow", "failed", "cancelled", "expired")
 AGED_OUT = ("too large", "too slow", "failed", "cancelled")
 ROW_RETENTION_DAYS = 30
 EXPORTS_FOLDER = "Home/Jarvis Exports"
+# link() errors that mean "not on the same device / filesystem cannot hard-link".
+CANNOT_LINK = (errno.EXDEV, errno.EPERM, errno.EMLINK, errno.ENOTSUP)
 FILE_FIELDS = ["name", "owner", "is_private", "file_url", "file_name"]
 STATE_FIELDS = [
 	"name",
@@ -479,9 +482,15 @@ def cancel(name: str):
 	job = _get_job(name)
 	_check_owner(job, cancel=True)
 	with _lock():
-		job = _get_job(job.name)
+		# Locked, and the write below is fenced too: a publish can turn the job ready meanwhile.
+		job = _get_job(job.name, for_update=True)
 		if job.status in ACTIVE:
-			frappe.db.set_value(DOCTYPE, name, "cancel_requested", 1)
+			j = frappe.qb.DocType(DOCTYPE)
+			(
+				frappe.qb.update(j)
+				.set(j.cancel_requested, 1)
+				.where((j.name == name) & j.status.isin(list(ACTIVE)))
+			).run()
 			if job.status != "running" or not job.started_at:
 				frappe.db.set_value(
 					DOCTYPE,
@@ -742,11 +751,46 @@ def _record_telemetry(name):
 
 
 def _publish_file(job, token, path, result, permission_key):
-	from jarvis.tools._export.envelope import _safe_base
-
 	# The folder is made first, in its own transaction, so no lock is held while it is created.
 	# A folder that cannot be made files the export under Attachments; it never fails the export.
 	folder = EXPORTS_FOLDER if _safely("exports folder", job.name, ensure_exports_folder) else None
+	# A cross-device copy of up to 50 MB must not run under the chat and job row locks below:
+	# it would block the chat's own message inserts and make chat deletion fail at once.
+	source = _stage_for_link(path, token)
+	try:
+		_publish_locked(job, token, path, source, result, permission_key, folder)
+	finally:
+		if source != path:
+			source.unlink(missing_ok=True)
+
+
+def _stage_for_link(path, token):
+	"""The file the locked publish can hard-link: the spool itself, or a copy when it cannot be.
+
+	``private/files`` may be another device than ``private/jarvis_exports`` (separate mounts).
+	The tmp name matches the straggler sweep, which only removes files older than 15 minutes
+	that no File row points at, so it cannot remove the copy mid-write. ``copyfile`` rather than
+	``copy2``: ``copystat`` would backdate the mtime and expose the copy to that sweep."""
+	probe = Path(frappe.get_site_path("private", "files", f"jarvis-export-tmp-{token}.part"))
+	probe.unlink(missing_ok=True)
+	try:
+		os.link(path, probe)
+	except OSError as exc:
+		if exc.errno not in CANNOT_LINK:
+			raise
+		try:
+			shutil.copyfile(path, probe)
+		except Exception:
+			probe.unlink(missing_ok=True)
+			raise
+		return probe
+	probe.unlink()
+	return path
+
+
+def _publish_locked(job, token, path, source, result, permission_key, folder):
+	from jarvis.tools._export.envelope import _safe_base
+
 	# Read current deletion state before locking publication.
 	_commit()
 	# Conversation deletion takes this same row lock before its trash hooks, so lock the
@@ -765,19 +809,20 @@ def _publish_file(job, token, path, result, permission_key):
 		frappe.db.rollback()
 		_finish(job.name, token, "cancelled", "Export cancelled.")
 		return
-	# A short display suffix must never overwrite an existing file on collision.
-	# Both paths are on the site's private filesystem; link is atomic and exclusive.
-	while True:
-		filename = f"jarvis-export-{_safe_base(job.title)}-{secrets.token_hex(3)}.{job.format}"
-		target = Path(frappe.get_site_path("private", "files", filename))
-		try:
-			os.link(path, target)
-			break
-		except FileExistsError:
-			continue
-	size = path.stat().st_size
-	path.unlink()
+	target = None
 	try:
+		# A short display suffix must never overwrite an existing file on collision.
+		# Both paths are on the site's private filesystem; link is atomic and exclusive.
+		while True:
+			filename = f"jarvis-export-{_safe_base(job.title)}-{secrets.token_hex(3)}.{job.format}"
+			target = Path(frappe.get_site_path("private", "files", filename))
+			try:
+				os.link(source, target)
+				break
+			except FileExistsError:
+				continue
+		size = target.stat().st_size
+		path.unlink()
 		file = frappe.get_doc(
 			{
 				"doctype": "File",
@@ -814,7 +859,8 @@ def _publish_file(job, token, path, result, permission_key):
 		_commit()
 	except Exception:
 		frappe.db.rollback()
-		target.unlink(missing_ok=True)
+		if target:
+			target.unlink(missing_ok=True)
 		raise
 
 

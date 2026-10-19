@@ -7,6 +7,7 @@ import secrets
 
 import frappe
 
+from jarvis.compat import cache_get_fresh
 from jarvis.exceptions import InvalidArgumentError
 
 TTL = 24 * 60 * 60
@@ -44,7 +45,8 @@ def save(spec, *, preserve_limit=False):
 def resolve(result_id):
 	if not isinstance(result_id, str) or not result_id.startswith("q_") or len(result_id) > 100:
 		raise InvalidArgumentError("Result not found.")
-	value = frappe.cache().get_value("jarvis:query:" + result_id)
+	# Fresh, not the request's local copy: on Frappe 15 an expired key can outlive its TTL there.
+	value = cache_get_fresh("jarvis:query:" + result_id)
 	if not value:
 		raise InvalidArgumentError("This result has expired; run the query again.")
 	if value.get("owner") != frappe.session.user:
