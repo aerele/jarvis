@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import {
 	applyActionPayload,
 	draftActionKey,
+	draftIsDirty,
 	draftSaveOutcome,
+	markDraftBaseline,
 	openPanelFor,
 	stampDraftModel,
 } from "./draftSave.js";
@@ -96,4 +98,24 @@ test("the open panel is found only for the draft it edits", () => {
 	assert.equal(openPanelFor(null, key), null);
 	// a panel built before the key existed, or a card without one, never matches
 	assert.equal(openPanelFor(stampDraftModel(base(), { editable: true }), ""), null);
+});
+
+test("a panel is dirty once a value changes or a failed save is showing", () => {
+	const field = (fieldname, value) => ({ fieldname, value, orig: value, control: "text" });
+	const panel = () =>
+		markDraftBaseline({ ...base(), fields: [field("description", "Call back")], tables: [] });
+	const fresh = panel();
+	assert.equal(draftIsDirty(fresh), false, "just opened");
+	const edited = panel();
+	edited.fields[0].value = "Call back tomorrow";
+	assert.equal(draftIsDirty(edited), true);
+	const failed = panel();
+	failed.error = { message: "Value missing for Due Date" };
+	assert.equal(draftIsDirty(failed), true, "its marked fields would be lost");
+	assert.equal(
+		draftIsDirty({ ...base(), fields: [], tables: [] }),
+		false,
+		"never opened as a panel"
+	);
+	assert.equal(draftIsDirty(null), false);
 });
