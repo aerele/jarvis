@@ -76,14 +76,26 @@ def matches_response(msg, request_id) -> bool:
 	"""True when ``msg`` is the JSON-RPC response to our request: same ``id`` and
 	carrying either ``result`` or ``error``. Server-to-client requests (they have
 	an ``id`` AND a ``method``) and notifications (no ``id``) are NOT our
-	response and must be skipped."""
+	response and must be skipped.
+
+	An error with ``"id": null`` also counts. JSON-RPC 2.0 allows it when the
+	server could not read the request id, and Mailchimp Transactional answers a
+	bad key that way before reading the body. One POST carries one request, so
+	the error can only be about ours; without this it read as a transport fault
+	and fed the circuit breaker."""
 	if not isinstance(msg, dict):
 		return False
 	if msg.get("method") is not None:
 		return False
+	if _is_unaddressed_error(msg):
+		return True
 	if msg.get("id") != request_id:
 		return False
 	return "result" in msg or "error" in msg
+
+
+def _is_unaddressed_error(msg: dict) -> bool:
+	return "id" in msg and msg["id"] is None and isinstance(msg.get("error"), dict) and "result" not in msg
 
 
 # --------------------------------------------------------------------------- #
