@@ -7760,11 +7760,11 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			// detail + hint, and nothing was saved) instead of throwing a raw Frappe
 			// 403/417. Keep the panel open so the values are editable (R2-9: the
 			// assistant is only told the user is fixing it here).
+			// The panel's draft stays live through the assistant's acknowledgement.
+			if (p.editable) fixingDraft.value = draftKey;
 			p.applying = false;
 			p.error = outcome.error;
 			markMissing(p, p.error.fields, (_formMetaCache[p.doctype] || {}).fields);
-			// The panel's draft stays live through the assistant's acknowledgement.
-			if (p.editable) fixingDraft.value = draftKey;
 			return;
 		}
 		// Sensitive configuration: nothing was saved, a confirmation card now waits in
