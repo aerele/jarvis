@@ -13,7 +13,11 @@ const F = (fieldname, fieldtype, extra = {}) => ({
 const link = (over = {}) => ({ key: "", items: [], open: false, anchor: null, ...over });
 // DraftLinkMenu has its own spec; here it is a stand-in, so only the cell's
 // wiring to it is under test (jsdom has no layout for the real one).
-const DraftLinkMenu = { name: "DraftLinkMenu", props: ["anchor", "items", "palette"], template: "<div />" };
+const DraftLinkMenu = {
+	name: "DraftLinkMenu",
+	props: ["anchor", "items", "palette"],
+	template: "<div />",
+};
 const cell = (field, row, props = {}) =>
 	mount(DraftCell, {
 		global: { stubs: { DraftLinkMenu } },
