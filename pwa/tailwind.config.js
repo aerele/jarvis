@@ -1,14 +1,9 @@
 import frappeUIPreset from "frappe-ui/tailwind";
 
-// The shared export card renders frappe-ui controls. Scan those controls and
-// their small dependency set so their classes survive the production build.
+// No frappe-ui content globs here (unlike the desktop SPA's config): the PWA
+// uses frappe-ui for its request layer, not its components, so scanning them
+// would only emit unused CSS.
 export default {
 	presets: [frappeUIPreset],
-	content: [
-		"./index.html",
-		"./src/**/*.{vue,js}",
-		"../frontend/src/components/chat/ExportCard.vue",
-		"./node_modules/frappe-ui/src/components/{Button,Tooltip}/**/*.{vue,js,ts}",
-		"./node_modules/frappe-ui/src/components/{Button,Tooltip,LoadingIndicator,FeatherIcon}.vue",
-	],
+	content: ["./index.html", "./src/**/*.{vue,js}"],
 };

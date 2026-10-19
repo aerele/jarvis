@@ -1518,7 +1518,7 @@ onUnmounted(() => {
 				<template v-if="it.msg">
 					<ReportScope :tools="reportToolsByTurn[it.key] || []" />
 					<ExportCard v-if="exportSummary(it.msg)" :summary="exportSummary(it.msg)" />
-					<div v-if="it.view.html" class="jv-md" v-html="it.view.html" />
+					<div v-else-if="it.view.html" class="jv-md" v-html="it.view.html" />
 					<div v-else-if="it.view.empty" class="jv-msg-error">
 						{{ agentName }} didn't return a reply for this turn. Try asking again.
 					</div>
