@@ -23,6 +23,11 @@ from jarvis.tools._export.streaming import ExportLimit, prepare
 DOCTYPE = "Jarvis Export Job"
 ACTIVE = ("queued", "running", "paused")
 TERMINAL = ("ready", "too large", "too slow", "failed", "cancelled", "expired")
+# Rows that age out by creation date. A ready row leaves only by expiring first (its File would
+# otherwise be swept as an orphan); an expired row is kept for ROW_RETENTION_DAYS after it expired.
+AGED_OUT = ("too large", "too slow", "failed", "cancelled")
+ROW_RETENTION_DAYS = 30
+EXPORTS_FOLDER = "Home/Jarvis Exports"
 FILE_FIELDS = ["name", "owner", "is_private", "file_url", "file_name"]
 STATE_FIELDS = [
 	"name",
@@ -150,6 +155,48 @@ def limits():
 		max(1, min(200_000, int(frappe.conf.get("jarvis_export_row_limit", 200_000)))),
 		max(1, int(frappe.conf.get("jarvis_export_max_mb", 50))) * 1024 * 1024,
 	)
+
+
+def retention_days():
+	"""Days a finished file is kept. 0 keeps it (and its job row) until the chat is deleted."""
+	# cint: an empty or string value must not raise inside a publish.
+	return max(0, cint(frappe.conf.get("jarvis_export_retention_days", 30)))
+
+
+def effective_expiry(job):
+	"""When a ready file stops being kept, or None for never.
+
+	The stored ``expires_at`` was set when the file was published. Lowering the setting later
+	applies to files already stored; raising it never extends them; 0 leaves the stored date."""
+	stored = get_datetime(job.expires_at) if job.expires_at else None
+	days = retention_days()
+	if not days or not job.finished_at:
+		return stored
+	cap = add_to_date(get_datetime(job.finished_at), days=days)
+	return min(stored, cap) if stored else cap
+
+
+def ensure_exports_folder():
+	"""Create the folder exports are filed in, in its own transaction. True once it exists.
+
+	Own transaction on purpose: the File insert validates its folder Link with a plain read, so
+	a publisher whose snapshot predates another publisher's folder commit would fail a finished
+	export. Callers run this before any row lock."""
+	if frappe.db.exists("File", EXPORTS_FOLDER):
+		return True
+	frappe.get_doc(
+		{"doctype": "File", "file_name": "Jarvis Exports", "is_folder": 1, "folder": "Home"}
+	).insert(ignore_permissions=True, ignore_if_duplicate=True)
+	# A worker creates it as the export's owner; the folder belongs to the site.
+	frappe.db.set_value("File", EXPORTS_FOLDER, "owner", "Administrator", update_modified=False)
+	_commit()
+	return True
+
+
+def after_migrate():
+	# Best effort: a missing folder is rebuilt by the first publish, so it never blocks a migrate.
+	if frappe.db.table_exists(DOCTYPE):
+		_safely("exports folder", "migrate", ensure_exports_folder, doctype=None)
 
 
 @contextlib.contextmanager
@@ -339,6 +386,7 @@ def public(job, files=None):
 	def iso(value):
 		return get_datetime(value).replace(tzinfo=timezone.utc).isoformat() if value else None
 
+	expiry = effective_expiry(job)
 	data = {
 		"export_job": job.name,
 		"title": job.title,
@@ -346,7 +394,7 @@ def public(job, files=None):
 		"rows_written": job.rows_written or 0,
 		"started_at": iso(job.started_at),
 		"finished_at": iso(job.finished_at),
-		"expires_at": iso(job.expires_at),
+		"expires_at": iso(expiry),
 		"next_attempt": iso(job.next_attempt),
 		"cancel_requested": bool(job.cancel_requested),
 		"error": job.error,
@@ -356,7 +404,7 @@ def public(job, files=None):
 		"cells_truncated": bool(job.cells_truncated),
 		"note": "The file will appear in this chat. Use the card to cancel; repeat export_query to check its state.",
 	}
-	if job.status == "ready" and job.expires_at and get_datetime(job.expires_at) <= now_datetime():
+	if job.status == "ready" and expiry and expiry <= now_datetime():
 		data.update(status="expired", error="This export has expired; ask for a new export.")
 	elif job.status == "ready":
 		file = _ready_file(job, files)
@@ -675,6 +723,9 @@ def _record_telemetry(name):
 def _publish_file(job, token, path, result, permission_key):
 	from jarvis.tools._export.envelope import _safe_base
 
+	# The folder is made first, in its own transaction, so no lock is held while it is created.
+	# A folder that cannot be made files the export under Attachments; it never fails the export.
+	folder = EXPORTS_FOLDER if _safely("exports folder", job.name, ensure_exports_folder) else None
 	# Read current deletion state before locking publication.
 	_commit()
 	# Conversation deletion takes this same row lock before its trash hooks, so lock the
@@ -716,12 +767,14 @@ def _publish_file(job, token, path, result, permission_key):
 				"owner": job.owner,
 				"attached_to_doctype": DOCTYPE,
 				"attached_to_name": job.name,
+				**({"folder": folder} if folder else {}),
 			}
 		)
 		# Supported on both release lines: validate the prewritten file normally,
 		# but do not load/rehash/deduplicate it or apply the unrelated upload cap.
 		file.flags.copy_from_existing_file = True
 		file.insert(ignore_permissions=True)
+		days = retention_days()
 		frappe.db.set_value(
 			DOCTYPE,
 			job.name,
@@ -731,7 +784,7 @@ def _publish_file(job, token, path, result, permission_key):
 				"file": file.name,
 				"size_bytes": size,
 				"finished_at": now_datetime(),
-				"expires_at": add_to_date(now_datetime(), days=1),
+				"expires_at": add_to_date(now_datetime(), days=days) if days else None,
 				"permission_fingerprint": permission_key,
 				"error": "",
 			},
@@ -778,6 +831,9 @@ def announce(name, initial=False, recovery=False):
 	if not frappe.db.exists(DOCTYPE, name):
 		return
 	job = _get_job(name)
+	if job.status == "expired":
+		# Expiry is routine: no chat message, no bell. The card shows its own "Expired" state.
+		return
 	if not initial and not recovery and job.status not in (*TERMINAL, "paused"):
 		return
 	_announce_one(name, initial=initial, recovery=recovery)
@@ -788,7 +844,7 @@ def _message_text(job, initial):
 		return f"Export started: {job.title}."
 	if job.status == "ready":
 		return f"{job.title} is ready ({(job.rows_written or 0):,} rows)."
-	return job.error or "This export has expired; ask again."
+	return job.error or f"{job.title} ended."
 
 
 @_rollback_on_error()
@@ -907,7 +963,7 @@ def reap():
 	if frappe.db.db_type != "mariadb" or not frappe.db.table_exists(DOCTYPE):
 		return
 	try:
-		old = add_to_date(frappe.utils.now_datetime(), days=-30)
+		old = add_to_date(frappe.utils.now_datetime(), days=-ROW_RETENTION_DAYS)
 		for name in _reap_worklist(old):
 			_reap_row(name, old)
 		# A deletion transaction may have started before a just-published File became
@@ -930,14 +986,29 @@ def _reap_worklist(old):
 		j.status.isin(["queued", "paused"]) & (Coalesce(j.card_message, "") == ""),
 		# Expiry is quiet: an expired job is never announced.
 		j.status.notin(["queued", "running", "expired"]) & (Coalesce(j.announced_status, "") != j.status),
-		(j.status == "ready") & (j.expires_at < now),
-		j.status.notin(list(ACTIVE)) & (j.creation < old),
+		(j.status == "ready") & _past_expiry(j, now),
+		j.status.isin(list(AGED_OUT)) & (j.creation < old),
+		# Counted from when it expired: counting from creation would delete it in the pass that
+		# expires it, and the card's "Expired" state would never show.
+		(j.status == "expired") & (j.expires_at < _expired_cutoff()),
 	):
 		names.update(
 			r[0]
 			for r in frappe.qb.from_(j).select(j.name).where(condition).orderby(j.creation).limit(200).run()
 		)
 	return names
+
+
+def _expired_cutoff():
+	# expires_at is naive UTC like every lifecycle stamp; creation is site time (see reap()).
+	return add_to_date(now_datetime(), days=-ROW_RETENTION_DAYS)
+
+
+def _past_expiry(j, now):
+	"""SQL twin of ``effective_expiry``: stored date passed, or older than a lowered setting."""
+	days = retention_days()
+	passed = j.expires_at < now
+	return passed | (j.finished_at < add_to_date(now, days=-days)) if days else passed
 
 
 def _reap_row(name, old):
@@ -990,10 +1061,17 @@ def _recover_row(name):
 		job = _get_job(job.name)
 		if job.status == "queued":
 			announce(job.name, recovery=True)
-	if job.status == "ready" and job.expires_at and get_datetime(job.expires_at) < now_datetime():
+	expiry = effective_expiry(job)
+	if job.status == "ready" and expiry and expiry < now_datetime():
 		_delete_file(job)
-		frappe.db.set_value(DOCTYPE, job.name, {"status": "expired", "file": None})
-		# Persist expiry and run after-commit file cleanup before notifying the owner.
+		# Quiet: no chat message and no bell. expires_at records when it expired, which also
+		# starts the 30 day row retention. The marker stops the reaper looking at it again.
+		frappe.db.set_value(
+			DOCTYPE,
+			job.name,
+			{"status": "expired", "file": None, "expires_at": expiry, "announced_status": "expired"},
+		)
+		# Persist expiry and run after-commit file cleanup.
 		_commit()
 
 
@@ -1001,11 +1079,17 @@ def _purge_if_old(name, old):
 	if not frappe.db.exists(DOCTYPE, name):
 		return
 	job = _get_job(name)
-	if job.status in TERMINAL and get_datetime(job.creation) < old:
+	if _row_is_old(job, old):
 		_delete_file(job)
 		frappe.db.delete(DOCTYPE, {"name": job.name})
 		# Persist retention deletion and run its after-commit file cleanup.
 		_commit()
+
+
+def _row_is_old(job, old):
+	if job.status == "expired":
+		return bool(job.expires_at) and get_datetime(job.expires_at) < _expired_cutoff()
+	return job.status in AGED_OUT and get_datetime(job.creation) < old
 
 
 def _announce_if_present(name):
