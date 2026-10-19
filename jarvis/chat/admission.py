@@ -40,6 +40,8 @@ import json
 import time
 
 import frappe
+from frappe.query_builder import Case
+from frappe.query_builder.functions import Count, IfNull
 
 from jarvis.chat import txn
 from jarvis.chat.events import publish_to_user
@@ -61,8 +63,12 @@ DEFAULT_MAX_INFLIGHT = 4
 
 # Accept-time overload guard (SUX-5): reject (no row) past this queued depth.
 MAX_QUEUE_DEPTH = 25
+# Background turns (File Box drops, scheduled runs) wait in their own line with its own
+# limit, so a large batch never fills the line typed messages use (#1567).
+MAX_BACKGROUND_QUEUE_DEPTH = 200
 
-# Sweep age-out (SUX-5): a queued turn older than this is system-cancelled.
+# Sweep age-out (SUX-5) for a typed turn, kept for callers; the sweep itself reads
+# turn_state.queued_max_age, which gives a background turn 4 hours (#1567).
 QUEUED_MAX_AGE_S = 15 * 60
 
 # Durable transcript marker copy (SUXI-4).
@@ -303,18 +309,31 @@ def _shard_inflight(target: str) -> int:
 	return _turn_dispatching_count(target) + _legacy_streaming_count(target)
 
 
-def _shard_queued_depth(target: str) -> int:
-	return frappe.db.sql(
-		"SELECT COUNT(*) FROM `tabJarvis Chat Turn` WHERE relay_target_id=%(t)s AND state='queued'",
-		{"t": target},
-	)[0][0]
+def _shard_queued_depth(target: str, background: bool | None = None) -> int:
+	"""Queued turns on ``target``: all of them, or only one line (``background``)."""
+	turn = frappe.qb.DocType(TURN)
+	query = (
+		frappe.qb.from_(turn)
+		.select(Count("*"))
+		.where((turn.relay_target_id == target) & (turn.state == "queued"))
+	)
+	if background is not None:
+		is_background = IfNull(turn.turn_class, "interactive") == "background"
+		query = query.where(is_background if background else is_background.negate())
+	return query.run()[0][0]
 
 
-def shard_overloaded(conversation: str | None = None) -> bool:
+def _line_full(target: str, background: bool) -> bool:
+	"""Is the waiting line this turn would join already at its limit? (#1567)"""
+	limit = MAX_BACKGROUND_QUEUE_DEPTH if background else MAX_QUEUE_DEPTH
+	return _shard_queued_depth(target, background) >= limit
+
+
+def shard_overloaded(conversation: str | None = None, background: bool = False) -> bool:
 	"""Cheap unlocked pre-check so send_message can reject BEFORE inserting the
 	user Message (avoids an orphan row). The authoritative overload check runs
-	under the shard lock inside accept_or_queue."""
-	return _shard_queued_depth(relay_target_id(conversation)) >= MAX_QUEUE_DEPTH
+	under the shard lock inside accept_or_queue. ``background`` picks the line."""
+	return _line_full(relay_target_id(conversation), background)
 
 
 def _conv_has_other_active_turn(conversation: str, run_id: str) -> bool:
@@ -689,7 +708,7 @@ def accept_or_queue(
 		# A confirm continuation (exempt_overload) and a held File Box resume
 		# (frappe.flags.jarvis_resume_exempt) skip it - they always queue.
 		exempt = exempt_overload or frappe.flags.get("jarvis_resume_exempt")
-		if not exempt and _shard_queued_depth(target) >= MAX_QUEUE_DEPTH:
+		if not exempt and _line_full(target, turn_class == "background"):
 			frappe.db.rollback()
 			_telemetry("overload_reject", run_id=run_id, target=target)
 			return {
@@ -771,7 +790,7 @@ def accept_or_queue(
 			# (single-flight) AND the shard has a free credit.
 			conv_busy = _conv_has_other_active_turn(conversation, run_id) or _conv_legacy_busy(conversation)
 			inflight = _shard_inflight(target)
-			queue_depth_at_accept = _shard_queued_depth(target)
+			queue_depth_at_accept = _shard_queued_depth(target, turn_class == "background")
 			admit = (not conv_busy) and (inflight < _max_inflight())
 
 			if admit:
@@ -1848,7 +1867,7 @@ def sweep() -> dict:
 	     Message truth; an orphaned turn whose own placeholder is a stale
 	     streaming row past a lost worker (reservation expired) is closed errored
 	     to free its credit (OARI-1/OARI-3). The legacy transport is the executor.
-	  3. Age-out: a queued turn older than QUEUED_MAX_AGE_S is system-cancelled
+	  3. Age-out: a queued turn past its class's maximum wait is system-cancelled
 	     with a recorded reason.
 
 	Then re-promote and republish positions. Never raises.
@@ -2046,17 +2065,21 @@ def _sweep_reservations(targets: set[str]) -> int:
 
 
 def _sweep_age_out(targets: set[str]) -> int:
-	"""System-cancel queued turns older than QUEUED_MAX_AGE_S with a recorded
-	reason + publish (SUX-5)."""
-	cutoff = frappe.utils.add_to_date(None, seconds=-QUEUED_MAX_AGE_S)
-	rows = frappe.db.sql(
-		"""
-		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message, c.owner
-		FROM `tabJarvis Chat Turn` t INNER JOIN `tabJarvis Conversation` c ON c.name = t.conversation
-		WHERE t.state='queued' AND t.enqueued_at IS NOT NULL AND t.enqueued_at < %(cut)s
-		""",
-		{"cut": cutoff},
-		as_dict=True,
+	"""System-cancel queued turns past their class's maximum wait (typed 15 minutes,
+	File Box 4 hours, #1567) with a recorded reason + publish (SUX-5)."""
+	from jarvis.chat import turn_state as ts
+
+	turn = frappe.qb.DocType(TURN)
+	conv = frappe.qb.DocType(CONV)
+	cutoffs = ts.queued_age_cutoffs()
+	cutoff = Case().when(turn.turn_class == "background", cutoffs["bcut"]).else_(cutoffs["cut"])
+	rows = (
+		frappe.qb.from_(turn)
+		.inner_join(conv)
+		.on(conv.name == turn.conversation)
+		.select(turn.run_id, turn.conversation, turn.relay_target_id, turn.seed_message, conv.owner)
+		.where((turn.state == "queued") & turn.enqueued_at.isnotnull() & (turn.enqueued_at < cutoff))
+		.run(as_dict=True)
 	)
 	reason = AGE_OUT_REASON
 	cancelled = 0
