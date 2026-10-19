@@ -302,6 +302,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="github",
 		help_url="https://github.com/settings/applications/new",
 		hint="Register your own GitHub app, then paste its details here.",
+		guide_url="https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app",
 		# GitHub's sign-in service publishes no discovery document, so its
 		# endpoints are pinned here for the metadata-less static seam:
 		# `_setup_mcp_oauth_client` seeds the client straight from these reviewed
@@ -412,6 +413,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="xero",
 		help_url="https://developer.xero.com/app/manage",
 		hint="Register your own Xero app, then paste its details here.",
+		guide_url="https://developer.xero.com/documentation/guides/oauth2/auth-flow",
 		# identity.xero.com publishes metadata but no registration endpoint (probed
 		# 2026-09-07); the resource document names the accounting scopes, so
 		# discovery runs as normal and asks for exactly those.
@@ -427,6 +429,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="hubspot",
 		help_url="https://developers.hubspot.com/docs/apps/developer-platform/build-apps/integrate-with-the-remote-hubspot-mcp-server",
 		hint="Register your own HubSpot app, then paste its details here.",
+		guide_url="https://developers.hubspot.com/docs/guides/apps/authentication/working-with-oauth",
 		# The server lives at the ORIGIN (``/mcp`` is 404). Its sign-in service
 		# publishes metadata with no registration endpoint; HubSpot's own guide has
 		# each customer create an app and requires PKCE (probed 2026-09-07).
@@ -503,6 +506,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo=None,
 		help_url="https://developer.monday.com/apps/docs/oauth",
 		hint="Register your own Monday.com app, then paste its details here.",
+		guide_url="https://developer.monday.com/api-reference/docs/control-mcp-access-with-oauth-app",
 	),
 	Provider(
 		name="Slack",
@@ -514,6 +518,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="slack",
 		help_url="https://api.slack.com/apps",
 		hint="Register your own Slack app, then paste its details here.",
+		guide_url="https://docs.slack.dev/authentication/installing-with-oauth",
 	),
 	Provider(
 		name="ClickUp",
@@ -536,6 +541,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo=None,
 		help_url="https://apps.docusign.com/admin/apps-and-keys",
 		hint="Register your own Docusign app, then paste its details here.",
+		guide_url="https://developers.docusign.com/platform/auth/confidential-authcode-get-token/",
 		# The unauthenticated initialize answers 403 (no 401 challenge), so the
 		# production sign-in endpoints its metadata publishes are pinned here
 		# (developer accounts use account-d / mcp-d, not covered). The resource
@@ -605,6 +611,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="zoom",
 		help_url="https://marketplace.zoom.us/develop/create",
 		hint="Register your own Zoom app, then paste its details here.",
+		guide_url="https://developers.zoom.us/docs/integrations/create/",
 		# zoom.us publishes metadata and Zoom's docs say the MCP servers accept
 		# manual app registration only, no self-registration (probed 2026-09-07).
 	),
@@ -647,6 +654,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="box",
 		help_url="https://app.box.com/developers/console",
 		hint="Register your own Box app, then paste its details here.",
+		guide_url="https://developer.box.com/guides/authentication/oauth2/oauth2-setup/",
 	),
 	Provider(
 		name="Google Drive",
@@ -785,6 +793,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="airtable",
 		help_url="https://airtable.com/create/oauth",
 		hint="Register your own Airtable app, then paste its details here.",
+		guide_url="https://airtable.com/developers/web/guides/oauth-integrations",
 	),
 	Provider(
 		name="Sentry",
