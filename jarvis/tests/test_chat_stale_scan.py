@@ -230,7 +230,7 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 		with (
 			patch("frappe.utils.background_jobs.get_job_status", return_value=None),
 			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
-			patch.object(admission, "MAX_QUEUE_DEPTH", 0),
+			patch.object(admission, "MAX_BACKGROUND_QUEUE_DEPTH", 0),  # the re-dispatch is background
 			patch.object(api, "_dispatch_turn", side_effect=lambda *a, **k: None),
 		):
 			stale_scan._sweep_orphan_turns(now_datetime())
@@ -247,7 +247,7 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 		with (
 			patch("frappe.utils.background_jobs.get_job_status", return_value=None),
 			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
-			patch.object(admission, "MAX_QUEUE_DEPTH", 0),
+			patch.object(admission, "MAX_BACKGROUND_QUEUE_DEPTH", 0),  # the re-dispatch is background
 			patch.object(api, "_dispatch_turn", side_effect=lambda *a, **k: None),
 		):
 			stale_scan._sweep_orphan_turns(now_datetime())
