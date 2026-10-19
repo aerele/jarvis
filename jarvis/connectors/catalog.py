@@ -629,7 +629,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		category="communication",
 		logo=None,
 		help_url="https://developers.facebook.com/apps",
-		hint="You need admin access to a Meta app with WhatsApp, and accepted Cloud API terms.",
+		hint="Needs admin access on a Meta app with WhatsApp and accepted Cloud API terms.",
 		guide_url="https://developers.facebook.com/documentation/mcp/whatsapp-business-tools-mcp",
 		scopes="business_management whatsapp_business_management whatsapp_business_messaging",
 		# Meta's own server. The unauthenticated initialize answers a proper 401
