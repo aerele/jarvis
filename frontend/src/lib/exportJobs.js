@@ -1,11 +1,39 @@
 import { reactive } from "vue";
+import { __ } from "./i18n.js";
 
 // One batched request for all mounted cards, shared by desktop and PWA.
 export const exportJobs = reactive({});
 const subscribers = new Map();
 let timer,
 	scheduled,
+	pending = null,
 	inFlight = false;
+// Ordering stamps. A response is applied to an id only if nothing newer (for example the answer
+// to a Cancel) was written for it after the request was sent.
+let clock = 0;
+const written = new Map();
+
+const FALLBACKS = {
+	get_jobs: () => __("Could not refresh the export."),
+	cancel: () => __("Could not cancel. The export may still be running."),
+};
+
+// Frappe errors carry the user-facing text in `_server_messages` (a JSON list of JSON
+// objects) or, failing that, in `exception` ("module.Class: text").
+function errorText(body) {
+	const plain = (text) =>
+		String(text || "")
+			.replace(/<[^>]*>/g, "")
+			.trim();
+	try {
+		const texts = JSON.parse(body._server_messages).map((m) => plain(JSON.parse(m).message));
+		const joined = texts.filter(Boolean).join(" ");
+		if (joined) return joined;
+	} catch {
+		// fall through to the next source
+	}
+	return plain(String(body?.exception || "").replace(/^[\w.]+:\s*/, "")) || plain(body?.message);
+}
 
 async function request(method, args) {
 	const response = await fetch(`/api/method/jarvis.tools._export.jobs.${method}`, {
@@ -17,8 +45,28 @@ async function request(method, args) {
 		},
 		body: JSON.stringify(args),
 	});
-	if (!response.ok) throw new Error("Could not refresh the export. Please try again.");
+	if (!response.ok) {
+		const body = await response.json().catch(() => null);
+		const error = new Error((body && errorText(body)) || FALLBACKS[method]());
+		error.method = method;
+		throw error;
+	}
 	return (await response.json()).message;
+}
+
+// Write only for a card that is still mounted. `sent` is the stamp taken when the request that
+// produced `value` left; a newer write for the same id wins.
+function write(id, value, sent = Infinity) {
+	if (!subscribers.has(id) || (written.get(id) || 0) >= sent) return;
+	written.set(id, ++clock);
+	exportJobs[id] = value;
+}
+
+export function formatBytes(bytes) {
+	const n = Math.max(0, Number(bytes) || 0);
+	if (n < 1024) return `${n} B`;
+	const kb = Math.max(1, Math.round(n / 1024));
+	return kb < 1024 ? `${kb} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 export function exportSummary(message) {
@@ -32,8 +80,23 @@ export function exportSummary(message) {
 	}
 }
 
+// Two queued requests become one: forced if either is, the union of their ids, and "all" (null)
+// dominates.
+function merged(a, b) {
+	if (!a) return b;
+	return {
+		force: a.force || b.force,
+		names: a.names && b.names ? [...new Set([...a.names, ...b.names])] : null,
+	};
+}
+
 export async function refreshExports(force = true, names = null) {
-	if (inFlight || !subscribers.size) return;
+	if (!subscribers.size) return;
+	if (inFlight) {
+		// A forced refresh (a socket event, Retry) is never dropped; a routine poll may be.
+		if (force) pending = merged(pending, { force, names });
+		return;
+	}
 	if (!force && document.visibilityState === "hidden") return;
 	const ids = [...subscribers.keys()].filter((id) => {
 		if (names && !names.includes(id)) return false;
@@ -53,14 +116,19 @@ export async function refreshExports(force = true, names = null) {
 	inFlight = true;
 	try {
 		for (let i = 0; i < ids.length; i += 100) {
+			const sent = ++clock;
 			const results = await request("get_jobs", { names: ids.slice(i, i + 100) });
 			for (const [id, state] of Object.entries(results))
-				exportJobs[id] = { state, error: "" };
+				write(id, { state, error: "" }, sent);
 		}
 	} catch (error) {
-		for (const id of ids) exportJobs[id] = { ...exportJobs[id], error: error.message };
+		for (const id of ids)
+			if (subscribers.has(id)) exportJobs[id] = { ...exportJobs[id], error: error.message };
 	} finally {
 		inFlight = false;
+		const next = pending;
+		pending = null;
+		if (next) await refreshExports(next.force, next.names);
 	}
 }
 
@@ -89,6 +157,7 @@ export function watchExport(id) {
 		if (remaining) subscribers.set(id, remaining);
 		else {
 			subscribers.delete(id);
+			written.delete(id);
 			delete exportJobs[id];
 		}
 		if (!subscribers.size) {
@@ -102,6 +171,8 @@ export function watchExport(id) {
 	};
 }
 
+// Throws the server's text when the cancel fails; the card shows it. That is not a refresh
+// failure, so the entry's own error is left alone.
 export async function cancelExport(id) {
-	exportJobs[id] = { state: await request("cancel", { name: id }), error: "" };
+	write(id, { state: await request("cancel", { name: id }), error: "" });
 }
