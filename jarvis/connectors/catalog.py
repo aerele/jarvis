@@ -631,6 +631,26 @@ PROVIDERS: tuple[Provider, ...] = (
 		# Mailchimp's only official server; the marketing API (audiences,
 		# campaigns) has none.
 	),
+	Provider(
+		name="WhatsApp Business",
+		key="whatsapp_business",
+		description="Phone numbers, message templates and messages",
+		base_url="https://mcp.facebook.com/whatsapp_business_tools",
+		auth=AUTH_DCR,
+		category="communication",
+		logo=None,
+		help_url="https://developers.facebook.com/apps",
+		hint="Needs admin access on a Meta app with WhatsApp and accepted Cloud API terms.",
+		guide_url="https://developers.facebook.com/documentation/mcp/whatsapp-business-tools-mcp",
+		scopes="business_management whatsapp_business_management whatsapp_business_messaging",
+		# Meta's own server. The unauthenticated initialize answers a proper 401
+		# challenge and discovery passes unchanged (a 403 only comes back for a bad
+		# token). But its registration endpoint refuses every client with
+		# invalid_client_metadata "Dynamic registration is not available for this
+		# client", whatever the callback (tenant host, localhost) or token auth
+		# method (probed 2026-10-19). Off until Meta opens registration.
+		enabled=False,
+	),
 	# --- files ------------------------------------------------------------
 	Provider(
 		name="Dropbox",
