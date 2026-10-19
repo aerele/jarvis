@@ -9499,17 +9499,9 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// to with the wrong (or empty) messages — and only a page refresh, which
 	// does a single clean load, would put it right. (Root cause of "open a
 	// chat, switch away and back, it shows empty until I refresh".)
-<<<<<<< HEAD
-	if (currentId.value !== id) return;
-	// Context meter: best-effort, off the critical path (never awaited) — a slow
-=======
 	if (!d || currentId.value !== id || loadId !== _conversationLoadId || !_recoveryViewActive)
 		return false;
-	// Reload THIS conversation's own connector-focus pick, if any (localStorage
-	// is the source of truth - see _loadConnectorFocusFor).
-	connectorFocus.value = _loadConnectorFocusFor(id);
-	// Context meter: best-effort, off the critical path (never awaited) - a slow
->>>>>>> b9127a6 (fix(chat): recover from unavailable conversation links)
+	// Context meter: best-effort, off the critical path (never awaited) — a slow
 	// or failed get_conversation_context must not delay messages rendering.
 	// This is the conversation-open path, so this fetch is authoritative for
 	// the lock too (applyCompacting) - unlike the mid-turn refreshes elsewhere.
