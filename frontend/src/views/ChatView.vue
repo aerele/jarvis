@@ -256,6 +256,26 @@
 										>
 									</span>
 								</button>
+								<button
+									v-if="
+										store.conversations.some(
+											(c) =>
+												c.name === currentId &&
+												!c.file_box &&
+												c.origin_page !== 'dashboards'
+										)
+									"
+									type="button"
+									role="menuitem"
+									data-create-item="share"
+									class="jv-create-item"
+									@click="
+										createMenuOpen = false;
+										openChatShare(currentId, loadedConvTitle);
+									"
+								>
+									<span class="jv-create-item-t">{{ __("Share…") }}</span>
+								</button>
 								<Dropdown
 									:options="downloadMenuOption.submenu"
 									:disabled="downloadMenuOption.disabled"
@@ -4616,6 +4636,7 @@ import {
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { __ } from "@/lib/i18n";
 import { conversationLoadFailure } from "@/lib/conversationLoadFailure";
+import { openChatShare } from "@/composables/useChatSharing";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
 	dashboardThumbnailTransform,
@@ -9738,7 +9759,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	const refresh = holding ? refreshNames(messages.value) : [];
 	// The newest seq held, so the page reaches back to it and the older pages join.
 	const after = holding ? heldNewestSeq(messages.value, historyPaging.value) : null;
-	const d = await api.getConversation(id, { refresh, after }).catch((error) => {
+	const d = await api.getConversation(id, { refresh, after }).catch(async (error) => {
 		const failure = conversationLoadFailure(error, {
 			requestedId: id,
 			currentId: currentId.value,
@@ -9748,14 +9769,34 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 		});
 		if (failure === "throw") throw error;
 		if (failure === "unavailable") {
+			// Keep the shared-link probe off the normal chat bundle/load path.
+			let sharedTarget = null;
+			try {
+				const { sharedConversationRoute } = await import("@/lib/sharedConversationRoute");
+				sharedTarget = await sharedConversationRoute(
+					id,
+					undefined,
+					() =>
+						_recoveryViewActive &&
+						id === currentId.value &&
+						loadId === _conversationLoadId
+				);
+			} catch {
+				/* Fall through to existing unavailable-chat recovery. */
+			}
+			if (!_recoveryViewActive || id !== currentId.value || loadId !== _conversationLoadId)
+				return null;
 			// Restore home's draft before changing the scope. Never create a chat
 			// or stop a server turn just because this read was refused.
 			swapDraft(null);
 			currentId.value = null;
 			resetRunState();
 			loadConversation(null);
-			notify(__("That chat isn't available"), { type: "error" });
-			router.replace({ name: "Chat" });
+			if (sharedTarget) router.replace(sharedTarget);
+			else {
+				notify(__("That chat isn't available"), { type: "error" });
+				router.replace({ name: "Chat" });
+			}
 		}
 		return null;
 	});

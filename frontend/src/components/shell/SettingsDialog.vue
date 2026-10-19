@@ -141,6 +141,7 @@
 </template>
 
 <script setup>
+import { __ } from "@/lib/i18n";
 import { computed, defineAsyncComponent, inject, onMounted, onBeforeUnmount } from "vue";
 import { Dialog, FeatherIcon } from "frappe-ui";
 // Straight from reka-ui, the same primitives frappe-ui's Dialog uses
@@ -209,7 +210,11 @@ onBeforeUnmount(() => unwatchNotice());
 
 const KEPT_PANES = ["GeneralPane", "UsagePane"];
 
+const SharedChatsPane = defineAsyncComponent(() =>
+	import("@/components/settings/SharedChatsPane.vue")
+);
 const PANES = {
+	sharedchats: SharedChatsPane,
 	general: GeneralPane,
 	usage: UsagePane,
 	activity: ActivityPane,
@@ -256,7 +261,10 @@ const NAV = [
 	{
 		name: "Administration",
 		gate: () => isAdmin,
-		items: [{ key: "usageadmin", label: "User usage", icon: "users" }],
+		items: [
+			{ key: "usageadmin", label: "User usage", icon: "users" },
+			{ key: "sharedchats", label: __("Shared chats"), icon: "share-2" },
+		],
 	},
 ];
 
