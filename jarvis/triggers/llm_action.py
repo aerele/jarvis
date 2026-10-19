@@ -82,17 +82,36 @@ def take_queue_slot(trigger: str, cap: int) -> bool:
 	used to queue one job per document. This counts at queue time, after the commit, so
 	a rolled-back insert takes nothing. ``cap`` + 1 may be queued: the last one finds the
 	run-time count past the cap and writes the day's single Skipped row. The run-time
-	counter stays the authority on what calls the model."""
-	cache = frappe.cache()
-	key = cache.make_key(_queue_key(trigger))
-	count = cint(cache.incr(key))
-	if count == 1:
-		cache.expire(key, _CAP_TTL_SECONDS)
-	try:  # the engine's peek, so a used-up trigger skips the snapshot too
-		frappe.cache.set_value(_count_key(_queue_key(trigger)), count, expires_in_sec=_CAP_TTL_SECONDS)
+	counter stays the authority on what calls the model, so a cache failure here queues
+	the job anyway rather than lose it. Bounded drift: a job queued just before midnight
+	runs against the next day's cap, and a job that crashes keeps its slot."""
+	try:
+		return _bump(_queue_key(trigger)) <= cap + 1
+	except Exception:
+		return True
+
+
+def _release_queue_slot(trigger: str) -> None:
+	"""Give back the queue slot of a job that will not run (its trigger was disabled or
+	deleted after it was queued), so re-enabling it later today still has budget."""
+	try:
+		_bump(_queue_key(trigger), -1)
 	except Exception:
 		pass
-	return count <= cap + 1
+
+
+def _bump(key: str, by: int = 1) -> int:
+	"""Move the per-day counter ``key`` by ``by`` and publish the count for the engine's
+	peek. Raises only if the counter itself fails."""
+	cache = frappe.cache()
+	raw = cache.make_key(key)
+	count = cint(cache.incr(raw, by))
+	cache.expire(raw, _CAP_TTL_SECONDS)
+	try:
+		frappe.cache.set_value(_count_key(key), count, expires_in_sec=_CAP_TTL_SECONDS)
+	except Exception:
+		pass
+	return count
 
 
 def _count_key(cap_key: str) -> str:
@@ -209,6 +228,7 @@ def run_llm_action(
 	)
 	if not row or not cint(row.enabled) or row.action_type != "LLM":
 		# Trigger deleted, disabled, or repurposed between fire and flush.
+		_release_queue_slot(trigger)
 		return
 
 	base = {
@@ -223,16 +243,7 @@ def run_llm_action(
 	}
 
 	cap = cint(row.llm_daily_cap) or _DEFAULT_DAILY_CAP
-	cap_key = _cap_key(trigger)
-	cache = frappe.cache()
-	counter_key = cache.make_key(cap_key)
-	count = cint(cache.incr(counter_key))
-	if count == 1:
-		cache.expire(counter_key, _CAP_TTL_SECONDS)
-	try:  # the engine's peek; the cap itself is enforced below
-		frappe.cache.set_value(_count_key(cap_key), count, expires_in_sec=_CAP_TTL_SECONDS)
-	except Exception:
-		pass
+	count = _bump(_cap_key(trigger))  # the cap itself is enforced below
 	if count > cap:
 		if count == cap + 1:
 			# Exactly one Skipped row marks the day's cutoff; the rest of the
