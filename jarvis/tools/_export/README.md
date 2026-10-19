@@ -84,17 +84,17 @@ Periodic polling includes active jobs only, plus a one-time refresh when a ready
 file reaches expiry; hidden tabs skip periodic requests. Terminal cards still
 refresh on focus/reconnect/realtime events. State reads batch job and File rows.
 
-A job can serve multiple chats owned by the same user. Each chat's initial card
-is its durable subscription; joining creates that card and all subscribed chats
-receive idempotent completion/state messages. There is one Desk bell per state
-notification for the owner. Cancel from any participating card cancels the shared
-job. Deleting a chat removes its subscription; deleting the primary chat transfers
-delivery to a surviving subscriber. Only deletion of the last chat revokes the job
-and removes its files. Publication rechecks the current delivery address.
+A job belongs to one chat. Its initial card is created in the chat that asked, and
+every state message goes only to that chat; the owner gets one Desk bell per state.
+A repeated request in the same chat joins the active job (or reuses a file finished
+in the last ten minutes) and inserts nothing; the same request in another chat, or
+from a caller with no chat, starts its own job and queues behind the first (one
+export per owner). Cancel from the card cancels the job. Delivery locks the
+conversation, then the job; publication locks them in the same order and cancels the
+job if its chat was deleted. Deleting the chat revokes the attempt, removes its files
+and deletes the job.
 
-Background files expire after one day, job rows after thirty days. Conversation
-deletion of the last participating chat revokes the attempt, removes its files and
-deletes its job. The existing
+Background files expire after one day, job rows after thirty days. The existing
 five-minute cron also removes stale attempt directories and uniquely prefixed
 files orphaned between filesystem rename and transaction commit. Immediate
 exports have no new retention policy.
