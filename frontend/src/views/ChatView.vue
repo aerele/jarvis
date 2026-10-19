@@ -4437,6 +4437,8 @@ import {
 	shouldHideNextStep,
 } from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
+import { __ } from "@/lib/i18n";
+import { conversationLoadFailure } from "@/lib/conversationLoadFailure";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
 	dashboardThumbnailTransform,
@@ -9422,10 +9424,12 @@ async function decideFileboxWait(item, text, approve) {
 // watcher may load during setup.
 let _lastLoadResumed = false;
 let _lastRunSignalAt = Date.now();
+let _conversationLoadId = 0;
 function noteRunSignal() {
 	_lastRunSignalAt = Date.now();
 }
 async function loadConversation(id, { staleRetry = true } = {}) {
+	const loadId = ++_conversationLoadId;
 	_recoveryRefreshEpoch++;
 	// Preserve the reader's position across an in-place resync. Captured BEFORE
 	// the message array is swapped, restored after the re-render.
@@ -9468,15 +9472,44 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	const refresh = holding ? refreshNames(messages.value) : [];
 	// The newest seq held, so the page reaches back to it and the older pages join.
 	const after = holding ? heldNewestSeq(messages.value, historyPaging.value) : null;
-	const d = await api.getConversation(id, { refresh, after });
+	const d = await api.getConversation(id, { refresh, after }).catch((error) => {
+		const failure = conversationLoadFailure(error, {
+			requestedId: id,
+			currentId: currentId.value,
+			loadId,
+			latestLoadId: _conversationLoadId,
+			viewActive: _recoveryViewActive,
+		});
+		if (failure === "throw") throw error;
+		if (failure === "unavailable") {
+			// Restore home's draft before changing the scope. Never create a chat
+			// or stop a server turn just because this read was refused.
+			swapDraft(null);
+			currentId.value = null;
+			resetRunState();
+			loadConversation(null);
+			notify(__("That chat isn't available"), { type: "error" });
+			router.replace({ name: "Chat" });
+		}
+		return null;
+	});
 	// Stale-response guard: if the user navigated to a different conversation
 	// while this request was in flight, drop the result. Without this, a slow
 	// get_conversation response clobbers the conversation you actually switched
 	// to with the wrong (or empty) messages — and only a page refresh, which
 	// does a single clean load, would put it right. (Root cause of "open a
 	// chat, switch away and back, it shows empty until I refresh".)
+<<<<<<< HEAD
 	if (currentId.value !== id) return;
 	// Context meter: best-effort, off the critical path (never awaited) — a slow
+=======
+	if (!d || currentId.value !== id || loadId !== _conversationLoadId || !_recoveryViewActive)
+		return false;
+	// Reload THIS conversation's own connector-focus pick, if any (localStorage
+	// is the source of truth - see _loadConnectorFocusFor).
+	connectorFocus.value = _loadConnectorFocusFor(id);
+	// Context meter: best-effort, off the critical path (never awaited) - a slow
+>>>>>>> b9127a6 (fix(chat): recover from unavailable conversation links)
 	// or failed get_conversation_context must not delay messages rendering.
 	// This is the conversation-open path, so this fetch is authoritative for
 	// the lock too (applyCompacting) - unlike the mid-turn refreshes elsewhere.
@@ -9718,6 +9751,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// not ask about: refresh once more so none stays confirmable after it resolved.
 	if (page.stale.length && staleRetry)
 		loadConversation(id, { staleRetry: false }).catch(() => {});
+	return true;
 }
 
 // Render any ```mermaid blocks (the agent's inline pie/flow charts) into SVG.
@@ -9937,9 +9971,9 @@ async function selectConversation(id) {
 	// history) — keep the URL coherent with the sidebar's /c/:id navigation.
 	// No-op when the route watcher initiated this call (params already match).
 	if (route.params.id !== id) router.replace("/c/" + id);
-	await loadConversation(id);
+	const loaded = await loadConversation(id);
 	await nextTick();
-	composerRef.value?.focusInput();
+	if (loaded && _recoveryViewActive && currentId.value === id) composerRef.value?.focusInput();
 }
 // Surface a failed action (new chat, send, …) as an error toast. String()-coerces
 // the extracted reason so a non-string Frappe error payload can't throw inside the
