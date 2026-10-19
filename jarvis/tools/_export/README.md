@@ -24,7 +24,9 @@ buffers only the first 1,000 rows and then spools worksheet XML. Those rows fix 
 column's kind and width, and every cell is then formatted by the immediate export's
 own rule (`compat.xlsx_cell_style`): bold frozen header, filter, grouped numbers, the
 site's date and time formats, tab named after the export. The site's float precision
-no longer applies (decimals show as `#,##0.00`, as in an immediate export).
+no longer applies (decimals show as `#,##0.00`, as in an immediate export). An
+abandoned workbook (too large, cancelled, failed) is never finalised: the spool is
+dropped with the attempt directory instead of being zipped.
 Conditional formatting uses the final range, not retained result rows.
 Xlsxwriter is an explicit dependency on both Frappe lines.
 
