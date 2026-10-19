@@ -236,7 +236,9 @@ def list_conversations(refresh: bool = False) -> list[dict]:
 	user = frappe.session.user
 	rows = frappe.db.sql(
 		"""
-		SELECT c.name, c.title, c.last_active_at, c.starred,
+		SELECT c.name, c.title, c.last_active_at, c.starred, c.file_box,
+		       (SELECT COUNT(*) FROM `tabJarvis Conversation Share` s
+		        WHERE s.conversation = c.name) AS shared_count,
 		       (SELECT COUNT(*) FROM `tabJarvis Chat Message` m
 		        WHERE m.conversation = c.name) AS message_count
 		FROM `tabJarvis Conversation` c
@@ -731,6 +733,12 @@ def get_conversation(
 	"""
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
+	return _conversation_history(doc, limit, before, refresh, after)
+
+
+def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
+	"""Shape history after the caller has established its own read authority."""
+	conversation = doc.name
 	paged = frappe.utils.cint(limit) > 0
 
 	fields = [
@@ -778,9 +786,9 @@ def get_conversation(
 	# hidden = internal system rows (e.g. the post-apply continuation prompt):
 	# they feed the agent transcript but never render in the chat UI, so this
 	# filter covers both first load and every resync-after-gap reload.
-	# get_all after the owner gate above, not get_list: a message's read permission
-	# IS its conversation's owner (chat_permissions), which that gate just proved, and
-	# the Jarvis Admin role reaches chat without a role row on the message doctype.
+	# Callers establish read authority before entering this private helper.
+	# Owners receive the established response; sharing must additionally apply
+	# the recipient allowlist, scrubber and file rewrite before returning it.
 	if paged:
 		page = _history_page(conversation, fields, limit, before, refresh, after)
 	else:

@@ -596,13 +596,15 @@ doc_events["Jarvis Personalise Question Rule"] = {
 # raises, never sprays RQ jobs under tests): see
 # jarvis.chat.role_profiles.on_user_update / enqueue_sync.
 doc_events["User"] = {
-	"on_update": "jarvis.chat.role_profiles.on_user_update",
+	"on_update": ["jarvis.chat.role_profiles.on_user_update", "jarvis.chat.sharing.on_user_update"],
+	"on_trash": "jarvis.chat.sharing.on_user_trash",
 }
 
 # Phase-0 admission (chat concurrency, WP-0): a deleted conversation must not
 # leave orphaned Jarvis Chat Turn rows behind (they would linger as ghost queued/
 # dispatching rows in the admission shard). Cascade-delete them on trash.
 doc_events["Jarvis Conversation"] = {
+	"on_update": "jarvis.chat.sharing.on_conversation_update",
 	"on_trash": [
 		"jarvis.chat.admission.on_conversation_trash",
 		# Slice B: delete the conversation's Jarvis Import Announcement rows so the
@@ -611,6 +613,7 @@ doc_events["Jarvis Conversation"] = {
 		# Pending actions: cancel + delete its chat cards (never an Executing one) and
 		# drop it from held rows' waiters.
 		"jarvis.chat.pending_actions.on_conversation_trash",
+		"jarvis.chat.sharing.on_conversation_trash",
 	],
 }
 
@@ -622,7 +625,11 @@ doc_events["Jarvis Conversation"] = {
 # The decide path already tolerates a deleted skill (a reject goes through, an
 # approve is refused). The hook is keyed on the doctype that HOLDS the Link, so a
 # Role or User a request names is not blocked by it either.
-ignore_links_on_delete = ["Jarvis Pending Action", "Jarvis Skill Promotion Request"]
+ignore_links_on_delete = [
+	"Jarvis Pending Action",
+	"Jarvis Skill Promotion Request",
+	"Jarvis Conversation Share",
+]
 
 # ---------------------------------------------------------------------------
 # Jarvis Triggers (user-defined doc-event automations)
