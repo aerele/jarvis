@@ -100,7 +100,7 @@ test("the open panel is found only for the draft it edits", () => {
 	assert.equal(openPanelFor(stampDraftModel(base(), { editable: true }), ""), null);
 });
 
-test("a panel is dirty once a value changes or a failed save is showing", () => {
+test("a panel is dirty once a value changes, and only then", () => {
 	const field = (fieldname, value) => ({ fieldname, value, orig: value, control: "text" });
 	const panel = () =>
 		markDraftBaseline({ ...base(), fields: [field("description", "Call back")], tables: [] });
@@ -111,7 +111,7 @@ test("a panel is dirty once a value changes or a failed save is showing", () => 
 	assert.equal(draftIsDirty(edited), true);
 	const failed = panel();
 	failed.error = { message: "Value missing for Due Date" };
-	assert.equal(draftIsDirty(failed), true, "its marked fields would be lost");
+	assert.equal(draftIsDirty(failed), false, "an error alone loses no typed work");
 	assert.equal(
 		draftIsDirty({ ...base(), fields: [], tables: [] }),
 		false,

@@ -48,10 +48,9 @@ test("a save sends the helper's payload and follows its outcome, closing on clos
 
 test("an open panel on the same draft is kept, not rebuilt from the agent's proposal", () => {
 	const fn = body("openDraftPanel");
-	const keep = fn.indexOf("openPanelFor(draftPanel.value, actionKey)");
-	assert.ok(keep > 0, "openDraftPanel looks for the open panel first");
+	const keep = fn.indexOf("if (openPanelFor(draftPanel.value, actionKey)) return false;");
+	assert.ok(keep > 0, "openDraftPanel keeps the open panel, stamp and all");
 	assert.ok(keep < fn.indexOf("buildDraftModel(a)"), "before any rebuild");
-	assert.match(fn, /if \(open\) \{[\s\S]*?return false;/);
 });
 
 test("the card's Confirm saves the open panel's values when it edits this draft", () => {
