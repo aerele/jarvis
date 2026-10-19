@@ -46,6 +46,13 @@ STATE_FIELDS = [
 	"limited_by_spec",
 	"cells_truncated",
 	"file",
+	# What the card shows without parsing `source` on every poll. "attempt N of 2" comes
+	# from `retries`: a maintenance pause raises before `attempts` is incremented.
+	"source_doctype",
+	"column_count",
+	"asked_at",
+	"attempts",
+	"retries",
 ]
 
 
@@ -56,8 +63,6 @@ JOB_FIELDS = STATE_FIELDS + [
 	"permission_fingerprint",
 	"attempt_token",
 	"heartbeat",
-	"attempts",
-	"retries",
 	"card_message",
 	"announced_status",
 	"creation",
@@ -342,6 +347,9 @@ def enqueue(source, fmt, title=None, highlights=None):
 					"owner": frappe.session.user,
 					"conversation": conversation,
 					"title": (title or prepared.doctype or "Export")[:140],
+					"source_doctype": prepared.doctype or None,
+					"column_count": len(prepared.columns),
+					"asked_at": now_datetime(),
 					"format": fmt,
 					"source": json.dumps(source),
 					"highlights": json.dumps(highlights),
@@ -382,6 +390,14 @@ def _file_exists(job):
 	return _ready_file(job) is not None
 
 
+# The one wording of the de-dup rule; the descriptor and the persona use the same sentence.
+NOTE = (
+	"The file will appear in this chat's export card, which shows progress and offers Cancel. "
+	"Do not call export_query again to check on it: a repeat in this chat returns the running "
+	"export, or the file it made in the last 10 minutes; otherwise it starts a new export."
+)
+
+
 def public(job, files=None):
 	def iso(value):
 		return get_datetime(value).replace(tzinfo=timezone.utc).isoformat() if value else None
@@ -402,7 +418,12 @@ def public(job, files=None):
 		"size_bytes": job.size_bytes or 0,
 		"limited_by_spec": job.limited_by_spec or None,
 		"cells_truncated": bool(job.cells_truncated),
-		"note": "The file will appear in this chat. Use the card to cancel; repeat export_query to check its state.",
+		"source_doctype": job.source_doctype or None,
+		"column_count": job.column_count or 0,
+		"asked_at": iso(job.asked_at),
+		"attempts": job.attempts or 0,
+		"retries": job.retries or 0,
+		"note": NOTE,
 	}
 	if job.status == "ready" and expiry and expiry <= now_datetime():
 		data.update(status="expired", error="This export has expired; ask for a new export.")

@@ -8,6 +8,9 @@
   "conversation",
   "card_message",
   "title",
+  "source_doctype",
+  "column_count",
+  "asked_at",
   "source",
   "highlights",
   "fingerprint",
@@ -51,6 +54,24 @@
    "fieldname": "title",
    "fieldtype": "Data",
    "label": "Title",
+   "read_only": 1
+  },
+  {
+   "fieldname": "source_doctype",
+   "fieldtype": "Data",
+   "label": "Source DocType",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_count",
+   "fieldtype": "Int",
+   "label": "Column Count",
+   "read_only": 1
+  },
+  {
+   "fieldname": "asked_at",
+   "fieldtype": "Datetime",
+   "label": "Asked At",
    "read_only": 1
   },
   {
