@@ -48,8 +48,8 @@ def validate_branding_inputs(agent_name, logo_url, favicon_url):
 
 
 def clear_brand_boot_cache():
-	"""Drop every user's cached Desk boot. The Desk widget reads the name and the logo from it,
-	so without this only a "clear cache and reload" shows a new brand (admin-v2#622)."""
+	"""Drop every user's cached Desk boot for branding or shortcut visibility changes.
+	Without this, a plain reload keeps serving the old widget preferences."""
 	frappe.cache.delete_key("bootinfo")
 
 
@@ -896,6 +896,7 @@ class JarvisSettings(Document):
 		self._validate_public_address()
 		# The Desk boot carries the name and the logo; on_update drops its cache on a change.
 		self.flags.brand_changed = any(self.has_value_changed(f) for f in ("agent_name", "brand_logo"))
+		self.flags.shortcut_visibility_changed = self.has_value_changed("hide_shortcut_without_access")
 
 	def _validate_public_address(self):
 		"""Private network (design 5.2): in Private mode the public address must pass the
@@ -1140,8 +1141,12 @@ class JarvisSettings(Document):
 		# that both reconfigures the LLM and disables the wiki still scrubs.
 		self._maybe_scrub_wiki_on_disable()
 		self._maybe_flip_agent_min_model()
-		if self.flags.get("brand_changed"):
+		if self.flags.get("brand_changed") or self.flags.get("shortcut_visibility_changed"):
 			clear_brand_boot_cache()
+		if self.flags.get("shortcut_visibility_changed"):
+			# A concurrent reload can repopulate boot before this transaction commits.
+			# Invalidate again once the new preference is visible to other sessions.
+			frappe.db.after_commit.add(clear_brand_boot_cache)
 
 		# ------------------------------------------------------------------ #
 		# Unified LLM path (2026-06-26): models table rows or preset present.
