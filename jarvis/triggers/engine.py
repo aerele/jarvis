@@ -392,19 +392,26 @@ def _llm_cap_reached(row: dict) -> bool:
 	(the authoritative incr + the single Skipped marker still live in the job).
 	Returns True only once the counter is STRICTLY over cap — i.e. after the
 	job has already logged the cap+1 Skipped marker — so we never suppress that
-	one marker. Never raises."""
+	one marker. Also True once today's queue budget (cap + 1 queued, #1563) is
+	used up, so a bulk insert stops paying the snapshot cost. Never raises."""
 	try:
-		from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP, daily_count
+		from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP, daily_count, queued_count
 
-		cap = cint(row.get("llm_daily_cap")) or _DEFAULT_DAILY_CAP
-		return daily_count(row.get("name")) > cap
+		cap = _llm_cap(row, _DEFAULT_DAILY_CAP)
+		return daily_count(row.get("name")) > cap or queued_count(row.get("name")) > cap
 	except Exception:
 		return False
+
+
+def _llm_cap(row: dict, default: int) -> int:
+	return cint(row.get("llm_daily_cap")) or default
 
 
 def _queue_llm_action(row: dict, doc, method: str) -> None:
 	if _llm_cap_reached(row):
 		return
+	from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP
+
 	if getattr(frappe.local, "_jarvis_trigger_llm_queue", None) is None:
 		frappe.local._jarvis_trigger_llm_queue = []
 		frappe.db.after_commit.add(_flush_llm_queue)
@@ -417,6 +424,7 @@ def _queue_llm_action(row: dict, doc, method: str) -> None:
 			event=method,
 			snapshot_json=_snapshot_json(doc),
 			fired_by=frappe.session.user,
+			cap=_llm_cap(row, _DEFAULT_DAILY_CAP),
 		)
 	)
 
@@ -451,7 +459,11 @@ def _flush_llm_queue() -> None:
 	# reverse again, to get back the original firing order
 	unique_last_instances.reverse()
 
+	from jarvis.triggers.llm_action import take_queue_slot
+
 	for job in unique_last_instances:
+		if not take_queue_slot(job.trigger, job.cap):
+			continue  # #1563: today's queue budget for this trigger is used up
 		# NB: the event kwarg is named doc_event because frappe.enqueue
 		# reserves `event` for itself (it would be swallowed, never reaching
 		# the job function).
