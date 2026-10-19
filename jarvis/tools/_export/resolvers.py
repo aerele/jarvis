@@ -68,6 +68,55 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 	oversized export raises instead of silently truncating. ``total`` is the TRUE,
 	permission-filtered source count (we fetch one past the ceiling: under it,
 	``len(rows)`` IS the exact count)."""
+	# The export gates live in authorize_filter, shared with the background path
+	# (streaming.prepare). Frappe's get_list masks on its own, so ``masked`` is unused here.
+	doctype, parent_doctype, cols, columns, _masked = authorize_filter(
+		doctype, fields, filters, order_by, parent_doctype
+	)
+	cap = immediate_row_limit()
+	# Fetch one past the ceiling so we can FAIL CLOSED on an over-large export
+	# instead of shipping a silently-truncated file. Under the ceiling, len(rows)
+	# is the true permission-filtered total.
+	rows = _get_list_bounded(
+		doctype,
+		filters=filters or {},
+		fields=cols,
+		order_by=order_by,
+		parent_doctype=parent_doctype,
+		limit=cap + 1,
+		# get_list returns list-of-dicts by default (no as_list), which is what the
+		# projection below keys on - the column-alignment fix.
+	)
+	if len(rows) > cap:
+		raise NeedsBackground(
+			f"{doctype} matches more than {cap:,} rows for your permissions, more than an immediate "
+			f"export holds. Narrow the filter (e.g. by date or status), or split it by a filter into "
+			f"a few exports."
+		)
+	# Project each row dict onto the REQUESTED columns. A field the caller lacks
+	# permlevel-read on is dropped from the row by get_list (on v17), so keying by
+	# column name - blank when absent - keeps every value under its own header on
+	# every engine, instead of the shift a positional as_list would produce.
+	# Keying is by plain fieldname (the tool's contract; fields=['*'] is rejected
+	# and aggregate/aliased expressions are out of scope - they'd key as blank).
+	return ExportModel(
+		columns=cols,
+		rows=[[row.get(c) for c in cols] for row in rows],
+		total=len(rows),
+		meta={"doctype": doctype, "headers": _unique_headers(columns)},
+	)
+
+
+def authorize_filter(doctype, fields, filters, order_by, parent_doctype):
+	"""The export gates for a ``doctype`` + ``filters`` export, in one place for the
+	immediate path (``from_query``) and the background one (``streaming.prepare``).
+	Returns ``(doctype, parent_doctype, fields, columns, masked)``.
+
+	The order is part of the contract (the agent keys on these texts): a missing or
+	unknown DocType first, then ``*``, the child-table rule, read, Export. A stray
+	``parent_doctype`` on a normal DocType is dropped before the read check. Callers
+	reach ``frappe.permissions.can_export`` and ``masking.masked_fields`` through
+	their modules so a test patch reaches both paths."""
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
 	if not frappe.db.exists("DocType", doctype):
@@ -104,42 +153,34 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 	if not frappe.permissions.can_export(export_dt):
 		raise PermissionDeniedError(f"no export permission on {export_dt}")
 
-	cap = immediate_row_limit()
 	cols = list(fields) if fields else _default_fields(doctype)
 	# Same core gap as get_list: a child's filter / sort / aggregate field is not
 	# permlevel-checked against parent_doctype by the query engine.
 	assert_child_query_fields_readable(doctype, parent_doctype, cols, filters, order_by)
-	# Fetch one past the ceiling so we can FAIL CLOSED on an over-large export
-	# instead of shipping a silently-truncated file. Under the ceiling, len(rows)
-	# is the true permission-filtered total.
-	rows = _get_list_bounded(
-		doctype,
-		filters=filters or {},
-		fields=cols,
-		order_by=order_by,
-		parent_doctype=parent_doctype,
-		limit=cap + 1,
-		# get_list returns list-of-dicts by default (no as_list), which is what the
-		# projection below keys on - the column-alignment fix.
-	)
-	if len(rows) > cap:
-		raise NeedsBackground(
-			f"{doctype} matches more than {cap:,} rows for your permissions, more than an immediate "
-			f"export holds. Narrow the filter (e.g. by date or status), or split it by a filter into "
-			f"a few exports."
-		)
-	# Project each row dict onto the REQUESTED columns. A field the caller lacks
-	# permlevel-read on is dropped from the row by get_list (on v17), so keying by
-	# column name - blank when absent - keeps every value under its own header on
-	# every engine, instead of the shift a positional as_list would produce.
-	# Keying is by plain fieldname (the tool's contract; fields=['*'] is rejected
-	# and aggregate/aliased expressions are out of scope - they'd key as blank).
-	return ExportModel(
-		columns=cols,
-		rows=[[row.get(c) for c in cols] for row in rows],
-		total=len(rows),
-		meta={"doctype": doctype, "headers": _unique_headers([_Column(c, doctype, None) for c in cols])},
-	)
+	columns = [_Column(c, doctype, None, "base") for c in cols]
+	masked = masking.masked_fields({"base": doctype}, {"base": parent_doctype})
+	return doctype, parent_doctype, cols, columns, masked
+
+
+def authorize_spec(spec, fetch_limit):
+	"""The export gates for a ``query`` spec, shared by ``from_spec`` and
+	``streaming.prepare``. Returns ``(query, tables, columns, masked)``.
+
+	The spec goes through the query tool's own compiler (DocType read, allowlist,
+	permlevel, record scope), then needs the Export DocPerm on every table its columns
+	come from, then the masking rule. ``fetch_limit`` is the caller's SELECT LIMIT:
+	the immediate path asks for one past its ceiling, the background one for one past
+	its row cap."""
+	from jarvis.tools.query import compile_spec_for_export
+
+	q, tables, export_doctypes, child_parents = compile_spec_for_export(spec, fetch_limit)
+	for dt in export_doctypes:
+		if not frappe.permissions.can_export(dt):
+			raise PermissionDeniedError(f"no export permission on {dt}")
+	columns = _spec_columns(spec, tables)
+	masked = masking.masked_fields(tables, child_parents)
+	masking.refuse_masked_expressions(columns, q, masked)
+	return q, tables, columns, masked
 
 
 def _get_list_bounded(*args, **kwargs):
@@ -172,16 +213,8 @@ def from_spec(spec) -> ExportModel:
 	below the ceiling still applies (a deliberate "top 50"); when it actually cut
 	the result, ``meta["limited_by_spec"]`` holds it so the caller can say so. An
 	``offset`` is refused."""
-	from jarvis.tools.query import compile_spec_for_export
-
 	cap = immediate_row_limit()
-	q, tables, export_doctypes, child_parents = compile_spec_for_export(spec, cap + 1)
-	for dt in export_doctypes:
-		if not frappe.permissions.can_export(dt):
-			raise PermissionDeniedError(f"no export permission on {dt}")
-	columns = _spec_columns(spec, tables)
-	masked = masking.masked_fields(tables, child_parents)
-	masking.refuse_masked_expressions(columns, q, masked)
+	q, tables, columns, masked = authorize_spec(spec, cap + 1)
 	rows, limited_by_spec = _cut_to_spec_limit(spec, _run_bounded(q))
 	if len(rows) > cap:
 		raise NeedsBackground(
