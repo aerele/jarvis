@@ -1374,6 +1374,73 @@ def cancel_queued_turn(run_id: str) -> dict:
 	return {"ok": True, "run_id": run_id, "path": path}
 
 
+def cancel_queued_on_stop(conversation: str, run_id: str | None) -> bool:
+	"""The composer's Stop on a reply still queued for a slot: cancel it the way the queued
+	chip's Cancel does, since the agent abort cannot reach a turn the agent never had.
+
+	``run_id`` names the turn Stop is for; only a queued turn of this conversation is
+	cancelled. The composer has no run id until run:start, so without one every queued
+	turn of the conversation is cancelled. While another of its turns is under way
+	(preparing, ready, a re-send or a running reply), Stop is for that one, as before,
+	and nothing is cancelled here. Returns True when every turn meant was cancelled, so
+	nothing is left for the agent abort; a turn promoted mid-cancel returns False."""
+	from jarvis.chat import turn_state as ts
+
+	under_way = tuple(s for s in ts.NONTERMINAL_STATES if s != "queued")
+	if ts.unfinished_turn(conversation, states=under_way):
+		return False
+	if run_id:
+		row = frappe.db.get_value(TURN, run_id, ["conversation", "state"], as_dict=True)
+		if not row or row.conversation != conversation or row.state != "queued":
+			return False
+		queued = [run_id]
+	else:
+		queued = frappe.db.get_values(
+			TURN,
+			{"conversation": conversation, "state": "queued"},
+			"name",
+			order_by="creation asc",
+			pluck=True,
+		)
+	if not queued:
+		return False
+	# Cancel them all before any of them hands its slot on, or the hand-over promotes the next.
+	won, all_cancelled = [], True
+	for rid in queued:
+		try:
+			result = _cancel_pre_dispatch(
+				rid, owner_of=_assert_owner, label=f"admission.cancel_queued_on_stop {rid}", attempts=2
+			)
+		except Exception as e:
+			# Stop must not fail here: a lost race or any other error leaves this turn to
+			# the caller's abort, and the turns already cancelled still get their hand-over.
+			if txn.is_write_conflict(e):
+				txn.report_lost_race(e, title="admission.cancel_queued_on_stop")
+			else:
+				frappe.db.rollback()
+				frappe.log_error(title="admission.cancel_queued_on_stop", message=frappe.get_traceback())
+			all_cancelled = False
+			continue
+		if result["path"]:
+			won.append((rid, result))
+		else:
+			all_cancelled = False
+	for rid, result in won:
+		try:
+			_finish_pre_dispatch_cancel(
+				rid,
+				result["row"],
+				result["owner"],
+				result["path"],
+				reason=USER_CANCEL_REASON,
+				source="chat.stop_run",
+			)
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title="admission.cancel_queued_on_stop finish", message=frappe.get_traceback())
+	return all_cancelled
+
+
 @frappe.whitelist()
 def queue_position(run_id: str) -> dict:
 	"""Poll-on-focus fallback for the queued chip. Owner-checked. Returns the

@@ -1657,6 +1657,73 @@ class TestCancelCreditLeak(_AdmissionTestCase):
 		self.assertEqual(self._state(rid), "dispatching", "dispatched turn untouched")
 
 
+class TestStopOnAWaitingReply(_AdmissionTestCase):
+	"""The composer's Stop calls ``stop_run``. A reply still queued for a slot was never
+	cancelled by it: Stop said "Stopped." and the reply ran later. The composer sends
+	no run id until run:start, so both shapes are covered."""
+
+	def test_stop_with_the_waiting_run_id_cancels_it(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q1", self._mk_msg(conv, 1), "queued", version=0)
+		self.assertTrue(chat_api.stop_run(conv, "adm_stop_q1")["ok"])
+		self.assertEqual(self._state("adm_stop_q1"), "cancelled")
+
+	def test_stop_without_a_run_id_cancels_the_waiting_reply(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q2", self._mk_msg(conv, 1), "queued", version=0)
+		self.assertTrue(chat_api.stop_run(conv)["ok"])
+		self.assertEqual(self._state("adm_stop_q2"), "cancelled")
+
+	def test_stop_cancels_every_waiting_turn_and_still_sweeps(self):
+		# Stop means nothing more runs, and its card and approval sweeps still apply.
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q3", self._mk_msg(conv, 1), "queued", version=0)
+		self._insert_turn(conv, "adm_stop_q4", self._mk_msg(conv, 2), "queued", version=0)
+		with patch("jarvis.api._request_autorun_clear") as autorun_clear:
+			chat_api.stop_run(conv)
+		self.assertEqual([self._state(r) for r in ("adm_stop_q3", "adm_stop_q4")], ["cancelled"] * 2)
+		autorun_clear.assert_called_once_with(conv)
+
+	def test_stop_on_a_running_reply_leaves_a_waiting_follow_up(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_run", self._mk_msg(conv, 1), "dispatching", version=3)
+		self._insert_turn(conv, "adm_stop_next", self._mk_msg(conv, 2), "queued", version=0)
+		chat_api.stop_run(conv)
+		chat_api.stop_run(conv, "adm_stop_run")
+		self.assertEqual(self._state("adm_stop_next"), "queued")
+
+	def test_stop_for_another_run_leaves_a_queued_reply(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q5", self._mk_msg(conv, 1), "queued", version=0)
+		chat_api.stop_run(conv, "some-other-run")
+		self.assertEqual(self._state("adm_stop_q5"), "queued")
+
+	def test_a_failing_queued_cancel_does_not_fail_stop_or_its_sweeps(self):
+		conv = self._mk_conv()
+		with (
+			patch.object(admission, "cancel_queued_on_stop", side_effect=RuntimeError("db hiccup")),
+			patch("jarvis.api._request_autorun_clear") as autorun_clear,
+		):
+			self.assertTrue(chat_api.stop_run(conv)["ok"])
+		autorun_clear.assert_called_once_with(conv)
+
+	def test_one_failing_hand_over_does_not_skip_the_others(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q6", self._mk_msg(conv, 1), "queued", version=0)
+		self._insert_turn(conv, "adm_stop_q7", self._mk_msg(conv, 2), "queued", version=0)
+		finished = []
+
+		def finish(run_id, *args, **kwargs):
+			finished.append(run_id)
+			if run_id == "adm_stop_q6":
+				raise RuntimeError("publish down")
+
+		with patch.object(admission, "_finish_pre_dispatch_cancel", side_effect=finish):
+			self.assertTrue(admission.cancel_queued_on_stop(conv, None))
+		self.assertEqual(finished, ["adm_stop_q6", "adm_stop_q7"])
+		self.assertEqual([self._state(r) for r in ("adm_stop_q6", "adm_stop_q7")], ["cancelled"] * 2)
+
+
 # --------------------------------------------------------------------------- #
 # CDX-9 — enqueue-failure compensation (both admit + promote paths)
 # --------------------------------------------------------------------------- #
