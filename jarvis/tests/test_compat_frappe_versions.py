@@ -25,7 +25,11 @@ Needs DB (File doctype); FrappeTestCase rolls back per-test inserts.
 from __future__ import annotations
 
 import datetime
+import importlib.util
 import io
+import tempfile
+import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import frappe
@@ -33,6 +37,8 @@ import openpyxl
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import compat
+from jarvis.tools._export import streaming
+from jarvis.tools._export.resolvers import _Column
 from jarvis.tools.export_excel import export_excel
 from jarvis.tools.read_file import read_file
 
@@ -230,6 +236,75 @@ class TestXlsxLayoutAcrossBuilders(FrappeTestCase):
 		ws = openpyxl.load_workbook(io.BytesIO(compat._xlsx_bytes_openpyxl([("S", rows)]))).worksheets[0]
 		self.assertTrue(ws["A1"].is_date)
 		self.assertTrue(ws["A1"].font.b)
+
+
+def _stream_workbook_bytes(sheets):
+	"""One sheet through the background writer (``streaming.write``), as the file a job makes."""
+	((title, data),) = sheets
+	header, *body = data
+	kinds = {datetime.date: "Date", float: "Float", int: "Int"}
+	fieldtypes = [kinds.get(type(v), "Data") for v in body[0]]
+	prepared = streaming.Prepared(
+		"",
+		{},
+		[_Column(h, None, None) for h in header],
+		header,
+		{},
+		fieldtypes,
+		[],
+		"yyyy-mm-dd",
+		"hh:mm:ss",
+		None,
+	)
+	# The writer names the sheet from this once the background export takes the immediate
+	# layout; until then it is ignored and the sheet is called "Export".
+	prepared.sheet_name = title
+	rows = ({h: v for h, v in zip(header, row, strict=True)} for row in body)
+	with tempfile.TemporaryDirectory() as directory:
+		path = Path(directory) / "export.part"
+		streaming.write(prepared, rows, path, "xlsx", 1000, 50 * 1024 * 1024, lambda: None, lambda n: None)
+		return path.read_bytes()
+
+
+@unittest.skipUnless(importlib.util.find_spec("xlsxwriter"), "the background writer needs xlsxwriter")
+class TestStreamWorkbookMatchesImmediateLayout(FrappeTestCase):
+	"""A background export opens like an immediate one (issue #598's layout).
+
+	The first group already agrees and stays green through the layout change. The expected
+	failures are the places the stream writer differs today; the commit that gives it the
+	immediate layout removes the decorators, and an unexpected success fails the run."""
+
+	def _sheet(self):
+		rows = [list(r) for r in TestXlsxLayoutAcrossBuilders.DATA]
+		return openpyxl.load_workbook(io.BytesIO(_stream_workbook_bytes([("Invoices", rows)]))).worksheets[0]
+
+	def test_header_is_bold_and_frozen(self):
+		ws = self._sheet()
+		self.assertTrue(ws["A1"].font.b)
+		self.assertEqual(ws.freeze_panes, "A2")
+
+	def test_dates_are_dates_floats_are_grouped_and_text_stays_text(self):
+		ws = self._sheet()
+		self.assertTrue(ws["C2"].is_date)
+		self.assertEqual(ws["D2"].number_format, compat.XLSX_FLOAT_FORMAT)
+		self.assertEqual(ws["F2"].value, "00123")  # a code, not a number
+		self.assertEqual(ws["F2"].number_format, "General")
+
+	@unittest.expectedFailure
+	def test_header_has_no_fill(self):
+		self.assertIsNone(self._sheet()["A1"].fill.fill_type)
+
+	@unittest.expectedFailure
+	def test_integers_use_the_grouped_format(self):
+		self.assertEqual(self._sheet()["E2"].number_format, compat.XLSX_INT_FORMAT)
+
+	@unittest.expectedFailure
+	def test_header_row_has_a_filter(self):
+		self.assertEqual(self._sheet().auto_filter.ref, "A1:F3")
+
+	@unittest.expectedFailure
+	def test_sheet_is_named_after_the_title(self):
+		self.assertEqual(self._sheet().title, "Invoices")
 
 
 class TestPermissionConditionsAcrossMajors(FrappeTestCase):

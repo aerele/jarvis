@@ -2,20 +2,22 @@
 
 import csv
 import datetime
+import inspect
 import json
+import re
 import tempfile
 import threading
 import time
 from pathlib import Path
-from unittest import TestCase
+from unittest import TestCase, expectedFailure
 from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis._session import impersonate
-from jarvis.exceptions import InvalidArgumentError
-from jarvis.tools._export import jobs, saved_queries, streaming
+from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools._export import jobs, masking, resolvers, saved_queries, streaming
 from jarvis.tools._export.database import MariaDBStream, Watchdog, connection_settings
 from jarvis.tools._export.resolvers import _Column
 
@@ -474,6 +476,113 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			db.close()
 			thread.join(timeout=2)
 
+	def test_over_cap_match_ends_too_large_not_truncated(self):
+		# The query asks for one row past the cap; that extra row is how a match
+		# larger than the cap is told apart from one that exactly fits.
+		job = self.job(source=json.dumps({"spec": {"from": "DocType", "select": ["name"]}}))
+		with (
+			patch.object(jobs, "limits", return_value=(2, 50 * 1024 * 1024)),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		job.reload()
+		self.assertEqual(job.status, "too large", job.error)
+		self.assertFalse(job.file)
+		self.assertFalse(
+			frappe.db.exists("File", {"attached_to_doctype": jobs.DOCTYPE, "attached_to_name": job.name})
+		)
+
+	def test_time_cap_kills_our_running_query(self):
+		job = self.job(started_at=jobs.now_datetime())
+		db = MariaDBStream(connection_settings()).open()
+		# No cancel request: only the ten-minute deadline (shortened to one second) may act.
+		watchdog = Watchdog(db, job.name, "abc123", frappe.local.site, job.owner, job.conversation, seconds=1)
+		errors = []
+
+		def slow_query():
+			try:
+				list(db.stream_rows("SELECT SLEEP(30)", {}))
+			except Exception as error:
+				errors.append(error)
+
+		thread = threading.Thread(target=slow_query)
+		try:
+			thread.start()
+			watchdog.start()
+			thread.join(timeout=8)
+			self.assertFalse(thread.is_alive(), "The time cap did not kill the read")
+			self.assertTrue(errors)
+			self.assertEqual(watchdog.reason.status, "too slow")
+			self.assertEqual(frappe.db.sql("SELECT 1"), ((1,),))
+		finally:
+			watchdog.stop()
+			db.close()
+			thread.join(timeout=2)
+
+	def test_stream_session_sets_statement_time_limit(self):
+		db = MariaDBStream(connection_settings(), seconds=7).open()
+		try:
+			with db.connection.cursor() as cursor:
+				cursor.execute("SELECT @@SESSION.max_statement_time, @@SESSION.net_write_timeout")
+				statement_time, write_timeout = cursor.fetchone()
+		finally:
+			db.close()
+		self.assertEqual((float(statement_time), float(write_timeout)), (7.0, 7.0))
+
+	def test_run_relies_on_the_ten_minute_defaults(self):
+		# run() builds both objects without a `seconds` argument.
+		for cls in (Watchdog, MariaDBStream):
+			self.assertEqual(inspect.signature(cls).parameters["seconds"].default, 600, cls.__name__)
+
+	def test_pause_schedules_retry_five_minutes_out(self):
+		job = self.job()
+		jobs._finish(job.name, "abc123", "paused", "x")
+		job.reload()
+		self.assertEqual(job.status, "paused")
+		self.assertEqual(job.retries, 1)
+		self.assertFalse(job.finished_at)
+		due = jobs.now_datetime() + datetime.timedelta(minutes=5)
+		self.assertLess(abs((frappe.utils.get_datetime(job.next_attempt) - due).total_seconds()), 15)
+		# Re-armed and paused again: the one retry is spent.
+		frappe.db.set_value(jobs.DOCTYPE, job.name, {"status": "running", "attempt_token": "abc123"})
+		frappe.db.commit()
+		jobs._finish(job.name, "abc123", "paused", "y")
+		job.reload()
+		self.assertEqual(job.status, "failed")
+		self.assertIn("interrupted again", job.error)
+
+	def test_dispatch_skips_a_retry_that_is_not_yet_due(self):
+		# dispatch() takes the oldest eligible job site-wide, so assert on this job's row and calls.
+		job = self.job(
+			status="paused",
+			attempt_token="",
+			next_attempt=jobs.now_datetime() + datetime.timedelta(minutes=5),
+		)
+
+		def started():
+			return [c for c in enqueue.call_args_list if c.kwargs.get("name") == job.name]
+
+		with (
+			patch("jarvis.chat.pump._probe_worker_count", return_value=3),
+			patch.object(frappe, "enqueue") as enqueue,
+		):
+			jobs.dispatch()
+			self.assertEqual(job.reload().status, "paused")
+			self.assertEqual(started(), [])
+			frappe.db.set_value(
+				jobs.DOCTYPE,
+				job.name,
+				"next_attempt",
+				jobs.now_datetime() - datetime.timedelta(seconds=1),
+			)
+			frappe.db.commit()
+			jobs.dispatch()
+			job.reload()
+			self.assertEqual(job.status, "running")
+			calls = started()
+			self.assertEqual(len(calls), 1)
+			self.assertEqual(calls[0].kwargs["job_id"], "export-" + job.attempt_token)
+
 	def test_reaper_expires_file_and_preserves_card(self):
 		job = self.job()
 		with patch.object(jobs, "dispatch"):
@@ -856,3 +965,144 @@ class TestBackgroundFilterPermissions(FrappeTestCase):
 				frappe.db.set_value("DocPerm", perm.name, "export", perm.export)
 				frappe.db.commit()
 				frappe.clear_cache(doctype=parent)
+
+
+class TestPreparedSqlFetchesOnePastTheCap(FrappeTestCase):
+	"""A match larger than the cap is told apart from one that exactly fits by one extra row."""
+
+	CAP = 2
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+
+	def assert_fetches_cap_plus_one(self, sql):
+		# Frappe 15's legacy compiler writes lowercase "limit 3"; Frappe 16's builder "LIMIT 3".
+		self.assertRegex(sql, re.compile(rf"\blimit\s+{self.CAP + 1}\b", re.I))
+
+	def test_spec_sql_fetches_one_row_past_the_cap(self):
+		p = streaming.prepare({"spec": {"from": "DocType", "select": ["name"]}}, self.CAP)
+		self.assert_fetches_cap_plus_one(p.sql)
+
+	def test_filter_sql_fetches_one_row_past_the_cap(self):
+		p = streaming.prepare({"doctype": "DocType", "fields": ["name"]}, self.CAP)
+		self.assert_fetches_cap_plus_one(p.sql)
+
+
+class TestExportGateParity(FrappeTestCase):
+	"""The immediate and the background export must refuse the same input in the same words.
+
+	Each path is asserted on its own, against the text the immediate path gives today, so
+	deleting a check from one path cannot hide behind the other (a deleted DocType check makes
+	both fail later and alike, which an equality test would accept). The cases where the
+	background path words it differently today are expected failures; the refactor that gives
+	both paths one gate removes the decorator, and an unexpected success fails the run."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+
+	def immediate(self, **source):
+		return resolvers.from_query(**source)
+
+	def background(self, **source):
+		return streaming.prepare(source, 10)
+
+	def refused(self, call, error, text):
+		with self.assertRaisesRegex(error, text):
+			call()
+
+	# Unknown DocType: the background path fails later, in get_meta.
+	def test_unknown_doctype_immediate(self):
+		self.refused(
+			lambda: self.immediate(doctype="JV No Such", fields=["name"]),
+			InvalidArgumentError,
+			"unknown DocType: JV No Such",
+		)
+
+	@expectedFailure
+	def test_unknown_doctype_background(self):
+		self.refused(
+			lambda: self.background(doctype="JV No Such", fields=["name"]),
+			InvalidArgumentError,
+			"unknown DocType: JV No Such",
+		)
+
+	# fields=["*"]: the background path words it for its own plain-field rule.
+	def test_star_fields_immediate(self):
+		self.refused(
+			lambda: self.immediate(doctype="ToDo", fields=["*"]),
+			InvalidArgumentError,
+			"name the columns you want",
+		)
+
+	@expectedFailure
+	def test_star_fields_background(self):
+		self.refused(
+			lambda: self.background(doctype="ToDo", fields=["*"]),
+			InvalidArgumentError,
+			"name the columns you want",
+		)
+
+	# A child table without its parent: the background path has a shorter text with no hint.
+	def test_child_table_without_parent_immediate(self):
+		self.refused(
+			lambda: self.immediate(doctype="DocField", fields=["fieldname"]),
+			InvalidArgumentError,
+			"is a child table; pass parent_doctype",
+		)
+
+	@expectedFailure
+	def test_child_table_without_parent_background(self):
+		self.refused(
+			lambda: self.background(doctype="DocField", fields=["fieldname"]),
+			InvalidArgumentError,
+			"is a child table; pass parent_doctype",
+		)
+
+	# The cases below already agree; they stay plain tests through the refactor.
+	def test_no_export_permission_on_both_paths(self):
+		with patch("frappe.permissions.can_export", return_value=False):
+			for call in (
+				lambda: self.immediate(doctype="ToDo", fields=["name"]),
+				lambda: self.background(doctype="ToDo", fields=["name"]),
+			):
+				self.refused(call, PermissionDeniedError, "no export permission on ToDo")
+
+	def test_no_read_permission_on_both_paths(self):
+		with patch.object(frappe, "has_permission", return_value=False):
+			for call in (
+				lambda: self.immediate(doctype="ToDo", fields=["name"]),
+				lambda: self.background(doctype="ToDo", fields=["name"]),
+			):
+				self.refused(call, PermissionDeniedError, "no read permission on ToDo")
+
+	def test_spec_without_export_permission_on_both_paths(self):
+		spec = {"from": "ToDo", "select": ["name"]}
+		with patch("frappe.permissions.can_export", return_value=False):
+			self.refused(
+				lambda: resolvers.from_spec(spec), PermissionDeniedError, "no export permission on ToDo"
+			)
+			self.refused(
+				lambda: streaming.prepare({"spec": spec}, 10),
+				PermissionDeniedError,
+				"no export permission on ToDo",
+			)
+
+	def test_computed_column_over_a_masked_field_on_both_paths(self):
+		# Patched, so it runs on Frappe 15 (no masking there) as well as 16.
+		spec = {
+			"from": "ToDo",
+			"alias": "m",
+			"select": [{"expr": {"fn": "upper", "args": [{"field": "m.description"}]}, "as": "shout"}],
+		}
+		masked = {"m": {"description": object()}}
+		with patch.object(masking, "masked_fields", return_value=masked):
+			self.refused(
+				lambda: resolvers.from_spec(spec), InvalidArgumentError, r"computes over m\.description"
+			)
+			self.refused(
+				lambda: streaming.prepare({"spec": spec}, 10),
+				InvalidArgumentError,
+				r"computes over m\.description",
+			)
