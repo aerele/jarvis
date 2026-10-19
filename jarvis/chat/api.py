@@ -4101,6 +4101,8 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
+	if run_id and _stop_is_late(conversation, run_id):
+		return {"ok": False, "reason": _("That reply has already finished, so nothing was stopped.")}
 	# A reply still queued for a slot has nothing with the agent to abort, so Stop
 	# cancels its turn, the same cancel as the queued chip's. Before this, Stop said
 	# "Stopped." and the reply ran later. The sweeps below still run either way, and a
@@ -4116,7 +4118,7 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	# NOT terminal - the legacy worker observes agent's aborted-terminal and
 	# settles the Turn (cancelled) + promotes the next queued turn there. Marking
 	# intent here just makes support/telemetry honest. Best-effort + flag-gated.
-	admission.mark_cancel_requested(conversation)
+	admission.mark_cancel_requested(conversation, run_id)
 	# Relay-Pump mode: flag the conversation's in-flight pump turn for cancellation
 	# (D2 #17) and wake the pump so its cancel sweep drives the out-of-band abort +
 	# aborted-terminal + settle-cancelled. The direct chat.abort below still fires
@@ -4205,6 +4207,27 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		frappe.log_error(title="jarvis stop_run", message=str(e))
 		return {"ok": False, "reason": _("couldn't reach the assistant to stop it")}
 	return {"ok": True}
+
+
+def _stop_is_late(conversation: str, run_id: str) -> bool:
+	"""#448: a Stop for run A that arrives after A ended, while another turn of the chat is
+	unfinished (a continuation, a macro step, a queued follow-up). That turn is not what the
+	Stop was for, so nothing may touch it: no cancel, no card or approval sweep, no abort.
+	A ``run_id`` that names no finished turn of this chat (a running turn, a gateway id, a
+	legacy run) is not late. Never raises: on a failed read the Stop goes on as before."""
+	from jarvis.chat import pump
+	from jarvis.chat import turn_state as ts
+
+	try:
+		base = run_id.removesuffix("-r1")
+		named = {run_id} | ({base} if pump.resent_gateway_key(base) == run_id else set())
+		state = frappe.db.get_value(
+			ts.TURN, {"name": ["in", list(named)], "conversation": conversation}, "state"
+		)
+		return state in ts.TERMINAL_STATES and bool(ts.unfinished_turn(conversation))
+	except Exception:
+		frappe.log_error(title="stop_run late check", message=frappe.get_traceback())
+		return False
 
 
 def _gateway_run_id(conversation: str, run_id: str | None) -> str | None:
