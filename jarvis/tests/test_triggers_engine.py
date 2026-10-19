@@ -424,6 +424,33 @@ class TestDispatch(_TriggerTestCase):
 		# flush cleared the request queue
 		self.assertFalse(getattr(frappe.local, "_jarvis_trigger_llm_queue", None))
 
+	def _burst(self, count):
+		todos = [self._make_todo(description=f"burst-{i}") for i in range(count)]
+		self._clear_llm_queue()
+		for todo in todos:
+			engine.dispatch(todo, "on_update")
+
+	def test_a_burst_queues_only_up_to_the_cap_and_the_skip_marker(self):
+		# #1563: the cap is also counted when a job is queued, so a bulk insert does not
+		# queue one job per document. cap + 1 are queued: the last one writes the day's
+		# single Skipped row when it runs.
+		self._make_llm_trigger(cap=2)
+		self._burst(6)
+		with patch("frappe.enqueue") as enq:
+			engine._flush_llm_queue()
+		self.assertEqual(enq.call_count, 3)
+		self._burst(2)  # the budget is used up: nothing is even snapshotted
+		self.assertEqual(self._llm_queue(), [])
+
+	def test_a_rolled_back_burst_takes_no_queue_budget(self):
+		self._make_llm_trigger(cap=1)
+		self._burst(3)
+		engine._drop_llm_queue()  # what a rollback runs
+		self._burst(3)
+		with patch("frappe.enqueue") as enq:
+			engine._flush_llm_queue()
+		self.assertEqual(enq.call_count, 2)
+
 	def test_llm_snapshot_filters_private_keys(self):
 		self._make_llm_trigger()
 		todo = self._make_todo()
