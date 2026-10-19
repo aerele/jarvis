@@ -33,6 +33,10 @@ from jarvis._responses import err
 _TTL_S = 900
 _PREFIX = "jarvis:connector_focus:"
 ALLOWED_TOOLS = frozenset({"list_connector_actions", "call_connector"})
+# The plugin reads the user's own memory through call_tool("recall") before the
+# first model step of a new session; refusing it would cache an empty memory for
+# the whole session. It is a read of the caller's own notes, never ERP data.
+PLUGIN_INTERNAL_TOOLS = frozenset({"recall"})
 REFUSED_CODE = "ConnectorFocusError"
 
 
@@ -97,6 +101,8 @@ def refusal(conversation: str | None, tool: str, args) -> dict | None:
 
 
 def _permitted(tool: str, args, key: str) -> bool:
+	if tool in PLUGIN_INTERNAL_TOOLS:
+		return True
 	if tool not in ALLOWED_TOOLS:
 		return False
 	named = args.get("connector") if isinstance(args, dict) else None

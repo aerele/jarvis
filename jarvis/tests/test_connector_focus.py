@@ -69,6 +69,11 @@ class TestFocusGate(FrappeTestCase):
 				"This chat is focused on Microsoft Learn. Clear the focus to use ERP or other tools.",
 			)
 
+	def test_the_plugins_own_memory_recall_is_permitted(self):
+		# memory-injection calls recall before the first model step and caches an
+		# empty result on any refusal, so a focused first turn must not block it.
+		self.assertIsNone(connector_focus.refusal(self.conv, "recall", {"query": "notes"}))
+
 	def test_the_two_connector_tools_are_permitted(self):
 		self.assertIsNone(connector_focus.refusal(self.conv, "list_connector_actions", {}))
 		self.assertIsNone(
