@@ -1,14 +1,17 @@
 """PREPARE loads all permissions/metadata. STREAM only transforms rows and writes disk."""
 
+import contextlib
 import csv
 import datetime
 import itertools
+import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
 import frappe
 
+from jarvis import compat
 from jarvis._xlsx_highlights import add_xlsxwriter_highlights, validate_highlights
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._export import masking, renderers, resolvers
@@ -34,10 +37,13 @@ class Prepared:
 	date_format: str
 	time_format: str
 	limit: int | None
-	number_format: str = "#,##0.00"
 	spool_cap: int = 1024 * 1024 * 1024
 	# The DocType the rows come from (a spec's FROM table); the default title of the export.
 	doctype: str = ""
+	# The workbook tab, already cleaned by ``sheet_name``.
+	sheet_name: str = "Export"
+	# "<date> <time>" when empty (a hand-built Prepared).
+	datetime_format: str = ""
 
 
 def _fieldtype(item, tables):
@@ -114,12 +120,12 @@ def _filter_sql(doctype, parent, **kwargs):
 	return query.walk()
 
 
-def prepare(source, row_cap, highlights=None):
+def prepare(source, row_cap, highlights=None, title=None):
 	"""Compile fresh under the caller, including every Export gate, before streaming.
 
 	The gates are the immediate export's own (``resolvers.authorize_spec`` /
 	``authorize_filter``), so both paths refuse the same input in the same words.
-	What stays here is only what the raw-SQL executor needs."""
+	What stays here is only what the raw-SQL executor needs. ``title`` names the workbook tab."""
 	if "spec" in source:
 		spec = source["spec"]
 		q, tables, columns, masked = resolvers.authorize_spec(spec, row_cap + 1)
@@ -159,6 +165,7 @@ def prepare(source, row_cap, highlights=None):
 	# Validate rules using metadata representatives, never scan the result set.
 	probe = [datetime.date(2000, 1, 1) if t in {"Date", "Datetime", "Time"} else None for t in types]
 	rules = validate_highlights(renderers._rules_by_header(highlights, model, labels), [headers, probe])
+	date_format, datetime_format, time_format = compat.xlsx_date_formats()
 	return Prepared(
 		sql,
 		params,
@@ -167,13 +174,23 @@ def prepare(source, row_cap, highlights=None):
 		masked,
 		types,
 		rules,
-		frappe.get_system_settings("date_format") or "yyyy-mm-dd",
-		frappe.get_system_settings("time_format") or "hh:mm:ss",
+		date_format,
+		time_format,
 		limit,
-		"#,##0." + "0" * min(12, max(0, int(frappe.get_system_settings("float_precision") or 2))),
-		int(frappe.conf.get("jarvis_export_spool_max_mb", 1024)) * 1024 * 1024,
-		source_doctype,
+		spool_cap=int(frappe.conf.get("jarvis_export_spool_max_mb", 1024)) * 1024 * 1024,
+		doctype=source_doctype,
+		sheet_name=sheet_name(title),
+		datetime_format=datetime_format,
 	)
+
+
+_BAD_SHEET_CHARS = re.compile(r"[\[\]:*?/\\]")
+
+
+def sheet_name(title) -> str:
+	"""The tab name for ``title``, as both immediate engines make it: at most 31
+	characters, each one Excel forbids replaced by a space."""
+	return _BAD_SHEET_CHARS.sub(" ", (title or "Export")[:31])
 
 
 class _Range:
@@ -244,66 +261,7 @@ def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress):
 							"The export exceeds the file-size limit. Narrow or split the filters.",
 						)
 	else:
-		import xlsxwriter
-
-		# xlsxwriter keeps only one worksheet row and spools XML beside the .part.
-		book = xlsxwriter.Workbook(
-			str(path),
-			{
-				"constant_memory": True,
-				"tmpdir": str(Path(path).parent),
-				"strings_to_formulas": False,
-				"strings_to_urls": False,
-			},
-		)
-		try:
-			sheet = book.add_worksheet("Export")
-			compressor = zlib.compressobj(wbits=-15)
-			compressed_size, spool_offset = 0, 0
-			first = list(itertools.islice(iterator, 1000))
-			bold = book.add_format({"bold": True, "bg_color": "#E8EDF2"})
-			formats = {
-				"Date": book.add_format({"num_format": prepared.date_format}),
-				"Datetime": book.add_format(
-					{"num_format": prepared.date_format + " " + prepared.time_format}
-				),
-				"Time": book.add_format({"num_format": prepared.time_format}),
-				"Currency": book.add_format({"num_format": "#,##0.00"}),
-				"Float": book.add_format({"num_format": prepared.number_format}),
-				"Int": book.add_format({"num_format": "0"}),
-			}
-			for i, header in enumerate(prepared.headers):
-				width = max([len(str(header))] + [len(str(r[i] or "")) for r in first])
-				sheet.set_column(i, i, min(60, max(12, width + 2)))
-				sheet.write(0, i, header, bold)
-			sheet.freeze_panes(1, 0)
-			for n, values in enumerate(itertools.chain(first, iterator), 1):
-				for i, value in enumerate(values):
-					sheet.write(n, i, value, formats.get(prepared.fieldtypes[i]))
-				if n % 1000 == 0:
-					progress(n)
-					check()
-					sheet.row_data_fh.flush()
-					if sheet.row_data_fh.tell() > prepared.spool_cap:
-						raise ExportLimit(
-							"too large",
-							"The workbook exceeds the export disk budget. Narrow or split the filters.",
-						)
-					# xlsxwriter generated this spool inside the private attempt directory.
-					# nosemgrep: frappe-security-file-traversal
-					with open(sheet.row_data_filename, "rb") as spool:
-						spool.seek(spool_offset)
-						while block := spool.read(64 * 1024):
-							compressed_size += len(compressor.compress(block))
-						spool_offset = spool.tell()
-					if compressed_size > size_cap:
-						raise ExportLimit(
-							"too large",
-							"The workbook exceeds the file-size limit. Narrow or split the filters.",
-						)
-			add_xlsxwriter_highlights(book, sheet, _Range(prepared.headers, count), prepared.rules)
-		finally:
-			book.close()
+		_write_xlsx(prepared, iterator, path, size_cap, check, progress)
 	check()
 	if Path(path).stat().st_size > size_cap:
 		raise ExportLimit("too large", "The export exceeds the file-size limit. Narrow or split the filters.")
@@ -313,3 +271,94 @@ def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress):
 		"limited_by_spec": prepared.limit if limited else 0,
 		"cells_truncated": bool(model.meta.get("cells_truncated")),
 	}
+
+
+def _write_xlsx(prepared, iterator, path, size_cap, check, progress):
+	"""Stream ``iterator`` into a constant-memory workbook laid out like an immediate export."""
+	import xlsxwriter
+
+	# xlsxwriter keeps only one worksheet row and spools XML beside the .part.
+	book = xlsxwriter.Workbook(
+		str(path),
+		{
+			"constant_memory": True,
+			"tmpdir": str(Path(path).parent),
+			"strings_to_formulas": False,
+			"strings_to_urls": False,
+		},
+	)
+	sheet = book.add_worksheet(prepared.sheet_name)
+	try:
+		count = _fill_sheet(book, sheet, prepared, iterator, size_cap, check, progress)
+		add_xlsxwriter_highlights(book, sheet, _Range(prepared.headers, count), prepared.rules)
+	finally:
+		book.close()
+
+
+def _fill_sheet(book, sheet, prepared, iterator, size_cap, check, progress) -> int:
+	"""Write the header and every row; return the row count.
+
+	Column kinds and widths come from the first 1,000 rows (the rest are not held);
+	each cell is then formatted by the immediate export's own rule."""
+	first = list(itertools.islice(iterator, 1000))
+	kinds, widths = compat._sheet_layout([prepared.headers, *first])
+	formats = _cell_formats(book, prepared)
+	bold = book.add_format({"bold": True})
+	for i, header in enumerate(prepared.headers):
+		sheet.set_column(i, i, widths[i])
+		sheet.write(0, i, header, bold)
+	sheet.freeze_panes(1, 0)
+	meter = _SpoolMeter()
+	count = 0
+	for count, values in enumerate(itertools.chain(first, iterator), 1):
+		for i, value in enumerate(values):
+			sheet.write(count, i, value, formats.get(compat.xlsx_cell_style(value, kinds[i])))
+		if count % 1000 == 0:
+			progress(count)
+			check()
+			meter.check(sheet, prepared.spool_cap, size_cap)
+	if kinds:
+		sheet.autofilter(0, 0, count, len(kinds) - 1)
+	return count
+
+
+def _cell_formats(book, prepared) -> dict:
+	"""One xlsxwriter format per ``compat.xlsx_cell_style`` result."""
+	datetime_format = prepared.datetime_format or f"{prepared.date_format} {prepared.time_format}"
+	numbers = {
+		"date": prepared.date_format,
+		"datetime": datetime_format,
+		"time": prepared.time_format,
+		"int": compat.XLSX_INT_FORMAT,
+		"float": compat.XLSX_FLOAT_FORMAT,
+	}
+	return {style: book.add_format({"num_format": number}) for style, number in numbers.items()}
+
+
+class _SpoolMeter:
+	"""Sizes the worksheet XML spool while it grows: its raw bytes against the disk budget,
+	and a running deflate of the new bytes against the file-size limit (a ZIP is compressed
+	XML, so this tracks the final size without building the file)."""
+
+	def __init__(self):
+		self.compressor = zlib.compressobj(wbits=-15)
+		self.compressed_size = 0
+		self.offset = 0
+
+	def check(self, sheet, spool_cap, size_cap):
+		sheet.row_data_fh.flush()
+		if sheet.row_data_fh.tell() > spool_cap:
+			raise ExportLimit(
+				"too large", "The workbook exceeds the export disk budget. Narrow or split the filters."
+			)
+		# xlsxwriter generated this spool inside the private attempt directory.
+		# nosemgrep: frappe-security-file-traversal
+		with open(sheet.row_data_filename, "rb") as spool:
+			spool.seek(self.offset)
+			while block := spool.read(64 * 1024):
+				self.compressed_size += len(self.compressor.compress(block))
+			self.offset = spool.tell()
+		if self.compressed_size > size_cap:
+			raise ExportLimit(
+				"too large", "The workbook exceeds the file-size limit. Narrow or split the filters."
+			)

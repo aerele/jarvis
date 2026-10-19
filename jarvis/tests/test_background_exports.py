@@ -130,6 +130,27 @@ class TestStreamingWriter(TestCase):
 				workbook.close()
 			self.assertEqual(result["rows_written"], 2)
 
+	def test_xlsx_dates_from_computed_columns_are_dates(self):
+		# A computed column is typed "Data" in prepare; its date values are still dates.
+		from openpyxl import load_workbook
+
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "export.part"
+			streaming.write(
+				prepared(),
+				iter([{"value": datetime.date(2026, 6, 1)}]),
+				path,
+				"xlsx",
+				10,
+				50 * 1024 * 1024,
+				lambda: None,
+				lambda n: None,
+			)
+			with path.open("rb") as source:
+				cell = load_workbook(source).active["A2"]
+		self.assertTrue(cell.is_date)
+		self.assertEqual(cell.number_format, "yyyy-mm-dd")
+
 
 class TestSavedQueries(FrappeTestCase):
 	def test_owner_expiry_and_no_rows(self):
@@ -1686,6 +1707,19 @@ class TestPreparedSqlFetchesOnePastTheCap(FrappeTestCase):
 	def test_filter_sql_fetches_one_row_past_the_cap(self):
 		p = streaming.prepare({"doctype": "DocType", "fields": ["name"]}, self.CAP)
 		self.assert_fetches_cap_plus_one(p.sql)
+
+
+class TestPreparedSheetName(FrappeTestCase):
+	"""The background workbook's tab is named after the export, as the immediate one is."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+
+	def test_sheet_name_comes_from_the_title(self):
+		source = {"doctype": "ToDo", "fields": ["name"]}
+		self.assertEqual(streaming.prepare(source, 10).sheet_name, "Export")
+		self.assertEqual(streaming.prepare(source, 10, title="Q1/Q2: [x]").sheet_name, "Q1 Q2   x ")
 
 
 class TestExportGateParity(FrappeTestCase):

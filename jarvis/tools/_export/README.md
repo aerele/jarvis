@@ -20,7 +20,11 @@ formatted file for otherwise identical requests.
 DocType's Export permission, and loads labels, DocField/computed types, masks,
 highlight rules and system formats. `streaming.write` does no database or
 permission lookups. CSV writes rows directly; xlsxwriter constant-memory mode
-buffers only the first 1,000 rows for widths and then spools worksheet XML.
+buffers only the first 1,000 rows and then spools worksheet XML. Those rows fix each
+column's kind and width, and every cell is then formatted by the immediate export's
+own rule (`compat.xlsx_cell_style`): bold frozen header, filter, grouped numbers, the
+site's date and time formats, tab named after the export. The site's float precision
+no longer applies (decimals show as `#,##0.00`, as in an immediate export).
 Conditional formatting uses the final range, not retained result rows.
 Xlsxwriter is an explicit dependency on both Frappe lines.
 
