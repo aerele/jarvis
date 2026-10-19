@@ -65,6 +65,36 @@ def daily_count(trigger: str) -> int:
 	return cint(compat.cache_get_fresh(_count_key(_cap_key(trigger))))
 
 
+def _queue_key(trigger: str) -> str:
+	"""Per-trigger per-day count of queued evaluations, e.g. jarvis:trigqueue:<name>:20260716."""
+	return f"jarvis:trigqueue:{trigger}:{nowdate().replace('-', '')}"
+
+
+def queued_count(trigger: str) -> int:
+	"""Today's queued LLM evaluations for ``trigger``, as the engine last published them."""
+	return cint(compat.cache_get_fresh(_count_key(_queue_key(trigger))))
+
+
+def take_queue_slot(trigger: str, cap: int) -> bool:
+	"""Count one more queued evaluation of ``trigger`` today, and tell if it may be queued.
+
+	#1563: the run-time counter below moves only when a job runs, so a fast bulk insert
+	used to queue one job per document. This counts at queue time, after the commit, so
+	a rolled-back insert takes nothing. ``cap`` + 1 may be queued: the last one finds the
+	run-time count past the cap and writes the day's single Skipped row. The run-time
+	counter stays the authority on what calls the model."""
+	cache = frappe.cache()
+	key = cache.make_key(_queue_key(trigger))
+	count = cint(cache.incr(key))
+	if count == 1:
+		cache.expire(key, _CAP_TTL_SECONDS)
+	try:  # the engine's peek, so a used-up trigger skips the snapshot too
+		frappe.cache.set_value(_count_key(_queue_key(trigger)), count, expires_in_sec=_CAP_TTL_SECONDS)
+	except Exception:
+		pass
+	return count <= cap + 1
+
+
 def _count_key(cap_key: str) -> str:
 	return f"{cap_key}:count"
 
