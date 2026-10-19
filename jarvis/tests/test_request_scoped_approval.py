@@ -16,6 +16,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import api as chat_api
 from jarvis.chat import approval_phrases, pending_confirm
+from jarvis.permissions import message_origin
 from jarvis.tests._conv_helpers import (
 	CONV,
 	NON_ADMIN_USER,
@@ -334,7 +335,7 @@ class TestRequestAutorunSendMessage(FrappeTestCase):
 
 		provision_legacy_site(self)
 		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
-			with patch("frappe.enqueue"):
+			with patch("frappe.enqueue"), message_origin("file_box"):  # a real background send
 				chat_api.send_message(conv, "create the orders, confirm all", background=1)
 		self.assertEqual(_flag(conv), 0, "a background (unattended) send never arms")
 
