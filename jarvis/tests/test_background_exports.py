@@ -10,9 +10,10 @@ import threading
 import time
 from pathlib import Path
 from unittest import TestCase, expectedFailure
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
+import pymysql
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis._session import impersonate
@@ -215,10 +216,20 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		frappe.db.delete(
 			"Notification Log", {"document_type": jobs.DOCTYPE, "document_name": ["in", self.names]}
 		)
+		frappe.db.delete(
+			"Error Log", {"reference_doctype": jobs.DOCTYPE, "reference_name": ["in", self.names]}
+		)
 		frappe.db.delete("Jarvis Chat Message", {"conversation": self.conversation})
 		frappe.db.delete("Jarvis Conversation", {"name": self.conversation})
 		frappe.db.commit()
 		super().tearDown()
+
+	def error_logs(self, name, doctype=None):
+		return frappe.get_all(
+			"Error Log",
+			filters={"reference_doctype": doctype or jobs.DOCTYPE, "reference_name": name},
+			fields=["method", "error"],
+		)
 
 	def job(self, **values):
 		job = frappe.get_doc(
@@ -986,6 +997,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		job.reload()
 		self.assertEqual(job.status, "failed")
 		self.assertIn("export it as CSV", job.error)
+		self.assertEqual(len(self.error_logs(job.name)), 1)
 
 	def test_refused_handoff_keeps_the_narrowing_advice(self):
 		from jarvis.tools.export_query import export_query
@@ -1059,6 +1071,188 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		self.assertEqual(first["title"], "ToDo")
 		self.assertEqual(second["title"], "DocType")
 		self.assertEqual(third["title"], "Open tasks")
+
+	def test_failure_is_logged_with_the_job_before_finishing(self):
+		job = self.job()
+		with (
+			patch.object(streaming, "write", side_effect=RuntimeError("disk full")),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		self.assertEqual(job.reload().status, "failed")
+		logs = self.error_logs(job.name)
+		self.assertEqual(len(logs), 1)
+		self.assertTrue(logs[0].method.startswith("jarvis.export"), logs[0].method)
+		self.assertIn("RuntimeError", logs[0].error)
+		self.assertIn("disk full", logs[0].error)
+		self.assertNotIn(job.source, logs[0].error)
+		# The log survives a failing terminal write: it is committed before _finish runs.
+		second = self.job()
+		with (
+			patch.object(streaming, "write", side_effect=RuntimeError("disk full again")),
+			patch.object(jobs, "_finish", side_effect=RuntimeError("db gone")),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(second.name, "abc123")
+		frappe.db.rollback()
+		self.assertTrue(any("disk full again" in log.error for log in self.error_logs(second.name)))
+
+	def test_failed_outcomes_are_logged_but_zero_rows_is_not(self):
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": f"export-off-{frappe.generate_hash(length=8)}@example.com",
+				"first_name": "off",
+				"send_welcome_email": 0,
+				"enabled": 0,
+				"user_type": "System User",
+			}
+		).insert(ignore_permissions=True)
+		try:
+			inactive = self.job()
+			frappe.db.set_value(jobs.DOCTYPE, inactive.name, "owner", user.name)
+			empty = self.job(
+				source=json.dumps(
+					{
+						"spec": {
+							"from": "ToDo",
+							"select": ["name"],
+							"where": [{"field": "description", "op": "=", "value": "jv-no-such-todo-xyz"}],
+						}
+					}
+				)
+			)
+			frappe.db.commit()
+			with patch.object(jobs, "dispatch"):
+				jobs.run(inactive.name, "abc123")
+				jobs.run(empty.name, "abc123")
+			self.assertEqual(inactive.reload().status, "failed")
+			# (The chat belongs to someone else here, so the bell step may log as well.)
+			self.assertTrue(any("active account" in log.error for log in self.error_logs(inactive.name)))
+			self.assertEqual(empty.reload().status, "failed")
+			self.assertIn("No records match", empty.error)
+			self.assertEqual(self.error_logs(empty.name), [])
+		finally:
+			frappe.delete_doc("User", user.name, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
+	def test_enqueue_failure_returns_the_reservation(self):
+		first = self.job(status="queued", attempt_token="")
+		second = self.job(status="queued", attempt_token="")
+		# A different owner, so only the break after the failure keeps dispatch from trying it.
+		frappe.db.set_value(jobs.DOCTYPE, second.name, "owner", "Guest")
+		frappe.db.commit()
+		with (
+			patch("jarvis.chat.pump._probe_worker_count", return_value=3),
+			patch("frappe.enqueue", side_effect=RuntimeError("redis down")) as enqueue,
+		):
+			jobs.dispatch()
+		self.assertEqual(enqueue.call_count, 1)
+		for job in (first, second):
+			job.reload()
+			self.assertEqual(job.status, "queued")
+			self.assertEqual(job.attempt_token or "", "")
+			self.assertEqual(job.retries or 0, 0)
+		self.assertEqual(len(self.error_logs(first.name)), 1)
+
+	def test_run_tail_survives_a_stuck_watchdog(self):
+		job = self.job()
+
+		def stuck(watchdog):
+			watchdog.stop_event.set()
+			raise RuntimeError("Export watchdog did not stop")
+
+		with (
+			patch.object(Watchdog, "stop", autospec=True, side_effect=stuck),
+			patch.object(jobs, "announce") as announce,
+			patch.object(jobs, "dispatch") as dispatch,
+		):
+			jobs.run(job.name, "abc123")
+		announce.assert_called_once()
+		dispatch.assert_called_once()
+
+	def test_watchdog_keeps_the_original_cause(self):
+		job = self.job(started_at=jobs.now_datetime())
+		lost = pymysql.err.OperationalError(2013, "Lost connection to server")
+		db = MariaDBStream(connection_settings()).open()
+		watchdog = Watchdog(db, job.name, "abc123", frappe.local.site, job.owner, job.conversation)
+		try:
+			with patch.object(db, "detect_lock_waiters", side_effect=lost):
+				watchdog.start()
+				deadline = time.monotonic() + 8
+				while not watchdog.reason and time.monotonic() < deadline:
+					time.sleep(0.1)
+		finally:
+			watchdog.stop()
+			db.close()
+		self.assertEqual(watchdog.reason.status, "failed")
+		self.assertIs(watchdog.cause, lost)
+
+		# run() hands that cause to the log; re-raising the replacement reason erases __cause__.
+		second = self.job()
+
+		def wait_for_the_watchdog(prepared, rows, path, fmt, cap, size_cap, check, progress):
+			for _ in range(100):
+				check()
+				time.sleep(0.1)
+			raise AssertionError("the watchdog never fired")
+
+		with (
+			patch.object(MariaDBStream, "detect_lock_waiters", side_effect=lost),
+			patch.object(streaming, "write", wait_for_the_watchdog),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(second.name, "abc123")
+		self.assertEqual(second.reload().status, "failed")
+		self.assertTrue(any("OperationalError" in log.error for log in self.error_logs(second.name)))
+
+	def test_run_tail_errors_do_not_skip_dispatch(self):
+		job = self.job()
+		dispatch = MagicMock()
+		with (
+			patch.object(jobs, "announce", side_effect=RuntimeError("announce failed")),
+			patch.object(jobs, "dispatch", dispatch),
+		):
+			jobs.run(job.name, "abc123")
+		dispatch.assert_called_once()
+		self.assertEqual(job.reload().status, "ready")
+
+	def test_reaper_tail_is_isolated_and_still_dispatches(self):
+		job = self.job()
+		with patch.object(jobs, "dispatch"):
+			jobs.run(job.name, "abc123")
+		file_name = job.reload().file
+		frappe.db.delete(jobs.DOCTYPE, {"name": job.name})
+		frappe.db.commit()
+		try:
+			with (
+				patch.object(jobs, "dispatch") as dispatch,
+				patch.object(frappe, "delete_doc", side_effect=RuntimeError("cannot delete")),
+			):
+				jobs.reap()
+			dispatch.assert_called_once()
+			self.assertEqual(len(self.error_logs(file_name, "File")), 1)
+		finally:
+			jobs._delete_generated_file(file_name)
+			frappe.db.delete("Error Log", {"reference_doctype": "File", "reference_name": file_name})
+			frappe.db.commit()
+
+	def test_reaper_purges_old_rows_even_if_announce_fails(self):
+		job = self.job(status="failed", attempt_token="", announced_status="")
+		frappe.db.set_value(
+			jobs.DOCTYPE,
+			job.name,
+			"creation",
+			frappe.utils.add_to_date(jobs.now_datetime(), days=-31),
+			update_modified=False,
+		)
+		frappe.db.commit()
+		with (
+			patch.object(jobs, "dispatch"),
+			patch.object(jobs, "announce", side_effect=RuntimeError("owner is gone")),
+		):
+			jobs.reap()
+		self.assertFalse(frappe.db.exists(jobs.DOCTYPE, job.name))
 
 
 class TestBackgroundFilterPermissions(FrappeTestCase):
