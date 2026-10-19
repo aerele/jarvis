@@ -820,6 +820,8 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		self.assertEqual(stored["data"]["rows_written"], 2)
 		self.assertEqual((expired_messages(), bells()), (0, bells_before))
 		self.assertEqual(job.announced_status, "expired")
+		# expires_at records when it expired (here), not the date it was due, so the 30 days start now.
+		self.assertLess(abs(job.expires_at - jobs.now_datetime()), datetime.timedelta(minutes=1))
 		# The row stays visible for 30 days after it expired, and a second pass changes nothing.
 		self.reap()
 		self.assertEqual(job.reload().status, "expired")
@@ -830,6 +832,16 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		self.stamp(job, expires_at=self.days_ago(31))
 		self.reap()
 		self.assertFalse(frappe.db.exists(jobs.DOCTYPE, job.name))
+
+	def test_lowered_retention_shows_expired_before_the_row_is_purged(self):
+		# A file due long ago (setting lowered, or the reaper was down) must not be expired and
+		# deleted in one pass: the card has to show "Expired" for the 30 days.
+		job = self.ready_job()
+		job = self.stamp(job, finished_at=self.days_ago(100), expires_at=self.days_ago(60))
+		self.reap()
+		self.assertTrue(frappe.db.exists(jobs.DOCTYPE, job.name))
+		self.assertEqual(job.reload().status, "expired")
+		self.assertEqual(jobs.public(job)["status"], "expired")
 
 	def test_row_retention_spares_ready_rows_and_purges_other_terminal_rows(self):
 		kept = self.ready_job()
@@ -1399,6 +1411,23 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		frappe.db.rollback()
 		self.assertTrue(any("disk full again" in log.error for log in self.error_logs(second.name)))
 
+	def test_refusals_shown_to_the_user_are_not_logged(self):
+		# Permission and invalid-argument refusals are user outcomes, shown verbatim: no Error Log.
+		for error in (
+			PermissionDeniedError("No read permission on ToDo."),
+			InvalidArgumentError("Bad field."),
+		):
+			with self.subTest(error=type(error).__name__):
+				job = self.job()
+				with (
+					patch.object(streaming, "write", side_effect=error),
+					patch.object(jobs, "dispatch"),
+				):
+					jobs.run(job.name, "abc123")
+				self.assertEqual(job.reload().status, "failed")
+				self.assertEqual(job.error, str(error))
+				self.assertEqual(self.error_logs(job.name), [])
+
 	def test_failed_outcomes_are_logged_but_zero_rows_is_not(self):
 		user = frappe.get_doc(
 			{
@@ -1472,6 +1501,40 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			jobs.run(job.name, "abc123")
 		announce.assert_called_once()
 		dispatch.assert_called_once()
+
+	def test_publish_phase_refreshes_the_heartbeat(self):
+		# The watchdog stops before publishing; a slow copy or lock wait must not look like a dead worker.
+		job = self.job()
+		stale = jobs.now_datetime() - datetime.timedelta(hours=2)
+		seen = {}
+		real_stop = Watchdog.stop
+
+		def stop_then_age_the_heartbeat(watchdog):
+			real_stop(watchdog)
+			frappe.db.set_value(jobs.DOCTYPE, job.name, "heartbeat", stale, update_modified=False)
+			frappe.db.commit()
+
+		def publish(row, token, *args):
+			seen["heartbeat"] = frappe.db.get_value(jobs.DOCTYPE, row.name, "heartbeat")
+
+		with (
+			patch.object(Watchdog, "stop", autospec=True, side_effect=stop_then_age_the_heartbeat),
+			patch.object(jobs, "_publish_file", side_effect=publish),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		self.assertGreater(
+			frappe.utils.get_datetime(seen["heartbeat"]), jobs.now_datetime() - datetime.timedelta(minutes=1)
+		)
+
+		# Fenced: a stale attempt's heartbeat touches nothing.
+		frappe.db.set_value(jobs.DOCTYPE, job.name, "heartbeat", stale, update_modified=False)
+		frappe.db.commit()
+		jobs._heartbeat(job.name, "not-the-token")
+		self.assertLess(
+			frappe.utils.get_datetime(job.reload().heartbeat),
+			jobs.now_datetime() - datetime.timedelta(hours=1),
+		)
 
 	def test_watchdog_keeps_the_original_cause(self):
 		job = self.job(started_at=jobs.now_datetime())
@@ -1655,6 +1718,20 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		self.assertEqual(len(bells()), 1)
 		self.assertEqual(job.reload().announced_status, "ready")
 
+	def test_bell_subject_escapes_the_model_supplied_title(self):
+		job = self.job(title="<b>Q3</b> suppliers")
+		with patch.object(jobs, "dispatch"):
+			jobs.run(job.name, "abc123")
+		subjects = [
+			b.subject
+			for b in frappe.get_all(
+				"Notification Log", filters={"document_name": job.name}, fields=["subject"]
+			)
+		]
+		self.assertEqual(len(subjects), 1)
+		self.assertNotIn("<b>", subjects[0])
+		self.assertIn("&lt;b&gt;Q3", subjects[0])
+
 	def test_publish_refuses_when_the_chat_was_deleted(self):
 		job = self.job()
 		files = Path(frappe.get_site_path("private", "files"))
@@ -1758,6 +1835,15 @@ class TestPreparedSheetName(FrappeTestCase):
 		source = {"doctype": "ToDo", "fields": ["name"]}
 		self.assertEqual(streaming.prepare(source, 10).sheet_name, "Export")
 		self.assertEqual(streaming.prepare(source, 10, title="Q1/Q2: [x]").sheet_name, "Q1 Q2   x ")
+
+	def test_sheet_name_never_starts_or_ends_with_an_apostrophe(self):
+		# Excel rejects such a tab name; xlsxwriter raises InvalidWorksheetName for it.
+		source = {"doctype": "ToDo", "fields": ["name"]}
+		cases = (("'Q3' suppliers", "Q3' suppliers"), ("Suppliers'", "Suppliers"), ("'" * 3, "Export"))
+		for title, expected in cases:
+			with self.subTest(title=title):
+				self.assertEqual(streaming.sheet_name(title), expected)
+				self.assertEqual(streaming.prepare(source, 10, title=title).sheet_name, expected)
 
 
 class TestExportGateParity(FrappeTestCase):
