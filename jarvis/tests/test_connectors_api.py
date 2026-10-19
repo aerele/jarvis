@@ -327,6 +327,22 @@ class TestListConnectors(_ConnectorApiTestCase):
 			self.assertNotIn("credential", row)
 			self.assertIn("allowed_actions", row)
 
+	def test_administrator_mine_holds_only_own_personal_rows(self):
+		# Administrator bypasses connector_query_conditions; the SPA payload must
+		# still drop other users' Personal rows (they stay visible in Desk).
+		shared = self._mk("Shared", "admin-shared-key")
+		own = self._mk("Personal", "admin-own-key")
+		other = self._mk("Personal", "admin-other-key", owner=PLAIN_A)
+
+		frappe.set_user("Administrator")
+		out = connectors_api.list_connectors()
+
+		mine_names = {r["name"] for r in out["mine"]}
+		self.assertIn(shared, {r["name"] for r in out["shared"]})
+		self.assertIn(own, mine_names)
+		self.assertNotIn(other, mine_names)
+		self.assertNotIn(other, {r["name"] for r in out["shared"]})
+
 
 class TestListConnectorsCatalog(_ConnectorApiTestCase):
 	"""The SPA builds its whole preset picker from ``list_connectors()["catalog"]``,

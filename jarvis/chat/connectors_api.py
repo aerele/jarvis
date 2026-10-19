@@ -693,6 +693,9 @@ def list_connectors() -> dict:
 			"last_test_status",
 			"last_test_at",
 		],
+		# Administrator bypasses connector_query_conditions, so this keeps other
+		# users' Personal rows out of the SPA for them too (Desk is the admin view).
+		or_filters=[["scope", "=", "Shared"], ["owner", "=", frappe.session.user]],
 		order_by="scope asc, label asc",
 	)
 	summaries = _action_summaries([r["name"] for r in rows])
