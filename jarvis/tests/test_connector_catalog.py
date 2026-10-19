@@ -510,10 +510,18 @@ class TestGuideUrl(unittest.TestCase):
 	_GOOGLE = ("Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs")
 	_GUIDE = "https://developers.google.com/workspace/guides/configure-mcp-servers"
 
-	def test_to_public_ships_the_guide_for_google_only(self):
+	def test_to_public_ships_the_google_guide(self):
 		for row in catalog.to_public():
-			expected = self._GUIDE if row["name"] in self._GOOGLE else None
-			self.assertEqual(row["guide_url"], expected, row["name"])
+			if row["name"] in self._GOOGLE:
+				self.assertEqual(row["guide_url"], self._GUIDE, row["name"])
+
+	def test_every_enabled_static_preset_has_an_https_guide(self):
+		static = [p for p in catalog.PROVIDERS if p.enabled and p.auth == catalog.AUTH_STATIC]
+		self.assertTrue(static)
+		for provider in static:
+			self.assertTrue(
+				(provider.guide_url or "").startswith("https://"), f"{provider.name} lacks a guide_url"
+			)
 
 	def test_guide_url_must_be_https(self):
 		bad = replace(catalog.by_name("Gmail"), guide_url="http://insecure.example/guide")
