@@ -594,26 +594,199 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			self.assertEqual(len(calls), 1)
 			self.assertEqual(calls[0].kwargs["job_id"], "export-" + job.attempt_token)
 
-	def test_reaper_expires_file_and_preserves_card(self):
+	def ready_job(self):
+		"""A job run to ``ready`` with its card in place, as a real publish leaves it."""
 		job = self.job()
 		with patch.object(jobs, "dispatch"):
 			jobs.announce(job.name, initial=True)
 			jobs.run(job.name, "abc123")
-			job.reload()
-			file_name = job.file
-			frappe.db.set_value(
-				jobs.DOCTYPE,
-				job.name,
-				"expires_at",
-				frappe.utils.add_to_date(jobs.now_datetime(), days=-1),
-			)
-			frappe.db.commit()
+		return job.reload()
+
+	def stamp(self, job, **columns):
+		"""Move lifecycle columns directly, without touching ``modified``."""
+		frappe.db.set_value(jobs.DOCTYPE, job.name, columns, update_modified=False)
+		frappe.db.commit()
+		return job.reload()
+
+	def days_ago(self, days):
+		return frappe.utils.add_to_date(jobs.now_datetime(), days=-days)
+
+	def reap(self):
+		with patch.object(jobs, "dispatch"):
 			jobs.reap()
+
+	def test_published_file_lives_in_jarvis_exports_for_thirty_days(self):
+		first = self.ready_job()
+		second = self.ready_job()
+		file = frappe.get_doc("File", first.file)
+		self.assertEqual(file.folder, "Home/Jarvis Exports")
+		self.assertEqual(file.attached_to_name, first.name)
+		self.assertEqual(file.is_private, 1)
+		self.assertTrue(file.file_name.startswith("jarvis-export-"))
+		self.assertEqual(frappe.db.get_value("File", second.file, "folder"), "Home/Jarvis Exports")
+		for job in (first, second):
+			offset = frappe.utils.get_datetime(job.expires_at) - jobs.now_datetime()
+			self.assertLess(abs(offset - datetime.timedelta(days=30)), datetime.timedelta(seconds=60))
+		self.assertEqual(frappe.db.count("File", {"is_folder": 1, "file_name": "Jarvis Exports"}), 1)
+
+	def test_retention_setting_zero_keeps_files_and_rows(self):
+		with patch.dict(frappe.conf, {"jarvis_export_retention_days": 0}):
+			job = self.ready_job()
+			self.assertIsNone(job.expires_at)
+			file_name = job.file
+			# A ready row never leaves by age: its File would be swept as an orphan.
+			job = self.stamp(job, finished_at=self.days_ago(40), creation=self.days_ago(40))
+			self.reap()
+			self.assertEqual(job.reload().status, "ready")
+			self.assertTrue(frappe.db.exists("File", file_name))
+			self.assertIsNone(jobs.public(job)["expires_at"])
+			self.assertEqual(jobs.public(job)["status"], "ready")
+
+	def test_retention_change_applies_to_stored_files_only_downward(self):
+		# (label, days setting, finished_at age, stored expires_at offset in days, expected status)
+		cases = [
+			("lowered below the file's age", 7, 8, 22, "expired"),
+			("lowered but the file is younger", 7, 3, 27, "ready"),
+			("raised never extends", 90, 31, -1, "expired"),
+			("zero keeps the stored expiry", 0, 31, -1, "expired"),
+			("zero does not expire a kept file", 0, 31, None, "ready"),
+		]
+		for label, days, age, offset, expected in cases:
+			with self.subTest(label), patch.dict(frappe.conf, {"jarvis_export_retention_days": 30}):
+				job = self.ready_job()
+				expires = None if offset is None else jobs.now_datetime() + datetime.timedelta(days=offset)
+				job = self.stamp(job, finished_at=self.days_ago(age), expires_at=expires)
+				file_name = job.file
+				with patch.dict(frappe.conf, {"jarvis_export_retention_days": days}):
+					self.assertEqual(jobs.public(job)["status"], expected)
+					self.reap()
+				self.assertEqual(job.reload().status, expected)
+				self.assertEqual(bool(frappe.db.exists("File", file_name)), expected == "ready")
+		# The card shows the lowered date, not the stored one.
+		job = self.ready_job()
+		job = self.stamp(job, finished_at=self.days_ago(3))
+		with patch.dict(frappe.conf, {"jarvis_export_retention_days": 7}):
+			shown = frappe.utils.get_datetime(jobs.public(job)["expires_at"].replace("+00:00", ""))
+		self.assertLess(
+			abs(shown - (frappe.utils.get_datetime(job.finished_at) + datetime.timedelta(days=7))),
+			datetime.timedelta(seconds=2),
+		)
+
+	def test_expiry_is_quiet(self):
+		job = self.ready_job()
+		expired_key = f"export:{job.name}:expired"
+
+		def expired_messages():
+			return frappe.db.count(
+				"Jarvis Chat Message", {"conversation": self.conversation, "tool_call_id": expired_key}
+			)
+
+		def bells():
+			return frappe.db.count("Notification Log", {"document_name": job.name})
+
+		bells_before = bells()
+		file_name = job.file
+		# Created 31 days ago with a 30 day file: expires_at is about a day past, as in real life.
+		job = self.stamp(job, creation=self.days_ago(31), expires_at=self.days_ago(1))
+		self.reap()
 		self.assertEqual(job.reload().status, "expired")
 		self.assertFalse(frappe.db.exists("File", file_name))
 		self.assertTrue(frappe.db.exists("Jarvis Chat Message", job.card_message))
 		stored = json.loads(frappe.db.get_value("Jarvis Chat Message", job.card_message, "tool_result"))
 		self.assertEqual(stored["data"]["rows_written"], 2)
+		self.assertEqual((expired_messages(), bells()), (0, bells_before))
+		self.assertEqual(job.announced_status, "expired")
+		# The row stays visible for 30 days after it expired, and a second pass changes nothing.
+		self.reap()
+		self.assertEqual(job.reload().status, "expired")
+		self.assertEqual((expired_messages(), bells()), (0, bells_before))
+		self.stamp(job, expires_at=self.days_ago(29))
+		self.reap()
+		self.assertTrue(frappe.db.exists(jobs.DOCTYPE, job.name))
+		self.stamp(job, expires_at=self.days_ago(31))
+		self.reap()
+		self.assertFalse(frappe.db.exists(jobs.DOCTYPE, job.name))
+
+	def test_row_retention_spares_ready_rows_and_purges_other_terminal_rows(self):
+		kept = self.ready_job()
+		kept = self.stamp(kept, creation=self.days_ago(40))
+		gone = self.job(status="failed", attempt_token="", announced_status="failed")
+		self.stamp(gone, creation=self.days_ago(40))
+		self.reap()
+		self.assertEqual(kept.reload().status, "ready")
+		self.assertFalse(frappe.db.exists(jobs.DOCTYPE, gone.name))
+
+	def test_missing_exports_folder_is_recreated_for_the_publisher(self):
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": f"export-folder-{frappe.generate_hash(length=8)}@example.com",
+				"first_name": "folder",
+				"send_welcome_email": 0,
+				"user_type": "System User",
+				"roles": [{"role": "Jarvis User"}],
+			}
+		).insert(ignore_permissions=True)
+		try:
+			frappe.db.delete("File", {"name": jobs.EXPORTS_FOLDER})
+			frappe.db.commit()
+			with impersonate(user.name):
+				jobs.ensure_exports_folder()
+				# A second call finds the folder and inserts nothing.
+				jobs.ensure_exports_folder()
+			folder = frappe.db.get_value(
+				"File", jobs.EXPORTS_FOLDER, ["owner", "is_folder", "folder"], as_dict=True
+			)
+			self.assertEqual((folder.owner, folder.is_folder, folder.folder), ("Administrator", 1, "Home"))
+		finally:
+			frappe.set_user("Administrator")
+			frappe.delete_doc("User", user.name, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
+	def test_publish_creates_the_folder_and_survives_a_folder_failure(self):
+		frappe.db.delete("File", {"name": jobs.EXPORTS_FOLDER})
+		frappe.db.commit()
+		job = self.ready_job()
+		self.assertEqual(frappe.db.get_value("File", job.file, "folder"), jobs.EXPORTS_FOLDER)
+		# A folder that cannot be made never fails a finished export; it files elsewhere.
+		frappe.db.delete("File", {"name": jobs.EXPORTS_FOLDER})
+		frappe.db.commit()
+		with patch.object(jobs, "ensure_exports_folder", side_effect=RuntimeError("no folder")):
+			other = self.ready_job()
+		self.assertEqual(other.status, "ready", other.error)
+		self.assertNotEqual(frappe.db.get_value("File", other.file, "folder"), jobs.EXPORTS_FOLDER)
+		self.assertEqual(len(self.error_logs(other.name)), 1)
+		jobs.ensure_exports_folder()
+
+	def test_expiry_deletes_only_the_linked_file(self):
+		job = self.ready_job()
+		file = frappe.get_doc("File", job.file)
+		path = Path(file.get_full_path())
+		twin = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": file.file_name,
+				"is_private": 1,
+				"file_url": file.file_url,
+				"file_size": file.file_size,
+				"attached_to_doctype": "Jarvis Conversation",
+				"attached_to_name": self.conversation,
+			}
+		)
+		twin.flags.copy_from_existing_file = True
+		twin.insert(ignore_permissions=True)
+		frappe.db.commit()
+		try:
+			self.stamp(job, expires_at=self.days_ago(1))
+			self.reap()
+			self.assertEqual(job.reload().status, "expired")
+			self.assertFalse(frappe.db.exists("File", file.name))
+			self.assertTrue(frappe.db.exists("File", twin.name))
+			self.assertTrue(path.exists())
+		finally:
+			frappe.delete_doc("File", twin.name, force=True, ignore_permissions=True)
+			path.unlink(missing_ok=True)
+			frappe.db.commit()
 
 	def test_reaper_retries_worker_death_only_once(self):
 		old = frappe.utils.add_to_date(jobs.now_datetime(), minutes=-2)

@@ -238,6 +238,9 @@ after_migrate = [
 	# Re-send installed_apps to admin when the app set changed (the fleet
 	# gates skills/tool-denies off the admin-persisted list).
 	"jarvis.installed_apps_sync.after_migrate",
+	# File "Home/Jarvis Exports", where finished background exports are kept. A fresh install
+	# never reaches this hook; the first publish creates the folder then.
+	"jarvis.tools._export.jobs.after_migrate",
 ]
 
 # Scheduled Tasks
