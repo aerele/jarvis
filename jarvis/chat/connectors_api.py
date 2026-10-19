@@ -462,8 +462,8 @@ def _merge_allowed_actions(existing_children, tools: list[dict]) -> list[dict]:
 	``allowed``/``read_only``/``destructive`` flags are PRESERVED as-is; they are
 	NOT recomputed from the server's ``annotations``. This closes a relabel attack:
 	a compromised server could otherwise mark a known destructive action
-	``readOnlyHint: true`` on the next re-test and have ``policy.action_decision``
-	auto-allow it (it auto-allows read-only, non-destructive actions). Re-testing
+	``readOnlyHint: true`` on the next re-test and have the safe-read check
+	(``api._connector_call_is_safe_read``) skip the confirm card for it. Re-testing
 	must never silently revoke an admin's earlier grant either, and preserving the
 	stored row does both.
 
