@@ -135,3 +135,80 @@ describe("chat export menu state", () => {
 		expect(downloadConversation).toHaveBeenCalledWith("selected-chat", "md");
 	});
 });
+
+describe("grouped chat download menu", () => {
+	beforeEach(() => vi.clearAllMocks());
+	it("keeps library menu identities stable when progress changes the visible labels", async () => {
+		let finish;
+		downloadConversation.mockImplementation(
+			() => new Promise((resolve) => (finish = resolve))
+		);
+		const menu = useConversationExport(() => "stable-menu");
+		const identities = () => [
+			menu.downloadMenuOption.value.value,
+			...menu.downloadMenuOption.value.submenu.map((option) => option.value),
+		];
+		expect(identities()).toEqual(["download", "pdf", "md"]);
+		const request = menu.downloadMenuOption.value.submenu[0].onClick();
+		try {
+			expect(menu.downloadMenuOption.value.label).toBe("Preparing PDF…");
+			expect(identities()).toEqual(["download", "pdf", "md"]);
+		} finally {
+			finish();
+			await request;
+		}
+		expect(menu.downloadMenuOption.value.label).toBe("Download");
+		expect(identities()).toEqual(["download", "pdf", "md"]);
+	});
+	it("offers one Download action with PDF and Markdown choices without starting a request", () => {
+		const menu = useConversationExport(() => "grouped-chat");
+		expect(menu.downloadMenuOption.value.label).toBe("Download");
+		expect(menu.downloadMenuOption.value.submenu.map((option) => option.label)).toEqual([
+			"PDF",
+			"Markdown",
+		]);
+		expect(downloadConversation).not.toHaveBeenCalled();
+	});
+	it.each([
+		["pdf", 0, "Preparing PDF…"],
+		["md", 1, "Preparing Markdown…"],
+	])(
+		"shares %s progress across grouped menus without disabling their focusable parent",
+		async (format, index, label) => {
+			let finish;
+			downloadConversation.mockImplementation(
+				() => new Promise((resolve) => (finish = resolve))
+			);
+			const row = useConversationExport(() => "grouped-" + format);
+			const header = useConversationExport(() => "grouped-" + format);
+			const request = row.downloadMenuOption.value.submenu[index].onClick();
+			try {
+				expect(downloadConversation).toHaveBeenCalledWith("grouped-" + format, format);
+				for (const menu of [row, header]) {
+					expect(menu.downloadMenuOption.value.label).toBe(label);
+					expect(menu.downloadMenuOption.value.disabled).toBe(false);
+					expect(
+						menu.downloadMenuOption.value.submenu.every((option) => option.disabled)
+					).toBe(true);
+				}
+				await header.downloadMenuOption.value.submenu[1 - index].onClick();
+				expect(downloadConversation).toHaveBeenCalledTimes(1);
+			} finally {
+				finish();
+				await request;
+			}
+			expect(row.downloadMenuOption.value.label).toBe("Download");
+			expect(header.downloadMenuOption.value.submenu.map((option) => option.label)).toEqual([
+				"PDF",
+				"Markdown",
+			]);
+		}
+	);
+	it("disables the grouped action when there is no conversation", () => {
+		const menu = useConversationExport(() => null);
+		expect(menu.downloadMenuOption.value.disabled).toBe(true);
+		expect(menu.downloadMenuOption.value.submenu.every((option) => option.disabled)).toBe(
+			true
+		);
+	});
+});
