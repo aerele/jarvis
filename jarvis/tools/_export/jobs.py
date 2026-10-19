@@ -14,7 +14,7 @@ from pathlib import Path
 
 import frappe
 from frappe.query_builder.functions import Coalesce
-from frappe.utils import add_to_date, cint, get_datetime
+from frappe.utils import add_to_date, cint, escape_html, get_datetime
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._export.clock import now_datetime
@@ -593,6 +593,17 @@ def _return_to_queue(name, token):
 	_commit()
 
 
+def _heartbeat(name, token):
+	"""Refresh the running attempt's heartbeat. Fenced: a stale token changes nothing."""
+	j = frappe.qb.DocType(DOCTYPE)
+	(
+		frappe.qb.update(j)
+		.set(j.heartbeat, now_datetime())
+		.where((j.name == name) & (j.attempt_token == token) & (j.status == "running"))
+	).run()
+	_commit()
+
+
 def _attempt(name, token):
 	row = frappe.db.get_value(DOCTYPE, name, ["attempt_token", "status", "cancel_requested"], as_dict=True)
 	return bool(row and row.attempt_token == token and row.status == "running" and not row.cancel_requested)
@@ -693,6 +704,9 @@ def _execute(job, token, directory):
 			watchdog.check()
 			if result["rows_written"] == 0:
 				raise _NoRecords("failed", "No records match your current permissions and filters.")
+			# The watchdog has stopped, so nothing refreshes the heartbeat while publish waits on
+			# a copy or a lock; without this the reaper could take a slow publish for a dead worker.
+			_heartbeat(name, token)
 			_publish_file(job, token, path, result, _permission_fingerprint(prepared))
 	except ExportLimit as exc:
 		if exc.status == "failed" and not isinstance(exc, _NoRecords):
@@ -706,7 +720,9 @@ def _execute(job, token, directory):
 
 		status = "too slow" if _failure_kind.too_slow(exc) else "failed"
 		known = isinstance(exc, (PermissionDeniedError, InvalidArgumentError))
-		_log_failure(name, status, exc, token=token, elapsed_s=_elapsed(started))
+		if not known:
+			# A refusal the user is shown verbatim is an outcome, not a fault: no Error Log.
+			_log_failure(name, status, exc, token=token, elapsed_s=_elapsed(started))
 		_settle(name, token, status, str(exc) if known else GENERIC_FAILURE)
 	finally:
 		# Every step is isolated: a stuck watchdog or a lock timeout must neither fail the RQ
@@ -983,6 +999,8 @@ def _announce_one(name, *, initial, recovery):
 
 def _notify_owner(job, subject):
 	# Serialized on the job row: one owner bell per state.
+	# The bell renders its subject as HTML and the title comes from the model: escape it.
+	subject = escape_html(subject)
 	if not frappe.db.exists("User", job.owner) or frappe.db.exists(
 		"Notification Log", {"document_type": DOCTYPE, "document_name": job.name, "subject": subject}
 	):
@@ -1135,10 +1153,12 @@ def _recover_row(name):
 		_delete_file(job)
 		# Quiet: no chat message and no bell. expires_at records when it expired, which also
 		# starts the 30 day row retention. The marker stops the reaper looking at it again.
+		# It is stamped now, not with the due date: a lowered setting can make that date long
+		# past, and the row would then be purged in this same pass, so "Expired" never shows.
 		frappe.db.set_value(
 			DOCTYPE,
 			job.name,
-			{"status": "expired", "file": None, "expires_at": expiry, "announced_status": "expired"},
+			{"status": "expired", "file": None, "expires_at": now_datetime(), "announced_status": "expired"},
 		)
 		# Persist expiry and run after-commit file cleanup.
 		_commit()

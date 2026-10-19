@@ -189,8 +189,10 @@ _BAD_SHEET_CHARS = re.compile(r"[\[\]:*?/\\]")
 
 def sheet_name(title) -> str:
 	"""The tab name for ``title``, as both immediate engines make it: at most 31
-	characters, each one Excel forbids replaced by a space."""
-	return _BAD_SHEET_CHARS.sub(" ", (title or "Export")[:31])
+	characters, each one Excel forbids replaced by a space. Excel also rejects a leading or
+	trailing apostrophe, so those go, and a blank name falls back to "Export"."""
+	name = _BAD_SHEET_CHARS.sub(" ", (title or "")[:31]).strip("'")
+	return name if name.strip() else "Export"
 
 
 class _Range:
