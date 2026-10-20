@@ -92,6 +92,70 @@ class TestStreamingWriter(TestCase):
 			with self.subTest(count=count, limit=limit):
 				self.assertEqual(streaming.expected_total(count, limit, cap), expected)
 
+	def test_finalizing_follows_the_final_progress_and_precedes_close(self):
+		import xlsxwriter
+
+		real_close = xlsxwriter.Workbook.close
+		for fmt in ("csv", "xlsx"):
+			events = []
+
+			def record_close(book, events=events):
+				events.append(("close",))
+				return real_close(book)
+
+			with (
+				self.subTest(fmt=fmt),
+				tempfile.TemporaryDirectory() as directory,
+				patch.object(xlsxwriter.Workbook, "close", autospec=True, side_effect=record_close),
+			):
+				result = streaming.write(
+					prepared(),
+					({"value": i} for i in range(1500)),
+					Path(directory) / "export.part",
+					fmt,
+					10_000,
+					10**8,
+					lambda: events.append(("check",)),
+					lambda n: events.append(("progress", n)),
+					finalizing=lambda n: events.append(("finalizing", n)),
+				)
+				self.assertEqual(result["rows_written"], 1500)
+				# A check() legitimately runs after the file is closed; the order of the rest is the rule.
+				seen = [e for e in events if e != ("check",)]
+				tail = [("progress", 1500), ("finalizing", 1500)] + ([("close",)] if fmt == "xlsx" else [])
+				self.assertEqual(seen[-len(tail) :], tail)
+				self.assertEqual(seen.count(("finalizing", 1500)), 1)
+				after = seen[seen.index(("finalizing", 1500)) :]
+				self.assertFalse([e for e in after if e[0] == "progress"])
+
+	def test_finalizing_is_not_reached_by_a_failed_or_empty_export(self):
+		for fmt in ("csv", "xlsx"):
+			for rows, cap in ((3, 2), (0, 10)):
+				events = []
+				with self.subTest(fmt=fmt, rows=rows), tempfile.TemporaryDirectory() as directory:
+					path = Path(directory) / "export.part"
+
+					def run():
+						return streaming.write(
+							prepared(),
+							iter([{"value": 1}] * rows),
+							path,
+							fmt,
+							cap,
+							10**8,
+							lambda: None,
+							lambda n: events.append(("progress", n)),
+							finalizing=lambda n: events.append(("finalizing", n)),
+						)
+
+					if rows > cap:
+						with self.assertRaises(streaming.ExportLimit):
+							run()
+					else:
+						run()
+						self.assertEqual(events, [("progress", 0)])
+					self.assertNotIn("finalizing", [e[0] for e in events])
+
 	def test_exact_cap_and_over_cap(self):
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "export.part"
@@ -899,6 +963,60 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		self.assertEqual(job.error, str(streaming.too_many_rows(2)))
 		self.assertEqual(order, ["stream_rows"])
 		self.assertFalse(job.file)
+
+	def phase_seen_by(self, owner, attribute, job_name, seen):
+		"""Patch ``owner.attribute`` to record the job's phase and status as the real call starts."""
+		original = getattr(owner, attribute)
+
+		def look(*args, **kwargs):
+			state = frappe.db.get_value(
+				jobs.DOCTYPE, job_name, ["phase", "status", "rows_written"], as_dict=True
+			)
+			seen.append(dict(state))
+			return original(*args, **kwargs)
+
+		return patch.object(owner, attribute, autospec=True, side_effect=look)
+
+	def test_finalizing_is_recorded_before_the_workbook_closes(self):
+		import xlsxwriter
+
+		job = self.job(format="xlsx")
+		at_close, at_publish = [], []
+		with (
+			self.phase_seen_by(xlsxwriter.Workbook, "close", job.name, at_close),
+			self.phase_seen_by(jobs, "_publish_locked", job.name, at_publish),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		expected = {"phase": "finalizing", "status": "running", "rows_written": 2}
+		self.assertEqual(at_close, [expected])
+		self.assertEqual(at_publish, [expected])
+		job.reload()
+		self.assertEqual(job.status, "ready", job.error)
+		self.assertFalse(job.phase)
+		self.assertIsNone(jobs.public(job)["phase"])
+
+	def test_finalizing_is_recorded_before_a_csv_publish(self):
+		job = self.job()
+		at_publish = []
+		with (
+			self.phase_seen_by(jobs, "_publish_locked", job.name, at_publish),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		self.assertEqual(at_publish, [{"phase": "finalizing", "status": "running", "rows_written": 2}])
+		self.assertEqual(job.reload().status, "ready", job.error)
+
+	def test_a_failed_phase_write_does_not_fail_the_export(self):
+		job = self.job()
+		with (
+			patch.object(jobs, "_set_progress", side_effect=RuntimeError("write failed")),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		self.assertEqual(job.reload().status, "ready", job.error)
+		titles = [log.method for log in self.error_logs(job.name)]
+		self.assertIn(f"jarvis.export finalizing: {job.name}", titles)
 
 	def test_run_relies_on_the_ten_minute_defaults(self):
 		# run() builds both objects without a `seconds` argument.
@@ -1843,7 +1961,7 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		# run() hands that cause to the log; re-raising the replacement reason erases __cause__.
 		second = self.job()
 
-		def wait_for_the_watchdog(prepared, rows, path, fmt, cap, size_cap, check, progress):
+		def wait_for_the_watchdog(prepared, rows, path, fmt, cap, size_cap, check, progress, **kwargs):
 			for _ in range(100):
 				check()
 				time.sleep(0.1)
