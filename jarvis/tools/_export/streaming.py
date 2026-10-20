@@ -225,8 +225,15 @@ def expected_total(count, limit, row_cap):
 	return count
 
 
-def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress):
+def _noop(rows):
+	return None
+
+
+def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress, *, finalizing=_noop):
 	"""Bounded memory; no Frappe/metadata/permission calls after entering this function.
+	The callbacks are the caller's, and are the only way out of it. After the last row it calls
+	``progress(rows)`` and then ``finalizing(rows)`` (only if there are rows), before the file is
+	closed, so the caller can say the slow part has started.
 
 	Measure compressed XML while spooling, then check the completed ZIP. A separate
 	configurable disk budget bounds XML scratch space. CSV checks actual bytes.
@@ -275,12 +282,14 @@ def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress):
 							"too large",
 							"The export exceeds the file-size limit. Narrow or split the filters.",
 						)
+			progress(count)
+			if count:
+				finalizing(count)
 	else:
-		_write_xlsx(prepared, iterator, path, size_cap, check, progress)
+		_write_xlsx(prepared, iterator, path, size_cap, check, progress, finalizing)
 	check()
 	if Path(path).stat().st_size > size_cap:
 		raise ExportLimit("too large", "The export exceeds the file-size limit. Narrow or split the filters.")
-	progress(count)
 	return {
 		"rows_written": count,
 		"limited_by_spec": prepared.limit if limited else 0,
@@ -288,7 +297,7 @@ def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress):
 	}
 
 
-def _write_xlsx(prepared, iterator, path, size_cap, check, progress):
+def _write_xlsx(prepared, iterator, path, size_cap, check, progress, finalizing):
 	"""Stream ``iterator`` into a constant-memory workbook laid out like an immediate export."""
 	import xlsxwriter
 
@@ -312,6 +321,10 @@ def _write_xlsx(prepared, iterator, path, size_cap, check, progress):
 		with contextlib.suppress(Exception):
 			sheet.row_data_fh.close()
 		raise
+	# Only a workbook that is really being zipped gets here; closing it is the slow step.
+	progress(count)
+	if count:
+		finalizing(count)
 	book.close()
 
 

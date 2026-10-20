@@ -718,6 +718,9 @@ def _execute(job, token, directory):
 					size_cap,
 					watchdog.check,
 					watchdog.progress,
+					finalizing=lambda rows: _safely(
+						"finalizing", name, _set_progress, name, token, phase="finalizing", rows_written=rows
+					),
 				)
 			except Exception:
 				watchdog.stop()
