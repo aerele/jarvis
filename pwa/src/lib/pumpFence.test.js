@@ -35,6 +35,7 @@ const UNFENCED_IN_CHATVIEW = new Set([
 	"action:pending", // a parked write — losing it strands the approval
 	"canvas",
 	"conversation:renamed",
+	"export:changed", // a durable background-job notification with no run_id/seq; it can arrive after the turn ends
 	"import:finished", // Slice B: a background-poll completion signal, not a pump-sequenced turn frame
 	"macro:closed", // the macro engine's closing message landed: a reload signal with no run_id/seq, not a turn frame
 ]);
@@ -162,5 +163,25 @@ test("approvals are never fenced away", () => {
 		admitEvent(fence, { kind: "action:pending", run_id: "r1", token: "t1", pump_epoch: 1 }),
 		true,
 		"a parked write must reach the UI whatever the pump did"
+	);
+});
+
+test("background export completion reaches the chat after its turn ends", () => {
+	const fence = createFence();
+	admitEvent(fence, {
+		kind: "run:end",
+		conversation_id: "c1",
+		run_id: "r1",
+		pump_epoch: 1,
+		event_seq: 3,
+	});
+	assert.equal(
+		admitEvent(fence, {
+			kind: "export:changed",
+			conversation_id: "c1",
+			export_job: "job1",
+			message_id: "message1",
+		}),
+		true
 	);
 });

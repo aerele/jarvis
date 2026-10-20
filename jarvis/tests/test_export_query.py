@@ -71,8 +71,11 @@ class TestExportQuery(FrappeTestCase):
 			with mock.patch("jarvis.telemetry.record_export_event") as m:
 				with self.assertRaises(InvalidArgumentError):
 					export_query("ToDo", filters={"description": ["like", "eq-%"]}, fields=["name"])
-		m.assert_called_once()
-		self.assertEqual(m.call_args.kwargs.get("outcome"), "rejected")
+		# The ceiling refusal, then (no chat in this test) the blocked handoff, counted separately.
+		self.assertEqual(
+			[call.kwargs.get("outcome") for call in m.call_args_list],
+			["rejected", "background_unavailable"],
+		)
 
 	def test_cells_truncated_surfaced_in_envelope(self):
 		# An over-long cell trips the xlsx 32767 cap; the disclosure must reach the

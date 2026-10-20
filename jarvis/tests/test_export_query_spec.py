@@ -145,10 +145,12 @@ class TestExportQuerySpec(FrappeTestCase):
 		self.assertIn("first 50 rows", env["note"])
 		self.assertIn("without limit", env["note"])
 
-	def test_fails_closed_above_the_ceiling(self):
+	def test_above_the_ceiling_requires_a_chat_for_delivery(self):
 		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 10):
-			with self.assertRaisesRegex(InvalidArgumentError, "too many to export in full"):
+			with self.assertRaises(InvalidArgumentError) as ctx:
 				export_query(spec=_no_comment_spec())
+		self.assertIn("Narrow", str(ctx.exception))
+		self.assertIn("Start it from a Jarvis chat", str(ctx.exception))
 
 	def test_shapes_an_export_refuses(self):
 		with self.assertRaisesRegex(InvalidArgumentError, "drop offset"):
@@ -163,9 +165,9 @@ class TestExportQuerySpec(FrappeTestCase):
 		}
 		with self.assertRaisesRegex(InvalidArgumentError, "both named 'name'"):
 			export_query(spec=dup)
-		with self.assertRaisesRegex(InvalidArgumentError, "one of the two"):
+		with self.assertRaisesRegex(InvalidArgumentError, "exactly one of"):
 			export_query("ToDo", spec=_no_comment_spec())
-		with self.assertRaisesRegex(InvalidArgumentError, "one of the two"):
+		with self.assertRaisesRegex(InvalidArgumentError, "exactly one of"):
 			export_query()
 		with self.assertRaisesRegex(InvalidArgumentError, "in the spec itself"):
 			export_query(spec=_no_comment_spec(), filters={"status": "Open"})
@@ -281,10 +283,12 @@ class TestExportQuerySpecLimitsAndHeaders(FrappeTestCase):
 		self.assertEqual(env["total"], TOTAL - WITH_COMMENT - 1)
 		self.assertEqual(env["limited_by_spec"], TOTAL - WITH_COMMENT - 1)
 
-	def test_a_limit_above_the_ceiling_still_fails_closed(self):
+	def test_a_limit_above_the_ceiling_requires_a_chat(self):
 		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 10):
-			with self.assertRaisesRegex(InvalidArgumentError, "too many to export in full"):
+			with self.assertRaises(InvalidArgumentError) as ctx:
 				export_query(spec=_no_comment_spec(limit=50))
+			self.assertIn("Narrow", str(ctx.exception))
+			self.assertIn("Start it from a Jarvis chat", str(ctx.exception))
 			# A limit equal to the ceiling is a deliberate cap, not an overflow.
 			env = export_query(spec=_no_comment_spec(limit=10))
 		self.assertEqual((env["total"], env["limited_by_spec"]), (10, 10))
@@ -393,9 +397,7 @@ class TestExportQuerySpecExportPermission(FrappeTestCase):
 
 
 class TestExportQueryDeadline(FrappeTestCase):
-	"""The whole export stays under the plugin's 30 s call abort: past the deadline
-	it is refused BEFORE the File is written, so nothing is orphaned and the agent
-	is told how to narrow it instead of retrying the same heavy query."""
+	"""Past the immediate deadline, hand off before saving an immediate File."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -412,9 +414,9 @@ class TestExportQueryDeadline(FrappeTestCase):
 		frappe.set_user("Administrator")
 		self.clock = _Clock()
 
-	def _refused(self, patch_target: str, seconds: float, **call):
+	def _deferred(self, patch_target: str, seconds: float, **call):
 		"""Run an export whose ``patch_target`` step takes ``seconds``; return what the
-		refusal did: the telemetry outcome, the File count change, and save calls."""
+		handoff did: the telemetry outcome, the File count change, and save calls."""
 		real = save_export_file
 		files = frappe.db.count("File")
 		with (
@@ -422,9 +424,13 @@ class TestExportQueryDeadline(FrappeTestCase):
 			mock.patch(patch_target, side_effect=self.clock.after(seconds, self._real(patch_target))),
 			mock.patch.object(export_module, "save_export_file", wraps=real) as save,
 			mock.patch("jarvis.telemetry.record_export_event") as event,
+			mock.patch(
+				"jarvis.tools._export.jobs.enqueue",
+				return_value={"export_job": "queued-test", "status": "queued"},
+			) as enqueue,
 		):
-			with self.assertRaisesRegex(ExportTooSlowError, "no file was saved"):
-				export_query(**call)
+			self.assertEqual(export_query(**call)["status"], "queued")
+			enqueue.assert_called_once()
 		save.assert_not_called()
 		self.assertEqual(frappe.db.count("File"), files)
 		event.assert_called_once()
@@ -435,14 +441,14 @@ class TestExportQueryDeadline(FrappeTestCase):
 		module, _, name = patch_target.rpartition(".")
 		return getattr(importlib.import_module(module), name)
 
-	def test_a_slow_spec_query_is_refused_before_a_file_is_saved(self):
-		outcome = self._refused(
+	def test_a_slow_spec_query_is_deferred_before_a_file_is_saved(self):
+		outcome = self._deferred(
 			"jarvis.tools._export.resolvers.from_spec", 26, spec=_no_comment_spec(), title="slow"
 		)
 		self.assertEqual(outcome, "too_slow")
 
-	def test_a_slow_doctype_query_is_refused_too(self):
-		outcome = self._refused(
+	def test_a_slow_doctype_query_is_deferred_too(self):
+		outcome = self._deferred(
 			"jarvis.tools._export.resolvers.from_query",
 			26,
 			doctype="ToDo",
@@ -451,11 +457,11 @@ class TestExportQueryDeadline(FrappeTestCase):
 		)
 		self.assertEqual(outcome, "too_slow")
 
-	def test_a_slow_render_is_refused_before_a_file_is_saved(self):
+	def test_a_slow_render_is_deferred_before_a_file_is_saved(self):
 		mime, render = export_module._FORMATS["xlsx"]
 		slow = self.clock.after(26, render)
 		with mock.patch.dict(export_module._FORMATS, {"xlsx": (mime, slow)}):
-			outcome = self._refused(
+			outcome = self._deferred(
 				"jarvis.tools._export.resolvers.from_spec", 0, spec=_no_comment_spec(), title="slow"
 			)
 		self.assertEqual(outcome, "too_slow")
