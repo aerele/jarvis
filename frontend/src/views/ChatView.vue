@@ -4189,7 +4189,37 @@
 									</thead>
 									<tbody>
 										<template v-for="(r, ri) in t.rows" :key="r.__key">
-											<tr>
+											<!-- An open row is its full form in place, as Desk opens a
+											     row: a card the panel's width at the row's own spot. -->
+											<tr v-if="r.__open" class="jv-grid-openrow">
+												<td
+													:colspan="t.columns.length + 2"
+													class="jv-grid-opencell"
+												>
+													<DraftRowBlock
+														:table="t"
+														:row="r"
+														:parent="rowMemo.parentFor(t)"
+														:table-index="ti"
+														:row-index="ri"
+														:changed-fields="
+															rowStatusFor(t, r, ri).changedFields
+														"
+														:saved-row="
+															rowStatusFor(t, r, ri).savedRow
+														"
+														:draft-link="draftLink"
+														:palette="paletteVars"
+														@close="closeRowForm(ti, r)"
+														@remove="removeDraftRow(ti, ri)"
+														@link-search="onDraftLink"
+														@link-blur="closeDraftLink"
+														@link-pick="pickDraftLink"
+														@link-close="draftLink.open = false"
+													/>
+												</td>
+											</tr>
+											<tr v-else>
 												<td class="jv-grid-lead">
 													<div class="jv-grid-lead-in">
 														<span class="jv-grid-num">{{
@@ -4284,25 +4314,6 @@
 									</tbody>
 								</table>
 							</div>
-							<template v-for="(r, ri) in t.rows" :key="'form-' + r.__key">
-								<DraftRowBlock
-									v-if="r.__open"
-									:table="t"
-									:row="r"
-									:parent="rowMemo.parentFor(t)"
-									:table-index="ti"
-									:row-index="ri"
-									:changed-fields="rowStatusFor(t, r, ri).changedFields"
-									:saved-row="rowStatusFor(t, r, ri).savedRow"
-									:draft-link="draftLink"
-									:palette="paletteVars"
-									@close="closeRowForm(ti, r)"
-									@link-search="onDraftLink"
-									@link-blur="closeDraftLink"
-									@link-pick="pickDraftLink"
-									@link-close="draftLink.open = false"
-								/>
-							</template>
 							<button class="jv-draft-addrow" @click="addDraftRow(ti)">
 								＋ Add row
 							</button>
@@ -17409,6 +17420,23 @@ onUnmounted(() => {
 	border-bottom: 1px solid var(--border);
 	position: relative;
 	min-width: 90px;
+}
+/* An open row (DraftRowBlock in place): one cell across the whole row, its card pinned
+   to the left at the scroller's visible width (the gridwrap is an inline-size
+   container), so it fits the panel however far the grid is scrolled sideways. */
+.jv-draft-gridwrap {
+	container-type: inline-size;
+}
+.jv-grid td.jv-grid-opencell {
+	padding: 0;
+	min-width: 0;
+	background: var(--surface);
+}
+.jv-grid-opencell > :deep(.jv-rowform-block) {
+	position: sticky;
+	left: 0;
+	width: 100cqi;
+	box-sizing: border-box;
 }
 .jv-grid td .jv-action-input {
 	width: 100%;

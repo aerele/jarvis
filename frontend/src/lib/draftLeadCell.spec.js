@@ -53,6 +53,8 @@ function mountGrid({ withForm = true, keys = ["k1", "k2", "k3"], status = () => 
 				rowToggleId,
 				rowFormId,
 				toggleRowForm,
+				closeRowForm: (ti, r) => (r.__open = false),
+				rowMemo: { parentFor: () => ({}) },
 				removeDraftRow,
 				draftLink: {},
 				paletteVars: {},
@@ -62,7 +64,7 @@ function mountGrid({ withForm = true, keys = ["k1", "k2", "k3"], status = () => 
 			}),
 			template: `<div>${gridMarkup}</div>`,
 		},
-		{ attachTo: document.body, global: { stubs: { DraftCell: true } } }
+		{ attachTo: document.body, global: { stubs: { DraftCell: true, DraftRowBlock: true } } }
 	);
 	return { t, removeDraftRow };
 }
@@ -151,10 +153,17 @@ describe("focus return still lands on the toggle by key", () => {
 		expect(document.activeElement.id).toBe(rowToggleId(0, row.__key));
 		expect(document.activeElement.closest("td").classList.contains("jv-grid-lead")).toBe(true);
 	});
-	it("clicking the toggle opens the row", async () => {
+	it("clicking the toggle opens the row in place, as Desk does", async () => {
 		const { t } = mountGrid();
 		await bodyRows()[2].find(".jv-grid-more").trigger("click");
 		expect(t.rows[2].__open).toBe(true);
+		const rows = bodyRows();
+		expect(rows).toHaveLength(3); // the row became its card; nothing was added below
+		const cell = rows[2].element.children[0];
+		expect(rows[2].classes()).toContain("jv-grid-openrow");
+		expect(cell.getAttribute("colspan")).toBe(String(t.columns.length + 2));
+		expect(rows[2].find("draft-row-block-stub").exists()).toBe(true);
+		expect(rows[1].find(".jv-grid-more").exists()).toBe(true); // the others stay rows
 	});
 });
 

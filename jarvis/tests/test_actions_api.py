@@ -1468,6 +1468,18 @@ class TestChildRowForm(_ChildRowFormHelpers, FrappeTestCase):
 		}
 		self.assertTrue(labelled <= meta_labels)
 
+	def test_a_section_carries_whether_desk_collapses_it(self):
+		breaks = {
+			f["fieldname"]: f for f in self._items()["form_fields"] if f["fieldtype"] == "Section Break"
+		}
+		meta = frappe.get_meta("Sales Order Item")
+		collapsible = [n for n in breaks if meta.get_field(n).collapsible]
+		self.assertTrue(collapsible)  # ERPNext's Sales Order Item has some
+		for name, f in breaks.items():
+			df = meta.get_field(name)
+			self.assertEqual(f["collapsible"], int(df.collapsible or 0))
+			self.assertEqual(f["collapsible_depends_on"], df.collapsible_depends_on or "")
+
 	def test_a_form_field_carries_its_rules(self):
 		items = self._items()
 		name = self._a_non_grid_field(items)

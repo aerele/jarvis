@@ -909,3 +909,54 @@ describe("an unchanged saved value a rule hides stays hidden", () => {
 		expect(s.changed).toBe(1);
 	});
 });
+
+// Desk's Section Break "collapsible": closed until its collapsible_depends_on holds. The
+// card also opens one holding what the user must see, so nothing proposed is hidden.
+describe("collapsible sections", () => {
+	const t = {
+		columns: [F("item")],
+		formFields: [
+			F("item"),
+			F("flag", "Check"),
+			BREAK("Section Break", "Discount", { fieldname: "disc_sec", collapsible: 1 }),
+			F("disc"),
+			BREAK("Section Break", "Drop Ship", {
+				fieldname: "ship_sec",
+				collapsible: 1,
+				collapsible_depends_on: "eval:doc.flag==1",
+			}),
+			F("supplier"),
+			BREAK("Section Break", "", { fieldname: "bare_sec", collapsible: 1 }),
+			F("note"),
+		],
+	};
+	const by = (row, ctx) =>
+		Object.fromEntries(rowFormLayout(t, row, {}, ctx).map((s) => [s.id, s]));
+	const blank = { item: "I", flag: "", disc: "", supplier: "", note: "" };
+
+	it("starts closed, and a plain section is always open", () => {
+		const s = by(blank);
+		expect(s.disc_sec).toMatchObject({ collapsible: true, open: false });
+		expect(s.ship_sec).toMatchObject({ collapsible: true, open: false });
+		expect(s["sec-item"]).toMatchObject({ collapsible: false, open: true });
+	});
+	it("one with no label has no heading to open it by, so it is plain", () => {
+		expect(by(blank).bare_sec).toMatchObject({ collapsible: false, open: true });
+	});
+	it("opens when its collapsible_depends_on holds", () => {
+		expect(by({ ...blank, flag: 1 }).ship_sec.open).toBe(true);
+		expect(by({ ...blank, flag: 1 }).disc_sec.open).toBe(false);
+	});
+	it("opens when it holds a proposed value, so nothing proposed is out of sight", () => {
+		expect(by({ ...blank, disc: "5" }).disc_sec.open).toBe(true);
+	});
+	it("opens for a field a failed save named", () => {
+		expect(by({ ...blank, __missing: ["supplier"] }).ship_sec.open).toBe(true);
+	});
+	it("on an update, opens for a change, not for an unchanged saved value", () => {
+		const savedRow = { name: "r1", item: "I", flag: 0, disc: 5, supplier: "", note: "" };
+		const same = { ...blank, disc: "5", __name: "r1" };
+		expect(by(same, { savedRow }).disc_sec.open).toBe(false);
+		expect(by({ ...same, disc: "7" }, { savedRow }).disc_sec.open).toBe(true);
+	});
+});

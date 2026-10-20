@@ -70,7 +70,7 @@ describe("ChatView shows what changed outside the grid", () => {
 	});
 	it("the row form block gets the saved row, for 'was X' and the rule-hidden rule", () => {
 		expect(between(src, "<DraftRowBlock", "/>")).toMatch(
-			/:saved-row="rowStatusFor\(t, r, ri\)\.savedRow"/
+			/:saved-row="\s*rowStatusFor\(t, r, ri\)\.savedRow\s*"/
 		);
 	});
 });

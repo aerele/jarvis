@@ -236,8 +236,17 @@ export function rowFormLayout(table, row, parent, ctx = {}) {
 	const sections = [];
 	let section = null;
 	let tabVisible = true;
-	const newSection = (label, visible, id = "") => {
-		section = { id, label, visible: visible && tabVisible, columns: [[]], first: "" };
+	// `opensByRule`: a collapsible section's collapsible_depends_on holds (Desk opens it).
+	const newSection = (label, visible, id = "", collapsible = false, opensByRule = false) => {
+		section = {
+			id,
+			label,
+			visible: visible && tabVisible,
+			columns: [[]],
+			first: "",
+			collapsible,
+			opensByRule,
+		};
 		sections.push(section);
 	};
 	for (const f of table.formFields || []) {
@@ -262,7 +271,17 @@ export function rowFormLayout(table, row, parent, ctx = {}) {
 					true,
 					`${where} section ${f.label || ""} depends_on`
 				),
-				f.fieldname
+				f.fieldname,
+				!!f.collapsible,
+				!!f.collapsible &&
+					!!f.collapsible_depends_on &&
+					ruleHolds(
+						f.collapsible_depends_on,
+						doc,
+						parent,
+						false,
+						`${where} section ${f.label || ""} collapsible_depends_on`
+					)
 			);
 			continue;
 		}
@@ -293,15 +312,24 @@ export function rowFormLayout(table, row, parent, ctx = {}) {
 		});
 	}
 	return sections
-		.map((s) => ({
-			// A stable key for v-for (not the position, which moves when a section above
-			// is hidden): the break's fieldname, else the section's first field.
-			id: s.id || `sec-${s.first}`,
-			label: s.label,
-			columns: s.columns
-				.map((c) => (s.visible ? c : c.filter((i) => i.shown)))
-				.filter((c) => c.length),
-		}))
+		.map((s) => {
+			// Desk shows a collapsible section closed until its rule holds. The card also
+			// opens one that holds what the user must see (a proposed value, a change on
+			// an update, a field a failed save named), so nothing is out of sight. One
+			// with no label has no heading to open it by, so it is a plain section.
+			const folds = s.collapsible && !!s.label;
+			return {
+				// A stable key for v-for (not the position, which moves when a section
+				// above is hidden): the break's fieldname, else the section's first field.
+				id: s.id || `sec-${s.first}`,
+				label: s.label,
+				columns: s.columns
+					.map((c) => (s.visible ? c : c.filter((i) => i.shown)))
+					.filter((c) => c.length),
+				collapsible: folds,
+				open: !folds || s.opensByRule || s.columns.some((c) => c.some((i) => i.shown)),
+			};
+		})
 		.filter((s) => s.columns.length);
 }
 

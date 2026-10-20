@@ -89,8 +89,23 @@ const needed = computed(() => {
 
 <template>
 	<div class="jv-rowform">
-		<section v-for="s in sections" :key="s.id" class="jv-rowform-section">
-			<div v-if="s.label" class="jv-rowform-section-title">{{ s.label }}</div>
+		<!-- A collapsible section (Desk's Section Break "collapsible") is a details
+		     element, its heading the toggle; it starts open when it holds what the user
+		     must see (rowFormLayout). Any other section is a plain titled group. -->
+		<component
+			:is="s.collapsible ? 'details' : 'section'"
+			v-for="s in sections"
+			:key="s.id"
+			class="jv-rowform-section"
+			:open="s.collapsible ? s.open : undefined"
+			:aria-label="s.collapsible ? undefined : s.label || undefined"
+		>
+			<component
+				:is="s.collapsible ? 'summary' : 'div'"
+				v-if="s.label"
+				class="jv-rowform-section-title"
+				>{{ s.label }}</component
+			>
 			<div class="jv-rowform-cols">
 				<div v-for="(col, ci) in s.columns" :key="ci" class="jv-rowform-col">
 					<div
@@ -149,7 +164,7 @@ const needed = computed(() => {
 					</div>
 				</div>
 			</div>
-		</section>
+		</component>
 		<p v-for="n in needed" :key="n" class="jv-rowform-needed" role="note">
 			Also needed: {{ n }}
 		</p>
@@ -160,25 +175,64 @@ const needed = computed(() => {
 </template>
 
 <style scoped>
-/* The draft panel's own tokens (ChatView: --border, --surface-1, --text-2/3, --amber). */
+/* The draft panel's own patterns and tokens (ChatView: .jv-draft-fld labels, the
+   table title, --border, --surface, --text-2/3, --cta, --amber), so a row reads like
+   the record's main fields above it. */
 .jv-rowform {
 	display: grid;
 	gap: 12px;
-	padding: 10px 12px 12px;
-	background: var(--surface-1);
+	padding: 12px 14px 14px;
+	background: var(--surface);
 	border-top: 1px solid var(--border);
+}
+/* Sections are divided by a rule, as Desk divides them. */
+.jv-rowform-section + .jv-rowform-section {
+	border-top: 1px solid var(--border);
+	padding-top: 12px;
 }
 .jv-rowform-section-title {
 	font-size: 12px;
 	font-weight: 650;
 	color: var(--text-2);
-	margin-bottom: 6px;
+	margin-bottom: 8px;
 	overflow-wrap: anywhere;
+}
+summary.jv-rowform-section-title {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	cursor: pointer;
+	list-style: none;
+	min-height: 28px;
+	margin-bottom: 0;
+}
+summary.jv-rowform-section-title::-webkit-details-marker {
+	display: none;
+}
+summary.jv-rowform-section-title::before {
+	content: "▸";
+	font-size: 10px;
+	color: var(--text-3);
+	transition: transform 0.12s;
+}
+details[open] > summary.jv-rowform-section-title {
+	margin-bottom: 8px;
+}
+details[open] > summary.jv-rowform-section-title::before {
+	transform: rotate(90deg);
+}
+summary.jv-rowform-section-title:hover {
+	color: var(--text);
+}
+summary.jv-rowform-section-title:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 2px;
+	border-radius: 4px;
 }
 .jv-rowform-cols {
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-	gap: 10px 16px;
+	gap: 10px 12px;
 }
 .jv-rowform-col {
 	display: grid;
@@ -191,8 +245,12 @@ const needed = computed(() => {
 	gap: 4px;
 	min-width: 0;
 }
+/* As a main field's label (.jv-draft-fld label). */
 .jv-rowform-label {
-	font-size: 12px;
+	font-size: 10.5px;
+	font-weight: 650;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
 	color: var(--text-3);
 	/* A long label (or one long word) wraps instead of widening its column past a
 	   phone screen. */
@@ -204,14 +262,18 @@ const needed = computed(() => {
 .jv-rowform-missing :deep(.jv-action-input) {
 	border-color: var(--amber-bd);
 }
-/* Differs from the saved row (an update), like a changed main field. */
+/* Differs from the saved row (an update): tinted as a changed main field is
+   (.jv-draft-fld.changed), and its label in the accent. */
 .jv-rowform-changed .jv-rowform-label {
 	color: var(--cta);
-	font-weight: 600;
 }
-.jv-rowform-changed :deep(.jv-action-input),
+.jv-rowform-changed :deep(.jv-action-input) {
+	border-color: var(--cta-bd);
+	background: var(--cta-bg);
+}
 .jv-rowform-changed :deep(.jv-cell-ro) {
 	box-shadow: inset 3px 0 0 var(--cta);
+	padding-left: 8px;
 }
 .jv-rowform-ctl {
 	min-width: 0;
@@ -236,11 +298,12 @@ const needed = computed(() => {
 	min-width: 0;
 	box-sizing: border-box;
 }
+/* A read-only value, as a main one (.jv-draft-ro). */
 .jv-rowform-ctl :deep(.jv-cell-ro) {
+	display: inline-block;
+	padding: 4px 0;
+	color: var(--text-2);
 	overflow-wrap: anywhere;
-}
-.jv-rowform-ctl :deep(.jv-cell-ro) {
-	color: var(--text-3);
 }
 .jv-rowform-empty {
 	margin: 0;

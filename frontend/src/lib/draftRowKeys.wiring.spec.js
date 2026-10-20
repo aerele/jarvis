@@ -18,7 +18,9 @@ const forms = between(src, "<DraftRowBlock", "/>");
 describe("ChatView keys draft rows by __key", () => {
 	it("the grid rows, the form blocks and the link-search keys use __key, not the index", () => {
 		expect(grid).toMatch(/v-for="\(r, ri\) in t\.rows" :key="r\.__key"/);
-		expect(src).toMatch(/v-for="\(r, ri\) in t\.rows" :key="'form-' \+ r\.__key"/);
+		// An open row's form is its grid row (in place), so it shares that row's key.
+		expect(grid).toContain("<DraftRowBlock");
+		expect(src.split("<DraftRowBlock").length - 1).toBe(1);
 		expect(grid).toMatch(/':' \+\s+r\.__key \+\s+':' \+\s+c\.fieldname/);
 		expect(src).not.toMatch(/v-for="\(r, ri\) in t\.rows" :key="ri"/);
 	});

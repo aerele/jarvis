@@ -247,6 +247,10 @@ def _child_form_fields(
 					"fieldtype": df.fieldtype,
 					"label": df.label or "",
 					"depends_on": df.get("depends_on") or "",
+					# A Section Break Desk shows collapsed until its rule holds (the card
+					# also opens one holding a value, so nothing proposed is out of sight).
+					"collapsible": int(df.get("collapsible") or 0),
+					"collapsible_depends_on": df.get("collapsible_depends_on") or "",
 				}
 			)
 			continue

@@ -580,3 +580,44 @@ describe("'Required' and 'was X' are tied to their control for a screen reader",
 		w.unmount();
 	});
 });
+
+describe("sections", () => {
+	const t = {
+		columns: [F("item_code", "Link", { options: "Item" })],
+		formFields: [
+			F("item_code", "Link", { options: "Item" }),
+			{ fieldname: "qty_sec", fieldtype: "Section Break", label: "Quantity and Rate" },
+			F("qty", "Float"),
+			{
+				fieldname: "disc_sec",
+				fieldtype: "Section Break",
+				label: "Discount",
+				collapsible: 1,
+			},
+			F("discount_percentage", "Percent"),
+		],
+	};
+	const mountT = (row) =>
+		mount(DraftRowForm, {
+			props: {
+				table: t,
+				row: reactive({ __key: 1, item_code: "I", qty: "", ...row }),
+				tableIndex: 0,
+				rowIndex: 0,
+				draftLink: { key: "", items: [], open: false, anchor: null },
+			},
+		});
+
+	it("a plain section is a titled group; a collapsible one a closed details with its heading", () => {
+		const w = mountT({ discount_percentage: "" });
+		const titled = w.findAll("section.jv-rowform-section");
+		expect(titled.map((s) => s.attributes("aria-label"))).toContain("Quantity and Rate");
+		const fold = w.get("details.jv-rowform-section");
+		expect(fold.get("summary").text()).toBe("Discount");
+		expect(fold.element.open).toBe(false);
+	});
+	it("a collapsible section holding a value starts open", () => {
+		const w = mountT({ discount_percentage: "5" });
+		expect(w.get("details.jv-rowform-section").element.open).toBe(true);
+	});
+});

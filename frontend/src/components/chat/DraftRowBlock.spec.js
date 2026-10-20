@@ -368,3 +368,35 @@ describe("a row number in the summary opens that row and moves focus to its form
 		expect(active()).toBe(document.getElementById(rowFormId(0, table.rows[1].__key)));
 	});
 });
+
+describe("the open row's card header", () => {
+	it("has Remove, named by the row, and Done; each asks the panel", async () => {
+		const t = reactive(
+			buildDraftTable({
+				fieldname: "items",
+				spec,
+				required: false,
+				proposed: null,
+				saved: saved(),
+				verb: "update",
+			})
+		);
+		const w = mount(DraftRowBlock, {
+			props: {
+				table: t,
+				row: t.rows[1],
+				tableIndex: 0,
+				rowIndex: 1,
+				draftLink: { key: "", items: [], open: false, anchor: null },
+			},
+			global: { stubs: { DraftLinkMenu } },
+		});
+		const remove = w.get(".jv-rowform-remove");
+		expect(remove.attributes("aria-label")).toBe("Remove row 2");
+		await remove.trigger("click");
+		expect(w.emitted("remove")).toHaveLength(1);
+		await w.get(".jv-rowform-close").trigger("click");
+		expect(w.emitted("close")).toHaveLength(1);
+		w.unmount();
+	});
+});

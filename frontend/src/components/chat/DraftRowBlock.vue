@@ -19,7 +19,14 @@ const props = defineProps({
 	draftLink: { type: Object, required: true },
 	palette: { type: Object, default: () => ({}) },
 });
-const emit = defineEmits(["close", "link-search", "link-blur", "link-pick", "link-close"]);
+const emit = defineEmits([
+	"close",
+	"remove",
+	"link-search",
+	"link-blur",
+	"link-pick",
+	"link-close",
+]);
 
 // The row's first grid value (its item, usually), to name it above its form.
 const title = computed(() => {
@@ -54,7 +61,18 @@ function onEscape(ev) {
 			<span :id="titleId" class="jv-rowform-title"
 				>Row {{ rowIndex + 1 }}<template v-if="title"> · {{ title }}</template></span
 			>
-			<button type="button" class="jv-rowform-close" @click="emit('close')">Done</button>
+			<span class="jv-rowform-acts">
+				<!-- The row's own Remove, since its grid row is this card while open. -->
+				<button
+					type="button"
+					class="jv-rowform-remove"
+					:aria-label="'Remove row ' + (rowIndex + 1)"
+					@click="emit('remove')"
+				>
+					Remove
+				</button>
+				<button type="button" class="jv-rowform-close" @click="emit('close')">Done</button>
+			</span>
 		</div>
 		<DraftRowForm
 			:table="table"
@@ -75,16 +93,14 @@ function onEscape(ev) {
 </template>
 
 <style scoped>
-/* A row's full form, below the grid's sideways scroller so it fits the panel. */
+/* A row's full form, opened in place of its grid row (ChatView pins it to the panel's
+   width). An accent edge marks the row being edited. */
 .jv-rowform-block {
-	margin-top: 8px;
-	border: 1px solid var(--border);
-	border-radius: 9px;
-	overflow: hidden;
+	box-shadow: inset 3px 0 0 var(--cta);
 }
 .jv-rowform-block:focus-visible {
 	outline: 2px solid var(--cta);
-	outline-offset: 1px;
+	outline-offset: -2px;
 }
 .jv-rowform-head {
 	display: flex;
@@ -103,6 +119,25 @@ function onEscape(ev) {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+.jv-rowform-acts {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	flex: none;
+}
+.jv-rowform-remove {
+	background: none;
+	border: none;
+	color: var(--red);
+	font-size: 12.5px;
+	cursor: pointer;
+	padding: 4px 6px;
+	min-height: 32px;
+}
+.jv-rowform-remove:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 1px;
 }
 .jv-rowform-close {
 	background: none;
