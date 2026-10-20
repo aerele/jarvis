@@ -1,7 +1,7 @@
 <template>
 	<SettingsPane
 		title="Connectors"
-		:description="`Give ${brand.agentName} access to other tools like GitHub, Linear or Stripe.`"
+		:description="`Give ${brand.agentName} access to apps like GitHub, Linear or Stripe.`"
 	>
 		<template v-if="loaded" #actions>
 			<TabButtons
@@ -273,7 +273,7 @@ async function test(row) {
 		row.last_test_at = new Date().toISOString();
 		if (res && res.ok) {
 			const n = (res.tools || []).length;
-			toast.success(`Connected, ${n} ${n === 1 ? "tool" : "tools"} found`);
+			toast.success(`Connected, ${n} ${n === 1 ? "action" : "actions"} found`);
 		} else {
 			toast.error(
 				errHtml({ message: (res && res.error && res.error.message) || "" }, "Test failed.")

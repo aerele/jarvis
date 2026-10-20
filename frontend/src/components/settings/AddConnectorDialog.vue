@@ -256,7 +256,7 @@
 									>2</span
 								>
 								<div class="text-sm text-ink-gray-9">
-									Create the app in your {{ form.preset }} organisation
+									{{ registerStepTwo }}
 								</div>
 								<a
 									v-if="staticHelpUrl"
@@ -435,10 +435,16 @@
 				</div>
 
 				<div class="flex items-center justify-between gap-3">
-					<p class="text-sm text-ink-gray-6">
-						Choose what {{ brand.agentName }} may do with {{ connectorDisplayName }}.
-						Read-only actions are pre-checked; writes are off by default.
-					</p>
+					<div>
+						<p class="text-sm text-ink-gray-6">
+							Choose what {{ brand.agentName }} may do with
+							{{ connectorDisplayName }}. Read-only actions are pre-checked; writes
+							are off by default.
+						</p>
+						<p class="mt-1 text-xs text-ink-gray-5">
+							{{ brand.agentName }} uses only the actions you switch on.
+						</p>
+					</div>
 					<Button
 						variant="ghost"
 						size="sm"
@@ -911,6 +917,13 @@ const staticHint = computed(() => {
 	if (form.preset === "Custom URL") return "";
 	return catalogEntry.value?.hint || "";
 });
+// Step 2 of the register card. Google's apps are OAuth clients made in a Google
+// Cloud project; the Google presets are the ones whose setup link is its console.
+const registerStepTwo = computed(() =>
+	(catalogEntry.value?.help_url || "").includes("console.cloud.google.com")
+		? "Create the OAuth client in your Google Cloud project"
+		: `Create the app in ${form.preset}'s developer settings`
+);
 const staticHelpUrl = computed(() => {
 	if (form.preset === "Custom URL") return "";
 	return catalogEntry.value?.help_url || "";
