@@ -780,6 +780,28 @@ class TestBackgroundExportJobs(FrappeTestCase):
 				finally:
 					db.close()
 
+	def test_count_keeps_literal_percent_signs_in_filter_values(self):
+		# On Frappe 15 the filter SQL has its values inlined and the params are None. Passing ()
+		# instead would make PyMySQL %-format the statement: a changed value or an error.
+		values = ["50% complete", "100%% literal", "%(value)s"]
+		docs = [frappe.get_doc({"doctype": "ToDo", "description": v}).insert() for v in values]
+		frappe.db.commit()
+		try:
+			for value in values:
+				with self.subTest(value=value):
+					source = {"doctype": "ToDo", "fields": ["name"], "filters": {"description": value}}
+					p = streaming.prepare(source, 100)
+					db = MariaDBStream(connection_settings()).open()
+					try:
+						self.assertEqual(db.count_rows(p.sql, p.params), 1)
+						self.assertIsNone(db.count_error)
+					finally:
+						db.close()
+		finally:
+			for doc in docs:
+				frappe.delete_doc("ToDo", doc.name, force=True)
+			frappe.db.commit()
+
 	def test_count_counts_groups_and_distinct_rows(self):
 		every = frappe.db.count("DocType")
 		for extra in ({"group_by": ["module"]}, {"distinct": True}):
