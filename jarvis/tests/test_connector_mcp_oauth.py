@@ -851,6 +851,35 @@ class RegistrationTests(unittest.TestCase):
 		self.assertEqual(ctx.exception.detail, "invalid_redirect_uri: must use https")
 		self.assertIn("invalid_redirect_uri: must use https", str(ctx.exception))
 
+	def test_register_dynamic_non_2xx_captures_a_per_field_reason(self):
+		# Calendly's literal refusal: no error_description, the reason sits in a
+		# per-field `errors` object.
+		transport = _ScriptedTransport(
+			{
+				self.REGISTRATION_ENDPOINT: _json_result(
+					{
+						"error": "invalid_client_metadata",
+						"errors": {
+							"name": ["may only contain alphanumeric characters, hyphens, and spaces."]
+						},
+					},
+					status=400,
+				)
+			}
+		)
+		with self.assertRaises(OAuthRegistrationError) as ctx:
+			registration.register_dynamic(
+				self.REGISTRATION_ENDPOINT,
+				redirect_uri="https://jarvis.example/oauth/callback",
+				scope="repo",
+				client_name=self.CLIENT_NAME,
+				transport=transport,
+			)
+		self.assertEqual(
+			ctx.exception.detail,
+			"invalid_client_metadata: name may only contain alphanumeric characters, hyphens, and spaces.",
+		)
+
 	def test_register_dynamic_non_2xx_captures_a_plain_text_reason_sanitized(self):
 		hostile = "line one\r\nline two\x07" + ("x" * 400)
 		transport = _ScriptedTransport(
@@ -887,6 +916,29 @@ class RegistrationTests(unittest.TestCase):
 			)
 		self.assertEqual(ctx.exception.detail, "")
 		self.assertNotIn("html", str(ctx.exception))
+
+
+class TestProviderErrorDetail(unittest.TestCase):
+	"""``provider_error_detail`` folds a per-field ``errors`` object in only when
+	the provider sent no ``error_description``, and ignores shapes it cannot read."""
+
+	def _detail(self, body):
+		return transport_module.provider_error_detail(HttpResult(status=400, headers={}, json=body, text=""))
+
+	def test_description_wins_over_field_errors(self):
+		body = {"error": "bad", "error_description": "why", "errors": {"name": ["ignored"]}}
+		self.assertEqual(self._detail(body), "bad: why")
+
+	def test_several_fields_and_messages_are_joined(self):
+		body = {"error": "bad", "errors": {"name": ["is too long", "is taken"], "uri": "must be https"}}
+		self.assertEqual(self._detail(body), "bad: name is too long; name is taken; uri must be https")
+
+	def test_unreadable_field_errors_are_skipped(self):
+		body = {"error": "bad", "errors": {"name": 5, "uri": {"x": "y"}, "scope": [None, " "]}}
+		self.assertEqual(self._detail(body), "bad")
+
+	def test_a_list_of_errors_is_not_a_field_mapping(self):
+		self.assertEqual(self._detail({"error": "bad", "errors": ["x"]}), "bad")
 
 
 # --------------------------------------------------------------------------- #

@@ -67,10 +67,10 @@ _LEGACY_HINTS = {
 
 
 class TestCatalogShape(unittest.TestCase):
-	def test_forty_seven_providers(self):
+	def test_forty_eight_providers(self):
 		# 31 from the 2026-09-05 sweep + 16 from the 2026-09-07 gap analysis
-		# (CONNECTOR_PROVIDERS.md carries both).
-		self.assertEqual(len(catalog.PROVIDERS), 47)
+		# + WhatsApp Business (2026-10-19). CONNECTOR_PROVIDERS.md carries all.
+		self.assertEqual(len(catalog.PROVIDERS), 48)
 
 	def test_names_unique(self):
 		names = [p.name for p in catalog.PROVIDERS]
@@ -95,7 +95,7 @@ class TestCatalogShape(unittest.TestCase):
 		self.assertEqual(
 			counts,
 			{
-				catalog.AUTH_DCR: 23,
+				catalog.AUTH_DCR: 24,
 				catalog.AUTH_STATIC: 15,
 				catalog.AUTH_TOKEN: 6,
 				catalog.AUTH_OPEN: 3,
@@ -510,10 +510,18 @@ class TestGuideUrl(unittest.TestCase):
 	_GOOGLE = ("Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs")
 	_GUIDE = "https://developers.google.com/workspace/guides/configure-mcp-servers"
 
-	def test_to_public_ships_the_guide_for_google_only(self):
+	def test_to_public_ships_the_google_guide(self):
 		for row in catalog.to_public():
-			expected = self._GUIDE if row["name"] in self._GOOGLE else None
-			self.assertEqual(row["guide_url"], expected, row["name"])
+			if row["name"] in self._GOOGLE:
+				self.assertEqual(row["guide_url"], self._GUIDE, row["name"])
+
+	def test_every_enabled_static_preset_has_an_https_guide(self):
+		static = [p for p in catalog.PROVIDERS if p.enabled and p.auth == catalog.AUTH_STATIC]
+		self.assertTrue(static)
+		for provider in static:
+			self.assertTrue(
+				(provider.guide_url or "").startswith("https://"), f"{provider.name} lacks a guide_url"
+			)
 
 	def test_guide_url_must_be_https(self):
 		bad = replace(catalog.by_name("Gmail"), guide_url="http://insecure.example/guide")
@@ -703,6 +711,17 @@ class TestGapAnalysisEntries(unittest.TestCase):
 		self.assertFalse(catalog.by_name("Shopify").enabled)
 		self.assertNotIn("Shopify", catalog.preset_names())
 
+	def test_pipedrive_ships_switched_off(self):
+		# Its sign-in service registers only a fixed list of return hosts, never a
+		# tenant's (probed 2026-10-18).
+		self.assertFalse(catalog.by_name("Pipedrive").enabled)
+		self.assertNotIn("Pipedrive", catalog.preset_names())
+
+	def test_intercom_hint_warns_the_token_is_checked_on_first_use(self):
+		# Intercom accepts any token until a tool runs, so the Test passes with a
+		# wrong one; the key card has to say so.
+		self.assertIn("checked only when an action runs", catalog.by_name("Intercom").hint)
+
 	def test_docusign_requests_only_the_esignature_floor(self):
 		self.assertEqual(catalog.by_name("Docusign").scopes, "signature")
 
@@ -716,3 +735,31 @@ class TestGapAnalysisEntries(unittest.TestCase):
 		for category in ("accounting", "crm", "commerce", "communication"):
 			self.assertIn(category, catalog._ALLOWED_CATEGORIES)
 			self.assertIn(category, used)
+
+
+class TestWhatsAppBusinessEntry(unittest.TestCase):
+	"""Meta's own server: listed, but off because its registration refuses every client."""
+
+	def test_entry_shape(self):
+		provider = catalog.by_name("WhatsApp Business")
+		self.assertEqual(provider.key, "whatsapp_business")
+		self.assertEqual(provider.base_url, "https://mcp.facebook.com/whatsapp_business_tools")
+		self.assertEqual(provider.auth, catalog.AUTH_DCR)
+		self.assertEqual(provider.category, "communication")
+		self.assertEqual(
+			provider.scopes,
+			"business_management whatsapp_business_management whatsapp_business_messaging",
+		)
+		self.assertTrue(provider.guide_url.startswith("https://developers.facebook.com/"))
+
+	def test_sits_in_the_communication_group(self):
+		names = list(catalog.all_names())
+		index = names.index("WhatsApp Business")
+		self.assertEqual(catalog.by_name(names[index - 1]).category, "communication")
+
+	def test_ships_switched_off(self):
+		self.assertFalse(catalog.by_name("WhatsApp Business").enabled)
+		self.assertNotIn("WhatsApp Business", catalog.preset_names())
+		self.assertNotIn("WhatsApp Business", [row["name"] for row in catalog.to_public()])
+		# A disabled entry still resolves its pinned endpoint for any saved row.
+		self.assertIn("WhatsApp Business", catalog.base_urls())

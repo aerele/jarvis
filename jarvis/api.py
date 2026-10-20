@@ -300,7 +300,7 @@ def _dispatch_from_session(
 	"""
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
-	from jarvis.chat import agent_run_steps
+	from jarvis.chat import agent_run_steps, connector_focus
 	from jarvis.chat.collaboration import require_legacy_session
 	from jarvis.tools import _agent_run_ctx, _delegate_capability
 
@@ -393,6 +393,19 @@ def _dispatch_from_session(
 			# Resolve the conversation for this session up front so the
 			# confirmation gate can bind a parked write to it.
 			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
+			# Connector focus (the composer pill): while the running turn is focused,
+			# only that connector's two tools run. Here, not in _run_tool, because
+			# _run_tool also executes a person's card confirm, which focus must not block.
+			focus_refusal = connector_focus.refusal(conv, tool, parsed_args)
+			if focus_refusal:
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=parsed_args,
+					result=focus_refusal,
+					tool_call_id=tool_call_id,
+				)
+				return focus_refusal
 			# STEP TIMELINE (#1062): the run to file this call's step against, taken
 			# from the contract resolved above - BEFORE the tool executes.
 			# record_agent_run flips the run off ``running`` from inside the tool, so
@@ -2903,10 +2916,8 @@ def _connector_call_is_safe_read(args) -> bool:
 	SAFE_READ (all four required, read off the resolved ``Jarvis Connector Action``
 	child row): the child row for ``action`` EXISTS, ``allowed`` == 1,
 	``read_only`` == 1, and ``destructive`` == 0. This is intentionally STRICTER
-	than ``policy.action_decision``'s allow rule (which also auto-allows an
-	unmarked read-only action): skipping the human card requires the user to have
-	positively enabled the action in the picker, not merely that the broker would
-	permit it.
+	than ``policy.action_decision``'s allow rule (``allowed`` alone): skipping the
+	human card also requires the action to be a non-destructive read.
 
 	SECURITY (owner-approved tradeoff). SAFE_READ trusts the STORED
 	``read_only``/``destructive`` flags. Those are NOT client-settable: the SPA's

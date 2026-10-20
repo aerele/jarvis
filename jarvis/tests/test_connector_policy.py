@@ -34,8 +34,16 @@ class TestActionGate(unittest.TestCase):
 	def test_explicitly_allowed(self):
 		self.assertIsNone(policy.action_decision(_row(actions=[{"action": "get_x", "allowed": 1}]), "get_x"))
 
-	def test_read_only_non_destructive_auto_allowed(self):
+	def test_switched_off_read_only_action_is_denied(self):
+		# allowed=0 on a read-only row means the user unchecked it; read_only
+		# must never re-grant it.
 		row = _row(actions=[{"action": "get_x", "allowed": 0, "read_only": 1, "destructive": 0}])
+		code, message = policy.action_decision(row, "get_x")
+		self.assertEqual(code, "action_denied")
+		self.assertIn("get_x", message)
+
+	def test_allowed_read_only_action_runs(self):
+		row = _row(actions=[{"action": "get_x", "allowed": 1, "read_only": 1, "destructive": 0}])
 		self.assertIsNone(policy.action_decision(row, "get_x"))
 
 	def test_destructive_not_allowed_is_denied(self):

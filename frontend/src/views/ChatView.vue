@@ -1494,9 +1494,8 @@
 												<button
 													class="jv-action-primary"
 													:disabled="
-														!summaryState.model ||
-														(summaryState.model &&
-															summaryState.model.applying) ||
+														!cardModel ||
+														cardModel.applying ||
 														convStreaming
 													"
 													:title="
@@ -1507,8 +1506,7 @@
 													@click="confirmSummary"
 												>
 													{{
-														summaryState.model &&
-														summaryState.model.applying
+														cardModel && cardModel.applying
 															? "Saving..."
 															: activeAction.verb === "update"
 															? "Confirm update"
@@ -3315,7 +3313,7 @@
 								<span v-if="groundNextTurn">Wiki</span>
 							</button>
 							<!-- Connector-focus pill: scope this conversation to one connected +
-							     enabled app (soft prompt-level nudge — see sendCtx.focus_connector
+							     enabled app (the bench limits the turn's tools to it, see sendCtx.focus_connector
 							     in send()). Connectors are a default feature, so this is always
 							     shown, even before the first app is connected, so the picker's
 							     "Browse connectors" row is the way in; a focus already armed still
@@ -3969,7 +3967,7 @@
 				v-if="draftPanel"
 				class="jv-artifact-overlay"
 				@mousedown="onOverlayMouseDown"
-				@click.self="onOverlayBackdropClick(closeDraftPanel)"
+				@click.self="onOverlayBackdropClick(dismissDraftPanel)"
 			>
 				<aside
 					ref="draftPanelEl"
@@ -4167,10 +4165,42 @@
 								{{ removedSavedRows(t).length === 1 ? "row" : "rows" }}:
 								{{ removedSavedRows(t).join(", ") }}
 							</div>
+							<div
+								v-if="draftChangeSummaries[ti]"
+								class="jv-rows-changed"
+								role="note"
+							>
+								<template v-if="draftChangeSummaries[ti].grouped">
+									<span>{{ draftChangeSummaries[ti].text }}</span>
+									<button
+										type="button"
+										class="jv-rows-changed-open"
+										@click="openChangedRows(t, draftChangeSummaries[ti])"
+									>
+										{{ draftChangeSummaries[ti].openLabel }}
+									</button>
+								</template>
+								<template v-else>
+									<span>{{ draftChangeSummaries[ti].lead }}</span>
+									<button
+										v-for="i in draftChangeSummaries[ti].rows"
+										:key="i"
+										type="button"
+										class="jv-rows-changed-open"
+										:aria-label="'Open row ' + (i + 1)"
+										@click="showRowForm(ti, t.rows[i])"
+									>
+										{{ i + 1 }}
+									</button>
+								</template>
+							</div>
 							<div class="jv-draft-gridwrap">
 								<table class="jv-grid">
 									<thead>
 										<tr>
+											<th class="jv-grid-lead">
+												<span class="jv-sr">Row</span>
+											</th>
 											<th v-for="c in t.columns" :key="c.fieldname">
 												{{ c.label }}
 											</th>
@@ -4178,129 +4208,144 @@
 										</tr>
 									</thead>
 									<tbody>
-										<tr v-for="(r, ri) in t.rows" :key="ri">
-											<td
-												v-for="c in t.columns"
-												:key="c.fieldname"
-												:class="{ 'jv-grid-ro': c.read_only }"
-											>
-												<span v-if="c.read_only">{{
-													r[c.fieldname]
-												}}</span>
-												<template v-else-if="c.fieldtype === 'Link'">
-													<input
-														class="jv-action-input"
-														v-model="r[c.fieldname]"
-														@input="
-															onDraftLink(
-																't:' +
-																	ti +
-																	':' +
-																	ri +
-																	':' +
-																	c.fieldname,
-																() => r[c.fieldname],
-																c.options,
-																$event
-															)
+										<template v-for="(r, ri) in t.rows" :key="r.__key">
+											<!-- An open row is its full form in place, as Desk opens a
+											     row: a card the panel's width at the row's own spot. -->
+											<tr v-if="r.__open" class="jv-grid-openrow">
+												<td
+													:colspan="t.columns.length + 2"
+													class="jv-grid-opencell"
+												>
+													<DraftRowBlock
+														:table="t"
+														:row="r"
+														:parent="rowMemo.parentFor(t)"
+														:table-index="ti"
+														:row-index="ri"
+														:changed-fields="
+															rowStatusFor(t, r, ri).changedFields
 														"
-														@focus="
-															onDraftLink(
-																't:' +
-																	ti +
-																	':' +
-																	ri +
-																	':' +
-																	c.fieldname,
-																() => r[c.fieldname],
-																c.options,
-																$event
-															)
+														:saved-row="
+															rowStatusFor(t, r, ri).savedRow
 														"
-														@blur="closeDraftLink"
-														autocomplete="off"
-													/>
-													<DraftLinkMenu
-														v-if="
-															draftLink.open &&
-															draftLink.key ===
-																't:' +
-																	ti +
-																	':' +
-																	ri +
-																	':' +
-																	c.fieldname &&
-															draftLink.items.length
-														"
-														:anchor="draftLink.anchor"
-														:items="draftLink.items"
+														:draft-link="draftLink"
 														:palette="paletteVars"
-														@pick="
-															(it) =>
-																pickDraftLink((v) => {
-																	r[c.fieldname] = v;
-																}, it)
-														"
-														@close="draftLink.open = false"
+														@close="closeRowForm(ti, r)"
+														@remove="removeDraftRow(ti, ri)"
+														@insert="insertDraftRowBelow(ti, ri)"
+														@link-search="onDraftLink"
+														@link-blur="closeDraftLink"
+														@link-pick="pickDraftLink"
+														@link-close="draftLink.open = false"
 													/>
-												</template>
-												<input
-													v-else-if="
-														[
-															'Int',
-															'Float',
-															'Currency',
-															'Percent',
-														].includes(c.fieldtype)
-													"
-													type="number"
-													class="jv-action-input"
-													v-model="r[c.fieldname]"
-												/>
-												<input
-													v-else-if="c.fieldtype === 'Date'"
-													type="date"
-													class="jv-action-input"
-													v-model="r[c.fieldname]"
-												/>
-												<select
-													v-else-if="c.fieldtype === 'Select'"
-													class="jv-action-input jv-action-sel"
-													v-model="r[c.fieldname]"
+												</td>
+											</tr>
+											<tr v-else>
+												<td class="jv-grid-lead">
+													<div class="jv-grid-lead-in">
+														<span class="jv-grid-num">{{
+															ri + 1
+														}}</span>
+														<button
+															v-if="
+																t.formFields && t.formFields.length
+															"
+															type="button"
+															:id="rowToggleId(ti, r.__key)"
+															class="jv-grid-more"
+															:class="{
+																'jv-grid-more-warn': rowStatusFor(
+																	t,
+																	r,
+																	ri
+																).missing,
+															}"
+															:aria-expanded="
+																r.__open ? 'true' : 'false'
+															"
+															:aria-controls="
+																r.__open
+																	? rowFormId(ti, r.__key)
+																	: undefined
+															"
+															:title="rowToggleLabel(t, r, ri)"
+															:aria-label="rowToggleLabel(t, r, ri)"
+															@click="toggleRowForm(ti, r)"
+														>
+															<!-- Desk's row edit icon: opens the row's full form. -->
+															<svg
+																width="14"
+																height="14"
+																viewBox="0 0 24 24"
+																fill="none"
+																stroke="currentColor"
+																stroke-width="2"
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																aria-hidden="true"
+															>
+																<path
+																	d="M21.17 6.81a1 1 0 0 0-3.99-3.98L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"
+																/>
+																<path d="m15 5 4 4" />
+															</svg>
+															<span
+																v-for="part in toggleParts(
+																	rowStatusFor(t, r, ri)
+																)"
+																:key="part.kind"
+																class="jv-grid-badge"
+																:class="{
+																	'jv-grid-badge-warn':
+																		part.kind === 'missing',
+																}"
+																aria-hidden="true"
+																>{{ part.text }}</span
+															>
+														</button>
+													</div>
+												</td>
+												<td
+													v-for="c in t.columns"
+													:key="c.fieldname"
+													:class="{ 'jv-grid-ro': c.read_only }"
 												>
-													<option
-														v-for="o in cellOptions(c, r[c.fieldname])"
-														:key="o"
-														:value="o"
-													>
-														{{ o }}
-													</option>
-												</select>
-												<select
-													v-else-if="c.fieldtype === 'Check'"
-													class="jv-action-input jv-action-sel"
-													v-model="r[c.fieldname]"
-												>
-													<option value="1">Yes</option>
-													<option value="0">No</option>
-												</select>
-												<input
-													v-else
-													class="jv-action-input"
-													v-model="r[c.fieldname]"
-												/>
-											</td>
-											<td class="jv-grid-x">
-												<button
-													class="jv-grid-del"
-													@click="removeDraftRow(ti, ri)"
-													title="Remove row"
-													aria-label="Remove row"
-												>
-													✕
-												</button>
-											</td>
-										</tr>
+													<DraftCell
+														:field="c"
+														:row="r"
+														:cell-key="
+															't:' +
+															ti +
+															':' +
+															r.__key +
+															':' +
+															c.fieldname
+														"
+														:read-only="!!c.read_only"
+														:label="c.label"
+														:draft-link="draftLink"
+														:palette="paletteVars"
+														@link-search="onDraftLink"
+														@link-blur="closeDraftLink"
+														@link-pick="pickDraftLink"
+														@link-close="draftLink.open = false"
+													/>
+												</td>
+												<td class="jv-grid-x">
+													<span class="jv-grid-acts">
+														<button
+															type="button"
+															class="jv-grid-del"
+															@click="removeDraftRow(ti, ri)"
+															title="Remove row"
+															:aria-label="'Remove row ' + (ri + 1)"
+														>
+															✕
+														</button>
+													</span>
+												</td>
+											</tr>
+										</template>
 									</tbody>
 								</table>
 							</div>
@@ -4406,9 +4451,9 @@
 		</transition>
 		<DraftPreview
 			v-if="previewOpen && summaryState.model"
-			:model="summaryState.model"
+			:model="cardModel"
 			:headline="(summaryState.view && summaryState.view.headline) || ''"
-			:disabled="convStreaming || !!(summaryState.model && summaryState.model.applying)"
+			:disabled="convStreaming || !!(cardModel && cardModel.applying)"
 			@close="previewOpen = false"
 			@edit="onPreviewEdit"
 			@confirm="onPreviewConfirm"
@@ -4472,6 +4517,8 @@ import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import { Button, Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
+import DraftCell from "@/components/chat/DraftCell.vue";
+import DraftRowBlock from "@/components/chat/DraftRowBlock.vue";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { useConversationActivity } from "@/lib/useConversationActivity";
 import { reportToolsByAssistant } from "@/lib/reportScope";
@@ -4490,7 +4537,16 @@ import {
 	withToolDetail,
 } from "@/lib/historyPaging";
 import { markParked, parkedByCard, parkedNoteFor } from "@/lib/draftParked";
-import { applyActionPayload, draftSaveOutcome, stampDraftModel } from "@/lib/draftSave";
+import {
+	applyActionPayload,
+	draftActionKey,
+	draftIsDirty,
+	draftSaveOutcome,
+	liveDraftMessage,
+	markDraftBaseline,
+	openPanelFor,
+	stampDraftModel,
+} from "@/lib/draftSave";
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
@@ -4595,7 +4651,7 @@ import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTool
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
-import { cellOptions, markMissing, panelField as _panelField } from "@/lib/docFields";
+import { markMissing, panelField as _panelField } from "@/lib/docFields";
 import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
 import {
 	alignComputedRows,
@@ -4604,12 +4660,29 @@ import {
 	draftValues,
 	isFieldMissing,
 	readonlyDisplay,
-	isRowKeyColumn,
-	overlaySavedRows,
 	removedSavedRows,
-	rowKeyColumn,
-	toPanelRow,
+	allRowFields,
 } from "@/lib/draftApply";
+import {
+	applyAutoOpen,
+	applyRuleValues,
+	blankRow,
+	buildDraftTable,
+	markMissingRows,
+	openChangedRows,
+	parentDefaults,
+	ruleFetchLinks,
+	toggleLabel,
+	toggleParts,
+} from "@/lib/draftTables";
+import { createRowStatusMemo } from "@/lib/rowStatusMemo";
+import {
+	closeRowForm,
+	rowFormId,
+	rowToggleId,
+	showRowForm,
+	toggleRowForm,
+} from "@/lib/rowFormFocus";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { replyBarParts, stampDeltaTime, useClientStamp } from "@/lib/replyBar";
 import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
@@ -5359,10 +5432,10 @@ watch(
 		if (!convAutoMode.value && autoView.value.visible) autoModeArmed.value = !!v;
 	}
 );
-// Connector-focus pill (composer control, MCP_CONNECTORS_PLAN.md): a soft
-// prompt-level nudge scoping this conversation to ONE connected+enabled
-// connector — NOT tool gating, the agent can still reach for anything, this
-// only tells it what to prefer. { key, label, preset } | null. Persisted per
+// Connector-focus pill (composer control, MCP_CONNECTORS_PLAN.md): scopes this
+// conversation to ONE connected+enabled connector. Each turn sent with it is
+// bound to that connector: the bench refuses every other tool for the turn
+// (jarvis.chat.connector_focus). { key, label, preset } | null. Persisted per
 // conversation (see connectorFocusStore below) so it survives across turns
 // until the user clears it, unlike the one-shot groundNextTurn above.
 const connectorFocus = ref(null);
@@ -7372,10 +7445,22 @@ const _lastAssistant = computed(() => {
 	}
 	return last && last.role === "assistant" && !last.streaming ? last : null;
 });
-const activeAction = computed(() =>
-	_lastAssistant.value ? actionOf(_lastAssistant.value) : null
+// The draft whose save failed on a value the person is fixing in the panel (its
+// message name). The assistant's "I'll wait" reply to that failure must not retire the
+// draft's card, or closing the panel would leave no Edit to reopen it.
+const fixingDraft = ref("");
+watch(currentId, () => {
+	fixingDraft.value = "";
+});
+// The message that owns the live draft card: the last assistant message, or the draft
+// being fixed when only the assistant's replies follow it (lib/draftSave).
+const _cardMessage = computed(() =>
+	liveDraftMessage(visibleMessages.value, _lastAssistant.value, fixingDraft.value, (m) =>
+		Boolean(actionOf(m))
+	)
 );
-const actionFor = computed(() => (activeAction.value ? _lastAssistant.value.name : null));
+const activeAction = computed(() => (_cardMessage.value ? actionOf(_cardMessage.value) : null));
+const actionFor = computed(() => (activeAction.value ? _cardMessage.value.name : null));
 const confirmFor = computed(() =>
 	_lastAssistant.value && !activeAction.value && confirmLabel(_lastAssistant.value)
 		? _lastAssistant.value.name
@@ -7422,6 +7507,20 @@ function _actField(meta, label) {
 // --- Record draft panel: the action JSON is the draft; edits are local; apply
 // posts to actions_api (no LLM round-trip). ---
 const draftPanel = ref(null);
+// A row's form status for its toggle and form: blank required fields, and (on an
+// update) what differs from the saved row. One computed per row that keeps its
+// object while nothing in the status changed, and one parent object per table with
+// just the record values its rules read (lib/rowStatusMemo.js): typing in a row, or
+// in a main field no rule reads, does not re-render the other rows.
+const rowMemo = createRowStatusMemo(() => draftPanel.value);
+// Above each grid, the rows the agent (or the user) changed outside it: named when
+// few, grouped by field when many, with a button that opens them (draftTables).
+const draftChangeSummaries = rowMemo.summaries;
+const rowStatusFor = rowMemo.rowStatusFor;
+// The toggle's accessible name: which row, and what needs attention in it.
+function rowToggleLabel(t, r, ri) {
+	return toggleLabel(ri + 1, rowStatusFor(t, r, ri));
+}
 // Drafts the server turned into a gated confirmation card (sensitive
 // configuration): message name -> the note. Waiting, not saved, never re-applied.
 const parkedDrafts = ref(new Map());
@@ -7491,7 +7590,7 @@ function onOverlayBackdropClick(close) {
 	if (_overlayPressOnBackdrop) close();
 }
 
-// one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<ri>:<col>"
+// one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<row __key>:<col>"
 const draftLink = ref({ key: "", items: [], open: false, anchor: null });
 // The shared popup belongs to one search, not merely one field key. A blur
 // timer or response from an older search must not mutate the current popup.
@@ -7609,34 +7708,21 @@ async function buildDraftModel(a) {
 	for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
 	for (const [tf, spec] of Object.entries(meta.tables || {})) {
 		const metaField = meta.fields.find((f) => f.fieldname === tf) || { reqd: 0 };
-		const baseRows = (base.tables || {})[tf] || [];
-		const proposedRows = aTables[tf] && overlaySavedRows(aTables[tf], baseRows);
-		if (!proposedRows && !metaField.reqd && !baseRows.length) continue;
-		// columns = child meta columns ∪ keys the agent used, each typed from the
-		// child's meta (unknown keys → data input)
-		const columns = spec.columns.slice();
-		const known = new Set(columns.map((c) => c.fieldname));
-		for (const r of proposedRows || []) {
-			for (const k of Object.keys(r)) {
-				if (!known.has(k) && isRowKeyColumn(k)) {
-					known.add(k);
-					columns.push(rowKeyColumn(k, spec.extra_columns));
-				}
-			}
-		}
-		const srcRows = proposedRows != null ? proposedRows : baseRows; // proposal REPLACES loaded rows
-		// Each row keeps its saved name (__name) so Apply edits THAT row (CR-3).
-		const rows = srcRows.map((r) => toPanelRow(columns, r));
-		if (!rows.length) rows.push(_blankRow(columns));
-		tables.push({
+		const table = buildDraftTable({
 			fieldname: tf,
-			label: spec.label,
-			child: spec.child_doctype,
-			columns,
-			rows,
-			origJson: JSON.stringify(verb === "update" ? baseRows : null), // raw saved rows
+			spec,
+			required: !!metaField.reqd,
+			proposed: aTables[tf],
+			saved: (base.tables || {})[tf] || [],
+			verb,
 		});
+		if (table) tables.push(table);
 	}
+	// Bounded: the card shows with the defaults rather than wait on a slow answer.
+	await Promise.race([
+		fillRuleValues(a.doctype, tables),
+		new Promise((resolve) => setTimeout(resolve, RULE_VALUES_WAIT_MS)),
+	]);
 	// A Prompt-autonamed DocType (e.g. Server Script) carries its document name as a
 	// proposed "name" field, not a real DocField, so it never lands in `fields`.
 	// Capture it here so applyDraft sends it as `name` (the backend folds it into
@@ -7663,6 +7749,9 @@ async function buildDraftModel(a) {
 		// stages the next step without the user typing "continue".
 		cont: a.continue ? 1 : 0,
 		linkContext: { ...base.values, ...proposed },
+		// For child rows' rules: Desk's new-form defaults and the record's docstatus.
+		parentDefaults: verb === "create" ? parentDefaults(meta.fields) : {},
+		docstatus: Number(base.docstatus || 0),
 		fields,
 		tables,
 		tableMeta: meta.tables || {},
@@ -7679,6 +7768,13 @@ async function openDraftPanel(a) {
 	// name another draft (the server sends "fixing it in the panel" once per draft).
 	const messageKey = actionFor.value || "";
 	const card = activeAction.value || null;
+	const actionKey = draftActionKey(a);
+	// The panel already edits this very draft (Edit clicked again, a failed Confirm, or
+	// the agent re-sending the same proposal): keep it, with the person's edits and the
+	// marked fields, instead of rebuilding it from the agent's proposal. Its stamp stays
+	// too, so the draft keeps one identity for parking and the server's once-per-draft
+	// note. Returns whether it rebuilt.
+	if (openPanelFor(draftPanel.value, actionKey)) return false;
 	let model;
 	// Deliberate: swallow to the SAME dead-end the old `if (!model) return` gave, so
 	// a guard throw cannot escape a @click handler. The summary card already shows
@@ -7686,24 +7782,49 @@ async function openDraftPanel(a) {
 	try {
 		model = await buildDraftModel(a);
 	} catch (e) {
-		return;
+		return false;
 	}
-	if (!model) return;
+	if (!model) return false;
+	markDraftBaseline(model);
+	// An update's changed rows (1 to 3) open on the first build, or when a re-emit changes
+	// what the agent proposed (the same draft re-sent keeps its panel above). A rebuild
+	// closes every row, so the same proposal opens none again; focus never moves. A throw
+	// here must not stop the panel opening. Opening rows is not an edit: the baseline is
+	// draftValues, which never carries a row's `__` keys.
+	try {
+		applyAutoOpen(model, draftPanel.value);
+	} catch (e) {
+		console.warn("Jarvis card: could not auto-open the changed rows", e);
+	}
 	// Only the open panel can be edited after a failure (R2-9, lib/draftSave).
-	draftPanel.value = stampDraftModel(model, { messageKey, card, editable: true });
+	draftPanel.value = stampDraftModel(model, { messageKey, card, editable: true, actionKey });
+	return true;
 }
 
-function _blankRow(columns) {
-	const o = {};
-	for (const c of columns) o[c.fieldname] = "";
-	return o;
-}
 function addDraftRow(ti) {
 	const t = draftPanel.value.tables[ti];
-	t.rows.push(_blankRow(t.columns));
+	t.rows.push(blankRow(t));
 }
 function removeDraftRow(ti, ri) {
 	draftPanel.value.tables[ti].rows.splice(ri, 1);
+}
+// Insert below, from an open row's card (as Desk's row editor): a blank row right
+// after it, opened in its place while the row it came from closes.
+function insertDraftRowBelow(ti, ri) {
+	const t = draftPanel.value.tables[ti];
+	t.rows[ri].__open = false;
+	t.rows.splice(ri + 1, 0, blankRow(t));
+	showRowForm(ti, t.rows[ri + 1]);
+}
+// A click outside the panel closes it only when nothing would be lost. With edits it
+// stays open (the dimmed chat behind it, its card's buttons included, is not a way
+// out); the X still closes it on purpose.
+function dismissDraftPanel() {
+	if (draftIsDirty(draftPanel.value)) {
+		if (draftPanelEl.value) draftPanelEl.value.focus();
+		return;
+	}
+	closeDraftPanel();
 }
 function closeDraftPanel() {
 	draftLinkGeneration++;
@@ -7757,6 +7878,25 @@ async function onDraftLink(key, target, doctype, ev) {
 		}
 	}
 }
+// The hidden values the rows' rules read that Desk fetches from a link (is_fixed_asset
+// from the Item), one call per table that still needs one, so the card shows and
+// requires what Desk would before the record is saved. A failure keeps the defaults;
+// `isCurrent` drops an answer that lands after its panel was closed or replaced.
+const RULE_VALUES_WAIT_MS = 1500;
+async function fillRuleValues(doctype, tables, isCurrent = () => true) {
+	await Promise.all(
+		(tables || []).map(async (t) => {
+			const links = ruleFetchLinks(t);
+			if (!Object.keys(links).length) return;
+			try {
+				const r = await api.ruleValues(doctype, t.fieldname, links);
+				if (r && r.ok && isCurrent()) applyRuleValues(t, r.values, links);
+			} catch (e) {
+				// the rules read the defaults, as before
+			}
+		})
+	);
+}
 function pickDraftLink(setter, item) {
 	draftLinkGeneration++;
 	if (
@@ -7767,6 +7907,9 @@ function pickDraftLink(setter, item) {
 	}
 	setter(item.value);
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
+	// A row's new link (an item) can change what its rules read: fetch it, as Desk does.
+	const panel = draftPanel.value;
+	if (panel) fillRuleValues(panel.doctype, panel.tables, () => draftPanel.value === panel);
 }
 function closeDraftLink(ev) {
 	const generation = draftLinkGeneration;
@@ -7791,8 +7934,10 @@ const draftTotals = computed(() => {
 		hasQty = false,
 		hasAmt = false;
 	for (const t of p.tables) {
-		const q = t.columns.find((c) => c.fieldname === "qty");
-		const r = t.columns.find((c) => c.fieldname === "rate");
+		// Any field of the row, not only the grid's columns: a user's own grid columns
+		// may leave qty or rate out, and the totals must still add up.
+		const q = allRowFields(t).find((c) => c.fieldname === "qty");
+		const r = allRowFields(t).find((c) => c.fieldname === "rate");
 		if (!q) continue;
 		hasQty = true;
 		for (const row of t.rows) {
@@ -7821,14 +7966,14 @@ const draftCta = computed(() => {
 });
 // Summary-first: the read-only model + view for the current create/update action.
 const summaryState = ref({ key: "", model: null, view: null, error: "" });
+// What the card's Confirm and Preview act on: the open panel when it edits this draft
+// (lib/draftSave openPanelFor), else the card's own read-only copy.
+const cardModel = computed(() => {
+	const m = summaryState.value.model;
+	return (m && openPanelFor(draftPanel.value, m.actionKey)) || m;
+});
 async function ensureActionSummary(a) {
-	const key = JSON.stringify([
-		a.verb || "create",
-		a.doctype,
-		a.name || "",
-		a.fields || [],
-		a.tables || [],
-	]);
+	const key = draftActionKey(a);
 	if (summaryState.value.key === key) return;
 	const messageKey = actionFor.value || ""; // this draft's message, before the build
 	const card = activeAction.value || null;
@@ -7853,7 +7998,7 @@ async function ensureActionSummary(a) {
 		return;
 	}
 	if (summaryState.value.key !== key) return; // a newer action superseded this build
-	stampDraftModel(model, { messageKey, card, editable: false });
+	stampDraftModel(model, { messageKey, card, editable: false, actionKey: key });
 	summaryState.value = { key, model, view: summarize(model, a), error: "" };
 	if (model.verb === "create") fillComputedCells(key, model, a);
 }
@@ -7893,6 +8038,13 @@ async function confirmSummary() {
 	// Captured before the round-trip: a newer turn may replace the active action.
 	const a = activeAction.value;
 	if (!model || model.applying || convStreaming.value) return;
+	// The panel is open on this draft: Confirm saves what the person sees there (their
+	// edits, not the card's copy), and a failure marks the fields in that same panel.
+	const panel = openPanelFor(draftPanel.value, model.actionKey);
+	if (panel) {
+		await applyDraft(0, panel);
+		return;
+	}
 	await applyDraft(0, model);
 	const stillShown = summaryState.value.model === model;
 	if (model.error && model.error.fields && stillShown) await openDraftForMissing(a, model.error);
@@ -7906,6 +8058,7 @@ async function openDraftForMissing(a, error) {
 	const p = draftPanel.value;
 	if (!p) return;
 	markMissing(p, error.fields, (_formMetaCache[p.doctype] || {}).fields);
+	markMissingRows(p, error.fields);
 	p.error = error;
 }
 
@@ -7942,9 +8095,10 @@ watch(actionFor, () => {
 	if (!a || a.kind === "email" || !isEditVerb(a)) return;
 	ensureActionSummary(a); // keep the summary card in sync with the latest action
 	if (draftPanel.value) {
-		// panel is open (user is editing) and the action re-emitted -> refresh it too
-		openDraftPanel({ verb: a.verb || "create", ...a }).then(() => {
-			if (draftPanel.value) draftPanel.value.updatedToast = true;
+		// panel is open (user is editing) and the action re-emitted: rebuilt only when the
+		// agent proposed something different (openDraftPanel keeps the same draft's edits)
+		openDraftPanel({ verb: a.verb || "create", ...a }).then((rebuilt) => {
+			if (rebuilt && draftPanel.value) draftPanel.value.updatedToast = true;
 		});
 	}
 });
@@ -7988,6 +8142,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			// the chat explains (or the note says to ask, when it could not be sent).
 			closeDraftPanel();
 			notify(outcome.note, { type: "error" });
+			fixingDraft.value = "";
 			await loadConversation(currentId.value);
 			store.loadConversations();
 			showQueuedContinuation(r);
@@ -7998,9 +8153,12 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			// detail + hint, and nothing was saved) instead of throwing a raw Frappe
 			// 403/417. Keep the panel open so the values are editable (R2-9: the
 			// assistant is only told the user is fixing it here).
+			// The panel's draft stays live through the assistant's acknowledgement.
+			if (p.editable) fixingDraft.value = draftKey;
 			p.applying = false;
 			p.error = outcome.error;
 			markMissing(p, p.error.fields, (_formMetaCache[p.doctype] || {}).fields);
+			markMissingRows(p, p.error.fields);
 			return;
 		}
 		// Sensitive configuration: nothing was saved, a confirmation card now waits in
@@ -8008,6 +8166,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 		// draft so it can't park a second card.
 		if (outcome.kind === "parked") {
 			const parked = outcome.note;
+			fixingDraft.value = "";
 			p.applying = false;
 			p.parked = parked;
 			parkedDrafts.value = markParked(parkedDrafts.value, draftKey, parked);
@@ -8016,6 +8175,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			await loadConversation(currentId.value);
 			return;
 		}
+		fixingDraft.value = "";
 		closeDraftPanel();
 		await loadConversation(currentId.value);
 		store.loadConversations();
@@ -17283,6 +17443,35 @@ onUnmounted(() => {
 	color: var(--text-2);
 	word-break: break-word;
 }
+.jv-rows-changed {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 10px;
+	padding: 6px 10px;
+	margin-bottom: 6px;
+	border-radius: 6px;
+	border: 1px solid var(--cta-bd);
+	background: var(--cta-bg);
+	color: var(--cta);
+	font-size: 12.5px;
+	overflow-wrap: anywhere;
+}
+.jv-rows-changed-open {
+	background: none;
+	border: 1px solid var(--cta-bd);
+	border-radius: 7px;
+	color: var(--cta);
+	font-weight: 600;
+	font-size: 12.5px;
+	cursor: pointer;
+	padding: 2px 10px;
+	min-height: 32px;
+}
+.jv-rows-changed-open:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 1px;
+}
 .jv-rows-removed {
 	padding: 6px 10px;
 	margin-bottom: 6px;
@@ -17325,6 +17514,23 @@ onUnmounted(() => {
 	position: relative;
 	min-width: 90px;
 }
+/* An open row (DraftRowBlock in place): one cell across the whole row, its card pinned
+   to the left at the scroller's visible width (the gridwrap is an inline-size
+   container), so it fits the panel however far the grid is scrolled sideways. */
+.jv-draft-gridwrap {
+	container-type: inline-size;
+}
+.jv-grid td.jv-grid-opencell {
+	padding: 0;
+	min-width: 0;
+	background: var(--surface);
+}
+.jv-grid-opencell > :deep(.jv-rowform-block) {
+	position: sticky;
+	left: 0;
+	width: 100cqi;
+	box-sizing: border-box;
+}
 .jv-grid td .jv-action-input {
 	width: 100%;
 	box-sizing: border-box;
@@ -17333,7 +17539,92 @@ onUnmounted(() => {
 	color: var(--text-3);
 }
 .jv-grid-x {
-	width: 30px;
+	width: 1%;
+	white-space: nowrap;
+	min-width: 0 !important;
+}
+/* The leading cell: row number + the row-form toggle, first in the row so they are on
+   screen at scrollLeft 0 on a phone without sticky CSS. At most 96px; the extra
+   specificity beats `.jv-grid td { min-width: 90px }`. The badges wrap under the arrow
+   rather than widening it. */
+.jv-grid td.jv-grid-lead,
+.jv-grid th.jv-grid-lead {
+	width: 96px;
+	max-width: 96px;
+	min-width: 0;
+	box-sizing: border-box;
+}
+.jv-grid th.jv-grid-lead {
+	position: relative; /* anchors the visually-hidden "Row" label */
+}
+/* Inside the cell, not on it: a flex td would leave table layout. */
+.jv-grid-lead-in {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+}
+.jv-grid-num {
+	min-width: 1.4em;
+	font-size: 11.5px;
+	font-variant-numeric: tabular-nums;
+	color: var(--text-3);
+}
+.jv-grid-lead .jv-grid-more {
+	flex-wrap: wrap;
+	max-width: 100%;
+	box-sizing: border-box;
+}
+.jv-grid-acts {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+/* Opens a row's full form (DraftRowForm, below the grid). A ~32px target, kept
+   apart from Remove so a thumb aimed at one does not hit the other. */
+.jv-grid-more,
+.jv-grid-del {
+	min-width: 32px;
+	min-height: 32px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 3px;
+}
+.jv-grid-more {
+	background: none;
+	border: 1px solid var(--border);
+	color: var(--text-3);
+	cursor: pointer;
+	padding: 2px 6px;
+	border-radius: 7px;
+}
+.jv-grid-more:hover,
+.jv-grid-more[aria-expanded="true"] {
+	color: var(--cta);
+	background: var(--surface-1);
+}
+.jv-grid-more-warn {
+	border-color: var(--amber-bd);
+}
+.jv-grid-badge {
+	font-size: 10.5px;
+	font-weight: 650;
+	line-height: 16px;
+	min-width: 16px;
+	padding: 0 4px;
+	border-radius: 8px;
+	background: var(--surface-1);
+	color: var(--text-2);
+}
+.jv-grid-badge-warn {
+	background: var(--amber-bg);
+	color: var(--amber);
+}
+.jv-grid-more:focus-visible,
+.jv-grid-del:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 1px;
 }
 .jv-grid-del {
 	background: none;

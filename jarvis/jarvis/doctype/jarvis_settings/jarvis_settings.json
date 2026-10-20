@@ -10,6 +10,7 @@
   "account_tab",
   "account_section",
   "enabled",
+  "hide_shortcut_without_access",
   "token_budget_monthly",
   "conversation_retention_days",
   "budgets_section",
@@ -174,7 +175,10 @@
   "maintenance_message",
   "catalogue_visibility_section",
   "catalogue_visibility_governed",
-  "catalogue_visibility_synced_at"
+  "catalogue_visibility_synced_at",
+  "connector_catalogue_section",
+  "connector_catalogue_disabled",
+  "connector_catalogue_synced_at"
  ],
  "fields": [
   {
@@ -192,6 +196,13 @@
    "fieldtype": "Check",
    "label": "Enabled",
    "default": "1"
+  },
+  {
+   "fieldname": "hide_shortcut_without_access",
+   "fieldtype": "Check",
+   "label": "Hide Jarvis shortcut for users without access",
+   "default": "0",
+   "description": "Hide the floating Desk shortcut for users who cannot access Jarvis. Reload Desk after changing this setting."
   },
   {
    "fieldname": "token_budget_monthly",
@@ -1280,6 +1291,28 @@
    "label": "Catalogue Visibility Synced At",
    "hidden": 1,
    "read_only": 1
+  },
+  {
+   "fieldname": "connector_catalogue_section",
+   "fieldtype": "Section Break",
+   "label": "Operator Connector Catalogue",
+   "collapsible": 1,
+   "description": "Mirror of the operator's fleet-global connector catalogue policy, pulled from the control plane via get_connection (jarvis.connector_catalogue). Read-only here; the pull is the only writer. A disabled preset leaves the Connectors picker and refuses new connectors; saved ones keep working."
+  },
+  {
+   "fieldname": "connector_catalogue_disabled",
+   "fieldtype": "Small Text",
+   "label": "Disabled Connector Presets",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Canonical JSON list of the preset names the operator switched off, as last applied. Names this release does not ship are kept but ignored. Empty [] = nothing disabled; empty string = never pulled (or every pull kept last-known)."
+  },
+  {
+   "fieldname": "connector_catalogue_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Connector Catalogue Synced At",
+   "hidden": 1,
+   "read_only": 1
   }
  ],
  "permissions": [
@@ -1319,5 +1352,5 @@
    "write": 1
   }
  ],
- "modified": "2026-10-06 12:00:00.000000"
+ "modified": "2026-10-18 12:00:00.000000"
 }

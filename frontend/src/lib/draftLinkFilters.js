@@ -1,4 +1,4 @@
-import { coerceOut } from "./draftApply";
+import { allRowFields, draftParentDoc } from "./draftApply";
 
 export class DraftLinkFilterError extends Error {}
 
@@ -70,16 +70,18 @@ export function resolveLinkFilters(field, doc, parent = null) {
 
 export function draftLinkSearch(model, key) {
 	if (!model || !key) throw unsupported();
-	const doc = { ...model.linkContext, doctype: model.doctype, name: model.docName || "" };
-	for (const f of model.fields) doc[f.fieldname] = coerceOut(f);
+	const doc = draftParentDoc(model);
 	let field, row;
 	if (key.startsWith("f:")) {
 		field = model.fields.find((f) => f.fieldname === key.slice(2));
 	} else {
-		const [, ti, ri, name] = key.split(":");
+		// "t:{table index}:{row __key}:{fieldname}[:form]". The row is found by its
+		// __key, not its position: a row removed above it moves it up a place.
+		const [, ti, rk, name] = key.split(":");
 		const table = model.tables[Number(ti)];
-		field = table?.columns.find((c) => c.fieldname === name);
-		row = table?.rows[Number(ri)];
+		// A grid cell or a field of the row form: both search with its meta.
+		field = table && allRowFields(table).find((c) => c.fieldname === name);
+		row = table?.rows.find((r) => r.__key != null && String(r.__key) === rk);
 		if (!row) throw unsupported();
 		row = {
 			...row,

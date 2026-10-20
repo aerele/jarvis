@@ -1,6 +1,9 @@
 <script setup>
 import { ref, computed, onBeforeUnmount } from "vue";
 import { isRequiredBlank, lineItemSummary } from "@/lib/actionSummary";
+import { draftParentDoc } from "@/lib/draftApply";
+import { AUTO_OPEN_MAX, savedRowsByName } from "@/lib/draftTables";
+import { changeDisplay, clipText, rowExtraValues } from "@/lib/rowForm";
 
 const props = defineProps({
 	model: { type: Object, required: true },
@@ -26,16 +29,50 @@ const fields = computed(() =>
 		return isUpdate.value ? set || f.changed : set || isRequiredBlank(f);
 	})
 );
+// A main field's change, worded as a child row's is (one formatter).
+const shownChange = (f, v) =>
+	changeDisplay({ fieldtype: f.control === "check" ? "Check" : "" }, v);
 // Each table through the card's own summary, so a cell ERPNext calculated (#647)
 // reads the same here as on the card.
-const tables = computed(() =>
-	(props.model.tables || [])
+const tables = computed(() => {
+	// The record as the rules read it, so a field a rule hides is judged as on the card.
+	const parent = draftParentDoc(props.model);
+	return (props.model.tables || [])
 		.filter((t) => (t.rows || []).length)
-		.map((t) => ({
-			...t,
-			view: lineItemSummary(t, (props.model.computed || {})[t.fieldname]),
-		}))
-);
+		.map((t) => {
+			const saved = savedRowsByName(t);
+			const extras = t.rows.map((r, ri) => {
+				const items = rowExtraValues(t, r, parent, {
+					index: ri,
+					parenttype: props.model.doctype || "",
+					parentfield: t.fieldname,
+					parent: props.model.docName || "",
+					savedRow: (r.__name && saved.get(r.__name)) || null,
+				});
+				return {
+					changed: items.filter((x) => x.changed),
+					also: items.filter((x) => !x.changed),
+				};
+			});
+			// Changed rows open by default only when few changed, as on the card.
+			const openChanged = extras.filter((e) => e.changed.length).length <= AUTO_OPEN_MAX;
+			return {
+				...t,
+				view: lineItemSummary(t, (props.model.computed || {})[t.fieldname]),
+				// Per row, the fields the grid does not show (its full form): those that
+				// differ from the saved row first, then the other filled values.
+				extras: extras.map((e) => ({ ...e, open: openChanged && e.changed.length > 0 })),
+			};
+		});
+});
+// "Row 7: 1 changed", "Row 7: 2 more fields", or both.
+function moreSummary(extra) {
+	const parts = [];
+	if (extra.changed.length) parts.push(`${extra.changed.length} changed`);
+	if (extra.also.length)
+		parts.push(`${extra.also.length} more ${extra.also.length === 1 ? "field" : "fields"}`);
+	return parts.join(", ");
+}
 
 // Resizable width - drag the left (inner) edge. Mirrors Resizer.vue's behaviour:
 // clamp to [min, max], snap to the default within +/-10px, persist to localStorage.
@@ -156,10 +193,12 @@ onBeforeUnmount(() => {
 							</dt>
 							<dd :class="{ 'dp-changed': f.changed }">
 								<template v-if="f.changed"
-									><span class="dp-old">{{ f.orig || "(empty)" }}</span>
-									<span class="dp-arrow">-&gt;</span>
+									><span class="dp-old" :title="shownChange(f, f.orig)">{{
+										clipText(shownChange(f, f.orig))
+									}}</span>
+									<span class="dp-arrow"> -&gt; </span>
 									<span class="dp-new">{{
-										f.value || "(empty)"
+										shownChange(f, f.value)
 									}}</span></template
 								>
 								<template v-else>{{ f.value || "-" }}</template>
@@ -190,6 +229,39 @@ onBeforeUnmount(() => {
 								</tbody>
 							</table>
 						</div>
+						<template v-for="(extra, ri) in t.extras" :key="'x' + ri">
+							<details
+								v-if="extra.changed.length || extra.also.length"
+								class="dp-rowmore"
+								:open="extra.open"
+							>
+								<summary>Row {{ ri + 1 }}: {{ moreSummary(extra) }}</summary>
+								<dl v-if="extra.changed.length" class="dp-rowmore-list">
+									<template v-for="x in extra.changed" :key="x.fieldname">
+										<dt>{{ x.label }}</dt>
+										<dd class="dp-changed">
+											<span class="dp-old" :title="x.was">{{
+												clipText(x.was)
+											}}</span>
+											<span class="dp-arrow"> -&gt; </span>
+											<span class="dp-new">{{ x.now }}</span>
+										</dd>
+									</template>
+								</dl>
+								<div
+									v-if="extra.changed.length && extra.also.length"
+									class="dp-rowmore-also"
+								>
+									Also on this row
+								</div>
+								<dl v-if="extra.also.length" class="dp-rowmore-list">
+									<template v-for="x in extra.also" :key="x.fieldname">
+										<dt>{{ x.label }}</dt>
+										<dd>{{ x.value }}</dd>
+									</template>
+								</dl>
+							</details>
+						</template>
 						<div v-if="t.view.computedLabels.length" class="dp-computed-note">
 							{{ t.view.computedLabels.join(", ") }}: calculated by ERPNext, saved
 							when you confirm.
@@ -353,6 +425,7 @@ onBeforeUnmount(() => {
 }
 .dp-fields dd {
 	margin: 0;
+	overflow-wrap: anywhere;
 	font-size: 13.5px;
 	color: var(--text);
 }
@@ -410,6 +483,41 @@ onBeforeUnmount(() => {
 .dp-grid td.dp-computed {
 	color: var(--text-2);
 	font-variant-numeric: tabular-nums;
+}
+/* A row's filled fields outside the grid (its full form). */
+.dp-rowmore {
+	margin-top: 6px;
+	font-size: 12.5px;
+	color: var(--text-2);
+}
+.dp-rowmore summary {
+	cursor: pointer;
+	color: var(--text-3);
+	padding: 2px 0;
+}
+.dp-rowmore summary:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 2px;
+	border-radius: 4px;
+}
+.dp-rowmore-list {
+	display: grid;
+	grid-template-columns: minmax(100px, max-content) minmax(0, 1fr);
+	gap: 4px 12px;
+	margin: 6px 0 0 14px;
+}
+.dp-rowmore-list dt {
+	color: var(--text-3);
+}
+.dp-rowmore-list dd {
+	margin: 0;
+	color: var(--text);
+	overflow-wrap: anywhere;
+}
+.dp-rowmore-also {
+	margin: 8px 0 0 14px;
+	font-size: 11.5px;
+	color: var(--text-3);
 }
 .dp-computed-note {
 	padding: 6px 0 0;

@@ -34,7 +34,16 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 
-from jarvis.chat import admission, empty_reply_recovery, finalize, prepare, pump, settlement, txn
+from jarvis.chat import (
+	admission,
+	connector_focus,
+	empty_reply_recovery,
+	finalize,
+	prepare,
+	pump,
+	settlement,
+	txn,
+)
 from jarvis.chat import api as chat_api
 from jarvis.chat import turn_state as ts
 from jarvis.chat.error_taxonomy import classify_error_text
@@ -487,6 +496,33 @@ class TestPanel4Chokepoint(_PipelineCase):
 # --------------------------------------------------------------------------- #
 # 3. PANEL 5 — kill during preparing -> recovering -> queued -> fresh prepare
 # --------------------------------------------------------------------------- #
+
+
+class TestPrepareBindsConnectorFocus(_PipelineCase):
+	"""The pump is the default transport, so its prepare must bind the turn's
+	connector focus (and clear a stale one) or the tool gate is inert."""
+
+	_FOCUS = {"key": "microsoft_learn", "label": "Microsoft Learn"}
+
+	def _prepare(self, rid, context, *, stale_focus=None):
+		conv = self._mk_conv()
+		self.addCleanup(connector_focus.clear, conv)
+		connector_focus.bind_turn(conv, stale_focus)
+		seed = self._mk_msg(conv, content="hi")
+		payload = json.dumps({"context": context})
+		self._mk_turn(conv, rid, seed, "queued", version=1, reserved=1, dispatch_payload=payload)
+		with self._gateway(_FakeSess()), self._pump_on():
+			prepare.run_prepare(rid, self._target)
+		self.assertEqual(self._state(rid), "ready")
+		return conv
+
+	def test_focused_turn_binds_the_focus(self):
+		conv = self._prepare("pmp_focus_on", {"focus_connector": self._FOCUS})
+		self.assertEqual(connector_focus.current(conv), self._FOCUS)
+
+	def test_unfocused_turn_clears_a_stale_focus(self):
+		conv = self._prepare("pmp_focus_off", {"page": "triggers"}, stale_focus=self._FOCUS)
+		self.assertIsNone(connector_focus.current(conv))
 
 
 class TestPanel5PrepareKill(_PipelineCase):
@@ -3536,6 +3572,35 @@ class TestStopRunOnAResentTurn(_EmptyReplyCase):
 		with patch.object(empty_reply_recovery, "resent_turn", side_effect=RuntimeError("db hiccup")):
 			sess = self._stop(conv, rid)
 		sess.chat_abort.assert_called_once_with(f"sess-{rid}", rid)
+
+	def test_a_late_stop_leaves_the_next_running_turn_alone(self):
+		# #448: a Stop for run A that arrives after A ended must not flag or abort turn B,
+		# the continuation now streaming in the same chat.
+		from jarvis.chat.turn_message_binding import clear_run_cancel
+
+		conv, _amsg = self._ready("pmp_448_a", None, "done")
+		seed = self._human_msg(conv, "and the next one")
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		self._mk_turn(conv, "pmp_448_b", seed, "streaming", assistant_message=amsg, version=6, pump_epoch=7)
+		sess = MagicMock()
+
+		@contextmanager
+		def checkout(_url):
+			yield sess
+
+		try:
+			with (
+				patch.object(pump, "pump_lifecycle_configured", return_value=True),
+				patch.object(pump, "ensure_pump"),
+				patch.object(pump, "lpush_wake"),
+				patch("jarvis.chat.agent_session_pool.checkout", checkout),
+			):
+				out = chat_api.stop_run(conv, "pmp_448_a")
+		finally:
+			clear_run_cancel(conv)
+		self.assertFalse(out["ok"])
+		self.assertEqual(int(self._val("pmp_448_b", "cancel_requested")), 0)
+		sess.chat_abort.assert_not_called()
 
 
 class TestEmptyReplyOutcome(_EmptyReplyCase):
