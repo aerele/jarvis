@@ -32,11 +32,18 @@ const showBody = computed(
 	() => view.value.track || view.value.stats.length || view.value.notes.length || alertText.value
 );
 const showFoot = computed(() => view.value.footer || view.value.buttons.length);
-// One calm sentence for screen readers. Never the ticking timer or the row count.
-const announcement = computed(() =>
-	state.value === undefined
-		? ""
-		: [view.value.pill.text, view.value.notes[0]?.text].filter(Boolean).join(". ")
+// One calm sentence for screen readers, spoken only when the STATUS changes after the card has
+// shown its first answer. Opening a thread must stay silent (one sentence per card would bury
+// the page), and the ticking timer or row count never speaks.
+const announcement = ref("");
+watch(
+	() => state.value?.status,
+	(status, before) => {
+		if (status === undefined || before === undefined) return;
+		announcement.value = [view.value.pill.text, view.value.notes[0]?.text]
+			.filter(Boolean)
+			.join(". ");
+	}
 );
 const downloadLabel = computed(() =>
 	__("Download {0}", [state.value?.format ? `.${state.value.format}` : ""]).trim()
