@@ -8,6 +8,8 @@ import re
 
 import frappe
 from frappe import _
+from frappe.utils.response import build_response
+from werkzeug.wrappers import Response
 
 from jarvis.chat.share_projection import safe_value
 from jarvis.tools._export.document.sanitizer import sanitize_letterhead
@@ -67,7 +69,7 @@ def read_file(conversation, url: str):
 	_refuse()
 
 
-def download(doc) -> None:
+def download(doc) -> Response:
 	content = doc.get_content()
 	mime = mimetypes.guess_type(doc.file_name or "")[0] or "application/octet-stream"
 	frappe.local.response.update(
@@ -79,7 +81,10 @@ def download(doc) -> None:
 			"display_content_as": "inline" if mime in _INLINE else "attachment",
 		}
 	)
-	frappe.local.response_headers["X-Content-Type-Options"] = "nosniff"
+	# Frappe v15 has no local.response_headers; return the HTTP response directly.
+	response = build_response("download")
+	response.headers["X-Content-Type-Options"] = "nosniff"
+	return response
 
 
 def static_html(content: bytes | str, conversation: str, *, dark: bool = False) -> str:

@@ -164,25 +164,6 @@ _unrelated(
 )
 
 _unrelated(
-	"jarvis.chat.connectors_api",
-	"Connector ownership/admin gates and current-user OAuth state, not chat sharing.",
-	"""
-    add_connector
-    connect_oauth
-    delete_connector
-    disconnect_oauth
-    list_connectors
-    mcp_oauth_callback
-    oauth_signin_status
-    probe_connector_auth
-    set_allowed_actions
-    set_oauth_client_credentials
-    test_connector
-    update_connector
-    """,
-)
-
-_unrelated(
 	"jarvis.chat.custom_skills_api",
 	"Custom skill owner/reviewer/sharing model is separate from conversation grants.",
 	"""
@@ -538,14 +519,6 @@ _unrelated(
 )
 
 _unrelated(
-	"jarvis.network_check",
-	"Signed network-check challenge callback; identifiers do not grant conversation access.",
-	"""
-    answer
-    """,
-)
-
-_unrelated(
 	"jarvis.oauth.api",
 	"Admin/current-user OAuth capture and connection state, independent of transcript grants.",
 	"""
@@ -623,20 +596,6 @@ _unrelated(
 	"Workspace readiness checks; no transcript lookup.",
 	"""
     run_chat_preflight
-    """,
-)
-
-_unrelated(
-	"jarvis.private_network",
-	"Operator network setup and workspace connectivity, not chat content.",
-	"""
-    check_admin_connection
-    connection_test_status
-    network_status
-    private_setup_targets
-    reserve_host
-    save_public_address
-    start_connection_test
     """,
 )
 

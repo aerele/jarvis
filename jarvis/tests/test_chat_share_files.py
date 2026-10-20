@@ -1,6 +1,8 @@
 """Recipient file resolution must never use the recipient's ERP permissions."""
 
 import json
+from types import SimpleNamespace
+from unittest import TestCase
 from unittest.mock import patch
 
 import frappe
@@ -206,12 +208,13 @@ class TestSharedFiles(SharingCase):
 				patch("frappe.has_permission", return_value=True),
 				patch.object(File, "get_content", return_value=b"file bytes"),
 			):
-				self.download(url)
+				response = self.download(url)
 			self.assertEqual(frappe.local.response.content_type, expected)
 			self.assertEqual(frappe.local.response.display_content_as, disposition)
-			# Frappe emits response_headers at the HTTP boundary; a nested
-			# response['headers'] value alone never reaches the browser.
-			self.assertEqual(frappe.local.response_headers.get("X-Content-Type-Options"), "nosniff")
+			self.assertEqual(response.mimetype, expected)
+			self.assertEqual(response.get_data(), b"file bytes")
+			self.assertTrue(response.headers["Content-Disposition"].startswith(disposition))
+			self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
 
 	def test_html_preview_is_static_sanitized_and_secret_scrubbed(self):
 		from frappe.core.doctype.file.file import File
@@ -270,3 +273,26 @@ class TestSharedFiles(SharingCase):
 				get_shared_file(self.conversation, "/private/files/share.html")
 			with as_user(user), self.assertRaises(frappe.PermissionError):
 				get_shared_canvas(self.message, "artifact")
+
+
+class TestDownloadResponse(TestCase):
+	def test_download_without_v16_response_headers(self):
+		from jarvis.chat.shared_files import download
+
+		headers = getattr(frappe.local, "response_headers", None)
+		previous_response = dict(frappe.local.response)
+		try:
+			if headers is not None:
+				del frappe.local.response_headers
+			doc = SimpleNamespace(file_name="shared.html", get_content=lambda: b"<p>fixture bytes</p>")
+			response = download(doc)
+			self.assertEqual(response.get_data(), b"<p>fixture bytes</p>")
+			self.assertEqual(response.mimetype, "text/html")
+			self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+			self.assertIn("attachment", response.headers["Content-Disposition"])
+			self.assertIn("shared.html", response.headers["Content-Disposition"])
+		finally:
+			frappe.local.response.clear()
+			frappe.local.response.update(previous_response)
+			if headers is not None:
+				frappe.local.response_headers = headers
