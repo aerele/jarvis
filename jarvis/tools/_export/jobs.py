@@ -19,7 +19,7 @@ from frappe.utils import add_to_date, cint, escape_html, get_datetime
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._export.clock import now_datetime
 from jarvis.tools._export.saved_queries import fingerprint
-from jarvis.tools._export.streaming import ExportLimit, prepare
+from jarvis.tools._export.streaming import ExportLimit, expected_total, prepare, too_many_rows
 
 DOCTYPE = "Jarvis Export Job"
 ACTIVE = ("queued", "running", "paused")
@@ -664,6 +664,7 @@ def _execute(job, token, directory):
 	name = job.name
 	db = watchdog = None
 	handed_back = False
+	count_detail = "count:skipped"
 	started = time.monotonic()
 	try:
 		with impersonate(job.owner):
@@ -701,6 +702,13 @@ def _execute(job, token, directory):
 			watchdog.start()
 			try:
 				watchdog.check()
+				total, count_detail = _count_expected(db, prepared, row_cap)
+				# A kill that ended the count (cancel, pause, time cap) must not fall through to the stream.
+				watchdog.check()
+				if total and total > row_cap:
+					raise too_many_rows(row_cap)
+				if total:
+					_safely("count", name, _set_progress, name, token, total_rows=total)
 				result = write(
 					prepared,
 					db.stream_rows(prepared.sql, prepared.params),
@@ -753,8 +761,19 @@ def _execute(job, token, directory):
 			_safely("tail", name, db.close)
 		_safely("tail", name, _remove_directory, directory)
 		if not handed_back:
-			_safely("tail", name, _record_telemetry, name)
+			_safely("tail", name, _record_telemetry, name, detail=count_detail)
 		_after(name)
+
+
+def _count_expected(db, prepared, row_cap):
+	"""``(expected rows or None, telemetry detail)``. The count never fails the export: a timeout or
+	an error just means no percentage. The detail is an outcome code only, never SQL or a message."""
+	raw = db.count_rows(prepared.sql, prepared.params)
+	if db.count_error is not None:
+		detail = f"count:{db.count_error}"
+	else:
+		detail = "count:ok" if raw is not None else "count:none"
+	return expected_total(raw, prepared.limit, row_cap), detail
 
 
 def _elapsed(started):
@@ -774,7 +793,7 @@ def _remove_directory(directory):
 		shutil.rmtree(directory)
 
 
-def _record_telemetry(name):
+def _record_telemetry(name, detail=None):
 	if frappe.db.exists(DOCTYPE, name):
 		from jarvis.telemetry import record_export_event
 
@@ -785,6 +804,7 @@ def _record_telemetry(name):
 			finished.rows_written or 0,
 			mode="background",
 			outcome=finished.status,
+			detail=detail,
 		)
 
 

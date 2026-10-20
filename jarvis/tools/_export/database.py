@@ -13,6 +13,9 @@ import pymysql
 from jarvis.tools._export.clock import now_datetime
 from jarvis.tools._export.streaming import ExportLimit
 
+# How long the pre-stream row count may run. A server-side limit, not a client timeout.
+COUNT_SECONDS = 3
+
 
 def connection_settings():
 	"""Use the PyMySQL adapter even when the bench's main driver is mysqlclient."""
@@ -37,6 +40,8 @@ class MariaDBStream:
 		self.connection = None
 		self.control = None
 		self.query_id = None
+		# Why the last count_rows gave no number: a MySQL errno, an exception class name, or None.
+		self.count_error = None
 
 	def open(self):
 		self.connection = pymysql.connect(**self.settings)
@@ -54,6 +59,31 @@ class MariaDBStream:
 		cursor = self.connection.cursor(pymysql.cursors.SSDictCursor)
 		cursor.execute(sql, params)
 		return iter(cursor)
+
+	def count_rows(self, sql, params, seconds=COUNT_SECONDS):
+		"""Count the rows ``sql`` returns, or None if that takes over ``seconds`` or fails.
+
+		The count wraps the exact SQL the stream runs, so permissions, GROUP BY, DISTINCT and the
+		LIMIT all apply. ``SET STATEMENT`` scopes the limit to this one query; the session limit
+		stays. ``seconds`` is code, never user input; 0 would mean no limit in MariaDB."""
+		seconds = int(seconds)
+		if seconds < 1:
+			raise ValueError("The count needs a time limit of at least one second.")
+		self.count_error = None
+		statement = (
+			f"SET STATEMENT max_statement_time={seconds} FOR "
+			f"SELECT COUNT(*) FROM ({sql}) AS jarvis_export_count"
+		)
+		try:
+			with self.connection.cursor() as cursor:
+				cursor.execute(statement, params)
+				return int(cursor.fetchone()[0])
+		except pymysql.err.MySQLError as exc:
+			code = exc.args[0] if exc.args and isinstance(exc.args[0], int) else type(exc).__name__
+			self.count_error = code
+		except (ValueError, TypeError) as exc:
+			self.count_error = type(exc).__name__
+		return None
 
 	def cancel_own_query(self):
 		if self.query_id is not None and self.connection.open:

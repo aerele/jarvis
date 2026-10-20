@@ -210,6 +210,21 @@ class _Range:
 		raise IndexError(index)
 
 
+def too_many_rows(row_cap):
+	"""The one "too large" refusal for a match past the row cap, whether the count or the stream finds it."""
+	return ExportLimit("too large", f"More than {row_cap:,} rows match. Narrow or split the filters.")
+
+
+def expected_total(count, limit, row_cap):
+	"""The rows ``write`` will keep out of a raw ``count`` of the SQL (which already carries the
+	cap + 1 LIMIT): None when there is nothing to show, else the spec's top-N when it applies."""
+	if not count:
+		return None
+	if limit is not None and limit <= row_cap:
+		return min(count, limit)
+	return count
+
+
 def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress):
 	"""Bounded memory; no Frappe/metadata/permission calls after entering this function.
 
@@ -229,9 +244,7 @@ def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress):
 				limited = True
 				break
 			if count >= row_cap:
-				raise ExportLimit(
-					"too large", f"More than {row_cap:,} rows match. Narrow or split the filters."
-				)
+				raise too_many_rows(row_cap)
 			masking.mask_rows(prepared.columns, [row], prepared.masked)
 			values = [row.get(c.key) for c in prepared.columns]
 			if fmt == "xlsx":
