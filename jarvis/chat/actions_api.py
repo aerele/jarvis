@@ -248,6 +248,65 @@ def _rule_fields(child_doctype: str, parent_doctype, form_fields: list[dict], co
 	]
 
 
+# A batch of fetch_from lookups is bounded, so a huge pasted table cannot become a scan.
+_RULE_VALUES_MAX_LINKS = 500
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def rule_values(doctype: str, table: str, links: str | dict | None = None) -> dict:
+	"""The hidden values a child row's rules read that Desk fetches from a link
+	(``fetch_from``, e.g. ``is_fixed_asset`` from the Item), so the card evaluates
+	its rules as Desk does before the record is saved. ``links`` maps a row's link
+	field to the values the card's rows hold; the answer maps each link field to
+	``{link value: {rule field: fetched value}}``. Read through ``frappe.get_list``,
+	so the user's permissions on the linked doctype apply, and only source fields the
+	user may read are fetched. Display only: the card never sends these values."""
+	doctype = (doctype or "").strip()
+	if not doctype or not frappe.db.exists("DocType", doctype):
+		return {"ok": False, "reason": _("unknown doctype")}
+	if not frappe.has_permission(doctype, "read"):
+		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
+	table_df = frappe.get_meta(doctype).get_field(table or "")
+	if not table_df or table_df.fieldtype != "Table" or not table_df.options:
+		return {"ok": False, "reason": _("unknown table")}
+	links = frappe.parse_json(links) if isinstance(links, str) else links
+	if not isinstance(links, dict):
+		return {"ok": False, "reason": _("links must be an object")}
+	child = table_df.options
+	# link field -> {rule field: source field on the linked doctype}
+	sources: dict[str, dict[str, str]] = {}
+	for rf in _child_table_spec(child, doctype, table)["rule_fields"]:
+		link, _sep, src = (rf.get("fetch_from") or "").partition(".")
+		if link and src:
+			sources.setdefault(link, {})[rf["fieldname"]] = src
+	child_meta = frappe.get_meta(child)
+	out: dict[str, dict] = {}
+	for link, wanted in sources.items():
+		link_df = child_meta.get_field(link)
+		values = links.get(link)
+		if not link_df or link_df.fieldtype != "Link" or not link_df.options or not isinstance(values, list):
+			continue
+		names = list(dict.fromkeys(str(v) for v in values if v not in (None, "")))[:_RULE_VALUES_MAX_LINKS]
+		target = frappe.get_meta(link_df.options)
+		levels = _readable_permlevels(link_df.options)
+		readable = {}
+		for rule, src in wanted.items():
+			src_df = target.get_field(src)
+			if src_df and _card_field_ok(src_df, levels):
+				readable[rule] = src
+		if not names or not readable:
+			continue
+		rows = frappe.get_list(
+			link_df.options,
+			filters={"name": ["in", names]},
+			fields=["name", *dict.fromkeys(readable.values())],
+			limit_page_length=len(names),
+		)
+		out[link] = {r.name: {rule: r.get(src) for rule, src in readable.items()} for r in rows}
+	return {"ok": True, "values": out}
+
+
 def _drop_empty_sections(fields: list[dict]) -> list[dict]:
 	"""Remove the breaks that would frame nothing: a tab with no field before the
 	next tab, a section with no field before the next section or tab, and a column

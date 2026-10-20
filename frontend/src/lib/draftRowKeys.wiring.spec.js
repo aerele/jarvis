@@ -53,3 +53,17 @@ describe("ChatView focus for the row form", () => {
 		expect(block).toMatch(/tabindex="-1"/);
 	});
 });
+
+describe("ChatView fetches the rule values Desk fetches from a link", () => {
+	it("after building the card's tables, and after a link is picked", () => {
+		expect(between(src, "async function buildDraftModel(", "\nfunction ")).toMatch(
+			/await fillRuleValues\(a\.doctype, tables\);/
+		);
+		expect(between(src, "function pickDraftLink(", "\nfunction ")).toMatch(
+			/fillRuleValues\(draftPanel\.value\.doctype, draftPanel\.value\.tables\)/
+		);
+		expect(between(src, "async function fillRuleValues(", "\nfunction ")).toMatch(
+			/api\.ruleValues\(doctype, t\.fieldname, links\)[\s\S]*applyRuleValues\(t, r\.values\)/
+		);
+	});
+});

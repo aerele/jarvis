@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { allRowFields, coerceRow } from "./draftApply";
+import { typedRow } from "./rowForm";
 import {
 	applyAutoOpen,
+	applyRuleValues,
 	autoOpenRows,
 	blankRow,
 	buildDraftTable,
@@ -10,6 +12,7 @@ import {
 	openChangedRows,
 	parentDefaults,
 	rowChangeSets,
+	ruleFetchLinks,
 	savedRowFor,
 	toggleLabel,
 	toggleParts,
@@ -293,6 +296,47 @@ describe("buildDraftTable: the hidden fields the row form's rules read (rule_fie
 			verb: "create",
 		});
 		expect(empty.rows[0].__rule).toEqual({ is_fixed_asset: "0", stock_kind: "" });
+	});
+
+	it("ruleFetchLinks asks for the links whose rule values are neither fetched nor saved", () => {
+		const t = build({
+			proposed: [{ name: "r1" }, { item_code: "C", qty: 3 }, { item_code: "C" }],
+		});
+		// r1 keeps its saved item A, so its saved value stands; the new rows need C, once
+		expect(ruleFetchLinks(t)).toEqual({ item_code: ["C"] });
+		t.rows[0].item_code = "D"; // moved off the saved item
+		expect(ruleFetchLinks(t)).toEqual({ item_code: ["D", "C"] });
+	});
+
+	it("a fetched value is the row's rule value, read as current until the link changes", () => {
+		const t = buildDraftTable({
+			fieldname: "items",
+			spec: withRules,
+			proposed: [{ item_code: "C", qty: 1 }],
+			verb: "create",
+		});
+		const flagOf = (row) =>
+			typedRow(allRowFields(t), row, { ruleFields: t.ruleFields }).is_fixed_asset;
+		expect(flagOf(t.rows[0])).toBe(0); // the default, before the fetch
+		applyRuleValues(t, { item_code: { C: { is_fixed_asset: 1 }, Z: { is_fixed_asset: 1 } } });
+		expect(t.rows[0].__rule.is_fixed_asset).toBe(1);
+		expect(t.rows[0].__ruleSrc).toEqual({ item_code: "C" });
+		expect(flagOf(t.rows[0])).toBe(1);
+		expect(ruleFetchLinks(t)).toEqual({});
+		t.rows[0].item_code = "E"; // another item, not fetched yet: the default again
+		expect(flagOf(t.rows[0])).toBe(0);
+		expect(ruleFetchLinks(t)).toEqual({ item_code: ["E"] });
+	});
+
+	it("rule values never reach the save payload", () => {
+		const t = buildDraftTable({
+			fieldname: "items",
+			spec: withRules,
+			proposed: [{ item_code: "C", qty: 1 }],
+			verb: "create",
+		});
+		applyRuleValues(t, { item_code: { C: { is_fixed_asset: 1 } } });
+		expect(coerceRow(t, t.rows[0], "create")).not.toHaveProperty("is_fixed_asset");
 	});
 
 	it("a value the agent proposed for a rule field is used", () => {

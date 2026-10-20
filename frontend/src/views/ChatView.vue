@@ -4619,11 +4619,13 @@ import {
 } from "@/lib/draftApply";
 import {
 	applyAutoOpen,
+	applyRuleValues,
 	blankRow,
 	buildDraftTable,
 	markMissingRows,
 	openChangedRows,
 	parentDefaults,
+	ruleFetchLinks,
 	toggleLabel,
 	toggleParts,
 } from "@/lib/draftTables";
@@ -7669,6 +7671,7 @@ async function buildDraftModel(a) {
 		});
 		if (table) tables.push(table);
 	}
+	await fillRuleValues(a.doctype, tables);
 	// A Prompt-autonamed DocType (e.g. Server Script) carries its document name as a
 	// proposed "name" field, not a real DocField, so it never lands in `fields`.
 	// Capture it here so applyDraft sends it as `name` (the backend folds it into
@@ -7816,6 +7819,23 @@ async function onDraftLink(key, target, doctype, ev) {
 		}
 	}
 }
+// The hidden values the rows' rules read that Desk fetches from a link (is_fixed_asset
+// from the Item), one call per table, so the card shows and requires what Desk would
+// before the record is saved. A failure keeps the defaults.
+async function fillRuleValues(doctype, tables) {
+	await Promise.all(
+		(tables || []).map(async (t) => {
+			const links = ruleFetchLinks(t);
+			if (!Object.keys(links).length) return;
+			try {
+				const r = await api.ruleValues(doctype, t.fieldname, links);
+				if (r && r.ok) applyRuleValues(t, r.values);
+			} catch (e) {
+				// the rules read the defaults, as before
+			}
+		})
+	);
+}
 function pickDraftLink(setter, item) {
 	draftLinkGeneration++;
 	if (
@@ -7826,6 +7846,8 @@ function pickDraftLink(setter, item) {
 	}
 	setter(item.value);
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
+	// A row's new link (an item) can change what its rules read: fetch it, as Desk does.
+	if (draftPanel.value) fillRuleValues(draftPanel.value.doctype, draftPanel.value.tables);
 }
 function closeDraftLink(ev) {
 	const generation = draftLinkGeneration;

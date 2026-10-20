@@ -1726,6 +1726,51 @@ class TestChildRowFormReview(_ChildRowFormHelpers, FrappeTestCase):
 		items = self._with_child_meta(secret, "Purchase Invoice Item", "Purchase Invoice", "items")
 		self.assertNotIn("is_fixed_asset", {f["fieldname"] for f in items["rule_fields"]})
 
+	def _fixed_asset_item(self):
+		from jarvis.tests._erpnext_masters import ensure_item
+
+		code = ensure_item("_JV Rule Values Asset", is_stock_item=0)
+		self.addCleanup(lambda: frappe.delete_doc("Item", code, force=True, ignore_permissions=True))
+		# Straight to the column: an asset item would otherwise need an Asset Category.
+		frappe.db.set_value("Item", code, "is_fixed_asset", 1, update_modified=False)
+		return code
+
+	def test_rule_values_fetch_what_desk_fetches_from_the_linked_item(self):
+		# A Purchase Invoice row's asset fields depend on the hidden is_fixed_asset,
+		# which Desk fetches from the Item: a create card asks rule_values for it.
+		from jarvis.chat.actions_api import rule_values
+
+		code = self._fixed_asset_item()
+		r = rule_values("Purchase Invoice", "items", {"item_code": [code, code, "_JV no such item", ""]})
+		self.assertTrue(r["ok"])
+		self.assertEqual(r["values"], {"item_code": {code: {"is_fixed_asset": 1}}})
+
+	def test_rule_values_refuse_what_they_cannot_answer(self):
+		from unittest.mock import patch
+
+		from jarvis.chat.actions_api import rule_values
+
+		self.assertFalse(rule_values("Purchase Invoice", "no_such_table", {})["ok"])
+		self.assertFalse(rule_values("Purchase Invoice", "items", "[1]")["ok"])
+		with patch("frappe.has_permission", return_value=False), self.assertRaises(frappe.PermissionError):
+			rule_values("Purchase Invoice", "items", {})
+
+	def test_rule_values_skip_a_source_field_the_user_may_not_read(self):
+		from unittest.mock import patch
+
+		from jarvis.chat.actions_api import rule_values
+
+		code = self._fixed_asset_item()
+		src = frappe.get_meta("Item").get_field("is_fixed_asset")
+		before = src.permlevel
+		src.permlevel = 1
+		try:
+			with patch("jarvis.chat.actions_api._readable_permlevels", return_value={0}):
+				r = rule_values("Purchase Invoice", "items", {"item_code": [code]})
+		finally:
+			src.permlevel = before
+		self.assertEqual(r, {"ok": True, "values": {}})
+
 	def test_the_rule_field_names_come_from_eval_and_bare_rules(self):
 		from jarvis.chat.actions_api import _rule_field_names
 
