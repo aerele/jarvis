@@ -82,4 +82,19 @@ describe("AddConnectorDialog: initial scope", () => {
 		expect(wrapper.find(".scope-control").exists()).toBe(false);
 		expect(wrapper.text()).not.toContain("Who can use it");
 	});
+
+	it("the caption follows the selection", async () => {
+		const shared = await openDialog("Shared");
+		expect(shared.text()).toContain("Everyone in your workspace can ask Jarvis to use this.");
+		const mine = await openDialog("Personal");
+		expect(mine.text()).toContain("Only you can use this.");
+		expect(mine.text()).not.toContain("Everyone in your workspace");
+	});
+
+	it("a plain user sees no caption", async () => {
+		window.is_system_manager = false;
+		const wrapper = await openDialog("Shared");
+		expect(wrapper.text()).not.toContain("Only you can use this.");
+		expect(wrapper.text()).not.toContain("Everyone in your workspace");
+	});
 });

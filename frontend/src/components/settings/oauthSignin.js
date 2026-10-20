@@ -48,7 +48,7 @@ export const nav = {
 	},
 };
 
-export function signIn(target, { label, agentName } = {}) {
+export function signIn(target, { label, agentName, onTabClosed } = {}) {
 	const w = openInterimTab(label, agentName);
 	let settled = false;
 	let stopPolling = null;
@@ -73,6 +73,7 @@ export function signIn(target, { label, agentName } = {}) {
 		target,
 		w,
 		resolveFn,
+		onTabClosed,
 		() => settled,
 		(stop) => {
 			stopPolling = stop;
@@ -87,7 +88,7 @@ export function signIn(target, { label, agentName } = {}) {
 	return promise;
 }
 
-async function runSignIn(target, w, resolve, isSettled, setStopPolling) {
+async function runSignIn(target, w, resolve, onTabClosed, isSettled, setStopPolling) {
 	let name = target;
 	if (typeof target === "function") {
 		try {
@@ -129,7 +130,7 @@ async function runSignIn(target, w, resolve, isSettled, setStopPolling) {
 		return;
 	}
 	w.location.href = res.url;
-	setStopPolling(pollUntilDone(name, w, res.started_at, resolve));
+	setStopPolling(pollUntilDone(name, w, res.started_at, resolve, onTabClosed));
 }
 
 // One centered line, no external asset - this tab only exists for the few
@@ -211,7 +212,7 @@ async function checkSignInStatus(name, startedAt) {
 // status request is still in flight. After the tab closes the poll carries on
 // for CLOSED_GRACE_MS, and re-checks at once when the user comes back to this
 // window. Only a grace period with no connection reports "closed".
-function pollUntilDone(name, w, startedAt, resolve) {
+function pollUntilDone(name, w, startedAt, resolve, onTabClosed) {
 	const deadline = Date.now() + POLL_TIMEOUT_MS;
 	let stopped = false;
 	let timer = null;
@@ -246,7 +247,10 @@ function pollUntilDone(name, w, startedAt, resolve) {
 			return;
 		}
 		if (w && w.closed) {
-			if (closedAt === null) closedAt = Date.now();
+			if (closedAt === null) {
+				closedAt = Date.now();
+				if (onTabClosed) onTabClosed(); // the caller can show "Waiting for ..."
+			}
 			if (Date.now() - closedAt >= CLOSED_GRACE_MS) {
 				finish({ status: "closed" });
 				return;

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
+import { signIn } from "@/components/settings/oauthSignin";
+import * as api from "@/api";
 
 // Register card copy: step 2 names the right place to create the app.
 vi.mock("@/api", () => ({
@@ -26,7 +28,8 @@ vi.mock("frappe-ui", () => ({
 	Button: {
 		name: "Button",
 		props: ["label", "variant", "size", "loading", "disabled", "theme"],
-		template: `<button>{{ label }}</button>`,
+		emits: ["click"],
+		template: `<button :data-label="label" @click="$emit('click')">{{ label }}</button>`,
 	},
 	FormControl: { name: "FormControl", props: ["label", "modelValue"], template: `<input />` },
 	Badge: { name: "Badge", props: ["label"], template: `<span>{{ label }}</span>` },
@@ -51,7 +54,15 @@ const entry = (name, help_url) => ({
 	accepts_key: false,
 	help_url,
 });
+const signinEntry = (name) => ({
+	name,
+	key: name.toLowerCase(),
+	auth: "dcr",
+	category: "dev",
+	description: name,
+});
 const catalog = [
+	signinEntry("Sentry"),
 	entry("Google Drive", "https://console.cloud.google.com/apis/credentials"),
 	entry("Slack", "https://api.slack.com/apps"),
 ];
@@ -81,5 +92,49 @@ describe("AddConnectorDialog: register card step 2", () => {
 		const wrapper = await opened("Slack");
 		expect(wrapper.text()).toContain("Create the app in Slack's developer settings");
 		expect(wrapper.text()).not.toContain("organisation");
+	});
+});
+
+describe("AddConnectorDialog: sign-in card", () => {
+	beforeEach(() => {
+		window.is_system_manager = true;
+		vi.clearAllMocks();
+	});
+	afterEach(() => {
+		delete window.is_system_manager;
+	});
+
+	it("reassures before the vendor consent that only switched-on actions are used", async () => {
+		const wrapper = await opened("Sentry");
+		expect(wrapper.text()).toContain(
+			"can only use the actions you switch on next, even if Sentry asks for more."
+		);
+	});
+
+	it("says Waiting for the app once the vendor tab has closed, until the result is in", async () => {
+		api.addConnector.mockResolvedValue({ name: "row-1", scope: "Personal" });
+		let tabClosed;
+		let settle;
+		signIn.mockImplementation(async (target, opts) => {
+			await target();
+			tabClosed = opts.onTabClosed;
+			return new Promise((resolve) => {
+				settle = resolve;
+			});
+		});
+		const wrapper = await opened("Sentry");
+		await wrapper.find('button[data-label="Sign in with Sentry"]').trigger("click");
+		await flushPromises();
+		expect(wrapper.text()).toContain("Finish signing in to Sentry in the other tab.");
+
+		tabClosed();
+		await flushPromises();
+		expect(wrapper.text()).toContain("Waiting for Sentry…");
+		expect(wrapper.text()).not.toContain("Finish signing in");
+
+		settle({ status: "closed" });
+		await flushPromises();
+		expect(wrapper.text()).toContain("Sign-in window was closed.");
+		expect(wrapper.text()).not.toContain("Waiting for Sentry");
 	});
 });

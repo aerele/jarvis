@@ -70,17 +70,26 @@
 					</div>
 				</template>
 
-				<div v-if="isAdmin && !isEdit" class="flex items-center justify-between gap-3">
-					<span class="text-xs text-ink-gray-5">Who can use it</span>
-					<TabButtons
-						v-if="!scopeLocked"
-						:buttons="SCOPE_OPTIONS"
-						:model-value="form.scope"
-						@update:model-value="onScopeChange"
-					/>
-					<span v-else class="text-sm text-ink-gray-7">
-						{{ form.scope === "Shared" ? "Everyone" : "Only me" }}
-					</span>
+				<div v-if="isAdmin && !isEdit" class="flex flex-col gap-1">
+					<div class="flex items-center justify-between gap-3">
+						<span class="text-xs text-ink-gray-5">Who can use it</span>
+						<TabButtons
+							v-if="!scopeLocked"
+							:buttons="SCOPE_OPTIONS"
+							:model-value="form.scope"
+							@update:model-value="onScopeChange"
+						/>
+						<span v-else class="text-sm text-ink-gray-7">
+							{{ form.scope === "Shared" ? "Everyone" : "Only me" }}
+						</span>
+					</div>
+					<p class="text-xs text-ink-gray-5">
+						{{
+							form.scope === "Shared"
+								? `Everyone in your workspace can ask ${brand.agentName} to use this.`
+								: "Only you can use this."
+						}}
+					</p>
 				</div>
 
 				<!-- One connect card, its shape picked by cardKind (see the state
@@ -99,7 +108,10 @@
 									<p class="text-xs text-ink-gray-5">Setting up…</p>
 								</template>
 								<template v-else>
-									<p class="text-xs text-ink-gray-5">
+									<p v-if="waitingForVendor" class="text-xs text-ink-gray-5">
+										Waiting for {{ signinAppName }}…
+									</p>
+									<p v-else class="text-xs text-ink-gray-5">
 										Finish signing in to {{ signinAppName }} in the other tab.
 									</p>
 								</template>
@@ -189,7 +201,8 @@
 									<p class="mt-1 text-p-sm text-ink-gray-6">
 										You will be sent to
 										{{ displaySigninHost || "the provider" }} to approve
-										access.
+										access. {{ brand.agentName }} can only use the actions you
+										switch on next, even if {{ signinAppName }} asks for more.
 									</p>
 								</div>
 								<div class="flex justify-end">
@@ -435,16 +448,10 @@
 				</div>
 
 				<div class="flex items-center justify-between gap-3">
-					<div>
-						<p class="text-sm text-ink-gray-6">
-							Choose what {{ brand.agentName }} may do with
-							{{ connectorDisplayName }}. Read-only actions are pre-checked; writes
-							are off by default.
-						</p>
-						<p class="mt-1 text-xs text-ink-gray-5">
-							{{ brand.agentName }} uses only the actions you switch on.
-						</p>
-					</div>
+					<p class="text-sm text-ink-gray-6">
+						Choose what {{ brand.agentName }} may do with {{ connectorDisplayName }}.
+						Read-only actions are pre-checked; writes are off by default.
+					</p>
 					<Button
 						variant="ghost"
 						size="sm"
@@ -612,7 +619,7 @@
 // immutable server side, so a fresh row is what a later press will create);
 // switching scope can no longer discard-and-recreate anything because the
 // toggle isn't even rendered once a row exists - see scopeLocked below.
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import {
 	Badge,
 	Button,
@@ -758,6 +765,8 @@ const isPlaceholder = computed(() =>
 const scopeLocked = computed(() => !!rowName.value);
 
 const signingIn = ref(false);
+// True while the sign-in poll runs on after the vendor tab closed itself.
+const waitingForVendor = ref(false);
 // Set the moment "Sign in with X" is first pressed this dialog session -
 // onClosed() uses it to decide whether a final status check is worth making
 // before deleting an unfinished row (F6: a token can land just after the
@@ -1144,7 +1153,14 @@ async function beginSignIn() {
 	// signIn() calls it synchronously in this same click, after opening the
 	// tab, per the interface contract.
 	const target = rowName.value || (() => createRowForSignIn(gen));
-	const pending = signIn(target, { label: signinAppName.value, agentName: brand.agentName });
+	waitingForVendor.value = false;
+	const pending = signIn(target, {
+		label: signinAppName.value,
+		agentName: brand.agentName,
+		onTabClosed: () => {
+			if (gen === sessionGen) waitingForVendor.value = true;
+		},
+	});
 	currentSignIn = pending;
 	try {
 		const res = await pending;
@@ -1164,7 +1180,10 @@ async function beginSignIn() {
 		if (gen !== sessionGen) return;
 		connectError.value = errMessage(e, "Could not sign in.");
 	} finally {
-		if (gen === sessionGen) signingIn.value = false;
+		if (gen === sessionGen) {
+			signingIn.value = false;
+			waitingForVendor.value = false;
+		}
 		if (currentSignIn === pending) currentSignIn = null;
 	}
 }
@@ -1432,6 +1451,10 @@ function onChange() {
 	show.value = false;
 	emit("change");
 }
+
+onBeforeUnmount(() => {
+	if (currentSignIn) currentSignIn.cancel(); // stop the sign-in poll with the dialog
+});
 
 // Fires on every close - Cancel, the dialog's own X, Escape, a backdrop click
 // and Save (which sets show.value itself) all land here via @after-leave.

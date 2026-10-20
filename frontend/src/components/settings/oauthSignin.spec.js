@@ -158,6 +158,25 @@ describe("oauthSignin", () => {
 		expect(await pending).toEqual({ status: "closed" });
 	});
 
+	it("calls onTabClosed once, when the popup is first seen closed", async () => {
+		api.connectOauth.mockResolvedValue({ ok: true, url: AUTH_URL, started_at: STARTED_AT });
+		api.oauthSigninStatus.mockResolvedValue({ ok: true, connected: false });
+		const onTabClosed = vi.fn();
+
+		const pending = signIn("row-1", { label: "Vendor", onTabClosed });
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(onTabClosed).not.toHaveBeenCalled(); // tab still open
+
+		tab.closed = true;
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(onTabClosed).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(onTabClosed).toHaveBeenCalledTimes(1); // not again on later ticks
+
+		pending.cancel();
+		await pending;
+	});
+
 	it("resolves connected when the sign-in lands during the grace period", async () => {
 		api.connectOauth.mockResolvedValue({ ok: true, url: AUTH_URL, started_at: STARTED_AT });
 		api.oauthSigninStatus.mockResolvedValue({ ok: true, connected: false });
