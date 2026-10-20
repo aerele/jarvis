@@ -1,13 +1,13 @@
 <template>
 	<SettingsPane
 		title="Connectors"
-		:description="`Give ${brand.agentName} access to other tools like GitHub, Linear or Stripe.`"
+		:description="`Give ${brand.agentName} access to apps like GitHub, Linear or Stripe.`"
 	>
 		<template v-if="loaded" #actions>
 			<TabButtons
 				:buttons="tabButtons"
 				:model-value="activeTab"
-				@update:model-value="(v) => (activeTab = v)"
+				@update:model-value="onTabChange"
 			/>
 		</template>
 
@@ -52,7 +52,7 @@
 						variant="solid"
 						iconLeft="plus"
 						label="Add connector"
-						@click="activeTab = 'browse'"
+						@click="openBrowse('Shared')"
 					/>
 				</div>
 
@@ -91,7 +91,7 @@
 						variant="solid"
 						iconLeft="plus"
 						label="Add connector"
-						@click="activeTab = 'browse'"
+						@click="openBrowse('Personal')"
 					/>
 				</div>
 
@@ -212,15 +212,26 @@ const tabButtons = computed(() => [
 // ── add / edit dialog ───────────────────────────────────────────────────────
 const addOpen = ref(false);
 const addScope = ref("Personal");
+// Who the next connector is for, set by the section's Add button that opened
+// Browse. Anything else that lands on Browse (the tab, the composer) is Only me.
+const browseScope = ref("Personal");
 // The Browse card's preset name, or "Custom URL" for the footer's own link -
 // AddConnectorDialog opens straight onto this app, no in-dialog picker.
 const addPreset = ref("");
 const editingRow = ref(null);
 
+function openBrowse(scope) {
+	browseScope.value = scope;
+	activeTab.value = "browse";
+}
+function onTabChange(tab) {
+	browseScope.value = "Personal";
+	activeTab.value = tab;
+}
 function openAddDialog(preset) {
 	editingRow.value = null;
 	addPreset.value = preset;
-	addScope.value = isAdmin ? "Shared" : "Personal";
+	addScope.value = isAdmin ? browseScope.value : "Personal";
 	addOpen.value = true;
 }
 function openAddCustomDialog() {
@@ -250,7 +261,7 @@ function onDialogChange() {
 function applySettingsIntent() {
 	const intent = store.takeSettingsIntent();
 	if (!intent || !intent.browse) return;
-	activeTab.value = "browse";
+	openBrowse("Personal");
 }
 
 // ── row actions ──────────────────────────────────────────────────────────
@@ -262,7 +273,7 @@ async function test(row) {
 		row.last_test_at = new Date().toISOString();
 		if (res && res.ok) {
 			const n = (res.tools || []).length;
-			toast.success(`Connected, ${n} ${n === 1 ? "tool" : "tools"} found`);
+			toast.success(`Connected, ${n} ${n === 1 ? "action" : "actions"} found`);
 		} else {
 			toast.error(
 				errHtml({ message: (res && res.error && res.error.message) || "" }, "Test failed.")
