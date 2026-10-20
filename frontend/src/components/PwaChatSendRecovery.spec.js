@@ -134,6 +134,35 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 describe("actual PWA chat recovery integration", () => {
+	it("renders an export message as its card, not as its placeholder text", async () => {
+		const job = { export_job: "job1", title: "Suppliers", status: "queued", asked_at: null };
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({ ok: true, json: async () => ({ message: { job1: job } }) }))
+		);
+		api.getConversation.mockResolvedValue({
+			conversation: { name: "A", title: "Chat A" },
+			messages: [
+				{
+					name: "m1",
+					role: "assistant",
+					content: "Export started: Suppliers.",
+					tool_call_id: "export:job1:card",
+					tool_result: JSON.stringify({ ok: true, data: { export_job: "job1" } }),
+				},
+			],
+		});
+		try {
+			await open("A");
+			await flushPromises();
+			// The real card, with no component mock: it needs nothing from frappe-ui.
+			expect(wrapper.find(".jv-xcard").exists()).toBe(true);
+			expect(wrapper.text()).not.toContain("Export started:");
+			expect(wrapper.text()).not.toContain("didn't return a reply");
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
 	it("keeps rejected text and files through resync and route remount", async () => {
 		recoveryState.drafts.A = { text: "", attachments: [{ ...file }] };
 		await open();

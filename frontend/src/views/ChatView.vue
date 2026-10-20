@@ -883,7 +883,9 @@
 						<Message
 							v-else
 							variant="row"
-							:html="m.error ? '' : render(m.content, m.streaming)"
+							:html="
+								m.error || exportSummary(m) ? '' : render(m.content, m.streaming)
+							"
 							:attachments="m.canvas"
 							:timestamp="msgTime(m)"
 							:timestampFull="msgTimeFull(m)"
@@ -1031,6 +1033,7 @@
 								     detail. See chat-report-scope.spec.js (upstream/develop
 								     version, restored). -->
 								<ReportScope :tools="reportToolsByTurn[m.name] || []" />
+								<ExportCard v-if="exportSummary(m)" :summary="exportSummary(m)" />
 								<!-- Phase-0 admission (SUXI-4): a cancelled/aged-out queued turn
 								     leaves a durable marker. Render it as a MUTED note, not the
 								     red error alert - the user (or the system) cancelled it; it
@@ -1960,12 +1963,8 @@
 										     height; copying half a reply would be wrong -->
 										<button
 											class="jv-msgbtn"
-											:style="
-												replyBarParts(m).showCopy
-													? null
-													: 'visibility: hidden'
-											"
-											:disabled="!replyBarParts(m).showCopy"
+											:style="canCopyReply(m) ? null : 'visibility: hidden'"
+											:disabled="!canCopyReply(m)"
 											@click="copyReplyMsg(m.name, m.content)"
 											:title="replyCopyLabel(m.name)"
 											:aria-label="replyCopyLabel(m.name)"
@@ -4365,6 +4364,8 @@ import ContextRing from "@/components/chat/ContextRing.vue";
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
 import DraftCell from "@/components/chat/DraftCell.vue";
 import DraftRowBlock from "@/components/chat/DraftRowBlock.vue";
+import ExportCard from "@/components/chat/ExportCard.vue";
+import { exportSummary } from "@/lib/exportJobs.js";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { useConversationActivity } from "@/lib/useConversationActivity";
 import { reportToolsByAssistant } from "@/lib/reportScope";
@@ -8675,6 +8676,10 @@ function copyMsg(id, text) {
 	copyText(text);
 	showCopied(id);
 }
+// An export card message has nothing to copy: its text is only the "Export started" placeholder.
+function canCopyReply(m) {
+	return replyBarParts(m).showCopy && !exportSummary(m);
+}
 // A reply copies as its rendered form (lib/richCopy.js); the tick shows only
 // once the clipboard took it, and a refusal says so instead of staying silent.
 const copyFailedId = ref("");
@@ -11780,6 +11785,7 @@ function onEvent(p) {
 			loadConversation(currentId.value);
 			break;
 		}
+		case "export:changed":
 		case "import:finished": {
 			// Slice B: a background CSV import finished and the bench already
 			// posted the "✓ ..." completion message into this conversation
