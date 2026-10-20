@@ -574,3 +574,28 @@ class TestCollaborationFoundation(SharingCase):
 		doc.flags.jarvis_server_write = True
 		with self.assertRaises(frappe.PermissionError):
 			doc.insert(ignore_permissions=True)
+
+	def test_marked_operator_review_is_refused_before_decision_or_resumption(self):
+		from jarvis.chat import approvals_api
+
+		self.mark_conversation()
+		doc = frappe.get_doc(
+			dict(
+				doctype=approvals_api.APPROVAL,
+				name="collaboration-review-test",
+				conversation=self.conversation,
+				assessment_key="collaboration-review-test",
+				status="Pending",
+			)
+		)
+		with (
+			as_user("Administrator"),
+			patch.object(frappe, "get_doc", return_value=doc),
+			patch("jarvis.chat.operator_review.check_review") as decide,
+			patch.object(approvals_api, "_resume_conversation") as resume,
+			self.assertRaises(frappe.PermissionError),
+		):
+			approvals_api.decide(doc.name, "Review acknowledged")
+		decide.assert_not_called()
+		resume.assert_not_called()
+		self.assertEqual(doc.status, "Pending")

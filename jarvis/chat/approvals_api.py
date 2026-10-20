@@ -738,7 +738,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	doc = frappe.get_doc(APPROVAL, name)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
-	require_legacy_conversation(doc.conversation)
+	require_legacy_conversation(doc.get("conversation"))
 	_refuse_if_wiki_write(doc)
 	if doc.get("assessment_key"):
 		from jarvis.chat.operator_review import check_review
