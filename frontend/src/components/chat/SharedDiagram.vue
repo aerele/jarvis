@@ -24,6 +24,22 @@ watch(
 			mermaid.initialize({
 				startOnLoad: false,
 				securityLevel: "strict",
+				// Preserve Mermaid's default protected keys and prevent message
+				// directives/front-matter changing styles or SVG label rendering.
+				secure: [
+					"secure",
+					"securityLevel",
+					"startOnLoad",
+					"maxTextSize",
+					"suppressErrorRendering",
+					"maxEdges",
+					"themeCSS",
+					"htmlLabels",
+					"flowchart",
+					"fontFamily",
+					"altFontFamily",
+					"themeVariables",
+				],
 				htmlLabels: false,
 				flowchart: { htmlLabels: false },
 				theme: props.dark ? "dark" : "default",
@@ -32,12 +48,16 @@ watch(
 				"shared-diagram-" + ++diagramSequence,
 				props.source || ""
 			);
-			if (gen === generation)
-				svg.value = DOMPurify.sanitize(result.svg, {
+			if (gen === generation) {
+				const clean = DOMPurify.sanitize(result.svg, {
 					USE_PROFILES: { svg: true, svgFilters: true },
 					FORBID_TAGS: ["foreignObject", "a"],
 					FORBID_ATTR: ["href", "xlink:href"],
 				});
+				const document = new DOMParser().parseFromString(clean, "image/svg+xml");
+				if ([...document.querySelectorAll("text")].some((node) => node.textContent.trim()))
+					svg.value = clean;
+			}
 		} catch {
 			/* Keep the escaped source when a diagram is malformed. */
 		}
