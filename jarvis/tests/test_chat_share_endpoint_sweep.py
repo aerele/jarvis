@@ -26,6 +26,23 @@ class SweepBoundary(RuntimeError):
 
 
 @contextmanager
+def enforce_role_checks():
+	"""Run Frappe's real role gate without v15's test-mode bypass."""
+	real_only_for = frappe.only_for
+
+	def only_for(*args, **kwargs):
+		previous = frappe.flags.in_test
+		frappe.flags.in_test = False
+		try:
+			return real_only_for(*args, **kwargs)
+		finally:
+			frappe.flags.in_test = previous
+
+	with patch.object(frappe, "only_for", only_for):
+		yield
+
+
+@contextmanager
 def no_delivery():
 	"""Record attempted effects, then fail closed instead of making a live call."""
 	observed = []
@@ -221,6 +238,44 @@ class TestShareEndpointSweep(SharingCase):
 			with self.subTest(read_control=fn.__name__), self.assertRaises(AssertionError):
 				self.probe("jarvis.chat.sharing.get_shared_conversation", fn, {}, {self.conversation})
 
+	def test_probe_enforces_roles_and_restores_test_mode(self):
+		from jarvis.tests._share_helpers import MANAGER
+
+		for user, allowed, fail_after_gate in (
+			(RECIPIENT, False, False),
+			(MANAGER, True, False),
+			(MANAGER, True, True),
+		):
+			with (
+				self.subTest(user=user, fail_after_gate=fail_after_gate),
+				as_user(user),
+				patch.dict(frappe.flags, {"in_test": True}),
+			):
+				observed_flags = []
+				gate_flags = []
+				completed = []
+				real_only_for = frappe.only_for
+
+				def observed_gate(*args, **kwargs):
+					gate_flags.append(frappe.flags.in_test)
+					return real_only_for(*args, **kwargs)
+
+				def operator_action():
+					observed_flags.append(frappe.flags.in_test)
+					frappe.only_for("System Manager")
+					observed_flags.append(frappe.flags.in_test)
+					completed.append(True)
+					if fail_after_gate:
+						raise SweepBoundary("operator failure")
+
+				with patch.object(frappe, "only_for", observed_gate):
+					self.probe("operator_control", operator_action, {}, {self.conversation})
+					self.assertIs(frappe.only_for, observed_gate)
+				self.assertEqual(observed_flags, [True, True] if allowed else [True])
+				self.assertEqual(gate_flags, [False])
+				self.assertEqual(completed, [True] if allowed else [])
+				self.assertIs(frappe.flags.in_test, True)
+
 	def test_runtime_registry_is_fully_and_explicitly_classified(self):
 		endpoints = all_endpoints()
 		self.assertGreater(len(endpoints), 400)
@@ -402,7 +457,8 @@ class TestShareEndpointSweep(SharingCase):
 				patch.object(frappe.db, "rollback", side_effect=SweepBoundary("rollback")),
 			):
 				try:
-					result = fn(**args)
+					with enforce_role_checks():
+						result = fn(**args)
 				except Exception as exc:
 					error = exc
 			# Always inspect mutations AFTER the call and BEFORE restoring its
