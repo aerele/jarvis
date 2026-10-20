@@ -18,6 +18,8 @@
   "format",
   "status",
   "rows_written",
+  "total_rows",
+  "phase",
   "started_at",
   "finished_at",
   "heartbeat",
@@ -123,6 +125,19 @@
    "label": "Rows Written",
    "read_only": 1,
    "default": "0"
+  },
+  {
+   "fieldname": "total_rows",
+   "fieldtype": "Int",
+   "label": "Total Rows",
+   "read_only": 1
+  },
+  {
+   "fieldname": "phase",
+   "fieldtype": "Select",
+   "label": "Phase",
+   "options": "\nfinalizing",
+   "read_only": 1
   },
   {
    "fieldname": "started_at",

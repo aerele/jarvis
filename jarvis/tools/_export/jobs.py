@@ -38,6 +38,8 @@ STATE_FIELDS = [
 	"title",
 	"status",
 	"rows_written",
+	"total_rows",
+	"phase",
 	"started_at",
 	"finished_at",
 	"expires_at",
@@ -406,11 +408,16 @@ def public(job, files=None):
 		return get_datetime(value).replace(tzinfo=timezone.utc).isoformat() if value else None
 
 	expiry = effective_expiry(job)
+	running = job.status == "running"
 	data = {
 		"export_job": job.name,
 		"title": job.title,
 		"status": job.status,
 		"rows_written": job.rows_written or 0,
+		# The EXPECTED row count while running (0 = unknown), not the ready-only `total` below,
+		# which is the rows actually written. Both fields mean something only while running.
+		"total_rows": (job.total_rows or None) if running else None,
+		"phase": (job.phase or None) if running else None,
 		"started_at": iso(job.started_at),
 		"finished_at": iso(job.finished_at),
 		"expires_at": iso(expiry),
@@ -548,6 +555,8 @@ def dispatch():
 					"attempt_token": token,
 					"heartbeat": now_datetime(),
 					"rows_written": 0,
+					"total_rows": 0,
+					"phase": "",
 					"started_at": None,
 					"error": "",
 				},
@@ -601,6 +610,17 @@ def _heartbeat(name, token):
 		.set(j.heartbeat, now_datetime())
 		.where((j.name == name) & (j.attempt_token == token) & (j.status == "running"))
 	).run()
+	_commit()
+
+
+def _set_progress(name, token, **values):
+	"""Record the running attempt's progress fields. Fenced: a stale token or a row that is no
+	longer running changes nothing. Also a heartbeat."""
+	j = frappe.qb.DocType(DOCTYPE)
+	query = frappe.qb.update(j).set(j.heartbeat, now_datetime())
+	for field, value in values.items():
+		query = query.set(j[field], value)
+	query.where((j.name == name) & (j.attempt_token == token) & (j.status == "running")).run()
 	_commit()
 
 
@@ -870,6 +890,7 @@ def _publish_locked(job, token, path, source, result, permission_key, folder):
 				"finished_at": now_datetime(),
 				"expires_at": add_to_date(now_datetime(), days=days) if days else None,
 				"permission_fingerprint": permission_key,
+				"phase": "",
 				"error": "",
 			},
 		)
