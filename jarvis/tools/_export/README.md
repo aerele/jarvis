@@ -47,6 +47,28 @@ active until the worker acknowledges cancellation, including a cancel/SELECT
 startup race. Wall-clock checks also run every 1,000 rows and after finalization;
 correctness does not depend on how MariaDB charges time spent sending results.
 
+Progress on the card. Before streaming, the attempt counts the exact SQL the stream
+will run (`MariaDBStream.count_rows`): on its own connection, after the watchdog starts
+so a cancel or a site update kills the count too, under a server-side three second limit
+(`SET STATEMENT max_statement_time`, the ten minute session limit is untouched). It counts
+output rows, so permissions, GROUP BY, DISTINCT and the LIMIT all apply, and the result
+becomes `total_rows` (0 means unknown). A count that times out or fails is silent: the
+card keeps its activity bar and row count, with no percentage. A count above the row cap
+ends the attempt "too large" at once, with the stream's own message; when the count does
+not answer, the stream still stops at the cap. Join specs that select the same column name
+from two tables unaliased fail the count (MySQL error 1060) and never get a percentage.
+The card shows rows against `total_rows`, stops at 99% until the file is ready, and shows
+no percentage before the first rows are written or when the count is stale. After the last
+row `write` records `phase = finalizing` before it closes the workbook (the zip) and
+publishes; the card then shows "Finalizing" with an activity bar. `total_rows` and `phase`
+are shown only while the job is running; the ready write clears `phase` and keeps
+`total_rows`. How often the count answers: ready jobs with a count over all ready jobs,
+`SELECT SUM(total_rows > 0) / COUNT(*) FROM `tabJarvis Export Job` WHERE status = 'ready'`.
+The outcome of each count is on the export telemetry line as `detail`: `count:ok`,
+`count:1969` (timed out), `count:1317` (killed), `count:1060` (duplicate column),
+`count:<errno or exception class>`, `count:none`, or `count:skipped` (the attempt ended
+before counting). Never SQL.
+
 Files stay in private attempt directories until complete. Final private files
 have unique names and are attached only to the owner-scoped job. Registration
 uses the supported File `copy_from_existing_file` lifecycle, avoiding a second
