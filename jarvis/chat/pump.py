@@ -2296,6 +2296,12 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 	turn = _read_dispatch_row(run_id)
 	if turn is None or turn["state"] != "ready":
 		return False
+	from jarvis.chat.collaboration import is_collaborative, is_collaborative_session
+
+	if is_collaborative(turn["conversation"]) or is_collaborative_session(
+		_load_dispatch(turn).get("session_key")
+	):
+		return False
 
 	# ready -> dispatching: E is FIRST stamped on the turn here, but the CAS now proves
 	# the SHARD control row still holds epoch E (confirm_dispatching's EXISTS clause,
@@ -2680,6 +2686,11 @@ def _resend_once(ctx: PumpContext, rs: _RunState, reason: str | None = None) -> 
 	unchanged.
 
 	Returns ``_RESENT``, ``_USED`` (already re-sent), ``_NO_PAYLOAD`` or ``_CAS_LOST``."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(rs.conversation):
+		return _NO_PAYLOAD
+
 	stored = empty_reply_recovery.stored_dispatch(frappe.db.get_value(TURN, rs.run_id, "dispatch_payload"))
 	if stored is None:
 		return _NO_PAYLOAD
@@ -2857,6 +2868,10 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 	``dispatch`` returns. Any OTHER exception propagates so the mux applies its
 	integrity class (LOSSY delta -> drop+count+continue; PRECIOUS tool/terminal ->
 	quarantine)."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(rs.conversation):
+		return LaneHandler()
 
 	def on_delta(event_seq: int, text: str, delta: str, shown: str | None = None) -> None:
 		# OARF-6: BATCH the cumulative mirror (relocated _AssistantContentBatcher).
@@ -3044,6 +3059,10 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 	)
 	swept = 0
 	for r in rows:
+		from jarvis.chat.collaboration import is_collaborative
+
+		if is_collaborative(r.get("conversation")):
+			continue
 		run_id = r["run_id"]
 		rs = ctx.runs.get(run_id)
 		awaiting_continuation = bool(rs and rs.yield_deadline is not None)
@@ -3189,6 +3208,11 @@ def _reconcile_on_start(ctx: PumpContext) -> None:
 
 
 def _reconcile_one(ctx: PumpContext, r: dict, active_keys) -> None:
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(r.get("conversation")):
+		return
+
 	run_id = r["run_id"]
 	state = r["state"]
 
@@ -3265,6 +3289,11 @@ def _issue_recovery_tail(ctx: PumpContext, r: dict, session_key: str) -> None:
 	"""OARF-5: issue the missed-terminal ``sessions.get`` recovery-tail RPC WITHOUT
 	blocking and park it (with the OARF-2 watermark window) for ``_poll_recoveries``.
 	Falls back to re-attach when the mux is unavailable."""
+	from jarvis.chat.collaboration import is_collaborative, is_collaborative_session
+
+	if is_collaborative(r.get("conversation")) or is_collaborative_session(session_key):
+		return
+
 	if ctx.mux is None:
 		_reattach_lane(ctx, r)
 		return
@@ -3465,6 +3494,11 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 	in-flight turn (start_seq seeded from the durable ``last_event_seq`` so the
 	watermark stays monotonic across the hop, WP-1B deviation 2). A breaker-open
 	re-adopt is refused (register_run returns None) — stop-readopting (OAR-7)."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(r.get("conversation")):
+		return
+
 	run_id = r["run_id"]
 	owner = frappe.db.get_value(CONV, r["conversation"], "owner")
 	dispatch = _load_dispatch(_read_dispatch_row(run_id) or {})

@@ -72,11 +72,13 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 			frappe.local.response.http_status_code = e.http_status
 			return _error(e.code, e.message)
 
-		plugin_user = frappe.db.get_value(
-			"Jarvis Chat Session",
-			{"session_key": session_key},
-			"user",
-		)
+		from jarvis.chat.collaboration import legacy_session_user
+
+		try:
+			plugin_user = legacy_session_user(session_key)
+		except frappe.PermissionError:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Collaborative chat execution is unavailable on this server.")
 		if not plugin_user:
 			frappe.local.response.http_status_code = 400
 			return _error(
@@ -299,7 +301,10 @@ def _dispatch_from_session(
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
 	from jarvis.chat import agent_run_steps
+	from jarvis.chat.collaboration import require_legacy_session
 	from jarvis.tools import _agent_run_ctx, _delegate_capability
+
+	require_legacy_session(session_key)
 
 	# Expose the caller's session_key to the tool for this dispatch (the LLM
 	# never authors it — it is the delegate's opaque bearer, delivered over the
@@ -3361,6 +3366,11 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	into one to match the reviewer's "native handler" pattern note
 	from the 2026-06-16 punch list.
 	"""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(conversation):
+		return _error("PermissionError", "Collaborative chat execution is unavailable on this server.")
+
 	# S6: a tool body (e.g. run_method -> call_tool) must never re-enter the gate.
 	refuse_in_tool_dispatch()
 	# #493: "Enable Business Wiki" is the operator's only wiki kill switch, so it

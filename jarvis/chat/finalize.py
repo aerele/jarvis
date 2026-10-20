@@ -85,6 +85,10 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		return {"ok": False, "reason": "no turn"}
 	state = turn["state"]
 	conversation = turn["conversation"]
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(conversation):
+		return {"ok": False, "reason": "collaboration_unavailable"}
 	if state == "done":
 		# jarvis#681: the enrichment terminal's CDX-12 backstop. ``run:end`` carried
 		# ``enrichment_pending``, which is the SPA's instruction to hold the subtle

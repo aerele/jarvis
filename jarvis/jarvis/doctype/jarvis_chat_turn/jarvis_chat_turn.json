@@ -38,7 +38,9 @@
   "finalizing_at",
   "done_at",
   "recovery_started_at",
-  "deadline_at"
+  "deadline_at",
+  "actor",
+  "collaboration_binding"
  ],
  "fields": [
   {
@@ -294,6 +296,23 @@
    "label": "Deadline At",
    "search_index": 1,
    "description": "Per-turn soft deadline (dispatch time + TURN_TIMEOUT_SECONDS=600); the stale-scan sweeper marks recovering/errored past it (D2 #27)."
+  },
+  {
+   "fieldname": "actor",
+   "fieldtype": "Data",
+   "label": "Initiating Actor",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "collaboration_binding",
+   "fieldtype": "Link",
+   "label": "Collaboration Binding",
+   "read_only": 1,
+   "no_copy": 1,
+   "options": "Jarvis Chat Binding",
+   "hidden": 1
   }
  ],
  "index_web_pages_for_search": 0,

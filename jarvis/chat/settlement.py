@@ -72,6 +72,10 @@ def invoke_settlement(
 	pump's CAS affects 0 rows and exits via ``lease_lost_exit`` (which rolls back
 	the uncommitted S1 message write). On a win, publishes the authoritative fenced
 	terminal event AFTER commit, then enqueues finalize. Never blocks."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(conversation):
+		return
 
 	def project():
 		"""The settlement transaction: projection + state advance + effects, committed as

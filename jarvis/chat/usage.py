@@ -491,6 +491,10 @@ def record_turn_usage(
 	re-raised, because it has already aborted the caller's whole transaction and only
 	the caller can replay it (finalize's usage effect replays its guard + this call as
 	one unit). Any other usage-accounting bug still must not break chat."""
+	from jarvis.chat.collaboration import is_collaborative_session
+
+	if is_collaborative_session(session_key):
+		return USAGE_RETRY
 	try:
 		# No fresh snapshot here, on purpose: this must not commit before its own commit
 		# below, or the retry paths would commit finalize's uncommitted guard CAS and a

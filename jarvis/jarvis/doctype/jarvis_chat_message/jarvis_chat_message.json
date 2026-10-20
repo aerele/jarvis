@@ -38,7 +38,9 @@
     "reply_duration_ms",
     "model",
     "provider",
-    "hidden"
+    "hidden",
+    "actor",
+    "collaboration_binding"
   ],
   "fields": [
     {
@@ -292,6 +294,23 @@
       "default": 0,
       "read_only": 1,
       "description": "Internal system message (e.g. the post-apply continuation prompt): part of the agent transcript but never rendered in the chat UI (get_conversation filters it out)."
+    },
+    {
+      "fieldname": "actor",
+      "fieldtype": "Data",
+      "label": "Initiating Actor",
+      "read_only": 1,
+      "no_copy": 1,
+      "hidden": 1
+    },
+    {
+      "fieldname": "collaboration_binding",
+      "fieldtype": "Link",
+      "label": "Collaboration Binding",
+      "read_only": 1,
+      "no_copy": 1,
+      "options": "Jarvis Chat Binding",
+      "hidden": 1
     }
   ],
   "permissions": [

@@ -80,6 +80,10 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	"""Prepare one reserved ``queued`` turn for dispatch. Idempotent + re-offer-safe;
 	returns a small status dict. Never raises out (a prepare crash must not kill the
 	pump hop; the deadline watchdog reclaims a stuck ``preparing`` turn)."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(frappe.db.get_value(TURN, run_id, "conversation")):
+		return {"ok": False, "reason": "collaboration_unavailable"}
 	try:
 		result = txn.replay_on_conflict(
 			lambda: _claim_preparing_unit(run_id), label=f"prepare.claim_preparing {run_id}", fresh=True

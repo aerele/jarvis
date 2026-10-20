@@ -96,6 +96,12 @@ def authorize(
 	conversation a conversation-less card adopts (D9)."""
 	if not row or row.kind != kind or (acting and kind == SHEET and row.get("collecting")):
 		return False, None
+	from jarvis.chat.collaboration import is_collaborative
+
+	# C1 rollback boundary, before claim/unseal/dispatch. Covers individual,
+	# batch, typed-confirm and approve-and-run callers, including card adoption.
+	if is_collaborative(row.conversation) or is_collaborative(conversation):
+		return False, None
 	if row.owner_user != approver and not (
 		kind in _SM_KINDS and _SYSTEM_MANAGER in frappe.get_roles(approver)
 	):

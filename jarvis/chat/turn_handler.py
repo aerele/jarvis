@@ -1435,6 +1435,9 @@ def handle_chat_send(payload: dict) -> None:
 	session_create_ms = 0
 
 	conv = frappe.get_doc(CONV, conversation_id)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conv)
 	user = conv.owner
 	# Turn -> triggering-message binding (skill "Approve & run", design §3.3):
 	# stamp THIS turn's triggering message under its conversation at turn start,

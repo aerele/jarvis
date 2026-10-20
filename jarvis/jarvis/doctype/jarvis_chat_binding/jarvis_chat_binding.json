@@ -1,0 +1,92 @@
+{
+ "doctype": "DocType",
+ "name": "Jarvis Chat Binding",
+ "module": "Jarvis",
+ "engine": "InnoDB",
+ "autoname": "hash",
+ "allow_rename": 0,
+ "field_order": [
+  "conversation",
+  "actor",
+  "logical_run_id",
+  "session_key",
+  "share",
+  "grant_revision",
+  "conversation_epoch",
+  "state"
+ ],
+ "fields": [
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "read_only": 1,
+   "no_copy": 1,
+   "options": "Jarvis Conversation",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "actor",
+   "fieldtype": "Data",
+   "label": "Initiating Actor",
+   "read_only": 1,
+   "no_copy": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "logical_run_id",
+   "fieldtype": "Data",
+   "label": "Logical Run ID",
+   "read_only": 1,
+   "no_copy": 1,
+   "reqd": 1,
+   "unique": 1,
+   "length": 32
+  },
+  {
+   "fieldname": "session_key",
+   "fieldtype": "Data",
+   "label": "Session Key",
+   "read_only": 1,
+   "no_copy": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "share",
+   "fieldtype": "Data",
+   "label": "Share Grant",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "grant_revision",
+   "fieldtype": "Int",
+   "label": "Grant Revision",
+   "read_only": 1,
+   "no_copy": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "conversation_epoch",
+   "fieldtype": "Int",
+   "label": "Conversation Epoch",
+   "read_only": 1,
+   "no_copy": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "state",
+   "fieldtype": "Select",
+   "label": "State",
+   "read_only": 1,
+   "no_copy": 1,
+   "options": "Active\nUncertain\nRetired",
+   "default": "Active",
+   "reqd": 1
+  }
+ ],
+ "permissions": [],
+ "track_changes": 0
+}

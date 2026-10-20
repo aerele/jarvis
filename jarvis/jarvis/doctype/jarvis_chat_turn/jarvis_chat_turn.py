@@ -17,4 +17,7 @@ from jarvis.permissions import NotRenamable
 class JarvisChatTurn(NotRenamable, Document):
 	# Minimal controller. run_id is the autoname field (name == run_id), so a
 	# duplicate send collides on primary-key insert - the idempotency guard.
-	pass
+	def validate(self):
+		from jarvis.chat.collaboration import guard_record_binding
+
+		guard_record_binding(self)
