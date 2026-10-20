@@ -2099,6 +2099,7 @@ _RESETTING_RECONNECT_LLM_STATUS = _RESETTING_STATUS + " (reconnect llm)"
 # Deliberately NOT wiped: Jarvis Settings, user settings/usage, agent listings/
 # installations, relay pump, File rows.
 _WIPE_DOCTYPES = (
+	"Jarvis Export Job",
 	# chats
 	"Jarvis Conversation Share",
 	"Jarvis Chat Message",
