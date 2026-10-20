@@ -141,3 +141,138 @@ describe("admin share metadata", () => {
 		w.unmount();
 	});
 });
+
+describe("admin sharing usability and recovery", () => {
+	const button = (w, label) => w.findAll("button").find((b) => b.text() === label);
+	it("retries reading the setting without closing Settings", async () => {
+		mocks.setting.mockRejectedValueOnce(new Error("offline"));
+		const w = mount(SharedChatsPane);
+		await flushPromises();
+		expect(w.get('input[type="checkbox"]').element.disabled).toBe(true);
+		expect(button(w, "Retry setting")).toBeDefined();
+		await button(w, "Retry setting").trigger("click");
+		await flushPromises();
+		expect(mocks.setting).toHaveBeenCalledTimes(2);
+		expect(w.get('input[type="checkbox"]').element.disabled).toBe(false);
+		expect(w.text()).not.toContain("Couldn't read the sharing setting.");
+		w.unmount();
+	});
+	it("retries metadata reads directly and does not present a failure as an empty result", async () => {
+		mocks.list.mockRejectedValueOnce(new Error("offline"));
+		const w = mount(SharedChatsPane);
+		await flushPromises();
+		expect(w.text()).not.toContain("No shared chats match your search.");
+		expect(button(w, "Retry loading shares")).toBeDefined();
+		await button(w, "Retry loading shares").trigger("click");
+		await flushPromises();
+		expect(mocks.list).toHaveBeenCalledTimes(2);
+		expect(w.text()).toContain("Invoice review");
+		expect(w.text()).not.toContain("Couldn't load shared chats.");
+		w.unmount();
+	});
+	it("explains an empty grant list without pretending a search is active", async () => {
+		mocks.list.mockResolvedValue({ rows: [], total: 0 });
+		const w = mount(SharedChatsPane);
+		await flushPromises();
+		expect(w.text()).toContain("No chats have been shared yet.");
+		expect(w.text()).not.toContain("No shared chats match your search.");
+		w.unmount();
+	});
+	it("clears a people search and restores the unfiltered first page", async () => {
+		vi.useFakeTimers();
+		const w = mount(SharedChatsPane);
+		await flushPromises();
+		mocks.list.mockResolvedValueOnce({ rows: [], total: 0 });
+		await w.get('input[type="search"]').setValue("Nobody");
+		await vi.advanceTimersByTimeAsync(250);
+		await flushPromises();
+		expect(w.text()).toContain("No shared chats match your search.");
+		expect(button(w, "Clear search")).toBeDefined();
+		await button(w, "Clear search").trigger("click");
+		await vi.advanceTimersByTimeAsync(250);
+		await flushPromises();
+		expect(w.get('input[type="search"]').element.value).toBe("");
+		expect(mocks.list).toHaveBeenLastCalledWith({ start: 0, page_length: 25, search: "" });
+		expect(w.text()).toContain("Invoice review");
+		w.unmount();
+	});
+	it("keeps the sharing setting usable when only metadata is loading", async () => {
+		mocks.list.mockReturnValue(new Promise(() => {}));
+		const w = mount(SharedChatsPane);
+		await flushPromises();
+		expect(w.get('input[type="checkbox"]').element.disabled).toBe(false);
+		w.unmount();
+	});
+	it("reads authoritative state after a save loses its acknowledgement", async () => {
+		mocks.setting
+			.mockResolvedValueOnce({ enabled: true })
+			.mockResolvedValueOnce({ enabled: false });
+		mocks.set.mockRejectedValueOnce(new Error("response lost after server commit"));
+		const w = mount(SharedChatsPane);
+		await flushPromises();
+		await w.get('input[type="checkbox"]').setValue(false);
+		await flushPromises();
+		expect(mocks.setting).toHaveBeenCalledTimes(2);
+		expect(w.get('input[type="checkbox"]').element.checked).toBe(false);
+		expect(w.text()).not.toContain("The previous setting is kept.");
+		expect(w.text()).toContain("Sharing is off");
+		w.unmount();
+	});
+	it("names the chat and recipient in confirmation, and Cancel performs no revoke", async () => {
+		const w = mount(SharedChatsPane);
+		await flushPromises();
+		await button(w, "Revoke").trigger("click");
+		const confirmation = w.get('[role="group"][aria-label="Revoke access?"]');
+		expect(confirmation.text()).toContain("Reader");
+		expect(confirmation.text()).toContain("Invoice review");
+		await button(w, "Cancel").trigger("click");
+		expect(w.find('[role="group"][aria-label="Revoke access?"]').exists()).toBe(false);
+		expect(mocks.revoke).not.toHaveBeenCalled();
+		w.unmount();
+	});
+	it("disables stale revoke controls immediately while a new search is pending", async () => {
+		vi.useFakeTimers();
+		const w = mount(SharedChatsPane);
+		await flushPromises();
+		await w.get('input[type="search"]').setValue("new recipient");
+		expect(button(w, "Revoke").element.disabled).toBe(true);
+		w.unmount();
+	});
+	it("blocks setting changes when the save and its authoritative recheck both fail", async () => {
+		mocks.set.mockRejectedValueOnce(new Error("timeout"));
+		mocks.setting
+			.mockResolvedValueOnce({ enabled: true })
+			.mockRejectedValueOnce(new Error("offline"));
+		const w = mount(SharedChatsPane);
+		await flushPromises();
+		await w.get('input[type="checkbox"]').setValue(false);
+		await flushPromises();
+		expect(w.get('input[type="checkbox"]').element.disabled).toBe(true);
+		expect(button(w, "Retry setting")).toBeDefined();
+		expect(w.text()).not.toContain("The previous setting is kept.");
+		w.unmount();
+	});
+});
+
+describe("uncertain admin revocation", () => {
+	it("reloads metadata after a lost acknowledgement without claiming a confirmed revoke", async () => {
+		mocks.revoke.mockRejectedValueOnce(new Error("response lost after commit"));
+		const w = mount(SharedChatsPane);
+		await flushPromises();
+		mocks.list.mockResolvedValueOnce({ rows: [], total: 0 });
+		await w
+			.findAll("button")
+			.find((b) => b.text() === "Revoke")
+			.trigger("click");
+		await w
+			.findAll("button")
+			.find((b) => b.text() === "Confirm revoke")
+			.trigger("click");
+		await flushPromises();
+		expect(mocks.list).toHaveBeenCalledTimes(2);
+		expect(w.text()).not.toContain("Invoice review");
+		expect(w.text()).not.toContain("Access revoked.");
+		expect(w.text()).toContain("Couldn't confirm revocation.");
+		w.unmount();
+	});
+});
