@@ -350,7 +350,7 @@ describe("persistent export card", () => {
 			expect([paused.text(), queued.text(), running.get("[role=status]").text()]).toEqual(
 				before
 			);
-			expect(running.get("[role=status]").text()).toBe("Preparing");
+			expect(running.get("[role=status]").text()).toBe("");
 			expect(running.findAll("[role=status]")).toHaveLength(1);
 		});
 
@@ -359,6 +359,84 @@ describe("persistent export card", () => {
 			wrapper.unmount();
 			wrappers.pop();
 			expect(vi.getTimerCount()).toBe(0);
+		});
+	});
+
+	describe("live region: open silently, announce later state changes", () => {
+		const live = (wrapper) => wrapper.get("[role=status]");
+
+		it("announces nothing for a card that opens already in a state", async () => {
+			const cards = [
+				show({ status: "ready", finished_at: at(-3) }, "job1"),
+				show({ status: "running" }, "job2"),
+				show({ status: "failed", error: "Boom." }, "job3"),
+			];
+			await flushPromises();
+			// Mutation killed: announcing the first resolved state fills every card on open.
+			expect(cards.map((wrapper) => live(wrapper).text())).toEqual(["", "", ""]);
+		});
+
+		it("announces nothing for the first answer of a card that was still checking", async () => {
+			fetch.mockResolvedValue(
+				reply({ job1: base({ status: "ready", finished_at: at(-3) }) })
+			);
+			const wrapper = card();
+			expect(live(wrapper).text()).toBe("");
+			await refreshExports();
+			await flushPromises();
+			expect(pill(wrapper).text()).toBe("Ready");
+			expect(live(wrapper).text()).toBe("");
+		});
+
+		it("announces a later status change once, then stays quiet", async () => {
+			const wrapper = show({ status: "queued", started_at: null });
+			exportJobs.job1 = { state: base({ status: "running" }), error: "" };
+			await flushPromises();
+			expect(live(wrapper).text()).toBe("Preparing");
+			exportJobs.job1 = { state: base({ status: "ready", finished_at: at(0) }), error: "" };
+			await flushPromises();
+			expect(live(wrapper).text()).toMatch(/^Ready\. Made at /);
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(live(wrapper).text()).toMatch(/^Ready\. Made at /);
+			expect(wrapper.findAll("[role=status]")).toHaveLength(1);
+		});
+
+		it("says why a job stopped when it moves to too large, too slow or failed", async () => {
+			const wrapper = show({});
+			exportJobs.job1 = {
+				state: base({ status: "too large", error: "Narrow it." }),
+				error: "",
+			};
+			await flushPromises();
+			expect(live(wrapper).text()).toBe("Not exported. Narrow it.");
+			exportJobs.job1 = { state: base({ status: "paused", retries: 1 }), error: "" };
+			await flushPromises();
+			expect(live(wrapper).text()).toMatch(/^Paused\. The site is being updated/);
+		});
+
+		it("does not announce row counts, the ticking clock or a repeat of the same status", async () => {
+			const wrapper = show({ status: "queued", started_at: null });
+			exportJobs.job1 = { state: base({ status: "running" }), error: "" };
+			await flushPromises();
+			await vi.advanceTimersByTimeAsync(12000);
+			exportJobs.job1.state.rows_written = 90000;
+			exportJobs.job1.state.cancel_requested = true;
+			await flushPromises();
+			exportJobs.job1 = {
+				state: base({ status: "running", rows_written: 99000 }),
+				error: "",
+			};
+			await flushPromises();
+			expect(live(wrapper).text()).toBe("Preparing");
+		});
+
+		it("announces the cancelled state once the server confirms Cancel", async () => {
+			fetch.mockResolvedValue(reply(base({ status: "cancelled", finished_at: at(1) })));
+			const wrapper = show({});
+			expect(live(wrapper).text()).toBe("");
+			await wrapper.get('[data-testid="cancel-export"]').trigger("click");
+			await flushPromises();
+			expect(live(wrapper).text()).toMatch(/^Cancelled\. You cancelled this export/);
 		});
 	});
 
