@@ -77,18 +77,22 @@ export function ruleFetchLinks(table) {
 
 // rule_values' answer onto the rows: a fetched value becomes the row's rule value and
 // its link the recorded source, so typedRow treats it as current (and falls back to
-// the default again when the link changes before the next fetch). New objects, not
-// in-place edits, so the row status memo sees the change.
-export function applyRuleValues(table, fetched) {
+// the default again when the link changes before the next fetch). A link that was
+// `asked` but answered nothing (unreadable, not found) keeps the default and is
+// recorded too, so it is not asked again until it changes. New objects, not in-place
+// edits, so the row status memo sees the change.
+export function applyRuleValues(table, fetched, asked = {}) {
 	for (const rf of table.ruleFields || []) {
 		const from = ruleFetchSource(rf);
-		const byLink = from && fetched && fetched[from];
-		if (!byLink) continue;
+		if (!from) continue;
+		const byLink = (fetched && fetched[from]) || {};
+		const wasAsked = new Set(asked[from] || []);
 		for (const row of table.rows || []) {
 			const v = text(row[from]);
 			const got = v && byLink[v];
-			if (!got || !(rf.fieldname in got)) continue;
-			row.__rule = { ...(row.__rule || {}), [rf.fieldname]: got[rf.fieldname] ?? "" };
+			if (got && rf.fieldname in got) {
+				row.__rule = { ...(row.__rule || {}), [rf.fieldname]: got[rf.fieldname] ?? "" };
+			} else if (!wasAsked.has(v)) continue;
 			row.__ruleSrc = { ...(row.__ruleSrc || {}), [from]: v };
 		}
 	}

@@ -7671,7 +7671,11 @@ async function buildDraftModel(a) {
 		});
 		if (table) tables.push(table);
 	}
-	await fillRuleValues(a.doctype, tables);
+	// Bounded: the card shows with the defaults rather than wait on a slow answer.
+	await Promise.race([
+		fillRuleValues(a.doctype, tables),
+		new Promise((resolve) => setTimeout(resolve, RULE_VALUES_WAIT_MS)),
+	]);
 	// A Prompt-autonamed DocType (e.g. Server Script) carries its document name as a
 	// proposed "name" field, not a real DocField, so it never lands in `fields`.
 	// Capture it here so applyDraft sends it as `name` (the backend folds it into
@@ -7820,16 +7824,18 @@ async function onDraftLink(key, target, doctype, ev) {
 	}
 }
 // The hidden values the rows' rules read that Desk fetches from a link (is_fixed_asset
-// from the Item), one call per table, so the card shows and requires what Desk would
-// before the record is saved. A failure keeps the defaults.
-async function fillRuleValues(doctype, tables) {
+// from the Item), one call per table that still needs one, so the card shows and
+// requires what Desk would before the record is saved. A failure keeps the defaults;
+// `isCurrent` drops an answer that lands after its panel was closed or replaced.
+const RULE_VALUES_WAIT_MS = 1500;
+async function fillRuleValues(doctype, tables, isCurrent = () => true) {
 	await Promise.all(
 		(tables || []).map(async (t) => {
 			const links = ruleFetchLinks(t);
 			if (!Object.keys(links).length) return;
 			try {
 				const r = await api.ruleValues(doctype, t.fieldname, links);
-				if (r && r.ok) applyRuleValues(t, r.values);
+				if (r && r.ok && isCurrent()) applyRuleValues(t, r.values, links);
 			} catch (e) {
 				// the rules read the defaults, as before
 			}
@@ -7847,7 +7853,8 @@ function pickDraftLink(setter, item) {
 	setter(item.value);
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
 	// A row's new link (an item) can change what its rules read: fetch it, as Desk does.
-	if (draftPanel.value) fillRuleValues(draftPanel.value.doctype, draftPanel.value.tables);
+	const panel = draftPanel.value;
+	if (panel) fillRuleValues(panel.doctype, panel.tables, () => draftPanel.value === panel);
 }
 function closeDraftLink(ev) {
 	const generation = draftLinkGeneration;

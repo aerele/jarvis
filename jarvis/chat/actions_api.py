@@ -287,7 +287,15 @@ def rule_values(doctype: str, table: str, links: str | dict | None = None) -> di
 		values = links.get(link)
 		if not link_df or link_df.fieldtype != "Link" or not link_df.options or not isinstance(values, list):
 			continue
-		names = list(dict.fromkeys(str(v) for v in values if v not in (None, "")))[:_RULE_VALUES_MAX_LINKS]
+		names = list(
+			dict.fromkeys(
+				str(v) for v in values[:_RULE_VALUES_MAX_LINKS] if isinstance(v, str | int) and v != ""
+			)
+		)
+		# A linked doctype the user cannot read answers nothing, as in Desk, and must not
+		# cost the table's other links their values.
+		if not names or not frappe.has_permission(link_df.options, "read"):
+			continue
 		target = frappe.get_meta(link_df.options)
 		levels = _readable_permlevels(link_df.options)
 		readable = {}
@@ -295,7 +303,7 @@ def rule_values(doctype: str, table: str, links: str | dict | None = None) -> di
 			src_df = target.get_field(src)
 			if src_df and _card_field_ok(src_df, levels):
 				readable[rule] = src
-		if not names or not readable:
+		if not readable:
 			continue
 		rows = frappe.get_list(
 			link_df.options,

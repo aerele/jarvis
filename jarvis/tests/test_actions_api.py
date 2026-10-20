@@ -1771,6 +1771,21 @@ class TestChildRowFormReview(_ChildRowFormHelpers, FrappeTestCase):
 			src.permlevel = before
 		self.assertEqual(r, {"ok": True, "values": {}})
 
+	def test_rule_values_skip_a_linked_doctype_the_user_cannot_read(self):
+		from unittest.mock import patch
+
+		from jarvis.chat.actions_api import rule_values
+
+		code = self._fixed_asset_item()
+		real = frappe.has_permission
+
+		def no_item(doctype, *a, **k):
+			return False if doctype == "Item" else real(doctype, *a, **k)
+
+		with patch("frappe.has_permission", side_effect=no_item):
+			r = rule_values("Purchase Invoice", "items", {"item_code": [code]})
+		self.assertEqual(r, {"ok": True, "values": {}})
+
 	def test_the_rule_field_names_come_from_eval_and_bare_rules(self):
 		from jarvis.chat.actions_api import _rule_field_names
 

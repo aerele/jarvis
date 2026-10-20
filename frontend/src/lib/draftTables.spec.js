@@ -328,6 +328,19 @@ describe("buildDraftTable: the hidden fields the row form's rules read (rule_fie
 		expect(ruleFetchLinks(t)).toEqual({ item_code: ["E"] });
 	});
 
+	it("a link asked but not answered keeps the default and is not asked again", () => {
+		const t = buildDraftTable({
+			fieldname: "items",
+			spec: withRules,
+			proposed: [{ item_code: "SECRET", qty: 1 }],
+			verb: "create",
+		});
+		const asked = ruleFetchLinks(t);
+		applyRuleValues(t, {}, asked);
+		expect(t.rows[0].__rule.is_fixed_asset).toBe("0");
+		expect(ruleFetchLinks(t)).toEqual({});
+	});
+
 	it("rule values never reach the save payload", () => {
 		const t = buildDraftTable({
 			fieldname: "items",
