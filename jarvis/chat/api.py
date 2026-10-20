@@ -2772,8 +2772,8 @@ def send_message(
 	# is viewing, OR {report_name, filters} when the user is on a
 	# query-report route, OR {page: "triggers"|"dashboards"} when the user is
 	# on the Triggers / Dashboards page, OR {focus_connector: {key, label}}
-	# when the composer's connector-focus pill is armed (a soft prompt-level
-	# nudge, not tool gating — MCP_CONNECTORS_PLAN.md). Only forwarded when
+	# when the composer's connector-focus pill is armed (binding for the turn:
+	# jarvis.chat.connector_focus gates the tools too). Only forwarded when
 	# present, for the same not-yet-reloaded worker safety as attachments
 	# above. The narrowing here is deliberate (allow-list, not passthrough) so
 	# a compromised / stale frontend can't smuggle arbitrary keys into the

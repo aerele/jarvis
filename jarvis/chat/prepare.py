@@ -162,6 +162,14 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 
 	context = _load_context(run_id)
 	attachments = _load_attachments(run_id)
+	# Connector focus binds (or clears) for THIS turn, before dispatch: the pump is
+	# the default transport, so a bind only in handle_chat_send would be inert.
+	try:
+		from jarvis.chat import connector_focus
+
+		connector_focus.bind_turn(conversation, connector_focus.focus_of(context))
+	except Exception:
+		frappe.log_error(title="prepare.connector_focus_bind", message=frappe.get_traceback())
 	try:
 		with impersonate(chat_user):
 			ap = turn_handler.assemble_prompt(

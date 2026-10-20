@@ -298,7 +298,7 @@ def _dispatch_from_session(
 	"""
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
-	from jarvis.chat import agent_run_steps
+	from jarvis.chat import agent_run_steps, connector_focus
 	from jarvis.tools import _agent_run_ctx, _delegate_capability
 
 	# Expose the caller's session_key to the tool for this dispatch (the LLM
@@ -388,6 +388,19 @@ def _dispatch_from_session(
 			# Resolve the conversation for this session up front so the
 			# confirmation gate can bind a parked write to it.
 			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
+			# Connector focus (the composer pill): while the running turn is focused,
+			# only that connector's two tools run. Here, not in _run_tool, because
+			# _run_tool also executes a person's card confirm, which focus must not block.
+			focus_refusal = connector_focus.refusal(conv, tool, parsed_args)
+			if focus_refusal:
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=parsed_args,
+					result=focus_refusal,
+					tool_call_id=tool_call_id,
+				)
+				return focus_refusal
 			# STEP TIMELINE (#1062): the run to file this call's step against, taken
 			# from the contract resolved above - BEFORE the tool executes.
 			# record_agent_run flips the run off ``running`` from inside the tool, so

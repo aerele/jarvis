@@ -104,9 +104,10 @@ def list_connector_actions(connector: str | None = None, action: str | None = No
 	return _listing_view(by_key)
 
 
-def _resolve_connectors(connector: str | None) -> dict[str, dict]:
+def _resolve_connectors(connector: str | None, extra_fields: tuple[str, ...] = ()) -> dict[str, dict]:
 	"""The visible, enabled connectors as ``{key: row}``, Personal winning over
-	Shared for a shared key. The single permission-checked query both views use;
+	Shared for a shared key. The single permission-checked query both views use
+	(and the per-turn connected-apps prompt line, which adds ``extra_fields``);
 	nothing downstream re-filters by owner."""
 	filters: dict = {"enabled": 1}
 	if connector:
@@ -114,7 +115,7 @@ def _resolve_connectors(connector: str | None) -> dict[str, dict]:
 	rows = frappe.get_list(
 		CONNECTOR_DOCTYPE,
 		filters=filters,
-		fields=["name", "key", "label", "scope"],
+		fields=["name", "key", "label", "scope", *extra_fields],
 		# "Personal" sorts before "Shared" - the de-dupe below keeps the
 		# FIRST row seen per key, so this ordering is what makes Personal win.
 		order_by="scope asc, label asc",
