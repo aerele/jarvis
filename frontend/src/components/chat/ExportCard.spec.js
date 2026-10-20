@@ -124,6 +124,89 @@ describe("persistent export card", () => {
 				footer: `Started at ${clock(at(-1))}`,
 				buttons: ["Cancel"],
 				track: "indet",
+				bar: "activity",
+			},
+			{
+				name: "running with a count",
+				over: { total_rows: 46214 },
+				pill: ["Preparing", "run"],
+				stats: "18,400 of 46,214 rows \u00b7 40%1:00 so farExcel, 12 columns",
+				footer: `Started at ${clock(at(-1))}`,
+				buttons: ["Cancel"],
+				track: "value",
+				bar: { now: "40", text: "18,400 of 46,214 rows, 40%" },
+				fill: "40%",
+			},
+			{
+				name: "running, all rows written",
+				over: { total_rows: 46214, rows_written: 46214 },
+				pill: ["Preparing", "run"],
+				stats: "46,214 of 46,214 rows \u00b7 99%1:00 so farExcel, 12 columns",
+				buttons: ["Cancel"],
+				track: "value",
+				bar: { now: "99", text: "46,214 of 46,214 rows, 99%" },
+				fill: "99%",
+			},
+			{
+				name: "running, count stale",
+				over: { total_rows: 46214, rows_written: 50000 },
+				pill: ["Preparing", "run"],
+				stats: "50,000 rows written1:00 so farExcel, 12 columns",
+				buttons: ["Cancel"],
+				track: "indet",
+				bar: "activity",
+			},
+			{
+				name: "running, no count",
+				over: { total_rows: null },
+				pill: ["Preparing", "run"],
+				stats: "18,400 rows written1:00 so farExcel, 12 columns",
+				buttons: ["Cancel"],
+				track: "indet",
+				bar: "activity",
+			},
+			{
+				name: "running, counted, 0 rows written",
+				over: { total_rows: 46214, rows_written: 0 },
+				pill: ["Preparing", "run"],
+				stats: "0 rows written1:00 so farExcel, 12 columns",
+				buttons: ["Cancel"],
+				track: "indet",
+				bar: "activity",
+			},
+			{
+				name: "finalizing xlsx",
+				over: { total_rows: 46214, rows_written: 46214, phase: "finalizing" },
+				pill: ["Preparing", "run"],
+				stats: "Finalizing spreadsheet\u202646,214 rows written1:00 so farExcel, 12 columns",
+				buttons: ["Cancel"],
+				track: "indet",
+				bar: "activity",
+				first: "Finalizing spreadsheet\u2026",
+			},
+			{
+				name: "finalizing csv",
+				over: { format: "csv", rows_written: 46214, phase: "finalizing" },
+				pill: ["Preparing", "run"],
+				stats: "Finalizing file\u202646,214 rows written1:00 so farCSV, 12 columns",
+				buttons: ["Cancel"],
+				track: "indet",
+				bar: "activity",
+				first: "Finalizing file\u2026",
+			},
+			{
+				name: "finalizing, cancel requested",
+				over: {
+					total_rows: 46214,
+					phase: "finalizing",
+					cancel_requested: true,
+				},
+				pill: ["Preparing", "run"],
+				stats: "18,400 of 46,214 rows \u00b7 40%1:00 so farExcel, 12 columns",
+				buttons: ["Cancelling..."],
+				track: "value",
+				bar: { now: "40", text: "18,400 of 46,214 rows, 40%" },
+				fill: "40%",
 			},
 			{
 				name: "running on the second attempt",
@@ -275,6 +358,31 @@ describe("persistent export card", () => {
 				const track = wrapper.find(".jv-track");
 				expect(track.exists()).toBe(!!c.track);
 				if (c.track) expect(track.classes().includes("indet")).toBe(c.track === "indet");
+				if (c.fill)
+					expect(wrapper.get(".jv-fill").attributes("style")).toContain(
+						`width: ${c.fill}`
+					);
+				if (c.bar) {
+					expect(track.attributes("role")).toBe("progressbar");
+					expect(track.attributes("aria-label")).toBe("Progress: Supplier list");
+					if (c.bar === "activity") {
+						// An indeterminate bar has no value, and nothing on the card shows a percent.
+						expect(track.attributes("aria-valuenow")).toBeUndefined();
+						expect(track.attributes("aria-valuetext")).toBeUndefined();
+						expect(wrapper.text()).not.toContain("%");
+					} else {
+						expect(track.attributes("aria-valuemin")).toBe("0");
+						expect(track.attributes("aria-valuemax")).toBe("100");
+						expect(track.attributes("aria-valuenow")).toBe(c.bar.now);
+						expect(track.attributes("aria-valuetext")).toBe(c.bar.text);
+					}
+				} else if (c.track === "empty") expect(track.attributes("role")).toBeUndefined(); // the empty queued/paused track
+				if (c.first)
+					expect(wrapper.get(".jv-stats span").text().startsWith(c.first)).toBe(true);
+				if (c.over.phase === "finalizing" && c.over.cancel_requested)
+					expect(wrapper.text()).not.toContain("Finalizing");
+				else if (c.over.phase === "finalizing")
+					expect(wrapper.text()).not.toContain("Ready");
 				// The title and its source line are always there.
 				expect(wrapper.get(".jv-xtitle b").text()).toBe("Supplier list");
 				expect(wrapper.get(".jv-xtitle span").text()).toBe("Export · Supplier");
@@ -385,6 +493,36 @@ describe("persistent export card", () => {
 			await refreshExports();
 			await flushPromises();
 			expect(pill(wrapper).text()).toBe("Ready");
+			expect(live(wrapper).text()).toBe("");
+		});
+
+		it("stays silent while a counted export ticks and finalizes, then announces ready once", async () => {
+			// Opened already running with a count, so the region starts empty and any write shows.
+			const wrapper = show({ total_rows: 46214, rows_written: 18400 });
+			const region = live(wrapper).element;
+			const writes = [];
+			const observer = new MutationObserver(() => writes.push(region.textContent));
+			observer.observe(region, { childList: true, characterData: true, subtree: true });
+			const step = async (change) => {
+				Object.assign(exportJobs.job1.state, change);
+				await flushPromises();
+				expect(live(wrapper).text()).toBe("");
+				expect(writes).toEqual([]);
+			};
+			await step({ rows_written: 25000 });
+			await step({ rows_written: 30000 });
+			// Mutation killed: watching [status, phase] writes "Preparing" here.
+			await step({ phase: "finalizing" });
+			exportJobs.job1 = { state: base({ status: "ready", finished_at: at(0) }), error: "" };
+			await flushPromises();
+			observer.disconnect();
+			expect(writes).toHaveLength(1);
+			expect(writes[0]).toMatch(/^Ready\. Made at /);
+		});
+
+		it("announces nothing for a card that opens already finalizing", async () => {
+			const wrapper = show({ total_rows: 46214, phase: "finalizing" });
+			await flushPromises();
 			expect(live(wrapper).text()).toBe("");
 		});
 
