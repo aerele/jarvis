@@ -2966,8 +2966,8 @@ def send_message(
 	# is viewing, OR {report_name, filters} when the user is on a
 	# query-report route, OR {page: "triggers"|"dashboards"} when the user is
 	# on the Triggers / Dashboards page, OR {focus_connector: {key, label}}
-	# when the composer's connector-focus pill is armed (a soft prompt-level
-	# nudge, not tool gating — MCP_CONNECTORS_PLAN.md), OR {handoff_pages:
+	# when the composer's connector-focus pill is armed (binding for the turn:
+	# jarvis.chat.connector_focus gates the tools too), OR {handoff_pages:
 	# ["payment-calendar"]}
 	# when the web chat can open the Payment Calendar page (a capability, not a
 	# viewing context; see the allow-list below and
