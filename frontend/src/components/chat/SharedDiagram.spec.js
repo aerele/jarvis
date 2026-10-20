@@ -13,6 +13,17 @@ afterEach(() => {
 	vi.clearAllMocks();
 });
 describe("safe shared diagrams", () => {
+	it("shows escaped source when successful sanitization leaves no readable labels", async () => {
+		mocks.render.mockResolvedValueOnce({
+			svg: '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div>Purchase order</div></foreignObject><path d="M0 0h10" /></svg>',
+		});
+		const source = "flowchart LR\n A[<script>untrusted()</script>] --> B";
+		const w = mount(SharedDiagram, { props: { source } });
+		await flushPromises();
+		expect(w.get("pre").text()).toBe(source);
+		expect(w.find("script,svg").exists()).toBe(false);
+		w.unmount();
+	});
 	it("keeps fallback diagram text available to assistive technology", async () => {
 		mocks.render.mockRejectedValueOnce(new Error("malformed"));
 		const w = mount(SharedDiagram, { props: { source: "Unreadable diagram source" } });
