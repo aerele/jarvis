@@ -27,6 +27,23 @@ const cancelBusy = computed(() => pending.value || !!state.value?.cancel_request
 const view = computed(() =>
 	exportCardView(props.summary, entry.value, { now: now.value, cancelling: cancelBusy.value })
 );
+// The activity bar and the counted bar are progress bars; the empty queued/paused track is not.
+// Only the counted bar has a value: an indeterminate bar leaves aria-valuenow out.
+const trackAria = computed(() => {
+	if (view.value.track !== "indet" && view.value.track !== "value") return {};
+	const aria = {
+		role: "progressbar",
+		"aria-label": __("Progress: {0}", [view.value.title]),
+	};
+	if (view.value.track === "indet") return aria;
+	return {
+		...aria,
+		"aria-valuemin": 0,
+		"aria-valuemax": 100,
+		"aria-valuenow": view.value.percent,
+		"aria-valuetext": view.value.progressText,
+	};
+});
 const alertText = computed(() => cancelError.value || entry.value?.error || "");
 const showBody = computed(
 	() => view.value.track || view.value.stats.length || view.value.notes.length || alertText.value
@@ -141,8 +158,16 @@ async function cancel() {
 			<span class="jv-pill" :class="view.pill.tone">{{ view.pill.text }}</span>
 		</div>
 		<div v-if="showBody" class="jv-xbody">
-			<div v-if="view.track" class="jv-track" :class="{ indet: view.track === 'indet' }">
-				<span class="jv-fill"></span>
+			<div
+				v-if="view.track"
+				class="jv-track"
+				:class="{ indet: view.track === 'indet' }"
+				v-bind="trackAria"
+			>
+				<span
+					class="jv-fill"
+					:style="view.track === 'value' ? { width: view.percent + '%' } : null"
+				></span>
 			</div>
 			<div v-if="view.stats.length" class="jv-stats">
 				<span v-for="(stat, i) in view.stats" :key="i"
@@ -362,6 +387,9 @@ async function cancel() {
 	background: var(--x-link);
 	border-radius: 99px;
 }
+.jv-track:not(.indet) .jv-fill {
+	transition: width 0.4s ease;
+}
 .jv-track.indet .jv-fill {
 	width: 30%;
 	animation: jv-xslide 1.4s ease-in-out infinite;
@@ -375,6 +403,9 @@ async function cancel() {
 	}
 }
 @media (prefers-reduced-motion: reduce) {
+	.jv-track:not(.indet) .jv-fill {
+		transition: none;
+	}
 	.jv-track.indet .jv-fill {
 		animation: none;
 		left: 0;
