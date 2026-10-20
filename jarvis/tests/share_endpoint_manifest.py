@@ -70,9 +70,10 @@ _unrelated(
 
 _unrelated(
 	"jarvis.chat.actions_api",
-	"Doctype form metadata is permission-gated and contains no stored conversation.",
+	"Doctype form metadata and linked rule values use ERP read permissions, not chat grants.",
 	"""
     get_doctype_form_meta
+    rule_values
     """,
 )
 
