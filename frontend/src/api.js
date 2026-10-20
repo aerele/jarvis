@@ -337,6 +337,10 @@ export const dismissGreeting = () => call(GR + "dismiss_greeting");
 const AC = "jarvis.chat.actions_api.";
 export const getDoctypeFormMeta = (doctype) => call(AC + "get_doctype_form_meta", { doctype });
 export const loadDocForEdit = (doctype, name) => call(AC + "load_doc", { doctype, name });
+// The hidden values a table's row rules read that Desk fetches from a link
+// (fetch_from): {ok, values: {link field: {link value: {rule field: value}}}}.
+export const ruleValues = (doctype, table, links) =>
+	call(AC + "rule_values", { doctype, table, links: JSON.stringify(links) });
 export const applyAction = (action) =>
 	call(AC + "apply_action", { action: JSON.stringify(action) });
 // Park the confirm card for a create receipt's suggested next step (#621). Same
