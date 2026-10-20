@@ -35,6 +35,9 @@ const POLL_INTERVAL_MS = 2000;
 // a slow vendor round trip doesn't time out on the client while the backend
 // would still have honoured it.
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+// How long to keep polling after the vendor tab closes before calling the
+// sign-in abandoned (the callback page closes its own tab once it lands).
+const CLOSED_GRACE_MS = 8000;
 
 // Navigation goes through this one indirection so a test can replace `go`
 // with a spy - jsdom refuses to let a script assign `window.location.href`
@@ -202,39 +205,64 @@ async function checkSignInStatus(name, startedAt) {
 // Polls until the flow has a verdict, calling `resolve` exactly once. Returns
 // a `stop()` function the caller can invoke to cancel the loop early without
 // resolving anything itself (signIn()'s own .cancel() does that part).
+//
+// A closed vendor tab is a hint, not a verdict: the callback page closes
+// itself right after the token lands, so the tab can read as closed while the
+// status request is still in flight. After the tab closes the poll carries on
+// for CLOSED_GRACE_MS, and re-checks at once when the user comes back to this
+// window. Only a grace period with no connection reports "closed".
 function pollUntilDone(name, w, startedAt, resolve) {
 	const deadline = Date.now() + POLL_TIMEOUT_MS;
 	let stopped = false;
 	let timer = null;
+	let closedAt = null;
+
+	function stop() {
+		stopped = true;
+		if (timer) clearTimeout(timer);
+		document.removeEventListener("visibilitychange", onReturn);
+		window.removeEventListener("focus", onReturn);
+	}
+
+	function finish(result) {
+		stop();
+		closeTab(w);
+		resolve(result);
+	}
+
+	async function onReturn() {
+		if (stopped || document.visibilityState === "hidden") return;
+		const outcome = await checkSignInStatus(name, startedAt);
+		if (stopped) return;
+		if (outcome.done) finish(outcome.result);
+	}
 
 	async function tick() {
 		if (stopped) return;
 		const outcome = await checkSignInStatus(name, startedAt);
 		if (stopped) return;
 		if (outcome.done) {
-			closeTab(w);
-			resolve(outcome.result);
+			finish(outcome.result);
 			return;
 		}
 		if (w && w.closed) {
-			// The callback may have landed a moment before the user closed the
-			// tab - give it one more chance before calling the sign-in abandoned.
-			const second = await checkSignInStatus(name, startedAt);
-			if (stopped) return;
-			resolve(second.done ? second.result : { status: "closed" });
-			return;
+			if (closedAt === null) closedAt = Date.now();
+			if (Date.now() - closedAt >= CLOSED_GRACE_MS) {
+				finish({ status: "closed" });
+				return;
+			}
 		}
 		if (Date.now() >= deadline) {
 			// Leave the tab open - the user may still be mid-flow in it.
+			stop();
 			resolve({ status: "timeout" });
 			return;
 		}
 		timer = setTimeout(tick, POLL_INTERVAL_MS);
 	}
 	timer = setTimeout(tick, POLL_INTERVAL_MS);
+	document.addEventListener("visibilitychange", onReturn);
+	window.addEventListener("focus", onReturn);
 
-	return () => {
-		stopped = true;
-		if (timer) clearTimeout(timer);
-	};
+	return stop;
 }
