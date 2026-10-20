@@ -608,16 +608,94 @@ describe("sections", () => {
 			},
 		});
 
-	it("a plain section is a titled group; a collapsible one a closed details with its heading", () => {
+	const head = (w, label) =>
+		w.findAll(".jv-rowform-sechead").find((b) => b.text().includes(label));
+	it("every titled section folds by its heading; it starts as Desk shows it", () => {
 		const w = mountT({ discount_percentage: "" });
-		const titled = w.findAll("section.jv-rowform-section");
-		expect(titled.map((s) => s.attributes("aria-label"))).toContain("Quantity and Rate");
-		const fold = w.get("details.jv-rowform-section");
-		expect(fold.get("summary").text()).toBe("Discount");
-		expect(fold.element.open).toBe(false);
+		const qty = head(w, "Quantity and Rate");
+		expect(qty.element.tagName).toBe("BUTTON");
+		expect(qty.attributes("aria-expanded")).toBe("true"); // open in Desk
+		expect(w.find('[id$="-qty"]').exists()).toBe(true);
+		const disc = head(w, "Discount");
+		expect(disc.attributes("aria-expanded")).toBe("false"); // Desk's collapsible: closed
+		expect(w.find('[id$="-discount_percentage"]').exists()).toBe(false);
 	});
 	it("a collapsible section holding a value starts open", () => {
 		const w = mountT({ discount_percentage: "5" });
-		expect(w.get("details.jv-rowform-section").element.open).toBe(true);
+		expect(head(w, "Discount").attributes("aria-expanded")).toBe("true");
+		expect(head(w, "Discount").text()).toContain("1 filled");
+	});
+	it("the heading folds and unfolds its section, and controls its body", async () => {
+		const w = mountT({ discount_percentage: "" });
+		const qty = head(w, "Quantity and Rate");
+		const body = qty.attributes("aria-controls");
+		expect(document.getElementById(body) || w.find(`[id="${body}"]`).exists()).toBeTruthy();
+		await qty.trigger("click");
+		expect(qty.attributes("aria-expanded")).toBe("false");
+		expect(w.find('[id$="-qty"]').exists()).toBe(false);
+		await qty.trigger("click");
+		expect(w.find('[id$="-qty"]').exists()).toBe(true);
+	});
+	it("folding a titled section also folds the untitled ones that continue it", async () => {
+		const t4 = {
+			columns: [],
+			formFields: [
+				F("item_code", "Link", { options: "Item" }),
+				{ fieldname: "q", fieldtype: "Section Break", label: "Quantity and Rate" },
+				F("qty", "Float"),
+				{ fieldname: "q2", fieldtype: "Section Break", label: "" },
+				F("rate", "Currency"),
+			],
+		};
+		const w = mount(DraftRowForm, {
+			props: {
+				table: t4,
+				row: reactive({ __key: 1, item_code: "I", qty: "2", rate: "" }),
+				tableIndex: 0,
+				rowIndex: 0,
+				draftLink: { key: "", items: [], open: false, anchor: null },
+			},
+		});
+		const rate = () => w.find('[id$="-rate"]');
+		expect(rate().isVisible()).toBe(true);
+		await head(w, "Quantity and Rate").trigger("click");
+		expect(w.find('[id$="-qty"]').exists()).toBe(false);
+		expect(rate().exists() && rate().isVisible()).toBe(false); // folded with it
+	});
+	it("Expand all / Collapse all, through what the form exposes", async () => {
+		const w = mountT({ discount_percentage: "" });
+		expect(w.vm.allOpen).toBe(false);
+		w.vm.setAllOpen(true);
+		await nextTick();
+		expect(w.find('[id$="-discount_percentage"]').exists()).toBe(true);
+		expect(w.vm.allOpen).toBe(true);
+		w.vm.setAllOpen(false);
+		await nextTick();
+		expect(w.find('[id$="-qty"]').exists()).toBe(false);
+	});
+	it("a section holding a field a failed save named stays open while it is blank", async () => {
+		const row = reactive({ __key: 1, item_code: "I", qty: "", discount_percentage: "" });
+		row.__missing = ["discount_percentage"];
+		const w = mount(DraftRowForm, {
+			props: {
+				table: t,
+				row,
+				tableIndex: 0,
+				rowIndex: 0,
+				draftLink: { key: "", items: [], open: false, anchor: null },
+			},
+		});
+		const disc = head(w, "Discount");
+		expect(disc.attributes("aria-expanded")).toBe("true");
+		await disc.trigger("click");
+		expect(disc.attributes("aria-expanded")).toBe("true"); // cannot be folded away
+		w.vm.setAllOpen(false); // nor does Collapse all fold it
+		await nextTick();
+		expect(disc.attributes("aria-expanded")).toBe("true");
+		row.discount_percentage = "5";
+		await nextTick();
+		expect(disc.attributes("aria-expanded")).toBe("true"); // filled: no sudden fold
+		await disc.trigger("click");
+		expect(disc.attributes("aria-expanded")).toBe("false");
 	});
 });

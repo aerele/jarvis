@@ -262,7 +262,7 @@ export function toggleParts({ missing = 0, changed = 0 }) {
 
 // The same in full words: the toggle's aria-label and its title.
 export function toggleLabel(rowNumber, { missing = 0, changed = 0 }) {
-	let label = `All fields of row ${rowNumber}`;
+	let label = `Edit row ${rowNumber}`;
 	if (missing) label += `, ${missing} required ${missing === 1 ? "field" : "fields"} blank`;
 	if (changed) label += `, ${changed} ${changed === 1 ? "field" : "fields"} changed`;
 	return label;

@@ -1468,6 +1468,28 @@ class TestChildRowForm(_ChildRowFormHelpers, FrappeTestCase):
 		}
 		self.assertTrue(labelled <= meta_labels)
 
+	def test_a_custom_field_is_on_the_card_where_desk_puts_it(self):
+		from frappe.custom.doctype.custom_field.custom_field import create_custom_field
+
+		create_custom_field(
+			"Sales Order Item",
+			{
+				"fieldname": "jv_test_grade",
+				"label": "JV Test Grade",
+				"fieldtype": "Data",
+				"insert_after": "qty",
+			},
+		)
+		try:
+			frappe.clear_cache(doctype="Sales Order Item")
+			names = [f.get("fieldname") for f in self._items()["form_fields"]]
+			self.assertIn("jv_test_grade", names)
+			# Desk's order: right after the field it was inserted after.
+			self.assertEqual(names[names.index("jv_test_grade") - 1], "qty")
+		finally:
+			frappe.delete_doc("Custom Field", "Sales Order Item-jv_test_grade", force=True)
+			frappe.clear_cache(doctype="Sales Order Item")
+
 	def test_a_section_carries_whether_desk_collapses_it(self):
 		breaks = {
 			f["fieldname"]: f for f in self._items()["form_fields"] if f["fieldtype"] == "Section Break"

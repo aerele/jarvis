@@ -588,12 +588,12 @@ describe("the row toggle's text and label", () => {
 		]);
 	});
 	it("the label is in full words, for both, and equals what the title shows", () => {
-		expect(toggleLabel(7, { missing: 0, changed: 0 })).toBe("All fields of row 7");
+		expect(toggleLabel(7, { missing: 0, changed: 0 })).toBe("Edit row 7");
 		expect(toggleLabel(7, { missing: 1, changed: 1 })).toBe(
-			"All fields of row 7, 1 required field blank, 1 field changed"
+			"Edit row 7, 1 required field blank, 1 field changed"
 		);
 		expect(toggleLabel(7, { missing: 2, changed: 3 })).toBe(
-			"All fields of row 7, 2 required fields blank, 3 fields changed"
+			"Edit row 7, 2 required fields blank, 3 fields changed"
 		);
 	});
 });

@@ -4212,6 +4212,7 @@
 														:palette="paletteVars"
 														@close="closeRowForm(ti, r)"
 														@remove="removeDraftRow(ti, ri)"
+														@insert="insertDraftRowBelow(ti, ri)"
 														@link-search="onDraftLink"
 														@link-blur="closeDraftLink"
 														@link-pick="pickDraftLink"
@@ -4251,9 +4252,23 @@
 															:aria-label="rowToggleLabel(t, r, ri)"
 															@click="toggleRowForm(ti, r)"
 														>
-															<span aria-hidden="true">{{
-																r.__open ? "▾" : "▸"
-															}}</span>
+															<!-- Desk's row edit icon: opens the row's full form. -->
+															<svg
+																width="14"
+																height="14"
+																viewBox="0 0 24 24"
+																fill="none"
+																stroke="currentColor"
+																stroke-width="2"
+																stroke-linecap="round"
+																stroke-linejoin="round"
+																aria-hidden="true"
+															>
+																<path
+																	d="M21.17 6.81a1 1 0 0 0-3.99-3.98L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"
+																/>
+																<path d="m15 5 4 4" />
+															</svg>
 															<span
 																v-for="part in toggleParts(
 																	rowStatusFor(t, r, ri)
@@ -7764,6 +7779,14 @@ function addDraftRow(ti) {
 }
 function removeDraftRow(ti, ri) {
 	draftPanel.value.tables[ti].rows.splice(ri, 1);
+}
+// Insert below, from an open row's card (as Desk's row editor): a blank row right
+// after it, opened in its place while the row it came from closes.
+function insertDraftRowBelow(ti, ri) {
+	const t = draftPanel.value.tables[ti];
+	t.rows[ri].__open = false;
+	t.rows.splice(ri + 1, 0, blankRow(t));
+	showRowForm(ti, t.rows[ri + 1]);
 }
 // A click outside the panel closes it only when nothing would be lost. With edits it
 // stays open (the dimmed chat behind it, its card's buttons included, is not a way

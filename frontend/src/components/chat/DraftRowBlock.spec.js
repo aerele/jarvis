@@ -314,7 +314,7 @@ describe("the block is named by its visible title, and ignores an IME Escape", (
 		const title = document.getElementById(section.getAttribute("aria-labelledby"));
 		expect(title).not.toBeNull();
 		expect(section.contains(title)).toBe(true);
-		expect(title.textContent.replace(/\s+/g, " ").trim()).toBe("Row 2 · I1");
+		expect(title.textContent.replace(/\s+/g, " ").trim()).toBe("Editing row 2 · I1");
 	});
 	it("an Escape that is part of an IME composition does not close the form", async () => {
 		const { table } = setup();
@@ -370,7 +370,7 @@ describe("a row number in the summary opens that row and moves focus to its form
 });
 
 describe("the open row's card header", () => {
-	it("has Remove, named by the row, and Done; each asks the panel", async () => {
+	it("has Insert below, Delete (named by the row) and Done; each asks the panel", async () => {
 		const t = reactive(
 			buildDraftTable({
 				fieldname: "items",
@@ -391,8 +391,13 @@ describe("the open row's card header", () => {
 			},
 			global: { stubs: { DraftLinkMenu } },
 		});
+		expect(w.get(".jv-rowform-title").text()).toBe("Editing row 2 · I1");
+		const insert = w.get(".jv-rowform-insert");
+		expect(insert.attributes("aria-label")).toBe("Insert a row below row 2");
+		await insert.trigger("click");
+		expect(w.emitted("insert")).toHaveLength(1);
 		const remove = w.get(".jv-rowform-remove");
-		expect(remove.attributes("aria-label")).toBe("Remove row 2");
+		expect(remove.attributes("aria-label")).toBe("Delete row 2");
 		await remove.trigger("click");
 		expect(w.emitted("remove")).toHaveLength(1);
 		await w.get(".jv-rowform-close").trigger("click");

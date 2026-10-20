@@ -3,7 +3,7 @@
 // form shows for this row, in its sections and columns, with depends_on and its
 // siblings evaluated as the row changes (lib/rowForm.js). The grid shows a few
 // columns; this shows the rest, so nothing the record would save is out of reach.
-import { computed } from "vue";
+import { computed, reactive } from "vue";
 import DraftCell from "@/components/chat/DraftCell.vue";
 import { allRowFields, toPanelRow } from "@/lib/draftApply";
 import { changeDisplay, clipText, rowFormLayout } from "@/lib/rowForm";
@@ -85,28 +85,82 @@ const needed = computed(() => {
 	const names = (props.row.__missing || []).filter((n) => !fillable.has(n) && isBlank(n));
 	return [...new Set(names)].map((n) => labels.get(n) || n);
 });
+// Section folding, as our DocSection: every titled section folds by its heading. A
+// section starts as rowFormLayout says (Desk's open state, opened for what the user must
+// see); the user's own fold wins after that, except a section holding a field a failed
+// save named and still blank, which stays open until it is filled.
+const userOpen = reactive({});
+const byId = computed(() => new Map(sections.value.map((s) => [s.id, s])));
+// An untitled continuation section (`owner`) is open while the titled one it runs on
+// from is.
+const isOpen = (s) => {
+	if (s.owner) return isOpen(byId.value.get(s.owner));
+	return !s.collapsible || s.forceOpen || (userOpen[s.id] ?? s.open);
+};
+function toggleSection(s) {
+	// Held open for a field a failed save named: a fold now would also be remembered
+	// and close it the moment that field is filled, so it changes nothing.
+	if (s.forceOpen) return;
+	userOpen[s.id] = !isOpen(s);
+}
+const foldable = computed(() => sections.value.filter((s) => s.collapsible));
+const allOpen = computed(() => foldable.value.every(isOpen));
+// For the card's Expand all / Collapse all.
+function setAllOpen(open) {
+	for (const s of foldable.value) if (!s.forceOpen) userOpen[s.id] = open;
+}
+// A foldable section's body id (its heading's aria-controls), unique to the row. The
+// section's key goes first, so the id never ends like a field's control id.
+const sectionId = (s) => `jv-rowsec-${s.id}-${props.tableIndex}-${props.row.__key}`;
+defineExpose({ allOpen, canFold: computed(() => foldable.value.length > 0), setAllOpen });
 </script>
 
 <template>
 	<div class="jv-rowform">
-		<!-- A collapsible section (Desk's Section Break "collapsible") is a details
-		     element, its heading the toggle; it starts open when it holds what the user
-		     must see (rowFormLayout). Any other section is a plain titled group. -->
-		<component
-			:is="s.collapsible ? 'details' : 'section'"
+		<!-- Sections as our DocSection: a titled one folds by its heading, a real button
+		     (chevron, title, how many fields are filled); one with no title is a plain
+		     group. Dividers between sections, as Desk draws them. -->
+		<section
 			v-for="s in sections"
+			v-show="!s.owner || isOpen(s)"
 			:key="s.id"
 			class="jv-rowform-section"
-			:open="s.collapsible ? s.open : undefined"
-			:aria-label="s.collapsible ? undefined : s.label || undefined"
+			:class="{ 'is-continued': s.owner }"
+			:aria-labelledby="s.collapsible ? sectionId(s) + '-title' : undefined"
 		>
-			<component
-				:is="s.collapsible ? 'summary' : 'div'"
-				v-if="s.label"
-				class="jv-rowform-section-title"
-				>{{ s.label }}</component
+			<button
+				v-if="s.collapsible"
+				type="button"
+				class="jv-rowform-sechead"
+				:aria-expanded="isOpen(s) ? 'true' : 'false'"
+				:aria-controls="isOpen(s) ? sectionId(s) : undefined"
+				@click="toggleSection(s)"
 			>
-			<div class="jv-rowform-cols">
+				<svg
+					class="jv-rowform-chev"
+					:class="{ 'is-open': isOpen(s) }"
+					width="16"
+					height="16"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="m9 18 6-6-6-6" />
+				</svg>
+				<span :id="sectionId(s) + '-title'" class="jv-rowform-section-title">{{
+					s.label
+				}}</span>
+				<span v-if="s.filled" class="jv-rowform-count">{{ s.filled }} filled</span>
+			</button>
+			<div
+				v-if="isOpen(s)"
+				:id="s.collapsible ? sectionId(s) : undefined"
+				class="jv-rowform-cols"
+			>
 				<div v-for="(col, ci) in s.columns" :key="ci" class="jv-rowform-col">
 					<div
 						v-for="item in col"
@@ -164,7 +218,7 @@ const needed = computed(() => {
 					</div>
 				</div>
 			</div>
-		</component>
+		</section>
 		<p v-for="n in needed" :key="n" class="jv-rowform-needed" role="note">
 			Also needed: {{ n }}
 		</p>
@@ -180,54 +234,69 @@ const needed = computed(() => {
    the record's main fields above it. */
 .jv-rowform {
 	display: grid;
-	gap: 12px;
-	padding: 12px 14px 14px;
+	gap: 0;
+	padding: 4px 14px 10px;
 	background: var(--surface);
 	border-top: 1px solid var(--border);
 }
-/* Sections are divided by a rule, as Desk divides them. */
+/* Sections as our DocSection (components/doc/DocSection.vue): divided by a rule, a
+   titled one folding by its heading. */
 .jv-rowform-section + .jv-rowform-section {
 	border-top: 1px solid var(--border);
-	padding-top: 12px;
 }
-.jv-rowform-section-title {
-	font-size: 12px;
-	font-weight: 650;
-	color: var(--text-2);
-	margin-bottom: 8px;
-	overflow-wrap: anywhere;
+.jv-rowform-section {
+	padding: 4px 0;
 }
-summary.jv-rowform-section-title {
+.jv-rowform-sechead {
+	width: 100%;
 	display: flex;
 	align-items: center;
-	gap: 6px;
-	cursor: pointer;
-	list-style: none;
-	min-height: 28px;
-	margin-bottom: 0;
-}
-summary.jv-rowform-section-title::-webkit-details-marker {
-	display: none;
-}
-summary.jv-rowform-section-title::before {
-	content: "▸";
-	font-size: 10px;
-	color: var(--text-3);
-	transition: transform 0.12s;
-}
-details[open] > summary.jv-rowform-section-title {
-	margin-bottom: 8px;
-}
-details[open] > summary.jv-rowform-section-title::before {
-	transform: rotate(90deg);
-}
-summary.jv-rowform-section-title:hover {
+	gap: 8px;
+	min-height: 40px;
+	padding: 6px 0;
+	background: none;
+	border: none;
 	color: var(--text);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
 }
-summary.jv-rowform-section-title:focus-visible {
+.jv-rowform-sechead:focus-visible {
 	outline: 2px solid var(--cta);
 	outline-offset: 2px;
-	border-radius: 4px;
+	border-radius: 6px;
+}
+.jv-rowform-chev {
+	flex: none;
+	transition: transform 0.2s ease;
+}
+.jv-rowform-chev.is-open {
+	transform: rotate(90deg);
+}
+.jv-rowform-section-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text);
+	overflow-wrap: anywhere;
+}
+.jv-rowform-count {
+	flex: none;
+	font-size: 11.5px;
+	color: var(--text-3);
+	background: var(--surface-1);
+	border-radius: 999px;
+	padding: 1px 8px;
+}
+/* A continuation of the titled section above: its divider starts under the title. */
+.jv-rowform-section.is-continued {
+	margin-left: 24px;
+}
+.jv-rowform-section.is-continued .jv-rowform-cols {
+	padding-left: 0;
+}
+/* Fields sit under the heading's title, past the chevron. */
+.jv-rowform-section .jv-rowform-cols {
+	padding: 6px 0 10px 24px;
 }
 .jv-rowform-cols {
 	display: grid;

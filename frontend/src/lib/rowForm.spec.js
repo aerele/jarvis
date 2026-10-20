@@ -940,6 +940,44 @@ describe("collapsible sections", () => {
 		expect(s.ship_sec).toMatchObject({ collapsible: true, open: false });
 		expect(s["sec-item"]).toMatchObject({ collapsible: false, open: true });
 	});
+	it("a titled section Desk does not collapse also folds, and starts open", () => {
+		const t2 = {
+			columns: [],
+			formFields: [BREAK("Section Break", "Qty", { fieldname: "q" }), F("qty")],
+		};
+		expect(rowFormLayout(t2, { qty: "" }, {})[0]).toMatchObject({
+			collapsible: true,
+			open: true,
+			forceOpen: false,
+		});
+	});
+	it("is held open (forceOpen) for a field a failed save named, until it is filled", () => {
+		expect(by({ ...blank, __missing: ["disc"] }).disc_sec.forceOpen).toBe(true);
+		expect(by({ ...blank, disc: "5", __missing: ["disc"] }).disc_sec.forceOpen).toBe(false);
+		expect(by(blank).disc_sec.forceOpen).toBe(false);
+	});
+	it("an untitled section after a titled one is its continuation: folds, opens and counts with it", () => {
+		const t3 = {
+			columns: [],
+			formFields: [
+				F("item"),
+				BREAK("Section Break", "Discount", { fieldname: "d", collapsible: 1 }),
+				F("disc"),
+				BREAK("Section Break", "", { fieldname: "d2" }),
+				F("disc_amt"),
+			],
+		};
+		const lay = (row) => Object.fromEntries(rowFormLayout(t3, row, {}).map((x) => [x.id, x]));
+		const a = lay({ item: "I", disc: "", disc_amt: "" });
+		expect(a["sec-item"].owner).toBeUndefined(); // before any titled section: plain
+		expect(a.d2.owner).toBe("d");
+		expect(a.d.open).toBe(false);
+		const b = lay({ item: "I", disc: "", disc_amt: "7" }); // a value in the continuation
+		expect(b.d.open).toBe(true);
+		expect(b.d.filled).toBe(1);
+		const c = lay({ item: "I", disc: "", disc_amt: "", __missing: ["disc_amt"] });
+		expect(c.d.forceOpen).toBe(true);
+	});
 	it("one with no label has no heading to open it by, so it is plain", () => {
 		expect(by(blank).bare_sec).toMatchObject({ collapsible: false, open: true });
 	});

@@ -309,15 +309,20 @@ export function rowFormLayout(table, row, parent, ctx = {}) {
 					ruleHolds(f.read_only_depends_on, doc, parent, false, `${at} read_only`)),
 			valued,
 			shown,
+			named: named.has(f.fieldname),
 		});
 	}
-	return sections
+	const out = sections
 		.map((s) => {
-			// Desk shows a collapsible section closed until its rule holds. The card also
-			// opens one that holds what the user must see (a proposed value, a change on
-			// an update, a field a failed save named), so nothing is out of sight. One
-			// with no label has no heading to open it by, so it is a plain section.
-			const folds = s.collapsible && !!s.label;
+			// Every titled section folds (one with no title has no heading to fold by). It
+			// starts as Desk shows it: open, or closed for Desk's collapsible one until its
+			// rule holds. The card also opens one holding what the user must see (a
+			// proposed value, a change on an update, a field a failed save named), so
+			// nothing is out of sight; one holding a named field stays open (forceOpen)
+			// even after the user folds it, until that field is filled.
+			const titled = !!s.label;
+			const deskClosed = s.collapsible && titled;
+			const has = (key) => s.columns.some((c) => c.some((i) => i[key]));
 			return {
 				// A stable key for v-for (not the position, which moves when a section
 				// above is hidden): the break's fieldname, else the section's first field.
@@ -326,11 +331,32 @@ export function rowFormLayout(table, row, parent, ctx = {}) {
 				columns: s.columns
 					.map((c) => (s.visible ? c : c.filter((i) => i.shown)))
 					.filter((c) => c.length),
-				collapsible: folds,
-				open: !folds || s.opensByRule || s.columns.some((c) => c.some((i) => i.shown)),
+				collapsible: titled,
+				open: !deskClosed || s.opensByRule || has("shown"),
+				forceOpen: titled && s.columns.some((c) => c.some((i) => i.named && !i.valued)),
+				// For the grouping below.
+				shows: has("shown"),
+				needs: s.columns.some((c) => c.some((i) => i.named && !i.valued)),
+				filled: s.columns.reduce((n, c) => n + c.filter((i) => i.valued).length, 0),
 			};
 		})
 		.filter((s) => s.columns.length);
+	// An untitled section after a titled one is that section's continuation in Desk
+	// (Quantity and Rate runs on through Rate and Amount): it folds with it (`owner`),
+	// opens it when it holds what the user must see, and counts in its "N filled".
+	let owner = null;
+	for (const s of out) {
+		if (s.collapsible) {
+			owner = s;
+			continue;
+		}
+		if (!owner) continue;
+		s.owner = owner.id;
+		owner.open = owner.open || s.shows;
+		owner.forceOpen = owner.forceOpen || s.needs;
+		owner.filled += s.filled;
+	}
+	return out;
 }
 
 // What the read-only preview lists under a row, for the row-form fields the grid does
