@@ -4,7 +4,7 @@
 // an optional model-written headline. It imposes no opinion on which fields matter
 // or what to total - that is the model's job, since it knows the doctype.
 // Relative, not "@/": actionSummary.test.js runs under plain `node --test`.
-import { isFieldMissing, removedSavedRows } from "./draftApply.js";
+import { checkToYesNo, isFieldMissing, removedSavedRows } from "./draftApply.js";
 
 export function proposedFields(action) {
 	return (action.fields || [])
@@ -43,7 +43,9 @@ export function lineItemSummary(table, computed) {
 			const own = r[c.fieldname] ?? "";
 			const v = computed && computed[i] ? computed[i][c.fieldname] : null;
 			const fill = !!c.read_only && String(own) === "" && v != null && v !== "";
-			cells.push(fill ? computedText(c, v) : own);
+			// A Check column reads Yes/No (a blank stays blank), not "1" / "false".
+			const shown = c.fieldtype === "Check" && String(own) !== "" ? checkToYesNo(own) : own;
+			cells.push(fill ? computedText(c, v) : shown);
 			flags.push(fill);
 			if (fill) filled.add(c.label);
 		}

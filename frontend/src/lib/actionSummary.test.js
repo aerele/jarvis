@@ -111,6 +111,29 @@ test("lineItemSummary: missing cell values render as empty string", () => {
 	assert.equal(s.rows[0].cells[1], "");
 });
 
+test("lineItemSummary: a Check column reads Yes/No, not the raw value", () => {
+	const s = lineItemSummary({
+		fieldname: "items",
+		label: "Items",
+		columns: [
+			{ fieldname: "item_code", label: "Item", fieldtype: "Link" },
+			{ fieldname: "is_free_item", label: "Free", fieldtype: "Check" },
+		],
+		rows: [
+			{ item_code: "A", is_free_item: "1" },
+			{ item_code: "B", is_free_item: "0" },
+			{ item_code: "C", is_free_item: "false" },
+			{ item_code: "D", is_free_item: "Yes" },
+			{ item_code: "E", is_free_item: "" },
+			{ item_code: "F" },
+		],
+	});
+	assert.deepEqual(
+		s.rows.map((r) => r.cells[1]),
+		["Yes", "No", "No", "Yes", "", ""]
+	);
+});
+
 test("summarize(create): kind=create, headline from action.summary, rows from proposed fields", () => {
 	const out = summarize(createModel, createAction);
 	assert.equal(out.kind, "create");
