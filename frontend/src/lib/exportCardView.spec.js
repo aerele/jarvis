@@ -56,6 +56,17 @@ describe("progressOf", () => {
 		});
 	});
 
+	it("never promises a file while the card's own cancel request is in flight", () => {
+		// Mutation killed: ignoring the local flag returns finalizing here.
+		const state = running({ phase: "finalizing" });
+		expect(progressOf(state, true)).toEqual({
+			kind: "value",
+			percent: 40,
+			rows: 18400,
+			total: 46214,
+		});
+	});
+
 	it("never promises a file while a cancel is pending", () => {
 		// Mutation killed: dropping the cancel_requested rule returns finalizing here.
 		const pending = progressOf(running({ phase: "finalizing", cancel_requested: true }));
