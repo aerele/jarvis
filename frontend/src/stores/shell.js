@@ -19,7 +19,51 @@ import { errHtml } from "@/lib/errors";
 import { createBadgeTimer } from "@/lib/badgeTimer";
 import { needsOnboarding } from "@/onboarding/readiness.js";
 
+import { listSharedWithMe } from "@/api/chatSharing";
+
 // ---- state ------------------------------------------------------------------
+const sharedConversations = ref([]),
+	sharedConversationsLoading = ref(false),
+	sharedConversationsError = ref(false);
+const hasUnseenShares = computed(() => sharedConversations.value.some((row) => row.unseen));
+let sharedFlight = null,
+	sharedAgain = false,
+	sharedMutation = 0;
+const sharedOpened = new Map();
+function markSharedSeen(id) {
+	sharedOpened.set(id, ++sharedMutation);
+	sharedConversations.value = sharedConversations.value.map((row) =>
+		row.name === id ? { ...row, unseen: false } : row
+	);
+}
+async function loadSharedConversations({ refresh = false } = {}) {
+	if (sharedFlight) {
+		if (refresh) sharedAgain = true;
+		return sharedFlight;
+	}
+	const mutation = sharedMutation;
+	sharedConversationsLoading.value = true;
+	sharedFlight = (async () => {
+		try {
+			const rows = await listSharedWithMe();
+			sharedConversations.value = (rows || []).map((row) => ({
+				...row,
+				unseen: !!row.unseen && (sharedOpened.get(row.name) || 0) <= mutation,
+			}));
+			sharedConversationsError.value = false;
+		} catch {
+			sharedConversationsError.value = true;
+		} finally {
+			sharedFlight = null;
+			sharedConversationsLoading.value = false;
+			if (sharedAgain) {
+				sharedAgain = false;
+				loadSharedConversations();
+			}
+		}
+	})();
+	return sharedFlight;
+}
 const conversations = ref([]); // [{name,title,last_active_at,starred,message_count}]
 const conversationsLoading = ref(false);
 const currentConvId = ref(null); // written by ChatView only
@@ -749,6 +793,12 @@ function clearUnread(id) {
 // properties: `store.pendingNewChat = false`, `watch(() => store.paletteOpen)`.
 const store = reactive({
 	// state
+	sharedConversations,
+	sharedConversationsLoading,
+	sharedConversationsError,
+	hasUnseenShares,
+	loadSharedConversations,
+	markSharedSeen,
 	conversations,
 	conversationsLoading,
 	currentConvId,
