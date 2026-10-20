@@ -98,11 +98,17 @@ describe("a child row's full form in the draft panel", () => {
 		expect(w.find("#jv-rowform-0-2-free_reason").exists()).toBe(true);
 	});
 
-	it("edits the row itself, and marks a required blank field", async () => {
+	it("edits the row itself; a required blank field has a star, flagged only once a save names it", async () => {
 		const row = reactive({ __key: 2, item_code: "I", discount_percentage: "", warehouse: "" });
 		const w = mountForm(row);
 		await w.find("#jv-rowform-0-2-discount_percentage").setValue("12");
 		expect(String(row.discount_percentage)).toBe("12"); // a number input, as in the grid
+		// ERPNext may fill it on save, so a blank required field alone is not flagged.
+		const label = w.find('label[for="jv-rowform-0-2-warehouse"]');
+		expect(label.find(".jv-rowform-req").exists()).toBe(true);
+		expect(w.find(".jv-rowform-missing").exists()).toBe(false);
+		row.__missing = ["warehouse"];
+		await nextTick();
 		expect(w.find(".jv-rowform-missing label").text()).toContain("warehouse");
 	});
 
@@ -359,7 +365,7 @@ describe("missing fields are named in words", () => {
 		expect(filled.find(".jv-rowform-reqtext").exists()).toBe(false);
 		expect(mountMissing({}).find(".jv-rowform-reqtext").exists()).toBe(false);
 	});
-	it("a required blank field (by meta) says 'Required' too", () => {
+	it("a required blank field (by meta) has its star but no 'Required' note until a save names it", () => {
 		const w = mount(DraftRowForm, {
 			props: {
 				table: {
@@ -372,7 +378,8 @@ describe("missing fields are named in words", () => {
 				draftLink: { key: "", items: [], open: false, anchor: null },
 			},
 		});
-		expect(w.get(".jv-rowform-reqtext").text()).toBe("Required");
+		expect(w.find(".jv-rowform-req").exists()).toBe(true);
+		expect(w.find(".jv-rowform-reqtext").exists()).toBe(false);
 	});
 	it("a rule-hidden field a failed save named is shown, as Required", () => {
 		const w = mountMissing({ __missing: ["asset_category"] });
@@ -531,12 +538,15 @@ describe("'Required' and 'was X' are tied to their control for a screen reader",
 			.split(/\s+/)
 			.map((id) => document.getElementById(id).textContent.trim())
 			.join(" | ");
-	it("a blank required field is aria-required and described by its 'Required' text", () => {
-		const w = mountA11y({ warehouse: "" });
-		const ctl = w.get("#jv-rowform-0-2-warehouse").element;
+	it("a blank required field is aria-required, and described by 'Required' once a save names it", () => {
+		const blank = mountA11y({ warehouse: "" });
+		const ctl = blank.get("#jv-rowform-0-2-warehouse").element;
 		expect(ctl.getAttribute("aria-required")).toBe("true");
-		expect(textOf(ctl)).toBe("Required");
-		w.unmount();
+		expect(ctl.hasAttribute("aria-describedby")).toBe(false);
+		blank.unmount();
+		const named = mountA11y({ warehouse: "", __missing: ["warehouse"] });
+		expect(textOf(named.get("#jv-rowform-0-2-warehouse").element)).toBe("Required");
+		named.unmount();
 	});
 	it("a filled required field is still aria-required, with nothing to describe", () => {
 		const w = mountA11y({ warehouse: "Stores" });
@@ -552,9 +562,9 @@ describe("'Required' and 'was X' are tied to their control for a screen reader",
 		expect(ctl.hasAttribute("aria-describedby")).toBe(false);
 		w.unmount();
 	});
-	it("a changed field is described by its 'was X' text, and by both when also required", () => {
+	it("a changed field is described by its 'was X' text, and by both when a save also named it", () => {
 		const w = mountA11y(
-			{ discount_percentage: "9", warehouse: "" },
+			{ discount_percentage: "9", warehouse: "", __missing: ["warehouse"] },
 			{
 				savedRow: { name: "r1", item_code: "I", discount_percentage: 5, warehouse: "Old" },
 				changedFields: new Set(["discount_percentage", "warehouse"]),

@@ -401,9 +401,11 @@ describe("rowFormLayout gives each section a stable id", () => {
 });
 
 describe("rowStatus", () => {
-	it("counts blank required fields, including ones a failed save named", () => {
+	it("counts only fields a failed save named, while they are still blank", () => {
+		// Required and blank (warehouse, because qty > 0) but no save has failed on it:
+		// ERPNext may fill it on save, so the row is not flagged.
 		const s = rowStatus(table, row({ qty: "3", warehouse: "" }), { update_stock: 1 }, null);
-		expect(s.missing).toBe(1); // warehouse, required because qty > 0
+		expect(s.missing).toBe(0);
 		const named = rowStatus(
 			table,
 			{ ...row({ qty: "0" }), __missing: ["serial_no"] },
@@ -488,10 +490,11 @@ describe("rowStatus", () => {
 		expect([...status("Yes", "0").changedFields]).toEqual(["is_free_item"]);
 		expect(status("false").changed).toBe(1);
 	});
-	it("a blank required Check is still missing", () => {
+	it("a blank required Check a failed save named is missing until it has a value", () => {
 		const t = { columns: [], formFields: [F("flag", "Check", { reqd: 1 })] };
-		expect(rowStatus(t, { flag: "" }, {}, null).missing).toBe(1);
-		expect(rowStatus(t, { flag: "No" }, {}, null).missing).toBe(0);
+		expect(rowStatus(t, { flag: "" }, {}, null).missing).toBe(0);
+		expect(rowStatus(t, { flag: "", __missing: ["flag"] }, {}, null).missing).toBe(1);
+		expect(rowStatus(t, { flag: "No", __missing: ["flag"] }, {}, null).missing).toBe(0);
 	});
 });
 

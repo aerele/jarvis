@@ -409,15 +409,16 @@ describe("a discarded panel stops costing", () => {
 });
 
 describe("a row's place is a real dependency (doc.idx)", () => {
-	it("a rule reading doc.idx follows a removal above the row", () => {
-		const model = ref(smallModel({ mandatory_depends_on: "eval:doc.idx==2" }));
+	it("a row's badge follows the row after a removal above it", () => {
+		const model = ref(smallModel({ depends_on: "eval:doc.idx==2" }));
 		const memo = createRowStatusMemo(() => model.value);
 		memos.push(memo);
 		const t = () => model.value.tables[0];
+		Object.assign(t().rows[1], { tag: "", __missing: ["tag"] }); // a failed save named it
 		const badges = () => t().rows.map((r, ri) => memo.rowStatusFor(t(), r, ri).missing);
 		expect(badges()).toEqual([0, 1, 0]);
 		t().rows.splice(0, 1);
-		expect(badges()).toEqual([0, 1]);
+		expect(badges()).toEqual([1, 0]);
 	});
 
 	it("knows which rules read the row's place", () => {

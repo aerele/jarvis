@@ -52,12 +52,13 @@ const serverMissing = computed(() => new Set(props.row.__missing || []));
 const isBlank = (name) => !String(props.row[name] ?? "").trim();
 // DraftCell shows these as a static value, not a control (so no <label for> fits).
 const isStatic = (item) => item.readOnly || item.field.fieldtype === "Read Only";
-// Required and blank, or named by a failed save and still blank. A static value has no
-// control to fill: it is listed under "Also needed" instead (below).
+// Named by a failed save and still blank (rowStatus explains why a required blank
+// alone is not flagged; its label keeps the star). A static value has no control to
+// fill: it is listed under "Also needed" instead (below).
 const isMissing = (item) =>
 	!isStatic(item) &&
 	isBlank(item.field.fieldname) &&
-	(item.reqd || serverMissing.value.has(item.field.fieldname));
+	serverMissing.value.has(item.field.fieldname);
 const idFor = (field) => `jv-rowform-${props.tableIndex}-${props.row.__key}-${field.fieldname}`;
 // The visible label's id, which names a read-only value (it has no <label for>).
 const labelIdFor = (field) => `${idFor(field)}-label`;

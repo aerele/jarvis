@@ -72,7 +72,8 @@ describe("one editable value of a child row", () => {
 			[false, "0"],
 			[0, "0"],
 			["0", "0"],
-			["", ""], // a blank cell shows no option, as before
+			["", "0"], // a blank cell (a new row) is unticked, as in Desk
+			[null, "0"],
 		]) {
 			// the row keeps what the agent sent; only the display is normalised
 			expect(shown(raw)).toEqual([opt, raw]);

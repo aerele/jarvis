@@ -350,37 +350,20 @@ function sameValue(field, now, was) {
 	return now === was;
 }
 
-// For a row's toggle and form: how many of its form's fields are required and blank
-// (or named missing by a failed save), and, for a saved row on an update, which
-// fields differ from the saved row (rowChangedSet, worked out first and handed to the
-// layout). `changed` counts only fields the grid does not show, since the grid shows
-// its own. `changedFields` is empty for a row with no saved match.
+// For a row's toggle and form: how many fields a failed save named missing are still
+// blank, and, for a saved row on an update, which fields differ from the saved row
+// (rowChangedSet). `changed` counts only fields the grid does not show, since the grid
+// shows its own. `changedFields` is empty for a row with no saved match.
+// A required blank alone is not missing: ERPNext fills many of them on save (a row's
+// item name and UOM from its item), so flagging each would warn about fields nobody
+// needs to touch; its label keeps the star. A named field counts whether the form
+// shows it, shows it read-only, or lists it under "Also needed", so no rule is
+// evaluated here (`parent` and `ctx` are kept for callers).
 export function rowStatus(table, row, parent, savedRow, ctx = {}) {
 	const inGrid = gridNames(table);
-	const serverMissing = new Set(row.__missing || []);
 	const changedFields = savedRow ? rowChangedSet(table, row, savedRow) : new Set();
-	let missing = 0;
-	const laidOut = new Set();
-	for (const s of rowFormLayout(table, row, parent, {
-		...ctx,
-		changed: savedRow ? changedFields : null,
-	}))
-		for (const col of s.columns)
-			for (const item of col) {
-				const name = item.field.fieldname;
-				laidOut.add(name);
-				const v = row[name] == null ? "" : String(row[name]);
-				// A field a failed save named stays flagged only while it is still blank, even
-				// when the form shows it read-only (the user cannot fill it; the form lists it
-				// under "Also needed").
-				const locked = item.readOnly || item.field.fieldtype === "Read Only";
-				if (!v.trim() && ((!locked && item.reqd) || serverMissing.has(name))) missing++;
-			}
-	// A name a failed save asked for that the form has no field for (the row form lists
-	// it as "Also needed") counts too while the row still has no value for it, so a
-	// closed row keeps its "required" badge.
-	missing += [...serverMissing].filter(
-		(n) => !laidOut.has(n) && !String(row[n] == null ? "" : row[n]).trim()
+	const missing = [...new Set(row.__missing || [])].filter(
+		(n) => !String(row[n] == null ? "" : row[n]).trim()
 	).length;
 	let changed = 0;
 	for (const name of changedFields) if (!inGrid.has(name)) changed++;

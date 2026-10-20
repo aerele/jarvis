@@ -52,12 +52,9 @@ const shown = () => {
 
 // The option a Check select shows. The row may hold what the agent proposed
 // ("Yes", "false", true), so map it to the 1/0 options for display only; the row is
-// rewritten when the user picks. A blank cell shows no option, as before.
-const checkValue = () => {
-	const v = props.row[props.field.fieldname];
-	if (v === "" || v == null) return "";
-	return checkToYesNo(v) === "Yes" ? "1" : "0";
-};
+// rewritten when the user picks. A blank cell (a new row) is unticked, as in Desk, so
+// it shows No; that writes nothing either.
+const checkValue = () => (checkToYesNo(props.row[props.field.fieldname]) === "Yes" ? "1" : "0");
 
 // Escape with this input's suggestion menu open closes only the menu: the key stops
 // here, so the row form around it stays open. With no menu it goes on up and closes
@@ -196,3 +193,33 @@ function search(ev) {
 		v-model="row[field.fieldname]"
 	/>
 </template>
+
+<style scoped>
+/* The draft panel's input look (ChatView's .jv-action-input), owned here: ChatView's
+   scoped style reaches only a child's single root element, so a Link cell (an input
+   plus its menu) and every field of the row form would otherwise get the browser's
+   plain controls. */
+.jv-action-input {
+	width: 100%;
+	box-sizing: border-box;
+	font-family: inherit;
+	font-size: 13px;
+	line-height: 1.45;
+	color: var(--text);
+	background: var(--surface);
+	border: 1px solid var(--border-2);
+	border-radius: 7px;
+	padding: 6px 9px;
+	outline: none;
+	resize: vertical;
+	transition: border-color 0.12s, box-shadow 0.12s;
+}
+.jv-action-input:focus {
+	border-color: var(--cta);
+	box-shadow: 0 0 0 3px var(--cta-bg);
+}
+.jv-action-sel {
+	cursor: pointer;
+	appearance: auto;
+}
+</style>
