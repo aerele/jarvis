@@ -1373,6 +1373,56 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		self.assertIsNone(shown["asked_at"])
 		self.assertEqual((shown["source_doctype"], shown["column_count"]), (None, 0))
 
+	def test_public_shows_progress_only_while_running(self):
+		running = self.job(total_rows=10, phase="finalizing")
+		shown = jobs.get_jobs([running.name])[running.name]
+		self.assertEqual((shown["total_rows"], shown["phase"]), (10, "finalizing"))
+		# Meaningful only while running: the stale values on any other status stay hidden.
+		for status in ("queued", "paused", "failed", "cancelled"):
+			with self.subTest(status=status):
+				frappe.db.set_value(jobs.DOCTYPE, running.name, "status", status)
+				frappe.db.commit()
+				shown = jobs.get_jobs([running.name])[running.name]
+				self.assertEqual((shown["total_rows"], shown["phase"]), (None, None))
+		ready = self.ready_job()
+		self.stamp(ready, total_rows=10, phase="finalizing")
+		shown = jobs.get_jobs([ready.name])[ready.name]
+		self.assertEqual(shown["status"], "ready")
+		self.assertEqual((shown["total_rows"], shown["phase"]), (None, None))
+		unknown = self.job(total_rows=0)
+		self.assertIsNone(jobs.get_jobs([unknown.name])[unknown.name]["total_rows"])
+
+	def test_dispatch_resets_progress_fields(self):
+		job = self.job(status="queued", attempt_token="", total_rows=500, phase="finalizing")
+		with (
+			patch("jarvis.chat.pump._probe_worker_count", return_value=3),
+			patch.object(frappe, "enqueue"),
+		):
+			jobs.dispatch()
+		job.reload()
+		self.assertEqual(job.status, "running")
+		self.assertEqual(job.total_rows, 0)
+		self.assertFalse(job.phase)
+
+	def test_set_progress_is_fenced(self):
+		job = self.job()
+		jobs._set_progress(job.name, "stale", phase="finalizing", total_rows=9)
+		self.assertEqual(frappe.db.get_value(jobs.DOCTYPE, job.name, ["phase", "total_rows"]), ("", 0))
+		for status in ("cancelled", "paused"):
+			with self.subTest(status=status):
+				frappe.db.set_value(jobs.DOCTYPE, job.name, "status", status)
+				frappe.db.commit()
+				jobs._set_progress(job.name, "abc123", phase="finalizing", total_rows=9)
+				self.assertEqual(
+					frappe.db.get_value(jobs.DOCTYPE, job.name, ["phase", "total_rows"]), ("", 0)
+				)
+		frappe.db.set_value(jobs.DOCTYPE, job.name, "status", "running")
+		frappe.db.commit()
+		jobs._set_progress(job.name, "abc123", phase="finalizing", total_rows=9)
+		self.assertEqual(
+			frappe.db.get_value(jobs.DOCTYPE, job.name, ["phase", "total_rows"]), ("finalizing", 9)
+		)
+
 	def test_background_title_defaults_to_source_doctype(self):
 		with (
 			patch.object(jobs, "current_conversation", return_value=self.conversation),
