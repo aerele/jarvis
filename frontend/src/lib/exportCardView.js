@@ -49,6 +49,63 @@ const rowsStat = (count, label) => ({
 	text: ` ${label}`,
 });
 
+const UNKNOWN = { kind: "unknown" };
+
+// What the running card can say about progress, from the server's counted total (0/null =
+// unknown) and the rows written so far. `unknown` keeps today's activity bar and row count: no
+// count, a stale count (more rows than counted), or nothing written yet (an empty "0%" track
+// would look like a queued one). The percent stops at 99 until the file is really ready, and
+// is never 0 once rows exist. `finalizing` (zip + publish, nothing to measure) is never claimed
+// while a cancel is pending, because a file is not coming.
+export function progressOf(state) {
+	if (state?.status !== "running") return UNKNOWN;
+	if (state.phase === "finalizing" && !state.cancel_requested) return { kind: "finalizing" };
+	const rows = Number(state.rows_written) || 0;
+	const total = Number(state.total_rows) || 0;
+	if (rows <= 0 || rows > total) return UNKNOWN;
+	const percent = Math.max(1, Math.min(99, Math.round((rows * 100) / total)));
+	return { kind: "value", percent, rows, total };
+}
+
+// The first stat of a running card.
+function progressStat(state, progress) {
+	if (progress.kind === "value")
+		return {
+			strong: progress.rows.toLocaleString(),
+			text: ` ${__("of {0} rows", [progress.total.toLocaleString()])} · ${__("{0}%", [
+				progress.percent,
+			])}`,
+		};
+	return rowsStat(state.rows_written, __("rows written"));
+}
+
+const finalizingLabel = (state) =>
+	state.format === "xlsx" ? __("Finalizing spreadsheet\u2026") : __("Finalizing file\u2026");
+
+function runningProgress(state) {
+	const progress = progressOf(state);
+	if (progress.kind === "finalizing")
+		return {
+			track: "indet",
+			stats: [
+				{ strong: finalizingLabel(state) },
+				rowsStat(state.rows_written, __("rows written")),
+			],
+		};
+	if (progress.kind === "value")
+		return {
+			track: "value",
+			percent: progress.percent,
+			progressText: __("{0} of {1} rows, {2}%", [
+				progress.rows.toLocaleString(),
+				progress.total.toLocaleString(),
+				progress.percent,
+			]),
+			stats: [progressStat(state, progress)],
+		};
+	return { track: "indet", stats: [progressStat(state, progress)] };
+}
+
 const attempt = (n) => __("Attempt {0} of {1}", [n, MAX_ATTEMPTS]);
 
 // The attempt count comes from `retries`: a maintenance pause raises before `attempts` moves.
@@ -81,23 +138,26 @@ const BUILDERS = {
 			: "",
 		buttons: ["cancel"],
 	}),
-	running: (s, ctx) => ({
-		pill: tone(__("Preparing"), "run"),
-		track: "indet",
-		stats: [
-			rowsStat(s.rows_written, __("rows written")),
-			{
-				strong: clockText((ctx.now - (toDate(s.started_at) || ctx.now)) / 1000),
-				text: ` ${__("so far")}`,
-			},
-			...(formatLine(s) ? [{ text: formatLine(s) }] : []),
-		],
-		footer:
-			(s.started_at ? __("Started at {0}", [whenText(s.started_at, ctx.now)]) : "") +
-			(retried(s) ? ` · ${__("attempt 2 of 2")}` : "") +
-			(ctx.cancelling ? ` · ${__("stops within a few seconds")}` : ""),
-		buttons: ["cancel"],
-	}),
+	running: (s, ctx) => {
+		const { stats, ...progress } = runningProgress(s);
+		return {
+			pill: tone(__("Preparing"), "run"),
+			...progress,
+			stats: [
+				...stats,
+				{
+					strong: clockText((ctx.now - (toDate(s.started_at) || ctx.now)) / 1000),
+					text: ` ${__("so far")}`,
+				},
+				...(formatLine(s) ? [{ text: formatLine(s) }] : []),
+			],
+			footer:
+				(s.started_at ? __("Started at {0}", [whenText(s.started_at, ctx.now)]) : "") +
+				(retried(s) ? ` · ${__("attempt 2 of 2")}` : "") +
+				(ctx.cancelling ? ` · ${__("stops within a few seconds")}` : ""),
+			buttons: ["cancel"],
+		};
+	},
 	paused: (s, ctx) => {
 		const next = toDate(s.next_attempt);
 		const after = next && next > ctx.now ? whenText(s.next_attempt, ctx.now) : "";
