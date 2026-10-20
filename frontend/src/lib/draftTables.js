@@ -56,6 +56,48 @@ export function ruleValues(ruleFields, row, savedRow, known = new Set()) {
 	return { rule, src };
 }
 
+// The link values whose fetch_from rule values a table still needs (actions_api
+// rule_values): per source link field, the distinct values of the rows that hold no
+// value fetched or saved for their current link (a create row, or a row whose link
+// moved off the saved one).
+export function ruleFetchLinks(table) {
+	const links = {};
+	for (const rf of table.ruleFields || []) {
+		const from = ruleFetchSource(rf);
+		if (!from) continue;
+		for (const row of table.rows || []) {
+			const v = text(row[from]);
+			const src = row.__ruleSrc || {};
+			if (!v || (from in src && src[from] === v)) continue;
+			(links[from] = links[from] || new Set()).add(v);
+		}
+	}
+	return Object.fromEntries(Object.entries(links).map(([k, set]) => [k, [...set]]));
+}
+
+// rule_values' answer onto the rows: a fetched value becomes the row's rule value and
+// its link the recorded source, so typedRow treats it as current (and falls back to
+// the default again when the link changes before the next fetch). A link that was
+// `asked` but answered nothing (unreadable, not found) keeps the default and is
+// recorded too, so it is not asked again until it changes. New objects, not in-place
+// edits, so the row status memo sees the change.
+export function applyRuleValues(table, fetched, asked = {}) {
+	for (const rf of table.ruleFields || []) {
+		const from = ruleFetchSource(rf);
+		if (!from) continue;
+		const byLink = (fetched && fetched[from]) || {};
+		const wasAsked = new Set(asked[from] || []);
+		for (const row of table.rows || []) {
+			const v = text(row[from]);
+			const got = v && byLink[v];
+			if (got && rf.fieldname in got) {
+				row.__rule = { ...(row.__rule || {}), [rf.fieldname]: got[rf.fieldname] ?? "" };
+			} else if (!wasAsked.has(v)) continue;
+			row.__ruleSrc = { ...(row.__ruleSrc || {}), [from]: v };
+		}
+	}
+}
+
 // A saved or proposed row -> its panel row, plus its rule values when the table has any.
 function panelRow(table, fields, r, savedByName) {
 	const row = toPanelRow(fields, r);

@@ -138,74 +138,21 @@ def _grid_fields(child_doctype: str, parent_doctype=None) -> tuple[list, list]:
 	"""(the grid's columns, every other editable field) of a child doctype,
 	limited to the fields the user can read through ``parent_doctype``.
 
-	The columns are what Desk's grid shows: the user's own column choice for this
-	table when they made one (GridView user settings), else the in_list_view
-	fields, else the first 4; a hidden field is never a column."""
+	The columns are Desk's default grid columns (_grid_columns), the same for every
+	user: the Approval Board's check of what it can show (held_edit._unshown_errors)
+	reads them, so a user's own Desk column choice must not change what an approver
+	may approve."""
 	meta = frappe.get_meta(child_doctype)
 	levels = _readable_permlevels(child_doctype, parent_doctype)
 	editable = [df for df in meta.fields if _card_field_ok(df, levels)]
-	visible = [df for df in editable if not df.hidden]
-	listed = (
-		_user_grid_columns(child_doctype, parent_doctype, visible)
-		or [df for df in visible if df.in_list_view]
-		or visible[:4]
-	)
+	listed = _grid_columns([df for df in editable if not df.hidden])
 	return listed, [df for df in editable if df not in listed]
 
 
-def _user_grid_columns(child_doctype: str, parent_doctype, visible: list) -> list:
-	"""The columns the user picked for this table in Desk (the grid's column
-	settings, saved under the parent's GridView user settings), in their order,
-	limited to fields the card may show. Empty when they never picked any."""
-	if not parent_doctype:
-		return []
-	by_name = {df.fieldname: df for df in visible}
-	try:
-		from frappe.model.utils.user_settings import get_user_settings
-
-		# get_user_settings raises on corrupt JSON, so it stays inside the try. Settings
-		# that parse to anything but a dict (a list, a string) are no settings.
-		saved = frappe.parse_json(get_user_settings(parent_doctype) or "{}")
-		grid = saved.get("GridView") if isinstance(saved, dict) else None
-		chosen = (grid.get(child_doctype) if isinstance(grid, dict) else None) or []
-		if not isinstance(chosen, list):
-			return []
-		# A saved column the card may not show (hidden, unreadable, since removed)
-		# is skipped, as Desk's grid skips it; a repeat is shown once.
-		names = [c.get("fieldname") for c in chosen if isinstance(c, dict)]
-		names = [n for n in names if isinstance(n, str) and n in by_name]
-		return [by_name[n] for n in dict.fromkeys(names)]
-	except Exception:
-		# A bad saved preference must not break the card: fall back to Desk's
-		# default columns, and leave a trace so "my columns are ignored" is findable.
-		_log_bad_grid_settings(child_doctype, parent_doctype)
-		return []
-
-
-_GRID_SETTINGS_LOG_TTL_S = 3600
-
-
-def _log_bad_grid_settings(child_doctype: str, parent_doctype: str) -> None:
-	"""Log unreadable grid settings at most once per (user, parent doctype, child table) per hour:
-	the card is opened for every create or update, and one corrupt row would
-	otherwise add an Error Log entry each time."""
-	user = frappe.session.user
-	key = f"jarvis:card_grid_settings_err:{user}:{parent_doctype}:{child_doctype}"
-	try:
-		cache = frappe.cache()
-		if cache.get_value(key, expires=True):
-			return
-		cache.set_value(key, 1, expires_in_sec=_GRID_SETTINGS_LOG_TTL_S)
-	except Exception:
-		pass  # no cache: log anyway rather than lose the trace
-	frappe.log_error(
-		title="jarvis chat card: grid column settings unreadable",
-		message=(
-			f"The saved grid column settings of {user} for {parent_doctype} "
-			f"({child_doctype} table) could not be read; the card used the default columns.\n\n"
-			f"{frappe.get_traceback()}"
-		),
-	)
+def _grid_columns(visible: list) -> list:
+	"""Desk's default grid columns: the in_list_view fields, else the first 4. A
+	hidden field is never a column (``visible`` has none)."""
+	return [df for df in visible if df.in_list_view] or visible[:4]
 
 
 def _child_form_fields(
@@ -303,6 +250,73 @@ def _rule_fields(child_doctype: str, parent_doctype, form_fields: list[dict], co
 		for df in frappe.get_meta(child_doctype).fields
 		if df.fieldname in wanted and _card_field_ok(df, levels)
 	]
+
+
+# A batch of fetch_from lookups is bounded, so a huge pasted table cannot become a scan.
+_RULE_VALUES_MAX_LINKS = 500
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def rule_values(doctype: str, table: str, links: str | dict | None = None) -> dict:
+	"""The hidden values a child row's rules read that Desk fetches from a link
+	(``fetch_from``, e.g. ``is_fixed_asset`` from the Item), so the card evaluates
+	its rules as Desk does before the record is saved. ``links`` maps a row's link
+	field to the values the card's rows hold; the answer maps each link field to
+	``{link value: {rule field: fetched value}}``. Read through ``frappe.get_list``,
+	so the user's permissions on the linked doctype apply, and only source fields the
+	user may read are fetched. Display only: the card never sends these values."""
+	doctype = (doctype or "").strip()
+	if not doctype or not frappe.db.exists("DocType", doctype):
+		return {"ok": False, "reason": _("unknown doctype")}
+	if not frappe.has_permission(doctype, "read"):
+		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
+	table_df = frappe.get_meta(doctype).get_field(table or "")
+	if not table_df or table_df.fieldtype != "Table" or not table_df.options:
+		return {"ok": False, "reason": _("unknown table")}
+	links = frappe.parse_json(links) if isinstance(links, str) else links
+	if not isinstance(links, dict):
+		return {"ok": False, "reason": _("links must be an object")}
+	child = table_df.options
+	# link field -> {rule field: source field on the linked doctype}
+	sources: dict[str, dict[str, str]] = {}
+	for rf in _child_table_spec(child, doctype, table)["rule_fields"]:
+		link, _sep, src = (rf.get("fetch_from") or "").partition(".")
+		if link and src:
+			sources.setdefault(link, {})[rf["fieldname"]] = src
+	child_meta = frappe.get_meta(child)
+	out: dict[str, dict] = {}
+	for link, wanted in sources.items():
+		link_df = child_meta.get_field(link)
+		values = links.get(link)
+		if not link_df or link_df.fieldtype != "Link" or not link_df.options or not isinstance(values, list):
+			continue
+		names = list(
+			dict.fromkeys(
+				str(v) for v in values[:_RULE_VALUES_MAX_LINKS] if isinstance(v, str | int) and v != ""
+			)
+		)
+		# A linked doctype the user cannot read answers nothing, as in Desk, and must not
+		# cost the table's other links their values.
+		if not names or not frappe.has_permission(link_df.options, "read"):
+			continue
+		target = frappe.get_meta(link_df.options)
+		levels = _readable_permlevels(link_df.options)
+		readable = {}
+		for rule, src in wanted.items():
+			src_df = target.get_field(src)
+			if src_df and _card_field_ok(src_df, levels):
+				readable[rule] = src
+		if not readable:
+			continue
+		rows = frappe.get_list(
+			link_df.options,
+			filters={"name": ["in", names]},
+			fields=["name", *dict.fromkeys(readable.values())],
+			limit_page_length=len(names),
+		)
+		out[link] = {r.name: {rule: r.get(src) for rule, src in readable.items()} for r in rows}
+	return {"ok": True, "values": out}
 
 
 def _drop_empty_sections(fields: list[dict]) -> list[dict]:
