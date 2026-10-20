@@ -1548,31 +1548,25 @@ class TestChildRowForm(_ChildRowFormHelpers, FrappeTestCase):
 			if k in ("Section Break", "Tab Break"):
 				self.assertTrue(i + 1 < len(kinds) and kinds[i + 1] not in ("Section Break", "Tab Break"))
 
-	def test_the_users_own_grid_columns_are_the_columns(self):
+	def test_the_columns_are_the_same_for_every_user(self):
+		# The Approval Board checks proposed cells against these columns
+		# (held_edit._unshown_errors), so a user's own Desk column choice must not
+		# change what an approver may approve.
 		from frappe.model.utils.user_settings import get_user_settings, update_user_settings
 
+		default = [c["fieldname"] for c in self._items()["columns"]]
 		before = get_user_settings("Sales Order")
 		try:
 			# for_update=True replaces the cached settings with this JSON outright.
 			update_user_settings(
 				"Sales Order",
-				frappe.as_json(
-					{
-						"GridView": {
-							"Sales Order Item": [
-								{"fieldname": "warehouse"},
-								{"fieldname": "item_code"},
-								{"fieldname": "no_such_field"},
-							]
-						}
-					}
-				),
+				frappe.as_json({"GridView": {"Sales Order Item": [{"fieldname": "warehouse"}]}}),
 				True,
 			)
-			cols = [c["fieldname"] for c in self._items()["columns"]]
-			self.assertEqual(cols, ["warehouse", "item_code"])
+			self.assertEqual([c["fieldname"] for c in self._items()["columns"]], default)
 		finally:
 			update_user_settings("Sales Order", before or "{}", True)
+		self.assertNotEqual(default, ["warehouse"])
 
 	def test_empty_sections_and_dangling_columns_are_dropped(self):
 		from jarvis.chat.actions_api import _drop_empty_sections
@@ -1598,9 +1592,7 @@ class TestChildRowForm(_ChildRowFormHelpers, FrappeTestCase):
 		from unittest.mock import patch
 
 		# Only one grid column, so the row form certainly has fields beyond the grid.
-		with patch(
-			"jarvis.chat.actions_api._user_grid_columns", side_effect=lambda dt, p, visible: visible[:1]
-		):
+		with patch("jarvis.chat.actions_api._grid_columns", side_effect=lambda visible: visible[:1]):
 			spec = get_doctype_form_meta("Contact")["tables"]["email_ids"]
 			row = load_doc("Contact", c.name)["tables"]["email_ids"][0]
 		columns = {col["fieldname"] for col in spec["columns"]}
@@ -1678,21 +1670,6 @@ class TestChildRowFormReview(_ChildRowFormHelpers, FrappeTestCase):
 		for dynamic in ("Today", "__user", ":Company"):
 			self.assertEqual(_field_dict(mk(dynamic))["default"], "")
 
-	def test_bad_or_repeated_saved_columns_never_break_the_card(self):
-		from unittest.mock import patch
-
-		bad = frappe.as_json(
-			{"GridView": {"Sales Order Item": [{"fieldname": []}, "x", {"fieldname": "qty"}]}}
-		)
-		with patch("frappe.model.utils.user_settings.get_user_settings", return_value=bad):
-			cols = [c["fieldname"] for c in self._items()["columns"]]
-		self.assertEqual(cols, ["qty"])
-		dup = frappe.as_json({"GridView": {"Sales Order Item": [{"fieldname": "qty"}, {"fieldname": "qty"}]}})
-		with patch("frappe.model.utils.user_settings.get_user_settings", return_value=dup):
-			self.assertEqual([c["fieldname"] for c in self._items()["columns"]], ["qty"])
-		with patch("frappe.model.utils.user_settings.get_user_settings", side_effect=ValueError("corrupt")):
-			self.assertTrue(self._items()["columns"])  # falls back to Desk's columns
-
 	def test_a_secret_is_never_a_column(self):
 		def make_column_secret(meta):
 			qty = meta.get_field("qty")
@@ -1718,77 +1695,6 @@ class TestChildRowFormReview(_ChildRowFormHelpers, FrappeTestCase):
 		# a later Section Break does not end a hidden TAB: only another Tab Break would
 		self.assertFalse(names & state["after"])
 		self.assertTrue(names & state["before"])
-
-	def test_a_saved_grid_column_that_is_hidden_or_unreadable_is_skipped(self):
-		from unittest.mock import patch
-
-		def lock_down(meta):
-			meta.get_field("warehouse").hidden = 1
-			meta.get_field("item_code").permlevel = 1
-
-		saved = frappe.as_json(
-			{
-				"GridView": {
-					"Sales Order Item": [
-						{"fieldname": "warehouse"},
-						{"fieldname": "qty"},
-						{"fieldname": "item_code"},
-					]
-				}
-			}
-		)
-		with (
-			patch("frappe.model.utils.user_settings.get_user_settings", return_value=saved),
-			patch("jarvis.chat.actions_api._readable_permlevels", return_value={0}),
-		):
-			items = self._with_child_meta(lock_down)
-		self.assertEqual([c["fieldname"] for c in items["columns"]], ["qty"])
-
-	def _bad_settings_run(self, bad):
-		"""Open the card twice with ``bad`` as the saved settings; (log_error mock, columns)."""
-		from unittest.mock import patch
-
-		key = f"jarvis:card_grid_settings_err:{frappe.session.user}:Sales Order:Sales Order Item"
-		frappe.cache().delete_value(key)
-		self.addCleanup(lambda: frappe.cache().delete_value(key))
-		with (
-			patch("frappe.model.utils.user_settings.get_user_settings", **bad),
-			patch.object(frappe, "log_error") as log_error,
-		):
-			first = get_doctype_form_meta("Sales Order")
-			second = get_doctype_form_meta("Sales Order")
-		self.assertTrue(first["ok"] and second["ok"])
-		return log_error, first["tables"]["items"]["columns"]
-
-	def test_corrupt_grid_settings_open_the_card_and_log_once(self):
-		log_error, columns = self._bad_settings_run({"side_effect": ValueError("corrupt")})
-		self.assertTrue(columns)  # Desk's default columns
-		log_error.assert_called_once()
-		text = " ".join(str(v) for v in (*log_error.call_args.args, *log_error.call_args.kwargs.values()))
-		for name in ("Sales Order", "Sales Order Item", frappe.session.user):
-			self.assertIn(name, text)
-
-	def test_corrupt_grid_settings_log_once_per_child_table(self):
-		from unittest.mock import patch
-
-		from jarvis.chat.actions_api import _log_bad_grid_settings
-
-		user = frappe.session.user
-		keys = [f"jarvis:card_grid_settings_err:{user}:Purchase Invoice:{c}" for c in ("A Item", "B Item")]
-		for k in keys:
-			frappe.cache().delete_value(k)
-			self.addCleanup(lambda k=k: frappe.cache().delete_value(k))
-		with patch.object(frappe, "log_error") as log_error:
-			_log_bad_grid_settings("A Item", "Purchase Invoice")
-			_log_bad_grid_settings("A Item", "Purchase Invoice")  # throttled
-			_log_bad_grid_settings("B Item", "Purchase Invoice")  # another table: logged
-		self.assertEqual(log_error.call_count, 2)
-
-	def test_grid_settings_that_are_not_an_object_count_as_none(self):
-		for bad in ("[1, 2]", '"text"', "7", "null"):
-			log_error, columns = self._bad_settings_run({"return_value": bad})
-			self.assertTrue(columns)
-			log_error.assert_not_called()  # not corrupt: simply no settings
 
 	def test_rule_fields_hold_the_hidden_fields_the_rules_read(self):
 		items = get_doctype_form_meta("Purchase Invoice")["tables"]["items"]
