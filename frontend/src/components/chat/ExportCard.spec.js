@@ -617,6 +617,19 @@ describe("persistent export card", () => {
 			expect(wrapper.find(".jv-xfoot small").text()).toContain("stops within a few seconds");
 		});
 
+		it("stops saying Finalizing once Cancel is pressed, before the server answers", async () => {
+			fetch.mockReturnValue(new Promise(() => {}));
+			const wrapper = show({ total_rows: 46214, phase: "finalizing" });
+			expect(wrapper.text()).toContain("Finalizing spreadsheet");
+			await wrapper.get('[data-testid="cancel-export"]').trigger("click");
+			await nextTick();
+			// Mutation killed: not passing the local pending flag keeps the label here.
+			expect(wrapper.text()).not.toContain("Finalizing");
+			const button = wrapper.get('[data-testid="cancel-export"]');
+			expect(button.text()).toBe("Cancelling...");
+			expect(button.attributes("aria-disabled")).toBe("true");
+		});
+
 		it("moves focus to the card when the control it was on goes away", async () => {
 			fetch.mockResolvedValue(reply(base({ status: "cancelled", finished_at: at(1) })));
 			const wrapper = show({});
