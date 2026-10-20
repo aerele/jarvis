@@ -639,9 +639,9 @@ import { errMessage, errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
-	// "Shared" or "Personal" - the default scope handed in from the pane (an
-	// admin's Browse press defaults Shared; a non-admin's is always Personal).
-	// Ignored in edit mode.
+	// "Shared" or "Personal" - the default scope handed in from the pane. It is
+	// Personal unless an admin pressed the Shared section's Add button; a
+	// non-admin's is always Personal. Ignored in edit mode.
 	scope: { type: String, default: "Personal" },
 	// The catalog name chosen on Browse, or "Custom URL". Ignored in edit mode.
 	preset: { type: String, default: "" },
@@ -925,7 +925,7 @@ function resetForCreate() {
 	form.preset = props.preset || defaultPreset();
 	form.base_url = "";
 	form.credential = "";
-	form.scope = isAdmin ? (props.scope === "Personal" ? "Personal" : "Shared") : "Personal";
+	form.scope = isAdmin && props.scope === "Shared" ? "Shared" : "Personal";
 	form.auth_method = presetDefaultsToOauth(catalogAuthOf(form.preset)) ? "OAuth" : "API Key";
 	rowName.value = "";
 	createdThisSession.value = false;
