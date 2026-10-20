@@ -56,10 +56,12 @@ const UNKNOWN = { kind: "unknown" };
 // count, a stale count (more rows than counted), or nothing written yet (an empty "0%" track
 // would look like a queued one). The percent stops at 99 until the file is really ready, and
 // is never 0 once rows exist. `finalizing` (zip + publish, nothing to measure) is never claimed
-// while a cancel is pending, because a file is not coming.
-export function progressOf(state) {
+// while a cancel is pending (the server's flag, or the card's own request still in flight),
+// because a file is not coming.
+export function progressOf(state, cancelling = false) {
 	if (state?.status !== "running") return UNKNOWN;
-	if (state.phase === "finalizing" && !state.cancel_requested) return { kind: "finalizing" };
+	if (state.phase === "finalizing" && !state.cancel_requested && !cancelling)
+		return { kind: "finalizing" };
 	const rows = Number(state.rows_written) || 0;
 	const total = Number(state.total_rows) || 0;
 	if (rows <= 0 || rows > total) return UNKNOWN;
@@ -82,8 +84,8 @@ function progressStat(state, progress) {
 const finalizingLabel = (state) =>
 	state.format === "xlsx" ? __("Finalizing spreadsheet\u2026") : __("Finalizing file\u2026");
 
-function runningProgress(state) {
-	const progress = progressOf(state);
+function runningProgress(state, cancelling) {
+	const progress = progressOf(state, cancelling);
 	if (progress.kind === "finalizing")
 		return {
 			track: "indet",
@@ -139,7 +141,7 @@ const BUILDERS = {
 		buttons: ["cancel"],
 	}),
 	running: (s, ctx) => {
-		const { stats, ...progress } = runningProgress(s);
+		const { stats, ...progress } = runningProgress(s, ctx.cancelling);
 		return {
 			pill: tone(__("Preparing"), "run"),
 			...progress,
