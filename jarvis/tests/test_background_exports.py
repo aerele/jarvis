@@ -1,5 +1,6 @@
 """Background-export boundary tests, including real files and MariaDB streams."""
 
+import contextlib
 import csv
 import datetime
 import errno
@@ -41,6 +42,22 @@ def prepared(limit=None, rules=None):
 	)
 
 
+# CPU-bound, one-row result: it aggregates INSIDE the derived table the count wraps it in, so it
+# never builds a big temp table, and only the statement time limit can end it.
+SLOW_COUNT = "SELECT COUNT(*) AS n FROM tabDocField a CROSS JOIN tabDocField b CROSS JOIN tabDocField c"
+
+
+def spy(owner, name, order):
+	"""Patch ``owner.name`` to record each call in ``order`` and then run the real method."""
+	original = getattr(owner, name)
+
+	def call(*args, **kwargs):
+		order.append(name)
+		return original(*args, **kwargs)
+
+	return patch.object(owner, name, autospec=True, side_effect=call)
+
+
 class TestStreamingWriter(TestCase):
 	def test_csv_200000_rows_and_no_database_calls(self):
 		with (
@@ -61,6 +78,19 @@ class TestStreamingWriter(TestCase):
 			self.assertEqual(result["rows_written"], 200_000)
 			with path.open() as source:
 				self.assertEqual(sum(1 for _ in csv.reader(source)), 200_001)
+
+	def test_expected_total_follows_the_rule_write_applies(self):
+		for count, limit, cap, expected in (
+			(None, None, 10, None),
+			(0, None, 10, None),
+			(7, None, 10, 7),
+			(11, None, 10, 11),
+			(6, 5, 10, 5),
+			(11, 10, 10, 10),
+			(3, 20, 10, 3),
+		):
+			with self.subTest(count=count, limit=limit):
+				self.assertEqual(streaming.expected_total(count, limit, cap), expected)
 
 	def test_exact_cap_and_over_cap(self):
 		with tempfile.TemporaryDirectory() as directory:
@@ -664,10 +694,217 @@ class TestBackgroundExportJobs(FrappeTestCase):
 			db.close()
 		self.assertEqual((float(statement_time), float(write_timeout)), (7.0, 7.0))
 
+	def streamed(self, db, p):
+		return len(list(db.stream_rows(p.sql, p.params)))
+
+	def test_count_matches_the_streamed_rows(self):
+		# The legacy v15 filter SQL has its values inlined and params=None; passing () instead would
+		# make PyMySQL %-format the LIKE pattern. Both sources must count what they stream.
+		sources = (
+			{"spec": {"from": "DocType", "select": ["name"]}},
+			{"doctype": "DocType", "fields": ["name"], "filters": {"name": ["like", "%Job%"]}},
+		)
+		for source in sources:
+			with self.subTest(source=list(source)):
+				p = streaming.prepare(source, 5000)
+				db = MariaDBStream(connection_settings()).open()
+				try:
+					counted = db.count_rows(p.sql, p.params)
+					self.assertIsNone(db.count_error)
+					self.assertGreater(counted, 0)
+					self.assertEqual(counted, self.streamed(db, p))
+				finally:
+					db.close()
+
+	def test_count_counts_groups_and_distinct_rows(self):
+		every = frappe.db.count("DocType")
+		for extra in ({"group_by": ["module"]}, {"distinct": True}):
+			with self.subTest(extra=extra):
+				p = streaming.prepare({"spec": {"from": "DocType", "select": ["module"], **extra}}, 5000)
+				db = MariaDBStream(connection_settings()).open()
+				try:
+					counted = db.count_rows(p.sql, p.params)
+					self.assertEqual(counted, self.streamed(db, p))
+					self.assertEqual(counted, len(set(frappe.get_all("DocType", pluck="module"))))
+					self.assertLess(counted, every)
+				finally:
+					db.close()
+
+	def test_count_respects_the_cap_and_spec_limit(self):
+		db = MariaDBStream(connection_settings()).open()
+		try:
+			capped = streaming.prepare({"doctype": "DocType", "fields": ["name"]}, 2)
+			self.assertEqual(db.count_rows(capped.sql, capped.params), 3)  # cap + 1
+			limited = streaming.prepare({"spec": {"from": "DocType", "select": ["name"], "limit": 5}}, 100)
+			raw = db.count_rows(limited.sql, limited.params)
+			self.assertEqual(raw, 6)  # limit + 1
+			self.assertEqual(streaming.expected_total(raw, limited.limit, 100), 5)
+		finally:
+			db.close()
+
+	def test_count_gives_up_within_its_limit(self):
+		db = MariaDBStream(connection_settings(), seconds=10).open()
+		try:
+			started = time.monotonic()
+			self.assertIsNone(db.count_rows(SLOW_COUNT, None, seconds=1))
+			self.assertLess(time.monotonic() - started, 4)
+			self.assertEqual(db.count_error, 1969)
+			# The connection is still good, and the session limit was not touched.
+			with db.connection.cursor() as cursor:
+				cursor.execute("SELECT 1, @@SESSION.max_statement_time")
+				one, session_limit = cursor.fetchone()
+			self.assertEqual((one, float(session_limit)), (1, 10.0))
+			with self.assertRaises(ValueError):
+				db.count_rows("SELECT 1", None, seconds=0)  # 0 would mean no limit at all
+		finally:
+			db.close()
+
+	def test_count_errors_are_swallowed(self):
+		db = MariaDBStream(connection_settings()).open()
+		try:
+			for sql, code in (("SELECT 1 AS a, 2 AS a", 1060), ("SELEKT nonsense", 1064)):
+				with self.subTest(code=code):
+					self.assertIsNone(db.count_rows(sql, None))
+					self.assertEqual(db.count_error, code)
+			self.assertEqual(db.count_rows("SELECT 1", None), 1)
+			self.assertIsNone(db.count_error)
+			# A real bug must surface, not be mistaken for "no count".
+			with patch.object(db.connection, "cursor", side_effect=RuntimeError("bug")):
+				with self.assertRaises(RuntimeError):
+					db.count_rows("SELECT 1", None)
+		finally:
+			db.close()
+
+	def test_cancel_during_the_count_ends_without_streaming(self):
+		job = self.job(source=json.dumps({"spec": {"from": "DocType", "select": ["name"]}}))
+		real_count = MariaDBStream.count_rows
+		seen = {}
+
+		def cancel_then_count(db, sql, params):
+			frappe.db.set_value(jobs.DOCTYPE, job.name, "cancel_requested", 1)
+			frappe.db.commit()
+			started = time.monotonic()
+			seen["result"] = real_count(db, SLOW_COUNT, None, seconds=8)
+			seen["seconds"] = time.monotonic() - started
+			return seen["result"]
+
+		order = []
+		with (
+			patch.object(MariaDBStream, "count_rows", autospec=True, side_effect=cancel_then_count),
+			spy(MariaDBStream, "stream_rows", order),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		self.assertEqual(job.reload().status, "cancelled")
+		self.assertEqual(order, [])  # the stream never started
+		# The watchdog's KILL QUERY reached the count before its own 8 s limit.
+		self.assertIsNone(seen["result"])
+		self.assertLess(seen["seconds"], 7)
+
+	def test_count_outcome_reaches_telemetry(self):
+		def timed_out(db, *args, **kwargs):
+			db.count_error = 1969
+
+		for patcher, detail in (
+			(contextlib.nullcontext(), "count:ok"),
+			(
+				patch.object(MariaDBStream, "count_rows", autospec=True, side_effect=timed_out),
+				"count:1969",
+			),
+		):
+			with self.subTest(detail=detail):
+				job = self.job()
+				with (
+					patcher,
+					patch("jarvis.telemetry.record_export_event") as record,
+					patch.object(jobs, "dispatch"),
+				):
+					jobs.run(job.name, "abc123")
+				record.assert_called_once()
+				self.assertEqual(record.call_args.kwargs["detail"], detail)
+				self.assertNotIn("SELECT", detail)
+
+	def test_run_stores_the_total_while_running(self):
+		job = self.job(source=json.dumps({"spec": {"from": "DocType", "select": ["name"]}}))
+		real_write = streaming.write
+		seen = {}
+
+		def look_then_write(*args, **kwargs):
+			seen.update(jobs.get_jobs([job.name])[job.name])
+			return real_write(*args, **kwargs)
+
+		order = []
+		with (
+			patch.object(streaming, "write", look_then_write),
+			spy(Watchdog, "start", order),
+			spy(MariaDBStream, "count_rows", order),
+			spy(MariaDBStream, "stream_rows", order),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		self.assertEqual(order, ["start", "count_rows", "stream_rows"])
+		self.assertEqual(seen["status"], "running")
+		self.assertEqual(seen["total_rows"], frappe.db.count("DocType"))
+		self.assertEqual(job.reload().status, "ready", job.error)
+		self.assertIsNone(jobs.public(job)["total_rows"])
+
+	def test_run_without_a_count_streams_as_before(self):
+		job = self.job()
+		real_write = streaming.write
+		seen = {}
+
+		def look_then_write(*args, **kwargs):
+			seen.update(jobs.get_jobs([job.name])[job.name])
+			return real_write(*args, **kwargs)
+
+		with (
+			patch.object(MariaDBStream, "count_rows", return_value=None),
+			patch.object(streaming, "write", look_then_write),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		job.reload()
+		self.assertEqual((job.status, job.rows_written), ("ready", 2))
+		self.assertIsNone(seen["total_rows"])
+		self.assertEqual(job.total_rows, 0)
+
+	def test_count_over_the_cap_ends_too_large_without_streaming(self):
+		job = self.job(source=json.dumps({"spec": {"from": "DocType", "select": ["name"]}}))
+		order = []
+		with (
+			patch.object(jobs, "limits", return_value=(2, 50 * 1024 * 1024)),
+			spy(MariaDBStream, "stream_rows", order),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		job.reload()
+		self.assertEqual(job.status, "too large")
+		self.assertEqual(job.error, str(streaming.too_many_rows(2)))
+		self.assertEqual(order, [])
+		self.assertFalse(job.file)
+
+	def test_over_cap_without_a_count_still_ends_too_large(self):
+		# What a big production set meets when the count does not answer in time: the stream's own cap.
+		job = self.job(source=json.dumps({"spec": {"from": "DocType", "select": ["name"]}}))
+		order = []
+		with (
+			patch.object(jobs, "limits", return_value=(2, 50 * 1024 * 1024)),
+			patch.object(MariaDBStream, "count_rows", return_value=None),
+			spy(MariaDBStream, "stream_rows", order),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		job.reload()
+		self.assertEqual(job.status, "too large")
+		self.assertEqual(job.error, str(streaming.too_many_rows(2)))
+		self.assertEqual(order, ["stream_rows"])
+		self.assertFalse(job.file)
+
 	def test_run_relies_on_the_ten_minute_defaults(self):
 		# run() builds both objects without a `seconds` argument.
 		for cls in (Watchdog, MariaDBStream):
 			self.assertEqual(inspect.signature(cls).parameters["seconds"].default, 600, cls.__name__)
+		self.assertEqual(inspect.signature(MariaDBStream.count_rows).parameters["seconds"].default, 3)
 
 	def test_pause_schedules_retry_five_minutes_out(self):
 		job = self.job()
