@@ -4,7 +4,7 @@
 // an optional model-written headline. It imposes no opinion on which fields matter
 // or what to total - that is the model's job, since it knows the doctype.
 // Relative, not "@/": actionSummary.test.js runs under plain `node --test`.
-import { isFieldMissing, removedSavedRows } from "./draftApply.js";
+import { checkToYesNo, isFieldMissing, removedSavedRows } from "./draftApply.js";
 
 export function proposedFields(action) {
 	return (action.fields || [])
@@ -43,7 +43,9 @@ export function lineItemSummary(table, computed) {
 			const own = r[c.fieldname] ?? "";
 			const v = computed && computed[i] ? computed[i][c.fieldname] : null;
 			const fill = !!c.read_only && String(own) === "" && v != null && v !== "";
-			cells.push(fill ? computedText(c, v) : own);
+			// A Check column reads Yes/No (a blank stays blank), not "1" / "false".
+			const shown = c.fieldtype === "Check" && String(own) !== "" ? checkToYesNo(own) : own;
+			cells.push(fill ? computedText(c, v) : shown);
 			flags.push(fill);
 			if (fill) filled.add(c.label);
 		}
@@ -129,6 +131,7 @@ const CARD_KINDS = new Set([
 	"skill",
 	"wiki",
 	"import",
+	"schedule",
 ]);
 
 // The structured card for a parked action ({kind, ...}), or null when the server
@@ -345,11 +348,49 @@ const RECEIPT_VERB = {
 	// job) - "Ran"/"Created" would falsely claim it already finished (Slice A ends at
 	// the queue; the completion tell is Slice B).
 	run_import: { past: "Queued", present: "queue" },
+	// A one-time macro: "Scheduled “Review comments” to run once".
+	schedule_run: { past: "Scheduled", present: "schedule" },
 };
 
 function pluralize(word, n) {
 	if (n === 1 || !word) return word;
 	return /[^aeiou]y$/i.test(word) ? word.slice(0, -1) + "ies" : word + "s";
+}
+
+// A prompt's start, for a receipt with no name to show: "Check the comments on …".
+function shortPrompt(prompt) {
+	const text = String(prompt || "")
+		.replace(/\s+/g, " ")
+		.trim();
+	return text.length > 40 ? `${text.slice(0, 40).trimEnd()}…` : text;
+}
+
+// "2 Nov 2026, 9:30 am" from a site-time "YYYY-MM-DD HH:MM[:SS]" (read as stored, the
+// clock the run fires on), or "" when it is not one.
+function scheduleWhen(value) {
+	const text = String(value || "");
+	// One with its own offset ("...Z", "+05:30") is another clock than the site's the
+	// run fires on: say no time rather than the wrong one.
+	if (/(Z|[+-]\d{2}:?\d{2})$/.test(text.trim())) return "";
+	const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})/.exec(text);
+	if (!m) return "";
+	const months = [
+		"Jan",
+		"Feb",
+		"Mar",
+		"Apr",
+		"May",
+		"Jun",
+		"Jul",
+		"Aug",
+		"Sep",
+		"Oct",
+		"Nov",
+		"Dec",
+	];
+	const hour = Number(m[4]);
+	const clock = `${hour % 12 || 12}:${m[5]} ${hour < 12 ? "am" : "pm"}`;
+	return `${Number(m[3])} ${months[Number(m[2]) - 1]} ${m[1]}, ${clock}`;
 }
 
 export function docUrl(doctype, name) {
@@ -452,7 +493,16 @@ export function receiptView(tool, args, result, outcome) {
 	}
 
 	let subject;
-	if (isEmail) {
+	if (tool === "schedule_run") {
+		// The macro it made or scheduled, linked to its page in the app, and when.
+		const label =
+			data.macro_name || args.title || args.macro || shortPrompt(args.prompt) || "the work";
+		const when = scheduleWhen(data.run_at || args.run_at);
+		subject = `“${label}” to run once${when ? ` on ${when}` : ""}`;
+		targets = data.macro
+			? [{ name: data.macro_name || data.macro, url: data.link || "" }]
+			: [];
+	} else if (isEmail) {
 		subject = `${count} ${count === 1 ? "recipient" : "recipients"}`;
 	} else if (count === 1 && names.length === 1) {
 		subject = `${doctype} ${names[0]}`;

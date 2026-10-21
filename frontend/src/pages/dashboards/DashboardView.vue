@@ -117,6 +117,14 @@
 					label="Everyone"
 				/>
 				<Badge v-else variant="subtle" theme="gray" label="Private" />
+				<Button
+					class="ml-auto"
+					label="Refresh"
+					iconLeft="refresh-cw"
+					:loading="canvas?.loading"
+					:disabled="!canvas || exporting || canvas?.loading"
+					@click="refreshData"
+				/>
 			</div>
 			<p v-if="detail.description" class="px-5 pt-1 text-p-sm text-ink-gray-6">
 				{{ detail.description }}
@@ -286,6 +294,12 @@ async function load() {
 	} finally {
 		loading.value = false;
 	}
+}
+
+function refreshData() {
+	if (!canvas.value || canvas.value.loading || exporting.value) return;
+	filterErrors.value = {};
+	canvas.value.rebuild();
 }
 
 function goBack() {

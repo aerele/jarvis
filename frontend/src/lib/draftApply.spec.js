@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
 	alignComputedRows,
@@ -17,6 +17,8 @@ import {
 	tableChanged,
 	tableRowsPayload,
 	toPanelRow,
+	allRowFields,
+	draftParentDoc,
 } from "./draftApply";
 
 describe("isFieldWritable", () => {
@@ -443,5 +445,157 @@ describe("alignComputedRows (#647)", () => {
 	it("gives up when ERPNext returns a different number of rows", () => {
 		expect(alignComputedRows(table, [{ amount: 10 }])).toBeNull();
 		expect(alignComputedRows(table, undefined)).toBeNull();
+	});
+});
+
+describe("draftParentDoc: the record as a child row's rules read it", () => {
+	it("defaults, then saved and proposed values, then the panel's values, plus name and docstatus", () => {
+		const doc = draftParentDoc({
+			doctype: "Sales Order",
+			docName: "SO-1",
+			docstatus: 1,
+			parentDefaults: { update_stock: "1", currency: "INR" },
+			linkContext: { currency: "USD", customer: "A" },
+			fields: [{ fieldname: "customer", control: "data", value: "B" }],
+		});
+		expect(doc).toEqual({
+			update_stock: "1",
+			currency: "USD",
+			customer: "B",
+			doctype: "Sales Order",
+			name: "SO-1",
+			docstatus: 1,
+		});
+		expect(draftParentDoc(null)).toEqual({});
+	});
+	it("a blank panel field leaves its default in place", () => {
+		const doc = draftParentDoc({
+			doctype: "Sales Order",
+			parentDefaults: { currency: "INR" },
+			linkContext: {},
+			fields: [{ fieldname: "currency", control: "link", value: "" }],
+		});
+		expect(doc.currency).toBe("INR");
+	});
+});
+
+describe("row form fields: a row carries and saves every field of its form", () => {
+	const col = (fieldname, fieldtype = "Data", extra = {}) => ({
+		fieldname,
+		label: fieldname,
+		fieldtype,
+		options: "",
+		reqd: 0,
+		read_only: 0,
+		...extra,
+	});
+	const table = {
+		fieldname: "items",
+		columns: [col("item_code", "Link"), col("qty", "Float")],
+		formFields: [
+			col("item_code", "Link"),
+			col("qty", "Float"),
+			{ fieldname: "", fieldtype: "Section Break", label: "More" },
+			col("discount_percentage", "Percent"),
+			col("is_free_item", "Check"),
+			col("amount", "Currency", { read_only: 1 }),
+		],
+	};
+
+	it("allRowFields: columns, then the form's other fields, breaks and repeats left out", () => {
+		expect(allRowFields(table).map((f) => f.fieldname)).toEqual([
+			"item_code",
+			"qty",
+			"discount_percentage",
+			"is_free_item",
+			"amount",
+		]);
+		expect(allRowFields({ columns: [col("a")] }).map((f) => f.fieldname)).toEqual(["a"]);
+	});
+
+	it("a create sends a field filled in the row form, typed by its meta", () => {
+		const row = {
+			item_code: "I",
+			qty: "2",
+			discount_percentage: "10",
+			is_free_item: "1",
+			amount: "",
+		};
+		expect(coerceRow(table, row, "create")).toEqual({
+			item_code: "I",
+			qty: 2,
+			discount_percentage: 10,
+			is_free_item: 1,
+		});
+	});
+
+	it("an update sends only a changed row-form field of a saved row, never a read-only one", () => {
+		const saved = [
+			{
+				name: "r1",
+				item_code: "I",
+				qty: 2,
+				discount_percentage: 0,
+				is_free_item: 0,
+				amount: 200,
+			},
+		];
+		const t = { ...table, rows: [toPanelRow(allRowFields(table), saved[0])] };
+		expect(tableChanged(t, saved)).toBe(false);
+		t.rows[0].discount_percentage = "15";
+		t.rows[0].amount = "999";
+		expect(tableChanged(t, saved)).toBe(true);
+		expect(tableRowsPayload(t, saved)).toEqual([{ name: "r1", discount_percentage: 15 }]);
+	});
+
+	it("toPanelRow keeps a saved value outside the grid, so it is not shown blank", () => {
+		const r = toPanelRow(allRowFields(table), {
+			name: "r1",
+			item_code: "I",
+			discount_percentage: 5,
+		});
+		expect(r).toMatchObject({ __name: "r1", discount_percentage: "5" });
+	});
+
+	it("the panel-only open flag on a row is never sent", () => {
+		const row = { item_code: "I", qty: "1", __open: true };
+		expect(coerceRow(table, row, "create")).toEqual({ item_code: "I", qty: 1 });
+	});
+});
+
+describe("the parsed saved rows are cached for the last 12 tables", () => {
+	const json = (tag, n) => JSON.stringify([{ name: `${tag}-${n}`, v: n }]);
+	it("keeps the last 12 strings and parses an older one again", async () => {
+		const { parseSavedRows } = await import("./draftApply");
+		const parse = vi.spyOn(JSON, "parse");
+		const parsed = (s) => parse.mock.calls.filter(([x]) => x === s).length;
+		try {
+			for (let n = 0; n < 12; n++) parseSavedRows(json("cap", n));
+			for (let n = 0; n < 12; n++) parseSavedRows(json("cap", n)); // all 12 still cached
+			for (let n = 0; n < 12; n++) expect(parsed(json("cap", n))).toBe(1);
+			parseSavedRows(json("cap", 12)); // a 13th pushes the oldest out
+			parseSavedRows(json("cap", 0));
+			expect(parsed(json("cap", 0))).toBe(2);
+			parseSavedRows(json("cap", 12)); // the newest is still there
+			expect(parsed(json("cap", 12))).toBe(1);
+		} finally {
+			parse.mockRestore();
+		}
+	});
+	it("a record with 6 filled tables parses each once across repeated renders", async () => {
+		const { parseSavedRows, savedRowsMap } = await import("./draftApply");
+		const parse = vi.spyOn(JSON, "parse");
+		try {
+			const tables = Array.from({ length: 6 }, (_, n) => json("six", n));
+			for (let render = 0; render < 5; render++)
+				for (const t of tables) {
+					parseSavedRows(t);
+					savedRowsMap(t);
+				}
+			for (const t of tables)
+				expect(parse.mock.calls.filter(([x]) => x === t)).toHaveLength(1);
+		} finally {
+			parse.mockRestore();
+		}
 	});
 });

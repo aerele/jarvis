@@ -1409,7 +1409,6 @@ class TestSkillAutorunPartition(FrappeTestCase):
 			frozenset(
 				{
 					"create_doc",
-					"create_docs",
 					"update_doc",
 					"submit_doc",
 					"run_import",
@@ -1431,9 +1430,19 @@ class TestSkillAutorunPartition(FrappeTestCase):
 		)
 
 	def test_never_set_is_the_trio_plus_create_custom_skill_and_call_connector(self):
+		# schedule_run joined the brake: an approved skill never sets up a later run.
 		self.assertEqual(
 			api._SKILL_AUTORUN_NEVER,
-			frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill", "call_connector"}),
+			frozenset(
+				{
+					"delete_doc",
+					"cancel_doc",
+					"amend_doc",
+					"create_custom_skill",
+					"call_connector",
+					"schedule_run",
+				}
+			),
 		)
 
 	def test_create_custom_skill_is_now_braked_in_both_modes(self):
@@ -1568,7 +1577,7 @@ class TestSkillAutorunGate(FrappeTestCase):
 		_stamp_autorun(conv)
 		docs = [{"doctype": "ToDo", "values": {"description": f"o{i}"}} for i in range(_MAX_BATCH + 1)]
 		with patch("jarvis.api.dispatch_confirmed") as disp:
-			r = api._run_tool("create_docs", {"docs": docs}, conversation=conv)
+			r = api._run_tool("create_doc", {"docs": docs}, conversation=conv)
 		self.assertFalse(r["ok"])
 		self.assertFalse(disp.called)
 		self.assertIn("too many records", r["error"]["message"])
@@ -1586,7 +1595,7 @@ class TestSkillAutorunGate(FrappeTestCase):
 
 		conv = _make_conv(TEST_USER)  # skill_autorun defaults 0
 		docs = [{"doctype": "ToDo", "values": {"description": f"o{i}"}} for i in range(_MAX_BATCH + 1)]
-		r = api._run_tool("create_docs", {"docs": docs}, conversation=conv)
+		r = api._run_tool("create_doc", {"docs": docs}, conversation=conv)
 		self.assertFalse(r["ok"])
 		self.assertIn("too many records", r["error"]["message"])
 		self.assertIn("confirm each one before starting the next", r["error"]["message"])

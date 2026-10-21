@@ -1,5 +1,6 @@
 <script setup>
 import { parkedByCard } from "@shared/lib/draftParked.js";
+import { reportToolsByAssistant } from "@shared/lib/reportScope.js";
 import {
 	computed,
 	defineAsyncComponent,
@@ -25,6 +26,7 @@ import { renderMarkdown } from "@shared/markdown.js";
 import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
 import { isShowCardRequest } from "../lib/showCardRequest.js";
+import { isImeKey } from "../lib/composerEnter.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
@@ -41,6 +43,12 @@ import { proposedLabel } from "../lib/cardAge.js";
 import { sortPendingCards } from "../lib/sortPendingCards.js";
 import { mergePendingSources, withExcluded } from "../lib/pendingResync.js";
 import {
+	heldNewestSeq,
+	mergeNewestPage,
+	prependOlderPage,
+	refreshNames,
+} from "@shared/lib/historyPaging.js";
+import {
 	discardedTokens,
 	isRecentCard,
 	markCardsEarlier,
@@ -48,6 +56,9 @@ import {
 } from "../lib/typedCardReply.js";
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
+import ExportCard from "@shared/components/chat/ExportCard.vue";
+import { exportSummary } from "@shared/lib/exportJobs.js";
+import ReportScope from "../components/ReportScope.vue";
 import Composer from "../components/Composer.vue";
 import {
 	boundedDelivery,
@@ -85,6 +96,11 @@ const webChatUrl = computed(() =>
 	convId.value ? `/jarvis/c/${encodeURIComponent(convId.value)}` : "/jarvis/"
 );
 const messages = ref([]);
+// History paging (#715 F13): `messages` is the newest page plus the older pages the
+// reader scrolled up to; pending cards older than all of them ride in olderPending.
+const historyPaging = ref({ hasMore: false, before: null, newest: null });
+const olderPending = ref([]);
+const loadingOlder = ref(false);
 const input = ref("");
 const loading = ref(false);
 const sendBusy = ref(false);
@@ -413,6 +429,9 @@ const items = computed(() => {
 	return out;
 });
 
+// Report receipts bound to their answer by tool_call_ids, never by position.
+const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value));
+
 const lastAssistantKey = computed(() => {
 	const assistants = items.value.filter((i) => i.type === "assistant" && i.msg);
 	return assistants.length ? assistants[assistants.length - 1].key : "";
@@ -439,6 +458,7 @@ function atBottom() {
 const follow = ref(true);
 function onScroll() {
 	follow.value = atBottom();
+	if (scroller.value && scroller.value.scrollTop < 200) loadOlder({ auto: true });
 }
 // Follow the newest text only while `follow` holds (parked at the bottom) AND no
 // reply is streaming (`live`): chasing the bottom mid-stream drags the line you
@@ -453,7 +473,7 @@ async function scrollToBottom(force = false) {
 }
 
 // ── loading ─────────────────────────────────────────────────────────────────
-async function load(force = false) {
+async function load(force = false, staleRetry = true) {
 	const cid = convId.value;
 	const generation = viewGeneration;
 	const ticket = ++loadGeneration;
@@ -464,10 +484,18 @@ async function load(force = false) {
 	follow.value = true;
 	loading.value = true;
 	try {
-		const d = await api.getConversation(cid);
+		// Only the newest page is re-read; older rows on screen stay (#715 F13). `after`
+		// lets the page reach back to the newest row held so the older pages join it.
+		const refresh = refreshNames(messages.value);
+		const after = heldNewestSeq(messages.value, historyPaging.value);
+		if (!messages.value.length) olderArmed = false; // an open, not a resync
+		const d = await api.getConversation(cid, { refresh, after });
 		if (!current()) return;
 		conversation.value = d?.conversation || null;
-		messages.value = d?.messages || [];
+		const page = mergeNewestPage(messages.value, historyPaging.value, d, refresh);
+		messages.value = page.messages;
+		historyPaging.value = page.paging;
+		olderPending.value = d?.older_pending || [];
 		sendRecovery.reconcile(cid, messages.value);
 		const row = store.conversations.find((c) => c.name === convId.value);
 		if (row) starred.value = !!row.starred;
@@ -492,10 +520,64 @@ async function load(force = false) {
 			queueGeneration++;
 		}
 		await scrollToBottom(force);
+		// An older page loaded while this read was in flight brought pending cards it
+		// did not ask about: refresh once more so none stays confirmable once resolved.
+		if (page.stale.length && staleRetry) load(false, false);
 	} catch (e) {
 		console.error("Jarvis PWA: failed to load conversation", e);
 	} finally {
 		if (current()) loading.value = false;
+		armOlderNextFrame();
+	}
+}
+
+// The page above the oldest loaded row, put in place with the rows the reader was
+// looking at held still (their distance from the bottom does not change). A failed
+// fetch pauses the scroll trigger for a while (the button still works), so scrolling
+// at the top of a chat that cannot load does not repeat the request and its banner.
+let olderFailedAt = 0;
+const OLDER_RETRY_PAUSE_MS = 10000;
+// The scroll trigger waits for an open to land on the newest message, and for a
+// prepend's hold to be applied: the scrollTop of those in-between frames is not
+// the reader's.
+let olderArmed = false;
+function armOlderNextFrame() {
+	requestAnimationFrame(() => {
+		olderArmed = true;
+	});
+}
+async function loadOlder({ auto = false } = {}) {
+	const cid = convId.value;
+	const generation = viewGeneration;
+	const paging = historyPaging.value;
+	if (!cid || !paging.hasMore || loadingOlder.value) return;
+	if (auto && (!olderArmed || Date.now() - olderFailedAt < OLDER_RETRY_PAUSE_MS)) return;
+	loadingOlder.value = true;
+	try {
+		const d = await api.getConversation(cid, { before: paging.before });
+		if (!isCurrent(cid, generation) || historyPaging.value.before !== paging.before) return;
+		const el = scroller.value;
+		const fromBottom = el ? el.scrollHeight - el.scrollTop : null;
+		olderArmed = false;
+		const page = prependOlderPage(messages.value, historyPaging.value, d);
+		messages.value = page.messages;
+		historyPaging.value = page.paging;
+		await nextTick();
+		const hold = () => {
+			if (scroller.value && fromBottom !== null)
+				scroller.value.scrollTop = scroller.value.scrollHeight - fromBottom;
+		};
+		hold();
+		requestAnimationFrame(hold); // again once late layout (charts, images) lands
+		armOlderNextFrame();
+	} catch (e) {
+		console.error("Jarvis PWA: failed to load earlier messages", e);
+		olderFailedAt = Date.now();
+		if (isCurrent(cid, generation))
+			errorBanner.value =
+				"Couldn't load earlier messages. Tap Load earlier messages to try again.";
+	} finally {
+		loadingOlder.value = false;
 	}
 }
 
@@ -545,7 +627,7 @@ async function recheckPending() {
 async function loadPending(source) {
 	const cid = convId.value;
 	if (!cid) return;
-	const fromRows = (messages.value || [])
+	const fromRows = [...olderPending.value, ...(messages.value || [])]
 		.filter(
 			(m) =>
 				m.role === "tool" &&
@@ -1046,6 +1128,12 @@ async function toggleStar() {
 	}
 }
 
+// Enter that confirms an IME candidate must not save a half-typed title.
+function onRenameEnter(e) {
+	if (isImeKey(e)) return;
+	saveRename();
+}
+
 async function saveRename() {
 	const t = renameText.value.trim();
 	if (!t) return;
@@ -1246,9 +1334,10 @@ function onEvent(p) {
 			load();
 			break;
 
+		case "export:changed":
 		case "import:finished":
-			// Slice B: a background CSV import finished; the bench already posted
-			// the "✓ ..." completion message into this conversation. The guard
+			// A background export or import changed; the bench already persisted
+			// its card or completion message in this conversation. The guard
 			// above already confirmed this is the open conversation, so pull it
 			// in the same way canvas/conversation:renamed do — a durable reload,
 			// since this frame carries no message body to splice in by hand.
@@ -1293,6 +1382,8 @@ watch(
 		restoreDraft();
 		store.clearUnread(convId.value);
 		messages.value = [];
+		historyPaging.value = { hasMore: false, before: null, newest: null };
+		olderPending.value = [];
 		conversation.value = null;
 		pending.value = [];
 		settledTokens.value = new Set(); // a settled token belonged to the previous conversation
@@ -1384,6 +1475,22 @@ onUnmounted(() => {
 	</div>
 
 	<div ref="scroller" class="jv-scroll jv-thread" @scroll.passive="onScroll">
+		<!-- History paging (#715 F13): older pages load near the top; same action. -->
+		<!-- Stays focusable while loading (aria-disabled, loadOlder ignores the tap);
+		     the status line announces the load. -->
+		<div v-if="historyPaging.hasMore && messages.length" style="text-align: center">
+			<button
+				type="button"
+				class="jv-btn is-ghost"
+				:aria-disabled="loadingOlder ? 'true' : 'false'"
+				@click="loadOlder()"
+			>
+				Load earlier messages
+			</button>
+			<div role="status" aria-live="polite" style="font-size: 13px; color: var(--ink5)">
+				{{ loadingOlder ? "Loading earlier messages…" : "" }}
+			</div>
+		</div>
 		<div v-if="!items.length && !localRequests.length && !live && !loading" class="jv-empty">
 			<BrandMark :size="52" :mood="holdActive ? 'upgrading' : 'star'" />
 			<div style="font-size: 16px; font-weight: 600; color: var(--ink9)">
@@ -1409,7 +1516,9 @@ onUnmounted(() => {
 			     bubble is what made this screen look like a toy next to the app. -->
 			<div v-else class="jv-msg-agent">
 				<template v-if="it.msg">
-					<div v-if="it.view.html" class="jv-md" v-html="it.view.html" />
+					<ReportScope :tools="reportToolsByTurn[it.key] || []" />
+					<ExportCard v-if="exportSummary(it.msg)" :summary="exportSummary(it.msg)" />
+					<div v-else-if="it.view.html" class="jv-md" v-html="it.view.html" />
 					<div v-else-if="it.view.empty" class="jv-msg-error">
 						{{ agentName }} didn't return a reply for this turn. Try asking again.
 					</div>
@@ -1690,7 +1799,7 @@ onUnmounted(() => {
 					v-model="renameText"
 					class="jv-input"
 					placeholder="Chat title"
-					@keydown.enter="saveRename"
+					@keydown.enter="onRenameEnter"
 				/>
 				<div v-if="menuError" class="jv-menu-error">{{ menuError }}</div>
 				<div class="jv-menu-actions">

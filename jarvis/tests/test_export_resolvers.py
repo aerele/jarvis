@@ -1,3 +1,4 @@
+import re
 from unittest import mock
 
 import frappe
@@ -6,6 +7,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._export import resolvers
 from jarvis.tools._export.resolvers import from_query
+from jarvis.tools.get_list import _child_table_parents
 
 
 class TestFromQuery(FrappeTestCase):
@@ -56,7 +58,54 @@ class TestFromQuery(FrappeTestCase):
 		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 2):
 			with self.assertRaises(InvalidArgumentError) as ctx:
 				from_query("ToDo", filters={"description": ["like", "resolver-test-%"]}, fields=["name"])
-		self.assertIn("too many to export", str(ctx.exception))
+		message = str(ctx.exception)
+		self.assertIn("more than 2 rows", message)
+		self.assertIn("Narrow the filter", message)
+		self.assertNotIn("not yet available", message)
+
+	def test_site_setting_can_only_lower_the_immediate_row_limit(self):
+		def limit_for(value):
+			with mock.patch.dict(frappe.conf, {"jarvis_export_immediate_row_limit": value}):
+				return resolvers.immediate_row_limit()
+
+		self.assertEqual(resolvers.immediate_row_limit(), 20_000)
+		self.assertEqual(limit_for(5000), 5000)
+		self.assertEqual(limit_for("5000"), 5000)
+		# Raising is refused: the plugin aborts a call at 30 s, which is why 20,000 exists.
+		self.assertEqual(limit_for(50_000), 20_000)
+		# Unusable values fall back to the default instead of disabling or breaking exports.
+		for bad in ("abc", "", 0, -5, "0", None, True, False, [], 1.5e-3):
+			with self.subTest(value=bad):
+				self.assertEqual(limit_for(bad), 20_000)
+		# The upper clamp follows the module ceiling, which tests lower on purpose.
+		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 2):
+			self.assertEqual(limit_for(50_000), 2)
+
+	def test_lowered_site_setting_moves_the_split_and_names_the_number(self):
+		filters = {"description": ["like", "resolver-test-%"]}
+		with mock.patch.dict(frappe.conf, {"jarvis_export_immediate_row_limit": 2}):
+			with self.assertRaisesRegex(resolvers.NeedsBackground, "more than 2 rows"):
+				from_query("ToDo", filters=filters, fields=["name"])
+			spec = {
+				"from": "ToDo",
+				"select": ["name"],
+				"where": [{"field": "description", "op": "like", "value": "resolver-test-%"}],
+			}
+			with self.assertRaisesRegex(resolvers.NeedsBackground, "more than 2 rows"):
+				resolvers.from_spec(spec)
+		# Without the setting the same three rows are exported at once.
+		self.assertEqual(from_query("ToDo", filters=filters, fields=["name"]).total, 3)
+
+	def test_stray_parent_doctype_is_dropped_for_a_normal_doctype(self):
+		# parent_doctype means something only for a child table; it must not turn a
+		# normal query into a "DocType not found" error.
+		m = from_query(
+			"ToDo",
+			filters={"description": ["like", "resolver-test-%"]},
+			fields=["name"],
+			parent_doctype="User",
+		)
+		self.assertEqual(m.total, 3)
 
 	def test_exact_ceiling_does_not_raise(self):
 		# Boundary: exactly ceiling rows (N == ceiling) must SUCCEED, not raise.
@@ -192,3 +241,49 @@ class TestFieldLevelAlignment(FrappeTestCase):
 			self.assertIn(row[s_idx], (None, ""))
 			# ...and "tag" (its real value) sits under the "tag" header, not shifted.
 			self.assertTrue(str(row[t_idx]).startswith("u"))
+
+
+class TestFromQueryGateTexts(FrappeTestCase):
+	"""The exact words (and the order) the agent's error handling keys on.
+
+	The class-only versions above survive a rewording; these do not. The background export
+	is being moved onto the same gate, so the immediate texts are pinned first."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		super().tearDown()
+
+	def test_doctype_is_required(self):
+		with self.assertRaisesRegex(InvalidArgumentError, "^doctype is required$"):
+			from_query(None, fields=["name"])
+
+	def test_guest_has_no_read_permission_on_user(self):
+		frappe.set_user("Guest")
+		with self.assertRaisesRegex(PermissionDeniedError, "^no read permission on User$"):
+			from_query("User", fields=["name"])
+
+	def test_star_fields_tell_the_caller_to_name_columns(self):
+		with self.assertRaisesRegex(InvalidArgumentError, "name the columns you want"):
+			from_query("ToDo", fields=["*"])
+
+	def test_an_unknown_doctype_is_reported_before_the_star_fields(self):
+		with self.assertRaises(InvalidArgumentError) as ctx:
+			from_query("JV No Such", fields=["*"])
+		self.assertIn("unknown DocType: JV No Such", str(ctx.exception))
+		self.assertNotIn("name the columns", str(ctx.exception))
+
+	def test_the_child_table_hint_comes_before_the_permission_check(self):
+		parents = _child_table_parents("Has Role")
+		self.assertTrue(parents)
+		frappe.set_user("Guest")
+		with self.assertRaisesRegex(InvalidArgumentError, re.escape(f"parent_doctype='{parents[0]}'")):
+			from_query("Has Role", fields=["role"])
+
+	def test_a_child_export_needs_export_permission_on_the_parent(self):
+		with mock.patch("frappe.permissions.can_export", side_effect=lambda d, *a, **k: d != "User"):
+			with self.assertRaisesRegex(PermissionDeniedError, "^no export permission on User$"):
+				from_query("Has Role", parent_doctype="User", fields=["role"])

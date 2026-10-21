@@ -200,12 +200,12 @@ def _add_warning(card: dict, preview) -> None:
 def _card_of(tool: str, args: dict, preview) -> dict | None:
 	would = preview.get("would") if isinstance(preview, dict) else None
 	full = _is_sensitive(preview)
-	if tool in ("create_doc", "create_docs", "update_doc"):
+	if tool in ("create_doc", "update_doc"):
 		# Every value the card reads from the call is read as the write stores it.
 		args = _stored_args(tool, args)
 	bulk_key, bulk_items = _bulk(args)
-	if tool in ("create_doc", "create_docs"):
-		if bulk_key == "docs" or tool == "create_docs":
+	if tool == "create_doc":
+		if bulk_key == "docs":
 			return _batch_create_card(args, would, full)
 		return _create_card(args, would, full)
 	if tool == "update_doc" and not bulk_key:
@@ -245,6 +245,8 @@ def _card_of(tool: str, args: dict, preview) -> dict | None:
 		return _method_card(args)
 	if tool == "run_import":
 		return _import_card(args, preview)
+	if tool == "schedule_run":
+		return _schedule_card(args)
 	return None
 
 
@@ -400,7 +402,7 @@ def _stored_args(tool: str, args: dict) -> dict:
 			return values
 
 	out = dict(args)
-	if tool in ("create_doc", "create_docs"):
+	if tool == "create_doc":
 		if isinstance(out.get("values"), dict):
 			out["values"] = stored(out.get("doctype"), out["values"])
 		if isinstance(out.get("docs"), list):
@@ -1081,6 +1083,37 @@ def _wiki_card(args: dict) -> dict:
 		"mode": mode,
 		"body": fmt(body_src, limit=_MAX_BODY),  # the body the TOOL will write
 	}
+
+
+def _schedule_card(args: dict) -> dict:
+	"""When the one-time run happens and what it does: the new macro's name and its
+	prompt, or the existing macro it runs."""
+	prompt = str(args.get("prompt") or "").strip()
+	return {
+		"kind": "schedule",
+		"when": _schedule_when(args.get("run_at")),
+		"name": fmt(" ".join(str(args.get("title") or "").split())),
+		"macro": "" if prompt else fmt(str(args.get("macro") or "")),
+		"prompt": fmt(prompt, limit=_MAX_BODY),
+	}
+
+
+def _schedule_when(run_at) -> str:
+	"""``run_at`` as people read it, on the site's clock and naming that clock (the
+	time the scheduler fires on): "Tue, 15 Jan 2030 at 9:30 am (Asia/Kolkata)". The
+	raw text when it is not a date and time (the tool then refuses it anyway). Read
+	exactly as the tool reads it (``site_datetime``), so an offset is converted the
+	same way on the card and in the run."""
+	from frappe.utils import get_system_timezone
+
+	from jarvis.tools.schedule_run import site_datetime
+
+	moment = site_datetime(run_at)
+	if not moment:
+		return fmt(str(run_at or ""))
+	hour = moment.hour % 12 or 12
+	clock = f"{hour}:{moment:%M} {'am' if moment.hour < 12 else 'pm'}"
+	return fmt(f"{moment:%a}, {moment.day} {moment:%b %Y} at {clock} ({get_system_timezone()})")
 
 
 def _method_card(args: dict) -> dict:

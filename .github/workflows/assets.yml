@@ -1,0 +1,17 @@
+name: Pre-build assets
+
+# Builds the JS, CSS and SPA files of each pushed commit with Pilot's workflow and puts
+# them on the GitHub release assets-<branch>. Benches download these files and do not
+# build. The Frappe Marketplace check requires them for each listed release.
+# See https://github.com/frappe/pilot/blob/develop/docs/prebuilt-assets.md
+
+on:
+  push:
+    branches: [version-15, version-16]
+
+jobs:
+  assets:
+    name: Pre-build assets
+    uses: frappe/pilot/.github/workflows/app-assets.yml@develop
+    permissions:
+      contents: write

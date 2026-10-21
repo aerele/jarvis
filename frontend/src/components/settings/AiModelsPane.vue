@@ -22,24 +22,39 @@
 			}}</span>
 		</template>
 
-		<!-- FIRST probe only. Both branches REPLACE the editor, so gating them on
-		     "a probe is in flight" (which is what directSubLoading alone means)
-		     unmounted LlmPoolEditor on every background re-probe and rebuilt it
-		     with empty state. See loadDirectSub for why that silently broke
-		     Disconnect (jarvis#574). Once a probe has succeeded the editor stays
-		     mounted for the life of the pane. -->
-		<div v-if="!directSubReady && directSubLoading" class="text-p-sm text-ink-gray-6">
-			Loading…
-		</div>
-
+		<!-- FIRST probe failed: nothing trustworthy to show yet, so Retry shows in
+		     place of the spinner and the editor below stays hidden. The editor itself
+		     stays mounted for the life of the pane: unmounting it rebuilt it with empty
+		     state and silently broke Disconnect (jarvis#574). -->
 		<Button
-			v-else-if="!directSubReady && directSubErr"
+			v-if="!directSubReady && directSubErr"
 			variant="subtle"
 			label="Retry"
 			iconLeft="refresh-cw"
 			:loading="directSubLoading"
 			@click="loadDirectSub"
 		/>
+
+		<template v-else>
+			<!-- One spinner for the whole first load: the probe AND the editor's own
+			     fetches (ConnectorsPane's markup). The editor mounts at once, hidden,
+			     so its fetches run beside the probe instead of after it. -->
+			<div v-if="!firstLoadDone" class="grid place-items-center py-10">
+				<JvSpinner />
+			</div>
+			<!-- A re-probe that failed keeps its retry affordance, but BESIDE the
+			     editor rather than instead of it: the last good directStatus is
+			     still on screen and still correct. -->
+			<Button
+				v-if="firstLoadDone && directSubErr"
+				class="mb-3"
+				variant="subtle"
+				label="Retry"
+				iconLeft="refresh-cw"
+				:loading="directSubLoading"
+				@click="loadDirectSub"
+			/>
+		</template>
 
 		<!-- Unified failover-list editor: a chat subscription, API keys, and
 		     multi-model failover pools all live in one list + master-detail
@@ -48,33 +63,19 @@
 		     synthesizes a read-oriented row for it (Reconnect embeds
 		     DirectSubscriptionCard inline; Remove disconnects) without ever
 		     round-tripping it through save_llm_pool. -->
-		<template v-else>
-			<!-- A re-probe that failed keeps its retry affordance, but BESIDE the
-			     editor rather than instead of it: the last good directStatus is
-			     still on screen and still correct. -->
-			<Button
-				v-if="directSubErr"
-				class="mb-3"
-				variant="subtle"
-				label="Retry"
-				iconLeft="refresh-cw"
-				:loading="directSubLoading"
-				@click="loadDirectSub"
+		<div v-show="firstLoadDone" class="jv-pane-fill h-full">
+			<LlmPoolEditor
+				ref="poolEditor"
+				:editable="isSM"
+				:directStatus="directSub"
+				:expiredEntries="subscriptionNotice.expired"
+				:reconnectRef="reconnectRef"
+				@reconnect-handled="reconnectRef = ''"
+				:hostScrim="true"
+				@saved="onSaved"
+				@direct-changed="onDirectChanged"
 			/>
-			<div class="jv-pane-fill h-full">
-				<LlmPoolEditor
-					ref="poolEditor"
-					:editable="isSM"
-					:directStatus="directSub"
-					:expiredEntries="subscriptionNotice.expired"
-					:reconnectRef="reconnectRef"
-					@reconnect-handled="reconnectRef = ''"
-					:hostScrim="true"
-					@saved="onSaved"
-					@direct-changed="onDirectChanged"
-				/>
-			</div>
-		</template>
+		</div>
 
 		<!-- Pane-wide busy scrim (jarvis#559): LlmPoolEditor's own scrim only ever
 		     covered its own box, so the pane's status line below it (same editor,
@@ -102,6 +103,7 @@ import SettingsPane from "@/components/settings/SettingsPane.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { isSyncDisconnected } from "@/lib/syncStatus";
 import { brand } from "@/branding";
+import { firstServerMessage, messageText } from "@/lib/errors";
 import { useShellStore } from "@/stores/shell";
 import {
 	subscriptionNotice,
@@ -159,6 +161,13 @@ const directSubErr = ref("");
 // not be torn down). Never reset: a later probe failing does not un-know the last
 // good answer.
 const directSubReady = ref(false);
+// The pane paints once: when the first probe has answered (or was never needed,
+// for a non-admin) AND the editor's own first load has settled. Neither flag goes
+// back to false, so a background re-probe or the reload after a save never puts
+// the spinner back over a live editor.
+const firstLoadDone = computed(
+	() => (directSubReady.value || !isSM) && !!poolEditor.value?.loaded
+);
 // SettingsPane's single error surface (design.md anti-pattern 16) takes a
 // short user-facing string; the retry Button sits in the body, the same
 // errorMessage/Retry split every migrated pane in this dialog uses.
@@ -174,7 +183,7 @@ async function loadDirectSub() {
 	errorMessage.value = "";
 	try {
 		// Race a client timeout so a hung probe can't strand the section on
-		// "Loading…" forever (the pool editor renders behind it).
+		// the spinner forever (the pool editor renders behind it).
 		const timeout = new Promise((_, rej) =>
 			setTimeout(() => rej(new Error("timed out")), 12000)
 		);
@@ -193,7 +202,9 @@ async function loadDirectSub() {
 		// button say the refresh failed.
 		if (!directSubReady.value) directSub.value = { is_direct_subscription: false };
 		directSubErr.value =
-			(e && (e.message || e._server_messages)) || "Couldn't load your AI connection.";
+			messageText(e && e.message) ||
+			messageText(firstServerMessage(e && e._server_messages)) ||
+			"Couldn't load your AI connection.";
 		errorMessage.value = "Couldn't load your AI connection.";
 	} finally {
 		directSubLoading.value = false;

@@ -489,6 +489,29 @@ function tableNote(t) {
 			</details>
 		</template>
 
+		<!-- schedule_run: work set to run once, later, as the user -->
+		<template v-else-if="card.kind === 'schedule'">
+			<div class="jv-pcard-head">
+				Run once<template v-if="card.name"> · {{ card.name }}</template>
+			</div>
+			<div class="jv-pcard-kv">
+				<span>When</span><b>{{ card.when }}</b>
+			</div>
+			<div v-if="card.macro" class="jv-pcard-kv">
+				<span>Macro</span><b>{{ card.macro }}</b>
+			</div>
+			<details v-if="card.prompt" class="jv-pcard-expand" open>
+				<summary>What it will do</summary>
+				<pre class="jv-pcard-body">{{ card.prompt }}</pre>
+			</details>
+			<p class="jv-pcard-caption jv-pcard-caption--after">
+				Runs once as you, within a few minutes of that time, then the schedule switches
+				itself off. You get a notification when it finishes. If it needs to change
+				something, it waits for you to confirm it in that chat. To cancel or move it later,
+				open the macro from the receipt.
+			</p>
+		</template>
+
 		<!-- run_method -->
 		<template v-else-if="card.kind === 'method'">
 			<div class="jv-pcard-kv">
@@ -1010,6 +1033,9 @@ html[data-theme="dark"] .jv-pcard {
 	font-size: 11.5px;
 	color: var(--pc-text-3);
 	margin: 0 0 8px;
+}
+.jv-pcard-caption--after {
+	margin-top: 8px;
 }
 .jv-pcard-recs {
 	display: flex;

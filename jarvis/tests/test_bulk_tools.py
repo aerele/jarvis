@@ -1,7 +1,7 @@
 """Bulk (list-param) overload behaviour for the write tools + the gating helpers.
 
 The shared atomic engine (run_atomic_batch: savepoint rollback + callback-queue
-restore) is already exercised by test_create_docs; here we verify each tool's
+restore) is exercised through create_doc's batch below; here we verify each tool's
 bulk branch wires into it (lean return, all-or-nothing rollback, validation) and
 that the api gate treats a bulk call correctly (never auto-applies create/update;
 routes consequential bulk writes to described-intent).

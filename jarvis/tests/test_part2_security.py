@@ -850,6 +850,36 @@ class TestSkillPromotionSurfacing(Part2Base):
 		self.assertIs(second.get("ok"), False)
 		self.assertIn("reason", second)
 
+	def test_reject_succeeds_when_the_skill_was_deleted(self):
+		# A delete leaves the request as history, its ``skill`` Link dangling; the
+		# reject save must not trip LinkValidationError and leave it Pending.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-orphan", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		frappe.delete_doc(SKILL, skill.name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 0, note="skill gone")
+		self.assertEqual(out.get("status"), "Rejected")
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Rejected")
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "reviewer"), REVIEWER)
+
+	def test_approve_refused_plainly_when_the_skill_was_deleted(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-orphan-ok", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		frappe.delete_doc(SKILL, skill.name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		with _as(REVIEWER):
+			with self.assertRaisesRegex(frappe.ValidationError, "source skill was deleted"):
+				custom_skills_api.decide_skill_promotion(req["request"], 1)
+		# Nothing was stamped: the reviewer can still reject it.
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+
 
 class TestSkillPromotionContentBinding(Part2Base):
 	"""CDX-SP-1: the approval is bound to an IMMUTABLE snapshot of the full content,

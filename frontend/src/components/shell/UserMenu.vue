@@ -1,7 +1,8 @@
 <template>
-	<Dropdown :options="menuOptions">
+	<Dropdown :options="menuOptions" @update:open="(open) => open && focusOpenMenu(triggerEl)">
 		<template #trigger="{ open }">
 			<button
+				ref="triggerEl"
 				class="jv-focus-ring relative flex h-12 items-center rounded-md py-2 duration-300 ease-in-out"
 				:class="
 					isCollapsed
@@ -52,6 +53,7 @@ import { computed, inject, onMounted, onUnmounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { Dropdown, FeatherIcon } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
+import { focusOpenMenu } from "@/lib/focusOpenMenu";
 import { useShellStore } from "@/stores/shell";
 import { useSupportStore } from "@/stores/support";
 import { useJarvisTheme } from "@/theme";
@@ -69,6 +71,9 @@ const props = defineProps({
 // the mark itself, reveals the blinking eyes. Two tiny handlers because the
 // hover surface is the parent button, wider than the mark JarvisMark owns.
 const brandPeek = ref(false);
+
+// The menu's button: the menu it controls is the one to focus when it opens.
+const triggerEl = ref(null);
 
 // Card title: brand.agentName ("Jarvis") in chat; "<brand.agentName> Support" on the support rail.
 const cardTitle = computed(() =>

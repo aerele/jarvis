@@ -238,6 +238,9 @@ after_migrate = [
 	# Re-send installed_apps to admin when the app set changed (the fleet
 	# gates skills/tool-denies off the admin-persisted list).
 	"jarvis.installed_apps_sync.after_migrate",
+	# File "Home/Jarvis Exports", where finished background exports are kept. A fresh install
+	# never reaches this hook; the first publish creates the folder then.
+	"jarvis.tools._export.jobs.after_migrate",
 ]
 
 # Scheduled Tasks
@@ -355,6 +358,14 @@ scheduler_events = {
 			# SWEEP_TIME_BUDGET_S.
 			# Cheap no-op (one query on a small table) when nothing is due.
 			"jarvis.chat.agent_scheduler.run_due_agent_audits",
+			"jarvis.tools._export.jobs.reap",
+			# Feedback outbox retry (admin-v2#715 F17): re-send stored feedback that
+			# admin has not acknowledged yet, with backoff, at most 6 rows a run, and
+			# stop at the first transient failure. Self-gating (skips a bench with no
+			# admin URL or credentials),
+			# never raises on an admin failure. Cheap no-op (one indexed query on a
+			# small table) when nothing is due.
+			"jarvis.chat.feedback_outbox.retry_due",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -492,6 +503,10 @@ scheduler_events = {
 		# admin past the retention window (the durable record lives in the admin's
 		# Jarvis Tenant Error). Keeps the local buffer small.
 		"jarvis.error_push.prune_pushed_client_errors",
+		# Feedback outbox hygiene (admin-v2#715 F17): delivered rows after 7 days,
+		# undelivered after 30, then the oldest above a 5000-row ceiling. Admin
+		# holds the durable copy of everything delivered.
+		"jarvis.chat.feedback_outbox.prune",
 		# Usage-dashboard Part A (task U1): Jarvis Turn Usage is an append-only
 		# per-turn accounting row written on every completed turn (see
 		# jarvis.chat.usage.record_turn_usage); without a sweep it grows
@@ -585,27 +600,41 @@ doc_events["Jarvis Personalise Question Rule"] = {
 # raises, never sprays RQ jobs under tests): see
 # jarvis.chat.role_profiles.on_user_update / enqueue_sync.
 doc_events["User"] = {
-	"on_update": "jarvis.chat.role_profiles.on_user_update",
+	"on_update": ["jarvis.chat.role_profiles.on_user_update", "jarvis.chat.sharing.on_user_update"],
+	"on_trash": "jarvis.chat.sharing.on_user_trash",
 }
 
 # Phase-0 admission (chat concurrency, WP-0): a deleted conversation must not
 # leave orphaned Jarvis Chat Turn rows behind (they would linger as ghost queued/
 # dispatching rows in the admission shard). Cascade-delete them on trash.
 doc_events["Jarvis Conversation"] = {
+	"on_update": "jarvis.chat.sharing.on_conversation_update",
 	"on_trash": [
 		"jarvis.chat.admission.on_conversation_trash",
 		# Slice B: delete the conversation's Jarvis Import Announcement rows so the
 		# Link never blocks deletion (LinkExistsError) or orphans the poll.
 		"jarvis.chat.import_announce.on_conversation_trash",
+		"jarvis.tools._export.jobs.on_conversation_trash",
 		# Pending actions: cancel + delete its chat cards (never an Executing one) and
 		# drop it from held rows' waiters.
 		"jarvis.chat.pending_actions.on_conversation_trash",
+		"jarvis.chat.sharing.on_conversation_trash",
 	],
 }
 
 # A pending action never blocks deleting the conversation it points at; the
 # on_trash hook above cleans it up instead.
-ignore_links_on_delete = ["Jarvis Pending Action"]
+# A skill promotion request never blocks deleting the skill it names, for its owner
+# or an admin (jarvis-admin-v2#720, D3). Its ``skill`` Link may then dangle: that is
+# expected, and the request's ``skill_name`` and content snapshots are the history.
+# The decide path already tolerates a deleted skill (a reject goes through, an
+# approve is refused). The hook is keyed on the doctype that HOLDS the Link, so a
+# Role or User a request names is not blocked by it either.
+ignore_links_on_delete = [
+	"Jarvis Pending Action",
+	"Jarvis Skill Promotion Request",
+	"Jarvis Conversation Share",
+]
 
 # ---------------------------------------------------------------------------
 # Jarvis Triggers (user-defined doc-event automations)
@@ -929,11 +958,26 @@ has_permission.update(
 # spanned a watchdog tick failed with "Your sign-in session was lost" (unknown_nonce). The
 # hash has no key TTL; each entry carries its own 10-minute expiry, and the sweep on every
 # begin (``oauth.api._gc_expired_nonces``) drops expired ones, so the hash stays bounded.
+#
+# jarvis:memory_seen: (#715 F09): the memory version each chat session was last shown
+# (``tools._user_memory.SEEN_PREFIX``), the base a memory save without ``base_version`` is
+# checked against. Without it every tick wiped every chat's base, and each chat's next
+# save came back as a conflict it had to re-read and merge. One-week TTL.
 persistent_cache_keys = [
+	"jarvis:query:",  # Saved result IDs retain their own 24-hour TTL across cache clears.
 	"jarvis:llm_switch",
 	"jarvis:macro_reconcile",
 	"jarvis:macro_snapshot_unreadable",
 	"jarvis:heartbeat_macro_health_log_hour",
 	"jarvis:subscription_",
 	"jarvis.oauth.codex_signin",
+	"jarvis:memory_seen:",
 ]
+
+# Durable background export state is owner-scoped, including direct REST reads.
+permission_query_conditions["Jarvis Export Job"] = (
+	"jarvis.jarvis.doctype.jarvis_export_job.jarvis_export_job.get_permission_query_conditions"
+)
+has_permission["Jarvis Export Job"] = (
+	"jarvis.jarvis.doctype.jarvis_export_job.jarvis_export_job.has_permission"
+)

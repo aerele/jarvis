@@ -12,5 +12,11 @@ export function initSocket() {
 	// host: on an http-only bench, dialling wss://host:443 silently never
 	// connects and chat only appears after a reload.
 	const protocol = port ? "http" : window.location.protocol.replace(":", "");
-	return io(`${protocol}://${host}${port}/${siteName}`, { withCredentials: true });
+	const socket = io(`${protocol}://${host}${port}/${siteName}`, { withCredentials: true });
+	socket.on("connect", () => window.dispatchEvent(new Event("jarvis:export-refresh")));
+	socket.on("jarvis:event", (event) => {
+		if (event?.kind?.startsWith("export:"))
+			window.dispatchEvent(new CustomEvent("jarvis:export-event", { detail: event }));
+	});
+	return socket;
 }

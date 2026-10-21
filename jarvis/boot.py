@@ -28,6 +28,8 @@ Keys we set:
   all (``jarvis.permissions.has_jarvis_access``). Lets the desk's
   floating Jarvis button send an unauthorized user to
   ``/jarvis-no-access`` instead of opening the chat panel.
+- ``jarvis_hide_shortcut_without_access`` - the optional site setting that
+  hides the Desk shortcut for users denied by ``jarvis_has_access``.
 - ``jarvis_site_setup_complete`` - whether the site has a Company yet.
   The same banner also gates on this, so a fresh install running
   ERPNext's own setup wizard is not simultaneously nagged to set up
@@ -81,6 +83,15 @@ def set_jarvis_boot(bootinfo):
 		bootinfo.jarvis_has_access = bool(has_jarvis_access())
 	except Exception:
 		bootinfo.jarvis_has_access = False  # fail-closed; the no-access page self-heals
+
+	# Visibility preference only: never changes the access verdict above. Missing
+	# values/older installations retain the existing shortcut and no-access route.
+	try:
+		bootinfo.jarvis_hide_shortcut_without_access = bool(
+			frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "hide_shortcut_without_access"))
+		)
+	except Exception:
+		bootinfo.jarvis_hide_shortcut_without_access = False
 
 	# Gates the same not-onboarded nudge on the SITE being set up first.
 	#

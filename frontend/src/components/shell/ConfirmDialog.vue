@@ -22,35 +22,74 @@
 				:style="paletteVars"
 				@click.self="settleConfirm(false)"
 			>
-				<div
-					class="jv-cdialog"
-					role="alertdialog"
-					aria-modal="true"
-					aria-labelledby="jv-confirm-title"
+				<!-- reka's FocusScope: mounting it pauses the focus trap of a modal dialog
+				     underneath (Settings), which would otherwise pull focus straight back
+				     out of this one. It is not a trap of its own (the keys are handled in
+				     the script); its mount event is where focus is first placed, because
+				     that runs after the pause. -->
+				<FocusScope
+					as-child
+					:present="true"
+					@mount-auto-focus.prevent="takeFocus"
+					@unmount-auto-focus.prevent
 				>
-					<div id="jv-confirm-title" class="jv-cdialog-title">{{ state.title }}</div>
-					<div v-if="state.message" class="jv-cdialog-msg">{{ state.message }}</div>
-					<div v-if="state.warning" class="jv-cdialog-warn">{{ state.warning }}</div>
-					<div class="jv-cdialog-foot">
-						<button class="jv-btn jv-btn--ghost" @click="settleConfirm(false)">
-							{{ state.cancelLabel }}
-						</button>
-						<button
-							class="jv-btn"
-							:class="state.danger ? 'jv-btn--danger' : 'jv-btn--primary'"
-							@click="settleConfirm(true)"
+					<div
+						ref="dialogEl"
+						class="jv-cdialog"
+						role="alertdialog"
+						aria-modal="true"
+						aria-labelledby="jv-confirm-title"
+						:aria-describedby="
+							state.message || state.warning ? 'jv-confirm-desc' : undefined
+						"
+					>
+						<div id="jv-confirm-title" class="jv-cdialog-title">{{ state.title }}</div>
+						<!-- What the dialog says: read out when focus lands on Cancel
+						     (aria-describedby), and the only part that scrolls, so the title
+						     and the buttons stay in view however long the question is. It takes
+						     a tab stop only while it scrolls, so the keyboard can page it. -->
+						<div
+							id="jv-confirm-desc"
+							ref="bodyEl"
+							class="jv-cdialog-body"
+							:class="{ 'jv-focus-ring': scrolls }"
+							:role="scrolls ? 'region' : undefined"
+							:aria-labelledby="scrolls ? 'jv-confirm-title' : undefined"
+							:tabindex="scrolls ? 0 : undefined"
 						>
-							{{ state.confirmLabel }}
-						</button>
+							<div v-if="state.message" class="jv-cdialog-msg">
+								{{ state.message }}
+							</div>
+							<div v-if="state.warning" class="jv-cdialog-warn">
+								{{ state.warning }}
+							</div>
+						</div>
+						<div class="jv-cdialog-foot">
+							<button
+								ref="cancelEl"
+								class="jv-btn jv-btn--ghost"
+								@click="settleConfirm(false)"
+							>
+								{{ state.cancelLabel }}
+							</button>
+							<button
+								class="jv-btn"
+								:class="state.danger ? 'jv-btn--danger' : 'jv-btn--primary'"
+								@click="settleConfirm(true)"
+							>
+								{{ state.confirmLabel }}
+							</button>
+						</div>
 					</div>
-				</div>
+				</FocusScope>
 			</div>
 		</transition>
 	</Teleport>
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount } from "vue";
+import { nextTick, onMounted, onBeforeUnmount, ref, watch } from "vue";
+import { FocusScope } from "reka-ui";
 import { confirmState as state, settleConfirm } from "@/composables/useConfirm";
 import { useJarvisTheme } from "@/theme";
 
@@ -60,18 +99,154 @@ import { useJarvisTheme } from "@/theme";
 // var(--…) styling and dark backdrop resolve to nothing.
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
+// Keyboard focus. The dialog asks a question nothing else may be done before, so
+// it takes focus when it opens, keeps Tab on its own controls, and gives focus back
+// to whatever opened it when it closes. Without this, focus stayed on the button
+// behind the dialog: Tab walked the page underneath and Enter pressed whatever was
+// focused there.
+//
+// Where focus goes first: on Cancel (the safe answer to a destructive question, so a
+// stray Enter does not confirm). When the question is taller than the window, it
+// goes to the scrolling message instead: Space there pages the message, where on
+// Cancel it would cancel, and Cancel is one Tab away.
+//
+// While it has the focus, a key pressed here does not travel on to the app's
+// shortcuts, which would otherwise open a search or change the screen under an open
+// question. Function keys are left alone.
+//
+// The same holds over Settings. Its modal dialog traps focus and pulls it back the
+// moment it leaves, so the FocusScope in the template pauses that trap while this
+// dialog is open, and focus is taken from the scope's own mount event (after the
+// pause, never before it).
+const dialogEl = ref(null);
+const bodyEl = ref(null);
+const cancelEl = ref(null);
+const scrolls = ref(false);
+let opener = null;
+
+// Read on the way in, before anything moves focus: the watcher runs before the
+// dialog is drawn.
+watch(
+	() => !!state.value,
+	async (open) => {
+		if (open) {
+			opener = document.activeElement;
+			scrolls.value = false;
+			return;
+		}
+		const back = opener;
+		opener = null;
+		await nextTick();
+		// Only if nobody has moved focus since: the caller carries on before this runs
+		// and may have put it somewhere on purpose. Left alone, focus is on <body> (the
+		// dialog's button it was on is gone) or still inside the closing dialog.
+		// (Asked of the element, not of `dialogEl`: the ref is cleared as soon as the
+		// closing transition starts, while the dialog and its focused button are still
+		// in the page.)
+		const at = document.activeElement;
+		const untouched = !at || at === document.body || !!at.closest(".jv-cdialog");
+		// And only if what opened it is still there and usable: a deleted row's button
+		// is gone, and that is fine.
+		if (
+			untouched &&
+			back &&
+			back.isConnected &&
+			!back.disabled &&
+			typeof back.focus === "function"
+		) {
+			back.focus();
+		}
+	}
+);
+
+async function takeFocus() {
+	measure();
+	// The scrolling message gets its tab stop from the measure.
+	await nextTick();
+	// Without scrolling: a question taller than the window would otherwise open
+	// scrolled past its own title.
+	const first = scrolls.value ? bodyEl.value : cancelEl.value;
+	if (state.value && first) first.focus({ preventScroll: true });
+}
+
+function measure() {
+	const el = bodyEl.value;
+	scrolls.value = !!el && el.scrollHeight > el.clientHeight;
+}
+
+// The message can start or stop scrolling while the dialog is open (the window is
+// resized, a font loads). Watched on the element where the browser can say so, else
+// on the window's resize.
+const watchesSize = typeof ResizeObserver !== "undefined";
+let sizeObserver = null;
+if (watchesSize) {
+	sizeObserver = new ResizeObserver(measure);
+	watch(bodyEl, (el, was) => {
+		if (was) sizeObserver.unobserve(was);
+		if (el) sizeObserver.observe(el);
+	});
+}
+
+// Taking the tab stop off a focused message would drop focus to <body>: Cancel gets
+// it first. Runs before the page is redrawn, while the message is still focusable.
+watch(scrolls, (now) => {
+	if (!now && bodyEl.value && document.activeElement === bodyEl.value) {
+		cancelEl.value?.focus({ preventScroll: true });
+	}
+});
+
+function hasFocus(e) {
+	const dialog = dialogEl.value;
+	if (!dialog) return false;
+	const target = e.target instanceof Node && dialog.contains(e.target);
+	return target || dialog.contains(document.activeElement);
+}
+
+// What Tab visits, in order: the message when it scrolls, then the two buttons.
+function tabStops() {
+	const buttons = [...dialogEl.value.querySelectorAll("button")];
+	return scrolls.value && bodyEl.value ? [bodyEl.value, ...buttons] : buttons;
+}
+
 // Escape cancels. Capture phase + stopPropagation so a global Escape handler on
 // an underlying view (e.g. ChatView closing settings) does NOT also fire when the
-// user is only dismissing this dialog.
+// user is only dismissing this dialog. Tab stays inside the dialog.
 function onKey(e) {
-	if (e.key === "Escape" && state.value) {
+	if (!state.value) return;
+	if (e.key === "Escape") {
 		e.preventDefault();
 		e.stopPropagation();
 		settleConfirm(false);
+		return;
 	}
+	// A key pressed while this dialog has the focus is not also one of the app's
+	// shortcuts. Only the journey to the app's own listeners is stopped: what the
+	// key does by itself (Enter or Space on the focused button, Space paging the
+	// message, the browser's own shortcuts) is untouched. Not when focus is elsewhere
+	// (a toast, say): that key is not meant for this dialog.
+	if (!/^F\d+$/.test(e.key) && hasFocus(e)) e.stopPropagation();
+	// Plain Tab and Shift+Tab only: with Ctrl, Alt or Meta it is the browser's.
+	if (e.key !== "Tab" || e.ctrlKey || e.altKey || e.metaKey) return;
+	if (!dialogEl.value) return;
+	const stops = tabStops();
+	if (!stops.length) return;
+	const at = stops.indexOf(document.activeElement);
+	const next = e.shiftKey
+		? stops[(at <= 0 ? stops.length : at) - 1]
+		: stops[(at + 1) % stops.length];
+	e.preventDefault();
+	e.stopPropagation();
+	next.focus();
 }
-onMounted(() => window.addEventListener("keydown", onKey, true));
-onBeforeUnmount(() => window.removeEventListener("keydown", onKey, true));
+onMounted(() => {
+	window.addEventListener("keydown", onKey, true);
+	if (!watchesSize) window.addEventListener("resize", measure);
+});
+onBeforeUnmount(() => {
+	window.removeEventListener("keydown", onKey, true);
+	window.removeEventListener("resize", measure);
+	sizeObserver?.disconnect();
+});
 </script>
 
 <style scoped>
@@ -90,9 +265,11 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey, true));
 	   the buttons reachable. Teleport alone was not enough (jarvis#435). */
 	pointer-events: auto;
 	background: rgba(15, 15, 22, 0.34);
+	/* The dialog is centred by its own auto margins, not by alignment here: when it
+	   is taller than the window (a long message, a zoomed page) alignment would put
+	   its top above the scrollable area, out of reach. */
 	display: flex;
-	align-items: center;
-	justify-content: center;
+	overflow-y: auto;
 	padding: 24px;
 }
 /* jv-dark is applied to the overlay itself (not an ancestor), matching the way
@@ -104,12 +281,32 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey, true));
 .jv-cdialog {
 	width: 400px;
 	max-width: 100%;
+	margin: auto;
+	/* Never taller than the window: the title and the buttons stay in view and only
+	   the message (.jv-cdialog-body) scrolls. */
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+	max-height: calc(100vh - 48px);
+	max-height: calc(100dvh - 48px);
+	/* A name or an address with nowhere to break still stays inside the box. */
+	overflow-wrap: anywhere;
 	background: var(--surface);
 	border: 1px solid var(--border);
 	border-radius: 14px;
 	padding: 20px;
 	box-shadow: 0 24px 70px rgba(20, 20, 30, 0.28);
 	animation: jv-confirm-popin 0.16s ease;
+}
+.jv-cdialog-body {
+	flex: 0 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+.jv-cdialog-title,
+.jv-cdialog-foot {
+	flex: none;
 }
 .jv-cdialog-title {
 	font-size: 16px;

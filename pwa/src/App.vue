@@ -18,6 +18,7 @@ import { prefs } from "./lib/prefs";
 import { agentName } from "@/branding";
 import { flushBuffered } from "@shared/lib/errorReporter";
 import { recordEvent } from "./lib/notifications";
+import { exportSignals } from "./lib/exportFeed.js";
 
 const socket = inject("$socket");
 const router = useRouter();
@@ -82,6 +83,11 @@ function onEvent(p) {
 		// off-screen unread dot. Deliberately no browser push for this event,
 		// this wave (unlike run:end above).
 		if (conv && conv !== openConversationId()) store.markUnread(conv);
+	} else if (exportSignals(p)) {
+		// A background export reached an outcome (ready, too large, too slow, failed). The card
+		// in the chat has the details, and ChatView refreshes it when that chat is open; this
+		// handler owns only the off-screen unread dot. No browser push.
+		if (conv !== openConversationId()) store.markUnread(conv);
 	} else if (p.kind === "action:pending" && prefs.notifyDecision) {
 		notify(
 			`${agentName} needs your approval`,

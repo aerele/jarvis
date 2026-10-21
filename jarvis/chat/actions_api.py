@@ -31,19 +31,37 @@ CONV = "Jarvis Conversation"
 
 # Child-grid columns can be any data-bearing fieldtype except nested tables
 # (no grid-in-grid in v1).
-_SKIP_CHILD_FIELDTYPES = _NON_EDIT_FIELDTYPES | {"Table", "Table MultiSelect"}
+# A secret is never a column or a row-form field either (its value is masked).
+_SKIP_CHILD_FIELDTYPES = _NON_EDIT_FIELDTYPES | {"Table", "Table MultiSelect", "Password"}
+# The breaks that shape a child row's form, as Desk's row edit form lays it out.
+_LAYOUT_FIELDTYPES = {"Section Break", "Column Break", "Tab Break"}
 
 
-def _field_dict(df, doctype=None, parent_doctype=None, parentfield=None) -> dict:
+def _field_dict(df, doctype=None, parent_doctype=None, parentfield=None, writable=None) -> dict:
+	"""One field for the card. ``writable`` is the set of permlevels the user may
+	write (None = unrestricted): a field they may read but not write is shown
+	read-only, as Desk shows it, instead of an input whose edit the save refuses."""
+	read_only = (
+		bool(df.read_only)
+		or df.fieldtype == "Read Only"
+		or (writable is not None and bool(df.permlevel) and df.permlevel not in writable)
+	)
 	return {
 		"fieldname": df.fieldname,
 		"label": df.label or df.fieldname,
 		"fieldtype": df.fieldtype,
 		"options": df.options or "",
 		"reqd": int(df.reqd or 0),
-		"read_only": int(df.read_only or 0),
+		"read_only": int(read_only),
+		# A plain default (not "Today", "__user" or a ":" lookup), so a rule reading
+		# `parent.<field>` on a create sees what Desk's new form would hold.
+		"default": _static_default(df),
 		"link_filters": df.get("link_filters") or "",
 		"link_query_filters": draft_link_query_filters(doctype or df.parent, df, parent_doctype, parentfield),
+		# Desk's form rules, which the card evaluates the same way on a child row.
+		"depends_on": df.get("depends_on") or "",
+		"mandatory_depends_on": df.get("mandatory_depends_on") or "",
+		"read_only_depends_on": df.get("read_only_depends_on") or "",
 	}
 
 
@@ -56,42 +74,278 @@ def _readable_permlevels(doctype: str, parenttype: str | None = None) -> set | N
 	return set(frappe.get_meta(doctype).get_permlevel_access(permission_type="read", parenttype=parenttype))
 
 
+def _writable_permlevels(doctype: str, parenttype: str | None = None) -> set | None:
+	"""Permlevels the session user may WRITE (None = unrestricted, Administrator)."""
+	if frappe.session.user == "Administrator":
+		return None
+	return set(frappe.get_meta(doctype).get_permlevel_access(permission_type="write", parenttype=parenttype))
+
+
+def _static_default(df) -> str:
+	d = df.get("default")
+	if d is None or d == "":
+		return ""
+	d = str(d)
+	return "" if d in ("Today", "Now", "__user") or d.startswith(":") else d
+
+
 def _can_read_field(df, levels: set | None) -> bool:
 	"""A permlevel-0 field is readable to anyone who can read the document; a
 	higher permlevel only with a role granting it (Desk hides the rest)."""
 	return levels is None or not df.permlevel or df.permlevel in levels
 
 
+def _card_field_ok(df, levels: set | None) -> bool:
+	"""A child field the card may carry at all (grid column, row-form field or rule
+	field): it has a name, is a data-bearing type the card can hold (no breaks, nested
+	tables, attachments or secrets), and the user can read its permlevel. Hidden is
+	decided by each caller. Call it AFTER handling the layout breaks: they are in
+	``_SKIP_CHILD_FIELDTYPES``, so it rejects them."""
+	return bool(df.fieldname) and df.fieldtype not in _SKIP_CHILD_FIELDTYPES and _can_read_field(df, levels)
+
+
 def _child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
-	"""Grid columns for one child table: the child's in_list_view fields (what
-	the Desk grid shows), falling back to the first 4 editable fields when the
-	child marks none. Columns at a permlevel the user cannot read are dropped."""
+	"""The grid's columns for one child table (see _grid_fields)."""
+	writable = _writable_permlevels(child_doctype, parent_doctype)
 	return [
-		_field_dict(df, child_doctype, parent_doctype, parentfield)
+		_field_dict(df, child_doctype, parent_doctype, parentfield, writable)
 		for df in _grid_fields(child_doctype, parent_doctype)[0]
 	]
 
 
-def _extra_child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
-	"""Every other readable editable field of the child, so a row key the model
-	proposes outside the grid keeps its real type and label (#655)."""
-	return [
-		_field_dict(df, child_doctype, parent_doctype, parentfield)
-		for df in _grid_fields(child_doctype, parent_doctype)[1]
-	]
+def _child_table_spec(child_doctype: str, parent_doctype=None, parentfield=None) -> dict:
+	"""One child table for the card: the grid's columns (see _grid_fields), every
+	other editable field so a row key the model proposes outside the grid keeps
+	its real type and label (#655), the row's full form, and the hidden fields its
+	rules read. Fields at a permlevel the user cannot read are left out of all four."""
+	listed, extra = _grid_fields(child_doctype, parent_doctype)
+	writable = _writable_permlevels(child_doctype, parent_doctype)
+	form_fields = _child_form_fields(child_doctype, parent_doctype, parentfield, writable)
+	return {
+		"columns": [_field_dict(df, child_doctype, parent_doctype, parentfield, writable) for df in listed],
+		"extra_columns": [
+			_field_dict(df, child_doctype, parent_doctype, parentfield, writable) for df in extra
+		],
+		# The row edit form: every field Desk shows for a row, laid out.
+		"form_fields": form_fields,
+		# Fields the form's rules read that the card does not show (see _rule_fields).
+		"rule_fields": _rule_fields(child_doctype, parent_doctype, form_fields, listed),
+	}
 
 
 def _grid_fields(child_doctype: str, parent_doctype=None) -> tuple[list, list]:
-	"""(the grid's columns, every other readable editable field) of a child doctype."""
+	"""(the grid's columns, every other editable field) of a child doctype,
+	limited to the fields the user can read through ``parent_doctype``.
+
+	The columns are Desk's default grid columns (_grid_columns), the same for every
+	user: the Approval Board's check of what it can show (held_edit._unshown_errors)
+	reads them, so a user's own Desk column choice must not change what an approver
+	may approve."""
 	meta = frappe.get_meta(child_doctype)
 	levels = _readable_permlevels(child_doctype, parent_doctype)
-	editable = [
-		df
-		for df in meta.fields
-		if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES and _can_read_field(df, levels)
-	]
-	listed = [df for df in editable if df.in_list_view] or editable[:4]
+	editable = [df for df in meta.fields if _card_field_ok(df, levels)]
+	listed = _grid_columns([df for df in editable if not df.hidden])
 	return listed, [df for df in editable if df not in listed]
+
+
+def _grid_columns(visible: list) -> list:
+	"""Desk's default grid columns: the in_list_view fields, else the first 4. A
+	hidden field is never a column (``visible`` has none)."""
+	return [df for df in visible if df.in_list_view] or visible[:4]
+
+
+def _child_form_fields(
+	child_doctype: str, parent_doctype=None, parentfield=None, writable=None
+) -> list[dict]:
+	"""A child row's full form, as Desk's row edit form shows it: every field the
+	user can read that is not hidden, in form order, with the section, column and
+	tab breaks that lay it out (a break carries its label and depends_on). A
+	section left with no field is dropped.
+
+	Why a field may be missing from the card's row form: it is hidden (or inside
+	a hidden section or tab); the user cannot read its permlevel; it is a type the
+	card cannot edit (attachments, nested tables, HTML, Password); or, in the
+	browser, its depends_on is false for that row (lib/rowForm.js)."""
+	meta = frappe.get_meta(child_doctype)
+	levels = _readable_permlevels(child_doctype, parent_doctype)
+	out: list[dict] = []
+	# Desk hides everything inside a hidden section (until the next section or
+	# tab) or a hidden tab (until the next tab).
+	skip_until: set[str] = set()
+	for df in meta.fields:
+		if df.fieldtype in ("Section Break", "Tab Break"):
+			if skip_until and df.fieldtype in skip_until:
+				skip_until = set()
+			if df.hidden:
+				# A hidden section inside a hidden tab must not narrow the tab's skip, or
+				# the next section would end it and bring the tab's fields back.
+				if df.fieldtype == "Tab Break":
+					skip_until = {"Tab Break"}
+				elif not skip_until:
+					skip_until = {"Section Break", "Tab Break"}
+				continue
+		if skip_until or df.hidden:
+			continue
+		if df.fieldtype in _LAYOUT_FIELDTYPES:
+			out.append(
+				{
+					"fieldname": df.fieldname or "",
+					"fieldtype": df.fieldtype,
+					"label": df.label or "",
+					"depends_on": df.get("depends_on") or "",
+					# A Section Break Desk shows collapsed until its rule holds (the card
+					# also opens one holding a value, so nothing proposed is out of sight).
+					"collapsible": int(df.get("collapsible") or 0),
+					"collapsible_depends_on": df.get("collapsible_depends_on") or "",
+				}
+			)
+			continue
+		if not _card_field_ok(df, levels):
+			continue
+		out.append(_field_dict(df, child_doctype, parent_doctype, parentfield, writable))
+	return _drop_empty_sections(out)
+
+
+# A field a Desk rule reads: `doc.<name>` / `doc["name"]` in an "eval:" rule, or the
+# whole rule being a bare fieldname ("depends_on": "is_fixed_asset").
+_RULE_DOC_REF = re.compile(r"""\bdoc\s*(?:\.\s*([A-Za-z_]\w*)|\[\s*["']([A-Za-z_]\w*)["']\s*\])""")
+_RULE_KEYS = ("depends_on", "mandatory_depends_on", "read_only_depends_on")
+
+
+def _rule_field_names(form_fields: list[dict]) -> set[str]:
+	"""The fieldnames the row form's rules read off the row."""
+	names: set[str] = set()
+	for f in form_fields:
+		for key in _RULE_KEYS:
+			rule = (f.get(key) or "").strip()
+			if rule.startswith("eval:"):
+				names.update(a or b for a, b in _RULE_DOC_REF.findall(rule))
+			elif rule and not rule.startswith("fn:") and re.fullmatch(r"[A-Za-z_]\w*", rule):
+				names.add(rule)
+	return names
+
+
+def _rule_fields(child_doctype: str, parent_doctype, form_fields: list[dict], columns: list) -> list[dict]:
+	"""The readable child fields that a form field's or break's rule reads but the
+	card shows nowhere (not a grid column, not in the row form). Typically a hidden
+	flag such as ``is_fixed_asset``: Desk's ``doc`` holds hidden fields, so the rule
+	``eval:!doc.is_fixed_asset`` is only right when the card evaluates it with the
+	same value. Same exclusions as the form (unreadable permlevel, secrets, types the
+	card cannot hold); hidden is allowed. The card never edits or sends these.
+	``fetch_from`` lets the client drop a saved value that no longer applies once the
+	row's source link changes."""
+	shown = {c.fieldname for c in columns} | {f["fieldname"] for f in form_fields if f["fieldname"]}
+	wanted = _rule_field_names(form_fields) - shown
+	if not wanted:
+		return []
+	levels = _readable_permlevels(child_doctype, parent_doctype)
+	return [
+		{
+			"fieldname": df.fieldname,
+			"fieldtype": df.fieldtype,
+			"default": _static_default(df),
+			"fetch_from": df.get("fetch_from") or "",
+		}
+		for df in frappe.get_meta(child_doctype).fields
+		if df.fieldname in wanted and _card_field_ok(df, levels)
+	]
+
+
+# A batch of fetch_from lookups is bounded, so a huge pasted table cannot become a scan.
+_RULE_VALUES_MAX_LINKS = 500
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def rule_values(doctype: str, table: str, links: str | dict | None = None) -> dict:
+	"""The hidden values a child row's rules read that Desk fetches from a link
+	(``fetch_from``, e.g. ``is_fixed_asset`` from the Item), so the card evaluates
+	its rules as Desk does before the record is saved. ``links`` maps a row's link
+	field to the values the card's rows hold; the answer maps each link field to
+	``{link value: {rule field: fetched value}}``. Read through ``frappe.get_list``,
+	so the user's permissions on the linked doctype apply, and only source fields the
+	user may read are fetched. Display only: the card never sends these values."""
+	doctype = (doctype or "").strip()
+	if not doctype or not frappe.db.exists("DocType", doctype):
+		return {"ok": False, "reason": _("unknown doctype")}
+	if not frappe.has_permission(doctype, "read"):
+		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
+	table_df = frappe.get_meta(doctype).get_field(table or "")
+	if not table_df or table_df.fieldtype != "Table" or not table_df.options:
+		return {"ok": False, "reason": _("unknown table")}
+	links = frappe.parse_json(links) if isinstance(links, str) else links
+	if not isinstance(links, dict):
+		return {"ok": False, "reason": _("links must be an object")}
+	child = table_df.options
+	# link field -> {rule field: source field on the linked doctype}
+	sources: dict[str, dict[str, str]] = {}
+	for rf in _child_table_spec(child, doctype, table)["rule_fields"]:
+		link, _sep, src = (rf.get("fetch_from") or "").partition(".")
+		if link and src:
+			sources.setdefault(link, {})[rf["fieldname"]] = src
+	child_meta = frappe.get_meta(child)
+	out: dict[str, dict] = {}
+	for link, wanted in sources.items():
+		link_df = child_meta.get_field(link)
+		values = links.get(link)
+		if not link_df or link_df.fieldtype != "Link" or not link_df.options or not isinstance(values, list):
+			continue
+		names = list(
+			dict.fromkeys(
+				str(v) for v in values[:_RULE_VALUES_MAX_LINKS] if isinstance(v, str | int) and v != ""
+			)
+		)
+		# A linked doctype the user cannot read answers nothing, as in Desk, and must not
+		# cost the table's other links their values.
+		if not names or not frappe.has_permission(link_df.options, "read"):
+			continue
+		target = frappe.get_meta(link_df.options)
+		levels = _readable_permlevels(link_df.options)
+		readable = {}
+		for rule, src in wanted.items():
+			src_df = target.get_field(src)
+			if src_df and _card_field_ok(src_df, levels):
+				readable[rule] = src
+		if not readable:
+			continue
+		rows = frappe.get_list(
+			link_df.options,
+			filters={"name": ["in", names]},
+			fields=["name", *dict.fromkeys(readable.values())],
+			limit_page_length=len(names),
+		)
+		out[link] = {r.name: {rule: r.get(src) for rule, src in readable.items()} for r in rows}
+	return {"ok": True, "values": out}
+
+
+def _drop_empty_sections(fields: list[dict]) -> list[dict]:
+	"""Remove the breaks that would frame nothing: a tab with no field before the
+	next tab, a section with no field before the next section or tab, and a column
+	break with no field after it. A tab whose fields sit in its sections is kept,
+	so its label and depends_on still apply to them."""
+	is_data = lambda f: f["fieldtype"] not in _LAYOUT_FIELDTYPES  # noqa: E731
+	out: list[dict] = []
+	for i, f in enumerate(fields):
+		if f["fieldtype"] in ("Section Break", "Tab Break"):
+			stops = ("Tab Break",) if f["fieldtype"] == "Tab Break" else ("Section Break", "Tab Break")
+			has_field = False
+			for nxt in fields[i + 1 :]:
+				if nxt["fieldtype"] in stops:
+					break
+				if is_data(nxt):
+					has_field = True
+					break
+			if not has_field:
+				continue
+		out.append(f)
+	# A column break directly followed by another break, or at the very end.
+	cleaned = []
+	for i, f in enumerate(out):
+		nxt = out[i + 1] if i + 1 < len(out) else None
+		if f["fieldtype"] == "Column Break" and (nxt is None or nxt["fieldtype"] in _LAYOUT_FIELDTYPES):
+			continue
+		cleaned.append(f)
+	return cleaned
 
 
 @frappe.whitelist()
@@ -109,22 +363,22 @@ def get_doctype_form_meta(doctype: str) -> dict:
 		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	meta = frappe.get_meta(doctype)
 	levels = _readable_permlevels(doctype)
+	writable = _writable_permlevels(doctype)
 	fields, tables = [], {}
 	for df in meta.fields:
 		if not df.fieldname or not _can_read_field(df, levels):
 			continue
 		if df.fieldtype == "Table" and df.options:
-			fields.append(_field_dict(df, doctype))
+			fields.append(_field_dict(df, doctype, writable=writable))
 			tables[df.fieldname] = {
 				"child_doctype": df.options,
 				"label": df.label or df.fieldname,
-				"columns": _child_columns(df.options, doctype, df.fieldname),
-				"extra_columns": _extra_child_columns(df.options, doctype, df.fieldname),
+				**_child_table_spec(df.options, doctype, df.fieldname),
 			}
 			continue
 		if df.fieldtype in _NON_EDIT_FIELDTYPES:
 			continue
-		fields.append(_field_dict(df, doctype))
+		fields.append(_field_dict(df, doctype, writable=writable))
 	return {
 		"ok": True,
 		"doctype": doctype,
@@ -138,9 +392,9 @@ def get_doctype_form_meta(doctype: str) -> dict:
 @frappe.whitelist()
 @require_jarvis_user
 def load_doc(doctype: str, name: str) -> dict:
-	"""Current values of one document (main fields + child rows restricted to
-	the form-meta columns) so the panel can pre-fill an update draft. Gated on
-	WRITE permission - this endpoint exists to edit."""
+	"""Current values of one document (main fields + child rows with every field
+	of the row form) so the panel can pre-fill an update draft. Gated on WRITE
+	permission - this endpoint exists to edit."""
 	doctype = (doctype or "").strip()
 	name = (name or "").strip()
 	if not doctype or not name:
@@ -164,9 +418,18 @@ def load_doc(doctype: str, name: str) -> dict:
 		values[f["fieldname"]] = "" if v is None else v
 	tables = {}
 	for tf, spec in fm["tables"].items():
-		cols = [c["fieldname"] for c in spec["columns"]]
+		# Every field the row form shows, not just the grid's columns, so a saved
+		# value outside the grid is seen (and kept) rather than shown as blank. The
+		# hidden fields its rules read (spec["rule_fields"]) ride along too.
+		cols = list(
+			dict.fromkeys(
+				[c["fieldname"] for c in spec["columns"]]
+				+ [f["fieldname"] for f in spec["form_fields"] if f["fieldtype"] not in _LAYOUT_FIELDTYPES]
+				+ [r["fieldname"] for r in spec["rule_fields"]]
+			)
+		)
 		# Each row carries its name so an update edits THAT row (update_doc merges
-		# by name); without it, fields the grid does not show would be lost.
+		# by name); without it, fields the card does not send would be lost.
 		tables[tf] = [{"name": row.name, **{c: row.get(c) for c in cols}} for row in (doc.get(tf) or [])]
 	return {
 		"ok": True,
@@ -535,7 +798,8 @@ def apply_action(action: dict | str | None = None) -> dict:
 		hidden = _write_risk.take_refusal()
 		if hidden is not None and not isinstance(e, api.WriteRefusedError):
 			e = hidden
-		envelope = api._translate_write_error(e, mark, doctype=doctype)
+		# A human Apply is a write: a statement limit is not "narrow the question".
+		envelope = api._translate_write_error(e, mark, doctype=doctype, is_write=True)
 		if envelope is None:
 			# Unexpected - audit + re-raise so a real bug still surfaces as a 500
 			# (never enveloped, never leaks a traceback to the client).

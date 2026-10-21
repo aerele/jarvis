@@ -6,11 +6,12 @@ that value already exists (``exact``), has near-matches worth reusing
 (``candidates``), is genuinely absent (``missing``), or cannot be checked
 because the user lacks read on the target (``unchecked``). It only searches; the
 agent decides whether a candidate is really the same entity and creates the
-``missing`` ones (batched via create_docs). See jarvis-persona AGENTS.md.
+``missing`` ones (batched via create_doc(docs=[...])). See jarvis-persona AGENTS.md.
 """
 
 import frappe
 
+from jarvis import _failure_kind
 from jarvis.exceptions import InvalidArgumentError
 
 _MAX_LIMIT = 20
@@ -97,7 +98,9 @@ def _resolve_one(field: str, target_dt: str, value: str, limit: int) -> dict:
 		if frappe.get_list(target_dt, filters={"name": value}, limit=1):
 			rec["status"] = "exact"
 			return rec
-	except Exception:
+	except Exception as e:
+		if _failure_kind.too_slow(e):
+			raise  # a search cut at the time limit is not "unchecked" (#707 B3)
 		rec["status"] = "unchecked"
 		return rec
 	rec["candidates"] = _candidates(target_dt, value, limit)
@@ -124,7 +127,9 @@ def _candidates(target_dt: str, value: str, limit: int) -> list:
 			limit=limit,
 			order_by="modified desc",
 		)
-	except Exception:
+	except Exception as e:
+		if _failure_kind.too_slow(e):
+			raise  # a search cut at the time limit is not "no match" (#707 B3)
 		return []
 	out = []
 	for r in rows:

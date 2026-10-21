@@ -1,7 +1,7 @@
 import json
 import time
 from collections import deque
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 import frappe
 from frappe.utils import strip_html
@@ -177,6 +177,116 @@ def _dispatch_current_user(tool: str, args: dict | str | None) -> dict:
 	return _run_tool(tool, args)
 
 
+# #707 B3: the agent's reads run on a web worker, and the database's own limit is
+# none, so one slow query or inline report holds the worker until the web server
+# kills it (and the query keeps running). Per site: ``jarvis_agent_read_timeout_s``
+# in site_config.json, whole seconds, 0 switches the limit off. The default sits under
+# the plugin's own 30 s call_tool abort (frappe-client.ts), so a slow read comes back
+# as QueryTooSlowError with its "narrow the question" advice instead of a bare abort.
+_AGENT_READ_TIMEOUT_KEY = "jarvis_agent_read_timeout_s"
+_AGENT_READ_TIMEOUT_DEFAULT_S = 25
+
+
+def _agent_read_timeout_s() -> int:
+	"""The agent's per-statement read limit in seconds; 0 means no limit. Not
+	``cint``: it reads garbage as 0, which would switch the limit off. Whole
+	seconds only: ``int`` would read 0.5 as 0 (off) and ``true`` as a 1 s limit."""
+	raw = frappe.conf.get(_AGENT_READ_TIMEOUT_KEY)
+	if raw is None or isinstance(raw, bool):
+		return _AGENT_READ_TIMEOUT_DEFAULT_S
+	if isinstance(raw, float) and not raw.is_integer():
+		return _AGENT_READ_TIMEOUT_DEFAULT_S
+	try:
+		seconds = int(raw)
+	except (TypeError, ValueError):
+		return _AGENT_READ_TIMEOUT_DEFAULT_S
+	return seconds if seconds >= 0 else _AGENT_READ_TIMEOUT_DEFAULT_S
+
+
+# A server that rejects the variable rejects it on every read: say so once per
+# process, not with a traceback per tool call.
+_limit_unsettable_logged = False
+
+
+def _log_limit_unsettable() -> None:
+	global _limit_unsettable_logged
+	if _limit_unsettable_logged:
+		return
+	_limit_unsettable_logged = True
+	frappe.logger("jarvis").warning("could not set max_statement_time", exc_info=True)
+
+
+def _log_read_too_slow(result, tool: str, user: str, conversation: str | None, started: float) -> None:
+	"""One server-side line per agent read the database stopped at the limit, so how
+	often it fires, and for which tool, can be read from the log. Never raises. The
+	session key is left out on purpose: it is a bearer."""
+	try:
+		error = result.get("error") if isinstance(result, dict) else None
+		if not isinstance(error, dict) or error.get("code") != "QueryTooSlowError":
+			return
+		frappe.logger("jarvis").warning(
+			"agent read stopped at the statement time limit: tool=%s user=%s conversation=%s "
+			"limit_s=%s duration_ms=%s",
+			tool,
+			user,
+			conversation,
+			_agent_read_timeout_s(),
+			int((time.monotonic() - started) * 1000),
+		)
+	except Exception:
+		pass
+
+
+@contextmanager
+def _agent_read_time_limit(tool: str):
+	"""Cap each database statement of an agent READ tool at the site's limit, then
+	put the session's own value back, on success and on error alike.
+
+	Write tools are left alone (``_WRITE_TOOLS``, the heavy exports included), and
+	so are the other callers of ``_run_tool``: this wraps the agent path only. A
+	limit the session already has that is tighter than ours is kept. MariaDB only;
+	``max_statement_time`` is per STATEMENT, so a tool that runs several can take
+	longer in total. A breach aborts the statement, not the transaction, and comes
+	back as ``QueryTooSlowError`` (``_translate_write_error``)."""
+	with statement_time_limit(_agent_read_timeout_s() if tool not in _WRITE_TOOLS else 0):
+		yield
+
+
+@contextmanager
+def statement_time_limit(limit: int):
+	"""Cap each database statement run inside at ``limit`` seconds (MariaDB
+	``max_statement_time``, set on the session and put back after), keeping a
+	tighter limit the session already has. ``limit`` 0, or another database: no
+	limit. The statements themselves run as usual (parameterised), which is why a
+	caller with one heavy statement uses this rather than prefixing its SQL."""
+	if not limit or frappe.db.db_type != "mariadb":
+		yield
+		return
+	try:
+		previous = frappe.db.sql("SELECT @@max_statement_time")[0][0]
+		if 0 < float(previous) <= limit:
+			previous = None
+		else:
+			frappe.db.set_execution_timeout(limit)
+	except Exception:
+		# A server without max_statement_time (MySQL reports itself as mariadb
+		# here): run unlimited rather than fail every read.
+		_log_limit_unsettable()
+		previous = None
+	if previous is None:
+		yield
+		return
+	try:
+		yield
+	finally:
+		# The exact previous value (it can be fractional), and never at the cost of
+		# the caller's own result or error.
+		try:
+			frappe.db.sql("SET SESSION max_statement_time = %s", (previous,))
+		except Exception:
+			frappe.logger("jarvis").warning("could not restore max_statement_time", exc_info=True)
+
+
 def _dispatch_from_session(
 	user: str,
 	session_key: str,
@@ -287,7 +397,8 @@ def _dispatch_from_session(
 			step_run = agent_run_steps.step_target(cap)
 			started_ms = time.monotonic()
 			try:
-				result = _run_tool(tool, parsed_args, conversation=conv)
+				with _agent_read_time_limit(tool):
+					result = _run_tool(tool, parsed_args, conversation=conv)
 			except Exception as exc:
 				# A tool that raised past _run_tool's envelope translation is a real
 				# fault; try to leave an honest step saying the attempt happened and
@@ -307,6 +418,7 @@ def _dispatch_from_session(
 					error_message=str(exc),
 				)
 				raise
+			_log_read_too_slow(result, tool, user, conv, started_ms)
 			# Recorded BEFORE the result budget trims the payload, so a step's row
 			# count is the count the tool actually returned, not the truncated one.
 			_ok = bool(isinstance(result, dict) and result.get("ok"))
@@ -721,6 +833,8 @@ def persist_tool_receipt(
 		if msg_name is None:
 			# Duplicate callback for the same tool call — already recorded (R-6 idempotent).
 			return
+		if tool_call_id and not flip_token:
+			_bind_callback_tool(conv_name, tool_call_id)
 		publish_realtime_tool_result(
 			user=conv_owner,
 			conversation_id=conv_name,
@@ -847,6 +961,25 @@ def cancel_pending_action_rows(conversation: str) -> None:
 				title="cancel_pending_action_rows: flip failed",
 				message=frappe.get_traceback(),
 			)
+
+
+def _bind_callback_tool(conv_name: str, tool_call_id: str) -> None:
+	"""Bind a callback tool to the running turn's reply ("Reports consulted" reads it).
+
+	A Claude CLI turn sends no tool events, so this callback is the only place its tools
+	can be bound. Runs in its own transaction after the receipt's commit, so a failed
+	bind never costs the receipt; it only locks the reply row. Best-effort."""
+	from jarvis.chat.tool_ownership import bind_to_live_reply
+
+	try:
+		txn.replay_on_conflict(
+			lambda: bind_to_live_reply(conv_name, tool_call_id),
+			label=f"bind tool {conv_name}:{tool_call_id}",
+		)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release the reply row lock now
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="jarvis.tool_owner.bind_failed", message=frappe.get_traceback())
 
 
 def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
@@ -982,10 +1115,9 @@ _BATCH_KEYS = ("docs", "names", "updates", "messages")
 # Tools whose signature carries a batch key ALONGSIDE the single-record form
 # (a ``doctype`` param), derived from the registry's own accepted-params map
 # so this can't drift from the tool signatures. This is also what naturally
-# excludes the two dual-form-shaped exceptions: ``create_docs`` (batch only -
-# no ``doctype`` param at all; keeps its own clear "docs must be non-empty"
-# error) and ``get_my_access`` (``docs`` is a query list of doctype/name
-# pairs to check access on, not a batch of writes - also no ``doctype`` param).
+# excludes the one dual-form-shaped exception: ``get_my_access`` (``docs`` is a
+# query list of doctype/name pairs to check access on, not a batch of writes,
+# and it has no ``doctype`` param).
 _DUAL_FORM_TOOLS = frozenset(
 	name
 	for name, params in _ACCEPTED_PARAMS.items()
@@ -1044,7 +1176,6 @@ def _parse_args(args: dict | str | None, tool: str | None = None) -> dict:
 _WRITE_TOOLS = frozenset(
 	{
 		"create_doc",
-		"create_docs",
 		"update_doc",
 		"submit_doc",
 		"cancel_doc",
@@ -1074,6 +1205,8 @@ _WRITE_TOOLS = frozenset(
 		"save_dashboard",
 		"create_custom_skill",
 		"update_wiki",
+		# A one-time macro: work the user asked to run later, as them.
+		"schedule_run",
 		# Audited but NOT gated (see _GATED_WRITES comment below):
 		# download_pdf/export_excel both insert a private, unattached File doc
 		# - real DB writes that need an audit trail, not a
@@ -1120,7 +1253,7 @@ _WRITE_TOOLS = frozenset(
 # cannot be rolled back. They park a described card with a consequence line, and a
 # failure shows at Confirm. run_method is never trial-run (its target's inline side
 # effects would fire unconfirmed).
-_PREVIEWABLE = frozenset({"create_doc", "create_docs", "update_doc"})
+_PREVIEWABLE = frozenset({"create_doc", "update_doc"})
 # The verbs that park a described card (see above), and the note it carries.
 _DESCRIBED_VERBS = frozenset({"submit_doc", "cancel_doc", "amend_doc", "delete_doc"})
 _DESCRIBED_VERB_NOTE = (
@@ -1141,7 +1274,6 @@ _DESCRIBED_VERB_NOTE = (
 _GATED_WRITES = frozenset(
 	{
 		"create_doc",
-		"create_docs",
 		"update_doc",
 		"submit_doc",
 		"cancel_doc",
@@ -1171,6 +1303,8 @@ _GATED_WRITES = frozenset(
 		"attach_to_doc",
 		"unshare_doc",
 		"unassign_from",
+		# Sets work to run later, unattended, as the user (a one-time macro).
+		"schedule_run",
 	}
 )
 # #493: the agent-facing wiki surface, refused wholesale when the operator has
@@ -1247,6 +1381,9 @@ _BRAKE = frozenset(
 		"amend_doc",
 		"create_custom_skill",
 		"call_connector",
+		# Scheduling work to run later is the user's call every time: an armed macro
+		# or an approved skill never sets up more unattended runs on its own.
+		"schedule_run",
 	}
 )
 # The unified COVERED set (design §3 A4): every gated write that is NOT a brake
@@ -1300,11 +1437,13 @@ _REQUEST_AUTORUN_TTL_S = 900
 # never sandbox-run at park (its target's inline non-DB side effects would fire
 # unconfirmed).
 #
-# create_docs joins the build-from-args creates: its whole batch is dry-run in
-# the sandbox at park, so a bad link / missing mandatory in ANY item bounces to
-# the model instead of a doomed card. Deliberately NOT in _AUTO_APPLYABLE - the
-# batch card is the human checkpoint against duplicate masters.
-_DRY_RUN_ON_PARK = frozenset({"create_doc", "create_docs", "update_doc"})
+# A ``create_doc(docs=[...])`` batch is dry-run whole in the sandbox at park, so a
+# bad link / missing mandatory in ANY item bounces to the model instead of a
+# doomed card. A batch never takes the auto-apply fast path (``_is_bulk_call``):
+# in an ordinary chat its card is the human checkpoint against duplicate masters.
+# The uncarded modes (auto mode, "confirm all", an armed macro, an approved skill
+# run) run it like any other covered write.
+_DRY_RUN_ON_PARK = frozenset({"create_doc", "update_doc"})
 
 # Batch payload keys: a call carrying a non-empty list under any of these is a
 # BULK call (many targets in one gated card), not a single-doc write.
@@ -1419,7 +1558,7 @@ def _arms_a_skill(tool: str, args) -> bool:
 	out is never refused here."""
 	from jarvis.tools import _write_risk
 
-	if tool in ("create_doc", "create_docs", "update_doc"):
+	if tool in ("create_doc", "update_doc"):
 		return any(
 			target.doctype == "Jarvis Custom Skill" and _switched_on(target.values.get(_ARMING_FIELD))
 			for target in _write_risk._targets(tool, args)
@@ -1817,6 +1956,8 @@ def _describe_call(tool: str, args: dict) -> str:
 		"slug",
 		"title",
 		"scope",
+		"run_at",
+		"macro",
 	):
 		val = a.get(key)
 		if val:
@@ -1991,6 +2132,9 @@ _ERROR_HINTS = {
 		"This feature is switched off for your workspace. Ask your administrator to "
 		"turn it back on in Jarvis Settings if you need it."
 	),
+	# #707 B3: a read stopped at the statement time limit. Asking again unchanged
+	# hits the same limit; a narrower question is what runs.
+	"QueryTooSlowError": "Ask a narrower question: add a filter or a date range, or ask for a total.",
 }
 # Frappe's User-Permission link denial reads "...not allowed to access this X
 # record because it is linked to Y '...' in field Z" - a more specific hint than
@@ -2071,6 +2215,13 @@ def _error_code(e: JarvisError) -> str:
 
 _BUSY_MESSAGE = "The system was busy (a lock or timeout) and nothing was saved."
 
+# The model reads only code + message, so the remedy rides in the message.
+_TOO_SLOW_MESSAGE = (
+	"The database stopped this query because it ran past the time limit. Retrying it "
+	"unchanged will hit the same limit. Narrow it: add filters or a date range, or "
+	"aggregate (count, sum, group by) instead of listing rows."
+)
+
 
 def _bad_date_message(found: dict) -> str:
 	"""A database refusal of a date / datetime / time value (error 1292), named by field."""
@@ -2086,7 +2237,9 @@ def _bad_date_message(found: dict) -> str:
 	return f"{where} has an invalid {found['type']} value '{found['value'][:80]}'; use {shape}."
 
 
-def _translate_write_error(e: Exception, mark: int, *, doctype: str = "") -> dict | None:
+def _translate_write_error(
+	e: Exception, mark: int, *, doctype: str = "", is_write: bool = False
+) -> dict | None:
 	"""Enriched ``{ok:false, error}`` envelope for a KNOWN write-path exception,
 	promoting Frappe's discarded reason into ``message``/``detail``/``hint``.
 	Returns ``None`` for an unexpected exception - the caller MUST re-raise it so
@@ -2134,6 +2287,9 @@ def _translate_write_error(e: Exception, mark: int, *, doctype: str = "") -> dic
 		code, message = "RetryLaterError", _BUSY_MESSAGE
 	elif _failure_kind.bad_date(e):
 		code, message = "InvalidArgumentError", _bad_date_message(_failure_kind.bad_date(e))
+	elif not is_write and _failure_kind.too_slow(e):
+		# Reads only: "narrow the question" is wrong advice for a write.
+		code, message = "QueryTooSlowError", _TOO_SLOW_MESSAGE
 	else:
 		return None
 	detail = _harvest_reason(mark)
@@ -2207,7 +2363,7 @@ def _dispatch_and_wrap(
 		if hidden is not None and not isinstance(e, WriteRefusedError):
 			e = hidden  # re-raised as something else: still the refusal
 		a = args if isinstance(args, dict) else {}
-		envelope = _translate_write_error(e, mark, doctype=a.get("doctype") or "")
+		envelope = _translate_write_error(e, mark, doctype=a.get("doctype") or "", is_write=is_write)
 		if envelope is None:  # unexpected - audit then re-raise to Frappe (500)
 			if is_write:
 				audit.record(
@@ -2409,7 +2565,7 @@ def _never_fixable(result: dict) -> None:
 
 
 # Uncarded writes that run behind the no-commit fence: the build-from-args pair.
-_FENCED_TOOLS = frozenset({"create_doc", "create_docs", "update_doc"})
+_FENCED_TOOLS = frozenset({"create_doc", "update_doc"})
 
 
 def _refuse_risky_write(
@@ -3013,18 +3169,19 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	}
 
 
-def _stamp_file_box_draft(conv: str, data) -> None:
+def _stamp_file_box_draft(conv: str, data) -> bool:
 	"""Record a File Box run's created draft (a SUBMITTABLE doctype) on its
-	conversation: the first draft is the row's result, later ones only count."""
+	conversation: the first draft is the row's result, later ones only count.
+	True when ``data`` was such a draft (and so was stamped)."""
 	doctype = data.get("doctype") if isinstance(data, dict) else None
 	name = data.get("name") if isinstance(data, dict) else None
 	if not (doctype and name):
-		return
+		return False
 	try:
 		if not frappe.get_meta(doctype).is_submittable:
-			return
+			return False
 	except frappe.DoesNotExistError:
-		return
+		return False
 	frappe.db.sql(
 		"""UPDATE `tabJarvis Conversation`
 		SET filebox_result_doctype = IF(COALESCE(filebox_result_name, '') = '', %(dt)s, filebox_result_doctype),
@@ -3033,6 +3190,7 @@ def _stamp_file_box_draft(conv: str, data) -> None:
 		WHERE name = %(conv)s""",
 		{"dt": doctype, "name": name, "conv": conv},
 	)
+	return True
 
 
 def _single_flight_error() -> dict:
@@ -3236,7 +3394,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 
 		# Batch cap at PARK (F16): a bulk call over the shared max bounces to the
 		# model now with a split-and-sequence instruction, instead of parking a
-		# card that only dies at execution. create/update/create_docs already
+		# card that only dies at execution. create/update batches already
 		# bounce via their park-time dry-run (run_atomic_batch), but the
 		# consequential bulk writes (submit/cancel/delete/amend/workflow) take a
 		# described-intent preview with NO dry-run, so without this an over-size
@@ -3888,8 +4046,10 @@ def _judging_key(tool: str, args) -> str | None:
 def _without_column(result: dict, column: str | None) -> dict:
 	"""``result`` with ``column`` (added by ``_dispatch_judging_skills``) taken out of
 	each row."""
-	if column and result.get("ok") and isinstance(result.get("data"), list):
-		for row in result["data"]:
+	data = result.get("data")
+	rows = data.get("rows") if isinstance(data, dict) else data
+	if column and result.get("ok") and isinstance(rows, list):
+		for row in rows:
 			if isinstance(row, dict):
 				row.pop(column, None)
 	return result
@@ -4056,6 +4216,8 @@ def _skill_rows_read(args, data, column: str | None = None):
 		if doctype == "Jarvis Custom Skill":
 			return names
 		return frappe.get_all(doctype, filters={"name": ["in", names]}, pluck="parent")
+	if isinstance(data, dict) and data.get("list_contract") == "list-page-v1":
+		data = data.get("rows")
 	if column and isinstance(data, list) and all(isinstance(row, dict) and row.get(column) for row in data):
 		return [row[column] for row in data]
 	return None

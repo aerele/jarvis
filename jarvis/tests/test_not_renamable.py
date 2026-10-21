@@ -16,13 +16,16 @@ from jarvis.tests.test_part3_security import _as, _ensure_user
 USER = "nr-user@example.com"
 
 NOT_RENAMABLE = (
+	"Jarvis Export Job",
 	"Jarvis Chat Send Request",
 	"Jarvis User Settings",
 	"Jarvis Chat Message",
 	"Jarvis Agent Installation",
 	"Jarvis Conversation",
+	"Jarvis Conversation Share",
 	"Jarvis Macro",
 	"Jarvis Macro Run",
+	"Jarvis Skill Admin Log",
 	"Jarvis Agent Activity",
 	"Jarvis Agent Finding",
 	"Jarvis Agent Run",
@@ -52,6 +55,7 @@ NOT_RENAMABLE = (
 	"Jarvis Relay Pump",
 	"Jarvis Agent Model Choice",
 	"Jarvis Client Error",
+	"Jarvis Feedback Outbox",
 	"Jarvis Import Announcement",
 	"Jarvis Pattern Detector State",
 	"Jarvis Pattern Run",

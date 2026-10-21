@@ -427,11 +427,13 @@ _VIEWS: tuple[ListView, ...] = (
 	),
 	ListView(
 		view_key="settings_macros_admin",
-		label="Settings → Macros (admin, every user's macros)",
+		# The key keeps its first name: the view moved from Settings to a tab of the
+		# Macros page, and a key is an identity, not an address.
+		label="Macros → Admin tab (every user's macros)",
 		classification=DOCUMENT_LIST,
 		root_doctype="Jarvis Macro",
 		endpoints=("jarvis.chat.macros_admin_api.admin_list_macros",),
-		surface="frontend/src/components/settings/MacrosAdminPane.vue",
+		surface="frontend/src/pages/macros/AdminTab.vue",
 		wave=3,
 		curated_filters={
 			"owner": "owner",
@@ -458,6 +460,32 @@ _VIEWS: tuple[ListView, ...] = (
 		),
 	),
 	ListView(
+		view_key="skills_admin",
+		label="Skills → Admin tab (every user's skills)",
+		classification=DOCUMENT_LIST,
+		root_doctype="Jarvis Custom Skill",
+		endpoints=("jarvis.chat.skills_admin_api.admin_list_skills",),
+		surface="frontend/src/pages/skills/AdminTab.vue",
+		wave=3,
+		curated_filters={
+			"owner": "owner",
+			"scope": "scope",
+			"enabled": "enabled",
+			"armed": "allow_approve_run",
+			"on_hold": None,
+		},
+		# The list shows who owns a skill and its state, never its instructions: those
+		# are read one skill at a time. A filter on them would let an admin's search
+		# rebuild every user's private skill text one LIKE at a time.
+		excluded_fields=("instructions",),
+		notes=(
+			"Cross-user, Jarvis-Admin gated, paginated with five server-authored "
+			"filters. `on_hold` is a pseudo filter over the permlevel-1 hold column, "
+			"which may not exist before the migrate. It does not take filters_v2, for "
+			"the reason the macro admin list gives."
+		),
+	),
+	ListView(
 		view_key="settings_tool_activity",
 		label="Settings → Activity (tool-run feed)",
 		classification=EXCLUDED_NOT_A_LIST,
@@ -473,6 +501,31 @@ _VIEWS: tuple[ListView, ...] = (
 		),
 	),
 	# ------------------------------------------------ explicit non-lists ----
+	ListView(
+		view_key="shared_chat_sidebar",
+		label="Shared with me sidebar",
+		classification=EXCLUDED_NOT_A_LIST,
+		endpoints=("jarvis.chat.sharing.list_shared_with_me",),
+		status=NOT_APPLICABLE,
+		reason=(
+			"Navigation to the recipient's visible shared chats: at most fifty recent "
+			"entries with an unseen marker, without columns, sorting or paging controls. "
+			"The separate read-only viewer and sidebar UI arrive in PR 2b."
+		),
+	),
+	ListView(
+		view_key="settings_chat_shares_admin",
+		label="Chat shares administration",
+		classification=EXCLUDED_DORMANT,
+		root_doctype="Jarvis Conversation Share",
+		endpoints=("jarvis.chat.sharing.list_all_shares",),
+		status=NOT_APPLICABLE,
+		reason=(
+			"PR 2a provides the admin-only share-grant metadata endpoint; its Settings "
+			"table is not reachable until PR 2b. Register the dormant surface now so "
+			"its activation and projection/filter policy are reviewed with that UI."
+		),
+	),
 	ListView(
 		view_key="chat_conversation_sidebar",
 		label="Chat conversation sidebar",

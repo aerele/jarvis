@@ -4,7 +4,8 @@
 // setup wizard (a fresh install whose site setup isn't finished, where
 // Frappe blocks the desk on the wizard), and any page where ERPNext's own
 // setup is otherwise incomplete (no Company yet). The visibility rule lives
-// in widget_visibility.mjs.
+// in widget_visibility.mjs. Sites may also opt to omit the widget entirely
+// for users without Jarvis access; the default retains the no-access redirect.
 //
 // The panel is a child of the FAB component, so hiding this host hides both.
 // On a narrow viewport the FAB navigates to the chat SPA instead of opening a
@@ -16,7 +17,10 @@
 
 import { createApp } from "vue";
 import Widget from "./jarvis_chat/widget/Widget.vue";
-import { shouldHideWidget } from "./jarvis_chat/widget/widget_visibility.mjs";
+import {
+	shouldHideWidget,
+	shouldHideWidgetForAccess,
+} from "./jarvis_chat/widget/widget_visibility.mjs";
 
 (function () {
 	if (window.__jarvisWidgetBooted) return;
@@ -41,6 +45,13 @@ import { shouldHideWidget } from "./jarvis_chat/widget/widget_visibility.mjs";
 	function start() {
 		if (!window.frappe) return;
 		window.__jarvisWidgetBooted = true;
+		if (
+			shouldHideWidgetForAccess(
+				frappe.boot?.jarvis_has_access,
+				frappe.boot?.jarvis_hide_shortcut_without_access
+			)
+		)
+			return;
 		sync();
 		if (frappe.router && frappe.router.on) frappe.router.on("change", sync);
 	}

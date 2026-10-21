@@ -49,6 +49,35 @@ SCOPES = ("User", "Role", "Org")
 
 SKILL_DOCTYPE = "Jarvis Custom Skill"
 
+# An admin's hold (``skills_admin_api.admin_hold``). The two columns arrive with a
+# migrate; until it has run the doctype does not have them and nothing is held.
+HOLD_FIELD = "admin_hold"
+HOLD_REASON_FIELD = "admin_hold_reason"
+# What a held skill may not be switched to. Switching either OFF stays free.
+_HELD_OFF_FIELDS = ("enabled", "allow_approve_run")
+
+
+class SkillOnHoldError(frappe.ValidationError):
+	"""A Jarvis Admin has put the skill on hold."""
+
+
+def hold_fields_exist() -> bool:
+	"""Whether this site's ``Jarvis Custom Skill`` has the hold fields (the migrate ran).
+	The doctype's meta, not ``frappe.db.has_column``, for the reasons given on the
+	macro's own ``hold_fields_exist``: the meta is this site's own doctype."""
+	return bool(frappe.get_meta(SKILL_DOCTYPE).has_field(HOLD_FIELD))
+
+
+def held_message(reason: str | None) -> str:
+	"""The one sentence for "on hold". A message, so HTML: the reason is an admin's
+	free text and is escaped here; the SPA reads the reason itself raw."""
+	reason = (reason or "").strip()
+	if reason:
+		return _("An admin has put this skill on hold: {0}. It stays off until an admin releases it.").format(
+			frappe.utils.escape_html(reason.rstrip("."))
+		)
+	return _("An admin has put this skill on hold. It stays off until an admin releases it.")
+
 
 class FileBoxCreatesError(frappe.ValidationError):
 	"""A ``file_box_creates`` File Box can't draft (the editor shows it on that field)."""
@@ -100,32 +129,44 @@ def user_can_use_skill(skill, user: str | None = None, user_roles: list[str] | N
 	  * ``Org``   — everyone, UNLESS ``allowed_roles`` is set (managed learned
 	    rows + legacy "Org narrowed by roles"), in which case role-match.
 
-	System Manager (and Administrator) always passes. ``skill`` may be a Document
+	System Manager and Administrator pass every Role and Org skill, but a private
+	(``User``) skill only as its owner or a ``shared_with`` user, like anyone else
+	(jarvis-admin-v2#720, D6): this rule decides what an assistant may fetch, and an
+	admin's assistant must not read a colleague's private skill. Administrator is
+	treated as a System Manager here. Desk read/list is unaffected:
+	``skill_permissions`` passes a System Manager before it reaches this rule.
+
+	``skill`` may be a Document
 	or any dict-like row; child tables absent from a ``frappe.get_all`` row are
 	fetched by parent name. Instruction-level enforcement — see TASK 11 for why
 	role-restricted skills must ALSO be kept off the shared container push (their
 	name and description would show to every user's agent).
 	"""
 	user = user or frappe.session.user
+	if (skill.get("owner") or "") == user:
+		return True
+	scope = skill_scope(skill)
+	if scope == "User":
+		# Private: a share is the only way in, for a System Manager too.
+		return _shared_with(skill, user)
 	if user == "Administrator":
 		return True
 	if user_roles is None:
 		user_roles = frappe.get_roles(user)
-	if "System Manager" in user_roles:
+	if "System Manager" in user_roles or _shared_with(skill, user):
 		return True
-	if (skill.get("owner") or "") == user:
-		return True
-	if user in _child_values(skill, "shared_with", "user", "Jarvis Custom Skill Share"):
-		return True
-	# NULL/empty scope == Org (pre-migration rows); "Personal" is the pre-ladder
-	# spelling of User (safe until the migration backfills the DB).
-	scope = (skill.get("scope") or "Org").strip() or "Org"
-	if scope == "Personal":
-		scope = "User"
-	if scope == "User":
-		# Private: owner/shared/SM already handled above.
-		return False
 	return scope_admits(skill, "Role" if scope == "Role" else "Org", user_roles)
+
+
+def skill_scope(skill) -> str:
+	"""``skill``'s ladder scope. NULL/empty is Org (pre-migration rows); "Personal"
+	is the pre-ladder spelling of User (safe until the migration backfills the DB)."""
+	scope = (skill.get("scope") or "Org").strip() or "Org"
+	return "User" if scope == "Personal" else scope
+
+
+def _shared_with(skill, user: str) -> bool:
+	return user in _child_values(skill, "shared_with", "user", "Jarvis Custom Skill Share")
 
 
 def scope_admits(skill, scope: str, user_roles) -> bool:
@@ -186,9 +227,9 @@ def prefetch_child_values(skills: list) -> None:
 	  ``parent in names`` could pull a promotion request's rows.
 	- Drop falsy values, mirroring ``_child_values``' ``if value`` filter.
 
-	Caller must SKIP this for Administrator / System Manager (they short-circuit
-	``user_can_use_skill`` before any child read); it is also pointless for a
-	single-row batch.
+	Pointless for a single-row batch, and for an Administrator / System Manager
+	unless a row is another user's private skill: they pass every Role and Org row
+	before any child read (``find_skills._maybe_prefetch_children`` gates this).
 	"""
 	names = [s.get("name") for s in skills if s.get("name")]
 	if not names:
@@ -240,6 +281,7 @@ class JarvisCustomSkill(NotRenamable, Document):
 	def validate(self):
 		_refuse_an_armed_macro_write()
 		refuse_unseen_change(self)
+		self._guard_admin_hold()
 		self._validate_slug()
 		self._validate_scope()
 		self._guard_new_scope()
@@ -262,6 +304,29 @@ class JarvisCustomSkill(NotRenamable, Document):
 		refuse_unseen_change(self)
 		_clear_personal_clause_cache(self.owner)
 		self._release_slug_reservation()
+
+	def _guard_admin_hold(self):
+		"""The hold is an admin's, never the owner's. Only the admin verbs write it, with
+		a raw write that never reaches ``validate``; so whatever a save carries in the
+		two fields is not theirs and the stored value wins: a form save, REST, a Data
+		Import, a Desk Duplicate (an insert, where "stored" is "not held"). Permlevel 1
+		with no writer does the same for a plain user's save, but not for one that
+		ignores permissions or comes from Administrator; this does.
+
+		While held, the save may not switch the skill on or arm it, judged against the
+		STORED value: the SPA form always sends both switches and never a timestamp, so
+		this, not ``modified``, is what refuses a form loaded before the hold."""
+		if not hold_fields_exist():
+			return
+		before = self.get_doc_before_save()
+		# As stored, NULL included: this doctype tracks changes.
+		self.set(HOLD_FIELD, before.get(HOLD_FIELD) if before else 0)
+		self.set(HOLD_REASON_FIELD, before.get(HOLD_REASON_FIELD) if before else None)
+		if not frappe.utils.cint(self.get(HOLD_FIELD)):
+			return
+		for field in _HELD_OFF_FIELDS:
+			if frappe.utils.cint(self.get(field)) and not frappe.utils.cint(before.get(field)):
+				frappe.throw(held_message(self.get(HOLD_REASON_FIELD)), SkillOnHoldError)
 
 	def _sync_slug_reservation(self):
 		"""Keep the DB-unique shared-slug reservation (SR4-2) in step with this row on
@@ -474,7 +539,7 @@ class JarvisCustomSkill(NotRenamable, Document):
 			_(
 				"Only a reviewer can change a shared (Role/Org) skill's name, description, "
 				"instructions, audience or File Box settings, or switch it back on. "
-				"Ask a System Manager to make the change."
+				"Ask a skill reviewer to make the change."
 			),
 			frappe.PermissionError,
 		)

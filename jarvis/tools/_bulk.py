@@ -2,7 +2,7 @@
 
 The bulk tools (`submit_doc(names=[...])`, `cancel_doc`, `update_doc`,
 `delete_doc`, `apply_workflow_action`, the collab writes) all want the same
-guarantee `create_docs` pioneered: run the single-doc operation over a list in
+guarantee the batch create pioneered: run the single-doc operation over a list in
 ONE savepoint-guarded transaction, all-or-nothing, so the user confirms the
 whole set with a single gated card.
 
@@ -12,7 +12,7 @@ commit-callback queues to their pre-batch state. Without that, callbacks queued
 by a doc that was inserted-then-rolled-back would survive and fire on the
 request's real commit (a whitelisted endpoint that catches the error and
 returns ``{ok: false}`` still responds HTTP 200, so Frappe commits at request
-end). See create_docs.py history for the bug this prevents.
+end). See create_doc.py's batch path for the bug this prevents.
 """
 
 from collections import deque
@@ -22,7 +22,7 @@ import frappe
 from jarvis.exceptions import InvalidArgumentError
 
 # Shared cap: one bulk call touches at most this many targets. Matches the
-# original create_docs limit; the confirmation card and the sandbox dry-run
+# original batch-create limit; the confirmation card and the sandbox dry-run
 # both scale with it, so keep it modest.
 _MAX_BATCH = 20
 
@@ -38,7 +38,7 @@ def run_atomic_batch(items, fn, *, label=None, max_batch=_MAX_BATCH):
 	per-item ``fn`` results on success.
 
 	``label`` (optional) maps an item to a short display string for that note.
-	Callers should validate their items BEFORE calling (like create_docs) so a
+	Callers should validate their items BEFORE calling (like create_doc's batch) so a
 	bad argument bounces before a savepoint is opened / a card is shown.
 	"""
 	if not isinstance(items, list) or not items:

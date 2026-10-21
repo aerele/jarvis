@@ -1660,6 +1660,191 @@ class TestCancelCreditLeak(_AdmissionTestCase):
 		self.assertEqual(self._state(rid), "dispatching", "dispatched turn untouched")
 
 
+class TestFileBoxHasItsOwnQueue(_AdmissionTestCase):
+	"""#1567: File Box drops (background turns) wait in their own line. A big batch no
+	longer fills the queue that typed messages use, and it is not cancelled after the
+	15 minutes a typed message may wait."""
+
+	def _queue(self, count, turn_class, minutes_ago=0):
+		conv = self._mk_conv()
+		at = frappe.utils.add_to_date(None, minutes=-minutes_ago)
+		runs = []
+		for i in range(count):
+			rid = f"adm_fb_{turn_class[:2]}_{minutes_ago}_{i}"
+			self._insert_turn(
+				conv,
+				rid,
+				self._mk_msg(conv, i + 1),
+				"queued",
+				version=0,
+				turn_class=turn_class,
+				enqueued_at=at,
+			)
+			runs.append(rid)
+		return runs
+
+	def test_a_full_file_box_line_does_not_refuse_typed_chat(self):
+		self._queue(admission.MAX_QUEUE_DEPTH, "background")
+		conv = self._mk_conv()
+		self.assertFalse(admission.shard_overloaded(conv))
+		self.assertTrue(self._accept(conv, "adm_fb_typed", self._mk_msg(conv, 1))["ok"])
+
+	def test_typed_chat_keeps_its_limit_of_25(self):
+		self._queue(admission.MAX_QUEUE_DEPTH, "interactive")
+		conv = self._mk_conv()
+		self.assertTrue(admission.shard_overloaded(conv))
+		res = self._accept(conv, "adm_fb_typed_full", self._mk_msg(conv, 1))
+		self.assertTrue(res.get("overloaded"))
+
+	def test_the_file_box_line_has_its_own_limit(self):
+		self._queue(3, "background")
+		conv = self._mk_conv()
+		with patch.object(admission, "MAX_BACKGROUND_QUEUE_DEPTH", 3):
+			self.assertTrue(admission.shard_overloaded(conv, background=True))
+			res = self._accept(conv, "adm_fb_drop_full", self._mk_msg(conv, 1), turn_class="background")
+			self.assertTrue(res.get("overloaded"))
+			self.assertFalse(admission.shard_overloaded(conv))
+
+	def test_a_queued_file_drop_outlives_the_typed_age_out(self):
+		typed = self._queue(1, "interactive", minutes_ago=20)
+		drop = self._queue(1, "background", minutes_ago=20)
+		old_drop = self._queue(1, "background", minutes_ago=5 * 60)
+		admission._sweep_age_out(set())
+		self.assertEqual(self._state(typed[0]), "cancelled")
+		self.assertEqual(self._state(drop[0]), "queued")
+		self.assertEqual(self._state(old_drop[0]), "cancelled")
+
+	def test_the_age_out_guard_reads_the_turn_class(self):
+		from jarvis.chat import turn_state as ts
+
+		drop = self._queue(1, "background", minutes_ago=20)
+		old_drop = self._queue(1, "background", minutes_ago=5 * 60)
+		self.assertFalse(ts.cancel_queued_max_age(drop[0], 0, "aged"))
+		self.assertTrue(ts.cancel_queued_max_age(old_drop[0], 0, "aged"))
+
+	def test_a_browser_cannot_pick_the_background_line(self):
+		# background=1 from a request is ignored: only a server-set origin makes a send
+		# unattended, so a user cannot skip the typed limit of 25.
+		from jarvis.permissions import message_origin
+
+		def send(conv):
+			with patch.object(chat_api, "_dispatch_turn", side_effect=lambda *a, **k: None):
+				return chat_api.send_message(conversation=conv, message="hello there", background=1)
+
+		browser = self._mk_conv()
+		self.assertTrue(send(browser)["ok"])
+		self.assertEqual(frappe.db.get_value(TURN, {"conversation": browser}, "turn_class"), "interactive")
+		drop = self._mk_conv()
+		with message_origin("file_box"):
+			self.assertTrue(send(drop)["ok"])
+		self.assertEqual(frappe.db.get_value(TURN, {"conversation": drop}, "turn_class"), "background")
+
+
+class TestStopForAFinishedRun(_AdmissionTestCase):
+	"""#448: a Stop for run A that arrives after A ended, while turn B of the same chat is
+	unfinished (a continuation, a macro step, a queued follow-up), must leave B alone:
+	no cancel, no card or approval sweep, and an honest ``ok`` False."""
+
+	def _cancel_requested(self, run_id):
+		return int(frappe.db.get_value(TURN, run_id, "cancel_requested") or 0)
+
+	def test_a_late_stop_leaves_the_running_turn_alone(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_448_a", self._mk_msg(conv, 1), "done", version=5)
+		self._insert_turn(conv, "adm_448_b", self._mk_msg(conv, 2), "dispatching", version=3)
+		with patch("jarvis.api._request_autorun_clear") as autorun_clear:
+			res = chat_api.stop_run(conv, "adm_448_a")
+		self.assertFalse(res["ok"])
+		self.assertEqual(self._cancel_requested("adm_448_b"), 0)
+		autorun_clear.assert_not_called()
+
+	def test_a_late_stop_leaves_a_queued_follow_up_alone(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_448_c", self._mk_msg(conv, 1), "done", version=5)
+		self._insert_turn(conv, "adm_448_d", self._mk_msg(conv, 2), "queued", version=0)
+		self.assertFalse(chat_api.stop_run(conv, "adm_448_c")["ok"])
+		self.assertEqual(self._state("adm_448_d"), "queued")
+
+	def test_a_stop_naming_the_running_turn_still_marks_it(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_448_e", self._mk_msg(conv, 1), "dispatching", version=3)
+		chat_api.stop_run(conv, "adm_448_e")
+		self.assertEqual(self._cancel_requested("adm_448_e"), 1)
+
+	def test_a_stop_naming_another_run_does_not_mark_the_running_turn(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_448_f", self._mk_msg(conv, 1), "dispatching", version=3)
+		chat_api.stop_run(conv, "not-a-turn-of-this-chat")
+		self.assertEqual(self._cancel_requested("adm_448_f"), 0)
+
+
+class TestStopOnAWaitingReply(_AdmissionTestCase):
+	"""The composer's Stop calls ``stop_run``. A reply still queued for a slot was never
+	cancelled by it: Stop said "Stopped." and the reply ran later. The composer sends
+	no run id until run:start, so both shapes are covered."""
+
+	def test_stop_with_the_waiting_run_id_cancels_it(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q1", self._mk_msg(conv, 1), "queued", version=0)
+		self.assertTrue(chat_api.stop_run(conv, "adm_stop_q1")["ok"])
+		self.assertEqual(self._state("adm_stop_q1"), "cancelled")
+
+	def test_stop_without_a_run_id_cancels_the_waiting_reply(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q2", self._mk_msg(conv, 1), "queued", version=0)
+		self.assertTrue(chat_api.stop_run(conv)["ok"])
+		self.assertEqual(self._state("adm_stop_q2"), "cancelled")
+
+	def test_stop_cancels_every_waiting_turn_and_still_sweeps(self):
+		# Stop means nothing more runs, and its card and approval sweeps still apply.
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q3", self._mk_msg(conv, 1), "queued", version=0)
+		self._insert_turn(conv, "adm_stop_q4", self._mk_msg(conv, 2), "queued", version=0)
+		with patch("jarvis.api._request_autorun_clear") as autorun_clear:
+			chat_api.stop_run(conv)
+		self.assertEqual([self._state(r) for r in ("adm_stop_q3", "adm_stop_q4")], ["cancelled"] * 2)
+		autorun_clear.assert_called_once_with(conv)
+
+	def test_stop_on_a_running_reply_leaves_a_waiting_follow_up(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_run", self._mk_msg(conv, 1), "dispatching", version=3)
+		self._insert_turn(conv, "adm_stop_next", self._mk_msg(conv, 2), "queued", version=0)
+		chat_api.stop_run(conv)
+		chat_api.stop_run(conv, "adm_stop_run")
+		self.assertEqual(self._state("adm_stop_next"), "queued")
+
+	def test_stop_for_another_run_leaves_a_queued_reply(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q5", self._mk_msg(conv, 1), "queued", version=0)
+		chat_api.stop_run(conv, "some-other-run")
+		self.assertEqual(self._state("adm_stop_q5"), "queued")
+
+	def test_a_failing_queued_cancel_does_not_fail_stop_or_its_sweeps(self):
+		conv = self._mk_conv()
+		with (
+			patch.object(admission, "cancel_queued_on_stop", side_effect=RuntimeError("db hiccup")),
+			patch("jarvis.api._request_autorun_clear") as autorun_clear,
+		):
+			self.assertTrue(chat_api.stop_run(conv)["ok"])
+		autorun_clear.assert_called_once_with(conv)
+
+	def test_one_failing_hand_over_does_not_skip_the_others(self):
+		conv = self._mk_conv()
+		self._insert_turn(conv, "adm_stop_q6", self._mk_msg(conv, 1), "queued", version=0)
+		self._insert_turn(conv, "adm_stop_q7", self._mk_msg(conv, 2), "queued", version=0)
+		finished = []
+
+		def finish(run_id, *args, **kwargs):
+			finished.append(run_id)
+			if run_id == "adm_stop_q6":
+				raise RuntimeError("publish down")
+
+		with patch.object(admission, "_finish_pre_dispatch_cancel", side_effect=finish):
+			self.assertTrue(admission.cancel_queued_on_stop(conv, None))
+		self.assertEqual(finished, ["adm_stop_q6", "adm_stop_q7"])
+		self.assertEqual([self._state(r) for r in ("adm_stop_q6", "adm_stop_q7")], ["cancelled"] * 2)
+
+
 # --------------------------------------------------------------------------- #
 # CDX-9 — enqueue-failure compensation (both admit + promote paths)
 # --------------------------------------------------------------------------- #
@@ -2234,7 +2419,7 @@ class TestEnqueueOverloadFourCallers(_AdmissionTestCase):
 		conv = self._mk_conv()
 		u = self._mk_msg(conv, 1, role="user")
 		with (
-			patch.object(admission, "MAX_QUEUE_DEPTH", 0),
+			patch.object(admission, "MAX_BACKGROUND_QUEUE_DEPTH", 0),  # the re-dispatch is background
 			patch.object(chat_api, "_dispatch_turn", side_effect=lambda *a, **k: None),
 		):
 			res = chat_api._redispatch_orphan(conv, u)
@@ -2247,7 +2432,7 @@ class TestEnqueueOverloadFourCallers(_AdmissionTestCase):
 		conv = self._mk_conv()
 		u = self._mk_msg(conv, 1, role="user")
 		with (
-			patch.object(admission, "MAX_QUEUE_DEPTH", 0),
+			patch.object(admission, "MAX_BACKGROUND_QUEUE_DEPTH", 0),  # the re-dispatch is background
 			patch.object(chat_api, "_dispatch_turn", side_effect=lambda *a, **k: None),
 		):
 			res1 = chat_api._redispatch_orphan(conv, u)

@@ -153,12 +153,12 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 		before = _all_names()
 		with m.patch("jarvis.api.dispatch", return_value={}):
 			api._dispatch_and_wrap(
-				"create_docs",
+				"create_doc",
 				{"docs": [{"doctype": "ToDo"}, {"doctype": "ToDo"}, {"doctype": "ToDo"}]},
 				is_write=True,
 				provenance="chat",
 			)
-		new = _new_rows(before, tool="create_docs")
+		new = _new_rows(before, tool="create_doc")
 		self.assertEqual(len(new), 1)
 		self.assertEqual(new[0]["bulk_count"], 3)
 		self.assertEqual(new[0]["ref_doctype"], "ToDo")

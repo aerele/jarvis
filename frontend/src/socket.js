@@ -16,5 +16,11 @@ export function initSocket() {
 	// plain http, as before.
 	const protocol = port ? "http" : window.location.protocol.replace(":", "");
 	const url = `${protocol}://${host}${port}/${siteName}`;
-	return io(url, { withCredentials: true });
+	const socket = io(url, { withCredentials: true });
+	socket.on("connect", () => window.dispatchEvent(new Event("jarvis:export-refresh")));
+	socket.on("jarvis:event", (event) => {
+		if (event?.kind?.startsWith("export:"))
+			window.dispatchEvent(new CustomEvent("jarvis:export-event", { detail: event }));
+	});
+	return socket;
 }

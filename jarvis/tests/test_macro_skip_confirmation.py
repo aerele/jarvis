@@ -232,9 +232,20 @@ class TestArmedSkipPartition(FrappeTestCase):
 		# always park. The macro and skill modes now share ONE brake, so
 		# create_custom_skill NO LONGER skips inside an armed macro - a deliberate
 		# behaviour change from the pre-unification macro set that covered it.
+		# schedule_run (setting up an unattended run for later) is the user's call
+		# every time, so it is in the brake as well.
 		self.assertEqual(
 			_ARMED_SKIP_NEVER,
-			frozenset({"cancel_doc", "delete_doc", "amend_doc", "create_custom_skill", "call_connector"}),
+			frozenset(
+				{
+					"cancel_doc",
+					"delete_doc",
+					"amend_doc",
+					"create_custom_skill",
+					"call_connector",
+					"schedule_run",
+				}
+			),
 		)
 
 	def test_run_method_is_covered(self):
@@ -315,7 +326,7 @@ class TestArmedSkipGate(FrappeTestCase):
 		conv = self._armed_conv()
 		with patch("jarvis.api.dispatch", return_value={"ok": True}) as disp:
 			r = api._run_tool(
-				"create_docs",
+				"create_doc",
 				{"docs": [{"doctype": "ToDo", "values": {"description": "b1"}}]},
 				conversation=conv,
 			)
@@ -328,7 +339,7 @@ class TestArmedSkipGate(FrappeTestCase):
 		conv = self._armed_conv()
 		docs = [{"doctype": "ToDo", "values": {"description": f"b{i}"}} for i in range(_MAX_BATCH + 1)]
 		with patch("jarvis.api.dispatch") as disp:
-			r = api._run_tool("create_docs", {"docs": docs}, conversation=conv)
+			r = api._run_tool("create_doc", {"docs": docs}, conversation=conv)
 		self.assertFalse(r["ok"], "an over-size batch must bounce, even when armed")
 		self.assertEqual(r["error"]["code"], "InvalidArgumentError")
 		self.assertFalse(disp.called, "the F16 cap bounces before dispatch, armed or not")
