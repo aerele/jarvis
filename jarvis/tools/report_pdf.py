@@ -28,6 +28,8 @@ import frappe
 from frappe.desk.query_report import run as frappe_run_report
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools._report_rows import cell as _cell
+from jarvis.tools._report_rows import normalise_columns as _normalise_columns
 
 # Above this many columns a portrait page clips the table, so default to landscape.
 _LANDSCAPE_COL_THRESHOLD = 6
@@ -134,57 +136,6 @@ def report_pdf(
 	# save_export_file owns filename sanitising + File-size/ValidationError
 	# translation, so only the extension of this placeholder name is used.
 	return save_export_file("report.pdf", pdf_bytes, title=report_title, mime_type="application/pdf")
-
-
-def _normalise_columns(columns: list) -> list[dict]:
-	"""Return columns as dicts with at least ``fieldname``, ``label``,
-	``fieldtype``, ``options``.
-
-	``query_report.run`` normalises columns to dicts, but a hand-written Query
-	Report can still emit the legacy ``"Label:Fieldtype/Options:Width"`` string
-	form, so both are handled.
-	"""
-	out: list[dict] = []
-	for i, col in enumerate(columns):
-		if isinstance(col, dict):
-			fieldname = col.get("fieldname") or col.get("label") or f"col_{i}"
-			out.append(
-				{
-					"fieldname": fieldname,
-					"label": col.get("label") or fieldname,
-					"fieldtype": col.get("fieldtype") or "Data",
-					"options": col.get("options") or "",
-				}
-			)
-			continue
-		# Legacy string column: "Label:Fieldtype/Options:Width"
-		parts = str(col).split(":")
-		label = parts[0].strip() or f"col_{i}"
-		fieldtype, options = "Data", ""
-		if len(parts) > 1 and parts[1]:
-			ft = parts[1].split("/")
-			fieldtype = ft[0].strip() or "Data"
-			options = ft[1].strip() if len(ft) > 1 else ""
-		out.append(
-			{
-				"fieldname": frappe.scrub(label),
-				"label": label,
-				"fieldtype": fieldtype,
-				"options": options,
-			}
-		)
-	return out
-
-
-def _cell(row, col: dict, idx: int):
-	"""Read one cell, tolerating both dict rows (keyed by fieldname) and
-	list/tuple rows (positional) — Frappe returns either depending on report type,
-	and an appended total row can be a list among dict rows."""
-	if isinstance(row, dict):
-		return row.get(col["fieldname"])
-	if isinstance(row, (list, tuple)):
-		return row[idx] if idx < len(row) else None
-	return None
 
 
 def _format_cell(value, col: dict) -> str:
