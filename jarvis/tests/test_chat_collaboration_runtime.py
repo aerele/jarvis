@@ -100,9 +100,7 @@ class TestCollaborationRuntime(CollaborationCase):
 	def policy(self):
 		from jarvis.chat.collaboration_runtime import RuntimePolicy
 
-		return RuntimePolicy(
-			skills_root="/srv/shared/skills", model_ref="provider/actor-model"
-		)
+		return RuntimePolicy(skills_root="/srv/shared/skills", model_ref="provider/actor-model")
 
 	def provision(self):
 		from jarvis.chat.collaboration_runtime import provision
