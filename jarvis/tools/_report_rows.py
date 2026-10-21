@@ -11,12 +11,17 @@ between v15 and v16, so the normalising lives here."""
 from __future__ import annotations
 
 import datetime
+import re
 
 import frappe
 from frappe.utils import get_datetime, getdate
 
 # Fieldtypes whose stored value is a date the spreadsheet should hold as a date.
 _DATE_FIELDTYPES = {"Date": getdate, "Datetime": get_datetime}
+# Only the ISO shape Frappe itself stores (``2026-10-21``, ``2026-10-21 18:37:32``)
+# is parsed: a report that formats a date for display (``21-10-2026``) keeps its
+# text, rather than getdate guessing day and month from the system format.
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?$")
 
 
 def normalise_columns(columns: list) -> list[dict]:
@@ -81,7 +86,7 @@ def as_file_value(value, col: dict):
 	if isinstance(value, (datetime.date, datetime.datetime)):
 		return value
 	parse = _DATE_FIELDTYPES.get(col.get("fieldtype"))
-	if parse is None or not isinstance(value, str):
+	if parse is None or not isinstance(value, str) or not _ISO_DATE.match(value.strip()):
 		return value
 	try:
 		return parse(value)

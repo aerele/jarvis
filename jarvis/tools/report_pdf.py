@@ -29,7 +29,8 @@ from frappe.desk.query_report import run as frappe_run_report
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._report_rows import cell as _cell
-from jarvis.tools._report_rows import normalise_columns as _normalise_columns
+from jarvis.tools._report_rows import normalise_columns as _normalise_columns  # noqa: F401 (tests import it here)
+from jarvis.tools._report_rows import visible_columns
 
 # Above this many columns a portrait page clips the table, so default to landscape.
 _LANDSCAPE_COL_THRESHOLD = 6
@@ -95,7 +96,9 @@ def report_pdf(
 		)
 		raise InvalidArgumentError(f"could not run report {report_name}: {e}") from e
 
-	columns = _normalise_columns(res.get("columns") or [])
+	# Hidden helper columns (an id behind a link) are not rendered, as Desk and
+	# export_query(report_name) leave them out.
+	columns = [col for _, col in visible_columns(res.get("columns") or [])]
 	if not columns:
 		raise InvalidArgumentError(
 			f"report {report_name} returned no columns to render "

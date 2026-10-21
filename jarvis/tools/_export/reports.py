@@ -17,7 +17,8 @@ Gates, in order, the same ones ``run_report`` applies plus Desk's export gate:
 ``get_report_doc`` (Has-Role allow-list, ``ref_doctype`` report permission,
 disabled check, Custom Report resolution), the Export DocPerm on ``ref_doctype``
 (``frappe.permissions.can_export``, what Desk's own Excel export checks), the
-receivable/payable scope (``_report_scope``), the report's filter defaults, and
+receivable/payable scope (``_report_scope``), the report's filter defaults (as
+Desk sends them, for BOTH the inline and the prepared path), and
 ``validate_filters_permissions``. A Report Builder report is a saved list view,
 not a columns+rows result: refused with the ``doctype`` source as the way.
 """
@@ -31,13 +32,10 @@ from frappe.utils import now_datetime
 from jarvis.exceptions import InvalidArgumentError, NoDataError, PermissionDeniedError
 from jarvis.tools import _prepared_reports, _report_rows
 from jarvis.tools._export.model import ExportModel
-from jarvis.tools._export.resolvers import immediate_row_limit
+from jarvis.tools._export.resolvers import _EXPORT_SELECT_LIMIT_S, immediate_row_limit
 from jarvis.tools._report_scope import resolve_scope
 from jarvis.tools.get_report_filters import get_report_filters
 from jarvis.tools.run_report import _normalize_filters
-
-# Only ``doctype`` + ``filters`` and ``spec`` take these; a report brings its own columns.
-_DOCTYPE_ONLY_ARGS = ("fields", "order_by", "parent_doctype")
 
 
 def too_large_message(report_name: str, cap: int) -> str:
@@ -55,12 +53,18 @@ def resolve(report_name: str, filters=None) -> tuple[ExportModel | None, dict | 
 		raise InvalidArgumentError("report_name is required")
 	if not frappe.db.exists("Report", report_name):
 		raise InvalidArgumentError(f"unknown Report: {report_name}")
+	user = frappe.session.user
 	report = _gate(report_name)
 	filters, _scope = resolve_scope(report_name, _normalize_filters(filters))
+	# Desk sends the report's own defaults under the user's values; so do we, on
+	# both paths: a Script Report's required filter with a default must not reach
+	# the script unset, and a prepared run started here must match a Desk run.
+	filters = _prepared_reports.fill_defaults(report_name, filters)
+	_prepared_reports.gate_filters(report_name, filters, user)
 	_require_filters(report_name, filters)
 
 	if report.prepared_report:
-		completed, status = _prepared_reports.rows_or_status(report_name, filters, user=frappe.session.user)
+		completed, status = _prepared_reports.completed_or_status(report_name, filters, user=user)
 		if status is not None:
 			return None, status
 		columns, result, as_of = completed["columns"], completed["result"], completed["as_of"]
@@ -73,9 +77,9 @@ def resolve(report_name: str, filters=None) -> tuple[ExportModel | None, dict | 
 
 def _gate(report_name: str):
 	"""The report doc, resolved and gated as ``run()`` gates it, plus the Export
-	DocPerm Desk's export checks. Report Builder reports are refused here, before any
-	permission detail about the report leaks into the message."""
-	report = _prepared_reports._gate_report(report_name)
+	DocPerm Desk's export checks. Report Builder reports are refused here, before
+	any further work."""
+	report = _prepared_reports.gate_report(report_name)
 	if report.report_type == "Report Builder":
 		raise InvalidArgumentError(
 			f"{report_name} is a Report Builder report (a saved list view). Export its records with "
@@ -90,23 +94,14 @@ def _gate(report_name: str):
 
 
 def _require_filters(report_name: str, filters: dict) -> None:
-	"""One error naming every required filter that is still unset, instead of the
-	report script's own failure (``format requires a mapping``, a KeyError). The
-	report's defaults count as set. Unreadable filter metadata: nothing to check."""
+	"""One error naming every required filter still unset (the defaults are already
+	filled in), instead of the report script's own failure (``format requires a
+	mapping``, a KeyError). Unreadable filter metadata: nothing to check."""
 	try:
-		declared = get_report_filters(report_name)
+		required = get_report_filters(report_name).get("required") or []
 	except Exception:
 		return
-	defaults = {
-		f["fieldname"]
-		for f in declared.get("filters") or []
-		if not _prepared_reports._unset(f.get("default"))
-	}
-	missing = [
-		name
-		for name in declared.get("required") or []
-		if name not in defaults and _prepared_reports._unset(filters.get(name))
-	]
+	missing = [name for name in required if _prepared_reports.is_unset(filters.get(name))]
 	if missing:
 		raise InvalidArgumentError(
 			f"{report_name} needs these filters: {', '.join(missing)}. Pass them in filters "
@@ -115,14 +110,26 @@ def _require_filters(report_name: str, filters: dict) -> None:
 
 
 def _run_inline(report_name: str, filters: dict) -> tuple[list, list]:
-	"""Run a Query / Script Report now, as ``run_report`` and ``report_pdf`` do.
-	``ignore_prepared_report`` is harmless here (the prepared path never reaches
-	this) and ``add_total_row`` is already applied inside ``run``."""
+	"""Run a Query / Script Report now, as ``run_report`` and ``report_pdf`` do, with
+	each of its statements under the export SELECT limit (``resolvers._run_bounded``
+	has the reasoning): the plugin aborts the call at 30 s and the render and save
+	still follow. ``add_total_row`` is already applied inside ``run``."""
+	from jarvis import _failure_kind
+	from jarvis.api import _agent_read_timeout_s, statement_time_limit
+
+	agent_limit = _agent_read_timeout_s()
+	limit = min(agent_limit, _EXPORT_SELECT_LIMIT_S) if agent_limit else 0
 	try:
-		res = frappe_run_report(report_name=report_name, filters=filters, ignore_prepared_report=True)
+		with statement_time_limit(limit):
+			res = frappe_run_report(report_name=report_name, filters=filters, ignore_prepared_report=True)
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"no permission to run report {report_name}") from e
 	except Exception as e:
+		if _failure_kind.too_slow(e):
+			raise InvalidArgumentError(
+				f"{report_name} ran past the {limit}-second limit for one export call, so the database "
+				f"stopped it. Narrow the filters, or use the report's own Excel export in Desk."
+			) from None
 		# The report itself failed: a bad filter value, invalid report SQL. A caller
 		# error from this tool's point of view, not a 500; the traceback stays in the
 		# Error Log for a genuine fault.
@@ -155,25 +162,27 @@ def _model(report, report_name: str, columns: list, result: list, as_of: str | N
 		for row in result
 	]
 	return ExportModel(
-		columns=[col["fieldname"] for _, col in visible],
+		# Keys are unique (a highlight rule names a column by key or header), the
+		# values still come from the report's own fieldname per column.
+		columns=_unique([col["fieldname"] for _, col in visible]),
 		rows=rows,
 		total=len(rows),
 		meta={
 			"doctype": report.ref_doctype,
 			"report_name": report_name,
-			"headers": _unique_labels([col["label"] for _, col in visible]),
+			"headers": _unique([col["label"] for _, col in visible]),
 			"title": report_name,
 			"as_of": as_of,
 		},
 	)
 
 
-def _unique_labels(labels: list[str]) -> list[str]:
-	"""Two columns with one label are told apart by a counter, so no header is lost."""
+def _unique(names: list[str]) -> list[str]:
+	"""Two columns with one name are told apart by a counter, so no column is lost."""
 	seen: dict[str, int] = {}
 	out = []
-	for label in labels:
-		n = seen.get(label, 0)
-		seen[label] = n + 1
-		out.append(label if n == 0 else f"{label} ({n + 1})")
+	for name in names:
+		n = seen.get(name, 0)
+		seen[name] = n + 1
+		out.append(name if n == 0 else f"{name} ({n + 1})")
 	return out

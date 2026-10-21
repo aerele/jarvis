@@ -94,14 +94,14 @@ def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
 	return _not_ready(report_name, filters, user)
 
 
-def rows_or_status(report_name: str, raw_filters: dict, *, user: str) -> tuple[dict | None, dict | None]:
-	"""For an export: ``(completed, None)`` with EVERY row of the completed copy
-	(``{columns, result, as_of, run}``, no ``_MAX_ROWS`` cap: the rows go to a file,
-	not to the model), or ``(None, status)`` with the same ``generating`` /
-	``failed`` / ``started`` envelope ``handle_prepared`` returns. One pass over the
-	live state, so a copy that completes between two lookups is never answered
-	with a capped ``ready`` envelope."""
-	filters = gate_and_fill(report_name, raw_filters, user=user)
+def completed_or_status(report_name: str, filters: dict, *, user: str) -> tuple[dict | None, dict | None]:
+	"""For an export, after the caller ran the gates and ``fill_defaults``:
+	``(completed, None)`` with EVERY row of the completed copy (``{columns, result,
+	as_of, run}``, no ``_MAX_ROWS`` cap: the rows go to a file, not to the model), or
+	``(None, status)`` with the same ``generating`` / ``failed`` / ``started``
+	envelope ``handle_prepared`` returns. One pass over the live state, so a copy
+	that completes between two lookups is never answered with a capped ``ready``
+	envelope."""
 	row = _latest(report_name, filters, user, ("Completed",))
 	if row:
 		completed = read_completed_rows(row.name)
@@ -111,13 +111,19 @@ def rows_or_status(report_name: str, raw_filters: dict, *, user: str) -> tuple[d
 
 
 def gate_and_fill(report_name: str, raw_filters: dict, *, user: str) -> dict:
-	"""The gates ``run()`` applies, then the filters as Desk would send them: the
-	report's own defaults under the caller's values. A run started with these is the
-	run Desk would start, and a Desk run is found again."""
-	_gate_report(report_name)
-	filters = {**_report_defaults(report_name), **_canonical_filters(raw_filters)}
-	_gate_filters(report_name, filters, user)
+	"""The gates ``run()`` applies, then the filters as Desk would send them."""
+	gate_report(report_name)
+	filters = fill_defaults(report_name, raw_filters)
+	gate_filters(report_name, filters, user)
 	return filters
+
+
+def fill_defaults(report_name: str, raw_filters: dict | str | None) -> dict:
+	"""The report's own defaults under the caller's values, as Desk sends them. A
+	run started with these is the run Desk would start, and a Desk run is found
+	again; a Script Report's required filter with a default never reaches the
+	script unset."""
+	return {**_report_defaults(report_name), **_canonical_filters(raw_filters)}
 
 
 def _not_ready(report_name: str, filters: dict, user: str) -> dict:
@@ -141,7 +147,7 @@ def _not_ready(report_name: str, filters: dict, user: str) -> dict:
 # --------------------------------------------------------------------------- #
 # gates
 # --------------------------------------------------------------------------- #
-def _gate_report(report_name: str):
+def gate_report(report_name: str):
 	"""Gate the report exactly as run() does: Has-Role allow-list, ref_doctype
 	report permission, disabled-check, Custom-Report resolution. Returns the
 	resolved report doc (the reference report, for a Custom Report)."""
@@ -154,7 +160,7 @@ def _gate_report(report_name: str):
 		raise InvalidArgumentError(str(e) or f"report {report_name} is unavailable") from e
 
 
-def _gate_filters(report_name: str, filters: dict, user: str) -> None:
+def gate_filters(report_name: str, filters: dict, user: str) -> None:
 	"""Record-level guard that a Link filter value points at a doc the caller may
 	read. make_prepared_report skips this (ignore_permissions insert), and the
 	completed-copy read path bypasses run() too, so we apply it once, up front."""
@@ -205,12 +211,15 @@ def _report_defaults(report_name: str) -> dict:
 	return {f["fieldname"]: f["default"] for f in filters if not _unset(f.get("default"))}
 
 
-def _unset(value) -> bool:
+def is_unset(value) -> bool:
 	"""Desk sends only the filters that have a value (``get_filter_values``): a blank,
 	0 / false, "%" or an empty selection reads as not set."""
 	if isinstance(value, list | tuple):
 		return not value
 	return value is None or value in ("", "%") or (isinstance(value, int | float) and value == 0)
+
+
+_unset = is_unset  # the name the module's own callers and tests use
 
 
 # --------------------------------------------------------------------------- #
