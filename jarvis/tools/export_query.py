@@ -10,7 +10,9 @@ This is the tool for "export these records to Excel/CSV" - NOT get_list +
 export_excel, whose rows pass through the model context and are truncatable.
 Records a plain filter cannot pick ("suppliers with no invoice in a year": a NOT
 EXISTS, a join, an aggregate) are exported with ``spec``, the same structured
-query the ``query`` tool takes, compiled under the same permission gates."""
+query the ``query`` tool takes, compiled under the same permission gates. A saved
+Frappe Report (Query / Script / Prepared) is exported with ``report_name``: its
+own columns and every row, straight from the report into the file (#2102)."""
 
 import time
 
@@ -67,13 +69,15 @@ def export_query(
 	highlights=None,
 	spec=None,
 	result_id=None,
+	report_name=None,
 ) -> dict:
 	"""Export ``doctype`` rows matching ``filters`` - or every row of the ``query``
-	``spec`` - to ``format`` (``xlsx``|``csv``). Exactly one of ``doctype``,
-	``spec``, or an owner-bound ``result_id`` from a partial query; saved IDs export
-	all matching rows beyond the default limit, preserving an explicit top-N limit. ``filters`` / ``fields`` /
-	``order_by`` / ``parent_doctype`` belong to
-	the ``doctype`` form. Headers are the fields' labels.
+	``spec`` - or a saved Report - to ``format`` (``xlsx``|``csv``). Exactly one of
+	``doctype``, ``spec``, an owner-bound ``result_id`` from a partial query, or
+	``report_name``; saved IDs export all matching rows beyond the default limit,
+	preserving an explicit top-N limit. ``fields`` / ``order_by`` / ``parent_doctype``
+	belong to the ``doctype`` form; ``filters`` to ``doctype`` and ``report_name``.
+	Headers are the fields' labels.
 
 	Returns the download-card envelope ``{file_url, filename, title, mime_type,
 	size_bytes, name}`` plus ``total`` (the TRUE, permission-filtered source count),
@@ -83,6 +87,17 @@ def export_query(
 	``parent_doctype`` to export a child (Table) DocType, whose permission derives
 	from its parent. Raises ``NoDataError`` when nothing matches (an empty file would
 	look complete but hold nothing).
+
+	``report_name`` exports a saved Query / Script Report with its own columns and
+	every row (``filters`` as ``run_report`` takes them), gated as ``run_report``
+	plus the Export permission on the report's DocType, as Desk's export is. A
+	Prepared Report whose copy is ready exports that copy (``as_of`` says when it
+	was generated); one that is not ready returns the same ``generating`` /
+	``failed`` / ``started`` status envelope ``run_report`` returns (``started``
+	kicks the background run off): call again later with the same arguments. A
+	Report Builder report is refused (export its DocType instead). A report over the
+	immediate row limit is refused (narrow the filters, or Desk's export); it never
+	becomes a background export.
 
 	One exception to "complete": a ``spec`` with its own ``limit`` exports only that
 	many rows (a deliberate top-N), and ``total`` is then the file's row count. When
@@ -110,8 +125,16 @@ def export_query(
 		raise InvalidArgumentError(f"format must be one of {sorted(_FORMATS)}, got {format!r}")
 	mime, render = _FORMATS[fmt]
 	budget = _Budget(_EXPORT_DEADLINE_S)
-	if sum(value is not None for value in (doctype, spec, result_id)) != 1:
-		raise InvalidArgumentError("Pass exactly one of doctype + filters, spec, or result_id.")
+	if sum(value is not None for value in (doctype, spec, result_id, report_name)) != 1:
+		raise InvalidArgumentError(
+			"Pass exactly one of doctype + filters, spec, result_id, or report_name (a saved Report)."
+		)
+	if report_name is not None:
+		# Branched before source_args and the background job lookups: a report is
+		# neither a SQL stream the #733 job can count and cursor nor a job fingerprint.
+		return _export_report(
+			report_name, filters, fields, order_by, parent_doctype, fmt, title, highlights, budget
+		)
 	if result_id is not None:
 		if any(v is not None for v in (filters, fields, order_by, parent_doctype)):
 			raise InvalidArgumentError(
@@ -174,7 +197,7 @@ def export_query(
 			raise NoDataError(f"No {source} records match - nothing to export.")
 		budget.check()
 		model.meta["title"] = title or source
-		content = render(model, highlights=highlights) if fmt == "xlsx" else render(model)
+		content = _render(model, fmt, render, highlights)
 		budget.check()
 		if background_available:
 			from frappe.utils.file_manager import get_max_file_size
@@ -228,6 +251,69 @@ def export_query(
 		)
 		raise
 
+	return _finish(env, model, fmt)
+
+
+def _export_report(report_name, filters, fields, order_by, parent_doctype, fmt, title, highlights, budget):
+	"""The ``report_name`` source: the report's own columns and every row, or the
+	prepared-report status envelope when the copy is not ready. Never a background
+	job: over the immediate limit the resolver refuses with what to do instead, and
+	a too-slow run is refused the same way (never re-raised as a job hand-off)."""
+	from jarvis.tools._export import reports
+
+	mime, render = _FORMATS[fmt]
+	try:
+		if fmt == "csv" and highlights is not None:
+			raise InvalidArgumentError("highlights requires format xlsx; CSV cannot store formatting")
+		if any(v is not None for v in (fields, order_by, parent_doctype)):
+			raise InvalidArgumentError(
+				"With report_name, pass only filters (the report brings its own columns and order), "
+				"not fields, order_by or parent_doctype."
+			)
+		model, status = reports.resolve(report_name, filters)
+		if status is not None:
+			# generating / failed / started: not a file yet. The agent relays the
+			# message and calls again later with the same arguments.
+			telemetry.record_export_event(
+				tool="export_query", fmt=fmt, rows=0, mode="sync", outcome="report_pending"
+			)
+			return status
+		budget.check()
+		model.meta["title"] = title or report_name
+		content = _render(model, fmt, render, highlights)
+		budget.check()
+		env = save_export_file(f"x.{fmt}", content, title=title or report_name, mime_type=mime)
+	except ExportTooSlowError as e:
+		telemetry.record_export_event(
+			tool="export_query", fmt=fmt, rows=0, mode="sync", outcome="too_slow", detail=str(e)[:200]
+		)
+		raise InvalidArgumentError(
+			f"{e} For a saved report, narrow the filters or use the report's own Excel export in Desk."
+		) from None
+	except (NoDataError, PermissionDeniedError, InvalidArgumentError) as e:
+		telemetry.record_export_event(
+			tool="export_query", fmt=fmt, rows=0, mode="sync", outcome=_outcome_for(e), detail=str(e)[:200]
+		)
+		raise
+	except Exception as e:
+		telemetry.record_export_event(
+			tool="export_query", fmt=fmt, rows=0, mode="sync", outcome="error", detail=str(e)[:200]
+		)
+		raise
+	env = _finish(env, model, fmt)
+	env["report_name"] = report_name
+	env["as_of"] = model.meta.get("as_of")
+	return env
+
+
+def _render(model, fmt: str, render, highlights) -> bytes:
+	return render(model, highlights=highlights) if fmt == "xlsx" else render(model)
+
+
+def _finish(env: dict, model, fmt: str) -> dict:
+	"""The download-card envelope plus the disclosure keys (``total``,
+	``highlight_count``, ``cells_truncated``, ``limited_by_spec``, ``note``), then
+	the success telemetry. Shared by every immediate source."""
 	env["total"] = model.total
 	if fmt == "xlsx":
 		env["highlight_count"] = model.meta["highlight_count"]
