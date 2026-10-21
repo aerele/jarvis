@@ -38,7 +38,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import websocket
@@ -1026,6 +1026,8 @@ class AgentSession:
 		deliver: bool = False,
 		attachments: list[dict] | None = None,
 		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
+		verified_session_id: str | None = None,
+		event_observer: Callable[[dict], None] | None = None,
 	) -> dict:
 		"""Start an agent turn via chat.send (agent's UI turn-start RPC).
 
@@ -1034,6 +1036,11 @@ class AgentSession:
 		them via the relay after subscribe_session), NOT on this response.
 		deliver=False keeps the result session-only (no external channel
 		delivery), matching the current chat path."""
+		if ":dashboard:collab:" in session_key and not verified_session_id:
+			raise AgentUnreachableError(
+				"Shared chat requires a verified existing runtime session.",
+				code="collaboration_policy_required",
+			)
 		params: dict = {
 			"sessionKey": session_key,
 			"message": message,
@@ -1044,7 +1051,31 @@ class AgentSession:
 			params["thinking"] = thinking
 		if attachments:
 			params["attachments"] = attachments
-		res = self._request("chat.send", params, timeout_s=timeout_s)
+		if verified_session_id:
+			params.update(
+				sessionId=verified_session_id,
+				expectedPermissionMode="read-only",
+			)
+		if event_observer is not None and ":dashboard:collab:" in session_key:
+
+			def observe(frame):
+				payload = frame.get("payload") or {}
+				if (
+					frame.get("type") != "event"
+					or frame.get("event") != "agent"
+					or payload.get("runId") != idempotency_key
+					or payload.get("sessionKey") not in (None, session_key)
+				):
+					return
+				parsed = parse_event(payload, collaboration=True)
+				if parsed and parsed.get("kind") == "tool_boundary" and parsed.get("tool_call_id"):
+					parsed = {**parsed, "kind": "tool", "phase": "start"}
+				if parsed and parsed.get("kind") == "tool":
+					event_observer(parsed)
+
+			res = self._request("chat.send", params, timeout_s=timeout_s, event_observer=observe)
+		else:
+			res = self._request("chat.send", params, timeout_s=timeout_s)
 		return res.get("payload") or {}
 
 	def chat_abort(
@@ -1405,7 +1436,9 @@ class AgentSession:
 				continue  # delta (150ms cumulative mirror) and unknown states: ignore
 			if payload.get("runId") != run_id:
 				continue
-			parsed = parse_event(payload)
+			parsed = parse_event(payload, collaboration=":dashboard:collab:" in session_key)
+			if parsed and parsed.get("kind") == "tool_boundary" and parsed.get("tool_call_id"):
+				parsed = {**parsed, "kind": "tool", "phase": "start"}
 			if parsed is None or parsed.get("kind") == "lifecycle":
 				# lifecycle frames stay off the terminal path, but the ``error``
 				# phase carries the runtime's own user-facing failure text - the
@@ -1562,6 +1595,8 @@ class AgentSession:
 		the subprocess. Raises AgentUnreachableError on WS drop, agent
 		errors, or timeout - all the failure modes worker.py already maps to
 		assistant-message error rows."""
+		if ":dashboard:collab:" in session_key:
+			raise AgentUnreachableError("Shared sessions require a verified chat.send transport.")
 		params = {
 			"message": message,
 			"sessionKey": session_key,
@@ -1761,7 +1796,7 @@ class AgentSession:
 			self._ws.send(payload)
 		return req_id
 
-	def _request(self, method: str, params: dict, *, timeout_s: float) -> dict:
+	def _request(self, method: str, params: dict, *, timeout_s: float, event_observer=None) -> dict:
 		"""Send a request and wait for the matching response frame.
 
 		Drops out-of-order event frames silently - the caller is RPC-style
@@ -1772,6 +1807,8 @@ class AgentSession:
 			frame = self._recv(deadline - time.monotonic())
 			if frame is None:
 				continue
+			if event_observer is not None and frame.get("type") == "event":
+				event_observer(frame)
 			if _is_response_frame(frame, req_id):
 				if not frame.get("ok"):
 					err = frame.get("error") or {}
@@ -1780,6 +1817,7 @@ class AgentSession:
 						f"{method} rejected: {err.get('code', '?')}: {err.get('message', '')}",
 						code=err.get("code"),
 						details=details if isinstance(details, dict) else None,
+						rejected_method=method,
 					)
 				return frame
 		# Tagged so callers can tell an AMBIGUOUS outcome from a definite one:

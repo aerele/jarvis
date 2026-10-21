@@ -15,8 +15,10 @@ SESSION = "Jarvis Chat Session"
 BINDING = "Jarvis Chat Binding"
 SHARE = "Jarvis Conversation Share"
 READER_FLOOR = 1
-# C2 must supply the complete authorized runtime before this can advance.
-WRITER_CAPABILITY = 0
+# The runtime floor is attested only after the actor-aware fleet and native
+# isolation probe pass. Merely enabling the older C1 flags cannot enable writes.
+WRITER_CAPABILITY = 1
+RUNTIME_FLOOR = 3
 NAMESPACE = ":dashboard:collab:"
 IDENTITY_FIELDS = (
 	"conversation",
@@ -45,6 +47,30 @@ def schema_ready() -> bool:
 			(SHARE, "access_revision"),
 			(SHARE, "access_mode"),
 			(BINDING, "conversation_epoch"),
+			("Jarvis Chat Message", "collaboration_run_id"),
+			(BINDING, "runtime_session_id"),
+			(BINDING, "runtime_policy_hash"),
+			(BINDING, "pending_agent_notes"),
+			(BINDING, "cleanup_checked_at"),
+			(BINDING, "runtime_retired_at"),
+			("Jarvis Chat Turn", "collaboration_tools"),
+			("Jarvis Chat Turn", "collaboration_dispatches"),
+			("Jarvis Chat Turn", "collaboration_send_started_at"),
+			("Jarvis Chat Turn", "collaboration_retry_allowed"),
+			("Jarvis Chat Turn", "collaboration_usage_unavailable"),
+			("Jarvis Chat Turn", "collaboration_executor"),
+			("Jarvis Chat Turn", "collaboration_recovery_checked_at"),
+			("Jarvis Pending Action", "actor"),
+			("Jarvis Pending Action", "collaboration_binding"),
+			("Jarvis Pending Action", "collaboration_grant_revision"),
+			("Jarvis Pending Action", "collaboration_epoch"),
+			("Jarvis Pending Action", "collaboration_call_key"),
+			("Jarvis Approval Request", "actor"),
+			("Jarvis Approval Request", "collaboration_binding"),
+			("Jarvis Approval Request", "collaboration_run_id"),
+			("Jarvis Approval Request", "collaboration_grant_revision"),
+			("Jarvis Approval Request", "collaboration_epoch"),
+			("Jarvis Approval Request", "collaboration_question_key"),
 		)
 	)
 
@@ -54,6 +80,7 @@ def writes_ready() -> bool:
 		WRITER_CAPABILITY
 		and cint(frappe.conf.get("chat_collaboration_enabled"))
 		and cint(frappe.conf.get("chat_collaboration_reader_floor")) >= READER_FLOOR
+		and cint(frappe.conf.get("chat_collaboration_runtime_floor")) >= RUNTIME_FLOOR
 		and schema_ready()
 	)
 
@@ -124,11 +151,11 @@ class ActorBinding:
 	conversation_epoch: int
 
 
-def resolve_binding(key: str) -> ActorBinding:
-	"""Resolve identity only; this grants NO dispatch capability in C1.
+def resolve_identity(key: str) -> ActorBinding:
+	"""Immutable audit identity, including revoked/retired work; NOT authorization.
 
-	C2 must add live authorization and turn-state fencing at every dispatch.
-	Never fall back to a conversation owner on malformed or retired bindings.
+	New work must use resolve_binding plus live participant/turn authorization.
+	This resolver exists solely so actual results can retain their attribution.
 	"""
 	if not schema_ready():
 		_deny()
@@ -136,13 +163,7 @@ def resolve_binding(key: str) -> ActorBinding:
 		BINDING, {"session_key": key}, ["name", *IDENTITY_FIELDS, "state"], as_dict=True
 	)
 	auth = frappe.db.get_value(SESSION, {"session_key": key}, ["user", "collaboration_binding"], as_dict=True)
-	if (
-		not row
-		or row.state != "Active"
-		or not auth
-		or auth.user != row.actor
-		or auth.collaboration_binding != row.name
-	):
+	if not row or not auth or auth.user != row.actor or auth.collaboration_binding != row.name:
 		_deny()
 	if (
 		NAMESPACE not in key
@@ -150,6 +171,17 @@ def resolve_binding(key: str) -> ActorBinding:
 		or not row.logical_run_id
 		or not is_collaborative(row.conversation)
 	):
+		_deny()
+	return ActorBinding(**{field: row.get(field) for field in ("name", *IDENTITY_FIELDS)})
+
+
+def resolve_binding(key: str) -> ActorBinding:
+	"""Current binding fence; callers must additionally authorize the live actor.
+
+	Never fall back to a conversation owner on malformed or retired bindings.
+	"""
+	row = resolve_identity(key)
+	if frappe.db.get_value(BINDING, row.name, "state") != "Active":
 		_deny()
 	if cint(frappe.db.get_value(CONVERSATION, row.conversation, "collaboration_epoch")) != cint(
 		row.conversation_epoch
@@ -169,7 +201,7 @@ def resolve_binding(key: str) -> ActorBinding:
 			_deny()
 	elif frappe.db.get_value(CONVERSATION, row.conversation, "owner") != row.actor:
 		_deny()
-	return ActorBinding(**{field: row.get(field) for field in ("name", *IDENTITY_FIELDS)})
+	return row
 
 
 def guard_server_fields(doc, fields):
@@ -193,7 +225,25 @@ def guard_server_fields(doc, fields):
 
 
 def guard_record_binding(doc):
+	from jarvis.chat.collaboration_turn import stamp_trusted_message
+
+	stamp_trusted_message(doc)
 	guard_server_fields(doc, ("actor", "collaboration_binding"))
+	if doc.doctype == "Jarvis Chat Message":
+		guard_server_fields(doc, ("collaboration_run_id",))
+	if doc.doctype == "Jarvis Chat Turn":
+		guard_server_fields(
+			doc,
+			(
+				"collaboration_tools",
+				"collaboration_dispatches",
+				"collaboration_send_started_at",
+				"collaboration_retry_allowed",
+				"collaboration_usage_unavailable",
+				"collaboration_executor",
+				"collaboration_recovery_checked_at",
+			),
+		)
 	if not doc.is_new():
 		return
 	if doc.get("actor") not in (None, "") or doc.get("collaboration_binding") not in (None, ""):
@@ -204,7 +254,13 @@ def guard_record_binding(doc):
 		)
 		if not binding_key:
 			_deny()
-		binding = resolve_binding(binding_key)
+		if doc.flags.jarvis_collaboration_settled_run:
+			from jarvis.chat.collaboration_bindings import require_settlement
+
+			binding = resolve_identity(binding_key)
+			require_settlement(binding, doc.flags.jarvis_collaboration_settled_run, doc.get("role"))
+		else:
+			binding = resolve_binding(binding_key)
 		if binding.actor != doc.get("actor") or binding.conversation != doc.get("conversation"):
 			_deny()
 	elif doc.is_new() and is_collaborative(doc.get("conversation")):
@@ -237,14 +293,48 @@ def assert_rollback_floor(target_floor: int):
 		frappe.throw("Rollback below the collaboration reader floor is unsafe.", frappe.PermissionError)
 
 
-def has_undrained_work() -> bool:
-	if frappe.db.table_exists(BINDING) and frappe.db.exists(BINDING, {"state": "Uncertain"}):
+def has_undrained_work(*, conversation: str | None = None) -> bool:
+	filters = {"state": "Uncertain"}
+	if conversation:
+		filters["conversation"] = conversation
+	if frappe.db.table_exists(BINDING) and frappe.db.exists(BINDING, filters):
 		return True
 	if not frappe.db.has_column(CONVERSATION, "collaboration_active"):
 		return False
+	condition = " AND c.name=%(conversation)s" if conversation else ""
+	# The model can be terminal while its human decision is still pending.
+	# C1 cannot resume/confirm these rows, so they must be drained too.
+	for table, states in (
+		("Jarvis Pending Action", ("Pending", "Executing")),
+		("Jarvis Approval Request", ("Pending",)),
+	):
+		unsettled_action = (
+			" OR (COALESCE(p.collaboration_binding,'')<>'' AND COALESCE(p.settled,0)=0)"
+			if table == "Jarvis Pending Action"
+			else ""
+		)
+		if frappe.db.table_exists(table) and frappe.db.sql(
+			f"""SELECT p.name FROM `tab{table}` p
+			JOIN `tabJarvis Conversation` c ON c.name=p.conversation
+			WHERE COALESCE(c.collaboration_active,0)<>0 AND (p.status IN %(states)s{unsettled_action})"""
+			+ condition
+			+ " LIMIT 1",
+			{"conversation": conversation, "states": states},
+		):
+			return True
+	from jarvis.chat.collaboration_tool_claims import has_unsettled_claims
+
+	if has_unsettled_claims(conversation=conversation):
+		return True
+	# Deferred notes without pending decisions or a live turn are audit only.
 	return bool(
-		frappe.db.sql("""SELECT t.name FROM `tabJarvis Chat Turn` t
+		frappe.db.sql(
+			"""SELECT t.name FROM `tabJarvis Chat Turn` t
 		JOIN `tabJarvis Conversation` c ON c.name=t.conversation
 		WHERE COALESCE(c.collaboration_active,0)<>0
-		AND t.state NOT IN ('done','errored','cancelled') LIMIT 1""")
+		AND t.state NOT IN ('done','errored','cancelled')"""
+			+ condition
+			+ " LIMIT 1",
+			{"conversation": conversation},
+		)
 	)

@@ -40,7 +40,8 @@
     "provider",
     "hidden",
     "actor",
-    "collaboration_binding"
+    "collaboration_binding",
+    "collaboration_run_id"
   ],
   "fields": [
     {
@@ -311,6 +312,16 @@
       "no_copy": 1,
       "options": "Jarvis Chat Binding",
       "hidden": 1
+    },
+    {
+      "fieldname": "collaboration_run_id",
+      "fieldtype": "Data",
+      "label": "Collaboration Run ID",
+      "read_only": 1,
+      "no_copy": 1,
+      "hidden": 1,
+      "length": 32,
+      "search_index": 1
     }
   ],
   "permissions": [
