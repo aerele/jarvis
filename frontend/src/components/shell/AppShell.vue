@@ -55,7 +55,12 @@
 						     drawer now, so each such page needs a hamburger to reach nav.
 						     Chat renders its own hamburger inside its header. -->
 						<div
-							v-if="store.mobile && !route.meta.chat && !route.meta.chromeless"
+							v-if="
+								store.mobile &&
+								!route.meta.chat &&
+								!route.meta.ownHeader &&
+								!route.meta.chromeless
+							"
 							class="flex h-12 shrink-0 items-center gap-2 border-b px-3"
 						>
 							<button
@@ -74,7 +79,9 @@
 						     action from the rightmost corner; chat has its own header button
 						     (ChatView openErpDesk), styled to match. -->
 						<div
-							v-else-if="!route.meta.chat && !route.meta.chromeless"
+							v-else-if="
+								!route.meta.chat && !route.meta.ownHeader && !route.meta.chromeless
+							"
 							class="flex border-b"
 						>
 							<div id="app-header" class="flex-1" />

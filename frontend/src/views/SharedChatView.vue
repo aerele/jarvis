@@ -1,21 +1,38 @@
 <template>
 	<section
-		class="shared-chat flex min-h-0 min-w-0 flex-1 flex-col text-ink-gray-8"
+		class="jv-root shared-chat flex min-h-0 min-w-0 flex-1 flex-col"
 		:class="{ 'jv-dark': dark }"
 		:style="paletteVars"
 	>
-		<header
-			class="flex min-w-0 flex-wrap items-center justify-between gap-3 border-b border-outline-gray-2 px-4 py-3"
-		>
-			<div class="min-w-0">
-				<h1 class="break-words text-base font-semibold">
+		<header class="jv-chat-header shared-chat-header">
+			<button
+				v-if="store.mobile"
+				type="button"
+				class="shared-icon"
+				:aria-label="__('Open navigation')"
+				@click="store.mobileDrawerOpen = true"
+			>
+				<svg
+					width="18"
+					height="18"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.8"
+					aria-hidden="true"
+				>
+					<path d="M3 6h18M3 12h18M3 18h18" />
+				</svg>
+			</button>
+			<div class="shared-chat-title">
+				<h1 :title="conversation?.title">
 					{{ conversation?.title || __("Shared chat") }}
 				</h1>
-				<p v-if="conversation" class="mt-1 text-sm text-ink-gray-5">
+				<p v-if="conversation">
 					{{ __("Shared by {0}", [conversation.owner_name || conversation.owner]) }}
 				</p>
 			</div>
-			<span class="shrink-0 rounded bg-surface-gray-2 px-2 py-1 text-xs">{{
+			<span v-if="conversation && !refused" class="shared-access">{{
 				projectedMode
 					? conversation?.can_chat
 						? __("Can chat")
@@ -23,13 +40,64 @@
 					: __("Read only")
 			}}</span>
 			<button
+				v-if="conversation && !refused"
+				type="button"
+				disabled
+				class="shared-action"
+				:title="__('Additional chat actions are not available in shared chats yet')"
+			>
+				{{ __("Action") }}
+			</button>
+			<button
 				v-if="conversation?.is_owner"
 				type="button"
-				class="rounded border border-outline-gray-2 px-3 py-1.5 text-sm"
+				class="shared-action"
+				:aria-label="__('Share')"
 				@click="openChatShare(String(route.params.id), conversation.title)"
 			>
 				{{ __("Share") }}
 			</button>
+			<button
+				type="button"
+				class="shared-icon"
+				:aria-label="__('Toggle theme')"
+				:title="__('Toggle theme')"
+				@click="toggleTheme"
+			>
+				<svg
+					width="16"
+					height="16"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.7"
+					aria-hidden="true"
+				>
+					<path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z" />
+				</svg>
+			</button>
+			<a
+				href="/app"
+				target="_blank"
+				rel="noopener"
+				class="shared-icon"
+				:aria-label="__('Open ERPNext Desk')"
+				:title="__('Open ERPNext Desk')"
+			>
+				<svg
+					width="16"
+					height="16"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.7"
+					aria-hidden="true"
+				>
+					<path
+						d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3"
+					/>
+				</svg>
+			</a>
 		</header>
 		<p
 			v-if="projectedMode && conversation?.notice && !refused"
@@ -51,8 +119,13 @@
 					: __("This chat is not shared with you")
 			}}
 		</p>
-		<main v-else class="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-5 sm:px-6">
-			<div class="mx-auto w-full min-w-0 max-w-3xl">
+		<main
+			v-else
+			class="shared-chat-thread min-h-0 min-w-0 flex-1 overflow-y-auto"
+			role="log"
+			:aria-label="__('Shared conversation')"
+		>
+			<div class="jv-thread-inner shared-chat-content">
 				<div
 					v-if="reconnecting"
 					role="status"
@@ -80,7 +153,11 @@
 				<p v-if="conversation && !messages.length" class="py-6 text-sm text-ink-gray-5">
 					{{ __("No messages yet") }}
 				</p>
-				<article v-for="row in messages" :key="row.name" class="mb-5 min-w-0">
+				<article
+					v-for="row in messages"
+					:key="row.name"
+					class="shared-chat-message min-w-0"
+				>
 					<p
 						v-if="row.actor?.name"
 						class="mb-1 break-words text-xs font-medium text-ink-gray-6"
@@ -169,6 +246,15 @@
 								row.role === 'assistant' && !row.actor?.name ? brand.agentName : ''
 							"
 						>
+							<template #avatar>
+								<JarvisMark
+									v-if="row.role === 'assistant'"
+									:size="28"
+									:radius="7"
+									:mood="row.streaming ? 'thinking' : 'star'"
+									style="margin-top: 2px; flex: none"
+								/>
+							</template>
 							<template #above-body
 								><StepsBox
 									v-if="steps(row).length"
@@ -314,11 +400,8 @@
 				</div>
 			</div>
 		</main>
-		<footer
-			v-if="conversation && !refused"
-			class="border-t border-outline-gray-2 px-3 py-3 sm:px-6"
-		>
-			<div class="mx-auto w-full min-w-0 max-w-3xl">
+		<footer v-if="conversation && !refused" class="jv-composer-wrap shared-chat-footer">
+			<div class="shared-chat-composer">
 				<p v-if="actionError" role="alert" class="mb-2 break-words text-sm text-ink-red-5">
 					{{ actionError }}
 				</p>
@@ -342,17 +425,66 @@
 					>
 						{{ __("Retry previous send") }}
 					</button>
-					<Composer
-						v-model="draft"
-						:attachments="files"
-						:canSend="canSend"
-						:placeholder="__('Message everyone in this chat…')"
-						:disclaimer="__('Files you send are visible to everyone in this chat.')"
-						@submit="send()"
-						@files-added="addFiles"
-						@remove-attachment="removeFile"
-					/>
 				</template>
+				<Composer
+					v-model="draft"
+					:attachments="files"
+					:canSend="canSend"
+					:readonly="!conversation.can_chat"
+					:placeholder="
+						conversation.can_chat
+							? __('Message everyone in this chat…')
+							: __('You have view-only access to this chat')
+					"
+					:disclaimer="
+						conversation.can_chat
+							? __('Files you send are visible to everyone in this chat.')
+							: __('Ask the owner for Can chat access to reply.')
+					"
+					@submit="send()"
+					@files-added="addFiles"
+					@remove-attachment="removeFile"
+				>
+					<template #left-toolbar="{ pickFiles }">
+						<button
+							type="button"
+							class="shared-attach"
+							:disabled="!conversation.can_chat"
+							:aria-label="__('Attach file')"
+							:title="
+								conversation.can_chat
+									? __('Attach file')
+									: __('Can chat access is required to attach files')
+							"
+							@click="conversation.can_chat && pickFiles()"
+						>
+							<svg
+								width="17"
+								height="17"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.7"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<path
+									d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"
+								/>
+							</svg>
+						</button>
+						<SharedComposerToolbar side="left" />
+					</template>
+					<template #right-toolbar><SharedComposerToolbar side="right" /></template>
+				</Composer>
+				<p v-if="conversation.can_chat" class="shared-control-note">
+					{{
+						__(
+							"Model, voice, wiki and connector selection are not available in shared chats yet. Your own defaults and permissions apply; actions require confirmation."
+						)
+					}}
+				</p>
 			</div>
 		</footer>
 	</section>
@@ -369,6 +501,8 @@ import { brand } from "@/branding";
 import { sharedTranscript } from "@/lib/sharedTranscript";
 import { mergeNewestPage, prependOlderPage, heldNewestSeq } from "@/lib/historyPaging";
 import Message from "@/components/chat/Message.vue";
+import JarvisMark from "@/components/JarvisMark.vue";
+import SharedComposerToolbar from "@/components/chat/SharedComposerToolbar.vue";
 import StepsBox from "@/components/chat/StepsBox.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import JvChart from "@/charts/JvChart.vue";
@@ -396,7 +530,7 @@ const route = useRoute(),
 	router = useRouter(),
 	store = useShellStore(),
 	socket = inject("$socket", null);
-const { effectiveDark: dark, paletteVars } = useJarvisTheme();
+const { effectiveDark: dark, paletteVars, toggleTheme } = useJarvisTheme();
 const conversation = ref(null),
 	messages = ref([]),
 	paging = ref(null),
@@ -717,5 +851,145 @@ onBeforeUnmount(() => {
 }
 .shared-chat :deep(svg) {
 	max-width: 100%;
+}
+</style>
+
+<style scoped>
+/* Match ChatView's header, thread and composer measurements; reuse its actual
+   Message/Composer/mark components without mounting its private-chat lifecycle. */
+.shared-chat {
+	height: 100%;
+	overflow: hidden;
+	position: relative;
+	color: var(--text);
+	background: var(--surface);
+	font-family: "Inter", system-ui, sans-serif;
+}
+.shared-chat-header {
+	display: flex;
+	align-items: center;
+	flex: none;
+	height: 52px;
+	min-width: 0;
+	gap: 8px;
+	padding: 0 18px;
+	border-bottom: 1px solid var(--border);
+}
+.shared-chat-title {
+	flex: 1;
+	min-width: 0;
+	line-height: 1.15;
+}
+.shared-chat-title h1 {
+	font-size: 14px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+}
+.shared-chat-title p {
+	margin-top: 2px;
+	font-size: 11.5px;
+	color: var(--text-3);
+}
+.shared-chat-title h1,
+.shared-chat-title p {
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+.shared-access {
+	flex: none;
+	padding: 3px 7px;
+	border-radius: 6px;
+	font-size: 11px;
+	color: var(--text-2);
+	background: var(--surface-1);
+}
+.shared-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	width: 32px;
+	height: 32px;
+	border: 1px solid var(--border);
+	border-radius: 7px;
+	color: var(--text-2);
+	background: transparent;
+}
+.shared-action {
+	flex: none;
+	border: 1px solid var(--border);
+	border-radius: 20px;
+	padding: 5px 10px;
+	background: var(--surface-1);
+	color: var(--text-2);
+	font-size: 12px;
+}
+.shared-action:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+.shared-chat-content {
+	max-width: 1280px;
+	margin: 0 auto;
+	padding: 26px 40px 36px;
+	min-width: 0;
+}
+.shared-chat-message {
+	margin-bottom: 26px;
+}
+.shared-chat-footer {
+	flex: none;
+	min-width: 0;
+	padding: 12px 40px 16px;
+	background: var(--surface);
+}
+.shared-chat-composer {
+	max-width: 1280px;
+	min-width: 0;
+	margin: 0 auto;
+}
+.shared-attach {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	width: 30px;
+	height: 30px;
+	border: none;
+	border-radius: 7px;
+	background: transparent;
+	color: var(--text-3);
+}
+.shared-control-note {
+	margin-top: 6px;
+	text-align: center;
+	font-size: 10.5px;
+	line-height: 1.5;
+	color: var(--text-3);
+}
+.shared-chat :is(button, a):focus-visible {
+	outline: 2px solid var(--link);
+	outline-offset: 3px;
+}
+@media (max-width: 767px) {
+	.shared-chat-header {
+		gap: 6px;
+		padding: 0 12px;
+	}
+	.shared-action:disabled {
+		display: none;
+	}
+	.shared-chat-footer {
+		padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+	}
+}
+@media (max-width: 640px) {
+	.shared-chat-content {
+		padding: 22px 16px 28px;
+	}
+	.shared-chat-footer {
+		padding: 10px 14px calc(14px + env(safe-area-inset-bottom, 0px));
+	}
 }
 </style>

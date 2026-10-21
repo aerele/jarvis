@@ -22,6 +22,7 @@ const routes = [
 		path: "/shared/:id",
 		name: "SharedConversation",
 		component: () => import("@/views/SharedChatView.vue"),
+		meta: { ownHeader: true },
 	},
 	{ path: "/", name: "Chat", component: ChatView, meta: { chat: true } },
 	{ path: "/c/:id", name: "Conversation", component: ChatView, meta: { chat: true } },

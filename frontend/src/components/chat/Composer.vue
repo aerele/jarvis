@@ -23,6 +23,7 @@
 	<slot name="above" />
 	<div
 		class="jv-composer"
+		:class="{ 'jv-composer-readonly': readonly }"
 		@dragover.prevent
 		@dragenter.prevent="onDragEnter"
 		@dragleave.prevent="onDragLeave"
@@ -62,7 +63,7 @@
 		     `preview_url` is a thumbnail, one with `uploading` is the in-flight
 		     placeholder pill, anything else is a 📎 chip. -->
 		<div
-			v-if="attachments.length"
+			v-if="attachments.length && !readonly"
 			style="display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 4px 2px"
 		>
 			<template v-for="(a, i) in attachments" :key="a.key ?? i">
@@ -231,6 +232,7 @@
 		     before @input, so the host sees the raw event with the new value
 		     already committed — exactly the order chat had inline. -->
 		<textarea
+			v-if="!readonly"
 			ref="inputEl"
 			v-model="text"
 			@input="onInputInternal"
@@ -256,7 +258,18 @@
 				...(disabled ? { opacity: 0.55, cursor: 'not-allowed' } : {}),
 			}"
 		></textarea>
+		<div
+			v-else
+			class="jv-composer-ro"
+			role="textbox"
+			aria-disabled="true"
+			aria-readonly="true"
+			aria-label="Message composer (read only)"
+		>
+			{{ placeholder }}
+		</div>
 		<input
+			v-if="!readonly"
 			ref="fileInputEl"
 			type="file"
 			multiple
@@ -276,6 +289,7 @@
 				<button
 					class="jv-iconbtn"
 					title="Attach file"
+					:disabled="readonly"
 					@click="pickFiles"
 					style="
 						width: 30px;
@@ -323,11 +337,13 @@
 				<!-- Only the "Stop" label survives here: it labels a real action the
 				     user can take mid-reply. The idle "Enter" hint was noise next to a
 				     send button that already says what it does. -->
-				<span v-if="busy" style="font-size: 11px; color: var(--text-3); margin-right: 2px"
+				<span
+					v-if="busy && !readonly"
+					style="font-size: 11px; color: var(--text-3); margin-right: 2px"
 					>Stop</span
 				>
 				<button
-					v-if="busy"
+					v-if="busy && !readonly"
 					@click="emit('stop')"
 					title="Stop generating"
 					style="
@@ -351,7 +367,7 @@
 					v-else
 					class="jv-sendbtn"
 					:class="{ ready: sendable }"
-					@click="emit('submit')"
+					@click="!readonly && emit('submit')"
 					:disabled="!sendable"
 					:title="sendTitle || null"
 					:style="{
@@ -408,6 +424,9 @@ const props = defineProps({
 	// Hard block (Stream E maintenance hold): greys the box + kills Send/Enter so the user
 	// cannot type or submit while a hold is active (the banner above says why). Default false.
 	disabled: { type: Boolean, default: false },
+	// Passive shared-chat presentation: no editable elements or file capabilities.
+	// Keep `disabled` unchanged for existing private chat and Support callers.
+	readonly: { type: Boolean, default: false },
 	// Optional override for whether Send is armed. `null` (the default) derives
 	// it from text/attachments; chat passes its own (it also blocks on
 	// `sending` and a suspended subscription).
@@ -452,7 +471,7 @@ const text = computed({
 });
 
 const sendable = computed(() => {
-	if (props.disabled) return false;
+	if (props.disabled || props.readonly) return false;
 	return props.canSend === null
 		? props.modelValue.trim().length > 0 || props.attachments.length > 0
 		: props.canSend;
@@ -471,9 +490,19 @@ function autoGrow() {
 // Typed input is grown synchronously in the handler below instead, so the box
 // never lags a frame behind the caret.
 watch(() => props.modelValue, autoGrow, { flush: "post" });
+watch(
+	() => props.readonly,
+	() => {
+		_dragDepth = 0;
+		dragActive.value = false;
+		autoGrow();
+	},
+	{ flush: "post" }
+);
 
 // ---- textarea events: emit raw FIRST, then act (unless the host took over) ----
 function onInputInternal(e) {
+	if (props.readonly) return;
 	// v-model has already pushed the new value up; grow, then hand the host the
 	// raw event (chat parses @/ mentions off the caret here).
 	//
@@ -488,6 +517,7 @@ function onInputInternal(e) {
 	emit("input", e);
 }
 function onKeydownInternal(e) {
+	if (props.readonly) return;
 	emit("keydown", e);
 	// The host claimed this key (chat: mention nav, prompt history, its own
 	// Enter-to-send) — never double-handle it.
@@ -502,6 +532,7 @@ function onKeydownInternal(e) {
 	}
 }
 function onPasteInternal(e) {
+	if (props.readonly) return;
 	emit("paste", e);
 	if (e.defaultPrevented) return;
 	const cd = e.clipboardData;
@@ -528,9 +559,11 @@ function onPasteInternal(e) {
 
 // ---- file input ----
 function pickFiles() {
+	if (props.readonly) return;
 	fileInputEl.value?.click();
 }
 function onFilesPicked(e) {
+	if (props.readonly) return;
 	const picked = Array.from(e.target.files || []);
 	// Reset so re-picking the same file still fires `change`.
 	e.target.value = "";
@@ -542,6 +575,7 @@ function onFilesPicked(e) {
 const dragActive = ref(false);
 let _dragDepth = 0;
 function onDragEnter() {
+	if (props.readonly) return;
 	_dragDepth++;
 	dragActive.value = true;
 }
@@ -552,6 +586,7 @@ function onDragLeave() {
 function onDrop(e) {
 	_dragDepth = 0;
 	dragActive.value = false;
+	if (props.readonly) return;
 	const dropped = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
 	if (dropped.length) emit("files-added", dropped);
 }
@@ -565,6 +600,22 @@ defineExpose({ el: inputEl, focusInput });
 </script>
 
 <style scoped>
+.jv-composer-ro {
+	min-height: 42px;
+	padding: 8px 8px 4px;
+	font-size: 14px;
+	line-height: 1.5;
+	color: var(--text-3);
+	cursor: not-allowed;
+}
+.jv-composer-readonly :deep(button) {
+	opacity: 0.45;
+	cursor: not-allowed !important;
+}
+.jv-composer-readonly::after {
+	animation: none !important;
+	opacity: 0.2 !important;
+}
 /* Brand highlight: a soft gradient ring in the logo colours flows around the
    composer edge. It is ALWAYS on (not gated on :focus-within) so it renders in
    every layout state — including when the sidebar is collapsed and focus has
