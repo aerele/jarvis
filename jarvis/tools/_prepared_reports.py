@@ -83,11 +83,7 @@ def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
 	"""Return a status envelope (ready / generating / failed / started) for a
 	prepared report. Pull-model, stateless, runs as ``user``. Raises
 	InvalidArgumentError when the background queue can't run the report."""
-	_gate_report(report_name)
-	# The report's own defaults, as Desk sends them: a run started here is the run
-	# Desk would start, and a Desk run is found again.
-	filters = {**_report_defaults(report_name), **_canonical_filters(raw_filters)}
-	_gate_filters(report_name, filters, user)
+	filters = gate_and_fill(report_name, raw_filters, user=user)
 
 	# 1. A completed copy we can read? (0 rows is a valid answer; unreadable -> fall through)
 	row = _latest(report_name, filters, user, ("Completed",))
@@ -95,15 +91,42 @@ def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
 		ready = _read_completed(row.name)
 		if ready is not None:
 			return ready
+	return _not_ready(report_name, filters, user)
 
-	# 2. The most recent non-completed attempt decides: still generating, or a
-	#    terminal failure to surface. A stalled attempt returns None so we re-run.
+
+def rows_or_status(report_name: str, raw_filters: dict, *, user: str) -> tuple[dict | None, dict | None]:
+	"""For an export: ``(completed, None)`` with EVERY row of the completed copy
+	(``{columns, result, as_of, run}``, no ``_MAX_ROWS`` cap: the rows go to a file,
+	not to the model), or ``(None, status)`` with the same ``generating`` /
+	``failed`` / ``started`` envelope ``handle_prepared`` returns. One pass over the
+	live state, so a copy that completes between two lookups is never answered
+	with a capped ``ready`` envelope."""
+	filters = gate_and_fill(report_name, raw_filters, user=user)
+	row = _latest(report_name, filters, user, ("Completed",))
+	if row:
+		completed = read_completed_rows(row.name)
+		if completed is not None:
+			return completed, None
+	return None, _not_ready(report_name, filters, user)
+
+
+def gate_and_fill(report_name: str, raw_filters: dict, *, user: str) -> dict:
+	"""The gates ``run()`` applies, then the filters as Desk would send them: the
+	report's own defaults under the caller's values. A run started with these is the
+	run Desk would start, and a Desk run is found again."""
+	_gate_report(report_name)
+	filters = {**_report_defaults(report_name), **_canonical_filters(raw_filters)}
+	_gate_filters(report_name, filters, user)
+	return filters
+
+
+def _not_ready(report_name: str, filters: dict, user: str) -> dict:
+	"""No readable completed copy: the most recent attempt decides (generating or a
+	terminal failure to surface), else (re)generate. Refuses (raises) if the queue
+	can't run it, so we never leave an orphan Queued row that no worker will drain."""
 	pending = _pending_state(report_name, filters, user)
 	if pending is not None:
 		return pending
-
-	# 3. Nothing usable -> (re)generate. Refuse (raise) if the queue can't run it,
-	#    so we never leave an orphan Queued row that no worker will drain.
 	_require_worker()
 	run = make_prepared_report(report_name, filters)["name"]
 	return _envelope(
@@ -118,11 +141,12 @@ def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
 # --------------------------------------------------------------------------- #
 # gates
 # --------------------------------------------------------------------------- #
-def _gate_report(report_name: str) -> None:
+def _gate_report(report_name: str):
 	"""Gate the report exactly as run() does: Has-Role allow-list, ref_doctype
-	report permission, disabled-check, Custom-Report resolution."""
+	report permission, disabled-check, Custom-Report resolution. Returns the
+	resolved report doc (the reference report, for a Custom Report)."""
 	try:
-		get_report_doc(report_name)
+		return get_report_doc(report_name)
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"no permission to run report {report_name}") from e
 	except frappe.ValidationError as e:
@@ -194,8 +218,31 @@ def _unset(value) -> bool:
 # --------------------------------------------------------------------------- #
 def _read_completed(dn: str) -> dict | None:
 	"""Read a completed Prepared Report's rows straight from its doc. Returns a
-	`ready` envelope, or None if the stored output can't be read (missing/corrupt
-	gz) so the caller falls through to (re)generate rather than emit empty."""
+	`ready` envelope (rows capped at ``_MAX_ROWS`` for the model), or None if the
+	stored output can't be read (missing/corrupt gz) so the caller falls through to
+	(re)generate rather than emit empty."""
+	completed = read_completed_rows(dn)
+	if completed is None:
+		return None
+	result = completed["result"]
+	capped, note = _cap_rows(result, completed["report_name"])
+	as_of = completed["as_of"]
+	env = _envelope(completed["report_name"], "ready", _ready_message(len(result), as_of))
+	env["columns"] = completed["columns"]
+	env["result"] = capped
+	env["as_of"] = as_of
+	env["run"] = dn
+	if note:
+		env["row_note"] = note
+	return env
+
+
+def read_completed_rows(dn: str) -> dict | None:
+	"""EVERY row of a completed Prepared Report, read DIRECTLY from its doc (no
+	``Prepared Report`` read role needed): ``{report_name, columns, result, as_of,
+	run}``, or None when the stored output can't be read (missing/corrupt gz) so the
+	caller regenerates rather than emits empty. Uncapped: the export path writes
+	these rows to a file; ``_read_completed`` caps them for the model."""
 	try:
 		doc = frappe.get_doc("Prepared Report", dn)
 		raw = doc.get_prepared_data()
@@ -221,16 +268,14 @@ def _read_completed(dn: str) -> dict | None:
 		result = []
 	if not isinstance(result, list):
 		return None
-	capped, note = _cap_rows(result)
 	as_of = doc.get("report_end_time") or doc.get("creation")
-	env = _envelope(doc.report_name, "ready", _ready_message(len(result), as_of))
-	env["columns"] = columns or []
-	env["result"] = capped
-	env["as_of"] = str(as_of) if as_of else None
-	env["run"] = dn
-	if note:
-		env["row_note"] = note
-	return env
+	return {
+		"report_name": doc.report_name,
+		"columns": columns or [],
+		"result": result,
+		"as_of": str(as_of) if as_of else None,
+		"run": dn,
+	}
 
 
 def _split_columns_result(doc, data):
@@ -247,12 +292,13 @@ def _split_columns_result(doc, data):
 	return [], None
 
 
-def _cap_rows(result: list):
+def _cap_rows(result: list, report_name: str):
 	if len(result) <= _MAX_ROWS:
 		return result, None
 	note = (
-		f"Showing the first {_MAX_ROWS} of {len(result)} rows. Ask me to narrow "
-		f"the filters, or to export the full report."
+		f"Showing the first {_MAX_ROWS} of {len(result)} rows. For every row in a file, call "
+		f"export_query(report_name={report_name!r}, filters=<the same filters>): it writes the "
+		f"completed report server-side, complete. Or narrow the filters."
 	)
 	return result[:_MAX_ROWS], note
 

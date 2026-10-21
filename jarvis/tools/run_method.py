@@ -90,6 +90,12 @@ _DENIED = frozenset(
 		"jarvis.chat.agents_api.promote_installation",
 		"jarvis.chat.agents_api.demote_installation",
 		"jarvis.chat.agents_api.raise_activation_ceiling",
+		# Frappe's own report/list exports are browser-shaped: no arguments, they
+		# read frappe.local.form_dict and answer with a binary download, not a File.
+		# Through run_method they can only fail (#2102: two confirm cards, both
+		# failed). The way to a report file is export_query(report_name=...).
+		"frappe.desk.query_report.export_query",
+		"frappe.desk.reportview.export_query",
 	}
 )
 
