@@ -101,7 +101,7 @@ class TestCollaborationRuntime(CollaborationCase):
 		from jarvis.chat.collaboration_runtime import RuntimePolicy
 
 		return RuntimePolicy(
-			skills_root="/home/node/.openclaw/workspace/skills", model_ref="provider/actor-model"
+			skills_root="/srv/shared/skills", model_ref="provider/actor-model"
 		)
 
 	def provision(self):
@@ -184,7 +184,7 @@ class TestCollaborationRuntime(CollaborationCase):
 
 	def test_owner_workspace_root_and_changed_model_are_refused(self):
 		self.provision()
-		self.gateway.entry["sessionRoot"] = "/home/node/.openclaw/workspace"
+		self.gateway.entry["sessionRoot"] = "/srv/shared"
 		with self.assertRaises(frappe.PermissionError):
 			self.verify()
 		self.assertFalse(self.gateway.sends)
