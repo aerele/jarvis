@@ -13,7 +13,7 @@ class TestCollaborationRuntimePaths(unittest.TestCase):
 	def test_attested_skills_root_is_used_verbatim(self):
 		from jarvis.chat.collaboration_runtime import configured_skills_root
 
-		root = "/home/node/.openclaw/workspace/skills"
+		root = "/srv/shared/skills"
 		with patch.dict(frappe.conf, {"chat_collaboration_skills_root": root}):
 			self.assertEqual(configured_skills_root(), root)
 
