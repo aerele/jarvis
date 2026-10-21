@@ -1184,22 +1184,26 @@ def publish_realtime_tool_result(
 	transcript reload. ``tool_call_id`` is the id the row was saved with, so the
 	SPA can bind a live report to the reply it belongs to (the "Reports
 	consulted" card) the same way the saved rows do."""
-	from jarvis.chat.events import publish_to_user
+	from jarvis.chat.collaboration_realtime import is_shared
 
-	publish_to_user(
-		user,
-		{
-			"kind": "tool:result",
-			"conversation_id": conversation_id,
-			"tool_message_id": tool_message_id,
-			"tool_call_id": tool_call_id,
-			"tool_name": tool_name,
-			"args": args,
-			"result": result,
-			"status": status,
-			"action_outcome": action_outcome,
-		},
-	)
+	payload = {
+		"kind": "tool:result",
+		"conversation_id": conversation_id,
+		"tool_message_id": tool_message_id,
+		"tool_call_id": tool_call_id,
+		"tool_name": tool_name,
+		"args": args,
+		"result": result,
+		"status": status,
+		"action_outcome": action_outcome,
+	}
+	if is_shared(conversation_id):
+		from jarvis.chat.events import publish_to_user
+
+		publish_to_user(user, payload)
+	else:
+		# Keep the existing private receipt publication seam and envelope.
+		frappe.publish_realtime("jarvis:event", payload, user=user)
 
 
 # P0d (decision 16): a batch key the model sends ALONGSIDE single-record args
