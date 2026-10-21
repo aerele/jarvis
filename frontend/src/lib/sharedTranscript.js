@@ -96,15 +96,16 @@ export function sharedTranscript(content, streaming = false) {
 // The server rewrites attachment URLs. Reject arbitrary paths/remote URLs at
 // the renderer too; a shared view never invokes the owner's preview endpoint.
 export function sharedFileUrl(value, conversation) {
-	if (
-		typeof value !== "string" ||
-		!value.startsWith("/api/method/jarvis.chat.sharing.get_shared_file?")
-	)
+	const allowed = [
+		"/api/method/jarvis.chat.sharing.get_shared_file",
+		"/api/method/jarvis.chat.collaboration_api.get_file",
+	];
+	if (typeof value !== "string" || !allowed.some((path) => value.startsWith(path + "?")))
 		return "";
 	try {
 		const url = new URL(value, "https://shared.invalid");
 		return url.origin === "https://shared.invalid" &&
-			url.pathname === "/api/method/jarvis.chat.sharing.get_shared_file" &&
+			allowed.includes(url.pathname) &&
 			url.searchParams.getAll("conversation").length === 1 &&
 			url.searchParams.get("conversation") === conversation &&
 			url.searchParams.getAll("file_url").length === 1

@@ -4710,6 +4710,7 @@ import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { __ } from "@/lib/i18n";
 import { conversationLoadFailure } from "@/lib/conversationLoadFailure";
 import { openChatShare } from "@/composables/useChatSharing";
+import { collaborationNoticeRoute } from "@/lib/sharedConversationRoute";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
 	dashboardThumbnailTransform,
@@ -11447,6 +11448,13 @@ function openProactive() {
 	proactiveToast.value = null;
 }
 function onEvent(p) {
+	if (p.kind === "collaboration:changed") {
+		// The signal carries no transcript. The common reader rechecks access
+		// and provides only this actor's controls on the destination view.
+		const collaborativeRoute = collaborationNoticeRoute(p, currentId.value);
+		if (collaborativeRoute) router.replace(collaborativeRoute);
+		return;
+	}
 	// Auto-generated title arrives async (worker titles the chat after the
 	// first real turn). Handle it before the current-conversation guard so the
 	// sidebar updates even if the user has since switched chats.

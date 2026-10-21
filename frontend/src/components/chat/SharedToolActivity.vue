@@ -28,7 +28,10 @@ import { ref, watch, onBeforeUnmount } from "vue";
 import StepsBox from "./StepsBox.vue";
 import { getSharedToolDetail } from "@/api/chatSharing";
 import { __ } from "@/lib/i18n";
-const props = defineProps({ message: { type: Object, required: true } });
+const props = defineProps({
+	message: { type: Object, required: true },
+	loadDetail: { type: Function, default: getSharedToolDetail },
+});
 const open = ref(false),
 	loading = ref(false),
 	detail = ref(null),
@@ -36,7 +39,7 @@ const open = ref(false),
 let generation = 0;
 const display = (v) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
 watch(
-	() => [props.message.name, props.message.modified],
+	() => [props.message.name, props.message.modified, props.loadDetail],
 	() => {
 		++generation;
 		detail.value = null;
@@ -52,7 +55,7 @@ async function toggle() {
 	loading.value = true;
 	error.value = "";
 	try {
-		const value = await getSharedToolDetail(props.message.name);
+		const value = await props.loadDetail(props.message.name);
 		if (gen === generation) detail.value = value;
 	} catch {
 		if (gen === generation)

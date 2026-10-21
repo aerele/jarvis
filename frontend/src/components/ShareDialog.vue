@@ -7,6 +7,7 @@
 	>
 		<template #body-content>
 			<p class="text-p-sm text-ink-gray-6 break-words">{{ hint }}</p>
+			<p v-if="accessModes && notice" class="mt-3 text-sm text-ink-gray-6">{{ notice }}</p>
 			<p v-if="!sharingEnabled" class="mt-3 text-sm text-ink-gray-6">
 				{{ __("Sharing is turned off on this site") }}
 			</p>
@@ -19,7 +20,7 @@
 					<li
 						v-for="id in selected"
 						:key="id"
-						class="flex min-w-0 max-w-full items-center gap-2 rounded bg-surface-gray-2 px-2 py-1 text-sm text-ink-gray-8"
+						class="flex min-w-0 max-w-full flex-wrap items-center gap-2 rounded bg-surface-gray-2 px-2 py-1 text-sm text-ink-gray-8"
 					>
 						<span class="min-w-0 break-words"
 							>{{ label(id)
@@ -29,6 +30,18 @@
 								>{{ hiddenShareReason(current.get(id).hidden_reason) }}</span
 							></span
 						>
+						<select
+							v-if="accessModes"
+							v-model="modes[id]"
+							:aria-label="__('Access for {0}', [label(id)])"
+							:disabled="saving"
+							class="max-w-full rounded border border-outline-gray-2 bg-surface-white px-2 py-1 text-sm"
+						>
+							<option value="View">{{ __("Can view") }}</option>
+							<option value="Chat" :disabled="!canConfigureChat || !sharingEnabled">
+								{{ __("Can chat") }}
+							</option>
+						</select>
 						<button
 							type="button"
 							class="shrink-0 rounded p-1 focus-visible:ring-2"
@@ -115,6 +128,7 @@ const props = defineProps({
 	loadShares: { type: Function, required: true },
 	saveShares: { type: Function, required: true },
 	enabled: { type: Boolean, default: true },
+	accessModes: { type: Boolean, default: false },
 });
 const emit = defineEmits(["update:modelValue", "saved"]);
 const loading = ref(false),
@@ -127,6 +141,9 @@ const loading = ref(false),
 	candidates = ref([]),
 	shares = ref([]),
 	serverEnabled = ref(true);
+const modes = ref({}),
+	canConfigureChat = ref(false),
+	notice = ref("");
 const current = computed(() => new Map(shares.value.map((u) => [u.name, u]))),
 	sharingEnabled = computed(() => props.enabled && serverEnabled.value);
 let generation = 0,
@@ -142,7 +159,10 @@ function close(value) {
 function toggle(id) {
 	if (saving.value) return;
 	if (selected.value.includes(id)) selected.value = selected.value.filter((u) => u !== id);
-	else if (sharingEnabled.value) selected.value = [...selected.value, id];
+	else if (sharingEnabled.value) {
+		modes.value[id] = "View";
+		selected.value = [...selected.value, id];
+	}
 }
 async function load() {
 	const gen = ++generation;
@@ -153,6 +173,9 @@ async function load() {
 	serverEnabled.value = true;
 	error.value = "";
 	selected.value = [];
+	modes.value = {};
+	canConfigureChat.value = false;
+	notice.value = "";
 	shares.value = [];
 	candidates.value = [];
 	loading.value = true;
@@ -163,6 +186,11 @@ async function load() {
 		candidates.value = people || [];
 		shares.value = result?.users || [];
 		selected.value = shares.value.map((u) => u.name);
+		modes.value = Object.fromEntries(
+			shares.value.map((u) => [u.name, u.access_mode === "Chat" ? "Chat" : "View"])
+		);
+		canConfigureChat.value = result?.can_configure_chat === true;
+		notice.value = result?.notice || "";
 		serverEnabled.value = result?.enabled !== false;
 	} catch {
 		if (gen === generation) {
@@ -209,7 +237,17 @@ async function save() {
 	error.value = "";
 	const gen = generation;
 	try {
-		const result = await props.saveShares([...selected.value]);
+		const result = props.accessModes
+			? await props.saveShares(
+					[...selected.value],
+					Object.fromEntries(
+						selected.value.map((id) => [
+							id,
+							modes.value[id] === "Chat" ? "Chat" : "View",
+						])
+					)
+			  )
+			: await props.saveShares([...selected.value]);
 		if (gen !== generation) return;
 		toast.success(__("Sharing updated"));
 		emit("saved", result);
