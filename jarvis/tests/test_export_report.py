@@ -141,6 +141,34 @@ class TestExportReport(FrappeTestCase):
 		self.assertEqual(text.splitlines()[0], "ID,Description,Date")
 		self.assertEqual(len(text.splitlines()), 4)
 
+	def test_inline_report_gets_the_reports_defaults_filled(self):
+		# A Script Report's required filter with a default must reach the script set,
+		# as Desk sends it; the prepared path already did this (finding from review).
+		live = {"columns": COLUMNS[:2], "result": [{"name": "a", "description": "b"}]}
+		with (
+			patch.object(reports._prepared_reports, "_report_defaults", return_value={"company": "X"}),
+			patch.object(reports, "frappe_run_report", return_value=live) as run,
+		):
+			export_query(report_name=INLINE_REPORT, filters={"status": "Open"})
+		self.assertEqual(run.call_args.kwargs["filters"], {"company": "X", "status": "Open"})
+
+	def test_duplicate_column_names_keep_every_column(self):
+		cols = [
+			{"fieldname": "amount", "label": "Amount", "fieldtype": "Currency"},
+			{"fieldname": "amount", "label": "Amount", "fieldtype": "Currency"},
+		]
+		with _completed([{"amount": 1}], columns=cols):
+			env = export_query(report_name=PREP_REPORT)
+		self.assertEqual(_sheet(env)[0], ["Amount", "Amount (2)"])
+
+	def test_only_iso_date_strings_become_dates(self):
+		from jarvis.tools import _report_rows
+
+		col = {"fieldtype": "Date"}
+		self.assertEqual(str(_report_rows.as_file_value("2026-10-21", col)), "2026-10-21")
+		self.assertEqual(_report_rows.as_file_value("21-10-2026", col), "21-10-2026")
+		self.assertEqual(_report_rows.as_file_value("n/a", col), "n/a")
+
 	def test_the_scope_resolver_runs_before_the_prepared_lookup(self):
 		# AR/AP fill company + report_date before the cache match (run_report does
 		# the same), so an export finds the copy run_report generated.

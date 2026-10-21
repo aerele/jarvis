@@ -58,6 +58,21 @@ def _outcome_for(exc: Exception) -> str:
 	return "rejected"  # InvalidArgumentError: ceiling, bad fields, file-too-large
 
 
+def _record_failure(fmt: str, exc: Exception, detail: str, *, mode: str = "sync") -> None:
+	"""An export that did not happen is counted too (the refused large exports are
+	the signal that would justify raising a ceiling): a known refusal by its
+	outcome, anything else as ``error``."""
+	known = isinstance(exc, (NoDataError, PermissionDeniedError, InvalidArgumentError, ExportTooSlowError))
+	telemetry.record_export_event(
+		tool="export_query",
+		fmt=fmt,
+		rows=0,
+		mode=mode,
+		outcome=_outcome_for(exc) if known else "error",
+		detail=detail,
+	)
+
+
 def export_query(
 	doctype=None,
 	filters=None,
@@ -209,14 +224,7 @@ def export_query(
 				)
 		env = save_export_file(f"x.{fmt}", content, title=title or source, mime_type=mime)
 	except (resolvers.NeedsBackground, ExportTooSlowError) as e:
-		telemetry.record_export_event(
-			tool="export_query",
-			fmt=fmt,
-			rows=0,
-			mode="sync",
-			outcome=_outcome_for(e),
-			detail=_detail(spec, e),
-		)
+		_record_failure(fmt, e, _detail(spec, e))
 		if not background_available:
 			raise
 		try:
@@ -233,22 +241,8 @@ def export_query(
 				detail=str(refused)[:200],
 			)
 			raise InvalidArgumentError(f"{e} A background export is not available here: {refused}") from None
-	except (NoDataError, PermissionDeniedError, InvalidArgumentError) as e:
-		telemetry.record_export_event(
-			tool="export_query",
-			fmt=fmt,
-			rows=0,
-			mode="sync",
-			outcome=_outcome_for(e),
-			detail=_detail(spec, e),
-		)
-		raise
 	except Exception as e:
-		# A database error or an unexpected failure is still an export that did not
-		# happen: count it, then let the caller's error handling report it.
-		telemetry.record_export_event(
-			tool="export_query", fmt=fmt, rows=0, mode="sync", outcome="error", detail=_detail(spec, e)
-		)
+		_record_failure(fmt, e, _detail(spec, e))
 		raise
 
 	return _finish(env, model, fmt)
@@ -284,21 +278,12 @@ def _export_report(report_name, filters, fields, order_by, parent_doctype, fmt, 
 		budget.check()
 		env = save_export_file(f"x.{fmt}", content, title=title or report_name, mime_type=mime)
 	except ExportTooSlowError as e:
-		telemetry.record_export_event(
-			tool="export_query", fmt=fmt, rows=0, mode="sync", outcome="too_slow", detail=str(e)[:200]
-		)
+		_record_failure(fmt, e, str(e)[:200])
 		raise InvalidArgumentError(
 			f"{e} For a saved report, narrow the filters or use the report's own Excel export in Desk."
 		) from None
-	except (NoDataError, PermissionDeniedError, InvalidArgumentError) as e:
-		telemetry.record_export_event(
-			tool="export_query", fmt=fmt, rows=0, mode="sync", outcome=_outcome_for(e), detail=str(e)[:200]
-		)
-		raise
 	except Exception as e:
-		telemetry.record_export_event(
-			tool="export_query", fmt=fmt, rows=0, mode="sync", outcome="error", detail=str(e)[:200]
-		)
+		_record_failure(fmt, e, str(e)[:200])
 		raise
 	env = _finish(env, model, fmt)
 	env["report_name"] = report_name
