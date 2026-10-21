@@ -3,7 +3,15 @@
 
   {"kind": "tool", ts, site, user_hash, conversation, tool, duration_ms,
    result_chars, custom_target}
-  {"kind": "turn", ts, site, conversation, run_id, duration_ms, touched_custom}
+  {"kind": "turn", ts, site, conversation, run_id, duration_ms, touched_custom,
+   queue_ms, approval_wait_ms, active_ms}
+
+A turn's duration_ms is the measured run:start -> terminal span (the same
+baseline as the persisted reply_duration_ms), or null when a timestamp is
+missing. It is never a placeholder zero. queue_ms is enqueue -> dispatch.
+duration_ms INCLUDES any human approval wait; approval_wait_ms is the summed
+Pending Action creation -> decided_at wait and active_ms = duration_ms minus it
+(null when either is unknown).
 
 analyze.py computes the activation rate from these. Every public function
 swallows everything - telemetry must never break a tool call or turn.
@@ -66,8 +74,8 @@ def record_budget_event(
 	"""One line per agent-boundary result-size guard event (truncation or an
 	uncapped-but-oversized result). Unlike ``record_tool``, this is not gated
 	on a custom-doctype target - every event is signal for sizing the budget
-	itself. The guard outcome rides under ``outcome`` (truncated / uncapped /
-	uncapped_nonrow / measure_failed) - NOT ``event`` - so it does not collide
+	itself. The guard outcome rides under ``outcome`` (truncated / bounded_document /
+	uncapped / uncapped_nonrow / measure_failed) - NOT ``event`` - so it does not collide
 	with this line's own ``kind`` discriminator. Never raises."""
 	try:
 		_emit(
@@ -86,6 +94,26 @@ def record_budget_event(
 		pass
 
 
+def record_export_intent(message: str) -> None:
+	"""Count English status/cancel requests, without logging the user's text.
+
+	A conservative demand signal for a future agent status/cancel tool, not an
+	intent router. This never cancels work or changes the reply.
+	"""
+	import re
+
+	text = (message or "").lower()
+	if not re.search(r"\bexport(?:s|ing)?\b", text):
+		return
+	outcome = None
+	if re.search(r"\b(cancel|stop|abort)\b", text):
+		outcome = "text_cancel_requested"
+	elif re.search(r"\b(status|ready|finished|progress|done|how long)\b", text):
+		outcome = "status_requested"
+	if outcome:
+		record_export_event("export_query", "unknown", 0, mode="intent", outcome=outcome)
+
+
 def record_export_event(
 	tool: str,
 	fmt: str,
@@ -96,7 +124,7 @@ def record_export_event(
 	detail: str | None = None,
 ) -> None:
 	"""One line per server-side export ATTEMPT (export_query etc.): format, row
-	count, sync/background, and ``outcome`` (ok / degraded / no_data / rejected).
+	count, sync/background, and ``outcome`` (ok / degraded / no_data / rejected / too_slow).
 	Emitting on the fail-closed paths too is the point - the refused large exports
 	are exactly the signal that would justify raising the ceiling / building the
 	async path.
@@ -127,9 +155,16 @@ def record_export_event(
 		pass
 
 
-def emit_turn(conversation: str | None, run_id: str | None, duration_ms: int) -> None:
+def emit_turn(
+	conversation: str | None,
+	run_id: str | None,
+	duration_ms: int | None,
+	queue_ms: int | None = None,
+	approval_wait_ms: int | None = None,
+	active_ms: int | None = None,
+) -> None:
 	"""One line per completed turn; reads and clears the per-turn custom
-	flag. Never raises."""
+	flag. A duration that was not measured is None (null), never 0. Never raises."""
 	try:
 		if not conversation:
 			return
@@ -140,7 +175,10 @@ def emit_turn(conversation: str | None, run_id: str | None, duration_ms: int) ->
 				"site": getattr(frappe.local, "site", None),
 				"conversation": conversation,
 				"run_id": run_id,
-				"duration_ms": int(duration_ms),
+				"duration_ms": None if duration_ms is None else int(duration_ms),
+				"queue_ms": None if queue_ms is None else int(queue_ms),
+				"approval_wait_ms": None if approval_wait_ms is None else int(approval_wait_ms),
+				"active_ms": None if active_ms is None else int(active_ms),
 				"touched_custom": _read_and_clear_turn_flag(conversation),
 			}
 		)

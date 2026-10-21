@@ -182,6 +182,104 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 		ResultTooLargeError: result exceeds ``ROW_GUARD`` and
 			``confirm_large`` is False.
 	"""
+	q = compile_spec(spec)
+
+	# Step 7: execute.
+	limit = int(spec.get("limit") or DEFAULT_LIMIT)
+	rows = q.limit(limit + 1).run(as_dict=True)
+	more_rows = len(rows) > limit
+	partial = more_rows and not spec.get("limit")
+	rows = rows[:limit]
+
+	# Step 8: row guard (post-execute - we can't know the row count
+	# without running, and limiting earlier would break aggregates).
+	if len(rows) > ROW_GUARD and not confirm_large:
+		raise ResultTooLargeError(
+			row_count=len(rows),
+			limit=ROW_GUARD,
+			tool="query",
+		)
+
+	# Resolve the SQL for the operator triage payload. ``get_sql()``
+	# is the qb call that produces the final dialect-specific SQL
+	# string; safe to expose since the spec doesn't carry secrets.
+	try:
+		resolved_sql = q.get_sql()
+	except Exception:
+		resolved_sql = "<sql resolution failed>"
+
+	result = {"sql": resolved_sql, "rows": rows}
+	if more_rows and spec.get("limit"):
+		result["more_rows"] = True
+		result["note"] = f"Showing the requested first {limit} rows; more rows match."
+	from jarvis.tools._result_guard import enforce_result_budget
+
+	_, budget_event = enforce_result_budget(result, tool="query")
+	# Only a cut answer gets a saved id; an event that cut nothing ("uncapped", "measure_failed")
+	# is a complete answer and must not tell the agent to export it again.
+	if partial or (budget_event and budget_event["kind"] in _CUTTING_EVENTS):
+		from jarvis.tools._export.saved_queries import save
+
+		result["result_id"] = save(spec, preserve_limit=bool(spec.get("limit")))
+		result["partial"] = True
+		result["note"] = _saved_note(result["result_id"], spec.get("limit"))
+	return result
+
+
+# Budget events that mean the answer was cut (see _result_guard.enforce_result_budget).
+_CUTTING_EVENTS = ("truncated", "uncapped_nonrow")
+
+
+def _saved_note(result_id: str, limit) -> str:
+	"""How to get the whole result. An explicit limit stays in the saved query, so say so."""
+	call = f"export_query(result_id='{result_id}'). Data is fresh at export time."
+	if limit:
+		return (
+			f"This answer is partial. To export every row of this query (its limit of {limit} stays), "
+			f"call {call}"
+		)
+	return f"This answer is partial. For every matching row, call {call}"
+
+
+def compile_spec(spec: dict):
+	"""Steps 1-6 of ``query``: validate the spec, run every permission gate, and
+	build the permission-woven qb query, NOT executed."""
+	return _compile(spec)[0]
+
+
+def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:
+	"""``compile_spec`` for ``export_query``: ``(query, tables, export_doctypes,
+	child_parents)``. ``tables`` maps each FROM / join alias to its DocType;
+	``export_doctypes`` are the DocTypes whose Export permission the file needs;
+	``child_parents`` maps each child-table alias to the parent its rows are scoped to.
+
+	``export_limit`` is the query's LIMIT instead of the spec's own ``limit`` /
+	``MAX_LIMIT``, which cap what reaches the model, not a file. A spec ``limit``
+	still applies when it is smaller (a deliberate "top 50"), and the query asks for
+	ONE ROW PAST it, so the caller can tell whether the limit cut the result and
+	say so. An ``offset`` is refused: an export is the whole result, never a page
+	of it.
+
+	A child table's rows are the record-level scope of ONE owning parent (the one
+	``_weave_record_gate`` scopes it to), so its Export permission is that
+	parent's, exactly as Desk exports a child through its parent. Administrator
+	has no scoping parent and exports everything anyway."""
+	q, alias_map = _compile(spec, export_limit=export_limit)
+	tables = {alias: dt for alias, (dt, _table) in alias_map.items()}
+	export_doctypes = []
+	child_parents = {}
+	for alias, (dt, _table) in alias_map.items():
+		if frappe.get_meta(dt).istable:
+			if frappe.session.user == "Administrator":
+				continue
+			dt = child_parents[alias] = _child_scoping_parent(dt, alias, spec, alias_map)
+		if dt not in export_doctypes:
+			export_doctypes.append(dt)
+	return q, tables, export_doctypes, child_parents
+
+
+def _compile(spec: dict, *, export_limit: int | None = None) -> tuple:
+	"""The body of ``compile_spec``: ``(query, alias_map)``."""
 	if not isinstance(spec, dict):
 		raise InvalidArgumentError("spec must be a dict")
 
@@ -229,6 +327,12 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 					f"readable only through a parent DocType, and you cannot read "
 					f"any of its parents ({', '.join(owning)})"
 				)
+		if dt == "Comment":
+			from jarvis.tools.get_comments import COMMENT_REDIRECT_HINT
+
+			raise PermissionDeniedError(
+				f"no read permission on referenced DocType: Comment. {COMMENT_REDIRECT_HINT}"
+			)
 		raise PermissionDeniedError(f"no read permission on referenced DocType: {dt}")
 
 	# Step 4: per-site DocType allowlist (defense-in-depth).
@@ -304,9 +408,19 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	# default; explicit None-check preserves operator intent and lets
 	# the validation below catch 0 as the invalid value it is.
 	limit_raw = spec.get("limit")
-	limit = DEFAULT_LIMIT if limit_raw is None else int(limit_raw)
-	if limit <= 0 or limit > MAX_LIMIT:
-		raise InvalidArgumentError(f"limit must be between 1 and {MAX_LIMIT}")
+	if export_limit is not None:
+		if limit_raw is not None and int(limit_raw) <= 0:
+			raise InvalidArgumentError("limit must be a positive number")
+		# One past the spec's limit: a row beyond it proves the limit cut the result.
+		limit = export_limit if limit_raw is None else min(int(limit_raw) + 1, export_limit)
+		if spec.get("offset"):
+			raise InvalidArgumentError(
+				"an export is the whole result: drop offset (and narrow the filter if it is too large)"
+			)
+	else:
+		limit = DEFAULT_LIMIT if limit_raw is None else int(limit_raw)
+		if limit <= 0 or limit > MAX_LIMIT:
+			raise InvalidArgumentError(f"limit must be between 1 and {MAX_LIMIT}")
 	q = q.limit(limit)
 
 	# OFFSET (v0.2). Optional pagination. Same None-check pattern as
@@ -336,28 +450,7 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	)
 	for alias, (resolved_dt, table) in alias_map.items():
 		q = _weave_record_gate(q, engine, alias, resolved_dt, table, spec, alias_map)
-
-	# Step 7: execute.
-	rows = q.run(as_dict=True)
-
-	# Step 8: row guard (post-execute - we can't know the row count
-	# without running, and limiting earlier would break aggregates).
-	if len(rows) > ROW_GUARD and not confirm_large:
-		raise ResultTooLargeError(
-			row_count=len(rows),
-			limit=ROW_GUARD,
-			tool="query",
-		)
-
-	# Resolve the SQL for the operator triage payload. ``get_sql()``
-	# is the qb call that produces the final dialect-specific SQL
-	# string; safe to expose since the spec doesn't carry secrets.
-	try:
-		resolved_sql = q.get_sql()
-	except Exception:
-		resolved_sql = "<sql resolution failed>"
-
-	return {"sql": resolved_sql, "rows": rows}
+	return q, alias_map
 
 
 # ---- Spec validation ------------------------------------------------

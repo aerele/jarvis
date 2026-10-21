@@ -1,83 +1,91 @@
 <template>
 	<FrappeUIProvider>
 		<div class="flex h-dvh-safe w-full">
-			<!-- Hold a neutral surface until the onboarding verdict resolves AND a
-			     route commits — prevents both a sidebar flash on fresh sites and a
-			     poster flicker on a not-ready /onboarding deep-link. -->
-			<div v-if="!shellReady" class="flex-1 bg-surface-white" />
-			<!-- Onboarding gate (D11-safe): when the workspace has never finished
-			     onboarding, block the WHOLE app with a full-screen poster — no
-			     sidebar, no header — inviting setup. A RENDERED gate, not a
-			     redirect, so it can't reintroduce the old desk↔SPA loop that the
-			     forced D11 redirect caused. The /onboarding wizard itself is
-			     exempt so the poster's "Complete setup" button can reach it. -->
-			<OnboardingGate v-else-if="showGate" />
-			<!-- Release-notice gate: a hard block, shown only once the app would
-			     otherwise render. Exempts the wizard so a mid-onboarding workspace
-			     can still finish setup. -->
-			<UpdateNoticeGate v-else-if="showNotice && route.name !== 'Onboarding'" />
-			<template v-else>
-				<!-- Chrome-less routes (onboarding) drop the sidebar entirely — a
-				     not-yet-onboarded customer has no app to navigate. Desktop keeps
-				     the sidebar in-flow; phone width moves it off-canvas (drawer
-				     block below). -->
-				<div
-					v-if="!route.meta.chromeless && !store.mobile"
-					class="h-full shrink-0 border-r bg-surface-gray-1"
-				>
-					<Sidebar />
-				</div>
-				<!-- Phone: sidebar as an off-canvas drawer + tap-scrim. Translated
-				     off-screen until opened; slides over the content. -->
-				<template v-if="!route.meta.chromeless && store.mobile">
+			<!-- The app itself: inert while a confirmation is open, so Tab and the
+			     pointer cannot reach it. The dialogs, the palette and the notification
+			     toasts below stay outside it: a toast stays readable and clickable. -->
+			<div class="flex h-full w-full min-w-0" :inert="confirmOpen || undefined">
+				<!-- Hold a neutral surface until the onboarding verdict resolves AND a
+				     route commits — prevents both a sidebar flash on fresh sites and a
+				     poster flicker on a not-ready /onboarding deep-link. -->
+				<div v-if="!shellReady" class="flex-1 bg-surface-white" />
+				<!-- Onboarding gate (D11-safe): when the workspace has never finished
+				     onboarding, block the WHOLE app with a full-screen poster — no
+				     sidebar, no header — inviting setup. A RENDERED gate, not a
+				     redirect, so it can't reintroduce the old desk↔SPA loop that the
+				     forced D11 redirect caused. The /onboarding wizard itself is
+				     exempt so the poster's "Complete setup" button can reach it. -->
+				<OnboardingGate v-else-if="showGate" />
+				<!-- Release-notice gate: a hard block, shown only once the app would
+				     otherwise render. Exempts the wizard so a mid-onboarding workspace
+				     can still finish setup. -->
+				<UpdateNoticeGate v-else-if="showNotice && route.name !== 'Onboarding'" />
+				<template v-else>
+					<!-- Chrome-less routes (onboarding) drop the sidebar entirely — a
+					     not-yet-onboarded customer has no app to navigate. Desktop keeps
+					     the sidebar in-flow; phone width moves it off-canvas (drawer
+					     block below). -->
 					<div
-						v-if="store.mobileDrawerOpen"
-						data-testid="drawer-scrim"
-						class="fixed inset-0 z-40 bg-black/40"
-						@click="store.mobileDrawerOpen = false"
-					/>
-					<div
-						data-testid="mobile-drawer"
-						class="fixed inset-y-0 left-0 z-50 border-r bg-surface-gray-1 shadow-xl transition-transform duration-300 ease-in-out"
-						:class="store.mobileDrawerOpen ? 'translate-x-0' : '-translate-x-full'"
+						v-if="!route.meta.chromeless && !store.mobile"
+						class="h-full shrink-0 border-r bg-surface-gray-1"
 					>
 						<Sidebar />
 					</div>
-				</template>
-				<div class="flex flex-1 flex-col h-full min-w-0 overflow-auto bg-surface-white">
-					<!-- Phone top bar for chrome'd non-chat routes: the sidebar is a
-					     drawer now, so each such page needs a hamburger to reach nav.
-					     Chat renders its own hamburger inside its header. -->
-					<div
-						v-if="store.mobile && !route.meta.chat && !route.meta.chromeless"
-						class="flex h-12 shrink-0 items-center gap-2 border-b px-3"
-					>
-						<button
-							class="jv-focus-ring grid size-9 place-items-center rounded-md text-ink-gray-7"
-							aria-label="Open navigation"
-							@click="store.mobileDrawerOpen = true"
+					<!-- Phone: sidebar as an off-canvas drawer + tap-scrim. Translated
+					     off-screen until opened; slides over the content. -->
+					<template v-if="!route.meta.chromeless && store.mobile">
+						<div
+							v-if="store.mobileDrawerOpen"
+							data-testid="drawer-scrim"
+							class="fixed inset-0 z-40 bg-black/40"
+							@click="store.mobileDrawerOpen = false"
+						/>
+						<div
+							data-testid="mobile-drawer"
+							class="fixed inset-y-0 left-0 z-50 border-r bg-surface-gray-1 shadow-xl transition-transform duration-300 ease-in-out"
+							:class="store.mobileDrawerOpen ? 'translate-x-0' : '-translate-x-full'"
 						>
-							<FeatherIcon name="menu" class="size-5" />
-						</button>
-						<div id="app-header" class="min-w-0 flex-1" />
-					</div>
-					<!-- LayoutHeader teleport target — non-chat routes only (D41).
-					     The "Go to Desk" button is rendered INSIDE LayoutHeader's right
-					     cluster (leftmost, before each page's own actions) so it is
-					     uniform across pages and never displaces the page's primary
-					     action from the rightmost corner; chat has its own header button
-					     (ChatView openErpDesk), styled to match. -->
+							<Sidebar />
+						</div>
+					</template>
 					<div
-						v-else-if="!route.meta.chat && !route.meta.chromeless"
-						class="flex border-b"
+						class="flex flex-1 flex-col h-full min-w-0 overflow-auto bg-surface-white"
 					>
-						<div id="app-header" class="flex-1" />
+						<!-- Phone top bar for chrome'd non-chat routes: the sidebar is a
+						     drawer now, so each such page needs a hamburger to reach nav.
+						     Chat renders its own hamburger inside its header. -->
+						<div
+							v-if="store.mobile && !route.meta.chat && !route.meta.chromeless"
+							class="flex h-12 shrink-0 items-center gap-2 border-b px-3"
+						>
+							<button
+								class="jv-focus-ring grid size-9 place-items-center rounded-md text-ink-gray-7"
+								aria-label="Open navigation"
+								@click="store.mobileDrawerOpen = true"
+							>
+								<FeatherIcon name="menu" class="size-5" />
+							</button>
+							<div id="app-header" class="min-w-0 flex-1" />
+						</div>
+						<!-- LayoutHeader teleport target — non-chat routes only (D41).
+						     The "Go to Desk" button is rendered INSIDE LayoutHeader's right
+						     cluster (leftmost, before each page's own actions) so it is
+						     uniform across pages and never displaces the page's primary
+						     action from the rightmost corner; chat has its own header button
+						     (ChatView openErpDesk), styled to match. -->
+						<div
+							v-else-if="!route.meta.chat && !route.meta.chromeless"
+							class="flex border-b"
+						>
+							<div id="app-header" class="flex-1" />
+						</div>
+						<router-view v-if="booted" />
 					</div>
-					<router-view v-if="booted" />
-				</div>
-			</template>
+				</template>
+			</div>
 			<Dialogs />
 			<SettingsDialog />
+			<ChatShareDialog />
 			<JarvisCommandPalette />
 			<NotifyToaster />
 			<ConfirmDialog />
@@ -97,6 +105,7 @@ import { useRoute, useRouter } from "vue-router";
 import { FrappeUIProvider, Dialogs, setConfig, FeatherIcon } from "frappe-ui";
 import * as api from "@/api";
 import { useShellStore } from "@/stores/shell";
+import { confirmState } from "@/composables/useConfirm";
 import { useShortcuts } from "@/composables/useShortcuts";
 import { attachGlobalNotifier } from "@/notify/globalNotifier";
 import NotifyToaster from "@/notify/NotifyToaster.vue";
@@ -104,6 +113,7 @@ import { needsOnboarding, regateOnRouteChange } from "@/onboarding/readiness.js"
 import Sidebar from "./Sidebar.vue";
 import JarvisCommandPalette from "./JarvisCommandPalette.vue";
 import SettingsDialog from "./SettingsDialog.vue";
+import ChatShareDialog from "@/components/chat/ChatShareDialog.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 // Mounted here (not in ChatView) so a route change away from Chat can never
 // unmount it mid-prompt - same reasoning as ConfirmDialog living here.
@@ -111,7 +121,7 @@ import SupportCopyPromptDialog from "@/components/support/SupportCopyPromptDialo
 import OnboardingGate from "./OnboardingGate.vue";
 import UpdateNoticeGate from "./UpdateNoticeGate.vue";
 import { showNotice } from "@/noticeGate";
-import { parseSettingsDeepLink } from "@/lib/settingsDeepLink";
+import { movedSettingsRoute, parseSettingsDeepLink } from "@/lib/settingsDeepLink";
 // Unscoped global stylesheet. ChatView and OnboardingView render .jv-btn /
 // .jv-iconbtn from it, so it is imported here at the shell rather than left as
 // a side effect of whichever component happens to mount first (it used to ride
@@ -122,6 +132,7 @@ import "@/assets/settings.css";
 const route = useRoute();
 const router = useRouter();
 const store = useShellStore();
+const confirmOpen = computed(() => confirmState.value !== null);
 // The same shared socket ChatView injects (main.js provides it app-wide;
 // null under ?nosocket) — the global notifier listens on it for the whole
 // session, independent of which route is mounted.
@@ -193,7 +204,8 @@ const SETTINGS_DEEP_LINK_KEYS = new Set([
 	"billing", // legacy alias, not a PANES key - SettingsDialog maps it to "usage"
 	"branding",
 	"usageadmin",
-	"macroadmin",
+	"sharedchats",
+	"macroadmin", // moved: no longer a pane, see openSettingsFromQuery
 ]);
 // Only ever OPENS a pane - an absent or unrecognised key is silently ignored
 // so a plain "/jarvis/" load is untouched. Strips the param either way it
@@ -202,6 +214,19 @@ const SETTINGS_DEEP_LINK_KEYS = new Set([
 function openSettingsFromQuery() {
 	const link = parseSettingsDeepLink(window.location.search, SETTINGS_DEEP_LINK_KEYS);
 	if (link.rest === null) return;
+	// Every user's macros moved from Settings to the Admin tab of the Macros page:
+	// a saved ?settings=macroadmin link lands there (the page shows the tab only to
+	// an admin).
+	const moved = movedSettingsRoute(link.section, link.rest, window.location.hash);
+	if (moved) {
+		// After the first navigation has settled: replacing while it is pending would
+		// reject it, and that is reported as a client error.
+		router
+			.isReady()
+			.then(() => router.replace(moved))
+			.catch(() => {});
+		return;
+	}
 	if (link.section) store.openSettings(link.section, link.intent);
 	const url =
 		window.location.pathname + (link.rest ? `?${link.rest}` : "") + window.location.hash;
@@ -244,6 +269,7 @@ function stopInterval() {
 }
 let _visTimer = null;
 function onVisibility() {
+	if (document.visibilityState === "visible") store.loadSharedConversations?.({ refresh: true });
 	if (document.visibilityState === "visible") {
 		startInterval();
 		clearTimeout(_visTimer);
@@ -272,6 +298,8 @@ onMounted(async () => {
 
 	// Sidebar fills without ChatView needing to be mounted (§3.1).
 	store.loadConversations();
+	store.loadSharedConversations?.();
+	window.addEventListener("focus", refreshSharedIndex);
 	store.refreshBadges();
 
 	// Fallback only (vite dev server serves index.html without the jinja boot
@@ -299,7 +327,11 @@ onMounted(async () => {
 	// stale /onboarding link.
 });
 
+function refreshSharedIndex() {
+	store.loadSharedConversations?.({ refresh: true });
+}
 onBeforeUnmount(() => {
+	window.removeEventListener("focus", refreshSharedIndex);
 	document.removeEventListener("visibilitychange", onVisibility);
 	clearTimeout(_visTimer);
 	stopInterval();

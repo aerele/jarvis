@@ -200,6 +200,7 @@ _PERSONALISE_SETTINGS_DEFAULTS = {
 	"personalise_daily_question_cap": 5,
 	"personalise_enabled": 1,
 	"chat_question_mining_enabled": 1,
+	"chat_sharing_enabled": 1,
 }
 
 
@@ -260,6 +261,16 @@ def _seed_personalise_settings_defaults() -> bool:
 		)
 	}
 	updates = {f: v for f, v in _PERSONALISE_SETTINGS_DEFAULTS.items() if f not in existing}
+	# Unlike an explicit 0, NULL is an unseeded sharing setting.
+	if (
+		"chat_sharing_enabled" in existing
+		and frappe.db.sql(
+			"SELECT value FROM tabSingles WHERE doctype=%s AND field=%s",
+			(_PERSONALISE_SETTINGS, "chat_sharing_enabled"),
+		)[0][0]
+		is None
+	):
+		updates["chat_sharing_enabled"] = 1
 	if not updates:
 		return False
 	frappe.db.set_single_value(_PERSONALISE_SETTINGS, updates, update_modified=False)

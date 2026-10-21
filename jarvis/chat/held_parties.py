@@ -17,7 +17,7 @@ import unicodedata
 
 import frappe
 
-CREATE_TOOLS = frozenset({"create_doc", "create_docs"})
+CREATE_TOOLS = frozenset({"create_doc"})
 MAX_CANDIDATES = 5
 _LIKE_SCAN = 50
 _NOT_GSTIN = re.compile(r"[^0-9A-Z]")
@@ -29,7 +29,7 @@ def items_of(tool: str, args) -> list[dict]:
 		return []
 	if tool in CREATE_TOOLS:
 		docs = args.get("docs")
-		if tool == "create_docs" or isinstance(docs, list):
+		if isinstance(docs, list):
 			return [
 				_item(d.get("doctype"), d.get("values"), None, "create")
 				for d in docs or []

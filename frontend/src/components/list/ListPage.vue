@@ -315,6 +315,7 @@ import FilterButton from "@/components/list/FilterButton.vue";
 import FilterGroup from "@/components/list/FilterGroup.vue";
 import SortButton from "@/components/list/SortButton.vue";
 import ColumnsButton from "@/components/list/ColumnsButton.vue";
+import { focusOpenMenu } from "@/lib/focusOpenMenu";
 
 const props = defineProps({
 	breadcrumbs: { type: Array, default: () => [] }, // [{label, route?}]
@@ -412,11 +413,6 @@ function quickOptions(qf) {
 		selected: o.value === quickValue(qf),
 		onClick: () => applyQuick(qf, o.value),
 	}));
-}
-// reka-ui does not move focus into this opened menu, so the arrow keys and Enter would not
-// reach the options, as they did in the select it replaces. Focus it after it renders.
-function focusOpenMenu() {
-	requestAnimationFrame(() => document.querySelector("[data-reka-menu-content]")?.focus());
 }
 function applyQuick(qf, value) {
 	const next = { ...(props.filters || {}) };

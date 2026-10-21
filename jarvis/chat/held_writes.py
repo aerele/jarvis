@@ -58,7 +58,7 @@ from jarvis.tools import _write_risk
 HELD = "file_box_held"
 AR = "Jarvis Approval Request"
 CONV = "Jarvis Conversation"
-_WRITE_DOC_TOOLS = frozenset({"create_doc", "create_docs", "update_doc"})
+_WRITE_DOC_TOOLS = frozenset({"create_doc", "update_doc"})
 # Framework / Jarvis internals an unattended run must never write (F6).
 DENIED_MODULES = frozenset(
 	{
@@ -181,8 +181,12 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
 	if verdict == "apply":
 		result = api.dispatch_confirmed(tool, args, provenance="auto_apply", uncarded=True)
-		if tool == "create_doc" and result.get("ok"):
-			api._stamp_file_box_draft(conversation, result.get("data"))
+		data = result.get("data")
+		if tool == "create_doc" and result.get("ok") and api._stamp_file_box_draft(conversation, data):
+			# The draft exists now, so the dropped file can be attached to it.
+			from jarvis.chat import filebox
+
+			data.update(filebox.attach_source_to_draft(conversation, data["doctype"], data["name"]))
 		return result
 	if verdict == "question":
 		return held_sheets.file_questions(tool, args, conversation)
@@ -207,7 +211,7 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 	sheets = bool(sheet) or held_sheets.enabled()
 	if tool == "update_wiki":
 		return "pass", None
-	bulk = api._is_bulk_call(args) or tool == "create_docs"
+	bulk = api._is_bulk_call(args)
 	if tool not in _WRITE_DOC_TOOLS:
 		if tool in api._GATED_WRITES or bulk:
 			return "refuse", _refuse(

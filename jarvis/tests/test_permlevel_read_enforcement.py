@@ -205,7 +205,7 @@ class TestLoadDocFieldLevel(FrappeTestCase):
 				with self.subTest(levels=levels):
 					meta.get_permlevel_access.return_value = levels
 					columns = actions_api._child_columns("Sales Order Item", "Sales Order", "items")
-					extra = actions_api._extra_child_columns("Sales Order Item", "Sales Order", "items")
+					extra = actions_api._grid_fields("Sales Order Item", "Sales Order")[1]
 					self.assertEqual(
 						[c.fieldname for c in columns],
 						["visible_grid", "hidden_grid"] if 2 in levels else ["visible_grid"],

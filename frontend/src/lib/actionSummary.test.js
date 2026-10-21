@@ -111,6 +111,29 @@ test("lineItemSummary: missing cell values render as empty string", () => {
 	assert.equal(s.rows[0].cells[1], "");
 });
 
+test("lineItemSummary: a Check column reads Yes/No, not the raw value", () => {
+	const s = lineItemSummary({
+		fieldname: "items",
+		label: "Items",
+		columns: [
+			{ fieldname: "item_code", label: "Item", fieldtype: "Link" },
+			{ fieldname: "is_free_item", label: "Free", fieldtype: "Check" },
+		],
+		rows: [
+			{ item_code: "A", is_free_item: "1" },
+			{ item_code: "B", is_free_item: "0" },
+			{ item_code: "C", is_free_item: "false" },
+			{ item_code: "D", is_free_item: "Yes" },
+			{ item_code: "E", is_free_item: "" },
+			{ item_code: "F" },
+		],
+	});
+	assert.deepEqual(
+		s.rows.map((r) => r.cells[1]),
+		["Yes", "No", "No", "Yes", "", ""]
+	);
+});
+
 test("summarize(create): kind=create, headline from action.summary, rows from proposed fields", () => {
 	const out = summarize(createModel, createAction);
 	assert.equal(out.kind, "create");
@@ -771,4 +794,48 @@ test("copyText: true when the clipboard took it, false when it refused or is mis
 	);
 	assert.equal(await copyText("pa-1", null), false);
 	assert.equal(await copyText("", { writeText: async () => {} }), false);
+});
+
+test("schedule_run: a schedule card is recognised, and its receipt names the macro", () => {
+	assert.ok(
+		pendingCardOf({ preview: { card: { kind: "schedule", when: "2030-01-15 09:30" } } })
+	);
+	const done = receiptView(
+		"schedule_run",
+		{ run_at: "2030-01-15 09:30", prompt: "x", title: "Review" },
+		{ ok: true, data: { macro: "m1", macro_name: "Review", link: "/jarvis/macros/m1" } },
+		"confirmed"
+	);
+	assert.equal(done.title, "Scheduled “Review” to run once on 15 Jan 2030, 9:30 am");
+	assert.deepEqual(done.targets, [{ name: "Review", url: "/jarvis/macros/m1" }]);
+	const no = receiptView(
+		"schedule_run",
+		{ run_at: "2030-01-15 09:30", title: "Review" },
+		null,
+		"discarded"
+	);
+	assert.equal(
+		no.title,
+		"Discarded, did not schedule “Review” to run once on 15 Jan 2030, 9:30 am"
+	);
+	const untitled = receiptView(
+		"schedule_run",
+		{
+			run_at: "2030-01-15 21:05",
+			prompt: "Check the comments on Employee HR-EMP-0001 and tell me",
+		},
+		null,
+		"discarded"
+	);
+	const offset = receiptView(
+		"schedule_run",
+		{ run_at: "2030-01-15T04:00:00Z", title: "Review" },
+		null,
+		"discarded"
+	);
+	assert.equal(offset.title, "Discarded, did not schedule “Review” to run once");
+	assert.equal(
+		untitled.title,
+		"Discarded, did not schedule “Check the comments on Employee HR-EMP-00…” to run once on 15 Jan 2030, 9:05 pm"
+	);
 });

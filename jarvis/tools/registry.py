@@ -42,16 +42,16 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# user. Read-only; picks no values. See jarvis-persona AGENTS.md.
 	"get_creation_context",
 	# Link-resolution for the create flow: which referenced records exist,
-	# which have near-matches to reuse, which are missing (feed create_docs).
+	# which have near-matches to reuse, which are missing (feed create_doc(docs=[...])).
 	"resolve_links",
 	"run_report",
 	"get_report_filters",
 	"run_method",
 	"query",
 	"update_doc",
+	# One record, or ``docs=[...]``: a batch, atomic create for a doc's missing
+	# dependencies (one gated card).
 	"create_doc",
-	# Batch, atomic create for a doc's missing dependencies (one gated card).
-	"create_docs",
 	"preview_doc",
 	# Read-only: static-check a Server Script / Script Report body against the
 	# safe_exec sandbox (imports, get_all/db.sql, RestrictedPython compile) before
@@ -129,6 +129,10 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"send_email",
 	"add_comment",
 	"update_comment",
+	# Read side of the comment pair: a record's timeline comments under the
+	# parent record's read permission (Desk's rule), since the Comment DocType
+	# itself is System Manager / Website Manager only.
+	"get_comments",
 	"share_doc",
 	"unshare_doc",
 	"assign_to",
@@ -137,6 +141,9 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"remove_tag",
 	"follow_document",
 	"unfollow_document",
+	# A one-time macro from chat ("remind me / do this on Monday at 9"): gated and a
+	# brake, so it always parks a card.
+	"schedule_run",
 	# Tier 4 analytics + visualization: dataset stats + dashboard/chart
 	# creation (independent reimplementations of capability gaps).
 	"summarize_dataset",

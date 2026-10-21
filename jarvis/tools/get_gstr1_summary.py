@@ -33,6 +33,7 @@ import re
 
 import frappe
 
+from jarvis import _failure_kind
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._company_scope import is_company_permitted
 
@@ -227,7 +228,9 @@ def get_gstr1_summary(
 		}
 	except InvalidArgumentError:
 		raise
-	except Exception:
+	except Exception as e:
+		if _failure_kind.too_slow(e):
+			raise  # a read cut at the time limit comes back coded, not as "error" (#707 B3)
 		# never raise an unexpected fault to the delegate: fail-closed + a bench-side
 		# breadcrumb (out of model context) so a broken RET-5 is diagnosable.
 		frappe.log_error(title="get_gstr1_summary failed", message=frappe.get_traceback())

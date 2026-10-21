@@ -2,6 +2,7 @@ import frappe
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._bulk import _MAX_BATCH
+from jarvis.tools._doc_parts import DocPart
 
 _NO_NAME_MESSAGE = (
 	"Pass name (one document) or names (a non-empty list). For a single "
@@ -9,7 +10,17 @@ _NO_NAME_MESSAGE = (
 )
 
 
-def get_doc(doctype: str, name: str | None = None, names: list | None = None) -> dict:
+def get_doc(
+	doctype: str,
+	name: str | None = None,
+	names: list | None = None,
+	fields: list | None = None,
+	child_table: str | None = None,
+	start: int = 0,
+	limit: int | None = None,
+	text_offset: int | None = None,
+	text_length: int | None = None,
+) -> dict:
 	"""Return one document as a dict - or a batch when ``names`` is given.
 
 	Enforces read permission on EACH specific document for the current user.
@@ -30,22 +41,36 @@ def get_doc(doctype: str, name: str | None = None, names: list | None = None) ->
 	Batch (non-single): returns ``{"doctype","docs":[<doc>,...],"count":N}``
 	(fail-fast: a missing or unreadable name raises, naming the offending
 	record).
+
+	Part of one document (single mode only), read through the same permission
+	check and field masking as the whole document, so it never shows more:
+	``fields`` returns just those fields plus doctype and name; ``child_table``
+	returns one page of that table's rows (``start``, ``limit``) in the
+	list-page-v1 rows/coverage shape, with ``fields`` naming the row fields;
+	``fields=[one field]`` with ``text_offset`` / ``text_length`` returns a window
+	of that value's text (a list or dict as its JSON) plus ``_text_window``
+	saying where it ends and how to continue. A null, empty or zero value of
+	these optional arguments means absent: models fill unused ones that way.
+	The agent's result-size guard points a cut document at these calls.
 	"""
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
 	if not frappe.db.exists("DocType", doctype):
 		raise InvalidArgumentError(f"unknown doctype: {doctype}")
+	part = DocPart(fields, child_table, start, limit, text_offset, text_length)
 
 	if frappe.get_meta(doctype).issingle:
-		doc = _get_single(doctype)
 		# names=[...] on a Single is meaningless as a name list (its one
 		# document's name IS the doctype - see docstring), but a caller who
 		# passed it explicitly asked for the BATCH shape and must get it back,
 		# not the flat dict every other Single call returns. names=None/[]
 		# (the common "nothing sensible to pass" case) stays flat.
-		if isinstance(names, list) and names:
+		batch = isinstance(names, list) and bool(names)
+		part.refuse_with_batch(batch)
+		doc = _get_single(doctype)
+		if batch:
 			return {"doctype": doctype, "docs": [doc], "count": 1}
-		return doc
+		return part.of(doc)
 
 	# Models may populate an unused optional array with [] in single-record mode.
 	# Treat only that empty-list shape as absent; malformed batches still fail.
@@ -56,11 +81,12 @@ def get_doc(doctype: str, name: str | None = None, names: list | None = None) ->
 	if names is not None:
 		if not isinstance(names, list) or not names:
 			raise InvalidArgumentError(_NO_NAME_MESSAGE)
+		part.refuse_with_batch(True)
 		return _get_doc_batch(doctype, names)
 
 	if not name:
 		raise InvalidArgumentError(_NO_NAME_MESSAGE)
-	return _get_doc_one(doctype, name)
+	return part.of(_get_doc_one(doctype, name))
 
 
 def _get_doc_one(doctype: str, name: str) -> dict:

@@ -20,13 +20,19 @@ function body(name) {
 test("the open panel is stamped editable with the draft it opened on", () => {
 	const fn = body("openDraftPanel");
 	assert.match(fn, /const messageKey = actionFor\.value/);
-	assert.match(fn, /stampDraftModel\(model, \{ messageKey, card, editable: true \}\)/);
+	assert.match(
+		fn,
+		/stampDraftModel\(model, \{ messageKey, card, editable: true, actionKey \}\)/
+	);
 });
 
 test("the summary card is stamped, never editable", () => {
 	const fn = body("ensureActionSummary");
 	assert.match(fn, /const messageKey = actionFor\.value/);
-	assert.match(fn, /stampDraftModel\(model, \{ messageKey, card, editable: false \}\)/);
+	assert.match(
+		fn,
+		/stampDraftModel\(model, \{ messageKey, card, editable: false, actionKey: key \}\)/
+	);
 });
 
 test("a save sends the helper's payload and follows its outcome, closing on closed", () => {
@@ -38,4 +44,64 @@ test("a save sends the helper's payload and follows its outcome, closing on clos
 		/outcome\.kind === "closed"\) \{\s*(\/\/[^\n]*\n\s*)*closeDraftPanel\(\);\s*notify\(outcome\.note/
 	);
 	assert.match(fn, /outcome\.kind === "keep"\) \{[\s\S]*?p\.error = outcome\.error;/);
+});
+
+test("an open panel on the same draft is kept, not rebuilt from the agent's proposal", () => {
+	const fn = body("openDraftPanel");
+	const keep = fn.indexOf("if (openPanelFor(draftPanel.value, actionKey)) return false;");
+	assert.ok(keep > 0, "openDraftPanel keeps the open panel, stamp and all");
+	assert.ok(keep < fn.indexOf("buildDraftModel(a)"), "before any rebuild");
+});
+
+test("the card's Confirm saves the open panel's values when it edits this draft", () => {
+	const fn = body("confirmSummary");
+	const panel = fn.indexOf("applyDraft(0, panel)");
+	assert.match(fn, /openPanelFor\(draftPanel\.value, model\.actionKey\)/);
+	assert.ok(panel > 0 && panel < fn.indexOf("applyDraft(0, model)"));
+});
+
+test("a re-sent proposal toasts 'updated' only when the panel was rebuilt", () => {
+	assert.match(
+		src,
+		/\.then\(\(rebuilt\) => \{\s*if \(rebuilt && draftPanel\.value\) draftPanel\.value\.updatedToast = true;/
+	);
+});
+
+test("the card's Confirm and Preview read the same model", () => {
+	assert.match(
+		src,
+		/:disabled="\s*!cardModel \|\|\s*cardModel\.applying \|\|\s*convStreaming\s*"/
+	);
+	assert.match(src, /:model="cardModel"/);
+});
+
+test("a click outside the panel closes it only when nothing would be lost", () => {
+	assert.match(src, /@click\.self="onOverlayBackdropClick\(dismissDraftPanel\)"/);
+	const fn = body("dismissDraftPanel");
+	assert.match(
+		fn,
+		/if \(draftIsDirty\(draftPanel\.value\)\) \{[\s\S]*?return;\s*\}\s*closeDraftPanel\(\);/
+	);
+	assert.match(body("openDraftPanel"), /markDraftBaseline\(model\);/);
+});
+
+test("a failed panel save keeps its draft's card live, and any other outcome lets go", () => {
+	assert.match(
+		src,
+		/liveDraftMessage\(visibleMessages\.value, _lastAssistant\.value, fixingDraft\.value/
+	);
+	assert.match(
+		src,
+		/const actionFor = computed\(\(\) => \(activeAction\.value \? _cardMessage\.value\.name : null\)\);/
+	);
+	const fn = body("applyDraft");
+	assert.match(
+		fn,
+		/outcome\.kind === "keep"\) \{[\s\S]*?if \(p\.editable\) fixingDraft\.value = draftKey;/
+	);
+	assert.equal(
+		(fn.match(/fixingDraft\.value = "";/g) || []).length,
+		3,
+		"closed, parked and saved"
+	);
 });

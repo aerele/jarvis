@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseSettingsDeepLink } from "./settingsDeepLink.js";
+import { movedSettingsRoute, parseSettingsDeepLink } from "./settingsDeepLink.js";
 
 const KEYS = new Set(["general", "aimodels", "usage"]);
 
@@ -40,5 +40,49 @@ describe("parseSettingsDeepLink", () => {
 			intent: null,
 			rest: "",
 		});
+	});
+});
+
+describe("movedSettingsRoute", () => {
+	it("sends the old macro admin key to the Macros page's Admin tab", () => {
+		expect(movedSettingsRoute("macroadmin")).toEqual({
+			name: "MacroAdmin",
+			query: {},
+			hash: "",
+		});
+	});
+
+	it("keeps the rest of the address", () => {
+		const link = parseSettingsDeepLink(
+			"?settings=macroadmin&x=1&y=two",
+			new Set(["macroadmin"])
+		);
+		expect(movedSettingsRoute(link.section, link.rest, "#top")).toEqual({
+			name: "MacroAdmin",
+			query: { x: "1", y: "two" },
+			hash: "#top",
+		});
+	});
+
+	it("keeps every value of a key given more than once", () => {
+		const link = parseSettingsDeepLink(
+			"?settings=macroadmin&nosocket&tag=one&tag=two&tag=three",
+			new Set(["macroadmin"])
+		);
+		expect(movedSettingsRoute(link.section, link.rest, "#kept")).toEqual({
+			name: "MacroAdmin",
+			query: { nosocket: "", tag: ["one", "two", "three"] },
+			hash: "#kept",
+		});
+	});
+
+	it("treats a key named like an inherited property as any other key", () => {
+		const moved = movedSettingsRoute("macroadmin", "toString=a&toString=b&constructor=c");
+		expect({ ...moved.query }).toEqual({ toString: ["a", "b"], constructor: "c" });
+	});
+
+	it("is null for a pane that is still a pane, and for no key", () => {
+		expect(movedSettingsRoute("usage", "x=1")).toBeNull();
+		expect(movedSettingsRoute("")).toBeNull();
 	});
 });

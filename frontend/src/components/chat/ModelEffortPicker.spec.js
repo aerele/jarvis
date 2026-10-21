@@ -225,7 +225,8 @@ describe("ModelEffortPicker expired sign-in", () => {
 	it("shows no dot for a model that is not expired", () => {
 		const w = buildExpired({ modelOverride: "claude-x" });
 		expect(dot(w).exists()).toBe(false);
-		expect(pill(w).attributes("title")).toBe("Model and effort");
+		// The tooltip names the model: the pill may truncate it on a narrow screen.
+		expect(pill(w).attributes("title")).toBe("Model and effort: claude-x");
 	});
 
 	it("marks an expired menu row and keeps it clickable", async () => {

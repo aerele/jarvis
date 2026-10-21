@@ -3798,6 +3798,8 @@ def request_cancel_conversation(relay_or_conversation: str, run_id: str | None =
 			if not _is_stoppable_ready(row, run_id):
 				return False, None
 			won = _cancel_ready_turn(row)
+		elif not stop_names_turn(row["run_id"], run_id):
+			return False, None  # #448: a Stop for another run leaves this one running
 		else:
 			won = ts.request_cancel(row["run_id"], int(row["version"]))
 		if won:
@@ -3824,10 +3826,16 @@ def _rollback_and_check_resent(run_id: str) -> bool:
 	return empty_reply_recovery.resent_turn(run_id)
 
 
+def stop_names_turn(turn_run_id: str, run_id: str | None) -> bool:
+	"""Is a Stop for ``run_id`` meant for this turn? Yes when ``run_id`` is absent or names
+	it (its run id or its ``-r1`` key)."""
+	return not run_id or run_id in (turn_run_id, resent_gateway_key(turn_run_id))
+
+
 def _is_stoppable_ready(row: dict, run_id: str | None) -> bool:
 	"""A ``ready`` turn Stop cancels: one the empty-reply re-send put back, when ``run_id``
 	is absent or names it (its run id or its ``-r1`` key)."""
-	if run_id and run_id not in (row["run_id"], resent_gateway_key(row["run_id"])):
+	if not stop_names_turn(row["run_id"], run_id):
 		return False
 	return empty_reply_recovery.resent_turn(row["run_id"])
 
@@ -4140,7 +4148,7 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 	rows = frappe.db.sql(
 		"""SELECT run_id, state, version, reserved, reservation_expires_at, enqueued_at,
 		       preparing_at, deadline_at, dispatching_at, recovery_started_at, conversation,
-		       assistant_message, seed_message
+		       assistant_message, seed_message, turn_class
 		FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s AND state IN %(states)s""",
 		{"t": target, "states": ts.NONTERMINAL_STATES},
@@ -4176,7 +4184,8 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 				continue
 			# Age-out (SUX-5): genuinely-waiting UNRESERVED queued turns only (a
 			# reserved turn is reclaimed above, never cancelled by this path).
-			if not reserved and _older_than(r.get("enqueued_at"), ts.QUEUED_MAX_AGE_S):
+			# A File Box drop waits longer than a typed message (#1567).
+			if not reserved and _older_than(r.get("enqueued_at"), ts.queued_max_age(r.get("turn_class"))):
 				if ts.cancel_queued_max_age(run_id, v, _AGE_OUT_REASON):
 					# The cancel is committed BEFORE its side effects, as on the other
 					# cancel edges: the marker below runs its own transaction and rolls

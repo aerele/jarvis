@@ -18,6 +18,11 @@ conversation. Best-effort throughout: the model itself decides greeting-vs-topic
 (it answers ``SKIP`` for greetings / small talk in any language), and a greeting
 or any failure simply leaves the chat "New chat" to be retried on the next turn —
 we never guess a title, and it never breaks the chat turn that triggered it.
+
+One deliberate exception: on the Claude plan every model turn starts its own
+claude-cli process, so there the title is the first non-greeting user message
+(``plain_title``), with greetings filtered by the ``_GREETINGS`` list instead of
+the model (admin-v2#657).
 """
 
 from __future__ import annotations
@@ -62,6 +67,25 @@ _GREETINGS = {
 	"ola",
 	"hola",
 	"namaste",
+	# The plain (no-model) title on the Claude plan relies on this list to skip a
+	# greeting, so it carries the common non-English ones too, in Latin and native
+	# script (admin-v2#657).
+	"namaskar",
+	"namaskaram",
+	"vanakkam",
+	"salaam",
+	"salam",
+	"assalamu alaikum",
+	"hallo",
+	"bonjour",
+	"ciao",
+	"नमस्ते",
+	"नमस्कार",
+	"வணக்கம்",
+	"నమస్కారం",
+	"നമസ്കാരം",
+	"ನಮಸ್ಕಾರ",
+	"নমস্কার",
 	"morning",
 	"evening",
 	"thanks",
@@ -203,8 +227,8 @@ def _is_greeting(text: str) -> bool:
 	return t in _GREETINGS
 
 
-def normalize_title(raw: str | None) -> str:
-	"""agent-style normalisation: first meaningful line, unwrapped, capped."""
+def normalize_title(raw: str | None, max_len: int = _TITLE_MAX_LEN) -> str:
+	"""agent-style normalisation: first meaningful line, unwrapped, capped at ``max_len``."""
 	if not raw:
 		return ""
 	first_line = ""
@@ -224,7 +248,7 @@ def normalize_title(raw: str | None) -> str:
 		current = re.sub(r"^__(.+)__$", r"\1", current).strip()
 		current = re.sub(r"^#+\s*", "", current).strip()  # leading markdown heading
 	current = current.rstrip(".").strip()
-	return current[:_TITLE_MAX_LEN]
+	return current[:max_len]
 
 
 def _opening_user_messages(conversation_id: str, *, limit: int = 6) -> str:
@@ -234,6 +258,11 @@ def _opening_user_messages(conversation_id: str, *, limit: int = 6) -> str:
 	find the real topic even when it follows a greeting, and decide greeting-vs-topic ITSELF — in
 	any language — rather than us pre-filtering against a hardcoded English greeting list. Returns
 	"" when there is no user message yet."""
+	return "\n".join(_opening_user_texts(conversation_id, limit=limit))
+
+
+def _opening_user_texts(conversation_id: str, *, limit: int = 6) -> list[str]:
+	"""The first few user messages, cleaned, one entry per message, empties dropped."""
 	rows = frappe.get_all(
 		MSG,
 		filters={"conversation": conversation_id, "role": "user"},
@@ -248,7 +277,49 @@ def _opening_user_messages(conversation_id: str, *, limit: int = 6) -> str:
 		c = re.sub(r"\n*📎.*$", "", c).strip()
 		if c:
 			parts.append(c)
-	return "\n".join(parts)
+	return parts
+
+
+# Words in _GREETINGS that also start real requests ("test the report", "evening sales",
+# "ok, now list ...") are a whole-message greeting only, never stripped from the front.
+_NOT_A_LEADING_GREETING = {"test", "ok", "okay", "thanks", "thank you", "morning", "evening", "greetings"}
+
+
+def _strip_leading_greeting(line: str) -> str:
+	"""``line`` without an opening salutation ("Hi, show me ..." -> "show me ...")."""
+	low = line.lower()
+	for g in sorted(_GREETINGS - _NOT_A_LEADING_GREETING, key=len, reverse=True):
+		if low.startswith(g) and (len(line) == len(g) or line[len(g)] in " ,!.:;-~"):
+			rest = line[len(g) :].lstrip(" ,!.:;-~")
+			rest = re.sub(r"^(jarvis|there|bot|buddy)\b[\s,!.:;-]*", "", rest, flags=re.IGNORECASE)
+			return rest.strip()
+	return line
+
+
+def plain_title(conversation_id: str) -> str:
+	"""A title from the first non-greeting line the user wrote, with no model call.
+
+	Used where an LLM title would start its own Claude CLI process (admin-v2#657). Same
+	shape as a generated title: one line, unwrapped, at most ``_TITLE_MAX_LEN`` characters,
+	cut at a word boundary. A leading greeting ("Hi, ...") is dropped and a greeting-only
+	line is skipped. "" while the chat holds only greetings, which leaves it "New chat" and
+	retries on the next turn, like the LLM path."""
+	for text in _opening_user_texts(conversation_id):
+		for raw_line in text.splitlines():
+			line = raw_line.strip()
+			if not line or line.startswith("```"):
+				continue
+			line = _strip_leading_greeting(line)
+			if not line or _is_greeting(line):
+				continue
+			full = normalize_title(line, max_len=len(line))
+			title = full[:_TITLE_MAX_LEN]
+			if len(full) > _TITLE_MAX_LEN and full[_TITLE_MAX_LEN] != " " and " " in title:
+				title = title.rsplit(" ", 1)[0]  # the cap fell inside a word; drop the stub
+			title = title.rstrip(" ,;:-").strip()
+			if title:
+				return title[:1].upper() + title[1:]
+	return ""
 
 
 def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
@@ -364,7 +435,7 @@ def autotitle_job(conversation_id: str, user: str) -> None:
 	logged, never affects the finished turn.
 	"""
 	try:
-		from jarvis.chat.turn_handler import _resolve_model_and_provider
+		from jarvis.chat.turn_handler import _resolve_model_and_provider, one_shot_runs_on_claude_plan
 
 		settings = frappe.get_single("Jarvis Settings")
 		gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
@@ -380,6 +451,7 @@ def autotitle_job(conversation_id: str, user: str) -> None:
 			gateway_url=gateway_url,
 			model=model,
 			provider=provider,
+			plain=one_shot_runs_on_claude_plan(settings, model, provider),
 		)
 	except Exception:
 		frappe.log_error(
@@ -388,23 +460,29 @@ def autotitle_job(conversation_id: str, user: str) -> None:
 		)
 
 
-def maybe_autotitle(conversation_id: str, user: str, *, gateway_url, model, provider) -> None:
+def maybe_autotitle(
+	conversation_id: str, user: str, *, gateway_url, model, provider, plain: bool = False
+) -> None:
 	"""Generate + set a concise title for a still-unnamed conversation.
 
 	No-op when the conversation already has a title (renamed by the user or
 	already auto-titled) or when nothing but greetings has been sent yet.
 	Publishes a ``conversation:renamed`` event so the sidebar updates live.
+	``plain`` takes the title from the first real message instead of a model turn.
 	"""
 	title = frappe.db.get_value(CONV, conversation_id, "title")
 	if title and title != "New chat":
 		return  # user renamed it, or we already titled it
 
-	source = _opening_user_messages(conversation_id)
-	if not source:
-		return  # no user message yet
-
-	new_title = _generate_via_gateway(gateway_url, source, model=model, provider=provider)
-	# ONLY a real title from the model names the chat. SKIP / a generic greeting label / an empty
+	if plain:
+		new_title = plain_title(conversation_id)
+	else:
+		source = _opening_user_messages(conversation_id)
+		if not source:
+			return  # no user message yet
+		new_title = _generate_via_gateway(gateway_url, source, model=model, provider=provider)
+	# Off the Claude plan, ONLY a real title from the model names the chat (the plain path is the
+	# documented exception in the module docstring). SKIP / a generic greeting label / an empty
 	# result (a title-model failure) all leave the chat "New chat", retried on the next turn — so a
 	# greeting is NEVER titled, even during a title-model outage, and no deterministic fallback
 	# guesses one; a real chat simply gets its title once the model answers.

@@ -98,7 +98,7 @@ class TestHeldParties(FrappeTestCase):
 		self.assertEqual(held_parties.item_key(named), "name:Supplier:acme pvt ltd")
 		bare = held_parties.items_of("create_doc", {"doctype": "Address", "values": {"city": "X"}})[0]
 		self.assertTrue(held_parties.item_key(bare).startswith("args:"))
-		self.assertEqual(len(held_parties.items_of("create_docs", _batch_args())), 2)
+		self.assertEqual(len(held_parties.items_of("create_doc", _batch_args())), 2)
 		upd = held_parties.items_of("update_doc", {"doctype": "Supplier", "name": "S-1", "changes": {"x": 1}})
 		key = held_parties.item_key(upd[0])
 		self.assertTrue(key.startswith("doc:Supplier:S-1:"), key)  # + a hash of the changes

@@ -65,6 +65,8 @@ _DENIED_PREFIXES = (
 	# The Jarvis Admin's view of every user's macros. An admin's own assistant must
 	# not reach it: one call would read every user's prompts into the model's context.
 	"jarvis.chat.macros_admin_api.",
+	# The same for skills: one call would read every user's private skill text.
+	"jarvis.chat.skills_admin_api.",
 	# Skills, learned rules and app learning: what these say steers every later chat,
 	# and their reviewer screens read other users' text. The assistant has its own
 	# tools for skills (find_skills, get_skill, create_custom_skill); a person

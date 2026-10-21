@@ -8,11 +8,22 @@
 // means the phone bundle can't be grown by a change made for the desktop.
 // Voice is the exception — see transcribeAudio below.
 import { call } from "frappe-ui";
+import { HISTORY_PAGE_SIZE } from "@shared/lib/historyPaging.js";
 
 const CHAT = "jarvis.chat.api.";
 
 export const listConversations = () => call(CHAT + "list_conversations");
-export const getConversation = (conversation) => call(CHAT + "get_conversation", { conversation });
+// The newest page of the thread, or with {before} the page older than that cursor;
+// {refresh} names held older rows to send fresh and {after} is the newest seq held
+// (#715 F13, @shared/lib/historyPaging.js).
+export const getConversation = (conversation, { before, refresh, after } = {}) =>
+	call(CHAT + "get_conversation", {
+		conversation,
+		limit: HISTORY_PAGE_SIZE,
+		...(before ? { before } : {}),
+		...(after ? { after } : {}),
+		...(refresh && refresh.length ? { refresh: JSON.stringify(refresh) } : {}),
+	});
 export const archiveConversation = (conversation) =>
 	call(CHAT + "archive_conversation", { conversation });
 export const renameConversation = (conversation, title) =>

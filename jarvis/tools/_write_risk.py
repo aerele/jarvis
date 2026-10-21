@@ -257,7 +257,6 @@ _ALLOWABLE = {"sensitive": frozenset({"sensitive"}), **{g: frozenset({g}) for g 
 _TOOLS_WITH_TARGETS = frozenset(
 	{
 		"create_doc",
-		"create_docs",
 		"update_doc",
 		"delete_doc",
 		"submit_doc",
@@ -341,7 +340,7 @@ def _targets(tool: str, args) -> list[_Target]:
 	"""Every document a call names, with what it does to it."""
 	a = args if isinstance(args, dict) else {}
 	out: list[_Target] = []
-	if tool in ("create_doc", "create_docs"):
+	if tool == "create_doc":
 		if isinstance(a.get("docs"), list):
 			for d in a["docs"]:
 				if isinstance(d, dict):
@@ -375,9 +374,7 @@ def _targets(tool: str, args) -> list[_Target]:
 
 def _is_batch(tool: str, args) -> bool:
 	a = args if isinstance(args, dict) else {}
-	return tool == "create_docs" or any(
-		isinstance(a.get(k), list) and a[k] for k in ("docs", "updates", "names")
-	)
+	return any(isinstance(a.get(k), list) and a[k] for k in ("docs", "updates", "names"))
 
 
 def _filled(value) -> bool:

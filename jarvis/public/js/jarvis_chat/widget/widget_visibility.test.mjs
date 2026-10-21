@@ -42,3 +42,29 @@ test("shown when setup-complete is unknown (older boot payload)", () => {
 test("shown on a normal desk page once setup is complete", () => {
   assert.equal(shouldHideWidget(["List", "Sales Invoice"], true), false);
 });
+
+test("opt-in hides only users without the existing access verdict", () => {
+  for (const hasAccess of [false, undefined, null]) {
+    assert.equal(
+      shouldHideWidget(["List", "User"], true, hasAccess, true),
+      true
+    );
+  }
+  assert.equal(shouldHideWidget(["List", "User"], true, true, true), false);
+});
+
+test("disabled or missing option preserves unauthorized users' shortcut", () => {
+  for (const option of [false, undefined]) {
+    assert.equal(
+      shouldHideWidget(["List", "User"], true, false, option),
+      false
+    );
+  }
+});
+
+test("access never overrides existing route and setup hiding", () => {
+  for (const option of [false, true]) {
+    assert.equal(shouldHideWidget(["setup-wizard"], true, true, option), true);
+    assert.equal(shouldHideWidget(["List", "User"], false, true, option), true);
+  }
+});

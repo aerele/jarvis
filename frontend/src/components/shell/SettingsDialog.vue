@@ -126,6 +126,7 @@
 </template>
 
 <script setup>
+import { __ } from "@/lib/i18n";
 import { computed, defineAsyncComponent, inject, onMounted, onBeforeUnmount } from "vue";
 import { Dialog, FeatherIcon } from "frappe-ui";
 // Straight from reka-ui, the same primitives frappe-ui's Dialog uses
@@ -166,10 +167,6 @@ const AiModelsPane = defineAsyncComponent(() => import("@/components/settings/Ai
 const UsageAdminPane = defineAsyncComponent(() =>
 	import("@/components/settings/UsageAdminPane.vue")
 );
-// Every user's macros, for a Jarvis Admin: see, open read-only, stop a run.
-const MacrosAdminPane = defineAsyncComponent(() =>
-	import("@/components/settings/MacrosAdminPane.vue")
-);
 const BrandingPane = defineAsyncComponent(() => import("@/components/settings/BrandingPane.vue"));
 const PdfTemplatesPane = defineAsyncComponent(() =>
 	import("@/components/settings/PdfTemplatesPane.vue")
@@ -195,7 +192,11 @@ onBeforeUnmount(() => unwatchNotice());
 
 const KEPT_PANES = ["GeneralPane", "UsagePane"];
 
+const SharedChatsPane = defineAsyncComponent(() =>
+	import("@/components/settings/SharedChatsPane.vue")
+);
 const PANES = {
+	sharedchats: SharedChatsPane,
 	general: GeneralPane,
 	usage: UsagePane,
 	activity: ActivityPane,
@@ -205,7 +206,6 @@ const PANES = {
 	branding: BrandingPane,
 	pdftemplates: PdfTemplatesPane,
 	usageadmin: UsageAdminPane,
-	macroadmin: MacrosAdminPane,
 };
 
 // Rail labels live here; the header title and description each pane shows are
@@ -237,7 +237,7 @@ const NAV = [
 		gate: () => isAdmin,
 		items: [
 			{ key: "usageadmin", label: "User usage", icon: "users" },
-			{ key: "macroadmin", label: "Macros", icon: "layers" },
+			{ key: "sharedchats", label: __("Shared chats"), icon: "share-2" },
 		],
 	},
 ];

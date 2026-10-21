@@ -292,7 +292,7 @@ class TestSkillsPage(unittest.TestCase):
 	def test_default_visibility_and_envelope(self):
 		res = self._page()
 		self.assertEqual(res["total"], 26)  # 24 own + 2 shared-enabled
-		self.assertEqual(set(res.keys()), {"rows", "total", "has_more", "start", "page_length"})
+		self.assertEqual(set(res.keys()), {"rows", "total", "has_more", "start", "page_length", "notices"})
 
 	def test_pagination(self):
 		seen, start, total = [], 0, None

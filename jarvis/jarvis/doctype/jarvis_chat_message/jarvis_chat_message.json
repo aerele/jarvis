@@ -177,7 +177,7 @@
       "fieldname": "tool_call_id",
       "fieldtype": "Data",
       "label": "Tool Call ID",
-      "length": 128,
+      "length": 512,
       "search_index": 1,
       "no_copy": 1,
       "depends_on": "eval:doc.role=='tool'",

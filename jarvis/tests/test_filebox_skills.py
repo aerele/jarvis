@@ -86,7 +86,7 @@ def _denied():
 
 
 def same_slug(private_first: bool):
-	"""A peer's private copy (SM see-all shows it) and a reviewed Org row of one slug,
+	"""A peer's private copy (SM see-all once showed it) and a reviewed Org row of one slug,
 	inserted in either order (the query leaves their tie unordered). Returns the Org row."""
 	if private_first:
 		skill(OWNER, "same", creates=SI)
@@ -393,8 +393,9 @@ class TestEligibility(_Base):
 		self.assertFalse(self.eligible(row))  # ...but never automatic
 
 	def test_no_system_manager_see_all(self):
+		# Another user's private skill is not a System Manager's (jarvis-admin-v2#720).
 		row = skill(PEER, "sm-private")
-		self.assertTrue(user_can_use_skill(frappe.get_doc(SKILL, row.name), SM))
+		self.assertFalse(user_can_use_skill(frappe.get_doc(SKILL, row.name), SM))
 		self.assertFalse(self.eligible(row, dropper=SM))
 
 	def test_the_recorded_pin_is_eligible_but_still_needs_use_in_file_box(self):
@@ -1371,6 +1372,15 @@ class TestSalesInvoiceToPurchaseE2E(_Base):
 		values = {"company": E2E_CO, "supplier": E2E_SUPPLIER, "bill_no": invoice_no, "items": [line]}
 		made = self.call("create_doc", {"doctype": PI, "values": values}, conv)
 		self.assertTrue(made["ok"], made)
+		# The dropped file is attached to the draft the run created.
+		source_url = frappe.db.get_value(
+			"File", frappe.db.get_value(CONV, conv, "filebox_source_file"), "file_url"
+		)
+		attached = frappe.db.get_value(
+			"File", {"attached_to_doctype": PI, "attached_to_name": made["data"]["name"]}, "file_url"
+		)
+		self.assertEqual(attached, source_url)
+		self.assertTrue(made["data"]["attached_file"])
 		return made["data"]["name"]
 
 	def test_two_sales_invoices_become_two_draft_purchase_invoices(self):
@@ -1383,7 +1393,7 @@ class TestSalesInvoiceToPurchaseE2E(_Base):
 			self.assertEqual([(i.item_code, i.qty, i.rate) for i in pi.items], [(E2E_ITEM, qty, rate)])
 			row = self.ladder()[convs[no]]
 			self.assertEqual(row["status"], "draft_created")
-			self.assertIn(f"Draft {PI} {name} created", row["result"])
+			self.assertIn(f"Draft {PI} {name} created with the file attached", row["result"])
 		self.assertFalse(frappe.db.exists(SI, {"company": E2E_CO}))
 
 

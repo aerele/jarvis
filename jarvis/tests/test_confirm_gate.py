@@ -44,10 +44,21 @@ class TestUnifiedBrakeCovered(FrappeTestCase):
 	covered sets (a deliberate behaviour change from the old macro set, which used
 	to cover it)."""
 
-	def test_brake_is_the_five_always_ask_tools(self):
+	def test_brake_is_the_six_always_ask_tools(self):
+		# schedule_run: scheduling work to run later, unattended, is the user's call
+		# every time, never an armed macro's or an approved skill's.
 		self.assertEqual(
 			api._BRAKE,
-			frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill", "call_connector"}),
+			frozenset(
+				{
+					"delete_doc",
+					"cancel_doc",
+					"amend_doc",
+					"create_custom_skill",
+					"call_connector",
+					"schedule_run",
+				}
+			),
 		)
 
 	def test_covered_is_gated_minus_brake_unified_across_modes(self):
@@ -312,7 +323,7 @@ class TestDryRunOnParkInvariant(FrappeTestCase):
 	path (a real sandboxed dry-run) and the RESYNC path (_pending_preview,
 	which routes purely on _PREVIEWABLE membership) diverge - a reload/
 	reconnect would silently degrade a real dry-run card to a blind
-	described-intent one (see test_create_docs_resync_preview_is_dry_run_
+	described-intent one (see test_batch_create_resync_preview_is_dry_run_
 	not_described below for the concrete failure mode this guards against).
 	This asserts the invariant holds as a standing regression guard, since
 	nothing else in the module enforces it structurally."""
@@ -991,11 +1002,11 @@ class TestListPendingConfirmations(FrappeTestCase):
 
 
 class TestCreateDocsGate(FrappeTestCase):
-	def test_create_docs_parks_one_card_and_dry_runs_batch(self):
+	def test_a_batch_create_parks_one_card_and_dry_runs_the_batch(self):
 		patcher, captured = _spy_mint()
 		with patcher:
 			r = api._run_tool(
-				"create_docs",
+				"create_doc",
 				{
 					"docs": [
 						{"doctype": "ToDo", "values": {"description": "jarvis-gate-a"}},
@@ -1005,7 +1016,7 @@ class TestCreateDocsGate(FrappeTestCase):
 			)
 		self.assertTrue(r["ok"])
 		self.assertEqual(r["data"]["status"], "pending_confirmation")
-		self.assertEqual(r["data"]["tool"], "create_docs")
+		self.assertEqual(r["data"]["tool"], "create_doc")
 		# The dry-run preview lists both creates; nothing was committed.
 		would = r["data"]["preview"]["would"]
 		self.assertEqual(len(would["created"]), 2)
@@ -1014,18 +1025,22 @@ class TestCreateDocsGate(FrappeTestCase):
 		self.assertIsNotNone(pending_confirm.peek(captured["token"]))
 		self.assertNotIn(captured["token"], frappe.as_json(r))
 
-	def test_create_docs_is_gated_but_not_auto_applyable(self):
-		# Locked decision: masters are never created without the batch card, so
-		# create_docs never fast-paths under auto_apply / file_box.
-		self.assertIn("create_docs", api._GATED_WRITES)
-		self.assertNotIn("create_docs", api._AUTO_APPLYABLE)
+	def test_a_batch_create_is_gated_and_never_takes_the_auto_apply_fast_path(self):
+		# Locked decision: in an ordinary chat masters are never created without
+		# the batch card. A single create_doc may fast-path under auto_apply /
+		# file_box; its ``docs=[...]`` batch is a bulk call, which never does. (The
+		# uncarded modes run a batch like any other covered write.)
+		self.assertIn("create_doc", api._GATED_WRITES)
+		self.assertTrue(api._is_bulk_call({"docs": [{"doctype": "ToDo", "values": {}}]}))
+		self.assertFalse(api._is_bulk_call({"doctype": "ToDo", "values": {}}))
+		self.assertNotIn("create_docs", api._ACCEPTED_PARAMS, "the retired shim is not a tool")
 
-	def test_create_docs_bad_batch_bounces_at_park(self):
+	def test_a_bad_batch_create_bounces_at_park(self):
 		# A deterministic failure (bad link on the 2nd doc) returns an error to
 		# the model instead of parking a doomed card. (allocated_to not
 		# assigned_by; see test_bulk_tools._BAD_USER for why.)
 		r = api._run_tool(
-			"create_docs",
+			"create_doc",
 			{
 				"docs": [
 					{"doctype": "ToDo", "values": {"description": "jarvis-gate-ok"}},
@@ -1042,13 +1057,13 @@ class TestCreateDocsGate(FrappeTestCase):
 		self.assertFalse(r["ok"])
 		self.assertFalse(frappe.db.exists("ToDo", {"description": "jarvis-gate-ok"}))
 
-	def test_create_docs_resync_preview_is_dry_run_not_described(self):
+	def test_batch_create_resync_preview_is_dry_run_not_described(self):
 		# Regression: the LIVE park path (_run_tool) builds the batch preview
 		# via _DRY_RUN_ON_PARK's direct _run_preview call, so it always worked.
 		# But the RESYNC path (list_pending_confirmations, hit on every
 		# conversation load / socket reconnect) rebuilds the preview via
 		# api._pending_preview, which routes on _PREVIEWABLE membership alone.
-		# If create_docs is missing from _PREVIEWABLE, _pending_preview
+		# If create_doc is missing from _PREVIEWABLE, _pending_preview
 		# short-circuits to a described-intent dict with no ``would`` - the
 		# batch card renders blank after a reload and a human would confirm
 		# master creation blind.
@@ -1057,7 +1072,7 @@ class TestCreateDocsGate(FrappeTestCase):
 		patcher, captured = _spy_mint()
 		with patcher:
 			r = api._run_tool(
-				"create_docs",
+				"create_doc",
 				{
 					"docs": [
 						{"doctype": "ToDo", "values": {"description": "jarvis-resync-a"}},
@@ -1088,7 +1103,7 @@ class TestCreateDocsGate(FrappeTestCase):
 class TestBulkBatchCapAtPark(FrappeTestCase):
 	"""F16: a bulk gated write over the shared max (20) bounces at PARK with a
 	split-and-sequence instruction - before any card is minted - so an over-size
-	batch never reaches a doomed confirmation card. create/update/create_docs
+	batch never reaches a doomed confirmation card. create/update batches
 	already bounced via their park-time dry-run; this also closes the
 	consequential bulk writes (submit/cancel/delete/amend/workflow) which take a
 	described preview with NO dry-run and would otherwise only fail at execution."""

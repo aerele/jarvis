@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 /**
  * The bug: a reply produced TWO "Reply ready" toasts.
@@ -13,6 +13,10 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
  */
 
 const store = {
+	startConversationActivity: vi.fn(),
+	stopConversationActivity: vi.fn(),
+	refreshConversationActivity: vi.fn(),
+	scheduleConversationActivityRefresh: vi.fn(),
 	markUnread: vi.fn(),
 	applyRemoteNew: vi.fn(),
 	currentConvId: null,
@@ -44,14 +48,17 @@ const { attachGlobalNotifier, useToasts, dismissToast } = await import("./global
 
 /** A socket that hands every emitted payload to the attached listener. */
 function fakeSocket() {
-	const handlers = [];
+	const handlers = new Map();
+	const emit = (event, payload) => (handlers.get(event) || []).forEach((fn) => fn(payload));
 	return {
-		on: (_evt, fn) => handlers.push(fn),
-		off: (_evt, fn) => {
-			const i = handlers.indexOf(fn);
-			if (i !== -1) handlers.splice(i, 1);
-		},
-		emit: (payload) => handlers.forEach((fn) => fn(payload)),
+		on: (event, fn) => handlers.set(event, [...(handlers.get(event) || []), fn]),
+		off: (event, fn) =>
+			handlers.set(
+				event,
+				(handlers.get(event) || []).filter((handler) => handler !== fn)
+			),
+		emit: (payload) => emit("jarvis:event", payload),
+		connect: () => emit("connect"),
 	};
 }
 
@@ -93,6 +100,8 @@ beforeEach(() => {
 	socket = fakeSocket();
 	detach = attachGlobalNotifier({ socket, router });
 });
+
+afterEach(() => detach());
 
 describe("a re-published terminal signals once", () => {
 	it("toasts ONCE for the same terminal delivered twice", () => {
@@ -388,5 +397,117 @@ describe("import:finished marks the sidebar unread, never a toast", () => {
 			router.currentRoute.value = savedRoute;
 			store.currentConvId = null;
 		}
+	});
+});
+
+// A background export finishing off-screen: the sidebar unread dot, nothing louder. Only an
+// outcome the user is waiting for counts (ready, too large, too slow, failed). A queued retry,
+// a pause (it restarts by itself), the user's own cancel, a quiet expiry and the card's first
+// announcement ("initial") stay silent.
+describe("export:changed marks the sidebar unread, never a toast", () => {
+	const exported = (over = {}) => ({
+		kind: "export:changed",
+		conversation_id: "conv-a",
+		export_job: "job-1",
+		message_id: "msg-1",
+		status: "ready",
+		title: "Suppliers",
+		initial: false,
+		...over,
+	});
+
+	it("marks an off-screen conversation unread for each outcome that matters", () => {
+		for (const status of ["ready", "too large", "too slow", "failed"]) {
+			store.markUnread.mockClear();
+			socket.emit(exported({ status }));
+			expect(store.markUnread, status).toHaveBeenCalledWith("conv-a");
+		}
+		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it("stays quiet for states that are not an outcome", () => {
+		for (const status of ["queued", "running", "paused", "cancelled", "expired"]) {
+			socket.emit(exported({ status }));
+		}
+		socket.emit(exported({ initial: true }));
+		socket.emit(exported({ conversation_id: undefined }));
+		expect(store.markUnread).not.toHaveBeenCalled();
+	});
+
+	it("never raises a toast or a browser notification, even while the tab is hidden", () => {
+		setHidden(true);
+		socket.emit(exported());
+		expect(store.markUnread).toHaveBeenCalledWith("conv-a");
+		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it("leaves the on-screen conversation to ChatView", () => {
+		const savedRoute = router.currentRoute.value;
+		store.currentConvId = "conv-a";
+		router.currentRoute.value = {
+			name: "Chat",
+			params: { id: "conv-a" },
+			meta: { chat: true },
+		};
+		try {
+			socket.emit(exported());
+			expect(store.markUnread).not.toHaveBeenCalled();
+		} finally {
+			router.currentRoute.value = savedRoute;
+			store.currentConvId = null;
+		}
+	});
+});
+
+describe("authoritative activity reconciliation (#591)", () => {
+	beforeEach(() => {
+		detach();
+		vi.useFakeTimers();
+		store.refreshConversationActivity.mockClear();
+		store.startConversationActivity.mockClear();
+		detach = attachGlobalNotifier({ socket, router });
+	});
+	afterEach(() => {
+		detach();
+		vi.useRealTimers();
+	});
+	it("starts and refreshes activity on attach", () => {
+		expect(store.startConversationActivity).toHaveBeenCalledOnce();
+		expect(store.refreshConversationActivity).toHaveBeenCalledOnce();
+	});
+	it("invalidates even a new or legacy conversation event without deriving activity", () => {
+		socket.emit({ kind: "turn:cancelled", conversation_id: "conv-b", run_id: "queued" });
+		socket.emit({ kind: "future:activity", conversation_id: "conv-b" });
+		expect(store.scheduleConversationActivityRefresh).toHaveBeenCalledTimes(2);
+	});
+	it("late lossy, legacy and seq-less events only request server reconciliation", () => {
+		socket.emit(terminal());
+		socket.emit(terminal({ kind: "run:step", event_seq: 14 }));
+		socket.emit(terminal({ kind: "run:start", event_seq: undefined }));
+		socket.emit({ kind: "tool:start", conversation_id: "conv-a", run_id: "run-1" });
+		expect(store.scheduleConversationActivityRefresh).toHaveBeenCalledTimes(4);
+		expect(useToasts().value).toHaveLength(1);
+	});
+	it("asks the server periodically through more than three minutes of silence", () => {
+		vi.advanceTimersByTime(4 * 60 * 1000);
+		expect(store.refreshConversationActivity).toHaveBeenCalledTimes(9);
+	});
+	it("reconciles on reconnect and visibility return; hidden polling stays quiet", () => {
+		store.refreshConversationActivity.mockClear();
+		setHidden(true);
+		vi.advanceTimersByTime(60 * 1000);
+		expect(store.refreshConversationActivity).not.toHaveBeenCalled();
+		setHidden(false);
+		document.dispatchEvent(new Event("visibilitychange"));
+		expect(store.refreshConversationActivity).toHaveBeenCalledOnce();
+		socket.connect();
+		expect(store.refreshConversationActivity).toHaveBeenCalledTimes(2);
+	});
+	it("detach stops activity and cancels the interval", () => {
+		detach();
+		store.refreshConversationActivity.mockClear();
+		vi.advanceTimersByTime(4 * 60 * 1000);
+		expect(store.stopConversationActivity).toHaveBeenCalled();
+		expect(store.refreshConversationActivity).not.toHaveBeenCalled();
 	});
 });

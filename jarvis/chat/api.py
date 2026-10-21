@@ -208,7 +208,7 @@ def list_tools() -> list[str]:
 
 
 @frappe.whitelist()
-def list_conversations() -> list[dict]:
+def list_conversations(refresh: bool = False) -> list[dict]:
 	"""Return active, non-empty conversations owned by the current user, newest
 	first.
 
@@ -216,6 +216,8 @@ def list_conversations() -> list[dict]:
 	hidden so a stray draft never lingers in the sidebar; it surfaces the moment
 	it gets its first message (the send path reloads this list). ``message_count``
 	is still returned for the UI, and is always >= 1 given the EXISTS filter.
+	``activity`` carries unfinished run/message identities. ``refresh`` is an
+	observational sidebar reconciliation: it never queues billed prewarming.
 	``create_or_focus_empty`` queries the DB directly, so it still finds and
 	reuses the hidden empty row.
 	"""
@@ -229,11 +231,14 @@ def list_conversations() -> list[dict]:
 	# "the prefix is already hot" guard, not by anything here.
 	from jarvis.chat import prewarm
 
-	prewarm.enqueue_warm_if_due()
+	if not frappe.utils.cint(refresh):
+		prewarm.enqueue_warm_if_due()
 	user = frappe.session.user
 	rows = frappe.db.sql(
 		"""
-		SELECT c.name, c.title, c.last_active_at, c.starred,
+		SELECT c.name, c.title, c.last_active_at, c.starred, c.file_box,
+		       (SELECT COUNT(*) FROM `tabJarvis Conversation Share` s
+		        WHERE s.conversation = c.name) AS shared_count,
 		       (SELECT COUNT(*) FROM `tabJarvis Chat Message` m
 		        WHERE m.conversation = c.name) AS message_count
 		FROM `tabJarvis Conversation` c
@@ -248,6 +253,48 @@ def list_conversations() -> list[dict]:
 		(user,),
 		as_dict=True,
 	)
+	# #591: sidebar status is a server fact, including silent tools and parked
+	# recovery. Batch by the already owner-filtered list; never probe per row.
+	from jarvis.chat.turn_state import NONTERMINAL_STATES
+
+	by_conversation = {row.name: row for row in rows}
+	for row in rows:
+		row["activity"] = []
+	if rows:
+		turns = frappe.db.sql(
+			"""SELECT conversation, name AS run_id, assistant_message AS message_id, state
+			FROM `tabJarvis Chat Turn`
+			WHERE conversation IN %(conversations)s AND state IN %(states)s
+			ORDER BY name""",
+			{"conversations": tuple(by_conversation), "states": NONTERMINAL_STATES},
+			as_dict=True,
+		)
+		for turn in turns:
+			by_conversation[turn.conversation]["activity"].append(
+				{"run_id": turn.run_id, "message_id": turn.message_id, "state": turn.state}
+			)
+		# Pure legacy work has no Turn/run id. A terminal owning Turn must also
+		# exclude a stale streaming flag. Keep older recovering messages even
+		# when a newer reply has finished; recovery unlocks the composer.
+		legacy = frappe.db.sql(
+			"""SELECT m.conversation, m.name AS message_id, m.recovering
+			FROM `tabJarvis Chat Message` m
+			WHERE m.conversation IN %(conversations)s AND m.role = 'assistant'
+			  AND m.streaming = 1 AND COALESCE(m.stopped, 0) = 0
+			  AND NOT EXISTS (SELECT 1 FROM `tabJarvis Chat Turn` t
+			      WHERE t.conversation = m.conversation AND t.assistant_message = m.name)
+			ORDER BY m.name""",
+			{"conversations": tuple(by_conversation)},
+			as_dict=True,
+		)
+		for message in legacy:
+			by_conversation[message.conversation]["activity"].append(
+				{
+					"run_id": None,
+					"message_id": message.message_id,
+					"state": "recovering" if message.recovering else "streaming",
+				}
+			)
 	return rows
 
 
@@ -675,75 +722,97 @@ def create_or_focus_empty(origin_page: str = "") -> str:
 
 
 @frappe.whitelist()
-def get_conversation(conversation: str) -> dict:
-	"""Return conversation metadata + ordered messages.
+def get_conversation(
+	conversation: str, limit: int = 0, before: int = 0, refresh: str | None = None, after: int = 0
+) -> dict:
+	"""Return conversation metadata + ordered messages: the whole visible thread, or
+	with ``limit`` one page of it (contract on ``_history_page``, #715 F13).
 
 	Raises frappe.DoesNotExistError if the conversation does not exist, or
 	frappe.PermissionError if the caller is not the owner.
 	"""
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
+	return _conversation_history(doc, limit, before, refresh, after)
 
+
+def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
+	"""Shape history after the caller has established its own read authority."""
+	conversation = doc.name
+	paged = frappe.utils.cint(limit) > 0
+
+	fields = [
+		"name",
+		"seq",
+		"role",
+		"content",
+		"streaming",
+		"error",
+		"recovering",
+		"stopped",
+		"tool_name",
+		"tool_args",
+		"tool_result",
+		"tool_status",
+		"action_outcome",
+		# Action-card overhaul (PR 1): a parked gated write rides a durable pending
+		# row (tool_status="pending") carrying the card + token + expiry, so a reload
+		# always shows a confirmable card - independent of Redis and the best-effort
+		# push. Expiry is computed CLIENT-side from expires_at (no server peek), so a
+		# Redis blip can never mislabel a live card as expired.
+		"tool_call_id",
+		"tool_call_ids",
+		"pending_card",
+		"expires_at",
+		"canvas",
+		# The live steps the reply showed, saved at settlement: [{text, at}].
+		"steps",
+		"reply_duration_ms",
+		# jarvis#560: which model actually produced each reply. The SPA renders it
+		# on the bubble only when it differs from what the header pill implies, so
+		# a mid-thread switch or a silent failover is visible without adding noise
+		# to a steady thread.
+		"model",
+		"provider",
+		# What the row is about. The SPA reads it for one thing: an assistant row
+		# whose ref_doctype is "Jarvis Macro Run" is the engine's closing message
+		# (macros._post_closing_message), not a reply, so it must not take the
+		# Retry control off the failed reply above it (lib/retryTarget.js).
+		"ref_doctype",
+		"ref_name",
+		"creation",
+		"modified",
+	]
 	# hidden = internal system rows (e.g. the post-apply continuation prompt):
 	# they feed the agent transcript but never render in the chat UI, so this
 	# filter covers both first load and every resync-after-gap reload.
-	messages = frappe.get_all(
-		MSG,
-		filters={"conversation": conversation, "hidden": 0},
-		fields=[
-			"name",
-			"seq",
-			"role",
-			"content",
-			"streaming",
-			"error",
-			"recovering",
-			"stopped",
-			"tool_name",
-			"tool_args",
-			"tool_result",
-			"tool_status",
-			"action_outcome",
-			# Action-card overhaul (PR 1): a parked gated write rides a durable pending
-			# row (tool_status="pending") carrying the card + token + expiry, so a reload
-			# always shows a confirmable card - independent of Redis and the best-effort
-			# push. Expiry is computed CLIENT-side from expires_at (no server peek), so a
-			# Redis blip can never mislabel a live card as expired.
-			"tool_call_id",
-			"tool_call_ids",
-			"pending_card",
-			"expires_at",
-			"canvas",
-			# The live steps the reply showed, saved at settlement: [{text, at}].
-			"steps",
-			"reply_duration_ms",
-			# jarvis#560: which model actually produced each reply. The SPA renders it
-			# on the bubble only when it differs from what the header pill implies, so
-			# a mid-thread switch or a silent failover is visible without adding noise
-			# to a steady thread.
-			"model",
-			"provider",
-			# What the row is about. The SPA reads it for one thing: an assistant row
-			# whose ref_doctype is "Jarvis Macro Run" is the engine's closing message
-			# (macros._post_closing_message), not a reply, so it must not take the
-			# Retry control off the failed reply above it (lib/retryTarget.js).
-			"ref_doctype",
-			"ref_name",
-			"creation",
-			"modified",
-		],
-		order_by="seq asc",
-	)
+	# Callers establish read authority before entering this private helper.
+	# Owners receive the established response; sharing must additionally apply
+	# the recipient allowlist, scrubber and file rewrite before returning it.
+	if paged:
+		page = _history_page(conversation, fields, limit, before, refresh, after)
+	else:
+		page = {
+			"messages": frappe.get_all(
+				MSG, filters={"conversation": conversation, "hidden": 0}, fields=fields, order_by="seq asc"
+			)
+		}
+	messages = page["messages"]
+	# Rows a page carries beside the thread (older pending cards, refreshed rows)
+	# are shaped exactly like the thread's own.
+	rows = messages + page.get("older_pending", []) + page.get("refreshed", [])
 	# A pending-action card renders from its row's card (the sealed record's own copy).
-	_pending_action_cards(messages)
-	_pending_recency(conversation, messages)
+	_pending_action_cards(rows)
+	_pending_recency(conversation, rows)
 	# T2 (live-turn-steps, R3): a still-streaming row's stored content keeps its
 	# step text by design (the RAW streaming mirror) - strip it and carry the
 	# run identity so a fresh tab opened mid-turn renders like a live one and
 	# can fence its own realtime events instead of starting from a null run.
 	_live_turn_steps(messages)
+	if paged:
+		_compact_tool_results(rows)
 	# canvas + steps + pending_card are stored as JSON strings; hand the UI real objects (or None).
-	for m in messages:
+	for m in rows:
 		if m.get("steps"):
 			try:
 				m["steps"] = frappe.parse_json(m["steps"])
@@ -778,8 +847,267 @@ def get_conversation(conversation: str) -> dict:
 			"file_box": frappe.utils.cint(doc.get("file_box")),
 			"last_active_at": doc.last_active_at,
 		},
-		"messages": messages,
+		**page,
 	}
+
+
+# History paging (#715 F13): the open chat reads its newest page and older pages as
+# the reader scrolls up, instead of the whole thread on every open and resync.
+HISTORY_PAGE_MAX = 200
+# How far a page may widen past ``limit`` to reach the start of its oldest turn. A
+# turn's reply row, live run state and tool rows (report receipts bind to the reply)
+# then load together; only a turn longer than this is cut at the row count.
+HISTORY_TURN_WIDEN_MAX = 200
+# Most stale rows one call refreshes (the client's older pending cards).
+HISTORY_REFRESH_MAX = 50
+# Most older pending cards one newest page carries (see _older_pending).
+HISTORY_OLDER_PENDING_MAX = 20
+# Earlier prompts a newest page carries for Up-arrow recall (see _recent_prompts).
+HISTORY_RECENT_PROMPTS = 50
+# A tool result longer than this rides a page compact; get_tool_detail has it whole.
+TOOL_RESULT_INLINE_MAX = 2048
+# What the chat UIs read off a compact tool result (lib/reportScope.js,
+# lib/docRefs.js, actionSummary.toolFailureCopy): everything else waits for
+# get_tool_detail, which the Activity view calls when a tool row is expanded.
+_COMPACT_RESULT_KEYS = ("ok", "error")
+_COMPACT_DATA_KEYS = ("doctype", "name", "report_scope", "prepared_report", "status", "as_of", "row_note")
+
+
+def _history_page(conversation: str, fields: list, limit, before, refresh, after=0) -> dict:
+	"""One page of the visible thread, oldest first, for ``get_conversation(limit=...)``.
+
+	The page holds the ``limit`` newest visible rows older than ``before`` (or the
+	newest overall), widened back to the user row that opens the oldest turn on it so
+	a reply, its run state and its tool rows never straddle two pages. The widening
+	stops after ``HISTORY_TURN_WIDEN_MAX`` more rows; a longer turn is cut at the count.
+
+	``paging.start`` is the page's lower ``seq`` bound (None when it reaches the
+	first row) and ``paging.before`` the cursor for the next older page, which exists
+	when ``paging.has_more``; ``paging.older_counts`` counts the shown rows below it. Rows that share a seq always share a page (``>=`` here,
+	``<`` on the next call), so none is skipped.
+
+	A resync passes ``after``, the newest seq the client already holds. When every
+	row newer than that fits within the widening, the newest page reaches back to
+	it, so the older pages on screen join this one however many turns arrived
+	through realtime events alone (they carry no seq); otherwise the client starts
+	over from this page.
+
+	Only the newest page (no ``before``) carries ``older_pending``: the still-pending
+	action rows older than it, so a parked card shows however little is loaded, and
+	``recent_prompts``: the user messages older than it, for Up-arrow recall.
+	``refresh`` is a JSON list of row names the client holds from older pages (its
+	pending cards, which can resolve while it is not looking); ``refreshed`` is their
+	current state, and a name missing from it was deleted or hidden.
+	"""
+	limit = max(1, min(frappe.utils.cint(limit), HISTORY_PAGE_MAX))
+	before = frappe.utils.cint(before)
+	after = frappe.utils.cint(after) if before <= 0 else 0
+	base = [["conversation", "=", conversation], ["hidden", "=", 0]]
+	if before > 0:
+		base.append(["seq", "<", before])
+	# The cut, from a two-column read: the page plus room to widen to its turn start.
+	widen = HISTORY_TURN_WIDEN_MAX
+	heads = frappe.get_all(
+		MSG, filters=base, fields=["seq", "role"], order_by="seq desc", limit=limit + widen + 1
+	)
+	start, has_more = None, False
+	if len(heads) > limit:
+		cut = next(
+			(i for i in range(limit - 1, min(len(heads), limit + widen)) if heads[i].role == "user"),
+			limit - 1,
+		)
+		start = heads[cut].seq
+		# Join the rows the client holds: every row newer than `after` is among the
+		# heads when the oldest head is at or below it, so the reach stays bounded.
+		if after > 0 and start is not None and start > after and (heads[-1].seq or 0) <= after:
+			start = after
+	if start is not None:
+		# A full heads read may stop short of older rows that exist.
+		truncated = len(heads) > limit + widen and (heads[-1].seq or 0) >= start
+		has_more = truncated or any((h.seq or 0) < start for h in heads)
+	page_filters = [*base, ["seq", ">=", start]] if start is not None else base
+	messages = frappe.get_all(MSG, filters=page_filters, fields=fields, order_by="seq asc")
+	older_counts = _older_counts(conversation, start) if has_more else None
+	newest_page = start is not None and before <= 0
+	older_pending = _older_pending(conversation, fields, start) if newest_page else []
+	recent_prompts = _recent_prompts(conversation, start) if newest_page else []
+	on_page = {m.name for m in messages}
+	names = [n for n in _refresh_names(refresh) if n not in on_page]
+	refreshed = (
+		frappe.get_all(
+			MSG,
+			filters={"conversation": conversation, "hidden": 0, "name": ["in", names]},
+			fields=fields,
+			order_by="seq asc",
+		)
+		if names
+		else []
+	)
+	return {
+		"messages": messages,
+		"paging": {
+			"limit": limit,
+			"start": start,
+			"before": start if has_more else None,
+			"has_more": has_more,
+			"older_counts": older_counts or {"user": 0, "assistant": 0, "receipt": 0},
+		},
+		"older_pending": older_pending,
+		"refreshed": refreshed,
+		"recent_prompts": recent_prompts,
+	}
+
+
+def _older_counts(conversation: str, start: int) -> dict:
+	"""How many rows the chat shows sit below the page (seq < ``start``): user and
+	assistant messages and receipts (tool rows with an ``action_outcome``). The chat
+	header and the usage pane add them to the loaded rows, so their totals cover the
+	whole thread while only some pages are loaded."""
+	m = frappe.qb.DocType(MSG)
+	rows = (
+		frappe.qb.from_(m)
+		.select(m.role, Count("*").as_("n"))
+		.where(m.conversation == conversation)
+		.where(m.hidden == 0)
+		.where(m.seq < start)
+		.where(
+			m.role.isin(["user", "assistant"]) | ((m.role == "tool") & (IfNull(m.action_outcome, "") != ""))
+		)
+		.groupby(m.role)
+		.run(as_dict=True)
+	)
+	n = {r.role: frappe.utils.cint(r.n) for r in rows}
+	return {"user": n.get("user", 0), "assistant": n.get("assistant", 0), "receipt": n.get("tool", 0)}
+
+
+def _recent_prompts(conversation: str, start: int) -> list:
+	"""The newest ``HISTORY_RECENT_PROMPTS`` visible user messages older than the page
+	(which starts at seq ``start``), oldest first, as {name, seq, role, content}. The
+	composer's Up-arrow recall reads them with the page's own user rows, so a long
+	chat's earlier prompts stay reachable without loading their pages."""
+	rows = frappe.get_all(
+		MSG,
+		filters=[
+			["conversation", "=", conversation],
+			["hidden", "=", 0],
+			["role", "=", "user"],
+			["seq", "<", start],
+			["content", "is", "set"],
+		],
+		fields=["name", "seq", "role", "content"],
+		order_by="seq desc",
+		limit=HISTORY_RECENT_PROMPTS,
+	)
+	return rows[::-1]
+
+
+def _older_pending(conversation: str, fields: list, start: int) -> list:
+	"""The still-live pending cards older than the newest page (which starts at seq
+	``start``), oldest first.
+
+	Every newest-page read ships these rows whole, card included, and that read runs
+	on every open and resync, so the set is bounded: an expired card (``expires_at``
+	past) can no longer be confirmed and is left out, and only the newest
+	``HISTORY_OLDER_PENDING_MAX`` ride along. A card left out still shows when its own
+	page loads, and the clients' list_pending backstop surfaces any live one.
+	"""
+	m = frappe.qb.DocType(MSG)
+	rows = (
+		frappe.qb.from_(m)
+		.select(*(m[f] for f in fields))
+		.where(m.conversation == conversation)
+		.where(m.hidden == 0)
+		.where(m.seq < start)
+		.where(m.role == "tool")
+		.where(m.tool_status == "pending")
+		.where(m.expires_at.isnull() | (m.expires_at > frappe.utils.now_datetime()))
+		.orderby(m.seq, order=Order.desc)
+		.limit(HISTORY_OLDER_PENDING_MAX)
+		.run(as_dict=True)
+	)
+	return rows[::-1]
+
+
+def _refresh_names(refresh) -> list:
+	"""The row names a page call asked to refresh: strings only, capped."""
+	if not refresh:
+		return []
+	try:
+		names = frappe.parse_json(refresh) if isinstance(refresh, str) else refresh
+	except Exception:
+		return []
+	if not isinstance(names, list):
+		return []
+	return [n for n in names if isinstance(n, str) and n][:HISTORY_REFRESH_MAX]
+
+
+def _compact_tool_results(rows: list) -> None:
+	"""Swap each large tool result on a page for the part the chat UIs read, and mark
+	the row ``tool_result_compact`` so the Activity view fetches the rest on expand.
+
+	A receipt (``action_outcome``) and a pending card keep their result whole: they
+	render inline from it. Tool arguments always stay whole (they label the row)."""
+	for m in rows:
+		raw = m.get("tool_result")
+		if m.get("role") != "tool" or m.get("action_outcome") or m.get("tool_status") == "pending":
+			continue
+		if not isinstance(raw, str) or len(raw) <= TOOL_RESULT_INLINE_MAX:
+			continue
+		m["tool_result"] = json.dumps(_tool_result_summary(raw), separators=(",", ":"), default=str)
+		m["tool_result_compact"] = 1
+
+
+def _tool_result_summary(raw: str) -> dict:
+	"""The compact form of one stored tool result: ``ok``, ``error`` and the report
+	receipt fields whole, row lists reduced to the {name, doctype} the chat links."""
+	try:
+		value = json.loads(raw)
+	except ValueError:
+		return {}
+	if not isinstance(value, dict):
+		return {}
+	out = {k: value[k] for k in _COMPACT_RESULT_KEYS if k in value}
+	data = value.get("data")
+	if isinstance(data, list):
+		out["data"] = _doc_refs(data)
+	elif isinstance(data, dict):
+		kept = {k: data[k] for k in _COMPACT_DATA_KEYS if k in data}
+		if isinstance(data.get("rows"), list):
+			kept["rows"] = _doc_refs(data["rows"])
+		# The report receipt only checks that rows came back, never reads them.
+		if isinstance(data.get("result"), list):
+			kept["result"] = []
+		out["data"] = kept
+	return out
+
+
+def _doc_refs(rows: list) -> list:
+	"""The {name, doctype} of each record row, which is all lib/docRefs.js reads."""
+	refs = []
+	for row in rows:
+		if isinstance(row, dict) and isinstance(row.get("name"), str):
+			ref = {"name": row["name"]}
+			if row.get("doctype"):
+				ref["doctype"] = row["doctype"]
+			refs.append(ref)
+	return refs
+
+
+@frappe.whitelist()
+def get_tool_detail(message: str) -> dict:
+	"""The whole input and output of one tool row a history page sent compact
+	(``tool_result_compact``). Gated like ``get_conversation``: the caller must own
+	the row's conversation, and a hidden row belongs to no visible transcript."""
+	require_jarvis_access()
+	from frappe import _ as _t
+
+	row = frappe.db.get_value(
+		MSG, message, ["conversation", "role", "hidden", "tool_args", "tool_result"], as_dict=True
+	)
+	if not row or row.role != "tool" or frappe.utils.cint(row.hidden):
+		frappe.throw(_t("message not found"), frappe.DoesNotExistError)
+	_get_owned_conversation(row.conversation)  # non-owner: PermissionError
+	return {"name": message, "tool_args": row.tool_args, "tool_result": row.tool_result}
 
 
 def _pending_action_cards(messages: list) -> None:
@@ -845,6 +1173,7 @@ def _live_turn_steps(messages: list) -> None:
 		return
 	from jarvis.chat.pump import _read_run_step_lines, _read_run_steps
 	from jarvis.chat.steps import display_line, remove_steps
+	from jarvis.chat.turn_state import NONTERMINAL_STATES
 
 	t = frappe.qb.DocType(TURN)
 	turns = (
@@ -855,9 +1184,21 @@ def _live_turn_steps(messages: list) -> None:
 	)
 	by_message = {row.assistant_message: row for row in turns}
 	for m in messages:
+		if not m.get("streaming"):
+			continue
 		turn = by_message.get(m["name"])
 		if turn is None:
+			# #591: pure legacy recovery/tools have no Turn watermark. Return
+			# the same durable liveness fact as the sidebar, without an age guess.
+			m["activity_state"] = (
+				None if m.get("stopped") else "recovering" if m.get("recovering") else "streaming"
+			)
 			continue
+		m["activity_state"] = (
+			turn.state
+			if turn.state in NONTERMINAL_STATES and turn.state not in ("terminal_observed", "finalizing")
+			else None
+		)
 		steps = _read_run_steps(turn.name)
 		m["content"] = remove_steps(m.get("content") or "", steps)
 		# The raw cache is unredacted (it must match the raw stream above), so the list
@@ -2113,6 +2454,11 @@ def send_message(
 	# A typed "no" (or a "yes" that bound nothing) is NOT consumed: it goes on as an
 	# ordinary send. R0 only snapshots here; nothing is written until the user row
 	# commits (R1 below), so every gate between them can still refuse cleanly.
+	# ``background`` is a server-only argument, like ``origin``: only a send that carries a
+	# server-set origin (File Box, an approval resume) may be unattended. A browser that
+	# passes it gets an ordinary typed send, so it cannot pick the longer background line
+	# or its 4-hour wait (#1567).
+	background = 1 if (int(background or 0) and frappe.flags.get("jarvis_message_origin")) else 0
 	_typed_snap = None
 	if _typed_approval_eligible(_delegated, atts, background):
 		_typed = _typed_confirmation(user, conversation, message, approval_tokens)
@@ -2140,7 +2486,10 @@ def send_message(
 	if admission.turn_machine_enabled():
 		# A held File Box resume continues an already-decided approval: it queues,
 		# never bounces on overload (frappe.flags.jarvis_resume_exempt, server-set).
-		if admission.shard_overloaded(conversation) and not frappe.flags.get("jarvis_resume_exempt"):
+		# A background send checks its own waiting line, as accept_or_queue does (#1567).
+		if admission.shard_overloaded(conversation, background=bool(background)) and not frappe.flags.get(
+			"jarvis_resume_exempt"
+		):
 			return {"ok": False, "reason": _("The site is busy. Please try again in a moment.")}
 		if _rej := _compacting_reject(conversation):
 			return _rej
@@ -2385,6 +2734,10 @@ def send_message(
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the job before enqueue
 
 	# R1: the typed reply acts only now that the user row is committed.
+	if not _delegated and not int(background or 0):
+		from jarvis.telemetry import record_export_intent
+
+		record_export_intent(message)
 	_typed_out = _apply_typed_reply(conversation, _typed_snap)
 
 	# Upfront request-scoped "confirm all" (design Layer B): a compound message that
@@ -2609,7 +2962,7 @@ def _api_key_models() -> dict[str, list[dict]]:
 	return out
 
 
-def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
+def _catalog_models_for_pool(settings, *, routable_only: bool = False) -> dict[str, list[dict]]:
 	"""Provider id -> catalog models the chat picker may offer BEYOND the exact ids
 	saved in the pool, for the providers this tenant has ALREADY configured.
 
@@ -2649,6 +3002,13 @@ def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 	it in pool_serialize, and keep this in step with the fleet render's
 	``any_model``. Feeds BOTH the picker (``catalog_models``) and the pin
 	validation (``_allowed_pin_models``): if it is offered, it is pinnable.
+
+	``routable_only`` (the picker, jarvis#1999): in a POOL only the agent's native
+	Claude plan serves an id the pool spec never named (fleet binds it ``anthropic/*``).
+	Every other leg routes by the saved ids alone: ``_resolve_model_and_provider``
+	drops an unsaved pin to the pool head, and Bifrost answers an unknown id with the
+	pool's own model. So the picker offers only the Claude-plan extras there. Pin
+	validation keeps the full set, so a chat already pinned to such a model still sends.
 	"""
 	from jarvis import admin_client
 	from jarvis.jarvis.pool_serialize import (
@@ -2703,10 +3063,23 @@ def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 			seen.add(mid)
 			bucket.append({"model": mid, "label": m.get("label") or mid})
 
+	pool_routes_extras_only_to_claude = False
+	if routable_only:
+		from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription
+
+		pool_routes_extras_only_to_claude = compute_pool_mode(settings)
+		claude_plan = has_native_claude_subscription(settings)
 	for provider in admin_client.get_model_catalog() or []:
 		models = provider.get("models") or []
 		pid = (provider.get("catalog_id") or provider.get("provider_id") or "").strip()
-		if pid and pid in wanted_api:
+		if pool_routes_extras_only_to_claude:
+			upstream = agent_provider_for(provider.get("subscription_label") or provider.get("label") or "")
+			if not (claude_plan and "anthropic" in {pid, upstream}):
+				continue
+			wanted_api_here = set()  # an Anthropic api-key extra would route to the plan, not the key
+		else:
+			wanted_api_here = wanted_api
+		if pid and pid in wanted_api_here:
 			_add(pid, [m for m in models if m.get("tier") == "api_key"])
 		if wanted_sub:
 			sub_rows = [m for m in models if m.get("tier") == "subscription"]
@@ -2871,7 +3244,7 @@ def get_chat_ui_settings() -> dict:
 		# Catalog models the customer may switch to IN CHAT without re-saving
 		# Settings, keyed by the same provider id the ``pool_models`` rows carry.
 		# See _catalog_models_for_pool.
-		"catalog_models": _catalog_models_for_pool(settings),
+		"catalog_models": _catalog_models_for_pool(settings, routable_only=True),
 		# Effort levels, minus the empty "auto" entry the UI renders separately.
 		# Empty when no route this tenant has can think: the clients then hide the
 		# effort control (see turn_handler.offered_thinking_levels).
@@ -3706,12 +4079,24 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
+	if run_id and _stop_is_late(conversation, run_id):
+		return {"ok": False, "reason": _("That reply has already finished, so nothing was stopped.")}
+	# A reply still queued for a slot has nothing with the agent to abort, so Stop
+	# cancels its turn, the same cancel as the queued chip's. Before this, Stop said
+	# "Stopped." and the reply ran later. The sweeps below still run either way, and a
+	# failure here only leaves the turn to the abort below, like every other step here.
+	try:
+		nothing_with_agent = admission.cancel_queued_on_stop(conversation, run_id)
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="stop_run queued cancel", message=frappe.get_traceback())
+		nothing_with_agent = False
 	# Phase-0 admission (flag ON): record cancel intent on this conversation's
 	# dispatching Turn row (D2's dispatching->cancel-intent transition). This is
 	# NOT terminal - the legacy worker observes agent's aborted-terminal and
 	# settles the Turn (cancelled) + promotes the next queued turn there. Marking
 	# intent here just makes support/telemetry honest. Best-effort + flag-gated.
-	admission.mark_cancel_requested(conversation)
+	admission.mark_cancel_requested(conversation, run_id)
 	# Relay-Pump mode: flag the conversation's in-flight pump turn for cancellation
 	# (D2 #17) and wake the pump so its cancel sweep drives the out-of-band abort +
 	# aborted-terminal + settle-cancelled. The direct chat.abort below still fires
@@ -3786,7 +4171,7 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		api._skill_autorun_clear(conversation)
 	except Exception:
 		frappe.log_error(title="stop_run skill_autorun clear", message=frappe.get_traceback())
-	if not conv.session_key:
+	if nothing_with_agent or not conv.session_key:
 		return {"ok": True}  # nothing running yet
 	settings = frappe.get_cached_doc("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
@@ -3800,6 +4185,27 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		frappe.log_error(title="jarvis stop_run", message=str(e))
 		return {"ok": False, "reason": _("couldn't reach the assistant to stop it")}
 	return {"ok": True}
+
+
+def _stop_is_late(conversation: str, run_id: str) -> bool:
+	"""#448: a Stop for run A that arrives after A ended, while another turn of the chat is
+	unfinished (a continuation, a macro step, a queued follow-up). That turn is not what the
+	Stop was for, so nothing may touch it: no cancel, no card or approval sweep, no abort.
+	A ``run_id`` that names no finished turn of this chat (a running turn, a gateway id, a
+	legacy run) is not late. Never raises: on a failed read the Stop goes on as before."""
+	from jarvis.chat import pump
+	from jarvis.chat import turn_state as ts
+
+	try:
+		base = run_id.removesuffix("-r1")
+		named = {run_id} | ({base} if pump.resent_gateway_key(base) == run_id else set())
+		state = frappe.db.get_value(
+			ts.TURN, {"name": ["in", list(named)], "conversation": conversation}, "state"
+		)
+		return state in ts.TERMINAL_STATES and bool(ts.unfinished_turn(conversation))
+	except Exception:
+		frappe.log_error(title="stop_run late check", message=frappe.get_traceback())
+		return False
 
 
 def _gateway_run_id(conversation: str, run_id: str | None) -> str | None:

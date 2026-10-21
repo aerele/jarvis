@@ -8,6 +8,8 @@
 //     applyRemoteNew (DA-04) — called from ChatView's socket handlers and the
 //     AppShell-level global notifier (notify/globalNotifier.js).
 //   - unreadConvs: the global notifier marks, ChatView clears on open.
+//   - conversationActivity: server snapshots, refreshed by the global notifier (#591).
+//     ChatView owns activeConversationActivity and immediate local Stop suppression.
 import { reactive, ref, computed } from "vue";
 import { useStorage } from "@vueuse/core";
 import { toast } from "frappe-ui";
@@ -17,7 +19,51 @@ import { errHtml } from "@/lib/errors";
 import { createBadgeTimer } from "@/lib/badgeTimer";
 import { needsOnboarding } from "@/onboarding/readiness.js";
 
+import { listSharedWithMe } from "@/api/chatSharing";
+
 // ---- state ------------------------------------------------------------------
+const sharedConversations = ref([]),
+	sharedConversationsLoading = ref(false),
+	sharedConversationsError = ref(false);
+const hasUnseenShares = computed(() => sharedConversations.value.some((row) => row.unseen));
+let sharedFlight = null,
+	sharedAgain = false,
+	sharedMutation = 0;
+const sharedOpened = new Map();
+function markSharedSeen(id) {
+	sharedOpened.set(id, ++sharedMutation);
+	sharedConversations.value = sharedConversations.value.map((row) =>
+		row.name === id ? { ...row, unseen: false } : row
+	);
+}
+async function loadSharedConversations({ refresh = false } = {}) {
+	if (sharedFlight) {
+		if (refresh) sharedAgain = true;
+		return sharedFlight;
+	}
+	const mutation = sharedMutation;
+	sharedConversationsLoading.value = true;
+	sharedFlight = (async () => {
+		try {
+			const rows = await listSharedWithMe();
+			sharedConversations.value = (rows || []).map((row) => ({
+				...row,
+				unseen: !!row.unseen && (sharedOpened.get(row.name) || 0) <= mutation,
+			}));
+			sharedConversationsError.value = false;
+		} catch {
+			sharedConversationsError.value = true;
+		} finally {
+			sharedFlight = null;
+			sharedConversationsLoading.value = false;
+			if (sharedAgain) {
+				sharedAgain = false;
+				loadSharedConversations();
+			}
+		}
+	})();
+	return sharedFlight;
+}
 const conversations = ref([]); // [{name,title,last_active_at,starred,message_count}]
 const conversationsLoading = ref(false);
 const currentConvId = ref(null); // written by ChatView only
@@ -26,6 +72,15 @@ const streamingConvId = ref(null); // written by ChatView only
 // the sidebar's unread dot (distinct from the streaming dot). Replaced
 // wholesale on every write so Set mutations stay reactive.
 const unreadConvs = ref(new Set());
+// Per-key updates keep unrelated rows out of activity transitions (#591).
+const conversationActivity = reactive(new Map());
+const activeConversationActivity = ref(null);
+const stoppedConversationRuns = reactive(new Map());
+let _activityEnabled = true;
+let _activityGeneration = 0;
+let _activityMutation = 0;
+let _activityRefreshTimer = null;
+let _activityAgain = false;
 const approvalsCount = ref(0);
 // Pending review work for a skill reviewer (skill + wiki promotions and
 // surfaced learned patterns): the same total as the Skills page Review tab.
@@ -401,21 +456,153 @@ const sidebarWidth = computed({
 
 // ---- actions (all errors → toast; never throw to callers) -------------------
 let _convsInflight = null;
-async function loadConversations() {
-	if (_convsInflight) return _convsInflight;
-	conversationsLoading.value = true;
+let _convsReadIsRefresh = false;
+let _convsReadGeneration = 0;
+async function loadConversations({ refresh = false } = {}) {
+	// Full list loads and background reads share one ordered request lane. An
+	// invalidation during a read queues one follow-up instead of being lost.
+	if (_convsInflight) {
+		if (!refresh && (_convsReadIsRefresh || _convsReadGeneration !== _activityGeneration)) {
+			return _convsInflight.then(() => loadConversations());
+		}
+		if (refresh) _activityAgain = true;
+		return _convsInflight;
+	}
+	if (!refresh) conversationsLoading.value = true;
+	clearTimeout(_activityRefreshTimer);
+	_activityRefreshTimer = null;
+	_convsReadIsRefresh = refresh;
+	_convsReadGeneration = _activityGeneration;
+	const generation = _activityGeneration;
+	const mutation = _activityMutation;
 	_convsInflight = (async () => {
 		try {
-			conversations.value = (await api.listConversations()) || [];
-			refreshBadges(); // poll-on-activity parity (D12)
+			const rows = (await api.listConversations({ refresh })) || [];
+			if (_activityEnabled && generation === _activityGeneration) {
+				applyConversationActivity(rows, mutation);
+			}
+			if (!refresh && generation === _activityGeneration) {
+				conversations.value = rows;
+				refreshBadges();
+			}
 		} catch (e) {
-			toast.error(errHtml(e));
+			// A failed observational read retains the last known server status.
+			if (!refresh) toast.error(errHtml(e));
 		} finally {
-			conversationsLoading.value = false;
+			if (!refresh) conversationsLoading.value = false;
 			_convsInflight = null;
+			if (_activityAgain && _activityEnabled) {
+				_activityAgain = false;
+				scheduleConversationActivityRefresh();
+			}
 		}
 	})();
 	return _convsInflight;
+}
+
+function applyConversationActivity(rows, mutation) {
+	const present = new Set();
+	for (const row of rows) {
+		present.add(row.name);
+		const activity = row.activity || [];
+		const previous = conversationActivity.get(row.name);
+		if (JSON.stringify(previous || []) !== JSON.stringify(activity)) {
+			conversationActivity.set(row.name, activity);
+		}
+	}
+	for (const id of conversationActivity.keys()) {
+		if (!present.has(id)) conversationActivity.delete(id);
+	}
+	for (const [id, stopped] of stoppedConversationRuns) {
+		const activity = rows.find((row) => row.name === id)?.activity || [];
+		const pending = stopped.filter(
+			(stop) =>
+				stop.revision > mutation || activity.some((run) => sameConversationRun(run, stop))
+		);
+		if (!pending.length) stoppedConversationRuns.delete(id);
+		else if (pending.length !== stopped.length) stoppedConversationRuns.set(id, pending);
+	}
+}
+
+function sameConversationRun(run, stop) {
+	return !!(
+		(run.run_id && run.run_id === stop.run_id) ||
+		(run.message_id && run.message_id === stop.message_id)
+	);
+}
+
+function stopConversationRun(id, run_id, message_id) {
+	if (!id || (!run_id && !message_id)) return;
+	stoppedConversationRuns.set(id, [
+		...(stoppedConversationRuns.get(id) || []),
+		{ run_id, message_id, revision: ++_activityMutation },
+	]);
+	scheduleConversationActivityRefresh();
+}
+
+function conversationIndicator(id) {
+	const local = currentConvId.value === id ? activeConversationActivity.value : null;
+	let runs;
+	if (local?.conversation_id === id) {
+		// A settled/recovering open chat must never be overruled by a stale
+		// background snapshot. ChatView owns Stop and server resync locally.
+		runs = local.state ? [local] : [];
+	} else {
+		const stopped = stoppedConversationRuns.get(id) || [];
+		runs = (conversationActivity.get(id) || []).filter(
+			(run) => !stopped.some((stop) => sameConversationRun(run, stop))
+		);
+	}
+	const states = runs.map((run) => run.state);
+	let state = null;
+	if (states.includes("streaming")) state = "streaming";
+	else if (states.some((s) => ["preparing", "ready", "dispatching"].includes(s)))
+		state = "preparing";
+	else if (states.includes("queued")) state = "queued";
+	else if (states.includes("recovering")) state = "recovering";
+	if (!state) return null; // finalization is not another running reply
+	return {
+		state,
+		label: {
+			streaming: "Replying",
+			preparing: "Preparing",
+			recovering: "Recovering",
+			queued: "Queued",
+		}[state],
+		pulse: state === "streaming" || state === "preparing",
+	};
+}
+
+function startConversationActivity() {
+	if (!_activityEnabled) _activityGeneration++;
+	_activityEnabled = true;
+}
+function stopConversationActivity() {
+	_activityEnabled = false;
+	_activityGeneration++;
+	clearTimeout(_activityRefreshTimer);
+	_activityRefreshTimer = null;
+	_activityAgain = false;
+	conversationActivity.clear();
+	stoppedConversationRuns.clear();
+}
+function refreshConversationActivity() {
+	if (!_activityEnabled) return Promise.resolve();
+	clearTimeout(_activityRefreshTimer);
+	_activityRefreshTimer = null;
+	return loadConversations({ refresh: true });
+}
+function scheduleConversationActivityRefresh() {
+	if (!_activityEnabled) return;
+	if (_convsInflight) {
+		_activityAgain = true;
+		return;
+	}
+	if (_activityRefreshTimer) return;
+	_activityRefreshTimer = setTimeout(() => {
+		_activityRefreshTimer = null;
+		refreshConversationActivity();
+	}, 1000);
 }
 
 // AppShell fires this from four triggers (mount · route change · visibility ·
@@ -604,11 +791,19 @@ function clearUnread(id) {
 // properties: `store.pendingNewChat = false`, `watch(() => store.paletteOpen)`.
 const store = reactive({
 	// state
+	sharedConversations,
+	sharedConversationsLoading,
+	sharedConversationsError,
+	hasUnseenShares,
+	loadSharedConversations,
+	markSharedSeen,
 	conversations,
 	conversationsLoading,
 	currentConvId,
 	streamingConvId,
 	unreadConvs,
+	conversationActivity,
+	activeConversationActivity,
 	approvalsCount,
 	reviewCount,
 	settingsOpen,
@@ -659,6 +854,12 @@ const store = reactive({
 	applyRemoteNew,
 	markUnread,
 	clearUnread,
+	conversationIndicator,
+	stopConversationRun,
+	startConversationActivity,
+	stopConversationActivity,
+	refreshConversationActivity,
+	scheduleConversationActivityRefresh,
 	bumpLlmConfig,
 });
 

@@ -58,6 +58,51 @@ export function coerceOut(field) {
 	return field.value;
 }
 
+// Every field a row carries: the grid's columns, then the row form's other fields
+// (table.formFields, laid out by lib/rowForm.js). Without form fields (the PWA, an
+// older server) it is just the columns. Kept here because this file imports nothing.
+// table.ruleFields (hidden fields a rule reads) are NOT part of it, by design: every
+// payload builder below walks this list, so a rule field here would be sent on Save.
+export const BREAK_TYPES = new Set(["Section Break", "Column Break", "Tab Break"]);
+export function allRowFields(table) {
+	const out = [...(table.columns || [])];
+	const seen = new Set(out.map((c) => c.fieldname));
+	for (const f of table.formFields || []) {
+		if (BREAK_TYPES.has(f.fieldtype) || seen.has(f.fieldname)) continue;
+		seen.add(f.fieldname);
+		out.push(f);
+	}
+	return out;
+}
+
+// The source link of a field Desk fills by fetch_from ("item_code.is_fixed_asset"
+// -> "item_code"), or "" when it has none. Used for the hidden fields a row's rules
+// read (table.ruleFields): once the row's source changes, a saved value no longer holds.
+export function ruleFetchSource(field) {
+	const m = /^([A-Za-z_]\w*)\.[A-Za-z_]\w*$/.exec(String((field && field.fetch_from) || ""));
+	return m ? m[1] : "";
+}
+
+// The record as Desk's `parent` holds it for a child row's rules: the form's plain
+// defaults (what a new form would hold), the saved and proposed values, then the
+// panel's current values, plus name and docstatus. One builder for the edit panel,
+// the preview and the link search, so a rule reads the same record everywhere.
+export function draftParentDoc(model) {
+	if (!model) return {};
+	const defaults = model.parentDefaults || {};
+	const doc = { ...defaults, ...(model.linkContext || {}) };
+	// A blank panel field leaves its default in place (a required field shown empty
+	// must not erase what Desk's new form would hold).
+	for (const f of model.fields || []) {
+		const blank = String(f.value ?? "").trim() === "";
+		if (!(blank && f.fieldname in defaults)) doc[f.fieldname] = coerceOut(f);
+	}
+	doc.doctype = model.doctype;
+	doc.name = model.docName || "";
+	doc.docstatus = Number(model.docstatus || 0);
+	return doc;
+}
+
 function coerceCheck(v) {
 	return checkToYesNo(v) === "Yes" ? 1 : 0;
 }
@@ -73,7 +118,7 @@ export function coerceRow(table, row, verb) {
 	// A saved row's name rides along so update_doc edits THAT row and keeps every
 	// field the grid does not show (CR-3). A new row has none.
 	const out = row.__name ? { name: row.__name } : {};
-	for (const c of table.columns) {
+	for (const c of allRowFields(table)) {
 		if (c.read_only && verb !== "create") continue;
 		const v = row[c.fieldname];
 		if (v === "" || v == null) continue;
@@ -99,11 +144,13 @@ function coerceCell(column, v) {
 // (a Datetime column used to differ and resend - and wipe - the whole table).
 export function toPanelRow(columns, src) {
 	const out = src && src.name ? { __name: src.name } : {};
-	for (const c of columns)
-		out[c.fieldname] = normDateVal(
-			c.fieldtype,
-			src[c.fieldname] == null ? "" : String(src[c.fieldname])
-		);
+	for (const c of columns) {
+		const v = src[c.fieldname];
+		// A JSON field arrives as an object: show (and compare) it as JSON text,
+		// never as "[object Object]".
+		const s = v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+		out[c.fieldname] = normDateVal(c.fieldtype, s);
+	}
 	return out;
 }
 
@@ -203,16 +250,40 @@ export function alignComputedRows(table, serverRows) {
 	return out;
 }
 
+// A table's loaded rows (origJson) parsed, and by name. A big table's origJson is
+// ~2 ms to parse and the card asks for it on every render, so the last few strings
+// are kept (a string is the key: the table object may be a reactive proxy or not).
+// The rows are shared: callers read them, never change them.
+const SAVED_CACHE_MAX = 12;
+const savedCache = new Map();
+function savedEntry(json) {
+	const key = json || "";
+	let e = savedCache.get(key);
+	if (!e) {
+		let rows = [];
+		try {
+			rows = JSON.parse(key || "null") || [];
+		} catch {
+			rows = [];
+		}
+		const byName = new Map();
+		for (const r of rows) if (r && r.name) byName.set(r.name, r);
+		e = { rows, byName };
+		if (savedCache.size >= SAVED_CACHE_MAX) savedCache.delete(savedCache.keys().next().value);
+		savedCache.set(key, e);
+	}
+	return e;
+}
+export const parseSavedRows = (json) => savedEntry(json).rows;
+export const savedRowsMap = (json) => savedEntry(json).byName;
+
 // Saved rows an update would delete: every loaded row (origJson) whose name no
 // panel row carries any more. Returned as short labels (first shown column's value,
 // else the row id) so the card can say WHICH rows go, not only how many (CR-3).
+// Only the parse is kept; this depends on the panel rows' names, so it is worked out
+// on every call.
 export function removedSavedRows(table) {
-	let saved = [];
-	try {
-		saved = JSON.parse(table.origJson || "null") || [];
-	} catch {
-		saved = [];
-	}
+	const saved = parseSavedRows(table.origJson);
 	const kept = new Set((table.rows || []).map((r) => r.__name).filter(Boolean));
 	const first = (table.columns || []).find((c) => !c.read_only) || (table.columns || [])[0];
 	return saved
@@ -226,7 +297,7 @@ export function tableChanged(table, originalRows) {
 		.map((r) => coerceRow(table, r, "update"))
 		.filter((r) => Object.keys(r).length);
 	const before = (originalRows || []).map((r) =>
-		coerceRow(table, toPanelRow(table.columns, r), "update")
+		coerceRow(table, toPanelRow(allRowFields(table), r), "update")
 	);
 	return JSON.stringify(now) !== JSON.stringify(before);
 }
@@ -263,7 +334,7 @@ export function normDateVal(fieldtype, v) {
 export function tableRowsPayload(table, originalRows) {
 	const saved = new Map();
 	for (const r of originalRows || [])
-		if (r && r.name) saved.set(r.name, toPanelRow(table.columns, r));
+		if (r && r.name) saved.set(r.name, toPanelRow(allRowFields(table), r));
 	const out = [];
 	for (const row of table.rows) {
 		const before = row.__name ? saved.get(row.__name) : null;
@@ -273,7 +344,7 @@ export function tableRowsPayload(table, originalRows) {
 			continue;
 		}
 		const r = { name: row.__name };
-		for (const c of table.columns) {
+		for (const c of allRowFields(table)) {
 			if (c.read_only) continue;
 			const v = row[c.fieldname] == null ? "" : String(row[c.fieldname]);
 			if (v === before[c.fieldname]) continue;

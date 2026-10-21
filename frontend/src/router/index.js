@@ -13,6 +13,16 @@ export function supportGuard(to, from, next) {
 }
 
 const routes = [
+	{
+		path: "/shared",
+		name: "SharedChats",
+		component: () => import("@/views/SharedChatsList.vue"),
+	},
+	{
+		path: "/shared/:id",
+		name: "SharedConversation",
+		component: () => import("@/views/SharedChatView.vue"),
+	},
 	{ path: "/", name: "Chat", component: ChatView, meta: { chat: true } },
 	{ path: "/c/:id", name: "Conversation", component: ChatView, meta: { chat: true } },
 	// /skills renders the two-tab shell (Skills | Learning). The name stays
@@ -110,6 +120,15 @@ const routes = [
 		name: "MacroRuns",
 		component: () => import("@/pages/macros/MacrosList.vue"),
 		props: { tab: "runs" },
+	},
+	// The admin's tab (every user's macros). Registered BEFORE :id so it can't be
+	// shadowed; MacrosList shows it only to an admin and falls back to the Macros
+	// tab for anyone else.
+	{
+		path: "/macros/admin",
+		name: "MacroAdmin",
+		component: () => import("@/pages/macros/MacrosList.vue"),
+		props: { tab: "admin" },
 	},
 	{
 		path: "/macros/new",

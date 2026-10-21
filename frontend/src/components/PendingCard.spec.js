@@ -675,3 +675,46 @@ describe("PendingCard styles stand alone outside the chat", () => {
 		w.unmount();
 	});
 });
+
+// schedule_run: a one-time run set from chat. The card says when, what, and that it
+// happens once, unattended, as the user.
+describe("PendingCard schedule kind", () => {
+	const scheduleCard = (overrides = {}) => ({
+		kind: "schedule",
+		when: "Tue, 15 Jan 2030 at 9:30 am (Asia/Kolkata)",
+		name: "Review comments",
+		macro: "",
+		prompt: "Check the comments on HR-EMP-0001 and tell me about the review",
+		...overrides,
+	});
+
+	it("shows when it runs, what it does, and that it runs once", () => {
+		const w = mount(PendingCard, { props: { card: scheduleCard(), details: "" } });
+		const text = w.text();
+		expect(text).toContain("Run once · Review comments");
+		expect(text).toContain("Tue, 15 Jan 2030 at 9:30 am (Asia/Kolkata)");
+		expect(text).toContain("Check the comments on HR-EMP-0001");
+		expect(text).toContain("then the schedule switches itself off");
+		expect(text).toContain("it waits for you to confirm it in that chat");
+		expect(text).toContain("To cancel or move it later");
+	});
+
+	it("names an existing macro instead of a prompt", () => {
+		const w = mount(PendingCard, {
+			props: {
+				card: scheduleCard({ name: "", macro: "Month-end close", prompt: "" }),
+				details: "",
+			},
+		});
+		expect(w.text()).toContain("Month-end close");
+		expect(w.find("details").exists()).toBe(false);
+	});
+
+	it("renders the prompt as text, never as markup", () => {
+		const w = mount(PendingCard, {
+			props: { card: scheduleCard({ prompt: "<img src=x onerror=alert(1)>" }), details: "" },
+		});
+		expect(w.find("img").exists()).toBe(false);
+		expect(w.text()).toContain("<img src=x onerror=alert(1)>");
+	});
+});

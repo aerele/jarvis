@@ -3,12 +3,84 @@ import { boundedDelivery, settledSendResult } from "./lib/sendDelivery.js";
 // the session cookie + CSRF). Same backend the Desk chat uses, so conversations
 // stay consistent across surfaces.
 import { call } from "frappe-ui";
+import { firstServerMessage, messageText } from "./lib/errors.js";
 import { listPageArgs as _page } from "./api/listPageArgs";
+import { HISTORY_PAGE_SIZE } from "./lib/historyPaging.js";
+import { __ } from "./lib/i18n.js";
 
-export const listConversations = () => call("jarvis.chat.api.list_conversations");
+// Binary GET: keep the SPA in place so refused exports can show an error toast.
+export async function downloadConversation(conversation, format) {
+	const query = new URLSearchParams({ conversation, format });
+	const response = await fetch(`/api/method/jarvis.chat.export.download_conversation?${query}`, {
+		method: "GET",
+		credentials: "same-origin",
+	});
+	if (!response.ok) {
+		let payload;
+		try {
+			payload = await response.json();
+		} catch {
+			// A proxy's HTML and raw exception bodies are never customer copy.
+		}
+		const message =
+			messageText(firstServerMessage(payload?._server_messages)) ||
+			__("Couldn't download this chat. Try again.");
+		const excType =
+			typeof payload?.exc_type === "string" &&
+			/^[A-Za-z_][A-Za-z0-9_]{0,79}$/.test(payload.exc_type)
+				? payload.exc_type
+				: undefined;
+		const expectedRefusal =
+			[401, 403, 404, 429].includes(response.status) ||
+			(response.status >= 400 && response.status < 500 && excType === "_ExportRefusedError");
+		throw Object.assign(new Error(message), {
+			status: response.status,
+			...(excType ? { exc_type: excType } : {}),
+			expectedRefusal,
+		});
+	}
+	const contentType = (response.headers.get("Content-Type") || "").split(";")[0].trim();
+	if (contentType !== (format === "pdf" ? "application/pdf" : "text/markdown")) {
+		throw new Error(__("Couldn't download this chat. Try again."));
+	}
+	const blob = await response.blob();
+	const disposition = response.headers.get("Content-Disposition") || "";
+	const filename = /filename="?([a-z0-9-]+\.(?:pdf|md))"?(?:;|$)/i.exec(disposition)?.[1];
+	const url = URL.createObjectURL(blob);
+	const anchor = document.createElement("a");
+	anchor.href = url;
+	anchor.download = filename || `jarvis-chat.${format === "pdf" ? "pdf" : "md"}`;
+	document.body.appendChild(anchor);
+	try {
+		anchor.click();
+	} finally {
+		anchor.remove();
+		setTimeout(() => URL.revokeObjectURL(url), 10000);
+	}
+}
+
+export const listConversations = ({ refresh = false } = {}) =>
+	call("jarvis.chat.api.list_conversations", refresh ? { refresh: 1 } : {});
 export const listTools = () => call("jarvis.chat.api.list_tools");
-export const getConversation = (conversation) =>
+// The open chat reads its history a page at a time (#715 F13): the newest page, or
+// with {before} the page older than that cursor; {refresh} names held older rows
+// the server should send fresh, and {after} (the newest seq held) lets the newest
+// page reach back to the rows already on screen. Dashboards and Triggers read whole threads through
+// their own wrappers (api/dashboards.js, api/triggers.js).
+export const getConversation = (conversation, { before, refresh, after } = {}) =>
+	call("jarvis.chat.api.get_conversation", {
+		conversation,
+		limit: HISTORY_PAGE_SIZE,
+		...(before ? { before } : {}),
+		...(after ? { after } : {}),
+		...(refresh && refresh.length ? { refresh: JSON.stringify(refresh) } : {}),
+	});
+// The whole visible thread, unpaged, for an action that needs every row (Save as
+// macro) rather than what is on screen.
+export const getWholeConversation = (conversation) =>
 	call("jarvis.chat.api.get_conversation", { conversation });
+// A compact tool row's whole input and output, for the Activity view (#715 F13).
+export const getToolDetail = (message) => call("jarvis.chat.api.get_tool_detail", { message });
 // Rich outputs: fetch one canvas/chart artifact's render-ready HTML for an
 // assistant message (sandboxed-iframe srcdoc). `name` selects which artifact
 // when a message has several.
@@ -265,6 +337,10 @@ export const dismissGreeting = () => call(GR + "dismiss_greeting");
 const AC = "jarvis.chat.actions_api.";
 export const getDoctypeFormMeta = (doctype) => call(AC + "get_doctype_form_meta", { doctype });
 export const loadDocForEdit = (doctype, name) => call(AC + "load_doc", { doctype, name });
+// The hidden values a table's row rules read that Desk fetches from a link
+// (fetch_from): {ok, values: {link field: {link value: {rule field: value}}}}.
+export const ruleValues = (doctype, table, links) =>
+	call(AC + "rule_values", { doctype, table, links: JSON.stringify(links) });
 export const applyAction = (action) =>
 	call(AC + "apply_action", { action: JSON.stringify(action) });
 // Park the confirm card for a create receipt's suggested next step (#621). Same
@@ -966,16 +1042,8 @@ export const supportDownloadUrl = (ticket, fileUrl) =>
 // the support store shows "file too large" / "no file provided" rather than
 // a generic status-code string.
 function _uploadErrorMessage(data, status) {
-	try {
-		if (data && data._server_messages) {
-			const msgs = JSON.parse(data._server_messages);
-			const first = typeof msgs[0] === "string" ? JSON.parse(msgs[0]) : msgs[0];
-			if (first && first.message) return String(first.message);
-		}
-	} catch (e) {
-		/* fall through to the status code */
-	}
-	return `upload failed (${status})`;
+	const message = messageText(firstServerMessage(data && data._server_messages));
+	return message || `upload failed (${status})`;
 }
 
 export async function supportUpload(ticket, file, comm) {
