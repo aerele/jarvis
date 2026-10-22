@@ -44,6 +44,11 @@ class Prepared:
 	sheet_name: str = "Export"
 	# "<date> <time>" when empty (a hand-built Prepared).
 	datetime_format: str = ""
+	# A saved-report source (#2102): the worker does not stream SQL, it waits for the
+	# report's prepared copy and converts it. ``report_filters`` are the FILLED filters
+	# the run was started with; ``sql`` is "" and ``columns`` empty until the copy is read.
+	report_name: str = ""
+	report_filters: dict | None = None
 
 
 def _fieldtype(item, tables):
@@ -126,6 +131,8 @@ def prepare(source, row_cap, highlights=None, title=None):
 	The gates are the immediate export's own (``resolvers.authorize_spec`` /
 	``authorize_filter``), so both paths refuse the same input in the same words.
 	What stays here is only what the raw-SQL executor needs. ``title`` names the workbook tab."""
+	if "report_name" in source:
+		return _prepare_report(source, highlights, title)
 	if "spec" in source:
 		spec = source["spec"]
 		q, tables, columns, masked = resolvers.authorize_spec(spec, row_cap + 1)
@@ -227,6 +234,84 @@ def expected_total(count, limit, row_cap):
 
 def _noop(rows):
 	return None
+
+
+def _prepare_report(source, highlights, title):
+	"""The placeholder ``Prepared`` for a saved report: every gate the immediate export runs
+	(``reports.authorize``), no SQL. Columns are known only once the copy exists, so the
+	highlight rules are validated then (``prepared_from_report``); the raw rules stay on
+	the job row."""
+	from jarvis.tools._export import reports
+
+	report, filters = reports.authorize(source.get("report_name"), source.get("filters"))
+	date_format, datetime_format, time_format = compat.xlsx_date_formats()
+	return Prepared(
+		"",
+		filters,
+		[],
+		[],
+		{},
+		[],
+		[],
+		date_format,
+		time_format,
+		None,
+		spool_cap=int(frappe.conf.get("jarvis_export_spool_max_mb", 1024)) * 1024 * 1024,
+		doctype=report.ref_doctype,
+		sheet_name=sheet_name(title or source.get("report_name")),
+		datetime_format=datetime_format,
+		report_name=source.get("report_name"),
+		report_filters=filters,
+	)
+
+
+def prepared_from_report(placeholder, columns, result, highlights=None):
+	"""``(prepared, rows)`` for a completed report copy: the visible columns as
+	``_Column`` keys with unique headers, the rows as dicts under those keys with Date
+	strings made dates (``_report_rows``), and the highlight rules validated against the
+	real headers (an invalid rule is the caller's refusal, shown verbatim)."""
+	from frappe.utils.xlsxutils import ILLEGAL_CHARACTERS_RE, handle_html
+
+	from jarvis.tools import _report_rows
+	from jarvis.tools._export.reports import _unique
+
+	visible = _report_rows.visible_columns(columns)
+	if not visible:
+		raise InvalidArgumentError(f"report {placeholder.report_name} returned no columns to export")
+	keys = _unique([col["fieldname"] for _, col in visible])
+	labels = _unique([col["label"] for _, col in visible])
+	prepared_columns = [resolvers._Column(key, None, label) for key, label in zip(keys, labels, strict=True)]
+	rows = [
+		{
+			key: _report_rows.as_file_value(_report_rows.cell(row, col, idx), col)
+			for key, (idx, col) in zip(keys, visible, strict=True)
+		}
+		for row in result
+	]
+	model = ExportModel(columns=keys, rows=[], total=0, meta={"headers": labels})
+	headers = [ILLEGAL_CHARACTERS_RE.sub("", renderers._xlsx_cell(h, model, handle_html)) for h in labels]
+	types = [col.get("fieldtype") or "Data" for _, col in visible]
+	probe = [datetime.date(2000, 1, 1) if t in {"Date", "Datetime", "Time"} else None for t in types]
+	rules = validate_highlights(renderers._rules_by_header(highlights, model, labels), [headers, probe])
+	prepared = Prepared(
+		"",
+		placeholder.params,
+		prepared_columns,
+		headers,
+		{},
+		types,
+		rules,
+		placeholder.date_format,
+		placeholder.time_format,
+		None,
+		spool_cap=placeholder.spool_cap,
+		doctype=placeholder.doctype,
+		sheet_name=placeholder.sheet_name,
+		datetime_format=placeholder.datetime_format,
+		report_name=placeholder.report_name,
+		report_filters=placeholder.report_filters,
+	)
+	return prepared, rows
 
 
 def write(prepared, rows, path, fmt, row_cap, size_cap, check, progress, *, finalizing=_noop):
