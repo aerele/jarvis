@@ -22,9 +22,10 @@ every company in the bench - requires an explicit, permission-checked
 ``company`` from a caller who is restricted to specific companies.
 
 A balance also sums GL Entries across every Cost Center, Project and
-Branch. A caller restricted on Project or Branch is refused, and one
-restricted on Cost Center must name a permitted ``cost_center`` on a Profit
-and Loss account (the only case ERPNext narrows by cost center).
+accounting dimension. A caller restricted on any dimension but Cost Center is
+refused, and one restricted on Cost Center must name a permitted
+``cost_center`` (a group only if its whole subtree is permitted) on a Profit
+and Loss account, the only case ERPNext narrows by cost center.
 """
 
 from __future__ import annotations

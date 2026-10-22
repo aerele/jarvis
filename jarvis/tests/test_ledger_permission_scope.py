@@ -17,7 +17,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.exceptions import PermissionDeniedError
-from jarvis.tools._ledger_access import gl_dimension_restrictions
+from jarvis.tools._ledger_access import gl_dimension_doctypes, gl_dimension_restrictions
 from jarvis.tools.get_balance_on import get_balance_on
 from jarvis.tools.get_customer_outstanding import get_customer_outstanding
 from jarvis.tools.get_stock_balance import get_stock_balance
@@ -50,9 +50,14 @@ ACCOUNT_PL = "_JLS Rent"
 ACCOUNT_ROOT_BS = "_JLS Assets"
 ACCOUNT_BS = "_JLS Cash"
 COST_CENTER_OTHER = "_JLS Other Cost Center"
+COST_CENTER_GROUP = "_JLS Group Cost Center"
+COST_CENTER_CHILD_1 = "_JLS Group Child 1"
+COST_CENTER_CHILD_2 = "_JLS Group Child 2"
 USER_GL_PROJECT = "jls-gl-project@example.com"
 USER_GL_COST_CENTER = "jls-gl-cost-center@example.com"
 USER_GL_FREE = "jls-gl-free@example.com"
+USER_GL_GROUP = "jls-gl-group@example.com"
+USER_GL_GROUP_HIDDEN = "jls-gl-group-hidden@example.com"
 USER_OUTSTANDING_PROJECT = "jls-outstanding-project@example.com"
 
 
@@ -140,13 +145,19 @@ def _ensure_account(name: str, company: str, **kwargs) -> str:
 	return doc.name
 
 
-def _ensure_cost_center(name: str, company: str) -> str:
+def _ensure_cost_center(name: str, company: str, parent: str | None = None, is_group: int = 0) -> str:
 	existing = frappe.db.exists("Cost Center", {"cost_center_name": name, "company": company})
 	if existing:
 		return existing
 	root = frappe.db.get_value("Cost Center", {"company": company, "is_group": 1}, order_by="lft")
 	doc = frappe.get_doc(
-		{"doctype": "Cost Center", "cost_center_name": name, "company": company, "parent_cost_center": root}
+		{
+			"doctype": "Cost Center",
+			"cost_center_name": name,
+			"company": company,
+			"parent_cost_center": parent or root,
+			"is_group": is_group,
+		}
 	)
 	doc.insert(ignore_permissions=True)
 	return doc.name
@@ -174,11 +185,17 @@ def _ensure_project(name: str, company: str) -> str:
 	)
 
 
-def _ensure_user_permission(user: str, allow: str, for_value: str) -> None:
+def _ensure_user_permission(user: str, allow: str, for_value: str, hide_descendants: int = 0) -> None:
 	if frappe.db.exists("User Permission", {"user": user, "allow": allow, "for_value": for_value}):
 		return
 	frappe.get_doc(
-		{"doctype": "User Permission", "user": user, "allow": allow, "for_value": for_value}
+		{
+			"doctype": "User Permission",
+			"user": user,
+			"allow": allow,
+			"for_value": for_value,
+			"hide_descendants": hide_descendants,
+		}
 	).insert(ignore_permissions=True)
 
 
@@ -200,7 +217,14 @@ class LedgerScopeTestCase(FrappeTestCase):
 		# Users are cheap and reused idempotently; everything else rolls back.
 		for email in (USER_COMPANY_A, USER_WAREHOUSE_A1, USER_ITEM_1, USER_UNRESTRICTED):
 			_ensure_user(email, ("Stock User",))
-		for email in (USER_GL_PROJECT, USER_GL_COST_CENTER, USER_GL_FREE, USER_OUTSTANDING_PROJECT):
+		for email in (
+			USER_GL_PROJECT,
+			USER_GL_COST_CENTER,
+			USER_GL_FREE,
+			USER_GL_GROUP,
+			USER_GL_GROUP_HIDDEN,
+			USER_OUTSTANDING_PROJECT,
+		):
 			_ensure_user(email, ("Accounts User",))
 		frappe.db.commit()
 		_ensure_company(COMPANY_A, "JLSA")
@@ -224,6 +248,12 @@ class LedgerScopeTestCase(FrappeTestCase):
 		cls.customer = _ensure_customer(CUSTOMER)
 		_ensure_user_permission(USER_GL_PROJECT, "Project", cls.project)
 		_ensure_user_permission(USER_GL_COST_CENTER, "Cost Center", cls.cost_center)
+		cls.cc_group = _ensure_cost_center(COST_CENTER_GROUP, COMPANY_A, is_group=1)
+		cls.cc_child_1 = _ensure_cost_center(COST_CENTER_CHILD_1, COMPANY_A, parent=cls.cc_group)
+		cls.cc_child_2 = _ensure_cost_center(COST_CENTER_CHILD_2, COMPANY_A, parent=cls.cc_group)
+		# Group permitted with its descendants (Frappe's default) vs. the group row alone.
+		_ensure_user_permission(USER_GL_GROUP, "Cost Center", cls.cc_group)
+		_ensure_user_permission(USER_GL_GROUP_HIDDEN, "Cost Center", cls.cc_group, hide_descendants=1)
 
 	def setUp(self):
 		super().setUp()
@@ -320,6 +350,9 @@ class TestGetValuationRateScope(LedgerScopeTestCase):
 
 
 BALANCE_HELPER = "erpnext.accounts.utils.get_balance_on"
+ACCOUNTING_DIMENSIONS = (
+	"erpnext.accounts.doctype.accounting_dimension.accounting_dimension.get_accounting_dimensions"
+)
 
 
 class TestGetBalanceOnGlDimensionScope(LedgerScopeTestCase):
@@ -373,31 +406,95 @@ class TestGetBalanceOnGlDimensionScope(LedgerScopeTestCase):
 		self.assertEqual(out["balance"], 10.0)
 		self.assertEqual(helper.call_count, 2)
 
-	def test_restrictions_cover_project_cost_center_and_branch(self):
+	def test_group_cost_center_allowed_when_whole_subtree_permitted(self):
+		with _as(USER_GL_GROUP), patch(BALANCE_HELPER, return_value=10.0) as helper:
+			get_balance_on(account=self.account_pl, cost_center=self.cc_group)
+			get_balance_on(account=self.account_pl, cost_center=self.cc_child_1)
+		self.assertEqual(helper.call_args_list[0].kwargs["cost_center"], self.cc_group)
+
+	def test_group_cost_center_refused_when_descendants_not_permitted(self):
+		# Permission on the group row only (hide_descendants): ERPNext would
+		# still sum the whole subtree for the group.
+		with _as(USER_GL_GROUP_HIDDEN), patch(BALANCE_HELPER, return_value=10.0) as helper:
+			with self.assertRaises(PermissionDeniedError):
+				get_balance_on(account=self.account_pl, cost_center=self.cc_group)
+		helper.assert_not_called()
+
+	def test_restrictions_use_accounting_dimensions_and_gl_branch_link(self):
 		perms = frappe._dict(
 			{
 				"Cost Center": [frappe._dict(doc="CC-1", applicable_for=None)],
 				"Project": [frappe._dict(doc="P-1", applicable_for="GL Entry")],
 				"Branch": [frappe._dict(doc="B-1", applicable_for=None)],
+				"Department": [frappe._dict(doc="D-1", applicable_for=None)],
 				"Customer": [frappe._dict(doc="C-1", applicable_for=None)],
 			}
 		)
-		with patch("jarvis.tools._ledger_access.get_user_permissions", return_value=perms):
+		dimensions = [frappe._dict(document_type="Department"), frappe._dict(document_type="Branch")]
+		with (
+			patch("jarvis.tools._ledger_access.get_user_permissions", return_value=perms),
+			patch(ACCOUNTING_DIMENSIONS, return_value=dimensions),
+		):
 			self.assertEqual(
 				gl_dimension_restrictions("anyone@example.com"),
-				{"Cost Center": {"CC-1"}, "Project": {"P-1"}, "Branch": {"B-1"}},
+				{
+					"Cost Center": {"CC-1"},
+					"Project": {"P-1"},
+					"Branch": {"B-1"},
+					"Department": {"D-1"},
+				},
 			)
+
+	def test_branch_counts_only_where_gl_entry_links_it(self):
+		on_site = any(f.options == "Branch" for f in frappe.get_meta("GL Entry").get_link_fields())
+		with patch(ACCOUNTING_DIMENSIONS, return_value=[]):
+			doctypes = gl_dimension_doctypes()
+		self.assertEqual(doctypes - {"Branch"}, {"Cost Center", "Project"})
+		self.assertEqual("Branch" in doctypes, on_site)
+		with patch(ACCOUNTING_DIMENSIONS, return_value=[frappe._dict(document_type="Branch")]):
+			self.assertIn("Branch", gl_dimension_doctypes())
 
 	def test_restriction_for_another_doctype_does_not_count(self):
 		perms = frappe._dict({"Project": [frappe._dict(doc="P-1", applicable_for="Task")]})
 		with patch("jarvis.tools._ledger_access.get_user_permissions", return_value=perms):
 			self.assertEqual(gl_dimension_restrictions("anyone@example.com"), {})
 
+	def test_accounting_dimension_restricted_user_refused(self):
+		perms = frappe._dict({"Department": [frappe._dict(doc="D-1", applicable_for=None)]})
+		with (
+			_as(USER_GL_FREE),
+			patch("jarvis.tools._ledger_access.get_user_permissions", return_value=perms),
+			patch(ACCOUNTING_DIMENSIONS, return_value=[frappe._dict(document_type="Department")]),
+			patch(BALANCE_HELPER, return_value=10.0) as helper,
+			self.assertRaises(PermissionDeniedError),
+		):
+			get_balance_on(account=self.account_pl, cost_center=self.cc_group)
+		helper.assert_not_called()
+
+	def test_accounting_dimension_with_cost_center_restriction_refused(self):
+		# A Cost Center restriction does not excuse another dimension's.
+		perms = frappe._dict(
+			{
+				"Cost Center": [frappe._dict(doc=self.cost_center, applicable_for=None)],
+				"Department": [frappe._dict(doc="D-1", applicable_for=None)],
+			}
+		)
+		with (
+			_as(USER_GL_FREE),
+			patch("jarvis.tools._ledger_access.get_user_permissions", return_value=perms),
+			patch(ACCOUNTING_DIMENSIONS, return_value=[frappe._dict(document_type="Department")]),
+			patch(BALANCE_HELPER, return_value=10.0) as helper,
+			self.assertRaises(PermissionDeniedError),
+		):
+			get_balance_on(account=self.account_pl, cost_center=self.cost_center)
+		helper.assert_not_called()
+
 	def test_branch_restricted_user_refused(self):
 		perms = frappe._dict({"Branch": [frappe._dict(doc="B-1", applicable_for=None)]})
 		with (
 			_as(USER_GL_FREE),
 			patch("jarvis.tools._ledger_access.get_user_permissions", return_value=perms),
+			patch(ACCOUNTING_DIMENSIONS, return_value=[frappe._dict(document_type="Branch")]),
 			patch(BALANCE_HELPER, return_value=10.0) as helper,
 			self.assertRaises(PermissionDeniedError),
 		):
