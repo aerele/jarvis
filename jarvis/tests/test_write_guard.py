@@ -428,10 +428,12 @@ class TestNestedWritesFromChat(FrappeTestCase):
 			conversation=self.conv,
 		)
 		self.assertTrue(r["ok"], r)
+		# ERPNext now limits barcode visibility changes to transaction fields;
+		# Sales Invoice.scan_barcode is updated by both old and new controllers.
 		self.assertEqual(
 			frappe.db.get_value(
 				"Property Setter",
-				{"doc_type": "Item", "field_name": "barcodes", "property": "hidden"},
+				{"doc_type": "Sales Invoice", "field_name": "scan_barcode", "property": "hidden"},
 				"value",
 			),
 			"1" if before else "0",
