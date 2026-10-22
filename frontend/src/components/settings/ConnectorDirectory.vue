@@ -66,6 +66,11 @@
 						size="sm"
 						:theme="authBadge(entry).theme"
 						:label="authBadge(entry).label"
+						:title="
+							authBadge(entry).hint
+								? `${authBadge(entry).hint} at ${entry.name}`
+								: undefined
+						"
 					/>
 					<span
 						v-if="isAdded(entry)"
@@ -176,7 +181,7 @@ function isAdded(entry) {
 // key, open needs nothing at all.
 const AUTH_BADGE = {
 	dcr: { label: "Sign in", theme: "gray" },
-	static: { label: "Your app", theme: "orange" },
+	static: { label: "Needs setup", theme: "orange", hint: "About 10 minutes, needs an admin" },
 	token: { label: "Key", theme: "gray" },
 	open: { label: "No sign-in", theme: "gray" },
 };

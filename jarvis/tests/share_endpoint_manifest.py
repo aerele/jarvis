@@ -680,6 +680,15 @@ _unrelated(
     """,
 )
 
+_unrelated(
+	"jarvis.tools._export.jobs",
+	"Background export lookup and cancel by export id; owner-only (System Manager reads), no conversation lookup.",
+	"""
+    cancel
+    get_jobs
+    """,
+)
+
 # Explicit, signature-bound invokers for conversation-directed paths.
 ENDPOINTS.update(
 	{

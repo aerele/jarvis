@@ -1,6 +1,7 @@
 from typing import NamedTuple
 
 import frappe
+from frappe.utils import cint
 
 from jarvis.exceptions import ExportTooSlowError, InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._export import masking
@@ -13,8 +14,9 @@ from jarvis.tools.get_list import _child_table_parents, assert_child_query_field
 # SYNCHRONOUSLY inside the web request, and the agent plugin aborts every call_tool
 # at 30s - a 100k wide-row fetch+render loses that race (the bench finishes and
 # orphans a File the agent never receives, then retries) and can hold ~200-300MB in
-# a shared worker. Streaming/async for larger sets is a deferred follow-up (see the
-# export DEFERRED backlog); until then, 20k keeps the sync path inside the budget.
+# a shared worker. Larger sets go to a background export (jobs.py); 20k keeps the
+# immediate path inside the budget. A site may LOWER the split with
+# ``jarvis_export_immediate_row_limit`` (see ``immediate_row_limit``), never raise it.
 _HARD_ROW_CEILING = 20_000
 
 # The export SELECT's own statement limit, in seconds. The plugin aborts the whole
@@ -23,6 +25,25 @@ _HARD_ROW_CEILING = 20_000
 # render passed 30 s, orphaned the File and made the agent retry the same heavy
 # query. export_query's overall deadline (see there) is the other half of this.
 _EXPORT_SELECT_LIMIT_S = 12
+
+
+class NeedsBackground(InvalidArgumentError):
+	"""The immediate row ceiling was exceeded, with all access gates satisfied."""
+
+
+def immediate_row_limit() -> int:
+	"""Rows an immediate export holds before it hands off to a background export.
+
+	Lower-only site setting: the plugin aborts a call at 30 s, which is why 20,000
+	exists, so a larger value is clamped to it. An unusable value (not a positive
+	whole number, or a bool) means the default."""
+	configured = frappe.conf.get("jarvis_export_immediate_row_limit")
+	if isinstance(configured, bool):
+		return _HARD_ROW_CEILING
+	value = cint(configured)
+	if value <= 0:
+		return _HARD_ROW_CEILING
+	return min(value, _HARD_ROW_CEILING)
 
 
 def _default_fields(doctype: str) -> list[str]:
@@ -43,10 +64,59 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 	DocPerm (``can_export``), matching Frappe's own query->file export. Rows never
 	return to the model context (reference-not-rows).
 
-	NOT capped for the model, but FAIL-CLOSED above ``_HARD_ROW_CEILING`` so an
+	NOT capped for the model, but FAIL-CLOSED above ``immediate_row_limit()`` so an
 	oversized export raises instead of silently truncating. ``total`` is the TRUE,
 	permission-filtered source count (we fetch one past the ceiling: under it,
 	``len(rows)`` IS the exact count)."""
+	# The export gates live in authorize_filter, shared with the background path
+	# (streaming.prepare). Frappe's get_list masks on its own, so ``masked`` is unused here.
+	doctype, parent_doctype, cols, columns, _masked = authorize_filter(
+		doctype, fields, filters, order_by, parent_doctype
+	)
+	cap = immediate_row_limit()
+	# Fetch one past the ceiling so we can FAIL CLOSED on an over-large export
+	# instead of shipping a silently-truncated file. Under the ceiling, len(rows)
+	# is the true permission-filtered total.
+	rows = _get_list_bounded(
+		doctype,
+		filters=filters or {},
+		fields=cols,
+		order_by=order_by,
+		parent_doctype=parent_doctype,
+		limit=cap + 1,
+		# get_list returns list-of-dicts by default (no as_list), which is what the
+		# projection below keys on - the column-alignment fix.
+	)
+	if len(rows) > cap:
+		raise NeedsBackground(
+			f"{doctype} matches more than {cap:,} rows for your permissions, more than an immediate "
+			f"export holds. Narrow the filter (e.g. by date or status), or split it by a filter into "
+			f"a few exports."
+		)
+	# Project each row dict onto the REQUESTED columns. A field the caller lacks
+	# permlevel-read on is dropped from the row by get_list (on v17), so keying by
+	# column name - blank when absent - keeps every value under its own header on
+	# every engine, instead of the shift a positional as_list would produce.
+	# Keying is by plain fieldname (the tool's contract; fields=['*'] is rejected
+	# and aggregate/aliased expressions are out of scope - they'd key as blank).
+	return ExportModel(
+		columns=cols,
+		rows=[[row.get(c) for c in cols] for row in rows],
+		total=len(rows),
+		meta={"doctype": doctype, "headers": _unique_headers(columns)},
+	)
+
+
+def authorize_filter(doctype, fields, filters, order_by, parent_doctype):
+	"""The export gates for a ``doctype`` + ``filters`` export, in one place for the
+	immediate path (``from_query``) and the background one (``streaming.prepare``).
+	Returns ``(doctype, parent_doctype, fields, columns, masked)``.
+
+	The order is part of the contract (the agent keys on these texts): a missing or
+	unknown DocType first, then ``*``, the child-table rule, read, Export. A stray
+	``parent_doctype`` on a normal DocType is dropped before the read check. Callers
+	reach ``frappe.permissions.can_export`` and ``masking.masked_fields`` through
+	their modules so a test patch reaches both paths."""
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
 	if not frappe.db.exists("DocType", doctype):
@@ -87,37 +157,43 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 	# Same core gap as get_list: a child's filter / sort / aggregate field is not
 	# permlevel-checked against parent_doctype by the query engine.
 	assert_child_query_fields_readable(doctype, parent_doctype, cols, filters, order_by)
-	# Fetch one past the ceiling so we can FAIL CLOSED on an over-large export
-	# instead of shipping a silently-truncated file. Under the ceiling, len(rows)
-	# is the true permission-filtered total.
-	rows = frappe.get_list(
-		doctype,
-		filters=filters or {},
-		fields=cols,
-		order_by=order_by,
-		parent_doctype=parent_doctype,
-		limit=_HARD_ROW_CEILING + 1,
-		# get_list returns list-of-dicts by default (no as_list), which is what the
-		# projection below keys on - the column-alignment fix.
-	)
-	if len(rows) > _HARD_ROW_CEILING:
-		raise InvalidArgumentError(
-			f"{doctype} matches more than {_HARD_ROW_CEILING:,} rows for your permissions "
-			f"- too many to export in full. Narrow the filter (e.g. by date or status); "
-			f"streamed export of larger sets is not yet available."
-		)
-	# Project each row dict onto the REQUESTED columns. A field the caller lacks
-	# permlevel-read on is dropped from the row by get_list (on v17), so keying by
-	# column name - blank when absent - keeps every value under its own header on
-	# every engine, instead of the shift a positional as_list would produce.
-	# Keying is by plain fieldname (the tool's contract; fields=['*'] is rejected
-	# and aggregate/aliased expressions are out of scope - they'd key as blank).
-	return ExportModel(
-		columns=cols,
-		rows=[[row.get(c) for c in cols] for row in rows],
-		total=len(rows),
-		meta={"doctype": doctype, "headers": _unique_headers([_Column(c, doctype, None) for c in cols])},
-	)
+	columns = [_Column(c, doctype, None, "base") for c in cols]
+	masked = masking.masked_fields({"base": doctype}, {"base": parent_doctype})
+	return doctype, parent_doctype, cols, columns, masked
+
+
+def authorize_spec(spec, fetch_limit):
+	"""The export gates for a ``query`` spec, shared by ``from_spec`` and
+	``streaming.prepare``. Returns ``(query, tables, columns, masked)``.
+
+	The spec goes through the query tool's own compiler (DocType read, allowlist,
+	permlevel, record scope), then needs the Export DocPerm on every table its columns
+	come from, then the masking rule. ``fetch_limit`` is the caller's SELECT LIMIT:
+	the immediate path asks for one past its ceiling, the background one for one past
+	its row cap."""
+	from jarvis.tools.query import compile_spec_for_export
+
+	q, tables, export_doctypes, child_parents = compile_spec_for_export(spec, fetch_limit)
+	for dt in export_doctypes:
+		if not frappe.permissions.can_export(dt):
+			raise PermissionDeniedError(f"no export permission on {dt}")
+	columns = _spec_columns(spec, tables)
+	masked = masking.masked_fields(tables, child_parents)
+	masking.refuse_masked_expressions(columns, q, masked)
+	return q, tables, columns, masked
+
+
+def _get_list_bounded(*args, **kwargs):
+	from jarvis import _failure_kind
+	from jarvis.api import statement_time_limit
+
+	try:
+		with statement_time_limit(_EXPORT_SELECT_LIMIT_S):
+			return frappe.get_list(*args, **kwargs)
+	except Exception as exc:
+		if _failure_kind.too_slow(exc):
+			raise ExportTooSlowError("This export's query exceeded the immediate time limit.") from None
+		raise
 
 
 def from_spec(spec) -> ExportModel:
@@ -132,26 +208,19 @@ def from_spec(spec) -> ExportModel:
 	would, and a computed column over one is refused (``_export.masking``).
 
 	Every row is fetched (not the model-facing ``query`` caps), FAIL-CLOSED above
-	``_HARD_ROW_CEILING`` like ``from_query``, and the SELECT is stopped at
+	``immediate_row_limit()`` like ``from_query``, and the SELECT is stopped at
 	``_EXPORT_SELECT_LIMIT_S`` so it cannot outlive the tool call. A spec ``limit``
 	below the ceiling still applies (a deliberate "top 50"); when it actually cut
 	the result, ``meta["limited_by_spec"]`` holds it so the caller can say so. An
 	``offset`` is refused."""
-	from jarvis.tools.query import compile_spec_for_export
-
-	q, tables, export_doctypes, child_parents = compile_spec_for_export(spec, _HARD_ROW_CEILING + 1)
-	for dt in export_doctypes:
-		if not frappe.permissions.can_export(dt):
-			raise PermissionDeniedError(f"no export permission on {dt}")
-	columns = _spec_columns(spec, tables)
-	masked = masking.masked_fields(tables, child_parents)
-	masking.refuse_masked_expressions(columns, q, masked)
+	cap = immediate_row_limit()
+	q, tables, columns, masked = authorize_spec(spec, cap + 1)
 	rows, limited_by_spec = _cut_to_spec_limit(spec, _run_bounded(q))
-	if len(rows) > _HARD_ROW_CEILING:
-		raise InvalidArgumentError(
-			f"this query matches more than {_HARD_ROW_CEILING:,} rows for your permissions - too many "
-			f"to export in full. Narrow it (e.g. by date or status), or split it by a filter into a "
-			f"few exports."
+	if len(rows) > cap:
+		raise NeedsBackground(
+			f"this query matches more than {cap:,} rows for your permissions, more than an immediate "
+			f"export holds. Narrow it (e.g. by date or status), or split it by a filter into a few "
+			f"exports."
 		)
 	masking.mask_rows(columns, rows, masked)
 	from_dt = next(iter(tables.values()))

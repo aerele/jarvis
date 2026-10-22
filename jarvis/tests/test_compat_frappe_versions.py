@@ -25,7 +25,11 @@ Needs DB (File doctype); FrappeTestCase rolls back per-test inserts.
 from __future__ import annotations
 
 import datetime
+import importlib.util
 import io
+import tempfile
+import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import frappe
@@ -33,6 +37,8 @@ import openpyxl
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import compat
+from jarvis.tools._export import streaming
+from jarvis.tools._export.resolvers import _Column
 from jarvis.tools.export_excel import export_excel
 from jarvis.tools.read_file import read_file
 
@@ -126,6 +132,64 @@ class TestXlsxBytesAcrossMajors(FrappeTestCase):
 		self.assertEqual(rows, [["a", "b"], [1, "x"], [2, "y"]])
 
 
+class TestXlsxCellStyle(unittest.TestCase):
+	"""``compat.xlsx_cell_style``: the per-cell rule every workbook writer shares."""
+
+	def test_dates_and_times_are_formatted_by_their_own_type(self):
+		from decimal import Decimal
+
+		cases = [
+			(datetime.datetime(2026, 6, 1, 9, 30), "text", "datetime"),
+			(datetime.date(2026, 6, 1), "text", "date"),
+			(datetime.time(9, 30), "text", "time"),
+			(datetime.timedelta(hours=9), "text", "time"),
+			("00123", "text", None),
+			(Decimal("1.5"), "text", None),
+		]
+		for value, kind, style in cases:
+			with self.subTest(value=value):
+				self.assertEqual(compat.xlsx_cell_style(value, kind), style)
+
+	def test_numbers_follow_their_column_kind(self):
+		from decimal import Decimal
+
+		self.assertEqual(compat.xlsx_cell_style(3, "int"), "int")
+		self.assertEqual(compat.xlsx_cell_style(3, "float"), "float")
+		self.assertEqual(compat.xlsx_cell_style(Decimal("3"), "float"), "float")
+		self.assertIsNone(compat.xlsx_cell_style(True, "int"))  # a bool is not a number
+		self.assertIsNone(compat.xlsx_cell_style("n/a", "int"))
+
+	def test_a_decimal_in_an_int_column_is_not_shown_rounded(self):
+		# A writer that sampled only the first rows can meet one later.
+		self.assertEqual(compat.xlsx_cell_style(2.5, "int"), "float")
+
+
+def _stream_workbook_bytes(sheets):
+	"""One sheet through the background writer (``streaming.write``), as the file a job makes."""
+	((title, data),) = sheets
+	header, *body = data
+	date_format, datetime_format, time_format = compat.xlsx_date_formats()
+	prepared = streaming.Prepared(
+		"",
+		{},
+		[_Column(h, None, None) for h in header],
+		header,
+		{},
+		["Data"] * len(header),  # the layout comes from the values, never from a column type
+		[],
+		date_format,
+		time_format,
+		None,
+		sheet_name=streaming.sheet_name(title),
+		datetime_format=datetime_format,
+	)
+	rows = ({h: v for h, v in zip(header, row, strict=True)} for row in body)
+	with tempfile.TemporaryDirectory() as directory:
+		path = Path(directory) / "export.part"
+		streaming.write(prepared, rows, path, "xlsx", 1000, 50 * 1024 * 1024, lambda: None, lambda n: None)
+		return path.read_bytes()
+
+
 def _builders():
 	"""Every workbook builder this bench can run, by label. The openpyxl one is
 	the Frappe 15 path; on a 16 bench it lacks only 15's date-format helper, so
@@ -139,6 +203,23 @@ def _builders():
 	else:
 		out["xlsxwriter"] = compat._xlsx_bytes_xlsxwriter
 	return out
+
+
+def _layout_builders():
+	"""``_builders()`` plus the background writer, for the layout checks only: it takes
+	no charts or highlights, which the other suites hand to every builder. It runs on
+	both majors, so on 15 it is compared with the openpyxl path."""
+	out = _builders()
+	if importlib.util.find_spec("xlsxwriter"):
+		out["stream"] = _stream_workbook_bytes
+	return out
+
+
+def _column_widths(ws) -> dict[int, float]:
+	"""``{1-based column: width}`` over every ``<col min max>`` range. xlsxwriter merges
+	equal adjacent columns into one range and openpyxl keeps it under its first letter
+	only, so reading one letter at a time finds the default width for the rest."""
+	return {i: d.width for d in ws.column_dimensions.values() for i in range(d.min, d.max + 1)}
 
 
 class TestXlsxLayoutAcrossBuilders(FrappeTestCase):
@@ -167,7 +248,7 @@ class TestXlsxLayoutAcrossBuilders(FrappeTestCase):
 		return openpyxl.load_workbook(io.BytesIO(build([("Invoices", rows)]))).worksheets[0]
 
 	def test_header_is_bold_frozen_and_filtered(self):
-		for label, build in _builders().items():
+		for label, build in _layout_builders().items():
 			with self.subTest(builder=label):
 				ws = self._sheet(build)
 				self.assertTrue(ws["A1"].font.b)
@@ -175,7 +256,7 @@ class TestXlsxLayoutAcrossBuilders(FrappeTestCase):
 				self.assertEqual(ws.auto_filter.ref, "A1:F3")
 
 	def test_numbers_and_dates_carry_formats_text_stays_general(self):
-		for label, build in _builders().items():
+		for label, build in _layout_builders().items():
 			with self.subTest(builder=label):
 				ws = self._sheet(build)
 				self.assertEqual(ws["D2"].number_format, compat.XLSX_FLOAT_FORMAT)
@@ -191,10 +272,12 @@ class TestXlsxLayoutAcrossBuilders(FrappeTestCase):
 		self.assertEqual(widths[4], 8)  # short columns keep a usable minimum
 		long = compat._sheet_layout([["Note"], ["x" * 500]])[1]
 		self.assertEqual(long, [60])  # one long note cannot blow a column up
-		for label, build in _builders().items():
+		for label, build in _layout_builders().items():
 			with self.subTest(builder=label):
-				ws = self._sheet(build)
-				self.assertGreaterEqual(ws.column_dimensions["B"].width, widths[1])
+				found = _column_widths(self._sheet(build))
+				for column, width in enumerate(widths, start=1):
+					# xlsxwriter stores a width a little above the one it is given
+					self.assertAlmostEqual(found[column], width, delta=1.0)
 
 	def test_mixed_column_stays_text(self):
 		kinds, _ = compat._sheet_layout([["v"], [1], ["n/a"], [True]])
@@ -213,7 +296,7 @@ class TestXlsxLayoutAcrossBuilders(FrappeTestCase):
 		]
 		kinds, _ = compat._sheet_layout(data)
 		self.assertEqual(kinds, ["float", "date", "datetime"])
-		for label, build in _builders().items():
+		for label, build in _layout_builders().items():
 			with self.subTest(builder=label):
 				rows = [list(r) for r in data]
 				ws = openpyxl.load_workbook(io.BytesIO(build([("S", rows)]))).worksheets[0]
@@ -230,6 +313,66 @@ class TestXlsxLayoutAcrossBuilders(FrappeTestCase):
 		ws = openpyxl.load_workbook(io.BytesIO(compat._xlsx_bytes_openpyxl([("S", rows)]))).worksheets[0]
 		self.assertTrue(ws["A1"].is_date)
 		self.assertTrue(ws["A1"].font.b)
+
+
+@unittest.skipUnless(importlib.util.find_spec("xlsxwriter"), "the background writer needs xlsxwriter")
+class TestStreamWorkbookMatchesImmediateLayout(FrappeTestCase):
+	"""A background export opens like an immediate one (issue #598's layout).
+
+	``TestXlsxLayoutAcrossBuilders`` holds the cross-builder checks (the stream is one of
+	its builders); these name the places the stream writer once differed, so a regression
+	reads as what it is."""
+
+	def _sheet(self):
+		rows = [list(r) for r in TestXlsxLayoutAcrossBuilders.DATA]
+		return openpyxl.load_workbook(io.BytesIO(_stream_workbook_bytes([("Invoices", rows)]))).worksheets[0]
+
+	def test_header_is_bold_and_frozen(self):
+		ws = self._sheet()
+		self.assertTrue(ws["A1"].font.b)
+		self.assertEqual(ws.freeze_panes, "A2")
+
+	def test_dates_are_dates_floats_are_grouped_and_text_stays_text(self):
+		ws = self._sheet()
+		self.assertTrue(ws["C2"].is_date)
+		self.assertEqual(ws["D2"].number_format, compat.XLSX_FLOAT_FORMAT)
+		self.assertEqual(ws["F2"].value, "00123")  # a code, not a number
+		self.assertEqual(ws["F2"].number_format, "General")
+
+	def test_header_has_no_fill(self):
+		self.assertIsNone(self._sheet()["A1"].fill.fill_type)
+
+	def test_integers_use_the_grouped_format(self):
+		self.assertEqual(self._sheet()["E2"].number_format, compat.XLSX_INT_FORMAT)
+
+	def test_header_row_has_a_filter(self):
+		self.assertEqual(self._sheet().auto_filter.ref, "A1:F3")
+
+	def test_sheet_is_named_after_the_title(self):
+		self.assertEqual(self._sheet().title, "Invoices")
+
+	def test_sheet_name_matches_the_immediate_export(self):
+		from jarvis.tools._export import renderers
+		from jarvis.tools._export.model import ExportModel
+
+		title = "Q1/Q2: [x]"
+		model = ExportModel(columns=["a"], rows=[[1]], total=1, meta={"title": title})
+		immediate = openpyxl.load_workbook(io.BytesIO(renderers.xlsx(model))).worksheets[0].title
+		stream = openpyxl.load_workbook(io.BytesIO(_stream_workbook_bytes([(title, [["a"], [1]])])))
+		self.assertEqual(immediate, "Q1 Q2   x ")
+		self.assertEqual(stream.worksheets[0].title, immediate)
+
+	def test_sheet_name_is_cut_to_31_characters(self):
+		self.assertEqual(streaming.sheet_name("x" * 60), "x" * 31)
+		self.assertEqual(streaming.sheet_name(None), "Export")
+		self.assertEqual(streaming.sheet_name(""), "Export")
+
+	def test_time_column_keeps_a_time_format(self):
+		# MariaDB returns a Time field as a timedelta.
+		data = [["Start"], [datetime.timedelta(hours=9, minutes=30)]]
+		ws = openpyxl.load_workbook(io.BytesIO(_stream_workbook_bytes([("T", data)]))).worksheets[0]
+		self.assertIn("h", ws["A2"].number_format.lower())
+		self.assertTrue(ws["A2"].is_date)
 
 
 class TestPermissionConditionsAcrossMajors(FrappeTestCase):
