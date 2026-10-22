@@ -18,7 +18,7 @@ export function whenText(value, now = Date.now()) {
 	const date = toDate(value);
 	if (!date) return "";
 	const days = Math.round(
-		(new Date(date).setHours(0, 0, 0, 0) - new Date(now).setHours(0, 0, 0, 0)) / 86400000,
+		(new Date(date).setHours(0, 0, 0, 0) - new Date(now).setHours(0, 0, 0, 0)) / 86400000
 	);
 	if (days === 0) return timeOf(date);
 	if (days === 1) return __("tomorrow {0}", [timeOf(date)]);
@@ -135,16 +135,16 @@ const BUILDERS = {
 			s.error
 				? tone(s.error, "warn")
 				: s.phase === "generating"
-					? tone(
-							__(
-								"The report is being generated in the background; the file follows automatically.",
-							),
+				? tone(
+						__(
+							"The report is being generated in the background; the file follows automatically."
 						)
-					: tone(__("Waiting for a free background worker; it starts automatically.")),
+				  )
+				: tone(__("Waiting for a free background worker; it starts automatically.")),
 		],
 		footer: s.asked_at
 			? __("Asked at {0}", [whenText(s.asked_at, ctx.now)]) +
-				(retried(s) ? ` · ${__("attempt 2 of 2 next")}` : "")
+			  (retried(s) ? ` · ${__("attempt 2 of 2 next")}` : "")
 			: "",
 		buttons: ["cancel"],
 	}),
@@ -172,7 +172,7 @@ const BUILDERS = {
 		const next = toDate(s.next_attempt);
 		const after = next && next > ctx.now ? whenText(s.next_attempt, ctx.now) : "";
 		const base = __(
-			"The site is being updated, so this export stopped to stay out of its way.",
+			"The site is being updated, so this export stopped to stay out of its way."
 		);
 		const rest = after
 			? __("It starts again automatically after {0}.", [after])
@@ -194,19 +194,19 @@ const BUILDERS = {
 				tone(
 					__("Made at {0} from the data at that time. Ask again for fresh numbers.", [
 						made,
-					]),
-				),
+					])
+				)
 			);
 		if (s.limited_by_spec)
 			notes.push(
 				tone(
 					__("Holds only the first {0} rows the query asked for.", [s.limited_by_spec]),
-					"warn",
-				),
+					"warn"
+				)
 			);
 		if (s.cells_truncated)
 			notes.push(
-				tone(__("Some long cells were shortened; the row count is complete."), "warn"),
+				tone(__("Some long cells were shortened; the row count is complete."), "warn")
 			);
 		return {
 			pill: tone(__("Ready"), "ok"),
@@ -245,8 +245,8 @@ const BUILDERS = {
 				s.finished_at
 					? __("You cancelled this export at {0}. Nothing was saved.", [
 							whenText(s.finished_at, ctx.now),
-						])
-					: __("You cancelled this export. Nothing was saved."),
+					  ])
+					: __("You cancelled this export. Nothing was saved.")
 			),
 		],
 	}),
