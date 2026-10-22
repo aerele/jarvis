@@ -151,3 +151,220 @@ class TestRunAsSetTimeRule(_RunAsFixture):
 			self._set_as(self.owner, inst, self.sm)
 		frappe.db.rollback()
 		self.assertEqual(frappe.db.get_value(INSTALLATION, inst, "run_as_user"), self.owner)
+
+
+class TestRunAsRunTimeRecheck(_RunAsFixture):
+	"""Every run re-judges the mapping against the setter's roles now."""
+
+	def _mapped_by(self, setter: str) -> str:
+		"""An enabled install owned by ``owner`` and mapped to ``peer`` by ``setter``."""
+		inst = _install_as(self.owner)
+		self._set_as(setter, inst, self.peer)
+		frappe.db.set_value(INSTALLATION, inst, "enabled", 1, update_modified=False)
+		frappe.db.commit()
+		return inst
+
+	def _revoke_sm(self, user: str):
+		frappe.get_doc("User", user).remove_roles("System Manager")
+		frappe.clear_cache(user=user)
+
+	def _restore_sm(self, user: str):
+		frappe.get_doc("User", user).add_roles("System Manager")
+		frappe.clear_cache(user=user)
+		frappe.db.commit()
+
+	def _refusal(self, inst: str):
+		from jarvis.chat.agent_scheduler import run_as_mapping_refusal
+
+		owner, run_as = frappe.db.get_value(INSTALLATION, inst, ["owner", "run_as_user"])
+		return run_as_mapping_refusal(inst, owner, run_as)
+
+	# -- the rule itself --------------------------------------------------- #
+	def test_self_map_is_unaffected(self):
+		inst = _install_as(self.owner)
+		self.assertIsNone(self._refusal(inst))
+
+	def test_mapping_set_by_a_system_manager_passes(self):
+		inst = self._mapped_by(self.sm2)
+		self.assertIsNone(self._refusal(inst))
+
+	def test_mapping_set_by_administrator_passes(self):
+		inst = self._mapped_by("Administrator")
+		self.assertIsNone(self._refusal(inst))
+
+	def test_mapping_is_refused_once_the_setter_loses_system_manager(self):
+		inst = self._mapped_by(self.sm2)
+		self._revoke_sm(self.sm2)
+		try:
+			reason = self._refusal(inst)
+		finally:
+			self._restore_sm(self.sm2)
+		self.assertIn("no longer a System Manager", reason)
+		self.assertIn(self.sm2, reason)
+
+	def test_mapping_is_refused_when_the_setter_is_disabled(self):
+		inst = self._mapped_by(self.sm2)
+		frappe.db.set_value("User", self.sm2, "enabled", 0, update_modified=False)
+		try:
+			reason = self._refusal(inst)
+		finally:
+			frappe.db.set_value("User", self.sm2, "enabled", 1, update_modified=False)
+		self.assertIn("is disabled", reason)
+
+	def test_cross_user_mapping_with_no_record_fails_closed(self):
+		inst = _install_as(self.owner)
+		# A raw write leaves no Version row and no audit row behind.
+		frappe.db.set_value(INSTALLATION, inst, "run_as_user", self.peer, update_modified=False)
+		reason = self._refusal(inst)
+		self.assertIn("nothing records who set the run-as user", reason)
+		self.assertIn("System Manager", reason)
+
+	def test_a_raw_write_after_a_recorded_mapping_leaves_it_unattributed(self):
+		inst = self._mapped_by(self.sm2)
+		frappe.db.set_value(INSTALLATION, inst, "run_as_user", self.jadmin, update_modified=False)
+		self.assertIn("nothing records", self._refusal(inst))
+
+	def test_a_self_map_by_the_run_as_user_needs_no_system_manager(self):
+		inst = _install_as(self.owner)
+		self._set_as(self.sm2, inst, self.peer)
+		# A Jarvis Admin (not a System Manager) re-points the install at themselves.
+		self._set_as(self.jadmin, inst, self.jadmin)
+		self._revoke_sm(self.sm2)
+		try:
+			self.assertIsNone(self._refusal(inst))
+		finally:
+			self._restore_sm(self.sm2)
+
+	def test_insert_time_mapping_is_attributed_through_its_audit_row(self):
+		from jarvis.chat.agent_activity import log_activity
+
+		inst = _install_as(self.owner)
+		frappe.db.set_value(INSTALLATION, inst, "run_as_user", self.peer, update_modified=False)
+		log_activity(
+			agent=AGENT,
+			agent_title=None,
+			installation=inst,
+			action="run_as_changed",
+			detail=f"run as {self.peer} (set by {self.sm2})",
+			owner=self.owner,
+		)
+		self.assertIsNone(self._refusal(inst))
+		self._revoke_sm(self.sm2)
+		try:
+			self.assertIn("no longer a System Manager", self._refusal(inst))
+		finally:
+			self._restore_sm(self.sm2)
+
+	# -- manual path -------------------------------------------------------- #
+	def test_run_agent_now_refuses_a_mapping_whose_setter_lost_system_manager(self):
+		inst = self._mapped_by(self.sm2)
+		self._revoke_sm(self.sm2)
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaises(frappe.PermissionError) as ctx:
+				agents_api.run_agent_now(inst)
+		finally:
+			frappe.set_user("Administrator")
+			self._restore_sm(self.sm2)
+		self.assertIn("no longer a System Manager", str(ctx.exception))
+		self.assertEqual(frappe.db.count(RUN, {"installation": inst}), 0)
+
+	def test_run_agent_now_refuses_a_cross_user_mapping_with_no_record(self):
+		inst = _install_as(self.owner)
+		frappe.db.set_value(
+			INSTALLATION, inst, {"run_as_user": self.peer, "enabled": 1}, update_modified=False
+		)
+		frappe.db.commit()
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaises(frappe.PermissionError) as ctx:
+				agents_api.run_agent_now(inst)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIn("ask a System Manager to set it again", str(ctx.exception))
+
+	# -- scheduled path ------------------------------------------------------ #
+	def _due_row(self, inst: str):
+		from frappe.utils import add_days, now_datetime
+
+		frappe.db.set_value(
+			INSTALLATION,
+			inst,
+			{
+				"schedule_enabled": 1,
+				"schedule_frequency": "daily",
+				"schedule_time": "01:00:00",
+				"next_run_at": add_days(now_datetime(), -1),
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		return frappe.db.get_value(
+			INSTALLATION,
+			inst,
+			[
+				"name",
+				"owner",
+				"run_as_user",
+				"agent",
+				"schedule_frequency",
+				"schedule_time",
+				"schedule_weekday",
+				"schedule_day_of_month",
+				"installable",
+				"activation_state",
+				"source_apps_json",
+			],
+			as_dict=True,
+		)
+
+	def _sweep(self, row):
+		from unittest import mock
+
+		from frappe.utils import now_datetime
+
+		from jarvis.chat import agent_scheduler
+
+		with (
+			mock.patch.object(agent_scheduler, "_dispatch") as dispatch,
+			mock.patch.object(agent_scheduler, "_over_run_budget", return_value=(False, "")),
+			mock.patch("jarvis.chat.agent_models.gate_run", return_value={"ok": True}),
+		):
+			frappe.set_user("Administrator")
+			agent_scheduler._sweep_one(row, now_datetime(), set())
+		return dispatch
+
+	def test_scheduled_run_is_skipped_and_recorded_when_the_setter_lost_system_manager(self):
+		inst = self._mapped_by(self.sm2)
+		row = self._due_row(inst)
+		self._revoke_sm(self.sm2)
+		try:
+			dispatch = self._sweep(row)
+		finally:
+			self._restore_sm(self.sm2)
+		dispatch.assert_not_called()
+		runs = frappe.get_all(RUN, filters={"installation": inst}, fields=["status", "error"])
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(runs[0]["status"], "failed")
+		self.assertIn("no longer a System Manager", runs[0]["error"])
+		self.assertIn("ask one to set it again", runs[0]["error"])  # survives the 140-char cap
+		# The slot was consumed.
+		self.assertIsNotNone(frappe.db.get_value(INSTALLATION, inst, "last_run_at"))
+
+	def test_scheduled_run_with_an_unrecorded_cross_user_mapping_is_skipped(self):
+		inst = _install_as(self.owner)
+		frappe.db.set_value(
+			INSTALLATION, inst, {"run_as_user": self.peer, "enabled": 1}, update_modified=False
+		)
+		row = self._due_row(inst)
+		dispatch = self._sweep(row)
+		dispatch.assert_not_called()
+		error = frappe.db.get_value(RUN, {"installation": inst}, "error")
+		self.assertIn("nothing records who set the run-as user", error)
+
+	def test_scheduled_run_goes_ahead_while_the_setter_is_still_a_system_manager(self):
+		inst = self._mapped_by(self.sm2)
+		row = self._due_row(inst)
+		dispatch = self._sweep(row)
+		dispatch.assert_called_once()
+		self.assertEqual(frappe.db.count(RUN, {"installation": inst, "status": "failed"}), 0)
