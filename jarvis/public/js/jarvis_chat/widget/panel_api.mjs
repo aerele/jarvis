@@ -58,6 +58,9 @@ export function csrf() {
   return globalThis.frappe?.csrf_token || globalThis.csrf_token || "";
 }
 
+// Mirrors MAX_MESSAGE_CHARS in frontend/src/lib/errors.js (smaller, for the panel).
+const MAX_REASON_CHARS = 300;
+
 // Best human-readable reason in a Frappe error body: _server_messages (a JSON
 // list of JSON strings), then message, then exception. HTML tags are stripped.
 export function serverReason(body) {
@@ -71,12 +74,22 @@ export function serverReason(body) {
   }
   if (!text && typeof body.message === "string") text = body.message;
   if (!text && typeof body.exception === "string") {
-    text = body.exception.split(":").slice(1).join(":") || body.exception;
+    // Only the text after the first colon; a bare class name is no use to users.
+    text = body.exception.split(":").slice(1).join(":");
   }
-  return text
-    .replace(/<[^>]*>/g, " ")
+  text = text
+    .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_m, n) => String.fromCharCode(Number(n)))
+    .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ")
     .trim();
+  return text.length > MAX_REASON_CHARS
+    ? text.slice(0, MAX_REASON_CHARS - 1) + "…"
+    : text;
 }
 
 // Multipart endpoints cannot go through frappe.call, so these two use fetch
