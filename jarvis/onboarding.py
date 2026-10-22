@@ -568,7 +568,7 @@ def _adopt_orphan_capture(account_ref: str, consumed_capture_ids: list) -> str:
 	return blob
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_llm_pool(
 	models: str | list,
 	preset: str | None = None,
@@ -2141,7 +2141,7 @@ _WIPE_DOCTYPES = (
 )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_llm: bool = False) -> dict:
 	"""Self-serve workspace reset: the control plane rebuilds the container NOW
 	(subscription kept), then this site disconnects its agent transport and polls
@@ -2173,7 +2173,7 @@ def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_ll
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reset_onboarding(wipe_data: bool = True) -> dict:
 	"""Customer-facing "Reset onboarding" (Jarvis Settings button): clear this
 	bench's connection + LLM credentials and — by default, matching the
@@ -2388,7 +2388,7 @@ def reconcile_pending_workspace_reset() -> None:
 		frappe.log_error(title="Jarvis: workspace-reset reconcile failed", message=frappe.get_traceback())
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_llm_creds(
 	provider: str,
 	model: str,

@@ -228,7 +228,7 @@ def chat_recovery_stats() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reset_agent_pairing() -> dict:
 	"""Clear the cached chat-device pairing and re-pair from scratch.
 
