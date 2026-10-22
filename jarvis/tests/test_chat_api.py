@@ -1049,12 +1049,17 @@ class TestThinkingOverride(FrappeTestCase):
 		self.assertEqual(out["error"]["code"], "unknown_thinking")
 
 	def test_set_thinking_empty_clears(self):
-		from jarvis.chat import api
+		from jarvis.chat import api, turn_handler
 
 		api.set_conversation_thinking(self.conv.name, "high")
-		out = api.set_conversation_thinking(self.conv.name, "")
+		with patch.object(turn_handler, "_runs_on_claude_plan", return_value=True):
+			out = api.set_conversation_thinking(self.conv.name, "")
 		self.assertTrue(out["ok"])
-		self.assertEqual(out["data"]["effective_thinking"], "medium")
+		self.assertEqual(out["data"]["effective_thinking"], turn_handler.DEFAULT_THINKING_LEVEL)
+		self.assertFalse(frappe.db.get_value("Jarvis Conversation", self.conv.name, "thinking_override"))
+		with patch.object(turn_handler, "_runs_on_claude_plan", return_value=False):
+			out = api.set_conversation_thinking(self.conv.name, "")
+		self.assertEqual(out["data"]["effective_thinking"], "")
 
 
 class TestChatUiSettings(FrappeTestCase):

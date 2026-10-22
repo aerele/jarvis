@@ -20,7 +20,7 @@ CLAUDE_PLAN_MODEL = "claude-opus-5"
 PROXY_MODEL = "gpt-5.6-terra"
 
 
-def _turn_thinking(level="medium", *, proxy=True, pinned=("", None), primary=PROXY_MODEL):
+def _turn_thinking(level="medium", *, proxy=True, pinned=("", None), primary=PROXY_MODEL, claude_plan=False):
 	"""Run ``_turn_thinking`` for one conversation on a faked tenant."""
 	conv = SimpleNamespace(thinking_override=level)
 	with (
@@ -30,6 +30,7 @@ def _turn_thinking(level="medium", *, proxy=True, pinned=("", None), primary=PRO
 		patch.object(
 			turn_handler, "_is_native_claude_pick", side_effect=lambda _s, model: model == CLAUDE_PLAN_MODEL
 		),
+		patch.object(turn_handler, "one_shot_runs_on_claude_plan", return_value=claude_plan),
 	):
 		return turn_handler._turn_thinking(conv)
 
@@ -38,9 +39,29 @@ class TestTurnThinking(TestCase):
 	def test_no_proxy_keeps_the_level(self):
 		self.assertEqual(_turn_thinking(" high ", proxy=False), "high")
 
-	def test_unset_level_stays_unset(self):
+	def test_unset_level_off_the_claude_plan_stays_unset(self):
 		self.assertIsNone(_turn_thinking(""))
 		self.assertIsNone(_turn_thinking(None, proxy=False))
+
+	def test_unset_level_on_the_claude_plan_runs_at_the_default(self):
+		self.assertEqual(turn_handler.DEFAULT_THINKING_LEVEL, "low")
+		self.assertEqual(_turn_thinking("", claude_plan=True), "low")
+		self.assertEqual(_turn_thinking(None, proxy=False, claude_plan=True), "low")
+
+	def test_stored_level_wins_over_the_default(self):
+		self.assertEqual(_turn_thinking("high", proxy=False, claude_plan=True), "high")
+
+	def test_claude_plan_check_uses_the_resolved_route(self):
+		conv = SimpleNamespace(thinking_override="", model_override="")
+		settings = SimpleNamespace(proxy_active=1)
+		route = (CLAUDE_PLAN_MODEL, turn_handler.NATIVE_CLAUDE_PROVIDER)
+		with (
+			patch("frappe.get_cached_doc", return_value=settings),
+			patch.object(turn_handler, "_resolve_model_and_provider", return_value=route),
+			patch.object(turn_handler, "one_shot_runs_on_claude_plan", return_value=True) as check,
+		):
+			self.assertTrue(turn_handler._runs_on_claude_plan(conv))
+		check.assert_called_once_with(settings, *route)
 
 	def test_proxy_unpinned_drops_the_level(self):
 		self.assertIsNone(_turn_thinking("medium"))

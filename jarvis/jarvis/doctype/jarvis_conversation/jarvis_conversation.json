@@ -54,7 +54,7 @@
    "fieldtype": "Select",
    "label": "Thinking Effort",
    "options": "\nlow\nmedium\nhigh",
-   "description": "Per-conversation reasoning effort sent to agent via an inline /think directive in the user message. Empty falls back to agent's default (medium). Maps to the Fast/Balanced/Deep UI selector."
+   "description": "Per-conversation reasoning effort, sent with each chat.send call. Empty (Auto) runs Claude-plan turns at low; other routes keep the agent's default. Set from the chat's Effort picker."
   },
   {
    "fieldname": "auto_apply",

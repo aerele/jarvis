@@ -767,6 +767,11 @@ def _session_model_patch(conv) -> tuple[bool, str | None]:
 # claude-cli runtime and keeps the full range.
 CHAT_THINKING_LEVELS = ("low", "medium", "high")
 
+# The level a Claude-plan turn runs at when its chat stores none ("Auto"). Low drafted as
+# accurately as the agent's own default in the 2026-10 Purchase Invoice bake-off, at about
+# 2.5x the speed (median 78 s -> 31 s on Opus 5); a chat can still pick medium or high.
+DEFAULT_THINKING_LEVEL = "low"
+
 
 def offered_thinking_levels(settings) -> list[str]:
 	"""The effort levels to offer: none when every turn runs on the proxy."""
@@ -778,12 +783,21 @@ def offered_thinking_levels(settings) -> list[str]:
 def _turn_thinking(conv) -> str | None:
 	"""The thinking level to send with this turn, or None to send none.
 
+	A stored level goes out unless the turn runs on the proxy route. With none stored, a
+	Claude-plan turn runs at ``DEFAULT_THINKING_LEVEL``; any other route sends none and
+	keeps the agent's default, since some providers answer an explicit level with an error.
 	The conversation keeps its stored level: a later pin to a Claude-plan model can use it.
 	"""
-	level = (conv.thinking_override or "").strip() or None
-	if level and _runs_on_proxy_route(conv):
-		return None
-	return level
+	level = (conv.thinking_override or "").strip()
+	if level:
+		return None if _runs_on_proxy_route(conv) else level
+	return DEFAULT_THINKING_LEVEL if _runs_on_claude_plan(conv) else None
+
+
+def _runs_on_claude_plan(conv) -> bool:
+	settings = frappe.get_cached_doc("Jarvis Settings")
+	model, provider = _resolve_model_and_provider(conv)
+	return one_shot_runs_on_claude_plan(settings, model, provider)
 
 
 def _runs_on_proxy_route(conv) -> bool:

@@ -3782,10 +3782,10 @@ def warm_session() -> dict:
 def set_conversation_thinking(conversation: str, thinking: str | None = None) -> dict:
 	"""Set or clear the per-conversation thinking effort (low/medium/high).
 
-	Empty / None clears it, so turns fall back to agent's default. The
-	value is plumbed as an inline /think directive in the user message, so it
-	never affects the cacheable system prefix. Returns the effective level
-	(empty resolves to "medium" for display).
+	Empty / None clears it ("Auto"): Claude-plan turns then run at
+	``turn_handler.DEFAULT_THINKING_LEVEL`` and other routes keep the agent's
+	default. The level rides the ``chat.send`` call, never the cacheable system
+	prefix. Returns the effective level, empty when the agent's default applies.
 
 	Owner-only (SEC-002): mutates the conversation via ``db.set_value`` (which
 	bypasses permission checks), so ownership is asserted explicitly here."""
@@ -3818,7 +3818,12 @@ def set_conversation_thinking(conversation: str, thinking: str | None = None) ->
 		label=f"set_conversation_thinking {conversation}",
 	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
-	return {"ok": True, "data": {"effective_thinking": level or "medium"}}
+	if not level:
+		from jarvis.chat import turn_handler
+
+		conv = frappe.db.get_value(CONV, conversation, ["thinking_override", "model_override"], as_dict=True)
+		level = turn_handler._turn_thinking(conv) or ""
+	return {"ok": True, "data": {"effective_thinking": level}}
 
 
 @frappe.whitelist(methods=["POST"])
