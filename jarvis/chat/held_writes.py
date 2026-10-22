@@ -19,7 +19,8 @@ e. a single create of a draft of a submittable doctype -> auto-applied, when it 
    auto-applied only to a draft this same conversation created (``note_created_draft``);
 f. any other create/update (an update of any other record included) -> HELD on the Approval Board (a batch that includes a
    submittable doctype is refused instead);
-g. every other gated tool, and bulk forms of ungated writes -> refused, no preview.
+g. every other gated tool, and bulk forms of ungated writes -> refused, no preview;
+   ``remember`` (the user's durable memory) is refused outright.
 
 A held write is a sealed ``Jarvis Pending Action`` (kind ``file_box_held``), deduped
 per owner + party (``held_parties``): K files from one new vendor wait on ONE row.
@@ -163,6 +164,10 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		return _refuse("InvalidArgumentError", "args must be a JSON object; nothing was written.")
 	if tool == "call_connector" and api._connector_call_is_safe_read(args):
 		return None
+	if tool == "remember":  # the user's durable memory: a person writes it, in chat
+		from jarvis.tools.remember import UNATTENDED_MESSAGE
+
+		return _refuse("FileBoxRefusedError", UNATTENDED_MESSAGE)
 	from jarvis.chat import held_sheets
 
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before lock
