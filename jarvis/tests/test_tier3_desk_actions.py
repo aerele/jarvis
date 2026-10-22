@@ -429,6 +429,18 @@ class TestRemoveTag(FrappeTestCase):
 # ---------------------------------------------------------------------
 
 
+def _follow_target(fn: str) -> str:
+	"""The Frappe function the tool calls: v16 takes the user on the underscore
+	variant, v15 on the public one."""
+	import inspect
+
+	from frappe.desk.form import document_follow
+
+	public = getattr(document_follow, fn)
+	name = fn if "user" in inspect.signature(public).parameters else f"_{fn}"
+	return f"frappe.desk.form.document_follow.{name}"
+
+
 class TestFollowDocument(FrappeTestCase):
 	def test_rejects_unknown_doc(self):
 		with _no_exists(), self.assertRaises(InvalidArgumentError):
@@ -438,8 +450,9 @@ class TestFollowDocument(FrappeTestCase):
 		with (
 			_all_exist(),
 			patch(
-				"frappe.desk.form.document_follow.follow_document",
+				_follow_target("follow_document"),
 				return_value=True,
+				autospec=True,
 			) as f,
 		):
 			out = follow_document("User", "test@example.com")
@@ -447,14 +460,15 @@ class TestFollowDocument(FrappeTestCase):
 		self.assertIsNotNone(out["user"])
 		self.assertTrue(out["followed"])
 		# The underlying helper receives the session user verbatim.
-		self.assertEqual(f.call_args.kwargs.get("user"), out["user"])
+		self.assertEqual(f.call_args.args[2], out["user"])
 
 	def test_accepts_explicit_user(self):
 		with (
 			_all_exist(),
 			patch(
-				"frappe.desk.form.document_follow.follow_document",
+				_follow_target("follow_document"),
 				return_value=True,
+				autospec=True,
 			),
 		):
 			out = follow_document(
@@ -470,8 +484,9 @@ class TestUnfollowDocument(FrappeTestCase):
 		with (
 			_all_exist(),
 			patch(
-				"frappe.desk.form.document_follow.unfollow_document",
+				_follow_target("unfollow_document"),
 				return_value=True,
+				autospec=True,
 			),
 		):
 			out = unfollow_document("User", "test@example.com")

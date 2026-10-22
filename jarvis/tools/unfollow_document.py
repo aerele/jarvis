@@ -18,6 +18,8 @@ Two shapes:
 
 from __future__ import annotations
 
+import inspect
+
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
@@ -60,11 +62,17 @@ def _unfollow_document_one(doctype: str, name: str, user: str) -> bool:
 	if user != frappe.session.user:
 		frappe.has_permission(doctype, "read", doc=name, throw=True)
 
-	from frappe.desk.form.document_follow import (
-		unfollow_document as _unfollow,
-	)
+	from frappe.desk.form import document_follow
 
-	result = _unfollow(doctype=doctype, doc_name=name, user=user)
+	# v16 whitelisted unfollow_document() takes no user (it acts for the session user); the
+	# user-taking variant is the underscore-prefixed one. v15's public function
+	# takes user itself. Pick by signature so both majors work.
+	public = document_follow.unfollow_document
+	if "user" in inspect.signature(public).parameters:
+		_unfollow = public
+	else:
+		_unfollow = document_follow._unfollow_document
+	result = _unfollow(doctype, name, user)
 	return bool(result)
 
 
