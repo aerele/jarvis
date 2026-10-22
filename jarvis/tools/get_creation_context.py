@@ -321,8 +321,9 @@ def _field_map(meta) -> list[dict]:
 
 
 def _compact(rec: dict) -> dict:
-	"""Drop keys whose value is False, None or empty: absent means off."""
-	return {k: v for k, v in rec.items() if v not in (None, "", False)}
+	"""Drop keys whose value is False, None or empty: absent means off. A zero
+	stays (``0 == False`` would drop it under an ``in`` test)."""
+	return {k: v for k, v in rec.items() if v is not None and v is not False and v != ""}
 
 
 def _split_fields(full_fields: list[dict]) -> tuple[list[dict], list[str], list[str]]:
