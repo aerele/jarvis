@@ -5,10 +5,12 @@ from unittest.mock import patch
 
 import frappe
 
+from jarvis.tests._collaboration_test_site import require_collaboration_test_site
+
 
 class TestCollaborationRuntimePaths(unittest.TestCase):
 	def setUp(self):
-		self.assertEqual(frappe.local.site, "test_jarvis")
+		require_collaboration_test_site(frappe.local.site)
 
 	def test_attested_skills_root_is_used_verbatim(self):
 		from jarvis.chat.collaboration_runtime import configured_skills_root
