@@ -19,6 +19,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.exceptions import PermissionDeniedError
 from jarvis.tools._ledger_access import gl_dimension_restrictions
 from jarvis.tools.get_balance_on import get_balance_on
+from jarvis.tools.get_customer_outstanding import get_customer_outstanding
 from jarvis.tools.get_stock_balance import get_stock_balance
 from jarvis.tools.get_valuation_rate import get_valuation_rate
 
@@ -43,6 +44,7 @@ USER_UNRESTRICTED = "jls-unrestricted@example.com"
 # dimension User Permission (or none).
 CUSTOMER = "_JLS Customer"
 PROJECT = "_JLS Project"
+PROJECT_2 = "_JLS Project 2"
 ACCOUNT_ROOT_PL = "_JLS Expenses"
 ACCOUNT_PL = "_JLS Rent"
 ACCOUNT_ROOT_BS = "_JLS Assets"
@@ -51,6 +53,7 @@ COST_CENTER_OTHER = "_JLS Other Cost Center"
 USER_GL_PROJECT = "jls-gl-project@example.com"
 USER_GL_COST_CENTER = "jls-gl-cost-center@example.com"
 USER_GL_FREE = "jls-gl-free@example.com"
+USER_OUTSTANDING_PROJECT = "jls-outstanding-project@example.com"
 
 
 def _ensure_user(email: str, roles: tuple) -> None:
@@ -197,7 +200,7 @@ class LedgerScopeTestCase(FrappeTestCase):
 		# Users are cheap and reused idempotently; everything else rolls back.
 		for email in (USER_COMPANY_A, USER_WAREHOUSE_A1, USER_ITEM_1, USER_UNRESTRICTED):
 			_ensure_user(email, ("Stock User",))
-		for email in (USER_GL_PROJECT, USER_GL_COST_CENTER, USER_GL_FREE):
+		for email in (USER_GL_PROJECT, USER_GL_COST_CENTER, USER_GL_FREE, USER_OUTSTANDING_PROJECT):
 			_ensure_user(email, ("Accounts User",))
 		frappe.db.commit()
 		_ensure_company(COMPANY_A, "JLSA")
@@ -400,3 +403,186 @@ class TestGetBalanceOnGlDimensionScope(LedgerScopeTestCase):
 		):
 			get_balance_on(account=self.account_pl, cost_center=self.cost_center)
 		helper.assert_not_called()
+
+
+class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
+	"""The Sales Order and Delivery Note parts count only documents the
+	caller can read; an unrestricted caller gets ERPNext's own number.
+
+	Documents are written with db_insert (no submit flow, so no items,
+	accounts or stock ledger are needed); amounts:
+
+	  GL            debit 5000 / credit 1000 (cost center A), debit 300 (cost center B)
+	  SO-1  P1      1000 x 75% unbilled = 750
+	  SO-2  P2       400 x 100% unbilled = 400
+	  SO closed / fully billed: excluded
+	  DN-1  P1      600 item, 200 billed -> 400 / 600 x 708 = 472
+	  DN-2  P2      300 item -> 300 / 300 x 354 = 354
+	  DN item against a Sales Order: excluded
+	"""
+
+	GL_TOTAL = 4300.0
+	GL_COST_CENTER_A = 4000.0
+	SO_P1 = 750.0
+	SO_ALL = 1150.0
+	DN_P1 = 472.0
+	DN_ALL = 826.0
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.customer = _ensure_customer(CUSTOMER)
+		cls.cc_a = frappe.db.get_value("Cost Center", {"company": COMPANY_A, "is_group": 0})
+		cls.cc_b = _ensure_cost_center(COST_CENTER_OTHER, COMPANY_A)
+		cls.p1 = _ensure_project(PROJECT, COMPANY_A)
+		cls.p2 = _ensure_project(PROJECT_2, COMPANY_A)
+		_ensure_user_permission(USER_OUTSTANDING_PROJECT, "Project", cls.p1)
+		cls._insert_ledger_and_documents()
+
+	@classmethod
+	def _insert(cls, doctype: str, name: str, **values) -> None:
+		frappe.get_doc({"doctype": doctype, "name": name, **values}).db_insert()
+
+	@classmethod
+	def _insert_ledger_and_documents(cls):
+		gl = {
+			"party_type": "Customer",
+			"party": cls.customer,
+			"company": COMPANY_A,
+			"is_cancelled": 0,
+			"docstatus": 1,
+			"posting_date": frappe.utils.today(),
+		}
+		cls._insert("GL Entry", "_JLS-GLE-1", debit=5000, credit=0, cost_center=cls.cc_a, **gl)
+		cls._insert("GL Entry", "_JLS-GLE-2", debit=0, credit=1000, cost_center=cls.cc_a, **gl)
+		cls._insert("GL Entry", "_JLS-GLE-3", debit=300, credit=0, cost_center=cls.cc_b, **gl)
+		cls._insert(
+			"GL Entry", "_JLS-GLE-4", debit=999, credit=0, cost_center=cls.cc_a, **{**gl, "is_cancelled": 1}
+		)
+
+		so = {"customer": cls.customer, "company": COMPANY_A, "docstatus": 1}
+		cls._insert(
+			"Sales Order",
+			"_JLS-SO-1",
+			base_grand_total=1000,
+			per_billed=25,
+			status="To Bill",
+			project=cls.p1,
+			**so,
+		)
+		cls._insert(
+			"Sales Order",
+			"_JLS-SO-2",
+			base_grand_total=400,
+			per_billed=0,
+			status="To Deliver and Bill",
+			project=cls.p2,
+			**so,
+		)
+		cls._insert(
+			"Sales Order",
+			"_JLS-SO-3",
+			base_grand_total=900,
+			per_billed=0,
+			status="Closed",
+			project=cls.p1,
+			**so,
+		)
+		cls._insert(
+			"Sales Order",
+			"_JLS-SO-4",
+			base_grand_total=900,
+			per_billed=100,
+			status="Completed",
+			project=cls.p1,
+			**so,
+		)
+
+		dn = {"customer": cls.customer, "company": COMPANY_A, "docstatus": 1, "status": "To Bill"}
+		cls._insert(
+			"Delivery Note", "_JLS-DN-1", base_net_total=600, base_grand_total=708, project=cls.p1, **dn
+		)
+		cls._insert(
+			"Delivery Note", "_JLS-DN-2", base_net_total=300, base_grand_total=354, project=cls.p2, **dn
+		)
+		cls._insert(
+			"Delivery Note",
+			"_JLS-DN-3",
+			base_net_total=500,
+			base_grand_total=590,
+			project=cls.p1,
+			**{**dn, "status": "Closed"},
+		)
+
+		def dn_item(name, parent, amount, **extra):
+			cls._insert(
+				"Delivery Note Item",
+				name,
+				parent=parent,
+				parenttype="Delivery Note",
+				parentfield="items",
+				amount=amount,
+				docstatus=1,
+				**extra,
+			)
+
+		dn_item("_JLS-DNI-1", "_JLS-DN-1", 600)
+		dn_item("_JLS-DNI-2", "_JLS-DN-2", 300)
+		dn_item("_JLS-DNI-3", "_JLS-DN-1", 250, against_sales_order="_JLS-SO-1")
+		dn_item("_JLS-DNI-4", "_JLS-DN-3", 500)
+		cls._insert(
+			"Sales Invoice Item",
+			"_JLS-SII-1",
+			parent="_JLS-SI-1",
+			parenttype="Sales Invoice",
+			parentfield="items",
+			dn_detail="_JLS-DNI-1",
+			amount=200,
+			docstatus=1,
+		)
+
+	def _erpnext(self, **kwargs) -> float:
+		from erpnext.selling.doctype.customer.customer import get_customer_outstanding as erpnext_gco
+
+		return erpnext_gco(customer=self.customer, company=COMPANY_A, **kwargs)
+
+	def test_preconditions_user_reads_customer_ledger_and_only_p1_documents(self):
+		user = USER_OUTSTANDING_PROJECT
+		self.assertTrue(frappe.has_permission("Customer", "read", doc=self.customer, user=user))
+		self.assertTrue(frappe.has_permission("GL Entry", "read", user=user))
+		for doctype, readable, hidden in (
+			("Sales Order", "_JLS-SO-1", "_JLS-SO-2"),
+			("Delivery Note", "_JLS-DN-1", "_JLS-DN-2"),
+		):
+			self.assertTrue(frappe.has_permission(doctype, "read", doc=readable, user=user))
+			self.assertFalse(frappe.has_permission(doctype, "read", doc=hidden, user=user))
+
+	def test_unrestricted_user_matches_erpnext(self):
+		with _as("Administrator"):
+			for kwargs in (
+				{},
+				{"ignore_outstanding_sales_order": True},
+				{"cost_center": self.cc_a},
+				{"cost_center": self.cc_a, "ignore_outstanding_sales_order": True},
+			):
+				got = get_customer_outstanding(self.customer, COMPANY_A, **kwargs)["outstanding"]
+				self.assertAlmostEqual(got, self._erpnext(**kwargs), places=4, msg=str(kwargs))
+
+	def test_unrestricted_user_total(self):
+		with _as("Administrator"):
+			out = get_customer_outstanding(self.customer, COMPANY_A)
+		self.assertAlmostEqual(out["outstanding"], self.GL_TOTAL + self.SO_ALL + self.DN_ALL, places=4)
+
+	def test_restricted_user_counts_only_readable_orders_and_notes(self):
+		with _as(USER_OUTSTANDING_PROJECT):
+			out = get_customer_outstanding(self.customer, COMPANY_A)
+		self.assertAlmostEqual(out["outstanding"], self.GL_TOTAL + self.SO_P1 + self.DN_P1, places=4)
+
+	def test_restricted_user_ignore_sales_order_and_cost_center_still_work(self):
+		with _as(USER_OUTSTANDING_PROJECT):
+			no_so = get_customer_outstanding(self.customer, COMPANY_A, ignore_outstanding_sales_order=True)[
+				"outstanding"
+			]
+			cc_a = get_customer_outstanding(self.customer, COMPANY_A, cost_center=self.cc_a)["outstanding"]
+		self.assertAlmostEqual(no_so, self.GL_TOTAL + self.DN_P1, places=4)
+		self.assertAlmostEqual(cc_a, self.GL_COST_CENTER_A + self.SO_P1 + self.DN_P1, places=4)

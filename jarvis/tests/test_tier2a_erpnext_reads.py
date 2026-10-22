@@ -204,7 +204,7 @@ class TestGetCustomerOutstanding(FrappeTestCase):
 			_all_exist(),
 			_allow_perm(),
 			patch(
-				"erpnext.selling.doctype.customer.customer.get_customer_outstanding",
+				"jarvis.tools.get_customer_outstanding._gl_outstanding",
 				return_value=2500.0,
 			),
 		):
@@ -633,7 +633,7 @@ class TestGetCustomerOutstandingCompanyPermission(CrossCompanyPermTestCase):
 		with (
 			_as(USER_COMPANY_SCOPED),
 			patch(
-				"erpnext.selling.doctype.customer.customer.get_customer_outstanding",
+				"jarvis.tools.get_customer_outstanding._gl_outstanding",
 				return_value=2500.0,
 			),
 			self.assertRaises(PermissionDeniedError),
@@ -644,7 +644,7 @@ class TestGetCustomerOutstandingCompanyPermission(CrossCompanyPermTestCase):
 		with (
 			_as(USER_COMPANY_SCOPED),
 			patch(
-				"erpnext.selling.doctype.customer.customer.get_customer_outstanding",
+				"jarvis.tools.get_customer_outstanding._gl_outstanding",
 				return_value=2500.0,
 			),
 		):
@@ -741,7 +741,7 @@ class TestBalanceToolsNeedLedgerRead(CrossCompanyPermTestCase):
 	def test_customer_outstanding_refused(self):
 		with (
 			_as(USER_SALES_ONLY),
-			patch("erpnext.selling.doctype.customer.customer.get_customer_outstanding") as helper,
+			patch("jarvis.tools.get_customer_outstanding._gl_outstanding") as helper,
 			self.assertRaises(PermissionDeniedError),
 		):
 			get_customer_outstanding(self.customer, PERM_COMPANY_A)
@@ -788,7 +788,7 @@ class TestAuditorLikeCompanyScope(CrossCompanyPermTestCase):
 		with (
 			_as(USER_AUDITOR_LIKE),
 			patch(
-				"erpnext.selling.doctype.customer.customer.get_customer_outstanding",
+				"jarvis.tools.get_customer_outstanding._gl_outstanding",
 				return_value=42.0,
 			),
 		):
