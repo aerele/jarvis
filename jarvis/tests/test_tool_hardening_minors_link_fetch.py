@@ -21,3 +21,15 @@ class TestLinkFetchGlobalOnly(unittest.TestCase):
 	def test_existing_blocks_still_apply(self):
 		for ip in ("10.0.0.1", "127.0.0.1", "169.254.169.254", "::1", "not-an-ip"):
 			self.assertTrue(link_fetch._is_blocked_ip(ip), ip)
+
+	def test_embedded_ipv4_in_ipv6_is_checked(self):
+		# IPv4-mapped loopback, 6to4 loopback, 6to4 10.0.0.1, and Teredo with a
+		# private server (10.0.0.1) and with a private client (10.0.0.1).
+		for ip in (
+			"::ffff:127.0.0.1",
+			"2002:7f00:1::1",
+			"2002:a00:1::1",
+			"2001:0:a00:1::1",
+			"2001:0:808:808::f5ff:fffe",
+		):
+			self.assertTrue(link_fetch._is_blocked_ip(ip), ip)
