@@ -8,6 +8,7 @@ jarvis module, so a new endpoint without ``methods=`` fails here on any Frappe.
 from __future__ import annotations
 
 import ast
+import functools
 from pathlib import Path
 
 from frappe.tests.utils import FrappeTestCase
@@ -30,12 +31,30 @@ GET_ALLOWLIST = frozenset(
 )
 
 
-def _is_whitelist(node: ast.AST) -> bool:
+def _whitelist_names(tree: ast.AST) -> tuple[set[str], set[str]]:
+	"""Names that mean ``frappe.whitelist`` in this module, from its imports.
+
+	Returns (module aliases for frappe, bare names bound to whitelist).
+	"""
+	modules = {"frappe"}
+	bare = set()
+	for node in ast.walk(tree):
+		if isinstance(node, ast.Import):
+			modules.update(a.asname for a in node.names if a.name == "frappe" and a.asname)
+		elif isinstance(node, ast.ImportFrom) and node.module == "frappe" and node.level == 0:
+			bare.update(a.asname or a.name for a in node.names if a.name == "whitelist")
+	return modules, bare
+
+
+def _is_whitelist(node: ast.AST, names: tuple[set[str], set[str]]) -> bool:
+	modules, bare = names
+	if isinstance(node, ast.Name):
+		return node.id in bare
 	return (
 		isinstance(node, ast.Attribute)
 		and node.attr == "whitelist"
 		and isinstance(node.value, ast.Name)
-		and node.value.id == "frappe"
+		and node.value.id in modules
 	)
 
 
@@ -50,6 +69,7 @@ def _methods_of(call: ast.Call) -> list[str] | None:
 	return None
 
 
+@functools.cache
 def _scan() -> list[tuple[str, int, str | None, list[str] | None]]:
 	"""Return (relative path, line, dotted path or None, methods) per use."""
 	found = []
@@ -59,15 +79,16 @@ def _scan() -> list[tuple[str, int, str | None, list[str] | None]]:
 			continue
 		module = ".".join(rel.with_suffix("").parts)
 		tree = ast.parse(path.read_text(), filename=str(path))
+		names = _whitelist_names(tree)
 		decorated = {}
 		for node in ast.walk(tree):
 			if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
 				for deco in node.decorator_list:
 					decorated[id(deco)] = f"{module}.{node.name}"
 		for node in ast.walk(tree):
-			if isinstance(node, ast.Call) and _is_whitelist(node.func):
+			if isinstance(node, ast.Call) and _is_whitelist(node.func, names):
 				found.append((str(rel), node.lineno, decorated.get(id(node)), _methods_of(node)))
-			elif _is_whitelist(node) and id(node) in decorated:
+			elif _is_whitelist(node, names) and id(node) in decorated:
 				# Bare ``@frappe.whitelist`` with no call: no methods at all.
 				found.append((str(rel), node.lineno, decorated[id(node)], None))
 	return found
