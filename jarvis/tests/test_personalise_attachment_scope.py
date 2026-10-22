@@ -142,7 +142,12 @@ class TestPersonaliseAttachmentScope(PersonaliseApiTestCase):
 	def test_file_on_own_earlier_note_is_used_and_its_row_is_unchanged(self):
 		with _as(USER_A):
 			earlier = frappe.get_doc(
-				{"doctype": NOTE, "transcript": "earlier", "context_type": "Business", "source": "Personalise"}
+				{
+					"doctype": NOTE,
+					"transcript": "earlier",
+					"context_type": "Business",
+					"source": "Personalise",
+				}
 			).insert(ignore_permissions=True)
 		fdoc = self._upload(USER_A, name="old.txt", attached_to_doctype=NOTE, attached_to_name=earlier.name)
 		with _as(USER_A):
