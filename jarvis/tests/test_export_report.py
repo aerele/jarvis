@@ -267,6 +267,35 @@ class TestExportReport(FrappeTestCase):
 			export_query(report_name=PREP_REPORT)
 		self.assertEqual(m.call_args.kwargs.get("outcome"), "report_pending")
 
+	def test_two_users_can_export_the_same_bytes(self):
+		# Frappe de-duplicates Files by content hash and refuses a private File
+		# another user owns; a CSV of the same report is the same bytes for every
+		# user, so the second user got "You do not have permission to access this
+		# file" (seen in the #2102 e2e). Each export must be the caller's own File.
+		from jarvis.tools._export import save_export_file
+
+		content = b"ID,Description\nr0,row 0\n"
+		mine = save_export_file("x.csv", content, title="Same bytes", mime_type="text/csv")
+		other = "jarvis-2102-other@example.com"
+		if not frappe.db.exists("User", other):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": other,
+					"first_name": "Other",
+					"roles": [{"role": "System Manager"}],
+				}
+			).insert(ignore_permissions=True)
+		frappe.set_user(other)
+		try:
+			theirs = save_export_file("x.csv", content, title="Same bytes", mime_type="text/csv")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertNotEqual(mine["name"], theirs["name"])
+		self.assertNotEqual(mine["file_url"], theirs["file_url"])
+		self.assertEqual(frappe.db.get_value("File", theirs["name"], "owner"), other)
+		self.assertEqual(frappe.get_doc("File", theirs["name"]).get_content(), content.decode())
+
 	def test_file_is_private_and_unattached(self):
 		with _completed(_rows(2), columns=COLUMNS):
 			env = export_query(report_name=PREP_REPORT)
