@@ -22,12 +22,16 @@ The compare reads the row with FOR UPDATE, so two overlapping saves are serialis
 by the database: the second sees the first's blob, or its lock wait fails and it
 gets a RetryLaterError saying nothing was saved, never a receipt for an overwrite.
 Capped to keep it terse and to bound the context it later consumes.
+
+Written only in a chat with the person present: a File Box run, a delegated agent run
+and a scheduled macro run are refused (``UNATTENDED_MESSAGE``), since what they read
+from a document or a tool result could otherwise be saved into every later chat.
 """
 
 import frappe
 
-from jarvis.exceptions import InvalidArgumentError, RetryLaterError
-from jarvis.tools import _user_memory
+from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError, RetryLaterError
+from jarvis.tools import _agent_run_ctx, _delegate_capability, _user_memory
 from jarvis.tools._user_memory import DOCTYPE, version_of
 
 MAX_BYTES = 8192
@@ -40,6 +44,12 @@ CONFLICT_MESSAGE = (
 	"and base_version set to `version`."
 )
 
+UNATTENDED_MESSAGE = (
+	"Not saved: remember is not available in a File Box, agent or scheduled run, where no one is "
+	"present to check what is stored. Do not retry. If a fact is worth keeping, say so in your "
+	"final reply so the person can ask Jarvis to remember it in a chat."
+)
+
 BUSY_MESSAGE = (
 	"Another chat was saving this person's memory at the same moment, so nothing was saved. "
 	"Call recall, merge your new facts into the content it returns, and call remember again "
@@ -48,6 +58,7 @@ BUSY_MESSAGE = (
 
 
 def remember(content: str, base_version: str | None = None) -> dict:
+	_refuse_unattended()
 	content = _checked_content(content)
 	base = _checked_base(base_version) or _user_memory.session_base()
 	try:
@@ -57,6 +68,36 @@ def remember(content: str, base_version: str | None = None) -> dict:
 		# the row changed after this request began). The database has rolled the
 		# statement back; retrying here would hit the same snapshot.
 		raise RetryLaterError(BUSY_MESSAGE) from e
+
+
+def _refuse_unattended() -> None:
+	"""Refuse a run with no person present: File Box, a delegate's Jarvis Agent Run, or a
+	scheduled Jarvis Macro Run. Only a call over a plugin session can be one."""
+	session_key = _agent_run_ctx.get_session_key()
+	if not session_key:
+		return
+	conv = frappe.db.get_value(
+		"Jarvis Conversation", {"session_key": session_key}, ["name", "file_box"], as_dict=True
+	)
+	if (
+		(conv and conv.file_box)
+		or _delegate_capability.resolve(session_key)
+		or (conv and _scheduled_macro_run(conv.name))
+	):
+		raise PermissionDeniedError(UNATTENDED_MESSAGE)
+
+
+def _scheduled_macro_run(conversation: str) -> bool:
+	return bool(
+		frappe.db.exists(
+			"Jarvis Macro Run",
+			{
+				"conversation": conversation,
+				"trigger": "scheduled",
+				"status": ["in", ["queued", "running", "waiting_capacity"]],
+			},
+		)
+	)
 
 
 def _save(user: str, content: str, base: str | None) -> dict:
