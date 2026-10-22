@@ -317,9 +317,10 @@ def note_created_draft(conversation: str, doctype: str, name: str) -> None:
 	the draft is simply not remembered (its updates are then held, never applied)."""
 	try:
 		cache = frappe.cache()
-		# RedisWrapper.sadd / sismember prefix the key themselves; expire_key does too.
+		# sadd / sismember prefix the key themselves on Frappe 15 and 16; the plain
+		# redis expire does not (expire_key is 16 only), so it gets the made key.
 		cache.sadd(_drafts_key(conversation), f"{doctype}\x1f{name}")
-		cache.expire_key(_drafts_key(conversation), DRAFTS_TTL_S)
+		cache.expire(cache.make_key(_drafts_key(conversation)), DRAFTS_TTL_S)
 	except Exception:
 		frappe.log_error(title="jarvis.file_box.draft_note_failed", message=frappe.get_traceback())
 
