@@ -134,6 +134,9 @@ class LinkFetchError(Exception):
 # --------------------------------------------------------------------------- #
 # SSRF guard
 # --------------------------------------------------------------------------- #
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+
+
 def _is_blocked_ip(ip_str: str) -> bool:
 	try:
 		ip = ipaddress.ip_address(ip_str)
@@ -142,6 +145,11 @@ def _is_blocked_ip(ip_str: str) -> bool:
 		# than risk treating something we can't classify as safe.
 		return True
 	if ip_str in _METADATA_IPS:
+		return True
+	# Only globally routable addresses may be fetched. is_global alone covers
+	# 100.64.0.0/10 (CGNAT); NAT64 (64:ff9b::/96) is listed explicitly because
+	# its is_global answer differs across Python versions.
+	if not ip.is_global or (ip.version == 6 and ip in _NAT64_NET):
 		return True
 	return bool(
 		ip.is_private
