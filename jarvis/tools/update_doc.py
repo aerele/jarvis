@@ -61,7 +61,11 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 	if not isinstance(changes, dict) or not changes:
 		raise InvalidArgumentError("changes must be a non-empty dict")
 
-	protected = sorted(set(changes.keys()) & PROTECTED_FIELDS)
+	# amended_from and underscore-prefixed names (_comments, _assign, ...) are
+	# framework-managed, so they are refused like the protected fields.
+	protected = sorted(
+		k for k in changes if k in PROTECTED_FIELDS or k == "amended_from" or str(k).startswith("_")
+	)
 	if protected:
 		raise InvalidArgumentError(f"refusing to write protected field(s): {', '.join(protected)}")
 
