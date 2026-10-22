@@ -121,11 +121,10 @@ describe("shared activity view integration", () => {
 	});
 	it("regroups an expanded orphan after earlier history arrives without losing its details", async () => {
 		const data = base();
+		const [reply] = data.messages;
 		data.messages = data.messages.slice(1);
 		data.paging = { has_more: true, before: 2, start: 2 };
-		mocks.get
-			.mockResolvedValueOnce(data)
-			.mockResolvedValue({ ...base(), messages: [base().messages[0]] });
+		mocks.get.mockResolvedValueOnce(data).mockResolvedValue({ ...base(), messages: [reply] });
 		const w = await open();
 		await w.get(".jv-tool-head").trigger("click");
 		await flushPromises();
