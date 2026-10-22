@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from frappe.tests.utils import FrappeTestCase
+
 from jarvis.chat import held_writes
 from jarvis.tests import test_filebox_held as fbh
 from jarvis.tests._pending_action_helpers import draft_doctype
@@ -54,3 +56,37 @@ class TestFileBoxDraftScope(fbh._Base):
 			self.call("update_doc", self.update(made["data"]["name"]), second)
 		self.assertEqual(hold.call_count, 1)
 		self.assertEqual(self.applied, [("create_doc", self.dt, None)])
+
+
+class _V15Cache:
+	"""Only what Frappe 15's RedisWrapper offers the draft helpers: make_key, sadd and
+	sismember (both prefixing the key) and the plain redis expire. Anything else raises."""
+
+	def __init__(self):
+		self.sets, self.ttls = {}, {}
+
+	def make_key(self, key):
+		return f"site|{key}"
+
+	def sadd(self, name, *values):
+		self.sets.setdefault(self.make_key(name), set()).update(values)
+
+	def sismember(self, name, value):
+		return value in self.sets.get(self.make_key(name), set())
+
+	def expire(self, key, seconds):
+		assert key in self.sets, "expire must get the prefixed key"
+		self.ttls[key] = seconds
+
+
+class TestDraftTrackingOnFrappe15(FrappeTestCase):
+	def test_the_helpers_use_only_calls_a_v15_cache_has(self):
+		cache = _V15Cache()
+		with (
+			patch("frappe.cache", return_value=cache),
+			patch("frappe.log_error", side_effect=AssertionError("cache call failed")),
+		):
+			held_writes.note_created_draft("CONV-1", "Sales Invoice", "SI-1")
+			self.assertTrue(held_writes.created_draft("CONV-1", "Sales Invoice", "SI-1"))
+			self.assertFalse(held_writes.created_draft("CONV-1", "Sales Invoice", "SI-2"))
+		self.assertEqual(list(cache.ttls.values()), [held_writes.DRAFTS_TTL_S])
