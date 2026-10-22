@@ -264,13 +264,26 @@ def _export_report(report_name, filters, fields, order_by, parent_doctype, fmt, 
 				"With report_name, pass only filters (the report brings its own columns and order), "
 				"not fields, order_by or parent_doctype."
 			)
-		model, status = reports.resolve(report_name, filters)
+		try:
+			model, status = reports.resolve(report_name, filters)
+		except reports.ReportTooLarge as e:
+			# A prepared copy over the immediate limit: the job converts it under its own cap.
+			handed = _report_job(report_name, e.filters, fmt, title, highlights)
+			if handed is not None:
+				return handed
+			raise
 		if status is not None:
-			# generating / failed / started: not a file yet. The agent relays the
-			# message and calls again later with the same arguments.
+			if status.get("status") in ("started", "generating"):
+				# The copy is coming: a job waits for it and delivers the file on the
+				# export card, so the user asks once. Without the background route (no
+				# chat, no permission, old bench) the status envelope is the answer.
+				handed = _report_job(report_name, status.get("filters") or filters, fmt, title, highlights)
+				if handed is not None:
+					return handed
 			telemetry.record_export_event(
 				tool="export_query", fmt=fmt, rows=0, mode="sync", outcome="report_pending"
 			)
+			status.pop("filters", None)
 			return status
 		budget.check()
 		model.meta["title"] = title or report_name
@@ -289,6 +302,37 @@ def _export_report(report_name, filters, fields, order_by, parent_doctype, fmt, 
 	env["report_name"] = report_name
 	env["as_of"] = model.meta.get("as_of")
 	return env
+
+
+def _report_job(report_name, filters, fmt, title, highlights):
+	"""Hand a saved report to the background export job: ``jobs.public`` state, or None
+	when the background route is not available here (the caller falls back)."""
+	from jarvis.tools._export import jobs
+
+	if not frappe.db.table_exists(jobs.DOCTYPE):
+		return None
+	source = {"report_name": report_name, "filters": filters or {}}
+	try:
+		found = jobs.existing(source, fmt, highlights, conversation=jobs.current_conversation())
+		state = found or jobs.enqueue(source, fmt, title or report_name, highlights)
+	except jobs.BackgroundUnavailable as refused:
+		telemetry.record_export_event(
+			tool="export_query",
+			fmt=fmt,
+			rows=0,
+			mode="background",
+			outcome="background_unavailable",
+			detail=str(refused)[:200],
+		)
+		return None
+	telemetry.record_export_event(
+		"export_query",
+		fmt,
+		state.get("rows_written", 0),
+		mode="background",
+		outcome="state_requested" if found else "report_queued",
+	)
+	return state
 
 
 def _render(model, fmt: str, render, highlights) -> bytes:

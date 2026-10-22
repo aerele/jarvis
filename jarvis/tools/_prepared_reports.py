@@ -110,6 +110,28 @@ def completed_or_status(report_name: str, filters: dict, *, user: str) -> tuple[
 	return None, _not_ready(report_name, filters, user)
 
 
+def peek(report_name: str, filters: dict, *, user: str) -> tuple[str, dict | None]:
+	"""The state of ``user``'s copy for already-filled ``filters``, WITHOUT starting a run:
+	``("ready", completed)``, ``("generating", envelope)``, ``("failed", envelope)`` or
+	``("missing", None)`` when nothing usable exists (never run, or the run stalled). The
+	export job dispatcher polls with this from the scheduler, so it must have no side
+	effect and must be called under the owner (``_latest`` is owner-scoped)."""
+	row = _latest(report_name, filters, user, ("Completed",))
+	if row:
+		completed = read_completed_rows(row.name)
+		if completed is not None:
+			return "ready", completed
+	pending = _pending_state(report_name, filters, user)
+	if pending is None:
+		return "missing", None
+	return pending["status"], pending
+
+
+def report_deadline_s(report_name: str) -> int:
+	"""Seconds after which a run started for this report counts as stuck."""
+	return _report_timeout(report_name) + _STARTED_STALL_MARGIN
+
+
 def gate_and_fill(report_name: str, raw_filters: dict, *, user: str) -> dict:
 	"""The gates ``run()`` applies, then the filters as Desk would send them."""
 	gate_report(report_name)
