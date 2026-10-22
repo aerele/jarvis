@@ -27,11 +27,6 @@ from frappe.core.doctype.user_permission.user_permission import get_user_permiss
 from jarvis.exceptions import PermissionDeniedError
 from jarvis.tools._company_scope import assert_company_permitted
 
-# GL dimensions whose User Permissions slice a ledger sum (Company is scoped
-# separately by _company_scope). Frappe has already expanded group values to
-# their descendants in get_user_permissions.
-_GL_DIMENSIONS = ("Cost Center", "Project", "Branch")
-
 _PARTY_REPORT = {
 	"Customer": "Accounts Receivable",
 	"Supplier": "Accounts Payable",
@@ -79,13 +74,31 @@ def assert_warehouse_readable(warehouse: str) -> None:
 	assert_company_permitted(frappe.db.get_value("Warehouse", warehouse, "company"))
 
 
+def gl_dimension_doctypes() -> set[str]:
+	"""DocTypes whose User Permissions can slice a GL Entry sum: Cost Center,
+	Project, every enabled Accounting Dimension's document type, and Branch
+	when this site links it from GL Entry (a Branch custom field). Company is
+	scoped separately by _company_scope."""
+	# Imported here: ERPNext is not a hard import of the jarvis app.
+	from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
+		get_accounting_dimensions,
+	)
+
+	doctypes = {"Cost Center", "Project"}
+	doctypes.update(d.document_type for d in get_accounting_dimensions(as_list=False) if d.document_type)
+	if any(f.options == "Branch" for f in frappe.get_meta("GL Entry").get_link_fields()):
+		doctypes.add("Branch")
+	return doctypes
+
+
 def gl_dimension_restrictions(user: str | None = None) -> dict[str, set[str]]:
-	"""``{dimension: permitted values}`` for each GL dimension the user is
-	restricted on for GL Entry. A User Permission whose ``applicable_for`` is
-	another DocType does not slice GL Entry, so it is not counted."""
+	"""``{dimension DocType: permitted values}`` for each GL dimension the user
+	is restricted on for GL Entry. A User Permission whose ``applicable_for`` is
+	another DocType does not slice GL Entry, so it is not counted. Frappe has
+	already expanded a group value to its descendants (unless hide_descendants)."""
 	perms = get_user_permissions(user or frappe.session.user) or {}
 	restrictions = {}
-	for dimension in _GL_DIMENSIONS:
+	for dimension in gl_dimension_doctypes():
 		values = {
 			p.get("doc")
 			for p in perms.get(dimension) or []
@@ -102,23 +115,32 @@ def assert_gl_balance_in_scope(account: str | None, cost_center: str | None) -> 
 
 	ERPNext's get_balance_on can only narrow by Cost Center, and only for a
 	Profit and Loss account (it ignores cost_center for Balance Sheet accounts
-	and party-only queries). So a Cost Center restriction is honoured only for
-	a P&L account queried with a permitted cost_center; a Project or Branch
-	restriction can't be honoured at all."""
+	and party-only queries), and it expands a group cost center to its whole
+	subtree. So a Cost Center restriction is honoured only for a P&L account
+	queried with a permitted cost_center whose subtree is entirely permitted;
+	a restriction on any other dimension can't be honoured at all."""
 	restrictions = gl_dimension_restrictions()
 	if not restrictions:
 		return
-	unsupported = [d for d in ("Project", "Branch") if d in restrictions]
+	unsupported = sorted(d for d in restrictions if d != "Cost Center")
 	if unsupported:
 		raise PermissionDeniedError(
-			f"balances can't be returned: your access is restricted by {' and '.join(unsupported)} "
-			"User Permission, and a balance sums ledger entries across every " + " and ".join(unsupported)
+			f"balances can't be returned: your access is restricted by {', '.join(unsupported)} "
+			"User Permission, and a balance sums ledger entries across every " + ", ".join(unsupported)
 		)
 	allowed = restrictions["Cost Center"]
 	if not cost_center or cost_center not in allowed:
 		raise PermissionDeniedError(
 			"balances need a cost_center: your access is restricted by Cost Center User Permission, "
 			"so pass one of your permitted cost centers" + (f" (not {cost_center!r})" if cost_center else "")
+		)
+	if (
+		frappe.db.get_value("Cost Center", cost_center, "is_group")
+		and not set(frappe.db.get_descendants("Cost Center", cost_center)) <= allowed
+	):
+		raise PermissionDeniedError(
+			f"cost_center {cost_center!r} is a group that includes cost centers outside your "
+			"Cost Center User Permission; pass a cost center whose whole subtree you can access"
 		)
 	if not account or frappe.db.get_value("Account", account, "report_type") != "Profit and Loss":
 		raise PermissionDeniedError(
