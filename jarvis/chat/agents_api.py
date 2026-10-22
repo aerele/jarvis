@@ -1208,8 +1208,8 @@ def install_agent(
 			"enabled": 0,
 			# Phase 1 identity: the agent runs AS this user (every jarvis__* read is
 			# permission-bounded to them). Defaults to the installer — a self-map,
-			# which the controller's escalation guard always permits. An admin may
-			# retarget it later via set_run_as_user.
+			# which the controller's escalation guard always permits. A System
+			# Manager may retarget it later via set_run_as_user.
 			"run_as_user": me,
 			# PP-4: every capability activates per customer in preview/SHADOW first,
 			# with the installer as the initial named reviewer (retargetable by an
@@ -1463,9 +1463,9 @@ def set_run_as_user(installation: str, user: str) -> dict:
 	ERP read is permission-bounded to (Phase 1 identity). Owner-gated (S3:
 	``check_permission("write")``) for WHO may touch the row; the ESCALATION guard
 	(who may map WHICH user) lives in the controller ``validate()`` so it holds on
-	Desk/test writes too — a non-admin may only map to themselves, any cross-user
-	mapping needs Jarvis Admin, and binding to a System Manager needs a System
-	Manager. Mirrors ``set_config``: check_permission, set, then save so
+	Desk/test writes too: only Administrator or a System Manager may map to
+	another user; everyone else may map only to themselves. The same rule is
+	re-checked at every run against whoever last set the mapping. Mirrors ``set_config``: check_permission, set, then save so
 	validate() enforces the guard. Pure DB write (no restart)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
