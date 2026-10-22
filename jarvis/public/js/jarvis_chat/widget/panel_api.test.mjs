@@ -86,6 +86,29 @@ test("serverReason reads _server_messages, then message, then exception", () => 
   assert.equal(serverReason(null), "");
 });
 
+test("serverReason keeps plain angle brackets and decodes entities", () => {
+  assert.equal(
+    serverReason({ message: "size < 5MB, got > 10MB" }),
+    "size < 5MB, got > 10MB"
+  );
+  assert.equal(
+    serverReason({
+      message: "<p>Bad &lt;exe&gt; &amp; &quot;x&quot; &#39;y&#39; &#65;</p>",
+    }),
+    "Bad <exe> & \"x\" 'y' A"
+  );
+});
+
+test("serverReason drops a colon-less exception and caps long text", () => {
+  assert.equal(
+    serverReason({ exception: "frappe.exceptions.PermissionError" }),
+    ""
+  );
+  const out = serverReason({ message: "a".repeat(1000) });
+  assert.equal(out.length, 300);
+  assert.ok(out.endsWith("…"));
+});
+
 test("uploadFile sends the Desk token and surfaces the server reason", async () => {
   const originalFetch = globalThis.fetch;
   const originalFrappe = globalThis.frappe;
