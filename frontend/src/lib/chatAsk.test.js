@@ -353,3 +353,82 @@ test("the Submit button also refuses while the host would silently swallow the a
 	assert.match(chatViewSrc, /<AskCard[\s\S]{0,200}:busy="sending"/);
 	assert.match(dashPaneSrc, /<AskCard[\s\S]{0,240}:busy="sending \|\| runActive"/);
 });
+
+// ---- shapes models actually send -----------------------------------------
+// Real blocks from chats where the card drew nothing; shared with the python
+// mirror test (jarvis/tests/test_chat_asks.py) through one fixture file.
+const REAL = JSON.parse(
+	read("..", "..", "..", "jarvis", "tests", "fixtures", "reply_cleanup_real_chats.json")
+);
+
+test("a single question object with `question` parses as a one-item list", () => {
+	const spec = parseAsk(fence(REAL.broken_ask_blocks.bn2pbg418f));
+	assert.equal(spec.questions.length, 1);
+	assert.equal(spec.questions[0].type, "single");
+	assert.match(spec.questions[0].q, /^ACC-PINV-2026-00008 \(MA Inc\./);
+	assert.deepEqual(spec.questions[0].options, [
+		"Use the existing invoice ACC-PINV-2026-00008",
+		"Draft a new invoice anyway (confirmed not a duplicate)",
+	]);
+});
+
+test("`kind`, `title`, `prompt` and a nested `field` make a field question", () => {
+	const spec = parseAsk(fence(REAL.broken_ask_blocks.jr7apok0g6));
+	assert.deepEqual(spec, {
+		questions: [
+			{
+				q: "Supplier invoice number",
+				type: "field",
+				options: [],
+				doctype: "Purchase Invoice",
+				fieldname: "bill_no",
+			},
+		],
+	});
+});
+
+test("a nested field with a bad identifier degrades to a typed answer", () => {
+	const spec = parseAsk(
+		fence('{"title":"Ref","field":{"doctype":"Purchase Invoice","fieldname":"bill no; x"}}')
+	);
+	assert.equal(spec.questions[0].type, "text");
+	assert.equal(spec.questions[0].q, "Ref");
+});
+
+test("{questions: [...]} items may use `label` for the text", () => {
+	const spec = parseAsk(fence(REAL.broken_ask_blocks.ch1n4ju8js));
+	assert.equal(spec.questions.length, 1);
+	assert.equal(spec.questions[0].type, "single");
+	assert.match(spec.questions[0].q, /^ACC-PINV-2026-00008 already matches/);
+	assert.equal(spec.questions[0].options.length, 3);
+});
+
+test("`kind` is used only when it is a known type, and `type` wins", () => {
+	const kind = parseAsk(fence('{"kind":"date","label":"When?"}'));
+	assert.equal(kind.questions[0].type, "date");
+	const typed = parseAsk(fence('{"type":"yesno","kind":"text","q":"Go?"}'));
+	assert.equal(typed.questions[0].type, "yesno");
+	const odd = parseAsk(fence('{"kind":"wat","q":"Pick","options":["a"]}'));
+	assert.equal(odd.questions[0].type, "single");
+});
+
+test("an object with no question text and no type is still not a question", () => {
+	assert.equal(parseAsk(fence('{"foo":1}')), null);
+	assert.equal(parseAsk(fence('{"questions":"nope"}')), null);
+});
+
+test("the real blocks that parsed before still parse the same", () => {
+	const b = REAL.valid_ask_blocks;
+	assert.deepEqual(parseAsk(fence(b.b1kllbcn7j)).questions, [
+		{
+			q: "ACC-PINV-2026-00008 already covers this. Still draft the new Purchase Invoice for review?",
+			type: "yesno",
+			options: ["Draft it anyway", "Leave it, 00008 stands"],
+			doctype: "",
+		},
+	]);
+	assert.equal(parseAsk(fence(b.ftofg3mkjj)).questions[0].type, "single");
+	assert.deepEqual(parseAsk(fence(b["9rbnkqvrhr"])).questions, [
+		{ q: "Supplier invoice number for this bill", type: "text", options: [], doctype: "" },
+	]);
+});

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -52,6 +53,10 @@ def _fence(payload, suffix="") -> str:
 	(malformed-JSON cases) or any JSON-dumpable value."""
 	body = payload if isinstance(payload, str) else json.dumps(payload)
 	return f"```jarvis-ask{suffix}\n{body}\n```"
+
+
+def _fence_raw(body: str) -> str:
+	return "Some lead-in.\n\n```jarvis-ask\n" + body + "\n```"
 
 
 def _ask(q="Which supplier is this from?", type="single", options=("Acme", "Globex")):
@@ -336,10 +341,101 @@ class TestParseAsk(unittest.TestCase):
 		long = ("x" * 400) + " Should I submit it now?"
 		self.assertLessEqual(len(question_excerpt(long)), 140)
 
+	# =========================================================================== #
+	# materialize_from_turn — row creation + publish + dedupe
+	# =========================================================================== #
 
-# =========================================================================== #
-# materialize_from_turn — row creation + publish + dedupe
-# =========================================================================== #
+	# -- shapes models actually send (real chats, shared with chatAsk.test.js) --
+
+	@staticmethod
+	def _real() -> dict:
+		path = os.path.join(os.path.dirname(__file__), "fixtures", "reply_cleanup_real_chats.json")
+		with open(path) as f:
+			return json.load(f)
+
+	def test_single_question_object_with_question_key(self):
+		qs = parse_ask(_fence_raw(self._real()["broken_ask_blocks"]["bn2pbg418f"]))
+		self.assertEqual(len(qs), 1)
+		self.assertEqual(qs[0]["type"], "single")
+		self.assertTrue(qs[0]["q"].startswith("ACC-PINV-2026-00008 (MA Inc."))
+		self.assertEqual(
+			qs[0]["options"],
+			[
+				"Use the existing invoice ACC-PINV-2026-00008",
+				"Draft a new invoice anyway (confirmed not a duplicate)",
+			],
+		)
+
+	def test_kind_title_prompt_and_nested_field_make_a_field_question(self):
+		qs = parse_ask(_fence_raw(self._real()["broken_ask_blocks"]["jr7apok0g6"]))
+		self.assertEqual(
+			qs,
+			[
+				{
+					"q": "Supplier invoice number",
+					"type": "field",
+					"options": [],
+					"doctype": "Purchase Invoice",
+					"fieldname": "bill_no",
+				}
+			],
+		)
+
+	def test_nested_field_with_a_bad_identifier_degrades_to_text(self):
+		qs = parse_ask(
+			_fence_raw('{"title":"Ref","field":{"doctype":"Purchase Invoice","fieldname":"bill no; x"}}')
+		)
+		self.assertEqual([(q["q"], q["type"]) for q in qs], [("Ref", "text")])
+
+	def test_questions_envelope_with_label_text(self):
+		qs = parse_ask(_fence_raw(self._real()["broken_ask_blocks"]["ch1n4ju8js"]))
+		self.assertEqual(len(qs), 1)
+		self.assertEqual(qs[0]["type"], "single")
+		self.assertTrue(qs[0]["q"].startswith("ACC-PINV-2026-00008 already matches"))
+		self.assertEqual(len(qs[0]["options"]), 3)
+
+	def test_kind_is_used_only_when_known_and_type_wins(self):
+		self.assertEqual(parse_ask(_fence_raw('{"kind":"date","label":"When?"}'))[0]["type"], "date")
+		self.assertEqual(
+			parse_ask(_fence_raw('{"type":"yesno","kind":"text","q":"Go?"}'))[0]["type"], "yesno"
+		)
+		self.assertEqual(
+			parse_ask(_fence_raw('{"kind":"wat","q":"Pick","options":["a"]}'))[0]["type"], "single"
+		)
+
+	def test_object_without_text_or_type_is_not_a_question(self):
+		self.assertEqual(parse_ask(_fence_raw('{"foo":1}')), [])
+		self.assertEqual(parse_ask(_fence_raw('{"questions":"nope"}')), [])
+
+	def test_real_blocks_that_parsed_before_still_parse_the_same(self):
+		valid = self._real()["valid_ask_blocks"]
+		self.assertEqual(
+			parse_ask(_fence_raw(valid["b1kllbcn7j"])),
+			[
+				{
+					"q": "ACC-PINV-2026-00008 already covers this. Still draft the new Purchase Invoice for review?",
+					"type": "yesno",
+					"options": ["Draft it anyway", "Leave it, 00008 stands"],
+					"doctype": "",
+					"fieldname": "",
+				}
+			],
+		)
+		self.assertEqual(parse_ask(_fence_raw(valid["ftofg3mkjj"]))[0]["type"], "single")
+		self.assertEqual(
+			parse_ask(_fence_raw(valid["9rbnkqvrhr"])),
+			[
+				{
+					"q": "Supplier invoice number for this bill",
+					"type": "text",
+					"options": [],
+					"doctype": "",
+					"fieldname": "",
+				}
+			],
+		)
+
+
 class TestMaterialize(unittest.TestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")

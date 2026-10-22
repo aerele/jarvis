@@ -20,6 +20,26 @@ export const ASK_FIELD_TYPES = ["date", "datetime", "field", "link", "select", "
 const DOCTYPE_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]*$/;
 const FIELDNAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// Types a model may put in `kind` instead of `type`.
+const ASK_KINDS = ["single", "multi", "yesno", "boolean", ...ASK_FIELD_TYPES];
+
+// The question text, under whichever key the model used.
+function askText(q) {
+	for (const key of ["q", "question", "label", "title", "prompt"]) {
+		const v = q[key] == null ? "" : String(q[key]).trim();
+		if (v) return v;
+	}
+	return "";
+}
+
+// A bare array, `{questions: [...]}`, or one question object on its own.
+function askItems(a) {
+	if (Array.isArray(a)) return a;
+	if (!a || typeof a !== "object") return null;
+	if ("questions" in a) return a.questions;
+	return askText(a) || a.type || a.kind ? [a] : null;
+}
+
 /**
  * A readable label for a field whose question carries none: strip a leading
  * `custom_`, underscores to spaces, capitalise the first letter
@@ -43,12 +63,16 @@ export function parseAsk(content) {
 	if (!mt) return null;
 	try {
 		const a = JSON.parse(mt[1].trim());
-		const raw = Array.isArray(a) ? a : a && a.questions;
+		const raw = askItems(a);
 		if (!Array.isArray(raw)) return null;
 		const questions = raw
 			.slice(0, 6)
 			.map((q) => {
-				let type = q.type === "boolean" ? "yesno" : q.type;
+				// A nested `field: {doctype, fieldname}` makes it a field question.
+				const nested = q.field && typeof q.field === "object" ? q.field : null;
+				let type = q.type == null && ASK_KINDS.includes(q.kind) ? q.kind : q.type;
+				if (nested) type = "field";
+				if (type === "boolean") type = "yesno";
 				if (!["single", "multi", "yesno", ...ASK_FIELD_TYPES].includes(type))
 					type = "single";
 				// A Select field's choice list can be long; only the button types stay at 8.
@@ -58,10 +82,10 @@ export function parseAsk(content) {
 					: [];
 				// A dropdown with nothing to pick from is just a typed answer.
 				if (type === "select" && !options.length) type = "text";
-				const text = String(q.q || q.question || "").trim();
+				const text = askText(q);
 				if (type === "field") {
-					const doctype = String(q.doctype || "").trim();
-					const fieldname = String(q.fieldname || "").trim();
+					const doctype = String((nested || q).doctype || "").trim();
+					const fieldname = String((nested || q).fieldname || "").trim();
 					// A bad identifier must not reach the API call; the question
 					// degrades to a typed answer instead of vanishing.
 					if (!DOCTYPE_RE.test(doctype) || !FIELDNAME_RE.test(fieldname)) {
