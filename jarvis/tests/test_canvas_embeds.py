@@ -159,7 +159,7 @@ class TestPersistCanvasesGatewayFallback(FrappeTestCase):
 		before."""
 		real_doc = b"<!doctype html><html><head><title>Real Dashboard</title></head><body>ok</body></html>"
 
-		def fake_get(url, headers=None, timeout=None):
+		def fake_get(url, headers=None, timeout=None, **kwargs):
 			if "jarvis-canvas-probe-" in url:
 				return Mock(status_code=404, content=b"not found")
 			return Mock(status_code=200, content=real_doc)
