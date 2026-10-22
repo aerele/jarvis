@@ -927,6 +927,11 @@ def _weave_record_gate(q, engine, alias: str, resolved_dt: str, table, node_spec
 		if frappe.session.user == "Administrator":
 			return q
 		parent_dt = _child_scoping_parent(resolved_dt, alias, node_spec, alias_map)
+		# Read on the parent covers permlevel 0 only; the parent's Table field
+		# holding this child can sit at a higher permlevel.
+		from jarvis.tools.get_list import assert_child_table_field_readable
+
+		assert_child_table_field_readable(resolved_dt, parent_dt)
 		cond = _child_record_scope(table, resolved_dt, parent_dt)
 		if cond is not None:
 			q = q.where(cond)
