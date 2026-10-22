@@ -1,0 +1,28 @@
+{
+ "steps_accepted": [
+  "Links all resolve. Now the invoice checks: supplier status, item setup, duplicates, and real-record conventions.",
+  "Found something important: a submitted invoice for MA Inc. today already matches this exactly. Let me verify the supplier and run the integrity dry-run.",
+  "All three links resolve. One thing stands out before I draft: an invoice for this exact supplier, date and amount already exists today. Checking it.",
+  "Both items and the supplier exist. Checking how your purchase invoices for this supplier are usually filled.",
+  "All three records exist. Pulling the org's real purchase-invoice conventions and checking for a duplicate.",
+  "Checking the invoice drafting rules and the supplier and item records.",
+  "Found it: only GM-50 and VA-10 have BOMs. The report silently drops items without one, so its silence on the other five is a data gap, not a clean bill. Re-running with the raw-material warehouse set, and checking what those five items actually are.",
+  "Both items and the supplier resolve to existing records, and there's a near-identical prior invoice for this exact supplier/item pair I can model the draft on (cost center, expense accounts, asset category). Here's the draft for review:",
+  "Checking what conversation records I can see.",
+  "I'll pull up that error log entry.",
+  "Error log read. Checking the Sales Order and the item behind it."
+ ],
+ "steps_rejected": [
+  "I found a likely duplicate before drafting this. **ACC-PINV-2026-00008** already exists for supplier MA Inc., posted 20-10-2026, with the exact same two lines (JV Asset Demo Laptop qty 1 @ 50,000 and SKU001 qty 2 @ 100) and the same grand total of ₹50,200. It's already submitted (status: Unpaid, docstatus 1).\n\nPer the duplicate check I run before drafting any invoice, I'm stopping here rather than creating a second copy."
+ ],
+ "broken_ask_blocks": {
+  "bn2pbg418f": "{\n  \"type\": \"single\",\n  \"question\": \"ACC-PINV-2026-00008 (MA Inc., 20-10-2026, ₹50,200) already matches this exactly. What would you like to do?\",\n  \"options\": [\n    \"Use the existing invoice ACC-PINV-2026-00008\",\n    \"Draft a new invoice anyway (confirmed not a duplicate)\"\n  ]\n}",
+  "jr7apok0g6": "{\"kind\":\"text\",\"title\":\"Supplier invoice number\",\"prompt\":\"Enter the supplier invoice number for this purchase invoice.\",\"field\":{\"doctype\":\"Purchase Invoice\",\"fieldname\":\"bill_no\"},\"required\":true}",
+  "ch1n4ju8js": "{\"questions\":[{\"type\":\"single\",\"name\":\"duplicate_decision\",\"label\":\"ACC-PINV-2026-00008 already matches this invoice. What should I do?\",\"options\":[\"Stop - that existing invoice is the one I meant\",\"Draft it anyway as a separate invoice (I'll note it's a second bill)\",\"Draft it anyway, and I'll supply the supplier invoice number to tell them apart\"]}]}"
+ },
+ "valid_ask_blocks": {
+  "b1kllbcn7j": "[{\"q\":\"ACC-PINV-2026-00008 already covers this. Still draft the new Purchase Invoice for review?\",\"type\":\"yesno\",\"options\":[\"Draft it anyway\",\"Leave it, 00008 stands\"]}]",
+  "ftofg3mkjj": "[{\"q\":\"How should I proceed with this matching invoice?\",\"type\":\"single\",\"options\":[\"Stop, this is a duplicate\",\"Stage a separate Purchase Invoice draft anyway\"]}]",
+  "9rbnkqvrhr": "[{\"q\":\"Supplier invoice number for this bill\",\"type\":\"text\"}]"
+ }
+}

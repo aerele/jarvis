@@ -763,8 +763,9 @@ class RelayMux:
 
 	def _move_pending_step(self, lane: _Lane) -> None:
 		"""At a tool call: if the reply text written since the previous tool call
-		is one short sentence, it was a step. Show it on the step line and take it
-		out of the live display. Anything longer stays in the reply."""
+		is a short run of narration (is_step: one line, up to three sentences), it was
+		a step. Show it on the step line and take it out of the live display.
+		Anything longer stays in the reply."""
 		pending = remove_steps(lane.stream_text[lane.since_tool :], lane.steps).strip()
 		lane.since_tool = len(lane.stream_text)
 		if not is_step(pending):
@@ -783,8 +784,8 @@ class RelayMux:
 		that is ALSO streaming as ordinary reply text, so routing it straight to
 		_offer_step (as before this method existed) shows the same text twice:
 		on the step line and in the reply bubble, until the next tool call's
-		_move_pending_step catches up - or never, for narration longer than one
-		sentence (is_step's narrow rule), which then stays glued into the saved
+		_move_pending_step catches up - or never, for narration longer than
+		is_step's limit, which then stays glued into the saved
 		reply too (before strip_preambles).
 
 		When the (stripped) text is already sitting in the reply written since
