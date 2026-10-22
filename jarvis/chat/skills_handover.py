@@ -85,6 +85,133 @@ def handover(row, new_owner: str, expected_owner: str) -> dict:
 	}
 
 
+def refuse_all(row, targets: list[str], expected_owner: str, *, keep: bool) -> None:
+	"""Every person a request names, before anything is written: the first is handed
+	the skill (``refusal``) unless ``keep``; everyone else gets a copy
+	(``copy_refusal``). One who cannot refuses the whole request."""
+	if row.owner != expected_owner:
+		frappe.throw(_("This skill changed while you acted on it. Reload."), SkillOwnerChangedError)
+	for i, user in enumerate(targets):
+		owned = _target_rows(user)
+		reason = refusal(row, user, owned) if i == 0 and not keep else copy_refusal(row, user, owned)
+		if reason:
+			frappe.throw(frappe.utils.escape_html(reason), SkillHandoverError)
+
+
+def copy_refusal(row, user: str, owned: list) -> str:
+	"""Why ``user`` cannot have a copy of ``row``, or "". ``refusal``'s rules, but for a
+	private skill of their own: a copy is never a Role or company skill, so they need
+	not be a reviewer."""
+	if skills_admin.is_learned(row):
+		return _("Learned skills are managed on the learning board, not here.")
+	if skills_admin.is_published(row):
+		return _("This is a published company copy. Give a copy of the private skill it was published from.")
+	if user == row.owner:
+		return _("{0} already owns this skill.").format(user)
+	reason = _target_refusal(user)
+	if reason:
+		return reason
+	cap = skill_doctype.MAX_SKILLS_PER_OWNER
+	if len(owned) >= cap:
+		return _("{0} already has {1} skills, the most one user can have.").format(user, cap)
+	if any(r.skill_name == row.skill_name for r in owned):
+		return _("{0} already has a skill named {1}.").format(user, row.skill_name)
+	return ""
+
+
+def give_copies(skill: str, users: list[str], old_owner: str) -> tuple[list[dict], list[dict]]:
+	"""A private copy of ``skill`` for each of ``users``, each in its own commit, as the
+	skill stands now. ``(copies, refused)``.
+
+	Inserted AS its new owner (``impersonate``), so the doctype's checks judge it for
+	them (the cap, a skill of the same name). It arrives as a hand-over leaves a
+	private skill: switched off, asking before every write, no File Box opt-in, no
+	shares, assignments or followers, no hold. A Role or company skill's copy is a
+	private one: its audience was reviewed for the original, not for the copy. Each
+	person was checked first; one refused here is a change made since, and is
+	reported without undoing the others."""
+	from jarvis._session import impersonate
+
+	copies, refused = [], []
+	if not users:
+		return copies, refused
+	src = frappe.get_doc(SKILL, skill)
+	admin = frappe.session.user
+	for user in users:
+		messages = len(frappe.local.message_log or [])
+		try:
+			reason = copy_refusal(src, user, _target_rows(user))
+			if reason:
+				frappe.throw(frappe.utils.escape_html(reason), SkillHandoverError)
+			with impersonate(user):
+				copy = frappe.get_doc(
+					{
+						"doctype": SKILL,
+						"skill_name": src.skill_name,
+						"description": src.description,
+						"instructions": src.instructions,
+						"user_invocable": src.user_invocable,
+						"enabled": 0,
+						"allow_approve_run": 0,
+						FILE_BOX_FIELD: 0,
+						"scope": "User",
+					}
+				)
+				copy.insert(ignore_permissions=True)
+			admin_log.write(
+				verb="handover",
+				skill=copy.name,
+				skill_name=copy.skill_name,
+				skill_owner=old_owner,
+				new_owner=user,
+				reason=_("A copy of skill {0}.").format(src.name),
+			)
+			skills_admin.comment(copy.name, f"{admin} gave {user} this copy of a skill of {old_owner}.")
+			skills_admin.commit_act()
+			frappe.cache().delete_value(_personal_key(user))
+			copies.append({"user": user, "skill": copy.name})
+		except frappe.ValidationError as e:
+			frappe.db.rollback()
+			del frappe.local.message_log[messages:]  # said in copy_failed, not as a popup
+			refused.append({"user": user, "reason": frappe.utils.strip_html(str(e)) or _("Not copied.")})
+	return copies, refused
+
+
+def _personal_key(user: str) -> str:
+	from jarvis.chat.custom_skills import personal_skills_cache_key
+
+	return personal_skills_cache_key(user)
+
+
+def tell_about_copies(row, old_owner: str, copied_to: list[str], *, moved_to: str | None) -> None:
+	"""The notices for the copies: the old owner once (what a hand-over already told
+	them is not said again), and each person given one. Never the acting admin."""
+	from jarvis.permissions import is_valid_unattended_owner
+
+	if not copied_to:
+		return
+	admin = frappe.session.user
+	kind = skills_admin.ADMIN_HANDOVER_NOTICE
+	names = frappe.utils.escape_html(
+		frappe.utils.comma_and([_full_name(u) for u in copied_to], add_quotes=False)
+	)
+	if old_owner != admin and is_valid_unattended_owner(old_owner):
+		if moved_to:
+			body = _("An admin also gave {1} a copy of your skill {0}.").format(row.skill_name, names)
+		else:
+			body = _("An admin gave {1} a copy of your skill {0}. Yours is unchanged.").format(
+				row.skill_name, names
+			)
+		skills_admin.notify_user(old_owner, row, kind, body)
+	for user in copied_to:
+		if user != admin:
+			body = _("An admin gave you a copy of the skill {0}. It arrives switched off.").format(
+				row.skill_name
+			)
+			skills_admin.notify_user(user, row, kind, body)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- the notices follow the committed copies
+
+
 def refuse(row, new_owner: str, expected_owner: str, owned: list) -> None:
 	"""Refuse a skill that changed hands since the dialog showed it, then anything
 	``refusal`` names. ``owned``: the target's skill rows (``_target_rows``)."""
