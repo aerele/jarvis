@@ -14,9 +14,10 @@ b. ``update_wiki`` -> the gate's fenced wiki proposal;
 c. ``Jarvis Approval Request`` create/update -> applied (single, or an all-AR batch);
 d. a denied doctype in any item -> refused; while a skill_conflict routing question
    is Pending, every create/update is refused too (``filebox_skills``);
-e. a single create/update of a draft of a submittable doctype -> auto-applied, when
-   it is the doctype the followed File Box skill drafts (``filebox_skills``);
-f. any other create/update -> HELD on the Approval Board (a batch that includes a
+e. a single create of a draft of a submittable doctype -> auto-applied, when it is the
+   doctype the followed File Box skill drafts (``filebox_skills``); an update is
+   auto-applied only to a draft this same conversation created (``note_created_draft``);
+f. any other create/update (an update of any other record included) -> HELD on the Approval Board (a batch that includes a
    submittable doctype is refused instead);
 g. every other gated tool, and bulk forms of ungated writes -> refused, no preview.
 
@@ -76,6 +77,7 @@ DENIED_MODULES = frozenset(
 )
 RECENT_DECISION_S = 600  # a row decided this recently still answers for its records
 MISS_TTL_S = 3600  # "tries once": a first miss is remembered this long
+DRAFTS_TTL_S = 30 * 86400  # a run's created drafts stay updatable this long
 TITLE_MAX = 140
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -183,6 +185,7 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		result = api.dispatch_confirmed(tool, args, provenance="auto_apply", uncarded=True)
 		data = result.get("data")
 		if tool == "create_doc" and result.get("ok") and api._stamp_file_box_draft(conversation, data):
+			note_created_draft(conversation, data["doctype"], data["name"])
 			# The draft exists now, so the dropped file can be attached to it.
 			from jarvis.chat import filebox
 
@@ -248,7 +251,11 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 		refusal = filebox_skills.target_refusal(conversation, items[0]["doctype"])
 		if not refusal and sheets:
 			refusal = held_sheets.draft_refusal(conversation, sheet)
-		return ("refuse", refusal) if refusal else ("apply", None)
+		if refusal:
+			return "refuse", refusal
+		if items[0]["op"] == "create" or created_draft(conversation, items[0]["doctype"], items[0]["name"]):
+			return "apply", None
+		# An update of a draft this run did not create waits for a human, like any other record.
 	if sheets and _write_risk.risk_of(tool, args) == "sensitive":
 		return "refuse", _sensitive_sheet_refusal(tool, args)
 	return held_sheets.classify_masters(items, conversation, sheet) if sheets else ("hold", items)
@@ -288,6 +295,33 @@ def _denied(doctype: str) -> dict | None:
 			"FileBoxRefusedError", f"An unattended File Box run can't write {doctype}. {_ASK_A_HUMAN}"
 		)
 	return None
+
+
+def _drafts_key(conversation: str) -> str:
+	return f"jarvis:filebox_drafts:{conversation}"
+
+
+def note_created_draft(conversation: str, doctype: str, name: str) -> None:
+	"""Remember that this File Box conversation created the draft ``doctype`` ``name``:
+	only such a draft is later updated without a human. A cache failure is logged and
+	the draft is simply not remembered (its updates are then held, never applied)."""
+	try:
+		cache = frappe.cache()
+		# RedisWrapper.sadd / sismember prefix the key themselves; expire_key does too.
+		cache.sadd(_drafts_key(conversation), f"{doctype}\x1f{name}")
+		cache.expire_key(_drafts_key(conversation), DRAFTS_TTL_S)
+	except Exception:
+		frappe.log_error(title="jarvis.file_box.draft_note_failed", message=frappe.get_traceback())
+
+
+def created_draft(conversation: str, doctype: str, name: str) -> bool:
+	"""True when this conversation created ``doctype`` ``name`` (see ``note_created_draft``);
+	False on a miss or a cache failure."""
+	try:
+		return bool(frappe.cache().sismember(_drafts_key(conversation), f"{doctype}\x1f{name}"))
+	except Exception:
+		frappe.log_error(title="jarvis.file_box.draft_check_failed", message=frappe.get_traceback())
+		return False
 
 
 def _is_draft(item: dict) -> bool:
