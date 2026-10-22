@@ -198,6 +198,12 @@ class TestCreationContextCompactShape(FrappeTestCase):
 	"""The field map lists settable or mandatory fields in full and the rest by
 	name, so the payload the model re-reads every round stays small."""
 
+	def test_compact_drops_off_flags_but_keeps_a_zero(self):
+		from jarvis.tools.get_creation_context import _compact
+
+		rec = {"fieldname": "qty", "default": 0, "mandatory": False, "auto": None, "label": ""}
+		self.assertEqual(_compact(rec), {"fieldname": "qty", "default": 0})
+
 	def test_read_only_fields_are_listed_by_name_only(self):
 		ctx = get_creation_context("ToDo")
 		full = {f["fieldname"] for f in ctx["fields"]}

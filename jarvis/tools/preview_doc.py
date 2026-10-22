@@ -159,8 +159,12 @@ def _summarize(doc, caller_values: dict) -> dict:
 	}
 	if doc.doctype in _DUPLICATE_CHECK:
 		# Key present (even as []) only where the check ran: a missing key means
-		# "not checked", an empty list means "none found".
-		out["possible_duplicates"] = _possible_duplicates(doc, caller_values)
+		# "not checked", an empty list means "none found". A user who may create
+		# but not read the doctype gets no key rather than a failed preview.
+		try:
+			out["possible_duplicates"] = _possible_duplicates(doc, caller_values)
+		except frappe.PermissionError:
+			pass
 	return out
 
 

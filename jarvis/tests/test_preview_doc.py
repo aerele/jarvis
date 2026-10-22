@@ -180,6 +180,15 @@ class TestPossibleDuplicates(FrappeTestCase):
 			out = preview_doc(NOTE_DT, {"title": "jarvis-preview-dupkey"})
 		self.assertEqual(out["possible_duplicates"], [])
 
+	def test_no_read_permission_drops_the_key_not_the_preview(self):
+		with (
+			patch.dict(preview_mod._DUPLICATE_CHECK, {NOTE_DT: {"party": "title", "bill_no": None}}),
+			patch.object(preview_mod, "_possible_duplicates", side_effect=frappe.PermissionError),
+		):
+			out = preview_doc(NOTE_DT, {"title": "jarvis-preview-noread"})
+		self.assertTrue(out["valid"])
+		self.assertNotIn("possible_duplicates", out)
+
 	def test_invalid_path_has_no_duplicates_key(self):
 		with patch.dict(preview_mod._DUPLICATE_CHECK, {"ToDo": {"party": "owner", "bill_no": None}}):
 			out = preview_doc("ToDo", {"priority": "High"})
