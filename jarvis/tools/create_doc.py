@@ -62,7 +62,11 @@ def _validate_create_args(doctype: str, values: dict) -> None:
 	if not isinstance(values, dict) or not values:
 		raise InvalidArgumentError("values must be a non-empty dict")
 
-	protected = sorted(set(values.keys()) & PROTECTED_FIELDS)
+	# amended_from and underscore-prefixed names (_comments, _assign, ...) are
+	# framework-managed, so they are refused like the protected fields.
+	protected = sorted(
+		k for k in values if k in PROTECTED_FIELDS or k == "amended_from" or str(k).startswith("_")
+	)
 	if protected:
 		raise InvalidArgumentError(f"refusing to write protected field(s): {', '.join(protected)}")
 
