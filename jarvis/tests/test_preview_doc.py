@@ -11,6 +11,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools import preview_doc as preview_mod
 from jarvis.tools.preview_doc import preview_doc
 
 NOTE_DT = "Note"
@@ -93,3 +94,94 @@ class TestPreviewDoc(FrappeTestCase):
 		out = preview_doc("ToDo", {"description": "jarvis preview baseline"})
 		self.assertTrue(out["valid"])
 		self.assertNotIn("status", out["server_filled"])
+
+
+class _Inv:
+	"""Minimal stand-in for a built invoice: attribute + .get() access."""
+
+	def __init__(self, doctype="Purchase Invoice", **kw):
+		self.doctype = doctype
+		self.supplier = "SUP"
+		self.customer = "CUST"
+		self.company = "Co"
+		self.posting_date = "2026-10-20"
+		self.grand_total = 500.0
+		self.bill_no = None
+		self.__dict__.update(kw)
+
+	def get(self, key, default=None):
+		return getattr(self, key, default)
+
+
+class TestPossibleDuplicates(FrappeTestCase):
+	def _run(self, doc, rows_by_call, caller=None):
+		with patch("frappe.get_list", side_effect=rows_by_call) as gl:
+			out = preview_mod._possible_duplicates(doc, caller or {})
+		return out, gl
+
+	def _row(self, name, **kw):
+		return {"name": name, "posting_date": "2026-10-20", "grand_total": 500.0, "docstatus": 1, **kw}
+
+	def test_found_by_date_and_total(self):
+		out, gl = self._run(_Inv(), [[self._row("PI-1")]])
+		self.assertEqual([r["name"] for r in out], ["PI-1"])
+		self.assertEqual(gl.call_count, 1)  # no bill_no, one query
+		filters = gl.call_args.kwargs["filters"]
+		self.assertEqual(filters["supplier"], "SUP")
+		self.assertEqual(filters["company"], "Co")
+		self.assertEqual(filters["posting_date"], "2026-10-20")
+		self.assertEqual(filters["grand_total"], 500.0)
+
+	def test_cancelled_excluded_by_filter(self):
+		_, gl = self._run(_Inv(), [[]])
+		self.assertEqual(gl.call_args.kwargs["filters"]["docstatus"], ["<", 2])
+
+	def test_found_by_bill_no_and_deduped(self):
+		doc = _Inv(bill_no="INV-9")
+		out, gl = self._run(doc, [[self._row("PI-1")], [self._row("PI-1"), self._row("PI-2")]])
+		self.assertEqual([r["name"] for r in out], ["PI-1", "PI-2"])
+		self.assertEqual(gl.call_count, 2)
+		self.assertEqual(gl.call_args.kwargs["filters"]["bill_no"], "INV-9")
+		self.assertNotIn("grand_total", gl.call_args.kwargs["filters"])
+		self.assertIn("bill_no", gl.call_args.kwargs["fields"])
+
+	def test_none_found_is_empty_list(self):
+		out, _ = self._run(_Inv(bill_no="X"), [[], []])
+		self.assertEqual(out, [])
+
+	def test_caller_posting_date_wins_over_pipeline_date(self):
+		doc = _Inv(posting_date="2026-10-22")
+		_, gl = self._run(doc, [[]], caller={"posting_date": "2026-10-20"})
+		self.assertEqual(gl.call_args.kwargs["filters"]["posting_date"], "2026-10-20")
+
+	def test_capped_at_five(self):
+		rows = [self._row(f"PI-{i}") for i in range(8)]
+		out, _ = self._run(_Inv(), [rows])
+		self.assertEqual(len(out), 5)
+
+	def test_sales_invoice_uses_customer_and_no_bill_no(self):
+		doc = _Inv("Sales Invoice", bill_no="IGNORED")
+		_, gl = self._run(doc, [[]])
+		self.assertEqual(gl.call_count, 1)
+		filters = gl.call_args.kwargs["filters"]
+		self.assertEqual(filters["customer"], "CUST")
+		self.assertNotIn("supplier", filters)
+		self.assertNotIn("bill_no", gl.call_args.kwargs["fields"])
+
+	def test_key_absent_for_non_invoice_doctype(self):
+		out = preview_doc(NOTE_DT, {"title": "jarvis-preview-nodup"})
+		self.assertNotIn("possible_duplicates", out)
+
+	def test_key_present_even_when_empty(self):
+		with (
+			patch.dict(preview_mod._DUPLICATE_CHECK, {NOTE_DT: {"party": "title", "bill_no": None}}),
+			patch.object(preview_mod, "_possible_duplicates", return_value=[]),
+		):
+			out = preview_doc(NOTE_DT, {"title": "jarvis-preview-dupkey"})
+		self.assertEqual(out["possible_duplicates"], [])
+
+	def test_invalid_path_has_no_duplicates_key(self):
+		with patch.dict(preview_mod._DUPLICATE_CHECK, {"ToDo": {"party": "owner", "bill_no": None}}):
+			out = preview_doc("ToDo", {"priority": "High"})
+		self.assertFalse(out["valid"])
+		self.assertNotIn("possible_duplicates", out)
