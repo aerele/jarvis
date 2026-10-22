@@ -645,15 +645,25 @@ def _create_note(
 	doc.insert(ignore_permissions=True)
 
 	if fdoc_name:
-		# Durable reparent (filebox.drop_file's idiom): the file now belongs
-		# to this note, not a bare upload with no owning record.
+		# Durable reparent (filebox.drop_file's idiom), for the caller's own BARE
+		# upload only. A File already attached to a record is never moved: the
+		# note just references its file_url (extraction and display read by url).
 		try:
-			frappe.db.set_value(
-				"File",
-				fdoc_name,
-				{"attached_to_doctype": NOTE, "attached_to_name": doc.name},
-				update_modified=False,
+			row = frappe.db.get_value(
+				"File", fdoc_name, ["owner", "attached_to_doctype", "attached_to_name"], as_dict=True
 			)
+			if (
+				row
+				and row.owner == frappe.session.user
+				and not row.attached_to_doctype
+				and not row.attached_to_name
+			):
+				frappe.db.set_value(
+					"File",
+					fdoc_name,
+					{"attached_to_doctype": NOTE, "attached_to_name": doc.name},
+					update_modified=False,
+				)
 		except Exception:
 			pass
 
