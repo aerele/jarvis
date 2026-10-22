@@ -105,6 +105,12 @@ vi.mock("frappe-ui", async () => ({
 		props: ["modelValue", "placeholder", "disabled", "readonly"],
 		template: `<input v-bind="$attrs" :value="modelValue" :disabled="disabled" :readonly="readonly" />`,
 	},
+	TabButtons: {
+		name: "TabButtons",
+		props: ["buttons", "modelValue"],
+		emits: ["update:modelValue"],
+		template: `<div role="radiogroup"><button v-for="b in buttons" :key="b.value" type="button" role="radio" :data-value="b.value" :aria-checked="b.value === modelValue ? 'true' : 'false'" @click="$emit('update:modelValue', b.value)">{{ b.label }}</button></div>`,
+	},
 	TimePicker: {
 		name: "TimePicker",
 		props: ["modelValue", "placeholder"],
@@ -236,6 +242,10 @@ function nameField(w) {
 function stepsBuilder(w) {
 	return w.findComponent({ name: "StepsBuilder" });
 }
+// Picks a Repeat option in the schedule editor, as a click on its tab button.
+async function repeat(w, value) {
+	await w.find(`[data-testid="schedule-repeat"] [data-value="${value}"]`).trigger("click");
+}
 
 describe("MacroDetail Schedule section: seeding must not fabricate a day", () => {
 	it("loading a weekly macro with no saved weekday loads clean (no Save)", async () => {
@@ -267,26 +277,16 @@ describe("MacroDetail Schedule section: seeding must not fabricate a day", () =>
 		expect(saveBtn(w).attributes("disabled")).toBeDefined();
 	});
 
-	it("an interactive Frequency change to weekly DOES default the day (and dirties the form)", async () => {
+	it("an interactive change to Weekly picks a day (and dirties the form)", async () => {
 		const w = await mountDetail(baseMacro({ schedule_frequency: "daily", next_run_at: null }));
 		expect(saveBtn(w).attributes("disabled")).toBeDefined();
-		// The FormControl stub renders a plain <select> with NO <option>s, so a
-		// native setValue("weekly") can never actually take (jsdom keeps a
-		// <select>'s .value at "" with no matching option to select) - drive
-		// the update the way the real component would receive it, straight
-		// through the component's own update:modelValue emit.
-		const freqControl = w
-			.findAllComponents({ name: "FormControl" })
-			.find((c) => c.attributes("label") === "Frequency");
-		expect(freqControl).toBeTruthy();
-		await freqControl.vm.$emit("update:modelValue", "weekly");
+		await repeat(w, "weekly");
 		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
-		// And the Day control picked up the fallback default, not a phantom
-		// empty selection.
-		const dayControl = w
-			.findAllComponents({ name: "FormControl" })
-			.find((c) => c.attributes("label") === "Day");
-		expect(dayControl.props("modelValue")).toBe("Monday");
+		// A day is already picked (Monday), not a week with nothing chosen.
+		const picked = w
+			.findAll("[data-day]")
+			.filter((b) => b.attributes("aria-pressed") === "true");
+		expect(picked.map((b) => b.attributes("data-day"))).toEqual(["1"]);
 	});
 });
 
@@ -561,7 +561,10 @@ describe("MacroDetail Schedule section: summary line reflects the SAVED snapshot
 		expect(w.text()).toContain("Scheduled monthly");
 		// dirty the schedule time (unsaved) - the summary must not narrate the
 		// draft against the SAVED next_run_at, which never recomputes on its own.
-		await w.find('[data-testid="time-picker"]').trigger("click");
+		const hour = w
+			.findAllComponents({ name: "FormControl" })
+			.find((c) => c.attributes("aria-label") === "Hour");
+		await hour.vm.$emit("update:modelValue", "10");
 		expect(w.text()).not.toContain("Scheduled monthly on the 15th at 9:00 am.");
 	});
 
@@ -1850,7 +1853,9 @@ describe("MacroDetail: an armed macro seen by someone other than its owner", () 
 		expect(switchNamed(w, "Enabled").props("disabled")).toBe(false);
 		expect(switchNamed(w, "Stop on error").props("disabled")).toBe(true);
 		expect(switchNamed(w, "Stop on error").props("description")).toBe(REASON);
-		expect(select(w).map((c) => c.props("disabled"))).toEqual([true, true]);
+		// The schedule editor is one fieldset: disabled, every control in it is.
+		expect(w.find('[data-testid="schedule-editor"]').attributes("disabled")).toBeDefined();
+		expect(select(w).length).toBeGreaterThan(0);
 	});
 
 	it("lets it be switched off, unscheduled and made to stop on error, and not back", async () => {
@@ -1881,8 +1886,6 @@ describe("MacroDetail: an armed macro seen by someone other than its owner", () 
 });
 
 describe("MacroDetail Schedule section: a one-time schedule", () => {
-	const control = (w, label) =>
-		w.findAllComponents({ name: "FormControl" }).find((c) => c.attributes("label") === label);
 	const tomorrow = () => testDayjs().add(1, "day").format("YYYY-MM-DD");
 	const scheduleAgainBtn = (w) =>
 		w.findAll("button").find((b) => b.attributes("data-label") === "Schedule again");
@@ -1898,8 +1901,8 @@ describe("MacroDetail Schedule section: a one-time schedule", () => {
 	it("Once swaps the Day control for a date, starting tomorrow, and saves that date", async () => {
 		api.updateMacro.mockResolvedValue({});
 		const w = await mountDetail(baseMacro({ next_run_at: null }));
-		await control(w, "Frequency").vm.$emit("update:modelValue", "once");
-		expect(control(w, "Day")).toBeUndefined();
+		await repeat(w, "once");
+		expect(w.find("[data-day]").exists()).toBe(false);
 		expect(w.findComponent({ name: "DatePicker" }).props("modelValue")).toBe(tomorrow());
 		await w.find('[data-testid="date-picker"]').trigger("click");
 		await saveBtn(w).trigger("click");
@@ -1911,9 +1914,9 @@ describe("MacroDetail Schedule section: a one-time schedule", () => {
 
 	it("picking Once and going back leaves nothing to save", async () => {
 		const w = await mountDetail(baseMacro({ next_run_at: null }));
-		await control(w, "Frequency").vm.$emit("update:modelValue", "once");
+		await repeat(w, "once");
 		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
-		await control(w, "Frequency").vm.$emit("update:modelValue", "daily");
+		await repeat(w, "daily");
 		expect(saveBtn(w).attributes("disabled")).toBeDefined();
 	});
 
@@ -1945,7 +1948,7 @@ describe("MacroDetail Schedule section: a one-time schedule", () => {
 
 	it("a date already past is refused at the field, before the server", async () => {
 		const w = await mountDetail(baseMacro({ next_run_at: null }));
-		await control(w, "Frequency").vm.$emit("update:modelValue", "once");
+		await repeat(w, "once");
 		w.findComponent({ name: "DatePicker" }).vm.$emit("update:modelValue", "2001-01-01");
 		await flushPromises();
 		await saveBtn(w).trigger("click");
@@ -2010,5 +2013,95 @@ describe("MacroDetail Schedule section: a one-time schedule", () => {
 			ranOnce({ schedule_date: "2026-11-02", last_run_at: "2026-10-01 09:00:02" })
 		);
 		expect(w.text()).not.toContain("Ran once on");
+	});
+});
+
+describe("MacroDetail Schedule section: cron schedules", () => {
+	const chip = (w, attr, value) => w.find(`[${attr}="${value}"]`);
+	const select = (w, label) =>
+		w
+			.findAllComponents({ name: "FormControl" })
+			.find((c) => c.attributes("aria-label") === label);
+
+	it("several days and times save as cron, with the old fields kept for older readers", async () => {
+		api.updateMacro.mockResolvedValue({});
+		const w = await mountDetail(baseMacro({ next_run_at: null }));
+		await repeat(w, "weekly");
+		await chip(w, "data-day", "3").trigger("click");
+		await chip(w, "data-day", "5").trigger("click");
+		const add = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Add another time");
+		await add.trigger("click");
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		const sent = api.updateMacro.mock.calls[0][0];
+		expect(sent.schedule_frequency).toBe("weekly");
+		expect(sent.schedule_cron).toBe("0 9,18 * * 1,3,5");
+		expect(sent.schedule_weekday).toBe("Monday");
+		expect(sent.schedule_time).toBe("09:00");
+	});
+
+	it("hourly saves as a step on the hour", async () => {
+		api.updateMacro.mockResolvedValue({});
+		const w = await mountDetail(baseMacro({ next_run_at: null }));
+		await repeat(w, "hourly");
+		await select(w, "Every how many hours").vm.$emit("update:modelValue", "2");
+		await select(w, "Minutes past the hour").vm.$emit("update:modelValue", "15");
+		expect(w.find('[data-testid="schedule-preview"]').text()).toContain(
+			"Runs every 2 hours at 15 minutes past."
+		);
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(api.updateMacro.mock.calls[0][0].schedule_cron).toBe("15 */2 * * *");
+	});
+
+	it("Custom starts from the schedule already chosen", async () => {
+		const w = await mountDetail(baseMacro({ next_run_at: null }));
+		await repeat(w, "custom");
+		expect(w.find("textarea").element.value).toBe("0 9 * * *");
+	});
+
+	it("a cron that cannot run is refused before the server, with the reason", async () => {
+		const w = await mountDetail(baseMacro({ next_run_at: null }));
+		await repeat(w, "custom");
+		await w.find("textarea").setValue("61 9 * * *");
+		expect(w.find('[data-testid="schedule-preview"]').text()).toContain(
+			"The minute part “61” must be between 0 and 59."
+		);
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(api.updateMacro).not.toHaveBeenCalled();
+	});
+
+	it("a saved cron schedule opens as its preset, clean", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				schedule_frequency: "weekly",
+				schedule_cron: "30 9 * * 1,3,5",
+				next_run_at: "2026-10-23 09:30:00",
+			})
+		);
+		expect(saveBtn(w).attributes("disabled")).toBeDefined();
+		const picked = w
+			.findAll("[data-day]")
+			.filter((b) => b.attributes("aria-pressed") === "true");
+		expect(picked.map((b) => b.attributes("data-day"))).toEqual(["1", "3", "5"]);
+		expect(w.text()).toContain("Scheduled every Mon, Wed and Fri at 9:30 am. Next run:");
+	});
+
+	it("estimates the month against the step budget the server sends", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				schedule_frequency: "hourly",
+				schedule_cron: "0 * * * *",
+				scheduled_step_budget: 500,
+				next_run_at: null,
+			})
+		);
+		expect(w.find('[data-testid="schedule-budget"]').text()).toContain(
+			"of the 500 scheduled steps"
+		);
+		expect(w.find('[data-testid="schedule-over-budget"]').exists()).toBe(true);
 	});
 });
