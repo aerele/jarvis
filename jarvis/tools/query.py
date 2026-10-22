@@ -1127,8 +1127,13 @@ def _build_from_and_aliases(spec: dict) -> tuple[Any, dict]:
 
 def _bare_name_is_column(name: str, alias_map: dict) -> bool:
 	"""True when ``name`` is a real column of any table in scope, i.e. one MariaDB
-	could resolve an unqualified reference to."""
-	return any(name in frappe.get_meta(dt).get_valid_columns() for dt, _table in alias_map.values())
+	could resolve an unqualified reference to. MariaDB column names are
+	case-insensitive, so ``Rate`` collides with the ``rate`` column."""
+	folded = name.casefold()
+	return any(
+		folded in {column.casefold() for column in frappe.get_meta(dt).get_valid_columns()}
+		for dt, _table in alias_map.values()
+	)
 
 
 def _resolve_field(
