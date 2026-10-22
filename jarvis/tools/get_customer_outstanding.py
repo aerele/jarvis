@@ -97,7 +97,10 @@ def _gl_outstanding(customer: str, company: str, cost_center: str | None) -> flo
 
 
 def _sales_order_outstanding(customer: str, company: str) -> float:
-	# Unbilled share of each open Sales Order the caller can read.
+	# Unbilled share of each open Sales Order the caller can read. get_list
+	# throws when the user has no read on the DocType at all: count nothing.
+	if not frappe.has_permission("Sales Order", "read"):
+		return 0.0
 	orders = frappe.get_list(
 		"Sales Order",
 		filters={
@@ -115,7 +118,10 @@ def _sales_order_outstanding(customer: str, company: str) -> float:
 
 def _delivery_note_outstanding(customer: str, company: str) -> float:
 	# Delivery Note value not yet invoiced and not created against a Sales
-	# Order / Sales Invoice, for the Delivery Notes the caller can read.
+	# Order / Sales Invoice, for the Delivery Notes the caller can read (none
+	# when the user has no read on the DocType, where get_list would throw).
+	if not frappe.has_permission("Delivery Note", "read"):
+		return 0.0
 	notes = frappe.get_list(
 		"Delivery Note",
 		filters={
