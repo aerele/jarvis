@@ -82,8 +82,10 @@ class TestExportEnvelope(FrappeTestCase):
 
 		from jarvis.exceptions import InvalidArgumentError
 
+		# The size check runs inside File.save_file, which save_export_file now calls itself.
 		with mock.patch(
-			"frappe.utils.file_manager.save_file", side_effect=ValidationError("File size exceeded")
+			"frappe.core.doctype.file.file.File.check_max_file_size",
+			side_effect=ValidationError("File size exceeded"),
 		):
 			with self.assertRaises(InvalidArgumentError):
 				save_export_file("x.xlsx", b"PK\x03\x04", title="Big", mime_type="x")
