@@ -13,9 +13,8 @@ SESSION = "plain.user@example.com"
 OTHER = "someone.else@example.com"
 
 
-def _as(user, roles):
+def _as(roles):
 	return (
-		patch.object(frappe.session, "user", user),
 		patch("frappe.get_roles", return_value=roles),
 		patch("frappe.db.exists", return_value=True),
 		patch("frappe.has_permission", return_value=True),
@@ -31,8 +30,11 @@ class TestFollowCrossUser(FrappeTestCase):
 	def _run(self, session_user, roles, fn, **kwargs):
 		from contextlib import ExitStack
 
+		previous = frappe.session.user
+		frappe.set_user(session_user)
+		self.addCleanup(frappe.set_user, previous)
 		with ExitStack() as stack:
-			_enter(_as(session_user, roles), stack)
+			_enter(_as(roles), stack)
 			stack.enter_context(
 				patch("frappe.desk.form.document_follow._follow_document", create=True, return_value=True)
 			)
