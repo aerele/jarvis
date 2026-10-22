@@ -108,6 +108,7 @@
 						     or screen reader user still reaches them and hears why. -->
 						<input
 							type="checkbox"
+							class="h-3.5 w-3.5 shrink-0 rounded-sm border-outline-gray-4 bg-surface-white text-ink-gray-9 transition hover:border-outline-gray-5 focus:ring-0 focus:ring-offset-0 focus-visible:ring-2 focus-visible:ring-outline-gray-3"
 							:value="u.user"
 							:checked="isPicked(u)"
 							:aria-disabled="unavailable(u) ? 'true' : undefined"
@@ -167,7 +168,12 @@
 					<label
 						class="jv-macro-handover-keep flex cursor-pointer items-start gap-2 text-p-sm text-ink-gray-8"
 					>
-						<input v-model="keep" type="checkbox" class="mt-0.5" :disabled="saving" />
+						<input
+							v-model="keep"
+							type="checkbox"
+							class="mt-[3px] h-3.5 w-3.5 shrink-0 rounded-sm border-outline-gray-4 bg-surface-white text-ink-gray-9 transition hover:border-outline-gray-5 focus:ring-0 focus:ring-offset-0 focus-visible:ring-2 focus-visible:ring-outline-gray-3"
+							:disabled="saving"
+						/>
 						<span
 							>Keep it with {{ ownerName }} too
 							<span class="block text-ink-gray-6"
