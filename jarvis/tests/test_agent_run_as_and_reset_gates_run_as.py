@@ -106,7 +106,8 @@ class _RunAsFixture(unittest.TestCase):
 			doc = frappe.get_doc(INSTALLATION, inst)
 			doc.flags.ignore_permissions = True  # who may write the row is not under test
 			doc.run_as_user = target
-			doc.save()
+			# Under tests Frappe skips Version rows unless asked; production saves write them.
+			doc.save(ignore_version=False)
 			frappe.db.commit()
 		finally:
 			frappe.set_user("Administrator")
