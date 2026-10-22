@@ -512,31 +512,42 @@ def _validate_and_resolve_attachment(file_url: str) -> str:
 	and a qualifying one is returned (a bare own upload first, so the caller's
 	upload is the one the note takes). Returns the File doc's name."""
 	me = frappe.session.user
-	# get_all on purpose: the ownership rule below is the gate, so an unreadable
-	# foreign row must surface as "Not permitted", not as "unknown".
-	rows = frappe.get_all(
-		"File",
-		filters={"file_url": file_url},
-		fields=["name", "owner", "attached_to_doctype", "attached_to_name"],
-		order_by="creation desc",
-		limit=50,
-	)
+	# Not permission-filtered on purpose (frappe.qb): the ownership rule below is
+	# the gate, so an unreadable foreign row must surface as "Not permitted", not
+	# as "unknown".
+	file = frappe.qb.DocType("File")
+	conv = frappe.qb.DocType(CONVERSATION)
+	note = frappe.qb.DocType(NOTE)
+	rows = (
+		frappe.qb.from_(file)
+		.left_join(conv)
+		.on((file.attached_to_doctype == CONVERSATION) & (file.attached_to_name == conv.name))
+		.left_join(note)
+		.on((file.attached_to_doctype == NOTE) & (file.attached_to_name == note.name))
+		.select(
+			file.name,
+			file.owner,
+			file.attached_to_doctype,
+			file.attached_to_name,
+			conv.owner.as_("conv_owner"),
+			note.owner.as_("note_owner"),
+		)
+		.where(file.file_url == file_url)
+		.orderby(file.creation, order=frappe.qb.desc)
+		.limit(50)
+	).run(as_dict=True)
 	if not rows:
 		frappe.throw(_("Unknown attachment - upload it first."))
-	chat_row = None
+	record_row = None
 	for row in rows:
 		if not row.attached_to_doctype and not row.attached_to_name:
 			if row.owner == me:
 				return row.name
-		elif (
-			chat_row is None
-			and row.attached_to_doctype == CONVERSATION
-			and row.attached_to_name
-			and frappe.db.get_value(CONVERSATION, row.attached_to_name, "owner") == me
-		):
-			chat_row = row.name
-	if chat_row:
-		return chat_row
+		elif record_row is None and me in (row.conv_owner, row.note_owner):
+			# Attached to the caller's own chat or own earlier note.
+			record_row = row.name
+	if record_row:
+		return record_row
 	frappe.throw(_("Not permitted."), frappe.PermissionError)
 
 
