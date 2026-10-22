@@ -888,6 +888,9 @@ def _make_permission_engine(query_builder, tables: list, doctype: str):
 	- ``tables`` — some ``permission_query_conditions`` hooks consult it;
 	- ``doctype`` — hooks format the main table name as ``f"tab{self.doctype}"``,
 	  so an unset value crashes the first such hook with AttributeError.
+	- ``reference_doctype``: v16 reads it for every User Permission row with
+	  ``applicable_for`` set, so an unset value raises AttributeError. Frappe 15's
+	  Engine never reads it; the attribute is inert there.
 
 	Factored from the three call sites: the outer step-6 weave, the EXISTS
 	sub-query weave, and the child-scope subquery build.
@@ -901,6 +904,7 @@ def _make_permission_engine(query_builder, tables: list, doctype: str):
 	engine.query = query_builder
 	engine.tables = list(tables)
 	engine.doctype = doctype
+	engine.reference_doctype = doctype
 	return engine
 
 
@@ -927,6 +931,9 @@ def _weave_record_gate(q, engine, alias: str, resolved_dt: str, table, node_spec
 		if cond is not None:
 			q = q.where(cond)
 		return q
+	# One engine serves every alias; User Permission ``applicable_for`` rows are
+	# matched against the DocType whose table is being gated.
+	engine.reference_doctype = resolved_dt
 	try:
 		cond = compat.permission_conditions(engine, resolved_dt, table)
 	except frappe.PermissionError:
