@@ -59,6 +59,10 @@ USER_GL_FREE = "jls-gl-free@example.com"
 USER_GL_GROUP = "jls-gl-group@example.com"
 USER_GL_GROUP_HIDDEN = "jls-gl-group-hidden@example.com"
 USER_OUTSTANDING_PROJECT = "jls-outstanding-project@example.com"
+# Accounts Manager reads Customer and GL Entry but neither Sales Order nor
+# Delivery Note; Auditor + Sales Manager reads Sales Order but not Delivery Note.
+USER_OUTSTANDING_NO_ORDERS = "jls-outstanding-no-orders@example.com"
+USER_OUTSTANDING_NO_NOTES = "jls-outstanding-no-notes@example.com"
 
 
 def _ensure_user(email: str, roles: tuple) -> None:
@@ -226,6 +230,8 @@ class LedgerScopeTestCase(FrappeTestCase):
 			USER_OUTSTANDING_PROJECT,
 		):
 			_ensure_user(email, ("Accounts User",))
+		_ensure_user(USER_OUTSTANDING_NO_ORDERS, ("Accounts Manager",))
+		_ensure_user(USER_OUTSTANDING_NO_NOTES, ("Auditor", "Sales Manager"))
 		frappe.db.commit()
 		_ensure_company(COMPANY_A, "JLSA")
 		_ensure_company(COMPANY_B, "JLSB")
@@ -683,3 +689,21 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 			cc_a = get_customer_outstanding(self.customer, COMPANY_A, cost_center=self.cc_a)["outstanding"]
 		self.assertAlmostEqual(no_so, self.GL_TOTAL + self.DN_P1, places=4)
 		self.assertAlmostEqual(cc_a, self.GL_COST_CENTER_A + self.SO_P1 + self.DN_P1, places=4)
+
+	def test_user_without_order_or_note_read_gets_the_gl_outstanding(self):
+		user = USER_OUTSTANDING_NO_ORDERS
+		self.assertTrue(frappe.has_permission("Customer", "read", doc=self.customer, user=user))
+		self.assertTrue(frappe.has_permission("GL Entry", "read", user=user))
+		self.assertFalse(frappe.has_permission("Sales Order", "read", user=user))
+		self.assertFalse(frappe.has_permission("Delivery Note", "read", user=user))
+		with _as(user):
+			out = get_customer_outstanding(self.customer, COMPANY_A)
+		self.assertAlmostEqual(out["outstanding"], self.GL_TOTAL, places=4)
+
+	def test_user_without_note_read_still_gets_sales_orders(self):
+		user = USER_OUTSTANDING_NO_NOTES
+		self.assertTrue(frappe.has_permission("Sales Order", "read", user=user))
+		self.assertFalse(frappe.has_permission("Delivery Note", "read", user=user))
+		with _as(user):
+			out = get_customer_outstanding(self.customer, COMPANY_A)
+		self.assertAlmostEqual(out["outstanding"], self.GL_TOTAL + self.SO_ALL, places=4)
