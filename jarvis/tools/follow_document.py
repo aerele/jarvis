@@ -23,6 +23,8 @@ Two shapes:
 
 from __future__ import annotations
 
+import inspect
+
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
@@ -63,11 +65,17 @@ def _follow_document_one(doctype: str, name: str, user: str) -> bool:
 	follow row was actually inserted (False if already following)."""
 	frappe.has_permission(doctype, "read", doc=name, throw=True)
 
-	from frappe.desk.form.document_follow import (
-		follow_document as _follow,
-	)
+	from frappe.desk.form import document_follow
 
-	result = _follow(doctype=doctype, doc_name=name, user=user)
+	# v16 whitelisted follow_document() takes no user (it acts for the session user); the
+	# user-taking variant is the underscore-prefixed one. v15's public function
+	# takes user itself. Pick by signature so both majors work.
+	public = document_follow.follow_document
+	if "user" in inspect.signature(public).parameters:
+		_follow = public
+	else:
+		_follow = document_follow._follow_document
+	result = _follow(doctype, name, user)
 	return bool(result)
 
 
