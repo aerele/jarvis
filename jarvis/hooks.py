@@ -251,6 +251,11 @@ after_migrate = [
 
 scheduler_events = {
 	"cron": {
+		"* * * * *": [
+			# Shared delivery recovery also runs with rollout/admission off.
+			# Never re-send an ambiguous model request or revive an owner session.
+			"jarvis.chat.collaboration_recovery.sweep",
+		],
 		"*/5 * * * *": [
 			"jarvis.chat.stale_scan.scan_and_mark_errored",
 			# Phase-0 admission backstop (chat concurrency, WP-0): reclaim lost
@@ -403,6 +408,9 @@ scheduler_events = {
 		],
 	},
 	"hourly": [
+		"jarvis.chat.collaboration_tool_claims.reconcile",
+		"jarvis.chat.collaboration_lifecycle.sweep",
+		"jarvis.chat.collaboration_lifecycle.reclaim_sessions",
 		# Admin model + preset catalogs into Redis and the site snapshot. Hot paths
 		# only read (jarvis.catalog_store), so this bounds how stale a site can be.
 		"jarvis.catalog_store.refresh_all",
@@ -620,6 +628,7 @@ doc_events["User"] = {
 doc_events["Jarvis Conversation"] = {
 	"on_update": "jarvis.chat.sharing.on_conversation_update",
 	"on_trash": [
+		"jarvis.chat.collaboration_lifecycle.on_conversation_trash",
 		"jarvis.chat.admission.on_conversation_trash",
 		# Slice B: delete the conversation's Jarvis Import Announcement rows so the
 		# Link never blocks deletion (LinkExistsError) or orphans the poll.
@@ -640,6 +649,8 @@ doc_events["Jarvis Conversation"] = {
 # approve is refused). The hook is keyed on the doctype that HOLDS the Link, so a
 # Role or User a request names is not blocked by it either.
 ignore_links_on_delete = [
+	# A retired binding is immutable audit; its delete hook first removes auth.
+	"Jarvis Chat Binding",
 	"Jarvis Pending Action",
 	"Jarvis Skill Promotion Request",
 	"Jarvis Conversation Share",

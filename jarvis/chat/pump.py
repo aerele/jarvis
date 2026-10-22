@@ -71,6 +71,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -80,6 +81,7 @@ from jarvis import compat
 from jarvis.chat import empty_reply_recovery, txn
 from jarvis.chat import turn_state as ts
 from jarvis.chat.agent_client import YIELD_CONTINUATION_WAIT_S
+from jarvis.chat.collaboration_ownership import executor_clause, legacy_clause
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import AgentUnreachableError
 
@@ -319,6 +321,9 @@ def set_transport_mode(target: str, mode: str) -> int:
 	CALLER already holds (pump_cutover_execute), advancing ``mode_epoch`` by 1 so the change
 	is observable/orderable (CDX-10). No commit here — the caller commits the flip atomically
 	(or rolls it back on a straggler/fault). Returns the new mode_epoch (best-effort read)."""
+	from jarvis.chat.collaboration_ownership import require_drained_for_mode
+
+	require_drained_for_mode(target, mode)
 	frappe.db.sql(
 		"""UPDATE `tabJarvis Relay Pump` SET transport_mode=%(m)s, mode_epoch=mode_epoch+1
 		WHERE relay_target_id=%(t)s""",
@@ -1285,8 +1290,18 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 	event_seq = event.get("event_seq")
 	is_jarvis = (tool_name or "").startswith("jarvis__")
 	conversation = rs.conversation
+	shared_binding = None
+	if ":dashboard:collab:" in rs.session_key:
+		from jarvis.chat.collaboration_turn import binding_for_run
+
+		shared_binding = binding_for_run(rs.run_id)
+	display_id = tool_call_id
+	if shared_binding and tool_call_id:
+		from jarvis.chat.collaboration_tool_claims import receipt_id
+
+		display_id = receipt_id(shared_binding, rs.run_id, tool_call_id)
 	owns_row = (not is_jarvis) and bool(tool_call_id)  # pump owns the durable receipt
-	need_lock = owns_row and phase == "start"  # seq allocation under the conversation lock
+	need_lock = bool(shared_binding) or (owns_row and phase == "start")
 
 	def fenced_step() -> tuple[bool, str | None]:
 		"""One attempt at the fenced tool mutation. Returns ``(committed, message_id)``;
@@ -1296,8 +1311,14 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 			# rank-2 conversation lock; canonical order control->conversation->turn->message
 			# (no shard lock is held on the streaming path, so conversation-first is legal).
 			ts._lock_conversation(conversation)
+		if shared_binding:
+			from jarvis.chat.collaboration_output import lock_reply
+
+			lock_reply(shared_binding, rs.run_id, rs.assistant_message)
 		# CDX-15 fence: same-txn proof the turn is still streaming under epoch E.
-		if not ts.apply_tool_fenced(rs.run_id, rs.version, ctx.epoch, event_seq):
+		if not ts.apply_tool_fenced(
+			rs.run_id, rs.version, ctx.epoch, event_seq, allow_dispatching=bool(shared_binding)
+		):
 			if _epoch_lost(ctx, rs.run_id):
 				ts.lease_lost_exit(rs.run_id)  # rolls back + raises; on_tool -> ctx.lease_lost
 			# Benign 0-rows (watermark dup / version drift): release the lock, apply
@@ -1318,13 +1339,22 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 			rs.version += 1
 			from jarvis.chat.tool_ownership import record_tool_owner
 
-			record_tool_owner(conversation, rs.assistant_message, tool_call_id)
+			if shared_binding and phase == "start" and is_jarvis:
+				from jarvis.chat.collaboration_callbacks import record_gateway_tool
+
+				record_gateway_tool(rs.run_id, tool_call_id, tool_name)
+			record_tool_owner(conversation, rs.assistant_message, display_id)
 			row_id = None
 			if owns_row:
-				if phase == "start":
-					row_id = _insert_tool_start_row(conversation, tool_call_id, tool_name)
-				else:
-					row_id = _update_tool_end_row(conversation, tool_call_id, event.get("status"), rs.run_id)
+				from jarvis.chat.collaboration_turn import turn_context
+
+				with turn_context(shared_binding, rs.run_id) if shared_binding else nullcontext():
+					if phase == "start":
+						row_id = _insert_tool_start_row(conversation, display_id, tool_name)
+					else:
+						row_id = _update_tool_end_row(
+							conversation, display_id, event.get("status"), rs.run_id
+						)
 			frappe.db.commit()  # fence + durable tool row commit ATOMICALLY
 			return True, row_id
 		except Exception:
@@ -1375,7 +1405,7 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 				message_id=message_id,
 				tool_name=tool_name,
 				tool_title=event.get("title"),
-				tool_call_id=tool_call_id,
+				tool_call_id=display_id,
 				pump_epoch=ctx.epoch,
 				relay_target_id=ctx.relay_target_id,
 			)
@@ -1388,7 +1418,7 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 				event_seq=event_seq,
 				message_id=message_id,
 				tool_name=tool_name,
-				tool_call_id=tool_call_id,
+				tool_call_id=display_id,
 				status=event.get("status"),
 				pump_epoch=ctx.epoch,
 				relay_target_id=ctx.relay_target_id,
@@ -1724,6 +1754,7 @@ class PumpContext:
 	pending_recoveries: dict[str, _PendingRecovery] = field(default_factory=dict)
 	# CDX-17: the in-flight mid-hop capacity-refresh RPC (issue-and-poll, never blocked on).
 	pending_snapshot: _PendingSnapshot | None = None
+	shared_preflights: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -1767,6 +1798,20 @@ def run_pump_hop(
 	holder = f"jarvis-pump::{site}::{relay_target_id}::hop{hop_counter}"
 
 	hop_started_mono = _monotonic()
+	# A stale queued hop must not acquire/restamp legacy-RQ work before its
+	# later kill-switch check. Durable mode flips already hold the shard lock.
+	if _row_transport_mode(relay_target_id) == _MODE_LEGACY and frappe.db.has_column(
+		TURN, "collaboration_executor"
+	):
+		if frappe.db.exists(
+			TURN,
+			{
+				"relay_target_id": relay_target_id,
+				"collaboration_executor": "rq",
+				"state": ["in", ts.NONTERMINAL_STATES],
+			},
+		):
+			return {"acquired": False, "relay_target_id": relay_target_id}
 	won, epoch = ts.lease_acquire(relay_target_id, holder, hop_counter=hop_counter)
 	if not won or epoch is None:
 		return {"acquired": False, "relay_target_id": relay_target_id}
@@ -2215,9 +2260,12 @@ def _pump_active_convs(target: str) -> set[str]:
 
 
 def _pump_queued_reserved(target: str) -> list[dict]:
+	from jarvis.chat import collaboration as shared
+
+	paused = "" if shared.writes_ready() else legacy_clause()
 	return frappe.db.sql(
-		"""SELECT run_id, conversation FROM `tabJarvis Chat Turn`
-		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=1
+		f"""SELECT run_id, conversation FROM `tabJarvis Chat Turn`
+		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=1 {executor_clause("pump")} {paused}
 		  AND ( reservation_expires_at IS NULL OR reservation_expires_at > %(now)s )
 		ORDER BY CASE turn_class WHEN 'interactive' THEN 0 ELSE 1 END, enqueued_at ASC, run_id ASC""",
 		{"t": target, "now": ts._now()},
@@ -2229,9 +2277,12 @@ def _pick_next_cold(target: str, active_convs: set[str], promoted_convs: set[str
 	"""Choose the next cold (reserved=0) queued turn to reserve — weighted classes
 	with a background floor of 1 (SUX-4a: when background work is queued,
 	interactive holds at most cap-1 credits), per-conversation single-flight."""
+	from jarvis.chat import collaboration as shared
+
+	paused = "" if shared.writes_ready() else legacy_clause()
 	rows = frappe.db.sql(
-		"""SELECT run_id, conversation, turn_class FROM `tabJarvis Chat Turn`
-		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=0
+		f"""SELECT run_id, conversation, turn_class FROM `tabJarvis Chat Turn`
+		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=0 {executor_clause("pump")} {paused}
 		ORDER BY enqueued_at ASC, run_id ASC LIMIT 200""",
 		{"t": target},
 		as_dict=True,
@@ -2274,8 +2325,8 @@ def _turn_state_count(target: str, turn_class: str) -> int:
 def _dispatch_ready(ctx: PumpContext) -> int:
 	target = ctx.relay_target_id
 	rows = frappe.db.sql(
-		"""SELECT run_id FROM `tabJarvis Chat Turn`
-		WHERE relay_target_id=%(t)s AND state='ready'
+		f"""SELECT run_id FROM `tabJarvis Chat Turn`
+		WHERE relay_target_id=%(t)s AND state='ready' {executor_clause("pump")}
 		ORDER BY ready_at ASC, run_id ASC LIMIT 50""",
 		{"t": target},
 		as_dict=True,
@@ -2301,7 +2352,9 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 	if is_collaborative(turn["conversation"]) or is_collaborative_session(
 		_load_dispatch(turn).get("session_key")
 	):
-		return False
+		from jarvis.chat.collaboration_pump import dispatch_one
+
+		return dispatch_one(ctx, turn)
 
 	# ready -> dispatching: E is FIRST stamped on the turn here, but the CAS now proves
 	# the SHARD control row still holds epoch E (confirm_dispatching's EXISTS clause,
@@ -2437,7 +2490,20 @@ def _on_ack_success(ctx: PumpContext, pa: _PendingAck, ack: dict) -> None:
 		# R-2: the ack PROVES delivery, so clear EXACTLY the agent-correction notes
 		# prepare folded into this prompt (id-keyed, idempotent) — never on an
 		# ack-timeout. Best-effort.
-		_clear_agent_notes_on_ack(rs.conversation, pa.drained_note_ids)
+		if ":dashboard:collab:" in rs.session_key:
+			from jarvis.chat.collaboration_notes import clear_after_ack
+			from jarvis.chat.collaboration_turn import binding_for_run
+
+			try:
+				clear_after_ack(binding_for_run(rs.run_id), rs.run_id, pa.drained_note_ids)
+			except Exception as exc:
+				frappe.db.rollback()
+				frappe.log_error(
+					title="shared chat: decision-note cleanup failed",
+					message=f"run={rs.run_id}; cause={type(exc).__name__}",
+				)
+		else:
+			_clear_agent_notes_on_ack(rs.conversation, pa.drained_note_ids)
 		return
 	# 0 rows: distinguish a real epoch loss from a benign version drift (e.g. a
 	# concurrent cancel bumped version out-of-band).
@@ -2550,6 +2616,16 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 	(the caller converts it to ``ctx.lease_lost``); a benign 0-rows (watermark dup
 	/ version drift) re-syncs the version and returns."""
 	if rs.pending_seq is None:
+		return
+	if ":dashboard:collab:" in rs.session_key:
+		# A secret can span arbitrary deltas; publishing an earlier prefix
+		# cannot be undone by a later scrub. Shared replies are projected only
+		# from the complete scrubbed terminal. Status/receipt notices stay live.
+		rs.pending_seq = None
+		rs.pending_text = rs.pending_delta = ""
+		rs.pending_shown = None
+		rs.events_since_flush = 0
+		rs.last_flush_mono = _monotonic()
 		return
 	seq, text, delta = rs.pending_seq, rs.pending_text, rs.pending_delta
 	shown = text if rs.pending_shown is None else rs.pending_shown
@@ -2812,11 +2888,19 @@ def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) 
 	# hop's reach), so start it on the present, and if a plain read ever lands between
 	# the two, replay the CAS once from a fresh transaction instead of quarantining.
 	txn.fresh_snapshot()
-	won = txn.replay_on_conflict(
-		lambda: ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload),
-		label=f"pump settle terminal {rs.run_id}",
-		before_replay=lambda: _resync_fresh(rs),
-	)
+	if ":dashboard:collab:" in rs.session_key:
+		from jarvis.chat.collaboration_pump import record_terminal
+
+		recorded = record_terminal(ctx, rs, kind, payload)
+		won = recorded is not None
+		if won:
+			rs.version, payload = recorded
+	else:
+		won = txn.replay_on_conflict(
+			lambda: ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload),
+			label=f"pump settle terminal {rs.run_id}",
+			before_replay=lambda: _resync_fresh(rs),
+		)
 	if not won:
 		if _epoch_lost(ctx, rs.run_id):
 			ts.lease_lost_exit(rs.run_id)
@@ -2871,7 +2955,11 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 	from jarvis.chat.collaboration import is_collaborative
 
 	if is_collaborative(rs.conversation):
-		return LaneHandler()
+		from jarvis.chat.collaboration_turn import binding_for_run
+
+		binding = binding_for_run(rs.run_id)
+		if not binding or binding.session_key != rs.session_key or binding.actor != rs.owner:
+			return LaneHandler()
 
 	def on_delta(event_seq: int, text: str, delta: str, shown: str | None = None) -> None:
 		# OARF-6: BATCH the cumulative mirror (relocated _AssistantContentBatcher).
@@ -3704,9 +3792,9 @@ def _park_affected_recovering(ctx: PumpContext, *, reason: str = "db-disconnect"
 	target = ctx.relay_target_id
 	try:
 		rows = frappe.db.sql(
-			"""SELECT run_id, version, conversation, assistant_message FROM `tabJarvis Chat Turn`
+			f"""SELECT run_id, version, conversation, assistant_message FROM `tabJarvis Chat Turn`
 			WHERE relay_target_id=%(t)s
-			  AND state IN ('preparing','ready','dispatching','streaming','terminal_observed')""",
+			  AND state IN ('preparing','ready','dispatching','streaming','terminal_observed') {executor_clause("pump")}""",
 			{"t": target},
 			as_dict=True,
 		)
@@ -4180,11 +4268,11 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 	# which re-stamps + reconciles in-flight turns on start (D6 §5). The watchdog
 	# parks only on a per-turn deadline / recovery budget.
 	rows = frappe.db.sql(
-		"""SELECT run_id, state, version, reserved, reservation_expires_at, enqueued_at,
+		f"""SELECT run_id, state, version, reserved, reservation_expires_at, enqueued_at,
 		       preparing_at, deadline_at, dispatching_at, recovery_started_at, conversation,
 		       assistant_message, seed_message, turn_class
 		FROM `tabJarvis Chat Turn`
-		WHERE relay_target_id=%(t)s AND state IN %(states)s""",
+		WHERE relay_target_id=%(t)s AND state IN %(states)s {legacy_clause()}""",
 		{"t": target, "states": ts.NONTERMINAL_STATES},
 		as_dict=True,
 	)

@@ -53,6 +53,8 @@ CONV = "Jarvis Conversation"
 # canon and must become an explicit subset of ``ts.EFFECT_NAMES``.
 FINAL_EFFECTS = ts.EFFECT_NAMES
 TERMINAL_EFFECTS = ("terminal_publish", "file_box_sheet_seal", "macro_advance", "telemetry_flush")
+SHARED_FINAL_EFFECTS = ("terminal_publish", "enrich_cards", "chat_asks", "usage", "telemetry_flush")
+SHARED_TERMINAL_EFFECTS = ("terminal_publish", "usage", "telemetry_flush")
 
 
 def invoke_settlement(
@@ -74,8 +76,17 @@ def invoke_settlement(
 	terminal event AFTER commit, then enqueues finalize. Never blocks."""
 	from jarvis.chat.collaboration import is_collaborative
 
+	shared_binding = None
 	if is_collaborative(conversation):
-		return
+		from jarvis.chat import collaboration as c
+		from jarvis.chat.collaboration_bindings import require_settlement
+		from jarvis.chat.collaboration_turn import binding_for_run
+
+		shared_binding = binding_for_run(run_id)
+		if not shared_binding or shared_binding.conversation != conversation:
+			c._deny()
+		require_settlement(shared_binding, run_id, "assistant")
+		owner = shared_binding.actor
 
 	def project():
 		"""The settlement transaction: projection + state advance + effects, committed as
@@ -84,6 +95,48 @@ def invoke_settlement(
 		``txn.replay_on_conflict`` if it loses a snapshot race: the reply row it projects
 		into is also written by the tool's web request (the file card), and a precious
 		terminal that raised here would be quarantined for a whole pump hop."""
+		if shared_binding:
+			frappe.db.get_value(CONV, conversation, "name", for_update=True)
+			bound = frappe.db.get_value(
+				TURN,
+				run_id,
+				[
+					"conversation",
+					"actor",
+					"collaboration_binding",
+					"assistant_message",
+					"collaboration_send_started_at",
+				],
+				as_dict=True,
+				for_update=True,
+			)
+			if (
+				not bound
+				or not bound.collaboration_send_started_at
+				or (bound.conversation, bound.actor, bound.collaboration_binding)
+				!= (conversation, shared_binding.actor, shared_binding.name)
+				or (assistant_message and assistant_message != bound.assistant_message)
+			):
+				c._deny()
+			reply = (
+				frappe.db.get_value(
+					MSG,
+					bound.assistant_message,
+					["conversation", "actor", "collaboration_binding", "collaboration_run_id", "role"],
+					as_dict=True,
+					for_update=True,
+				)
+				if bound.assistant_message
+				else None
+			)
+			if not reply or (
+				reply.conversation,
+				reply.actor,
+				reply.collaboration_binding,
+				reply.collaboration_run_id,
+				reply.role,
+			) != (conversation, shared_binding.actor, shared_binding.name, run_id, "assistant"):
+				c._deny()
 		row = ts.read_turn(run_id)
 		if row is None:
 			return
@@ -97,6 +150,16 @@ def invoke_settlement(
 		aborted = bool(row.get("cancel_requested")) and _is_aborted_payload(
 			row.get("terminal_kind"), terminal_payload
 		)
+		if shared_binding and am and (aborted or kind == "relay:error"):
+			from jarvis.chat.scrub import scrub_for_share
+
+			# Shared deltas stay out of storage until a complete payload can be
+			# scrubbed. Error/stop terminals can still contain a useful answer.
+			text = scrub_for_share(_final_text(terminal_payload))
+			if text:
+				ts._run_cas(
+					f"UPDATE `tab{MSG}` SET content=%(text)s WHERE name=%(m)s", {"text": text, "m": am}
+				)
 
 		if aborted:
 			# Clean-stop terminal (D2 #19). The stop is a FLAG, not prose: keep whatever
@@ -105,10 +168,16 @@ def invoke_settlement(
 				ts._run_cas(f"UPDATE `tab{MSG}` SET stopped=1, streaming=0 WHERE name=%(m)s", {"m": am})
 			won = ts.settle_cancelled(run_id, v, epoch)
 			if won:
-				ts.insert_required_effects(run_id, TERMINAL_EFFECTS)
+				ts.insert_required_effects(
+					run_id, SHARED_TERMINAL_EFFECTS if shared_binding else TERMINAL_EFFECTS
+				)
 			pub_kind, pub_extra = "run:end", {"stopped": True}
 		elif kind == "relay:error":
 			err = _error_text(terminal_payload)
+			if shared_binding:
+				from jarvis.chat.scrub import scrub_for_share
+
+				err = scrub_for_share(err)
 			# Mark errored WITHOUT overwriting the streamed content (matches legacy
 			# _mark_errored: streaming=0 + error, content preserved). SUX-11: the code
 			# classification travels on the realtime event below.
@@ -119,10 +188,16 @@ def invoke_settlement(
 				)
 			won = ts.settle_errored(run_id, v, epoch, error=err)
 			if won:
-				ts.insert_required_effects(run_id, TERMINAL_EFFECTS)
+				ts.insert_required_effects(
+					run_id, SHARED_TERMINAL_EFFECTS if shared_binding else TERMINAL_EFFECTS
+				)
 			pub_kind, pub_extra = "run:error", {"error": err, "code": _classify(err)}
 		else:
 			final_text = _final_text(terminal_payload)
+			if shared_binding:
+				from jarvis.chat.scrub import scrub_for_share
+
+				final_text = scrub_for_share(final_text)
 			# A media/marker-only reply strips to empty text; force the content overwrite
 			# whenever ANY MEDIA: marker was stripped, so the raw streamed batcher tail
 			# (which could carry the marker) can never survive into stored content. Coerce
@@ -139,7 +214,9 @@ def invoke_settlement(
 					)
 				else:
 					ts._run_cas(f"UPDATE `tab{MSG}` SET streaming=0 WHERE name=%(m)s", {"m": am})
-			won = ts.settle_finalizing(run_id, v, epoch, required_effects=FINAL_EFFECTS)
+			won = ts.settle_finalizing(
+				run_id, v, epoch, required_effects=SHARED_FINAL_EFFECTS if shared_binding else FINAL_EFFECTS
+			)
 			# SUX-6: was_recovered tells the client a VISIBLE replacement is legitimate
 			# (the answer changed via snapshot recovery); on the normal path it is 0 and
 			# the client skips re-rendering an identical terminal.
@@ -221,7 +298,8 @@ def invoke_settlement(
 		# C2: ride any live parked confirmation card for this conversation on the
 		# fenced, backstopped terminal, so a card whose best-effort action:pending
 		# push was missed re-surfaces at turn-end without a manual reload.
-		pub_extra = _extra_with_pending(pub_extra, owner, conversation)
+		if not shared_binding:
+			pub_extra = _extra_with_pending(pub_extra, owner, conversation)
 		ts.publish_fenced(
 			owner,
 			pub_kind,
@@ -236,6 +314,10 @@ def invoke_settlement(
 
 	# S6 — enqueue enrichment (idempotent per (turn, effect_name); force-done at 3).
 	deps.enqueue_finalize(run_id, relay_target_id)
+	if shared_binding:
+		from jarvis.chat.collaboration_ownership import wake_queued
+
+		wake_queued(relay_target_id)
 
 	# Last, so its read takes no snapshot before the steps above. The helper never raises;
 	# the try is for the import. A run:error pub_extra carries "error" and "code".

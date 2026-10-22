@@ -72,10 +72,16 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 			frappe.local.response.http_status_code = e.http_status
 			return _error(e.code, e.message)
 
-		from jarvis.chat.collaboration import legacy_session_user
+		from jarvis.chat.collaboration import is_collaborative_session, legacy_session_user, resolve_binding
 
+		shared_session = is_collaborative_session(session_key)
+		if shared_session and tool in {"recall", "remember"}:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Private memory is unavailable in shared chats.")
 		try:
-			plugin_user = legacy_session_user(session_key)
+			plugin_user = (
+				resolve_binding(session_key).actor if shared_session else legacy_session_user(session_key)
+			)
 		except frappe.PermissionError:
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", "Collaborative chat execution is unavailable on this server.")
@@ -157,6 +163,10 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 				"start a new chat to continue. Then stop.",
 			)
 
+		if shared_session:
+			from jarvis.chat.collaboration_dispatch import dispatch
+
+			return dispatch(session_key, tool, args, (_get_header("X-Jarvis-Tool-Call-Id") or "").strip())
 		return _dispatch_from_session(plugin_user, session_key, tool, args)
 
 	# Standard Frappe auth path - Guest is rejected; everything else dispatches
@@ -766,6 +776,15 @@ def persist_tool_receipt(
 	# session-safe (a bare frappe.set_user in this HTTP path would gut the
 	# caller's cookie session sid + data and log them out).
 	conv_owner = frappe.db.get_value("Jarvis Conversation", conv_name, "owner")
+	from jarvis.chat.collaboration_turn import current_turn
+
+	shared_turn = current_turn()
+	if shared_turn and shared_turn.binding.conversation == conv_name:
+		conv_owner = shared_turn.binding.actor
+		if tool_call_id:
+			from jarvis.chat.collaboration_tool_claims import receipt_id
+
+			tool_call_id = receipt_id(shared_turn.binding, shared_turn.run_id, tool_call_id)
 	with impersonate(conv_owner):
 		# R-6: take the conversation FOR UPDATE (canonical rank 2, out-of-band, NO
 		# epoch fence) so the seq allocation + the (conversation, tool_call_id)
@@ -919,6 +938,11 @@ def _insert_pending_row(
 		expires = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=remaining)
 	card = preview.get("card") if isinstance(preview, dict) else None
 	conv_owner = frappe.db.get_value("Jarvis Conversation", conv_name, "owner")
+	from jarvis.chat.collaboration_turn import current_turn
+
+	shared_turn = current_turn()
+	if shared_turn and shared_turn.binding.conversation == conv_name:
+		conv_owner = shared_turn.binding.actor
 	if not conv_owner:
 		# Not a real, hostable conversation (a synthetic/stray id, or a session-
 		# resolution artifact) - it cannot host a Jarvis Chat Message row. Treat it
@@ -990,11 +1014,36 @@ def _bind_callback_tool(conv_name: str, tool_call_id: str) -> None:
 	A Claude CLI turn sends no tool events, so this callback is the only place its tools
 	can be bound. Runs in its own transaction after the receipt's commit, so a failed
 	bind never costs the receipt; it only locks the reply row. Best-effort."""
+	from jarvis.chat.collaboration_turn import current_turn
 	from jarvis.chat.tool_ownership import bind_to_live_reply
+
+	context = current_turn()
+
+	def bind():
+		if context and context.binding.conversation == conv_name:
+			from jarvis.chat.tool_ownership import record_tool_owner
+
+			frappe.db.get_value("Jarvis Conversation", conv_name, "name", for_update=True)
+			row = frappe.db.get_value(
+				"Jarvis Chat Turn",
+				context.run_id,
+				["actor", "collaboration_binding", "conversation", "assistant_message"],
+				as_dict=True,
+				for_update=True,
+			)
+			if not row or (row.actor, row.collaboration_binding, row.conversation) != (
+				context.binding.actor,
+				context.binding.name,
+				conv_name,
+			):
+				raise frappe.PermissionError("The shared receipt identity changed.")
+			record_tool_owner(conv_name, row.assistant_message, tool_call_id)
+		else:
+			bind_to_live_reply(conv_name, tool_call_id)
 
 	try:
 		txn.replay_on_conflict(
-			lambda: bind_to_live_reply(conv_name, tool_call_id),
+			bind,
 			label=f"bind tool {conv_name}:{tool_call_id}",
 		)
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release the reply row lock now
@@ -1035,6 +1084,13 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 	if isinstance(notes, list) and notes:
 		item["notes"] = [str(n) for n in notes][:10]
 	MSG = "Jarvis Chat Message"
+	from jarvis.chat.collaboration_turn import current_turn
+
+	context = current_turn()
+	from jarvis.chat.collaboration_realtime import is_shared
+
+	if is_shared(conv_name) and (not context or context.binding.conversation != conv_name):
+		raise frappe.PermissionError("A shared file receipt requires its bound turn.")
 
 	def _write_canvas() -> tuple[str, list] | None:
 		"""Row-locked read-append-write, replayable: two file tools finishing together
@@ -1048,19 +1104,36 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 		already the first read of a clean transaction either way.
 		"""
 		# Prefer the in-flight (streaming) assistant message; fall back to the latest.
-		rows = frappe.get_all(
-			MSG,
-			filters={"conversation": conv_name, "role": "assistant", "streaming": 1},
-			order_by="seq desc",
-			limit=1,
-			pluck="name",
-		) or frappe.get_all(
-			MSG,
-			filters={"conversation": conv_name, "role": "assistant"},
-			order_by="seq desc",
-			limit=1,
-			pluck="name",
-		)
+		if context and context.binding.conversation == conv_name:
+			frappe.db.get_value("Jarvis Conversation", conv_name, "name", for_update=True)
+			turn = frappe.db.get_value(
+				"Jarvis Chat Turn",
+				context.run_id,
+				["actor", "collaboration_binding", "conversation", "assistant_message"],
+				as_dict=True,
+				for_update=True,
+			)
+			if not turn or (turn.actor, turn.collaboration_binding, turn.conversation) != (
+				context.binding.actor,
+				context.binding.name,
+				conv_name,
+			):
+				raise frappe.PermissionError("The shared file receipt identity changed.")
+			rows = [turn.assistant_message] if turn.assistant_message else []
+		else:
+			rows = frappe.get_all(
+				MSG,
+				filters={"conversation": conv_name, "role": "assistant", "streaming": 1},
+				order_by="seq desc",
+				limit=1,
+				pluck="name",
+			) or frappe.get_all(
+				MSG,
+				filters={"conversation": conv_name, "role": "assistant"},
+				order_by="seq desc",
+				limit=1,
+				pluck="name",
+			)
 		if not rows:
 			return None
 		msg_name = rows[0]
@@ -1084,10 +1157,11 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 	# publish twice, and a realtime event for a card the transaction later loses
 	# would be worse than none.
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
-	frappe.publish_realtime(
-		"jarvis:event",
+	from jarvis.chat.events import publish_to_user
+
+	publish_to_user(
+		user,
 		{"kind": "canvas", "conversation_id": conv_name, "message_id": msg_name, "items": items},
-		user=user,
 	)
 
 
@@ -1110,21 +1184,26 @@ def publish_realtime_tool_result(
 	transcript reload. ``tool_call_id`` is the id the row was saved with, so the
 	SPA can bind a live report to the reply it belongs to (the "Reports
 	consulted" card) the same way the saved rows do."""
-	frappe.publish_realtime(
-		"jarvis:event",
-		{
-			"kind": "tool:result",
-			"conversation_id": conversation_id,
-			"tool_message_id": tool_message_id,
-			"tool_call_id": tool_call_id,
-			"tool_name": tool_name,
-			"args": args,
-			"result": result,
-			"status": status,
-			"action_outcome": action_outcome,
-		},
-		user=user,
-	)
+	from jarvis.chat.collaboration_realtime import is_shared
+
+	payload = {
+		"kind": "tool:result",
+		"conversation_id": conversation_id,
+		"tool_message_id": tool_message_id,
+		"tool_call_id": tool_call_id,
+		"tool_name": tool_name,
+		"args": args,
+		"result": result,
+		"status": status,
+		"action_outcome": action_outcome,
+	}
+	if is_shared(conversation_id):
+		from jarvis.chat.events import publish_to_user
+
+		publish_to_user(user, payload)
+	else:
+		# Keep the existing private receipt publication seam and envelope.
+		frappe.publish_realtime("jarvis:event", payload, user=user)
 
 
 # P0d (decision 16): a batch key the model sends ALONGSIDE single-record args
@@ -3379,8 +3458,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	"""
 	from jarvis.chat.collaboration import is_collaborative
 
+	shared_permit = None
 	if is_collaborative(conversation):
-		return _error("PermissionError", "Collaborative chat execution is unavailable on this server.")
+		from jarvis.chat.collaboration_callbacks import permitted_callback
+
+		shared_permit = permitted_callback(conversation, tool)
+		if not shared_permit:
+			return _error("PermissionError", "Shared tool execution requires a current actor-bound callback.")
 
 	# S6: a tool body (e.g. run_method -> call_tool) must never re-enter the gate.
 	refuse_in_tool_dispatch()
@@ -3403,6 +3487,15 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		args = _parse_args(raw_args, tool)
 	except JarvisError as e:
 		return _error(type(e).__name__, str(e))
+	if shared_permit:
+		from jarvis.chat.collaboration_tools import tool_kind, validate_targets
+
+		try:
+			if tool_kind(tool) == "refused":
+				return _error("PermissionError", "This tool is unavailable in shared chats.")
+			validate_targets(tool, args)
+		except frappe.PermissionError:
+			return _error("PermissionError", "Private Jarvis context is unavailable in shared chats.")
 
 	# Write-risk guard (round 2, jarvis.tools._write_risk): ONE choke point, ahead of
 	# every route below (File Box, the uncarded modes, the park). A structure change
@@ -3462,7 +3555,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an
 	# unattended File Box run never reaches the preview / park / auto-apply paths
 	# below with a write the policy did not decide. None = not its call.
-	if conversation and is_write:
+	if conversation and is_write and not shared_permit:
 		from jarvis.chat import held_writes
 
 		verdict = held_writes.apply(tool, args, conversation)
@@ -3475,14 +3568,14 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# An armed macro's run follows only skills its owner controls: judged here, on the
 	# row this fetch serves, before its body goes back (``macros.check_a_fetched_skill``).
 	skill_note = ""
-	if conversation and tool == "get_skill":
+	if conversation and tool == "get_skill" and not shared_permit:
 		from jarvis.chat import macros
 
 		skill_note = macros.check_a_fetched_skill(
 			conversation, args.get("skill_name") if isinstance(args, dict) else None
 		)
 	# File Box skill routing: only an eligible skill loads (and is recorded).
-	if conversation and tool == "get_skill":
+	if conversation and tool == "get_skill" and not shared_permit:
 		from jarvis.chat import filebox_skills
 
 		verdict = filebox_skills.gate_get_skill(args, conversation)
@@ -3546,7 +3639,11 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# _SKILL_AUTORUN_NEVER unchanged (writes still park; the partition invariants
 	# hold); only a proven safe read is exempted here.
 	_connector_safe_read = tool == "call_connector" and _connector_call_is_safe_read(args)
-	if (tool in _GATED_WRITES or (is_write and _is_bulk_call(args))) and not _connector_safe_read:
+	if (
+		tool in _GATED_WRITES
+		or (is_write and _is_bulk_call(args))
+		or (shared_permit and tool_kind(tool) == "write")
+	) and not _connector_safe_read:
 		from jarvis.chat import events, pending_confirm
 		from jarvis.tools._bulk import _MAX_BATCH
 
@@ -3586,7 +3683,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						["skill_autorun", "request_autorun", *_auto_mode_fields()],
 						as_dict=True,
 					)
-					if conversation
+					if conversation and not shared_permit
 					else None
 				) or {}
 				if (
@@ -3616,7 +3713,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# tracked on this path, so the token carries "" and the sibling-run filter
 		# in pending_confirm.clear_for_conversation no-ops.
 		conv = conversation or ""
-		run_id = ""
+		run_id = shared_permit.turn.run_id if shared_permit else ""
 		# Two identities (issue #186, #1/#5/#6):
 		#   owner_user = the CONVERSATION OWNER - the human who sees the card,
 		#     clicks Confirm, and whose browser is subscribed. Deliver + bind +
@@ -3631,6 +3728,8 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		owner_user = (
 			frappe.db.get_value("Jarvis Conversation", conv, "owner") if conv else None
 		) or exec_user
+		if shared_permit:
+			owner_user = exec_user = shared_permit.turn.binding.actor
 		# One flags read shared by the skip-the-card bypasses below (all key off the
 		# conversation row). An empty/unresolved conv -> {} -> every flag OFF (the
 		# safe default: the write parks). skill_autorun + skill_autorun_at +
@@ -3656,7 +3755,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				],
 				as_dict=True,
 			)
-			if conv
+			if conv and not shared_permit
 			else None
 		) or {}
 		# File Box direct-apply (a draft of a submittable doctype) and the held
@@ -4003,7 +4102,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# Never on a structure card: confirming it must not also open an approved run.
 		skill_docname, skill_slug = (
 			_resolve_approve_run_offer(conv)
-			if tool in _SKILL_AUTORUN_COVERED and not _guarded
+			if tool in _SKILL_AUTORUN_COVERED and not _guarded and not shared_permit
 			else (None, None)
 		)
 		if isinstance(preview, dict):

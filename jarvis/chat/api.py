@@ -4492,7 +4492,33 @@ def _dispatch_turn(
 			_gate_ts.reset_lock_tracking()
 			return _reroute_legacy_to_pump(enqueue_kwargs, interactive, exempt_overload=exempt_overload)
 	try:
-		if (frappe.conf.get("socketio_backend") or "").strip().lower() == "python":
+		from jarvis.chat.collaboration import is_collaborative
+
+		shared = is_collaborative(enqueue_kwargs.get("conversation_id"))
+		if shared:
+			from jarvis.chat import collaboration as c
+			from jarvis.chat.collaboration_turn import binding_for_run
+
+			binding = binding_for_run(enqueue_kwargs.get("run_id"))
+			row = frappe.db.get_value(
+				"Jarvis Chat Turn",
+				enqueue_kwargs.get("run_id"),
+				["seed_message", "collaboration_executor", "state"],
+				as_dict=True,
+			)
+			if (
+				not binding
+				or not row
+				or (binding.conversation, row.seed_message, row.collaboration_executor, row.state)
+				!= (
+					enqueue_kwargs.get("conversation_id"),
+					enqueue_kwargs.get("message_id"),
+					"rq",
+					"dispatching",
+				)
+			):
+				c._deny()
+		if not shared and (frappe.conf.get("socketio_backend") or "").strip().lower() == "python":
 			from jarvis.chat import dispatch
 
 			# Mismatch guard: pub/sub is fire-and-forget, so publishing with no
@@ -5026,6 +5052,29 @@ _TYPED_REPLY_SUFFIX = (
 )
 
 
+def continuation_prompt(receipt: str, *, outcome=None, spans=None, failed=False, applied=None) -> str:
+	"""Format untrusted receipt data without admission, identity or bypass state."""
+	from jarvis.chat.turn_handler import _safe_label_name
+
+	spans = dict(spans or {})
+	if set(spans) - MIXED_SPANS:
+		raise ValueError(f"enqueue_continuation: unknown span(s) {sorted(set(spans) - MIXED_SPANS)}")
+	if applied is not None:
+		spans.setdefault("applied", applied)
+	spans.setdefault("not_fixable", receipt)
+	outcome = _resolve_outcome(outcome, failed, spans.get("applied"))
+	safe = _safe_label_name(receipt)
+	if outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
+		prompt = _CONTINUATION_PROMPT_UNKNOWN.format(receipt=safe)
+	elif outcome == OUTCOME_MIXED:
+		prompt = _mixed_prompt(spans)
+	elif outcome in _FAILED_SCAFFOLDS:
+		prompt = _FAILED_SCAFFOLDS[outcome].format(receipt=safe)
+	else:
+		prompt = _CONTINUATION_PROMPT.format(receipt=safe)
+	return prompt
+
+
 def enqueue_continuation(
 	conversation: str,
 	receipt: str,
@@ -5067,22 +5116,7 @@ def enqueue_continuation(
 	A typed approval in flight (``TYPED_REPLY_FLAG``) appends the user's words as DATA."""
 	from jarvis.chat.turn_handler import _safe_label_name
 
-	spans = dict(spans or {})
-	if set(spans) - MIXED_SPANS:
-		raise ValueError(f"enqueue_continuation: unknown span(s) {sorted(set(spans) - MIXED_SPANS)}")
-	if applied is not None:
-		spans.setdefault("applied", applied)
-	spans.setdefault("not_fixable", receipt)
-	outcome = _resolve_outcome(outcome, failed, spans.get("applied"))
-	safe = _safe_label_name(receipt)
-	if outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
-		prompt = _CONTINUATION_PROMPT_UNKNOWN.format(receipt=safe)
-	elif outcome == OUTCOME_MIXED:
-		prompt = _mixed_prompt(spans)
-	elif outcome in _FAILED_SCAFFOLDS:
-		prompt = _FAILED_SCAFFOLDS[outcome].format(receipt=safe)
-	else:
-		prompt = _CONTINUATION_PROMPT.format(receipt=safe)
+	prompt = continuation_prompt(receipt, outcome=outcome, spans=spans, failed=failed, applied=applied)
 	typed = frappe.flags.get(TYPED_REPLY_FLAG)
 	if typed:
 		prompt += _TYPED_REPLY_SUFFIX.format(typed=_safe_label_name(typed))

@@ -93,7 +93,7 @@ def _item(row) -> dict:
 		settlement = _seal.unseal_settlement(row) or {}
 	except _seal.SealError:
 		settlement = {}
-	return {
+	item = {
 		"name": row.name,
 		"kind": row.kind,
 		"tool": row.tool,
@@ -112,6 +112,9 @@ def _item(row) -> dict:
 		"corrects": row.get("corrects") or "",
 		"late": bool(frappe.flags.get(LATE_SETTLE_FLAG) or row.settle_attempts),
 	}
+	if row.get("collaboration_binding"):
+		item.update(actor=row.actor, collaboration_binding=row.collaboration_binding, run_id=row.run_id)
+	return item
 
 
 def _delivery_conversation(row) -> str | None:
@@ -125,6 +128,12 @@ def _deliver(item: dict) -> None:
 	if item["kind"] != "chat" or not conv:
 		return
 	from jarvis import api
+
+	if item.get("collaboration_binding"):
+		from jarvis.chat.collaboration_continuations import deliver
+
+		deliver(item)
+		return
 
 	# A legacy sweep may have mislabelled an executing card; its real outcome wins.
 	# Supersede flipped its own chip in park's transaction: re-flip it so the chip
@@ -174,6 +183,12 @@ def _announce(item: dict) -> None:
 
 
 def _continue(kind: str, conversation: str | None, items: list[dict]) -> None:
+	if any(item.get("collaboration_binding") for item in items):
+		from jarvis.chat.collaboration_continuations import on_settled
+
+		on_settled(conversation, items)
+		frappe.db.commit()
+		return
 	path = CONTINUATIONS.get(kind)
 	if path:
 		frappe.get_attr(path)(conversation, items)

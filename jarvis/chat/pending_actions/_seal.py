@@ -34,6 +34,11 @@ BOUND_FIELDS = (
 	# R2-3: the failed card this one corrects. Bound so clearing it in the table
 	# (to win a second correction) reads as tampered; "" on rows sealed before it.
 	"corrects",
+	"actor",
+	"collaboration_binding",
+	"collaboration_grant_revision",
+	"collaboration_epoch",
+	"collaboration_call_key",
 )
 
 
