@@ -255,6 +255,25 @@ class TestRunAsRunTimeRecheck(_RunAsFixture):
 		finally:
 			self._restore_sm(self.sm2)
 
+	def test_audit_fallback_does_not_treat_underscore_or_percent_as_a_wildcard(self):
+		from jarvis.chat.agent_activity import log_activity
+		from jarvis.chat.agent_scheduler import _run_as_setter
+
+		inst = _install_as(self.owner)
+		log_activity(
+			agent=AGENT,
+			agent_title=None,
+			installation=inst,
+			action="run_as_changed",
+			detail=f"run as ragYx@example.com (set by {self.sm2})",
+			owner=self.owner,
+		)
+		# Only ragYx has a row; an address with "_" or "%" in the same place must not
+		# pick it up as if those characters were LIKE wildcards.
+		self.assertIsNone(_run_as_setter(inst, "rag_x@example.com"))
+		self.assertIsNone(_run_as_setter(inst, "rag%@example.com"))
+		self.assertEqual(_run_as_setter(inst, "ragYx@example.com"), self.sm2)
+
 	# -- manual path -------------------------------------------------------- #
 	def test_run_agent_now_refuses_a_mapping_whose_setter_lost_system_manager(self):
 		inst = self._mapped_by(self.sm2)

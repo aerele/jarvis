@@ -24,7 +24,7 @@ from jarvis.exceptions import (
 	AdminValidationError,
 )
 from jarvis.hooks import get_default_admin_url
-from jarvis.permissions import grant_onboarding_admin, require_jarvis_admin
+from jarvis.permissions import grant_onboarding_admin, is_system_manager, require_jarvis_admin
 
 # Every admin-side failure admin_client raises. One tuple so the onboarding
 # facade's catch sites cannot drift apart from _surface's.
@@ -2159,9 +2159,7 @@ def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_ll
 	``frappe.only_for``, which no-ops under the v15 test runner and raises with no
 	message the SPA could show."""
 	require_jarvis_admin()
-	if cint(wipe_data) and not (
-		frappe.session.user == "Administrator" or "System Manager" in frappe.get_roles()
-	):
+	if cint(wipe_data) and not is_system_manager():
 		frappe.throw(
 			"Only a System Manager can reset the workspace and delete its data.",
 			frappe.PermissionError,

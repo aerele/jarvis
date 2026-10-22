@@ -56,7 +56,7 @@ from jarvis._session import authenticated_user, impersonate
 from jarvis.chat import derived_config
 from jarvis.chat.agent_activity import ACTIVITY, log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
-from jarvis.permissions import is_valid_unattended_owner
+from jarvis.permissions import is_system_manager, is_valid_unattended_owner
 from jarvis.tools import _delegate_capability
 
 INSTALLATION = "Jarvis Agent Installation"
@@ -1833,14 +1833,6 @@ def _valid_owner(owner: str) -> bool:
 	return is_valid_unattended_owner(owner)
 
 
-def may_set_run_as_for_others(user: str) -> bool:
-	"""True iff ``user`` is Administrator or holds System Manager NOW: the only
-	identities allowed to map an installation to run as someone other than
-	themselves. Read at call time (roles are not cached on the installation), so a
-	revoked System Manager loses the right at once."""
-	return user == "Administrator" or "System Manager" in frappe.get_roles(user)
-
-
 _RUN_AS_AUDIT_DETAIL = re.compile(r"^run as (?P<target>\S+) \(set by (?P<setter>[^)\s]+)\)")
 
 
@@ -1875,14 +1867,23 @@ def _run_as_setter(installation: str, run_as: str) -> str | None:
 			if isinstance(item, list) and len(item) >= 3 and item[0] == "run_as_user":
 				return r.owner if (item[2] or "").strip() == run_as else None
 
-	detail = frappe.db.get_value(
-		ACTIVITY,
-		{"installation": installation, "action": "run_as_changed", "detail": ["like", f"run as {run_as} (set by %"]},
-		"detail",
-		order_by="creation desc",
+	# Match the exact "run as <target> (set by <setter>)" text in Python: a LIKE
+	# pattern built from an email would treat its "_" and "%" as wildcards.
+	activity = frappe.qb.DocType(ACTIVITY)
+	details = (
+		frappe.qb.from_(activity)
+		.select(activity.detail)
+		.where(activity.installation == installation)
+		.where(activity.action == "run_as_changed")
+		.orderby(activity.creation, order=frappe.qb.desc)
+		.limit(25)
+		.run(pluck="detail")
 	)
-	m = _RUN_AS_AUDIT_DETAIL.match(detail or "")
-	return m.group("setter") if m and m.group("target") == run_as else None
+	for detail in details:
+		m = _RUN_AS_AUDIT_DETAIL.match(detail or "")
+		if m and m.group("target") == run_as:
+			return m.group("setter")
+	return None
 
 
 def run_as_mapping_refusal(installation: str, owner: str, run_as: str) -> str | None:
@@ -1904,7 +1905,7 @@ def run_as_mapping_refusal(installation: str, owner: str, run_as: str) -> str | 
 		return None
 	if setter != "Administrator" and not frappe.db.get_value("User", setter, "enabled"):
 		return f"{setter} set the run-as user and is disabled; ask a System Manager to set it again"
-	if not may_set_run_as_for_others(setter):
+	if not is_system_manager(setter):
 		# Short on purpose: the scheduler stores the reason in a 140-character field.
 		return f"{setter} set the run-as user and is no longer a System Manager; ask one to set it again"
 	return None
