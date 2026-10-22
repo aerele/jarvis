@@ -1207,6 +1207,9 @@ _WRITE_TOOLS = frozenset(
 		"update_wiki",
 		# A one-time macro: work the user asked to run later, as them.
 		"schedule_run",
+		# Rewrites the user's durable memory, which every later chat reads. Audited, not
+		# gated; a File Box, agent or scheduled run is refused it (remember.py).
+		"remember",
 		# Audited but NOT gated (see _GATED_WRITES comment below):
 		# download_pdf/export_excel both insert a private, unattached File doc
 		# - real DB writes that need an audit trail, not a
