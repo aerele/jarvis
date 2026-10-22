@@ -17,6 +17,8 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.exceptions import PermissionDeniedError
+from jarvis.tools._ledger_access import gl_dimension_restrictions
+from jarvis.tools.get_balance_on import get_balance_on
 from jarvis.tools.get_stock_balance import get_stock_balance
 from jarvis.tools.get_valuation_rate import get_valuation_rate
 
@@ -36,6 +38,19 @@ USER_COMPANY_A = "jls-company-a@example.com"
 USER_WAREHOUSE_A1 = "jls-warehouse-a1@example.com"
 USER_ITEM_1 = "jls-item-1@example.com"
 USER_UNRESTRICTED = "jls-unrestricted@example.com"
+
+# Accounts User reads GL Entry; each user below is narrowed by one GL
+# dimension User Permission (or none).
+CUSTOMER = "_JLS Customer"
+PROJECT = "_JLS Project"
+ACCOUNT_ROOT_PL = "_JLS Expenses"
+ACCOUNT_PL = "_JLS Rent"
+ACCOUNT_ROOT_BS = "_JLS Assets"
+ACCOUNT_BS = "_JLS Cash"
+COST_CENTER_OTHER = "_JLS Other Cost Center"
+USER_GL_PROJECT = "jls-gl-project@example.com"
+USER_GL_COST_CENTER = "jls-gl-cost-center@example.com"
+USER_GL_FREE = "jls-gl-free@example.com"
 
 
 def _ensure_user(email: str, roles: tuple) -> None:
@@ -112,6 +127,50 @@ def _ensure_warehouse(name: str, company: str) -> str:
 	return doc.name
 
 
+def _ensure_account(name: str, company: str, **kwargs) -> str:
+	account = frappe.db.exists("Account", {"account_name": name, "company": company})
+	if account:
+		return account
+	doc = frappe.get_doc({"doctype": "Account", "account_name": name, "company": company, **kwargs})
+	# Roots have no parent; the fixture companies carry no chart of accounts.
+	doc.insert(ignore_permissions=True, ignore_mandatory=True)
+	return doc.name
+
+
+def _ensure_cost_center(name: str, company: str) -> str:
+	existing = frappe.db.exists("Cost Center", {"cost_center_name": name, "company": company})
+	if existing:
+		return existing
+	root = frappe.db.get_value("Cost Center", {"company": company, "is_group": 1}, order_by="lft")
+	doc = frappe.get_doc(
+		{"doctype": "Cost Center", "cost_center_name": name, "company": company, "parent_cost_center": root}
+	)
+	doc.insert(ignore_permissions=True)
+	return doc.name
+
+
+def _ensure_customer(name: str) -> str:
+	existing = frappe.db.exists("Customer", {"customer_name": name})
+	if existing:
+		return existing
+	return (
+		frappe.get_doc({"doctype": "Customer", "customer_name": name, "customer_type": "Company"})
+		.insert(ignore_permissions=True)
+		.name
+	)
+
+
+def _ensure_project(name: str, company: str) -> str:
+	existing = frappe.db.exists("Project", {"project_name": name})
+	if existing:
+		return existing
+	return (
+		frappe.get_doc({"doctype": "Project", "project_name": name, "company": company})
+		.insert(ignore_permissions=True)
+		.name
+	)
+
+
 def _ensure_user_permission(user: str, allow: str, for_value: str) -> None:
 	if frappe.db.exists("User Permission", {"user": user, "allow": allow, "for_value": for_value}):
 		return
@@ -138,6 +197,8 @@ class LedgerScopeTestCase(FrappeTestCase):
 		# Users are cheap and reused idempotently; everything else rolls back.
 		for email in (USER_COMPANY_A, USER_WAREHOUSE_A1, USER_ITEM_1, USER_UNRESTRICTED):
 			_ensure_user(email, ("Stock User",))
+		for email in (USER_GL_PROJECT, USER_GL_COST_CENTER, USER_GL_FREE):
+			_ensure_user(email, ("Accounts User",))
 		frappe.db.commit()
 		_ensure_company(COMPANY_A, "JLSA")
 		_ensure_company(COMPANY_B, "JLSB")
@@ -149,6 +210,17 @@ class LedgerScopeTestCase(FrappeTestCase):
 		_ensure_user_permission(USER_COMPANY_A, "Company", COMPANY_A)
 		_ensure_user_permission(USER_WAREHOUSE_A1, "Warehouse", cls.wh_a1)
 		_ensure_user_permission(USER_ITEM_1, "Item", ITEM_1)
+
+		root_pl = _ensure_account(ACCOUNT_ROOT_PL, COMPANY_A, is_group=1, root_type="Expense")
+		cls.account_pl = _ensure_account(ACCOUNT_PL, COMPANY_A, parent_account=root_pl, root_type="Expense")
+		root_bs = _ensure_account(ACCOUNT_ROOT_BS, COMPANY_A, is_group=1, root_type="Asset")
+		cls.account_bs = _ensure_account(ACCOUNT_BS, COMPANY_A, parent_account=root_bs, root_type="Asset")
+		cls.cost_center = frappe.db.get_value("Cost Center", {"company": COMPANY_A, "is_group": 0})
+		cls.cost_center_other = _ensure_cost_center(COST_CENTER_OTHER, COMPANY_A)
+		cls.project = _ensure_project(PROJECT, COMPANY_A)
+		cls.customer = _ensure_customer(CUSTOMER)
+		_ensure_user_permission(USER_GL_PROJECT, "Project", cls.project)
+		_ensure_user_permission(USER_GL_COST_CENTER, "Cost Center", cls.cost_center)
 
 	def setUp(self):
 		super().setUp()
@@ -242,3 +314,89 @@ class TestGetValuationRateScope(LedgerScopeTestCase):
 	def test_company_scope_alone_does_not_require_a_warehouse(self):
 		with _as(USER_COMPANY_A), patch(VALUATION_HELPER, return_value=7.0):
 			self.assertEqual(get_valuation_rate(ITEM_1, COMPANY_A), {"rate": 7.0})
+
+
+BALANCE_HELPER = "erpnext.accounts.utils.get_balance_on"
+
+
+class TestGetBalanceOnGlDimensionScope(LedgerScopeTestCase):
+	def test_preconditions_users_read_ledger(self):
+		# Without GL Entry read the refusals below could pass for the wrong reason.
+		for user in (USER_GL_PROJECT, USER_GL_COST_CENTER, USER_GL_FREE):
+			self.assertTrue(frappe.has_permission("GL Entry", "read", user=user))
+		self.assertEqual(frappe.db.get_value("Account", self.account_pl, "report_type"), "Profit and Loss")
+		self.assertEqual(frappe.db.get_value("Account", self.account_bs, "report_type"), "Balance Sheet")
+
+	def test_project_restricted_user_refused(self):
+		with _as(USER_GL_PROJECT), patch(BALANCE_HELPER, return_value=10.0) as helper:
+			with self.assertRaises(PermissionDeniedError):
+				get_balance_on(account=self.account_pl, cost_center=self.cost_center)
+			with self.assertRaises(PermissionDeniedError):
+				get_balance_on(account=self.account_bs)
+		helper.assert_not_called()
+
+	def test_cost_center_restricted_user_refused_without_cost_center(self):
+		with _as(USER_GL_COST_CENTER), patch(BALANCE_HELPER, return_value=10.0) as helper:
+			with self.assertRaises(PermissionDeniedError):
+				get_balance_on(account=self.account_pl)
+		helper.assert_not_called()
+
+	def test_cost_center_restricted_user_refused_for_other_cost_center(self):
+		with _as(USER_GL_COST_CENTER), patch(BALANCE_HELPER, return_value=10.0) as helper:
+			with self.assertRaises(PermissionDeniedError):
+				get_balance_on(account=self.account_pl, cost_center=self.cost_center_other)
+		helper.assert_not_called()
+
+	def test_cost_center_restricted_user_refused_where_cost_center_is_ignored(self):
+		# ERPNext applies cost_center to Profit and Loss accounts only, so a
+		# Balance Sheet account or a party balance would still sum every row.
+		with _as(USER_GL_COST_CENTER), patch(BALANCE_HELPER, return_value=10.0) as helper:
+			with self.assertRaises(PermissionDeniedError):
+				get_balance_on(account=self.account_bs, cost_center=self.cost_center)
+			with self.assertRaises(PermissionDeniedError):
+				get_balance_on(party_type="Customer", party=self.customer, cost_center=self.cost_center)
+		helper.assert_not_called()
+
+	def test_cost_center_restricted_user_allowed_for_permitted_cost_center(self):
+		with _as(USER_GL_COST_CENTER), patch(BALANCE_HELPER, return_value=10.0) as helper:
+			out = get_balance_on(account=self.account_pl, cost_center=self.cost_center)
+		self.assertEqual(out["balance"], 10.0)
+		self.assertEqual(helper.call_args.kwargs["cost_center"], self.cost_center)
+
+	def test_unrestricted_user_unchanged(self):
+		with _as(USER_GL_FREE), patch(BALANCE_HELPER, return_value=10.0) as helper:
+			out = get_balance_on(account=self.account_bs)
+			get_balance_on(account=self.account_pl, cost_center=self.cost_center_other)
+		self.assertEqual(out["balance"], 10.0)
+		self.assertEqual(helper.call_count, 2)
+
+	def test_restrictions_cover_project_cost_center_and_branch(self):
+		perms = frappe._dict(
+			{
+				"Cost Center": [frappe._dict(doc="CC-1", applicable_for=None)],
+				"Project": [frappe._dict(doc="P-1", applicable_for="GL Entry")],
+				"Branch": [frappe._dict(doc="B-1", applicable_for=None)],
+				"Customer": [frappe._dict(doc="C-1", applicable_for=None)],
+			}
+		)
+		with patch("jarvis.tools._ledger_access.get_user_permissions", return_value=perms):
+			self.assertEqual(
+				gl_dimension_restrictions("anyone@example.com"),
+				{"Cost Center": {"CC-1"}, "Project": {"P-1"}, "Branch": {"B-1"}},
+			)
+
+	def test_restriction_for_another_doctype_does_not_count(self):
+		perms = frappe._dict({"Project": [frappe._dict(doc="P-1", applicable_for="Task")]})
+		with patch("jarvis.tools._ledger_access.get_user_permissions", return_value=perms):
+			self.assertEqual(gl_dimension_restrictions("anyone@example.com"), {})
+
+	def test_branch_restricted_user_refused(self):
+		perms = frappe._dict({"Branch": [frappe._dict(doc="B-1", applicable_for=None)]})
+		with (
+			_as(USER_GL_FREE),
+			patch("jarvis.tools._ledger_access.get_user_permissions", return_value=perms),
+			patch(BALANCE_HELPER, return_value=10.0) as helper,
+			self.assertRaises(PermissionDeniedError),
+		):
+			get_balance_on(account=self.account_pl, cost_center=self.cost_center)
+		helper.assert_not_called()

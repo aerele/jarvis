@@ -11,6 +11,10 @@ Allowed when the user can read GL Entry (the General Ledger report's own
 gate), or, for a Customer / Supplier balance, can run Accounts Receivable /
 Accounts Payable, the reports that already show that balance.
 
+A balance also sums GL Entries across every Cost Center, Project and Branch,
+so a User Permission on one of those dimensions has to be honoured by the
+caller (``assert_gl_balance_in_scope``).
+
 The stock-quantity tools get the matching gate here: the Item, and the
 Warehouse together with its Company, must be readable by the caller.
 """
@@ -22,6 +26,11 @@ from frappe.core.doctype.user_permission.user_permission import get_user_permiss
 
 from jarvis.exceptions import PermissionDeniedError
 from jarvis.tools._company_scope import assert_company_permitted
+
+# GL dimensions whose User Permissions slice a ledger sum (Company is scoped
+# separately by _company_scope). Frappe has already expanded group values to
+# their descendants in get_user_permissions.
+_GL_DIMENSIONS = ("Cost Center", "Project", "Branch")
 
 _PARTY_REPORT = {
 	"Customer": "Accounts Receivable",
@@ -68,6 +77,54 @@ def assert_warehouse_readable(warehouse: str) -> None:
 	if not frappe.has_permission("Warehouse", "read", doc=warehouse):
 		raise PermissionDeniedError(f"no read permission on Warehouse {warehouse}")
 	assert_company_permitted(frappe.db.get_value("Warehouse", warehouse, "company"))
+
+
+def gl_dimension_restrictions(user: str | None = None) -> dict[str, set[str]]:
+	"""``{dimension: permitted values}`` for each GL dimension the user is
+	restricted on for GL Entry. A User Permission whose ``applicable_for`` is
+	another DocType does not slice GL Entry, so it is not counted."""
+	perms = get_user_permissions(user or frappe.session.user) or {}
+	restrictions = {}
+	for dimension in _GL_DIMENSIONS:
+		values = {
+			p.get("doc")
+			for p in perms.get(dimension) or []
+			if p.get("applicable_for") in (None, "", "GL Entry")
+		}
+		if values:
+			restrictions[dimension] = values
+	return restrictions
+
+
+def assert_gl_balance_in_scope(account: str | None, cost_center: str | None) -> None:
+	"""Refuse a balance that would sum GL Entries outside the caller's GL
+	dimension User Permissions.
+
+	ERPNext's get_balance_on can only narrow by Cost Center, and only for a
+	Profit and Loss account (it ignores cost_center for Balance Sheet accounts
+	and party-only queries). So a Cost Center restriction is honoured only for
+	a P&L account queried with a permitted cost_center; a Project or Branch
+	restriction can't be honoured at all."""
+	restrictions = gl_dimension_restrictions()
+	if not restrictions:
+		return
+	unsupported = [d for d in ("Project", "Branch") if d in restrictions]
+	if unsupported:
+		raise PermissionDeniedError(
+			f"balances can't be returned: your access is restricted by {' and '.join(unsupported)} "
+			"User Permission, and a balance sums ledger entries across every " + " and ".join(unsupported)
+		)
+	allowed = restrictions["Cost Center"]
+	if not cost_center or cost_center not in allowed:
+		raise PermissionDeniedError(
+			"balances need a cost_center: your access is restricted by Cost Center User Permission, "
+			"so pass one of your permitted cost centers" + (f" (not {cost_center!r})" if cost_center else "")
+		)
+	if not account or frappe.db.get_value("Account", account, "report_type") != "Profit and Loss":
+		raise PermissionDeniedError(
+			"a cost_center narrows only a Profit and Loss account balance; with a Cost Center User "
+			"Permission, query a Profit and Loss account"
+		)
 
 
 def assert_warehouse_named_if_restricted(warehouse: str | None) -> None:
