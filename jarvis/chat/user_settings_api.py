@@ -149,7 +149,7 @@ def _settings_payload(doc) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_my_settings() -> dict:
 	"""Lazy-create the caller's settings row and return prefs + own usage +
 	limit."""
@@ -158,7 +158,7 @@ def get_my_settings() -> dict:
 	return {"ok": True, "data": _settings_payload(doc)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_my_settings(
 	notify_enabled: int | None = None,
 	activity_detail: int | None = None,
@@ -206,7 +206,7 @@ def update_my_settings(
 	return {"ok": True, "data": _settings_payload(doc)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def admin_list_user_usage() -> dict:
 	"""Every user with a settings row, joined to enabled site users: usage
 	counters (rollover-aware), limits, and last activity. Admins only."""
@@ -266,7 +266,7 @@ def admin_list_user_usage() -> dict:
 	return {"ok": True, "data": out}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def admin_set_user_limit(user: str, monthly_token_limit: int = 0, limit_period: str | None = None) -> dict:
 	"""Set a user's token cap (0 = unlimited) and, when given, the window it
 	applies to (All time / Daily / Weekly / Monthly), creating the settings row
@@ -310,7 +310,7 @@ def admin_set_user_limit(user: str, monthly_token_limit: int = 0, limit_period: 
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def admin_set_user_model_limit(user: str, model: str, monthly_token_limit: int = 0) -> dict:
 	"""Set a user's PER-MODEL monthly token cap (0 = unlimited), creating the
 	settings row + current-month child row if absent. Mirrors admin_set_user_limit.
@@ -331,7 +331,7 @@ def admin_set_user_model_limit(user: str, model: str, monthly_token_limit: int =
 	return {"ok": True, "data": {"user": user, "model": model, "monthly_token_limit": limit}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def admin_sync_usage() -> dict:
 	"""Sweep ``sessions.list`` over the pooled gateway connection and refresh
 	per-session snapshot fields + ``last_synced_at`` (no counter accumulation).
@@ -374,7 +374,7 @@ def admin_sync_usage() -> dict:
 _THEME_TO_DESK = {"light": "Light", "dark": "Dark", "system": "Automatic"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_user_theme(theme: str) -> dict:
 	"""Persist the caller's theme choice on their own User.desk_theme
 	(Light/Dark/Automatic). ``theme`` is the SPA vocabulary light|dark|system."""
@@ -386,7 +386,7 @@ def set_user_theme(theme: str) -> dict:
 	return {"ok": True, "data": {"theme": theme, "desk_theme": desk}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_sidebar_order(order: str) -> dict:
 	"""Persist the caller's sidebar nav order. ``order`` is JSON
 	``{"top": [labels], "more": [labels]}`` where labels are the SPA's nav-link
@@ -411,7 +411,7 @@ def set_sidebar_order(order: str) -> dict:
 	return {"ok": True, "data": {"sidebar_order": clean}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_prompt_suggestions() -> dict:
 	"""New-chat prompt suggestions for the calling user, synthesised from their own
 	recent chat titles (see ``jarvis.chat.suggestions``).
@@ -435,7 +435,7 @@ def get_prompt_suggestions() -> dict:
 	return {"ok": True, "data": {"suggestions": suggestions.read(user)}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_capability_catalog() -> dict:
 	"""Curated "What can I ask Jarvis?" task cards for the empty-chat catalog.
 
@@ -461,7 +461,7 @@ def get_capability_catalog() -> dict:
 	return {"ok": True, "data": {"cards": cards}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def log_capability_pick(title: str) -> dict:
 	"""Telemetry: a capability card was tapped. Logs only (no DB write) so we can
 	tell whether the catalog drives real usage. ``title`` is coerced defensively -

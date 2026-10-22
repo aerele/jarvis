@@ -1463,7 +1463,7 @@ def cancel_queued_on_stop(conversation: str, run_id: str | None) -> bool:
 	return all_cancelled
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def queue_position(run_id: str) -> dict:
 	"""Poll-on-focus fallback for the queued chip. Owner-checked. Returns the
 	current state and (when queued) the approximate position."""
@@ -1480,7 +1480,7 @@ def queue_position(run_id: str) -> dict:
 	return {"ok": True, "run_id": run_id, "state": row["state"], "position": pos}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def active_turn_for_conversation(conversation: str) -> dict:
 	"""SUXI-1 server-truth resync for the queued chip. Owner-checked. Returns the
 	conversation's own QUEUED turn (the one the chip represents), if any, so a
@@ -1571,7 +1571,7 @@ def _legacy_turn_jobs() -> tuple[int, list[str], bool]:
 	return len(ordered), ordered[:20], scan_ok
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pump_cutover_preflight(relay_target: str | None = None) -> dict:
 	"""CDX-10 — the MANDATORY first-deploy cutover preflight. Before removing the
 	explicit ``jarvis_pump_enabled=0`` kill switch to enter the default-ON pump, run
@@ -1634,7 +1634,7 @@ def pump_cutover_preflight(relay_target: str | None = None) -> dict:
 	return result
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pump_cutover_execute(relay_target: str | None = None) -> dict:
 	"""CDX-10/CDX-21 — ONE cutover PASS that encodes the safe protocol (the loop is the
 	operator's; this method is one pass). It closes the TOCTOU window the read-only
@@ -1741,7 +1741,7 @@ def pump_cutover_execute(relay_target: str | None = None) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pump_set_transport_mode(mode: str, relay_target: str | None = None) -> dict:
 	"""CDX-10/CDX-21 — the operator command for a DELIBERATE transport-mode change OTHER than the
 	forward cutover: the kill switch (``legacy``), the rollback ladder's drain step

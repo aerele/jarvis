@@ -221,7 +221,7 @@ def _single_int(field: str, default: int) -> int:
 # --------------------------------------------------------------------------- #
 # probe / status
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_skills_area_caps() -> dict:
 	"""Single tab-gating probe for the whole Skills area (DESIGN.md section 6:
 	"single get_skills_area_caps probe ... replaces boolean pair"). Any desk
@@ -279,7 +279,7 @@ def get_skills_area_caps() -> dict:
 # --------------------------------------------------------------------------- #
 # questions
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_questions_page(
 	status: str = "Unanswered",
 	search: str = "",
@@ -348,7 +348,7 @@ def list_questions_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_question(name: str) -> dict:
 	"""The caller's own single question (owner-only), same field shape as a
 	``list_questions_page`` row (incl. ``context_md``) so the SPA can rehydrate
@@ -390,7 +390,7 @@ def get_question(name: str) -> dict:
 	return row
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def answer_question(
 	name: str,
 	text: str = "",
@@ -443,7 +443,7 @@ def answer_question(
 	return {"ok": True, "note": note.name, "question_status": "Answered"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def ignore_question(name: str) -> dict:
 	"""Owner-only "not now": Ignored is snooze-like, NOT terminal - the row
 	stays listed and answerable (DESIGN.md section 6). There is no separate
@@ -469,7 +469,7 @@ def ignore_question(name: str) -> dict:
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def delete_question(name: str) -> dict:
 	"""Owner-only soft-delete: status -> "Deleted" (audit trail kept; every
 	list/probe endpoint excludes it; also suppresses a generator from ever
@@ -662,7 +662,7 @@ def _create_note(
 	return doc
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_note(
 	text: str = "",
 	url: str = "",
@@ -681,7 +681,7 @@ def save_note(
 	return {"ok": True, "note": note.name}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_notes_page(
 	kind: str = "",
 	status: str = "",
@@ -748,7 +748,7 @@ def list_notes_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_note(name: str) -> dict:
 	"""Note detail (owner-only): full fields plus the answered question's
 	text (if linked) and up to 5 Wiki pages whose ``sources`` JSON trail
@@ -805,7 +805,7 @@ def get_note(name: str) -> dict:
 	return doc
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_note(name: str) -> dict:
 	"""Owner-only delete. Alias of ``voice_notes_api.delete_voice_note``
@@ -820,7 +820,7 @@ def delete_note(name: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Personalisation Settings (admin set)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_personalisation_settings() -> dict:
 	"""Admin-only read of the Personalisation Single fields, plus the read-only
 	chat-mining run status so an operator can see the daily sweep is alive."""
@@ -835,7 +835,7 @@ def get_personalisation_settings() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_personalisation_settings(payload: str | dict | None = None) -> dict:
 	"""Admin-only write. Only the two known keys are accepted; unknown keys
 	are refused (``learned_api.set_learning_settings``'s idiom). Writes via
@@ -871,7 +871,7 @@ def set_personalisation_settings(payload: str | dict | None = None) -> dict:
 	return get_personalisation_settings()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def generate_chat_questions_now() -> dict:
 	"""Admin-only: run the chat-transcript question miner immediately over the
 	recent backlog (the manual counterpart to the daily sweep). Refuses when
@@ -891,7 +891,7 @@ def generate_chat_questions_now() -> dict:
 # Question Rules (admin set) - materialization itself is
 # jarvis.learning.questions's job (PIPELINE agent); this is CRUD only.
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_role_options() -> list[str]:
 	"""Admin-only: desk Role names selectable as a question-rule ``target_role``
 	(Role scope). Returns every enabled Role that has desk access, minus the
@@ -912,7 +912,7 @@ def list_role_options() -> list[str]:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_question_rules() -> list[dict]:
 	"""Admin-only: every configured rule. A flat, unpaginated list - the
 	Personalisation Settings editor is a small admin-managed table, not a
@@ -933,7 +933,7 @@ def list_question_rules() -> list[dict]:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_question_rule(payload: str | dict | None = None) -> dict:
 	"""Admin-only create/update. ``payload["name"]`` present -> update that
 	rule; absent -> create a new one. Saved with ``ignore_permissions=True``
@@ -970,7 +970,7 @@ def save_question_rule(payload: str | dict | None = None) -> dict:
 	return {"ok": True, "name": doc.name}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def delete_question_rule(name: str) -> dict:
 	"""Admin-only hard delete. Rules have no soft-delete semantics of their
 	own (unlike questions): deleting a rule is a real retraction, and any

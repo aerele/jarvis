@@ -106,7 +106,7 @@ def _probe_admin() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def network_status() -> dict:
 	"""What the first onboarding screen needs: is the host public, is Jarvis reachable from
 	here, is the private setup already done. Returns no address of the Jarvis setup server
@@ -129,7 +129,7 @@ def network_status() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def check_admin_connection() -> dict:
 	"""The "Check connection" button: can this site reach admin, is private setup switched
 	on, and what public address does admin see us calling from (pre-fills the next screen)."""
@@ -166,7 +166,7 @@ def _resolve_ipv4(host: str) -> list[str]:
 	return found[:_MAX_ADMIN_IPS] or _configured_admin_ips()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def private_setup_targets() -> dict:
 	"""The Jarvis setup server the customer's network team must allow: the host name and its
 	IPv4 addresses. Called only after the customer picks the private option, so the address
@@ -382,7 +382,7 @@ def _is_unknown_check(err) -> bool:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def connection_test_status(check: str = "") -> dict:
 	"""The inbound half's state, proxied from admin: ``{ok, status, reason, checked_at}``.
 	An unknown or foreign check name is a bare 404 from admin; it reads as an expired result."""
