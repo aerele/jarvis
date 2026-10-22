@@ -50,6 +50,7 @@ const props = defineProps({
 	message: String,
 	conversation: String,
 	dark: Boolean,
+	loadCanvas: { type: Function, default: getSharedCanvas },
 });
 const html = ref(""),
 	error = ref("");
@@ -64,6 +65,7 @@ watch(
 		props.artifact.name,
 		props.artifact.file_url,
 		props.dark,
+		props.loadCanvas,
 	],
 	async () => {
 		const gen = ++generation;
@@ -71,7 +73,7 @@ watch(
 		error.value = "";
 		if (!htmlArtifact.value) return;
 		try {
-			const result = await getSharedCanvas(props.message, props.artifact.name, props.dark);
+			const result = await props.loadCanvas(props.message, props.artifact.name, props.dark);
 			if (gen === generation) html.value = result?.content || "";
 		} catch {
 			if (gen === generation)

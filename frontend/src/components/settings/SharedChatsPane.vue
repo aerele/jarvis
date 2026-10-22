@@ -2,7 +2,7 @@
 	<SettingsPane
 		class="shared-chats-pane"
 		:title="__('Shared chats')"
-		:description="__('Manage read-only chat sharing across this site.')"
+		:description="__('Manage chat sharing across this site.')"
 	>
 		<div class="rounded-lg border border-outline-gray-2 p-4">
 			<label class="flex cursor-pointer items-center justify-between gap-4">
@@ -196,6 +196,11 @@
 						__("Shared with:")
 					}}</span
 					>{{ row.recipient_name }}
+					<span
+						class="mt-1 block w-fit rounded bg-surface-gray-2 px-2 py-0.5 text-xs text-ink-gray-6"
+					>
+						{{ row.access_mode === "Chat" ? __("Can chat") : __("Can view") }}
+					</span>
 				</div>
 				<div role="cell" class="col-start-1 text-xs text-ink-gray-5 lg:col-auto">
 					<time

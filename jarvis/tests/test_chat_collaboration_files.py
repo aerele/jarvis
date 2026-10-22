@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import frappe
-from werkzeug.datastructures import FileStorage, MultiDict
+from werkzeug.wrappers import Request
 
 from jarvis.chat import collaboration as c
 from jarvis.chat.collaboration_bindings import insert_message
@@ -147,8 +147,12 @@ class TestCollaborationFiles(CommittedCollaborationCase):
 	def test_upload_is_private_owned_by_actor_and_not_attached_until_send(self):
 		from jarvis.chat.collaboration_api import upload_file
 
-		file = FileStorage(stream=io.BytesIO(b"new actor attachment"), filename="shared-upload.txt")
-		request = frappe._dict(files=MultiDict({"file": file}))
+		request = Request.from_values(
+			method="POST",
+			base_url=f"http://{frappe.local.site}",
+			data={"file": (io.BytesIO(b"new actor attachment"), "shared-upload.txt")},
+		)
+		self.addCleanup(request.close)
 		with as_user(RECIPIENT), patch.object(frappe.local, "request", request, create=True):
 			result = frappe.call(
 				upload_file,
@@ -172,9 +176,12 @@ class TestCollaborationFiles(CommittedCollaborationCase):
 		from jarvis.chat.collaboration_api import upload_file
 
 		before = frappe.db.count("File", {"owner": RECIPIENT})
-		request = frappe._dict(
-			files=MultiDict({"file": FileStorage(stream=io.BytesIO(b"too much"), filename="large.txt")})
+		request = Request.from_values(
+			method="POST",
+			base_url=f"http://{frappe.local.site}",
+			data={"file": (io.BytesIO(b"too much"), "large.txt")},
 		)
+		self.addCleanup(request.close)
 		with (
 			as_user(RECIPIENT),
 			patch.object(frappe.local, "request", request, create=True),

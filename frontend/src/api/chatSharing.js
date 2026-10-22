@@ -3,23 +3,27 @@ import { __ } from "@/lib/i18n";
 
 // Unlike the generic call helper, preserve the shared-read endpoint's typed
 // 403 reason. Every other refusal remains an error; HTML/proxy bodies are inert.
-async function request(method, args = {}, { signal, refusals = false } = {}) {
+export async function request(
+	method,
+	args = {},
+	{ signal, refusals = false, namespace = "sharing", formData = null } = {}
+) {
 	const controller = new AbortController();
 	const abort = () => controller.abort();
 	signal?.addEventListener("abort", abort, { once: true });
 	if (signal?.aborted) abort();
 	const timer = setTimeout(abort, 20000);
 	try {
-		const response = await fetch(`/api/method/jarvis.chat.sharing.${method}`, {
+		const response = await fetch(`/api/method/jarvis.chat.${namespace}.${method}`, {
 			method: "POST",
 			credentials: "same-origin",
 			signal: controller.signal,
 			headers: {
 				Accept: "application/json",
-				"Content-Type": "application/json",
+				...(!formData ? { "Content-Type": "application/json" } : {}),
 				"X-Frappe-CSRF-Token": window.csrf_token || "",
 			},
-			body: JSON.stringify(args),
+			body: formData || JSON.stringify(args),
 		});
 		let body;
 		try {
@@ -78,5 +82,5 @@ export const getSharingSetting = () => request("get_sharing_setting");
 export const setSharingSetting = (enabled) =>
 	request("set_sharing_setting", { enabled: enabled ? 1 : 0 });
 export const listAllShares = ({ start = 0, page_length = 25, search = "" } = {}) =>
-	request("list_all_shares", { start, page_length, search });
+	request("list_all_shares", { start, page_length, search, include_modes: 1 });
 export const revokeShare = (name) => request("revoke_share", { name });
