@@ -233,7 +233,11 @@ class TestCreationContextCompactShape(FrappeTestCase):
 		self.assertIn("item_code", names)
 		self.assertIn("qty", names)
 		child = frappe.get_meta("Sales Order Item")
-		skipped = {d.fieldname for d in child.fields if d.read_only or d.fetch_from}
+		skipped = {
+			d.fieldname
+			for d in child.fields
+			if not d.reqd and (d.read_only or (d.fetch_from and not d.fetch_if_empty))
+		}
 		self.assertFalse(skipped & set(names))
 		for f in ctx["child_fields"]["items"]:
 			self.assertNotIn(False, f.values())
@@ -247,6 +251,24 @@ class TestCreationContextCompactShape(FrappeTestCase):
 		with patch.object(df, "hidden", 1), patch.object(df, "reqd", 1):
 			names = [f["fieldname"] for f in get_creation_context("Sales Order")["child_fields"]["items"]]
 		self.assertIn("qty", names)
+
+	def test_mandatory_read_only_child_field_is_kept(self):
+		child = frappe.get_meta("Sales Order Item")
+		df = next(d for d in child.fields if d.fieldname == "qty")
+		with patch.object(df, "read_only", 1), patch.object(df, "reqd", 0):
+			names = [f["fieldname"] for f in get_creation_context("Sales Order")["child_fields"]["items"]]
+		self.assertNotIn("qty", names)
+		with patch.object(df, "read_only", 1), patch.object(df, "reqd", 1):
+			names = [f["fieldname"] for f in get_creation_context("Sales Order")["child_fields"]["items"]]
+		self.assertIn("qty", names)
+
+	def test_fetch_if_empty_field_is_settable_not_auto(self):
+		meta = frappe.get_meta("ToDo")
+		df = next(d for d in meta.fields if d.fetch_from)
+		with patch.object(df, "fetch_if_empty", 1), patch.object(df, "read_only", 0):
+			ctx = get_creation_context("ToDo")
+		self.assertIn(df.fieldname, {f["fieldname"] for f in ctx["fields"]})
+		self.assertNotIn(df.fieldname, ctx["auto_fields"])
 
 	def test_example_drops_empty_values_but_keeps_zero_and_false(self):
 		from jarvis.tools.get_creation_context import _prune_empty
