@@ -151,6 +151,12 @@ def _is_blocked_ip(ip_str: str) -> bool:
 	# its is_global answer differs across Python versions.
 	if not ip.is_global or (ip.version == 6 and ip in _NAT64_NET):
 		return True
+	# An IPv6 address can wrap an IPv4 one (::ffff:a.b.c.d, 6to4, Teredo); some
+	# Python versions call those global even when the wrapped address is not.
+	if ip.version == 6:
+		embedded = [ip.ipv4_mapped, ip.sixtofour, *(ip.teredo or ())]
+		if any(e is not None and _is_blocked_ip(str(e)) for e in embedded):
+			return True
 	return bool(
 		ip.is_private
 		or ip.is_loopback
