@@ -156,7 +156,7 @@
 					{{ __("No messages yet") }}
 				</p>
 				<article
-					v-for="row in messages"
+					v-for="row in activity.messages"
 					:key="row.name"
 					class="shared-chat-message min-w-0"
 				>
@@ -257,26 +257,20 @@
 									style="margin-top: 2px; flex: none"
 								/>
 							</template>
-							<template #above-body
-								><StepsBox
-									v-if="steps(row).length"
-									:view="{
-										mode: 'folded',
-										head: { label: __('Activity'), expandable: true },
-									}"
-									:open="!!stepsOpen[row.name]"
-									@toggle="stepsOpen[row.name] = !stepsOpen[row.name]"
-									><template #details
-										><p
-											v-for="(step, i) in steps(row)"
-											:key="i"
-											class="mb-1 break-words text-sm"
-										>
-											{{ step.text || step }}
-										</p></template
-									></StepsBox
-								></template
-							>
+							<template #above-body>
+								<SharedTurnActivity
+									v-if="row.role === 'assistant'"
+									:message="row"
+									:tools="activity.tools.get(row.name) || []"
+									:turnState="
+										turns.find((t) => t.assistant_message === row.name)
+											?.state ||
+										row.turn_state ||
+										''
+									"
+									:loadDetail="projectedMode ? getCollaborationTool : undefined"
+								/>
+							</template>
 							<template #below-body
 								><template v-for="(part, i) in parts(row)" :key="i"
 									><div
@@ -501,7 +495,7 @@
 	</section>
 </template>
 <script setup>
-import { ref, reactive, computed, watch, nextTick, onBeforeUnmount, inject } from "vue";
+import { ref, reactive, computed, watch, nextTick, onBeforeUnmount, inject, provide } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { getSharedConversation } from "@/api/chatSharing";
 import { useShellStore } from "@/stores/shell";
@@ -514,7 +508,8 @@ import { mergeNewestPage, prependOlderPage, heldNewestSeq } from "@/lib/historyP
 import Message from "@/components/chat/Message.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
 import SharedComposerToolbar from "@/components/chat/SharedComposerToolbar.vue";
-import StepsBox from "@/components/chat/StepsBox.vue";
+import SharedTurnActivity from "@/components/chat/SharedTurnActivity.vue";
+import { sharedActivity, clearSharedToolDetails } from "@/lib/sharedActivity";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import JvChart from "@/charts/JvChart.vue";
 import SharedDiagram from "@/components/chat/SharedDiagram.vue";
@@ -548,8 +543,10 @@ const conversation = ref(null),
 	paging = ref(null),
 	loading = ref(false),
 	refused = ref(""),
-	reconnecting = ref(false),
-	stepsOpen = ref({});
+	reconnecting = ref(false);
+const activity = computed(() => sharedActivity(messages.value));
+const toolDetails = new Map();
+provide("sharedToolDetails", toolDetails);
 const projectedMode = ref(false),
 	turns = ref([]),
 	questions = ref([]),
@@ -682,8 +679,7 @@ function list(value) {
 	}
 	return [];
 }
-const canvas = (row) => list(row.canvas),
-	steps = (row) => list(row.steps).concat(list(row.live_steps));
+const canvas = (row) => list(row.canvas);
 const parsed = computed(
 	() =>
 		new Map(
@@ -748,6 +744,7 @@ async function reload(before = null) {
 			}
 			if (gen !== generation || disposed) return;
 			if (data?.refused) {
+				clearSharedToolDetails(toolDetails);
 				conversation.value = null;
 				messages.value = [];
 				paging.value = null;
@@ -809,6 +806,7 @@ async function reload(before = null) {
 		} catch (error) {
 			if (gen === generation && !disposed) {
 				if ([401, 403, 404].includes(error?.status)) {
+					clearSharedToolDetails(toolDetails);
 					conversation.value = null;
 					messages.value = [];
 					paging.value = null;
@@ -845,7 +843,7 @@ watch(
 		conversation.value = null;
 		paging.value = null;
 		refused.value = "";
-		stepsOpen.value = {};
+		clearSharedToolDetails(toolDetails);
 		projectedMode.value = false;
 		turns.value = [];
 		questions.value = [];
@@ -884,6 +882,7 @@ const activeTimer = setInterval(() => {
 		reload();
 }, 3000);
 onBeforeUnmount(() => {
+	clearSharedToolDetails(toolDetails);
 	disposed = true;
 	++generation;
 	controller?.abort();
