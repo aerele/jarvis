@@ -25,6 +25,7 @@ import frappe
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools import desk_action
 from jarvis.tools._bulk import run_atomic_batch
+from jarvis.tools.follow_document import require_system_manager_for_other_user
 
 
 @desk_action(check_user_arg="user")
@@ -40,6 +41,7 @@ def unfollow_document(
 	Single: returns ``{doctype, name, user, unfollowed}``.
 	Batch: returns ``{doctype, user, unfollowed:[name,...], count}``."""
 	target_user = user or frappe.session.user
+	require_system_manager_for_other_user(target_user, "unfollow")
 
 	if names is not None:
 		return _unfollow_document_batch(doctype, names, target_user)
@@ -57,8 +59,8 @@ def _unfollow_document_one(doctype: str, name: str, user: str) -> bool:
 	"""Unsubscribe ONE record. Returns whether a follow row was actually removed
 	(False if not following). Frappe lets a user stop their OWN notifications
 	without doc read access (Desk allows it); only unfollowing on behalf of
-	ANOTHER user needs a read floor here (the helper additionally requires
-	Document Follow write for that cross-user path)."""
+	ANOTHER user needs a read floor here, on top of the System Manager gate
+	``unfollow_document`` applies up front (Frappe's helper checks neither)."""
 	if user != frappe.session.user:
 		frappe.has_permission(doctype, "read", doc=name, throw=True)
 
