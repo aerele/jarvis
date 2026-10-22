@@ -1839,18 +1839,20 @@ _RUN_AS_AUDIT_DETAIL = re.compile(r"^run as (?P<target>\S+) \(set by (?P<setter>
 def _run_as_setter(installation: str, run_as: str) -> str | None:
 	"""The user who set the CURRENT run-as mapping, or None when no record says.
 
-	Primary record: the newest ``Version`` row that changed ``run_as_user`` (the
-	DocType tracks changes; the row's owner is the session user who saved it). It
-	only counts when it set the value that is in force now, so a later write that
-	bypassed the controller (a raw ``set_value``) leaves it stale and the mapping
-	unattributed. Fallback for a mapping made at insert, which writes no Version:
-	the cross-user ``run_as_changed`` activity row the controller logs. A self-map
-	is never audited; the caller handles it (setter == run_as_user). System-side
-	read of audit rows, no data is returned to the user."""
+	Primary record: the ``Version`` rows that changed ``run_as_user`` (the DocType
+	tracks changes; a row's owner is the session user who saved it). The setter is
+	the owner of the change that set the value in force now and that no later change
+	moved away from. "Later" follows the old -> new chain, with ``creation`` only as
+	a tie-break, so equal or out-of-order timestamps (a frozen clock) cannot hide a
+	genuine change. A value no recorded change set (a later raw ``set_value``) leaves
+	the mapping unattributed. Fallback for a mapping made at insert, which writes no
+	Version: the cross-user ``run_as_changed`` activity row the controller logs. A
+	self-map is never audited; the caller handles it (setter == run_as_user).
+	System-side read of audit rows, no data is returned to the user."""
 	version = frappe.qb.DocType("Version")
 	rows = (
 		frappe.qb.from_(version)
-		.select(version.owner, version.data)
+		.select(version.owner, version.data, version.creation)
 		.where(version.ref_doctype == INSTALLATION)
 		.where(version.docname == installation)
 		.where(version.data.like('%"run_as_user"%'))
@@ -1858,6 +1860,7 @@ def _run_as_setter(installation: str, run_as: str) -> str | None:
 		.limit(25)
 		.run(as_dict=True)
 	)
+	changes = []  # (old, new, setter, creation) of every recorded run_as_user change
 	for r in rows:
 		try:
 			changed = json.loads(r.data).get("changed") or []
@@ -1865,7 +1868,15 @@ def _run_as_setter(installation: str, run_as: str) -> str | None:
 			continue
 		for item in changed:
 			if isinstance(item, list) and len(item) >= 3 and item[0] == "run_as_user":
-				return r.owner if (item[2] or "").strip() == run_as else None
+				changes.append(((item[1] or "").strip(), (item[2] or "").strip(), r.owner, r.creation))
+	if changes:
+		# A change is superseded when a later-or-equal one moves the value away again.
+		current = [
+			c
+			for c in changes
+			if c[1] == run_as and not any(d is not c and d[0] == c[1] and d[3] >= c[3] for d in changes)
+		]
+		return current[0][2] if len(current) == 1 and current[0][2] else None
 
 	# Match the exact "run as <target> (set by <setter>)" text in Python: a LIKE
 	# pattern built from an email would treat its "_" and "%" as wildcards.
