@@ -32,6 +32,13 @@ function askText(q) {
 	return "";
 }
 
+// A nested `field: {doctype, fieldname}` object, or null. A list, an empty object or one
+// naming neither key is not a field reference (chat_asks._nested_field agrees).
+function nestedField(f) {
+	if (!f || typeof f !== "object" || Array.isArray(f)) return null;
+	return f.doctype || f.fieldname ? f : null;
+}
+
 // A bare array, `{questions: [...]}`, or one question object on its own.
 function askItems(a) {
 	if (Array.isArray(a)) return a;
@@ -69,7 +76,7 @@ export function parseAsk(content) {
 			.slice(0, 6)
 			.map((q) => {
 				// A nested `field: {doctype, fieldname}` makes it a field question.
-				const nested = q.field && typeof q.field === "object" ? q.field : null;
+				const nested = nestedField(q.field);
 				let type = q.type == null && ASK_KINDS.includes(q.kind) ? q.kind : q.type;
 				if (nested) type = "field";
 				if (type === "boolean") type = "yesno";

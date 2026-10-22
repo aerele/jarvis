@@ -395,6 +395,16 @@ test("a nested field with a bad identifier degrades to a typed answer", () => {
 	assert.equal(spec.questions[0].q, "Ref");
 });
 
+test("an empty or list `field` is not a field reference", () => {
+	for (const field of ["{}", "[]", '["x"]']) {
+		const spec = parseAsk(
+			fence(`{"q":"Pick","type":"single","options":["a","b"],"field":${field}}`)
+		);
+		assert.equal(spec.questions[0].type, "single");
+		assert.deepEqual(spec.questions[0].options, ["a", "b"]);
+	}
+});
+
 test("{questions: [...]} items may use `label` for the text", () => {
 	const spec = parseAsk(fence(REAL.broken_ask_blocks.ch1n4ju8js));
 	assert.equal(spec.questions.length, 1);
