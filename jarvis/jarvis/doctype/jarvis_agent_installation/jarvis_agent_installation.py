@@ -363,10 +363,10 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		themselves. The same rule is re-checked at every run
 		(``agent_scheduler.run_as_mapping_refusal``), against the setter's roles at
 		that time."""
-		from jarvis.chat.agent_scheduler import may_set_run_as_for_others
+		from jarvis.permissions import is_system_manager
 
 		setter = frappe.session.user
-		if target != setter and not may_set_run_as_for_others(setter):
+		if target != setter and not is_system_manager(setter):
 			frappe.throw(
 				_("Only a System Manager may set this agent to run as another user."),
 				frappe.PermissionError,
