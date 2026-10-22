@@ -138,3 +138,25 @@ class TestPersonaliseAttachmentScope(PersonaliseApiTestCase):
 	def test_unknown_url_is_still_a_validation_error(self):
 		with _as(USER_A), self.assertRaises(frappe.ValidationError):
 			personalise_api._validate_and_resolve_attachment("/private/files/persattach-nope.txt")
+
+	def test_file_on_own_earlier_note_is_used_and_its_row_is_unchanged(self):
+		with _as(USER_A):
+			earlier = frappe.get_doc(
+				{"doctype": NOTE, "transcript": "earlier", "context_type": "Business", "source": "Personalise"}
+			).insert(ignore_permissions=True)
+		fdoc = self._upload(USER_A, name="old.txt", attached_to_doctype=NOTE, attached_to_name=earlier.name)
+		with _as(USER_A):
+			out = personalise_api.save_note(attachment=fdoc.file_url)
+		self.assertEqual(frappe.db.get_value(NOTE, out["note"], "attachment"), fdoc.file_url)
+		row = frappe.db.get_value("File", fdoc.name, _FILE_FIELDS, as_dict=True)
+		self.assertEqual(row.attached_to_doctype, NOTE)
+		self.assertEqual(row.attached_to_name, earlier.name)
+
+	def test_file_on_another_users_note_is_refused(self):
+		with _as(USER_B):
+			theirs = frappe.get_doc(
+				{"doctype": NOTE, "transcript": "theirs", "context_type": "Business", "source": "Personalise"}
+			).insert(ignore_permissions=True)
+		fdoc = self._upload(USER_B, name="bnote.txt", attached_to_doctype=NOTE, attached_to_name=theirs.name)
+		with _as(USER_A), self.assertRaises(frappe.PermissionError):
+			personalise_api.save_note(attachment=fdoc.file_url)
