@@ -51,6 +51,15 @@ _INTEGRITY_FIELDS = {
 	"taxes_and_charges",
 }
 
+# Doctypes whose preview also reports possible duplicates: the party field and,
+# where the doctype has one, the supplier's own bill number. Add a doctype here
+# to extend the check.
+_DUPLICATE_CHECK = {
+	"Purchase Invoice": {"party": "supplier", "bill_no": "bill_no"},
+	"Sales Invoice": {"party": "customer", "bill_no": None},
+}
+_MAX_DUPLICATES = 5
+
 _TOTAL_FIELDS = ("net_total", "total_taxes_and_charges", "grand_total", "rounded_total")
 
 
@@ -135,7 +144,7 @@ def _summarize(doc, caller_values: dict) -> dict:
 		and doc.get(f) is not None
 		and doc.meta.get_field(f).permlevel in allowed_permlevels
 	}
-	return {
+	out = {
 		"valid": True,
 		"resolved": resolved,
 		"server_filled": sorted(server_filled),
@@ -148,6 +157,45 @@ def _summarize(doc, caller_values: dict) -> dict:
 			"HTTP calls) are not sandboxed."
 		),
 	}
+	if doc.doctype in _DUPLICATE_CHECK:
+		# Key present (even as []) only where the check ran: a missing key means
+		# "not checked", an empty list means "none found".
+		out["possible_duplicates"] = _possible_duplicates(doc, caller_values)
+	return out
+
+
+def _possible_duplicates(doc, caller_values: dict) -> list[dict]:
+	"""Existing invoices (drafts and submitted, not cancelled) for the same party
+	and company that match on posting date + grand total, or on bill number.
+	Permission-checked, at most two indexed queries, capped at 5."""
+	cfg = _DUPLICATE_CHECK[doc.doctype]
+	base = {
+		cfg["party"]: doc.get(cfg["party"]),
+		"company": doc.company,
+		"docstatus": ["<", 2],
+	}
+	if not base[cfg["party"]] or not base["company"]:
+		return []
+	fields = ["name", "posting_date", "grand_total", "docstatus", "status"]
+	if cfg["bill_no"]:
+		fields.append(cfg["bill_no"])
+	# The caller's date wins: without set_posting_time the insert pipeline
+	# overwrites posting_date with today, hiding the invoice date they meant.
+	posting_date = caller_values.get("posting_date") or doc.posting_date
+	queries = [{"posting_date": posting_date, "grand_total": doc.grand_total}]
+	if cfg["bill_no"] and doc.get(cfg["bill_no"]):
+		queries.append({cfg["bill_no"]: doc.get(cfg["bill_no"])})
+	found: dict[str, dict] = {}
+	for extra in queries:
+		for row in frappe.get_list(
+			doc.doctype,
+			filters={**base, **extra},
+			fields=fields,
+			order_by="posting_date desc",
+			limit_page_length=_MAX_DUPLICATES,
+		):
+			found.setdefault(row["name"], row)
+	return list(found.values())[:_MAX_DUPLICATES]
 
 
 def _error_text(e: Exception) -> str:
