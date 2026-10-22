@@ -1770,6 +1770,13 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 			_("The run-as user does not have access to this agent. Ask your administrator."),
 			frappe.PermissionError,
 		)
+	# A mapping to someone other than the owner is only honoured while whoever set it
+	# is still a System Manager (or Administrator); judged now, on every run.
+	from jarvis.chat.agent_scheduler import run_as_mapping_refusal
+
+	refusal = run_as_mapping_refusal(installation, doc.owner, run_as)
+	if refusal:
+		frappe.throw(_("This agent cannot run: {0}.").format(refusal), frappe.PermissionError)
 	if not doc.enabled:
 		frappe.throw(_("Enable the agent before running it."))
 	# R5-J8: refuse an on-demand run for a non-installable capability — a required

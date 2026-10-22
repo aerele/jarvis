@@ -248,6 +248,20 @@ class TestAgentsMarketplace(unittest.TestCase):
 		run.error)."""
 		inst_name = _install_as(owner, "close-auditor")
 		frappe.db.set_value(INSTALLATION, inst_name, "run_as_user", run_as, update_modified=False)
+		if run_as != owner:
+			# A run-as user other than the owner is only honoured when the record says
+			# an Administrator or System Manager set it, so leave the same activity row
+			# the controller writes for a cross-user mapping.
+			from jarvis.chat.agent_activity import log_activity
+
+			log_activity(
+				agent="close-auditor",
+				agent_title=None,
+				installation=inst_name,
+				action="run_as_changed",
+				detail=f"run as {run_as} (set by Administrator)",
+				owner=owner,
+			)
 		frappe.db.set_value(INSTALLATION, inst_name, "enabled", 1)
 		agent = frappe.db.get_value(INSTALLATION, inst_name, "agent")
 		frappe.db.commit()
