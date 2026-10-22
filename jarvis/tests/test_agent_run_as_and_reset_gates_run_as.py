@@ -264,6 +264,8 @@ class TestRunAsRunTimeRecheck(_RunAsFixture):
 				self.assertIsNone(self._refusal(inst))
 			finally:
 				self._restore_sm(self.sm2)
+				# The owner may hold one install of the agent; free it for the next pass.
+				self._cleanup()
 
 	def test_insert_time_mapping_is_attributed_through_its_audit_row(self):
 		from jarvis.chat.agent_activity import log_activity
