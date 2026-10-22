@@ -120,6 +120,10 @@ def only_seen_advanced(before, after):
 # These are the newly authorized reads. Their dedicated tests enforce exact
 # allowlists/scrubbing/file checks; the sweep is about privilege escalation.
 EXEMPTIONS = {
+	"jarvis.chat.collaboration_api.get_conversation": "Explicit projected shared read.",
+	"jarvis.chat.collaboration_api.get_tool_detail": "Explicit projected tool detail.",
+	"jarvis.chat.collaboration_api.get_canvas": "Explicit sanitized static artifact.",
+	"jarvis.chat.collaboration_api.get_file": "Explicit common attachment download.",
 	"jarvis.chat.sharing.get_shared_conversation": "The explicitly authorized, projected read; seen_marker may advance.",
 	"jarvis.chat.sharing.get_shared_tool_detail": "The explicitly authorized, projected tool read.",
 	"jarvis.chat.sharing.get_shared_canvas": "The explicitly authorized sanitized static artifact read.",

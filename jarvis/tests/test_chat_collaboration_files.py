@@ -12,6 +12,7 @@ from werkzeug.datastructures import FileStorage, MultiDict
 from jarvis.chat import collaboration as c
 from jarvis.chat.collaboration_bindings import insert_message
 from jarvis.tests._collaboration_committed import CommittedCollaborationCase, repeatable_read
+from jarvis.tests._collaboration_test_site import require_collaboration_test_site
 from jarvis.tests._share_helpers import OUTSIDER, OWNER, RECIPIENT, as_user
 
 
@@ -21,7 +22,7 @@ class TestCollaborationFiles(CommittedCollaborationCase):
 		self.bound, self.turn = self.running_turn(self.binding(uuid.uuid4().hex))
 
 	def file(self, *, actor=RECIPIENT, hidden=0, suffix="txt", content=b"shared actor bytes"):
-		self.assertEqual(frappe.local.site, "test_jarvis")
+		require_collaboration_test_site(frappe.local.site)
 		filename = f"collaboration-{uuid.uuid4().hex}.{suffix}"
 		path = Path(frappe.get_site_path("private", "files", filename))
 		path.parent.mkdir(parents=True, exist_ok=True)

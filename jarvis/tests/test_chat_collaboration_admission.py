@@ -8,12 +8,13 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import admission, pump
 from jarvis.chat import collaboration as c
+from jarvis.tests._collaboration_test_site import require_collaboration_test_site
 from jarvis.tests._share_helpers import OWNER, RECIPIENT, SHARE, as_user, make_chat, make_user
 
 
 class TestCollaborationAdmission(FrappeTestCase):
 	def setUp(self):
-		self.assertEqual(frappe.local.site, "test_jarvis")
+		require_collaboration_test_site(frappe.local.site)
 		super().setUp()
 		self.previous = frappe.session.user
 		frappe.set_user("Administrator")

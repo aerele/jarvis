@@ -121,9 +121,11 @@
 		</p>
 		<main
 			v-else
+			ref="thread"
 			class="shared-chat-thread min-h-0 min-w-0 flex-1 overflow-y-auto"
 			role="log"
 			:aria-label="__('Shared conversation')"
+			@scroll.passive="onThreadScroll"
 		>
 			<div class="jv-thread-inner shared-chat-content">
 				<div
@@ -400,6 +402,15 @@
 				</div>
 			</div>
 		</main>
+		<button
+			v-if="showJump && conversation && !refused"
+			type="button"
+			class="mx-auto my-1 rounded-full border border-outline-gray-2 bg-surface-white px-3 py-1 text-xs text-ink-gray-7"
+			:aria-label="__('Jump to latest')"
+			@click="scrollToLatest"
+		>
+			{{ __("Jump to latest") }} ↓
+		</button>
 		<footer v-if="conversation && !refused" class="jv-composer-wrap shared-chat-footer">
 			<div class="shared-chat-composer">
 				<p v-if="actionError" role="alert" class="mb-2 break-words text-sm text-ink-red-5">
@@ -441,7 +452,7 @@
 							? __('Files you send are visible to everyone in this chat.')
 							: __('Ask the owner for Can chat access to reply.')
 					"
-					@submit="send()"
+					@submit="sendMessage"
 					@files-added="addFiles"
 					@remove-attachment="removeFile"
 				>
@@ -490,7 +501,7 @@
 	</section>
 </template>
 <script setup>
-import { ref, reactive, computed, watch, onBeforeUnmount, inject } from "vue";
+import { ref, reactive, computed, watch, nextTick, onBeforeUnmount, inject } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { getSharedConversation } from "@/api/chatSharing";
 import { useShellStore } from "@/stores/shell";
@@ -526,6 +537,7 @@ import { useSharedComposer } from "@/composables/useSharedComposer";
 import { sharedResultMessage } from "@/lib/sharedActionResult";
 import { openChatShare } from "@/composables/useChatSharing";
 import { errMessage } from "@/lib/errors";
+import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
 const route = useRoute(),
 	router = useRouter(),
 	store = useShellStore(),
@@ -548,6 +560,28 @@ const chatId = computed(() => String(route.params.id));
 const canChat = computed(
 	() => !!conversation.value?.can_chat && !refused.value && !reconnecting.value
 );
+const thread = ref(null),
+	showJump = ref(false);
+let pinned = true;
+function onThreadScroll() {
+	showJump.value = !!thread.value && needsJumpArrow(thread.value);
+	pinned = !showJump.value;
+}
+function scrollToLatest() {
+	if (thread.value)
+		thread.value.scrollTop = Math.max(
+			0,
+			thread.value.scrollHeight - thread.value.clientHeight
+		);
+	pinned = true;
+	showJump.value = false;
+}
+function onThreadResize() {
+	const follow = pinned;
+	requestAnimationFrame(() => {
+		if (!disposed && follow) scrollToLatest();
+	});
+}
 const {
 	draft,
 	files,
@@ -564,6 +598,12 @@ const {
 	failed,
 	retryPrevious,
 } = useSharedComposer({ id: chatId, canChat, refresh: () => reload() });
+async function sendMessage() {
+	const id = chatId.value;
+	scrollToLatest();
+	await send();
+	if (id === chatId.value && pinned) scrollToLatest();
+}
 const commonCard = (control) => pendingCardOf({ preview: { card: control?.card } });
 const activeStates = new Set([
 	"queued",
@@ -719,6 +759,12 @@ async function reload(before = null) {
 				if (data.refused === "owner") router.replace("/c/" + encodeURIComponent(id));
 				return;
 			}
+			const initial = !conversation.value,
+				previousNewest = messages.value.at(-1)?.seq || 0,
+				anchor = {
+					top: thread.value?.scrollTop || 0,
+					height: thread.value?.scrollHeight || 0,
+				};
 			const page =
 				before != null
 					? prependOlderPage(messages.value, paging.value, data)
@@ -727,6 +773,7 @@ async function reload(before = null) {
 				[...page.messages, ...(data.older_pending || [])].map((m) => [m.name, m])
 			);
 			messages.value = [...unique.values()].sort((a, b) => a.seq - b.seq);
+			const addedLatest = messages.value.some((m) => m.seq > previousNewest);
 			paging.value = page.paging;
 			conversation.value = data.conversation;
 			if (projectedMode.value) {
@@ -736,6 +783,27 @@ async function reload(before = null) {
 			}
 			refused.value = "";
 			reconnecting.value = false;
+			await nextTick();
+			if (gen !== generation || disposed) return;
+			if (thread.value) {
+				if (before != null) {
+					thread.value.scrollTop =
+						anchor.top + thread.value.scrollHeight - anchor.height;
+					onThreadScroll();
+				} else if (
+					initial ||
+					(pinned && addedLatest) ||
+					shouldFollowBottom({
+						pinned,
+						streaming:
+							messages.value.some((m) => m.streaming) ||
+							visibleTurns.value.some((t) => activeStates.has(t.state)),
+						revealPending: false,
+					})
+				)
+					scrollToLatest();
+				else showJump.value = needsJumpArrow(thread.value);
+			}
 			store.markSharedSeen(id);
 			store.loadSharedConversations?.();
 		} catch (error) {
@@ -768,6 +836,8 @@ watch(
 	() => route.params.id,
 	() => {
 		++generation;
+		pinned = true;
+		showJump.value = false;
 		controller?.abort();
 		flight = null;
 		again = false;
@@ -798,6 +868,7 @@ const onEvent = (event) => {
 		reload();
 };
 window.addEventListener("focus", onFocus);
+window.addEventListener("resize", onThreadResize);
 socket?.on("jarvis:event", onEvent);
 socket?.on("connect", onFocus);
 const timer = setInterval(() => {
@@ -819,6 +890,7 @@ onBeforeUnmount(() => {
 	clearInterval(timer);
 	clearInterval(activeTimer);
 	window.removeEventListener("focus", onFocus);
+	window.removeEventListener("resize", onThreadResize);
 	socket?.off("jarvis:event", onEvent);
 	socket?.off("connect", onFocus);
 });
