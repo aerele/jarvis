@@ -54,6 +54,7 @@ from jarvis.permissions import (
 QUESTION = "Jarvis Personalise Question"
 RULE = "Jarvis Personalise Question Rule"
 NOTE = "Jarvis Voice Note"
+CONVERSATION = "Jarvis Conversation"
 WIKI = "Jarvis Wiki Page"
 SETTINGS = "Jarvis Settings"
 
@@ -502,16 +503,41 @@ def _derive_kind(url: str, attachment: str, duration_s: int) -> str:
 
 
 def _validate_and_resolve_attachment(file_url: str) -> str:
-	"""Resolve + object-level-authorize an uploaded ``file_url`` (the
-	``filebox.drop_file`` idiom): the caller must not be able to hand back
-	someone else's private file_url and have its contents land in their own
-	note. Returns the File doc's name."""
-	fdoc = frappe.db.get_value("File", {"file_url": file_url}, "name")
-	if not fdoc:
+	"""Resolve + object-level-authorize an uploaded ``file_url``: only the
+	caller's own files qualify, so nobody can hand back someone else's file_url
+	and have its contents land in their own note. A File qualifies when it is the
+	caller's own upload attached to no record, or is attached to one of the
+	caller's own Jarvis chats. Several File rows can share a ``file_url`` (an
+	identical re-upload, a copy attached elsewhere), so every row is considered
+	and a qualifying one is returned (a bare own upload first, so the caller's
+	upload is the one the note takes). Returns the File doc's name."""
+	me = frappe.session.user
+	# get_all on purpose: the ownership rule below is the gate, so an unreadable
+	# foreign row must surface as "Not permitted", not as "unknown".
+	rows = frappe.get_all(
+		"File",
+		filters={"file_url": file_url},
+		fields=["name", "owner", "attached_to_doctype", "attached_to_name"],
+		order_by="creation desc",
+		limit=50,
+	)
+	if not rows:
 		frappe.throw(_("Unknown attachment - upload it first."))
-	if not frappe.has_permission("File", "read", doc=fdoc):
-		frappe.throw(_("Not permitted."), frappe.PermissionError)
-	return fdoc
+	chat_row = None
+	for row in rows:
+		if not row.attached_to_doctype and not row.attached_to_name:
+			if row.owner == me:
+				return row.name
+		elif (
+			chat_row is None
+			and row.attached_to_doctype == CONVERSATION
+			and row.attached_to_name
+			and frappe.db.get_value(CONVERSATION, row.attached_to_name, "owner") == me
+		):
+			chat_row = row.name
+	if chat_row:
+		return chat_row
+	frappe.throw(_("Not permitted."), frappe.PermissionError)
 
 
 def _extract_attachment_text(file_name: str | None) -> str:
