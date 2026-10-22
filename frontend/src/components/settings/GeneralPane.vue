@@ -239,7 +239,12 @@
 						class="w-full rounded-md border bg-surface-white p-2 text-p-sm text-ink-gray-8"
 						placeholder="What's wrong? (optional)"
 					/>
-					<label class="mt-3 flex cursor-pointer items-start gap-2.5">
+					<!-- System Manager only, like Reset to onboarding below: the server
+					     (request_workspace_reset) refuses a data wipe from a Jarvis Admin. -->
+					<label
+						v-if="isSystemManager"
+						class="mt-3 flex cursor-pointer items-start gap-2.5"
+					>
 						<input v-model="wipeData" type="checkbox" class="mt-0.5" />
 						<span>
 							<span class="block text-p-sm font-medium text-ink-gray-8">

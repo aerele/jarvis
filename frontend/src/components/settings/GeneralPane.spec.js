@@ -363,6 +363,57 @@ describe("GeneralPane Reset onboarding button", () => {
 	});
 });
 
+describe("GeneralPane Reset workspace, data wipe option", () => {
+	async function openResetForm(w) {
+		await w
+			.findAll(".stub-button")
+			.find((b) => b.attributes("data-label") === "Reset workspace")
+			.trigger("click");
+		await flushPromises();
+	}
+
+	beforeEach(() => {
+		// jsdom has no scrollIntoView; openReset() scrolls the form into view.
+		Element.prototype.scrollIntoView = vi.fn();
+		confirmMock.mockReset();
+		api.requestWorkspaceReset.mockReset();
+		api.requestWorkspaceReset.mockImplementation(() => Promise.resolve({}));
+	});
+
+	afterEach(() => {
+		delete Element.prototype.scrollIntoView;
+	});
+
+	it("offers the data wipe to a System Manager", async () => {
+		const w = await mountAs({ admin: true });
+		await openResetForm(w);
+		expect(w.text()).toContain("Also delete workspace content");
+		expect(w.text()).toContain("Also disconnect AI model connections");
+	});
+
+	// The server (request_workspace_reset) refuses wipe_data from a Jarvis Admin who
+	// is not a System Manager, so that seat keeps the plain reset and no wipe option.
+	it("hides the data wipe from a Jarvis-Admin-only seat but keeps the plain reset", async () => {
+		const w = await mountAs({ admin: false, jarvisAdmin: true });
+		await openResetForm(w);
+		expect(w.text()).not.toContain("Also delete workspace content");
+		expect(w.text()).toContain("Also disconnect AI model connections");
+	});
+
+	it("never sends wipe_data from a Jarvis-Admin-only seat", async () => {
+		confirmMock.mockResolvedValue(true);
+		const w = await mountAs({ admin: false, jarvisAdmin: true });
+		await openResetForm(w);
+		const submit = w
+			.findAll(".stub-button")
+			.filter((b) => b.attributes("data-label") === "Reset workspace");
+		await submit[0].trigger("click");
+		await flushPromises();
+		expect(api.requestWorkspaceReset).toHaveBeenCalledTimes(1);
+		expect(api.requestWorkspaceReset.mock.calls[0][1]).toMatchObject({ wipeData: false });
+	});
+});
+
 describe("GeneralPane, Context section", () => {
 	it("shows the measured context in use for this chat, under its own unbadged heading", async () => {
 		api.getUsage.mockImplementation(() =>
