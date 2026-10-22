@@ -14,7 +14,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools import get_list as get_list_mod
 from jarvis.tools import query as query_mod
-from jarvis.tools._export import masking
+from jarvis.tools._export import masking, resolvers
 
 
 class TestGroupByAliasCaseInsensitive(FrappeTestCase):
@@ -287,3 +287,30 @@ class TestQueryRowMasking(_NonAdmin):
 			with self.assertRaisesRegex(InvalidArgumentError, "masked"):
 				query_mod.query(spec)
 		run.assert_not_called()
+
+
+class TestExportChildReadThroughParentField(_NonAdmin):
+	def _authorize(self, levels):
+		parent = _parent_meta([("items", "Child Row", 1)], levels)
+		child = MagicMock(istable=True)
+		with (
+			patch("frappe.get_meta", side_effect=lambda dt, *a, **k: child if dt == "Child Row" else parent),
+			patch("frappe.db.exists", return_value=True),
+			patch("frappe.has_permission", return_value=True),
+			patch("frappe.permissions.can_export", return_value=True) as can_export,
+			patch.object(resolvers, "assert_child_query_fields_readable"),
+			patch.object(masking, "masked_fields", return_value={}),
+		):
+			try:
+				return resolvers.authorize_filter("Child Row", ["name"], None, None, "Parent Doc")
+			finally:
+				self.can_export = can_export
+
+	def test_export_refuses_a_child_when_the_parent_table_field_is_hidden(self):
+		with self.assertRaises(PermissionDeniedError):
+			self._authorize([0])
+		self.can_export.assert_not_called()
+
+	def test_export_reads_the_child_when_the_parent_table_field_is_readable(self):
+		doctype, parent_doctype, _fields, _columns, _masked = self._authorize([0, 1])
+		self.assertEqual((doctype, parent_doctype), ("Child Row", "Parent Doc"))
