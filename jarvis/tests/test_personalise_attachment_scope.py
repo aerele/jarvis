@@ -20,6 +20,7 @@ class TestPersonaliseAttachmentScope(PersonaliseApiTestCase):
 		super().setUp()
 		self._files: list[str] = []
 		self._convs: list[str] = []
+		self._todos: list[str] = []
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -29,6 +30,9 @@ class TestPersonaliseAttachmentScope(PersonaliseApiTestCase):
 		for name in self._convs:
 			if frappe.db.exists(CONV, name):
 				frappe.delete_doc(CONV, name, ignore_permissions=True, force=True)
+		for name in self._todos:
+			if frappe.db.exists("ToDo", name):
+				frappe.delete_doc("ToDo", name, ignore_permissions=True, force=True)
 		frappe.db.commit()
 		super().tearDown()
 
@@ -82,3 +86,55 @@ class TestPersonaliseAttachmentScope(PersonaliseApiTestCase):
 		row = frappe.db.get_value("File", fdoc.name, _FILE_FIELDS, as_dict=True)
 		self.assertFalse(row.attached_to_doctype)
 		self.assertFalse(row.attached_to_name)
+
+	def test_file_attached_to_a_business_record_is_refused_and_unchanged(self):
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "persattach todo"}).insert(
+			ignore_permissions=True
+		)
+		self._todos.append(todo.name)
+		fdoc = self._upload(USER_A, name="rec.txt", attached_to_doctype="ToDo", attached_to_name=todo.name)
+		with _as(USER_A), self.assertRaises(frappe.PermissionError):
+			personalise_api.save_note(attachment=fdoc.file_url)
+		row = frappe.db.get_value("File", fdoc.name, _FILE_FIELDS, as_dict=True)
+		self.assertEqual(row.attached_to_doctype, "ToDo")
+		self.assertEqual(row.attached_to_name, todo.name)
+
+	def test_file_in_another_users_chat_is_refused(self):
+		conv = self._conversation(USER_B)
+		fdoc = self._upload(USER_B, name="bchat.txt", attached_to_doctype=CONV, attached_to_name=conv)
+		with _as(USER_A), self.assertRaises(frappe.PermissionError):
+			personalise_api.save_note(attachment=fdoc.file_url)
+
+	def test_another_users_bare_upload_is_refused(self):
+		fdoc = self._upload(USER_B, name="bbare.txt")
+		with _as(USER_A), self.assertRaises(frappe.PermissionError):
+			personalise_api.save_note(attachment=fdoc.file_url)
+		self.assertFalse(frappe.db.get_value("File", fdoc.name, "attached_to_name"))
+
+	def test_shared_file_url_picks_the_qualifying_row(self):
+		# One file_url, three rows: a business record's copy, another user's bare
+		# copy and the caller's own bare upload. Only the last qualifies, and it is
+		# the row that gets attached, whatever order the rows come back in.
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "persattach todo 2"}).insert(
+			ignore_permissions=True
+		)
+		self._todos.append(todo.name)
+		first = self._upload(USER_B, name="dup.txt", content="same bytes")
+		self._upload(
+			USER_A,
+			name="dup.txt",
+			content="same bytes",
+			attached_to_doctype="ToDo",
+			attached_to_name=todo.name,
+		)
+		mine = self._upload(USER_A, name="dup.txt", content="same bytes")
+		url = first.file_url
+		rows = frappe.get_all("File", filters={"file_url": url}, pluck="name")
+		if len(rows) < 3:
+			self.skipTest("File dedupe collapsed the shared rows on this version")
+		with _as(USER_A):
+			self.assertEqual(personalise_api._validate_and_resolve_attachment(url), mine.name)
+
+	def test_unknown_url_is_still_a_validation_error(self):
+		with _as(USER_A), self.assertRaises(frappe.ValidationError):
+			personalise_api._validate_and_resolve_attachment("/private/files/persattach-nope.txt")
