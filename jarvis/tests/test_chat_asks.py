@@ -387,6 +387,11 @@ class TestParseAsk(unittest.TestCase):
 		)
 		self.assertEqual([(q["q"], q["type"]) for q in qs], [("Ref", "text")])
 
+	def test_empty_or_list_field_is_not_a_field_reference(self):
+		for field in ("{}", "[]", '["x"]'):
+			qs = parse_ask(_fence_raw('{"q":"Pick","type":"single","options":["a","b"],"field":%s}' % field))
+			self.assertEqual([(q["type"], q["options"]) for q in qs], [("single", ["a", "b"])])
+
 	def test_questions_envelope_with_label_text(self):
 		qs = parse_ask(_fence_raw(self._real()["broken_ask_blocks"]["ch1n4ju8js"]))
 		self.assertEqual(len(qs), 1)

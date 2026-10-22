@@ -80,6 +80,14 @@ def _ask_text(q: dict) -> str:
 	return ""
 
 
+def _nested_field(value):
+	"""Port of chatAsk.js ``nestedField``: a ``{doctype, fieldname}`` dict naming at
+	least one of the two, else None (a list or an empty dict is no field reference)."""
+	if not isinstance(value, dict):
+		return None
+	return value if value.get("doctype") or value.get("fieldname") else None
+
+
 def _ask_items(parsed):
 	"""Port of chatAsk.js ``askItems``: a bare list, ``{questions: [...]}``, or
 	one question object on its own (a list of one)."""
@@ -122,7 +130,7 @@ def parse_ask(content: str | None) -> list[dict]:
 	for q in raw[:6]:
 		if not isinstance(q, dict):
 			continue
-		nested = q.get("field") if isinstance(q.get("field"), dict) else None
+		nested = _nested_field(q.get("field"))
 		qtype = q.get("kind") if q.get("type") is None and q.get("kind") in _ASK_KINDS else q.get("type")
 		if nested:
 			qtype = "field"
