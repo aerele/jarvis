@@ -599,7 +599,7 @@ def _upstreams() -> list[str]:
 	return sorted({account["upstream"] for account in _live_accounts().values()})
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_subscription_notice() -> dict:
 	"""The expired chat sign-ins, for the chat banner, the error card and the Settings rail.
 

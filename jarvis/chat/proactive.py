@@ -69,7 +69,7 @@ def start_conversation(message: str, *, title: str | None = None, user: str | No
 	return {"ok": True, "conversation": conv.name, "message": msg.name}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def demo_proactive(message: str | None = None, title: str | None = None) -> dict:
 	"""Test trigger: Jarvis proactively messages the current user.
 

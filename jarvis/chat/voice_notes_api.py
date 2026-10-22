@@ -108,7 +108,7 @@ def _clean_entities(entities) -> str | None:
 	return frappe.as_json(cleaned) if cleaned else None
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_voice_note(
 	transcript: str,
 	context_type: str = "Business",
@@ -174,7 +174,7 @@ def save_voice_note(
 	return {"name": doc.name}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_my_voice_notes_page(
 	start: int = 0,
 	page_length: int = 20,
@@ -239,7 +239,7 @@ def list_my_voice_notes_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_voice_note(name: str, transcript: str) -> dict:
 	"""Edit the transcript of one of the caller's own notes while it is still
 	``New`` (owner-only): the edited text re-feeds the daily sweep untouched.
@@ -271,7 +271,7 @@ def update_voice_note(name: str, transcript: str) -> dict:
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def delete_voice_note(name: str) -> dict:
 	"""Delete one of the caller's own voice notes (owner-only)."""
 	_require_system_user()
@@ -284,7 +284,7 @@ def delete_voice_note(name: str) -> dict:
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_business_status() -> dict:
 	"""Business-tab status card: STT availability, the caller's note count and
 	(for System Managers) the org-wide New backlog + last sweep outcome."""
@@ -315,7 +315,7 @@ def get_business_status() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def process_voice_notes_now() -> dict:
 	"""Jarvis Admin / System Manager (PART 4 REVISED, TASK 45): run the daily
 	voice-facts sweep now (same deduped background job). Returns ``{"ok": True}``

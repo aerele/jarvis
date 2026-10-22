@@ -19,7 +19,7 @@ import frappe
 from jarvis.permissions import require_jarvis_admin
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def ping_admin() -> dict:
 	"""Hit the admin's get_connection endpoint with the customer's stored
 	jarvis_admin_api_key. Distinguishes auth failure from unreachable.
@@ -52,7 +52,7 @@ def ping_admin() -> dict:
 		return {"ok": False, "kind": "unreachable", "error": str(e)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def ping_agent() -> dict:
 	"""Open WS to agent_url with agent_token; connect handshake only.
 
@@ -79,7 +79,7 @@ def ping_agent() -> dict:
 		return {"ok": False, "kind": "error", "error": f"{type(e).__name__}: {e}"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def force_resync(action: str = "reload") -> dict:
 	"""Bypass on_update change-detection. Re-drive the CURRENT Settings through
 	admin, branching pool vs direct like every other dispatch path.
@@ -174,7 +174,7 @@ def force_resync(action: str = "reload") -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def chat_recovery_stats() -> dict:
 	"""Operator-facing visibility into snapshot recovery (turn_recovery):
 	how often the never-error machinery is quietly compensating for a
@@ -267,7 +267,7 @@ def reset_agent_pairing() -> dict:
 		return {"ok": False, "kind": "error", "error": f"{type(e).__name__}: {e}"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def import_announce_stats() -> dict:
 	"""Operator visibility into the Slice B import auto-tell (import_announce). Surfaces
 	the pending/stuck backlog broken out by reason, and the fast-path ATTRIBUTION so a
