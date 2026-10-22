@@ -73,7 +73,7 @@ describe("progressOf", () => {
 		expect(pending.kind).not.toBe("finalizing");
 		expect(pending.kind).toBe("value");
 		expect(
-			progressOf(running({ phase: "finalizing", cancel_requested: true, total_rows: 0 }))
+			progressOf(running({ phase: "finalizing", cancel_requested: true, total_rows: 0 })),
 		).toEqual({ kind: "unknown" });
 	});
 
@@ -87,6 +87,28 @@ describe("progressOf", () => {
 			expect(progressOf(running({ status, phase: "finalizing" }))).toEqual({
 				kind: "unknown",
 			});
+	});
+});
+
+describe("queued report job", () => {
+	it("says the report is generating and keeps Cancel", () => {
+		const v = view({
+			status: "queued",
+			phase: "generating",
+			rows_written: 0,
+			total_rows: null,
+		});
+		expect(v.pill.text).toBe("Generating report");
+		expect(v.track).toBe("indet");
+		expect(v.notes[0].text).toMatch(/generated in the background/);
+		expect(v.buttons).toEqual(["cancel"]);
+	});
+
+	it("a plain queued job still waits for a worker", () => {
+		const v = view({ status: "queued", phase: null, rows_written: 0, total_rows: null });
+		expect(v.pill.text).toBe("Queued");
+		expect(v.track).toBe("empty");
+		expect(v.notes[0].text).toMatch(/free background worker/);
 	});
 });
 
@@ -122,7 +144,7 @@ describe("running card view", () => {
 		expect(xlsx.stats[0]).toEqual({ strong: "Finalizing spreadsheet…" });
 		expect(xlsx.stats[1].text).toBe(" rows written");
 		expect(view({ phase: "finalizing", format: "csv" }).stats[0].strong).toBe(
-			"Finalizing file…"
+			"Finalizing file…",
 		);
 		expect(JSON.stringify(xlsx.stats)).not.toContain("%");
 		expect(xlsx.buttons).toEqual(["cancel"]);
