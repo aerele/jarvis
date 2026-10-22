@@ -13495,11 +13495,14 @@ watch(
 	}
 );
 // External archive (deleted from the sidebar): fall back to the empty
-// new-chat state when the open conversation disappears from the list.
+// new-chat state when the open conversation disappears from the list. Only one
+// the list HAD: a chat it never lists (a macro run's, opened from the Runs page)
+// is not one that vanished.
 watch(
 	() => store.conversations,
-	(list) => {
+	(list, previous) => {
 		if (booting.value || !currentId.value) return;
+		if (!(previous || []).some((c) => c.name === currentId.value)) return;
 		// A fresh/unsent chat is intentionally hidden from the list — "hidden" is
 		// not "deleted", so don't reset it out from under the user. This covers an
 		// empty draft (no messages) AND the first send in flight (only optimistic
