@@ -428,10 +428,12 @@ class TestNestedWritesFromChat(FrappeTestCase):
 			conversation=self.conv,
 		)
 		self.assertTrue(r["ok"], r)
+		# Every ERPNext release toggles the transaction scan field; newer ones no
+		# longer touch Item.barcodes.
 		self.assertEqual(
 			frappe.db.get_value(
 				"Property Setter",
-				{"doc_type": "Item", "field_name": "barcodes", "property": "hidden"},
+				{"doc_type": "Sales Invoice", "field_name": "scan_barcode", "property": "hidden"},
 				"value",
 			),
 			"1" if before else "0",
