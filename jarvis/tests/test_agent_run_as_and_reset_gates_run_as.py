@@ -235,6 +235,35 @@ class TestRunAsRunTimeRecheck(_RunAsFixture):
 		finally:
 			self._restore_sm(self.sm2)
 
+	def _pin_version_times(self, inst: str, times: list):
+		"""Give the installation's run_as_user Version rows (oldest first) these creation times."""
+		names = frappe.get_all(
+			"Version",
+			filters={"ref_doctype": INSTALLATION, "docname": inst, "data": ["like", '%"run_as_user"%']},
+			order_by="creation asc",
+			pluck="name",
+		)
+		self.assertEqual(len(names), len(times))
+		for name, ts in zip(names, times, strict=True):
+			frappe.db.set_value("Version", name, "creation", ts, update_modified=False)
+
+	def test_attribution_does_not_depend_on_version_timestamps(self):
+		for times in (
+			["2026-01-01 10:00:00.000000", "2026-01-01 10:00:00.000000"],  # equal (frozen clock)
+			["2026-01-01 10:00:05.000000", "2026-01-01 10:00:00.000000"],  # out of order
+		):
+			inst = _install_as(self.owner)
+			self._set_as(self.sm2, inst, self.peer)
+			self._set_as(self.jadmin, inst, self.jadmin)
+			self._pin_version_times(inst, times)
+			self._revoke_sm(self.sm2)
+			try:
+				# jadmin (not a System Manager) self-mapped last, so the earlier
+				# sm2 -> peer change must not be mistaken for the setter.
+				self.assertIsNone(self._refusal(inst))
+			finally:
+				self._restore_sm(self.sm2)
+
 	def test_insert_time_mapping_is_attributed_through_its_audit_row(self):
 		from jarvis.chat.agent_activity import log_activity
 
