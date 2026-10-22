@@ -57,23 +57,29 @@
 				role="group"
 				:aria-labelledby="ids.every"
 			>
-				<FormControl
-					class="w-20"
-					type="select"
+				<select
+					class="jv-sched-select w-20"
 					aria-label="Every how many hours"
-					:options="EVERY_N_HOURS"
-					:modelValue="model.everyN"
-					@update:modelValue="(v) => update({ everyN: v })"
-				/>
+					:value="model.everyN"
+					@change="(e) => update({ everyN: e.target.value })"
+				>
+					<option v-for="n in EVERY_N_HOURS" :key="n" :value="n">{{ n }}</option>
+				</select>
 				<span>{{ model.everyN === "1" ? "hour" : "hours" }}, at</span>
-				<FormControl
-					class="w-20"
-					type="select"
+				<select
+					class="jv-sched-select w-20"
 					aria-label="Minutes past the hour"
-					:options="minuteOptions(model.hourlyMin, ':')"
-					:modelValue="model.hourlyMin"
-					@update:modelValue="(v) => update({ hourlyMin: v })"
-				/>
+					:value="model.hourlyMin"
+					@change="(e) => update({ hourlyMin: e.target.value })"
+				>
+					<option
+						v-for="o in minuteOptions(model.hourlyMin, ':')"
+						:key="o.value"
+						:value="o.value"
+					>
+						{{ o.label }}
+					</option>
+				</select>
 				<span>past the hour</span>
 			</div>
 		</div>
@@ -149,23 +155,25 @@
 					:aria-label="`Time ${i + 1}`"
 					data-testid="schedule-time"
 				>
-					<FormControl
-						class="w-[4.5rem]"
-						type="select"
+					<select
+						class="jv-sched-select w-[4.5rem]"
 						aria-label="Hour"
-						:options="HOURS"
-						:modelValue="t.h"
-						@update:modelValue="(v) => setTime(i, { h: v })"
-					/>
+						:value="t.h"
+						@change="(e) => setTime(i, { h: e.target.value })"
+					>
+						<option v-for="h in HOURS" :key="h" :value="h">{{ h }}</option>
+					</select>
 					<span class="font-semibold text-ink-gray-5" aria-hidden="true">:</span>
-					<FormControl
-						class="w-[4.5rem]"
-						type="select"
+					<select
+						class="jv-sched-select w-[4.5rem]"
 						aria-label="Minute"
-						:options="minuteOptions(t.m)"
-						:modelValue="t.m"
-						@update:modelValue="(v) => setTime(i, { m: v })"
-					/>
+						:value="t.m"
+						@change="(e) => setTime(i, { m: e.target.value })"
+					>
+						<option v-for="o in minuteOptions(t.m)" :key="o.value" :value="o.value">
+							{{ o.label }}
+						</option>
+					</select>
 					<TabButtons
 						:buttons="AM_PM"
 						:modelValue="t.ap"
@@ -290,15 +298,7 @@
 // draft comes in as `modelValue` (macroCron's shape) and every change goes out as a
 // new object. What a draft saves as, and what it says, is macroCron's.
 import { computed, ref } from "vue";
-import {
-	Button,
-	DatePicker,
-	ErrorMessage,
-	FormControl,
-	TabButtons,
-	TextInput,
-	dayjs,
-} from "frappe-ui";
+import { Button, DatePicker, ErrorMessage, TabButtons, TextInput, dayjs } from "frappe-ui";
 import { brand } from "@/branding";
 import { siteTimezone } from "@/utils/datetime";
 import {
@@ -436,6 +436,35 @@ const preview = computed(() =>
 </script>
 
 <style scoped>
+/* A native select in the inputs' look: small, fixed-width pickers whose menu is the
+   platform's own (a wheel on a phone). */
+.jv-sched-select {
+	height: 1.75rem;
+	padding: 0 1.5rem 0 0.625rem;
+	border: 1px solid transparent;
+	border-radius: 0.5rem;
+	background-color: var(--surface-gray-2, #f3f3f3);
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237c7c7c' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: right 0.5rem center;
+	color: var(--text-ink-gray-8, #383838);
+	font-size: 14px;
+	appearance: none;
+	-webkit-appearance: none;
+	cursor: pointer;
+}
+.jv-sched-select:hover {
+	border-color: var(--outline-gray-2, #e2e2e2);
+}
+.jv-sched-select:focus-visible {
+	outline: none;
+	border-color: var(--outline-gray-4, #a3a3a3);
+	box-shadow: 0 0 0 2px var(--outline-gray-2, #e5e5e5);
+}
+.jv-sched-select:disabled {
+	cursor: not-allowed;
+	opacity: 0.6;
+}
 .jv-sched-chip {
 	height: 2rem;
 	min-width: 3rem;

@@ -561,10 +561,7 @@ describe("MacroDetail Schedule section: summary line reflects the SAVED snapshot
 		expect(w.text()).toContain("Scheduled monthly");
 		// dirty the schedule time (unsaved) - the summary must not narrate the
 		// draft against the SAVED next_run_at, which never recomputes on its own.
-		const hour = w
-			.findAllComponents({ name: "FormControl" })
-			.find((c) => c.attributes("aria-label") === "Hour");
-		await hour.vm.$emit("update:modelValue", "10");
+		await w.find('select[aria-label="Hour"]').setValue("10");
 		expect(w.text()).not.toContain("Scheduled monthly on the 15th at 9:00 am.");
 	});
 
@@ -1855,7 +1852,7 @@ describe("MacroDetail: an armed macro seen by someone other than its owner", () 
 		expect(switchNamed(w, "Stop on error").props("description")).toBe(REASON);
 		// The schedule editor is one fieldset: disabled, every control in it is.
 		expect(w.find('[data-testid="schedule-editor"]').attributes("disabled")).toBeDefined();
-		expect(select(w).length).toBeGreaterThan(0);
+		expect(w.findAll('[data-testid="schedule-editor"] select').length).toBeGreaterThan(0);
 	});
 
 	it("lets it be switched off, unscheduled and made to stop on error, and not back", async () => {
@@ -2018,10 +2015,7 @@ describe("MacroDetail Schedule section: a one-time schedule", () => {
 
 describe("MacroDetail Schedule section: cron schedules", () => {
 	const chip = (w, attr, value) => w.find(`[${attr}="${value}"]`);
-	const select = (w, label) =>
-		w
-			.findAllComponents({ name: "FormControl" })
-			.find((c) => c.attributes("aria-label") === label);
+	const select = (w, label) => w.find(`select[aria-label="${label}"]`);
 
 	it("several days and times save as cron, with the old fields kept for older readers", async () => {
 		api.updateMacro.mockResolvedValue({});
@@ -2046,8 +2040,8 @@ describe("MacroDetail Schedule section: cron schedules", () => {
 		api.updateMacro.mockResolvedValue({});
 		const w = await mountDetail(baseMacro({ next_run_at: null }));
 		await repeat(w, "hourly");
-		await select(w, "Every how many hours").vm.$emit("update:modelValue", "2");
-		await select(w, "Minutes past the hour").vm.$emit("update:modelValue", "15");
+		await select(w, "Every how many hours").setValue("2");
+		await select(w, "Minutes past the hour").setValue("15");
 		expect(w.find('[data-testid="schedule-preview"]').text()).toContain(
 			"Runs every 2 hours at 15 minutes past."
 		);
