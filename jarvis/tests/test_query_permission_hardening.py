@@ -14,6 +14,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools import get_list as get_list_mod
 from jarvis.tools import query as query_mod
+from jarvis.tools._export import masking
 
 
 class TestGroupByAliasCaseInsensitive(FrappeTestCase):
@@ -194,3 +195,95 @@ class TestChildReadThroughParentField(_NonAdmin):
 			q = query_mod._weave_record_gate("Q", None, "c", "Child Row", None, {}, {})
 		self.assertEqual(q, "Q")
 		scope.assert_called_once()
+
+
+class TestQueryRowMasking(_NonAdmin):
+	"""Frappe 16 masks a ``mask=1`` field for a user without the mask permission.
+	The query tool builds rows with the query builder directly, so it masks them
+	itself. ``mask_field_value`` is stubbed so the same tests run on Frappe 15."""
+
+	PHONE = frappe._dict(fieldname="description", fieldtype="Data", options="Phone")
+	# A standard column, so building the query under the mocked Engine skips the permlevel lookup.
+	MODIFIED = frappe._dict(fieldname="modified", fieldtype="Datetime", options=None)
+
+	def _run(self, spec, rows, masked_fields=(PHONE,), feature=True):
+		stub = (lambda field, val: "MASKED") if feature else None
+		with (
+			patch.object(masking, "mask_field_value", stub),
+			patch("jarvis.compat.masked_fields_of", return_value=list(masked_fields)) as lookup,
+			patch.object(query_mod, "compile_spec") as compile_query,
+		):
+			q = compile_query.return_value
+			q.limit.return_value = q
+			q.get_sql.return_value = "SELECT"
+			q.run.return_value = rows
+			q._selects = [MagicMock(fields_=MagicMock(return_value=[])) for _ in spec["select"]]
+			return query_mod.query(spec), lookup
+
+	def test_a_masked_column_is_masked_in_the_rows(self):
+		result, _ = self._run(
+			{"from": "ToDo", "select": ["name", "description"]},
+			[{"name": "T1", "description": "9876543210"}],
+		)
+		self.assertEqual(result["rows"], [{"name": "T1", "description": "MASKED"}])
+
+	def test_a_column_that_is_not_masked_is_untouched(self):
+		result, _ = self._run(
+			{"from": "ToDo", "select": ["name", "status"]},
+			[{"name": "T1", "status": "Open"}],
+		)
+		self.assertEqual(result["rows"], [{"name": "T1", "status": "Open"}])
+
+	def test_a_joined_alias_is_masked_by_its_own_doctype(self):
+		result, _ = self._run(
+			{
+				"from": "ToDo",
+				"alias": "t",
+				"joins": [{"doctype": "User", "alias": "u", "on": {"u.name": "t.owner"}}],
+				"select": ["t.name", "u.description"],
+			},
+			[{"name": "T1", "description": "9876543210"}],
+		)
+		self.assertEqual(result["rows"][0]["description"], "MASKED")
+
+	def test_without_the_masking_feature_rows_are_returned_as_is(self):
+		result, lookup = self._run(
+			{"from": "ToDo", "select": ["name", "description"]},
+			[{"name": "T1", "description": "9876543210"}],
+			feature=False,
+		)
+		self.assertEqual(result["rows"][0]["description"], "9876543210")
+		lookup.assert_not_called()
+
+	def test_administrator_is_never_masked(self):
+		frappe.set_user("Administrator")
+		result, lookup = self._run(
+			{"from": "ToDo", "select": ["name", "description"]},
+			[{"name": "T1", "description": "9876543210"}],
+		)
+		self.assertEqual(result["rows"][0]["description"], "9876543210")
+		lookup.assert_not_called()
+
+	def test_a_computed_column_over_a_masked_field_is_refused_before_the_select_runs(self):
+		spec = {
+			"from": "ToDo",
+			"alias": "t",
+			"select": [{"agg": "max", "field": "t.modified", "as": "latest"}],
+		}
+		frappe.set_user("Administrator")
+		with (
+			patch("frappe.has_permission", return_value=True),
+			patch("frappe.database.query.Engine") as fake_engine,
+		):
+			fake_engine.return_value.get_permission_conditions.return_value = None
+			q = query_mod.compile_spec(spec)
+		frappe.set_user("Guest")
+		with (
+			patch.object(masking, "mask_field_value", lambda field, val: "MASKED"),
+			patch("jarvis.compat.masked_fields_of", return_value=[self.MODIFIED]),
+			patch.object(query_mod, "compile_spec", return_value=q),
+			patch.object(q, "run", create=True) as run,
+		):
+			with self.assertRaisesRegex(InvalidArgumentError, "masked"):
+				query_mod.query(spec)
+		run.assert_not_called()
