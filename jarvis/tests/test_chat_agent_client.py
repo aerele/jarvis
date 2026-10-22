@@ -269,6 +269,34 @@ class TestCreateSession(FrappeTestCase):
 		key = sess.create_session()
 		self.assertEqual(key, "session-abc")
 
+	def test_uses_the_session_create_budget_not_the_connect_one(self):
+		# openclaw 2026.10.x took 18 s for a cold sessions.create after a restart (1 CPU tenant);
+		# the shared 10 s connect budget failed the first new conversation. Both attempts (the
+		# plain one and the no-explicit-owner retry) must use the longer budget.
+		from jarvis.chat import agent_client
+
+		self.assertGreater(agent_client.SESSION_CREATE_TIMEOUT_SECONDS, agent_client.CONNECT_TIMEOUT_SECONDS)
+		self.assertLess(agent_client.SESSION_CREATE_TIMEOUT_SECONDS, _prepare_deadline())
+		sess, _ws = _build_session()
+		seen = []
+
+		def fake_request(method, params, timeout_s=None):
+			seen.append((method, timeout_s))
+			if len(seen) == 1:
+				raise AgentUnreachableError(
+					'Multiple agents are configured, but session key "main" has no explicit owner. '
+					"Pass agentId or use an agent-prefixed session key.",
+					code="INVALID_REQUEST",
+				)
+			return {"payload": {"key": "k"}}
+
+		with patch.object(sess, "_request", side_effect=fake_request):
+			self.assertEqual(sess.create_session(), "k")
+		self.assertEqual(
+			seen,
+			[("sessions.create", agent_client.SESSION_CREATE_TIMEOUT_SECONDS)] * 2,
+		)
+
 	def test_rejection_raises(self):
 		sess, ws = _build_session()
 
@@ -1516,3 +1544,9 @@ class TestHandshakeSignsPresentedToken(FrappeTestCase):
 		with self.assertRaises(Exception):
 			_verify_connect_signature(sent, "", creds.public_key)
 		sess.close()
+
+
+def _prepare_deadline():
+	from jarvis.chat import turn_state
+
+	return turn_state.PREPARE_DEADLINE_S

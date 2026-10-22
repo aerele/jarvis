@@ -95,6 +95,14 @@ from jarvis.exceptions import AgentUnreachableError
 
 CONNECT_TIMEOUT_SECONDS = 10
 
+# sessions.create gets its own, longer budget. openclaw 2026.10.x does real work in it (preflight,
+# state snapshot, writer admission): measured 150-230 ms warm, but 18 s on a 1 CPU tenant in the
+# minutes after a restart or image roll, so the shared 10 s budget failed a customer's first new
+# conversation with "sessions.create timed out" (2026-10-22, openclaw compat run). 45 s covers that
+# with headroom and sits well inside the turn's prepare deadline (turn_state.PREPARE_DEADLINE_S = 300;
+# the session is created after the prepare claim). Every other request keeps CONNECT_TIMEOUT_SECONDS.
+SESSION_CREATE_TIMEOUT_SECONDS = 45
+
 # A dormant / just-recreated container's gateway is unreachable for ~10-30s
 # while `compose up -d` recreates it (see jarvis/api.py rotate_agent_token) or
 # while a rotated-dormant container spins back up. A single 10s connect with no
@@ -982,7 +990,7 @@ class AgentSession:
 	def create_session(self, label: str = "jarvis-chat") -> str:
 		params = {"label": label}
 		try:
-			res = self._request("sessions.create", params, timeout_s=CONNECT_TIMEOUT_SECONDS)
+			res = self._request("sessions.create", params, timeout_s=SESSION_CREATE_TIMEOUT_SECONDS)
 		except AgentUnreachableError as e:
 			# agent 2026.9+ makes a MULTI-AGENT roster (>=1 marketplace-agent
 			# delegate installed) reject an unscoped session and demand the caller
@@ -1004,7 +1012,7 @@ class AgentSession:
 			res = self._request(
 				"sessions.create",
 				{**params, "agentId": _PRIMARY_AGENT_ID},
-				timeout_s=CONNECT_TIMEOUT_SECONDS,
+				timeout_s=SESSION_CREATE_TIMEOUT_SECONDS,
 			)
 		key = (res.get("payload") or {}).get("key")
 		if not key:
