@@ -305,8 +305,10 @@ def _field_map(meta) -> list[dict]:
 			# `auto` means Frappe COMPUTES this (fetch_from) - skipping it is safe.
 			# A field with a DEFAULT is different: Frappe GUESSES it, and the guess is
 			# a decision the human never sees unless it reaches the draft. Surface the
-			# default value and let the model decide, rather than hiding both.
-			"auto": bool(df.fetch_from),
+			# default value and let the model decide, rather than hiding both. A
+			# fetch_if_empty field only fills a blank, so a value the user gives wins:
+			# it is settable, not auto.
+			"auto": bool(df.fetch_from) and not df.fetch_if_empty,
 			"readonly": bool(df.read_only),
 		}
 		if df.default not in (None, ""):
@@ -344,8 +346,8 @@ def _split_fields(full_fields: list[dict]) -> tuple[list[dict], list[str], list[
 
 
 def _child_fields(meta) -> dict[str, list[dict]]:
-	"""``{table_fieldname: [settable child fields]}`` for each MANDATORY Table
-	field, so the model need not fetch the child schema separately."""
+	"""``{table_fieldname: [settable or mandatory child fields]}`` for each
+	MANDATORY Table field, so the model need not fetch the child schema separately."""
 	out = {}
 	for df in meta.get_table_fields():
 		if not df.reqd or not df.options:
@@ -357,7 +359,7 @@ def _child_fields(meta) -> dict[str, list[dict]]:
 		out[df.fieldname] = [
 			_compact(rec)
 			for rec in _field_map(child_meta)
-			if not (rec["auto"] or rec["readonly"] or rec["fieldname"] in hidden)
+			if rec["mandatory"] or not (rec["auto"] or rec["readonly"] or rec["fieldname"] in hidden)
 		]
 	return out
 
