@@ -340,7 +340,7 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		# Only re-litigate the mapping when it is actually being (re)assigned.
 		# An unrelated save (enable / schedule / config) on a row whose
 		# run_as_user is unchanged must not be blocked just because, e.g., an
-		# admin earlier mapped it cross-user — and perms drift is re-checked at
+		# System Manager earlier mapped it cross-user, and perms drift is re-checked at
 		# each run's session-mint, not on every incidental write.
 		if not self.is_new():
 			old = frappe.db.get_value("Jarvis Agent Installation", self.name, "run_as_user")
@@ -358,23 +358,17 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		self._validate_run_as_permissions(target)
 
 	def _validate_run_as_escalation(self, target: str) -> None:
-		"""A4: a non-admin setter may map ONLY to themselves; any cross-user
-		mapping needs Jarvis Admin (``has_jarvis_admin_access`` — SM or Jarvis
-		Admin, never an invented permission); binding to a System Manager
-		additionally requires the setter BE a System Manager."""
-		from jarvis.permissions import has_jarvis_admin_access
+		"""A4: mapping an install to run as ANOTHER user needs the setter to be
+		Administrator or a System Manager; every other user may map ONLY to
+		themselves. The same rule is re-checked at every run
+		(``agent_scheduler.run_as_mapping_refusal``), against the setter's roles at
+		that time."""
+		from jarvis.chat.agent_scheduler import may_set_run_as_for_others
 
 		setter = frappe.session.user
-		if target != setter and not has_jarvis_admin_access(setter):
+		if target != setter and not may_set_run_as_for_others(setter):
 			frappe.throw(
-				_("You may only set this agent to run as yourself."),
-				frappe.PermissionError,
-			)
-		target_is_sm = "System Manager" in frappe.get_roles(target)
-		setter_is_sm = setter == "Administrator" or "System Manager" in frappe.get_roles(setter)
-		if target_is_sm and not setter_is_sm:
-			frappe.throw(
-				_("Only a System Manager may map an agent to run as a System Manager."),
+				_("Only a System Manager may set this agent to run as another user."),
 				frappe.PermissionError,
 			)
 

@@ -1818,6 +1818,14 @@ def _valid_owner(owner: str) -> bool:
 	return is_valid_unattended_owner(owner)
 
 
+def may_set_run_as_for_others(user: str) -> bool:
+	"""True iff ``user`` is Administrator or holds System Manager NOW: the only
+	identities allowed to map an installation to run as someone other than
+	themselves. Read at call time (roles are not cached on the installation), so a
+	revoked System Manager loses the right at once."""
+	return user == "Administrator" or "System Manager" in frappe.get_roles(user)
+
+
 def _agent_run_budget_monthly() -> int:
 	"""A14: the per-INSTALLATION monthly run budget from Jarvis Settings, floored at
 	MIN_AGENT_RUN_BUDGET_MONTHLY (a full daily schedule) so a misconfigured 0/blank
