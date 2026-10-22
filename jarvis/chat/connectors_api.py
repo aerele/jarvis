@@ -1573,7 +1573,7 @@ def probe_connector_auth(base_url: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def set_oauth_client_credentials(name: str, client_id: str, client_secret: str = "") -> dict:
 	"""ADMIN ONLY. Supply the credentials an administrator got by registering this

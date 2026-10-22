@@ -643,7 +643,7 @@ def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def complete_pool_account_signin(nonce: str, redirected_url: str) -> dict:
 	"""Capture ONE more chat-subscription account for a pool "subscription"
 	model, and RETURN the blob for the caller to stash in a pool
@@ -961,7 +961,7 @@ def begin_claude_cli_login(model: str = "") -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def complete_claude_cli_login(login_id: str, code: str) -> dict:
 	"""Submit the code the customer pasted back from claude.com.
 
