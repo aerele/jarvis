@@ -298,8 +298,33 @@ def _masking_for_rows(spec: dict, q) -> tuple[list, dict]:
 	}
 	masked = masking.masked_fields(tables, child_parents)
 	columns = _result_columns(spec, tables)
+	if masked:
+		_assert_masking_maps_to_rows(columns, q, masked)
 	masking.refuse_masked_expressions(columns, q, masked)
 	return columns, masked
+
+
+def _assert_masking_maps_to_rows(columns: list, q, masked: dict) -> None:
+	"""Refuse, while anything is masked, a select whose entries do not line up with
+	the built query's terms, or whose plain columns share a row key. Masking works
+	per row key, so a masked value must never sit under an unmasked column's key."""
+	if len(columns) != len(q._selects):
+		raise InvalidArgumentError(
+			"cannot apply field masking to this select list. Select the masked field "
+			"on its own, without computed columns beside it."
+		)
+	seen = {}
+	for column in columns:
+		if column.alias is not None:
+			seen.setdefault(column.key, []).append(column)
+	for key, same_key in seen.items():
+		if len(same_key) > 1 and any(c.key in masked.get(c.alias, {}) for c in same_key):
+			raise InvalidArgumentError(
+				f"column {key!r} is selected from more than one table and one of them is masked "
+				f"for you (you lack the mask permission), so the values would share a row key. "
+				f"Select the masked field on its own, or give each column its own name with "
+				f'{{"expr": {{"field": "<alias>.{key}"}}, "as": "<new_name>"}}.'
+			)
 
 
 def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:

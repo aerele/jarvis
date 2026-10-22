@@ -288,6 +288,51 @@ class TestQueryRowMasking(_NonAdmin):
 				query_mod.query(spec)
 		run.assert_not_called()
 
+	def test_columns_that_do_not_line_up_with_the_query_terms_are_refused(self):
+		spec = {"from": "ToDo", "select": ["name", "description"]}
+		with self.assertRaisesRegex(InvalidArgumentError, "masking"):
+			self._run_with_terms(spec, terms=1)
+
+	def test_two_plain_columns_sharing_a_key_are_refused_when_one_is_masked(self):
+		spec = {
+			"from": "ToDo",
+			"alias": "t",
+			"joins": [{"doctype": "User", "alias": "u", "on": {"u.name": "t.owner"}}],
+			"select": ["t.description", "u.description"],
+		}
+		with self.assertRaisesRegex(InvalidArgumentError, "more than one table"):
+			self._run_with_terms(spec, terms=2, masked_alias="u")
+
+	def test_two_plain_columns_sharing_a_key_pass_when_neither_is_masked(self):
+		spec = {
+			"from": "ToDo",
+			"alias": "t",
+			"joins": [{"doctype": "User", "alias": "u", "on": {"u.name": "t.owner"}}],
+			"select": ["t.name", "u.name", "t.status"],
+		}
+		result, _ = self._run(spec, [{"name": "U1", "status": "Open"}])
+		self.assertEqual(result["rows"], [{"name": "U1", "status": "Open"}])
+
+	def _run_with_terms(self, spec, terms, masked_alias=None):
+		"""Run ``query`` with a query that exposes ``terms`` select terms and a
+		masked ``description`` (on every table, or only on ``masked_alias``)."""
+
+		def lookup(meta, parenttype=None):
+			if masked_alias is not None and meta.name != {"u": "User"}[masked_alias]:
+				return []
+			return [self.PHONE]
+
+		with (
+			patch.object(masking, "mask_field_value", lambda field, val: "MASKED"),
+			patch("jarvis.compat.masked_fields_of", side_effect=lookup),
+			patch.object(query_mod, "compile_spec") as compile_query,
+		):
+			q = compile_query.return_value
+			q.limit.return_value = q
+			q.run.return_value = []
+			q._selects = [MagicMock(fields_=MagicMock(return_value=[])) for _ in range(terms)]
+			return query_mod.query(spec)
+
 
 class TestExportChildReadThroughParentField(_NonAdmin):
 	def _authorize(self, levels):
