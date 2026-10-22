@@ -27,9 +27,21 @@ import inspect
 
 import frappe
 
-from jarvis.exceptions import InvalidArgumentError
+from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools import desk_action
 from jarvis.tools._bulk import run_atomic_batch
+
+
+def require_system_manager_for_other_user(user: str, verb: str) -> None:
+	"""Acting on behalf of ANOTHER user needs Administrator or System Manager:
+	Frappe's follow helpers do not gate ``user``, and Document Follow rights
+	are held by every Desk User, so that doctype's permission restricts nobody.
+	Called once up front so a batch is refused as a whole."""
+	if user == frappe.session.user:
+		return
+	if frappe.session.user == "Administrator" or "System Manager" in frappe.get_roles():
+		return
+	raise PermissionDeniedError(f"only a System Manager may {verb} a document for another user")
 
 
 @desk_action(check_user_arg="user")
@@ -47,6 +59,7 @@ def follow_document(
 	when the doc was already being followed (idempotent).
 	Batch: returns ``{doctype, user, followed:[name,...], count}``."""
 	target_user = user or frappe.session.user
+	require_system_manager_for_other_user(target_user, "follow")
 
 	if names is not None:
 		return _follow_document_batch(doctype, names, target_user)
