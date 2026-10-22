@@ -1,9 +1,13 @@
 """Net outstanding receivable for a customer at a company.
 
-Wraps ``erpnext.selling.doctype.customer.customer.get_customer_outstanding``.
-The underlying helper sums GL entries against the customer's
-receivable accounts and optionally adds open Sales Orders' invoiceable
-balance - the same calculation as the Customer Credit Limit check.
+Reproduces ``erpnext.selling.doctype.customer.customer.get_customer_outstanding``
+(the Customer Credit Limit calculation): GL entries against the customer,
+plus the invoiceable balance of open Sales Orders, plus unbilled Delivery
+Note value. ERPNext sums the Sales Order and Delivery Note parts with raw SQL
+that ignores permissions, so here only documents the caller can read
+(``frappe.get_list``: roles and User Permissions) count towards those two
+parts. The GL part is computed as ERPNext does, and an unrestricted caller
+gets the same number as ERPNext.
 
 Customer read perm is enforced before delegating, and the company is
 gated by Company User Permission scope (not Company-doctype read - see
@@ -21,6 +25,8 @@ Receivable report (``jarvis.tools._ledger_access``).
 from __future__ import annotations
 
 import frappe
+from frappe.query_builder.functions import Coalesce, Sum
+from frappe.utils import flt
 
 from jarvis.exceptions import (
 	InvalidArgumentError,
@@ -53,18 +59,106 @@ def get_customer_outstanding(
 	assert_ledger_readable("Customer")
 	assert_company_permitted(company)
 
-	from erpnext.selling.doctype.customer.customer import (
-		get_customer_outstanding as _gco,
-	)
+	if cost_center and not frappe.db.exists("Cost Center", cost_center):
+		raise InvalidArgumentError(f"unknown Cost Center: {cost_center}")
 
-	outstanding = _gco(
-		customer=customer,
-		company=company,
-		ignore_outstanding_sales_order=bool(ignore_outstanding_sales_order),
-		cost_center=cost_center,
-	)
+	outstanding = _gl_outstanding(customer, company, cost_center)
+	if not ignore_outstanding_sales_order:
+		outstanding += _sales_order_outstanding(customer, company)
+	outstanding += _delivery_note_outstanding(customer, company)
 	return {
 		"outstanding": float(outstanding or 0),
 		"customer": customer,
 		"company": company,
 	}
+
+
+def _gl_outstanding(customer: str, company: str, cost_center: str | None) -> float:
+	# Same query as ERPNext: ledger sum, not a document list, so no per-row read filter.
+	gle = frappe.qb.DocType("GL Entry")
+	query = (
+		frappe.qb.from_(gle)
+		.select(Sum(gle.debit) - Sum(gle.credit))
+		.where(
+			(gle.party_type == "Customer")
+			& (gle.is_cancelled == 0)
+			& (gle.party == customer)
+			& (gle.company == company)
+		)
+	)
+	if cost_center:
+		lft, rgt = frappe.get_cached_value("Cost Center", cost_center, ["lft", "rgt"])
+		cc = frappe.qb.DocType("Cost Center")
+		query = query.where(
+			gle.cost_center.isin(frappe.qb.from_(cc).select(cc.name).where((cc.lft >= lft) & (cc.rgt <= rgt)))
+		)
+	rows = query.run()
+	return flt(rows[0][0]) if rows else 0.0
+
+
+def _sales_order_outstanding(customer: str, company: str) -> float:
+	# Unbilled share of each open Sales Order the caller can read.
+	orders = frappe.get_list(
+		"Sales Order",
+		filters={
+			"customer": customer,
+			"company": company,
+			"docstatus": 1,
+			"per_billed": ["<", 100],
+			"status": ["!=", "Closed"],
+		},
+		fields=["base_grand_total", "per_billed"],
+		limit_page_length=0,
+	)
+	return sum(flt(o.base_grand_total) * (100 - flt(o.per_billed)) / 100 for o in orders)
+
+
+def _delivery_note_outstanding(customer: str, company: str) -> float:
+	# Delivery Note value not yet invoiced and not created against a Sales
+	# Order / Sales Invoice, for the Delivery Notes the caller can read.
+	notes = frappe.get_list(
+		"Delivery Note",
+		filters={
+			"customer": customer,
+			"company": company,
+			"docstatus": 1,
+			"status": ["not in", ["Closed", "Stopped"]],
+		},
+		fields=["name", "base_net_total", "base_grand_total"],
+		limit_page_length=0,
+	)
+	if not notes:
+		return 0.0
+	totals = {n.name: n for n in notes}
+
+	dn_item = frappe.qb.DocType("Delivery Note Item")
+	items = (
+		frappe.qb.from_(dn_item)
+		.select(dn_item.name, dn_item.parent, dn_item.amount)
+		.where(
+			dn_item.parent.isin(list(totals))
+			& (Coalesce(dn_item.against_sales_order, "") == "")
+			& (Coalesce(dn_item.against_sales_invoice, "") == "")
+		)
+		.run(as_dict=True)
+	)
+	if not items:
+		return 0.0
+
+	si_item = frappe.qb.DocType("Sales Invoice Item")
+	billed = dict(
+		frappe.qb.from_(si_item)
+		.select(si_item.dn_detail, Sum(si_item.amount))
+		.where((si_item.docstatus == 1) & si_item.dn_detail.isin([i.name for i in items]))
+		.groupby(si_item.dn_detail)
+		.run()
+	)
+
+	outstanding = 0.0
+	for item in items:
+		dn_amount = flt(item.amount)
+		si_amount = flt(billed.get(item.name))
+		note = totals[item.parent]
+		if dn_amount > si_amount and note.base_net_total:
+			outstanding += ((dn_amount - si_amount) / note.base_net_total) * note.base_grand_total
+	return outstanding
