@@ -28,11 +28,11 @@ def _enter(patches, stack):
 
 
 class TestFollowCrossUser(FrappeTestCase):
-	def _run(self, user, roles, fn, **kwargs):
+	def _run(self, session_user, roles, fn, **kwargs):
 		from contextlib import ExitStack
 
 		with ExitStack() as stack:
-			_enter(_as(user, roles), stack)
+			_enter(_as(session_user, roles), stack)
 			stack.enter_context(
 				patch("frappe.desk.form.document_follow._follow_document", create=True, return_value=True)
 			)
