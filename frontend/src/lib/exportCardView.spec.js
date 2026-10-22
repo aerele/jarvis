@@ -73,7 +73,7 @@ describe("progressOf", () => {
 		expect(pending.kind).not.toBe("finalizing");
 		expect(pending.kind).toBe("value");
 		expect(
-			progressOf(running({ phase: "finalizing", cancel_requested: true, total_rows: 0 })),
+			progressOf(running({ phase: "finalizing", cancel_requested: true, total_rows: 0 }))
 		).toEqual({ kind: "unknown" });
 	});
 
@@ -144,7 +144,7 @@ describe("running card view", () => {
 		expect(xlsx.stats[0]).toEqual({ strong: "Finalizing spreadsheet…" });
 		expect(xlsx.stats[1].text).toBe(" rows written");
 		expect(view({ phase: "finalizing", format: "csv" }).stats[0].strong).toBe(
-			"Finalizing file…",
+			"Finalizing file…"
 		);
 		expect(JSON.stringify(xlsx.stats)).not.toContain("%");
 		expect(xlsx.buttons).toEqual(["cancel"]);
