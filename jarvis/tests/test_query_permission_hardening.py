@@ -58,3 +58,36 @@ class TestGroupByAliasCaseInsensitive(FrappeTestCase):
 			select_aliases=frozenset({"Module"}),
 		)
 		self.assertIsNone(field.table)
+
+
+class TestEngineReferenceDoctype(FrappeTestCase):
+	def _engine(self, doctype="ToDo"):
+		table = frappe.qb.DocType(doctype).as_("t")
+		q = frappe.qb.from_(table).select(table.name)
+		return query_mod._make_permission_engine(q, [table], doctype), table
+
+	def test_engine_carries_the_queried_doctype_as_reference_doctype(self):
+		engine, _table = self._engine("ToDo")
+		self.assertEqual(engine.reference_doctype, "ToDo")
+
+	def test_user_permission_with_applicable_for_is_evaluated_without_raising(self):
+		engine, table = self._engine("ToDo")
+		if not hasattr(engine, "get_user_permission_conditions"):
+			self.skipTest("Frappe 15 Engine has no user permission builder")
+		perms = {
+			"ToDo": [
+				{"doc": "TD-APPLIES", "applicable_for": "ToDo"},
+				{"doc": "TD-OTHER", "applicable_for": "Note"},
+			]
+		}
+		with patch("frappe.permissions.get_user_permissions", return_value=perms):
+			conditions = engine.get_user_permission_conditions("ToDo", table)
+		sql = " ".join(str(c) for c in conditions)
+		self.assertIn("TD-APPLIES", sql)
+		self.assertNotIn("TD-OTHER", sql)
+
+	def test_record_gate_points_the_engine_at_each_aliased_doctype(self):
+		engine, table = self._engine("ToDo")
+		with patch.object(query_mod.compat, "permission_conditions", return_value=None):
+			query_mod._weave_record_gate(None, engine, "u", "User", table, {}, {})
+		self.assertEqual(engine.reference_doctype, "User")
