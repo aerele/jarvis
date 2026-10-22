@@ -38,6 +38,16 @@ from jarvis.tools.get_report_filters import get_report_filters
 from jarvis.tools.run_report import _normalize_filters
 
 
+class ReportTooLarge(InvalidArgumentError):
+	"""A PREPARED report's completed copy is over the immediate row limit. The copy exists,
+	so the background export job can convert it under its own (larger) cap: export_query
+	hands off when that route is available, else this is the refusal shown."""
+
+	def __init__(self, message: str, filters: dict):
+		super().__init__(message)
+		self.filters = filters
+
+
 def too_large_message(report_name: str, cap: int) -> str:
 	return (
 		f"{report_name} has more than {cap:,} rows for these filters - too many for one export. "
@@ -49,6 +59,28 @@ def too_large_message(report_name: str, cap: int) -> str:
 def resolve(report_name: str, filters=None) -> tuple[ExportModel | None, dict | None]:
 	"""``(model, None)`` with every row of the report, or ``(None, status)`` for a
 	Prepared Report that has no completed copy yet (see the module docstring)."""
+	report, filters = authorize(report_name, filters)
+	if report.prepared_report:
+		completed, status = _prepared_reports.completed_or_status(
+			report_name, filters, user=frappe.session.user
+		)
+		if status is not None:
+			# The filled filters ride along: a background job started from this status
+			# must look for (and the run was started with) exactly these.
+			status["filters"] = filters
+			return None, status
+		columns, result, as_of = completed["columns"], completed["result"], completed["as_of"]
+	else:
+		columns, result = _run_inline(report_name, filters)
+		as_of = str(now_datetime())
+
+	return _model(report, report_name, columns, result, as_of, filters=filters), None
+
+
+def authorize(report_name: str, filters=None):
+	"""Every gate, then the filters as the run gets them: ``(report doc, filled filters)``.
+	Shared by the immediate export and the background job's ``prepare``, so both refuse
+	the same input in the same words."""
 	if not report_name:
 		raise InvalidArgumentError("report_name is required")
 	if not frappe.db.exists("Report", report_name):
@@ -62,17 +94,7 @@ def resolve(report_name: str, filters=None) -> tuple[ExportModel | None, dict | 
 	filters = _prepared_reports.fill_defaults(report_name, filters)
 	_prepared_reports.gate_filters(report_name, filters, user)
 	_require_filters(report_name, filters)
-
-	if report.prepared_report:
-		completed, status = _prepared_reports.completed_or_status(report_name, filters, user=user)
-		if status is not None:
-			return None, status
-		columns, result, as_of = completed["columns"], completed["result"], completed["as_of"]
-	else:
-		columns, result = _run_inline(report_name, filters)
-		as_of = str(now_datetime())
-
-	return _model(report, report_name, columns, result, as_of), None
+	return report, filters
 
 
 def _gate(report_name: str):
@@ -141,11 +163,13 @@ def _run_inline(report_name: str, filters: dict) -> tuple[list, list]:
 	return res.get("columns") or [], res.get("result") or []
 
 
-def _model(report, report_name: str, columns: list, result: list, as_of: str | None) -> ExportModel:
-	"""Every row under the visible columns, as file values. Refused above the
-	immediate row limit with a plain InvalidArgumentError: a report has no streamed
-	background export (the #733 job streams a SQL query), so it must never be read
-	as "hand off to a job"."""
+def _model(
+	report, report_name: str, columns: list, result: list, as_of: str | None, *, filters=None
+) -> ExportModel:
+	"""Every row under the visible columns, as file values. Over the immediate row limit
+	a PREPARED report's copy is handed to the background job (``ReportTooLarge``, caught
+	by export_query); an inline report is refused with a plain InvalidArgumentError, since
+	nothing can convert it without running it again."""
 	visible = _report_rows.visible_columns(columns)
 	if not visible:
 		raise InvalidArgumentError(
@@ -156,7 +180,10 @@ def _model(report, report_name: str, columns: list, result: list, as_of: str | N
 		raise NoDataError(f"{report_name} returned no rows for these filters - nothing to export.")
 	cap = immediate_row_limit()
 	if len(result) > cap:
-		raise InvalidArgumentError(too_large_message(report_name, cap))
+		message = too_large_message(report_name, cap)
+		if report.prepared_report:
+			raise ReportTooLarge(message, filters or {})
+		raise InvalidArgumentError(message)
 	rows = [
 		[_report_rows.as_file_value(_report_rows.cell(row, col, idx), col) for idx, col in visible]
 		for row in result
