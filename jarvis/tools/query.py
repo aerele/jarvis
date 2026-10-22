@@ -82,6 +82,7 @@ from jarvis.exceptions import (
 )
 from jarvis.tools import _expr
 from jarvis.tools._doctype_name import canonical_doctype
+from jarvis.tools._export import masking
 
 # Row guard: refuse a result over this size unless the caller passes
 # ``confirm_large=True``. Mirrors the run_query guard so the agent's
@@ -183,6 +184,9 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 			``confirm_large`` is False.
 	"""
 	q = compile_spec(spec)
+	# Frappe 16 field masking (a no-op on 15); a computed column over a masked
+	# field is refused here, before the SELECT runs.
+	columns, masked = _masking_for_rows(spec, q)
 
 	# Step 7: execute.
 	limit = int(spec.get("limit") or DEFAULT_LIMIT)
@@ -190,6 +194,7 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	more_rows = len(rows) > limit
 	partial = more_rows and not spec.get("limit")
 	rows = rows[:limit]
+	masking.mask_rows(columns, rows, masked)
 
 	# Step 8: row guard (post-execute - we can't know the row count
 	# without running, and limiting earlier would break aggregates).
@@ -245,6 +250,56 @@ def compile_spec(spec: dict):
 	"""Steps 1-6 of ``query``: validate the spec, run every permission gate, and
 	build the permission-woven qb query, NOT executed."""
 	return _compile(spec)[0]
+
+
+def _spec_tables(spec: dict) -> dict:
+	"""``{spec alias: DocType}`` for the FROM and every join, spelled the way
+	``_build_from_and_aliases`` and the join loop key their alias map."""
+	from_dt = canonical_doctype(spec["from"])
+	tables = {spec.get("alias") or spec["from"]: from_dt}
+	for j in spec.get("joins") or []:
+		tables[j["alias"]] = canonical_doctype(j["doctype"])
+	return tables
+
+
+def _result_columns(spec: dict, tables: dict) -> list:
+	"""One export-style column per select entry, in order. A plain ``alias.field``
+	entry carries its table alias; an aggregate or expression carries none."""
+	from jarvis.tools._export.resolvers import _Column
+
+	from_alias = next(iter(tables))
+	columns = []
+	for item in spec.get("select") or ["name"]:
+		if isinstance(item, str):
+			alias, _, field = item.rpartition(".")
+			columns.append(_Column(field, tables.get(alias or from_alias), None, alias or from_alias))
+		else:
+			columns.append(_Column(item.get("as") or "", None, None))
+	return columns
+
+
+def _masking_for_rows(spec: dict, q) -> tuple[list, dict]:
+	"""``(columns, masked)`` for ``masking.mask_rows`` over this query's rows.
+
+	The tool builds its SELECT with the query builder directly, so Frappe 16's
+	masking of a ``mask=1`` field for a user without the mask permission never
+	sees it. Same rule as a spec export: a plain masked column is masked value by
+	value, a computed column over a masked field is refused. A child table takes
+	its masking from the parent its rows are scoped to. Empty on Frappe 15 (no
+	masking feature) and for Administrator, who is never masked."""
+	if masking.mask_field_value is None or frappe.session.user == "Administrator":
+		return [], {}
+	tables = _spec_tables(spec)
+	alias_map = {alias: (dt, None) for alias, dt in tables.items()}  # the resolver reads the DocType only
+	child_parents = {
+		alias: _child_scoping_parent(dt, alias, spec, alias_map)
+		for alias, dt in tables.items()
+		if frappe.get_meta(dt).istable
+	}
+	masked = masking.masked_fields(tables, child_parents)
+	columns = _result_columns(spec, tables)
+	masking.refuse_masked_expressions(columns, q, masked)
+	return columns, masked
 
 
 def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:
