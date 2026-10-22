@@ -25,7 +25,7 @@ def _scope() -> str:
 	return scope
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET"])
 def download(ticket: str, file_url: str):
 	scope = _scope()
 	content, content_type, disposition = _surface(
@@ -41,7 +41,7 @@ def download(ticket: str, file_url: str):
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def upload(ticket: str, comm: str | None = None) -> dict:
 	# comm (optional): the reply Communication this upload belongs to. Frappe maps the multipart form
 	# field onto it, same as `ticket`. Forwarded to the backend, which attaches the File to that Communication
