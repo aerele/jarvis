@@ -34,6 +34,7 @@ from jarvis.tools._bulk import run_atomic_batch
 from jarvis.tools._child_rows import merge_child_rows, row_values
 from jarvis.tools._delegate_write_caps import enforce_update
 from jarvis.tools._field_values import cast_numbers, check_values
+from jarvis.tools.create_doc import refused_field_names
 
 # Fields Frappe maintains itself or that govern DocType identity. An LLM
 # rewriting these would corrupt the row.
@@ -61,11 +62,7 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 	if not isinstance(changes, dict) or not changes:
 		raise InvalidArgumentError("changes must be a non-empty dict")
 
-	# amended_from and underscore-prefixed names (_comments, _assign, ...) are
-	# framework-managed, so they are refused like the protected fields.
-	protected = sorted(
-		k for k in changes if k in PROTECTED_FIELDS or k == "amended_from" or str(k).startswith("_")
-	)
+	protected = refused_field_names(changes, PROTECTED_FIELDS)
 	if protected:
 		raise InvalidArgumentError(f"refusing to write protected field(s): {', '.join(protected)}")
 
