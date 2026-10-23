@@ -23,11 +23,39 @@ Two shapes:
 
 from __future__ import annotations
 
+import inspect
+
 import frappe
 
-from jarvis.exceptions import InvalidArgumentError
+from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools import desk_action
 from jarvis.tools._bulk import run_atomic_batch
+
+
+def require_system_manager_for_other_user(user: str, verb: str) -> None:
+	"""Acting on behalf of ANOTHER user needs Administrator or System Manager:
+	Frappe's follow helpers do not gate ``user``, and Document Follow rights
+	are held by every Desk User, so that doctype's permission restricts nobody.
+	Called once up front so a batch is refused as a whole."""
+	if user == frappe.session.user:
+		return
+	if frappe.session.user == "Administrator" or "System Manager" in frappe.get_roles():
+		return
+	raise PermissionDeniedError(f"only a System Manager may {verb} a document for another user")
+
+
+def pick_follow_function(fn_name: str):
+	"""Frappe's ``follow_document`` / ``unfollow_document`` taking a user as the
+	third positional argument. v15's public function takes ``user`` itself; v16's
+	whitelisted one acts for the session user and the user-taking variant is the
+	underscore-prefixed one. Picked by signature so both majors work, resolved at
+	call time."""
+	from frappe.desk.form import document_follow
+
+	public = getattr(document_follow, fn_name)
+	if "user" in inspect.signature(public).parameters:
+		return public
+	return getattr(document_follow, f"_{fn_name}")
 
 
 @desk_action(check_user_arg="user")
@@ -45,6 +73,7 @@ def follow_document(
 	when the doc was already being followed (idempotent).
 	Batch: returns ``{doctype, user, followed:[name,...], count}``."""
 	target_user = user or frappe.session.user
+	require_system_manager_for_other_user(target_user, "follow")
 
 	if names is not None:
 		return _follow_document_batch(doctype, names, target_user)
@@ -63,11 +92,7 @@ def _follow_document_one(doctype: str, name: str, user: str) -> bool:
 	follow row was actually inserted (False if already following)."""
 	frappe.has_permission(doctype, "read", doc=name, throw=True)
 
-	from frappe.desk.form.document_follow import (
-		follow_document as _follow,
-	)
-
-	result = _follow(doctype=doctype, doc_name=name, user=user)
+	result = pick_follow_function("follow_document")(doctype, name, user)
 	return bool(result)
 
 
