@@ -195,7 +195,7 @@ def _origin_page_from_context(context: str | dict | None) -> str:
 	return origin if origin in _BUILDER_ORIGINS else ""
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_tools() -> list[str]:
 	"""Tool names the agent can call, from the bench registry (the agent
 	plugin registers one ``jarvis__<name>`` per entry). Drives the chat's
@@ -207,7 +207,7 @@ def list_tools() -> list[str]:
 	return _registry_list_tools()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_conversations(refresh: bool = False) -> list[dict]:
 	"""Return active, non-empty conversations owned by the current user, newest
 	first.
@@ -304,7 +304,7 @@ def list_conversations(refresh: bool = False) -> list[dict]:
 	return rows
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def search_conversations(search: str = "", start: int = 0, page_length: int = 20) -> dict:
 	"""Title-only search over the caller's ACTIVE conversations (⌘K palette,
 	DESIGN-V3 §8.2 / D40). Owner-scoped in SQL; LIKE wildcards escaped; empty
@@ -616,7 +616,7 @@ def _search_records(search: str, limit: int) -> list[dict]:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def search_workspace(search: str = "", limit: int = 6) -> dict:
 	"""Full desk search over the caller's Frappe desk for the ⌘K palette,
@@ -664,7 +664,7 @@ def _undo_first_send_auto_mode(conversation: str, conv_changes: dict) -> None:
 		frappe.db.set_value(CONV, conversation, {"auto_mode": 0, "auto_mode_at": None}, update_modified=False)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_or_focus_empty(origin_page: str = "") -> str:
 	"""Return an empty active conversation for the current user, creating
 	one only if no empty conversation already exists.
@@ -730,7 +730,7 @@ def create_or_focus_empty(origin_page: str = "") -> str:
 	return create_conversation(origin_page=origin)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_conversation(
 	conversation: str, limit: int = 0, before: int = 0, refresh: str | None = None, after: int = 0
 ) -> dict:
@@ -742,6 +742,9 @@ def get_conversation(
 	"""
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	return _conversation_history(doc, limit, before, refresh, after)
 
 
@@ -1102,7 +1105,7 @@ def _doc_refs(rows: list) -> list:
 	return refs
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_tool_detail(message: str) -> dict:
 	"""The whole input and output of one tool row a history page sent compact
 	(``tool_result_compact``). Gated like ``get_conversation``: the caller must own
@@ -1116,6 +1119,9 @@ def get_tool_detail(message: str) -> dict:
 	if not row or row.role != "tool" or frappe.utils.cint(row.hidden):
 		frappe.throw(_t("message not found"), frappe.DoesNotExistError)
 	_get_owned_conversation(row.conversation)  # non-owner: PermissionError
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(row.conversation)
 	return {"name": message, "tool_args": row.tool_args, "tool_result": row.tool_result}
 
 
@@ -1232,7 +1238,7 @@ def _live_turn_steps(messages: list) -> None:
 		m["turn_state"] = turn.state
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 	"""Return one canvas artifact's render-ready content for inline display.
 
@@ -1249,6 +1255,9 @@ def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 	if not row:
 		frappe.throw(_t("message not found"), frappe.DoesNotExistError)
 	_get_owned_conversation(row.conversation)  # non-owner: PermissionError
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(row.conversation)
 
 	items = frappe.parse_json(row.canvas) if row.canvas else []
 	if not isinstance(items, list) or not items:
@@ -1323,7 +1332,7 @@ def _artifact_mime(item: dict) -> str:
 	}.get(ext, "application/octet-stream")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def preview_file(file_url: str) -> dict:
 	"""Render-ready preview for the artifact side panel.
 
@@ -1360,7 +1369,7 @@ def preview_file(file_url: str) -> dict:
 	return {"kind": kind or "binary"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_conversation(origin_page: str = "") -> str:
 	"""Create an empty conversation owned by the current user; return its name."""
 	require_jarvis_access()
@@ -1626,7 +1635,7 @@ def _unlink_macro_runs(conversation: str) -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def rename_conversation(conversation: str, title: str) -> dict:
 	"""Rename a conversation (owner-only, enforced explicitly)."""
 	require_jarvis_access()
@@ -1653,7 +1662,7 @@ def rename_conversation(conversation: str, title: str) -> dict:
 	return {"ok": True, "data": {"title": title}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_star(conversation: str, starred: str | int | bool) -> dict:
 	"""Star/unstar a conversation (owner-only, enforced explicitly). Starred
 	chats are listed first and grouped under 'Starred' in the sidebar."""
@@ -2413,11 +2422,17 @@ def send_message(
 	# track. PermissionError (someone else's conversation) always propagates.
 	try:
 		conv_doc = _get_owned_conversation(conversation)
+		from jarvis.chat.collaboration import require_legacy_conversation
+
+		require_legacy_conversation(conversation)
 	except frappe.DoesNotExistError:
 		if _delegated:
 			raise
 		conversation = create_or_focus_empty(origin_page=requested_origin)
 		conv_doc = _get_owned_conversation(conversation)
+		from jarvis.chat.collaboration import require_legacy_conversation
+
+		require_legacy_conversation(conversation)
 
 	# Builder threads are application-scoped workspaces, not aliases for main
 	# chat. A direct /c/<id> visit therefore cannot post into one without the
@@ -3163,7 +3178,7 @@ def _provider_base_urls(catalog: list) -> dict[str, str]:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_model_catalog_ui(retry: bool = False) -> dict:
 	"""Catalog slice the pool editor and subscription card need, independent of
 	get_chat_ui_settings so the onboarding wizard (which never calls that) works.
@@ -3193,7 +3208,7 @@ def get_model_catalog_ui(retry: bool = False) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_chat_ui_settings() -> dict:
 	"""Return the bench-side LLM settings the chat UI needs to render the
 	model picker (provider label, current default model, auth mode, and the
@@ -3487,7 +3502,7 @@ def _tool_runs(conversation: str) -> list[dict]:
 	return runs
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_tool_activity(conversation: str, limit: int = 20) -> dict:
 	"""Recent tool runs in ``conversation`` for the Settings Activity pane.
 
@@ -3498,6 +3513,9 @@ def get_tool_activity(conversation: str, limit: int = 20) -> dict:
 	"""
 	require_jarvis_access()
 	_get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	from frappe.utils import cint
 
 	runs = _tool_runs(conversation)
@@ -3561,7 +3579,7 @@ def _measured_usage(user: str) -> dict | None:
 	return measured
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_usage(conversation: str | None = None) -> dict:
 	"""Estimated token usage for the current user — this chat, this month, and
 	all-time — plus the monthly budget so the UI can draw a meter.
@@ -3619,12 +3637,15 @@ def get_usage(conversation: str | None = None) -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_conversation_context(conversation: str) -> dict:
 	"""Context-window meter for one conversation (owner only). Bench snapshot
 	only; never calls the runtime."""
 	require_jarvis_access()
 	_get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	from jarvis.chat import compaction
 
 	payload = compaction.context_payload(conversation)
@@ -3653,13 +3674,16 @@ def _cap_reading(user: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 	"""Summarise older turns of one conversation (owner only). Refuses with a
 	typed reason while a turn or another compaction is in flight; otherwise
 	takes the lock and enqueues jarvis.chat.compaction.run_compact."""
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	from jarvis.chat import compaction
 
 	if doc.get("skip_confirmation"):
@@ -3699,7 +3723,7 @@ def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 	return compaction.start_compaction(conversation, frappe.session.user, clean)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 	"""Set or clear the per-conversation model override.
 
@@ -3768,7 +3792,7 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 	return {"ok": True, "data": {"effective_model": model}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def warm_session() -> dict:
 	"""Fire-and-forget: warm this tenant's agent prefix cache so the next
 	new-chat first turn skips the cold prefill. Best-effort; always ok.
@@ -3787,7 +3811,7 @@ def warm_session() -> dict:
 	return {"ok": True, "enqueued": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_conversation_thinking(conversation: str, thinking: str | None = None) -> dict:
 	"""Set or clear the per-conversation thinking effort (low/medium/high).
 
@@ -3861,6 +3885,9 @@ def retry_message(message: str) -> dict:
 	# A retry is a human turn-entry too, so an armed macro-run conversation refuses
 	# it (T4): re-running a step there would run the covered set uncarded on demand.
 	_reject_send_into_armed_conversation(_get_owned_conversation(doc.conversation))
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	# Flag ON: _retry_errored refuses a retry while another turn runs, and accept_or_queue
 	# queues it when the site is at capacity; flag OFF keeps the legacy single-flight reject.
 	if admission.turn_machine_enabled():
@@ -4130,6 +4157,9 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	if run_id and _stop_is_late(conversation, run_id):
 		return {"ok": False, "reason": _("That reply has already finished, so nothing was stopped.")}
 	# A reply still queued for a slot has nothing with the agent to abort, so Stop
@@ -4475,7 +4505,33 @@ def _dispatch_turn(
 			_gate_ts.reset_lock_tracking()
 			return _reroute_legacy_to_pump(enqueue_kwargs, interactive, exempt_overload=exempt_overload)
 	try:
-		if (frappe.conf.get("socketio_backend") or "").strip().lower() == "python":
+		from jarvis.chat.collaboration import is_collaborative
+
+		shared = is_collaborative(enqueue_kwargs.get("conversation_id"))
+		if shared:
+			from jarvis.chat import collaboration as c
+			from jarvis.chat.collaboration_turn import binding_for_run
+
+			binding = binding_for_run(enqueue_kwargs.get("run_id"))
+			row = frappe.db.get_value(
+				"Jarvis Chat Turn",
+				enqueue_kwargs.get("run_id"),
+				["seed_message", "collaboration_executor", "state"],
+				as_dict=True,
+			)
+			if (
+				not binding
+				or not row
+				or (binding.conversation, row.seed_message, row.collaboration_executor, row.state)
+				!= (
+					enqueue_kwargs.get("conversation_id"),
+					enqueue_kwargs.get("message_id"),
+					"rq",
+					"dispatching",
+				)
+			):
+				c._deny()
+		if not shared and (frappe.conf.get("socketio_backend") or "").strip().lower() == "python":
 			from jarvis.chat import dispatch
 
 			# Mismatch guard: pub/sub is fire-and-forget, so publishing with no
@@ -4590,6 +4646,9 @@ def _enqueue_turn(
 	written. Elsewhere (the pump off, or draining) there is no row to meet on and the
 	turn gets a random id, as before."""
 	conv_doc = frappe.get_doc(CONV, conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conv_doc)
 	# Every field this call changes on the conversation row is collected here and
 	# persisted as ONE locked, targeted write below, right before msg_doc.insert(),
 	# the same reasoning as send_message's targeted write (see there): a
@@ -5006,6 +5065,29 @@ _TYPED_REPLY_SUFFIX = (
 )
 
 
+def continuation_prompt(receipt: str, *, outcome=None, spans=None, failed=False, applied=None) -> str:
+	"""Format untrusted receipt data without admission, identity or bypass state."""
+	from jarvis.chat.turn_handler import _safe_label_name
+
+	spans = dict(spans or {})
+	if set(spans) - MIXED_SPANS:
+		raise ValueError(f"enqueue_continuation: unknown span(s) {sorted(set(spans) - MIXED_SPANS)}")
+	if applied is not None:
+		spans.setdefault("applied", applied)
+	spans.setdefault("not_fixable", receipt)
+	outcome = _resolve_outcome(outcome, failed, spans.get("applied"))
+	safe = _safe_label_name(receipt)
+	if outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
+		prompt = _CONTINUATION_PROMPT_UNKNOWN.format(receipt=safe)
+	elif outcome == OUTCOME_MIXED:
+		prompt = _mixed_prompt(spans)
+	elif outcome in _FAILED_SCAFFOLDS:
+		prompt = _FAILED_SCAFFOLDS[outcome].format(receipt=safe)
+	else:
+		prompt = _CONTINUATION_PROMPT.format(receipt=safe)
+	return prompt
+
+
 def enqueue_continuation(
 	conversation: str,
 	receipt: str,
@@ -5047,22 +5129,7 @@ def enqueue_continuation(
 	A typed approval in flight (``TYPED_REPLY_FLAG``) appends the user's words as DATA."""
 	from jarvis.chat.turn_handler import _safe_label_name
 
-	spans = dict(spans or {})
-	if set(spans) - MIXED_SPANS:
-		raise ValueError(f"enqueue_continuation: unknown span(s) {sorted(set(spans) - MIXED_SPANS)}")
-	if applied is not None:
-		spans.setdefault("applied", applied)
-	spans.setdefault("not_fixable", receipt)
-	outcome = _resolve_outcome(outcome, failed, spans.get("applied"))
-	safe = _safe_label_name(receipt)
-	if outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
-		prompt = _CONTINUATION_PROMPT_UNKNOWN.format(receipt=safe)
-	elif outcome == OUTCOME_MIXED:
-		prompt = _mixed_prompt(spans)
-	elif outcome in _FAILED_SCAFFOLDS:
-		prompt = _FAILED_SCAFFOLDS[outcome].format(receipt=safe)
-	else:
-		prompt = _CONTINUATION_PROMPT.format(receipt=safe)
+	prompt = continuation_prompt(receipt, outcome=outcome, spans=spans, failed=failed, applied=applied)
 	typed = frappe.flags.get(TYPED_REPLY_FLAG)
 	if typed:
 		prompt += _TYPED_REPLY_SUFFIX.format(typed=_safe_label_name(typed))
@@ -5230,7 +5297,7 @@ _NON_EDIT_FIELDTYPES = {
 }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_doctype_fields(doctype: str) -> dict:
 	"""Field metadata (fieldtype + options) for a DocType, so the chat SPA can
 	render the record-edit card with proper controls (Link → searchable picker,

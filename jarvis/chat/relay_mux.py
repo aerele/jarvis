@@ -694,7 +694,9 @@ class RelayMux:
 		# redact=False: this runs on the reader thread, which has no frappe.local
 		# site. The pump redacts the text fields itself, on its own thread, in
 		# _apply, right before they reach a lane callback.
-		parsed = parse_event(payload, redact=False)
+		parsed = parse_event(payload, redact=False, collaboration=":dashboard:collab:" in lane.session_key)
+		if parsed and parsed.get("kind") == "tool_boundary" and parsed.get("tool_call_id"):
+			parsed = {**parsed, "kind": "tool", "phase": "start"}
 		if parsed is None or parsed.get("kind") == "lifecycle":
 			# lifecycle frames are dropped on the managed relay path (mirror of
 			# relay_turn_events); not a stray — it's an expected known-run drop.
@@ -1107,6 +1109,7 @@ class RelayMux:
 		thinking: str | None = None,
 		deliver: bool = False,
 		attachments: list[dict] | None = None,
+		verified_session_id: str | None = None,
 	) -> PendingRpc:
 		"""FRESH-send fast path with early-frame routing (OAR-15). PRE-REGISTERS
 		the run map under ``run_id == idempotencyKey`` at ISSUANCE (before the
@@ -1116,6 +1119,8 @@ class RelayMux:
 		Retry-attach (an ack of ``status:"in_flight"`` returning an EXISTING
 		run's id) is NOT handled here: the caller inspects the ack and calls
 		``rekey_run(run_id, ack_run_id)`` when the returned id differs."""
+		if ":dashboard:collab:" in session_key and not verified_session_id:
+			raise AgentUnreachableError("Shared sessions require a verified physical session before sending.")
 		self.register_run(run_id, handler, session_key=session_key, start_seq=start_seq)
 		params: dict = {
 			"sessionKey": session_key,
@@ -1123,6 +1128,8 @@ class RelayMux:
 			"idempotencyKey": run_id,
 			"deliver": deliver,
 		}
+		if verified_session_id:
+			params.update(sessionId=verified_session_id, expectedPermissionMode="read-only")
 		if thinking:
 			params["thinking"] = thinking
 		if attachments:

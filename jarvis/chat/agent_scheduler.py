@@ -32,6 +32,10 @@ review:
   never past the slot's next natural time), records a ``failed`` run and notifies
   the owner. The missed slot is NOT backfilled (``compute_next_run`` from
   *now* yields a single next future slot).
+* **Run-as mapping re-check:** a run-as user other than the install owner is only
+  honoured while whoever last set it is STILL Administrator or a System Manager
+  (``run_as_mapping_refusal``); otherwise the run is refused. A mapping with no
+  record of its setter is refused too, on both launch paths.
 * **O7:** identical ``(owner, agent, cadence, time)`` due rows are deduped.
 
 ``_launch_audit`` is shared with ``agents_api.run_agent_now`` so a manual
@@ -39,6 +43,7 @@ trigger takes the EXACT same code path as the scheduler.
 """
 
 import json
+import re
 import time
 from datetime import timedelta
 
@@ -49,9 +54,9 @@ from rq.timeouts import JobTimeoutException
 
 from jarvis._session import authenticated_user, impersonate
 from jarvis.chat import derived_config
-from jarvis.chat.agent_activity import log_activity
+from jarvis.chat.agent_activity import ACTIVITY, log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
-from jarvis.permissions import is_valid_unattended_owner
+from jarvis.permissions import is_system_manager, is_valid_unattended_owner
 from jarvis.tools import _delegate_capability
 
 INSTALLATION = "Jarvis Agent Installation"
@@ -354,6 +359,16 @@ def _sweep_one(row, now, seen: set) -> None:
 	# (gotcha #8 — the EXECUTING identity is gated, not the triggerer).
 	if not _user_allowed_for_agent(row.agent, run_as):
 		_record_failed(row, "run-as user's roles no longer permit this agent")
+		_advance(row, now)
+		return
+
+	# A mapping to someone other than the owner is only honoured while whoever set it
+	# is still a System Manager (or Administrator). Judged at EVERY run, so a revoked
+	# setter takes the mapping down with their role. Consume the slot: only a System
+	# Manager can fix it, and retrying would just relog the same failure.
+	refusal = run_as_mapping_refusal(row.name, row.owner, run_as)
+	if refusal:
+		_record_failed(row, f"scheduled run skipped: {refusal}")
 		_advance(row, now)
 		return
 
@@ -1816,6 +1831,95 @@ def _valid_owner(owner: str) -> bool:
 	one definition with this one instead of re-deriving it (jarvis #469); this
 	wrapper keeps the local name every call site here already uses."""
 	return is_valid_unattended_owner(owner)
+
+
+_RUN_AS_AUDIT_DETAIL = re.compile(r"^run as (?P<target>\S+) \(set by (?P<setter>[^)\s]+)\)")
+
+
+def _run_as_setter(installation: str, run_as: str) -> str | None:
+	"""The user who set the CURRENT run-as mapping, or None when no record says.
+
+	Primary record: the ``Version`` rows that changed ``run_as_user`` (the DocType
+	tracks changes; a row's owner is the session user who saved it). The setter is
+	the owner of the change that set the value in force now and that no later change
+	moved away from. "Later" follows the old -> new chain, with ``creation`` only as
+	a tie-break, so equal or out-of-order timestamps (a frozen clock) cannot hide a
+	genuine change. A value no recorded change set (a later raw ``set_value``) leaves
+	the mapping unattributed. Fallback for a mapping made at insert, which writes no
+	Version: the cross-user ``run_as_changed`` activity row the controller logs. A
+	self-map is never audited; the caller handles it (setter == run_as_user).
+	System-side read of audit rows, no data is returned to the user."""
+	version = frappe.qb.DocType("Version")
+	rows = (
+		frappe.qb.from_(version)
+		.select(version.owner, version.data, version.creation)
+		.where(version.ref_doctype == INSTALLATION)
+		.where(version.docname == installation)
+		.where(version.data.like('%"run_as_user"%'))
+		.orderby(version.creation, order=frappe.qb.desc)
+		.limit(25)
+		.run(as_dict=True)
+	)
+	changes = []  # (old, new, setter, creation) of every recorded run_as_user change
+	for r in rows:
+		try:
+			changed = json.loads(r.data).get("changed") or []
+		except (TypeError, ValueError, AttributeError):
+			continue
+		for item in changed:
+			if isinstance(item, list) and len(item) >= 3 and item[0] == "run_as_user":
+				changes.append(((item[1] or "").strip(), (item[2] or "").strip(), r.owner, r.creation))
+	if changes:
+		# A change is superseded when a later-or-equal one moves the value away again.
+		current = [
+			c
+			for c in changes
+			if c[1] == run_as and not any(d is not c and d[0] == c[1] and d[3] >= c[3] for d in changes)
+		]
+		return current[0][2] if len(current) == 1 and current[0][2] else None
+
+	# Match the exact "run as <target> (set by <setter>)" text in Python: a LIKE
+	# pattern built from an email would treat its "_" and "%" as wildcards.
+	activity = frappe.qb.DocType(ACTIVITY)
+	details = (
+		frappe.qb.from_(activity)
+		.select(activity.detail)
+		.where(activity.installation == installation)
+		.where(activity.action == "run_as_changed")
+		.orderby(activity.creation, order=frappe.qb.desc)
+		.limit(25)
+		.run(pluck="detail")
+	)
+	for detail in details:
+		m = _RUN_AS_AUDIT_DETAIL.match(detail or "")
+		if m and m.group("target") == run_as:
+			return m.group("setter")
+	return None
+
+
+def run_as_mapping_refusal(installation: str, owner: str, run_as: str) -> str | None:
+	"""Run-time form of the set-time rule (``_validate_run_as_escalation``): None
+	when the run may go ahead, else the reason to refuse it.
+
+	A run-as user equal to the install owner is the ordinary self-map and needs no
+	check. Otherwise the user who last set the mapping must be that run-as user
+	(a self-map) or be Administrator or a System Manager NOW, so a setter whose role
+	was revoked (or who was disabled) no longer vouches for it. No record of the
+	setter fails closed."""
+	run_as = (run_as or "").strip()
+	if not run_as or run_as == owner:
+		return None
+	setter = _run_as_setter(installation, run_as)
+	if not setter:
+		return "nothing records who set the run-as user; ask a System Manager to set it again"
+	if setter == run_as:
+		return None
+	if setter != "Administrator" and not frappe.db.get_value("User", setter, "enabled"):
+		return f"{setter} set the run-as user and is disabled; ask a System Manager to set it again"
+	if not is_system_manager(setter):
+		# Short on purpose: the scheduler stores the reason in a 140-character field.
+		return f"{setter} set the run-as user and is no longer a System Manager; ask one to set it again"
+	return None
 
 
 def _agent_run_budget_monthly() -> int:

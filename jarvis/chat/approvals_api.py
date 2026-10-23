@@ -20,6 +20,7 @@ from pypika.terms import Criterion, ExistsCriterion, Not, ValueWrapper
 
 from jarvis._session import impersonate
 from jarvis.chat import filebox_skills
+from jarvis.chat.collaboration import is_collaborative
 from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as _ar
 from jarvis.permissions import (
 	message_origin,
@@ -101,6 +102,8 @@ def _parse_options(raw: str | None) -> list[str]:
 
 def _may_act_on(conversation: str | None) -> bool:
 	# SM, or the owner of the linked conversation.
+	if is_collaborative(conversation):
+		return False
 	if "System Manager" in frappe.get_roles():
 		return True
 	if not conversation:
@@ -108,7 +111,7 @@ def _may_act_on(conversation: str | None) -> bool:
 	return frappe.db.get_value("Jarvis Conversation", conversation, "owner") == frappe.session.user
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 	"""Approvals visible to the current user (owner of the linked
@@ -156,6 +159,7 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 		order_by="creation desc",
 		limit_page_length=int(limit),
 	)
+	rows = [r for r in rows if not is_collaborative(r.get("conversation"))]
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
 	conversation_names = [r.get("conversation") for r in rows if r.get("conversation")]
@@ -238,6 +242,20 @@ def _owns_conversation(a, me: str):
 	return ExistsCriterion(frappe.qb.from_(c).select(1).where((c.name == a.conversation) & (c.owner == me)))
 
 
+def _legacy_approval(a):
+	"""The legacy board never exposes a collaborative actor's raw payload."""
+	if not frappe.db.has_column("Jarvis Conversation", "collaboration_active"):
+		return None
+	c = frappe.qb.DocType("Jarvis Conversation").as_("collaborative_thread")
+	return Not(
+		ExistsCriterion(
+			frappe.qb.from_(c)
+			.select(1)
+			.where((c.name == a.conversation) & (IfNull(c.collaboration_active, 0) != 0))
+		)
+	)
+
+
 def _tagged(a, me: str):
 	ds = frappe.qb.DocType("DocShare").as_("ds")
 	return ExistsCriterion(
@@ -249,7 +267,7 @@ def _tagged(a, me: str):
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_approvals_page(
 	search: str = "",
@@ -284,6 +302,9 @@ def list_approvals_page(
 	# the customer decide board and its facet/badge counts. NULL-safe so legacy
 	# rows (source NULL = File Box) still show.
 	base = [a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE)]
+	legacy = _legacy_approval(a)
+	if legacy is not None:
+		base.append(legacy)
 	if _ar.sheet_ready():
 		base.append(IfNull(a.sheet, "") == "")  # answered in its File Box sheet
 	if not is_sm:
@@ -465,7 +486,7 @@ def _awaiting_reply(me: str) -> list[dict]:
 			"last_at": str(r.last_at or ""),
 		}
 		for r in rows
-		if not _shows_a_card(r.content)  # the chat shows its card, listed under open drafts
+		if not is_collaborative(r.conversation) and not _shows_a_card(r.content)
 	]
 
 
@@ -525,6 +546,8 @@ def _open_drafts(me: str) -> list[dict]:
 	)
 	out = []
 	for r in rows:
+		if is_collaborative(r.conversation):
+			continue
 		a = parse_action(r.content)
 		if not a:
 			continue  # a submit/email card, or one the chat can't draw either
@@ -545,7 +568,7 @@ def _open_drafts(me: str) -> list[dict]:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_approval(name: str) -> dict:
 	"""One approval with every field the detail page renders (DESIGN-V3 §8.3).
@@ -555,6 +578,9 @@ def get_approval(name: str) -> dict:
 	READ but gets ``can_act=0`` so the UI hides the decide controls. ``can_act``
 	mirrors what ``decide()`` would permit; the UI combines it with status."""
 	doc = frappe.get_doc(APPROVAL, name)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	can_act = _may_act_on(doc.conversation)
 	can_read = can_act
 	if doc.get("assessment_key"):
@@ -602,7 +628,7 @@ def get_approval(name: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def pending_count() -> int:
 	"""The board badge: Pending approval requests + held File Box writes and sealed
@@ -617,7 +643,7 @@ def pending_count() -> int:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def pending_badge() -> dict:
 	"""``{count, next_in}``: the badge, plus the seconds until the caller's next chat
@@ -643,6 +669,9 @@ def _ar_pending_count() -> int:
 	)
 	if _ar.sheet_ready():
 		query = query.where(IfNull(a.sheet, "") == "")
+	legacy = _legacy_approval(a)
+	if legacy is not None:
+		query = query.where(legacy)
 	if "System Manager" not in frappe.get_roles():
 		me = frappe.session.user
 		query = query.where(_owns_conversation(a, me) | _tagged(a, me))
@@ -707,6 +736,9 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	if not decision:
 		frappe.throw("Decision text is required")
 	doc = frappe.get_doc(APPROVAL, name)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.get("conversation"))
 	_refuse_if_wiki_write(doc)
 	if doc.get("assessment_key"):
 		from jarvis.chat.operator_review import check_review
@@ -810,6 +842,9 @@ def dismiss_approval(name: str) -> dict:
 	"""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	_refuse_if_wiki_write(doc)
 	if doc.get("assessment_key"):
 		from jarvis.chat.operator_review import check_review
@@ -849,6 +884,9 @@ def restore_approval(name: str) -> dict:
 	accidental dismiss."""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	_refuse_if_wiki_write(doc)
 	if doc.get("assessment_key"):
 		from jarvis.chat.operator_review import check_review
@@ -920,6 +958,9 @@ def _wiki_proposal_or_throw(name: str):
 	"""Load a proposal, reviewer-gated, asserting it really is a wiki-write row."""
 	require_skill_reviewer()
 	doc = frappe.get_doc(APPROVAL, name)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	if not _is_wiki_write(doc):
 		frappe.throw(f"{name} is not a wiki-write proposal", frappe.DoesNotExistError)
 	return doc
@@ -942,7 +983,7 @@ def _dropper_of(doc) -> str | None:
 	return doc.owner
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_wiki_write_proposals(
 	status: str = "Actionable", start: int = 0, page_length: int = 20, order: str = "newest"
@@ -1318,7 +1359,7 @@ def _for_user(owner: str, me: str) -> str:
 	return "" if owner == me else (frappe.db.get_value("User", owner, "full_name") or owner)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_pending_actions_lane() -> dict:
 	"""Pending actions awaiting a decision (or running), oldest first; ``{rows,
@@ -1557,7 +1598,7 @@ def _authorized_held(name, approver: str, kinds=(HELD,), *, acting: bool = True)
 	return row if authorize(row, approver, row.kind, acting=acting)[0] else None
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_pending_action(name: str, slim: int | str | None = None) -> dict:
 	"""One lane row for the board: ``{kind, card, summary, age, can_act,
@@ -1590,7 +1631,7 @@ def get_pending_action(name: str, slim: int | str | None = None) -> dict:
 	return _value_free(_held_detail, "detail_crashed", row, me)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_sheet_candidates(name: str, indexes: str | list | None = None) -> dict:
 	"""Existing records per create record of a sealed sheet, read as its dropper

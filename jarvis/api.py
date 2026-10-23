@@ -72,11 +72,19 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 			frappe.local.response.http_status_code = e.http_status
 			return _error(e.code, e.message)
 
-		plugin_user = frappe.db.get_value(
-			"Jarvis Chat Session",
-			{"session_key": session_key},
-			"user",
-		)
+		from jarvis.chat.collaboration import is_collaborative_session, legacy_session_user, resolve_binding
+
+		shared_session = is_collaborative_session(session_key)
+		if shared_session and tool in {"recall", "remember"}:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Private memory is unavailable in shared chats.")
+		try:
+			plugin_user = (
+				resolve_binding(session_key).actor if shared_session else legacy_session_user(session_key)
+			)
+		except frappe.PermissionError:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Collaborative chat execution is unavailable on this server.")
 		if not plugin_user:
 			frappe.local.response.http_status_code = 400
 			return _error(
@@ -155,6 +163,10 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 				"start a new chat to continue. Then stop.",
 			)
 
+		if shared_session:
+			from jarvis.chat.collaboration_dispatch import dispatch
+
+			return dispatch(session_key, tool, args, (_get_header("X-Jarvis-Tool-Call-Id") or "").strip())
 		return _dispatch_from_session(plugin_user, session_key, tool, args)
 
 	# Standard Frappe auth path - Guest is rejected; everything else dispatches
@@ -299,7 +311,10 @@ def _dispatch_from_session(
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
 	from jarvis.chat import agent_run_steps, connector_focus
+	from jarvis.chat.collaboration import require_legacy_session
 	from jarvis.tools import _agent_run_ctx, _delegate_capability
+
+	require_legacy_session(session_key)
 
 	# Expose the caller's session_key to the tool for this dispatch (the LLM
 	# never authors it — it is the delegate's opaque bearer, delivered over the
@@ -761,6 +776,15 @@ def persist_tool_receipt(
 	# session-safe (a bare frappe.set_user in this HTTP path would gut the
 	# caller's cookie session sid + data and log them out).
 	conv_owner = frappe.db.get_value("Jarvis Conversation", conv_name, "owner")
+	from jarvis.chat.collaboration_turn import current_turn
+
+	shared_turn = current_turn()
+	if shared_turn and shared_turn.binding.conversation == conv_name:
+		conv_owner = shared_turn.binding.actor
+		if tool_call_id:
+			from jarvis.chat.collaboration_tool_claims import receipt_id
+
+			tool_call_id = receipt_id(shared_turn.binding, shared_turn.run_id, tool_call_id)
 	with impersonate(conv_owner):
 		# R-6: take the conversation FOR UPDATE (canonical rank 2, out-of-band, NO
 		# epoch fence) so the seq allocation + the (conversation, tool_call_id)
@@ -914,6 +938,11 @@ def _insert_pending_row(
 		expires = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=remaining)
 	card = preview.get("card") if isinstance(preview, dict) else None
 	conv_owner = frappe.db.get_value("Jarvis Conversation", conv_name, "owner")
+	from jarvis.chat.collaboration_turn import current_turn
+
+	shared_turn = current_turn()
+	if shared_turn and shared_turn.binding.conversation == conv_name:
+		conv_owner = shared_turn.binding.actor
 	if not conv_owner:
 		# Not a real, hostable conversation (a synthetic/stray id, or a session-
 		# resolution artifact) - it cannot host a Jarvis Chat Message row. Treat it
@@ -985,11 +1014,36 @@ def _bind_callback_tool(conv_name: str, tool_call_id: str) -> None:
 	A Claude CLI turn sends no tool events, so this callback is the only place its tools
 	can be bound. Runs in its own transaction after the receipt's commit, so a failed
 	bind never costs the receipt; it only locks the reply row. Best-effort."""
+	from jarvis.chat.collaboration_turn import current_turn
 	from jarvis.chat.tool_ownership import bind_to_live_reply
+
+	context = current_turn()
+
+	def bind():
+		if context and context.binding.conversation == conv_name:
+			from jarvis.chat.tool_ownership import record_tool_owner
+
+			frappe.db.get_value("Jarvis Conversation", conv_name, "name", for_update=True)
+			row = frappe.db.get_value(
+				"Jarvis Chat Turn",
+				context.run_id,
+				["actor", "collaboration_binding", "conversation", "assistant_message"],
+				as_dict=True,
+				for_update=True,
+			)
+			if not row or (row.actor, row.collaboration_binding, row.conversation) != (
+				context.binding.actor,
+				context.binding.name,
+				conv_name,
+			):
+				raise frappe.PermissionError("The shared receipt identity changed.")
+			record_tool_owner(conv_name, row.assistant_message, tool_call_id)
+		else:
+			bind_to_live_reply(conv_name, tool_call_id)
 
 	try:
 		txn.replay_on_conflict(
-			lambda: bind_to_live_reply(conv_name, tool_call_id),
+			bind,
 			label=f"bind tool {conv_name}:{tool_call_id}",
 		)
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release the reply row lock now
@@ -1030,6 +1084,13 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 	if isinstance(notes, list) and notes:
 		item["notes"] = [str(n) for n in notes][:10]
 	MSG = "Jarvis Chat Message"
+	from jarvis.chat.collaboration_turn import current_turn
+
+	context = current_turn()
+	from jarvis.chat.collaboration_realtime import is_shared
+
+	if is_shared(conv_name) and (not context or context.binding.conversation != conv_name):
+		raise frappe.PermissionError("A shared file receipt requires its bound turn.")
 
 	def _write_canvas() -> tuple[str, list] | None:
 		"""Row-locked read-append-write, replayable: two file tools finishing together
@@ -1043,19 +1104,36 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 		already the first read of a clean transaction either way.
 		"""
 		# Prefer the in-flight (streaming) assistant message; fall back to the latest.
-		rows = frappe.get_all(
-			MSG,
-			filters={"conversation": conv_name, "role": "assistant", "streaming": 1},
-			order_by="seq desc",
-			limit=1,
-			pluck="name",
-		) or frappe.get_all(
-			MSG,
-			filters={"conversation": conv_name, "role": "assistant"},
-			order_by="seq desc",
-			limit=1,
-			pluck="name",
-		)
+		if context and context.binding.conversation == conv_name:
+			frappe.db.get_value("Jarvis Conversation", conv_name, "name", for_update=True)
+			turn = frappe.db.get_value(
+				"Jarvis Chat Turn",
+				context.run_id,
+				["actor", "collaboration_binding", "conversation", "assistant_message"],
+				as_dict=True,
+				for_update=True,
+			)
+			if not turn or (turn.actor, turn.collaboration_binding, turn.conversation) != (
+				context.binding.actor,
+				context.binding.name,
+				conv_name,
+			):
+				raise frappe.PermissionError("The shared file receipt identity changed.")
+			rows = [turn.assistant_message] if turn.assistant_message else []
+		else:
+			rows = frappe.get_all(
+				MSG,
+				filters={"conversation": conv_name, "role": "assistant", "streaming": 1},
+				order_by="seq desc",
+				limit=1,
+				pluck="name",
+			) or frappe.get_all(
+				MSG,
+				filters={"conversation": conv_name, "role": "assistant"},
+				order_by="seq desc",
+				limit=1,
+				pluck="name",
+			)
 		if not rows:
 			return None
 		msg_name = rows[0]
@@ -1079,10 +1157,11 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 	# publish twice, and a realtime event for a card the transaction later loses
 	# would be worse than none.
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
-	frappe.publish_realtime(
-		"jarvis:event",
+	from jarvis.chat.events import publish_to_user
+
+	publish_to_user(
+		user,
 		{"kind": "canvas", "conversation_id": conv_name, "message_id": msg_name, "items": items},
-		user=user,
 	)
 
 
@@ -1105,21 +1184,26 @@ def publish_realtime_tool_result(
 	transcript reload. ``tool_call_id`` is the id the row was saved with, so the
 	SPA can bind a live report to the reply it belongs to (the "Reports
 	consulted" card) the same way the saved rows do."""
-	frappe.publish_realtime(
-		"jarvis:event",
-		{
-			"kind": "tool:result",
-			"conversation_id": conversation_id,
-			"tool_message_id": tool_message_id,
-			"tool_call_id": tool_call_id,
-			"tool_name": tool_name,
-			"args": args,
-			"result": result,
-			"status": status,
-			"action_outcome": action_outcome,
-		},
-		user=user,
-	)
+	from jarvis.chat.collaboration_realtime import is_shared
+
+	payload = {
+		"kind": "tool:result",
+		"conversation_id": conversation_id,
+		"tool_message_id": tool_message_id,
+		"tool_call_id": tool_call_id,
+		"tool_name": tool_name,
+		"args": args,
+		"result": result,
+		"status": status,
+		"action_outcome": action_outcome,
+	}
+	if is_shared(conversation_id):
+		from jarvis.chat.events import publish_to_user
+
+		publish_to_user(user, payload)
+	else:
+		# Keep the existing private receipt publication seam and envelope.
+		frappe.publish_realtime("jarvis:event", payload, user=user)
 
 
 # P0d (decision 16): a batch key the model sends ALONGSIDE single-record args
@@ -1223,6 +1307,9 @@ _WRITE_TOOLS = frozenset(
 		"update_wiki",
 		# A one-time macro: work the user asked to run later, as them.
 		"schedule_run",
+		# Rewrites the user's durable memory, which every later chat reads. Audited, not
+		# gated; a File Box, agent or scheduled run is refused it (remember.py).
+		"remember",
 		# Audited but NOT gated (see _GATED_WRITES comment below):
 		# download_pdf/export_excel both insert a private, unattached File doc
 		# - real DB writes that need an audit trail, not a
@@ -1360,11 +1447,10 @@ FILE_BOX_WIKI_SOURCE = "File Box Wiki"
 _DESTRUCTIVE = frozenset(
 	{"delete_doc", "cancel_doc", "amend_doc", "send_email", "apply_workflow_action", "run_import"}
 )
-# Writes that auto-apply may fast-path without a confirmation click. Strictly
-# the reversible create/update pair, per spec. submit_doc, run_method and every
-# _DESTRUCTIVE tool ALWAYS park even with auto-apply on: run_method's
-# default-unrestricted allowlist under auto-apply + a prompt injection would be
-# an unconfirmed arbitrary whitelisted method call, so it never fast-paths.
+# The create/update pair: the only gated tools whose catalog badge reads "asks you
+# first". They ask in ordinary chat and run without a card in the uncarded modes
+# (auto mode, "confirm all", an armed macro, an approved skill run). Every other
+# gated tool's badge reads "always asks" (see ``_gating_badge``).
 _AUTO_APPLYABLE = frozenset({"create_doc", "update_doc"})
 
 
@@ -1377,11 +1463,17 @@ def _gating_badge(tool: str) -> str:
 	armed macro (skip_confirmation), an approved skill run (skill_autorun), and a
 	request-scoped "confirm all" (request_autorun), and a per-chat auto mode
 	(auto_mode, chosen with the chat's first message) can run some tools uncarded -
-	the catalog legend says so. (Admin Auto-Apply was removed.) Total over any string.
+	the catalog legend says so. submit_doc, send_email, run_import and run_method are
+	not among those for auto mode and "confirm all": they always ask there
+	(``_CARDED_IN_AUTO``). (Admin Auto-Apply was removed.) Total over any string.
 	"""
 	if tool not in _WRITE_TOOLS:
 		return "reads_only"
-	if tool in _DESTRUCTIVE or (tool in _GATED_WRITES and tool not in _AUTO_APPLYABLE):
+	if (
+		tool in _DESTRUCTIVE
+		or tool in _CARDED_IN_AUTO
+		or (tool in _GATED_WRITES and tool not in _AUTO_APPLYABLE)
+	):
 		return "always_asks"
 	if tool in _AUTO_APPLYABLE:
 		return "asks_to_approve"
@@ -1425,6 +1517,13 @@ _BRAKE = frozenset(
 # approved skill). Bulk covered writes skip too; the F16 over-size cap still bounces
 # an oversized batch.
 _COVERED = _GATED_WRITES - _BRAKE
+# Auto mode and a typed "confirm all" run the covered tools uncarded EXCEPT these four,
+# which always show their confirm card there, as the _BRAKE tools do: a submit posts and
+# locks a document, an email goes out, an import writes in bulk, and a run_method calls
+# any whitelisted method. An armed macro and an approved skill run are unchanged: they
+# use _COVERED, and run these four uncarded.
+_CARDED_IN_AUTO = frozenset({"submit_doc", "send_email", "run_import", "run_method"})
+_AUTO_COVERED = _COVERED - _CARDED_IN_AUTO
 # Back-compat aliases: the gate branches and the existing suites refer to the
 # per-mode names; both modes now point at the SAME unified sets so they cannot drift
 # (design §3 A4 - the old macro/skill divergence on create_custom_skill is gone).
@@ -3372,6 +3471,16 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	into one to match the reviewer's "native handler" pattern note
 	from the 2026-06-16 punch list.
 	"""
+	from jarvis.chat.collaboration import is_collaborative
+
+	shared_permit = None
+	if is_collaborative(conversation):
+		from jarvis.chat.collaboration_callbacks import permitted_callback
+
+		shared_permit = permitted_callback(conversation, tool)
+		if not shared_permit:
+			return _error("PermissionError", "Shared tool execution requires a current actor-bound callback.")
+
 	# S6: a tool body (e.g. run_method -> call_tool) must never re-enter the gate.
 	refuse_in_tool_dispatch()
 	# #493: "Enable Business Wiki" is the operator's only wiki kill switch, so it
@@ -3393,6 +3502,15 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		args = _parse_args(raw_args, tool)
 	except JarvisError as e:
 		return _error(type(e).__name__, str(e))
+	if shared_permit:
+		from jarvis.chat.collaboration_tools import tool_kind, validate_targets
+
+		try:
+			if tool_kind(tool) == "refused":
+				return _error("PermissionError", "This tool is unavailable in shared chats.")
+			validate_targets(tool, args)
+		except frappe.PermissionError:
+			return _error("PermissionError", "Private Jarvis context is unavailable in shared chats.")
 
 	# Write-risk guard (round 2, jarvis.tools._write_risk): ONE choke point, ahead of
 	# every route below (File Box, the uncarded modes, the park). A structure change
@@ -3452,7 +3570,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an
 	# unattended File Box run never reaches the preview / park / auto-apply paths
 	# below with a write the policy did not decide. None = not its call.
-	if conversation and is_write:
+	if conversation and is_write and not shared_permit:
 		from jarvis.chat import held_writes
 
 		verdict = held_writes.apply(tool, args, conversation)
@@ -3465,14 +3583,14 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# An armed macro's run follows only skills its owner controls: judged here, on the
 	# row this fetch serves, before its body goes back (``macros.check_a_fetched_skill``).
 	skill_note = ""
-	if conversation and tool == "get_skill":
+	if conversation and tool == "get_skill" and not shared_permit:
 		from jarvis.chat import macros
 
 		skill_note = macros.check_a_fetched_skill(
 			conversation, args.get("skill_name") if isinstance(args, dict) else None
 		)
 	# File Box skill routing: only an eligible skill loads (and is recorded).
-	if conversation and tool == "get_skill":
+	if conversation and tool == "get_skill" and not shared_permit:
 		from jarvis.chat import filebox_skills
 
 		verdict = filebox_skills.gate_get_skill(args, conversation)
@@ -3536,7 +3654,11 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# _SKILL_AUTORUN_NEVER unchanged (writes still park; the partition invariants
 	# hold); only a proven safe read is exempted here.
 	_connector_safe_read = tool == "call_connector" and _connector_call_is_safe_read(args)
-	if (tool in _GATED_WRITES or (is_write and _is_bulk_call(args))) and not _connector_safe_read:
+	if (
+		tool in _GATED_WRITES
+		or (is_write and _is_bulk_call(args))
+		or (shared_permit and tool_kind(tool) == "write")
+	) and not _connector_safe_read:
 		from jarvis.chat import events, pending_confirm
 		from jarvis.tools._bulk import _MAX_BATCH
 
@@ -3576,7 +3698,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						["skill_autorun", "request_autorun", *_auto_mode_fields()],
 						as_dict=True,
 					)
-					if conversation
+					if conversation and not shared_permit
 					else None
 				) or {}
 				if (
@@ -3606,7 +3728,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# tracked on this path, so the token carries "" and the sibling-run filter
 		# in pending_confirm.clear_for_conversation no-ops.
 		conv = conversation or ""
-		run_id = ""
+		run_id = shared_permit.turn.run_id if shared_permit else ""
 		# Two identities (issue #186, #1/#5/#6):
 		#   owner_user = the CONVERSATION OWNER - the human who sees the card,
 		#     clicks Confirm, and whose browser is subscribed. Deliver + bind +
@@ -3621,6 +3743,8 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		owner_user = (
 			frappe.db.get_value("Jarvis Conversation", conv, "owner") if conv else None
 		) or exec_user
+		if shared_permit:
+			owner_user = exec_user = shared_permit.turn.binding.actor
 		# One flags read shared by the skip-the-card bypasses below (all key off the
 		# conversation row). An empty/unresolved conv -> {} -> every flag OFF (the
 		# safe default: the write parks). skill_autorun + skill_autorun_at +
@@ -3646,7 +3770,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				],
 				as_dict=True,
 			)
-			if conv
+			if conv and not shared_permit
 			else None
 		) or {}
 		# File Box direct-apply (a draft of a submittable doctype) and the held
@@ -3823,15 +3947,16 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			except Exception:
 				pass  # the park below is the safe outcome either way
 		# Request-scoped "confirm all" (design Layer B): the user approved this whole
-		# request's fan-out at once, so a COVERED write (_GATED_WRITES - _BRAKE) runs
-		# uncarded while the request is live - armed by _typed_confirmation / the upfront
-		# detector, sliding request_autorun_at within the TTL. The brake is NOT covered,
-		# so delete/cancel/amend/create_custom_skill/connector still park (the brake
-		# protects what the user has not seen). Placed AFTER the skill-autorun branch (an
+		# request's fan-out at once, so a write in _AUTO_COVERED (_COVERED less the four
+		# _CARDED_IN_AUTO tools) runs uncarded while the request is live - armed by
+		# _typed_confirmation / the upfront detector, sliding request_autorun_at within
+		# the TTL. The brake is NOT covered, so delete/cancel/amend/create_custom_skill/
+		# connector still park (the brake protects what the user has not seen); so do
+		# submit_doc, send_email, run_import and run_method. Placed AFTER the skill-autorun branch (an
 		# approved skill run keeps its own provenance) and AFTER the File Box wiki fence.
 		# Bulk covered writes skip too (one approval covers the batch); the F16 over-size
 		# cap above still bounces an oversized batch.
-		if tool in _COVERED and not _must_card and _conv_flags.get("request_autorun"):
+		if tool in _AUTO_COVERED and not _must_card and _conv_flags.get("request_autorun"):
 			from jarvis.chat import turn_message_binding
 
 			# Cancel-gate FIRST (Halt): stop_run sets a transport-independent run-cancel
@@ -3876,11 +4001,12 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# Per-chat auto mode (#581): the user chose it with the chat's first message and
 		# it never turns off, so unlike request_autorun there is no TTL and a failed
 		# write does not end it. The brake is not covered, so delete/cancel/amend/
-		# create_custom_skill/connector writes still park below. Placed AFTER the
+		# create_custom_skill/connector writes still park below, and so do the four
+		# _CARDED_IN_AUTO tools (submit_doc, send_email, run_import, run_method). Placed AFTER the
 		# request branch (an armed request keeps its own provenance and TTL) and after
 		# the File Box wiki fence. Halt refuses the write and clears the cancel signal
 		# but leaves the mode on (it is a chat property, not a run).
-		if tool in _COVERED and not _must_card and _conv_flags.get("auto_mode"):
+		if tool in _AUTO_COVERED and not _must_card and _conv_flags.get("auto_mode"):
 			from jarvis.chat import turn_message_binding
 
 			if turn_message_binding.is_run_cancel_requested(conv):
@@ -3993,7 +4119,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# Never on a structure card: confirming it must not also open an approved run.
 		skill_docname, skill_slug = (
 			_resolve_approve_run_offer(conv)
-			if tool in _SKILL_AUTORUN_COVERED and not _guarded
+			if tool in _SKILL_AUTORUN_COVERED and not _guarded and not shared_permit
 			else (None, None)
 		)
 		if isinstance(preview, dict):

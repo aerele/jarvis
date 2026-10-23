@@ -176,7 +176,7 @@ def _after_change(
 	frappe.db.after_commit.add(committed)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def share_candidates(query: str = "") -> list[dict]:
 	require_jarvis_access()
 	query = (query or "").strip()[:140]
@@ -197,7 +197,7 @@ def share_candidates(query: str = "") -> list[dict]:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_shares(conversation: str) -> dict:
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
@@ -350,7 +350,7 @@ def _mark_seen(name: str, latest) -> None:
 		frappe.db.set_value(SHARE, name, "seen_marker", latest, update_modified=False)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_shared_with_me() -> list[dict]:
 	require_jarvis_access()
 	if not sharing_enabled() or not _enabled_user(frappe.session.user):
@@ -381,7 +381,7 @@ def list_shared_with_me() -> list[dict]:
 	return [project_index_row(row) for row in rows]
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def is_shared_with_me(conversation: str) -> bool:
 	require_jarvis_access()
 	return _visible_share(conversation)[2] is None
@@ -416,6 +416,15 @@ def _read_shared_conversation(conversation, limit, before, after, refresh) -> di
 		doc, limit=max(1, min(200, cint(limit))), before=cint(before), after=cint(after), refresh=refresh
 	)
 	result = project_conversation(body, doc)
+	from jarvis.chat import collaboration
+
+	# Old clients keep their inert projection. New clients discover the
+	# separately authorized common reader, including after the rollout pauses.
+	if collaboration.writes_ready() or collaboration.is_collaborative(conversation):
+		result["conversation"].update(
+			collaboration_available=collaboration.writes_ready(),
+			collaboration_active=collaboration.is_collaborative(conversation),
+		)
 	_mark_seen(share.name, latest)
 	return result
 
@@ -428,7 +437,7 @@ def _shared_message(message: str):
 	return doc
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_shared_tool_detail(message: str) -> dict:
 	require_jarvis_access()
 	doc = _shared_message(message)
@@ -441,7 +450,7 @@ def get_shared_tool_detail(message: str) -> dict:
 	return project_row(row, doc.name)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_shared_canvas(message: str, name: str, dark: int = 0) -> dict:
 	require_jarvis_access()
 	doc = _shared_message(message)
@@ -459,7 +468,7 @@ def get_shared_canvas(message: str, name: str, dark: int = 0) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET"])
 def get_shared_file(conversation: str, file_url: str) -> None:
 	require_jarvis_access()
 	doc, _share = _require_share(conversation)
@@ -468,7 +477,7 @@ def get_shared_file(conversation: str, file_url: str) -> None:
 	download(read_file(doc, file_url))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_sharing_setting() -> dict:
 	require_jarvis_access()
 	require_jarvis_admin()
@@ -486,8 +495,8 @@ def set_sharing_setting(enabled: bool) -> dict:
 	return {"enabled": new}
 
 
-@frappe.whitelist()
-def list_all_shares(start: int = 0, page_length: int = 50, search: str = "") -> dict:
+@frappe.whitelist(methods=["POST"])
+def list_all_shares(start: int = 0, page_length: int = 50, search: str = "", include_modes: int = 0) -> dict:
 	require_jarvis_access()
 	require_jarvis_admin()
 	start, page_length = max(0, cint(start)), max(1, min(200, cint(page_length)))
@@ -497,14 +506,18 @@ def list_all_shares(start: int = 0, page_length: int = 50, search: str = "") -> 
 		JOIN `tabUser` o ON o.name=s.shared_by JOIN `tabUser` u ON u.name=s.user
 		WHERE (o.name LIKE %(search)s OR o.full_name LIKE %(search)s
 		 OR u.name LIKE %(search)s OR u.full_name LIKE %(search)s)"""
+	mode_column = "s.access_mode" if frappe.db.has_column(SHARE, "access_mode") else "'View'"
+	mode_select = f", {mode_column} AS access_mode" if cint(include_modes) else ""
 	rows = frappe.db.sql(
-		"SELECT s.name, s.conversation, s.user, s.creation AS shared_on, c.title AS conversation_title, o.full_name AS owner_name, u.full_name AS recipient_name "
+		f"SELECT s.name, s.conversation, s.user, s.creation AS shared_on, c.title AS conversation_title, o.full_name AS owner_name, u.full_name AS recipient_name{mode_select} "
 		+ where
 		+ " ORDER BY s.creation DESC, s.name LIMIT %(length)s OFFSET %(start)s",
 		params,
 		as_dict=True,
 	)
 	for row in rows:
+		if cint(include_modes):
+			row["access_mode"] = "Chat" if row.get("access_mode") == "Chat" else "View"
 		doc = frappe.get_doc(CONVERSATION, row.pop("conversation"))
 		row["hidden"] = bool(_hidden_reason(doc, row.pop("user")))
 	return {"rows": rows, "total": frappe.db.sql("SELECT COUNT(*) " + where, params)[0][0]}

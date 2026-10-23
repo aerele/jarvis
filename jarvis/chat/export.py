@@ -490,6 +490,9 @@ def download_conversation(conversation: str, format: str) -> None:
 	try:
 		require_jarvis_access()
 		doc = _get_owned_conversation(conversation)
+		from jarvis.chat.collaboration import require_legacy_conversation
+
+		require_legacy_conversation(conversation)
 		if format not in {"pdf", "md"}:
 			frappe.throw(_("Unknown format"), frappe.ValidationError)
 		with ExitStack() as locks:

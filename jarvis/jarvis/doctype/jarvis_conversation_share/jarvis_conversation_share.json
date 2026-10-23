@@ -5,12 +5,62 @@
  "creation": "2026-10-19 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
- "field_order": ["conversation", "user", "shared_by", "seen_marker"],
+ "field_order": [
+  "conversation",
+  "user",
+  "shared_by",
+  "seen_marker",
+  "access_mode",
+  "access_revision"
+ ],
  "fields": [
-  {"fieldname": "conversation", "fieldtype": "Link", "label": "Conversation", "options": "Jarvis Conversation", "reqd": 1, "search_index": 1},
-  {"fieldname": "user", "fieldtype": "Link", "label": "Recipient", "options": "User", "reqd": 1, "search_index": 1},
-  {"fieldname": "shared_by", "fieldtype": "Link", "label": "Shared By", "options": "User", "reqd": 1, "search_index": 1},
-  {"fieldname": "seen_marker", "fieldtype": "Datetime", "label": "Seen Marker", "read_only": 1}
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "options": "Jarvis Conversation",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "label": "Recipient",
+   "options": "User",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "shared_by",
+   "fieldtype": "Link",
+   "label": "Shared By",
+   "options": "User",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "seen_marker",
+   "fieldtype": "Datetime",
+   "label": "Seen Marker",
+   "read_only": 1
+  },
+  {
+   "fieldname": "access_mode",
+   "fieldtype": "Select",
+   "label": "Access Mode",
+   "read_only": 1,
+   "no_copy": 1,
+   "options": "View\nChat",
+   "default": "View"
+  },
+  {
+   "fieldname": "access_revision",
+   "fieldtype": "Int",
+   "label": "Access Revision",
+   "read_only": 1,
+   "no_copy": 1,
+   "default": "1"
+  }
  ],
  "index_web_pages_for_search": 0,
  "links": [],

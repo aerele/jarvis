@@ -336,8 +336,9 @@ def _tool_message_aggregates(
 	Tool names come from the STRUCTURED ``tool_name`` field on role=tool rows
 	(read at the insert site - ``jarvis.chat.pump._insert_tool_start_row`` -
 	not parsed from the content prefix; a distinct field already carries the
-	name). Attribution is via each message's conversation OWNER - Jarvis Chat
-	Message carries no direct user field, and the brief pins this route. A
+	name). Collaborative rows use their immutable actor. Genuinely legacy
+	rows retain conversation-owner attribution. A bound row missing its actor
+	is excluded instead of falling back to another participant's identity. A
 	message whose conversation has no resolvable owner (INNER JOIN miss) is
 	excluded from all three results, same as a message with no owner was
 	already excluded from the per-user results before this change."""
@@ -346,13 +347,15 @@ def _tool_message_aggregates(
 	tenant_counts: dict[str, int] = {}
 	for r in frappe.db.sql(
 		"""
-		SELECT c.owner AS user, m.tool_name AS tool, COUNT(*) AS cnt
+		SELECT CASE WHEN COALESCE(m.collaboration_binding,'')<>''
+		  THEN NULLIF(m.actor,'') ELSE c.owner END AS user,
+		  m.tool_name AS tool, COUNT(*) AS cnt
 		FROM `tabJarvis Chat Message` m
 		INNER JOIN `tabJarvis Conversation` c ON c.name = m.conversation
 		WHERE m.role = 'tool' AND m.tool_name IS NOT NULL AND m.tool_name != ''
 		  AND m.creation >= %(start)s AND m.creation < %(next_month)s
-		GROUP BY c.owner, m.tool_name
-		ORDER BY c.owner, cnt DESC, m.tool_name ASC
+		GROUP BY user, m.tool_name
+		ORDER BY user, cnt DESC, m.tool_name ASC
 		""",
 		{"start": start, "next_month": next_month},
 		as_dict=True,
