@@ -160,15 +160,34 @@ class TestNoDocPerm(PendingActionTestMixin, FrappeTestCase):
 		with as_user(SM_USER):
 			self.assertFalse(frappe.has_permission(PA, "read", doc=name))
 			self.assertFalse(frappe.has_permission(WAITER, "read"))
-			with self.assertRaises(frappe.PermissionError):
-				frappe.get_list(PA, fields=["name", "sealed_call"])
+			# Frappe 16.53+ gives a new DocType without permissions a System Manager row,
+			# so a list may come back empty (the query hook's 1=0) instead of raising.
+			self.assertEqual(
+				self._rows_or_refused(lambda: frappe.get_list(PA, fields=["name", "sealed_call"])), []
+			)
 			with self.assertRaises(frappe.PermissionError):
 				frappe.client.get(PA, name)
-			with self.assertRaises((PermissionDeniedError, frappe.PermissionError)):
-				query({"from": PA, "select": ["name", "sealed_call", "open_key"], "limit": 5})
+			self.assertEqual(
+				self._rows_or_refused(
+					lambda: query({"from": PA, "select": ["name", "sealed_call", "open_key"], "limit": 5})[
+						"rows"
+					]
+				),
+				[],
+			)
 			with self.assertRaises((PermissionDeniedError, frappe.PermissionError)):
 				assign_to(PA, name, user=SM_USER)
 		self.assertEqual(frappe.db.count("ToDo", {"reference_type": PA}), 0)
+
+	@staticmethod
+	def _rows_or_refused(call) -> list:
+		"""The rows ``call`` returns, or [] when it is refused outright."""
+		from jarvis.exceptions import PermissionDeniedError
+
+		try:
+			return list(call())
+		except (PermissionDeniedError, frappe.PermissionError):
+			return []
 
 	def test_permission_hooks_deny_everything(self):
 		for doctype in (PA, WAITER):

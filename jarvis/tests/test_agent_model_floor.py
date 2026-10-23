@@ -631,15 +631,18 @@ class TestPushKeys(AgentModelDBBase):
 
 
 class TestApiGates(AgentModelDBBase):
-	def test_doctype_has_no_docperm_so_rest_cannot_touch_it(self):
-		self.assertEqual(frappe.get_all("DocPerm", filters={"parent": CHOICE}), [])
+	def test_only_system_manager_may_hold_a_docperm_so_others_cannot_touch_it(self):
+		# Frappe 16.53+ gives a new DocType without permissions a System Manager row;
+		# System Manager access is accepted, no other role may hold one.
+		roles = set(frappe.get_all("DocPerm", filters={"parent": CHOICE}, pluck="role"))
+		self.assertLessEqual(roles, {"System Manager"})
 		_choice(AGENT, state="legacy")
-		for user in (OWNER, ADMIN):
+		for user in (OWNER, STRANGER):
 			self.assertFalse(frappe.has_permission(CHOICE, "read", user=user))
 			self.assertFalse(frappe.has_permission(CHOICE, "write", user=user))
-		with _as(ADMIN), self.assertRaises(frappe.PermissionError):
+		with _as(OWNER), self.assertRaises(frappe.PermissionError):
 			frappe.client.get_list(CHOICE)
-		with _as(ADMIN), self.assertRaises(frappe.PermissionError):
+		with _as(OWNER), self.assertRaises(frappe.PermissionError):
 			frappe.client.set_value(CHOICE, AGENT, "model", "gpt-raw")
 
 	def test_user_not_allowed_for_the_agent_is_refused(self):
