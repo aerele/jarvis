@@ -54,6 +54,7 @@ from jarvis.permissions import (
 QUESTION = "Jarvis Personalise Question"
 RULE = "Jarvis Personalise Question Rule"
 NOTE = "Jarvis Voice Note"
+CONVERSATION = "Jarvis Conversation"
 WIKI = "Jarvis Wiki Page"
 SETTINGS = "Jarvis Settings"
 
@@ -502,16 +503,52 @@ def _derive_kind(url: str, attachment: str, duration_s: int) -> str:
 
 
 def _validate_and_resolve_attachment(file_url: str) -> str:
-	"""Resolve + object-level-authorize an uploaded ``file_url`` (the
-	``filebox.drop_file`` idiom): the caller must not be able to hand back
-	someone else's private file_url and have its contents land in their own
-	note. Returns the File doc's name."""
-	fdoc = frappe.db.get_value("File", {"file_url": file_url}, "name")
-	if not fdoc:
+	"""Resolve + object-level-authorize an uploaded ``file_url``: only the
+	caller's own files qualify, so nobody can hand back someone else's file_url
+	and have its contents land in their own note. A File qualifies when it is the
+	caller's own upload attached to no record, or is attached to one of the
+	caller's own Jarvis chats. Several File rows can share a ``file_url`` (an
+	identical re-upload, a copy attached elsewhere), so every row is considered
+	and a qualifying one is returned (a bare own upload first, so the caller's
+	upload is the one the note takes). Returns the File doc's name."""
+	me = frappe.session.user
+	# Not permission-filtered on purpose (frappe.qb): the ownership rule below is
+	# the gate, so an unreadable foreign row must surface as "Not permitted", not
+	# as "unknown".
+	file = frappe.qb.DocType("File")
+	conv = frappe.qb.DocType(CONVERSATION)
+	note = frappe.qb.DocType(NOTE)
+	rows = (
+		frappe.qb.from_(file)
+		.left_join(conv)
+		.on((file.attached_to_doctype == CONVERSATION) & (file.attached_to_name == conv.name))
+		.left_join(note)
+		.on((file.attached_to_doctype == NOTE) & (file.attached_to_name == note.name))
+		.select(
+			file.name,
+			file.owner,
+			file.attached_to_doctype,
+			file.attached_to_name,
+			conv.owner.as_("conv_owner"),
+			note.owner.as_("note_owner"),
+		)
+		.where(file.file_url == file_url)
+		.orderby(file.creation, order=frappe.qb.desc)
+		.limit(50)
+	).run(as_dict=True)
+	if not rows:
 		frappe.throw(_("Unknown attachment - upload it first."))
-	if not frappe.has_permission("File", "read", doc=fdoc):
-		frappe.throw(_("Not permitted."), frappe.PermissionError)
-	return fdoc
+	record_row = None
+	for row in rows:
+		if not row.attached_to_doctype and not row.attached_to_name:
+			if row.owner == me:
+				return row.name
+		elif record_row is None and me in (row.conv_owner, row.note_owner):
+			# Attached to the caller's own chat or own earlier note.
+			record_row = row.name
+	if record_row:
+		return record_row
+	frappe.throw(_("Not permitted."), frappe.PermissionError)
 
 
 def _extract_attachment_text(file_name: str | None) -> str:
@@ -645,15 +682,25 @@ def _create_note(
 	doc.insert(ignore_permissions=True)
 
 	if fdoc_name:
-		# Durable reparent (filebox.drop_file's idiom): the file now belongs
-		# to this note, not a bare upload with no owning record.
+		# Durable reparent (filebox.drop_file's idiom), for the caller's own BARE
+		# upload only. A File already attached to a record is never moved: the
+		# note just references its file_url (extraction and display read by url).
 		try:
-			frappe.db.set_value(
-				"File",
-				fdoc_name,
-				{"attached_to_doctype": NOTE, "attached_to_name": doc.name},
-				update_modified=False,
+			row = frappe.db.get_value(
+				"File", fdoc_name, ["owner", "attached_to_doctype", "attached_to_name"], as_dict=True
 			)
+			if (
+				row
+				and row.owner == frappe.session.user
+				and not row.attached_to_doctype
+				and not row.attached_to_name
+			):
+				frappe.db.set_value(
+					"File",
+					fdoc_name,
+					{"attached_to_doctype": NOTE, "attached_to_name": doc.name},
+					update_modified=False,
+				)
 		except Exception:
 			pass
 
