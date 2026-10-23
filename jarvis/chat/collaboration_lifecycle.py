@@ -206,7 +206,8 @@ def sweep(limit=25):
 	days = session_lifecycle._retention_days()
 	if not days or not c.schema_ready() or not txn.owns_transaction():
 		return {"retired": 0}
-	rows = frappe.db.sql(
+	# Only the fixed binding DocType is formatted; cutoff and limit stay bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT name, conversation FROM `tab{c.BINDING}`
 		WHERE state='Active' AND creation < %(cut)s
 		ORDER BY COALESCE(cleanup_checked_at,'1970-01-01'), creation, name LIMIT %(limit)s""",
@@ -220,7 +221,8 @@ def sweep(limit=25):
 		frappe.db.set_value(
 			c.BINDING, row.name, "cleanup_checked_at", frappe.utils.now_datetime(), update_modified=False
 		)
-		frappe.db.commit()
+		# Persist sweep rotation even if this binding cannot yet be retired.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		try:
 
 			def unit():
@@ -257,7 +259,8 @@ def reclaim_runtime(name, sess):
 	# the final CAS still requires that same retired key and physical UUID.
 	if frappe.db.transaction_writes:
 		raise RuntimeError("Native cleanup requires a clean transaction.")
-	frappe.db.commit()
+	# Release the read-only retirement snapshot before native cleanup RPCs.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	result = sess._request(
 		"sessions.list",
 		{
@@ -299,7 +302,8 @@ def reclaim_runtime(name, sess):
 		payload = result.get("payload") or result
 		if "session" not in payload or payload["session"] is not None:
 			return False
-	frappe.db.sql(
+	# Only the fixed binding DocType is formatted; identity and time stay bound.
+	frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""UPDATE `tab{c.BINDING}` SET runtime_retired_at=%(now)s
 		WHERE name=%(name)s AND state='Retired' AND session_key=%(key)s
 		AND COALESCE(runtime_session_id,'')=%(physical)s AND runtime_retired_at IS NULL""",
@@ -310,7 +314,8 @@ def reclaim_runtime(name, sess):
 			"now": frappe.utils.now_datetime(),
 		},
 	)
-	frappe.db.commit()
+	# Persist the exact retired-runtime CAS after native deletion is confirmed.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	return True
 
 
@@ -339,7 +344,8 @@ def _remember_unsent_runtime(hint, physical_id):
 		frappe.db.rollback()
 		return False
 	frappe.db.set_value(c.BINDING, hint.name, "runtime_session_id", physical_id, update_modified=False)
-	frappe.db.commit()
+	# Persist the unsent physical UUID before deletion can lose its acknowledgement.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	return True
 
 
@@ -347,7 +353,8 @@ def reclaim_sessions(limit=25):
 	"""Bounded gateway cleanup; immutable binding evidence remains on the bench."""
 	if not c.schema_ready() or not txn.owns_transaction():
 		return {"reclaimed": 0}
-	rows = frappe.db.sql(
+	# Only the fixed binding DocType is formatted; the bounded limit stays bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT name FROM `tab{c.BINDING}` WHERE state='Retired'
 		AND runtime_retired_at IS NULL
 		ORDER BY COALESCE(cleanup_checked_at,'1970-01-01'), creation, name LIMIT %(limit)s""",
@@ -359,7 +366,8 @@ def reclaim_sessions(limit=25):
 	from jarvis.chat.agent_client import AgentSession
 
 	url = frappe.get_cached_doc("Jarvis Settings").agent_url
-	frappe.db.commit()
+	# End the cleanup batch snapshot before connecting to the gateway.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	count, deadline = 0, time.monotonic() + 30
 	sess = None
 	try:
@@ -370,7 +378,8 @@ def reclaim_sessions(limit=25):
 			frappe.db.set_value(
 				c.BINDING, row.name, "cleanup_checked_at", frappe.utils.now_datetime(), update_modified=False
 			)
-			frappe.db.commit()
+			# Persist cleanup rotation before a slow or failed native deletion attempt.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 			try:
 				count += int(reclaim_runtime(row.name, sess))
 			except Exception as exc:

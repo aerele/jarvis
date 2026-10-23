@@ -27,7 +27,8 @@ def _cards(ctx):
 			new = scrub_for_share(enrich_text(content, owner=binding.actor))
 			if new != content:
 				frappe.db.set_value(ts.MSG, am, "content", new, update_modified=False)
-		frappe.db.commit()
+		# Persist enrichment as its own replayable settlement effect.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 	try:
 		txn.replay_on_conflict(unit, label="collaboration.enrich", fresh=True)
@@ -54,7 +55,8 @@ def _terminal(ctx):
 		extra["stopped"] = True
 	else:
 		extra.update(enrichment_pending=True, was_recovered=bool(row.was_recovered))
-	frappe.db.commit()
+	# End the terminal-read transaction before publishing the fenced event.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	ts.publish_fenced(
 		ctx.shared_binding.actor,
 		kind,

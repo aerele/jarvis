@@ -1127,7 +1127,8 @@ def _pick_next(target: str, cap: int, promoted_convs: set[str]) -> dict | None:
 		"t.collaboration_binding" if frappe.db.has_column(TURN, "collaboration_binding") else "NULL"
 	)
 
-	rows = frappe.db.sql(
+	# Only fixed schema columns and closed executor predicates are formatted; target stays bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""
 		SELECT t.run_id, t.conversation, t.seed_message, t.turn_class, t.dispatch_payload, t.version,
 		       {binding_column} AS collaboration_binding
@@ -2051,7 +2052,8 @@ def _sweep_reconcile(targets: set[str]) -> int:
 	streaming placeholder (worker provably dead - reservation past the 900s TTL,
 	well beyond the 720s worker cap) is closed errored so a post-deploy batch of
 	orphans frees its shard credits instead of pinning them for extra cycles."""
-	rows = frappe.db.sql(
+	# legacy_clause accepts only a closed alias set and returns fixed schema predicates.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""
 		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message,
 		       t.reservation_expires_at
@@ -2124,7 +2126,8 @@ def _sweep_reservations(targets: set[str]) -> int:
 	OARI-6: a stopped turn (``cancel_requested``) whose worker died before making
 	a placeholder is CANCELLED (terminal), never re-dispatched - a turn the user
 	explicitly stopped must not run again."""
-	rows = frappe.db.sql(
+	# Only the closed legacy schema predicate is formatted; the cutoff stays bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""
 		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message,
 		       t.cancel_requested

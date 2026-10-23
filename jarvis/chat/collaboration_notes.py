@@ -111,6 +111,7 @@ def clear_after_ack(binding, run_id: str, ids):
 		):
 			c._deny()
 		_store(binding, [entry for entry in entries if entry["id"] not in set(ids)])
-		frappe.db.commit()
+		# Persist the acknowledged note IDs as one replayable actor-bound unit.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 	return txn.replay_on_conflict(clear, label="collaboration.notes_ack", fresh=True)

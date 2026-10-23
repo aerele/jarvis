@@ -44,7 +44,8 @@ def retry(conversation, run_id):
 			):
 				c._deny()
 			if row.state in {"queued", "preparing", "ready", "dispatching", "streaming"}:
-				frappe.db.commit()
+				# Release retry locks for an already-live duplicate without dispatching again.
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit
 				return {"ok": True, "duplicate": True, "run_id": run_id, "state": row.state}
 			if row.state not in {"cancelled", "errored"} or row.collaboration_send_started_at:
 				frappe.throw(
@@ -138,7 +139,8 @@ def retry(conversation, run_id):
 			if not won:
 				frappe.db.rollback()
 				return {"ok": False, "reason": "This request changed. Reload the chat before retrying."}
-			frappe.db.commit()
+			# Persist the guarded retry requeue before waking its transport.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 			return {"ok": True, "run_id": run_id, "state": "queued", "message_id": row.seed_message}
 		except Exception:
 			frappe.db.rollback()

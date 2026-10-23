@@ -89,7 +89,8 @@ def materialize(run_id: str):
 		key = _key(binding, run_id)
 		existing = frappe.db.get_value(APPROVAL, {"collaboration_question_key": key}, "name", for_update=True)
 		if existing:
-			frappe.db.commit()
+			# Release the locked duplicate question before returning its durable identity.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 			return existing
 		options = questions[0]["options"] if len(questions) == 1 else []
 		if len(options) > _BOARD_MAX_CHIPS:
@@ -114,7 +115,8 @@ def materialize(run_id: str):
 		doc.flags.jarvis_collaboration_write = True
 		with impersonate(binding.actor):
 			doc.insert(ignore_permissions=True)
-		frappe.db.commit()
+		# Persist the actor-bound question before this replayable job unit returns.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return doc.name
 
 	try:
@@ -169,7 +171,8 @@ def answer(conversation: str, name: str, decision: str):
 		frappe.throw("This question has already been answered. Reload the shared chat.")
 	# Admission must acquire Shard before Conversation. Its adapter rechecks
 	# this grant under those locks; do not carry this read-only preflight into it.
-	frappe.db.commit()
+	# End the preflight snapshot before admission takes Shard then Conversation locks.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	from jarvis.chat import policy
 
 	ok, reason = policy.validate_can_send(actor)
@@ -232,7 +235,8 @@ def answer(conversation: str, name: str, decision: str):
 def resolve_on_user_message(conversation: str, actor: str):
 	"""Server-only admission hook. Another actor's ordinary message answers none."""
 	frappe.db.get_value(c.CONVERSATION, conversation, "name", for_update=True)
-	frappe.db.sql(
+	# APPROVAL is a fixed internal DocType; actor, conversation and time stay bound.
+	frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""UPDATE `tab{APPROVAL}` SET status='Answered', decision='(answered in chat)',
 		decided_by=%(actor)s, decided_at=%(now)s
 		WHERE conversation=%(conversation)s AND actor=%(actor)s AND status='Pending'

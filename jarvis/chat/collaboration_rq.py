@@ -80,7 +80,8 @@ def _claim(binding, run_id, seed, target):
 		if not won:
 			frappe.db.rollback()
 			return None
-		frappe.db.commit()
+		# Persist the exclusive RQ preparation claim and reply before native preparation.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return SimpleNamespace(version=int(row.version) + 1, reply=reply.name, prepared_at=prepared_at)
 	finally:
 		ts.reset_lock_tracking()
@@ -113,7 +114,8 @@ def _claim_send(binding, run_id, target, claim, payload):
 		if not won:
 			frappe.db.rollback()
 			return False
-		frappe.db.commit()
+		# Persist the one-shot send marker before gateway I/O can have an unknown outcome.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return True
 	finally:
 		ts.reset_lock_tracking()
@@ -147,7 +149,8 @@ def _finish_unsent(binding, run_id, claim, *, retry_allowed=False):
 		)
 		if won and row.assistant_message:
 			frappe.db.set_value(ts.MSG, row.assistant_message, {"streaming": 0, "stopped": 1})
-		frappe.db.commit()
+		# Persist the confirmed-unsent finish before releasing the queue slot.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return row.relay_target_id if won else None
 
 	target = txn.replay_on_conflict(unit, label="collaboration.rq.unsent", fresh=True)
@@ -197,7 +200,8 @@ def _finish_rejected(binding, run_id, claim):
 					"error": "The gateway refused this shared request. Your message is kept.",
 				},
 			)
-		frappe.db.commit()
+		# Persist the definite gateway rejection before waking queued work.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return row.relay_target_id if won else None
 
 	result = txn.replay_on_conflict(unit, label="collaboration.rq.rejected", fresh=True)
@@ -229,7 +233,8 @@ def _park(binding, run_id, reply):
 		won = ts.mark_recovering(run_id, int(row.version), epoch=0)
 		if won and valid_reply:
 			frappe.db.set_value(ts.MSG, reply, "recovering", 1, update_modified=False)
-		frappe.db.commit()
+		# Persist unknown-send recovery state before this worker exits.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return won
 
 	return txn.replay_on_conflict(unit, label="collaboration.rq.park", fresh=True)
@@ -248,7 +253,8 @@ def _advance(binding, run_id, reply, states, mutation):
 		if not mutation(row):
 			frappe.db.rollback()
 			return None
-		frappe.db.commit()
+		# Persist this fenced event transition before waiting for another gateway event.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return int(row.version) + 1
 
 	return txn.replay_on_conflict(unit, label="collaboration.rq.event", fresh=True)

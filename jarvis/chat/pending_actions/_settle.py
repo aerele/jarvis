@@ -187,7 +187,8 @@ def _continue(kind: str, conversation: str | None, items: list[dict]) -> None:
 		from jarvis.chat.collaboration_continuations import on_settled
 
 		on_settled(conversation, items)
-		frappe.db.commit()
+		# Persist claimed shared continuations before the outer settlement step returns.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return
 	path = CONTINUATIONS.get(kind)
 	if path:

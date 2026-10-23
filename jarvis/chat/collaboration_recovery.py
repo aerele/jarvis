@@ -119,7 +119,8 @@ def _expire_unsent(binding, observed):
 				for k in ("conversation", "actor", "collaboration_binding", "collaboration_run_id", "role")
 			) == (binding.conversation, binding.actor, binding.name, row.name, "assistant"):
 				frappe.db.set_value(ts.MSG, row.assistant_message, {"streaming": 0, "stopped": 1})
-		frappe.db.commit()
+		# Persist the unsent expiry and matching reply disposition before returning.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return bool(won)
 
 	return txn.replay_on_conflict(unit, label="collaboration.expire_unsent", fresh=True)
@@ -143,7 +144,8 @@ def _expire_unknown(binding, observed):
 			# An inconsistent reply pointer is audit evidence, never permission
 			# to overwrite the pointed-to row. Retain the honest Turn outcome.
 			pass
-		frappe.db.commit()
+		# Persist the unknown outcome and uncertainty fence; never replay a possible send.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return True
 
 	return txn.replay_on_conflict(unit, label="collaboration.expire_unknown", fresh=True)
@@ -166,7 +168,8 @@ def _reclaim_prepare_reservation(binding, observed):
 			AND COALESCE(assistant_message,'')=''""",
 			{"r": row.name, "v": int(row.version), "now": frappe.utils.now_datetime()},
 		)
-		frappe.db.commit()
+		# Persist the expired preparation reservation CAS before promotion resumes.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return bool(won)
 
 	return txn.replay_on_conflict(unit, label="collaboration.prepare_reservation", fresh=True)
@@ -182,10 +185,12 @@ def _recover_result(binding, observed):
 		return False
 	policy = RuntimePolicy(runtime.get("skills_root") or "", runtime.get("model_ref") or "")
 	settings = frappe.get_cached_doc("Jarvis Settings")
-	frappe.db.commit()
+	# Release the recovery read snapshot before gateway verification RPCs.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	with agent_session_pool.checkout(settings.agent_url or "") as sess:
 		physical = verify_dispatched_session(sess, binding, policy)
-		frappe.db.commit()
+		# Release identity-verification reads before polling native session metadata.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		metadata = next(
 			(item for item in sess.list_sessions(timeout_s=5) if item.get("key") == binding.session_key), None
 		)
@@ -209,7 +214,8 @@ def _recover_result(binding, observed):
 		if not text:
 			return False
 		verify_dispatched_session(sess, binding, policy)
-		frappe.db.commit()
+		# End native-verification reads before the independent terminal-observation CAS.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	terminal = {"text": scrub_for_share(text)}
 	latest = max(
 		(item for item in messages if item.get("role") == "assistant"),
@@ -235,7 +241,8 @@ def _recover_result(binding, observed):
 			frappe.db.rollback()
 			return None
 		frappe.db.set_value(ts.MSG, row.assistant_message, "recovering", 0, update_modified=False)
-		frappe.db.commit()
+		# Persist recovered terminal evidence before invoking settlement effects.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return int(row.version) + 1
 
 	v = txn.replay_on_conflict(unit, label="collaboration.recovered_result", fresh=True)
@@ -271,7 +278,8 @@ def _park_deadline(binding, observed):
 				_mirror(binding, row, {"recovering": 1})
 			except frappe.PermissionError:
 				frappe.db.set_value(c.BINDING, binding.name, "state", "Uncertain")
-		frappe.db.commit()
+		# Persist the deadline recovery CAS and uncertainty fence for the next worker.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return won
 
 	return txn.replay_on_conflict(unit, label="collaboration.deadline", fresh=True)
@@ -292,7 +300,8 @@ def sweep(limit: int = 10, *, conversation: str | None = None):
 	fields = ", ".join(f"`{field}`" for field in _FIELDS)
 	# Fresh queued requests and live preparations cannot crowd recovery.
 	# Durable scheduling metadata rotates polls of long-lived or broken rows.
-	rows = frappe.db.sql(
+	# Only the fixed field list, DocType and optional predicate are formatted; values stay bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT {fields} FROM `tab{ts.TURN}`
 		WHERE collaboration_executor IN ('rq','pump') AND COALESCE(collaboration_binding,'')<>''
 		AND (
@@ -381,7 +390,8 @@ def sweep(limit: int = 10, *, conversation: str | None = None):
 			frappe.log_error(title="shared recovery", message=f"run={row.name} cause={type(exc).__name__}")
 	# A lost wake for fresh work also needs a backstop, independently of the
 	# actionable recovery window. Promotion keeps its own mode/flag gates.
-	queued = frappe.db.sql(
+	# Only the fixed DocType and optional parameterized conversation predicate are formatted.
+	queued = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT DISTINCT relay_target_id FROM `tab{ts.TURN}`
 		WHERE collaboration_executor IN ('rq','pump') AND COALESCE(collaboration_binding,'')<>''
 		AND state IN ('queued','preparing','ready') {condition} LIMIT 50""",

@@ -109,7 +109,8 @@ def record(session_key: str, row, run_id: str | None, *, reply_chars=None):
 		if outcome == usage.USAGE_RETRY:
 			frappe.db.rollback()
 		elif outcome == usage.USAGE_VALID_ZERO:
-			frappe.db.commit()
+			# Persist a valid zero-usage disposition so it cannot be lost at job exit.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return outcome
 
 	return txn.replay_on_conflict(unit, label="collaboration.usage", fresh=True)
@@ -124,7 +125,8 @@ def mark_unavailable(binding, run_id):
 			frappe.log_error(
 				title="Shared request usage unavailable", message=f"run={run_id} cause=usage_retry_exhausted"
 			)
-		frappe.db.commit()
+		# Persist exhausted-accounting disposition and its audit as one replayable unit.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return won
 
 	return txn.replay_on_conflict(unit, label="collaboration.usage_unavailable", fresh=True)
@@ -196,7 +198,9 @@ def capture(binding, run_id: str, *, session=None):
 		or turn.terminal_kind not in {"relay:final", "relay:error"}
 	):
 		return usage.USAGE_RETRY
-	frappe.db.commit()  # read-only snapshot; never hold actor locks across gateway I/O
+	# Release the read-only actor snapshot before gateway usage I/O.
+	# read-only snapshot; never hold actor locks across gateway I/O
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	try:
 		if session is None:
 			from jarvis.chat import agent_session_pool
@@ -257,7 +261,8 @@ def require_previous_usage(binding, run_id: str, session):
 		# Lost accounting does not license overlapping model work. Runtime
 		# identity and idleness remain independently mandatory for a child.
 		physical = frappe.db.get_value(c.BINDING, binding.name, "runtime_session_id")
-		frappe.db.commit()
+		# Release actor reads before verifying native idleness after unavailable usage.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		entry = next(
 			(item for item in session.list_sessions() if item.get("key") == binding.session_key), None
 		)

@@ -77,7 +77,8 @@ def stop(conversation: str, run_id: str):
 			)
 			abort = bool(won and row.collaboration_send_started_at)
 		else:
-			frappe.db.commit()
+			# Release stop-intent locks when the durable turn is already terminal.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 			return row, "already_finished"
 		if won:
 			# Only the initiating actor's own unsent stop is reversible. Owner
@@ -105,7 +106,8 @@ def stop(conversation: str, run_id: str):
 			) != (conversation, binding.actor, binding.name, run_id, "assistant"):
 				c._deny()
 			frappe.db.set_value(ts.MSG, row.assistant_message, {"streaming": 0, "stopped": 1})
-		frappe.db.commit()
+		# Persist stop intent and release actor locks before abort RPC or queue wake.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return row, "abort" if abort else "cancelled" if won else "changed"
 
 	row, action = txn.replay_on_conflict(intent, label="collaboration.stop")

@@ -17,7 +17,8 @@ def is_shared(conversation):
 	# No negative cache: first activation must immediately fence owner events,
 	# even on long-lived workers that previously handled this private chat.
 	return bool(
-		frappe.db.sql(
+		# Only the fixed conversation DocType is formatted; its name stays bound.
+		frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 			f"SELECT 1 FROM `tab{c.CONVERSATION}` WHERE name=%s AND collaboration_active=1",
 			(conversation,),
 		)

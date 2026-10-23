@@ -26,7 +26,8 @@ def _fail_prepare(binding, run_id, version, assistant, error, *, retry_allowed=F
 		frappe.db.set_value(c.BINDING, binding.name, "state", "Uncertain")
 	if row and version is None and row.state == "queued":
 		if ts.cancel_queued(run_id, int(row.version)):
-			frappe.db.commit()
+			# Persist the refused queued preparation before this job returns.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	elif row and row.state == "preparing" and int(row.version) == version:
 		frappe.db.set_value(
 			ts.TURN, run_id, "collaboration_retry_allowed", int(retry_allowed and not uncertain)
@@ -41,7 +42,8 @@ def _fail_prepare(binding, run_id, version, assistant, error, *, retry_allowed=F
 			code="permission" if "access" in error else "validation",
 		)
 	else:
-		frappe.db.commit()
+		# Persist the retained uncertainty fence even when no preparation can proceed.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	return {"ok": False, "reason": "shared_prepare_refused"}
 
 
@@ -142,14 +144,16 @@ def build_payload(binding, run_id: str, seed_message: str) -> dict:
 	)
 	managed = turn_handler._to_managed_attachments(ap.vision_parts) if ap.vision_parts else None
 	# Permission/history reads take locks; no gateway RPC runs under them.
-	frappe.db.commit()
+	# Release permission and history locks before gateway preparation RPCs.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	root = configured_skills_root()
 	with agent_session_pool.checkout(ap.settings.agent_url or "") as sess:
 		from jarvis.chat.collaboration_usage import require_previous_usage
 
 		require_previous_usage(binding, run_id, sess)
 		runtime = resolve_runtime(sess, binding, skills_root=root)
-		frappe.db.commit()
+		# End runtime-verification reads before requesting the native history watermark.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		watermark = history_watermark(sess, binding)
 	if ap.shared_parts is not None:
 		from jarvis.chat.collaboration_context import fit_prompt_history

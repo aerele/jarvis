@@ -116,7 +116,8 @@ def on_settled(conversation, items):
 					f"Your proposed {item['tool']} action is {item['outcome']}. Do not treat it as approved; a new action always needs its own human confirmation.",
 					note_id="decision-" + hashlib.sha256(item["name"].encode()).hexdigest(),
 				)
-			frappe.db.commit()
+			# Persist the settled decision claim and note before processing the next receipt.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 			continue
 		plan = actions_api._settled_plan([item])
 		previous = getattr(frappe.local, "jarvis_shared_continuation_ids", None)

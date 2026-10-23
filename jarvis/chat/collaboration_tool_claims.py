@@ -86,7 +86,8 @@ def _store(permit, entries):
 		json.dumps(entries, separators=(",", ":")),
 		update_modified=False,
 	)
-	frappe.db.commit()
+	# Persist the at-most-once tool claim before the ERP effect can execute.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 
 def claim(permit) -> bool:
@@ -249,7 +250,8 @@ def reconcile(limit=25, *, conversation=None):
 				frappe.utils.now_datetime(),
 				update_modified=False,
 			)
-			frappe.db.commit()
+			# Persist reconciled tool claims and recovery rotation before the next item.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 			return count
 
 		changed += txn.replay_on_conflict(unit, label="collaboration.claim_recovery", fresh=True)

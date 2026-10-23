@@ -2263,7 +2263,8 @@ def _pump_queued_reserved(target: str) -> list[dict]:
 	from jarvis.chat import collaboration as shared
 
 	paused = "" if shared.writes_ready() else legacy_clause()
-	return frappe.db.sql(
+	# Only closed executor and schema predicates are formatted; target and time stay bound.
+	return frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT run_id, conversation FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=1 {executor_clause("pump")} {paused}
 		  AND ( reservation_expires_at IS NULL OR reservation_expires_at > %(now)s )
@@ -2280,7 +2281,8 @@ def _pick_next_cold(target: str, active_convs: set[str], promoted_convs: set[str
 	from jarvis.chat import collaboration as shared
 
 	paused = "" if shared.writes_ready() else legacy_clause()
-	rows = frappe.db.sql(
+	# Only closed executor and schema predicates are formatted; target stays bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT run_id, conversation, turn_class FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=0 {executor_clause("pump")} {paused}
 		ORDER BY enqueued_at ASC, run_id ASC LIMIT 200""",
@@ -2324,7 +2326,8 @@ def _turn_state_count(target: str, turn_class: str) -> int:
 
 def _dispatch_ready(ctx: PumpContext) -> int:
 	target = ctx.relay_target_id
-	rows = frappe.db.sql(
+	# Only the closed pump executor predicate is formatted; target stays bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT run_id FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s AND state='ready' {executor_clause("pump")}
 		ORDER BY ready_at ASC, run_id ASC LIMIT 50""",
@@ -3791,7 +3794,8 @@ def _park_affected_recovering(ctx: PumpContext, *, reason: str = "db-disconnect"
 	transport-budget park all share this one path."""
 	target = ctx.relay_target_id
 	try:
-		rows = frappe.db.sql(
+		# Only the closed pump executor predicate is formatted; target stays bound.
+		rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 			f"""SELECT run_id, version, conversation, assistant_message FROM `tabJarvis Chat Turn`
 			WHERE relay_target_id=%(t)s
 			  AND state IN ('preparing','ready','dispatching','streaming','terminal_observed') {executor_clause("pump")}""",
@@ -4267,7 +4271,8 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 	# A stale lease is not parked here — ensure_pump (below) revives the pump,
 	# which re-stamps + reconciles in-flight turns on start (D6 §5). The watchdog
 	# parks only on a per-turn deadline / recovery budget.
-	rows = frappe.db.sql(
+	# Only the closed legacy schema predicate is formatted; target and states stay bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
 		f"""SELECT run_id, state, version, reserved, reservation_expires_at, enqueued_at,
 		       preparing_at, deadline_at, dispatching_at, recovery_started_at, conversation,
 		       assistant_message, seed_message, turn_class

@@ -81,7 +81,8 @@ def _reject(ctx, turn, binding, *, retry_allowed=False):
 				"error",
 				"This shared request could not start because access or the isolated session changed. Your message is kept.",
 			)
-		frappe.db.commit()
+		# Persist the refused dispatch and release locks before publishing its error.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return won
 
 	if txn.replay_on_conflict(cancel, label="collaboration.dispatch_refused", fresh=True) and binding:

@@ -56,7 +56,8 @@ def preserve_drift(binding, error):
 		)
 		if row and (row.actor, row.conversation) == (binding.actor, binding.conversation):
 			frappe.db.set_value(c.BINDING, binding.name, "state", "Uncertain")
-		frappe.db.commit()
+		# Persist the uncertainty fence independently when native identity drift is found.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 	return txn.replay_on_conflict(unit, label="collaboration.runtime_drift", fresh=True)
 
