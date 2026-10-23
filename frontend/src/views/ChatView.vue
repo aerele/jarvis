@@ -2341,6 +2341,35 @@
 				</div>
 			</div>
 
+			<!-- Jump-to-latest: a real strip between the thread and the composer, NOT an
+			     overlay, so it can never sit on top of a message's buttons (export Cancel
+			     at 375/320 did). Jumps the thread to the newest message. -->
+			<transition name="jv-sd">
+				<div v-if="showScrollDown && !showWelcome && !booting" class="jv-jump-strip">
+					<button
+						type="button"
+						class="jv-scrolldown"
+						@click="jumpToBottom"
+						title="Jump to latest"
+						aria-label="Jump to latest message"
+					>
+						<svg
+							width="18"
+							height="18"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
+							<path d="M12 5v14" />
+							<path d="m19 12-7 7-7-7" />
+						</svg>
+					</button>
+				</div>
+			</transition>
+
 			<!-- ===== COMPOSER ===== -->
 			<div
 				class="jv-composer-wrap"
@@ -2565,30 +2594,6 @@
 					</template>
 				</Banner>
 
-				<!-- floats just above the composer; jumps the thread to the newest message -->
-				<transition name="jv-sd">
-					<button
-						v-if="showScrollDown && !showWelcome && !booting"
-						class="jv-scrolldown"
-						@click="jumpToBottom"
-						title="Jump to latest"
-						aria-label="Jump to latest message"
-					>
-						<svg
-							width="18"
-							height="18"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.2"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-						>
-							<path d="M12 5v14" />
-							<path d="m19 12-7 7-7-7" />
-						</svg>
-					</button>
-				</transition>
 				<div style="max-width: 1280px; margin: 0 auto">
 					<!-- DO NOT REMOVE `@submit="send()"`: the Send BUTTON's click is
 					     `emit('submit')` inside Composer, so this binding is the
@@ -14048,16 +14053,23 @@ onUnmounted(() => {
 	background: var(--surface-2);
 	color: var(--text);
 }
-/* jump-to-latest arrow — floats just above the composer, centered.
-   It lives in .jv-composer-wrap (this view), NOT inside <Composer>, so it and
-   its .jv-sd-* transition stay here. */
+/* jump-to-latest arrow: a strip that takes real layout space between the thread
+   scroller and .jv-composer-wrap (both flex items of <main>; the scroller is flex: 1,
+   so it gets 48px shorter while the strip shows and the composer does not move).
+   It used to be an absolute overlay on the composer's top edge, which put it over
+   whatever thread row was at the bottom: at 375/320 px it covered an export card's
+   Cancel and swallowed the click. Keep it out of the scroller's box: no position,
+   no negative margin, no z-index. It lives in this view, NOT inside <Composer>, so
+   it and its .jv-sd-* transition stay here. The fade is opacity only: animating
+   height would resize the scroller on every frame. */
+.jv-jump-strip {
+	flex: none;
+	height: 48px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
 .jv-scrolldown {
-	position: absolute;
-	left: 50%;
-	bottom: 100%;
-	margin-bottom: 12px;
-	transform: translateX(-50%);
-	z-index: 20;
 	width: 38px;
 	height: 38px;
 	display: flex;
@@ -14076,20 +14088,19 @@ onUnmounted(() => {
 .jv-scrolldown:hover {
 	color: var(--text);
 	border-color: var(--text-3);
-	transform: translateX(-50%) translateY(-2px);
+	transform: translateY(-2px);
 	box-shadow: 0 9px 24px rgba(20, 20, 30, 0.22);
 }
 .jv-scrolldown:active {
-	transform: translateX(-50%) scale(0.92);
+	transform: scale(0.92);
 }
 .jv-sd-enter-active,
 .jv-sd-leave-active {
-	transition: opacity 0.18s ease, transform 0.18s ease;
+	transition: opacity 0.18s ease;
 }
 .jv-sd-enter-from,
 .jv-sd-leave-to {
 	opacity: 0;
-	transform: translateX(-50%) translateY(10px);
 }
 /* response metrics (tools · time) */
 .jv-skillused {
