@@ -641,13 +641,10 @@ class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
 
 	A request carrying none of the three signature headers used to be
 	accepted on bearer + session alone, so a captured agent_token replayed
-	arbitrary unsigned tool bodies. Enforcement is now the default; the
-	site_config key ``jarvis_plugin_allow_unsigned`` is the documented,
-	WARN-logged escape hatch for un-upgraded plugins.
+	arbitrary unsigned tool bodies. Signatures are now always enforced; the
+	old site_config key ``jarvis_plugin_allow_unsigned`` no longer does anything.
 
-	The trailing block covers the review remediation: the reject is the
-	operator's only signal, so it carries the remedy; the audit row behind
-	it is throttled; and the hatch's usage count is readable by an operator.
+	The audit row behind the reject is throttled per session.
 	"""
 
 	CONF_KEY = "jarvis_plugin_allow_unsigned"
@@ -666,7 +663,6 @@ class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
 			cache.delete(f"jarvis:plugin_rl:{self.SESSION_KEY}")
 			for key in self._audit_gate_keys():
 				cache.delete(key)
-			cache.delete(_plugin_auth._UNSIGNED_COUNTER_PREFIX + frappe.utils.today())
 		except Exception:
 			pass
 
@@ -719,17 +715,17 @@ class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
 			result = self._call()
 		self.assertTrue(result["ok"], msg=result)
 
-	def test_off_or_junk_flag_values_keep_enforcement(self):
-		"""Fail closed: only an explicit on-literal re-opens the path."""
-		for value in (self._ABSENT, 0, "0", "", None, False, "false", "no", "maybe"):
+	def test_removed_flag_values_never_reopen_the_path(self):
+		"""The retired site_config key is ignored: no value re-opens the path."""
+		for value in (self._ABSENT, 0, "0", "", None, False, "false", "no", "maybe", 1, "1", True, "yes"):
 			with self.subTest(flag=value), self._conf(value):
 				result = self._call(sign=False)
 				self.assertFalse(result["ok"], msg=f"flag={value!r} allowed an unsigned request")
 				self.assertEqual(result["error"]["code"], "InvalidArgumentError")
 
 	def test_partial_signature_headers_rejected_regardless_of_flag(self):
-		"""The escape hatch re-enables *unsigned* requests, never
-		half-signed ones - that shape is a downgrade attempt."""
+		"""Half-signed requests are a downgrade attempt, whatever the retired
+		flag says."""
 		for value in (self._ABSENT, 0, 1):
 			with self.subTest(flag=value), self._conf(value):
 				result = self._call(extra_headers={"X-Jarvis-Signature": "a" * 64})
@@ -737,52 +733,15 @@ class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
 				self.assertEqual(result["error"]["code"], "InvalidArgumentError")
 				self.assertIn("partial signature", result["error"]["message"].lower())
 
-	def test_unsigned_allowed_when_flag_on_and_warns_with_sunset_date(self):
-		from unittest.mock import MagicMock
-
-		from jarvis import _plugin_auth
-
-		logger = MagicMock()
-		with self._conf(1), patch.object(_plugin_auth.frappe, "logger", return_value=logger):
-			result = self._call(sign=False)
-		self.assertTrue(result["ok"], msg=result)
-		warned = " ".join(str(arg) for call in logger.warning.call_args_list for arg in call.args)
-		self.assertIn("DEPRECATED unsigned request", warned)
-		self.assertIn(_plugin_auth._UNSIGNED_SUNSET_DATE, warned)
-		self.assertIn(self.CONF_KEY, warned)
-
-	def test_legacy_allowed_requests_are_counted(self):
-		"""Operators need a number to watch before flipping the flag off."""
-		from jarvis import _plugin_auth
-
-		cache = frappe.cache()
-		key = _plugin_auth._UNSIGNED_COUNTER_PREFIX + frappe.utils.today()
-		try:
-			cache.delete(key)
-		except Exception:
-			self.skipTest("cache unavailable")
-		with self._conf(1):
-			self.assertTrue(self._call(sign=False)["ok"])
-			self.assertTrue(self._call(sign=False)["ok"])
-		raw = cache.get(key)
-		self.assertEqual(int(raw.decode() if isinstance(raw, bytes) else raw), 2)
-
-	# --- review remediation: UX P0-1 (remedy in the message) + adversarial
-	# P2-7 (throttle the reject audit) + UX P1-1 (operator-visible count).
-
 	def test_reject_message_carries_the_remedy(self):
-		"""The 400 is the operator's ONLY signal - it must name both the
-		real fix and the exact stopgap command, with the removal date."""
-		from jarvis import _plugin_auth
-
+		"""The 400 is the operator's ONLY signal - it must name the fix."""
 		with self._conf(self._ABSENT):
 			result = self._call(sign=False)
 		msg = result["error"]["message"]
 		self.assertFalse(result["ok"], msg=result)
 		self.assertIn("signature headers required", msg)
 		self.assertIn("Upgrade the agent plugin", msg)
-		self.assertIn(f"bench --site <site> set-config {self.CONF_KEY} 1", msg)
-		self.assertIn(_plugin_auth._UNSIGNED_SUNSET_DATE, msg)
+		self.assertNotIn("set-config", msg)
 
 	def test_unsigned_reject_audit_is_throttled_per_session(self):
 		"""Every reject still happens; only the Error Log row is gated."""
@@ -810,44 +769,6 @@ class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
 		with patch.object(_plugin_auth.frappe, "cache", side_effect=RuntimeError("redis down")):
 			self.assertTrue(_plugin_auth._should_audit_unsigned_reject("s1"))
 			self.assertTrue(_plugin_auth._should_audit_unsigned_reject("s1"))
-
-	def test_escape_hatch_status_is_none_while_enforcing(self):
-		from jarvis import _plugin_auth
-
-		with self._conf(self._ABSENT):
-			self.assertIsNone(_plugin_auth.unsigned_escape_hatch_status())
-
-	def test_escape_hatch_status_reports_recent_allowed_count(self):
-		"""The operator-facing count must be read back from the same raw keys
-		the allow path increments."""
-		from jarvis import _plugin_auth
-
-		cache = frappe.cache()
-		today = frappe.utils.today()
-		yesterday = frappe.utils.add_days(today, -1)
-		try:
-			cache.delete(_plugin_auth._UNSIGNED_COUNTER_PREFIX + today)
-			cache.delete(_plugin_auth._UNSIGNED_COUNTER_PREFIX + str(yesterday))
-		except Exception:
-			self.skipTest("cache unavailable")
-		cache.set(_plugin_auth._UNSIGNED_COUNTER_PREFIX + str(yesterday), b"3", ex=60)
-		with self._conf(1):
-			self.assertTrue(self._call(sign=False)["ok"])
-			status = _plugin_auth.unsigned_escape_hatch_status()
-		self.assertEqual(status["conf_key"], self.CONF_KEY)
-		self.assertEqual(status["sunset_date"], _plugin_auth._UNSIGNED_SUNSET_DATE)
-		self.assertEqual(status["window_days"], _plugin_auth._UNSIGNED_COUNTER_DAYS)
-		# 1 from the call just made today + the 3 seeded for yesterday.
-		self.assertEqual(status["recent_allowed"], 4)
-		cache.delete(_plugin_auth._UNSIGNED_COUNTER_PREFIX + str(yesterday))
-
-	def test_escape_hatch_status_says_unknown_when_cache_is_unreachable(self):
-		from jarvis import _plugin_auth
-
-		with self._conf(1), patch.object(_plugin_auth.frappe, "cache", side_effect=RuntimeError("down")):
-			status = _plugin_auth.unsigned_escape_hatch_status()
-		self.assertIsNotNone(status)
-		self.assertIsNone(status["recent_allowed"])
 
 
 class TestRotateAgentTokenEndpoint(FrappeTestCase):
