@@ -129,3 +129,18 @@ def publish_to_user(user: str, payload: dict[str, Any]) -> None:
 			# failure path if the conversation was concurrently removed.
 			pass
 	frappe.publish_realtime(CHANNEL, message, user=user)
+
+
+def accumulate_assistant_text(previous: str, event: dict) -> str:
+	"""Fold one parsed ``assistant`` event into the reply text so far.
+
+	Both stream shapes are handled: openclaw 2026.9.x sends a cumulative ``text`` on every frame
+	(plus ``delta``), while 2026.10.x sends ``text`` only on the first frame (and on ``replace``
+	frames) and the rest as ``delta`` with ``text=""``. Reading only ``text`` therefore kept the
+	FIRST CHUNK of every one-shot reply on 10.x (one-word auto-titles, suggestions never stored,
+	found 2026-10-22 on the openclaw compat stack). A non-empty ``text`` is authoritative; an empty
+	one means "append the delta"."""
+	text = event.get("text") or ""
+	if text:
+		return text
+	return previous + (event.get("delta") or "")
