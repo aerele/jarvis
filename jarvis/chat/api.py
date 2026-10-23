@@ -733,6 +733,9 @@ def get_conversation(
 	"""
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	return _conversation_history(doc, limit, before, refresh, after)
 
 
@@ -1107,6 +1110,9 @@ def get_tool_detail(message: str) -> dict:
 	if not row or row.role != "tool" or frappe.utils.cint(row.hidden):
 		frappe.throw(_t("message not found"), frappe.DoesNotExistError)
 	_get_owned_conversation(row.conversation)  # non-owner: PermissionError
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(row.conversation)
 	return {"name": message, "tool_args": row.tool_args, "tool_result": row.tool_result}
 
 
@@ -1240,6 +1246,9 @@ def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 	if not row:
 		frappe.throw(_t("message not found"), frappe.DoesNotExistError)
 	_get_owned_conversation(row.conversation)  # non-owner: PermissionError
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(row.conversation)
 
 	items = frappe.parse_json(row.canvas) if row.canvas else []
 	if not isinstance(items, list) or not items:
@@ -2404,11 +2413,17 @@ def send_message(
 	# track. PermissionError (someone else's conversation) always propagates.
 	try:
 		conv_doc = _get_owned_conversation(conversation)
+		from jarvis.chat.collaboration import require_legacy_conversation
+
+		require_legacy_conversation(conversation)
 	except frappe.DoesNotExistError:
 		if _delegated:
 			raise
 		conversation = create_or_focus_empty(origin_page=requested_origin)
 		conv_doc = _get_owned_conversation(conversation)
+		from jarvis.chat.collaboration import require_legacy_conversation
+
+		require_legacy_conversation(conversation)
 
 	# Builder threads are application-scoped workspaces, not aliases for main
 	# chat. A direct /c/<id> visit therefore cannot post into one without the
@@ -3489,6 +3504,9 @@ def get_tool_activity(conversation: str, limit: int = 20) -> dict:
 	"""
 	require_jarvis_access()
 	_get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	from frappe.utils import cint
 
 	runs = _tool_runs(conversation)
@@ -3616,6 +3634,9 @@ def get_conversation_context(conversation: str) -> dict:
 	only; never calls the runtime."""
 	require_jarvis_access()
 	_get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	from jarvis.chat import compaction
 
 	payload = compaction.context_payload(conversation)
@@ -3651,6 +3672,9 @@ def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 	takes the lock and enqueues jarvis.chat.compaction.run_compact."""
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	from jarvis.chat import compaction
 
 	if doc.get("skip_confirmation"):
@@ -3852,6 +3876,9 @@ def retry_message(message: str) -> dict:
 	# A retry is a human turn-entry too, so an armed macro-run conversation refuses
 	# it (T4): re-running a step there would run the covered set uncarded on demand.
 	_reject_send_into_armed_conversation(_get_owned_conversation(doc.conversation))
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	# Flag ON: _retry_errored refuses a retry while another turn runs, and accept_or_queue
 	# queues it when the site is at capacity; flag OFF keeps the legacy single-flight reject.
 	if admission.turn_machine_enabled():
@@ -4121,6 +4148,9 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	if run_id and _stop_is_late(conversation, run_id):
 		return {"ok": False, "reason": _("That reply has already finished, so nothing was stopped.")}
 	# A reply still queued for a slot has nothing with the agent to abort, so Stop
@@ -4466,7 +4496,33 @@ def _dispatch_turn(
 			_gate_ts.reset_lock_tracking()
 			return _reroute_legacy_to_pump(enqueue_kwargs, interactive, exempt_overload=exempt_overload)
 	try:
-		if (frappe.conf.get("socketio_backend") or "").strip().lower() == "python":
+		from jarvis.chat.collaboration import is_collaborative
+
+		shared = is_collaborative(enqueue_kwargs.get("conversation_id"))
+		if shared:
+			from jarvis.chat import collaboration as c
+			from jarvis.chat.collaboration_turn import binding_for_run
+
+			binding = binding_for_run(enqueue_kwargs.get("run_id"))
+			row = frappe.db.get_value(
+				"Jarvis Chat Turn",
+				enqueue_kwargs.get("run_id"),
+				["seed_message", "collaboration_executor", "state"],
+				as_dict=True,
+			)
+			if (
+				not binding
+				or not row
+				or (binding.conversation, row.seed_message, row.collaboration_executor, row.state)
+				!= (
+					enqueue_kwargs.get("conversation_id"),
+					enqueue_kwargs.get("message_id"),
+					"rq",
+					"dispatching",
+				)
+			):
+				c._deny()
+		if not shared and (frappe.conf.get("socketio_backend") or "").strip().lower() == "python":
 			from jarvis.chat import dispatch
 
 			# Mismatch guard: pub/sub is fire-and-forget, so publishing with no
@@ -4581,6 +4637,9 @@ def _enqueue_turn(
 	written. Elsewhere (the pump off, or draining) there is no row to meet on and the
 	turn gets a random id, as before."""
 	conv_doc = frappe.get_doc(CONV, conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conv_doc)
 	# Every field this call changes on the conversation row is collected here and
 	# persisted as ONE locked, targeted write below, right before msg_doc.insert(),
 	# the same reasoning as send_message's targeted write (see there): a
@@ -4997,6 +5056,29 @@ _TYPED_REPLY_SUFFIX = (
 )
 
 
+def continuation_prompt(receipt: str, *, outcome=None, spans=None, failed=False, applied=None) -> str:
+	"""Format untrusted receipt data without admission, identity or bypass state."""
+	from jarvis.chat.turn_handler import _safe_label_name
+
+	spans = dict(spans or {})
+	if set(spans) - MIXED_SPANS:
+		raise ValueError(f"enqueue_continuation: unknown span(s) {sorted(set(spans) - MIXED_SPANS)}")
+	if applied is not None:
+		spans.setdefault("applied", applied)
+	spans.setdefault("not_fixable", receipt)
+	outcome = _resolve_outcome(outcome, failed, spans.get("applied"))
+	safe = _safe_label_name(receipt)
+	if outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
+		prompt = _CONTINUATION_PROMPT_UNKNOWN.format(receipt=safe)
+	elif outcome == OUTCOME_MIXED:
+		prompt = _mixed_prompt(spans)
+	elif outcome in _FAILED_SCAFFOLDS:
+		prompt = _FAILED_SCAFFOLDS[outcome].format(receipt=safe)
+	else:
+		prompt = _CONTINUATION_PROMPT.format(receipt=safe)
+	return prompt
+
+
 def enqueue_continuation(
 	conversation: str,
 	receipt: str,
@@ -5038,22 +5120,7 @@ def enqueue_continuation(
 	A typed approval in flight (``TYPED_REPLY_FLAG``) appends the user's words as DATA."""
 	from jarvis.chat.turn_handler import _safe_label_name
 
-	spans = dict(spans or {})
-	if set(spans) - MIXED_SPANS:
-		raise ValueError(f"enqueue_continuation: unknown span(s) {sorted(set(spans) - MIXED_SPANS)}")
-	if applied is not None:
-		spans.setdefault("applied", applied)
-	spans.setdefault("not_fixable", receipt)
-	outcome = _resolve_outcome(outcome, failed, spans.get("applied"))
-	safe = _safe_label_name(receipt)
-	if outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
-		prompt = _CONTINUATION_PROMPT_UNKNOWN.format(receipt=safe)
-	elif outcome == OUTCOME_MIXED:
-		prompt = _mixed_prompt(spans)
-	elif outcome in _FAILED_SCAFFOLDS:
-		prompt = _FAILED_SCAFFOLDS[outcome].format(receipt=safe)
-	else:
-		prompt = _CONTINUATION_PROMPT.format(receipt=safe)
+	prompt = continuation_prompt(receipt, outcome=outcome, spans=spans, failed=failed, applied=applied)
 	typed = frappe.flags.get(TYPED_REPLY_FLAG)
 	if typed:
 		prompt += _TYPED_REPLY_SUFFIX.format(typed=_safe_label_name(typed))

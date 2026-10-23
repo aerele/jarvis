@@ -12,6 +12,12 @@ class JarvisConversationShare(NotRenamable, Document):
 
 	def validate(self):
 		self._validate_owner_write()
+		before = None if self.is_new() else self.get_doc_before_save()
+		for field, default in (("access_mode", "View"), ("access_revision", 1)):
+			if not self.meta.has_field(field):
+				continue
+			if self.get(field) != (before.get(field) if before else default):
+				frappe.throw("Share access is server-managed.", frappe.PermissionError)
 		if not self.is_new():
 			if any(
 				self.has_value_changed(field)

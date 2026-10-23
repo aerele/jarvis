@@ -21,6 +21,8 @@ GET_ALLOWLIST = frozenset(
 	{
 		# <a href> and <img src> in the shared transcript view.
 		"jarvis.chat.sharing.get_shared_file",
+		# Collaborative shared transcript images and download links.
+		"jarvis.chat.collaboration_api.get_file",
 		# <a href> and <img src> for support attachments.
 		"jarvis.support.media.download",
 		# Download link for an exported conversation.

@@ -47,6 +47,9 @@ class JarvisConversation(NotRenamable, Document):
 			self.status = "Active"
 
 	def validate(self):
+		from jarvis.chat.collaboration import guard_server_fields
+
+		guard_server_fields(self, ("collaboration_active", "collaboration_epoch"))
 		self._guard_file_box_server_fields()
 		self._guard_file_box_enable()
 		self._guard_skip_confirmation_enable()

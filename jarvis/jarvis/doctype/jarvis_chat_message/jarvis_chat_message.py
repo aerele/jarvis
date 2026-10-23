@@ -34,6 +34,9 @@ def _norm(fieldname: str, value):
 
 class JarvisChatMessage(NotRenamable, Document):
 	def validate(self):
+		from jarvis.chat.collaboration import guard_record_binding
+
+		guard_record_binding(self)
 		self._validate_conversation_owner()
 		self._guard_server_fields()
 
