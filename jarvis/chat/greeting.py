@@ -83,7 +83,7 @@ def _upsert_pref(user: str, **values: object) -> None:
 	frappe.db.set_value(PREF, {"user": user}, values, update_modified=True)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def maybe_greet() -> dict:
 	"""Report whether the business-note greeting card should show right now.
 
@@ -120,7 +120,7 @@ def maybe_greet() -> dict:
 	return {"show_card": show_card, "stt_enabled": stt_enabled}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def hide_greeting() -> dict:
 	"""Maybe later / the card's X: hide the card for the rest of the current
 	cadence tick. Records the current chat count on the durable preference row,
@@ -135,7 +135,7 @@ def hide_greeting() -> dict:
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def dismiss_greeting() -> dict:
 	"""Don't ask again: mute the greeting permanently. The Dismissed flag lives
 	ONLY in the DocType (never Redis), so a cache eviction can never resurrect a

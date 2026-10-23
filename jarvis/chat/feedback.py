@@ -127,7 +127,7 @@ def _session_uuid(session_key: str | None) -> str:
 # --------------------------------------------------------------------------- #
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def session_feedback_status(conversation: str) -> dict:
 	"""Whether the once-per-session popup is due for this conversation now.
 

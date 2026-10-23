@@ -677,7 +677,7 @@ def _admin_chat_gate() -> dict:
 	return {"ready": True, "reason": None, "billing_notice": notice}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def is_onboarded() -> dict:
 	"""True iff Jarvis Settings holds an admin api_key. The wizard's
 	completion-card branch and the account page's redirect guard share this.
@@ -721,7 +721,7 @@ def _site_replacement() -> dict:
 	return verdict
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def is_ready_for_chat() -> dict:
 	"""Pre-flight check used by /jarvis-chat's page load to decide whether to
 	render the chat surface or redirect the customer to /jarvis-onboarding.
@@ -1275,7 +1275,7 @@ def _llm_missing_verdict(settings) -> dict:
 	return {"ready": False, "reason": "llm_credentials"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_apply_operation(operation_id: str) -> dict:
 	"""Read-only status of a durable LLM-apply operation (plan-05 D2), for the SPA's
 	single Start-chatting controller to follow one operation to a terminal state.
@@ -1344,7 +1344,7 @@ def _persist_operation_probe_verdicts(status: dict) -> None:
 	frappe.db.set_single_value("Jarvis Settings", fields, update_modified=False)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_usage() -> dict:
 	"""Real LLM usage for the Monitor tab (System-Manager only, spec 7).
 
@@ -1442,7 +1442,7 @@ def _subscription_expiry_fields(attention_reason: str) -> dict:
 	return {"attention_detail": detail, "subscription_health": entries}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_connection_status() -> dict:
 	"""Connection card for Settings, General: how this workspace's LLM config is
 	SHAPED (``pool_mode`` / ``proxy_active`` / ``model_count`` / ``routing_mode``)
@@ -1555,7 +1555,7 @@ def get_llm_connection_status() -> dict:
 MEMBER_HEALTH_STATES = ("ok", "applying", "attention", "down")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_connection_health() -> dict:
 	"""The Settings Status badge for a workspace MEMBER: is this workspace's
 	assistant working right now? Returns exactly one field, ``state``, one of
@@ -1885,7 +1885,7 @@ def _has_llm_config(settings) -> bool:
 		return False
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_account() -> dict:
 	"""Plan + validity + upgrade-eligible plans for the account page.
 
@@ -1907,7 +1907,7 @@ def get_account() -> dict:
 _SUBSCRIPTION_STATUS_TIMEOUT_S = 8
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_subscription_status() -> dict:
 	"""LIVE plan + status for the chat agent's 'what is my current subscription plan?' answer.
 
@@ -1922,7 +1922,7 @@ def get_subscription_status() -> dict:
 	return _surface(admin_client.get_account_summary, timeout_s=_SUBSCRIPTION_STATUS_TIMEOUT_S)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def preview_upgrade(target_plan: str) -> dict:
 	"""Prorated amount for the upgrade modal's per-plan cards.
 
@@ -1935,7 +1935,7 @@ def preview_upgrade(target_plan: str) -> dict:
 	return _surface(admin_client.preview_upgrade, target_plan)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def start_upgrade(target_plan: str, provider: str | None = None) -> dict:
 	"""Create the prorated order on the sub's gateway (or the ``provider``
 	override); the page then opens that gateway's Checkout.
@@ -1954,7 +1954,7 @@ def start_upgrade(target_plan: str, provider: str | None = None) -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_plan_at_period_end() -> dict:
 	"""Schedule a period-end cancellation of the site's BILLING plan.
 
@@ -1972,7 +1972,7 @@ def cancel_plan_at_period_end() -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def resume_plan() -> dict:
 	"""Undo a scheduled cancellation (System Manager, as above)."""
 	require_jarvis_admin()
@@ -1981,7 +1981,7 @@ def resume_plan() -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reauthorize_autopay() -> dict:
 	"""Start re-arming auto-renewal; the page then opens a mandate Checkout.
 
@@ -1994,7 +1994,7 @@ def reauthorize_autopay() -> dict:
 	return onboarding_contract.augment_pay_page(_surface(admin_client.reauthorize_autopay))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def stop_autopay_to_pay() -> dict:
 	"""Past-Due pay-now, step one of two: neutralize the customer's still-live
 	Razorpay mandate so the account's EXISTING reactivation grid (can_reactivate)
@@ -2017,7 +2017,7 @@ def stop_autopay_to_pay() -> dict:
 	return _surface(admin_client.stop_autopay_to_pay, requesting_user=frappe.session.user)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_billing_payment_state() -> dict:
 	"""Where the current billing checkout stands, without asking a gateway.
 
@@ -2028,7 +2028,7 @@ def get_billing_payment_state() -> dict:
 	return onboarding_contract.augment_pay_page(_surface(admin_client.get_billing_payment_state))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_invoices() -> list:
 	"""The customer's own GST invoices for the billing page. SM/Jarvis-Admin only, like its
 	billing siblings (the SPA route adds no client guard and leans on this one)."""
@@ -2036,21 +2036,21 @@ def get_invoices() -> list:
 	return _surface(admin_client.get_invoices)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def download_invoice(erp_name: str) -> dict:
 	"""Base64 PDF of ONE of the customer's invoices; admin re-verifies ownership."""
 	require_jarvis_admin()
 	return _surface(admin_client.download_invoice, erp_name)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_billing_profile() -> dict:
 	"""The billing-details card: editable party (direct) or a 'billed through <partner>' notice."""
 	require_jarvis_admin()
 	return _surface(admin_client.get_billing_profile)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_billing_details(billing: dict | None = None) -> dict:
 	"""Save the customer's own billing party (validated admin-side; a partner-billed customer is
 	refused there)."""
@@ -2058,7 +2058,7 @@ def update_billing_details(billing: dict | None = None) -> dict:
 	return _surface(admin_client.update_billing_details, billing)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def check_billing_payment_status() -> dict:
 	"""Ask the provider what happened to the current billing payment and converge.
 
@@ -2080,14 +2080,14 @@ def check_billing_payment_status() -> dict:
 	return onboarding_contract.success(out, context={})
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def preview_downgrade(target_plan: str) -> dict:
 	"""Describe a downgrade for the picker. SM-only, same gate as upgrade."""
 	require_jarvis_admin()
 	return _surface(admin_client.preview_downgrade, target_plan)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def start_downgrade(target_plan: str) -> dict:
 	"""Schedule a downgrade (next cycle). Monthly autopay returns a mandate
 	pay-page token for a ₹0 mandate checkout; Annual just schedules.
@@ -2100,7 +2100,7 @@ def start_downgrade(target_plan: str) -> dict:
 	return onboarding_contract.augment_pay_page(_surface(admin_client.start_downgrade, target_plan))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_scheduled_downgrade() -> dict:
 	"""Revoke a scheduled downgrade (SM-only).
 

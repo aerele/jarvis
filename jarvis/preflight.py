@@ -68,7 +68,7 @@ _RATE_LIMIT_RE = re.compile(
 )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def run_chat_preflight() -> dict:
 	"""The wizard's pre-chat checklist (jarvis#840). Container health and
 	config-applied are NOT re-derived here - the SPA just watched its own

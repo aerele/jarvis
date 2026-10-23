@@ -427,7 +427,7 @@ def drop_file(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 @rate_limit(limit=60, seconds=60)
 def check_skill(skill: str | None = None) -> dict:
@@ -1035,7 +1035,7 @@ def _attach_results(rows: list[dict], me: str) -> None:
 			r.pop(k, None)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def open_waits(conversation: str) -> dict:
 	"""What a File Box file is waiting on, for its own chat (the Approval Board shows
@@ -1078,7 +1078,7 @@ def _options_list(raw) -> list[str]:
 	return [str(o) for o in parsed] if isinstance(parsed, list) else []
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_inbound_page(
 	search: str = "",

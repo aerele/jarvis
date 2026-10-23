@@ -454,7 +454,7 @@ def _check_owner(job, *, cancel=False):
 		frappe.throw("Export not found", frappe.PermissionError)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_jobs(names: str | list[str]):
 	if isinstance(names, str):
 		names = json.loads(names)

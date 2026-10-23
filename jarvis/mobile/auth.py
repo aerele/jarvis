@@ -126,7 +126,7 @@ def get_mobile_token(device_label: str | None = None, platform: str | None = Non
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_mobile_devices() -> list[dict]:
 	"""The session user's paired-device inventory (no secrets, own rows only).
 
@@ -236,7 +236,7 @@ def _qr_svg_b64(data: str) -> str:
 		stream.close()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_pairing_qr() -> dict:
 	"""Return an SVG QR (base64) encoding the site connection details, plus the
 	raw payload. Shown in the Jarvis web app for the phone to scan during
@@ -249,7 +249,7 @@ def get_pairing_qr() -> dict:
 	return {"svg": _qr_svg_b64(data), "payload": payload}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_pwa_qr() -> dict:
 	"""SVG QR (base64) of the mobile PWA URL, plus the URL. Scanning it opens the
 	PWA on the phone: Android offers to install it (the PWA's own
