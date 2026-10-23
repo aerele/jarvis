@@ -846,12 +846,14 @@ class TestOrdinaryWritesUnchanged(_RouteBase):
 
 
 class TestRunMethodGuard(_RouteBase):
-	"""R2-13: run_method stays open (a card normally, none in the uncarded modes);
-	the ORM guard judges what it saves on every route."""
+	"""R2-13: run_method stays open (a card normally, none in an armed macro); the ORM
+	guard judges what it saves on every route. Auto mode and "confirm all" always card
+	it, so these cases run in an armed macro (``skip_confirmation``), the uncarded route
+	that is left."""
 
-	def test_an_ordinary_method_runs_uncarded_in_auto_mode(self):
+	def test_an_ordinary_method_runs_uncarded_in_an_armed_macro(self):
 		frappe.set_user("Administrator")
-		conv = self._conv(auto_mode=1)
+		conv = self._conv(skip_confirmation=1)
 		r = self._run("run_method", {"method": "jarvis.tests.test_write_guard.wg_insert_todo"}, conv)
 		self.assertTrue(r["ok"], r)
 		self.assertIsInstance(r["data"], str, "the method's own return value, not a parked card")
@@ -868,14 +870,14 @@ class TestRunMethodGuard(_RouteBase):
 		call = {"method": "frappe.client.insert", "args": {"doc": cf}}
 		r = self._run("run_method", call, self._conv())
 		self.assertEqual(r["data"]["status"], "pending_confirmation", "a card in ordinary chat")
-		r = self._run("run_method", call, self._conv(auto_mode=1))
+		r = self._run("run_method", call, self._conv(skip_confirmation=1))
 		self.assertEqual(r["error"]["code"], "structure_refused", r)
 		r = api.dispatch_confirmed("run_method", call, allow_risky=True)
 		self.assertEqual(r["error"]["code"], "structure_refused", r)
 		self.assertFalse(frappe.db.exists("Custom Field", {"dt": "ToDo", "fieldname": "jarvis_wg_rm"}))
 		cs = {"doctype": "Client Script", **_client_script_values(PREFIX + "rm-cs")}
 		call = {"method": "frappe.client.insert", "args": {"doc": cs}}
-		r = self._run("run_method", call, self._conv(auto_mode=1))
+		r = self._run("run_method", call, self._conv(skip_confirmation=1))
 		self.assertFalse(r["ok"], r)
 		self.assertEqual(r["error"]["code"], "sensitive_refused")
 		self.assertFalse(frappe.db.exists("Client Script", PREFIX + "rm-cs"))
@@ -885,7 +887,7 @@ class TestRunMethodGuard(_RouteBase):
 
 	def test_custom_method_root_insert_carded_admitted_uncarded_refused(self):
 		"""A whitelisted method inserting a Property Setter / User Permission itself:
-		parked in chat; refused by the ORM when it runs uncarded (auto mode, filed
+		parked in chat; refused by the ORM when it runs uncarded (armed macro, filed
 		refused against the doctype it refused, never ok), and admitted once a human
 		confirmed the run_method card (R2-13)."""
 		frappe.set_user("Administrator")
@@ -895,7 +897,7 @@ class TestRunMethodGuard(_RouteBase):
 		before = frappe.db.count(
 			AGENT_WRITE, {"tool": "run_method", "outcome": "refused", "ref_doctype": "Property Setter"}
 		)
-		r = self._run("run_method", {"method": method}, self._conv(auto_mode=1))
+		r = self._run("run_method", {"method": method}, self._conv(skip_confirmation=1))
 		self.assertEqual(r["error"]["code"], "sensitive_refused", r)
 		self.assertFalse(_ps_exists("bold"))
 		self.assertEqual(
@@ -911,7 +913,7 @@ class TestRunMethodGuard(_RouteBase):
 				"method": "jarvis.tests.test_write_guard.wg_insert_user_permission",
 				"args": {"user": TEST_USER},
 			},
-			self._conv(auto_mode=1),
+			self._conv(skip_confirmation=1),
 		)
 		self.assertEqual(r["error"]["code"], "sensitive_refused", r)
 		self.assertFalse(frappe.db.exists("User Permission", {"user": TEST_USER, "allow": "User"}))
@@ -927,7 +929,7 @@ class TestRunMethodGuard(_RouteBase):
 		r = self._run(
 			"run_method",
 			{"method": "jarvis.tests.test_write_guard.wg_ignore_validate_update", "args": {"name": ps.name}},
-			self._conv(auto_mode=1),
+			self._conv(skip_confirmation=1),
 		)
 		self.assertEqual(r["error"]["code"], "sensitive_refused", r)
 		self.assertEqual(frappe.db.get_value("Property Setter", ps.name, "value"), "1")
@@ -967,9 +969,11 @@ class TestConfirmedRunMethod(_RouteBase):
 		email = _quiet_user(PREFIX + "rp@example.com", enabled=1)
 		method = "frappe.core.doctype.user.user.reset_password"
 		key = frappe.db.get_value("User", email, "reset_password_key")
-		# Auto mode: run uncarded (R2-13); its User write is refused at the save and
+		# Armed macro: run uncarded (R2-13); its User write is refused at the save and
 		# reported as refused although the method swallows the exception.
-		r = self._run("run_method", {"method": method, "args": {"user": email}}, self._conv(auto_mode=1))
+		r = self._run(
+			"run_method", {"method": method, "args": {"user": email}}, self._conv(skip_confirmation=1)
+		)
 		self.assertFalse(r["ok"], r)
 		self.assertEqual(r["error"]["code"], "sensitive_refused")
 		uncarded, call = self._both(method, {"user": email})
@@ -1081,7 +1085,9 @@ class TestEveryConfirmRoute(_RouteBase):
 		r = self._run("run_import", {"doctype": "Custom Field", "file_url": "/x.csv"}, self._conv())
 		self.assertEqual(r["error"]["code"], "structure_refused", r)
 		with patch("jarvis.api._run_covered_write") as covered:
-			self._run("run_import", {"doctype": "Web Page", "file_url": "/x.csv"}, self._conv(auto_mode=1))
+			self._run(
+				"run_import", {"doctype": "Web Page", "file_url": "/x.csv"}, self._conv(skip_confirmation=1)
+			)
 		self.assertFalse(covered.called, "M4: a conditional doctype's import never runs uncarded")
 
 	def test_sheet_apply(self):
@@ -1243,9 +1249,9 @@ class TestSavedRoutesCycle3(_RouteBase):
 
 		self.addCleanup(_drop)
 		call = {"method": "frappe.client.delete", "args": {"doctype": "DocType", "name": name}}
-		# Auto mode: a delete through run_method parks its own card (the delete
+		# Armed macro: a delete through run_method parks its own card (the delete
 		# brake), and run uncarded anyway it is refused before the delete.
-		r = self._run("run_method", call, self._conv(auto_mode=1))
+		r = self._run("run_method", call, self._conv(skip_confirmation=1))
 		self.assertEqual(r["data"]["status"], "pending_confirmation", r)
 		r = api.dispatch_confirmed("run_method", call, uncarded=True)
 		self.assertEqual(r["error"]["code"], "brake_refused", r)
@@ -1280,7 +1286,7 @@ class TestSavedRoutesCycle3(_RouteBase):
 				"data": {"value": "0"},
 			},
 		}
-		r = self._run("run_method", call, self._conv(auto_mode=1))
+		r = self._run("run_method", call, self._conv(skip_confirmation=1))
 		self.assertTrue(r["ok"], r)
 		job = jobs.calls[-1]
 		self.assertEqual(job["func"], wr._GUARDED_EXECUTE_JOB, "the job runs through the guard")
@@ -1497,7 +1503,7 @@ class TestSavedRoutesCycle3(_RouteBase):
 		email = _quiet_user(PREFIX + "field@example.com", enabled=1)
 		self.addCleanup(lambda: (frappe.delete_doc_if_exists("User", email, force=True), frappe.db.commit()))
 		emp = self._employee()
-		conv = self._conv(auto_mode=1)
+		conv = self._conv(skip_confirmation=1)
 		set_user = {
 			"method": "frappe.client.set_value",
 			"args": {"doctype": "Employee", "name": emp.name, "fieldname": "user_id", "value": email},
@@ -1522,7 +1528,7 @@ class TestSavedRoutesCycle3(_RouteBase):
 			"method": "frappe.client.set_value",
 			"args": {"doctype": "Employee", "name": emp.name, "fieldname": "status", "value": "Inactive"},
 		}
-		r = self._run("run_method", call, self._conv(auto_mode=1))
+		r = self._run("run_method", call, self._conv(skip_confirmation=1))
 		self.assertEqual(r["error"]["code"], "sensitive_refused", r)
 		self.assertEqual(frappe.db.get_value("User", email, "enabled"), 1, "the login was not cut")
 		self.assertEqual(
@@ -1560,7 +1566,7 @@ class TestSavedRoutesCycle3(_RouteBase):
 		r = self._run(
 			"run_method",
 			{"method": "frappe.client.save", "args": {"doc": frappe.as_json(doc)}},
-			self._conv(auto_mode=1),
+			self._conv(skip_confirmation=1),
 		)
 		self.assertEqual(r["error"]["code"], "sensitive_refused", r)
 		self.assertFalse(frappe.get_all("Portal User", {"parent": customer.name}))
