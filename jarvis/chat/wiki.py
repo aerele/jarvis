@@ -995,7 +995,7 @@ def _nudge_entities(conversation_id: str) -> list[dict]:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def dismiss_nudge(conversation: str) -> dict:
 	"""Mute wiki nudges for one conversation for 7 days (owner-only)."""
 	_require_system_user()
@@ -1858,7 +1858,7 @@ def _publish_review_pending(queue: str) -> None:
 # --------------------------------------------------------------------------- #
 # wiki promotion (User page -> Role/Org, via the Review board)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def request_wiki_promotion(page: str, to_scope: str, target_role: str = "", note: str = "") -> dict:
 	"""Ask a reviewer to widen one of the caller's OWN User-scope wiki pages to
 	Role/Org visibility (Skills-area rework part 3). Snapshots the body into a
@@ -1909,7 +1909,7 @@ def request_wiki_promotion(page: str, to_scope: str, target_role: str = "", note
 	return {"ok": True, "request": req.name, "page": doc.slug}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def my_wiki_promotion(page: str) -> dict:
 	"""The caller's MOST-RECENT promotion request for one of their OWN wiki pages
 	— the requester-side status read powering the "requested → approved /
@@ -2088,7 +2088,7 @@ def _promote_body_into_target(req, reviewer: str) -> str:
 # --------------------------------------------------------------------------- #
 # SPA endpoints
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @list_filters.filter_errors_to_envelope
 def list_wiki_pages_page(
 	search: str | None = None,
@@ -2204,7 +2204,7 @@ def list_wiki_pages_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_wiki_caps() -> dict:
 	"""The caller's wiki capabilities + the SM settings surfaced in the Wiki
 	tab header (knowledge language, last lint run)."""
@@ -2237,7 +2237,7 @@ def get_wiki_caps() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_wiki_page(slug: str) -> dict:
 	"""One full wiki page by slug (any status — the editor can open an
 	archived page). Invisible pages 404 as "not found" (existence is not
@@ -2280,7 +2280,7 @@ def get_wiki_page(slug: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_wiki_page(
 	title: str,
 	page_type: str,
@@ -2355,7 +2355,7 @@ def create_wiki_page(
 	return {"ok": True, "slug": doc.slug}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_wiki_page(
 	slug: str,
 	body_md: str | None = None,
@@ -2388,7 +2388,7 @@ def save_wiki_page(
 	return {"ok": True, "slug": doc.slug, "modified": str(doc.modified)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def archive_wiki_page(slug: str) -> dict:
 	"""Retire a page, write matrix enforced (``can_archive_page``: Org=SM;
 	Role=KW Manager holding the role, or SM; User per matrix). Archived pages
@@ -2407,7 +2407,7 @@ def archive_wiki_page(slug: str) -> dict:
 	return {"ok": True, "slug": doc.slug}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def delete_wiki_page(slug: str) -> dict:
 	"""Permanently delete a page. Same authority as archiving (the write
 	matrix's strongest right on the page); archive remains the reversible
@@ -2425,7 +2425,7 @@ def delete_wiki_page(slug: str) -> dict:
 	return {"ok": True, "slug": slug}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def restore_wiki_page(slug: str) -> dict:
 	"""Undo an archive (same permission as archiving) — the SPA's escape hatch
 	for a one-click accidental archive."""
@@ -2442,7 +2442,7 @@ def restore_wiki_page(slug: str) -> dict:
 	return {"ok": True, "slug": doc.slug}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_knowledge_language(value: str) -> dict:
 	"""Jarvis Admin / System Manager (PART 4 REVISED, TASK 45): set the org-wide
 	knowledge language (D6) consumed by the wiki/voice-facts extraction prompts.
@@ -2456,7 +2456,7 @@ def set_knowledge_language(value: str) -> dict:
 	return {"ok": True, "knowledge_language": value}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def sync_wiki_mirror_now() -> dict:
 	"""Jarvis Admin / System Manager (PART 4 REVISED, TASK 45): queue a FULL
 	org-wiki mirror sync into the tenant container workspace (same deduped job as
@@ -2468,7 +2468,7 @@ def sync_wiki_mirror_now() -> dict:
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def run_wiki_lint_now() -> dict:
 	"""Jarvis Admin / System Manager (PART 4 REVISED, TASK 45): run the wiki
 	health check (deterministic lint pass) now and return its summary (also
@@ -2479,7 +2479,7 @@ def run_wiki_lint_now() -> dict:
 	return {"ok": True, "summary": wiki_lint.run_lint()}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_wiki_graph() -> dict:
 	"""Caller-scoped Obsidian-style graph for the tenant Knowledge Graph SPA:
 	``{nodes, edges, counts}`` over ONLY the Active pages the caller may see.
@@ -2507,7 +2507,7 @@ def get_wiki_graph() -> dict:
 	return wiki_graph._build_graph_from_pages(pages, include_content=True)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_wiki_graph_history() -> list:
 	"""Measured Knowledge-Evolution series: the daily ORG-WIDE graph totals
 	recorded by ``wiki_graph.record_history_snapshot`` (one row/day). Powers the
@@ -2559,7 +2559,7 @@ def _parse_manual_links(raw) -> list:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def add_wiki_link(slug: str, target_slug: str) -> dict:
 	"""Curate a ``[[link]]`` from ``slug`` → ``target_slug``, stored OUT of
 	``body_md`` in ``manual_links``.
@@ -2610,7 +2610,7 @@ def add_wiki_link(slug: str, target_slug: str) -> dict:
 	return {"ok": True, "slug": slug, "manual_links": links}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def remove_wiki_link(slug: str, target_slug: str) -> dict:
 	"""Undo a curated ``[[link]]`` from ``slug`` -> ``target_slug`` in
 	``manual_links``.

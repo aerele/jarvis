@@ -195,7 +195,7 @@ def _origin_page_from_context(context: str | dict | None) -> str:
 	return origin if origin in _BUILDER_ORIGINS else ""
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_tools() -> list[str]:
 	"""Tool names the agent can call, from the bench registry (the agent
 	plugin registers one ``jarvis__<name>`` per entry). Drives the chat's
@@ -207,7 +207,7 @@ def list_tools() -> list[str]:
 	return _registry_list_tools()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_conversations(refresh: bool = False) -> list[dict]:
 	"""Return active, non-empty conversations owned by the current user, newest
 	first.
@@ -298,7 +298,7 @@ def list_conversations(refresh: bool = False) -> list[dict]:
 	return rows
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def search_conversations(search: str = "", start: int = 0, page_length: int = 20) -> dict:
 	"""Title-only search over the caller's ACTIVE conversations (⌘K palette,
 	DESIGN-V3 §8.2 / D40). Owner-scoped in SQL; LIKE wildcards escaped; empty
@@ -607,7 +607,7 @@ def _search_records(search: str, limit: int) -> list[dict]:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def search_workspace(search: str = "", limit: int = 6) -> dict:
 	"""Full desk search over the caller's Frappe desk for the ⌘K palette,
@@ -655,7 +655,7 @@ def _undo_first_send_auto_mode(conversation: str, conv_changes: dict) -> None:
 		frappe.db.set_value(CONV, conversation, {"auto_mode": 0, "auto_mode_at": None}, update_modified=False)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_or_focus_empty(origin_page: str = "") -> str:
 	"""Return an empty active conversation for the current user, creating
 	one only if no empty conversation already exists.
@@ -721,7 +721,7 @@ def create_or_focus_empty(origin_page: str = "") -> str:
 	return create_conversation(origin_page=origin)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_conversation(
 	conversation: str, limit: int = 0, before: int = 0, refresh: str | None = None, after: int = 0
 ) -> dict:
@@ -1093,7 +1093,7 @@ def _doc_refs(rows: list) -> list:
 	return refs
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_tool_detail(message: str) -> dict:
 	"""The whole input and output of one tool row a history page sent compact
 	(``tool_result_compact``). Gated like ``get_conversation``: the caller must own
@@ -1223,7 +1223,7 @@ def _live_turn_steps(messages: list) -> None:
 		m["turn_state"] = turn.state
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 	"""Return one canvas artifact's render-ready content for inline display.
 
@@ -1314,7 +1314,7 @@ def _artifact_mime(item: dict) -> str:
 	}.get(ext, "application/octet-stream")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def preview_file(file_url: str) -> dict:
 	"""Render-ready preview for the artifact side panel.
 
@@ -1351,7 +1351,7 @@ def preview_file(file_url: str) -> dict:
 	return {"kind": kind or "binary"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_conversation(origin_page: str = "") -> str:
 	"""Create an empty conversation owned by the current user; return its name."""
 	require_jarvis_access()
@@ -1617,7 +1617,7 @@ def _unlink_macro_runs(conversation: str) -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def rename_conversation(conversation: str, title: str) -> dict:
 	"""Rename a conversation (owner-only, enforced explicitly)."""
 	require_jarvis_access()
@@ -1644,7 +1644,7 @@ def rename_conversation(conversation: str, title: str) -> dict:
 	return {"ok": True, "data": {"title": title}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_star(conversation: str, starred: str | int | bool) -> dict:
 	"""Star/unstar a conversation (owner-only, enforced explicitly). Starred
 	chats are listed first and grouped under 'Starred' in the sidebar."""
@@ -3121,7 +3121,7 @@ def _subscription_connect_providers() -> list[dict]:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_model_catalog_ui() -> dict:
 	"""Catalog slice the pool editor and subscription card need, independent of
 	get_chat_ui_settings so the onboarding wizard (which never calls that) works.
@@ -3142,7 +3142,7 @@ def get_model_catalog_ui() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_chat_ui_settings() -> dict:
 	"""Return the bench-side LLM settings the chat UI needs to render the
 	model picker (provider label, current default model, auth mode, and the
@@ -3436,7 +3436,7 @@ def _tool_runs(conversation: str) -> list[dict]:
 	return runs
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_tool_activity(conversation: str, limit: int = 20) -> dict:
 	"""Recent tool runs in ``conversation`` for the Settings Activity pane.
 
@@ -3510,7 +3510,7 @@ def _measured_usage(user: str) -> dict | None:
 	return measured
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_usage(conversation: str | None = None) -> dict:
 	"""Estimated token usage for the current user — this chat, this month, and
 	all-time — plus the monthly budget so the UI can draw a meter.
@@ -3568,7 +3568,7 @@ def get_usage(conversation: str | None = None) -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_conversation_context(conversation: str) -> dict:
 	"""Context-window meter for one conversation (owner only). Bench snapshot
 	only; never calls the runtime."""
@@ -3602,7 +3602,7 @@ def _cap_reading(user: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 	"""Summarise older turns of one conversation (owner only). Refuses with a
 	typed reason while a turn or another compaction is in flight; otherwise
@@ -3648,7 +3648,7 @@ def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 	return compaction.start_compaction(conversation, frappe.session.user, clean)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 	"""Set or clear the per-conversation model override.
 
@@ -3717,7 +3717,7 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 	return {"ok": True, "data": {"effective_model": model}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def warm_session() -> dict:
 	"""Fire-and-forget: warm this tenant's agent prefix cache so the next
 	new-chat first turn skips the cold prefill. Best-effort; always ok.
@@ -3736,7 +3736,7 @@ def warm_session() -> dict:
 	return {"ok": True, "enqueued": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_conversation_thinking(conversation: str, thinking: str | None = None) -> dict:
 	"""Set or clear the per-conversation thinking effort (low/medium/high).
 
@@ -5179,7 +5179,7 @@ _NON_EDIT_FIELDTYPES = {
 }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_doctype_fields(doctype: str) -> dict:
 	"""Field metadata (fieldtype + options) for a DocType, so the chat SPA can
 	render the record-edit card with proper controls (Link → searchable picker,

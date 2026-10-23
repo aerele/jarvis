@@ -988,7 +988,7 @@ def view_filters_enabled(view_key: str) -> bool:
 	return view_key not in _disabled_views()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_filters_capabilities() -> dict:
 	"""Per-view ``{view_key: enabled}`` for every MIGRATED view (P1-05).
@@ -1050,7 +1050,7 @@ def emit_filter_telemetry(
 		pass
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 @filter_errors_to_envelope
 def get_list_filter_schema(view_key: str) -> dict:

@@ -271,7 +271,7 @@ def _store_agent_token(settings, token: str) -> None:
 		settings.db_set("agent_token_issued_at", frappe.utils.now_datetime())
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def sync_connection(timeout_s: int | None = None) -> dict:
 	"""Pull the container connection from admin and store it. Daily scheduled +
 	the page's 'Sync connection' button + the reconnect landing. No-op until
@@ -318,12 +318,12 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	return {"synced": False, "tenant_status": data.get("tenant_status", "pending")}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_plans() -> list:
 	return admin_client.get_plans()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_payment_providers() -> dict:
 	"""Gateways the wizard may offer, already narrowed to what THIS bench can
 	render: ``{providers: [...], default: "..."}``.
@@ -370,14 +370,14 @@ def _payment_ui_v2_enabled() -> bool:
 	return bool(value)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_preset_catalog() -> list:
 	"""Preset catalog for the desk onboarding step + the /ai SPA route.
 	Thin wrapper over admin_client (fetch/cache/bundled fallback)."""
 	return admin_client.get_preset_catalog()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def capture_onboarding_lead(
 	email: str | None = None,
 	company: str | None = None,
@@ -431,7 +431,7 @@ def capture_onboarding_lead(
 		return {"ok": False}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_terms_url() -> dict:
 	"""The public Terms & Conditions URL (marketing site) for the Details-step
 	checkbox link. Best-effort: ``{"url": ""}`` on any failure so the checkbox
@@ -568,7 +568,7 @@ def _adopt_orphan_capture(account_ref: str, consumed_capture_ids: list) -> str:
 	return blob
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_llm_pool(
 	models: str | list,
 	preset: str | None = None,
@@ -918,7 +918,7 @@ _DISCONNECTED_LLM_FIELDS = {
 _POOL_MODEL_DOCTYPE = "Jarvis LLM Pool Model"
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def disconnect_llm() -> dict:
 	"""Tear the customer's whole LLM connection down: delete every credential this
 	bench stores AND ask admin to delete them from the container.
@@ -1030,7 +1030,7 @@ def _clear_llm_secrets(settings) -> None:
 	clear_settings_password(settings, "llm_api_key")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def start_signup(
 	email: str,
 	company: str,
@@ -1317,7 +1317,7 @@ def _no_signup_here() -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_onboarding_state() -> dict:
 	"""Where this site's signup actually stands, from admin, plus what this
 	bench knows locally.
@@ -1401,14 +1401,14 @@ def _raw_gstin_info(gstin: str):
 	return _ic._get_gstin_info(gstin, throw_error=False)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def gstin_autofill_available() -> dict:
 	"""Whether to offer the onboarding GSTIN 'Fetch details' button on this site."""
 	require_jarvis_admin()
 	return {"available": _gstin_autofill_available()}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def gstin_autofill(gstin: str) -> dict:
 	"""Prefill billing party details from a GSTIN via THIS site's own India Compliance.
 
@@ -1467,7 +1467,7 @@ def _clean_registry_value(value, maxlen):
 	return cleaned.strip()[:maxlen]
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def initiate_signup_payment(
 	plan: str | None = None,
 	provider: str | None = None,
@@ -1567,7 +1567,7 @@ def initiate_signup_payment(
 	return onboarding_contract.success(data, context=context)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def check_signup_payment_status() -> dict:
 	"""Ask the PROVIDER what happened to this signup's payment, and converge.
 
@@ -1614,7 +1614,7 @@ def check_signup_payment_status() -> dict:
 	return onboarding_contract.success(data, context=context)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_billing(billing: dict) -> dict:
 	"""Authenticated billing-only edit facade (Plan 01, post-intent Review & Pay
 	"Edit"): forwards to admin's ``update_pending_billing`` on the owned pending
@@ -1628,7 +1628,7 @@ def update_billing(billing: dict) -> dict:
 	return _surface(admin_client.update_pending_billing, billing)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reconnect_available(email: str, company: str = "") -> dict:
 	"""Would a reconnect for this (email, company) find an account to reconnect?
 
@@ -1658,7 +1658,7 @@ def reconnect_available(email: str, company: str = "") -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def start_account_reconnect(email: str, company: str = "") -> dict:
 	"""Fresh-bench recovery: ask admin to email a reconnect CODE to the
 	REGISTERED address of an existing paid account (wiped-site scenario — the
@@ -1672,7 +1672,7 @@ def start_account_reconnect(email: str, company: str = "") -> dict:
 	return _surface(admin_client.request_account_reconnect, email, company)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	"""Redeem the reconnect code the customer received BY EMAIL (the customer-
 	started request path). Only a correct code releases anything: admin rotates and
@@ -1683,7 +1683,7 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	return _land_reconnect(data)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def redeem_reconnect_code(code: str, email: str = "") -> dict:
 	"""Redeem an OPERATOR-ISSUED reconnect code on this fresh bench — the
 	request-less counterpart to check_account_reconnect. The customer got the code
@@ -1791,7 +1791,7 @@ def _installed_apps() -> set[str]:
 		return set()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_account_defaults() -> dict:
 	"""Prefill for the onboarding Account step so the customer doesn't retype what
 	the site already knows: the caller's email + a default company. Company is the
@@ -1948,7 +1948,7 @@ def _resolve_company_billing_address(company: str) -> dict | None:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_company_onboarding_defaults(company: str) -> dict:
 	"""ERP-derived billing defaults for ONE selected Company (Plan 01): its primary
 	Contact's phone and its primary billing Address (+ optional India Compliance
@@ -1992,7 +1992,7 @@ def get_company_onboarding_defaults(company: str) -> dict:
 	return {"ok": True, "data": data}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def check_signup_payment_state() -> dict:
 	"""Wizard-poll endpoint for the email-verification window.
 
@@ -2024,7 +2024,7 @@ def check_signup_payment_state() -> dict:
 	return onboarding_contract.strip_credentials(data)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def finish_payment(payload: dict | str) -> dict:
 	"""Confirm Checkout success → store the returned container connection.
 
@@ -2066,7 +2066,7 @@ def finish_payment(payload: dict | str) -> dict:
 	return onboarding_contract.strip_credentials(data)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def renew(provider: str | None = None, target_plan: str | None = None) -> dict:
 	"""Existing customer initiates a renewal payment; returns a pay-page token
 	the billing page top-level-navigates to (plan-09 WS8). The admin-hosted
@@ -2141,7 +2141,7 @@ _WIPE_DOCTYPES = (
 )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_llm: bool = False) -> dict:
 	"""Self-serve workspace reset: the control plane rebuilds the container NOW
 	(subscription kept), then this site disconnects its agent transport and polls
@@ -2182,7 +2182,7 @@ def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_ll
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reset_onboarding(wipe_data: bool = True) -> dict:
 	"""Customer-facing "Reset onboarding" (Jarvis Settings button): clear this
 	bench's connection + LLM credentials and — by default, matching the
@@ -2257,7 +2257,7 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before cache bust
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def workspace_reset_state() -> dict:
 	"""Poll endpoint for the reset card: admin request state + serving readiness.
 	When admin reports the new container Ready, persists the fresh connection and
@@ -2397,7 +2397,7 @@ def reconcile_pending_workspace_reset() -> None:
 		frappe.log_error(title="Jarvis: workspace-reset reconcile failed", message=frappe.get_traceback())
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_llm_creds(
 	provider: str,
 	model: str,
@@ -2510,7 +2510,7 @@ def save_llm_creds(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_config() -> dict:
 	"""Current effective LLM pool for the desk step + /ai SPA: models[] rows,
 	preset, routing_mode, derived proxy_active. Reads models[] (NOT the legacy
@@ -2557,7 +2557,7 @@ def get_llm_config() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_sync_status() -> dict:
 	"""Lightweight poller for the onboarding + account pages.
 
@@ -2690,7 +2690,7 @@ _RESYNC_COOLDOWN_S = 180
 _RESYNC_COOLDOWN_KEY = "jarvis:resync_llm_cooldown"
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def resync_llm() -> dict:
 	"""Re-drive this workspace's saved AI configuration through admin. The customer
 	half of #713: a way forward from a sync that failed.
