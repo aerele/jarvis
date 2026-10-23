@@ -1207,6 +1207,9 @@ _WRITE_TOOLS = frozenset(
 		"update_wiki",
 		# A one-time macro: work the user asked to run later, as them.
 		"schedule_run",
+		# Rewrites the user's durable memory, which every later chat reads. Audited, not
+		# gated; a File Box, agent or scheduled run is refused it (remember.py).
+		"remember",
 		# Audited but NOT gated (see _GATED_WRITES comment below):
 		# download_pdf/export_excel both insert a private, unattached File doc
 		# - real DB writes that need an audit trail, not a
@@ -1335,11 +1338,10 @@ FILE_BOX_WIKI_SOURCE = "File Box Wiki"
 _DESTRUCTIVE = frozenset(
 	{"delete_doc", "cancel_doc", "amend_doc", "send_email", "apply_workflow_action", "run_import"}
 )
-# Writes that auto-apply may fast-path without a confirmation click. Strictly
-# the reversible create/update pair, per spec. submit_doc, run_method and every
-# _DESTRUCTIVE tool ALWAYS park even with auto-apply on: run_method's
-# default-unrestricted allowlist under auto-apply + a prompt injection would be
-# an unconfirmed arbitrary whitelisted method call, so it never fast-paths.
+# The create/update pair: the only gated tools whose catalog badge reads "asks you
+# first". They ask in ordinary chat and run without a card in the uncarded modes
+# (auto mode, "confirm all", an armed macro, an approved skill run). Every other
+# gated tool's badge reads "always asks" (see ``_gating_badge``).
 _AUTO_APPLYABLE = frozenset({"create_doc", "update_doc"})
 
 
@@ -1352,11 +1354,17 @@ def _gating_badge(tool: str) -> str:
 	armed macro (skip_confirmation), an approved skill run (skill_autorun), and a
 	request-scoped "confirm all" (request_autorun), and a per-chat auto mode
 	(auto_mode, chosen with the chat's first message) can run some tools uncarded -
-	the catalog legend says so. (Admin Auto-Apply was removed.) Total over any string.
+	the catalog legend says so. submit_doc, send_email, run_import and run_method are
+	not among those for auto mode and "confirm all": they always ask there
+	(``_CARDED_IN_AUTO``). (Admin Auto-Apply was removed.) Total over any string.
 	"""
 	if tool not in _WRITE_TOOLS:
 		return "reads_only"
-	if tool in _DESTRUCTIVE or (tool in _GATED_WRITES and tool not in _AUTO_APPLYABLE):
+	if (
+		tool in _DESTRUCTIVE
+		or tool in _CARDED_IN_AUTO
+		or (tool in _GATED_WRITES and tool not in _AUTO_APPLYABLE)
+	):
 		return "always_asks"
 	if tool in _AUTO_APPLYABLE:
 		return "asks_to_approve"
@@ -1400,6 +1408,13 @@ _BRAKE = frozenset(
 # approved skill). Bulk covered writes skip too; the F16 over-size cap still bounces
 # an oversized batch.
 _COVERED = _GATED_WRITES - _BRAKE
+# Auto mode and a typed "confirm all" run the covered tools uncarded EXCEPT these four,
+# which always show their confirm card there, as the _BRAKE tools do: a submit posts and
+# locks a document, an email goes out, an import writes in bulk, and a run_method calls
+# any whitelisted method. An armed macro and an approved skill run are unchanged: they
+# use _COVERED, and run these four uncarded.
+_CARDED_IN_AUTO = frozenset({"submit_doc", "send_email", "run_import", "run_method"})
+_AUTO_COVERED = _COVERED - _CARDED_IN_AUTO
 # Back-compat aliases: the gate branches and the existing suites refer to the
 # per-mode names; both modes now point at the SAME unified sets so they cannot drift
 # (design §3 A4 - the old macro/skill divergence on create_custom_skill is gone).
@@ -3662,15 +3677,16 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			except Exception:
 				pass  # the park below is the safe outcome either way
 		# Request-scoped "confirm all" (design Layer B): the user approved this whole
-		# request's fan-out at once, so a COVERED write (_GATED_WRITES - _BRAKE) runs
-		# uncarded while the request is live - armed by _typed_confirmation / the upfront
-		# detector, sliding request_autorun_at within the TTL. The brake is NOT covered,
-		# so delete/cancel/amend/create_custom_skill/connector still park (the brake
-		# protects what the user has not seen). Placed AFTER the skill-autorun branch (an
+		# request's fan-out at once, so a write in _AUTO_COVERED (_COVERED less the four
+		# _CARDED_IN_AUTO tools) runs uncarded while the request is live - armed by
+		# _typed_confirmation / the upfront detector, sliding request_autorun_at within
+		# the TTL. The brake is NOT covered, so delete/cancel/amend/create_custom_skill/
+		# connector still park (the brake protects what the user has not seen); so do
+		# submit_doc, send_email, run_import and run_method. Placed AFTER the skill-autorun branch (an
 		# approved skill run keeps its own provenance) and AFTER the File Box wiki fence.
 		# Bulk covered writes skip too (one approval covers the batch); the F16 over-size
 		# cap above still bounces an oversized batch.
-		if tool in _COVERED and not _must_card and _conv_flags.get("request_autorun"):
+		if tool in _AUTO_COVERED and not _must_card and _conv_flags.get("request_autorun"):
 			from jarvis.chat import turn_message_binding
 
 			# Cancel-gate FIRST (Halt): stop_run sets a transport-independent run-cancel
@@ -3715,11 +3731,12 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# Per-chat auto mode (#581): the user chose it with the chat's first message and
 		# it never turns off, so unlike request_autorun there is no TTL and a failed
 		# write does not end it. The brake is not covered, so delete/cancel/amend/
-		# create_custom_skill/connector writes still park below. Placed AFTER the
+		# create_custom_skill/connector writes still park below, and so do the four
+		# _CARDED_IN_AUTO tools (submit_doc, send_email, run_import, run_method). Placed AFTER the
 		# request branch (an armed request keeps its own provenance and TTL) and after
 		# the File Box wiki fence. Halt refuses the write and clears the cancel signal
 		# but leaves the mode on (it is a chat property, not a run).
-		if tool in _COVERED and not _must_card and _conv_flags.get("auto_mode"):
+		if tool in _AUTO_COVERED and not _must_card and _conv_flags.get("auto_mode"):
 			from jarvis.chat import turn_message_binding
 
 			if turn_message_binding.is_run_cancel_requested(conv):
