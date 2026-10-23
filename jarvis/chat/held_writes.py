@@ -162,15 +162,10 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		return None
 	if not isinstance(args, dict):  # fail closed: the policy can't read the call
 		return _refuse("InvalidArgumentError", "args must be a JSON object; nothing was written.")
-<<<<<<< HEAD
-=======
-	if tool == "call_connector" and api._connector_call_is_safe_read(args):
-		return None
 	if tool == "remember":  # the user's durable memory: a person writes it, in chat
 		from jarvis.tools.remember import UNATTENDED_MESSAGE
 
 		return _refuse("FileBoxRefusedError", UNATTENDED_MESSAGE)
->>>>>>> c3b4eb0 (remember: classed as a write; refused in File Box, delegated and scheduled runs)
 	from jarvis.chat import held_sheets
 
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before lock
