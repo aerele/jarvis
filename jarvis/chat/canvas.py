@@ -154,8 +154,15 @@ def fetch_canvas(agent_url: str, token: str, name: str) -> tuple[bytes, str] | N
 		return None
 	url = f"{base}{get_profile().canvas_route}{name}"
 	try:
-		r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+		# The bearer token must never follow a redirect off the gateway.
+		r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20, allow_redirects=False)
 	except Exception:
+		return None
+	if 300 <= r.status_code < 400:
+		frappe.log_error(
+			title="chat canvas: gateway redirect refused",
+			message=f"Canvas fetch for {name} answered HTTP {r.status_code}; redirects are not followed, so the artifact was not fetched.",
+		)
 		return None
 	if r.status_code != 200 or not r.content:
 		return None
@@ -190,7 +197,7 @@ def _gateway_fakes_missing_canvas_as_ok(agent_url: str, token: str) -> bool:
 	sentinel = f"documents/jarvis-canvas-probe-{uuid.uuid4().hex}/index.html"
 	url = f"{base}{get_profile().canvas_route}{sentinel}"
 	try:
-		r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+		r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10, allow_redirects=False)
 	except Exception:
 		return False
 	return r.status_code != 404

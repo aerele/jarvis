@@ -1,4 +1,4 @@
-"""Owner-permission-checked attachment reads for a named chat recipient."""
+"""Attachment reads for a named chat recipient, checked against owner and reader."""
 
 from __future__ import annotations
 
@@ -62,7 +62,12 @@ def read_file(conversation, url: str):
 		# They must never widen the exact canvas URL's authorization.
 		if row.file_url != url:
 			continue
-		if frappe.has_permission("File", "read", doc=row, user=conversation.owner):
+		# The chat text is shared; a file opens only when the owner and the
+		# reader can both read it under Frappe's own File permission.
+		if all(
+			frappe.has_permission("File", "read", doc=row, user=user)
+			for user in dict.fromkeys((conversation.owner, frappe.session.user))
+		):
 			return row
 	_refuse()
 

@@ -185,7 +185,7 @@ def _allowed_users_map() -> dict[str, list[str]]:
 # --------------------------------------------------------------------------- #
 # catalog + install state (read)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_agents() -> list[dict]:
 	"""The full catalog plus THIS owner's install/enable/schedule state per
@@ -420,7 +420,7 @@ def _enriched_catalog() -> list[dict]:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_agents_page(
 	tab: str = "available",
@@ -489,7 +489,7 @@ def list_agents_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_agent(agent_slug: str) -> dict:
 	"""One listing + the CURRENT user's installation for the agent detail page
@@ -639,7 +639,7 @@ def get_agent(agent_slug: str) -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_installations() -> list[dict]:
 	"""This owner's installations, with the linked listing title/nature/status."""
@@ -715,7 +715,7 @@ def _parse_name_list(raw, what: str) -> list[str]:
 	return clean
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_agent_access(
 	agent_slug: str,
 	roles: str | list | None = None,
@@ -828,7 +828,7 @@ def set_agent_access(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_agent_roles(agent_slug: str, roles: str | list | None = None) -> dict:
 	"""Compat shim over ``set_agent_access`` — sets the ROLE half, users untouched.
 
@@ -847,7 +847,7 @@ def set_agent_roles(agent_slug: str, roles: str | list | None = None) -> dict:
 	return {"ok": True, "allowed_roles": res["allowed_roles"]}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def search_users(q: str | None = None) -> list[dict]:
 	"""Enabled, named users matching ``q`` for the admin Access picker.
 
@@ -870,7 +870,7 @@ def search_users(q: str | None = None) -> list[dict]:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_listing_status(agent_slug: str, status: str) -> dict:
 	"""Set a listing's marketplace status. Jarvis Admin / System Manager (PART 4
 	REVISED, TASK 45). Only the admin-meaningful statuses are settable (Draft
@@ -908,7 +908,7 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 _VISIBILITY_CHOICES = ("available", "teaser", "hidden")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_operator_visibility(agent_slug: str, visibility: str) -> dict:
 	"""Set an agent's operator catalogue visibility (available / teaser / hidden).
 
@@ -940,7 +940,7 @@ def set_operator_visibility(agent_slug: str, visibility: str) -> dict:
 	return {"ok": True, "visibility": doc.operator_visibility}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_agent_admin_overview() -> dict:
 	"""Bench-admin overview: the selectable Roles + every listing with its
 	allowed_roles and ALL owners' installs. Jarvis Admin / System Manager (PART 4
@@ -1208,8 +1208,8 @@ def install_agent(
 			"enabled": 0,
 			# Phase 1 identity: the agent runs AS this user (every jarvis__* read is
 			# permission-bounded to them). Defaults to the installer — a self-map,
-			# which the controller's escalation guard always permits. An admin may
-			# retarget it later via set_run_as_user.
+			# which the controller's escalation guard always permits. A System
+			# Manager may retarget it later via set_run_as_user.
 			"run_as_user": me,
 			# PP-4: every capability activates per customer in preview/SHADOW first,
 			# with the installer as the initial named reviewer (retargetable by an
@@ -1282,7 +1282,7 @@ def _check_installation_write(doc, ptype: str = "write") -> bool:
 	return False
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_enabled(installation: str, enabled: int) -> dict:
 	"""Enable/disable an installed agent — a pure DB write (O6: NO restart; the
 	bundle only reaches the container on the next Apply)."""
@@ -1314,7 +1314,7 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "enabled": doc.enabled}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_schedule(
 	installation: str,
 	schedule_enabled: int | None = None,
@@ -1392,7 +1392,7 @@ def set_schedule(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_ap_review_defaults(company: str | None = None) -> dict:
 	"""Permission-bounded AP starter settings; this endpoint never saves configuration."""
@@ -1401,7 +1401,7 @@ def get_ap_review_defaults(company: str | None = None) -> dict:
 	return configuration_defaults(company)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_ar_review_defaults(company: str | None = None) -> dict:
 	"""Read-only AR suggestions, including company-bound fiscal years."""
@@ -1410,7 +1410,7 @@ def get_ar_review_defaults(company: str | None = None) -> dict:
 	return configuration_defaults(company)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_bank_recon_review_defaults(company: str | None = None) -> dict:
 	"""Read-only bank reconciliation starter settings; never saves configuration."""
@@ -1419,7 +1419,7 @@ def get_bank_recon_review_defaults(company: str | None = None) -> dict:
 	return configuration_defaults(company)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_config(installation: str, config: str) -> dict:
 	"""Persist an installed agent's engagement config JSON — a pure DB write
 	(O6: no restart; the delegate reads it on its installation on the next run).
@@ -1457,15 +1457,15 @@ def set_config(installation: str, config: str) -> dict:
 	return {"ok": True, "data": {"name": doc.name}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_run_as_user(installation: str, user: str) -> dict:
 	"""Map an installed agent's RUN-AS identity — the user every ``jarvis__*``
 	ERP read is permission-bounded to (Phase 1 identity). Owner-gated (S3:
 	``check_permission("write")``) for WHO may touch the row; the ESCALATION guard
 	(who may map WHICH user) lives in the controller ``validate()`` so it holds on
-	Desk/test writes too — a non-admin may only map to themselves, any cross-user
-	mapping needs Jarvis Admin, and binding to a System Manager needs a System
-	Manager. Mirrors ``set_config``: check_permission, set, then save so
+	Desk/test writes too: only Administrator or a System Manager may map to
+	another user; everyone else may map only to themselves. The same rule is
+	re-checked at every run against whoever last set the mapping. Mirrors ``set_config``: check_permission, set, then save so
 	validate() enforces the guard. Pure DB write (no restart)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
@@ -1603,7 +1603,7 @@ def _delete_installation_preserving_provenance(doc, via_admin: bool) -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def uninstall_agent(installation: str) -> dict:
 	"""Delete an installation (owner-gated) plus its run + finding history —
 	bottom-up, mirroring ``macros_api.delete_macro``: findings link runs (via
@@ -1711,7 +1711,7 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before stopping runs
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	"""Manual trigger: enqueue an audit turn NOW via the SAME code path the
 	scheduler uses (``agent_scheduler._launch_audit``), executed UNDER THE
@@ -1770,6 +1770,13 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 			_("The run-as user does not have access to this agent. Ask your administrator."),
 			frappe.PermissionError,
 		)
+	# A mapping to someone other than the owner is only honoured while whoever set it
+	# is still a System Manager (or Administrator); judged now, on every run.
+	from jarvis.chat.agent_scheduler import run_as_mapping_refusal
+
+	refusal = run_as_mapping_refusal(installation, doc.owner, run_as)
+	if refusal:
+		frappe.throw(_("This agent cannot run: {0}.").format(refusal), frappe.PermissionError)
 	if not doc.enabled:
 		frappe.throw(_("Enable the agent before running it."))
 	# R5-J8: refuse an on-demand run for a non-installable capability — a required
@@ -1985,7 +1992,7 @@ def _try_abort_gateway_session(session_key: str | None, run: str) -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def stop_agent_run(run: str) -> dict:
 	"""Stop a RUNNING agent run: terminalize it ``stopped``, revoke its session bearer
 	and best-effort abort its gateway session. Idempotent on an already-terminal run.
@@ -2237,7 +2244,7 @@ def _require_activation_authority(user: str) -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def promote_installation(installation: str, justification: str | None = None) -> dict:
 	"""PP-4 — promote a shadow installation to LIVE on a reviewer's explicit
 	sign-off. This is the SINGLE choke point PP-4 (calibration) and PP-6 (budget)
@@ -2329,7 +2336,7 @@ def promote_installation(installation: str, justification: str | None = None) ->
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def demote_installation(installation: str, reason: str | None = None) -> dict:
 	"""PP-4 — the demotion / kill path: send a live installation back to SHADOW
 	(re-closing the owner surface, freeing a global activation-budget slot). Same
@@ -2359,7 +2366,7 @@ def demote_installation(installation: str, reason: str | None = None) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "activation_state": "shadow"}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def raise_activation_ceiling(customer: str, justification: str, new_ceiling: int = 2) -> dict:
 	"""PP-6 — raise the activation ceiling from 1 to 2 (the stage maximum) FOR ONE
 	NAMED CUSTOMER. Restricted to a Jarvis Admin. The raise is per-customer, never a
@@ -2472,7 +2479,7 @@ def _stamp_run_nature(rows: list[dict]) -> list[dict]:
 	return rows
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_runs(agent: str | None = None, limit: int = 50) -> list[dict]:
 	"""This owner's run history (optionally filtered to one agent)."""
@@ -2490,7 +2497,7 @@ def list_runs(agent: str | None = None, limit: int = 50) -> list[dict]:
 	return _stamp_run_nature(rows)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_runs_page(
 	agent: str | None = None,
@@ -2540,7 +2547,7 @@ def list_runs_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_findings(
 	run: str | None = None,
@@ -2702,7 +2709,7 @@ def list_findings(
 RUN_STEPS_CAP = 200
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_run_steps(run: str) -> dict:
 	"""One run's STEP TIMELINE, oldest first: ``{steps, count}``.
@@ -2758,7 +2765,7 @@ def list_run_steps(run: str) -> dict:
 	return {"steps": steps, "count": len(steps)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_finding_state(finding: str, state: str) -> dict:
 	"""Move a finding to open/acknowledged/resolved. Owner-gated (S3)."""
 	if state not in ("open", "acknowledged", "resolved"):
@@ -2771,7 +2778,7 @@ def set_finding_state(finding: str, state: str) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "state": state}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_agent_activity_page(
 	agent: str | None = None,
@@ -2927,7 +2934,7 @@ def take_finding_to_chat(finding: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Apply (explicit push to the container, via admin -> fleet) + status poller
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_agents_sync_status() -> dict:
 	"""Lightweight poller mirroring get_custom_skills_sync_status."""
@@ -2943,7 +2950,7 @@ def get_agents_sync_status() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_agents_caps() -> dict:
 	"""Lightweight capability probe for the Agents SPA (PART 3 remediation).
@@ -2964,7 +2971,7 @@ def get_agents_caps() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def apply_agents() -> dict:
 	"""Push all ENABLED installed agent bundles to the container (one restart).
 	Explicit action. Builds the payload synchronously (surfaces size/cap errors

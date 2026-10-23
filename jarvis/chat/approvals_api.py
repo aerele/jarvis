@@ -111,7 +111,7 @@ def _may_act_on(conversation: str | None) -> bool:
 	return frappe.db.get_value("Jarvis Conversation", conversation, "owner") == frappe.session.user
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 	"""Approvals visible to the current user (owner of the linked
@@ -267,7 +267,7 @@ def _tagged(a, me: str):
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_approvals_page(
 	search: str = "",
@@ -568,7 +568,7 @@ def _open_drafts(me: str) -> list[dict]:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_approval(name: str) -> dict:
 	"""One approval with every field the detail page renders (DESIGN-V3 §8.3).
@@ -628,7 +628,7 @@ def get_approval(name: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def pending_count() -> int:
 	"""The board badge: Pending approval requests + held File Box writes and sealed
@@ -643,7 +643,7 @@ def pending_count() -> int:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def pending_badge() -> dict:
 	"""``{count, next_in}``: the badge, plus the seconds until the caller's next chat
@@ -983,7 +983,7 @@ def _dropper_of(doc) -> str | None:
 	return doc.owner
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_wiki_write_proposals(
 	status: str = "Actionable", start: int = 0, page_length: int = 20, order: str = "newest"
@@ -1359,7 +1359,7 @@ def _for_user(owner: str, me: str) -> str:
 	return "" if owner == me else (frappe.db.get_value("User", owner, "full_name") or owner)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_pending_actions_lane() -> dict:
 	"""Pending actions awaiting a decision (or running), oldest first; ``{rows,
@@ -1598,7 +1598,7 @@ def _authorized_held(name, approver: str, kinds=(HELD,), *, acting: bool = True)
 	return row if authorize(row, approver, row.kind, acting=acting)[0] else None
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_pending_action(name: str, slim: int | str | None = None) -> dict:
 	"""One lane row for the board: ``{kind, card, summary, age, can_act,
@@ -1631,7 +1631,7 @@ def get_pending_action(name: str, slim: int | str | None = None) -> dict:
 	return _value_free(_held_detail, "detail_crashed", row, me)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_sheet_candidates(name: str, indexes: str | list | None = None) -> dict:
 	"""Existing records per create record of a sealed sheet, read as its dropper

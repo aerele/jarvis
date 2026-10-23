@@ -36,7 +36,7 @@ def _requesting_user() -> str:
 	return frappe.db.get_value("User", user, "email") or user
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_tickets() -> dict:
 	scope = _scope()
 	return {
@@ -45,7 +45,7 @@ def list_tickets() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_ticket(subject: str, body: str = "") -> dict:
 	scope = _scope()
 	# raised_by must be a valid email — Helpdesk rejects a non-email, and that
@@ -70,7 +70,7 @@ def create_ticket(subject: str, body: str = "") -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_thread(ticket: str) -> dict:
 	scope = _scope()
 	return {
@@ -84,7 +84,7 @@ def get_thread(ticket: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reply(ticket: str, body: str) -> dict:
 	scope = _scope()
 	return {
@@ -99,7 +99,7 @@ def reply(ticket: str, body: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def close_ticket(ticket: str) -> dict:
 	scope = _scope()
 	return {
@@ -113,7 +113,7 @@ def close_ticket(ticket: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def awaiting_count() -> dict:
 	scope = _scope()
 	return {

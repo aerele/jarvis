@@ -256,7 +256,7 @@ def _rule_fields(child_doctype: str, parent_doctype, form_fields: list[dict], co
 _RULE_VALUES_MAX_LINKS = 500
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def rule_values(doctype: str, table: str, links: str | dict | None = None) -> dict:
 	"""The hidden values a child row's rules read that Desk fetches from a link
@@ -349,7 +349,7 @@ def _drop_empty_sections(fields: list[dict]) -> list[dict]:
 	return cleaned
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_doctype_form_meta(doctype: str) -> dict:
 	"""Form metadata for the draft panel: main fields INCLUDING Table fields,
@@ -390,7 +390,7 @@ def get_doctype_form_meta(doctype: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def load_doc(doctype: str, name: str) -> dict:
 	"""Current values of one document (main fields + child rows with every field
@@ -2222,7 +2222,7 @@ _KNOWN_RECHECK_SOURCES = frozenset({"recheck", "auto", "pill", "menu", "typed"})
 _RESCUE_RECHECK_SOURCES = frozenset({"recheck", "pill", "menu", "typed"})
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_pending_confirmations(conversation: str | None = None, source: str | None = None) -> dict:
 	"""Re-surface the caller's OWN currently-parked confirmation cards after a

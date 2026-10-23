@@ -155,7 +155,7 @@ def get_conversation(
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET"])
 def get_file(conversation: str, file_url: str) -> None:
 	refuse_in_tool_dispatch()
 	require_jarvis_access()

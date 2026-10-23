@@ -176,7 +176,7 @@ def _after_change(
 	frappe.db.after_commit.add(committed)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def share_candidates(query: str = "") -> list[dict]:
 	require_jarvis_access()
 	query = (query or "").strip()[:140]
@@ -197,7 +197,7 @@ def share_candidates(query: str = "") -> list[dict]:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_shares(conversation: str) -> dict:
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
@@ -350,7 +350,7 @@ def _mark_seen(name: str, latest) -> None:
 		frappe.db.set_value(SHARE, name, "seen_marker", latest, update_modified=False)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_shared_with_me() -> list[dict]:
 	require_jarvis_access()
 	if not sharing_enabled() or not _enabled_user(frappe.session.user):
@@ -381,7 +381,7 @@ def list_shared_with_me() -> list[dict]:
 	return [project_index_row(row) for row in rows]
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def is_shared_with_me(conversation: str) -> bool:
 	require_jarvis_access()
 	return _visible_share(conversation)[2] is None
@@ -437,7 +437,7 @@ def _shared_message(message: str):
 	return doc
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_shared_tool_detail(message: str) -> dict:
 	require_jarvis_access()
 	doc = _shared_message(message)
@@ -450,7 +450,7 @@ def get_shared_tool_detail(message: str) -> dict:
 	return project_row(row, doc.name)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_shared_canvas(message: str, name: str, dark: int = 0) -> dict:
 	require_jarvis_access()
 	doc = _shared_message(message)
@@ -468,7 +468,7 @@ def get_shared_canvas(message: str, name: str, dark: int = 0) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET"])
 def get_shared_file(conversation: str, file_url: str) -> None:
 	require_jarvis_access()
 	doc, _share = _require_share(conversation)
@@ -477,7 +477,7 @@ def get_shared_file(conversation: str, file_url: str) -> None:
 	download(read_file(doc, file_url))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_sharing_setting() -> dict:
 	require_jarvis_access()
 	require_jarvis_admin()
@@ -495,7 +495,7 @@ def set_sharing_setting(enabled: bool) -> dict:
 	return {"enabled": new}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_all_shares(start: int = 0, page_length: int = 50, search: str = "", include_modes: int = 0) -> dict:
 	require_jarvis_access()
 	require_jarvis_admin()

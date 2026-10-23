@@ -6,7 +6,11 @@ from frappe.utils import cint
 from jarvis.exceptions import ExportTooSlowError, InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._export import masking
 from jarvis.tools._export.model import ExportModel
-from jarvis.tools.get_list import _child_table_parents, assert_child_query_fields_readable
+from jarvis.tools.get_list import (
+	_child_table_parents,
+	assert_child_query_fields_readable,
+	assert_child_table_field_readable,
+)
 
 # Server-side hard ceiling. ABOVE this we FAIL CLOSED (raise) rather than return
 # a silently-partial file - an export must never look complete when it isn't.
@@ -144,6 +148,9 @@ def authorize_filter(doctype, fields, filters, order_by, parent_doctype):
 
 	if not frappe.has_permission(doctype, ptype="read", parent_doctype=parent_doctype):
 		raise PermissionDeniedError(f"no read permission on {doctype}")
+	if parent_doctype:
+		# Read on the parent covers permlevel 0 only; same gate as get_list.
+		assert_child_table_field_readable(doctype, parent_doctype)
 	# Honor Frappe's Export DocPerm (like frappe.desk.reportview.export_query): a
 	# bulk file export is governed by the Export permission, not just read (System
 	# Manager bypasses). export_query lifts the row cap, so a read-but-not-Export

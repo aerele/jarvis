@@ -248,7 +248,7 @@ def _begin_signin(provider: str, model: str, *, pool: bool) -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def begin_paste_signin(provider: str, model: str) -> dict:
 	"""Mint a nonce + PKCE pair, return the authorize URL for the customer
 	to open in their browser.
@@ -338,7 +338,7 @@ def _begin_device_signin(provider: str, model: str) -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def begin_pool_account_signin(provider: str, model: str) -> dict:
 	"""POOL variant of ``begin_paste_signin``: start capturing ONE more account
 	into a pool "subscription" model.
@@ -556,7 +556,7 @@ def _exchange_and_build_blob(entry: dict, redirected_url: str):
 	return {"provider": provider, "model": model, "email": email, "blob": blob}, None
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	"""Wizard calls this after the customer signs in and pastes the URL
 	they copied from the browser's address bar.
@@ -643,7 +643,7 @@ def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def complete_pool_account_signin(nonce: str, redirected_url: str) -> dict:
 	"""Capture ONE more chat-subscription account for a pool "subscription"
 	model, and RETURN the blob for the caller to stash in a pool
@@ -718,7 +718,7 @@ def complete_pool_account_signin(nonce: str, redirected_url: str) -> dict:
 	return _ok(view)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def poll_pool_account_signin(nonce: str) -> dict:
 	"""Poll a device-code (Kimi) pool sign-in started by
 	``begin_pool_account_signin``.
@@ -934,7 +934,7 @@ _CLAUDE_LOGIN_ADMIN_EXCEPTIONS = (
 )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def begin_claude_cli_login(model: str = "") -> dict:
 	"""Start the Claude browser sign-in: relays to admin/fleet, which runs the
 	official Claude Code CLI's own ``claude auth login`` headless inside the
@@ -961,7 +961,7 @@ def begin_claude_cli_login(model: str = "") -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def complete_claude_cli_login(login_id: str, code: str) -> dict:
 	"""Submit the code the customer pasted back from claude.com.
 
@@ -1005,7 +1005,7 @@ def complete_claude_cli_login(login_id: str, code: str) -> dict:
 	return _ok(view)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_claude_cli_login(login_id: str) -> dict:
 	"""Customer backed out of the Claude sign-in before pasting a code: tell
 	fleet to kill the detached CLI process and drop its transcript. Best
@@ -1022,7 +1022,7 @@ def cancel_claude_cli_login(login_id: str) -> dict:
 	return _ok({})
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_pending_captures() -> dict:
 	"""The current user's live (un-consumed, un-expired) pending OAuth captures,
 	safe view only (opaque id + display metadata, never a token). The editor calls
@@ -1033,7 +1033,7 @@ def list_pending_captures() -> dict:
 	return _ok({"captures": pending_capture.list_active()})
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_pending_capture(capture_id: str) -> dict:
 	"""Customer discarded an unsaved just-connected account: revoke the provider
 	token where the provider exposes an endpoint we can call, then erase the
@@ -1186,7 +1186,7 @@ def _fetch_account_email(provider: str, access_token: str, id_token: str) -> str
 	return ""
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def disconnect() -> dict:
 	"""Clear the container's OAuth profile, flip bench back to api_key.
 
@@ -1265,7 +1265,7 @@ def _is_direct_subscription(
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_direct_subscription_status() -> dict:
 	"""Surface the flat-field DIRECT chat-subscription connection to the SPA.
 

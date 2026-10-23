@@ -143,6 +143,38 @@ def _readable_child_parents(doctype: str) -> list[str]:
 	]
 
 
+def assert_child_table_field_readable(child_doctype: str, parent_doctype: str) -> None:
+	"""Refuse a read of ``child_doctype`` rows through ``parent_doctype`` when the
+	parent's Table field holding them sits at a permlevel the caller cannot read.
+
+	Read on the parent DocType only covers permlevel 0. A Table field at a higher
+	permlevel hides its rows from a caller without read at that level on the
+	parent, and a child DocType has no permissions to say so itself. Every Table
+	field on the parent that points at the child must be readable: the child rows
+	do not record which field a caller reached them through (``parentfield`` is
+	not filtered here), so one hidden field is enough to refuse. Shared by
+	``get_list`` and the ``query`` tool's child record gate. Administrator skips."""
+	if frappe.session.user == "Administrator":
+		return
+	parent_meta = frappe.get_meta(parent_doctype)
+	levels = None
+	hidden = []
+	for df in parent_meta.fields:
+		if df.fieldtype not in _CHILD_TABLE_FIELDTYPES or df.options != child_doctype:
+			continue
+		if not df.permlevel:
+			continue
+		if levels is None:
+			levels = set(parent_meta.get_permlevel_access("read"))
+		if df.permlevel not in levels:
+			hidden.append(df.fieldname)
+	if hidden:
+		raise PermissionDeniedError(
+			f"no read permission on {child_doctype} through {parent_doctype}: its table "
+			f"field(s) {', '.join(sorted(hidden))} are restricted by permission level"
+		)
+
+
 def get_list(
 	doctype: str,
 	fields: list[str] | None = None,
@@ -244,6 +276,8 @@ def get_list(
 
 			raise PermissionDeniedError(f"no read permission on Comment. {COMMENT_REDIRECT_HINT}")
 		raise PermissionDeniedError(f"no read permission on {doctype}")
+	if parent_doctype:
+		assert_child_table_field_readable(doctype, parent_doctype)
 	assert_child_query_fields_readable(doctype, parent_doctype, fields, filters, order_by)
 
 	if paged:
