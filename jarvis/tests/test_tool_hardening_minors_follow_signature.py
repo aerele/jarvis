@@ -29,7 +29,8 @@ class TestFollowSignature(FrappeTestCase):
 			seen["args"] = args
 			return True
 
-		with patch(f"frappe.desk.form.document_follow.{target}", side_effect=spy):
+		# autospec keeps the real signature, which the tool reads to pick the function.
+		with patch(f"frappe.desk.form.document_follow.{target}", autospec=True, side_effect=spy):
 			runner()
 		self.assertEqual(seen["args"], ("User", "Administrator", "someone@example.com"))
 
