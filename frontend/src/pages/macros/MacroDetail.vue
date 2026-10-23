@@ -169,89 +169,16 @@
 							(!!scheduleBlocked && !form.schedule_enabled)
 						"
 					/>
-					<div v-if="form.schedule_enabled" class="flex items-start gap-4">
-						<FormControl
-							class="flex-1"
-							type="select"
-							label="Frequency"
-							:options="FREQUENCY_OPTIONS"
-							:modelValue="form.schedule_frequency"
-							:disabled="saving || armedLocked"
-							@update:modelValue="(v) => (form.schedule_frequency = v)"
-						/>
-						<div
-							class="flex-1"
-							role="group"
-							aria-labelledby="macro-schedule-time-label"
-						>
-							<label
-								id="macro-schedule-time-label"
-								class="mb-1.5 block text-xs text-ink-gray-5"
-								>Time</label
-							>
-							<TimePicker
-								v-model="form.schedule_time"
-								placeholder="09:00"
-								:disabled="saving || armedLocked"
-							/>
-						</div>
-						<!-- weekly -> weekday name, monthly -> day of month; hidden for
-						     daily. Copies the Frequency control above exactly - jarvis#653.
-						     Monthly's 31 rows overflow this Select's popover with no cap of
-						     its own (frappe-ui's Select sets no max-height on its content,
-						     unlike Combobox/Autocomplete/MultiSelect) - the fix lives in
-						     src/main.css's [role="listbox"] [data-slot="content-body"]
-						     rule, app-wide for every plain Select, not here (nothing to add
-						     on this control itself). -->
-						<FormControl
-							v-if="hasDayAnchor"
-							class="flex-1"
-							type="select"
-							label="Day"
-							:options="dayOptions"
-							:modelValue="form.schedule_day"
-							:disabled="saving || armedLocked"
-							@update:modelValue="(v) => (form.schedule_day = v)"
-						/>
-						<!-- A one-time schedule runs on one date, then switches itself off. -->
-						<div
-							v-if="form.schedule_frequency === 'once'"
-							ref="dateField"
-							class="flex-1"
-						>
-							<label
-								for="macro-schedule-date"
-								class="mb-1.5 block text-xs text-ink-gray-5"
-								>Date</label
-							>
-							<!-- The picker's own input takes no id: this one does, so the label
-							     above names it, and it shows the date as people read it. -->
-							<DatePicker
-								:modelValue="form.schedule_date"
-								format="ddd, D MMM YYYY"
-								placeholder="Pick a date"
-								:disabled="saving || armedLocked"
-								@update:modelValue="(v) => (form.schedule_date = v || '')"
-							>
-								<template #target="{ togglePopover, isOpen, displayLabel }">
-									<TextInput
-										id="macro-schedule-date"
-										class="w-full cursor-pointer"
-										readonly
-										aria-haspopup="dialog"
-										:aria-expanded="isOpen ? 'true' : 'false'"
-										:modelValue="displayLabel"
-										placeholder="Pick a date"
-										:disabled="saving || armedLocked"
-										@click="togglePopover()"
-										@keydown.enter.prevent="togglePopover()"
-										@keydown.space.prevent="togglePopover()"
-									/>
-								</template>
-							</DatePicker>
-							<ErrorMessage :message="fieldErrors.schedule_date" class="mt-2" />
-						</div>
-					</div>
+					<ScheduleEditor
+						v-if="form.schedule_enabled"
+						ref="scheduleEditor"
+						v-model="form.sched"
+						v-model:scheduleDate="form.schedule_date"
+						:dateError="fieldErrors.schedule_date"
+						:disabled="saving || armedLocked"
+						:steps="Math.max(stepsWithPrompt, 1)"
+						:budget="stepBudget"
+					/>
 					<div v-if="scheduleSummary" class="text-sm text-ink-gray-5">
 						{{ scheduleSummary }}
 					</div>
@@ -369,13 +296,10 @@ import { useRouter, onBeforeRouteLeave } from "vue-router";
 import {
 	Button,
 	Badge,
-	DatePicker,
 	Dropdown,
 	ErrorMessage,
 	FormControl,
 	Switch,
-	TextInput,
-	TimePicker,
 	dayjs,
 	toast,
 	confirmDialog,
@@ -387,14 +311,17 @@ import DocMetaPanel from "@/components/doc/DocMetaPanel.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import StepsBuilder from "./StepsBuilder.vue";
+import ScheduleEditor from "./ScheduleEditor.vue";
 import { takeMacroPrefill } from "@/composables/macroPrefill";
 import { exactDate, formatTime12h, onAnotherClock, siteTimezone } from "@/utils/datetime";
+import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
 import {
-	WEEKDAY_OPTIONS,
-	DAY_OF_MONTH_OPTIONS,
-	deriveScheduleDay,
-	scheduleAnchorPhrase,
-} from "@/lib/scheduleAnchor";
+	cronLinesOf,
+	scheduleFromRow,
+	schedulePayload,
+	schedulePreview,
+	scheduleSentence,
+} from "@/lib/macroCron";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
 import { brand } from "@/branding";
@@ -419,12 +346,6 @@ const router = useRouter();
 const socket = inject("$socket");
 const DOCTYPE = "Jarvis Macro";
 
-const FREQUENCY_OPTIONS = [
-	{ label: "Daily", value: "daily" },
-	{ label: "Weekly", value: "weekly" },
-	{ label: "Monthly", value: "monthly" },
-	{ label: "Once", value: "once" },
-];
 // A one-time schedule's date and time are read on the SITE's clock (the one the
 // scheduler fires on, and the one the Time field already uses), so its dates are
 // counted on the site's calendar too, not the viewer's.
@@ -475,54 +396,30 @@ const form = reactive({
 	stop_on_error: true,
 	skip_confirmation: false,
 	schedule_enabled: false,
-	schedule_frequency: "daily",
-	schedule_time: "09:00",
-	schedule_day: "",
+	// The schedule's draft in macroCron's shape (frequency, times, days, cron...); the
+	// one-time date stays a field of its own, as the date picker edits it.
+	sched: scheduleFromRow({}),
 	schedule_date: "",
 	steps: [],
 	merged_prompt: "",
 });
-// jarvis#653: weekly -> weekday names, monthly -> 1..31 (ordinal labels) - the
-// Day control's own option list, keyed off the DRAFT frequency so it flips the
-// instant Frequency changes, before any save.
-const dayOptions = computed(() =>
-	form.schedule_frequency === "weekly" ? WEEKDAY_OPTIONS : DAY_OF_MONTH_OPTIONS
-);
-// Weekly and monthly pick a day; daily needs none; once picks a date instead.
-const hasDayAnchor = computed(
-	() => form.schedule_frequency === "weekly" || form.schedule_frequency === "monthly"
-);
-// jarvis#653: guards the interactive-frequency-change watcher below from firing
-// off `seed()`'s own frequency+day assignment (which legitimately sets day to
-// "" for a legacy row with no anchor saved - the defaulting watcher must not
-// treat that as "needs a default"). True for exactly the synchronous pre-flush
-// window seed()'s own assignment runs in; nextTick clears it once the DOM
-// update (and any watcher chained off THIS assignment) has settled. Mirrors
-// AgentDetail.vue's `seedingSchedule` guard exactly.
+// Guards the watchers below from `seed()`'s own assignment: loading a macro is not
+// the owner picking a schedule. Cleared on the next tick.
 let seedingSchedule = false;
-// jarvis#653: an interactive Frequency change (NOT `seed()`, guarded off by
-// `seedingSchedule`) needs its OWN default day - "Monday" for weekly, the 1st
-// for monthly - so the Day select never shows a visible option ("Monday")
-// while the model is empty (a phantom selection that would silently save
-// nothing). Only fills in when the current day does not already belong to the
-// new frequency's own option set, so switching away and back keeps whatever
-// was picked.
+// Picking Once offers tomorrow when no date is set yet.
 watch(
-	() => form.schedule_frequency,
+	() => form.sched.frequency,
 	(freq) => {
 		if (seedingSchedule) return;
-		if (freq === "weekly" && !WEEKDAY_OPTIONS.some((o) => o.value === form.schedule_day)) {
-			form.schedule_day = "Monday";
-		} else if (
-			freq === "monthly" &&
-			!DAY_OF_MONTH_OPTIONS.some((o) => o.value === form.schedule_day)
-		) {
-			form.schedule_day = "1";
-		} else if (freq === "once" && !form.schedule_date) {
-			form.schedule_date = tomorrow();
-		}
+		if (freq === "once" && !form.schedule_date) form.schedule_date = tomorrow();
 	}
 );
+// The monthly step budget for scheduled runs (get_macro / get_new_macro_arming), 0
+// when the server did not say: the editor then leaves its estimate out.
+const stepBudget = ref(0);
+// The saved row's cron schedule ("" for a macro from before cron schedules, whose
+// saved summary keeps its old wording).
+const savedCron = ref("");
 // Saved-state copy for the dirty compare (set by seed). MUST be a ref: on
 // /macros/:id the dirty computed first evaluates while the load is in flight,
 // and with a plain variable the `!snapshot` short-circuit would track zero
@@ -535,7 +432,7 @@ const snapshot = ref(null);
 // right). Toast-only, the owner was told once and then had to find the field.
 const fieldErrors = reactive({ macro_name: "", schedule_date: "" });
 watch(
-	() => [form.schedule_date, form.schedule_frequency, form.schedule_enabled],
+	() => [form.schedule_date, form.sched.frequency, form.schedule_enabled],
 	() => {
 		fieldErrors.schedule_date = "";
 	}
@@ -545,7 +442,7 @@ watch(
 watch(
 	() => form.schedule_enabled,
 	(on) => {
-		if (seedingSchedule || !on || form.schedule_frequency !== "once") return;
+		if (seedingSchedule || !on || form.sched.frequency !== "once") return;
 		// Today stays: a time later today is still ahead (the server judges the time).
 		if (!form.schedule_date || form.schedule_date < siteToday().format("YYYY-MM-DD")) {
 			form.schedule_date = tomorrow();
@@ -683,13 +580,10 @@ const dirty = computed(() => {
 		(form.stop_on_error ? 1 : 0) !== snap.stop_on_error ||
 		(form.skip_confirmation ? 1 : 0) !== snap.skip_confirmation ||
 		(form.schedule_enabled ? 1 : 0) !== snap.schedule_enabled ||
-		(form.schedule_frequency || "daily") !== snap.schedule_frequency ||
-		(form.schedule_time || "") !== snap.schedule_time ||
-		(form.schedule_day || "") !== (snap.schedule_day || "") ||
-		// The date matters only to a one-time schedule: picking Once and going back
-		// leaves a date behind that is not saved and is not a change.
-		((form.schedule_frequency === "once" || snap.schedule_frequency === "once") &&
-			(form.schedule_date || "") !== (snap.schedule_date || "")) ||
+		// Compared as what a save would send: the date counts only for a one-time
+		// schedule (picking Once and going back leaves a date that is not saved), and a
+		// draft that saves as the same cron is not a change.
+		schedulePayloadJson() !== snap.schedulePayloadJson ||
 		JSON.stringify(cleanSteps(form.steps)) !== snap.stepsJson ||
 		(form.merged_prompt || "") !== snap.merged_prompt
 	);
@@ -741,11 +635,25 @@ const scheduleSummary = computed(() => {
 		? `The last scheduled run failed (Runs, on the Macros page, says why). Retrying: ${stamp}`
 		: `Next run: ${stamp}`;
 	if (snap.schedule_frequency === "once") return oneTimeSummary(snap, next);
+	const recurring = savedScheduleText(snap);
+	if (recurring) return `Scheduled ${recurring}${zone ? `, ${zone} time` : ""}. ${next}`;
 	return (
 		`Scheduled ${snap.schedule_frequency}${anchor ? ` ${anchor}` : ""} ` +
 		`at ${formatTime12h(snap.schedule_time)}${zone ? `, ${zone} time` : ""}. ${next}`
 	);
 });
+
+// "every Mon, Wed and Fri at 9:30 am" for a saved cron schedule, or "" for a macro
+// saved before cron schedules (the old wording above stays for it).
+function savedScheduleText(snap) {
+	if (!savedCron.value || snap.schedule_frequency === "once") return "";
+	if (snap.sched.frequency === "custom") {
+		return `on the cron schedule ${cronLinesOf(savedCron.value).join("; ")}`;
+	}
+	return scheduleSentence(snap.sched)
+		.replace(/^Runs /, "")
+		.replace(/\.$/, "");
+}
 
 // "Runs once on Mon, 2 Nov 2026 at 9:00 am, Asia/Kolkata time. ...": the slot as the
 // owner set it, on the site's clock like the recurring summary. A retry of a slot
@@ -779,13 +687,14 @@ const oneTimeDoneNote = computed(() => {
 });
 // "Schedule again": the schedule back on, one-time, from tomorrow at the same time,
 // then the date field, so the owner sees what will be saved and can change it.
-const dateField = ref(null);
+const scheduleEditor = ref(null);
 function scheduleAgain() {
-	form.schedule_frequency = "once";
+	form.sched = { ...form.sched, frequency: "once" };
 	form.schedule_date = tomorrow();
 	form.schedule_enabled = true;
 	nextTick(() => {
-		const input = dateField.value && dateField.value.querySelector("input, button");
+		const field = scheduleEditor.value && scheduleEditor.value.dateField;
+		const input = field && field.querySelector("input, button");
 		if (input) input.focus();
 	});
 }
@@ -849,18 +758,9 @@ function promptlessSteps(steps) {
 	return out;
 }
 
-function toHHMM(t) {
-	const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ""));
-	return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
-}
-
 // ── load / init (re-runs when /macros/new saves and replaces to /macros/:id) ─
 function seed(data) {
-	// jarvis#653: guard the frequency-change watcher above from the assignment
-	// two lines down - a legacy row with schedule_frequency weekly/monthly and
-	// NO anchor saved must seed schedule_day as "" (matching the snapshot below
-	// verbatim), not have the watcher fabricate "Monday"/"1" and leave the page
-	// dirty before the owner has touched anything.
+	// Guards the schedule watchers above from this load (see `seedingSchedule`).
 	seedingSchedule = true;
 	form.macro_name = data.macro_name || "";
 	form.description = data.description || "";
@@ -868,14 +768,10 @@ function seed(data) {
 	form.stop_on_error = !!data.stop_on_error;
 	form.skip_confirmation = !!data.skip_confirmation;
 	form.schedule_enabled = !!data.schedule_enabled;
-	form.schedule_frequency = data.schedule_frequency || "daily";
-	form.schedule_time = toHHMM(data.schedule_time) || "09:00";
-	form.schedule_day = deriveScheduleDay(
-		form.schedule_frequency,
-		data.schedule_weekday,
-		data.schedule_day_of_month
-	);
+	form.sched = scheduleFromRow(data);
 	form.schedule_date = data.schedule_date || "";
+	savedCron.value = data.schedule_cron || "";
+	stepBudget.value = Number(data.scheduled_step_budget) || 0;
 	lastRunAt.value = data.last_run_at || "";
 	nextTick(() => {
 		seedingSchedule = false;
@@ -903,12 +799,32 @@ function formSnapshot() {
 		stop_on_error: form.stop_on_error ? 1 : 0,
 		skip_confirmation: form.skip_confirmation ? 1 : 0,
 		schedule_enabled: form.schedule_enabled ? 1 : 0,
-		schedule_frequency: form.schedule_frequency,
-		schedule_time: form.schedule_time,
-		schedule_day: form.schedule_day,
-		schedule_date: form.schedule_date,
+		...savedScheduleFields(),
+		schedulePayloadJson: schedulePayloadJson(),
 		stepsJson: JSON.stringify(cleanSteps(form.steps)),
 		merged_prompt: form.merged_prompt,
+	};
+}
+
+// What a save sends for the schedule, as a string to compare.
+function schedulePayloadJson() {
+	return JSON.stringify(schedulePayload(form.sched, form.schedule_date));
+}
+
+// The saved schedule in the shape its summary reads: the old fields (for a macro
+// saved before cron schedules) and the draft state it was loaded as.
+function savedScheduleFields() {
+	const p = schedulePayload(form.sched, form.schedule_date);
+	return {
+		schedule_frequency: p.schedule_frequency,
+		schedule_time: p.schedule_time,
+		schedule_day: deriveScheduleDay(
+			p.schedule_frequency,
+			p.schedule_weekday,
+			p.schedule_day_of_month
+		),
+		schedule_date: p.schedule_date,
+		sched: JSON.parse(JSON.stringify(toRaw(form.sched))),
 	};
 }
 
@@ -955,7 +871,10 @@ watch(() => [props.id, props.isNew], init, { immediate: true });
 async function loadNewArming() {
 	try {
 		const arming = await apiMacros.getNewMacroArming();
-		if (props.isNew) seedArming(arming);
+		if (props.isNew) {
+			seedArming(arming);
+			stepBudget.value = Number(arming && arming.scheduled_step_budget) || 0;
+		}
 	} catch (e) {
 		// keep the fallback
 	}
@@ -993,12 +912,22 @@ const notStartedToast = (macroName, reasonHtml) =>
 // Why the one-time date cannot be saved, or "": checked here so the owner is told
 // at the field, not by the server after Save (which checks the time of day too).
 function oneTimeDateProblem() {
-	if (!form.schedule_enabled || form.schedule_frequency !== "once") return "";
+	if (!form.schedule_enabled || form.sched.frequency !== "once") return "";
 	if (!form.schedule_date) return "Pick the date this one-time schedule runs on.";
 	if (form.schedule_date < siteToday().format("YYYY-MM-DD")) {
 		return "That date has passed. Pick today or a later date.";
 	}
 	return "";
+}
+
+// Why a recurring schedule cannot be saved as it stands, or "": the editor shows
+// the same sentence in its summary box. Only for a schedule that is on (an
+// unscheduled macro keeps whatever draft it has); a one-time schedule is judged at
+// its date field and by the server.
+function scheduleProblem() {
+	if (!form.schedule_enabled || form.sched.frequency === "once") return "";
+	const { error } = schedulePreview(form.sched, { now: new Date(0) });
+	return error ? `Schedule: ${error}` : "";
 }
 
 async function save() {
@@ -1008,11 +937,13 @@ async function save() {
 	const name = (form.macro_name || "").trim();
 	fieldErrors.macro_name = name ? "" : "Give the macro a name.";
 	fieldErrors.schedule_date = oneTimeDateProblem();
+	const scheduleError = scheduleProblem();
 	stepErrors.value = promptlessSteps(form.steps);
 	const promptless = Object.keys(stepErrors.value).map((i) => Number(i) + 1);
 	const problems = [
 		fieldErrors.macro_name,
 		fieldErrors.schedule_date,
+		scheduleError,
 		promptless.length &&
 			`Step${promptless.length === 1 ? "" : "s"} ${promptless.join(", ")} ` +
 				`need${promptless.length === 1 ? "s" : ""} a prompt.`,
@@ -1043,12 +974,7 @@ async function save() {
 			stop_on_error: form.stop_on_error ? 1 : 0,
 			skip_confirmation: form.skip_confirmation ? 1 : 0,
 			schedule_enabled: form.schedule_enabled ? 1 : 0,
-			schedule_frequency: form.schedule_frequency || "daily",
-			schedule_time: form.schedule_time || "09:00",
-			schedule_weekday: form.schedule_frequency === "weekly" ? form.schedule_day || "" : "",
-			schedule_day_of_month:
-				form.schedule_frequency === "monthly" ? Number(form.schedule_day) || 0 : 0,
-			schedule_date: form.schedule_frequency === "once" ? form.schedule_date || "" : "",
+			...schedulePayload(form.sched, form.schedule_date),
 		};
 		// The SERVER decides whether the steps changed (it clears a stale summary)
 		// and whether a new summary is due (`summarize`). The form used to guess

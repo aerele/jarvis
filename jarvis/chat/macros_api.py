@@ -151,6 +151,7 @@ def list_macros() -> list[dict]:
 			"schedule_day_of_month",
 			"schedule_time",
 			*_schedule_date_column(),
+			*_schedule_cron_column(),
 			"next_run_at",
 			"last_run_at",
 			"modified",
@@ -175,7 +176,7 @@ _MACROS_SORTABLE = {
 	"next_run_at": "next_run_at",
 }
 _MACROS_FILTERS = {"enabled", "schedule_enabled", "schedule_frequency"}
-_FREQUENCIES = {"daily", "weekly", "monthly", "once"}
+_FREQUENCIES = {"daily", "weekly", "monthly", "once", "hourly", "custom"}
 
 
 def _schedule_date_column() -> list[str]:
@@ -184,6 +185,13 @@ def _schedule_date_column() -> list[str]:
 	from jarvis.chat.macro_scheduler import once_ready
 
 	return ["schedule_date"] if once_ready() else []
+
+
+def _schedule_cron_column() -> list[str]:
+	"""``schedule_cron`` among the fields read, once the migrate that adds it ran."""
+	from jarvis.chat.macro_scheduler import cron_ready
+
+	return ["schedule_cron"] if cron_ready() else []
 
 
 # C08-5: ``_lk`` / ``_clamp_page`` / ``_bool01`` / ``_load_filters`` /
@@ -249,6 +257,7 @@ def list_macros_page(
 
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params)[0][0]
 	once_columns = "schedule_date, " if _schedule_date_column() else ""
+	once_columns += "schedule_cron, " if _schedule_cron_column() else ""
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, macro_name, description, enabled, stop_on_error, skip_confirmation,
 		schedule_enabled, schedule_frequency, schedule_weekday, schedule_day_of_month,
@@ -486,6 +495,9 @@ def get_macro(name: str) -> dict:
 		# `or ""` sent the form "" and it fell back to (then saved) its 09:00 default.
 		"schedule_time": "" if doc.schedule_time is None else str(doc.schedule_time),
 		"schedule_date": str(doc.get("schedule_date") or ""),
+		"schedule_cron": doc.get("schedule_cron") or "",
+		# What the schedule's step count is measured against, for the form's estimate.
+		"scheduled_step_budget": _scheduled_step_budget(),
 		"next_run_at": str(doc.next_run_at or ""),
 		"last_run_at": str(doc.last_run_at or ""),
 		"merged_prompt": doc.merged_prompt or "",
@@ -522,8 +534,20 @@ def get_macro(name: str) -> dict:
 @require_jarvis_user
 def get_new_macro_arming() -> dict:
 	"""``get_macro``'s arming keys for a macro the caller is about to create: the new
-	form has no macro to load, and the caller will be its owner."""
-	return _arming(frappe.session.user, held=0)
+	form has no macro to load, and the caller will be its owner. Also what a schedule's
+	step count is measured against, as ``get_macro`` says it."""
+	return {**_arming(frappe.session.user, held=0), "scheduled_step_budget": _scheduled_step_budget()}
+
+
+def _scheduled_step_budget() -> int:
+	"""The monthly step budget for scheduled runs (``macros.entitlement_block``), or 0
+	when it cannot be read: the form then leaves the estimate out."""
+	from jarvis.chat import macros
+
+	try:
+		return int(macros._scheduled_step_budget_monthly())
+	except Exception:
+		return 0
 
 
 # What an armed macro does without asking, and what still asks: one row per plain
@@ -678,6 +702,7 @@ def create_macro(
 	schedule_weekday: str | None = None,
 	schedule_day_of_month: int | None = None,
 	schedule_date: str | None = None,
+	schedule_cron: str | None = None,
 ) -> dict:
 	"""Create a macro. Validation (name/steps/caps, and the two schedule anchors'
 	ranges) runs in the doctype validate(). Per-step tagged skills arrive INSIDE
@@ -699,6 +724,7 @@ def create_macro(
 			"schedule_weekday": schedule_weekday or None,
 			"schedule_day_of_month": frappe.utils.cint(schedule_day_of_month) or None,
 			"schedule_date": schedule_date or None,
+			**({"schedule_cron": schedule_cron or None} if _schedule_cron_column() else {}),
 			"steps": _parse_steps(steps),
 		}
 	)
@@ -726,6 +752,7 @@ def update_macro(
 	schedule_weekday: str | None = None,
 	schedule_day_of_month: int | None = None,
 	schedule_date: str | None = None,
+	schedule_cron: str | None = None,
 	merged_prompt: str | None = None,
 	merged_prompt_edited: int | None = None,
 ) -> dict:
@@ -788,6 +815,8 @@ def update_macro(
 		doc.schedule_day_of_month = frappe.utils.cint(schedule_day_of_month) or None
 	if schedule_date is not None:
 		doc.schedule_date = schedule_date or None
+	if schedule_cron is not None and _schedule_cron_column():
+		doc.schedule_cron = schedule_cron or None
 	if steps is not None:
 		rows = _parse_steps(steps)
 		# Unchanged steps are left as they are: the rows are not deleted and inserted
