@@ -69,6 +69,12 @@ def report_pdf(
 			"report_pdf renders Query Report and Script Report results."
 		)
 
+	# A PDF of the full result set is a bulk export: like the export tools, require
+	# the Export permission on the report's DocType, not just report access.
+	ref_doctype = frappe.db.get_value("Report", report_name, "ref_doctype")
+	if ref_doctype and not frappe.permissions.can_export(ref_doctype):
+		raise PermissionDeniedError(f"no export permission on {ref_doctype}")
+
 	# Same execution path as run_report: Frappe enforces report + filter
 	# permissions and raises PermissionError. ignore_prepared_report=True forces
 	# LIVE data rather than a queued async stub for prepared reports.
