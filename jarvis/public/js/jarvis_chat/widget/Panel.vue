@@ -1541,7 +1541,7 @@ async function onFilePicked(e) {
 			attachments.value.push(await uploadFile(f));
 		}
 	} catch (err) {
-		loadError.value = "That file could not be attached.";
+		loadError.value = err?.serverReason || "That file could not be attached.";
 	} finally {
 		uploading.value = false;
 	}

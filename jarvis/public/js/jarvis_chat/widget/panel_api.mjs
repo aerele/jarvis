@@ -52,6 +52,46 @@ export const sendMessage = (
 // button must not appear at all in that case.
 export const getChatUiSettings = () => call(CHAT + "get_chat_ui_settings");
 
+// A Desk tab keeps the token on frappe.csrf_token; window.csrf_token is only
+// set on web-page contexts, so read frappe first.
+export function csrf() {
+  return globalThis.frappe?.csrf_token || globalThis.csrf_token || "";
+}
+
+// Mirrors MAX_MESSAGE_CHARS in frontend/src/lib/errors.js (smaller, for the panel).
+const MAX_REASON_CHARS = 300;
+
+// Best human-readable reason in a Frappe error body: _server_messages (a JSON
+// list of JSON strings), then message, then exception. HTML tags are stripped.
+export function serverReason(body) {
+  if (!body || typeof body !== "object") return "";
+  let text = "";
+  try {
+    const first = JSON.parse(body._server_messages || "[]")[0];
+    text = first ? JSON.parse(first).message || "" : "";
+  } catch (e) {
+    text = "";
+  }
+  if (!text && typeof body.message === "string") text = body.message;
+  if (!text && typeof body.exception === "string") {
+    // Only the text after the first colon; a bare class name is no use to users.
+    text = body.exception.split(":").slice(1).join(":");
+  }
+  text = text
+    .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_m, n) => String.fromCharCode(Number(n)))
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > MAX_REASON_CHARS
+    ? text.slice(0, MAX_REASON_CHARS - 1) + "…"
+    : text;
+}
+
 // Multipart endpoints cannot go through frappe.call, so these two use fetch
 // with the Desk's CSRF token, the same way the SPA's uploadFile does.
 export async function uploadFile(file) {
@@ -60,11 +100,15 @@ export async function uploadFile(file) {
   fd.append("is_private", "1");
   const r = await fetch("/api/method/upload_file", {
     method: "POST",
-    headers: { "X-Frappe-CSRF-Token": window.csrf_token || "" },
+    headers: { "X-Frappe-CSRF-Token": csrf() },
     body: fd,
     credentials: "include",
   });
-  if (!r.ok) throw new Error(`upload failed (${r.status})`);
+  if (!r.ok) {
+    const err = new Error(`upload failed (${r.status})`);
+    err.serverReason = serverReason(await r.json().catch(() => null));
+    throw err;
+  }
   const data = await r.json();
   const f = data.message || data;
   return { file_url: f.file_url, file_name: f.file_name || file.name };
@@ -90,7 +134,7 @@ export async function transcribeAudio(blob, durationS) {
   try {
     const r = await fetch("/api/method/jarvis.chat.voice.transcribe_audio", {
       method: "POST",
-      headers: { "X-Frappe-CSRF-Token": window.csrf_token || "" },
+      headers: { "X-Frappe-CSRF-Token": csrf() },
       body: fd,
       credentials: "include",
       signal: ctrl.signal,
