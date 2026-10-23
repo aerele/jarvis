@@ -3121,23 +3121,8 @@ def _subscription_connect_providers() -> list[dict]:
 	return out
 
 
-<<<<<<< HEAD
-@frappe.whitelist()
-def get_model_catalog_ui() -> dict:
-=======
-def _provider_base_urls(catalog: list) -> dict[str, str]:
-	"""Provider label -> the admin catalog's default base URL, for the editor's
-	provider defaults (it used to hardcode these)."""
-	return {
-		p.get("label") or p.get("provider_id") or "": (p.get("default_base_url") or "").strip()
-		for p in catalog
-		if (p.get("default_base_url") or "").strip()
-	}
-
-
 @frappe.whitelist(methods=["POST"])
-def get_model_catalog_ui(retry: bool = False) -> dict:
->>>>>>> 31464a6 (whitelist: declare HTTP methods on every endpoint, POST by default)
+def get_model_catalog_ui() -> dict:
 	"""Catalog slice the pool editor and subscription card need, independent of
 	get_chat_ui_settings so the onboarding wizard (which never calls that) works.
 

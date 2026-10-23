@@ -1030,47 +1030,7 @@ def _clear_llm_secrets(settings) -> None:
 	clear_settings_password(settings, "llm_api_key")
 
 
-<<<<<<< HEAD
-@frappe.whitelist()
-=======
-#: Shown when private-network setup is off on admin (design 5.3, 10). Same sentence the
-#: Network step uses (frontend privateNetwork.js SETUP_UNAVAILABLE).
-PRIVATE_NETWORK_UNAVAILABLE = "Private network setup isn't available yet. Contact support."
-#: A bare 429 on the gate is a rate limit, not "off" (ruling R6). Shared with private_network.
-PRIVATE_NETWORK_BUSY = "Too many attempts. Try again in a minute."
-
-
-def _require_private_setup_enabled() -> None:
-	"""Private mode only: ask admin whether private onboarding is on BEFORE the customer
-	signs up. Admin stays the final authority (it refuses a forced signup with
-	``PRIVATE_NETWORK_DISABLED``); asking first turns "the operator has not switched this on"
-	into one clear sentence now instead of a coded refusal later. An unreachable admin is
-	reported as unreachable and a rate limit as "try again", neither as "off"; any other
-	failure, including an admin that does not know the method yet, reads as off."""
-	try:
-		info = admin_client.private_setup_info(timeout_s=8) or {}
-	except AdminUnreachableError as e:
-		_throw_admin_error(e)  # always raises
-	except AdminRateLimitedError as e:
-		error, _status = onboarding_contract.error_object(e)
-		error["message"] = PRIVATE_NETWORK_BUSY
-		onboarding_contract.stamp_error(error)
-		frappe.throw(PRIVATE_NETWORK_BUSY)
-	except _ADMIN_ERRORS:
-		info = {}
-	if isinstance(info, dict) and info.get("enabled"):
-		return
-	error = {
-		"code": "PRIVATE_NETWORK_DISABLED",
-		"message": PRIVATE_NETWORK_UNAVAILABLE,
-		"recovery": onboarding_contract.RECOVERY_CONTACT_SUPPORT,
-	}
-	onboarding_contract.stamp_error(error)
-	frappe.throw(PRIVATE_NETWORK_UNAVAILABLE)
-
-
 @frappe.whitelist(methods=["POST"])
->>>>>>> 31464a6 (whitelist: declare HTTP methods on every endpoint, POST by default)
 def start_signup(
 	email: str,
 	company: str,

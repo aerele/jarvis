@@ -448,13 +448,8 @@ def get_shared_canvas(message: str, name: str, dark: int = 0) -> dict:
 	}
 
 
-<<<<<<< HEAD
-@frappe.whitelist()
-def get_shared_file(conversation: str, file_url: str):
-=======
 @frappe.whitelist(methods=["GET"])
-def get_shared_file(conversation: str, file_url: str) -> None:
->>>>>>> 31464a6 (whitelist: declare HTTP methods on every endpoint, POST by default)
+def get_shared_file(conversation: str, file_url: str):
 	require_jarvis_access()
 	doc, _share = _require_share(conversation)
 	from jarvis.chat.shared_files import download, read_file
