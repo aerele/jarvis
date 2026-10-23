@@ -25,8 +25,7 @@ GET_ALLOWLIST = frozenset(
 		"jarvis.support.media.download",
 		# Download link for an exported conversation.
 		"jarvis.chat.export.download_conversation",
-		# Top-level redirect from the MCP OAuth provider.
-		"jarvis.chat.connectors_api.mcp_oauth_callback",
+		# MCP connectors (and their OAuth callback) are not on this branch.
 	}
 )
 
