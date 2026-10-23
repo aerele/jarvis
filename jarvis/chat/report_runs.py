@@ -34,7 +34,7 @@ def _json_functions_available() -> bool:
 	return frappe.db.db_type == "mariadb"
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def chat_report_runs(conversation: str) -> dict:
 	"""This chat's background reports not shown yet: ``{items: [{conversation, run,

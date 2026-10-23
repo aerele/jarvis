@@ -132,7 +132,7 @@ def _clean_step_skills(skills) -> list[str]:
 	return clean
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_macros() -> list[dict]:
 	"""The current user's macros (no step bodies), newest first, with a count."""
@@ -198,7 +198,7 @@ _load_filters = list_filters.load_legacy_filters
 _order_by = list_filters.order_by
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 @list_filters.filter_errors_to_envelope
 def list_macros_page(
@@ -459,7 +459,7 @@ def _last_runs(macro_names: list[str], owner: str) -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_macro(name: str) -> dict:
 	"""One macro incl. its ordered steps (owner-gated)."""
@@ -518,7 +518,7 @@ def get_macro(name: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_new_macro_arming() -> dict:
 	"""``get_macro``'s arming keys for a macro the caller is about to create: the new
@@ -1085,7 +1085,7 @@ def stop_macro_run(run: str) -> dict:
 	return macros.stop_macro_run(run)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_macro_run(run: str) -> dict:
 	"""Current state of a run (for polling as a socketio fallback)."""
@@ -1116,7 +1116,7 @@ _RUN_STATUSES = {"queued", "running", "waiting_capacity", "completed", "failed",
 # ``macro IS NOT NULL``.
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, start: int | str = 0) -> dict:
 	"""The current user's macro runs, newest-first, for the history dashboard.
@@ -1170,7 +1170,7 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 	return {"runs": rows[:limit], "has_more": len(rows) > limit, "total": total}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def macro_run_stats() -> dict:
 	"""Summary tiles for the dashboard: counts per status, success rate, and the

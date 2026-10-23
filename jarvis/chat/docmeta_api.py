@@ -248,7 +248,7 @@ def _validate_target_user(user: str) -> str:
 # --------------------------------------------------------------------------- #
 # read bundle
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_docmeta(doctype: str, name: str) -> dict:
 	"""The doc-page metadata bundle (§8.1 as amended by §14 F1) in one round trip."""
