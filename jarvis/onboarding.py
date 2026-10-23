@@ -24,7 +24,7 @@ from jarvis.exceptions import (
 	AdminValidationError,
 )
 from jarvis.hooks import get_default_admin_url
-from jarvis.permissions import grant_onboarding_admin, require_jarvis_admin
+from jarvis.permissions import grant_onboarding_admin, is_system_manager, require_jarvis_admin
 
 # Every admin-side failure admin_client raises. One tuple so the onboarding
 # facade's catch sites cannot drift apart from _surface's.
@@ -2153,8 +2153,17 @@ def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_ll
 	markers) so the customer sets up their AI model fresh after the reset.
 	Both run only AFTER the control plane accepted the reset.
 
-	Gated on System Manager, like the rest of onboarding."""
+	Gated on Jarvis Admin (or System Manager). ``wipe_data`` additionally needs
+	System Manager, the same role as :func:`reset_onboarding`, because it deletes
+	every user's workspace content. Checked directly rather than with
+	``frappe.only_for``, which no-ops under the v15 test runner and raises with no
+	message the SPA could show."""
 	require_jarvis_admin()
+	if cint(wipe_data) and not is_system_manager():
+		frappe.throw(
+			"Only a System Manager can reset the workspace and delete its data.",
+			frappe.PermissionError,
+		)
 	settings = frappe.get_single("Jarvis Settings")
 	# Tear down the container-side OAuth auth-profile while the old container is
 	# still reachable (same ordering as dev.reset_onboarding). Best-effort — a

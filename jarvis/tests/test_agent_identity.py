@@ -3,9 +3,9 @@
 Covers the verified identity contract wired at trigger:
   (a) the A13 backfill patch stamps run_as_user = owner on legacy rows (and
       skips-or-logs an invalid owner without aborting);
-  (b) validate() (the authoritative escalation guard) rejects a non-admin
-      mapping run_as_user to another non-SM user, and rejects a non-SM binding
-      run_as_user to a System Manager — while an SM may map cross-user;
+  (b) validate() (the authoritative escalation guard) rejects a non-System-Manager
+      mapping run_as_user to any other user (Jarvis Admin included), while an SM
+      may map cross-user;
   (c) scoped_visibility is stamped when the run-as user carries a Cost Center
       User Permission (a GL-dimension slice);
   (d) _launch_audit mints a per-run Jarvis Chat Session bound to the run-as user
@@ -226,8 +226,8 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertEqual(frappe.db.get_value(INSTALLATION, inst, "run_as_user"), self.owner)
 
 	def test_validate_rejects_non_sm_binding_to_system_manager(self):
-		# jadmin holds Jarvis Admin (so a cross-user mapping is ALLOWED) but is NOT
-		# a System Manager -> binding to an SM must still be refused.
+		# jadmin holds Jarvis Admin but is NOT a System Manager -> a cross-user
+		# mapping (here to an SM) is refused.
 		inst = _install_as(self.jadmin)
 		frappe.set_user(self.jadmin)
 		try:
