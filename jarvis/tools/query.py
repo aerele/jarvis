@@ -82,6 +82,7 @@ from jarvis.exceptions import (
 )
 from jarvis.tools import _expr
 from jarvis.tools._doctype_name import canonical_doctype
+from jarvis.tools._export import masking
 
 # Row guard: refuse a result over this size unless the caller passes
 # ``confirm_large=True``. Mirrors the run_query guard so the agent's
@@ -183,6 +184,9 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 			``confirm_large`` is False.
 	"""
 	q = compile_spec(spec)
+	# Frappe 16 field masking (a no-op on 15); a computed column over a masked
+	# field is refused here, before the SELECT runs.
+	columns, masked = _masking_for_rows(spec, q)
 
 	# Step 7: execute.
 	limit = int(spec.get("limit") or DEFAULT_LIMIT)
@@ -190,6 +194,7 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	more_rows = len(rows) > limit
 	partial = more_rows and not spec.get("limit")
 	rows = rows[:limit]
+	masking.mask_rows(columns, rows, masked)
 
 	# Step 8: row guard (post-execute - we can't know the row count
 	# without running, and limiting earlier would break aggregates).
@@ -245,6 +250,81 @@ def compile_spec(spec: dict):
 	"""Steps 1-6 of ``query``: validate the spec, run every permission gate, and
 	build the permission-woven qb query, NOT executed."""
 	return _compile(spec)[0]
+
+
+def _spec_tables(spec: dict) -> dict:
+	"""``{spec alias: DocType}`` for the FROM and every join, spelled the way
+	``_build_from_and_aliases`` and the join loop key their alias map."""
+	from_dt = canonical_doctype(spec["from"])
+	tables = {spec.get("alias") or spec["from"]: from_dt}
+	for j in spec.get("joins") or []:
+		tables[j["alias"]] = canonical_doctype(j["doctype"])
+	return tables
+
+
+def _result_columns(spec: dict, tables: dict) -> list:
+	"""One export-style column per select entry, in order. A plain ``alias.field``
+	entry carries its table alias; an aggregate or expression carries none."""
+	from jarvis.tools._export.resolvers import _Column
+
+	from_alias = next(iter(tables))
+	columns = []
+	for item in spec.get("select") or ["name"]:
+		if isinstance(item, str):
+			alias, _, field = item.rpartition(".")
+			columns.append(_Column(field, tables.get(alias or from_alias), None, alias or from_alias))
+		else:
+			columns.append(_Column(item.get("as") or "", None, None))
+	return columns
+
+
+def _masking_for_rows(spec: dict, q) -> tuple[list, dict]:
+	"""``(columns, masked)`` for ``masking.mask_rows`` over this query's rows.
+
+	The tool builds its SELECT with the query builder directly, so Frappe 16's
+	masking of a ``mask=1`` field for a user without the mask permission never
+	sees it. Same rule as a spec export: a plain masked column is masked value by
+	value, a computed column over a masked field is refused. A child table takes
+	its masking from the parent its rows are scoped to. Empty on Frappe 15 (no
+	masking feature) and for Administrator, who is never masked."""
+	if masking.mask_field_value is None or frappe.session.user == "Administrator":
+		return [], {}
+	tables = _spec_tables(spec)
+	alias_map = {alias: (dt, None) for alias, dt in tables.items()}  # the resolver reads the DocType only
+	child_parents = {
+		alias: _child_scoping_parent(dt, alias, spec, alias_map)
+		for alias, dt in tables.items()
+		if frappe.get_meta(dt).istable
+	}
+	masked = masking.masked_fields(tables, child_parents)
+	columns = _result_columns(spec, tables)
+	if masked:
+		_assert_masking_maps_to_rows(columns, q, masked)
+	masking.refuse_masked_expressions(columns, q, masked)
+	return columns, masked
+
+
+def _assert_masking_maps_to_rows(columns: list, q, masked: dict) -> None:
+	"""Refuse, while anything is masked, a select whose entries do not line up with
+	the built query's terms, or whose plain columns share a row key. Masking works
+	per row key, so a masked value must never sit under an unmasked column's key."""
+	if len(columns) != len(q._selects):
+		raise InvalidArgumentError(
+			"cannot apply field masking to this select list. Select the masked field "
+			"on its own, without computed columns beside it."
+		)
+	seen = {}
+	for column in columns:
+		if column.alias is not None:
+			seen.setdefault(column.key, []).append(column)
+	for key, same_key in seen.items():
+		if len(same_key) > 1 and any(c.key in masked.get(c.alias, {}) for c in same_key):
+			raise InvalidArgumentError(
+				f"column {key!r} is selected from more than one table and one of them is masked "
+				f"for you (you lack the mask permission), so the values would share a row key. "
+				f"Select the masked field on its own, or give each column its own name with "
+				f'{{"expr": {{"field": "<alias>.{key}"}}, "as": "<new_name>"}}.'
+			)
 
 
 def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:
@@ -888,6 +968,9 @@ def _make_permission_engine(query_builder, tables: list, doctype: str):
 	- ``tables`` — some ``permission_query_conditions`` hooks consult it;
 	- ``doctype`` — hooks format the main table name as ``f"tab{self.doctype}"``,
 	  so an unset value crashes the first such hook with AttributeError.
+	- ``reference_doctype``: v16 reads it for every User Permission row with
+	  ``applicable_for`` set, so an unset value raises AttributeError. Frappe 15's
+	  Engine never reads it; the attribute is inert there.
 
 	Factored from the three call sites: the outer step-6 weave, the EXISTS
 	sub-query weave, and the child-scope subquery build.
@@ -901,6 +984,7 @@ def _make_permission_engine(query_builder, tables: list, doctype: str):
 	engine.query = query_builder
 	engine.tables = list(tables)
 	engine.doctype = doctype
+	engine.reference_doctype = doctype
 	return engine
 
 
@@ -923,10 +1007,18 @@ def _weave_record_gate(q, engine, alias: str, resolved_dt: str, table, node_spec
 		if frappe.session.user == "Administrator":
 			return q
 		parent_dt = _child_scoping_parent(resolved_dt, alias, node_spec, alias_map)
+		# Read on the parent covers permlevel 0 only; the parent's Table field
+		# holding this child can sit at a higher permlevel.
+		from jarvis.tools.get_list import assert_child_table_field_readable
+
+		assert_child_table_field_readable(resolved_dt, parent_dt)
 		cond = _child_record_scope(table, resolved_dt, parent_dt)
 		if cond is not None:
 			q = q.where(cond)
 		return q
+	# One engine serves every alias; User Permission ``applicable_for`` rows are
+	# matched against the DocType whose table is being gated.
+	engine.reference_doctype = resolved_dt
 	try:
 		cond = compat.permission_conditions(engine, resolved_dt, table)
 	except frappe.PermissionError:
@@ -1127,8 +1219,13 @@ def _build_from_and_aliases(spec: dict) -> tuple[Any, dict]:
 
 def _bare_name_is_column(name: str, alias_map: dict) -> bool:
 	"""True when ``name`` is a real column of any table in scope, i.e. one MariaDB
-	could resolve an unqualified reference to."""
-	return any(name in frappe.get_meta(dt).get_valid_columns() for dt, _table in alias_map.values())
+	could resolve an unqualified reference to. MariaDB column names are
+	case-insensitive, so ``Rate`` collides with the ``rate`` column."""
+	folded = name.casefold()
+	return any(
+		folded in {column.casefold() for column in frappe.get_meta(dt).get_valid_columns()}
+		for dt, _table in alias_map.values()
+	)
 
 
 def _resolve_field(
