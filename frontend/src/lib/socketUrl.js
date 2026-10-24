@@ -16,5 +16,6 @@ export function socketUrl(location, boot, fallbackPort) {
 function socketOrigin(location, boot, fallbackPort) {
 	const devServer = boot.dev_server ?? true;
 	if (!location.port || !devServer) return location.origin;
-	return `${location.protocol}//${location.hostname}:${boot.socketio_port || fallbackPort}`;
+	// bench start's socketio is plain http, whatever scheme the page came over.
+	return `http://${location.hostname}:${boot.socketio_port || fallbackPort}`;
 }
