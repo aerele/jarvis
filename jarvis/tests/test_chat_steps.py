@@ -5,6 +5,7 @@ reply glued a wrong first draft and a "Hold on" step onto the real answer, and a
 Claude-subscription reply that kept its "I'll count them now." step.
 """
 
+import json
 import os
 import re
 from unittest.mock import patch as mock_patch
@@ -16,6 +17,8 @@ from jarvis.chat import steps as chat_steps
 from jarvis.chat.steps import (
 	MAX_PREAMBLE_STEP_CHARS,
 	MAX_STEP_CHARS,
+	MAX_STEP_SENTENCES,
+	MAX_STEP_TEXT_CHARS,
 	collapse_steps,
 	display_line,
 	is_preamble_step,
@@ -25,6 +28,19 @@ from jarvis.chat.steps import (
 	strip_preambles,
 	strip_steps,
 )
+
+# Narration the Claude subscription route wrote right before a tool call, seen on
+# e2e2 (2026-10-21): two or three sentences, so the one-sentence rule left them
+# at the top of the saved answer.
+CLAUDE_NARRATION = [
+	"Links all resolve. Now the invoice checks: supplier status, item setup, duplicates, and real-record conventions.",
+	"Found something important: a submitted invoice for MA Inc. today already matches this exactly. "
+	"Let me verify the supplier and run the integrity dry-run.",
+	"All three links resolve. One thing stands out before I draft: an invoice for this exact supplier, "
+	"date and amount already exists today. Checking it.",
+	"Both items and the supplier exist. Checking how your purchase invoices for this supplier are usually filled.",
+	"All three records exist. Pulling the org's real purchase-invoice conventions and checking for a duplicate.",
+]
 
 DEEPSEEK_DRAFT = (
 	"West View Software Ltd. is your biggest receivable at **2,29,000 INR** outstanding "
@@ -75,13 +91,53 @@ class TestIsStep(FrappeTestCase):
 		self.assertTrue(is_step("  Let me check the overdue invoices  "))
 
 	def test_anything_that_may_be_answer_is_not(self):
-		self.assertFalse(is_step("Invoice #4521 is due Oct 3. I'll open a card for it."))
+		self.assertFalse(
+			is_step(
+				"Invoice #4521 is due Oct 3. It is unpaid. The customer was reminded. I'll open a card for it."
+			)
+		)
 		self.assertFalse(is_step("| a | b |"))
 		self.assertFalse(is_step("- first item"))
 		self.assertFalse(is_step("Line one\nLine two"))
-		self.assertFalse(is_step("word " * 40))
+		self.assertFalse(is_step("word " * 80))
 		self.assertFalse(is_step(DEEPSEEK_DRAFT))
 		self.assertFalse(is_step(""))
+
+	def test_claude_narration_of_up_to_three_sentences_is_a_step(self):
+		for text in CLAUDE_NARRATION:
+			with self.subTest(text=text):
+				self.assertTrue(is_step(text))
+
+	def test_the_sentence_cap_is_three(self):
+		self.assertEqual(MAX_STEP_SENTENCES, 3)
+		self.assertTrue(is_step("One. Two. Three."))
+		self.assertFalse(is_step("One. Two. Three. Four."))
+
+	def test_a_newline_or_a_structural_start_is_not_a_step(self):
+		self.assertFalse(is_step("Checking the invoices.\nThen the customers."))
+		for text in (
+			"| a | b |",
+			"- Checking this. Then that.",
+			"1. Checking. Then that.",
+			"## Plan. Then run.",
+		):
+			with self.subTest(text=text):
+				self.assertFalse(is_step(text))
+
+	def test_the_length_limit_still_applies(self):
+		self.assertFalse(is_step("a" * (MAX_STEP_TEXT_CHARS + 1)))
+		self.assertTrue(is_step("a" * MAX_STEP_TEXT_CHARS))
+
+	def test_real_pre_tool_segments(self):
+		with open(os.path.join(os.path.dirname(__file__), "fixtures", "reply_cleanup_real_chats.json")) as f:
+			fixture = json.load(f)
+		for text in fixture["steps_accepted"]:
+			with self.subTest(text=text[:60]):
+				self.assertTrue(is_step(text))
+		# A long, multi-line split answer written before a lookup stays in the reply.
+		for text in fixture["steps_rejected"]:
+			with self.subTest(text=text[:60]):
+				self.assertFalse(is_step(text))
 
 
 class TestRemoveSteps(FrappeTestCase):
@@ -132,6 +188,17 @@ class TestStripSteps(FrappeTestCase):
 		final = "You have 3 active customers.\n\nHere they are."
 		self.assertEqual(strip_steps(final, ["You have 3 active customers."]), final)
 
+	def test_a_short_final_whole_is_kept_when_the_step_is_longer(self):
+		# The guard that matters most now that a step may be three sentences.
+		step = CLAUDE_NARRATION[0]
+		final = f"{step}\n\nAll good."
+		self.assertEqual(strip_steps(final, [step]), final)
+
+	def test_a_three_sentence_step_is_cut_from_a_longer_answer(self):
+		step = CLAUDE_NARRATION[3]
+		answer = "The supplier and both items exist. " * 8
+		self.assertEqual(strip_steps(f"{step}\n\n{answer.strip()}", [step]), answer.strip())
+
 	def test_never_leaves_an_empty_reply(self):
 		final = "Here is the summary you asked for."
 		self.assertEqual(strip_steps(final, [final]), final)
@@ -171,9 +238,12 @@ class TestIsPreambleStep(FrappeTestCase):
 	def test_one_short_sentence_is_accepted(self):
 		self.assertTrue(is_preamble_step("I'll check the overdue invoices."))
 
-	def test_two_sentences_up_to_the_limit_are_accepted(self):
+	def test_more_than_three_sentences_up_to_the_limit_are_accepted(self):
 		# Looser than is_step: the runtime already flagged this as narration.
-		text = "I'll check the overdue invoices. Then I'll total them by customer."
+		text = (
+			"I'll check the overdue invoices. Then I'll total them by customer. "
+			"After that I'll rank the customers. Finally I'll draft the reminders."
+		)
 		self.assertFalse(is_step(text))
 		self.assertLessEqual(len(text), MAX_PREAMBLE_STEP_CHARS)
 		self.assertTrue(is_preamble_step(text))
