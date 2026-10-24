@@ -104,6 +104,11 @@ def get_context(context):
 		# AppShell configure systemTimezone synchronously instead of gating the
 		# first routed render on a settings request.
 		"time_zone": frappe.utils.get_system_timezone(),
+		# Where socket.js finds this site's socket.io (frontend/src/lib/socketUrl.js):
+		# only `bench start` runs it on a port of its own, and the site's port wins
+		# over the common one, as Desk reads it (frappe/boot.py).
+		"dev_server": bool(frappe._dev_server),
+		"socketio_port": frappe.conf.socketio_port,
 	}
 
 	# Whitelabel branding (Phase 2): tenant-admin-set identity, shipped to every
