@@ -310,6 +310,13 @@ class _Lane:
 		# there), so it needs no lock. Not terminal on its own: it just names the
 		# provider failure for a terminal that otherwise cannot.
 		self.failure_detail: str | None = None
+		# Raw reply text from the lifecycle ``end`` frame (events.parse_event ``terminal_reply_raw``):
+		# the fallback source for MEDIA: paths the runtime stripped from the chat final.
+		self.terminal_reply_raw: str = ""
+		# Whether that lifecycle ``end`` frame arrived before the chat final. It always did in
+		# measured runs (20/20 on 2026.9.3 and 2026.10.6); when it has not, the final asks for one
+		# transcript read so a stripped MEDIA: image is still found (``harvest_history``).
+		self.terminal_end_seen: bool = False
 		# True once a MEDIA_GEN_TOOL_NAMES tool call started on this run.
 		# Written in _route_agent, read in _route_terminal (same reader-thread-
 		# only discipline as failure_detail): the gateway's bare terminal for a
@@ -704,6 +711,10 @@ class RelayMux:
 			# failure, so keep its text on the lane for a failed final (#543).
 			if parsed is not None and parsed.get("phase") == "error" and parsed.get("error"):
 				lane.failure_detail = str(parsed["error"])
+			if parsed is not None and parsed.get("phase") == "end":
+				lane.terminal_end_seen = True
+			if parsed is not None and parsed.get("terminal_reply_raw"):
+				lane.terminal_reply_raw = parsed["terminal_reply_raw"]
 			return
 		kind = parsed.get("kind")
 		if kind == "assistant":
@@ -932,6 +943,8 @@ class RelayMux:
 					# free segment boundaries back together on the pump thread.
 					"tails": list(lane.segment_tails),
 					"stream_text": lane.stream_text,
+					"terminal_reply_raw": lane.terminal_reply_raw,
+					"terminal_end_seen": lane.terminal_end_seen,
 					"is_continuation": lane.is_continuation,
 					"media_urls": _chat_final_media_urls(payload),
 					"run_id": lane.run_id,
@@ -991,6 +1004,11 @@ class RelayMux:
 		# happens to remove that neighbouring line.
 		rels = detect_media_paths(raw["text"])
 		marked = has_media_marker(raw["text"]) or has_embedded_media_path(raw["text"])
+		if not rels and raw.get("terminal_reply_raw"):
+			# openclaw strips a MEDIA: line from the final text itself, so the paths only survive on
+			# the lifecycle end frame. Seed from there; ``marked`` stays off (the final text has no
+			# marker left to strip, so no content overwrite is needed).
+			rels = detect_media_paths(raw["terminal_reply_raw"])
 		# R6: re-insert the paragraph break the runtime's own glued-segment
 		# boundaries dropped, BEFORE step-strip and redaction (a tail is a
 		# verbatim substring of the RAW text only; strip_steps below would
@@ -1050,6 +1068,10 @@ class RelayMux:
 			term_payload["marker_stripped"] = True
 		if raw["media_urls"]:  # gateway-attached image/video/audio/document content blocks
 			term_payload["media_urls"] = raw["media_urls"]
+		if not rels and not raw["media_urls"] and not raw.get("terminal_end_seen", True):
+			# The lifecycle end frame (the only one still carrying a stripped MEDIA: line) has not
+			# arrived yet: ask for one transcript read after the turn instead.
+			term_payload["harvest_history"] = True
 		if raw["is_continuation"]:
 			# Marks this as the yield's continuation outcome so the caller's
 			# post-settle rich-output step (finalize._effect_rich_outputs) knows

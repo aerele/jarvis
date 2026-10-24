@@ -40,6 +40,7 @@ import frappe
 from frappe import _
 from frappe.utils import today
 
+from jarvis.chat.events import accumulate_assistant_text
 from jarvis.learning.sanitizer import scan_instruction_injection
 
 JLP = "Jarvis Learned Pattern"
@@ -278,8 +279,8 @@ def _run_gateway_turn(prompt: str) -> str:
 					model=model,
 					provider=provider,
 				):
-					if ev.get("kind") == "assistant" and ev.get("text"):
-						text = ev["text"]
+					if ev.get("kind") == "assistant":
+						text = accumulate_assistant_text(text, ev)
 				run_ended = True
 			finally:
 				# Reclaim the throwaway on the SAME pooled connection, turn

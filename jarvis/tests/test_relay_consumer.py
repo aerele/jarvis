@@ -38,14 +38,27 @@ def _chat_frame(run_id, session_key, state, **extra):
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 
 
+def _with_lifecycle_end(frames):
+	"""Insert the run's lifecycle ``end`` frame before each chat final, as the gateway sends it (it
+	always precedes the final: 20/20 measured runs on 2026.9.3 and 2026.10.6). Without it the relay
+	treats the end as late and asks for a transcript read (``harvest_history``)."""
+	out = []
+	for f in frames:
+		p = f.get("payload") if isinstance(f, dict) else None
+		if isinstance(p, dict) and f.get("event") == "chat" and p.get("state") == "final":
+			out.append(_agent_frame(p.get("runId"), "lifecycle", {"phase": "end"}))
+		out.append(f)
+	return out
+
+
 def setUpModule():
 	install_synthetic_runtime_profile()
 
 
 class TestRelayTurnEvents(FrappeTestCase):
-	def _sess(self, frames):
+	def _sess(self, frames, with_end=True):
 		sess = AgentSession.__new__(AgentSession)  # bypass __init__/WS
-		queue = list(frames)
+		queue = _with_lifecycle_end(frames) if with_end else list(frames)
 
 		def fake_recv(_timeout):
 			frame = queue.pop(0)
@@ -747,3 +760,27 @@ class TestSetSessionModel(FrappeTestCase):
 		captured = self._capture("sk", None)
 		self.assertIn("model", captured["params"], "the key must be PRESENT, not dropped")
 		self.assertEqual(captured["params"], {"key": "sk", "model": None})
+
+
+class TestRelayStrippedMediaMarker(FrappeTestCase):
+	"""Direct relay path: a MEDIA: line openclaw stripped from the final is taken from the lifecycle end
+	frame's terminalReply; a final that beats the end frame asks for one transcript read."""
+
+	_PATH = "/srv/test-gateway/media/probe/red.png"  # under the synthetic profile's media_root
+
+	def _sess(self, frames):
+		return TestRelayTurnEvents._sess(self, frames, with_end=False)
+
+	def _final(self, text):
+		return _chat_frame("r1", "sk", "final", message={"content": [{"type": "text", "text": text}]})
+
+	def test_media_path_from_the_end_frame(self):
+		end = _agent_frame(
+			"r1", "lifecycle", {"phase": "end", "terminalReply": {"text": f"Chart.\nMEDIA:{self._PATH}"}}
+		)
+		out = list(self._sess([end, self._final("Chart.")]).relay_turn_events("sk", "r1"))
+		self.assertEqual(out[-1], {"kind": "relay:final", "text": "Chart.", "media_rels": [self._PATH]})
+
+	def test_a_late_end_frame_asks_for_one_transcript_read(self):
+		out = list(self._sess([self._final("Chart.")]).relay_turn_events("sk", "r1"))
+		self.assertEqual(out[-1], {"kind": "relay:final", "text": "Chart.", "harvest_history": True})

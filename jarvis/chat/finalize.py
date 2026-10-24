@@ -304,6 +304,7 @@ def _effect_rich_outputs(ctx: _Ctx) -> None:
 	media_rels = (payload or {}).get("media_rels") or None
 	media_urls = (payload or {}).get("media_urls") or None
 	yield_continuation = bool((payload or {}).get("yield_continuation"))
+	harvest_history = bool((payload or {}).get("harvest_history"))
 	turn_handler.persist_rich_outputs(
 		am,
 		ctx.conversation,
@@ -313,6 +314,7 @@ def _effect_rich_outputs(ctx: _Ctx) -> None:
 		media_rels=media_rels,
 		media_urls=media_urls,
 		yield_continuation=yield_continuation,
+		harvest_history=harvest_history,
 	)
 
 
