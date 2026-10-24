@@ -65,6 +65,27 @@ class CalendarFixtures:
 
 	def insert(self, doctype, suffix, **fields):
 		name = self.prefix + suffix
+		# Raw standalone ledger fixtures need submitted voucher headers so real
+		# source/delivery document permissions can be checked consistently.
+		voucher_type, voucher = fields.get("voucher_type"), fields.get("voucher_no")
+		if (
+			doctype == "Payment Ledger Entry"
+			and voucher_type in ("Payment Entry", "Journal Entry")
+			and voucher
+			and not frappe.db.exists(voucher_type, voucher)
+		):
+			frappe.get_doc(
+				{
+					"doctype": voucher_type,
+					"name": voucher,
+					"company": fields.get("company"),
+					"posting_date": fields.get("posting_date"),
+					"docstatus": 1,
+					"party_type": fields.get("party_type"),
+					"party": fields.get("party"),
+				}
+			).db_insert()
+			self.created.append((voucher_type, voucher))
 		frappe.get_doc({"doctype": doctype, "name": name, **fields}).db_insert()
 		self.created.append((doctype, name))
 		return name
@@ -174,6 +195,9 @@ class CalendarFixtures:
 		voucher_no=None,
 		finance_book=None,
 	):
+		voucher = voucher_no or (
+			invoice if voucher_type in ("Purchase Invoice", "Sales Invoice") else self.prefix + suffix
+		)
 		return self.insert(
 			"Payment Ledger Entry",
 			suffix,
@@ -185,8 +209,7 @@ class CalendarFixtures:
 			party_type="Supplier" if side == "Payable" else "Customer",
 			party=party or self.supplier,
 			voucher_type=voucher_type,
-			voucher_no=voucher_no
-			or (invoice if voucher_type in ("Purchase Invoice", "Sales Invoice") else self.prefix + suffix),
+			voucher_no=voucher,
 			against_voucher_type="Purchase Invoice" if side == "Payable" else "Sales Invoice",
 			against_voucher_no=invoice,
 			amount=amount,
