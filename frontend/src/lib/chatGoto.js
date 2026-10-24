@@ -35,6 +35,48 @@ export function parseGoto(content) {
 	}
 }
 
+// ── the builder's first message ──────────────────────────────────────────────
+//
+// The goto `prompt` is the agent's restatement of the request, and a
+// restatement can drop a detail the user gave: asked for "the connecting lanes
+// diagram", the builder got per-item coverage and built no lanes
+// (Aerele-RnD/jarvis-admin-v2#740, use case 3). So the user's own message rides
+// along under the restatement. Capped, so a pasted wall of text cannot crowd the
+// builder's context; left out when the restatement already quotes it whole.
+
+export const REQUEST_WORDS_MAX = 2000;
+
+/**
+ * The user message a goto answers: the nearest user turn before it.
+ * @param {Array<{name: string, role: string, content: string}>} messages
+ * @param {string} messageId the assistant message carrying the goto block
+ * @returns {string} "" when the message is not in the list or no user turn precedes it
+ */
+export function requestBefore(messages, messageId) {
+	const list = Array.isArray(messages) ? messages : [];
+	const at = list.findIndex((m) => m && m.name === messageId);
+	for (let i = at - 1; i >= 0; i--) {
+		const m = list[i];
+		if (m && m.role === "user" && m.content) return String(m.content).trim();
+	}
+	return "";
+}
+
+/**
+ * What the builder is sent: the restatement, then the user's own words.
+ * @param {string} prompt the goto block's restatement
+ * @param {string} request the user's message (requestBefore)
+ * @returns {string}
+ */
+export function builderSeed(prompt, request) {
+	const brief = String(prompt || "").trim();
+	const words = String(request || "")
+		.trim()
+		.slice(0, REQUEST_WORDS_MAX);
+	if (!words || brief.includes(words)) return brief;
+	return `${brief}\n\nIn my own words: ${words}`;
+}
+
 // ── the "fired" stamp (jarvis#912) ───────────────────────────────────────────
 //
 // One ```jarvis-goto message gets one durable localStorage stamp, keyed by
