@@ -34,6 +34,13 @@ describe("socketUrl", () => {
 		);
 	});
 
+	it("bench start on an https page with a port: plain http, the socketio process has no TLS", () => {
+		const boot = { site_name: "e2e2.localhost", dev_server: true, socketio_port: 9002 };
+		expect(socketUrl(page("https://e2e2.localhost:8443/jarvis"), boot, BAKED_PORT)).toBe(
+			"http://e2e2.localhost:9002/e2e2.localhost"
+		);
+	});
+
 	it("bench start with no socketio port in the site config: the build-time port", () => {
 		const boot = { site_name: "e2e2.localhost", dev_server: true, socketio_port: null };
 		expect(socketUrl(page("http://e2e2.localhost:8002/jarvis"), boot, 9002)).toBe(
