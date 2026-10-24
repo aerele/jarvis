@@ -110,6 +110,7 @@ def persist_rich_outputs(
 	media_rels: list[str] | None = None,
 	media_urls: list[dict] | None = None,
 	yield_continuation: bool = False,
+	harvest_history: bool = False,
 ) -> None:
 	"""Best-effort canvas + generated-image persistence and publish for one
 	finished turn. Shared by the worker's clean exit and snapshot recovery
@@ -125,10 +126,15 @@ def persist_rich_outputs(
 	settled via the deferred-reply yield-wait: when neither media_rels nor
 	media_urls landed on the terminal itself, poll the transcript for the
 	image that arrives moments later (see ``_harvest_post_yield_media``).
+	``harvest_history`` (from both transports) marks a final that arrived before the run's
+	lifecycle ``end`` frame, the only frame still carrying a ``MEDIA:`` line openclaw stripped from
+	the final: read the transcript ONCE (no polling) for that image.
 	Never raises."""
-	if yield_continuation and not media_rels and not media_urls:
+	if (yield_continuation or harvest_history) and not media_rels and not media_urls:
 		try:
-			media_rels, media_urls = _harvest_post_yield_media(conversation_id, turn_start_ms)
+			media_rels, media_urls = _harvest_post_yield_media(
+				conversation_id, turn_start_ms, poll=yield_continuation
+			)
 		except Exception:
 			frappe.log_error(
 				title="chat worker: post-yield media harvest failed",
@@ -324,7 +330,9 @@ def _scan_history_for_media(messages: list, turn_start_ms: int) -> tuple[list[st
 	return (rels, []) if rels else ([], urls)
 
 
-def _harvest_post_yield_media(conversation_id: str, turn_start_ms: int) -> tuple[list[str], list[dict]]:
+def _harvest_post_yield_media(
+	conversation_id: str, turn_start_ms: int, *, poll: bool = True
+) -> tuple[list[str], list[dict]]:
 	"""Poll the session's display transcript (chat.history) for the deferred-
 	reply yield's actual media - it arrives as separate transcript messages
 	AFTER the continuation's own final, past the point relay_turn_events /
@@ -350,7 +358,7 @@ def _harvest_post_yield_media(conversation_id: str, turn_start_ms: int) -> tuple
 		rels, urls = _scan_history_for_media(history.get("messages") or [], turn_start_ms)
 		if rels or urls:
 			return rels, urls
-		if time.monotonic() >= deadline:
+		if not poll or time.monotonic() >= deadline:
 			return [], []
 		time.sleep(_YIELD_MEDIA_POLL_INTERVAL_S)
 
@@ -2002,6 +2010,7 @@ def handle_chat_send(payload: dict) -> None:
 			media_rels=terminal.get("media_rels"),
 			media_urls=terminal.get("media_urls"),
 			yield_continuation=bool(terminal.get("yield_continuation")),
+			harvest_history=bool(terminal.get("harvest_history")),
 		)
 
 		# Chat-ask materialization (notify-approvals design Part 2): a final

@@ -42,3 +42,22 @@ class TestAccumulateAssistantText(unittest.TestCase):
 
 	def test_empty_frames_change_nothing(self):
 		self.assertEqual(fold([{"text": "Hi", "delta": "Hi"}, {"text": "", "delta": ""}, {}]), "Hi")
+
+
+class TestLifecycleEndCarriesTheRawReply(unittest.TestCase):
+	def test_end_frame_keeps_terminal_reply_raw(self):
+		from jarvis.chat.events import parse_event
+
+		raw = "Here.\nMEDIA:/home/node/.openclaw/media/x.png"
+		ev = parse_event(
+			{"stream": "lifecycle", "data": {"phase": "end", "terminalReply": {"text": raw}}}, redact=False
+		)
+		self.assertEqual(ev["terminal_reply_raw"], raw)
+
+	def test_other_phases_carry_nothing(self):
+		from jarvis.chat.events import parse_event
+
+		ev = parse_event(
+			{"stream": "lifecycle", "data": {"phase": "start", "terminalReply": {"text": "x"}}}, redact=False
+		)
+		self.assertNotIn("terminal_reply_raw", ev)

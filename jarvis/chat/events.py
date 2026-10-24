@@ -46,6 +46,14 @@ def parse_event(payload: dict[str, Any], *, redact: bool = True) -> dict[str, An
 		out: dict[str, Any] = {"kind": "lifecycle", "phase": data.get("phase")}
 		if data.get("error"):
 			out["error"] = _redact(data["error"])
+		# The run's raw reply as the runtime settled it, on the ``end`` frame. Kept RAW (never
+		# redacted, never shown): it is read only to detect ``MEDIA:`` paths. openclaw strips a
+		# ``MEDIA:`` line from the streamed text AND from the chat final (verified on 2026.9.3 and
+		# 2026.10.6), so the final-text detection never sees it; this is the only frame that still
+		# carries the line.
+		reply = data.get("terminalReply")
+		if data.get("phase") == "end" and isinstance(reply, dict) and isinstance(reply.get("text"), str):
+			out["terminal_reply_raw"] = reply["text"]
 		return out
 
 	if stream == "item":

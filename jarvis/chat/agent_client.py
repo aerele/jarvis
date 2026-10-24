@@ -1328,6 +1328,8 @@ class AgentSession:
 		# (the chat event is the single terminal path); it is the only frame
 		# that names the provider failure, so it is kept for a failed final.
 		failure_detail: str | None = None
+		terminal_reply_raw = ""
+		terminal_end_seen = False
 		# True once a media-generation tool call started this run - see
 		# MEDIA_GEN_TOOL_NAMES. Turns a would-be failed_final bare terminal into
 		# a yield instead (the two are wire-identical without this history).
@@ -1389,6 +1391,10 @@ class AgentSession:
 					# text). media_rels rides the terminal so the worker seeds the image.
 					_red, _rels, _marked = egress_rules.redact_final_with_media(text, run_id=run_id)
 					_final = {"kind": "relay:final", "text": _red}
+					if not _rels and terminal_reply_raw:
+						from jarvis.chat.generated_media import detect_media_paths
+
+						_rels = detect_media_paths(terminal_reply_raw)
 					if _rels:  # fetchable media -> seed downstream (only set when present)
 						_final["media_rels"] = _rels
 					if _marked:  # any MEDIA: line stripped -> force the content overwrite
@@ -1396,6 +1402,9 @@ class AgentSession:
 					_urls = _chat_final_media_urls(payload)
 					if _urls:  # gateway-attached image/video/audio/document content blocks
 						_final["media_urls"] = _urls
+					if not _rels and not _urls and not terminal_end_seen:
+						# See relay_mux: the end frame is late, so read the transcript once instead.
+						_final["harvest_history"] = True
 					yield _final
 					return
 				if state in ("error", "aborted"):
@@ -1421,6 +1430,12 @@ class AgentSession:
 				# failed final; a real answer still wins over it (#543).
 				if parsed is not None and parsed.get("phase") == "error" and parsed.get("error"):
 					failure_detail = str(parsed["error"])
+				# MEDIA: paths the runtime stripped from the final survive only here (see
+				# events.parse_event terminal_reply_raw).
+				if parsed is not None and parsed.get("phase") == "end":
+					terminal_end_seen = True
+				if parsed is not None and parsed.get("terminal_reply_raw"):
+					terminal_reply_raw = parsed["terminal_reply_raw"]
 				continue
 			if (
 				parsed.get("kind") == "tool"
