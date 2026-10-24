@@ -17,7 +17,12 @@ from frappe.utils import flt, getdate
 
 from jarvis.payment_calendar.books import validate_obligation_books
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
-from jarvis.payment_calendar.permissions import incomplete_scope_reasons, require_company, require_report
+from jarvis.payment_calendar.permissions import (
+	incomplete_scope_reasons,
+	require_company,
+	require_report,
+	visible_names,
+)
 
 MAX_LEDGER_ROWS = 100_000
 MAX_VOUCHERS = 10_000
@@ -96,6 +101,19 @@ def _report_class():
 			if any(count > 1 for count in counts.values()):
 				raise CalendarSourceUnavailable("multiple_invoice_accounts")
 			super().build_data()
+			# The report's output alone cannot prove reconciliation: a malformed
+			# payment schedule can redefine an invoice's total. Compare allocated
+			# output with the independent, pre-mutation ledger residual per invoice.
+			allocated = {}
+			for row in self.data:
+				key = _key(row)
+				allocated[key] = allocated.get(key, Decimal(0)) + money(
+					row.outstanding, self.currency_precision
+				)
+			for key, row in self.pre.items():
+				expected = money(row.invoiced - row.paid - row.credit_note, self.currency_precision)
+				if allocated.get(key, Decimal(0)) != expected:
+					raise CalendarSourceUnavailable("reconciliation_mismatch")
 			for key, row in self.pre.items():
 				if self.is_invoice(row) and row.invoiced > 0 and key not in self.terms:
 					company_residual = money(
@@ -161,24 +179,48 @@ def _visible_rows(engine, report, rows):
 	from frappe.desk.query_report import get_filtered_data
 
 	filtered = get_filtered_data(report.ref_doctype, engine.columns, rows, frappe.session.user)
-	# Report post-filters do not apply every Dynamic Link / custom query hook.
-	# Invoice reads must also be in the viewer's actual document query scope.
+	# Apply the exact delivery predicate to every voucher, including JE/PE.
 	allowed = {}
-	for doctype in {
-		r.voucher_type for r in filtered if r.voucher_type in ("Purchase Invoice", "Sales Invoice")
-	}:
+	for doctype in {r.voucher_type for r in filtered}:
 		names = sorted({r.voucher_no for r in filtered if r.voucher_type == doctype})
-		allowed[doctype] = set()
-		for start in range(0, len(names), 500):
-			allowed[doctype].update(
-				frappe.get_list(
-					doctype,
-					filters={"name": ["in", names[start : start + 500]], "docstatus": 1},
-					pluck="name",
-					limit_page_length=0,
-				)
-			)
-	return [r for r in filtered if r.voucher_type not in allowed or r.voucher_no in allowed[r.voucher_type]]
+		filters = {"docstatus": 1}
+		if frappe.get_meta(doctype).has_field("company"):
+			filters["company"] = engine.filters.company
+		allowed[doctype] = visible_names(doctype, names, filters)
+	parties = {}
+	for doctype in {r.party_type for r in filtered if r.party_type and r.party}:
+		parties[doctype] = visible_names(doctype, [r.party for r in filtered if r.party_type == doctype])
+	return [
+		r
+		for r in filtered
+		if (r.voucher_type not in allowed or r.voucher_no in allowed[r.voucher_type])
+		and r.party in parties.get(r.party_type, set())
+	]
+
+
+def _permission_columns(columns):
+	return [
+		{key: col.get(key) for key in ("fieldname", "fieldtype", "options")}
+		for col in columns
+		if col.get("fieldtype") in ("Link", "Dynamic Link")
+	]
+
+
+def _permission_row(row, columns):
+	fields = {
+		"party",
+		"party_type",
+		"party_account",
+		"voucher_type",
+		"voucher_no",
+		"posting_date",
+		"due_date",
+	}
+	for col in _permission_columns(columns):
+		fields.add(col["fieldname"])
+		if col["fieldtype"] == "Dynamic Link" and col.get("options"):
+			fields.add(col["options"])
+	return {field: row.get(field) for field in sorted(fields)}
 
 
 def read_obligations(company: str, account_type: str, as_of: str, window_start: str, window_end: str) -> dict:
@@ -303,6 +345,7 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 				"remaining": str(remaining),
 				"settlement": status,
 				"kind": "adjustment" if adjustment else "obligation",
+				"_permission": _permission_row(row, engine.columns),
 			}
 		)
 	canonical_total = sum((money(r.outstanding, precision) for r in canonical), Decimal(0))
@@ -319,4 +362,5 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 		"precision": precision,
 		"complete_for_company": not reasons,
 		"scope_reasons": reasons,
+		"permission_columns": _permission_columns(engine.columns),
 	}

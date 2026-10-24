@@ -50,22 +50,58 @@ def incomplete_scope_reasons() -> list[str]:
 		"Purchase Invoice",
 		"Sales Invoice",
 		"Journal Entry",
+		"Payment Entry",
 	}
 	relevant.update(gl_dimension_doctypes())
+	relevant.update(
+		frappe.get_all(
+			"Party Type", filters={"account_type": ["in", ["Payable", "Receivable"]]}, pluck="name"
+		)
+	)
 	reasons = ["restricted_obligations"] if relevant.intersection(get_user_permissions(user)) else []
-	for doctype in ("Purchase Invoice", "Sales Invoice", "Journal Entry"):
+	for doctype in ("Purchase Invoice", "Sales Invoice", "Journal Entry", "Payment Entry"):
 		if not frappe.has_permission(doctype, "read"):
 			reasons.append("restricted_document_details")
 		perms = get_role_permissions(frappe.get_meta(doctype), user)
-		if perms.get("if_owner", {}).get("read") or perms.get("if_owner", {}).get("report"):
+		if {"read", "report"}.intersection(perms.get("if_owner", {})):
 			reasons.append("owner_only_obligations")
 	query_hooks = frappe.get_hooks("permission_query_conditions")
 	if any(
 		query_hooks.get(dt)
-		for dt in ("Purchase Invoice", "Sales Invoice", "Payment Ledger Entry", "GL Entry", "Account")
+		for dt in ("Purchase Invoice", "Sales Invoice", "Payment Ledger Entry", "GL Entry", "Account", "*")
 	):
 		reasons.append("custom_accounting_scope")
 	return sorted(set(reasons))
+
+
+def visible_names(doctype: str, names, filters: dict | None = None) -> set[str]:
+	"""Use Frappe's read-or-select query gate, including custom party scopes."""
+	names = sorted(set(names))
+	allowed = set()
+	try:
+		for offset in range(0, len(names), 500):
+			allowed.update(
+				frappe.get_list(
+					doctype,
+					filters={**(filters or {}), "name": ["in", names[offset : offset + 500]]},
+					pluck="name",
+					limit_page_length=0,
+				)
+			)
+	except frappe.PermissionError:
+		return set()
+	hooks = frappe.get_hooks("has_permission")
+	if hooks.get(doctype) or hooks.get("*"):
+		ptype = "select" if frappe.only_has_select_perm(doctype) else "read"
+		visible = set()
+		for name in allowed:
+			try:
+				if frappe.has_permission(doctype, ptype, doc=name):
+					visible.add(name)
+			except (frappe.DoesNotExistError, frappe.PermissionError):
+				continue
+		return visible
+	return allowed
 
 
 def require_floor_write(company: str) -> None:
