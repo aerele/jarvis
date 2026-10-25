@@ -640,6 +640,29 @@ def _report_copy_ready(row) -> bool:
 		return True
 
 
+def on_prepared_report_update(doc, method=None):
+	"""``Prepared Report`` on_update: the run just finished (Frappe saves it Completed, or
+	Error). Wake the dispatcher for the report jobs waiting on it, AFTER this transaction
+	commits, so the file follows within seconds rather than at the next five-minute reap.
+	A cheap no-op when no report job of this owner is waiting; never fails the save."""
+	try:
+		if doc.get("status") not in ("Completed", "Error", "Failed"):
+			return
+		if not frappe.db.table_exists(DOCTYPE):
+			return
+		if not frappe.db.exists(DOCTYPE, {"status": "queued", "phase": "generating", "owner": doc.owner}):
+			return
+		frappe.enqueue(
+			"jarvis.tools._export.jobs.dispatch",
+			queue="short",
+			enqueue_after_commit=True,
+			job_id=f"export-dispatch-{doc.name}",
+			deduplicate=True,
+		)
+	except Exception as exc:
+		_log_failure(doc.name, "wake dispatch", exc, doctype="Prepared Report")
+
+
 def _directory(name, token):
 	if not name.isalnum() or not token.isalnum():
 		raise ValueError("Invalid export attempt")
