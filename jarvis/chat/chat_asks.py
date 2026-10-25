@@ -43,6 +43,9 @@ _ASK_RE = re.compile(r"```jarvis-ask[ \t]*\n([\s\S]*?)```")
 
 _FIELD_TYPES = ("date", "datetime", "field", "link", "select", "text")
 
+# Types a model may put in ``kind`` instead of ``type`` (chatAsk.js ASK_KINDS).
+_ASK_KINDS = ("single", "multi", "yesno", "boolean", *_FIELD_TYPES)
+
 # Same identifier guards as the client parser (chatAsk.js DOCTYPE_RE/FIELDNAME_RE).
 _DOCTYPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]*")
 _FIELDNAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -67,12 +70,45 @@ def ask_label(question: dict) -> str:
 	return question["q"] or humanize_fieldname(question.get("fieldname"))
 
 
+def _ask_text(q: dict) -> str:
+	"""Port of chatAsk.js ``askText``: the first non-empty of the keys a model
+	may use for the question text."""
+	for key in ("q", "question", "label", "title", "prompt"):
+		value = "" if q.get(key) is None else str(q[key]).strip()
+		if value:
+			return value
+	return ""
+
+
+def _nested_field(value):
+	"""Port of chatAsk.js ``nestedField``: a ``{doctype, fieldname}`` dict naming at
+	least one of the two, else None (a list or an empty dict is no field reference)."""
+	if not isinstance(value, dict):
+		return None
+	return value if value.get("doctype") or value.get("fieldname") else None
+
+
+def _ask_items(parsed):
+	"""Port of chatAsk.js ``askItems``: a bare list, ``{questions: [...]}``, or
+	one question object on its own (a list of one)."""
+	if isinstance(parsed, list):
+		return parsed
+	if not isinstance(parsed, dict):
+		return None
+	if "questions" in parsed:
+		return parsed["questions"]
+	return [parsed] if _ask_text(parsed) or parsed.get("type") or parsed.get("kind") else None
+
+
 def parse_ask(content: str | None) -> list[dict]:
 	"""Normalized questions ``[{q, type, options, doctype, fieldname}]`` from
 	the LAST ```jarvis-ask``` fence in ``content``, or ``[]``.
 
-	Mirrors chatAsk.js ``parseAsk`` exactly: JSON body is a list or
-	``{questions: [...]}``; at most 6 questions; ``type`` normalized
+	Mirrors chatAsk.js ``parseAsk`` exactly: JSON body is a list,
+	``{questions: [...]}`` or one question object; the text is the first of
+	``q``/``question``/``label``/``title``/``prompt``, the type is ``type`` else
+	a known ``kind``, and a nested ``field: {doctype, fieldname}`` makes a
+	``field`` question; at most 6 questions; ``type`` normalized
 	("boolean" -> "yesno", unknown -> "single"); at most 8 string options
 	(200 for ``select``, which with none degrades to ``text``); a ``field``
 	question needs a plain-identifier doctype and fieldname (else it degrades
@@ -87,19 +123,17 @@ def parse_ask(content: str | None) -> list[dict]:
 		parsed = json.loads(matches[-1].strip())
 	except Exception:
 		return []
-	if isinstance(parsed, list):
-		raw = parsed
-	elif isinstance(parsed, dict):
-		raw = parsed.get("questions")
-	else:
-		raw = None
+	raw = _ask_items(parsed)
 	if not isinstance(raw, list):
 		return []
 	out: list[dict] = []
 	for q in raw[:6]:
 		if not isinstance(q, dict):
 			continue
-		qtype = q.get("type")
+		nested = _nested_field(q.get("field"))
+		qtype = q.get("kind") if q.get("type") is None and q.get("kind") in _ASK_KINDS else q.get("type")
+		if nested:
+			qtype = "field"
 		if qtype == "boolean":
 			qtype = "yesno"
 		if qtype not in ("single", "multi", "yesno", *_FIELD_TYPES):
@@ -109,10 +143,11 @@ def parse_ask(content: str | None) -> list[dict]:
 		options = [str(o) for o in options[:cap]] if isinstance(options, list) else []
 		if qtype == "select" and not options:
 			qtype = "text"
-		text = str(q.get("q") or q.get("question") or "").strip()
+		text = _ask_text(q)
 		if qtype == "field":
-			doctype = str(q.get("doctype") or "").strip()
-			fieldname = str(q.get("fieldname") or "").strip()
+			source = nested or q
+			doctype = str(source.get("doctype") or "").strip()
+			fieldname = str(source.get("fieldname") or "").strip()
 			if _DOCTYPE_RE.fullmatch(doctype) and _FIELDNAME_RE.fullmatch(fieldname):
 				out.append(
 					{"q": text, "type": qtype, "options": [], "doctype": doctype, "fieldname": fieldname}
