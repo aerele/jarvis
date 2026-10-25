@@ -108,8 +108,13 @@ def get_creation_context(
 	if not isinstance(context, dict):
 		context = {}
 
-	fields = _field_map(meta)
-	mandatory = [f["fieldname"] for f in fields if f["mandatory"]]
+	full_fields = _field_map(meta)
+	mandatory = [f["fieldname"] for f in full_fields if f["mandatory"]]
+	fields, auto_fields, readonly_fields = _split_fields(full_fields)
+	field_lists = {"auto_fields": auto_fields, "readonly_fields": readonly_fields}
+	child_fields = _child_fields(meta)
+	if child_fields:
+		field_lists["child_fields"] = child_fields
 
 	# Derived record? The agent already tells us the source - it passes
 	# {"sales_order": "SAL-ORD-2026-00002"} as a hint - so if the ERP has a
@@ -139,10 +144,13 @@ def get_creation_context(
 			mapped=mapped,
 			mapped_from=mapped_from,
 			mapped_note=mapped_note,
+			field_lists=field_lists,
 		)
 
 	filters, matched = _resolve_context_filters(meta, context)
-	value_fields = [f["fieldname"] for f in fields if f["fieldtype"] in _VALUE_FIELDTYPES][:_MAX_VALUE_FIELDS]
+	value_fields = [f["fieldname"] for f in full_fields if f["fieldtype"] in _VALUE_FIELDTYPES][
+		:_MAX_VALUE_FIELDS
+	]
 	similar, match_note = _similar_records(doctype, filters, value_fields, limit)
 
 	if similar:
@@ -154,7 +162,7 @@ def get_creation_context(
 		if frappe.has_permission(doctype, ptype="read", doc=name):
 			doc = frappe.get_doc(doctype, name)
 			doc.apply_fieldlevel_read_permissions()
-			example = doc.as_dict(no_default_fields=True)
+			example = _prune_empty(doc.as_dict(no_default_fields=True))
 
 	if not matched and frappe.has_permission(doctype, ptype="read"):
 		facets = _facets(doctype, meta)
@@ -168,6 +176,7 @@ def get_creation_context(
 		match_note,
 		facets,
 		mapped_note=mapped_note,
+		field_lists=field_lists,
 	)
 
 
@@ -183,6 +192,7 @@ def _result(
 	mapped=None,
 	mapped_from=None,
 	mapped_note=None,
+	field_lists=None,
 ) -> dict:
 	"""Assemble the response. ``mapped`` (when present) is the ERP's own mapper
 	output and carries a different instruction from the similar-records case:
@@ -197,8 +207,10 @@ def _result(
 		"facets": facets,
 		"note": (
 			"Reference only - decide each field yourself from these examples "
-			"and the user's input; never copy blindly. Skip `auto`/`readonly` "
-			"fields (Frappe computes those). A field with a `default` is NOT "
+			"and the user's input; never copy blindly. `auto_fields` and "
+			"`readonly_fields` are names only: Frappe fills them, skip them. "
+			"`child_fields` lists the settable columns of each mandatory child "
+			"table (e.g. `items`), so no get_schema call is needed. A field with a `default` is NOT "
 			"auto - Frappe applies the default silently, so decide it "
 			"yourself: leave it out to accept the default, set it when the "
 			"default is wrong for this record; a symbolic default (`Today`, "
@@ -207,6 +219,7 @@ def _result(
 			"Ask the user only about mandatory fields you cannot determine."
 		),
 	}
+	out.update(field_lists or {})
 	if mapped is not None:
 		out["mapped"] = mapped
 		out["mapped_from"] = mapped_from
@@ -292,8 +305,10 @@ def _field_map(meta) -> list[dict]:
 			# `auto` means Frappe COMPUTES this (fetch_from) - skipping it is safe.
 			# A field with a DEFAULT is different: Frappe GUESSES it, and the guess is
 			# a decision the human never sees unless it reaches the draft. Surface the
-			# default value and let the model decide, rather than hiding both.
-			"auto": bool(df.fetch_from),
+			# default value and let the model decide, rather than hiding both. A
+			# fetch_if_empty field only fills a blank, so a value the user gives wins:
+			# it is settable, not auto.
+			"auto": bool(df.fetch_from) and not df.fetch_if_empty,
 			"readonly": bool(df.read_only),
 		}
 		if df.default not in (None, ""):
@@ -305,6 +320,59 @@ def _field_map(meta) -> list[dict]:
 			rec["fetch_from"] = df.fetch_from
 		out.append(rec)
 	return out
+
+
+def _compact(rec: dict) -> dict:
+	"""Drop keys whose value is False, None or empty: absent means off. A zero
+	stays (``0 == False`` would drop it under an ``in`` test)."""
+	return {k: v for k, v in rec.items() if v is not None and v is not False and v != ""}
+
+
+def _split_fields(full_fields: list[dict]) -> tuple[list[dict], list[str], list[str]]:
+	"""``(fields, auto_fields, readonly_fields)``.
+
+	A field stays in full only when the model can set it (neither fetch_from nor
+	read-only) or must (mandatory). The rest are listed by name, so the model
+	still knows they exist and get filled, without paying for their metadata."""
+	fields, auto_fields, readonly_fields = [], [], []
+	for rec in full_fields:
+		if rec["mandatory"] or not (rec["auto"] or rec["readonly"]):
+			fields.append(_compact(rec))
+		elif rec["auto"]:
+			auto_fields.append(rec["fieldname"])
+		else:
+			readonly_fields.append(rec["fieldname"])
+	return fields, auto_fields, readonly_fields
+
+
+def _child_fields(meta) -> dict[str, list[dict]]:
+	"""``{table_fieldname: [settable or mandatory child fields]}`` for each
+	MANDATORY Table field, so the model need not fetch the child schema separately."""
+	out = {}
+	for df in meta.get_table_fields():
+		if not df.reqd or not df.options:
+			continue
+		child_meta = frappe.get_meta(df.options)
+		# Layout fields are already skipped by _field_map; a hidden field is
+		# kept only when mandatory.
+		hidden = {c.fieldname for c in child_meta.fields if c.hidden and not c.reqd}
+		out[df.fieldname] = [
+			_compact(rec)
+			for rec in _field_map(child_meta)
+			if rec["mandatory"] or not (rec["auto"] or rec["readonly"] or rec["fieldname"] in hidden)
+		]
+	return out
+
+
+def _prune_empty(value):
+	"""Recursively drop dict keys holding None, "", [] or {} (zeros and False
+	stay: they are values). Child rows are pruned too."""
+	if isinstance(value, dict):
+		pruned = {k: _prune_empty(v) for k, v in value.items()}
+		return {k: v for k, v in pruned.items() if v is not None and v not in ("", [], {})}
+	if isinstance(value, list):
+		return [_prune_empty(v) for v in value]
+	return value
 
 
 def _resolve_context_filters(meta, context: dict) -> tuple[list, list]:
