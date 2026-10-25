@@ -4,6 +4,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools.get_creation_context import _LAYOUT_FIELDTYPES as _LAYOUT
 from jarvis.tools.get_creation_context import get_creation_context
 
 
@@ -37,17 +38,17 @@ class TestGetCreationContext(FrappeTestCase):
 		self.assertEqual(ctx["doctype"], "ToDo")
 		self.assertTrue(ctx["fields"])
 		for f in ctx["fields"]:
-			self.assertLessEqual(
-				{"fieldname", "fieldtype", "mandatory", "auto", "readonly"},
-				set(f.keys()),
-			)
+			self.assertLessEqual({"fieldname", "fieldtype"}, set(f.keys()))
+			# falsy flags are dropped: absent means off
+			for flag in ("mandatory", "auto", "readonly"):
+				self.assertTrue(f.get(flag, True), f"{f['fieldname']}.{flag} should be absent when false")
 
 	def test_mandatory_matches_meta(self):
 		ctx = get_creation_context("ToDo")
 		expected = {df.fieldname for df in frappe.get_meta("ToDo").fields if df.reqd}
 		self.assertEqual(set(ctx["mandatory"]), expected)
 		# every listed mandatory field is flagged mandatory in the field map
-		flagged = {f["fieldname"] for f in ctx["fields"] if f["mandatory"]}
+		flagged = {f["fieldname"] for f in ctx["fields"] if f.get("mandatory")}
 		self.assertEqual(flagged, set(ctx["mandatory"]))
 
 	def test_context_match_on_select(self):
@@ -156,15 +157,16 @@ class TestCreationContextAutoAndDefaults(FrappeTestCase):
 	def test_fetch_from_field_is_auto_and_carries_no_default(self):
 		"""ToDo.assigned_by_full_name is `fetch_from: assigned_by.full_name` -
 		Frappe computes it, so skipping it is genuinely safe."""
-		f = self._field(get_creation_context("ToDo"), "assigned_by_full_name")
-		self.assertTrue(f["auto"])
-		self.assertNotIn("default", f)
+		ctx = get_creation_context("ToDo")
+		# non-mandatory fetch_from fields are listed by name only
+		self.assertIn("assigned_by_full_name", ctx["auto_fields"])
+		self.assertNotIn("assigned_by_full_name", [f["fieldname"] for f in ctx["fields"]])
 
 	def test_defaulted_field_is_not_auto_and_surfaces_its_default(self):
 		"""ToDo.date defaults to Today. Frappe GUESSES it, so the model must see
 		both that it is not auto and what the guess is."""
 		f = self._field(get_creation_context("ToDo"), "date")
-		self.assertFalse(f["auto"])
+		self.assertFalse(f.get("auto"))
 		self.assertEqual(f["default"], "Today")
 
 	def test_reqd_field_is_still_mandatory(self):
@@ -178,7 +180,7 @@ class TestCreationContextAutoAndDefaults(FrappeTestCase):
 		double-bind the note's ordering exists to resolve."""
 		f = self._field(get_creation_context("Sales Order"), "transaction_date")
 		self.assertTrue(f["mandatory"])
-		self.assertFalse(f["auto"])
+		self.assertFalse(f.get("auto"))
 		self.assertEqual(f["default"], "Today")
 
 	def test_note_carries_the_default_and_symbolic_default_clauses(self):
@@ -190,6 +192,106 @@ class TestCreationContextAutoAndDefaults(FrappeTestCase):
 		# the mandatory command is scoped to what the default rule left over,
 		# so a reqd+default field is not commanded and permitted at once
 		self.assertIn("remaining", note)
+
+
+class TestCreationContextCompactShape(FrappeTestCase):
+	"""The field map lists settable or mandatory fields in full and the rest by
+	name, so the payload the model re-reads every round stays small."""
+
+	def test_compact_drops_off_flags_but_keeps_a_zero(self):
+		from jarvis.tools.get_creation_context import _compact
+
+		rec = {"fieldname": "qty", "default": 0, "mandatory": False, "auto": None, "label": ""}
+		self.assertEqual(_compact(rec), {"fieldname": "qty", "default": 0})
+
+	def test_read_only_fields_are_listed_by_name_only(self):
+		ctx = get_creation_context("ToDo")
+		full = {f["fieldname"] for f in ctx["fields"]}
+		for df in frappe.get_meta("ToDo").fields:
+			if df.read_only and not df.reqd and not df.fetch_from and df.fieldtype not in _LAYOUT:
+				self.assertIn(df.fieldname, ctx["readonly_fields"])
+				self.assertNotIn(df.fieldname, full)
+		self.assertIsInstance(ctx["auto_fields"], list)
+
+	def test_mandatory_read_only_field_stays_in_fields(self):
+		meta = frappe.get_meta("ToDo")
+		df = next(d for d in meta.fields if d.fieldname == "description")
+		with patch.object(df, "read_only", 1), patch.object(df, "fetch_from", "x.y"):
+			ctx = get_creation_context("ToDo")
+		f = next(f for f in ctx["fields"] if f["fieldname"] == "description")
+		self.assertTrue(f["mandatory"])
+		self.assertTrue(f["readonly"])
+		self.assertTrue(f["auto"])
+		self.assertNotIn("description", ctx["auto_fields"] + ctx["readonly_fields"])
+
+	def test_child_fields_absent_without_mandatory_table(self):
+		self.assertNotIn("child_fields", get_creation_context("ToDo"))
+
+	def test_child_fields_for_mandatory_table(self):
+		ctx = get_creation_context("Sales Order")
+		names = [f["fieldname"] for f in ctx["child_fields"]["items"]]
+		self.assertIn("item_code", names)
+		self.assertIn("qty", names)
+		child = frappe.get_meta("Sales Order Item")
+		skipped = {
+			d.fieldname
+			for d in child.fields
+			if not d.reqd and (d.read_only or (d.fetch_from and not d.fetch_if_empty))
+		}
+		self.assertFalse(skipped & set(names))
+		for f in ctx["child_fields"]["items"]:
+			self.assertNotIn(False, f.values())
+
+	def test_hidden_child_field_kept_only_when_mandatory(self):
+		child = frappe.get_meta("Sales Order Item")
+		df = next(d for d in child.fields if d.fieldname == "qty")
+		with patch.object(df, "hidden", 1), patch.object(df, "reqd", 0):
+			names = [f["fieldname"] for f in get_creation_context("Sales Order")["child_fields"]["items"]]
+		self.assertNotIn("qty", names)
+		with patch.object(df, "hidden", 1), patch.object(df, "reqd", 1):
+			names = [f["fieldname"] for f in get_creation_context("Sales Order")["child_fields"]["items"]]
+		self.assertIn("qty", names)
+
+	def test_mandatory_read_only_child_field_is_kept(self):
+		child = frappe.get_meta("Sales Order Item")
+		df = next(d for d in child.fields if d.fieldname == "qty")
+		with patch.object(df, "read_only", 1), patch.object(df, "reqd", 0):
+			names = [f["fieldname"] for f in get_creation_context("Sales Order")["child_fields"]["items"]]
+		self.assertNotIn("qty", names)
+		with patch.object(df, "read_only", 1), patch.object(df, "reqd", 1):
+			names = [f["fieldname"] for f in get_creation_context("Sales Order")["child_fields"]["items"]]
+		self.assertIn("qty", names)
+
+	def test_fetch_if_empty_field_is_settable_not_auto(self):
+		meta = frappe.get_meta("ToDo")
+		df = next(d for d in meta.fields if d.fetch_from)
+		with patch.object(df, "fetch_if_empty", 1), patch.object(df, "read_only", 0):
+			ctx = get_creation_context("ToDo")
+		self.assertIn(df.fieldname, {f["fieldname"] for f in ctx["fields"]})
+		self.assertNotIn(df.fieldname, ctx["auto_fields"])
+
+	def test_example_drops_empty_values_but_keeps_zero_and_false(self):
+		from jarvis.tools.get_creation_context import _prune_empty
+
+		out = _prune_empty(
+			{
+				"a": None,
+				"b": "",
+				"c": [],
+				"d": {},
+				"e": 0,
+				"f": False,
+				"g": "x",
+				"rows": [{"h": None, "i": 0, "j": ""}],
+			}
+		)
+		self.assertEqual(out, {"e": 0, "f": False, "g": "x", "rows": [{"i": 0}]})
+
+	def test_live_example_has_no_empty_values(self):
+		_todo("jarvis-ctx compact example")
+		example = get_creation_context("ToDo")["example"]
+		for v in example.values():
+			self.assertNotIn(v, (None, "", [], {}))
 
 
 class TestCreationContextMappedSource(FrappeTestCase):
