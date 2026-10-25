@@ -204,6 +204,27 @@ class TestReportExportJob(FrappeTestCase):
 		job.reload()
 		self.assertEqual(job.status, "too large")
 
+	# --- the wake-up ------------------------------------------------------------
+	def test_a_finished_prepared_run_wakes_the_dispatcher(self):
+		self._job(status="queued", attempt_token="", phase="generating")
+		doc = frappe.get_doc("Prepared Report", _make_pr("Completed"))
+		with patch.object(jobs.frappe, "enqueue") as enqueue:
+			jobs.on_prepared_report_update(doc)
+		enqueue.assert_called_once()
+		self.assertEqual(enqueue.call_args.args[0], "jarvis.tools._export.jobs.dispatch")
+		self.assertTrue(enqueue.call_args.kwargs["enqueue_after_commit"])
+
+	def test_a_run_nobody_waits_for_wakes_nothing(self):
+		doc = frappe.get_doc("Prepared Report", _make_pr("Completed"))
+		with patch.object(jobs.frappe, "enqueue") as enqueue:
+			jobs.on_prepared_report_update(doc)
+		enqueue.assert_not_called()
+		doc.status = "Queued"
+		self._job(status="queued", attempt_token="", phase="generating")
+		with patch.object(jobs.frappe, "enqueue") as enqueue:
+			jobs.on_prepared_report_update(doc)
+		enqueue.assert_not_called()
+
 	# --- the card --------------------------------------------------------------
 	def test_public_state_shows_the_generating_phase_while_queued(self):
 		job = self._job(status="queued", attempt_token="", phase="generating")

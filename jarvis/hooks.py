@@ -622,6 +622,13 @@ doc_events["Jarvis Conversation"] = {
 	],
 }
 
+# A saved report's background export waits for Frappe's prepared copy; the moment
+# the run saves its Completed (or Error) state, the export dispatcher is woken so the
+# file follows within seconds rather than at the next five-minute reap (#2102).
+doc_events["Prepared Report"] = {
+	"on_update": "jarvis.tools._export.jobs.on_prepared_report_update",
+}
+
 # A pending action never blocks deleting the conversation it points at; the
 # on_trash hook above cleans it up instead.
 # A skill promotion request never blocks deleting the skill it names, for its owner
