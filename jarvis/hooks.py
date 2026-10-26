@@ -575,6 +575,13 @@ doc_events = {
 	for dt in ("DocType", "Custom Field", "Property Setter", "Workflow", "Client Script")
 }
 
+# Error capture (jarvis.api_errors): name the jarvis caller on an Error Log row
+# written without a traceback, and buffer a jarvis API call that answered 4xx
+# (Frappe writes no Error Log row for those). Both are no-ops for anything that
+# isn't jarvis, and neither ever raises.
+doc_events["Error Log"] = {"before_insert": "jarvis.api_errors.tag_error_log_origin"}
+after_request = ["jarvis.api_errors.capture_failed_request"]
+
 # Org-scope wiki pages are mirrored as markdown into the tenant container
 # workspace; every page write/delete enqueues a debounced mirror sync (the
 # handler filters to Org scope itself and no-ops when the tenant is

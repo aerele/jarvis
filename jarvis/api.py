@@ -2444,6 +2444,11 @@ def _dispatch_and_wrap(
 				provenance_name=provenance_name,
 				ref_doctype=err_obj.get("doctype") if refused else None,
 			)
+		# The agent got {ok: false}, a 200, so no other error lane sees it. Placed
+		# after every rollback above so the row rides the envelope's commit.
+		from jarvis import api_errors
+
+		api_errors.record_tool_failure(tool, envelope.get("error"))
 		return envelope
 	if sp:
 		try:
