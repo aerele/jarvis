@@ -92,10 +92,6 @@
 						{{ explain(reason) }}
 					</p>
 					<p v-if="model.snapshot.bank_code">{{ explain(model.snapshot.bank_code) }}</p>
-					<p>
-						Permitted dues may still be shown below. Missing values are never treated
-						as zero.
-					</p>
 				</div>
 				<p v-if="!model.accounts.length" class="pcal-notice">
 					Choose bank and cash accounts to include book cash in the forecast.

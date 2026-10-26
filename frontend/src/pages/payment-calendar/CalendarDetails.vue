@@ -126,12 +126,9 @@
 											}}{{ row.term ? " · " + row.term : "" }}</small
 										>
 										<small v-if="row.allocation_basis === 'invoice'">
-											Invoice-level balance · payment-term breakdown
-											unavailable.
 											{{
-												row.allocation_reason === "withholding"
-													? "Tax withholding is included in the ledger balance."
-													: "A foreign-currency advance is included in the ledger balance."
+												allocationLabels[row.allocation_reason] ||
+												"Invoice balance"
 											}}
 										</small>
 									</td>
@@ -221,6 +218,10 @@ const unavailable = computed(
 			props.bucketSide || (props.view === "customers" ? "Receivable" : "Payable")
 		]
 );
+const allocationLabels = {
+	withholding: "Tax withholding",
+	foreign_advance: "Advance adjustment",
+};
 const money = (value) =>
 	exactMoney(value, props.snapshot.currency, props.snapshot.projection.precision);
 const safeLink = (value) =>
