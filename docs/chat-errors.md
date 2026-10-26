@@ -319,3 +319,68 @@ unknown inputs, and safe status URLs. Run:
 node --test frontend/src/lib/errors.test.js
 python3 -m unittest jarvis.tests.test_error_taxonomy
 ```
+
+## Error capture lanes
+
+Every way a Jarvis failure reaches a user is buffered on the bench and pushed to
+the admin Errors feed by `jarvis.error_push.push_error_rollup` (`*/5` cron).
+
+| Lane | Source | Surface | Severity | Cursor |
+| --- | --- | --- | --- | --- |
+| Browser (SPA, PWA, Desk) | `Jarvis Client Error` | the reporter's surface | error | `pushed` 0 to 1 |
+| Failed jarvis API call (4xx) | `Jarvis Client Error`, by the `after_request` hook | `api` | warning | `pushed` |
+| Failed tool (`{ok: false}`) | `Jarvis Client Error` | `tool` | warning | `pushed` |
+| Rejected `call_tool` | `Jarvis Client Error` | `call_tool` | error | `pushed` |
+| Code-level exception | `Error Log`, jarvis origin only | `server` | error | `jarvis_error_log_watermark` |
+| Failed turn | `Jarvis Chat Turn` in state `errored` | `turn` | error | `jarvis_failed_turn_watermark` |
+
+Rules worth knowing:
+
+- Cursors are `<timestamp>|<name>` and only move forward. Each scan stops 120 s
+  behind now. A transaction that commits more than 120 s after its row was
+  created is skipped.
+- A rejected `call_tool` before the caller is known is recorded under the route
+  `unauthenticated`; a tool or endpoint name that does not exist is recorded as
+  `unknown_tool` / `unknown_method`, so a hostile caller cannot choose how many
+  rows are written. HTTP 401 and 429 are not errors.
+- A `frappe.log_error(title, message)` row has no traceback. Only its title and
+  the jarvis function that called `log_error` are forwarded, never the message
+  body. A row written by `error_push`, `api_errors` or `chat/heartbeat`, or whose
+  traceback passes through `admin_client.py` or `chat/usage_push.py`, is never
+  forwarded.
+- A browser `RunError` is dropped only when its `run_id` names an `errored` turn
+  (the turn lane sends that one). Any other `RunError` is kept.
+- A batch is claimed and committed before the admin call, reverted if it fails,
+  and dropped when admin refuses the payload (`InvalidErrorRollup`) or answers it
+  with a failure 12 cycles in a row (an hour). An outage, 401/403/429 or a stopped tenant
+  is waited out, never dropped.
+- A tool that calls `frappe.log_error` and then returns `{ok: false}` shows as
+  two rows (a `tool` warning and an exception). That is by design.
+- Not captured: generic Frappe endpoints (`savedocs`, `/api/resource`) on jarvis
+  doctypes, and HTTP 200 `{ok: false}` replies outside `call_tool`.
+- After the deploy every forwarded Error Log fingerprint changes once (frames now
+  read `jarvis/...`), so open admin rows will not fold with new ones. This is a
+  one-time re-key.
+- `done_at` on `Jarvis Chat Turn` now has a search index, so the failed-turn scan
+  is an index range read. It needs `bench migrate` (v15 and v16).
+- The site_config flag `jarvis_error_capture_off: 1` turns every lane and the
+  push off.
+
+### Diagnosing a stalled pipeline
+
+In `bench --site <site> console`:
+
+```python
+d = frappe.db.get_default
+for k in ("last_ok_at", "last_attempt_at", "consecutive_failures", "last_failure_cause", "inflight"):
+    print(k, d("jarvis_error_push_" + k))
+print(d("jarvis_error_log_watermark"), d("jarvis_failed_turn_watermark"))
+frappe.db.count("Jarvis Client Error", {"pushed": 0})  # waiting in the buffer
+```
+
+Once the last success is over an hour old and a push fails, an Error Log row
+`jarvis errors: rollup push stalled <N>h (<cause>)` is written at most every 6
+hours. A dropped batch writes `jarvis errors: admin refused rollup batch` and a
+`jarvis.error_push` log line; a prune of unsent rows and rows a scan could not
+read are logged the same way. Capture-hook failures go to the `jarvis.error_capture`
+log at warning level.
