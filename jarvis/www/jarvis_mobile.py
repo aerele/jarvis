@@ -36,6 +36,10 @@ def get_context(context):
 		"frappe_full_name": frappe.utils.get_fullname(frappe.session.user),
 		# Picks the AI-switch banner line (pwa/src/llmSwitch.js); UX only, like the SPA's.
 		"is_jarvis_admin": has_jarvis_admin_access(),
+		# Where socket.js finds this site's socket.io (frontend/src/lib/socketUrl.js,
+		# shared with the desktop shell).
+		"dev_server": bool(frappe._dev_server),
+		"socketio_port": frappe.conf.socketio_port,
 	}
 	# Whitelabel branding (Phase 4): shipped to the PWA so it renders the custom
 	# name/logo and patches the tab title/favicon. Blank => Jarvis defaults.
