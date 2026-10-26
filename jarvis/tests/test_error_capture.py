@@ -116,6 +116,16 @@ class TestFailedRequests(CaptureBase):
 		self.assertEqual(row.user, USER)
 		self.assertIn("is disabled", row.message)
 
+	def test_the_same_failure_on_two_endpoints_stays_two_rows(self):
+		self._capture("/api/method/jarvis.chat.api.get_conversation", 404, exc_type="DoesNotExistError")
+		self._capture("/api/method/jarvis.chat.api.rename_conversation", 404, exc_type="DoesNotExistError")
+		self._capture("/api/method/jarvis.chat.api.rename_conversation", 404, exc_type="DoesNotExistError")
+		rows = frappe.get_all(DT, fields=["route", "count"], order_by="route")
+		self.assertEqual(
+			[(r.route, r.count) for r in rows],
+			[("jarvis.chat.api.get_conversation", 1), ("jarvis.chat.api.rename_conversation", 2)],
+		)
+
 	def test_the_v2_api_path_counts_too(self):
 		self._capture("/api/v2/method/jarvis.chat.api.send_message", 403, exc_type="PermissionError")
 		self.assertEqual([r.route for r in self.buffered()], ["jarvis.chat.api.send_message"])
