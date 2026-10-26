@@ -668,7 +668,10 @@ class TestAHookThatWasLost(CheckBase):
 		rows = self._signals()
 		self.assertEqual(len(rows), 1, "one Error Log row per run")
 		self.assertEqual(rows[0].method, SIGNAL + "hook_dropped")
-		self.assertEqual(rows[0].error, f"run {run}; turn state done; shape hook_dropped")
+		# api_errors.tag_error_log_origin appends the calling frame after a blank line.
+		self.assertEqual(
+			rows[0].error.partition("\n\n")[0], f"run {run}; turn state done; shape hook_dropped"
+		)
 		for row in frappe.get_all(
 			LOG, filters={"method": ["like", "jarvis.chat.macros.reconcil%"]}, fields=["*"]
 		):
