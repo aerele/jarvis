@@ -90,6 +90,42 @@ describe("progressOf", () => {
 	});
 });
 
+describe("queued report job", () => {
+	it("says the report is generating and keeps Cancel", () => {
+		const v = view({
+			status: "queued",
+			phase: "generating",
+			rows_written: 0,
+			total_rows: null,
+		});
+		expect(v.pill.text).toBe("Generating report");
+		expect(v.track).toBe("indet");
+		expect(v.notes[0].text).toMatch(/generated in the background/);
+		expect(v.buttons).toEqual(["cancel"]);
+	});
+
+	it("a plain queued job still waits for a worker", () => {
+		const v = view({ status: "queued", phase: null, rows_written: 0, total_rows: null });
+		expect(v.pill.text).toBe("Queued");
+		expect(v.track).toBe("empty");
+		expect(v.notes[0].text).toMatch(/free background worker/);
+	});
+});
+
+describe("ready card took", () => {
+	it("counts from the ask, not from the worker start", () => {
+		const v = view({
+			status: "ready",
+			rows_written: 11,
+			total_rows: null,
+			asked_at: "2026-10-25T18:40:47Z",
+			started_at: "2026-10-25T18:40:58.1Z",
+			finished_at: "2026-10-25T18:40:58.5Z",
+		});
+		expect(v.stats.map((x) => x.text).join("")).toContain("took 0:12");
+	});
+});
+
 describe("running card view", () => {
 	it("shows the counted progress as a value track with its sentence", () => {
 		const v = view();
