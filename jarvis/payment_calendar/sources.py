@@ -23,6 +23,7 @@ from jarvis.payment_calendar.permissions import (
 	require_report,
 	visible_names,
 )
+from jarvis.payment_calendar.reconciliation import InvoiceReconciler, check_allocation_contract
 
 MAX_LEDGER_ROWS = 100_000
 MAX_VOUCHERS = 10_000
@@ -48,6 +49,7 @@ def _check_contract():
 
 	if erpnext.__version__.split(".")[0] != "16":
 		raise CalendarSourceUnavailable()
+	check_allocation_contract()
 	for name, arguments in {
 		"build_data": ("self",),
 		"allocate_outstanding_based_on_payment_terms": ("self", "row"),
@@ -93,6 +95,13 @@ def _report_class():
 			if len(self.pre) > MAX_VOUCHERS:
 				raise CalendarSourceUnavailable("too_large")
 			self.metadata = deepcopy(self.invoice_details)
+			self.ledger_residuals = {
+				_key(row): money(row.invoiced - row.paid - row.credit_note, self.currency_precision)
+				for row in self.voucher_balance.values()
+			}
+			reconciler = InvoiceReconciler(self, money, _key)
+			self.excluded = []
+			suppressed = set()
 			counts = Counter(
 				(r.voucher_type, r.voucher_no)
 				for r in self.pre.values()
@@ -113,9 +122,20 @@ def _report_class():
 			for key, row in self.pre.items():
 				expected = money(row.invoiced - row.paid - row.credit_note, self.currency_precision)
 				if allocated.get(key, Decimal(0)) != expected:
-					raise CalendarSourceUnavailable("reconciliation_mismatch")
+					if reconciler.excluded_fx(row, key in allocated):
+						self.excluded.extend(reconciler.native(row, force=True))
+						suppressed.add(key)
+						continue
+					replacement = reconciler.repair(row, expected)
+					self.data = [r for r in self.data if _key(r) != key] + [replacement]
+					self.terms[key] = []
 			for key, row in self.pre.items():
-				if self.is_invoice(row) and row.invoiced > 0 and key not in self.terms:
+				if (
+					self.is_invoice(row)
+					and row.invoiced > 0
+					and key not in self.terms
+					and key not in suppressed
+				):
 					company_residual = money(
 						row.invoiced - row.paid - row.credit_note, self.currency_precision
 					)
@@ -133,6 +153,7 @@ def _report_class():
 				if self.is_invoice(r)
 				and r.invoiced > 0
 				and k not in self.terms
+				and k not in suppressed
 				and money(r.invoiced - r.paid - r.credit_note, self.currency_precision) == 0
 			}
 			in_window = self._settled_in_window(candidates)
@@ -141,7 +162,10 @@ def _report_class():
 				row.invoice_grand_total = row.invoiced
 				self.allocate_outstanding_based_on_payment_terms(row)
 				if any(money(term.outstanding, self.currency_precision) for term in row.payment_terms):
-					raise CalendarSourceUnavailable("settlement_schedule_mismatch")
+					try:
+						self.terms[key] = [reconciler.repair(candidates[key], Decimal(0), settled=True)]
+					except CalendarSourceUnavailable as exc:
+						raise CalendarSourceUnavailable("settlement_schedule_mismatch") from exc
 				if not row.payment_terms:
 					row.outstanding = 0
 					self.terms[key] = [row]
@@ -326,6 +350,9 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 		adjustment = remaining < 0 or original <= 0
 		if adjustment:
 			status = "Adjustment"
+		basis = row.get("_calendar_basis")
+		if basis and remaining > 0 and remaining < original:
+			status = "Partially settled"
 		result.append(
 			{
 				"id": sha256(f"{account_type}:{_key(row)}:{index}".encode()).hexdigest()[:24],
@@ -339,9 +366,10 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 				"due_date": str(getdate(row.due_date)) if row.due_date else None,
 				"term": row.payment_term or "",
 				"original": str(original),
-				"paid": str(money(row.paid, precision) - discount),
-				"credit": str(credit),
-				"discount": str(discount),
+				"paid": None if basis else str(money(row.paid, precision) - discount),
+				"credit": None if basis else str(credit),
+				"discount": None if basis else str(discount),
+				**({"allocation_basis": "invoice", "allocation_reason": basis} if basis else {}),
 				"remaining": str(remaining),
 				"settlement": status,
 				"kind": "adjustment" if adjustment else "obligation",
@@ -352,11 +380,41 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 	if sum((Decimal(r["remaining"]) for r in result), Decimal(0)) != canonical_total:
 		raise CalendarSourceUnavailable("reconciliation_mismatch")
 	result.sort(key=lambda r: (r["due_date"] or "", r["voucher_type"], r["voucher_no"], r["id"]))
+	visible_excluded = _visible_rows(engine, report, engine.excluded)
+	excluded_rows = [
+		{
+			"voucher_type": row.voucher_type,
+			"voucher_no": row.voucher_no,
+			"party_type": row.party_type,
+			"party": row.party,
+			"remaining": str(money(row.outstanding, precision)),
+			"kind": "settled_fx",
+			"account_remaining": str(money(row.outstanding_in_account_currency, precision)),
+			"_permission": _permission_row(row, engine.columns),
+		}
+		for row in visible_excluded
+	]
+	visible_keys = {_key(row) for row in canonical + visible_overlay + visible_excluded}
+	fx_total = sum((money(row.outstanding, precision) for row in visible_excluded), Decimal(0))
+	if canonical_total + fx_total != sum((engine.ledger_residuals[k] for k in visible_keys), Decimal(0)):
+		raise CalendarSourceUnavailable("reconciliation_mismatch")
+	notes = {}
+	fallback_count = sum(row.get("allocation_basis") == "invoice" for row in result)
+	if fallback_count:
+		notes["invoice_level"] = {"count": fallback_count}
+	if excluded_rows:
+		notes["currency_residue_excluded"] = {"count": len(excluded_rows), "amount": str(fx_total)}
 	reasons = incomplete_scope_reasons()
+	if excluded_rows:
+		reasons = sorted({*reasons, "currency_residue_excluded"})
+	if len(visible_excluded) != len(engine.excluded):
+		reasons = sorted({*reasons, "filtered_obligations"})
 	if len(canonical) != len(engine.data) or len(visible_overlay) != len(overlay):
 		reasons = sorted({*reasons, "filtered_obligations"})
 	return {
 		"rows": result,
+		"excluded_rows": excluded_rows,
+		"notes": notes,
 		"canonical_total": str(canonical_total),
 		"currency": company_values.default_currency,
 		"precision": precision,

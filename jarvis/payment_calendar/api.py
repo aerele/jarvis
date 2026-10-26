@@ -280,6 +280,12 @@ def get_snapshot_status(snapshot_id: str) -> dict:
 	status, result = _load(snapshot_id)
 	if result is None:
 		status = jobs.observe_job(status)
+	if (status["state"] == "complete" and result is None) or (
+		result is not None and status["state"] != "complete"
+	):
+		# Publication can land between the independent Redis reads above. Reload
+		# through the complete-result authorization path before claiming readiness.
+		status, result = _complete(snapshot_id)
 	data = jobs.public_status(status)
 	if result:
 		data.update(
