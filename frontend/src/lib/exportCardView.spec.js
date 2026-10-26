@@ -112,6 +112,20 @@ describe("queued report job", () => {
 	});
 });
 
+describe("ready card took", () => {
+	it("counts from the ask, not from the worker start", () => {
+		const v = view({
+			status: "ready",
+			rows_written: 11,
+			total_rows: null,
+			asked_at: "2026-10-25T18:40:47Z",
+			started_at: "2026-10-25T18:40:58.1Z",
+			finished_at: "2026-10-25T18:40:58.5Z",
+		});
+		expect(v.stats.map((x) => x.text).join("")).toContain("took 0:12");
+	});
+});
+
 describe("running card view", () => {
 	it("shows the counted progress as a value track with its sentence", () => {
 		const v = view();
