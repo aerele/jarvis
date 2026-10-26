@@ -12,6 +12,9 @@
 	var ENDPOINT = "/api/method/jarvis.api_errors.report_client_errors";
 	var MAX_PER_SESSION = 100;
 	var MAX_QUEUE = 50;
+	// A POST this large still fits a proxy's body limit; the rest waits its turn.
+	var MAX_BATCH_BYTES = 60000;
+	var FETCH_TIMEOUT_MS = 15000;
 	var DEBOUNCE_MS = 4000;
 
 	var sent = 0;
@@ -66,7 +69,8 @@
 		try {
 			ctx = ctx || {};
 			// Not gated on an in-flight flush: report() only queues, and gating
-			// dropped every error raised while a slow POST was out.
+			// dropped every error raised while a slow POST was out. `sent` counts
+			// attempts, so a failing server cannot be hit without bound.
 			if (sent >= MAX_PER_SESSION) return;
 			var message = String(ctx.message || "").slice(0, 2000);
 			if (benign(message) || benign(ctx.stack)) return;
@@ -98,35 +102,78 @@
 		}, ms);
 	}
 
-	function flush() {
-		if (!queue.length || reporting) return;
-		var batch = queue.splice(0, MAX_QUEUE);
-		seen = {};
-		reporting = true;
-		fetch(ENDPOINT, {
-			method: "POST",
-			credentials: "include",
-			headers: { "Content-Type": "application/json", "X-Frappe-CSRF-Token": csrf() },
-			body: JSON.stringify({ errors: batch }),
-			keepalive: true,
-		})
-			.then(function (res) {
-				if (!res.ok) throw new Error("report failed " + res.status);
-				sent += batch.length;
-				failures = 0;
+	// Take the next batch off the queue: at most MAX_QUEUE errors and about
+	// MAX_BATCH_BYTES serialised (always at least one, so nothing is stuck).
+	function takeBatch() {
+		var batch = [];
+		var bytes = 0;
+		while (queue.length && batch.length < MAX_QUEUE) {
+			var size = JSON.stringify(queue[0]).length;
+			if (batch.length && bytes + size > MAX_BATCH_BYTES) break;
+			bytes += size;
+			batch.push(queue.shift());
+		}
+		return batch;
+	}
+
+	// force: a page unload sends whatever is queued even while another send is out
+	// (keepalive lets it outlive the page).
+	function flush(force) {
+		if (!queue.length || (reporting && force !== true)) return;
+		var batch = [];
+		var timeout = null;
+		var own = force !== true;
+		try {
+			batch = takeBatch();
+			seen = {};
+			if (own) reporting = true;
+			sent += batch.length;
+			var ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+			if (ctl)
+				timeout = setTimeout(function () {
+					ctl.abort();
+				}, FETCH_TIMEOUT_MS);
+			fetch(ENDPOINT, {
+				method: "POST",
+				credentials: "include",
+				headers: { "Content-Type": "application/json", "X-Frappe-CSRF-Token": csrf() },
+				body: JSON.stringify({ errors: batch }),
+				keepalive: true,
+				signal: ctl ? ctl.signal : undefined,
 			})
-			.catch(function () {
-				// A dropped connection or a server hiccup: keep the batch for a few
-				// more tries, ahead of anything queued since, then give up on it.
-				failures += 1;
-				if (failures <= MAX_RETRIES) queue = batch.concat(queue).slice(0, MAX_QUEUE);
-				else failures = 0;
-			})
-			.then(function () {
-				reporting = false;
-				// Errors that arrived while this batch was out, or a retry.
-				if (queue.length) schedule(failures ? DEBOUNCE_MS * (failures + 1) : DEBOUNCE_MS);
-			});
+				.then(function (res) {
+					if (!res.ok) throw new Error("report failed " + res.status);
+					failures = 0;
+				})
+				.catch(function () {
+					retry(batch);
+				})
+				.then(function () {
+					if (timeout) clearTimeout(timeout);
+					if (own) reporting = false;
+					// Errors that arrived while this batch was out, or a retry.
+					if (queue.length)
+						schedule(failures ? DEBOUNCE_MS * (failures + 1) : DEBOUNCE_MS);
+				});
+		} catch (_) {
+			// Setup failed before a request went out: never leave `reporting` set.
+			if (timeout) clearTimeout(timeout);
+			if (own) reporting = false;
+			retry(batch);
+			if (queue.length) schedule(DEBOUNCE_MS * (failures + 1));
+		}
+	}
+
+	// A dropped connection or a server hiccup: keep the batch for a few more
+	// tries, ahead of anything queued since, then give up on it.
+	function retry(batch) {
+		failures += 1;
+		if (failures > MAX_RETRIES) {
+			failures = 0;
+			return;
+		}
+		for (var i = 0; i < batch.length; i++) seen[fingerprint(batch[i])] = 1;
+		queue = batch.concat(queue).slice(0, MAX_QUEUE);
 	}
 
 	window.addEventListener("error", function (ev) {
@@ -149,7 +196,9 @@
 			stack: r && r.stack,
 		});
 	});
-	window.addEventListener("pagehide", flush);
+	window.addEventListener("pagehide", function () {
+		flush(true);
+	});
 
 	window.jarvisReportError = report;
 	window.__jarvisErrorReporter = true;

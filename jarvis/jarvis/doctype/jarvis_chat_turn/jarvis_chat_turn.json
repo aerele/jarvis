@@ -280,6 +280,7 @@
    "fieldtype": "Datetime",
    "label": "Done At",
    "in_list_view": 1,
+   "search_index": 1,
    "description": "Stamped at finalizing->done|errored|cancelled; terminal timestamp for retention/GC (D2 #25)."
   },
   {
@@ -298,7 +299,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-14 00:00:00.000000",
+ "modified": "2026-10-26 12:00:00.000000",
  "module": "Jarvis",
  "name": "Jarvis Chat Turn",
  "naming_rule": "By fieldname",

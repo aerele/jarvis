@@ -464,7 +464,13 @@ class TestRealTracebacks(ApiErrorsBase):
 		)
 
 	def test_the_reporters_own_failures_stay_local(self):
-		for rel in ("error_push.py", "api_errors.py", "chat/heartbeat.py"):
+		for rel in (
+			"error_push.py",
+			"api_errors.py",
+			"chat/heartbeat.py",
+			"admin_client.py",
+			"chat/usage_push.py",
+		):
 			tb = _stored_traceback(f"apps/jarvis/jarvis/{rel}")
 			self.assertFalse(api_errors.is_jarvis_error("jarvis errors: rollup push failed", tb), rel)
 
@@ -472,7 +478,10 @@ class TestRealTracebacks(ApiErrorsBase):
 		since = str(frappe.utils.now_datetime())
 		tb = _stored_traceback("apps/jarvis/jarvis/chat/pump.py", "make_mux", "RuntimeError('relay gone')")
 		doc = frappe.get_doc({"doctype": "Error Log", "method": "pump.make_mux", "error": tb})
-		doc.insert(ignore_permissions=True)
+		# db_insert skips the before_insert tag hook, so only the real traceback can
+		# make this row jarvis's (inserted from here, the hook would rescue it).
+		doc.set_new_name()
+		doc.db_insert()
 		self.addCleanup(frappe.delete_doc, "Error Log", doc.name, force=True, ignore_permissions=True)
 		frappe.db.commit()
 		rows = api_errors.collect_error_log(since=since, limit=500)["rows"]
@@ -559,7 +568,7 @@ class TestPushClaimConfirm(ApiErrorsBase):
 	def test_occurrence_arriving_after_claim_is_not_lost(self):
 		self._seed("window boom")
 
-		def _during_push(errors):
+		def _during_push(errors, **kw):
 			# Same error reported again mid-flight: it must land in a FRESH pushed=0
 			# row (it can't fold into the already-claimed one), so its count lives.
 			with _as(USER):
