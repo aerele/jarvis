@@ -55,6 +55,8 @@ def _doctypes():
 			"Supplier",
 			"Customer",
 			"Report",
+			"Payment Schedule",
+			"Purchase Taxes and Charges",
 			*gl_dimension_doctypes(),
 			*(dt for dt in configured if frappe.db.exists("DocType", dt)),
 		}
@@ -198,6 +200,10 @@ _MASK_FIELDS = {
 		"currency",
 		"credit_to",
 		"grand_total",
+		"rounded_total",
+		"base_rounded_total",
+		"party_account_currency",
+		"write_off_amount",
 		"base_grand_total",
 		"outstanding_amount",
 		"total_advance",
@@ -212,6 +218,10 @@ _MASK_FIELDS = {
 		"currency",
 		"debit_to",
 		"grand_total",
+		"rounded_total",
+		"base_rounded_total",
+		"party_account_currency",
+		"write_off_amount",
 		"base_grand_total",
 		"outstanding_amount",
 		"total_advance",
@@ -219,6 +229,8 @@ _MASK_FIELDS = {
 		"cost_center",
 		"project",
 	},
+	"Payment Schedule": {"due_date", "base_payment_amount"},
+	"Purchase Taxes and Charges": {"is_tax_withholding_account", "base_tax_amount_after_discount_amount"},
 	"Supplier": {"supplier_name"},
 	"Customer": {"customer_name"},
 	"Company": {"default_currency", "default_finance_book"},
@@ -248,7 +260,7 @@ def validate_result_visibility(scope: dict, result: dict) -> None:
 		if source is None:
 			continue
 		report = require_report(scope["company"], side)
-		rows = source["rows"]
+		rows = source["rows"] + source.get("excluded_rows", [])
 		try:
 			proofs = [frappe._dict(deepcopy(row["_permission"])) for row in rows]
 			filtered = get_filtered_data(

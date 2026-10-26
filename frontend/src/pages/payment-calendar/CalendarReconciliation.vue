@@ -6,6 +6,21 @@
 				<p>Every bucket reconciles to the current ERPNext outstanding balance.</p>
 			</div>
 		</div>
+		<div v-for="(notes, side) in snapshot.projection.source_notes || {}" :key="side">
+			<p v-if="notes.invoice_level?.count" class="pcal-notice" role="status">
+				{{ notes.invoice_level.count }} {{ side === "Payable" ? "supplier" : "customer" }}
+				{{ notes.invoice_level.count === 1 ? "invoice uses" : "invoices use" }} ERPNext's
+				invoice-level balance because their single payment-term split did not reconcile.
+				Their original due dates are retained.
+			</p>
+			<p v-if="notes.currency_residue_excluded?.count" class="pcal-notice" role="status">
+				{{ notes.currency_residue_excluded.count }} settled foreign-currency
+				{{ notes.currency_residue_excluded.count === 1 ? "invoice has" : "invoices have" }}
+				a signed company-currency difference of
+				{{ money(notes.currency_residue_excluded.amount) }}. This difference is excluded
+				from scheduled dues; cash colours remain unavailable.
+			</p>
+		</div>
 		<div class="reconciliation-summary">
 			<div>
 				<h3>Payable now · {{ dateLabel(snapshot.scope.anchor) }}</h3>

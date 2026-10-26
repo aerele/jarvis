@@ -104,6 +104,8 @@ def _settlement(rows):
 		return "Settled"
 	if all(r[1] >= r[2] for r in rows):
 		return "Unpaid"
+	if any(row[0].get("settlement") == "Partially settled" for row in rows):
+		return "Partially settled"
 	return "Partially paid"
 
 
@@ -193,6 +195,10 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 		"excluded_collections": {
 			key: display(ar_buckets[key]) if ar is not None else None
 			for key in ("overdue", "undated", "adjustments")
+		},
+		"source_notes": {
+			side: source.get("notes", {}) if source else {}
+			for side, source in (("Payable", ap), ("Receivable", ar))
 		},
 		"reconciliation": {
 			side: {key: display(value) for key, value in buckets.items()} if buckets is not None else None

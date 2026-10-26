@@ -125,6 +125,15 @@
 											>{{ row.voucher_type
 											}}{{ row.term ? " · " + row.term : "" }}</small
 										>
+										<small v-if="row.allocation_basis === 'invoice'">
+											Invoice-level balance · payment-term breakdown
+											unavailable.
+											{{
+												row.allocation_reason === "withholding"
+													? "Tax withholding is included in the ledger balance."
+													: "A foreign-currency advance is included in the ledger balance."
+											}}
+										</small>
 									</td>
 									<td>
 										{{ row.party_name || row.party
@@ -210,7 +219,7 @@ const unavailable = computed(
 	() =>
 		props.snapshot.unavailable?.[
 			props.bucketSide || (props.view === "customers" ? "Receivable" : "Payable")
-		]
+		],
 );
 const money = (value) =>
 	exactMoney(value, props.snapshot.currency, props.snapshot.projection.precision);
@@ -221,7 +230,7 @@ const safeLink = (value) =>
 function pageRange(page, total) {
 	return `${(page - 1) * props.data.page_size + 1}–${Math.min(
 		page * props.data.page_size,
-		total
+		total,
 	)}`;
 }
 </script>

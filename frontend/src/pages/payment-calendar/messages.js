@@ -1,6 +1,6 @@
 export const riskLabel = (risk) =>
-	({ red: "Below zero", orange: "Below minimum cash", green: "At or above minimum" }[risk] ||
-	"Forecast unavailable");
+	({ red: "Below zero", orange: "Below minimum cash", green: "At or above minimum" })[risk] ||
+	"Forecast unavailable";
 
 const messages = {
 	restricted_obligations:
@@ -32,6 +32,8 @@ const messages = {
 	timeout: "The calendar took too long to prepare. Refresh to try again.",
 	job_lost: "The calendar job stopped before it finished. Refresh to try again.",
 	worker_busy: "Your calendar jobs are still running. Please wait, then refresh.",
+	currency_residue_excluded:
+		"Settled foreign-currency invoices have exchange differences excluded from dues. See the explanation below; cash colours are unavailable.",
 	floor_unconfigured: "A company minimum cash balance has not been configured.",
 	bank_unavailable:
 		"Selected bank balances are unavailable. Check account selection and finance access.",
