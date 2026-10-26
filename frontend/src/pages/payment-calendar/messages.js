@@ -1,6 +1,6 @@
 export const riskLabel = (risk) =>
-	({ red: "Below zero", orange: "Below minimum cash", green: "At or above minimum" })[risk] ||
-	"Forecast unavailable";
+	({ red: "Below zero", orange: "Below minimum cash", green: "At or above minimum" }[risk] ||
+	"Forecast unavailable");
 
 const messages = {
 	restricted_obligations:

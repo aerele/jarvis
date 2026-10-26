@@ -219,7 +219,7 @@ const unavailable = computed(
 	() =>
 		props.snapshot.unavailable?.[
 			props.bucketSide || (props.view === "customers" ? "Receivable" : "Payable")
-		],
+		]
 );
 const money = (value) =>
 	exactMoney(value, props.snapshot.currency, props.snapshot.projection.precision);
@@ -230,7 +230,7 @@ const safeLink = (value) =>
 function pageRange(page, total) {
 	return `${(page - 1) * props.data.page_size + 1}–${Math.min(
 		page * props.data.page_size,
-		total,
+		total
 	)}`;
 }
 </script>
