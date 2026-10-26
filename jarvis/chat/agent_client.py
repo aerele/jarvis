@@ -103,6 +103,13 @@ CONNECT_TIMEOUT_SECONDS = 10
 # the session is created after the prepare claim). Every other request keeps CONNECT_TIMEOUT_SECONDS.
 SESSION_CREATE_TIMEOUT_SECONDS = 45
 
+# openclaw 2026.10.x answers ``UNAVAILABLE`` ("Agent main has not completed startup inspection and
+# preparation", "The model catalog is still loading") for ~40 s after a restart, even after
+# /healthz is 200 (the fleet agent now also waits on /startupz; this is the bench-side safety net).
+# Session setup RPCs that hit it wait and retry for up to this long instead of failing the turn.
+UNAVAILABLE_RETRY_BUDGET_SECONDS = 60
+_UNAVAILABLE_RETRY_DELAYS = (2, 3, 5, 8, 10)  # then 10 s until the budget runs out
+
 # A dormant / just-recreated container's gateway is unreachable for ~10-30s
 # while `compose up -d` recreates it (see jarvis/api.py rotate_agent_token) or
 # while a rotated-dormant container spins back up. A single 10s connect with no
@@ -987,10 +994,30 @@ class AgentSession:
 
 	# -- protocol methods -------------------------------------------------
 
-	def create_session(self, label: str = "jarvis-chat") -> str:
+	def _request_when_available(self, method: str, params: dict, *, timeout_s: float) -> dict:
+		"""``_request``, retried while the gateway answers ``UNAVAILABLE`` (still starting up), for at
+		most ``UNAVAILABLE_RETRY_BUDGET_SECONDS``. Any other error, and the last UNAVAILABLE once the
+		budget is spent, is raised unchanged."""
+		deadline = time.monotonic() + UNAVAILABLE_RETRY_BUDGET_SECONDS
+		attempt = 0
+		while True:
+			try:
+				return self._request(method, params, timeout_s=timeout_s)
+			except AgentUnreachableError as e:
+				delay = _UNAVAILABLE_RETRY_DELAYS[min(attempt, len(_UNAVAILABLE_RETRY_DELAYS) - 1)]
+				if e.code != "UNAVAILABLE" or time.monotonic() + delay > deadline:
+					raise
+				attempt += 1
+				time.sleep(delay)
+
+	def create_session(self, label: str = "jarvis-chat", *, wait_unavailable: bool = True) -> str:
+		"""``wait_unavailable=False`` for request-time callers (preflight, prewarm) that should report a
+		still-starting gateway at once instead of waiting out its startup (see
+		``UNAVAILABLE_RETRY_BUDGET_SECONDS``)."""
 		params = {"label": label}
+		send = self._request_when_available if wait_unavailable else self._request
 		try:
-			res = self._request("sessions.create", params, timeout_s=SESSION_CREATE_TIMEOUT_SECONDS)
+			res = send("sessions.create", params, timeout_s=SESSION_CREATE_TIMEOUT_SECONDS)
 		except AgentUnreachableError as e:
 			# agent 2026.9+ makes a MULTI-AGENT roster (>=1 marketplace-agent
 			# delegate installed) reject an unscoped session and demand the caller
@@ -1009,7 +1036,7 @@ class AgentSession:
 			# later image adds a structured reason, prefer it.
 			if e.code != "INVALID_REQUEST" or "no explicit owner" not in str(e).lower():
 				raise
-			res = self._request(
+			res = send(
 				"sessions.create",
 				{**params, "agentId": _PRIMARY_AGENT_ID},
 				timeout_s=SESSION_CREATE_TIMEOUT_SECONDS,
@@ -1245,7 +1272,7 @@ class AgentSession:
 		NEVER call this for a key the gateway did not just report. Patching an
 		ABSENT key does not fail - agent creates the entry, mints a fresh
 		sessionId and drops the label."""
-		res = self._request(
+		res = self._request_when_available(
 			"sessions.patch",
 			{"key": session_key, "model": None},
 			timeout_s=timeout_s,
@@ -1289,7 +1316,7 @@ class AgentSession:
 		``modelOverrideSource: "auto"`` -- and that marker is not in the sessions.patch
 		schema (the gateway rejects it with INVALID_REQUEST), so not overriding is the
 		supported way to preserve failover. See ``turn_handler._session_model_for``."""
-		self._request(
+		self._request_when_available(
 			"sessions.patch",
 			{"key": session_key, "model": model_ref},
 			timeout_s=timeout_s,

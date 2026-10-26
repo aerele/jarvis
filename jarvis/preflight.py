@@ -308,7 +308,9 @@ def _probe_direct_subscription(settings) -> dict:
 	stream_finished = False
 	try:
 		sess = AgentSession.connect(gateway_url)
-		throwaway = sess.create_session(label=f"jarvis-preflight-{uuid.uuid4().hex[:8]}")
+		throwaway = sess.create_session(
+			label=f"jarvis-preflight-{uuid.uuid4().hex[:8]}", wait_unavailable=False
+		)
 		fired_at = time.time()
 		out = _drain_probe_stream(
 			sess,

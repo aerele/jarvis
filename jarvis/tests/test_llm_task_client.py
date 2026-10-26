@@ -256,3 +256,40 @@ class TestLLMTaskComplete(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestLLMTaskWaitsOutGatewayStartup(unittest.TestCase):
+	"""openclaw 2026.10.x refuses work for ~40 s after a restart (agent startup inspection); a trigger
+	waits it out instead of failing."""
+
+	_OK = json.dumps({"ok": True, "result": {"details": {"json": "done"}}}).encode()
+	_UNAVAILABLE = json.dumps(
+		{
+			"ok": False,
+			"error": {"code": "UNAVAILABLE", "message": "Agent main has not completed startup inspection"},
+		}
+	).encode()
+
+	def _run(self, responses):
+		with (
+			patch("frappe.get_cached_doc", return_value=_settings()),
+			patch("requests.post", side_effect=responses) as post,
+			patch("jarvis.triggers.llm_task_client.time.sleep") as sleep,
+		):
+			out = lt.llm_task_complete("p", "i")
+		return out, post.call_count, sleep.call_count
+
+	def test_retries_an_unavailable_envelope_then_succeeds(self):
+		out, posts, sleeps = self._run(
+			[_streamed_response(400, self._UNAVAILABLE), _streamed_response(body=self._OK)]
+		)
+		self.assertEqual((out, posts, sleeps), ("done", 2, 1))
+
+	def test_retries_a_503(self):
+		out, posts, _ = self._run([_streamed_response(503, b"starting"), _streamed_response(body=self._OK)])
+		self.assertEqual((out, posts), ("done", 2))
+
+	def test_other_errors_are_not_retried(self):
+		bad = json.dumps({"ok": False, "error": {"code": "INVALID_REQUEST", "message": "nope"}}).encode()
+		with self.assertRaises(lt.LLMTaskError):
+			self._run([_streamed_response(400, bad)])

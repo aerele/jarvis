@@ -326,7 +326,9 @@ def warm_prefix() -> bool:
 		t0 = time.monotonic()
 		sess = AgentSession.connect(gateway_url)
 		try:
-			throwaway = sess.create_session(label=f"jarvis-prewarm-{uuid.uuid4().hex[:8]}")
+			throwaway = sess.create_session(
+				label=f"jarvis-prewarm-{uuid.uuid4().hex[:8]}", wait_unavailable=False
+			)
 			# The pin is the whole point: this warms ONE model's prefix cache,
 			# so a failover would warm the wrong one. agent answers an
 			# explicit model by dropping the run's fallback chain (#531), and
