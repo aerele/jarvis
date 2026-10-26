@@ -64,7 +64,7 @@ ERROR_LOG_SCAN_LIMIT = 300
 #: Surfaces the server writes into the buffer (never a browser), with the
 #: severity each is sent at. A tool or API failure the user can act on is a
 #: warning; a turn that failed outright is an error.
-SERVER_SURFACES = {"turn": "error", "tool": "warning", "api": "warning"}
+SERVER_SURFACES = {"turn": "error", "tool": "warning", "api": "warning", "call_tool": "error"}
 
 #: Ceiling on server-side buffer writes per user per minute. Past it the
 #: occurrence is dropped: one runaway loop must not flood the buffer.
@@ -663,8 +663,10 @@ def record_server_error(
 
 _METHOD_PATH_RE = re.compile(r"^/api/(?:v\d+/)?method/(jarvis\.[\w.]+)")
 
-#: Endpoints whose failures are not captured: the reporter's own (a loop).
-_UNCAPTURED_METHODS = ("jarvis.api_errors.",)
+#: Endpoints whose failures are not captured here: the reporter's own (a
+#: loop), and call_tool, which records its own (record_call_tool_failure) with
+#: the chat user and tool this hook can't see.
+_UNCAPTURED_METHODS = ("jarvis.api_errors.", "jarvis.api.call_tool")
 
 
 def capture_failed_request(response=None, request=None) -> None:
@@ -723,7 +725,41 @@ def _request_failure(response) -> tuple[str, str]:
 	return error_class, " ".join(messages)[:MAX_MESSAGE]
 
 
-def record_tool_failure(tool: str, error: dict | None, *, conversation: str = "", run_id: str = "") -> None:
+def record_call_tool_failure(tool: str, result) -> None:
+	"""Record an ``{ok: false}`` that ``call_tool`` answered, unless the tool
+	failure was already recorded in ``_dispatch_and_wrap``.
+
+	A rejected call (4xx: bad or missing token, unsigned body, unknown session,
+	stale device pairing, a shared-chat refusal) stops every tool call of the
+	turn, so it goes as an error under ``call_tool``. A refusal before the tool
+	ran (bad arguments, a delegate's contract, connector focus) goes as a tool
+	failure. Never raises."""
+	try:
+		if not isinstance(result, dict) or result.get("ok") is not False:
+			return
+		if getattr(frappe.local, "jarvis_tool_failure_recorded", False):
+			return
+		error = result.get("error") if isinstance(result.get("error"), dict) else {}
+		user = getattr(frappe.local, "jarvis_call_tool_user", None) or frappe.session.user
+		status = int((getattr(frappe.local, "response", None) or {}).get("http_status_code") or 200)
+		if status >= 400:
+			record_server_error(
+				"call_tool",
+				error_code=str(status),
+				error_class=str(error.get("code") or f"HTTP {status}"),
+				message=str(error.get("message") or ""),
+				route=str(tool or ""),
+				user=user,
+			)
+			return
+		record_tool_failure(tool, error, user=user)
+	except Exception:
+		pass
+
+
+def record_tool_failure(
+	tool: str, error: dict | None, *, conversation: str = "", run_id: str = "", user: str | None = None
+) -> None:
 	"""A tool that returned ``{ok: false}`` to the agent. A refusal by the user's
 	write guard is policy working, not a failure, and is not recorded."""
 	try:
@@ -741,6 +777,7 @@ def record_tool_failure(tool: str, error: dict | None, *, conversation: str = ""
 			route=str(tool or ""),
 			conversation=conversation,
 			run_id=run_id,
+			user=user,
 		)
 	except Exception:
 		pass
