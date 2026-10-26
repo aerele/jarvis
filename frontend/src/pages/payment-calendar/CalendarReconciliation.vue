@@ -1,40 +1,30 @@
 <template>
-	<section class="pcal-panel reconciliation-panel">
-		<div class="pcal-panel-heading">
-			<div>
-				<h2>What the forecast includes</h2>
-				<p>Every bucket reconciles to the current ERPNext outstanding balance.</p>
-			</div>
-		</div>
+	<section class="pcal-panel reconciliation-panel" aria-label="Outstanding balances">
 		<div class="reconciliation-summary">
 			<div>
 				<h3>Payable now · {{ dateLabel(snapshot.scope.anchor) }}</h3>
 				<strong>{{ money(snapshot.projection.due_now.total) }}</strong>
 				<p>
-					Scheduled today {{ money(snapshot.projection.due_now.scheduled) }}<br />Plus
-					overdue {{ money(snapshot.projection.due_now.overdue) }} and undated
-					{{ money(snapshot.projection.due_now.undated) }}, charged once today.
+					Today {{ money(snapshot.projection.due_now.scheduled) }}<br />
+					Overdue {{ money(snapshot.projection.due_now.overdue) }}<br />
+					Undated {{ money(snapshot.projection.due_now.undated) }}
 				</p>
 			</div>
 			<div>
-				<h3>Customer money excluded from expected cash</h3>
+				<h3>Overdue & undated receivables</h3>
 				<p>
 					Overdue {{ money(snapshot.projection.excluded_collections.overdue) }}<br />No
 					due date {{ money(snapshot.projection.excluded_collections.undated) }}
 				</p>
-				<p>
-					Neither is assumed to arrive today. Future dated collections assume on-time
-					payment.
-				</p>
 			</div>
 		</div>
 		<details class="reconciliation-details">
-			<summary>Reconcile all outstanding balances</summary>
+			<summary>Balance details</summary>
 			<div class="pcal-table-wrap overflow-x-auto">
 				<table class="pcal-table">
 					<thead>
 						<tr>
-							<th>Bucket</th>
+							<th>Category</th>
 							<th class="numeric">Suppliers</th>
 							<th class="numeric">Customers</th>
 						</tr>
@@ -59,31 +49,43 @@
 								}}</span>
 							</td>
 						</tr>
+						<tr v-if="hasExchangeDifference">
+							<th scope="row">Exchange differences (excluded)</th>
+							<td v-for="side in sides" :key="side" class="numeric money">
+								{{ money(exchangeDifference(side)) }}
+							</td>
+						</tr>
 					</tbody>
 				</table>
 			</div>
-			<p class="pcal-footnote">
-				Canonical outstanding = current / future + overdue + undated + outside forecast +
-				signed adjustments. Negative credits and advances remain signed here; they are not
-				assumed refunds or cash collections.
-			</p>
 		</details>
 	</section>
 </template>
 <script setup>
+import { computed } from "vue";
 import { exactMoney } from "@/lib/paymentCalendar/format";
 import { dateLabel } from "@/lib/paymentCalendar/dates";
 const props = defineProps({ snapshot: { type: Object, required: true } });
 defineEmits(["bucket"]);
 const sides = ["Payable", "Receivable"];
 const buckets = [
-	{ key: "canonical_total", label: "Canonical outstanding" },
-	{ key: "current_future", label: "Current / future in forecast" },
+	{ key: "canonical_total", label: "Total outstanding" },
+	{ key: "current_future", label: "Due today & later" },
 	{ key: "overdue", label: "Overdue", drill: true },
 	{ key: "undated", label: "No due date", drill: true },
 	{ key: "outside_horizon", label: "Outside forecast", drill: true },
-	{ key: "adjustments", label: "Signed adjustments", drill: true },
+	{ key: "adjustments", label: "Adjustments", drill: true },
 ];
+const hasExchangeDifference = computed(() =>
+	sides.some(
+		(side) => props.snapshot.projection.source_notes?.[side]?.currency_residue_excluded?.count
+	)
+);
+const exchangeDifference = (side) =>
+	props.snapshot.projection.reconciliation[side] == null
+		? null
+		: props.snapshot.projection.source_notes?.[side]?.currency_residue_excluded?.amount ??
+		  null;
 const money = (value) =>
 	exactMoney(value, props.snapshot.currency, props.snapshot.projection.precision);
 </script>

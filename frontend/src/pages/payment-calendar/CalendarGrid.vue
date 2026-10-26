@@ -54,31 +54,22 @@
 						@click="$emit('select', date)"
 						@keydown="onKey($event, date)"
 					>
-						<span class="calendar-date"
-							>{{ Number(date.slice(-2))
-							}}<span
-								v-if="date === scope.anchor"
-								class="today-dot"
-								aria-hidden="true"
-							></span
-						></span>
+						<span class="calendar-date" :class="{ today: date === scope.anchor }">{{
+							Number(date.slice(-2))
+						}}</span>
 						<template v-if="isSelectable(date, scope)"
 							><span
 								class="calendar-amount"
 								:title="money(day(date)?.payable_remaining)"
-								>{{ compact(day(date)?.payable_remaining) }}</span
+								><span class="calendar-amount-full">{{
+									compact(day(date)?.payable_remaining)
+								}}</span
+								><span class="calendar-amount-narrow">{{
+									compact(day(date)?.payable_remaining, 6)
+								}}</span></span
 							><span class="calendar-settlement">{{
-								day(date)?.settlement || "Unavailable"
-							}}</span
-							><span v-if="day(date)?.payable_terms" class="calendar-count"
-								>{{ day(date).payable_terms }} invoice
-								{{ day(date).payable_terms === 1 ? "row" : "rows" }}</span
-							><span
-								v-if="riskMarker(day(date)?.risk)"
-								class="calendar-risk"
-								aria-hidden="true"
-								>{{ riskMarker(day(date)?.risk) }}</span
-							></template
+								settlement(date)
+							}}</span></template
 						>
 					</button>
 				</div>
@@ -102,25 +93,23 @@
 				<span
 					>{{ dateLabel(date)
 					}}<small
-						>{{ date === scope.anchor ? "Today · " : ""
-						}}{{ day(date)?.settlement || "Unavailable" }}</small
+						>{{ date === scope.anchor ? "Today · " : "" }}{{ settlement(date) }}</small
 					></span
-				><span class="list-amount"
-					>{{ money(day(date)?.payable_remaining)
-					}}<small>{{ riskLabel(day(date)?.risk) }}</small></span
-				>
+				><span class="list-amount">{{ money(day(date)?.payable_remaining) }}</span>
 			</button>
 		</div>
 		<div class="calendar-legend">
-			<span><i class="risk-dot red" aria-hidden="true">↓</i>Below zero</span
-			><span><i class="risk-dot orange" aria-hidden="true">!</i>Below minimum</span
-			><span><i class="risk-dot green" aria-hidden="true">✓</i>At / above minimum</span
-			><span><i class="risk-dot unknown"></i>Unavailable / historical</span>
+			<span><i class="settlement-dot green" aria-hidden="true"></i>Paid / Settled</span
+			><span
+				><i class="settlement-dot orange" aria-hidden="true"></i>Partially paid /
+				settled</span
+			><span><i class="settlement-dot red" aria-hidden="true"></i>Unpaid</span
+			><span
+				><i class="settlement-dot neutral" aria-hidden="true"></i>No dues /
+				Unavailable</span
+			>
 		</div>
-		<p class="pcal-footnote">
-			Colours describe projected closing cash. Paid / Settled describes ERP accounting
-			settlement, not bank clearance.
-		</p>
+		<p class="pcal-footnote">Payment status is as of this snapshot.</p>
 	</section>
 </template>
 <script setup>
@@ -134,7 +123,6 @@ import {
 	monthLabel,
 } from "@/lib/paymentCalendar/dates";
 import { compactMoney, exactMoney } from "@/lib/paymentCalendar/format";
-import { riskLabel } from "./messages";
 const props = defineProps({
 	snapshot: { type: Object, required: true },
 	selected: { type: String, required: true },
@@ -180,23 +168,38 @@ function setButton(date, element) {
 const day = (date) => props.snapshot.projection.days[date];
 const money = (value) =>
 	exactMoney(value, props.snapshot.currency, props.snapshot.projection.precision);
-const compact = (value) =>
-	compactMoney(value, props.snapshot.currency, props.snapshot.projection.precision);
+const compact = (value, maxLength = 14) =>
+	compactMoney(value, props.snapshot.currency, props.snapshot.projection.precision, maxLength);
+const settlementColours = {
+	Paid: "green",
+	Settled: "green",
+	"Partially paid": "orange",
+	"Partially settled": "orange",
+	Unpaid: "red",
+	"No dues": null,
+};
+function settlement(date) {
+	const status = day(date)?.settlement;
+	return props.snapshot.projection.payable_settlement_complete === true &&
+		props.snapshot.projection.reconciliation?.Payable != null &&
+		!props.snapshot.unavailable?.Payable &&
+		isSelectable(date, scope.value) &&
+		typeof status === "string" &&
+		Object.hasOwn(settlementColours, status)
+		? status
+		: "Unavailable";
+}
 function label(date) {
-	return `${dateLabel(date, true)}, ${money(day(date)?.payable_remaining)}, ${
-		day(date)?.settlement || "Unavailable"
-	}, ${riskLabel(day(date)?.risk)}`;
+	return `${dateLabel(date, true)}, ${money(day(date)?.payable_remaining)}, ${settlement(date)}`;
 }
 function classes(date) {
-	const risk = day(date)?.risk;
+	const colour = settlementColours[settlement(date)];
 	return {
 		selected: date === props.selected,
 		adjacent: !date.startsWith(props.month),
-		[`risk-bg-${risk}`]:
-			isSelectable(date, scope.value) && ["red", "orange", "green"].includes(risk),
+		[`settlement-${colour}`]: Boolean(colour),
 	};
 }
-const riskMarker = (risk) => ({ red: "↓ Short", orange: "! Low", green: "✓ OK" }[risk] || "");
 async function onKey(event, date) {
 	if (["Enter", " "].includes(event.key)) {
 		event.preventDefault();

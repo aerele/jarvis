@@ -60,6 +60,27 @@ class TestPaymentCalendarProjection(TestCase):
 		data = self.project(source(a, b))
 		self.assertEqual(data["days"][ANCHOR]["payable_parties_due"], 2)
 
+	def test_payable_settlement_completeness_is_independent_of_cash_and_receivables(self):
+		result = project_snapshot(
+			source(term(0, original=50)), None, None, None, ANCHOR, ANCHOR, "2026-10-25"
+		)
+		self.assertFalse(result["forecast_available"])
+		self.assertIs(result["payable_settlement_complete"], True)
+		self.assertEqual(result["days"][ANCHOR]["settlement"], "Settled")
+
+	def test_incomplete_and_missing_payables_do_not_certify_settlement(self):
+		missing_reasons = source(term(0, original=50), complete=False)
+		missing_reasons.pop("scope_reasons")
+		for ap in [None, source(term(0, original=50), complete=False), missing_reasons]:
+			with self.subTest(ap=ap):
+				result = project_snapshot(ap, source(), "100", "20", ANCHOR, ANCHOR, "2026-10-25")
+				self.assertIs(result["payable_settlement_complete"], False)
+
+	def test_receivable_restrictions_do_not_make_complete_payables_unknown(self):
+		result = self.project(source(term(10)), source(term(0, original=20), complete=False))
+		self.assertFalse(result["forecast_available"])
+		self.assertIs(result["payable_settlement_complete"], True)
+
 	def test_unavailable_payable_source_cannot_mean_no_upcoming_payments(self):
 		data = project_snapshot(None, source(), "100", "20", ANCHOR, "2026-10-01", "2026-12-05")
 		with self.assertRaises(ProjectionError):

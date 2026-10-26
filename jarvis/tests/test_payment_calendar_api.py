@@ -68,6 +68,7 @@ class TestPaymentCalendarAPI(TestCase):
 		result = api.get_snapshot_status(self.sid)
 		self.assertTrue(result["ok"], result)
 		self.assertEqual(result["data"]["currency"], "INR")
+		self.assertIs(result["data"]["projection"]["payable_settlement_complete"], True)
 		self.assertNotIn("_permission", json.dumps(result))
 		self.assertNotIn("permission_columns", json.dumps(result))
 		self.assertNotIn(self.invoice, json.dumps(result))

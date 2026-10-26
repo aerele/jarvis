@@ -104,7 +104,45 @@ def _settlement(rows):
 		return "Settled"
 	if all(r[1] >= r[2] for r in rows):
 		return "Unpaid"
+	if any(row[0].get("settlement") == "Partially settled" for row in rows):
+		return "Partially settled"
 	return "Partially paid"
+
+
+def _verified_settled_fx(source, precision):
+	"""Waive only verified non-cash exclusions; never weaken other scope gates."""
+	try:
+		rows = source["excluded_rows"]
+		note = source["notes"]["currency_residue_excluded"]
+		if not isinstance(rows, list) or not rows or not isinstance(note, dict):
+			return False
+		if type(note.get("count")) is not int or note["count"] != len(rows):
+			return False
+
+		def identity(row):
+			return row["voucher_type"], row["voucher_no"], row["party"]
+
+		delivered = {identity(row) for row in source["rows"]}
+		seen, total = set(), Decimal(0)
+		for row in rows:
+			key = identity(row)
+			if (
+				key in delivered
+				or key in seen
+				or row.get("kind") != "settled_fx"
+				or row["voucher_type"] not in ("Purchase Invoice", "Sales Invoice")
+				or _amount(row["account_remaining"], precision) != 0
+			):
+				return False
+			remaining = _amount(row["remaining"], precision)
+			if remaining == 0:
+				return False
+			seen.add(key)
+			total += remaining
+		return _amount(note["amount"], precision) == total
+	except (KeyError, TypeError, AttributeError, ProjectionError):
+		# Missing/old/unverified proof keeps the original unavailable state.
+		return False
 
 
 def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision=2):
@@ -120,12 +158,17 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 	minimum = _amount(floor, precision) if floor is not None else None
 	if minimum is not None and minimum < 0:
 		raise ProjectionError("invalid_floor")
-	reasons = set()
+	reasons, complete_sides = set(), {}
 	for side, source in (("payables", ap), ("receivables", ar)):
+		complete_sides[side] = source is not None and source["complete_for_company"]
 		if source is None:
 			reasons.add(f"{side}_unavailable")
 		elif not source["complete_for_company"]:
-			reasons.update(source.get("scope_reasons") or ["incomplete_obligations"])
+			source_reasons = set(source.get("scope_reasons") or ["incomplete_obligations"])
+			if source_reasons == {"currency_residue_excluded"} and _verified_settled_fx(source, precision):
+				source_reasons.clear()
+			reasons.update(source_reasons)
+			complete_sides[side] = not source_reasons
 	if opening is None:
 		reasons.add("bank_unavailable")
 	if minimum is None:
@@ -179,6 +222,7 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 		"precision": precision,
 		"days": days,
 		"forecast_available": available,
+		"payable_settlement_complete": complete_sides["payables"],
 		"scope_reasons": sorted(reasons),
 		"book_cash": display(opening),
 		"floor": display(minimum),
@@ -193,6 +237,10 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 		"excluded_collections": {
 			key: display(ar_buckets[key]) if ar is not None else None
 			for key in ("overdue", "undated", "adjustments")
+		},
+		"source_notes": {
+			side: source.get("notes", {}) if source else {}
+			for side, source in (("Payable", ap), ("Receivable", ar))
 		},
 		"reconciliation": {
 			side: {key: display(value) for key, value in buckets.items()} if buckets is not None else None

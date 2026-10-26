@@ -14,12 +14,12 @@ describe("Payment Calendar grid and look-ahead limits", () => {
 		});
 		return wrapper;
 	}
-	it("keeps liquidity and settlement separate and exposes exact amounts", () => {
+	it("exposes settlement and exact amounts without cash-risk labels", () => {
 		render();
 		const day = wrapper.get('[data-date="2026-10-24"]');
 		expect(day.attributes("aria-label")).toContain("₹10.00");
 		expect(day.attributes("aria-label")).toContain("Unpaid");
-		expect(day.attributes("aria-label")).toContain("At or above minimum");
+		expect(day.attributes("aria-label")).not.toContain("At or above minimum");
 		expect(day.attributes("aria-current")).toBe("date");
 	});
 	it("gives one date a tab stop and moves focus by keyboard", async () => {
@@ -50,12 +50,12 @@ describe("Payment Calendar grid and look-ahead limits", () => {
 		expect(wrapper.find('[role="grid"]').exists()).toBe(false);
 		expect(wrapper.get('[data-date="2026-10-24"]').text()).toContain("Unpaid");
 	});
-	it("provides a visible risk cue independent of colour", () => {
+	it("provides a visible payment status independent of colour", () => {
 		const snapshot = complete();
 		snapshot.projection.days["2026-10-24"].risk = "red";
 		render({ snapshot });
-		const marker = wrapper.get('[data-date="2026-10-24"] .calendar-risk');
-		expect(marker.text()).toContain("Short");
+		const marker = wrapper.get('[data-date="2026-10-24"] .calendar-settlement');
+		expect(marker.text()).toContain("Unpaid");
 		expect(marker.classes()).not.toContain("sr-only");
 	});
 	it("moves one row at a time in list mode", async () => {

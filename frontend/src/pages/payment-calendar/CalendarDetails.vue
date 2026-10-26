@@ -125,6 +125,12 @@
 											>{{ row.voucher_type
 											}}{{ row.term ? " · " + row.term : "" }}</small
 										>
+										<small v-if="row.allocation_basis === 'invoice'">
+											{{
+												allocationLabels[row.allocation_reason] ||
+												"Invoice balance"
+											}}
+										</small>
 									</td>
 									<td>
 										{{ row.party_name || row.party
@@ -212,6 +218,10 @@ const unavailable = computed(
 			props.bucketSide || (props.view === "customers" ? "Receivable" : "Payable")
 		]
 );
+const allocationLabels = {
+	withholding: "Tax withholding",
+	foreign_advance: "Advance adjustment",
+};
 const money = (value) =>
 	exactMoney(value, props.snapshot.currency, props.snapshot.projection.precision);
 const safeLink = (value) =>

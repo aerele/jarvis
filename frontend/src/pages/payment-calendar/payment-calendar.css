@@ -302,49 +302,76 @@
 	gap: 5px;
 	width: 100%;
 	height: 106px;
-	padding: 9px 7px;
-	border: 1px solid var(--outline-gray-1, #edf0f2);
+	padding: 9px 5px;
+	border: 1px solid var(--settlement-border, #e6e9ed);
 	border-radius: 5px;
 	text-align: left;
-	background: var(--surface-gray-1, #fafbfc);
+	background: var(--settlement-fill, #fff);
+	box-shadow: inset 0 3px 0 var(--settlement-accent, transparent);
+	color: #20252b;
 }
 .calendar-cell:disabled {
 	opacity: 0.35;
 	cursor: not-allowed;
 }
 .calendar-cell.adjacent:not(.selected) {
-	opacity: 0.6;
+	border-style: dashed;
 }
 .calendar-date {
 	display: flex;
 	align-items: center;
-	gap: 5px;
+	justify-content: center;
+	min-width: 18px;
+	height: 18px;
 	font-size: 10px;
 	font-weight: 550;
 	line-height: 1.2;
 }
-.today-dot {
-	height: 4px;
-	width: 4px;
+.calendar-date.today {
 	border-radius: 50%;
-	background: currentColor;
+	background: #20252b;
+	color: #fff;
 }
 .calendar-amount {
 	display: block;
 	max-width: 100%;
+	min-width: 0;
 	font-size: 10px;
 	font-weight: 650;
 	line-height: 1.3;
 	letter-spacing: -0.2px;
-	overflow-wrap: anywhere;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.calendar-amount-full,
+.calendar-amount-narrow {
+	white-space: inherit;
+}
+.calendar-amount-narrow {
+	display: none;
 }
 .calendar-settlement {
 	font-size: 9px;
-	line-height: 1.2;
+	line-height: 1.4;
+	color: #53616f;
+	max-width: 100%;
+	overflow-wrap: anywhere;
 }
-.calendar-count {
-	font-size: 8px;
-	opacity: 0.75;
+.settlement-green {
+	--settlement-fill: #e6f4ea;
+	--settlement-border: #c6dfce;
+	--settlement-accent: #2f8f5b;
+}
+.settlement-orange {
+	--settlement-fill: #fff3d9;
+	--settlement-border: #f0d48f;
+	--settlement-accent: #d98a00;
+}
+.settlement-red {
+	--settlement-fill: #fde6e1;
+	--settlement-border: #f1bcb0;
+	--settlement-accent: #c8402b;
 }
 .risk-bg-red {
 	background: #fff0ed;
@@ -363,11 +390,28 @@
 }
 .calendar-cell.selected,
 .calendar-list-row.selected {
-	border: 2px solid #2c6552;
-	box-shadow: 0 0 0 2px #2c655214;
+	outline: 2px solid #1f2933;
+	outline-offset: 0;
 }
-.calendar-cell.selected {
-	padding: 8px 6px;
+.pcal-root .calendar-cell:focus-visible,
+.pcal-root .calendar-list-row:focus-visible {
+	outline: 2px solid #2563eb;
+	outline-offset: 2px;
+}
+.settlement-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 2px;
+	background: #abb2bb;
+}
+.settlement-dot.green {
+	background: #2f8f5b;
+}
+.settlement-dot.orange {
+	background: #d98a00;
+}
+.settlement-dot.red {
+	background: #c8402b;
 }
 .calendar-legend {
 	display: flex;
@@ -427,7 +471,10 @@
 	width: 100%;
 	min-height: 64px;
 	padding: 10px 12px;
-	border: 1px solid var(--outline-gray-1, #e6eaed);
+	border: 1px solid var(--settlement-border, #e6e9ed);
+	background: var(--settlement-fill, #fff);
+	box-shadow: inset 4px 0 0 var(--settlement-accent, transparent);
+	color: #20252b;
 	border-radius: 6px;
 	margin-bottom: 6px;
 	text-align: left;
@@ -748,17 +795,17 @@ button.upcoming-row:hover {
 		height: 104px;
 		padding: 10px;
 	}
-	.calendar-cell.selected {
-		padding: 9px;
-	}
 	.calendar-amount {
 		font-size: 12px;
 	}
+	.calendar-amount-full {
+		display: none;
+	}
+	.calendar-amount-narrow {
+		display: inline;
+	}
 	.calendar-settlement {
 		font-size: 10px;
-	}
-	.calendar-count {
-		font-size: 9px;
 	}
 }
 @media (max-width: 820px) {
@@ -787,9 +834,6 @@ button.upcoming-row:hover {
 	}
 	.calendar-amount {
 		font-size: 10px;
-	}
-	.calendar-count {
-		font-size: 8px;
 	}
 }
 @media (max-width: 500px) {
@@ -870,18 +914,12 @@ button.upcoming-row:hover {
 		height: 94px;
 		gap: 6px;
 	}
-	.calendar-cell.selected {
-		padding: 5px 2px;
-	}
 	.calendar-amount {
-		font-size: 8px;
+		font-size: 9px;
 		letter-spacing: -0.25px;
 	}
 	.calendar-settlement {
 		font-size: 8px;
-	}
-	.calendar-count {
-		font-size: 7px;
 	}
 	.calendar-legend {
 		gap: 8px;
@@ -930,11 +968,6 @@ button.upcoming-row:hover {
 		font-size: 9px;
 	}
 }
-.calendar-risk {
-	font-size: 8px;
-	font-weight: 650;
-	line-height: 1.2;
-}
 .calendar-list {
 	position: relative;
 }
@@ -957,9 +990,6 @@ button.upcoming-row:hover {
 	font-weight: 700;
 }
 @media (max-width: 500px) {
-	.calendar-risk {
-		font-size: 7px;
-	}
 	.pcal-assumptions {
 		font-size: 9px;
 		margin-top: -8px;
