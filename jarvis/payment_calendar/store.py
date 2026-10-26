@@ -209,7 +209,9 @@ def admit(actor: str, digest: str, scope: dict, fingerprint: str) -> tuple[str, 
 
 
 def _read(key):
-	value = frappe.cache.get(key)
+	# _key already adds the database prefix. get_value would prefix it again
+	# and unpickle the JSON written by the Lua state transitions.
+	value = frappe.cache.execute_command("GET", key)
 	if value is None:
 		return None
 	try:

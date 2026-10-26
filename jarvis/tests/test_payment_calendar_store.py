@@ -152,6 +152,39 @@ class TestPaymentCalendarStore(TestCase):
 			self.assertIsNone(store.load_status(self.actor, sid))
 			self.assertIsNone(store.load_result(self.actor, sid))
 
+	def test_same_actor_and_snapshot_id_are_isolated_between_database_namespaces(self):
+		namespace = {"db_name": "calendar-other-" + uuid4().hex}
+		other_payload = {"summary": {"book_cash": "200.00"}}
+		with patch.object(store, "token_hex", return_value=uuid4().hex):
+			sid, _ = self.admit()
+			key = store._key(self.actor, sid, "status")
+			try:
+				with patch.dict(frappe.local.conf, namespace):
+					self.assertNotEqual(store._key(self.actor, sid, "status"), key)
+					self.assertIsNone(store.load_status(self.actor, sid))
+					self.assertIsNone(store.load_result(self.actor, sid))
+					other_sid, created = self.admit()
+					self.assertTrue(created)
+					self.assertEqual(other_sid, sid)
+					self.assertTrue(store.mark_running(self.actor, sid))
+					self.assertTrue(store.publish(self.actor, sid, other_payload))
+				self.assertEqual(store.load_status(self.actor, sid)["state"], "queued")
+				self.assertTrue(store.mark_running(self.actor, sid))
+				self.assertTrue(store.publish(self.actor, sid, self.payload))
+				with patch.dict(frappe.local.conf, namespace):
+					self.assertEqual(store.load_result(self.actor, sid), other_payload)
+					store.purge_actor(self.actor)
+					self.assertIsNone(store.load_result(self.actor, sid))
+				self.assertEqual(store.load_result(self.actor, sid), self.payload)
+				with patch.dict(frappe.local.conf, namespace):
+					self.complete()
+					store.purge_site()
+					self.assertIsNone(store.load_result(self.actor, sid))
+				self.assertEqual(store.load_result(self.actor, sid), self.payload)
+			finally:
+				with patch.dict(frappe.local.conf, namespace):
+					store.purge_actor(self.actor)
+
 	def test_a_completed_refresh_gets_a_new_id(self):
 		before = self.complete()
 		after, created = self.admit()
