@@ -250,7 +250,7 @@ describe("persistent export card", () => {
 					filename: "x.xlsx",
 				},
 				pill: ["Ready", "ok"],
-				stats: "46,214 rows3.8 MBExcel, 12 columnstook 2:00",
+				stats: "46,214 rows3.8 MBExcel, 12 columnstook 3:00",
 				note: `Made at ${clock(
 					at(1)
 				)} from the data at that time. Ask again for fresh numbers.`,
@@ -267,7 +267,7 @@ describe("persistent export card", () => {
 					file_url: "/private/files/x.csv",
 				},
 				pill: ["Ready", "ok"],
-				stats: "18,400 rows2 KBCSV, 12 columnstook 2:00",
+				stats: "18,400 rows2 KBCSV, 12 columnstook 3:00",
 				footer: "Kept until you delete this chat",
 				buttons: ["Download .csv"],
 			},
