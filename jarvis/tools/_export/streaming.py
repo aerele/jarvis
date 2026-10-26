@@ -77,7 +77,7 @@ def _fieldtype(item, tables):
 		return "Date"
 	if function == "date_add":
 		return _fieldtype((item.get("args") or [None])[0], tables)
-	if function in {"date_part", "length"}:
+	if function in {"date_part", "date_diff", "length"}:
 		return "Int"
 	if function in {"round", "abs", "ceil", "floor", "add", "sub", "mul", "div", "neg"}:
 		return "Float"
