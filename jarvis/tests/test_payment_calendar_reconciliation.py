@@ -231,7 +231,7 @@ class TestPaymentCalendarReconciliation(TestCase):
 		self.assertEqual(rows[0]["due_date"], add_days(self.fx.today, 10))
 		self.assertEqual(Decimal(result["canonical_total"]), 6400)
 
-	def test_fx_leftover_is_disclosed_without_hiding_other_receivables_or_enabling_colours(self):
+	def test_verified_settled_fx_leftover_is_disclosed_without_blocking_forecast_colours(self):
 		invoice = self.foreign(paid=8000, advance=0, gross=8000.01)
 		# Settlement is complete in the party currency; only a company-currency
 		# cent remains, the exact suppression used by the native report.
@@ -251,8 +251,8 @@ class TestPaymentCalendarReconciliation(TestCase):
 		projection = project_snapshot(
 			empty, result, "1000", "100", self.fx.today, self.fx.today, add_days(self.fx.today, 40)
 		)
-		self.assertFalse(projection["forecast_available"])
-		self.assertTrue(all(day["risk"] is None for day in projection["days"].values()))
+		self.assertTrue(projection["forecast_available"])
+		self.assertTrue(all(day["risk"] is not None for day in projection["days"].values()))
 		self.assertEqual(projection["source_notes"]["Receivable"], result["notes"])
 
 	def test_unknown_single_term_mismatch_and_multiple_terms_still_refuse(self):

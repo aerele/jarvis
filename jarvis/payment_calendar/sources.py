@@ -388,6 +388,8 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 			"party_type": row.party_type,
 			"party": row.party,
 			"remaining": str(money(row.outstanding, precision)),
+			"kind": "settled_fx",
+			"account_remaining": str(money(row.outstanding_in_account_currency, precision)),
 			"_permission": _permission_row(row, engine.columns),
 		}
 		for row in visible_excluded

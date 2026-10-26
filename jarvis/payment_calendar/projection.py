@@ -109,6 +109,42 @@ def _settlement(rows):
 	return "Partially paid"
 
 
+def _verified_settled_fx(source, precision):
+	"""Waive only verified non-cash exclusions; never weaken other scope gates."""
+	try:
+		rows = source["excluded_rows"]
+		note = source["notes"]["currency_residue_excluded"]
+		if not isinstance(rows, list) or not rows or not isinstance(note, dict):
+			return False
+		if type(note.get("count")) is not int or note["count"] != len(rows):
+			return False
+
+		def identity(row):
+			return row["voucher_type"], row["voucher_no"], row["party"]
+
+		delivered = {identity(row) for row in source["rows"]}
+		seen, total = set(), Decimal(0)
+		for row in rows:
+			key = identity(row)
+			if (
+				key in delivered
+				or key in seen
+				or row.get("kind") != "settled_fx"
+				or row["voucher_type"] not in ("Purchase Invoice", "Sales Invoice")
+				or _amount(row["account_remaining"], precision) != 0
+			):
+				return False
+			remaining = _amount(row["remaining"], precision)
+			if remaining == 0:
+				return False
+			seen.add(key)
+			total += remaining
+		return _amount(note["amount"], precision) == total
+	except (KeyError, TypeError, AttributeError, ProjectionError):
+		# Missing/old/unverified proof keeps the original unavailable state.
+		return False
+
+
 def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision=2):
 	"""Aggregate complete residuals; carry from the anchor even before visible start."""
 	if isinstance(precision, bool) or not isinstance(precision, int) or not 0 <= precision <= 9:
@@ -127,7 +163,10 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 		if source is None:
 			reasons.add(f"{side}_unavailable")
 		elif not source["complete_for_company"]:
-			reasons.update(source.get("scope_reasons") or ["incomplete_obligations"])
+			source_reasons = set(source.get("scope_reasons") or ["incomplete_obligations"])
+			if source_reasons == {"currency_residue_excluded"} and _verified_settled_fx(source, precision):
+				source_reasons.clear()
+			reasons.update(source_reasons)
 	if opening is None:
 		reasons.add("bank_unavailable")
 	if minimum is None:
