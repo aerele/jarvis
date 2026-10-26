@@ -9,6 +9,38 @@ from jarvis.payment_calendar.sources import CalendarSourceUnavailable, money
 from jarvis.tools._ledger_access import assert_gl_balance_in_scope, assert_ledger_readable
 
 
+def validate_bank_accounts(company: str, accounts: list[str]) -> list[str]:
+	"""Authorize selection without reading money; deduplicate database identities."""
+	require_company(company)
+	assert_ledger_readable()
+	if (
+		not isinstance(accounts, list)
+		or not accounts
+		or len(accounts) > 50
+		or any(not isinstance(a, str) or not a for a in accounts)
+	):
+		raise frappe.ValidationError("Select bank or cash accounts.")
+	names = []
+	for name in dict.fromkeys(accounts):
+		assert_gl_balance_in_scope(name, None)
+		if not frappe.has_permission("Account", "read", doc=name):
+			raise frappe.PermissionError("A selected account is unavailable.")
+		account = frappe.db.get_value(
+			"Account", name, ["name", "company", "is_group", "disabled", "account_type"], as_dict=True
+		)
+		if (
+			not account
+			or account.company != company
+			or account.is_group
+			or account.disabled
+			or account.account_type not in ("Bank", "Cash")
+		):
+			raise frappe.ValidationError("Select enabled bank or cash ledger accounts from this company.")
+		if account.name not in names:
+			names.append(account.name)
+	return names
+
+
 def read_bank_balances(company: str, accounts: list[str], as_of: str) -> dict:
 	if not as_of:
 		raise frappe.ValidationError("The accounting date is required.")
@@ -21,30 +53,7 @@ def read_bank_balances(company: str, accounts: list[str], as_of: str) -> dict:
 	)
 
 	values = require_company(company)
-	assert_ledger_readable()
-	if (
-		not isinstance(accounts, list)
-		or not accounts
-		or len(accounts) > 50
-		or any(not isinstance(a, str) or not a for a in accounts)
-	):
-		raise frappe.ValidationError("Select bank or cash accounts.")
-	names = list(dict.fromkeys(accounts))
-	for name in names:
-		assert_gl_balance_in_scope(name, None)
-		if not frappe.has_permission("Account", "read", doc=name):
-			raise frappe.PermissionError("A selected account is unavailable.")
-		account = frappe.db.get_value(
-			"Account", name, ["company", "is_group", "disabled", "account_type"], as_dict=True
-		)
-		if (
-			not account
-			or account.company != company
-			or account.is_group
-			or account.disabled
-			or account.account_type not in ("Bank", "Cash")
-		):
-			raise frappe.ValidationError("Select enabled bank or cash ledger accounts from this company.")
+	names = validate_bank_accounts(company, accounts)
 	try:
 		get_fiscal_year(getdate(as_of), company=company, verbose=0)
 	except FiscalYearError as exc:

@@ -17,7 +17,13 @@ from frappe.utils import flt, getdate
 
 from jarvis.payment_calendar.books import validate_obligation_books
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
-from jarvis.payment_calendar.permissions import incomplete_scope_reasons, require_company, require_report
+from jarvis.payment_calendar.permissions import (
+	incomplete_scope_reasons,
+	require_company,
+	require_report,
+	visible_names,
+)
+from jarvis.payment_calendar.reconciliation import InvoiceReconciler, check_allocation_contract
 
 MAX_LEDGER_ROWS = 100_000
 MAX_VOUCHERS = 10_000
@@ -43,6 +49,7 @@ def _check_contract():
 
 	if erpnext.__version__.split(".")[0] != "16":
 		raise CalendarSourceUnavailable()
+	check_allocation_contract()
 	for name, arguments in {
 		"build_data": ("self",),
 		"allocate_outstanding_based_on_payment_terms": ("self", "row"),
@@ -88,6 +95,13 @@ def _report_class():
 			if len(self.pre) > MAX_VOUCHERS:
 				raise CalendarSourceUnavailable("too_large")
 			self.metadata = deepcopy(self.invoice_details)
+			self.ledger_residuals = {
+				_key(row): money(row.invoiced - row.paid - row.credit_note, self.currency_precision)
+				for row in self.voucher_balance.values()
+			}
+			reconciler = InvoiceReconciler(self, money, _key)
+			self.excluded = []
+			suppressed = set()
 			counts = Counter(
 				(r.voucher_type, r.voucher_no)
 				for r in self.pre.values()
@@ -96,8 +110,32 @@ def _report_class():
 			if any(count > 1 for count in counts.values()):
 				raise CalendarSourceUnavailable("multiple_invoice_accounts")
 			super().build_data()
+			# The report's output alone cannot prove reconciliation: a malformed
+			# payment schedule can redefine an invoice's total. Compare allocated
+			# output with the independent, pre-mutation ledger residual per invoice.
+			allocated = {}
+			for row in self.data:
+				key = _key(row)
+				allocated[key] = allocated.get(key, Decimal(0)) + money(
+					row.outstanding, self.currency_precision
+				)
 			for key, row in self.pre.items():
-				if self.is_invoice(row) and row.invoiced > 0 and key not in self.terms:
+				expected = money(row.invoiced - row.paid - row.credit_note, self.currency_precision)
+				if allocated.get(key, Decimal(0)) != expected:
+					if reconciler.excluded_fx(row, key in allocated):
+						self.excluded.extend(reconciler.native(row, force=True))
+						suppressed.add(key)
+						continue
+					replacement = reconciler.repair(row, expected)
+					self.data = [r for r in self.data if _key(r) != key] + [replacement]
+					self.terms[key] = []
+			for key, row in self.pre.items():
+				if (
+					self.is_invoice(row)
+					and row.invoiced > 0
+					and key not in self.terms
+					and key not in suppressed
+				):
 					company_residual = money(
 						row.invoiced - row.paid - row.credit_note, self.currency_precision
 					)
@@ -115,6 +153,7 @@ def _report_class():
 				if self.is_invoice(r)
 				and r.invoiced > 0
 				and k not in self.terms
+				and k not in suppressed
 				and money(r.invoiced - r.paid - r.credit_note, self.currency_precision) == 0
 			}
 			in_window = self._settled_in_window(candidates)
@@ -123,7 +162,10 @@ def _report_class():
 				row.invoice_grand_total = row.invoiced
 				self.allocate_outstanding_based_on_payment_terms(row)
 				if any(money(term.outstanding, self.currency_precision) for term in row.payment_terms):
-					raise CalendarSourceUnavailable("settlement_schedule_mismatch")
+					try:
+						self.terms[key] = [reconciler.repair(candidates[key], Decimal(0), settled=True)]
+					except CalendarSourceUnavailable as exc:
+						raise CalendarSourceUnavailable("settlement_schedule_mismatch") from exc
 				if not row.payment_terms:
 					row.outstanding = 0
 					self.terms[key] = [row]
@@ -161,24 +203,48 @@ def _visible_rows(engine, report, rows):
 	from frappe.desk.query_report import get_filtered_data
 
 	filtered = get_filtered_data(report.ref_doctype, engine.columns, rows, frappe.session.user)
-	# Report post-filters do not apply every Dynamic Link / custom query hook.
-	# Invoice reads must also be in the viewer's actual document query scope.
+	# Apply the exact delivery predicate to every voucher, including JE/PE.
 	allowed = {}
-	for doctype in {
-		r.voucher_type for r in filtered if r.voucher_type in ("Purchase Invoice", "Sales Invoice")
-	}:
+	for doctype in {r.voucher_type for r in filtered}:
 		names = sorted({r.voucher_no for r in filtered if r.voucher_type == doctype})
-		allowed[doctype] = set()
-		for start in range(0, len(names), 500):
-			allowed[doctype].update(
-				frappe.get_list(
-					doctype,
-					filters={"name": ["in", names[start : start + 500]], "docstatus": 1},
-					pluck="name",
-					limit_page_length=0,
-				)
-			)
-	return [r for r in filtered if r.voucher_type not in allowed or r.voucher_no in allowed[r.voucher_type]]
+		filters = {"docstatus": 1}
+		if frappe.get_meta(doctype).has_field("company"):
+			filters["company"] = engine.filters.company
+		allowed[doctype] = visible_names(doctype, names, filters)
+	parties = {}
+	for doctype in {r.party_type for r in filtered if r.party_type and r.party}:
+		parties[doctype] = visible_names(doctype, [r.party for r in filtered if r.party_type == doctype])
+	return [
+		r
+		for r in filtered
+		if (r.voucher_type not in allowed or r.voucher_no in allowed[r.voucher_type])
+		and r.party in parties.get(r.party_type, set())
+	]
+
+
+def _permission_columns(columns):
+	return [
+		{key: col.get(key) for key in ("fieldname", "fieldtype", "options")}
+		for col in columns
+		if col.get("fieldtype") in ("Link", "Dynamic Link")
+	]
+
+
+def _permission_row(row, columns):
+	fields = {
+		"party",
+		"party_type",
+		"party_account",
+		"voucher_type",
+		"voucher_no",
+		"posting_date",
+		"due_date",
+	}
+	for col in _permission_columns(columns):
+		fields.add(col["fieldname"])
+		if col["fieldtype"] == "Dynamic Link" and col.get("options"):
+			fields.add(col["options"])
+	return {field: row.get(field) for field in sorted(fields)}
 
 
 def read_obligations(company: str, account_type: str, as_of: str, window_start: str, window_end: str) -> dict:
@@ -284,6 +350,9 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 		adjustment = remaining < 0 or original <= 0
 		if adjustment:
 			status = "Adjustment"
+		basis = row.get("_calendar_basis")
+		if basis and remaining > 0 and remaining < original:
+			status = "Partially settled"
 		result.append(
 			{
 				"id": sha256(f"{account_type}:{_key(row)}:{index}".encode()).hexdigest()[:24],
@@ -297,26 +366,59 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 				"due_date": str(getdate(row.due_date)) if row.due_date else None,
 				"term": row.payment_term or "",
 				"original": str(original),
-				"paid": str(money(row.paid, precision) - discount),
-				"credit": str(credit),
-				"discount": str(discount),
+				"paid": None if basis else str(money(row.paid, precision) - discount),
+				"credit": None if basis else str(credit),
+				"discount": None if basis else str(discount),
+				**({"allocation_basis": "invoice", "allocation_reason": basis} if basis else {}),
 				"remaining": str(remaining),
 				"settlement": status,
 				"kind": "adjustment" if adjustment else "obligation",
+				"_permission": _permission_row(row, engine.columns),
 			}
 		)
 	canonical_total = sum((money(r.outstanding, precision) for r in canonical), Decimal(0))
 	if sum((Decimal(r["remaining"]) for r in result), Decimal(0)) != canonical_total:
 		raise CalendarSourceUnavailable("reconciliation_mismatch")
 	result.sort(key=lambda r: (r["due_date"] or "", r["voucher_type"], r["voucher_no"], r["id"]))
+	visible_excluded = _visible_rows(engine, report, engine.excluded)
+	excluded_rows = [
+		{
+			"voucher_type": row.voucher_type,
+			"voucher_no": row.voucher_no,
+			"party_type": row.party_type,
+			"party": row.party,
+			"remaining": str(money(row.outstanding, precision)),
+			"kind": "settled_fx",
+			"account_remaining": str(money(row.outstanding_in_account_currency, precision)),
+			"_permission": _permission_row(row, engine.columns),
+		}
+		for row in visible_excluded
+	]
+	visible_keys = {_key(row) for row in canonical + visible_overlay + visible_excluded}
+	fx_total = sum((money(row.outstanding, precision) for row in visible_excluded), Decimal(0))
+	if canonical_total + fx_total != sum((engine.ledger_residuals[k] for k in visible_keys), Decimal(0)):
+		raise CalendarSourceUnavailable("reconciliation_mismatch")
+	notes = {}
+	fallback_count = sum(row.get("allocation_basis") == "invoice" for row in result)
+	if fallback_count:
+		notes["invoice_level"] = {"count": fallback_count}
+	if excluded_rows:
+		notes["currency_residue_excluded"] = {"count": len(excluded_rows), "amount": str(fx_total)}
 	reasons = incomplete_scope_reasons()
+	if excluded_rows:
+		reasons = sorted({*reasons, "currency_residue_excluded"})
+	if len(visible_excluded) != len(engine.excluded):
+		reasons = sorted({*reasons, "filtered_obligations"})
 	if len(canonical) != len(engine.data) or len(visible_overlay) != len(overlay):
 		reasons = sorted({*reasons, "filtered_obligations"})
 	return {
 		"rows": result,
+		"excluded_rows": excluded_rows,
+		"notes": notes,
 		"canonical_total": str(canonical_total),
 		"currency": company_values.default_currency,
 		"precision": precision,
 		"complete_for_company": not reasons,
 		"scope_reasons": reasons,
+		"permission_columns": _permission_columns(engine.columns),
 	}
