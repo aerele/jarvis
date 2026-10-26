@@ -327,7 +327,14 @@ def _clean_route(route) -> str:
 # --------------------------------------------------------------------------- #
 # Lane 2: the Error Log reader (code-level exceptions, jarvis-only)
 # --------------------------------------------------------------------------- #
-_JARVIS_APP_MARKER = "/apps/jarvis/"
+#: The jarvis package inside the bench, as a traceback names it. Frappe strips
+#: the bench path from every traceback it stores (``frappe.get_traceback``
+#: replaces ``<bench>/`` with ""), so a real Error Log frame reads
+#: ``File "apps/jarvis/jarvis/chat/api.py"`` with no leading slash. Matching
+#: ``/apps/jarvis/`` instead dropped almost every jarvis error from the feed.
+#: This form matches both the stored (relative) and a raw (absolute) path, and
+#: never ``apps/jarvis_admin/`` or ``apps/jarvis_partner/``.
+_JARVIS_APP_MARKER = "apps/jarvis/jarvis/"
 _FRAME_RE = re.compile(r'File "([^"]+)", line \d+, in (\w+)')
 _EXC_LINE_RE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Warning|Interrupt)):?\s*(.*)$")
 
@@ -336,11 +343,11 @@ _EXC_LINE_RE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Warning|Interrup
 #: once admin returns, flood the feed with a report per failed cycle. These logs
 #: stay local (Error Log / journalctl) where the operator can still see them.
 _REPORTER_SELF_MARKERS = (
-	"/apps/jarvis/jarvis/error_push.py",
-	"/apps/jarvis/jarvis/api_errors.py",
+	_JARVIS_APP_MARKER + "error_push.py",
+	_JARVIS_APP_MARKER + "api_errors.py",
 	# GAP 1 heartbeat: its own push-path errors are infra, not customer-relevant — do not
 	# forward them into the tenant Errors feed (would be a fleet-wide false positive).
-	"/apps/jarvis/jarvis/chat/heartbeat.py",
+	_JARVIS_APP_MARKER + "chat/heartbeat.py",
 )
 
 
@@ -374,7 +381,7 @@ def _parse_traceback(traceback: str) -> tuple[str, str, list[str]]:
 	for fm in _FRAME_RE.finditer(traceback or ""):
 		path, func = fm.group(1), fm.group(2)
 		if _JARVIS_APP_MARKER in path:
-			rel = path.split(_JARVIS_APP_MARKER, 1)[1]
+			rel = "jarvis/" + path.split(_JARVIS_APP_MARKER, 1)[1]
 			frames.append(f"{rel}:{func}")
 	return exc_class, exc_message, frames
 
