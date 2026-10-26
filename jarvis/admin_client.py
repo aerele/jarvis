@@ -2257,11 +2257,12 @@ def push_usage_rollup(rollup: dict) -> dict:
 	return _post(path=_m("api.tenant.ingest_usage_rollup"), body={"rollup": rollup})
 
 
-def push_error_rollup(errors: list) -> dict:
+def push_error_rollup(errors: list, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	"""Push a batch of scrubbed tenant errors (UI + code-level) to admin for the
-	per-tenant Errors feed. Called best-effort from the error_push */5 cron.
+	per-tenant Errors feed. Called best-effort from the error_push */5 cron, which
+	passes a short ``timeout_s`` (it holds a lock while the call is out).
 	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
-	return _post(path=_m("api.tenant.ingest_error_rollup"), body={"errors": errors})
+	return _post(path=_m("api.tenant.ingest_error_rollup"), body={"errors": errors}, timeout_s=timeout_s)
 
 
 def push_bench_heartbeat(heartbeat: dict) -> dict:
