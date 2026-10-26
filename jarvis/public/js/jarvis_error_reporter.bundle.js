@@ -19,6 +19,8 @@
 	var seen = {};
 	var timer = null;
 	var reporting = false;
+	var failures = 0;
+	var MAX_RETRIES = 3;
 
 	var BENIGN = [
 		/ResizeObserver loop/i,
@@ -63,7 +65,9 @@
 	function report(ctx) {
 		try {
 			ctx = ctx || {};
-			if (reporting || sent >= MAX_PER_SESSION) return;
+			// Not gated on an in-flight flush: report() only queues, and gating
+			// dropped every error raised while a slow POST was out.
+			if (sent >= MAX_PER_SESSION) return;
 			var message = String(ctx.message || "").slice(0, 2000);
 			if (benign(message) || benign(ctx.stack)) return;
 			var e = {
@@ -80,15 +84,18 @@
 			if (seen[fp] || queue.length >= MAX_QUEUE) return;
 			seen[fp] = 1;
 			queue.push(e);
-			if (!timer) {
-				timer = setTimeout(function () {
-					timer = null;
-					flush();
-				}, DEBOUNCE_MS);
-			}
+			schedule(DEBOUNCE_MS);
 		} catch (_) {
 			/* a reporter that throws is worse than a missing report */
 		}
+	}
+
+	function schedule(ms) {
+		if (timer) return;
+		timer = setTimeout(function () {
+			timer = null;
+			flush();
+		}, ms);
 	}
 
 	function flush() {
@@ -104,13 +111,21 @@
 			keepalive: true,
 		})
 			.then(function (res) {
-				if (res.ok) sent += batch.length;
+				if (!res.ok) throw new Error("report failed " + res.status);
+				sent += batch.length;
+				failures = 0;
 			})
 			.catch(function () {
-				/* best-effort telemetry - drop on failure */
+				// A dropped connection or a server hiccup: keep the batch for a few
+				// more tries, ahead of anything queued since, then give up on it.
+				failures += 1;
+				if (failures <= MAX_RETRIES) queue = batch.concat(queue).slice(0, MAX_QUEUE);
+				else failures = 0;
 			})
 			.then(function () {
 				reporting = false;
+				// Errors that arrived while this batch was out, or a retry.
+				if (queue.length) schedule(failures ? DEBOUNCE_MS * (failures + 1) : DEBOUNCE_MS);
 			});
 	}
 
