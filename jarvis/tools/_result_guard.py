@@ -19,8 +19,9 @@ _SAFETY = 200  # pad for note-digit / separator variance below the hard cap
 
 # Routing help (model-facing): the full-data escape is a FILE built server-side,
 # which this cap never touches: export_query for records (doctype + filters, or the
-# same query spec the agent just ran, joins and NOT EXISTS included) and report_pdf
-# for a saved report. export_excel is not one: its rows pass through the model.
+# same query spec the agent just ran, joins and NOT EXISTS included) and for a
+# saved report (export_query with the same report_name and filters, or report_pdf
+# for a PDF). export_excel is not one: its rows pass through the model.
 # Generic/legacy results have no reliable continuation. Paged get_list below
 # updates its own next_start to the rows actually retained by this guard.
 _NOTE = (
@@ -29,12 +30,14 @@ _NOTE = (
 	"built from these rows is partial too. For the full answer: narrow the filter, "
 	"aggregate with query, or put every row in a file with export_query (pass the "
 	"same spec, or doctype + filters; built server-side, complete). A saved report: "
-	"report_pdf. Never rebuild the full set in chunks through chat."
+	"export_query with the same report_name and filters (Excel/CSV), or report_pdf. "
+	"Never rebuild the full set in chunks through chat."
 )
 _NOTE_NONE = (
 	"Result too large: even one row exceeds the size budget. Request fewer fields "
 	"(avoid fields=['*']), narrow the filter, aggregate with query, or put the rows "
-	"in a file with export_query (server-side, complete); a saved report: report_pdf."
+	"in a file with export_query (server-side, complete); a saved report: export_query "
+	"with the same report_name and filters, or report_pdf."
 )
 # A paged get_list page: the guard keeps a prefix, so the walk simply resumes after
 # it. No "of N" here - N would be the page size, which reads as the match count.
@@ -56,8 +59,9 @@ _PAGED_NOTE_NONE = (
 _NOTE_NONROW = (
 	"Result too large: the non-row content (e.g. the SQL text or columns) alone "
 	"exceeds the size budget, so ALL rows were dropped. PARTIAL, showing zero rows. "
-	"Narrow the query so the surrounding content is smaller, or use report_pdf for "
-	"a saved report (server-side, returns the full data as a file, no cap)."
+	"Narrow the query so the surrounding content is smaller, or for a saved report "
+	"call export_query with the same report_name and filters (or report_pdf): "
+	"server-side, the full data as a file, no cap."
 )
 
 

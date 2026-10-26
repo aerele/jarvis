@@ -351,7 +351,7 @@ def enqueue(source, fmt, title=None, highlights=None):
 					"doctype": DOCTYPE,
 					"owner": frappe.session.user,
 					"conversation": conversation,
-					"title": (title or prepared.doctype or "Export")[:140],
+					"title": (title or prepared.report_name or prepared.doctype or "Export")[:140],
 					"source_doctype": prepared.doctype or None,
 					"column_count": len(prepared.columns),
 					"asked_at": now_datetime(),
@@ -359,6 +359,9 @@ def enqueue(source, fmt, title=None, highlights=None):
 					"source": json.dumps(source),
 					"highlights": json.dumps(highlights),
 					"status": "queued",
+					# A report job waits, queued, for Frappe's prepared copy (never holding a
+					# worker: that copy is generated on the same queue); the card shows this phase.
+					"phase": "generating" if prepared.report_name else "",
 					"fingerprint": _key(source, fmt, highlights),
 					"permission_fingerprint": _permission_fingerprint(prepared),
 				}
@@ -417,7 +420,10 @@ def public(job, files=None):
 		# The EXPECTED row count while running (0 = unknown), not the ready-only `total` below,
 		# which is the rows actually written. Both fields mean something only while running.
 		"total_rows": (job.total_rows or None) if running else None,
-		"phase": (job.phase or None) if running else None,
+		# While queued only the report job's "generating" phase means something.
+		"phase": (job.phase or None)
+		if running or (job.status == "queued" and job.phase == "generating")
+		else None,
 		"started_at": iso(job.started_at),
 		"finished_at": iso(job.finished_at),
 		"expires_at": iso(expiry),
@@ -529,23 +535,30 @@ def dispatch():
 		running = frappe.get_all(DOCTYPE, filters={"status": "running"}, fields=["owner"])
 		owners = {r.owner for r in running}
 		slots = max(0, capacity - len(running))
+		# Report jobs whose copy is not there yet: left queued this round, no worker held.
+		waiting_for_report = set()
 		while slots:
 			# Filter before LIMIT and reselect after each owner reservation. A large
 			# backlog belonging to one owner cannot hide another owner's runnable job.
 			j = frappe.qb.DocType(DOCTYPE)
 			query = (
 				frappe.qb.from_(j)
-				.select(j.name, j.owner)
+				.select(j.name, j.owner, j.source, j.asked_at, j.phase)
 				.where(j.status.isin(["queued", "paused"]))
 				.where(Coalesce(j.cancel_requested, 0) == 0)
 				.where(j.next_attempt.isnull() | (j.next_attempt <= now_datetime()))
 			)
 			if owners:
 				query = query.where(j.owner.notin(list(owners)))
+			if waiting_for_report:
+				query = query.where(j.name.notin(list(waiting_for_report)))
 			waiting = query.orderby(j.creation, j.name).limit(1).run(as_dict=True)
 			if not waiting:
 				break
 			row = waiting[0]
+			if not _report_copy_ready(row):
+				waiting_for_report.add(row.name)
+				continue
 			token = secrets.token_hex(16)
 			frappe.db.set_value(
 				DOCTYPE,
@@ -581,6 +594,73 @@ def dispatch():
 				break
 			owners.add(row.owner)
 			slots -= 1
+
+
+def _report_copy_ready(row) -> bool:
+	"""A report job may take a worker only once Frappe's prepared copy exists (or its run
+	failed, so the job can say so). Polled from the scheduler under the OWNER: the copy
+	lookup is owner-scoped. A copy that never comes (a run that stalled past the report's
+	own timeout) settles the job ``too slow`` here, so it does not wait forever. Never
+	starts a run: that is the worker's job, as the owner. Any other source: ready."""
+	try:
+		source = json.loads(row.source or "{}")
+	except (TypeError, ValueError):
+		return True
+	report_name = source.get("report_name")
+	if not report_name:
+		return True
+	from jarvis._session import impersonate
+	from jarvis.tools import _prepared_reports
+
+	try:
+		with impersonate(row.owner):
+			state, _payload = _prepared_reports.peek(report_name, source.get("filters") or {}, user=row.owner)
+			if state in ("ready", "failed", "missing"):
+				return True
+			asked = get_datetime(row.asked_at) if row.asked_at else now_datetime()
+			deadline = add_to_date(asked, seconds=_prepared_reports.report_deadline_s(report_name))
+			if now_datetime() > deadline:
+				frappe.db.set_value(
+					DOCTYPE,
+					row.name,
+					{
+						"status": "too slow",
+						"error": f"{report_name} is still generating in the background after its time "
+						f"budget. Ask for the export again later.",
+						"finished_at": now_datetime(),
+						"phase": "",
+					},
+				)
+				_commit()
+				_safely("announce", row.name, announce, row.name)
+			return False
+	except Exception as exc:
+		# A broken peek must not wedge the queue: let the worker try and report properly.
+		_log_failure(row.name, "report peek", exc)
+		return True
+
+
+def on_prepared_report_update(doc, method=None):
+	"""``Prepared Report`` on_update: the run just finished (Frappe saves it Completed, or
+	Error). Wake the dispatcher for the report jobs waiting on it, AFTER this transaction
+	commits, so the file follows within seconds rather than at the next five-minute reap.
+	A cheap no-op when no report job of this owner is waiting; never fails the save."""
+	try:
+		if doc.get("status") not in ("Completed", "Error", "Failed"):
+			return
+		if not frappe.db.table_exists(DOCTYPE):
+			return
+		if not frappe.db.exists(DOCTYPE, {"status": "queued", "phase": "generating", "owner": doc.owner}):
+			return
+		frappe.enqueue(
+			"jarvis.tools._export.jobs.dispatch",
+			queue="short",
+			enqueue_after_commit=True,
+			job_id=f"export-dispatch-{doc.name}",
+			deduplicate=True,
+		)
+	except Exception as exc:
+		_log_failure(doc.name, "wake dispatch", exc, doctype="Prepared Report")
 
 
 def _directory(name, token):
@@ -695,6 +775,21 @@ def _execute(job, token, directory):
 			)
 			directory.mkdir(parents=True, exist_ok=False, mode=0o700)
 			path = directory / "export.part"
+			if prepared.report_name:
+				result = _convert_report_copy(job, token, prepared, path, row_cap, size_cap, started)
+				if result is None:
+					# The copy is not there (a stalled run was restarted): back to the queue,
+					# where the dispatcher waits for it without holding this worker.
+					_return_to_queue(name, token)
+					_set_phase_queued(name, "generating")
+					handed_back = True
+					return
+				count_detail = "count:report"
+				if result["rows_written"] == 0:
+					raise _NoRecords("failed", "The report returned no rows for these filters.")
+				_heartbeat(name, token)
+				_publish_file(job, token, path, result, _permission_fingerprint(prepared))
+				return
 			db = MariaDBStream(connection_settings())
 			db.open()
 			watchdog = Watchdog(db, name, token, frappe.local.site, job.owner, job.conversation)
@@ -766,6 +861,63 @@ def _execute(job, token, directory):
 		if not handed_back:
 			_safely("tail", name, _record_telemetry, name, detail=count_detail)
 		_after(name)
+
+
+def _set_phase_queued(name, phase):
+	"""The phase a QUEUED job shows (a report job waiting for its copy)."""
+	j = frappe.qb.DocType(DOCTYPE)
+	(frappe.qb.update(j).set(j.phase, phase).where((j.name == name) & (j.status == "queued"))).run()
+	_commit()
+
+
+def _convert_report_copy(job, token, prepared, path, row_cap, size_cap, started):
+	"""Write the report's completed prepared copy to the file. Runs as the owner (the
+	caller impersonates). ``None`` when no copy exists yet: ``completed_or_status`` has
+	then (re)started the run, and the caller returns the job to the queue. A failed run
+	is the job's failure, in the report's own words. Over ``row_cap`` is refused like a
+	SQL export. Progress is a real percentage: the row count is known before writing."""
+	from jarvis.tools import _prepared_reports
+	from jarvis.tools._export.streaming import prepared_from_report, write
+
+	name = job.name
+	completed, status = _prepared_reports.completed_or_status(
+		prepared.report_name, prepared.report_filters or {}, user=job.owner
+	)
+	if status is not None:
+		if status.get("status") == "failed":
+			raise ExportLimit("failed", status.get("message") or "The report failed to generate.")
+		return None
+	result_rows = completed["result"]
+	if len(result_rows) > row_cap:
+		raise too_many_rows(row_cap)
+	full, rows = prepared_from_report(
+		prepared, completed["columns"], result_rows, json.loads(job.highlights or "null")
+	)
+	_safely("count", name, _set_progress, name, token, total_rows=len(rows))
+	budget_s = 600
+
+	def check():
+		if not _attempt(name, token):
+			raise ExportLimit("cancelled", "Export cancelled.")
+		if time.monotonic() - started > budget_s:
+			raise ExportLimit("too slow", "The export exceeded its time budget. Narrow the filters.")
+
+	def progress(count):
+		_safely("progress", name, _set_progress, name, token, rows_written=count)
+
+	return write(
+		full,
+		iter(rows),
+		path,
+		job.format,
+		row_cap,
+		size_cap,
+		check,
+		progress,
+		finalizing=lambda n: _safely(
+			"finalizing", name, _set_progress, name, token, phase="finalizing", rows_written=n
+		),
+	)
 
 
 def _count_expected(db, prepared, row_cap):
