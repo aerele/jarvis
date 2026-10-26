@@ -186,7 +186,9 @@ const BUILDERS = {
 		};
 	},
 	ready: (s, ctx) => {
-		const took = secondsBetween(s.started_at, s.finished_at);
+		// From the ask to the file: for a report job the worker's own conversion is a
+		// fraction of a second, the wait for the report's run is what the person felt.
+		const took = secondsBetween(s.asked_at || s.started_at, s.finished_at);
 		const made = s.finished_at ? whenText(s.finished_at, ctx.now) : "";
 		const notes = [];
 		if (made)
