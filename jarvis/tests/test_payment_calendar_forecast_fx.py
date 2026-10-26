@@ -56,6 +56,25 @@ class TestPaymentCalendarForecastFX(TestCase):
 		self.assertIsNone(result["days"]["2026-10-23"]["risk"])
 		self.assertEqual(result["source_notes"]["Receivable"]["currency_residue_excluded"]["amount"], "0.03")
 
+	def test_payable_settlement_completeness_requires_the_same_exact_fx_proof(self):
+		_, valid = self.inputs()
+		for row in valid["excluded_rows"]:
+			row["voucher_type"] = "Purchase Invoice"
+		self.assertIs(self.project(valid, source())["payable_settlement_complete"], True)
+		for field, value in [("kind", "adjustment"), ("account_remaining", "0.01")]:
+			bad = deepcopy(valid)
+			bad["excluded_rows"][0][field] = value
+			self.assertIs(self.project(bad, source())["payable_settlement_complete"], False)
+		for change in ("count", "duplicate", "scope"):
+			bad = deepcopy(valid)
+			if change == "count":
+				bad["notes"]["currency_residue_excluded"]["count"] += 1
+			elif change == "duplicate":
+				bad["excluded_rows"][1]["voucher_no"] = bad["excluded_rows"][0]["voucher_no"]
+			else:
+				bad["scope_reasons"].append("filtered_obligations")
+			self.assertIs(self.project(bad, source())["payable_settlement_complete"], False)
+
 	def test_a_known_settled_fx_amount_is_never_new_cash_even_when_large(self):
 		ap, ar = self.inputs()
 		ar["excluded_rows"][0]["remaining"] = "10000.04"

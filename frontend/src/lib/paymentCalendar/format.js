@@ -39,28 +39,39 @@ export function exactMoney(value, currency, precision) {
 	}`;
 }
 
-export function compactMoney(value, currency, precision) {
+export function compactMoney(value, currency, precision, maxLength = 14) {
+	if (!Number.isInteger(maxLength) || maxLength < 4 || maxLength > 14) maxLength = 14;
 	const full = exactMoney(value, currency, precision);
 	const parsed = decimal(value, precision);
-	if (!parsed || full === "—" || full.length <= 14) return full;
+	if (!parsed || full === "—") return full;
+	const narrow = maxLength < 14;
+	const trimmed = narrow ? full.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "") : full;
+	if (trimmed.length <= maxLength) return trimmed;
 	const scales =
 		currency === "INR"
-			? [
-					[7, "Cr"],
-					[5, "L"],
-			  ]
+			? [[7, "Cr"], [5, "L"], ...(narrow ? [[3, "K"]] : [])]
 			: [
 					[9, "B"],
 					[6, "M"],
 					[3, "K"],
 			  ];
 	const scale = scales.find(([digits]) => parsed.integer.length > digits);
-	if (!scale) return full;
+	if (!scale) {
+		return narrow && parsed.integer.length >= 3 ? trimmed.replace(/\.\d+$/, "") : trimmed;
+	}
 	const [digits, suffix] = scale;
 	const split = parsed.integer.length - digits;
-	// Shortened display retains the exact amount in the caller's accessible name.
-	return `${parsed.negative ? "-" : ""}${symbol(currency)}${parsed.integer.slice(
+	const prefix = `${parsed.negative ? "-" : ""}${symbol(currency)}${parsed.integer.slice(
 		0,
 		split
-	)}.${parsed.integer.slice(split, split + 2).padEnd(2, "0")}${suffix}`;
+	)}`;
+	const fraction = parsed.integer.slice(split, split + 2).padEnd(2, "0");
+	// Shortened display retains the exact amount in the caller's accessible name.
+	if (!narrow) return `${prefix}.${fraction}${suffix}`;
+	for (let places = 2; places >= 0; places--) {
+		const tail = fraction.slice(0, places).replace(/0+$/, "");
+		const compact = `${prefix}${tail ? "." + tail : ""}${suffix}`;
+		if (compact.length <= maxLength) return compact;
+	}
+	return `${prefix}${suffix}`;
 }

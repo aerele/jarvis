@@ -47,6 +47,7 @@ export function complete(company = "Manufacturing", accounts = ["Bank A"], id = 
 			window_end: "2027-10-30",
 		},
 		projection: {
+			payable_settlement_complete: true,
 			anchor: "2026-10-24",
 			days,
 			precision: 2,

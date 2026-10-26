@@ -158,8 +158,9 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 	minimum = _amount(floor, precision) if floor is not None else None
 	if minimum is not None and minimum < 0:
 		raise ProjectionError("invalid_floor")
-	reasons = set()
+	reasons, complete_sides = set(), {}
 	for side, source in (("payables", ap), ("receivables", ar)):
+		complete_sides[side] = source is not None and source["complete_for_company"]
 		if source is None:
 			reasons.add(f"{side}_unavailable")
 		elif not source["complete_for_company"]:
@@ -167,6 +168,7 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 			if source_reasons == {"currency_residue_excluded"} and _verified_settled_fx(source, precision):
 				source_reasons.clear()
 			reasons.update(source_reasons)
+			complete_sides[side] = not source_reasons
 	if opening is None:
 		reasons.add("bank_unavailable")
 	if minimum is None:
@@ -220,6 +222,7 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 		"precision": precision,
 		"days": days,
 		"forecast_available": available,
+		"payable_settlement_complete": complete_sides["payables"],
 		"scope_reasons": sorted(reasons),
 		"book_cash": display(opening),
 		"floor": display(minimum),
