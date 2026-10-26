@@ -184,14 +184,14 @@ class TestReportEndpoint(ApiErrorsBase):
 		# error recurring with a different number), so they fold into one row.
 		row = {
 			"surface": "spa_chat",
-			"error_code": "run_error",
-			"error_class": "RunError",
-			"message": "the run failed after 3 tries",
+			"error_code": "export_failed",
+			"error_class": "ExportError",
+			"message": "the export failed after 3 tries",
 			"route": "/c/abc?x=1",
 		}
 		with _as(USER):
 			r1 = api_errors.report_client_errors([row])
-			r2 = api_errors.report_client_errors([dict(row, message="the run failed after 8 tries")])
+			r2 = api_errors.report_client_errors([dict(row, message="the export failed after 8 tries")])
 		self.assertEqual(r1["accepted"], 1)
 		self.assertEqual(r2["accepted"], 1)
 		rows = frappe.get_all(DT, filters={"user": USER}, fields=["name", "count", "route", "message"])
@@ -346,8 +346,11 @@ class TestErrorLogReader(ApiErrorsBase):
 		)
 		j = frappe.get_doc({"doctype": "Error Log", "method": "jarvis.chat.api.send_message", "error": jtb})
 		j.insert(ignore_permissions=True)
+		# Written without hooks, as by ERPNext code with no jarvis frame on the
+		# stack: inserted from here, the origin tag would rightly name this test.
 		e = frappe.get_doc({"doctype": "Error Log", "method": "erpnext.stock.x.get", "error": etb})
-		e.insert(ignore_permissions=True)
+		e.set_new_name()
+		e.db_insert()
 		frappe.db.commit()
 
 		self.addCleanup(frappe.delete_doc, "Error Log", j.name, force=True, ignore_permissions=True)

@@ -1,7 +1,8 @@
 """Capture user-facing UI errors and code-level exceptions, buffer them locally,
 and shape them for the out-of-band push to the admin control plane.
 
-Two capture lanes (both feed ``jarvis.error_push``):
+Every way a jarvis error can reach a user is captured (all feed
+``jarvis.error_push``):
 
   - ``report_client_errors`` - the whitelisted endpoint the SPA / PWA / Desk
     reporters POST to. Session-authed. Scrubs message/stack of PII / ERP values,
@@ -11,6 +12,18 @@ Two capture lanes (both feed ``jarvis.error_push``):
     server / RQ-worker / cron exception already lands there), **filtered to the
     jarvis app only**, and normalizes them. Error Log IS the storage, so this
     only reads + shapes; ``error_push`` owns the watermark.
+    ``tag_error_log_origin`` stamps the jarvis caller onto a row written by
+    ``frappe.log_error(title, message)``, which stores no traceback.
+  - ``capture_failed_request`` - a jarvis API call that answered 4xx: a
+    ``frappe.throw``, permission or validation error the user saw. Frappe
+    writes no Error Log row for these (only 5xx), so nothing else sees them.
+  - ``record_tool_failure`` - a tool that failed and returned ``{ok: false}``
+    to the agent (a 200, so no other lane sees it).
+  - ``collect_failed_turns`` - every turn that ended ``errored``, read from the
+    durable turn row whether or not a browser was open to see it fail.
+
+The server-side lanes write the same buffer as the browser, under a
+``SERVER_SURFACES`` surface that sets their kind and severity.
 
 The core privacy rule lives here: only a *scrubbed* copy of any error text ever
 leaves the bench. The reporting user's own email is preserved (admin already
@@ -22,7 +35,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import sys
 import time
 
 import frappe
@@ -43,8 +58,17 @@ MAX_STACK = 2000
 #: MAX_ERRORS_PER_CALL get_value+save cycles, so this is the real DoS guard.
 REPORT_RATE_PER_MIN = 60
 
-#: How many Error Log rows one push cycle scans at most.
+#: How many Error Log rows one page of the scan reads.
 ERROR_LOG_SCAN_LIMIT = 300
+
+#: Surfaces the server writes into the buffer (never a browser), with the
+#: severity each is sent at. A tool or API failure the user can act on is a
+#: warning; a turn that failed outright is an error.
+SERVER_SURFACES = {"turn": "error", "tool": "warning", "api": "warning"}
+
+#: Ceiling on server-side buffer writes per user per minute. Past it the
+#: occurrence is dropped: one runaway loop must not flood the buffer.
+SERVER_RATE_PER_MIN = 120
 
 #: Positive "this browser error came from another app, not Jarvis" evidence -
 #: an asset path only a non-Jarvis Desk bundle loads. Used as a server-side
@@ -211,7 +235,9 @@ def report_client_errors(errors: str | list) -> dict:
 	return {"ok": True, "accepted": accepted}
 
 
-def _over_report_rate_limit(user: str) -> bool:
+def _over_report_rate_limit(
+	user: str, scope: str = "client_error_report", limit: int = REPORT_RATE_PER_MIN
+) -> bool:
 	"""Per-user calendar-minute bucket. Atomic ``incrby`` (not get-then-set): it
 	is race-free under concurrent requests, and - unlike get_value/set_value with
 	a TTL - it is not fooled by frappe's request-local cache when the same request
@@ -222,11 +248,11 @@ def _over_report_rate_limit(user: str) -> bool:
 	# incrby is a raw redis-py call that bypasses RedisWrapper.make_key's site
 	# prefix, so prefix the site ourselves - otherwise a multi-site bench sharing
 	# one Redis would let two sites' same-named users share a bucket.
-	key = f"{frappe.local.site}:jarvis.client_error_report.{user}.{bucket}"
+	key = f"{frappe.local.site}:jarvis.{scope}.{user}.{bucket}"
 	count = frappe.cache.incrby(key, 1)
 	if count == 1:
 		frappe.cache.expire(key, 120)
-	return count > REPORT_RATE_PER_MIN
+	return count > limit
 
 
 def _looks_non_jarvis(surface: str, route: str, stack: str) -> bool:
@@ -247,22 +273,61 @@ def _row_lock(user: str, fp: str) -> str:
 
 
 def _ingest_one(raw: dict, user: str) -> bool:
-	"""Fold one reported error into the local buffer. Returns True if stored,
-	False if filtered out (non-Jarvis origin)."""
+	"""Fold one browser-reported error into the local buffer. Returns True if
+	stored, False if filtered out (non-Jarvis origin, or a failed turn)."""
 	surface = (str(raw.get("surface") or "unknown"))[:40]
-	error_code = (str(raw.get("error_code") or ""))[:64]
+	if surface in SERVER_SURFACES:
+		surface = "ui"  # a browser can't speak for a server lane (it sets severity)
 	error_class = (str(raw.get("error_class") or ""))[:140]
-	route = _clean_route(raw.get("route"))
-	conversation = (str(raw.get("conversation") or ""))[:140]
-	run_id = (str(raw.get("run_id") or ""))[:140]
+	if error_class == "RunError":
+		# A failed turn is read from its durable row (collect_failed_turns), which
+		# sees it even with no browser open. Counting the browser's copy as well
+		# would double every failed turn on admin.
+		return False
 
 	# Origin check runs on the RAW stack/route - scrubbing would blob the asset
 	# path (`/assets/erpnext/...` -> `[BLOB]`) and hide the very marker we filter on.
 	if _looks_non_jarvis(surface, str(raw.get("route") or ""), str(raw.get("stack") or "")):
 		return False
 
-	message = _scrub_error_text(raw.get("message"), keep_email=user)[:MAX_MESSAGE]
-	stack = _scrub_error_text(raw.get("stack"), keep_email=user)[:MAX_STACK]
+	_fold(
+		surface=surface,
+		error_code=raw.get("error_code"),
+		error_class=error_class,
+		message=raw.get("message"),
+		stack=raw.get("stack"),
+		route=raw.get("route"),
+		user=user,
+		conversation=raw.get("conversation"),
+		run_id=raw.get("run_id"),
+		lock_wait_s=2,
+	)
+	return True
+
+
+def _fold(
+	*,
+	surface: str,
+	error_code,
+	error_class,
+	message,
+	stack,
+	route,
+	user: str,
+	conversation=None,
+	run_id=None,
+	lock_wait_s: float,
+) -> None:
+	"""Scrub one occurrence and fold it into the buffer: a new row, or one more
+	on the unpushed row with the same fingerprint for this user."""
+	surface = str(surface or "unknown")[:40]
+	error_code = str(error_code or "")[:64]
+	error_class = str(error_class or "")[:140]
+	route = _clean_route(route)
+	conversation = str(conversation or "")[:140]
+	run_id = str(run_id or "")[:140]
+	message = _scrub_error_text(message, keep_email=user)[:MAX_MESSAGE]
+	stack = _scrub_error_text(stack, keep_email=user)[:MAX_STACK]
 	# Fingerprint the SCRUBBED message: it doubles as the grouping normalizer, so
 	# "Customer 'Tata Steel'" and "Customer 'Acme'" both scrub to "Customer '[VAL]'"
 	# and collapse to one group - one bug across N customers is one row at count=N,
@@ -279,7 +344,7 @@ def _ingest_one(raw: dict, user: str) -> bool:
 	# different errors take different locks and never contend; on contention/timeout
 	# we proceed unlocked (a rare duplicate row is harmless: admin folds by
 	# (tenant, fingerprint)).
-	with redis_lock(_row_lock(user, fp), timeout_s=10, blocking_timeout_s=2):
+	with redis_lock(_row_lock(user, fp), timeout_s=10, blocking_timeout_s=lock_wait_s):
 		now = frappe.utils.now_datetime()
 		existing = frappe.db.get_value(DT, {"fingerprint": fp, "user": user, "pushed": 0}, "name")
 		if existing:
@@ -290,7 +355,7 @@ def _ingest_one(raw: dict, user: str) -> bool:
 			doc.stack = stack or doc.stack
 			doc.route = route or doc.route
 			doc.save(ignore_permissions=True)
-			return True
+			return
 
 		frappe.get_doc(
 			{
@@ -310,7 +375,6 @@ def _ingest_one(raw: dict, user: str) -> bool:
 				"last_seen": now,
 			}
 		).insert(ignore_permissions=True)
-		return True
 
 
 def _clean_route(route) -> str:
@@ -401,42 +465,356 @@ def _error_log_user_ref(owner: str | None) -> str:
 	return owner
 
 
-def collect_error_log(since: str | None, limit: int = ERROR_LOG_SCAN_LIMIT) -> dict:
-	"""Read new ``Error Log`` rows after ``since``, keep only jarvis-origin ones,
-	and normalize them into the push shape.
+#: How many Error Log rows one push cycle reads at most, in pages of
+#: ERROR_LOG_SCAN_LIMIT. A bench that writes more than this in 5 minutes falls
+#: behind for a while, but the cursor never skips a row.
+ERROR_LOG_MAX_SCAN = 3000
 
-	Returns ``{"rows": [...], "watermark": <creation str or None>}``. The
-	watermark advances past EVERY scanned row (jarvis or not) so skipped
-	framework errors are never re-scanned."""
-	filters = {"creation": (">", since)} if since else {}
-	logs = frappe.get_all(
-		"Error Log",
-		filters=filters,
-		fields=["name", "method", "error", "creation", "owner"],
-		order_by="creation asc",
-		limit=limit,
-	)
-	rows: list[dict] = []
+#: Most distinct errors one cycle sends per scanned lane. Admin refuses a batch
+#: over 600 errors, so error_push keeps the sum of every lane's cap under it.
+MAX_GROUPS = 200
+
+
+def _split_cursor(cursor: str | None) -> tuple[str | None, str]:
+	"""A scan cursor is ``"<timestamp>|<name>"`` (rows sharing a timestamp are
+	ordered by name, so none is skipped). A bare timestamp, as older versions
+	stored, means "after this instant"."""
+	if not cursor:
+		return None, ""
+	ts, _sep, name = str(cursor).partition("|")
+	return ts, name
+
+
+def _after_cursor(field, name_field, cursor: str | None):
+	ts, name = _split_cursor(cursor)
+	if ts is None:
+		return None
+	return (field > ts) | ((field == ts) & (name_field > name))
+
+
+class _Groups:
+	"""Folds scanned occurrences into one row per (fingerprint, user), so a
+	burst of the same failure is one row with a count, not hundreds of rows."""
+
+	def __init__(self, max_groups: int):
+		self.max_groups = max_groups
+		self.rows: dict[tuple[str, str], dict] = {}
+
+	def full_for(self, key: tuple[str, str]) -> bool:
+		return key not in self.rows and len(self.rows) >= self.max_groups
+
+	def add(self, key: tuple[str, str], row: dict, at: str) -> None:
+		have = self.rows.get(key)
+		if have is None:
+			self.rows[key] = {**row, "count": 1, "first_seen": at, "last_seen": at}
+			return
+		# Keep the latest sample; scans run oldest-first.
+		have.update({**row, "count": have["count"] + 1, "first_seen": have["first_seen"], "last_seen": at})
+
+	def values(self) -> list[dict]:
+		return list(self.rows.values())
+
+
+def collect_error_log(
+	since: str | None,
+	limit: int = ERROR_LOG_MAX_SCAN,
+	*,
+	upto: str | None = None,
+	max_groups: int = MAX_GROUPS,
+) -> dict:
+	"""Read new ``Error Log`` rows after the ``since`` cursor, keep only
+	jarvis-origin ones, and fold them into the push shape.
+
+	``upto`` bounds the scan to rows created at or before it, so a row whose
+	transaction commits a little late isn't passed by the cursor. Returns
+	``{"rows": [...], "watermark": <cursor or None>}``. The cursor advances past
+	EVERY scanned row (jarvis or not) so skipped framework errors are never
+	re-scanned, and stops before a row that would open a group past
+	``max_groups``, which the next cycle then reads."""
+	el = frappe.qb.DocType("Error Log")
+	groups = _Groups(max_groups)
 	watermark = since
-	for log in logs:
-		watermark = str(log.creation)
-		if not is_jarvis_error(log.method, log.error):
-			continue
-		exc_class, exc_message, frames = _parse_traceback(log.error or "")
-		message = _scrub_error_text(exc_message or log.method or exc_class)[:MAX_MESSAGE]
-		rows.append(
-			{
-				"kind": "exception",
-				"surface": "server",
-				"error_code": exc_class,
-				"error_class": exc_class,
-				"message": message,
-				"stack": _scrub_error_text(log.error)[:MAX_STACK],
-				"route": (log.method or "")[:200],
-				"fingerprint": _traceback_fingerprint(exc_class, frames),
-				"occurred_at": str(log.creation),
-				"severity": "error",
-				"user_ref": _error_log_user_ref(log.owner),
-			}
+	scanned = 0
+	while scanned < limit:
+		q = (
+			frappe.qb.from_(el)
+			.select(el.name, el.method, el.error, el.creation, el.owner)
+			.orderby(el.creation)
+			.orderby(el.name)
+			.limit(min(ERROR_LOG_SCAN_LIMIT, limit - scanned))
 		)
-	return {"rows": rows, "watermark": watermark}
+		after = _after_cursor(el.creation, el.name, watermark)
+		if after is not None:
+			q = q.where(after)
+		if upto:
+			q = q.where(el.creation <= upto)
+		logs = q.run(as_dict=True)
+		if not logs:
+			break
+		for log in logs:
+			try:
+				row = _error_log_row(log) if is_jarvis_error(log.method, log.error) else None
+			except Exception:
+				row = None  # one unreadable row must not stall the lane behind it
+			if row:
+				key = (row["fingerprint"], row["user_ref"])
+				if groups.full_for(key):
+					return {"rows": groups.values(), "watermark": watermark}
+				groups.add(key, row, str(log.creation))
+			watermark = f"{log.creation}|{log.name}"
+		scanned += len(logs)
+		if len(logs) < ERROR_LOG_SCAN_LIMIT:
+			break
+	return {"rows": groups.values(), "watermark": watermark}
+
+
+def _error_log_row(log) -> dict:
+	exc_class, exc_message, frames = _parse_traceback(log.error or "")
+	return {
+		"kind": "exception",
+		"surface": "server",
+		"error_code": exc_class,
+		"error_class": exc_class,
+		"message": _scrub_error_text(exc_message or log.method or exc_class)[:MAX_MESSAGE],
+		"stack": _scrub_error_text(log.error)[:MAX_STACK],
+		"route": (log.method or "")[:200],
+		"fingerprint": _traceback_fingerprint(exc_class, frames),
+		"severity": "error",
+		"user_ref": _error_log_user_ref(log.owner),
+	}
+
+
+# --------------------------------------------------------------------------- #
+# Error Log origin: rows written without a traceback
+# --------------------------------------------------------------------------- #
+def tag_error_log_origin(doc, method=None) -> None:
+	"""``before_insert`` on Error Log. ``frappe.log_error(title, message)``
+	stores ``message`` as the error text, with no traceback, so a row jarvis
+	wrote that way names no jarvis frame and the Error Log lane can't tell it
+	apart from an ERPNext error (142 jarvis call sites log that way). When the
+	text names no jarvis frame but jarvis code is on the call stack, append the
+	nearest jarvis caller in traceback form, which the lane already reads.
+
+	A row Frappe defers (a request's 500, read-only mode) skips this hook; those
+	carry a full traceback, which names the jarvis frames itself. Never raises."""
+	try:
+		if _JARVIS_APP_MARKER in (doc.error or ""):
+			return
+		caller = _jarvis_caller(sys._getframe(1))
+		if caller:
+			doc.error = f"{(doc.error or '').rstrip()}\n\nLogged from:\n{caller}\n"
+	except Exception:
+		pass
+
+
+def _jarvis_caller(frame) -> str | None:
+	"""The innermost jarvis frame on the stack, as a traceback line."""
+	package = os.path.dirname(os.path.abspath(__file__)) + os.sep
+	while frame is not None:
+		path = os.path.abspath(frame.f_code.co_filename)
+		if path.startswith(package):
+			rel = path[len(package) :].replace(os.sep, "/")
+			return f'  File "{_JARVIS_APP_MARKER}{rel}", line {frame.f_lineno}, in {frame.f_code.co_name}'
+		frame = frame.f_back
+	return None
+
+
+# --------------------------------------------------------------------------- #
+# Server-side buffer writes: failed requests and failed tools
+# --------------------------------------------------------------------------- #
+def record_server_error(
+	surface: str,
+	*,
+	error_code: str,
+	error_class: str,
+	message: str,
+	route: str = "",
+	stack: str = "",
+	user: str | None = None,
+	conversation: str = "",
+	run_id: str = "",
+) -> None:
+	"""Buffer one server-side occurrence (``surface`` in SERVER_SURFACES) for the
+	next push. Cheap and silent: never waits on a lock (a rare duplicate row
+	folds on admin), never raises, and drops past a per-user rate."""
+	try:
+		user = user or frappe.session.user or "Guest"
+		if _over_report_rate_limit(user, "server_error", SERVER_RATE_PER_MIN):
+			return
+		_fold(
+			surface=surface,
+			error_code=error_code,
+			error_class=error_class,
+			message=message,
+			stack=stack,
+			route=route,
+			user=user,
+			conversation=conversation,
+			run_id=run_id,
+			lock_wait_s=0,
+		)
+	except Exception:
+		frappe.logger("jarvis.client_errors").debug("server error not buffered", exc_info=True)
+
+
+_METHOD_PATH_RE = re.compile(r"^/api/(?:v\d+/)?method/(jarvis\.[\w.]+)")
+
+#: Endpoints whose failures are not captured: the reporter's own (a loop).
+_UNCAPTURED_METHODS = ("jarvis.api_errors.",)
+
+
+def capture_failed_request(response=None, request=None) -> None:
+	"""``after_request``: buffer a jarvis API call that answered 4xx.
+
+	A ``frappe.throw``, permission or validation error is shown to the user but
+	never written to Error Log (Frappe logs only 5xx, which the Error Log lane
+	reads), so without this it goes unnoticed. 401 (a signed-out session) is not
+	an error. Runs after Frappe has finished the request transaction, so it
+	rolls back whatever the failed request left and commits only its own row.
+	Never raises: an after_request hook that throws is only logged by Frappe."""
+	try:
+		status = int(getattr(response, "status_code", 0) or 0)
+		if not 400 <= status < 500 or status == 401 or request is None:
+			return
+		m = _METHOD_PATH_RE.match(getattr(request, "path", "") or "")
+		if not m or m.group(1).startswith(_UNCAPTURED_METHODS):
+			return
+		user = frappe.session.user if getattr(frappe.local, "session", None) else None
+		if not user or user == "Guest" or not frappe.db:
+			return
+		error_class, message = _request_failure(response)
+		frappe.db.rollback()
+		record_server_error(
+			"api",
+			error_code=str(status),
+			error_class=error_class or f"HTTP {status}",
+			message=message,
+			route=m.group(1),
+			user=user,
+		)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- after_request runs past the request commit
+	except Exception:
+		pass
+
+
+def _request_failure(response) -> tuple[str, str]:
+	"""(error class, message) of a failed request: Frappe's ``exc_type`` and
+	message log, or a jarvis ``{ok: false, error}`` envelope in the body."""
+	local = getattr(frappe.local, "response", None) or {}
+	error_class = str(local.get("exc_type") or "")
+	messages = []
+	for entry in getattr(frappe.local, "message_log", None) or []:
+		text = entry.get("message") if isinstance(entry, dict) else entry
+		if text:
+			messages.append(frappe.utils.strip_html(str(text)))
+	if not messages:
+		try:
+			body = response.get_json(silent=True) or {}
+			error = (body.get("message") or {}).get("error") if isinstance(body, dict) else None
+			if isinstance(error, dict):
+				error_class = error_class or str(error.get("code") or "")
+				messages.append(str(error.get("message") or ""))
+		except Exception:
+			pass
+	return error_class, " ".join(messages)[:MAX_MESSAGE]
+
+
+def record_tool_failure(tool: str, error: dict | None, *, conversation: str = "", run_id: str = "") -> None:
+	"""A tool that returned ``{ok: false}`` to the agent. A refusal by the user's
+	write guard is policy working, not a failure, and is not recorded."""
+	try:
+		error = error or {}
+		code = str(error.get("code") or "")
+		from jarvis.tools import _write_risk
+
+		if code in _write_risk.REFUSAL_CODES:
+			return
+		record_server_error(
+			"tool",
+			error_code=code,
+			error_class=str(tool or ""),
+			message=str(error.get("message") or ""),
+			route=str(tool or ""),
+			conversation=conversation,
+			run_id=run_id,
+		)
+	except Exception:
+		pass
+
+
+# --------------------------------------------------------------------------- #
+# Failed turns, from the durable turn row
+# --------------------------------------------------------------------------- #
+TURN_DT = "Jarvis Chat Turn"
+TURN_MAX_SCAN = 2000
+TURN_MAX_GROUPS = 150
+
+
+def collect_failed_turns(
+	since: str | None,
+	limit: int = TURN_MAX_SCAN,
+	*,
+	upto: str | None = None,
+	max_groups: int = TURN_MAX_GROUPS,
+) -> dict:
+	"""Turns that ended ``errored`` after the ``since`` cursor (on ``done_at``,
+	which every errored transition stamps and nothing changes afterwards).
+
+	The turn row is the one record every failed turn leaves, whichever path
+	failed it and whether or not a browser saw the ``run:error``. Folded by
+	(error class + scrubbed message, user). Same return shape and cursor rules
+	as ``collect_error_log``."""
+	turn = frappe.qb.DocType(TURN_DT)
+	q = (
+		frappe.qb.from_(turn)
+		.select(turn.name, turn.conversation, turn.error, turn.done_at, turn.owner)
+		.where(turn.state == "errored")
+		.where(turn.done_at.isnotnull())
+		.orderby(turn.done_at)
+		.orderby(turn.name)
+		.limit(limit)
+	)
+	after = _after_cursor(turn.done_at, turn.name, since)
+	if after is not None:
+		q = q.where(after)
+	if upto:
+		q = q.where(turn.done_at <= upto)
+	groups = _Groups(max_groups)
+	watermark = since
+	for t in q.run(as_dict=True):
+		try:
+			row = _failed_turn_row(t)
+		except Exception:
+			row = None  # one unreadable row must not stall the lane behind it
+		if row:
+			key = (row["fingerprint"], row["user_ref"])
+			if groups.full_for(key):
+				break
+			groups.add(key, row, str(t.done_at))
+		watermark = f"{t.done_at}|{t.name}"
+	return {"rows": groups.values(), "watermark": watermark}
+
+
+def _failed_turn_row(t) -> dict:
+	err = str(t.error or "")
+	try:
+		from jarvis.chat.error_taxonomy import classify_error_text
+
+		code = classify_error_text(err) or "internal"
+	except Exception:
+		code = "internal"
+	message = _scrub_error_text(err or "The turn failed.")[:MAX_MESSAGE]
+	return {
+		"kind": "exception",
+		"surface": "turn",
+		"error_code": code,
+		"error_class": "TurnError",
+		"message": message,
+		"stack": "",
+		"route": "",
+		"fingerprint": _fingerprint(code, "TurnError", message, "turn"),
+		"severity": SERVER_SURFACES["turn"],
+		"user_ref": _error_log_user_ref(t.owner),
+		"conversation_ref": str(t.conversation or "")[:140],
+		"run_id": str(t.name or "")[:140],
+	}
