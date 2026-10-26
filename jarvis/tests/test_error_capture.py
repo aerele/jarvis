@@ -7,6 +7,7 @@ the ones after it."""
 from __future__ import annotations
 
 import types
+from contextlib import ExitStack
 from unittest.mock import Mock, patch
 
 import frappe
@@ -132,7 +133,7 @@ class TestFailedRequests(CaptureBase):
 
 	def test_a_tool_envelope_body_gives_the_class_and_message(self):
 		body = '{"message": {"ok": false, "error": {"code": "unsigned", "message": "request not signed"}}}'
-		self._capture("/api/method/jarvis.api.call_tool", 400, exc_type=None, messages=[], body=body)
+		self._capture("/api/method/jarvis.api.confirm_tool", 400, exc_type=None, messages=[], body=body)
 		(row,) = self.buffered()
 		self.assertEqual(row.error_class, "unsigned")
 		self.assertIn("request not signed", row.message)
@@ -143,6 +144,7 @@ class TestFailedRequests(CaptureBase):
 		self._capture("/api/method/jarvis.chat.api.send_message", 500)  # Error Log lane
 		self._capture("/api/method/erpnext.stock.get_stock", 417)
 		self._capture("/api/method/jarvis.api_errors.report_client_errors", 417)
+		self._capture("/api/method/jarvis.api.call_tool", 400)  # records its own
 		self._capture("/api/method/jarvis.chat.api.send_message", 417, user="Guest")
 		self.assertEqual(self.buffered(), [])
 
@@ -170,6 +172,76 @@ class TestToolFailures(CaptureBase):
 
 	def test_a_write_guard_refusal_is_not_a_failure(self):
 		api_errors.record_tool_failure("set_value", {"code": "sensitive_refused", "message": "refused"})
+		self.assertEqual(self.buffered(), [])
+
+
+# --------------------------------------------------------------------------- #
+# call_tool: rejected calls and refusals before the tool runs
+# --------------------------------------------------------------------------- #
+class TestCallToolFailures(CaptureBase):
+	def setUp(self):
+		super().setUp()
+		frappe.local.response = frappe._dict()
+
+	def _plugin_call(self, **patches):
+		"""Drive the real call_tool down the container's (X-Jarvis-Token) path."""
+		from jarvis import api
+
+		with ExitStack() as stack:
+			stack.enter_context(
+				patch.object(api, "_get_header", side_effect=lambda h: "tok" if h == "X-Jarvis-Token" else "")
+			)
+			stack.enter_context(patch.object(api, "_request_body_bytes", return_value=b"{}"))
+			for name, kw in patches.items():
+				stack.enter_context(patch.object(api, name, **kw))
+			return api.call_tool("get_list", {"doctype": "Customer"})
+
+	def test_a_rejected_container_call_is_an_error(self):
+		from jarvis._plugin_auth import PluginAuthError
+
+		rejected = PluginAuthError(http_status=400, code="unsigned", message="request is not signed")
+		result = self._plugin_call(validate_plugin_request={"side_effect": rejected})
+		self.assertFalse(result["ok"])
+		(row,) = self.buffered()
+		self.assertEqual((row.surface, row.error_code, row.error_class), ("call_tool", "400", "unsigned"))
+		self.assertEqual(row.route, "get_list")
+		self.assertIn("not signed", row.message)
+
+	def test_an_unknown_session_is_an_error(self):
+		# No Jarvis Chat Session row has this key, so it resolves to no user.
+		result = self._plugin_call(validate_plugin_request={"return_value": "errcap-no-such-session"})
+		self.assertEqual(result["error"]["code"], "InvalidArgumentError")
+		(row,) = self.buffered()
+		self.assertEqual((row.surface, row.error_code), ("call_tool", "400"))
+
+	def test_a_refusal_before_the_tool_runs_is_a_tool_failure_of_the_chat_user(self):
+		from jarvis import api
+
+		def refuse(tool, args):
+			frappe.local.jarvis_call_tool_user = USER
+			return api._error("InvalidArgumentError", "args must be an object")
+
+		with patch.object(api, "_call_tool", side_effect=refuse):
+			api.call_tool("get_list", "not json")
+		(row,) = self.buffered()
+		self.assertEqual((row.surface, row.error_class, row.user), ("tool", "get_list", USER))
+
+	def test_a_tool_failure_is_counted_once(self):
+		from jarvis import api
+
+		def failed_tool(tool, args):
+			with patch.object(api, "dispatch", side_effect=frappe.ValidationError("Customer is disabled")):
+				return api._dispatch_and_wrap(tool, {"doctype": "Customer"}, False)
+
+		with patch.object(api, "_call_tool", side_effect=failed_tool):
+			api.call_tool("get_list", {"doctype": "Customer"})
+		self.assertEqual(len(self.buffered()), 1)
+
+	def test_a_successful_call_records_nothing(self):
+		from jarvis import api
+
+		with patch.object(api, "_call_tool", return_value={"ok": True, "data": []}):
+			api.call_tool("get_list", {})
 		self.assertEqual(self.buffered(), [])
 
 
