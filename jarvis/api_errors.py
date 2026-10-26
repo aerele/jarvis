@@ -334,7 +334,11 @@ def _fold(
 	# not N rows at count=1. The scrubber-coupling that creates (a scrubber change
 	# would re-key the feed) is made explicit and deliberate via _SCRUB_VERSION,
 	# baked into _fingerprint. Lane 2 keys on raw frames, so it is scrub-stable.
-	fp = _fingerprint(error_code, error_class, message, surface)
+	# A server row's route is the endpoint or tool that failed, so the same
+	# message from two endpoints stays two rows. A browser route is a page path
+	# (it carries conversation ids), so browser rows keep grouping without it.
+	group_by = f"{error_class}|{route}" if surface in SERVER_SURFACES else error_class
+	fp = _fingerprint(error_code, group_by, message, surface)
 
 	# Serialize concurrent reports of the SAME error (same user+fingerprint) so the
 	# check-then-act below can't double-insert, and two occurrences can't both read
