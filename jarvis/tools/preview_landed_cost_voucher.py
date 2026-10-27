@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 from collections import Counter
+from decimal import Decimal
 
 import frappe
 from frappe.utils import flt, getdate, nowdate
@@ -159,7 +160,7 @@ def _number(value):
 	return number
 
 
-def _guard_fields(meta, parenttype=None, dimensions=()):
+def _guard_fields(meta, parenttype=None, dimensions=(), extra_fields=()):
 	"""Native helpers read raw rows: fence amounts, ratios and dimensions first."""
 	if frappe.session.user == "Administrator":
 		return
@@ -177,6 +178,7 @@ def _guard_fields(meta, parenttype=None, dimensions=()):
 		},
 		"Item": {"is_stock_item", "is_fixed_asset", "stock_uom"},
 		"Account": {"company", "is_group", "account_type", "account_currency"},
+		"UOM": {"category", "enabled"},
 	}
 	required = master_fields.get(meta.name)
 	if required is not None:
@@ -223,6 +225,7 @@ def _guard_fields(meta, parenttype=None, dimensions=()):
 			)
 			if meta.has_field(f)
 		)
+	required.update(f for f in extra_fields if meta.has_field(f))
 	if required & (unreadable | masked):
 		raise PermissionDeniedError(_DENIED)
 
@@ -483,10 +486,10 @@ class _Preparation:
 					"Select a submitted non-stock service invoice for these costs.",
 				)
 			basis = charge.get("basis")
-			if not isinstance(basis, str) or basis not in {"Amount", "Qty", "Manual"}:
+			if not isinstance(basis, str) or basis not in {"Amount", "Qty", "Weight", "Manual"}:
 				raise _Gap(
 					"allocation_policy",
-					"Supply Amount, comparable Qty, or explicit Manual allocations; weight needs accountant-provided splits.",
+					"Supply Amount, comparable Qty, recorded Weight in one mass unit, or explicit Manual allocations.",
 				)
 			selected = charge.get("items")
 			_list(selected, "charge items", MAX_ROWS)
@@ -511,6 +514,7 @@ class _Preparation:
 				seen_rows.add((name, row_name))
 			scope = self.scope(charge.get("receipt_items"))
 			scratch = self.scratch(scope)
+			weight_evidence = self.weight_basis(scratch, scope) if basis == "Weight" else None
 			if basis == "Qty":
 				units = {self.source_row(key).uom for key in scope}
 				if len(units) != 1:
@@ -573,7 +577,7 @@ class _Preparation:
 			if basis == "Manual":
 				self.manual(scratch, charge.get("allocations"))
 			else:
-				scratch.distribute_charges_based_on = basis
+				scratch.distribute_charges_based_on = "Amount" if basis == "Weight" else basis
 				scratch.set_applicable_charges_on_item()
 				scratch.validate_applicable_charges_for_item()
 			for row in scratch.items:
@@ -582,6 +586,9 @@ class _Preparation:
 					target.applicable_charges + row.applicable_charges, target.precision("applicable_charges")
 				)
 				self.component(row, name, "service", basis)
+			if weight_evidence:
+				for evidence, row in zip(weight_evidence, scratch.items, strict=True):
+					evidence["allocated_amount"] = row.applicable_charges
 			for tax in scratch.taxes:
 				self.doc.append("taxes", self.tax_values(tax))
 				if len(self.doc.taxes) > MAX_ROWS:
@@ -594,10 +601,94 @@ class _Preparation:
 					"basis": basis,
 					"amount": scratch.total_taxes_and_charges,
 					"receipt_items": [k[2] for k in scope],
+					**(
+						{"weight_uom": weight_evidence[0]["weight_uom"], "weight_evidence": weight_evidence}
+						if weight_evidence
+						else {}
+					),
 				}
 			)
 		for name, amount in claims.items():
 			self.doc.append("vendor_invoices", {"vendor_invoice": name, "amount": amount})
+
+	def weight_basis(self, scratch, scope):
+		"""Use the native allocator on exact proportional integers in scratch only."""
+		evidence = []
+		for key in scope:
+			row = self.source_row(key)
+			_guard_fields(
+				row.meta,
+				key[0],
+				extra_fields=("weight_uom", "stock_uom", "total_weight", "weight_per_unit", "stock_qty"),
+			)
+			try:
+				weight, per_unit, quantity = (
+					_number(row.get(field)) for field in ("total_weight", "weight_per_unit", "stock_qty")
+				)
+			except InvalidArgumentError as exc:
+				raise _Gap(
+					"weight_basis",
+					"The receipt needs finite recorded item weights.",
+					receipt_item=key[2],
+					check="finite_weight_and_stock_quantity",
+				) from exc
+			expected = quantity * per_unit
+			if (
+				min(weight, per_unit, quantity) <= 0
+				or not math.isfinite(expected)
+				or not row.weight_uom
+				or not row.stock_uom
+				or not (
+					math.isclose(weight, expected, rel_tol=1e-12, abs_tol=0)
+					or weight == flt(expected, row.precision("total_weight"))
+				)
+			):
+				raise _Gap(
+					"weight_basis",
+					"Use positive, consistent posted receipt weights, or provide Manual allocations. Item defaults and quantities cannot substitute for missing weights.",
+					receipt_item=key[2],
+					check="positive_consistent_recorded_weight_and_units",
+				)
+			unit = self.read("UOM", row.weight_uom)
+			if not unit.enabled or unit.get("category") != "Mass":
+				raise _Gap(
+					"weight_basis",
+					"Recorded weights need an enabled mass-category UOM.",
+					receipt_item=key[2],
+					weight_uom=unit.name,
+				)
+			evidence.append(
+				{
+					"receipt_item": key[2],
+					"item_code": row.item_code,
+					"stock_qty": quantity,
+					"stock_uom": row.stock_uom,
+					"weight_per_unit": per_unit,
+					"total_weight": weight,
+					"weight_uom": unit.name,
+				}
+			)
+		if len({row["weight_uom"] for row in evidence}) != 1:
+			raise _Gap(
+				"weight_basis",
+				"Weight allocation requires one common mass UOM; provide Manual allocations for mixed units.",
+				weight_evidence=evidence[:20],
+				total_weight_rows=len(evidence),
+			)
+		# Currency precision rounds the native basis total. Uniform decimal scaling
+		# makes even 0.004/0.004 exact integers, preserving the intended 50/50 split.
+		weights = [Decimal(str(row["total_weight"])) for row in evidence]
+		digits = max(0, *(-weight.as_tuple().exponent for weight in weights))
+		scaled = [int(weight.scaleb(digits)) for weight in weights]
+		precision = scratch.items[0].precision("amount")
+		if sum(scaled) * 10**precision > 2**53 - 1:
+			raise _Gap(
+				"weight_basis",
+				"The weight precision/range exceeds exact native allocation. Provide Manual allocations.",
+			)
+		for row, weight in zip(scratch.items, scaled, strict=True):
+			row.amount = weight
+		return evidence
 
 	def account_currency(self, name):
 		account = self.read("Account", name)

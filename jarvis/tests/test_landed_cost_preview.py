@@ -62,7 +62,7 @@ class TestLandedCostPreview(LandedCostFixtures):
 		self.assertEqual(result["status"], "needs_input")
 		self.assertNotIn("draft_values", result)
 
-	def test_missing_bill_and_unsupported_weight_are_explicit_gaps(self):
+	def test_missing_bill_and_unavailable_weight_are_explicit_gaps(self):
 		for charges in (
 			[{"amount": 120, "description": "Unbooked freight"}],
 			[{"purchase_invoice": self.invoice.name, "basis": "Weight"}],
