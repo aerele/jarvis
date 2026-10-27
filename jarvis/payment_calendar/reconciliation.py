@@ -9,18 +9,20 @@ import frappe
 from frappe.query_builder.functions import Count, Min, Sum
 from frappe.utils import flt
 
+from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 
 
 def check_allocation_contract():
-	"""Classification formulas are pinned to the inspected v16 controller paths."""
+	"""Classification formulas are pinned to inspected v15/v16 controller paths."""
 	from erpnext.accounts.doctype.purchase_invoice.purchase_invoice import PurchaseInvoice
 	from erpnext.controllers.accounts_controller import AccountsController
 
+	profile = source_profile()
 	for method, expected in (
 		(
 			AccountsController.set_payment_schedule,
-			"da22739f601983c4070b44a73bdefb683286145aefc89c2374f684aed32bd0f3",
+			profile.payment_schedule_hash,
 		),
 		(
 			PurchaseInvoice.make_gl_entries_for_tax_withholding,

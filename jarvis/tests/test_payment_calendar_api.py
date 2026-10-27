@@ -8,6 +8,7 @@ import frappe
 from frappe.utils import add_days
 
 from jarvis.payment_calendar import access, api, store
+from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.projection import project_snapshot
 from jarvis.payment_calendar.scope import normalize_scope
 from jarvis.payment_calendar.settings import get_settings, update_safety_floor
@@ -101,6 +102,47 @@ class TestPaymentCalendarAPI(TestCase):
 		self.assertEqual(result["code"], "scope_changed")
 		self.assertNotIn("data", result)
 		self.assertIsNone(store.load_result(self.user, self.sid))
+
+	def test_sales_person_restrictions_block_previously_cached_receivable_delivery(self):
+		frappe.set_user("Administrator")
+		person = self.fx.insert(
+			"Sales Person",
+			"SalesPerson",
+			sales_person_name="Scoped calendar sales person",
+			is_group=0,
+			lft=1,
+			rgt=2,
+		)
+		frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": self.user,
+				"allow": "Sales Person",
+				"for_value": person,
+				"apply_to_all_doctypes": 1,
+			}
+		).insert(ignore_permissions=True)
+		frappe.set_user(self.user)
+		for response in (
+			api.get_snapshot_status(self.sid),
+			api.get_day_detail(self.sid, self.fx.today, "Receivable"),
+		):
+			self.assertFalse(response["ok"], response)
+			self.assertNotIn("data", response)
+		if source_profile().major == "15":
+			# A current fingerprint cannot legitimize a cached AR source produced
+			# before the v15 limitation was enforced: delivery checks it again.
+			proof = access.authorize_scope(self.scope)
+			sid, _ = store.admit(self.user, "d" * 64, self.scope, proof["fingerprint"])
+			store.mark_running(self.user, sid)
+			store.publish(self.user, sid, self.result)
+			for response in (
+				api.get_snapshot_status(sid),
+				api.get_day_detail(sid, self.fx.today, "Receivable"),
+			):
+				self.assertFalse(response["ok"], response)
+				self.assertEqual(response["code"], "restricted_obligations")
+				self.assertNotIn("data", response)
 
 	def test_floor_identity_uses_the_locked_row_even_if_a_plain_read_would_be_stale(self):
 		with patch.object(api, "get_settings", return_value={"configuration_id": "old-deleted-row"}):

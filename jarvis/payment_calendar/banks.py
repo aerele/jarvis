@@ -4,6 +4,7 @@ import frappe
 from frappe.utils import getdate
 
 from jarvis.payment_calendar.books import validate_finance_books
+from jarvis.payment_calendar.compatibility import bank_balance_arguments, source_profile
 from jarvis.payment_calendar.permissions import require_company
 from jarvis.payment_calendar.sources import CalendarSourceUnavailable, money
 from jarvis.tools._ledger_access import assert_gl_balance_in_scope, assert_ledger_readable
@@ -44,6 +45,7 @@ def validate_bank_accounts(company: str, accounts: list[str]) -> list[str]:
 def read_bank_balances(company: str, accounts: list[str], as_of: str) -> dict:
 	if not as_of:
 		raise frappe.ValidationError("The accounting date is required.")
+	source_profile()
 
 	from erpnext.accounts.utils import (
 		FiscalYearError,
@@ -59,6 +61,9 @@ def read_bank_balances(company: str, accounts: list[str], as_of: str) -> dict:
 	except FiscalYearError as exc:
 		raise CalendarSourceUnavailable("fiscal_year_unavailable") from exc
 	validate_finance_books(company, names, as_of)
+	# Reject alternative books before selecting the audited helper arguments that
+	# include NULL, blank and company-default books on this source revision.
+	book_arguments = bank_balance_arguments(get_balance_on)
 	precision = get_currency_precision() or 2
 	previous_form = frappe.local.form_dict
 	try:
@@ -78,8 +83,7 @@ def read_bank_balances(company: str, accounts: list[str], as_of: str) -> dict:
 							party=None,
 							cost_center=None,
 							ignore_account_permission=False,
-							finance_book=None,
-							include_default_fb_balances=False,
+							**book_arguments,
 						),
 						precision,
 					)
