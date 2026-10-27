@@ -68,9 +68,11 @@ class TestCallToolPinsSite(FrappeTestCase):
 	def test_pin_failure_never_breaks_call_tool(self):
 		with self._plugin_request():
 			baseline = self._call()
-		with self._plugin_request(), patch(
-			"jarvis.chat.site_pin.pin_if_unset", side_effect=Exception("db down")
-		), patch("frappe.log_error") as log_error:
+		with (
+			self._plugin_request(),
+			patch("jarvis.chat.site_pin.pin_if_unset", side_effect=Exception("db down")),
+			patch("frappe.log_error") as log_error,
+		):
 			result = self._call()
 		self.assertEqual(result, baseline)
 		log_error.assert_called_once_with(title="site_pin: pin failed")
