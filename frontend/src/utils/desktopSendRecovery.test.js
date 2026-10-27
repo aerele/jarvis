@@ -36,6 +36,7 @@ function harness(pendingStore) {
 		refreshNames,
 		deliveryFailureCopy,
 		deliveryTimeoutError,
+		DELIVERY_TOAST: "Delivery not confirmed. See the note under your message.",
 		SEND_DEADLINE_MS: 30000,
 		CHECK_DEADLINE_MS: 15000,
 		toLocalMs: (value) => Date.parse(value),
