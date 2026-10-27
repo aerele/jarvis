@@ -72,11 +72,36 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 			frappe.local.response.http_status_code = e.http_status
 			return _error(e.code, e.message)
 
+<<<<<<< HEAD
 		plugin_user = frappe.db.get_value(
 			"Jarvis Chat Session",
 			{"session_key": session_key},
 			"user",
 		)
+=======
+		# Only the real site receives verified plugin calls, so this is where it
+		# claims the tenant. A failed pin must never break the tool call.
+		try:
+			from jarvis.chat import site_pin
+
+			site_pin.pin_if_unset()
+		except Exception:
+			frappe.log_error(title="site_pin: pin failed")
+
+		from jarvis.chat.collaboration import is_collaborative_session, legacy_session_user, resolve_binding
+
+		shared_session = is_collaborative_session(session_key)
+		if shared_session and tool in {"recall", "remember"}:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Private memory is unavailable in shared chats.")
+		try:
+			plugin_user = (
+				resolve_binding(session_key).actor if shared_session else legacy_session_user(session_key)
+			)
+		except frappe.PermissionError:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Collaborative chat execution is unavailable on this server.")
+>>>>>>> 8dad292 (feat(pairing): pin the site on its first verified plugin call)
 		if not plugin_user:
 			frappe.local.response.http_status_code = 400
 			return _error(
