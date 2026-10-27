@@ -599,6 +599,12 @@ describe("copied-site banner", () => {
 		);
 	});
 
+	it("names another site when the pin is empty", () => {
+		expect(copyBanner({ paired_site: "" }).message).toBe(
+			"This site is a copy of another site. Jarvis is turned off here. Contact support to use Jarvis on this site."
+		);
+	});
+
 	it("stays silent without a notice", () => {
 		expect(copyBanner(null)).toBeNull();
 	});
