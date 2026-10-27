@@ -52,10 +52,21 @@ def _log_read_failure() -> None:
 		pass
 
 
+def _current_site() -> str:
+	"""Empty when there is no site context (a worker thread, a bare
+	``frappe.local``). Never raises."""
+	try:
+		return (getattr(frappe.local, "site", None) or "").strip()
+	except Exception:
+		return ""
+
+
 def status() -> dict:
 	"""Fails OPEN: any error reading the pin reports not blocked, so an
 	infrastructure fault can never lock the real site out."""
-	current_site = (frappe.local.site or "").strip()
+	current_site = _current_site()
+	if not current_site:
+		return {"blocked": False, "paired_site": "", "current_site": "", "reason": ""}
 	try:
 		raw = _read_pin()
 		paired_site = (raw.get("paired_site") or "").strip()
@@ -75,13 +86,16 @@ def status() -> dict:
 def pin_if_unset() -> bool:
 	"""Stamp this site as the paired site when no pin exists yet. A failed read
 	pins nothing."""
+	current_site = _current_site()
+	if not current_site:
+		return False
 	try:
 		if (_read_pin().get("paired_site") or "").strip():
 			return False
 	except Exception:
 		_log_read_failure()
 		return False
-	frappe.db.set_single_value(SETTINGS, "paired_site", frappe.local.site, update_modified=False)
+	frappe.db.set_single_value(SETTINGS, "paired_site", current_site, update_modified=False)
 	return True
 
 
