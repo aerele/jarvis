@@ -24,7 +24,7 @@ import { cookieUser } from "./sessionCookie.js";
 // properties of undefined (reading 'exc_type')") and the pre-2021 form
 // ("Cannot read property 'exc_type' of undefined") both match.
 const INTERNAL_CRASH_MESSAGE = /^Cannot read propert(y|ies) (?:'[^']*' )?of (undefined|null)\b/;
-function isInternalCrash(e) {
+export function isInternalCrash(e) {
 	return e instanceof TypeError && INTERNAL_CRASH_MESSAGE.test((e && e.message) || "");
 }
 

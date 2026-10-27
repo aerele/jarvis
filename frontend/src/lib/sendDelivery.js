@@ -1,4 +1,4 @@
-import { messageText, serverSentMessage } from "./errors.js";
+import { isInternalCrash, messageText, serverSentMessage } from "./errors.js";
 
 // Request identity survives uncertain delivery; only definite rejection gets a new ID.
 export function newSendRequestId(rng = globalThis.crypto) {
@@ -123,6 +123,13 @@ export function deliveryFailureCause(error) {
 		return "This device is offline, so the message could not reach the server.";
 	if (NETWORK_ERROR_RE.test(error.message || ""))
 		return "The network connection dropped before the server answered.";
+	// frappe-ui's call() crashes on a non-JSON body (#696): it reads
+	// `error.exc_type` off the failed JSON.parse. That body is what nginx sends
+	// for a 502/504 and what a restarting bench sends, so this crash shape IS
+	// the gateway error, seen from the browser (the real 502 above was
+	// captured on the live site exactly this way).
+	if (isInternalCrash(error))
+		return "The server did not send a readable reply. It is usually restarting or behind a gateway error.";
 	if (error instanceof TypeError)
 		return "The app hit an error before the request reached the server.";
 	return `The request failed before the server answered.${said}`;
@@ -144,7 +151,8 @@ function serverSentence(error) {
 	if (!text) return "";
 	const clipped =
 		text.length > SERVER_MESSAGE_CHARS ? text.slice(0, SERVER_MESSAGE_CHARS - 1) + "…" : text;
-	return ` The server said: ${clipped}`;
+	// Always ends a sentence: the recovery step follows it in the same note.
+	return ` The server said: ${clipped}${/[.!?…]$/.test(clipped) ? "" : "."}`;
 }
 
 // The last 8 characters of the request ID: enough for support to find the
