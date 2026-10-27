@@ -62,6 +62,7 @@ vi.mock("@/api", () => ({
 	rejectWikiWrite: vi.fn(),
 	retryWikiWrite: vi.fn(),
 	listShareableUsers: vi.fn(async () => []),
+	listApprovalReviewers: vi.fn(async () => []),
 	getListFilterSchema: vi.fn(),
 	getListFilterCapabilities: vi.fn(),
 }));
@@ -240,6 +241,14 @@ const pane = (w) => w.find(".flex-1.overflow-y-auto");
 const button = (w, label) => w.findAll("button").find((b) => b.text() === label);
 
 describe("ApprovalsBoard one inbox", () => {
+	it("loads the dedicated approval reviewer roster instead of generic sharing users", async () => {
+		const w = await board();
+		await button(w, "Tag for review").trigger("click");
+		await flushPromises();
+		expect(api.listApprovalReviewers).toHaveBeenCalledOnce();
+		expect(api.listShareableUsers).not.toHaveBeenCalled();
+	});
+
 	let mounted = [];
 	beforeEach(() => {
 		vi.clearAllMocks();
