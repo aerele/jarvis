@@ -52,6 +52,16 @@ export function isSessionExpired(e) {
 	return authFailure && !cookieUser();
 }
 
+// Only what the server said ON PURPOSE (frappe.throw / _server_messages), or "".
+// Never e.message: frappe-ui composes that from the method name, the exception
+// class and the traceback head, which is not a sentence for a customer. For a
+// caller (lib/sendDelivery.js) that builds its own cause sentence from the
+// transport facts and only wants to quote the server when it actually spoke.
+export function serverSentMessage(e) {
+	const first = e && Array.isArray(e.messages) ? e.messages[0] : "";
+	return typeof first === "string" ? first : "";
+}
+
 export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
 	if (isSessionExpired(e)) return SESSION_EXPIRED_MESSAGE;
 	// The server's OWN explicit message always wins, even on a 401/403 (round-4
