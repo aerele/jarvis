@@ -59,7 +59,7 @@ test("a deadline exposes recovery but preserves late authoritative success", asy
 		() => {
 			expired = true;
 		},
-		1
+		1,
 	);
 	await new Promise((r) => setTimeout(r, 10));
 	assert.equal(expired, true);
@@ -76,7 +76,7 @@ test("uncertain diagnostics remain errors and never expose arbitrary server text
 					receipt_status: status,
 					message: "PRIVATE",
 				}),
-			(error) => error.deliveryUncertain && !error.message.includes("PRIVATE")
+			(error) => error.deliveryUncertain && !error.message.includes("PRIVATE"),
 		);
 	}
 });
@@ -86,4 +86,89 @@ test("authentication, CSRF and access failures explain recovery without claiming
 	assert.match(deliveryFailureCopy({ status: 401 }), /sign in/i);
 	assert.match(deliveryFailureCopy({ exc_type: "CSRFTokenError" }), /copy.*reload/i);
 	assert.match(deliveryFailureCopy({ status: 403 }), /access|permission/i);
+});
+
+test("every transport failure names its cause, the recovery step and a support reference", async () => {
+	const { deliveryFailureCopy, deliveryFailureCause, deliveryTimeoutError } =
+		await import("./sendDelivery.js");
+	const id = "0123456789abcdef0123456789abcdef";
+	const cases = [
+		[deliveryTimeoutError(30000), /did not answer within 30 seconds/],
+		[new Error("Delivery check timed out"), /delivery check did not get an answer/i],
+		[new TypeError("Failed to fetch"), /network connection dropped/],
+		[Object.assign(new Error("x"), { status: 502 }), /not reachable right now \(HTTP 502\)/],
+		[Object.assign(new Error("x"), { status: 429 }), /too many requests/],
+		[Object.assign(new Error("x"), { status: 413 }), /too large/],
+		[
+			Object.assign(new Error("x"), { status: 500, exc_type: "ValidationError" }),
+			/hit an error .*\(HTTP 500, ValidationError\)/,
+		],
+		[
+			Object.assign(new Error("x"), { status: 417, exc_type: "ValidationError" }),
+			/refused this request \(HTTP 417/,
+		],
+		[
+			Object.assign(new Error("x"), { exc_type: "TimestampMismatchError" }),
+			/failed \(TimestampMismatchError\)/,
+		],
+		[new Error("x"), /failed before the server answered/],
+	];
+	for (const [error, cause] of cases) {
+		const copy = deliveryFailureCopy(error, id);
+		assert.match(copy, cause, String(error?.message || error?.status));
+		assert.match(copy, /Check delivery before sending it again/);
+		assert.match(copy, /Reference 89abcdef\.$/);
+		assert.doesNotMatch(
+			copy,
+			/^Delivery not confirmed/,
+			"the title is not repeated as the note's lead",
+		);
+	}
+	// No reference clause without an ID (programmatic sends).
+	assert.doesNotMatch(deliveryFailureCopy(new Error("x")), /Reference/);
+	assert.equal(deliveryFailureCause(null), "The request failed before the server answered.");
+});
+
+test("the server's own sentence is quoted, a generic 500 placeholder and markup are not", async () => {
+	const { deliveryFailureCause } = await import("./sendDelivery.js");
+	const said = deliveryFailureCause(
+		Object.assign(new Error("x"), {
+			status: 500,
+			exc_type: "ValidationError",
+			messages: ["<b>Attachment</b> invoice.pdf was &gt; 25 MB"],
+		}),
+	);
+	assert.match(said, /The server said: Attachment invoice\.pdf was (&gt;|>) 25 MB$/);
+	assert.doesNotMatch(said, /<b>/);
+	assert.doesNotMatch(
+		deliveryFailureCause(
+			Object.assign(new Error("x"), { status: 500, messages: ["Internal Server Error"] }),
+		),
+		/server said/,
+	);
+	const long = "a".repeat(600);
+	const clipped = deliveryFailureCause(
+		Object.assign(new Error("x"), { status: 500, messages: [long] }),
+	);
+	assert.ok(clipped.length < 400, "a runaway server message is clipped");
+});
+
+test("an uncertain receipt keeps its own diagnostic and gains the reference", async () => {
+	const { deliveryFailureCopy, settledSendResult } = await import("./sendDelivery.js");
+	let thrown;
+	try {
+		settledSendResult({ delivery: "unknown", reason: "request_mismatch" });
+	} catch (e) {
+		thrown = e;
+	}
+	assert.match(thrown.message, /delivery ID already belongs to a different message/);
+	assert.match(
+		deliveryFailureCopy(thrown, "abcdefgh12345678"),
+		/different message.* Reference 12345678\.$/,
+	);
+	// check_delivery's own read failing is told apart from "no receipt".
+	assert.throws(
+		() => settledSendResult({ delivery: "unknown" }),
+		/Delivery not confirmed\. The server could not read the delivery receipt/,
+	);
 });
