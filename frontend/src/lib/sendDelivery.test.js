@@ -107,9 +107,16 @@ test("every transport failure names its cause, the recovery step and a support r
 			Object.assign(new Error("x"), { status: 417, exc_type: "ValidationError" }),
 			/refused this request \(HTTP 417\)/,
 		],
-		// A TypeError that is NOT the browser's fetch failure is an app bug, and
-		// must not send the customer chasing their network.
-		[new TypeError("Cannot read properties of undefined (reading 'x')"), /app hit an error/],
+		// frappe-ui's call() crashes on a non-JSON body, which is how an nginx 502
+		// or a restarting bench reaches this code (#696). That shape is the
+		// gateway error, not an app bug.
+		[
+			new TypeError("Cannot read properties of undefined (reading 'exc_type')"),
+			/did not send a readable reply/,
+		],
+		// Any other TypeError is an app bug, and must not send the customer
+		// chasing their network.
+		[new TypeError("x is not a function"), /app hit an error/],
 		[
 			Object.assign(new Error("x"), { exc_type: "TimestampMismatchError" }),
 			/failed before the server answered/,
