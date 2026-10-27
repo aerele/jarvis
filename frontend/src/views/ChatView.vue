@@ -4457,7 +4457,16 @@ import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
-import { newSendRequestId, observeDelivery, deliveryFailureCopy } from "@/lib/sendDelivery.js";
+import {
+	newSendRequestId,
+	observeDelivery,
+	deliveryFailureCopy,
+	deliveryTimeoutError,
+} from "@/lib/sendDelivery.js";
+// How long a send, a same-request retry, and a delivery check wait before the
+// bubble turns "not confirmed" and says so. The late answer still lands.
+const SEND_DEADLINE_MS = 30000;
+const CHECK_DEADLINE_MS = 15000;
 import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
@@ -10562,15 +10571,17 @@ async function recoverSend(m, retrySame = false) {
 		const operation = retrySame
 			? api.sendMessage(...m.sendRequest.args)
 			: api.checkMessageDelivery(id);
+		const deadline = retrySame ? SEND_DEADLINE_MS : CHECK_DEADLINE_MS;
 		const r = await observeDelivery(
 			operation,
 			() => {
 				if (m.deliveryReadEpoch === epoch && m.deliveryState === "checking") {
 					m.deliveryState = "uncertain";
 					m.deliveryBusy = false;
+					m.deliveryNote = deliveryFailureCopy(deliveryTimeoutError(deadline), id);
 				}
 			},
-			retrySame ? 30000 : 15000
+			deadline
 		);
 		if (m.sendRequest.requestId === id) await settleRecoveredSend(m, r);
 	} catch (error) {
@@ -10581,7 +10592,7 @@ async function recoverSend(m, retrySame = false) {
 			m.deliveryState === "checking"
 		) {
 			m.deliveryState = "uncertain";
-			m.deliveryNote = deliveryFailureCopy(error);
+			m.deliveryNote = deliveryFailureCopy(error, id);
 		}
 	} finally {
 		if (m.sendRequest.requestId === id && m.deliveryReadEpoch === epoch)
@@ -10880,21 +10891,33 @@ async function send(textArg, resendAck) {
 			return;
 		_optBubble.failed = true;
 		_optBubble.deliveryState = "uncertain";
+		// The deadline is the one path here that is not an exception, so without
+		// this the bubble showed the bare title and no reason. A later throw or
+		// late answer still overwrites it.
+		if (!_optBubble.deliveryNote)
+			_optBubble.deliveryNote = deliveryFailureCopy(
+				deliveryTimeoutError(SEND_DEADLINE_MS),
+				sendRequest.requestId
+			);
 		const scope = _pendingSends.scopeOf(_optBubble) || _sentScope;
 		_pendingSends.add(scope, _optBubble);
 		if (_recoveryViewActive && _currentScope() === scope)
 			messages.value = injectPendingBubbles(messages.value, [_optBubble]);
 	};
 	try {
-		const r = await observeDelivery(api.sendMessage(...sendRequest.args), () => {
-			expired = true;
-			markUncertain();
-			// Do not interrupt a reply which has already started or another chat.
-			if (_currentScope() === _sentScope && !currentMsgId.value) {
-				sending.value = false;
-				waiting.value = false;
-			}
-		});
+		const r = await observeDelivery(
+			api.sendMessage(...sendRequest.args),
+			() => {
+				expired = true;
+				markUncertain();
+				// Do not interrupt a reply which has already started or another chat.
+				if (_currentScope() === _sentScope && !currentMsgId.value) {
+					sending.value = false;
+					waiting.value = false;
+				}
+			},
+			SEND_DEADLINE_MS
+		);
 		if (
 			expired ||
 			!_recoveryViewActive ||
@@ -11138,7 +11161,7 @@ async function send(textArg, resendAck) {
 				(_optBubble.deliveryReadEpoch || 0) === initialEpoch &&
 				!["delivered", "rejected"].includes(_optBubble.deliveryState)
 			)
-				_optBubble.deliveryNote = deliveryFailureCopy(e);
+				_optBubble.deliveryNote = deliveryFailureCopy(e, sendRequest.requestId);
 			markUncertain();
 			return;
 		}
@@ -11149,13 +11172,13 @@ async function send(textArg, resendAck) {
 		// and show it now if the origin is still on screen.
 		_optBubble.failed = true;
 		_optBubble.deliveryState = "uncertain";
-		_optBubble.deliveryNote = deliveryFailureCopy(e);
+		_optBubble.deliveryNote = deliveryFailureCopy(e, sendRequest.requestId);
 		_pendingSends.add(_sentScope, _optBubble);
 		if (_currentScope() === _sentScope && !messages.value.some((x) => x.name === tmpName))
 			messages.value = [...messages.value, _optBubble];
 		sending.value = false;
 		waiting.value = false;
-		notify(deliveryFailureCopy(e), { type: "info" });
+		notify(_optBubble.deliveryNote, { type: "info" });
 	}
 }
 
