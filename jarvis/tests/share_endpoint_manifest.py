@@ -14,6 +14,23 @@ def _unrelated(module, reason, names):
 
 
 _unrelated(
+	"jarvis.payment_calendar.api",
+	"Company/report/ledger finance scope and actor-owned snapshots/preferences; shared chat identifiers grant no authority.",
+	"""
+    configure_floor
+    get_bucket_detail
+    get_capabilities
+    get_day_detail
+    get_preferences
+    get_snapshot_status
+    get_upcoming
+    request_snapshot
+    set_preferences
+    """,
+)
+
+
+_unrelated(
 	"jarvis.account",
 	"Workspace billing, subscription and LLM connection metadata; no transcript lookup.",
 	"""
