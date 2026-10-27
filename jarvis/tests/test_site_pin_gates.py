@@ -1,6 +1,7 @@
 """Site pin: the doors the first wave missed (trigger LLM client, session pool,
 send path, pump retries), fail-open status reads, and the settings reset."""
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -159,3 +160,35 @@ class TestSitePinGates(FrappeTestCase):
 		self.assertFalse(out["blocked"])
 		self.assertEqual(out["cleared_paired_site"], "erp.example.com")
 		self.assertEqual(out["cleared_reason"], "because")
+
+	# -- no site context (threads, bare frappe.local) fails open ---------------
+
+	def _run_in_thread(self, fn):
+		out = {}
+
+		def target():
+			try:
+				out["value"] = fn()
+			except BaseException as e:
+				out["error"] = e
+
+		t = threading.Thread(target=target)
+		t.start()
+		t.join(10)
+		return out
+
+	def test_status_in_thread_without_site_is_not_blocked(self):
+		out = self._run_in_thread(site_pin.status)
+		self.assertNotIn("error", out)
+		self.assertFalse(out["value"]["blocked"])
+
+	def test_assert_not_copy_in_thread_without_site_does_not_raise(self):
+		out = self._run_in_thread(site_pin.assert_not_copy)
+		self.assertNotIn("error", out)
+
+	def test_status_and_pin_without_site_attribute_fail_open(self):
+		with patch.object(frappe, "local", SimpleNamespace()), patch("frappe.log_error") as log:
+			self.assertFalse(site_pin.status()["blocked"])
+			self.assertFalse(site_pin.pin_if_unset())
+			site_pin.assert_not_copy()  # does not raise
+		log.assert_not_called()
