@@ -161,6 +161,11 @@ const routes = [
 		component: () => import("@/pages/dashboards/DashboardsPage.vue"),
 	},
 	{
+		path: "/dashboards/payment-calendar",
+		name: "PaymentCalendar",
+		component: () => import("@/pages/payment-calendar/PaymentCalendarPage.vue"),
+	},
+	{
 		path: "/dashboards/:id",
 		name: "DashboardView",
 		component: () => import("@/pages/dashboards/DashboardView.vue"),
