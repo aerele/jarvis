@@ -123,6 +123,19 @@ class TestCollaborationCallbacks(CollaborationCase):
 		self.assertFalse(WRITE_TOOLS & REFUSED_TOOLS)
 		self.assertEqual(tool_kind("future_unknown_tool"), "refused")
 
+	def test_landed_cost_preview_is_read_only_and_bound_to_the_initiating_actor(self):
+		from jarvis.chat.collaboration_tools import tool_kind, validate_targets
+
+		self.assertEqual(tool_kind("preview_landed_cost_voucher"), "read")
+		validate_targets(
+			"preview_landed_cost_voucher",
+			{"company": "Example", "receipts": [{"doctype": "Purchase Receipt", "name": "PR-1"}]},
+		)
+		self.assertTrue(self.record(tool="jarvis__preview_landed_cost_voucher"))
+		permit = self.authorize(tool="preview_landed_cost_voucher")
+		self.assertEqual(permit.binding.actor, RECIPIENT)
+		self.assertEqual(permit.run_id, self.turn.name)
+
 	def test_generic_tools_cannot_read_private_memory_or_chat_rows(self):
 		from jarvis.chat.collaboration_tools import validate_targets
 
