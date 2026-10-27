@@ -50,6 +50,13 @@ def target_state(doctype: str, name: str) -> list:
 	return [frappe.utils.get_datetime(cur.modified).strftime("%Y-%m-%d %H:%M:%S.%f"), int(cur.docstatus or 0)]
 
 
+def single_has_version(doctype: str) -> bool:
+	"""A stored native stamp, never the synthetic now from get_datetime(None)."""
+	# get_single_value also casts a missing Datetime to now; read the stored row.
+	rows = frappe.db.sql("SELECT value FROM `tabSingles` WHERE doctype=%s AND field='modified'", doctype)
+	return bool(rows and rows[0][0])
+
+
 def snapshot_targets(tool: str, args: dict) -> list[list]:
 	"""``[[doctype, name, modified_us, docstatus], ...]`` for a target-bound call."""
 	if tool not in TARGET_BOUND or not isinstance(args, dict):
@@ -57,7 +64,7 @@ def snapshot_targets(tool: str, args: dict) -> list[list]:
 	doctype = args.get("doctype")
 	if not isinstance(doctype, str) or not frappe.db.exists("DocType", doctype):
 		return []
-	if frappe.get_meta(doctype).issingle:
+	if frappe.get_meta(doctype).issingle and not single_has_version(doctype):
 		return []
 	return [[doctype, n, *target_state(doctype, n)] for n in _target_names(args)]
 

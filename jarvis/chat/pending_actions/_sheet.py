@@ -342,7 +342,7 @@ def _record_errors(row, records: list[dict], merged: list[dict], plan: dict, err
 		if key in errors or kind == "skip" or i in cascade:
 			continue
 		entry = plan["records"][key]
-		denied = held_writes._denied(record["doctype"])
+		denied = held_writes._denied_item(record)
 		if denied:
 			errors[key] = denied["error"]["message"]
 		elif kind == "use_existing":
@@ -681,12 +681,20 @@ def _savepoint() -> tuple[str, dict]:
 	return sp, queues
 
 
-def _undo(sp: str, queues: dict) -> None:
+def _undo(sp: str, queues: dict, *, clean_single=False) -> None:
 	"""Back to the savepoint, and nothing that record queued runs at the commit."""
 	frappe.db.rollback(save_point=sp)
-	for q, functions in queues.items():
-		getattr(frappe.db, q)._functions = deque(functions)
-	frappe.clear_messages()
+	try:
+		if clean_single and "after_rollback" in queues:
+			# Savepoint rollback does not run Frappe's native cache cleanup. Run only
+			# this failed save's callbacks; earlier records still belong to the pass.
+			callbacks = tuple(frappe.db.after_rollback._functions)
+			for callback in callbacks[len(queues["after_rollback"]) :]:
+				callback()
+	finally:
+		for q, functions in queues.items():
+			getattr(frappe.db, q)._functions = deque(functions)
+		frappe.clear_messages()
 
 
 def _message(e: Exception) -> str:
@@ -698,7 +706,7 @@ def _message(e: Exception) -> str:
 	return filebox_skills._safe(text, ERROR_CAP) or "This record can't be saved."
 
 
-def _guarded(fn, crashes: list, *, duplicate=None):
+def _guarded(fn, crashes: list, *, duplicate=None, clean_single=False):
 	"""``fn()`` in its own savepoint. A deadlock aborts the pass; a duplicate goes to
 	``duplicate(e)`` when given; any other error is the record's (an unexpected one
 	logged after the pass)."""
@@ -709,7 +717,7 @@ def _guarded(fn, crashes: list, *, duplicate=None):
 		raise
 	except Exception as e:
 		tb = "" if isinstance(e, _KNOWN) else frappe.get_traceback()
-		_undo(sp, queues)
+		_undo(sp, queues, clean_single=clean_single)
 		if duplicate and isinstance(e, frappe.DuplicateEntryError):
 			return duplicate(e)
 		if tb:
@@ -721,10 +729,15 @@ def _guarded(fn, crashes: list, *, duplicate=None):
 def _update(i: int, record: dict, values: dict, crashes: list) -> dict:
 	from jarvis.tools.update_doc import _update_one
 
+	single = bool(frappe.get_meta(record["doctype"]).issingle)
+	if single:
+		denied = held_writes._denied_item({**record, "values": values})
+		if denied:
+			raise _Failed(denied["error"]["message"])
 	stale = _stale_code([record["snapshot"]]) if record.get("snapshot") else None
 	if stale:
 		raise _Failed(REASON_TEXT[stale])
-	_guarded(lambda: _update_one(record["doctype"], record["name"], values), crashes)
+	_guarded(lambda: _update_one(record["doctype"], record["name"], values), crashes, clean_single=single)
 	return _entry(i, record, "updated", record["name"])
 
 

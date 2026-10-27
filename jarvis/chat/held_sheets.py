@@ -341,7 +341,9 @@ def identities(item: dict) -> list[str]:
 
 
 def category(doctype: str) -> str:
-	"""The sheet section: party · address · item · other."""
+	"""The sheet section: party · address · item · other · settings."""
+	if frappe.db.exists("DocType", doctype) and frappe.get_meta(doctype).issingle:
+		return "settings"
 	if doctype in ("Address", "Contact"):
 		return "address"
 	if doctype == "Item":
@@ -667,6 +669,8 @@ def name_of(record: dict) -> str:
 
 
 def _title(record: dict) -> str:
+	if category(record["doctype"]) == "settings":
+		return held_writes._clean_title(record["doctype"])
 	return held_writes._clean_title(f"{record['doctype']} {name_of(record)}")
 
 

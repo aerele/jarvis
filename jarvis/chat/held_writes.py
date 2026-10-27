@@ -239,8 +239,8 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 	doctypes = [i["doctype"] for i in items]
 	if items and all(dt == AR for dt in doctypes):
 		return held_sheets.classify_questions(tool, items, conversation, sheet) if sheets else ("apply", None)
-	for dt in doctypes:
-		refusal = _denied(dt)
+	for item in items:
+		refusal = _denied_item(item, batch=bulk)
 		if refusal:
 			return "refuse", refusal
 	refusal = filebox_skills.routing_refusal(conversation)
@@ -291,17 +291,63 @@ def _sensitive_sheet_refusal(tool: str, args: dict) -> dict:
 	return env
 
 
-def _denied(doctype: str) -> dict | None:
+def _denied(doctype: str, *, allow_single=False) -> dict | None:
 	if doctype == AR:
 		return None
 	if not doctype or not frappe.db.exists("DocType", doctype):
 		return _refuse("InvalidArgumentError", f"DocType {doctype or '(none)'} does not exist.")
 	meta = frappe.get_meta(doctype)
-	if meta.module in DENIED_MODULES or meta.issingle or meta.istable:
+	if meta.module in DENIED_MODULES or (meta.issingle and not allow_single) or meta.istable:
 		return _refuse(
 			"FileBoxRefusedError", f"An unattended File Box run can't write {doctype}. {_ASK_A_HUMAN}"
 		)
 	return None
+
+
+def _denied_item(item: dict, *, batch=False) -> dict | None:
+	"""Only ordinary, initialized Single updates may reach human approval.
+
+	Repeat on the complete edited record at Apply and immediately before writing;
+	metadata/risk may have changed since collection. Other records keep their policy.
+	"""
+	from jarvis.chat.pending_actions._park import single_has_version
+
+	doctype = item["doctype"]
+	refusal = _denied(doctype, allow_single=True)
+	if refusal or not frappe.get_meta(doctype).issingle:
+		return refusal
+	args = {"doctype": doctype, "name": item.get("name"), "changes": item["values"]}
+	if (
+		batch
+		or item.get("op") != "update"
+		or item.get("name") != doctype
+		or _write_risk.risk_of("update_doc", args) is not None
+		or _has_secret(frappe.get_meta(doctype), item["values"])
+	):
+		return _refuse(
+			"FileBoxRefusedError",
+			f"File Box can only propose ordinary settings updates without secret fields. {_ASK_A_HUMAN}",
+		)
+	if not single_has_version(doctype):
+		return _refuse(
+			"FileBoxRefusedError",
+			f"Initialize {doctype} by saving it in Desk before proposing a File Box update.",
+		)
+	return None
+
+
+def _has_secret(meta, values: dict) -> bool:
+	from jarvis.chat._record_summary import is_secret
+
+	for key, value in values.items():
+		if is_secret(meta, key):
+			return True
+		df = meta.get_field(key)
+		if df and df.fieldtype in ("Table", "Table MultiSelect") and isinstance(value, list):
+			child = frappe.get_meta(df.options)
+			if any(_has_secret(child, row) for row in value if isinstance(row, dict)):
+				return True
+	return False
 
 
 def _drafts_key(conversation: str) -> str:

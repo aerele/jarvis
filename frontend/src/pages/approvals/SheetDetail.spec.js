@@ -219,6 +219,30 @@ describe("SheetDetail", () => {
 		vi.useRealTimers();
 	});
 
+	it("shows settings once, explains their scope, and keeps Apply and Skip choices", async () => {
+		const setting = record(0, {
+			doctype: "Buying Settings",
+			name: "Buying Settings",
+			title: "Buying Settings",
+			category: "settings",
+			op: "update",
+			values: { maintain_same_rate: 0 },
+		});
+		const w = await mountSheet(
+			detail({ records: [setting], questions: [], record_count: 1, question_count: 0 })
+		);
+		const s = section(w, "settings");
+		expect(s.text()).toContain("This changes a setting for every user.");
+		expect(s.text().match(/Buying Settings/g)).toHaveLength(1);
+		expect(pressed(w, 0)).toBe("Apply");
+		expect(choice(w, 0, "Use existing")).toBeUndefined();
+		await choice(w, 0, "Skip").trigger("click");
+		expect(pressed(w, 0)).toBe("Skip");
+		await button(s, "Apply all").trigger("click");
+		expect(pressed(w, 0)).toBe("Apply");
+		expect(apply(w).attributes("disabled")).toBeUndefined();
+	});
+
 	it("loads, then lists the sections in order with counts, and the header", async () => {
 		let resolve;
 		api.getPendingAction.mockReturnValue(new Promise((r) => (resolve = r)));
