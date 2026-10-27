@@ -11,6 +11,8 @@ from uuid import uuid4
 import frappe
 from frappe.utils import add_days, nowdate
 
+from jarvis.payment_calendar.compatibility import source_profile
+
 
 def require_calendar_test_site():
 	allowed = frappe.local.site == "test_jarvis" or (
@@ -18,11 +20,8 @@ def require_calendar_test_site():
 	)
 	assert allowed, "Calendar fixtures require the disposable local or CI test site"
 	if "erpnext" not in frappe.get_installed_apps():
-		raise SkipTest("Payment Calendar requires ERPNext v16")
-	import erpnext
-
-	if erpnext.__version__.split(".")[0] != "16":
-		raise SkipTest("The Payment Calendar source contract currently supports ERPNext v16")
+		raise SkipTest("Payment Calendar requires ERPNext")
+	source_profile()
 
 
 class CalendarFixtures:

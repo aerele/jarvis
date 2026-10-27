@@ -30,6 +30,7 @@ SAFE_CODES = {
 	"settlement_schedule_mismatch",
 	"multiple_invoice_accounts",
 	"masked_source_unsupported",
+	"restricted_obligations",
 	"job_lost",
 	"worker_unavailable",
 	"worker_busy",

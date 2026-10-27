@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import frappe
 
@@ -201,7 +201,7 @@ def _persist_locked(raw, anchor, profile, unavailable) -> None:
 	"""The locking write itself: one self-contained unit, safe to run again from a
 	fresh snapshot after a lost race (it re-reads ``row`` from scratch and takes
 	its own lock each time)."""
-	record = {"profile": raw, "anchor": anchor, "fetched_at": datetime.now(UTC).isoformat()}
+	record = {"profile": raw, "anchor": anchor, "fetched_at": datetime.now(timezone.utc).isoformat()}
 	if unavailable:
 		record["unavailable"] = True
 	blob = _json(record)

@@ -8,6 +8,7 @@ import frappe
 
 from jarvis.exceptions import PermissionDeniedError
 from jarvis.payment_calendar.banks import validate_bank_accounts
+from jarvis.payment_calendar.compatibility import has_native_field_masks, require_obligation_scope
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.permissions import (
 	incomplete_scope_reasons,
@@ -138,7 +139,7 @@ def policy_fingerprint(scope: dict) -> str:
 				"fieldtype",
 				"options",
 				"permlevel",
-				"mask",
+				*(["mask"] if has_native_field_masks() else []),
 				"ignore_user_permissions",
 			],
 		),
@@ -239,7 +240,7 @@ _MASK_FIELDS = {
 
 
 def _check_masks(reports):
-	if frappe.session.user == "Administrator":
+	if frappe.session.user == "Administrator" or not has_native_field_masks():
 		return
 	for doctype, fields in _MASK_FIELDS.items():
 		if doctype in ("Sales Invoice", "Customer") and not reports["Receivable"]:
@@ -259,6 +260,7 @@ def validate_result_visibility(scope: dict, result: dict) -> None:
 	for side, source in result.get("sources", {}).items():
 		if source is None:
 			continue
+		require_obligation_scope(side)
 		report = require_report(scope["company"], side)
 		rows = source["rows"] + source.get("excluded_rows", [])
 		try:

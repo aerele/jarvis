@@ -8,6 +8,7 @@ import frappe
 from frappe.utils import add_days
 
 from jarvis.payment_calendar.access import ScopeChanged, validate_result_visibility
+from jarvis.payment_calendar.compatibility import has_native_field_masks
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.projection import project_snapshot
 from jarvis.payment_calendar.sources import read_obligations
@@ -281,6 +282,8 @@ class TestPaymentCalendarReconciliation(TestCase):
 	def test_new_classification_fields_cannot_bypass_field_masks(self):
 		from jarvis.payment_calendar.access import _check_masks
 
+		if not has_native_field_masks():
+			self.skipTest("This framework has no native field-mask permissions")
 		user = self.fx.user()
 		fields = {
 			"Purchase Invoice": [

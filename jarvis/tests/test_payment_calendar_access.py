@@ -5,6 +5,7 @@ from unittest import TestCase
 import frappe
 
 from jarvis.payment_calendar import access
+from jarvis.payment_calendar.compatibility import has_native_field_masks
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.scope import normalize_scope
 from jarvis.payment_calendar.settings import update_safety_floor
@@ -133,6 +134,8 @@ class TestPaymentCalendarAccess(TestCase):
 			access.authorize_scope(scope, expected_fingerprint=before["fingerprint"])
 
 	def test_masked_financial_fields_are_not_read_as_zero_or_unknown_dates(self):
+		if not has_native_field_masks():
+			self.skipTest("This framework has no native field-mask permissions")
 		user = self.finance_user()
 		frappe.set_user("Administrator")
 		frappe.get_doc(

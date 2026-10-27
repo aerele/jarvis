@@ -12,13 +12,14 @@ from unittest.mock import patch
 import frappe
 
 from jarvis.payment_calendar import api, jobs, snapshot, store
+from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.scope import normalize_scope
 from jarvis.tests.payment_calendar_fixtures import CalendarFixtures, require_calendar_test_site
 
 
 @contextmanager
 def test_read_view():
-	yield {("get_value", "defaults::__default"), ("get_value", "document_cache::Company::fixture")}
+	yield {source_profile().defaults_cache_hit, ("get_value", "document_cache::Company::fixture")}
 
 
 class TestPaymentCalendarDeliveryScope(TestCase):

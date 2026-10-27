@@ -1,4 +1,4 @@
-"""A thin v16 contract around ERPNext's actual AP/AR term allocation.
+"""A thin versioned contract around ERPNext's actual AP/AR term allocation.
 
 The ordinary report remains unchanged. Open terms come from its output; zero
 terms are captured separately, using pre-build balances and metadata. No ledger
@@ -16,6 +16,7 @@ import frappe
 from frappe.utils import flt, getdate
 
 from jarvis.payment_calendar.books import validate_obligation_books
+from jarvis.payment_calendar.compatibility import require_obligation_scope, source_profile
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.permissions import (
 	incomplete_scope_reasons,
@@ -44,11 +45,9 @@ def _key(row):
 
 
 def _check_contract():
-	import erpnext
 	from erpnext.accounts.report.accounts_receivable.accounts_receivable import ReceivablePayableReport
 
-	if erpnext.__version__.split(".")[0] != "16":
-		raise CalendarSourceUnavailable()
+	source_profile()
 	check_allocation_contract()
 	for name, arguments in {
 		"build_data": ("self",),
@@ -260,6 +259,7 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 		raise frappe.ValidationError("The accounting date and calendar window are required.")
 	report = require_report(company, account_type)
 	_check_contract()
+	require_obligation_scope(account_type)
 	# ERPNext skips its common company/account filters when the Party Type
 	# mapping is absent, and skips its account filter when no account matches.
 	# Incomplete accounting setup must never widen this reader's source scope.
