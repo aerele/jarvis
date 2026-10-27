@@ -110,6 +110,7 @@
 					</button>
 				</div>
 			</div>
+			<p v-if="q.filterError" class="jv-ask-hint">{{ q.filterError }}</p>
 			<!-- Other free-text only for choice questions -->
 			<input
 				v-if="
@@ -158,11 +159,12 @@ import { ref, computed, watch } from "vue";
 import { FormControl, LoadingIndicator, Select } from "frappe-ui";
 import { getDoctypeFields, searchLink } from "@/api";
 import { controlFor } from "@/lib/docFields";
+import { DraftLinkFilterError, resolveLinkFilters } from "@/lib/draftLinkFilters";
 import { vScrollFade } from "@/composables/useScrollFade";
 import { ASK_FIELD_TYPES, isAskReady, askAnswerText, humanizeFieldname } from "@/lib/chatAsk";
 
 const props = defineProps({
-	// A parsed ask: { questions: [{q, type, options, doctype, fieldname?}] } (see parseAsk).
+	// Parsed questions may carry fieldname and child-field parent/parentfield (see parseAsk).
 	spec: { type: Object, required: true },
 	// True while the host would SILENTLY refuse a submit right now (a send
 	// already in flight, a turn's tail still running for this conversation).
@@ -192,15 +194,15 @@ const isForm = computed(
 
 // A `field` question names a DocType field; the card draws that field's real
 // control from its meta (get_doctype_fields, which checks read permission). One
-// request per DocType per card; a failure (error, bad response or a hung
+// request per DocType/parent/table context per card; a failure (error, bad response or a hung
 // request) is dropped from the cache so it can retry, and the question falls
 // back to a text box.
 const FIELDS_TIMEOUT_MS = 8000;
 const fieldsCache = new Map();
-function fetchFields(doctype) {
+function fetchFields(q) {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => reject(new Error("timeout")), FIELDS_TIMEOUT_MS);
-		Promise.resolve(getDoctypeFields(doctype)).then(
+		Promise.resolve(getDoctypeFields(q.doctype, q.parent, q.parentfield)).then(
 			(r) => {
 				clearTimeout(timer);
 				if (!r || r.ok === false || !Array.isArray(r.fields)) {
@@ -214,16 +216,18 @@ function fetchFields(doctype) {
 		);
 	});
 }
-function loadFields(doctype) {
-	if (!fieldsCache.has(doctype)) {
-		const p = fetchFields(doctype);
-		p.catch(() => fieldsCache.delete(doctype));
-		fieldsCache.set(doctype, p);
+function loadFields(q) {
+	const key = JSON.stringify([q.doctype, q.parent || "", q.parentfield || ""]);
+	if (!fieldsCache.has(key)) {
+		const p = fetchFields(q);
+		p.catch(() => fieldsCache.delete(key));
+		fieldsCache.set(key, p);
 	}
-	return fieldsCache.get(doctype);
+	return fieldsCache.get(key);
 }
-const fieldKey = (q) => `${q.doctype}\n${q.fieldname}`;
-const fieldMeta = ref({}); // "doctype\nfieldname" -> "loading" | "failed" | meta field
+const fieldKey = (q) =>
+	JSON.stringify([q.doctype, q.fieldname, q.parent || "", q.parentfield || ""]);
+const fieldMeta = ref({}); // field/context tuple -> "loading" | "failed" | meta field
 watch(
 	() => props.spec,
 	(spec) => {
@@ -231,7 +235,7 @@ watch(
 			const key = fieldKey(q);
 			if (q.type !== "field" || fieldMeta.value[key]) continue;
 			fieldMeta.value = { ...fieldMeta.value, [key]: "loading" };
-			loadFields(q.doctype)
+			loadFields(q)
 				.then((fields) => fields.find((f) => f.fieldname === q.fieldname) || "failed")
 				.catch(() => "failed")
 				.then((m) => (fieldMeta.value = { ...fieldMeta.value, [key]: m }));
@@ -240,7 +244,7 @@ watch(
 	{ immediate: true }
 );
 // The question as drawn: a field question becomes the control its meta calls for.
-function drawn(q) {
+function drawn(q, i) {
 	if (q.type !== "field") return q;
 	const m = fieldMeta.value[fieldKey(q)];
 	const base = {
@@ -250,13 +254,23 @@ function drawn(q) {
 	};
 	if (m === "loading" || !m) return { ...base, type: "loading" };
 	if (m === "failed") return { ...base, type: "text" };
+	if (link.value[i]?.filterError)
+		return { ...base, type: "text", filterError: link.value[i].filterError };
 	const [control, opts] = controlFor(m.fieldtype, m.options);
 	if (control === "select") {
 		const options = opts.filter(Boolean);
 		return options.length ? { ...base, type: "select", options } : { ...base, type: "text" };
 	}
 	if (control === "link") {
-		return opts ? { ...base, type: "link", doctype: opts } : { ...base, type: "text" };
+		return opts
+			? {
+					...base,
+					type: "link",
+					doctype: opts,
+					linkField: m,
+					referenceDoctype: q.parent || q.doctype,
+			  }
+			: { ...base, type: "text" };
 	}
 	if (control === "check") return { ...base, type: "yesno", options: [] };
 	if (control === "date" || control === "datetime") return { ...base, type: control };
@@ -265,21 +279,53 @@ function drawn(q) {
 }
 const questions = computed(() => props.spec.questions.map(drawn));
 const ready = computed(() => isAskReady({ questions: questions.value }, sel.value, other.value));
+const linkSeq = {};
+watch(
+	() => props.spec.questions.map((q) => JSON.stringify([q.type, fieldKey(q)])),
+	(keys, previous) => {
+		keys.forEach((key, i) => {
+			if (key === previous[i]) return;
+			linkSeq[i] = (linkSeq[i] || 0) + 1;
+			sel.value = { ...sel.value, [i]: "" };
+			link.value = { ...link.value, [i]: {} };
+		});
+	}
+);
 
 async function onLinkSearch(i, doctype, val) {
-	link.value = { ...link.value, [i]: { ...(link.value[i] || {}), q: val, open: true } };
+	if (answered.value) return;
+	const seq = (linkSeq[i] = (linkSeq[i] || 0) + 1);
+	const q = questions.value[i];
+	if (val !== sel.value[i]) sel.value = { ...sel.value, [i]: "" };
+	link.value = { ...link.value, [i]: { q: val, items: [], open: true } };
 	if (!doctype) return;
 	try {
-		const r = await searchLink(doctype, val);
+		const filters = q.linkField ? resolveLinkFilters(q.linkField, {}, null) : [];
+		// Preserve the existing lookup for a parentless field with no constraints.
+		const r =
+			q.linkField && (q.parent || filters.length)
+				? await searchLink(doctype, val, 8, q.referenceDoctype, q.fieldname, filters)
+				: await searchLink(doctype, val);
+		if (seq !== linkSeq[i]) return;
 		const items = (r || [])
 			.map((x) => ({ value: x.value, label: x.description || "" }))
 			.slice(0, 8);
 		link.value = { ...link.value, [i]: { q: val, items, open: true } };
 	} catch (e) {
-		link.value = { ...link.value, [i]: { q: val, items: [], open: true } };
+		if (seq !== linkSeq[i]) return;
+		link.value = {
+			...link.value,
+			[i]: {
+				q: val,
+				items: [],
+				open: true,
+				...(e instanceof DraftLinkFilterError ? { filterError: e.message } : {}),
+			},
+		};
 	}
 }
 function pickLink(i, item) {
+	linkSeq[i] = (linkSeq[i] || 0) + 1;
 	sel.value = { ...sel.value, [i]: item.value };
 	link.value = { ...link.value, [i]: { q: item.value, items: [], open: false } };
 }
@@ -287,6 +333,7 @@ function pickLink(i, item) {
 // the screen / tabbing away). @mousedown.prevent on the result buttons lets a
 // pick land before the blur fires.
 function closeLink(i) {
+	linkSeq[i] = (linkSeq[i] || 0) + 1;
 	const cur = link.value[i];
 	if (cur && cur.open) link.value = { ...link.value, [i]: { ...cur, open: false } };
 }

@@ -519,8 +519,12 @@ export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkField
 
 // Field metadata for the record-edit action card: powers Link/Select/Date
 // controls (returns {ok, doctype, fields:[{fieldname,label,fieldtype,options}]}).
-export const getDoctypeFields = (doctype) =>
-	call("jarvis.chat.api.get_doctype_fields", { doctype });
+export const getDoctypeFields = (doctype, parentDoctype, parentfield) =>
+	call("jarvis.chat.api.get_doctype_fields", {
+		doctype,
+		...(parentDoctype ? { parent_doctype: parentDoctype } : {}),
+		...(parentfield ? { parentfield } : {}),
+	});
 
 // --- LLM pool / models config (System-Manager only, gated server-side) ---
 export const getLlmConfig = () => call("jarvis.onboarding.get_llm_config");

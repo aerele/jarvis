@@ -5289,24 +5289,55 @@ _NON_EDIT_FIELDTYPES = {
 
 
 @frappe.whitelist(methods=["POST"])
-def get_doctype_fields(doctype: str) -> dict:
-	"""Field metadata (fieldtype + options) for a DocType, so the chat SPA can
-	render the record-edit card with proper controls (Link → searchable picker,
-	Select → dropdown, Date → date input) instead of plain text boxes.
+def get_doctype_fields(
+	doctype: str, parent_doctype: str | None = None, parentfield: str | None = None
+) -> dict:
+	"""Readable field metadata for the chat's field-backed clarifying questions.
+	Child fields require their real parent/table context, including for admins.
 
-	Returns only editable, data-bearing fields (layout/display fieldtypes are
+	Returns data-bearing fields (layout/display fieldtypes are
 	dropped). Read-only structural info — gated on the caller being able to read
 	the DocType so it can't be used to enumerate arbitrary schemas."""
 	require_jarvis_access()
 	doctype = (doctype or "").strip()
 	if not doctype or not frappe.db.exists("DocType", doctype):
 		return {"ok": False, "reason": _("unknown doctype"), "fields": []}
-	if not frappe.has_permission(doctype, "read"):
-		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	meta = frappe.get_meta(doctype)
+	parent_doctype, parentfield = (parent_doctype or "").strip(), (parentfield or "").strip()
+	if parent_doctype or parentfield:
+		if not meta.istable or not parent_doctype or not frappe.db.exists("DocType", parent_doctype):
+			return {"ok": False, "reason": _("invalid parent"), "fields": []}
+		parent_meta = frappe.get_meta(parent_doctype)
+		tables = [
+			df
+			for df in parent_meta.get_table_fields()
+			if df.options == doctype and (not parentfield or df.fieldname == parentfield)
+		]
+		if parent_meta.istable or len(tables) != 1:
+			return {"ok": False, "reason": _("invalid parent"), "fields": []}
+		parentfield = tables[0].fieldname
+		if (
+			frappe.session.user != "Administrator"
+			and tables[0].permlevel
+			and tables[0].permlevel not in parent_meta.get_permlevel_access(permission_type="read")
+		):
+			frappe.throw(_("You don't have access to this table."), frappe.PermissionError)
+	if not frappe.has_permission(doctype, "read", parent_doctype=parent_doctype or None):
+		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
+	if meta.istable and not parent_doctype:
+		return {"ok": False, "reason": _("parent required"), "fields": []}
+	from jarvis.chat.link_filters import draft_link_query_filters
+
+	levels = (
+		None
+		if frappe.session.user == "Administrator"
+		else set(meta.get_permlevel_access(permission_type="read", parenttype=parent_doctype or None))
+	)
 	fields = []
 	for df in meta.fields:
 		if df.fieldtype in _NON_EDIT_FIELDTYPES or not df.fieldname:
+			continue
+		if levels is not None and df.permlevel and df.permlevel not in levels:
 			continue
 		fields.append(
 			{
@@ -5315,6 +5346,10 @@ def get_doctype_fields(doctype: str) -> dict:
 				"fieldtype": df.fieldtype,
 				"options": df.options or "",
 				"reqd": int(df.reqd or 0),
+				"link_filters": df.get("link_filters") or "",
+				"link_query_filters": draft_link_query_filters(
+					doctype, df, parent_doctype or None, parentfield or None
+				),
 			}
 		)
 	return {"ok": True, "doctype": doctype, "fields": fields}
