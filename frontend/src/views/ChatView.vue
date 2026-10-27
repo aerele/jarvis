@@ -4494,7 +4494,14 @@ import { onLlmSwitch } from "@/llmSwitch";
 import { parseAsk } from "@/lib/chatAsk";
 import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
-import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
+import {
+	parseGoto,
+	gotoFiredKey,
+	parseFiredStamp,
+	claimGotoFire,
+	builderSeed,
+	requestBefore,
+} from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
 import { markMissing, panelField as _panelField } from "@/lib/docFields";
@@ -7062,7 +7069,11 @@ function gotoOf(m) {
 // navigates - the prefill slot is left alone so the claimant's own payload
 // (set moments earlier, in the same tick or the one before) is what the
 // single resulting mount actually consumes.
+//
+// The builder is sent the restatement with the user's own words under it
+// (builderSeed), so a detail the restatement dropped still reaches the build.
 function gotoDashboards(prompt, messageId) {
+	const text = builderSeed(prompt, requestBefore(messages.value, messageId));
 	const key = messageId ? gotoFiredKey(messageId) : null;
 	const claim = key ? claimGotoFire(localStorage.getItem(key)) : { build: true };
 	if (claim.build) {
@@ -7085,9 +7096,9 @@ function gotoDashboards(prompt, messageId) {
 				.slice(50)
 				.forEach(([k]) => localStorage.removeItem(k));
 		}
-		setDashboardPrefill({ text: prompt, autoSend: true, messageId });
+		setDashboardPrefill({ text, autoSend: true, messageId });
 	} else if (claim.conv) {
-		setDashboardPrefill({ text: prompt, resume: true, conv: claim.conv, messageId });
+		setDashboardPrefill({ text, resume: true, conv: claim.conv, messageId });
 	}
 	router.push("/dashboards");
 }
