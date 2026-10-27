@@ -19,6 +19,7 @@ import uuid
 import websocket
 from websocket import create_connection
 
+from jarvis.chat import site_pin
 from jarvis.exceptions import AgentUnreachableError
 
 PING_TIMEOUT_SECONDS = 10
@@ -30,6 +31,7 @@ def ping(gateway_url: str, gateway_token: str) -> None:
 	Raises ``AgentUnreachableError`` if the socket can't open or the
 	handshake is rejected.
 	"""
+	site_pin.assert_not_copy()  # raw-socket door: refuse on a copied site
 	try:
 		ws = create_connection(gateway_url, timeout=PING_TIMEOUT_SECONDS)
 	except (websocket.WebSocketException, OSError) as e:
