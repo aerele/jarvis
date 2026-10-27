@@ -43,7 +43,7 @@ export function deliveryDiagnostic(status) {
 			// state), so a same-request retry would mismatch again: the way out is
 			// a new send from the composer.
 			request_mismatch:
-				"This request was not sent: its delivery ID already belongs to a different message. Dismiss this and send the message again from the composer.",
+				"This request was not sent: its delivery ID already belongs to a different message. Copy the text, then dismiss this and send it again from the composer.",
 			// check_delivery's own read failed server-side ({delivery: "unknown"}
 			// with no receipt_status): the receipt may exist, it just could not be read.
 			unknown:
