@@ -89,7 +89,7 @@ class TestRoleProfiles(FrappeTestCase):
 
 	def test_standard_tools_allow_excludes_drops_keeps_features(self):
 		allow = set(role_profiles.standard_tools_allow())
-		self.assertEqual(len(allow), 71)
+		self.assertEqual(len(allow), 72)
 		for kept in (
 			"exec",
 			"read",
@@ -127,16 +127,16 @@ class TestRoleProfiles(FrappeTestCase):
 		):
 			self.assertNotIn(dropped, allow)
 
-	def test_tool_universe_is_100(self):
-		# standard_tools_allow() (71) + STANDARD_DROP_TOOLS (29) must
+	def test_tool_universe_is_101(self):
+		# standard_tools_allow() (72) + STANDARD_DROP_TOOLS (29) must
 		# reconstruct the evidence-captured 94-tool universe plus the two MCP
-		# connector tools, the two per-user memory tools, get_comments and schedule_run added after (100),
+		# connector tools, the two per-user memory tools, get_comments and schedule_run and landed-cost preview added after (101),
 		# with no overlap and no gap.
 		allow = set(role_profiles.standard_tools_allow())
 		drop = set(role_profiles.STANDARD_DROP_TOOLS)
 		self.assertEqual(len(drop), 29)
 		self.assertEqual(allow & drop, set())
-		self.assertEqual(len(allow | drop), 100)
+		self.assertEqual(len(allow | drop), 101)
 
 	def test_shared_core_membership(self):
 		shared = role_profiles.SHARED_CORE_SKILLS
@@ -1004,7 +1004,7 @@ class TestSessionProfilePick(FrappeTestCase):
 		row = frappe.get_doc(SESSION, {"session_key": key})
 		self.assertEqual(row.profile_agent_id, "role-hr")
 		self.assertEqual(row.profile_tier, "standard")
-		self.assertEqual(row.profile_n_tools, 71)
+		self.assertEqual(row.profile_n_tools, 72)
 
 	def test_flag_off_uses_legacy_create_session_path(self):
 		settings = self._fake_settings(enable_role_profiles=False)

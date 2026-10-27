@@ -13,7 +13,7 @@ from jarvis.tools.create_doc import build_doc, create_doc
 from jarvis.tools.preview_doc import preview_doc
 
 
-class TestLandedCostDefaults(FrappeTestCase):
+class LandedCostFixtures(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
@@ -178,6 +178,8 @@ class TestLandedCostDefaults(FrappeTestCase):
 			"vendor_invoices": rows,
 		}
 
+
+class TestLandedCostDefaults(LandedCostFixtures):
 	def test_preview_and_save_fetch_company_currency_costs(self):
 		frappe.set_user("Administrator")
 		invoices = [self.invoice, self.make_invoice(80), self.make_invoice(2, "USD", 83.4)]
