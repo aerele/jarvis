@@ -17,6 +17,8 @@ const {
 	regateOnRouteChange,
 	forgetReady,
 	replacedBanner,
+	copyBanner,
+	copyNoticeOf,
 	subscriptionExpiredBanner,
 	hasReconnectIntent,
 	landingStep,
@@ -584,6 +586,29 @@ describe("replaced-site banner", () => {
 		expect(replacedBanner({})).toBeNull();
 		expect(replacedBanner(null)).toBeNull();
 		expect(replacedBanner({ replaced: false })).toBeNull();
+	});
+});
+
+describe("copied-site banner", () => {
+	it("says the site is a copy and names the original", () => {
+		const b = copyBanner({ paired_site: "erp.example.com" });
+		expect(b.tone).toBe("warning");
+		expect(b.title).toBe("This site is a copy");
+		expect(b.message).toBe(
+			"This site is a copy of erp.example.com. Jarvis is turned off here. Contact support to use Jarvis on this site."
+		);
+	});
+
+	it("stays silent without a notice", () => {
+		expect(copyBanner(null)).toBeNull();
+	});
+
+	it("reads the notice off the readiness verdict", async () => {
+		verdict({ ready: false, reason: "site_is_copy", copy_notice: { paired_site: "erp.example.com" } });
+		expect(await copyNoticeOf()).toEqual({ paired_site: "erp.example.com" });
+		forgetReady();
+		verdict({ ready: false, reason: "signup" });
+		expect(await copyNoticeOf()).toBeNull();
 	});
 });
 

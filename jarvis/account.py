@@ -780,7 +780,21 @@ def is_ready_for_chat() -> dict:
 
 	Fails safe: any exception probing worker health leaves the field False
 	rather than raising or affecting the verdict above.
+	- ``"site_is_copy"`` - this site is not the one Jarvis was first connected from
+	  (a restored copy). Checked FIRST, before anything asks admin, which refuses a
+	  copy. Carries ``copy_notice: {paired_site}``.
 	"""
+	from jarvis.chat import site_pin
+
+	pin = site_pin.status()
+	if pin["blocked"]:
+		return {
+			"ready": False,
+			"reason": "site_is_copy",
+			"detail": site_pin.copy_message(pin["paired_site"]),
+			"copy_notice": {"paired_site": pin["paired_site"]},
+			"billing_notice": {},
+		}
 	verdict = _ready_verdict()
 	if verdict.get("ready"):
 		from jarvis.chat.runtime_profile import RuntimeProfileError, ensure_ready
