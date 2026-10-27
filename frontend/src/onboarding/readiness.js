@@ -182,6 +182,15 @@ export async function replacedNoticeOf() {
 	return r.replaced_notice || { replaced: true };
 }
 
+// This site is a restored copy of another one (jarvis.chat.site_pin). Like
+// `site_replaced` it is deliberately absent from NOT_ONBOARDED_REASONS: the site
+// is onboarded, it just must not drive the original's agent. Null unless it applies.
+export async function copyNoticeOf() {
+	const r = await checkReady();
+	if (!r || r.reason !== "site_is_copy") return null;
+	return r.copy_notice || null;
+}
+
 // Where that banner's action sends the customer, and how the wizard recognises it.
 // One constant for both ends: without the flag the wizard resumes its own path,
 // and a site whose key was rotated away dead-ends at "could not sign in".
@@ -226,6 +235,17 @@ export function replacedBanner(notice) {
 			? `Your Jarvis account is now connected to ${where}. Chat here stopped working when it moved.`
 			: "Your Jarvis account was reconnected on another site. Chat here stopped working when it moved.",
 		action: "Reconnect this site instead",
+	};
+}
+
+// Same sentence as jarvis.chat.site_pin.copy_message. No action: only support can
+// move the pairing, so there is nothing to click.
+export function copyBanner(notice) {
+	if (!notice || !notice.paired_site) return null;
+	return {
+		tone: "warning",
+		title: "This site is a copy",
+		message: `This site is a copy of ${notice.paired_site}. Jarvis is turned off here. Contact support to use Jarvis on this site.`,
 	};
 }
 

@@ -2366,8 +2366,16 @@
 				<!-- The account was reconnected on another site, so this one lost the
 					 workspace. Leads the chain: billing/suspension wording is
 					 meaningless once the account is somewhere else. -->
+				<!-- A restored copy of another site: Jarvis is off here. Heads the chain. -->
 				<Banner
-					v-if="replacedAlert"
+					v-if="copyAlert"
+					type="warning"
+					:title="copyAlert.title"
+					:message="copyAlert.message"
+					style="margin-bottom: 10px"
+				/>
+				<Banner
+					v-else-if="replacedAlert"
 					type="warning"
 					:title="replacedAlert.title"
 					:message="replacedAlert.message"
@@ -4779,6 +4787,8 @@ import {
 	billingNoticeOf,
 	replacedNoticeOf,
 	replacedBanner,
+	copyNoticeOf,
+	copyBanner,
 	RECONNECT_INTENT_URL,
 } from "@/onboarding/readiness.js";
 import { useShellStore } from "@/stores/shell";
@@ -5089,6 +5099,9 @@ const billingNotice = ref({});
 // Set by the readiness poll when this site's account moved elsewhere.
 const replacedNotice = ref({});
 const replacedAlert = computed(() => replacedBanner(replacedNotice.value));
+// Set by the readiness poll when this site is a restored copy of another one.
+const copyNotice = ref(null);
+const copyAlert = computed(() => copyBanner(copyNotice.value));
 function goReconnect() {
 	// The wizard owns the reconnect flow; land on it rather than duplicating the
 	// code-entry screen here. The flag matters: without it the wizard resumes down
@@ -5137,6 +5150,7 @@ const hasUrgentAlert = computed(
 			// release-nudge soft banner yields to the "back shortly" banner.
 			(
 				holdActive.value ||
+				copyAlert.value ||
 				replacedAlert.value ||
 				billingAlert.value ||
 				suspendedNotice.value ||
@@ -13563,6 +13577,9 @@ onMounted(async () => {
 	// this page load - no extra round-trip. Never blocks the mount.
 	replacedNoticeOf()
 		.then((n) => (replacedNotice.value = n || {}))
+		.catch(() => {});
+	copyNoticeOf()
+		.then((n) => (copyNotice.value = n || null))
 		.catch(() => {});
 	billingNoticeOf()
 		.then((n) => {
