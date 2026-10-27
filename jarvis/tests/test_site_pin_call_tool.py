@@ -28,9 +28,15 @@ class TestCallToolPinsSite(FrappeTestCase):
 		frappe.db.set_single_value("Jarvis Settings", "paired_site", "", update_modified=False)
 		# The hotfix call_tool resolves the user from this row; the test
 		# rollback removes it, so nothing is committed.
+		frappe.db.delete("Jarvis Chat Session", {"session_key": SESSION_KEY})
 		frappe.get_doc(
 			{"doctype": "Jarvis Chat Session", "session_key": SESSION_KEY, "user": "Administrator"}
 		).insert(ignore_permissions=True)
+
+	def tearDown(self):
+		# call_tool can commit, so rollback alone may leave the row behind.
+		frappe.db.delete("Jarvis Chat Session", {"session_key": SESSION_KEY})
+		super().tearDown()
 
 	@contextlib.contextmanager
 	def _plugin_request(self, *, verified=True, extra_headers=None):
