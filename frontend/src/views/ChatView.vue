@@ -4462,6 +4462,7 @@ import {
 	observeDelivery,
 	deliveryFailureCopy,
 	deliveryTimeoutError,
+	DELIVERY_TOAST,
 } from "@/lib/sendDelivery.js";
 // How long a send, a same-request retry, and a delivery check wait before the
 // bubble turns "not confirmed" and says so. The late answer still lands.
@@ -11178,7 +11179,7 @@ async function send(textArg, resendAck) {
 			messages.value = [...messages.value, _optBubble];
 		sending.value = false;
 		waiting.value = false;
-		notify(_optBubble.deliveryNote, { type: "info" });
+		notify(DELIVERY_TOAST, { type: "info" });
 	}
 }
 

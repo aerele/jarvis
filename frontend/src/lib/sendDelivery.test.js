@@ -100,22 +100,26 @@ test("every transport failure names its cause, the recovery step and a support r
 		[Object.assign(new Error("x"), { status: 429 }), /too many requests/],
 		[Object.assign(new Error("x"), { status: 413 }), /too large/],
 		[
-			Object.assign(new Error("x"), { status: 500, exc_type: "ValidationError" }),
-			/hit an error .*\(HTTP 500, ValidationError\)/,
+			Object.assign(new Error("x"), { status: 500, exc_type: "OperationalError" }),
+			/hit an error .*\(HTTP 500\)\./,
 		],
 		[
 			Object.assign(new Error("x"), { status: 417, exc_type: "ValidationError" }),
-			/refused this request \(HTTP 417/,
+			/refused this request \(HTTP 417\)/,
 		],
+		// A TypeError that is NOT the browser's fetch failure is an app bug, and
+		// must not send the customer chasing their network.
+		[new TypeError("Cannot read properties of undefined (reading 'x')"), /app hit an error/],
 		[
 			Object.assign(new Error("x"), { exc_type: "TimestampMismatchError" }),
-			/failed \(TimestampMismatchError\)/,
+			/failed before the server answered/,
 		],
 		[new Error("x"), /failed before the server answered/],
 	];
 	for (const [error, cause] of cases) {
 		const copy = deliveryFailureCopy(error, id);
 		assert.match(copy, cause, String(error?.message || error?.status));
+		assert.doesNotMatch(copy, /OperationalError|ValidationError|TypeError/, "no class names");
 		assert.match(copy, /Check delivery before sending it again/);
 		assert.match(copy, /Reference 89abcdef\.$/);
 		assert.doesNotMatch(
@@ -162,10 +166,21 @@ test("an uncertain receipt keeps its own diagnostic and gains the reference", as
 		thrown = e;
 	}
 	assert.match(thrown.message, /delivery ID already belongs to a different message/);
+	// Recovery keeps the same ID, so the copy must not promise a fresh-ID retry.
+	assert.doesNotMatch(thrown.message, /fresh ID|Retry/);
+	assert.match(thrown.message, /send the message again from the composer/);
 	assert.match(
 		deliveryFailureCopy(thrown, "abcdefgh12345678"),
 		/different message.* Reference 12345678\.$/,
 	);
+	// A reason that is not request_mismatch never collides with a receipt key.
+	assert.throws(
+		() => settledSendResult({ delivery: "unknown", reason: "unavailable" }),
+		/could not read the delivery receipt/,
+	);
+	// Sign-in, CSRF and access notes carry the reference too.
+	for (const e of [{ status: 401 }, { exc_type: "CSRFTokenError" }, { status: 403 }])
+		assert.match(deliveryFailureCopy(e, "abcdefgh12345678"), /Reference 12345678\.$/);
 	// check_delivery's own read failing is told apart from "no receipt".
 	assert.throws(
 		() => settledSendResult({ delivery: "unknown" }),
