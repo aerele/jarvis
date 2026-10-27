@@ -60,6 +60,18 @@ def set_jarvis_boot(bootinfo):
 		bootinfo.jarvis_onboarded = True  # fail-safe: never nag on a boot error
 		bootinfo.jarvis_ready_reason = ""
 
+	# Copy of another site: the desk banner shows the block message instead of the
+	# onboarding nudge. Its own try/except, like its siblings.
+	try:
+		from jarvis.chat import site_pin
+
+		pin = site_pin.status()
+		bootinfo.jarvis_pairing_blocked = bool(pin["blocked"])
+		bootinfo.jarvis_paired_site = pin["paired_site"]
+	except Exception:
+		bootinfo.jarvis_pairing_blocked = False  # fail-safe: never claim a block on a boot error
+		bootinfo.jarvis_paired_site = ""
+
 	# has_been_chat_ready() is its own fail-safe (returns False on error) and
 	# reads the same lightweight raw-settings fields is_ready_for_chat's own
 	# gates already read - a single extra SQL select, never a second admin

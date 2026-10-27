@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
@@ -80,3 +82,14 @@ class TestSitePin(FrappeTestCase):
 		st = site_pin.clear_pairing_block()
 		self.assertFalse(st["blocked"])
 		self.assertEqual(st["paired_site"], "")
+
+	def test_is_ready_for_chat_reports_site_is_copy(self):
+		import jarvis.account
+
+		_set(paired_site="erp.example.com")
+		with patch("jarvis.admin_client.get_connection") as get_connection:
+			out = jarvis.account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "site_is_copy")
+		self.assertEqual(out["copy_notice"]["paired_site"], "erp.example.com")
+		get_connection.assert_not_called()
