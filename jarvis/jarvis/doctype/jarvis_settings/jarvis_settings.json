@@ -647,6 +647,7 @@
   {
    "fieldname": "paired_site",
    "fieldtype": "Data",
+   "permlevel": 1,
    "hidden": 1,
    "label": "Paired Site",
    "read_only": 1,
@@ -655,6 +656,7 @@
   {
    "fieldname": "pairing_blocked",
    "fieldtype": "Check",
+   "permlevel": 1,
    "hidden": 1,
    "label": "Pairing Blocked",
    "read_only": 1
@@ -662,6 +664,7 @@
   {
    "fieldname": "pairing_blocked_reason",
    "fieldtype": "Small Text",
+   "permlevel": 1,
    "hidden": 1,
    "label": "Pairing Blocked Reason",
    "read_only": 1

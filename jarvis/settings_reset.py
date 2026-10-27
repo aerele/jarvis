@@ -61,6 +61,10 @@ CONNECTION = ResetSpec(
 		# (review plan 04 P0-5). A reset re-points this bench at a fresh tenancy,
 		# so the previous handle must not linger and trip the identity check.
 		"tenant_authority_handle",
+		# The site pin names the PREVIOUS tenancy's site. The reset also wipes the
+		# admin credentials, so dropping the pin cannot unlock a copy.
+		"paired_site",
+		"pairing_blocked_reason",
 		"chat_device_id",
 		"chat_device_public_key",
 		# Per-push statuses that otherwise read as "already sent" on a fresh site
@@ -144,6 +148,7 @@ CONNECTION = ResetSpec(
 		# connection is accepted on its own terms, not rejected as "older" than
 		# the previous tenancy's generation (review plan 04 P0-5).
 		"tenant_authority_generation",
+		"pairing_blocked",
 		# enable_role_profiles is now an admin-owned mirror (spec B4), not
 		# operator intent - it must not carry the PREVIOUS tenancy's admin
 		# decision into a fresh one with no config pulled yet.
