@@ -265,6 +265,9 @@ class AdminUnreachableError(JarvisError):
 	"""HTTPS call to jarvis_admin failed (network, timeout, 5xx, non-JSON)."""
 
 
+SITE_IS_COPY_CODE = "site_is_copy"
+
+
 class SiteIsCopyError(AgentUnreachableError):
 	"""This site is a restored copy of the site its agent was paired with, so
 	Jarvis refuses to connect to that agent from here. Built from the pinned
@@ -273,7 +276,8 @@ class SiteIsCopyError(AgentUnreachableError):
 	def __init__(self, paired_site: str):
 		from jarvis.chat.site_pin import copy_message
 
-		super().__init__(copy_message(paired_site))
+		# Distinct code: retry loops (pump, collaboration) must not retry a copy.
+		super().__init__(copy_message(paired_site), code=SITE_IS_COPY_CODE)
 		self.paired_site = paired_site
 
 

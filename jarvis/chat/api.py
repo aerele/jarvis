@@ -1698,6 +1698,10 @@ def _send_rejection(user: str, reason: str) -> dict:
 	monthly) fires the same code but leaves the window out, and the SPA keeps
 	its period-neutral copy."""
 	out = {"ok": False, "reason": reason}
+	if reason == "site_is_copy":
+		from jarvis.chat import site_pin
+
+		out["message"] = site_pin.copy_message(site_pin.status()["paired_site"])
 	if reason == "usage_limit":
 		period = blocking_limit_period(user)
 		if period:

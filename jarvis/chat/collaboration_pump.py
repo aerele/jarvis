@@ -11,7 +11,7 @@ from jarvis.chat.collaboration_bindings import require_live
 from jarvis.chat.collaboration_context import require_prompt_budget
 from jarvis.chat.collaboration_runtime import RuntimePolicy, verify_response
 from jarvis.chat.collaboration_turn import binding_for_run
-from jarvis.exceptions import AgentUnreachableError
+from jarvis.exceptions import SITE_IS_COPY_CODE, AgentUnreachableError
 
 
 def record_terminal(ctx, rs, kind, payload):
@@ -178,7 +178,7 @@ def dispatch_one(ctx, turn):
 			ctx,
 			turn,
 			binding,
-			retry_allowed=isinstance(exc, AgentUnreachableError) and exc.code != "INVALID_REQUEST",
+			retry_allowed=isinstance(exc, AgentUnreachableError) and exc.code not in ("INVALID_REQUEST", SITE_IS_COPY_CODE),
 		)
 
 	rs = pump._RunState(

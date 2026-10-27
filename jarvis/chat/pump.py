@@ -83,7 +83,7 @@ from jarvis.chat import turn_state as ts
 from jarvis.chat.agent_client import YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.collaboration_ownership import executor_clause, legacy_clause
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
-from jarvis.exceptions import AgentUnreachableError
+from jarvis.exceptions import AgentUnreachableError, SiteIsCopyError
 
 TURN = "Jarvis Chat Turn"
 PUMP = "Jarvis Relay Pump"
@@ -1842,13 +1842,18 @@ def run_pump_hop(
 
 	try:
 		ctx.mux = deps.make_mux(relay_target_id, epoch)
-	except Exception:
+	except Exception as mux_exc:
 		# Could not build the transport this hop. CDX-1: do NOT exit successor-less —
 		# release the lease (epoch-guarded) and enqueue a bounded-backoff successor if
 		# the shard still has live work, so a make_mux failure cannot strand a turn
 		# until the watchdog. Do not crash the job.
 		frappe.log_error(title="pump.make_mux", message=frappe.get_traceback())
-		_schedule_successor_on_exit(ctx, transport_retry=transport_retry)
+		# A copied site never reaches the agent: retrying only loops. Spend the
+		# budget at once so the turns park and the lease is released without a successor.
+		copy_site = isinstance(mux_exc, SiteIsCopyError)
+		_schedule_successor_on_exit(
+			ctx, transport_retry=TRANSPORT_RETRY_MAX if copy_site else transport_retry
+		)
 		return {"acquired": True, "exit": "no_transport", "epoch": epoch}
 
 	# C1 (WP-2 Stage B): watch the cross-process accept wake bus on its own thread so
