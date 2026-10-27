@@ -104,10 +104,10 @@
 					:aria-labelledby="s.id + '-title'"
 				>
 					<div class="flex flex-wrap items-center gap-2 pt-3">
-						<h3 :id="s.id + '-title'" class="min-w-0 flex-1">
+						<h3 :id="s.id + '-title'" class="min-w-0 flex-1 basis-48 shrink-0">
 							<button
 								type="button"
-								class="flex items-center gap-1.5 text-left"
+								class="flex max-w-full items-center gap-1.5 text-left"
 								:aria-expanded="open[s.key] === false ? 'false' : 'true'"
 								:aria-controls="s.id + '-body'"
 								@click="open[s.key] = open[s.key] === false"
@@ -119,10 +119,13 @@
 									class="size-3.5 shrink-0 text-ink-gray-5"
 									aria-hidden="true"
 								/>
-								<span class="text-base font-medium text-ink-gray-9">{{
-									s.label
+								<span
+									class="min-w-0 break-words text-base font-medium text-ink-gray-9"
+									>{{ s.label }}</span
+								>
+								<span class="shrink-0 text-sm text-ink-gray-5">{{
+									s.records.length
 								}}</span>
-								<span class="text-sm text-ink-gray-5">{{ s.records.length }}</span>
 							</button>
 						</h3>
 						<span v-if="s.attention" class="text-sm text-ink-amber-3">{{
