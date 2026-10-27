@@ -20,6 +20,7 @@ NOT_RENAMABLE = (
 	"Jarvis Export Job",
 	"Jarvis Chat Send Request",
 	"Jarvis User Settings",
+	"Jarvis Payment Calendar Settings",
 	"Jarvis Chat Message",
 	"Jarvis Connector",
 	"Jarvis Agent Installation",
