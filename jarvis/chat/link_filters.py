@@ -9,6 +9,19 @@ Configured DocField filters travel separately and retain Desk's override order.
 def draft_link_query_filters(doctype, df, parent_doctype=None, parentfield=None):
 	if df.fieldtype != "Link":
 		return []
+	# ERPNext sales_common.js: Sales Invoice's items/item_code query.
+	if (
+		doctype == "Sales Invoice Item"
+		and parent_doctype == "Sales Invoice"
+		and parentfield == "items"
+		and df.fieldname == "item_code"
+		and df.options == "Item"
+	):
+		return [
+			["Item", "is_sales_item", "=", 1],
+			["Item", "disabled", "=", 0],
+			["Item", "has_variants", "=", 0],
+		]
 	# erpnext/accounts/doctype/purchase_invoice/purchase_invoice.js: credit_to.get_query
 	if doctype == "Purchase Invoice" and df.fieldname == "credit_to" and df.options == "Account":
 		return [
