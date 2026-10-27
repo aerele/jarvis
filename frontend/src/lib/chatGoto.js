@@ -35,6 +35,64 @@ export function parseGoto(content) {
 	}
 }
 
+// ── the builder's first message ──────────────────────────────────────────────
+//
+// The goto `prompt` is the agent's restatement of the request, and a
+// restatement can drop a detail the user gave: asked for "the connecting lanes
+// diagram", the builder got per-item coverage and built no lanes
+// (Aerele-RnD/jarvis-admin-v2#740, use case 3). So the user's own words ride
+// along under the restatement: the last few user turns, because the ask is not
+// always the latest one (a "yes" to "shall I build it?" carries no detail).
+// Capped, keeping the newest words, so a pasted wall of text cannot crowd the
+// builder's context; left out when the restatement already quotes them whole.
+
+export const REQUEST_WORDS_MAX = 2000;
+export const REQUEST_TURNS_MAX = 3;
+
+const MACRO_ROW = "▶ Running macro";
+const ATTACHMENT_LINE = /^📎 .*$/gm;
+
+/**
+ * The user's words a goto answers: up to REQUEST_TURNS_MAX user turns before it,
+ * oldest first, stopping at an earlier hand-off. Macro rows and the "📎 file"
+ * marker are not the user's words.
+ * @param {Array<{name: string, role: string, content: string}>} messages
+ * @param {string} messageId the assistant message carrying the goto block
+ * @returns {string} "" when the message is not in the list or no user words precede it
+ */
+export function requestBefore(messages, messageId) {
+	const list = Array.isArray(messages) ? messages : [];
+	const at = list.findIndex((m) => m && m.name === messageId);
+	const turns = [];
+	for (let i = at - 1; i >= 0 && turns.length < REQUEST_TURNS_MAX; i--) {
+		const m = list[i];
+		if (!m) continue;
+		if (m.role === "assistant" && parseGoto(m.content)) break;
+		if (m.role !== "user" || !m.content || m.content.startsWith(MACRO_ROW)) continue;
+		const words = String(m.content).replace(ATTACHMENT_LINE, "").trim();
+		if (words) turns.unshift(words);
+	}
+	return turns.join("\n");
+}
+
+/**
+ * What the builder is sent: the restatement, then the user's own words.
+ * @param {string} prompt the goto block's restatement
+ * @param {string} request the user's words (requestBefore)
+ * @returns {string}
+ */
+export function builderSeed(prompt, request) {
+	const brief = String(prompt || "").trim();
+	// Code points, not UTF-16 units, so the cut never splits an emoji.
+	const chars = Array.from(String(request || "").trim());
+	const words =
+		chars.length > REQUEST_WORDS_MAX
+			? "…" + chars.slice(-REQUEST_WORDS_MAX).join("")
+			: chars.join("");
+	if (!words || brief.includes(words)) return brief;
+	return `${brief}\n\nIn my own words: ${words}`;
+}
+
 // ── the "fired" stamp (jarvis#912) ───────────────────────────────────────────
 //
 // One ```jarvis-goto message gets one durable localStorage stamp, keyed by
