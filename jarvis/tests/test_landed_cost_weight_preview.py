@@ -13,11 +13,18 @@ class TestLandedCostWeightPreview(LandedCostFixtures):
 	@patch.object(frappe, "in_test", False)
 	def weighted_receipt(self, weights=(15, 70), quantities=(2, 1), rates=(50, 100), boxed=False):
 		frappe.set_user("Administrator")
-		for unit in ("Kg", "Gram"):
+		# Minimal CI sites do not install the full standard UOM catalogue.
+		for unit in ("Kg", "Gram", "Nos", "Box"):
 			if not frappe.db.exists("UOM", unit):
 				if not frappe.db.exists("UOM Category", "Mass"):
 					frappe.get_doc({"doctype": "UOM Category", "category_name": "Mass"}).insert()
-				frappe.get_doc({"doctype": "UOM", "uom_name": unit, "category": "Mass"}).insert()
+				frappe.get_doc(
+					{
+						"doctype": "UOM",
+						"uom_name": unit,
+						"category": "Mass" if unit in {"Kg", "Gram"} else None,
+					}
+				).insert()
 		rows = []
 		for idx, (weight, qty, rate) in enumerate(zip(weights, quantities, rates, strict=True)):
 			code = self.make_item(f"_JLCV Weight {idx}", 1, "84821020")
