@@ -1098,6 +1098,7 @@ persistent_cache_keys = [
 	"jarvis:mcp_oauth_signin_error:",
 	"jarvis:memory_seen:",
 	"jarvis:holiday:",
+	"jarvis:foreign_session:",  # Once-a-day throttles must survive the 5-minute watchdog cache clear.
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.

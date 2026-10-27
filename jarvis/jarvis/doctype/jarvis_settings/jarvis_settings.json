@@ -751,7 +751,7 @@
    "default": "0",
    "hidden": 1,
    "read_only": 1,
-   "description": "Count of distinct plugin session keys (one per 24 h) this site received tool calls for but never started. A non-zero value usually means a restored copy of this site is still running Jarvis. Reported to admin."
+   "description": "Unknown agent sessions seen, counted once per session per day: sessions this site received tool calls for but never started. A non-zero value usually means a restored copy of this site is still running Jarvis. Reported to admin."
   },
   {
    "fieldname": "foreign_session_last_at",
