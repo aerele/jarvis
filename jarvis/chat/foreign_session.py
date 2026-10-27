@@ -53,11 +53,6 @@ def is_known_key(session_key: str) -> bool:
 		return True
 
 
-def _already_claimed(key: str) -> bool:
-	cache = frappe.cache()
-	return bool(cache.exists(cache.make_key(key)))
-
-
 def _claim(key: str) -> bool:
 	"""Atomic set-if-absent with a 24 h expiry, so parallel first calls record once."""
 	cache = frappe.cache()
@@ -69,7 +64,7 @@ def record(session_key: str) -> bool:
 	key = None
 	try:
 		key = _KEY_PREFIX + hashlib.sha256(str(session_key).encode()).hexdigest()[:12]
-		if _already_claimed(key) or is_known_key(session_key) or not _claim(key):
+		if is_known_key(session_key) or not _claim(key):
 			return False
 		seen = int(frappe.db.get_single_value("Jarvis Settings", "foreign_sessions_seen") or 0)
 		frappe.db.set_single_value(
@@ -112,7 +107,5 @@ def report() -> None:
 def _notify_system_managers_once_a_day() -> None:
 	from jarvis.learning.lifecycle import notify_system_managers
 
-	if frappe.cache().get_value(_NOTICE_KEY):
-		return
-	notify_system_managers(NOTICE_SUBJECT, NOTICE_MESSAGE)
-	frappe.cache().set_value(_NOTICE_KEY, 1, expires_in_sec=_ONE_DAY)
+	if _claim(_NOTICE_KEY):
+		notify_system_managers(NOTICE_SUBJECT, NOTICE_MESSAGE)

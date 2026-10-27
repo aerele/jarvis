@@ -156,14 +156,11 @@ class TestForeignSessionHardening(FrappeTestCase):
 		self.assertEqual(enq.call_args.kwargs["job_id"], "jarvis-foreign-session-report")
 		self.assertTrue(enq.call_args.kwargs["deduplicate"])
 
-	def test_notice_latch_set_only_after_notifier_returns(self):
-		def boom(*a):
-			raise RuntimeError("x")
-
-		with patch("jarvis.learning.lifecycle.notify_system_managers", side_effect=boom):
-			with self.assertRaises(RuntimeError):
-				foreign_session._notify_system_managers_once_a_day()
-		self.assertFalse(frappe.cache().get_value("jarvis:foreign_session:notice"))
+	def test_notice_is_claimed_before_notifying(self):
+		with patch("jarvis.learning.lifecycle.notify_system_managers") as notify:
+			foreign_session._notify_system_managers_once_a_day()
+			foreign_session._notify_system_managers_once_a_day()
+		notify.assert_called_once_with(_NOTICE_SUBJECT, foreign_session.NOTICE_MESSAGE)
 
 
 class TestCallToolRecordsForeignSession(FrappeTestCase):
