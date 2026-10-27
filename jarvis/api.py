@@ -72,6 +72,15 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 			frappe.local.response.http_status_code = e.http_status
 			return _error(e.code, e.message)
 
+		# Only the real site receives verified plugin calls, so this is where it
+		# claims the tenant. A failed pin must never break the tool call.
+		try:
+			from jarvis.chat import site_pin
+
+			site_pin.pin_if_unset()
+		except Exception:
+			frappe.log_error(title="site_pin: pin failed")
+
 		from jarvis.chat.collaboration import is_collaborative_session, legacy_session_user, resolve_binding
 
 		shared_session = is_collaborative_session(session_key)

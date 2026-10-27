@@ -45,7 +45,7 @@ import websocket
 
 _logger = logging.getLogger(__name__)
 
-from jarvis.chat import egress_rules
+from jarvis.chat import egress_rules, site_pin
 from jarvis.chat.device import (
 	ChatDeviceCredentials,
 	build_payload_v3,
@@ -662,6 +662,8 @@ class AgentSession:
 	def connect(cls, gateway_url: str) -> AgentSession:
 		if not gateway_url:
 			raise AgentUnreachableError("agent_url not set on Jarvis Settings")
+		# One site per tenant: a copied site must not reach the agent.
+		site_pin.assert_not_copy()
 
 		# Two-shot self-heal for tenant re-provisioning: on the first attempt
 		# we use whatever paired creds the customer has; if agent rejects
