@@ -241,11 +241,13 @@ export function replacedBanner(notice) {
 // Same sentence as jarvis.chat.site_pin.copy_message. No action: only support can
 // move the pairing, so there is nothing to click.
 export function copyBanner(notice) {
-	if (!notice || !notice.paired_site) return null;
+	if (!notice) return null;
+	// A block with no recorded pin still shows: "another site" matches the desk banner.
+	const site = notice.paired_site || "another site";
 	return {
 		tone: "warning",
 		title: "This site is a copy",
-		message: `This site is a copy of ${notice.paired_site}. Jarvis is turned off here. Contact support to use Jarvis on this site.`,
+		message: `This site is a copy of ${site}. Jarvis is turned off here. Contact support to use Jarvis on this site.`,
 	};
 }
 
