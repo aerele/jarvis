@@ -1037,6 +1037,9 @@ class AgentSession:
 		key = (res.get("payload") or {}).get("key")
 		if not key:
 			raise AgentUnreachableError(f"sessions.create returned no key: {res}")
+		from jarvis.chat import session_claims
+
+		session_claims.claim(key)
 		return key
 
 	# -- Gateway-native turn model (chat.send + chat.history + sessions.*) --

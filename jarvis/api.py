@@ -215,6 +215,37 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 	return _dispatch_current_user(tool, args)
 
 
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def vouch_session(pinned_instance_id: str | None = None) -> dict:
+	"""Does this site know the plugin session key? Signed exactly like ``call_tool``.
+
+	``known`` comes only from an exact-key record this site wrote: a row in the chat
+	tables or a claim made at session creation. Never from the key's shape. An unknown
+	key, or a plugin pinned to another instance id, is recorded as a foreign session so
+	the site that answers reports it to admin."""
+	try:
+		session_key = validate_plugin_request(_request_body_bytes())
+	except PluginAuthError as e:
+		frappe.local.response.http_status_code = e.http_status
+		return _error(e.code, e.message)
+
+	from jarvis.chat import foreign_session, session_claims, site_identity
+
+	key = str(session_key).lower()
+	known = foreign_session.is_known_key(key) or session_claims.is_claimed(key)
+	own_id = site_identity.instance_id()
+	if not known or (pinned_instance_id and pinned_instance_id != own_id):
+		foreign_session.record(key)
+	if known:
+		try:
+			from jarvis.chat import site_pin
+
+			site_pin.pin_if_unset()
+		except Exception:
+			frappe.log_error(title="site_pin: pin failed")
+	return {"known": known, "instance_id": own_id}
+
+
 def _dispatch_current_user(tool: str, args: dict | str | None) -> dict:
 	return _run_tool(tool, args)
 

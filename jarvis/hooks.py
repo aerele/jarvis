@@ -1098,6 +1098,7 @@ persistent_cache_keys = [
 	"jarvis:mcp_oauth_signin_error:",
 	"jarvis:memory_seen:",
 	"jarvis:holiday:",
+	"jarvis:session_claim:",  # Claims must outlive the 5-minute watchdog cache clear.
 	"jarvis:foreign_session:",  # Once-a-day throttles must survive the 5-minute watchdog cache clear.
 ]
 
