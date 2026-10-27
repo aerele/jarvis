@@ -23,6 +23,7 @@ from jarvis.chat import filebox_skills
 from jarvis.chat.collaboration import is_collaborative
 from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as _ar
 from jarvis.permissions import (
+	JARVIS_ADMIN_ROLES,
 	message_origin,
 	refuse_in_tool_dispatch,
 	require_jarvis_user,
@@ -109,6 +110,30 @@ def _may_act_on(conversation: str | None) -> bool:
 	if not conversation:
 		return False
 	return frappe.db.get_value("Jarvis Conversation", conversation, "owner") == frappe.session.user
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def list_approval_reviewers() -> list[dict]:
+	"""Capped Tag-for-review choices; generic sharing keeps its own policy."""
+	user = frappe.qb.DocType("User")
+	role = frappe.qb.DocType("Has Role")
+	return (
+		frappe.qb.from_(user)
+		.join(role)
+		.on((role.parent == user.name) & (role.parenttype == "User"))
+		.select(user.name, user.full_name)
+		.distinct()
+		.where(
+			(user.enabled == 1)
+			& (user.user_type == "System User")
+			& role.role.isin(JARVIS_ADMIN_ROLES)
+			& user.name.notin([frappe.session.user, "Guest", "Administrator"])
+		)
+		.orderby(user.full_name, user.name)
+		.limit(500)
+		.run(as_dict=True)
+	)
 
 
 @frappe.whitelist(methods=["POST"])

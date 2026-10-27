@@ -865,6 +865,7 @@ ENDPOINTS.update(
 			"scope": "chat_scoped",
 		},
 		"jarvis.chat.approvals_api.list_approvals": {"arguments": {}, "scope": "chat_scoped"},
+		"jarvis.chat.approvals_api.list_approval_reviewers": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_approvals_page": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_pending_actions_lane": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_wiki_write_proposals": {"arguments": {}, "scope": "chat_scoped"},

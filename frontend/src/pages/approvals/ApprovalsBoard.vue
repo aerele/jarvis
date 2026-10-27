@@ -1211,7 +1211,7 @@ async function loadShareUsers() {
 	if (shareUsersLoaded) return;
 	shareUsersLoaded = true;
 	try {
-		shareUsers.value = (await api.listShareableUsers()) || [];
+		shareUsers.value = (await api.listApprovalReviewers()) || [];
 	} catch (e) {
 		shareUsersLoaded = false; // retry on next open
 	}
