@@ -176,7 +176,7 @@ test("an uncertain receipt keeps its own diagnostic and gains the reference", as
 	assert.match(thrown.message, /delivery ID already belongs to a different message/);
 	// Recovery keeps the same ID, so the copy must not promise a fresh-ID retry.
 	assert.doesNotMatch(thrown.message, /fresh ID|Retry/);
-	assert.match(thrown.message, /send the message again from the composer/);
+	assert.match(thrown.message, /send it again from the composer/);
 	assert.match(
 		deliveryFailureCopy(thrown, "abcdefgh12345678"),
 		/different message.* Reference 12345678\.$/
