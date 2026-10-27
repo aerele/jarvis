@@ -697,6 +697,13 @@
 							</div>
 						</button>
 					</div>
+					<router-link
+						to="/dashboards/payment-calendar"
+						class="mt-4 flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm text-ink-gray-7 hover:bg-surface-gray-1"
+					>
+						<span>Payment Calendar · plan supplier dues and cash</span>
+						<span aria-hidden="true">→</span>
+					</router-link>
 					<CapabilityCatalog @select="onWelcomeSuggestion" />
 				</div>
 			</div>
