@@ -770,6 +770,9 @@ def is_ready_for_chat() -> dict:
 	  ambiguous/invalid and support has been paged. A safe blocked state - the
 	  customer must NOT retry payment or reconnect; ``detail`` carries admin's own
 	  reassurance (see ``_admin_chat_gate``, review plan 04 P0-6).
+	- ``"site_is_copy"`` - this site is not the one Jarvis was first connected from
+	  (a restored copy). Checked FIRST, before anything asks admin, which refuses a
+	  copy. Carries ``copy_notice: {paired_site}``.
 	- ``None`` when ``ready`` is True.
 
 	Also carries one non-blocking worker-health field, merged in AFTER the
@@ -780,9 +783,6 @@ def is_ready_for_chat() -> dict:
 
 	Fails safe: any exception probing worker health leaves the field False
 	rather than raising or affecting the verdict above.
-	- ``"site_is_copy"`` - this site is not the one Jarvis was first connected from
-	  (a restored copy). Checked FIRST, before anything asks admin, which refuses a
-	  copy. Carries ``copy_notice: {paired_site}``.
 	"""
 	from jarvis.chat import site_pin
 

@@ -56,19 +56,13 @@ def set_jarvis_boot(bootinfo):
 		readiness = is_ready_for_chat() or {}
 		bootinfo.jarvis_onboarded = bool(readiness.get("ready"))
 		bootinfo.jarvis_ready_reason = "" if bootinfo.jarvis_onboarded else (readiness.get("reason") or "")
+		# Copy of another site: the desk banner shows the block message instead of the
+		# onboarding nudge. Read off the verdict above, not a second status() call.
+		bootinfo.jarvis_pairing_blocked = readiness.get("reason") == "site_is_copy"
+		bootinfo.jarvis_paired_site = (readiness.get("copy_notice") or {}).get("paired_site") or ""
 	except Exception:
 		bootinfo.jarvis_onboarded = True  # fail-safe: never nag on a boot error
 		bootinfo.jarvis_ready_reason = ""
-
-	# Copy of another site: the desk banner shows the block message instead of the
-	# onboarding nudge. Its own try/except, like its siblings.
-	try:
-		from jarvis.chat import site_pin
-
-		pin = site_pin.status()
-		bootinfo.jarvis_pairing_blocked = bool(pin["blocked"])
-		bootinfo.jarvis_paired_site = pin["paired_site"]
-	except Exception:
 		bootinfo.jarvis_pairing_blocked = False  # fail-safe: never claim a block on a boot error
 		bootinfo.jarvis_paired_site = ""
 
