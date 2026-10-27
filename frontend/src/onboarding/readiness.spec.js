@@ -613,7 +613,11 @@ describe("copied-site banner", () => {
 	});
 
 	it("reads the notice off the readiness verdict", async () => {
-		verdict({ ready: false, reason: "site_is_copy", copy_notice: { paired_site: "erp.example.com" } });
+		verdict({
+			ready: false,
+			reason: "site_is_copy",
+			copy_notice: { paired_site: "erp.example.com" },
+		});
 		expect(await copyNoticeOf()).toEqual({ paired_site: "erp.example.com" });
 		forgetReady();
 		verdict({ ready: false, reason: "signup" });
