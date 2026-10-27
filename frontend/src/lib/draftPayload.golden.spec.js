@@ -323,7 +323,10 @@ describe("landed-cost create payload", () => {
 			fieldname: "vendor_invoices",
 			spec: {
 				child_doctype: "Landed Cost Vendor Invoice",
-				columns: [F("vendor_invoice", "Link", { options: "Purchase Invoice" }), F("amount", "Currency", { read_only: 1 })],
+				columns: [
+					F("vendor_invoice", "Link", { options: "Purchase Invoice" }),
+					F("amount", "Currency", { read_only: 1 }),
+				],
 			},
 			verb: "create",
 			proposed: [{ vendor_invoice: "PI-FREIGHT", amount: 30 }],
@@ -332,14 +335,37 @@ describe("landed-cost create payload", () => {
 			fieldname: "items",
 			spec: {
 				child_doctype: "Landed Cost Item",
-				columns: [F("item_code", "Link", { options: "Item" }), F("applicable_charges", "Currency")],
-				form_fields: [F("purchase_receipt_item", "Data", { read_only: 1 }), F("receipt_document", "Data", { read_only: 1 }), F("receipt_document_type", "Data", { read_only: 1 })],
+				columns: [
+					F("item_code", "Link", { options: "Item" }),
+					F("applicable_charges", "Currency"),
+				],
+				form_fields: [
+					F("purchase_receipt_item", "Data", { read_only: 1 }),
+					F("receipt_document", "Data", { read_only: 1 }),
+					F("receipt_document_type", "Data", { read_only: 1 }),
+				],
 			},
 			verb: "create",
-			proposed: [{ item_code: "STOCK-A", applicable_charges: 30, purchase_receipt_item: "native-pr-row", receipt_document: "PR-IMPORT", receipt_document_type: "Purchase Receipt" }],
+			proposed: [
+				{
+					item_code: "STOCK-A",
+					applicable_charges: 30,
+					purchase_receipt_item: "native-pr-row",
+					receipt_document: "PR-IMPORT",
+					receipt_document_type: "Purchase Receipt",
+				},
+			],
 		});
 		const result = draftValues({ verb: "create", fields: [], tables: [vendor, items] });
 		expect(result.vendor_invoices).toEqual([{ vendor_invoice: "PI-FREIGHT", amount: 30 }]);
-		expect(result.items).toEqual([{ item_code: "STOCK-A", applicable_charges: 30, purchase_receipt_item: "native-pr-row", receipt_document: "PR-IMPORT", receipt_document_type: "Purchase Receipt" }]);
+		expect(result.items).toEqual([
+			{
+				item_code: "STOCK-A",
+				applicable_charges: 30,
+				purchase_receipt_item: "native-pr-row",
+				receipt_document: "PR-IMPORT",
+				receipt_document_type: "Purchase Receipt",
+			},
+		]);
 	});
 });
