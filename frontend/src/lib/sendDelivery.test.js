@@ -149,7 +149,7 @@ test("the server's own sentence is quoted, a generic 500 placeholder and markup 
 			messages: ["<b>Attachment</b> invoice.pdf was &gt; 25 MB"],
 		}),
 	);
-	assert.match(said, /The server said: Attachment invoice\.pdf was (&gt;|>) 25 MB$/);
+	assert.match(said, /The server said: Attachment invoice\.pdf was (&gt;|>) 25 MB\.$/);
 	assert.doesNotMatch(said, /<b>/);
 	assert.doesNotMatch(
 		deliveryFailureCause(
