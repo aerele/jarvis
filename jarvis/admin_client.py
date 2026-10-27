@@ -20,6 +20,7 @@ import time
 import frappe
 import requests
 
+from jarvis.chat import site_pin
 from jarvis.exceptions import (
 	AdminAmbiguousError,
 	AdminAuthError,
@@ -1434,6 +1435,7 @@ def _authenticated_raw(path: str, body: dict, *, timeout_s: int):
 	can't be reused for streamed media). DRIFT-GUARD: this replicates _post's ladder; mirror any
 	change to _post's auth ladder here too. Error status routing is in _raise_for_admin_raw."""
 	settings = frappe.get_single("Jarvis Settings")
+	site_pin.assert_not_copy(admin=True)  # a copied site must not act as the tenant
 	admin_url = _admin_url(settings)
 	url = admin_url + path
 
@@ -2651,6 +2653,7 @@ def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	bearer->401-remint->403-terminal->legacy ladder; mirror any change here there too.
 	"""
 	settings = frappe.get_single("Jarvis Settings")
+	site_pin.assert_not_copy(admin=True)  # a copied site must not act as the tenant
 	admin_url = _admin_url(settings)
 
 	# Preferred path: OAuth bearer. Retry once on a token rejection (revoked,
