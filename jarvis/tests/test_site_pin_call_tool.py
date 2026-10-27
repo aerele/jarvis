@@ -26,6 +26,11 @@ class TestCallToolPinsSite(FrappeTestCase):
 	def setUp(self):
 		super().setUp()
 		frappe.db.set_single_value("Jarvis Settings", "paired_site", "", update_modified=False)
+		# The hotfix call_tool resolves the user from this row; the test
+		# rollback removes it, so nothing is committed.
+		frappe.get_doc(
+			{"doctype": "Jarvis Chat Session", "session_key": SESSION_KEY, "user": "Administrator"}
+		).insert(ignore_permissions=True)
 
 	@contextlib.contextmanager
 	def _plugin_request(self, *, verified=True, extra_headers=None):
@@ -38,8 +43,6 @@ class TestCallToolPinsSite(FrappeTestCase):
 		with (
 			patch.object(frappe, "request", _FakeRequest(headers), create=True),
 			verify,
-			patch("jarvis.chat.collaboration.is_collaborative_session", return_value=False),
-			patch("jarvis.chat.collaboration.legacy_session_user", return_value="Administrator"),
 			patch("jarvis.api.dispatch", return_value={"doctype": "Customer", "fields": []}),
 			patch("jarvis.api._persist_and_publish_tool_call"),
 		):
