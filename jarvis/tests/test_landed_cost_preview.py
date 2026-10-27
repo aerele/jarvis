@@ -363,3 +363,42 @@ class TestLandedCostPreview(LandedCostFixtures):
 		self.assertEqual(result["draft_values"]["taxes"][0]["amount"], 2)
 		self.assertEqual(result["draft_values"]["taxes"][0]["exchange_rate"], 83.4)
 		self.assertAlmostEqual(result["totals"]["charges"], 166.8)
+
+	def test_stock_updating_invoice_is_a_receipt_and_nonstock_lines_are_excluded(self):
+		frappe.set_user("Administrator")
+		with patch.object(frappe, "in_test", False):
+			invoice = frappe.get_doc(
+				{
+					"doctype": "Purchase Invoice",
+					"company": self.company,
+					"supplier": self.supplier,
+					"posting_date": self.receipt.posting_date,
+					"due_date": self.receipt.posting_date,
+					"set_posting_time": 1,
+					"update_stock": 1,
+					"bill_no": frappe.generate_hash(length=10),
+					"items": [
+						{
+							"item_code": self.stock,
+							"qty": 2,
+							"rate": 50,
+							"warehouse": self.receipt.items[0].warehouse,
+						},
+						{
+							"item_code": self.service,
+							"qty": 1,
+							"rate": 20,
+							"expense_account": self.expense,
+							"cost_center": self.cost_center,
+						},
+					],
+				}
+			).insert()
+			invoice.submit()
+		frappe.set_user(self.reader)
+		result = self.prepare(receipts=[{"doctype": "Purchase Invoice", "name": invoice.name}])
+		self.assertEqual(result["status"], "ready", result)
+		self.assertEqual(len(result["items"]), 1)
+		self.assertEqual(result["draft_values"]["items"][0]["purchase_receipt_item"], invoice.items[0].name)
+		self.assertEqual(result["draft_values"]["items"][0]["receipt_document_type"], "Purchase Invoice")
+		self.assertEqual(result["items"][0]["applicable_charges"], 120)
