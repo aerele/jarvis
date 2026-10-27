@@ -121,10 +121,9 @@ class TestContextualItemPicker(FrappeTestCase):
 			next(f for f in result["fields"] if f["fieldname"] == "item_code")["link_query_filters"],
 		)
 
-	def test_rule_does_not_attach_to_purchase_or_custom_contexts(self):
+	def test_rule_does_not_attach_to_custom_contexts(self):
 		df = frappe.get_meta("Sales Invoice Item").get_field("item_code")
 		for child, parent, table in (
-			("Purchase Invoice Item", "Purchase Invoice", "items"),
 			("Sales Invoice Item", "Custom Invoice", "items"),
 			("Sales Invoice Item", "Sales Invoice", "custom_items"),
 		):
@@ -209,3 +208,128 @@ class TestContextualItemPicker(FrappeTestCase):
 			page_length=20,
 		)
 		self.assertEqual(results, [])
+
+	def purchase_field(self, parent):
+		result = get_doctype_fields(parent + " Item", parent_doctype=parent, parentfield="items")
+		self.assertTrue(result["ok"])
+		return next(f for f in result["fields"] if f["fieldname"] == "item_code")
+
+	def test_purchase_child_metadata_requires_allow_purchase_without_sales_filter(self):
+		frappe.get_doc("User", self.user).add_roles("Purchase User", "Stock User")
+		frappe.set_user(self.user)
+		for parent in ("Purchase Invoice", "Purchase Order", "Purchase Receipt", "Supplier Quotation"):
+			with self.subTest(parent=parent):
+				self.assertEqual(
+					self.purchase_field(parent)["link_query_filters"],
+					[
+						["Item", "is_purchase_item", "=", 1],
+						["Item", "disabled", "=", 0],
+						["Item", "has_variants", "=", 0],
+					],
+				)
+
+	def test_purchase_draft_grid_has_the_same_eligibility_as_the_question(self):
+		for parent in ("Purchase Invoice", "Purchase Order", "Purchase Receipt", "Supplier Quotation"):
+			with self.subTest(parent=parent):
+				meta = get_doctype_form_meta(parent)
+				field = next(f for f in meta["tables"]["items"]["columns"] if f["fieldname"] == "item_code")
+				self.assertEqual(
+					field["link_query_filters"], self.purchase_field(parent)["link_query_filters"]
+				)
+				self.assertIn(["Item", "is_purchase_item", "=", 1], field["link_query_filters"])
+
+	def test_purchase_rule_is_limited_to_the_canonical_item_field(self):
+		df = frappe.get_meta("Purchase Invoice Item").get_field("item_code")
+		for child, parent, table in (
+			("Purchase Invoice Item", "Sales Invoice", "items"),
+			("Purchase Invoice Item", "Purchase Invoice", "custom_items"),
+			("Custom Purchase Item", "Purchase Invoice", "items"),
+			("Material Request Item", "Material Request", "items"),
+			("Request for Quotation Item", "Request for Quotation", "items"),
+		):
+			with self.subTest(child=child, parent=parent, table=table):
+				self.assertEqual(draft_link_query_filters(child, df, parent, table), [])
+		for attr, value in (("fieldname", "custom_item"), ("options", "Asset"), ("fieldtype", "Data")):
+			other = deepcopy(df)
+			setattr(other, attr, value)
+			self.assertEqual(
+				draft_link_query_filters("Purchase Invoice Item", other, "Purchase Invoice", "items"), []
+			)
+
+	def test_purchase_creation_context_identifies_the_item_child(self):
+		for parent in ("Purchase Invoice", "Purchase Order", "Purchase Receipt", "Supplier Quotation"):
+			with self.subTest(parent=parent):
+				result = get_creation_context(parent, limit=1)
+				self.assertEqual(result["child_doctypes"]["items"], parent + " Item")
+				self.assertIn('"parentfield"', result["note"])
+
+	def test_real_purchase_search_excludes_sales_only_and_preserves_item_permissions(self):
+		items = {}
+		for label, flags in {
+			"purchase_only": {"is_purchase_item": 1, "is_sales_item": 0},
+			"both": {"is_purchase_item": 1, "is_sales_item": 1},
+			"sales_only": {"is_purchase_item": 0, "is_sales_item": 1},
+			"legacy_subcontract": {"is_purchase_item": 0, "is_sub_contracted_item": 1},
+			"disabled": {"is_purchase_item": 1, "disabled": 1},
+			"template": {"is_purchase_item": 1, "has_variants": 1},
+		}.items():
+			name = self.prefix + label
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"name": name,
+					"item_code": name,
+					"item_name": name,
+					"item_group": "All Item Groups",
+					"stock_uom": "Nos",
+					**flags,
+				}
+			).db_insert()
+			items[label] = name
+		frappe.get_doc("User", self.user).add_roles("Purchase User", "Stock User")
+		frappe.set_user(self.user)
+		parents = ("Purchase Invoice", "Purchase Order", "Purchase Receipt", "Supplier Quotation")
+		for parent in parents:
+			with self.subTest(parent=parent):
+				results = search_link(
+					"Item",
+					self.prefix,
+					filters=self.purchase_field(parent)["link_query_filters"],
+					reference_doctype=parent,
+					link_fieldname="item_code",
+					page_length=20,
+				)
+				self.assertEqual({r["value"] for r in results}, {items["purchase_only"], items["both"]})
+		self.assertIn(
+			items["sales_only"], {r["value"] for r in search_link("Item", self.prefix, page_length=20)}
+		)
+		# Legacy old-flow subcontracted-only Items require ERPNext Desk.
+		self.assertIn(
+			items["legacy_subcontract"],
+			{r["value"] for r in search_link("Item", self.prefix, page_length=20)},
+		)
+		frappe.set_user("Administrator")
+		frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": self.user,
+				"allow": "Item",
+				"for_value": items["sales_only"],
+				"apply_to_all_doctypes": 1,
+			}
+		).insert(ignore_permissions=True)
+		frappe.clear_cache(user=self.user)
+		frappe.set_user(self.user)
+		for parent in parents:
+			with self.subTest(restricted_parent=parent):
+				self.assertEqual(
+					search_link(
+						"Item",
+						self.prefix,
+						filters=self.purchase_field(parent)["link_query_filters"],
+						reference_doctype=parent,
+						link_fieldname="item_code",
+						page_length=20,
+					),
+					[],
+				)
