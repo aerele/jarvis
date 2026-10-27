@@ -122,7 +122,11 @@ def lock_keys(items) -> list[str]:
 		party = held_parties.party_of({**item, "values": values})
 		if party["gstin"]:
 			keys.add(f"gstin:{doctype}:{party['gstin']}")
-		title = held_parties.norm_name(held_sheets.deterministic_name(doctype, values) or party["title"])
+		title = held_parties.scoped_name(
+			doctype,
+			values,
+			held_parties.norm_name(held_sheets.deterministic_name(doctype, values) or party["title"]),
+		)
 		if title:
 			keys.add(f"name:{doctype}:{title}")
 	return sorted(keys)
@@ -367,6 +371,9 @@ def _existing_error(record: dict, target: str | None, exec_user: str) -> str:
 		and frappe.has_permission(doctype, "read", doc=target, user=exec_user)
 	):
 		return f"That {doctype} was not found, or the person who dropped the file can't open it."
+	if held_parties.company_scoped(doctype):
+		with impersonate(exec_user):
+			return held_parties.account_selection_error(record["values"], target)
 	return ""
 
 
@@ -598,7 +605,7 @@ def _walk(row, token: str, plan: dict, records: list[dict], merged: list[dict], 
 	"""ONE ordered pass as ``exec_user``: every record's outcome, or every error."""
 	cascade = _cascade(merged, kinds)
 	outcome: list = [None] * len(merged)
-	failures, roots, crashes, remap = {}, {}, [], {}
+	failures, roots, crashes, remap = {}, {}, [], held_sheets.initial_remap(merged, records)
 	approver, total, done = plan.get("approver"), len(merged), 0
 	with impersonate(row.exec_user), _dispatching():
 		for i in held_sheets.order(merged, range(total)):
@@ -665,6 +672,10 @@ def _one(i: int, record: dict, original: dict, kind: str, entry: dict, remap: di
 			raise _Failed(
 				f"That {record['doctype']} was not found, or the person who dropped the file can't open it."
 			)
+		if held_parties.company_scoped(record["doctype"]):
+			problem = held_parties.account_selection_error(values, target)
+			if problem:
+				raise _Failed(problem)
 		_learn(record, original, target, remap)
 		return _entry(i, record, "existing", target)
 	found = _resolve(record, values)
@@ -754,6 +765,16 @@ def _existing(record: dict, values: dict) -> str | None:
 	doctype = record["doctype"]
 	if doctype == "Address":
 		return _existing_address(values)
+	if held_parties.company_scoped(doctype):
+		for hidden in (False, True):
+			seen = held_parties.existing_of({**record, "values": values}, limit=1, ignore_permissions=hidden)
+			if seen:
+				if not hidden:
+					problem = held_parties.account_selection_error(values, seen[0]["name"])
+					if problem:
+						raise _Failed(problem)
+				return seen[0]["name"]
+		return None
 	name = held_sheets.deterministic_name(doctype, values)
 	found = frappe.db.exists(doctype, name) if name else None
 	if found:
@@ -895,6 +916,7 @@ def _recent_keys(owner: str, merged: list[dict], outcome: list[dict]) -> list[st
 		title = held_parties.norm_name(
 			held_sheets.deterministic_name(record["doctype"], record["values"]) or party["title"]
 		)
+		title = held_parties.scoped_name(record["doctype"], record["values"], title)
 		if title:
 			found.append(f"name:{record['doctype']}:{title}")
 		keys.update(_seal.open_key(owner, k) for k in found or [held_parties.item_key(record)])
