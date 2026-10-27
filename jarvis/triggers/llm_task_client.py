@@ -159,6 +159,16 @@ def llm_task_complete(
 	"""
 	import requests
 
+	# Third door to the tenant's agent besides AgentSession.connect: a restored copy
+	# must not use its token. LLMTaskError (not the OpenRouter fallback) is the answer.
+	from jarvis.chat import site_pin
+	from jarvis.exceptions import SiteIsCopyError
+
+	try:
+		site_pin.assert_not_copy()
+	except SiteIsCopyError as e:
+		raise LLMTaskError(str(e)) from e
+
 	base, token = _agent_gateway_creds()
 	if not base or not token:
 		raise LLMTaskError("agent gateway is not configured on this site")
