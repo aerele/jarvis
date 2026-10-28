@@ -961,11 +961,13 @@ def record_call_tool_failure(tool: str, result) -> None:
 	"""Record an ``{ok: false}`` that ``call_tool`` answered, unless the tool
 	failure was already recorded in ``_dispatch_and_wrap``.
 
-	A rejected call (4xx: bad or missing token, unsigned body, unknown session,
-	stale device pairing, a shared-chat refusal) stops every tool call of the
-	turn, so it goes as an error under ``call_tool``. A refusal before the tool
-	ran (bad arguments, a delegate's contract, connector focus) goes as a tool
-	failure. Never raises."""
+	A rejected call (4xx: unsigned body, unknown session, stale device pairing,
+	a shared-chat refusal) stops every tool call of the turn, so it goes as an
+	error under ``call_tool``. A 401 from a caller nobody knows (a missing or bad
+	token) is not recorded: it is an internet probe, or a plugin-auth rejection
+	that is already an Error Log row. A refusal before the tool ran (bad
+	arguments, a delegate's contract, connector focus) goes as a tool failure.
+	Never raises."""
 	try:
 		if not isinstance(result, dict) or result.get("ok") is not False:
 			return
@@ -978,6 +980,10 @@ def record_call_tool_failure(tool: str, result) -> None:
 			# Before the caller is known this is anyone on the internet: one constant
 			# route, never the tool name they typed.
 			unknown_caller = not user or user == "Guest"
+			if status == 401 and unknown_caller:
+				# Not an error of the tenant: a probe of the guest endpoint, or a plugin-auth
+				# rejection that _plugin_auth already wrote to the Error Log (which is forwarded).
+				return
 			record_server_error(
 				"call_tool",
 				error_code=str(status),
