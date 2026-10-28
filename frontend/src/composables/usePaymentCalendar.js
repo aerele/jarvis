@@ -23,6 +23,36 @@ export function usePaymentCalendar({
 	timezone = siteTimezone,
 	initialDate = "",
 } = {}) {
+	const refreshing = ref(false),
+		waitingForWorker = ref(false),
+		refreshIssue = shallowRef(null);
+	const layout = shallowRef(null);
+	// A loading frame contains identities and presentation metadata, never old balances.
+	const loadingSnapshot = computed(() =>
+		!snapshot.value && layout.value && (refreshing.value || refreshIssue.value)
+			? {
+					snapshot_id: null,
+					currency: layout.value.currency,
+					scope: layout.value.scope,
+					generated_at: layout.value.generated_at,
+					unavailable: {},
+					bank_code: null,
+					projection: {
+						precision: layout.value.precision,
+						days: {},
+						forecast_available: false,
+						payable_settlement_complete: false,
+						book_cash: null,
+						floor: null,
+						due_now: { total: null, scheduled: null, overdue: null, undated: null },
+						excluded_collections: { overdue: null, undated: null, adjustments: null },
+						reconciliation: { Payable: null, Receivable: null },
+						source_notes: {},
+						scope_reasons: [],
+					},
+			  }
+			: null
+	);
 	const phase = ref("loading"),
 		companies = ref([]),
 		company = ref(""),
@@ -55,7 +85,11 @@ export function usePaymentCalendar({
 		upcomingSequence = 0,
 		bucketSequence = 0,
 		disposed = false;
-	let pollTimer,
+	let pendingSnapshotId = null,
+		refreshAt = 0,
+		resumeRefresh = false;
+	let refreshTimer,
+		pollTimer,
 		expiryTimer,
 		midnightTimer,
 		pollStarted = 0,
@@ -68,6 +102,7 @@ export function usePaymentCalendar({
 		value.company === company.value &&
 		JSON.stringify(value.accounts) === JSON.stringify(accounts.value);
 	const stopTimers = () => {
+		clearTimeout(refreshTimer);
 		clearTimeout(pollTimer);
 		clearTimeout(expiryTimer);
 		clearTimeout(midnightTimer);
@@ -87,10 +122,17 @@ export function usePaymentCalendar({
 		upcomingSequence++;
 		bucketSequence++;
 	}
-	function begin(nextPhase) {
+	function begin(nextPhase, { preserve = false, keepLayout = false } = {}) {
 		generation++;
 		stopTimers();
-		clearFinance();
+		refreshing.value = false;
+		waitingForWorker.value = false;
+		refreshIssue.value = null;
+		if (!preserve && !keepLayout) layout.value = null;
+		pendingSnapshotId = null;
+		refreshAt = 0;
+		resumeRefresh = false;
+		if (!preserve) clearFinance();
 		error.value = null;
 		phase.value = nextPhase;
 		return generation;
@@ -220,10 +262,30 @@ export function usePaymentCalendar({
 		return fail(result, token);
 	}
 
-	async function refresh({ automatic = false } = {}) {
-		if (!company.value || disposed) return;
+	function initialMonth() {
+		const today = siteToday(timezone());
+		return today &&
+			isSelectable(initialDate, {
+				selectable_start: addMonths(today.slice(0, 7), -12) + "-01",
+				selectable_end: addMonths(today.slice(0, 7), 11) + "-31",
+			})
+			? initialDate.slice(0, 7)
+			: "current";
+	}
+
+	async function refresh({ automatic = false, background = false, month: requestedMonth } = {}) {
+		if (!company.value || disposed || (automatic && (refreshing.value || floorSaving.value)))
+			return;
 		if (!automatic) recoveries = 0;
-		const token = begin("requesting");
+		const preserve =
+			background && !!snapshot.value && Date.parse(snapshot.value.expires_at) > Date.now();
+		const keepLayout = background && !!layout.value;
+		const token = begin(preserve || keepLayout ? "ready" : "requesting", {
+			preserve,
+			keepLayout,
+		});
+		refreshing.value = background;
+		if (preserve) armExpiry();
 		if (!caps.value) {
 			const capability = await reloadCapabilities(token);
 			if (!current(token)) return;
@@ -231,39 +293,130 @@ export function usePaymentCalendar({
 			const allowed = new Set((caps.value.accounts || []).map((account) => account.name));
 			accounts.value = accounts.value.filter((name) => allowed.has(name));
 		}
-		const selection = { company: company.value, accounts: [...accounts.value] };
-		const result = await api.requestSnapshot(selection.company, selection.accounts);
+		const selection = {
+			company: company.value,
+			accounts: [...accounts.value],
+			month: requestedMonth || month.value || initialMonth(),
+			viewMonth: month.value,
+		};
+		pollStarted = performance.now();
+		await requestSelection(token, selection);
+	}
+	async function requestSelection(token, selection, attempt = 0) {
 		if (!current(token)) return;
+		if (refreshing.value && selection.month !== "current" && month.value)
+			selection = { ...selection, month: month.value };
+		const result = await api.requestSnapshot(
+			selection.company,
+			selection.accounts,
+			selection.month
+		);
+		if (!current(token)) return;
+		if (!result?.ok && result?.code === "worker_busy") {
+			waitingForWorker.value = true;
+			if (performance.now() - pollStarted >= 60000) {
+				if (!layout.value) return fail(result, token);
+				refreshing.value = false;
+				waitingForWorker.value = false;
+				refreshIssue.value = safeError(result);
+				return;
+			}
+			pollTimer = setTimeout(() => {
+				void requestSelection(token, selection, attempt + 1);
+			}, [1000, 2000, 3000, 5000][Math.min(attempt, 3)]);
+			return;
+		}
+		if (
+			!result?.ok &&
+			result?.code === "invalid_request" &&
+			selection.month !== "current" &&
+			!selection.currentFallback
+		) {
+			// The oldest selectable month can leave the window at site midnight.
+			// Resolve "current" on the server once; do not keep resending stale bounds.
+			return requestSelection(token, {
+				...selection,
+				month: "current",
+				viewMonth: month.value,
+				currentFallback: true,
+			});
+		}
 		if (!result?.ok) return accessFailure(result, token);
+		waitingForWorker.value = false;
 		const status = result.data;
 		if (!status?.snapshot_id || status.state === "failed")
 			return fail({ state: "failed", code: status?.code }, token);
-		snapshotId.value = status.snapshot_id;
+		pendingSnapshotId = status.snapshot_id;
 		pollStarted = performance.now();
 		await poll(token, status.snapshot_id, selection, 0);
+	}
+	function wantsAnotherMonth(selection) {
+		return (
+			refreshing.value &&
+			selection.month &&
+			(selection.month === "current"
+				? selection.viewMonth !== month.value
+				: selection.month !== month.value)
+		);
 	}
 	async function poll(token, id, selection, attempt) {
 		if (!current(token)) return;
 		if (performance.now() - pollStarted >= 900000)
 			return fail({ state: "failed", code: "timeout" }, token);
 		const result = await api.getSnapshotStatus(id);
-		if (!current(token) || snapshotId.value !== id) return;
+		if (!current(token) || pendingSnapshotId !== id) return;
+		if (!result?.ok && result?.state === "expired" && wantsAnotherMonth(selection))
+			return expire({ result, retry: true });
 		if (!result?.ok) return accessFailure(result, token);
 		const data = result.data;
-		if (data?.state === "failed") return fail({ state: "failed", code: data.code }, token);
+		if (data?.state === "failed") {
+			if (wantsAnotherMonth(selection))
+				return refresh({ background: true, month: month.value });
+			return fail({ state: "failed", code: data.code }, token);
+		}
 		if (data?.state === "complete") {
+			// A newer date/month may have been chosen while this accepted job ran.
+			// Finish polling it before admitting only the latest requested month.
+			if (wantsAnotherMonth(selection))
+				return refresh({ background: true, month: month.value });
 			if (
 				data.scope?.company !== selection.company ||
+				(data.scope.month &&
+					selection.month &&
+					selection.month !== "current" &&
+					data.scope.month !== selection.month) ||
 				JSON.stringify([...data.scope.accounts].sort()) !==
 					JSON.stringify(selection.accounts)
 			)
 				return fail({ state: "failed", code: "internal_error" }, token);
+			if (Date.parse(data.expires_at) <= Date.now()) return expire();
+			// Publish one snapshot identity before loading any of its panels.
+			snapshotId.value = id;
+			detailSequence++;
+			upcomingSequence++;
+			bucketSequence++;
+			detail.value = null;
+			upcoming.value = [];
+			bucketData.value = null;
 			snapshot.value = data;
+			layout.value = {
+				currency: data.currency,
+				scope: data.scope,
+				generated_at: data.generated_at,
+				precision: data.projection.precision,
+			};
+			refreshing.value = false;
+			refreshIssue.value = null;
 			if (caps.value) caps.value = { ...caps.value, settings: data.floor };
 			phase.value = "ready";
 			notice.value = "";
 			recoveries = 0;
-			const requested = selectedDate.value || initialDate;
+			let requested = selectedDate.value || initialDate;
+			if (data.scope.month && !requested.startsWith(data.scope.month + "-"))
+				requested = data.scope.anchor.startsWith(data.scope.month + "-")
+					? data.scope.anchor
+					: data.scope.month + "-01";
+			if (data.scope.month) month.value = data.scope.month;
 			selectedDate.value = isSelectable(requested, data.scope)
 				? requested
 				: data.scope.anchor;
@@ -275,21 +428,20 @@ export function usePaymentCalendar({
 				month.value > data.scope.selectable_end.slice(0, 7)
 			)
 				month.value = selectedDate.value.slice(0, 7);
-			if (Date.parse(data.expires_at) <= Date.now()) return expire();
 			armTimers();
-			await loadPanels(token);
+			await Promise.all([loadPanels(token), bucket.value ? loadBucket() : null]);
 			return;
 		}
 		if (!data || !["queued", "running"].includes(data.state))
 			return fail({ state: "expired", code: "expired" }, token);
-		phase.value = data.state;
+		if (!snapshot.value) phase.value = data.state;
 		const delay = document.hidden ? 15000 : [1000, 2000, 3000, 5000][Math.min(attempt, 3)];
 		pollTimer = setTimeout(() => {
 			void poll(token, id, selection, attempt + 1);
 		}, delay);
 	}
 
-	async function expire({ result, verifyAccess = true } = {}) {
+	async function expire({ result, verifyAccess = true, retry = false } = {}) {
 		const token = begin("expired");
 		error.value = safeError(result || { code: "expired", state: "expired" });
 		if (!verifyAccess) return;
@@ -305,48 +457,103 @@ export function usePaymentCalendar({
 			accounts.value = permitted;
 			saveSelection();
 		}
+		if (retry) return refresh({ automatic: true, background: true, month: month.value });
+	}
+	function armExpiry() {
+		clearTimeout(expiryTimer);
+		if (!snapshot.value) return;
+		expiryTimer = setTimeout(() => {
+			if (refreshIssue.value) {
+				clearFinance();
+			} else if (refreshing.value) {
+				// Keep the replacement job alive, but never display expired balances.
+				clearFinance();
+				phase.value = "running";
+			} else if (document.hidden || floorSaving.value) {
+				clearFinance();
+				phase.value = "expired";
+				resumeRefresh = true;
+			} else {
+				clearFinance();
+				void refresh({ automatic: true, background: true });
+			}
+		}, Math.max(1, Date.parse(snapshot.value.expires_at) - Date.now()));
 	}
 	function armTimers() {
-		clearTimeout(expiryTimer);
+		clearTimeout(refreshTimer);
 		clearTimeout(midnightTimer);
 		if (!snapshot.value) return;
-		expiryTimer = setTimeout(
-			expire,
-			Math.max(1, Date.parse(snapshot.value.expires_at) - Date.now())
-		);
+		armExpiry();
+		// Start ahead of the five-minute deadline so a quick job swaps in place.
+		refreshAt =
+			Date.now() + Math.max(1, (Date.parse(snapshot.value.expires_at) - Date.now()) * 0.9);
+		refreshTimer = setTimeout(checkClock, Math.max(1, refreshAt - Date.now()));
 		midnightTimer = setTimeout(checkClock, msUntilSiteMidnight(timezone()) + 20);
 	}
 	function checkClock() {
-		if (!snapshot.value || disposed) return;
+		if (disposed || document.hidden || refreshing.value || floorSaving.value) return;
+		if (!snapshot.value) {
+			if (phase.value === "expired" && resumeRefresh)
+				void refresh({ automatic: true, background: true });
+			return;
+		}
 		const today = siteToday(timezone()),
 			anchor = snapshot.value.scope.anchor;
 		const key = `${today}:${anchor}`;
 		if (today && today !== anchor && !handledMidnights.has(key)) {
 			handledMidnights.add(key);
 			notice.value = "The site date changed. Refreshing the calendar.";
-			void refresh({ automatic: true });
-		} else if (Date.parse(snapshot.value.expires_at) <= Date.now()) expire();
-		else armTimers();
+			void refresh({ automatic: true, background: true });
+		} else if (Date.now() >= refreshAt) {
+			void refresh({ automatic: true, background: true });
+		}
 	}
 
 	async function selectDate(value) {
-		if (!snapshot.value || !isSelectable(value, snapshot.value.scope)) return;
+		const navigation = snapshot.value?.scope || layout.value?.scope;
+		if (!navigation || !isSelectable(value, navigation)) return;
 		selectedDate.value = value;
 		month.value = value.slice(0, 7);
 		pages.value = emptyPages();
+		if (
+			!snapshot.value ||
+			(navigation.month &&
+				(refreshing.value ||
+					refreshIssue.value ||
+					!value.startsWith(navigation.month + "-")))
+		)
+			return loadMonth(month.value);
 		await loadPanels(generation);
 	}
-	function browseMonth(offset) {
-		if (!snapshot.value) return;
+	async function browseMonth(offset) {
+		const navigation = snapshot.value?.scope || layout.value?.scope;
+		if (!navigation) return;
 		const next = addMonths(month.value, offset);
 		if (
-			next >= snapshot.value.scope.selectable_start.slice(0, 7) &&
-			next <= snapshot.value.scope.selectable_end.slice(0, 7)
-		)
+			next >= navigation.selectable_start.slice(0, 7) &&
+			next <= navigation.selectable_end.slice(0, 7)
+		) {
 			month.value = next;
+			if (navigation.month || !snapshot.value) {
+				selectedDate.value = next + "-01";
+				pages.value = emptyPages();
+				await loadMonth(next);
+			}
+		}
+	}
+	async function loadMonth(value) {
+		detailSequence++;
+		upcomingSequence++;
+		detail.value = null;
+		upcoming.value = [];
+		detailLoading.value = true;
+		upcomingLoading.value = true;
+		closeBucket();
+		if (!refreshing.value) await refresh({ month: value, background: true });
 	}
 	function goToday() {
-		return snapshot.value && selectDate(snapshot.value.scope.anchor);
+		const navigation = snapshot.value?.scope || layout.value?.scope;
+		return navigation && selectDate(navigation.anchor);
 	}
 
 	async function loadPanels(token) {
@@ -355,6 +562,7 @@ export function usePaymentCalendar({
 	async function loadDetails(token = generation) {
 		const data = snapshot.value;
 		if (!data || !current(token)) return;
+		if (data.scope.month && !selectedDate.value.startsWith(data.scope.month + "-")) return;
 		const seq = ++detailSequence,
 			date = selectedDate.value,
 			selectedSide = side.value;
@@ -386,6 +594,7 @@ export function usePaymentCalendar({
 	async function loadUpcoming(token = generation) {
 		const data = snapshot.value;
 		if (!data || !current(token)) return;
+		if (data.scope.month && !selectedDate.value.startsWith(data.scope.month + "-")) return;
 		const seq = ++upcomingSequence,
 			date = selectedDate.value;
 		upcoming.value = [];
@@ -483,7 +692,10 @@ export function usePaymentCalendar({
 			}
 			return result;
 		} finally {
-			if (!disposed) floorSaving.value = false;
+			if (!disposed) {
+				floorSaving.value = false;
+				checkClock();
+			}
 		}
 	}
 
@@ -494,10 +706,15 @@ export function usePaymentCalendar({
 		generation++;
 		stopTimers();
 		clearFinance();
+		layout.value = null;
 		window.removeEventListener("focus", checkClock);
 		document.removeEventListener("visibilitychange", checkClock);
 	});
 	return {
+		loadingSnapshot,
+		waitingForWorker,
+		refreshIssue,
+		refreshing,
 		phase,
 		companies,
 		company,

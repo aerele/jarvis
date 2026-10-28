@@ -761,11 +761,29 @@ button.upcoming-row:hover {
 	display: flex;
 	gap: 12px;
 	align-items: center;
-	padding: 12px 2px;
+	padding: 12px 6px;
 	border-bottom: 1px solid var(--outline-gray-1, #edf0f2);
 }
-.account-choices input {
+.account-choices input[type="checkbox"] {
+	width: 16px;
+	height: 16px;
+	flex: 0 0 16px;
+	margin: 0;
+	padding: 0;
+	color: #346752;
 	accent-color: #346752;
+}
+.account-choices input[type="checkbox"]:focus {
+	box-shadow: none;
+}
+.account-choices input[type="checkbox"]:focus-visible {
+	outline: 2px solid #237c69;
+	outline-offset: 3px;
+	box-shadow: none;
+}
+.account-choices label > span {
+	min-width: 0;
+	overflow-wrap: anywhere;
 }
 .account-choices small {
 	display: block;
@@ -888,10 +906,18 @@ button.upcoming-row:hover {
 	.calendar-heading {
 		gap: 10px;
 	}
+	.calendar-heading > div:first-child {
+		flex: 1;
+		min-width: 0;
+	}
+	.calendar-heading .pcal-actions {
+		flex-shrink: 0;
+	}
 	.calendar-heading h2 {
 		font-size: 13px;
 	}
 	.calendar-heading p {
+		min-height: 29px;
 		font-size: 9px;
 	}
 	.calendar-heading .pcal-button {
