@@ -1304,7 +1304,7 @@
       "domain": "india-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "For suppliers you have already classified as Micro/Small MSME, this overlays each open payable's elapsed days against its 15/45-day window and projects whether it will still be unpaid on 31-March, when s.43B(h) defers the deduction. Ships a pay-before-year-end worklist on top of ERPNext's native AP Ageing report. Read-only; never records a payment, edits a voucher, classifies a supplier, or decides what you may deduct.",
       "tools_required": [
@@ -1337,6 +1337,7 @@
         "msmed_s15_windows",
         "s43bh_yearend_test"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1352,7 +1353,14 @@
       "validated_for_fy": "2026-2027",
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "supplier_group_mapping",
+        "reviewer",
+        "reviewer_capacity",
+        "applicable_tax_rate",
+        "currency"
+      ]
     },
     {
       "agent_slug": "negative-stock-valuation-auditor",
