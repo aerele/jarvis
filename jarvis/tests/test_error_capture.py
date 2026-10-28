@@ -15,14 +15,17 @@ from unittest.mock import Mock, patch
 
 import frappe
 import requests
+from frappe.tests.classes.context_managers import freeze_time
 from frappe.tests.utils import FrappeTestCase
 from werkzeug.wrappers import Response
 
 from jarvis import api_errors, error_push
 from jarvis._redis_lock import redis_lock
 from jarvis.exceptions import (
+	AdminAmbiguousError,
 	AdminAuthError,
 	AdminContractError,
+	AdminRejectedError,
 	AdminUnreachableError,
 	AdminValidationError,
 )
@@ -487,6 +490,7 @@ class PushBase(CaptureBase):
 		error_push._CAUSE_KEY,
 		error_push._BATCH_KEY,
 		error_push._INFLIGHT_KEY,
+		error_push._RETRY_AFTER_KEY,
 		*(
 			f"jarvis_error_push_log_{k}"
 			for k in ("stalled", "dropped", "failed", "scan_error_log", "scan_failed_turns", "pruned_unsent")
@@ -567,7 +571,7 @@ class TestPush(PushBase):
 
 	def test_a_batch_admin_keeps_failing_is_dropped_after_twelve_cycles(self):
 		api_errors.record_server_error("tool", error_code="e", error_class="t", message="m", user=USER)
-		failing = Mock(side_effect=AdminUnreachableError("admin returned a 502 error: bad gateway"))
+		failing = Mock(side_effect=AdminUnreachableError("admin returned a 500 error: boom", status_code=500))
 		for _ in range(error_push.MAX_BATCH_FAILURES - 1):
 			with self.assertRaises(AdminUnreachableError):
 				self._push(failing)
@@ -592,7 +596,7 @@ class TestPush(PushBase):
 
 	def test_a_success_resets_the_failure_count(self):
 		api_errors.record_server_error("tool", error_code="e", error_class="t", message="m", user=USER)
-		failing = Mock(side_effect=AdminUnreachableError("admin returned a 502 error"))
+		failing = Mock(side_effect=AdminUnreachableError("admin returned a 500 error", status_code=500))
 		for _ in range(error_push.MAX_BATCH_FAILURES - 1):
 			with self.assertRaises(AdminUnreachableError):
 				self._push(failing)
@@ -602,6 +606,48 @@ class TestPush(PushBase):
 			self._push(failing)
 		self.assertEqual(frappe.db.count(DT, {"pushed": 0}), 1)
 		self.assertEqual(error_push._state_get(error_push._FAILURES_KEY), "0")
+
+	def test_a_gateway_answer_never_counts_toward_a_drop(self):
+		frappe.db.delete("Error Log", {"method": "jarvis errors: admin refused rollup batch"})
+		api_errors.record_server_error("tool", error_code="e", error_class="t", message="m", user=USER)
+		for status in (502, 503, 504):
+			gateway = AdminUnreachableError(
+				f"admin returned non-JSON response (status {status})", status_code=status
+			)
+			for _ in range(error_push.MAX_BATCH_FAILURES + 1):
+				with self.assertRaises(AdminUnreachableError):
+					self._push(Mock(side_effect=gateway))
+			self.assertEqual(frappe.db.count(DT, {"pushed": 0}), 1, status)
+		self.assertFalse(
+			frappe.db.exists("Error Log", {"method": "jarvis errors: admin refused rollup batch"})
+		)
+
+	def test_a_read_timeout_never_counts_toward_a_drop(self):
+		frappe.db.delete("Error Log", {"method": "jarvis errors: admin refused rollup batch"})
+		api_errors.record_server_error("tool", error_code="e", error_class="t", message="m", user=USER)
+		timeout = AdminAmbiguousError("admin did not answer in time")
+		timeout.__cause__ = requests.ReadTimeout()
+		for _ in range(error_push.MAX_BATCH_FAILURES + 1):
+			with self.assertRaises(AdminAmbiguousError):
+				self._push(Mock(side_effect=timeout))
+		self.assertEqual(frappe.db.count(DT, {"pushed": 0}), 1)
+		self.assertFalse(
+			frappe.db.exists("Error Log", {"method": "jarvis errors: admin refused rollup batch"})
+		)
+
+	def test_a_refusal_admin_will_not_take_back_counts_even_on_a_502(self):
+		# Admin's fleet layer refuses with a 502 too: that is an answer, not a gateway fault.
+		api_errors.record_server_error("tool", error_code="e", error_class="t", message="m", user=USER)
+		refusal = AdminRejectedError("admin returned a 502 error: no", code="FleetConfigError")
+		refusal.status_code = 502  # if a status is ever attached, the refusal still counts
+		for _ in range(error_push.MAX_BATCH_FAILURES - 1):
+			with self.assertRaises(AdminRejectedError):
+				self._push(Mock(side_effect=refusal))
+		self._push(Mock(side_effect=refusal))
+		self.assertEqual(frappe.db.count(DT, {"pushed": 0}), 0)
+		self.addCleanup(
+			frappe.db.delete, "Error Log", {"method": "jarvis errors: admin refused rollup batch"}
+		)
 
 	def test_a_stopped_tenant_keeps_the_batch_for_later(self):
 		api_errors.record_server_error("tool", error_code="e", error_class="t", message="m", user=USER)
@@ -632,6 +678,90 @@ class TestPush(PushBase):
 # --------------------------------------------------------------------------- #
 # F1: nothing a caller types picks how many rows are written
 # --------------------------------------------------------------------------- #
+class TestPushBackoff(PushBase):
+	"""An outage is waited out with growing gaps; an answered failure is not."""
+
+	START = "2026-10-22 10:00:00"
+
+	def setUp(self):
+		super().setUp()
+		api_errors.record_server_error("tool", error_code="e", error_class="t", message="m", user=USER)
+		frappe.db.commit()
+
+	def _tick(self, minutes: int, outcome, seconds: int = 0) -> bool:
+		"""Run the scheduler entry ``minutes`` after START; True when it called admin."""
+		from jarvis import admin_client
+
+		at = frappe.utils.add_to_date(self.START, minutes=minutes, seconds=seconds)
+		sender = Mock(side_effect=outcome) if isinstance(outcome, Exception) else Mock()
+		with (
+			freeze_time(at),
+			patch.object(error_push, "_admin_configured", return_value=True),
+			patch.object(admin_client, "push_error_rollup", sender),
+		):
+			error_push.push_error_rollup()
+		return sender.called
+
+	def test_an_outage_backs_off_and_a_success_resets_it(self):
+		down = AdminUnreachableError("admin returned non-JSON response (status 503)", status_code=503)
+		calls = [m for m in range(0, 241) if m % 5 == 0 and self._tick(m, down)]
+		self.assertEqual(calls, [0, 5, 15, 35, 75, 135, 195])  # 5, 10, 20, 40, then 60 min apart
+		self.assertEqual(frappe.db.count(DT, {"pushed": 0}), 1)  # nothing was dropped
+		self.assertTrue(error_push._state_get(error_push._RETRY_AFTER_KEY))
+		self.assertFalse(self._tick(200, down), "a tick inside the wait does not call admin")
+		self.assertTrue(self._tick(255, None), "once the wait is over a success goes through")
+		self.assertEqual(error_push._state_get(error_push._RETRY_AFTER_KEY), "")
+		api_errors.record_server_error("tool", error_code="e", error_class="t", message="m2", user=USER)
+		frappe.db.commit()
+		self.assertTrue(self._tick(260, None), "after a success the next tick calls admin again")
+
+	def test_a_timeout_backs_off_too(self):
+		timeout = AdminAmbiguousError("admin did not answer in time")
+		timeout.__cause__ = requests.ReadTimeout()
+		self.assertTrue(self._tick(0, timeout))
+		self.assertFalse(self._tick(3, timeout))
+		self.assertTrue(self._tick(5, timeout))
+
+	def test_a_tick_that_runs_a_little_late_is_not_skipped_a_cycle(self):
+		down = AdminUnreachableError("admin returned a 503 error", status_code=503)
+		self.assertTrue(self._tick(0, down, seconds=30))  # the job ran 30 s late
+		self.assertTrue(self._tick(5, down), "the next */5 tick still finds the wait over")
+
+	def test_an_answered_failure_does_not_back_off(self):
+		answered = AdminUnreachableError("admin returned a 500 error: boom", status_code=500)
+		self.assertTrue(self._tick(0, answered))
+		self.assertEqual(error_push._state_get(error_push._RETRY_AFTER_KEY), "")
+		self.assertTrue(self._tick(5, answered))
+
+	def test_an_answered_failure_clears_a_wait_that_was_set(self):
+		error_push._state_set(error_push._RETRY_AFTER_KEY, str(frappe.utils.add_days(self.START, 1)))
+		answered = AdminUnreachableError("admin returned a 500 error: boom", status_code=500)
+		with self.assertRaises(AdminUnreachableError):
+			self._push(Mock(side_effect=answered))
+		self.assertEqual(error_push._state_get(error_push._RETRY_AFTER_KEY), "")
+
+	def test_an_unreadable_wait_is_no_wait(self):
+		error_push._state_set(error_push._RETRY_AFTER_KEY, "not a time")
+		self.assertTrue(self._tick(0, None))
+
+	def test_clearing_the_wait_pushes_at_once(self):
+		down = AdminUnreachableError("admin returned a 502 error", status_code=502)
+		self.assertTrue(self._tick(0, down))
+		self.assertFalse(self._tick(1, None))
+		error_push._state_set(error_push._RETRY_AFTER_KEY, "")
+		self.assertTrue(self._tick(1, None))
+
+	def test_a_failing_drop_decision_still_reverts_the_claim(self):
+		answered = AdminUnreachableError("admin returned a 500 error: boom", status_code=500)
+		with (
+			patch.object(error_push, "_batch_id", side_effect=RuntimeError("db hiccup")),
+			self.assertRaises(AdminUnreachableError),
+		):
+			self._push(Mock(side_effect=answered))
+		self.assertEqual(frappe.db.count(DT, {"pushed": 0}), 1)
+		self.assertEqual(error_push._state_get(error_push._INFLIGHT_KEY), "")
+
+
 class TestHostileInput(CaptureBase):
 	def setUp(self):
 		super().setUp()
@@ -857,7 +987,7 @@ class TestPushOrdering(PushBase):
 	def test_the_batch_id_holds_when_the_turn_cursor_was_never_stored(self):
 		self._buffered_row()
 		error_push._state_set(error_push._TURN_WATERMARK_KEY, "")
-		failing = Mock(side_effect=AdminUnreachableError("admin returned a 502 error"))
+		failing = Mock(side_effect=AdminUnreachableError("admin returned a 500 error", status_code=500))
 		with patch.object(error_push, "_batch_id", wraps=error_push._batch_id) as batch_id:
 			for _ in range(2):
 				with self.assertRaises(AdminUnreachableError):
