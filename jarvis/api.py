@@ -36,11 +36,13 @@ from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def call_tool(tool: str, args: dict | str | None = None) -> dict:
 	"""The agent's one tool endpoint (see ``_call_tool``). Every ``{ok: false}``
-	it answers is recorded for the admin error feed: a rejected call (bad token,
-	unsigned, unknown session, stale pairing) happens before the chat user is
-	known, and an argument, contract or focus refusal before the tool runs, so
-	neither reaches ``_dispatch_and_wrap``, which records the tools that failed
-	(the flag below keeps those from being counted twice)."""
+	it answers is recorded for the admin error feed: a rejected call (unsigned,
+	unknown session, stale pairing) happens before the chat user is known, and an
+	argument, contract or focus refusal before the tool runs, so neither reaches
+	``_dispatch_and_wrap``, which records the tools that failed (the flag below
+	keeps those from being counted twice). A 401 from a caller nobody knows is
+	not recorded: it is an internet probe, or a plugin-auth rejection that is
+	already in the Error Log."""
 	frappe.local.jarvis_tool_failure_recorded = False
 	frappe.local.jarvis_call_tool_user = None
 	result = _call_tool(tool, args)
