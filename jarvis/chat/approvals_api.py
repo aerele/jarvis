@@ -130,7 +130,7 @@ def list_approval_reviewers() -> list[dict]:
 			& role.role.isin(JARVIS_ADMIN_ROLES)
 			& user.name.notin([frappe.session.user, "Guest", "Administrator"])
 		)
-		.orderby(user.full_name, user.name)
+		.orderby(Coalesce(NullIf(user.full_name, ""), user.name), user.name)
 		.limit(500)
 		.run(as_dict=True)
 	)
