@@ -35,6 +35,24 @@ from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def call_tool(tool: str, args: dict | str | None = None) -> dict:
+	"""The agent's one tool endpoint (see ``_call_tool``). Every ``{ok: false}``
+	it answers is recorded for the admin error feed: a rejected call (unsigned,
+	unknown session, stale pairing) happens before the chat user is known, and an
+	argument, contract or focus refusal before the tool runs, so neither reaches
+	``_dispatch_and_wrap``, which records the tools that failed (the flag below
+	keeps those from being counted twice). A 401 from a caller nobody knows is
+	not recorded: it is an internet probe, or a plugin-auth rejection that is
+	already in the Error Log."""
+	frappe.local.jarvis_tool_failure_recorded = False
+	frappe.local.jarvis_call_tool_user = None
+	result = _call_tool(tool, args)
+	from jarvis import api_errors
+
+	api_errors.record_call_tool_failure(tool, result)
+	return result
+
+
+def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 	"""Whitelisted entry point for Jarvis tool dispatch.
 
 	Two authentication modes are supported:
@@ -100,6 +118,7 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 				"InvalidArgumentError",
 				f"unknown session: {session_key}",
 			)
+		frappe.local.jarvis_call_tool_user = plugin_user
 		enabled = frappe.db.get_value("User", plugin_user, "enabled")
 		if enabled is None:
 			frappe.local.response.http_status_code = 400
@@ -2596,6 +2615,12 @@ def _dispatch_and_wrap(
 				provenance_name=provenance_name,
 				ref_doctype=err_obj.get("doctype") if refused else None,
 			)
+		# The agent got {ok: false}, a 200, so no other error lane sees it. Placed
+		# after every rollback above so the row rides the envelope's commit.
+		from jarvis import api_errors
+
+		api_errors.record_tool_failure(tool, envelope.get("error"))
+		frappe.local.jarvis_tool_failure_recorded = True
 		return envelope
 	if sp:
 		try:
@@ -2621,6 +2646,14 @@ def _dispatch_and_wrap(
 			provenance=provenance,
 			provenance_name=provenance_name,
 		)
+	if not envelope_ok(tool, {"ok": True, "data": data}):
+		# A connector call that dispatched but answered {ok: false} inside its own
+		# envelope: the agent got a failure under an outer ok:true, so no failure
+		# branch above saw it.
+		from jarvis import api_errors
+
+		api_errors.record_tool_failure(tool, data.get("error") if isinstance(data, dict) else None)
+		frappe.local.jarvis_tool_failure_recorded = True
 	return {"ok": True, "data": data}
 
 

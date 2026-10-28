@@ -184,14 +184,14 @@ class TestReportEndpoint(ApiErrorsBase):
 		# error recurring with a different number), so they fold into one row.
 		row = {
 			"surface": "spa_chat",
-			"error_code": "run_error",
-			"error_class": "RunError",
-			"message": "the run failed after 3 tries",
+			"error_code": "export_failed",
+			"error_class": "ExportError",
+			"message": "the export failed after 3 tries",
 			"route": "/c/abc?x=1",
 		}
 		with _as(USER):
 			r1 = api_errors.report_client_errors([row])
-			r2 = api_errors.report_client_errors([dict(row, message="the run failed after 8 tries")])
+			r2 = api_errors.report_client_errors([dict(row, message="the export failed after 8 tries")])
 		self.assertEqual(r1["accepted"], 1)
 		self.assertEqual(r2["accepted"], 1)
 		rows = frappe.get_all(DT, filters={"user": USER}, fields=["name", "count", "route", "message"])
@@ -346,8 +346,11 @@ class TestErrorLogReader(ApiErrorsBase):
 		)
 		j = frappe.get_doc({"doctype": "Error Log", "method": "jarvis.chat.api.send_message", "error": jtb})
 		j.insert(ignore_permissions=True)
+		# Written without hooks, as by ERPNext code with no jarvis frame on the
+		# stack: inserted from here, the origin tag would rightly name this test.
 		e = frappe.get_doc({"doctype": "Error Log", "method": "erpnext.stock.x.get", "error": etb})
-		e.insert(ignore_permissions=True)
+		e.set_new_name()
+		e.db_insert()
 		frappe.db.commit()
 
 		self.addCleanup(frappe.delete_doc, "Error Log", j.name, force=True, ignore_permissions=True)
@@ -461,7 +464,13 @@ class TestRealTracebacks(ApiErrorsBase):
 		)
 
 	def test_the_reporters_own_failures_stay_local(self):
-		for rel in ("error_push.py", "api_errors.py", "chat/heartbeat.py"):
+		for rel in (
+			"error_push.py",
+			"api_errors.py",
+			"chat/heartbeat.py",
+			"admin_client.py",
+			"chat/usage_push.py",
+		):
 			tb = _stored_traceback(f"apps/jarvis/jarvis/{rel}")
 			self.assertFalse(api_errors.is_jarvis_error("jarvis errors: rollup push failed", tb), rel)
 
@@ -469,7 +478,10 @@ class TestRealTracebacks(ApiErrorsBase):
 		since = str(frappe.utils.now_datetime())
 		tb = _stored_traceback("apps/jarvis/jarvis/chat/pump.py", "make_mux", "RuntimeError('relay gone')")
 		doc = frappe.get_doc({"doctype": "Error Log", "method": "pump.make_mux", "error": tb})
-		doc.insert(ignore_permissions=True)
+		# db_insert skips the before_insert tag hook, so only the real traceback can
+		# make this row jarvis's (inserted from here, the hook would rescue it).
+		doc.set_new_name()
+		doc.db_insert()
 		self.addCleanup(frappe.delete_doc, "Error Log", doc.name, force=True, ignore_permissions=True)
 		frappe.db.commit()
 		rows = api_errors.collect_error_log(since=since, limit=500)["rows"]
@@ -556,7 +568,7 @@ class TestPushClaimConfirm(ApiErrorsBase):
 	def test_occurrence_arriving_after_claim_is_not_lost(self):
 		self._seed("window boom")
 
-		def _during_push(errors):
+		def _during_push(errors, **kw):
 			# Same error reported again mid-flight: it must land in a FRESH pushed=0
 			# row (it can't fold into the already-claimed one), so its count lives.
 			with _as(USER):
