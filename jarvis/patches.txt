@@ -68,3 +68,8 @@ jarvis.patches.v2_24_backfill_skill_use_in_file_box
 jarvis.patches.v2_25_backfill_filebox_card_results
 jarvis.patches.v2_26_hide_unanswered_chat_patterns
 jarvis.patches.v2_27_stamp_agent_token_issued_at
+<<<<<<< HEAD
+=======
+jarvis.patches.v2_28_chat_collaboration_foundation
+jarvis.patches.v2_29_backfill_holiday_touch_switches
+>>>>>>> a52f2a5 (feat(holiday-touches): server side for holiday and birthday greetings)
