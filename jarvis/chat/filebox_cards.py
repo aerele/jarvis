@@ -149,6 +149,33 @@ def _ask(conversation: str, owner: str, a: dict, reason: str) -> str:
 	return doc.name
 
 
+def _desk_link(doctype, name, user: str | None) -> str | None:
+	"""Cosmetic only: a failed lookup must never strand an already-saved result."""
+	if not user or not isinstance(doctype, str) or not isinstance(name, str):
+		return None
+	if re.search(r"[\[\]`*~\\\x00-\x1f\x7f]", name):
+		return None
+	try:
+		if not (
+			frappe.db.exists("DocType", doctype)
+			and frappe.db.exists(doctype, name)
+			and frappe.has_permission(doctype, "read", doc=name, user=user)
+		):
+			return None
+		slug = frappe.scrub(doctype).replace("_", "-")
+		# The renderer trims a bare path's final dot; quote() leaves dots literal.
+		target = quote(name, safe="").replace(".", "%2E")
+		return f"[{name}](/app/{slug}/{target})"
+	except (frappe.DoesNotExistError, frappe.PermissionError):
+		return None
+	except Exception:
+		try:
+			frappe.log_error(title="jarvis.file_box.result_link_failed", message=frappe.get_traceback())
+		except Exception:
+			pass  # Logging is optional too; retain the successful plain-text receipt.
+		return None
+
+
 def _note(tool: str | None, res: dict, asked: str | None, user: str | None = None) -> str:
 	if asked:
 		return "This change is waiting for you on the Approval Board."
@@ -159,27 +186,8 @@ def _note(tool: str | None, res: dict, asked: str | None, user: str | None = Non
 		return "This change is waiting for approval on the Approval Board."
 	verb = "Updated" if tool == "update_doc" else "Created"
 	doctype, name = data.get("doctype"), data["name"]
-	# Card conversion has no tool row for the client's document-ref linkifier.
 	# Link only a real result the requester can read, never the worker's privilege.
-	if (
-		user
-		and isinstance(doctype, str)
-		and isinstance(name, str)
-		and not re.search(r"[\[\]`*~\\\x00-\x1f\x7f]", name)
-	):
-		try:
-			readable = (
-				frappe.db.exists("DocType", doctype)
-				and frappe.db.exists(doctype, name)
-				and frappe.has_permission(doctype, "read", doc=name, user=user)
-			)
-		except (frappe.DoesNotExistError, frappe.PermissionError):
-			readable = False  # Deleted or permission-revoked during the lookup.
-		if readable:
-			slug = frappe.scrub(doctype).replace("_", "-")
-			# The renderer trims a bare path's final dot; quote() leaves dots literal.
-			target = quote(name, safe="").replace(".", "%2E")
-			name = f"[{name}](/app/{slug}/{target})"
+	name = _desk_link(doctype, name, user) or name
 	return f"{verb} {doctype or ''} {name}.".replace("  ", " ")
 
 
