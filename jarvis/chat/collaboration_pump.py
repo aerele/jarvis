@@ -11,6 +11,7 @@ from jarvis.chat.collaboration_bindings import require_live
 from jarvis.chat.collaboration_context import require_prompt_budget
 from jarvis.chat.collaboration_runtime import RuntimePolicy, verify_response
 from jarvis.chat.collaboration_turn import binding_for_run
+from jarvis.chat.socket_io import SendNotStarted
 from jarvis.exceptions import SITE_IS_COPY_CODE, AgentUnreachableError
 
 
@@ -100,6 +101,42 @@ def _reject(ctx, turn, binding, *, retry_allowed=False):
 	return False
 
 
+def cancel_unsent(ctx, run_id, row, binding) -> bool:
+	"""The actor or owner stopped a shared turn between the pump's claim and a
+	``chat.send`` refused before any byte. Stop saw the claim's send stamp and only
+	flagged the turn, so it is cancelled here as never sent: no send stamp, credit
+	released, the bound reply stopped, Stop's retry choice kept. One ``run:end``
+	(stopped) to the actor, as the aborted settlement would publish, but no usage
+	effects and no ``chat.abort``: nothing ran. False when the fence matched nothing."""
+	from jarvis.chat.collaboration_control import stamp_stopped_reply
+
+	def unit():
+		frappe.db.get_value(c.CONVERSATION, binding.conversation, "name", for_update=True)
+		won = ts.cancel_unsent_dispatch(run_id, int(row.version), epoch=ctx.epoch, target=ctx.relay_target_id)
+		if won and row.assistant_message:
+			stamp_stopped_reply(binding, run_id, row.assistant_message)
+		if won:
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
+		return won
+
+	if not txn.replay_on_conflict(unit, label="collaboration.cancel_unsent", fresh=True):
+		return False
+	ts.publish_fenced(
+		binding.actor,
+		"run:end",
+		conversation_id=binding.conversation,
+		run_id=run_id,
+		message_id=row.assistant_message,
+		pump_epoch=ctx.epoch,
+		relay_target_id=ctx.relay_target_id,
+		stopped=True,
+	)
+	from jarvis.chat.collaboration_ownership import wake_queued
+
+	wake_queued(ctx.relay_target_id)
+	return True
+
+
 def dispatch_one(ctx, turn):
 	from jarvis.chat import pump
 
@@ -124,11 +161,18 @@ def dispatch_one(ctx, turn):
 			if not pump._io_admit(ctx):
 				# #773: no lease time for the preflight write; the turn stays ready.
 				return False
-			fut = ctx.mux.issue_rpc(
-				"sessions.patch",
-				{"key": binding.session_key, "expectedSessionId": physical},
-				timeout_s=pump.ACK_TIMEOUT_S,
-			)
+			try:
+				fut = ctx.mux.issue_rpc(
+					"sessions.patch",
+					{"key": binding.session_key, "expectedSessionId": physical},
+					timeout_s=pump.ACK_TIMEOUT_S,
+				)
+			except SendNotStarted:
+				# Refused before any byte (PR #2201): nothing was checked or sent. The
+				# turn stays ready; a later slice preflights again.
+				ctx.io_deferred = True
+				ctx.io_deferrals += 1
+				return False
 			ctx.shared_preflights[run_id] = {
 				"fut": fut,
 				"version": int(turn["version"]),
@@ -221,6 +265,10 @@ def dispatch_one(ctx, turn):
 			attachments=payload.get("attachments"),
 			verified_session_id=physical,
 		)
+	except SendNotStarted as exc:
+		# Never sent: back to ready; the retry re-runs every access check above.
+		pump._return_unsent(ctx, rs, turn, exc, binding=binding)
+		return False
 	except AgentUnreachableError as exc:
 		pump._handle_ack_failure(ctx, rs, exc)
 		ctx.runs.pop(run_id, None)

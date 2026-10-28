@@ -43,9 +43,11 @@ HARD INVARIANTS (this component is TRANSPORT-PURE):
     operation at a time, so the reader loop and any RPC issuance never interleave
     partial frames or TLS calls. Writes still take the session's one ``_lock``
     first, and the wait for both is one bounded budget.
-  * A write that started and failed POISONS the transport at once (``is_closed``):
-    no later write starts, and the reader's ``Closing`` fails every other pending
-    RPC with the ambiguous ``ack-timeout`` sentinel, never a definite error.
+  * A write that started and failed, or hit a socket error before its first byte,
+    POISONS the transport at once (``is_closed``): no later write starts, and the
+    reader's ``Closing`` fails every other pending RPC with the ambiguous
+    ``ack-timeout`` sentinel, never a definite error. A write refused as closed,
+    busy or past its deadline leaves the transport as it was.
   * No second reader ever touches ``_recv`` (R-15): one thread owns the socket
     read; RPC futures are resolved on that SAME reader loop.
   * Only THREE causes end a hop (D5 §2/§5): socket failure, lease loss, or
@@ -482,6 +484,10 @@ class RelayMux:
 		# stray/late/unknown frame): see _on_reader_fault. Should stay at 0 in
 		# healthy operation - any nonzero count here is a bug, not routine noise.
 		self._reader_errors = 0
+		# #773: writes refused before any byte (``SendNotStarted``), and transports
+		# poisoned by a write (started-and-failed, or a socket error before its first byte).
+		self._writes_refused = 0
+		self._writes_poisoned = 0
 
 	# -- lifecycle ---------------------------------------------------------- #
 
@@ -1101,16 +1107,23 @@ class RelayMux:
 		through the session's IO gate. The reader resolves the future when the
 		response arrives; the caller awaits ``future.result(timeout)``.
 
-		Raises ``SendNotStarted`` (definite: no byte of the frame went out; the
-		transport stays usable) or, once the write started, ``SendUncertain``
-		(code ``ack-timeout``) or the original non-socket exception; both of those
-		poison the transport. The pending entry is removed on every failure."""
+		Raises ``SendNotStarted`` (no byte of the frame went out) or, once the write
+		started, ``SendUncertain`` (code ``ack-timeout``) or the original non-socket
+		exception. Those two poison the transport, and so does a ``SendNotStarted``
+		with reason ``local`` (a socket error before the first byte: the socket may be
+		broken), so ``is_closed()`` is already true when this raises. A closed, busy or
+		deadline refusal leaves the transport as it was. The pending entry is removed
+		on every failure."""
 		if self.is_closed() or self._stopping.is_set():
+			self._bump("writes_refused")
 			raise SendNotStarted(f"{method} was not sent: the relay connection is closed")
 		write_s = IO_WRITE_TIMEOUT_S
 		deadline = self._write_deadline
 		if deadline is not None and time.monotonic() + write_s > deadline:
-			raise SendNotStarted(f"{method} was not sent: no time left in this delivery window")
+			self._bump("writes_refused")
+			raise SendNotStarted(
+				f"{method} was not sent: no time left in this delivery window", reason="deadline"
+			)
 		payload, req_id = _build_request_frame(method, params)
 		fut = PendingRpc(method, req_id, timeout_s)
 		fut._on_settle = self._drop_pending
@@ -1118,15 +1131,30 @@ class RelayMux:
 			self._pending[req_id] = fut
 		try:
 			self._write(method, payload, write_s, deadline)
-		except SendNotStarted:
+		except SendNotStarted as exc:
 			self._drop_pending(req_id)
+			self._bump("writes_refused")
+			if exc.reason == "local":
+				self._poison(method, exc)
 			raise
-		except BaseException:
-			self._poisoned.set()
-			self._wake.set()
+		except BaseException as exc:
 			self._drop_pending(req_id)
+			self._poison(method, exc)
 			raise
 		return fut
+
+	def _poison(self, method: str, exc: BaseException) -> None:
+		"""No later write starts on this transport. Called with no lock held; warns
+		once per mux, naming only the method and the exception class."""
+		first = not self._poisoned.is_set()
+		self._poisoned.set()
+		self._wake.set()
+		self._bump("writes_poisoned")
+		if first:
+			try:
+				_logger.warning("relay_mux: transport poisoned by %s (%s)", method, type(exc).__name__)
+			except Exception:
+				pass  # diagnostics only: never replace the caller's outcome
 
 	def _write(self, method: str, payload: str, write_s: float, deadline: float | None) -> None:
 		session = self._session
@@ -1613,6 +1641,8 @@ class RelayMux:
 				"rpc_failed_on_close": self._rpc_failed_on_close,
 				"chat_delta_ignored": self._chat_delta_ignored,
 				"reader_errors": self._reader_errors,
+				"writes_refused": self._writes_refused,
+				"writes_poisoned": self._writes_poisoned,
 				"breaker_open": self.is_breaker_open(),
 				"active_runs": len(self._runs),
 			}

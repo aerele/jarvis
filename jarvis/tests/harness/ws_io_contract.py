@@ -335,6 +335,38 @@ def finalize_while_waiting(mode):
 	}
 
 
+def failure_before_first_send(mode):
+	"""PR #2201: a socket error raised before the first raw send of a write (the
+	budget already spent) must reach the gate as a socket-class error, so it is
+	``SendNotStarted`` (reason ``local``) with no byte on the wire and the transport
+	dead. Depends on how this library version wraps the facade's ``TimeoutError``."""
+	cli, srv, rel = _pair(mode, relay=True)
+	peer = tp.Peer(srv)
+	peer.start()
+	io = _SocketIO(tp.client_ws(cli))
+	time.sleep(0.1)
+	wire = len(rel.c2s)
+
+	def spent():
+		raise TimeoutError("timed out")
+
+	io._send_budget = spent
+	err = None
+	try:
+		io.write(json.dumps({"blob": "p" * 50_000}), lock=None, method="chat.send")
+	except SendNotStarted as e:
+		err = e
+	time.sleep(0.2)
+	out = {
+		"ok_not_started": err is not None and getattr(err, "reason", None) == "local",
+		"ok_dead": io.dead,
+		"ok_no_bytes": len(rel.c2s) == wire and peer.messages == [],
+	}
+	peer.stop()
+	rel.close()
+	return out
+
+
 def abort_no_plaintext(mode):
 	cli, srv, rel = _pair(mode, relay=True)
 	peer = tp.Peer(srv)
@@ -404,6 +436,7 @@ def main() -> int:
 			check("close_during_write", mode, close_during_write)
 			check("peer_eof", mode, peer_eof)
 			check("finalize_while_waiting", mode, finalize_while_waiting)
+			check("failure_before_first_send", mode, failure_before_first_send)
 		check("abort_no_plaintext", "tls13", abort_no_plaintext)
 	finally:
 		for s in OPEN:

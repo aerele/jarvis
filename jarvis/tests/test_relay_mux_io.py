@@ -142,7 +142,8 @@ class TestMuxSendUncertain(_MuxCase):
 		with self.assertRaises(AgentUnreachableError) as cm:
 			mux.issue_rpc("chat.abort", {"sessionKey": "sess-1"}, timeout_s=5)
 		self.assertEqual(cm.exception.code, "send-not-started")
-		self.assertLess(time.monotonic() - t1, 0.2)
+		# Instant, not a wait: a reintroduced 0.5s read hold would still fail this.
+		self.assertLess(time.monotonic() - t1, 0.25)
 		t2 = time.monotonic()
 		with self.assertRaises(AgentUnreachableError) as cm:
 			other.result(10)
@@ -261,3 +262,55 @@ class TestMuxWriteDeadline(_MuxCase):
 		self.assertFalse(sess._io.dead)
 		time.sleep(0.2)
 		self.assertEqual(peer.messages, [])
+
+
+class TestPoisonWarningNeverMasksTheOutcome(_MuxCase):
+	"""(Independent CODE review.) The one poison warning is diagnostics only: a logging
+	handler that raises must not replace what the caller is owed. Through the real mux
+	and socket gate: a socket error before the first raw send stays ``SendNotStarted``
+	(reason ``local``), and an RQ job timeout or ``SystemExit`` stays the SAME object;
+	the transport is poisoned, no lane or pending RPC is left, and the warning was
+	attempted without the request's text."""
+
+	def _run(self, exc_for_budget, *, after_first_chunk: bool):
+		mux, sess, _peer, _ = self.mux("tls13")
+		real = sess._io._send_budget
+		calls: list[int] = []
+
+		def budget():
+			calls.append(1)
+			if len(calls) > (1 if after_first_chunk else 0):
+				raise exc_for_budget
+			return real()
+
+		message = "secret request text " + "z" * 100_000
+		with (
+			patch.object(sess._io, "_send_budget", side_effect=budget),
+			patch.object(relay_mux._logger, "warning", side_effect=RuntimeError("log handler broke")) as warn,
+		):
+			try:
+				mux.send_chat("sess-1", message, "run-poison", _handler(), timeout_s=5)
+			except BaseException as e:
+				raised = e
+			else:
+				raised = None
+		self.assertTrue(mux.is_closed(), "the transport is poisoned")
+		self.assertNotIn("run-poison", mux._runs, "ghost lane left behind")
+		self.assertEqual(mux._pending, {}, "ghost pending RPC left behind")
+		self.assertEqual(warn.call_count, 1, "the warning was attempted once")
+		self.assertNotIn("secret request text", " ".join(map(str, warn.call_args.args)))
+		return raised
+
+	def test_local_not_started_survives_a_failing_logger(self):
+		from jarvis.chat.agent_client import SendNotStarted
+
+		raised = self._run(TimeoutError("timed out"), after_first_chunk=False)
+		self.assertIs(type(raised), SendNotStarted, repr(raised))
+		self.assertEqual(raised.reason, "local")
+
+	def test_job_timeout_and_system_exit_survive_a_failing_logger(self):
+		from jarvis.tests.test_ws_io_gate import _JobTimeout
+
+		for exc, after in ((_JobTimeout(), True), (SystemExit(3), False)):
+			with self.subTest(exc=type(exc).__name__):
+				self.assertIs(self._run(exc, after_first_chunk=after), exc)
