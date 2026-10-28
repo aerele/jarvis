@@ -162,6 +162,7 @@ jobs:
         run: |
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
           node --test jarvis/public/js/*.test.mjs jarvis/public/js/shared/*.test.mjs
+          node --test jarvis/public/js/shared/holiday/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
   # Builds BOTH deploy artifacts (the /jarvis SPA and the /jarvis-mobile PWA) on Node
@@ -203,6 +204,12 @@ jobs:
         # that only shows up on Node 18 fails in CI instead of at Frappe Cloud deploy time.
         # The stub above satisfies pwa/src/socket.js's bench-config import, same as the SPA.
         run: npm run install-pwa && npm run build-pwa
+      - name: Holiday worn-item art stays out of the main bundle
+        # The art is lazy (holiday-* chunk). A static import would put it in every
+        # user's first load, and nothing else would notice. The gate has a self-test.
+        run: |
+          node --test frontend/scripts/check-holiday-chunks.test.mjs
+          node frontend/scripts/check-holiday-chunks.mjs
 
   # The v15 gate: from-scratch Frappe version-15 bench + the full jarvis suite.
   #

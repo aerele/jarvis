@@ -59,6 +59,35 @@ export async function downloadConversation(conversation, format) {
 	}
 }
 
+// What the holiday touch shows the session user today (jarvis.holiday_touch.api). The
+// method is GET-only server-side and frappe-ui's `call` always POSTs, so this is a
+// plain fetch. A non-2xx (a 403 for a user without Jarvis access) rejects with .status;
+// the holiday store reads 403 as "none". A 200 whose message is not an object rejects
+// too (malformed: true), so the store keeps the answer it already has. The call gives up
+// after 10 s and never reads the HTTP cache: a stale copy would defeat the refresh.
+export async function getHolidayToday() {
+	const response = await fetch("/api/method/jarvis.holiday_touch.api.get_today", {
+		method: "GET",
+		credentials: "same-origin",
+		cache: "no-store",
+		headers: { Accept: "application/json" },
+		signal: typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(10000) : undefined,
+	});
+	if (!response.ok) {
+		throw Object.assign(new Error(`holiday touch ${response.status}`), {
+			status: response.status,
+		});
+	}
+	const message = (await response.json()).message;
+	if (!message || typeof message !== "object" || Array.isArray(message)) {
+		throw Object.assign(new Error("holiday touch: no answer in the response"), {
+			status: response.status,
+			malformed: true,
+		});
+	}
+	return message;
+}
+
 export const listConversations = ({ refresh = false } = {}) =>
 	call("jarvis.chat.api.list_conversations", refresh ? { refresh: 1 } : {});
 export const listTools = () => call("jarvis.chat.api.list_tools");
