@@ -13,6 +13,16 @@ export function supportGuard(to, from, next) {
 }
 
 const routes = [
+	{
+		path: "/shared",
+		name: "SharedChats",
+		component: () => import("@/views/SharedChatsList.vue"),
+	},
+	{
+		path: "/shared/:id",
+		name: "SharedConversation",
+		component: () => import("@/views/SharedChatView.vue"),
+	},
 	{ path: "/", name: "Chat", component: ChatView, meta: { chat: true } },
 	{ path: "/c/:id", name: "Conversation", component: ChatView, meta: { chat: true } },
 	// /skills renders the two-tab shell (Skills | Learning). The name stays
