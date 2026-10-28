@@ -32,7 +32,11 @@ vi.mock("@vueuse/core", async (importOriginal) => {
 	return { ...actual, useStorage: (_key, initial) => ref(initial) };
 });
 vi.mock("frappe-ui", () => ({
-	Autocomplete: { template: "<div/>" },
+	Autocomplete: {
+		props: ["options"],
+		template:
+			'<div class="reviewer-options"><span v-for="o in options" :key="o.value">{{ o.label }}</span></div>',
+	},
 	Badge: { props: ["label", "theme"], template: '<span class="badge">{{ label }}</span>' },
 	Breadcrumbs: { props: ["items"], template: "<nav/>" },
 	Button: {
@@ -47,7 +51,10 @@ vi.mock("frappe-ui", () => ({
 		emits: ["update:modelValue"],
 		template: `<select v-if="type === 'select'" :value="modelValue" @change="$emit('update:modelValue', $event.target.value)"><option v-for="o in options" :key="o.value" :value="o.value">{{ o.label }}</option></select><input v-else :placeholder="placeholder" :value="modelValue" @input="$emit('update:modelValue', $event.target.value)" />`,
 	},
-	Popover: { template: '<div><slot name="target" :togglePopover="() => {}" /></div>' },
+	Popover: {
+		template:
+			'<div><slot name="target" :togglePopover="() => {}" /><slot name="body" /></div>',
+	},
 	Tooltip: { template: "<span><slot/></span>" },
 	toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 	call: vi.fn(),
@@ -242,11 +249,17 @@ const button = (w, label) => w.findAll("button").find((b) => b.text() === label)
 
 describe("ApprovalsBoard one inbox", () => {
 	it("loads the dedicated approval reviewer roster instead of generic sharing users", async () => {
+		api.listApprovalReviewers.mockResolvedValueOnce([
+			{ name: "reviewer@example.com", full_name: "Eligible Reviewer" },
+			{ name: "unnamed@example.com", full_name: null },
+		]);
 		const w = await board();
 		await button(w, "Tag for review").trigger("click");
 		await flushPromises();
 		expect(api.listApprovalReviewers).toHaveBeenCalledOnce();
 		expect(api.listShareableUsers).not.toHaveBeenCalled();
+		expect(w.get(".reviewer-options").text()).toContain("Eligible Reviewer");
+		expect(w.get(".reviewer-options").text()).toContain("unnamed@example.com");
 	});
 
 	let mounted = [];
