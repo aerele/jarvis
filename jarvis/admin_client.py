@@ -3046,7 +3046,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			title="admin_client: non-JSON response",
 			message=f"url={url!r} status={resp.status_code} body={resp.text[:1000]!r}",
 		)
-		raise AdminUnreachableError(f"admin returned non-JSON response (status {resp.status_code})")
+		raise AdminUnreachableError(
+			f"admin returned non-JSON response (status {resp.status_code})", status_code=resp.status_code
+		)
 
 	envelope = payload.get("message", payload) if isinstance(payload, dict) else payload
 
@@ -3150,7 +3152,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 				status=resp.status_code,
 				exc_type=exc_type,
 			)
-		raise AdminUnreachableError(clean or f"admin returned an unrecognised error: {exc_type}")
+		raise AdminUnreachableError(
+			clean or f"admin returned an unrecognised error: {exc_type}", status_code=resp.status_code
+		)
 	# Sprint-3 PR-8 (2026-06-16 review): a 4xx response with the
 	# structured envelope ({"ok": false, "error": {...}}) is a
 	# user-input / business-rule error, NOT an "admin is unreachable"
@@ -3193,7 +3197,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 				code=rejected,
 				detail=msg,
 			)
-		raise AdminUnreachableError(f"admin returned a {resp.status_code} error: {msg}")
+		raise AdminUnreachableError(
+			f"admin returned a {resp.status_code} error: {msg}", status_code=resp.status_code
+		)
 	if isinstance(envelope, dict) and not envelope.get("ok", True):
 		err = envelope.get("error", {}) or {}
 		code = err.get("code") or "?"
@@ -3209,7 +3215,7 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		# omitted - the bench knows where it's pointing.
 		if _permanent_rejection_code(envelope):
 			raise AdminRejectedError(f"{code}: {msg}", code=code, detail=msg)
-		raise AdminUnreachableError(f"{code}: {msg}")
+		raise AdminUnreachableError(f"{code}: {msg}", status_code=resp.status_code)
 	from jarvis.chat.runtime_profile import private_connection
 
 	return private_connection(envelope.get("data", envelope) if isinstance(envelope, dict) else envelope)
