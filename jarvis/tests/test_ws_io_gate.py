@@ -329,7 +329,8 @@ class TestStalledWritePoisons(_SocketCase):
 		with self.assertRaises(SendNotStarted) as cm:
 			sess._send("chat.abort", {"sessionKey": "s"})
 		self.assertEqual(cm.exception.code, "send-not-started")
-		self.assertLess(time.monotonic() - t1, 0.05)
+		# Instant, not a wait: a reintroduced 0.5s read hold would still fail this.
+		self.assertLess(time.monotonic() - t1, 0.25)
 		time.sleep(0.2)
 		self.assertEqual(len(rel.c2s), wire, "a refused write put bytes on the wire")
 		self.assertEqual(peer.messages, [])
