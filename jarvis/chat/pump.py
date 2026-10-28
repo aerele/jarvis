@@ -79,7 +79,12 @@ import frappe
 from jarvis import compat
 from jarvis.chat import empty_reply_recovery, txn
 from jarvis.chat import turn_state as ts
+<<<<<<< HEAD
 from jarvis.chat.agent_client import YIELD_CONTINUATION_WAIT_S
+=======
+from jarvis.chat.agent_client import IO_GATE_WAIT_S, IO_WRITE_TIMEOUT_S, YIELD_CONTINUATION_WAIT_S
+from jarvis.chat.collaboration_ownership import executor_clause, legacy_clause
+>>>>>>> 43c05eb (fix(chat): bound attachment writes and keep recovery visible)
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import AgentUnreachableError, SiteIsCopyError
 
@@ -125,6 +130,17 @@ SLICE_BLOCK_S = 0.2
 # chat.send ack window. Longer than the mux default so a busy accept path still
 # acks; on expiry the mux raises the `ack-timeout` sentinel → park recovering.
 ACK_TIMEOUT_S = 15.0
+
+# #773 per-write lease admission. A gateway write may wait IO_GATE_WAIT_S (5) for the
+# socket and take IO_WRITE_TIMEOUT_S (10) to finish. It is started only when that,
+# plus IO_PRESEND_SLACK_S for the DB work between the check and the send, ends before
+# the LOCAL lease bound minus LEASE_IO_MARGIN_S (clock/renew margin) and
+# SLICE_TAIL_RESERVE_S (the rest of the slice up to its renew). With LEASE_TTL_S=30
+# that admits writes while the lease is at most 7s old; a slice that cannot admit a
+# write defers it (no side effect) and forces a renew at its end.
+LEASE_IO_MARGIN_S = 3
+SLICE_TAIL_RESERVE_S = 4
+IO_PRESEND_SLACK_S = 1
 
 # DB-disconnect bounded backoff (D6 §6): after this many CONSECUTIVE slice-level
 # operational errors the pump PARKS the affected turns and exits (never spins).
@@ -1521,10 +1537,17 @@ def _default_snapshot(ctx: "PumpContext") -> dict:
 	there is no active stream to freeze. Issues ``sessions.list`` and awaits the frame,
 	then parses it (:func:`_parse_snapshot_frame`); any error => the CDX-11 fail-CLOSED
 	shape. The MID-HOP refresh does NOT use this — it is issue-and-poll (CDX-17) so a
-	stalled control RPC never blocks delta application."""
+	stalled control RPC never blocks delta application.
+
+	#773: the write is lease-admitted and the wait never outlasts the lease's IO
+	deadline; either refusal is the same fail-closed shape."""
+	if not _io_admit(ctx):
+		return dict(_SNAPSHOT_FAILED)
 	try:
 		fut = ctx.mux.issue_rpc("sessions.list", {}, timeout_s=ACK_TIMEOUT_S)
-		frame = fut.result(ACK_TIMEOUT_S)
+		deadline = _io_deadline(ctx)
+		wait_s = ACK_TIMEOUT_S if deadline is None else min(ACK_TIMEOUT_S, max(0.0, deadline - _monotonic()))
+		frame = fut.result(wait_s)
 	except Exception:
 		return dict(_SNAPSHOT_FAILED)
 	return _parse_snapshot_frame(ctx, frame)
@@ -1724,6 +1747,16 @@ class PumpContext:
 	pending_recoveries: dict[str, _PendingRecovery] = field(default_factory=dict)
 	# CDX-17: the in-flight mid-hop capacity-refresh RPC (issue-and-poll, never blocked on).
 	pending_snapshot: _PendingSnapshot | None = None
+<<<<<<< HEAD
+=======
+	shared_preflights: dict = field(default_factory=dict)
+	# #773: conservative LOCAL lease bound (monotonic): the stamp taken just BEFORE the
+	# last successful lease_acquire/lease_renew plus LEASE_TTL_S. None (a hand-built
+	# context) means no per-write admission, as before.
+	lease_valid_until: float | None = None
+	# A write site deferred this slice for lack of lease time: renew at the slice end.
+	io_deferred: bool = False
+>>>>>>> 43c05eb (fix(chat): bound attachment writes and keep recovery visible)
 
 
 # --------------------------------------------------------------------------- #
@@ -1767,6 +1800,24 @@ def run_pump_hop(
 	holder = f"jarvis-pump::{site}::{relay_target_id}::hop{hop_counter}"
 
 	hop_started_mono = _monotonic()
+<<<<<<< HEAD
+=======
+	# A stale queued hop must not acquire/restamp legacy-RQ work before its
+	# later kill-switch check. Durable mode flips already hold the shard lock.
+	if _row_transport_mode(relay_target_id) == _MODE_LEGACY and frappe.db.has_column(
+		TURN, "collaboration_executor"
+	):
+		if frappe.db.exists(
+			TURN,
+			{
+				"relay_target_id": relay_target_id,
+				"collaboration_executor": "rq",
+				"state": ["in", ts.NONTERMINAL_STATES],
+			},
+		):
+			return {"acquired": False, "relay_target_id": relay_target_id}
+	lease_stamp = _monotonic()  # taken BEFORE the acquire: the DB expiry is later
+>>>>>>> 43c05eb (fix(chat): bound attachment writes and keep recovery visible)
 	won, epoch = ts.lease_acquire(relay_target_id, holder, hop_counter=hop_counter)
 	if not won or epoch is None:
 		return {"acquired": False, "relay_target_id": relay_target_id}
@@ -1779,6 +1830,7 @@ def run_pump_hop(
 		hop_counter=hop_counter,
 		site=site,
 		deps=deps,
+		lease_valid_until=lease_stamp + ts.LEASE_TTL_S,
 	)
 	now = _monotonic()
 	ctx.soft_deadline = now + soft_budget_s
@@ -1820,6 +1872,10 @@ def run_pump_hop(
 	op_errors = 0
 	conflicts = 0  # consecutive slices lost to a snapshot race
 	try:
+		# R0 (#773): renew before the first gateway write. Only kill-switch reads and the
+		# connect ran since the committed acquire, and a slow connect can outlive the
+		# lease: a lost lease exits here, before any write.
+		_renew_lease(ctx)
 		_reconcile_on_start(ctx)
 		slices = 0
 		while _monotonic() < ctx.soft_deadline and _monotonic() < ctx.hard_deadline:
@@ -2042,6 +2098,10 @@ def _maybe_refresh_capacity(ctx: PumpContext) -> None:
 		return  # a refresh is already in flight — do not stack another
 	if _monotonic() - ctx.last_snapshot_mono < SNAPSHOT_REFRESH_S:
 		return  # not due yet
+	if not _io_admit(ctx):
+		# #773: no lease time for the write. Neither fold a failed snapshot (that would
+		# wrongly fail capacity closed) nor stamp the cadence: retry next slice.
+		return
 	try:
 		fut = ctx.deps.issue_snapshot(ctx)
 	except Exception:
@@ -2287,6 +2347,10 @@ def _dispatch_ready(ctx: PumpContext) -> int:
 	)
 	dispatched = 0
 	for r in rows:
+		# #773: stop the wave on a dead/poisoned transport, and defer (no side effect,
+		# the rows stay `ready` first in line) once the lease cannot cover a write.
+		if (ctx.mux is not None and ctx.mux.is_closed()) or not _io_admit(ctx):
+			break
 		if _dispatch_one(ctx, r["run_id"]):
 			dispatched += 1
 	return dispatched
@@ -2302,6 +2366,9 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 	if turn is None or turn["state"] != "ready":
 		return False
 
+	# #773: the last check before the first side effect (the CAS); deferred -> untouched.
+	if not _io_admit(ctx):
+		return False
 	# ready -> dispatching: E is FIRST stamped on the turn here, but the CAS now proves
 	# the SHARD control row still holds epoch E (confirm_dispatching's EXISTS clause,
 	# CDX-2) so a stale pump that read this ready row before a takeover cannot win. On
@@ -2358,18 +2425,33 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 			attachments=dispatch.get("attachments"),
 		)
 	except AgentUnreachableError as exc:
-		# Immediate send failure (socket write failed) — resolve inline (rare).
+		# Immediate send failure, resolved inline: ``send-not-started`` is definite
+		# (errored), a write that started is ``ack-timeout`` (park recovering, same
+		# key). Either way this hop no longer tracks the run.
 		_handle_ack_failure(ctx, rs, exc)
+		ctx.runs.pop(run_id, None)
 		return False
 	# Park the ack: polled by _poll_pending; on our deadline the ack-timeout
-	# sentinel path fires (park recovering), never a blocking .result().
+	# sentinel path fires (park recovering), never a blocking .result(). The window
+	# starts now, after the whole frame was written.
 	ctx.pending_acks[run_id] = _PendingAck(
 		fut=fut,
-		deadline=_monotonic() + ACK_TIMEOUT_S,
+		deadline=_monotonic() + _ack_window_s(dispatch),
 		rs=rs,
 		drained_note_ids=dispatch.get("drained_note_ids"),
 	)
 	return True
+
+
+def _ack_window_s(dispatch: dict) -> float:
+	"""The ``chat.send`` ack window for a dispatch payload: the size-based window
+	prepare stored (legacy parity, ``turn_handler._ack_timeout_s``), never below
+	ACK_TIMEOUT_S; a payload from before the key existed gets ACK_TIMEOUT_S."""
+	try:
+		stored = float(dispatch.get("ack_timeout_s") or 0)
+	except (TypeError, ValueError):
+		stored = 0.0
+	return max(ACK_TIMEOUT_S, stored)
 
 
 def _poll_pending(ctx: PumpContext) -> None:
@@ -3063,6 +3145,10 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 		# ``gateway_run_id`` is the ORIGINAL run the agent runtime already retired (that is
 		# why we are here waiting) - target the abort at the session's current run
 		# instead of a dead id.
+		if ctx.mux is not None and session_key and not _io_admit(ctx):
+			# #773: no lease time to ask the gateway to stop. Record nothing locally:
+			# cancel_requested stays set and the next slice sends the abort.
+			break
 		try:
 			if ctx.mux is not None and session_key:
 				ctx.mux.abort(
@@ -3122,15 +3208,60 @@ def _heartbeat_and_renew(ctx: PumpContext, progressed: bool) -> None:
 	lease-alive-but-not-draining pump goes progress-stale (the watchdog then
 	force-takes it over) while a healthy-but-quiet pump keeps renewing and is never
 	falsely expired. A 0-rows renew/heartbeat means the epoch was lost to a takeover
-	⇒ shared lease-loss exit."""
+	⇒ shared lease-loss exit.
+
+	#773: a slice that deferred a write for lack of lease time (``io_deferred``) also
+	renews here, inside the interval; that renew is not progress and does not move
+	the heartbeat cadence."""
 	now = _monotonic()
-	if now - ctx.last_heartbeat < HEARTBEAT_INTERVAL_S:
+	due = now - ctx.last_heartbeat >= HEARTBEAT_INTERVAL_S
+	if not due and not ctx.io_deferred:
 		return
-	ctx.last_heartbeat = now
-	if progressed and not ts.lease_heartbeat(ctx.relay_target_id, ctx.epoch):
-		ts.lease_lost_exit()
+	ctx.io_deferred = False
+	if due:
+		ctx.last_heartbeat = now
+		if progressed and not ts.lease_heartbeat(ctx.relay_target_id, ctx.epoch):
+			ts.lease_lost_exit()
+	_renew_lease(ctx)
+
+
+def _io_deadline(ctx: PumpContext) -> float | None:
+	"""The monotonic instant no gateway write of this hop may run past (#773)."""
+	if ctx.lease_valid_until is None:
+		return None
+	return ctx.lease_valid_until - LEASE_IO_MARGIN_S - SLICE_TAIL_RESERVE_S
+
+
+def _io_admit(ctx: PumpContext) -> bool:
+	"""May a gateway write start now? Checked BEFORE every write site's first side
+	effect (CAS, publish, key change, local record). False marks the slice
+	``io_deferred`` so it renews at its end; the site leaves its rows untouched."""
+	deadline = _io_deadline(ctx)
+	if deadline is None:
+		return True
+	if _monotonic() + IO_GATE_WAIT_S + IO_WRITE_TIMEOUT_S + IO_PRESEND_SLACK_S <= deadline:
+		return True
+	ctx.io_deferred = True
+	return False
+
+
+def _sync_io_deadline(ctx: PumpContext) -> None:
+	"""Push the IO deadline to the mux, whose write gate refuses (zero bytes) any
+	write that could not finish by then: the exact backstop to ``_io_admit``."""
+	if ctx.mux is not None:
+		ctx.mux.set_write_deadline(_io_deadline(ctx))
+
+
+def _renew_lease(ctx: PumpContext) -> None:
+	"""Renew the lease (commits first and last) and advance the local bound from a
+	stamp taken BEFORE the call. Call only at a committed boundary. 0 rows means the
+	epoch was lost: the shared lease-loss exit, before any further write."""
+	stamp = _monotonic()
 	if not ts.lease_renew(ctx.relay_target_id, ctx.epoch, holder=ctx.holder):
 		ts.lease_lost_exit()
+	if ctx.lease_valid_until is not None:
+		ctx.lease_valid_until = stamp + ts.LEASE_TTL_S
+		_sync_io_deadline(ctx)
 	_write_lease_mirror(ctx.relay_target_id)
 
 
@@ -3174,6 +3305,10 @@ def _reconcile_on_start(ctx: PumpContext) -> None:
 	# keeps the last-known foreign count (TTL) or goes conservative, never zero.
 	_reconcile_gateway_active(ctx, snap)
 	active_keys = snap.get("active_session_keys")
+	if ctx.lease_valid_until is not None:
+		# R1 (#773): the cold snapshot may have waited up to ACK_TIMEOUT_S; renew before
+		# the row loop's writes. Since the last commit only Redis and ctx changed.
+		_renew_lease(ctx)
 
 	rows = frappe.db.sql(
 		"""SELECT run_id, state, version, conversation, assistant_message,
@@ -3270,7 +3405,18 @@ def _issue_recovery_tail(ctx: PumpContext, r: dict, session_key: str) -> None:
 	"""OARF-5: issue the missed-terminal ``sessions.get`` recovery-tail RPC WITHOUT
 	blocking and park it (with the OARF-2 watermark window) for ``_poll_recoveries``.
 	Falls back to re-attach when the mux is unavailable."""
+<<<<<<< HEAD
 	if ctx.mux is None:
+=======
+	from jarvis.chat.collaboration import is_collaborative, is_collaborative_session
+
+	if is_collaborative(r.get("conversation")) or is_collaborative_session(session_key):
+		return
+
+	if ctx.mux is None or not _io_admit(ctx):
+		# No transport, or (#773) no lease time for the write: re-attach; the next hop's
+		# reconcile issues the tail.
+>>>>>>> 43c05eb (fix(chat): bound attachment writes and keep recovery visible)
 		_reattach_lane(ctx, r)
 		return
 	min_seq, max_seq = _recovery_window(r)
@@ -4354,7 +4500,8 @@ def _load_dispatch(turn: dict) -> dict:
 	prompt + created session into ``dispatch_payload`` JSON for the pump to
 	``chat.send``. Keys the pump reads: ``session_key`` (required), ``message``
 	(assembled prompt; falls back to the seed message content), ``thinking``,
-	``attachments``. Robust to a missing/partial payload."""
+	``attachments``, ``ack_timeout_s`` (#773; absent on older payloads). Robust to a
+	missing/partial payload."""
 	payload: dict = {}
 	raw = turn.get("dispatch_payload") if turn else None
 	if raw:
@@ -4376,6 +4523,7 @@ def _load_dispatch(turn: dict) -> dict:
 		"attachments": payload.get("attachments"),
 		"drained_note_ids": payload.get("drained_note_ids") or [],
 		"redispatch": int(payload.get("redispatch") or 0),
+		"ack_timeout_s": payload.get("ack_timeout_s"),
 	}
 
 
