@@ -1025,6 +1025,12 @@ export const listApprovalsPage = (p) =>
 	call("jarvis.chat.approvals_api.list_approvals_page", _page(p));
 export const listApprovalReviewers = () =>
 	call("jarvis.chat.approvals_api.list_approval_reviewers");
+// A Chat question's reviewers are explicit grants (requester only), never DocShares.
+// Both answer with the current reviewers: [{ user, full_name }].
+export const tagApprovalReviewer = (name, user) =>
+	call("jarvis.chat.approvals_api.tag_reviewer", { name, user });
+export const untagApprovalReviewer = (name, user) =>
+	call("jarvis.chat.approvals_api.untag_reviewer", { name, user });
 
 // ── File Box FB-1: cascade delete + clear-processed + bulk delete (Q4) ──────
 // delete_inbound: owner-gated cascade (approvals + messages + File docs + the

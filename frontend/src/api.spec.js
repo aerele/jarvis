@@ -9,7 +9,13 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 vi.mock("frappe-ui", () => ({ call: vi.fn(async () => ({})) }));
 
 import { call } from "frappe-ui";
-import { sendMessage, setSidebarOrder, searchLink } from "./api.js";
+import {
+	sendMessage,
+	setSidebarOrder,
+	searchLink,
+	tagApprovalReviewer,
+	untagApprovalReviewer,
+} from "./api.js";
 
 // The args object handed to `call("jarvis.chat.api.send_message", args)`.
 function lastSendArgs() {
@@ -170,5 +176,23 @@ describe("durable send receipts", () => {
 		await expect(
 			sendMessage("A", "hello", null, [], null, [], false, false, null, "a".repeat(32))
 		).rejects.toThrow("Delivery not confirmed");
+	});
+});
+
+describe("approval reviewer tagging (#756)", () => {
+	it("tags and untags through the dedicated endpoints, not the generic share", async () => {
+		await tagApprovalReviewer("AR-1", "ja@example.com");
+		expect(call).toHaveBeenLastCalledWith("jarvis.chat.approvals_api.tag_reviewer", {
+			name: "AR-1",
+			user: "ja@example.com",
+		});
+		await untagApprovalReviewer("AR-1", "ja@example.com");
+		expect(call).toHaveBeenLastCalledWith("jarvis.chat.approvals_api.untag_reviewer", {
+			name: "AR-1",
+			user: "ja@example.com",
+		});
+		expect(call.mock.calls.map((c) => c[0])).not.toContain(
+			"jarvis.chat.docmeta_api.toggle_share"
+		);
 	});
 });

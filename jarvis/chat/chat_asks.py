@@ -265,6 +265,17 @@ def resolve_on_user_message(conversation: str) -> None:
 		open_filter["sheet"] = ["is", "not set"]
 	if not frappe.db.exists(APPROVAL, open_filter):
 		return
+	# Lock exactly the Pending rows that this answer wins. A simultaneous
+	# reviewer decision cannot be announced as answered or resumed twice.
+	a = frappe.qb.DocType(APPROVAL)
+	where = (a.conversation == conversation) & (a.status == "Pending") & (a.source == "Chat")
+	if sheet_ready():
+		from frappe.query_builder.functions import Coalesce
+
+		where &= Coalesce(a.sheet, "") == ""
+	rows = frappe.qb.from_(a).select(a.name).where(where).for_update().run(pluck=True)
+	if not rows:
+		return
 	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status='Answered', decision=%(decision)s,
@@ -284,3 +295,8 @@ def resolve_on_user_message(conversation: str) -> None:
 	owner = frappe.db.get_value(CONV, conversation, "owner")
 	if owner:
 		publish_to_user(owner, {"kind": "action:settled", "conversation_id": conversation})
+
+	from jarvis.chat.approval_reviewers import notify_settled
+
+	for name in rows:
+		notify_settled(frappe.get_doc(APPROVAL, name), include_requester=False)

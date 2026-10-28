@@ -221,6 +221,15 @@ describe("dashboard-origin attention stays in Dashboard Builder", () => {
 		expect(useToasts().value).toHaveLength(0);
 	});
 
+	it("re-reads the approvals badge when a reviewer is tagged or untagged, silently", () => {
+		store.refreshApprovalsCount.mockClear();
+		socket.emit({ kind: "approval:tagged", name: "AR-1" });
+		expect(store.refreshApprovalsCount).toHaveBeenCalledTimes(1);
+		socket.emit({ kind: "approval:untagged", name: "AR-1" });
+		expect(store.refreshApprovalsCount).toHaveBeenCalledTimes(2);
+		expect(useToasts().value).toHaveLength(0);
+	});
+
 	it("re-reads the reviewer badge on review:pending without a toast", () => {
 		store.refreshReviewCount.mockClear();
 		socket.emit({ kind: "review:pending", queue: "skill_promotion", request: "JSPR-1" });

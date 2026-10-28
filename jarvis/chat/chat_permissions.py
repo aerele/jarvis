@@ -197,7 +197,7 @@ def has_session_permission(doc, ptype: str = "read", user: str | None = None) ->
 # --------------------------------------------------------------------------- #
 # Jarvis Approval Request - linked-conversation owner OR DocShare read grant.
 # --------------------------------------------------------------------------- #
-def approval_query_conditions(user: str | None = None) -> str:
+def _legacy_approval_query_conditions(user: str | None = None) -> str:
 	"""Scope Jarvis Approval Request queries exactly like ``approvals_api``'s
 	list: the caller owns the linked conversation, OR holds a DocShare read grant
 	on the approval (tagging). System Manager (and Administrator) see all."""
@@ -221,6 +221,25 @@ def approval_query_conditions(user: str | None = None) -> str:
 	)
 
 
+def approval_query_conditions(user: str | None = None) -> str:
+	"""Review grants belong to the review APIs, not generic REST or Desk."""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return ""
+	esc = frappe.db.escape(user)
+	a = "`tabJarvis Approval Request`"
+	owned = (
+		f"EXISTS (SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name={a}.conversation AND c.owner={esc})"
+	)
+	orphan = f"NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name={a}.conversation) AND {a}.owner={esc}"
+	legacy = _legacy_approval_query_conditions(user) or "1=1"
+	chat = f"({owned} OR ({orphan}))"
+	if frappe.db.has_column(CONVERSATION, "collaboration_active"):
+		chat += f" AND NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` cc WHERE cc.name={a}.conversation AND COALESCE(cc.collaboration_active, 0)<>0)"
+	scoped = f"COALESCE({a}.source, '')='Chat' AND NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` fb WHERE fb.name={a}.conversation AND COALESCE(fb.file_box, 0)<>0)"
+	return f"((NOT ({scoped}) AND ({legacy})) OR (({scoped}) AND ({chat})))"
+
+
 def has_approval_permission(doc, ptype: str = "read", user: str | None = None) -> bool:
 	"""Per-doc gate for Jarvis Approval Request. System Manager: all. Owner of the
 	linked conversation: full. A DocShare-read holder: READ only (view on the
@@ -230,6 +249,15 @@ def has_approval_permission(doc, ptype: str = "read", user: str | None = None) -
 	user = user or frappe.session.user
 	if user != "Administrator" and is_collaborative(doc.get("conversation")):
 		return False
+	from jarvis.chat import approval_reviewers
+
+	if approval_reviewers.is_chat(doc):
+		if user == "Administrator":
+			return True
+		owner = _conversation_owner(doc.get("conversation"))
+		if ptype == "create":
+			return owner is None or owner == user
+		return (owner or doc.owner) == user
 	if _is_sm(user):
 		return True
 	owner = _conversation_owner(doc.get("conversation"))

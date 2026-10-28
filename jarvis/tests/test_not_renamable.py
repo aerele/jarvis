@@ -16,6 +16,7 @@ from jarvis.tests.test_part3_security import _as, _ensure_user
 USER = "nr-user@example.com"
 
 NOT_RENAMABLE = (
+	"Jarvis Approval Reviewer",
 	"Jarvis Chat Binding",
 	"Jarvis Export Job",
 	"Jarvis Chat Send Request",

@@ -45,13 +45,27 @@ class JarvisApprovalRequest(NotRenamable, Document):
 	"""
 
 	def validate(self):
+		from jarvis.chat import approval_reviewers
 		from jarvis.chat.collaboration_asks import guard_record
 
 		guard_record(self)
+		if not self.is_new() and not self.flags.jarvis_server_write:
+			before = self.get_doc_before_save()
+			if approval_reviewers.is_chat(self) or (before and approval_reviewers.is_chat(before)):
+				if self.has_value_changed("source") or self.has_value_changed("conversation"):
+					frappe.throw(
+						"A Chat question's source and conversation cannot be changed.", frappe.PermissionError
+					)
 		self._guard_server_fields()
 		self._guard_decided_fields()
 		if self.status != "Pending" and not self.decision:
 			frappe.throw("A decided approval must carry the decision text.")
+
+	def validate_share(self, _share):
+		from jarvis.chat import approval_reviewers
+
+		if approval_reviewers.is_chat(self):
+			frappe.throw("Use Tag for review for a Chat question.", frappe.PermissionError)
 
 	def _guard_server_fields(self):
 		"""PR-1 §1: a document-injected model running as an Admin/SM dropper must not
@@ -142,8 +156,12 @@ class JarvisApprovalRequest(NotRenamable, Document):
 		owner's other tabs and devices to re-count (the acting tab already does)."""
 		if not self.has_value_changed("status") or self.is_new():
 			return
+		from jarvis.chat import approval_reviewers
 		from jarvis.chat.events import publish_to_user
 
+		if approval_reviewers.is_chat(self):
+			approval_reviewers.queue_settled(self)
+			return
 		owner = (
 			frappe.db.get_value("Jarvis Conversation", self.conversation, "owner")
 			if self.conversation

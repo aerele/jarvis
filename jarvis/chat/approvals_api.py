@@ -19,7 +19,7 @@ from frappe.query_builder.functions import Coalesce, Count, IfNull, NullIf, Trim
 from pypika.terms import Criterion, ExistsCriterion, Not, ValueWrapper
 
 from jarvis._session import impersonate
-from jarvis.chat import filebox_skills
+from jarvis.chat import approval_reviewers, filebox_skills
 from jarvis.chat.collaboration import is_collaborative
 from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as _ar
 from jarvis.permissions import (
@@ -117,23 +117,30 @@ def _may_act_on(conversation: str | None) -> bool:
 def list_approval_reviewers() -> list[dict]:
 	"""Capped Tag-for-review choices; generic sharing keeps its own policy."""
 	user = frappe.qb.DocType("User")
-	role = frappe.qb.DocType("Has Role")
 	return (
 		frappe.qb.from_(user)
-		.join(role)
-		.on((role.parent == user.name) & (role.parenttype == "User"))
 		.select(user.name, user.full_name)
-		.distinct()
-		.where(
-			(user.enabled == 1)
-			& (user.user_type == "System User")
-			& role.role.isin(JARVIS_ADMIN_ROLES)
-			& user.name.notin([frappe.session.user, "Guest", "Administrator"])
-		)
+		.where(approval_reviewers.eligible_condition(user) & (user.name != frappe.session.user))
 		.orderby(user.full_name, user.name)
 		.limit(500)
 		.run(as_dict=True)
 	)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def tag_reviewer(name: str, user: str) -> list[dict]:
+	"""Explicitly invite an eligible reviewer to this Chat question."""
+	refuse_in_tool_dispatch()
+	return approval_reviewers.change_tag(name, user)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def untag_reviewer(name: str, user: str) -> list[dict]:
+	"""Revoke a Chat question's explicit review grant."""
+	refuse_in_tool_dispatch()
+	return approval_reviewers.change_tag(name, user, remove=True)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -143,46 +150,40 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 	conversation, or any System Manager)."""
 	if status not in ("Pending", "Approved", "Rejected", "Answered", "Dismissed", "Decided", "All"):
 		frappe.throw("Invalid status filter")
-	if status == "All":
-		filters = {}
-	elif status == "Decided":
-		filters = {"status": ["in", ["Approved", "Rejected"]]}
-	else:
-		filters = {"status": status}
+	a = frappe.qb.DocType(APPROVAL)
+	query = frappe.qb.from_(a).select(
+		a.name,
+		a.title,
+		a.status,
+		a.document_type,
+		a.question,
+		a.context_md,
+		a.options,
+		a.conversation,
+		a.ref_doctype,
+		a.ref_name,
+		a.decision,
+		a.decided_by,
+		a.decided_at,
+		a.creation,
+		a.source.as_("_source"),
+		a.owner.as_("_owner"),
+	)
+	if status == "Decided":
+		query = query.where(a.status.isin(("Approved", "Rejected")))
+	elif status != "All":
+		query = query.where(a.status == status)
 	if _ar.sheet_ready():
-		filters["sheet"] = ["is", "not set"]  # a sheet's questions are answered in the sheet
-	# Non-SM: filter by ownership IN the query so `limit` applies to the
-	# caller's rows, not to a mixed page that later shrinks (and no N+1).
-	if "System Manager" not in frappe.get_roles():
-		my_convs = frappe.get_all(
-			"Jarvis Conversation",
-			filters={"owner": frappe.session.user},
-			pluck="name",
-		)
-		if not my_convs:
-			return []
-		filters["conversation"] = ["in", my_convs]
-	rows = frappe.get_all(
-		APPROVAL,
-		filters=filters,
-		fields=[
-			"name",
-			"title",
-			"status",
-			"document_type",
-			"question",
-			"context_md",
-			"options",
-			"conversation",
-			"ref_doctype",
-			"ref_name",
-			"decision",
-			"decided_by",
-			"decided_at",
-			"creation",
-		],
-		order_by="creation desc",
-		limit_page_length=int(limit),
+		query = query.where(Coalesce(a.sheet, "") == "")
+	me = frappe.session.user
+	legacy_access = (
+		a.name.isnotnull() if "System Manager" in frappe.get_roles() else _owns_conversation(a, me)
+	)
+	rows = (
+		query.where(approval_reviewers.visible_condition(a, me, legacy_access))
+		.orderby(a.creation, order=frappe.qb.desc)
+		.limit(int(limit))
+		.run(as_dict=True)
 	)
 	rows = [r for r in rows if not is_collaborative(r.get("conversation"))]
 	for r in rows:
@@ -200,6 +201,10 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 		}
 	for r in rows:
 		r["origin_page"] = conversation_origins.get(r.get("conversation"), "")
+	approval_reviewers.enrich_rows(rows, me, source_key="_source", owner_key="_owner")
+	for row in rows:
+		row.pop("_source", None)
+		row.pop("_owner", None)
 	return rows
 
 
@@ -332,12 +337,8 @@ def list_approvals_page(
 		base.append(legacy)
 	if _ar.sheet_ready():
 		base.append(IfNull(a.sheet, "") == "")  # answered in its File Box sheet
-	if not is_sm:
-		# Owner OR tagged: the caller owns the linked conversation, or holds a
-		# DocShare read grant on the approval (docmeta_api.toggle_share /
-		# assignment). EXISTS, not JOIN: a row matching BOTH arms must still
-		# appear exactly once in rows/total/facets.
-		base.append(_owns_conversation(a, me) | _tagged(a, me))
+	legacy_access = a.name.isnotnull() if is_sm else (_owns_conversation(a, me) | _tagged(a, me))
+	base.append(approval_reviewers.visible_condition(a, me, legacy_access))
 	status = f.get("status") or "Pending"
 	if status not in _APPROVAL_STATUSES:
 		frappe.throw("Invalid status filter")
@@ -372,6 +373,7 @@ def list_approvals_page(
 		frappe.qb.from_(a)
 		.select(
 			a.name,
+			a.owner,
 			a.title,
 			a.status,
 			a.source,
@@ -396,6 +398,7 @@ def list_approvals_page(
 		.offset(start)
 		.run(as_dict=True)
 	)
+	approval_reviewers.enrich_rows(rows, me)
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
 		r["shared"] = int(r.get("shared") or 0)
@@ -606,7 +609,10 @@ def get_approval(name: str) -> dict:
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.conversation)
-	can_act = _may_act_on(doc.conversation)
+	chat_question = approval_reviewers.is_chat(doc)
+	requester = approval_reviewers.requester(doc) if chat_question else doc.owner
+	is_requester = requester == frappe.session.user
+	can_act = approval_reviewers.may_review(doc) if chat_question else _may_act_on(doc.conversation)
 	can_read = can_act
 	if doc.get("assessment_key"):
 		from jarvis.chat.operator_review import may_review
@@ -615,9 +621,12 @@ def get_approval(name: str) -> dict:
 	if (
 		not can_read
 		and not can_act
-		and not frappe.db.exists(
-			"DocShare",
-			{"share_doctype": APPROVAL, "share_name": name, "user": frappe.session.user, "read": 1},
+		and (
+			chat_question
+			or not frappe.db.exists(
+				"DocShare",
+				{"share_doctype": APPROVAL, "share_name": name, "user": frappe.session.user, "read": 1},
+			)
 		)
 	):
 		frappe.throw("Not permitted", frappe.PermissionError)
@@ -627,13 +636,16 @@ def get_approval(name: str) -> dict:
 		"status": doc.status,
 		# .get(): tolerant of a not-yet-migrated site; NULL = File Box.
 		"source": doc.get("source") or "File Box",
+		"review_scoped": int(chat_question),
 		"document_type": doc.document_type or "",
-		"conversation": doc.conversation,
+		"conversation": doc.conversation if not chat_question or is_requester else "",
 		"origin_page": (
 			frappe.db.get_value("Jarvis Conversation", doc.conversation, "origin_page") or ""
 			if doc.conversation
 			else ""
-		),
+		)
+		if not chat_question or is_requester
+		else "",
 		"question": doc.question,
 		"context_md": doc.context_md or "",
 		"options": _parse_options(doc.options),
@@ -650,6 +662,13 @@ def get_approval(name: str) -> dict:
 		"creation": str(doc.creation or ""),
 		"owner": doc.owner,
 		"can_act": int(can_act and not doc.get("sheet")),  # a sheet's question: answered in the sheet
+		"can_manage": int(is_requester) if chat_question else int(can_act),
+		"is_requester": int(is_requester) if chat_question else int(_may_act_on(doc.conversation)),
+		"requester": requester,
+		"requester_name": (frappe.db.get_value("User", requester, "full_name") or requester)
+		if chat_question
+		else "",
+		"reviewers": approval_reviewers.reviewers(doc.name) if chat_question else [],
 	}
 
 
@@ -697,9 +716,13 @@ def _ar_pending_count() -> int:
 	legacy = _legacy_approval(a)
 	if legacy is not None:
 		query = query.where(legacy)
-	if "System Manager" not in frappe.get_roles():
-		me = frappe.session.user
-		query = query.where(_owns_conversation(a, me) | _tagged(a, me))
+	me = frappe.session.user
+	legacy_access = (
+		a.name.isnotnull()
+		if "System Manager" in frappe.get_roles()
+		else (_owns_conversation(a, me) | _tagged(a, me))
+	)
+	query = query.where(approval_reviewers.visible_condition(a, me, legacy_access))
 	return query.run()[0][0]
 
 
@@ -769,6 +792,8 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		from jarvis.chat.operator_review import check_review
 
 		check_review(doc, bool(int(approve)))
+	elif approval_reviewers.is_chat(doc):
+		approval_reviewers.check(doc)
 	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
@@ -778,21 +803,24 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		decision = filebox_skills.validate_answer(doc, decision)
 		approve = 1  # an answer, never a rejection
 	new_status = "Approved" if int(approve) else "Rejected"
-	# Conditional flip closes the double-decide race: only ONE concurrent
-	# caller wins the Pending -> decided transition.
-	frappe.db.sql(
-		"""update `tabJarvis Approval Request`
-		set status=%s, decision=%s, decided_by=%s, decided_at=%s
-		where name=%s and status='Pending'"""
-		+ _unlinked(),
-		(new_status, decision, frappe.session.user, frappe.utils.now_datetime(), name),
-	)
-	if not frappe.db.sql(
-		"select 1 from `tabJarvis Approval Request` where name=%s and status=%s and decided_by=%s",
-		(name, new_status, frappe.session.user),
-	):
-		frappe.throw(f"Approval {name} was decided concurrently")
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before reload and hooks
+	if approval_reviewers.is_chat(doc):
+		doc = approval_reviewers.decide_pending(name, decision, bool(int(approve)))
+	else:
+		# Conditional flip closes the double-decide race: only ONE concurrent
+		# caller wins the Pending -> decided transition.
+		frappe.db.sql(
+			"""update `tabJarvis Approval Request`
+			set status=%s, decision=%s, decided_by=%s, decided_at=%s
+			where name=%s and status='Pending'"""
+			+ _unlinked(),
+			(new_status, decision, frappe.session.user, frappe.utils.now_datetime(), name),
+		)
+		if not frappe.db.sql(
+			"select 1 from `tabJarvis Approval Request` where name=%s and status=%s and decided_by=%s",
+			(name, new_status, frappe.session.user),
+		):
+			frappe.throw(f"Approval {name} was decided concurrently")
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before reload and hooks
 	doc.reload()
 	# fire the trace-comment hook (db update bypasses on_update)
 	doc.run_method("on_update")
@@ -808,6 +836,9 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 			f"[Approval {doc.name} - {doc.title}] {verdict}: {decision}\n"
 			f"Continue the flow with this decision; do not re-ask."
 		)
+		if approval_reviewers.is_chat(doc):
+			actor = frappe.db.get_value("User", frappe.session.user, "full_name") or frappe.session.user
+			msg = f"Decided by {actor}.\n" + msg
 		# File-Box conversations: re-attach the source document. Attachments
 		# ride only the message they were sent with, so a resumed turn can
 		# no longer SEE the pages - observed live: the agent (correctly)
@@ -875,6 +906,8 @@ def dismiss_approval(name: str) -> dict:
 		from jarvis.chat.operator_review import check_review
 
 		check_review(doc, False)
+	elif approval_reviewers.is_chat(doc):
+		approval_reviewers.check(doc, manage=True)
 	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
@@ -894,6 +927,8 @@ def dismiss_approval(name: str) -> dict:
 		(name,),
 	):
 		frappe.throw(f"Approval {name} was decided concurrently")
+	doc.status = "Dismissed"
+	approval_reviewers.queue_settled(doc)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before resuming agent
 	resumed = False
 	if doc.get("routing"):
@@ -917,6 +952,8 @@ def restore_approval(name: str) -> dict:
 		from jarvis.chat.operator_review import check_review
 
 		check_review(doc, False)
+	elif approval_reviewers.is_chat(doc):
+		approval_reviewers.check(doc, manage=True)
 	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
@@ -935,6 +972,8 @@ def restore_approval(name: str) -> dict:
 		"select 1 from `tabJarvis Approval Request` where name=%s and status='Pending'", (name,)
 	):
 		frappe.throw(f"Approval {name} was changed concurrently")
+	doc.status = "Pending"
+	approval_reviewers.queue_settled(doc)
 	return {"ok": True, "status": "Pending"}
 
 

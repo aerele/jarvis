@@ -306,6 +306,12 @@ export function attachGlobalNotifier({ socket, router }) {
 				// a card or held write was decided somewhere: the badge may have dropped
 				store.refreshApprovalsCount();
 				return;
+			case "approval:tagged":
+			case "approval:untagged":
+				// a Chat question's reviewer grant was added or revoked: the count of what
+				// waits on this user moved. Badge only; the board re-reads its own lists.
+				store.refreshApprovalsCount();
+				return;
 			case "review:pending": {
 				// a skill or wiki promotion is waiting on this reviewer: re-read the
 				// sidebar Skills badge now (server truth, not +1; both queues share
