@@ -94,6 +94,15 @@ class TestApprovalReviewers(unittest.TestCase):
 		self.assertFalse(names & {email("admin"), "Administrator", "Guest"})
 		self.assertIn(email("manager"), names)
 
+	def test_missing_display_names_sort_by_the_label_shown_in_the_picker(self):
+		for missing in (None, ""):
+			with self.subTest(full_name=missing):
+				frappe.db.set_value("User", email("both"), "full_name", missing)
+				with as_user(email("caller")):
+					rows = approvals_api.list_approval_reviewers()
+				ours = [r["name"] for r in rows if r["name"].startswith(PREFIX)]
+				self.assertEqual(ours, [email("admin"), email("manager"), email("both")])
+
 	def test_empty_roster_when_only_the_caller_has_an_admin_role(self):
 		frappe.db.savepoint("j757_empty")
 		try:
