@@ -33,16 +33,26 @@ double-counts it: telemetry-grade, the lesser evil next to losing it.
 
 A batch that cannot go through does not block the ones after it. Admin's own
 payload refusal (``InvalidErrorRollup``) drops it at once. Anything else is
-reverted and retried, and a batch that admin ANSWERED with a failure 12 cycles (an
-hour) in a row is dropped (cursors advance, the claim stays) with a loud log. A transport
-failure, a 401/403/429 or a stopped tenant is never counted: those are outages,
-and the batch waits for them to end.
+reverted and retried, and a batch admin answered with a failure 12 times (a
+400/500-class answer, not a gateway 502/503/504 or a timeout) is dropped (cursors
+advance, the claim stays) with a loud log. A transport failure, a timeout, a
+502/503/504, a 401/403/429 or a stopped tenant is never counted: those are outages,
+and the batch waits for them to end. While one lasts the push backs off: the next
+attempt waits 5, 10, 20, 40, then 60 minutes (``jarvis_error_push_retry_after``), and
+any answered failure or success ends the wait.
 
 Diagnosing a stalled pipeline (``bench --site <site> console``)::
 
     d = frappe.db.get_default
-    for k in ("last_ok_at", "last_attempt_at", "consecutive_failures", "last_failure_cause", "inflight"):
-        print(k, d("jarvis_error_push_" + k))
+    for k in (
+        "last_ok_at",
+        "last_attempt_at",
+        "consecutive_failures",
+        "last_failure_cause",
+        "inflight",
+        "retry_after",
+    ):
+        print(k, d("jarvis_error_push_" + k))  # retry_after: set it to '' to push now
     print(d("jarvis_error_log_watermark"), d("jarvis_failed_turn_watermark"))  # cursors
     frappe.db.count("Jarvis Client Error", {"pushed": 0})  # waiting in the buffer
     # what the Error Log lane would send, without calling admin:
@@ -52,8 +62,8 @@ Diagnosing a stalled pipeline (``bench --site <site> console``)::
 
 Defaults written here: ``jarvis_error_push_last_ok_at``,
 ``jarvis_error_push_last_attempt_at``, ``jarvis_error_push_consecutive_failures``,
-``jarvis_error_push_last_failure_cause`` (plus ``jarvis_error_push_batch`` and
-``jarvis_error_push_inflight``). Once the last success is over an hour old and a
+``jarvis_error_push_last_failure_cause`` (plus ``jarvis_error_push_batch``,
+``jarvis_error_push_inflight`` and ``jarvis_error_push_retry_after``). Once the last success is over an hour old and a
 push fails, an Error Log row "jarvis errors: rollup push stalled <N>h (<cause>)"
 is written at most every 6 hours; a dropped batch writes "jarvis errors: admin
 refused rollup batch" (and always a ``jarvis.error_push`` log line). The
@@ -86,6 +96,7 @@ from jarvis.chat.usage_push import _admin_configured
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
+	AdminRejectedError,
 	AdminUnreachableError,
 	AdminValidationError,
 )
@@ -122,18 +133,34 @@ PUSH_TIMEOUT_S = 30
 #: run (the timeout above plus the scans); a crashed holder frees it by expiry.
 _PUSH_LOCK_TTL_S = 300
 
-#: A batch admin answered with a failure this many cycles in a row (an hour) is dropped.
+#: A batch admin answered with a failure (a 400/500-class answer, not a gateway
+#: 502/503/504 or a timeout) this many times is dropped.
 MAX_BATCH_FAILURES = 12
+
+#: What a proxy in front of admin answers while admin is down or slow: an outage, not
+#: a verdict on the batch.
+_GATEWAY_STATUSES = frozenset({502, 503, 504})
+
+#: After an outage the wait before the next attempt starts here, doubles per failure
+#: in a row, and stops growing at the cap (5, 10, 20, 40, then 60 minutes).
+_BACKOFF_FIRST_MIN = 5
+_BACKOFF_MAX_MIN = 60
+
+#: The wait is cut by this much so a tick that lands a little early (scheduler
+#: jitter) is not skipped for a whole extra */5 cycle.
+_BACKOFF_SLACK_S = 60
 
 #: Durable health of the pipeline (global DefaultValues), for an operator.
 _OK_KEY = "jarvis_error_push_last_ok_at"
 _ATTEMPT_KEY = "jarvis_error_push_last_attempt_at"
 _FAILURES_KEY = "jarvis_error_push_consecutive_failures"
 _CAUSE_KEY = "jarvis_error_push_last_failure_cause"
-#: "<batch id>:<n>": the cycles in a row admin answered this batch with a failure.
+#: "<batch id>:<n>": how many times admin answered this batch with a failure.
 _BATCH_KEY = "jarvis_error_push_batch"
 #: The buffer rows claimed for a call that has not finished, as JSON.
 _INFLIGHT_KEY = "jarvis_error_push_inflight"
+#: Until this time (a datetime) the push stands down after an outage; "" for none.
+_RETRY_AFTER_KEY = "jarvis_error_push_retry_after"
 
 #: A failed push is called "stalled" once the last success is this old.
 STALLED_AFTER_H = 1
@@ -210,7 +237,7 @@ def _push_lock_name() -> str:
 def push_error_rollup() -> None:
 	"""``*/5`` scheduler entry. Self-gating + best-effort; NEVER raises."""
 	try:
-		if api_errors.capture_off() or not _admin_configured():
+		if api_errors.capture_off() or not _admin_configured() or _backing_off():
 			return
 		with redis_lock(_push_lock_name(), timeout_s=_PUSH_LOCK_TTL_S) as held:
 			if held:
@@ -283,8 +310,7 @@ def _do_push() -> None:
 			"error_log": len(log_result["rows"]),
 			"turns": len(turn_result["rows"]),
 		}
-		batch_id = _batch_id(log_mark, turn_mark, ui_names)
-		reason = _drop_reason(e, batch_id)
+		reason = _drop_decision(e, log_mark, turn_mark, ui_names)
 		if reason:
 			advance()
 			_finish_dropped(len(errors), lanes, reason)
@@ -293,6 +319,7 @@ def _do_push() -> None:
 		# where they were. Re-raise for push_error_rollup to classify.
 		_revert_claim(ui_names)
 		_state_set(_INFLIGHT_KEY, "")
+		_set_backoff(e)
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the revert
 		raise
 
@@ -337,16 +364,21 @@ def _is_invalid_batch(e: Exception) -> bool:
 
 def _counts_toward_drop(e: Exception) -> bool:
 	"""True for a failure admin ANSWERED with (or a bug in building the batch): the
-	same batch is likely to fail again. An outage (a transport error, 401/403, 429)
-	or a stopped tenant says nothing about the batch, so it is waited out."""
+	same batch is likely to fail again. An outage (a transport error or timeout, a
+	gateway 502/503/504, 401/403, 429) or a stopped tenant says nothing about the
+	batch, so it is waited out."""
+	if isinstance(e, AdminRejectedError):
+		return True  # admin's own permanent refusal, even when it sent a 502
 	if isinstance(e, (AdminAuthError, AdminRateLimitedError)):
 		return False
 	if isinstance(e, AdminValidationError):
 		return not _is_retry_later(e)
 	if isinstance(e, AdminUnreachableError):
-		# A network failure is raised `from` the requests error; a 5xx or a
-		# non-JSON body (admin answered) has no cause.
-		return not isinstance(e.__cause__, requests.RequestException)
+		# A network failure or timeout is raised `from` the requests error. Without
+		# a cause admin (or its proxy) answered: only a gateway status is an outage.
+		if isinstance(e.__cause__, requests.RequestException):
+			return False
+		return e.status_code not in _GATEWAY_STATUSES
 	return True
 
 
@@ -355,9 +387,20 @@ def _batch_id(log_mark, turn_mark, ui_names: list[str]) -> str:
 	return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
 
+def _drop_decision(e: Exception, log_mark, turn_mark, ui_names: list[str]) -> str:
+	"""``_drop_reason`` that cannot raise: the caller must always reach the revert
+	of the claim. A decision that fails means "retry" (and is logged)."""
+	try:
+		return _drop_reason(e, _batch_id(log_mark, turn_mark, ui_names))
+	except Exception:
+		frappe.logger("jarvis.error_push").warning("could not decide whether to drop a batch", exc_info=True)
+		return ""
+
+
 def _drop_reason(e: Exception, batch_id: str) -> str:
 	"""Why this failed batch should be dropped, or "" to retry it. Counts the
-	cycles in a row the SAME batch (same cursors and first buffer row) failed."""
+	times admin answered the SAME batch (same cursors and first buffer row) with a
+	failure; an outage in between neither counts nor resets it."""
 	if _is_invalid_batch(e):
 		return f"admin refused the payload ({_INVALID_BATCH})"
 	if not _counts_toward_drop(e):
@@ -366,7 +409,7 @@ def _drop_reason(e: Exception, batch_id: str) -> str:
 	n = frappe.utils.cint(seen_n) + 1 if seen_id == batch_id else 1
 	_state_set(_BATCH_KEY, f"{batch_id}:{n}")
 	if n >= MAX_BATCH_FAILURES:
-		return f"failed {n} cycles in a row ({_failure_cause(e)})"
+		return f"admin answered with a failure {n} times ({_failure_cause(e)})"
 	return ""
 
 
@@ -375,10 +418,33 @@ def _finish_dropped(size: int, lanes: dict, reason: str) -> None:
 	say so where an operator will look."""
 	_state_set(_BATCH_KEY, "")
 	_state_set(_INFLIGHT_KEY, "")
+	_state_set(_RETRY_AFTER_KEY, "")
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- drop the batch
 	detail = f"dropped {size} errors ({lanes}): {reason}"
 	frappe.logger("jarvis.error_push").warning(detail)
 	_log_throttled("dropped", 1, "jarvis errors: admin refused rollup batch", detail)
+
+
+def _set_backoff(e: Exception) -> None:
+	"""After a failure that does not count toward a drop (an outage), wait before
+	the next attempt; after one that does, clear the wait so a poison batch keeps
+	the 5-minute cadence and is dropped within the hour."""
+	if _counts_toward_drop(e):
+		_state_set(_RETRY_AFTER_KEY, "")
+		return
+	in_a_row = frappe.utils.cint(_state_get(_FAILURES_KEY)) + 1
+	minutes = min(_BACKOFF_FIRST_MIN * 2 ** (in_a_row - 1), _BACKOFF_MAX_MIN)
+	wait = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=minutes, seconds=-_BACKOFF_SLACK_S)
+	_state_set(_RETRY_AFTER_KEY, str(wait))
+
+
+def _backing_off() -> bool:
+	"""True while an outage wait is running. An unreadable value is no wait."""
+	try:
+		until = _state_get(_RETRY_AFTER_KEY)
+		return bool(until) and frappe.utils.now_datetime() < frappe.utils.get_datetime(until)
+	except Exception:
+		return False
 
 
 def _wire(row: dict) -> dict:
@@ -504,6 +570,7 @@ def _note_success() -> None:
 	_state_set(_FAILURES_KEY, "0")
 	_state_set(_CAUSE_KEY, "")
 	_state_set(_BATCH_KEY, "")
+	_state_set(_RETRY_AFTER_KEY, "")
 
 
 def _note_failure(e: Exception) -> None:
