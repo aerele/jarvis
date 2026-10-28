@@ -1169,7 +1169,8 @@ def _tell_both_owners(
 	given a copy. Not to the admin about their own act."""
 	from jarvis.chat import macros, macros_api
 
-	subject = f"{macros_api.ADMIN_HANDOVER_NOTICE}: {macro_name}"
+	# The desk bell renders a subject as HTML. The bodies are shown as text.
+	subject = f"{macros_api.ADMIN_HANDOVER_NOTICE}: {frappe.utils.escape_html(macro_name)}"
 	copied = frappe.utils.comma_and(list(copied_to), add_quotes=False)
 	if old_owner != admin and (new_owner or copied_to):
 		if not new_owner:

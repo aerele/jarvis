@@ -283,3 +283,15 @@ class TestACopyThatBreaks(ManyBase):
 		self.assertIn("R&D sweep", failed["reason"])
 		self.assertNotIn("&amp;", failed["reason"])
 		self.assertNotIn("something went wrong", failed["reason"])
+
+
+class TestTheNoticeSubject(ManyBase):
+	def test_the_handover_notice_subject_escapes_the_macro_name(self):
+		macro = self._macro(OWNER, "<b>Q4</b>")
+		self._give(macro, [TARGET])
+		for user in (OWNER, TARGET):
+			(note,) = self._notices(user)
+			self.assertIn("&lt;b&gt;", note.subject)
+			self.assertNotIn("<b>", note.subject)
+			# The body is shown as text by the Macros list, so it stays as written.
+			self.assertIn("<b>Q4</b>", note.email_content)

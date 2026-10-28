@@ -242,3 +242,15 @@ class TestACopyThatBreaks(ManyBase):
 			res = self._give(skill, [TARGET, OTHER], keep=True)
 		(failed,) = res["copy_failed"]
 		self.assertEqual(failed["reason"], "R&D is full <b>today</b>.")
+
+
+class TestTheNoticeSubject(ManyBase):
+	def test_a_notice_subject_escapes_the_skill_name(self):
+		# A new skill's name is a slug, so a name with markup can only be an old row.
+		row = frappe._dict(name="old-row", skill_name="<b>Q4</b>")
+		skills_admin.notify_user(TARGET, row, skills_admin.ADMIN_HANDOVER_NOTICE, "body")
+		(note,) = frappe.get_all(
+			"Notification Log", filters={"for_user": TARGET, "subject": ["like", "%Q4%"]}, pluck="subject"
+		)
+		self.assertIn("&lt;b&gt;Q4&lt;/b&gt;", note)
+		self.assertNotIn("<b>", note)
