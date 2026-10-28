@@ -295,7 +295,7 @@ def authorize_scope(scope: dict, expected_fingerprint: str | None = None, result
 		for doctype in _doctypes():
 			frappe.get_meta(doctype, cached=False)
 		frappe.local.role_permissions = {}
-	if normalize_scope(scope["company"], scope["accounts"]) != scope:
+	if normalize_scope(scope["company"], scope["accounts"], month=scope.get("month")) != scope:
 		raise ScopeChanged("Refresh the Payment Calendar snapshot.")
 	company = require_company(scope["company"])
 	if not company.default_currency or not frappe.db.exists("Currency", company.default_currency):

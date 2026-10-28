@@ -20,7 +20,7 @@ vi.mock("@/components/LayoutHeader.vue", () => ({
 }));
 import PaymentCalendarPage from "./PaymentCalendarPage.vue";
 import * as api from "@/api/paymentCalendar";
-import { ok, refusal } from "../../../tests/payment-calendar/fixtures";
+import { ok, refusal, complete, deferred } from "../../../tests/payment-calendar/fixtures";
 
 describe("Native Payment Calendar page", () => {
 	let wrapper;
@@ -83,5 +83,64 @@ describe("Native Payment Calendar page", () => {
 		expect(wrapper.find(".minimum-field button").exists()).toBe(false);
 		expect(wrapper.get(".minimum-value strong").text()).toBe("—");
 		expect(wrapper.get(".pcal-select-button").attributes("disabled")).toBeDefined();
+	});
+	it("keeps the calendar on screen with a refreshing status during automatic replacement", async () => {
+		await render();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		await vi.advanceTimersByTimeAsync(270000);
+		expect(wrapper.find('[data-kpi="cash"]').exists()).toBe(true);
+		expect(wrapper.text()).toContain("Refreshing data…");
+		expect(wrapper.get(".pcal-title-row button").attributes("disabled")).toBeDefined();
+		const fresh = complete();
+		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
+		late.resolve(ok(fresh));
+		await flushPromises();
+		expect(wrapper.text()).toContain("Refreshes automatically every 5 minutes");
+		expect(wrapper.text()).not.toContain("Snapshot expired");
+	});
+	it("keeps native labelled checkbox selection and cancel/apply behavior", async () => {
+		await render();
+		await wrapper.get(".pcal-select-button").trigger("click");
+		const box = wrapper.get('.account-choices input[type="checkbox"]');
+		expect(box.element.checked).toBe(true);
+		expect(box.element.closest("label").textContent).toContain("Operating bank");
+		await box.setValue(false);
+		await wrapper.get(".pcal-dialog-actions button").trigger("click");
+		expect(api.setPreferences).not.toHaveBeenCalled();
+		await wrapper.get(".pcal-select-button").trigger("click");
+		expect(wrapper.get(".account-choices input").element.checked).toBe(true);
+		await wrapper.get(".account-choices input").setValue(false);
+		await wrapper.get(".pcal-dialog-actions .pcal-primary").trigger("click");
+		await flushPromises();
+		expect(api.setPreferences).toHaveBeenLastCalledWith("Manufacturing", []);
+	});
+	it("keeps the calendar mounted through worker contention instead of showing a full-page error", async () => {
+		await render();
+		const grid = wrapper.get(".calendar-grid").element;
+		api.requestSnapshot.mockResolvedValueOnce(refusal("worker_busy"));
+		await vi.advanceTimersByTimeAsync(270000);
+		expect(wrapper.get(".calendar-grid").element).toBe(grid);
+		expect(wrapper.text()).not.toContain("Calendar unavailable");
+		expect(wrapper.text()).toContain("Waiting to load");
+	});
+	it("keeps an empty calendar frame while expired balances await replacement", async () => {
+		await render();
+		const grid = wrapper.get(".calendar-grid").element;
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		await vi.advanceTimersByTimeAsync(300001);
+		expect(wrapper.get(".calendar-grid").element).toBe(grid);
+		expect(wrapper.get('[data-kpi="cash"] .kpi-value').text()).toBe("—");
+		expect(wrapper.text()).not.toContain("Preparing your calendar");
+		expect(wrapper.text()).toContain("Loading current balances");
+	});
+	it("waits automatically when workers are busy on first open", async () => {
+		api.requestSnapshot.mockResolvedValueOnce(refusal("worker_busy"));
+		await render();
+		expect(wrapper.text()).not.toContain("Calendar unavailable");
+		expect(wrapper.text()).toContain("This page will update automatically.");
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(wrapper.find(".calendar-grid").exists()).toBe(true);
 	});
 });

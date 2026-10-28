@@ -199,6 +199,8 @@ def collect(scope: dict, fingerprint: str) -> dict:
 			scope["window_end"],
 			precision=precision,
 		)
+		if scope.get("month"):
+			projected["month"] = scope["month"]
 		if bank and (("hget", "fiscal_years") not in hits or bank["precision"] != precision):
 			raise CalendarSourceUnavailable("source_contract_unavailable")
 		if any(sources.values()) and (

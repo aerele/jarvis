@@ -1,3 +1,4 @@
+import { vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import CalendarKpis from "./CalendarKpis.vue";
 import { complete } from "../../../tests/payment-calendar/fixtures";
@@ -55,6 +56,26 @@ describe("Payment Calendar KPIs", () => {
 		expect(wrapper.get('[data-kpi="payable"]').text()).toContain("Payable now ₹5,90,000.00");
 		expect(wrapper.get('[data-kpi="payable"]').text()).toContain("Overdue ₹4,00,000.00");
 		expect(wrapper.get('[data-kpi="payable"]').text()).toContain("Undated ₹1,00,000.00");
+		wrapper.unmount();
+	});
+	it("preserves the KPI footprint and wide layout while loading blank amounts", async () => {
+		const snapshot = complete();
+		snapshot.projection.book_cash = "123456789012345.00";
+		const wrapper = mount(CalendarKpis, {
+			props: { snapshot, selected: "2026-10-24", day: null },
+		});
+		const bounds = vi
+			.spyOn(wrapper.element, "getBoundingClientRect")
+			.mockReturnValue({ height: 240 });
+		await wrapper.setProps({ snapshot: { ...snapshot } });
+		expect(wrapper.element.style.minHeight).toBe("240px");
+		await wrapper.setProps({
+			loading: true,
+			snapshot: { ...snapshot, projection: { ...snapshot.projection, book_cash: null } },
+		});
+		expect(wrapper.classes()).toContain("long-values");
+		expect(wrapper.element.style.minHeight).toBe("240px");
+		bounds.mockRestore();
 		wrapper.unmount();
 	});
 });

@@ -1,9 +1,19 @@
 <template>
-	<section class="pcal-panel" aria-label="Payment Calendar">
+	<section class="pcal-panel" aria-label="Payment Calendar" :aria-busy="loading">
 		<div class="pcal-panel-heading calendar-heading">
 			<div>
 				<h2>{{ monthLabel(month) }}</h2>
-				<p>Remaining supplier dues by due date</p>
+				<p role="status">
+					<template v-if="loadError"
+						>Couldn’t load this month.
+						<button class="pcal-text-button" @click="$emit('retry')">
+							Retry
+						</button></template
+					>
+					<template v-else-if="waiting">Waiting to load this month…</template>
+					<template v-else-if="loading">Loading values…</template>
+					<template v-else>Remaining supplier dues by due date</template>
+				</p>
 			</div>
 			<div class="pcal-actions">
 				<button
@@ -128,8 +138,11 @@ const props = defineProps({
 	selected: { type: String, required: true },
 	month: { type: String, required: true },
 	mode: { type: String, default: "month" },
+	loading: { type: Boolean, default: false },
+	waiting: { type: Boolean, default: false },
+	loadError: { type: Boolean, default: false },
 });
-const emit = defineEmits(["select", "browse", "today"]);
+const emit = defineEmits(["select", "browse", "today", "retry"]);
 const scope = computed(() => props.snapshot.scope),
 	grid = computed(() => monthGrid(props.month));
 const weeks = computed(() =>
@@ -179,6 +192,14 @@ const settlementColours = {
 	"No dues": null,
 };
 function settlement(date) {
+	if ((props.loading || props.loadError) && !day(date) && date.startsWith(props.month + "-"))
+		return props.loadError ? "Not loaded" : "Loading…";
+	if (
+		scope.value.month &&
+		!date.startsWith(scope.value.month + "-") &&
+		isSelectable(date, scope.value)
+	)
+		return "Load month";
 	const status = day(date)?.settlement;
 	return props.snapshot.projection.payable_settlement_complete === true &&
 		props.snapshot.projection.reconciliation?.Payable != null &&

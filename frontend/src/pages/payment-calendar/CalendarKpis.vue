@@ -1,14 +1,16 @@
 <template>
 	<div
+		ref="element"
 		class="pcal-kpis"
-		:class="{ 'long-values': cards.some((card) => card.value.length > 14) }"
+		:class="{ 'long-values': cards.some(isWide) }"
+		:style="{ minHeight: minimumHeight ? `${minimumHeight}px` : undefined }"
 	>
 		<article
 			v-for="card in cards"
 			:key="card.key"
 			:data-kpi="card.key"
 			class="pcal-kpi"
-			:class="{ wide: card.value.length > 14 }"
+			:class="{ wide: isWide(card) }"
 		>
 			<p class="kpi-label">{{ card.label }}</p>
 			<p class="kpi-value" :class="card.key === 'closing' ? riskClass : ''">
@@ -31,7 +33,7 @@
 	</div>
 </template>
 <script setup>
-import { computed } from "vue";
+import { computed, nextTick, onMounted, onUpdated, onUnmounted, ref } from "vue";
 import { exactMoney } from "@/lib/paymentCalendar/format";
 import { dateLabel } from "@/lib/paymentCalendar/dates";
 import { riskLabel } from "./messages";
@@ -39,6 +41,7 @@ const props = defineProps({
 	snapshot: { type: Object, required: true },
 	day: { type: Object, default: null },
 	selected: { type: String, required: true },
+	loading: { type: Boolean, default: false },
 });
 const money = (value) =>
 	exactMoney(value, props.snapshot.currency, props.snapshot.projection.precision);
@@ -74,4 +77,30 @@ const cards = computed(() => [
 				: riskLabel(props.day?.risk),
 	},
 ]);
+// Keep the same footprint while amounts disappear or the selected date changes.
+const element = ref(null),
+	minimumHeight = ref(0),
+	previousWidths = ref({});
+const isWide = (card) =>
+	props.loading ? !!previousWidths.value[card.key] : card.value.length > 14;
+function rememberLayout() {
+	if (props.loading || !element.value) return;
+	minimumHeight.value = Math.max(
+		minimumHeight.value,
+		element.value.getBoundingClientRect().height
+	);
+	previousWidths.value = Object.fromEntries(
+		cards.value.map((card) => [card.key, card.value.length > 14])
+	);
+}
+function resize() {
+	minimumHeight.value = 0;
+	void nextTick(rememberLayout);
+}
+onMounted(() => {
+	rememberLayout();
+	window.addEventListener("resize", resize);
+});
+onUpdated(rememberLayout);
+onUnmounted(() => window.removeEventListener("resize", resize));
 </script>
