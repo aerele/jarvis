@@ -35,6 +35,8 @@ read them). A run's conversation is never returned.
 
 from __future__ import annotations
 
+import html
+
 import frappe
 from frappe import _
 
@@ -1080,11 +1082,21 @@ def _give_copies(macro: str, users: list[str], old_owner: str, admin: str) -> tu
 			_leave_comment(copy.name, f"{admin} gave {user} this copy of a macro of {old_owner}.")
 			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- each copy stands on its own
 			copies.append({"user": user, "macro": copy.name})
-		except frappe.ValidationError as e:
+		except Exception as e:
 			frappe.db.rollback()
 			del frappe.local.message_log[messages:]  # said in copy_failed, not as a popup
-			refused.append({"user": user, "reason": frappe.utils.strip_html(str(e)) or _("Not copied.")})
+			refused.append({"user": user, "reason": _copy_failure(e)})
 	return copies, refused
+
+
+def _copy_failure(error: Exception) -> str:
+	"""What ``copy_failed`` says for a copy that did not land. A refusal is plain text
+	(the dialog escapes it again for its toast); anything else is logged and kept
+	short, so one bad copy never stops the others or the notices after them."""
+	if isinstance(error, frappe.ValidationError):
+		return html.unescape(frappe.utils.strip_html(str(error))) or _("Not copied.")
+	frappe.log_error(title="macro handover: copy failed")
+	return _("Not copied: something went wrong. The error is in the Error Log.")
 
 
 def _handover_under_lock(row, old_owner: str, new_owner: str, admin: str, *, hold_reason: str):

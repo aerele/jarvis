@@ -36,6 +36,8 @@ OWNER = ho.OWNER
 ADMIN = ho.ADMIN
 TARGET = ho.TARGET
 SECOND = ho.SECOND_TARGET
+THIRD = ho.ORDER_FIRST
+COPY_FAILED = "macro handover: copy failed"
 DISABLED = ho.DISABLED
 TAG = ho.TAG
 
@@ -213,3 +215,71 @@ class TestKeep(ManyBase):
 				with self.assertRaises(frappe.ValidationError):
 					self._give(macro, [TARGET], keep=bad)
 		self.assertEqual(self._row(macro).owner, OWNER)
+
+
+class TestACopyThatBreaks(ManyBase):
+	"""Anything a copy throws, not only a refusal, is that copy's failure: the others
+	stand, the notices go out, and the error is logged."""
+
+	def _error_logs(self):
+		return frappe.db.count("Error Log", {"method": COPY_FAILED})
+
+	def _assert_second_alone_failed(self, macro, res, logs_before):
+		self.assertEqual([c["user"] for c in res["copies"]], [TARGET, THIRD])
+		(failed,) = res["copy_failed"]
+		self.assertEqual(failed["user"], SECOND)
+		self.assertIn("something went wrong", failed["reason"])
+		self.assertTrue(self._copy_of(macro, TARGET))
+		self.assertTrue(self._copy_of(macro, THIRD))
+		self.assertIsNone(self._copy_of(macro, SECOND))
+		self.assertEqual(self._error_logs(), logs_before + 1)
+		for user in (OWNER, TARGET, THIRD):
+			self.assertTrue(self._notices(user), user)
+		self.assertEqual(self._notices(SECOND), [])
+
+	def test_an_unexpected_error_on_one_copy_is_reported_and_the_rest_go_through(self):
+		macro = self._macro(OWNER, "boom")
+		real = macros_admin_api._leave_comment
+
+		def comment(target, text, **kwargs):
+			if f"gave {SECOND} this copy" in text:
+				raise frappe.QueryDeadlockError
+			return real(target, text, **kwargs)
+
+		logs_before = self._error_logs()
+		with patch.object(macros_admin_api, "_leave_comment", side_effect=comment):
+			res = self._give(macro, [TARGET, SECOND, THIRD], keep=True)
+		self._assert_second_alone_failed(macro, res, logs_before)
+
+	def test_a_duplicate_from_the_recipients_insert_is_reported_the_same_way(self):
+		macro = self._macro(OWNER, "dupe")
+		real = frappe.model.document.Document.insert
+
+		def insert(doc, *args, **kwargs):
+			if doc.doctype == MACRO and frappe.session.user == SECOND:
+				raise frappe.DuplicateEntryError(MACRO, doc.macro_name)
+			return real(doc, *args, **kwargs)
+
+		logs_before = self._error_logs()
+		with patch.object(frappe.model.document.Document, "insert", insert):
+			res = self._give(macro, [TARGET, SECOND, THIRD], keep=True)
+		self._assert_second_alone_failed(macro, res, logs_before)
+
+	def test_a_copy_refusal_reads_as_plain_text(self):
+		macro = self._macro(OWNER, "R&D sweep")
+		real = macros_admin_api._handover_refusal
+		calls = []
+
+		def refusal(row, user):
+			calls.append(user)
+			# The checks before anything is written pass; SECOND takes the name after them.
+			if user == SECOND and calls.count(SECOND) == 2:
+				self._macro(SECOND, "R&D sweep")
+			return real(row, user)
+
+		with patch.object(macros_admin_api, "_handover_refusal", side_effect=refusal):
+			res = self._give(macro, [TARGET, SECOND], keep=True)
+		(failed,) = res["copy_failed"]
+		self.assertIn("R&D sweep", failed["reason"])
+		self.assertNotIn("&amp;", failed["reason"])
+		self.assertNotIn("something went wrong", failed["reason"])

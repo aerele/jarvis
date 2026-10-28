@@ -24,6 +24,8 @@ may hand their own skill away. Both are audited.
 
 from __future__ import annotations
 
+import html
+
 import frappe
 from frappe import _
 from frappe.query_builder.functions import Count
@@ -170,11 +172,21 @@ def give_copies(skill: str, users: list[str], old_owner: str) -> tuple[list[dict
 			skills_admin.commit_act()
 			frappe.cache().delete_value(_personal_key(user))
 			copies.append({"user": user, "skill": copy.name})
-		except frappe.ValidationError as e:
+		except Exception as e:
 			frappe.db.rollback()
 			del frappe.local.message_log[messages:]  # said in copy_failed, not as a popup
-			refused.append({"user": user, "reason": frappe.utils.strip_html(str(e)) or _("Not copied.")})
+			refused.append({"user": user, "reason": _copy_failure(e)})
 	return copies, refused
+
+
+def _copy_failure(error: Exception) -> str:
+	"""What ``copy_failed`` says for a copy that did not land. A refusal is plain text
+	(the dialog escapes it again for its toast); anything else is logged and kept
+	short, so one bad copy never stops the others or the notices after them."""
+	if isinstance(error, frappe.ValidationError):
+		return html.unescape(frappe.utils.strip_html(str(error))) or _("Not copied.")
+	frappe.log_error(title="skill handover: copy failed")
+	return _("Not copied: something went wrong. The error is in the Error Log.")
 
 
 def _personal_key(user: str) -> str:

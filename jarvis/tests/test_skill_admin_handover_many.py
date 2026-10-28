@@ -18,9 +18,11 @@ What is pinned here:
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import frappe
 
-from jarvis.chat import skills_admin_api, skills_handover
+from jarvis.chat import skills_admin, skills_admin_api, skills_handover
 from jarvis.tests import test_skill_admin_handover as ho
 
 SKILL = ho.SKILL
@@ -31,6 +33,7 @@ ADMIN = ho.ADMIN
 TARGET = ho.TARGET
 DISABLED = ho.DISABLED
 TAG = ho.TAG
+COPY_FAILED = "skill handover: copy failed"
 
 
 class ManyBase(ho.HandoverBase):
@@ -172,3 +175,70 @@ class TestKeep(ManyBase):
 		res = self._give(skill, [TARGET])
 		self.assertEqual((res["handed_over"], res["new_owner"], res["copies"]), (True, TARGET, []))
 		self.assertEqual(self._state(skill).owner, TARGET)
+
+
+class TestACopyThatBreaks(ManyBase):
+	"""Anything a copy throws, not only a refusal, is that copy's failure: the others
+	stand, the notices go out, and the error is logged."""
+
+	def _error_logs(self):
+		return frappe.db.count("Error Log", {"method": COPY_FAILED})
+
+	def _assert_other_alone_failed(self, skill, res, logs_before):
+		self.assertEqual([c["user"] for c in res["copies"]], [TARGET, REVIEWER])
+		(failed,) = res["copy_failed"]
+		self.assertEqual(failed["user"], OTHER)
+		self.assertIn("something went wrong", failed["reason"])
+		self.assertTrue(self._copy_of(skill, TARGET))
+		self.assertTrue(self._copy_of(skill, REVIEWER))
+		self.assertIsNone(self._copy_of(skill, OTHER))
+		self.assertEqual(self._error_logs(), logs_before + 1)
+		for user in (OWNER, TARGET, REVIEWER):
+			self.assertTrue(self._notices(user), user)
+		self.assertEqual(self._notices(OTHER), [])
+
+	def test_an_unexpected_error_on_one_copy_is_reported_and_the_rest_go_through(self):
+		skill = self._skill(OWNER, "boom")
+		real = skills_admin.comment
+
+		def comment(target, text, *args, **kwargs):
+			if f"gave {OTHER} this copy" in text:
+				raise frappe.QueryDeadlockError
+			return real(target, text, *args, **kwargs)
+
+		logs_before = self._error_logs()
+		with patch.object(skills_admin, "comment", side_effect=comment):
+			res = self._give(skill, [TARGET, OTHER, REVIEWER], keep=True)
+		self._assert_other_alone_failed(skill, res, logs_before)
+
+	def test_a_duplicate_from_the_recipients_insert_is_reported_the_same_way(self):
+		skill = self._skill(OWNER, "dupe")
+		real = frappe.model.document.Document.insert
+
+		def insert(doc, *args, **kwargs):
+			if doc.doctype == SKILL and frappe.session.user == OTHER:
+				raise frappe.DuplicateEntryError(SKILL, doc.skill_name)
+			return real(doc, *args, **kwargs)
+
+		logs_before = self._error_logs()
+		with patch.object(frappe.model.document.Document, "insert", insert):
+			res = self._give(skill, [TARGET, OTHER, REVIEWER], keep=True)
+		self._assert_other_alone_failed(skill, res, logs_before)
+
+	def test_a_copy_refusal_reads_as_plain_text(self):
+		# A skill name cannot hold "&", so the refusal is worded by hand here: the point
+		# is that the dialog, which escapes the reason itself, gets text and not entities.
+		skill = self._skill(OWNER, "plain-text")
+		real = skills_handover.copy_refusal
+		calls = []
+
+		def refusal(row, user, owned):
+			calls.append(user)
+			if user == OTHER and calls.count(OTHER) == 2:
+				return "R&D is full <b>today</b>."
+			return real(row, user, owned)
+
+		with patch.object(skills_handover, "copy_refusal", side_effect=refusal):
+			res = self._give(skill, [TARGET, OTHER], keep=True)
+		(failed,) = res["copy_failed"]
+		self.assertEqual(failed["reason"], "R&D is full <b>today</b>.")
