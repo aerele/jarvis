@@ -90,6 +90,27 @@ class TestNativeDraftLinks(_Base):
 		self.assertEqual(frappe.db.count("Purchase Invoice", {"company": self.fixture.company}), 2)
 		self.assertEqual(self.rows(), [])
 
+	def test_link_lookup_failure_preserves_the_saved_note_and_replay_guard(self):
+		conv = self.conv()
+		msg = self.reply(conv, self.invoice_card())
+		permission = frappe.has_permission
+
+		def failed_read_hook(doctype, *args, **kwargs):
+			if doctype == "Purchase Invoice" and args == ("read",) and kwargs.get("user") == OWNER:
+				raise RuntimeError("fixture permission hook failed")
+			return permission(doctype, *args, **kwargs)
+
+		with patch("frappe.has_permission", side_effect=failed_read_hook), patch("frappe.log_error") as log:
+			note = filebox_cards.park_from_turn(conv, msg)
+			self.assertTrue(log.called)
+		name = frappe.db.get_value(CONV, conv, "filebox_result_name")
+		self.assertTrue(name)
+		self.assertEqual(note, f"Created Purchase Invoice {name}.")
+		self.assertIn(note, frappe.db.get_value(MSG, msg, "content"))
+		self.assertNotIn("Sending this change", frappe.db.get_value(MSG, msg, "content"))
+		self.assertIsNone(filebox_cards.park_from_turn(conv, msg))
+		self.assertEqual(frappe.db.count("Purchase Invoice", {"company": self.fixture.company}), 1)
+
 	def test_confirm_card_links_a_draft_and_cannot_replay(self):
 		conv = self.conv()
 		card = self.invoice_card()
