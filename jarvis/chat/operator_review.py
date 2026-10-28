@@ -84,6 +84,29 @@ def stage_reviews(run, inst, findings, adapter):
 		)
 		name = frappe.db.get_value("Jarvis Approval Request", {"assessment_key": key}, "name")
 		if name:
+			prior = frappe.db.get_value(
+				"Jarvis Approval Request",
+				name,
+				["run", "status", "assessment_evidence"],
+				as_dict=True,
+				for_update=True,
+			)
+			if not prior.assessment_evidence:
+				original = frappe.parse_json(
+					frappe.db.get_value("Jarvis Agent Run", prior.run, "input_snapshot_json") or "{}"
+				)
+				if prior.status != "Pending" or original.get("source_digest") != stored["source_digest"]:
+					frappe.throw(
+						"The saved review has no matching source evidence; an administrator must check it."
+					)
+				# Repair a pending request from the same sealed evidence. Keep its original run.
+				frappe.db.set_value(
+					"Jarvis Approval Request",
+					name,
+					"assessment_evidence",
+					frappe.as_json({**evidence, "run": prior.run}),
+					update_modified=False,
+				)
 			requests.append(name)
 			continue
 		context = adapter.review_context(stored, finding)
@@ -112,7 +135,8 @@ def stage_reviews(run, inst, findings, adapter):
 			}
 		)
 		doc.flags.jarvis_server_write = True
-		doc.insert()
+		# Create permission is checked above. Keep the server-owned evidence at permlevel 1.
+		doc.insert(ignore_permissions=True)
 		frappe.share.add(
 			"Jarvis Approval Request",
 			doc.name,
