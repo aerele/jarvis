@@ -83,6 +83,41 @@ class TestCronHelpers(FrappeTestCase):
 		self.assertIn("at most", problem("\n".join(f"{m} 9 * * *" for m in range(7))))
 		self.assertTrue(problem(""))
 
+	def test_a_schedule_with_runs_under_five_minutes_apart_is_refused(self):
+		refused = {
+			"* * * * *": 1,
+			"* 9 * * *": 1,
+			"*/3 9 * * *": 3,
+			"*/7 * * * *": 4,  # 56 -> 0 of the next hour
+			"0,2 9 * * *": 2,
+			"0 9 * * *\n2 9 * * *": 2,
+			"58 23 * * *\n0 0 * * *": 2,  # across midnight
+		}
+		for expr, gap in refused.items():
+			with self.subTest(expr=expr):
+				self.assertEqual(macro_scheduler.shortest_gap_minutes(macro_scheduler.cron_lines(expr)), gap)
+				problem = macro_scheduler.cron_problem(expr)
+				self.assertIn(f"{gap} minute(s) apart", problem)
+				self.assertIn("at least 5 minutes", problem)
+		for expr in ("*/5 * * * *", "0 9 * * MON-FRI", "0 * * * *", "15 */2 * * *", "0 9 * * *"):
+			with self.subTest(expr=expr):
+				self.assertEqual(macro_scheduler.cron_problem(expr), "")
+
+	def test_only_a_star_in_the_minute_part_gets_the_hint(self):
+		self.assertIn("0 9 * * *", macro_scheduler.cron_problem("* 9 * * *"))
+		self.assertNotIn("every minute", macro_scheduler.cron_problem("0,2 9 * * *"))
+
+	def test_one_run_a_day_is_the_widest_gap(self):
+		self.assertEqual(macro_scheduler.shortest_gap_minutes(["30 9 * * *"]), 1440)
+
+	def test_cron_parts_the_form_cannot_read_are_refused(self):
+		for expr in ("0 9 L * *", "0 9 l * *", "5-1 * * * *", "0 9 * * fri-mon", "0 9 * * 1#2", "0 9 ? * *"):
+			with self.subTest(expr=expr):
+				self.assertIn("is not a cron schedule", macro_scheduler.cron_problem(expr))
+		for expr in ("0 9 * jan-mar *", "0 9 * * sun-sat", "0 9 * * MON-FRI", "0-30/10 9 * * *"):
+			with self.subTest(expr=expr):
+				self.assertEqual(macro_scheduler.cron_problem(expr), "")
+
 	def test_matches(self):
 		self.assertTrue(macro_scheduler.cron_matches(["30 9 * * 1,3,5"], "2026-10-23 09:30:00"))
 		self.assertFalse(macro_scheduler.cron_matches(["30 9 * * 1,3,5"], "2026-10-22 09:30:00"))
@@ -159,6 +194,11 @@ class TestCronOnTheMacro(FrappeTestCase):
 	def test_a_bad_cron_is_refused_even_with_the_schedule_off(self):
 		with self.assertRaises(frappe.ValidationError):
 			self._macro("bad", schedule_frequency="custom", schedule_enabled=0, schedule_cron="61 * * * *")
+
+	def test_saving_a_macro_with_a_one_minute_cron_throws(self):
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._macro("tight", schedule_frequency="custom", schedule_cron="* 9 * * *")
+		self.assertIn("1 minute(s) apart", str(ctx.exception))
 
 	def test_changing_the_cron_moves_the_next_run(self):
 		doc = self._macro("move", schedule_frequency="custom", schedule_cron="0 9 * * 1")

@@ -42,6 +42,7 @@ FAILED is retried 55 minutes later, not on every sweep (``_retry_later``). Model
 
 import calendar
 import datetime
+import itertools
 import re
 from traceback import format_tb
 
@@ -956,9 +957,22 @@ def once_slot(schedule_date, schedule_time) -> datetime.datetime | None:
 CRON_FREQUENCIES = ("hourly", "custom")
 # One line per distinct minute of the form's times, and the form allows six times.
 MAX_CRON_LINES = 6
-# The characters of one cron part. croniter also takes a sixth (seconds) part and
-# "@daily" style nicknames: neither is a schedule the form can show, so both are refused.
-_CRON_PART = re.compile(r"^[0-9A-Za-z*,/-]+$")
+# The sweep in hooks.py looks for due macros every 5 minutes, so two runs closer than
+# that would merge into one. Keep it equal to the sweep's interval.
+MIN_GAP_MINUTES = 5
+# One element of a cron part, read the way the form's parser reads it
+# (frontend/src/lib/macroCron.js parseField): ``*`` or ``low`` or ``low-high``, then an
+# optional ``/step``. croniter also takes a sixth (seconds) part, "@daily" nicknames,
+# ``L`` and reversed ranges: none is a schedule the form can show, so all are refused.
+_CRON_ELEMENT = re.compile(r"^(?:\*|([0-9a-z]+)(?:-([0-9a-z]+))?)(?:/\d+)?$", re.I)
+_CRON_NAMES = {
+	name: number for number, name in enumerate(("sun", "mon", "tue", "wed", "thu", "fri", "sat"))
+} | {
+	name: number
+	for number, name in enumerate(
+		("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1
+	)
+}
 
 
 def cron_ready() -> bool:
@@ -1021,6 +1035,39 @@ def macro_next_run(m, from_dt=None) -> datetime.datetime | None:
 	)
 
 
+def _cron_part_ok(part: str) -> bool:
+	"""Whether one cron part is spelled the way the form can read it: digits or a
+	3-letter name, an optional range, an optional step. croniter checks the bounds."""
+	for element in part.split(","):
+		found = _CRON_ELEMENT.match(element)
+		if not found:
+			return False
+		ends = [end.lower() for end in found.groups() if end]
+		if any(not end.isdigit() and end not in _CRON_NAMES for end in ends):
+			return False
+		values = [int(end) if end.isdigit() else _CRON_NAMES[end] for end in ends]
+		if len(values) == 2 and values[0] > values[1]:
+			return False
+	return True
+
+
+def shortest_gap_minutes(lines: list[str]) -> int:
+	"""The fewest minutes between two runs of valid ``lines``. Days are ignored, so
+	this errs on the side of refusing: 09:00 on Mondays and 09:02 on Tuesdays count as
+	2 apart. One run a day gives 1440."""
+	slots = set()
+	for line in lines:
+		minutes, hours = croniter(line).expanded[:2]
+		slots.update(
+			hour * 60 + minute
+			for hour in (range(24) if hours == ["*"] else hours)
+			for minute in (range(60) if minutes == ["*"] else minutes)
+		)
+	ordered = sorted(slots)
+	gaps = [b - a for a, b in itertools.pairwise(ordered)]
+	return min([*gaps, ordered[0] + 1440 - ordered[-1]])
+
+
 def cron_problem(value) -> str:
 	"""Why ``value`` cannot be saved as a cron schedule, or "" when it can."""
 	lines = cron_lines(value)
@@ -1030,13 +1077,26 @@ def cron_problem(value) -> str:
 		return _("A schedule can have at most {0} cron lines.").format(MAX_CRON_LINES)
 	for line in lines:
 		parts = line.split(" ")
-		if len(parts) != 5 or not all(_CRON_PART.match(p) for p in parts) or not croniter.is_valid(line):
+		if len(parts) != 5 or not all(_cron_part_ok(p) for p in parts) or not croniter.is_valid(line):
 			return _(
 				"“{0}” is not a cron schedule. It needs 5 parts: minute, hour, day, month and weekday."
 			).format(line)
 	if next_cron_run(lines) is None:
 		return _("This schedule never comes round. Check its day and month.")
-	return ""
+	return _gap_problem(lines)
+
+
+def _gap_problem(lines: list[str]) -> str:
+	gap = shortest_gap_minutes(lines)
+	if gap >= MIN_GAP_MINUTES:
+		return ""
+	problem = _(
+		"Two runs of this schedule can be {0} minute(s) apart. Macros are checked every {1} minutes, "
+		"so leave at least {1} minutes between runs."
+	).format(gap, MIN_GAP_MINUTES)
+	if any(line.split(" ")[0] == "*" for line in lines):
+		problem += " " + _("A “*” in the first part means every minute: for 9:00 each day write “0 9 * * *”.")
+	return problem
 
 
 def validate_cron_or_throw(value) -> None:
