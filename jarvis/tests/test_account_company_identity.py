@@ -89,6 +89,31 @@ class _AccountCompanies:
 
 
 class TestAccountCompanyIdentity(_AccountCompanies, held_tests._Base):
+	def test_padded_account_name_still_finds_the_scoped_existing_account(self):
+		company = self.companies[0]
+		existing = self.existing(company)
+		item = self.item(company)
+		item["values"]["account_name"] = "  " + self.account_name + "  "
+		with as_user(self.actor):
+			self.assertEqual([r["name"] for r in held_parties.existing_of(item)], [existing.name])
+
+	def test_same_scope_name_edit_retains_the_original_sibling_identity(self):
+		original = self.item(self.companies[0])
+		edited = {**original, "values": {**original["values"], "account_name": self.account_name + " new"}}
+		key = held_parties.item_key(original)
+		sibling = frappe._dict(name="sibling", owner_user=self.actor, summary="Original Account")
+		with (
+			patch.object(approvals_api, "_first_existing", return_value=None),
+			patch.object(
+				held_writes, "sibling_of", side_effect=lambda name, keys: sibling if key in keys else None
+			),
+		):
+			result = approvals_api._edit_precheck(
+				frappe._dict(name="current"), [original], [edited], self.actor
+			)
+		self.assertIsNotNone(result)
+		self.assertEqual(result["reason_code"], "pending_elsewhere")
+
 	def test_legacy_dedup_key_distinguishes_the_selected_company(self):
 		one, two = (self.item(c) for c in self.companies)
 		self.assertNotEqual(held_parties.item_key(one), held_parties.item_key(two))

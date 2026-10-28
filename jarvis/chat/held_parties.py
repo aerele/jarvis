@@ -29,6 +29,10 @@ def company_scoped(doctype: str) -> bool:
 	return bool(meta and meta.has_field("company") and meta.has_field("account_name"))
 
 
+def account_scope(values: dict) -> tuple[str, str]:
+	return tuple(str(values.get(k) or "").strip().casefold() for k in ("company", "account_number"))
+
+
 def scoped_name(doctype: str, values: dict, name: str) -> str:
 	"""Keep unrelated identities unchanged; an Account belongs to one company/number.
 
@@ -37,8 +41,7 @@ def scoped_name(doctype: str, values: dict, name: str) -> str:
 	"""
 	if not name or not company_scoped(doctype):
 		return name
-	scope = [str(values.get(k) or "").strip().casefold() for k in ("company", "account_number")]
-	return f"{name}@{_digest(scope)}"
+	return f"{name}@{_digest(account_scope(values))}"
 
 
 def missing_scope(items: list[dict]) -> bool:
@@ -189,7 +192,7 @@ def existing_of(item: dict, *, limit=MAX_CANDIDATES, ignore_permissions=False) -
 			"Account",
 			filters={
 				"company": values["company"].strip(),
-				"account_name": values["account_name"],
+				"account_name": values["account_name"].strip(),
 				"account_number": number or ["is", "not set"],
 			},
 			fields=["name", "account_name", "company", "account_currency"],
