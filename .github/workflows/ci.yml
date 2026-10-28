@@ -161,6 +161,37 @@ jobs:
           node --test jarvis/public/js/*.test.mjs jarvis/public/js/shared/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
+  # Real-browser Board regression gate, independent of the Python/bench shards.
+  approval-layout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps and Chrome
+        working-directory: frontend
+        run: |
+          npm ci --prefix ../wiki-graph-core
+          npm ci
+          npx playwright install --with-deps chrome
+      - name: Stub the bench site config (API calls are mocked)
+        run: |
+          mkdir -p "$HOME/sites"
+          printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
+      - name: Check Board layout in Chrome
+        working-directory: frontend
+        run: npx playwright test --config playwright.layout.config.cjs
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: approval-layout-failure
+          path: frontend/test-results/approval-layout
+          retention-days: 7
+
   # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
   # would slip through green and only surface at Frappe Cloud deploy time as a 404 on /jarvis. This gate
   # builds the SPA (the /jarvis artifact) the way the deploy does. (The PWA build resolves the bench site
