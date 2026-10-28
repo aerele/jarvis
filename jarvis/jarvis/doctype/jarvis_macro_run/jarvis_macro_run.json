@@ -18,7 +18,16 @@
     "started_at",
     "finished_at",
     "error",
-    "steps_snapshot"
+    "steps_snapshot",
+    "waiting_on",
+    "waiting_since",
+    "resume_turn",
+    "resume_count",
+    "step_resumes",
+    "resume_compensations",
+    "waiting_failed",
+    "waited",
+    "step_continuations"
   ],
   "fields": [
     {
@@ -40,7 +49,7 @@
       "fieldname": "status",
       "fieldtype": "Select",
       "label": "Status",
-      "options": "queued\nrunning\nwaiting_capacity\ncompleted\nfailed\nstopped",
+      "options": "queued\nrunning\nwaiting_capacity\nwaiting_report\ncompleted\nfailed\nstopped",
       "default": "queued",
       "in_list_view": 1,
       "search_index": 1,
@@ -102,6 +111,81 @@
       "read_only": 1,
       "hidden": 1,
       "description": "What the run started with, as JSON: each step's prompt, skills and overrides, Stop on error and the summarized prompt. The engine reads it instead of the macro while the run is live, so an edit applies from the next run. Written with the run row, cleared when the run ends. Empty on a run started before it existed: such a run reads the macro, as it always did."
+    },
+    {
+      "fieldname": "waiting_on",
+      "fieldtype": "Long Text",
+      "label": "Waiting On",
+      "hidden": 1,
+      "read_only": 1,
+      "description": "JSON list of the Prepared Reports the parked step is waiting for: each {prepared_report, report_name, filters}. Written only inside the CAS that moves the run to waiting_report."
+    },
+    {
+      "fieldname": "waiting_since",
+      "fieldtype": "Datetime",
+      "label": "Waiting Since",
+      "hidden": 1,
+      "read_only": 1,
+      "description": "When the run parked in waiting_report. The wait deadline counts from here."
+    },
+    {
+      "fieldname": "resume_turn",
+      "fieldtype": "Data",
+      "label": "Resume Turn",
+      "hidden": 1,
+      "read_only": 1,
+      "description": "Id of the continuation turn sent when the awaited reports were ready. Once set, it is the only turn that ends the current step. Cleared in the CAS that moves the cursor."
+    },
+    {
+      "fieldname": "resume_count",
+      "fieldtype": "Int",
+      "label": "Resume Count",
+      "hidden": 1,
+      "read_only": 1,
+      "description": "Continuations sent over the whole run (capped).",
+      "default": "0"
+    },
+    {
+      "fieldname": "step_resumes",
+      "fieldtype": "Int",
+      "label": "Step Resumes",
+      "hidden": 1,
+      "read_only": 1,
+      "description": "Continuations sent for the current step (capped). Reset when the cursor moves.",
+      "default": "0"
+    },
+    {
+      "fieldname": "resume_compensations",
+      "fieldtype": "Int",
+      "label": "Resume Compensations",
+      "hidden": 1,
+      "read_only": 1,
+      "description": "Times a continuation that failed to go out was put back to waiting_report (capped).",
+      "default": "0"
+    },
+    {
+      "fieldname": "waiting_failed",
+      "fieldtype": "Check",
+      "label": "Waiting Failed",
+      "hidden": 1,
+      "read_only": 1,
+      "description": "An awaited report failed: the continuation is the write-less explanation turn, after which the run ends failed."
+    },
+    {
+      "fieldname": "waited",
+      "fieldtype": "Check",
+      "label": "Waited",
+      "hidden": 1,
+      "read_only": 1,
+      "description": "The run parked for a report at least once; its owner is notified of any terminal outcome."
+    },
+    {
+      "fieldname": "step_continuations",
+      "fieldtype": "Long Text",
+      "label": "Step Continuations",
+      "hidden": 1,
+      "read_only": 1,
+      "description": "JSON {step_index: last continuation turn id}, written when a continuation goes out and never cleared; a resumed step is judged by it."
     }
   ],
   "permissions": [
