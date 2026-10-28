@@ -1039,7 +1039,10 @@ def _child_scoping_parent(child_dt: str, child_alias: str, node_spec: dict, alia
 	1. Explicit signals (join ``parent``/``name`` link or ``parenttype``
 	   literal) → exactly 1 distinct owning parent: use it IF the caller can
 	   read the child through it, else DENY; >1 (conflicting) → DENY ambiguous.
-	2. No signals → the parents the caller can read the child through: 0 → DENY
+	2. Signals that name only DocTypes which do not own the child (a Sales Team
+	   joined to a Quotation, which has no Sales Team table) → InvalidArgumentError
+	   naming the real parents: the query is wrong, not the caller's access.
+	3. No signals → the parents the caller can read the child through: 0 → DENY
 	   (defensive; step 3 already gates this), 1 → use it, >1 → DENY ambiguous.
 	"""
 	from jarvis.tools.get_list import _child_table_parents, _readable_child_parents
@@ -1047,6 +1050,12 @@ def _child_scoping_parent(child_dt: str, child_alias: str, node_spec: dict, alia
 	owning_parents = _child_table_parents(child_dt)
 	owning = set(owning_parents)
 	signals = _collect_scoping_signals(child_dt, child_alias, node_spec, alias_map, owning)
+	if not signals:
+		named = _collect_scoping_signals(child_dt, child_alias, node_spec, alias_map, None)
+		if named:
+			raise InvalidArgumentError(
+				_not_a_parent_message(child_dt, child_alias, sorted(named), owning_parents)
+			)
 	if signals:
 		if len(signals) > 1:
 			raise PermissionDeniedError(_ambiguous_scope_message(child_dt, child_alias, sorted(signals)))
@@ -1083,21 +1092,32 @@ def _ambiguous_scope_message(child_dt: str, child_alias: str, parents: list) -> 
 	)
 
 
-def _literal_owning_parent(ref, alias_map: dict, owning: set) -> str | None:
+def _not_a_parent_message(child_dt: str, child_alias: str, named: list, owning_parents: list) -> str:
+	"""A child alias tied to DocTypes that have no Table field for it: no row can
+	ever match, so say which DocTypes do own it instead of a permission denial."""
+	return (
+		f"{' / '.join(repr(dt) for dt in named)} has no '{child_dt}' table, so "
+		f"{child_alias}.parent never matches it: '{child_dt}' rows belong only to "
+		f"{', '.join(owning_parents) or 'no DocType'}. Join {child_alias}.parent to the name "
+		f"of one of those, or read the answer from a field of {named[0]!r} itself"
+	)
+
+
+def _literal_owning_parent(ref, alias_map: dict, owning: set | None) -> str | None:
 	"""``ref`` is a ``parenttype`` comparand. Mirror ``_build_on_criterion``'s
 	literal detection: a string is a field reference only when it is
 	``alias.field`` with a KNOWN alias — otherwise it is a literal. Return the
-	literal when it names an owning parent."""
+	literal when it names an owning parent (any literal when ``owning`` is None)."""
 	if not isinstance(ref, str):
 		return None
 	is_field_ref = "." in ref and ref.split(".", 1)[0] in alias_map
 	if is_field_ref:
 		return None
-	return ref if ref in owning else None
+	return ref if owning is None or ref in owning else None
 
 
 def _collect_scoping_signals(
-	child_dt: str, child_alias: str, node_spec: dict, alias_map: dict, owning: set
+	child_dt: str, child_alias: str, node_spec: dict, alias_map: dict, owning: set | None
 ) -> set:
 	"""Explicit scoping signals for THIS child alias, read structurally from
 	``node_spec``'s join ON dicts and TOP-LEVEL where equalities only:
@@ -1107,7 +1127,8 @@ def _collect_scoping_signals(
 	  correlated ``{"$field": "<outer_alias>.name"}`` form);
 	- ``<child_alias>.parenttype == <string literal>`` naming an owning parent.
 
-	Returns the set of distinct owning-parent doctypes signalled.
+	Returns the set of distinct owning-parent doctypes signalled. With ``owning``
+	None, every DocType so named is returned, owning or not.
 	"""
 	parent_ref = f"{child_alias}.parent"
 	parenttype_ref = f"{child_alias}.parenttype"
@@ -1117,7 +1138,11 @@ def _collect_scoping_signals(
 		# "<alias>.name" whose alias resolves to an owning-parent doctype.
 		if isinstance(ref, str) and ref.count(".") == 1:
 			other_alias, col = ref.split(".", 1)
-			if col == "name" and other_alias in alias_map and alias_map[other_alias][0] in owning:
+			if (
+				col == "name"
+				and other_alias in alias_map
+				and (owning is None or alias_map[other_alias][0] in owning)
+			):
 				return alias_map[other_alias][0]
 		return None
 
@@ -1150,7 +1175,7 @@ def _collect_scoping_signals(
 			continue
 		field = w.get("field")
 		value = w.get("value")
-		if field == parenttype_ref and isinstance(value, str) and value in owning:
+		if field == parenttype_ref and isinstance(value, str) and (owning is None or value in owning):
 			signals.add(value)
 		elif field == parent_ref and isinstance(value, dict) and "$field" in value:
 			# Correlated sub-spec form: c.parent = {"$field": "outer.name"}.
