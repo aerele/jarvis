@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import quote
 
 import frappe
 
@@ -148,7 +149,7 @@ def _ask(conversation: str, owner: str, a: dict, reason: str) -> str:
 	return doc.name
 
 
-def _note(tool: str | None, res: dict, asked: str | None) -> str:
+def _note(tool: str | None, res: dict, asked: str | None, user: str | None = None) -> str:
 	if asked:
 		return "This change is waiting for you on the Approval Board."
 	if not res.get("ok"):
@@ -157,7 +158,29 @@ def _note(tool: str | None, res: dict, asked: str | None) -> str:
 	if data.get("held_for") == "approval_board" or not data.get("name"):
 		return "This change is waiting for approval on the Approval Board."
 	verb = "Updated" if tool == "update_doc" else "Created"
-	return f"{verb} {data.get('doctype') or ''} {data['name']}.".replace("  ", " ")
+	doctype, name = data.get("doctype"), data["name"]
+	# Card conversion has no tool row for the client's document-ref linkifier.
+	# Link only a real result the requester can read, never the worker's privilege.
+	if (
+		user
+		and isinstance(doctype, str)
+		and isinstance(name, str)
+		and not re.search(r"[\[\]`*~\\\x00-\x1f\x7f]", name)
+	):
+		try:
+			readable = (
+				frappe.db.exists("DocType", doctype)
+				and frappe.db.exists(doctype, name)
+				and frappe.has_permission(doctype, "read", doc=name, user=user)
+			)
+		except (frappe.DoesNotExistError, frappe.PermissionError):
+			readable = False  # Deleted or permission-revoked during the lookup.
+		if readable:
+			slug = frappe.scrub(doctype).replace("_", "-")
+			# The renderer trims a bare path's final dot; quote() leaves dots literal.
+			target = quote(name, safe="").replace(".", "%2E")
+			name = f"[{name}](/app/{slug}/{target})"
+	return f"{verb} {doctype or ''} {name}.".replace("  ", " ")
 
 
 def _outcome(conversation: str, owner: str, a: dict, call) -> tuple[dict, str | None]:
@@ -191,7 +214,7 @@ def _park(conversation: str, message: str, content: str, a: dict, call=None, fen
 		frappe.db.rollback()
 		_swap(message, claimed, content)
 		raise
-	note = _note(call[0] if call else None, res, asked)
+	note = _note(call[0] if call else None, res, asked, user=owner)
 	_swap(message, claimed, _sub(content, note, fence))
 	if asked:
 		publish_to_user(owner, {"kind": "approval:new", "conversation_id": conversation, "name": asked})
