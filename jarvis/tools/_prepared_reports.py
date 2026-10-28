@@ -36,7 +36,9 @@ lacks the ``Prepared Report`` read role.
 
 from __future__ import annotations
 
+import html
 import json
+import re
 
 import frappe
 from frappe.core.doctype.prepared_report.prepared_report import make_prepared_report
@@ -374,16 +376,93 @@ def _pending_state(report_name: str, filters: dict, user: str) -> dict | None:
 		return None  # started but the worker died mid-run -> caller re-generates
 	# Error / Failed - surface it and stop; re-firing the same doomed job on every
 	# ask is the loop we are avoiding. The user can adjust the filters (a new match
-	# key -> a fresh run). The raw error (a traceback) stays out of the message;
-	# Frappe already logged it on the failing job.
+	# key -> a fresh run). Only the exception's own message reaches the user (see
+	# failure_reason); the traceback stays on the Prepared Report for an admin.
+	reason, detail = failure_reason(frappe.db.get_value("Prepared Report", row.name, "error_message"))
 	return _envelope(
 		report_name,
 		"failed",
-		"That report failed to generate. If it needs a filter you didn't set "
-		"(a company, a date range, a required value), tell me and I'll run it "
-		"again with it.",
+		_FAILED_MESSAGES[reason].format(detail=detail, run=row.name),
 		run=row.name,
+		reason=reason,
+		error=detail,
 	)
+
+
+# What the agent relays per failure reason. Only ``report_error`` invites a filter
+# change: a permission refusal or a timeout would fail again whatever the filters.
+_FAILED_MESSAGES = {
+	"permission": "I couldn't run that report: {detail} Changing the filters won't help; "
+	"this needs access from an administrator.",
+	"timed_out": "That report failed to generate: {detail} A narrower date range or "
+	"fewer rows may finish in time, or an administrator can raise the report's time limit.",
+	"report_error": "That report failed to generate: {detail} If a filter needs changing, "
+	"tell me and I'll run it again.",
+	"internal": "That report failed to generate. If it needs a filter you didn't set "
+	"(a company, a date range, a required value), tell me and I'll run it again with "
+	"it. An administrator can see the error in Prepared Report {run}.",
+}
+_FAILURE_DETAIL_MAX = 300
+_TIMED_OUT = "It took too long to generate and was stopped."
+_NO_PERMISSION = "You don't have permission to run this report."
+# frappe.exceptions that wrap a database error: their message is the driver's
+# (an error code and SQL fragments), not one written for the user.
+_FRAPPE_DB_ERRORS = frozenset(
+	{"QueryDeadlockError", "DuplicateEntryError", "UniqueValidationError", "InvalidColumnName", "SQLError"}
+)
+# The traceback's final exception line, at column 0 (a traceback's frames and
+# variables are indented): "frappe.exceptions.PermissionError: <message>". The
+# message may run on over further lines, up to the end of the text.
+_EXC_LINE = re.compile(r"^((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception|Timeout|Exit)\w*)(?::(.*))?$")
+
+
+def failure_reason(error_message: str | None) -> tuple[str, str]:
+	"""Why a Prepared Report failed, as ``(reason, detail)`` safe to show its owner.
+
+	``error_message`` is what Frappe stored: a traceback with variables (the user's
+	roles, the filters, the report's config), or "Report timed out." for a run the
+	stall sweep failed. Only the final exception's own message is kept, and only
+	from a ``frappe.*`` exception - the text ``frappe.throw`` addresses to the user,
+	the same text Desk would show them. Anything else (KeyError, SQL errors) is
+	developer-facing and reads as ``internal`` with no detail.
+
+	``reason`` is ``permission``, ``timed_out``, ``report_error`` or ``internal``."""
+	text = (error_message or "").strip()
+	if not text:
+		return "internal", ""
+	if text.startswith("Report timed out"):
+		return "timed_out", _TIMED_OUT
+	lines = text.splitlines()
+	for i in range(len(lines) - 1, -1, -1):
+		match = _EXC_LINE.match(lines[i])
+		if match:
+			exc = match.group(1)
+			message = "\n".join([match.group(2) or "", *lines[i + 1 :]])
+			break
+	else:
+		return "internal", ""
+	name = exc.rsplit(".", 1)[-1]
+	if name in ("JobTimeoutException", "QueryTimeoutError"):
+		return "timed_out", _TIMED_OUT
+	if not exc.startswith("frappe.") or name in _FRAPPE_DB_ERRORS:
+		return "internal", ""
+	detail = _clean_detail(message)
+	if exc.endswith("PermissionError"):
+		return "permission", detail or _NO_PERMISSION
+	return ("report_error", detail) if detail else ("internal", "")
+
+
+def _clean_detail(message: str) -> str:
+	"""The exception message as one plain sentence: tags dropped (``<br>`` reads as a
+	space), entities decoded, whitespace collapsed, capped, and closed with a full
+	stop so the agent's next sentence does not run into it."""
+	text = html.unescape(re.sub(r"<[^>]*>", " ", message))
+	text = " ".join(text.split())
+	if len(text) > _FAILURE_DETAIL_MAX:
+		text = text[: _FAILURE_DETAIL_MAX - 1].rstrip() + "…"
+	elif text and text[-1] not in ".!?":
+		text += "."
+	return text
 
 
 def _latest(report_name, filters, user, statuses):
