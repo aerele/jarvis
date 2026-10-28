@@ -124,13 +124,11 @@ describe("AskCard field-backed Link search", () => {
 		);
 		w.unmount();
 	});
-	it("falls back to an explained typed answer when a required filter cannot be resolved", async () => {
+	it("explains an unresolved filter as soon as metadata arrives, before focus", async () => {
 		getDoctypeFields.mockResolvedValue(
 			metadata({ link_filters: [["Item", "company", "=", "eval:parent.company"]] })
 		);
 		const w = card();
-		await flushPromises();
-		await w.get(".jv-ask-link input").trigger("focus");
 		await flushPromises();
 		expect(searchLink).not.toHaveBeenCalled();
 		expect(w.text()).toContain("Set Company before searching this field.");
