@@ -14,6 +14,9 @@
 
 export const MAX_TIMES = 6;
 export const MAX_CRON_LINES = 6;
+// The sweep looks for due macros every 5 minutes (the server's MIN_GAP_MINUTES), so two
+// runs closer than that would merge into one.
+export const MIN_GAP_MINUTES = 5;
 export const FREQUENCIES = ["once", "hourly", "daily", "weekly", "monthly", "custom"];
 export const HOURS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
 // Five-minute steps: the scheduler looks every five minutes, so a finer minute could
@@ -67,7 +70,6 @@ const NAMES = {
 	nov: 11,
 	dec: 12,
 };
-const FIVE_MIN_MS = 5 * 60 * 1000;
 const DAY_MS = 24 * 3600 * 1000;
 
 export function wallClock(year, month, day, hour = 0, minute = 0) {
@@ -202,6 +204,31 @@ export function cronRuns(parsed, from, to, limit = 3) {
 	}
 	out.sort(byNumber);
 	return out.filter((t, i) => i === 0 || +t !== +out[i - 1]);
+}
+
+// The fewest minutes between two runs of the parsed lines, as the server counts them
+// (macro_scheduler.shortest_gap_minutes): days are ignored, so it errs on the side of
+// refusing, and the last run of a day is followed by the first of the next.
+export function shortestGapMinutes(parsed) {
+	const slots = new Set();
+	for (const c of parsed) {
+		for (const h of c.hours) for (const m of c.minutes) slots.add(h * 60 + m);
+	}
+	const ordered = [...slots].sort(byNumber);
+	const gaps = ordered.slice(1).map((slot, i) => slot - ordered[i]);
+	return Math.min(...gaps, ordered[0] + 1440 - ordered[ordered.length - 1]);
+}
+
+// The sentence for a gap under MIN_GAP_MINUTES: the server says the same words.
+function gapProblem(gap, lines) {
+	let text =
+		`Two runs of this schedule can be ${gap} minute(s) apart. Macros are checked every ` +
+		`${MIN_GAP_MINUTES} minutes, so leave at least ${MIN_GAP_MINUTES} minutes between runs.`;
+	if (lines.some((line) => line.split(" ")[0] === "*")) {
+		text +=
+			" A “*” in the first part means every minute: for 9:00 each day write “0 9 * * *”.";
+	}
+	return text;
 }
 
 export function cronLinesOf(text) {
@@ -392,6 +419,7 @@ export function schedulePreview(state, { now, scheduleDate = "", steps = 1, budg
 		stepsMonth: 0,
 		overBudget: false,
 		tooClose: false,
+		shortMonths: "",
 		cronText: "",
 	};
 	try {
@@ -419,14 +447,17 @@ export function schedulePreview(state, { now, scheduleDate = "", steps = 1, budg
 		const found = cronRuns(parsed, now, new Date(+now + 400 * DAY_MS), 4);
 		if (!found.length)
 			throw new Error("This schedule never comes round. Check its day and month.");
+		const gap = shortestGapMinutes(parsed);
+		if (gap < MIN_GAP_MINUTES) throw new Error(gapProblem(gap, lines));
 		out.next = found.slice(0, 3).map((d) => runText(d));
 		const month = cronRuns(parsed, now, new Date(+now + 30 * DAY_MS), 50000);
 		out.perMonth = month.length;
 		out.stepsMonth = month.length * Math.max(1, Number(steps) || 1);
 		out.overBudget = budget > 0 && out.stepsMonth > budget;
-		out.tooClose =
-			parsed.some((c) => c.minutes.some((m) => m % 5)) ||
-			month.some((t, i) => i > 0 && t - month[i - 1] < FIVE_MIN_MS);
+		out.tooClose = parsed.some((c) => c.minutes.some((m) => m % 5));
+		if (state.frequency === "monthly" && Math.max(...state.dom) > 28) {
+			out.shortMonths = ordinal(Math.max(...state.dom));
+		}
 		out.cronText = lines.join("  ·  ");
 		out.summary =
 			state.frequency === "custom"

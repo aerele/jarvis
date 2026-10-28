@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+	cronLinesOf,
 	cronListLabel,
 	parseCron,
 	presetCron,
@@ -10,6 +11,7 @@ import {
 	schedulePayload,
 	schedulePreview,
 	scheduleSentence,
+	shortestGapMinutes,
 } from "./macroCron.js";
 
 // Thursday 22 Oct 2026, 10:00 on the site's clock.
@@ -158,10 +160,87 @@ test("the month estimate is measured against the step budget", () => {
 	assert.equal(schedulePreview(base, { now: NOW, steps: 1, budget: 500 }).overBudget, false);
 });
 
-test("runs closer than five minutes are flagged", () => {
-	const s = { ...base, frequency: "custom", cron: "* 9 * * *" };
-	assert.equal(schedulePreview(s, { now: NOW }).tooClose, true);
+// The same table as jarvis/tests/test_macro_cron_schedule.py: one rule, two files.
+const GAPS = [
+	["* * * * *", 1],
+	["* 9 * * *", 1],
+	["*/3 9 * * *", 3],
+	["*/7 * * * *", 4],
+	["0,2 9 * * *", 2],
+	["0 9 * * *\n2 9 * * *", 2],
+	["58 23 * * *\n0 0 * * *", 2],
+	["*/5 * * * *", 5],
+	["0 9 * * MON-FRI", 1440],
+	["0 * * * *", 60],
+	["15 */2 * * *", 120],
+	["30 9 * * *", 1440],
+];
+
+test("the shortest gap between runs, over all lines and across midnight", () => {
+	for (const [cron, gap] of GAPS) {
+		assert.equal(shortestGapMinutes(cronLinesOf(cron).map(parseCron)), gap, cron);
+	}
+});
+
+test("runs under five minutes apart are an error that says how far apart", () => {
+	for (const [cron, gap] of GAPS.filter(([, g]) => g < 5)) {
+		const p = schedulePreview({ ...base, frequency: "custom", cron }, { now: NOW });
+		assert.match(p.error, new RegExp(`${gap} minute\\(s\\) apart`), cron);
+		assert.match(p.error, /at least 5 minutes/, cron);
+	}
+	for (const [cron] of GAPS.filter(([, g]) => g >= 5)) {
+		const p = schedulePreview({ ...base, frequency: "custom", cron }, { now: NOW });
+		assert.equal(p.error, "", cron);
+	}
+});
+
+test("only a star in the minute part gets the every-minute hint", () => {
+	const star = schedulePreview(
+		{ ...base, frequency: "custom", cron: "* 9 * * *" },
+		{ now: NOW }
+	);
+	assert.match(star.error, /write “0 9 \* \* \*”/);
+	const list = schedulePreview(
+		{ ...base, frequency: "custom", cron: "0,2 9 * * *" },
+		{ now: NOW }
+	);
+	assert.doesNotMatch(list.error, /every minute/);
+});
+
+test("a minute that is not a multiple of five is only a late-start note", () => {
+	const s = { ...base, frequency: "custom", cron: "7 9 * * *" };
+	const p = schedulePreview(s, { now: NOW });
+	assert.equal(p.tooClose, true);
+	assert.equal(p.error, "");
 	assert.equal(schedulePreview(base, { now: NOW }).tooClose, false);
+});
+
+test("what the server refuses the form refuses too, and names work", () => {
+	for (const cron of [
+		"0 9 L * *",
+		"5-1 * * * *",
+		"0 9 * * fri-mon",
+		"0 9 * * 1#2",
+		"0 9 ? * *",
+	]) {
+		const p = schedulePreview({ ...base, frequency: "custom", cron }, { now: NOW });
+		assert.notEqual(p.error, "", cron);
+	}
+	for (const cron of ["0 9 * jan-mar *", "0 9 * * sun-sat", "0 9 * * MON-FRI"]) {
+		const p = schedulePreview({ ...base, frequency: "custom", cron }, { now: NOW });
+		assert.equal(p.error, "", cron);
+		assert.ok(p.next.length > 0, cron);
+	}
+});
+
+test("a monthly day past the 28th says which months skip it", () => {
+	const monthly = { ...base, frequency: "monthly" };
+	const short = (dom) => schedulePreview({ ...monthly, dom }, { now: NOW }).shortMonths;
+	assert.equal(short([31]), "31st");
+	assert.equal(short([15, 30]), "30th");
+	assert.equal(short([29]), "29th");
+	assert.equal(short([28]), "");
+	assert.equal(schedulePreview(base, { now: NOW }).shortMonths, "");
 });
 
 test("custom cron errors name the part that is wrong", () => {

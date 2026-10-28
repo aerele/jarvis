@@ -137,9 +137,6 @@
 					{{ n }}
 				</button>
 			</div>
-			<p class="mt-1.5 text-xs text-ink-gray-5">
-				Months without the 29th, 30th or 31st skip that day.
-			</p>
 		</div>
 
 		<div v-if="showsTimes">
@@ -263,8 +260,16 @@
 					</ul>
 				</div>
 				<p v-if="preview.tooClose" class="jv-sched-warn">
-					{{ brand.agentName }} checks schedules every 5 minutes, so runs closer together
-					than that are merged, and a run can start up to 5 minutes late.
+					{{ brand.agentName }} checks schedules every 5 minutes, so a run can start up
+					to 5 minutes late.
+				</p>
+				<p
+					v-if="preview.shortMonths"
+					class="jv-sched-warn"
+					data-testid="schedule-short-months"
+				>
+					Months with no {{ preview.shortMonths }} are skipped, so this macro does not
+					run in them. Pick the 28th or earlier to run every month.
 				</p>
 				<p
 					v-if="preview.overBudget"
