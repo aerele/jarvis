@@ -5,7 +5,7 @@ import { reactive, effect, stop } from "vue";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createPendingSends, planRejectedSend, injectPendingBubbles } from "./voiceSendGlue.js";
-import { deliveryFailureCopy } from "../lib/sendDelivery.js";
+import { deliveryFailureCopy, deliveryTimeoutError } from "../lib/sendDelivery.js";
 import { stampDeltaTime } from "../lib/replyBar.js";
 import { firstSendPicks } from "../lib/firstSendPicks.js";
 import { heldNewestSeq, mergeNewestPage, refreshNames } from "../lib/historyPaging.js";
@@ -35,6 +35,10 @@ function harness(pendingStore) {
 		mergeNewestPage,
 		refreshNames,
 		deliveryFailureCopy,
+		deliveryTimeoutError,
+		DELIVERY_TOAST: "Delivery not confirmed. See the note under your message.",
+		SEND_DEADLINE_MS: 30000,
+		CHECK_DEADLINE_MS: 15000,
 		toLocalMs: (value) => Date.parse(value),
 		RUN_ENDED_STATES: new Set(["done", "failed", "cancelled"]),
 		stepsFromTexts: () => [],
