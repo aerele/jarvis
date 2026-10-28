@@ -262,6 +262,13 @@ function drawn(q, i) {
 		return options.length ? { ...base, type: "select", options } : { ...base, type: "text" };
 	}
 	if (control === "link") {
+		try {
+			resolveLinkFilters(m, {}, null);
+		} catch (e) {
+			if (e instanceof DraftLinkFilterError)
+				return { ...base, type: "text", filterError: e.message };
+			throw e;
+		}
 		return opts
 			? {
 					...base,
