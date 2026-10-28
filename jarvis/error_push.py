@@ -419,6 +419,7 @@ def _finish_dropped(size: int, lanes: dict, reason: str) -> None:
 	_state_set(_BATCH_KEY, "")
 	_state_set(_INFLIGHT_KEY, "")
 	_state_set(_RETRY_AFTER_KEY, "")
+	_state_set(_FAILURES_KEY, "0")  # the next outage starts at the first wait
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- drop the batch
 	detail = f"dropped {size} errors ({lanes}): {reason}"
 	frappe.logger("jarvis.error_push").warning(detail)

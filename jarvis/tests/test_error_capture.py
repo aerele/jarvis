@@ -762,6 +762,20 @@ class TestPushBackoff(PushBase):
 		self.assertTrue(self._tick(0, down, seconds=30))  # the job ran 30 s late
 		self.assertTrue(self._tick(5, down), "the next */5 tick still finds the wait over")
 
+	def test_a_dropped_batch_starts_the_next_outage_at_the_first_wait(self):
+		poison = AdminUnreachableError("admin returned a 500 error: boom", status_code=500)
+		for n in range(error_push.MAX_BATCH_FAILURES):
+			self.assertTrue(self._tick(n * 5, poison))  # the last one drops the batch
+		self.assertEqual(frappe.db.count(DT, {"pushed": 0}), 0)
+		self.addCleanup(
+			frappe.db.delete, "Error Log", {"method": "jarvis errors: admin refused rollup batch"}
+		)
+		api_errors.record_server_error("tool", error_code="e", error_class="t", message="m2", user=USER)
+		frappe.db.commit()
+		down = AdminUnreachableError("admin returned a 502 error", status_code=502)
+		self.assertTrue(self._tick(60, down))
+		self.assertTrue(self._tick(65, down), "the first wait is 5 minutes, not 60")
+
 	def test_an_answered_failure_does_not_back_off(self):
 		answered = AdminUnreachableError("admin returned a 500 error: boom", status_code=500)
 		self.assertTrue(self._tick(0, answered))
