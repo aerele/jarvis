@@ -120,8 +120,11 @@ def list_approval_reviewers() -> list[dict]:
 	return (
 		frappe.qb.from_(user)
 		.select(user.name, user.full_name)
-		.where(approval_reviewers.eligible_condition(user) & (user.name != frappe.session.user))
-		.orderby(user.full_name, user.name)
+		.where(
+			# One eligibility rule shared with tag_reviewer (approval_reviewers.change_tag).
+			approval_reviewers.eligible_condition(user) & (user.name != frappe.session.user)
+		)
+		.orderby(Coalesce(NullIf(user.full_name, ""), user.name), user.name)
 		.limit(500)
 		.run(as_dict=True)
 	)
