@@ -9,7 +9,11 @@
 	>
 		<div>
 			<span :id="ids.repeat" class="mb-1.5 block text-xs text-ink-gray-5">Repeat</span>
-			<div class="flex flex-wrap" :aria-labelledby="ids.repeat" role="group">
+			<div
+				class="flex max-w-full flex-wrap overflow-x-auto"
+				:aria-labelledby="ids.repeat"
+				role="group"
+			>
 				<TabButtons
 					data-testid="schedule-repeat"
 					:buttons="REPEAT_OPTIONS"
@@ -118,7 +122,7 @@
 			</div>
 		</div>
 
-		<div v-if="model.frequency === 'monthly'">
+		<div v-if="model.frequency === 'monthly'" class="jv-sched-dom-box">
 			<span :id="ids.dom" class="mb-1.5 block text-xs text-ink-gray-5">
 				On these days of the month
 			</span>
@@ -147,7 +151,7 @@
 				<div
 					v-for="(t, i) in shownTimes"
 					:key="i"
-					class="flex items-center gap-2"
+					class="flex flex-wrap items-center gap-2"
 					role="group"
 					:aria-label="`Time ${i + 1}`"
 					data-testid="schedule-time"
@@ -187,7 +191,7 @@
 				</div>
 				<Button
 					v-if="canAddTime"
-					class="self-start"
+					class="max-w-full self-start"
 					variant="ghost"
 					iconLeft="plus"
 					label="Add another time"
@@ -452,7 +456,7 @@ const preview = computed(() =>
 	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237c7c7c' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 	background-repeat: no-repeat;
 	background-position: right 0.5rem center;
-	color: var(--text-ink-gray-8, #383838);
+	color: var(--ink-gray-8, #383838);
 	font-size: 14px;
 	appearance: none;
 	-webkit-appearance: none;
@@ -477,7 +481,7 @@ const preview = computed(() =>
 	border-radius: 0.5rem;
 	border: 1px solid var(--outline-gray-2, #e2e2e2);
 	background: var(--surface-white, #fff);
-	color: var(--text-ink-gray-8, #383838);
+	color: var(--ink-gray-8, #383838);
 	font-size: 13px;
 	font-weight: 500;
 	cursor: pointer;
@@ -485,10 +489,13 @@ const preview = computed(() =>
 .jv-sched-chip:hover {
 	border-color: var(--outline-gray-4, #a3a3a3);
 }
+/* Selected = the page's ink as the fill and its surface as the text. Both swap with
+   the theme (index.css dark bridge), so the numeral stays readable in either; the
+   frappe-ui "white on gray-7" pair is not remapped in dark and left white on white. */
 .jv-sched-chip.on {
-	background: var(--surface-gray-7, #171717);
-	border-color: var(--surface-gray-7, #171717);
-	color: var(--text-ink-white, #fff);
+	background: var(--ink-gray-9, #171717);
+	border-color: var(--ink-gray-9, #171717);
+	color: var(--surface-white, #fff);
 }
 .jv-sched-chip:focus-visible,
 .jv-sched-quick:focus-visible,
@@ -500,10 +507,20 @@ const preview = computed(() =>
 	cursor: not-allowed;
 	opacity: 0.6;
 }
+.jv-sched-dom-box {
+	container-type: inline-size;
+}
 .jv-sched-dom {
 	display: grid;
 	grid-template-columns: repeat(7, 2.5rem);
 	gap: 0.375rem;
+}
+/* A column too narrow for seven chips (a phone with the side panel open) wraps them
+   onto more rows instead of running off its edge. */
+@container (max-width: 19rem) {
+	.jv-sched-dom {
+		grid-template-columns: repeat(auto-fill, 2.5rem);
+	}
 }
 .jv-sched-dom .jv-sched-chip {
 	min-width: 0;
@@ -514,13 +531,13 @@ const preview = computed(() =>
 	border: 0;
 	background: none;
 	padding: 0;
-	color: var(--text-ink-gray-6, #6b6b6b);
+	color: var(--ink-gray-6, #6b6b6b);
 	text-decoration: underline;
 	text-underline-offset: 3px;
 	cursor: pointer;
 }
 .jv-sched-quick:hover {
-	color: var(--text-ink-gray-9, #171717);
+	color: var(--ink-gray-9, #171717);
 }
 .jv-sched-cron {
 	display: block;
@@ -529,7 +546,7 @@ const preview = computed(() =>
 	border: 1px solid transparent;
 	border-radius: 0.5rem;
 	background: var(--surface-gray-2, #f3f3f3);
-	color: var(--text-ink-gray-9, #171717);
+	color: var(--ink-gray-9, #171717);
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: 14px;
 	letter-spacing: 0.02em;
@@ -550,7 +567,7 @@ const preview = computed(() =>
 	width: min(22rem, 100%);
 	margin-top: 0.375rem;
 	font-size: 11px;
-	color: var(--text-ink-gray-5, #6b6b6b);
+	color: var(--ink-gray-5, #6b6b6b);
 	text-align: center;
 }
 .jv-sched-example {
@@ -559,7 +576,7 @@ const preview = computed(() =>
 	border-radius: 999px;
 	border: 1px solid var(--outline-gray-2, #e2e2e2);
 	background: var(--surface-white, #fff);
-	color: var(--text-ink-gray-8, #383838);
+	color: var(--ink-gray-8, #383838);
 	font-size: 12px;
 	cursor: pointer;
 }
@@ -575,13 +592,19 @@ const preview = computed(() =>
 	border-radius: 0.75rem;
 	background: var(--surface-gray-1, #fafafa);
 }
+/* Amber on its own hexes in both themes: the library's amber pair is 3:1 in light, and
+   its light fallback left dark-brown text on a dark page. */
 .jv-sched-warn {
 	margin: 0;
 	padding: 0.5rem 0.625rem;
 	border-radius: 0.5rem;
-	background: var(--surface-amber-1, #fff7ed);
-	color: var(--text-ink-amber-3, #9a4a0b);
+	background: #fff7ed;
+	color: #9a4a0b;
 	font-size: 13px;
+}
+:root[data-theme="dark"] .jv-sched-warn {
+	background: #2e2413;
+	color: #f3c27c;
 }
 .jv-sched-meta {
 	display: flex;
@@ -590,13 +613,13 @@ const preview = computed(() =>
 	padding-top: 0.625rem;
 	border-top: 1px solid var(--outline-gray-1, #ededed);
 	font-size: 12px;
-	color: var(--text-ink-gray-5, #6b6b6b);
+	color: var(--ink-gray-5, #6b6b6b);
 }
 .jv-sched-meta code {
 	padding: 1px 5px;
 	border-radius: 4px;
 	background: var(--surface-gray-2, #f0f0f0);
-	color: var(--text-ink-gray-8, #383838);
+	color: var(--ink-gray-8, #383838);
 	font-size: 12px;
 }
 </style>
