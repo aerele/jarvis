@@ -39,3 +39,8 @@ def on_doctype_update():
 		["owner", "creation"],
 		index_name="owner_creation_index",
 	)
+	# The chat list hides a macro run's chat (``api.list_conversations``,
+	# ``search_conversations``: NOT EXISTS on ``conversation``), and the chaining hook
+	# finds a conversation's running run on every turn end
+	# (``macros.advance_after_turn``). Both look rows up by conversation.
+	frappe.db.add_index("Jarvis Macro Run", ["conversation"], index_name="conversation_index")

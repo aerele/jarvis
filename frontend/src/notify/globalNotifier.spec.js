@@ -273,13 +273,14 @@ describe("a failed macro run is announced", () => {
 		...over,
 	});
 
-	it("toasts the macro's name and the reason, and marks the run's chat unread", () => {
+	it("toasts the macro's name and the reason, with no unread dot", () => {
+		// The run's chat is not in the chat list: there is no row to dot.
 		socket.emit(done());
 		const toasts = useToasts().value;
 		expect(toasts).toHaveLength(1);
 		expect(toasts[0].title).toBe("Macro failed: Month-end close");
 		expect(toasts[0].body).toBe("Step 2 failed: no such customer");
-		expect(store.markUnread).toHaveBeenCalledWith("conv-m");
+		expect(store.markUnread).not.toHaveBeenCalled();
 	});
 
 	it("opens the run's conversation when clicked", () => {
@@ -288,8 +289,50 @@ describe("a failed macro run is announced", () => {
 		expect(router.push).toHaveBeenCalledWith("/c/conv-m");
 	});
 
-	it("says nothing for a run that worked, or that stopped", () => {
+	it("announces a run that finished, and opens its chat", () => {
 		socket.emit(done({ status: "completed", error: "" }));
+		const toasts = useToasts().value;
+		expect(toasts).toHaveLength(1);
+		expect(toasts[0].title).toBe("Macro finished: Month-end close");
+		toasts[0].onClick();
+		expect(router.push).toHaveBeenCalledWith("/c/conv-m");
+	});
+
+	it("a finished run in a hidden tab takes the browser-notification branch", () => {
+		setHidden(true);
+		socket.emit(done({ status: "completed", error: "" }));
+		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it("says nothing for each step of a run, only for its end", () => {
+		// Each step is a turn of its own in a chat the sidebar does not list.
+		const step = (n) => ({
+			kind: "macro:progress",
+			conversation: "conv-m",
+			macro_run: "run-m",
+			step: n,
+			total: 2,
+		});
+		socket.emit(step(1));
+		socket.emit(terminal({ conversation_id: "conv-m", run_id: "step-1", event_seq: 1 }));
+		socket.emit(step(2));
+		socket.emit(terminal({ conversation_id: "conv-m", run_id: "step-2", event_seq: 2 }));
+		expect(useToasts().value).toHaveLength(0);
+		expect(store.markUnread).not.toHaveBeenCalled();
+		socket.emit(done({ status: "completed", error: "" }));
+		expect(useToasts().value).toHaveLength(1);
+	});
+
+	it("a failed step of a run is told once, by the run's end", () => {
+		socket.emit({ kind: "macro:progress", conversation: "conv-m", step: 1, total: 1 });
+		socket.emit(terminal({ kind: "run:error", conversation_id: "conv-m", error: "boom" }));
+		socket.emit(done());
+		const toasts = useToasts().value;
+		expect(toasts).toHaveLength(1);
+		expect(toasts[0].title).toBe("Macro failed: Month-end close");
+	});
+
+	it("says nothing for a run that the user stopped, or that stopped at a card", () => {
 		socket.emit(done({ status: "stopped", error: "" }));
 		// Stopped at a confirmation card: the card already said "needs your confirmation".
 		socket.emit(

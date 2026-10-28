@@ -214,7 +214,9 @@ def list_conversations(refresh: bool = False) -> list[dict]:
 
 	Empty conversations (a "New Chat" opened and abandoned with no message) are
 	hidden so a stray draft never lingers in the sidebar; it surfaces the moment
-	it gets its first message (the send path reloads this list). ``message_count``
+	it gets its first message (the send path reloads this list). A macro run's
+	chat is hidden too: it is a run log, opened from the Runs page, its macro's
+	page or the run's notification, and still opens at its own URL. ``message_count``
 	is still returned for the UI, and is always >= 1 given the EXISTS filter.
 	``activity`` carries unfinished run/message identities. ``refresh`` is an
 	observational sidebar reconciliation: it never queues billed prewarming.
@@ -247,6 +249,10 @@ def list_conversations(refresh: bool = False) -> list[dict]:
 		  AND EXISTS (
 		    SELECT 1 FROM `tabJarvis Chat Message` m2
 		    WHERE m2.conversation = c.name
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM `tabJarvis Macro Run` r
+		    WHERE r.conversation = c.name
 		  )
 		ORDER BY c.starred DESC, c.last_active_at DESC
 		""",
@@ -318,6 +324,7 @@ def search_conversations(search: str = "", start: int = 0, page_length: int = 20
 
 	c = frappe.qb.DocType("Jarvis Conversation")
 	m = frappe.qb.DocType("Jarvis Chat Message")
+	r = frappe.qb.DocType("Jarvis Macro Run")
 	query = (
 		frappe.qb.from_(c)
 		.where(c.owner == me)
@@ -326,8 +333,10 @@ def search_conversations(search: str = "", start: int = 0, page_length: int = 20
 		# leak into the general chat palette. Other origin markers retain their
 		# established behavior.
 		.where(Coalesce(c.origin_page, "") != "dashboards")
-		# Hide empty (message-less) drafts, mirroring list_conversations.
+		# Hide empty (message-less) drafts and macro run chats, mirroring
+		# list_conversations.
 		.where(ExistsCriterion(frappe.qb.from_(m).select(1).where(m.conversation == c.name)))
+		.where(ExistsCriterion(frappe.qb.from_(r).select(1).where(r.conversation == c.name)).negate())
 	)
 	if search:
 		escaped = (search or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

@@ -618,10 +618,11 @@ class TestAHookThatWasLost(CheckBase):
 		self._settled_long_enough(run, rid, seconds=3 * 3600 - 300)  # however late: an end is an end
 		self._tick()
 		self.assertEqual((self._run(run).status, self._run(run).error or ""), ("completed", ""))
-		# A clean completion is told to nobody, as on the hook's own path: the check is
-		# not louder than the hook. Only an ending with a reason notifies.
+		# Told exactly as on the hook's own path, once: the check is no louder than the
+		# hook, and a finished run is told there too (its chat is not in the chat list).
 		subjects = frappe.get_all("Notification Log", filters={"for_user": TEST_USER}, pluck="subject")
-		self.assertEqual(subjects, [])
+		self.assertEqual(len(subjects), 1)
+		self.assertTrue(subjects[0].startswith("Macro run finished: "), subjects)
 
 	def test_a_hook_that_was_delivered_is_not_logged_as_lost(self):
 		# The ledger row is `done` with attempts to spare and the hook left no trace of
@@ -1113,8 +1114,9 @@ class TestSendingAnotherStepUnattended(CheckBase):
 				self.assertEqual(len(self._seeds(conv)), 1)
 
 	def test_a_run_stopped_at_a_confirmation_card_is_told_to_its_owner(self):
-		# The closing line is withheld while the reply holds the card, and a manual run
-		# gets no notification from the engine: the run row was the only trace.
+		# The closing line is withheld while the reply holds the card, so the
+		# notification is the trace. Told once: by the engine's own ending, not again
+		# by the check.
 		run, conv, rid = self._lost()
 		self._settled_long_enough(run, rid)
 		parked = {"tool": "delete_doc", "summary": "delete_doc doctype=ToDo name=X", "conversation": conv}

@@ -13,6 +13,7 @@ write came from the SPA, the Desk, or a test — mirroring ``Jarvis Custom Skill
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import get_datetime
 
 from jarvis.permissions import NotRenamable, has_jarvis_admin_access
 
@@ -151,6 +152,7 @@ class JarvisMacro(NotRenamable, Document):
 		self._validate_owner_cap()
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
+		self._validate_cron_schedule()
 		self._validate_one_time_schedule()
 		self._guard_admin_hold()
 		self._guard_summary_state()
@@ -398,6 +400,7 @@ class JarvisMacro(NotRenamable, Document):
 			or self._time_changed()
 			or self._anchor_changed("schedule_weekday")
 			or self._anchor_changed("schedule_day_of_month")
+			or self._anchor_changed("schedule_cron")
 			or self._date_changed()
 		):
 			changes.append(_("schedule"))
@@ -476,6 +479,30 @@ class JarvisMacro(NotRenamable, Document):
 
 		validate_schedule_day_of_month_or_throw(self.schedule_day_of_month)
 
+	def _validate_cron_schedule(self):
+		"""A cron schedule is checked whenever one is present on a recurring schedule,
+		for the reason ``_validate_schedule_time`` gives: a value saved while the
+		schedule is off is handed to the sweep the day it is switched on. Hourly and
+		custom have nothing else to run on, so they need one once switched on. The
+		lines are stored single-spaced, one per line, so a re-save is not a change."""
+		from jarvis.chat.macro_scheduler import (
+			CRON_FREQUENCIES,
+			ONCE,
+			cron_lines,
+			cron_ready,
+			validate_cron_or_throw,
+		)
+
+		if not cron_ready():
+			return
+		frequency = self.schedule_frequency or ""
+		lines = cron_lines(self.get("schedule_cron"))
+		self.schedule_cron = "\n".join(lines) or None
+		if frequency == ONCE:
+			return
+		if lines or (frappe.utils.cint(self.schedule_enabled) and frequency in CRON_FREQUENCIES):
+			validate_cron_or_throw(self.schedule_cron)
+
 	def _validate_one_time_schedule(self):
 		"""A one-time schedule needs its date, and a moment still ahead when it is
 		set: a past one would be switched off by the next sweep without ever running.
@@ -503,6 +530,7 @@ class JarvisMacro(NotRenamable, Document):
 			or self._time_changed()
 			or self._anchor_changed("schedule_weekday")
 			or self._anchor_changed("schedule_day_of_month")
+			or self._anchor_changed("schedule_cron")
 			or self._date_changed()
 		)
 
@@ -530,15 +558,22 @@ class JarvisMacro(NotRenamable, Document):
 			self.next_run_at = None
 			return
 		if self._schedule_changed() or not self.next_run_at:
-			from jarvis.chat.macro_scheduler import compute_next_run
+			from jarvis.chat.macro_scheduler import cron_lines, cron_matches, macro_next_run, uses_cron
 
-			self.next_run_at = compute_next_run(
-				self.schedule_frequency,
-				self.schedule_time,
-				weekday=self.schedule_weekday,
-				day_of_month=self.schedule_day_of_month,
-				schedule_date=self.get("schedule_date"),
-			)
+			upcoming = macro_next_run(self)
+			# A cron schedule that still fires at the slot already set keeps it. Saving a
+			# macro from before cron schedules writes its daily time as a cron line: the
+			# same schedule, and recomputing from now would skip a slot that is due but
+			# not swept yet (admin-v2#675). Kept only while no earlier slot comes first.
+			kept = self.next_run_at and get_datetime(self.next_run_at)
+			if (
+				kept
+				and uses_cron(self)
+				and cron_matches(cron_lines(self.schedule_cron), kept)
+				and (upcoming is None or kept <= upcoming)
+			):
+				return
+			self.next_run_at = upcoming
 
 	def _anchor_changed(self, fieldname: str) -> bool:
 		"""``has_value_changed`` for the two optional anchors, treating every spelling of

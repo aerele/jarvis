@@ -71,6 +71,12 @@ const radio = (w, user) => w.find(`.jv-macro-handover-user[data-user="${user}"] 
 async function pick(w, user) {
 	await radio(w, user).setValue(true);
 }
+const chips = (w) => w.findAll(".jv-macro-handover-chip").map((c) => c.attributes("data-user"));
+const MORE = [
+	...USERS,
+	{ user: "cara@example.test", full_name: "Cara Lim", macros: 1 },
+	{ user: "dev@example.test", full_name: "Dev Nair", macros: 1 },
+];
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -183,12 +189,15 @@ describe("MacroHandoverDialog", () => {
 		expect(api.adminHandover).toHaveBeenCalledWith(
 			"m1",
 			"ben@example.test",
-			"asha@example.test"
+			"asha@example.test",
+			false
 		);
 		expect(toast.success).toHaveBeenCalledWith(
 			"Handed “Month end” to Ben Ode (ben@example.test); 1 run stopped"
 		);
-		expect(w.emitted("handed")).toEqual([[{ name: "m1", new_owner: "ben@example.test" }]]);
+		expect(w.emitted("handed")).toEqual([
+			[{ name: "m1", new_owner: "ben@example.test", copies: [] }],
+		]);
 		expect(w.emitted("update:modelValue")).toEqual([[false]]);
 	});
 
@@ -252,7 +261,8 @@ describe("MacroHandoverDialog", () => {
 		expect(api.adminHandover).toHaveBeenLastCalledWith(
 			"m1",
 			"ben@example.test",
-			"cara@example.test"
+			"cara@example.test",
+			false
 		);
 		expect(w.find(".jv-macro-handover-summary").text()).toContain("from Cara");
 	});
@@ -276,26 +286,26 @@ describe("MacroHandoverDialog", () => {
 		);
 	});
 
-	it("searches when the typing stops, and drops a pick the new results do not show", async () => {
+	it("searches when the typing stops, and keeps a pick the new results do not show", async () => {
 		vi.useFakeTimers();
 		const w = await open();
 		await pick(w, "ben@example.test");
 		api.adminHandoverTargets.mockResolvedValue({ users: [USERS[2]], max: 25 });
-		await w.find(".stub-search").setValue("ful");
+		await w.find(".jv-macro-handover-search").setValue("ful");
 		expect(api.adminHandoverTargets).toHaveBeenCalledTimes(1);
 		vi.advanceTimersByTime(300);
 		await flushPromises();
 		expect(api.adminHandoverTargets).toHaveBeenLastCalledWith("ful");
 		expect(w.findAll(".jv-macro-handover-user")).toHaveLength(1);
-		expect(handButton(w).attributes("disabled")).toBe("");
-		expect(w.find(".jv-macro-handover-summary").exists()).toBe(false);
-		// Searched back, the user is offered again but not picked behind the admin's back.
+		// Several people are gathered from several searches: the pick stays, as a chip.
+		expect(chips(w)).toEqual(["ben@example.test"]);
+		expect(handButton(w).attributes("disabled")).toBeUndefined();
 		api.adminHandoverTargets.mockResolvedValue({ users: USERS, max: 25 });
-		await w.find(".stub-search").setValue("");
+		await w.find(".jv-macro-handover-search").setValue("");
 		vi.advanceTimersByTime(300);
 		await flushPromises();
 		expect(w.findAll(".jv-macro-handover-user")).toHaveLength(3);
-		expect(w.find(".jv-macro-handover-summary").exists()).toBe(false);
+		expect(radio(w, "ben@example.test").element.checked).toBe(true);
 	});
 
 	it("shows that a new search is under way until its answer comes", async () => {
@@ -304,7 +314,7 @@ describe("MacroHandoverDialog", () => {
 		expect(w.find(".jv-macro-handover-searching").exists()).toBe(false);
 		let answer;
 		api.adminHandoverTargets.mockReturnValue(new Promise((r) => (answer = r)));
-		await w.find(".stub-search").setValue("be");
+		await w.find(".jv-macro-handover-search").setValue("be");
 		vi.advanceTimersByTime(300);
 		await flushPromises();
 		expect(w.find(".jv-macro-handover-searching").text()).toBe("Searching…");
@@ -383,8 +393,146 @@ describe("MacroHandoverDialog", () => {
 		w.find(".stub-close").element.focus();
 		await flushPromises();
 		await new Promise((r) => requestAnimationFrame(r));
-		expect(document.activeElement).toBe(w.find(".stub-search").element);
+		expect(document.activeElement).toBe(w.find(".jv-macro-handover-search").element);
 		expect(w.find("h3.jv-macro-dialog-title").text()).toBe("Hand over “Month end”");
 		w.unmount();
+	});
+
+	it("picks several people as chips, and a chip's x or the box unpicks them", async () => {
+		api.adminHandoverTargets.mockResolvedValue({ users: MORE, max: 25 });
+		const w = await open();
+		expect(w.find(".jv-macro-handover-search").attributes("placeholder")).toBe(
+			"Search by name or email"
+		);
+		await pick(w, "ben@example.test");
+		await pick(w, "cara@example.test");
+		expect(chips(w)).toEqual(["ben@example.test", "cara@example.test"]);
+		expect(w.find(".jv-macro-handover-chip").text()).toContain("BO");
+		expect(w.find(".jv-macro-handover-search").attributes("placeholder")).toBe(
+			"Add someone else"
+		);
+		expect(w.find(".jv-macro-handover-count").text()).toContain("2 selected");
+		const x = w.find('.jv-macro-handover-chip[data-user="ben@example.test"] button');
+		expect(x.attributes("aria-label")).toBe("Remove Ben Ode (ben@example.test)");
+		await x.trigger("click");
+		expect(chips(w)).toEqual(["cara@example.test"]);
+		expect(radio(w, "ben@example.test").element.checked).toBe(false);
+		await radio(w, "cara@example.test").setValue(false);
+		expect(chips(w)).toEqual([]);
+		expect(w.find(".jv-macro-handover-summary").exists()).toBe(false);
+	});
+
+	it("says the first gets it and the others a copy, and sends them in order", async () => {
+		api.adminHandoverTargets.mockResolvedValue({ users: MORE, max: 25 });
+		api.adminHandover.mockResolvedValue({
+			ok: true,
+			handed_over: true,
+			new_owner: "cara@example.test",
+			stopped_runs: 0,
+			copies: [{ user: "ben@example.test", macro: "m2" }],
+			copy_failed: [],
+		});
+		const w = await open();
+		await pick(w, "cara@example.test");
+		await pick(w, "ben@example.test");
+		const summary = w.find(".jv-macro-handover-summary");
+		expect(summary.find("p").text()).toBe(
+			"Hand “Month end” from Asha Rao (asha@example.test) to Cara Lim and Ben Ode?"
+		);
+		const points = summary.findAll("li").map((li) => li.text());
+		expect(points[0]).toBe(
+			"The first person picked gets it; each of the others gets their own copy."
+		);
+		expect(points).toContain("Everyone is told.");
+		expect(handButton(w)).toBeUndefined();
+		const button = w.find(".jv-macro-handover-confirm");
+		expect(button.text()).toBe("Hand over to 2 people");
+		await button.trigger("click");
+		await flushPromises();
+		expect(api.adminHandover).toHaveBeenCalledWith(
+			"m1",
+			["cara@example.test", "ben@example.test"],
+			"asha@example.test",
+			false
+		);
+		expect(toast.success).toHaveBeenCalledWith(
+			"Handed “Month end” to Cara Lim (cara@example.test); copies went to Ben Ode (ben@example.test)"
+		);
+		expect(w.emitted("handed")[0][0]).toEqual({
+			name: "m1",
+			new_owner: "cara@example.test",
+			copies: [{ user: "ben@example.test", macro: "m2" }],
+		});
+	});
+
+	it("with Keep, gives everyone a copy and leaves the macro where it is", async () => {
+		api.adminHandover.mockResolvedValue({
+			ok: true,
+			handed_over: false,
+			new_owner: null,
+			copies: [{ user: "ben@example.test", macro: "m2" }],
+			copy_failed: [],
+		});
+		const w = await open();
+		await pick(w, "ben@example.test");
+		const keep = w.find(".jv-macro-handover-keep");
+		expect(keep.text().replace(/\s+/g, " ")).toBe(
+			"Keep it with Asha Rao (asha@example.test) too Gives everyone a copy instead of moving it."
+		);
+		await keep.find("input").setValue(true);
+		const summary = w.find(".jv-macro-handover-summary");
+		expect(summary.find("p").text()).toBe(
+			"Give Ben Ode (ben@example.test) a copy of “Month end” from Asha Rao (asha@example.test)?"
+		);
+		expect(summary.text()).toContain("the original stays as it is");
+		expect(summary.text()).not.toContain("A run that is going now is stopped.");
+		const button = w.find(".jv-macro-handover-confirm");
+		expect(button.text()).toBe("Give a copy");
+		await button.trigger("click");
+		await flushPromises();
+		expect(api.adminHandover).toHaveBeenCalledWith(
+			"m1",
+			"ben@example.test",
+			"asha@example.test",
+			true
+		);
+		expect(toast.success).toHaveBeenCalledWith(
+			"Gave a copy of “Month end” to Ben Ode (ben@example.test)"
+		);
+		expect(w.emitted("handed")[0][0].new_owner).toBeNull();
+	});
+
+	it("says which copies the server could not make, escaped", async () => {
+		api.adminHandoverTargets.mockResolvedValue({ users: MORE, max: 25 });
+		api.adminHandover.mockResolvedValue({
+			ok: true,
+			handed_over: true,
+			new_owner: "cara@example.test",
+			copies: [],
+			copy_failed: [{ user: "ben@example.test", reason: "has <25> macros." }],
+		});
+		const w = await open();
+		await pick(w, "cara@example.test");
+		await pick(w, "ben@example.test");
+		await w.find(".jv-macro-handover-confirm").trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith(
+			"Not copied for Ben Ode (ben@example.test): has &lt;25&gt; macros."
+		);
+		expect(w.emitted("handed")).toHaveLength(1);
+	});
+
+	it("picks at most ten people at once", async () => {
+		const many = Array.from({ length: 12 }, (_, i) => ({
+			user: `p${i}@example.test`,
+			full_name: `Person ${i}`,
+			macros: 0,
+		}));
+		api.adminHandoverTargets.mockResolvedValue({ users: many, max: 25 });
+		const w = await open();
+		for (let i = 0; i < 11; i++) await pick(w, `p${i}@example.test`);
+		expect(chips(w)).toHaveLength(10);
+		expect(radio(w, "p10@example.test").element.checked).toBe(false);
+		expect(w.find(".jv-macro-handover-count").text()).toContain("10 is the most at once");
 	});
 });
