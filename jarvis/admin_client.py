@@ -2306,6 +2306,17 @@ def push_bench_heartbeat(heartbeat: dict) -> dict:
 	return _post(path=_m("api.tenant.ingest_bench_heartbeat"), body={"heartbeat": heartbeat})
 
 
+def report_foreign_session(count: int, last_seen_at: str) -> dict:
+	"""Tell admin how many plugin sessions this site never started (a restored copy
+	is probably using this site's agent). Count and time only, never a session key.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError /
+	AdminRateLimitedError."""
+	return _post(
+		path=_m("api.tenant.ingest_foreign_session"),
+		body={"report": {"count": count, "last_seen_at": last_seen_at}},
+	)
+
+
 # Short timeout for the three feedback pushes below. Admin's ingest is a single
 # upsert; 10s is generous for it. All three are sent by the feedback outbox's
 # delivery job and retry sweep (jarvis.chat.feedback_outbox), never inside a

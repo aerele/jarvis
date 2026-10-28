@@ -110,9 +110,11 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 				resolve_binding(session_key).actor if shared_session else legacy_session_user(session_key)
 			)
 		except frappe.PermissionError:
+			_record_foreign_session(session_key)
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", "Collaborative chat execution is unavailable on this server.")
 		if not plugin_user:
+			_record_foreign_session(session_key)
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
@@ -4571,6 +4573,16 @@ def _with_note(result: dict, note: str) -> dict:
 # ``{"ok": True, "data": data}``) is the matching ``ok()`` there if a
 # caller wants it explicitly.
 from jarvis._responses import err as _error
+
+
+def _record_foreign_session(session_key: str) -> None:
+	"""Best effort: note a plugin session this site never started. Never raises."""
+	try:
+		from jarvis.chat.foreign_session import record
+
+		record(session_key)
+	except Exception:
+		frappe.logger("jarvis.foreign_session").warning("foreign session hook failed", exc_info=True)
 
 
 def _get_header(name: str) -> str:
