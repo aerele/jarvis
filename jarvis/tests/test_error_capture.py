@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import types
 from contextlib import ExitStack
 from unittest.mock import Mock, patch
@@ -181,14 +182,17 @@ class TestErrorLogOrigin(CaptureBase):
 		self.assertFalse(api_errors.is_jarvis_error(doc.method, doc.error))
 
 	def test_a_real_log_wrapper_names_the_function_that_called_it(self):
-		package = api_errors._JARVIS_PACKAGE
+		# The probe's file name must not sit in the app tree: it does not exist, and
+		# coverage (source = apps/jarvis) would fail its report on it (NoSource).
+		package = os.path.join(tempfile.gettempdir(), "zz_errcap_pkg") + os.sep  # never created
 		src = (
 			"def _log_it(title):\n    return frappe.log_error(title=title, message='plain')\n"
 			"def real_site(title):\n    return _log_it(title)\n"
 		)
 		scope = {"frappe": frappe}
 		exec(compile(src, f"{package}chat/zz_errcap_probe.py", "exec"), scope)
-		doc = scope["real_site"]("errcap wrapper")
+		with patch.object(api_errors, "_JARVIS_PACKAGE", package):
+			doc = scope["real_site"]("errcap wrapper")
 		self.addCleanup(frappe.delete_doc, "Error Log", doc.name, force=True, ignore_permissions=True)
 		self.assertIn("in real_site", doc.error)
 		self.assertNotIn("in _log_it", doc.error)
