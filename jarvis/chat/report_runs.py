@@ -149,6 +149,7 @@ def _with_state(runs: list[dict], owner: str) -> list[dict]:
 			ignore_permissions=True,  # owner-scoped; ERP users lack the Prepared Report role
 		)
 	}
+	errors = _failure_errors([name for name, p in reports.items() if p.status in _FAILED])
 	out = []
 	for r in runs:
 		p = reports.get(r["run"])
@@ -158,8 +159,24 @@ def _with_state(runs: list[dict], owner: str) -> list[dict]:
 		item = {k: v for k, v in r.items() if k != "key"}
 		ready_at = str(p.report_end_time or p.modified) if status == "ready" else ""
 		item.update(status=status, ready_at=ready_at)
+		if status == "failed":
+			item["error"] = errors.get(r["run"], "")
 		out.append(item)
 	return out
+
+
+def _failure_errors(names: list[str]) -> dict:
+	"""Each failed run's reason as its owner may read it (``failure_reason``), never
+	the stored traceback. Read only for failed runs: the traceback can be large."""
+	if not names:
+		return {}
+	rows = frappe.get_all(
+		"Prepared Report",
+		filters={"name": ["in", names]},
+		fields=["name", "error_message"],
+		ignore_permissions=True,  # the names were already owner-scoped by the caller
+	)
+	return {row.name: _prepared_reports.failure_reason(row.error_message)[1] for row in rows}
 
 
 def _filters_label(filters) -> str:

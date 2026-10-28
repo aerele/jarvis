@@ -374,6 +374,34 @@ class TestRunReportPrepared(FrappeTestCase):
 		# must NOT re-fire a fresh doomed job
 		self.assertEqual(frappe.db.count("Prepared Report", {"report_name": PREP_REPORT}), before)
 
+	def test_a_permission_refusal_is_shown_and_offers_no_filter_change(self):
+		run = _make_pr("Error")
+		frappe.db.set_value("Prepared Report", run, "error_message", PERMISSION_TB, update_modified=False)
+		env = run_report(report_name=PREP_REPORT)
+		self.assertEqual(env["status"], "failed")
+		self.assertEqual(env["reason"], "permission")
+		self.assertEqual(env["error"], PERMISSION_DETAIL)
+		self.assertIn(PERMISSION_DETAIL, env["message"])
+		self.assertNotIn("tell me and I'll run it again", env["message"])
+
+	def test_an_internal_error_keeps_the_traceback_out(self):
+		run = _make_pr("Error")
+		frappe.db.set_value("Prepared Report", run, "error_message", INTERNAL_TB, update_modified=False)
+		env = run_report(report_name=PREP_REPORT)
+		self.assertEqual((env["reason"], env["error"]), ("internal", ""))
+		for leak in ("KeyError", "warehouse", "Traceback", "Sales User"):
+			self.assertNotIn(leak, json.dumps(env))
+		self.assertIn(run, env["message"])  # where an administrator finds the details
+
+	def test_a_stalled_run_reads_as_timed_out(self):
+		run = _make_pr("Failed")
+		frappe.db.set_value(
+			"Prepared Report", run, "error_message", "Report timed out.", update_modified=False
+		)
+		env = run_report(report_name=PREP_REPORT)
+		self.assertEqual(env["reason"], "timed_out")
+		self.assertIn("took too long", env["message"])
+
 	def test_newer_inflight_wins_over_older_error(self):
 		# An old Error must not shadow a newer in-flight run: the newest attempt
 		# decides. Older failed row, then a fresh Started -> generating, not failed.
@@ -460,3 +488,110 @@ class TestRunReportPrepared(FrappeTestCase):
 			frappe.set_user("Administrator")
 		# denied BEFORE any generation is triggered
 		self.assertEqual(frappe.db.count("Prepared Report", {"report_name": gated}), before)
+
+
+# A Prepared Report's stored error_message is Frappe's "traceback with variables":
+# the user's roles, the filters and the report's config ride along in it.
+PERMISSION_TB = "\n".join(
+	[
+		"Traceback with variables (most recent call last):",
+		'  File "apps/frappe/frappe/core/doctype/prepared_report/prepared_report.py", line 124',
+		"    result = generate_report_result(report=report, filters=instance.filters)",
+		"      filters = {'company': 'Acme', 'from_date': '2026-04-01'}",
+		"      user_roles = ['Sales User', 'Stock Manager']",
+		'  File "apps/frappe/frappe/__init__.py", line 537, in _raise_exception',
+		"    raise exc",
+		"      exc = PermissionError('You do not have permission to access the report.')",
+		"frappe.exceptions.PermissionError: You do not have permission to access the "
+		"<b>Batch-Wise Balance History</b> report.<br><br>Access is restricted for all "
+		"users with the Sales User role.",
+	]
+)
+PERMISSION_DETAIL = (
+	"You do not have permission to access the Batch-Wise Balance History report. "
+	"Access is restricted for all users with the Sales User role."
+)
+INTERNAL_TB = "\n".join(
+	[
+		"Traceback with variables (most recent call last):",
+		'  File "apps/erpnext/erpnext/stock/report/stock_balance/stock_balance.py", line 40',
+		'    warehouse = filters["warehouse"]',
+		"      filters = {'company': 'Acme'}",
+		"      user_roles = ['Sales User']",
+		"KeyError: 'warehouse'",
+	]
+)
+
+
+def _tb(last_line: str) -> str:
+	return f'Traceback (most recent call last):\n  File "x.py", line 1, in execute\n{last_line}'
+
+
+class TestFailureReason(FrappeTestCase):
+	"""failure_reason keeps only what the run's owner may read: a frappe.* exception's
+	own message (what Desk would show them), never the traceback around it."""
+
+	def test_a_permission_refusal_keeps_its_message_as_plain_text(self):
+		self.assertEqual(_prepared_reports.failure_reason(PERMISSION_TB), ("permission", PERMISSION_DETAIL))
+
+	def test_a_frappe_throw_is_a_report_error_with_its_message(self):
+		tb = _tb("frappe.exceptions.ValidationError: From Date must be before To Date")
+		self.assertEqual(
+			_prepared_reports.failure_reason(tb), ("report_error", "From Date must be before To Date.")
+		)
+
+	def test_a_message_over_several_lines_is_one_line(self):
+		tb = _tb("frappe.exceptions.ValidationError: Row 3:\nItem &amp; batch missing.")
+		self.assertEqual(
+			_prepared_reports.failure_reason(tb), ("report_error", "Row 3: Item & batch missing.")
+		)
+
+	def test_the_last_of_chained_exceptions_decides(self):
+		tb = (
+			_tb("KeyError: 'x'")
+			+ "\n\nDuring handling of the above exception, another exception occurred:\n\n"
+			+ _tb("frappe.exceptions.ValidationError: Please set Company.")
+		)
+		self.assertEqual(_prepared_reports.failure_reason(tb), ("report_error", "Please set Company."))
+
+	def test_non_frappe_errors_are_internal_with_no_detail(self):
+		self.assertEqual(_prepared_reports.failure_reason(INTERNAL_TB), ("internal", ""))
+		sql = _tb("pymysql.err.OperationalError: (1054, \"Unknown column 'x' in 'where clause'\")")
+		self.assertEqual(_prepared_reports.failure_reason(sql), ("internal", ""))
+
+	def test_timeouts(self):
+		self.assertEqual(_prepared_reports.failure_reason("Report timed out.")[0], "timed_out")
+		tb = _tb("rq.timeouts.JobTimeoutException: Task exceeded maximum timeout value (1500 seconds)")
+		self.assertEqual(_prepared_reports.failure_reason(tb)[0], "timed_out")
+		tb = _tb("frappe.exceptions.QueryTimeoutError: (3024, 'Query execution was interrupted')")
+		self.assertEqual(
+			_prepared_reports.failure_reason(tb),
+			("timed_out", "It took too long to generate and was stopped."),
+		)
+
+	def test_frappe_errors_wrapping_the_database_are_internal(self):
+		tb = _tb("frappe.exceptions.QueryDeadlockError: (1213, 'Deadlock found when trying to get lock')")
+		self.assertEqual(_prepared_reports.failure_reason(tb), ("internal", ""))
+
+	def test_nothing_stored_or_unparseable_is_internal(self):
+		for text in (None, "", "   ", "something went wrong"):
+			self.assertEqual(_prepared_reports.failure_reason(text), ("internal", ""))
+
+	def test_a_bare_permission_error_still_says_why(self):
+		self.assertEqual(
+			_prepared_reports.failure_reason(_tb("frappe.exceptions.PermissionError")),
+			("permission", "You don't have permission to run this report."),
+		)
+
+	def test_a_frappe_error_with_no_message_is_internal(self):
+		self.assertEqual(
+			_prepared_reports.failure_reason(_tb("frappe.exceptions.ValidationError")), ("internal", "")
+		)
+
+	def test_a_long_message_is_capped(self):
+		reason, detail = _prepared_reports.failure_reason(
+			_tb("frappe.exceptions.ValidationError: " + "word " * 200)
+		)
+		self.assertEqual(reason, "report_error")
+		self.assertLessEqual(len(detail), 300)
+		self.assertTrue(detail.endswith("…"))
