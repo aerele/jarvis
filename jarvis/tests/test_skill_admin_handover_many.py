@@ -193,6 +193,10 @@ class TestACopyThatBreaks(ManyBase):
 		self.assertTrue(self._copy_of(skill, REVIEWER))
 		self.assertIsNone(self._copy_of(skill, OTHER))
 		self.assertEqual(self._error_logs(), logs_before + 1)
+		# The row says which skill and which recipient, with the traceback.
+		log = frappe.get_last_doc("Error Log", {"method": COPY_FAILED})
+		self.assertIn(f"{skill} -> {OTHER}", log.error)
+		self.assertIn("Traceback", log.error)
 		for user in (OWNER, TARGET, REVIEWER):
 			self.assertTrue(self._notices(user), user)
 		self.assertEqual(self._notices(OTHER), [])

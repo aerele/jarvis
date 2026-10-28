@@ -175,17 +175,19 @@ def give_copies(skill: str, users: list[str], old_owner: str) -> tuple[list[dict
 		except Exception as e:
 			frappe.db.rollback()
 			del frappe.local.message_log[messages:]  # said in copy_failed, not as a popup
-			refused.append({"user": user, "reason": _copy_failure(e)})
+			refused.append({"user": user, "reason": _copy_failure(e, skill, user)})
 	return copies, refused
 
 
-def _copy_failure(error: Exception) -> str:
+def _copy_failure(error: Exception, skill: str, user: str) -> str:
 	"""What ``copy_failed`` says for a copy that did not land. A refusal is plain text
 	(the dialog escapes it again for its toast); anything else is logged and kept
 	short, so one bad copy never stops the others or the notices after them."""
 	if isinstance(error, frappe.ValidationError):
 		return html.unescape(frappe.utils.strip_html(str(error))) or _("Not copied.")
-	frappe.log_error(title="skill handover: copy failed")
+	frappe.log_error(
+		title="skill handover: copy failed", message=f"{skill} -> {user}\n{frappe.get_traceback()}"
+	)
 	return _("Not copied: something went wrong. The error is in the Error Log.")
 
 

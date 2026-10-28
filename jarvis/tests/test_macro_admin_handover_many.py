@@ -233,6 +233,10 @@ class TestACopyThatBreaks(ManyBase):
 		self.assertTrue(self._copy_of(macro, THIRD))
 		self.assertIsNone(self._copy_of(macro, SECOND))
 		self.assertEqual(self._error_logs(), logs_before + 1)
+		# The row says which macro and which recipient, with the traceback.
+		log = frappe.get_last_doc("Error Log", {"method": COPY_FAILED})
+		self.assertIn(f"{macro} -> {SECOND}", log.error)
+		self.assertIn("Traceback", log.error)
 		for user in (OWNER, TARGET, THIRD):
 			self.assertTrue(self._notices(user), user)
 		self.assertEqual(self._notices(SECOND), [])
