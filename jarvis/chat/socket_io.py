@@ -30,7 +30,10 @@ operation), queues for the gate, and such a reader gets one turn between writes.
 Outcomes a caller can rely on:
 
 * ``SendNotStarted`` (code ``send-not-started``): no byte of THIS frame reached the
-  socket. A definite failure; the transport is untouched.
+  socket. ``reason`` says why: ``closed`` (the transport is already dead), ``busy``
+  (the lock and gate wait ran out), ``deadline`` (the write could not finish in its
+  window) leave the transport as it was; ``local`` (a socket error before the first
+  raw send of the frame) also aborts it, since that socket may be broken.
 * ``SendUncertain`` (code ``ack-timeout``, the existing ambiguous sentinel): the
   write started and did not finish normally. The peer may hold the whole frame:
   CPython can raise from a signal handler after the kernel accepted the last byte
@@ -87,10 +90,13 @@ _SOCKET_ERRORS = (OSError, websocket.WebSocketException)
 
 
 class SendNotStarted(AgentUnreachableError):
-	"""No byte of this frame was handed to the socket: a definite failure."""
+	"""No byte of this frame was handed to the socket. Raised only locally (never
+	built from a gateway reply), so its TYPE is the proof; ``reason`` is one of
+	``closed``, ``busy``, ``deadline`` or ``local`` (see the module docstring)."""
 
-	def __init__(self, message: str):
+	def __init__(self, message: str, *, reason: str = "closed"):
 		super().__init__(message, code="send-not-started")
+		self.reason = reason
 
 
 class SendUncertain(AgentUnreachableError):
@@ -142,6 +148,8 @@ class _DeadlineSocket:
 			sent = 0
 			while sent < total:
 				self._raw.settimeout(self._io._send_budget())
+				# From here on the peer may hold bytes of this operation's frame.
+				self._io._raw_send_started = True
 				sent += self._raw.send(view[sent : sent + RAW_SEND_CHUNK])
 			return total
 		except BaseException:
@@ -185,6 +193,9 @@ class _SocketIO:
 		self._op_deadline: float | None = None
 		self._op_owner: int | None = None
 		self._ctrl_deadline: float | None = None
+		# Did the current operation call a raw send yet? Without a real socket nothing
+		# proves it did not, so compatibility mode counts every operation as started.
+		self._raw_send_started = False
 		self._writers_waiting = 0
 		self._readers_waiting = 0
 		self._reader_turn = False
@@ -217,6 +228,7 @@ class _SocketIO:
 		self._op_deadline = deadline
 		self._op_owner = threading.get_ident()
 		self._ctrl_deadline = None
+		self._raw_send_started = self._raw is None
 
 	def _end_op(self) -> None:
 		with self._cv:
@@ -451,11 +463,17 @@ class _SocketIO:
 
 	def _read_compat(self, timeout_s: float) -> dict | None:
 		self._raise_if_dead()
+		wait_end = time.monotonic() + max(timeout_s, READY_READER_WAIT_S)
 		with self._cv:
 			while not self._dead and self._busy:
-				self._cv.wait()
+				left = wait_end - time.monotonic()
+				if left <= 0:
+					break
+				self._cv.wait(left)
 			if self._dead:
 				raise AgentUnreachableError("agent WS closed: transport aborted")
+			if self._busy:
+				return None
 			self._start_op("read", time.monotonic() + timeout_s)
 		ws = self._ws
 		try:
@@ -496,7 +514,8 @@ class _SocketIO:
 		wait_end = time.monotonic() + wait_s
 		if lock is not None and not lock.acquire(timeout=max(0.0, wait_end - time.monotonic())):
 			raise SendNotStarted(
-				f"{method} was not sent: the connection to the assistant stayed busy for {wait_s:g}s"
+				f"{method} was not sent: the connection to the assistant stayed busy for {wait_s:g}s",
+				reason="busy",
 			)
 		try:
 			with self._cv:
@@ -508,7 +527,8 @@ class _SocketIO:
 						left = wait_end - time.monotonic()
 						if left <= 0:
 							raise SendNotStarted(
-								f"{method} was not sent: the connection to the assistant stayed busy for {wait_s:g}s"
+								f"{method} was not sent: the connection to the assistant stayed busy for {wait_s:g}s",
+								reason="busy",
 							)
 						self._cv.wait(left)
 					if self._dead:
@@ -517,7 +537,9 @@ class _SocketIO:
 						)
 					now = time.monotonic()
 					if not_after is not None and now + write_s > not_after:
-						raise SendNotStarted(f"{method} was not sent: no time left in this delivery window")
+						raise SendNotStarted(
+							f"{method} was not sent: no time left in this delivery window", reason="deadline"
+						)
 					self._start_op("write", now + write_s)
 				finally:
 					self._writers_waiting -= 1
@@ -530,7 +552,12 @@ class _SocketIO:
 					self._ws.settimeout(write_s)
 				self._ws.send(payload)
 			except _SOCKET_ERRORS as e:
+				# Either way this socket is not used again.
 				self.abort()
+				if not self._raw_send_started:
+					# Failed before any raw send of this frame (a spent budget, a library
+					# check): the peer holds none of it.
+					raise SendNotStarted(f"{method} was not sent: {type(e).__name__}", reason="local") from e
 				raise SendUncertain(f"{method} may not have been delivered: {e}") from e
 			except BaseException:
 				self.abort()

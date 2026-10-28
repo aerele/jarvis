@@ -10,7 +10,8 @@ What is checked is what a customer and the lease depend on:
   * a slice that cannot finish a write inside its lease writes NOTHING: no CAS, no
     ``run:start``, no RPC; the turn stays ``ready`` under the same key and is sent
     on the next slice after a forced renew;
-  * a send that provably never started is a definite, honest error;
+  * a send that provably never started after the claim returns the turn to
+    ``ready`` (see also ``test_pump_send_not_started``): nothing failed;
   * a send that started and failed is AMBIGUOUS: the turn parks ``recovering``, the
     user never reads "No changes were made", later turns stay ``ready``, and the
     successor hop adopts the turn under the same key without sending it again.
@@ -185,18 +186,26 @@ class TestDeferralBeforeAnySideEffect(_IoPumpCase):
 
 
 class TestSendNotStartedAfterClaim(_IoPumpCase):
-	"""AC-P3: the send lock stays busy past the 5s wait after the turn was claimed.
-	No byte was written, so the definite error is honest: ``errored``, ``run:error``
-	with ``changed_data=False`` and code ``unreachable``. No ghost run or lane is
-	left, the transport is not poisoned, and the next turn of the wave goes out."""
+	"""AC-P3' (replaces AC-P3 after the PR #2201 review): the send lock stays busy past
+	the 5s wait after the turn was claimed. No byte was written, so nothing failed:
+	the turn returns to ``ready`` with its key, payload, queue position and credit,
+	and nobody is shown an error. The wave stops for this slice (at most one 5s wait
+	per slice), the slice renews the lease at once but does not count the return as
+	progress, and the next slice sends both turns once each, in queue order."""
 
-	def test_not_started_errors_honestly_and_the_wave_continues(self):
-		conv = self._mk_conv()
+	def test_busy_socket_returns_the_turn_and_the_next_slice_sends_both_in_order(self):
+		conv1, conv2 = self._mk_conv(), self._mk_conv()
 		first, second = "pmp_ns1", "pmp_ns2"
-		self._seed_ready(conv, first)
-		self._seed_ready(conv, second)
+		self._seed_ready(conv1, first)
+		self._seed_ready(conv2, second)
+		before = {rid: self._row(rid) for rid in (first, second)}
 		sess, peer = self._socket_mux(on_message=tp.rpc_responder(chat_final=False))
 		ctx = self._make_ctx(self._socket_deps(sess))
+		ctx.last_snapshot_mono = pump._monotonic()  # no capacity refresh in these slices
+		ctx.last_heartbeat = pump._monotonic() - pump.HEARTBEAT_INTERVAL_S - 1  # the stamp is due
+		stamp_before, expires_before = frappe.db.get_value(
+			PUMP, self._target, ["loop_heartbeat_ts", "lease_expires_at"]
+		)
 		held = threading.Event()
 
 		def hold_lock():
@@ -208,20 +217,43 @@ class TestSendNotStartedAfterClaim(_IoPumpCase):
 		holder.start()
 		self.assertTrue(held.wait(2))
 		published = _PublishLog()
-		with patch.object(ts, "publish_fenced", side_effect=published):
-			pump._dispatch_ready(ctx)
+		telemetry: list = []
+		with (
+			patch.object(ts, "publish_fenced", side_effect=published),
+			patch.object(pump, "_telemetry", side_effect=lambda event, **f: telemetry.append((event, f))),
+		):
+			pump.drain_slice(ctx)
 		holder.join(10)
-		self.assertEqual(self._state(first), "errored", "a send that never started is a definite error")
-		errors = [f for e, f in published.for_run(first) if e == "run:error"]
-		self.assertEqual(len(errors), 1)
-		self.assertIs(errors[0].get("changed_data"), False)
-		self.assertEqual(errors[0].get("code"), "unreachable")
+		state, version, payload = self._row(first)
+		self.assertEqual((state, version), ("ready", before[first][1] + 2), "a send that never started")
+		self.assertEqual(
+			{k: v for k, v in json.loads(payload).items() if k != "unsent_return"},
+			json.loads(before[first][2]),
+		)
+		self.assertEqual(int(self._val(first, "reserved")), 1, "the credit is kept")
+		self.assertEqual(self._row(second), before[second], "the wave stops for this slice")
+		self.assertNotIn("run:error", published.names(first))
+		self.assertFalse(any("changed_data" in f for _e, f in published.for_run(first)))
 		self.assertNotIn(first, ctx.runs, "ghost run left in the pump context")
 		self.assertNotIn(first, ctx.mux._runs, "ghost lane left in the mux")
 		self.assertFalse(ctx.mux.is_closed())
-		self.assertEqual(self._state(second), "dispatching", "the rest of the wave is unaffected")
-		self.assertTrue(_wait_for(lambda: tp.chat_sends(peer), 5))
-		self.assertEqual([f["params"]["idempotencyKey"] for f in tp.chat_sends(peer)], [second])
+		stamp_after, expires_after = frappe.db.get_value(
+			PUMP, self._target, ["loop_heartbeat_ts", "lease_expires_at"]
+		)
+		self.assertEqual(stamp_after, stamp_before, "returning a turn is not drain progress")
+		self.assertGreater(
+			frappe.utils.get_datetime(expires_after), frappe.utils.get_datetime(expires_before)
+		)
+		returned = [f for e, f in telemetry if e == "send_returned"]
+		self.assertEqual(len(returned), 1)
+		self.assertEqual((returned[0]["reason"], returned[0]["outcome"]), ("busy", "ready"))
+		self.assertLessEqual(set(returned[0]), {"target", "run_id", "method", "reason", "outcome"})
+		self.assertEqual(tp.chat_sends(peer), [])
+		with patch.object(ts, "publish_fenced", side_effect=published):
+			pump.drain_slice(ctx)
+		self.assertTrue(_wait_for(lambda: len(tp.chat_sends(peer)) == 2, 5))
+		self.assertEqual([f["params"]["idempotencyKey"] for f in tp.chat_sends(peer)], [first, second])
+		self.assertNotIn("run:error", published.names(first))
 
 
 class TestSendUncertainMidWave(_IoPumpCase):
