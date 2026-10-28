@@ -49,14 +49,10 @@ const MONTH_SHORT = [
 	"Nov",
 	"Dec",
 ];
-const NAMES = {
-	sun: 0,
-	mon: 1,
-	tue: 2,
-	wed: 3,
-	thu: 4,
-	fri: 5,
-	sat: 6,
+// Names belong to their own field, as croniter reads them: days in the weekday part,
+// months in the month part, nowhere else.
+const WEEKDAY_NAMES = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+const MONTH_NAMES = {
 	jan: 1,
 	feb: 2,
 	mar: 3,
@@ -117,7 +113,7 @@ export function ordinal(n) {
 }
 
 // ── cron ─────────────────────────────────────────────────────────────────────
-function parseField(src, min, max, label) {
+function parseField(src, min, max, label, names = {}) {
 	const out = new Set();
 	for (const part of src.split(",")) {
 		const m = /^(\*|[a-z0-9]+(?:-[a-z0-9]+)?)(?:\/(\d+))?$/i.exec(part);
@@ -128,12 +124,18 @@ function parseField(src, min, max, label) {
 		if (m[1] !== "*") {
 			const ends = m[1].split("-").map((x) => {
 				const k = x.toLowerCase();
-				if (k in NAMES) return NAMES[k];
+				if (k in names) return names[k];
 				if (!/^\d+$/.test(x)) throw bad;
 				return Number(x);
 			});
 			lo = ends[0];
 			hi = ends.length > 1 ? ends[1] : m[2] ? max : ends[0];
+			// croniter reads "n-n" as "*", so the server refuses it; so does the form.
+			if (ends.length > 1 && lo === hi) {
+				throw new Error(
+					`The ${label} part “${part}” starts and ends on the same value. Write just ${lo}.`
+				);
+			}
 		}
 		const step = m[2] ? Number(m[2]) : 1;
 		if (step < 1 || lo < min || hi > max || lo > hi) {
@@ -153,7 +155,7 @@ export function parseCron(expr) {
 	if (f.length !== 5 || !f[0]) {
 		throw new Error("A cron schedule has 5 parts: minute, hour, day, month and weekday.");
 	}
-	const dow = parseField(f[4], 0, 7, "weekday");
+	const dow = parseField(f[4], 0, 7, "weekday", WEEKDAY_NAMES);
 	if (dow.has(7)) {
 		dow.delete(7);
 		dow.add(0);
@@ -162,7 +164,7 @@ export function parseCron(expr) {
 		minutes: [...parseField(f[0], 0, 59, "minute")].sort(byNumber),
 		hours: [...parseField(f[1], 0, 23, "hour")].sort(byNumber),
 		dom: parseField(f[2], 1, 31, "day"),
-		months: parseField(f[3], 1, 12, "month"),
+		months: parseField(f[3], 1, 12, "month", MONTH_NAMES),
 		dow,
 		domAny: f[2] === "*",
 		dowAny: f[4] === "*",

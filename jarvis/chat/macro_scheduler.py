@@ -963,7 +963,7 @@ MIN_GAP_MINUTES = 5
 # One element of a cron part, read the way the form's parser reads it
 # (frontend/src/lib/macroCron.js parseField): ``*`` or ``low`` or ``low-high``, then an
 # optional ``/step``. croniter also takes a sixth (seconds) part, "@daily" nicknames,
-# ``L`` and reversed ranges: none is a schedule the form can show, so all are refused.
+# ``L``, reversed ranges and "n-n" ranges: none is a schedule the form can show, so all are refused.
 _CRON_ELEMENT = re.compile(r"^(?:\*|([0-9a-z]+)(?:-([0-9a-z]+))?)(?:/\d+)?$", re.I)
 _CRON_NAMES = {
 	name: number for number, name in enumerate(("sun", "mon", "tue", "wed", "thu", "fri", "sat"))
@@ -1046,7 +1046,8 @@ def _cron_part_ok(part: str) -> bool:
 		if any(not end.isdigit() and end not in _CRON_NAMES for end in ends):
 			return False
 		values = [int(end) if end.isdigit() else _CRON_NAMES[end] for end in ends]
-		if len(values) == 2 and values[0] > values[1]:
+		# Reversed is refused; so is "n-n", which croniter reads as "*" (3-3 would run every minute).
+		if len(values) == 2 and values[0] >= values[1]:
 			return False
 	return True
 

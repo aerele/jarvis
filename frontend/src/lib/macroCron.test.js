@@ -222,6 +222,16 @@ test("what the server refuses the form refuses too, and names work", () => {
 		"0 9 * * fri-mon",
 		"0 9 * * 1#2",
 		"0 9 ? * *",
+		// A name belongs to its own field only.
+		"jan 9 * * *",
+		"0 mon * * *",
+		"0 9 mon * *",
+		"0 9 * * jan",
+		// croniter reads "n-n" as "*", so the server refuses it too.
+		"3-3 9 * * *",
+		"0 9-9 * * *",
+		"0 9 * * 2-2",
+		"0 9 * jan-jan *",
 	]) {
 		const p = schedulePreview({ ...base, frequency: "custom", cron }, { now: NOW });
 		assert.notEqual(p.error, "", cron);

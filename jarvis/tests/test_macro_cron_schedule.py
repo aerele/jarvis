@@ -127,7 +127,24 @@ class TestCronHelpers(FrappeTestCase):
 		self.assertEqual(macro_scheduler.shortest_gap_minutes(["30 9 * * *"]), 1440)
 
 	def test_cron_parts_the_form_cannot_read_are_refused(self):
-		for expr in ("0 9 L * *", "0 9 l * *", "5-1 * * * *", "0 9 * * fri-mon", "0 9 * * 1#2", "0 9 ? * *"):
+		for expr in (
+			"0 9 L * *",
+			"0 9 l * *",
+			"5-1 * * * *",
+			"0 9 * * fri-mon",
+			"0 9 * * 1#2",
+			"0 9 ? * *",
+			# A name belongs to its own field only.
+			"jan 9 * * *",
+			"0 mon * * *",
+			"0 9 mon * *",
+			"0 9 * * jan",
+			# croniter reads "n-n" as "*": "3-3 9 * * *" would run every minute.
+			"3-3 9 * * *",
+			"0 9-9 * * *",
+			"0 9 * * 2-2",
+			"0 9 * jan-jan *",
+		):
 			with self.subTest(expr=expr):
 				self.assertIn("is not a cron schedule", macro_scheduler.cron_problem(expr))
 		for expr in ("0 9 * jan-mar *", "0 9 * * sun-sat", "0 9 * * MON-FRI", "0-30/10 9 * * *"):
