@@ -707,8 +707,8 @@ def _undo(sp: str, queues: dict, *, clean_single=False, original_error: Exceptio
 			getattr(frappe.db, q)._functions = deque(functions)
 		frappe.clear_messages()
 	if cleanup_error:
-		# Abort the pass after attempting every invalidator. Retain the original
-		# failure explicitly; do not turn uncertain cache cleanup into a retry.
+		# Abort this pass after attempting every invalidator, retaining the original
+		# failure. The caller rolls back the pass; the Pending sheet can be retried.
 		raise cleanup_error from original_error
 
 
