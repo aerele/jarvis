@@ -121,6 +121,9 @@ def dispatch_one(ctx, turn):
 			c._deny()
 		pending = ctx.shared_preflights.get(run_id)
 		if not pending or pending["version"] != int(turn["version"]):
+			if not pump._io_admit(ctx):
+				# #773: no lease time for the preflight write; the turn stays ready.
+				return False
 			fut = ctx.mux.issue_rpc(
 				"sessions.patch",
 				{"key": binding.session_key, "expectedSessionId": physical},
@@ -133,6 +136,10 @@ def dispatch_one(ctx, turn):
 			}
 			return False
 		if not pending["fut"].done and pump._monotonic() < pending["deadline"]:
+			return False
+		if not pump._io_admit(ctx):
+			# #773: no lease time for the chat.send. Keep the verified preflight (its
+			# version still fences it) and claim nothing; the next slice sends.
 			return False
 		response = pending["fut"].result(0)
 		ctx.shared_preflights.pop(run_id, None)
@@ -216,10 +223,11 @@ def dispatch_one(ctx, turn):
 		)
 	except AgentUnreachableError as exc:
 		pump._handle_ack_failure(ctx, rs, exc)
+		ctx.runs.pop(run_id, None)
 		return False
 	ctx.pending_acks[run_id] = pump._PendingAck(
 		fut=fut,
-		deadline=pump._monotonic() + pump.ACK_TIMEOUT_S,
+		deadline=pump._monotonic() + pump._ack_window_s(payload),
 		rs=rs,
 		drained_note_ids=payload.get("drained_note_ids") or [],
 	)
