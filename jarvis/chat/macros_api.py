@@ -815,8 +815,16 @@ def update_macro(
 		doc.schedule_day_of_month = frappe.utils.cint(schedule_day_of_month) or None
 	if schedule_date is not None:
 		doc.schedule_date = schedule_date or None
-	if schedule_cron is not None and _schedule_cron_column():
-		doc.schedule_cron = schedule_cron or None
+	if _schedule_cron_column():
+		if schedule_cron is not None:
+			doc.schedule_cron = schedule_cron or None
+		elif any(
+			sent is not None
+			for sent in (schedule_frequency, schedule_time, schedule_weekday, schedule_day_of_month)
+		):
+			# A caller that sends the old fields without a cron does not know cron: its
+			# fields are the schedule, and a stored cron would silently override them.
+			doc.schedule_cron = None
 	if steps is not None:
 		rows = _parse_steps(steps)
 		# Unchanged steps are left as they are: the rows are not deleted and inserted

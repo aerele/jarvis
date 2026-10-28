@@ -15,6 +15,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, get_datetime, now_datetime
+from freezegun import freeze_time
 
 from jarvis.chat import macro_scheduler
 
@@ -275,6 +276,46 @@ class TestCronOnTheMacro(FrappeTestCase):
 		self.assertEqual(frappe.db.get_value(MACRO, out["data"]["name"], "schedule_cron"), "0 * * * *")
 		page = macros_api.list_macros_page(filters={"schedule_frequency": "hourly"})
 		self.assertIn(out["data"]["name"], [r["name"] for r in page["rows"]])
+
+	def test_update_without_cron_follows_the_legacy_fields(self):
+		from jarvis.chat import macros_api
+
+		with freeze_time("2026-10-22 10:00"):  # a Thursday
+			doc = self._macro(
+				"legacy-update",
+				schedule_frequency="weekly",
+				schedule_weekday="Monday",
+				schedule_time="08:00:00",
+				schedule_cron="0 8 * * 1",
+			)
+			macros_api.update_macro(doc.name, schedule_time="10:00")
+			doc.reload()
+			self.assertFalse(doc.schedule_cron)
+			self.assertEqual(get_datetime(doc.next_run_at), datetime.datetime(2026, 10, 26, 10, 0))
+
+	def test_update_without_cron_and_without_a_schedule_field_keeps_the_cron(self):
+		from jarvis.chat import macros_api
+
+		with freeze_time("2026-10-22 10:00"):
+			doc = self._macro("keeps-cron", schedule_frequency="custom", schedule_cron="0 8 * * 1")
+			macros_api.update_macro(doc.name, schedule_enabled=0)
+			self.assertEqual(frappe.db.get_value(MACRO, doc.name, "schedule_cron"), "0 8 * * 1")
+
+	def test_update_with_cron_and_time_together_keeps_the_sent_cron(self):
+		from jarvis.chat import macros_api
+
+		with freeze_time("2026-10-22 10:00"):
+			doc = self._macro("both", schedule_frequency="custom", schedule_cron="0 8 * * 1")
+			macros_api.update_macro(doc.name, schedule_time="10:00", schedule_cron="30 7 * * 2")
+			self.assertEqual(frappe.db.get_value(MACRO, doc.name, "schedule_cron"), "30 7 * * 2")
+
+	def test_update_to_hourly_without_cron_is_refused(self):
+		from jarvis.chat import macros_api
+
+		with freeze_time("2026-10-22 10:00"):
+			doc = self._macro("to-hourly", schedule_frequency="custom", schedule_cron="0 8 * * 1")
+			with self.assertRaises(frappe.ValidationError):
+				macros_api.update_macro(doc.name, schedule_frequency="hourly")
 
 	def test_the_admin_list_and_view_carry_the_cron(self):
 		from jarvis.chat import macros_admin_api
