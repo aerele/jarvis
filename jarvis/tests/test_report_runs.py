@@ -12,7 +12,13 @@ from jarvis.chat import report_runs
 from jarvis.chat.approvals_api import list_approvals_page
 from jarvis.chat.report_runs import _filters_label, _open_runs, chat_report_runs, ready_reports
 from jarvis.tests.test_chat_asks import _ensure_user
-from jarvis.tests.test_run_report import _ENQUEUE, PREP_REPORT, _ensure_report
+from jarvis.tests.test_run_report import (
+	_ENQUEUE,
+	PERMISSION_DETAIL,
+	PERMISSION_TB,
+	PREP_REPORT,
+	_ensure_report,
+)
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -100,6 +106,20 @@ class TestChatReportCard(FrappeTestCase):
 		run = _pr("Error")
 		_tool(self.conv, 1, "started", run)
 		self.assertEqual(_states(self.conv), [(run, "failed")])
+
+	def test_a_failed_run_carries_its_reason_never_the_traceback(self):
+		run = _pr("Error")
+		frappe.db.set_value("Prepared Report", run, "error_message", PERMISSION_TB, update_modified=False)
+		_tool(self.conv, 1, "started", run)
+		[item] = chat_report_runs(self.conv)["items"]
+		self.assertEqual((item["status"], item["error"]), ("failed", PERMISSION_DETAIL))
+		self.assertNotIn("user_roles", json.dumps(item))
+
+	def test_only_a_failed_run_has_an_error(self):
+		run = _pr("Started")
+		_tool(self.conv, 1, "started", run)
+		[item] = chat_report_runs(self.conv)["items"]
+		self.assertNotIn("error", item)
 
 	def test_a_desk_run_found_still_generating_gets_a_card(self):
 		run = _pr("Queued")

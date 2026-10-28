@@ -40,6 +40,25 @@ describe("ReportRunCards", () => {
 		expect(w.find(".jv-rrc-show").exists()).toBe(false);
 	});
 
+	it("a failed run with a reason shows it instead of the filter hint", () => {
+		const w = mountWith([
+			{
+				...RUN,
+				status: "failed",
+				error: "You do not have permission to access the report.",
+			},
+		]);
+		expect(w.find(".jv-rrc-state").text()).toBe(
+			"Couldn't prepare this report. You do not have permission to access the report."
+		);
+	});
+
+	it("shows the reason as text", () => {
+		const w = mountWith([{ ...RUN, status: "failed", error: "<img src=x onerror=alert(1)>" }]);
+		expect(w.find("img").exists()).toBe(false);
+		expect(w.find(".jv-rrc-state").text()).toContain("<img src=x onerror=alert(1)>");
+	});
+
 	it("can't ask while a reply is running", () => {
 		const w = mountWith([{ ...RUN, status: "ready" }], true);
 		expect(w.find(".jv-rrc-show").attributes("disabled")).toBeDefined();
