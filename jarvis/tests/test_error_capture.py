@@ -354,6 +354,41 @@ class TestCallToolFailures(CaptureBase):
 		self.assertEqual((row.surface, row.error_code), ("call_tool", "400"))
 		self.assertEqual(row.route, api_errors.UNAUTHENTICATED_ROUTE)
 
+	def test_an_unauthenticated_401_is_not_recorded(self):
+		# Internet probes of an allow_guest endpoint, and plugin-auth rejections that
+		# already write their own Error Log row: neither belongs in the tenant feed.
+		from jarvis import api
+		from jarvis._plugin_auth import PluginAuthError
+
+		frappe.set_user("Guest")
+		with patch.object(api, "_get_header", return_value=""):
+			result = api.call_tool("get_list", {"doctype": "Customer"})  # no token header at all
+		self.assertEqual(result["error"]["message"], "authentication required")
+		self.assertEqual(frappe.local.response.http_status_code, 401)
+		self.assertEqual(self.buffered(), [])
+
+		bad_token = PluginAuthError(http_status=401, code="invalid_token", message="bad bearer")
+		result = self._plugin_call(validate_plugin_request={"side_effect": bad_token})
+		self.assertFalse(result["ok"])
+		self.assertEqual(self.buffered(), [])
+
+	def test_a_stale_pairing_401_is_an_error_of_the_chat_user(self):
+		# The chat user is known by then, and the customer's chat is dead (jarvis #712).
+		from jarvis import api
+
+		frappe.set_user("Guest")
+		with (
+			patch("jarvis.chat.collaboration.is_collaborative_session", return_value=False),
+			patch("jarvis.chat.collaboration.legacy_session_user", return_value=USER),
+			patch("jarvis.chat.device.session_device_is_stale", return_value=True),
+			patch.object(api, "_notify_stale_pairing"),
+		):
+			result = self._plugin_call(validate_plugin_request={"return_value": "errcap-stale-session"})
+		self.assertEqual(result["error"]["code"], "AuthenticationError")
+		(row,) = self.buffered()
+		self.assertEqual((row.surface, row.error_code, row.user), ("call_tool", "401", USER))
+		self.assertNotEqual(row.route, api_errors.UNAUTHENTICATED_ROUTE)
+
 	def test_a_refusal_before_the_tool_runs_is_a_tool_failure_of_the_chat_user(self):
 		from jarvis import api
 
