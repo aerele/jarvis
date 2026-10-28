@@ -15,7 +15,6 @@ from unittest.mock import Mock, patch
 
 import frappe
 import requests
-from frappe.tests.classes.context_managers import freeze_time
 from frappe.tests.utils import FrappeTestCase
 from werkzeug.wrappers import Response
 
@@ -727,10 +726,12 @@ class TestPushBackoff(PushBase):
 		"""Run the scheduler entry ``minutes`` after START; True when it called admin."""
 		from jarvis import admin_client
 
-		at = frappe.utils.add_to_date(self.START, minutes=minutes, seconds=seconds)
+		at = frappe.utils.get_datetime(frappe.utils.add_to_date(self.START, minutes=minutes, seconds=seconds))
 		sender = Mock(side_effect=outcome) if isinstance(outcome, Exception) else Mock()
 		with (
-			freeze_time(at),
+			# Stdlib mock, not freezegun: CI does not install it. error_push reads the
+			# clock through frappe.utils.now_datetime() only.
+			patch("frappe.utils.now_datetime", return_value=at),
 			patch.object(error_push, "_admin_configured", return_value=True),
 			patch.object(admin_client, "push_error_rollup", sender),
 		):
