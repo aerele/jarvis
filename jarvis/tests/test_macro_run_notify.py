@@ -96,6 +96,43 @@ class TestTheOwnerIsToldHowARunEnded(outcome.MacroRunOutcomeBase):
 		self.assertEqual(note.link, f"/jarvis/c/{conv}")
 
 
+class TestTheMacroNameInASubjectIsEscaped(outcome.MacroRunOutcomeBase):
+	"""The desk bell renders a Notification Log subject as HTML; the Macros list shows
+	the body as text. So the name is escaped in every subject that holds it."""
+
+	NAME = "<b>Q4</b>"
+
+	def _subjects(self):
+		return frappe.get_all("Notification Log", filters={"for_user": OWNER}, pluck="subject")
+
+	def _assert_escaped(self):
+		(subject,) = self._subjects()
+		self.assertIn("&lt;b&gt;Q4&lt;/b&gt;", subject)
+		self.assertNotIn("<b>", subject)
+
+	def test_a_run_outcome(self):
+		run, _, macro = self._mk_run(tag=self.NAME)
+		frappe.set_user("Administrator")
+		with patch.object(macros, "_post_closing_message"), patch.object(macros, "_publish_done"):
+			macros._announce(frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro), "failed", "no")
+		self._assert_escaped()
+
+	def test_a_reaped_run(self):
+		run, _, _ = self._mk_run(tag=self.NAME)
+		frappe.set_user("Administrator")
+		with patch.object(macros, "_publish_done"):
+			macros._announce_reaped(run)
+		self._assert_escaped()
+
+	def test_a_scheduled_macro_that_did_not_run(self):
+		from jarvis.chat import macro_scheduler
+
+		frappe.set_user("Administrator")
+		row = frappe._dict(owner=OWNER, name="x", macro_name=self.NAME)
+		macro_scheduler._notify_owner(row, "reason")
+		self._assert_escaped()
+
+
 class TestARunsChatIsNotInTheChatList(outcome.MacroRunOutcomeBase):
 	def _plain_chat(self, title):
 		frappe.set_user(OWNER)

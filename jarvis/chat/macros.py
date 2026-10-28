@@ -3358,7 +3358,7 @@ def _announce_reaped(run_name: str) -> None:
 		_publish_done(run, macro_doc, "failed", _STALE_RUN_ERROR)
 		notify_owner(
 			macro_doc.owner,
-			subject=f"Macro run did not finish: {macro_doc.macro_name}",
+			subject=f"Macro run did not finish: {frappe.utils.escape_html(macro_doc.macro_name)}",
 			body=_STALE_RUN_ERROR,
 			link=_run_link(run),
 		)
@@ -3627,7 +3627,10 @@ def _announce(run, macro_doc, status: str, error: str = "") -> None:
 		return
 	notify_owner(
 		macro_doc.owner,
-		subject=f"{_OUTCOME_SUBJECT.get(status, 'Macro run ended')}: {macro_doc.macro_name}",
+		subject=(
+			f"{_OUTCOME_SUBJECT.get(status, 'Macro run ended')}: "
+			f"{frappe.utils.escape_html(macro_doc.macro_name)}"
+		),
 		body=error or _outcome_body(run, macro_doc, status),
 		link=_run_link(run),
 	)

@@ -295,3 +295,21 @@ class TestTheNoticeSubject(ManyBase):
 			self.assertNotIn("<b>", note.subject)
 			# The body is shown as text by the Macros list, so it stays as written.
 			self.assertIn("<b>Q4</b>", note.email_content)
+
+	def _owner_subjects(self):
+		return frappe.get_all("Notification Log", filters={"for_user": OWNER}, pluck="subject")
+
+	def test_the_stopped_by_an_admin_notice_escapes_the_macro_name(self):
+		macro = self._macro(OWNER, "<b>Q4</b>")
+		macros_admin_api._tell_the_owner(macro, ADMIN)
+		(subject,) = self._owner_subjects()
+		self.assertIn("&lt;b&gt;", subject)
+		self.assertNotIn("<b>", subject)
+
+	def test_the_deleted_by_an_admin_notice_escapes_the_macro_name(self):
+		macro = self._macro(OWNER, "<b>Q4</b>")
+		frappe.set_user(ADMIN)
+		macros_admin_api.admin_delete(macro)
+		(subject,) = self._owner_subjects()
+		self.assertIn("&lt;b&gt;", subject)
+		self.assertNotIn("<b>", subject)

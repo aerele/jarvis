@@ -486,7 +486,7 @@ def _tell_the_owner(macro: str | None, admin: str) -> None:
 			return
 		macros.notify_owner(
 			owner,
-			subject=f"{macros._OUTCOME_SUBJECT['stopped']}: {macro_name}",
+			subject=f"{macros._OUTCOME_SUBJECT['stopped']}: {frappe.utils.escape_html(macro_name)}",
 			body=STOPPED_BY_ADMIN,
 		)
 	except Exception:
@@ -755,7 +755,7 @@ def admin_delete(macro: str) -> dict:
 	if owner != admin:
 		macros.notify_owner(
 			owner,
-			subject=f"{macros_api.ADMIN_DELETE_NOTICE}: {row.macro_name}",
+			subject=f"{macros_api.ADMIN_DELETE_NOTICE}: {frappe.utils.escape_html(row.macro_name)}",
 			body=_("An admin deleted your macro {0}.").format(row.macro_name),
 		)
 	return {"ok": True, "deleted": True, "stopped_runs": out.get("stopped_runs") or 0}

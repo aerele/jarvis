@@ -872,7 +872,8 @@ def _notify_owner(m, reason: str) -> None:
 
 	macros.notify_owner(
 		m.owner,
-		subject=f"Scheduled macro did not run: {m.get('macro_name') or m.name}",
+		# The desk bell renders a subject as HTML.
+		subject=f"Scheduled macro did not run: {frappe.utils.escape_html(m.get('macro_name') or m.name)}",
 		body=reason,
 	)
 
