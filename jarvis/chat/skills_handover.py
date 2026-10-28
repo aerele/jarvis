@@ -25,6 +25,7 @@ may hand their own skill away. Both are audited.
 from __future__ import annotations
 
 import html
+from traceback import format_tb
 
 import frappe
 from frappe import _
@@ -139,7 +140,7 @@ def give_copies(skill: str, users: list[str], old_owner: str) -> tuple[list[dict
 		return copies, refused
 	src = frappe.get_doc(SKILL, skill)
 	admin = frappe.session.user
-	for user in users:
+	for i, user in enumerate(users, 1):
 		messages = len(frappe.local.message_log or [])
 		try:
 			reason = copy_refusal(src, user, _target_rows(user))
@@ -175,18 +176,24 @@ def give_copies(skill: str, users: list[str], old_owner: str) -> tuple[list[dict
 		except Exception as e:
 			frappe.db.rollback()
 			del frappe.local.message_log[messages:]  # said in copy_failed, not as a popup
-			refused.append({"user": user, "reason": _copy_failure(e, skill, user)})
+			refused.append({"user": user, "reason": _copy_failure(e, skill, i, len(users))})
 	return copies, refused
 
 
-def _copy_failure(error: Exception, skill: str, user: str) -> str:
+def _copy_failure(error: Exception, skill: str, i: int, n: int) -> str:
 	"""What ``copy_failed`` says for a copy that did not land. A refusal is plain text
 	(the dialog escapes it again for its toast); anything else is logged and kept
 	short, so one bad copy never stops the others or the notices after them."""
 	if isinstance(error, frappe.ValidationError):
 		return html.unescape(frappe.utils.strip_html(str(error))) or _("Not copied.")
+	# Error Logs are forwarded off-site: name the skill and the position, never the
+	# recipient, and leave out the exception's message (it can quote a user).
 	frappe.log_error(
-		title="skill handover: copy failed", message=f"{skill} -> {user}\n{frappe.get_traceback()}"
+		title="skill handover: copy failed",
+		message=(
+			f"{skill}: copy {i} of {n} failed\n{type(error).__name__}\n\n"
+			+ "".join(format_tb(error.__traceback__))
+		),
 	)
 	return _("Not copied: something went wrong. The error is in the Error Log.")
 

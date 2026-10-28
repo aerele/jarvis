@@ -193,10 +193,13 @@ class TestACopyThatBreaks(ManyBase):
 		self.assertTrue(self._copy_of(skill, REVIEWER))
 		self.assertIsNone(self._copy_of(skill, OTHER))
 		self.assertEqual(self._error_logs(), logs_before + 1)
-		# The row says which skill and which recipient, with the traceback.
+		# The row says which skill and which copy, with where it failed, and names no one:
+		# Error Logs are forwarded off-site.
 		log = frappe.get_last_doc("Error Log", {"method": COPY_FAILED})
-		self.assertIn(f"{skill} -> {OTHER}", log.error)
-		self.assertIn("Traceback", log.error)
+		self.assertIn(f"{skill}: copy 2 of 3 failed", log.error)
+		self.assertIn("give_copies", log.error)
+		for user in (TARGET, OTHER, REVIEWER, OWNER):
+			self.assertNotIn(user, log.error)
 		for user in (OWNER, TARGET, REVIEWER):
 			self.assertTrue(self._notices(user), user)
 		self.assertEqual(self._notices(OTHER), [])
@@ -221,7 +224,8 @@ class TestACopyThatBreaks(ManyBase):
 
 		def insert(doc, *args, **kwargs):
 			if doc.doctype == SKILL and frappe.session.user == OTHER:
-				raise frappe.DuplicateEntryError(SKILL, doc.skill_name)
+				# The message quotes the recipient, as a failed insert can.
+				raise frappe.DuplicateEntryError(SKILL, doc.skill_name, frappe.session.user)
 			return real(doc, *args, **kwargs)
 
 		logs_before = self._error_logs()

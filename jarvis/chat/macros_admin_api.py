@@ -36,6 +36,7 @@ read them). A run's conversation is never returned.
 from __future__ import annotations
 
 import html
+from traceback import format_tb
 
 import frappe
 from frappe import _
@@ -1059,7 +1060,7 @@ def _give_copies(macro: str, users: list[str], old_owner: str, admin: str) -> tu
 		}
 		for s in src.steps
 	]
-	for user in users:
+	for i, user in enumerate(users, 1):
 		messages = len(frappe.local.message_log or [])
 		try:
 			reason = _handover_refusal(frappe._dict(owner=src.owner, macro_name=src.macro_name), user)
@@ -1085,18 +1086,24 @@ def _give_copies(macro: str, users: list[str], old_owner: str, admin: str) -> tu
 		except Exception as e:
 			frappe.db.rollback()
 			del frappe.local.message_log[messages:]  # said in copy_failed, not as a popup
-			refused.append({"user": user, "reason": _copy_failure(e, macro, user)})
+			refused.append({"user": user, "reason": _copy_failure(e, macro, i, len(users))})
 	return copies, refused
 
 
-def _copy_failure(error: Exception, macro: str, user: str) -> str:
+def _copy_failure(error: Exception, macro: str, i: int, n: int) -> str:
 	"""What ``copy_failed`` says for a copy that did not land. A refusal is plain text
 	(the dialog escapes it again for its toast); anything else is logged and kept
 	short, so one bad copy never stops the others or the notices after them."""
 	if isinstance(error, frappe.ValidationError):
 		return html.unescape(frappe.utils.strip_html(str(error))) or _("Not copied.")
+	# Error Logs are forwarded off-site: name the macro and the position, never the
+	# recipient, and leave out the exception's message (it can quote a user).
 	frappe.log_error(
-		title="macro handover: copy failed", message=f"{macro} -> {user}\n{frappe.get_traceback()}"
+		title="macro handover: copy failed",
+		message=(
+			f"{macro}: copy {i} of {n} failed\n{type(error).__name__}\n\n"
+			+ "".join(format_tb(error.__traceback__))
+		),
 	)
 	return _("Not copied: something went wrong. The error is in the Error Log.")
 
