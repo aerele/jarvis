@@ -19,7 +19,7 @@
 						>{{ record.title || record.name || record.doctype }}</span
 					>
 					<Badge
-						v-if="(record.title || record.name || record.doctype) !== record.doctype"
+						v-if="record.category !== 'settings'"
 						variant="subtle"
 						theme="gray"
 						:label="record.doctype"

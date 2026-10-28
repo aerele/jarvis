@@ -57,6 +57,19 @@ def single_has_version(doctype: str) -> bool:
 	return bool(rows and rows[0][0])
 
 
+def valid_single_snapshot(snapshot, doctype: str) -> bool:
+	"""A Single update must keep the complete snapshot of that exact settings doc."""
+	return (
+		isinstance(snapshot, list)
+		and len(snapshot) == 4
+		and snapshot[:2] == [doctype, doctype]
+		and isinstance(snapshot[2], str)
+		and bool(snapshot[2].strip())
+		and type(snapshot[3]) is int
+		and snapshot[3] in (0, 1, 2)
+	)
+
+
 def snapshot_targets(tool: str, args: dict) -> list[list]:
 	"""``[[doctype, name, modified_us, docstatus], ...]`` for a target-bound call."""
 	if tool not in TARGET_BOUND or not isinstance(args, dict):

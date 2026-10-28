@@ -681,20 +681,35 @@ def _savepoint() -> tuple[str, dict]:
 	return sp, queues
 
 
-def _undo(sp: str, queues: dict, *, clean_single=False) -> None:
+def _undo(sp: str, queues: dict, *, clean_single=False, original_error: Exception | None = None) -> None:
 	"""Back to the savepoint, and nothing that record queued runs at the commit."""
 	frappe.db.rollback(save_point=sp)
+	cleanup_error = None
 	try:
 		if clean_single and "after_rollback" in queues:
 			# Savepoint rollback does not run Frappe's native cache cleanup. Run only
 			# this failed save's callbacks; earlier records still belong to the pass.
 			callbacks = tuple(frappe.db.after_rollback._functions)
 			for callback in callbacks[len(queues["after_rollback"]) :]:
-				callback()
+				try:
+					callback()
+				except Exception as error:
+					cleanup_error = cleanup_error or error
+					try:
+						frappe.log_error(
+							title="jarvis.file_box.single_rollback_cleanup_failed",
+							message=f"Original write error: {original_error}\n{frappe.get_traceback()}",
+						)
+					except Exception:
+						pass  # Finish every invalidator even when logging is unavailable.
 	finally:
 		for q, functions in queues.items():
 			getattr(frappe.db, q)._functions = deque(functions)
 		frappe.clear_messages()
+	if cleanup_error:
+		# Abort the pass after attempting every invalidator. Retain the original
+		# failure explicitly; do not turn uncertain cache cleanup into a retry.
+		raise cleanup_error from original_error
 
 
 def _message(e: Exception) -> str:
@@ -717,7 +732,7 @@ def _guarded(fn, crashes: list, *, duplicate=None, clean_single=False):
 		raise
 	except Exception as e:
 		tb = "" if isinstance(e, _KNOWN) else frappe.get_traceback()
-		_undo(sp, queues, clean_single=clean_single)
+		_undo(sp, queues, clean_single=clean_single, original_error=e)
 		if duplicate and isinstance(e, frappe.DuplicateEntryError):
 			return duplicate(e)
 		if tb:
@@ -731,6 +746,12 @@ def _update(i: int, record: dict, values: dict, crashes: list) -> dict:
 
 	single = bool(frappe.get_meta(record["doctype"]).issingle)
 	if single:
+		from jarvis.chat.pending_actions._park import valid_single_snapshot
+
+		if not valid_single_snapshot(record.get("snapshot"), record["doctype"]):
+			raise _Failed(
+				"This settings proposal has no valid version snapshot. Skip it and propose it again."
+			)
 		denied = held_writes._denied_item({**record, "values": values})
 		if denied:
 			raise _Failed(denied["error"]["message"])

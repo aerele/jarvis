@@ -243,6 +243,16 @@ describe("SheetDetail", () => {
 		expect(apply(w).attributes("disabled")).toBeUndefined();
 	});
 
+	it("keeps a non-settings doctype badge even when the title matches the doctype", async () => {
+		const item = record(0, { title: "Item" });
+		const w = await mountSheet(detail({ records: [item], questions: [] }));
+		expect(
+			row(w, 0)
+				.findAll(".badge")
+				.map((b) => b.text())
+		).toContain("Item");
+	});
+
 	it("loads, then lists the sections in order with counts, and the header", async () => {
 		let resolve;
 		api.getPendingAction.mockReturnValue(new Promise((r) => (resolve = r)));

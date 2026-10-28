@@ -61,6 +61,9 @@ HELD = "file_box_held"
 AR = "Jarvis Approval Request"
 CONV = "Jarvis Conversation"
 _WRITE_DOC_TOOLS = frozenset({"create_doc", "update_doc"})
+# New settings need an explicit policy review before unattended proposals can
+# reach the board. Existing risk, secret and permission checks still apply.
+FILEBOX_SETTINGS = frozenset({"Buying Settings"})
 # Framework / Jarvis internals an unattended run must never write (F6).
 DENIED_MODULES = frozenset(
 	{
@@ -327,6 +330,11 @@ def _denied_item(item: dict, *, batch=False) -> dict | None:
 		return _refuse(
 			"FileBoxRefusedError",
 			f"File Box can only propose ordinary settings updates without secret fields. {_ASK_A_HUMAN}",
+		)
+	if doctype not in FILEBOX_SETTINGS:
+		return _refuse(
+			"FileBoxRefusedError",
+			f"File Box settings proposals are not enabled for {doctype}. {_ASK_A_HUMAN}",
 		)
 	if not single_has_version(doctype):
 		return _refuse(
