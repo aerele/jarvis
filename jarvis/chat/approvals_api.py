@@ -1990,7 +1990,12 @@ def _edit_precheck(locked, items: list[dict], merged: list[dict], approver: str)
 		)
 	# A company/number correction supersedes the old Account scope. Unrelated
 	# identity fields retain the original-and-edited overlap contract.
-	original = [i for i in items if not held_parties.company_scoped(i["doctype"])]
+	original = [
+		item
+		for index, item in enumerate(items)
+		if not held_parties.company_scoped(item["doctype"])
+		or held_parties.account_scope(item["values"]) == held_parties.account_scope(merged[index]["values"])
+	]
 	keys = list(dict.fromkeys(held_parties.item_key(i) for i in (*original, *merged)))
 	sibling = held_writes.sibling_of(locked.name, keys)
 	if sibling:
