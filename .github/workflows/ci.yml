@@ -162,6 +162,10 @@ jobs:
         run: |
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
           node --test jarvis/public/js/*.test.mjs jarvis/public/js/shared/*.test.mjs
+<<<<<<< HEAD
+=======
+          node --test jarvis/public/js/shared/holiday/*.test.mjs jarvis/public/js/shared/holiday/scenes/*.test.mjs
+>>>>>>> 07c0d9d (feat(holiday-touches): full-area Diwali welcome scene (stage layout spike))
           node --test pwa/src/lib/*.test.js
 
   # Builds BOTH deploy artifacts (the /jarvis SPA and the /jarvis-mobile PWA) on Node
