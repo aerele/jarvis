@@ -1146,7 +1146,15 @@ def get_macro_run(run: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Run history dashboard (settings → Macro runs)
 # --------------------------------------------------------------------------- #
-_RUN_STATUSES = {"queued", "running", "waiting_capacity", "completed", "failed", "stopped"}
+_RUN_STATUSES = {
+	"queued",
+	"running",
+	"waiting_capacity",
+	"waiting_report",
+	"completed",
+	"failed",
+	"stopped",
+}
 # A run row with no macro is not run history: ``delete_macro`` keeps the month's
 # scheduled rows of a deleted macro so the unattended budget still counts them, and
 # clears their macro. Every query that shows or counts runs for a person carries
