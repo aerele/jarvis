@@ -3,8 +3,8 @@
 Reproduces ``erpnext.selling.doctype.customer.customer.get_customer_outstanding``
 (the Customer Credit Limit calculation): GL entries against the customer,
 plus the invoiceable balance of open Sales Orders, plus unbilled Delivery
-Note value. ERPNext sums the Sales Order and Delivery Note parts with raw SQL
-that ignores permissions, so here only documents the caller can read
+Note value (net of billed and returned quantity). ERPNext sums the Sales Order
+and Delivery Note parts with raw SQL that ignores permissions, so here only documents the caller can read
 (``frappe.get_list``: roles and User Permissions) count towards those two
 parts. The GL part is computed as ERPNext does, and an unrestricted caller
 gets the same number as ERPNext.
@@ -25,7 +25,7 @@ Receivable report (``jarvis.tools._ledger_access``).
 from __future__ import annotations
 
 import frappe
-from frappe.query_builder.functions import Coalesce, Sum
+from frappe.query_builder.functions import Coalesce, IfNull, Sum
 from frappe.utils import flt
 
 from jarvis.exceptions import (
@@ -117,12 +117,14 @@ def _sales_order_outstanding(customer: str, company: str) -> float:
 
 
 def _delivery_note_outstanding(customer: str, company: str) -> float:
-	# Delivery Note value not yet invoiced and not created against a Sales
-	# Order / Sales Invoice, for the Delivery Notes the caller can read (none
-	# when the user has no read on the DocType, where get_list would throw).
+	# Unbilled, unreturned Delivery Note value not created against a Sales Order /
+	# Sales Invoice, for the Delivery Notes the caller can read (none when the user
+	# has no read on the DocType, where get_list would throw). The arithmetic is
+	# ERPNext's own (quantity based, net of billed and returned stock quantity),
+	# restricted to the readable notes; see erpnext get_customer_outstanding.
 	if not frappe.has_permission("Delivery Note", "read"):
 		return 0.0
-	notes = frappe.get_list(
+	names = frappe.get_list(
 		"Delivery Note",
 		filters={
 			"customer": customer,
@@ -130,41 +132,66 @@ def _delivery_note_outstanding(customer: str, company: str) -> float:
 			"docstatus": 1,
 			"status": ["not in", ["Closed", "Stopped"]],
 		},
-		fields=["name", "base_net_total", "base_grand_total"],
+		pluck="name",
 		limit_page_length=0,
 	)
-	if not notes:
-		return 0.0
-	totals = {n.name: n for n in notes}
-
-	dn_item = frappe.qb.DocType("Delivery Note Item")
-	items = (
-		frappe.qb.from_(dn_item)
-		.select(dn_item.name, dn_item.parent, dn_item.amount)
-		.where(
-			dn_item.parent.isin(list(totals))
-			& (Coalesce(dn_item.against_sales_order, "") == "")
-			& (Coalesce(dn_item.against_sales_invoice, "") == "")
-		)
-		.run(as_dict=True)
+	return sum(
+		_unbilled_delivery_value(customer, company, names[i : i + 500]) for i in range(0, len(names), 500)
 	)
-	if not items:
-		return 0.0
 
+
+def _unbilled_delivery_value(customer: str, company: str, names: list[str]) -> float:
+	dn = frappe.qb.DocType("Delivery Note")
+	dn_item = frappe.qb.DocType("Delivery Note Item")
+	si = frappe.qb.DocType("Sales Invoice")
 	si_item = frappe.qb.DocType("Sales Invoice Item")
-	billed = dict(
+
+	returned_items = (
+		frappe.qb.from_(dn_item)
+		.join(dn)
+		.on(dn.name == dn_item.parent)
+		.select(dn_item.name, dn_item.dn_detail)
+		.where(
+			(dn.customer == customer) & (dn.company == company) & (dn.docstatus == 1) & (dn.is_return == 1)
+		)
+	).as_("returned_items")
+	# Credits against a return delivery reduce the original delivery row's billed quantity.
+	billed_dn_detail = Coalesce(returned_items.dn_detail, si_item.dn_detail)
+	billed = (
 		frappe.qb.from_(si_item)
-		.select(si_item.dn_detail, Sum(si_item.amount))
-		.where((si_item.docstatus == 1) & si_item.dn_detail.isin([i.name for i in items]))
-		.groupby(si_item.dn_detail)
+		.join(si)
+		.on(si.name == si_item.parent)
+		.left_join(returned_items)
+		.on((returned_items.name == si_item.dn_detail) & (si.is_return == 1))
+		.select(billed_dn_detail.as_("dn_detail"), Sum(si_item.stock_qty).as_("billed_qty"))
+		.where(si_item.docstatus == 1)
+		.where((si.is_return == 0) | (si.update_billed_amount_in_delivery_note == 1))
+		.groupby(billed_dn_detail)
+	)
+	billed_qty = IfNull(billed.billed_qty, 0.0)
+	returned_qty = IfNull(dn_item.returned_qty, 0.0)
+
+	rows = (
+		frappe.qb.from_(dn)
+		.join(dn_item)
+		.on(dn.name == dn_item.parent)
+		.left_join(billed)
+		.on(dn_item.name == billed.dn_detail)
+		.select(
+			Sum(
+				(
+					dn_item.base_net_amount
+					* (dn_item.stock_qty - billed_qty - returned_qty)
+					/ dn_item.stock_qty
+				)
+				/ dn.base_net_total
+				* dn.base_grand_total
+			)
+		)
+		.where(dn.name.isin(names) & (dn.base_net_total > 0))
+		.where(dn_item.stock_qty > billed_qty + returned_qty)
+		.where(Coalesce(dn_item.against_sales_order, "") == "")
+		.where(Coalesce(dn_item.against_sales_invoice, "") == "")
 		.run()
 	)
-
-	outstanding = 0.0
-	for item in items:
-		dn_amount = flt(item.amount)
-		si_amount = flt(billed.get(item.name))
-		note = totals[item.parent]
-		if dn_amount > si_amount and note.base_net_total:
-			outstanding += ((dn_amount - si_amount) / note.base_net_total) * note.base_grand_total
-	return outstanding
+	return flt(rows[0][0]) if rows and rows[0][0] is not None else 0.0

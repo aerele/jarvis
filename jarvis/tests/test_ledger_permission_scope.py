@@ -519,9 +519,13 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 	  SO-1  P1      1000 x 75% unbilled = 750
 	  SO-2  P2       400 x 100% unbilled = 400
 	  SO closed / fully billed: excluded
-	  DN-1  P1      600 item, 200 billed -> 400 / 600 x 708 = 472
-	  DN-2  P2      300 item -> 300 / 300 x 354 = 354
+	  DN-1  P1      600 item (6 qty), 2 qty billed -> 4 / 6 x 600 / 600 x 708 = 472
+	  DN-2  P2      300 item (3 qty), 1 qty returned -> 2 / 3 x 300 / 300 x 354 = 236
 	  DN item against a Sales Order: excluded
+
+	ERPNext prices a Delivery Note by quantity (net of billed and returned stock
+	quantity), so the rows carry stock_qty / base_net_amount, the billing
+	Sales Invoice exists, and a row with quantity but no billing is not zero.
 	"""
 
 	GL_TOTAL = 4300.0
@@ -529,7 +533,7 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 	SO_P1 = 750.0
 	SO_ALL = 1150.0
 	DN_P1 = 472.0
-	DN_ALL = 826.0
+	DN_ALL = 708.0
 
 	@classmethod
 	def setUpClass(cls):
@@ -617,7 +621,7 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 			**{**dn, "status": "Closed"},
 		)
 
-		def dn_item(name, parent, amount, **extra):
+		def dn_item(name, parent, amount, stock_qty, **extra):
 			cls._insert(
 				"Delivery Note Item",
 				name,
@@ -625,14 +629,24 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 				parenttype="Delivery Note",
 				parentfield="items",
 				amount=amount,
+				base_net_amount=amount,
+				stock_qty=stock_qty,
 				docstatus=1,
 				**extra,
 			)
 
-		dn_item("_JLS-DNI-1", "_JLS-DN-1", 600)
-		dn_item("_JLS-DNI-2", "_JLS-DN-2", 300)
-		dn_item("_JLS-DNI-3", "_JLS-DN-1", 250, against_sales_order="_JLS-SO-1")
-		dn_item("_JLS-DNI-4", "_JLS-DN-3", 500)
+		dn_item("_JLS-DNI-1", "_JLS-DN-1", 600, 6)
+		dn_item("_JLS-DNI-2", "_JLS-DN-2", 300, 3, returned_qty=1)
+		dn_item("_JLS-DNI-3", "_JLS-DN-1", 250, 5, against_sales_order="_JLS-SO-1")
+		dn_item("_JLS-DNI-4", "_JLS-DN-3", 500, 5)
+		cls._insert(
+			"Sales Invoice",
+			"_JLS-SI-1",
+			customer=cls.customer,
+			company=COMPANY_A,
+			docstatus=1,
+			is_return=0,
+		)
 		cls._insert(
 			"Sales Invoice Item",
 			"_JLS-SII-1",
@@ -641,6 +655,7 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 			parentfield="items",
 			dn_detail="_JLS-DNI-1",
 			amount=200,
+			stock_qty=2,
 			docstatus=1,
 		)
 
