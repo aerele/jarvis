@@ -336,7 +336,8 @@ def identities(item: dict) -> list[str]:
 	if party["gstin"]:
 		keys.append(f"gstin:{doctype}:{party['gstin']}")
 	if not name and held_parties.norm_name(party["title"]):
-		keys.append(f"name:{doctype}:{held_parties.norm_name(party['title'])}")
+		name = held_parties.scoped_name(doctype, values, held_parties.norm_name(party["title"]))
+		keys.append(f"name:{doctype}:{name}")
 	return keys or [args_key]
 
 
@@ -413,16 +414,30 @@ def _links(doctype: str, values: dict):
 						yield target, cell, (df.fieldname, i, cdf.fieldname)
 
 
-def link_deps(records: list[dict], before: list[dict] | None = None) -> None:
-	"""``depends_on`` = the other records each one links to (by doctype + name, or by
-	the name it had in ``before``: the same records before an edit)."""
+def _link_owners(records: list[dict], before: list[dict] | None = None) -> dict:
 	known: dict = {}
 	for j, r in enumerate(records):
 		for version in (r, *(before[j : j + 1] if before else ())):
 			for key in _ref_names(version):
-				known.setdefault((version["doctype"], key), j)
+				alias = (version["doctype"], key)
+				if held_parties.company_scoped(version["doctype"]) and alias in known and known[alias] != j:
+					known[alias] = None
+				else:
+					known.setdefault(alias, j)
+	return known
+
+
+def initial_remap(records: list[dict], before: list[dict] | None = None) -> dict:
+	"""Block ambiguous Account aliases before replay/creation order can pick one."""
+	return {alias: None for alias, owner in _link_owners(records, before).items() if owner is None}
+
+
+def link_deps(records: list[dict], before: list[dict] | None = None) -> None:
+	"""``depends_on`` = the other records each one links to (by doctype + name, or by
+	the name it had in ``before``: the same records before an edit)."""
+	known = _link_owners(records, before)
 	for i, r in enumerate(records):
-		deps = {known.get((t, _key(v)), i) for t, v, _p in _links(r["doctype"], r["values"])}
+		deps = {known.get((t, _key(v)), i) for t, v, _p in _links(r["doctype"], r["values"])} - {None}
 		r["depends_on"] = sorted(deps - {i})
 
 
@@ -538,7 +553,11 @@ def remapped(record: dict, remap: dict) -> dict:
 
 def learn(record: dict, name: str, remap: dict) -> None:
 	for key in _ref_names(record):
-		remap.setdefault((record["doctype"], key), name)
+		alias = (record["doctype"], key)
+		if held_parties.company_scoped(record["doctype"]) and alias in remap and remap[alias] != name:
+			remap[alias] = None
+		else:
+			remap.setdefault(alias, name)
 
 
 def _stand_in(record: dict, values: dict, remap: dict) -> None:
@@ -639,7 +658,7 @@ def _dry_run(records: list[dict], targets: list[int]) -> dict[int, tuple]:
 	target. ``{index: (kind, detail)}`` for the records that failed."""
 	from jarvis.tools._preview_sandbox import preview_sandbox
 
-	problems, remap = {}, {}
+	problems, remap = {}, initial_remap(records)
 	frappe.local.jarvis_dispatch_depth = getattr(frappe.local, "jarvis_dispatch_depth", 0) + 1
 	try:
 		with preview_sandbox():
@@ -806,14 +825,11 @@ def _precheck(items: list[dict]) -> dict | None:
 		return _refuse("InvalidArgumentError", _TOO_MANY.format(count=len(items), cap=_MAX_BATCH))
 	if not items:
 		return _refuse("InvalidArgumentError", "Nothing to write: give a doctype and values.")
+	if held_parties.missing_scope(items):
+		return _refuse("InvalidArgumentError", held_parties.SCOPE_REQUIRED)
 	match = held_writes._existing_party(items)
 	if match:
-		label = match["title"] or match["name"]
-		return _refuse(
-			"InvalidArgumentError",
-			f"{match['doctype']} {label} already exists (name: {match['name']}). Use it: leave it out "
-			"of this call and do not create it again.",
-		)
+		return _refuse("InvalidArgumentError", held_parties.existing_note(match))
 	return None
 
 
@@ -872,6 +888,11 @@ def _collect_locked(conversation: str, items: list[dict], sheet) -> dict:
 			records = _seal.unseal_call(row)["args"]["records"]
 		except _seal.SealError as e:
 			return _tampered(row, e)
+		# Pre-fix sheets stored company-blind Account identities. Derive only that
+		# metadata afresh; the verified proposed values are never changed here.
+		for record in records:
+			if record["op"] == "create" and held_parties.company_scoped(record["doctype"]):
+				record["identity"] = identities(record)
 	records, targets = _merge(records, [_record(i) for i in items])
 	if not targets:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
