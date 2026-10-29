@@ -1606,9 +1606,9 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "status": "Published",
-      "description": "Reads your computed Salary Slips each month before the PF/ESI/PT deposit and surfaces the employees whose statutory deduction lines don't reconcile with their reconstructed wage bases — PF against the ceiling, ESI at the eligibility boundary and its mid-period continuity, PT against the state slab, LWF presence, and bonus/gratuity eligibility transitions. UAN/ESI identity and challan/portal deposit evidence come only from sources you declare at install; checks needing them stay not-evaluable until then. Read-only; never edits a slip or files a return; a named reviewer owns every decision.",
+      "description": "Reviews one submitted payroll batch using dated PF and ESI rules and owner-classified native remuneration. It keeps missing remuneration, contract sources and unreviewed law periods visible. The revised PF ceiling uses an official announcement; the Gazette text and qualified legal review remain pending. Read-only; a named reviewer owns each decision.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
@@ -1646,7 +1646,8 @@
         "lwf_state_maharashtra",
         "pf_wage_ceiling",
         "pt_slabs_karnataka",
-        "pt_slabs_maharashtra"
+        "pt_slabs_maharashtra",
+        "statutory_wage_definition"
       ],
       "advisory_tokens": [],
       "writes": null,
@@ -1660,7 +1661,7 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027",
+      "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
       },
