@@ -14,6 +14,35 @@ def _unrelated(module, reason, names):
 
 
 _unrelated(
+<<<<<<< HEAD
+=======
+	"jarvis.payment_calendar.api",
+	"Company/report/ledger finance scope and actor-owned snapshots/preferences; shared chat identifiers grant no authority.",
+	"""
+    configure_floor
+    get_bucket_detail
+    get_capabilities
+    get_day_detail
+    get_preferences
+    get_snapshot_status
+    get_upcoming
+    request_snapshot
+    set_preferences
+    """,
+)
+
+
+_unrelated(
+	"jarvis.holiday_touch.api",
+	"Session-user holiday occasion lookup; takes no identifier, so shared chat identifiers grant no authority.",
+	"""
+    get_today
+    """,
+)
+
+
+_unrelated(
+>>>>>>> 1a653b6 (fix(holiday-touches): register get_today with the endpoint audits; satisfy semgrep)
 	"jarvis.account",
 	"Workspace billing, subscription and LLM connection metadata; no transcript lookup.",
 	"""
