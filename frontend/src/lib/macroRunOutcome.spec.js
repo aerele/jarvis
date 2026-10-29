@@ -189,9 +189,25 @@ describe("macroDoneSignal: what a macro:done event is worth telling the user", (
 		expect(macroDoneSignal(done({ macro_name: undefined })).title).toBe("Macro failed");
 	});
 
-	it("a run that worked, or that the user stopped, is not announced", () => {
-		expect(macroDoneSignal(done({ status: "completed", error: "" }))).toBeNull();
+	it("a run that worked is announced too: its chat is not in the chat list", () => {
+		expect(macroDoneSignal(done({ status: "completed", error: "" }))).toEqual({
+			title: "Macro finished: Month-end close",
+			body: "Open the chat to see what it found or did.",
+		});
+		expect(macroDoneSignal(done({ status: "completed", macro_name: "" })).title).toBe(
+			"Macro finished"
+		);
+	});
+
+	it("a finished run's note is the body", () => {
+		const note = "Step 1 left a draft for you to apply in the chat.";
+		expect(macroDoneSignal(done({ status: "completed", error: note })).body).toBe(note);
+	});
+
+	it("a run the user stopped, or one still going, is not announced", () => {
 		expect(macroDoneSignal(done({ status: "stopped", error: "" }))).toBeNull();
+		expect(macroDoneSignal(done({ status: "running", error: "" }))).toBeNull();
+		expect(macroDoneSignal(null)).toBeNull();
 	});
 
 	it("a run stopped at a confirmation card is not announced twice", () => {

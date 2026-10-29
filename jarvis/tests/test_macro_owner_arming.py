@@ -240,7 +240,13 @@ class TestCanArm(WithColumns):
 		self.assertEqual(got["arm_notice"], macros_api.arm_notice())
 		self.assertEqual(
 			macros_api.get_new_macro_arming(),
-			{"can_arm": 1, "arm_blocked_reason": "", "arm_notice": macros_api.arm_notice()},
+			{
+				"can_arm": 1,
+				"arm_blocked_reason": "",
+				"arm_notice": macros_api.arm_notice(),
+				# What the new form's schedule estimate is measured against.
+				"scheduled_step_budget": macros_api._scheduled_step_budget(),
+			},
 		)
 
 	def test_anyone_else_may_not_and_is_told_why(self):

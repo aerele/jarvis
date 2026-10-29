@@ -4,6 +4,7 @@ import { turnErrorInfo } from "../../../jarvis/public/js/turn_errors.mjs";
 import { agentName } from "@/branding";
 import { report as reportError } from "@shared/lib/errorReporter";
 import { exportFeedEntry } from "./exportFeed.js";
+import { isMacroConversation, macroDoneEntry, noteMacroConversation } from "./macroFeed.js";
 
 // The notification feed, assembled client-side from realtime events — the bench
 // has no persistent notification store (the desktop uses live toasts, the native
@@ -79,10 +80,31 @@ export function recordEvent(e) {
 	const conv = e.conversation_id || e.conversation;
 	const at = Date.now();
 
+	if (e.kind === "macro:progress") {
+		noteMacroConversation(conv);
+		return;
+	}
+	if (e.kind === "macro:done") {
+		noteMacroConversation(conv);
+		const entry = macroDoneEntry(e);
+		if (entry && e.macro_run)
+			push({
+				id: `macro:${e.macro_run}`,
+				kind: e.status === "failed" ? "task-failed" : "task-finished",
+				...entry,
+				conversation: conv || "",
+				at,
+				read: false,
+			});
+		return;
+	}
+	const macroStep = isMacroConversation(conv);
+
 	// A stopped run is not a finished task. This feed is durable (localStorage +
 	// unread badge), so without the guard the user finds an unread "Task
 	// finished" hours after they killed the reply themselves.
 	if (e.kind === "run:end" && !e.stopped && conv) {
+		if (macroStep) return;
 		push({
 			id: `end:${e.run_id || e.message_id}`,
 			kind: "task-finished",
@@ -103,6 +125,7 @@ export function recordEvent(e) {
 			conversation: conv,
 			run_id: e.run_id || "",
 		});
+		if (macroStep) return; // the run's end says how it went
 		// Same classified copy the chat shows, never the raw provider text.
 		const info = turnErrorInfo(e.error, e.code);
 		push({
