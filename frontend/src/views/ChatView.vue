@@ -608,6 +608,34 @@
 				</svg>
 			</div>
 			<!-- ===== WELCOME ===== -->
+			<!-- Scene-day layout (lib/holidayStage.js says when): a big centred mark and the
+			     greeting over the same starter cards, link and catalog, with the holiday scene's
+			     art on a layer above. Every other day takes the normal layout below. -->
+			<HolidayStage
+				v-else-if="showWelcome && stageOn"
+				:greeting="greeting"
+				:first-name="firstName"
+				:mood="holdActive ? 'upgrading' : 'star'"
+				:hold-active="holdActive"
+				:composer-empty="!input"
+			>
+				<template #sub>
+					<p class="jv-welcome-sub">
+						Ask about your ERP data, run a workflow or draft something.
+						{{ brand.agentName }}
+						is connected to your
+						<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
+						instance.
+					</p>
+				</template>
+				<template #bottom>
+					<WelcomeStarters
+						:cards="welcomeCards"
+						:tint="starterTint"
+						@select="onWelcomeSuggestion"
+					/>
+				</template>
+			</HolidayStage>
 			<!-- Scroll viewport + inner column are CLASSES, not inline styles: inline
 			     styles cannot be overridden, and the overflow-safe centring below
 			     (jv-welcome-scroll/jv-welcome-col) has to win on short/zoomed
@@ -653,6 +681,7 @@
 					     the original four defaults for a workspace with no history yet.
 					     They FILL the composer, never send: the do-not-regress rule the old
 					     cards had. -->
+<<<<<<< HEAD
 					<div
 						class="jv-welcome-grid"
 						style="
@@ -718,6 +747,13 @@
 						</button>
 					</div>
 					<CapabilityCatalog @select="onWelcomeSuggestion" />
+=======
+					<WelcomeStarters
+						:cards="welcomeCards"
+						:tint="starterTint"
+						@select="onWelcomeSuggestion"
+					/>
+>>>>>>> 07c0d9d (feat(holiday-touches): full-area Diwali welcome scene (stage layout spike))
 				</div>
 			</div>
 
@@ -4463,7 +4499,16 @@ import { report as reportError } from "@/lib/errorReporter";
 import JvChart from "@/charts/JvChart.vue";
 import ConnectPhoneDialog from "@/components/ConnectPhoneDialog.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
+<<<<<<< HEAD
 import CapabilityCatalog from "@/components/CapabilityCatalog.vue";
+=======
+import HolidayMark from "@/components/holiday/HolidayMark.vue";
+import WelcomeHero from "@/components/holiday/WelcomeHero.vue";
+import HolidayStage from "@/components/holiday/HolidayStage.vue";
+import { holidayTouch } from "@/holidayTouch";
+import { stageEligible, withFestiveCard } from "@/lib/holidayStage";
+import WelcomeStarters from "@/components/chat/WelcomeStarters.vue";
+>>>>>>> 07c0d9d (feat(holiday-touches): full-area Diwali welcome scene (stage layout spike))
 import DraftPreview from "@/components/doc/DraftPreview.vue";
 import ActionError from "@/components/ActionError.vue";
 import Banner from "@/components/Banner.vue";
@@ -6687,6 +6732,32 @@ const showWelcome = computed(
 	() =>
 		!booting.value &&
 		(!currentId.value || (visibleMessages.value.length === 0 && !isExistingTitledConv.value))
+);
+
+// The scene-day stage layout (lib/holidayStage.js): decided from the answer, the phone
+// flag and white label, plus whether a hold was showing when this welcome screen opened.
+// A hold that starts later does not swap the layout; the stage just settles its scene.
+const holdAtWelcomeMount = ref(false);
+watch(
+	showWelcome,
+	(on) => {
+		if (on) holdAtWelcomeMount.value = holdActive.value;
+	},
+	{ immediate: true }
+);
+const stageOn = computed(() =>
+	stageEligible({
+		answer: holidayTouch.answer.value,
+		phone: store.mobile,
+		whiteLabel: brand.isWhitelabeled,
+		holdAtMount: holdAtWelcomeMount.value,
+	})
+);
+// The festive greeting card replaces the last starter on a scene day.
+const welcomeCards = computed(() =>
+	stageOn.value
+		? withFestiveCard(starterCards.value, holidayTouch.answer.value)
+		: starterCards.value
 );
 
 // settings/overview derived metrics (all from data we already hold)
@@ -14367,15 +14438,7 @@ onUnmounted(() => {
 	line-height: 1.5;
 	margin: 12px 0 0;
 }
-/* Starter cards (the original card treatment, now carrying synthesised copy). */
-.jv-suggest:hover {
-	border-color: var(--border-2);
-	background: var(--surface-1);
-}
-.jv-suggest:focus-visible {
-	outline: 2px solid var(--cta);
-	outline-offset: 2px;
-}
+/* Starter card styles live in components/chat/WelcomeStarters.vue. */
 /* mobile layout (UX #12): the chat had fixed 40px desktop paddings + a 2-col
    welcome grid; inline styles win over class rules, so these override with
    !important. The "Connect phone" QR flow ships people straight here. */
@@ -14402,11 +14465,6 @@ onUnmounted(() => {
 	.jv-welcome-sub {
 		font-size: 14px;
 		margin-top: 10px;
-	}
-	/* Starter cards stack: two 14px-padded cards side by side are unreadable at
-	   phone width. Inline styles set the grid, so this has to win with !important. */
-	.jv-welcome-grid {
-		grid-template-columns: 1fr !important;
 	}
 }
 /* Phone mode (< 768px, matches the shell store `mobile` flag that swaps the
