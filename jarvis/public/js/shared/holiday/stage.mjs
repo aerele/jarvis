@@ -1,6 +1,6 @@
 // Shared helpers for the holiday scenes (lazy art: this file and scenes/*.mjs load only
 // when a scene may play). Framework-free: it touches the DOM only through the host it is
-// given. Ported from the approved desktop mock; the drawing helpers are unchanged.
+// given.
 
 export const STAR =
   "M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z";
@@ -56,6 +56,26 @@ export function ballistic(vx, vy, g, dur, steps = 8) {
   });
 }
 
+/**
+ * Keyframes along the quadratic from `from` through `ctrl` to `to` (points in stage units),
+ * `steps` samples, the last one faded out. `spin` degrees are unwound along the way.
+ */
+export function quadPath(from, ctrl, to, steps, spin = 0) {
+  return Array.from({ length: steps + 1 }, (_, k) => {
+    const t = k / steps;
+    const at = (i) =>
+      (1 - t) ** 2 * from[i] + 2 * (1 - t) * t * ctrl[i] + t * t * to[i];
+    return {
+      transform: tr(
+        at(0),
+        at(1),
+        spin ? ` rotate(${r2(spin * (1 - t))}deg)` : ""
+      ),
+      opacity: k === steps ? 0 : 1,
+    };
+  });
+}
+
 /** Sparks of a burst: each a short streak with a bright head, aimed along `data-a`. */
 export function burstSVG(cls, n, colours, seed) {
   const rand = rng(seed);
@@ -80,8 +100,10 @@ const SVG_NS = "http://www.w3.org/2000/svg";
  * Everything it starts is tracked; nothing outlives `dispose()`.
  */
 export class Stage {
-  constructor(host) {
+  /** `onError(error)` hears every error a timer callback throws (see at). */
+  constructor(host, onError) {
     this.host = host;
+    this.onError = onError;
     this.svg = null;
     this.anims = [];
     this.timers = [];
@@ -114,22 +136,46 @@ export class Stage {
     return this.svg ? [...this.svg.querySelectorAll(selector)] : [];
   }
 
-  /** Web Animations call, remembered so it can be cancelled. Null when unsupported. */
+  /**
+   * Web Animations call, remembered so it can be cancelled. Null when unsupported or when the
+   * browser refuses these keyframes: one bad animation must not take the scene down.
+   */
   animate(el, frames, options = {}) {
     if (!el || typeof el.animate !== "function") return null;
-    const anim = el.animate(frames, { fill: "both", ...options });
+    let anim;
+    try {
+      anim = el.animate(frames, { fill: "both", ...options });
+    } catch {
+      return null;
+    }
     this.anims.push(anim);
     return anim;
   }
 
-  /** A timer that dispose() clears. */
+  /**
+   * A timer that dispose() clears. A callback that throws is handed to onError and the other
+   * timers go on, so the scene still reaches its end.
+   */
   at(ms, fn) {
     const id = setTimeout(() => {
       this.timers = this.timers.filter((t) => t !== id);
-      fn();
+      try {
+        fn();
+      } catch (error) {
+        this.fail(error);
+      }
     }, ms);
     this.timers.push(id);
     return id;
+  }
+
+  /** Tell onError about a failure; an onError that throws is ignored. */
+  fail(error) {
+    try {
+      if (this.onError) this.onError(error);
+    } catch {
+      // Reporting is best effort: it must not stop the scene.
+    }
   }
 
   clearTimers() {

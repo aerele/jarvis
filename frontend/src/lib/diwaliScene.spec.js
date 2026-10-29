@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { play, FLASHES, END_MS } from "@jsshared/holiday/scenes/diwali.mjs";
+import { play, END_MS } from "@jsshared/holiday/scenes/diwali.mjs";
+import { FLASHES } from "@jsshared/holiday/scenes/diwali-art.mjs";
 
 const BOXES = {
 	host: { w: 1170, h: 640 },

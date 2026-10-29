@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
 	load: null,
 	reduced: false,
 	resize: null,
+	reason: null,
 }));
 vi.mock("vue-router", async () => {
 	const { reactive } = await import("vue");
@@ -18,13 +19,16 @@ vi.mock("vue-router", async () => {
 vi.mock("@/holidayTouch", async () => {
 	const { ref } = await import("vue");
 	state.answer = ref({ v: 1, kind: "none" });
-	return { holidayTouch: { answer: state.answer, start: vi.fn() } };
+	state.reason = vi.fn();
+	return {
+		holidayTouch: { answer: state.answer, start: vi.fn(), setSceneReason: state.reason },
+	};
 });
 vi.mock("@/api", () => ({ recordHolidayShown: (...a) => state.record(...a) }));
 vi.mock("@/lib/holidayScenes", async (importOriginal) => ({
 	// The clearance is the art's real geometry; only loading the art is faked.
 	sceneClearance: (await importOriginal()).sceneClearance,
-	hasScene: (d) => d === "diwali",
+	hasScene: (d) => d === "diwali" || d === "holi",
 	loadScene: (...a) => state.load(...a),
 	isSceneLoading: () => false,
 }));
@@ -331,6 +335,16 @@ describe("HolidayStage", () => {
 		read.mockRestore();
 	});
 
+	it("the boxes the scene reads include the hero's, so the floor row can keep clear of its bottom", async () => {
+		wrapper = stage();
+		await tick(10);
+		const boxes = sceneApi.opts.getBoxes();
+		expect(Object.keys(boxes).sort()).toEqual(["cards", "heading", "hero", "host", "mark"]);
+		for (const key of ["hero", "mark", "heading", "cards"]) {
+			expect(Object.keys(boxes[key]).sort()).toEqual(["h", "w", "x", "y"]);
+		}
+	});
+
 	it("the bottom block changing (cards arriving) keeps the scene playing", async () => {
 		wrapper = stage();
 		await tick(10);
@@ -348,6 +362,73 @@ describe("HolidayStage", () => {
 		state.resize.fireOne(area, 900, 600);
 		state.resize.fireOne(area, 900, 500);
 		expect(sceneApi.settle).toHaveBeenCalledWith("early");
+	});
+
+	it("names the design on the stage and tells the support view why the scene plays", async () => {
+		wrapper = stage();
+		expect(wrapper.attributes("data-design")).toBe("diwali");
+		await tick(10);
+		expect(state.reason).toHaveBeenLastCalledWith("loaded");
+		sceneApi.opts.onError(new Error("a timer in the scene"));
+		await wrapper.vm.$nextTick();
+		expect(state.reason).toHaveBeenLastCalledWith("threw");
+	});
+
+	it.each(["wheel", "touchmove"])(
+		"a %s on the scroller ends the scene early, like a key or a pointer",
+		async (type) => {
+			wrapper = stage();
+			await tick(10);
+			wrapper
+				.get(".jv-stage-scroll")
+				.element.dispatchEvent(new Event(type, { bubbles: true }));
+			expect(sceneApi.settle).toHaveBeenCalledWith("early");
+		}
+	);
+
+	it("a scroll listener is not left on the scroller after the screen goes", async () => {
+		wrapper = stage();
+		await tick(10);
+		const scroller = wrapper.get(".jv-stage-scroll").element;
+		const off = vi.spyOn(scroller, "removeEventListener");
+		wrapper.unmount();
+		wrapper = null;
+		expect(off.mock.calls.map((c) => c[0]).sort()).toEqual(["touchmove", "wheel"]);
+	});
+
+	it("a layout change followed at once by the scene ending, or the screen going, reads no boxes", async () => {
+		wrapper = stage();
+		await tick(10);
+		const hero = wrapper.get(".jv-stage-hero").element;
+		state.resize.fireOne(hero, 680, 228);
+		state.resize.fireOne(hero, 680, 250);
+		wrapper.unmount(); // before the tick the scene would have read the boxes in
+		wrapper = null;
+		await vi.advanceTimersByTimeAsync(0);
+		expect(sceneApi.relayout).not.toHaveBeenCalled();
+	});
+
+	describe("a tab opened hidden", () => {
+		const visibility = (value) =>
+			Object.defineProperty(document, "visibilityState", {
+				configurable: true,
+				get: () => value,
+			});
+		afterEach(() => delete document.visibilityState);
+
+		it("does not start the scene, or spend the day's showing, until it is shown", async () => {
+			visibility("hidden");
+			wrapper = stage();
+			await tick(DEADLINE_MS * 2);
+			expect(state.record).not.toHaveBeenCalled();
+			expect(mod.play).not.toHaveBeenCalled();
+			expect(state.reason).toHaveBeenLastCalledWith("hidden");
+			expect(wrapper.attributes("data-phase")).toBe("pending");
+			visibility("visible");
+			document.dispatchEvent(new Event("visibilitychange"));
+			await tick(10);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+		});
 	});
 
 	it("fonts not ready until 2.6 s: no scene, the cards show at 2.5 s, no slot used", async () => {
@@ -440,7 +521,7 @@ describe("HolidayStage", () => {
 		expect(button.attributes("aria-label")).toBe("Replay the greeting");
 		expect(button.element.parentElement.classList.contains("jv-stage-mark")).toBe(true);
 		await button.trigger("click");
-		await tick(10);
+		await tick(300); // the click waits for the hero to finish rising (250 ms)
 		expect(mod.play).toHaveBeenCalledTimes(1);
 		expect(mod.play.mock.calls[0][1].replay).toBe(true);
 		expect(hidden(wrapper)).toBe(false);
@@ -535,6 +616,78 @@ describe("HolidayStage", () => {
 			expect(shift(wrapper)).toBe(`translateY(${min - 100}px)`);
 		});
 
+		describe("the worn item above the mark", () => {
+			// Holi has no toran or sleigh to clear, so only the item's reach limits the centring.
+			// The stage is 1000 wide: scale 1.25, a 90 px mark; Holi's item reaches 19 units
+			// above the tile, 19 * 90 / 56 = 30.54 px, and the gap is 12 px.
+			const reach = 42.54;
+			const restLift = (w) => w.attributes("style");
+
+			it("a short stage keeps the whole item and 12 px below the top of the stage while centred", async () => {
+				state.answer.value = { ...DAY, design: "holi", occasion: "holi" };
+				Object.assign(sizes, { areaH: 100, heroH: 80, restTop: 20, scrollH: 100 });
+				wrapper = stage();
+				await wrapper.vm.$nextTick();
+				// Centred would be 10, above the item's reach: the top is held at 42.54.
+				expect(shift(wrapper)).toBe(`translateY(${Math.round(reach - 20)}px)`);
+			});
+
+			it("a stage with room centres as before", async () => {
+				state.answer.value = { ...DAY, design: "holi", occasion: "holi" };
+				wrapper = stage();
+				await wrapper.vm.$nextTick();
+				expect(shift(wrapper)).toBe("translateY(130px)");
+			});
+
+			it("asks the layout for room above the hero at rest: the reach and the gap, less the scroller's padding", async () => {
+				state.answer.value = { ...DAY, design: "holi", occasion: "holi" };
+				wrapper = stage();
+				await wrapper.vm.$nextTick();
+				expect(restLift(wrapper)).toContain("--rest-lift: 31px"); // ceil(42.54 - 12)
+			});
+
+			it("asks for no room for a design whose item stays on the tile", async () => {
+				wrapper = stage();
+				await wrapper.vm.$nextTick();
+				expect(restLift(wrapper)).toContain("--rest-lift: 0px");
+			});
+
+			it("reads the drawn layer's real box when it is mounted, and centres again", async () => {
+				state.answer.value = { ...DAY, design: "holi", occasion: "holi" };
+				Object.assign(sizes, { areaH: 100, heroH: 80, restTop: 20, scrollH: 100 });
+				wrapper = stage();
+				await tick(10);
+				const markEl = wrapper.get(".jv-stage-mark").element;
+				markEl.insertAdjacentHTML(
+					"beforeend",
+					'<svg data-testid="holiday-worn"><g class="acc"></g></svg>'
+				);
+				// 40 units above the tile (more than the table's 19): 40 * 90 / 56 = 64.29 px.
+				markEl.querySelector(".acc").getBBox = () => ({ y: -40 });
+				await tick(10);
+				expect(restLift(wrapper)).toContain("--rest-lift: 65px"); // ceil(64.29 + 12 - 12)
+				expect(shift(wrapper)).toBe(`translateY(${Math.round(64.29 + 12 - 20)}px)`);
+				// A bigger reach also moves where the floor row is fitted: the scene reads again.
+				expect(sceneApi.relayout).toHaveBeenCalled();
+			});
+
+			it("a layer with no box yet (jsdom has none) leaves the table standing", async () => {
+				state.answer.value = { ...DAY, design: "holi", occasion: "holi" };
+				wrapper = stage();
+				await tick(10);
+				const markEl = wrapper.get(".jv-stage-mark").element;
+				markEl.insertAdjacentHTML(
+					"beforeend",
+					'<svg data-testid="holiday-worn"><g class="acc"></g></svg>'
+				);
+				markEl.querySelector(".acc").getBBox = () => {
+					throw new Error("not rendered");
+				};
+				await tick(10);
+				expect(restLift(wrapper)).toContain("--rest-lift: 31px");
+			});
+		});
+
 		it("a hero that changes size mid-scene (the font swap) is centred again", async () => {
 			wrapper = stage();
 			await tick(10);
@@ -545,6 +698,28 @@ describe("HolidayStage", () => {
 			expect(wrapper.attributes("data-phase")).toBe("playing");
 			expect(shift(wrapper)).toBe("translateY(120px)"); // (700 - 260) / 2 - 100
 			expect(sceneApi.relayout).toHaveBeenCalledTimes(1);
+		});
+
+		// The first reading a ResizeObserver delivers is the size at that moment, which may
+		// already be the new one: the web font can swap in between the mount-time measure and
+		// the observer's start. That reading is not "no change".
+		it("a hero that grew before the observer's first reading is centred again (hero resize while playing re-centres)", async () => {
+			wrapper = stage();
+			await tick(10);
+			expect(shift(wrapper)).toBe("translateY(130px)");
+			sizes.heroH = 280;
+			state.resize.fireOne(hero(wrapper), 400, 280); // the first reading, already the new size
+			await wrapper.vm.$nextTick();
+			expect(wrapper.attributes("data-phase")).toBe("playing");
+			expect(shift(wrapper)).toBe("translateY(110px)"); // (700 - 280) / 2 - 100
+			expect(sceneApi.relayout).toHaveBeenCalledTimes(1);
+		});
+
+		it("a hero that grew between the first measure and the observer starting is centred again at once", async () => {
+			wrapper = stage();
+			sizes.heroH = 280; // the scale (or the font) applied after the first measure
+			await tick(10);
+			expect(shift(wrapper)).toBe("translateY(110px)");
 		});
 
 		it.each([
@@ -594,7 +769,7 @@ describe("HolidayStage", () => {
 			wrapper = stage();
 			await tick(10);
 			await wrapper.get('[data-testid="stage-replay"]').trigger("click");
-			await tick(10);
+			await tick(300);
 			expect(wrapper.attributes("data-phase")).toBe("replaying");
 			expect(shift(wrapper)).toBe("translateY(0px)");
 			state.resize.fireOne(hero(wrapper), 400, 240);
