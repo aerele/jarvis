@@ -2,9 +2,10 @@
 	<div
 		ref="areaEl"
 		class="jv-stage"
-		:style="{ '--s': scale }"
+		:style="{ '--s': scale, '--rest-lift': `${lift}px` }"
 		data-testid="holiday-stage"
 		:data-phase="scene.phase.value"
+		:data-design="answer.design"
 	>
 		<!-- The art: a sibling of the scroller, never inside it, so it cannot change
 		     scrollHeight. It lets every pointer event through and is hidden from screen
@@ -106,6 +107,12 @@
 // transform on the hero, so layout and the scroll height never change; the worn item is
 // inside the mark, so it moves with it.
 //
+// The worn item (a hat, an umbrella, a crescent) hangs above the mark's top. The whole of it
+// plus 12 px stays below the top of the stage, so it never slides under the page's top bar:
+// the centring clearance includes its reach, and so does the rest place, through a minimum
+// space above the hero (--rest-lift). Its reach is the real box of the drawn layer when it
+// is mounted, else the table in scene-geometry.mjs (WORN_OVERHANG).
+//
 // While a scene may still play the greeting is the person's normal one and the bottom
 // block is hidden (visibility, so Tab skips it and nothing moves). The scene, its deadline
 // and what ends it live in lib/useHolidayScene.js; this file is the DOM around it.
@@ -121,10 +128,11 @@ import {
 import { useRoute } from "vue-router";
 import HolidayMark from "@/components/holiday/HolidayMark.vue";
 import { holidayTouch } from "@/holidayTouch";
-import { heroOffset } from "@/lib/holidayStage";
+import { heroOffset, restLift, wornOverhangPx, wornTop } from "@/lib/holidayStage";
 import { sceneClearance } from "@/lib/holidayScenes";
 import { createHolidayScene } from "@/lib/useHolidayScene";
 import { DAY_SUB_LINE, headingFor } from "@jsshared/holiday/copy.mjs";
+import { heroFloorTop } from "@jsshared/holiday/scene-geometry.mjs";
 
 const props = defineProps({
 	/** The ordinary greeting ("Good morning"). */
@@ -158,6 +166,38 @@ function measureScale() {
 	if (width > 0) scale.value = Math.round(Math.min(width / 800, 1.25) * 1000) / 1000;
 }
 
+// ---- the worn item's reach above the mark, in tile units as measured on the drawn layer
+// (0 until it is mounted). It only grows for the life of the page: a sway or a pop must not
+// make the layout breathe.
+const wornMeasured = ref(0);
+const overhang = computed(() =>
+	wornOverhangPx({
+		design: holidayTouch.answer.value.design,
+		markSize: markSize.value,
+		measured: wornMeasured.value,
+	})
+);
+// The scroller's own top padding (it is already part of the space above the hero).
+const padTop = ref(12);
+// The least space (px) above the hero in the layout, so the item clears the top at rest.
+const lift = computed(() => restLift({ overhangPx: overhang.value, padTop: padTop.value }));
+function measureWorn() {
+	const acc = markEl.value && markEl.value.querySelector('[data-testid="holiday-worn"] .acc');
+	if (!acc || typeof acc.getBBox !== "function") return;
+	try {
+		wornMeasured.value = Math.max(wornMeasured.value, -acc.getBBox().y);
+	} catch {
+		// an element not rendered yet has no box: the table stands
+	}
+}
+// A bigger reach moves the rest place, so the centring is read again once it is on the page,
+// and the scene reads the boxes again (the floor row is fitted to the hero's bottom).
+watch(overhang, async () => {
+	await nextTick();
+	if (scene.centred.value) measureHero();
+	relayoutNow();
+});
+
 // ---- where the hero sits: centred while a scene may play, at rest otherwise
 const centredShift = ref(0);
 const heroStyle = computed(() => {
@@ -168,18 +208,44 @@ const heroStyle = computed(() => {
 		"--glide": `${centred ? 0 : scene.glideMs.value}ms`,
 	};
 });
-// Layout sizes only (offsetTop and offsetHeight ignore the transform), so measuring again
-// while the hero is shifted gives the same answer.
+// The layout sizes measureHero reads, as one string: what the centring was computed from.
+// When it differs from the last measure, the centring is stale. (Layout sizes only:
+// offsetTop and offsetHeight ignore the transform, so the shift itself never changes it.)
+let measuredKey = "";
+function layoutKey() {
+	const [area, hero, scroll] = [areaEl.value, heroEl.value, scrollEl.value];
+	if (!area || !hero || !scroll) return "";
+	return [area.clientHeight, hero.offsetHeight, hero.offsetTop, scroll.scrollHeight].join(":");
+}
+// Measuring again while the hero is shifted gives the same answer, for the same reason.
 function measureHero() {
 	const area = areaEl.value;
 	const hero = heroEl.value;
 	if (!area || !hero || !scrollEl.value) return;
+	measuredKey = layoutKey();
 	centredShift.value = heroOffset({
 		areaH: area.clientHeight,
 		heroH: hero.offsetHeight,
 		restTop: hero.offsetTop,
 		minTop: sceneClearance(holidayTouch.answer.value.design, scale.value),
+		wornTop: wornTop(overhang.value),
 		maxBottom: scrollEl.value.scrollHeight,
+		floorTop: floorTop(),
+	});
+}
+// Where the scene's floor row reaches up to under the hero at its smallest (undefined for a
+// design with nothing tall there): the hero is kept above it. The card band ends where the
+// row's baseline is.
+function floorTop() {
+	const [area, bottom] = [areaEl.value, bottomEl.value];
+	if (!area || !bottom) return undefined;
+	const box = bottom.getBoundingClientRect();
+	if (!box.height) return undefined; // not laid out yet: there is no ground to measure
+	return heroFloorTop({
+		design: holidayTouch.answer.value.design,
+		s: scale.value,
+		hostH: area.clientHeight,
+		cardsBottomPx: box.bottom - area.getBoundingClientRect().top,
 	});
 }
 
@@ -209,7 +275,8 @@ const scene = createHolidayScene({
 		document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve(),
 });
 
-// Boxes of the mark, heading and bottom block, in px relative to the art layer.
+// Boxes of the hero (mark, heading and sub-line), the mark, the heading and the bottom block,
+// in px relative to the art layer. The hero's bottom is where the floor row keeps clear.
 function getBoxes() {
 	const base = hostEl.value.getBoundingClientRect();
 	const rel = (el) => {
@@ -218,14 +285,27 @@ function getBoxes() {
 	};
 	return {
 		host: { w: base.width, h: base.height },
+		hero: rel(heroEl.value),
 		mark: rel(markEl.value),
 		heading: rel(h1El.value),
 		cards: rel(bottomEl.value),
 	};
 }
 
-// ---- what ends a scene: input, a click or key anywhere (never intercepted), a change of
-// the stage area itself, the hold, a route change. Leaving the screen stops it.
+// Why the scene is or is not playing, readable from the console (window.__holidayTouch).
+watch(scene.reason, (reason) => holidayTouch.setSceneReason(reason), { immediate: true });
+
+// Hands the scene fresh boxes, but only while one is playing and the page is all there (the
+// screen may have gone, or the scene ended, between the change and the next tick).
+function relayoutNow() {
+	const phase = scene.phase.value;
+	if (phase !== "playing" && phase !== "replaying") return;
+	if (![hostEl, heroEl, markEl, h1El, bottomEl].every((r) => r.value)) return;
+	scene.relayout(getBoxes());
+}
+
+// ---- what ends a scene: input, a click or key anywhere (never intercepted), a scroll of the
+// stage, a change of the stage area itself, the hold, a route change. Leaving the screen stops it.
 const route = useRoute();
 watch(
 	() => props.composerEmpty,
@@ -241,12 +321,19 @@ watch(
 );
 
 const onKey = () => scene.settle("early");
+const SCROLLS = ["wheel", "touchmove"];
 let sizes = new Map();
 let observer = null;
+let wornWatch = null;
 // Only the stage area (the window or the sidebar changed) ends a scene. The hero and the
 // bottom block change on their own while a scene plays: the web font swapping in, the
 // suggestions, banner or catalog arriving. That is not the person doing anything, so the
 // scene keeps playing and reads the boxes again.
+//
+// An observer's first reading of an element is its size at that moment, not "no change":
+// the scale or the web font may have been applied after the mount-time measure and before
+// the observer started. So a first reading of the hero or the bottom block counts as a
+// change when the layout is no longer what the centring was measured from.
 function onResize(entries) {
 	let areaChanged = false;
 	let layoutChanged = false;
@@ -254,9 +341,13 @@ function onResize(entries) {
 		const { width, height } = entry.contentRect;
 		const last = sizes.get(entry.target);
 		sizes.set(entry.target, { width, height });
-		if (!last || (Math.abs(last.width - width) < 1 && Math.abs(last.height - height) < 1)) {
+		const same =
+			last && Math.abs(last.width - width) < 1 && Math.abs(last.height - height) < 1;
+		if (!last && entry.target !== areaEl.value && layoutKey() !== measuredKey) {
+			layoutChanged = true;
 			continue;
 		}
+		if (!last || same) continue;
 		if (entry.target === areaEl.value) areaChanged = true;
 		else layoutChanged = true;
 	}
@@ -266,19 +357,37 @@ function onResize(entries) {
 	} else if (layoutChanged) {
 		if (scene.centred.value) measureHero();
 		// After the new shift is on the page, so the scene reads the mark where it now is.
-		nextTick(() => scene.relayout(getBoxes()));
+		nextTick(relayoutNow);
 	}
 }
 
 onMounted(async () => {
 	measureScale();
+	if (scrollEl.value && typeof getComputedStyle === "function") {
+		const pad = parseFloat(getComputedStyle(scrollEl.value).paddingTop);
+		if (Number.isFinite(pad)) padTop.value = pad;
+	}
+	measureWorn();
 	measureHero();
 	// Passive, capturing, and never calling preventDefault or stopPropagation: a click on
 	// the sidebar, the composer or a link still does its normal job.
 	window.addEventListener("pointerdown", scene.onPointerDown, { capture: true, passive: true });
 	window.addEventListener("keydown", onKey, { capture: true, passive: true });
+	// Scrolling the stage moves the page under the art, which does not follow it.
+	for (const type of SCROLLS) scrollEl.value?.addEventListener(type, onKey, { passive: true });
 	scene.begin();
 	await nextTick();
+	// The scale just set (and any font that has swapped since) is on the page now; the first
+	// measure above read the hero before it.
+	if (layoutKey() !== measuredKey) {
+		if (scene.centred.value) measureHero();
+		nextTick(relayoutNow);
+	}
+	// The item's layer is mounted after the art module loads, and again on a replay.
+	if (typeof MutationObserver === "function" && markEl.value) {
+		wornWatch = new MutationObserver(measureWorn);
+		wornWatch.observe(markEl.value, { childList: true, subtree: true });
+	}
 	if (typeof ResizeObserver === "function" && areaEl.value) {
 		observer = new ResizeObserver(onResize);
 		[areaEl.value, heroEl.value, bottomEl.value].forEach((el) => el && observer.observe(el));
@@ -287,7 +396,9 @@ onMounted(async () => {
 onBeforeUnmount(() => {
 	window.removeEventListener("pointerdown", scene.onPointerDown, { capture: true });
 	window.removeEventListener("keydown", onKey, { capture: true });
+	for (const type of SCROLLS) scrollEl.value?.removeEventListener(type, onKey);
 	if (observer) observer.disconnect();
+	if (wornWatch) wornWatch.disconnect();
 	scene.stop();
 });
 </script>
@@ -299,6 +410,10 @@ onBeforeUnmount(() => {
 	min-height: 0;
 	display: flex;
 	flex-direction: column;
+	/* Nothing in the stage (the worn item above the mark included) paints outside it or
+	   above the page's top bar: its own stacking context, clipped to its box. */
+	isolation: isolate;
+	overflow: hidden;
 }
 /* Above the scroller's plain content, below the greeting (see .jv-stage-hero). */
 .jv-stage-art {
@@ -341,6 +456,8 @@ onBeforeUnmount(() => {
 .jv-stage-top::before {
 	content: "";
 	flex: 6 1 0;
+	/* Room for the worn item above the mark at rest (see the script's header). */
+	min-height: var(--rest-lift, 0px);
 }
 .jv-stage-top::after {
 	content: "";

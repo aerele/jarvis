@@ -94,7 +94,7 @@ describe("createHolidayScene", () => {
 		it.each([
 			["it is not a scene day", { scene: false }],
 			["the server says no slot is left", { may_play: false }],
-			["the design has no scene yet", { design: "pongal", occasion: "pongal" }],
+			["the design has no scene yet", { design: "ramadan", occasion: "ramadan" }],
 			["it is a lead-up day", { kind: "leadup" }],
 			["there is no answer", { kind: "none" }],
 		])("shows the rest state at once when %s, and records nothing", async (_, patch) => {
@@ -190,6 +190,7 @@ describe("createHolidayScene", () => {
 			await tick(10);
 			expect(scene.phase.value).toBe("rest");
 			expect(mod.play).not.toHaveBeenCalled();
+			await tick(300); // the hero's rise (250 ms) is the only timer left, and it ends
 			expect(vi.getTimerCount()).toBe(0);
 		});
 
@@ -254,6 +255,148 @@ describe("createHolidayScene", () => {
 			await tick(10);
 			expect(scene.phase.value).toBe("rest");
 			expect(options.report).toHaveBeenCalledTimes(1);
+			expect(scene.reason.value).toBe("threw");
+		});
+
+		it("a failure report names the design and keeps the error's stack", async () => {
+			const boom = new Error("boom");
+			const bad = {
+				play: vi.fn(() => {
+					throw boom;
+				}),
+			};
+			const { scene, options } = setup({
+				answer: { ...DAY, design: "christmas", occasion: "christmas" },
+				load: vi.fn(async () => bad),
+			});
+			scene.begin();
+			await tick(10);
+			expect(options.report.mock.calls[0][0]).toMatchObject({
+				error_class: "HolidaySceneFailed",
+				error_code: "holiday_scene:christmas",
+				stack: boom.stack,
+			});
+		});
+
+		it("a timer inside the scene that throws is reported once with the design, and the scene plays on", async () => {
+			const { scene, made, options } = setup();
+			scene.begin();
+			await tick(10);
+			made[0].opts.onError(new Error("timer one"));
+			made[0].opts.onError(new Error("timer two"));
+			expect(options.report).toHaveBeenCalledTimes(1);
+			expect(options.report.mock.calls[0][0]).toMatchObject({
+				error_code: "holiday_scene:diwali",
+			});
+			expect(scene.phase.value).toBe("playing");
+			expect(scene.reason.value).toBe("threw");
+		});
+
+		it("fonts that never load for good (a rejected promise) still let the scene play", async () => {
+			const { scene, mod } = setup({ fontsReady: () => Promise.reject(new Error("fonts")) });
+			scene.begin();
+			await tick(10);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+		});
+
+		it("a fontsReady that throws at once still lets the scene play", async () => {
+			const { scene, mod } = setup({
+				fontsReady: () => {
+					throw new Error("no fonts api");
+				},
+			});
+			scene.begin();
+			await tick(10);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe("why it is or is not playing (reason)", () => {
+		it("is loaded when it plays", async () => {
+			const { scene } = setup();
+			scene.begin();
+			await tick(10);
+			expect(scene.reason.value).toBe("loaded");
+		});
+
+		it("is load-failed when the art does not load", async () => {
+			const { scene } = setup({ load: vi.fn(async () => null) });
+			scene.begin();
+			await tick(10);
+			expect(scene.reason.value).toBe("load-failed");
+		});
+
+		it("is deadline when the art is too slow", async () => {
+			const { scene } = setup({ load: vi.fn(() => new Promise(() => {})) });
+			scene.begin();
+			await tick(DEADLINE_MS);
+			expect(scene.reason.value).toBe("deadline");
+		});
+
+		it("is declined when the server says no, and when it was never going to play", async () => {
+			const no = setup({ recordShown: vi.fn(async () => ({ play: false })) });
+			no.scene.begin();
+			await tick(10);
+			expect(no.scene.reason.value).toBe("declined");
+			expect(setup({ reduced: () => true }).scene.reason.value).toBe("declined");
+		});
+	});
+
+	describe("a tab opened hidden", () => {
+		function fakeDoc(visibilityState) {
+			const doc = new EventTarget();
+			doc.visibilityState = visibilityState;
+			doc.show = () => {
+				doc.visibilityState = "visible";
+				doc.dispatchEvent(new Event("visibilitychange"));
+			};
+			vi.spyOn(doc, "addEventListener");
+			vi.spyOn(doc, "removeEventListener");
+			return doc;
+		}
+
+		it("does not begin, ask for a slot or start the deadline until it is shown", async () => {
+			const doc = fakeDoc("hidden");
+			const { scene, mod, options } = setup({ doc });
+			scene.begin();
+			scene.begin();
+			await tick(DEADLINE_MS * 4);
+			expect(scene.reason.value).toBe("hidden");
+			expect(scene.phase.value).toBe("pending");
+			expect(options.recordShown).not.toHaveBeenCalled();
+			expect(doc.addEventListener).toHaveBeenCalledTimes(1);
+			doc.show();
+			await tick(10);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			expect(scene.reason.value).toBe("loaded");
+			expect(doc.removeEventListener).toHaveBeenCalledTimes(1);
+		});
+
+		it("the 2.5 s deadline runs from the moment it is shown", async () => {
+			const doc = fakeDoc("hidden");
+			const { scene } = setup({ doc, load: vi.fn(() => new Promise(() => {})) });
+			scene.begin();
+			await tick(60000);
+			doc.show();
+			await tick(DEADLINE_MS - 1);
+			expect(scene.phase.value).toBe("pending");
+			await tick(1);
+			expect(scene.phase.value).toBe("rest");
+		});
+
+		it("stop removes the listener, and a settle while it waits ends it for good", async () => {
+			const doc = fakeDoc("hidden");
+			const first = setup({ doc });
+			first.scene.begin();
+			first.scene.stop();
+			expect(doc.removeEventListener).toHaveBeenCalledTimes(1);
+			const second = setup({ doc });
+			second.scene.begin();
+			second.scene.settle("early");
+			expect(second.scene.phase.value).toBe("rest");
+			doc.show();
+			await tick(10);
+			expect(second.mod.play).not.toHaveBeenCalled();
 		});
 	});
 
@@ -377,6 +520,7 @@ describe("createHolidayScene", () => {
 			await tick(10);
 			expect(mod.play).not.toHaveBeenCalled();
 			expect(options.recordShown).not.toHaveBeenCalled(); // an early settle used no slot
+			await tick(300); // the hero's rise (250 ms) is the only timer left, and it ends
 			expect(vi.getTimerCount()).toBe(0);
 		});
 
@@ -438,6 +582,7 @@ describe("createHolidayScene", () => {
 			ctx.scene.begin();
 			await tick(10);
 			ctx.scene.settle("early");
+			await tick(300); // the scene is over and the hero has risen (250 ms)
 			return ctx;
 		}
 
@@ -467,9 +612,90 @@ describe("createHolidayScene", () => {
 			await tick(10);
 			scene.onPointerDown();
 			await scene.replay();
+			await tick(300); // the hero has risen
 			scene.onPointerDown(); // a new gesture at rest
 			await scene.replay();
 			expect(mod.play).toHaveBeenCalledTimes(2);
+		});
+
+		describe("a click while the last scene is still going", () => {
+			it("waits for the scene's done and the hero's rise, then plays once", async () => {
+				const { scene, mod, made } = setup();
+				scene.begin();
+				await tick(10);
+				made[0].opts.onBeat("settle", "end"); // the fade (600 ms) and the rise (600 ms) start
+				await scene.replay();
+				await scene.replay(); // a second click is not kept: one is
+				expect(mod.play).toHaveBeenCalledTimes(1);
+				made[0].finish(); // the art is gone
+				await tick(10);
+				expect(mod.play).toHaveBeenCalledTimes(1); // the hero is still rising
+				await tick(600);
+				expect(mod.play).toHaveBeenCalledTimes(2);
+				expect(mod.play.mock.calls[1][1].replay).toBe(true);
+			});
+
+			it("is not lost when the page's clock does not move (a pinned or stepped clock): the rise is timed by a timer", async () => {
+				// Only the timers are fake, so Date.now() stays where it is for the whole test.
+				vi.useRealTimers();
+				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+				const { scene, mod, made } = setup();
+				scene.begin();
+				await tick(10);
+				made[0].opts.onBeat("settle", "end");
+				made[0].finish();
+				await tick(10);
+				await scene.replay(); // clicked during the rise
+				expect(mod.play).toHaveBeenCalledTimes(1);
+				await tick(700); // the rise (600 ms) is over
+				expect(mod.play).toHaveBeenCalledTimes(2);
+				expect(mod.play.mock.calls[1][1].replay).toBe(true);
+			});
+
+			it("a click once the rise is over plays at once", async () => {
+				const { scene, mod, made } = setup();
+				scene.begin();
+				await tick(10);
+				made[0].opts.onBeat("settle", "end");
+				made[0].finish();
+				await tick(700);
+				await scene.replay();
+				expect(mod.play).toHaveBeenCalledTimes(2);
+			});
+
+			it("a new gesture before then forgets the waiting click", async () => {
+				const { scene, mod, made } = setup();
+				scene.begin();
+				await tick(10);
+				made[0].opts.onBeat("settle", "end");
+				await scene.replay();
+				scene.onPointerDown();
+				made[0].finish();
+				await tick(1000);
+				expect(mod.play).toHaveBeenCalledTimes(1);
+			});
+
+			it("stop leaves no timer for it", async () => {
+				const { scene, made } = setup();
+				scene.begin();
+				await tick(10);
+				made[0].opts.onBeat("settle", "end");
+				made[0].finish();
+				await tick(10);
+				await scene.replay();
+				scene.stop();
+				expect(vi.getTimerCount()).toBe(0);
+			});
+
+			it("the scene before is closed (its smile ended) when the replay starts", async () => {
+				const { scene, made } = setup();
+				scene.begin();
+				await tick(10);
+				scene.settle("early");
+				await tick(300);
+				await scene.replay();
+				expect(made[0].settle).toHaveBeenLastCalledWith("instant");
+			});
 		});
 
 		it("under reduced motion a click only smiles, then the smile ends", async () => {
