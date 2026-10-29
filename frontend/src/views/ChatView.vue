@@ -1217,6 +1217,21 @@
 										>
 											{{ errorInfo(m).actionLabel }}
 										</button>
+										<button
+											v-if="canReportError(m)"
+											type="button"
+											class="jv-retry"
+											:disabled="openSupportInFlight"
+											:style="{
+												cursor: openSupportInFlight
+													? 'default'
+													: 'pointer',
+												opacity: openSupportInFlight ? 0.6 : 1,
+											}"
+											@click="openErrorSupport(m)"
+										>
+											{{ __("Report error") }}
+										</button>
 									</div>
 								</div>
 							</template>
@@ -4607,6 +4622,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
+import { supportErrorDraft } from "@/lib/supportErrorDraft";
 import {
 	supportPillLabel as supportPillLabelFor,
 	supportAwaitingPhrase,
@@ -5286,7 +5302,7 @@ function recentMessagesForSupport() {
 // a double-click firing openSupport() twice concurrently: without this, a
 // second click could race the first to SupportNew before the first's prompt
 // even resolves.
-let openSupportInFlight = false;
+const openSupportInFlight = ref(false);
 async function openSupport() {
 	if (!supportOn) {
 		// Unconfigured-but-visible state (see supportEntryVisible): explain rather
@@ -5300,12 +5316,12 @@ async function openSupport() {
 	// supportMenuOptions below), and its "New ticket from this chat" row calls
 	// straight into this same function - so openSupport() itself never needs to
 	// know which of the two paths got it here.
-	if (openSupportInFlight) return;
-	openSupportInFlight = true;
+	if (openSupportInFlight.value) return;
+	openSupportInFlight.value = true;
 	try {
 		const recent = recentMessagesForSupport();
 		if (!recent.length) {
-			router.push({ name: "SupportNew" });
+			await router.push({ name: "SupportNew" });
 			return;
 		}
 		let copyBody = "";
@@ -5332,9 +5348,49 @@ async function openSupport() {
 				supportStore.setCopyPref("No");
 			}
 		}
-		router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
+		await router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
 	} finally {
-		openSupportInFlight = false;
+		openSupportInFlight.value = false;
+	}
+}
+
+function canReportError(m) {
+	const id = currentId.value;
+	// During selection, currentId/route can already name the next chat while the
+	// old history remains on screen. Never pair those IDs in a support draft.
+	if (!supportOn || !id || _shownConvId !== id || (route.params.id && route.params.id !== id))
+		return false;
+	const row = m?.name && messages.value.find((item) => item.name === m.name);
+	return !!(
+		row &&
+		row.role === "assistant" &&
+		row.error &&
+		!row.hidden &&
+		!row.stopped &&
+		!row.streaming &&
+		errorInfo(row).code !== "cancelled"
+	);
+}
+
+async function openErrorSupport(m) {
+	if (openSupportInFlight.value || !canReportError(m)) return;
+	const row = messages.value.find((item) => item.name === m.name);
+	const info = errorInfo(row);
+	const draft = supportErrorDraft({
+		code: info.code,
+		upstream: info.upstream,
+		conversation: currentId.value,
+		message: row.name,
+		at: row.modified || row.creation,
+	});
+	if (!draft) return;
+	openSupportInFlight.value = true;
+	try {
+		await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		notify(__("Could not open Support. Try again."), { type: "error" });
+	} finally {
+		openSupportInFlight.value = false;
 	}
 }
 // Waiting-reply count pill (header headphones button). awaiting_count is a
