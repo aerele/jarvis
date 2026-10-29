@@ -12,6 +12,7 @@ import {
 	hasScene,
 	isSceneLoading,
 	loadScene,
+	sceneClearance,
 } from "./holidayScenes";
 
 const scene = { play: () => ({}) };
@@ -71,5 +72,15 @@ describe("the scene loader map", () => {
 		).toBeNull();
 		expect(reported).toHaveBeenCalledTimes(1);
 		expect(isSceneLoading()).toBe(false);
+	});
+});
+
+describe("sceneClearance", () => {
+	it("is the art's own clearance, scaled with the stage; a design with no scene has none", () => {
+		const one = sceneClearance("diwali", 1);
+		expect(one).toBeGreaterThan(37); // below the toran, whose bottom is 37 units down
+		expect(sceneClearance("diwali", 1.25)).toBeCloseTo(one * 1.25, 6);
+		expect(sceneClearance("pongal", 1)).toBe(0);
+		expect(sceneClearance("toString", 1)).toBe(0);
 	});
 });
