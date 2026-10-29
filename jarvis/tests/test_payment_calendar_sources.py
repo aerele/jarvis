@@ -125,6 +125,20 @@ class TestPaymentCalendarSources(TestCase):
 		after = ReceivablePayableReport(filters).run(args)[1]
 		self.assertEqual(before, after)
 
+	def test_doctype_link_columns_never_reach_the_user_match_filter(self):
+		# ERPNext links Party Type / Voucher Type to DocType; Frappe v15's match
+		# filter would then demand DocType read from every non-System Manager.
+		from frappe.desk.query_report import get_filtered_data
+
+		self.fx.invoice()
+		with patch("frappe.desk.query_report.get_filtered_data", wraps=get_filtered_data) as filtered:
+			self.read()
+		columns = [col for call in filtered.call_args_list for col in call.args[1]]
+		self.assertTrue(columns)
+		self.assertFalse(
+			[c for c in columns if c.get("fieldtype") == "Link" and c.get("options") == "DocType"]
+		)
+
 	def test_disabled_report_is_refused_before_source_execution(self):
 		with patch("frappe.desk.query_report.get_report_doc", side_effect=frappe.PermissionError):
 			with self.assertRaises(frappe.PermissionError):

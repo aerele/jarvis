@@ -117,9 +117,11 @@ def _sales_order_outstanding(customer: str, company: str) -> float:
 
 
 def _delivery_note_outstanding(customer: str, company: str) -> float:
-	# Delivery Note value not yet invoiced and not created against a Sales
-	# Order / Sales Invoice, for the Delivery Notes the caller can read (none
-	# when the user has no read on the DocType, where get_list would throw).
+	# Unbilled, unreturned stock quantity of each Delivery Note row not created
+	# against a Sales Order / Sales Invoice, valued as ERPNext does (row net
+	# amount share of the note's grand total), for the Delivery Notes the caller
+	# can read (none when the user has no read on the DocType, where get_list
+	# would throw).
 	if not frappe.has_permission("Delivery Note", "read"):
 		return 0.0
 	notes = frappe.get_list(
@@ -128,6 +130,7 @@ def _delivery_note_outstanding(customer: str, company: str) -> float:
 			"customer": customer,
 			"company": company,
 			"docstatus": 1,
+			"base_net_total": [">", 0],
 			"status": ["not in", ["Closed", "Stopped"]],
 		},
 		fields=["name", "base_net_total", "base_grand_total"],
@@ -140,7 +143,9 @@ def _delivery_note_outstanding(customer: str, company: str) -> float:
 	dn_item = frappe.qb.DocType("Delivery Note Item")
 	items = (
 		frappe.qb.from_(dn_item)
-		.select(dn_item.name, dn_item.parent, dn_item.amount)
+		.select(
+			dn_item.name, dn_item.parent, dn_item.base_net_amount, dn_item.stock_qty, dn_item.returned_qty
+		)
 		.where(
 			dn_item.parent.isin(list(totals))
 			& (Coalesce(dn_item.against_sales_order, "") == "")
@@ -151,20 +156,47 @@ def _delivery_note_outstanding(customer: str, company: str) -> float:
 	if not items:
 		return 0.0
 
-	si_item = frappe.qb.DocType("Sales Invoice Item")
-	billed = dict(
-		frappe.qb.from_(si_item)
-		.select(si_item.dn_detail, Sum(si_item.amount))
-		.where((si_item.docstatus == 1) & si_item.dn_detail.isin([i.name for i in items]))
-		.groupby(si_item.dn_detail)
-		.run()
-	)
-
+	billed = _billed_stock_qty(customer, company, [i.name for i in items])
 	outstanding = 0.0
 	for item in items:
-		dn_amount = flt(item.amount)
-		si_amount = flt(billed.get(item.name))
-		note = totals[item.parent]
-		if dn_amount > si_amount and note.base_net_total:
-			outstanding += ((dn_amount - si_amount) / note.base_net_total) * note.base_grand_total
+		open_qty = flt(item.stock_qty) - flt(billed.get(item.name)) - flt(item.returned_qty)
+		if open_qty > 0 and flt(item.stock_qty):
+			note = totals[item.parent]
+			share = flt(item.base_net_amount) * open_qty / flt(item.stock_qty) / note.base_net_total
+			outstanding += share * note.base_grand_total
 	return outstanding
+
+
+def _billed_stock_qty(customer: str, company: str, dn_details: list[str]) -> dict:
+	# Invoiced stock quantity per Delivery Note row, as ERPNext counts it: credit
+	# notes count only when they update the delivery's billed amount, and a credit
+	# against a return delivery row counts against the original row.
+	dn = frappe.qb.DocType("Delivery Note")
+	dn_item = frappe.qb.DocType("Delivery Note Item")
+	si = frappe.qb.DocType("Sales Invoice")
+	si_item = frappe.qb.DocType("Sales Invoice Item")
+	returned = (
+		frappe.qb.from_(dn_item)
+		.join(dn)
+		.on(dn.name == dn_item.parent)
+		.select(dn_item.name, dn_item.dn_detail)
+		.where(
+			(dn.customer == customer) & (dn.company == company) & (dn.docstatus == 1) & (dn.is_return == 1)
+		)
+	).as_("returned")
+	row = Coalesce(returned.dn_detail, si_item.dn_detail)
+	return dict(
+		frappe.qb.from_(si_item)
+		.join(si)
+		.on(si.name == si_item.parent)
+		.left_join(returned)
+		.on((returned.name == si_item.dn_detail) & (si.is_return == 1))
+		.select(row, Sum(si_item.stock_qty))
+		.where(
+			(si_item.docstatus == 1)
+			& ((si.is_return == 0) | (si.update_billed_amount_in_delivery_note == 1))
+			& row.isin(dn_details)
+		)
+		.groupby(row)
+		.run()
+	)

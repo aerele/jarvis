@@ -43,6 +43,7 @@ USER_UNRESTRICTED = "jls-unrestricted@example.com"
 # Accounts User reads GL Entry; each user below is narrowed by one GL
 # dimension User Permission (or none).
 CUSTOMER = "_JLS Customer"
+CUSTOMER_RETURNS = "_JLS Customer Returns"
 PROJECT = "_JLS Project"
 PROJECT_2 = "_JLS Project 2"
 ACCOUNT_ROOT_PL = "_JLS Expenses"
@@ -519,9 +520,12 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 	  SO-1  P1      1000 x 75% unbilled = 750
 	  SO-2  P2       400 x 100% unbilled = 400
 	  SO closed / fully billed: excluded
-	  DN-1  P1      600 item, 200 billed -> 400 / 600 x 708 = 472
-	  DN-2  P2      300 item -> 300 / 300 x 354 = 354
+	  DN-1  P1      600 item (6 units), 2 billed -> 400 / 600 x 708 = 472
+	  DN-2  P2      300 item (3 units) -> 300 / 300 x 354 = 354
 	  DN item against a Sales Order: excluded
+
+	Rows carry both amount and stock quantity, so ERPNext's older amount-based
+	and newer quantity-based Delivery Note formulas give the same number.
 	"""
 
 	GL_TOTAL = 4300.0
@@ -617,7 +621,7 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 			**{**dn, "status": "Closed"},
 		)
 
-		def dn_item(name, parent, amount, **extra):
+		def dn_item(name, parent, amount, stock_qty, **extra):
 			cls._insert(
 				"Delivery Note Item",
 				name,
@@ -625,14 +629,18 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 				parenttype="Delivery Note",
 				parentfield="items",
 				amount=amount,
+				base_net_amount=amount,
+				qty=stock_qty,
+				stock_qty=stock_qty,
 				docstatus=1,
 				**extra,
 			)
 
-		dn_item("_JLS-DNI-1", "_JLS-DN-1", 600)
-		dn_item("_JLS-DNI-2", "_JLS-DN-2", 300)
-		dn_item("_JLS-DNI-3", "_JLS-DN-1", 250, against_sales_order="_JLS-SO-1")
-		dn_item("_JLS-DNI-4", "_JLS-DN-3", 500)
+		dn_item("_JLS-DNI-1", "_JLS-DN-1", 600, 6)
+		dn_item("_JLS-DNI-2", "_JLS-DN-2", 300, 3)
+		dn_item("_JLS-DNI-3", "_JLS-DN-1", 250, 5, against_sales_order="_JLS-SO-1")
+		dn_item("_JLS-DNI-4", "_JLS-DN-3", 500, 5)
+		cls._insert("Sales Invoice", "_JLS-SI-1", customer=cls.customer, company=COMPANY_A, docstatus=1)
 		cls._insert(
 			"Sales Invoice Item",
 			"_JLS-SII-1",
@@ -641,6 +649,8 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 			parentfield="items",
 			dn_detail="_JLS-DNI-1",
 			amount=200,
+			qty=2,
+			stock_qty=2,
 			docstatus=1,
 		)
 
@@ -707,3 +717,89 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 		with _as(user):
 			out = get_customer_outstanding(self.customer, COMPANY_A)
 		self.assertAlmostEqual(out["outstanding"], self.GL_TOTAL + self.SO_ALL, places=4)
+
+
+class TestGetCustomerOutstandingDeliveryQuantities(LedgerScopeTestCase):
+	"""The Delivery Note part follows ERPNext's quantity rules: billed and
+	returned stock quantity close a row, and a credit note counts only when it
+	updates the delivery's billed amount, against the original row when it
+	credits a return delivery row.
+
+	  DN-1  1000 net / 1180 grand, one row of 10 units, 2 returned
+	  DN-2  the return delivery (negative net total): not outstanding itself
+	  SI-1  invoices 3 units of the DN-1 row
+	  SI-2  credit note for 1 unit of the DN-2 row, updates billed amount
+	  SI-3  credit note for 1 unit of the DN-1 row, does not
+	  -> open 10 - (3 - 1) - 2 = 6 units -> 600 / 1000 x 1180 = 708
+	"""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.customer = _ensure_customer(CUSTOMER_RETURNS)
+		party = {"customer": cls.customer, "company": COMPANY_A, "docstatus": 1}
+
+		def insert(doctype, name, **values):
+			frappe.get_doc({"doctype": doctype, "name": name, **values}).db_insert()
+
+		def row(doctype, name, parent, **values):
+			parenttype = doctype.removesuffix(" Item")
+			insert(
+				doctype,
+				name,
+				parent=parent,
+				parenttype=parenttype,
+				parentfield="items",
+				docstatus=1,
+				**values,
+			)
+
+		insert(
+			"Delivery Note",
+			"_JLS-RDN-1",
+			base_net_total=1000,
+			base_grand_total=1180,
+			status="To Bill",
+			**party,
+		)
+		row(
+			"Delivery Note Item",
+			"_JLS-RDNI-1",
+			"_JLS-RDN-1",
+			amount=1000,
+			base_net_amount=1000,
+			qty=10,
+			stock_qty=10,
+			returned_qty=2,
+		)
+		insert(
+			"Delivery Note",
+			"_JLS-RDN-2",
+			base_net_total=-200,
+			base_grand_total=-236,
+			is_return=1,
+			return_against="_JLS-RDN-1",
+			status="Return",
+			**party,
+		)
+		row(
+			"Delivery Note Item",
+			"_JLS-RDNI-2",
+			"_JLS-RDN-2",
+			amount=-200,
+			base_net_amount=-200,
+			qty=-2,
+			stock_qty=-2,
+			dn_detail="_JLS-RDNI-1",
+		)
+		insert("Sales Invoice", "_JLS-RSI-1", **party)
+		row("Sales Invoice Item", "_JLS-RSII-1", "_JLS-RSI-1", dn_detail="_JLS-RDNI-1", qty=3, stock_qty=3)
+		insert("Sales Invoice", "_JLS-RSI-2", is_return=1, update_billed_amount_in_delivery_note=1, **party)
+		row("Sales Invoice Item", "_JLS-RSII-2", "_JLS-RSI-2", dn_detail="_JLS-RDNI-2", qty=-1, stock_qty=-1)
+		insert("Sales Invoice", "_JLS-RSI-3", is_return=1, update_billed_amount_in_delivery_note=0, **party)
+		row("Sales Invoice Item", "_JLS-RSII-3", "_JLS-RSI-3", dn_detail="_JLS-RDNI-1", qty=-1, stock_qty=-1)
+
+	def test_billed_and_returned_quantity_close_the_row(self):
+		with _as("Administrator"):
+			out = get_customer_outstanding(self.customer, COMPANY_A)
+		self.assertAlmostEqual(out["outstanding"], 708.0, places=4)
