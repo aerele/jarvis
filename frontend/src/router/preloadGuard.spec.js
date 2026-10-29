@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const state = vi.hoisted(() => ({ loading: false }));
+const state = vi.hoisted(() => ({ loading: false, sceneLoading: false }));
 vi.mock("@/lib/holidayWorn", () => ({ isHolidayLoading: () => state.loading }));
+vi.mock("@/lib/holidayScenes", () => ({ isSceneLoading: () => state.sceneLoading }));
 
 import {
 	createPreloadErrorHandler,
@@ -47,6 +48,7 @@ describe("vite:preloadError", () => {
 	let handler;
 	beforeEach(() => {
 		state.loading = false;
+		state.sceneLoading = false;
 		recover = vi.fn();
 		handler = createPreloadErrorHandler({ isChunkLoadError, recover });
 	});
@@ -65,6 +67,14 @@ describe("vite:preloadError", () => {
 
 	it("leaves Safari's nameless message alone while the holiday art is loading", () => {
 		state.loading = true;
+		expect(isHolidayPreloadError(SAFARI)).toBe(true);
+		const event = fire(handler, SAFARI);
+		expect(event.preventDefault).not.toHaveBeenCalled();
+		expect(recover).not.toHaveBeenCalled();
+	});
+
+	it("leaves Safari's nameless message alone while a welcome scene is loading", () => {
+		state.sceneLoading = true;
 		expect(isHolidayPreloadError(SAFARI)).toBe(true);
 		const event = fire(handler, SAFARI);
 		expect(event.preventDefault).not.toHaveBeenCalled();

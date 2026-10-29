@@ -159,7 +159,7 @@ jobs:
         run: |
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
           node --test jarvis/public/js/*.test.mjs jarvis/public/js/shared/*.test.mjs
-          node --test jarvis/public/js/shared/holiday/*.test.mjs
+          node --test jarvis/public/js/shared/holiday/*.test.mjs jarvis/public/js/shared/holiday/scenes/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
   # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break

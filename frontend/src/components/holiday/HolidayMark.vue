@@ -7,8 +7,9 @@
 		:class="{ 'jvh-button': clickable }"
 		:type="clickable ? 'button' : undefined"
 		:aria-label="clickable ? 'Show the greeting again' : undefined"
-		:style="clickable ? { borderRadius: `${radius}px` } : undefined"
+		:style="wrapperStyle"
 		:data-design="art.design"
+		:data-look="lookOn ? '' : undefined"
 		@mouseenter="hovered = true"
 		@mouseleave="hovered = false"
 		@click="clickable && replay()"
@@ -65,6 +66,18 @@ const props = defineProps({
 	idlePeek: { type: Boolean, default: false },
 	/** The big welcome mark: smile once per mount while there is something to say. */
 	welcome: { type: Boolean, default: false },
+	/**
+	 * The welcome stage drives the mark instead of the mark's own timers: {face, item,
+	 * happy, look}. The face shows while `face` is set, the item while `item` is set,
+	 * `happy` is the smile and `look` is [dx, dy] in the 56-unit tile space. Null (the
+	 * default) is the mark's own behaviour.
+	 */
+	stage: { type: Object, default: null },
+	/**
+	 * The pointer is over the mark but something laid on top of it (the stage's replay
+	 * button) receives the mouse events, so it reports the hover instead.
+	 */
+	hover: { type: Boolean, default: false },
 });
 
 const WELCOME_SMILE_MS = 2500;
@@ -110,7 +123,8 @@ const smiling = ref(false);
 const canSmile = computed(
 	() => wearing.value && props.welcome && SMILE_KINDS.includes(art.value?.kind)
 );
-const clickable = canSmile;
+// On the stage the replay button over the mark does the clicking, not the mark.
+const clickable = computed(() => canSmile.value && !props.stage);
 let smiled = false;
 let smileTimer = null;
 let smileRun = 0;
@@ -140,15 +154,16 @@ watch(
 	{ immediate: true }
 );
 
-const effectiveMood = computed(() =>
-	smiling.value && props.mood === "star" ? "happy" : props.mood
-);
+const effectiveMood = computed(() => {
+	if (props.stage) return props.stage.happy && props.mood === "star" ? "happy" : props.mood;
+	return smiling.value && props.mood === "star" ? "happy" : props.mood;
+});
 const markProps = computed(() => ({
 	size: props.size,
 	radius: props.radius,
 	mood: effectiveMood.value,
 	hoverPeek: props.hoverPeek,
-	peek: props.peek,
+	peek: props.peek || !!(props.stage && props.stage.face),
 	idlePeek: props.idlePeek,
 }));
 
@@ -156,7 +171,8 @@ const markProps = computed(() => ({
 // a hoverPeek mark is pure CSS there, so it is tracked here.
 const faceActive = ref(false);
 const hovered = ref(false);
-const faceShown = computed(() => faceActive.value || (props.hoverPeek && hovered.value));
+const hoverOn = computed(() => hovered.value || props.hover);
+const faceShown = computed(() => faceActive.value || (props.hoverPeek && hoverOn.value));
 // Once the mark stops wearing (the answer ended, a logo was set) the wrapper and the
 // JarvisMark under it are replaced: what they knew about hover and face is stale.
 watch(wearing, (yes) => {
@@ -166,7 +182,9 @@ watch(wearing, (yes) => {
 	}
 });
 
-const layerOn = computed(() => wearing.value && faceShown.value && !!worn.value);
+const layerOn = computed(
+	() => wearing.value && faceShown.value && !!worn.value && (!props.stage || props.stage.item)
+);
 const layerState = computed(() =>
 	effectiveMood.value === "happy"
 		? "happy"
@@ -176,7 +194,22 @@ const layerState = computed(() =>
 );
 // The item pops on for a hover, a smile or a reply in progress. The mark's own idle
 // blink, which happens unprompted every few seconds, only fades it in.
-const popOn = computed(() => hovered.value || props.peek || effectiveMood.value !== "star");
+const popOn = computed(
+	() => hoverOn.value || props.peek || !!props.stage || effectiveMood.value !== "star"
+);
+
+// The stage points the eyes at something (the sky, the flame): a fixed offset that
+// replaces the mark's own glancing until the smile or the next beat.
+const lookOn = computed(() => !!(props.stage && props.stage.look) && !props.stage.happy);
+const wrapperStyle = computed(() => {
+	const style = clickable.value ? { borderRadius: `${props.radius}px` } : {};
+	if (lookOn.value) {
+		const unit = props.size / 56;
+		style["--jvh-lx"] = `${props.stage.look[0] * unit}px`;
+		style["--jvh-ly"] = `${props.stage.look[1] * unit}px`;
+	}
+	return Object.keys(style).length ? style : undefined;
+});
 
 // ---- reduced motion, read live: the OS setting can change while the page is open.
 const reducedMotion = ref(false);
@@ -248,6 +281,12 @@ const layerStyle = computed(() => {
 .jvh-button:focus-visible {
 	outline: 2px solid var(--cta);
 	outline-offset: 3px;
+}
+/* The stage's "look": the face holds a fixed offset instead of its own glancing loop. */
+.jvh[data-look] :deep(.jv-face) {
+	animation: none !important;
+	transform: translate(var(--jvh-lx), var(--jvh-ly));
+	transition: opacity 0.25s ease, transform 0.35s ease-in-out;
 }
 .jvh-layer {
 	position: absolute;

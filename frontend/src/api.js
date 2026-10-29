@@ -88,6 +88,11 @@ export async function getHolidayToday() {
 	return message;
 }
 
+// The welcome scene asks the server for its showing slot (jarvis.holiday_touch.api).
+// Answers {play: bool}; rejects on a network or server error. The scene gives it, and
+// the scene's import, one overall deadline, so this call sets no timeout of its own.
+export const recordHolidayShown = () => call("jarvis.holiday_touch.api.record_shown");
+
 export const listConversations = ({ refresh = false } = {}) =>
 	call("jarvis.chat.api.list_conversations", refresh ? { refresh: 1 } : {});
 export const listTools = () => call("jarvis.chat.api.list_tools");
