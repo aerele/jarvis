@@ -106,7 +106,7 @@ class TestExportReport(FrappeTestCase):
 			shown = run_report(PREP_REPORT)
 			env = export_query(report_name=PREP_REPORT)
 		self.assertLess(len(shown["result"]), n)
-		self.assertIn("export_query(report_name=", shown["row_note"])
+		self.assertIn("query_report", shown["row_note"])
 		self.assertEqual(env["total"], n)
 		self.assertTrue(env["as_of"])
 		sheet = _sheet(env)
@@ -251,7 +251,7 @@ class TestExportReport(FrappeTestCase):
 		self.assertTrue(_is_denied_path("frappe.desk.query_report.export_query"))
 		self.assertTrue(_is_denied_path("frappe.desk.reportview.export_query"))
 
-	def test_truncated_run_report_points_at_export_query_report_name(self):
+	def test_truncated_run_report_points_at_query_report(self):
 		data = {"columns": COLUMNS, "result": [{"description": "x" * 200} for _ in range(5000)]}
 		out, event = _result_guard.enforce_result_budget(data, "run_report")
 		self.assertEqual(event["kind"], "truncated")

@@ -265,6 +265,9 @@ def _read_completed(dn: str) -> dict | None:
 	env["result"] = capped
 	env["as_of"] = as_of
 	env["run"] = dn
+	env["source_rows"] = len(result)
+	env["preview_complete"] = len(capped) == len(result)
+	env["next_query"] = {"tool": "query_report", "args": {"prepared_report": dn}}
 	if note:
 		env["row_note"] = note
 	return env
@@ -329,9 +332,9 @@ def _cap_rows(result: list, report_name: str):
 	if len(result) <= _MAX_ROWS:
 		return result, None
 	note = (
-		f"Showing the first {_MAX_ROWS} of {len(result)} rows. For every row in a file, call "
-		f"export_query(report_name={report_name!r}, filters=<the same filters>): it writes the "
-		f"completed report server-side, complete. Or narrow the filters."
+		f"Showing the first {_MAX_ROWS} of {len(result)} stored rows. For questions, counts or totals "
+		"use query_report with this response's exact run ID. Inspect first, then pin its version "
+		"for queries over all stored rows. This preview is not a complete report read."
 	)
 	return result[:_MAX_ROWS], note
 

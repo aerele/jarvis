@@ -4408,8 +4408,17 @@ def _reads_skill_rows(tool: str, args) -> bool:
 	Report's own SQL is not seen here."""
 	if tool in _NO_STORED_ROWS:
 		return False
-	if tool in ("run_report", "report_pdf") and isinstance(args, dict):
+	if tool in ("run_report", "report_pdf", "query_report") and isinstance(args, dict):
 		report = args.get("report_name")
+		if tool == "query_report":
+			run = args.get("prepared_report")
+			report = (
+				frappe.db.get_value(
+					"Prepared Report", {"name": run, "owner": frappe.session.user}, "report_name"
+				)
+				if isinstance(run, str)
+				else None
+			)
 		ref = frappe.get_cached_value("Report", report, "ref_doctype") if isinstance(report, str) else None
 		if ref and _is_a_skill_doctype(ref):
 			return True
