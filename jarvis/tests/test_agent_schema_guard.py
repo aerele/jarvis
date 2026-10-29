@@ -10,9 +10,13 @@ from jarvis.tools import record_agent_run as writeback
 
 
 class TestAgentSchemaGuard(FrappeTestCase):
-	def _write(self, provider, *, findings=None, coverage=None, keys='["tax_withholding_model"]'):
+	def _write(
+		self, provider, *, findings=None, coverage=None, keys='["tax_withholding_model"]', version="0.4.0"
+	):
 		run = frappe._dict(name="FAKE-RUN", status="running", installation="FAKE-INST", agent="fake-auditor")
-		inst = frappe._dict(name="FAKE-INST", agent="fake-auditor", owner="Administrator")
+		inst = frappe._dict(
+			name="FAKE-INST", agent="fake-auditor", owner="Administrator", installed_version=version
+		)
 		listing = {
 			"rule_tokens": '["check", "external"]',
 			"doctypes_required": "[]",
@@ -39,7 +43,7 @@ class TestAgentSchemaGuard(FrappeTestCase):
 			)
 		return persist.call_args
 
-	def test_v16_cannot_record_a_forged_finding_or_clean_coverage(self):
+	def test_unrecognized_schema_cannot_record_a_finding_or_clean_coverage(self):
 		finding = {
 			"token": "check",
 			"ref_doctype": "Company",
@@ -48,7 +52,7 @@ class TestAgentSchemaGuard(FrappeTestCase):
 			"amount": 1,
 			"result_class": "observed_fact",
 		}
-		call = self._write(lambda _: "entry_table_v16", findings=[finding])
+		call = self._write(lambda _: "entry_table_unrecognized", findings=[finding])
 		self.assertEqual(call.args[2], [])
 		self.assertIn("unsupported_customisation", call.kwargs["dropped"][0]["reason"])
 		self.assertTrue(
@@ -57,9 +61,9 @@ class TestAgentSchemaGuard(FrappeTestCase):
 		self.assertIsNone(call.kwargs["dashboard"])
 		self.assertIsNone(call.kwargs["integrity_digest"])
 
-	def test_legacy_schema_keeps_the_existing_writeback(self):
+	def test_recognized_v16_schema_keeps_the_existing_writeback(self):
 		coverage = {"check": {"state": "evaluated"}}
-		call = self._write(lambda _: "legacy_supplier", coverage=coverage)
+		call = self._write(lambda _: "entry_table_v16", coverage=coverage)
 		self.assertEqual(call.kwargs["coverage"], coverage)
 		self.assertEqual(call.kwargs["dashboard"], "MODEL-PAGE")
 		self.assertEqual(call.kwargs["integrity_digest"], "MODEL-DIGEST")
@@ -75,7 +79,7 @@ class TestAgentSchemaGuard(FrappeTestCase):
 			"reason_code": "external_evidence_absent",
 			"detail": "portal facts",
 		}
-		call = self._write(lambda _: "entry_table_v16", coverage={"external": external})
+		call = self._write(lambda _: "entry_table_unrecognized", coverage={"external": external})
 		self.assertEqual(call.kwargs["coverage"]["external"], external)
 		self.assertEqual(call.kwargs["coverage"]["check"]["reason_code"], "unsupported_customisation")
 
@@ -88,10 +92,15 @@ class TestAgentSchemaGuard(FrappeTestCase):
 			token: {"state": "not_evaluable", "reason_code": "unsupported_customisation"}
 			for token in ("check", "external", "invented")
 		}
-		call = self._write(lambda _: "entry_table_v16", coverage=coverage)
+		call = self._write(lambda _: "entry_table_unrecognized", coverage=coverage)
 		self.assertEqual(set(call.kwargs["coverage"]), {"check", "external"})
 		self.assertEqual(call.kwargs["dashboard"], "MODEL-PAGE")
 
 	def test_undeclared_guard_does_not_affect_other_agents(self):
 		call = self._write(lambda _: "entry_table_v16", keys="[]")
 		self.assertEqual(call.kwargs["coverage"], {"check": {"state": "evaluated"}})
+
+	def test_mixed_old_bundle_cannot_claim_native_support(self):
+		call = self._write(lambda _: "entry_table_v16", version="0.3.0")
+		self.assertEqual(call.kwargs["coverage"]["check"]["reason_code"], "unsupported_customisation")
+		self.assertIsNone(call.kwargs["dashboard"])

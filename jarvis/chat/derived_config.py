@@ -3,6 +3,7 @@ supplies itself instead of asking the customer to type them."""
 
 import hashlib
 import hmac
+import re
 
 import frappe
 
@@ -24,28 +25,56 @@ def _open_lead_statuses(inst):
 
 
 def _tax_withholding_model(inst):
-	if frappe.get_meta("Purchase Invoice").has_field("tax_withholding_entries"):
-		return "entry_table_v16"
-	return "legacy_supplier_unverified"
-
-
-UNSUPPORTED = {
-	"tax_withholding_model": {
-		"entry_table_v16": "the Tax Withholding Entry table",
-		"legacy_supplier_unverified": "legacy tax withholding inputs",
+	invoice = frappe.get_meta("Purchase Invoice")
+	if not invoice.has_field("tax_withholding_entries"):
+		return "legacy_supplier_unverified"
+	field = invoice.get_field("tax_withholding_entries")
+	if field.fieldtype != "Table" or field.options != "Tax Withholding Entry":
+		return "entry_table_unrecognized"
+	entry = frappe.get_meta("Tax Withholding Entry")
+	required = {
+		"company",
+		"party_type",
+		"party",
+		"tax_id",
+		"tax_withholding_category",
+		"tax_withholding_group",
+		"taxable_amount",
+		"tax_rate",
+		"withholding_amount",
+		"taxable_doctype",
+		"taxable_name",
+		"taxable_date",
+		"withholding_doctype",
+		"withholding_name",
+		"withholding_date",
+		"under_withheld_reason",
+		"lower_deduction_certificate",
+		"status",
 	}
-}
+	if not all(entry.has_field(name) for name in required):
+		return "entry_table_unrecognized"
+	if not {"Duplicate", "Cancelled"} <= set((entry.get_field("status").options or "").splitlines()):
+		return "entry_table_unrecognized"
+	return "entry_table_v16"
+
+
+SUPPORTED = {"tax_withholding_model": {"entry_table_v16"}}
+MIN_BUNDLE_VERSION = {"tax_withholding_model": (0, 4, 0)}
 
 
 def unsupported_reason(namespaces, inst):
 	"""Recheck declared schema guards at writeback; a failed check stays closed."""
-	for key in sorted(set(namespaces) & set(UNSUPPORTED)):
+	for key in sorted(set(namespaces) & set(SUPPORTED)):
+		version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", str(inst.get("installed_version") or ""))
+		if not version or tuple(map(int, version.groups())) < MIN_BUNDLE_VERSION[key]:
+			return "auditor bundle version"
 		try:
 			value = PROVIDERS[key][0](inst)
 		except Exception:
 			return "unavailable " + key.replace("_", " ")
-		if value in UNSUPPORTED[key]:
-			return UNSUPPORTED[key][value]
+		if value not in SUPPORTED[key]:
+			return key.replace("_", " ")
 	return None
 
 

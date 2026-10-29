@@ -13,10 +13,19 @@ class _Inst(frappe._dict):
 
 
 def _inst(name="INST-1", config=None):
-	return _Inst(name=name, config=config)
+	return _Inst(name=name, config=config, installed_version="0.4.0")
 
 
 class TestDerivedConfig(FrappeTestCase):
+	def test_missing_native_field_is_not_recognized(self):
+		invoice = frappe._dict(
+			has_field=lambda _: True,
+			get_field=lambda _: frappe._dict(fieldtype="Table", options="Tax Withholding Entry"),
+		)
+		entry = frappe._dict(has_field=lambda name: name != "taxable_amount")
+		with patch.object(derived_config.frappe, "get_meta", side_effect=[invoice, entry]):
+			self.assertEqual(derived_config._tax_withholding_model(_inst()), "entry_table_unrecognized")
+
 	def test_withholding_model_matches_installed_schema(self):
 		expected = (
 			"entry_table_v16"
