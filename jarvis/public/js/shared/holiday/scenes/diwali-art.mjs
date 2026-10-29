@@ -2,6 +2,14 @@
 // rockets and the three bursts. Ported from the approved desktop mock. Coordinates are
 // the mock's 800-unit stage (x centred on 400); diwali.mjs scales and places the group.
 import { burstSVG, lin, rad, rng, r2, ring } from "../stage.mjs";
+import {
+  BURSTS,
+  DIYA,
+  SWAGS,
+  TORAN,
+  floorTransform,
+  swagY,
+} from "../scene-geometry.mjs";
 
 // Where the diwali scene puts the item's flame, in the 56-unit tile space of the mark.
 export const FLAME_TILE = [60.5, 36];
@@ -114,23 +122,27 @@ export const defsSVG = (p) => `<defs>
 export function toranSVG(p, from, to) {
   const first = Math.floor(from / 200);
   const last = Math.ceil(to / 200);
-  let d = `M${first * 200} 4`;
+  let d = `M${first * 200} ${TORAN.top}`;
   let items = "";
   for (let i = first; i < last; i++) {
-    d += ` Q${i * 200 + 100} 40 ${i * 200 + 200} 4`;
-    for (let k = 1; k < 9; k++) {
-      const t = k / 9;
+    d += ` Q${i * 200 + 100} ${TORAN.top + TORAN.sag / 2} ${i * 200 + 200} ${
+      TORAN.top
+    }`;
+    for (let k = 1; k < SWAGS; k++) {
+      const t = k / SWAGS;
       const x = r2(i * 200 + 200 * t);
-      const y = r2(4 + 72 * t * (1 - t));
+      const y = r2(swagY(t));
       const n = i * 8 + k;
       const hue = Math.abs(n) % 2;
       const colour = Math.abs(n) % 4 === 1 ? "#15803d" : "#22c55e";
-      const leaf = `<path d="M${x} ${y} q-3.2 6.5 0 13 q3.2 -6.2 0 -13 Z" fill="${colour}"/><path d="M${x} ${r2(
+      const leaf = `<path d="M${x} ${y} q-3.2 ${TORAN.leaf / 2} 0 ${
+        TORAN.leaf
+      } q3.2 -6.2 0 -${TORAN.leaf} Z" fill="${colour}"/><path d="M${x} ${r2(
         y + 1
       )} V${r2(
-        y + 11.5
+        y + TORAN.leaf - 1.5
       )}" stroke="#14532d" stroke-opacity=".5" stroke-width=".6"/>`;
-      const marigold = `<circle cx="${x}" cy="${y}" r="5.4" fill="${
+      const marigold = `<circle cx="${x}" cy="${y}" r="${TORAN.bloom}" fill="${
         hue ? "#facc15" : "#f97316"
       }"/>${ring(
         8,
@@ -148,13 +160,17 @@ export function toranSVG(p, from, to) {
   return `<g class="${p}toran" opacity="0"><path d="${d}" stroke="#a16207" stroke-width="1.2" fill="none"/>${items}</g>`;
 }
 
-/** The floor props: a row of lit diyas with an anar fountain at each end. `ground` is the baseline. */
-export function floorSVG(p, ground) {
-  const P = 1.35;
+/**
+ * The floor props: a row of lit diyas with an anar fountain at each end. `ground` is the
+ * baseline. `fit` (scene-geometry.mjs floorFit) shrinks the whole row as one group on a short
+ * stage, so the glow and the fountain sparks scale with the pots.
+ */
+export function floorSVG(p, ground, fit) {
+  const P = DIYA.pot;
   const rand = rng(13);
-  const diya = (x) => `<g transform="translate(${x} ${ground - 20}) scale(${r2(
-    0.85 * P
-  )})">
+  const diya = (x) => `<g transform="translate(${x} ${
+    ground - DIYA.lift
+  }) scale(${r2(DIYA.scale)})">
     <circle class="${p}dglow" cx="16.5" cy="-10" r="22" fill="url(#${p}dg)" opacity="0"/>
     <ellipse cx="0" cy="14.5" rx="16" ry="2.4" fill="#000" opacity=".12"/>
     <path d="M-16 0 Q-15 12 0 13 Q11 13 15 3 L19 -1.5 Q13 .5 8 .5 Z" fill="url(#${p}dclay)"/>
@@ -180,10 +196,12 @@ export function floorSVG(p, ground) {
     <path d="M-6.6 -5 H6.6 M-5.4 -10.5 H5.4" stroke="#fde68a" stroke-width="1.3"/>
     <ellipse cx="0" cy="-16" rx="4.5" ry="1.4" fill="#7f1d1d"/></g>`;
   const xs = [90, 193, 297, 400, 503, 607, 710];
-  return `<g>${xs.map(diya).join("")}${anar(245)}${anar(555)}</g>`;
+  return `<g class="${p}floor" transform="${floorTransform(fit)}">${xs
+    .map(diya)
+    .join("")}${anar(245)}${anar(555)}</g>`;
 }
 
-/** Rockets and the three bursts. `top` is the mark's y shift from the mock's 84. */
+/** Rockets and the three bursts. `dy` is the mark's y shift from the mock's MARK_TOP. */
 export function skyShowSVG(p, dy) {
   const flash = (n, x, y) =>
     `<g transform="translate(${x} ${y})"><circle class="${p}flash${n} ${p}fb" r="${radiusOf(
@@ -191,19 +209,19 @@ export function skyShowSVG(p, dy) {
     )}" fill="url(#${p}flash)" opacity="0"/>`;
   const rocket = (n) =>
     `<g class="${p}rk${n}" opacity="0"><path d="M0 0 L0 18" stroke="url(#${p}rkt)" stroke-width="2.2" stroke-linecap="round"/><circle r="2.3" fill="#fff7ed"/></g>`;
-  return `${flash(1, 250, 98 + dy)}${burstSVG(
+  return `${flash(1, BURSTS[0].x, BURSTS[0].y + dy)}${burstSVG(
     `${p}b1`,
     40,
     ["#f59e0b", "#ea580c", "#facc15", "#e11d48"],
     3
   )}</g>
-    ${flash(2, 560, 80 + dy)}${burstSVG(
+    ${flash(2, BURSTS[1].x, BURSTS[1].y + dy)}${burstSVG(
     `${p}b2`,
     40,
     ["#db2777", "#9333ea", "#ec4899", "#f59e0b"],
     6
   )}</g>
-    ${flash(3, 680, 118 + dy)}${burstSVG(
+    ${flash(3, BURSTS[2].x, BURSTS[2].y + dy)}${burstSVG(
     `${p}b3`,
     32,
     ["#fde047", "#fbbf24", "#fff7ed"],

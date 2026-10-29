@@ -24,3 +24,16 @@ export function withFestiveCard(cards, answer) {
 	if (!fest || !cards.length) return cards;
 	return [...cards.slice(0, -1), { category: "draft", title: fest[0], prompt: fest[1] }];
 }
+
+/**
+ * How far (px) to shift the hero from its rest place so it is centred in the stage while
+ * the scene plays. Positive is down. Its top is held at `minTop` or below, the clearance
+ * from the toran (lib/holidayScenes.js sceneClearance), and its bottom
+ * inside `maxBottom` so the shift never grows the scroll height; when both cannot hold the
+ * clearance wins. All sizes are layout sizes in px (they ignore the shift itself).
+ */
+export function heroOffset({ areaH, heroH, restTop, minTop, maxBottom }) {
+	const centred = (areaH - heroH) / 2;
+	const top = Math.max(minTop, Math.min(centred, maxBottom - heroH));
+	return Math.round(top - restTop);
+}

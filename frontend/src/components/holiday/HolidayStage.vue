@@ -10,10 +10,10 @@
 		     scrollHeight. It lets every pointer event through and is hidden from screen
 		     readers. -->
 		<div ref="hostEl" class="jv-stage-art" aria-hidden="true" data-testid="holiday-art"></div>
-		<div class="jv-welcome-scroll jv-stage-scroll">
+		<div ref="scrollEl" class="jv-welcome-scroll jv-stage-scroll">
 			<div class="jv-stage-col">
 				<div class="jv-stage-top">
-					<div ref="heroEl" class="jv-stage-hero">
+					<div ref="heroEl" class="jv-stage-hero" :style="heroStyle">
 						<div
 							ref="markEl"
 							class="jv-stage-mark"
@@ -94,10 +94,17 @@
 </template>
 
 <script setup>
-// The scene-day welcome layout: a big centred Jarvis and the greeting at a 0.6 / 0.4 split
-// of the space above the bottom block (starter cards, Payment Calendar link, capability
-// catalog), with the scene's art on a layer over it. ChatView uses this only when
-// lib/holidayStage.js says so; otherwise the normal WelcomeHero layout is untouched.
+// The scene-day welcome layout: a big Jarvis and the greeting, with the scene's art on a
+// layer over it, above a bottom block (starter cards, Payment Calendar link, capability
+// catalog). ChatView uses this only when lib/holidayStage.js says so; otherwise the normal
+// WelcomeHero layout is untouched.
+//
+// Where the hero sits: at rest, at a 0.6 / 0.4 split of the space above the bottom block.
+// While a scene may still play it is centred in the whole stage instead, never above the
+// toran (lib/holidayScenes.js sceneClearance; the scene keeps its fireworks below the
+// toran itself). When the scene ends it glides up to its rest place. The move is a
+// transform on the hero, so layout and the scroll height never change; the worn item is
+// inside the mark, so it moves with it.
 //
 // While a scene may still play the greeting is the person's normal one and the bottom
 // block is hidden (visibility, so Tab skips it and nothing moves). The scene, its deadline
@@ -114,6 +121,8 @@ import {
 import { useRoute } from "vue-router";
 import HolidayMark from "@/components/holiday/HolidayMark.vue";
 import { holidayTouch } from "@/holidayTouch";
+import { heroOffset } from "@/lib/holidayStage";
+import { sceneClearance } from "@/lib/holidayScenes";
 import { createHolidayScene } from "@/lib/useHolidayScene";
 import { DAY_SUB_LINE, headingFor } from "@jsshared/holiday/copy.mjs";
 
@@ -133,6 +142,7 @@ const normalId = `jvs-t${uid}`;
 const dayId = `jvs-d${uid}`;
 const areaEl = ref(null);
 const hostEl = ref(null);
+const scrollEl = ref(null);
 const heroEl = ref(null);
 const markEl = ref(null);
 const h1El = ref(null);
@@ -146,6 +156,31 @@ const markSize = computed(() => Math.round(72 * scale.value));
 function measureScale() {
 	const width = areaEl.value ? areaEl.value.clientWidth : 0;
 	if (width > 0) scale.value = Math.round(Math.min(width / 800, 1.25) * 1000) / 1000;
+}
+
+// ---- where the hero sits: centred while a scene may play, at rest otherwise
+const centredShift = ref(0);
+const heroStyle = computed(() => {
+	const centred = scene.centred.value;
+	return {
+		transform: `translateY(${centred ? centredShift.value : 0}px)`,
+		// No glide while centred (a re-measure must not drift); the way up at the end.
+		"--glide": `${centred ? 0 : scene.glideMs.value}ms`,
+	};
+});
+// Layout sizes only (offsetTop and offsetHeight ignore the transform), so measuring again
+// while the hero is shifted gives the same answer.
+function measureHero() {
+	const area = areaEl.value;
+	const hero = heroEl.value;
+	if (!area || !hero || !scrollEl.value) return;
+	centredShift.value = heroOffset({
+		areaH: area.clientHeight,
+		heroH: hero.offsetHeight,
+		restTop: hero.offsetTop,
+		minTop: sceneClearance(holidayTouch.answer.value.design, scale.value),
+		maxBottom: scrollEl.value.scrollHeight,
+	});
 }
 
 // ---- the greeting
@@ -229,12 +264,15 @@ function onResize(entries) {
 		measureScale();
 		scene.settle("early");
 	} else if (layoutChanged) {
-		scene.relayout(getBoxes());
+		if (scene.centred.value) measureHero();
+		// After the new shift is on the page, so the scene reads the mark where it now is.
+		nextTick(() => scene.relayout(getBoxes()));
 	}
 }
 
 onMounted(async () => {
 	measureScale();
+	measureHero();
 	// Passive, capturing, and never calling preventDefault or stopPropagation: a click on
 	// the sidebar, the composer or a link still does its normal job.
 	window.addEventListener("pointerdown", scene.onPointerDown, { capture: true, passive: true });
@@ -311,6 +349,7 @@ onBeforeUnmount(() => {
 .jv-stage-hero {
 	position: relative;
 	z-index: 2;
+	transition: transform var(--glide, 0ms) cubic-bezier(0.2, 0.8, 0.2, 1);
 	flex: none;
 	width: 100%;
 	max-width: 680px;
@@ -379,6 +418,7 @@ onBeforeUnmount(() => {
 }
 @media (prefers-reduced-motion: reduce) {
 	.jv-stage-t,
+	.jv-stage-hero,
 	.jv-stage-bottom {
 		transition: none !important;
 	}
