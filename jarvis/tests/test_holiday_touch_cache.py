@@ -398,7 +398,8 @@ class TestRotationAfterCommit(_Base):
 				self.assertTrue(frappe.flags.get(cache.QUEUED_FLAG))
 				end()
 				self.assertFalse(frappe.flags.get(cache.QUEUED_FLAG))
-				self.assertEqual(len(frappe.db.after_commit), 0)
+				# Frappe 15's CallbackManager has no __len__; its queue is the same deque on 15 and 16.
+				self.assertEqual(len(frappe.db.after_commit._functions), 0)
 		_, _, holiday_list = self._fixtures()
 		self.assertTrue(self._rotated_by("Holiday List", holiday_list, color="#000000"))  # not stuck
 

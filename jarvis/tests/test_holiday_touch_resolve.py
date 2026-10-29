@@ -116,6 +116,11 @@ def _holiday_list(rows, country=None, subdivision=None, allow_duplicates=False) 
 
 
 def _assign(employee: str, company: str, holiday_list: str) -> None:
+	"""HRMS 16 assigns a list with a Holiday List Assignment; HRMS 15 has no such doctype and
+	reads the Employee's own ``holiday_list``."""
+	if not frappe.db.exists("DocType", "Holiday List Assignment"):
+		frappe.db.set_value("Employee", employee, "holiday_list", holiday_list, update_modified=False)
+		return
 	frappe.get_doc(
 		{
 			"doctype": "Holiday List Assignment",
