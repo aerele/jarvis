@@ -24,7 +24,7 @@ def may_play(now_utc: datetime, times_utc: list[datetime], tz: str) -> bool:
 	zone = ZoneInfo(tz)
 	now = _utc(now_utc)
 	local = now.astimezone(zone)
-	today = sorted(t for t in map(_utc, times_utc) if t.astimezone(zone).date() == local.date())
+	today = sorted(t for t in (_utc(x) for x in times_utc) if t.astimezone(zone).date() == local.date())
 	am = next((t for t in today if t.astimezone(zone).hour < _SPLIT_HOUR), None)
 	pm = next((t for t in today if t.astimezone(zone).hour >= _SPLIT_HOUR), None)
 	if local.hour < _SPLIT_HOUR:

@@ -47,6 +47,7 @@ def report(kind: str, title: str, message: str | None = None) -> None:
 def _due(kind: str) -> bool:
 	try:
 		cache = frappe.cache()
-		return bool(cache.set(name=cache.make_key(PREFIX + kind), value=1, nx=True, ex=INTERVAL))
+		key = cache.make_key(PREFIX + kind)  # plain redis-py `set`: apply the site prefix by hand
+		return bool(cache.set(name=key, value=1, nx=True, ex=INTERVAL))
 	except Exception:
 		return True
