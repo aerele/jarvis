@@ -1768,7 +1768,7 @@
       "domain": "tds-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.3.0",
       "status": "Published",
       "description": "Prepares your monthly TDS/TCS data before each deposit due date and before each 26Q/24Q quarter: reconciles the TDS booked in your ledger against the challan payments recorded in your books, tracks each supplier's running total against the section thresholds, checks the rate deducted against the effective section rate, and lists the deductee fields your return is missing. Read-only worklist; never edits a voucher, books TDS, deposits a challan, files a return, or decides what is legally deductible.",
       "tools_required": [
@@ -1806,6 +1806,7 @@
         "section_rates",
         "section_thresholds"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1818,10 +1819,18 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027",
+      "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "tds_payable_accounts",
+        "deductor_class",
+        "reviewer",
+        "reviewer_capacity",
+        "currency",
+        "tax_withholding_model"
+      ]
     },
     {
       "agent_slug": "ticket-triage-operator",
