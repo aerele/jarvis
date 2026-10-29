@@ -385,7 +385,13 @@ def park(run, macro_doc, waits: list[dict]) -> bool:
 	# A report that finished while the step's turn was still running has already fired
 	# its hook, and found nobody waiting: look once now rather than at the next cron.
 	wake(run.name)
-	names = list(dict.fromkeys(w["report_name"] for w in waits))
+	_announce_waiting(run, macro_doc, [w["report_name"] for w in waits])
+	return True
+
+
+def _announce_waiting(run, macro_doc, report_names: list[str]) -> None:
+	"""Tell the owner's open pages the run is waiting (``macro:progress``). Never raises."""
+	names = list(dict.fromkeys(report_names))
 	label = "Waiting for report: " + ", ".join(names)
 	if len(label) > _LABEL_MAX:
 		label = label[: _LABEL_MAX - 1].rstrip() + "…"
@@ -406,7 +412,6 @@ def park(run, macro_doc, waits: list[dict]) -> bool:
 		)
 	except Exception:
 		pass
-	return True
 
 
 # --------------------------------------------------------------------------- #
@@ -654,7 +659,12 @@ def _allocate(run, merged: bool) -> str:
 	if stored and not frappe.db.exists(TURN, stored):
 		return stored
 	n = frappe.utils.cint(run.resume_count) + 1
-	return hashlib.sha1(f"{run.name}:{_step_key(run, merged)}:report:{n}".encode()).hexdigest()[:12]
+	# A transport re-park hands its resume back (``repark_after_transport_failure``), so
+	# the same count comes round again: the compensations, which only ever go up, tell the
+	# new send from the failed one whose Turn exists (its id would answer "duplicate").
+	tries = frappe.utils.cint(run.resume_compensations)
+	tail = f":c{tries}" if tries else ""
+	return hashlib.sha1(f"{run.name}:{_step_key(run, merged)}:report:{n}{tail}".encode()).hexdigest()[:12]
 
 
 def _resume_ready(run, macro_doc, merged, what, states) -> None:
@@ -811,6 +821,192 @@ def resume_not_delivered(run, macro_doc) -> None:
 	_not_sent(run, macro_doc, merged, what, run.resume_turn, "the continuation's turn was never written")
 	if macros._run_status_now(run.name) == "waiting_report":
 		wake(run.name)
+
+
+def is_transport_failure(turn) -> bool:
+	"""Whether a continuation's failed Turn never really reached the model, so the report
+	it was sent for is still unread and the run can wait again: the system cancelled it
+	while it waited in the queue (state ``cancelled`` with a ``cancel_reason``; the
+	user's own Stop records none, and neither does an engine stop), or it errored without
+	ever starting: no ``first_event_at``, no event applied (``last_event_seq``, as
+	``turn_state.requeue_for_redispatch`` reads it) and no tool row in its window. A turn
+	that was sent and timed out waiting for the gateway's ack can still have run (its
+	tools may have written), so the absence of the stamp alone proves nothing. Anything
+	else, an error after the model began or a Stop by the user, is the step's own failure."""
+	if not turn:
+		return False
+	from jarvis.chat import admission, macros
+
+	state = turn.get("state")
+	if state == "cancelled":
+		reason = (turn.get("cancel_reason") or "").strip()
+		# The two named reasons are defensive: nothing writes either to a Turn today (only
+		# the queue age-out records a cancel_reason), but a later writer must not be
+		# taken for the system's.
+		return bool(reason) and reason not in (admission.USER_CANCEL_REASON, macros._STOPPED_BEFORE_START)
+	if state == "errored":
+		row = frappe.db.get_value(
+			TURN,
+			turn.get("name"),
+			["first_event_at", "last_event_seq", "conversation", "seed_message", "creation"],
+			as_dict=True,
+		)
+		if not row or row.first_event_at or frappe.utils.cint(row.last_event_seq):
+			return False
+		return not _has_tool_rows(row)
+	return False
+
+
+def _has_tool_rows(turn) -> bool:
+	"""Whether any tool call was recorded in ``turn``'s window (its seed message to the next
+	user message, made since the Turn began): a tool that ran may have changed something.
+	A seed that cannot be found says nothing, and is taken for "yes": the safe answer."""
+	after = frappe.db.get_value(MSG, turn.seed_message, "seq") if turn.seed_message else None
+	if after is None:
+		return True
+	m = frappe.qb.DocType(MSG)
+	next_user = (
+		frappe.qb.from_(m)
+		.select(m.seq)
+		.where((m.conversation == turn.conversation) & (m.role == "user") & (m.seq > after))
+		.orderby(m.seq)
+		.limit(1)
+		.run()
+	)
+	query = (
+		frappe.qb.from_(m)
+		.select(m.name)
+		.where((m.conversation == turn.conversation) & (m.role == "tool") & (m.seq > after))
+		.where(m.creation >= turn.creation)
+		.limit(1)
+	)
+	if next_user:
+		query = query.where(m.seq < next_user[0][0])
+	return bool(query.run())
+
+
+def repark_after_transport_failure(run, macro_doc, what: str, turn) -> None:
+	"""A continuation failed at the transport (``is_transport_failure``): the report is
+	still ready, so go back to ``waiting_report`` and let the cron send another (not at
+	once: a gateway that is down would be asked again in the same second).
+
+	Counted in ``resume_compensations``, apart from the resumes: the failed send's
+	``resume_count`` and ``step_resumes`` are handed back, so a few minutes of outage
+	cannot use up the per-step cap on a healthy run, and only the compensation cap
+	(``_MAX_COMPENSATIONS``) ends it, failed. ``resume_turn`` stays; the next allocation
+	sees a Turn of that id and, the compensations being in its hash, names a new one.
+	Under the caller's run lock; the run is ``running``. Never for a ``waiting_failed``
+	continuation, which ends the run failed whatever happened (``_apply_step_end``)."""
+	from jarvis.chat import macros
+
+	compensations = frappe.utils.cint(run.resume_compensations) + 1
+	why = turn.get("cancel_reason") or turn.get("error") or turn.get("state")
+	_log_at_most_hourly(
+		run.name,
+		LOG_COMPENSATED,
+		f"run {run.name}; the continuation {turn.get('name')} was not delivered: {why}",
+	)
+	if compensations > _MAX_COMPENSATIONS:
+		_log_at_most_hourly(
+			run.name, LOG_NOT_DELIVERED, f"run {run.name}; gave up after {compensations - 1} tries"
+		)
+		macros._end_run(run, macro_doc, "failed", _NOT_RESUMED.format(what=what))
+		return
+	if not _repark(
+		run,
+		resume_compensations=compensations,
+		resume_count=max(frappe.utils.cint(run.resume_count) - 1, 0),
+		step_resumes=max(frappe.utils.cint(run.step_resumes) - 1, 0),
+	):
+		return  # a stop won
+	run.status = "waiting_report"
+	_announce_waiting(run, macro_doc, [w.get("report_name") or "" for w in _waits_of(run.waiting_on)])
+
+
+# --------------------------------------------------------------------------- #
+# the agent may not change anything while its step waits
+# --------------------------------------------------------------------------- #
+GUARD_CODE = "ReportWaitError"
+GUARD_WAITING = (
+	"This step is waiting for a background report; Jarvis will continue it when the report is ready."
+)
+GUARD_FAILED = (
+	"This step stopped because a report it needed could not be produced; nothing can be changed in it."
+)
+
+
+def write_refusal(conversation: str | None, tool: str) -> dict | None:
+	"""The error envelope for an agent tool call that must not run because the macro
+	step is waiting on a report (or its report failed), or None.
+
+	Refused: every tool in ``api._WRITE_TOOLS``, the bench's own list of what mutates
+	(the gated writes the bench parks cards for, ``send_email`` among them, and the
+	ungated ones: file exports, ``save_dashboard``, ``remember``, the agent write-backs).
+	Reads are never touched.
+
+	* the step's live turn already got a ``waiting: true`` answer that no later read of
+	  the same report replaced (``step_waits``, over this turn's rows only): the step
+	  was told to stop and change nothing until Jarvis continues it;
+	* the run is ``waiting_failed`` and the live turn is its ``resume_turn`` (the
+	  explanation turn, which has no write or email tool).
+
+	It sits in ``call_tool``'s agent branch, not in ``_run_tool``: a person's card
+	confirm and the File Box and collaboration callers go through ``_run_tool`` and must
+	not be stopped. A typed follow-up in the run's chat is another turn, so neither
+	applies to it. Two parallel calls of one model step can both pass: the row of the
+	first is not written yet. Fails open: any error allows the call (and is logged
+	once)."""
+	try:
+		from jarvis import api
+
+		if tool not in api._WRITE_TOOLS or not conversation or not enabled():
+			return None
+		return _write_refusal(conversation)
+	except Exception:
+		_log_guard_failure(conversation)
+		return None
+
+
+def _log_guard_failure(conversation: str | None) -> None:
+	"""One Error Log row an hour per chat for a guard that failed open: a model in a loop
+	calls a write tool again and again, and each call fails the same way. Asked of the
+	cache, not the Error Log: the call is a request in flight and must not commit. Never
+	raises."""
+	try:
+		key = f"jarvis_macro_wait_guard_log:{conversation or '-'}"
+		if frappe.cache().get_value(key):
+			return
+		frappe.cache().set_value(key, 1, expires_in_sec=_LOG_EVERY_S)
+		frappe.log_error(
+			title="jarvis macro report wait guard failed",
+			message=f"chat {conversation}; {frappe.get_traceback()}",
+		)
+	except Exception:
+		pass
+
+
+def _write_refusal(conversation: str) -> dict | None:
+	from jarvis._responses import err
+	from jarvis.chat import held_sheets
+
+	run = frappe.db.get_value(
+		RUN,
+		{"conversation": conversation, "status": "running"},
+		["name", "resume_turn", "waiting_failed"],
+		as_dict=True,
+		order_by="creation desc",
+	)
+	if not run:
+		return None
+	live = held_sheets.live_turn(conversation)
+	if not live:
+		return None
+	if frappe.utils.cint(run.waiting_failed):
+		return err(GUARD_CODE, GUARD_FAILED) if live == run.resume_turn else None
+	turn = frappe.db.get_value(TURN, live, ["name", "seed_message"], as_dict=True)
+	if turn and step_waits(conversation, turn)[0]:
+		return err(GUARD_CODE, GUARD_WAITING)
+	return None
 
 
 def _log_at_most_hourly(run_name: str, title: str, message: str) -> None:

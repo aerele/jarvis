@@ -1549,6 +1549,14 @@ def _apply_step_end(
 	# From here on `errored` is the step's verdict, not the caller's word alone.
 	judged = _turn_to_judge(conversation_id, turn, run_id, assistant_message)
 	errored = bool(_step_verdict(judged, _step_reply(judged), errored))
+	if errored and run.resume_turn and macro_report_wait.is_transport_failure(judged):
+		# The continuation never reached the model (the system cancelled it in the queue,
+		# or it errored before the gateway took it): the report is still ready and the
+		# step still unread, so wait again and send another, whatever "Stop on error"
+		# says. A failure of the model's own, or the user's Stop, is not this and goes on
+		# below. A ``waiting_failed`` continuation ended the run above.
+		macro_report_wait.repark_after_transport_failure(run, macro_doc, what, judged)
+		return
 	if errored and (content.stop_on_error or (a_stop_ends_the_run and _stopped_by_the_user(turn))):
 		if _stopped_by_the_user(turn):
 			# Their own Stop on the step: the run stopped, it did not fail. No

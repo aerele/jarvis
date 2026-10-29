@@ -1812,8 +1812,21 @@ class ContBase(ResumeBase):
 		self.addCleanup(patcher.stop)
 		return mock
 
-	def _end_continuation(self, rows=(), *, state="done", error="", reply="Done.", ended_s_ago=0):
-		"""The continuation ends: its ``run_report`` rows, its reply, its final state."""
+	def _end_continuation(
+		self,
+		rows=(),
+		*,
+		state="done",
+		error="",
+		reply="Done.",
+		ended_s_ago=0,
+		reached_model=True,
+		cancel_reason="",
+	):
+		"""The continuation ends: its ``run_report`` rows, its reply, its final state.
+		``reached_model``: the gateway took it (``first_event_at`` is stamped when it
+		does); a turn that errored without it never did. ``cancel_reason``: what the
+		system records when it cancels a turn (a user's Stop records none)."""
 		for row in rows:
 			self._tool(self.conv, **row)
 		reply_id = self._msg(self.conv, "assistant", content=reply)
@@ -1823,6 +1836,8 @@ class ContBase(ResumeBase):
 			{
 				"state": state,
 				"error": error,
+				"cancel_reason": cancel_reason,
+				"first_event_at": now_datetime() if reached_model else None,
 				"assistant_message": reply_id,
 				"done_at": add_to_date(now_datetime(), seconds=-ended_s_ago),
 			},
@@ -2185,6 +2200,251 @@ class TestAResumedStepIsJudgedByItsContinuation(ContBase):
 		# recorded only: the same after the resume_turn is cleared
 		frappe.db.set_value(RUN, self.run, "resume_turn", "", update_modified=False)
 		self.assertEqual(macros._step_turns(self.conv, self._doc())[0].name, self.cont)
+
+
+class TestAContinuationThatNeverReachedTheModel(ContBase):
+	"""A continuation that fails at the transport (the system cancelled it while queued,
+	or it errored before the gateway took it) did not fail the STEP: the report is still
+	ready, so the run waits again and another continuation is sent."""
+
+	def _assert_reparked(self, *, compensations=1):
+		got = self._full()
+		self.assertEqual(got.status, "waiting_report")
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "resume_compensations"), compensations)
+		# the wait is kept, so the next wake resumes it; nothing else moved
+		self.assertEqual([w["prepared_report"] for w in json.loads(got.waiting_on)], [self.pr])
+		self.assertEqual(got.current_step, 1)
+		self.assertEqual(got.waiting_failed, 0)
+		# the failed send's resume is handed back, and nobody is woken: the cron spaces the retries
+		self.assertEqual((got.resume_count, got.step_resumes), (0, 0))
+		self.wake.assert_not_called()
+
+	def _new_id(self, count, tries):
+		return hashlib.sha1(f"{self.run}:0:report:{count}:c{tries}".encode()).hexdigest()[:12]
+
+	def _assert_resumes_with_a_new_continuation(self):
+		self._sending_continuation()
+		self._resume(self.run)
+		again = self._full()
+		self.assertEqual(again.status, "running")
+		self.assertNotEqual(again.resume_turn, self.cont)
+		self.assertEqual(again.resume_turn, self._new_id(1, 1))
+		self.assertEqual((again.resume_count, again.step_resumes), (1, 1))
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "resume_compensations"), 1)
+
+	def _fail_at_the_transport(self):
+		self._end_continuation(
+			[], state="cancelled", cancel_reason=admission.AGE_OUT_REASON, reached_model=False
+		)
+		self._hook(errored=True)
+
+	def test_three_transport_failures_in_a_row_are_retried_and_only_the_fourth_ends_the_run(self):
+		# two resumes already spent on the step: without the refund the second failure
+		# would use up the step's cap and end a healthy run as "kept waiting on reports"
+		frappe.db.set_value(RUN, self.run, {"step_resumes": 2, "resume_count": 2}, update_modified=False)
+		frappe.db.commit()
+		seen = [self.cont]
+		for tries in (1, 2, 3):
+			self._fail_at_the_transport()
+			got = self._full()
+			self.assertEqual(got.status, "waiting_report", tries)
+			self.assertEqual(frappe.db.get_value(RUN, self.run, "resume_compensations"), tries)
+			self.assertEqual((got.resume_count, got.step_resumes), (1, 1))
+			self._sending_continuation()
+			self._resume(self.run)
+			self.cont = self._row().resume_turn
+			self.assertEqual(self._row().status, "running", tries)
+			self.assertNotIn(self.cont, seen)  # a new turn each time: never a duplicate
+			seen.append(self.cont)
+		self.assertEqual(len(frappe.get_all(TURN, filters={"name": ["in", seen]})), 4)
+		self._fail_at_the_transport()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(got.error, "Step 1 could not be continued after its report was ready.")
+
+	def test_a_continuation_cancelled_by_the_system_is_sent_again(self):
+		self._end_continuation(
+			[], state="cancelled", cancel_reason=admission.AGE_OUT_REASON, reached_model=False
+		)
+		enqueue = self._hook(errored=True)
+		enqueue.assert_not_called()
+		self._assert_reparked()
+		self._assert_resumes_with_a_new_continuation()
+
+	def test_a_continuation_that_errored_before_the_gateway_took_it_is_sent_again(self):
+		self._end_continuation([], state="errored", error="gateway down", reached_model=False)
+		enqueue = self._hook(errored=True)
+		enqueue.assert_not_called()
+		self._assert_reparked()
+		self._assert_resumes_with_a_new_continuation()
+
+	def test_it_is_sent_again_whatever_stop_on_error_says(self):
+		macro = frappe.db.get_value(RUN, self.run, "macro")
+		frappe.db.set_value("Jarvis Macro", macro, "stop_on_error", 0)
+		frappe.db.commit()
+		self._end_continuation([], state="errored", error="gateway down", reached_model=False)
+		enqueue = self._hook(errored=True)
+		enqueue.assert_not_called()
+		self._assert_reparked()
+
+	def test_an_error_after_the_model_began_is_the_steps_own_failure(self):
+		self._end_continuation([], state="errored", error="boom", reached_model=True)
+		enqueue = self._hook(errored=True)
+		enqueue.assert_not_called()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertTrue(got.error.startswith("Step 1 failed:"), got.error)
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "resume_compensations"), 0)
+		self.wake.assert_not_called()
+
+	def test_the_users_stop_of_a_continuation_stops_the_run(self):
+		# Cancelled with nothing recorded as to why: the user pressed Stop.
+		self._end_continuation([], state="cancelled", reached_model=False)
+		self._hook(errored=True)
+		got = self._full()
+		self.assertEqual(got.status, "stopped")
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "resume_compensations"), 0)
+		self.wake.assert_not_called()
+
+	def test_a_cancel_the_user_made_of_a_queued_continuation_is_not_the_systems(self):
+		for reason in (admission.USER_CANCEL_REASON, macros._STOPPED_BEFORE_START):
+			with self.subTest(reason=reason):
+				self.assertFalse(
+					macro_report_wait.is_transport_failure(
+						{"name": self.cont, "state": "cancelled", "cancel_reason": reason}
+					)
+				)
+
+	def test_a_turn_that_is_not_failed_is_not_a_transport_failure(self):
+		for turn in (
+			None,
+			{},
+			{"name": self.cont, "state": "done"},
+			{"name": self.cont, "state": "streaming"},
+		):
+			with self.subTest(turn=turn):
+				self.assertFalse(macro_report_wait.is_transport_failure(turn))
+
+	def test_the_cap_ends_the_run_failed(self):
+		frappe.db.set_value(RUN, self.run, "resume_compensations", 3, update_modified=False)
+		frappe.db.commit()
+		self._end_continuation(
+			[], state="cancelled", cancel_reason=admission.AGE_OUT_REASON, reached_model=False
+		)
+		self._hook(errored=True)
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(got.error, "Step 1 could not be continued after its report was ready.")
+		self.wake.assert_not_called()
+
+	def test_the_last_try_under_the_cap_still_waits_again(self):
+		frappe.db.set_value(RUN, self.run, "resume_compensations", 2, update_modified=False)
+		frappe.db.commit()
+		self._end_continuation(
+			[], state="cancelled", cancel_reason=admission.AGE_OUT_REASON, reached_model=False
+		)
+		self._hook(errored=True)
+		self._assert_reparked(compensations=3)
+
+	def test_an_error_with_no_ack_but_a_tool_that_ran_is_the_steps_own_failure(self):
+		# Ack timed out, then recovered and errored: the model may have run and written.
+		self._end_continuation(
+			[dict(status="ready", run=self.pr, tool_name="create_doc")],
+			state="errored",
+			error="timed out",
+			reached_model=False,
+		)
+		enqueue = self._hook(errored=True)
+		enqueue.assert_not_called()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertTrue(got.error.startswith("Step 1 failed:"), got.error)
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "resume_compensations"), 0)
+
+	def test_an_error_with_no_ack_but_an_event_applied_is_the_steps_own_failure(self):
+		self._end_continuation([], state="errored", error="timed out", reached_model=False)
+		frappe.db.set_value(TURN, self.cont, "last_event_seq", 3, update_modified=False)
+		frappe.db.commit()
+		self._hook(errored=True)
+		self.assertEqual(self._full().status, "failed")
+
+	def test_a_tool_row_of_an_earlier_turn_does_not_count(self):
+		# The step's own turn (before the continuation's message) ran tools; the continuation did not.
+		self._tool(self.conv, "started", self.pr, waiting=True, tool_name="create_doc")
+		earlier = frappe.get_all(MSG, filters={"conversation": self.conv, "role": "tool"}, pluck="name")[-1]
+		frappe.db.set_value(MSG, earlier, "seq", 0, update_modified=False)
+		self._end_continuation([], state="errored", error="gateway down", reached_model=False)
+		self._hook(errored=True)
+		self.assertEqual(self._full().status, "waiting_report")
+
+	def test_a_stop_that_won_is_left_alone(self):
+		self._end_continuation([], state="errored", error="gateway down", reached_model=False)
+		with patch.object(macro_report_wait, "_repark", return_value=False):
+			self._hook(errored=True)
+		self.wake.assert_not_called()
+
+	def test_a_transport_failure_is_logged_once_an_hour(self):
+		self._end_continuation([], state="errored", error="gateway down", reached_model=False)
+		with patch.object(macro_report_wait, "_log_at_most_hourly") as log:
+			self._hook(errored=True)
+		titles = [c.args[1] for c in log.call_args_list]
+		self.assertEqual(titles, [macro_report_wait.LOG_COMPENSATED])
+
+
+class TestAFailureExplanationIsNeverSentAgain(ContBase):
+	FAILS = True
+
+	def _assert_failed_with_the_reports_reason(self):
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(
+			got.error,
+			f"Step 1 stopped: {PREP_REPORT} failed: It took too long to generate and was stopped.",
+		)
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "resume_compensations"), 0)
+		self.wake.assert_not_called()
+
+	def test_an_explanation_cancelled_by_the_system_ends_the_run_failed(self):
+		self._end_continuation(
+			[], state="cancelled", cancel_reason=admission.AGE_OUT_REASON, reached_model=False
+		)
+		self._hook(errored=True)
+		self._assert_failed_with_the_reports_reason()
+
+	def test_an_explanation_that_never_reached_the_model_ends_the_run_failed(self):
+		self._end_continuation([], state="errored", error="gateway down", reached_model=False)
+		self._hook(errored=True)
+		self._assert_failed_with_the_reports_reason()
+
+
+class TestAnErroredContinuationWithStopOnErrorOff(ContBase):
+	"""The macro's own choice decides for a continuation that errored in the model: with
+	"Stop on error" off the run goes on to the next step, the "did not read" check does
+	not pile a second failure on top of the error, and the run still ends failed."""
+
+	def test_it_advances_and_the_final_outcome_reads_failed(self):
+		macro = frappe.db.get_value(RUN, self.run, "macro")
+		frappe.db.set_value("Jarvis Macro", macro, "stop_on_error", 0)
+		frappe.db.commit()
+		# No rows at all: the check would call this "did not read the report" if it ran.
+		self._end_continuation([], state="errored", error="boom", reached_model=True)
+		enqueue = self._hook(errored=True)
+		enqueue.assert_called_once()
+		got = self._full()
+		self.assertEqual((got.status, got.current_step), ("running", 2))
+		self.assertFalse(got.error)
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "resume_compensations"), 0)
+		newest = frappe.get_all(TURN, filters={"conversation": self.conv}, order_by="creation desc", limit=1)[
+			0
+		].name
+		frappe.db.set_value(TURN, newest, "state", "done", update_modified=False)
+		frappe.db.commit()
+		with self._dispatching(self.conv):
+			macros.advance_after_turn(self.conv, errored=False, run_id=newest)
+		final = self._full()
+		self.assertEqual(final.status, "failed")
+		self.assertTrue(final.error.startswith("Finished, but 1 of 2 steps failed. Step 1:"), final.error)
+		self.assertNotIn("did not read", final.error)
 
 
 class TestTwoCompaniesOfOneReport(ContBase):
