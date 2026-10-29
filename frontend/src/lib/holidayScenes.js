@@ -7,23 +7,31 @@
 // import (a stale chunk after a deploy, an offline tab) gives null: no scene, the cards
 // show, nothing reloads and nothing throws. isSceneLoading() is true while an import is
 // pending, so the router's preload-error guard leaves Safari's file-less message alone.
-// The first failure of the session is reported with a fixed text (the error reporter
-// drops chunk-load messages as already handled).
-import { _resetReportedForTests, reportOnce } from "@/lib/holidayReport";
-import { heroTopMin } from "@jsshared/holiday/scene-geometry.mjs";
+// The first failure per design in the session is reported with a fixed text and the design
+// in error_code (the error reporter drops chunk-load messages as already handled).
+import { _resetReportedForTests, reportSceneFailure } from "@/lib/holidayReport";
+import { sceneHeroTop } from "@jsshared/holiday/scene-geometry.mjs";
 
+// One scene per design (the republic occasion plays the independence design). Each import is
+// a literal path, so each scene is its own chunk and the shared runtime and art helpers fall
+// into a common holiday-* chunk.
 export const SCENE_LOADERS = {
+	birthday: () => import("@jsshared/holiday/scenes/birthday.mjs"),
+	christmas: () => import("@jsshared/holiday/scenes/christmas.mjs"),
 	diwali: () => import("@jsshared/holiday/scenes/diwali.mjs"),
+	eid: () => import("@jsshared/holiday/scenes/eid.mjs"),
+	holi: () => import("@jsshared/holiday/scenes/holi.mjs"),
+	independence: () => import("@jsshared/holiday/scenes/independence.mjs"),
+	newyear: () => import("@jsshared/holiday/scenes/newyear.mjs"),
+	onam: () => import("@jsshared/holiday/scenes/onam.mjs"),
+	pongal: () => import("@jsshared/holiday/scenes/pongal.mjs"),
 };
 
-// The art's geometry is tiny and always loaded (see scene-geometry.mjs), so the page can
-// keep the hero clear of the art before the art itself arrives.
-const HERO_TOP_MIN = { diwali: heroTopMin };
+// How low the hero must sit is tiny and always loaded (see scene-geometry.mjs
+// HERO_TOP_UNITS), so the page can keep the hero clear of the art before the art arrives.
 
 /** The least y (px) the mark's top may have while this design's scene plays, at scale s. */
-export function sceneClearance(design, s) {
-	return Object.hasOwn(HERO_TOP_MIN, design) ? HERO_TOP_MIN[design](s) : 0;
-}
+export const sceneClearance = sceneHeroTop;
 
 export const SCENE_RETRY_MS = 60 * 1000;
 
@@ -55,13 +63,9 @@ export function loadScene(design, { now = Date.now, loaders = SCENE_LOADERS } = 
 			loaded.set(design, mod);
 			return mod;
 		})
-		.catch(() => {
+		.catch((error) => {
 			retryAt.set(design, now() + SCENE_RETRY_MS);
-			reportOnce("load", {
-				error_class: "HolidaySceneLoadFailed",
-				error_code: "holiday_scene",
-				message: "The holiday scene art could not be loaded",
-			});
+			reportSceneFailure("load", design, error);
 			return null;
 		})
 		.finally(() => {
