@@ -1422,7 +1422,7 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "status": "Published",
       "description": "Read-only pre-run check on your drafted salary slips, run just before you submit payroll. It flags what changed or was overridden after HRMS computed them at generation: an eligible employee missing from the batch, a rostered employee with no slip, attendance or leave data changed after generation, manual payment_days overrides, manually created slips, mover proration that looks off, and net-pay swings versus last month with no attendance or structure cause. Hands you a ranked worklist; never edits a slip, regularises attendance, submits payroll, or draws any statutory conclusion.",
       "tools_required": [
