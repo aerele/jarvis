@@ -2,7 +2,13 @@
 // `node --test jarvis/public/js/shared/holiday/*.test.mjs`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { FEST, OCCASIONS, headingFor, leadupLineFor } from "./copy.mjs";
+import {
+  DAY_SUB_LINE,
+  FEST,
+  OCCASIONS,
+  headingFor,
+  leadupLineFor,
+} from "./copy.mjs";
 
 // The approved wording, word for word.
 const LEADUP = {
@@ -98,4 +104,13 @@ test("FEST has a card for every holiday occasion and none for birthday", () => {
   }
   assert.equal(FEST.birthday, undefined);
   assert.match(FEST.republic[0], /Republic Day/);
+});
+
+test("the scene-day sub-line is the approved wording, with no em-dash or product name", () => {
+  assert.equal(
+    DAY_SUB_LINE,
+    "Hope you are enjoying the day. I'm here if anything needs doing."
+  );
+  assert.ok(!DAY_SUB_LINE.includes(EM_DASH));
+  assert.ok(!/jarvis/i.test(DAY_SUB_LINE));
 });

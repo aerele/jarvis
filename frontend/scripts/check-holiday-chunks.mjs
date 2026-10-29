@@ -1,17 +1,23 @@
-// Build gate for the holiday worn-item art.
+// Build gate for the holiday art (the worn item and the welcome scenes).
 // Run after `vite build`:  node scripts/check-holiday-chunks.mjs
 //
-// The art (jarvis/public/js/shared/holiday/worn.mjs) is lazy: it must live in its own
-// `holiday-*` chunk and never in the main entry chunk or any other chunk. The words
-// and the answer reader are tiny and must stay in main. If a refactor turns the
-// dynamic import into a static one, the art silently lands in main for every user;
-// this is the check that fails when that happens.
+// The art (jarvis/public/js/shared/holiday/worn.mjs, stage.mjs and scenes/*.mjs) is lazy:
+// it must live in `holiday-*` chunks and never in the main entry chunk or any other
+// chunk. The words and the answer reader are tiny and must stay in main. If a refactor
+// turns the dynamic import into a static one, the art silently lands in main for every
+// user; this is the check that fails when that happens.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Strings only the worn art contains (the Diwali flame path, a reaction keyframe).
-const ART_MARKERS = ["M60.5 26 C66 33 67 38.5", "@keyframes jvh-hop"];
+// Strings only the art contains: the worn item (the Diwali flame path, a reaction
+// keyframe) and the Diwali scene (its diya clay path, the toran's thread colour).
+export const ART_MARKERS = [
+  "M60.5 26 C66 33 67 38.5",
+  "@keyframes jvh-hop",
+  "M-16 0 Q-15 12 0 13 Q11 13 15 3",
+  'stroke="#a16207"',
+];
 // A string only the always-loaded words contain.
 const WORDS_MARKER = "Wishing you a happy Diwali in advance!";
 
@@ -69,6 +75,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error(`check-holiday-chunks: ${problem}`);
   if (problems.length) process.exit(1);
   console.log(
-    "check-holiday-chunks: ok (worn art only in holiday-* chunks, words in main)"
+    "check-holiday-chunks: ok (worn and scene art only in holiday-* chunks, words in main)"
   );
 }

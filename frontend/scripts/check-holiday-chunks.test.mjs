@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { checkHolidayChunks } from "./check-holiday-chunks.mjs";
+import { ART_MARKERS, checkHolidayChunks } from "./check-holiday-chunks.mjs";
 
-const ART = "M60.5 26 C66 33 67 38.5 @keyframes jvh-hop";
+const ART = ART_MARKERS.join(" ");
 const WORDS = "Wishing you a happy Diwali in advance!";
 const HTML =
   '<script type="module" src="/assets/jarvis/frontend/assets/index-AAAA.js"></script>';
@@ -58,5 +58,33 @@ test("a missing entry chunk is reported, not thrown", () => {
   assert.match(
     checkHolidayChunks(dir, HTML).join("\n"),
     /main entry chunk not found/
+  );
+});
+
+test("the scene art is in the gate's markers", () => {
+  assert.ok(ART_MARKERS.some((m) => m.includes("M-16 0 Q-15 12")));
+  assert.ok(ART_MARKERS.some((m) => m.includes("#a16207")));
+});
+
+test("scene art in the main chunk fails, even with the worn art in its own chunk", () => {
+  const dir = build({
+    "index-AAAA.js":
+      WORDS + ' stroke="#a16207" M-16 0 Q-15 12 0 13 Q11 13 15 3',
+    "holiday-worn-BBBB.js": ART,
+  });
+  assert.match(
+    checkHolidayChunks(dir, HTML).join("\n"),
+    /index-AAAA\.js, not only holiday/
+  );
+});
+
+test("a build whose holiday chunks lack the scene art fails", () => {
+  const dir = build({
+    "index-AAAA.js": WORDS,
+    "holiday-worn-BBBB.js": "M60.5 26 C66 33 67 38.5 @keyframes jvh-hop",
+  });
+  assert.match(
+    checkHolidayChunks(dir, HTML).join("\n"),
+    /holiday-\* chunks lack/
   );
 });
