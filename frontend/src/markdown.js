@@ -74,8 +74,9 @@ function inline(s) {
 	// Models also use native disclosure blocks for supporting calculations. Keep
 	// the allowlist attribute-free (no handlers, styles or named groups). Code
 	// spans are still protected by the sentinels and restored verbatim below.
-	t = t.replace(/&lt;(\/?)(details|summary)\s*&gt;/gi, (_tag, close, name) =>
-		`<${close}${name.toLowerCase()}>`
+	t = t.replace(
+		/&lt;(\/?)(details|summary)\s*&gt;/gi,
+		(_tag, close, name) => `<${close}${name.toLowerCase()}>`
 	);
 	t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
 	t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");

@@ -27,7 +27,10 @@ test("disclosure tags never permit attributes or unescape other HTML", () => {
 });
 
 test("disclosure examples in inline and fenced code stay literal", () => {
-	for (const src of ["`<details><summary>Example</summary></details>`", "```html\n<details><summary>Example</summary></details>\n```"])
+	for (const src of [
+		"`<details><summary>Example</summary></details>`",
+		"```html\n<details><summary>Example</summary></details>\n```",
+	])
 		assert.ok(!renderMarkdown(src).includes("<details>"));
 });
 
