@@ -856,8 +856,9 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	doc.reload()
 	# fire the trace-comment hook (db update bypasses on_update)
 	doc.run_method("on_update")
-	# The trace comment and settle notifications persist before any resume: the send
-	# then starts on a clean transaction and its rollback can never discard them.
+	# Intentional for every approval kind: the trace comment and settle notifications
+	# persist before any resume. The request-end commit persisted the same writes before;
+	# now a later rollback (a refused send, a routing apply error) cannot discard them.
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- decision side effects before the resume
 	if doc.get("assessment_key"):
 		return {"ok": True, "status": doc.status, "resumed": False}

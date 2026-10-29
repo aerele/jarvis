@@ -1,9 +1,13 @@
 """Reset ambiguous legacy chat review shares; requesters must re-tag reviewers.
 
-The owner approved removing correlated read-only Desk shares even when their
-original purpose cannot be distinguished. Actual Jarvis chat-sharing grants and
-File Box/collaborative conversations are never modified. No decision grants are
-backfilled. Rollback does not recreate the removed access.
+The Jarvis chat-sharing grants (Jarvis Conversation Share records, a standalone
+DocType), File Box conversations and collaborative conversations are never
+modified. The owner-approved reset deletes the Desk DocShares on Chat questions.
+It also deletes a read-only Desk DocShare of the same conversation for the same
+former reviewer, or for everyone, because its original purpose cannot be told
+apart; an unrelated read-only share of that kind is removed too. The log records
+counts only. No decision grants are backfilled. Rollback does not recreate the
+removed access.
 """
 
 import frappe

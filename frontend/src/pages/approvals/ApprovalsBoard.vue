@@ -1104,8 +1104,18 @@ const docmeta = useDocmeta("Jarvis Approval Request", selectedId);
 const seedTargetId = typeof route.params.id === "string" ? route.params.id : "";
 let seedWanted = !!seedTargetId;
 const seedRow = ref(null);
+// The selected review-scoped decision that did not reach the chat ("failed") or is
+// not confirmed yet ("pending") keeps its rail row after a Pending refresh drops it,
+// however it was selected (list entry, click, deep link). Derived from the pane, so
+// it leaves with the selection; the deep-link seed keeps priority.
+const pinRow = computed(() => {
+	if (seedRow.value) return seedRow.value;
+	const s = selected.value;
+	const undelivered = s && (s.continuation === "failed" || s.continuation === "pending");
+	return undelivered && s.review_scoped && s.name === selectedId.value ? seedFrom(s) : null;
+});
 const railRows = computed(() => {
-	const seed = seedRow.value;
+	const seed = pinRow.value;
 	if (!seed || rows.value.some((r) => r.name === seed.name)) return rows.value;
 	return [seed, ...rows.value];
 });
@@ -1190,6 +1200,9 @@ function select(id) {
 }
 
 async function loadRecord(id, { keep = false } = {}) {
+	// a keep re-read (a late decide/send/tag answer, a realtime frame) is for the open
+	// record only: after a switch it must not cancel the new row's load or replace it
+	if (keep && id !== selectedId.value) return;
 	const rid = ++paneReq;
 	try {
 		const rec = (await getApproval(id)) || null;
@@ -1484,8 +1497,11 @@ async function submitDecide(approve) {
 				...(wasScoped ? { continuation: delivery || "", can_continue: 0 } : {}),
 			};
 		}
-		selectedOption.value = "";
-		note.value = "";
+		// the draft belongs to the record it was typed for: a late answer keeps another row's
+		if (selectedId.value === id) {
+			selectedOption.value = "";
+			note.value = "";
+		}
 		const verdict = approve
 			? reviewOnly
 				? "Review acknowledged: no accounting or sending action"
@@ -1513,11 +1529,11 @@ async function submitDecide(approve) {
 		} else {
 			// authoritative decided_by/decided_at + the decide trace comment
 			loadRecord(id, { keep: true });
-			docmeta.reload();
+			if (selectedId.value === id) docmeta.reload();
 		}
 	} catch (e) {
 		toast.error(errHtml(e));
-		if (scoped.value) {
+		if (wasScoped) {
 			// decided meanwhile, or the tag was revoked: show what is true now
 			refreshKeep();
 			loadRecord(id, { keep: true });
@@ -1583,8 +1599,11 @@ async function submitDismiss() {
 				decided_at: "",
 			};
 		}
-		note.value = "";
-		selectedOption.value = "";
+		// the draft belongs to the record it was typed for: a late answer keeps another row's
+		if (selectedId.value === id) {
+			note.value = "";
+			selectedOption.value = "";
+		}
 		toast.success("Ignored. The assistant was not notified");
 		store.refreshApprovalsCount();
 		if ((filters.status || "Pending") === "Pending") advanceAfterDecide(id);
@@ -1628,6 +1647,9 @@ function advanceAfterDecide(id) {
 			total.value = Math.max(0, total.value - 1);
 		}
 		if (seedRow.value && seedRow.value.name === id) seedRow.value = null;
+		// the pane's record pins its rail row: let go of it, or the row stays in the
+		// order and advanceFrom picks it again
+		if (selected.value && selected.value.name === id) selected.value = null;
 	});
 }
 

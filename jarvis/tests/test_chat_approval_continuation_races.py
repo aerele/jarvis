@@ -20,6 +20,13 @@ from jarvis.tests._pending_action_helpers import as_user, ensure_user
 
 AR = continuation_fixture.AR
 MODES = {"on": 1, "off": 0, "default": None}
+NO_SNAPSHOT_VARIABLE = "this server has no innodb_snapshot_isolation; the ON/OFF case cannot run"
+
+
+def snapshot_variable_supported() -> bool:
+	"""Only a server without the variable skips the ON/OFF cases; one that has it and
+	cannot set it still fails."""
+	return bool(frappe.db.sql("SHOW VARIABLES LIKE 'innodb_snapshot_isolation'"))
 
 
 @contextmanager
@@ -61,10 +68,11 @@ class TestChatApprovalContinuationRaces(continuation_fixture.ComposedChatReviewF
 
 	def test_two_simultaneous_requester_sends_post_one_message(self):
 		"""N7, snapshot isolation ON / OFF / default."""
-		supported = frappe.db.sql("SHOW VARIABLES LIKE 'innodb_snapshot_isolation'")
-		self.assertTrue(supported, "the server must expose innodb_snapshot_isolation")
+		supported = snapshot_variable_supported()
 		for label, mode in MODES.items():
 			with self.subTest(mode=label):
+				if mode is not None and not supported:
+					self.skipTest(NO_SNAPSHOT_VARIABLE)
 				self.chat = self.fx.question("Chat")
 				conv = self.failed_by_reviewer()
 				with (
@@ -231,8 +239,11 @@ class TestChatApprovalContinuationRaces(continuation_fixture.ComposedChatReviewF
 		was not sent. OFF, server default and ON (per session)."""
 		import threading
 
+		supported = snapshot_variable_supported()
 		for label, mode in (("off", 0), ("default", None), ("on", 1)):
 			with self.subTest(mode=label):
+				if mode is not None and not supported:
+					self.skipTest(NO_SNAPSHOT_VARIABLE)
 				self.chat = self.fx.question("Chat")
 				self.tag()
 				conv = self.conversation_of(self.chat)
@@ -261,7 +272,7 @@ class TestChatApprovalContinuationRaces(continuation_fixture.ComposedChatReviewF
 				with (
 					patch.object(approvals_api, "_resume_conversation", side_effect=resume),
 					patch.object(approval_reviewers, "stored_resume_state", side_effect=read),
-					continuation_fixture.real_send_without_worker(),
+					continuation_fixture.real_send_without_worker() as (dispatch, _send),
 					patch("frappe.publish_realtime", side_effect=realtime),
 				):
 					with as_user(self.reviewer), session_snapshot_isolation(mode):
@@ -272,6 +283,7 @@ class TestChatApprovalContinuationRaces(continuation_fixture.ComposedChatReviewF
 					{
 						"requester_send": other.get("b"),
 						"messages": [r.origin for r in self.user_messages(conv)],
+						"dispatch": dispatch.call_count,
 						"state": frappe.get_doc(AR, self.chat).get("resume_state"),
 						"failure_events": realtime.payloads(self.owner, continuation_fixture.FAILED_KIND),
 						"reviewer_told_not_sent": outcome[1] == "failed",
@@ -279,6 +291,7 @@ class TestChatApprovalContinuationRaces(continuation_fixture.ComposedChatReviewF
 					{
 						"requester_send": {"ok": True, "continuation": "done"},
 						"messages": ["board_answer"],
+						"dispatch": 1,
 						"state": "done",
 						"failure_events": [],
 						"reviewer_told_not_sent": False,

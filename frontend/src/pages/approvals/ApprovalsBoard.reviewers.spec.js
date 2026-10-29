@@ -205,6 +205,18 @@ async function mountBoard(id = "AR-1") {
 	route.name = "ApprovalDetail";
 	route.params = { id };
 	route.query = {};
+	return mountRoute();
+}
+
+// the list entry: /approvals with no :id, so the rows watcher selects the first row
+async function mountList(query = {}) {
+	route.name = "ApprovalsList";
+	route.params = {};
+	route.query = query;
+	return mountRoute();
+}
+
+async function mountRoute() {
 	const w = mount(ApprovalsBoard, {
 		attachTo: document.body,
 		global: {
@@ -945,6 +957,579 @@ describe("ApprovalsBoard reviewer scoping (#756)", () => {
 			await flushPromises();
 			expect(approvals.getApproval.mock.calls.length).toBeGreaterThan(reads);
 			expect(w.exists()).toBe(true);
+		});
+	});
+	// Sowmya re-review 2026-10-29: a list entry (no :id) or a second row selection must
+	// keep a decided question whose decision did not reach the chat in the rail after a
+	// Pending refresh, with its badge. Only the selected undelivered question is pinned.
+	describe("rail keeps the selected undelivered decision after a refresh", () => {
+		const opts = { options: ["Main", "Spare"] };
+		const NOT_SENT =
+			"Decision saved, but it was not sent to the requester's chat. Only the requester can send it, from Approvals.";
+		let views;
+		const listBoard = async (query) => {
+			mounted.forEach((w) => w.unmount());
+			mounted = [];
+			const w = await mountList(query);
+			mounted.push(w);
+			return w;
+		};
+		const titles = (w) =>
+			[
+				...rail(w)
+					.text()
+					.matchAll(/Question AR-\d/g),
+			].map((m) => m[0]);
+		const rowButton = (w, id) =>
+			rail(w)
+				.findAll("button")
+				.find((b) => b.text().includes("Question " + id));
+		const settle = async () => {
+			await flushPromises();
+			await flushPromises();
+		};
+		const decided = (view, id, over = {}) =>
+			view({ ...opts, ...ar(id), status: "Approved", decision: "Main", ...over });
+		// the reviewer decides `id`; the next server Pending page no longer lists it
+		const decide = async (w, id, delivery, view) => {
+			api.decideApproval.mockImplementation(async () => {
+				views[id] = view;
+				state.rows = state.rows.filter((r) => r.name !== id);
+				return delivery;
+			});
+			await button(w, "Main").trigger("click");
+			await button(w, "Approve").trigger("click");
+			await settle();
+		};
+		const FAILED = { ok: true, status: "Approved", resumed: false, continuation: "failed" };
+		const refreshes = {
+			realtime: async (w, id) => socket.emit({ kind: "action:settled", name: id }),
+			count: async () => (shell.store.approvalsCount += 1),
+			manual: async (w) => w.find('button[data-tip="Refresh"]').trigger("click"),
+		};
+		beforeEach(() => {
+			views = {};
+			for (const id of ["AR-1", "AR-2", "AR-3"])
+				views[id] = reviewerView({ ...opts, ...ar(id), name: id });
+			state.rows = ["AR-1", "AR-2", "AR-3"].map((id) => ar(id, { review_scoped: 1 }));
+			approvals.getApproval.mockImplementation(async (id) => {
+				const v = views[id];
+				if (v instanceof Error) throw v;
+				return v;
+			});
+		});
+
+		it("A1 list entry, auto-selected row: a failed decision stays first with its badge", async () => {
+			const w = await listBoard();
+			expect(approvals.getApproval).toHaveBeenLastCalledWith("AR-1");
+			await decide(
+				w,
+				"AR-1",
+				FAILED,
+				decided(reviewerView, "AR-1", { continuation: "failed" })
+			);
+			for (const [how, run] of Object.entries(refreshes)) {
+				await run(w, "AR-1");
+				await settle();
+				expect(titles(w), how).toEqual([
+					"Question AR-1",
+					"Question AR-2",
+					"Question AR-3",
+				]);
+				expect(rail(w).text(), how).toContain("Not sent to chat");
+				expect(pane(w).text(), how).toContain(NOT_SENT);
+			}
+			expect(api.listApprovalsPage.mock.calls.length).toBeGreaterThan(3);
+			expect(api.decideApproval).toHaveBeenCalledTimes(1);
+			expect(api.continueApprovalChat).not.toHaveBeenCalled();
+		});
+
+		it("A1b list entry, then a click on the second row", async () => {
+			const w = await listBoard();
+			await rowButton(w, "AR-2").trigger("click");
+			await settle();
+			await decide(
+				w,
+				"AR-2",
+				FAILED,
+				decided(reviewerView, "AR-2", { continuation: "failed" })
+			);
+			await refreshes.count(w);
+			await settle();
+			await refreshes.manual(w);
+			await settle();
+			expect(titles(w)).toEqual(["Question AR-2", "Question AR-1", "Question AR-3"]);
+			expect(rail(w).text()).toContain("Not sent to chat");
+			expect(pane(w).text()).toContain(NOT_SENT);
+		});
+
+		it("A1c deep link, then a click on another row", async () => {
+			const w = await board("AR-1");
+			await rowButton(w, "AR-2").trigger("click");
+			await settle();
+			await decide(
+				w,
+				"AR-2",
+				FAILED,
+				decided(reviewerView, "AR-2", { continuation: "failed" })
+			);
+			await refreshes.realtime(w, "AR-2");
+			await settle();
+			expect(titles(w)).toEqual(["Question AR-2", "Question AR-1", "Question AR-3"]);
+			expect(rail(w).text()).toContain("Not sent to chat");
+		});
+
+		it("A2 pending, and a missing continuation that the re-read reports as pending", async () => {
+			for (const delivery of [
+				{ ok: true, status: "Approved", resumed: false, continuation: "pending" },
+				{ ok: true, status: "Approved", resumed: false },
+			]) {
+				vi.clearAllMocks();
+				views["AR-1"] = reviewerView({ ...opts, ...ar("AR-1") });
+				state.rows = ["AR-1", "AR-2"].map((id) => ar(id, { review_scoped: 1 }));
+				const w = await listBoard();
+				await decide(
+					w,
+					"AR-1",
+					delivery,
+					decided(reviewerView, "AR-1", { continuation: "pending" })
+				);
+				await refreshes.count(w);
+				await settle();
+				expect(titles(w)).toEqual(["Question AR-1", "Question AR-2"]);
+				expect(pane(w).text()).toContain("Sending it to the chat is not confirmed yet.");
+			}
+		});
+
+		it("A3 requester sends it: the row then follows the Pending filter, the pane stays", async () => {
+			for (const id of ["AR-1", "AR-2"]) views[id] = requesterView({ ...opts, ...ar(id) });
+			state.rows = ["AR-1", "AR-2"].map((id) => ar(id, { review_scoped: 1 }));
+			const w = await listBoard();
+			await decide(
+				w,
+				"AR-1",
+				FAILED,
+				decided(requesterView, "AR-1", { continuation: "failed", can_continue: 1 })
+			);
+			await refreshes.count(w);
+			await settle();
+			expect(titles(w)).toEqual(["Question AR-1", "Question AR-2"]);
+			api.continueApprovalChat.mockImplementation(async () => {
+				views["AR-1"] = decided(requesterView, "AR-1", { continuation: "done" });
+				return { ok: true, continuation: "done" };
+			});
+			await button(w, "Send decision to chat").trigger("click");
+			await settle();
+			await refreshes.realtime(w, "AR-1");
+			await settle();
+			expect(titles(w)).toEqual(["Question AR-2"]);
+			expect(pane(w).text()).toContain("Question AR-1");
+			expect(buttons(w)).not.toContain("Send decision to chat");
+			expect(api.continueApprovalChat).toHaveBeenCalledTimes(1);
+		});
+
+		it("A4 revoked after the decision (403 / 404 / untagged): the selection moves on", async () => {
+			const notFound = Object.assign(new Error("Not found"), { status: 404 });
+			for (const [label, error, frame] of [
+				["403", denied(), "action:settled"],
+				["404", notFound, "action:settled"],
+				["untagged", denied(), "approval:untagged"],
+			]) {
+				vi.clearAllMocks();
+				for (const id of ["AR-1", "AR-2", "AR-3"])
+					views[id] = reviewerView({ ...opts, ...ar(id), name: id });
+				state.rows = ["AR-1", "AR-2", "AR-3"].map((id) => ar(id, { review_scoped: 1 }));
+				const w = await listBoard();
+				await decide(
+					w,
+					"AR-1",
+					FAILED,
+					decided(reviewerView, "AR-1", { continuation: "failed" })
+				);
+				expect(titles(w), label).toContain("Question AR-1");
+				views["AR-1"] = error;
+				socket.emit({ kind: frame, name: "AR-1" });
+				await settle();
+				expect(titles(w), label).toEqual(["Question AR-2", "Question AR-3"]);
+				expect(approvals.getApproval, label).toHaveBeenLastCalledWith("AR-2");
+				expect(pane(w).text(), label).toContain("Question AR-2");
+				expect(toast.error, label).not.toHaveBeenCalled();
+			}
+		});
+
+		it("A4 revoked when it was the only row: the pane clears", async () => {
+			state.rows = [ar("AR-1", { review_scoped: 1 })];
+			const w = await listBoard();
+			await decide(
+				w,
+				"AR-1",
+				FAILED,
+				decided(reviewerView, "AR-1", { continuation: "failed" })
+			);
+			expect(titles(w)).toEqual(["Question AR-1"]);
+			views["AR-1"] = denied();
+			socket.emit({ kind: "action:settled", name: "AR-1" });
+			await settle();
+			expect(titles(w)).toEqual([]);
+			expect(router.replace).toHaveBeenLastCalledWith(
+				expect.objectContaining({ name: "ApprovalsList" })
+			);
+		});
+
+		it("A4b a lost decide response and a failed re-read keep the row and the pane", async () => {
+			const w = await listBoard();
+			api.decideApproval.mockImplementation(async () => {
+				views["AR-1"] = decided(reviewerView, "AR-1", { continuation: "failed" });
+				state.rows = state.rows.filter((r) => r.name !== "AR-1");
+				throw new Error("network down");
+			});
+			await button(w, "Main").trigger("click");
+			await button(w, "Approve").trigger("click");
+			await settle();
+			expect(titles(w)[0]).toBe("Question AR-1");
+			views["AR-1"] = Object.assign(new Error("server error"), { status: 500 });
+			socket.emit({ kind: "action:settled", name: "AR-1" });
+			await settle();
+			expect(titles(w)).toEqual(["Question AR-1", "Question AR-2", "Question AR-3"]);
+			expect(pane(w).text()).toContain(NOT_SENT);
+			expect(api.decideApproval).toHaveBeenCalledTimes(1);
+		});
+
+		it("A5 another selection unpins it; the total and Load More use server rows only", async () => {
+			api.listApprovalsPage.mockImplementation(async (p) => ({
+				rows: p.start || 0 ? [] : state.rows,
+				total: state.rows.length + 5,
+				has_more: true,
+				facets: {},
+				awaiting_reply: [],
+				open_drafts: [],
+				ready_reports: [],
+			}));
+			const w = await listBoard();
+			await decide(
+				w,
+				"AR-1",
+				FAILED,
+				decided(reviewerView, "AR-1", { continuation: "failed" })
+			);
+			await refreshes.count(w);
+			await settle();
+			expect(rail(w).text()).toContain("3 of 8 questions");
+			await rowButton(w, "AR-2").trigger("click");
+			await settle();
+			expect(titles(w)).toEqual(["Question AR-2", "Question AR-3"]);
+			expect(rail(w).text()).toContain("2 of 7 questions");
+			await button(w, "Load More").trigger("click");
+			await settle();
+			expect(api.listApprovalsPage).toHaveBeenLastCalledWith(
+				expect.objectContaining({ start: 2 })
+			);
+		});
+
+		it("A6 a filter that lists the decided row shows it exactly once", async () => {
+			views["AR-1"] = decided(reviewerView, "AR-1", { continuation: "failed" });
+			state.rows = [
+				ar("AR-1", { review_scoped: 1, status: "Approved", continuation: "failed" }),
+			];
+			const w = await listBoard({ status: "Decided" });
+			expect(approvals.getApproval).toHaveBeenLastCalledWith("AR-1");
+			expect(titles(w)).toEqual(["Question AR-1"]);
+			expect(
+				rail(w)
+					.text()
+					.match(/Not sent to chat/g)
+			).toHaveLength(1);
+		});
+
+		it("A7 a list-entry File Box decision still advances; it is never pinned", async () => {
+			views["AR-1"] = fileBoxView();
+			views["AR-2"] = fileBoxView({ ...ar("AR-2", { source: "File Box" }) });
+			state.rows = [ar("AR-1", { source: "File Box" }), ar("AR-2", { source: "File Box" })];
+			const w = await listBoard();
+			api.decideApproval.mockImplementation(async () => {
+				state.rows = state.rows.filter((r) => r.name !== "AR-1");
+				return { ok: true, status: "Approved", resumed: true };
+			});
+			await button(w, "Acme").trigger("click");
+			await button(w, "Approve").trigger("click");
+			await settle();
+			await refreshes.count(w);
+			await settle();
+			expect(titles(w)).toEqual(["Question AR-2"]);
+			expect(approvals.getApproval).toHaveBeenLastCalledWith("AR-2");
+		});
+	});
+	// M1: a decide or send answer that arrives after the user selected another row must
+	// not put the old record back in the pane, re-read it, reload its comments, or clear
+	// the new row's draft.
+	describe("a late decide or send answer after a selection change (M1)", () => {
+		const opts = { options: ["Main", "Spare"] };
+		let views;
+		const deferred = () => {
+			let resolve, reject;
+			const promise = new Promise((ok, fail) => ((resolve = ok), (reject = fail)));
+			return { promise, resolve, reject };
+		};
+		const settle = async () => {
+			await flushPromises();
+			await flushPromises();
+		};
+		const listBoard = async (query) => {
+			mounted.forEach((w) => w.unmount());
+			mounted = [];
+			const w = await mountList(query);
+			mounted.push(w);
+			return w;
+		};
+		const rowButton = (w, id) =>
+			rail(w)
+				.findAll("button")
+				.find((b) => b.text().includes("Question " + id));
+		const decided = (view, id, over = {}) =>
+			view({ ...opts, ...ar(id), status: "Approved", decision: "Main", ...over });
+		// the AR-1 decide stays open until the test answers it
+		const approveAr1 = async (w) => {
+			const answer = deferred();
+			api.decideApproval.mockImplementation(() => answer.promise);
+			await button(w, "Main").trigger("click");
+			await button(w, "Approve").trigger("click");
+			await settle();
+			return answer;
+		};
+		const clickAr2 = async (w) => {
+			await rowButton(w, "AR-2").trigger("click");
+			await settle();
+			return approvals.getApproval.mock.calls.length;
+		};
+		// the pane, the URL, the reads and the comment target all stay on AR-2
+		const staysOnAr2 = (w, readsAtClick, reloadsAtClick, label) => {
+			expect(pane(w).text(), label).toContain("Question AR-2");
+			expect(pane(w).text(), label).not.toContain("Question AR-1");
+			expect(route.params.id, label).toBe("AR-2");
+			const later = approvals.getApproval.mock.calls.slice(readsAtClick).map((c) => c[0]);
+			expect(later, label).not.toContain("AR-1");
+			expect(probe.docmeta.reload.mock.calls.length, label).toBe(reloadsAtClick);
+		};
+		const answers = {
+			failed: (d) => {
+				views["AR-1"] = decided(reviewerView, "AR-1", { continuation: "failed" });
+				d.resolve({
+					ok: true,
+					status: "Approved",
+					resumed: false,
+					continuation: "failed",
+				});
+			},
+			pending: (d) => {
+				views["AR-1"] = decided(reviewerView, "AR-1", { continuation: "pending" });
+				d.resolve({
+					ok: true,
+					status: "Approved",
+					resumed: false,
+					continuation: "pending",
+				});
+			},
+			rejected: (d) => {
+				views["AR-1"] = decided(reviewerView, "AR-1", { continuation: "failed" });
+				d.reject(new Error("network down"));
+			},
+			done: (d) => {
+				views["AR-1"] = decided(reviewerView, "AR-1", { continuation: "done" });
+				d.resolve({ ok: true, status: "Approved", resumed: true, continuation: "done" });
+			},
+		};
+		const fresh = (kind = reviewerView) => {
+			views = {};
+			for (const id of ["AR-1", "AR-2"]) views[id] = kind({ ...opts, ...ar(id) });
+			state.rows = ["AR-1", "AR-2"].map((id) => ar(id, { review_scoped: 1 }));
+		};
+		beforeEach(() => {
+			fresh();
+			approvals.getApproval.mockImplementation(async (id) => views[id]);
+		});
+
+		it("V1 a late failed / pending / rejected decide leaves the pane on the new row", async () => {
+			for (const kind of ["failed", "pending", "rejected"]) {
+				vi.clearAllMocks();
+				fresh();
+				const w = await listBoard();
+				const answer = await approveAr1(w);
+				const reads = await clickAr2(w);
+				const reloads = probe.docmeta.reload.mock.calls.length;
+				answers[kind](answer);
+				await settle();
+				staysOnAr2(w, reads, reloads, kind);
+			}
+		});
+
+		it("V2 a late Send decision to chat answer leaves the pane on the new row", async () => {
+			fresh(requesterView);
+			views["AR-1"] = decided(requesterView, "AR-1", {
+				continuation: "failed",
+				can_continue: 1,
+			});
+			state.rows = [
+				ar("AR-1", { review_scoped: 1, status: "Approved", continuation: "failed" }),
+				ar("AR-2", { review_scoped: 1 }),
+			];
+			const w = await listBoard({ status: "All" });
+			const answer = deferred();
+			api.continueApprovalChat.mockImplementation(() => answer.promise);
+			await button(w, "Send decision to chat").trigger("click");
+			await settle();
+			const reads = await clickAr2(w);
+			const reloads = probe.docmeta.reload.mock.calls.length;
+			views["AR-1"] = decided(requesterView, "AR-1", { continuation: "done" });
+			answer.resolve({ ok: true, continuation: "done" });
+			await settle();
+			staysOnAr2(w, reads, reloads, "send");
+			expect(api.continueApprovalChat).toHaveBeenCalledTimes(1);
+		});
+
+		it("V3 a late answer does not cancel the new row's load that is still in flight", async () => {
+			const w = await listBoard();
+			const answer = await approveAr1(w);
+			const ar2 = deferred();
+			views["AR-2"] = ar2.promise;
+			await rowButton(w, "AR-2").trigger("click");
+			await settle();
+			answers.failed(answer);
+			await settle();
+			ar2.resolve(reviewerView({ ...opts, ...ar("AR-2") }));
+			await settle();
+			expect(pane(w).text()).toContain("Question AR-2");
+			expect(pane(w).text()).not.toContain("Question AR-1");
+		});
+
+		it("V4 a late answer keeps the new row's draft (chip and note)", async () => {
+			const seen = {};
+			for (const kind of ["failed", "pending", "done"]) {
+				vi.clearAllMocks();
+				fresh();
+				const w = await listBoard();
+				const answer = await approveAr1(w);
+				await clickAr2(w);
+				await button(w, "Spare").trigger("click");
+				await w.find("textarea").setValue("QA756 AR-2 note");
+				answers[kind](answer);
+				await settle();
+				const chip = button(w, "Spare");
+				const textarea = w.find("textarea");
+				seen[kind] = {
+					pane: pane(w).text().includes("Question AR-2") ? "AR-2" : "not AR-2",
+					chip: chip ? chip.attributes("variant") : "absent",
+					note: textarea.exists() ? textarea.element.value : "absent",
+				};
+			}
+			const kept = { pane: "AR-2", chip: "solid", note: "QA756 AR-2 note" };
+			expect(seen).toEqual({ failed: kept, pending: kept, done: kept });
+		});
+
+		it("V5 a failed decide re-reads by the scope of the decided row, not the new row", async () => {
+			// AR-1 File Box (not scoped), AR-2 scoped: no re-read, no refresh for AR-1
+			views = { "AR-1": fileBoxView(), "AR-2": reviewerView({ ...opts, ...ar("AR-2") }) };
+			state.rows = [ar("AR-1", { source: "File Box" }), ar("AR-2", { review_scoped: 1 })];
+			let w = await listBoard();
+			let answer = deferred();
+			api.decideApproval.mockImplementation(() => answer.promise);
+			await button(w, "Acme").trigger("click");
+			await button(w, "Approve").trigger("click");
+			await settle();
+			let reads = await clickAr2(w);
+			let lists = api.listApprovalsPage.mock.calls.length;
+			answer.reject(new Error("network down"));
+			await settle();
+			staysOnAr2(w, reads, probe.docmeta.reload.mock.calls.length, "filebox then scoped");
+			expect(api.listApprovalsPage.mock.calls.length).toBe(lists);
+			// AR-1 scoped, AR-2 File Box: the scoped decision still refreshes the list
+			vi.clearAllMocks();
+			views = {
+				"AR-1": reviewerView({ ...opts, ...ar("AR-1") }),
+				"AR-2": fileBoxView(ar("AR-2", { source: "File Box" })),
+			};
+			state.rows = [ar("AR-1", { review_scoped: 1 }), ar("AR-2", { source: "File Box" })];
+			w = await listBoard();
+			answer = await approveAr1(w);
+			reads = await clickAr2(w);
+			lists = api.listApprovalsPage.mock.calls.length;
+			answer.reject(new Error("network down"));
+			await settle();
+			expect(api.listApprovalsPage.mock.calls.length).toBeGreaterThan(lists);
+			expect(pane(w).text()).toContain("Question AR-2");
+			const later = approvals.getApproval.mock.calls.slice(reads).map((c) => c[0]);
+			expect(later).not.toContain("AR-1");
+		});
+
+		it("K1 a late done answer leaves the pane on the new row", async () => {
+			const w = await listBoard();
+			const answer = await approveAr1(w);
+			const reads = await clickAr2(w);
+			const reloads = probe.docmeta.reload.mock.calls.length;
+			answers.done(answer);
+			await settle();
+			staysOnAr2(w, reads, reloads, "done");
+		});
+
+		it("K2 without a switch, failed / pending / rejected answers re-read the decided row", async () => {
+			for (const kind of ["failed", "pending", "rejected"]) {
+				vi.clearAllMocks();
+				fresh();
+				const w = await listBoard();
+				const answer = await approveAr1(w);
+				answers[kind](answer);
+				await settle();
+				expect(approvals.getApproval, kind).toHaveBeenLastCalledWith("AR-1");
+				expect(pane(w).text(), kind).toContain("Question AR-1");
+				if (kind !== "rejected") expect(probe.docmeta.reload, kind).toHaveBeenCalled();
+			}
+		});
+
+		it("T2/T3 back on the decided row before the answer: it is re-read; after a switch it is not pinned", async () => {
+			let w = await listBoard();
+			let answer = await approveAr1(w);
+			await clickAr2(w);
+			await rowButton(w, "AR-1").trigger("click");
+			await settle();
+			answers.failed(answer);
+			await settle();
+			expect(approvals.getApproval).toHaveBeenLastCalledWith("AR-1");
+			expect(pane(w).text()).toContain("Question AR-1");
+			expect(probe.docmeta.reload).toHaveBeenCalled();
+			// after a switch, the late failed row follows the server list (no pin)
+			vi.clearAllMocks();
+			fresh();
+			w = await listBoard();
+			answer = await approveAr1(w);
+			await clickAr2(w);
+			state.rows = state.rows.filter((r) => r.name !== "AR-1");
+			answers.failed(answer);
+			await settle();
+			shell.store.approvalsCount += 1;
+			await settle();
+			expect(rail(w).text()).not.toContain("Question AR-1");
+			expect(pane(w).text()).toContain("Question AR-2");
+		});
+
+		it("m2 a late Ignore answer keeps the new row's draft (chip and note)", async () => {
+			fresh(requesterView);
+			const w = await listBoard();
+			const answer = deferred();
+			api.dismissApproval.mockImplementation(() => answer.promise);
+			await button(w, "Ignore").trigger("click");
+			await settle();
+			await clickAr2(w);
+			await button(w, "Spare").trigger("click");
+			await w.find("textarea").setValue("QA756 AR-2 note");
+			answer.resolve({ ok: true });
+			await settle();
+			const chip = button(w, "Spare");
+			const textarea = w.find("textarea");
+			expect({
+				pane: pane(w).text().includes("Question AR-2") ? "AR-2" : "not AR-2",
+				chip: chip ? chip.attributes("variant") : "absent",
+				note: textarea.exists() ? textarea.element.value : "absent",
+			}).toEqual({ pane: "AR-2", chip: "solid", note: "QA756 AR-2 note" });
+			expect(api.dismissApproval).toHaveBeenCalledTimes(1);
 		});
 	});
 });
