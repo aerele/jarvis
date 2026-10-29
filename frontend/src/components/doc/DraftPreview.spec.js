@@ -36,6 +36,33 @@ const mountPreview = (m) =>
 	mount(DraftPreview, { props: { model: m }, global: { stubs: { transition: false } } });
 
 describe("the read-only preview lists a row's values outside the grid", () => {
+	it("does not repeat an unchanged proposed column beneath the preview grid", () => {
+		const m = model([{ item_code: "I", qty: "2", description: "Bank charges" }], {
+			verb: "create",
+		});
+		const t = m.tables[0];
+		t.gridFields = ["item_code", "qty"];
+		t.columns.push(F("description", "Small Text"));
+		t.formFields.push(F("description", "Small Text"));
+		const w = mountPreview(m);
+		expect(w.findAll(".dp-grid td").map((c) => c.text())).toContain("Bank charges");
+		expect(w.findAll(".dp-rowmore")).toHaveLength(0);
+	});
+
+	it("keeps the old and new values for a changed proposed column", () => {
+		const m = model([{ __name: "r1", item_code: "I", qty: "2", description: "New charges" }]);
+		const t = m.tables[0];
+		t.gridFields = ["item_code", "qty"];
+		t.columns.push(F("description", "Small Text"));
+		t.formFields.push(F("description", "Small Text"));
+		t.origJson = JSON.stringify([
+			{ name: "r1", item_code: "I", qty: 2, description: "Old charges" },
+		]);
+		const w = mountPreview(m);
+		expect(w.find(".dp-rowmore").text()).toContain("Old charges");
+		expect(w.find(".dp-rowmore").text()).toContain("New charges");
+	});
+
 	it("shows a disclosure per row with such values, worded by count", () => {
 		const w = mountPreview(
 			model([
