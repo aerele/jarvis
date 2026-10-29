@@ -419,7 +419,7 @@ class TestDocxNativePermissions(unittest.TestCase):
 
 		from frappe.utils.file_manager import save_file
 
-		self.assertEqual(frappe.local.site, "test_jarvis")
+		self.assertIn(frappe.local.site, {"test_jarvis", "jarvis-ci.test"})
 		self.original_user = frappe.session.user
 		frappe.set_user("Administrator")
 		self.prefix = "j790-" + uuid.uuid4().hex[:8]
