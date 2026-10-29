@@ -146,26 +146,32 @@ def step_waits(conversation: str, turn) -> tuple[list[dict], list[dict]]:
 	never the whole answer. A row with no status (a tool error) says nothing about the
 	report and supersedes nothing.
 
-	Contract with the caller (``macros._apply_step_end``): the turn's own rows are all
-	this knows. It does not tell a step's first turn from a continuation; the caller
-	ends the run on a failed read only for a first turn (no ``resume_turn``). What a
-	continuation's failed read means is the resume's to decide."""
+	The turn's own rows are all this knows. It does not tell a step's first turn from a
+	continuation; ``macros._apply_step_end`` ends the run on a failed read in either."""
+	waits, failed, _ready = step_reads(conversation, turn)
+	return waits, failed
+
+
+def step_reads(conversation: str, turn) -> tuple[list[dict], list[dict], list[dict] | None]:
+	"""``step_waits`` and, third, ``ready``: ``{report_name, run, key}`` of every report
+	the turn read to the end (the newest answer per report and filters is ``ready``;
+	``key`` is the report and filters by meaning, as ``report_runs._key``), or
+	None when the rows could not be read (nothing can then be said of what the turn
+	read, and the caller must not take that for "it read nothing"). Never raises."""
 	try:
-		return _step_waits(conversation, turn)
+		return _step_reads(conversation, turn)
 	except Exception:
 		frappe.log_error(title="jarvis macro report wait read failed", message=frappe.get_traceback())
-		return [], []
+		return [], [], None
 
 
-def _step_waits(conversation: str, turn):
-	from jarvis.chat import report_runs
-
+def _step_reads(conversation: str, turn):
 	seed = turn.get("seed_message") if turn else None
 	if not seed:
-		return [], []
+		return [], [], None
 	after = frappe.db.get_value(MSG, seed, "seq")
 	if after is None:
-		return [], []
+		return [], [], None
 	# A retry is a second Turn on the same seed: its rows come after the failed
 	# attempt's, which are in the seq range too. Only rows made since THIS turn began.
 	since = frappe.db.get_value(TURN, turn.get("name"), "creation")
@@ -188,6 +194,11 @@ def _step_waits(conversation: str, turn):
 			for r in newest.values()
 			if r["status"] == "failed"
 		],
+		[
+			{"report_name": r["report_name"], "run": r["run"] or "", "key": r["key"]}
+			for r in newest.values()
+			if r["status"] == "ready"
+		],
 	)
 
 
@@ -207,7 +218,7 @@ def _note(row: dict, waits: dict, newest: dict, defaults: dict) -> None:
 	for name, wait in list(waits.items()):
 		if name == run or wait["key"] == key:
 			del waits[name]
-	newest[key] = {**row, "report_name": report}
+	newest[key] = {**row, "report_name": report, "key": key}
 	if run and row["status"] in _IN_FLIGHT and row["waiting"]:
 		waits[run] = {"key": key, "report_name": report, "args": args.get("filters")}
 
@@ -295,6 +306,61 @@ def failed_read_message(what: str, failed: dict) -> str:
 	return f"{what} stopped: {failed['report_name']} failed: {reason}"
 
 
+def waiting_failed_message(run, what: str) -> str:
+	"""Why a run ends because the report its step awaited failed, for the end of the
+	explanation turn: the failure ``_resume_failed`` recorded in the same CAS that sent
+	the explanation (``waiting_on``: the failed wait's ``failure``), in the words the
+	first-turn failure uses. Not read again from the report: it may have been deleted or
+	changed in the minutes the explanation took, and the owner must be told what the
+	model was told. A run without the record (written before it) reads the report."""
+	waits = _waits_of(run.waiting_on)
+	for wait in waits:
+		failure = wait.get("failure")
+		if isinstance(failure, dict) and failure.get("report"):
+			return failed_read_message(
+				what, {"report_name": failure["report"], "reason": failure.get("detail") or ""}
+			)
+	for wait in waits:
+		state = _state_of(run, wait)
+		if state["state"] == "failed":
+			return failed_read_message(what, {"report_name": state["report"], "reason": state["detail"]})
+	return f"{what} stopped: a report it was waiting for failed."
+
+
+def unread_reports(run, ready: list[dict]) -> list[str]:
+	"""The awaited reports a continuation did not read to the end: those of the run's
+	``waiting_on`` that none of the turn's ``ready`` answers (``step_reads``) is for.
+	An answer is for a wait if it is that Prepared Report, or the same report with the
+	same filters by meaning (``report_runs._key``: the model re-ran it and was served
+	another copy made since the run began). The same report with other filters is not:
+	two companies are two reads, and a model that drifted from the filters it was given
+	did not read what it was told is ready. Empty: it read what it was told is ready."""
+	from jarvis.chat import report_runs
+
+	defaults: dict = {}
+	missing = []
+	for wait in _waits_of(run.waiting_on):
+		report = wait.get("report_name") or wait.get("prepared_report") or ""
+		try:
+			key = report_runs._key(report, wait.get("filters"), defaults)
+		except Exception:
+			key = None
+		if any(
+			r["run"] == wait.get("prepared_report") or (key is not None and r["key"] == key) for r in ready
+		):
+			continue
+		missing.append(report)
+	return list(dict.fromkeys(missing))
+
+
+def not_read_message(what: str, names: list[str]) -> str:
+	from jarvis.chat import macros
+
+	return (
+		f"{what} stopped: it did not read the report {macros._one_line(', '.join(names))} after it was ready."
+	)
+
+
 def park(run, macro_doc, waits: list[dict]) -> bool:
 	"""Park ``run`` in ``waiting_report`` awaiting ``waits``: ONE fenced UPDATE of
 	``running`` -> ``waiting_report`` that also stores the wait (``waiting_on``,
@@ -351,6 +417,9 @@ def park(run, macro_doc, waits: list[dict]) -> bool:
 # never past the hard cap, before the wait is declared failed.
 _QUEUE_GRACE_S = 60 * 60
 _WAIT_CAP_S = 6 * 60 * 60
+# The stale-run sweep closes a run still parked this long after it was parked: past the
+# longest wait (the cap) by an hour, so the cron always gets there first.
+STALE_WAIT_AFTER_S = _WAIT_CAP_S + 60 * 60
 _MAX_STEP_RESUMES = 3
 _MAX_RESUMES = 5
 _MAX_COMPENSATIONS = 3
@@ -608,16 +677,33 @@ def _resume_failed(run, macro_doc, merged, what, failed) -> None:
 			failed_read_message(what, {"report_name": failed["report"], "reason": failed["detail"]}),
 		)
 		return
-	_send(run, macro_doc, merged, what, _failed_prompt(failed), waiting_failed=True)
+	# The failure is recorded with the flip: the end of the explanation reports THIS
+	# reason (``waiting_failed_message``), whatever the report becomes meanwhile.
+	record = {"report": failed["report"], "detail": _span(failed["detail"], _DETAIL_MAX)}
+	waits = [
+		{**w, "failure": record} if w.get("prepared_report") == failed["prepared_report"] else w
+		for w in _waits_of(run.waiting_on)
+	]
+	_send(
+		run,
+		macro_doc,
+		merged,
+		what,
+		_failed_prompt(failed),
+		waiting_failed=True,
+		waiting_on=json.dumps(waits),
+	)
 
 
-def _send(run, macro_doc, merged: bool, what: str, prompt: str, *, waiting_failed: bool = False) -> None:
+def _send(
+	run, macro_doc, merged: bool, what: str, prompt: str, *, waiting_failed: bool = False, **record
+) -> None:
 	"""The shared tail: store the turn id in the fenced CAS, send, and settle on what the
 	enqueue said. Counters move only when a continuation went out."""
 	from jarvis.chat import api, macros
 
 	turn = _allocate(run, merged)
-	extra = {"resume_turn": turn, **({"waiting_failed": 1} if waiting_failed else {})}
+	extra = {"resume_turn": turn, **({"waiting_failed": 1} if waiting_failed else {}), **record}
 	if not macros._cas_run_status(run.name, "waiting_report", "running", **extra):
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- a stop won; release locks
 		return
@@ -709,6 +795,22 @@ def _not_sent(run, macro_doc, merged: bool, what: str, turn: str, why: str) -> N
 		macros._end_run(run, macro_doc, "failed", _NOT_RESUMED.format(what=what))
 		return
 	_repark(run, resume_compensations=compensations)
+
+
+def resume_not_delivered(run, macro_doc) -> None:
+	"""The five minute check found ``resume_turn`` stored and no Turn of that id long after
+	the flip: the process died between the flip and the enqueue. Settled as an enqueue
+	that failed (``_not_sent``), under the caller's lock: back to ``waiting_report`` and
+	woken, counted in ``resume_compensations`` so it cannot go round for ever (past
+	``_MAX_COMPENSATIONS`` the run ends failed, "could not be continued"). A Turn of that
+	id that does exist is a continuation that went out after all."""
+	from jarvis.chat import macros
+
+	merged = macros._run_mode(run, macro_doc) == macros.MODE_MERGED
+	what = "The summarized run" if merged else f"Step {max(frappe.utils.cint(run.current_step), 1)}"
+	_not_sent(run, macro_doc, merged, what, run.resume_turn, "the continuation's turn was never written")
+	if macros._run_status_now(run.name) == "waiting_report":
+		wake(run.name)
 
 
 def _log_at_most_hourly(run_name: str, title: str, message: str) -> None:
