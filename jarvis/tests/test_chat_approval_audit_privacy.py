@@ -7,6 +7,8 @@ Box and unrelated sources are the positive controls that must stay readable.
 """
 
 import json
+from contextlib import contextmanager
+from unittest.mock import patch
 
 import frappe
 from frappe import client
@@ -17,6 +19,28 @@ from jarvis.tests import test_chat_approval_continuation as continuation_fixture
 from jarvis.tests._pending_action_helpers import as_user, ensure_user
 
 AR = continuation_fixture.AR
+
+
+@contextmanager
+def versions_recorded(*doctypes):
+	"""Record Versions for these doctypes' saves as production does.
+
+	Under the framework test runner (frappe.in_test) Document.save skips Versions
+	unless the caller asks for them, so endpoints that save internally (docmeta
+	update_comment, client.set_value) produce none. Only an unspecified
+	ignore_version on the named doctypes becomes False; the real save, its
+	permission checks and any explicit ignore_version are unchanged."""
+	from frappe.model.document import Document
+
+	real_save = Document.save
+
+	def save(self, *args, **kwargs):
+		if self.doctype in doctypes and len(args) < 2 and kwargs.get("ignore_version") is None:
+			kwargs["ignore_version"] = False
+		return real_save(self, *args, **kwargs)
+
+	with patch.object(Document, "save", save):
+		yield
 
 
 class AuditReach:
@@ -88,14 +112,16 @@ class TestChatApprovalAuditPrivacy(
 			with as_user(self.owner):
 				doc = frappe.get_doc(AR, name)
 				doc.question = self.secret + " question edited"
-				doc.save()
+				doc.save(ignore_version=False)
 			frappe.db.commit()
 		with as_user(self.reviewer):
 			chat_comment = self.comment(self.chat, self.secret + " reviewer note")
-			docmeta_api.update_comment(chat_comment, self.secret + " reviewer note edited")
+			with versions_recorded("Comment"):
+				docmeta_api.update_comment(chat_comment, self.secret + " reviewer note edited")
 		with as_user(self.manager):
 			filebox_comment = self.comment(self.filebox, "QA756 File Box note")
-			docmeta_api.update_comment(filebox_comment, "QA756 File Box note edited")
+			with versions_recorded("Comment"):
+				docmeta_api.update_comment(filebox_comment, "QA756 File Box note edited")
 		versions = {
 			"chat question": self.versions(AR, self.chat),
 			"chat comment": self.versions("Comment", chat_comment),
@@ -137,7 +163,8 @@ class TestChatApprovalAuditPrivacy(
 		self.tag()
 		with as_user(self.reviewer):
 			note = self.comment(self.chat, self.secret + " reviewer note")
-			docmeta_api.update_comment(note, self.secret + " reviewer note edited")
+			with versions_recorded("Comment"):
+				docmeta_api.update_comment(note, self.secret + " reviewer note edited")
 		version = self.versions("Comment", note)
 		ensure_user(self.owner, ("Jarvis User", "System Manager"))
 		with as_user(self.owner):
@@ -374,7 +401,8 @@ class TestChatApprovalAuditPrivacy(
 			self.extra_files.append(file.name)
 			frappe.db.commit()
 			private_name = "QA756 private salary revision.txt"
-			client.set_value("File", file.name, "file_name", private_name)
+			with versions_recorded("File"):
+				client.set_value("File", file.name, "file_name", private_name)
 			frappe.db.commit()
 		version = self.versions("File", file.name)
 		self.assertIn(private_name, frappe.db.get_value("Version", version, "data"))
