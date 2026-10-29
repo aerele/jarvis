@@ -23,10 +23,38 @@ def _open_lead_statuses(inst):
 	return sorted(names) or None
 
 
+def _statutory_schema(inst):
+	"""Describe existing columns. Do not read payroll or identity values."""
+	identity = ("pan_number", "provident_fund_account", "ifsc_code", "micr_code")
+	return {
+		"india_fields_present": {field: frappe.db.has_column("Employee", field) for field in identity},
+		"component_fields": [
+			field
+			for field in ("component_type", "accrual_component")
+			if frappe.db.has_column("Salary Component", field)
+		],
+		"detail_fields": [
+			field for field in ("accrual_component",) if frappe.db.has_column("Salary Detail", field)
+		],
+		"assignment_fields": [
+			field
+			for field in (
+				"epf_applicable",
+				"contribute_on_actual_pf_wage",
+				"employment_state",
+				"is_person_with_disability",
+				"lwf_exempted",
+			)
+			if frappe.db.has_column("Salary Structure Assignment", field)
+		],
+	}
+
+
 # key -> (provider, customer value wins?)
 PROVIDERS = {
 	"fingerprint_salt": (_fingerprint_salt, False),
 	"open_workable_status_set": (_open_lead_statuses, True),
+	"statutory_schema": (_statutory_schema, False),
 }
 
 

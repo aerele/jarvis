@@ -17,6 +17,19 @@ def _inst(name="INST-1", config=None):
 
 
 class TestDerivedConfig(FrappeTestCase):
+	def test_statutory_schema_is_metadata_only_and_cannot_be_overridden(self):
+		self.assertFalse(derived_config.customer_may_set("statutory_schema"))
+		with patch.object(
+			derived_config.frappe.db, "has_column", side_effect=lambda dt, field: field != "micr_code"
+		):
+			out = agent_scheduler._explicit_config(
+				{"config_keys": ["statutory_schema"]},
+				_inst(config='{"statutory_schema": {"forged": true}}'),
+			)
+		self.assertNotIn("forged", out["statutory_schema"])
+		self.assertFalse(out["statutory_schema"]["india_fields_present"]["micr_code"])
+		self.assertTrue(out["statutory_schema"]["india_fields_present"]["pan_number"])
+
 	def test_salt_stable_distinct_and_hex(self):
 		a = derived_config._fingerprint_salt(_inst("A"))
 		self.assertEqual(a, derived_config._fingerprint_salt(_inst("A")))
