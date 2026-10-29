@@ -3,6 +3,34 @@ import assert from "node:assert/strict";
 
 import { renderMarkdown } from "./markdown.js";
 
+test("renders bare disclosure tags around a calculation while retaining markdown", () => {
+	const html = renderMarkdown(
+		"<details><summary>How this was worked out</summary>\n\nRequired: **10**\n</details>"
+	);
+	assert.ok(html.includes("<details><summary>How this was worked out</summary>"));
+	assert.ok(html.includes("Required: <strong>10</strong>"));
+	assert.ok(html.includes("</details>"));
+	assert.ok(!html.includes("&lt;details&gt;"));
+});
+
+test("disclosure tags never permit attributes or unescape other HTML", () => {
+	for (const tag of [
+		"<details open>",
+		"<details ontoggle=alert(1)>",
+		'<summary onclick="alert(1)">',
+		"<details/name=x>",
+		"<script>alert(1)</script>",
+	]) {
+		assert.ok(!renderMarkdown(tag).includes(tag));
+		assert.ok(renderMarkdown(tag).includes("&lt;"));
+	}
+});
+
+test("disclosure examples in inline and fenced code stay literal", () => {
+	for (const src of ["`<details><summary>Example</summary></details>`", "```html\n<details><summary>Example</summary></details>\n```"])
+		assert.ok(!renderMarkdown(src).includes("<details>"));
+});
+
 test("finding evidence links retain their document labels and local targets", () => {
 	const html = renderMarkdown(
 		"Compare [PAY-1](/app/payment-entry/PAY-1) and [PAY-2](/app/payment-entry/PAY-2)."
