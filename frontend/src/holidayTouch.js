@@ -65,7 +65,7 @@ export function createHolidayTouch({
 
 	// For support: what the store holds, readable from the console as
 	// window.__holidayTouch. Read only; nothing here can change the store.
-	const state = { lastError: null, lastFetchAt: null };
+	const state = { lastError: null, lastFetchAt: null, sceneReason: null };
 	const debugView = {
 		get raw() {
 			return raw.value;
@@ -82,7 +82,16 @@ export function createHolidayTouch({
 		get lastFetchAt() {
 			return state.lastFetchAt;
 		},
+		// Why today's scene is or is not playing (loaded | load-failed | deadline | declined |
+		// threw | hidden), set by the welcome stage; null before it has an answer.
+		get sceneReason() {
+			return state.sceneReason;
+		},
 	};
+
+	function setSceneReason(reason) {
+		state.sceneReason = reason || null;
+	}
 
 	function reportOnce(key, ctx) {
 		if (reported.has(key)) return;
@@ -207,7 +216,7 @@ export function createHolidayTouch({
 		if (next) refresh({ force: true });
 	}
 
-	return { answer, refresh, start, stop, tick, setShown, debugView };
+	return { answer, refresh, start, stop, tick, setShown, setSceneReason, debugView };
 }
 
 export const holidayTouch = createHolidayTouch({

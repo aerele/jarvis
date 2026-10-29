@@ -84,6 +84,42 @@ test("the tile clip follows the mark's corner radius", () => {
   assert.match(wornMarkup("holi", { idPrefix: "a", radius: 7 }), /rx="7"/);
 });
 
+// The contact shadow, as worn.mjs draws it under an item.
+const CONTACT =
+  /<g clip-path="url\(#t[^)]*\)" fill="#1e1b4b" opacity="\.2">[\s\S]*?<\/g>/g;
+
+test("noShadow leaves out the contact shadow and nothing else, for every design", () => {
+  for (const design of DESIGNS) {
+    const full = wornMarkup(design, { idPrefix: "a" });
+    const bare = wornMarkup(design, { idPrefix: "a", noShadow: true });
+    assert.equal(bare, full.replace(CONTACT, ""), design);
+    assert.ok(!CONTACT.test(bare), design);
+  }
+  assert.ok(
+    wornMarkup("independence", { idPrefix: "a" }).includes('opacity=".2"')
+  );
+  assert.ok(
+    !wornMarkup("independence", { idPrefix: "a", noShadow: true }).includes(
+      'opacity=".2"'
+    )
+  );
+});
+
+test("crownOnly draws Onam's umbrella alone: the same umbrella, without the kasavu", () => {
+  const full = wornMarkup("onam", { idPrefix: "a" });
+  const crown = wornMarkup("onam", { idPrefix: "a", crownOnly: true });
+  const umbrella = (m) =>
+    m.slice(
+      m.indexOf('<g class="twirl">'),
+      m.indexOf("</g></g>", m.indexOf('<g class="twirl">')) + 8
+    );
+  assert.ok(umbrella(crown).length > 200);
+  assert.equal(umbrella(crown), umbrella(full));
+  assert.ok(full.includes("kv"), "the full item has the kasavu");
+  assert.doesNotMatch(crown, /kv|kasavu|clip-path="url\(#kz/);
+  assert.ok(crown.length < full.length);
+});
+
 test("holi draws its cheeks; no other design does", () => {
   for (const design of DESIGNS) {
     assert.equal(

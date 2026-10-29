@@ -1,15 +1,9 @@
 // The drawing of the Diwali scene: marigold toran, dusk sky, diyas and anar fountains,
-// rockets and the three bursts. Ported from the approved desktop mock. Coordinates are
-// the mock's 800-unit stage (x centred on 400); diwali.mjs scales and places the group.
+// rockets and the three bursts. Coordinates are stage units (scene-geometry.mjs: 800 wide,
+// x centred on 400); diwali.mjs scales and places the group.
 import { burstSVG, lin, rad, rng, r2, ring } from "../stage.mjs";
-import {
-  BURSTS,
-  DIYA,
-  SWAGS,
-  TORAN,
-  floorTransform,
-  swagY,
-} from "../scene-geometry.mjs";
+import { BURSTS, DIYA, TORAN } from "../scene-geometry.mjs";
+import { toranSVG as toran } from "./scene-art.mjs";
 
 // Where the diwali scene puts the item's flame, in the 56-unit tile space of the mark.
 export const FLAME_TILE = [60.5, 36];
@@ -35,7 +29,7 @@ const DIYA_FLAME = `<path d="M16.5 -20 C22 -13 23 -7.5 20.5 -4 C19 -2 14 -2 12.5
   <path d="M16.5 -10.5 C18.2 -8 18.3 -6 17.5 -4.8 C17 -4.1 16 -4.1 15.5 -4.8 C14.7 -6 14.8 -8 16.5 -10.5 Z" fill="#fffbeb"/>`;
 
 /** Rules for the scene's own classes, so nothing leaks into the page. */
-export const styleSVG = (p) => `<style>
+export const diwaliStyle = (p) => `<style>
 .${p}fb{transform-box:fill-box;transform-origin:50% 50%}
 .${p}fl{transform-box:fill-box;transform-origin:50% 100%}
 .${p}flick{transform-box:fill-box;transform-origin:50% 100%;animation:${p}flick 1.9s ease-in-out infinite}
@@ -119,53 +113,38 @@ export const defsSVG = (p) => `<defs>
 </defs>`;
 
 /** The marigold toran: swags of marigolds and mango leaves across units [from, to]. */
-export function toranSVG(p, from, to) {
-  const first = Math.floor(from / 200);
-  const last = Math.ceil(to / 200);
-  let d = `M${first * 200} ${TORAN.top}`;
-  let items = "";
-  for (let i = first; i < last; i++) {
-    d += ` Q${i * 200 + 100} ${TORAN.top + TORAN.sag / 2} ${i * 200 + 200} ${
-      TORAN.top
-    }`;
-    for (let k = 1; k < SWAGS; k++) {
-      const t = k / SWAGS;
-      const x = r2(i * 200 + 200 * t);
-      const y = r2(swagY(t));
-      const n = i * 8 + k;
-      const hue = Math.abs(n) % 2;
-      const colour = Math.abs(n) % 4 === 1 ? "#15803d" : "#22c55e";
-      const leaf = `<path d="M${x} ${y} q-3.2 ${TORAN.leaf / 2} 0 ${
-        TORAN.leaf
-      } q3.2 -6.2 0 -${TORAN.leaf} Z" fill="${colour}"/><path d="M${x} ${r2(
-        y + 1
-      )} V${r2(
-        y + TORAN.leaf - 1.5
-      )}" stroke="#14532d" stroke-opacity=".5" stroke-width=".6"/>`;
-      const marigold = `<circle cx="${x}" cy="${y}" r="${TORAN.bloom}" fill="${
-        hue ? "#facc15" : "#f97316"
-      }"/>${ring(
-        8,
-        x,
-        y,
-        3.35,
-        (cx, cy) =>
-          `<circle cx="${cx}" cy="${cy}" r="1.62" fill="${
-            hue ? "#fde047" : "#fb923c"
-          }"/>`
-      )}<circle cx="${x}" cy="${y}" r="1.62" fill="#c2410c"/>`;
-      items += (k % 2 ? leaf : "") + marigold;
-    }
-  }
-  return `<g class="${p}toran" opacity="0"><path d="${d}" stroke="#a16207" stroke-width="1.2" fill="none"/>${items}</g>`;
-}
+export const toranSVG = (p, from, to) =>
+  toran(p, from, to, (x, y, n, k) => {
+    const hue = Math.abs(n) % 2;
+    const colour = Math.abs(n) % 4 === 1 ? "#15803d" : "#22c55e";
+    const leaf = `<path d="M${x} ${y} q-3.2 ${TORAN.leaf / 2} 0 ${
+      TORAN.leaf
+    } q3.2 -6.2 0 -${TORAN.leaf} Z" fill="${colour}"/><path d="M${x} ${r2(
+      y + 1
+    )} V${r2(
+      y + TORAN.leaf - 1.5
+    )}" stroke="#14532d" stroke-opacity=".5" stroke-width=".6"/>`;
+    const marigold = `<circle cx="${x}" cy="${y}" r="${TORAN.bloom}" fill="${
+      hue ? "#facc15" : "#f97316"
+    }"/>${ring(
+      8,
+      x,
+      y,
+      3.35,
+      (cx, cy) =>
+        `<circle cx="${cx}" cy="${cy}" r="1.62" fill="${
+          hue ? "#fde047" : "#fb923c"
+        }"/>`
+    )}<circle cx="${x}" cy="${y}" r="1.62" fill="#c2410c"/>`;
+    return (k % 2 ? leaf : "") + marigold;
+  });
 
 /**
  * The floor props: a row of lit diyas with an anar fountain at each end. `ground` is the
- * baseline. `fit` (scene-geometry.mjs floorFit) shrinks the whole row as one group on a short
- * stage, so the glow and the fountain sparks scale with the pots.
+ * baseline. The scene's floor group (scene-runtime.mjs floorGroup) shrinks the whole row as
+ * one group on a short stage, so the glow and the fountain sparks scale with the pots.
  */
-export function floorSVG(p, ground, fit) {
+export function floorSVG(p, ground) {
   const P = DIYA.pot;
   const rand = rng(13);
   const diya = (x) => `<g transform="translate(${x} ${
@@ -196,12 +175,10 @@ export function floorSVG(p, ground, fit) {
     <path d="M-6.6 -5 H6.6 M-5.4 -10.5 H5.4" stroke="#fde68a" stroke-width="1.3"/>
     <ellipse cx="0" cy="-16" rx="4.5" ry="1.4" fill="#7f1d1d"/></g>`;
   const xs = [90, 193, 297, 400, 503, 607, 710];
-  return `<g class="${p}floor" transform="${floorTransform(fit)}">${xs
-    .map(diya)
-    .join("")}${anar(245)}${anar(555)}</g>`;
+  return `${xs.map(diya).join("")}${anar(245)}${anar(555)}`;
 }
 
-/** Rockets and the three bursts. `dy` is the mark's y shift from the mock's MARK_TOP. */
+/** Rockets and the three bursts. `dy` is the mark's y shift from MARK_TOP. */
 export function skyShowSVG(p, dy) {
   const flash = (n, x, y) =>
     `<g transform="translate(${x} ${y})"><circle class="${p}flash${n} ${p}fb" r="${radiusOf(
