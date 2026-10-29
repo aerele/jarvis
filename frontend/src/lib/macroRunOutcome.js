@@ -74,15 +74,25 @@ export function runDetail(run) {
 }
 
 // What a `macro:done` event is worth telling the user: { title, body }, or null.
-// Only a FAILED run. A run that stopped at a confirmation card was announced when
-// the card parked ("needs your confirmation"), and a run the user stopped needs no
-// announcement at all.
+// A run that FINISHED or FAILED. A run's chat is not in the chat list, so this is
+// how someone who left it hears the run is done. A run that stopped at a
+// confirmation card was announced when the card parked ("needs your
+// confirmation"), and a run the user stopped needs no announcement at all.
 export function macroDoneSignal(p) {
-	if (!p || p.status !== "failed") return null;
-	return {
-		title: p.macro_name ? `Macro failed: ${p.macro_name}` : "Macro failed",
-		body: p.error || "Open the run to see what happened.",
-	};
+	if (!p) return null;
+	const name = p.macro_name;
+	if (p.status === "failed")
+		return {
+			title: name ? `Macro failed: ${name}` : "Macro failed",
+			body: p.error || "Open the run to see what happened.",
+		};
+	if (p.status === "completed")
+		return {
+			title: name ? `Macro finished: ${name}` : "Macro finished",
+			// A completed run's `error` is a plain note (a step only drafted a record).
+			body: p.error || "Open the chat to see what it found or did.",
+		};
+	return null;
 }
 
 // A run that has not ended, as the server counts it (macros._LIVE_RUN_STATUSES):

@@ -25,6 +25,7 @@
   "schedule_weekday",
   "schedule_day_of_month",
   "schedule_time",
+  "schedule_cron",
   "last_run_at",
   "next_run_at"
  ],
@@ -129,7 +130,7 @@
    "fieldname": "schedule_frequency",
    "fieldtype": "Select",
    "label": "Frequency",
-   "options": "daily\nweekly\nmonthly\nonce",
+   "options": "daily\nweekly\nmonthly\nonce\nhourly\ncustom",
    "default": "daily",
    "depends_on": "eval:doc.schedule_enabled"
   },
@@ -161,6 +162,13 @@
    "label": "Time of day",
    "depends_on": "eval:doc.schedule_enabled",
    "description": "Local time the scheduled run fires (defaults to 09:00 if unset)."
+  },
+  {
+   "fieldname": "schedule_cron",
+   "fieldtype": "Small Text",
+   "label": "Cron schedule",
+   "depends_on": "eval:doc.schedule_enabled && doc.schedule_frequency!='once'",
+   "description": "One cron expression per line (minute hour day month weekday), on the site's clock. When set, it decides when a recurring schedule runs."
   },
   {
    "fieldname": "last_run_at",
