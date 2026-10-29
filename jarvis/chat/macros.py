@@ -41,6 +41,7 @@ import frappe
 from frappe import _
 from frappe.utils import get_datetime, now_datetime
 
+from jarvis.chat import macro_report_wait
 from jarvis.chat.events import publish_to_user
 
 MACRO = "Jarvis Macro"
@@ -208,8 +209,9 @@ def _run_status_now(run_name: str) -> str | None:
 
 
 _TERMINAL_RUN_STATUSES = ("completed", "failed", "stopped")
-# A parked run is live: the capacity resume will send its step (CDX-19).
-_LIVE_RUN_STATUSES = ("running", "waiting_capacity")
+# A parked run is live: the capacity resume will send its step (CDX-19), and a run
+# waiting for a prepared report is continued when the report is ready.
+_LIVE_RUN_STATUSES = ("running", "waiting_capacity", "waiting_report")
 
 
 def _disarm_conversation(conversation: str | None) -> None:
@@ -1437,6 +1439,7 @@ def _apply_step_end(
 		return
 
 	step_number = max(int(run.current_step or 0), 1)  # never "Step 0" (first-step race)
+	what = "The summarized run" if merged else f"Step {step_number}"
 	turn = _ended_turn(seed, run_id)
 	# From here on `errored` is the step's verdict, not the caller's word alone.
 	judged = _turn_to_judge(conversation_id, turn, run_id, assistant_message)
@@ -1449,9 +1452,27 @@ def _apply_step_end(
 			# is what the success rate and the notification key on.
 			_end_run(run, macro_doc, "stopped", "")
 			return
-		what = "The summarized run" if merged else f"Step {step_number}"
 		_end_run(run, macro_doc, "failed", f"{what} failed: {_turn_failure_reason(turn)}")
 		return
+
+	# A step that read a prepared report which is still being made stops and waits for
+	# it (the tool told it to), and one that read a report which failed has nothing to
+	# wait for. An errored turn was dealt with above: the error wins. A step the user
+	# stopped is not parked even with "Stop on error" off: they asked for it to end.
+	# A parked run sends no step and does not end; whoever wakes it continues THIS step.
+	if (
+		turn
+		and not _stopped_by_the_user(turn)
+		and macro_report_wait.enabled()
+		and not frappe.utils.cint(run.waiting_failed)
+	):
+		waits, failed_reads = macro_report_wait.step_waits(conversation_id, turn)
+		if failed_reads and not run.resume_turn:
+			_end_run(run, macro_doc, "failed", macro_report_wait.failed_read_message(what, failed_reads[0]))
+			return
+		if waits:
+			macro_report_wait.park(run, macro_doc, waits)
+			return
 
 	if next_index >= total:
 		try:
@@ -1973,7 +1994,7 @@ def _stop_run_locked(run_name: str, *, reason: str, by: str) -> bool:
 
 
 def live_runs_of(macro_name: str) -> list[str]:
-	"""The macro's runs that have not ended (``running`` or parked for capacity)."""
+	"""The macro's runs that have not ended (``running``, or parked for capacity or a report)."""
 	return frappe.get_all(
 		RUN, filters={"macro": macro_name, "status": ["in", _LIVE_RUN_STATUSES]}, pluck="name"
 	)
@@ -2117,11 +2138,12 @@ def _fenced_by_an_ended_run(run, enqueued) -> str:
 	holder, and ``run_macro`` sends the first step outside it. A dispatcher that read
 	`running` then sent a step into a run that had been stopped, deleted or failed.
 
-	The run is live only while its row says ``running`` or ``waiting_capacity`` (a
-	parked run is live: a cancelled turn would leave its step sent with nothing to
-	run it). Everything else has ended, and that includes NO ROW: a delete of the
-	macro stops the run and then removes its row, and can do both while the first
-	step is being sent. Asking "is the status an ended one" let that step through."""
+	The run is live only while its row says ``running``, ``waiting_capacity`` or
+	``waiting_report`` (a parked run is live: a cancelled turn would leave its
+	step sent with nothing to run it). Everything else has ended, and that includes NO
+	ROW: a delete of the macro stops the run and then removes its row, and can do both
+	while the first step is being sent. Asking "is the status an ended one" let that
+	step through."""
 	from jarvis.chat import txn
 
 	txn.fresh_snapshot(owned=True)
