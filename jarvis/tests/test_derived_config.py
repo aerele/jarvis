@@ -17,6 +17,30 @@ def _inst(name="INST-1", config=None):
 
 
 class TestDerivedConfig(FrappeTestCase):
+	def test_withholding_model_matches_installed_schema(self):
+		expected = (
+			"entry_table_v16"
+			if frappe.get_meta("Purchase Invoice").has_field("tax_withholding_entries")
+			else "legacy_supplier_unverified"
+		)
+		self.assertEqual(derived_config._tax_withholding_model(_inst()), expected)
+
+	def test_typed_withholding_model_cannot_override_schema(self):
+		inst = _inst(config='{"tax_withholding_model": "legacy_supplier"}')
+		with patch.dict(
+			derived_config.PROVIDERS, {"tax_withholding_model": (lambda _: "entry_table_v16", False)}
+		):
+			out = agent_scheduler._explicit_config({"config_keys": ["tax_withholding_model"]}, inst)
+		self.assertEqual(out, {"tax_withholding_model": "entry_table_v16"})
+
+	def test_withholding_guard_fails_closed_on_provider_error(self):
+		with patch.dict(derived_config.PROVIDERS, {"tax_withholding_model": (lambda _: 1 / 0, False)}):
+			self.assertIn(
+				"unavailable",
+				derived_config.unsupported_reason(["tax_withholding_model"], _inst()),
+			)
+			self.assertIsNone(derived_config.unsupported_reason([], _inst()))
+
 	def test_salt_stable_distinct_and_hex(self):
 		a = derived_config._fingerprint_salt(_inst("A"))
 		self.assertEqual(a, derived_config._fingerprint_salt(_inst("A")))
