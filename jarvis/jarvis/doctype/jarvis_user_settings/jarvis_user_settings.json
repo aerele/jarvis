@@ -16,11 +16,7 @@
     "auto_mode_acknowledged",
     "preferred_persona",
     "support_context_copy_pref",
-<<<<<<< HEAD
-=======
     "show_holiday_touches",
-    "payment_calendar_preferences",
->>>>>>> a52f2a5 (feat(holiday-touches): server side for holiday and birthday greetings)
     "app_state_section",
     "business_greeting_state",
     "business_greeting_chat_count",
