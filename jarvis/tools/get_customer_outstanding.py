@@ -3,11 +3,16 @@
 Reproduces ``erpnext.selling.doctype.customer.customer.get_customer_outstanding``
 (the Customer Credit Limit calculation): GL entries against the customer,
 plus the invoiceable balance of open Sales Orders, plus unbilled Delivery
-Note value (net of billed and returned quantity). ERPNext sums the Sales Order
-and Delivery Note parts with raw SQL that ignores permissions, so here only documents the caller can read
-(``frappe.get_list``: roles and User Permissions) count towards those two
-parts. The GL part is computed as ERPNext does, and an unrestricted caller
-gets the same number as ERPNext.
+Note value (net of billed and returned quantity). ERPNext sums the Sales
+Order and Delivery Note parts with raw SQL that ignores permissions, so here
+only documents the caller can read (``frappe.get_list``: roles and User
+Permissions) count towards those two parts. The GL part is computed as
+ERPNext does, and an unrestricted caller gets the same number as ERPNext.
+
+The Delivery Note arithmetic is the return-aware, quantity-based formula of
+current ERPNext. On older ERPNext versions (before that change) ERPNext's own
+figure is computed differently, so the number here can differ from that
+version's ``get_customer_outstanding``.
 
 Customer read perm is enforced before delegating, and the company is
 gated by Company User Permission scope (not Company-doctype read - see
@@ -34,6 +39,9 @@ from jarvis.exceptions import (
 )
 from jarvis.tools._company_scope import assert_company_permitted
 from jarvis.tools._ledger_access import assert_ledger_readable
+
+# Delivery Note names priced per query, to keep the ``IN (...)`` list bounded.
+_NAME_CHUNK = 500
 
 
 def get_customer_outstanding(
@@ -136,7 +144,8 @@ def _delivery_note_outstanding(customer: str, company: str) -> float:
 		limit_page_length=0,
 	)
 	return sum(
-		_unbilled_delivery_value(customer, company, names[i : i + 500]) for i in range(0, len(names), 500)
+		_unbilled_delivery_value(customer, company, names[i : i + _NAME_CHUNK])
+		for i in range(0, len(names), _NAME_CHUNK)
 	)
 
 
@@ -157,6 +166,10 @@ def _unbilled_delivery_value(customer: str, company: str, names: list[str]) -> f
 	).as_("returned_items")
 	# Credits against a return delivery reduce the original delivery row's billed quantity.
 	billed_dn_detail = Coalesce(returned_items.dn_detail, si_item.dn_detail)
+	# Only rows of this chunk's notes can be looked up below, so aggregate just those
+	# instead of every submitted invoice item on the site. The coalesced key is the
+	# original delivery row even for a credit note against a return.
+	chunk_rows = frappe.qb.from_(dn_item).select(dn_item.name).where(dn_item.parent.isin(names))
 	billed = (
 		frappe.qb.from_(si_item)
 		.join(si)
@@ -164,6 +177,7 @@ def _unbilled_delivery_value(customer: str, company: str, names: list[str]) -> f
 		.left_join(returned_items)
 		.on((returned_items.name == si_item.dn_detail) & (si.is_return == 1))
 		.select(billed_dn_detail.as_("dn_detail"), Sum(si_item.stock_qty).as_("billed_qty"))
+		.where(billed_dn_detail.isin(chunk_rows))
 		.where(si_item.docstatus == 1)
 		.where((si.is_return == 0) | (si.update_billed_amount_in_delivery_note == 1))
 		.groupby(billed_dn_detail)
