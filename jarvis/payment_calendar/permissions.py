@@ -74,6 +74,22 @@ def incomplete_scope_reasons() -> list[str]:
 	return sorted(set(reasons))
 
 
+def match_columns(columns):
+	"""Report columns for Frappe's ``get_filtered_data`` user-match filter.
+
+	ERPNext 15.124 / 16.x link Party Type and Voucher Type to DocType. On Frappe v15
+	the match filter then needs read on DocType itself and throws for anyone but a
+	System Manager. They name doctypes, not records, and every caller rechecks each
+	voucher and party with ``visible_names``, so they are matched as plain values.
+	"""
+	return [
+		{**col, "fieldtype": "Data"}
+		if col.get("fieldtype") == "Link" and col.get("options") == "DocType"
+		else col
+		for col in columns
+	]
+
+
 def visible_names(doctype: str, names, filters: dict | None = None) -> set[str]:
 	"""Use Frappe's read-or-select query gate, including custom party scopes."""
 	names = sorted(set(names))

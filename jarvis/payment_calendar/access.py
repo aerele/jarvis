@@ -12,6 +12,7 @@ from jarvis.payment_calendar.compatibility import has_native_field_masks, requir
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.permissions import (
 	incomplete_scope_reasons,
+	match_columns,
 	require_company,
 	require_report,
 	visible_names,
@@ -266,7 +267,7 @@ def validate_result_visibility(scope: dict, result: dict) -> None:
 		try:
 			proofs = [frappe._dict(deepcopy(row["_permission"])) for row in rows]
 			filtered = get_filtered_data(
-				report.ref_doctype, source["permission_columns"], proofs, scope["actor"]
+				report.ref_doctype, match_columns(source["permission_columns"]), proofs, scope["actor"]
 			)
 		except (KeyError, TypeError, AttributeError) as exc:
 			raise ScopeChanged("Refresh the Payment Calendar snapshot.") from exc

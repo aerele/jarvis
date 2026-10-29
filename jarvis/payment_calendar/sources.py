@@ -20,6 +20,7 @@ from jarvis.payment_calendar.compatibility import require_obligation_scope, sour
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.permissions import (
 	incomplete_scope_reasons,
+	match_columns,
 	require_company,
 	require_report,
 	visible_names,
@@ -201,9 +202,7 @@ def _report_class():
 def _visible_rows(engine, report, rows):
 	from frappe.desk.query_report import get_filtered_data
 
-	filtered = get_filtered_data(
-		report.ref_doctype, _match_columns(engine.columns), rows, frappe.session.user
-	)
+	filtered = get_filtered_data(report.ref_doctype, match_columns(engine.columns), rows, frappe.session.user)
 	# Apply the exact delivery predicate to every voucher, including JE/PE.
 	allowed = {}
 	for doctype in {r.voucher_type for r in filtered}:
@@ -220,19 +219,6 @@ def _visible_rows(engine, report, rows):
 		for r in filtered
 		if (r.voucher_type not in allowed or r.voucher_no in allowed[r.voucher_type])
 		and r.party in parties.get(r.party_type, set())
-	]
-
-
-def _match_columns(columns):
-	# ERPNext 15.124 / 16.x link Party Type and Voucher Type to DocType. On Frappe v15,
-	# get_filtered_data then needs read on DocType itself and throws for anyone but a
-	# System Manager. They name doctypes, not records, and the voucher and party checks
-	# in _visible_rows are the record gate, so match them as plain values.
-	return [
-		{**col, "fieldtype": "Data"}
-		if col.get("fieldtype") == "Link" and col.get("options") == "DocType"
-		else col
-		for col in columns
 	]
 
 
