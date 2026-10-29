@@ -489,18 +489,10 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	# delete waiting on the lock sees this run when it looks.
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 
-	# Scheduled runs surface via the proactive "conversation:new" toast; manual
-	# runs are navigated to directly by the SPA, so no toast there.
-	if trigger == "scheduled":
-		publish_to_user(
-			owner,
-			{
-				"kind": "conversation:new",
-				"conversation_id": conv.name,
-				"title": doc.macro_name[:140],
-				"preview": f"Scheduled macro: {doc.macro_name}",
-			},
-		)
+	# No "conversation:new" for a scheduled run: a run's chat is kept out of the chat
+	# list (``api.list_conversations``) and is opened from the Runs page, so a toast
+	# naming a chat the sidebar never shows only confused. How the run ended is told
+	# when it ends (``_announce``).
 
 	try:
 		_dispatch_step(run, doc, 0)
@@ -3366,8 +3358,9 @@ def _announce_reaped(run_name: str) -> None:
 		_publish_done(run, macro_doc, "failed", _STALE_RUN_ERROR)
 		notify_owner(
 			macro_doc.owner,
-			subject=f"Macro run did not finish: {macro_doc.macro_name}",
+			subject=f"Macro run did not finish: {frappe.utils.escape_html(macro_doc.macro_name)}",
 			body=_STALE_RUN_ERROR,
+			link=_run_link(run),
 		)
 	except Exception:
 		pass
@@ -3613,14 +3606,15 @@ def _post_closing_message(run, status: str, note: str) -> None:
 
 def _announce(run, macro_doc, status: str, error: str = "") -> None:
 	"""Tell the owner how a run ended: a closing message in the run's conversation,
-	the realtime event an open app listens for and, for a SCHEDULED run that did not
-	simply work, a Notification Log.
+	the realtime event an open app listens for and a Notification Log, linked to the
+	run's chat.
 
-	A realtime event reaches an open socket only, and nobody is watching a scheduled
-	run. Before this, a scheduled run that failed part-way told nobody: only the
-	scheduler's own refusals and the stale-run sweep wrote a notification. A manual
-	run writes none; whoever started it gets the event. Never raises: each part is
-	best-effort on top of the run row, which is the record."""
+	The notification goes out for every run, scheduled or started by hand, that
+	finished, failed or was stopped by the engine (a step waiting on a card). A run
+	the owner stopped themselves ends ``stopped`` with no reason and is not told: it
+	is their own click. A run's chat is not in the chat list, so this is how the
+	owner hears a run is done once they have left its chat. Never raises: each part
+	is best-effort on top of the run row, which is the record."""
 	try:
 		_post_closing_message(run, status, error)
 	except Exception:
@@ -3629,26 +3623,41 @@ def _announce(run, macro_doc, status: str, error: str = "") -> None:
 		_publish_done(run, macro_doc, status, error)
 	except Exception:
 		frappe.log_error(title="jarvis macro done event failed", message=frappe.get_traceback())
-	if (run.get("trigger") or "manual") != "scheduled":
-		return
-	if not error:
-		# A one-time schedule is usually something the owner asked to be done or
-		# reminded of at a moment: that it ran is the news, so it is told too.
-		from jarvis.chat.macro_scheduler import is_once
-
-		if status == "completed" and is_once(macro_doc):
-			notify_owner(
-				macro_doc.owner,
-				subject=f"Your scheduled run finished: {macro_doc.macro_name}",
-				body="It ran at the time you set. Open the conversation to see what it found or did.",
-				link=f"/jarvis/c/{run.conversation}" if run.get("conversation") else None,
-			)
+	if status == "stopped" and not error:
 		return
 	notify_owner(
 		macro_doc.owner,
-		subject=f"{_OUTCOME_SUBJECT.get(status, 'Macro run ended')}: {macro_doc.macro_name}",
-		body=error,
+		subject=(
+			f"{_OUTCOME_SUBJECT.get(status, 'Macro run ended')}: "
+			f"{frappe.utils.escape_html(macro_doc.macro_name)}"
+		),
+		body=error or _outcome_body(run, macro_doc, status),
+		link=_run_link(run),
 	)
+
+
+def _outcome_body(run, macro_doc, status: str) -> str:
+	"""The notification's text for a run that ended with no note of its own."""
+	if status != "completed":
+		return "Open the chat to see what happened."
+	from jarvis.chat.macro_scheduler import is_once
+
+	if (run.get("trigger") or "manual") == "scheduled" and is_once(macro_doc):
+		# A one-time schedule is usually something the owner asked to be done or
+		# reminded of at a moment: that it ran at that moment is the news.
+		return "It ran at the time you set. Open the chat to see what it found or did."
+	return "Open the chat to see what it found or did."
+
+
+def _run_link(run) -> str | None:
+	"""Where the notification takes the owner: the run's chat, while it exists."""
+	conversation = run.get("conversation")
+	try:
+		if conversation and frappe.db.exists(CONV, conversation):
+			return f"/jarvis/c/{conversation}"
+	except Exception:
+		pass
+	return None
 
 
 def _end_run(run, macro_doc, status: str, error: str = "") -> None:
