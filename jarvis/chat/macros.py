@@ -934,7 +934,27 @@ def _plain_reason(raw) -> str:
 	if _reads_as_a_sentence(" ".join(str(raw).split())):
 		return line
 	headline = error_taxonomy.headline_for(raw)
-	return _one_line(headline.rstrip(".") + ".") if headline else ""
+	if not headline:
+		return ""
+	return _one_line(headline.rstrip(".") + "." + _reset_note(raw))
+
+
+# The part of a usage-limit error that says when the allowance comes back, up to the
+# separator the CLI puts after it. Read only for an error the "quota" rule matched.
+_RESET_AT = re.compile(r"\bresets?\s+(?:at\s+|on\s+|in\s+)?([^\n|\u00b7\u2219]{1,40})", re.IGNORECASE)
+
+
+def _reset_note(raw) -> str:
+	"""`` Resets 7:20am (UTC).`` for a usage-limit error that names when it resets, else "".
+	The headline alone tells an owner the allowance is used up, not when to try again."""
+	from jarvis.chat import error_taxonomy
+
+	text = " ".join(str(raw or "").split())
+	if error_taxonomy.classify_error_text(text) != "quota":
+		return ""
+	found = _RESET_AT.search(text)
+	when = found.group(1).strip(" .") if found else ""
+	return f" Resets {when}." if when else ""
 
 
 _REPLY_FIELDS = ["name", "content", "error", "streaming", "was_recovered"]

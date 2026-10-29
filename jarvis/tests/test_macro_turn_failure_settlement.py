@@ -32,6 +32,7 @@ from collections import defaultdict
 from unittest.mock import patch
 
 import frappe
+from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import finalize, macros, pump
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
@@ -166,6 +167,24 @@ class TestASummaryTurnThatFails(_PlayFrames, SummaryBase):
 					[c["kw"].get("errored") for c in self.calls], [True], "the hook ran once, errored"
 				)
 
+	def test_a_new_summary_wakes_the_pump_after_its_turn_is_committed(self):
+		"""The dispatch edge of #2194's "no job on any queue": a summary turn that is queued
+		is only ever started by a pump wake (or the watchdog). Nothing asserted the wake
+		for a summary: ``CheckBase`` replaces ``ensure_pump`` with a no-op."""
+		seen = []
+
+		def wake(target, **kw):
+			# The turn row exists when the wake comes.
+			seen.append((target, frappe.db.get_value(TURN, {"relay_target_id": target}, "state")))
+			return {"enqueued": False}
+
+		with patch.object(pump, "ensure_pump", wake):
+			name = self._mk_macro()
+			conv = self._summarize(name)
+		rid = frappe.db.get_value(TURN, {"conversation": conv}, "name")
+		self.assertEqual(self._state(rid), "queued")
+		self.assertEqual(seen, [(self._target, "queued")], "woken once, after the commit of the turn")
+
 	def test_a_stream_cut_with_only_a_lifecycle_error_is_not_a_terminal(self):
 		"""The turn parks for recovery; nothing has told the macro. Characterises the
 		window the five minute check and the watchdog are there for."""
@@ -228,7 +247,7 @@ class TestAStepTurnThatFails(_PlayFrames, CheckBase):
 				self.assertEqual([c["kw"].get("errored") for c in self.calls], [True])
 				self.assertTrue(self._closing_lines(conv), "the run chat holds the closing line")
 
-	def test_the_quota_text_reaches_the_chat_row_when_the_gateway_names_it(self):
+	def test_the_quota_text_reaches_the_chat_row_and_the_run_reason(self):
 		for shape in ("limit-chat-error", "limit-lifecycle-final"):
 			with self.subTest(shape=shape):
 				run, conv, rid = self._first_step()
@@ -236,6 +255,9 @@ class TestAStepTurnThatFails(_PlayFrames, CheckBase):
 				self._finalize(rid)
 				err = frappe.db.get_value(MSG, self._val(rid, "assistant_message"), "error") or ""
 				self.assertIn("session limit", err, "the chat row carries the provider's text")
+				reason = self._run(run).error or ""
+				self.assertIn("usage allowance", reason, "the run says it was a usage limit")
+				self.assertIn("7:20am (UTC)", reason, "and when it comes back")
 
 	def test_the_next_step_is_not_sent_after_a_failed_one(self):
 		run, conv, rid = self._first_step(stop_on_error=1)
@@ -274,3 +296,32 @@ class TestAStepTurnThatFails(_PlayFrames, CheckBase):
 		frappe.db.commit()
 		pump._watchdog_shard(self._target, deps, defaultdict(int))
 		self.assertIn((rid, self._target, "errored", "pending"), seen, "enqueued after the commit")
+
+
+class TestAUsageLimitReason(FrappeTestCase):
+	"""#2195: what the run row says for a provider's usage-limit text."""
+
+	def test_a_limit_with_a_reset_time_keeps_the_time(self):
+		cases = {
+			"You've hit your session limit \u00b7 resets 7:20am (UTC)": "Resets 7:20am (UTC).",
+			"You've hit your weekly limit \u00b7 resets Mon 9:00am": "Resets Mon 9:00am.",
+			"5-hour limit reached \u2219 resets 3pm": "Resets 3pm.",
+		}
+		for text, note in cases.items():
+			with self.subTest(text=text):
+				reason = macros._plain_reason(text)
+				self.assertTrue(
+					reason.startswith("The model account\u2019s usage allowance was reached."), reason
+				)
+				self.assertTrue(reason.endswith(note), reason)
+
+	def test_a_limit_without_a_reset_time_gets_the_headline_only(self):
+		self.assertEqual(
+			macros._plain_reason("Claude AI usage limit reached|1760000000"),
+			"The model account\u2019s usage allowance was reached.",
+		)
+
+	def test_other_errors_are_as_before(self):
+		self.assertEqual(macros._plain_reason("Daily limit of 5 emails reached"), "")
+		self.assertIn("request limit", macros._plain_reason("rate limit exceeded, resets in 5s"))
+		self.assertNotIn("Resets", macros._plain_reason("rate limit exceeded, resets in 5s"))
