@@ -1,4 +1,155 @@
-# File cursor reading
+# File reading and spreadsheet queries
+
+## JSON, Markdown and text queries
+
+`query_file` also accepts UTF-8 JSON, MD, Markdown and TXT files. It uses the same
+temporary SQLite database and bounded child process as spreadsheet queries. No
+analysis database is saved. Each call checks File read permission and loads the
+complete file before it runs a read-only SELECT. There is no ERP import.
+
+First omit `sql` to inspect the tables, columns and samples in `sheets`. This field
+also lists document tables for compatibility with existing clients. Omit the input
+`sheets` argument for documents; document queries always cover the entire file.
+Pin the returned `version` on follow-up queries.
+
+| Format | Tables | Source positions |
+|---|---|---|
+| JSON | `json_nodes(path,parent,key,kind,value,depth)` | RFC 6901 JSON pointers; `_row` is the node ordinal |
+| TXT | `text_lines(text,ending,section)` | `_row` is the original one-based line number |
+| MD/Markdown | `text_lines`, plus `md_table1`, `md_table2`, etc. | Original line numbers in `_row`, including table rows |
+
+JSON retains every container and scalar. The root pointer is an empty string.
+Object keys escape `~` as `~0` and `/` as `~1`; array indices use decimal strings.
+`parent` is the parent pointer, or SQL NULL at the root. `kind` is `object`, `array`,
+`string`, `number`, `boolean` or `null`. Containers and null have SQL NULL values.
+Booleans have `true` or `false` text. Numbers keep their original numeric token as
+text, including decimal precision. Empty containers and array order are retained.
+Duplicate object keys, non-finite values, invalid Unicode and depth over 64 fail.
+Nested arrays remain separate. No field flattening or record boundary is inferred.
+
+For example, after inspecting a JSON document with a `/payments` array whose
+records have `supplier` and `amount` fields:
+
+```sql
+SELECT supplier.value AS supplier, COUNT(*) AS payments,
+       decimal_sum(amount.value) AS total
+FROM json_nodes AS record
+JOIN json_nodes AS supplier
+  ON supplier.parent = record.path AND supplier.key = 'supplier'
+JOIN json_nodes AS amount
+  ON amount.parent = record.path AND amount.key = 'amount'
+WHERE record.parent = '/payments' AND record.kind = 'object'
+GROUP BY supplier.value
+```
+
+Check required fields and currency before calculating totals. Inner joins exclude
+records with missing fields. Do not sum every node with a matching key across
+unrelated arrays. `COUNT(*) FROM json_nodes` counts nodes, not payment records.
+
+Text lines retain their text and line endings. Markdown `section` values provide
+ATX heading paths outside fenced code; raw text remains the source of truth.
+Supported Markdown tables use pipes and separator cells with at least three
+hyphens. Optional outer pipes, column alignment markers and escaped pipes are
+supported. Code fences and indented code do not become tables. Table headers stay
+in the data; columns use A, B, etc. Table rows must have equal widths. Unequal rows
+fail with their source line number. Markdown markup inside cells is not rendered.
+Other Markdown layouts remain searchable as raw lines.
+
+For example, `SELECT _row, text FROM text_lines WHERE text LIKE '%reference%'`
+searches all lines. Use source ranges and `substr` for passages that exceed the
+result size. Search matches support relevant passages; they do not prove that an
+exhaustive summary covered every paragraph. Use `read_file` for sequential reading.
+Prose does not become a validated bank transaction merely because it is in SQLite.
+
+Documents return `read_contract: document-query-v1`; spreadsheet responses retain
+`spreadsheet-query-v1`. The plugin accepts both and fences all source metadata and
+values. `coverage.complete` confirms full source loading, while `result_truncated`
+describes displayed results. `source_unit` explains `source_rows`: JSON nodes, or
+text lines plus derived Markdown table rows. Markdown therefore counts some source
+lines again as table rows. These counts are never business record counts.
+
+The shared limits are 10 MiB input, 100,000 stored rows/nodes, two million cells,
+128 columns and the existing process/query/output budgets. Markdown supports at
+most 31 tables plus its raw line table. These limits can allow fewer than 100,000
+JSON business records. Exceeded limits fail before any query result is returned.
+Deploy the backend before the plugin. A previous plugin can still use spreadsheet
+queries; it rejects the new document contract instead of presenting a partial read.
+
+## Questions about large spreadsheets
+
+Use `query_file` for counts, searches, comparisons and totals over uploaded XLSX,
+CSV or TSV files. It loads every row of the selected worksheets into a disposable
+in-memory database before it runs a read-only SQLite SELECT. The source rows do
+not pass through the model. This supports large reports such as six months of
+GSTR-2B data without the cursor reader's context budget.
+
+First call with `file_url` and no `sql` to inspect worksheet names, stable table
+names, column letters, source row counts and small samples. Samples include source
+row numbers. Titles, headers, blanks, totals and hidden rows stay in the source;
+the agent must select invoice rows explicitly. If headers are below the sample,
+query the next source row range to inspect them. No GST field mapping is inferred.
+
+Tables use the original workbook ordinal: `sheet1`, `sheet2`, and so on. Selecting
+only the sixth worksheet still exposes it as `sheet6`. Columns use Excel letters
+`A`, `B`, etc.; `_row` preserves the one-based source row number. CSV/TSV exposes
+`sheet1`, named `Sheet1`. Excel date cells use ISO strings; text dates retain their
+source format. Blank Excel cells are NULL; blank CSV cells are empty strings.
+
+Pass the returned `version` on follow-up queries and keep the same `sheets` scope.
+A change to the file identity, bytes or scope requires a fresh inspection. Each
+call rechecks the user's File read permission before reading bytes. There is no
+analysis cache, retained database, new document, ERP import or model call.
+
+For example, after inspecting the actual headers and row types:
+
+```json
+{
+  "file_url": "/private/files/2b.xlsx",
+  "sql": "SELECT A AS gstin, COUNT(*) AS lines, decimal_sum(D) AS taxable, decimal_sum(E) AS igst FROM sheet1 WHERE _row > 2 AND A != 'TOTAL' GROUP BY A",
+  "version": "<version from the inspection>"
+}
+```
+
+This example assumes column A is GSTIN, D is taxable value and E is IGST. Real
+reports can have different layouts. Preserve credit-note signs and currency and
+tax meanings. Count distinct invoice keys when one invoice spans multiple rows.
+Combine matching columns from monthly worksheets with `UNION ALL` before grouping.
+
+Use `decimal_sum`, `decimal_avg`, `decimal_min`, `decimal_max` and
+`decimal_add/sub/mul/div` for amounts. They accept plain numeric values, Western or
+Indian comma grouping, and parenthesized negatives. They return decimal strings.
+Empty values are ignored by aggregates. Invalid nonempty values fail the query;
+they never become zero. Plain `sum`, `avg` and `total` are denied. Decimal arithmetic
+uses 80 digits of precision; division can round repeating results. SQL arithmetic
+and casts use SQLite number semantics, so use decimal functions for money.
+
+`coverage.complete` confirms loading of all source rows in the selected scope.
+`source_rows` includes headers and totals. It is not an invoice count.
+`result_truncated` describes only the displayed query result: default 100 rows,
+maximum 200, with a 16,000-character output budget. Narrow filters or group results
+when the display is incomplete. Never report all matching invoices as displayed
+when this flag is true. No query returns an aggregate over a silently cut source.
+
+Hard limits: 10 MiB input, 64 MiB expanded XLSX, 32 sheets, 128 columns,
+100,000 total source rows and two million cells. Missing formula caches, unsupported
+chart sheets, malformed encodings or exceeded limits fail explicitly. Select data
+worksheets explicitly to exclude chart sheets. Recalculate formulas and save the
+workbook before uploading it; cached formula values can be stale. Legacy XLS must
+be saved as XLSX. Parser/query failures return no complete answer.
+
+The child has 22 seconds of wall time, 16 seconds of CPU time and a 512 MiB Linux
+address-space limit. SQLite work also has a VM-step limit. A deny-by-default
+authorizer permits SELECT, reads of imported tables and a small function allowlist.
+It refuses mutations, PRAGMA, ATTACH, schema reads and extension/file functions.
+All source data and SQL travel on stdin with shell execution disabled. The parent
+kills and reaps a timed-out child. The plugin keeps values inside an escaped data
+fence and records structural logs without SQL, file paths or source values.
+
+Deploy the backend before the matching plugin. Existing `read_file` cursor and
+preview contracts remain available. A plugin rollback restores the previous tool
+set. There is no new persisted analysis state to migrate or delete.
+
+## Exact cursor reads
 
 `read_file` returns exact extracted values in bounded windows. For whole-file tasks,
 the agent follows `next_read` sequentially across files. The customer does not manage
