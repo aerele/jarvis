@@ -300,6 +300,12 @@ scheduler_events = {
 			# path. Bounded per run (capacity_attempts), then the run fails honestly.
 			# Cheap no-op (one indexed status query) when nothing is parked.
 			"jarvis.chat.macros.resume_waiting_capacity_runs",
+			# A macro run parked in `waiting_report` (its step started a prepared
+			# report) is continued when the report is ready, or ended when it failed or
+			# overran its deadline. The Prepared Report on_update hook wakes it at once;
+			# this is the guarantee. Cheap no-op (one indexed status query) when nothing
+			# is parked.
+			"jarvis.chat.macro_report_wait.resume_report_waits",
 			# A macro run moves when its step's turn end reaches the chaining hook, and
 			# several ends never do (a turn that fails before it is sent, ages out of the
 			# queue or is cancelled queued has no finalize job; a finalize job that died
@@ -664,8 +670,15 @@ doc_events["Jarvis Conversation"] = {
 # A saved report's background export waits for Frappe's prepared copy; the moment
 # the run saves its Completed (or Error) state, the export dispatcher is woken so the
 # file follows within seconds rather than at the next five-minute reap (#2102).
+#
+# A macro run parked while its step's report generates is woken by the same event, by a
+# handler of its own: neither can fail the other or the save. The */5 cron
+# (`resume_report_waits`) is the guarantee; this is the speed.
 doc_events["Prepared Report"] = {
-	"on_update": "jarvis.tools._export.jobs.on_prepared_report_update",
+	"on_update": [
+		"jarvis.tools._export.jobs.on_prepared_report_update",
+		"jarvis.chat.macro_report_wait.on_prepared_report_update",
+	],
 }
 
 # A pending action never blocks deleting the conversation it points at; the

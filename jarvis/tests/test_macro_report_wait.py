@@ -9,14 +9,18 @@ turn machine) must get today's answer, byte for byte.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 from unittest.mock import patch
 
 import frappe
 from frappe.utils import add_to_date, now_datetime
 
-from jarvis.chat import macro_report_wait, macros, macros_api, report_runs
+from jarvis.chat import admission, macro_report_wait, macros, macros_api, report_runs
 from jarvis.tests import test_macro_run_outcome as outcome
+from jarvis.tests.race_harness import other_connection
+from jarvis.tests.test_macro_dispatch_identity import IdentityBase
 from jarvis.tests.test_run_report import PREP_REPORT, _completed, _ensure_report
 from jarvis.tools import _agent_run_ctx
 from jarvis.tools.run_report import run_report
@@ -367,6 +371,10 @@ class ParkBase(GateBase):
 			_ensure_report(name, prepared=1)
 		self._clear_prepared()
 		self.addCleanup(self._clear_prepared)
+		# A real wake would queue a job some worker on the site might run mid-test.
+		self._wake_patch = patch("jarvis.chat.macro_report_wait.wake")
+		self.wake = self._wake_patch.start()
+		self.addCleanup(self._wake_patch.stop)
 
 	def _clear_prepared(self):
 		frappe.db.delete("Prepared Report", {"report_name": ["in", [PREP_REPORT, REPORT_B]]})
@@ -906,3 +914,840 @@ class TestAParkedRunIsLive(ParkBase):
 		self.assertEqual(macros_api._RUN_STATUSES, options)
 		self.assertTrue(set(macros._LIVE_RUN_STATUSES) <= options)
 		self.assertIn("waiting_report", macros._LIVE_RUN_STATUSES)
+
+
+# --------------------------------------------------------------------------- #
+# waking a parked run
+# --------------------------------------------------------------------------- #
+_ENQUEUE_TURN = "jarvis.chat.api._enqueue_turn"
+_OVERLOADED = "jarvis.chat.admission.shard_overloaded"
+_BAD_ERROR = (
+	"Traceback (most recent call last):\n"
+	'  File "report.py", line 3, in execute\n'
+	"frappe.exceptions.ValidationError: Set the `Company` filter\nbefore running this"
+)
+
+
+class ResumeBase(ParkBase):
+	"""A two-step run parked on one prepared report (``self.pr``, still Started)."""
+
+	def setUp(self):
+		super().setUp()
+		self.run, self.conv, self.macro = self._parked()
+
+	def _parked(self, reports=((PREP_REPORT, _ACME),), **kw):
+		run, conv, macro = self._mk_run(steps=2, at_step=1, **kw)
+		self.prs = [self._pr(report, filters) for report, filters in reports]
+		self.pr = self.prs[0]
+		step_turn = self._end_step(
+			run,
+			conv,
+			[
+				dict(status="started", run=pr, report=report, filters=filters, waiting=True)
+				for pr, (report, filters) in zip(self.prs, reports, strict=True)
+			],
+		)
+		self._advance(conv, step_turn)
+		self.assertEqual(self._values(run).status, "waiting_report")
+		frappe.set_user("Administrator")
+		return run, conv, macro
+
+	def _set_pr(self, name=None, **values):
+		frappe.db.set_value("Prepared Report", name or self.pr, values, update_modified=False)
+		frappe.db.commit()
+
+	def _ready(self, name=None):
+		self._set_pr(name, status="Completed", report_end_time="2026-10-28 09:30:00")
+
+	def _row(self, run=None):
+		return frappe.db.get_value(
+			RUN,
+			run or self.run,
+			[
+				"status",
+				"error",
+				"resume_turn",
+				"resume_count",
+				"step_resumes",
+				"resume_compensations",
+				"waiting_failed",
+				"step_continuations",
+				"waiting_on",
+			],
+			as_dict=True,
+		)
+
+	def _sending(self, result=None, raises=None):
+		"""Stand-in for ``api._enqueue_turn``. Notes the run's row as it stood AT the call
+		(``seen``), and, like the real gate, leaves the Turn named by ``run_id`` unless
+		``result`` or ``raises`` says it did not get that far."""
+		seen = []
+
+		def enqueue(conversation, prompt, **kw):
+			seen.append(self._row())
+			if raises:
+				raise raises
+			if result is not None:
+				return result
+			self._turn_as(conversation, kw["run_id"], state="queued")
+			return {"run_id": kw["run_id"], "message_id": None}
+
+		patcher = patch(_ENQUEUE_TURN, side_effect=enqueue)
+		mock = patcher.start()
+		self.addCleanup(patcher.stop)
+		mock.seen = seen
+		return mock
+
+	def _resume(self, run=None):
+		frappe.set_user("Administrator")
+		macro_report_wait.resume_report_waits(run)
+		frappe.set_user("Administrator")
+
+
+class TestAReadyReportContinuesTheStep(ResumeBase):
+	def test_a_completed_report_sends_exactly_one_continuation_hook_and_cron_alike(self):
+		self._ready()
+		enqueue = self._sending()
+		self._resume(self.run)  # the Prepared Report hook's wake
+		self._resume()  # the cron, straight after
+		self.assertEqual(enqueue.call_count, 1)
+		args, kw = enqueue.call_args
+		self.assertEqual(args[0], self.conv)
+		self.assertEqual(
+			{k: v for k, v in kw.items() if k != "run_id"},
+			{"origin": "continuation", "hidden": True, "interactive": False},
+		)
+		got = self._row()
+		self.assertEqual(kw["run_id"], got.resume_turn)
+		self.assertEqual(kw["run_id"], hashlib.sha1(f"{self.run}:0:report:1".encode()).hexdigest()[:12])
+		self.assertEqual(got.status, "running")
+
+	def test_the_turn_id_is_in_the_row_before_the_enqueue_and_the_counters_are_not(self):
+		self._ready()
+		enqueue = self._sending()
+		self._resume()
+		(seen,) = enqueue.seen
+		self.assertEqual(seen.status, "running")
+		self.assertEqual(seen.resume_turn, self._row().resume_turn)
+		self.assertTrue(seen.resume_turn)
+		self.assertEqual((seen.resume_count, seen.step_resumes), (0, 0))
+		after = self._row()
+		self.assertEqual((after.resume_count, after.step_resumes, after.resume_compensations), (1, 1, 0))
+		self.assertEqual(json.loads(after.step_continuations), {"0": after.resume_turn})
+
+	def test_the_continuation_is_recorded_beside_the_steps_before_it(self):
+		frappe.db.set_value(RUN, self.run, "step_continuations", json.dumps({"3": "older"}))
+		frappe.db.commit()
+		self._ready()
+		self._sending()
+		self._resume()
+		self.assertEqual(
+			json.loads(self._row().step_continuations), {"3": "older", "0": self._row().resume_turn}
+		)
+
+	def test_the_prompt_names_the_report_and_carries_the_stored_filters_verbatim(self):
+		self._ready()
+		enqueue = self._sending()
+		self._resume()
+		prompt = enqueue.call_args.args[1]
+		self.assertEqual(
+			prompt,
+			f"{PREP_REPORT} (generated 2026-10-28 09:30:00) is ready. Call run_report with exactly "
+			'these filters and finish this step: `{"company": "Acme"}`',
+		)
+
+	def test_a_summarized_run_finishes_the_remaining_task(self):
+		frappe.db.set_value(RUN, self.run, {"run_mode": "merged", "total_steps": 1})
+		frappe.db.commit()
+		self._ready()
+		enqueue = self._sending()
+		self._resume()
+		self.assertIn("and finish the remaining task: `", enqueue.call_args.args[1])
+		self.assertNotIn("finish this step", enqueue.call_args.args[1])
+		self.assertEqual(self._row().status, "running")
+
+	def test_two_reports_are_one_line_each_and_a_backtick_in_a_filter_cannot_close_the_span(self):
+		run, conv, _ = self._parked(
+			reports=((PREP_REPORT, {"company": "A`B"}), (REPORT_B, _GLOBEX)), tag="two"
+		)
+		self.run, self.conv = run, conv
+		for pr in self.prs:
+			self._ready(pr)
+		enqueue = self._sending()
+		self._resume()
+		lines = enqueue.call_args.args[1].split("\n")
+		self.assertEqual(len(lines), 2)
+		self.assertTrue(lines[0].startswith(f"{PREP_REPORT} "))
+		self.assertTrue(lines[1].startswith(f"{REPORT_B} "))
+		for line in lines:
+			self.assertEqual(line.count("`"), 2, line)
+		self.assertEqual(json.loads(lines[0].split("`")[1]), {"company": "A`B"})
+
+	def test_a_report_still_generating_keeps_the_run_parked(self):
+		for status in ("Queued", "Started"):
+			with self.subTest(status=status):
+				self._set_pr(status=status)
+				enqueue = self._sending()
+				self._resume()
+				enqueue.assert_not_called()
+				self.assertEqual(self._row().status, "waiting_report")
+
+	def test_it_waits_for_every_report_of_the_step(self):
+		run, conv, _ = self._parked(reports=((PREP_REPORT, _ACME), (REPORT_B, _GLOBEX)), tag="two")
+		self.run, self.conv = run, conv
+		self._ready(self.prs[0])
+		enqueue = self._sending()
+		self._resume()
+		enqueue.assert_not_called()
+		self.assertEqual(self._row().status, "waiting_report")
+		self._ready(self.prs[1])
+		self._resume()
+		self.assertEqual(enqueue.call_count, 1)
+
+	def test_a_report_of_another_user_is_not_the_awaited_one(self):
+		self._ready()
+		self._set_pr(owner="Administrator")
+		enqueue = self._sending()
+		self._resume()
+		self.assertIn("was removed", enqueue.call_args.args[1])
+
+	def test_a_run_that_is_not_waiting_is_left_alone(self):
+		self._ready()
+		frappe.db.set_value(RUN, self.run, "status", "stopped")
+		frappe.db.commit()
+		enqueue = self._sending()
+		self._resume()
+		enqueue.assert_not_called()
+
+	def test_a_run_stopped_between_the_list_and_the_lock_is_left_stopped(self):
+		self._ready()
+		enqueue = self._sending()
+
+		@contextlib.contextmanager
+		def stopped_while_waiting_for_the_lock(*a, **k):
+			# A Stop from another worker, committed after this one listed the run and
+			# before it got the lock.
+			with other_connection() as other:
+				other.sql(f"UPDATE `tab{RUN}` SET status='stopped' WHERE name=%s", self.run)
+				other.commit()
+			yield True
+
+		with (
+			patch("jarvis._redis_lock.redis_lock", stopped_while_waiting_for_the_lock),
+			patch.object(macro_report_wait, "_state_of", wraps=macro_report_wait._state_of) as looked,
+		):
+			self._resume()  # the cron: lists first, so its transaction holds a read view
+		enqueue.assert_not_called()
+		looked.assert_not_called()  # it never acted on the stale `waiting_report`
+		frappe.db.commit()
+		self.assertEqual(self._row().status, "stopped")
+
+	def test_a_run_whose_lock_is_held_is_skipped(self):
+		self._ready()
+		enqueue = self._sending()
+
+		@contextlib.contextmanager
+		def busy(*a, **k):
+			yield False
+
+		with patch("jarvis._redis_lock.redis_lock", busy):
+			self._resume()
+		enqueue.assert_not_called()
+		self.assertEqual(self._row().status, "waiting_report")
+
+
+class TestAResumeThatCannotGoYet(ResumeBase):
+	def test_the_turn_machine_off_or_draining_keeps_the_run_parked_untouched(self):
+		self._ready()
+		before = self._row()
+		enqueue = self._sending()
+		seen = []
+		with patch(_MACHINE, side_effect=lambda **kw: seen.append(kw) or False):
+			self._resume()
+		enqueue.assert_not_called()
+		self.assertEqual(self._row(), before)
+		self.assertEqual(seen, [{"from_db": True}])  # the fenced, DB-authoritative read
+
+	def test_a_full_queue_keeps_the_run_parked_untouched(self):
+		self._ready()
+		before = self._row()
+		enqueue = self._sending()
+		with patch(_OVERLOADED, return_value=True) as full:
+			self._resume()
+		enqueue.assert_not_called()
+		self.assertEqual(self._row(), before)
+		self.assertEqual(full.call_args.args, (self.conv,))
+		self.assertTrue(full.call_args.kwargs["background"])  # the line a continuation joins
+
+	def test_a_queue_that_fills_after_the_check_parks_the_run_again_without_counting(self):
+		self._ready()
+		enqueue = self._sending(result={"ok": False, "overloaded": True, "reason": "busy"})
+		self._resume()
+		got = self._row()
+		self.assertEqual(got.status, "waiting_report")
+		self.assertEqual((got.resume_count, got.step_resumes, got.resume_compensations), (0, 0, 0))
+		self.assertFalse(got.waiting_failed)
+		# The id was chosen once: the next attempt sends the very same turn.
+		first = enqueue.call_args.kwargs["run_id"]
+		self.assertEqual(got.resume_turn, first)
+		self.assertEqual(json.loads(got.waiting_on)[0]["prepared_report"], self.pr)  # the wait is intact
+		enqueue = self._sending()
+		self._resume()
+		self.assertEqual(enqueue.call_args.kwargs["run_id"], first)
+		self.assertEqual(self._row().status, "running")
+
+
+class TestADeliveryThatFailsOrRepeats(ResumeBase):
+	def test_an_enqueue_that_raises_is_compensated_and_the_retry_reuses_the_id(self):
+		self._ready()
+		enqueue = self._sending(raises=RuntimeError("redis down"))
+		with patch("frappe.log_error"):
+			self._resume()
+		got = self._row()
+		self.assertEqual(got.status, "waiting_report")
+		self.assertEqual((got.resume_compensations, got.resume_count, got.step_resumes), (1, 0, 0))
+		first = enqueue.call_args.kwargs["run_id"]
+		self.assertEqual(got.resume_turn, first)
+		enqueue = self._sending()
+		self._resume()
+		self.assertEqual(enqueue.call_args.kwargs["run_id"], first)
+		got = self._row()
+		self.assertEqual((got.status, got.resume_count, got.step_resumes), ("running", 1, 1))
+		self.assertEqual(got.resume_compensations, 1)  # counted apart, never reset
+
+	def test_a_refusal_that_is_not_overload_is_compensated_too(self):
+		self._ready()
+		self._sending(result={"ok": False, "reason": "no"})
+		with patch("frappe.log_error"):
+			self._resume()
+		got = self._row()
+		self.assertEqual((got.status, got.resume_compensations, got.resume_count), ("waiting_report", 1, 0))
+
+	def test_a_raise_after_the_turn_exists_leaves_the_run_running_and_counts_the_resume(self):
+		self._ready()
+
+		def enqueue(conversation, prompt, **kw):
+			self._turn_as(conversation, kw["run_id"], state="queued")
+			raise RuntimeError("died after the turn was written")
+
+		with patch(_ENQUEUE_TURN, side_effect=enqueue), patch("frappe.log_error"):
+			self._resume()
+		got = self._row()
+		self.assertEqual((got.status, got.resume_count, got.step_resumes), ("running", 1, 1))
+		self.assertEqual(got.resume_compensations, 0)
+
+	def test_a_duplicate_means_it_went_out_so_the_run_stays_running_and_counts(self):
+		self._ready()
+		# A duplicate means the turn is there: this chat's, under the id the CAS names.
+		self._turn_as(self.conv, hashlib.sha1(f"{self.run}:0:report:1".encode()).hexdigest()[:12])
+		self._sending(result={"run_id": "x", "message_id": None, "duplicate": True})
+		self._resume()
+		got = self._row()
+		self.assertEqual((got.status, got.resume_count, got.step_resumes), ("running", 1, 1))
+		self.assertEqual(json.loads(got.step_continuations), {"0": got.resume_turn})
+
+	def _taken_elsewhere(self):
+		"""The id the first continuation gets, already the name of a Turn in another chat."""
+		_, other_conv, _ = self._mk_run(steps=2, at_step=1, tag="elsewhere")
+		taken = hashlib.sha1(f"{self.run}:0:report:1".encode()).hexdigest()[:12]
+		self._turn_as(other_conv, taken, state="done")
+		return taken
+
+	def test_a_duplicate_that_is_another_chats_turn_did_not_go_out(self):
+		self._taken_elsewhere()
+		self._ready()
+		self._sending(result={"run_id": "x", "message_id": None, "duplicate": True})
+		with patch("frappe.log_error"):
+			self._resume()
+		got = self._row()
+		self.assertEqual((got.status, got.resume_count, got.step_resumes), ("waiting_report", 0, 0))
+		self.assertEqual(got.resume_compensations, 1)
+		self.assertFalse(got.step_continuations)
+
+	def test_a_raise_with_the_id_taken_by_another_chat_is_compensated_too(self):
+		self._taken_elsewhere()
+		self._ready()
+		self._sending(raises=RuntimeError("died"))
+		with patch("frappe.log_error"):
+			self._resume()
+		got = self._row()
+		self.assertEqual((got.status, got.resume_count, got.resume_compensations), ("waiting_report", 0, 1))
+
+	def test_the_fourth_compensation_ends_the_run_failed(self):
+		self._ready()
+		self._sending(raises=RuntimeError("redis down"))
+		with patch("frappe.log_error"):
+			for _ in range(3):
+				self._resume()
+				self.assertEqual(self._row().status, "waiting_report")
+			self._resume()
+		got = self._row()
+		self.assertEqual(got.status, "failed")
+		self.assertIn("could not be continued", got.error)
+
+	def test_the_error_logs_have_fixed_titles_and_come_once_an_hour_per_run(self):
+		frappe.db.delete("Error Log", {"method": ["like", "Jarvis: macro report%"]})
+		self._ready()
+		self._sending(raises=RuntimeError("redis down"))
+		for _ in range(4):
+			self._resume()
+		titles = frappe.get_all(
+			"Error Log", filters={"method": ["like", "Jarvis: macro report%"]}, pluck="method"
+		)
+		self.assertEqual(
+			sorted(titles),
+			[
+				"Jarvis: macro report resume compensated",
+				"Jarvis: macro report resume not delivered",
+			],
+		)
+		frappe.db.delete("Error Log", {"method": ["like", "Jarvis: macro report%"]})
+		frappe.db.commit()
+
+
+class TestAReportThatFailed(ResumeBase):
+	def _assert_explained(self, enqueue, needle, *, state="running"):
+		self.assertEqual(enqueue.call_count, 1)
+		prompt = enqueue.call_args.args[1]
+		self.assertTrue(
+			prompt.startswith(f"{PREP_REPORT} could not be produced. The system's reason, quoted as data")
+		)
+		self.assertIn(needle, prompt)
+		self.assertTrue(prompt.endswith("Tell the user this step stopped and why. Do not continue the task."))
+		got = self._row()
+		self.assertEqual(got.status, state)
+		self.assertEqual(got.waiting_failed, 1)
+		self.assertEqual(got.resume_turn, enqueue.call_args.kwargs["run_id"])
+		self.assertEqual(got.resume_count, 1)
+
+	def test_error_failed_and_cancelled_each_send_the_explanation(self):
+		statuses = ["Error", "Failed"]
+		if "Cancelled" in (frappe.get_meta("Prepared Report").get_field("status").options or ""):
+			statuses.append("Cancelled")
+		for status in statuses:
+			with self.subTest(status=status):
+				run, conv, _ = self._parked(tag=status.lower())
+				self.run, self.conv = run, conv
+				self._set_pr(status=status, error_message="Report timed out.")
+				enqueue = self._sending()
+				self._resume()
+				self._assert_explained(enqueue, "It took too long to generate and was stopped.")
+				self.assertNotIn("is ready", enqueue.call_args.args[1])
+
+	def test_a_status_with_no_reason_still_says_what_happened(self):
+		self._set_pr(status="Cancelled" if False else "Failed", error_message="")
+		enqueue = self._sending()
+		self._resume()
+		self._assert_explained(enqueue, "the report failed")
+
+	def test_a_deleted_report_is_a_removed_report(self):
+		frappe.db.delete("Prepared Report", {"name": self.pr})
+		frappe.db.commit()
+		enqueue = self._sending()
+		self._resume()
+		self._assert_explained(enqueue, "the report was removed")
+
+	def test_a_failure_beats_a_report_still_generating(self):
+		run, conv, _ = self._parked(reports=((PREP_REPORT, _ACME), (REPORT_B, _GLOBEX)), tag="two")
+		self.run, self.conv = run, conv
+		self._set_pr(self.prs[1], status="Error", error_message="Report timed out.")
+		enqueue = self._sending()
+		self._resume()
+		self.assertIn(f"{REPORT_B} could not be produced", enqueue.call_args.args[1])
+
+	def test_the_reason_is_one_line_with_no_backtick_to_close_the_span(self):
+		self._set_pr(status="Error", error_message=_BAD_ERROR)
+		enqueue = self._sending()
+		self._resume()
+		prompt = enqueue.call_args.args[1]
+		self.assertIn("`Set the 'Company' filter before running this", prompt)
+		self.assertEqual(prompt.count("`"), 2)
+		self.assertNotIn("\n", prompt)
+
+	def test_the_detail_is_capped(self):
+		out = macro_report_wait._failed_prompt({"report": "R", "detail": "x`y\n" * 400})
+		span = out.split("`")[1]
+		self.assertEqual(out.count("`"), 2)
+		self.assertLessEqual(len(span), 300)
+		self.assertNotIn("\n", out)
+
+	def test_the_chat_is_disarmed_before_the_explanation_goes(self):
+		run, conv, _ = self._parked(armed=True, tag="armed")
+		self.run, self.conv = run, conv
+		self.assertTrue(frappe.db.get_value(CONV, conv, "skip_confirmation"))
+		self._set_pr(status="Error", error_message="Report timed out.")
+		armed_at_send = []
+
+		def enqueue(conversation, prompt, **kw):
+			armed_at_send.append(frappe.db.get_value(CONV, conversation, "skip_confirmation"))
+			self._turn_as(conversation, kw["run_id"], state="queued")
+			return {"run_id": kw["run_id"], "message_id": None}
+
+		with patch(_ENQUEUE_TURN, side_effect=enqueue):
+			self._resume()
+		self.assertEqual(armed_at_send, [0])
+		self.assertEqual(self._row().waiting_failed, 1)
+
+	def test_a_card_that_outlived_the_sweep_ends_the_run_with_no_model_turn(self):
+		run, conv, _ = self._parked(armed=True, tag="card")
+		self.run, self.conv = run, conv
+		self._set_pr(status="Error", error_message="Report timed out.")
+		enqueue = self._sending()
+		with (
+			patch("jarvis.chat.pending_confirm.has_live_card", return_value=True),
+			patch("frappe.log_error"),
+		):
+			self._resume()
+		enqueue.assert_not_called()
+		got = self._row()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(
+			got.error, f"Step 1 stopped: {PREP_REPORT} failed: It took too long to generate and was stopped."
+		)
+		self.assertEqual(got.waiting_failed, 0)
+		self.assertTrue(frappe.db.get_value(CONV, conv, "skip_confirmation"))  # fail closed
+
+	def test_a_failed_explanation_that_did_not_go_is_put_back_not_failed_open(self):
+		self._set_pr(status="Error", error_message="Report timed out.")
+		self._sending(raises=RuntimeError("redis down"))
+		with patch("frappe.log_error"):
+			self._resume()
+		got = self._row()
+		self.assertEqual((got.status, got.waiting_failed, got.resume_compensations), ("waiting_report", 0, 1))
+
+
+class TestTheWaitsDeadline(ResumeBase):
+	def _wait_since(self, minutes):
+		self._set_wait(add_to_date(now_datetime(), minutes=-minutes))
+
+	def _set_wait(self, when):
+		frappe.db.set_value(RUN, self.run, "waiting_since", when, update_modified=False)
+		frappe.db.commit()
+
+	def test_a_report_inside_its_deadline_is_waited_for(self):
+		# Frappe's 25 minutes + the stall margin + the hour of queue grace.
+		self._wait_since(89)
+		enqueue = self._sending()
+		self._resume()
+		enqueue.assert_not_called()
+		self.assertEqual(self._row().status, "waiting_report")
+
+	def test_a_report_past_its_deadline_failed_to_finish_in_time(self):
+		self._wait_since(91)
+		enqueue = self._sending()
+		self._resume()
+		self.assertIn("the report did not finish in time", enqueue.call_args.args[1])
+		self.assertEqual(self._row().waiting_failed, 1)
+
+	def _report_timeout(self, seconds):
+		old = frappe.db.get_value("Report", PREP_REPORT, "timeout")
+		frappe.db.set_value("Report", PREP_REPORT, "timeout", seconds, update_modified=False)
+		frappe.db.commit()
+		self.addCleanup(
+			lambda: (
+				frappe.db.set_value("Report", PREP_REPORT, "timeout", old, update_modified=False),
+				frappe.db.commit(),
+			)
+		)
+
+	def test_the_deadline_follows_the_reports_own_timeout(self):
+		self._report_timeout(3 * 3600)  # + 5 minutes of stall margin + the hour of queue grace
+		self._wait_since(244)
+		enqueue = self._sending()
+		self._resume()
+		enqueue.assert_not_called()
+		self._wait_since(246)
+		self._resume()
+		self.assertIn("did not finish in time", enqueue.call_args.args[1])
+
+	def test_nothing_waits_past_six_hours(self):
+		self._report_timeout(10 * 3600)
+		self._wait_since(6 * 60 + 1)
+		enqueue = self._sending()
+		self._resume()
+		self.assertIn("did not finish in time", enqueue.call_args.args[1])
+
+	def test_an_expired_wait_leaves_one_error_log(self):
+		frappe.db.delete("Error Log", {"method": macro_report_wait.LOG_EXPIRED})
+		self._wait_since(120)
+		self._sending(raises=RuntimeError("redis down"))
+		with patch("frappe.log_error", wraps=frappe.log_error) as log:
+			self._resume()
+			self._resume()
+		expired = [c for c in log.call_args_list if c.kwargs.get("title") == macro_report_wait.LOG_EXPIRED]
+		self.assertEqual(len(expired), 1)
+		self.assertIn(self.run, expired[0].kwargs["message"])
+		frappe.db.delete("Error Log", {"method": ["like", "Jarvis: macro report%"]})
+		frappe.db.commit()
+
+
+class TestTheCaps(ResumeBase):
+	def test_a_step_that_keeps_asking_to_wait_ends_the_run(self):
+		frappe.db.set_value(RUN, self.run, "step_resumes", 3)
+		frappe.db.commit()
+		self._ready()
+		enqueue = self._sending()
+		self._resume()
+		enqueue.assert_not_called()
+		got = self._row()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(got.error, "Step 1 kept waiting on reports, so the run was stopped.")
+
+	def test_a_run_that_keeps_waiting_ends_too(self):
+		frappe.db.set_value(RUN, self.run, "resume_count", 5)
+		frappe.db.commit()
+		self._ready()
+		enqueue = self._sending()
+		self._resume()
+		enqueue.assert_not_called()
+		self.assertEqual(self._row().status, "failed")
+
+	def test_one_below_the_caps_still_resumes(self):
+		frappe.db.set_value(RUN, self.run, {"step_resumes": 2, "resume_count": 4})
+		frappe.db.commit()
+		self._ready()
+		enqueue = self._sending()
+		self._resume()
+		self.assertEqual(enqueue.call_count, 1)
+		got = self._row()
+		self.assertEqual((got.step_resumes, got.resume_count), (3, 5))
+
+	def test_at_the_cap_a_failed_report_is_the_reason_given(self):
+		frappe.db.set_value(RUN, self.run, "step_resumes", 3)
+		frappe.db.commit()
+		self._set_pr(status="Error", error_message="Report timed out.")
+		enqueue = self._sending()
+		self._resume()
+		enqueue.assert_not_called()
+		self.assertIn("failed: It took too long", self._row().error)
+
+
+class TestTheSharedGuards(ResumeBase):
+	def test_a_hold_ends_a_waiting_run_without_a_turn(self):
+		self._ready()
+		enqueue = self._sending()
+		with patch("jarvis.chat.macros.is_held", return_value=True):
+			self._resume()
+		enqueue.assert_not_called()
+		self.assertEqual(self._row().status, "stopped")
+
+	def test_an_owner_who_may_no_longer_run_unattended_work_ends_the_run(self):
+		self._ready()
+		enqueue = self._sending()
+		with patch("jarvis.permissions.is_valid_unattended_owner", return_value=False):
+			self._resume()
+		enqueue.assert_not_called()
+		got = self._row()
+		self.assertEqual((got.status, got.error), ("failed", macros._OWNER_INELIGIBLE_ERROR))
+
+	def test_a_run_whose_macro_steps_vanished_is_incompatible_only_if_the_sent_step_did(self):
+		# A run with no steps snapshot reads the live macro: the step it parked on is the
+		# last, and that must not read as "the list shrank past the cursor".
+		frappe.db.set_value(RUN, self.run, {"steps_snapshot": "", "current_step": 2})
+		frappe.db.commit()
+		self._ready()
+		self._sending()
+		self._resume()
+		self.assertEqual(self._row().status, "running")
+
+
+# --------------------------------------------------------------------------- #
+# the wake
+# --------------------------------------------------------------------------- #
+class TestThePreparedReportHook(ResumeBase):
+	def _doc(self, name=None, status="Completed", owner=OWNER):
+		return frappe._dict(name=name or self.pr, status=status, owner=owner)
+
+	def _hook(self, doc):
+		with patch("frappe.enqueue") as enqueue:
+			macro_report_wait.on_prepared_report_update(doc)
+		return enqueue
+
+	def test_a_finished_awaited_report_wakes_its_run_after_commit(self):
+		for status in ("Completed", "Error", "Failed", "Cancelled"):
+			with self.subTest(status=status):
+				enqueue = self._hook(self._doc(status=status))
+				enqueue.assert_called_once()
+				self.assertEqual(
+					enqueue.call_args.args, ("jarvis.chat.macro_report_wait.resume_report_waits",)
+				)
+				kw = enqueue.call_args.kwargs
+				self.assertEqual(kw["run"], self.run)
+				self.assertEqual(kw["queue"], "short")
+				self.assertEqual(kw["job_id"], f"macro-report-wake-{self.run}")
+				self.assertTrue(kw["deduplicate"])
+				self.assertTrue(kw["enqueue_after_commit"])
+
+	def test_a_report_still_running_wakes_nobody(self):
+		for status in ("Queued", "Started"):
+			self._hook(self._doc(status=status)).assert_not_called()
+
+	def test_a_report_no_run_awaits_wakes_nobody(self):
+		self._hook(self._doc(name="PR-unrelated")).assert_not_called()
+
+	def test_another_users_report_of_the_same_name_wakes_nobody(self):
+		self._hook(self._doc(owner="Administrator")).assert_not_called()
+
+	def test_a_name_that_is_only_inside_another_name_wakes_nobody(self):
+		self._hook(self._doc(name=self.pr[:-1])).assert_not_called()
+
+	def test_a_run_that_is_not_waiting_is_not_woken(self):
+		frappe.db.set_value(RUN, self.run, "status", "stopped")
+		frappe.db.commit()
+		self._hook(self._doc()).assert_not_called()
+
+	def test_it_never_raises(self):
+		with patch("frappe.get_all", side_effect=RuntimeError("db gone")), patch("frappe.log_error") as log:
+			macro_report_wait.on_prepared_report_update(self._doc())
+		self.assertEqual(log.call_args.kwargs["title"], "jarvis macro report wake failed")
+		with patch("frappe.enqueue", side_effect=RuntimeError("redis")), patch("frappe.log_error"):
+			macro_report_wait.on_prepared_report_update(self._doc())
+
+	def test_the_hooks_file_registers_it_beside_the_export_handler_and_the_cron(self):
+		handlers = frappe.get_hooks("doc_events")["Prepared Report"]["on_update"]
+		self.assertIn("jarvis.chat.macro_report_wait.on_prepared_report_update", handlers)
+		self.assertIn("jarvis.tools._export.jobs.on_prepared_report_update", handlers)
+		self.assertIn(
+			"jarvis.chat.macro_report_wait.resume_report_waits",
+			frappe.get_hooks("scheduler_events")["cron"]["*/5 * * * *"],
+		)
+
+	def test_a_park_asks_for_a_wake_so_a_report_that_finished_mid_turn_resumes_at_once(self):
+		self.wake.assert_called_with(self.run)
+
+	def test_wake_queues_one_pending_job_per_run_and_never_raises(self):
+		self._wake_patch.stop()
+		with patch("frappe.enqueue") as enqueue:
+			macro_report_wait.wake(self.run)
+		kw = enqueue.call_args.kwargs
+		self.assertEqual((kw["run"], kw["queue"], kw["deduplicate"]), (self.run, "short", True))
+		self.assertEqual(kw["job_id"], f"macro-report-wake-{self.run}")
+		with patch("frappe.enqueue", side_effect=RuntimeError("redis")), patch("frappe.log_error") as log:
+			macro_report_wait.wake(self.run)
+		self.assertEqual(log.call_args.kwargs["title"], "jarvis macro report wake failed")
+
+
+class TestTheCronNeverRaises(ResumeBase):
+	def test_one_runs_fault_does_not_stop_the_others(self):
+		run2, conv2, _ = self._parked(tag="second")
+		self._ready()
+		self.pr2 = self.pr
+		calls = []
+
+		def one(name, wait=0.0):
+			calls.append(name)
+			if len(calls) == 1:
+				raise RuntimeError("boom")
+
+		with (
+			patch.object(macro_report_wait, "_resume_one", side_effect=one),
+			patch("frappe.log_error") as log,
+		):
+			self._resume()
+		self.assertEqual(len(calls), 2)
+		self.assertIn("jarvis macro report resume failed", log.call_args.kwargs["title"])
+
+	def test_a_run_that_keeps_failing_is_logged_once_an_hour(self):
+		title = f"jarvis macro report resume failed: {self.run}"
+		frappe.db.delete("Error Log", {"method": title})
+		with patch.object(macro_report_wait, "_resume_one", side_effect=RuntimeError("boom")):
+			for _ in range(3):
+				self._resume(self.run)
+		self.assertEqual(frappe.db.count("Error Log", {"method": title}), 1)
+		frappe.db.delete("Error Log", {"method": title})
+		frappe.db.commit()
+
+	def test_an_unreadable_list_is_logged_not_raised(self):
+		with patch("frappe.get_all", side_effect=RuntimeError("db gone")), patch("frappe.log_error"):
+			macro_report_wait.resume_report_waits()
+
+
+class TestTheRealEnqueueOnTheTurnMachine(IdentityBase):
+	"""The continuation through the real ``_enqueue_turn`` and accept gate (the pump
+	shard of ``IdentityBase``), not a stand-in: the turn named in the CAS is the Turn that
+	exists, with a hidden continuation message, and a second delivery meets it."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+		_ensure_report(PREP_REPORT, prepared=1)
+		frappe.db.delete("Prepared Report", {"report_name": PREP_REPORT})
+		self.addCleanup(
+			lambda: (frappe.db.delete("Prepared Report", {"report_name": PREP_REPORT}), frappe.db.commit())
+		)
+		self.run, self.conv, _ = self._mk_run(steps=2, at_step=1)
+		with patch(_ENQUEUE):
+			pr = frappe.get_doc(
+				{"doctype": "Prepared Report", "report_name": PREP_REPORT, "filters": json.dumps(_ACME)}
+			).insert(ignore_permissions=True)
+		self.pr = pr.name
+		frappe.db.set_value(
+			"Prepared Report", pr.name, {"status": "Completed", "owner": OWNER}, update_modified=False
+		)
+		frappe.db.set_value(
+			RUN,
+			self.run,
+			{
+				"status": "waiting_report",
+				"waiting_since": now_datetime(),
+				"waited": 1,
+				"waiting_on": json.dumps(
+					[{"prepared_report": self.pr, "report_name": PREP_REPORT, "filters": _ACME}]
+				),
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+	def _row(self):
+		return frappe.db.get_value(
+			RUN, self.run, ["status", "resume_turn", "resume_count", "step_resumes"], as_dict=True
+		)
+
+	def test_the_continuation_is_the_turn_the_cas_named(self):
+		macro_report_wait.resume_report_waits(self.run)
+		got = self._row()
+		self.assertEqual((got.status, got.resume_count, got.step_resumes), ("running", 1, 1))
+		turn = frappe.db.get_value(
+			TURN, got.resume_turn, ["conversation", "state", "seed_message", "turn_class"], as_dict=True
+		)
+		self.assertEqual(turn.conversation, self.conv)
+		self.assertEqual(turn.turn_class, "background")
+		seed = frappe.db.get_value(
+			MSG, turn.seed_message, ["role", "origin", "content", "hidden"], as_dict=True
+		)
+		self.assertEqual((seed.role, seed.origin), ("user", "continuation"))
+		self.assertTrue(seed.hidden)
+		self.assertIn(f"{PREP_REPORT} (generated ", seed.content)
+		self.assertIn(
+			' is ready. Call run_report with exactly these filters and finish this step: `{"company": "Acme"}`',
+			seed.content,
+		)
+		# A second look (the cron after the hook) finds a running run and sends nothing.
+		macro_report_wait.resume_report_waits()
+		self.assertEqual(self._names(self.conv), [got.resume_turn])
+
+	def test_a_turn_that_already_exists_is_a_duplicate_that_went_out(self):
+		macro_report_wait.resume_report_waits(self.run)
+		first = self._row()
+		# The run is parked again with the id unspent-looking: counters back, same id.
+		frappe.db.set_value(
+			RUN,
+			self.run,
+			{"status": "waiting_report", "resume_count": 0, "step_resumes": 0},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		macro_report_wait.resume_report_waits(self.run)
+		got = self._row()
+		self.assertEqual((got.status, got.resume_turn, got.resume_count), ("running", first.resume_turn, 1))
+		self.assertEqual(self._names(self.conv), [first.resume_turn])  # no second turn, no second message
+
+	def test_a_full_queue_keeps_the_run_parked_on_the_real_gate(self):
+		with patch.object(admission, "MAX_BACKGROUND_QUEUE_DEPTH", 0):
+			macro_report_wait.resume_report_waits(self.run)
+		got = self._row()
+		self.assertEqual((got.status, got.resume_count), ("waiting_report", 0))
+		self.assertEqual(self._names(self.conv), [])
+		macro_report_wait.resume_report_waits(self.run)
+		self.assertEqual(self._row().status, "running")
