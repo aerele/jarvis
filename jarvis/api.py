@@ -4181,6 +4181,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				frappe.clear_messages()
 				return refusal
 			preview["card"] = card
+			if tool == "create_doc" and isinstance(card, dict) and _risk != "sensitive" and not _guarded:
+				# The ORIGINAL proposal's identity: saving a draft card of the very same
+				# proposal retires this card (#777, jarvis.chat.one_approval). Not on a
+				# sensitive or structure card: its draft parks a card instead of saving.
+				from jarvis.chat.one_approval import create_key
+
+				card["proposal_key"] = create_key(args.get("doctype"), args.get("values"))
 			if from_draft and isinstance(preview.get("card"), dict):
 				# On the card too: a reloaded desktop seeds the card from its message
 				# row (pending_card), which carries only the card.

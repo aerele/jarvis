@@ -33,6 +33,7 @@
     "armed_by_skill",
     "ref_doctype",
     "ref_name",
+    "draft_saved_as",
     "canvas",
     "steps",
     "reply_duration_ms",
@@ -246,6 +247,16 @@
       "hidden": 1,
       "search_index": 1,
       "description": "Populated programmatically: the document name paired with ref_doctype."
+    },
+    {
+      "fieldname": "draft_saved_as",
+      "fieldtype": "Data",
+      "label": "Draft Saved As",
+      "hidden": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "permlevel": 1,
+      "description": "Server-only (#777). On an assistant reply with a create draft card: the record the draft was saved as. Claimed and set in the save's own transaction, so a draft is saved at most once."
     },
     {
       "fieldname": "canvas",
