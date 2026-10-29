@@ -17,6 +17,15 @@
 // `replay` plays again over a screen whose cards are showing: no floor props, no greeting swap.
 import { Stage, ballistic, r2, rng, tr } from "../stage.mjs";
 import {
+  BURSTS,
+  MARK_TOP,
+  TORAN,
+  fireworksMinDy,
+  fitPoint,
+  floorFit,
+  floorTransform,
+} from "../scene-geometry.mjs";
+import {
   FLAME_TILE,
   FLASHES,
   LAND_MS,
@@ -87,12 +96,12 @@ class DiwaliScene {
   start() {
     const beat = this.opts.onBeat;
     this.geo = this.measure();
-    const { W, H, s, cxPx, dy, ground, skyPx, from, to } = this.geo;
+    const { W, H, s, cxPx, dy, ground, floor, skyPx, from, to } = this.geo;
     const p = this.p;
     const inner = `${styleSVG(p)}${defsSVG(p)}${skySVG(p, W, skyPx)}
       <g transform="translate(${r2(cxPx)} 0) scale(${r2(s)}) translate(-400 0)">
         ${skyShowSVG(p, dy)}${toranSVG(p, from, to)}${
-      this.opts.replay ? "" : floorSVG(p, ground)
+      this.opts.replay ? "" : floorSVG(p, ground, floor)
     }
       </g>`;
     this.stage.mount(W, H, inner);
@@ -117,6 +126,14 @@ class DiwaliScene {
   relayout(boxes) {
     if (this.settled || !this.geo) return;
     this.geo = { ...this.geo, ...this.measure(boxes) };
+    this.refitFloor();
+  }
+
+  // The floor row follows the stage height: shrunk and lifted on a short stage (see
+  // scene-geometry.mjs floorFit), so it is always whole above the composer.
+  refitFloor() {
+    const row = this.stage.q(`.${this.p}floor`);
+    if (row) row.setAttribute("transform", floorTransform(this.geo.floor));
   }
 
   // Where things stand now, in the mock's 800-unit space (x centred on the mark).
@@ -127,13 +144,16 @@ class DiwaliScene {
     const markU = b.mark.w / s;
     const cxPx = b.mark.x + b.mark.w / 2;
     const skyEnd = Math.min(b.heading.y - 4, b.mark.y + 120 * s);
+    const ground = (b.cards.y + b.cards.h) / s - 2;
     return {
       W,
       H: b.host.h,
       s,
       cxPx,
-      dy: b.mark.y / s - 84,
-      ground: (b.cards.y + b.cards.h) / s - 2,
+      // The fireworks follow the mark, but never up into the toran.
+      dy: Math.max(b.mark.y / s - MARK_TOP, fireworksMinDy()),
+      ground,
+      floor: floorFit({ ground, hostH: b.host.h, s }),
       skyPx: Math.max(40, skyEnd / 0.52),
       from: 400 - cxPx / s,
       to: 400 + (W - cxPx) / s,
@@ -181,7 +201,7 @@ class DiwaliScene {
       stage.q(`.${p}toran`),
       [
         { transform: tr(0, -52), opacity: 1 },
-        { transform: tr(0, 4), opacity: 1, offset: 0.7 },
+        { transform: tr(0, TORAN.overshoot), opacity: 1, offset: 0.7 },
         { transform: tr(0, 0), opacity: 1 },
       ],
       { duration: 850, delay: 100, easing: "ease-out" }
@@ -218,12 +238,13 @@ class DiwaliScene {
   rockets() {
     const { geo } = this;
     const stage = this.stage;
-    const base = geo.ground - 30;
+    // The rockets leave from just above the floor row, wherever the row now sits.
+    const launchAt = (x) => fitPoint(geo.floor, [x, geo.ground - 30]);
     const launch = (n, x, to, delay) =>
       stage.animate(
         stage.q(`.${this.p}rk${n}`),
         [
-          { transform: tr(x, base), opacity: 1 },
+          { transform: tr(...launchAt(x)), opacity: 1 },
           { transform: tr(...to), opacity: 1, offset: 0.95 },
           { transform: tr(to[0], to[1] - 3), opacity: 0 },
         ],
@@ -235,13 +256,14 @@ class DiwaliScene {
         }
       );
     const dy = geo.dy;
-    launch(1, 234, [250, 98 + dy], 1800);
-    launch(2, 552, [560, 80 + dy], 2400);
-    launch(3, 672, [680, 118 + dy], 3250);
+    const [b1, b2, b3] = BURSTS;
+    launch(1, 234, [b1.x, b1.y + dy], 1800);
+    launch(2, 552, [b2.x, b2.y + dy], 2400);
+    launch(3, 672, [b3.x, b3.y + dy], 3250);
     this.flashes();
-    this.burst(".b1", 120, 2450, 3, 1300, 70);
-    this.burst(".b2", 120, 3050, 6, 1300, 70);
-    this.burst(".b3", 85, 3900, 9, 2300, 150);
+    this.burst(".b1", b1, 2450, 3);
+    this.burst(".b2", b2, 3050, 6);
+    this.burst(".b3", b3, 3900, 9);
   }
 
   flashes() {
@@ -261,7 +283,7 @@ class DiwaliScene {
     );
   }
 
-  burst(sel, speed, delay, seed, dur, gravity) {
+  burst(sel, { speed, ms: dur, gravity }, delay, seed) {
     const rand = rng(seed);
     this.stage.qa(`.${this.p}${sel.slice(1)}`).forEach((el) => {
       const a = (Number(el.dataset.a) * Math.PI) / 180;
@@ -283,6 +305,7 @@ class DiwaliScene {
   // position is read again here, because the page may have moved since the scene began.
   light() {
     this.geo = { ...this.geo, ...this.measure() };
+    this.refitFloor();
     const { flame, dy } = this.geo;
     const stage = this.stage;
     const group = stage.q("g");
@@ -291,9 +314,11 @@ class DiwaliScene {
     const [fx, fy] = flame;
     const carry = Array.from({ length: 13 }, (_, k) => {
       const t = k / 12;
-      const x = (1 - t) ** 2 * 560 + 2 * (1 - t) * t * 492 + t * t * fx;
+      const x = (1 - t) ** 2 * BURSTS[1].x + 2 * (1 - t) * t * 492 + t * t * fx;
       const y =
-        (1 - t) ** 2 * (80 + dy) + 2 * (1 - t) * t * (36 + dy) + t * t * fy;
+        (1 - t) ** 2 * (BURSTS[1].y + dy) +
+        2 * (1 - t) * t * (36 + dy) +
+        t * t * fy;
       return { transform: tr(x, y), opacity: k === 12 ? 0 : 1 };
     });
     stage.animate(stage.q(`.${this.p}carry`), carry, {

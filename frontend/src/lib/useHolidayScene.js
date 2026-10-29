@@ -7,6 +7,9 @@
 // rest. Or pending -> rest at once when the answer is no, the deadline passes or the art
 // will not load. A scene never restarts and never hides the cards again: the replay on the
 // mark runs as "replaying", with the cards showing.
+//
+// The hero (mark and greeting) is centred in the stage while the scene is pending or playing
+// (`centred`) and glides up to its rest place over `glideMs` when the scene ends.
 import { computed, reactive, ref } from "vue";
 import { mayPlayLocal, recordLocal } from "@jsshared/holiday/cadence.mjs";
 import { recordHolidayShown } from "@/api";
@@ -17,6 +20,7 @@ import { hasScene, loadScene } from "@/lib/holidayScenes";
 export const DEADLINE_MS = 2500; // import() then record_shown, from mount
 const SMILE_MS = 1500;
 const FADE_MS = { end: 600, early: 400, instant: 0 }; // how the cards come back
+const GLIDE_MS = { end: 600, early: 250, instant: 0 }; // how the hero rises to its rest place
 
 // The answer a reply (or a give-up) was already seen for. A second new chat in the same
 // tab reads the same answer, so it must not hide the cards again; the next get_today
@@ -58,7 +62,9 @@ export function createHolidayScene({
 	// The greeting: swapped to the day heading, and whether that swap is instant.
 	const text = reactive({ swapped: false, instant: false });
 	const fadeMs = ref(0);
-	const cardsHidden = computed(() => phase.value === "pending" || phase.value === "playing");
+	const glideMs = ref(0);
+	const centred = computed(() => phase.value === "pending" || phase.value === "playing");
+	const cardsHidden = centred;
 
 	let scene = null;
 	// Every scene started, kept after it is done: one that settled early still has the smile's
@@ -104,7 +110,10 @@ export function createHolidayScene({
 
 	function onSettle(mode) {
 		if (phase.value !== "playing" && phase.value !== "replaying") return;
-		if (phase.value === "playing") fadeMs.value = FADE_MS[mode] ?? 0;
+		if (phase.value === "playing") {
+			fadeMs.value = FADE_MS[mode] ?? 0;
+			glideMs.value = GLIDE_MS[mode] ?? 0;
+		}
 		phase.value = "rest";
 	}
 
@@ -147,13 +156,14 @@ export function createHolidayScene({
 		else giveUp(mine);
 	}
 
-	function giveUp(mine) {
+	function giveUp(mine, mode = "early") {
 		if (mine !== run || phase.value !== "pending") return;
 		run++;
 		clearTimeout(deadline);
 		deadline = null;
 		spentFor = answer();
 		fadeMs.value = 0;
+		glideMs.value = GLIDE_MS[mode] ?? 0; // the centred hero still has to come up
 		rest();
 		phase.value = "rest";
 	}
@@ -211,13 +221,16 @@ export function createHolidayScene({
 	// ---- ending it -------------------------------------------------------------------
 	/** End the scene: "early" (input, resize, ...) or "instant". Does nothing at rest. */
 	function settle(mode = "early") {
-		if (phase.value === "pending") return giveUp(run);
+		if (phase.value === "pending") return giveUp(run, mode);
 		if (phase.value !== "playing" && phase.value !== "replaying") return;
 		const was = phase.value;
 		if (scene) scene.settle(mode);
 		if (phase.value === was) {
 			// A scene that did not announce its ending still ends here.
-			if (was === "playing") fadeMs.value = FADE_MS[mode] ?? 0;
+			if (was === "playing") {
+				fadeMs.value = FADE_MS[mode] ?? 0;
+				glideMs.value = GLIDE_MS[mode] ?? 0;
+			}
 			phase.value = "rest";
 		}
 	}
@@ -277,6 +290,8 @@ export function createHolidayScene({
 		mark,
 		text,
 		fadeMs,
+		glideMs,
+		centred,
 		cardsHidden,
 		begin,
 		settle,

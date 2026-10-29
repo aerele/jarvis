@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stageEligible, withFestiveCard } from "./holidayStage";
+import { heroOffset, stageEligible, withFestiveCard } from "./holidayStage";
 
 const DAY = {
 	v: 1,
@@ -84,5 +84,35 @@ describe("withFestiveCard", () => {
 		expect(withFestiveCard(cards, { ...DAY, occasion: "nope" })).toBe(cards);
 		withFestiveCard(cards, DAY);
 		expect(cards.at(-1).title).toBe("T4");
+	});
+});
+
+describe("heroOffset", () => {
+	// Stage 700 high, hero 240 high resting at 100 px; the toran and fireworks need the top
+	// at 150 px at least; the scroller's content is 700 px high.
+	const base = { areaH: 700, heroH: 240, restTop: 100, minTop: 150, maxBottom: 700 };
+
+	it("centres the hero in the stage: top (700 - 240) / 2 = 230, so 130 px below its rest place", () => {
+		expect(heroOffset(base)).toBe(130);
+	});
+
+	it("never lets the top rise above the toran and fireworks clearance", () => {
+		expect(heroOffset({ ...base, areaH: 420 })).toBe(50); // centred would be 90; held at 150
+	});
+
+	it("never lets the hero grow the scroll height: its bottom stays inside the content", () => {
+		expect(heroOffset({ ...base, areaH: 1000, maxBottom: 600 })).toBe(260); // top 360
+	});
+
+	it("when the clearance and the content cannot both hold, the clearance wins", () => {
+		expect(heroOffset({ ...base, minTop: 480, maxBottom: 600 })).toBe(380);
+	});
+
+	it("is a whole number of pixels", () => {
+		expect(Number.isInteger(heroOffset({ ...base, areaH: 701 }))).toBe(true);
+	});
+
+	it("a rest place below the centre gives a negative offset (the hero rises)", () => {
+		expect(heroOffset({ ...base, restTop: 400 })).toBe(-170);
 	});
 });

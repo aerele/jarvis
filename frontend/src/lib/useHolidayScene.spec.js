@@ -309,6 +309,36 @@ describe("createHolidayScene", () => {
 			expect(scene.cardsHidden.value).toBe(false);
 		});
 
+		it("the hero is centred while pending and playing, and rises over 600 / 250 / 0 ms by how it ends", async () => {
+			const end = await playing();
+			expect(end.scene.centred.value).toBe(true);
+			end.made[0].opts.onBeat("settle", "end");
+			expect(end.scene.centred.value).toBe(false);
+			expect(end.scene.glideMs.value).toBe(600);
+			const early = await playing();
+			early.scene.settle("early");
+			expect(early.scene.glideMs.value).toBe(250);
+			const instant = await playing();
+			instant.scene.settle("instant");
+			expect(instant.scene.glideMs.value).toBe(0);
+			expect(instant.scene.centred.value).toBe(false);
+		});
+
+		it("a hero centred while pending rises in 250 ms when the scene is given up", async () => {
+			const { scene } = setup({ load: vi.fn(() => new Promise(() => {})) });
+			scene.begin();
+			expect(scene.centred.value).toBe(true);
+			await tick(DEADLINE_MS);
+			expect(scene.centred.value).toBe(false);
+			expect(scene.glideMs.value).toBe(250);
+		});
+
+		it("a scene that was never going to play is at rest from the start: no centring", () => {
+			const { scene } = setup({ reduced: () => true });
+			expect(scene.centred.value).toBe(false);
+			expect(scene.glideMs.value).toBe(0);
+		});
+
 		it("the beats drive the mark and the greeting", async () => {
 			const { scene, made } = await playing();
 			const beat = made[0].opts.onBeat;
