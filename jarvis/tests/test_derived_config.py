@@ -30,6 +30,16 @@ class TestDerivedConfig(FrappeTestCase):
 		self.assertFalse(out["statutory_schema"]["india_fields_present"]["micr_code"])
 		self.assertTrue(out["statutory_schema"]["india_fields_present"]["pan_number"])
 
+	def test_statutory_wage_basis_reaches_the_agent_unchanged(self):
+		basis = {"source": "salary_detail", "component_classes": {"Fake Basic": "included"}}
+		import json
+
+		config = {"statutory": {"wage_basis": basis}, "other": {"forged": True}}
+		out = agent_scheduler._explicit_config(
+			{"config_keys": ["statutory"]}, _inst(config=json.dumps(config))
+		)
+		self.assertEqual(out, {"statutory": {"wage_basis": basis}})
+
 	def test_salt_stable_distinct_and_hex(self):
 		a = derived_config._fingerprint_salt(_inst("A"))
 		self.assertEqual(a, derived_config._fingerprint_salt(_inst("A")))
