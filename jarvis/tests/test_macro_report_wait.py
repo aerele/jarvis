@@ -640,7 +640,7 @@ class TestParkingAtStepEnd(ParkBase):
 		enqueue.assert_not_called()
 
 	def test_a_sessions_yield_row_after_the_waiting_row_still_parks(self):
-		# Measured with a real model: it stops, calls openclaw's sessions_yield, and the
+		# Measured with a real model: it stops, calls the runtime's sessions_yield, and the
 		# turn still ends normally. Nothing may depend on the turn's last row.
 		run, conv, _ = self._mk_run(steps=2, at_step=1)
 		pr = self._pr(PREP_REPORT, _ACME)

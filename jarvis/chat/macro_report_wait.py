@@ -125,7 +125,7 @@ def step_waits(conversation: str, turn) -> tuple[list[dict], list[dict]]:
 
 	The turn's rows are the ``run_report`` rows after its seed message and before the
 	next user message (a typed follow-up, a continuation), so another turn's rows never
-	count. Nothing depends on the turn's last row: a model that calls openclaw's
+	count. Nothing depends on the turn's last row: a model that calls the runtime's
 	``sessions_yield`` after the waiting answer still ends the same turn.
 
 	Same supersede rule as the chat's report card (``report_runs._open_runs``): a later
