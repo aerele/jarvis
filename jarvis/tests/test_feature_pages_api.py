@@ -441,7 +441,7 @@ class TestMacrosPage(unittest.TestCase):
 
 	def test_bad_frequency_throws(self):
 		with self.assertRaises(frappe.ValidationError):
-			self._page(filters={"schedule_frequency": "hourly"})
+			self._page(filters={"schedule_frequency": "yearly"})
 
 	def test_has_summary_and_step_count(self):
 		rows = {r["macro_name"]: r for r in self._page(page_length=100)["rows"]}
