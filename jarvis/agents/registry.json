@@ -1666,9 +1666,9 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "status": "Published",
-      "description": "Reviews recorded outgoing Journal Entry and Payment Entry bookings for owner-declared wage months. It compares each recorded date with a versioned due date. It does not read portal receipts or import artifacts, establish receipt of a deposit, assess the liability balance, or decide a penalty. A named reviewer owns every decision.",
+      "description": "Reviews each owner-declared native outgoing payroll booking against a dated due-date reference. It keeps current interest and damages evidence-review gaps visible and shows VISHWAS as an external-review reference only. It does not decide eligibility, receipt, default or penalty. Gazette text and qualified legal review remain pending.",
       "tools_required": [
         "jarvis__query"
       ],
