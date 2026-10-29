@@ -31,6 +31,15 @@ _unrelated(
 
 
 _unrelated(
+	"jarvis.holiday_touch.api",
+	"Session-user holiday occasion lookup; takes no identifier, so shared chat identifiers grant no authority.",
+	"""
+    get_today
+    """,
+)
+
+
+_unrelated(
 	"jarvis.account",
 	"Workspace billing, subscription and LLM connection metadata; no transcript lookup.",
 	"""

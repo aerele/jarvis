@@ -29,6 +29,8 @@ GET_ALLOWLIST = frozenset(
 		"jarvis.chat.export.download_conversation",
 		# Top-level redirect from the MCP OAuth provider.
 		"jarvis.chat.connectors_api.mcp_oauth_callback",
+		# Read-only boot payload for the holiday touch; refetched by the client without a reload.
+		"jarvis.holiday_touch.api.get_today",
 	}
 )
 
