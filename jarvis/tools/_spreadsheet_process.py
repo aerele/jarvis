@@ -20,26 +20,26 @@ def run_query(content, filename, *, sql=None, sheets=None, max_rows=100):
 	env = os.environ.copy()
 	env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get("PYTHONPATH", "")
 	try:
-		completed = (
-			subprocess.run(  # nosemgrep: frappe-subprocess-exec -- fixed argv, shell=False; data on stdin
-				[sys.executable, "-m", "jarvis.tools._spreadsheet_worker"],
-				input=json.dumps(
-					{
-						"content": base64.b64encode(content).decode("ascii"),
-						"filename": filename,
-						"sql": sql,
-						"sheets": sheets,
-						"max_rows": max_rows,
-					}
-				),
-				shell=False,
-				text=True,
-				stdout=subprocess.PIPE,
-				stderr=subprocess.DEVNULL,
-				timeout=WALL_SECONDS,
-				check=False,
-				env=env,
-			)
+		# Security review: fixed interpreter/module argv and no shell. All caller
+		# values travel as JSON on stdin. The child enforces CPU/memory/wall limits.
+		completed = subprocess.run(  # nosemgrep: frappe-subprocess-exec
+			[sys.executable, "-m", "jarvis.tools._spreadsheet_worker"],
+			input=json.dumps(
+				{
+					"content": base64.b64encode(content).decode("ascii"),
+					"filename": filename,
+					"sql": sql,
+					"sheets": sheets,
+					"max_rows": max_rows,
+				}
+			),
+			shell=False,
+			text=True,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.DEVNULL,
+			timeout=WALL_SECONDS,
+			check=False,
+			env=env,
 		)
 	except subprocess.TimeoutExpired:
 		raise InvalidArgumentError(RESOURCE_ERROR) from None
