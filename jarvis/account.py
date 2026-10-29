@@ -28,6 +28,7 @@ from jarvis.exceptions import (
 	AdminUnreachableError,
 	AdminValidationError,
 )
+from jarvis.holiday_touch import policy as holiday_policy
 from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
 from jarvis.onboarding import _surface
 from jarvis.permissions import require_jarvis_access, require_jarvis_admin
@@ -573,6 +574,12 @@ def _admin_chat_gate() -> dict:
 	from jarvis.chat import egress_rules
 
 	egress_rules.persist(conn.get("redaction_patterns"))
+	# Same cadence: mirror the operator's holiday-touch policy. daily=False: the gate runs
+	# about every 30 s, so it writes only on change and never stamps the sync time. Skipped
+	# when the request will not commit (the desk's boot GET is rolled back): the write would
+	# be discarded and would take a row lock on Jarvis Settings for nothing. persist never raises.
+	if _write_is_durable():
+		holiday_policy.persist(conn, daily=False)
 	notice = conn.get("billing_notice") or {}
 	if "chat_readiness" in conn and conn["chat_readiness"] != "Ready":
 		# Authority-repair incident (review plan 04 P0-6): admin's strict resolver
