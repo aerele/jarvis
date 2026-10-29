@@ -10,10 +10,20 @@
 // The first failure of the session is reported with a fixed text (the error reporter
 // drops chunk-load messages as already handled).
 import { _resetReportedForTests, reportOnce } from "@/lib/holidayReport";
+import { heroTopMin } from "@jsshared/holiday/scene-geometry.mjs";
 
 export const SCENE_LOADERS = {
 	diwali: () => import("@jsshared/holiday/scenes/diwali.mjs"),
 };
+
+// The art's geometry is tiny and always loaded (see scene-geometry.mjs), so the page can
+// keep the hero clear of the art before the art itself arrives.
+const HERO_TOP_MIN = { diwali: heroTopMin };
+
+/** The least y (px) the mark's top may have while this design's scene plays, at scale s. */
+export function sceneClearance(design, s) {
+	return Object.hasOwn(HERO_TOP_MIN, design) ? HERO_TOP_MIN[design](s) : 0;
+}
 
 export const SCENE_RETRY_MS = 60 * 1000;
 

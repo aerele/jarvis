@@ -21,7 +21,9 @@ vi.mock("@/holidayTouch", async () => {
 	return { holidayTouch: { answer: state.answer, start: vi.fn() } };
 });
 vi.mock("@/api", () => ({ recordHolidayShown: (...a) => state.record(...a) }));
-vi.mock("@/lib/holidayScenes", () => ({
+vi.mock("@/lib/holidayScenes", async (importOriginal) => ({
+	// The clearance is the art's real geometry; only loading the art is faked.
+	sceneClearance: (await importOriginal()).sceneClearance,
 	hasScene: (d) => d === "diwali",
 	loadScene: (...a) => state.load(...a),
 	isSceneLoading: () => false,
@@ -29,6 +31,7 @@ vi.mock("@/lib/holidayScenes", () => ({
 
 import HolidayStage from "./HolidayStage.vue";
 import { _resetSpentForTests } from "@/lib/useHolidayScene";
+import { heroTopMin } from "@jsshared/holiday/scene-geometry.mjs";
 
 const DAY = {
 	v: 1,
@@ -319,6 +322,7 @@ describe("HolidayStage", () => {
 		state.resize.fireOne(hero, 680, 228); // the first reading: the baseline
 		const read = vi.spyOn(Element.prototype, "getBoundingClientRect");
 		state.resize.fireOne(hero, 680, 250);
+		await wrapper.vm.$nextTick(); // the scene reads the boxes once the new shift is on the page
 		expect(sceneApi.settle).not.toHaveBeenCalled();
 		expect(sceneApi.relayout).toHaveBeenCalledTimes(1);
 		expect(read).toHaveBeenCalled();
@@ -470,4 +474,140 @@ describe("HolidayStage", () => {
 			}
 		}
 	);
+
+	describe("the hero's place", () => {
+		// jsdom has no layout: give the stage the sizes a real one would have. Offsets ignore
+		// transforms, which is what the component must read (not a bounding box).
+		const sizes = { areaW: 1000, areaH: 700, heroH: 240, restTop: 100, scrollH: 700 };
+		const saved = {};
+		const getters = {
+			clientWidth: (el) => (el.classList.contains("jv-stage") ? sizes.areaW : 0),
+			clientHeight: (el) => (el.classList.contains("jv-stage") ? sizes.areaH : 0),
+			offsetHeight: (el) => (el.classList.contains("jv-stage-hero") ? sizes.heroH : 0),
+			offsetTop: (el) => (el.classList.contains("jv-stage-hero") ? sizes.restTop : 0),
+			scrollHeight: (el) => (el.classList.contains("jv-stage-scroll") ? sizes.scrollH : 0),
+		};
+		beforeEach(() => {
+			Object.assign(sizes, {
+				areaW: 1000,
+				areaH: 700,
+				heroH: 240,
+				restTop: 100,
+				scrollH: 700,
+			});
+			for (const [name, read] of Object.entries(getters)) {
+				saved[name] = Object.getOwnPropertyDescriptor(HTMLElement.prototype, name);
+				Object.defineProperty(HTMLElement.prototype, name, {
+					configurable: true,
+					get() {
+						return read(this);
+					},
+				});
+			}
+		});
+		afterEach(() => {
+			for (const name of Object.keys(getters)) {
+				if (saved[name]) Object.defineProperty(HTMLElement.prototype, name, saved[name]);
+				else delete HTMLElement.prototype[name];
+			}
+		});
+		const hero = (w) => w.get(".jv-stage-hero").element;
+		const shift = (w) => hero(w).style.transform;
+		const glide = (w) => hero(w).style.getPropertyValue("--glide");
+
+		it("is centred in the stage from the first paint: (700 - 240) / 2 = 230, 130 px below its rest place", async () => {
+			wrapper = stage();
+			await wrapper.vm.$nextTick();
+			expect(shift(wrapper)).toBe("translateY(130px)");
+			expect(glide(wrapper)).toBe("0ms");
+			await tick(10);
+			expect(wrapper.attributes("data-phase")).toBe("playing");
+			expect(shift(wrapper)).toBe("translateY(130px)");
+		});
+
+		it("a short stage holds the mark below the toran and the fireworks", async () => {
+			sizes.areaH = 300; // centred would be 30, above the toran's clearance
+			sizes.scrollH = 300;
+			wrapper = stage();
+			await wrapper.vm.$nextTick();
+			const min = Math.round(heroTopMin(1.25));
+			expect(min).toBeGreaterThan(30);
+			expect(shift(wrapper)).toBe(`translateY(${min - 100}px)`);
+		});
+
+		it("a hero that changes size mid-scene (the font swap) is centred again", async () => {
+			wrapper = stage();
+			await tick(10);
+			state.resize.fireOne(hero(wrapper), 400, 240); // the first reading: the baseline
+			sizes.heroH = 260;
+			state.resize.fireOne(hero(wrapper), 400, 260);
+			await wrapper.vm.$nextTick();
+			expect(wrapper.attributes("data-phase")).toBe("playing");
+			expect(shift(wrapper)).toBe("translateY(120px)"); // (700 - 260) / 2 - 100
+			expect(sceneApi.relayout).toHaveBeenCalledTimes(1);
+		});
+
+		it.each([
+			["end", "600ms"],
+			["early", "250ms"],
+			["instant", "0ms"],
+		])("when the scene settles %s it goes to its rest place over %s", async (mode, ms) => {
+			wrapper = stage();
+			await tick(10);
+			sceneApi.settle(mode);
+			await wrapper.vm.$nextTick();
+			expect(shift(wrapper)).toBe("translateY(0px)");
+			expect(glide(wrapper)).toBe(ms);
+		});
+
+		it("a first key settles it early: the hero rises in 250 ms", async () => {
+			wrapper = stage();
+			await tick(10);
+			dispatch("keydown");
+			await wrapper.vm.$nextTick();
+			expect(shift(wrapper)).toBe("translateY(0px)");
+			expect(glide(wrapper)).toBe("250ms");
+		});
+
+		it("a scene that never plays ({play: false}) sends the centred hero up in 250 ms", async () => {
+			state.record = vi.fn(async () => ({ play: false }));
+			wrapper = stage();
+			await wrapper.vm.$nextTick();
+			expect(shift(wrapper)).toBe("translateY(130px)");
+			await tick(10);
+			expect(shift(wrapper)).toBe("translateY(0px)");
+			expect(glide(wrapper)).toBe("250ms");
+		});
+
+		it("reduced motion is at the rest place from the first paint, with no glide", async () => {
+			state.reduced = true;
+			wrapper = stage();
+			await wrapper.vm.$nextTick();
+			expect(shift(wrapper)).toBe("translateY(0px)");
+			expect(glide(wrapper)).toBe("0ms");
+			await tick(10);
+			expect(shift(wrapper)).toBe("translateY(0px)");
+		});
+
+		it("a replay from the mark at rest keeps the hero where it is", async () => {
+			state.record = vi.fn(async () => ({ play: false }));
+			wrapper = stage();
+			await tick(10);
+			await wrapper.get('[data-testid="stage-replay"]').trigger("click");
+			await tick(10);
+			expect(wrapper.attributes("data-phase")).toBe("replaying");
+			expect(shift(wrapper)).toBe("translateY(0px)");
+			state.resize.fireOne(hero(wrapper), 400, 240);
+			state.resize.fireOne(hero(wrapper), 400, 300);
+			await wrapper.vm.$nextTick();
+			expect(shift(wrapper)).toBe("translateY(0px)");
+		});
+
+		it("the shift is a transform only: the layout (and the scroll height) is untouched", async () => {
+			wrapper = stage();
+			await wrapper.vm.$nextTick();
+			expect(hero(wrapper).style.top).toBe("");
+			expect(hero(wrapper).style.marginTop).toBe("");
+		});
+	});
 });
