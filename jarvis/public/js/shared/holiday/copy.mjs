@@ -26,6 +26,10 @@ const WORDS = {
 
 export const OCCASIONS = Object.keys(WORDS);
 
+// The line under the day heading on the scene-day welcome screen (the Christmas track).
+export const DAY_SUB_LINE =
+  "Hope you are enjoying the day. I'm here if anything needs doing.";
+
 // The festive starter card for scene days (the Christmas track): [title, prompt].
 // Never for the birthday, which stays private.
 export const FEST = {
