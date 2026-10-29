@@ -1557,7 +1557,7 @@ def handle_chat_send(payload: dict) -> None:
 	try:
 		from jarvis.chat import chat_asks
 
-		chat_asks.resolve_on_user_message(conversation_id)
+		chat_asks.resolve_on_user_message(conversation_id, seed_message=message_id)
 	except Exception:
 		frappe.log_error(
 			title="chat asks: resolve_on_user_message failed",

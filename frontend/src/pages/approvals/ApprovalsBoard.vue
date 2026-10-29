@@ -322,6 +322,13 @@
 									<Tooltip v-if="row.shared" text="Shared with you for review">
 										<Badge variant="subtle" theme="blue" label="Shared" />
 									</Tooltip>
+									<!-- a decided question whose decision did not reach the chat -->
+									<Badge
+										v-if="row.continuation === 'failed'"
+										variant="subtle"
+										theme="red"
+										label="Not sent to chat"
+									/>
 									<Tooltip :text="exactDate(row.creation)">
 										<span class="whitespace-nowrap text-sm text-ink-gray-5">{{
 											timeAgo(row.creation)
@@ -774,6 +781,33 @@
 								<div v-if="decidedLine" class="mt-2 text-sm text-ink-gray-5">
 									{{ decidedLine }}
 								</div>
+								<!-- a review-scoped question's decision that did not reach the
+								     requester's chat: persistent, from the server's record. Only
+								     the requester may send it, as themselves, once. -->
+								<div
+									v-if="scoped && selected.continuation === 'failed'"
+									role="status"
+									class="mt-3 rounded bg-surface-amber-1 p-3 text-sm text-ink-amber-3"
+								>
+									<div>{{ notSentNotice }}</div>
+									<Button
+										v-if="selected.can_continue"
+										class="mt-2"
+										variant="solid"
+										label="Send decision to chat"
+										iconLeft="send"
+										:loading="sending"
+										:disabled="sending"
+										@click="sendDecisionToChat"
+									/>
+								</div>
+								<div
+									v-else-if="scoped && selected.continuation === 'pending'"
+									role="status"
+									class="mt-2 text-sm text-ink-gray-5"
+								>
+									{{ PENDING_NOTICE }}
+								</div>
 								<!-- undo an accidental Ignore: back to Pending, nothing was
 								     ever told to the assistant -->
 								<Button
@@ -1199,6 +1233,7 @@ function seedFrom(rec) {
 			requester_name: rec.requester_name,
 			is_requester: rec.is_requester,
 			shared: rec.is_requester ? 0 : 1,
+			continuation: rec.continuation || "",
 		});
 	}
 	return row;
@@ -1422,14 +1457,21 @@ async function submitDecide(approve) {
 		  (reviewOnly ? "Review acknowledged: no posting authorised" : "Approved")
 		: noteText || "Rejected";
 	const id = selected.value.name;
+	const wasScoped = scoped.value;
+	const requester = isRequester.value;
 	try {
 		const res = (await api.decideApproval(id, text, approve)) || {};
 		const status = approve ? "Approved" : "Rejected";
+		// a review-scoped question reports whether its decision reached the chat:
+		// "done", "failed", "pending" (not confirmed) or "" (not tracked); a missing
+		// answer is treated as not confirmed
+		const delivery = wasScoped ? res.continuation : "";
 		// optimistic: rail row swaps status, pane flips to the decided state
 		const r = railRows.value.find((x) => x.name === id);
 		if (r) {
 			r.status = status;
 			r.decision = text;
+			if (wasScoped) r.continuation = delivery || "";
 		}
 		if (selected.value && selected.value.name === id) {
 			selected.value = {
@@ -1439,19 +1481,32 @@ async function submitDecide(approve) {
 				decided_by: session.user,
 				decided_by_name: "",
 				decided_at: "",
+				...(wasScoped ? { continuation: delivery || "", can_continue: 0 } : {}),
 			};
 		}
 		selectedOption.value = "";
 		note.value = "";
-		toast.success(
-			(approve
-				? reviewOnly
-					? "Review acknowledged: no accounting or sending action"
-					: "Approved"
-				: "Rejected") + (res.resumed ? " - conversation resumed" : "")
-		);
+		const verdict = approve
+			? reviewOnly
+				? "Review acknowledged: no accounting or sending action"
+				: "Approved"
+			: "Rejected";
+		if (wasScoped && delivery === "done") {
+			toast.success(
+				verdict + (requester ? " - sent to your chat" : " - sent to the requester's chat")
+			);
+		} else if (wasScoped && delivery === "failed") {
+			toast.warning(requester ? REQUESTER_NOT_SENT : REVIEWER_NOT_SENT);
+		} else if (wasScoped && delivery !== "") {
+			toast.warning(PENDING_NOTICE);
+		} else {
+			toast.success(verdict + (res.resumed ? " - conversation resumed" : ""));
+		}
 		store.refreshApprovalsCount();
-		if ((filters.status || "Pending") === "Pending") {
+		// leave the record only when its outcome is known: a decision that did not
+		// (or may not have) reached the chat stays open with its notice
+		const settled = !wasScoped || delivery === "done" || delivery === "";
+		if (settled && (filters.status || "Pending") === "Pending") {
 			// the decided row no longer matches the Pending quick-filter -
 			// drop it and move the selection along so triage keeps flowing
 			advanceAfterDecide(id);
@@ -1469,6 +1524,39 @@ async function submitDecide(approve) {
 		}
 	} finally {
 		deciding.value = null;
+	}
+}
+
+const REVIEWER_NOT_SENT =
+	"Decision saved, but it was not sent to the requester's chat. Only the requester can send it, from Approvals.";
+const REQUESTER_NOT_SENT =
+	"Decision saved, but it was not sent to your chat. Use Send decision to chat to try again.";
+const PENDING_NOTICE = "Decision saved. Sending it to the chat is not confirmed yet.";
+const notSentNotice = computed(() =>
+	isRequester.value ? "Decision saved, but it was not sent to your chat." : REVIEWER_NOT_SENT
+);
+
+// The requester sends the stored decision to their chat. One request at a time;
+// whatever happens (sent, refused, lost response) the record is re-read from the
+// server, which alone says whether it was sent - never resent automatically.
+const sending = ref(false);
+async function sendDecisionToChat() {
+	if (sending.value || !selected.value) return;
+	const id = selected.value.name;
+	sending.value = true;
+	try {
+		const res = (await api.continueApprovalChat(id)) || {};
+		if (res.ok)
+			toast.success(
+				res.already ? "Already sent to your chat" : "Decision sent to your chat"
+			);
+		else toast.error(res.reason || "The decision was not sent to your chat.");
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		sending.value = false;
+		refreshKeep();
+		await loadRecord(id, { keep: true });
 	}
 }
 
@@ -1603,7 +1691,12 @@ const correctSelected = computed(() => {
 // is dropped quietly by loadRecord (no error toast, no "not found" pane). A burst
 // costs one re-run, not one read per frame.
 const socket = inject("$socket", null);
-const ACCESS_KINDS = new Set(["approval:tagged", "approval:untagged", "action:settled"]);
+const ACCESS_KINDS = new Set([
+	"approval:tagged",
+	"approval:untagged",
+	"action:settled",
+	"approval:continuation_failed",
+]);
 let syncing = false;
 let syncAgain = false;
 let syncSelected = false;

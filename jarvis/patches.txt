@@ -72,3 +72,4 @@ jarvis.patches.v2_26_hide_unanswered_chat_patterns
 jarvis.patches.v2_27_stamp_agent_token_issued_at
 jarvis.patches.v2_28_chat_collaboration_foundation
 jarvis.patches.v2_29_chat_approval_reviewers
+jarvis.patches.v2_29_deleted_document_audit_index

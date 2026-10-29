@@ -334,7 +334,13 @@ def add_comment(doctype: str, name: str, content: str) -> dict:
 
 def _comment_gated(comment: str):
 	"""Comment mutation gate (§8.1): the comment must live on an allowlisted
-	doctype and the caller must be its author or a System Manager."""
+	doctype and the caller must be its author or a System Manager.
+
+	On a review-scoped Chat question the caller must also still review it, and a
+	System Manager edits or deletes only their own comments there unless they are
+	the requester. A requester without System Manager cannot delete a reviewer's
+	comment: the general author-or-System-Manager rule applies (no extra
+	moderation right on review questions)."""
 	doc = frappe.get_doc("Comment", comment)
 	if doc.reference_doctype not in ALLOWED_DOCTYPES:
 		frappe.throw(_("Not permitted"), frappe.PermissionError)

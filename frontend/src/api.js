@@ -932,6 +932,10 @@ export const listApprovals = (status = "Pending") =>
 export const approvalsBadge = () => call("jarvis.chat.approvals_api.pending_badge", {});
 export const decideApproval = (name, decision, approve = 1) =>
 	call("jarvis.chat.approvals_api.decide", { name, decision, approve });
+// The requester sends a decided Chat question's stored decision to their own chat
+// when it did not reach it (requester-only, never resends a delivered decision).
+export const continueApprovalChat = (name) =>
+	call("jarvis.chat.approvals_api.continue_approval_chat", { name });
 // Ignore a request off the board (no verdict, no chat resume); reversible.
 export const dismissApproval = (name) =>
 	call("jarvis.chat.approvals_api.dismiss_approval", { name });

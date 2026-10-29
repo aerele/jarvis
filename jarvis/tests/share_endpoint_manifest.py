@@ -832,6 +832,10 @@ ENDPOINTS.update(
 			"arguments": {"name": "$approval"},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.approvals_api.continue_approval_chat": {
+			"arguments": {"name": "$approval"},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.approvals_api.decide": {
 			"arguments": {"approve": 1, "decision": "approve", "name": "$approval"},
 			"scope": "chat_scoped",

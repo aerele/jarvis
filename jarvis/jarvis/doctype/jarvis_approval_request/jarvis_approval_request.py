@@ -18,12 +18,24 @@ _SERVER_FIELDS = (
 	"sheet",
 	"assessment_key",
 	"assessment_evidence",
+	"resume_state",
 )
+# A decided review-scoped Chat question's outcome. It is written only by raw-SQL
+# server transitions (decide/dismiss/restore/answer and the chat continuation), so
+# an ORM change, whoever makes it, would rewrite or reopen someone's decision.
+_OUTCOME_FIELDS = ("status", "decision", "decided_by", "decided_at", "resume_state")
 # Frozen on a wiki proposal: what the reviewer reads and where it lands.
 _WIKI_FIELDS = ("title", "question", "context_md", "document_type", "conversation", "source", "status")
 # Frozen on a File Box routing question (its answer is validated against its options)
 # and on a question linked to a File Box sheet (answered with the sheet).
 _ROUTING_FIELDS = (*_WIKI_FIELDS, "options", "decision", "decided_by", "decided_at")
+
+
+def _differs(before, after, is_datetime: bool) -> bool:
+	if is_datetime:
+		before = frappe.utils.get_datetime(before) if before else None
+		after = frappe.utils.get_datetime(after) if after else None
+	return (before or None) != (after or None)
 
 
 def sheet_ready() -> bool:
@@ -56,10 +68,30 @@ class JarvisApprovalRequest(NotRenamable, Document):
 					frappe.throw(
 						"A Chat question's source and conversation cannot be changed.", frappe.PermissionError
 					)
+		self._freeze_decided_outcome()
 		self._guard_server_fields()
 		self._guard_decided_fields()
 		if self.status != "Pending" and not self.decision:
 			frappe.throw("A decided approval must carry the decision text.")
+
+	def _freeze_decided_outcome(self):
+		"""A reviewer's (or the requester's) recorded outcome on a scoped Chat
+		question is final for every ORM path: REST, Desk, agent tools,
+		ignore_permissions and Administrator saves alike. Metadata (title,
+		question, references...) stays editable."""
+		if self.is_new() or self.flags.jarvis_server_write:
+			return
+		from jarvis.chat import approval_reviewers
+
+		before = self.get_doc_before_save()
+		if not before or (before.status or "Pending") == "Pending" or not approval_reviewers.is_chat(before):
+			return
+		changed = [f for f in _OUTCOME_FIELDS if _differs(before.get(f), self.get(f), f == "decided_at")]
+		if changed:
+			frappe.throw(
+				frappe._("A decided question's outcome cannot be changed: {0}").format(", ".join(changed)),
+				frappe.PermissionError,
+			)
 
 	def validate_share(self, _share):
 		from jarvis.chat import approval_reviewers

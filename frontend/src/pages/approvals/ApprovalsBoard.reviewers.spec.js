@@ -66,6 +66,7 @@ vi.mock("@/api", () => ({
 	listApprovalsPage: vi.fn(),
 	listWikiWriteProposals: vi.fn(),
 	decideApproval: vi.fn(),
+	continueApprovalChat: vi.fn(),
 	dismissApproval: vi.fn(),
 	restoreApproval: vi.fn(),
 	tagApprovalReviewer: vi.fn(),
@@ -744,6 +745,206 @@ describe("ApprovalsBoard reviewer scoping (#756)", () => {
 			expect(toast.error).toHaveBeenCalledTimes(1);
 			expect(pane(w).text()).not.toContain("Which warehouse?");
 			expect(rail(w).text()).not.toContain("Question AR-1");
+		});
+	});
+	// Sowmya re-review: a decision on a review-scoped question reports whether it
+	// reached the requester's chat. Only "done" (accepted) or "" (not tracked) leaves
+	// the record; failed / not confirmed keep it open with a persistent notice, and
+	// only the requester may send the stored decision, one request at a time.
+	describe("decision delivery to the requester's chat", () => {
+		const REVIEWER_NOT_SENT =
+			"Decision saved, but it was not sent to the requester's chat. Only the requester can send it, from Approvals.";
+		const PENDING = "Decision saved. Sending it to the chat is not confirmed yet.";
+		const opts = { options: ["Main", "Spare"] };
+		const decideAs = async (w, delivery, decided) => {
+			api.decideApproval.mockImplementation(async () => {
+				state.view = decided;
+				return delivery;
+			});
+			await button(w, "Main").trigger("click");
+			await button(w, "Approve").trigger("click");
+			await flushPromises();
+			await flushPromises();
+		};
+		const failedView = (view, over = {}) =>
+			view({
+				...opts,
+				status: "Approved",
+				decision: "Main",
+				continuation: "failed",
+				...over,
+			});
+
+		it("reviewer, not sent: a persistent notice, no send button, the record stays", async () => {
+			state.view = reviewerView(opts);
+			const w = await board();
+			await decideAs(
+				w,
+				{ ok: true, status: "Approved", resumed: false, continuation: "failed" },
+				failedView(reviewerView, { can_continue: 0 })
+			);
+			expect(toast.warning).toHaveBeenCalledWith(REVIEWER_NOT_SENT);
+			expect(toast.success).not.toHaveBeenCalled();
+			expect(JSON.stringify(toast.warning.mock.calls)).not.toContain("notified");
+			expect(rail(w).text()).toContain("Question AR-1");
+			expect(rail(w).text()).toContain("Not sent to chat");
+			expect(pane(w).text()).toContain(REVIEWER_NOT_SENT);
+			expect(buttons(w)).not.toContain("Send decision to chat");
+			expect(w.find(".conv-link").exists()).toBe(false);
+		});
+
+		it("requester, not sent: the notice offers Send decision to chat", async () => {
+			state.view = requesterView(opts);
+			const w = await board();
+			await decideAs(
+				w,
+				{ ok: true, status: "Approved", resumed: false, continuation: "failed" },
+				failedView(requesterView, { can_continue: 1 })
+			);
+			expect(toast.warning).toHaveBeenCalledWith(
+				"Decision saved, but it was not sent to your chat. Use Send decision to chat to try again."
+			);
+			expect(rail(w).text()).toContain("Question AR-1");
+			expect(pane(w).text()).toContain("Decision saved, but it was not sent to your chat.");
+			expect(buttons(w)).toContain("Send decision to chat");
+		});
+
+		it("sent: names the chat it reached and moves on", async () => {
+			state.view = reviewerView(opts);
+			const w = await board();
+			await decideAs(
+				w,
+				{ ok: true, status: "Approved", resumed: true, continuation: "done" },
+				reviewerView({ ...opts, status: "Approved", continuation: "done" })
+			);
+			expect(toast.success).toHaveBeenCalledWith("Approved - sent to the requester's chat");
+			expect(rail(w).text()).not.toContain("Question AR-1");
+		});
+
+		it("not confirmed (pending, unknown or no answer): stays open, never claims it was sent", async () => {
+			for (const delivery of [
+				{ ok: true, status: "Approved", resumed: false, continuation: "pending" },
+				null,
+			]) {
+				vi.clearAllMocks();
+				state.view = requesterView(opts);
+				state.rows = [ar("AR-1", { review_scoped: 1 })];
+				const w = await board();
+				await decideAs(
+					w,
+					delivery,
+					requesterView({ ...opts, status: "Approved", continuation: "pending" })
+				);
+				expect(toast.warning).toHaveBeenCalledWith(PENDING);
+				expect(toast.success).not.toHaveBeenCalled();
+				expect(rail(w).text()).toContain("Question AR-1");
+				expect(pane(w).text()).toContain(PENDING);
+				expect(buttons(w)).not.toContain("Send decision to chat");
+			}
+		});
+
+		it("an untracked question keeps today's copy and flow", async () => {
+			state.view = requesterView(opts);
+			const w = await board();
+			await decideAs(
+				w,
+				{ ok: true, status: "Approved", resumed: true, continuation: "" },
+				requesterView({ ...opts, status: "Approved" })
+			);
+			expect(toast.success).toHaveBeenCalledWith("Approved - conversation resumed");
+			expect(rail(w).text()).not.toContain("Question AR-1");
+		});
+
+		it("a non-Chat question is unchanged", async () => {
+			state.rows = [ar("AR-1", { source: "File Box" })];
+			state.view = fileBoxView();
+			const w = await board();
+			api.decideApproval.mockResolvedValue({ ok: true, status: "Approved", resumed: true });
+			await button(w, "Acme").trigger("click");
+			await button(w, "Approve").trigger("click");
+			await flushPromises();
+			expect(toast.success).toHaveBeenCalledWith("Approved - conversation resumed");
+			expect(toast.warning).not.toHaveBeenCalled();
+		});
+
+		describe("Send decision to chat", () => {
+			beforeEach(() => {
+				state.rows = [
+					ar("AR-1", { review_scoped: 1, status: "Approved", continuation: "failed" }),
+				];
+				state.view = failedView(requesterView, { can_continue: 1 });
+			});
+
+			it("sends once while in flight, then shows what the server reports", async () => {
+				let finish;
+				api.continueApprovalChat.mockImplementation(
+					() => new Promise((resolve) => (finish = resolve))
+				);
+				const w = await board();
+				expect(rail(w).text()).toContain("Not sent to chat");
+				await button(w, "Send decision to chat").trigger("click");
+				await flushPromises();
+				expect(button(w, "Send decision to chat").attributes("disabled")).toBeDefined();
+				await button(w, "Send decision to chat").trigger("click");
+				state.view = requesterView({ ...opts, status: "Approved", continuation: "done" });
+				state.rows = [
+					ar("AR-1", { review_scoped: 1, status: "Approved", continuation: "done" }),
+				];
+				finish({ ok: true, continuation: "done" });
+				await flushPromises();
+				await flushPromises();
+				expect(api.continueApprovalChat).toHaveBeenCalledTimes(1);
+				expect(api.continueApprovalChat).toHaveBeenCalledWith("AR-1");
+				expect(toast.success).toHaveBeenCalledWith("Decision sent to your chat");
+				expect(buttons(w)).not.toContain("Send decision to chat");
+				expect(rail(w).text()).not.toContain("Not sent to chat");
+			});
+
+			it("a refusal shows its reason and the button stays", async () => {
+				api.continueApprovalChat.mockResolvedValue({
+					ok: false,
+					continuation: "failed",
+					reason: "a reply is already in progress - hang on a moment",
+				});
+				const w = await board();
+				await button(w, "Send decision to chat").trigger("click");
+				await flushPromises();
+				await flushPromises();
+				expect(toast.error).toHaveBeenCalledWith(
+					"a reply is already in progress - hang on a moment"
+				);
+				expect(buttons(w)).toContain("Send decision to chat");
+			});
+
+			it("a lost response re-reads the record and never resends", async () => {
+				api.continueApprovalChat.mockRejectedValue(new Error("network down"));
+				const w = await board();
+				const reads = approvals.getApproval.mock.calls.length;
+				state.view = requesterView({ ...opts, status: "Approved", continuation: "done" });
+				await button(w, "Send decision to chat").trigger("click");
+				await flushPromises();
+				await flushPromises();
+				expect(api.continueApprovalChat).toHaveBeenCalledTimes(1);
+				expect(approvals.getApproval.mock.calls.length).toBeGreaterThan(reads);
+				expect(buttons(w)).not.toContain("Send decision to chat");
+			});
+
+			it("a reviewer sees the notice only", async () => {
+				state.view = failedView(reviewerView, { can_continue: 0 });
+				const w = await board();
+				expect(pane(w).text()).toContain(REVIEWER_NOT_SENT);
+				expect(buttons(w)).not.toContain("Send decision to chat");
+			});
+		});
+
+		it("re-reads the open question when its decision was not sent", async () => {
+			const w = await board();
+			const reads = approvals.getApproval.mock.calls.length;
+			socket.emit({ kind: "approval:continuation_failed", name: "AR-1" });
+			await flushPromises();
+			await flushPromises();
+			expect(approvals.getApproval.mock.calls.length).toBeGreaterThan(reads);
+			expect(w.exists()).toBe(true);
 		});
 	});
 });

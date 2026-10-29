@@ -33,6 +33,7 @@ from jarvis.chat.events import publish_to_user
 
 APPROVAL = "Jarvis Approval Request"
 CONV = "Jarvis Conversation"
+GRANT = "Jarvis Approval Reviewer"
 
 # Port of the client fence grammar (ChatView.vue:1457 ``_ASK_RE``):
 # ```jarvis-ask, optional spaces/tabs, newline, non-greedy body, closing
@@ -251,13 +252,18 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	return doc.name
 
 
-def resolve_on_user_message(conversation: str) -> None:
+def resolve_on_user_message(conversation: str, seed_message: str | None = None) -> None:
 	"""The user sent a message in ``conversation``: any Pending chat-sourced
 	approval there is now answered in chat — flip it to "Answered" so the
 	board row never goes stale or double-answered. One indexed UPDATE
 	(conversation is search_index'd); decided rows are untouched, so a
 	board decide() that resumes the chat never re-flips its own row. A File Box
-	sheet's question is answered with its sheet, never here."""
+	sheet's question is answered with its sheet, never here.
+
+	``seed_message`` is the turn's triggering message. When it is a board answer
+	(one decided question sent to the chat), another Pending question that has
+	its own tagged reviewers stays open for them; the requester's own messages
+	and untagged questions settle as before."""
 	from jarvis.jarvis.doctype.jarvis_approval_request.jarvis_approval_request import sheet_ready
 
 	open_filter = {"conversation": conversation, "status": "Pending", "source": "Chat"}
@@ -273,6 +279,15 @@ def resolve_on_user_message(conversation: str) -> None:
 		from frappe.query_builder.functions import Coalesce
 
 		where &= Coalesce(a.sheet, "") == ""
+	if (
+		seed_message
+		and frappe.db.get_value("Jarvis Chat Message", seed_message, "origin") == "board_answer"
+		and frappe.db.table_exists(GRANT)
+	):
+		from pypika.terms import ExistsCriterion
+
+		g = frappe.qb.DocType(GRANT)
+		where &= ~ExistsCriterion(frappe.qb.from_(g).select(1).where(g.approval == a.name))
 	rows = frappe.qb.from_(a).select(a.name).where(where).for_update().run(pluck=True)
 	if not rows:
 		return
@@ -280,23 +295,29 @@ def resolve_on_user_message(conversation: str) -> None:
 		"""update `tabJarvis Approval Request`
 		set status='Answered', decision=%(decision)s,
 			decided_by=%(user)s, decided_at=%(now)s
-		where conversation=%(conversation)s
-		and status='Pending' and source='Chat'"""
-		+ (" and IFNULL(sheet, '')=''" if sheet_ready() else ""),
+		where name in %(names)s
+		and status='Pending' and source='Chat'""",
 		{
 			"decision": _ANSWERED_DECISION,
 			"user": frappe.session.user,
 			"now": frappe.utils.now_datetime(),
-			"conversation": conversation,
+			"names": tuple(rows),
 		},
 	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
-	# The board badge counted it: tell the owner's shell to re-count.
-	owner = frappe.db.get_value(CONV, conversation, "owner")
-	if owner:
-		publish_to_user(owner, {"kind": "action:settled", "conversation_id": conversation})
+	from jarvis.chat.approval_reviewers import log_bounded, notify_settled
 
-	from jarvis.chat.approval_reviewers import notify_settled
-
+	# The board badge counted it: tell the owner's shell to re-count. Best effort: a
+	# failed delivery never skips the reviewers below (the log names the kind only).
+	try:
+		owner = frappe.db.get_value(CONV, conversation, "owner")
+		if owner:
+			publish_to_user(owner, {"kind": "action:settled", "conversation_id": conversation})
+	except Exception:
+		log_bounded("jarvis.approval.notify_failed", "action:settled")
 	for name in rows:
-		notify_settled(frappe.get_doc(APPROVAL, name), include_requester=False)
+		try:
+			doc = frappe.get_doc(APPROVAL, name)
+		except Exception:
+			continue
+		notify_settled(doc, include_requester=False)

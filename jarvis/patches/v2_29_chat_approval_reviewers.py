@@ -9,6 +9,8 @@ backfilled. Rollback does not recreate the removed access.
 import frappe
 from frappe.query_builder.functions import Coalesce
 
+BATCH = 500  # legacy approval shares read per page
+
 
 def execute():
 	from jarvis.chat.approval_reviewers import AR, CONV, scoped_condition
@@ -26,7 +28,7 @@ def execute():
 			.select(s.name, s.user, s.everyone, a.conversation)
 			.where(scoped_condition(a) & (Coalesce(c.collaboration_active, 0) == 0) & (s.name > last))
 			.orderby(s.name)
-			.limit(500)
+			.limit(BATCH)
 			.run(as_dict=True)
 		)
 		if not rows:
@@ -51,5 +53,7 @@ def execute():
 					counts["conversation_shares_reset"] += len(mirrors)
 		frappe.db.delete("DocShare", {"name": ["in", [r.name for r in rows]]})
 		counts["approval_shares_reset"] += len(rows)
+	# Counts only (never names or users), visible in the migrate output and the log.
+	print(f"Chat review legacy access reset: {counts}")
 	frappe.logger("jarvis").info("Chat review legacy access reset: %s", counts)
 	return counts

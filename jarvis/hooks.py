@@ -801,6 +801,9 @@ permission_query_conditions.update(
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.approval_query_conditions",
 		"Comment": "jarvis.chat.approval_reviewers.comment_query_conditions",
 		"Jarvis Approval Reviewer": "jarvis.chat.approval_reviewers.grant_query_conditions",
+		# Audit copies of a private Chat question: requester-only, like the question.
+		"Version": "jarvis.chat.approval_reviewers.version_query_conditions",
+		"Deleted Document": "jarvis.chat.approval_reviewers.deleted_document_query_conditions",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.voice_note_query_conditions",
 	}
 )
@@ -814,6 +817,8 @@ has_permission.update(
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.has_approval_permission",
 		"Jarvis Approval Reviewer": "jarvis.chat.approval_reviewers.has_grant_permission",
 		"Comment": "jarvis.chat.approval_reviewers.has_comment_permission",
+		"Version": "jarvis.chat.approval_reviewers.has_version_permission",
+		"Deleted Document": "jarvis.chat.approval_reviewers.has_deleted_document_permission",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.has_voice_note_permission",
 	}
 )

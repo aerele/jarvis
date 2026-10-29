@@ -14,6 +14,7 @@ import {
 	setSidebarOrder,
 	searchLink,
 	tagApprovalReviewer,
+	continueApprovalChat,
 	untagApprovalReviewer,
 } from "./api.js";
 
@@ -194,5 +195,14 @@ describe("approval reviewer tagging (#756)", () => {
 		expect(call.mock.calls.map((c) => c[0])).not.toContain(
 			"jarvis.chat.docmeta_api.toggle_share"
 		);
+	});
+});
+
+describe("sending a decided question to the chat", () => {
+	it("calls the requester-only endpoint with the question name only", async () => {
+		await continueApprovalChat("AR-1");
+		expect(call).toHaveBeenLastCalledWith("jarvis.chat.approvals_api.continue_approval_chat", {
+			name: "AR-1",
+		});
 	});
 });

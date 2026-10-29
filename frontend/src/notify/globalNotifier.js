@@ -306,6 +306,18 @@ export function attachGlobalNotifier({ socket, router }) {
 				// a card or held write was decided somewhere: the badge may have dropped
 				store.refreshApprovalsCount();
 				return;
+			case "approval:continuation_failed":
+				// a reviewer's decision on the requester's question did not reach their
+				// chat: open the question (no chat id travels), where they can send it
+				signal({
+					conv: null,
+					toastAnywhere: true,
+					title: "Decision not sent to your chat",
+					body: "A reviewer answered your question, but it was not sent to your chat. Open it to send it.",
+					tag: "jarvis-approvals",
+					open: () => go("/approvals/" + encodeURIComponent(p.name || "")),
+				});
+				return;
 			case "approval:tagged":
 			case "approval:untagged":
 				// a Chat question's reviewer grant was added or revoked: the count of what
