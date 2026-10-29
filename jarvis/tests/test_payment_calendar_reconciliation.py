@@ -223,12 +223,19 @@ class TestPaymentCalendarReconciliation(TestCase):
 		self.assertNotIn("currency_residue_excluded", result["notes"])
 
 	def test_foreign_advance_reuses_company_currency_ledger_residual(self):
+		from erpnext.accounts.report.accounts_receivable.accounts_receivable import ReceivablePayableReport
+
 		invoice = self.foreign()
 		result = self.read("Receivable")
 		rows = [r for r in result["rows"] if r["voucher_no"] == invoice]
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(Decimal(rows[0]["remaining"]), 6400)
-		self.assertEqual(rows[0]["allocation_basis"], "invoice")
+		if hasattr(ReceivablePayableReport, "get_advance_in_report_currency"):
+			# ERPNext version-16 (October 2026) converts the advance to company currency
+			# itself, so the report's own row is right and nothing is repaired.
+			self.assertNotIn("allocation_basis", rows[0])
+		else:
+			self.assertEqual(rows[0]["allocation_basis"], "invoice")
 		self.assertEqual(rows[0]["due_date"], add_days(self.fx.today, 10))
 		self.assertEqual(Decimal(result["canonical_total"]), 6400)
 
