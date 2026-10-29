@@ -1630,6 +1630,17 @@ def _stamp_scope_and_watermark(
 	try:
 		scope = agent_scope.resolve_scope(inst)
 	except Exception:
+		try:
+			config = frappe.parse_json(inst.get("config") or "{}")
+		except (TypeError, ValueError):
+			config = {}
+		if isinstance(config, dict) and any(
+			config.get(k) for k in ("record_scope", "prior_period_from", "prior_period_to")
+		):
+			frappe.log_error(
+				title="jarvis agent: explicit scope resolution failed", message=frappe.get_traceback()
+			)
+			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
@@ -1751,6 +1762,13 @@ def _audit_prompt(
 			f'report_date="{scope.get("report_date")}", '
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
+		)
+	# Bound record and comparison-period values live in the server-stamped scope,
+	# not in the mutable installation config.  Give the delegate the exact values
+	# it must copy into its evaluator input.
+	if scope and any(scope.get(k) for k in ("prior_period_from", "prior_period_to", "record_scope")):
+		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
+			{k: scope[k] for k in ("prior_period_from", "prior_period_to", "record_scope") if scope.get(k)}
 		)
 	# EXPLICIT CONFIG: ``_launch_audit`` resolves declared/derived values ONCE and
 	# stamps them on the Run before dispatch.  This function receives that exact
