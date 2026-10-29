@@ -6,7 +6,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import agent_runs, agent_scheduler, agent_scope
+from jarvis.chat import agent_runs, agent_scheduler, agent_scope, agents_api
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tests.test_platform_false_clean import (
 	FINDING,
@@ -177,6 +177,18 @@ class TestRecordScopedWriteback(FrappeTestCase):
 		first = self.record(self.a)
 		self.record(None, findings=False)
 		self.assertEqual(frappe.db.get_value(FINDING, {"run": first.name}, "state"), "open")
+
+	def test_run_drilldown_does_not_include_a_different_record_between_detections(self):
+		self.record(self.a)
+		middle = self.record(self.b, findings=False)
+		last = self.record(self.a)
+		frappe.get_doc("User", self.owner).add_roles("Jarvis User")
+		frappe.set_user(self.owner)
+		try:
+			self.assertEqual(agents_api.list_findings(run=middle.name)["total"], 0)
+			self.assertEqual(agents_api.list_findings(run=last.name)["total"], 1)
+		finally:
+			frappe.set_user("Administrator")
 
 	def test_delegate_cannot_change_the_launcher_boundary(self):
 		first = self.record(self.a)
