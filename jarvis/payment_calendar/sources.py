@@ -22,6 +22,7 @@ from jarvis.payment_calendar.permissions import (
 	incomplete_scope_reasons,
 	require_company,
 	require_report,
+	row_filter_columns,
 	visible_names,
 )
 from jarvis.payment_calendar.reconciliation import InvoiceReconciler, check_allocation_contract
@@ -201,7 +202,9 @@ def _report_class():
 def _visible_rows(engine, report, rows):
 	from frappe.desk.query_report import get_filtered_data
 
-	filtered = get_filtered_data(report.ref_doctype, engine.columns, rows, frappe.session.user)
+	filtered = get_filtered_data(
+		report.ref_doctype, row_filter_columns(engine.columns), rows, frappe.session.user
+	)
 	# Apply the exact delivery predicate to every voucher, including JE/PE.
 	allowed = {}
 	for doctype in {r.voucher_type for r in filtered}:
