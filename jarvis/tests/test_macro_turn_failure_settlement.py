@@ -325,3 +325,29 @@ class TestAUsageLimitReason(FrappeTestCase):
 		self.assertEqual(macros._plain_reason("Daily limit of 5 emails reached"), "")
 		self.assertIn("request limit", macros._plain_reason("rate limit exceeded, resets in 5s"))
 		self.assertNotIn("Resets", macros._plain_reason("rate limit exceeded, resets in 5s"))
+
+	def test_a_credential_next_to_the_reset_time_never_reaches_the_reason(self):
+		"""The reset time is cut to 40 characters. Cut from the raw text, a key that starts
+		inside that window is left as a prefix no scrub pattern knows. Slide the start of a
+		fake key across the whole window. Fake values only."""
+		head = "You've hit your session limit \u00b7 resets 7:20am (UTC)"
+		secrets = (
+			"sk-ant-api03-" + "Zq7" * 20,
+			"password=" + "Hunter2" * 5,
+			"X-Amz-Security-Token: " + "Tk9" * 12,
+		)
+		for secret in secrets:
+			for pad in range(0, 32):
+				with self.subTest(secret=secret[:12], pad=pad):
+					reason = macros._plain_reason(f"{head}{',' * pad} {secret}")
+					self.assertTrue(
+						reason.startswith("The model account\u2019s usage allowance was reached.")
+					)
+					self.assertIn("Resets 7:20am (UTC)", reason, "the reset time is still said")
+					for part in ("Zq7", "Hunter", "Tk9", "sk-", "ant-api"):
+						self.assertNotIn(part, reason)
+
+	def test_a_long_reset_text_is_cut_and_the_reason_stays_short(self):
+		reason = macros._plain_reason("You've hit your session limit \u00b7 resets " + "tomorrow " * 40)
+		self.assertLessEqual(len(reason), macros._REASON_MAX)
+		self.assertIn("Resets tomorrow", reason)
