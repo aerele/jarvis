@@ -2673,7 +2673,13 @@ def resume_waiting_capacity_runs() -> None:
 	if not rows:
 		return
 	from jarvis._redis_lock import redis_lock
-	from jarvis.permissions import is_valid_unattended_owner
+
+	def _attempts_spent(run, macro_doc) -> bool:
+		# Asked by the guards between the hold and the shape check, where it always was.
+		if int(run.capacity_attempts or 0) + 1 <= _MAX_CAPACITY_ATTEMPTS:
+			return False
+		_end_run(run, macro_doc, "failed", _NO_CAPACITY_ERROR)
+		return True
 
 	for run_name in rows:
 		try:
@@ -2684,46 +2690,15 @@ def resume_waiting_capacity_runs() -> None:
 				if run.status != "waiting_capacity":
 					continue
 				macro_doc = frappe.get_doc(MACRO, run.macro)
-				if _fail_run_unless_one_owner(run, macro_doc):
-					continue
-				if is_held(macro_doc):
-					# An admin's hold landed while the run was parked (its own stop of
-					# the run lost, or came before the park): end it, never send its step.
-					_stop_run_locked(run.name, reason=_MACRO_HELD_ERROR, by="capacity resume")
+				if not _resume_guards(
+					run,
+					macro_doc,
+					expect_status="waiting_capacity",
+					by="capacity resume",
+					spent=_attempts_spent,
+				):
 					continue
 				attempts = int(run.capacity_attempts or 0) + 1
-				if attempts > _MAX_CAPACITY_ATTEMPTS:
-					_end_run(run, macro_doc, "failed", _NO_CAPACITY_ERROR)
-					continue
-				# #470: end the run before spending an attempt on work its snapshot can no
-				# longer describe. State-fenced off waiting_capacity so a stop that landed
-				# first is never clobbered.
-				if _resume_incompatible(run, macro_doc):
-					if _cas_run_status(
-						run.name,
-						"waiting_capacity",
-						"failed",
-						finished_at=frappe.utils.now(),
-						error=_MACRO_CHANGED_ERROR,
-					):
-						frappe.db.commit()
-						_announce(run, macro_doc, "failed", _MACRO_CHANGED_ERROR)
-					else:
-						frappe.db.commit()
-					continue
-				if not is_valid_unattended_owner(frappe.db.get_value(CONV, run.conversation, "owner")):
-					if _cas_run_status(
-						run.name,
-						"waiting_capacity",
-						"failed",
-						finished_at=frappe.utils.now(),
-						error=_OWNER_INELIGIBLE_ERROR,
-					):
-						frappe.db.commit()
-						_announce(run, macro_doc, "failed", _OWNER_INELIGIBLE_ERROR)
-					else:
-						frappe.db.commit()
-					continue
 				# CDX-22: flip waiting_capacity -> running with a STATE-FENCED CAS (not a blind set),
 				# recording the attempt BEFORE re-enqueue so a re-overload keeps the bounded count. The
 				# fence closes the stop-before-resume-write race: a stop that already set ``stopped``
@@ -2807,6 +2782,53 @@ def resume_waiting_capacity_runs() -> None:
 			)
 
 
+def _resume_guards(
+	run, macro_doc, *, expect_status: str, by: str, spent=None, step_sent: bool = False
+) -> bool:
+	"""The opening both resumes of a parked run share (``resume_waiting_capacity_runs``,
+	``macro_report_wait.resume_report_waits``), called under the run lock with the run
+	re-read and found in ``expect_status``: True when the run may be resumed, False when
+	this ended it (or it was not the engine's to resume) and the caller does nothing more.
+
+	In order: the run, its macro and its conversation belong to one user
+	(``_fail_run_unless_one_owner``); an admin's hold landed during the park (its own stop
+	of the run lost, or came before the park): end it, never send its step; ``spent``, the
+	caller's own limit (a ``(run, macro_doc)`` callable that ends the run itself and says
+	so by returning True); #470 the macro was edited into a shape the run cannot run
+	(``_resume_incompatible``); the owner may no longer run unattended work. Each ending is
+	state-fenced off ``expect_status``, so a stop that landed first is never clobbered.
+	``by`` names the caller in a hold's stop. ``step_sent``: the parked step is already
+	out (a report wait), see ``_resume_incompatible``."""
+	from jarvis.permissions import is_valid_unattended_owner
+
+	if _fail_run_unless_one_owner(run, macro_doc):
+		return False
+	if is_held(macro_doc):
+		_stop_run_locked(run.name, reason=_MACRO_HELD_ERROR, by=by)
+		return False
+	if spent is not None and spent(run, macro_doc):
+		return False
+	# #470: end the run before spending an attempt on work its snapshot can no
+	# longer describe.
+	if _resume_incompatible(run, macro_doc, step_sent=step_sent):
+		_fail_parked_run(run, macro_doc, expect_status, _MACRO_CHANGED_ERROR)
+		return False
+	if not is_valid_unattended_owner(frappe.db.get_value(CONV, run.conversation, "owner")):
+		_fail_parked_run(run, macro_doc, expect_status, _OWNER_INELIGIBLE_ERROR)
+		return False
+	return True
+
+
+def _fail_parked_run(run, macro_doc, expect_status: str, error: str) -> None:
+	"""End a parked run ``failed`` with ``error`` and say so, unless it left
+	``expect_status`` first (a stop): then its outcome stands."""
+	if _cas_run_status(run.name, expect_status, "failed", finished_at=frappe.utils.now(), error=error):
+		frappe.db.commit()
+		_announce(run, macro_doc, "failed", error)
+	else:
+		frappe.db.commit()
+
+
 def _run_mode(run, macro_doc) -> str:
 	"""The shape this run was DISPATCHED in (#470).
 
@@ -2830,7 +2852,7 @@ def _run_mode(run, macro_doc) -> str:
 	return MODE_MERGED if int(run.total_steps or 0) == 1 and len(steps) > 1 else MODE_STEPPED
 
 
-def _resume_incompatible(run, macro_doc) -> bool:
+def _resume_incompatible(run, macro_doc, *, step_sent: bool = False) -> bool:
 	"""#470: True when the macro was edited during the park in a way that leaves the run's
 	dispatch-time shape unrunnable. Macro edits take no per-run lock, so the resume path is
 	where that is noticed.
@@ -2849,9 +2871,18 @@ def _resume_incompatible(run, macro_doc) -> bool:
 	A run with a steps snapshot never gets here: it runs the steps and the summary it
 	started with (``_run_content``), so no edit of the macro can make it unrunnable.
 	Only a run started before the snapshot existed reads the live macro, and still
-	needs this."""
+	needs this.
+
+	``step_sent``: the parked step is already out (a run waiting for a report, whose
+	cursor counts steps SENT, so the step is ``current_step - 1``). Then nothing is
+	left to send that an edit could have removed except the step itself: merged is
+	never incompatible, stepped is when the list shrank below the sent step."""
 	if _run_content(run, macro_doc).from_snapshot:
 		return False
+	if step_sent:
+		return _run_mode(run, macro_doc) != MODE_MERGED and int(run.current_step or 0) > len(
+			macro_doc.steps or []
+		)
 	if _run_mode(run, macro_doc) == MODE_MERGED:
 		return not (macro_doc.merged_prompt or "").strip()
 	return int(run.current_step or 0) >= len(macro_doc.steps or [])
