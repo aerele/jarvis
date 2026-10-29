@@ -71,13 +71,6 @@ function inline(s) {
 	// means no script/handler/URL surface. The attribute form (&lt;br onload=...&gt;)
 	// deliberately stays escaped, so the safe posture holds.
 	t = t.replace(/&lt;br\s*\/?&gt;/gi, "<br>");
-	// Models also use native disclosure blocks for supporting calculations. Keep
-	// the allowlist attribute-free (no handlers, styles or named groups). Code
-	// spans are still protected by the sentinels and restored verbatim below.
-	t = t.replace(
-		/&lt;(\/?)(details|summary)\s*&gt;/gi,
-		(_tag, close, name) => `<${close}${name.toLowerCase()}>`
-	);
 	t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
 	t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 	t = t.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
@@ -188,6 +181,14 @@ function renderListBlock(items) {
 	return html;
 }
 
+// Native disclosure blocks (<details>/<summary>) are allowed only as whole lines, never
+// inside running text: a block tag inside <p> is invalid and browsers repair it into
+// empty paragraphs. Attribute-free only; anything else stays escaped by inline().
+const DETAILS_OPEN = /^<details\s*>$/i;
+const DETAILS_CLOSE = /^<\/details\s*>$/i;
+const SUMMARY_LINE = /^<summary\s*>(.*?)<\/summary\s*>(.*)$/i;
+const DETAILS_SUMMARY_LINE = /^<details\s*>\s*(<summary\s*>.*)$/i;
+
 export function renderMarkdown(src) {
 	if (!src) return "";
 	const lines = String(src).replace(/\r\n/g, "\n").split("\n");
@@ -200,8 +201,48 @@ export function renderMarkdown(src) {
 			para = [];
 		}
 	};
+	let openDetails = 0;
+	// The summary must be the first child of its <details>.
+	const summaryAllowed = () => out[out.length - 1] === "<details>";
+	// <summary>text</summary>rest: summary now, any trailing text starts a paragraph.
+	const pushSummary = (m) => {
+		out.push(`${out.pop()}<summary>${inline(m[1])}</summary>`);
+		let rest = m[2].trim();
+		// A complete one-line block: <details><summary>S</summary>body</details>.
+		const closed = /<\/details\s*>$/i.test(rest);
+		if (closed) rest = rest.replace(/<\/details\s*>$/i, "").trim();
+		if (rest) para.push(rest);
+		if (closed) {
+			flushPara();
+			out.push("</details>");
+			openDetails--;
+		}
+	};
 	while (i < lines.length) {
 		const line = lines[i];
+		const tagLine = line.trim();
+		const open = tagLine.match(DETAILS_SUMMARY_LINE);
+		const summary = tagLine.match(SUMMARY_LINE);
+		if (DETAILS_OPEN.test(tagLine) || (open && SUMMARY_LINE.test(open[1]))) {
+			flushPara();
+			out.push("<details>");
+			openDetails++;
+			if (open) pushSummary(open[1].match(SUMMARY_LINE));
+			i++;
+			continue;
+		}
+		if (summary && summaryAllowed() && para.length === 0) {
+			pushSummary(summary);
+			i++;
+			continue;
+		}
+		if (DETAILS_CLOSE.test(tagLine) && openDetails > 0) {
+			flushPara();
+			out.push("</details>");
+			openDetails--;
+			i++;
+			continue;
+		}
 		// fenced code block: ``` or ```lang - mermaid renders as a diagram,
 		// everything else as a styled code block.
 		const fence = line.match(/^\s*```\s*([\w-]*)\s*$/);
@@ -307,5 +348,7 @@ export function renderMarkdown(src) {
 		i++;
 	}
 	flushPara();
+	// An unterminated disclosure (cut-off reply) still closes, keeping the HTML valid.
+	while (openDetails-- > 0) out.push("</details>");
 	return out.join("\n");
 }
