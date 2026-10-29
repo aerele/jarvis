@@ -1666,18 +1666,14 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "status": "Published",
-      "description": "Extends the Statutory Payroll auditor onto your own recorded PF/ESI deposit bookings: it reads the Journal Entry or Payment Entry you post against your PF/ESI liability account and reports whether that booking is dated on or before the effective-dated deposit due date. Installable only where ERPNext and HRMS are present. Read-only; reports a booked-liability date only, never that a deposit reached EPFO/ESIC, and never books, edits, or deposits. Custom challan doctypes and portal receipts are not read here; they enter as a declared import artifact.",
+      "description": "Reviews recorded outgoing Journal Entry and Payment Entry bookings for owner-declared wage months. It compares each recorded date with a versioned due date. It does not read portal receipts or import artifacts, establish receipt of a deposit, assess the liability balance, or decide a penalty. A named reviewer owns every decision.",
       "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__get_doc"
+        "jarvis__query"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -1687,13 +1683,18 @@
       "doctypes_required": [
         "Journal Entry",
         "Payment Entry",
-        "Company"
+        "Company",
+        "Account",
+        "Journal Entry Account",
+        "Payment Entry Deduction",
+        "Advance Taxes and Charges"
       ],
       "rule_tokens": [
         "pf_esi_deposit_due_date",
         "s14b_damages_table",
         "s7q_interest_table"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -1706,10 +1707,13 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027",
+      "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "deposit"
+      ]
     },
     {
       "agent_slug": "stock-variance-auditor",
