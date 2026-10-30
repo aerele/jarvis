@@ -167,7 +167,7 @@ const pulledUp = (bottom, hostH, s, gapPx) =>
 
 // The page puts the hero on a whole pixel, which can be up to half a pixel lower than the place
 // it worked out, so a row that is a pixel short of its gap still counts as fitting.
-const TIGHT_SLACK_PX = 1;
+export const TIGHT_SLACK_PX = 1;
 
 /** Where a point of the drawn row lands once the row is fitted (the row scales about x = 400). */
 export function fitPoint(fit, [x, y]) {

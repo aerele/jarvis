@@ -31,6 +31,7 @@ import {
   heroTopMin,
   sceneHeroTop,
   toranBottom,
+  TIGHT_SLACK_PX,
 } from "./scene-geometry.mjs";
 import { DESIGNS } from "./answer.mjs";
 import { r2 } from "./stage.mjs";
@@ -348,6 +349,18 @@ test("a row the hero is too close to even at its smallest is reported as tight, 
   assert.equal(floorFit({ ...CROWDED, s: 2, clearTop: 345.6 }).tight, true); // 1.2 px
   assert.equal(floorFit({ ...CROWDED, clearTop: undefined }).tight, false);
   assert.equal(floorFit({ ground: NaN, hostH: 500, s: 1 }).tight, false);
+});
+
+test("the tight slack is one pixel: a row exactly that far short still fits, a hair more is tight", () => {
+  assert.equal(TIGHT_SLACK_PX, 1);
+  // At 0.55 the row's top reaches 345 (CROWDED); the slack is in px, so it is 1 / s in units.
+  for (const s of [1, 2, 4]) {
+    const edge = 345 + TIGHT_SLACK_PX / s;
+    const fit = (clearTop) => floorFit({ ...CROWDED, s, clearTop });
+    assert.equal(fit(edge).scale, MIN_FLOOR_SCALE);
+    assert.equal(fit(edge).tight, false, `s ${s}: at the slack`);
+    assert.equal(fit(edge + 1e-6).tight, true, `s ${s}: past the slack`);
+  }
 });
 
 // ---- the rows with something tall under the hero (the page places the hero by them) ----------
