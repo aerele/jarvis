@@ -14,22 +14,30 @@ const GAP_PX = 8;
 /**
  * Boxes for a phone `w` x `h` px. `starters` true puts the starter cards band at the bottom
  * of the layer; false leaves the band as the space under the hero. `markY` overrides where
- * the hero is centred in the space above the band.
+ * the hero is centred in the space above the band. `lines` is the greeting's line count (a
+ * long day greeting wraps to two and makes the hero 26 px taller).
  */
-export function phoneBoxes({ w = 390, h = 844, starters = true, markY } = {}) {
+export function phoneBoxes({
+  w = 390,
+  h = 844,
+  starters = true,
+  markY,
+  lines = 1,
+} = {}) {
+  const heroH = HERO_H + (lines - 1) * 26;
   const hostH = h - COMPOSER_PX;
   const bandH = h >= 800 ? STARTER_BAND_PX.roomy : STARTER_BAND_PX.short;
   const bandTop = starters ? hostH - GAP_PX - bandH : hostH - GAP_PX;
   const y =
-    markY ?? Math.round(BAR_PX + (bandTop - GAP_PX - BAR_PX - HERO_H) / 2);
-  const hero = { x: (w - HERO_W) / 2, y, w: HERO_W, h: HERO_H };
+    markY ?? Math.round(BAR_PX + (bandTop - GAP_PX - BAR_PX - heroH) / 2);
+  const hero = { x: (w - HERO_W) / 2, y, w: HERO_W, h: heroH };
   const cards = starters
     ? { x: 14, y: bandTop, w: w - 28, h: bandH }
     : {
         x: 14,
-        y: y + HERO_H + 16,
+        y: y + heroH + 16,
         w: w - 28,
-        h: hostH - GAP_PX - (y + HERO_H + 16),
+        h: hostH - GAP_PX - (y + heroH + 16),
       };
   return {
     host: { w, h: hostH },
