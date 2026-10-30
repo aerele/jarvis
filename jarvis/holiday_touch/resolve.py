@@ -275,19 +275,20 @@ def _row_matches(rows, company: str) -> list[dict]:
 	"""One ``{on, description, occasion, via}`` per row, in row order; ``occasion`` and
 	``via`` are None for a row that names none. The one place a row is matched."""
 	country = frappe.get_cached_value("Company", company, "country")
+	extra = settings.names(settings.site())  # the operator's names; this runs on a cache miss only
 	lists, hits = {}, []
 	for row in rows:
 		on = getdate(row.get("holiday_date"))
-		occ, via = match_occasion(row.get("description"), on, country), "match"
+		occ, via = match_occasion(row.get("description"), on, country, extra), "match"
 		if occ is None and row.get("weekly_off"):
-			occ, via = _calendar_occasion(row.get("parent"), on, country, lists), "weekly_off_calendar"
+			occ, via = _calendar_occasion(row.get("parent"), on, country, lists, extra), "weekly_off_calendar"
 		hits.append(
 			{"on": on, "description": row.get("description"), "occasion": occ, "via": via if occ else None}
 		)
 	return hits
 
 
-def _calendar_occasion(parent, on: date, company_country, lists: dict):
+def _calendar_occasion(parent, on: date, company_country, lists: dict, extra=None):
 	"""What the country's own calendar calls this weekly-off date (ERPNext's "Get Local
 	Holidays" skips a date that already has a row, so a festival on a Sunday stays "Sunday").
 	The row's list country and subdivision win; without a country, the Company's ISO code and
@@ -297,7 +298,7 @@ def _calendar_occasion(parent, on: date, company_country, lists: dict):
 	country, subdivision = lists[parent]
 	code = country_code_for(country or company_country)
 	name = calendar_name(on, code, subdivision if country else None)
-	return match_occasion(name, on, company_country) if name else None
+	return match_occasion(name, on, company_country, extra) if name else None
 
 
 def _list_region(parent):
