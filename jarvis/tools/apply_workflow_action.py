@@ -23,7 +23,7 @@ Two shapes:
 """
 
 import frappe
-from frappe.model.workflow import apply_workflow, get_workflow_name
+from frappe.model.workflow import apply_workflow, get_transitions, get_workflow, get_workflow_name
 
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools import require_doctype_and_name
@@ -65,6 +65,7 @@ def apply_workflow_action(
 		)
 
 	doc = frappe.get_doc(doctype, name)  # raises DoesNotExistError if missing
+	_lcv_tax_gate(doc, action)
 	result = apply_workflow(doc, action)  # validates transition + role + self-approval
 	if result is None:
 		return {"doctype": doctype, "name": name, "action": action, "queued": True}
@@ -101,8 +102,35 @@ def _apply_batch(doctype: str, action: str, names: list) -> dict:
 
 	def _do(name: str) -> dict:
 		doc = frappe.get_doc(doctype, name)  # raises DoesNotExistError if missing
+		_lcv_tax_gate(doc, action)
 		result = apply_workflow(doc, action)  # validates transition + role + self-approval
 		return {"name": name, "queued": result is None}
 
 	results = run_atomic_batch(names, _do, label=lambda n: n)
 	return {"doctype": doctype, "action": action, "results": results, "count": len(results)}
+
+
+def _lcv_tax_gate(doc, action):
+	if doc.doctype != "Landed Cost Voucher" or doc.docstatus != 0:
+		return
+	doc.check_permission("read")
+	# apply_workflow reloads its target. Keep that reload bound to the document
+	# checked here, including on READ COMMITTED connections.
+	modified = frappe.db.get_value(doc.doctype, doc.name, "modified", for_update=True)
+	if str(modified) != str(doc.modified):
+		raise frappe.TimestampMismatchError(
+			"The LCV changed. Reload it before applying this workflow action."
+		)
+	workflow = get_workflow(doc.doctype)
+	transition = next((t for t in get_transitions(doc, workflow) if t.action == action), None)
+	if not transition or not any(
+		s.state == transition.next_state and int(s.doc_status) == 1 for s in workflow.states
+	):
+		return
+	if doc.meta.queue_in_background:
+		raise InvalidArgumentError(
+			"Review this LCV in the ERP form; background workflow cannot recheck source tax here."
+		)
+	from jarvis.tools._lcv_source_tax import gate_lcv
+
+	gate_lcv(doc, lock=True)
