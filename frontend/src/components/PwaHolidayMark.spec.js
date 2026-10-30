@@ -148,4 +148,21 @@ describe("PWA HolidayMark", () => {
 		await flushPromises();
 		expect(wrapper.find(".jv-mood-star").exists()).toBe(true);
 	});
+
+	it("still ends the smile when the mark is tapped again while the art import is stalled", async () => {
+		await today_is(answer());
+		art.load = () => new Promise(() => {});
+		art.loaded = null;
+		await mountMark();
+		vi.advanceTimersByTime(1000);
+		await wrapper.get("button.jvh-button").trigger("click"); // a replay inside the first 3 s wait
+		await flushPromises();
+		vi.advanceTimersByTime(2000); // the first wait gives up (it must not cancel the second)
+		await flushPromises();
+		vi.advanceTimersByTime(1000); // the second wait gives up
+		await flushPromises();
+		vi.advanceTimersByTime(2500);
+		await flushPromises();
+		expect(wrapper.find(".jv-mood-star").exists()).toBe(true);
+	});
 });
