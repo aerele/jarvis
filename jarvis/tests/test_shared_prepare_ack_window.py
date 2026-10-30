@@ -77,7 +77,7 @@ class TestSharedPrepareStoresAckWindow(_shared_prepare.TestCollaborationPrepare)
 			self.addCleanup(
 				lambda n=doc.name: frappe.delete_doc("File", n, force=True, ignore_permissions=True)
 			)
-			attachments.append({"file_url": doc.file_url, "file_name": name})
+			attachments.append({"file_id": doc.name, "file_url": doc.file_url, "file_name": name})
 		frappe.db.set_value(
 			"Jarvis Chat Turn", self.turn.name, "dispatch_payload", json.dumps({"attachments": attachments})
 		)
@@ -111,7 +111,7 @@ class TestSharedPrepareStoresAckWindow(_shared_prepare.TestCollaborationPrepare)
 		self.assertLess(payload["ack_timeout_s"], 60.0)
 
 	def test_inlined_text_extends_the_window(self):
-		self._attach([("figures.txt", ("row,amount\n" + "line-item,1250.00\n" * 300).encode())])
+		self._attach([("figures.log", ("row,amount\n" + "line-item,1250.00\n" * 300).encode())])
 		payload = self._prepared()
 		ap = self.assembled[0]
 		self.assertGreater(ap.inlined_prompt_chars, 5000, "premise: the text was inlined")

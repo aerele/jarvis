@@ -7,7 +7,7 @@ from frappe.core.doctype.file.file import File
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 
-MISSING = "No matching file found."
+MISSING = "no matching file found"
 HANDOFF = "prepared-report-handoff-v1"
 MAX_BYTES = 10 * 1024 * 1024
 

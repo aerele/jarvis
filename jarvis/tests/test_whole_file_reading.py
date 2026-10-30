@@ -26,7 +26,7 @@ class TestFileCoverage(unittest.TestCase):
 	def read(self, data, filename="x.txt", api=False, **args):
 		doc = SimpleNamespace(name="file", file_name=filename, file_url="/private/files/x")
 		with (
-			patch("jarvis.tools.read_file._resolve_file", return_value=doc),
+			patch("jarvis.tools.read_file.resolve_file", return_value=doc),
 			patch.object(frappe, "has_permission", return_value=True),
 			patch("jarvis.compat.file_bytes", return_value=data),
 		):
@@ -151,7 +151,7 @@ class TestFileCoverage(unittest.TestCase):
 	def test_permission_precedes_bytes_on_every_call(self):
 		for args in ({}, {"cursor": "0:201:0", "version": "a" * 64}):
 			with (
-				patch("jarvis.tools.read_file._resolve_file", return_value=SimpleNamespace(name="private")),
+				patch("jarvis.tools.read_file.resolve_file", return_value=SimpleNamespace(name="private")),
 				patch.object(frappe, "has_permission", return_value=False),
 				patch("jarvis.compat.file_bytes") as read,
 			):
@@ -185,7 +185,9 @@ class TestFileCoverage(unittest.TestCase):
 		data = self.workbook()
 		with self.assertRaisesRegex(Exception, "worksheet does not exist"):
 			self.read(data, "x.xlsx", sheet="missing")
-		with patch.object(scan, "MAX_EXPANDED_BYTES", 1), self.assertRaisesRegex(Exception, "64 MiB"):
+		from jarvis.tools import _archive_sources
+
+		with patch.object(_archive_sources, "MAX_XML", 1), self.assertRaisesRegex(Exception, "byte budget"):
 			self.read(data, "x.xlsx")
 		with (
 			patch(
