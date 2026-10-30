@@ -363,6 +363,27 @@ test("the tight slack is one pixel: a row exactly that far short still fits, a h
   }
 });
 
+test("a larger minScale stops the shrink there, and reports tight sooner", () => {
+  const roomy = floorFit({ ...CROWDED, clearTop: 346.2 });
+  assert.equal(roomy.scale, MIN_FLOOR_SCALE);
+  assert.equal(roomy.tight, true);
+  const phone = floorFit({ ...CROWDED, clearTop: 300, minScale: 0.8 });
+  assert.equal(phone.scale >= 0.8, true);
+  assert.equal(
+    floorFit({ ...CROWDED, clearTop: 360, minScale: 0.8 }).scale,
+    0.8
+  );
+  assert.equal(
+    floorFit({ ...CROWDED, clearTop: 360, minScale: 0.8 }).tight,
+    true
+  );
+  // Without it nothing changes.
+  assert.deepEqual(
+    floorFit({ ...CROWDED, clearTop: 360 }),
+    floorFit({ ...CROWDED, clearTop: 360, minScale: MIN_FLOOR_SCALE })
+  );
+});
+
 // ---- the rows with something tall under the hero (the page places the hero by them) ----------
 
 const ROWS = {
