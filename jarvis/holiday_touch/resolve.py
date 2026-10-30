@@ -344,6 +344,7 @@ def _window_rows(employee, today: date) -> tuple[str, list]:
 			return "no_list", []
 		return "ok", [_row_view(hit) for hit in _row_matches(rows, employee.company)]
 	except Exception:
+		report("explain_rows", "Holiday touch: explain rows lookup failed")
 		return "error", []
 
 
