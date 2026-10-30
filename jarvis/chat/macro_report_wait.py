@@ -1220,7 +1220,9 @@ def _log_once_an_hour(conversation: str | None, title: str, message: str, key: s
 	and must not commit. Never raises."""
 	try:
 		key = key or f"jarvis_macro_wait_log:{title}:{conversation or '-'}"
-		if frappe.cache().get_value(key):
+		# expires=True: on Frappe 15 a plain read caches the miss for the request, so the
+		# key set below (expiring keys skip the local cache) would never be seen again.
+		if frappe.cache().get_value(key, expires=True):
 			return
 		frappe.cache().set_value(key, 1, expires_in_sec=_LOG_EVERY_S)
 		frappe.log_error(title=title, message=message)
