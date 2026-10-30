@@ -588,38 +588,50 @@
 				</svg>
 			</div>
 			<!-- ===== WELCOME ===== -->
+			<!-- Scene-day layout (lib/holidayStage.js says when): a big centred mark and the
+			     greeting over the same starter cards, link and catalog, with the holiday scene's
+			     art on a layer above. Every other day takes the normal layout below. -->
+			<HolidayStage
+				v-else-if="showWelcome && stageOn"
+				:greeting="greeting"
+				:first-name="firstName"
+				:mood="holdActive ? 'upgrading' : 'star'"
+				:hold-active="holdActive"
+				:composer-empty="!input"
+			>
+				<template #sub>
+					<p class="jv-welcome-sub">
+						Ask about your ERP data, run a workflow or draft something.
+						{{ brand.agentName }}
+						is connected to your
+						<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
+						instance.
+					</p>
+				</template>
+				<template #bottom>
+					<WelcomeStarters
+						:cards="welcomeCards"
+						:tint="starterTint"
+						@select="onWelcomeSuggestion"
+					/>
+				</template>
+			</HolidayStage>
 			<!-- Scroll viewport + inner column are CLASSES, not inline styles: inline
 			     styles cannot be overridden, and the overflow-safe centring below
 			     (jv-welcome-scroll/jv-welcome-col) has to win on short/zoomed
 			     viewports. See the style block for the centre-when-it-fits rationale. -->
 			<div v-else-if="showWelcome" class="jv-welcome-scroll">
 				<div class="jv-welcome-col">
-					<!-- The brand mark inline with the greeting, then one line of
-					     orienting copy. The copy earns its place on an empty screen: it
-					     is the only thing that says what this box is for and that the
-					     agent is wired to real ERP data. -->
-					<h1
-						class="jv-welcome-h1"
-						style="
-							display: flex;
-							align-items: center;
-							justify-content: center;
-							gap: 16px;
-							font-size: 40px;
-							font-weight: 640;
-							letter-spacing: -0.03em;
-							margin: 0;
-							overflow-wrap: anywhere;
-						"
-					>
-						<JarvisMark
-							:size="38"
-							:radius="11"
-							:mood="holdActive ? 'upgrading' : 'star'"
-							style="flex: none"
-						/>
-						<span>{{ greeting }}, {{ firstName }}</span>
-					</h1>
+					<!-- The brand mark inline with the greeting (a holiday heading and
+					     advance wish on those days), then one line of orienting copy.
+					     The copy earns its place on an empty screen: it is the only
+					     thing that says what this box is for and that the agent is
+					     wired to real ERP data. -->
+					<WelcomeHero
+						:greeting="greeting"
+						:first-name="firstName"
+						:mood="holdActive ? 'upgrading' : 'star'"
+					/>
 					<p class="jv-welcome-sub">
 						Ask about your ERP data, run a workflow or draft something.
 						{{ brand.agentName }}
@@ -633,78 +645,11 @@
 					     the original four defaults for a workspace with no history yet.
 					     They FILL the composer, never send: the do-not-regress rule the old
 					     cards had. -->
-					<div
-						class="jv-welcome-grid"
-						style="
-							display: grid;
-							grid-template-columns: 1fr 1fr;
-							gap: 11px;
-							text-align: left;
-							margin-top: 26px;
-						"
-					>
-						<button
-							v-for="(s, i) in starterCards"
-							:key="s.prompt"
-							type="button"
-							class="jv-suggest"
-							@click="onWelcomeSuggestion(s)"
-							style="
-								display: flex;
-								gap: 11px;
-								padding: 14px;
-								background: var(--surface);
-								border: 1px solid var(--border);
-								border-radius: 10px;
-								cursor: pointer;
-								transition: border-color 0.12s, background 0.12s;
-								text-align: left;
-								font-family: inherit;
-								color: inherit;
-								width: 100%;
-							"
-						>
-							<div
-								:style="{
-									width: '30px',
-									height: '30px',
-									flex: 'none',
-									borderRadius: '8px',
-									background: starterTint(i).bg,
-									color: starterTint(i).fg,
-									display: 'flex',
-									alignItems: 'center',
-									justifyContent: 'center',
-								}"
-								v-html="starterTint(i).icon"
-							></div>
-							<div style="min-width: 0">
-								<div
-									v-if="s.title"
-									style="font-size: 13.5px; font-weight: 550; margin-bottom: 2px"
-								>
-									{{ s.title }}
-								</div>
-								<div
-									style="
-										font-size: 12.5px;
-										color: var(--text-3);
-										line-height: 1.4;
-									"
-								>
-									{{ s.prompt }}
-								</div>
-							</div>
-						</button>
-					</div>
-					<router-link
-						to="/dashboards/payment-calendar"
-						class="mt-4 flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm text-ink-gray-7 hover:bg-surface-gray-1"
-					>
-						<span>Payment Calendar · plan supplier dues and cash</span>
-						<span aria-hidden="true">→</span>
-					</router-link>
-					<CapabilityCatalog @select="onWelcomeSuggestion" />
+					<WelcomeStarters
+						:cards="welcomeCards"
+						:tint="starterTint"
+						@select="onWelcomeSuggestion"
+					/>
 				</div>
 			</div>
 
@@ -881,7 +826,7 @@
 							@open-attachment="openArtifact(m, $event)"
 						>
 							<template #avatar>
-								<JarvisMark
+								<HolidayMark
 									:size="28"
 									:radius="7"
 									:mood="
@@ -2136,7 +2081,7 @@
 					     StepsBox's own Cancel button (queued mode) calls the same
 					     cancelQueued the old chip's button did. -->
 					<div v-if="inFlightRowVisible" style="display: flex; gap: 12px">
-						<JarvisMark
+						<HolidayMark
 							:size="28"
 							:radius="7"
 							:mood="queuedTurn ? 'star' : 'thinking'"
@@ -4450,7 +4395,12 @@ import { report as reportError } from "@/lib/errorReporter";
 import JvChart from "@/charts/JvChart.vue";
 import ConnectPhoneDialog from "@/components/ConnectPhoneDialog.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
-import CapabilityCatalog from "@/components/CapabilityCatalog.vue";
+import HolidayMark from "@/components/holiday/HolidayMark.vue";
+import WelcomeHero from "@/components/holiday/WelcomeHero.vue";
+import HolidayStage from "@/components/holiday/HolidayStage.vue";
+import { holidayTouch } from "@/holidayTouch";
+import { stageEligible, withFestiveCard } from "@/lib/holidayStage";
+import WelcomeStarters from "@/components/chat/WelcomeStarters.vue";
 import DraftPreview from "@/components/doc/DraftPreview.vue";
 import ActionError from "@/components/ActionError.vue";
 import Banner from "@/components/Banner.vue";
@@ -6187,7 +6137,7 @@ const jarvisTools = ref([
 
 // Shared with the shell via @/lib/user (see the cookie double-decode note there).
 const fullName = displayName(session.user);
-const firstName = computed(() => fullName.split(/\s+/)[0]);
+const firstName = computed(() => fullName.trim().split(/\s+/)[0]);
 // The empty-chat greeting. `now` is captured ONCE per mount, not read per render:
 // the phrase must not change under the user while they sit on the screen (and a
 // session left open past midnight keeping its line is the calmer behaviour).
@@ -6673,6 +6623,32 @@ const showWelcome = computed(
 	() =>
 		!booting.value &&
 		(!currentId.value || (visibleMessages.value.length === 0 && !isExistingTitledConv.value))
+);
+
+// The scene-day stage layout (lib/holidayStage.js): decided from the answer, the phone
+// flag and white label, plus whether a hold was showing when this welcome screen opened.
+// A hold that starts later does not swap the layout; the stage just settles its scene.
+const holdAtWelcomeMount = ref(false);
+watch(
+	showWelcome,
+	(on) => {
+		if (on) holdAtWelcomeMount.value = holdActive.value;
+	},
+	{ immediate: true }
+);
+const stageOn = computed(() =>
+	stageEligible({
+		answer: holidayTouch.answer.value,
+		phone: store.mobile,
+		whiteLabel: brand.isWhitelabeled,
+		holdAtMount: holdAtWelcomeMount.value,
+	})
+);
+// The festive greeting card replaces the last starter on a scene day.
+const welcomeCards = computed(() =>
+	stageOn.value
+		? withFestiveCard(starterCards.value, holidayTouch.answer.value)
+		: starterCards.value
 );
 
 // settings/overview derived metrics (all from data we already hold)
@@ -13456,7 +13432,9 @@ onUnmounted(() => {
 
 <style scoped>
 /* The brand mark is now <JarvisMark> everywhere on this surface (hero, assistant
-   avatars, proactive toast), so it carries its own gradient in BOTH themes.
+   avatars, proactive toast; the hero and avatars through <HolidayMark>, which draws
+   a JarvisMark and adds the holiday item on top), so it carries its own gradient in
+   BOTH themes.
    Deleted with this comment: a `.jv-dark .jv-logo, .jv-dark .jv-toast-ic` rule
    that force-painted the gradient with !important in dark only. It existed
    because those chips were `background: var(--cta)` — near-black in light, and
@@ -14333,15 +14311,7 @@ onUnmounted(() => {
 	line-height: 1.5;
 	margin: 12px 0 0;
 }
-/* Starter cards (the original card treatment, now carrying synthesised copy). */
-.jv-suggest:hover {
-	border-color: var(--border-2);
-	background: var(--surface-1);
-}
-.jv-suggest:focus-visible {
-	outline: 2px solid var(--cta);
-	outline-offset: 2px;
-}
+/* Starter card styles live in components/chat/WelcomeStarters.vue. */
 /* mobile layout (UX #12): the chat had fixed 40px desktop paddings + a 2-col
    welcome grid; inline styles win over class rules, so these override with
    !important. The "Connect phone" QR flow ships people straight here. */
@@ -14360,19 +14330,9 @@ onUnmounted(() => {
 	.jv-welcome-scroll {
 		padding: 24px 16px;
 	}
-	.jv-welcome-h1 {
-		/* Scaled with the desktop bump (32 -> 40), kept a step smaller so a long
-		   "Long time no see, <name>" still fits a phone without wrapping oddly. */
-		font-size: 28px !important;
-	}
 	.jv-welcome-sub {
 		font-size: 14px;
 		margin-top: 10px;
-	}
-	/* Starter cards stack: two 14px-padded cards side by side are unreadable at
-	   phone width. Inline styles set the grid, so this has to win with !important. */
-	.jv-welcome-grid {
-		grid-template-columns: 1fr !important;
 	}
 }
 /* Phone mode (< 768px, matches the shell store `mobile` flag that swaps the
