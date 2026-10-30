@@ -22,6 +22,8 @@
   "agent_name",
   "brand_logo",
   "brand_favicon",
+  "holiday_touches_enabled",
+  "birthday_greetings_enabled",
   "documents_section",
   "default_pdf_template",
   "llm_tab",
@@ -181,7 +183,12 @@
   "catalogue_visibility_synced_at",
   "connector_catalogue_section",
   "connector_catalogue_disabled",
-  "connector_catalogue_synced_at"
+  "connector_catalogue_synced_at",
+  "holiday_policy_section",
+  "holiday_policy_disabled",
+  "holiday_policy_disabled_designs",
+  "holiday_policy_names",
+  "holiday_policy_synced_at"
  ],
  "fields": [
   {
@@ -279,6 +286,20 @@
    "fieldtype": "Attach Image",
    "label": "Favicon",
    "description": "Browser-tab icon. Square PNG (or .ico) works best."
+  },
+  {
+   "fieldname": "holiday_touches_enabled",
+   "fieldtype": "Check",
+   "label": "Holiday touches",
+   "default": "1",
+   "description": "Holiday and birthday greetings on the Jarvis welcome screen"
+  },
+  {
+   "fieldname": "birthday_greetings_enabled",
+   "fieldtype": "Check",
+   "label": "Birthday greetings",
+   "default": "1",
+   "depends_on": "eval:doc.holiday_touches_enabled"
   },
   {
    "fieldname": "documents_section",
@@ -1341,6 +1362,39 @@
    "label": "Connector Catalogue Synced At",
    "hidden": 1,
    "read_only": 1
+  },
+  {
+   "fieldname": "holiday_policy_section",
+   "fieldtype": "Section Break",
+   "label": "Holiday policy (from Jarvis Cloud)",
+   "collapsible": 1,
+   "description": "Mirror of the operator's holiday-touch policy, pulled from the control plane via get_connection (jarvis.holiday_touch.policy). Read-only here; the pull is the only writer."
+  },
+  {
+   "fieldname": "holiday_policy_disabled",
+   "fieldtype": "Check",
+   "label": "Holiday Touches Disabled By Operator",
+   "read_only": 1
+  },
+  {
+   "fieldname": "holiday_policy_disabled_designs",
+   "fieldtype": "Small Text",
+   "label": "Disabled Holiday Designs",
+   "read_only": 1,
+   "description": "JSON list of design keys the operator has turned off."
+  },
+  {
+   "fieldname": "holiday_policy_names",
+   "fieldtype": "Long Text",
+   "label": "Holiday Policy Names",
+   "read_only": 1,
+   "description": "JSON {aliases, near_misses} of extra holiday names from the operator."
+  },
+  {
+   "fieldname": "holiday_policy_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Holiday Policy Synced At",
+   "read_only": 1
   }
  ],
  "permissions": [
@@ -1380,5 +1434,5 @@
    "write": 1
   }
  ],
- "modified": "2026-10-18 12:00:00.000000"
+ "modified": "2026-10-28 12:00:00.000000"
 }

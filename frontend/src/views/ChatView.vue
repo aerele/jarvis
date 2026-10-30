@@ -614,32 +614,16 @@
 			     viewports. See the style block for the centre-when-it-fits rationale. -->
 			<div v-else-if="showWelcome" class="jv-welcome-scroll">
 				<div class="jv-welcome-col">
-					<!-- The brand mark inline with the greeting, then one line of
-					     orienting copy. The copy earns its place on an empty screen: it
-					     is the only thing that says what this box is for and that the
-					     agent is wired to real ERP data. -->
-					<h1
-						class="jv-welcome-h1"
-						style="
-							display: flex;
-							align-items: center;
-							justify-content: center;
-							gap: 16px;
-							font-size: 40px;
-							font-weight: 640;
-							letter-spacing: -0.03em;
-							margin: 0;
-							overflow-wrap: anywhere;
-						"
-					>
-						<JarvisMark
-							:size="38"
-							:radius="11"
-							:mood="holdActive ? 'upgrading' : 'star'"
-							style="flex: none"
-						/>
-						<span>{{ greeting }}, {{ firstName }}</span>
-					</h1>
+					<!-- The brand mark inline with the greeting (a holiday heading and
+					     advance wish on those days), then one line of orienting copy.
+					     The copy earns its place on an empty screen: it is the only
+					     thing that says what this box is for and that the agent is
+					     wired to real ERP data. -->
+					<WelcomeHero
+						:greeting="greeting"
+						:first-name="firstName"
+						:mood="holdActive ? 'upgrading' : 'star'"
+					/>
 					<p class="jv-welcome-sub">
 						Ask about your ERP data, run a workflow or draft something.
 						{{ brand.agentName }}
@@ -901,7 +885,7 @@
 							@open-attachment="openArtifact(m, $event)"
 						>
 							<template #avatar>
-								<JarvisMark
+								<HolidayMark
 									:size="28"
 									:radius="7"
 									:mood="
@@ -2161,7 +2145,7 @@
 					     StepsBox's own Cancel button (queued mode) calls the same
 					     cancelQueued the old chip's button did. -->
 					<div v-if="inFlightRowVisible" style="display: flex; gap: 12px">
-						<JarvisMark
+						<HolidayMark
 							:size="28"
 							:radius="7"
 							:mood="queuedTurn ? 'star' : 'thinking'"
@@ -4624,6 +4608,8 @@ import { report as reportError } from "@/lib/errorReporter";
 import JvChart from "@/charts/JvChart.vue";
 import ConnectPhoneDialog from "@/components/ConnectPhoneDialog.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
+import HolidayMark from "@/components/holiday/HolidayMark.vue";
+import WelcomeHero from "@/components/holiday/WelcomeHero.vue";
 import CapabilityCatalog from "@/components/CapabilityCatalog.vue";
 import DraftPreview from "@/components/doc/DraftPreview.vue";
 import ActionError from "@/components/ActionError.vue";
@@ -6383,7 +6369,7 @@ const jarvisTools = ref([
 
 // Shared with the shell via @/lib/user (see the cookie double-decode note there).
 const fullName = displayName(session.user);
-const firstName = computed(() => fullName.split(/\s+/)[0]);
+const firstName = computed(() => fullName.trim().split(/\s+/)[0]);
 // The empty-chat greeting. `now` is captured ONCE per mount, not read per render:
 // the phrase must not change under the user while they sit on the screen (and a
 // session left open past midnight keeping its line is the calmer behaviour).
@@ -13929,7 +13915,9 @@ onUnmounted(() => {
 
 <style scoped>
 /* The brand mark is now <JarvisMark> everywhere on this surface (hero, assistant
-   avatars, proactive toast), so it carries its own gradient in BOTH themes.
+   avatars, proactive toast; the hero and avatars through <HolidayMark>, which draws
+   a JarvisMark and adds the holiday item on top), so it carries its own gradient in
+   BOTH themes.
    Deleted with this comment: a `.jv-dark .jv-logo, .jv-dark .jv-toast-ic` rule
    that force-painted the gradient with !important in dark only. It existed
    because those chips were `background: var(--cta)` — near-black in light, and
@@ -14846,11 +14834,6 @@ onUnmounted(() => {
 	   matching the 16px the thread/composer use. */
 	.jv-welcome-scroll {
 		padding: 24px 16px;
-	}
-	.jv-welcome-h1 {
-		/* Scaled with the desktop bump (32 -> 40), kept a step smaller so a long
-		   "Long time no see, <name>" still fits a phone without wrapping oddly. */
-		font-size: 28px !important;
 	}
 	.jv-welcome-sub {
 		font-size: 14px;
