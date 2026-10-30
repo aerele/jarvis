@@ -417,7 +417,12 @@ class TestHolidays(_Base):
 
 	def _public_stand_in(self):
 		"""``get_holidays_for_employee`` built from the real internal calls, captured before a
-		test breaks them (the real public function imports the same internal module)."""
+		test breaks them (the real public function imports the same internal module).
+
+		These fallbacks are the HRMS 16 path only: HRMS 15 has neither the internal module nor
+		Holiday List Assignment, and resolve reads the list through ERPNext there."""
+		if not frappe.db.exists("DocType", "Holiday List Assignment"):
+			self.skipTest("HRMS 15: no Holiday List Assignment, so no HRMS 16 fallback to test")
 		from hrms.utils import holiday_list as internal
 
 		ranges_for, rows_in = internal.get_holiday_list_ranges_for_employee, internal.get_holidays_in_ranges
