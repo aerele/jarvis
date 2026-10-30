@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import AppBar from "../components/AppBar.vue";
 import Sheet from "../components/Sheet.vue";
 import * as api from "../api";
@@ -7,8 +7,8 @@ import { EFFORT, effortOffered } from "../lib/effort";
 import { prefs, setPrefs } from "../lib/prefs";
 import { applyTheme, theme } from "../lib/theme";
 import { agentName } from "@/branding";
-import { holidayTouch } from "@/holidayTouch";
-import { createHolidaySwitch } from "@/lib/holidaySwitch";
+import { holidayTouch } from "../holidayTouch";
+import { createHolidaySwitch } from "../lib/holidaySwitch";
 
 // Settings, as the native app has them: Chat (default model + effort),
 // Appearance, Notifications. No "open full workspace" — this is the workspace.
@@ -72,7 +72,7 @@ const notifySupported = "Notification" in window;
 // Personal "Show holiday touches" switch (the worn item and the greeting words). The
 // server row is the truth: the row stays disabled until it has answered, and the store
 // follows only after a successful save (see lib/holidaySwitch.js).
-const holiday = reactive({ value: true, loaded: false, saving: false });
+const holiday = reactive({ value: true, loaded: false, loadFailed: false, saving: false });
 const holidayError = ref("");
 const holidaySwitch = createHolidaySwitch({
 	state: holiday,
@@ -82,12 +82,25 @@ const holidaySwitch = createHolidaySwitch({
 	onError: () => (holidayError.value = "Could not save that. Try again."),
 });
 function toggleHoliday() {
+	// aria-disabled, not `disabled`, while saving: the button keeps focus for a screen reader.
+	if (holiday.saving) return;
 	holidayError.value = "";
 	holidaySwitch.toggle(!holiday.value);
 }
+// A failed read is retried when the page comes back to the front.
+function retryHoliday() {
+	if (document.visibilityState !== "hidden") holidaySwitch.retry();
+}
+
+onBeforeUnmount(() => {
+	window.removeEventListener("focus", retryHoliday);
+	document.removeEventListener("visibilitychange", retryHoliday);
+});
 
 onMounted(async () => {
 	holidaySwitch.load();
+	window.addEventListener("focus", retryHoliday);
+	document.addEventListener("visibilitychange", retryHoliday);
 	try {
 		settings.value = await api.getChatUiSettings();
 	} catch {
@@ -154,7 +167,12 @@ onMounted(async () => {
 			<div class="jv-row is-last">
 				<span class="jv-row-text">
 					Show holiday touches
-					<small>Holiday and birthday greetings on the welcome screen.</small>
+					<small id="holiday-help"
+						>Holiday and birthday greetings on the welcome screen.</small
+					>
+					<small v-if="holiday.loadFailed" id="holiday-load-hint" class="jv-row-warn"
+						>Couldn't load this setting.</small
+					>
 				</span>
 				<button
 					class="jv-toggle"
@@ -162,7 +180,11 @@ onMounted(async () => {
 					role="switch"
 					aria-label="Show holiday touches"
 					:aria-checked="holiday.value"
-					:disabled="!holiday.loaded || holiday.saving"
+					:aria-describedby="
+						holiday.loadFailed ? 'holiday-help holiday-load-hint' : 'holiday-help'
+					"
+					:disabled="!holiday.loaded"
+					:aria-disabled="holiday.saving"
 					@click="toggleHoliday"
 				>
 					<span />
@@ -348,7 +370,8 @@ onMounted(async () => {
 	background: #fff;
 	transition: transform 0.15s ease;
 }
-.jv-toggle:disabled {
+.jv-toggle:disabled,
+.jv-toggle[aria-disabled="true"] {
 	opacity: 0.55;
 	cursor: default;
 }
@@ -362,6 +385,9 @@ onMounted(async () => {
 	font-size: 12px;
 	line-height: 1.4;
 	color: var(--ink5);
+}
+.jv-row-text .jv-row-warn {
+	color: var(--red);
 }
 .jv-toggle.is-on {
 	background: var(--accent-solid);
