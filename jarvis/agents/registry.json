@@ -426,16 +426,14 @@
       "domain": "measurement",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "status": "Published",
-      "description": "Extends the Retrospective Baseline Meter onto HRMS payroll records: how often payroll was re-run for the same period, how many corrections were booked as additional salary, and how many salary slips were changed after submission. Installable only where HRMS is present. Read-only; reports run counts, correction counts, and dates - never individual pay values.",
+      "description": "Read-only payroll activity counts for three fixed periods: overlapping payroll runs, one-time and recurring additional salary entries, submitted amended salary slips and captured change-log records. Counts cover the declared Department and retained history. It reads no individual pay values and makes no payroll error or saving verdict.",
       "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list"
+        "jarvis__query"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -446,12 +444,17 @@
         "Payroll Entry",
         "Salary Slip",
         "Additional Salary",
-        "Version"
+        "Version",
+        "Company",
+        "Department",
+        "Employee",
+        "Payroll Employee Detail"
       ],
       "rule_tokens": [
         "bmh-ovl-7d12",
         "bmh-win-3ab8"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 1800,
@@ -467,7 +470,10 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "baseline_hrms"
+      ]
     },
     {
       "agent_slug": "cash-limit-269st-40a3-auditor",
