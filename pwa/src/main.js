@@ -29,8 +29,10 @@ applyTheme();
 applyBrandChrome();
 
 // The holiday store keeps today's answer fresh for the whole session (a wake after midnight
-// asks the server again), not only while the welcome hero is on screen.
-holidayTouch.start();
+// asks the server again), not only while the welcome hero is on screen. Not for a guest:
+// the login view has no hero, and get_today would answer 403 on every wake. Signing in is
+// a full page load (LoginView), so the store starts then.
+if (sessionUser()) holidayTouch.start();
 
 const app = createApp(App);
 app.config.errorHandler = vueErrorHandler;
