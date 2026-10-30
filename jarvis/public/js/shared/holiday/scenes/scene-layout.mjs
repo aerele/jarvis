@@ -14,7 +14,8 @@ import {
   floorTransform,
   groundOf,
 } from "../scene-geometry.mjs";
-import { heroKeepOut } from "./scene-place.mjs";
+import { phoneFloorMinScale, phoneScale } from "../scene-phone.mjs";
+import { BELOW_HEADING_PX, heroKeepOut, squeezeOf } from "./scene-place.mjs";
 import { SceneMotion } from "./scene-motion.mjs";
 import { itemSVG } from "./scene-art.mjs";
 
@@ -23,6 +24,19 @@ import { itemSVG } from "./scene-art.mjs";
 const prefixOf = (id) => {
   const clean = String(id || "jvs").replace(/[^\w-]/g, "");
   return `${/^[A-Za-z_]/.test(clean) ? clean : `j${clean}`}-`;
+};
+
+/**
+ * The card band the floor row stands in the bottom of. A page with no starter cards (a short
+ * phone) gives none, or an empty one: the band is then what is left between the hero's bottom
+ * and the layer's bottom.
+ */
+const cardBand = (b) => {
+  if (b.cards && b.cards.h > 0) return b.cards;
+  const top = b.hero
+    ? b.hero.y + b.hero.h
+    : b.heading.y + b.heading.h + BELOW_HEADING_PX;
+  return { y: top, h: b.host.h - top };
 };
 
 export class SceneLayout extends SceneMotion {
@@ -42,20 +56,25 @@ export class SceneLayout extends SceneMotion {
   }
 
   // Where things stand now, in stage units (x centred on the mark's column). geo has: the
-  // layer W x H px; s px per unit; hu the layer's height in units; cxPx the mark's centre in
-  // px; k units per tile unit of the mark; mt the mark's top; ground the floor row's baseline;
-  // floor its fit (floorFit; null without a row); skyPx the sky wash's height; from..to the
-  // stage's x extent; keep the hero's box (heroKeepOut); shift how far the mark sits below
-  // where the art was drawn for (MARK_TOP), for props that follow it; airTop..airBottom the
-  // room for sky decorations above the hero.
+  // layer W x H px; s px per unit (the phone: width / 540, see scene-phone.mjs); hu the layer's
+  // height in units; cxPx the mark's centre in px; k units per tile unit of the mark; mt the
+  // mark's top; ground the floor row's baseline; floor its fit (floorFit; null without a row);
+  // skyPx the sky wash's height; from..to the stage's x extent (130..670 on a phone); squeeze
+  // how much narrower than 800 units that is (1 on desktop; scene-place.mjs squeezeX); keep the
+  // hero's box (heroKeepOut); shift how far the mark sits below where the art was drawn for
+  // (MARK_TOP), for props that follow it; airTop..airBottom the room for sky decorations above
+  // the hero.
   measure(boxes) {
     const b = boxes || this.opts.getBoxes();
+    const phone = this.opts.layout === "phone";
     const [W, H] = [b.host.w, b.host.h];
-    const s = Math.min(W / 800, 1.25);
+    const s = phone ? phoneScale(W) : Math.min(W / 800, 1.25);
     const cxPx = b.mark.x + b.mark.w / 2;
     const mt = b.mark.y / s; // the mark's top
-    const ground = groundOf(b.cards.y + b.cards.h, s);
+    const band = cardBand(b);
+    const ground = groundOf(band.y + band.h, s);
     const skyEnd = Math.min(b.heading.y - 4, b.mark.y + 120 * s);
+    const [from, to] = [400 - cxPx / s, 400 + (W - cxPx) / s];
     const geo = {
       W,
       H,
@@ -76,11 +95,13 @@ export class SceneLayout extends SceneMotion {
             clearTop: b.hero
               ? (b.hero.y + b.hero.h + HERO_FLOOR_GAP_PX) / s
               : undefined,
+            minScale: phone ? phoneFloorMinScale(s) : undefined,
           })
         : null,
       skyPx: Math.max(40, skyEnd / 0.52),
-      from: 400 - cxPx / s,
-      to: 400 + (W - cxPx) / s,
+      from,
+      to,
+      squeeze: squeezeOf(from, to),
       keep: heroKeepOut(b, s),
       shift: mt - MARK_TOP, // how far the mark sits below MARK_TOP, for props that follow it
       airTop: CLEAR, // the sky decorations live between here ...
