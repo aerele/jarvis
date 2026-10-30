@@ -26,6 +26,8 @@ GET_ALLOWLIST = frozenset(
 		# Download link for an exported conversation.
 		"jarvis.chat.export.download_conversation",
 		# MCP connectors (and their OAuth callback) are not on this branch.
+		# Read-only boot payload for the holiday touch; refetched by the client without a reload.
+		"jarvis.holiday_touch.api.get_today",
 	}
 )
 

@@ -241,6 +241,9 @@ after_migrate = [
 	# File "Home/Jarvis Exports", where finished background exports are kept. A fresh install
 	# never reaches this hook; the first publish creates the folder then.
 	"jarvis.tools._export.jobs.after_migrate",
+	# Holiday touch: rotate the cache generation so a release's matcher fixes apply at once
+	# (migrate clears the cache but not the persistent jarvis:holiday: prefix). Never raises.
+	"jarvis.holiday_touch.cache.on_after_migrate",
 ]
 
 # Scheduled Tasks
@@ -638,6 +641,25 @@ doc_events["Prepared Report"] = {
 	"on_update": "jarvis.tools._export.jobs.on_prepared_report_update",
 }
 
+# Holiday touches: a change to the data an occasion is read from rotates the
+# cache generation once it is COMMITTED (never on a rollback). The handler only queues the
+# rotation on frappe.db.after_commit (once per transaction, and for an Employee or a Company
+# only when a field an occasion depends on changed) and never raises into the save. Holiday List Assignment
+# exists on HRMS 16 only; on a site without it the entry is inert. setdefault + append so
+# another app's or this file's handlers on the same doctype are kept.
+_HOLIDAY_ROTATE = "jarvis.holiday_touch.cache.rotate_after_commit"
+for _holiday_dt, _holiday_events in (
+	("Holiday List", ("on_update", "on_trash")),
+	("Holiday List Assignment", ("on_submit", "on_cancel")),
+	("Company", ("on_update",)),
+	("Employee", ("on_update", "on_trash")),
+):
+	for _holiday_event in _holiday_events:
+		_holiday_handlers = doc_events.setdefault(_holiday_dt, {}).setdefault(_holiday_event, [])
+		if isinstance(_holiday_handlers, str):
+			_holiday_handlers = doc_events[_holiday_dt][_holiday_event] = [_holiday_handlers]
+		_holiday_handlers.append(_HOLIDAY_ROTATE)
+
 # A pending action never blocks deleting the conversation it points at; the
 # on_trash hook above cleans it up instead.
 # A skill promotion request never blocks deleting the skill it names, for its owner
@@ -979,6 +1001,14 @@ has_permission.update(
 # (``tools._user_memory.SEEN_PREFIX``), the base a memory save without ``base_version`` is
 # checked against. Without it every tick wiped every chat's base, and each chat's next
 # save came back as a conflict it had to re-read and merge. One-week TTL.
+#
+# jarvis:holiday: (2026-10-28): the holiday touch's cached occasions, the placeholder
+# birth-date sets, the random generation token (``jarvis:holiday:gen``) (``holiday_touch.cache``)
+# and the per-kind hourly log markers (``jarvis:holiday:log_hour:<kind>``,
+# ``holiday_touch.report``). Without it the pump's tick, and ERPNext's ``Employee.on_update``,
+# wiped them: the cache never held, and an error logged on every tick instead of once an hour. The cache is invalidated by rotating ``gen``
+# (``after_migrate`` and ``doc_events`` after commit), never by deleting keys (``delete_keys``
+# is a ``KEYS`` scan); answers expire by TTL (2 h at most, 10 min for an error).
 persistent_cache_keys = [
 	"jarvis:pcal:",  # Financial snapshots retain bounded TTLs across watchdog cache clears.
 	"jarvis:query:",  # Saved result IDs retain their own 24-hour TTL across cache clears.
@@ -989,6 +1019,7 @@ persistent_cache_keys = [
 	"jarvis:subscription_",
 	"jarvis.oauth.codex_signin",
 	"jarvis:memory_seen:",
+	"jarvis:holiday:",
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.
