@@ -14,9 +14,11 @@ import { MOODS, faceShown } from "../lib/holidayFace";
 // The face is the mobile twin of the desktop JarvisMark's: white pills on the same
 // gradient, never a colour of its own. `mood="upgrading"` (Stream E) shows sleepy
 // lids + a soft "z z z" while this tenant's agent is being upgraded; `mood="happy"`
-// is a smile, played once (the holiday welcome); `peek` shows the eyes glancing
-// around while the mark otherwise rests. The whitelabel <img> branch ignores all
-// of it (a tenant logo stays put; the top-of-app hold strip carries the message).
+// is a smile, played once (the holiday welcome). There is no `peek` (the desktop mark's
+// hover/idle glance): a phone has no hover and nothing here needs it. The face stays
+// rendered and cross-fades with the star, so the tile is never blank mid-change. The
+// whitelabel <img> branch ignores all of it (a tenant logo stays put; the top-of-app hold
+// strip carries the message).
 const props = defineProps({
 	size: { type: Number, default: 40 },
 	// Corner radius in px; the default keeps the 25% tile the app always had.
@@ -26,13 +28,12 @@ const props = defineProps({
 		default: "star",
 		validator: (v) => MOODS.includes(v),
 	},
-	peek: { type: Boolean, default: false },
 });
 
 // Tells a wrapper (HolidayMark) when the face is actually showing. Nothing else listens.
 const emit = defineEmits(["face"]);
 
-const showFace = computed(() => faceShown(props.mood, props.peek));
+const showFace = computed(() => faceShown(props.mood));
 watch(showFace, (shown) => emit("face", shown), { immediate: true });
 
 const style = computed(() => ({
@@ -54,20 +55,19 @@ const style = computed(() => ({
 	<span
 		v-else
 		class="jv-mark"
-		:class="[`jv-mood-${mood}`, { 'jv-mark-face': showFace, 'jv-peek-on': peek }]"
+		:class="[`jv-mood-${mood}`, { 'jv-mark-face': showFace }]"
 		:style="style"
 	>
-		<!-- The face hides the masked star (the global .jv-mark::before) while it shows. -->
-		<template v-if="showFace">
-			<span class="bm-face" aria-hidden="true">
-				<span class="bm-eyes"><i class="bm-eye"></i><i class="bm-eye"></i></span>
-				<span class="bm-mouth"></span>
-			</span>
-			<span v-if="mood === 'upgrading'" class="bm-zzz" aria-hidden="true"
-				><i>z</i><i>z</i><i>z</i></span
-			>
-		</template>
-		<svg v-else viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+		<!-- The face fades in over the masked star (the global .jv-mark::before), which fades
+		     out; both stay rendered so the cross-fade has something to fade. -->
+		<span class="bm-face" aria-hidden="true">
+			<span class="bm-eyes"><i class="bm-eye"></i><i class="bm-eye"></i></span>
+			<span class="bm-mouth"></span>
+		</span>
+		<span v-if="mood === 'upgrading'" class="bm-zzz" aria-hidden="true"
+			><i>z</i><i>z</i><i>z</i></span
+		>
+		<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 			<path d="M12 2.5 14 10 21.5 12 14 14 12 21.5 10 14 2.5 12 10 10Z" />
 		</svg>
 	</span>
@@ -80,8 +80,7 @@ const style = computed(() => ({
 	flex-shrink: 0;
 }
 
-/* A face hides the masked star (the global .jv-mark::before). Higher specificity than
-   the global rule. Opacity, not display, so the star can fade as the face appears. */
+/* A face fades the masked star (the global .jv-mark::before) out as it fades in. */
 .jv-mark::before {
 	transition: opacity 0.25s ease;
 }
@@ -99,6 +98,11 @@ const style = computed(() => ({
 	align-items: center;
 	justify-content: center;
 	gap: calc(var(--sz) * 0.07);
+	opacity: 0;
+	transition: opacity 0.25s ease;
+}
+.jv-mark-face .bm-face {
+	opacity: 1;
 }
 .bm-eyes {
 	display: flex;
@@ -115,38 +119,6 @@ const style = computed(() => ({
 }
 .bm-mouth {
 	display: none;
-}
-
-/* PEEK: the eyes drift up and glance side to side, with a soft blink. */
-.jv-peek-on .bm-face {
-	animation: bm-look 3.4s ease-in-out infinite;
-}
-.jv-peek-on .bm-eye {
-	animation: bm-blink 3.4s infinite;
-}
-@keyframes bm-look {
-	0%,
-	100%,
-	28% {
-		transform: translate(-16%, -8%);
-	}
-	52% {
-		transform: translate(18%, -4%);
-	}
-	70% {
-		transform: translate(0, -12%) scale(0.96, 1.04);
-	}
-}
-@keyframes bm-blink {
-	0%,
-	46%,
-	100% {
-		transform: scaleY(1);
-	}
-	49%,
-	52% {
-		transform: scaleY(0.14);
-	}
 }
 
 /* HAPPY: smaller eyes and a smile, one bounce, then it holds. Plays once so a
