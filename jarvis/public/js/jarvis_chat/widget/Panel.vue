@@ -267,6 +267,7 @@
 							class="jvp-fx"
 							viewBox="0 0 350 260"
 							preserveAspectRatio="xMidYMin slice"
+							focusable="false"
 							aria-hidden="true"
 						></svg>
 						<div
@@ -278,7 +279,7 @@
 							:style="heroStyle"
 							:role="heroClickable ? 'button' : undefined"
 							:tabindex="heroClickable ? 0 : undefined"
-							:aria-label="heroClickable ? 'Show the greeting again' : undefined"
+							:aria-label="heroClickable ? 'Replay the holiday greeting' : undefined"
 							@click="onHeroClick"
 							@keydown.enter.prevent="onHeroClick"
 							@keydown.space.prevent="onHeroClick"
@@ -851,6 +852,7 @@ import {
 } from "./panel_welcome.mjs";
 import { createWelcomeFx } from "./panel_welcome_fx.mjs";
 import { wornLayerBox } from "./fab_worn.mjs";
+import { prefersReduced, watchReducedMotion } from "./reduced_motion.mjs";
 import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
 import { sendRefusalMessage } from "./panel_send_copy.mjs";
 import { maintenance, foldSend, startPollIfHeld } from "./maintenance_state.mjs";
@@ -1262,8 +1264,11 @@ const welcomeText = computed(() =>
 );
 const heroSmiling = ref(false);
 const fxEl = ref(null);
-const prefersReduced = () =>
-	window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+// Reactive, so the hero stops being a button the moment the user asks for less motion.
+const reducedMotion = ref(prefersReduced());
+const stopWatchingMotion = watchReducedMotion((reduced) => {
+	reducedMotion.value = reduced;
+});
 const wearsHoliday = computed(
 	() =>
 		!!props.holiday &&
@@ -1271,12 +1276,18 @@ const wearsHoliday = computed(
 		holidayView.value.worn === true &&
 		["leadup", "day", "birthday"].includes(holidayView.value.kind)
 );
-// Room above the hero for the item, known before the art loads so nothing jumps.
+// Room above the hero for the item, taken from the answer (not from the art) so the hero never
+// jumps: the room is there before the art arrives, and stays if the art is blocked. A blocked
+// art leaves an empty gap above the hero on Christmas, which is the lesser evil next to a
+// hero that moves a few px just as the greeting begins.
 const heroStyle = computed(() => {
 	const room = wearsHoliday.value ? heroTopRoom(holidayView.value.design) : 0;
 	return room ? { marginTop: `${room}px` } : undefined;
 });
-const heroClickable = computed(() => wearsHoliday.value && holidayView.value.wear === true);
+// A replay is motion, so under reduced motion the hero is inert: no role, no tab stop.
+const heroClickable = computed(
+	() => wearsHoliday.value && holidayView.value.wear === true && !reducedMotion.value
+);
 const heroLayerBox = wornLayerBox(HERO_PX);
 const heroItemMarkup = computed(() => {
 	const art = props.holiday?.art.value;
@@ -2222,6 +2233,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+	stopWatchingMotion();
 	welcomeFx?.close(); // no smile timer or particle animation outlives the panel
 	// A live recording outlives this component otherwise: the mic stays hot and
 	// the getUserMedia tracks are never released.
@@ -2824,9 +2836,6 @@ defineExpose({ load, startNewChat, convId });
 		animation: none;
 	}
 }
-.jvp-greet-leadup {
-	margin-top: 4px;
-}
 .jvp-hero {
 	/* position: relative so the sleepy .jvp-face (position:absolute) centres inside
 	   this 52px tile, not against the whole panel - matching .jvp-avatar. */
@@ -2858,6 +2867,11 @@ defineExpose({ load, startNewChat, convId });
 	line-height: 1.55;
 	color: var(--jv-ink-2);
 	text-align: center;
+}
+/* The lead-up wish sits closer to the greeting than the sub-line does. Needs both classes to
+   outrank .jvp-greet-sub above. */
+.jvp-greet-sub.jvp-greet-leadup {
+	margin-top: 4px;
 }
 .jvp-greet-sub b {
 	font-weight: 600;
