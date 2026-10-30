@@ -59,8 +59,21 @@ const run = (name, scope, data = {}) => ({
 
 describe("reportScopes from receipts", () => {
 	it("retains scope for metadata-only prepared report receipts after reload", () => {
-		const metadata = run("ready", {}, { result: undefined, prepared_report: true, status: "ready", read_status: "not_read", coverage: { complete: false }, as_of: "2026-10-30 08:00:00" });
-		expect(reportScopes(JSON.parse(JSON.stringify([metadata])))).toMatchObject([{ company: "Acme", generated_at: "2026-10-30 08:00:00" }]);
+		const metadata = run(
+			"ready",
+			{},
+			{
+				result: undefined,
+				prepared_report: true,
+				status: "ready",
+				read_status: "not_read",
+				coverage: { complete: false },
+				as_of: "2026-10-30 08:00:00",
+			}
+		);
+		expect(reportScopes(JSON.parse(JSON.stringify([metadata])))).toMatchObject([
+			{ company: "Acme", generated_at: "2026-10-30 08:00:00" },
+		]);
 	});
 	it("keeps one entry per company and per currency set, in receipt order", () => {
 		const out = reportScopes([
