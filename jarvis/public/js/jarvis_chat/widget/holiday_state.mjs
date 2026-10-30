@@ -19,6 +19,7 @@ const NONE_VIEW = Object.freeze({
   design: null,
   occasion: null,
   scene: false,
+  worn: false,
   wear: false,
   heading: null,
   leadupLine: null,
@@ -59,6 +60,8 @@ export function createHolidayState({
     if (artStatus === "idle") artStatus = "loading";
     return loader.load().then((loaded) => {
       art.value = loaded || null;
+      if (loaded && typeof loaded.installWornCss === "function")
+        loaded.installWornCss(doc);
       artStatus = loaded ? "ready" : "failed";
       return art.value;
     });
@@ -88,6 +91,7 @@ export function createHolidayState({
       design: a.design,
       occasion: a.occasion,
       scene: a.scene === true,
+      worn: a.worn === true,
       wear: a.worn === true && !!art.value,
       heading:
         a.kind === "leadup"
