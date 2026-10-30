@@ -1,7 +1,8 @@
-// The mini chat's particles are ported from the frozen design (MINI_PARTICLE, playMiniFx).
+// The mini chat's particles are ported from the approved design (MINI_PARTICLE, playMiniFx).
 // These tests pin the numbers that make them look the same on every showing.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { DESIGNS } from "./answer.mjs";
 import {
   MINI_PARTICLE,
@@ -78,7 +79,7 @@ test("particles start above the top edge, inside the 350 wide view", () => {
   }
 });
 
-test("playing runs one 'both'-filled fall per particle with the frozen timings", () => {
+test("playing runs one 'both'-filled fall per particle with the approved timings", () => {
   const svg = fakeSvg();
   playParticles(svg, "diwali");
   assert.equal(svg.animations.length, 24);
@@ -122,3 +123,21 @@ test("an unknown design plays nothing and leaves the svg empty", () => {
   assert.equal(svg.animations.length, 0);
   run.cancel(); // a no-op, not a throw
 });
+
+// mini-fx.design.json holds, for each of the nine designs, the exact svg children the approved
+// design draws (its MINI_PARTICLE table and the markup line of playMiniFx, evaluated with the
+// design's own rng(7), r2, STAR and flakeSVG). Each design's markup is pinned whole, so a
+// colour, a shape, a position or the draw order cannot drift without this test saying so.
+const APPROVED = JSON.parse(
+  readFileSync(new URL("./mini-fx.design.json", import.meta.url), "utf8")
+);
+
+test("the pinned markup covers exactly the nine designs", () => {
+  assert.deepEqual(Object.keys(APPROVED).sort(), [...DESIGNS].sort());
+});
+
+for (const design of DESIGNS) {
+  test(`${design}: the particles are the approved design's, character for character`, () => {
+    assert.equal(particleMarkup(design), APPROVED[design]);
+  });
+}

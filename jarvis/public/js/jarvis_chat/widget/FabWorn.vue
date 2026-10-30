@@ -29,7 +29,8 @@
 
 <script setup>
 import { computed } from "vue";
-import { FAB_PX, wornLayerBox } from "./fab_worn.mjs";
+import { FAB_PX, FAB_RADIUS_PX, wornLayerBox } from "./fab_worn.mjs";
+import { tileUnits } from "../../shared/holiday/worn-room.mjs";
 
 const props = defineProps({
 	art: { type: Object, required: true }, // window.__jarvisHolidayArt
@@ -44,11 +45,11 @@ const props = defineProps({
 
 const box = wornLayerBox();
 const transform = computed(() => `translate3d(${props.x}px, ${props.y}px, 0)`);
-// The launcher's corner radius (16px) in the art's 56 unit tile space.
+// The launcher's corner radius in the art's tile space.
 const markup = computed(() =>
 	props.art.wornMarkup(props.design, {
 		idPrefix: "jvwf",
-		radius: (16 / FAB_PX) * 56,
+		radius: tileUnits(FAB_RADIUS_PX, FAB_PX),
 		motion: props.motion,
 	})
 );

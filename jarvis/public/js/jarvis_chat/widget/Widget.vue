@@ -15,7 +15,7 @@
 				'jvw-fab--dock-left': side === 'left',
 				'jvw-fab--peek': autoPeek,
 				'jvw-fab--maint': maintenanceActive,
-				'jvw-fab--look': wornLook,
+				'jvw-fab--look': lookAtItem,
 			}"
 			:style="fabButtonStyle"
 			:aria-label="panelOpen ? `Close ${brandName}` : `Ask ${brandName}`"
@@ -58,10 +58,10 @@
 		<!-- Today's holiday item, over the tile (see FabWorn.vue). Mounted only once the lazy
 		     art is in, so a failed load or a plain day costs nothing here. -->
 		<FabWorn
-			v-if="holidayArt && holidayView.wear"
+			v-if="holidayArt && holidayView.itemReady"
 			:art="holidayArt"
 			:design="holidayView.design"
-			:shown="wornOn"
+			:shown="itemOn"
 			:x="fabXY.x"
 			:y="fabXY.y"
 			:snapping="snapping"
@@ -111,7 +111,7 @@ import * as fabPos from "./fab_position.mjs";
 import { fabAction, panelTogglePlan } from "./fab_action.mjs";
 import { createArtLoader } from "./holiday_art_loader.mjs";
 import { createHolidayState, exposeDebugView } from "./holiday_state.mjs";
-import { lookStyle, wornShown } from "./fab_worn.mjs";
+import { lookStyle, isItemShown } from "./fab_worn.mjs";
 import { prefersReduced } from "./reduced_motion.mjs";
 import FabWorn from "./FabWorn.vue";
 import Panel from "./Panel.vue";
@@ -188,9 +188,9 @@ function handleReducedMotionChange(e) {
 	}
 }
 
-const wornOn = computed(() =>
-	wornShown({
-		wear: holidayView.value.wear,
+const itemOn = computed(() =>
+	isItemShown({
+		itemReady: holidayView.value.itemReady,
 		faceShown: hovered.value || focused.value || autoPeek.value,
 		dragging: dragging.value,
 		panelOpen: panelOpen.value,
@@ -238,7 +238,7 @@ const holidayView = holiday.view;
 const holidayArt = holiday.art;
 // A day that crosses midnight into a holiday: the answer starts wearing after the page booted.
 watch(
-	() => holidayView.value.worn,
+	() => holidayView.value.hasItem,
 	(worn) => {
 		if (worn) holiday.ensureArt();
 	}
@@ -375,11 +375,11 @@ const fabStyle = computed(() => {
 });
 
 // The eyes look at the item while it shows (the art's LOOK_AT table).
-const wornLookVars = computed(() =>
-	wornOn.value ? lookStyle(holidayArt.value?.LOOK_AT, holidayView.value.design) : {}
+const lookVars = computed(() =>
+	itemOn.value ? lookStyle(holidayArt.value?.LOOK_AT, holidayView.value.design) : {}
 );
-const wornLook = computed(() => Object.keys(wornLookVars.value).length > 0);
-const fabButtonStyle = computed(() => ({ ...fabStyle.value, ...wornLookVars.value }));
+const lookAtItem = computed(() => Object.keys(lookVars.value).length > 0);
+const fabButtonStyle = computed(() => ({ ...fabStyle.value, ...lookVars.value }));
 
 function readCssPx(el, prop, fallback) {
 	if (!el) return fallback;

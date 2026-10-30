@@ -22,8 +22,8 @@ const NONE_VIEW = Object.freeze({
   design: null,
   occasion: null,
   scene: false,
-  worn: false,
-  wear: false,
+  hasItem: false,
+  itemReady: false,
   heading: null,
   leadupLine: null,
 });
@@ -89,6 +89,7 @@ export function createHolidayState({
       })
     : null;
 
+  // hasItem: the answer has something to wear (known at boot). itemReady: and the art is in.
   const view = computed(() => {
     const a = store ? store.answer.value : null;
     if (!a || a.kind === "none") return NONE_VIEW;
@@ -97,8 +98,8 @@ export function createHolidayState({
       design: a.design,
       occasion: a.occasion,
       scene: a.scene === true,
-      worn: a.worn === true,
-      wear: a.worn === true && !!art.value,
+      hasItem: a.worn === true,
+      itemReady: a.worn === true && !!art.value,
       heading:
         a.kind === "leadup"
           ? null
