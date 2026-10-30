@@ -250,6 +250,10 @@ export const sceneHeroTop = (design, s) =>
 // ---- the worn item above the mark ------------------------------------------------------------
 // The item the mark wears (hat, umbrella, crescent ...) hangs past the tile's top; its
 // numbers (WORN_OVERHANG, WORN_GAP_PX) live in worn-room.mjs and are re-exported here.
+<<<<<<< HEAD
+=======
+import { WORN_OVERHANG } from "./worn-room.mjs";
+>>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
 export { WORN_GAP_PX, WORN_OVERHANG } from "./worn-room.mjs";
 
 /** How far (tile units) the design's item reaches above the tile's top. */

@@ -44,6 +44,7 @@ function fakeTarget() {
   const target = { handlers: {}, intervals: [], visibilityState: "visible" };
   target.addEventListener = (name, fn) => (target.handlers[name] = fn);
   target.removeEventListener = (name) => delete target.handlers[name];
+<<<<<<< HEAD
   target.cleared = [];
   target.setInterval = (fn) => {
     target.intervals.push(fn);
@@ -52,6 +53,12 @@ function fakeTarget() {
   target.clearInterval = (id) => {
     target.cleared.push(id);
   };
+=======
+  target.setInterval = (fn) => (
+    target.intervals.push(fn), target.intervals.length
+  );
+  target.clearInterval = () => {};
+>>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
   return target;
 }
 
@@ -66,10 +73,14 @@ function setup(opts = {}) {
     ref,
     computed,
     boot,
+<<<<<<< HEAD
     fetchToday: async () => {
       calls.push(1);
       return fetch();
     },
+=======
+    fetchToday: async () => (calls.push(1), fetch()),
+>>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
     now: () => new Date(clock.t),
     doc: target,
     win: target,
@@ -91,6 +102,7 @@ test("reads the boot answer and shows it while it is today's", () => {
   );
 });
 
+<<<<<<< HEAD
 // A small dependency tracker with Vue 3.3's computed rule (the Frappe 15 Desk): a computed
 // tells its readers whenever one of ITS inputs is set, without comparing its own result. A
 // ref only tells them when the value it holds actually changes.
@@ -174,6 +186,8 @@ test("a tick that changes nothing wakes nobody; midnight wakes them once", () =>
   assert.equal(store.answer.value.kind, "none");
 });
 
+=======
+>>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
 test("at midnight in the answer's own time zone it reads as none, with no call", () => {
   const { store, clock, calls } = setup();
   clock.t = new Date("2026-11-08T18:29:00Z").getTime(); // 23:59 in Kolkata
@@ -360,6 +374,7 @@ test("the personal switch off reads as none and stops fetching; on forces a refr
   assert.equal(calls.length, 1);
 });
 
+<<<<<<< HEAD
 async function wakeAfterMidnight(visibility, wake) {
   const ctx = setup({ start: NEXT_MORNING - 3_600_000 });
   ctx.store.start();
@@ -386,6 +401,16 @@ test("the timer leaves a fresh answer alone", async () => {
   const { store, clock, target, calls } = setup();
   store.start();
   clock.t += REFRESH_MIN_MS * 3;
+=======
+test("a hidden tab never refreshes on wake or on its timer", async () => {
+  const { store, clock, target, calls } = setup({
+    start: NEXT_MORNING - 3_600_000,
+  });
+  store.start();
+  target.visibilityState = "hidden";
+  clock.t = NEXT_MORNING;
+  target.handlers.focus();
+>>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
   target.intervals[0]();
   await settle();
   assert.equal(calls.length, 0);
@@ -410,7 +435,10 @@ test("start loads the art once for a worn answer, and stop removes the listeners
   assert.equal(target.intervals.length, 1);
   store.stop();
   assert.deepEqual(Object.keys(target.handlers), []);
+<<<<<<< HEAD
   assert.deepEqual(target.cleared, [1]);
+=======
+>>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
 });
 
 test("canWear false keeps the art from loading", () => {
