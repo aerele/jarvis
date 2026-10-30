@@ -146,6 +146,20 @@ class TestPreparedReportIntegration(unittest.TestCase):
 			)
 			frappe.db.commit()
 			before = {dt: frappe.db.count(dt) for dt in ["Prepared Report", "File", "Notification Log"]}
+			# Public report generation lookup must not touch stored report bytes.
+			from jarvis.tools.run_report import run_report
+
+			controller = type(frappe.get_doc("Prepared Report", large.name))
+			with patch.object(
+				controller, "get_prepared_data", side_effect=AssertionError("metadata must not decode")
+			):
+				ready = run_report(report.name, filters={"company": company, "report_date": "2026-10-29"})
+			assert ready["read_status"] == "not_read" and ready["run"] == large.name
+			assert ready["next_query"]["args"] == {"prepared_report": large.name}
+			assert not ready["coverage"]["complete"] and "result" not in ready
+			assert before == {dt: frappe.db.count(dt) for dt in before}, (
+				"Metadata lookup regenerated a report"
+			)
 			started = time.monotonic()
 			initial = query_report(large.name)
 			answer = _run_tool(
