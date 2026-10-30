@@ -10,6 +10,8 @@
 // the page scales a unit to s = min(width / 800, 1.25) px. Every "units" in the scenes' code
 // and comments means these.
 
+import { WORN_OVERHANG } from "./worn-room.mjs";
+
 // The toran: a thread sagging TORAN.sag units between hooks at y = TORAN.top, hung with
 // blooms (radius TORAN.bloom) and mango leaves (TORAN.leaf tall). It drops in from above
 // and overshoots TORAN.overshoot units before settling.
@@ -248,7 +250,6 @@ export const sceneHeroTop = (design, s) =>
 // ---- the worn item above the mark ------------------------------------------------------------
 // The item the mark wears (hat, umbrella, crescent ...) hangs past the tile's top; its
 // numbers (WORN_OVERHANG, WORN_GAP_PX) live in worn-room.mjs and are re-exported here.
-import { WORN_OVERHANG } from "./worn-room.mjs";
 export { WORN_GAP_PX, WORN_OVERHANG } from "./worn-room.mjs";
 
 /** How far (tile units) the design's item reaches above the tile's top. */

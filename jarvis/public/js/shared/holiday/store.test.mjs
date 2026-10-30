@@ -44,10 +44,14 @@ function fakeTarget() {
   const target = { handlers: {}, intervals: [], visibilityState: "visible" };
   target.addEventListener = (name, fn) => (target.handlers[name] = fn);
   target.removeEventListener = (name) => delete target.handlers[name];
-  target.setInterval = (fn) => (
-    target.intervals.push(fn), target.intervals.length
-  );
-  target.clearInterval = () => {};
+  target.cleared = [];
+  target.setInterval = (fn) => {
+    target.intervals.push(fn);
+    return target.intervals.length;
+  };
+  target.clearInterval = (id) => {
+    target.cleared.push(id);
+  };
   return target;
 }
 
@@ -62,7 +66,10 @@ function setup(opts = {}) {
     ref,
     computed,
     boot,
-    fetchToday: async () => (calls.push(1), fetch()),
+    fetchToday: async () => {
+      calls.push(1);
+      return fetch();
+    },
     now: () => new Date(clock.t),
     doc: target,
     win: target,
@@ -270,14 +277,32 @@ test("the personal switch off reads as none and stops fetching; on forces a refr
   assert.equal(calls.length, 1);
 });
 
+async function wakeAfterMidnight(visibility, wake) {
+  const ctx = setup({ start: NEXT_MORNING - 3_600_000 });
+  ctx.store.start();
+  ctx.target.visibilityState = visibility;
+  ctx.clock.t = NEXT_MORNING;
+  wake(ctx.target);
+  await settle();
+  return ctx.calls.length;
+}
+const onFocus = (target) => target.handlers.focus();
+const onTimer = (target) => target.intervals[0]();
+
+test("a visible tab refetches a stale answer on wake and on its timer", async () => {
+  assert.equal(await wakeAfterMidnight("visible", onFocus), 1);
+  assert.equal(await wakeAfterMidnight("visible", onTimer), 1);
+});
+
 test("a hidden tab never refreshes on wake or on its timer", async () => {
-  const { store, clock, target, calls } = setup({
-    start: NEXT_MORNING - 3_600_000,
-  });
+  assert.equal(await wakeAfterMidnight("hidden", onFocus), 0);
+  assert.equal(await wakeAfterMidnight("hidden", onTimer), 0);
+});
+
+test("the timer leaves a fresh answer alone", async () => {
+  const { store, clock, target, calls } = setup();
   store.start();
-  target.visibilityState = "hidden";
-  clock.t = NEXT_MORNING;
-  target.handlers.focus();
+  clock.t += REFRESH_MIN_MS * 3;
   target.intervals[0]();
   await settle();
   assert.equal(calls.length, 0);
@@ -302,6 +327,7 @@ test("start loads the art once for a worn answer, and stop removes the listeners
   assert.equal(target.intervals.length, 1);
   store.stop();
   assert.deepEqual(Object.keys(target.handlers), []);
+  assert.deepEqual(target.cleared, [1]);
 });
 
 test("canWear false keeps the art from loading", () => {
