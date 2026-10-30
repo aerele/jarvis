@@ -252,21 +252,53 @@ describe("the hero and the floor row on short stages", () => {
 		}
 	);
 
-	it("across the seam where the row starts to need the room, every stage height clears it by the gap or is tight", () => {
-		// The hero is centred in the stage on one side of the seam and in the free band on the
-		// other, so its place jumps there on purpose: a window resize ends the scene, so no one
-		// sees it move. What must hold on both sides is the clearance.
-		for (const design of ["pongal", "onam"])
+	it("across the seam where the row starts to need the room, every stage height clears it by the gap or is tight, and the hero never jumps", () => {
+		// Stage heights one pixel apart: the hero is centred on one side of the seam and held
+		// 16 px above the row on the other, and it moves smoothly from one to the other.
+		for (const design of ["pongal", "onam"]) {
+			let last;
 			for (let areaH = 480; areaH <= 760; areaH += 1) {
 				const r = play({ design, areaH, heroH: 250, cardsBottom: areaH - 16 });
 				expect(
 					r.fit.tight || r.room >= HERO_FLOOR_GAP_PX - 0.5,
 					`${design} ${areaH}`
 				).toBe(true);
+				if (last !== undefined)
+					expect(Math.abs(r.top - last), `${design} ${areaH}`).toBeLessThanOrEqual(1);
+				last = r.top;
 			}
+		}
 	});
 
-	it("a hero the centred stage would put into the row at its smallest is centred in the free band instead", () => {
+	it("with a fixed free band, the hero's place is continuous in the stage height", () => {
+		// Centred while the stage is short, then held at the band's bottom as the stage grows.
+		const base = { heroH: 300, restTop: 0, minTop: 50, maxBottom: 2000, floorTop: 520 };
+		let last;
+		let seam = false;
+		for (let areaH = 400; areaH <= 900; areaH += 1) {
+			const top = heroOffset({ ...base, areaH });
+			if (last !== undefined)
+				expect(Math.abs(top - last), `areaH ${areaH}`).toBeLessThanOrEqual(1);
+			if (top + 300 === 520 - HERO_FLOOR_GAP_PX) seam = true;
+			last = top;
+		}
+		expect(seam, "the hero reaches the band's bottom").toBe(true);
+	});
+
+	it("the hero is held at the band's bottom, 16 px above the row, once the centred place would reach it", () => {
+		const base = {
+			areaH: 900,
+			heroH: 300,
+			restTop: 0,
+			minTop: 50,
+			maxBottom: 2000,
+			floorTop: 520,
+		};
+		expect(heroOffset(base)).toBe(520 - HERO_FLOOR_GAP_PX - 300); // centred would be 300
+		expect(heroOffset({ ...base, areaH: 600 })).toBe(150); // centred, clear
+	});
+
+	it("a hero the centred stage would put into the row at its smallest is held above the row instead", () => {
 		const args = { design: "pongal", areaH: 560, heroH: 315, cardsBottom: 700 };
 		const before = play({ ...args, withFloor: false });
 		expect(before.fit.scale).toBe(0.55);

@@ -62,12 +62,12 @@ export function restLift({ overhangPx, gap = WORN_GAP_PX, padTop = 0 }) {
  * clearances win. All sizes are layout sizes in px (they ignore the shift itself).
  *
  * `floorTop` (heroFloorTop in scene-geometry.mjs) is the line the floor row's tall middle
- * part reaches up to at its smallest scale, when the design has one. If the centred hero
- * would reach HERO_FLOOR_GAP_PX of it, the hero is centred in the free band between the top
- * clearance and that line instead, so the row can always stay clear of it. A band too small
- * for the hero puts it at the top clearance (the scene then leaves that part of the row out).
- * The place jumps up where the rule changes (a stage a pixel shorter): both sides clear the
- * row, and a resize ends the scene, so no one sees it move.
+ * part reaches up to at its smallest scale, when the design has one. The hero's bottom is
+ * kept HERO_FLOOR_GAP_PX above it, so the row can always stay clear: the hero is centred
+ * until that would put it lower, then it sits at that limit. The place is continuous as the
+ * stage grows, so a relayout while the scene plays (a font swap, an item's measured reach)
+ * moves the hero smoothly, never in a step. A band too small for the hero puts it at the top
+ * clearance (the scene then leaves that part of the row out).
  */
 export function heroOffset({
 	areaH,
@@ -79,11 +79,8 @@ export function heroOffset({
 	floorTop,
 }) {
 	const bandTop = Math.max(minTop, worn);
-	let top = Math.max(bandTop, Math.min((areaH - heroH) / 2, maxBottom - heroH));
-	if (Number.isFinite(floorTop)) {
-		const bandBottom = floorTop - HERO_FLOOR_GAP_PX;
-		if (top + heroH > bandBottom)
-			top = bandTop + Math.max(0, (bandBottom - bandTop - heroH) / 2);
-	}
+	const bandBottom = Number.isFinite(floorTop) ? floorTop - HERO_FLOOR_GAP_PX : Infinity;
+	const lowest = Math.min((areaH - heroH) / 2, maxBottom - heroH, bandBottom - heroH);
+	const top = Math.max(bandTop, lowest);
 	return Math.round(top - restTop);
 }

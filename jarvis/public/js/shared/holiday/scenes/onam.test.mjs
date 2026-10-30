@@ -100,6 +100,29 @@ test("a hero with no room left for the pookalam even at the row's smallest leave
   assert.ok(fine.querySelectorAll(".t-pring").length > 0, "kept when it fits");
 });
 
+test("a relayout that leaves the hero no room for the pookalam takes them out then, and they stay out", () => {
+  const { scene, svg, move } = start();
+  const page = boxes();
+  assert.ok(svg.querySelectorAll(".t-pring").length > 0, "drawn at the start");
+  const crowded = { ...page, hero: { x: 0, y: 0, w: 680, h: 720 } };
+  move(crowded);
+  scene.relayout(crowded);
+  assert.equal(svg.querySelectorAll(".t-pring").length, 0, "taken out");
+  assert.equal(
+    svg.querySelectorAll(".t-floor").length,
+    1,
+    "the rest of the row stays"
+  );
+  assert.equal(
+    svg.querySelectorAll(".t-edge").length,
+    2,
+    "the held props stay"
+  );
+  move(page);
+  scene.relayout(page);
+  assert.equal(svg.querySelectorAll(".t-pring").length, 0, "not drawn again");
+});
+
 test("the lamps stay at the stage's ends when the row shrinks on a short stage, never drifting in under the sub-line", () => {
   const ctx = start();
   const short = boxes({ h: 500, cardsBottom: 700 });
