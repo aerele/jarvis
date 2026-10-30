@@ -7,6 +7,7 @@ import {
   greetingFor,
   greetingLine,
   heroTopRoom,
+  isWelcomeOpen,
   suggestionsFor,
   welcomeLines,
 } from "./panel_welcome.mjs";
@@ -129,4 +130,56 @@ test("welcomeLines: a hold (maintenance) shows the normal greeting", () => {
     greeting: "Good evening",
     leadupLine: null,
   });
+});
+
+// ---- when does a welcome count as open? (the panel's celebration trigger) ----
+
+// The state in which a welcome is open: the panel is open and settled, the workspace is set
+// up, and there is nothing in the thread.
+const OPEN = Object.freeze({
+  open: true,
+  settled: true,
+  enabled: true,
+  maintenance: false,
+  readiness: "ready",
+  loading: false,
+  hasMessages: false,
+  loadError: false,
+  streaming: false,
+  thinking: false,
+});
+
+test("isWelcomeOpen: an open panel with an empty thread is a welcome", () => {
+  assert.equal(isWelcomeOpen(OPEN), true);
+});
+
+test("isWelcomeOpen: each condition alone closes it", () => {
+  const closers = {
+    open: false,
+    settled: false,
+    enabled: false,
+    maintenance: true,
+    loading: true,
+    hasMessages: true,
+    loadError: true,
+    streaming: true,
+    thinking: true,
+  };
+  for (const [field, value] of Object.entries(closers)) {
+    assert.equal(isWelcomeOpen({ ...OPEN, [field]: value }), false, field);
+  }
+});
+
+test("isWelcomeOpen: needs a resolved readiness that is not the setup gate", () => {
+  assert.equal(isWelcomeOpen({ ...OPEN, readiness: "ready" }), true);
+  assert.equal(isWelcomeOpen({ ...OPEN, readiness: "degraded" }), true);
+  // Not known yet: an unset-up workspace must not count as a welcome before the verdict.
+  assert.equal(isWelcomeOpen({ ...OPEN, readiness: null }), false);
+  assert.equal(isWelcomeOpen({ ...OPEN, readiness: "gate" }), false);
+  assert.equal(isWelcomeOpen({ ...OPEN, readiness: "something-new" }), false);
+});
+
+test("isWelcomeOpen: a missing field never opens it", () => {
+  assert.equal(isWelcomeOpen({}), false);
+  assert.equal(isWelcomeOpen({ ...OPEN, enabled: undefined }), false);
 });

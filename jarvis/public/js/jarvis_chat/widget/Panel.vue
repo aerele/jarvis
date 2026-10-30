@@ -845,6 +845,7 @@ import {
 	HERO_PX,
 	greetingLine,
 	heroTopRoom,
+	isWelcomeOpen,
 	suggestionsFor,
 	welcomeLines,
 } from "./panel_welcome.mjs";
@@ -2048,18 +2049,19 @@ function onRealtime(payload) {
 // with no conversation, or a new chat). A restored conversation never shows it, so the
 // welcome counts only once this open's load has finished (the empty frame before it is not one).
 const openSettled = ref(false);
-const welcomeShown = computed(
-	() =>
-		props.open &&
-		openSettled.value &&
-		!!welcomeFx &&
-		!maintenanceActive.value &&
-		readiness.value !== "gate" &&
-		!loading.value &&
-		!shownMessages.value.length &&
-		!(loadError.value && !shownMessages.value.length) &&
-		!stream.value.live &&
-		!thinking.value
+const welcomeShown = computed(() =>
+	isWelcomeOpen({
+		open: props.open,
+		settled: openSettled.value,
+		enabled: !!welcomeFx,
+		maintenance: maintenanceActive.value,
+		readiness: readiness.value,
+		loading: loading.value,
+		hasMessages: shownMessages.value.length > 0,
+		loadError: !!loadError.value,
+		streaming: !!stream.value.live,
+		thinking: !!thinking.value,
+	})
 );
 watch(
 	welcomeShown,
