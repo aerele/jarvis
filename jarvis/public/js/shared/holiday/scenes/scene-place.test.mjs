@@ -49,3 +49,20 @@ test("edgeX on the phone window squeezes, so a prop never crosses the centre or 
   );
   out.forEach((x) => assert.ok(x >= 130 - 1e-9 && x <= 670 + 1e-9, String(x)));
 });
+
+test("squeezeX keeps a prop whole inside the window, in a group scaled about the centre", () => {
+  const phone = stage(130, 670);
+  // At x = 150 the squeezed centre is 231.25: room for a half width of 100, not of 120.
+  assert.ok(Math.abs(squeezeX(150, phone, { hw: 100 }) - 231.25) < 1e-9);
+  assert.ok(Math.abs(squeezeX(150, phone, { hw: 120 }) - 250) < 1e-9);
+  assert.ok(Math.abs(squeezeX(650, phone, { hw: 120 }) - 550) < 1e-9);
+  // In a group drawn 1.2 times larger the same centre is further out, and so is the margin.
+  const g = 1.2;
+  const x = squeezeX(150, phone, { hw: 70, g });
+  assert.ok(400 + g * (x - 400) - g * 70 >= 130 - 1e-9);
+  assert.equal(
+    squeezeX(150, stage(0, 800), { hw: 900, g }),
+    150,
+    "desktop is untouched"
+  );
+});
