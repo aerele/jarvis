@@ -103,6 +103,9 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 
 		_guard_fields(doc.meta)
 		previous_links = {r.vendor_invoice for r in doc.get("vendor_invoices") or []}
+		from jarvis.tools._lcv_legacy import source_names
+
+		previous_links.update(source_names(doc))
 	changes = check_values(doctype, changes)
 
 	# Child tables are merged by row name, never wholesale-replaced: a payload

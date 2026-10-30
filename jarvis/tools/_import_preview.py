@@ -79,7 +79,7 @@ def build_import_preview(
 
 	# Background imports cannot run the current-source LCV tax gate. Keep the
 	# native non-importable policy even if custom metadata enables Data Import.
-	if doctype == "Landed Cost Voucher":
+	if doctype in {"Landed Cost Voucher", "Landed Cost Taxes and Charges"}:
 		return {
 			"doctype": doctype,
 			"import_type": import_type,
