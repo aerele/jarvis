@@ -7,15 +7,19 @@ import { readFileSync } from "node:fs";
 import { WORN_GAP_PX, WORN_OVERHANG } from "./worn-room.mjs";
 import * as geometry from "./scene-geometry.mjs";
 
+<<<<<<< HEAD
 // Static, dynamic and re-export forms; line comments are dropped first.
 const IMPORTS = /\bimport\b\s*[({"'*\w]|^\s*export\b[^;]*\bfrom\b/m;
 const withoutComments = (text) => text.replace(/\/\/.*$/gm, "");
 
+=======
+>>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
 test("worn-room.mjs has no imports, so it can ride in the always-loaded bundle", () => {
   const source = readFileSync(
     new URL("./worn-room.mjs", import.meta.url),
     "utf8"
   );
+<<<<<<< HEAD
   assert.equal(IMPORTS.test(withoutComments(source)), false);
 });
 
@@ -33,6 +37,9 @@ test("the import check catches static, dynamic and re-export forms", () => {
     IMPORTS.test(withoutComments("// no imports here\nexport const a = 1;")),
     false
   );
+=======
+  assert.equal(/^\s*import\s/m.test(source), false);
+>>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
 });
 
 test("scene-geometry.mjs re-exports the same objects", () => {

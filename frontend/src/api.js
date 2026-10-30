@@ -60,11 +60,17 @@ export async function downloadConversation(conversation, format) {
 	}
 }
 
+<<<<<<< HEAD
 // What the holiday touch shows the session user today (jarvis.holiday_touch.api). The
 // method is GET-only server-side and frappe-ui's `call` always POSTs, so this is a plain
 // fetch (jarvis/public/js/shared/holiday/store.mjs, shared with the Desk widget). A non-2xx
 // (a 403 for a user without Jarvis access) rejects with .status; a 200 whose message is not
 // an object rejects with malformed: true. The holiday store reads a 403 as "none".
+=======
+// What the holiday touch shows the session user today (jarvis.holiday_touch.api). The fetch
+// and its error shape (.status, .malformed) are shared with the Desk widget; the holiday
+// store reads a 403 as "none".
+>>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
 export const getHolidayToday = () => fetchToday();
 
 // The welcome scene asks the server for its showing slot (jarvis.holiday_touch.api).
