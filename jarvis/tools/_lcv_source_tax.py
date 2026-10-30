@@ -352,14 +352,17 @@ def source_names(doc):
 def _prior_claims(invoice, voucher, lock):
 	# A locking read sees a competing commit even if this transaction already
 	# established an older REPEATABLE READ snapshot before waiting for the PI.
-	rows = frappe.db.sql(
-		f"""select t.expense_account, t.base_amount
+	query = """select t.expense_account, t.base_amount
 		from `tabLanded Cost Taxes and Charges` t
 		inner join `tabLanded Cost Voucher` p on p.name = t.parent
 		where t.parenttype = 'Landed Cost Voucher' and t.parentfield = 'taxes'
 		and p.docstatus = 1 and p.name != %(voucher)s
-		and t.`{SOURCE_INVOICE}` = %(invoice)s
-		limit 2001 {"for update" if lock else ""}""",
+		and t.custom_jarvis_source_invoice = %(invoice)s
+		limit 2001"""
+	if lock:
+		query += " for update"
+	rows = frappe.db.sql(
+		query,
 		{"voucher": voucher or "", "invoice": invoice},
 		as_dict=True,
 	)

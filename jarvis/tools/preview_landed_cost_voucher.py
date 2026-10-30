@@ -656,6 +656,7 @@ class _Preparation:
 		# private/custom conversion records do not need to become readable.
 		path = frappe.get_app_path("erpnext", "setup", "setup_wizard", "data", "uom_conversion_data.json")
 		try:
+			# nosemgrep: frappe-security-file-traversal -- fixed installed ERP catalogue; no user path
 			with open(path) as source:
 				rows = json.load(source)
 			return {
