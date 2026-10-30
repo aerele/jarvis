@@ -91,12 +91,19 @@ const smiling = ref(false);
 const clickable = computed(() => wearing.value && SMILE_KINDS.includes(art.value?.kind));
 let smiled = false;
 let smileTimer = null;
-let artTimer = null;
+const artTimers = new Set(); // one per wait: a replay must not cancel an earlier wait's timer
 let smileRun = 0;
 let gone = false;
 function artOrGiveUp() {
-	const giveUp = new Promise((resolve) => (artTimer = setTimeout(resolve, ART_WAIT_MS)));
-	return Promise.race([ensureWorn(), giveUp]).finally(() => clearTimeout(artTimer));
+	let timer;
+	const giveUp = new Promise((resolve) => {
+		timer = setTimeout(resolve, ART_WAIT_MS);
+		artTimers.add(timer);
+	});
+	return Promise.race([ensureWorn(), giveUp]).finally(() => {
+		clearTimeout(timer);
+		artTimers.delete(timer);
+	});
 }
 async function smile() {
 	const run = ++smileRun;
@@ -162,7 +169,7 @@ watch(
 onBeforeUnmount(() => {
 	gone = true;
 	clearTimeout(smileTimer);
-	clearTimeout(artTimer);
+	artTimers.forEach(clearTimeout);
 	stopWatchingMotion();
 });
 
