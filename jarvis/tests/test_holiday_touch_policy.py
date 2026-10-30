@@ -20,7 +20,12 @@ from jarvis.tests.test_holiday_touch_resolve import SETTINGS, _set, _user, clear
 from jarvis.tests.test_onboarding_sync import _restore_settings, _set_token, _snapshot_settings
 
 NOW = datetime(2026, 11, 9, 6, 0, tzinfo=timezone.utc)
-MIRROR = ("holiday_policy_disabled", "holiday_policy_disabled_designs", "holiday_policy_synced_at")
+MIRROR = (
+	"holiday_policy_disabled",
+	"holiday_policy_disabled_designs",
+	"holiday_policy_names",
+	"holiday_policy_synced_at",
+)
 _MISSING = object()
 
 
@@ -39,6 +44,12 @@ def _raw(field):
 
 def _designs():
 	return json.loads(_raw("holiday_policy_disabled_designs") or "[]")
+
+
+def _names():
+	"""The stored names, or None when the field was never written."""
+	raw = _raw("holiday_policy_names")
+	return json.loads(raw) if raw else None
 
 
 def _is_holiday_write(args, kwargs) -> bool:
@@ -135,20 +146,17 @@ class TestPersist(_Base):
 		self.assertEqual(_designs(), ["holi"])
 		self.assertEqual(log.call_count, 1)
 
-	def test_unknown_designs_are_dropped_and_names_are_ignored(self):
+	def test_unknown_designs_are_dropped(self):
 		policy.persist(
 			_payload(
 				{
 					"disabled": False,
 					"disabled_designs": ["pongal", "nope", 7, None, "diwali", "pongal"],
-					"aliases": {"diwali": ["lights"]},
-					"near_misses": ["x"],
 				}
 			),
 			daily=False,
 		)
 		self.assertEqual(_designs(), ["diwali", "pongal"])  # canonical order, deduped
-		self.assertIsNone(_raw("holiday_policy_names"))
 
 	def test_dropped_unknown_designs_are_reported_without_their_names(self):
 		with mock.patch("frappe.log_error") as log:
@@ -399,6 +407,224 @@ class TestPersist(_Base):
 		self.assertEqual(_raw("holiday_policy_disabled"), "1")
 		self.assertEqual(_designs(), ["eid"])
 		self.assertTrue(_raw("holiday_policy_synced_at"))
+
+
+def _names_payload(aliases=_MISSING, near_misses=_MISSING, **policy_extra) -> dict:
+	body = dict(policy_extra)
+	if aliases is not _MISSING:
+		body["aliases"] = aliases
+	if near_misses is not _MISSING:
+		body["near_misses"] = near_misses
+	return _payload(body)
+
+
+def _store_names(aliases, near_misses):
+	_set("holiday_policy_names", json.dumps({"aliases": aliases, "near_misses": near_misses}))
+
+
+class TestNames(_Base):
+	def test_names_are_stored_as_canonical_json(self):
+		policy.persist(
+			_names_payload({"pongal": ["Thai  Pongal!", "thai pongal", "Aadi Pongal"]}, ["  Pongal Eve "]),
+			daily=False,
+		)
+		self.assertEqual(
+			_names(),
+			{"aliases": {"pongal": ["aadi pongal", "thai pongal"]}, "near_misses": ["pongal eve"]},
+		)
+
+	def test_a_missing_names_key_keeps_the_stored_names(self):
+		_store_names({"diwali": ["lights"]}, ["lights eve"])
+		calls, spy = self.holiday_writes()
+		with spy:
+			policy.persist(_payload({"disabled": False, "disabled_designs": []}), daily=False)
+		self.assertEqual(calls, [])
+		self.assertEqual(_names(), {"aliases": {"diwali": ["lights"]}, "near_misses": ["lights eve"]})
+
+	def test_each_names_key_is_independent_when_missing(self):
+		_store_names({"diwali": ["lights"]}, ["lights eve"])
+		policy.persist(_names_payload(near_misses=["fireworks night"]), daily=False)
+		self.assertEqual(_names(), {"aliases": {"diwali": ["lights"]}, "near_misses": ["fireworks night"]})
+		policy.persist(_names_payload(aliases={"holi": ["colours day"]}), daily=False)
+		self.assertEqual(_names(), {"aliases": {"holi": ["colours day"]}, "near_misses": ["fireworks night"]})
+
+	def test_empty_values_clear_their_half(self):
+		_store_names({"diwali": ["lights"]}, ["lights eve"])
+		policy.persist(_names_payload(aliases={}), daily=False)
+		self.assertEqual(_names(), {"aliases": {}, "near_misses": ["lights eve"]})
+		policy.persist(_names_payload(near_misses=[]), daily=False)
+		self.assertEqual(_names(), {"aliases": {}, "near_misses": []})
+
+	def test_a_design_with_an_empty_list_clears_that_design(self):
+		_store_names({"diwali": ["lights"], "holi": ["colours day"]}, [])
+		policy.persist(_names_payload(aliases={"holi": ["colours day"], "diwali": []}), daily=False)
+		self.assertEqual(_names()["aliases"], {"holi": ["colours day"]})
+
+	def test_empty_names_on_a_never_synced_site_write_nothing(self):
+		calls, spy = self.holiday_writes()
+		with spy:
+			policy.persist(_names_payload({}, []), daily=False)
+		self.assertEqual(calls, [])
+		self.assertIsNone(_raw("holiday_policy_names"))
+
+	def test_unchanged_names_write_nothing_across_100_gate_refreshes(self):
+		body = _names_payload({"diwali": ["lights", "festival of lights"]}, ["lights eve"])
+		calls, spy = self.holiday_writes()
+		with spy:
+			for _ in range(100):
+				policy.persist(body, daily=False)
+		self.assertEqual(len(calls), 1)  # the first sight only
+		self.assertIsNone(_raw("holiday_policy_synced_at"))  # the gate never stamps
+
+	def test_a_daily_run_with_unchanged_names_writes_only_the_stamp(self):
+		body = _names_payload({"diwali": ["lights"]}, [])
+		policy.persist(body, daily=True)
+		_set("holiday_policy_synced_at", frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-2))
+		calls, spy = self.holiday_writes()
+		with spy:
+			policy.persist(body, daily=True)
+		self.assertEqual(list(calls[0][0]), ["holiday_policy_synced_at"])
+
+	def test_names_and_flags_change_in_one_write(self):
+		calls, spy = self.holiday_writes()
+		with spy:
+			policy.persist(
+				_names_payload({"diwali": ["lights"]}, [], disabled=True, disabled_designs=["eid"]),
+				daily=False,
+			)
+		self.assertEqual(len(calls), 1)
+
+	def test_malformed_aliases_keep_the_stored_value_and_log_once(self):
+		_store_names({"diwali": ["lights"]}, ["lights eve"])
+		with mock.patch.object(frappe, "log_error") as log:
+			policy.persist(_names_payload("SECRET-TEXT", ["fireworks night"]), daily=False)
+			policy.persist(_names_payload("SECRET-TEXT", ["fireworks night"]), daily=False)
+		self.assertEqual(_names(), {"aliases": {"diwali": ["lights"]}, "near_misses": ["fireworks night"]})
+		self.assertEqual(log.call_count, 1)
+		self.assertIn("aliases", log.call_args.kwargs["message"])
+		self.assertNotIn("SECRET-TEXT", log.call_args.kwargs["message"])
+
+	def test_malformed_near_misses_keep_the_stored_value(self):
+		_store_names({"diwali": ["lights"]}, ["lights eve"])
+		with mock.patch.object(frappe, "log_error") as log:
+			policy.persist(_names_payload({"holi": ["colours day"]}, {"a": 1}), daily=False)
+		self.assertEqual(_names(), {"aliases": {"holi": ["colours day"]}, "near_misses": ["lights eve"]})
+		self.assertEqual(log.call_count, 1)
+
+	def test_malformed_names_never_stop_the_flags(self):
+		with mock.patch.object(frappe, "log_error"):
+			policy.persist(_names_payload("junk", 7, disabled=True, disabled_designs=["eid"]), daily=False)
+		self.assertEqual(_raw("holiday_policy_disabled"), "1")
+		self.assertEqual(_designs(), ["eid"])
+		self.assertIsNone(_raw("holiday_policy_names"))
+
+	def test_malformed_flags_never_stop_the_names(self):
+		with mock.patch.object(frappe, "log_error"):
+			policy.persist(
+				_names_payload({"diwali": ["lights"]}, [], disabled="yes", disabled_designs="x"),
+				daily=False,
+			)
+		self.assertEqual(_names(), {"aliases": {"diwali": ["lights"]}, "near_misses": []})
+
+	def test_bad_entries_are_dropped_and_logged_without_their_text(self):
+		with mock.patch.object(frappe, "log_error") as log:
+			policy.persist(
+				_names_payload(
+					{
+						"diwali": ["lights", 7, None, "ab", "x" * 61, "  ", ["nested"]],
+						"nope": ["SECRET-NAME"],
+						"holi": "not a list",
+						"eid": [],
+					},
+					["lights eve", {"a": 1}],
+				),
+				daily=False,
+			)
+		self.assertEqual(_names(), {"aliases": {"diwali": ["lights"]}, "near_misses": ["lights eve"]})
+		self.assertEqual(log.call_count, 1)
+		kwargs = log.call_args.kwargs
+		self.assertEqual(kwargs["title"], "Holiday touch: admin policy names ignored entries")
+		self.assertNotIn("SECRET-NAME", kwargs["message"])
+
+	def test_length_limits_are_counted_after_tidying(self):
+		sixty, sixty_one = "a" * 60, "a" * 61
+		policy.persist(
+			_names_payload({"diwali": ["<b>abc</b>", "ab", sixty, sixty_one, "<i>x</i>"]}, []),
+			daily=False,
+		)
+		self.assertEqual(_names()["aliases"]["diwali"], sorted(["abc", sixty]))
+
+	def test_a_valid_name_list_with_nothing_bad_logs_nothing(self):
+		with mock.patch.object(frappe, "log_error") as log:
+			policy.persist(_names_payload({"diwali": ["lights"]}, ["lights eve"]), daily=False)
+		log.assert_not_called()
+
+	def test_at_most_200_names_in_total(self):
+		many = [f"name {n:03d}" for n in range(150)]
+		more = [f"near {n:03d}" for n in range(150)]
+		policy.persist(_names_payload({"diwali": many}, more), daily=False)
+		stored = _names()
+		self.assertEqual(len(stored["aliases"]["diwali"]) + len(stored["near_misses"]), 200)
+		self.assertEqual(len(stored["aliases"]["diwali"]), 150)  # aliases first, then near-misses
+
+	def test_one_oversize_list_is_cut_to_200_without_walking_it_all(self):
+		huge = [f"name {n}" for n in range(5000)]
+		with mock.patch.object(frappe, "log_error"):
+			policy.persist(_names_payload(near_misses=huge), daily=False)
+		self.assertEqual(len(_names()["near_misses"]), 200)
+
+	def test_oversize_payload_against_stored_names_is_stable(self):
+		many = [f"name {n:03d}" for n in range(300)]
+		body = _names_payload(near_misses=many)
+		policy.persist(body, daily=False)
+		calls, spy = self.holiday_writes()
+		with spy:
+			policy.persist(body, daily=False)
+		self.assertEqual(calls, [])
+
+	def test_a_stored_value_that_is_not_json_is_replaced_by_a_valid_payload(self):
+		_set("holiday_policy_names", "{broken")
+		policy.persist(_names_payload({"diwali": ["lights"]}, []), daily=False)
+		self.assertEqual(_names(), {"aliases": {"diwali": ["lights"]}, "near_misses": []})
+
+	def test_odd_payload_shapes_never_raise(self):
+		for aliases, near in (({"diwali": 5}, None), ({1: ["x"]}, "str"), ([], {}), (None, None)):
+			with self.subTest(aliases=aliases, near=near):
+				with mock.patch.object(frappe, "log_error"):
+					policy.persist(_names_payload(aliases, near), daily=False)
+
+	def _rotation(self, body):
+		"""Run ``persist`` and report (gen before commit, gen after the commit callbacks)."""
+		frappe.db.after_commit.reset()
+		frappe.flags.pop(cache.QUEUED_FLAG, None)
+		before = cache.current_gen()
+		policy.persist(body, daily=False)
+		during = cache.current_gen()
+		frappe.db.after_commit.run()
+		return before, during, cache.current_gen()
+
+	def test_a_names_change_rotates_the_cache_after_the_commit(self):
+		before, during, after = self._rotation(_names_payload({"diwali": ["lights"]}, []))
+		self.assertEqual(during, before)  # not before the commit
+		self.assertNotEqual(after, before)
+
+	def test_unchanged_names_do_not_rotate(self):
+		body = _names_payload({"diwali": ["lights"]}, [])
+		policy.persist(body, daily=False)
+		before, _, after = self._rotation(body)
+		self.assertEqual(after, before)
+
+	def test_a_flags_only_change_does_not_rotate(self):
+		before, _, after = self._rotation(_payload({"disabled": True}))
+		self.assertEqual(after, before)
+
+	def test_a_rollback_does_not_rotate(self):
+		frappe.db.after_commit.reset()
+		before = cache.current_gen()
+		policy.persist(_names_payload({"diwali": ["lights"]}, []), daily=False)
+		frappe.db.rollback()
+		frappe.db.after_commit.run()
+		self.assertEqual(cache.current_gen(), before)
 
 
 class TestAnswerHonoursTheMirror(_Base):
