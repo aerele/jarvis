@@ -86,7 +86,12 @@ def _blank(value) -> bool:
 
 
 def _decimal(text: str) -> str:
-	return format(Decimal(text).normalize(), "f")
+	"""The exact plain form of a number: never rounded, whatever the decimal context.
+	(``Decimal.normalize`` rounds to the context's 28 digits, so two long references
+	that differ in their last digits read as one.) Zeros after the point are not a
+	difference ("2546.50" is "2546.5", "2546.00" is "2546"); zeros before it are kept."""
+	plain = format(Decimal(text), "f")
+	return plain.rstrip("0").rstrip(".") if "." in plain else plain
 
 
 def _proposal(conversation: str, message: str, doctype: str):
