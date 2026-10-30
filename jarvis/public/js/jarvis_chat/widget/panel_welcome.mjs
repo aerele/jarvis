@@ -5,6 +5,8 @@
 // board's purple accent and decorative animation are off-language per
 // design.md 2.2 and 1.3, so only the copy and the layout idea carry over.
 //
+import { WORN_GAP_PX, WORN_OVERHANG } from "../../shared/holiday/worn-room.mjs";
+
 // Pure: the greeting is a function of the hour, and the prompts are a function
 // of what the user is looking at, which makes both unit-testable.
 
@@ -70,4 +72,34 @@ export function suggestionsFor(ctx) {
     { title: "Take an action", prompt: "Draft a document for me to review." },
     { title: "Search records", prompt: "Search for a customer or contact." },
   ];
+}
+
+// ---- holiday touches ----
+// The hero tile, and the padding above it in the welcome (Panel.vue .jvp-hero, .jvp-welcome).
+export const HERO_PX = 52;
+export const WELCOME_PAD_TOP_PX = 24;
+
+/**
+ * Extra room above the hero for the item it wears, in px: the item's reach above the tile
+ * (the 56 unit table, scaled to the hero) plus the gap, less the padding already there.
+ * Known before the art loads, so the hero does not jump when the item appears. A design
+ * whose item sits on or beside the tile (no table entry) needs none.
+ */
+export function heroTopRoom(design) {
+  if (!Object.prototype.hasOwnProperty.call(WORN_OVERHANG, design)) return 0;
+  const reach = (WORN_OVERHANG[design] * HERO_PX) / 56;
+  return Math.max(0, Math.ceil(reach + WORN_GAP_PX - WELCOME_PAD_TOP_PX));
+}
+
+/**
+ * The words on the welcome: on a day or birthday the heading replaces the greeting; on a
+ * lead-up the normal greeting stays and the advance wish goes under it. A hold (upgrade
+ * maintenance) shows the plain greeting: the mark is asleep and has nothing to celebrate.
+ */
+export function welcomeLines(greeting, view, { hold = false } = {}) {
+  if (hold || !view) return { greeting, leadupLine: null };
+  return {
+    greeting: view.heading || greeting,
+    leadupLine: view.leadupLine || null,
+  };
 }
