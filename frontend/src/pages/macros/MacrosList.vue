@@ -221,7 +221,7 @@ import {
 	deleteWarning,
 	bulkDeleteToast,
 	deleteGuard,
-	isLiveRun,
+	progressChangesLastRun,
 } from "@/lib/macroRunOutcome";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
@@ -454,10 +454,11 @@ function onEvent(p) {
 	if (p && p.kind === "macro:done") return refreshKeep();
 	// A run STARTED that this list has not heard of (the scheduler, another tab):
 	// the cell, and the delete confirmation, should know. Once per run: the later
-	// steps of the same run find the row already live.
+	// steps of the same run find the row already live. A run that moves between two
+	// live states (running <-> waiting for a report) changes the cell too.
 	if (p && p.kind === "macro:progress") {
 		const row = (rows.value || []).find((r) => r.name === p.macro);
-		return row && !isLiveRun(row.last_run) ? refreshKeep() : undefined;
+		return row && progressChangesLastRun(row.last_run, p) ? refreshKeep() : undefined;
 	}
 	if (!p || p.kind !== "macro:merged") return;
 	refreshKeep();
@@ -512,6 +513,8 @@ function lastRunCell(row) {
 		lastRun: row.last_run,
 		when: at ? exactDate(at) : "",
 		relative: at ? timeAgo(at) : "",
+		waitingSince:
+			row.last_run && row.last_run.waiting_since ? timeAgo(row.last_run.waiting_since) : "",
 		legacy: row.last_run_at
 			? { when: exactDate(row.last_run_at), relative: timeAgo(row.last_run_at) }
 			: null,

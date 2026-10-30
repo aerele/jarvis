@@ -441,6 +441,30 @@ describe("MacrosList: deleting macros that are running", () => {
 	});
 });
 
+describe("MacrosList: a run that moves between live states", () => {
+	const live = { last_run: { status: "running", error: "" } };
+	const waitingRun = {
+		last_run: { status: "waiting_report", error: "", waiting_reports: ["Stock Ageing"] },
+	};
+
+	it("is learned of when it parks for a report, and when it goes on", async () => {
+		const { emit } = await mountList([macro("live", live), macro("parked", waitingRun)]);
+		fetchPage.mockClear();
+		emit({ kind: "macro:progress", macro: "live", status: "running", step: 2 });
+		emit({ kind: "macro:progress", macro: "parked", status: "waiting_report", step: 1 });
+		await flushPromises();
+		expect(fetchPage).not.toHaveBeenCalled(); // same state: nothing to ask
+
+		emit({ kind: "macro:progress", macro: "live", status: "waiting_report", step: 1 });
+		await flushPromises();
+		expect(fetchPage).toHaveBeenCalledTimes(1);
+
+		emit({ kind: "macro:progress", macro: "parked", status: "running", step: 1 });
+		await flushPromises();
+		expect(fetchPage).toHaveBeenCalledTimes(2);
+	});
+});
+
 describe("MacrosList: an admin's hold and delete", () => {
 	const HELD_SAYS =
 		"An admin has put this macro on hold: Paused for review. It will not run until an admin releases it.";
