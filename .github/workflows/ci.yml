@@ -86,6 +86,37 @@ jobs:
         with:
           extra_args: --all-files --show-diff-on-failure
 
+  # #773: the product socket gate (jarvis/chat/socket_io.py) relies on websocket-client
+  # internals, and pyproject allows any websocket-client >=1.6,<2 while the tests job
+  # installs only the newest. This runs the contract harness against BOTH ends of that
+  # range: the 1.6.0 floor and the newest release inside it. It needs only Python and
+  # cryptography (for the local TLS pair): no bench, no Frappe, no network beyond pip.
+  ws-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        websocket-client: ["==1.6.0", ">=1.6,<2"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the harness's only dependency
+        run: python -m pip install cryptography
+      - name: Unpack websocket-client${{ matrix.websocket-client }}
+        run: |
+          python -m pip download --no-deps --only-binary=:all: "websocket-client${{ matrix.websocket-client }}" -d "$RUNNER_TEMP/dl"
+          python -m zipfile -e "$RUNNER_TEMP"/dl/websocket_client-*.whl "$RUNNER_TEMP/ws"
+      - name: Run the contract harness
+        run: |
+          version="$(basename "$RUNNER_TEMP"/dl/websocket_client-*.whl | cut -d- -f2)"
+          echo "websocket-client $version"
+          python -I jarvis/tests/harness/ws_io_contract.py --ws-dir "$RUNNER_TEMP/ws" \
+            --expect-version "$version" --out "$RUNNER_TEMP/ws-contract.json"
+          cat "$RUNNER_TEMP/ws-contract.json"
+
   # The frontend Vue SPA carries its own two test suites and, until this job, NOTHING ran either of
   # them on a PR: `frontend/package.json` defines `test` (vitest) and `test:node` (node's built-in
   # runner), but no workflow invoked them, so a browser-transport regression once shipped green.
@@ -159,6 +190,7 @@ jobs:
         run: |
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
           node --test jarvis/public/js/*.test.mjs jarvis/public/js/shared/*.test.mjs
+          node --test jarvis/public/js/shared/holiday/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
   # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
@@ -184,6 +216,12 @@ jobs:
           printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
       - name: Build the SPA (Vite) — the /jarvis deploy artifact
         run: npm run install-frontend && npm run build-frontend
+      - name: Holiday worn-item art stays out of the main bundle
+        # The art is lazy (holiday-* chunk). A static import would put it in every
+        # user's first load, and nothing else would notice. The gate has a self-test.
+        run: |
+          node --test frontend/scripts/check-holiday-chunks.test.mjs
+          node frontend/scripts/check-holiday-chunks.mjs
 
   tests:
     runs-on: ubuntu-latest
