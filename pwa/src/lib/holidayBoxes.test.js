@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sceneBoxes } from "./holidayBoxes.js";
+import { heroBox, sceneBoxes } from "./holidayBoxes.js";
 
 const rects = {
 	host: { w: 390, h: 726 },
@@ -30,4 +30,10 @@ test("sceneBoxes: with no cards (a short screen) the band is the room under the 
 test("sceneBoxes: a hero that leaves no room gives an empty band, never a negative one", () => {
 	const boxes = sceneBoxes({ ...rects, hero: { ...rects.hero, y: 700 }, cards: null });
 	assert.equal(boxes.cards.h, 0);
+});
+
+test("heroBox: the mark and the heading together, not the flex area around them", () => {
+	const mark = { x: 167, y: 220, w: 56, h: 56 };
+	const heading = { x: 80, y: 290, w: 230, h: 52 };
+	assert.deepEqual(heroBox(mark, heading), { x: 80, y: 220, w: 230, h: 122 });
 });
