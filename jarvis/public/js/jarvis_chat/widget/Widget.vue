@@ -112,6 +112,7 @@ import { fabAction, panelTogglePlan } from "./fab_action.mjs";
 import { createArtLoader } from "./holiday_art_loader.mjs";
 import { createHolidayState, exposeDebugView } from "./holiday_state.mjs";
 import { lookStyle, wornShown } from "./fab_worn.mjs";
+import { prefersReduced } from "./reduced_motion.mjs";
 import FabWorn from "./FabWorn.vue";
 import Panel from "./Panel.vue";
 
@@ -212,8 +213,6 @@ const maintenanceActive = computed(() => maintenance.active);
 // ---- Holiday touch: the item the launcher wears while its face shows. The state exists
 // only for a user with Jarvis access whose page booted with the key; for anyone else it is
 // inert (no request, no art). The art is a lazy bundle, loaded by our own <script> tag.
-const prefersReduced = () =>
-	window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 function safeStorage() {
 	try {
 		return window.localStorage;
@@ -464,9 +463,18 @@ function onFabEnter() {
 	wake();
 }
 
+// :focus-visible is not known to every engine (an old one throws on the selector).
+function isFocusVisible(el) {
+	try {
+		return !!el?.matches?.(":focus-visible");
+	} catch (e) {
+		return false;
+	}
+}
+
 function onFabFocus(e) {
 	// Only keyboard focus shows the face (CSS :focus-visible); a click's focus must not.
-	focused.value = !!e.target?.matches?.(":focus-visible");
+	focused.value = isFocusVisible(e.target);
 	wake();
 }
 
