@@ -52,3 +52,10 @@ test("a design with no look entry (holi) keeps the default glance", () => {
   assert.deepEqual(lookStyle(undefined, "diwali"), {});
   assert.deepEqual(lookStyle({}, "toString"), {});
 });
+
+test("the layer box follows the tile it dresses (the panel's 52px hero)", () => {
+  const unit = 52 / 56;
+  const box = wornLayerBox(52);
+  assert.equal(box.left, `${-16 * unit}px`);
+  assert.equal(box.width, `${88 * unit}px`);
+});

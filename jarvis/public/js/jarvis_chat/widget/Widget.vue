@@ -89,6 +89,7 @@
 			:context="effectiveContext"
 			:layout="panelBox"
 			:leaving="leaving"
+			:holiday="holiday"
 			@close="closePanel"
 			@open-full="openFull"
 			@dismiss-context="contextDismissed = true"
