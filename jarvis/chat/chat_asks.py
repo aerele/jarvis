@@ -242,6 +242,7 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 		owner,
 		{
 			"kind": "approval:new",
+			"source": "Chat",
 			"conversation_id": conversation,
 			"origin_page": conversation_meta.origin_page or "",
 			"name": doc.name,
