@@ -30,7 +30,10 @@ def _attachments(value):
 		url = item.get("file_url") if isinstance(item, dict) else None
 		if not isinstance(url, str) or len(url) > 2048 or not url.startswith(("/private/files/", "/files/")):
 			frappe.throw("Choose an uploaded attachment.")
-		result.append({"file_url": url})
+		file_id = item.get("file_id")
+		if file_id is not None and (not isinstance(file_id, str) or not 1 <= len(file_id) <= 140):
+			frappe.throw("Choose an uploaded attachment.")
+		result.append({"file_url": url, **({"file_id": file_id} if file_id else {})})
 	return result
 
 
@@ -83,17 +86,29 @@ def send_message(
 	ok, reason = policy.validate_can_send(actor)
 	if not ok:
 		return {"ok": False, "reason": reason}
-	context = SharedAdmission(actor, request_hash=request_fingerprint(message, atts))
+	context = SharedAdmission(
+		actor,
+		request_hash=request_fingerprint(message, atts),
+		file_ids_supplied=tuple(bool(item.get("file_id")) for item in atts),
+	)
 
 	def validate_files():
 		from jarvis.chat.api import _att_canvas_item
+		from jarvis.exceptions import JarvisError
+		from jarvis.tools._file_source import resolve_file
 
 		with actor_permissions(actor):
 			validated = []
 			for item in atts:
-				file = frappe.get_doc("File", {"file_url": item["file_url"]})
+				try:
+					file = resolve_file(item["file_url"], file_id=item.get("file_id"))
+				except JarvisError:
+					frappe.throw("Choose the current attachment. Its File reference is missing or ambiguous.")
 				file.check_permission("read")
-				validated.append({"file_url": file.file_url, "file_name": file.file_name})
+				item["file_id"] = file.name
+				validated.append(
+					{"file_id": file.name, "file_url": file.file_url, "file_name": file.file_name}
+				)
 			context.seed_fields["canvas"] = (
 				frappe.as_json([_att_canvas_item(item) for item in validated]) if validated else None
 			)

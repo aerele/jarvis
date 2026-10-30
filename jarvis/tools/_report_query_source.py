@@ -17,6 +17,7 @@ from frappe.permissions import get_role_permissions
 
 from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools._file_source import FileCapacityError, read_bounded
 from jarvis.tools._report_query_data import CONTRACT, MAX_COMPRESSED, encode
 from jarvis.tools._report_scope import _assert_company_readable
 from jarvis.tools.get_report_filters import get_report_filters
@@ -109,7 +110,7 @@ class ReportSource:
 			)
 		self.file = files[0]
 		if int(self.file.file_size or 0) > MAX_COMPRESSED:
-			raise InvalidArgumentError("Prepared report exceeds the 10 MiB compressed input limit.")
+			raise FileCapacityError("Prepared report exceeds the 10 MiB compressed input limit.")
 
 	def _metadata(self):
 		fields = [
@@ -162,9 +163,9 @@ class ReportSource:
 			) from None
 
 	def read(self):
-		content = compat.file_bytes(frappe.get_doc("File", self.file.name))
+		content = read_bounded(frappe.get_doc("File", self.file.name))
 		if len(content) > MAX_COMPRESSED:
-			raise InvalidArgumentError("Prepared report exceeds the 10 MiB compressed input limit.")
+			raise FileCapacityError("Prepared report exceeds the 10 MiB compressed input limit.")
 		self.source_sha = hashlib.sha256(content).hexdigest()
 		legacy = self.meta.get("columns")
 		if isinstance(legacy, str):

@@ -8,7 +8,7 @@ a prepared report and the agent relayed that as "no data" - the bug this fixes.
 
 Instead we return a **self-describing status envelope**. On every call we
 recompute from live state (there is no stored ticket):
-  - ``ready``       - a completed copy exists; its rows + ``as_of`` ride along.
+  - ``ready``       - a completed copy exists; metadata points to ``query_report``.
   - ``generating``  - a background run for these filters is in flight.
   - ``failed``      - the most recent run terminally errored; surfaced, not looped.
   - ``started``     - nothing usable, so we kicked off a background run.
@@ -249,28 +249,28 @@ _unset = is_unset  # the name the module's own callers and tests use
 # --------------------------------------------------------------------------- #
 # completed copy (read DIRECTLY - never via run() by name)
 # --------------------------------------------------------------------------- #
-def _read_completed(dn: str) -> dict | None:
-	"""Read a completed Prepared Report's rows straight from its doc. Returns a
-	`ready` envelope (rows capped at ``_MAX_ROWS`` for the model), or None if the
-	stored output can't be read (missing/corrupt gz) so the caller falls through to
-	(re)generate rather than emit empty."""
-	completed = read_completed_rows(dn)
-	if completed is None:
-		return None
-	result = completed["result"]
-	capped, note = _cap_rows(result, completed["report_name"])
-	as_of = completed["as_of"]
-	env = _envelope(completed["report_name"], "ready", _ready_message(len(result), as_of))
-	env["columns"] = completed["columns"]
-	env["result"] = capped
-	env["as_of"] = as_of
-	env["run"] = dn
-	env["source_rows"] = len(result)
-	env["preview_complete"] = len(capped) == len(result)
-	env["next_query"] = {"tool": "query_report", "args": {"prepared_report": dn}}
-	if note:
-		env["row_note"] = note
-	return env
+def _read_completed(dn: str) -> dict:
+	"""A completed run is ready for analysis. Do not fetch or parse its source here."""
+	row = frappe.db.get_value(
+		"Prepared Report",
+		{"name": dn, "owner": frappe.session.user, "status": "Completed"},
+		["report_name", "report_end_time", "creation"],
+		as_dict=True,
+	)
+	if not row:
+		raise PermissionDeniedError("The completed report is no longer available. Select a current run.")
+	as_of = str(row.report_end_time or row.creation)
+	return _envelope(
+		row.report_name,
+		"ready",
+		f"The stored report is ready (generated {as_of}). Its data has not been read yet. Use query_report to inspect and query the complete stored source.",
+		run=dn,
+		as_of=as_of,
+		read_status="not_read",
+		preview_complete=False,
+		coverage={"complete": False},
+		next_query={"tool": "query_report", "args": {"prepared_report": dn}},
+	)
 
 
 def read_completed_rows(dn: str) -> dict | None:
@@ -278,7 +278,7 @@ def read_completed_rows(dn: str) -> dict | None:
 	``Prepared Report`` read role needed): ``{report_name, columns, result, as_of,
 	run}``, or None when the stored output can't be read (missing/corrupt gz) so the
 	caller regenerates rather than emits empty. Uncapped: the export path writes
-	these rows to a file; ``_read_completed`` caps them for the model."""
+	these rows to a file; ``_read_completed`` returns metadata only."""
 	try:
 		doc = frappe.get_doc("Prepared Report", dn)
 		raw = doc.get_prepared_data()

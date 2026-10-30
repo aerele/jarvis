@@ -213,6 +213,39 @@ class TestPreparedReportIntegration(unittest.TestCase):
 				read.assert_not_called()
 			frappe.db.set_value("Prepared Report", large.name, "status", "Completed")
 
+			# The known native gzip artifact hands off before the generic File gate.
+			from jarvis.tools import _file_source
+			from jarvis.tools.query_file import query_file
+			from jarvis.tools.read_file import read_file
+
+			artifact = frappe.db.get_value(
+				"File", {"attached_to_doctype": "Prepared Report", "attached_to_name": large.name}, "name"
+			)
+			real_permission = frappe.has_permission
+			with (
+				patch.object(
+					frappe,
+					"has_permission",
+					side_effect=lambda doctype, *a, **kw: False
+					if doctype == "File"
+					else real_permission(doctype, *a, **kw),
+				),
+				patch.object(
+					_file_source, "read_bounded", side_effect=AssertionError("handoff must not read")
+				),
+			):
+				for reader in (query_file, read_file):
+					handoff = reader(file_id=artifact)
+					assert handoff["read_contract"] == "prepared-report-handoff-v1"
+					assert handoff["next_query"]["args"] == {"prepared_report": large.name}
+			frappe.set_user(email)
+			with (
+				patch.object(frappe, "has_permission", return_value=True),
+				patch.object(_file_source, "read_bounded", side_effect=AssertionError("no generic bypass")),
+			):
+				for reader in (query_file, read_file):
+					with self.assertRaises(PermissionDeniedError):
+						reader(file_id=artifact)
 			frappe.set_user(email)
 			for identifier in [large.name, "missing-" + tag]:
 				try:

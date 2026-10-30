@@ -105,8 +105,9 @@ class TestExportReport(FrappeTestCase):
 		with _completed(_rows(n), columns=COLUMNS):
 			shown = run_report(PREP_REPORT)
 			env = export_query(report_name=PREP_REPORT)
-		self.assertLess(len(shown["result"]), n)
-		self.assertIn("query_report", shown["row_note"])
+		self.assertNotIn("result", shown)
+		self.assertEqual(shown["read_status"], "not_read")
+		self.assertEqual(shown["next_query"]["tool"], "query_report")
 		self.assertEqual(env["total"], n)
 		self.assertTrue(env["as_of"])
 		sheet = _sheet(env)

@@ -19,7 +19,7 @@ from jarvis.tools._document_query_sources import (
 	DOCUMENT_NOTE,
 	load_document,
 )
-from jarvis.tools._file_scan import MAX_BYTES, MAX_COLUMNS, MAX_EXPANDED_BYTES, MAX_SHEETS
+from jarvis.tools._file_scan import MAX_BYTES, MAX_COLUMNS, MAX_SHEETS
 from jarvis.tools.read_file import _cell
 
 MAX_TOTAL_ROWS = 100_000
@@ -164,13 +164,20 @@ def _missing_formula(archive, worksheet):
 	return empty
 
 
-def _load_sources(db, content, filename, selected):
+def _load_sources(db, content, filename, selected, *, prefix="", budget=None):
 	ext = filename.rsplit(".", 1)[-1].lower()
 	manifest = []
-	total_rows = total_cells = sample_chars = 0
+	budget = budget if budget is not None else {}
+	for key in ("rows", "cells", "sample", "tables", "xml"):
+		budget.setdefault(key, 0)
 
 	def load(name, table, rows, hidden=False, *, columns=None, positions=False):
-		nonlocal total_rows, total_cells, sample_chars
+		table = prefix + table
+		budget["tables"] += 1
+		if prefix and budget["tables"] > 32:
+			from jarvis.tools._archive_sources import ArchiveCapacityError
+
+			raise ArchiveCapacityError("Selected archive scope exceeds 32 tables.")
 		# Table/column names come only from ordinal counters, never source labels.
 		db.execute(f'CREATE TABLE "{table}" (_row INTEGER PRIMARY KEY)')
 		width = count = 0
@@ -189,9 +196,9 @@ def _load_sources(db, content, filename, selected):
 				raise InvalidArgumentError(
 					f"Worksheet {name!r} exceeds {MAX_COLUMNS} columns. No query was run."
 				)
-			total_rows += 1
-			total_cells += len(row)
-			if total_rows > MAX_TOTAL_ROWS or total_cells > MAX_CELLS:
+			budget["rows"] += 1
+			budget["cells"] += len(row)
+			if budget["rows"] > MAX_TOTAL_ROWS or budget["cells"] > MAX_CELLS:
 				raise InvalidArgumentError(
 					f"Selected sources exceed {MAX_TOTAL_ROWS} stored rows/nodes or {MAX_CELLS} cells. "
 					"Select fewer worksheets or split the file. No query was run."
@@ -217,9 +224,9 @@ def _load_sources(db, content, filename, selected):
 			# Discovery samples are explicitly partial; source loading is exhaustive.
 			candidate = [number, *values]
 			size = len(json.dumps(candidate, ensure_ascii=False))
-			if count <= 8 and sample_chars + size <= 6000:
+			if count <= 8 and budget["sample"] + size <= 6000:
 				sample.append(candidate)
-				sample_chars += size
+				budget["sample"] += size
 		manifest.append(
 			{
 				"name": name,
@@ -258,9 +265,10 @@ def _load_sources(db, content, filename, selected):
 
 		if content.startswith(bytes.fromhex("d0cf11e0a1b11ae1")):
 			raise InvalidArgumentError("Workbook is encrypted or legacy XLS. Supply an unlocked XLSX copy.")
+		from jarvis.tools._archive_sources import validate_workbook
+
+		validate_workbook(content, budget)
 		with ZipFile(io.BytesIO(content)) as archive:
-			if sum(item.file_size for item in archive.infolist()) > MAX_EXPANDED_BYTES:
-				raise InvalidArgumentError("Expanded workbook exceeds 64 MiB. Split the workbook.")
 			book = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
 			try:
 				if len(book.sheetnames) > MAX_SHEETS:
@@ -299,7 +307,7 @@ def _load_sources(db, content, filename, selected):
 		raise InvalidArgumentError(
 			"File queries support XLSX, CSV, TSV, JSON, MD, Markdown and TXT. Re-save legacy XLS as XLSX."
 		)
-	return manifest, total_rows
+	return manifest, budget["rows"]
 
 
 def query_spreadsheet(content, filename, *, sql=None, sheets=None, max_rows=100):

@@ -214,7 +214,7 @@ class TestQueryFileBoundary(unittest.TestCase):
 		with (
 			patch.object(frappe, "flags", frappe._dict()),
 			patch.object(frappe, "conf", frappe._dict()),
-			patch("jarvis.tools.query_file._resolve_file", return_value=doc),
+			patch("jarvis.tools.query_file.resolve_file", return_value=doc),
 			patch.object(frappe, "has_permission", return_value=True),
 			patch("jarvis.compat.file_bytes", return_value=b"GSTIN,Tax\n" + b"A,0.10\n" * 1500),
 		):
@@ -239,9 +239,10 @@ class TestQueryFileBoundary(unittest.TestCase):
 		with patch.object(frappe, "conf", frappe._dict()):
 			from jarvis.chat.turn_handler import _prepare_attachments
 
-		doc = SimpleNamespace(name="file", file_name="2b.xlsx")
+		doc = SimpleNamespace(name="file", file_name="2b.xlsx", file_url="/private/files/2b.xlsx")
 		with (
 			patch("frappe.get_doc", return_value=doc),
+			patch("jarvis.tools._file_source.resolve_file", return_value=doc),
 			patch("frappe.has_permission", return_value=True),
 			patch("jarvis.compat.file_bytes", return_value=b"PRIVATE-WORKBOOK-CONTENT"),
 		):
@@ -256,7 +257,7 @@ class TestQueryFileBoundary(unittest.TestCase):
 	def test_permission_precedes_bytes_and_child_on_every_call(self):
 		for version in (None, "a" * 64):
 			with (
-				patch("jarvis.tools.query_file._resolve_file", return_value=SimpleNamespace(name="private")),
+				patch("jarvis.tools.query_file.resolve_file", return_value=SimpleNamespace(name="private")),
 				patch("jarvis.tools.query_file.frappe.has_permission", return_value=False),
 				patch("jarvis.tools.query_file.compat.file_bytes") as read,
 				patch("jarvis.tools.query_file.run_query") as child,
@@ -269,7 +270,7 @@ class TestQueryFileBoundary(unittest.TestCase):
 	def test_changed_file_rejects_pinned_version(self):
 		doc = SimpleNamespace(name="file", file_name="2b.csv", file_url="/private/files/2b.csv")
 		with (
-			patch("jarvis.tools.query_file._resolve_file", return_value=doc),
+			patch("jarvis.tools.query_file.resolve_file", return_value=doc),
 			patch("jarvis.tools.query_file.frappe.has_permission", return_value=True),
 			patch("jarvis.tools.query_file.compat.file_bytes", side_effect=[b"A\n1", b"A\n2"]),
 			patch("jarvis.tools.query_file.run_query", return_value={}) as child,
