@@ -546,6 +546,15 @@ class TestNames(_Base):
 		self.assertEqual(kwargs["title"], "Holiday touch: admin policy names ignored entries")
 		self.assertNotIn("SECRET-NAME", kwargs["message"])
 
+	def test_birthday_is_not_an_alias_design_and_is_logged_without_its_names(self):
+		with mock.patch.object(frappe, "log_error") as log:
+			policy.persist(
+				_names_payload({"birthday": ["SECRET-NAME"], "diwali": ["lights"]}, []), daily=False
+			)
+		self.assertEqual(_names(), {"aliases": {"diwali": ["lights"]}, "near_misses": []})
+		self.assertEqual(log.call_count, 1)
+		self.assertNotIn("SECRET-NAME", log.call_args.kwargs["message"])
+
 	def test_length_limits_are_counted_after_tidying(self):
 		sixty, sixty_one = "a" * 60, "a" * 61
 		policy.persist(
