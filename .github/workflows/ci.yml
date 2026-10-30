@@ -164,8 +164,10 @@ jobs:
 
   # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
   # would slip through green and only surface at Frappe Cloud deploy time as a 404 on /jarvis. This gate
-  # builds the SPA (the /jarvis artifact) the way the deploy does. (The PWA build resolves the bench site
-  # config via a bench-relative path a bare runner lacks, so it is not gated here — a follow-up.)
+  # builds the SPA (the /jarvis artifact) and the PWA (the /jarvis-mobile artifact) the way the deploy does.
+  # The PWA imports modules from frontend/src (@shared, e.g. voice.js -> frappe-ui), so it builds AFTER the
+  # SPA's dependencies are installed. Its socket.js reads the bench site config by the same fixed relative
+  # path as the SPA's, which the stub step below satisfies (pwa/vite.config.js aliases it like the SPA's).
   frontend-build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -175,7 +177,9 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            frontend/package-lock.json
+            pwa/package-lock.json
       - name: Stub the bench site config the SPA build reads (no bench in CI)
         # src/socket.js imports sites/common_site_config.json at build time (for the socketio
         # port); a bare runner has no bench, so provide a minimal stub. Frappe Cloud builds
@@ -191,6 +195,15 @@ jobs:
         run: |
           node --test frontend/scripts/check-holiday-chunks.test.mjs
           node frontend/scripts/check-holiday-chunks.mjs
+      - name: Build the PWA (Vite) — the /jarvis-mobile deploy artifact
+        # After the SPA build on purpose: the PWA imports from frontend/src, which needs
+        # frontend/node_modules.
+        run: npm run install-pwa && npm run build-pwa
+      - name: Holiday worn-item art stays lazy and out of the PWA precache
+        # The same art rule for the phone build, plus: no holiday-* file in the built sw.js
+        # precache, and no precached chunk statically imports a file that is not precached
+        # (it would fail offline). Its self-test ran in the step above.
+        run: node frontend/scripts/check-holiday-chunks.mjs --pwa
 
   tests:
     runs-on: ubuntu-latest
