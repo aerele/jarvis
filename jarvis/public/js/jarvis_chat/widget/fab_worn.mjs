@@ -1,9 +1,13 @@
 // Pure rules for the item the launcher wears on a holiday (Widget.vue draws it, FabWorn.vue
 // holds the layer). Text only: no art import, so this stays in the widget bundle.
 
-export const FAB_PX = 54; // the launcher tile, matches .jvw-fab and fab_position.FAB_SIZE
-const TILE_UNITS = 56; // the worn art is drawn in a 56 unit tile
-const MARGIN_UNITS = 16; // room the art keeps around the tile on every side
+import { TILE_UNITS } from "../../shared/holiday/worn-room.mjs";
+
+// The launcher tile, matches .jvw-fab and fab_position.FAB_SIZE (holiday_geometry.test.mjs
+// holds these to the CSS).
+export const FAB_PX = 54;
+export const FAB_RADIUS_PX = 16;
+export const MARGIN_UNITS = 16; // room the art keeps around the tile on every side
 
 /**
  * Does the item show right now? Only with the face (the item and the face come and go
@@ -11,8 +15,8 @@ const MARGIN_UNITS = 16; // room the art keeps around the tile on every side
  * the launcher's job), never on a brand logo (no face to wear it on) and never in the
  * upgrade hold (its sleepy face is telling the user something).
  */
-export function wornShown({
-  wear,
+export function isItemShown({
+  itemReady,
   faceShown,
   dragging,
   panelOpen,
@@ -20,7 +24,7 @@ export function wornShown({
   maintenance,
 }) {
   return (
-    !!wear &&
+    !!itemReady &&
     !!faceShown &&
     !dragging &&
     !panelOpen &&
@@ -45,8 +49,7 @@ export function wornLayerBox(px = FAB_PX) {
  * {} for a design with no entry: its default glance stays.
  */
 export function lookStyle(lookAt, design) {
-  if (!lookAt || !Object.prototype.hasOwnProperty.call(lookAt, design))
-    return {};
+  if (!lookAt || !Object.hasOwn(lookAt, design)) return {};
   const [x, y] = lookAt[design];
   const unit = FAB_PX / TILE_UNITS;
   return {

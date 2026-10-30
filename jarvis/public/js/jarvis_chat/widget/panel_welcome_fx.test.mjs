@@ -6,8 +6,8 @@ import { SMILE_MS, createWelcomeFx } from "./panel_welcome_fx.mjs";
 const view = (extra = {}) => ({
   kind: "day",
   design: "diwali",
-  worn: true,
-  wear: true,
+  hasItem: true,
+  itemReady: true,
   ...extra,
 });
 
@@ -122,8 +122,8 @@ test("a birthday celebrates like a day", async () => {
 
 test("nothing to wear (none, white label, hold) does nothing at all", async () => {
   for (const v of [
-    view({ kind: "none", worn: false }),
-    view({ worn: false }),
+    view({ kind: "none", hasItem: false }),
+    view({ hasItem: false }),
   ]) {
     const { fx, log } = setup({ v });
     fx.open();
@@ -209,7 +209,7 @@ test("a replay on a lead-up smiles only; under reduced motion it holds the smile
 });
 
 test("a replay with nothing to wear does nothing", async () => {
-  const { fx, log } = setup({ v: view({ worn: false }) });
+  const { fx, log } = setup({ v: view({ hasItem: false }) });
   fx.replay();
   await settle();
   assert.deepEqual(log.smiling, []);

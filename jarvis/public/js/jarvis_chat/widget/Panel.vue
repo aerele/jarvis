@@ -270,62 +270,27 @@
 							focusable="false"
 							aria-hidden="true"
 						></svg>
-						<div
-							class="jvp-hero"
-							:class="{
-								'jvp-sleeping': maintenanceActive,
-								'jvp-hero--button': heroClickable,
-							}"
+						<WelcomeHero
+							:sleeping="maintenanceActive"
+							:smiling="heroSmiling"
+							:clickable="heroClickable"
+							:design="holidayView.design"
+							:item-markup="heroItemMarkup"
+							:layer-box="heroLayerBox"
 							:style="heroStyle"
-							:role="heroClickable ? 'button' : undefined"
-							:tabindex="heroClickable ? 0 : undefined"
-							:aria-label="heroClickable ? 'Replay the holiday greeting' : undefined"
-							@click="onHeroClick"
-							@keydown.enter.prevent="onHeroClick"
-							@keydown.space.prevent="onHeroClick"
+							@replay="welcomeFx?.replay()"
 						>
 							<!-- Upgrading: the hero mark sleeps too, so it matches the header
 							     avatar instead of showing a wide-awake face during a hold. -->
-							<span v-if="maintenanceActive" class="jvp-face" aria-hidden="true">
-								<i class="jvp-eye"></i><i class="jvp-eye"></i>
-							</span>
-							<span v-if="maintenanceActive" class="jvp-zzz" aria-hidden="true"
-								><i>z</i><i>z</i><i>z</i></span
-							>
-							<svg
-								v-else-if="!heroSmiling"
-								viewBox="0 0 24 24"
-								fill="#fff"
-								aria-hidden="true"
-							>
-								<path
-									d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z"
-								/>
-							</svg>
-							<!-- A holiday smile: the mark's happy face (JarvisMark's happy mood). -->
-							<span
-								v-if="heroSmiling && !maintenanceActive"
-								class="jvp-smile"
-								aria-hidden="true"
-							>
-								<span class="jvp-smile-eyes"><i></i><i></i></span>
-								<span class="jvp-smile-mouth"></span>
-							</span>
-							<!-- v-html is safe: built by the art from constants and a design key the
-							     answer reader has already checked. -->
-							<svg
-								v-if="heroItemMarkup"
-								class="jvh-layer jvp-item"
-								:data-design="holidayView.design"
-								data-state="happy"
-								data-testid="holiday-hero-worn"
-								viewBox="-16 -16 88 88"
-								:style="heroLayerBox"
-								focusable="false"
-								aria-hidden="true"
-								v-html="heroItemMarkup"
-							></svg>
-						</div>
+							<template #sleeping>
+								<span class="jvp-face" aria-hidden="true">
+									<i class="jvp-eye"></i><i class="jvp-eye"></i>
+								</span>
+								<span class="jvp-zzz" aria-hidden="true"
+									><i>z</i><i>z</i><i>z</i></span
+								>
+							</template>
+						</WelcomeHero>
 						<div class="jvp-greet">{{ welcomeText.greeting }}</div>
 						<p v-if="welcomeText.leadupLine" class="jvp-greet-sub jvp-greet-leadup">
 							{{ welcomeText.leadupLine }}
@@ -844,6 +809,7 @@ import { isShowCardRequest } from "./showCardRequest.mjs";
 import { resizeFrom } from "./panel_size.mjs";
 import {
 	HERO_PX,
+	HERO_RADIUS_PX,
 	greetingLine,
 	heroTopRoom,
 	isWelcomeOpen,
@@ -851,7 +817,9 @@ import {
 	welcomeLines,
 } from "./panel_welcome.mjs";
 import { createWelcomeFx } from "./panel_welcome_fx.mjs";
+import WelcomeHero from "./WelcomeHero.vue";
 import { wornLayerBox } from "./fab_worn.mjs";
+import { tileUnits } from "../../shared/holiday/worn-room.mjs";
 import { prefersReduced, watchReducedMotion } from "./reduced_motion.mjs";
 import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
 import { sendRefusalMessage } from "./panel_send_copy.mjs";
@@ -1256,7 +1224,7 @@ const suggestions = computed(() => suggestionsFor(props.context));
 
 // ---- Holiday touch in the welcome: the words, the hero's room, smile and particles. All
 // of it is inert without props.holiday, and nothing here runs under the upgrade hold. ----
-const holidayView = computed(() => props.holiday?.view.value || { kind: "none", worn: false });
+const holidayView = computed(() => props.holiday?.view.value || { kind: "none", hasItem: false });
 const welcomeText = computed(() =>
 	welcomeLines(greeting.value, props.holiday ? holidayView.value : null, {
 		hold: maintenanceActive.value,
@@ -1269,11 +1237,11 @@ const reducedMotion = ref(prefersReduced());
 const stopWatchingMotion = watchReducedMotion((reduced) => {
 	reducedMotion.value = reduced;
 });
-const wearsHoliday = computed(
+const hasHolidayItem = computed(
 	() =>
 		!!props.holiday &&
 		!maintenanceActive.value &&
-		holidayView.value.worn === true &&
+		holidayView.value.hasItem === true &&
 		["leadup", "day", "birthday"].includes(holidayView.value.kind)
 );
 // Room above the hero for the item, taken from the answer (not from the art) so the hero never
@@ -1281,20 +1249,21 @@ const wearsHoliday = computed(
 // art leaves an empty gap above the hero on Christmas, which is the lesser evil next to a
 // hero that moves a few px just as the greeting begins.
 const heroStyle = computed(() => {
-	const room = wearsHoliday.value ? heroTopRoom(holidayView.value.design) : 0;
+	const room = hasHolidayItem.value ? heroTopRoom(holidayView.value.design) : 0;
 	return room ? { marginTop: `${room}px` } : undefined;
 });
 // A replay is motion, so under reduced motion the hero is inert: no role, no tab stop.
 const heroClickable = computed(
-	() => wearsHoliday.value && holidayView.value.wear === true && !reducedMotion.value
+	() => hasHolidayItem.value && holidayView.value.itemReady === true && !reducedMotion.value
 );
 const heroLayerBox = wornLayerBox(HERO_PX);
 const heroItemMarkup = computed(() => {
 	const art = props.holiday?.art.value;
-	if (!heroSmiling.value || !wearsHoliday.value || !holidayView.value.wear || !art) return "";
+	if (!heroSmiling.value || !hasHolidayItem.value || !holidayView.value.itemReady || !art)
+		return "";
 	return art.wornMarkup(holidayView.value.design, {
 		idPrefix: "jvwp",
-		radius: (14 / HERO_PX) * 56,
+		radius: tileUnits(HERO_RADIUS_PX, HERO_PX),
 		motion: !prefersReduced(),
 	});
 });
@@ -1308,9 +1277,6 @@ const welcomeFx = props.holiday
 			reduced: prefersReduced,
 	  })
 	: null;
-function onHeroClick() {
-	if (heroClickable.value) welcomeFx?.replay();
-}
 
 // Lucide-shaped paths for the starter-card chips, indexed alongside suggestions.
 const CARD_ICONS = [
@@ -2054,8 +2020,6 @@ function onRealtime(payload) {
 	}
 }
 
-// Load lazily on first open, not at mount: the FAB is on every Desk page and
-// most page views never open the panel.
 // A "welcome open": the welcome block becomes visible while the panel is open (a first open
 // with no conversation, or a new chat). A restored conversation never shows it, so the
 // welcome counts only once this open's load has finished (the empty frame before it is not one).
@@ -2083,6 +2047,8 @@ watch(
 	{ flush: "post" }
 );
 
+// Load lazily on first open, not at mount: the FAB is on every Desk page and
+// most page views never open the panel.
 // Refresh on EVERY open, not just the first. A reply can land while the panel
 // is closed, and the old first-open-only rule left the user staring at a stale
 // or empty thread until they reloaded the page. `load()` keeps the messages it
@@ -2740,14 +2706,12 @@ defineExpose({ load, startNewChat, convId });
 
 /* ---- welcome ---- */
 .jvp-welcome {
+	position: relative; /* the particle layer is absolutely placed against it */
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	padding: 24px 9px 8px;
-}
-.jvp-welcome {
-	position: relative;
 }
 /* Holiday particles: behind the welcome's own content, never in the way of a click. */
 .jvp-fx {
@@ -2770,71 +2734,6 @@ defineExpose({ load, startNewChat, convId });
 }
 .jvp-welcome > :not(.jvp-fx) {
 	position: relative;
-}
-/* The hero smiles with its holiday item: the star gives way to the happy face. */
-.jvp-hero--button {
-	cursor: pointer;
-}
-.jvp-hero--button:focus-visible {
-	outline: 2px solid var(--jv-accent);
-	outline-offset: 3px;
-}
-.jvp-smile {
-	position: absolute;
-	inset: 0;
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	justify-content: center;
-	gap: calc(var(--sz) * 0.07);
-	animation: jvp-cheer 1.5s ease-in-out 1 both;
-}
-.jvp-smile-eyes {
-	display: flex;
-	gap: calc(var(--sz) * 0.05);
-}
-.jvp-smile-eyes i {
-	width: calc(var(--sz) * 0.1);
-	height: calc(var(--sz) * 0.14);
-	background: #fff;
-	border-radius: 999px;
-}
-.jvp-smile-mouth {
-	width: calc(var(--sz) * 0.42);
-	height: calc(var(--sz) * 0.34);
-	border: calc(var(--sz) * 0.07) solid #fff;
-	border-color: transparent transparent #fff transparent;
-	border-radius: 50%;
-	margin-top: calc(var(--sz) * -0.1);
-}
-@keyframes jvp-cheer {
-	0%,
-	100% {
-		transform: translateY(3%) scale(1);
-	}
-	50% {
-		transform: translateY(-12%) scale(1.05);
-	}
-}
-.jvp-item {
-	position: absolute;
-	overflow: visible;
-	pointer-events: none;
-}
-.jvp-item :deep(.acc) {
-	animation: jvp-item-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-}
-@keyframes jvp-item-pop {
-	from {
-		opacity: 0;
-		transform: translateY(-5px) scale(0.86);
-	}
-}
-@media (prefers-reduced-motion: reduce) {
-	.jvp-smile,
-	.jvp-item :deep(.acc) {
-		animation: none;
-	}
 }
 .jvp-hero {
 	/* position: relative so the sleepy .jvp-face (position:absolute) centres inside
