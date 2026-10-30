@@ -42,7 +42,8 @@ export function createWelcomeFx({
   }
 
   const view = () => holiday.view.value;
-  const wants = () => SMILE_KINDS.includes(view().kind) && view().worn === true;
+  const wants = () =>
+    SMILE_KINDS.includes(view().kind) && view().hasItem === true;
 
   function stopVisuals() {
     if (cancelWait) cancelWait();

@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { FAB_PX, lookStyle, wornLayerBox, wornShown } from "./fab_worn.mjs";
+import { FAB_PX, lookStyle, wornLayerBox, isItemShown } from "./fab_worn.mjs";
 
 const base = {
-  wear: true,
+  itemReady: true,
   faceShown: true,
   dragging: false,
   panelOpen: false,
@@ -12,22 +12,22 @@ const base = {
 };
 
 test("the item shows with the face and nothing else in the way", () => {
-  assert.equal(wornShown(base), true);
+  assert.equal(isItemShown(base), true);
 });
 
-test("the item is off when there is nothing to wear or the face is hidden", () => {
-  assert.equal(wornShown({ ...base, wear: false }), false);
-  assert.equal(wornShown({ ...base, faceShown: false }), false);
+test("the item is off when there is nothing to show or the face is hidden", () => {
+  assert.equal(isItemShown({ ...base, itemReady: false }), false);
+  assert.equal(isItemShown({ ...base, faceShown: false }), false);
 });
 
 test("the item is hidden while dragging and while the panel is open", () => {
-  assert.equal(wornShown({ ...base, dragging: true }), false);
-  assert.equal(wornShown({ ...base, panelOpen: true }), false);
+  assert.equal(isItemShown({ ...base, dragging: true }), false);
+  assert.equal(isItemShown({ ...base, panelOpen: true }), false);
 });
 
 test("the item never shows on a brand logo or under the maintenance hold", () => {
-  assert.equal(wornShown({ ...base, brandLogo: true }), false);
-  assert.equal(wornShown({ ...base, maintenance: true }), false);
+  assert.equal(isItemShown({ ...base, brandLogo: true }), false);
+  assert.equal(isItemShown({ ...base, maintenance: true }), false);
 });
 
 test("the layer is the FAB's box with the art's 16 unit margin on every side", () => {
