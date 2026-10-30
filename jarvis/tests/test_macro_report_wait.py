@@ -17,7 +17,7 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import add_to_date, now_datetime
 
-from jarvis.chat import admission, macro_report_wait, macros, macros_api, report_runs
+from jarvis.chat import admission, macro_reconcile, macro_report_wait, macros, macros_api, report_runs
 from jarvis.tests import test_macro_run_outcome as outcome
 from jarvis.tests.race_harness import other_connection
 from jarvis.tests.test_macro_dispatch_identity import IdentityBase
@@ -732,13 +732,19 @@ class TestParkingAtStepEnd(ParkBase):
 		self._advance(conv, step_turn)
 		self.assertNotEqual(self._values(run).status, "waiting_report")
 
-	def test_a_failed_read_in_a_continuation_does_not_end_the_run_directly(self):
+	def test_a_failed_read_in_a_continuation_ends_the_run_with_the_reason(self):
+		# A resumed step is ended by its continuation alone; a failed read in it must not
+		# fall through to "success" (T4).
 		run, conv, _ = self._mk_run(steps=2, at_step=1)
 		frappe.db.set_value(RUN, run, "resume_turn", "resume000001", update_modified=False)
 		bad = self._pr(PREP_REPORT, _ACME, "Error")
-		step_turn = self._end_step(run, conv, [dict(status="failed", run=bad, error="Nope.")])
+		step_turn = self._end_step(
+			run, conv, [dict(status="failed", run=bad, error="Nope.")], turn_id="resume000001"
+		)
 		self._advance(conv, step_turn)
-		self.assertNotEqual(self._values(run).error, f"Step 1 stopped: {PREP_REPORT} failed: Nope.")
+		got = self._values(run)
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(got.error, f"Step 1 stopped: {PREP_REPORT} failed: Nope.")
 
 	def test_a_derivation_error_falls_back_to_todays_behaviour(self):
 		run, conv, _ = self._mk_run(steps=2, at_step=1)
@@ -931,9 +937,11 @@ _BAD_ERROR = (
 class ResumeBase(ParkBase):
 	"""A two-step run parked on one prepared report (``self.pr``, still Started)."""
 
+	REPORTS = ((PREP_REPORT, _ACME),)
+
 	def setUp(self):
 		super().setUp()
-		self.run, self.conv, self.macro = self._parked()
+		self.run, self.conv, self.macro = self._parked(self.REPORTS)
 
 	def _parked(self, reports=((PREP_REPORT, _ACME),), **kw):
 		run, conv, macro = self._mk_run(steps=2, at_step=1, **kw)
@@ -1662,10 +1670,9 @@ class TestTheCronNeverRaises(ResumeBase):
 			macro_report_wait.resume_report_waits()
 
 
-class TestTheRealEnqueueOnTheTurnMachine(IdentityBase):
-	"""The continuation through the real ``_enqueue_turn`` and accept gate (the pump
-	shard of ``IdentityBase``), not a stand-in: the turn named in the CAS is the Turn that
-	exists, with a hidden continuation message, and a second delivery meets it."""
+class RealResumeBase(IdentityBase):
+	"""A run parked on a Completed report, on the pump shard of ``IdentityBase``: the
+	resume goes through the real ``_enqueue_turn`` and accept gate, not a stand-in."""
 
 	def setUp(self):
 		super().setUp()
@@ -1675,7 +1682,7 @@ class TestTheRealEnqueueOnTheTurnMachine(IdentityBase):
 		self.addCleanup(
 			lambda: (frappe.db.delete("Prepared Report", {"report_name": PREP_REPORT}), frappe.db.commit())
 		)
-		self.run, self.conv, _ = self._mk_run(steps=2, at_step=1)
+		self.run, self.conv, self.macro = self._mk_run(steps=2, at_step=1)
 		with patch(_ENQUEUE):
 			pr = frappe.get_doc(
 				{"doctype": "Prepared Report", "report_name": PREP_REPORT, "filters": json.dumps(_ACME)}
@@ -1703,6 +1710,12 @@ class TestTheRealEnqueueOnTheTurnMachine(IdentityBase):
 		return frappe.db.get_value(
 			RUN, self.run, ["status", "resume_turn", "resume_count", "step_resumes"], as_dict=True
 		)
+
+
+class TestTheRealEnqueueOnTheTurnMachine(RealResumeBase):
+	"""The continuation through the real ``_enqueue_turn`` and accept gate, not a
+	stand-in: the turn named in the CAS is the Turn that exists, with a hidden
+	continuation message, and a second delivery meets it."""
 
 	def test_the_continuation_is_the_turn_the_cas_named(self):
 		macro_report_wait.resume_report_waits(self.run)
@@ -1751,3 +1764,788 @@ class TestTheRealEnqueueOnTheTurnMachine(IdentityBase):
 		self.assertEqual(self._names(self.conv), [])
 		macro_report_wait.resume_report_waits(self.run)
 		self.assertEqual(self._row().status, "running")
+
+
+# --------------------------------------------------------------------------- #
+# recognising and judging the continuation (T4)
+# --------------------------------------------------------------------------- #
+class ContBase(ResumeBase):
+	"""A two-step run whose step 1 parked on a report, and whose report is now resolved
+	(Completed, or failed when ``FAILS``) and the run RESUMED: the continuation is queued
+	under ``self.cont`` (with its own seed message, origin ``continuation``, as the real
+	gate writes it), the step's original turn is ``self.step_turn`` and has ended."""
+
+	FAILS = False
+	MERGED = False
+
+	def setUp(self):
+		super().setUp()
+		self.step_turn = macros._step_turn_id(self.run, 0)
+		self.orig = frappe.db.get_value(
+			TURN, self.step_turn, ["seed_message", "assistant_message"], as_dict=True
+		)
+		if self.MERGED:
+			frappe.db.set_value(RUN, self.run, {"run_mode": "merged", "total_steps": 1})
+			frappe.db.commit()
+		if self.FAILS:
+			self._set_pr(status="Error", error_message="Report timed out.")
+		else:
+			for pr in self.prs:
+				self._ready(pr)
+		self._continuation_enqueue = self._sending_continuation()
+		self._resume(self.run)
+		self.cont = self._row().resume_turn
+		self.assertEqual(self._row().status, "running")
+		self.wake.reset_mock()
+
+	def _sending_continuation(self):
+		"""``api._enqueue_turn`` as the real gate leaves it: a queued Turn under the given
+		id with a hidden ``continuation`` seed message."""
+
+		def enqueue(conversation, prompt, **kw):
+			seed = self._msg(conversation, "user", origin="continuation", content=prompt)
+			self._turn_as(conversation, kw["run_id"], state="queued", seed=seed)
+			return {"run_id": kw["run_id"], "message_id": seed}
+
+		patcher = patch(_ENQUEUE_TURN, side_effect=enqueue)
+		mock = patcher.start()
+		self.addCleanup(patcher.stop)
+		return mock
+
+	def _end_continuation(self, rows=(), *, state="done", error="", reply="Done.", ended_s_ago=0):
+		"""The continuation ends: its ``run_report`` rows, its reply, its final state."""
+		for row in rows:
+			self._tool(self.conv, **row)
+		reply_id = self._msg(self.conv, "assistant", content=reply)
+		frappe.db.set_value(
+			TURN,
+			self.cont,
+			{
+				"state": state,
+				"error": error,
+				"assistant_message": reply_id,
+				"done_at": add_to_date(now_datetime(), seconds=-ended_s_ago),
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		return reply_id
+
+	def _ready_row(self, pr=None, report=PREP_REPORT, filters=None):
+		return dict(status="ready", run=pr or self.pr, report=report, filters=filters or _ACME)
+
+	def _hook(self, **handle):
+		"""The turn-end hook for the named handle (default: the continuation's id), with
+		the next step's dispatch recorded. Returns the dispatch mock."""
+		with self._dispatching(self.conv) as enqueue:
+			macros.advance_after_turn(
+				self.conv, errored=handle.pop("errored", False), **(handle or {"run_id": self.cont})
+			)
+		frappe.set_user("Administrator")
+		return enqueue
+
+	def _doc(self):
+		return frappe.get_doc(RUN, self.run)
+
+	def _full(self):
+		return frappe.db.get_value(
+			RUN,
+			self.run,
+			[
+				"status",
+				"error",
+				"current_step",
+				"resume_turn",
+				"resume_count",
+				"step_resumes",
+				"step_continuations",
+				"waiting_on",
+				"waiting_failed",
+			],
+			as_dict=True,
+		)
+
+
+class TestTheOriginalTurnsEndAfterAResume(ContBase):
+	"""Once ``resume_turn`` is set it is the ONLY turn that ends the step. The original
+	turn's rows still say ``waiting: true``, so taken for the step's end again it would
+	park the run on a report that was read."""
+
+	def _assert_ignored(self, **handle):
+		before = self._full()
+		enqueue = self._hook(**handle)
+		self.assertEqual(self._full(), before)
+		enqueue.assert_not_called()
+		self.wake.assert_not_called()
+
+	def test_a_redelivery_by_the_turns_id_changes_nothing(self):
+		self._assert_ignored(run_id=self.step_turn)
+
+	def test_a_redelivery_by_the_reply_alone_changes_nothing(self):
+		# Turn recovery names only the assistant row.
+		self._assert_ignored(assistant_message=self.orig.assistant_message)
+
+	def test_a_redelivery_by_the_steps_message_alone_changes_nothing(self):
+		# The legacy worker names only the message.
+		self._assert_ignored(seed_message=self.orig.seed_message)
+
+	def test_a_finalize_retry_with_the_id_and_the_message_changes_nothing(self):
+		self._assert_ignored(run_id=self.step_turn, seed_message=self.orig.seed_message)
+		self._assert_ignored(run_id=self.step_turn, errored=True)
+
+	def test_a_hook_that_names_no_turn_is_not_the_end_of_a_resumed_step(self):
+		self._assert_ignored(seed_message=None)
+
+	def test_any_other_turn_of_a_resumed_step_counts_as_superseded(self):
+		self.assertTrue(
+			macros._superseded_by_a_retry(self.step_turn, self.orig.seed_message, run=self._doc())
+		)
+		self.assertFalse(macros._superseded_by_a_retry(self.cont, self.orig.seed_message, run=self._doc()))
+
+	def test_the_continuations_own_end_by_the_reply_alone_is_accepted(self):
+		reply = self._end_continuation([self._ready_row()])
+		enqueue = self._hook(assistant_message=reply)
+		self.assertEqual(self._full().current_step, 2)
+		enqueue.assert_called_once()
+
+	def test_the_step_turn_helper_is_the_continuation_once_one_is_set(self):
+		self.assertEqual(macros._step_turn(self._doc()), self.cont)
+		frappe.db.set_value(RUN, self.run, "resume_turn", "", update_modified=False)
+		self.assertEqual(macros._step_turn(self._doc()), self.step_turn)
+
+
+class TestTheContinuationEnds(ContBase):
+	def test_a_ready_read_moves_the_run_on_and_clears_the_resume(self):
+		self._end_continuation([self._ready_row()])
+		enqueue = self._hook()
+		enqueue.assert_called_once()
+		got = self._full()
+		self.assertEqual((got.status, got.current_step), ("running", 2))
+		self.assertEqual((got.resume_turn or "", got.step_resumes), ("", 0))
+		# kept: the outcome of the step is judged by it, and the counters of the run
+		self.assertEqual(json.loads(got.step_continuations), {"0": self.cont})
+		self.assertEqual(got.resume_count, 1)
+
+	def test_the_next_steps_end_is_judged_by_its_own_turn_again(self):
+		self._end_continuation([self._ready_row()])
+		self._hook()
+		self.assertEqual(macros._step_turn(self._doc()), macros._step_turn_id(self.run, 1))
+		# and the continuation's own end, redelivered, no longer moves anything
+		before = self._full()
+		self._hook(run_id=self.cont)
+		self.assertEqual(self._full(), before)
+
+	def test_a_continuation_that_never_read_the_report_fails_the_run(self):
+		self._end_continuation([])
+		enqueue = self._hook()
+		enqueue.assert_not_called()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(
+			got.error, f"Step 1 stopped: it did not read the report {PREP_REPORT} after it was ready."
+		)
+
+	def test_a_ready_read_of_another_report_is_not_the_awaited_one(self):
+		other = self._pr(REPORT_B, _ACME, "Completed")
+		self._end_continuation([self._ready_row(other, REPORT_B)])
+		self._hook()
+		self.assertEqual(self._full().status, "failed")
+		self.assertIn("did not read the report", self._full().error)
+
+	def test_a_ready_read_with_other_filters_is_not_the_awaited_one(self):
+		# A model that drifted from the filters it was given read something else.
+		other = self._pr(PREP_REPORT, {"company": "Initech"}, "Completed")
+		self._end_continuation([self._ready_row(other, filters={"company": "Initech"})])
+		self._hook()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(
+			got.error, f"Step 1 stopped: it did not read the report {PREP_REPORT} after it was ready."
+		)
+
+	def test_a_ready_read_of_the_awaited_prepared_report_passes_whatever_filters_it_was_asked_with(self):
+		self._end_continuation([self._ready_row(self.pr, filters={"company": "Acme", "extra": ""})])
+		self._hook()
+		self.assertEqual(self._full().current_step, 2)
+
+	def test_a_fresh_copy_of_the_same_report_counts_as_read(self):
+		again = self._pr(PREP_REPORT, _ACME, "Completed")
+		self._end_continuation([self._ready_row(again)])
+		self._hook()
+		self.assertEqual(self._full().current_step, 2)
+
+	def test_a_failed_read_ends_the_run_with_the_reason(self):
+		self._end_continuation([dict(status="failed", run=self.pr, error="Out of memory.")])
+		enqueue = self._hook()
+		enqueue.assert_not_called()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(got.error, f"Step 1 stopped: {PREP_REPORT} failed: Out of memory.")
+
+	def test_a_failed_read_wins_over_a_ready_read_of_another_report(self):
+		other = self._pr(REPORT_B, _ACME, "Completed")
+		self._end_continuation(
+			[
+				self._ready_row(),
+				dict(status="failed", run=other, report=REPORT_B, error="Nope."),
+			]
+		)
+		self._hook()
+		self.assertEqual(self._full().error, f"Step 1 stopped: {REPORT_B} failed: Nope.")
+
+	def test_an_unreadable_continuation_is_not_taken_for_one_that_read_nothing(self):
+		self._end_continuation([])
+		with (
+			patch.object(macro_report_wait, "_rows", side_effect=RuntimeError("db")),
+			patch("frappe.log_error"),
+		):
+			self._hook()
+		self.assertEqual(self._full().current_step, 2)  # as before the feature: it goes on
+
+	def test_an_errored_continuation_takes_the_error_path_not_the_unread_one(self):
+		self._end_continuation([], state="errored", error="boom")
+		self._hook(errored=True)
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertTrue(got.error.startswith("Step 1 failed:"), got.error)
+
+	def test_a_continuation_that_waits_again_parks_the_run_and_the_resume_path_is_reusable(self):
+		more = self._pr(PREP_REPORT, {"company": "Globex"})
+		self._end_continuation(
+			[
+				dict(
+					status="started",
+					run=more,
+					report=PREP_REPORT,
+					filters={"company": "Globex"},
+					waiting=True,
+				)
+			]
+		)
+		enqueue = self._hook()
+		enqueue.assert_not_called()
+		got = self._full()
+		self.assertEqual(got.status, "waiting_report")
+		self.assertEqual([w["prepared_report"] for w in json.loads(got.waiting_on)], [more])
+		self.wake.assert_called_once()
+		# the report finishes: a second continuation, the next id of the run
+		self._set_pr(more, status="Completed", report_end_time="2026-10-28 10:30:00")
+		self._sending_continuation()
+		self._resume(self.run)
+		again = self._full()
+		self.assertEqual(again.status, "running")
+		self.assertEqual(again.resume_turn, hashlib.sha1(f"{self.run}:0:report:2".encode()).hexdigest()[:12])
+		self.assertNotEqual(again.resume_turn, self.cont)
+		self.assertEqual((again.resume_count, again.step_resumes), (2, 2))
+		self.assertEqual(json.loads(again.step_continuations), {"0": again.resume_turn})
+		# the first continuation's end, redelivered, is not the step's any more
+		before = self._full()
+		self._hook(run_id=self.cont)
+		self.assertEqual(self._full(), before)
+		# and the second one's ends the step
+		self.cont = again.resume_turn
+		self._end_continuation([self._ready_row(more, filters={"company": "Globex"})])
+		self._hook()
+		self.assertEqual(self._full().current_step, 2)
+		self.assertEqual(self._full().step_resumes, 0)
+
+
+class TestAFailedReportsExplanationEnds(ContBase):
+	FAILS = True
+
+	def _reason(self):
+		return f"Step 1 stopped: {PREP_REPORT} failed: It took too long to generate and was stopped."
+
+	def test_the_run_is_waiting_failed_with_its_explanation_turn_out(self):
+		self.assertEqual(self._full().waiting_failed, 1)
+
+	def test_a_clean_explanation_still_ends_the_run_failed_with_the_reports_reason(self):
+		self._end_continuation([])
+		enqueue = self._hook()
+		enqueue.assert_not_called()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(got.error, self._reason())
+
+	def test_a_card_the_explanation_left_does_not_change_it(self):
+		self._park_card(self.conv)
+		self._end_continuation([])
+		self._hook()
+		got = self._full()
+		self.assertEqual((got.status, got.error), ("failed", self._reason()))
+
+	def test_an_errored_explanation_gives_the_reports_reason_not_its_own(self):
+		self._end_continuation([], state="errored", error="boom")
+		self._hook(errored=True)
+		self.assertEqual(self._full().error, self._reason())
+
+	def test_an_explanation_that_read_the_report_is_still_a_failed_run(self):
+		self._end_continuation([self._ready_row()])
+		self._hook()
+		self.assertEqual((self._full().status, self._full().error), ("failed", self._reason()))
+
+	def test_an_explanation_that_asks_to_wait_never_parks(self):
+		more = self._pr(PREP_REPORT, _ACME)
+		self._end_continuation([dict(status="started", run=more, waiting=True)])
+		self._hook()
+		self.assertEqual((self._full().status, self._full().error), ("failed", self._reason()))
+		self.wake.assert_not_called()
+
+	def test_the_failure_is_recorded_with_the_flip(self):
+		(wait,) = json.loads(self._full().waiting_on)
+		self.assertEqual(wait["failure"]["report"], PREP_REPORT)
+		self.assertEqual(wait["failure"]["detail"], "It took too long to generate and was stopped.")
+
+	def test_the_reason_is_the_one_recorded_when_the_explanation_was_sent(self):
+		# The report is deleted (or changed) in the minutes the explanation takes: the
+		# owner is told what the model was told, not what the report has become.
+		frappe.delete_doc("Prepared Report", self.pr, force=True, ignore_permissions=True)
+		self._end_continuation([])
+		self._hook()
+		self.assertEqual(self._full().error, self._reason())
+
+	def test_a_report_that_changed_meanwhile_does_not_change_the_reason(self):
+		self._set_pr(error_message="Something else.")
+		self._end_continuation([])
+		self._hook()
+		self.assertEqual(self._full().error, self._reason())
+
+	def test_a_run_without_the_record_falls_back_to_reading_the_report(self):
+		waits = json.loads(self._full().waiting_on)
+		for w in waits:
+			w.pop("failure", None)
+		frappe.db.set_value(RUN, self.run, "waiting_on", json.dumps(waits), update_modified=False)
+		frappe.db.commit()
+		self._end_continuation([])
+		self._hook()
+		self.assertEqual(self._full().error, self._reason())
+
+	def test_the_original_turn_does_not_end_it(self):
+		before = self._full()
+		self._hook(run_id=self.step_turn)
+		self.assertEqual(self._full(), before)
+
+
+class TestAResumedStepIsJudgedByItsContinuation(ContBase):
+	def _finish_step_two(self, *, state="done"):
+		"""The step the hook dispatched ends (the newest turn of the chat)."""
+		newest = frappe.get_all(TURN, filters={"conversation": self.conv}, order_by="creation desc", limit=1)[
+			0
+		].name
+		frappe.db.set_value(TURN, newest, "state", state, update_modified=False)
+		frappe.db.commit()
+		with self._dispatching(self.conv):
+			macros.advance_after_turn(self.conv, errored=state != "done", run_id=newest)
+
+	def _stop_on_error_off(self):
+		macro = frappe.db.get_value(RUN, self.run, "macro")
+		frappe.db.set_value("Jarvis Macro", macro, "stop_on_error", 0)
+		frappe.db.commit()
+
+	def test_a_continuation_that_errored_is_the_steps_failure_in_the_final_outcome(self):
+		self._stop_on_error_off()
+		self._end_continuation([], state="errored", error="boom")
+		enqueue = self._hook(errored=True)  # stop on error is off: step 2 goes out
+		# the macro's own choice decides: no "did not read the report" on top of the error
+		enqueue.assert_called_once()
+		self.assertEqual((self._full().status, self._full().current_step), ("running", 2))
+		self._finish_step_two()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertTrue(got.error.startswith("Finished, but 1 of 2 steps failed. Step 1:"), got.error)
+
+	def test_a_continuation_that_left_a_draft_is_reported_as_a_draft_the_next_step_closed(self):
+		self._end_continuation([self._ready_row()], reply=f"Here is the draft.\n{outcome._DRAFT}")
+		self._hook()
+		self._finish_step_two()
+		got = self._full()
+		self.assertEqual(got.status, "completed")
+		self.assertTrue(got.error.startswith("Step 1 drafted a record that was not created"), got.error)
+
+	def test_the_original_turns_clean_end_does_not_hide_the_continuations_failure(self):
+		# The original turn said "It is generating." and ended done. Judged by it, the
+		# run would be a clean success.
+		self.assertEqual(frappe.db.get_value(TURN, self.step_turn, "state"), "done")
+		self._stop_on_error_off()
+		self._end_continuation([], state="errored", error="boom")
+		self._hook(errored=True)
+		self._finish_step_two()
+		self.assertEqual(self._full().status, "failed")
+
+	def test_a_clean_continuation_is_a_clean_run(self):
+		self._end_continuation([self._ready_row()])
+		self._hook()
+		self._finish_step_two()
+		self.assertEqual((self._full().status, self._full().error or ""), ("completed", ""))
+
+	def test_the_outcome_reads_the_continuation_while_it_is_the_resume_turn_and_after(self):
+		self.assertEqual(macros._step_turns(self.conv, self._doc())[0].name, self.cont)
+		# the original is what a caller with no run still gets
+		self.assertEqual(macros._step_turns(self.conv)[0].name, self.step_turn)
+		# recorded only: the same after the resume_turn is cleared
+		frappe.db.set_value(RUN, self.run, "resume_turn", "", update_modified=False)
+		self.assertEqual(macros._step_turns(self.conv, self._doc())[0].name, self.cont)
+
+
+class TestTwoCompaniesOfOneReport(ContBase):
+	"""Two waits of one report with different filters are two reads."""
+
+	REPORTS = ((PREP_REPORT, _ACME), (PREP_REPORT, _GLOBEX))
+
+	def test_one_read_does_not_satisfy_both(self):
+		self._end_continuation([self._ready_row(self.prs[0], filters=_ACME)])
+		self._hook()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(
+			got.error, f"Step 1 stopped: it did not read the report {PREP_REPORT} after it was ready."
+		)
+
+	def test_the_other_company_alone_does_not_either(self):
+		self._end_continuation([self._ready_row(self.prs[1], filters=_GLOBEX)])
+		self._hook()
+		self.assertEqual(self._full().status, "failed")
+
+	def test_both_reads_advance_the_run(self):
+		self._end_continuation(
+			[self._ready_row(self.prs[0], filters=_ACME), self._ready_row(self.prs[1], filters=_GLOBEX)]
+		)
+		self._hook()
+		self.assertEqual(self._full().current_step, 2)
+
+	def test_a_fresh_copy_for_the_second_company_counts_for_that_company_only(self):
+		again = self._pr(PREP_REPORT, _GLOBEX, "Completed")
+		self._end_continuation(
+			[self._ready_row(self.prs[0], filters=_ACME), self._ready_row(again, filters=_GLOBEX)]
+		)
+		self._hook()
+		self.assertEqual(self._full().current_step, 2)
+
+
+class TestCapacityResumeOfAResumedLastStep(ContBase):
+	"""A run parked for capacity whose last step was resumed: that step ends with its
+	continuation, not with the step's fixed id (which the redelivery rule now ignores)."""
+
+	def _park_for_capacity(self, **values):
+		self._end_continuation([self._ready_row()])
+		if self.MERGED:  # a merged run resumes only while its summary is there
+			frappe.db.set_value("Jarvis Macro", self.macro, "merged_prompt", "Do the steps.")
+		frappe.db.set_value(
+			RUN, self.run, {"status": "waiting_capacity", "total_steps": 1, **values}, update_modified=False
+		)
+		frappe.db.commit()
+		frappe.set_user("Administrator")
+		with self._dispatching(self.conv) as enqueue:
+			macros.resume_waiting_capacity_runs()
+		frappe.set_user("Administrator")
+		return enqueue
+
+	def test_the_continuation_ends_the_last_step(self):
+		enqueue = self._park_for_capacity()
+		enqueue.assert_not_called()
+		self.assertEqual(self._full().status, "completed", self._full().error)
+
+	def test_the_step_end_is_delivered_by_the_continuations_turn(self):
+		frappe.db.set_value(TURN, self.cont, "state", "streaming", update_modified=False)
+		self.assertFalse(macros._step_end_delivered(self._doc(), 0))  # the original ended; this has not
+		frappe.db.set_value(TURN, self.cont, "state", "done", update_modified=False)
+		self.assertTrue(macros._step_end_delivered(self._doc(), 0))
+
+	def test_the_continuation_is_the_turn_applied_never_the_steps_fixed_id(self):
+		with patch.object(macros, "_apply_step_end", wraps=macros._apply_step_end) as apply:
+			self._park_for_capacity()
+		self.assertEqual([c.kwargs["run_id"] for c in apply.call_args_list], [self.cont])
+
+
+class TestCapacityResumeOfAResumedSummarizedRun(TestCapacityResumeOfAResumedLastStep):
+	MERGED = True
+
+
+class TestAResumedSummarizedRun(ContBase):
+	MERGED = True
+
+	def test_the_continuations_end_ends_the_run(self):
+		self._end_continuation([self._ready_row()])
+		enqueue = self._hook()
+		enqueue.assert_not_called()
+		self.assertEqual((self._full().status, self._full().error or ""), ("completed", ""))
+
+	def test_the_original_turn_does_not_end_it(self):
+		before = self._full()
+		self._hook(run_id=self.step_turn)
+		self.assertEqual(self._full(), before)
+
+	def test_a_continuation_that_never_read_the_report_fails_it_by_name(self):
+		self._end_continuation([])
+		self._hook()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertTrue(got.error.startswith("The summarized run stopped: it did not read"), got.error)
+
+	def test_a_continuation_that_errored_is_the_runs_failure(self):
+		self._end_continuation([], state="errored", error="boom")
+		self._hook(errored=True)
+		self.assertEqual(self._full().status, "failed")
+
+
+class TestTheFiveMinuteCheckOnAResumedStep(ContBase):
+	"""``macro_reconcile`` judges a resumed step by its continuation alone."""
+
+	def setUp(self):
+		super().setUp()
+		for target in (
+			patch.object(macro_reconcile, "_shard_is_on_the_pump", return_value=True),
+			patch.object(macro_reconcile, "_may_run_unattended", return_value=True),
+			patch.object(macro_reconcile, "_send_gate_refusal", return_value=None),
+		):
+			target.start()
+			self.addCleanup(target.stop)
+		real = macro_reconcile._candidates
+		patcher = patch.object(
+			macro_reconcile,
+			"_candidates",
+			lambda: [row for row in real() if row.name == self.run],
+		)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		self.applied = []
+		real_apply = macros._apply_step_end
+
+		def spy(*args, **kw):
+			self.applied.append(kw.get("run_id"))
+			return real_apply(*args, **kw)
+
+		patcher = patch.object(macros, "_apply_step_end", side_effect=spy)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		# the step's original turn ended long ago and is judged by nobody
+		self._age_turn(self.step_turn, 45 * 60)
+
+	def _age_turn(self, turn, seconds):
+		frappe.db.set_value(
+			TURN, turn, "done_at", add_to_date(now_datetime(), seconds=-seconds), update_modified=False
+		)
+		frappe.db.commit()
+
+	def _idle(self, seconds=15 * 60):
+		frappe.db.sql(
+			f"UPDATE `tab{RUN}` SET modified=%s WHERE name=%s",
+			(add_to_date(now_datetime(), seconds=-seconds), self.run),
+		)
+		frappe.db.commit()
+
+	def _tick(self):
+		frappe.set_user("Administrator")
+		with self._dispatching(self.conv) as enqueue:
+			summary = macro_reconcile.reconcile_running_runs()
+		frappe.set_user("Administrator")
+		return summary, enqueue
+
+	def test_a_queued_continuation_keeps_the_run_running_however_old_the_original_turn_is(self):
+		self._idle()
+		summary, enqueue = self._tick()
+		self.assertEqual(summary["candidates"], 1)
+		self.assertEqual(self.applied, [])
+		enqueue.assert_not_called()
+		self.assertEqual(self._full().status, "running")
+		self.assertEqual(self._full().resume_turn, self.cont)
+
+	def test_a_running_continuation_keeps_the_run_running_too(self):
+		frappe.db.set_value(TURN, self.cont, "state", "streaming", update_modified=False)
+		self._idle()
+		self._tick()
+		self.assertEqual(self.applied, [])
+		self.assertEqual(self._full().status, "running")
+
+	def test_a_continuation_whose_end_never_reached_the_hook_is_applied_by_its_id(self):
+		self._end_continuation([self._ready_row()], ended_s_ago=5 * 60)
+		self._idle()
+		_summary, enqueue = self._tick()
+		# the engine's own body, for the continuation, never the step's fixed id
+		self.assertEqual(self.applied, [self.cont])
+		self.assertNotIn(self.step_turn, self.applied)
+		self.assertNotIn(macros._step_turn_id(self.run, 0), self.applied)
+		enqueue.assert_called_once()  # step 2
+		got = self._full()
+		self.assertEqual((got.status, got.current_step, got.resume_turn or ""), ("running", 2, ""))
+
+	def test_the_age_limit_is_measured_from_the_continuations_end(self):
+		# ended 30 minutes ago: past CONTINUE_WITHIN_S, so the run ends instead of sending
+		# step 2 (measured from the ORIGINAL turn, 45 minutes ago, it would be the same;
+		# the next test pins the other direction)
+		self._end_continuation([self._ready_row()], ended_s_ago=30 * 60)
+		self._idle()
+		_summary, enqueue = self._tick()
+		enqueue.assert_not_called()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertTrue(got.error.startswith("The run was interrupted"), got.error)
+
+	def test_an_old_original_turn_does_not_make_a_fresh_continuation_too_late(self):
+		self._end_continuation([self._ready_row()], ended_s_ago=5 * 60)
+		self._age_turn(self.step_turn, 3 * 60 * 60)
+		self._idle()
+		_summary, enqueue = self._tick()
+		enqueue.assert_called_once()
+		self.assertEqual(self._full().current_step, 2)
+
+	def test_a_continuation_that_never_read_its_report_ends_failed_through_the_check(self):
+		self._end_continuation([], ended_s_ago=5 * 60)
+		self._idle()
+		self._tick()
+		self.assertEqual(self._full().status, "failed")
+		self.assertIn("did not read the report", self._full().error)
+
+	def test_a_stored_continuation_with_no_turn_after_ten_minutes_parks_the_run_again(self):
+		frappe.db.delete(TURN, {"name": self.cont})
+		before = self._full()
+		self._idle(15 * 60)
+		summary, _ = self._tick()
+		self.assertEqual(summary["acted"], 1)
+		self.assertEqual(self.applied, [])
+		got = self._full()
+		self.assertEqual(got.status, "waiting_report")
+		# the id and the counters stay: the retry reuses the id and counts what goes out
+		self.assertEqual(
+			(got.resume_turn, got.resume_count, got.step_resumes),
+			(before.resume_turn, before.resume_count, before.step_resumes),
+		)
+		self.assertEqual(json.loads(got.waiting_on), json.loads(before.waiting_on))
+		self.wake.assert_called_once_with(self.run)
+		# the next wake sends it again, under the same id
+		enqueue = self._sending_continuation()
+		self._resume(self.run)
+		self.assertEqual(enqueue.call_args.kwargs["run_id"], self.cont)
+		self.assertEqual(self._full().status, "running")
+
+	def test_a_continuation_that_never_goes_out_is_given_up_on_after_three_tries(self):
+		# The process dies between the flip and the enqueue, again and again: the flip
+		# commits, no Turn is written, nothing counts it as sent (``_went_out``).
+		frappe.db.delete(TURN, {"name": self.cont})
+
+		def never_sent(conversation, prompt, **kw):
+			return {"run_id": kw["run_id"], "message_id": None}
+
+		with patch(_ENQUEUE_TURN, side_effect=never_sent), patch.object(macro_report_wait, "_went_out"):
+			for tries in (1, 2, 3):
+				self._idle(15 * 60)
+				self._tick()
+				got = self._full()
+				self.assertEqual(got.status, "waiting_report")
+				self.assertEqual(self._row().resume_compensations, tries)
+				self._resume(self.run)
+				self.assertEqual(self._full().status, "running")  # flipped, nothing sent
+			self._idle(15 * 60)
+			self._tick()
+		got = self._full()
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(got.error, "Step 1 could not be continued after its report was ready.")
+
+	def test_a_stored_continuation_with_no_turn_is_left_alone_before_ten_minutes(self):
+		frappe.db.delete(TURN, {"name": self.cont})
+		self._idle(5 * 60)
+		summary, _ = self._tick()
+		self.assertEqual(summary["acted"], 0)
+		self.assertEqual(self._full().status, "running")
+
+	def test_a_continuation_turn_of_another_chat_is_not_ours(self):
+		frappe.db.delete(TURN, {"name": self.cont})
+		_, other_conv, _ = self._mk_run(steps=2, at_step=1, tag="elsewhere")
+		self._turn_as(other_conv, self.cont, state="done")
+		self._idle(15 * 60)
+		self._tick()
+		self.assertEqual(self._full().status, "waiting_report")
+
+	def test_the_stuck_runs_report_names_a_continuation_that_never_went_out(self):
+		frappe.db.delete(TURN, {"name": self.cont})
+		self._idle(30 * 60)
+		rows = [r for r in macro_reconcile.stuck_runs() if r["run"] == self.run]
+		self.assertEqual([r["why"] for r in rows], ["continuation_not_sent"])
+
+
+class TestStopAndHoldCancelAQueuedContinuation(RealResumeBase):
+	def _resumed(self):
+		macro_report_wait.resume_report_waits(self.run)
+		turn = self._row().resume_turn
+		self.assertEqual(frappe.db.get_value(TURN, turn, "state"), "queued")
+		return turn
+
+	def test_stop_cancels_the_queued_continuation(self):
+		turn = self._resumed()
+		self.assertTrue(macros._stop_run(self.run, reason="Stopped.", by="Administrator"))
+		self.assertEqual(frappe.db.get_value(TURN, turn, "state"), "cancelled")
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "status"), "stopped")
+
+	def test_a_hold_or_delete_cancels_it_too(self):
+		turn = self._resumed()
+		self.assertEqual(macros.stop_runs_of_macro(self.macro, reason="Put on hold.", by="Administrator"), 1)
+		self.assertEqual(frappe.db.get_value(TURN, turn, "state"), "cancelled")
+
+	def test_a_continuation_already_handed_to_the_agent_is_left_to_finish(self):
+		turn = self._resumed()
+		frappe.db.set_value(TURN, turn, "state", "streaming", update_modified=False)
+		frappe.db.commit()
+		macros._stop_run(self.run, reason="Stopped.", by="Administrator")
+		self.assertEqual(frappe.db.get_value(TURN, turn, "state"), "streaming")
+
+	def test_stopping_a_parked_run_cancels_nothing(self):
+		self.assertTrue(macros._stop_run(self.run, reason="Stopped.", by="Administrator"))
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "status"), "stopped")
+
+
+class TestTheStaleSweepBeltForAParkedRun(ResumeBase):
+	def _age(self, seconds):
+		frappe.db.sql(
+			f"UPDATE `tab{RUN}` SET modified=%s WHERE name=%s",
+			(add_to_date(now_datetime(), seconds=-seconds), self.run),
+		)
+		frappe.db.commit()
+
+	def _sweep(self):
+		frappe.set_user("Administrator")
+		with patch.object(macros, "_stale_run_candidates", return_value=[self.run]):
+			return macros.reap_stale_macro_runs()
+
+	def test_a_run_parked_past_the_longest_wait_and_an_hour_is_a_candidate(self):
+		self._age(macro_report_wait.STALE_WAIT_AFTER_S + 600)
+		cutoff = add_to_date(now_datetime(), seconds=-macros.STALE_RUN_AFTER_SECONDS)
+		self.assertIn(self.run, macros._stale_run_candidates(cutoff))
+
+	def test_a_run_inside_that_window_is_not(self):
+		# older than the sweep's own three hours, younger than seven
+		self._age(macros.STALE_RUN_AFTER_SECONDS + 3600)
+		cutoff = add_to_date(now_datetime(), seconds=-macros.STALE_RUN_AFTER_SECONDS)
+		self.assertNotIn(self.run, macros._stale_run_candidates(cutoff))
+
+	def test_the_window_is_the_waits_cap_plus_an_hour(self):
+		self.assertEqual(macro_report_wait.STALE_WAIT_AFTER_S, 7 * 3600)
+
+	def test_the_sweep_ends_it_failed_through_a_compare_and_set_expecting_waiting_report(self):
+		self._age(macro_report_wait.STALE_WAIT_AFTER_S + 600)
+		with patch.object(macros, "_cas_run_status", wraps=macros._cas_run_status) as cas:
+			self.assertEqual(self._sweep(), 1)
+		self.assertEqual(cas.call_args.args[:3], (self.run, "waiting_report", "failed"))
+		got = frappe.db.get_value(RUN, self.run, ["status", "error"], as_dict=True)
+		self.assertEqual(got.status, "failed")
+		self.assertEqual(got.error, macros._STALE_RUN_ERROR)
+
+	def test_a_parked_run_inside_the_window_is_left_alone(self):
+		self._age(macros.STALE_RUN_AFTER_SECONDS * 2)
+		self.assertEqual(self._sweep(), 0)
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "status"), "waiting_report")
+
+	def test_a_run_that_resumed_after_the_scan_is_left_alone(self):
+		# listed while parked and old; by the re-read under the lock it is running again
+		self._age(macro_report_wait.STALE_WAIT_AFTER_S + 600)
+		frappe.db.set_value(RUN, self.run, "status", "running")
+		frappe.db.sql(f"UPDATE `tab{RUN}` SET modified=%s WHERE name=%s", (now_datetime(), self.run))
+		frappe.db.commit()
+		self.assertEqual(self._sweep(), 0)
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "status"), "running")
+
+	def test_a_run_parked_again_after_the_scan_is_left_alone(self):
+		self._age(macro_report_wait.STALE_WAIT_AFTER_S + 600)
+		frappe.db.sql(f"UPDATE `tab{RUN}` SET modified=%s WHERE name=%s", (now_datetime(), self.run))
+		frappe.db.commit()
+		self.assertEqual(self._sweep(), 0)
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "status"), "waiting_report")

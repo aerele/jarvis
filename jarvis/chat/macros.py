@@ -673,6 +673,29 @@ def _step_turn_id(run_name: str, index: int) -> str:
 	return hashlib.sha1(f"{run_name}:{index}".encode()).hexdigest()[:12]
 
 
+def _step_turn_for(run, index: int) -> str:
+	"""The id of the turn whose end ends step ``index`` (0-based) of the run: the
+	continuation (``resume_turn``) when that step is the run's current one and was parked
+	for a report and resumed, else the step's own turn (``_step_turn_id``)."""
+	resume = run.get("resume_turn") if run else ""
+	if resume and index == max(int(run.current_step or 0) - 1, 0):
+		return resume
+	return _step_turn_id(run.name, index)
+
+
+def _step_turn(run) -> str:
+	"""The id of the turn whose end ends the run's CURRENT step (``current_step`` counts
+	steps SENT, so the step is index ``current_step - 1``): the continuation once the step
+	was parked for a report and resumed, else the step's own turn.
+
+	Once ``resume_turn`` is set it is the ONLY turn that ends the step. The step's
+	original turn ended when it parked, and its end is redelivered for minutes (the
+	finalize effect is retried), is found again by the five minute check and is named by
+	turn recovery. Taken for the step's end a second time it parked the run on a report
+	already read, or moved it past a step still being finished."""
+	return _step_turn_for(run, max(int(run.current_step or 0) - 1, 0))
+
+
 def _step_turn_state(run, index: int) -> str | None:
 	"""The state of step ``index``'s turn, or None when it has none. A Turn of that
 	name in ANOTHER chat is not this step's (a 48-bit collision): None, and the
@@ -708,9 +731,12 @@ def _step_end_delivered(run, index: int) -> bool:
 	``finalizing`` turn and a ``running`` row count as delivered. The check acts in
 	the hook's place, where the wrong "over" moves a run under a hook that is still
 	coming, so for it neither does. Change one and read the other."""
-	if _step_turn_state(run, index) not in (*_TURN_ENDED, "finalizing"):
+	# A step that was resumed after a report ends with its continuation (``_step_turn_for``).
+	turn_id = _step_turn_for(run, index)
+	state = frappe.db.get_value(TURN, {"name": turn_id, "conversation": run.conversation}, "state")
+	if state not in (*_TURN_ENDED, "finalizing"):
 		return False
-	return _hook_effect_status(_step_turn_id(run.name, index)) != "pending"
+	return _hook_effect_status(turn_id) != "pending"
 
 
 def _hook_effect_status(turn_id: str) -> str | None:
@@ -751,18 +777,29 @@ def _raise_cursor(run, to: int, *, sent: bool = False) -> None:
 	from jarvis.chat import txn
 
 	txn.fresh_snapshot(owned=True)
+	# A step that was resumed after a report is over once the cursor moves past it: its
+	# continuation (``resume_turn``) and resume count go in the SAME statement. They are
+	# listed BEFORE ``current_step`` because MariaDB evaluates the assignments in order
+	# and the condition reads the cursor as it was; the cursor is what makes the
+	# step's original turn the "current step" again.
 	if sent:
 		frappe.db.sql(
-			"""UPDATE `tabJarvis Macro Run` SET current_step = GREATEST(current_step, %(to)s), modified = %(now)s
+			"""UPDATE `tabJarvis Macro Run` SET
+			    resume_turn = CASE WHEN %(to)s > current_step THEN '' ELSE resume_turn END,
+			    step_resumes = CASE WHEN %(to)s > current_step THEN 0 ELSE step_resumes END,
+			    current_step = GREATEST(current_step, %(to)s), modified = %(now)s
 			    WHERE name = %(n)s""",
 			{"n": run.name, "to": to, "now": frappe.utils.now()},
 		)
 	else:
 		frappe.db.sql(
-			"UPDATE `tabJarvis Macro Run` SET current_step = %(to)s WHERE name = %(n)s AND current_step < %(to)s",
+			"""UPDATE `tabJarvis Macro Run` SET resume_turn = '', step_resumes = 0, current_step = %(to)s
+			    WHERE name = %(n)s AND current_step < %(to)s""",
 			{"n": run.name, "to": to},
 		)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
+	if to > int(run.current_step or 0):
+		run.resume_turn, run.step_resumes = "", 0
 	run.current_step = max(int(run.current_step or 0), to)
 
 
@@ -870,7 +907,9 @@ def _ended_turn_seed(
 	return None
 
 
-def _is_the_steps_own_turn(conversation: str, seed: str | None) -> bool:
+def _is_the_steps_own_turn(
+	conversation: str, seed: str | None, *, run=None, named: str | None = None
+) -> bool:
 	"""Whether the turn that just ended is the run's CURRENT step, so the run may move.
 
 	The hook fires for every finished turn in the conversation. An unarmed run's
@@ -878,7 +917,20 @@ def _is_the_steps_own_turn(conversation: str, seed: str | None) -> bool:
 	and the finalize effect that calls the hook is retried. Each of those used to
 	advance the run: steps overlapped, the run finished early, and "Step N failed"
 	named the wrong step. Only the turn started by the current step's message counts;
-	a re-delivered event for an earlier step no longer matches once the next is out."""
+	a re-delivered event for an earlier step no longer matches once the next is out.
+
+	``run`` / ``named``: once the step was resumed after a report (``run.resume_turn``)
+	it is judged by that turn alone (``_step_turn``), never by the step's message: the
+	original turn's end, redelivered, names the same message. ``named`` is the Turn the
+	caller means (``_named_turn``). A caller that names no Turn is matched by the
+	continuation's own seed, and a caller with neither is not the step's end."""
+	if run and run.get("resume_turn"):
+		expected = _step_turn(run)
+		if named:
+			return named == expected
+		if seed:
+			return seed == frappe.db.get_value(TURN, expected, "seed_message")
+		return False
 	current = _current_step_message(conversation)
 	if seed:
 		if current:
@@ -1039,7 +1091,7 @@ def _step_went_out_anyway(run, index: int) -> bool:
 	return True
 
 
-def _superseded_by_a_retry(run_id: str, seed: str | None) -> bool:
+def _superseded_by_a_retry(run_id: str, seed: str | None, *, run=None) -> bool:
 	"""Whether the turn the caller names is an OLD turn of its message: a newer Turn
 	exists for the same one. That is the owner's Retry of a failed step (a deliberate
 	second turn on the step's message, with a random id). The retry's own end moves
@@ -1058,6 +1110,9 @@ def _superseded_by_a_retry(run_id: str, seed: str | None) -> bool:
 	stale-run sweep. One that started and was then stopped calls the hook itself."""
 	if not run_id or not seed:
 		return False
+	if run is not None and run.get("resume_turn"):
+		# A resumed step has one turn that ends it (``_step_turn``); any other is old.
+		return run_id != _step_turn(run)
 	named = frappe.db.get_value(TURN, run_id, ["seed_message", "creation"], as_dict=True)
 	if not named or named.seed_message != seed:
 		return False
@@ -1136,10 +1191,15 @@ def _turn_to_judge(conversation: str, turn, run_id: str | None, assistant_messag
 	return turn
 
 
-def _step_turns(conversation: str) -> list:
+def _step_turns(conversation: str, run=None) -> list:
 	"""The run's dispatched steps in order, each with its Turn row (None on the legacy
 	path, which writes none). Step N is the Nth step message. Where Turn rows are in
-	use, a message that never became a turn (``_never_dispatched``) is not a step."""
+	use, a message that never became a turn (``_never_dispatched``) is not a step.
+
+	``run``: a step that was parked for a report and resumed is judged by its LAST
+	continuation (``step_continuations``, and ``resume_turn`` while it runs), not by the
+	original turn, which only said "it is generating". Whether the step worked, errored
+	or left a draft is the continuation's."""
 	seeds = [m.name for m in _macro_seeds(conversation)]
 	if not seeds:
 		return []
@@ -1152,7 +1212,42 @@ def _step_turns(conversation: str) -> list:
 	latest = {t.seed_message: t for t in turns}  # a retried step: its last turn counts
 	if latest:
 		seeds = [seed for seed in seeds if seed in latest]
-	return [latest.get(seed) for seed in seeds]
+	steps = [latest.get(seed) for seed in seeds]
+	return _with_continuations(run, steps) if run is not None else steps
+
+
+def _continuation_ids(run) -> dict[int, str]:
+	"""``{0-based step index: the step's last continuation turn}`` of a run: the ones
+	``step_continuations`` recorded when each went out, and ``resume_turn`` for the
+	current step (stored before the continuation is recorded)."""
+	found: dict[int, str] = {}
+	raw = run.get("step_continuations")
+	recorded = macro_report_wait._loads(raw) if raw else None
+	for key, turn in (recorded if isinstance(recorded, dict) else {}).items():
+		try:
+			found[int(key)] = str(turn)
+		except (TypeError, ValueError):
+			continue
+	if run.get("resume_turn") and int(run.current_step or 0) >= 1:
+		found[int(run.current_step) - 1] = run.resume_turn
+	return found
+
+
+def _with_continuations(run, steps: list) -> list:
+	"""``steps`` with each resumed step's Turn swapped for its continuation's (when that
+	Turn exists; a step whose continuation never got a Turn keeps its original)."""
+	ids = {i: t for i, t in _continuation_ids(run).items() if 0 <= i < len(steps)}
+	if not ids:
+		return steps
+	rows = {
+		t.name: t
+		for t in frappe.get_all(
+			TURN,
+			filters={"name": ["in", list(ids.values())], "conversation": run.conversation},
+			fields=_TURN_FIELDS,
+		)
+	}
+	return [rows.get(ids[i], turn) if i in ids else turn for i, turn in enumerate(steps)]
 
 
 _DRAFT_GONE_HINT = (
@@ -1226,7 +1321,7 @@ def _run_outcome(run, total: int, *, last_step_errored: bool) -> tuple[str, str]
 	path) only the step that just ended is known, first-hand."""
 	from jarvis.chat import filebox_cards
 
-	steps = _step_turns(run.conversation)
+	steps = _step_turns(run.conversation, run)
 	failed: dict[int, str] = {}
 	drafted: list[int] = []
 	names = [t.assistant_message for t in steps if t and t.assistant_message]
@@ -1355,11 +1450,13 @@ def _apply_step_end(
 	if run.status != "running":  # stopped mid-flight, or already advanced
 		return
 	seed = _ended_turn_seed(conversation_id, run_id, seed_message, assistant_message)
-	if not _is_the_steps_own_turn(conversation_id, seed):
+	named = _named_turn(conversation_id, run_id, assistant_message)
+	if not _is_the_steps_own_turn(conversation_id, seed, run=run, named=named):
 		# Not an error, and routine: a typed message, a card's follow-up or a
-		# repeated event.
+		# repeated event, or the end of a step's original turn, redelivered after the
+		# step was resumed (``_step_turn``).
 		return
-	if _superseded_by_a_retry(_named_turn(conversation_id, run_id, assistant_message), seed):
+	if _superseded_by_a_retry(named, seed, run=run):
 		return  # the step was retried; that turn's end is the one that counts
 	macro_doc = frappe.get_doc(MACRO, run.macro)
 	if _fail_run_unless_one_owner(run, macro_doc):
@@ -1388,6 +1485,16 @@ def _apply_step_end(
 		# the summary went out again, possibly empty after an edit cleared it.
 		_raise_cursor(run, total)
 		next_index = total
+
+	step_number = max(int(run.current_step or 0), 1)  # never "Step 0" (first-step race)
+	what = "The summarized run" if merged else f"Step {step_number}"
+	if frappe.utils.cint(run.waiting_failed):
+		# The turn that explained a report's failure ended (it is the only turn that can:
+		# ``waiting_failed`` is set together with ``resume_turn``). Whatever it did, a card
+		# it left or a clean verdict, the step did not get its data: the run failed, and
+		# says why. Before the card branch and the verdict, and never parks.
+		_end_run(run, macro_doc, "failed", macro_report_wait.waiting_failed_message(run, what))
+		return
 
 	# A step that parked a confirmation card. A park returns ok:True, so
 	# `errored` is False: the only per-step signal is the parked token itself.
@@ -1438,8 +1545,6 @@ def _apply_step_end(
 		)
 		return
 
-	step_number = max(int(run.current_step or 0), 1)  # never "Step 0" (first-step race)
-	what = "The summarized run" if merged else f"Step {step_number}"
 	turn = _ended_turn(seed, run_id)
 	# From here on `errored` is the step's verdict, not the caller's word alone.
 	judged = _turn_to_judge(conversation_id, turn, run_id, assistant_message)
@@ -1460,19 +1565,27 @@ def _apply_step_end(
 	# wait for. An errored turn was dealt with above: the error wins. A step the user
 	# stopped is not parked even with "Stop on error" off: they asked for it to end.
 	# A parked run sends no step and does not end; whoever wakes it continues THIS step.
-	if (
-		turn
-		and not _stopped_by_the_user(turn)
-		and macro_report_wait.enabled()
-		and not frappe.utils.cint(run.waiting_failed)
-	):
-		waits, failed_reads = macro_report_wait.step_waits(conversation_id, turn)
-		if failed_reads and not run.resume_turn:
+	#
+	# The same read judges the continuation of a step that was parked (``resume_turn``):
+	# a failed read ends the run whatever the step went on to say, a new wait parks it
+	# again, and a continuation that never read the report it was told is ready did not
+	# do the step, so the run does not go on as if it had.
+	if turn and not _stopped_by_the_user(turn) and macro_report_wait.enabled():
+		waits, failed_reads, ready = macro_report_wait.step_reads(conversation_id, turn)
+		if failed_reads:
 			_end_run(run, macro_doc, "failed", macro_report_wait.failed_read_message(what, failed_reads[0]))
 			return
 		if waits:
 			macro_report_wait.park(run, macro_doc, waits)
 			return
+		# An errored continuation skips the "did not read" check on purpose: the error is
+		# the macro's own "Stop on error" decision (it ended the run above, or the owner
+		# chose to go on), and the outcome still reads that step as failed.
+		if run.resume_turn and not errored and ready is not None:
+			unread = macro_report_wait.unread_reports(run, ready)
+			if unread:
+				_end_run(run, macro_doc, "failed", macro_report_wait.not_read_message(what, unread))
+				return
 
 	if next_index >= total:
 		try:
@@ -2048,6 +2161,16 @@ def _cancel_current_step(conversation: str | None, *, macro_run: str = "") -> bo
 	agent is left to finish. ``macro_run`` names the run in the log of a lost cancel."""
 	seed = _current_step_message(conversation) if conversation else None
 	turn = _ended_turn(seed, None) if seed else None  # the step's newest turn; None on the legacy path
+	resume = frappe.db.get_value(RUN, macro_run, "resume_turn") if macro_run else None
+	if resume:
+		# The step was resumed after a report: the turn that is (or is about to be) running
+		# is the continuation, and the step's original turn ended long ago.
+		turn = (
+			frappe.db.get_value(
+				TURN, {"name": resume, "conversation": conversation}, _TURN_FIELDS, as_dict=True
+			)
+			or turn
+		)
 	if not turn or turn.state in _TURN_ENDED:
 		return False
 	return _cancel_undispatched_turn(turn.name, _STOPPED_BEFORE_START, macro_run=macro_run)
@@ -2737,7 +2860,7 @@ def resume_waiting_capacity_runs() -> None:
 					# hook still to come finds the run `running` and ends it itself.
 					if _step_end_delivered(run, last):
 						_apply_step_end(
-							run.name, run.conversation, errored=False, run_id=_step_turn_id(run.name, last)
+							run.name, run.conversation, errored=False, run_id=_step_turn_for(run, last)
 						)
 					continue
 				try:
@@ -2774,7 +2897,7 @@ def resume_waiting_capacity_runs() -> None:
 					# `finalizing` Turn is a success). A hook still to come finds the run
 					# `running` and moves it itself.
 					_apply_step_end(
-						run.name, run.conversation, errored=False, run_id=_step_turn_id(run.name, index)
+						run.name, run.conversation, errored=False, run_id=_step_turn_for(run, index)
 					)
 		except Exception:
 			frappe.log_error(
@@ -3319,12 +3442,18 @@ def reap_stale_macro_runs() -> int:
 				cur = frappe.db.get_value(
 					RUN, run_name, ["status", "modified"], as_dict=True, for_update=True
 				)
-				if not cur or cur.status != "running" or get_datetime(cur.modified) >= cutoff:
+				if (
+					not cur
+					or cur.status not in ("running", "waiting_report")
+					or get_datetime(cur.modified) >= _stale_cutoff(cur.status, cutoff)
+				):
 					frappe.db.commit()  # release the row lock; the snapshot was stale
 					continue
-				left = _left_by_the_reconcile_check(run_name)  # read while the run is still `running`
+				# Read while the run is still `running`; a run parked for a report is not
+				# the check's (it only looks at `running` ones).
+				left = _left_by_the_reconcile_check(run_name) if cur.status == "running" else None
 				if not _cas_run_status(
-					run_name, "running", "failed", finished_at=frappe.utils.now(), error=_STALE_RUN_ERROR
+					run_name, cur.status, "failed", finished_at=frappe.utils.now(), error=_STALE_RUN_ERROR
 				):
 					frappe.db.commit()
 					continue
@@ -3363,7 +3492,25 @@ def _stale_run_candidates(cutoff) -> list[str]:
 	"""Runs stuck ``running`` with no forward progress since ``cutoff``. Its own
 	function so the re-read-under-lock compare-and-set can be exercised against a
 	deliberately STALE candidate snapshot in tests."""
-	return frappe.get_all(RUN, filters={"status": "running", "modified": ["<", cutoff]}, pluck="name")
+	running = frappe.get_all(RUN, filters={"status": "running", "modified": ["<", cutoff]}, pluck="name")
+	# Belt for a run parked for a report: the five minute cron ends a wait at its
+	# deadline (at most six hours), so one still parked an hour after that is one the
+	# cron is not reaching. Measured on the park, which is the last write of the row.
+	waiting = frappe.get_all(
+		RUN,
+		filters={"status": "waiting_report", "modified": ["<", _stale_cutoff("waiting_report", cutoff)]},
+		pluck="name",
+	)
+	return running + waiting
+
+
+def _stale_cutoff(status: str, cutoff):
+	"""The moment before which a run of ``status`` that has not been written is stale: the
+	sweep's own for a ``running`` run, and for one parked for a report the longest a wait
+	may last plus an hour (``macro_report_wait``)."""
+	if status != "waiting_report":
+		return cutoff
+	return now_datetime() - timedelta(seconds=macro_report_wait.STALE_WAIT_AFTER_S)
 
 
 def _left_by_the_reconcile_check(run_name: str) -> dict | None:
