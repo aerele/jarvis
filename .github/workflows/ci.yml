@@ -165,12 +165,21 @@ jobs:
           node --test jarvis/public/js/shared/holiday/*.test.mjs jarvis/public/js/shared/holiday/scenes/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
+<<<<<<< HEAD
   # Builds BOTH deploy artifacts (the /jarvis SPA and the /jarvis-mobile PWA) on Node
   # 18.16.0 the way the Frappe Cloud v15 deploy does, so a Vite/workbox break surfaces here
   # instead of as a 404 (or a failed deploy) in production. The PWA reads the bench site
   # config via a bench-relative path a bare runner lacks; the SPA step stubs that file and
   # the PWA build reuses it. Node 18 is deliberate: FC v15 benches build on 18.16.0, so a
   # break that only shows up there must fail here, not at deploy time.
+=======
+  # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
+  # would slip through green and only surface at Frappe Cloud deploy time as a 404 on /jarvis. This gate
+  # builds the SPA (the /jarvis artifact) and the PWA (the /jarvis-mobile artifact) the way the deploy does.
+  # The PWA imports modules from frontend/src (@shared, e.g. voice.js -> frappe-ui), so it builds AFTER the
+  # SPA's dependencies are installed. Its socket.js reads the bench site config by the same fixed relative
+  # path as the SPA's, which the stub step below satisfies (pwa/vite.config.js aliases it like the SPA's).
+>>>>>>> b766e61 (ci(pwa): build the PWA and gate its holiday chunks and precache)
   frontend-build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -183,6 +192,7 @@ jobs:
           # only shows up on Node 18 must fail here, not at FC deploy time.
           node-version: "18.16.0"
           cache: npm
+<<<<<<< HEAD
           cache-dependency-path: frontend/package-lock.json
       - name: Stub the bench site config the SPA and PWA builds read (no bench in CI)
         # Both frontend/src/socket.js and pwa/src/socket.js import
@@ -191,6 +201,15 @@ jobs:
         # to its root ($HOME/sites); the PWA resolves it relative to the file (two levels
         # above the checkout). Create it at both so each build finds it. FC builds inside a
         # real bench where this file already exists — this only reproduces that for CI.
+=======
+          cache-dependency-path: |
+            frontend/package-lock.json
+            pwa/package-lock.json
+      - name: Stub the bench site config the SPA build reads (no bench in CI)
+        # src/socket.js imports sites/common_site_config.json at build time (for the socketio
+        # port); a bare runner has no bench, so provide a minimal stub. Frappe Cloud builds
+        # INSIDE a real bench where this file already exists — this only reproduces that for CI.
+>>>>>>> b766e61 (ci(pwa): build the PWA and gate its holiday chunks and precache)
         run: |
           stub='{"socketio_port": 9000, "developer_mode": 0}'
           for base in "$HOME" "$(cd pwa/src && cd ../../../../ && pwd)"; do
@@ -210,6 +229,15 @@ jobs:
         run: |
           node --test frontend/scripts/check-holiday-chunks.test.mjs
           node frontend/scripts/check-holiday-chunks.mjs
+      - name: Build the PWA (Vite) — the /jarvis-mobile deploy artifact
+        # After the SPA build on purpose: the PWA imports from frontend/src, which needs
+        # frontend/node_modules.
+        run: npm run install-pwa && npm run build-pwa
+      - name: Holiday worn-item art stays lazy and out of the PWA precache
+        # The same art rule for the phone build, plus: no holiday-* file in the built sw.js
+        # precache, and no precached chunk statically imports a file that is not precached
+        # (it would fail offline). Its self-test ran in the step above.
+        run: node frontend/scripts/check-holiday-chunks.mjs --pwa
 
   # The v15 gate: from-scratch Frappe version-15 bench + the full jarvis suite.
   #
