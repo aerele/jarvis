@@ -24,7 +24,7 @@ const read = (name) =>
 // The declarations of the first rule that starts with exactly this selector.
 function ruleBody(text, selector) {
   const start = text.search(
-    new RegExp(`^${selector.replace(/\./g, "\\.")}\\s*\\{`, "m")
+    new RegExp(`^${selector.replace(/\./g, "\\.")}\\s*[,{]`, "m")
   );
   assert.notEqual(start, -1, `no rule for ${selector}`);
   return text.slice(text.indexOf("{", start), text.indexOf("}", start));
