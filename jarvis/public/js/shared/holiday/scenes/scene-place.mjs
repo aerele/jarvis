@@ -4,7 +4,7 @@
 import { GAP } from "../scene-geometry.mjs";
 
 const SUBLINE_PX = 420; // the sub-line is wider than the heading; keep clear of it too
-const BELOW_HEADING_PX = 44; // and of the sub-line's height
+export const BELOW_HEADING_PX = 44; // and of the sub-line's height
 
 /** A point in stage units -> the mark's 56-unit tile units (geo as Scene.measure gives it). */
 export const toTile = (geo, [x, y]) => [
@@ -44,5 +44,32 @@ export function clearOfHero({ x, y, hw, hh }, keep, from, to) {
   return nx - hw >= from && nx + hw <= to ? nx : null;
 }
 
-/** An x on the 800-unit stage kept the same distance from its own edge of a wider stage. */
-export const edgeX = (x, geo) => (x < 400 ? geo.from + x : geo.to - (800 - x));
+// How much narrower than the 800-unit stage the window [from, to] is, as a factor (1: not
+// narrower). Only the phone window is: a host never shows less than 800 units on desktop
+// (to - from = width / s, with s at most width / 800), so the tolerance only absorbs float
+// noise there and keeps every desktop position exactly as it was.
+export const squeezeOf = (from, to) => {
+  const k = (to - from) / 800;
+  return k >= 1 - 1e-9 ? 1 : k;
+};
+
+/**
+ * An x placed on the 800-unit stage, squeezed about the mark's column (400) into a narrower
+ * window (the phone's); exactly `x` when the window is not narrower. For props at a fixed x
+ * that is not an edge (the floor row's diyas, the moon, the fireworks, ...).
+ */
+export const squeezeX = (x, geo) =>
+  geo.squeeze < 1 ? 400 + (x - 400) * geo.squeeze : x;
+
+/**
+ * An x on the 800-unit stage for a prop that belongs to an edge. A wider stage: the same
+ * distance from its own edge. A narrower one (the phone): squeezed with the whole stage, so
+ * an edge prop stays at its edge and none crosses the centre. (Keeping the distance on a
+ * 540-unit window would put a prop 150 units in from the edge at x = 280, over the hero.)
+ */
+export const edgeX = (x, geo) =>
+  geo.squeeze < 1
+    ? squeezeX(x, geo)
+    : x < 400
+    ? geo.from + x
+    : geo.to - (800 - x);
