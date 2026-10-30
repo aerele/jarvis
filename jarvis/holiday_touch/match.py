@@ -72,7 +72,18 @@ def match_occasion(description, on_date, country, extra=None) -> str | None:
 
 
 def _extra_key(extra):
-	"""A hashable, normalised form of the admin overlay, so the memo keys on content."""
+	"""A hashable, normalised form of the admin overlay, so the memo keys on content. Equal
+	content returns ONE shared object (``_interned``): every ``_match`` memo entry holds its
+	key, and 2048 private copies of a 200-name key would be about 100 MB a worker."""
+	return _interned(_build_key(extra))
+
+
+@lru_cache(maxsize=8)
+def _interned(key):
+	return key
+
+
+def _build_key(extra):
 	if not isinstance(extra, dict):
 		return ((), ())
 	aliases = []
