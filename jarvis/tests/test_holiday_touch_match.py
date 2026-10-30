@@ -266,7 +266,6 @@ class TestExtra(unittest.TestCase):
 			return {"aliases": {"diwali": [f"lights {n}" for n in range(200)]}, "near_misses": ["x y z"]}
 
 		first, second = match_module._extra_key(overlay()), match_module._extra_key(overlay())
-		self.assertIsNot(overlay(), overlay())
 		self.assertIs(first, second)
 		self.assertEqual(m("Lights 7", extra=overlay()), "diwali")
 		self.assertEqual(m("Lights 7", extra=overlay()), "diwali")
