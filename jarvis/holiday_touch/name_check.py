@@ -1,7 +1,8 @@
 """Check the extra holiday names the control plane sends, before they are stored.
 
 The bench does not trust admin: only the nine design keys count, a name is 3-60 characters
-after ``match.normalise``, and there are at most 200 names in all. A bad entry is dropped
+after ``match.normalise``, and there are at most 200 names in all. ``birthday`` is a design
+but never a holiday row, so it takes no aliases (admin refuses it too). A bad entry is dropped
 and counted (``NameCheck.dropped``); a value of the wrong shape is ``None`` (malformed).
 Names come back normalised, sorted and unique, so equal input always stores equal text.
 
@@ -13,6 +14,7 @@ from __future__ import annotations
 from jarvis.holiday_touch.match import normalise
 from jarvis.holiday_touch.names import DESIGNS
 
+ALIAS_DESIGNS = tuple(d for d in DESIGNS if d != "birthday")
 MAX_NAMES = 200
 MIN_CHARS = 3
 MAX_CHARS = 60
@@ -28,12 +30,12 @@ class NameCheck:
 			return None
 		found = {}
 		for design, names in value.items():
-			if design not in DESIGNS or not isinstance(names, list):
+			if design not in ALIAS_DESIGNS or not isinstance(names, list):
 				self.dropped += 1
 				continue
 			if cleaned := self._names(names):
 				found[design] = cleaned
-		return {d: found[d] for d in DESIGNS if d in found}
+		return {d: found[d] for d in ALIAS_DESIGNS if d in found}
 
 	def near_misses(self, value) -> list | None:
 		"""The cleaned name list; None when ``value`` is not a list."""
