@@ -344,6 +344,17 @@ def gate_lcv(doc, *, lock=False, previous_links=None):
 	if doc.doctype != "Landed Cost Voucher":
 		return None
 	_guard_fields(doc.meta)
+	from jarvis.tools import _lcv_legacy
+
+	if _lcv_legacy.source_names(doc):
+		raise LCVSourceTaxNeedsInput(
+			[
+				{
+					"code": "legacy_source_link",
+					"message": "This voucher uses service invoice links from ERPNext v15. Recreate the draft from a fresh landed-cost preview before continuing. Keep the old voucher for review.",
+				}
+			]
+		)
 	field = doc.meta.get_field("vendor_invoices")
 	if field:
 		_guard_fields(frappe.get_meta(field.options), doc.doctype, extra_fields=("vendor_invoice",))
@@ -416,14 +427,24 @@ def gate_lcv(doc, *, lock=False, previous_links=None):
 		if result.get("code"):
 			issues.append(result)
 		else:
-			if result["treatment"] == "excluded_per_recorded_treatment":
+			legacy = _lcv_legacy.claimed_cost(name, doc.name, lock=lock)
+			if legacy is None:
+				issues.append(
+					_issue(
+						name,
+						"legacy_claims_unresolved",
+						"Review earlier landed-cost claims in the ERP form before continuing.",
+					)
+				)
+				continue
+			if result["treatment"] == "excluded_per_recorded_treatment" or legacy:
 				from erpnext.stock.doctype.landed_cost_voucher.landed_cost_voucher import (
 					get_claimed_landed_cost,
 				)
 
 				claim = sum(_amount(r.amount) for r in doc.vendor_invoices if r.vendor_invoice == name)
 				prior = get_claimed_landed_cost(name, exclude_voucher=doc.name, for_update=lock)
-				if flt(claim + prior, pi.precision("base_net_total")) > flt(
+				if flt(claim + prior + legacy, pi.precision("base_net_total")) > flt(
 					pi.base_net_total, pi.precision("base_net_total")
 				):
 					issues.append(
