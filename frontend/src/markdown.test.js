@@ -229,3 +229,77 @@ test("a pipe table separator row is not swallowed by the thematic-break rule", (
 	assert.ok(html.includes("<table"), "the table still renders");
 	assert.ok(!html.includes("<hr"), "the |---| separator did not become a rule");
 });
+
+test("numbered steps keep indented descriptions and nested costs inside one list", () => {
+	const html = renderMarkdown(
+		[
+			"1. **Cancel INV-1**  ",
+			"   Reverse the payable.",
+			"",
+			"2. **Amend the invoice**  ",
+			"   Keep the supplier reference.",
+			"",
+			"3. **Add costs**  ",
+			"   Include:",
+			"   - Duty: 100 INR",
+			"   - Freight: 200 INR",
+			"",
+			"4. **Keep as Draft**  ",
+			"   No ledger change.",
+			"",
+			"No records changed.",
+		].join("\n")
+	);
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.equal((html.match(/<ul\b/g) || []).length, 1);
+	assert.match(html, /Cancel INV-1<\/strong>.*Reverse the payable\..*<\/li><li>/s);
+	assert.match(html, /Include:.*<ul.*Duty: 100 INR.*Freight: 200 INR.*<\/ul>.*Keep as Draft/s);
+	assert.match(html, /No ledger change\..*<\/li><\/ol>\n<p[^>]*>No records changed\./s);
+});
+
+test("list continuations keep soft lines, paragraph gaps and parent text after children", () => {
+	const html = renderMarkdown(
+		"1. Parent\n   Soft line\n   wraps here.\n\n   Another paragraph.\n   - Child\n     Child detail.\n   Parent tail.\n\n2. Next\n\nOutside."
+	);
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.match(html, /Soft line wraps here\./);
+	assert.match(
+		html,
+		/Another paragraph\..*<ul.*Child.*Child detail\..*<\/ul>.*Parent tail\..*<\/li><li>Next/s
+	);
+	assert.match(html, /<\/ol>\n<p[^>]*>Outside\./);
+});
+
+test("list continuation content stays escaped and code blocks end the prose list", () => {
+	const html = renderMarkdown(
+		"1. First\n   <img src=x onerror=alert(1)>\n\n```\n2. literal\n```"
+	);
+	assert.ok(html.includes("&lt;img"));
+	assert.ok(!html.includes("<img"));
+	assert.match(html, /<\/ol>.*<pre.*2\. literal/s);
+});
+
+test("tab-indented descriptions stay inside numbered steps", () => {
+	const html = renderMarkdown("1. First\n\tDetails.\n\n2. Next");
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.match(html, /First Details\.<\/li><li>Next/);
+});
+
+test("indented headings, quotes, tables and rules keep their block format", () => {
+	for (const [body, tag] of [
+		["   # Heading", "h3"],
+		["   > Quoted", "blockquote"],
+		["   ---", "hr"],
+		["   | A | B |\n   |---|---|\n   |x|y|", "table"],
+	]) {
+		const html = renderMarkdown("1. First\n" + body);
+		assert.match(html, new RegExp("</ol>.*<" + (tag === "table" ? "div" : tag), "s"));
+		assert.ok(html.includes("<" + tag));
+	}
+});
+
+test("an indented code fence stays inside its step without parsing list text", () => {
+	const html = renderMarkdown("1. First\n\n   ```\n   8. literal <script>\n   ```\n\n2. Next");
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.match(html, /First<pre.*8\. literal &lt;script&gt;.*<\/pre><\/li><li>Next/s);
+});
