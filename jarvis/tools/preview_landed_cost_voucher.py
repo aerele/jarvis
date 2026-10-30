@@ -11,6 +11,7 @@ import frappe
 from frappe.utils import flt, getdate, nowdate
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError, PreviewSandboxLost, RetryLaterError
+from jarvis.tools._lcv_source_tax import _DENIED, LCVSourceTaxNeedsInput, _guard_fields, gate_lcv
 from jarvis.tools._preview_sandbox import preview_sandbox
 from jarvis.tools._result_guard import MAX_RESULT_CHARS, _size
 from jarvis.tools.preview_doc import _error_text
@@ -20,7 +21,6 @@ RECEIPTS = {"Purchase Receipt", "Purchase Invoice"}
 MAX_ROWS = 500
 MAX_SOURCES = 20
 MAX_SOURCE_ROWS = 2000
-_DENIED = "Cannot read the source records and fields required to prepare landed costs."
 _ITEM_FIELDS = (
 	"item_code",
 	"description",
@@ -104,6 +104,8 @@ def preview_landed_cost_voucher(
 			prep.doc.insert()
 			prep.validate_allocations(prep.doc)
 			return _bounded(prep.result())
+	except LCVSourceTaxNeedsInput as exc:
+		return exc.assessment
 	except _Gap as gap:
 		return {"status": "needs_input", "issues": [gap.issue]}
 	except (PermissionDeniedError, frappe.PermissionError, PreviewSandboxLost):
@@ -158,76 +160,6 @@ def _number(value):
 	except (TypeError, ValueError, OverflowError) as exc:
 		raise InvalidArgumentError("Amounts must be finite numbers") from exc
 	return number
-
-
-def _guard_fields(meta, parenttype=None, dimensions=(), extra_fields=()):
-	"""Native helpers read raw rows: fence amounts, ratios and dimensions first."""
-	if frappe.session.user == "Administrator":
-		return
-	access = set(meta.get_permlevel_access("read", parenttype=parenttype))
-	unreadable = {df.fieldname for df in meta.fields if df.permlevel and df.permlevel not in access}
-	mask_reader = getattr(meta, "get_masked_fields", None)
-	masked = {df.fieldname for df in mask_reader(parenttype=parenttype)} if mask_reader else set()
-	master_fields = {
-		"Company": {
-			"default_currency",
-			"cost_center",
-			"default_gst_expense_account",
-			"country",
-			"enable_perpetual_inventory",
-		},
-		"Item": {"is_stock_item", "is_fixed_asset", "stock_uom"},
-		"Account": {"company", "is_group", "account_type", "account_currency"},
-		"UOM": {"category", "enabled"},
-	}
-	required = master_fields.get(meta.name)
-	if required is not None:
-		required = {f for f in required if meta.has_field(f)}
-	else:
-		required = {
-			df.fieldname
-			for df in meta.fields
-			if df.fieldtype in {"Currency", "Float", "Percent", "Int"}
-			or df.fieldname
-			in {
-				"items",
-				"taxes",
-				"vendor_invoices",
-				"purchase_receipts",
-				"company",
-				"cost_center",
-				"is_ineligible_for_itc",
-				"is_stock_item",
-				"is_fixed_asset",
-				"update_stock",
-				"is_return",
-				"is_subcontracted",
-			}
-		}
-		required.update(
-			f
-			for f in (
-				"item_code",
-				"description",
-				"expense_account",
-				"account_currency",
-				"currency",
-				"receipt_document_type",
-				"receipt_document",
-				"purchase_receipt_item",
-				"stock_entry_item",
-				"purchase_invoice",
-				"purchase_invoice_item",
-				"purchase_receipt",
-				"pr_detail",
-				"pi_detail",
-				*dimensions,
-			)
-			if meta.has_field(f)
-		)
-	required.update(f for f in extra_fields if meta.has_field(f))
-	if required & (unreadable | masked):
-		raise PermissionDeniedError(_DENIED)
 
 
 def _key(row):
@@ -611,6 +543,8 @@ class _Preparation:
 		for name, amount in claims.items():
 			self.doc.append("vendor_invoices", {"vendor_invoice": name, "amount": amount})
 
+		self.source_tax = gate_lcv(self.doc)
+
 	def weight_basis(self, scratch, scope):
 		"""Use the native allocator on exact proportional integers in scratch only."""
 		evidence = []
@@ -793,6 +727,7 @@ class _Preparation:
 			self.submitted("Purchase Invoice", row.vendor_invoice)
 		for row in doc.taxes:
 			self.account_currency(row.expense_account)
+		self.source_tax = gate_lcv(doc)
 		self.doc = copy.deepcopy(doc)
 		self.charges = [
 			{"source": name, "kind": "saved_charge", "description": r.description, "amount": r.base_amount}
@@ -886,7 +821,8 @@ class _Preparation:
 				*self.warnings,
 				"Preview does not reserve invoice costs or customs duty; independently confirmed vouchers can compete.",
 			],
-			"native_checks": ["draft_validation", "item_allocation_reconciliation"],
+			"source_tax": self.source_tax,
+			"native_checks": ["draft_validation", "item_allocation_reconciliation", "linked_invoice_tax"],
 			"submission_checks_pending": [
 				"current permissions and source state",
 				"closed/frozen periods",

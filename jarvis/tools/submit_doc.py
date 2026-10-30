@@ -75,6 +75,10 @@ def _submit_one(doctype: str, name: str) -> "frappe.model.document.Document":
 			f"docs cannot be re-submitted (amend creates a new draft)"
 		)
 
+	if doctype == "Landed Cost Voucher":
+		from jarvis.tools._lcv_source_tax import gate_lcv
+
+		gate_lcv(doc, lock=True)
 	doc.submit()  # runs validate() + on_submit hooks; sets docstatus=1
 	return doc
 

@@ -84,6 +84,25 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 
 	# R2-3: a value Frappe would store as 0 or the database would refuse is rejected
 	# naming the field, before anything is set (``_field_values``).
+	previous_links = None
+	check_lcv_tax = doctype == "Landed Cost Voucher" and (
+		doc.docstatus == 0
+		or set(changes)
+		& {
+			"vendor_invoices",
+			"taxes",
+			"items",
+			"purchase_receipts",
+			"company",
+			"posting_date",
+			"distribute_charges_based_on",
+		}
+	)
+	if check_lcv_tax:
+		from jarvis.tools._lcv_source_tax import _guard_fields, gate_lcv
+
+		_guard_fields(doc.meta)
+		previous_links = {r.vendor_invoice for r in doc.get("vendor_invoices") or []}
 	changes = check_values(doctype, changes)
 
 	# Child tables are merged by row name, never wholesale-replaced: a payload
@@ -99,6 +118,8 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 		else:
 			doc.set(field, value)
 	cast_numbers(doc)
+	if check_lcv_tax:
+		gate_lcv(doc, lock=True, previous_links=previous_links)
 	doc.save()  # runs DocType validate() and on_update hooks
 	return doc
 
