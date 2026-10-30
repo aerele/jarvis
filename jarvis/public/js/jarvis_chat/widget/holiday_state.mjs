@@ -100,10 +100,13 @@ export function createHolidayState({
       scene: a.scene === true,
       hasItem: a.worn === true,
       itemReady: a.worn === true && !!art.value,
-      heading:
-        a.kind === "leadup"
+      // A getter: Desk fills in the user's name a moment after the widget mounts, and a
+      // value built here would keep the nameless heading for good.
+      get heading() {
+        return a.kind === "leadup"
           ? null
-          : headingFor(a.occasion, firstWord(userName())),
+          : headingFor(a.occasion, firstWord(userName()));
+      },
       leadupLine: a.kind === "leadup" ? leadupLineFor(a.occasion) : null,
     };
   });
