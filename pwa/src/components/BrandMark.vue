@@ -1,7 +1,7 @@
 <script setup>
 import { computed, watch } from "vue";
 import { brandLogoUrl } from "@/branding";
-import { MOODS, faceShown } from "@/lib/holidayFace";
+import { MOODS, faceShown } from "../lib/holidayFace";
 
 // The Jarvis logo tile — identical to the native app's mark
 // (jarvis_mobile/src/components/BrandMark.tsx): a violet rounded square with a
