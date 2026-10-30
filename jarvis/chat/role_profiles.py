@@ -132,6 +132,7 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__get_workflow_transitions",
 	"jarvis__list_app_modules",
 	"jarvis__preview_doc",
+	"jarvis__preview_landed_cost_voucher",
 	"jarvis__preview_import",
 	"jarvis__query",
 	"jarvis__read_file",

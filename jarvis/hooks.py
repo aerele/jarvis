@@ -210,7 +210,11 @@ website_redirects = [
 # needs that DocType sync does not produce has to be seeded here: the roles no
 # DocType names ("Knowledge Wiki Manager", the two support roles) plus the
 # Personalisation Settings defaults. See jarvis/install.py.
-after_install = ["jarvis.legacy_compatibility.seed", "jarvis.install.after_install"]
+after_install = [
+	"jarvis.legacy_compatibility.seed",
+	"jarvis.install.after_install",
+	"jarvis.lcv.setup_source_link",
+]
 
 before_migrate = "jarvis.legacy_compatibility.seed"
 
@@ -218,6 +222,7 @@ before_migrate = "jarvis.legacy_compatibility.seed"
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
 # fetch — bundles are reviewed deploy artifacts, adversarial S2).
 after_migrate = [
+	"jarvis.lcv.setup_source_link",
 	"jarvis.chat.runtime_profile.after_migrate",
 	"jarvis.chat.agent_catalog.after_migrate",
 	# Behavioural pattern learning: seed Jarvis Pattern Detector State rows

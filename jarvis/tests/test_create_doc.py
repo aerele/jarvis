@@ -67,6 +67,8 @@ class TestCreateDocValidation(FrappeTestCase):
 				meta = frappe._dict(fields=[])  # what cast_numbers reads; no numeric fields
 
 				def __init__(self):
+					self.doctype = dt
+					self.docstatus = 0
 					self._values = {}
 
 				def set(self, f, v):

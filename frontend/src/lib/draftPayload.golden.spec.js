@@ -76,6 +76,48 @@ const savedRows = () => [
 
 const mainField = { fieldname: "customer", value: "C1", orig: "C1", control: "text" };
 
+describe("v15 landed-cost charge provenance", () => {
+	const source = "custom_jarvis_source_invoice";
+	const chargeSpec = {
+		label: "Charges",
+		child_doctype: "Landed Cost Taxes and Charges",
+		columns: [F("expense_account", "Link"), F("amount", "Currency")],
+		extra_columns: [F(source, "Link", { options: "Purchase Invoice" })],
+		form_fields: [F(source, "Link", { options: "Purchase Invoice" })],
+	};
+	it("keeps a preview's invoice link in the confirmed create payload", () => {
+		const row = { expense_account: "Freight - X", amount: 120, [source]: "PINV-TEST" };
+		const table = buildDraftTable({
+			fieldname: "taxes",
+			spec: chargeSpec,
+			required: true,
+			proposed: [row],
+			verb: "create",
+		});
+		expect(draftValues({ verb: "create", fields: [], tables: [table] })).toEqual({
+			taxes: [row],
+		});
+	});
+	it("updates the saved row by name without clearing its source link", () => {
+		const row = {
+			name: "charge-1",
+			expense_account: "Freight - X",
+			amount: 120,
+			[source]: "PINV-TEST",
+		};
+		const table = buildDraftTable({
+			fieldname: "taxes",
+			spec: chargeSpec,
+			saved: [row],
+			verb: "update",
+		});
+		table.rows[0].amount = "100";
+		expect(draftValues({ verb: "update", fields: [], tables: [table] })).toEqual({
+			taxes: [{ name: "charge-1", amount: 100 }],
+		});
+	});
+});
+
 function payload(verb, { proposed, saved, mutate, withSpec = spec } = {}) {
 	const t = buildDraftTable({
 		fieldname: "items",
