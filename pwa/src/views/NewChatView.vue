@@ -19,7 +19,7 @@ import { recoveryState, sendRecovery } from "../sendRecoveryStore";
 import { observeDelivery, deliveryFailureCopy } from "@shared/lib/sendDelivery.js";
 import { holidayTouch, wornAnswer } from "../holidayTouch";
 import { heroWords } from "../lib/holidayWords";
-import { WORN_GAP_PX, WORN_OVERHANG } from "@jsshared/holiday/worn-room.mjs";
+import { heroRoomPx } from "../lib/holidayRoom";
 
 // New chat: the hero screen, not an empty thread with a chat bar bolted to the
 // bottom. Brand mark, a greeting that knows the time of day and who you are, and
@@ -84,9 +84,8 @@ const words = computed(() =>
 // The worn item hangs above the mark: keep room for all of it (and a gap) below the top of
 // the hero, so it is never cut off under the app bar. Nothing extra when it wears nothing.
 const heroRoom = computed(() => {
-	const art = wornAnswer.value;
-	const overhang = art && !holdActive.value ? WORN_OVERHANG[art.design] : 0;
-	return overhang ? { paddingTop: `${overhang + WORN_GAP_PX}px` } : undefined;
+	const room = heroRoomPx(wornAnswer.value, holdActive.value);
+	return room ? { paddingTop: `${room}px` } : undefined;
 });
 
 // Same derivation the desktop uses: the configured pool if there is one, else
