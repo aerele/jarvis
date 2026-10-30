@@ -2735,7 +2735,10 @@ defineExpose({ load, startNewChat, convId });
 .jvp-welcome > :not(.jvp-fx) {
 	position: relative;
 }
-.jvp-hero {
+/* :deep too: WelcomeHero's root does not carry this component's scope attribute in the Desk
+   build, so the bare selector alone never reaches it. */
+.jvp-hero,
+:deep(.jvp-hero) {
 	/* position: relative so the sleepy .jvp-face (position:absolute) centres inside
 	   this 52px tile, not against the whole panel - matching .jvp-avatar. */
 	position: relative;
