@@ -9101,14 +9101,23 @@ async function openArtifact(m, cv) {
 	}
 	if (t === "html" || t === "svg") {
 		let content = cvOf(m, cv);
-		artifact.value = { m, cv, url, conv, kind: content ? t : "loading", content };
-		const pending = artifact.value;
+		let pending;
 		if (!content) {
+			artifact.value = { m, cv, url, conv, kind: "loading" };
+			pending = artifact.value;
 			await ensureCanvas(m);
 			if (artifact.value !== pending) return;
 			content = cvOf(m, cv);
 		}
-		Object.assign(pending, { kind: content ? t : "nopreview", content });
+		artifact.value = {
+			...pending,
+			m,
+			cv,
+			url,
+			conv,
+			kind: content ? t : "nopreview",
+			content,
+		};
 		return;
 	}
 	// "file" (xlsx / csv / txt / …) → ask the backend for a tabular/text preview.
@@ -9118,17 +9127,27 @@ async function openArtifact(m, cv) {
 		const r = await api.previewFile(cv.file_url);
 		if (artifact.value !== pending) return;
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
-			Object.assign(pending, { kind: "table", ...tablePreviewFields(r), sheetIdx: 0 });
+			artifact.value = {
+				...pending,
+				m,
+				cv,
+				url,
+				conv,
+				kind: "table",
+				...tablePreviewFields(r),
+				sheetIdx: 0,
+			};
 			return;
 		}
 		if (r && r.kind === "text") {
-			Object.assign(pending, { kind: "text", text: r.text || "" });
+			artifact.value = { ...pending, m, cv, url, conv, kind: "text", text: r.text || "" };
 			return;
 		}
 	} catch (e) {
 		/* fall through to download-only */
 	}
-	if (artifact.value === pending) pending.kind = "nopreview";
+	if (artifact.value === pending)
+		artifact.value = { ...pending, m, cv, url, conv, kind: "nopreview" };
 }
 
 // --- Per-document PDF template override (jarvis.pdf_templates.rerender_document).
