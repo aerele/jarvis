@@ -533,6 +533,18 @@ class TestAgentsMarketplace(unittest.TestCase):
 			],
 		)
 
+	def test_sync_preserves_vendor_ledger_configuration_keys(self):
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "vendor-ledger-recon-auditor", "config_keys")),
+			[
+				"ageing.stale_floor_days",
+				"ageing.advance_floor_days",
+				"ageing.grir_floor_days",
+				"ageing.band_edges",
+			],
+		)
+
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
 		"""An agent the registry declares no config_keys for (everyone but
 		close-auditor today) gets [], not null/absent - ConfigForm.vue can

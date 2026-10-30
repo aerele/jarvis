@@ -599,7 +599,13 @@
       "validated_for_fy": "2026-2027",
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "materiality.benchmark_value",
+        "materiality.percentage",
+        "materiality.engagement_risk_level",
+        "materiality.rounding_step"
+      ]
     },
     {
       "agent_slug": "custom-app-learning",
@@ -2014,7 +2020,13 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "ageing.stale_floor_days",
+        "ageing.advance_floor_days",
+        "ageing.grir_floor_days",
+        "ageing.band_edges"
+      ]
     }
   ]
 }
