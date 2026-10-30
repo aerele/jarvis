@@ -15,8 +15,9 @@ def _unrelated(module, reason, names):
 
 _unrelated(
 	"jarvis.holiday_touch.api",
-	"Session-user holiday occasion lookup and scene-showing record; takes no identifier, so shared chat identifiers grant no authority.",
+	"Holiday occasion lookup, scene-showing record and the admin-only support view; no transcript identifier, so shared chat identifiers grant no authority.",
 	"""
+    explain
     get_today
     record_shown
     """,
