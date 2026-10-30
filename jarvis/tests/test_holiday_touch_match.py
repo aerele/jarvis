@@ -3,6 +3,7 @@
 import unittest
 from datetime import date
 
+from jarvis.holiday_touch import match as match_module
 from jarvis.holiday_touch.match import match_occasion, normalise
 from jarvis.holiday_touch.names import ALIASES, DESIGNS, NEAR_MISSES, OCCASIONS
 
@@ -257,6 +258,19 @@ class TestExtra(unittest.TestCase):
 	def test_extra_alias_matches(self):
 		self.assertIsNone(m("Tihar"))
 		self.assertEqual(m("Tihar", extra={"aliases": {"diwali": ["Tihar"]}}), "diwali")
+
+	def test_equal_overlays_share_one_cache_key_object(self):
+		# Each lru entry of ``_match`` holds its key; a fresh 200-name tuple per call would
+		# multiply that by the cache size.
+		def overlay():
+			return {"aliases": {"diwali": [f"lights {n}" for n in range(200)]}, "near_misses": ["x y z"]}
+
+		first, second = match_module._extra_key(overlay()), match_module._extra_key(overlay())
+		self.assertIsNot(overlay(), overlay())
+		self.assertIs(first, second)
+		self.assertEqual(m("Lights 7", extra=overlay()), "diwali")
+		self.assertEqual(m("Lights 7", extra=overlay()), "diwali")
+		self.assertIsNot(match_module._extra_key({"aliases": {"holi": ["lights 7"]}}), first)
 
 	def test_extra_alias_is_normalised(self):
 		extra = {"aliases": {"pongal": ["  Uzhavar  THIRUNAAL "]}}
