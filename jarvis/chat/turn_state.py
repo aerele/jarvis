@@ -584,6 +584,53 @@ def confirm_dispatching(run_id: str, version: int, epoch: int, target: str) -> b
 	)
 
 
+def unclaim_unsent_dispatch(
+	run_id: str, version: int, epoch: int, target: str, *, prior: dict, payload: str | None
+) -> bool:
+	"""D2 row 5b (dispatching -> ready), pump, EPOCH-fenced: undo OUR OWN claim of a
+	turn whose ``chat.send`` was refused before any byte left (a local
+	``SendNotStarted``, never a gateway reply). Restores exactly what
+	``confirm_dispatching`` (and the shared claim's send stamp) wrote, from the
+	pre-claim row ``prior``: ``pump_epoch``, ``dispatching_at``, ``deadline_at`` and
+	``collaboration_send_started_at``. Keeps ``ready_at`` (queue position), the
+	reservation, the request and its gateway key. ``payload`` (the stored request plus
+	the server-only ``unsent_return`` marker) replaces ``dispatch_payload`` when given.
+
+	Fenced like the claim: state, our claim's ``version``, ``pump_epoch=E``, no Stop
+	(``cancel_requested=0``), the pump executor and the control row still at epoch E.
+	Any other writer since (Stop, a takeover re-stamp, a park) bumped the version or
+	moved the epoch, so this matches 0 rows and overwrites nothing. Lease expiry is
+	not checked: this is a DB-only compensation with no gateway write, and the caller
+	renews (and exits on a lost lease) before any later write. Returns won/lost. No
+	commit."""
+	set_payload = ", dispatch_payload=%(p)s" if payload is not None else ""
+	return (
+		_run_cas(
+			f"""UPDATE `tab{TURN}`
+			SET state='ready', pump_epoch=%(pe)s, dispatching_at=%(pd)s, deadline_at=%(pdl)s,
+			    collaboration_send_started_at=%(pss)s, version=version+1{set_payload}
+			WHERE name=%(r)s AND state='dispatching' AND version=%(v)s AND pump_epoch=%(e)s
+			  AND COALESCE(cancel_requested, 0)=0 {executor_clause("pump")}
+			  AND EXISTS (
+			        SELECT 1 FROM `tab{PUMP}` p
+			        WHERE p.relay_target_id=%(t)s AND p.pump_epoch=%(e)s
+			  )""",
+			{
+				"r": run_id,
+				"v": version,
+				"e": epoch,
+				"t": target,
+				"p": payload,
+				"pe": prior.get("pump_epoch") or 0,
+				"pd": prior.get("dispatching_at"),
+				"pdl": prior.get("deadline_at"),
+				"pss": prior.get("collaboration_send_started_at"),
+			},
+		)
+		== 1
+	)
+
+
 def mark_streaming(run_id: str, version: int, epoch: int, gateway_run_id: str | None = None) -> bool:
 	"""D2 row 6 (dispatching -> streaming), pump, EPOCH-fenced. Record
 	``gateway_run_id`` from the ack, ``first_event_at``, ``version+1``. Returns
@@ -933,25 +980,75 @@ def request_cancel(run_id: str, version: int) -> bool:
 	)
 
 
-def record_aborted_terminal(run_id: str, state: str, version: int, epoch: int) -> bool:
+def record_aborted_terminal(
+	run_id: str, state: str, version: int, epoch: int, *, control_target: str | None = None
+) -> bool:
 	"""D2 row 18 (streaming|dispatching -> terminal_observed, aborted), pump,
 	EPOCH-fenced. Guard: ``cancel_requested=1`` AND state=X AND version=V AND
 	pump_epoch=E (the pump has issued the out-of-band chat.abort). Record
 	``terminal_kind='relay:error'`` with an aborted marker in ``terminal_payload``,
 	``terminal_observed_at``, ``version+1``. ``cancel_requested=1`` is what
 	distinguishes this aborted terminal from a plain error terminal at
-	``settle_cancelled`` time. Returns won/lost. No commit."""
+	``settle_cancelled`` time. ``control_target`` also requires the shard's control row
+	to still hold epoch E (a run that was never sent has nothing to abort, so this
+	proof replaces the abort's). Returns won/lost. No commit."""
 	if state not in ("streaming", "dispatching"):
 		raise ValueError(f"record_aborted_terminal: illegal from-state {state!r}")
 	payload = json.dumps({"aborted": True})
+	control = (
+		f" AND EXISTS (SELECT 1 FROM `tab{PUMP}` p WHERE p.relay_target_id=%(t)s AND p.pump_epoch=%(e)s)"
+		if control_target
+		else ""
+	)
 	return (
 		_run_cas(
 			f"""UPDATE `tab{TURN}`
 			SET state='terminal_observed', terminal_kind='relay:error',
 			    terminal_payload=%(p)s, terminal_observed_at=%(now)s, version=version+1
 			WHERE name=%(r)s AND state=%(s)s AND cancel_requested=1
-			  AND version=%(v)s AND pump_epoch=%(e)s""",
-			{"r": run_id, "p": payload, "now": _now(), "s": state, "v": version, "e": epoch},
+			  AND version=%(v)s AND pump_epoch=%(e)s{control}""",
+			{
+				"r": run_id,
+				"p": payload,
+				"now": _now(),
+				"s": state,
+				"v": version,
+				"e": epoch,
+				"t": control_target,
+			},
+		)
+		== 1
+	)
+
+
+def cancel_unsent_dispatch(
+	run_id: str, version: int, *, epoch: int | None = None, target: str | None = None
+) -> bool:
+	"""Shared chats: a ``dispatching`` turn whose ``chat.send`` never left becomes
+	``cancelled`` (credit released, ``done_at``, no send stamp). Two callers:
+
+	* the actor's Stop (``epoch`` None), web, ACTOR-fenced, only while the send stamp
+	  is still unset;
+	* the pump after a Stop landed between its claim and a write that was refused
+	  before any byte (``epoch``/``target`` given): fenced on the Stop
+	  (``cancel_requested=1``), ``pump_epoch=E``, the pump executor and the control row
+	  at E. The claim's send stamp is cleared: nothing was sent.
+
+	Returns won/lost. No commit."""
+	params = {"now": frappe.utils.now_datetime(), "r": run_id, "v": version}
+	if epoch is None:
+		fence = "AND collaboration_send_started_at IS NULL"
+	else:
+		fence = f"""AND pump_epoch=%(e)s AND cancel_requested=1 {executor_clause("pump")}
+		AND EXISTS (SELECT 1 FROM `tab{PUMP}` p WHERE p.relay_target_id=%(t)s AND p.pump_epoch=%(e)s)"""
+		params.update(e=epoch, t=target)
+	return (
+		_run_cas(
+			f"""UPDATE `tab{TURN}` SET state='cancelled', cancel_requested=1,
+			reserved=0, reservation_expires_at=NULL, done_at=%(now)s,
+			collaboration_send_started_at=NULL, version=version+1
+			WHERE name=%(r)s AND state='dispatching' AND version=%(v)s {fence}""",
+			params,
 		)
 		== 1
 	)
