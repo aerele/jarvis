@@ -127,9 +127,18 @@ test("pwa: a good build passes", () => {
   assert.equal(check(pwaBuild(GOOD, GOOD_SW)), "");
 });
 
-test("pwa: the words may sit in a view chunk, they are eager text", () => {
-  // Unlike the desktop, the PWA's words land in the NewChatView chunk, not the entry.
-  assert.deepEqual(checkPwaBuild(pwaBuild(GOOD, GOOD_SW), PWA_HTML), []);
+test("pwa: a STATIC import of a non-precached ordinary chunk fails", () => {
+  // The lazy chunk is a real file in the build but not in the precache.
+  const files = {
+    ...GOOD,
+    "lazy-GGGG.js": "export default 3",
+    "NewChatView-EEEE.js":
+      GOOD["NewChatView-EEEE.js"] + 'import{z}from"./lazy-GGGG.js";',
+  };
+  assert.match(
+    check(pwaBuild(files, GOOD_SW)),
+    /NewChatView-EEEE\.js is precached but statically imports lazy-GGGG\.js/
+  );
 });
 
 test("pwa: words that exist only in a holiday chunk fail", () => {
@@ -175,8 +184,14 @@ test("pwa: a precached chunk that statically imports a non-precached file fails"
   );
 });
 
-test("pwa: a dynamic import of a non-precached chunk is fine", () => {
-  assert.equal(check(pwaBuild(GOOD, GOOD_SW)), "");
+test("pwa: a DYNAMIC import of a non-precached ordinary chunk is fine", () => {
+  const files = {
+    ...GOOD,
+    "lazy-GGGG.js": "export default 3",
+    "NewChatView-EEEE.js":
+      GOOD["NewChatView-EEEE.js"] + 'import("./lazy-GGGG.js");',
+  };
+  assert.equal(check(pwaBuild(files, GOOD_SW)), "");
 });
 
 test("pwa: worn art in a precached chunk fails", () => {
