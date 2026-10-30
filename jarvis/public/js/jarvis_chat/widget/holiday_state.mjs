@@ -1,6 +1,7 @@
 // What the Desk widget knows about today's holiday touch: the answer, the words, whether
 // the art is in, and whether the welcome may celebrate. Framework-free (Vue's `ref` and
-// `computed` are injected), so `node --test` runs it bare.
+// `computed` are injected; so is `shallowRef`, which holds the art), so `node --test` runs it
+// bare.
 //
 // Built only for a user with Jarvis access whose page booted with the key
 // (`bootinfo.jarvis_holiday_touch`, written server-side only for such a user). Anyone else
@@ -14,6 +15,8 @@ import { createHolidayStore, fetchToday } from "../../shared/holiday/store.mjs";
 import { createCelebrator } from "./holiday_celebration.mjs";
 
 const RECORD_SHOWN = "/api/method/jarvis.holiday_touch.api.record_shown";
+// Its own short timeout: a call that hangs must not outlive the welcome by much.
+const RECORD_SHOWN_TIMEOUT_MS = 2500;
 const NONE_VIEW = Object.freeze({
   kind: "none",
   design: null,
@@ -32,6 +35,7 @@ const firstWord = (name) =>
 
 export function createHolidayState({
   ref,
+  shallowRef = ref,
   computed,
   boot,
   doc = globalThis.document,
@@ -50,7 +54,9 @@ export function createHolidayState({
       ? boot.jarvis_holiday_touch
       : undefined;
   const enabled = key !== undefined && key !== null;
-  const art = ref(null);
+  // The art global, version-checked by the loader. Shallow: Vue must not wrap the art's
+  // functions and tables in proxies.
+  const art = shallowRef(null);
   let artStatus = "idle"; // idle | loading | ready | failed
   let lastCelebration = null;
 
@@ -110,6 +116,10 @@ export function createHolidayState({
         Accept: "application/json",
         "X-Frappe-CSRF-Token": (win.frappe && win.frappe.csrf_token) || "",
       },
+      signal:
+        typeof AbortSignal.timeout === "function"
+          ? AbortSignal.timeout(RECORD_SHOWN_TIMEOUT_MS)
+          : undefined,
     });
     if (!response.ok) {
       throw Object.assign(new Error(`record_shown ${response.status}`), {
@@ -156,6 +166,7 @@ export function createHolidayState({
     enabled,
     view,
     debugView,
+    art,
     ensureArt,
     start: () => store && store.start(),
     stop: () => store && store.stop(),
@@ -164,16 +175,36 @@ export function createHolidayState({
     onPanelOpen: () => (store ? store.refresh() : Promise.resolve()),
     async celebrate() {
       if (!celebrator) return { play: false, reason: "off" };
-      lastCelebration = await celebrator.celebrate();
-      return lastCelebration;
+      const result = await celebrator.celebrate();
+      lastCelebration = { play: result.play, reason: result.reason };
+      return result;
     },
   };
 }
 
-/** window.__jarvisWidgetHoliday: for support; a getter, so nothing can write to it. */
+// A deep, frozen, plain copy: nothing the support view hands out is a live (reactive) object.
+function frozenCopy(value) {
+  if (value === undefined) return value;
+  const copy = JSON.parse(JSON.stringify(value));
+  const freeze = (node) => {
+    if (node && typeof node === "object") Object.values(node).forEach(freeze);
+    return Object.freeze(node);
+  };
+  return freeze(copy);
+}
+
+function snapshot(debugView) {
+  return Object.freeze(
+    Object.fromEntries(
+      Object.keys(debugView).map((name) => [name, frozenCopy(debugView[name])])
+    )
+  );
+}
+
+/** window.__jarvisWidgetHoliday: for support; a getter of frozen copies, so nothing can write to it. */
 export function exposeDebugView(win, state) {
   Object.defineProperty(win, "__jarvisWidgetHoliday", {
-    get: () => ({ ...state.debugView }),
+    get: () => snapshot(state.debugView),
     configurable: true,
   });
 }

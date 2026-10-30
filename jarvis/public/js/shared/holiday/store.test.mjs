@@ -91,6 +91,89 @@ test("reads the boot answer and shows it while it is today's", () => {
   );
 });
 
+// A small dependency tracker with Vue 3.3's computed rule (the Frappe 15 Desk): a computed
+// tells its readers whenever one of ITS inputs is set, without comparing its own result. A
+// ref only tells them when the value it holds actually changes.
+function tracked() {
+  let active = null;
+  const track = (subs) => active && subs.add(active);
+  const ref = (initial) => {
+    const subs = new Set();
+    let held = initial;
+    return {
+      get value() {
+        track(subs);
+        return held;
+      },
+      set value(next) {
+        if (Object.is(next, held)) return;
+        held = next;
+        [...subs].forEach((run) => run());
+      },
+    };
+  };
+  const computed = (fn) => {
+    const subs = new Set();
+    let dirty = true;
+    let cached;
+    const invalidate = () => {
+      dirty = true;
+      [...subs].forEach((run) => run());
+    };
+    return {
+      get value() {
+        track(subs);
+        if (dirty) {
+          const outer = active;
+          active = invalidate;
+          cached = fn();
+          active = outer;
+          dirty = false;
+        }
+        return cached;
+      },
+    };
+  };
+  const watch = (read) => {
+    const run = () => {
+      const outer = active;
+      active = run;
+      read();
+      active = outer;
+    };
+    run();
+  };
+  return { ref, computed, watch };
+}
+
+test("a tick that changes nothing wakes nobody; midnight wakes them once", () => {
+  const reactive = tracked();
+  const clock = { t: MORNING };
+  const target = fakeTarget();
+  const store = createHolidayStore({
+    ref: reactive.ref,
+    computed: reactive.computed,
+    boot: DIWALI,
+    now: () => new Date(clock.t),
+    doc: target,
+    win: target,
+  });
+  let runs = 0;
+  reactive.watch(() => {
+    runs++;
+    return store.answer.value;
+  });
+  for (const minutes of [1, 2, 3, 4]) {
+    clock.t = MORNING + minutes * 60000;
+    store.tick();
+  }
+  assert.equal(runs, 1);
+  clock.t = new Date("2026-11-08T18:30:00Z").getTime(); // 00:00 on 9 Nov in Kolkata
+  store.tick();
+  assert.equal(runs, 2);
+  assert.equal(store.answer.value.kind, "none");
+});
+
 test("at midnight in the answer's own time zone it reads as none, with no call", () => {
   const { store, clock, calls } = setup();
   clock.t = new Date("2026-11-08T18:29:00Z").getTime(); // 23:59 in Kolkata

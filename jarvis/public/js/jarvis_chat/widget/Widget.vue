@@ -100,7 +100,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { ref, shallowRef, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { maintenance, startPollIfHeld } from "./maintenance_state.mjs";
 import { FULL_CHAT_URL, conversationUrl, PANEL_MIN_VIEWPORT_PX } from "./config.mjs";
 import { contextFromRoute } from "./desk_context.mjs";
@@ -223,6 +223,7 @@ function safeStorage() {
 }
 const holiday = createHolidayState({
 	ref,
+	shallowRef,
 	computed,
 	boot: window.frappe?.boot,
 	storage: safeStorage(),
@@ -234,8 +235,8 @@ const holiday = createHolidayState({
 });
 exposeDebugView(window, holiday);
 const holidayView = holiday.view;
-// The art once it has loaded, else null.
-const holidayArt = computed(() => (holidayView.value.wear ? window.__jarvisHolidayArt : null));
+// The art once it has loaded (version-checked by the loader), else null.
+const holidayArt = holiday.art;
 // A day that crosses midnight into a holiday: the answer starts wearing after the page booted.
 watch(
 	() => holidayView.value.worn,

@@ -40,6 +40,7 @@ function setup({
   fetches = [],
   clock = { at: NOW },
   name = "Priya Raman",
+  shallowRef,
 } = {}) {
   const listeners = [];
   const requests = [];
@@ -60,6 +61,7 @@ function setup({
   const queue = [...fetches];
   const state = createHolidayState({
     ref,
+    ...(shallowRef ? { shallowRef } : {}),
     computed,
     boot,
     doc,
@@ -239,6 +241,8 @@ test("record_shown is a POST with the CSRF token and no body", async () => {
   assert.equal(init.headers["X-Frappe-CSRF-Token"], "tok123");
   assert.equal(init.credentials, "same-origin");
   assert.equal(init.body, undefined);
+  // Its own short timeout, so a hung call cannot outlive the welcome by much.
+  assert.ok(init.signal instanceof AbortSignal);
   assert.match(
     url,
     /^\/api\/method\/jarvis\.holiday_touch\.api\.record_shown$/
@@ -306,4 +310,56 @@ test("the art's stylesheet is installed once, as the art arrives", async () => {
   await state.ensureArt();
   assert.equal(installs.length, 2); // installWornCss itself is idempotent
   assert.ok(installs[0] && typeof installs[0].addEventListener === "function");
+});
+
+test("record_shown still goes out where AbortSignal.timeout does not exist", async () => {
+  const original = AbortSignal.timeout;
+  AbortSignal.timeout = undefined;
+  try {
+    const { state, requests } = setup();
+    await state.celebrate();
+    const { init } = requests.find((r) => /record_shown$/.test(r.url));
+    assert.equal(init.signal, undefined);
+  } finally {
+    AbortSignal.timeout = original;
+  }
+});
+
+test("the version-checked art is on the state, held shallowly", async () => {
+  const made = [];
+  const shallowRef = (value) => {
+    made.push(value);
+    return ref(value);
+  };
+  const { state } = setup({ shallowRef });
+  assert.deepEqual(made, [null]);
+  assert.equal(state.art.value, null);
+  await state.ensureArt();
+  assert.equal(state.art.value, ART);
+  // A failed load leaves it null.
+  const failed = setup({ art: null });
+  await failed.state.ensureArt();
+  assert.equal(failed.state.art.value, null);
+});
+
+test("the support view hands out frozen copies, not the live objects", async () => {
+  const { state } = setup();
+  await state.ensureArt();
+  const win = {};
+  exposeDebugView(win, state);
+  const seen = win.__jarvisWidgetHoliday;
+  for (const field of [
+    seen.answer,
+    seen.view,
+    seen.store.raw,
+    seen.store.answer,
+  ]) {
+    assert.ok(Object.isFrozen(field));
+  }
+  assert.notEqual(seen.answer, state.debugView.answer);
+  assert.throws(() => {
+    seen.answer.kind = "none";
+  }, TypeError);
+  assert.equal(state.view.value.kind, "day"); // untouched
+  assert.equal(seen.answer.design, "diwali");
 });

@@ -9,8 +9,11 @@
 //  * `{play: true}` plays. `{play: false}` plays nothing and latches this answer object in
 //    memory (never in storage: a decline is not a showing). A failed call (any non-2xx or a
 //    thrown fetch) plays and records the showing in this browser instead;
-//  * a reply that lands after the caller gave up still sets the latch or the local record,
-//    so the next welcome does not ask again for nothing.
+//  * a reply that lands after the caller gave up still sets the latch, so the next welcome
+//    does not ask again for nothing, and a late `{play: true}` comes back on `late` so a welcome
+//    that is still open can play it (the slot is spent on the server). A late failure does
+//    nothing: it plays nothing, records nothing and latches nothing, since the caller has
+//    already moved on without it.
 // Text only: no art import, so it stays in the always-loaded widget bundle.
 import { mayPlayLocal, recordLocal } from "../../shared/holiday/cadence.mjs";
 
@@ -25,6 +28,8 @@ export function createCelebrator({
   storage = null,
   now = () => new Date(),
   deadlineMs = DEADLINE_MS,
+  setTimer = (fn, ms) => setTimeout(fn, ms),
+  clearTimer = (id) => clearTimeout(id),
 }) {
   let latched = null; // the answer object a reply was last seen for
   let inFlight = null;
@@ -44,25 +49,30 @@ export function createCelebrator({
     const a = answer();
     const why = refusal(a);
     if (why) return { play: false, reason: why };
+    const waiting = { yes: true }; // false once the caller has been told "deadline"
     let timer = null;
     const expired = new Promise((resolve) => {
-      timer = setTimeout(resolve, deadlineMs, DEADLINE);
+      timer = setTimer(() => {
+        waiting.yes = false;
+        resolve(DEADLINE);
+      }, deadlineMs);
     });
     try {
       const art = await Promise.race([ensureArt(), expired]);
       if (art === DEADLINE) return { play: false, reason: "deadline" };
       if (!art) return { play: false, reason: "load-failed" };
-      const outcome = await Promise.race([ask(a), expired]);
+      const asked = ask(a, waiting);
+      const outcome = await Promise.race([asked, expired]);
       return outcome === DEADLINE
-        ? { play: false, reason: "deadline" }
+        ? { play: false, reason: "deadline", late: asked }
         : outcome;
     } finally {
-      clearTimeout(timer);
+      clearTimer(timer);
     }
   }
 
-  // The reply's effects happen here, whoever is still waiting for it.
-  function ask(a) {
+  // The reply's effects happen here, whoever is still waiting for it. Never rejects.
+  function ask(a, waiting) {
     return Promise.resolve()
       .then(recordShown)
       .then(
@@ -70,14 +80,19 @@ export function createCelebrator({
         (error) => ({ error })
       )
       .then((result) => {
+        if (result.error) {
+          return waiting.yes
+            ? failedCall(a)
+            : { play: false, reason: "late-error" };
+        }
         latched = a;
-        if (result.error) return failedCall(a);
         const play = !!result.reply && result.reply.play === true;
         return { play, reason: play ? "played" : "declined" };
       });
   }
 
   function failedCall(a) {
+    latched = a;
     if (storage) recordLocal(storage, now(), a.tz);
     return { play: true, reason: "network" };
   }
