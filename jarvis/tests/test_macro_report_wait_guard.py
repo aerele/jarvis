@@ -225,11 +225,16 @@ class TestOtherCallers(GuardBase):
 		frappe.db.set_value(TURN, self.step_turn, "state", "done", update_modified=False)
 		self._assert_allowed("create_doc")
 
+	def test_every_gated_write_is_refused_even_off_the_write_list(self):
+		# call_connector is gated but not in _WRITE_TOOLS on the version-15/16 lines.
+		self._waiting()
+		self.assertIn("call_connector", api._GATED_WRITES)
+		self._assert_refused("call_connector")
+
 	def test_no_conversation_does_not_guard(self):
 		self.assertIsNone(macro_report_wait.write_refusal(None, "send_email"))
 
 	def test_the_refused_set_is_the_benches_own_write_list(self):
-		self.assertTrue(api._GATED_WRITES <= api._WRITE_TOOLS)
 		for tool in (*GATED, *UNGATED):
 			self.assertIn(tool, api._WRITE_TOOLS)
 		for tool in READS:

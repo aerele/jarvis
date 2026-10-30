@@ -3608,6 +3608,7 @@ def _announce_reaped(run_name: str) -> None:
 			macro_doc.owner,
 			subject=f"Macro run did not finish: {macro_doc.macro_name}",
 			body=_STALE_RUN_ERROR,
+			link=_run_link(run),
 		)
 	except Exception:
 		pass
