@@ -210,6 +210,11 @@ jobs:
         run: |
           node --test frontend/scripts/check-holiday-chunks.test.mjs
           node frontend/scripts/check-holiday-chunks.mjs
+      - name: Holiday worn-item art stays lazy and out of the PWA precache
+        # The same art rule for the phone build, plus: no holiday-* file in the built sw.js
+        # precache, and no precached chunk statically imports a file that is not precached
+        # (it would fail offline). Its self-test ran in the step above.
+        run: node frontend/scripts/check-holiday-chunks.mjs --pwa
 
   # The v15 gate: from-scratch Frappe version-15 bench + the full jarvis suite.
   #
