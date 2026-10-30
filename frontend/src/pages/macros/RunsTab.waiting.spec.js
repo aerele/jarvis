@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
+import { toast } from "frappe-ui";
 
 /**
  * A run parked for a prepared report on the Runs tab: it says which reports (from the
@@ -88,7 +89,8 @@ async function mountTab(rows, stats = {}) {
 }
 
 const rowEl = (w, name) => w.find(`.row[data-name="${name}"]`);
-const stopBtn = (r) => r.findAll("button").find((b) => b.attributes("data-tooltip") === "Stop");
+const stopBtn = (r) =>
+	r.findAll("button").find((b) => (b.attributes("data-tooltip") || "").startsWith("Stop"));
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -131,11 +133,30 @@ describe("RunsTab: a run waiting for a report", () => {
 		// Icon-only: its accessible name is the Button's `label`.
 		const stopButton = w
 			.findAllComponents({ name: "Button" })
-			.find((b) => b.props("tooltip") === "Stop");
+			.find((b) => b.props("tooltip") === "Stop" || b.props("label") === "Stop run");
 		expect(stopButton.props("label")).toBe("Stop run");
 		api.stopMacroRun.mockResolvedValue({ ok: true });
 		await stopBtn(rowEl(w, "run-w")).trigger("click");
 		expect(api.stopMacroRun).toHaveBeenCalledWith("run-w");
+	});
+
+	it("says the report keeps generating when the run waiting for it is stopped", async () => {
+		const { w } = await mountTab([waiting(), run("run-r", { status: "running" })]);
+		// the tooltip warns before the click, for a waiting run only
+		expect(stopBtn(rowEl(w, "run-w")).attributes("data-tooltip")).toContain(
+			"keeps generating in the background"
+		);
+		expect(stopBtn(rowEl(w, "run-r")).attributes("data-tooltip")).toBe("Stop");
+		api.stopMacroRun.mockResolvedValue({ ok: true });
+		await stopBtn(rowEl(w, "run-w")).trigger("click");
+		await flushPromises();
+		expect(toast.success).toHaveBeenCalledWith(
+			expect.stringContaining("The report keeps generating in the background")
+		);
+		toast.success.mockClear();
+		await stopBtn(rowEl(w, "run-r")).trigger("click");
+		await flushPromises();
+		expect(toast.success).toHaveBeenCalledWith("Run stopped");
 	});
 
 	it("is a choice in the status filter, and filtering asks the server for it", async () => {

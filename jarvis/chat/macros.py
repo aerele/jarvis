@@ -1589,13 +1589,16 @@ def _apply_step_end(
 		if failed_reads:
 			_end_run(run, macro_doc, "failed", macro_report_wait.failed_read_message(what, failed_reads[0]))
 			return
-		if waits:
-			macro_report_wait.park(run, macro_doc, waits)
+		if waits and macro_report_wait.can_park():
+			# A continuation that read some of what it was told was ready and then hit
+			# another wait carries the reports it has not read into the new wait.
+			macro_report_wait.park(run, macro_doc, macro_report_wait.carry_unread(run, waits, ready))
 			return
 		# An errored continuation skips the "did not read" check on purpose: the error is
 		# the macro's own "Stop on error" decision (it ended the run above, or the owner
-		# chose to go on), and the outcome still reads that step as failed.
-		if run.resume_turn and not errored and ready is not None:
+		# chose to go on), and the outcome still reads that step as failed. A wait that
+		# could not be parked (the scheduler is off) ends the step as the switch off does.
+		if not waits and run.resume_turn and not errored and ready is not None:
 			unread = macro_report_wait.unread_reports(run, ready)
 			if unread:
 				_end_run(run, macro_doc, "failed", macro_report_wait.not_read_message(what, unread))
@@ -2126,7 +2129,11 @@ def _stop_run_locked(run_name: str, *, reason: str, by: str) -> bool:
 		notify_owner(
 			macro_doc.owner,
 			subject=f"{_OUTCOME_SUBJECT['stopped']}: {frappe.utils.escape_html(macro_doc.macro_name)}",
-			body=reason or _outcome_body(run, macro_doc, "stopped"),
+			body=(
+				f"{reason or _outcome_body(run, macro_doc, 'stopped')} {macro_report_wait.STOPPED_WHILE_WAITING}"
+				if run.status == "waiting_report"
+				else reason or _outcome_body(run, macro_doc, "stopped")
+			),
 			link=_run_link(run),
 		)
 	return True
@@ -3478,6 +3485,11 @@ def reap_stale_macro_runs() -> int:
 				# Read while the run is still `running`; a run parked for a report is not
 				# the check's (it only looks at `running` ones).
 				left = _left_by_the_reconcile_check(run_name) if cur.status == "running" else None
+				parked = (
+					frappe.db.get_value(RUN, run_name, ["waiting_since", "waiting_on"], as_dict=True)
+					if cur.status == "waiting_report"
+					else None
+				)
 				if not _cas_run_status(
 					run_name, cur.status, "failed", finished_at=frappe.utils.now(), error=_STALE_RUN_ERROR
 				):
@@ -3488,6 +3500,8 @@ def reap_stale_macro_runs() -> int:
 				_announce_reaped(run_name)
 				if left:
 					_log_reaped_despite_check(left)
+				if parked:
+					macro_report_wait.log_reaped(run_name, parked.waiting_since, parked.waiting_on)
 		except Exception:
 			# Roll back explicitly: an exception between the FOR UPDATE read and its
 			# balancing commit would otherwise leave the row lock and any half-applied

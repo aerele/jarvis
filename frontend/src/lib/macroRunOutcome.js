@@ -65,6 +65,28 @@ export function waitingLabel(run) {
 	return names.length ? `Waiting for report: ${names.join(", ")}` : "Waiting for report";
 }
 
+// Stopping a run that waits for a report does not cancel the report: Frappe goes on
+// generating it (up to the report's timeout) and nothing will use it.
+export const STOP_WHILE_WAITING =
+	"The report keeps generating in the background; this run will not use it.";
+
+// The Stop button's tooltip for a run in `status`.
+export function stopTooltip(status) {
+	return status === "waiting_report" ? `Stop. ${STOP_WHILE_WAITING}` : "Stop";
+}
+
+// The toast after a stop went through.
+export function stoppedToast(status) {
+	return status === "waiting_report" ? `Run stopped. ${STOP_WHILE_WAITING}` : "Run stopped";
+}
+
+// The status the in-chat banner and the run history show for a `macro:progress`
+// event: the run is either waiting for a report or running (every other progress
+// event is a step going out). Absent on an older server, which means running.
+export function progressStatus(progress) {
+	return progress && progress.status === "waiting_report" ? "waiting_report" : "running";
+}
+
 // The form's notice about the last run: { title, text, tone }, or null when there
 // is nothing the owner needs to be told (it worked, it is still going, they stopped
 // it). `title` says what happened in a few words; `text` is the reason, which can

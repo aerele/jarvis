@@ -135,6 +135,16 @@ class TestTheOwnerHearsAWaitedRunEnd(OpsBase):
 		(note,) = self._notes()
 		self.assertEqual(note.subject, f"Macro run stopped: {self._macro_name()}")
 		self.assertEqual(note.link, f"/jarvis/c/{self.conv}")
+		# The Prepared Report is not cancelled: the owner is told it keeps generating.
+		self.assertIn(macro_report_wait.STOPPED_WHILE_WAITING, note.email_content)
+
+	def test_a_stop_of_a_waited_run_that_is_running_again_does_not_say_it_waits(self):
+		frappe.db.set_value(RUN, self.run, "status", "running", update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(OWNER)
+		macros.stop_macro_run(self.run)
+		(note,) = self._notes()
+		self.assertNotIn(macro_report_wait.STOPPED_WHILE_WAITING, note.email_content)
 
 	def test_a_stop_with_a_reason_says_the_reason(self):
 		frappe.set_user("Administrator")
@@ -171,9 +181,8 @@ class TestTheOwnerHearsAWaitedRunEnd(OpsBase):
 		# Ended by the engine straight away (the report is ready, the run has used its
 		# resumes): through ``_end_run`` -> ``_announce``, so one note, not two.
 		self._ready()
-		frappe.db.set_value(
-			RUN, self.run, "resume_count", macro_report_wait._MAX_RESUMES, update_modified=False
-		)
+		cap = macro_report_wait._resume_cap(frappe.get_doc(RUN, self.run))
+		frappe.db.set_value(RUN, self.run, "resume_count", cap, update_modified=False)
 		frappe.db.commit()
 		self._resume()
 		self.assertEqual(self._row().status, "failed")
@@ -433,3 +442,31 @@ class TestTheWakeFailureIsLoggedOncePerHour(OpsBase):
 			for _ in range(3):
 				macro_report_wait.on_prepared_report_update(doc)
 		log.assert_called_once()
+
+
+class TestTheOtherWaitingReportSites(OpsBase):
+	"""``waiting_report`` is a live status for the scheduler's start check and for the
+	``remember`` tool's scheduled-run refusal; each is pinned against a real run row."""
+
+	def test_remember_counts_a_waiting_scheduled_run_as_a_scheduled_run(self):
+		from jarvis.tools.remember import _scheduled_macro_run
+
+		self.assertFalse(_scheduled_macro_run(self.conv))  # a manual run
+		frappe.db.set_value(RUN, self.run, "trigger", "scheduled", update_modified=False)
+		frappe.db.commit()
+		self.assertTrue(_scheduled_macro_run(self.conv))
+		frappe.db.set_value(RUN, self.run, "status", "completed", update_modified=False)
+		frappe.db.commit()
+		self.assertFalse(_scheduled_macro_run(self.conv))
+
+	def test_the_scheduler_counts_a_waiting_run_as_started(self):
+		from jarvis.chat.macro_scheduler import _run_started
+
+		frappe.db.set_value(RUN, self.run, "current_step", 0, update_modified=False)
+		frappe.db.commit()
+		run = frappe.get_doc(RUN, self.run)
+		self.assertEqual(run.status, "waiting_report")
+		self.assertTrue(_run_started(run))
+		# the same row not waiting, with no conversation to find a step in, has not started
+		bare = frappe._dict(current_step=0, status="queued", conversation=None)
+		self.assertFalse(_run_started(bare))

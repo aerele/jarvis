@@ -12,6 +12,10 @@ import {
 	LIVE_RUN,
 	waitingLabel,
 	progressChangesLastRun,
+	progressStatus,
+	stopTooltip,
+	stoppedToast,
+	STOP_WHILE_WAITING,
 	SLOW_DELETE_MS,
 } from "./macroRunOutcome.js";
 
@@ -474,5 +478,33 @@ describe("deleteGuard: one delete at a time, with a note while a slow one is goi
 			})
 		).rejects.toThrow("boom");
 		expect(guard.isBusy()).toBe(false);
+	});
+});
+
+describe("a macro:progress event's status", () => {
+	it("passes a waiting run through instead of calling it running", () => {
+		expect(progressStatus({ status: "waiting_report" })).toBe("waiting_report");
+	});
+
+	it("is running for every other progress event, and for an older server that sends none", () => {
+		expect(progressStatus({ status: "running" })).toBe("running");
+		expect(progressStatus({})).toBe("running");
+		expect(progressStatus(null)).toBe("running");
+		expect(progressStatus(undefined)).toBe("running");
+	});
+});
+
+describe("stopping a run that waits for a report", () => {
+	it("says the report keeps generating, only for a waiting run", () => {
+		expect(stopTooltip("waiting_report")).toBe(`Stop. ${STOP_WHILE_WAITING}`);
+		expect(stoppedToast("waiting_report")).toBe(`Run stopped. ${STOP_WHILE_WAITING}`);
+		for (const status of ["running", "queued", "waiting_capacity"]) {
+			expect(stopTooltip(status), status).toBe("Stop");
+			expect(stoppedToast(status), status).toBe("Run stopped");
+		}
+	});
+
+	it("has no em-dash in the words", () => {
+		expect(STOP_WHILE_WAITING).not.toContain("\u2014");
 	});
 });

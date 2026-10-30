@@ -266,6 +266,20 @@ class TestAFailedWait(GuardBase):
 		self._explanation_live()
 		self._assert_allowed("get_list")
 
+	def test_an_error_in_the_guard_refuses_in_the_explanation_turn(self):
+		# Nothing else withholds a write from this turn: the guard fails CLOSED here.
+		self._explanation_live()
+		key = f"jarvis_macro_wait_guard_log:{self.conv}"
+		frappe.cache().delete_value(key)
+		self.addCleanup(frappe.cache().delete_value, key)
+		with (
+			patch("jarvis.chat.held_sheets.live_turn", side_effect=RuntimeError("db gone")),
+			patch("frappe.log_error") as log,
+		):
+			for tool in ("send_email", "export_excel", "remember"):
+				self._assert_refused(tool, FAILED)
+		log.assert_called_once()  # logged once an hour, not per call
+
 	def test_another_turn_of_the_chat_is_not_guarded(self):
 		self._live_turn_of_another_message()
 		for tool in ("send_email", "create_doc"):
