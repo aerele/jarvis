@@ -105,7 +105,7 @@ test("at the least fireworks shift the highest spark is still below the toran", 
 // drawn; a short one pulls the row's bottom up to the stage bottom minus FLOOR_GAP_PX and
 // shrinks the row by the same amount, as a group.
 test("the floor row's extent comes from the diya the art draws", () => {
-  const svg = floorSVG("t-", 300, floorFit({ ground: 300, hostH: 2000, s: 1 }));
+  const svg = floorSVG("t-", 300);
   // The diya sits `lift` above the baseline at DIYA.scale; the glow and shadow numbers
   // the extent is built from are the ones in the markup.
   assert.ok(

@@ -3,6 +3,7 @@
 // lanterns stay under the clearance line.
 import { tr } from "../stage.mjs";
 import { Scene, playScene } from "./scene-runtime.mjs";
+import { squeezeX } from "./scene-place.mjs";
 import {
   FLOOR_ROW,
   LANTERN,
@@ -11,6 +12,7 @@ import {
   defsSVG,
   eidStyle,
   lanternSpot,
+  lanternXs,
   lanternsSVG,
   moonSVG,
   moonY,
@@ -48,13 +50,18 @@ class EidScene extends Scene {
     super(host, opts, CFG);
   }
 
+  // Where the lanterns hang follows the page as it stands, like the moon.
+  extra(_b, geo) {
+    return { lanternX: lanternXs(geo) };
+  }
+
   px() {
     return `${eidStyle(this.p)}${defsSVG(this.p)}`;
   }
 
   inner(geo) {
     const { p } = this;
-    const { low, air } = lanternsSVG(p);
+    const { low, air } = lanternsSVG(p, geo.lanternX);
     const floor = this.opts.replay ? "" : this.floorGroup(low);
     return `${moonSVG(p)}${starsSVG(p, geo)}${floor}${air}${this.item("eid")}`;
   }
@@ -62,12 +69,13 @@ class EidScene extends Scene {
   playArt() {
     const { stage, p, geo } = this;
     const my = moonY(geo);
+    const moonX = squeezeX(MOON.x, geo);
     stage.animate(
       stage.q(`.${p}moon`),
       [
-        { transform: tr(MOON.x, my + MOON.rise), opacity: 0 },
+        { transform: tr(moonX, my + MOON.rise), opacity: 0 },
         { opacity: 1, offset: 0.3 },
-        { transform: tr(MOON.x, my), opacity: 1 },
+        { transform: tr(moonX, my), opacity: 1 },
       ],
       { duration: 2200, delay: 100, easing: "cubic-bezier(.2,.7,.2,1)" }
     );
@@ -91,7 +99,9 @@ class EidScene extends Scene {
   // the string's length at the row's scale, so no string shows at the stage's bottom edge.
   lantern(i) {
     const { stage, p, geo } = this;
-    const [x, y] = lanternSpot(i, geo);
+    const x = geo.lanternX[i];
+    if (x === null) return; // no room beside the hero: not drawn
+    const [, y] = lanternSpot(i, geo);
     const stub = LOW.includes(i) ? LANTERN.string / geo.floor.scale : 0;
     const from = geo.hu + 90 + stub;
     stage.animate(
