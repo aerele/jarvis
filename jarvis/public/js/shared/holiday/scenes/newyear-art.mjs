@@ -4,7 +4,7 @@
 // group. The year is text drawn from the `year` option, never part of the art.
 import { burstSVG, lin, rad, r2 } from "../stage.mjs";
 import { styleSVG } from "./scene-art.mjs";
-import { clearOfHero } from "./scene-place.mjs";
+import { clearOfHero, squeezeX } from "./scene-place.mjs";
 import {
   CLEAR,
   GAP,
@@ -131,10 +131,13 @@ export const defsSVG = (p) => `<defs>
   )}
 </defs>`;
 
-/** The four bursts and their rockets. `shift` moves them down from the heights they are listed at. */
-export function skySVG(p, shift) {
+/**
+ * The four bursts and their rockets. `shift` moves them down from the heights they are listed
+ * at; `xs` is where each stands across the stage (the phone squeezes them into its window).
+ */
+export function skySVG(p, shift, xs = BURSTS.map((b) => b.x)) {
   const burst = (b) =>
-    `<g transform="translate(${b.x} ${r2(
+    `<g transform="translate(${xs[b.n]} ${r2(
       b.y + shift
     )})"><circle class="${p}nflash${b.n} ${p}fb" r="${radiusOf(
       `nflash${b.n}`
@@ -234,7 +237,8 @@ export function cannonXs(geo) {
     t: geo.keep.t - more,
     b: geo.keep.b + more,
   };
-  return CANNON.x.map((x, i) => {
+  return CANNON.x.map((x0, i) => {
+    const x = squeezeX(x0, geo, { hw });
     const moved = clearOfHero(
       { x, y: anchor - hh, hw, hh },
       keep,

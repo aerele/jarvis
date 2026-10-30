@@ -5,6 +5,7 @@
 import { ballistic, quadPath, rng, tr } from "../stage.mjs";
 import { BURSTS, FLOOR_ROW, fireworksMinDy } from "../scene-geometry.mjs";
 import { Scene, playScene } from "./scene-runtime.mjs";
+import { squeezeX } from "./scene-place.mjs";
 import {
   FLAME_TILE,
   FLASHES,
@@ -55,7 +56,10 @@ class DiwaliScene extends Scene {
 
   // The fireworks follow the mark, but never up into the toran.
   extra(_b, geo) {
-    return { dy: Math.max(geo.shift, fireworksMinDy()) };
+    return {
+      dy: Math.max(geo.shift, fireworksMinDy()),
+      burstX: BURSTS.map((b) => squeezeX(b.x, geo)),
+    };
   }
 
   px(geo) {
@@ -65,8 +69,14 @@ class DiwaliScene extends Scene {
 
   inner(geo) {
     const { p } = this;
-    return `${skyShowSVG(p, geo.dy)}${toranSVG(p, geo.from, geo.to)}${
-      this.opts.replay ? "" : this.floorGroup(floorSVG(p, geo.ground))
+    return `${skyShowSVG(p, geo.dy, geo.burstX)}${toranSVG(
+      p,
+      geo.from,
+      geo.to
+    )}${
+      this.opts.replay
+        ? ""
+        : this.floorGroup(floorSVG(p, geo.ground, (x) => squeezeX(x, geo)))
     }`;
   }
 
@@ -97,7 +107,7 @@ class DiwaliScene extends Scene {
   rockets() {
     const { geo, stage } = this;
     // The rockets leave from just above the floor row, wherever the row now sits.
-    const launchAt = (x) => this.fitted([x, geo.ground - 30]);
+    const launchAt = (x) => this.fitted([squeezeX(x, geo), geo.ground - 30]);
     const launch = (n, x, to, delay) =>
       stage.animate(
         stage.q(`.${this.p}rk${n}`),
@@ -115,9 +125,10 @@ class DiwaliScene extends Scene {
       );
     const dy = geo.dy;
     const [b1, b2, b3] = BURSTS;
-    launch(1, 234, [b1.x, b1.y + dy], 1800);
-    launch(2, 552, [b2.x, b2.y + dy], 2400);
-    launch(3, 672, [b3.x, b3.y + dy], 3250);
+    const [x1, x2, x3] = geo.burstX;
+    launch(1, 234, [x1, b1.y + dy], 1800);
+    launch(2, 552, [x2, b2.y + dy], 2400);
+    launch(3, 672, [x3, b3.y + dy], 3250);
     this.flashes();
     this.burst("b1", b1, 2450, 3);
     this.burst("b2", b2, 3050, 6);
@@ -145,13 +156,18 @@ class DiwaliScene extends Scene {
   // position is read again before this runs, because the page may have moved since the
   // scene began.
   prepare() {
-    const { dy } = this.geo;
+    const { dy, burstX } = this.geo;
     const [fx, fy] = this.tile(...FLAME_TILE);
     this.append(lightSVG(this.p, fx, fy));
     const burst = BURSTS[1];
     this.stage.animate(
       this.stage.q(`.${this.p}carry`),
-      quadPath([burst.x, burst.y + dy], [492, 36 + dy], [fx, fy], 12),
+      quadPath(
+        [burstX[1], burst.y + dy],
+        [squeezeX(492, this.geo), 36 + dy],
+        [fx, fy],
+        12
+      ),
       { duration: this.untilLand(), easing: "ease-in", fill: "forwards" }
     );
     this.flash(

@@ -56,10 +56,16 @@ export const squeezeOf = (from, to) => {
 /**
  * An x placed on the 800-unit stage, squeezed about the mark's column (400) into a narrower
  * window (the phone's); exactly `x` when the window is not narrower. For props at a fixed x
- * that is not an edge (the floor row's diyas, the moon, the fireworks, ...).
+ * that is not an edge (the floor row's diyas, the moon, the fireworks, ...). A prop `hw` units
+ * wide on each side (drawn in a group scaled by `g` about 400, like the floor row) is also
+ * kept whole inside the window: the squeeze moves its centre, not its size.
  */
-export const squeezeX = (x, geo) =>
-  geo.squeeze < 1 ? 400 + (x - 400) * geo.squeeze : x;
+export function squeezeX(x, geo, { hw = 0, g = 1 } = {}) {
+  if (!(geo.squeeze < 1)) return x;
+  const eff = 400 + g * (x - 400) * geo.squeeze;
+  const kept = Math.min(Math.max(eff, geo.from + g * hw), geo.to - g * hw);
+  return 400 + (kept - 400) / g;
+}
 
 /**
  * An x on the 800-unit stage for a prop that belongs to an edge. A wider stage: the same
@@ -67,9 +73,9 @@ export const squeezeX = (x, geo) =>
  * an edge prop stays at its edge and none crosses the centre. (Keeping the distance on a
  * 540-unit window would put a prop 150 units in from the edge at x = 280, over the hero.)
  */
-export const edgeX = (x, geo) =>
+export const edgeX = (x, geo, reach) =>
   geo.squeeze < 1
-    ? squeezeX(x, geo)
+    ? squeezeX(x, geo, { hw: reach })
     : x < 400
     ? geo.from + x
     : geo.to - (800 - x);
