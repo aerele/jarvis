@@ -11,6 +11,7 @@ import { initSocket } from "./socket";
 import "./install";
 import { applyTheme } from "./lib/theme";
 import { applyBrandChrome } from "./branding";
+import { holidayTouch } from "./holidayTouch";
 import { install as installErrorReporter, vueErrorHandler } from "@shared/lib/errorReporter";
 import "./index.css";
 
@@ -26,6 +27,10 @@ installErrorReporter({ surface: "pwa", offline: true });
 applyTheme();
 // Whitelabel: patch tab title/favicon + repoint the manifest before mount.
 applyBrandChrome();
+
+// The holiday store keeps today's answer fresh for the whole session (a wake after midnight
+// asks the server again), not only while the welcome hero is on screen.
+holidayTouch.start();
 
 const app = createApp(App);
 app.config.errorHandler = vueErrorHandler;
