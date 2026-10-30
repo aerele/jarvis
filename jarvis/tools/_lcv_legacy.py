@@ -41,20 +41,23 @@ def claimed_cost(invoice, voucher, *, lock=False):
 		return None
 	from jarvis.tools._lcv_source_tax import _amount
 
-	rows = frappe.db.sql(
-		f"""select t.base_amount
+	query = """select t.base_amount
 		from `tabLanded Cost Taxes and Charges` t
 		inner join `tabLanded Cost Voucher` p on p.name = t.parent
 		where t.parenttype = 'Landed Cost Voucher' and t.parentfield = 'taxes'
 		and p.docstatus = 1 and p.name != %(voucher)s
-		and t.`{SOURCE_FIELD}` = %(invoice)s
+		and t.custom_jarvis_source_invoice = %(invoice)s
 		and not exists (
 			select 1 from `tabLanded Cost Vendor Invoice` n
 			where n.parent = p.name and n.parenttype = 'Landed Cost Voucher'
 			and n.parentfield = 'vendor_invoices' and n.vendor_invoice = %(invoice)s
 		)
-		limit {MAX_CLAIM_ROWS + 1} {"for update" if lock else ""}""",
-		{"invoice": invoice, "voucher": voucher or ""},
+		limit %(row_limit)s"""
+	if lock:
+		query += " for update"
+	rows = frappe.db.sql(
+		query,
+		{"invoice": invoice, "voucher": voucher or "", "row_limit": MAX_CLAIM_ROWS + 1},
 		as_dict=True,
 	)
 	if len(rows) > MAX_CLAIM_ROWS:
