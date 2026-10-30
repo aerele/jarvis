@@ -3,7 +3,7 @@
 // window.brand_favicon_url). Blank falls back to the Jarvis defaults. Mirrors
 // the desktop SPA's src/branding.js.
 
-import { isWhitelabelBrand } from "./lib/holidayFace";
+import { isWhitelabelBrand } from "./lib/brand";
 
 const DEFAULT_NAME = "Jarvis";
 
