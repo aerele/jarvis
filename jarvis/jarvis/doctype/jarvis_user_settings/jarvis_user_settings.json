@@ -16,11 +16,13 @@
     "auto_mode_acknowledged",
     "preferred_persona",
     "support_context_copy_pref",
+    "show_holiday_touches",
     "payment_calendar_preferences",
     "app_state_section",
     "business_greeting_state",
     "business_greeting_chat_count",
     "business_greeting_hidden_at_count",
+    "holiday_touch_shown",
     "pulse_last_period_key",
     "pulse_offer_count",
     "sidebar_order",
@@ -106,6 +108,13 @@
       "description": "Remembered answer to \"copy the last few chat messages into a new support ticket?\" - blank means ask every time (the default); Yes/No is a permanent 'don't ask again' the New Ticket flow reads before showing that popup. Set by the popup itself, not editable elsewhere."
     },
     {
+      "fieldname": "show_holiday_touches",
+      "fieldtype": "Check",
+      "label": "Show holiday touches",
+      "default": "1",
+      "description": "Holiday and birthday greetings on this person's Jarvis welcome screen. Off hides everything for them."
+    },
+    {
       "fieldname": "app_state_section",
       "fieldtype": "Section Break",
       "label": "App State"
@@ -139,6 +148,16 @@
       "read_only": 1,
       "no_copy": 1,
       "description": "Merged from Jarvis User Preference. Chat count at which the card was last 'Maybe later'-ed; keeps a refresh from re-showing it. Permlevel 1: server-owned (jarvis.chat.greeting), read-only to a Jarvis User."
+    },
+    {
+      "fieldname": "holiday_touch_shown",
+      "fieldtype": "Small Text",
+      "label": "Holiday Touch Shown",
+      "permlevel": 1,
+      "read_only": 1,
+      "hidden": 1,
+      "no_copy": 1,
+      "description": "JSON {date, times[iso utc]}: when today's holiday scene played for this person (Christmas cadence). Permlevel 1: server-owned app state, written only by jarvis.holiday_touch.cadence.record_shown with update_modified=False; deliberately absent from update_my_settings, which saves with ignore_permissions."
     },
     {
       "fieldname": "pulse_last_period_key",

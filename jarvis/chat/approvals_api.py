@@ -1523,7 +1523,7 @@ def _candidates_as(exec_user: str, item: dict) -> list[dict]:
 		return []
 	try:
 		with impersonate(exec_user):
-			return held_parties.find_existing(item["doctype"], title=party["title"], gstin=party["gstin"])
+			return held_parties.existing_of(item)
 	except Exception:
 		frappe.log_error(title="jarvis.pending_action.candidates_failed", message=frappe.get_traceback())
 		return []
@@ -1691,10 +1691,27 @@ def _first_existing(exec_user: str, items: list[dict]) -> tuple[dict, dict] | No
 	from jarvis.chat import held_parties
 
 	for item in items:
-		if item["op"] != "create" or not held_parties.is_party(item["doctype"]):
+		if item["op"] != "create" or not (
+			held_parties.is_party(item["doctype"]) or held_parties.company_scoped(item["doctype"])
+		):
 			continue
 		for match in _candidates_as(exec_user, item):
 			return item, match
+	return None
+
+
+def _existing_account_conflict(item: dict, match: dict) -> dict | None:
+	from jarvis.chat import held_parties
+
+	if held_parties.company_scoped(item["doctype"]) and held_parties.account_currency_conflict(
+		item["values"], match.get("currency")
+	):
+		return _held_refusal(
+			"scope_mismatch",
+			f"Account {match['name']} already exists in {match['company']} "
+			f"({match.get('currency') or 'currency not set'}) with a different currency. "
+			"Skip this proposal and request a different account name or number; nothing was created.",
+		)
 	return None
 
 
@@ -1742,6 +1759,9 @@ def _create_locked(row, approver: str) -> dict:
 	frappe.db.rollback()
 	if existing:
 		item, match = existing
+		conflict = _existing_account_conflict(item, match)
+		if conflict:
+			return conflict
 		label = match["title"] or match["name"]
 		hint = (
 			"Choose Use existing."
@@ -1822,6 +1842,12 @@ def _use_existing_locked(row, approver: str, link) -> dict:
 			"record_not_found",
 			f"That {doctype} was not found, or the person who dropped the file can't open it.",
 		)
+	if held_parties.company_scoped(doctype):
+		with impersonate(locked.exec_user):
+			problem = held_parties.account_selection_error(item["values"], link)
+		if problem:
+			frappe.db.rollback()
+			return _held_refusal("scope_mismatch", problem)
 	result = {"ok": True, "data": {"doctype": doctype, "name": link, "used_existing": True}}
 	_terminal_update(
 		locked.name,
@@ -1944,13 +1970,33 @@ def _edit_precheck(locked, items: list[dict], merged: list[dict], approver: str)
 	existing = _first_existing(locked.exec_user, merged)
 	if existing:
 		item, match = existing
+		conflict = _existing_account_conflict(item, match)
+		if conflict:
+			return conflict
 		label = match["title"] or match["name"]
+		if held_parties.company_scoped(item["doctype"]):
+			index = merged.index(item)
+			if items[index]["values"].get("company") != item["values"].get("company"):
+				return _held_refusal(
+					"scope_exists",
+					f"Account {match['name']} already exists in {match['company']} "
+					f"({match.get('currency') or 'currency not set'}). Skip this old-company proposal "
+					"and continue with the existing Account; nothing was created.",
+				)
 		return _held_refusal(
 			"exists",
 			f"{item['doctype']} {label} already exists now. Choose Use existing.",
 			candidates=[match],
 		)
-	keys = list(dict.fromkeys(held_parties.item_key(i) for i in (*items, *merged)))
+	# A company/number correction supersedes the old Account scope. Unrelated
+	# identity fields retain the original-and-edited overlap contract.
+	original = [
+		item
+		for index, item in enumerate(items)
+		if not held_parties.company_scoped(item["doctype"])
+		or held_parties.account_scope(item["values"]) == held_parties.account_scope(merged[index]["values"])
+	]
+	keys = list(dict.fromkeys(held_parties.item_key(i) for i in (*original, *merged)))
 	sibling = held_writes.sibling_of(locked.name, keys)
 	if sibling:
 		seen = sibling.owner_user == approver or "System Manager" in frappe.get_roles(approver)
@@ -1976,12 +2022,13 @@ def _claim_lost(name: str, ref: tuple[str, str] = ("", "")) -> None:
 	)
 
 
-def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, str]) -> dict:
+def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, str], items=()) -> dict:
 	"""A successful Edit & create, the row re-read under its lock (a mid-dispatch commit
 	or rollback may have moved it): our claim -> Executed; Pending (a rollback dropped
 	the uncommitted claim, the insert went on) -> Failed/``partial`` naming the record,
 	never Pending with a record; decided elsewhere (the reconciler) -> its verdict
 	stands and the outcome is late."""
+	from jarvis.chat import held_parties
 	from jarvis.chat.pending_actions import _seal, settle
 	from jarvis.chat.pending_actions._execute import late_outcome, outcome_of
 	from jarvis.chat.pending_actions._store import (
@@ -1996,6 +2043,13 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 
 	fresh = get_row(locked.name, lock="update")
 	cols = {"decided_by": approver, "result_doctype": ref[0], "result_name": ref[1], "edited": 1}
+	scope_cols = {}
+	if any(held_parties.company_scoped(i["doctype"]) for i in items):
+		# These are derived fingerprints, not sealed values. A successful company
+		# correction must not leave a recent-approval claim on the old company.
+		scope_cols["dedup_keys"] = _seal.canonical(
+			[_seal.open_key(locked.owner_user, held_parties.item_key(i)) for i in items]
+		)
 	if _our_claim(fresh, approver, stamp) and _terminal_update(
 		locked.name,
 		[EXECUTING],
@@ -2003,6 +2057,7 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 		reason=_EDITED_REASON,
 		sealed_settlement=_seal.seal_settlement(locked.name, {"result": result, "outcome": "confirmed"}),
 		**cols,
+		**scope_cols,
 	):
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 		settle(locked.name)
@@ -2119,7 +2174,7 @@ def _edit_create_locked(row, approver: str, patches: list[dict]) -> dict:
 	refs = held_edit.created_refs(locked.tool, edited, result) if ok else []
 	hidden = [dt for dt, n in refs if not frappe.has_permission(dt, "read", doc=n, user=locked.exec_user)]
 	if ok and not hidden:
-		return _edit_created(locked, approver, stamp, result, refs[0] if refs else ("", ""))
+		return _edit_created(locked, approver, stamp, result, refs[0] if refs else ("", ""), merged)
 
 	_discard_failed_dispatch(locked, edited, crash_tb, actor=approver, result=result)  # full rollback
 	if ok and not interfered:

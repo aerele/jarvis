@@ -24,6 +24,7 @@ from jarvis.exceptions import (
 	AdminUnreachableError,
 	AdminValidationError,
 )
+from jarvis.holiday_touch import policy as holiday_policy
 from jarvis.hooks import get_default_admin_url
 from jarvis.permissions import grant_onboarding_admin, is_system_manager, require_jarvis_admin
 
@@ -317,6 +318,9 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	# Marker-aware + KEEP-on-doubt (jarvis.connector_catalogue) so an old/rolled-back CP
 	# never re-enables a switched-off preset fleet-wide.
 	connector_catalogue.persist_from_connection(data)
+	# Same cadence: mirror the operator's holiday-touch policy. This is the daily path, the
+	# only one that stamps holiday_policy_synced_at (jarvis.holiday_touch.policy). Never raises.
+	holiday_policy.persist(data, daily=True)
 	if data.get("agent_url"):
 		write_connection(data)
 		return {"synced": True, "tenant_status": data.get("tenant_status")}

@@ -56,6 +56,16 @@ from jarvis.chat.device import (
 )
 from jarvis.chat.events import parse_event
 
+# #773: every socket call of a session goes through one gated, deadline-bounded IO
+# path; the names are re-exported here for callers of this module.
+from jarvis.chat.socket_io import (
+	IO_GATE_WAIT_S,
+	IO_WRITE_TIMEOUT_S,
+	SendNotStarted,
+	SendUncertain,
+	_SocketIO,
+)
+
 # Agent gateway's WS frame format. Looks JSON-RPC-shaped but has its
 # own type discriminator (``"type": "req"|"res"|"event"``) rather than
 # JSON-RPC 2.0's ``"jsonrpc": "2.0"`` field, so a generic JSON-RPC
@@ -655,6 +665,15 @@ class AgentSession:
 		self._ws = ws
 		self._creds = creds
 		self._lock = threading.Lock()  # serialize concurrent sends on same WS
+		# The one gate every read, write and close of this socket goes through (#773).
+		self._io = _SocketIO(ws)
+
+	def _socket_io(self) -> _SocketIO:
+		# Tests build sessions with __new__ and a stubbed _ws; give those one lazily.
+		io = self.__dict__.get("_io")
+		if io is None:
+			io = self._io = _SocketIO(self._ws)
+		return io
 
 	# -- lifecycle --------------------------------------------------------
 
@@ -974,10 +993,17 @@ class AgentSession:
 			# newly-persisted creds without re-pairing.
 
 	def close(self) -> None:
+		"""Graceful close (CLOSE frame, bounded), or an abort when another operation
+		holds the socket. Idempotent; the descriptor closes once nothing uses it."""
 		try:
-			self._ws.close()
+			self._socket_io().close_graceful()
 		except Exception:
 			pass
+
+	def abort_transport(self) -> None:
+		"""Poison the socket from any thread without waiting: blocked reads and writes
+		return at once and every later write is ``SendNotStarted``."""
+		self._socket_io().abort()
 
 	# -- protocol methods -------------------------------------------------
 
@@ -1792,11 +1818,29 @@ class AgentSession:
 		raise AgentUnreachableError("no connect response before timeout")
 
 	def _send(self, method: str, params: dict) -> str:
-		"""Send a request frame; return the generated request id."""
+		"""Send a request frame; return the generated request id. Raises
+		``SendNotStarted`` when no byte went out and ``SendUncertain`` (code
+		``ack-timeout``) when the write started and failed."""
 		payload, req_id = _build_request_frame(method, params)
-		with self._lock:
-			self._ws.send(payload)
+		self._write_frame(payload, method=method)
 		return req_id
+
+	def _write_frame(
+		self,
+		payload: str,
+		*,
+		wait_s: float = IO_GATE_WAIT_S,
+		write_s: float = IO_WRITE_TIMEOUT_S,
+		not_after: float | None = None,
+		method: str = "frame",
+	) -> None:
+		"""Write one pre-built frame (the relay mux's write seam): wait at most
+		``wait_s`` in total for the send lock and the socket, then at most ``write_s``
+		for the whole frame; ``not_after`` (monotonic) refuses a write that could not
+		finish by then."""
+		self._socket_io().write(
+			payload, lock=self._lock, wait_s=wait_s, write_s=write_s, not_after=not_after, method=method
+		)
 
 	def _request(self, method: str, params: dict, *, timeout_s: float, event_observer=None) -> dict:
 		"""Send a request and wait for the matching response frame.
@@ -1833,8 +1877,9 @@ class AgentSession:
 	def _recv(self, timeout_s: float) -> dict | None:
 		"""Read one frame from the WS, parse JSON, or return None on a soft
 		timeout / non-JSON noise. Raises AgentUnreachableError on hard
-		close so the caller can wrap into an assistant-message error row."""
-		return _recv_with_timeout(self._ws, timeout_s)
+		close so the caller can wrap into an assistant-message error row. A quiet
+		socket is waited on outside the IO gate, so it never delays a write."""
+		return self._socket_io().read(timeout_s)
 
 
 def _recv_with_timeout(ws: websocket.WebSocket, timeout_s: float) -> dict | None:
