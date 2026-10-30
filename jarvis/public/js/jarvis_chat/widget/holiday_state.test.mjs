@@ -41,6 +41,8 @@ function setup({
   clock = { at: NOW },
   name = "Priya Raman",
   shallowRef,
+  userName,
+  computed: computedImpl = computed,
 } = {}) {
   const listeners = [];
   const requests = [];
@@ -62,14 +64,14 @@ function setup({
   const state = createHolidayState({
     ref,
     ...(shallowRef ? { shallowRef } : {}),
-    computed,
+    computed: computedImpl,
     boot,
     doc,
     win,
     now: () => clock.at,
     storage: null,
     reduced: () => false,
-    userName: () => name,
+    userName: userName || (() => name),
     report: (ctx) => reports.push(ctx),
     loader: {
       load: async () => {
@@ -362,4 +364,25 @@ test("the support view hands out frozen copies, not the live objects", async () 
   }, TypeError);
   assert.equal(state.view.value.kind, "day"); // untouched
   assert.equal(seen.answer.design, "diwali");
+});
+
+test("the heading reads the name when it is asked for, not when the view was first built", () => {
+  // Desk fills the user's name a moment after the widget mounts; the view is built before.
+  let name = "";
+  // A computed that caches its first result, as Vue's does for inputs that are not reactive.
+  const caching = (fn) => {
+    let held;
+    let built = false;
+    return {
+      get value() {
+        if (!built) held = fn();
+        built = true;
+        return held;
+      },
+    };
+  };
+  const { state } = setup({ userName: () => name, computed: caching });
+  assert.equal(state.view.value.heading, "Happy Diwali");
+  name = "Priya Raman";
+  assert.equal(state.view.value.heading, "Happy Diwali, Priya");
 });
