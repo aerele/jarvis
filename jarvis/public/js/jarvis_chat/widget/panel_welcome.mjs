@@ -103,3 +103,33 @@ export function welcomeLines(greeting, view, { hold = false } = {}) {
     leadupLine: view.leadupLine || null,
   };
 }
+
+/**
+ * Is the welcome block open right now? A "welcome open" is the moment it becomes visible while
+ * the panel is open: a first open with no conversation, or a new chat. It counts only once this
+ * open's load has settled (the empty frame before it is not one), never before the readiness
+ * verdict is known (an unset-up workspace has the setup nudge, not a welcome), never on the
+ * setup gate, under the upgrade hold, or with anything in the thread.
+ */
+export function isWelcomeOpen({
+  open,
+  settled,
+  enabled,
+  maintenance,
+  readiness,
+  loading,
+  hasMessages,
+  loadError,
+  streaming,
+  thinking,
+}) {
+  const known = readiness === "ready" || readiness === "degraded";
+  const calm = !loading && !loadError && !streaming && !thinking;
+  return (
+    !!(open && settled && enabled) &&
+    !maintenance &&
+    known &&
+    calm &&
+    !hasMessages
+  );
+}
