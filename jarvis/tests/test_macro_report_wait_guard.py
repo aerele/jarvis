@@ -324,6 +324,9 @@ class TestWhenTheFeatureIsOffOrBroken(GuardBase):
 
 	def test_an_unreadable_rows_lookup_allows_the_call_and_logs_once(self):
 		self._waiting()
+		key = f"jarvis_macro_wait_log:jarvis macro report wait read failed:{self.conv}"
+		frappe.cache().delete_value(key)
+		self.addCleanup(lambda: frappe.cache().delete_value(key))
 		with (
 			patch.object(macro_report_wait, "_rows", side_effect=RuntimeError("db gone")),
 			patch("frappe.log_error") as log,

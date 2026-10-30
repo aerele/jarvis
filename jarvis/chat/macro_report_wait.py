@@ -13,6 +13,7 @@ cannot leak into an ordinary conversation.
 import hashlib
 import json
 import re
+from datetime import timedelta
 
 import frappe
 
@@ -161,7 +162,7 @@ def step_reads(conversation: str, turn) -> tuple[list[dict], list[dict], list[di
 	try:
 		return _step_reads(conversation, turn)
 	except Exception:
-		frappe.log_error(title="jarvis macro report wait read failed", message=frappe.get_traceback())
+		_log_once_an_hour(conversation, "jarvis macro report wait read failed", frappe.get_traceback())
 		return [], [], None
 
 
@@ -186,7 +187,7 @@ def _step_reads(conversation: str, turn):
 		except Exception:
 			unreadable = unreadable or frappe.get_traceback()
 	if unreadable:
-		frappe.log_error(title="jarvis macro report wait row skipped", message=unreadable)
+		_log_once_an_hour(conversation, "jarvis macro report wait row skipped", unreadable)
 	return (
 		[_wait(name, w, owner) for name, w in waits.items()],
 		[
@@ -455,7 +456,7 @@ def wake(run_name: str) -> None:
 			deduplicate=True,
 		)
 	except Exception:
-		frappe.log_error(title="jarvis macro report wake failed", message=frappe.get_traceback())
+		_log_once_an_hour(run_name, "jarvis macro report wake failed", frappe.get_traceback())
 
 
 def on_prepared_report_update(doc, method=None):
@@ -482,7 +483,8 @@ def on_prepared_report_update(doc, method=None):
 				enqueue_after_commit=True,
 			)
 	except Exception:
-		frappe.log_error(title="jarvis macro report wake failed", message=frappe.get_traceback())
+		# Once an hour for the whole site: a broken queue fails every report update alike.
+		_log_once_an_hour(None, "jarvis macro report wake failed", frappe.get_traceback())
 
 
 def resume_report_waits(run: str | None = None) -> None:
@@ -578,6 +580,15 @@ def _resume_one(name: str, lock_wait_s: float = 0.0) -> None:
 			_resume_ready(run, macro_doc, merged, what, states)
 
 
+def _wait_limit_s(report_name: str) -> int:
+	"""How long a run may wait for ``report_name`` from the moment it was parked: the
+	report's own timeout (plus Frappe's stall margin), an hour more for a queue behind
+	it, never past the hard cap."""
+	from jarvis.tools import _prepared_reports
+
+	return min(_prepared_reports.report_deadline_s(report_name) + _QUEUE_GRACE_S, _WAIT_CAP_S)
+
+
 def _state_of(run, wait: dict) -> dict:
 	"""One awaited report as ``{state, report, prepared_report, detail, as_of, expired}``,
 	``state`` ``ready`` / ``failed`` / ``pending``. Read by name AND the run's owner: a
@@ -610,7 +621,7 @@ def _state_of(run, wait: dict) -> dict:
 		_, detail = _prepared_reports.failure_reason(row.error_message)
 		fallback = "the report was cancelled" if row.status == "Cancelled" else "the report failed"
 		return {**out, "state": "failed", "detail": detail or fallback}
-	limit = min(_prepared_reports.report_deadline_s(out["report"]) + _QUEUE_GRACE_S, _WAIT_CAP_S)
+	limit = _wait_limit_s(out["report"])
 	since = frappe.utils.get_datetime(run.waiting_since) if run.waiting_since else None
 	if since and (frappe.utils.now_datetime() - since).total_seconds() > limit:
 		return {**out, "state": "failed", "detail": _NOT_IN_TIME, "expired": True}
@@ -769,6 +780,30 @@ def _went_out(run, merged: bool, turn: str) -> None:
 		step_continuations=json.dumps(continuations),
 	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
+	_announce_continuing(run)
+
+
+def _announce_continuing(run) -> None:
+	"""Tell the owner's open pages the run is going again (``macro:progress``, status
+	``running``), so a page showing "Waiting for report" does not wait for the next
+	step's event to change. Never raises."""
+	try:
+		total = frappe.utils.cint(run.total_steps)
+		publish_to_user(
+			frappe.db.get_value("Jarvis Macro", run.macro, "owner"),
+			{
+				"kind": "macro:progress",
+				"macro_run": run.name,
+				"macro": run.macro,
+				"conversation": run.conversation,
+				"step": min(frappe.utils.cint(run.current_step) or 1, total or 1),
+				"total": total,
+				"label": "Report ready, continuing",
+				"status": "running",
+			},
+		)
+	except Exception:
+		pass
 
 
 def _turn_is_ours(run, turn: str) -> bool:
@@ -969,18 +1004,26 @@ def write_refusal(conversation: str | None, tool: str) -> dict | None:
 
 def _log_guard_failure(conversation: str | None) -> None:
 	"""One Error Log row an hour per chat for a guard that failed open: a model in a loop
-	calls a write tool again and again, and each call fails the same way. Asked of the
-	cache, not the Error Log: the call is a request in flight and must not commit. Never
-	raises."""
+	calls a write tool again and again, and each call fails the same way. Never raises."""
+	_log_once_an_hour(
+		conversation,
+		"jarvis macro report wait guard failed",
+		f"chat {conversation}; {frappe.get_traceback()}",
+		key=f"jarvis_macro_wait_guard_log:{conversation or '-'}",
+	)
+
+
+def _log_once_an_hour(conversation: str | None, title: str, message: str, key: str | None = None) -> None:
+	"""``frappe.log_error`` at most once an hour per chat and title. The guard reads a
+	step's rows on every write tool call, so a database fault would otherwise log on each
+	one of them. Asked of the cache, not the Error Log: the call is a request in flight
+	and must not commit. Never raises."""
 	try:
-		key = f"jarvis_macro_wait_guard_log:{conversation or '-'}"
+		key = key or f"jarvis_macro_wait_log:{title}:{conversation or '-'}"
 		if frappe.cache().get_value(key):
 			return
 		frappe.cache().set_value(key, 1, expires_in_sec=_LOG_EVERY_S)
-		frappe.log_error(
-			title="jarvis macro report wait guard failed",
-			message=f"chat {conversation}; {frappe.get_traceback()}",
-		)
+		frappe.log_error(title=title, message=message)
 	except Exception:
 		pass
 
@@ -1025,3 +1068,113 @@ def _log_at_most_hourly(run_name: str, title: str, message: str) -> None:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist error log
 	except Exception:
 		frappe.db.rollback()
+
+
+# --------------------------------------------------------------------------- #
+# for the operator: what is waiting, and ending every wait
+# --------------------------------------------------------------------------- #
+_END_ALL_LOCK_WAIT_S = 5.0
+WAITS_ENDED = "Jarvis stopped waiting for reports on this site, so this run was ended. Run the macro again."
+
+
+def awaited_names(raw) -> list[str]:
+	"""The distinct report names in a run's ``waiting_on``, in order. What the runs API
+	hands the app so "Waiting for report: <names>" survives a reload."""
+	names = (str(w.get("report_name") or "") for w in _waits_of(raw))
+	return list(dict.fromkeys(n for n in names if n))
+
+
+def report_waits() -> list[dict]:
+	"""Every run parked in ``waiting_report``, read only: ``bench execute
+	jarvis.chat.macro_report_wait.report_waits``.
+
+	Per run: the macro, owner, step, ``waiting_since``, the ``deadline`` (the earliest
+	moment the sweep will give up on one of its reports) and the ``awaiting`` reports
+	with the live status of each Prepared Report (``missing`` when it was deleted or is
+	not the owner's). Oldest wait first. It changes nothing and takes no lock."""
+	out = []
+	runs = frappe.get_all(
+		RUN,
+		filters={"status": "waiting_report"},
+		fields=[
+			"name",
+			"macro",
+			"owner",
+			"conversation",
+			"current_step",
+			"total_steps",
+			"waiting_since",
+			"waiting_on",
+			"resume_count",
+			"step_resumes",
+		],
+		order_by="waiting_since asc",
+	)
+	for run in runs:
+		since = frappe.utils.get_datetime(run.waiting_since) if run.waiting_since else None
+		awaiting = []
+		deadlines = []
+		for wait in _waits_of(run.waiting_on):
+			name = wait.get("prepared_report") or ""
+			row = frappe.db.get_value(
+				PREPARED, {"name": name, "owner": run.owner}, ["status", "report_name"], as_dict=True
+			)
+			report = (row.report_name if row else None) or wait.get("report_name") or name
+			awaiting.append(
+				{"report": report, "prepared_report": name, "status": row.status if row else "missing"}
+			)
+			if since:
+				deadlines.append(since + timedelta(seconds=_wait_limit_s(report)))
+		out.append(
+			{
+				"run": run.name,
+				"macro": run.macro,
+				"owner": run.owner,
+				"conversation": run.conversation,
+				"step": f"{run.current_step}/{run.total_steps}",
+				"waiting_since": str(run.waiting_since or ""),
+				"deadline": str(min(deadlines)) if deadlines else "",
+				"resumes": f"{run.step_resumes} this step, {run.resume_count} this run",
+				"awaiting": awaiting,
+			}
+		)
+	return out
+
+
+def end_all_report_waits() -> dict:
+	"""End every run parked in ``waiting_report`` as failed, saying why, and disarm its
+	chat: ``bench execute jarvis.chat.macro_report_wait.end_all_report_waits``. For
+	draining the kill switch (a switched-off site still has parked runs, and the cron
+	would go on continuing them) and before a ROLLBACK (an older release does not know
+	the status).
+
+	Each run goes through the same ending a failed wait does (``macros._fail_parked_run``:
+	state-fenced, so a run that moved on meanwhile keeps its outcome; the owner is told).
+	A run whose lock is held (someone is moving it) or that raised is left for a second
+	call. Returns ``{"ended": [...], "skipped": [...]}``."""
+	from jarvis._redis_lock import redis_lock
+	from jarvis.chat import macros, txn
+
+	ended, skipped = [], []
+	for name in frappe.get_all(RUN, filters={"status": "waiting_report"}, pluck="name"):
+		try:
+			with redis_lock(
+				f"jarvis_macro_run:{name}", timeout_s=60, blocking_timeout_s=_END_ALL_LOCK_WAIT_S
+			) as acquired:
+				if not acquired:
+					skipped.append(name)
+					continue
+				txn.fresh_snapshot(owned=True)
+				run = frappe.get_doc(RUN, name)
+				if run.status != "waiting_report":
+					continue
+				macros._fail_parked_run(
+					run, frappe.get_doc(macros.MACRO, run.macro), "waiting_report", WAITS_ENDED
+				)
+				if frappe.db.get_value(RUN, name, "status") == "failed":
+					ended.append(name)
+		except Exception:
+			frappe.db.rollback()
+			skipped.append(name)
+			_log_at_most_hourly(name, f"jarvis macro report wait end failed: {name}", frappe.get_traceback())
+	return {"ended": ended, "skipped": skipped}
