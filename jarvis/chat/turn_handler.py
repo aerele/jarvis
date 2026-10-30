@@ -42,6 +42,7 @@ from jarvis import compat
 from jarvis.chat import agent_session_pool, empty_reply_recovery, seq_watermark, txn, vision
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
+from jarvis.chat.filebox_source import SourceLost
 from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription, pool_primary_model
@@ -1425,6 +1426,9 @@ def _assemble_prompt(
 	# vision_parts empty, so growth is the only signal that the send is big.
 	# Feeds _ack_timeout_s() below.
 	_prompt_chars_before_attachments = len(user_message)
+	from jarvis.chat.filebox_source import prepare_attachments as source_attachments
+
+	attachments = source_attachments(conv, attachments)
 	user_message, vision_parts = _prepare_attachments(user_message, attachments, vision_ok)
 	if binding is not None:
 		prefix, marker, suffix = user_message.partition(history_marker)
@@ -1581,27 +1585,6 @@ def handle_chat_send(payload: dict) -> None:
 		},
 	)
 
-	# Prompt assembly (shared with the Relay-Pump prepare job so the two paths
-	# emit a byte-identical prompt — clause order + attachment fencing live in
-	# ONE place, jarvis.chat.turn_handler.assemble_prompt). Pure reads + string
-	# building; agent_notes are READ (folded in) but cleared only after a proven
-	# delivery below.
-	_ap = assemble_prompt(
-		conv,
-		message_id=message_id,
-		conversation_id=conversation_id,
-		context=context,
-		attachments=attachments,
-		user=user,
-	)
-	settings = _ap.settings
-	chat_user = _ap.chat_user
-	user_message = _ap.user_message
-	vision_parts = _ap.vision_parts
-	inlined_prompt_chars = _ap.inlined_prompt_chars
-	drained_notes = _ap.drained_notes
-	drained_ids = _ap.drained_ids
-	from jarvis.chat import agent_notes
 	# The /think directive rides the chat_send ``thinking`` param, so
 	# user_message stays unprefixed and the OpenAI prefix cache the warm-up
 	# populates is never busted by a varying prefix.
@@ -1629,6 +1612,28 @@ def handle_chat_send(payload: dict) -> None:
 		_publish_to_user(user, payload)
 
 	try:
+		# Prompt assembly (shared with the Relay-Pump prepare job so the two paths
+		# emit a byte-identical prompt — clause order + attachment fencing live in
+		# ONE place, jarvis.chat.turn_handler.assemble_prompt). Pure reads + string
+		# building; agent_notes are READ (folded in) but cleared only after a proven
+		# delivery below.
+		_ap = assemble_prompt(
+			conv,
+			message_id=message_id,
+			conversation_id=conversation_id,
+			context=context,
+			attachments=attachments,
+			user=user,
+		)
+		settings = _ap.settings
+		chat_user = _ap.chat_user
+		user_message = _ap.user_message
+		vision_parts = _ap.vision_parts
+		inlined_prompt_chars = _ap.inlined_prompt_chars
+		drained_notes = _ap.drained_notes
+		drained_ids = _ap.drained_ids
+		from jarvis.chat import agent_notes
+
 		tool_msg_by_call_id: dict[str, str] = {}
 		batcher = _AssistantContentBatcher(assistant_msg.name)
 		# Own import (not the earlier best-effort one at bind_turn_message): the
@@ -2104,6 +2109,11 @@ def handle_chat_send(payload: dict) -> None:
 				message=frappe.get_traceback(),
 			)
 
+	except SourceLost as e:
+		_publish_run_error(str(e), changed_data=False, code="source_unavailable")
+		_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
+		_admission_settle(run_id, "errored", str(e))
+		return
 	except Exception as e:
 		# Last-resort backstop. Any exception that wasn't an
 		# AgentUnreachableError (e.g. cryptography.InvalidKey from
@@ -2756,7 +2766,14 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 		if not url:
 			continue
 		try:
-			fdoc = frappe.get_doc("File", {"file_url": url})
+			if "file_id" in att:
+				if not isinstance(att["file_id"], str) or not att["file_id"]:
+					raise ValueError("Invalid attachment identity")
+				fdoc = frappe.get_doc("File", att["file_id"])
+				if fdoc.file_url != url:
+					raise ValueError("Attachment identity does not match URL")
+			else:
+				fdoc = frappe.get_doc("File", {"file_url": url})
 		except Exception:
 			blocks.append(f"[Could not read attached file `{name}`.]")
 			continue

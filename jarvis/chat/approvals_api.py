@@ -810,6 +810,12 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		# The decision is durably recorded above; a resume failure must
 		# not 500 the endpoint (the SPA would re-show a decided row).
 		try:
+			from jarvis.chat.filebox_source import selected_file
+
+			owner = frappe.db.get_value("Jarvis Conversation", doc.conversation, "owner")
+			selected = selected_file(doc.conversation, read_as=owner)
+			if selected is not None:
+				attachments = json.dumps([dict(selected)])
 			res = _resume_conversation(doc.conversation, msg, origin="board_answer", attachments=attachments)
 			resumed = bool(res.get("ok"))
 		except Exception:
@@ -1414,6 +1420,12 @@ def list_pending_actions_lane() -> dict:
 			as_dict=True,
 		)
 	rows.sort(key=lambda r: (r.creation, r.name))
+	from jarvis.chat.filebox_source import selection_previews
+
+	selected = selection_previews([r.conversation for r in rows if r.kind == SHEET and r.conversation])
+	for r in rows:
+		if r.kind == SHEET and r.conversation in selected:
+			r.file_name = (selected[r.conversation] or {}).get("file_name") or ""
 	out = []
 	for r in rows:
 		if r.kind == SHEET:

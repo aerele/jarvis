@@ -324,9 +324,9 @@ def _record(conversation: str, row) -> str | None:
 # Routing Approval Requests
 # --------------------------------------------------------------------------- #
 def _file_name(conversation: str) -> str:
-	from jarvis.chat.filebox import _source_file
+	from jarvis.chat.filebox_source import display_file
 
-	f = _source_file(conversation)
+	f = display_file(conversation)
 	return _safe((f and f.file_name) or "this file", 80)
 
 
@@ -516,7 +516,7 @@ def _start_unpinned(conversation: str) -> bool:
 	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before run starts
 	try:
-		f = filebox._source_file(conversation)
+		f = filebox._source_file(conversation, read_as=frappe.db.get_value(CONV, conversation, "owner"))
 		ok, switch_to = approvals_api.owner_run_identity(conversation)
 		if not (f and ok):
 			reason = "the original file is no longer available" if not f else "the file's owner can't run it"
@@ -544,7 +544,7 @@ def _start_unpinned(conversation: str) -> bool:
 def _resume(conversation: str, message: str) -> bool:
 	from jarvis.chat import approvals_api, filebox
 
-	f = filebox._source_file(conversation)
+	f = filebox._source_file(conversation, read_as=frappe.db.get_value(CONV, conversation, "owner"))
 	attachments = json.dumps([{"file_url": f.file_url, "file_name": f.file_name}]) if f else None
 	try:
 		res = approvals_api._resume_conversation(
