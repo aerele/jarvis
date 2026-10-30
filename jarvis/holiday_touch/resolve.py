@@ -70,7 +70,8 @@ def answer(user: str, now: datetime | None = None) -> dict:
 	if forced is not None and has_jarvis_access(user):
 		occ = forced
 	else:
-		occ = cache.occasion_cached(user, zone, now, lambda: occasion(user, now, zone))
+		names = settings.names(site)
+		occ = cache.occasion_cached(user, zone, now, lambda: occasion(user, now, zone, names))
 	chosen = _choose(
 		occ,
 		settings.on(site, "birthday_greetings_enabled"),
@@ -93,9 +94,12 @@ def answer(user: str, now: datetime | None = None) -> dict:
 	return payload
 
 
-def occasion(user: str, now: datetime | None = None, zone: str | None = None) -> dict:
+def occasion(
+	user: str, now: datetime | None = None, zone: str | None = None, names: dict | None = None
+) -> dict:
 	"""The cacheable occasion for ``user`` (see the module docstring). ``zone`` is the user's
-	already validated zone (``zone_for``); it is read here when the caller has not."""
+	already validated zone (``zone_for``) and ``names`` the operator's extra holiday names
+	(``settings.names``); each is read here when the caller has not."""
 	if not user or user == "Guest":
 		return _none("guest")
 	if not has_jarvis_access(user):
@@ -106,7 +110,7 @@ def occasion(user: str, now: datetime | None = None, zone: str | None = None) ->
 	if not employee:
 		return _none("no_employee")
 	today = _utc(now).astimezone(ZoneInfo(zone or zone_for(user))).date()
-	holiday = _holiday_candidate(employee, today)
+	holiday = _holiday_candidate(employee, today, names)
 	state = _birthday_state(employee, today)
 	if state == "yes":
 		win = pick.hit("birthday", "birthday", "birthday", None, True, "birthday")
@@ -202,7 +206,7 @@ def _placeholder_dates(company: str) -> set[date]:
 # -- holidays -------------------------------------------------------------------------
 
 
-def _holiday_candidate(employee, today: date) -> dict:
+def _holiday_candidate(employee, today: date, names: dict | None = None) -> dict:
 	"""The holiday for ``today``, or a ``none`` with a reason. A failure here never costs the
 	birthday: it is logged once an hour and counts as "no holiday" (reason ``holiday_error``).
 	Reasons: ``no_list`` (no Holiday List resolves), ``no_rows`` (a list, but no row within
@@ -216,7 +220,7 @@ def _holiday_candidate(employee, today: date) -> dict:
 			return _none("no_list")
 		if not rows:
 			return _none("no_rows")
-		return pick.pick(_matches(rows, employee.company), today)
+		return pick.pick(_matches(rows, employee.company, names), today)
 	except Exception:
 		report("holiday", "Holiday touch: holiday lookup failed")
 		return _none("holiday_error")
