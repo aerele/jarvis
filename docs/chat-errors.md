@@ -256,6 +256,72 @@ site `logs/`):
   `redispatch_reason=empty_reply`. The refused-session re-send adds no reason;
   it logs `pump redispatch_refused_session`.
 
+## Macro runs waiting for a report
+
+A macro step that needs a Prepared Report (one that takes longer than a tool call
+can wait) asks for a copy made at or after the run started. The run then parks in
+status `waiting_report` without holding a worker or a turn. The Runs tab, the
+macro's page and the Macros list show "Waiting for report: <names>", and the names
+come from the run row, so they survive a reload.
+
+How it moves on:
+
+- A `Prepared Report` update wakes the parked runs that await it (one pending wake
+  per run, job id `macro-report-wake-<run>`, so a burst of updates is one job). A
+  wake that finds the run lock held leaves the run to the next cron.
+- The `*/5` cron `jarvis.chat.macro_report_wait.resume_report_waits` is the
+  guarantee; the wake is only speed. When every awaited report is Completed it
+  sends one continuation turn to the same chat, and the same step goes on. When one
+  failed, was cancelled or was deleted, the chat is disarmed and the model gets one
+  turn with no write or email tool to say why, then the run ends `failed`.
+- A report still Queued or Started is waited for until its `Report.timeout` (25
+  minutes when unset) plus 60 minutes, and never past 6 hours. After that the run
+  ends `failed` ("did not finish in time"). The hourly stale-run sweep closes a run
+  still parked 7 hours after it parked.
+- A site that is overloaded, or whose Relay Pump is draining, leaves the run parked;
+  nothing is lost.
+- The owner is told (Notification Log) of every ending of a run that waited,
+  including their own Stop.
+
+What to check:
+
+- `Report.timeout`. Frappe kills a generation after the report's timeout, 25
+  minutes when unset. A report that needs longer must have `Report.timeout` raised
+  first, or every run waiting for it ends "did not finish in time".
+- The scheduler. The cron and the update hook both depend on it: while the scheduler
+  is paused or the `short` queue is down, parked runs wait and nothing is lost; they
+  go on when it resumes (a run past its deadline ends then).
+- Kill switch: `bench --site <site> set-config jarvis_macro_report_wait 0` (also off
+  on a bench without the turn machine). New steps then never park and a report is
+  served as before. The switch is not looked at by the wake-up or the cron: a run
+  already parked is still continued when its report is ready (its step is then read
+  without the freshness bound). To end such runs instead, run `end_all_report_waits`
+  (below).
+
+Two helpers, run from the bench:
+
+```bash
+# read only: each waiting run, the status of every report it awaits, since when, deadline
+bench --site <site> execute jarvis.chat.macro_report_wait.report_waits
+
+# ends every waiting run failed with a clear reason, tells the owner, disarms the chat
+bench --site <site> execute jarvis.chat.macro_report_wait.end_all_report_waits
+```
+
+`end_all_report_waits` answers `{"ended": [...], "skipped": [...]}`. A skipped run was
+being moved by another worker or raised; run it again. Use it after switching the kill
+switch off, and before rolling the release back (an older release does not know
+`waiting_report`, so nothing would ever continue those runs).
+
+Error Log titles (fixed, at most one per run or chat an hour; the run is in the body):
+`Jarvis: macro report wait expired`, `Jarvis: macro report resume compensated`,
+`Jarvis: macro report resume not delivered`, `jarvis macro report resume failed: <run>`,
+`jarvis macro report wait end failed: <run>` (`end_all_report_waits` could not end a run),
+`jarvis macro report wake failed` (the wake-up could not be queued; the cron still
+continues the run, within five minutes), `jarvis macro report wait guard failed`,
+`jarvis macro report wait read failed` and `jarvis macro report wait row skipped`
+(these last three fail open: the step is not blocked, and the guard is not applied).
+
 ## Customer wording
 
 Headlines state the failure; the next line gives the customer an action.

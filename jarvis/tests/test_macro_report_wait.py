@@ -1006,6 +1006,12 @@ class ResumeBase(ParkBase):
 		mock.seen = seen
 		return mock
 
+	def _forget_wake_log(self, scope):
+		"""The wake failure is logged once an hour (cache): clear it before and after."""
+		key = f"jarvis_macro_wait_log:jarvis macro report wake failed:{scope or '-'}"
+		frappe.cache().delete_value(key)
+		self.addCleanup(frappe.cache().delete_value, key)
+
 	def _resume(self, run=None):
 		frappe.set_user("Administrator")
 		macro_report_wait.resume_report_waits(run)
@@ -1605,6 +1611,7 @@ class TestThePreparedReportHook(ResumeBase):
 		self._hook(self._doc()).assert_not_called()
 
 	def test_it_never_raises(self):
+		self._forget_wake_log(None)
 		with patch("frappe.get_all", side_effect=RuntimeError("db gone")), patch("frappe.log_error") as log:
 			macro_report_wait.on_prepared_report_update(self._doc())
 		self.assertEqual(log.call_args.kwargs["title"], "jarvis macro report wake failed")
@@ -1630,6 +1637,7 @@ class TestThePreparedReportHook(ResumeBase):
 		kw = enqueue.call_args.kwargs
 		self.assertEqual((kw["run"], kw["queue"], kw["deduplicate"]), (self.run, "short", True))
 		self.assertEqual(kw["job_id"], f"macro-report-wake-{self.run}")
+		self._forget_wake_log(self.run)
 		with patch("frappe.enqueue", side_effect=RuntimeError("redis")), patch("frappe.log_error") as log:
 			macro_report_wait.wake(self.run)
 		self.assertEqual(log.call_args.kwargs["title"], "jarvis macro report wake failed")

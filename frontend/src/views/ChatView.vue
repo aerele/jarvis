@@ -5767,7 +5767,11 @@ function patchMacroRunRow(p, done) {
 	const row = macroRuns.value.find((r) => r.name === p.macro_run);
 	if (row) {
 		if (p.step != null) row.current_step = p.step;
-		row.status = done ? p.status || "completed" : "running";
+		row.status = done
+			? p.status || "completed"
+			: p.status === "waiting_report"
+			? p.status
+			: "running";
 	}
 	loadMacroRunStats();
 }

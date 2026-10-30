@@ -22,6 +22,12 @@ error" and the summary). Everything that re-enters a live run reads those rather
 the macro, because the macro is editable while the run is in flight: an edit applies
 from the next run (``_run_content``).
 
+ROLLBACK: a run waiting for a prepared report is ``waiting_report``, a status an older
+release does not know (nothing would ever continue it, and its chat stays armed). Before
+reverting this change run ``bench --site <site> execute
+jarvis.chat.macro_report_wait.end_all_report_waits``; it ends every such run failed, tells
+its owner and disarms its chat. ``report_waits`` in the same module lists them first.
+
 Two ways to say WHICH step a turn is, each used for one job. Sending and position go by
 the step's fixed turn id (``_step_turn_id``: step N of run R is the Turn named
 ``h(R, N)``): whether a step was sent, where the run is, and every dispatcher meeting
@@ -2044,7 +2050,7 @@ def _stop_run_locked(run_name: str, *, reason: str, by: str) -> bool:
 		already ended or its row is gone, False when the status moved between two
 		live values after it was read."""
 		run = frappe.db.get_value(
-			RUN, run_name, ["name", "status", "conversation", "macro", "trigger"], as_dict=True
+			RUN, run_name, ["name", "status", "conversation", "macro", "trigger", "waited"], as_dict=True
 		)
 		# CDX-19: waiting_capacity is a live (non-terminal) run parked for capacity, so it must
 		# be stoppable too, otherwise the resume cron would keep re-attempting a run the user
@@ -2107,10 +2113,22 @@ def _stop_run_locked(run_name: str, *, reason: str, by: str) -> bool:
 			_post_closing_message(run, "stopped", reason)
 		except Exception:
 			frappe.log_error(title="jarvis macro closing message failed", message=frappe.get_traceback())
+	macro_doc = None
 	try:
-		_publish_done(run, frappe.get_doc(MACRO, run.macro), "stopped", reason)
+		macro_doc = frappe.get_doc(MACRO, run.macro)
+		_publish_done(run, macro_doc, "stopped", reason)
 	except Exception:
 		pass
+	if macro_doc is not None and frappe.utils.cint(run.waited):
+		# A run that waited for a report may be hours old and nobody is watching it:
+		# whoever stopped it, the owner hears it ended. (``_announce`` does the same for
+		# the endings that come through it.)
+		notify_owner(
+			macro_doc.owner,
+			subject=f"{_OUTCOME_SUBJECT['stopped']}: {frappe.utils.escape_html(macro_doc.macro_name)}",
+			body=reason or _outcome_body(run, macro_doc, "stopped"),
+			link=_run_link(run),
+		)
 	return True
 
 
@@ -3820,7 +3838,8 @@ def _announce(run, macro_doc, status: str, error: str = "") -> None:
 	The notification goes out for every run, scheduled or started by hand, that
 	finished, failed or was stopped by the engine (a step waiting on a card). A run
 	the owner stopped themselves ends ``stopped`` with no reason and is not told: it
-	is their own click. A run's chat is not in the chat list, so this is how the
+	is their own click, unless it ever waited for a prepared report (``waited``): that
+	run is long and unattended, so its owner hears every ending. A run's chat is not in the chat list, so this is how the
 	owner hears a run is done once they have left its chat. Never raises: each part
 	is best-effort on top of the run row, which is the record."""
 	try:
@@ -3831,7 +3850,7 @@ def _announce(run, macro_doc, status: str, error: str = "") -> None:
 		_publish_done(run, macro_doc, status, error)
 	except Exception:
 		frappe.log_error(title="jarvis macro done event failed", message=frappe.get_traceback())
-	if status == "stopped" and not error:
+	if status == "stopped" and not error and not _run_waited(run):
 		return
 	notify_owner(
 		macro_doc.owner,
@@ -3842,6 +3861,16 @@ def _announce(run, macro_doc, status: str, error: str = "") -> None:
 		body=error or _outcome_body(run, macro_doc, status),
 		link=_run_link(run),
 	)
+
+
+def _run_waited(run) -> bool:
+	"""Whether the run ever waited for a prepared report (``waited``, set when it is
+	parked and never cleared). Such a run is long and unattended, so its owner is told
+	of every ending, their own Stop included. Never raises."""
+	try:
+		return bool(frappe.utils.cint(frappe.db.get_value(RUN, run.name, "waited")))
+	except Exception:
+		return False
 
 
 def _outcome_body(run, macro_doc, status: str) -> str:

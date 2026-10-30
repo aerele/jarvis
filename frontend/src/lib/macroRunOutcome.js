@@ -4,8 +4,10 @@
 // for a macro whose last run failed).
 //
 // `lastRun` is the server's `last_run` on a macro (macros_api._last_runs):
-// { status, error, started_at, finished_at, conversation, trigger }, or null when
-// the macro never ran. `error` holds the reason for a failed or stopped run, and a
+// { status, error, started_at, finished_at, conversation, trigger, waiting_reports,
+// waiting_since }, or null when the macro never ran. `waiting_reports` (the names
+// of the prepared reports a `waiting_report` run awaits) and `waiting_since` are
+// set only for that status. `error` holds the reason for a failed or stopped run, and a
 // plain note on a completed one (a step that only drafted a record).
 
 // What the Macros list's "Last run" cell shows: { text, hint, tone }, or null for
@@ -14,8 +16,9 @@
 // `when` is the run's exact date and `relative` its relative time, both already
 // formatted by the caller. `legacy` is what the cell showed before the server sent
 // `last_run` (the scheduler's `last_run_at`, as { when, relative }); it is used only
-// when `lastRun` is undefined, i.e. an older server during a deploy.
-export function lastRunCell({ lastRun, when, relative, legacy }) {
+// when `lastRun` is undefined, i.e. an older server during a deploy. `waitingSince`
+// is the relative time of `lastRun.waiting_since`, for a run waiting for a report.
+export function lastRunCell({ lastRun, when, relative, legacy, waitingSince }) {
 	if (lastRun === undefined)
 		return legacy && legacy.relative
 			? { text: legacy.relative, hint: legacy.when, tone: "" }
@@ -39,6 +42,14 @@ export function lastRunCell({ lastRun, when, relative, legacy }) {
 			return { text: "Running", hint: `Started ${when}`, tone: "info" };
 		case "waiting_capacity":
 			return { text: "Waiting", hint: `Waiting for capacity since ${when}`, tone: "info" };
+		case "waiting_report": {
+			const label = waitingLabel(lastRun);
+			return {
+				text: label,
+				hint: waitingSince ? `${label}. Waiting since ${waitingSince}` : label,
+				tone: "info",
+			};
+		}
 		default:
 			// A status this bundle does not know (a newer server): show it as it is.
 			// Falling back to the time would read as "it worked".
@@ -46,12 +57,30 @@ export function lastRunCell({ lastRun, when, relative, legacy }) {
 	}
 }
 
+// "Waiting for report: A, B" for a run parked until its prepared reports are ready
+// (the names come from the server's `waiting_reports`, so they survive a reload);
+// just "Waiting for report" when it sends none.
+export function waitingLabel(run) {
+	const names = (run && run.waiting_reports) || [];
+	return names.length ? `Waiting for report: ${names.join(", ")}` : "Waiting for report";
+}
+
 // The form's notice about the last run: { title, text, tone }, or null when there
 // is nothing the owner needs to be told (it worked, it is still going, they stopped
 // it). `title` says what happened in a few words; `text` is the reason, which can
-// be several sentences and reads better as the lighter second line.
-export function lastRunLine(lastRun) {
+// be several sentences and reads better as the lighter second line. A run waiting
+// for a report is told as it is; `waitingSince` is the relative time of its
+// `waiting_since`.
+export function lastRunLine(lastRun, { waitingSince = "" } = {}) {
 	if (!lastRun) return null;
+	if (lastRun.status === "waiting_report")
+		return {
+			title: waitingLabel(lastRun),
+			text: `${
+				waitingSince ? `Waiting since ${waitingSince}. ` : ""
+			}Jarvis continues this run when the report is ready.`,
+			tone: "info",
+		};
 	const reason = lastRun.error || "";
 	if (lastRun.status === "failed")
 		return { title: "The last run failed", text: reason, tone: "bad" };
@@ -96,11 +125,24 @@ export function macroDoneSignal(p) {
 }
 
 // A run that has not ended, as the server counts it (macros._LIVE_RUN_STATUSES):
-// in progress, or parked until the site has capacity for its next step.
-const LIVE_RUN = ["running", "waiting_capacity"];
+// in progress, or parked until the site has capacity for its next step or a
+// prepared report is ready.
+export const LIVE_RUN = ["running", "waiting_capacity", "waiting_report"];
 
 export function isLiveRun(lastRun) {
 	return !!lastRun && LIVE_RUN.includes(lastRun.status);
+}
+
+// Whether a `macro:progress` event means the page's copy of a macro's last run is out
+// of date. Yes when the page knows of no live run (one just started: the scheduler,
+// another tab), and when the run it shows moved between two live statuses (running
+// <-> waiting_report): the cell and the notice name the state, and the later steps
+// of an unchanged state need nothing. `progress.status` is absent on an older server,
+// which then behaves as before.
+export function progressChangesLastRun(lastRun, progress) {
+	if (!isLiveRun(lastRun)) return true;
+	const status = progress && progress.status;
+	return !!status && LIVE_RUN.includes(status) && status !== lastRun.status;
 }
 
 // What a delete confirmation adds when the page knows a macro about to be deleted
