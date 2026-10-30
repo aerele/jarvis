@@ -1279,7 +1279,7 @@ const heroStyle = computed(() => {
 const heroClickable = computed(() => wearsHoliday.value && holidayView.value.wear === true);
 const heroLayerBox = wornLayerBox(HERO_PX);
 const heroItemMarkup = computed(() => {
-	const art = window.__jarvisHolidayArt;
+	const art = props.holiday?.art.value;
 	if (!heroSmiling.value || !wearsHoliday.value || !holidayView.value.wear || !art) return "";
 	return art.wornMarkup(holidayView.value.design, {
 		idPrefix: "jvwp",
