@@ -29,9 +29,9 @@ export function wornShown({
   );
 }
 
-/** Where the item's svg sits against the launcher: the art's own 88 unit viewBox. */
-export function wornLayerBox() {
-  const unit = FAB_PX / TILE_UNITS;
+/** Where the item's svg sits against a tile of `px` (the launcher by default): the art's own 88 unit viewBox. */
+export function wornLayerBox(px = FAB_PX) {
+  const unit = px / TILE_UNITS;
   return {
     left: `${-MARGIN_UNITS * unit}px`,
     top: `${-MARGIN_UNITS * unit}px`,
