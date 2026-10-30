@@ -15,7 +15,7 @@ from unittest import mock
 import frappe
 from redis.exceptions import RedisError
 
-from jarvis.holiday_touch import cache, resolve
+from jarvis.holiday_touch import cache, policy, resolve
 from jarvis.tests.test_holiday_touch_resolve import (
 	DIWALI,
 	HAS_HRMS,
@@ -484,6 +484,30 @@ class TestRotationAfterCommit(_Base):
 		with mock.patch.object(frappe, "cache", side_effect=RuntimeError("x")):
 			cache.rotate()
 			cache.on_after_migrate()
+
+
+class TestNamesRotation(_Base):
+	def setUp(self):
+		if not HAS_HRMS:
+			self.skipTest("hrms is not installed on this site")
+		super().setUp()
+
+	def test_a_cached_answer_is_served_until_the_commit_then_matched_again(self):
+		user = self.person([(DIWALI, "Festival of Lights", 0)])
+		self.assertEqual(_cached(user)["kind"], "none")
+		frappe.db.after_commit.reset()
+		frappe.flags.pop(cache.QUEUED_FLAG, None)
+		policy.persist(
+			{
+				"holiday_policy_supported": True,
+				"holiday_policy": {"aliases": {"diwali": ["festival of lights"]}},
+			},
+			daily=False,
+		)
+		frappe.db.value_cache.pop("Jarvis Settings", None)
+		self.assertEqual(_cached(user)["kind"], "none")  # the cache still holds the old answer
+		frappe.db.after_commit.run()
+		self.assertEqual(_cached(user)["design"], "diwali")
 
 
 class TestAfterMigrate(_Base):

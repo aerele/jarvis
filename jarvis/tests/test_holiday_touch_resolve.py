@@ -16,7 +16,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import get_system_timezone
 
-from jarvis.holiday_touch import cache, report, resolve, settings, weekly_off
+from jarvis.holiday_touch import cache, policy, report, resolve, settings, weekly_off
 
 SETTINGS = "Jarvis Settings"
 _MISSING = object()
@@ -128,7 +128,15 @@ def _assign(employee: str, company: str, holiday_list: str) -> None:
 	).insert(ignore_permissions=True).submit()
 
 
-LOG_KINDS = ("answer", "holiday", "rotate", "policy_persist", "policy_malformed", "policy_designs")
+LOG_KINDS = (
+	"answer",
+	"holiday",
+	"rotate",
+	"policy_persist",
+	"policy_malformed",
+	"policy_designs",
+	"policy_names",
+)
 
 
 def clear_log_markers() -> None:
@@ -157,7 +165,12 @@ class _Base(FrappeTestCase):
 		clear_log_markers()
 		for field in ("holiday_touches_enabled", "birthday_greetings_enabled"):
 			_set(field, 1)
-		for field in ("holiday_policy_disabled", "holiday_policy_disabled_designs", "brand_logo"):
+		for field in (
+			"holiday_policy_disabled",
+			"holiday_policy_disabled_designs",
+			"holiday_policy_names",
+			"brand_logo",
+		):
 			_set(field, None)
 		_set("agent_name", "Jarvis")
 
@@ -727,6 +740,66 @@ class TestSwitchesAndPolicy(_Base):
 		user = self._holiday_user()
 		out = resolve.answer(user, _now(date(2026, 11, 6)))
 		self.assertEqual((out["kind"], out["worn"], out["scene"]), ("leadup", True, False))
+
+
+class TestAdminNames(_Base):
+	"""Names the operator maintains (``holiday_policy_names``) change what a row matches."""
+
+	def setUp(self):
+		if not HAS_HRMS:
+			if os.environ.get("CI"):
+				self.fail("hrms is not installed on the CI site")
+			self.skipTest("hrms is not installed on this site")
+		super().setUp()
+
+	def _sync(self, aliases=None, near_misses=None):
+		"""The names the way the pull delivers them, then the commit (which rotates the cache)."""
+		body = {"holiday_policy_supported": True, "holiday_policy": {}}
+		if aliases is not None:
+			body["holiday_policy"]["aliases"] = aliases
+		if near_misses is not None:
+			body["holiday_policy"]["near_misses"] = near_misses
+		frappe.db.after_commit.reset()
+		frappe.flags.pop(cache.QUEUED_FLAG, None)
+		policy.persist(body, daily=False)
+		frappe.db.after_commit.run()
+		frappe.db.value_cache.pop(SETTINGS, None)
+
+	def _kind(self, user):
+		out = resolve.answer(user, _now(DIWALI))
+		return out["kind"], out.get("design")
+
+	def test_an_alias_makes_an_unknown_row_match_the_design(self):
+		user = self.person([(DIWALI, "Festival of Lights", 0)])
+		self.assertEqual(self._kind(user), ("none", None))  # and now cached as none
+		self._sync(aliases={"diwali": ["festival of lights"]})
+		self.assertEqual(self._kind(user), ("day", "diwali"))
+
+	def test_a_near_miss_blocks_a_row_that_would_match(self):
+		user = self.person([(DIWALI, "Diwali Bonus Day", 0)])
+		self.assertEqual(self._kind(user), ("day", "diwali"))
+		self._sync(near_misses=["diwali bonus day"])
+		self.assertEqual(self._kind(user), ("none", None))
+
+	def test_clearing_the_names_restores_the_default_matching(self):
+		user = self.person([(DIWALI, "Festival of Lights", 0)])
+		self._sync(aliases={"diwali": ["festival of lights"]})
+		self.assertEqual(self._kind(user), ("day", "diwali"))
+		self._sync(aliases={})
+		self.assertEqual(self._kind(user), ("none", None))
+
+	def test_an_alias_on_a_weekly_off_calendar_name_applies_too(self):
+		user = self.person([(DIWALI, "Sunday", 1)], list_country="India")
+		self._sync(near_misses=["diwali", "deepavali"])  # the calendar names this date Diwali
+		self.assertEqual(self._kind(user), ("none", None))
+
+	def test_unreadable_stored_names_leave_the_default_matching(self):
+		user = self.person([(DIWALI, "Diwali", 0)])
+		for junk in ("{broken", "[]", '"text"', '{"aliases": 5, "near_misses": {"a": 1}}'):
+			with self.subTest(junk=junk):
+				_set("holiday_policy_names", junk)
+				cache.rotate()
+				self.assertEqual(self._kind(user), ("day", "diwali"))
 
 
 class TestPrivacyAndFailSafe(_Base):
