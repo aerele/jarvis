@@ -24,3 +24,13 @@ export function sceneBoxes({ host, hero, mark, heading, cards }) {
 	};
 	return { host, hero, mark, heading, cards: band };
 }
+
+/** The hero as the scenes want it: the mark and the heading together (the page's hero
+ * element is a flex area that fills the screen between the bar and the cards). */
+export function heroBox(mark, heading) {
+	const x = Math.min(mark.x, heading.x);
+	const y = Math.min(mark.y, heading.y);
+	const right = Math.max(mark.x + mark.w, heading.x + heading.w);
+	const bottom = Math.max(mark.y + mark.h, heading.y + heading.h);
+	return { x, y, w: right - x, h: bottom - y };
+}
