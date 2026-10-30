@@ -1,3 +1,4 @@
+// Keep in step with frontend/src/lib/holidayWorn.js (the desktop original).
 // Loads the worn-item art (jarvis/public/js/shared/holiday/worn.mjs) the first time a mark
 // needs it. A literal import path, never a template string, so the bundler can see it and
 // name the chunk `holiday-*` (see chunkFileNames in vite.config.js), which keeps it out of

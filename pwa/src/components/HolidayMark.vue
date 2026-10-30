@@ -20,7 +20,7 @@
 				class="jvh-layer"
 				data-testid="holiday-worn"
 				:data-design="art.design"
-				:data-state="layerState(effectiveMood)"
+				data-state="happy"
 				viewBox="-16 -16 88 88"
 				:style="layerStyle"
 				aria-hidden="true"
@@ -32,6 +32,8 @@
 </template>
 
 <script setup>
+// Keep in step with frontend/src/components/holiday/HolidayMark.vue (the desktop original).
+//
 // BrandMark that wears today's holiday item while its face shows. With nothing to wear
 // (an ordinary day, a logo or custom agent name, the upgrade hold, worn:false) this is
 // BrandMark alone, exactly as before. Wearing, the root is a wrapper and the item is drawn
@@ -42,12 +44,13 @@
 // The welcome mark smiles with its item for about 2.5 s when it first appears on a lead-up
 // day, the day itself or a birthday, and is then a button that plays the smile again. On
 // an ordinary day, in white label and in the upgrade hold it is not a button at all.
-// A phone has no hover, and the PWA has no idle blink: the face shows for the smile only.
+// A phone has no hover, and the PWA has no idle blink: the face shows for the smile only, so
+// the item is always in its "happy" state (the desktop's peek and thinking states are not used).
 import { computed, getCurrentInstance, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import BrandMark from "./BrandMark.vue";
 import { wornAnswer } from "../holidayTouch";
 import { loadWorn, loadedWorn } from "../lib/holidayWorn";
-import { effectiveMood as moodFor, layerState } from "../lib/holidayFace";
+import { effectiveMood as moodFor } from "../lib/holidayFace";
 
 const props = defineProps({
 	size: { type: Number, default: 56 },
@@ -80,19 +83,26 @@ watch(
 );
 
 // ---- the welcome smile: about 2.5 s with the item, once per mount, and again on a tap.
-// The 2.5 s starts when the item first shows (or when the art turns out not to load), so a
-// slow chunk does not eat the smile. Reduced motion holds the smiling frame.
+// The 2.5 s starts when the item first shows, or after ART_WAIT_MS if the art has not
+// arrived (a failed or stalled import), so a slow chunk does not eat the smile and a stuck
+// one cannot hold it for ever. Reduced motion holds the smiling frame.
+const ART_WAIT_MS = 3000;
 const smiling = ref(false);
 const clickable = computed(() => wearing.value && SMILE_KINDS.includes(art.value?.kind));
 let smiled = false;
 let smileTimer = null;
+let artTimer = null;
 let smileRun = 0;
 let gone = false;
+function artOrGiveUp() {
+	const giveUp = new Promise((resolve) => (artTimer = setTimeout(resolve, ART_WAIT_MS)));
+	return Promise.race([ensureWorn(), giveUp]).finally(() => clearTimeout(artTimer));
+}
 async function smile() {
 	const run = ++smileRun;
 	clearTimeout(smileTimer);
 	smiling.value = true;
-	await ensureWorn();
+	await artOrGiveUp();
 	await nextTick(); // the item is drawn now
 	if (gone || run !== smileRun) return;
 	smileTimer = setTimeout(() => (smiling.value = false), WELCOME_SMILE_MS);
@@ -152,6 +162,7 @@ watch(
 onBeforeUnmount(() => {
 	gone = true;
 	clearTimeout(smileTimer);
+	clearTimeout(artTimer);
 	stopWatchingMotion();
 });
 
