@@ -8,8 +8,10 @@ Redis, as a request by that user would.)
 A date of birth is never part of the view: ``birthday_today`` is a yes/no.
 
 ``chain`` lists the steps ``answer`` applies, in its order. ``effect`` is ``blocks`` when that
-step alone drops this user's occasion, ``changes`` when it swaps the occasion, else ``none``.
-The final word is always ``answer``.
+step alone leaves the user with nothing, ``changes`` when it swaps the occasion (a fallback
+survives, or a forced occasion replaces it), else ``none``.
+The final word is always ``answer``: the chain reads a fresh ``resolve.occasion`` while
+``answer`` may serve a cached one, so on a stale cache the two can differ (``answer`` wins).
 """
 
 from __future__ import annotations
@@ -61,58 +63,71 @@ class _View:
 			"occasion": occ,
 			"chain": self.chain(occ),
 			"answer": resolve.safe_answer(self.user, self.now),
+			"answer_is_authoritative": True,  # the chain is a fresh read; answer may be cached
 		}
 
 	def chain(self, occ: dict) -> list[dict]:
+		forced = self.forced()
+		occ_used = forced or occ  # what answer() chooses from
 		return [
 			self.switch("site_switch", settings.on(self.site, "holiday_touches_enabled")),
 			self.switch("personal_switch", not settings.personal_off(self.row)),
 			self.switch("policy_switch", not settings.on(self.site, "holiday_policy_disabled")),
-			self.force(),
+			self.force(forced),
 			_step(
 				"occasion", f"{occ['kind']} ({occ['reason']})", "blocks" if occ["kind"] == "none" else "none"
 			),
-			self.birthday_switch(occ),
-			self.blocked_designs(occ),
+			self.birthday_switch(occ_used),
+			self.blocked_designs(occ_used),
 			_step("white_label", "yes" if settings.white_label(self.site) else "no", "none"),
-			self.cadence(),
+			self.cadence(forced),
 		]
 
 	def switch(self, step: str, enabled: bool) -> dict:
 		return _step(step, "on" if enabled else "off", "none" if enabled else "blocks")
 
-	def force(self) -> dict:
+	def forced(self) -> dict | None:
+		"""The developer-mode occasion ``answer`` would use instead of the real one."""
 		forced = force.forced_occasion(self.now)
-		if forced is None or not has_jarvis_access(self.user):
+		return forced if forced is not None and has_jarvis_access(self.user) else None
+
+	def force(self, forced: dict | None) -> dict:
+		if forced is None:
 			return _step("force", "none", "none")
 		return _step("force", f"{forced['kind']} ({forced['occasion']})", "changes")
 
 	def birthday_switch(self, occ: dict) -> dict:
-		enabled = settings.on(self.site, "birthday_greetings_enabled")
-		blocked = not enabled and "birthday" in _kinds(occ)
-		return _step("birthday_switch", "on" if enabled else "off", "blocks" if blocked else "none")
+		if settings.on(self.site, "birthday_greetings_enabled"):
+			return _step("birthday_switch", "on", "none")
+		return _step("birthday_switch", "off", _effect(occ, False, self.blocked, True, self.blocked))
 
 	def blocked_designs(self, occ: dict) -> dict:
-		blocked = settings.blocked_designs(self.site)
-		hit = bool(blocked & _designs(occ))
-		return _step("blocked_designs", ",".join(sorted(blocked)) or "none", "blocks" if hit else "none")
+		on = settings.on(self.site, "birthday_greetings_enabled")
+		effect = _effect(occ, on, self.blocked, on, frozenset())
+		return _step("blocked_designs", ",".join(sorted(self.blocked)) or "none", effect)
 
-	def cadence(self) -> dict:
+	@property
+	def blocked(self) -> frozenset:
+		return settings.blocked_designs(self.site)
+
+	def cadence(self, forced: dict | None) -> dict:
+		if forced is not None:
+			return _step("cadence", "force bypasses the cadence", "none")
 		allowed = cadence.may_play(self.now, settings.shown_times(self.row), self.zone)
 		return _step("cadence", "may play" if allowed else "already shown", "none" if allowed else "blocks")
 
 
+def _effect(
+	occ: dict, birthday_on: bool, blocked: frozenset, other_on: bool, other_blocked: frozenset
+) -> str:
+	"""What one switch does to the choice ``answer`` makes: compare the real choice with the
+	choice that would be made had this switch been left out (``other_*``)."""
+	actual = resolve._choose(occ, birthday_on, blocked)
+	without = resolve._choose(occ, other_on, other_blocked)
+	if actual == without:
+		return "none"
+	return "blocks" if actual is None else "changes"
+
+
 def _step(step: str, value: str, effect: str) -> dict:
 	return {"step": step, "value": value, "effect": effect}
-
-
-def _candidates(occ: dict) -> list[dict]:
-	return [c for c in (occ, occ.get("fallback")) if c]
-
-
-def _kinds(occ: dict) -> set:
-	return {c["kind"] for c in _candidates(occ)}
-
-
-def _designs(occ: dict) -> set:
-	return {c["design"] for c in _candidates(occ) if c["design"]}

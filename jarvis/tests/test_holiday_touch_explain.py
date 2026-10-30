@@ -39,6 +39,7 @@ VIEW_KEYS = {
 	"occasion",
 	"chain",
 	"answer",
+	"answer_is_authoritative",
 }
 
 
@@ -248,6 +249,23 @@ class TestReasons(_Case):
 		)
 		self.assertEqual(self.step(self.view(user), "cadence")["value"], "already shown")
 
+	def test_a_forced_occasion_bypasses_the_cadence(self):
+		user = self.person()
+		state = {"date": "2026-11-08", "times": [NOW.isoformat()]}
+		frappe.get_doc({"doctype": USETT, "user": user, "holiday_touch_shown": json.dumps(state)}).insert(
+			ignore_permissions=True
+		)
+		with mock.patch.dict(frappe.conf, {"developer_mode": 1, "jarvis_holiday_touch_force": "diwali:day"}):
+			view = self.view(user)
+		self.assertEqual(
+			self.step(view, "cadence"),
+			{"step": "cadence", "value": "force bypasses the cadence", "effect": "none"},
+		)
+		self.assertIs(view["answer"]["may_play"], True)
+
+	def test_the_view_says_the_answer_is_authoritative(self):
+		self.assertIs(self.view(self.person())["answer_is_authoritative"], True)
+
 	def test_the_chain_steps_come_in_the_order_answer_applies_them(self):
 		names = [s["step"] for s in self.view(self.person())["chain"]]
 		self.assertEqual(
@@ -264,6 +282,51 @@ class TestReasons(_Case):
 				"cadence",
 			],
 		)
+
+
+class TestChoiceEffects(_Case):
+	"""A birthday on the Diwali date: the birthday wins and Diwali is its fallback."""
+
+	def setUp(self):
+		self.needs_hrms()
+		super().setUp()
+		self.user = self.person([(DIWALI, "Diwali", 0)], dob=BIRTHDAY)
+
+	def test_the_baseline_is_the_birthday(self):
+		view = self.view(self.user)
+		self.assertEqual(view["occasion"]["fallback"]["kind"], "day")
+		self.assertEqual(view["answer"]["kind"], "birthday")
+
+	def test_a_blocked_fallback_design_does_not_block_the_birthday(self):
+		_set("holiday_policy_disabled_designs", json.dumps(["diwali"]))
+		view = self.view(self.user)
+		self.assertEqual(self.step(view, "blocked_designs")["effect"], "none")
+		self.assertEqual(view["answer"]["kind"], "birthday")
+
+	def test_a_blocked_birthday_design_changes_to_the_fallback(self):
+		_set("holiday_policy_disabled_designs", json.dumps(["birthday"]))
+		view = self.view(self.user)
+		self.assertEqual(self.step(view, "blocked_designs")["effect"], "changes")
+		self.assertEqual(view["answer"]["kind"], "day")
+
+	def test_both_designs_blocked_blocks(self):
+		_set("holiday_policy_disabled_designs", json.dumps(["birthday", "diwali"]))
+		view = self.view(self.user)
+		self.assertEqual(self.step(view, "blocked_designs")["effect"], "blocks")
+		self.assertEqual(view["answer"]["kind"], "none")
+
+	def test_the_birthday_switch_off_changes_to_the_fallback(self):
+		_set("birthday_greetings_enabled", 0)
+		view = self.view(self.user)
+		self.assertEqual(self.step(view, "birthday_switch")["effect"], "changes")
+		self.assertEqual(view["answer"]["kind"], "day")
+
+	def test_the_birthday_switch_off_with_a_blocked_fallback_blocks(self):
+		_set("birthday_greetings_enabled", 0)
+		_set("holiday_policy_disabled_designs", json.dumps(["diwali"]))
+		view = self.view(self.user)
+		self.assertEqual(self.step(view, "birthday_switch")["effect"], "blocks")
+		self.assertEqual(view["answer"]["kind"], "none")
 
 
 class TestRows(_Case):
@@ -306,6 +369,10 @@ class TestRows(_Case):
 		self.assertEqual((view["rows_status"], view["rows"]), ("error", []))
 		self.assertEqual(view["occasion"]["reason"], "holiday_error")
 
-	def test_the_matches_do_not_change_what_answer_says(self):
+	def test_the_view_answer_is_the_payload_the_user_gets_from_get_today(self):
 		user = self.person([(DIWALI, "Diwali", 0), (date(2026, 11, 10), "Company Offsite", 0)])
-		self.assertEqual(self.view(user)["answer"], resolve.answer(user, NOW))
+		answer = self.view(user)["answer"]
+		frappe.set_user(user)
+		with mock.patch.object(resolve, "_utc", return_value=NOW):
+			self.assertEqual(api.get_today(), answer)
+		self.assertEqual(answer["kind"], "day")
