@@ -284,3 +284,26 @@ test("the support view hangs off window as a getter, not a value", () => {
     undefined
   );
 });
+
+test("view.worn says the answer has something to wear before the art is in", () => {
+  const { state } = setup();
+  assert.equal(state.view.value.worn, true);
+  const plain = setup({
+    boot: {
+      jarvis_has_access: true,
+      jarvis_holiday_touch: answerOf({ worn: false }),
+    },
+  });
+  assert.equal(plain.state.view.value.worn, false);
+  assert.equal(setup({ boot: {} }).state.view.value.worn, false);
+});
+
+test("the art's stylesheet is installed once, as the art arrives", async () => {
+  const installs = [];
+  const art = { v: 1, installWornCss: (doc) => installs.push(doc) };
+  const { state } = setup({ art });
+  await state.ensureArt();
+  await state.ensureArt();
+  assert.equal(installs.length, 2); // installWornCss itself is idempotent
+  assert.ok(installs[0] && typeof installs[0].addEventListener === "function");
+});
