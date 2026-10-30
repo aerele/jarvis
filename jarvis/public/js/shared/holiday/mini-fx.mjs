@@ -1,5 +1,5 @@
 // The mini chat's celebration: a few seconds of the holiday's particles drift down behind
-// the welcome. Ported verbatim from the frozen design (MINI_PARTICLE, playMiniFx); lazy art,
+// the welcome. Ported verbatim from the approved design (MINI_PARTICLE, playMiniFx); lazy art,
 // it loads with the Desk art bundle and never with the widget. The target svg has viewBox
 // "0 0 350 260", which is the space the numbers below are in.
 import { flakeSVG } from "./scenes/christmas-art.mjs";
@@ -43,8 +43,7 @@ export const MINI_PARTICLE = {
     }" stroke="${i % 3 === 1 ? "#cbd5e1" : "none"}" stroke-width=".6"/>`,
 };
 
-const has = (design) =>
-  Object.prototype.hasOwnProperty.call(MINI_PARTICLE, design);
+const has = (design) => Object.hasOwn(MINI_PARTICLE, design);
 
 /** The svg children for one design's particles, "" for a design with none. */
 export function particleMarkup(design, rand = rng(7)) {
@@ -76,7 +75,7 @@ export function playParticles(svg, design) {
   };
 }
 
-// The draw order of rand() is the frozen design's: duration, drift, spin, delay.
+// The draw order of rand() is the approved design's: duration, drift, spin, delay.
 function fall(el, rand) {
   const duration = 2600 + rand() * 1500;
   return el.animate(

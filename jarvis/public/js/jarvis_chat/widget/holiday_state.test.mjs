@@ -114,9 +114,9 @@ test("a day reads as heading and design; the item shows once the art is in", asy
   assert.equal(before.heading, "Happy Diwali, Priya");
   assert.equal(before.leadupLine, null);
   assert.equal(before.design, "diwali");
-  assert.equal(before.wear, false);
+  assert.equal(before.itemReady, false);
   await state.ensureArt();
-  assert.equal(state.view.value.wear, true);
+  assert.equal(state.view.value.itemReady, true);
 });
 
 test("a lead-up has the advance wish and no heading", () => {
@@ -154,7 +154,7 @@ test("a white-label answer keeps the words and never wears", async () => {
   });
   await state.ensureArt();
   assert.equal(state.view.value.heading, "Happy Diwali, Priya");
-  assert.equal(state.view.value.wear, false);
+  assert.equal(state.view.value.itemReady, false);
 });
 
 test("starting preloads the art only when the answer wears", async () => {
@@ -289,17 +289,17 @@ test("the support view hangs off window as a getter, not a value", () => {
   );
 });
 
-test("view.worn says the answer has something to wear before the art is in", () => {
+test("view.hasItem says the answer has something to wear before the art is in", () => {
   const { state } = setup();
-  assert.equal(state.view.value.worn, true);
+  assert.equal(state.view.value.hasItem, true);
   const plain = setup({
     boot: {
       jarvis_has_access: true,
       jarvis_holiday_touch: answerOf({ worn: false }),
     },
   });
-  assert.equal(plain.state.view.value.worn, false);
-  assert.equal(setup({ boot: {} }).state.view.value.worn, false);
+  assert.equal(plain.state.view.value.hasItem, false);
+  assert.equal(setup({ boot: {} }).state.view.value.hasItem, false);
 });
 
 test("the art's stylesheet is installed once, as the art arrives", async () => {
