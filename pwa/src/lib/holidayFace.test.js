@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MOODS, effectiveMood, faceShown, layerState } from "./holidayFace.js";
+import { MOODS, effectiveMood, faceShown, isWhitelabelBrand, layerState } from "./holidayFace.js";
 
 test("MOODS: the moods the mark can show", () => {
 	assert.deepEqual(MOODS, ["star", "happy", "upgrading"]);
@@ -24,4 +24,10 @@ test("layerState: how the worn item reacts to the mood", () => {
 	assert.equal(layerState("happy"), "happy");
 	assert.equal(layerState("star"), "peek");
 	assert.equal(layerState("upgrading"), "peek");
+});
+
+test("isWhitelabelBrand: a logo or a non-default agent name, nothing else", () => {
+	assert.equal(isWhitelabelBrand("Jarvis", ""), false);
+	assert.equal(isWhitelabelBrand("Jarvis", "/files/logo.png"), true);
+	assert.equal(isWhitelabelBrand("Acme Assistant", ""), true);
 });

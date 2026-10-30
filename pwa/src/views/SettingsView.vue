@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import AppBar from "../components/AppBar.vue";
 import Sheet from "../components/Sheet.vue";
 import * as api from "../api";
@@ -7,6 +7,8 @@ import { EFFORT, effortOffered } from "../lib/effort";
 import { prefs, setPrefs } from "../lib/prefs";
 import { applyTheme, theme } from "../lib/theme";
 import { agentName } from "@/branding";
+import { holidayTouch } from "@/holidayTouch";
+import { createHolidaySwitch } from "@/lib/holidaySwitch";
 
 // Settings, as the native app has them: Chat (default model + effort),
 // Appearance, Notifications. No "open full workspace" — this is the workspace.
@@ -67,7 +69,25 @@ async function toggleNotify(key) {
 
 const notifySupported = "Notification" in window;
 
+// Personal "Show holiday touches" switch (the worn item and the greeting words). The
+// server row is the truth: the row stays disabled until it has answered, and the store
+// follows only after a successful save (see lib/holidaySwitch.js).
+const holiday = reactive({ value: true, loaded: false, saving: false });
+const holidayError = ref("");
+const holidaySwitch = createHolidaySwitch({
+	state: holiday,
+	getSettings: api.getMySettings,
+	saveSetting: (on) => api.updateMySettings({ show_holiday_touches: on }),
+	setShown: (on) => holidayTouch.setShown(on),
+	onError: () => (holidayError.value = "Could not save that. Try again."),
+});
+function toggleHoliday() {
+	holidayError.value = "";
+	holidaySwitch.toggle(!holiday.value);
+}
+
 onMounted(async () => {
+	holidaySwitch.load();
 	try {
 		settings.value = await api.getChatUiSettings();
 	} catch {
@@ -128,6 +148,28 @@ onMounted(async () => {
 				{{ t.label }}
 			</button>
 		</div>
+
+		<div class="jv-label">Welcome screen</div>
+		<div class="jv-card">
+			<div class="jv-row is-last">
+				<span class="jv-row-text">
+					Show holiday touches
+					<small>Holiday and birthday greetings on the welcome screen.</small>
+				</span>
+				<button
+					class="jv-toggle"
+					:class="{ 'is-on': holiday.value }"
+					role="switch"
+					aria-label="Show holiday touches"
+					:aria-checked="holiday.value"
+					:disabled="!holiday.loaded || holiday.saving"
+					@click="toggleHoliday"
+				>
+					<span />
+				</button>
+			</div>
+		</div>
+		<div v-if="holidayError" class="jv-err" role="alert">{{ holidayError }}</div>
 
 		<template v-if="notifySupported">
 			<div class="jv-label">Notifications</div>
@@ -305,6 +347,21 @@ onMounted(async () => {
 	border-radius: 999px;
 	background: #fff;
 	transition: transform 0.15s ease;
+}
+.jv-toggle:disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+.jv-row-text {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+}
+.jv-row-text small {
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--ink5);
 }
 .jv-toggle.is-on {
 	background: var(--accent-solid);
