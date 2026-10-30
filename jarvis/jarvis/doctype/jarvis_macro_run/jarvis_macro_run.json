@@ -117,6 +117,7 @@
       "fieldtype": "Long Text",
       "label": "Waiting On",
       "hidden": 1,
+      "no_copy": 1,
       "read_only": 1,
       "description": "JSON list of the Prepared Reports the parked step is waiting for: each {prepared_report, report_name, filters}. Written only inside the CAS that moves the run to waiting_report."
     },
@@ -125,6 +126,7 @@
       "fieldtype": "Datetime",
       "label": "Waiting Since",
       "hidden": 1,
+      "no_copy": 1,
       "read_only": 1,
       "description": "When the run parked in waiting_report. The wait deadline counts from here."
     },
@@ -133,6 +135,7 @@
       "fieldtype": "Data",
       "label": "Resume Turn",
       "hidden": 1,
+      "no_copy": 1,
       "read_only": 1,
       "description": "Id of the continuation turn sent when the awaited reports were ready. Once set, it is the only turn that ends the current step. Cleared in the CAS that moves the cursor."
     },
@@ -141,6 +144,7 @@
       "fieldtype": "Int",
       "label": "Resume Count",
       "hidden": 1,
+      "no_copy": 1,
       "read_only": 1,
       "description": "Continuations sent over the whole run (capped).",
       "default": "0"
@@ -150,6 +154,7 @@
       "fieldtype": "Int",
       "label": "Step Resumes",
       "hidden": 1,
+      "no_copy": 1,
       "read_only": 1,
       "description": "Continuations sent for the current step (capped). Reset when the cursor moves.",
       "default": "0"
@@ -159,6 +164,7 @@
       "fieldtype": "Int",
       "label": "Resume Compensations",
       "hidden": 1,
+      "no_copy": 1,
       "read_only": 1,
       "description": "Times a continuation that failed to go out was put back to waiting_report (capped).",
       "default": "0"
@@ -168,6 +174,7 @@
       "fieldtype": "Check",
       "label": "Waiting Failed",
       "hidden": 1,
+      "no_copy": 1,
       "read_only": 1,
       "description": "An awaited report failed: the continuation is the write-less explanation turn, after which the run ends failed."
     },
@@ -176,6 +183,7 @@
       "fieldtype": "Check",
       "label": "Waited",
       "hidden": 1,
+      "no_copy": 1,
       "read_only": 1,
       "description": "The run parked for a report at least once; its owner is notified of any terminal outcome."
     },
@@ -184,6 +192,7 @@
       "fieldtype": "Long Text",
       "label": "Step Continuations",
       "hidden": 1,
+      "no_copy": 1,
       "read_only": 1,
       "description": "JSON {step_index: last continuation turn id}, written when a continuation goes out and never cleared; a resumed step is judged by it."
     }

@@ -128,7 +128,7 @@
 							variant="ghost"
 							theme="red"
 							icon="square"
-							:tooltip="'Stop'"
+							:tooltip="stopTooltip(row.status)"
 							label="Stop run"
 							@click="stopRun(row)"
 						/>
@@ -248,7 +248,13 @@ import LayoutHeader from "@/components/LayoutHeader.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
-import { runDetail, waitingLabel, isLiveRun } from "@/lib/macroRunOutcome";
+import {
+	runDetail,
+	waitingLabel,
+	isLiveRun,
+	stopTooltip,
+	stoppedToast,
+} from "@/lib/macroRunOutcome";
 import { RUN_THEMES, RUN_STATUS_OPTIONS, statusLabel } from "./runDisplay";
 
 const router = useRouter();
@@ -510,9 +516,10 @@ function openError(row) {
 
 async function stopRun(row) {
 	try {
+		const was = row.status;
 		await api.stopMacroRun(row.name);
 		row.status = "stopped"; // optimistic patch
-		toast.success("Run stopped");
+		toast.success(stoppedToast(was));
 		fetchRuns("keep");
 		loadStats();
 	} catch (e) {
