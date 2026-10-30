@@ -307,7 +307,7 @@ def _dispatch_from_session(
 	"""
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
-	from jarvis.chat import agent_run_steps
+	from jarvis.chat import agent_run_steps, macro_report_wait
 	from jarvis.tools import _agent_run_ctx, _delegate_capability
 
 	# Expose the caller's session_key to the tool for this dispatch (the LLM
@@ -397,6 +397,19 @@ def _dispatch_from_session(
 			# Resolve the conversation for this session up front so the
 			# confirmation gate can bind a parked write to it.
 			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
+			# A macro step that was told to wait for a background report (or whose report
+			# failed) changes nothing until Jarvis continues it. Here too, and not in
+			# _run_tool, for the same reason as focus: a card confirm must still run.
+			wait_refusal = macro_report_wait.write_refusal(conv, tool)
+			if wait_refusal:
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=parsed_args,
+					result=wait_refusal,
+					tool_call_id=tool_call_id,
+				)
+				return wait_refusal
 			# STEP TIMELINE (#1062): the run to file this call's step against, taken
 			# from the contract resolved above - BEFORE the tool executes.
 			# record_agent_run flips the run off ``running`` from inside the tool, so

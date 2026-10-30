@@ -85,6 +85,23 @@
 						</Tooltip>
 					</div>
 				</template>
+				<template v-else-if="column.key === 'macro_name'">
+					<div class="min-w-0 leading-tight">
+						<div class="truncate text-base">{{ row.macro_name }}</div>
+						<!-- Which reports a parked run awaits and since when: from the
+						     server's waiting_reports / waiting_since, so a reload keeps it.
+						     w-0 + min-w-full: the line is cut to the column; it does not
+						     widen the column (and the table with it). -->
+						<div
+							v-if="row.status === 'waiting_report'"
+							data-testid="run-waiting"
+							class="w-0 min-w-full truncate text-xs text-ink-gray-5"
+							:title="waitingHint(row)"
+						>
+							{{ waitingLabel(row) }}
+						</div>
+					</div>
+				</template>
 				<template v-else-if="column.key === 'started_at'">
 					<Tooltip :text="exactDate(row.started_at || row.creation)">
 						<div class="truncate text-base">
@@ -104,16 +121,15 @@
 				</template>
 				<template v-else-if="column.key === '_actions'">
 					<div class="flex w-full items-center justify-end gap-1" @click.stop.prevent>
+						<!-- An icon button: frappe-ui sets its `label` as the accessible name and
+						     draws no text, whereas an aria-label attribute is overwritten. -->
 						<Button
-							v-if="
-								row.status === 'running' ||
-								row.status === 'queued' ||
-								row.status === 'waiting_capacity'
-							"
+							v-if="row.status === 'queued' || isLiveRun(row)"
 							variant="ghost"
 							theme="red"
 							icon="square"
-							:tooltip="'Stop'"
+							:tooltip="stopTooltip(row.status)"
+							label="Stop run"
 							@click="stopRun(row)"
 						/>
 						<Button
@@ -232,26 +248,24 @@ import LayoutHeader from "@/components/LayoutHeader.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
-import { runDetail } from "@/lib/macroRunOutcome";
-import { RUN_THEMES, statusLabel } from "./runDisplay";
+import {
+	runDetail,
+	waitingLabel,
+	isLiveRun,
+	stopTooltip,
+	stoppedToast,
+} from "@/lib/macroRunOutcome";
+import { RUN_THEMES, RUN_STATUS_OPTIONS, statusLabel } from "./runDisplay";
 
 const router = useRouter();
 const socket = inject("$socket");
 
 // ── list config ──────────────────────────────────────────────────────────────
-const STATUS_OPTIONS = [
-	{ label: "All statuses", value: "" },
-	{ label: "Queued", value: "queued" },
-	{ label: "Running", value: "running" },
-	{ label: "Waiting for capacity", value: "waiting_capacity" },
-	{ label: "Completed", value: "completed" },
-	{ label: "Failed", value: "failed" },
-	{ label: "Stopped", value: "stopped" },
-];
+const STATUS_OPTIONS = RUN_STATUS_OPTIONS;
 
 const columns = [
 	{ label: "Macro", key: "macro_name", width: 2 },
-	{ label: "Status", key: "status", width: "7rem" },
+	{ label: "Status", key: "status", width: "9.5rem" },
 	{ label: "Trigger", key: "trigger", width: "6rem" },
 	{ label: "Started", key: "started_at", width: "8rem" },
 	{ label: "Duration", key: "duration", width: "6rem" },
@@ -297,10 +311,17 @@ const statCards = computed(() => {
 	return [
 		{ label: "Total runs", value: s.total != null ? s.total : "-" },
 		{ label: "Success rate", value: s.success_rate != null ? `${s.success_rate}%` : "-" },
-		{ label: "Running now", value: s.running != null ? s.running : "-" },
+		{ label: "Running or waiting", value: liveCount(s) },
 		{ label: "Last run", value: s.last_run_at ? timeAgo(s.last_run_at) : "-" },
 	];
 });
+
+// Runs that have not ended and are not just queued: going, or parked for capacity
+// or a report.
+function liveCount(s) {
+	if (s.running == null) return "-";
+	return s.running + (s.waiting_capacity || 0) + (s.waiting_report || 0);
+}
 
 // ── data ─────────────────────────────────────────────────────────────────────
 // Three kinds of fetch:
@@ -495,9 +516,10 @@ function openError(row) {
 
 async function stopRun(row) {
 	try {
+		const was = row.status;
 		await api.stopMacroRun(row.name);
 		row.status = "stopped"; // optimistic patch
-		toast.success("Run stopped");
+		toast.success(stoppedToast(was));
 		fetchRuns("keep");
 		loadStats();
 	} catch (e) {
@@ -529,6 +551,11 @@ onBeforeUnmount(() => {
 });
 
 // ── formatters ───────────────────────────────────────────────────────────────
+function waitingHint(row) {
+	return row.waiting_since
+		? `${waitingLabel(row)}. Waiting since ${timeAgo(row.waiting_since)}`
+		: waitingLabel(row);
+}
 function fmtDuration(sec) {
 	if (sec == null) return "";
 	sec = Math.max(0, Math.round(sec));
