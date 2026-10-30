@@ -788,10 +788,26 @@ class TestAdminNames(_Base):
 		self._sync(aliases={})
 		self.assertEqual(self._kind(user), ("none", None))
 
-	def test_an_alias_on_a_weekly_off_calendar_name_applies_too(self):
+	def test_a_near_miss_applies_to_a_weekly_off_calendar_name_too(self):
 		user = self.person([(DIWALI, "Sunday", 1)], list_country="India")
-		self._sync(near_misses=["diwali", "deepavali"])  # the calendar names this date Diwali
+		self.assertEqual(self._kind(user), ("day", "diwali"))  # the calendar names this date Diwali
+		self._sync(near_misses=["diwali", "deepavali"])
 		self.assertEqual(self._kind(user), ("none", None))
+
+	def test_an_alias_applies_to_a_weekly_off_calendar_name_too(self):
+		user = self.person([(DIWALI, "Sunday", 1)], list_country="India")
+		with mock.patch.object(resolve, "calendar_name", return_value="Festival of Lights"):
+			self.assertEqual(self._kind(user), ("none", None))
+			self._sync(aliases={"diwali": ["festival of lights"]})
+			self.assertEqual(self._kind(user), ("day", "diwali"))
+
+	def test_a_cache_miss_reads_the_settings_singles_once(self):
+		user = self.person([(DIWALI, "Festival of Lights", 0)])
+		self._sync(aliases={"diwali": ["festival of lights"]})
+		real = frappe.db.get_singles_dict
+		with mock.patch.object(frappe.db, "get_singles_dict", side_effect=real) as spy:
+			self.assertEqual(self._kind(user), ("day", "diwali"))  # a miss: it computes
+		self.assertEqual(spy.call_count, 1)
 
 	def test_unreadable_stored_names_leave_the_default_matching(self):
 		user = self.person([(DIWALI, "Diwali", 0)])
