@@ -9,7 +9,7 @@
 		:aria-labelledby="rowId + '-title'"
 		:aria-describedby="describedBy || undefined"
 	>
-		<div class="flex flex-wrap items-start gap-x-3 gap-y-2">
+		<div class="jv-sheet-record-heading flex flex-wrap items-start gap-x-3 gap-y-2">
 			<div class="min-w-0 flex-1">
 				<div class="flex flex-wrap items-center gap-2">
 					<span class="text-sm tabular-nums text-ink-gray-5">#{{ n }}</span>

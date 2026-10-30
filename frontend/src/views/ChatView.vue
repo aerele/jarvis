@@ -2021,10 +2021,11 @@
 					</template>
 					<!-- a File Box file's open questions, also on the Approval Board -->
 					<FileBoxWaits
-						v-if="fileboxWaits.length"
-						:items="fileboxWaits"
+						v-if="visibleFileboxWaits.length"
+						:items="visibleFileboxWaits"
 						:busy="fileboxWaitBusy"
 						@decide="decideFileboxWait"
+						@review="reviewFileboxSheet"
 					/>
 					<!-- background reports this chat started, until their results are shown -->
 					<ReportRunCards
@@ -4457,6 +4458,13 @@
 			@confirm="onPreviewConfirm"
 		/>
 
+		<FileBoxSheetReview
+			v-if="fileboxReviewSession"
+			:key="fileboxReviewSession.id"
+			:session="fileboxReviewSession"
+			:onChanged="fileboxReviewChanged"
+			:onClosed="closeFileboxReview"
+		/>
 		<ConnectPhoneDialog v-model="showConnect" />
 
 		<CompactDialog
@@ -4637,6 +4645,8 @@ import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
+import FileBoxSheetReview from "@/components/chat/FileBoxSheetReview.vue";
+import { useFileBoxWaits } from "@/composables/useFileBoxWaits";
 import ReportRunCards from "@/components/chat/ReportRunCards.vue";
 import VersionPill from "@/components/chat/VersionPill.vue";
 import UpdateBanner from "@/components/chat/UpdateBanner.vue";
@@ -9829,7 +9839,21 @@ function _checkPulseOnce(id) {
 // A File Box file's chat shows what the file waits on, the same items the Approval
 // Board lists: its questions are answered here as on the board. Re-read on every load
 // (a run's end reloads the chat, which is when a new question appears).
-const fileboxWaits = ref([]);
+const {
+	items: fileboxWaits,
+	visibleItems: visibleFileboxWaits,
+	refresh: refreshFileboxWaits,
+	onEvent: onFileboxWaitEvent,
+	reviewSession: fileboxReviewSession,
+	openReview: reviewFileboxSheet,
+	reviewChanged: fileboxReviewChanged,
+	closeReview: closeFileboxReview,
+} = useFileBoxWaits({
+	conversation: currentId,
+	activeAsk,
+	load: api.fileboxOpenWaits,
+	onChanged: () => store.refreshApprovalsCount?.(),
+});
 const fileboxWaitBusy = ref("");
 // Background reports this chat started: a card each until Jarvis shows the results.
 // Re-read on every load, on Frappe's report_generated event, and every 15s while one
@@ -9867,18 +9891,6 @@ function onReportGenerated() {
 function showReportResults(item) {
 	if (busy.value || convStreaming.value) return;
 	send(`Show me the ${item.report_name} results${item.filters ? ` (${item.filters})` : ""}.`);
-}
-async function refreshFileboxWaits(id, isFileBox) {
-	if (!id || !isFileBox) {
-		fileboxWaits.value = [];
-		return;
-	}
-	try {
-		const r = await api.fileboxOpenWaits(id);
-		if (currentId.value === id) fileboxWaits.value = (r && r.items) || [];
-	} catch (e) {
-		// best-effort: the board still lists them
-	}
 }
 async function decideFileboxWait(item, text, approve) {
 	if (fileboxWaitBusy.value || !text) return;
@@ -13603,6 +13615,7 @@ onMounted(async () => {
 		})
 		.catch(() => {});
 	socket?.on("jarvis:event", onEvent);
+	socket?.on("jarvis:event", onFileboxWaitEvent);
 	socket?.on("jarvis:llm_switch", onLlmSwitch);
 	socket?.on("connect", onResync);
 	socket?.on("report_generated", onReportGenerated);
@@ -13831,6 +13844,7 @@ onBeforeUnmount(() => {
 	// away, app close) — nothing here is visible to blank.
 	flushReveal(); // cancels the frame loop and leaves every row whole
 	socket?.off("jarvis:event", onEvent);
+	socket?.off("jarvis:event", onFileboxWaitEvent);
 	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
 	socket?.off("report_generated", onReportGenerated);

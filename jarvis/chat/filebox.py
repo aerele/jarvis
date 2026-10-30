@@ -1059,7 +1059,8 @@ def open_waits(conversation: str) -> dict:
 	for w in waits:
 		item = {"src": w.src, "name": w.item, "title": w.title or ""}
 		if w.src == "ar":
-			ar = frappe.db.get_value(APPROVAL, w.item, ["question", "options"], as_dict=True) or {}
+			ar = frappe.db.get_value(APPROVAL, w.item, ["question", "options", "source"], as_dict=True) or {}
+			item["source"] = ar.get("source") or "File Box"
 			item["question"] = ar.get("question") or item["title"]
 			item["options"] = _options_list(ar.get("options"))
 			item["link"] = f"/approvals/{quote(w.item, safe='')}"
