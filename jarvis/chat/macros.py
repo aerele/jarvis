@@ -2979,10 +2979,10 @@ def _fail_parked_run(run, macro_doc, expect_status: str, error: str) -> None:
 	"""End a parked run ``failed`` with ``error`` and say so, unless it left
 	``expect_status`` first (a stop): then its outcome stands."""
 	if _cas_run_status(run.name, expect_status, "failed", finished_at=frappe.utils.now(), error=error):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- the end is durable before the owner is told
 		_announce(run, macro_doc, "failed", error)
 	else:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release the row lock of a lost CAS
 
 
 def _run_mode(run, macro_doc) -> str:
