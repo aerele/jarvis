@@ -60,6 +60,12 @@ def after_install() -> None:
 			"seed failed' Error Log entry for the cause."
 		)
 
+	# install_app marks every patch complete without running it, so the audit lookup
+	# index its post-model-sync patch adds on upgraded sites is created here.
+	from jarvis.chat.approval_reviewers import ensure_audit_lookup_index
+
+	ensure_audit_lookup_index()
+
 	# The Agents Marketplace catalog (Jarvis Agent Listing) is otherwise seeded
 	# ONLY by the after_migrate hook, which install_app never runs -- so a freshly
 	# onboarded site shows an EMPTY Agents section until its first later migrate

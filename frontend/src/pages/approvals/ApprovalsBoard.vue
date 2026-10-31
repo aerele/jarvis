@@ -11,8 +11,8 @@
 		<!-- toolbar (§15.2): search · status · type facets · Refresh - no
 		     Filter/Sort/Columns; the split view IS the workflow -->
 		<div class="flex items-center justify-between gap-2 border-b px-5 py-3">
-			<div class="flex flex-1 items-center gap-2 overflow-x-auto py-0.5">
-				<div class="w-60 shrink-0">
+			<div class="flex flex-1 flex-wrap items-center gap-2 py-0.5">
+				<div class="w-60 shrink-0 max-md:w-full">
 					<FormControl
 						type="text"
 						placeholder="Search approvals"
@@ -20,7 +20,7 @@
 						@update:modelValue="onSearch"
 					/>
 				</div>
-				<div class="w-36 shrink-0">
+				<div class="w-36 shrink-0 max-md:min-w-0 max-md:flex-1">
 					<FormControl
 						type="select"
 						:options="STATUS_OPTIONS"
@@ -28,7 +28,7 @@
 						@update:modelValue="(v) => setQuick('status', v)"
 					/>
 				</div>
-				<div class="w-44 shrink-0">
+				<div class="w-44 shrink-0 max-md:min-w-0 max-md:flex-1">
 					<FormControl
 						type="select"
 						:options="typeOptions"
@@ -45,11 +45,13 @@
 			/>
 		</div>
 
-		<div class="flex min-h-0 flex-1">
+		<div class="flex min-h-0 flex-1 max-md:flex-col">
 			<!-- LEFT rail: inbox-style rows on a standing gray-1 surface so the
 			     selected row's white chip + shadow reads in light mode (CRM
 			     sidebar pattern; dark gray-1 ≠ surface-selected per §2.5) -->
-			<div class="w-[360px] shrink-0 overflow-y-auto border-r bg-surface-gray-1">
+			<div
+				class="w-[360px] shrink-0 overflow-y-auto border-r bg-surface-gray-1 max-md:max-h-[40vh] max-md:w-full max-md:border-b max-md:border-r-0"
+			>
 				<!-- "Waiting for your reply" strip (notify-approvals Part 3): prose
 				     questions the agent asked in chat — derived server-side
 				     (envelope.awaiting_reply, page 1 only), no approval row behind
@@ -298,6 +300,17 @@
 								<div class="truncate text-base text-ink-gray-9">
 									{{ row.title || row.name }}
 								</div>
+								<!-- a reviewer needs to know whose question this is -->
+								<div
+									v-if="
+										row.review_scoped &&
+										row.requester_name &&
+										!row.is_requester
+									"
+									class="mt-0.5 truncate text-sm text-ink-gray-6"
+								>
+									From {{ row.requester_name }}
+								</div>
 								<div class="mt-1 flex items-center gap-2">
 									<!-- source: Chat blue / File Box gray (NULL = File Box) -->
 									<Badge
@@ -309,6 +322,13 @@
 									<Tooltip v-if="row.shared" text="Shared with you for review">
 										<Badge variant="subtle" theme="blue" label="Shared" />
 									</Tooltip>
+									<!-- a decided question whose decision did not reach the chat -->
+									<Badge
+										v-if="row.continuation === 'failed'"
+										variant="subtle"
+										theme="red"
+										label="Not sent to chat"
+									/>
 									<Tooltip :text="exactDate(row.creation)">
 										<span class="whitespace-nowrap text-sm text-ink-gray-5">{{
 											timeAgo(row.creation)
@@ -367,10 +387,13 @@
 			</div>
 
 			<!-- RIGHT pane: review + act on the selected approval -->
-			<div class="flex-1 overflow-y-auto">
+			<div class="min-w-0 flex-1 overflow-y-auto">
 				<!-- a held write / chat card / wiki note: its own detail, keyed so every
 				     selection mounts (and loads) a fresh one -->
-				<div v-if="selectedKey" class="mx-auto w-full max-w-3xl px-8 py-6">
+				<div
+					v-if="selectedKey"
+					class="mx-auto w-full max-w-3xl px-8 py-6 max-md:px-4 max-md:py-4"
+				>
 					<div class="flex items-center gap-3">
 						<h1 class="min-w-0 flex-1 truncate text-xl font-semibold text-ink-gray-9">
 							{{ selectedAction ? selectedAction.title : KIND_LABEL[selectedKind] }}
@@ -453,7 +476,7 @@
 				<div v-else-if="!selected" class="flex h-full items-center justify-center">
 					<JvSpinner />
 				</div>
-				<div v-else class="mx-auto w-full max-w-3xl px-8 py-6">
+				<div v-else class="mx-auto w-full max-w-3xl px-8 py-6 max-md:px-4 max-md:py-4">
 					<!-- 1. title row -->
 					<div class="flex items-center gap-3">
 						<h1 class="min-w-0 flex-1 truncate text-xl font-semibold text-ink-gray-9">
@@ -467,8 +490,10 @@
 						<Tooltip v-if="selected.shared" text="Shared with you for review">
 							<Badge variant="subtle" theme="blue" label="Shared" />
 						</Tooltip>
+						<!-- a review-scoped Chat question is answered, never entered: the requester
+						     has "Answer in chat" and the conversation chip below -->
 						<Button
-							v-if="selected.conversation"
+							v-if="selected.conversation && !scoped"
 							variant="subtle"
 							:label="
 								selected.origin_page === 'dashboards'
@@ -527,6 +552,43 @@
 								</Tooltip>
 							</div>
 						</div>
+						<div v-if="scoped" class="flex items-center gap-2 leading-5">
+							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-5">
+								Requested by
+							</div>
+							<div class="flex w-[65%] items-center text-base text-ink-gray-8">
+								<span class="truncate">{{
+									selected.requester_name || selected.requester
+								}}</span>
+							</div>
+						</div>
+						<div v-if="scoped" class="flex items-start gap-2 leading-5">
+							<div class="w-[35%] min-w-20 shrink-0 pt-0.5 text-sm text-ink-gray-5">
+								Reviewers
+							</div>
+							<div class="flex w-[65%] flex-wrap items-center gap-1.5 text-base">
+								<div
+									v-for="r in reviewers"
+									:key="r.user"
+									class="flex h-6 items-center gap-1 rounded bg-surface-gray-2 px-2 text-sm text-ink-gray-8"
+								>
+									<span class="truncate">{{ r.full_name || r.user }}</span>
+									<Button
+										v-if="canManage"
+										variant="ghost"
+										icon="x"
+										class="-mr-1.5 !h-6 !w-6"
+										:label="'Remove ' + (r.full_name || r.user)"
+										tooltip="Remove their access to this question and its comments"
+										:disabled="tagging"
+										@click="removeReviewer(r)"
+									/>
+								</div>
+								<span v-if="!reviewers.length" class="text-sm text-ink-gray-5"
+									>No reviewer tagged</span
+								>
+							</div>
+						</div>
 						<div
 							v-if="selected.conversation"
 							class="flex items-center gap-2 leading-5"
@@ -580,12 +642,16 @@
 										v-if="!chatAnswerOnly"
 										type="textarea"
 										:class="showOptionChips ? 'mt-3' : ''"
-										placeholder="Add a note - optional"
+										:placeholder="
+											freeformReviewer
+												? 'Your answer'
+												: 'Add a note - optional'
+										"
 										:modelValue="note"
 										@update:modelValue="(v) => (note = v)"
 									/>
 									<div
-										class="flex items-center gap-2"
+										class="flex flex-wrap items-center gap-2"
 										:class="chatAnswerOnly ? '' : 'mt-3'"
 									>
 										<!-- chat asks without options are free-form questions: a
@@ -613,7 +679,7 @@
 														: 'Approve'
 												"
 												:loading="deciding === 1"
-												:disabled="deciding !== null"
+												:disabled="approvalBusy || approveBlocked"
 												@click="submitDecide(1)"
 											/>
 											<Button
@@ -621,33 +687,40 @@
 												theme="red"
 												label="Reject"
 												:loading="deciding === 0"
-												:disabled="deciding !== null"
+												:disabled="approvalBusy"
 												@click="submitDecide(0)"
 											/>
 										</template>
 										<!-- Ignore: clear it off the board without acting — no
 										     verdict, no chat resume; reversible via Restore -->
 										<Button
+											v-if="canManage"
 											variant="ghost"
 											label="Ignore"
 											iconLeft="bell-off"
 											:tooltip="'Dismiss without acting. The assistant is not told anything'"
 											:loading="dismissing"
-											:disabled="deciding !== null"
+											:disabled="approvalBusy"
 											@click="submitDismiss"
 										/>
 										<div class="flex-1" />
-										<!-- tag for review - the DocShare path DocMetaPanel's
-										     "Shared with" block uses (same docmeta object, so the
-										     Record details block stays in sync) -->
-										<Popover placement="bottom-end">
+										<!-- tag for review. A review-scoped Chat question: the requester's
+										     explicit reviewer grant (tag/untag endpoints, chips in the meta
+										     rows). Anything else: the DocShare path DocMetaPanel's "Shared
+										     with" block uses (same docmeta object, so the Record details
+										     block stays in sync) -->
+										<Popover v-if="canTag" placement="bottom-end">
 											<template #target="{ togglePopover }">
 												<Button
 													variant="subtle"
 													size="sm"
 													label="Tag for review"
 													iconLeft="user-plus"
-													:tooltip="'Share this approval so a colleague can review it'"
+													:tooltip="
+														scoped
+															? 'Invite an administrator to answer this question'
+															: 'Share this approval so a colleague can review it'
+													"
 													@click="openTagPicker(togglePopover)"
 												/>
 											</template>
@@ -656,7 +729,7 @@
 													class="my-2 w-[320px] rounded-lg bg-surface-modal p-3 shadow-2xl ring-1 ring-black ring-opacity-5"
 												>
 													<div
-														v-if="shares.length"
+														v-if="!scoped && shares.length"
 														class="mb-2 flex flex-wrap gap-1.5"
 													>
 														<div
@@ -693,11 +766,7 @@
 										</Popover>
 									</div>
 									<div class="mt-2 text-sm text-ink-gray-5">
-										{{
-											chatAnswerOnly
-												? "This question needs a longer answer. Continue in chat."
-												: "Tag a colleague to view and comment. Only you (or an admin) can approve."
-										}}
+										{{ decisionHint }}
 									</div>
 								</div>
 								<div v-else class="text-sm text-ink-gray-5">
@@ -712,15 +781,43 @@
 								<div v-if="decidedLine" class="mt-2 text-sm text-ink-gray-5">
 									{{ decidedLine }}
 								</div>
+								<!-- a review-scoped question's decision that did not reach the
+								     requester's chat: persistent, from the server's record. Only
+								     the requester may send it, as themselves, once. -->
+								<div
+									v-if="scoped && selected.continuation === 'failed'"
+									role="status"
+									class="mt-3 rounded bg-surface-amber-1 p-3 text-sm text-ink-amber-3"
+								>
+									<div>{{ notSentNotice }}</div>
+									<Button
+										v-if="selected.can_continue"
+										class="mt-2"
+										variant="solid"
+										label="Send decision to chat"
+										iconLeft="send"
+										:loading="sending"
+										:disabled="approvalBusy"
+										@click="sendDecisionToChat"
+									/>
+								</div>
+								<div
+									v-else-if="scoped && selected.continuation === 'pending'"
+									role="status"
+									class="mt-2 text-sm text-ink-gray-5"
+								>
+									{{ PENDING_NOTICE }}
+								</div>
 								<!-- undo an accidental Ignore: back to Pending, nothing was
 								     ever told to the assistant -->
 								<Button
-									v-if="selected.status === 'Dismissed' && selected.can_act"
+									v-if="selected.status === 'Dismissed' && canManage"
 									class="mt-3"
 									variant="subtle"
 									label="Restore to board"
 									iconLeft="rotate-ccw"
 									:loading="restoring"
+									:disabled="approvalBusy"
 									@click="submitRestore"
 								/>
 							</template>
@@ -734,7 +831,12 @@
 						<!-- 6. doc-parity block, collapsed by default -->
 						<DocSection label="Record details" :opened="false">
 							<div class="overflow-hidden rounded-lg border">
-								<DocMetaPanel :docmeta="docmeta" :can-write="!!selected.can_act" />
+								<DocMetaPanel
+									:docmeta="docmeta"
+									:can-write="canManage"
+									:allow-shares="!scoped"
+									:allow-assignees="!scoped"
+								/>
 							</div>
 						</DocSection>
 					</div>
@@ -760,7 +862,7 @@
 // One inbox: held File Box writes, approval sheets, chat cards and wiki notes are
 // rail rows in a "Needs your decision" group above the questions (Pending view),
 // each opening its own detail in the right pane; ?held= / ?wiki= deep-link them.
-import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, inject, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
 	Autocomplete,
@@ -798,6 +900,7 @@ import * as api from "@/api";
 import { renderMarkdown } from "@/markdown";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { APPROVE_RE, REJECT_RE } from "@/lib/approvalVerbs";
+import { isPermissionDenied } from "@/lib/wikiReview";
 
 const route = useRoute();
 const router = useRouter();
@@ -1002,8 +1105,18 @@ const docmeta = useDocmeta("Jarvis Approval Request", selectedId);
 const seedTargetId = typeof route.params.id === "string" ? route.params.id : "";
 let seedWanted = !!seedTargetId;
 const seedRow = ref(null);
+// The selected review-scoped decision that did not reach the chat ("failed") or is
+// not confirmed yet ("pending") keeps its rail row after a Pending refresh drops it,
+// however it was selected (list entry, click, deep link). Derived from the pane, so
+// it leaves with the selection; the deep-link seed keeps priority.
+const pinRow = computed(() => {
+	if (seedRow.value) return seedRow.value;
+	const s = selected.value;
+	const undelivered = s && (s.continuation === "failed" || s.continuation === "pending");
+	return undelivered && s.review_scoped && s.name === selectedId.value ? seedFrom(s) : null;
+});
 const railRows = computed(() => {
-	const seed = seedRow.value;
+	const seed = pinRow.value;
 	if (!seed || rows.value.some((r) => r.name === seed.name)) return rows.value;
 	return [seed, ...rows.value];
 });
@@ -1088,31 +1201,62 @@ function select(id) {
 }
 
 async function loadRecord(id, { keep = false } = {}) {
+	// a keep re-read (a late decide/send/tag answer, a realtime frame) is for the open
+	// record only: after a switch it must not cancel the new row's load or replace it
+	if (keep && id !== selectedId.value) return;
 	const rid = ++paneReq;
 	try {
 		const rec = (await getApproval(id)) || null;
 		if (rid !== paneReq) return;
 		selected.value = rec;
 		paneError.value = "";
-		if (seedWanted && rec && rec.name === seedTargetId) {
+		// a re-read of the pinned question (after a lost race, a settle) keeps its
+		// row as true as the pane
+		if (rec && (seedWanted ? rec.name === seedTargetId : seedRow.value?.name === rec.name)) {
 			seedWanted = false;
-			seedRow.value = {
-				name: rec.name,
-				title: rec.title,
-				status: rec.status,
-				source: rec.source || "File Box",
-				document_type: rec.document_type || "",
-				creation: rec.creation,
-			};
+			seedRow.value = seedFrom(rec);
 		}
 	} catch (e) {
 		if (rid !== paneReq) return;
-		// a keep-reload (post-decide) failing must not blank the pane
-		if (!keep) {
-			selected.value = null;
-			paneError.value = errMsg(e);
+		// a keep-reload (post-decide, realtime) failing must not blank the pane...
+		if (keep) {
+			// ...unless the failure is "you may no longer see this" (a revoked tag, a
+			// deleted row): that is not an error to report, the row just leaves
+			if (isAccessLost(e)) advanceAfterDecide(id);
+			return;
 		}
+		selected.value = null;
+		paneError.value = errMsg(e);
 	}
+}
+
+// the rail fields of a list row, from the get_approval payload
+function seedFrom(rec) {
+	const row = {
+		name: rec.name,
+		title: rec.title,
+		status: rec.status,
+		source: rec.source || "File Box",
+		document_type: rec.document_type || "",
+		creation: rec.creation,
+	};
+	if (rec.review_scoped) {
+		Object.assign(row, {
+			review_scoped: rec.review_scoped,
+			requester: rec.requester,
+			requester_name: rec.requester_name,
+			is_requester: rec.is_requester,
+			shared: rec.is_requester ? 0 : 1,
+			continuation: rec.continuation || "",
+		});
+	}
+	return row;
+}
+
+function isAccessLost(e) {
+	return (
+		isPermissionDenied(e) || (!!e && (e.status === 404 || e.exc_type === "DoesNotExistError"))
+	);
 }
 
 function onRowClick(row) {
@@ -1126,6 +1270,8 @@ function onRowClick(row) {
 }
 
 function openChat() {
+	// a reviewer is never handed the requester's chat (the payload carries none either)
+	if (scoped.value && !isRequester.value) return;
 	if (selected.value && selected.value.conversation) {
 		router.push(conversationRoute(selected.value.conversation, selected.value.origin_page));
 	}
@@ -1190,8 +1336,41 @@ const showOptionChips = computed(() => {
 // options merely restate Approve/Reject keeps the plain Approve/Reject
 // buttons (decide() already resumes the conversation with the decision).
 const chatAnswerOnly = computed(
-	() => !!selected.value && sourceOf(selected.value) === "Chat" && !options.value.length
+	() =>
+		!!selected.value &&
+		sourceOf(selected.value) === "Chat" &&
+		!options.value.length &&
+		!freeformReviewer.value
 );
+
+// ── review-scoped Chat questions (#756) ──────────────────────────────────────
+// The server marks a Chat question `review_scoped` when only its requester and the
+// reviewers the requester tagged may see it (a Chat question a real File Box asks
+// inline is not: it keeps the original File Box behaviour everywhere below). The
+// requester manages it (tag, untag, ignore, restore, record details) and answers
+// free-form questions in the chat; a tagged reviewer decides it (and comments)
+// but manages nothing and is never handed the chat.
+const scoped = computed(() => !!selected.value && !!selected.value.review_scoped);
+const isRequester = computed(() => !!selected.value && !!selected.value.is_requester);
+const canManage = computed(
+	() => !!selected.value && !!(scoped.value ? selected.value.can_manage : selected.value.can_act)
+);
+const canTag = computed(() => !scoped.value || canManage.value);
+const reviewers = computed(() => (selected.value && selected.value.reviewers) || []);
+// A reviewer on a question with no options has no chat to answer in, and no suggested
+// option to send: they write the answer here, and Approve needs it.
+const freeformReviewer = computed(
+	() => scoped.value && !isRequester.value && !options.value.length
+);
+const approveBlocked = computed(() => freeformReviewer.value && !note.value.trim());
+const decisionHint = computed(() => {
+	if (scoped.value && !isRequester.value)
+		return "You were tagged to review this question. Your answer goes back to the requester's chat.";
+	if (chatAnswerOnly.value) return "This question needs a longer answer. Continue in chat.";
+	if (scoped.value)
+		return "Tag an administrator to let them answer this question. Only you and the people you tag can see it.";
+	return "Tag a colleague to view and comment. Only you (or an admin) can approve.";
+});
 const decidedLine = computed(() => {
 	const s = selected.value;
 	if (!s || !s.decided_by) return "";
@@ -1222,13 +1401,45 @@ function openTagPicker(togglePopover) {
 }
 // toggleShare returns true on success (errors toast inside the composable)
 async function addTag(opt) {
-	if (await docmeta.toggleShare(opt.value, "add")) {
+	if (scoped.value) {
+		if (await changeReviewer(opt.value, false))
+			toast.success("Tagged " + (opt.label || opt.value));
+	} else if (await docmeta.toggleShare(opt.value, "add")) {
 		toast.success("Shared with " + (opt.label || opt.value));
 	}
 }
+// A scoped question's reviewers are explicit grants; both endpoints answer with the
+// current list, which replaces the chips (a refusal toasts and leaves them as they are).
+const tagging = ref(false);
+async function changeReviewer(user, remove) {
+	if (tagging.value || !selected.value) return false;
+	const id = selected.value.name;
+	tagging.value = true;
+	try {
+		const list = remove
+			? await api.untagApprovalReviewer(id, user)
+			: await api.tagApprovalReviewer(id, user);
+		if (selected.value && selected.value.name === id) {
+			if (Array.isArray(list)) selected.value = { ...selected.value, reviewers: list };
+			else loadRecord(id, { keep: true });
+		}
+		return true;
+	} catch (e) {
+		toast.error(errHtml(e));
+		return false;
+	} finally {
+		tagging.value = false;
+	}
+}
+async function removeReviewer(r) {
+	if (await changeReviewer(r.user, true)) toast.success("Untagged " + (r.full_name || r.user));
+}
 const tagOptions = computed(() => {
-	const taken = new Set(shares.value.map((s) => s.user));
-	if (docmeta.meta && docmeta.meta.created) taken.add(docmeta.meta.created.owner);
+	const taken = new Set(
+		scoped.value ? reviewers.value.map((r) => r.user) : shares.value.map((s) => s.user)
+	);
+	if (scoped.value) taken.add(selected.value.requester);
+	else if (docmeta.meta && docmeta.meta.created) taken.add(docmeta.meta.created.owner);
 	return shareUsers.value
 		.filter((u) => !taken.has(u.name))
 		.map((u) => ({ label: u.full_name || u.name, value: u.name }));
@@ -1237,17 +1448,34 @@ const tagOptions = computed(() => {
 // ── decide (§15.2 point 4) ────────────────────────────────────────────────────
 const selectedOption = ref("");
 const note = ref("");
-const deciding = ref(null); // 1 | 0 | null
-const dismissing = ref(false);
-const restoring = ref(false);
+// Requests belong to their record, including while another record is selected.
+// Keep the claim until its response settles so returning to a row cannot resend it.
+const approvalActions = ref(new Map());
+const selectedApprovalAction = computed(() => approvalActions.value.get(selectedId.value));
+const approvalBusy = computed(() => !!selectedApprovalAction.value);
+const deciding = computed(() =>
+	selectedApprovalAction.value === "approve"
+		? 1
+		: selectedApprovalAction.value === "reject"
+		? 0
+		: null
+);
+const dismissing = computed(() => selectedApprovalAction.value === "dismiss");
+const restoring = computed(() => selectedApprovalAction.value === "restore");
+function claimApprovalAction(id, action) {
+	if (!id || approvalActions.value.has(id)) return false;
+	approvalActions.value.set(id, action);
+	return true;
+}
 
 function toggleOption(opt) {
 	selectedOption.value = selectedOption.value === opt ? "" : opt;
 }
 
 async function submitDecide(approve) {
-	if (deciding.value !== null || !selected.value) return;
-	deciding.value = approve;
+	if (!selected.value || (approve && approveBlocked.value)) return;
+	const id = selected.value.name;
+	if (!claimApprovalAction(id, approve ? "approve" : "reject")) return;
 	const noteText = note.value.trim();
 	// decide() requires non-empty decision text - Approve sends the selected
 	// option chip, else the note, else the verdict word; Reject sends the note
@@ -1258,15 +1486,21 @@ async function submitDecide(approve) {
 		  noteText ||
 		  (reviewOnly ? "Review acknowledged: no posting authorised" : "Approved")
 		: noteText || "Rejected";
-	const id = selected.value.name;
+	const wasScoped = scoped.value;
+	const requester = isRequester.value;
 	try {
 		const res = (await api.decideApproval(id, text, approve)) || {};
 		const status = approve ? "Approved" : "Rejected";
+		// a review-scoped question reports whether its decision reached the chat:
+		// "done", "failed", "pending" (not confirmed) or "" (not tracked); a missing
+		// answer is treated as not confirmed
+		const delivery = wasScoped ? res.continuation : "";
 		// optimistic: rail row swaps status, pane flips to the decided state
 		const r = railRows.value.find((x) => x.name === id);
 		if (r) {
 			r.status = status;
 			r.decision = text;
+			if (wasScoped) r.continuation = delivery || "";
 		}
 		if (selected.value && selected.value.name === id) {
 			selected.value = {
@@ -1276,40 +1510,92 @@ async function submitDecide(approve) {
 				decided_by: session.user,
 				decided_by_name: "",
 				decided_at: "",
+				...(wasScoped ? { continuation: delivery || "", can_continue: 0 } : {}),
 			};
 		}
-		selectedOption.value = "";
-		note.value = "";
-		toast.success(
-			(approve
-				? reviewOnly
-					? "Review acknowledged: no accounting or sending action"
-					: "Approved"
-				: "Rejected") + (res.resumed ? " - conversation resumed" : "")
-		);
+		// the draft belongs to the record it was typed for: a late answer keeps another row's
+		if (selectedId.value === id) {
+			selectedOption.value = "";
+			note.value = "";
+		}
+		const verdict = approve
+			? reviewOnly
+				? "Review acknowledged: no accounting or sending action"
+				: "Approved"
+			: "Rejected";
+		if (wasScoped && delivery === "done") {
+			toast.success(
+				verdict + (requester ? " - sent to your chat" : " - sent to the requester's chat")
+			);
+		} else if (wasScoped && delivery === "failed") {
+			toast.warning(requester ? REQUESTER_NOT_SENT : REVIEWER_NOT_SENT);
+		} else if (wasScoped && delivery !== "") {
+			toast.warning(PENDING_NOTICE);
+		} else {
+			toast.success(verdict + (res.resumed ? " - conversation resumed" : ""));
+		}
 		store.refreshApprovalsCount();
-		if ((filters.status || "Pending") === "Pending") {
+		// leave the record only when its outcome is known: a decision that did not
+		// (or may not have) reached the chat stays open with its notice
+		const settled = !wasScoped || delivery === "done" || delivery === "";
+		if (settled && (filters.status || "Pending") === "Pending") {
 			// the decided row no longer matches the Pending quick-filter -
 			// drop it and move the selection along so triage keeps flowing
 			advanceAfterDecide(id);
 		} else {
 			// authoritative decided_by/decided_at + the decide trace comment
 			loadRecord(id, { keep: true });
-			docmeta.reload();
+			if (selectedId.value === id) docmeta.reload();
 		}
 	} catch (e) {
 		toast.error(errHtml(e));
+		if (wasScoped) {
+			// decided meanwhile, or the tag was revoked: show what is true now
+			refreshKeep();
+			loadRecord(id, { keep: true });
+		}
 	} finally {
-		deciding.value = null;
+		approvalActions.value.delete(id);
+	}
+}
+
+const REVIEWER_NOT_SENT =
+	"Decision saved, but it was not sent to the requester's chat. Only the requester can send it, from Approvals.";
+const REQUESTER_NOT_SENT =
+	"Decision saved, but it was not sent to your chat. Use Send decision to chat to try again.";
+const PENDING_NOTICE = "Decision saved. Sending it to the chat is not confirmed yet.";
+const notSentNotice = computed(() =>
+	isRequester.value ? "Decision saved, but it was not sent to your chat." : REVIEWER_NOT_SENT
+);
+
+// The requester sends the stored decision to their chat. One request at a time;
+// whatever happens (sent, refused, lost response) the record is re-read from the
+// server, which alone says whether it was sent - never resent automatically.
+const sending = computed(() => selectedApprovalAction.value === "send");
+async function sendDecisionToChat() {
+	const id = selected.value?.name;
+	if (!claimApprovalAction(id, "send")) return;
+	try {
+		const res = (await api.continueApprovalChat(id)) || {};
+		if (res.ok)
+			toast.success(
+				res.already ? "Already sent to your chat" : "Decision sent to your chat"
+			);
+		else toast.error(res.reason || "The decision was not sent to your chat.");
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		approvalActions.value.delete(id);
+		refreshKeep();
+		await loadRecord(id, { keep: true });
 	}
 }
 
 // Ignore = dismiss off the board with no verdict and no chat resume. Same
 // optimistic swap as decide, but the row lands in "Dismissed".
 async function submitDismiss() {
-	if (dismissing.value || deciding.value !== null || !selected.value) return;
-	dismissing.value = true;
-	const id = selected.value.name;
+	const id = selected.value?.name;
+	if (!claimApprovalAction(id, "dismiss")) return;
 	try {
 		await api.dismissApproval(id);
 		const r = railRows.value.find((x) => x.name === id);
@@ -1327,8 +1613,11 @@ async function submitDismiss() {
 				decided_at: "",
 			};
 		}
-		note.value = "";
-		selectedOption.value = "";
+		// the draft belongs to the record it was typed for: a late answer keeps another row's
+		if (selectedId.value === id) {
+			note.value = "";
+			selectedOption.value = "";
+		}
 		toast.success("Ignored. The assistant was not notified");
 		store.refreshApprovalsCount();
 		if ((filters.status || "Pending") === "Pending") advanceAfterDecide(id);
@@ -1336,15 +1625,14 @@ async function submitDismiss() {
 	} catch (e) {
 		toast.error(errHtml(e));
 	} finally {
-		dismissing.value = false;
+		approvalActions.value.delete(id);
 	}
 }
 
 // Restore a dismissed request back to Pending (the undo).
 async function submitRestore() {
-	if (restoring.value || !selected.value) return;
-	restoring.value = true;
-	const id = selected.value.name;
+	const id = selected.value?.name;
+	if (!claimApprovalAction(id, "restore")) return;
 	try {
 		await api.restoreApproval(id);
 		const r = railRows.value.find((x) => x.name === id);
@@ -1356,7 +1644,7 @@ async function submitRestore() {
 	} catch (e) {
 		toast.error(errHtml(e));
 	} finally {
-		restoring.value = false;
+		approvalActions.value.delete(id);
 	}
 }
 
@@ -1372,6 +1660,9 @@ function advanceAfterDecide(id) {
 			total.value = Math.max(0, total.value - 1);
 		}
 		if (seedRow.value && seedRow.value.name === id) seedRow.value = null;
+		// the pane's record pins its rail row: let go of it, or the row stays in the
+		// order and advanceFrom picks it again
+		if (selected.value && selected.value.name === id) selected.value = null;
 	});
 }
 
@@ -1428,6 +1719,44 @@ const correctSelected = computed(() => {
 		selectAction(kind + ":" + selectedName.value);
 	};
 });
+
+// ── realtime access changes (#756) ───────────────────────────────────────────
+// A reviewer tagged, untagged or a question settled by someone else: re-read the
+// rail, and the open question when it is the one named. A question the viewer lost
+// is dropped quietly by loadRecord (no error toast, no "not found" pane). A burst
+// costs one re-run, not one read per frame.
+const socket = inject("$socket", null);
+const ACCESS_KINDS = new Set([
+	"approval:tagged",
+	"approval:untagged",
+	"action:settled",
+	"approval:continuation_failed",
+]);
+let syncing = false;
+let syncAgain = false;
+let syncSelected = false;
+async function onAccessEvent(p) {
+	if (!p || !ACCESS_KINDS.has(p.kind)) return;
+	if (!p.name || p.name === selectedId.value) syncSelected = true;
+	if (syncing) {
+		syncAgain = true;
+		return;
+	}
+	syncing = true;
+	try {
+		do {
+			syncAgain = false;
+			const id = syncSelected ? selectedId.value : "";
+			syncSelected = false;
+			if (id) docmeta.reload();
+			await Promise.allSettled([refreshKeep(), id && loadRecord(id, { keep: true })]);
+		} while (syncAgain && alive);
+	} finally {
+		syncing = false;
+	}
+}
+onMounted(() => socket && socket.on && socket.on("jarvis:event", onAccessEvent));
+onBeforeUnmount(() => socket && socket.off && socket.off("jarvis:event", onAccessEvent));
 
 // Refresh re-reads the decision rows too: wiki notes have no realtime event, and
 // a System Manager gets none for other users' held rows.

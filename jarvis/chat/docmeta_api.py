@@ -40,6 +40,7 @@ from frappe import _
 from frappe.desk.form import assign_to as _assign_to
 from frappe.share import add_docshare
 
+from jarvis.chat import approval_reviewers
 from jarvis.permissions import has_jarvis_access, require_jarvis_user
 
 ALLOWED_DOCTYPES = {
@@ -78,6 +79,10 @@ def _get_gated(doctype: str, name: str, write: bool = False):
 		frappe.throw(_("Doctype not allowed."), frappe.PermissionError)
 	doc = frappe.get_doc(doctype, name)
 	me = frappe.session.user
+	if doctype == "Jarvis Approval Request":
+		if approval_reviewers.is_chat(doc):
+			approval_reviewers.check(doc, manage=write)
+			return doc
 	if "System Manager" in frappe.get_roles():
 		return doc
 	if doc.owner == me:
@@ -329,10 +334,25 @@ def add_comment(doctype: str, name: str, content: str) -> dict:
 
 def _comment_gated(comment: str):
 	"""Comment mutation gate (§8.1): the comment must live on an allowlisted
-	doctype and the caller must be its author or a System Manager."""
+	doctype and the caller must be its author or a System Manager.
+
+	On a review-scoped Chat question the caller must also still review it, and a
+	System Manager edits or deletes only their own comments there unless they are
+	the requester. A requester without System Manager cannot delete a reviewer's
+	comment: the general author-or-System-Manager rule applies (no extra
+	moderation right on review questions)."""
 	doc = frappe.get_doc("Comment", comment)
 	if doc.reference_doctype not in ALLOWED_DOCTYPES:
 		frappe.throw(_("Not permitted"), frappe.PermissionError)
+	if doc.reference_doctype == "Jarvis Approval Request":
+		approval = frappe.get_doc(doc.reference_doctype, doc.reference_name)
+		if approval_reviewers.is_chat(approval):
+			approval_reviewers.check(approval)
+			if (
+				doc.owner != frappe.session.user
+				and approval_reviewers.requester(approval) != frappe.session.user
+			):
+				frappe.throw(_("Not permitted"), frappe.PermissionError)
 	if doc.owner != frappe.session.user and "System Manager" not in frappe.get_roles():
 		frappe.throw(_("Not permitted"), frappe.PermissionError)
 	return doc
@@ -384,6 +404,8 @@ def toggle_assignment(doctype: str, name: str, user: str, action: str = "add") -
 	if action not in ("add", "remove"):
 		frappe.throw(_("Invalid action."))
 	_get_gated(doctype, name, write=True)
+	if doctype == "Jarvis Approval Request" and approval_reviewers.is_chat(frappe.get_doc(doctype, name)):
+		frappe.throw("Reload Jarvis and use Tag for review for this Chat question.", frappe.PermissionError)
 	user = _validate_target_user(user)
 
 	if action == "add":
@@ -439,6 +461,8 @@ def toggle_share(doctype: str, name: str, user: str, action: str = "add") -> lis
 	if action not in ("add", "remove"):
 		frappe.throw(_("Invalid action."))
 	doc = _get_gated(doctype, name, write=True)
+	if doctype == "Jarvis Approval Request" and approval_reviewers.is_chat(frappe.get_doc(doctype, name)):
+		frappe.throw("Reload Jarvis and use Tag for review for this Chat question.", frappe.PermissionError)
 	user = _validate_target_user(user)
 
 	if action == "add":
@@ -464,7 +488,12 @@ def toggle_share(doctype: str, name: str, user: str, action: str = "add") -> lis
 	if doctype == "Jarvis Approval Request":
 		try:
 			conv = doc.get("conversation")
-			if conv and frappe.db.exists("Jarvis Conversation", conv):
+			parent = (
+				frappe.db.get_value("Jarvis Conversation", conv, ["owner", "file_box"], as_dict=True)
+				if conv
+				else None
+			)
+			if parent and (action == "remove" or parent.file_box or parent.owner == frappe.session.user):
 				if action == "add":
 					add_docshare(
 						"Jarvis Conversation",

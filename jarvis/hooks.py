@@ -625,9 +625,18 @@ doc_events["User"] = {
 	"on_update": [
 		"jarvis.chat.role_profiles.on_user_update",
 		"jarvis.chat.sharing.on_user_update",
+		"jarvis.chat.approval_reviewers.on_user_update",
 		"jarvis.payment_calendar.lifecycle.on_user_update",
 	],
-	"on_trash": ["jarvis.chat.sharing.on_user_trash", "jarvis.payment_calendar.lifecycle.on_user_trash"],
+	"on_trash": [
+		"jarvis.chat.sharing.on_user_trash",
+		"jarvis.chat.approval_reviewers.on_user_update",
+		"jarvis.payment_calendar.lifecycle.on_user_trash",
+	],
+}
+
+doc_events["Jarvis Approval Request"] = {
+	"on_trash": "jarvis.chat.approval_reviewers.on_approval_trash",
 }
 
 doc_events["User Permission"] = {
@@ -790,6 +799,11 @@ permission_query_conditions.update(
 		# A pattern mined from someone's chats stays theirs until they answer (#18).
 		"Jarvis Learned Pattern": "jarvis.learning.chat_pattern_privacy.pattern_query_conditions",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.approval_query_conditions",
+		"Comment": "jarvis.chat.approval_reviewers.comment_query_conditions",
+		"Jarvis Approval Reviewer": "jarvis.chat.approval_reviewers.grant_query_conditions",
+		# Audit copies of a private Chat question: requester-only, like the question.
+		"Version": "jarvis.chat.approval_reviewers.version_query_conditions",
+		"Deleted Document": "jarvis.chat.approval_reviewers.deleted_document_query_conditions",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.voice_note_query_conditions",
 	}
 )
@@ -801,6 +815,10 @@ has_permission.update(
 		"Jarvis Chat Session": "jarvis.chat.chat_permissions.has_session_permission",
 		"Jarvis Learned Pattern": "jarvis.learning.chat_pattern_privacy.has_pattern_permission",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.has_approval_permission",
+		"Jarvis Approval Reviewer": "jarvis.chat.approval_reviewers.has_grant_permission",
+		"Comment": "jarvis.chat.approval_reviewers.has_comment_permission",
+		"Version": "jarvis.chat.approval_reviewers.has_version_permission",
+		"Deleted Document": "jarvis.chat.approval_reviewers.has_deleted_document_permission",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.has_voice_note_permission",
 	}
 )
