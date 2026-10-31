@@ -9,9 +9,16 @@ from unittest.mock import patch
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
-from jarvis.tools._report_query_source import _pinned_restrictions
 
 TERRITORY_FILTER = {"fieldname": "territory", "fieldtype": "Link", "options": "Territory"}
+
+
+def _pinned_restrictions(*args):
+	# Imported at call time, like query_report below, so test discovery does not load
+	# the report source module before the stored-report test sets up its site.
+	from jarvis.tools._report_query_source import _pinned_restrictions as pinned
+
+	return pinned(*args)
 
 
 def _grants(*names):
