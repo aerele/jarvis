@@ -7,6 +7,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import onboarding_contract, _http, _plugin_auth, onboarding, settings_reset
+from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
 from jarvis._password_utils import clear_settings_password, set_settings_password
 from jarvis._plugin_auth import PluginAuthError
 from jarvis.tests.test_api import _FakeRequest, sign_plugin_headers
@@ -17,34 +18,12 @@ CALLBACK = "ab" * 32
 SESSION = "agent:test:j2"
 
 
-class TestCallbackKey(FrappeTestCase):
+class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
 		super().setUp()
-		s = frappe.get_single(SETTINGS)
-		self._orig_agent = s.get_password("agent_token", raise_exception=False) or ""
-		self._orig_cb = s.get_password("callback_key", raise_exception=False) or ""
-		self._orig_issued = s.get("agent_token_issued_at")
-		self._orig_auth = {
-			f: frappe.db.get_single_value(SETTINGS, f)
-			for f in ("tenant_authority_generation", "tenant_authority_handle", "agent_url")
-		}
-		self.settings = s
-		self._orig_email = s.get("jarvis_admin_customer_email")
-		set_settings_password(s, "agent_token", OWNER, update_modified=False)
-		clear_settings_password(s, "callback_key")
-
-	def tearDown(self):
-		s = self.settings
-		clear_settings_password(s, "callback_key")
-		clear_settings_password(s, "agent_token")
-		if self._orig_agent:
-			set_settings_password(s, "agent_token", self._orig_agent, update_modified=False)
-		if self._orig_cb:
-			set_settings_password(s, "callback_key", self._orig_cb, update_modified=False)
-		s.db_set("agent_token_issued_at", self._orig_issued, update_modified=False)
-		for f, v in self._orig_auth.items():
-			s.db_set(f, v, update_modified=False)
-		super().tearDown()
+		self.settings = frappe.get_single(SETTINGS)
+		set_settings_password(self.settings, "agent_token", OWNER, update_modified=False)
+		clear_settings_password(self.settings, "callback_key")
 
 	def _validate(self, token):
 		headers = {"X-Jarvis-Token": token, "X-Jarvis-Session": SESSION}
@@ -146,7 +125,6 @@ class TestCallbackKey(FrappeTestCase):
 		set_settings_password(self.settings, "callback_key", CALLBACK)
 		onboarding.write_connection({"customer": "new@example.com"})
 		self.assertEqual(_plugin_auth._callback_key(), "")
-		frappe.db.set_single_value(SETTINGS, "jarvis_admin_customer_email", self._orig_email)
 
 	def test_workspace_reset_disconnect_keeps_callback_key(self):
 		set_settings_password(self.settings, "callback_key", CALLBACK)
