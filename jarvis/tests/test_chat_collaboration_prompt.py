@@ -45,7 +45,15 @@ class TestCollaborationPrompt(CollaborationCase):
 		)
 		with ExitStack() as stack:
 			private = [
-				stack.enter_context(patch(path, return_value="PRIVATE_CONTEXT_SENTINEL"))
+				stack.enter_context(
+					patch(
+						path,
+						return_value="PRIVATE_CONTEXT_SENTINEL",
+						# This newer helper is absent on release; shared turns must
+						# not read it even when a later backport provides it.
+						create=path == "jarvis.chat.custom_skills.armed_skill_clause",
+					)
+				)
 				for path in (
 					"jarvis.chat.turn_handler._persona_clause",
 					"jarvis.chat.custom_skills.personal_skill_clause",
