@@ -80,6 +80,31 @@ def _visible_names(doctype, names, deadline):
 		return set()
 
 
+def _filter_values(value):
+	"""The names a stored filter value pins (a string, or a list for a MultiSelectList);
+	empty when it is unset or any entry is not a non-empty string."""
+	values = [value] if isinstance(value, str) else list(value) if isinstance(value, list | tuple) else []
+	return values if all(isinstance(v, str) and v for v in values) else []
+
+
+def _pinned_restrictions(linked_matches, filter_defs, stored_filters):
+	"""The restricted doctypes the stored run was pinned inside. A doctype is pinned when
+	the report has a Link filter to it whose stored value is set and every value is one
+	the user may use on the report's DocType (``linked_matches``: their User Permissions
+	for it, tree descendants included). A restriction that is not pinned is not credited."""
+	pinned = set()
+	for doctype, matches in linked_matches.items():
+		permitted = {permission.get("doc") for permission in matches or []}
+		for definition in filter_defs:
+			if definition.get("fieldtype") != "Link" or definition.get("options") != doctype:
+				continue
+			values = _filter_values(stored_filters.get(definition.get("fieldname")))
+			if values and permitted.issuperset(values):
+				pinned.add(doctype)
+				break
+	return pinned
+
+
 class ReportSource:
 	def __init__(self, name, *, version=None):
 		self.name = name
@@ -94,6 +119,7 @@ class ReportSource:
 		self.proof_columns = []
 		self.proof_targets = set()
 		self.framework_filter = False
+		self.filter_defs = []
 		self.meta = self._metadata()
 		if self.meta.status != "Completed":
 			raise InvalidArgumentError(
@@ -149,6 +175,7 @@ class ReportSource:
 		try:
 			self.report = get_report_doc(self.meta.report_name)
 			metadata = get_report_filters(self.meta.report_name)
+			self.filter_defs = metadata.get("filters") or []
 			validate_filters_permissions(
 				self.meta.report_name, self.filters, self.user, js_filters=metadata.get("filters") or []
 			)
@@ -264,8 +291,11 @@ class ReportSource:
 			]
 			for dt in linked_types
 		}
+		# A run made with a permitted value for the restricted doctype (Company on Accounts
+		# Receivable) is inside the user's restriction without a column for it.
+		pinned = _pinned_restrictions(linked_matches, self.filter_defs, self.filters)
 		unrepresented_restrictions = any(
-			linked_matches.get(dt) and dt not in static | dynamic_types for dt in linked_types
+			linked_matches.get(dt) and dt not in static | dynamic_types | pinned for dt in linked_types
 		)
 		for dt in static | dynamic_types:
 			deadline.check()
