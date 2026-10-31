@@ -221,6 +221,11 @@ class TestPinnedRestrictions(unittest.TestCase):
 		self.assertEqual(
 			self.pinned({"territory": "North"}, "North", filters=filters, ref_links=links), set()
 		)
+		# A second Territory link on the DocType with no filter of its own is not covered.
+		self.assertEqual(
+			self.pinned({"territory": "North"}, "North", ref_links=links),
+			set(),
+		)
 		self.assertEqual(
 			self.pinned(
 				{"territory": "North", "billing_territory": "North"},
