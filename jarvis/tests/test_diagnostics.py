@@ -6,6 +6,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import diagnostics
+from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
 
 
 class TestPingAdmin(FrappeTestCase):
@@ -66,15 +67,7 @@ class TestPingAdmin(FrappeTestCase):
 		self.assertEqual(out["kind"], "unreachable")
 
 
-class TestPingAgent(FrappeTestCase):
-	def setUp(self):
-		s = frappe.get_single("Jarvis Settings")
-		self._orig_url = s.get("agent_url") or ""
-
-	def tearDown(self):
-		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", self._orig_url)
-		frappe.db.commit()
-
+class TestPingAgent(JarvisSettingsSnapshot, FrappeTestCase):
 	def test_missing_url_returns_config_error(self):
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", "")
 		frappe.db.commit()

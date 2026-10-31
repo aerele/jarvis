@@ -2,7 +2,7 @@
 token keeps verifying until retirement clears it. The site signs plugin-route
 requests with the callback key, else the owner token."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -106,8 +106,6 @@ class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 	def test_settings_reset_clears_callback_key(self):
 		# Never run the real reset on a live site: assert the scope and drive apply()
 		# against a mock settings object with every side effect patched out.
-		from unittest.mock import MagicMock
-
 		self.assertIn("callback_key", settings_reset.CONNECTION.passwords)
 		mock_settings = MagicMock()
 		with (

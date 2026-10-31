@@ -2330,17 +2330,19 @@
 					v-if="copyAlert"
 					type="warning"
 					:title="copyAlert.title"
-					:message="reverifyError ? `${copyAlert.message} ${reverifyError}` : copyAlert.message"
+					:message="
+						reverifyError ? `${copyAlert.message} ${reverifyError}` : copyAlert.message
+					"
 					style="margin-bottom: 10px"
 				>
 					<template v-if="canReverifySite" #action>
-						<Button
-							size="sm"
-							variant="subtle"
-							label="Re-verify this site"
-							:loading="reverifying"
+						<button
+							class="jv-btn jv-btn--sm"
+							:disabled="reverifying"
 							@click="reverifySite"
-						/>
+						>
+							Re-verify this site
+						</button>
 					</template>
 				</Banner>
 				<Banner

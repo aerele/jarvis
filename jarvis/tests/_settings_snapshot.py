@@ -19,9 +19,7 @@ def _child_doctypes():
 
 def _rows():
 	# Raw SQL is acceptable: this is a test fixture copying and restoring raw rows.
-	singles = frappe.db.sql(
-		"select doctype, field, value from tabSingles where doctype=%s", SETTINGS
-	)
+	singles = frappe.db.sql("select doctype, field, value from tabSingles where doctype=%s", SETTINGS)
 	auth = frappe.db.sql(
 		"select doctype, name, fieldname, password, encrypted from `__Auth` where doctype=%s", SETTINGS
 	)
@@ -47,12 +45,38 @@ def _restore_child_rows(snapshot):
 			frappe.db.sql(f"insert into `tab{dt}` ({cols}) values ({marks})", tuple(row.values()))
 
 
+def _child_auth(child_rows):
+	"""``__Auth`` rows of child-table Password fields, keyed (child doctype, row name, fieldname).
+
+	Only rows for the given child rows' names; ``child_rows`` is ``{doctype: [row dict]}``."""
+	out = []
+	for dt, rows in child_rows.items():
+		names = [r["name"] for r in rows]
+		if names:
+			out.extend(
+				frappe.db.sql(
+					"select doctype, name, fieldname, password, encrypted from `__Auth` "
+					"where doctype=%s and name in %s",
+					(dt, names),
+				)
+			)
+	return out
+
+
 def compute_hash():
 	"""(sha256, tabSingles count, __Auth count, child-row count) of the raw rows."""
 	singles, auth = _rows()
 	child = _child_rows()
 	child_norm = {dt: sorted(repr(sorted(r.items())) for r in rows) for dt, rows in child.items()}
-	payload = repr((sorted(map(tuple, singles)), sorted(map(tuple, auth)), sorted(child_norm.items())))
+	child_auth = _child_auth(child)
+	payload = repr(
+		(
+			sorted(map(tuple, singles)),
+			sorted(map(tuple, auth)),
+			sorted(child_norm.items()),
+			sorted(map(tuple, child_auth)),
+		)
+	)
 	return (
 		hashlib.sha256(payload.encode()).hexdigest(),
 		len(singles),
@@ -76,8 +100,25 @@ class JarvisSettingsSnapshot:
 	def _take_snapshot(self):
 		self._js_singles, self._js_auth = _rows()
 		self._js_child = _child_rows()
+		self._js_child_auth = _child_auth(self._js_child)
 		# A cleanup runs even when a later setUp step raises (tearDown would not).
 		self.addCleanup(self._restore)
+
+	def _restore_child_auth(self):
+		"""Child-row Password values live in ``__Auth``. Drop those of the snapshot's rows
+		and of the rows present now (a row the test added), then put the snapshot back."""
+		current = _child_auth(_child_rows())
+		for dt in self._js_child:
+			names = {r["name"] for r in self._js_child[dt]}
+			names |= {row[1] for row in current if row[0] == dt}
+			if names:
+				frappe.db.sql("delete from `__Auth` where doctype=%s and name in %s", (dt, list(names)))
+		for row in self._js_child_auth:
+			frappe.db.sql(
+				"insert into `__Auth` (doctype, name, fieldname, password, encrypted) "
+				"values (%s, %s, %s, %s, %s)",
+				row,
+			)
 
 	def _restore(self):
 		try:
@@ -91,6 +132,7 @@ class JarvisSettingsSnapshot:
 					"values (%s, %s, %s, %s, %s)",
 					row,
 				)
+			self._restore_child_auth()
 			_restore_child_rows(self._js_child)
 			# Commit the restore: code under test may have committed, and the test
 			# class's final rollback would otherwise revert to that leaked state.

@@ -115,7 +115,7 @@ def route_request(
 def post_session_action(agent_url: str, path: str, session_key: str, body: dict) -> dict:
 	"""POST a sessions/delete or sessions/patch body; returns the plugin's payload.
 
-	401/403/404/5xx raise ``PluginRouteError``. A 502 carries the gateway's refusal text
+	401/403/404/5xx raise ``PluginRouteError``. Only a 502 carries the gateway's refusal text
 	(for example "session not found"), which the plugin has already scrubbed of secrets.
 	"""
 	response = route_request(agent_url, "POST", path, session_key, body, read_timeout_s=30)
@@ -124,9 +124,12 @@ def post_session_action(agent_url: str, path: str, session_key: str, body: dict)
 	except ValueError:
 		parsed = {}
 	if response.status_code != 200 or not isinstance(parsed, dict) or not parsed.get("ok"):
-		detail = parsed.get("error") if isinstance(parsed, dict) else ""
-		detail = detail[:200] if isinstance(detail, str) else ""
-		raise PluginRouteError(f"The agent route was refused (HTTP {response.status_code}): {detail}")
+		# Only a 502 carries the gateway's own (scrubbed) refusal text, e.g. "session not
+		# found". Any other status gets a fixed message, so a missing route's "Not Found"
+		# can never be read by a caller as "the session is already gone".
+		if response.status_code == 502 and isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
+			raise PluginRouteError(f"The agent route was refused (HTTP 502): {parsed['error'][:200]}")
+		raise PluginRouteError(f"The agent route was refused (HTTP {response.status_code}).")
 	payload = parsed.get("payload")
 	return payload if isinstance(payload, dict) else {}
 

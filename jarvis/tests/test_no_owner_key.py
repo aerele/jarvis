@@ -18,8 +18,14 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.chat import plugin_routes
 from jarvis.chat.agent_client import _REQUESTED_SCOPES, AgentSession
 from jarvis.exceptions import AgentUnreachableError
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 from jarvis.tests._plugin_route_fixtures import SESSION, patch_signer
 from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
 
 AGENT_URL = "ws://agent.host:9000"
 HTTP_BASE = "http://agent.host:9000"
@@ -108,10 +114,14 @@ class TestSignedRoutes(FrappeTestCase):
 			with self.assertRaises(plugin_routes.PluginRouteError) as ctx:
 				plugin_routes.delete_session(AGENT_URL, SESSION)
 		self.assertIn("session not found", str(ctx.exception))
+		# Any other status gets a fixed message, even when the body says "not found".
 		for status in (401, 403, 404, 500):
-			with patch_signer(), patch("requests.request", return_value=_response(status=status)):
-				with self.assertRaises(plugin_routes.PluginRouteError):
+			body = {"error": "Not Found: session not found"}
+			with patch_signer(), patch("requests.request", return_value=_response(status, payload=body)):
+				with self.assertRaises(plugin_routes.PluginRouteError) as ctx:
 					plugin_routes.delete_session(AGENT_URL, SESSION)
+			self.assertNotIn("not found", str(ctx.exception).lower())
+			self.assertIn(f"HTTP {status}", str(ctx.exception))
 
 
 class TestCanvasUsesPluginRoute(FrappeTestCase):
@@ -198,7 +208,7 @@ class TestMediaUsesDeviceBearer(FrappeTestCase):
 		cm.__enter__ = Mock(return_value=resp)
 		cm.__exit__ = Mock(return_value=False)
 		with patch("requests.get", return_value=cm) as get:
-			out = generated_media.fetch_media(AGENT_URL, "dev-tok", "/home/node/.openclaw/media/a.png")
+			out = generated_media.fetch_media(AGENT_URL, "dev-tok", "/home/node/media/a.png")
 		self.assertEqual(out, b"PNG")
 		self.assertEqual(get.call_args.kwargs["headers"], {"Authorization": "Bearer dev-tok"})
 
@@ -307,9 +317,21 @@ class TestPing(FrappeTestCase):
 		connect.return_value.close.assert_called_once()
 
 		# What that connect presents: the device token, the narrow scopes, no owner token.
-		sess, ws = _build_session()
-		params = ws.sent[0]["params"]
-		self.assertEqual(params["auth"], {"deviceToken": "tok-test"})
+		from jarvis.tests.test_chat_agent_client import _challenge, _frame, _make_creds, _ScriptedWS
+
+		creds = _make_creds()
+
+		def _ok():
+			return _frame({"type": "res", "id": scripted.sent[-1]["id"], "ok": True, "payload": {}})
+
+		scripted = _ScriptedWS([_challenge("nonce-xyz"), _ok])
+		with (
+			patch("jarvis.chat.agent_client.websocket.create_connection", return_value=scripted),
+			patch("jarvis.chat.agent_client.ensure_paired", return_value=creds),
+		):
+			sess = AgentSession.connect("ws://t")
+		params = scripted.sent[0]["params"]
+		self.assertEqual(params["auth"], {"deviceToken": creds.device_token})
 		self.assertEqual(params["scopes"], ["operator.read", "operator.write"])
 		sess.close()
 

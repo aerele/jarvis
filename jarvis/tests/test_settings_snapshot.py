@@ -7,7 +7,14 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.tests._settings_snapshot import SETTINGS, JarvisSettingsSnapshot, _child_doctypes, _child_rows, _rows, compute_hash
+from jarvis.tests._settings_snapshot import (
+	SETTINGS,
+	JarvisSettingsSnapshot,
+	_child_doctypes,
+	_child_rows,
+	_rows,
+	compute_hash,
+)
 
 PROBE = "zz_snapshot_probe"
 
@@ -65,11 +72,8 @@ class TestSettingsSnapshot(FrappeTestCase):
 			frappe.db.sql(f"delete from `tab{dt}` where name=%s", rows[0]["name"])
 		else:
 			# an inserted row must go away
-			template = frappe.db.sql(f"select * from `tab{dt}` limit 1", as_dict=True)
-			self.assertFalse(template and template[0].get("parenttype") == SETTINGS)
 			frappe.db.sql(
-				f"insert into `tab{dt}` (name, parent, parenttype, parentfield) "
-				"values (%s, %s, %s, %s)",
+				f"insert into `tab{dt}` (name, parent, parenttype, parentfield) values (%s, %s, %s, %s)",
 				("zz_snapshot_probe", SETTINGS, SETTINGS, "zz"),
 			)
 		self.assertNotEqual(compute_hash(), before)

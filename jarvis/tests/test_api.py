@@ -6,6 +6,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.api import call_tool
 from jarvis.tests._role_guard import enforced_role_guards
+from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
 
 
 class TestCallToolStandardAuth(FrappeTestCase):
@@ -771,33 +772,13 @@ class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
 			self.assertTrue(_plugin_auth._should_audit_unsigned_reject("s1"))
 
 
-class TestRotateAgentTokenEndpoint(FrappeTestCase):
+class TestRotateAgentTokenEndpoint(JarvisSettingsSnapshot, FrappeTestCase):
 	"""C2 PR-3C: bench-side orchestrator. Generates fresh randomness,
 	pushes via admin (which proxies to fleet which recreates the
 	container against the new env), persists locally on success."""
 
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		settings = frappe.get_single("Jarvis Settings")
-		cls._original_token = settings.get_password("agent_token", raise_exception=False) or ""
-		settings.db_set("agent_token", "before-rotation-token")
-		frappe.db.commit()
-
-	@classmethod
-	def tearDownClass(cls):
-		# A successful rotation stores the token in __Auth (masked column);
-		# drop that row so a stale rotated token can't shadow the restored
-		# value via get_password's __Auth fallback in later suites.
-		from frappe.utils.password import remove_encrypted_password
-
-		remove_encrypted_password("Jarvis Settings", "Jarvis Settings", "agent_token")
-		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("agent_token", cls._original_token)
-		frappe.db.commit()
-		super().tearDownClass()
-
 	def setUp(self):
+		super().setUp()  # snapshots every Jarvis Settings row; restored after each test
 		# rotate_agent_token requires System Manager; tests run as Admin.
 		frappe.set_user("Administrator")
 		# Reset to a known starting token (column write shadows any __Auth

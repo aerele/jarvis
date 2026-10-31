@@ -55,29 +55,28 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 	"""Whitelisted entry point for Jarvis tool dispatch.
 
-	   Two authentication modes are supported:
+	Two authentication modes are supported:
 
-	   1. **Standard Frappe auth** (external callers): session cookie or
-	      ``Authorization: token <api_key>:<api_secret>``. The calling user is
-	      whoever Frappe's session resolves to; their permissions are what the
-	      tool sees. Guest is rejected.
+	1. **Standard Frappe auth** (external callers): session cookie or
+	   ``Authorization: token <api_key>:<api_secret>``. The calling user is
+	   whoever Frappe's session resolves to; their permissions are what the
+	   tool sees. Guest is rejected.
 
-	   2. **Plugin auth** (Jarvis agent plugin, Path A): two custom headers
-	      are presented together:
+	2. **Plugin auth** (Jarvis agent plugin, Path A): two custom headers
+	   are presented together:
 
-	      - ``X-Jarvis-Token`` - the per-tenant ``callback_key`` (or, before one is stored,
-	the shared ``agent_token``)
-	 (proves the request originated inside the agent container)
-	      - ``X-Jarvis-Session`` - the agent sessionKey for this conversation
+	   - ``X-Jarvis-Token`` - the shared ``agent_token`` secret
+	     (proves the request originated inside the agent container)
+	   - ``X-Jarvis-Session`` - the agent sessionKey for this conversation
 
-	      The token is validated, then the user is resolved from
-	      ``Jarvis Chat Session`` (the row inserted at session-create time maps
-	      sessionKey → Frappe user). Dispatch runs under that user via
-	      ``frappe.set_user``. The original session user is restored after.
+	   The token is validated, then the user is resolved from
+	   ``Jarvis Chat Session`` (the row inserted at session-create time maps
+	   sessionKey → Frappe user). Dispatch runs under that user via
+	   ``frappe.set_user``. The original session user is restored after.
 
-	   Returns ``{ok: True, data: ...}`` on success or
-	   ``{ok: False, error: {code, message}}`` on tool-level error. Auth
-	   failures are reported with the corresponding HTTP status code.
+	Returns ``{ok: True, data: ...}`` on success or
+	``{ok: False, error: {code, message}}`` on tool-level error. Auth
+	failures are reported with the corresponding HTTP status code.
 	"""
 	# Plugin auth mode - detected by presence of X-Jarvis-Token header.
 	# Goes through the C2 hardening pipeline (bearer → session →
