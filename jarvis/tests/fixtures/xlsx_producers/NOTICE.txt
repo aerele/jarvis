@@ -1,0 +1,15 @@
+The eight LibreOffice corpus workbooks are verbatim public test fixtures from
+LibreOffice/core/sc/qa/unit/data/xlsx. The manifest pins each Git blob and SHA-256.
+LibreOffice source licensing: https://www.libreoffice.org/about-us/licenses/
+These LibreOffice fixtures remain under MPL 2.0. See MPL-2.0.txt.
+MPL 2.0 source license: https://www.mozilla.org/MPL/2.0/
+
+The Google Sheets workbook is a verbatim XLSX export of the public Class Data
+sample linked by Google's Sheets API Quickstart. It is parser test data, not
+customer data. The manifest records the export URL, documentation and SHA-256.
+Google sample attribution: https://developers.google.com/workspace/sheets/api/quickstart/python
+Google Developers site terms: https://developers.google.com/terms/site-policies
+
+No network request is needed to run these tests. These fixtures establish only
+the listed producer cases. They do not establish compatibility with every valid
+workbook or every exporter.

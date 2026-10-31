@@ -8,7 +8,7 @@ A ZIP can contain XLSX, CSV, TSV, JSON, MD, Markdown, and TXT files. A standalon
 
 Nested archives, GZ members inside ZIP, TAR, encrypted members, links, and unsupported compression methods are refused. PDF and image members appear as unsupported inventory entries. No file is extracted to disk or saved as a new Frappe File.
 
-The compressed input limit is 10 MiB. Each decoded file has a 10 MiB limit. Selected decoded files share a 32 MiB limit. XLSX internal streams share a separate 64 MiB limit, both per workbook and across the selected workbooks. ZIP allows 32 files and 128 total entries. Selected data shares limits of 32 tables, 100,000 stored rows or nodes, 2 million cells, and 128 columns per table. A response has at most 200 displayed rows and 16,000 characters of worker data. The child has a 16-second CPU limit, 22-second wall limit, and 512 MiB address-space limit. These are refusal limits, not capacity guarantees for every file shape.
+The compressed input limit is 10 MiB. Each decoded file has a 10 MiB limit. Selected decoded files share a 32 MiB limit. XLSX internal streams share a separate 64 MiB limit, both per workbook and across the selected workbooks. ZIP allows 32 data files and 128 total entries. Unsupported macOS resource-fork entries stay in inventory but do not consume data-file slots. They remain unread and prevent a whole-archive completion claim. Selected data shares limits of 32 tables, 100,000 stored rows or nodes, 2 million cells, and 128 columns per table. A response has at most 200 displayed rows and 16,000 characters of worker data. The child has a 16-second CPU limit, 22-second wall limit, and 512 MiB address-space limit. These are refusal limits, not capacity guarantees for every file shape.
 
 ## Query flow
 
@@ -43,7 +43,7 @@ Preserve exact File IDs in ordinary and shared chat attachments. A URL shared by
 
 Keep archives off if an old plugin/backend pair drops scope arguments, if required capabilities are absent, or if supported-runtime checks are incomplete. A rollback must restore the matching backend/plugin pair. Shared XLSX integrity hardening is a separate change from the archive key.
 
-Local evidence is recorded in the implementation work area. Native Frappe 15 execution, representative Microsoft Excel/LibreOffice/Google exports, and full model-driven chat journeys still need release verification. These gaps do not permit a production-ready claim.
+Local evidence is recorded in the implementation work area. Native Frappe 15 execution and full model-driven chat journeys still need release verification. The pinned producer fixtures below cover selected export cases. These gaps do not permit a production-ready claim.
 
 ## Integrity and retention review
 
@@ -54,15 +54,18 @@ The validator also limits a workbook to 4,096 ZIP entries. This is a resource
 ceiling, not a statement that every valid workbook has fewer parts. Representative
 Office export checks remain required; no permissive integrity fallback is used.
 
-Review checks used eight pinned public fixtures from LibreOffice's XLSX test
-corpus. Producer metadata covered Excel, Macintosh Excel, and LibreOffice. Both
+The offline test matrix commits eight pinned public fixtures from LibreOffice's
+XLSX test corpus and one Google Sheets Quickstart export. Producer metadata covered Excel, Macintosh Excel, and LibreOffice. Both
 plain query and exact-scan child paths passed. The Excel 2010 fixture exposed an
 empty deflate thumbnail with no file-data bytes. The reader now accepts that
 zero-byte ZIP case only when the verified size and CRC are zero. Nonempty streams
 still require full EOF and integrity checks. A synthetic regression also proves
 that the final worksheet row is preserved and incorrect size/CRC values fail.
-This fixture check does not establish Google Sheets export coverage or universal
-Office compatibility.
+The Google Sheets export contains the public Class Data sample linked in Google's
+API Quickstart. SHA-256 values and immutable LibreOffice blob references are in
+`jarvis/tests/fixtures/xlsx_producers/manifest.json`. Both real child paths run in
+the tests with archives disabled. The matrix covers these files, not every valid
+workbook or every Numbers, ClosedXML or ExcelJS export.
 
 All source workers disable core dumps before reading input. The 512 MiB
 address-space cap applies on Linux. macOS does not provide the same address-space
@@ -72,3 +75,22 @@ re-query behavior, historic records, and native-runner limitations.
 URL-only lookup uses Frappe's permission-aware File listing. Exact attachment File
 IDs remain the preferred reference, including native prepared-report handoff.
 Missing, ambiguous, and unreadable URL references use the same denial text.
+
+## Paired release order
+
+Pause chat and agent traffic while deploying this release group. Deploy backend
+#2245, #2247 and #2262 first; run `bench migrate` and restart backend workers. Then
+deploy plugin #136, #137 and #138 and restart the gateway. Check the matching tool
+contract digest, source-read hooks, a prepared-report handoff and an archive
+canary. Keep archive reading off until those checks pass.
+
+The 21 reader bundles bumped to 0.3.1 require `jarvis__query_report`. Deliver those
+bundles and the Admin #794 provisioning patch only after the backend and plugin
+register that tool. Refresh role profiles and check effective permissions on a
+fresh run. Existing AgentRun capability snapshots are not rewritten. Resume
+traffic only after the paired checks pass.
+
+URL-only references remain refused when multiple readable File rows match. The
+exact File ID disambiguates the attachment and preserves prepared-report access
+checks. Updated attachment hints include that ID. Do not pick an arbitrary File
+row to make a legacy URL succeed.

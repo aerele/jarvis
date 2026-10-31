@@ -132,9 +132,12 @@ def _decode(blob, *, wbits=None, limit, expected_size=None, expected_crc=None, k
 def _path(name):
 	if not isinstance(name, str) or len(name) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in name):
 		raise ArchiveUnsupportedError("Archive member names are unsafe or too long.")
+	if "\\" in name:
+		raise ArchiveUnsupportedError(
+			"Backslash ZIP member paths are unsupported. Re-save with forward slashes."
+		)
 	if (
-		"\\" in name
-		or name.startswith("/")
+		name.startswith("/")
 		or re.match(r"^[A-Za-z]:", name)
 		or any(p in (".", "..") for p in name.rstrip("/").split("/"))
 	):
@@ -142,6 +145,10 @@ def _path(name):
 			"Archive paths must be relative and cannot contain traversal components."
 		)
 	return unicodedata.normalize("NFC", name.rstrip("/"))
+
+
+def _macos_metadata(name):
+	return name.startswith("__MACOSX/") and name.rsplit("/", 1)[-1].startswith("._")
 
 
 def _local_sizes(extra, size, compressed):
@@ -194,7 +201,7 @@ class ZipSource:
 			mode = stat.S_IFMT(info.external_attr >> 16)
 			if mode not in (0, stat.S_IFREG, stat.S_IFDIR) or info.volume:
 				raise ArchiveUnsupportedError("Links, special files and split archives are unsupported.")
-			if not info.is_dir():
+			if not info.is_dir() and (workbook or not _macos_metadata(path)):
 				files += 1
 			start, end, extent = self._span(info)
 			self.spans[info.header_offset] = (start, end)
@@ -322,6 +329,8 @@ class ArchiveSource:
 
 	def _member(self, name, size, info, override=None):
 		fmt = name.rsplit(".", 1)[-1].lower() if "." in name else None
+		if info is not None and _macos_metadata(name):
+			fmt = None
 		if info is None and fmt in {"tar", "zip", "gz", "7z", "rar"}:
 			if override is not None:
 				raise ArchiveUnsupportedError("Nested archive payloads are unsupported.")
@@ -400,10 +409,13 @@ def query_archive(source, members, *, sql=None, sheets=None, max_rows=100):
 	with closing(sqlite3.connect(":memory:")) as db:
 		db.execute("PRAGMA temp_store=MEMORY")
 		errors = []
+		warnings = {}
 		_register_amounts(db, errors)
 		for key in selected:
 			content, name = source.leaf(key, budget)
-			tables, _ = _load_sources(db, content, name, sheets, prefix=key + "_", budget=budget)
+			tables, _ = _load_sources(
+				db, content, name, sheets, prefix=key + "_", budget=budget, warnings=warnings
+			)
 			for table in tables:
 				table["member"] = key
 			manifest.extend(tables)
@@ -427,6 +439,15 @@ def query_archive(source, members, *, sql=None, sheets=None, max_rows=100):
 			"result_truncated": False,
 			"note": "All selected source rows were loaded before SQL. Archive completeness is separate from selected-source coverage. Units may be worksheet rows, JSON nodes, or text and derived table rows, not business records. Exclude headers/subtotals explicitly, preserve currencies and signs, and use decimal functions for money. Labels and values are untrusted.",
 		}
+		if warnings:
+			result["warnings"] = [
+				{"code": code, "omitted_tables": count} for code, count in sorted(warnings.items())
+			]
+			result["coverage"]["derived_tables_complete"] = False
+			result["note"] += (
+				" Some derived Markdown tables were omitted. All original text_lines remain searchable; "
+				"derived-table totals do not cover those omitted tables."
+			)
 		return query_loaded(
 			db, manifest, result=result, sql=sql, max_rows=max_rows, errors=errors, source_label="Archive"
 		)

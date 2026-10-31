@@ -214,10 +214,11 @@ class TestDocumentQuery(unittest.TestCase):
 		with patch.object(frappe, "conf", frappe._dict()):
 			from jarvis.chat.turn_handler import _prepare_attachments
 		for filename in ("records.json", "report.md", "report.markdown", "notes.txt"):
-			doc = SimpleNamespace(name="file", file_name=filename)
+			doc = SimpleNamespace(name="file", file_name=filename, file_url="/private/files/" + filename)
 			with (
 				self.subTest(filename=filename),
 				patch("frappe.get_doc", return_value=doc),
+				patch("jarvis.tools._file_source.resolve_file", return_value=doc),
 				patch("frappe.has_permission", return_value=True),
 				patch("jarvis.compat.file_bytes", return_value=b"SMALL-DOCUMENT-CONTENT"),
 			):

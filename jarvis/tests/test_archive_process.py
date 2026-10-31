@@ -1,6 +1,11 @@
 """Actual worker and public API contracts with controlled File/access boundaries."""
 
 import gzip
+import io
+import json
+import resource
+import signal
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -23,6 +28,27 @@ from jarvis.tools.read_file import read_file
 
 
 class TestArchiveProcess(unittest.TestCase):
+	def test_archive_worker_sets_core_cpu_memory_and_wall_limits(self):
+		from jarvis.tools import _archive_worker
+
+		request = {"content": "", "filename": "fixture.zip", "operation": "manifest"}
+		with (
+			patch.object(resource, "setrlimit") as limits,
+			patch.object(signal, "alarm") as alarm,
+			patch.object(sys, "platform", "linux"),
+			patch.object(
+				sys, "stdin", SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode() + b"\n"))
+			),
+			patch.object(sys, "stdout", SimpleNamespace(buffer=io.BytesIO())),
+			patch("jarvis.tools._archive_sources.ArchiveSource") as source,
+		):
+			source.return_value.manifest.return_value = {}
+			_archive_worker.main()
+			self.assertEqual(limits.call_args_list[0].args, (resource.RLIMIT_CORE, (0, 0)))
+			self.assertEqual(limits.call_args_list[1].args, (resource.RLIMIT_CPU, (16, 16)))
+			self.assertEqual(limits.call_args_list[2].args, (resource.RLIMIT_AS, (512 * 1024**2,) * 2))
+			alarm.assert_called_once_with(22)
+
 	def test_actual_worker_queries_all_members(self):
 		data = archive([("jan.csv", "Amount\n" + "0.10\n" * 3000), ("feb.csv", "Amount\n" + "0.20\n" * 3000)])
 		result = run_archive(

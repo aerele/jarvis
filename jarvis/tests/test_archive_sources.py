@@ -33,6 +33,33 @@ def understated_zip():
 
 
 class TestArchiveSources(unittest.TestCase):
+	def test_macos_resource_forks_do_not_consume_the_data_file_slots(self):
+		files = [(f"data{i}.csv", "A\n1\n") for i in range(32)]
+		files += [(f"__MACOSX/._data{i}.csv", b"resource-fork") for i in range(32)]
+		source = a.ArchiveSource(archive(files), "macos.zip")
+		selected = [m["id"] for m in source.members if m["status"] == "supported"]
+		self.assertEqual(len(source.members), 64)
+		self.assertEqual(len(selected), 32)
+		result = a.query_archive(source, selected)
+		self.assertTrue(result["coverage"]["complete"])
+		self.assertFalse(result["archive_complete"])
+		self.assertEqual(result["unread_member_count"], 32)
+		with self.assertRaises(a.ArchiveUnsupportedError):
+			source.select(["m33"])
+		with self.assertRaises(a.ArchiveCapacityError):
+			a.ArchiveSource(archive(files + [("extra.csv", "A\n1")]), "too-many.zip")
+
+	def test_omitted_markdown_tables_keep_the_original_archive_text(self):
+		source = a.ArchiveSource(archive([("notes.md", "|a|b|\n|---|---|\n|1|2|3|\nTAIL")]), "notes.zip")
+		result = a.query_archive(source, ["m1"], sql="SELECT text FROM m1_text_lines WHERE text='TAIL'")
+		self.assertEqual(result["rows"], [["TAIL"]])
+		self.assertEqual(result["warnings"], [{"code": "malformed_markdown_table", "omitted_tables": 1}])
+		self.assertFalse(result["coverage"]["derived_tables_complete"])
+
+	def test_backslash_refusal_explains_the_supported_separator(self):
+		with self.assertRaisesRegex(a.ArchiveUnsupportedError, "Backslash.*forward slashes"):
+			a.ArchiveSource(archive([("a\\b.csv", "x")]), "paths.zip")
+
 	def test_six_months_query_whole_scope_and_tail(self):
 		files = [
 			(
