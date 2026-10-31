@@ -539,6 +539,9 @@ def _require_own_conversation(conversation: str) -> None:
 		raise InvalidArgumentError("unknown conversation")
 	if owner != frappe.session.user:
 		frappe.throw(_("Not your conversation."), frappe.PermissionError)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 
 
 def _owns_conversation(conversation: str) -> bool:
@@ -1339,6 +1342,9 @@ def _dispatch_call(record: dict, token: str, guard_conv, crash_title: str) -> di
 	from jarvis import api
 
 	# exec_user defaults to the owner for tokens minted before this field existed.
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(record.get("conversation"))
 	exec_user = record.get("exec_user") or record.get("owner") or frappe.session.user
 	watch = CommitWatch().arm(savepoint=True)
 	try:

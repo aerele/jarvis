@@ -91,12 +91,6 @@ jobs:
         with:
           extra_args: --all-files --show-diff-on-failure
 
-<<<<<<< HEAD
-  # The frontend Vue SPA carries its own two test suites; this job is their gate. It needs
-  # only node — no bench, no container — so it reports fast and independently of the
-  # Python job below. The SPA is served identically on v15 and v16 sites, so this job is
-  # identical to develop's.
-=======
   # #773: the product socket gate (jarvis/chat/socket_io.py) relies on websocket-client
   # internals, and pyproject allows any websocket-client >=1.6,<2 while the tests job
   # installs only the newest. This runs the contract harness against BOTH ends of that
@@ -128,12 +122,10 @@ jobs:
             --expect-version "$version" --out "$RUNNER_TEMP/ws-contract.json"
           cat "$RUNNER_TEMP/ws-contract.json"
 
-  # The frontend Vue SPA carries its own two test suites and, until this job, NOTHING ran either of
-  # them on a PR: `frontend/package.json` defines `test` (vitest) and `test:node` (node's built-in
-  # runner), but no workflow invoked them, so a browser-transport regression once shipped green.
-  # This is that gate. It needs only node — no bench, no container — so it reports fast and
-  # independently of the Python shards above.
->>>>>>> d91b552 (fix(chat): safely retry locally unsent dispatches and preserve Stop intent)
+  # The frontend Vue SPA carries its own two test suites; this job is their gate. It needs
+  # only node — no bench, no container — so it reports fast and independently of the
+  # Python job below. The SPA is served identically on v15 and v16 sites, so this job is
+  # identical to develop's.
   frontend-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
