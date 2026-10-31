@@ -208,7 +208,12 @@ class ReportSource:
 
 	def _gate(self):
 		try:
-			self.report = get_report_doc(self.meta.report_name)
+			try:
+				self.report = get_report_doc(self.meta.report_name)
+			except frappe.ValidationError:
+				raise InvalidArgumentError(
+					"The selected report is unavailable. Choose an enabled report."
+				) from None
 			metadata = get_report_filters(self.meta.report_name)
 			self.filter_defs = metadata.get("filters") or []
 			validate_filters_permissions(
@@ -232,7 +237,7 @@ class ReportSource:
 					raise InvalidArgumentError(
 						"The saved accounting report lacks its company or report date. Regenerate it."
 					)
-		except frappe.PermissionError:
+		except (frappe.PermissionError, frappe.ValidationError):
 			raise PermissionDeniedError(
 				"You do not have permission to read this report or its saved scope."
 			) from None

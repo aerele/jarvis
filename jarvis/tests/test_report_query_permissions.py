@@ -194,9 +194,7 @@ class TestStoredReportPermissions(unittest.TestCase):
 				if permitted:
 					self.assertIn("version", query_report(run.name))
 				else:
-					# Frappe's own filter check refuses an out-of-scope value first
-					# (ValidationError); an unpinned run is refused by the restriction gate.
-					with self.assertRaises((PermissionDeniedError, frappe.ValidationError)):
+					with self.assertRaises(PermissionDeniedError):
 						query_report(run.name)
 		finally:
 			frappe.set_user("Administrator")
@@ -206,6 +204,39 @@ class TestStoredReportPermissions(unittest.TestCase):
 					frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
 			frappe.db.commit()
 			frappe.set_user(original_user)
+
+
+class TestStoredReportGate(unittest.TestCase):
+	def source(self):
+		from jarvis.tools._report_query_source import ReportSource
+
+		source = ReportSource.__new__(ReportSource)
+		source.meta = frappe._dict(report_name="Stored report")
+		source.user = "report-reader@example.test"
+		source.filters = {"customer": "PRIVATE-FILTER-VALUE"}
+		return source
+
+	def test_framework_filter_refusals_do_not_disclose_stored_values(self):
+		module = "jarvis.tools._report_query_source"
+		for error in (frappe.PermissionError, frappe.ValidationError):
+			with (
+				self.subTest(error=error.__name__),
+				patch(module + ".get_report_doc", return_value=frappe._dict(name="Stored report")),
+				patch(module + ".get_report_filters", return_value={"filters": []}),
+				patch(module + ".validate_filters_permissions", side_effect=error("PRIVATE-FILTER-VALUE")),
+			):
+				with self.assertRaises(PermissionDeniedError) as caught:
+					self.source()._gate()
+				self.assertNotIn("PRIVATE-FILTER-VALUE", str(caught.exception))
+
+	def test_disabled_report_has_a_safe_argument_error(self):
+		with patch(
+			"jarvis.tools._report_query_source.get_report_doc",
+			side_effect=frappe.ValidationError("PRIVATE-REPORT-NAME is disabled"),
+		):
+			with self.assertRaises(InvalidArgumentError) as caught:
+				self.source()._gate()
+			self.assertNotIn("PRIVATE-REPORT-NAME", str(caught.exception))
 
 
 class TestPinnedRestrictions(unittest.TestCase):
