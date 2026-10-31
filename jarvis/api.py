@@ -55,29 +55,29 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 	"""Whitelisted entry point for Jarvis tool dispatch.
 
-	Two authentication modes are supported:
+	   Two authentication modes are supported:
 
-	1. **Standard Frappe auth** (external callers): session cookie or
-	   ``Authorization: token <api_key>:<api_secret>``. The calling user is
-	   whoever Frappe's session resolves to; their permissions are what the
-	   tool sees. Guest is rejected.
+	   1. **Standard Frappe auth** (external callers): session cookie or
+	      ``Authorization: token <api_key>:<api_secret>``. The calling user is
+	      whoever Frappe's session resolves to; their permissions are what the
+	      tool sees. Guest is rejected.
 
-	2. **Plugin auth** (Jarvis agent plugin, Path A): two custom headers
-	   are presented together:
+	   2. **Plugin auth** (Jarvis agent plugin, Path A): two custom headers
+	      are presented together:
 
-	   - ``X-Jarvis-Token`` - the per-tenant ``callback_key`` (or, before one is stored,
-     the shared ``agent_token``)
-	     (proves the request originated inside the agent container)
-	   - ``X-Jarvis-Session`` - the agent sessionKey for this conversation
+	      - ``X-Jarvis-Token`` - the per-tenant ``callback_key`` (or, before one is stored,
+	the shared ``agent_token``)
+	 (proves the request originated inside the agent container)
+	      - ``X-Jarvis-Session`` - the agent sessionKey for this conversation
 
-	   The token is validated, then the user is resolved from
-	   ``Jarvis Chat Session`` (the row inserted at session-create time maps
-	   sessionKey → Frappe user). Dispatch runs under that user via
-	   ``frappe.set_user``. The original session user is restored after.
+	      The token is validated, then the user is resolved from
+	      ``Jarvis Chat Session`` (the row inserted at session-create time maps
+	      sessionKey → Frappe user). Dispatch runs under that user via
+	      ``frappe.set_user``. The original session user is restored after.
 
-	Returns ``{ok: True, data: ...}`` on success or
-	``{ok: False, error: {code, message}}`` on tool-level error. Auth
-	failures are reported with the corresponding HTTP status code.
+	   Returns ``{ok: True, data: ...}`` on success or
+	   ``{ok: False, error: {code, message}}`` on tool-level error. Auth
+	   failures are reported with the corresponding HTTP status code.
 	"""
 	# Plugin auth mode - detected by presence of X-Jarvis-Token header.
 	# Goes through the C2 hardening pipeline (bearer → session →
@@ -214,6 +214,32 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 		return _error("PermissionError", "you do not have access to Jarvis")
 
 	return _dispatch_current_user(tool, args)
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def pairing_challenge(nonce: str) -> dict:
+	"""Does this site hold the one-time proof nonce? Signed like ``call_tool`` with the
+	literal session key ``pairing-challenge``. The nonce is consumed either way."""
+	try:
+		session_key = validate_plugin_request(_request_body_bytes())
+	except PluginAuthError as e:
+		frappe.local.response.http_status_code = e.http_status
+		return _error(e.code, e.message)
+
+	from jarvis.chat import pairing_proof
+
+	if session_key != pairing_proof.PROOF_SESSION_KEY:
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", "not a pairing challenge")
+	held = pairing_proof.consume_nonce(nonce)
+	if held:
+		try:
+			from jarvis.chat import site_pin
+
+			site_pin.pin_if_unset()
+		except Exception:
+			frappe.log_error(title="site_pin: pin failed")
+	return {"ok": True, "held": held}
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -4719,9 +4745,10 @@ def rotate_agent_token() -> dict:
 	# holds the old token (fleet-agent rolled back per PR-3A), so both
 	# ends stay in lockstep.
 	from jarvis import admin_client
+	from jarvis.chat import pairing_proof
 
 	try:
-		admin_client.post_rotate_agent_token(new_token=new_token)
+		admin_client.post_rotate_agent_token(new_token=new_token, proof_nonce=pairing_proof.issue_nonce())
 	except admin_client.AdminAuthError as e:
 		frappe.local.response.http_status_code = 502
 		return {

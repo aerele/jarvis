@@ -208,7 +208,7 @@ class TestResetUnpairsTheContainer(FrappeTestCase):
 		"""Ordering: after the wipe the api credentials are gone, so the call must
 		happen before it."""
 		seen = {}
-		self.unpair_chat_devices.side_effect = lambda: seen.update(
+		self.unpair_chat_devices.side_effect = lambda **_kw: seen.update(
 			agent_url=frappe.db.get_single_value(SETTINGS, "agent_url")
 		)
 		reset_onboarding()

@@ -21,6 +21,10 @@ SESSION = "agent:test:j2"
 class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
 		super().setUp()
+		# The retired-without-key path fetches the key through admin: never for real.
+		fetch = patch("jarvis.onboarding.fetch_callback_key_if_missing")
+		fetch.start()
+		self.addCleanup(fetch.stop)
 		self.settings = frappe.get_single(SETTINGS)
 		set_settings_password(self.settings, "agent_token", OWNER, update_modified=False)
 		clear_settings_password(self.settings, "callback_key")

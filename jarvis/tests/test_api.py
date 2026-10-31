@@ -817,7 +817,7 @@ class TestRotateAgentTokenEndpoint(FrappeTestCase):
 
 		seen = {}
 
-		def _spy(*, new_token):
+		def _spy(*, new_token, proof_nonce=None):
 			seen["pushed"] = new_token
 			return {"action": "recreate", "result": "ok"}
 

@@ -243,6 +243,9 @@ def write_connection(data: dict) -> None:
 				# callback key only, so the stored owner token must stop verifying.
 				clear_settings_password(s, "agent_token")
 				s.db_set("agent_token_issued_at", None)
+				# Retired with no callback key stored: tool calls 503 until it
+				# arrives, so fetch it now with a proof instead of at the next sync.
+				fetch_callback_key_if_missing()
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them. Wider than
 	# ``new_admin_login`` above on purpose - a standalone customer_password (the
@@ -303,6 +306,26 @@ def _store_callback_key(key: str) -> bool:
 	return True
 
 
+def has_callback_key() -> bool:
+	return bool(frappe.get_single("Jarvis Settings").get_password("callback_key", raise_exception=False))
+
+
+def fetch_callback_key_if_missing() -> None:
+	"""Run a proof-backed sync when no callback key is stored. The key only ever
+	arrives through ``write_connection`` (behind the tenant-authority guard), never
+	from a pairing response. Best effort and not re-entrant: a sync that returns no
+	key does not start another."""
+	if has_callback_key() or getattr(frappe.flags, "jarvis_key_fetch", False):
+		return
+	frappe.flags.jarvis_key_fetch = True
+	try:
+		_sync_connection(timeout_s=8)
+	except Exception:
+		frappe.log_error(title="callback key fetch failed")
+	finally:
+		frappe.flags.jarvis_key_fetch = False
+
+
 @frappe.whitelist(methods=["POST"])
 def sync_connection(timeout_s: int | None = None) -> dict:
 	"""Pull the container connection from admin and store it. Daily scheduled +
@@ -317,6 +340,14 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	from the 2026-06-16 code review.
 	"""
 	require_jarvis_admin()
+	return _sync_connection(timeout_s)
+
+
+def _sync_connection(timeout_s: int | None = None) -> dict:
+	"""``sync_connection`` without the role check, for the callers that must fetch
+	the connection themselves. Always carries a fresh site proof."""
+	from jarvis.chat import pairing_proof
+
 	settings = frappe.get_single("Jarvis Settings")
 	api_key = settings.get_password("jarvis_admin_api_key", raise_exception=False) or ""
 	api_secret = settings.get_password("jarvis_admin_api_secret", raise_exception=False) or ""
@@ -325,7 +356,9 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	)
 	if not ((api_key and api_secret) or oauth_ready):
 		return {"synced": False, "reason": "not onboarded"}
-	get_conn_kwargs = {} if timeout_s is None else {"timeout_s": timeout_s}
+	get_conn_kwargs = {"proof_nonce": pairing_proof.issue_nonce()}
+	if timeout_s is not None:
+		get_conn_kwargs["timeout_s"] = timeout_s
 	data = admin_client.get_connection(**get_conn_kwargs)
 	# Outside the agent_url branch: a payload without one must still be able to
 	# raise or clear the release notice, and this is the only refresh an idle

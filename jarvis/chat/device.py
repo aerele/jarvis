@@ -15,7 +15,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import frappe
 from cryptography.hazmat.primitives import serialization
@@ -38,6 +38,9 @@ class ChatDeviceCredentials:
 	# bootstrap presents it as ``auth.token`` and signs the v3 payload's token
 	# slot with it (spike invariant #2); steady state and legacy leave it "".
 	bootstrap_token: str = ""
+	# Single-use bootstrap codes admin returned with a proof-backed pairing; the
+	# Mechanism-A handshake (J4b) consumes them. Empty until then.
+	bootstrap_codes: tuple = ()
 
 	@property
 	def needs_bootstrap(self) -> bool:
@@ -227,6 +230,9 @@ def _establish_pairing() -> ChatDeviceCredentials:
 	the SAME deviceId (idempotent), rather than the pre-fix race where each minted
 	a fresh keypair and flapped the container's pairing state.
 	"""
+	from jarvis import onboarding
+	from jarvis.chat import pairing_proof
+
 	device_id, pub_b64u, priv = _ensure_keypair_under_lock()
 
 	# A peer may have finished pairing (adopted + persisted a token) while we ran
@@ -236,15 +242,28 @@ def _establish_pairing() -> ChatDeviceCredentials:
 		return existing
 
 	try:
-		resp = admin_client.request_chat_pairing(public_key=pub_b64u, device_id=device_id) or {}
+		resp = (
+			admin_client.request_chat_pairing(
+				public_key=pub_b64u, device_id=device_id, proof_nonce=pairing_proof.issue_nonce()
+			)
+			or {}
+		)
 	except Exception as e:
 		raise AgentUnreachableError(f"chat device pairing request failed: {e}") from e
+
+	# A callback_key in this response is ignored on purpose: the key is stored only
+	# by write_connection. After a proof-backed pairing, fetch it the guarded way.
+	onboarding.fetch_callback_key_if_missing()
 
 	mode = (resp.get("mode") or "").strip()
 	if mode == "legacy":
 		return _pair_legacy(resp, device_id=device_id, pub_b64u=pub_b64u, priv=priv)
 	if mode == "mechanism_a":
-		return _pair_mechanism_a(device_id=device_id, pub_b64u=pub_b64u, priv=priv)
+		creds = _pair_mechanism_a(device_id=device_id, pub_b64u=pub_b64u, priv=priv)
+		codes = resp.get("bootstrap_codes")
+		if isinstance(codes, (list, tuple)):
+			creds = replace(creds, bootstrap_codes=tuple(codes))
+		return creds
 	# Unknown/blank mode: fail closed (D-d) - never fabricate a credential.
 	raise AgentUnreachableError(f"request_chat_pairing returned unknown mode {mode!r}")
 
@@ -343,11 +362,15 @@ def _generate_and_pair() -> ChatDeviceCredentials:
 	(same family as the deferred ``unpair_devices`` fix); on a Mechanism-A tenant
 	the CP's legacy forge is the broken path, so this stays legacy-only until then.
 	"""
+	from jarvis.chat import pairing_proof
+
 	priv, _pub_raw, pub_b64u, device_id = _generate_keypair()
 	priv_b64u = _priv_b64u(priv)
 
 	try:
-		resp = admin_client.pair_chat_device(public_key=pub_b64u, device_id=device_id)
+		resp = admin_client.pair_chat_device(
+			public_key=pub_b64u, device_id=device_id, proof_nonce=pairing_proof.issue_nonce()
+		)
 	except Exception as e:
 		raise AgentUnreachableError(f"chat device pairing failed: {e}") from e
 

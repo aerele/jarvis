@@ -1086,6 +1086,7 @@ has_permission.update(
 # (``after_migrate`` and ``doc_events`` after commit), never by deleting keys (``delete_keys``
 # is a ``KEYS`` scan); answers expire by TTL (2 h at most, 10 min for an error).
 persistent_cache_keys = [
+	"jarvis:pairing_proof:",  # One-time site-proof nonces: 600 s TTL must survive watchdog clears.
 	"jarvis:pcal:",  # Financial snapshots retain bounded TTLs across watchdog cache clears.
 	"jarvis:query:",  # Saved result IDs retain their own 24-hour TTL across cache clears.
 	"jarvis:llm_switch",

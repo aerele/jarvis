@@ -46,6 +46,11 @@ class _SettingsSnapshotMixin:
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
+		# Pairing fetches a missing callback key through a proof-backed sync: never
+		# let these tests reach admin with real settings.
+		key_fetch = patch("jarvis.onboarding.fetch_callback_key_if_missing")
+		key_fetch.start()
+		cls.addClassCleanup(key_fetch.stop)
 		s = frappe.get_single("Jarvis Settings")
 		snap = {f: s.get(f) for f in _SNAPSHOT_PLAIN_FIELDS}
 		for f in _SNAPSHOT_PASSWORD_FIELDS:
