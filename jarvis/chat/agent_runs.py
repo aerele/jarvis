@@ -433,11 +433,28 @@ def _notify_owner_dashboard(
 		pass
 
 
-def _fingerprint(rule_id, ref_doctype, ref_name) -> str:
+def _fingerprint(rule_id, ref_doctype, ref_name, record_scope=None) -> str:
 	"""Stable dedupe key for a finding — identity only (rule + the doc it hit),
 	NOT the amount (which can drift run to run while it stays the same finding)."""
 	raw = "|".join([str(rule_id or ""), str(ref_doctype or ""), str(ref_name or "")])
+	if record_scope:
+		import json
+
+		raw += "|" + json.dumps(record_scope, sort_keys=True, separators=(",", ":"))
 	return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+
+
+def _record_scope(raw):
+	"""Use the record boundary saved by the launcher, never a delegate claim."""
+	import json
+
+	try:
+		value = json.loads(raw or "{}").get("record_scope")
+		if isinstance(value, dict) and all(value.get(k) for k in ("doctype", "name")):
+			return {k: str(value[k]) for k in ("doctype", "name")}
+	except (ValueError, TypeError, AttributeError):
+		pass
+	return None
 
 
 def _safe_date(value):
@@ -753,13 +770,51 @@ def record_delegate_run(
 	scope = scope or {}
 	dropped = dropped or []
 	company = (scope.get("company") or "").strip()
+	record_scope = _record_scope(run_doc.get("scope_json"))
+	if record_scope:
+		import json
+
+		stamp = json.loads(run_doc.get("scope_json") or "{}")
+		matches = scope.get("record_scope") == record_scope and all(
+			str(scope.get(k) or "") == str(stamp.get(k) or "")
+			for k in (
+				"company",
+				"from_date",
+				"to_date",
+				"report_date",
+				"prior_period_from",
+				"prior_period_to",
+			)
+		)
+		if not matches:
+			dropped = [
+				*dropped,
+				*[
+					{
+						"ref_doctype": f.get("ref_doctype"),
+						"ref_name": f.get("ref_name"),
+						"reason": "assessment scope mismatch",
+					}
+					for f in findings or []
+				],
+			]
+			findings = []
+			coverage = {
+				token: {
+					"state": "not_evaluable",
+					"reason_code": "unsupported_customisation",
+					"detail": "assessment record or period scope",
+				}
+				for token in required_coverage_tokens
+			}
+			dashboard = canvas_ref = integrity_digest = None
 
 	# Collapse this run's findings by fingerprint (token + doc identity), so a doc
 	# flagged twice by one rule is ONE finding and counts stay consistent.
 	by_fp: dict = {}
 	for f in findings or []:
 		token = f.get("token") or f.get("rule_id")
-		fp = _fingerprint(token, f.get("ref_doctype"), f.get("ref_name"))
+		fp = _fingerprint(token, f.get("ref_doctype"), f.get("ref_name"), record_scope)
 		by_fp.setdefault(fp, f)
 	seen_fps = set(by_fp)
 
@@ -900,6 +955,7 @@ def record_delegate_run(
 
 	if (
 		not truncated
+		and not dropped
 		and not wm_drift
 		and not scoped
 		and not row_shortfall
@@ -914,9 +970,22 @@ def record_delegate_run(
 				"state": "open",
 				"rule_id": ["in", list(evaluated_tokens)],
 			},
-			fields=["name", "fingerprint", "company"],
+			fields=["name", "fingerprint", "company", "run", "last_seen_run"],
+		)
+		candidate_runs = {c.last_seen_run or c.run for c in candidates if c.last_seen_run or c.run}
+		run_scopes = (
+			{
+				r.name: _record_scope(r.scope_json)
+				for r in frappe.get_all(
+					RUN, filters={"name": ["in", list(candidate_runs)]}, fields=["name", "scope_json"]
+				)
+			}
+			if candidate_runs
+			else {}
 		)
 		for c in candidates:
+			if run_scopes.get(c.last_seen_run or c.run) != record_scope:
+				continue
 			if c.fingerprint in seen_fps:
 				continue  # still present this run
 			# Company scope gate: only resolve a finding whose company matches this
@@ -1048,7 +1117,22 @@ def record_delegate_run(
 				base = {}
 		except Exception:
 			base = {}
+		pinned_keys = (
+			("company", "from_date", "to_date", "report_date", "prior_period_from", "prior_period_to")
+			if record_scope
+			else ("prior_period_from", "prior_period_to")
+		)
+		pinned = {k: base[k] for k in pinned_keys if k in base}
 		base.update(scope)
+		for key in pinned_keys:
+			if key in pinned:
+				base[key] = pinned[key]
+			else:
+				base.pop(key, None)
+		if record_scope:
+			base["record_scope"] = record_scope
+		else:
+			base.pop("record_scope", None)
 		run_values["scope_json"] = frappe.as_json(base)[:60000]
 	if integrity_digest:
 		run_values["integrity_digest"] = str(integrity_digest)[:64]
