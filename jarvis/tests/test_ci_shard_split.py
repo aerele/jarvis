@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from jarvis.ci import test_shards
+from jarvis.ci import shard_split
 
 
 def _log(*events):
@@ -49,7 +49,7 @@ class TestModuleSeconds(unittest.TestCase):
 		)
 		lines[0] = "﻿" + lines[0]  # GitHub's raw logs open with a byte-order mark
 		self.assertEqual(
-			test_shards.module_seconds(lines), {"jarvis.tests.test_a": 6.0, "jarvis.tests.test_b": 13.0}
+			shard_split.module_seconds(lines), {"jarvis.tests.test_a": 6.0, "jarvis.tests.test_b": 13.0}
 		)
 
 	def test_subpackages_and_doctype_tests_keep_their_full_module_path(self):
@@ -60,7 +60,7 @@ class TestModuleSeconds(unittest.TestCase):
 			(5, _ok("test_s")),
 		)
 		self.assertEqual(
-			test_shards.module_seconds(lines),
+			shard_split.module_seconds(lines),
 			{
 				"jarvis.tests.learning.test_q": 2.0,
 				"jarvis.jarvis.doctype.jarvis_settings.test_jarvis_settings": 3.0,
@@ -72,13 +72,13 @@ class TestModuleSeconds(unittest.TestCase):
 			"2026-10-31T23:59:59.0000000Z jarvis.tests.test_a.TestA\n",
 			"2026-11-01T00:00:01.5000000Z " + _ok("test_a") + "\n",
 		]
-		self.assertEqual(test_shards.module_seconds(lines), {"jarvis.tests.test_a": 2.5})
+		self.assertEqual(shard_split.module_seconds(lines), {"jarvis.tests.test_a": 2.5})
 
 	def test_a_log_without_test_output_gives_nothing(self):
-		self.assertEqual(test_shards.module_seconds(_log((0, "pip install"), (1, "done"))), {})
+		self.assertEqual(shard_split.module_seconds(_log((0, "pip install"), (1, "done"))), {})
 
 	def test_median_across_runs(self):
-		merged = test_shards.merge_runs(
+		merged = shard_split.merge_runs(
 			[{"m.test_a": 10.0, "m.test_b": 1.0}, {"m.test_a": 30.0}, {"m.test_a": 11.0}]
 		)
 		self.assertEqual(merged, {"m.test_a": 11.0, "m.test_b": 1.0})
@@ -108,31 +108,31 @@ class TestPartition(unittest.TestCase):
 			n = rng.randint(0, 9)
 			k = rng.randint(1, 4)
 			weights = [round(rng.choice([rng.uniform(0, 3), rng.uniform(0, 300)]), 1) for _ in range(n)]
-			chunks = test_shards.partition(weights, k)
+			chunks = shard_split.partition(weights, k)
 			self.assert_valid(weights, k, chunks)
 			heaviest = max((sum(weights[i] for i in run) for run in chunks), default=0.0)
 			self.assertAlmostEqual(heaviest, _best_contiguous_max(weights, k), places=4, msg=(weights, k))
 
 	def test_one_dominant_file_gets_a_shard_of_its_own(self):
 		weights = [1.0] * 30 + [300.0] + [1.0] * 30
-		chunks = test_shards.partition(weights, 4)
+		chunks = shard_split.partition(weights, 4)
 		self.assertIn([30], chunks)
 
 	def test_more_shards_than_files_leaves_trailing_shards_empty(self):
-		chunks = test_shards.partition([5.0, 5.0], 4)
+		chunks = shard_split.partition([5.0, 5.0], 4)
 		self.assert_valid([5.0, 5.0], 4, chunks)
 		self.assertEqual(chunks, [[0], [1], [], []])
 
 	def test_rejects_bad_input(self):
 		with self.assertRaises(ValueError):
-			test_shards.partition([1.0], 0)
+			shard_split.partition([1.0], 0)
 		with self.assertRaises(ValueError):
-			test_shards.partition([1.0, -1.0], 2)
+			shard_split.partition([1.0, -1.0], 2)
 
 
 class TestTimingsFile(unittest.TestCase):
 	def test_the_checked_in_file_loads(self):
-		timings = test_shards.load_timings()
+		timings = shard_split.load_timings()
 		self.assertGreater(len(timings), 100)
 		self.assertIn("jarvis.tests.test_holiday_touch_resolve", timings)
 
@@ -145,7 +145,7 @@ class TestTimingsFile(unittest.TestCase):
 
 	def test_rejects_a_missing_malformed_or_wrong_version_file(self):
 		with self.assertRaises(FileNotFoundError):
-			test_shards.load_timings(Path("/nonexistent/test-timings.json"))
+			shard_split.load_timings(Path("/nonexistent/test-timings.json"))
 		for document in (
 			{"version": 2, "seconds": {"jarvis.tests.test_a": 1}},
 			{"version": 1, "seconds": {}},
@@ -154,7 +154,7 @@ class TestTimingsFile(unittest.TestCase):
 			{"version": 1, "seconds": {"jarvis.helpers": 1}},
 		):
 			with self.subTest(document=document), self.assertRaises(ValueError):
-				test_shards.load_timings(self.write(document))
+				shard_split.load_timings(self.write(document))
 
 
 class TestSplitter(unittest.TestCase):
@@ -167,9 +167,9 @@ class TestSplitter(unittest.TestCase):
 	]
 
 	def test_module_name(self):
-		self.assertEqual(test_shards.module_name(*self.WORK[2], self.ROOT), "jarvis.tests.learning.test_c")
+		self.assertEqual(shard_split.module_name(*self.WORK[2], self.ROOT), "jarvis.tests.learning.test_c")
 		with self.assertRaises(ValueError):
-			test_shards.module_name("/elsewhere", "test_x.py", self.ROOT)
+			shard_split.module_name("/elsewhere", "test_x.py", self.ROOT)
 
 	def test_untimed_files_cost_the_measured_average_per_test(self):
 		timings = {
@@ -178,7 +178,7 @@ class TestSplitter(unittest.TestCase):
 			"jarvis.tests.learning.test_c": 0.0,
 		}
 		# 40s over 2 + 6 + 2 = 10 tests -> 4s/test, so the 5-test new file costs 20s
-		_names, seconds, untimed = test_shards.estimate(self.WORK, [2, 6, 2, 5], timings, self.ROOT)
+		_names, seconds, untimed = shard_split.estimate(self.WORK, [2, 6, 2, 5], timings, self.ROOT)
 		self.assertEqual(seconds, [10.0, 30.0, 0.0, 20.0])
 		self.assertEqual(untimed, ["jarvis.tests.test_new"])
 
@@ -190,7 +190,7 @@ class TestSplitter(unittest.TestCase):
 		}
 		out = io.StringIO()
 		# 200s over 30 timed tests: the 1-test new file costs ~6.7s, ~3% of the suite (not stale)
-		chunks = test_shards.make_splitter(timings, self.ROOT, out=out)(self.WORK, [10, 10, 10, 1], 2)
+		chunks = shard_split.make_splitter(timings, self.ROOT, out=out)(self.WORK, [10, 10, 10, 1], 2)
 		self.assertEqual(chunks, [self.WORK[:2], self.WORK[2:]])
 		self.assertIn("shard 1:    2 files", out.getvalue())
 		self.assertIn("1 untimed files", out.getvalue())
@@ -199,7 +199,7 @@ class TestSplitter(unittest.TestCase):
 	def test_warns_when_the_timings_file_has_gone_stale(self):
 		timings = {"jarvis.tests.test_a": 1.0}
 		out = io.StringIO()
-		test_shards.make_splitter(timings, self.ROOT, out=out)(self.WORK, [1, 50, 50, 50], 2)
+		shard_split.make_splitter(timings, self.ROOT, out=out)(self.WORK, [1, 50, 50, 50], 2)
 		self.assertIn("::warning title=Stale test timings::", out.getvalue())
 
 
@@ -215,7 +215,7 @@ class TestFrappeHook(unittest.TestCase):
 		self.addCleanup(patcher.stop)
 
 	def test_every_shard_of_the_real_suite_is_disjoint_and_together_complete(self):
-		runner = test_shards.install(out=io.StringIO())
+		runner = shard_split.install(out=io.StringIO())
 		self.assertEqual(runner.split_by_weight.__name__, "split_by_time")
 		cls = runner.ParallelTestRunner
 		weigh = getattr(cls, "get_test_weight", None) or cls.get_test_count  # v16 / v15 spelling
@@ -230,6 +230,12 @@ class TestFrappeHook(unittest.TestCase):
 		self.assertEqual(sorted(every), sorted(tuple(t) for t in runner.get_all_tests("jarvis")))
 		self.assertTrue(all(shards))
 
+	def test_no_ci_tooling_module_is_collected_as_a_test_file(self):
+		# frappe collects every test_*.py under the app. This module was first named
+		# test_shards.py and so ran as an (empty) test file in shard 1; keep jarvis/ci clear.
+		collected = [path for path, _ in self.runner.get_all_tests("jarvis")]
+		self.assertFalse([p for p in collected if p.rstrip("/").endswith("/jarvis/ci")])
+
 
 class TestCli(unittest.TestCase):
 	def test_timings_writes_the_median_document(self):
@@ -241,26 +247,26 @@ class TestCli(unittest.TestCase):
 				logs.append(str(path))
 			output = Path(directory, "out.json")
 			with mock.patch("sys.stdout", io.StringIO()):
-				self.assertEqual(test_shards.main(["timings", *logs, "--output", str(output)]), 0)
+				self.assertEqual(shard_split.main(["timings", *logs, "--output", str(output)]), 0)
 			document = json.loads(output.read_text())
 			self.assertEqual(document["version"], 1)
 			self.assertEqual(document["seconds"], {"jarvis.tests.test_a": 6.0})
-			self.assertEqual(test_shards.load_timings(output), {"jarvis.tests.test_a": 6.0})
+			self.assertEqual(shard_split.load_timings(output), {"jarvis.tests.test_a": 6.0})
 
 	def test_timings_refuses_a_log_with_no_test_output(self):
 		with tempfile.NamedTemporaryFile("w", suffix=".log") as log, mock.patch("sys.stderr", io.StringIO()):
 			log.write("".join(_log((0, "Set up job"))))
 			log.flush()
-			self.assertEqual(test_shards.main(["timings", log.name, "--output", "/dev/null"]), 1)
+			self.assertEqual(shard_split.main(["timings", log.name, "--output", "/dev/null"]), 1)
 
 	def test_run_installs_the_split_then_hands_frappe_the_same_argv_bench_would(self):
 		seen = {}
 		fake_helper = types.SimpleNamespace(main=lambda: seen.setdefault("argv", list(sys.argv)))
 		with (
-			mock.patch.object(test_shards, "install") as install,
+			mock.patch.object(shard_split, "install") as install,
 			mock.patch.dict(sys.modules, {"frappe.utils.bench_helper": fake_helper}),
 			mock.patch("frappe.utils.bench_helper", fake_helper, create=True),
-			mock.patch.object(sys, "argv", ["test_shards.py"]),
+			mock.patch.object(sys, "argv", ["shard_split.py"]),
 		):
 			args = [
 				"run",
@@ -273,12 +279,12 @@ class TestCli(unittest.TestCase):
 				"--total-builds",
 				"4",
 			]
-			self.assertEqual(test_shards.main(args), 0)
-		install.assert_called_once_with(test_shards.TIMINGS_FILE)
+			self.assertEqual(shard_split.main(args), 0)
+		install.assert_called_once_with(shard_split.TIMINGS_FILE)
 		self.assertEqual(
 			seen["argv"],
 			[
-				"test_shards.py",
+				"shard_split.py",
 				"frappe",
 				"--site",
 				"s.test",
