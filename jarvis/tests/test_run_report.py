@@ -194,39 +194,40 @@ class TestRunReportPrepared(FrappeTestCase):
 		with _completed([{"name": "T1", "description": "hi"}], columns=[{"label": "Name"}]):
 			env = run_report(report_name=PREP_REPORT)
 		self.assertEqual(env["status"], "ready")
-		self.assertEqual(env["result"], [{"name": "T1", "description": "hi"}])
+		self.assertEqual(env["read_status"], "not_read")
+		self.assertEqual(env["next_query"]["tool"], "query_report")
 		self.assertTrue(env["as_of"])
 
-	def test_empty_completed_is_ready_with_zero_rows(self):
+	def test_empty_completed_defers_read_to_query_report(self):
 		with _completed([]):
 			env = run_report(report_name=PREP_REPORT)
 		self.assertEqual(env["status"], "ready")
-		self.assertEqual(env["result"], [])  # 0 rows is a COMPLETE answer, not "no data"
+		self.assertNotIn("result", env)
+		self.assertFalse(env["coverage"]["complete"])
 
-	def test_null_result_completed_is_ready_with_zero_rows(self):
+	def test_null_completed_defers_read_to_query_report(self):
 		# A report that stores result=None (columns but no rows) is a genuine 0-row
 		# answer - it must be `ready`, not fall through and regenerate forever.
 		with _completed(None, columns=[{"label": "Name"}]):
 			env = run_report(report_name=PREP_REPORT)
 		self.assertEqual(env["status"], "ready")
-		self.assertEqual(env["result"], [])
+		self.assertNotIn("result", env)
 
-	def test_completed_with_unreadable_output_is_not_ready(self):
-		# Completed but its stored output won't read (get_prepared_data throws) ->
-		# must NOT be "ready"; it falls through and (re)generates instead.
-		_make_pr("Completed")  # no attachment -> real get_prepared_data throws
-		with patch(_ENQUEUE):
-			env = run_report(report_name=PREP_REPORT)
-		self.assertNotEqual(env["status"], "ready")
-
-	def test_row_cap_applied_and_note_reports_true_total(self):
-		total = _prepared_reports._MAX_ROWS + 25
-		big = [{"name": f"T{i}"} for i in range(total)]
-		with _completed(big):
+	def test_completed_metadata_never_decodes_or_regenerates(self):
+		run = _make_pr("Completed")  # No attachment; reading will report the missing source.
+		with (
+			patch(_ENQUEUE) as enqueue,
+			patch.object(
+				_prepared_reports, "read_completed_rows", side_effect=AssertionError("must not decode")
+			),
+		):
 			env = run_report(report_name=PREP_REPORT)
 		self.assertEqual(env["status"], "ready")
-		self.assertEqual(len(env["result"]), _prepared_reports._MAX_ROWS)
-		self.assertIn(str(total), env["row_note"])  # note reports the UNCAPPED total
+		self.assertEqual(env["run"], run)
+		self.assertEqual(env["next_query"]["args"], {"prepared_report": run})
+		enqueue.assert_not_called()
+		for key in ("result", "columns", "row_note", "source_rows"):
+			self.assertNotIn(key, env)
 
 	def test_canonical_filters_round_trip_reuses_completed_copy(self):
 		# A completed copy stored for {"company":"Acme"} must be reused when the
@@ -237,7 +238,7 @@ class TestRunReportPrepared(FrappeTestCase):
 				filters={"company": "Acme", "prepared_report_name": "junk", "cost_center": ""},
 			)
 		self.assertEqual(env["status"], "ready")
-		self.assertEqual(env["result"], [{"name": "X"}])
+		self.assertEqual(env["read_status"], "not_read")
 
 	# ---- in-flight + stall self-heal ----------------------------------------
 	# ---- #635: finding the copy the background run left ------------------------
@@ -251,7 +252,7 @@ class TestRunReportPrepared(FrappeTestCase):
 				filters={"company": "Acme", "show_zero": True, "periods": ["Q1", "Q2"]},
 			)
 		self.assertEqual(env["status"], "ready")
-		self.assertEqual(env["result"], [{"name": "D"}])
+		self.assertEqual(env["read_status"], "not_read")
 
 	def test_a_desk_copy_carrying_the_reports_defaults_is_reused(self):
 		# Desk sends every filter that has a value, the report's own defaults included;
@@ -260,7 +261,7 @@ class TestRunReportPrepared(FrappeTestCase):
 		with _defaults(valuation_field_type="Currency"), _completed([{"name": "D"}], filters=desk):
 			env = run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
 		self.assertEqual(env["status"], "ready")
-		self.assertEqual(env["result"], [{"name": "D"}])
+		self.assertEqual(env["read_status"], "not_read")
 
 	def test_an_unticked_box_reads_as_unset(self):
 		# Desk drops a filter whose value is 0 / false; so does the match.
@@ -450,7 +451,7 @@ class TestRunReportPrepared(FrappeTestCase):
 			finally:
 				frappe.set_user("Administrator")
 		self.assertEqual(env["status"], "ready")
-		self.assertEqual(env["result"], [{"name": "T1"}])
+		self.assertEqual(env["read_status"], "not_read")
 
 	# ---- permission gate: Has Role on the report ----------------------------
 	def test_has_role_restricted_report_is_denied(self):

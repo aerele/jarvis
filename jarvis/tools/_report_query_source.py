@@ -428,7 +428,7 @@ class ReportSource:
 	def receipt(self):
 		filters = (
 			self.filters
-			if not self.context.get("masked_columns")
+			if not self.context.get("masked_columns") and not self.context.get("denied_columns")
 			else {
 				k: v
 				for k, v in self.filters.items()
