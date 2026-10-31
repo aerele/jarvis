@@ -49,4 +49,4 @@ def _log_once() -> None:
 	if _logged:
 		return
 	_logged = True
-	frappe.log_error(title="site_identity: instance id unavailable")
+	frappe.log_error(title="site_identity: instance id unavailable", message=frappe.get_traceback())

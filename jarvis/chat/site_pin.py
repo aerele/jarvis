@@ -47,7 +47,7 @@ def _log_read_failure() -> None:
 		return
 	_read_failure_logged = True
 	try:
-		frappe.log_error(title="site_pin: status read failed")
+		frappe.log_error(title="site_pin: status read failed", message=frappe.get_traceback())
 	except Exception:
 		pass
 

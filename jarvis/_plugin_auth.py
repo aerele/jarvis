@@ -125,6 +125,10 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			"plugin_auth: bearer mismatch",
 			f"remote_ip={caller_ip!r} session={headers.get('X-Jarvis-Session', '')!r}",
 		)
+		# The container may hold a key this site never received (a rotation, a missed
+		# delivery). Rejecting is unchanged; one throttled background sync, backed by
+		# a site proof, fetches the current key so the next request can match.
+		_request_key_resync()
 		raise PluginAuthError(
 			http_status=401,
 			code="AuthenticationError",
@@ -268,13 +272,31 @@ def match_stored_key(presented: str, keys: list[str]) -> str:
 
 def _callback_key() -> str:
 	"""Per-tenant callback key (admin delivers it through a proof-backed sync)."""
-	settings = frappe.get_single("Jarvis Settings")
-	return settings.get_password("callback_key", raise_exception=False) or ""
+	return _settings_password("callback_key")
 
 
 def _agent_token() -> str:
-	settings = frappe.get_single("Jarvis Settings")
-	return settings.get_password("agent_token", raise_exception=False) or ""
+	return _settings_password("agent_token")
+
+
+def _settings_password(fieldname: str) -> str:
+	from frappe.utils.password import get_decrypted_password
+
+	return (
+		get_decrypted_password("Jarvis Settings", "Jarvis Settings", fieldname, raise_exception=False) or ""
+	)
+
+
+def _request_key_resync() -> None:
+	"""Queue the throttled stale-key self-heal (see ``onboarding.request_key_resync``).
+	Called only after a presented key matched nothing; a signed, matching request never
+	reaches it. Must never change the reject, so any failure is swallowed."""
+	try:
+		from jarvis import onboarding
+
+		onboarding.request_key_resync()
+	except Exception:
+		pass
 
 
 def _canonical_request(*, session_key: str, body_bytes: bytes, nonce: str, timestamp_s: int) -> bytes:

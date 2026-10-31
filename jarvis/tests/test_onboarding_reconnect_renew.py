@@ -82,7 +82,7 @@ class TestReconnectEagerTokenSync(FrappeTestCase):
 		with _land_ctx() as sync:
 			out = onboarding._land_reconnect({**_READY, "subscription_status": "Active"})
 		self.assertEqual(out["status"], "connected")
-		sync.assert_called_once_with(timeout_s=15)
+		sync.assert_called_once_with(timeout_s=15, prove=True)
 
 	def test_renew_payment_does_not_sync(self):
 		# No running container to sync to; the token reconciles later at renew()/finish_payment.
@@ -102,7 +102,7 @@ class TestReconnectEagerTokenSync(FrappeTestCase):
 		with _land_ctx(sync_side_effect=RuntimeError("admin unreachable")) as sync:
 			out = onboarding._land_reconnect({**_READY, "subscription_status": "Active"})
 		self.assertEqual(out["status"], "connected")
-		sync.assert_called_once_with(timeout_s=15)
+		sync.assert_called_once_with(timeout_s=15, prove=True)
 
 
 class TestRenewForwardsTargetPlan(FrappeTestCase):

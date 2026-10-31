@@ -23,10 +23,15 @@ SESSION = "agent:test:j2"
 class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
 		super().setUp()
-		# The retired-without-key path fetches the key through admin: never for real.
-		fetch = patch("jarvis.onboarding.fetch_callback_key_if_missing")
-		fetch.start()
-		self.addCleanup(fetch.stop)
+		# The retired-without-key path queues a key fetch, and a wrong key queues the
+		# self-heal sync (both go through admin): never for real.
+		for target in (
+			"jarvis.onboarding.schedule_callback_key_fetch",
+			"jarvis._plugin_auth._request_key_resync",
+		):
+			mocked = patch(target)
+			mocked.start()
+			self.addCleanup(mocked.stop)
 		self.settings = frappe.get_single(SETTINGS)
 		set_settings_password(self.settings, "agent_token", OWNER, update_modified=False)
 		clear_settings_password(self.settings, "callback_key")
@@ -40,6 +45,13 @@ class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 	def test_callback_key_verifies_plugin_request(self):
 		set_settings_password(self.settings, "callback_key", CALLBACK)
 		self.assertEqual(self._validate(CALLBACK), SESSION)
+
+	def test_keys_are_read_without_loading_the_settings_doc(self):
+		"""Owner rule: no get_doc to read. Both keys come from __Auth directly."""
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+		with patch("frappe.get_single", side_effect=AssertionError("loaded the Settings doc")):
+			self.assertEqual(self._validate(CALLBACK), SESSION)
+			self.assertTrue(onboarding.has_callback_key())
 
 	def test_either_key_verifies_before_retirement(self):
 		set_settings_password(self.settings, "callback_key", CALLBACK)

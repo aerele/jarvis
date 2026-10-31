@@ -115,6 +115,13 @@ class TestCallToolPluginAuth(FrappeTestCase):
 		frappe.db.commit()
 		super().tearDownClass()
 
+	def setUp(self):
+		super().setUp()
+		# A wrong token queues the stale-key self-heal sync: never for real here.
+		resync = patch("jarvis._plugin_auth._request_key_resync")
+		resync.start()
+		self.addCleanup(resync.stop)
+
 	def _with_headers(
 		self,
 		headers: dict[str, str],
