@@ -999,20 +999,18 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "status": "Published",
-      "description": "Sweeps goods receipts (Purchase Receipts) for receiving-discipline gaps: UOM-conversion anomalies that distort stock quantity, receipts missing the batch/serial capture the Item mandates, ageing received-but-not-billed (GRNI) balances, and direct receipts booked with no Purchase Order to match against. Ranks each gap with a rupee or count figure and hyperlinks it to the offending receipt line. Read-only; never edits a receipt, posts, chases a vendor, or touches stock or valuation.",
+      "description": "Reviews receiving metrics for selected stock receipts. Shows conversion candidates, recorded batch and serial capture, Purchase Order links and direct invoice timing. Billing totals use ERPNext current recorded state, not historical liability. Read-only aggregate meter; saves summaries and source receipt links.",
       "tools_required": [
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__get_my_access",
+        "jarvis__run_report"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
+        "jarvis__get_my_access",
         "jarvis__run_report",
-        "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -1020,12 +1018,16 @@
         "message"
       ],
       "doctypes_required": [
+        "Company",
+        "Supplier",
         "Purchase Receipt",
+        "Purchase Receipt Item",
         "Item",
-        "Purchase Order",
+        "UOM Conversion Detail",
         "Purchase Invoice",
+        "Purchase Invoice Item",
         "Serial and Batch Bundle",
-        "Company"
+        "Serial and Batch Entry"
       ],
       "rule_tokens": [
         "grn-grniband-9c2e",
@@ -1035,6 +1037,7 @@
         "grn-offpo-3d51",
         "grn-uomtol-4b17"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1049,7 +1052,10 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "grn_hygiene"
+      ]
     },
     {
       "agent_slug": "gst-itc-recon-auditor",
