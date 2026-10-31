@@ -58,10 +58,16 @@ def prepare(result, *, tool):
 		raise InvalidArgumentError("The private source has no row array; coverage is incomplete.")
 	if len(rows) > MAX_ROWS:
 		raise InvalidArgumentError("The private source exceeds its row limit; coverage is incomplete.")
+	if tool == "run_report" and (
+		data.get("prepared_report") or data.get("status") not in (None, "", "ready")
+	):
+		raise InvalidArgumentError("The private report is not a complete inline result.")
 	if data.get("_truncated") or data.get("partial") or (tool == "run_report" and data.get("more_rows")):
 		raise InvalidArgumentError("The private source is truncated; coverage is incomplete.")
 	try:
-		body = json.dumps(data, default=json_handler, ensure_ascii=False, separators=(",", ":")).encode()
+		body = json.dumps(
+			data, default=json_handler, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+		).encode()
 	except (TypeError, ValueError, OverflowError) as exc:
 		raise InvalidArgumentError(
 			"The private source cannot be serialized; coverage is incomplete."

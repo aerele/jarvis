@@ -141,6 +141,22 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			self.assertNotIn("data", result)
 			self.assertNotIn(CANARY, str(result))
 
+	def test_nonfinite_private_values_are_refused_without_echoing_source(self):
+		for value in (float("nan"), float("inf"), -float("inf")):
+			with self.subTest(value=value):
+				result = self._dispatch({"rows": [{"value": value, "secret": CANARY}]})
+				self.assertFalse(result["ok"])
+				self.assertNotIn("data", result)
+				self.assertNotIn(CANARY, str(result))
+
+	def test_waiting_or_prepared_report_with_old_rows_is_not_a_complete_private_source(self):
+		for extra in ({"prepared_report": True}, {"status": "generating"}):
+			with self.subTest(extra=extra):
+				result = self._dispatch({"result": [{"value": CANARY}], **extra}, tool="run_report")
+				self.assertFalse(result["ok"])
+				self.assertNotIn("data", result)
+				self.assertNotIn(CANARY, str(result))
+
 	def test_non_delegate_unknown_mode_and_stopped_run_do_not_execute(self):
 		for mode, key in ((_private_output.MODE, "agent:main:fake"), ("unknown", self.key)):
 			with patch("jarvis.api._run_tool") as execute:
