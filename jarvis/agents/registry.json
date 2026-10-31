@@ -313,24 +313,22 @@
     },
     {
       "agent_slug": "baseline-meter-auditor",
-      "title": "Retrospective Baseline Meter (auditor)",
+      "title": "Retrospective Baseline Meter",
       "domain": "measurement",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "status": "Published",
-      "description": "Reads 6-12 months of your own ERP history and reports the facts that size everything else: how long receipts take to become invoices, how quickly sales invoices get settled, how many entries were reversed, what your books already carry under interest and late-fee heads, how much stock is aged, and how many documents you process each period. Read-only; writes nothing, decides nothing, and never labels anything good or bad - it reports what your database already knows.",
+      "description": "Read-only measures from current company books through fixed closed calendar periods. Shows finance, purchase, stock and receivable activity for 3, 6 and 12 months together. Uses signed receivable ledger entries and the native Stock Ageing report. Marks unavailable sources clearly; does not claim savings or a historic immutable snapshot.",
       "tools_required": [
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__get_my_access",
+        "jarvis__run_report"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
+        "jarvis__get_my_access",
         "jarvis__run_report",
-        "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -338,17 +336,22 @@
         "message"
       ],
       "doctypes_required": [
+        "Company",
+        "Account",
         "GL Entry",
-        "Item",
-        "Payment Ledger Entry",
+        "Payment Entry",
         "Purchase Invoice",
         "Purchase Invoice Item",
-        "Purchase Order",
         "Purchase Receipt",
-        "Payment Entry",
+        "Purchase Order",
         "Sales Invoice",
+        "Payment Ledger Entry",
         "Stock Ledger Entry",
-        "Version"
+        "Item",
+        "Batch",
+        "Serial and Batch Bundle",
+        "Serial and Batch Entry",
+        "Repost Item Valuation"
       ],
       "rule_tokens": [
         "bm-ap-2e4b",
@@ -358,6 +361,7 @@
         "bm-fc-1d7a",
         "bm-inv-6b03"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 3600,
@@ -372,7 +376,10 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "baseline"
+      ]
     },
     {
       "agent_slug": "baseline-meter-auditor-helpdesk",

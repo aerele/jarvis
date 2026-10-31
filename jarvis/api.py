@@ -34,7 +34,7 @@ from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-def call_tool(tool: str, args: dict | str | None = None) -> dict:
+def call_tool(tool: str, args: dict | str | None = None, result_mode: str | None = None) -> dict:
 	"""The agent's one tool endpoint (see ``_call_tool``). Every ``{ok: false}``
 	it answers is recorded for the admin error feed: a rejected call (unsigned,
 	unknown session, stale pairing) happens before the chat user is known, and an
@@ -45,14 +45,14 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 	already in the Error Log."""
 	frappe.local.jarvis_tool_failure_recorded = False
 	frappe.local.jarvis_call_tool_user = None
-	result = _call_tool(tool, args)
+	result = _call_tool(tool, args, result_mode=result_mode)
 	from jarvis import api_errors
 
 	api_errors.record_call_tool_failure(tool, result)
 	return result
 
 
-def _call_tool(tool: str, args: dict | str | None = None) -> dict:
+def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | None = None) -> dict:
 	"""Whitelisted entry point for Jarvis tool dispatch.
 
 	Two authentication modes are supported:
@@ -191,10 +191,17 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 				"start a new chat to continue. Then stop.",
 			)
 
+		if result_mode is not None and (
+			result_mode != "private_audit_v1" or shared_session or tool not in {"query", "run_report"}
+		):
+			frappe.local.response.http_status_code = 400
+			return _error("InvalidArgumentError", "This call cannot use private audit output.")
 		if shared_session:
 			from jarvis.chat.collaboration_dispatch import dispatch
 
 			return dispatch(session_key, tool, args, (_get_header("X-Jarvis-Tool-Call-Id") or "").strip())
+		if result_mode is not None:
+			return _dispatch_from_session(plugin_user, session_key, tool, args, result_mode=result_mode)
 		return _dispatch_from_session(plugin_user, session_key, tool, args)
 
 	# Standard Frappe auth path - Guest is rejected; everything else dispatches
@@ -210,6 +217,9 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 		frappe.local.response.http_status_code = 403
 		return _error("PermissionError", "you do not have access to Jarvis")
 
+	if result_mode is not None:
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", "Private audit output requires a bound plugin delegate.")
 	return _dispatch_current_user(tool, args)
 
 
@@ -332,6 +342,8 @@ def _dispatch_from_session(
 	session_key: str,
 	tool: str,
 	args: dict | str | None,
+	*,
+	result_mode: str | None = None,
 ) -> dict:
 	"""Run the dispatch under ``user``, then attribute the tool call to the
 	chat session so the UI sees it.
@@ -340,7 +352,7 @@ def _dispatch_from_session(
 	# would gut the caller's cookie session sid + data and log them out.
 	from jarvis.chat import agent_run_steps, connector_focus, macro_report_wait
 	from jarvis.chat.collaboration import require_legacy_session
-	from jarvis.tools import _agent_run_ctx, _delegate_capability
+	from jarvis.tools import _agent_run_ctx, _delegate_capability, _private_output
 
 	require_legacy_session(session_key)
 
@@ -410,11 +422,28 @@ def _dispatch_from_session(
 
 					agent_scheduler.fail_run(denial["run"], denial["run_error"])
 				return result
+			if result_mode is not None and not _private_output.allowed(result_mode, tool, cap):
+				result = _error(
+					"CapabilityDeniedError", "Private audit output requires an active delegate contract."
+				)
+				audit.record(
+					tool=tool,
+					args={},
+					ok=False,
+					error_code="CapabilityDeniedError",
+					error_message="Private audit output requires an active delegate contract.",
+				)
+				_persist_and_publish_tool_call(
+					session_key=session_key, tool=tool, args={}, result=result, tool_call_id=tool_call_id
+				)
+				return result
 			# Parse args up front so persist_and_publish gets the same
 			# dict shape the tool ran against (or the empty dict on a
 			# malformed-args rejection).
 			try:
 				parsed_args = _parse_args(args, tool)
+				if result_mode is not None:
+					_private_output.validate_args(tool, parsed_args)
 			except InvalidArgumentError as e:
 				result = _error("InvalidArgumentError", str(e))
 				_persist_and_publish_tool_call(
@@ -466,7 +495,7 @@ def _dispatch_from_session(
 			step_run = agent_run_steps.step_target(cap)
 			started_ms = time.monotonic()
 			try:
-				with _agent_read_time_limit(tool):
+				with _private_output.request(result_mode is not None), _agent_read_time_limit(tool):
 					result = _run_tool(tool, parsed_args, conversation=conv)
 			except Exception as exc:
 				# A tool that raised past _run_tool's envelope translation is a real
@@ -488,6 +517,12 @@ def _dispatch_from_session(
 				)
 				raise
 			_log_read_too_slow(result, tool, user, conv, started_ms)
+			receipt = result
+			if result_mode is not None:
+				try:
+					result, receipt = _private_output.prepare(result, tool=tool)
+				except InvalidArgumentError as exc:
+					result = receipt = _error("InvalidArgumentError", str(exc))
 			# Recorded BEFORE the result budget trims the payload, so a step's row
 			# count is the count the tool actually returned, not the truncated one.
 			_ok = bool(isinstance(result, dict) and result.get("ok"))
@@ -495,7 +530,7 @@ def _dispatch_from_session(
 				step_run,
 				tool,
 				parsed_args,
-				result.get("data") if isinstance(result, dict) else None,
+				receipt.get("data") if isinstance(receipt, dict) else None,
 				ok=_ok,
 				started_ms=started_ms,
 				error_message=(
@@ -507,7 +542,7 @@ def _dispatch_from_session(
 			# Agent-boundary model-facing size cap. ONLY on this (agent session)
 			# path - the dashboard builder/desk/external call_tool callers go through
 			# _dispatch_current_user and are deliberately uncapped.
-			if isinstance(result, dict) and result.get("ok"):
+			if result_mode is None and isinstance(result, dict) and result.get("ok"):
 				guarded, event = enforce_result_budget(result["data"], tool=tool)
 				if event:
 					result["data"] = guarded
@@ -518,11 +553,12 @@ def _dispatch_from_session(
 						shown=event["shown"],
 						total=event["total"],
 					)
+				receipt = result
 			_persist_and_publish_tool_call(
 				session_key=session_key,
 				tool=tool,
 				args=parsed_args,
-				result=result,
+				result=receipt,
 				tool_call_id=tool_call_id,
 			)
 			return result
