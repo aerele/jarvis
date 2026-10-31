@@ -120,17 +120,21 @@ def apply_tax_template(doc):
 	"""Fill ``doc.taxes`` from its tax template when the template is set and no rows
 	were sent, as Desk does on picking the template. Rows already present are never
 	touched. A no-op without ERPNext, without the field, for a template that does not
-	exist, or for one the user cannot read (its rows are not copied past the user's
+	exist, is disabled or belongs to another company (Desk's picker offers neither),
+	or for one the user cannot read (its rows are not copied past the user's
 	permissions). Shared by every insert and dry run so the card total equals the saved one."""
 	field = doc.meta.get_field("taxes_and_charges")
 	template = doc.get("taxes_and_charges")
-	# A card value is untrusted JSON: only a plain name may reach exists(), where a
+	# A card value is untrusted JSON: only a plain name may reach get_value(), where a
 	# dict would read as filters.
 	if not (field and field.options and isinstance(template, str) and template.strip()):
 		return
 	if doc.get("taxes"):
 		return
-	if not frappe.db.exists(field.options, template):
+	master = frappe.db.get_value(field.options, template, ["company", "disabled"], as_dict=True)
+	if not master or master.disabled:
+		return
+	if doc.get("company") and master.company and master.company != doc.get("company"):
 		return
 	if not frappe.has_permission(field.options, "read", doc=template):
 		return

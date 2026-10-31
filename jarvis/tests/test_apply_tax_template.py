@@ -28,18 +28,19 @@ class FakeDoc:
 
 
 class TestApplyTaxTemplate(unittest.TestCase):
-	def run_apply(self, doc, exists=True, can_read=True):
+	def run_apply(self, doc, exists=True, can_read=True, company="C", disabled=0):
 		calls = []
 
 		def fake_get(master_doctype, master_name):
 			calls.append((master_doctype, master_name))
 			return ROWS
 
+		master = frappe._dict(company=company, disabled=disabled) if exists else None
 		stub = types.ModuleType("erpnext.controllers.accounts_controller")
 		stub.get_taxes_and_charges = fake_get
 		with (
 			patch.dict(sys.modules, {"erpnext.controllers.accounts_controller": stub}),
-			patch.object(frappe, "db", types.SimpleNamespace(exists=lambda *a: exists)),
+			patch.object(frappe, "db", types.SimpleNamespace(get_value=lambda *a, **k: master)),
 			patch.object(frappe, "has_permission", lambda *a, **k: can_read),
 		):
 			apply_tax_template(doc)
@@ -76,6 +77,21 @@ class TestApplyTaxTemplate(unittest.TestCase):
 		doc = FakeDoc("Sales Taxes and Charges Template", taxes_and_charges="gone")
 		self.assertEqual(self.run_apply(doc, exists=False), [])
 		self.assertEqual(doc.appended, [])
+
+	def test_disabled_template_is_a_no_op(self):
+		doc = FakeDoc("Sales Taxes and Charges Template", taxes_and_charges="T")
+		self.assertEqual(self.run_apply(doc, disabled=1), [])
+		self.assertEqual(doc.appended, [])
+
+	def test_template_of_another_company_is_a_no_op(self):
+		doc = FakeDoc("Sales Taxes and Charges Template", taxes_and_charges="T", company="C")
+		self.assertEqual(self.run_apply(doc, company="Other"), [])
+		self.assertEqual(doc.appended, [])
+
+	def test_template_of_the_same_company_appends(self):
+		doc = FakeDoc("Sales Taxes and Charges Template", taxes_and_charges="T", company="C")
+		self.run_apply(doc, company="C")
+		self.assertEqual(doc.appended, [("taxes", ROWS[0])])
 
 	def test_template_the_user_cannot_read_is_a_no_op(self):
 		doc = FakeDoc("Sales Taxes and Charges Template", taxes_and_charges="T")
