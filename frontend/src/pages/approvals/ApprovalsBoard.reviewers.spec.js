@@ -46,7 +46,7 @@ vi.mock("frappe-ui", () => ({
 		props: ["label", "icon", "disabled", "loading", "tooltip"],
 		emits: ["click"],
 		template:
-			'<button v-bind="$attrs" :disabled="disabled" :data-tip="tooltip" :aria-label="label" @click="$emit(\'click\')">{{ icon ? "" : label }}</button>',
+			'<button v-bind="$attrs" :disabled="disabled" :data-loading="String(!!loading)" :data-tip="tooltip" :aria-label="label" @click="$emit(\'click\')">{{ icon ? "" : label }}</button>',
 	},
 	FeatherIcon: { template: "<i/>" },
 	FormControl: {
@@ -1348,6 +1348,108 @@ describe("ApprovalsBoard reviewer scoping (#756)", () => {
 			approvals.getApproval.mockImplementation(async (id) => views[id]);
 		});
 
+		it("keeps each record's loading state while independent decisions finish out of order", async () => {
+			const w = await listBoard();
+			const first = await approveAr1(w);
+			await clickAr2(w);
+			expect(button(w, "Approve").attributes("data-loading")).toBe("false");
+			expect(button(w, "Approve").element.disabled).toBe(false);
+			expect(button(w, "Ignore")).toBeUndefined(); // reviewer cannot manage
+			const second = deferred();
+			api.decideApproval.mockImplementation(() => second.promise);
+			await button(w, "Main").trigger("click");
+			await button(w, "Approve").trigger("click");
+			await settle();
+			expect(api.decideApproval).toHaveBeenCalledTimes(2);
+			expect(button(w, "Approve").attributes("data-loading")).toBe("true");
+			answers.failed(first);
+			await settle();
+			expect(button(w, "Approve").attributes("data-loading")).toBe("true");
+			expect(button(w, "Reject").element.disabled).toBe(true);
+			await button(w, "Approve").trigger("click");
+			expect(api.decideApproval).toHaveBeenCalledTimes(2);
+			second.reject(new Error("lost response"));
+			await settle();
+			expect(button(w, "Approve").attributes("data-loading")).toBe("false");
+			expect(button(w, "Approve").element.disabled).toBe(false);
+		});
+		it("restores the pending indicator when returning to a record and refuses another action on it", async () => {
+			fresh(requesterView);
+			const w = await listBoard();
+			const answer = await approveAr1(w);
+			await clickAr2(w);
+			expect(button(w, "Ignore").element.disabled).toBe(false);
+			await rowButton(w, "AR-1").trigger("click");
+			await settle();
+			expect(button(w, "Approve").attributes("data-loading")).toBe("true");
+			expect(button(w, "Ignore").element.disabled).toBe(true);
+			await button(w, "Ignore").trigger("click");
+			expect(api.dismissApproval).not.toHaveBeenCalled();
+			answers.failed(answer);
+			await settle();
+		});
+		it("allows another failed decision to be sent while the first send is pending", async () => {
+			fresh(requesterView);
+			for (const id of ["AR-1", "AR-2"]) {
+				views[id] = decided(requesterView, id, {
+					continuation: "failed",
+					can_continue: 1,
+				});
+			}
+			state.rows = ["AR-1", "AR-2"].map((id) =>
+				ar(id, { review_scoped: 1, status: "Approved", continuation: "failed" })
+			);
+			const w = await listBoard({ status: "All" });
+			const first = deferred(),
+				second = deferred();
+			api.continueApprovalChat
+				.mockReturnValueOnce(first.promise)
+				.mockReturnValueOnce(second.promise);
+			await button(w, "Send decision to chat").trigger("click");
+			expect(button(w, "Send decision to chat").attributes("data-loading")).toBe("true");
+			await clickAr2(w);
+			expect(button(w, "Send decision to chat").element.disabled).toBe(false);
+			expect(button(w, "Send decision to chat").attributes("data-loading")).toBe("false");
+			await button(w, "Send decision to chat").trigger("click");
+			expect(api.continueApprovalChat.mock.calls.map(([id]) => id)).toEqual([
+				"AR-1",
+				"AR-2",
+			]);
+			first.resolve({ ok: true });
+			await settle();
+			expect(button(w, "Send decision to chat").element.disabled).toBe(true);
+			second.resolve({ ok: true });
+			await settle();
+			expect(button(w, "Send decision to chat").element.disabled).toBe(false);
+		});
+		it.each(["dismiss", "restore"])(
+			"keeps %s requests independent for different records",
+			async (action) => {
+				fresh(requesterView);
+				const status = action === "restore" ? "Dismissed" : "Pending";
+				for (const id of ["AR-1", "AR-2"]) views[id].status = status;
+				state.rows.forEach((row) => {
+					row.status = status;
+				});
+				const w = await listBoard({ status: "All" });
+				const first = deferred(),
+					second = deferred();
+				const request = action === "restore" ? api.restoreApproval : api.dismissApproval;
+				const label = action === "restore" ? "Restore to board" : "Ignore";
+				request.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+				await button(w, label).trigger("click");
+				await clickAr2(w);
+				expect(button(w, label).element.disabled).toBe(false);
+				expect(button(w, label).attributes("data-loading")).toBe("false");
+				await button(w, label).trigger("click");
+				expect(request.mock.calls.map(([id]) => id)).toEqual(["AR-1", "AR-2"]);
+				first.resolve({ ok: true });
+				await settle();
+				expect(button(w, label).element.disabled).toBe(true);
+				second.resolve({ ok: true });
+				await settle();
+			}
+		);
 		it("V1 a late failed / pending / rejected decide leaves the pane on the new row", async () => {
 			for (const kind of ["failed", "pending", "rejected"]) {
 				vi.clearAllMocks();

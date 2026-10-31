@@ -679,7 +679,7 @@
 														: 'Approve'
 												"
 												:loading="deciding === 1"
-												:disabled="deciding !== null || approveBlocked"
+												:disabled="approvalBusy || approveBlocked"
 												@click="submitDecide(1)"
 											/>
 											<Button
@@ -687,7 +687,7 @@
 												theme="red"
 												label="Reject"
 												:loading="deciding === 0"
-												:disabled="deciding !== null"
+												:disabled="approvalBusy"
 												@click="submitDecide(0)"
 											/>
 										</template>
@@ -700,7 +700,7 @@
 											iconLeft="bell-off"
 											:tooltip="'Dismiss without acting. The assistant is not told anything'"
 											:loading="dismissing"
-											:disabled="deciding !== null"
+											:disabled="approvalBusy"
 											@click="submitDismiss"
 										/>
 										<div class="flex-1" />
@@ -797,7 +797,7 @@
 										label="Send decision to chat"
 										iconLeft="send"
 										:loading="sending"
-										:disabled="sending"
+										:disabled="approvalBusy"
 										@click="sendDecisionToChat"
 									/>
 								</div>
@@ -817,6 +817,7 @@
 									label="Restore to board"
 									iconLeft="rotate-ccw"
 									:loading="restoring"
+									:disabled="approvalBusy"
 									@click="submitRestore"
 								/>
 							</template>
@@ -1447,18 +1448,34 @@ const tagOptions = computed(() => {
 // ── decide (§15.2 point 4) ────────────────────────────────────────────────────
 const selectedOption = ref("");
 const note = ref("");
-const deciding = ref(null); // 1 | 0 | null
-const dismissing = ref(false);
-const restoring = ref(false);
+// Requests belong to their record, including while another record is selected.
+// Keep the claim until its response settles so returning to a row cannot resend it.
+const approvalActions = ref(new Map());
+const selectedApprovalAction = computed(() => approvalActions.value.get(selectedId.value));
+const approvalBusy = computed(() => !!selectedApprovalAction.value);
+const deciding = computed(() =>
+	selectedApprovalAction.value === "approve"
+		? 1
+		: selectedApprovalAction.value === "reject"
+		? 0
+		: null
+);
+const dismissing = computed(() => selectedApprovalAction.value === "dismiss");
+const restoring = computed(() => selectedApprovalAction.value === "restore");
+function claimApprovalAction(id, action) {
+	if (!id || approvalActions.value.has(id)) return false;
+	approvalActions.value.set(id, action);
+	return true;
+}
 
 function toggleOption(opt) {
 	selectedOption.value = selectedOption.value === opt ? "" : opt;
 }
 
 async function submitDecide(approve) {
-	if (deciding.value !== null || !selected.value) return;
-	if (approve && approveBlocked.value) return;
-	deciding.value = approve;
+	if (!selected.value || (approve && approveBlocked.value)) return;
+	const id = selected.value.name;
+	if (!claimApprovalAction(id, approve ? "approve" : "reject")) return;
 	const noteText = note.value.trim();
 	// decide() requires non-empty decision text - Approve sends the selected
 	// option chip, else the note, else the verdict word; Reject sends the note
@@ -1469,7 +1486,6 @@ async function submitDecide(approve) {
 		  noteText ||
 		  (reviewOnly ? "Review acknowledged: no posting authorised" : "Approved")
 		: noteText || "Rejected";
-	const id = selected.value.name;
 	const wasScoped = scoped.value;
 	const requester = isRequester.value;
 	try {
@@ -1539,7 +1555,7 @@ async function submitDecide(approve) {
 			loadRecord(id, { keep: true });
 		}
 	} finally {
-		deciding.value = null;
+		approvalActions.value.delete(id);
 	}
 }
 
@@ -1555,11 +1571,10 @@ const notSentNotice = computed(() =>
 // The requester sends the stored decision to their chat. One request at a time;
 // whatever happens (sent, refused, lost response) the record is re-read from the
 // server, which alone says whether it was sent - never resent automatically.
-const sending = ref(false);
+const sending = computed(() => selectedApprovalAction.value === "send");
 async function sendDecisionToChat() {
-	if (sending.value || !selected.value) return;
-	const id = selected.value.name;
-	sending.value = true;
+	const id = selected.value?.name;
+	if (!claimApprovalAction(id, "send")) return;
 	try {
 		const res = (await api.continueApprovalChat(id)) || {};
 		if (res.ok)
@@ -1570,7 +1585,7 @@ async function sendDecisionToChat() {
 	} catch (e) {
 		toast.error(errHtml(e));
 	} finally {
-		sending.value = false;
+		approvalActions.value.delete(id);
 		refreshKeep();
 		await loadRecord(id, { keep: true });
 	}
@@ -1579,9 +1594,8 @@ async function sendDecisionToChat() {
 // Ignore = dismiss off the board with no verdict and no chat resume. Same
 // optimistic swap as decide, but the row lands in "Dismissed".
 async function submitDismiss() {
-	if (dismissing.value || deciding.value !== null || !selected.value) return;
-	dismissing.value = true;
-	const id = selected.value.name;
+	const id = selected.value?.name;
+	if (!claimApprovalAction(id, "dismiss")) return;
 	try {
 		await api.dismissApproval(id);
 		const r = railRows.value.find((x) => x.name === id);
@@ -1611,15 +1625,14 @@ async function submitDismiss() {
 	} catch (e) {
 		toast.error(errHtml(e));
 	} finally {
-		dismissing.value = false;
+		approvalActions.value.delete(id);
 	}
 }
 
 // Restore a dismissed request back to Pending (the undo).
 async function submitRestore() {
-	if (restoring.value || !selected.value) return;
-	restoring.value = true;
-	const id = selected.value.name;
+	const id = selected.value?.name;
+	if (!claimApprovalAction(id, "restore")) return;
 	try {
 		await api.restoreApproval(id);
 		const r = railRows.value.find((x) => x.name === id);
@@ -1631,7 +1644,7 @@ async function submitRestore() {
 	} catch (e) {
 		toast.error(errHtml(e));
 	} finally {
-		restoring.value = false;
+		approvalActions.value.delete(id);
 	}
 }
 
