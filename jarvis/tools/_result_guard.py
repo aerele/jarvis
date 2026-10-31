@@ -130,6 +130,13 @@ def _envelope(data, kind: str, key: str | None, kept: list, n: int, note: str) -
 	for k, v in data.items():
 		if k != key and k not in _META_KEYS:
 			out[k] = v
+	if data.get("prepared_report") and data.get("status") == "ready" and isinstance(data.get("run"), str):
+		out["preview_complete"] = False
+		out["note"] = (
+			"Partial prepared-report preview. Use query_report with the returned run ID to inspect "
+			"the complete stored source. Then pin its version for SELECT queries, counts and totals. "
+			"Do not calculate a whole-report answer from these preview rows."
+		)
 	out[key] = kept
 	if data.get("list_contract") == "list-page-v1":
 		# Never leave a pre-truncation completeness claim or skip omitted rows.
