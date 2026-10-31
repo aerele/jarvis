@@ -66,6 +66,7 @@ def query_file(
 	if version not in (None, "") and version != digest:
 		raise InvalidArgumentError("File or worksheet scope changed. Inspect the file again without version.")
 	return {
+		"file_id": fdoc.name,
 		"filename": fdoc.file_name,
 		"file_url": fdoc.file_url,
 		"version": digest,

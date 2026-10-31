@@ -169,7 +169,8 @@ def build_tables(schema, rows, total_index, context):
 			return (left > right) - (left < right)
 
 		db.create_collation("decimal", compare)
-		visible = [c for c in schema["columns"] if not c["hidden"]]
+		denied = set(context.get("denied_columns", []))
+		visible = [c for c in schema["columns"] if not c["hidden"] and c["sql_column"] not in denied]
 		masked = set(context.get("masked_columns", []))
 		blocked = {(table, key) for table in ("report_rows", "report_totals") for key in masked}
 		definitions = []
@@ -264,7 +265,7 @@ def query_report_tables(db, manifest, schema, context, *, sql=None, max_rows=100
 		{k: c[k] for k in ("sql_column", "fieldname", "label", "fieldtype", "options")}
 		| {"masked": c["sql_column"] in context.get("masked_columns", [])}
 		for c in schema["columns"]
-		if not c["hidden"]
+		if not c["hidden"] and c["sql_column"] not in context.get("denied_columns", [])
 	]
 	result = {
 		"read_contract": CONTRACT,

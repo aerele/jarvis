@@ -122,7 +122,9 @@ def _open_runs(rows) -> list[dict]:
 		if r.get("tool_name") == "query_report":
 			# An inspection is not an answer. Close only this exact run after a
 			# successful query loaded the complete permitted source.
-			if args.get("sql") and r.get("coverage_complete") in (True, "true", "1", 1):
+			if (args.get("sql") or args.get("source_query_executed") is True) and r.get(
+				"coverage_complete"
+			) in (True, "true", "1", 1):
 				open_runs.pop((r.conversation, r.get("prepared_report")), None)
 			continue
 		run, report = r.run, r.report_name or args.get("report_name")

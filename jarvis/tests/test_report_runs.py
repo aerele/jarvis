@@ -170,7 +170,8 @@ class TestChatReportCard(FrappeTestCase):
 			{"conversation": self.conv, "seq": 5},
 			{
 				"tool_name": "query_report",
-				"tool_args": json.dumps({"prepared_report": run, "sql": "SELECT COUNT(*) FROM report_rows"}),
+				# New receipts keep this server-owned flag instead of the SQL text.
+				"tool_args": json.dumps({"prepared_report": run, "source_query_executed": True}),
 				"tool_result": json.dumps(
 					{"ok": True, "data": {"prepared_report": run, "coverage": {"complete": True}}}
 				),
