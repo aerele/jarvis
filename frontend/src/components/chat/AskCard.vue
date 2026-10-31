@@ -83,27 +83,34 @@
 				@update:model-value="pickSingle(qi, $event)"
 			/>
 			<!-- link: search a record of the given DocType -->
-			<div v-else-if="q.type === 'link'" class="jv-ask-link">
+			<div
+				v-else-if="q.type === 'link'"
+				class="jv-ask-link"
+				@keydown.esc="onLinkEscape(qi, $event)"
+			>
 				<input
 					type="text"
 					class="jv-ask-field"
 					:value="link[qi] && link[qi].q != null ? link[qi].q : sel[qi] || ''"
 					:disabled="answered"
 					@input="onLinkSearch(qi, q.doctype, $event.target.value)"
-					@focus="onLinkSearch(qi, q.doctype, (link[qi] && link[qi].q) || '')"
+					@focus="onLinkFocus(qi, q.doctype, $event)"
 					:placeholder="'Search ' + (q.doctype || 'records') + '…'"
-					@blur="closeLink(qi)"
+					@blur="onLinkLeave(qi, $event)"
 					@keydown.enter.prevent
 				/>
 				<div
 					v-if="!answered && link[qi] && link[qi].open && (link[qi].items || []).length"
 					class="jv-ask-linkmenu"
 					v-scroll-fade
+					@focusout="onLinkLeave(qi, $event)"
 				>
 					<button
 						v-for="(it, ii) in link[qi].items"
 						:key="ii"
-						@mousedown.prevent="pickLink(qi, it)"
+						type="button"
+						@mousedown.prevent="pickLink(qi, it, $event)"
+						@click="pickLink(qi, it, $event)"
 					>
 						<b>{{ it.value }}</b
 						><span v-if="it.label"> · {{ it.label }}</span>
@@ -304,7 +311,7 @@ async function onLinkSearch(i, doctype, val) {
 	const seq = (linkSeq[i] = (linkSeq[i] || 0) + 1);
 	const q = questions.value[i];
 	if (val !== sel.value[i]) sel.value = { ...sel.value, [i]: "" };
-	link.value = { ...link.value, [i]: { q: val, items: [], open: true } };
+	link.value = { ...link.value, [i]: { q: val, items: [], open: true, pending: !!doctype } };
 	if (!doctype) return;
 	try {
 		const filters = q.linkField ? resolveLinkFilters(q.linkField, {}, null) : [];
@@ -331,14 +338,55 @@ async function onLinkSearch(i, doctype, val) {
 		};
 	}
 }
-function pickLink(i, item) {
+// Focus moves between the input and the suggestions of ONE question stay inside
+// the widget; only a move out of it (or to nothing) closes the menu.
+const linkWrap = (e) => e.currentTarget.closest(".jv-ask-link");
+const insideLink = (e) => !!e.relatedTarget && !!linkWrap(e)?.contains(e.relatedTarget);
+// Our own focus restore must not look like the user focusing the field (that
+// would start a lookup).
+let restoringFocus = false;
+function restoreInputFocus(e) {
+	const input = linkWrap(e)?.querySelector("input");
+	if (!input) return;
+	restoringFocus = true;
+	try {
+		input.focus();
+	} finally {
+		restoringFocus = false;
+	}
+}
+function onLinkFocus(i, doctype, e) {
+	if (restoringFocus || insideLink(e)) return;
+	onLinkSearch(i, doctype, (link.value[i] && link.value[i].q) || "");
+}
+function onLinkLeave(i, e) {
+	if (insideLink(e)) return;
+	closeLink(i);
+}
+// Escape closes an open (or still loading) dropdown and nothing else, so the
+// host's own Escape handling still runs when there is nothing to close.
+function onLinkEscape(i, e) {
+	const cur = link.value[i];
+	if (answered.value || !cur || !cur.open || !(cur.pending || (cur.items || []).length)) return;
+	e.preventDefault();
+	e.stopPropagation();
+	restoreInputFocus(e);
+	closeLink(i);
+}
+// A pointer pick fires mousedown then click; the second finds the menu already
+// closed and does nothing. Keyboard Enter/Space only produces the click.
+function pickLink(i, item, e) {
+	const cur = link.value[i];
+	if (!cur || !cur.open || !(cur.items || []).includes(item)) return;
+	// Move focus back to the input BEFORE the focused suggestion is removed.
+	restoreInputFocus(e);
 	linkSeq[i] = (linkSeq[i] || 0) + 1;
 	sel.value = { ...sel.value, [i]: item.value };
 	link.value = { ...link.value, [i]: { q: item.value, items: [], open: false } };
 }
-// Hide the record dropdown when the field loses focus (clicking elsewhere on
-// the screen / tabbing away). @mousedown.prevent on the result buttons lets a
-// pick land before the blur fires.
+// Hide the record dropdown when focus leaves the field and its suggestions
+// (clicking elsewhere on the screen / tabbing away). @mousedown.prevent on the
+// result buttons lets a pointer pick land before the blur fires.
 function closeLink(i) {
 	linkSeq[i] = (linkSeq[i] || 0) + 1;
 	const cur = link.value[i];
