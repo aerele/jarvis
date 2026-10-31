@@ -211,6 +211,9 @@ export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
 // 180s server-side. Admin-gated (require_jarvis_admin). Returns get_llm_sync_status()'s
 // shape plus `outcome`: converged | queued | throttled | not_configured.
 export const resyncLlm = () => call("jarvis.onboarding.resync_llm");
+// System Manager only. Asks admin to prove, through the tenant container, that this is the
+// registered site; a pass clears the copy block. Returns the site status plus `proved`.
+export const reverifySite = () => call("jarvis.chat.site_pin.reverify");
 // Read-only poll of a durable LLM-apply operation (plan-05 D2). The single
 // Start-chatting controller (frontend/src/lib/llmOperation.js) follows exactly one
 // operation id to a terminal state through this; it never spends the apply bucket.

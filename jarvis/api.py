@@ -97,7 +97,7 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 
 			site_pin.pin_if_unset()
 		except Exception:
-			frappe.log_error(title="site_pin: pin failed")
+			frappe.log_error(title="site_pin: pin failed", message=frappe.get_traceback())
 
 		from jarvis.chat.collaboration import is_collaborative_session, legacy_session_user, resolve_binding
 
@@ -110,9 +110,11 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 				resolve_binding(session_key).actor if shared_session else legacy_session_user(session_key)
 			)
 		except frappe.PermissionError:
+			_record_foreign_session(session_key)
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", "Collaborative chat execution is unavailable on this server.")
 		if not plugin_user:
+			_record_foreign_session(session_key)
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
@@ -211,6 +213,76 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 		return _error("PermissionError", "you do not have access to Jarvis")
 
 	return _dispatch_current_user(tool, args)
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def pairing_challenge(nonce: str) -> dict:
+	"""Does this site hold the one-time proof nonce? The nonce is the only credential:
+	128 random bits, single-use, 10 minutes, known to this site and admin alone. There
+	is deliberately no plugin signature, so the proof works whatever key state the
+	container is in (a rotated or never-delivered key must not lock the real site out
+	of the proof that re-syncs it). Any X-Jarvis-* headers are ignored.
+
+	Order: strict format check (400, nothing touched), atomic consume, then a held
+	nonce is answered and is never rate limited. Only a nonce this site does not hold
+	counts toward the flood limits (429 once over), so a flood cannot lock out a real
+	proof."""
+	from jarvis.chat import pairing_proof
+
+	if not pairing_proof.is_well_formed(nonce):
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", "malformed nonce")
+	if pairing_proof.consume_nonce(nonce):
+		try:
+			from jarvis.chat import site_pin
+
+			site_pin.pin_if_unset()
+		except Exception:
+			frappe.log_error(title="site_pin: pin failed", message=frappe.get_traceback())
+		return {"ok": True, "held": True}
+	if pairing_proof.failed_challenge_rate_limited():
+		frappe.local.response.http_status_code = 429
+		return _error("RateLimitExceededError", "too many requests")
+	return {"ok": True, "held": False}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def vouch_session(pinned_instance_id: str | None = None) -> dict:
+	"""Does this site know the plugin session key? Signed exactly like ``call_tool``.
+
+	``known`` comes only from an exact-key record this site wrote: a row in the chat
+	tables or a claim made at session creation. Never from the key's shape. An unknown
+	key, or a plugin pinned to another instance id, is recorded as a foreign session so
+	the site that answers reports it to admin."""
+	try:
+		session_key = validate_plugin_request(_request_body_bytes())
+	except PluginAuthError as e:
+		frappe.local.response.http_status_code = e.http_status
+		return _error(e.code, e.message)
+
+	from jarvis.chat import foreign_session, session_claims, site_identity
+
+	key = str(session_key).lower()
+	try:
+		# Strict: a lookup error must never read as "known" (that would be fail-open).
+		known = foreign_session.has_row_for_key(key) or session_claims.is_claimed_strict(key)
+	except Exception:
+		frappe.log_error(title="vouch_session: lookup failed", message=frappe.get_traceback())
+		frappe.local.response.http_status_code = 503
+		return _error("ServiceUnavailable", "vouch lookup failed")
+	own_id = site_identity.instance_id()
+	if not known:
+		foreign_session.record(key)
+	else:
+		if own_id and pinned_instance_id and pinned_instance_id != own_id:
+			foreign_session.record_instance_mismatch(key)
+		try:
+			from jarvis.chat import site_pin
+
+			site_pin.pin_if_unset()
+		except Exception:
+			frappe.log_error(title="site_pin: pin failed", message=frappe.get_traceback())
+	return {"known": known, "instance_id": own_id}
 
 
 def _dispatch_current_user(tool: str, args: dict | str | None) -> dict:
@@ -4593,6 +4665,16 @@ def _with_note(result: dict, note: str) -> dict:
 from jarvis._responses import err as _error
 
 
+def _record_foreign_session(session_key: str) -> None:
+	"""Best effort: note a plugin session this site never started. Never raises."""
+	try:
+		from jarvis.chat.foreign_session import record
+
+		record(session_key)
+	except Exception:
+		frappe.logger("jarvis.foreign_session").warning("foreign session hook failed", exc_info=True)
+
+
 def _get_header(name: str) -> str:
 	"""Read a request header, returning empty string when no request is bound.
 
@@ -4659,6 +4741,13 @@ def rotate_agent_token() -> dict:
 	# expansion shipping with relaxed defaults.
 	frappe.only_for("System Manager")
 
+	# A site holding a per-tenant callback key no longer holds the owner token, so
+	# rotating it from here would hand the site a key it must not have.
+	from jarvis import _plugin_auth
+
+	if _plugin_auth._callback_key():
+		frappe.throw("Token rotation is handled by Jarvis support.", frappe.PermissionError)
+
 	new_token = secrets.token_hex(32)  # 64 hex chars
 
 	# Push to admin FIRST. We only persist locally after admin confirms
@@ -4667,9 +4756,10 @@ def rotate_agent_token() -> dict:
 	# holds the old token (fleet-agent rolled back per PR-3A), so both
 	# ends stay in lockstep.
 	from jarvis import admin_client
+	from jarvis.chat import pairing_proof
 
 	try:
-		admin_client.post_rotate_agent_token(new_token=new_token)
+		admin_client.post_rotate_agent_token(new_token=new_token, proof_nonce=pairing_proof.issue_nonce())
 	except admin_client.AdminAuthError as e:
 		frappe.local.response.http_status_code = 502
 		return {

@@ -1692,7 +1692,7 @@ import uuid
 
 from frappe import _
 
-from jarvis.chat import role_profiles
+from jarvis.chat import device, role_profiles
 from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.entities import scrub
 from jarvis.chat.policy import blocking_limit_period, validate_can_send
@@ -5225,8 +5225,9 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile:
 		# create_session/sessions.create entirely: a totally unconfigured
 		# agent must still fail fast here, not silently mint a key nothing
 		# can ever connect to.
-		gateway_token = settings.get_password("agent_token")
-		if not gateway_url or not gateway_token:
+		# A profile pick skips the connect, so check here that the agent is reachable in
+		# principle: an agent_url and a paired chat device (never the owner token).
+		if not gateway_url or not device.has_paired_token(settings):
 			frappe.throw(_("agent is not configured"))
 		# ":dashboard:" is the SAME chat-session namespace marker the gateway
 		# stamps into every legacy-minted key - session_lifecycle.py's
@@ -5241,8 +5242,9 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile:
 		# deduplicates sessions by label and rejects collisions.
 		session_key = sess.create_session(label=f"jarvis-chat-{user}-{int(time.time() * 1000)}")
 	else:
-		gateway_token = settings.get_password("agent_token")
-		if not gateway_url or not gateway_token:
+		# AgentSession.connect pairs the chat device on first use, so only the URL
+		# can be checked up front; a device that cannot pair fails the connect itself.
+		if not gateway_url:
 			frappe.throw(_("agent is not configured"))
 
 		one_shot = AgentSession.connect(gateway_url)

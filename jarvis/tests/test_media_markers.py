@@ -630,7 +630,6 @@ class TestSeedBlockWiring(unittest.TestCase):
 		from jarvis.chat import turn_handler
 
 		settings = Mock(agent_url="ws://h:1")
-		settings.get_password = Mock(return_value="tok")
 
 		def fake_get_value(dt, dn, field):
 			if field == "content":
@@ -643,6 +642,7 @@ class TestSeedBlockWiring(unittest.TestCase):
 		published = []
 		with (
 			patch("frappe.get_single", return_value=settings),
+			patch("jarvis.chat.device.device_bearer", return_value="tok"),
 			patch("frappe.db.get_value", side_effect=fake_get_value),
 			patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
 			patch("jarvis.chat.generated_media.seed_media", return_value=[media_item]) as sm,
@@ -660,9 +660,9 @@ class TestSeedBlockWiring(unittest.TestCase):
 		from jarvis.chat import turn_handler
 
 		settings = Mock(agent_url="ws://h:1")
-		settings.get_password = Mock(return_value="tok")
 		with (
 			patch("frappe.get_single", return_value=settings),
+			patch("jarvis.chat.device.device_bearer", return_value="tok"),
 			patch("frappe.db.get_value", return_value=""),
 			patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
 			patch("jarvis.chat.generated_media.seed_media") as sm,
@@ -704,10 +704,10 @@ class TestSeedBlockWiring(unittest.TestCase):
 		from jarvis.chat import turn_handler
 
 		settings = Mock(agent_url="ws://h:1")
-		settings.get_password = Mock(return_value="tok")
 		with patch.object(turn_handler, "_harvest_post_yield_media", return_value=([_IMG], [])) as harvest:
 			with (
 				patch("frappe.get_single", return_value=settings),
+				patch("jarvis.chat.device.device_bearer", return_value="tok"),
 				patch("frappe.db.get_value", return_value=""),
 				patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
 				patch("jarvis.chat.generated_media.seed_media", return_value=[]) as sm,

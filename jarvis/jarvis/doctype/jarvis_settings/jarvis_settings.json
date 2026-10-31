@@ -87,11 +87,14 @@
   "pairing_blocked",
   "pairing_blocked_reason",
   "agent_token",
+  "callback_key",
   "agent_token_issued_at",
   "agent_token_max_age_days",
   "tenant_authority_generation",
   "operator_col",
   "tenant_authority_handle",
+  "foreign_sessions_seen",
+  "foreign_session_last_at",
   "chat_device_id",
   "chat_device_public_key",
   "chat_device_private_key",
@@ -708,6 +711,15 @@
    "description": "Bearer token used to authenticate the secrets.reload RPC and the chat worker's WebSocket session"
   },
   {
+   "fieldname": "callback_key",
+   "fieldtype": "Password",
+   "permlevel": 1,
+   "hidden": 1,
+   "label": "Callback Key",
+   "read_only": 1,
+   "description": "Per-tenant key the plugin signs its callbacks to this site with. Either this key or the gateway owner token (agent_token) verifies until retirement clears agent_token; after that only this key does."
+  },
+  {
    "fieldname": "agent_token_issued_at",
    "fieldtype": "Datetime",
    "label": "Agent Token Issued At",
@@ -741,6 +753,23 @@
    "hidden": 1,
    "read_only": 1,
    "description": "Opaque, stable identifier (admin's sha256 of the serving container's docname) of the connection last accepted at tenant_authority_generation. Equal handle iff same container; never the internal TEN-* id. A payload at the SAME generation carrying a DIFFERENT handle is an admin invariant breach - the bench holds the current connection rather than overwrite onto an unverifiable container."
+  },
+  {
+   "fieldname": "foreign_sessions_seen",
+   "fieldtype": "Int",
+   "label": "Foreign Sessions Seen",
+   "default": "0",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Unknown agent sessions seen, counted once per session per day: sessions this site received tool calls for but never started. A non-zero value usually means a restored copy of this site is still running Jarvis. Reported to admin."
+  },
+  {
+   "fieldname": "foreign_session_last_at",
+   "fieldtype": "Datetime",
+   "label": "Foreign Session Last Seen",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "When the most recent foreign plugin session was recorded."
   },
   {
    "fieldname": "chat_device_id",

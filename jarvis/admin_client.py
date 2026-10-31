@@ -1242,7 +1242,7 @@ def get_integration_status(*, deep: bool = False, timeout_s: int = 20) -> dict:
 	)
 
 
-def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
+def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S, proof_nonce: str | None = None) -> dict:
 	"""Fetch the assigned container connection (fallback / scheduled sync).
 
 	``timeout_s`` is keyword-only and defaults to DEFAULT_TIMEOUT_S so existing
@@ -1263,6 +1263,8 @@ def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	from jarvis.source_version import source_details
 
 	body = {"jarvis_version": __version__}
+	if proof_nonce:
+		body["proof_nonce"] = proof_nonce
 	source = source_details()
 	# A value Git confirmed is sent even when empty, so a checkout that moved off a
 	# branch or tag clears stale metadata upstream. A value Git could not give in
@@ -1594,7 +1596,7 @@ def post_rotate_llm_secret(secret: str) -> dict:
 	)
 
 
-def post_rotate_agent_token(new_token: str) -> dict:
+def post_rotate_agent_token(new_token: str, proof_nonce: str | None = None) -> dict:
 	"""POST a rotated plugin agent_token to admin's /tenant/rotate-agent-token.
 
 	C2 PR-3C orchestrator. Called from rotate_agent_token (this module's
@@ -1614,7 +1616,7 @@ def post_rotate_agent_token(new_token: str) -> dict:
 	"""
 	return _post(
 		path=_m("api.tenant.rotate_agent_token"),
-		body={"new_token": new_token},
+		body=_with_proof({"new_token": new_token}, proof_nonce),
 		timeout_s=180,
 	)
 
@@ -2122,10 +2124,10 @@ def post_disconnect_llm() -> dict:
 	)
 
 
-def unpair_chat_devices() -> dict:
+def unpair_chat_devices(proof_nonce: str | None = None) -> dict:
 	"""Drop the container's paired devices. Idempotent; a file op on the agent,
 	so it needs none of the disconnect budget above."""
-	return _post(path=_m("api.tenant.unpair_chat_devices"), body={}, timeout_s=60)
+	return _post(path=_m("api.tenant.unpair_chat_devices"), body=_with_proof({}, proof_nonce), timeout_s=60)
 
 
 # --------------------------------------------------------------------------- #
@@ -2306,6 +2308,17 @@ def push_bench_heartbeat(heartbeat: dict) -> dict:
 	return _post(path=_m("api.tenant.ingest_bench_heartbeat"), body={"heartbeat": heartbeat})
 
 
+def report_foreign_session(count: int, last_seen_at: str) -> dict:
+	"""Tell admin how many plugin sessions this site never started (a restored copy
+	is probably using this site's agent). Count and time only, never a session key.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError /
+	AdminRateLimitedError."""
+	return _post(
+		path=_m("api.tenant.ingest_foreign_session"),
+		body={"report": {"count": count, "last_seen_at": last_seen_at}},
+	)
+
+
 # Short timeout for the three feedback pushes below. Admin's ingest is a single
 # upsert; 10s is generous for it. All three are sent by the feedback outbox's
 # delivery job and retry sweep (jarvis.chat.feedback_outbox), never inside a
@@ -2353,7 +2366,9 @@ def push_pulse_feedback(item: dict) -> dict:
 	)
 
 
-def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int = 30) -> dict:
+def pair_chat_device(
+	public_key: str, device_id: str, *, request_timeout_s: int = 30, proof_nonce: str | None = None
+) -> dict:
 	"""POST customer's chat device pubkey to admin; admin asks the fleet-agent
 	to write a PairedDevice record into the customer's agent container and
 	returns the issued bearer device-token. Customer keeps the private key.
@@ -2369,15 +2384,20 @@ def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int 
 	"""
 	return _post(
 		path=_m("api.tenant.pair_chat_device"),
-		body={
-			"public_key": public_key,
-			"device_id": device_id,
-			"request_timeout_s": request_timeout_s,
-		},
+		body=_with_proof(
+			{
+				"public_key": public_key,
+				"device_id": device_id,
+				"request_timeout_s": request_timeout_s,
+			},
+			proof_nonce,
+		),
 	)
 
 
-def request_chat_pairing(public_key: str, device_id: str, *, request_timeout_s: int = 30) -> dict:
+def request_chat_pairing(
+	public_key: str, device_id: str, *, request_timeout_s: int = 30, proof_nonce: str | None = None
+) -> dict:
 	"""Additive successor to ``pair_chat_device`` for the agent 9.3
 	device-pairing fix (Mechanism A). POSTs the customer's chat device pubkey to
 	the CP, which decides - per its own per-tenant gate - HOW this tenant pairs
@@ -2401,11 +2421,14 @@ def request_chat_pairing(public_key: str, device_id: str, *, request_timeout_s: 
 	(the CP clamps it), same contract as ``pair_chat_device``."""
 	return _post(
 		path=_m("api.tenant.request_chat_pairing"),
-		body={
-			"public_key": public_key,
-			"device_id": device_id,
-			"request_timeout_s": request_timeout_s,
-		},
+		body=_with_proof(
+			{
+				"public_key": public_key,
+				"device_id": device_id,
+				"request_timeout_s": request_timeout_s,
+			},
+			proof_nonce,
+		),
 	)
 
 
@@ -2675,7 +2698,24 @@ def has_credentials() -> bool:
 	return bool(username and password) or _has_legacy_credentials(settings)
 
 
-def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
+def _with_proof(body: dict, proof_nonce: str | None) -> dict:
+	"""The body with ``proof_nonce`` added only when one was passed."""
+	if proof_nonce:
+		body["proof_nonce"] = proof_nonce
+	return body
+
+
+def verify_site(proof_nonce: str) -> dict:
+	"""Ask admin to prove, through the tenant container, that this is the registered
+	site. Allowed on a blocked site: it is the way back from a false block."""
+	return _post(
+		path=_m("api.tenant.verify_site"),
+		body={"proof_nonce": proof_nonce},
+		allow_copy=True,
+	)
+
+
+def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S, allow_copy: bool = False) -> dict:
 	"""Authenticated POST. Prefers a short-lived OAuth bearer token (password
 	grant, cached in Redis) and falls back to the legacy native
 	api_key:api_secret for customers onboarded before OAuth. Raises
@@ -2688,7 +2728,8 @@ def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	bearer->401-remint->403-terminal->legacy ladder; mirror any change here there too.
 	"""
 	settings = frappe.get_single("Jarvis Settings")
-	site_pin.assert_not_copy(admin=True)  # a copied site must not act as the tenant
+	if not allow_copy:
+		site_pin.assert_not_copy(admin=True)  # a copied site must not act as the tenant
 	admin_url = _admin_url(settings)
 
 	# Preferred path: OAuth bearer. Retry once on a token rejection (revoked,

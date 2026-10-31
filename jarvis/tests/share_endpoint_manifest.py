@@ -80,6 +80,23 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.api",
+	"Nonce-authenticated pairing challenge and plugin-signed session-vouch endpoints answering this site's own instance identity; no transcript lookup.",
+	"""
+    pairing_challenge
+    vouch_session
+    """,
+)
+
+_unrelated(
+	"jarvis.chat.site_pin",
+	"System Manager action re-checking this site's registration with admin; no conversation data.",
+	"""
+    reverify
+    """,
+)
+
+_unrelated(
 	"jarvis.api_errors",
 	"Receives caller-supplied client telemetry; does not resolve conversation identifiers.",
 	"""
