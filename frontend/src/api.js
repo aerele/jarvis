@@ -1057,6 +1057,8 @@ export const listMacrosPage = (p) => call(MC + "list_macros_page", _page(p));
 export const fileboxListPage = (p) => call("jarvis.chat.filebox.list_inbound_page", _page(p));
 export const listApprovalsPage = (p) =>
 	call("jarvis.chat.approvals_api.list_approvals_page", _page(p));
+export const listApprovalReviewers = () =>
+	call("jarvis.chat.approvals_api.list_approval_reviewers");
 
 // ── File Box FB-1: cascade delete + clear-processed + bulk delete (Q4) ──────
 // delete_inbound: owner-gated cascade (approvals + messages + File docs + the
