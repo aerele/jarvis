@@ -97,7 +97,7 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 
 			site_pin.pin_if_unset()
 		except Exception:
-			frappe.log_error(title="site_pin: pin failed")
+			frappe.log_error(title="site_pin: pin failed", message=frappe.get_traceback())
 
 		from jarvis.chat.collaboration import is_collaborative_session, legacy_session_user, resolve_binding
 
@@ -217,19 +217,20 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def pairing_challenge(nonce: str) -> dict:
-	"""Does this site hold the one-time proof nonce? Signed like ``call_tool`` with the
-	literal session key ``pairing-challenge``. The nonce is consumed either way."""
-	try:
-		session_key = validate_plugin_request(_request_body_bytes())
-	except PluginAuthError as e:
-		frappe.local.response.http_status_code = e.http_status
-		return _error(e.code, e.message)
-
+	"""Does this site hold the one-time proof nonce? The nonce is the only credential:
+	128 random bits, single-use, 10 minutes, known to this site and admin alone. There
+	is deliberately no plugin signature, so the proof works whatever key state the
+	container is in (a rotated or never-delivered key must not lock the real site out
+	of the proof that re-syncs it). Any X-Jarvis-* headers are ignored. Flood limits
+	count every request, and the nonce is consumed either way."""
 	from jarvis.chat import pairing_proof
 
-	if session_key != pairing_proof.PROOF_SESSION_KEY:
+	if pairing_proof.challenge_rate_limited():
+		frappe.local.response.http_status_code = 429
+		return _error("RateLimitExceededError", "too many requests")
+	if not pairing_proof.is_well_formed(nonce):
 		frappe.local.response.http_status_code = 400
-		return _error("InvalidArgumentError", "not a pairing challenge")
+		return _error("InvalidArgumentError", "malformed nonce")
 	held = pairing_proof.consume_nonce(nonce)
 	if held:
 		try:
@@ -237,7 +238,7 @@ def pairing_challenge(nonce: str) -> dict:
 
 			site_pin.pin_if_unset()
 		except Exception:
-			frappe.log_error(title="site_pin: pin failed")
+			frappe.log_error(title="site_pin: pin failed", message=frappe.get_traceback())
 	return {"ok": True, "held": held}
 
 
@@ -262,7 +263,7 @@ def vouch_session(pinned_instance_id: str | None = None) -> dict:
 		# Strict: a lookup error must never read as "known" (that would be fail-open).
 		known = foreign_session.has_row_for_key(key) or session_claims.is_claimed_strict(key)
 	except Exception:
-		frappe.log_error(title="vouch_session: lookup failed")
+		frappe.log_error(title="vouch_session: lookup failed", message=frappe.get_traceback())
 		frappe.local.response.http_status_code = 503
 		return _error("ServiceUnavailable", "vouch lookup failed")
 	own_id = site_identity.instance_id()
@@ -276,7 +277,7 @@ def vouch_session(pinned_instance_id: str | None = None) -> dict:
 
 			site_pin.pin_if_unset()
 		except Exception:
-			frappe.log_error(title="site_pin: pin failed")
+			frappe.log_error(title="site_pin: pin failed", message=frappe.get_traceback())
 	return {"known": known, "instance_id": own_id}
 
 

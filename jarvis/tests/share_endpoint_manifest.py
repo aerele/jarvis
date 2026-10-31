@@ -80,7 +80,7 @@ _unrelated(
 
 _unrelated(
 	"jarvis.api",
-	"Plugin/admin-signed pairing and session-vouch endpoints answering this site's own instance identity; no transcript lookup.",
+	"Nonce-authenticated pairing challenge and plugin-signed session-vouch endpoints answering this site's own instance identity; no transcript lookup.",
 	"""
     pairing_challenge
     vouch_session
