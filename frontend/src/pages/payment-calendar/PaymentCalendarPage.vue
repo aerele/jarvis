@@ -94,7 +94,7 @@
 								? "Update paused"
 								: model.refreshing
 								? "Refreshing data…"
-								: "Refreshes automatically every 5 minutes"
+								: "Updates automatically while active"
 						}}</span
 					>
 				</div>
