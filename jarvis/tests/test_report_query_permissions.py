@@ -207,6 +207,30 @@ class TestStoredReportPermissions(unittest.TestCase):
 
 
 class TestStoredReportGate(unittest.TestCase):
+	def test_framework_messages_do_not_leak_in_the_http_json_response(self):
+		from frappe.api import ApiVersion
+		from frappe.utils.response import as_json
+
+		module = "jarvis.tools._report_query_source"
+		with (
+			patch.object(frappe.local, "message_log", [frappe._dict(message="Earlier status")]),
+			patch.object(frappe.local, "response", frappe._dict(message={"ok": False})),
+			patch.dict(frappe.flags, {"mute_messages": False}),
+			patch("frappe.api.get_api_version", return_value=ApiVersion.V1),
+			patch(module + ".get_report_doc", return_value=frappe._dict(name="Stored report")),
+			patch(module + ".get_report_filters", return_value={"filters": []}),
+			patch(
+				module + ".validate_filters_permissions",
+				side_effect=lambda *args, **kwargs: frappe.throw("PRIVATE-FILTER-VALUE"),
+			),
+		):
+			with self.assertRaises(PermissionDeniedError):
+				self.source()._gate()
+			wire = as_json().get_data(as_text=True)
+			self.assertNotIn("PRIVATE-FILTER-VALUE", wire)
+			self.assertIn("Earlier status", wire)
+			self.assertFalse(frappe.flags.mute_messages)
+
 	def source(self):
 		from jarvis.tools._report_query_source import ReportSource
 
