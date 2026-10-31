@@ -173,6 +173,9 @@ jobs:
   frontend-build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Keep the FC Node 18 compatibility check; give Vite enough heap for the SPA.
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
