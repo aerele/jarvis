@@ -111,8 +111,35 @@ def build_doc(doctype: str, values: dict) -> "frappe.model.document.Document":
 
 		landed_cost_vendor_amounts(doc, values)
 	cast_numbers(doc)
+	apply_tax_template(doc)
 	_set_title_from_title_field(doc)
 	return doc
+
+
+def apply_tax_template(doc):
+	"""Fill ``doc.taxes`` from its tax template when the template is set and no rows
+	were sent, as Desk does on picking the template. Rows already present are never
+	touched. A no-op without ERPNext, without the field, for a template that does not
+	exist, or for one the user cannot read (its rows are not copied past the user's
+	permissions). Shared by every insert and dry run so the card total equals the saved one."""
+	field = doc.meta.get_field("taxes_and_charges")
+	template = doc.get("taxes_and_charges")
+	# A card value is untrusted JSON: only a plain name may reach exists(), where a
+	# dict would read as filters.
+	if not (field and field.options and isinstance(template, str) and template.strip()):
+		return
+	if doc.get("taxes"):
+		return
+	if not frappe.db.exists(field.options, template):
+		return
+	if not frappe.has_permission(field.options, "read", doc=template):
+		return
+	try:
+		from erpnext.controllers.accounts_controller import get_taxes_and_charges
+	except ImportError:
+		return
+	for row in get_taxes_and_charges(field.options, template) or []:
+		doc.append("taxes", row)
 
 
 def create_doc(
