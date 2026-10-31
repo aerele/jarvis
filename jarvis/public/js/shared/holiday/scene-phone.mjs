@@ -1,8 +1,8 @@
 // The phone stage, as plain numbers the welcome page needs before the art arrives. A phone is
-// drawn through a window of the same 800-unit stage: the 540 units 130..670 (the approved
-// preview's crop), centred on the mark's column (400), at width / 540 px a unit. The scenes
-// are the desktop ones; scene-layout.mjs measures the stage through this window and
-// scene-place.mjs squeezes the props that are placed at a fixed x into it.
+// drawn through a window of the same 800-unit stage: the 540 units 130..670, the middle of it,
+// centred on the mark's column (400), at width / 540 px a unit. The scenes are the desktop
+// ones; scene-layout.mjs measures the stage through this window and scene-place.mjs squeezes
+// the props that are placed at a fixed x into it.
 import { MIN_FLOOR_SCALE, sceneHeroTop } from "./scene-geometry.mjs";
 
 export const PHONE = { from: 130, to: 670, units: 540, floorMinPx: 0.5 };

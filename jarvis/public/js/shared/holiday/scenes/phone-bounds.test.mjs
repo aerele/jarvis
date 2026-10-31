@@ -36,38 +36,39 @@ const PHONES = {
   "360x640": phoneBoxes({ w: 360, h: 640, starters: false }),
 };
 
-// Pieces that are not a place: they fly, fall, burst or span the layer on purpose (the snow,
-// the toran, the sleigh crossing the sky), or they are pinned to the mark. Strings run off the
-// bottom of the stage on purpose (kites, balloons).
-const TRANSIENT = new Set([
-  "sleigh",
-  "drop",
-  "trail",
-  "pin",
-  "flake",
-  "bconf",
-  "pet",
-  "tb",
-  "fount",
-  "carry",
-  "ball",
-  "toran",
-  "b1",
-  "b2",
-  "b3",
-  "nb0",
-  "nb1",
-  "nb2",
-  "nb3",
-  "rk1",
-  "rk2",
-  "rk3",
-  "nrk0",
-  "nrk1",
-  "nrk2",
-  "nrk3",
-  "cl",
-  "cr",
+// Pieces that are not a place: they fly, fall, burst or span the layer on purpose, or they are
+// pinned to the mark. Strings run off the bottom of the stage on purpose (kites, balloons: the
+// stroke colour in isTransient). Each class has its reason here, so a new one cannot slip in
+// unexplained.
+const TRANSIENT = new Map([
+  ["sleigh", "Santa's sleigh crosses the sky"],
+  ["trail", "the sleigh's glitter trail, behind it"],
+  ["drop", "the hat or rosette falling onto the mark"],
+  ["pin", "sparkles pinned to the mark"],
+  ["flake", "snow, falling"],
+  ["bconf", "birthday confetti, falling"],
+  ["pet", "Onam petals, falling"],
+  ["tb", "Independence confetti, falling"],
+  ["fount", "Diwali fountain sparks, rising and falling"],
+  ["carry", "the Diwali spark that drifts down to the mark"],
+  ["ball", "the Holi colour ball, thrown across"],
+  ["toran", "the toran spans the layer on purpose"],
+  ["b1", "Diwali firework burst 1"],
+  ["b2", "Diwali firework burst 2"],
+  ["b3", "Diwali firework burst 3"],
+  ["nb0", "New Year burst 0"],
+  ["nb1", "New Year burst 1"],
+  ["nb2", "New Year burst 2"],
+  ["nb3", "New Year burst 3"],
+  ["rk1", "Diwali rocket 1, flying up"],
+  ["rk2", "Diwali rocket 2, flying up"],
+  ["rk3", "Diwali rocket 3, flying up"],
+  ["nrk0", "New Year rocket 0, flying up"],
+  ["nrk1", "New Year rocket 1, flying up"],
+  ["nrk2", "New Year rocket 2, flying up"],
+  ["nrk3", "New Year rocket 3, flying up"],
+  ["cl", "the left cannon's spray"],
+  ["cr", "the right cannon's spray"],
 ]);
 const isTransient = (n) =>
   n.classes.some((c) => TRANSIENT.has(c.slice(2))) ||

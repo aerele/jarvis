@@ -1,13 +1,18 @@
-// The boxes a phone welcome screen reports, for the tests and the owner's contact sheet (no
-// test runner imports, so a browser bundle can take it). Sizes follow the PWA welcome: a 56 px
+// The boxes a phone welcome screen reports, for the tests and for any script that renders the
+// scenes at phone sizes (no test runner imports, so a browser bundle can take it). Sizes follow the PWA welcome: a 56 px
 // mark, a 21 px greeting (20ch wide, up to two lines), a 14 px sub-line, the starter cards
 // in a band above the composer, which the art layer stops short of. With no starters (a screen
 // 640 px tall or less hides them) the band is what is left between the hero and the composer.
+//
+// The sizes the page's CSS sets are exported in PAGE, and pwa/src/lib/holidayBoxes.test.js
+// checks them against pwa/src/views/NewChatView.vue. The rest depend on content and are
+// measured on the real page (Chrome, 390 x 844), so they are kept here by hand: the bar,
+// the composer with its safe area, the hero and the starter band.
+export const PAGE = { MARK_PX: 56, HERO_GAP_PX: 14, GREETING_PX: 21 };
 const BAR_PX = 56; // the app bar the art layer runs under
 const COMPOSER_PX = 118; // composer and safe area: the layer ends above them
 const HERO_H = 150;
 const HERO_W = 260;
-const MARK_PX = 56;
 const STARTER_BAND_PX = { roomy: 200, short: 150 };
 const GAP_PX = 8;
 
@@ -41,8 +46,13 @@ export function phoneBoxes({
       };
   return {
     host: { w, h: hostH },
-    mark: { x: (w - MARK_PX) / 2, y, w: MARK_PX, h: MARK_PX },
-    heading: { x: (w - 230) / 2, y: y + MARK_PX + 14, w: 230, h: 52 },
+    mark: { x: (w - PAGE.MARK_PX) / 2, y, w: PAGE.MARK_PX, h: PAGE.MARK_PX },
+    heading: {
+      x: (w - 230) / 2,
+      y: y + PAGE.MARK_PX + PAGE.HERO_GAP_PX,
+      w: 230,
+      h: 52,
+    },
     hero,
     cards,
   };
