@@ -345,15 +345,17 @@ def schedule_callback_key_fetch() -> None:
 
 
 KEY_RESYNC_THROTTLE_S = 600
+# A FAILED self-heal retries sooner: the throttle's expiry is cut to this.
+KEY_RESYNC_FAILED_THROTTLE_S = 120
 _KEY_RESYNC_THROTTLE_PREFIX = "jarvis:key_resync:"
 
 
 def request_key_resync() -> bool:
 	"""Stale-key self-heal. A plugin request carried a key this site does not hold
 	(admin rotated it, or a delivery was missed): queue ONE proof-backed key sync so
-	the next request can match. At most once per ``KEY_RESYNC_THROTTLE_S`` per site,
-	and the caller has already rejected the request. Returns whether a job was queued;
-	never raises."""
+	the next request can match. At most once per ``KEY_RESYNC_THROTTLE_S`` per site
+	(``KEY_RESYNC_FAILED_THROTTLE_S`` after a failed run), and the caller has already
+	rejected the request. Returns whether a job was queued; never raises."""
 	try:
 		gate = _KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site
 		if not frappe.cache().set(gate, b"1", nx=True, ex=KEY_RESYNC_THROTTLE_S):
@@ -371,24 +373,57 @@ def request_key_resync() -> bool:
 
 
 def run_key_resync() -> None:
-	"""The self-heal job: one proof-backed sync with the normal admin timeout (the job
-	is not holding a plugin request open). Failures are logged without frame locals."""
+	"""The key-resync job (stale-key self-heal and the post-pairing resync): one
+	proof-backed sync as Administrator with the normal admin timeout (no request is
+	held open). Failures are logged without frame locals, and a failed run shortens
+	the self-heal throttle so the next stale request retries within two minutes."""
 	if getattr(frappe.flags, "jarvis_key_fetch", False):
 		return
+	# A background job has no user; the sync writes Jarvis Settings and the Error Log.
+	frappe.set_user("Administrator")
 	frappe.flags.jarvis_key_fetch = True
 	try:
 		_sync_connection(prove=True)
 	except Exception:
 		frappe.log_error(title="callback key resync failed", message=frappe.get_traceback())
+		_shorten_key_resync_throttle()
 	finally:
 		frappe.flags.jarvis_key_fetch = False
 
 
+def _shorten_key_resync_throttle() -> None:
+	"""Cut the self-heal throttle's remaining life to ``KEY_RESYNC_FAILED_THROTTLE_S``
+	(never extend it). A no-op when no throttle key exists, e.g. after a post-pairing
+	run. Never raises."""
+	try:
+		cache = frappe.cache()
+		gate = _KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site
+		ttl = cache.ttl(gate)
+		if ttl == -1 or ttl > KEY_RESYNC_FAILED_THROTTLE_S:
+			cache.expire(gate, KEY_RESYNC_FAILED_THROTTLE_S)
+	except Exception:
+		pass
+
+
 def resync_callback_key_after_pairing() -> None:
-	"""Run a proof-backed sync after EVERY proof-backed pairing, whether or not a key
-	is stored, so a callback key admin rotated always reaches this site. Best effort:
-	a failed sync never fails the pairing. Not re-entrant."""
-	_best_effort_key_sync()
+	"""Queue a proof-backed sync after EVERY proof-backed pairing, whether or not a key
+	is stored, so a callback key admin rotated always reaches this site. A background
+	job that starts after the current transaction commits: pairing never waits for it
+	(admin's pairing approval holds a container lock for up to 30 s, which an inline
+	sync would stall behind and give up on). Deduplicated per site; skipped inside a
+	running key sync. A failure to queue never fails the pairing."""
+	if getattr(frappe.flags, "jarvis_key_fetch", False):
+		return
+	try:
+		frappe.enqueue(
+			"jarvis.onboarding.run_key_resync",
+			queue="short",
+			job_id=f"jarvis_key_resync_pairing:{frappe.local.site}",
+			deduplicate=True,
+			enqueue_after_commit=True,
+		)
+	except Exception:
+		frappe.log_error(title="callback key resync: enqueue failed", message=frappe.get_traceback())
 
 
 def _best_effort_key_sync() -> None:

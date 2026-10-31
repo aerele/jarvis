@@ -126,6 +126,16 @@ class TestStaleKeySelfHeal(JarvisSettingsSnapshot, FrappeTestCase):
 		sync.assert_called_once_with(prove=True)
 		enq.assert_not_called()
 
+	def test_the_job_runs_as_administrator(self):
+		self.addCleanup(frappe.set_user, frappe.session.user)
+		frappe.set_user("Guest")
+		seen = []
+		with patch(
+			"jarvis.onboarding._sync_connection", side_effect=lambda **kw: seen.append(frappe.session.user)
+		):
+			onboarding.run_key_resync()
+		self.assertEqual(seen, ["Administrator"])
+
 	def test_the_job_logs_a_failure_without_frame_locals(self):
 		with (
 			patch("jarvis.onboarding._sync_connection", side_effect=RuntimeError("admin down")),
@@ -136,6 +146,43 @@ class TestStaleKeySelfHeal(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertIn("RuntimeError: admin down", kwargs["message"])
 		self.assertNotIn("Local variables", kwargs["message"])
 		self.assertFalse(frappe.flags.get("jarvis_key_fetch"))
+
+	def test_a_failed_job_shortens_the_throttle_to_two_minutes(self):
+		with patch("frappe.enqueue"):
+			self._reject("stale-1")
+		self.assertTrue(120 < frappe.cache().ttl(_throttle_key()) <= 600)
+		with (
+			patch("jarvis.onboarding._sync_connection", side_effect=RuntimeError("admin down")),
+			patch.object(frappe, "log_error"),
+		):
+			onboarding.run_key_resync()
+		ttl = frappe.cache().ttl(_throttle_key())
+		self.assertTrue(0 < ttl <= onboarding.KEY_RESYNC_FAILED_THROTTLE_S)
+		self.assertEqual(onboarding.KEY_RESYNC_FAILED_THROTTLE_S, 120)
+
+	def test_a_failed_job_never_lengthens_a_shorter_throttle(self):
+		frappe.cache().set(_throttle_key(), b"1", ex=30)
+		with (
+			patch("jarvis.onboarding._sync_connection", side_effect=RuntimeError("admin down")),
+			patch.object(frappe, "log_error"),
+		):
+			onboarding.run_key_resync()
+		self.assertTrue(0 < frappe.cache().ttl(_throttle_key()) <= 30)
+
+	def test_a_failed_job_without_a_throttle_key_creates_none(self):
+		with (
+			patch("jarvis.onboarding._sync_connection", side_effect=RuntimeError("admin down")),
+			patch.object(frappe, "log_error"),
+		):
+			onboarding.run_key_resync()
+		self.assertEqual(frappe.cache().ttl(_throttle_key()), -2)
+
+	def test_a_successful_job_keeps_the_ten_minute_throttle(self):
+		with patch("frappe.enqueue"):
+			self._reject("stale-1")
+		with patch("jarvis.onboarding._sync_connection"):
+			onboarding.run_key_resync()
+		self.assertTrue(120 < frappe.cache().ttl(_throttle_key()) <= 600)
 
 
 class TestErrorLogCarriesNoSecrets(JarvisSettingsSnapshot, FrappeTestCase):
@@ -165,6 +212,7 @@ class TestErrorLogCarriesNoSecrets(JarvisSettingsSnapshot, FrappeTestCase):
 			"callback key fetch failed",
 			"callback key resync failed",
 			"callback key fetch: enqueue failed",
+			"callback key resync: enqueue failed",
 			"site_pin: pin failed",
 			"site_pin: status read failed",
 			"vouch_session: lookup failed",

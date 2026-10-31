@@ -21,7 +21,9 @@ _NONCE_RE = re.compile(r"[0-9a-f]{32}")
 # The challenge endpoint is a guest endpoint (the nonce is its only credential), so it
 # carries its own flood limits. Two buckets: per source IP, and one for the whole site
 # (behind a gateway many callers share an IP, and a rotating-IP flood must still stop).
-# Every request counts, valid nonce or not. Legitimate use is one call per admin proof.
+# Only FAILED challenges (a well-formed nonce this site does not hold) count, and a held
+# nonce is never limited, so a flood can never lock out the real proof. Legitimate use
+# is one call per admin proof.
 CHALLENGE_PER_IP_LIMIT = 30
 CHALLENGE_GLOBAL_LIMIT = 120
 CHALLENGE_WINDOW_S = 60
@@ -32,9 +34,9 @@ def is_well_formed(nonce) -> bool:
 	return isinstance(nonce, str) and bool(_NONCE_RE.fullmatch(nonce))
 
 
-def challenge_rate_limited() -> bool:
-	"""Count this request against the per-IP and the per-site buckets; True when either
-	is over. Same idiom as ``jarvis.network_check._rate_limited``: ``incr`` and ``ttl`` in
+def failed_challenge_rate_limited() -> bool:
+	"""Count this FAILED challenge against the per-IP and the per-site buckets; True when
+	either is over. Same idiom as ``jarvis.network_check._rate_limited``: ``incr`` and ``ttl`` in
 	one pipeline, a counter without a TTL is re-armed so nobody is blocked forever, the
 	IP is digested because X-Forwarded-For is attacker-controlled, and cache trouble
 	fails OPEN (a Redis blip must not break the proof; the nonce is still single-use).

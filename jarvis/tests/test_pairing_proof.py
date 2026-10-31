@@ -13,6 +13,7 @@ import threading
 from unittest.mock import MagicMock, patch
 
 import frappe
+from frappe.exceptions import FrappeTypeError
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import admin_client, onboarding
@@ -157,11 +158,31 @@ class TestPairingChallenge(JarvisSettingsSnapshot, FrappeTestCase):
 
 	def test_malformed_nonce_is_400_and_touches_no_nonce(self):
 		nonce = pairing_proof.issue_nonce()
-		for bad in ("", "../x", "a" * 31, "a" * 33, "A" * 32, "g" * 32, None):
+		for bad in ("", "../x", "a" * 31, "a" * 33, "A" * 32, "g" * 32):
 			with self._request():
 				res = pairing_challenge(bad)
 			self.assertFalse(res["ok"], bad)
 			self.assertEqual(frappe.local.response.http_status_code, 400, bad)
+		self.assertTrue(pairing_proof.consume_nonce(nonce))  # untouched
+
+	def test_malformed_nonces_never_count_toward_the_limits(self):
+		"""The format check runs first and touches no counter: it is a pure 400."""
+		with self._request(ip="198.51.100.40"):
+			for _ in range(pairing_proof.CHALLENGE_PER_IP_LIMIT + 5):
+				res = pairing_challenge("not-a-nonce")
+				self.assertEqual(frappe.local.response.http_status_code, 400)
+			self.assertFalse(res["ok"])
+			# Still under the limit: the first unknown (well-formed) nonce is a plain false.
+			frappe.local.response.http_status_code = 200
+			self.assertEqual(pairing_challenge("ab" * 16), {"ok": True, "held": False})
+
+	def test_non_string_nonce_is_rejected_by_frappe_and_touches_no_nonce(self):
+		"""Frappe's own type validation (the signature keeps ``nonce: str``) refuses a
+		non-str value before the body runs, so the 400 path is str-only."""
+		nonce = pairing_proof.issue_nonce()
+		for bad in (None, 7, ["a" * 32]):
+			with self._request(), self.assertRaises(FrappeTypeError):
+				pairing_challenge(bad)
 		self.assertTrue(pairing_proof.consume_nonce(nonce))  # untouched
 
 	def test_held_true_and_pins(self):
@@ -185,7 +206,7 @@ class TestPairingChallenge(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertTrue(first["held"])
 		self.assertEqual(second, {"ok": True, "held": False})
 
-	def test_per_ip_rate_limit_is_429_and_never_logs_errors(self):
+	def test_per_ip_rate_limit_is_429_for_failures_and_never_logs_errors(self):
 		limit = pairing_proof.CHALLENGE_PER_IP_LIMIT
 		rows_before = frappe.db.count("Error Log")
 		with patch.object(frappe, "log_error") as log_error:
@@ -201,18 +222,45 @@ class TestPairingChallenge(JarvisSettingsSnapshot, FrappeTestCase):
 		log_error.assert_not_called()
 		self.assertEqual(frappe.db.count("Error Log"), rows_before)
 
+	def test_a_held_nonce_succeeds_even_when_both_buckets_are_full(self):
+		"""A flood can never lock out a real proof: a held nonce is answered before any
+		counter is read."""
+		ip = "198.51.100.20"
+		with patch.object(pairing_proof, "CHALLENGE_GLOBAL_LIMIT", 3):
+			with self._request(ip=ip):
+				for _ in range(pairing_proof.CHALLENGE_PER_IP_LIMIT):
+					pairing_challenge("ab" * 16)
+				self.assertFalse(pairing_challenge("ab" * 16)["ok"])
+				self.assertEqual(frappe.local.response.http_status_code, 429)
+				# Both buckets are over (per-IP at 30, site at 3).
+				nonce = pairing_proof.issue_nonce()
+				frappe.local.response.http_status_code = 200
+				res = pairing_challenge(nonce)
+		self.assertEqual(res, {"ok": True, "held": True})
+		self.assertEqual(frappe.local.response.http_status_code, 200)
+
+	def test_held_nonces_are_never_counted(self):
+		"""Only failures spend the budget: more held proofs than the limit all succeed."""
+		with self._request(ip="198.51.100.21"):
+			for _ in range(pairing_proof.CHALLENGE_PER_IP_LIMIT + 5):
+				res = pairing_challenge(pairing_proof.issue_nonce())
+				self.assertEqual(res, {"ok": True, "held": True})
+			# And the bucket is still empty: an unknown nonce is a plain false, not a 429.
+			self.assertEqual(pairing_challenge("ab" * 16), {"ok": True, "held": False})
+
 	def test_failed_nonces_count_toward_the_limit(self):
-		"""Malformed nonces spend the budget too, and a limited call leaves a valid nonce untouched."""
-		nonce = pairing_proof.issue_nonce()
-		with self._request(ip="198.51.100.20"):
-			for _ in range(pairing_proof.CHALLENGE_PER_IP_LIMIT):
-				pairing_challenge("not-a-nonce")
-			res = pairing_challenge(nonce)
+		"""Unknown and already-used nonces are the failures that spend the budget."""
+		used = pairing_proof.issue_nonce()
+		with self._request(ip="198.51.100.22"):
+			self.assertTrue(pairing_challenge(used)["held"])
+			for _ in range(pairing_proof.CHALLENGE_PER_IP_LIMIT - 1):
+				pairing_challenge("ab" * 16)
+			self.assertEqual(pairing_challenge(used), {"ok": True, "held": False})  # the 30th failure
+			res = pairing_challenge("cd" * 16)
 		self.assertFalse(res["ok"])
 		self.assertEqual(frappe.local.response.http_status_code, 429)
-		self.assertTrue(pairing_proof.consume_nonce(nonce))
 
-	def test_global_bucket_limits_across_addresses(self):
+	def test_global_bucket_limits_failures_across_addresses(self):
 		with patch.object(pairing_proof, "CHALLENGE_GLOBAL_LIMIT", 3):
 			for i in range(3):
 				with self._request(ip=f"192.0.2.{i + 1}"):
@@ -224,7 +272,7 @@ class TestPairingChallenge(JarvisSettingsSnapshot, FrappeTestCase):
 
 	def test_cache_trouble_fails_open(self):
 		with patch("frappe.cache", side_effect=RuntimeError("redis down")):
-			self.assertFalse(pairing_proof.challenge_rate_limited())
+			self.assertFalse(pairing_proof.failed_challenge_rate_limited())
 
 	def test_rate_limit_counter_rearms_a_missing_ttl(self):
 		with self._request(ip="198.51.100.30"):
@@ -302,52 +350,102 @@ class TestEstablishPairing(JarvisSettingsSnapshot, FrappeTestCase):
 			creds = chat_device._establish_pairing()
 		self.assertEqual(creds.bootstrap_codes, ("c1", "c2"))
 
-	def test_pairing_response_stores_callback_key(self):
+	def test_pairing_response_callback_key_is_ignored(self):
 		"""A callback_key riding a pairing response is ignored; the key arrives only
-		through the proof-backed sync (write_connection's guarded path)."""
+		through the proof-backed sync (write_connection's guarded path), which runs as a
+		background job, never inline."""
 		_onboard()
 		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
 		resp = {"mode": "legacy", "device_token": "tok", "callback_key": "ee" * 32}
-		conn = {"agent_url": "ws://x.invalid", "callback_key": CALLBACK}
 		with (
 			patch("jarvis.chat.device.admin_client.request_chat_pairing", return_value=resp),
-			patch("jarvis.onboarding.admin_client.get_connection", return_value=conn) as get_conn,
+			patch("jarvis.onboarding.admin_client.get_connection") as get_conn,
+			patch("frappe.enqueue"),
 		):
 			chat_device._establish_pairing()
-		self.assertRegex(get_conn.call_args.kwargs["proof_nonce"], HEX32)
-		stored = frappe.get_single(SETTINGS).get_password("callback_key", raise_exception=False)
-		self.assertEqual(stored, CALLBACK)
+		get_conn.assert_not_called()
+		self.assertFalse(frappe.get_single(SETTINGS).get_password("callback_key", raise_exception=False))
 
 
 class TestResyncAfterPairing(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
 		super().setUp()
 		_onboard()
+		self.addCleanup(frappe.set_user, frappe.session.user)
 
-	def test_rotated_key_replaces_stored_one_after_pairing(self):
-		set_settings_password(frappe.get_single(SETTINGS), "callback_key", CALLBACK)
-		rotated = "ee" * 32
-		resp = {"mode": "legacy", "device_token": "tok"}
-		conn = {"agent_url": "ws://x.invalid", "callback_key": rotated}
-		with (
-			patch("jarvis.chat.device.admin_client.request_chat_pairing", return_value=resp),
-			patch("jarvis.onboarding.admin_client.get_connection", return_value=conn) as get_conn,
-		):
-			chat_device._establish_pairing()
-		get_conn.assert_called_once()
-		self.assertRegex(get_conn.call_args.kwargs["proof_nonce"], HEX32)
-		stored = frappe.get_single(SETTINGS).get_password("callback_key", raise_exception=False)
-		self.assertEqual(stored, rotated)
-
-	def test_failed_resync_never_fails_pairing(self):
+	def test_pairing_enqueues_the_resync_and_makes_no_admin_call(self):
 		resp = {"mode": "legacy", "device_token": "tok"}
 		with (
 			patch("jarvis.chat.device.admin_client.request_chat_pairing", return_value=resp),
-			patch("jarvis.onboarding.admin_client.get_connection", side_effect=RuntimeError("admin down")),
-			patch("jarvis.onboarding.frappe.log_error"),
+			patch("jarvis.onboarding.admin_client.get_connection") as get_conn,
+			patch("frappe.enqueue") as enq,
 		):
 			creds = chat_device._establish_pairing()
 		self.assertEqual(creds.device_token, "tok")
+		get_conn.assert_not_called()
+		enq.assert_called_once()
+		self.assertEqual(enq.call_args.args[0], "jarvis.onboarding.run_key_resync")
+		kwargs = enq.call_args.kwargs
+		self.assertEqual(kwargs["queue"], "short")
+		self.assertTrue(kwargs["deduplicate"])
+		self.assertTrue(kwargs["enqueue_after_commit"])
+		self.assertIn(frappe.local.site, kwargs["job_id"])
+
+	def test_rotate_pairing_enqueues_the_resync_too(self):
+		with (
+			patch(
+				"jarvis.chat.device.admin_client.pair_chat_device", return_value={"device_token": "tok-new"}
+			),
+			patch("jarvis.chat.device._save_credentials"),
+			patch("jarvis.onboarding.admin_client.get_connection") as get_conn,
+			patch("frappe.enqueue") as enq,
+		):
+			chat_device._generate_and_pair()
+		get_conn.assert_not_called()
+		enq.assert_called_once()
+		self.assertEqual(enq.call_args.args[0], "jarvis.onboarding.run_key_resync")
+
+	def test_resync_inside_a_running_key_sync_queues_nothing(self):
+		frappe.flags.jarvis_key_fetch = True
+		self.addCleanup(setattr, frappe.flags, "jarvis_key_fetch", False)
+		with patch("frappe.enqueue") as enq:
+			onboarding.resync_callback_key_after_pairing()
+		enq.assert_not_called()
+
+	def test_an_enqueue_failure_never_fails_pairing(self):
+		resp = {"mode": "legacy", "device_token": "tok"}
+		with (
+			patch("jarvis.chat.device.admin_client.request_chat_pairing", return_value=resp),
+			patch("frappe.enqueue", side_effect=RuntimeError("queue down")),
+			patch("jarvis.onboarding.frappe.log_error") as log_error,
+		):
+			creds = chat_device._establish_pairing()
+		self.assertEqual(creds.device_token, "tok")
+		self.assertIn("RuntimeError: queue down", log_error.call_args.kwargs["message"])
+
+	def test_the_job_runs_the_proof_sync_with_the_normal_timeout(self):
+		"""The queued job syncs with a proof and NO short timeout (it is not holding a
+		pairing open), as Administrator."""
+		set_settings_password(frappe.get_single(SETTINGS), "callback_key", CALLBACK)
+		rotated = "ee" * 32
+		conn = {"agent_url": "ws://x.invalid", "callback_key": rotated}
+		frappe.set_user("Guest")
+		with patch("jarvis.onboarding.admin_client.get_connection", return_value=conn) as get_conn:
+			onboarding.run_key_resync()
+		self.assertEqual(frappe.session.user, "Administrator")
+		get_conn.assert_called_once()
+		self.assertRegex(get_conn.call_args.kwargs["proof_nonce"], HEX32)
+		self.assertNotIn("timeout_s", get_conn.call_args.kwargs)
+		stored = frappe.get_single(SETTINGS).get_password("callback_key", raise_exception=False)
+		self.assertEqual(stored, rotated)
+
+	def test_a_failed_job_logs_and_does_not_raise(self):
+		with (
+			patch("jarvis.onboarding.admin_client.get_connection", side_effect=RuntimeError("admin down")),
+			patch("jarvis.onboarding.frappe.log_error") as log_error,
+		):
+			onboarding.run_key_resync()
+		self.assertIn("RuntimeError: admin down", log_error.call_args.kwargs["message"])
 
 	def test_resync_runs_after_rotate_pairing(self):
 		priv_pub = {"device_token": "tok-new"}

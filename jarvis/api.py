@@ -221,25 +221,29 @@ def pairing_challenge(nonce: str) -> dict:
 	128 random bits, single-use, 10 minutes, known to this site and admin alone. There
 	is deliberately no plugin signature, so the proof works whatever key state the
 	container is in (a rotated or never-delivered key must not lock the real site out
-	of the proof that re-syncs it). Any X-Jarvis-* headers are ignored. Flood limits
-	count every request, and the nonce is consumed either way."""
+	of the proof that re-syncs it). Any X-Jarvis-* headers are ignored.
+
+	Order: strict format check (400, nothing touched), atomic consume, then a held
+	nonce is answered and is never rate limited. Only a nonce this site does not hold
+	counts toward the flood limits (429 once over), so a flood cannot lock out a real
+	proof."""
 	from jarvis.chat import pairing_proof
 
-	if pairing_proof.challenge_rate_limited():
-		frappe.local.response.http_status_code = 429
-		return _error("RateLimitExceededError", "too many requests")
 	if not pairing_proof.is_well_formed(nonce):
 		frappe.local.response.http_status_code = 400
 		return _error("InvalidArgumentError", "malformed nonce")
-	held = pairing_proof.consume_nonce(nonce)
-	if held:
+	if pairing_proof.consume_nonce(nonce):
 		try:
 			from jarvis.chat import site_pin
 
 			site_pin.pin_if_unset()
 		except Exception:
 			frappe.log_error(title="site_pin: pin failed", message=frappe.get_traceback())
-	return {"ok": True, "held": held}
+		return {"ok": True, "held": True}
+	if pairing_proof.failed_challenge_rate_limited():
+		frappe.local.response.http_status_code = 429
+		return _error("RateLimitExceededError", "too many requests")
+	return {"ok": True, "held": False}
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
