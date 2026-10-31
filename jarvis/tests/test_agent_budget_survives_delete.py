@@ -318,11 +318,14 @@ class TestUninstallStopsALiveRun(AgentBudgetTestCase):
 		@contextmanager
 		def _launched_elsewhere_while_waiting(lock_name, **kw):
 			with other_connection() as db:
+				# Match the site's budget clock. SQL NOW() can still be in the
+				# previous month when the site has crossed local midnight.
+				at = now_datetime()
 				db.sql(
 					f"""INSERT INTO `tab{RUN}` (name, creation, modified, owner, modified_by, agent,
 					installation, `trigger`, status, started_at)
-					VALUES (%s, NOW(), NOW(), %s, %s, %s, %s, 'scheduled', 'running', NOW())""",
-					(name, self.owner, self.owner, SLUG, inst),
+					VALUES (%s, %s, %s, %s, %s, %s, %s, 'scheduled', 'running', %s)""",
+					(name, at, at, self.owner, self.owner, SLUG, inst, at),
 				)
 				db.commit()
 			with real_lock(lock_name, **kw) as acquired:
@@ -340,6 +343,7 @@ class TestUninstallStopsALiveRun(AgentBudgetTestCase):
 
 		self.assertEqual(out, {"ok": True, "stopped_runs": 1})
 		row = frappe.db.get_value(RUN, name, ["status", "installation"], as_dict=True)
+		self.assertIsNotNone(row, "the concurrently committed run must remain in the audit history")
 		self.assertEqual((row.status, row.installation), ("stopped", None))
 
 	def test_an_uninstall_while_a_launch_holds_the_lock_is_refused(self):
