@@ -34,6 +34,20 @@ def _masked_fields(meta):
 	return compat.masked_fields_of(meta) if callable(getattr(meta, "get_masked_fields", None)) else []
 
 
+def _denied_columns(meta, columns, user, aliases=None):
+	"""Match stored report fieldnames to the current source DocType's read levels."""
+	if user == "Administrator":
+		return set()
+	fields = {df.fieldname for df in meta.fields}
+	permitted = set(meta.get_permitted_fieldnames(user=user, permission_type="read"))
+	aliases = aliases or {}
+	return {
+		col["sql_column"]
+		for col in columns
+		if aliases.get(col["fieldname"], col["fieldname"]) in fields - permitted
+	}
+
+
 @contextmanager
 def _db_budget(deadline):
 	from jarvis.api import statement_time_limit
@@ -162,7 +176,7 @@ class ReportSource:
 			) from None
 
 	def read(self):
-		content = compat.file_bytes(frappe.get_doc("File", self.file.name))
+		content = compat.file_bytes(frappe.get_cached_doc("File", self.file.name))
 		if len(content) > MAX_COMPRESSED:
 			raise InvalidArgumentError("Prepared report exceeds the 10 MiB compressed input limit.")
 		self.source_sha = hashlib.sha256(content).hexdigest()
@@ -195,17 +209,22 @@ class ReportSource:
 		deadline.check()
 		masked = set()
 		ref_meta = frappe.get_meta(self.report.ref_doctype)
+		denied = _denied_columns(ref_meta, columns, self.user)
 		mask_names = {df.fieldname for df in _masked_fields(ref_meta)}
 		masked.update(c["sql_column"] for c in columns if c["fieldname"] in mask_names)
 		# Known aliases in the standard AR/AP reports must not reveal newly masked party names.
 		if self.report.name in {"Accounts Receivable", "Accounts Receivable Summary"}:
-			party_masks = {df.fieldname for df in _masked_fields(frappe.get_meta("Customer"))}
+			party_meta = frappe.get_meta("Customer")
+			denied.update(_denied_columns(party_meta, columns, self.user, {"party_name": "customer_name"}))
+			party_masks = {df.fieldname for df in _masked_fields(party_meta)}
 			if "customer_name" in party_masks:
 				masked.update(
 					c["sql_column"] for c in columns if c["fieldname"] in {"party_name", "customer_name"}
 				)
 		elif self.report.name in {"Accounts Payable", "Accounts Payable Summary"}:
-			party_masks = {df.fieldname for df in _masked_fields(frappe.get_meta("Supplier"))}
+			party_meta = frappe.get_meta("Supplier")
+			denied.update(_denied_columns(party_meta, columns, self.user, {"party_name": "supplier_name"}))
+			party_masks = {df.fieldname for df in _masked_fields(party_meta)}
 			if "supplier_name" in party_masks:
 				masked.update(
 					c["sql_column"] for c in columns if c["fieldname"] in {"party_name", "supplier_name"}
@@ -230,6 +249,24 @@ class ReportSource:
 		)
 		hooks = frappe.get_hooks("permission_query_conditions") or {}
 		doc_hooks = frappe.get_hooks("has_permission") or {}
+		# Match restrictions on the source DocType's links, not only links the
+		# report happened to include. Otherwise fresh inspection can bless old
+		# rows after a Branch/Cost Center restriction was added.
+		linked_types = {
+			df.options for df in ref_meta.get_link_fields() if not df.get("ignore_user_permissions")
+		}
+		user_permissions = get_user_permissions(self.user)
+		linked_matches = {
+			dt: [
+				permission
+				for permission in user_permissions.get(dt, [])
+				if permission.get("applicable_for") in (None, "", self.report.ref_doctype)
+			]
+			for dt in linked_types
+		}
+		unrepresented_restrictions = any(
+			linked_matches.get(dt) and dt not in static | dynamic_types for dt in linked_types
+		)
 		for dt in static | dynamic_types:
 			deadline.check()
 			if self.user == "Administrator":
@@ -246,7 +283,8 @@ class ReportSource:
 				self.proof_targets.add(dt)
 		ref_perms = get_role_permissions(ref_meta, self.user)
 		if self.user != "Administrator" and (
-			ref_perms.get("if_owner", {}).get("report")
+			unrepresented_restrictions
+			or ref_perms.get("if_owner", {}).get("report")
 			or ref_perms.get("if_owner", {}).get("read")
 			or hooks.get(self.report.ref_doctype)
 			or hooks.get("*")
@@ -271,15 +309,23 @@ class ReportSource:
 		self.proof_columns = [columns[i] for i in sorted(fields)]
 		if len({c["fieldname"] for c in self.proof_columns}) != len(self.proof_columns):
 			raise PermissionDeniedError("Stored report permission columns are ambiguous. Regenerate it.")
-		if any(c["sql_column"] in masked for c in self.proof_columns):
-			raise PermissionDeniedError("Stored report access depends on a masked identity. Regenerate it.")
-		self.context = {"masked_columns": sorted(masked), "proof_fields": sorted(fields)}
+		if any(c["sql_column"] in masked | denied for c in self.proof_columns):
+			raise PermissionDeniedError(
+				"Stored report access depends on an unreadable identity. Use a report with permitted identity columns."
+			)
+		self.context = {
+			"masked_columns": sorted(masked),
+			"denied_columns": sorted(denied),
+			"proof_fields": sorted(fields),
+		}
 		policy = {
 			"roles": sorted(frappe.get_roles(self.user)),
-			"user_permissions": get_user_permissions(self.user),
+			"user_permissions": user_permissions,
 			"match_filters": match_filters,
 			"targets": sorted(self.proof_targets),
 			"masked": sorted(masked),
+			"denied": sorted(denied),
+			"linked_match_filters": linked_matches,
 		}
 		self.version = hashlib.sha256(
 			_canonical(
