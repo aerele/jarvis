@@ -307,7 +307,7 @@ describe("PWA HolidayStage", () => {
 		expect(made[0].settle).toHaveBeenCalledWith("early");
 	});
 
-	it("a tap on the mark at rest plays the scene again with the starters showing", async () => {
+	it("a tap on the mark at rest plays the scene again, hiding the starters until it is over", async () => {
 		await today_is(answer());
 		const { mod, made } = fakeScenes();
 		mountStage();
@@ -318,8 +318,11 @@ describe("PWA HolidayStage", () => {
 		await flushPromises();
 		expect(mod.play).toHaveBeenCalledTimes(2);
 		expect(made[1].opts.replay).toBe(true);
-		expect(cardsHidden()).toBe(false);
+		expect(cardsHidden()).toBe(true); // the floor row stands in their band
 		expect(api.recordHolidayShown).toHaveBeenCalledTimes(1); // a replay is uncounted
+		made[1].opts.onBeat("settle", "end");
+		await flushPromises();
+		expect(cardsHidden()).toBe(false);
 	});
 
 	it("leaves nothing behind when the screen goes away mid-scene", async () => {

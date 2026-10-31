@@ -10,9 +10,10 @@
 //
 // Phases: pending (the scene may still play: cards hidden, normal greeting) -> playing ->
 // rest. Or pending -> rest at once when the answer is no, there is no room, the deadline
-// passes or the art will not load. A scene never restarts and never hides the cards again: the
-// replay on the mark runs as "replaying", with the cards showing. A replay tapped while the
-// last scene is still fading out waits for it (one tap is kept).
+// passes or the art will not load. A scene never restarts on its own. The replay on the mark runs
+// as "replaying" and hides the cards like the first play (the floor row stands in their band, so
+// they would be under the art), then brings them back at rest. A replay tapped while the last
+// scene is still fading out waits for it (one tap is kept).
 //
 // A tab opened hidden does not begin until it is shown, so a day's showing is not spent on
 // a scene nobody sees. `reason` says why the scene is or is not playing, for support.
@@ -72,7 +73,7 @@ export function createHolidayScene({
 	// Why the scene is or is not playing: loaded | load-failed | deadline | declined | no-room |
 	// threw | hidden (null until something is known).
 	const reason = ref(null);
-	const cardsHidden = computed(() => phase.value === "pending" || phase.value === "playing");
+	const cardsHidden = computed(() => phase.value !== "rest" && phase.value !== "idle");
 
 	let scene = null;
 	// Every scene started, kept after it is done: one that settled early still has the smile's
@@ -121,9 +122,7 @@ export function createHolidayScene({
 
 	function onSettle(mode) {
 		if (phase.value !== "playing" && phase.value !== "replaying") return;
-		if (phase.value === "playing") {
-			fadeMs.value = FADE_MS[mode] ?? 0;
-		}
+		fadeMs.value = FADE_MS[mode] ?? 0;
 		phase.value = "rest";
 	}
 
@@ -154,6 +153,9 @@ export function createHolidayScene({
 		Promise.all([load(a.design), fonts]).then(([mod]) => {
 			if (mine !== run || phase.value !== "pending") return;
 			if (!mod) return giveUp(mine, "early", "load-failed");
+			// The page may have moved while the art loaded (starters arriving, a rotation): ask
+			// once more, before the showing is used.
+			if (!fits()) return giveUp(mine, "early", "no-room");
 			Promise.resolve()
 				.then(recordShown)
 				.then(
@@ -198,7 +200,8 @@ export function createHolidayScene({
 		clearTimeout(deadline);
 		deadline = null;
 		stopWaiting();
-		spentFor = answer();
+		// No room is a fact about this screen, not an answer: the next new chat may have room.
+		if (why !== "no-room") spentFor = answer();
 		fadeMs.value = 0;
 		reason.value = why;
 		rest();
@@ -263,7 +266,7 @@ export function createHolidayScene({
 		if (scene) scene.settle(mode);
 		if (phase.value === was) {
 			// A scene that did not announce its ending still ends here.
-			if (was === "playing") fadeMs.value = FADE_MS[mode] ?? 0;
+			fadeMs.value = FADE_MS[mode] ?? 0;
 			phase.value = "rest";
 		}
 	}
@@ -278,6 +281,15 @@ export function createHolidayScene({
 	function onPointerDown() {
 		swallowClick = phase.value !== "rest" && phase.value !== "idle";
 		queuedReplay = false; // a new gesture; an older waiting click is forgotten
+		settle("early");
+	}
+
+	/**
+	 * A key anywhere ends the scene. Enter or Space on the mark (`startsMarkClick`) is also the
+	 * start of the click that would replay it, so that click is swallowed like a tap's.
+	 */
+	function onKeyDown(startsMarkClick = false) {
+		if (startsMarkClick) swallowClick = phase.value !== "rest" && phase.value !== "idle";
 		settle("early");
 	}
 
@@ -355,6 +367,7 @@ export function createHolidayScene({
 		settle,
 		relayout,
 		onPointerDown,
+		onKeyDown,
 		takeEndingTap,
 		replay,
 		stop,
