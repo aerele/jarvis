@@ -147,18 +147,22 @@ class TestStoredReportPermissions(unittest.TestCase):
 			# restriction, though the saved columns have no Territory; one pinned elsewhere is not.
 			frappe.set_user("Administrator")
 			frappe.delete_doc("User Permission", restriction.name, force=True, ignore_permissions=True)
+			# A fresh CI site has no "All Territories" root, so make our own group.
+			gate_root = save(
+				{"doctype": "Territory", "territory_name": "Gate root " + tag, "is_group": 1}
+			).name
 			allowed = save(
 				{
 					"doctype": "Territory",
 					"territory_name": "Gate in " + tag,
-					"parent_territory": "All Territories",
+					"parent_territory": gate_root,
 				}
 			).name
 			other = save(
 				{
 					"doctype": "Territory",
 					"territory_name": "Gate out " + tag,
-					"parent_territory": "All Territories",
+					"parent_territory": gate_root,
 				}
 			).name
 			save(
