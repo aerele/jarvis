@@ -221,6 +221,19 @@ describe("PWA HolidayMark", () => {
 			expect(wrapper.find(".jv-mood-happy").exists()).toBe(false);
 		});
 
+		it("is labelled for what the tap does: the scene on a scene day, the greeting otherwise", async () => {
+			await today_is(answer({ scene: true }));
+			await mountMark({ stage: stage({ face: true, item: true }) });
+			expect(wrapper.get("button.jvh-button").attributes("aria-label")).toBe(
+				"Replay the holiday scene"
+			);
+			wrapper.unmount();
+			await mountMark();
+			expect(wrapper.get("button.jvh-button").attributes("aria-label")).toBe(
+				"Show the greeting again"
+			);
+		});
+
 		it("keeps the upgrade hold's face and wears nothing in it", async () => {
 			await today_is(answer({ scene: true }));
 			await mountMark({

@@ -400,14 +400,17 @@ onUnmounted(() => {
 	<!-- On a scene day the stage plays the holiday scene over the hero and hides the starters
 	     meanwhile; any other day it hands the slot straight back (see HolidayStage.vue). -->
 	<HolidayStage
-		:greeting="greeting"
-		:words="words"
 		:hold-active="holdActive"
 		:has-draft="hasDraft"
 		:composer-top="composerTop"
 		v-slot="stage"
 	>
-		<div class="jv-hero" :class="{ 'is-stage': stage.active }" :style="heroRoom">
+		<div
+			class="jv-hero"
+			:class="{ 'is-stage': stage.active }"
+			:style="heroRoom"
+			data-hs="hero"
+		>
 			<HolidayMark
 				data-hs="mark"
 				:size="56"
@@ -781,11 +784,6 @@ onUnmounted(() => {
 	gap: 14px;
 	padding: 18px;
 }
-/* The name is arbitrary-length, so this line has to survive "Administrator"
-   as well as "Jo". At 24px/600 the longest common case measured 326px against
-   324px of usable width, so it overflowed its own padding and sat edge to edge.
-   Smaller and lighter, capped short of the padding, and balanced so a wrap
-   splits evenly instead of dropping one orphaned word. */
 .jv-hero.is-stage {
 	position: relative;
 	z-index: 2;
@@ -811,6 +809,11 @@ onUnmounted(() => {
 		transition: none !important;
 	}
 }
+/* The name is arbitrary-length, so this line has to survive "Administrator"
+   as well as "Jo". At 24px/600 the longest common case measured 326px against
+   324px of usable width, so it overflowed its own padding and sat edge to edge.
+   Smaller and lighter, capped short of the padding, and balanced so a wrap
+   splits evenly instead of dropping one orphaned word. */
 .jv-greeting {
 	margin: 0;
 	max-width: 20ch;
