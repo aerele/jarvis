@@ -236,10 +236,12 @@ def _log_pinned_oneshot(run_id: str, model: str | None, provider: str | None) ->
 	)
 
 
-# Scopes the chat path needs: operator.write for sessions.create + agent;
-# operator.admin so the same connection can also read state (status snapshots,
-# etc.) without re-pairing.
-_REQUESTED_SCOPES = ["operator.write", "operator.admin"]
+# Scopes the chat path asks for: read for state (history, status snapshots) and write
+# for sessions.create / chat.send / agent. Never operator.admin or operator.pairing: the
+# site must not hold a credential that can do owner-only things. The four owner-only
+# actions (sessions.delete, inherited tool policy, llm-task, canvas) go through signed
+# plugin routes instead (jarvis.chat.plugin_routes).
+_REQUESTED_SCOPES = ["operator.read", "operator.write"]
 _CLIENT_ID = "gateway-client"
 _CLIENT_MODE = "backend"
 _ROLE = "operator"
@@ -1346,11 +1348,35 @@ class AgentSession:
 		(transcript is archived gateway-side first; ``deleteTranscript``
 		defaults true there). The gateway refuses to delete the agent's
 		main session - callers treat that error as a skip, never retry."""
-		self._request(
-			"sessions.delete",
-			{"key": session_key},
-			timeout_s=timeout_s,
-		)
+		# sessions.delete is owner-only, so it goes through the plugin's signed route.
+		# The plugin vouches the key with this site, so the caller must delete its own
+		# row for the key only AFTER this returns. timeout_s is kept for callers; the
+		# route has its own bounded timeout.
+		import frappe
+
+		from jarvis.chat import plugin_routes
+
+		agent_url = frappe.db.get_single_value("Jarvis Settings", "agent_url") or ""
+		try:
+			plugin_routes.delete_session(agent_url, session_key)
+		except plugin_routes.PluginRouteError as e:
+			raise AgentUnreachableError(f"sessions.delete failed: {e}") from e
+
+	def patch_session_policy(self, session_key: str, patch: dict) -> None:
+		"""Set a session's inherited tool policy (``inheritedTool*`` fields).
+
+		Owner-only on the gateway, so it goes through the plugin's signed
+		``/jarvis/sessions/patch`` route. Only the three policy fields are accepted;
+		plain fields (model, label) stay on ``sessions.patch`` over this socket."""
+		import frappe
+
+		from jarvis.chat import plugin_routes
+
+		agent_url = frappe.db.get_single_value("Jarvis Settings", "agent_url") or ""
+		try:
+			plugin_routes.patch_session_policy(agent_url, session_key, patch)
+		except plugin_routes.PluginRouteError as e:
+			raise AgentUnreachableError(f"sessions.patch failed: {e}") from e
 
 	def set_session_model(
 		self,
@@ -1599,6 +1625,32 @@ class AgentSession:
 				}
 			continue  # delta (cumulative mirror) / unknown chat states: keep waiting
 
+	def _apply_oneshot_model(
+		self,
+		session_key: str,
+		model: str | None,
+		provider: str | None,
+		idempotency_key: str,
+	) -> None:
+		"""Pin a one-shot's model on its session before the ``agent`` RPC.
+
+		The gateway refuses ``model`` / ``provider`` on the ``agent`` RPC for a caller
+		without operator.admin ("provider/model overrides are not authorized"), and this
+		site never holds admin. ``sessions.patch {key, model}`` is allowed with write
+		scope, so the override rides there instead. The ref is the same ``<provider>/<model>``
+		(or bare ``<model>``) form ``_session_model_patch`` sends for chat turns. A provider
+		without a model has nothing to patch and is dropped. The pin still disables the
+		failover chain, so the pinned-run log line is kept."""
+		if not (model or provider):
+			return
+		_log_pinned_oneshot(idempotency_key, model, provider)
+		if model:
+			self.set_session_model(
+				session_key,
+				f"{provider}/{model}" if provider else model,
+				timeout_s=CONNECT_TIMEOUT_SECONDS,
+			)
+
 	def fire_agent(
 		self,
 		session_key: str,
@@ -1615,7 +1667,8 @@ class AgentSession:
 		the result stays session-only. ``_request`` drops the interleaved
 		event frames and returns the agent ack response.
 
-		Setting ``model`` / ``provider`` disables agent's failover for this
+		Setting ``model`` / ``provider`` patches the session first (see
+		``_apply_oneshot_model``) and disables agent's failover for this
 		run - see PINNED_ONESHOT_RUN_PREFIX."""
 		params = {
 			"message": message,
@@ -1623,12 +1676,7 @@ class AgentSession:
 			"deliver": False,
 			"idempotencyKey": idempotency_key,
 		}
-		if model:
-			params["model"] = model
-		if provider:
-			params["provider"] = provider
-		if model or provider:
-			_log_pinned_oneshot(idempotency_key, model, provider)
+		self._apply_oneshot_model(session_key, model, provider, idempotency_key)
 		res = self._request("agent", params, timeout_s=CONNECT_TIMEOUT_SECONDS)
 		return (res.get("payload") or {}).get("runId") or ""
 
@@ -1644,11 +1692,10 @@ class AgentSession:
 	) -> Iterator[dict[str, Any]]:
 		"""Send an `agent` request, then yield parsed events until lifecycle.end.
 
-		`model` / `provider` are optional per-turn overrides. When set, they
-		flow into agent's agent RPC params; the gateway honours them via
-		the operator.admin-scope-gated modelOverride path (our connect already
-		declares that scope), and the run loses its failover chain for the
-		duration - see PINNED_ONESHOT_RUN_PREFIX. When omitted, agent falls
+		`model` / `provider` are optional overrides. They are NOT sent on the agent RPC
+		(that needs operator.admin, which the site no longer holds): they are applied to
+		the session with ``sessions.patch`` first, and the run loses its failover chain
+		for the duration - see PINNED_ONESHOT_RUN_PREFIX. When omitted, agent falls
 		back to agents.defaults.model.primary from agent configuration AND keeps its
 		fallbacks.
 
@@ -1664,18 +1711,13 @@ class AgentSession:
 			"deliver": False,
 			"idempotencyKey": idempotency_key,
 		}
-		if model:
-			params["model"] = model
-		if provider:
-			params["provider"] = provider
 		if attachments:
 			# Native vision input. agent's `agent` handler reads these and
 			# normalizes them to the active provider's image blocks; the flat
 			# {type:"image", mimeType, fileName, content:<base64>} shape is what
 			# its gateway normalizer accepts.
 			params["attachments"] = attachments
-		if model or provider:
-			_log_pinned_oneshot(idempotency_key, model, provider)
+		self._apply_oneshot_model(session_key, model, provider, idempotency_key)
 		agent_id = self._send("agent", params)
 		deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
 

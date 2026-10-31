@@ -70,40 +70,43 @@ class TestPingAgent(FrappeTestCase):
 	def setUp(self):
 		s = frappe.get_single("Jarvis Settings")
 		self._orig_url = s.get("agent_url") or ""
-		self._orig_tok = s.get_password("agent_token", raise_exception=False) or ""
 
 	def tearDown(self):
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", self._orig_url)
-		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_token", self._orig_tok)
 		frappe.db.commit()
 
 	def test_missing_url_returns_config_error(self):
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", "")
-		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_token", "t")
 		frappe.db.commit()
 		out = diagnostics.ping_agent()
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["kind"], "config")
 		self.assertIn("agent_url", out["error"])
 
-	def test_missing_token_returns_config_error(self):
-		# Password fields ignore empty db_set; patch get_password to simulate
-		# the "operator hasn't onboarded yet" state.
+	def test_unpaired_device_returns_config_error(self):
+		# The ping uses the paired device, never the owner token: no device token,
+		# nothing to connect with.
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", "ws://h:1")
 		frappe.db.commit()
-		with patch.object(frappe.get_single("Jarvis Settings").__class__, "get_password", return_value=""):
+		with (
+			patch("jarvis.chat.device.has_paired_token", return_value=False),
+			patch("jarvis.agent_ws.ping") as p,
+		):
 			out = diagnostics.ping_agent()
+		p.assert_not_called()
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["kind"], "config")
-		self.assertIn("agent_token", out["error"])
+		self.assertIn("not paired", out["error"])
 
 	def test_happy_path(self):
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", "ws://h:1")
-		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_token", "t")
 		frappe.db.commit()
-		with patch("jarvis.agent_ws.ping") as p:
+		with (
+			patch("jarvis.chat.device.has_paired_token", return_value=True),
+			patch("jarvis.agent_ws.ping") as p,
+		):
 			out = diagnostics.ping_agent()
-		p.assert_called_once_with("ws://h:1", "t")
+		p.assert_called_once_with("ws://h:1")
 		self.assertTrue(out["ok"])
 		# PART 4 TASK 34-R: the endpoint agent_url is an operator-disclosure surface
 		# and is dropped from the response.
@@ -113,9 +116,11 @@ class TestPingAgent(FrappeTestCase):
 		from jarvis.exceptions import AgentUnreachableError
 
 		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_url", "ws://h:1")
-		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "agent_token", "t")
 		frappe.db.commit()
-		with patch("jarvis.agent_ws.ping", side_effect=AgentUnreachableError("refused")):
+		with (
+			patch("jarvis.chat.device.has_paired_token", return_value=True),
+			patch("jarvis.agent_ws.ping", side_effect=AgentUnreachableError("refused")),
+		):
 			out = diagnostics.ping_agent()
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["kind"], "unreachable")

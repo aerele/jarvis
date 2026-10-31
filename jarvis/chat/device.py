@@ -181,6 +181,15 @@ def has_paired_token(settings_doc=None) -> bool:
 	return bool((s.get_password("chat_device_token", raise_exception=False) or "").strip())
 
 
+def device_bearer(settings_doc=None) -> str:
+	"""The paired chat device token, "" when not paired yet.
+
+	The bearer for the gateway's HTTP media route (a device token is accepted there),
+	so a download never needs the owner token. A pure read: it never pairs."""
+	s = settings_doc or frappe.get_single("Jarvis Settings")
+	return (s.get_password("chat_device_token", raise_exception=False) or "").strip()
+
+
 def _read_credentials() -> ChatDeviceCredentials | None:
 	"""Load creds from Jarvis Settings, or None if any field is missing.
 

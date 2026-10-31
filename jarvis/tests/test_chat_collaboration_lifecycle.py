@@ -166,9 +166,8 @@ class TestCollaborationLifecycle(CommittedCollaborationCase):
 						]
 					}
 				}
-			self.assertEqual(method, "sessions.delete")
-			self.assertEqual(params, {"key": self.bound.session_key, "expectedSessionId": "physical-owned"})
-			return {"ok": True}
+			# sessions.delete is owner-only: it goes through sess.delete_session (plugin route).
+			raise AssertionError(method)
 
 		sess._request.side_effect = request
 		return sess
@@ -179,7 +178,8 @@ class TestCollaborationLifecycle(CommittedCollaborationCase):
 		sess = self.native_session()
 		self.assertTrue(reclaim_runtime(self.bound.name, sess))
 		self.assertTrue(frappe.db.get_value(c.BINDING, self.bound.name, "runtime_retired_at"))
-		self.assertEqual(sess._request.call_args_list[-1].args[0], "sessions.delete")
+		sess.delete_session.assert_called_once_with(self.bound.session_key)
+		self.assertEqual(sess._request.call_args_list[-1].args[0], "sessions.list")
 		self.assertEqual(frappe.db.get_value(c.BINDING, self.bound.name, "actor"), self.bound.actor)
 
 	def test_native_cleanup_refuses_active_or_replaced_runtime(self):

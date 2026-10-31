@@ -261,7 +261,7 @@ def vouch_session(pinned_instance_id: str | None = None) -> dict:
 	key = str(session_key).lower()
 	try:
 		# Strict: a lookup error must never read as "known" (that would be fail-open).
-		known = foreign_session.has_row_for_key(key) or session_claims.is_claimed(key)
+		known = foreign_session.has_row_for_key(key) or session_claims.is_claimed_strict(key)
 	except Exception:
 		frappe.log_error(title="vouch_session: lookup failed")
 		frappe.local.response.http_status_code = 503
@@ -4736,6 +4736,13 @@ def rotate_agent_token() -> dict:
 	# to False; this is defense-in-depth against a future @whitelist
 	# expansion shipping with relaxed defaults.
 	frappe.only_for("System Manager")
+
+	# A site holding a per-tenant callback key no longer holds the owner token, so
+	# rotating it from here would hand the site a key it must not have.
+	from jarvis import _plugin_auth
+
+	if _plugin_auth._callback_key():
+		frappe.throw("Token rotation is handled by Jarvis support.", frappe.PermissionError)
 
 	new_token = secrets.token_hex(32)  # 64 hex chars
 

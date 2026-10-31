@@ -806,6 +806,11 @@ class TestRotateAgentTokenEndpoint(FrappeTestCase):
 		settings = frappe.get_single("Jarvis Settings")
 		settings.db_set("agent_token", "before-rotation-token")
 		frappe.db.commit()
+		# A stored callback key makes rotation support-only; these tests cover the
+		# legacy path (no callback key), whatever the shared e2e2 site holds.
+		patcher = patch("jarvis._plugin_auth._callback_key", return_value="")
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
 	def _call_rotate(self):
 		from jarvis.api import rotate_agent_token

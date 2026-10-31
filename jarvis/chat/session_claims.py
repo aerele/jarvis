@@ -34,3 +34,9 @@ def is_claimed(session_key: str) -> bool:
 	except Exception:
 		frappe.logger("jarvis.session_claims").warning("session claim lookup failed", exc_info=True)
 		return False
+
+
+def is_claimed_strict(session_key: str) -> bool:
+	"""``is_claimed`` for a caller that must not fail open: a cache error RAISES
+	instead of reading as "not claimed", so ``vouch_session`` can answer 503."""
+	return frappe.cache().get(_cache_key(session_key)) is not None

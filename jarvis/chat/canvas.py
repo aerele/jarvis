@@ -120,7 +120,7 @@ def detect_canvas_names(text: str) -> list[str]:
 		name = m.group(1)
 		# Reject path traversal: `_PATH` permits `..` segments, so a reply of
 		# `canvas/../../etc/passwd.html` would otherwise be fetched from the
-		# gateway with the bearer token. Only in-tree canvas paths are allowed.
+		# gateway through the signed route. Only in-tree canvas paths are allowed.
 		if ".." in name.split("/"):
 			continue
 		seen.setdefault(name, None)
@@ -144,19 +144,21 @@ def _http_base(agent_url: str) -> str:
 	return base
 
 
-def fetch_canvas(agent_url: str, token: str, name: str) -> tuple[bytes, str] | None:
-	"""GET one artifact from the gateway (binary-safe). Returns (raw_bytes, type)
-	or None if it can't be fetched."""
-	import requests
+def fetch_canvas(agent_url: str, session_key: str, name: str) -> tuple[bytes, str] | None:
+	"""GET one artifact through the plugin's signed canvas route (binary-safe). Returns
+	(raw_bytes, type) or None if it can't be fetched.
 
-	base = _http_base(agent_url)
-	if not base or not token:
+	The plugin holds the gateway owner token; this site signs the request with its callback
+	key and names the conversation's session key, which the plugin vouches before it reads."""
+	from jarvis.chat import plugin_routes
+
+	if not agent_url or not session_key:
 		return None
-	url = f"{base}{get_profile().canvas_route}{name}"
 	try:
-		# The bearer token must never follow a redirect off the gateway.
-		r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20, allow_redirects=False)
-	except Exception:
+		r = plugin_routes.route_request(
+			agent_url, "GET", plugin_routes.canvas_path(name), session_key, read_timeout_s=20
+		)
+	except plugin_routes.PluginRouteError:
 		return None
 	if 300 <= r.status_code < 400:
 		frappe.log_error(
@@ -169,7 +171,7 @@ def fetch_canvas(agent_url: str, token: str, name: str) -> tuple[bytes, str] | N
 	return r.content, _type_for(name)
 
 
-def _gateway_fakes_missing_canvas_as_ok(agent_url: str, token: str) -> bool:
+def _gateway_fakes_missing_canvas_as_ok(agent_url: str, session_key: str) -> bool:
 	"""True only when the gateway is confirmed to answer EVERY canvas path with
 	HTTP 200, including one that cannot possibly exist.
 
@@ -189,16 +191,19 @@ def _gateway_fakes_missing_canvas_as_ok(agent_url: str, token: str) -> bool:
 	"""
 	import uuid
 
-	import requests
+	from jarvis.chat import plugin_routes
 
-	base = _http_base(agent_url)
-	if not base or not token:
+	if not agent_url or not session_key:
 		return False
 	sentinel = f"documents/jarvis-canvas-probe-{uuid.uuid4().hex}/index.html"
-	url = f"{base}{get_profile().canvas_route}{sentinel}"
 	try:
-		r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10, allow_redirects=False)
-	except Exception:
+		r = plugin_routes.route_request(
+			agent_url, "GET", plugin_routes.canvas_path(sentinel), session_key, read_timeout_s=10
+		)
+	except plugin_routes.PluginRouteError:
+		return False
+	# 401/403 is the plugin refusing this site, not the runtime's catch-all: inconclusive.
+	if r.status_code in (401, 403):
 		return False
 	return r.status_code != 404
 
@@ -258,16 +263,16 @@ def persist_canvases(
 	assistant_msg_name: str,
 	content: str,
 	agent_url: str,
-	token: str,
+	session_key: str,
 ) -> list[dict]:
-	"""Detect artifacts referenced in the assistant reply, fetch each from the
-	gateway, save as private Files, stamp the message's ``canvas`` JSON field,
+	"""Detect artifacts referenced in the assistant reply, fetch each through the plugin's
+	canvas route (signed for the conversation's ``session_key``), save as private Files, stamp the message's ``canvas`` JSON field,
 	strip the dead links, and return ``[{name, title, type, file_url}]``."""
 	names = detect_canvas_names(content)
 	if not names:
 		return []
 
-	if _gateway_fakes_missing_canvas_as_ok(agent_url, token):
+	if _gateway_fakes_missing_canvas_as_ok(agent_url, session_key):
 		frappe.log_error(
 			title="chat canvas: gateway fallback detected",
 			message=(
@@ -293,7 +298,7 @@ def persist_canvases(
 
 	items: list[dict] = []
 	for name in names:
-		fetched = fetch_canvas(agent_url, token, name)
+		fetched = fetch_canvas(agent_url, session_key, name)
 		if not fetched:
 			continue
 		body, typ = fetched
