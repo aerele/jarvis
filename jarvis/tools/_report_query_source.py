@@ -81,6 +81,61 @@ def _visible_names(doctype, names, deadline):
 		return set()
 
 
+def _filter_values(value):
+	"""The names a stored filter value pins (a string, or a list for a MultiSelectList);
+	empty when it is unset or any entry is not a non-empty string."""
+	values = [value] if isinstance(value, str) else list(value) if isinstance(value, list | tuple) else []
+	return values if all(isinstance(v, str) and v for v in values) else []
+
+
+def _pinned_restrictions(linked_matches, filter_defs, stored_filters, ref_links, group_values):
+	"""The restricted doctypes the stored run was pinned inside. A doctype is pinned only
+	when the report has at least one Link filter to it whose fieldname is that same link
+	on the report's DocType (``ref_links``: fieldname -> options), and EVERY such filter's
+	stored value is set, is one the user may use (``linked_matches``: their User
+	Permissions for it, tree descendants included) and names no tree group node
+	(``group_values``), since a group value can widen the rows to descendants a
+	hide-descendants permission excludes. Anything else is not credited (fail closed)."""
+	pinned = set()
+	for doctype, matches in linked_matches.items():
+		permitted = {permission.get("doc") for permission in matches or []}
+		pins = [
+			definition
+			for definition in filter_defs
+			if definition.get("fieldtype") == "Link"
+			and definition.get("options") == doctype
+			and ref_links.get(definition.get("fieldname")) == doctype
+		]
+		if not pins:
+			continue
+		for definition in pins:
+			values = _filter_values(stored_filters.get(definition.get("fieldname")))
+			if not values or not permitted.issuperset(values) or group_values(doctype, values):
+				break
+		else:
+			pinned.add(doctype)
+	return pinned
+
+
+def _group_values(doctype, values):
+	"""The tree group nodes among ``values``; none for a non-tree doctype. The values are
+	already within the user's permitted set, so the permission-aware list sees them; an
+	error counts every value as a group so the restriction stays uncredited."""
+	if not frappe.get_meta(doctype).is_tree:
+		return set()
+	try:
+		return set(
+			frappe.get_list(
+				doctype,
+				filters={"name": ["in", list(values)], "is_group": 1},
+				pluck="name",
+				limit_page_length=0,
+			)
+		)
+	except frappe.PermissionError:
+		return set(values)
+
+
 class ReportSource:
 	def __init__(self, name, *, version=None):
 		self.name = name
@@ -95,6 +150,7 @@ class ReportSource:
 		self.proof_columns = []
 		self.proof_targets = set()
 		self.framework_filter = False
+		self.filter_defs = []
 		self.meta = self._metadata()
 		if self.meta.status != "Completed":
 			raise InvalidArgumentError(
@@ -150,6 +206,7 @@ class ReportSource:
 		try:
 			self.report = get_report_doc(self.meta.report_name)
 			metadata = get_report_filters(self.meta.report_name)
+			self.filter_defs = metadata.get("filters") or []
 			validate_filters_permissions(
 				self.meta.report_name, self.filters, self.user, js_filters=metadata.get("filters") or []
 			)
@@ -265,8 +322,14 @@ class ReportSource:
 			]
 			for dt in linked_types
 		}
+		# A run made with a permitted value for the restricted doctype (Company on Accounts
+		# Receivable) is inside the user's restriction without a column for it.
+		ref_links = {df.fieldname: df.options for df in ref_meta.get_link_fields()}
+		pinned = _pinned_restrictions(
+			linked_matches, self.filter_defs, self.filters, ref_links, _group_values
+		)
 		unrepresented_restrictions = any(
-			linked_matches.get(dt) and dt not in static | dynamic_types for dt in linked_types
+			linked_matches.get(dt) and dt not in static | dynamic_types | pinned for dt in linked_types
 		)
 		for dt in static | dynamic_types:
 			deadline.check()
