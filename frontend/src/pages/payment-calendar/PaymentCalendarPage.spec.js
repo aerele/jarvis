@@ -96,7 +96,7 @@ describe("Native Payment Calendar page", () => {
 		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
 		late.resolve(ok(fresh));
 		await flushPromises();
-		expect(wrapper.text()).toContain("Refreshes automatically every 5 minutes");
+		expect(wrapper.text()).toContain("Updates automatically while active");
 		expect(wrapper.text()).not.toContain("Snapshot expired");
 	});
 	it("keeps native labelled checkbox selection and cancel/apply behavior", async () => {
