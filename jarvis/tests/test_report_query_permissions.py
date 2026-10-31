@@ -194,7 +194,9 @@ class TestStoredReportPermissions(unittest.TestCase):
 				if permitted:
 					self.assertIn("version", query_report(run.name))
 				else:
-					with self.assertRaises(PermissionDeniedError):
+					# Frappe's own filter check refuses an out-of-scope value first
+					# (ValidationError); an unpinned run is refused by the restriction gate.
+					with self.assertRaises((PermissionDeniedError, frappe.ValidationError)):
 						query_report(run.name)
 		finally:
 			frappe.set_user("Administrator")
