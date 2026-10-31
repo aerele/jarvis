@@ -609,27 +609,24 @@ describe("Payment Calendar state and async boundaries", () => {
 			clock.mockRestore();
 		}
 	});
-	it("pauses idle report refreshes, clears expired figures and resumes once on interaction", async () => {
+	it("keeps a visible wall display fresh without input and stops on disposal", async () => {
 		monthlyApi();
 		await model.initialize();
-		await vi.advanceTimersByTimeAsync(10 * 60000);
+		const initialRequests = api.requestSnapshot.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(30 * 60000);
 		const requests = api.requestSnapshot.mock.calls.length;
-		await vi.advanceTimersByTimeAsync(20 * 60000);
-		expect(api.requestSnapshot).toHaveBeenCalledTimes(requests);
-		expect(model.snapshot.value).toBeNull();
-		expect(model.detail.value).toBeNull();
-		expect(model.upcoming.value).toEqual([]);
-		expect(model.phase.value).toBe("expired");
-		document.dispatchEvent(new Event("click"));
-		await flushPromises();
-		expect(api.requestSnapshot).toHaveBeenCalledTimes(requests + 1);
+		expect(requests).toBeGreaterThan(initialRequests + 5);
+		expect(model.snapshot.value).not.toBeNull();
+		expect(Date.parse(model.snapshot.value.expires_at)).toBeGreaterThan(Date.now());
+		expect(model.detail.value).not.toBeNull();
 		expect(model.phase.value).toBe("ready");
+		expect(model.notice.value).not.toContain("inactive");
 		scope.stop();
 		document.dispatchEvent(new Event("click"));
 		document.dispatchEvent(new Event("keydown"));
 		document.dispatchEvent(new Event("wheel"));
 		await vi.advanceTimersByTimeAsync(20 * 60000);
-		expect(api.requestSnapshot).toHaveBeenCalledTimes(requests + 1);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(requests);
 	});
 	it("keeps refreshing while the user interacts without duplicating accepted jobs", async () => {
 		monthlyApi();
