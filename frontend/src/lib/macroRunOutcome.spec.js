@@ -9,6 +9,13 @@ import {
 	bulkDeleteToast,
 	deleteGuard,
 	isLiveRun,
+	LIVE_RUN,
+	waitingLabel,
+	progressChangesLastRun,
+	progressStatus,
+	stopTooltip,
+	stoppedToast,
+	STOP_WHILE_WAITING,
 	SLOW_DELETE_MS,
 } from "./macroRunOutcome.js";
 
@@ -99,6 +106,28 @@ describe("lastRunCell: the Macros list's Last run cell", () => {
 		expect(lastRunCell({ lastRun: { status: "waiting_capacity" }, ...labels }).text).toBe(
 			"Waiting"
 		);
+	});
+
+	it("a run waiting for a report names the reports and since when", () => {
+		const lastRun = {
+			status: "waiting_report",
+			waiting_reports: ["Stock Ageing", "Sales Register"],
+		};
+		const cell = lastRunCell({ lastRun, ...labels, waitingSince: "20 minutes ago" });
+		expect(cell.text).toBe("Waiting for report: Stock Ageing, Sales Register");
+		expect(cell.hint).toBe(
+			"Waiting for report: Stock Ageing, Sales Register. Waiting since 20 minutes ago"
+		);
+		expect(cell.tone).toBe("info");
+	});
+
+	it("a run waiting for a report that is not named, or has no start, still says so", () => {
+		const cell = lastRunCell({ lastRun: { status: "waiting_report" }, ...labels });
+		expect(cell).toEqual({
+			text: "Waiting for report",
+			hint: "Waiting for report",
+			tone: "info",
+		});
 	});
 
 	it("an unknown status is shown as it is, never as a success", () => {
@@ -199,6 +228,62 @@ describe("macroDoneSignal: what a macro:done event is worth telling the user", (
 		expect(
 			macroDoneSignal(done({ status: "stopped", error: "Step 1 is waiting…" }))
 		).toBeNull();
+	});
+});
+
+describe("a run waiting for a report", () => {
+	const waiting = { status: "waiting_report", waiting_reports: ["Stock Ageing"] };
+
+	it("is live: LIVE_RUN holds it, so isLiveRun and the delete warning know it", () => {
+		expect(LIVE_RUN).toContain("waiting_report");
+		expect(isLiveRun(waiting)).toBe(true);
+		expect(deleteWarning([waiting])).toBe("This macro is running. Deleting it stops the run.");
+	});
+
+	it("the label names the reports", () => {
+		expect(waitingLabel(waiting)).toBe("Waiting for report: Stock Ageing");
+		expect(waitingLabel({ status: "waiting_report", waiting_reports: [] })).toBe(
+			"Waiting for report"
+		);
+		expect(waitingLabel(null)).toBe("Waiting for report");
+	});
+
+	it("the form's notice is the label with since when, and is not an error", () => {
+		const line = lastRunLine(waiting, { waitingSince: "5 minutes ago" });
+		expect(line.title).toBe("Waiting for report: Stock Ageing");
+		expect(line.text).toBe(
+			"Waiting since 5 minutes ago. Jarvis continues this run when the report is ready."
+		);
+		expect(line.tone).toBe("info");
+		expect(lastRunLine(waiting).text).toBe(
+			"Jarvis continues this run when the report is ready."
+		);
+	});
+});
+
+describe("progressChangesLastRun: when a macro:progress event makes a page ask again", () => {
+	it("asks when the page knows of no live run: one just started", () => {
+		for (const last of [null, undefined, { status: "completed" }, { status: "failed" }])
+			expect(progressChangesLastRun(last, { status: "running" })).toBe(true);
+	});
+
+	it("does not ask for the later steps of a run the page already shows as running", () => {
+		expect(progressChangesLastRun({ status: "running" }, { status: "running", step: 2 })).toBe(
+			false
+		);
+		expect(progressChangesLastRun({ status: "running" }, { step: 3 })).toBe(false);
+	});
+
+	it("asks when a live run moves between live states, either way", () => {
+		expect(progressChangesLastRun({ status: "running" }, { status: "waiting_report" })).toBe(
+			true
+		);
+		expect(progressChangesLastRun({ status: "waiting_report" }, { status: "running" })).toBe(
+			true
+		);
+		expect(
+			progressChangesLastRun({ status: "waiting_report" }, { status: "waiting_report" })
+		).toBe(false);
 	});
 });
 
@@ -377,5 +462,33 @@ describe("deleteGuard: one delete at a time, with a note while a slow one is goi
 			})
 		).rejects.toThrow("boom");
 		expect(guard.isBusy()).toBe(false);
+	});
+});
+
+describe("a macro:progress event's status", () => {
+	it("passes a waiting run through instead of calling it running", () => {
+		expect(progressStatus({ status: "waiting_report" })).toBe("waiting_report");
+	});
+
+	it("is running for every other progress event, and for an older server that sends none", () => {
+		expect(progressStatus({ status: "running" })).toBe("running");
+		expect(progressStatus({})).toBe("running");
+		expect(progressStatus(null)).toBe("running");
+		expect(progressStatus(undefined)).toBe("running");
+	});
+});
+
+describe("stopping a run that waits for a report", () => {
+	it("says the report keeps generating, only for a waiting run", () => {
+		expect(stopTooltip("waiting_report")).toBe(`Stop. ${STOP_WHILE_WAITING}`);
+		expect(stoppedToast("waiting_report")).toBe(`Run stopped. ${STOP_WHILE_WAITING}`);
+		for (const status of ["running", "queued", "waiting_capacity"]) {
+			expect(stopTooltip(status), status).toBe("Stop");
+			expect(stoppedToast(status), status).toBe("Run stopped");
+		}
+	});
+
+	it("has no em-dash in the words", () => {
+		expect(STOP_WHILE_WAITING).not.toContain("\u2014");
 	});
 });

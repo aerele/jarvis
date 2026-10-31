@@ -743,6 +743,20 @@
 							>
 							<button class="jv-macrobar-stop" @click="stopMacro">Stop</button>
 						</template>
+						<template v-else-if="macroRun.status === 'waiting_report'">
+							<span class="jv-macrobar-dot"></span>
+							<span class="jv-macrobar-txt"
+								>Step {{ macroRun.step }}/{{ macroRun.total }}:
+								{{ macroRun.label || "Waiting for report" }}</span
+							>
+							<button
+								class="jv-macrobar-stop"
+								:title="STOP_WHILE_WAITING"
+								@click="stopMacro"
+							>
+								Stop
+							</button>
+						</template>
 						<template v-else-if="macroRun.status === 'completed'"
 							><span class="jv-macrobar-chip">✓ Macro completed</span></template
 						>
@@ -4565,6 +4579,7 @@ import {
 	turnToolNames,
 } from "@/lib/liveTurn";
 import { mergeCanvasItems } from "@/lib/canvasMerge";
+import { progressStatus, STOP_WHILE_WAITING } from "@/lib/macroRunOutcome";
 import { candidateTextFor } from "@/lib/candidateSnap";
 import { pickGreeting } from "@/lib/greeting";
 import { dashboardForConversation } from "@/api/dashboards";
@@ -5556,7 +5571,7 @@ function patchMacroRunRow(p, done) {
 	const row = macroRuns.value.find((r) => r.name === p.macro_run);
 	if (row) {
 		if (p.step != null) row.current_step = p.step;
-		row.status = done ? p.status || "completed" : "running";
+		row.status = done ? p.status || "completed" : progressStatus(p);
 	}
 	loadMacroRunStats();
 }
@@ -11244,7 +11259,7 @@ function onEvent(p) {
 				step: p.step || 0,
 				total: p.total || (macroRun.value && macroRun.value.total) || 0,
 				label: p.label || "",
-				status: "running",
+				status: progressStatus(p),
 			};
 		}
 		patchMacroRunRow(p, false); // live-advance the open run-history dashboard
