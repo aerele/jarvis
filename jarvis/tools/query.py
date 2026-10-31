@@ -217,6 +217,10 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	if more_rows and spec.get("limit"):
 		result["more_rows"] = True
 		result["note"] = f"Showing the requested first {limit} rows; more rows match."
+	from jarvis.tools import _private_output
+
+	if _private_output.is_private():
+		return result
 	from jarvis.tools._result_guard import enforce_result_budget
 
 	_, budget_event = enforce_result_budget(result, tool="query")
