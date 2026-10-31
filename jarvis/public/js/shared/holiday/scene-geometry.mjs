@@ -10,6 +10,8 @@
 // the page scales a unit to s = min(width / 800, 1.25) px. Every "units" in the scenes' code
 // and comments means these.
 
+import { WORN_OVERHANG } from "./worn-room.mjs";
+
 // The toran: a thread sagging TORAN.sag units between hooks at y = TORAN.top, hung with
 // blooms (radius TORAN.bloom) and mango leaves (TORAN.leaf tall). It drops in from above
 // and overshoots TORAN.overshoot units before settling.
@@ -246,24 +248,9 @@ export const sceneHeroTop = (design, s) =>
   Object.hasOwn(HERO_TOP_UNITS, design) ? HERO_TOP_UNITS[design] * s : 0;
 
 // ---- the worn item above the mark ------------------------------------------------------------
-// The item the mark wears (hat, umbrella, crescent ...) is drawn on a layer over the mark and
-// hangs past the tile's top. The page keeps all of it, plus WORN_GAP_PX, below the top of the
-// stage: while the hero is centred, as it glides up and at rest. The real box is measured from
-// the drawn layer when there is one (HolidayStage.vue); this table is what the page uses before
-// the layer is mounted, and its floor afterwards. Units are the 56-unit tile space the worn
-// art is drawn in: how far the item reaches above the tile's top, rounded up with a little
-// room for the reactions (worn-overhang.test.mjs works the real reach out from the markup and
-// the reaction keyframes and holds each number to it, so the table cannot drift from worn.mjs).
-// A design with no entry wears nothing above the tile (its item sits on the tile or beside it).
-export const WORN_OVERHANG = {
-  christmas: 36,
-  newyear: 22.5,
-  eid: 19.5,
-  onam: 19.5,
-  holi: 19,
-};
-
-export const WORN_GAP_PX = 12; // room kept between the item's top and the stage's top
+// The item the mark wears (hat, umbrella, crescent ...) hangs past the tile's top; its
+// numbers (WORN_OVERHANG, WORN_GAP_PX) live in worn-room.mjs and are re-exported here.
+export { WORN_GAP_PX, WORN_OVERHANG } from "./worn-room.mjs";
 
 /** How far (tile units) the design's item reaches above the tile's top. */
 export const wornOverhangUnits = (design) =>
