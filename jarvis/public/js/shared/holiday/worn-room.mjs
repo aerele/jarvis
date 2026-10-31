@@ -20,7 +20,6 @@ export const WORN_OVERHANG = {
 };
 
 export const WORN_GAP_PX = 12; // room kept between the item's top and the stage's top
-<<<<<<< HEAD
 
 // The worn art is drawn in a tile of this many units, whatever size the tile is on the page.
 export const TILE_UNITS = 56;
@@ -29,5 +28,3 @@ export const TILE_UNITS = 56;
 export function tileUnits(px, tilePx) {
   return (px * TILE_UNITS) / tilePx;
 }
-=======
->>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
