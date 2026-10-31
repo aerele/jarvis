@@ -8,6 +8,9 @@ import {
 	siteToday,
 } from "@/lib/paymentCalendar/dates";
 
+const IDLE_AFTER_MS = 10 * 60 * 1000;
+const IDLE_NOTICE = "Automatic refresh paused while inactive. Use Refresh to update.";
+
 const emptyPages = () => ({
 	Payable: { rows: 1, parties: 1 },
 	Receivable: { rows: 1, parties: 1 },
@@ -96,6 +99,8 @@ export function usePaymentCalendar({
 		recoveries = 0;
 	let preferencePending = null,
 		preferenceDraining = false;
+	let lastActivityAt = Date.now();
+	const recentlyActive = () => Date.now() - lastActivityAt < IDLE_AFTER_MS;
 	const handledMidnights = new Set();
 	const current = (token) => !disposed && generation === token;
 	const sameSelection = (value) =>
@@ -276,7 +281,10 @@ export function usePaymentCalendar({
 	async function refresh({ automatic = false, background = false, month: requestedMonth } = {}) {
 		if (!company.value || disposed || (automatic && (refreshing.value || floorSaving.value)))
 			return;
-		if (!automatic) recoveries = 0;
+		if (!automatic) {
+			recoveries = 0;
+			lastActivityAt = Date.now();
+		}
 		const preserve =
 			background && !!snapshot.value && Date.parse(snapshot.value.expires_at) > Date.now();
 		const keepLayout = background && !!layout.value;
@@ -319,6 +327,8 @@ export function usePaymentCalendar({
 				refreshing.value = false;
 				waitingForWorker.value = false;
 				refreshIssue.value = safeError(result);
+				detailLoading.value = false;
+				upcomingLoading.value = false;
 				return;
 			}
 			pollTimer = setTimeout(() => {
@@ -469,10 +479,11 @@ export function usePaymentCalendar({
 				// Keep the replacement job alive, but never display expired balances.
 				clearFinance();
 				phase.value = "running";
-			} else if (document.hidden || floorSaving.value) {
+			} else if (document.hidden || floorSaving.value || !recentlyActive()) {
 				clearFinance();
 				phase.value = "expired";
 				resumeRefresh = true;
+				if (!recentlyActive()) notice.value = IDLE_NOTICE;
 			} else {
 				clearFinance();
 				void refresh({ automatic: true, background: true });
@@ -492,6 +503,10 @@ export function usePaymentCalendar({
 	}
 	function checkClock() {
 		if (disposed || document.hidden || refreshing.value || floorSaving.value) return;
+		if (!recentlyActive()) {
+			if (snapshot.value || resumeRefresh) notice.value = IDLE_NOTICE;
+			return;
+		}
 		if (!snapshot.value) {
 			if (phase.value === "expired" && resumeRefresh)
 				void refresh({ automatic: true, background: true });
@@ -699,16 +714,28 @@ export function usePaymentCalendar({
 		}
 	}
 
-	window.addEventListener("focus", checkClock);
-	document.addEventListener("visibilitychange", checkClock);
+	function onActivity() {
+		if (disposed || document.hidden) return;
+		lastActivityAt = Date.now();
+		if (notice.value === IDLE_NOTICE) notice.value = "";
+		checkClock();
+	}
+	window.addEventListener("focus", onActivity);
+	document.addEventListener("visibilitychange", onActivity);
+	document.addEventListener("click", onActivity);
+	document.addEventListener("keydown", onActivity);
+	document.addEventListener("wheel", onActivity, { passive: true });
 	onScopeDispose(() => {
 		disposed = true;
 		generation++;
 		stopTimers();
 		clearFinance();
 		layout.value = null;
-		window.removeEventListener("focus", checkClock);
-		document.removeEventListener("visibilitychange", checkClock);
+		window.removeEventListener("focus", onActivity);
+		document.removeEventListener("visibilitychange", onActivity);
+		document.removeEventListener("click", onActivity);
+		document.removeEventListener("keydown", onActivity);
+		document.removeEventListener("wheel", onActivity);
 	});
 	return {
 		loadingSnapshot,

@@ -588,6 +588,73 @@ describe("Payment Calendar state and async boundaries", () => {
 			clock.mockRestore();
 		}
 	});
+	it("stops panel loading when a month selection exhausts worker-busy retries", async () => {
+		monthlyApi();
+		await model.initialize();
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+		try {
+			api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+			await model.browseMonth(1);
+			expect(model.detailLoading.value).toBe(true);
+			await vi.advanceTimersByTimeAsync(65000);
+			expect(model.refreshIssue.value.code).toBe("worker_busy");
+			expect(model.detailLoading.value).toBe(false);
+			expect(model.upcomingLoading.value).toBe(false);
+			monthlyApi();
+			await model.refresh();
+			expect(model.snapshot.value.scope.month).toBe("2026-11");
+			expect(model.detailLoading.value).toBe(false);
+			expect(model.upcomingLoading.value).toBe(false);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("pauses idle report refreshes, clears expired figures and resumes once on interaction", async () => {
+		monthlyApi();
+		await model.initialize();
+		await vi.advanceTimersByTimeAsync(10 * 60000);
+		const requests = api.requestSnapshot.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(20 * 60000);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(requests);
+		expect(model.snapshot.value).toBeNull();
+		expect(model.detail.value).toBeNull();
+		expect(model.upcoming.value).toEqual([]);
+		expect(model.phase.value).toBe("expired");
+		document.dispatchEvent(new Event("click"));
+		await flushPromises();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(requests + 1);
+		expect(model.phase.value).toBe("ready");
+		scope.stop();
+		document.dispatchEvent(new Event("click"));
+		document.dispatchEvent(new Event("keydown"));
+		document.dispatchEvent(new Event("wheel"));
+		await vi.advanceTimersByTimeAsync(20 * 60000);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(requests + 1);
+	});
+	it("keeps refreshing while the user interacts without duplicating accepted jobs", async () => {
+		monthlyApi();
+		await model.initialize();
+		for (let i = 0; i < 5; i++) {
+			await vi.advanceTimersByTimeAsync(4 * 60000);
+			document.dispatchEvent(new Event(i % 2 ? "wheel" : "keydown"));
+			await flushPromises();
+		}
+		expect(api.requestSnapshot.mock.calls.length).toBeGreaterThan(4);
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		const pending = model.refresh({ automatic: true, background: true });
+		await flushPromises();
+		const count = api.requestSnapshot.mock.calls.length;
+		document.dispatchEvent(new Event("click"));
+		document.dispatchEvent(new Event("keydown"));
+		await flushPromises();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+		const fresh = complete();
+		fresh.scope.month = model.month.value;
+		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
+		late.resolve(ok(fresh));
+		await pending;
+	});
 	it("cancels worker-busy retries when the page is disposed", async () => {
 		monthlyApi();
 		await model.initialize();
