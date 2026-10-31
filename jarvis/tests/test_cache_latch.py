@@ -35,10 +35,17 @@ class TestClaimOnce(FrappeTestCase):
 		frappe.cache().delete_value(KEY)
 		self.assertTrue(claim_once(KEY, 60))
 
-	def test_a_counter_without_a_ttl_is_given_one(self):
+	def test_a_key_without_a_ttl_gets_re_armed(self):
 		frappe.cache().incr(_redis_key())  # a leftover key that would otherwise block forever
+		self.assertEqual(frappe.cache().ttl(_redis_key()), -1)
 		self.assertFalse(claim_once(KEY, 60))
 		self.assertTrue(0 < frappe.cache().ttl(_redis_key()) <= 60)
+
+	def test_a_re_armed_key_keeps_its_remaining_ttl(self):
+		claim_once(KEY, 60)
+		frappe.cache().expire(_redis_key(), 30)
+		claim_once(KEY, 60)
+		self.assertTrue(0 < frappe.cache().ttl(_redis_key()) <= 30)
 
 	def test_the_primitive_has_one_winner_under_a_race(self):
 		"""Real redis: threads race the same transaction ``claim_once`` runs (``frappe.local``
@@ -52,7 +59,7 @@ class TestClaimOnce(FrappeTestCase):
 			barrier.wait()
 			pipe = cache.pipeline()
 			pipe.incr(key)
-			pipe.expire(key, 60, nx=True)
+			pipe.ttl(key)
 			results.append(int(pipe.execute()[0]) == 1)
 
 		threads = [threading.Thread(target=worker) for _ in range(8)]
