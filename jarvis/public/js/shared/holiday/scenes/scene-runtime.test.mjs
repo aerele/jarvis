@@ -6,7 +6,14 @@ import assert from "node:assert/strict";
 import { Stage } from "../stage.mjs";
 import { Scene, playScene } from "./scene-runtime.mjs";
 import { heroKeepOut } from "./scene-place.mjs";
-import { boxes, fakeHost, run } from "./day-scene-fakes.test-support.mjs";
+import {
+  boxes,
+  fakeHost,
+  floorTransformOf,
+  run,
+} from "./day-scene-fakes.test-support.mjs";
+
+const floorScaleOf = (r) => floorTransformOf(r).scale;
 
 const CFG = {
   end: 1000,
@@ -164,4 +171,44 @@ test("the keep-out box follows the hero's own box when the page gives it, and a 
   assert.equal(own.r, 400 + 340 + 8);
   const scaled = heroKeepOut({ ...page, hero }, 2);
   assert.equal(scaled.b, 200 + 8);
+});
+
+// A scene with a floor row and one prop held at its edge (Scene.edge).
+class HoldsAProp extends Scene {
+  constructor(host, opts) {
+    super(host, opts, {
+      ...CFG,
+      row: { up: 52, rise: 0, mid: null, base: 0, g: 1 },
+    });
+  }
+
+  inner() {
+    return this.floorGroup(this.edge(150, `<g class="${this.p}prop"></g>`));
+  }
+}
+
+const heldTransform = (r) =>
+  r.host.svg.querySelector(".t-edge").getAttribute("transform");
+
+test("a held prop on a roomy stage has exactly the identity wrapper, translate(0 0)", () => {
+  const r = run(mod(HoldsAProp));
+  assert.equal(floorScaleOf(r), 1, "roomy: the row is at full size");
+  assert.equal(heldTransform(r), "translate(0 0)", "not -0, not a stray shift");
+  r.api.settle("instant");
+  r.end();
+});
+
+test("a held prop moves back out as the floor row shrinks, and returns to the identity", () => {
+  const r = run(mod(HoldsAProp), {
+    boxes: boxes({ h: 480, cardsH: 100, bottomGap: -40 }),
+  });
+  const scale = floorScaleOf(r);
+  assert.ok(scale < 1, `the row shrank to ${scale}`);
+  const [, shift] = /translate\(([-\d.]+) 0\)/.exec(heldTransform(r));
+  // The prop is at x = 150, 250 units left of the row's centre: held at x, so moved out.
+  assert.equal(Number(shift), Math.round(-250 * (1 / scale - 1) * 100) / 100);
+  r.api.relayout(boxes());
+  assert.equal(heldTransform(r), "translate(0 0)");
+  r.api.settle("instant");
+  r.end();
 });
