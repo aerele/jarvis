@@ -236,6 +236,16 @@ jobs:
       # header comment for why that x4 cost is acceptable on this public repo.
       fail-fast: false
       matrix:
+        # Shards are cut by measured TIME, not by test count (jarvis/ci/test_shards.py).
+        # Frappe's own splitter weights each test FILE by its `def test_` count, and test cost
+        # is far from uniform: on 2026-10-31 (531 files, ~14k tests, ~67 min of tests) the
+        # count split gave est. [17.5, 27.6, 11.5, 10.4] min, the holiday-touch files all
+        # landing on shard 2; the time split gives [16.9, 16.9, 16.9, 16.4]. The cut stays
+        # contiguous in frappe's file order, so no file gains new neighbours. At 6 shards the
+        # time split estimates a 12.0 min slowest shard, for 2 more from-scratch bench builds.
+        #
+        # If you change this list, --total-builds in the test step and the shard-count guard
+        # in the `coverage` job move with it.
         shard: [1, 2, 3, 4]
 
     services:
@@ -386,10 +396,20 @@ jobs:
           # websockets: needed by the fake gateway imported by harness configuration tests.
           ./env/bin/pip install coverage gevent websockets
           # run-parallel-tests shards by test FILE across --total-builds, so each
-          # --build-number runs a disjoint quarter of the suite. --with-coverage is this
-          # command's spelling of run-tests' --coverage (different click commands; do not
-          # "fix" one to match the other).
-          bench --site jarvis-ci.test run-parallel-tests \
+          # --build-number runs a disjoint part of the suite.
+          #
+          # This is `bench --site jarvis-ci.test run-parallel-tests ...` with ONE change: the
+          # wrapper swaps frappe's count-based split_by_weight for a split by the measured
+          # per-module seconds in jarvis/ci/data/test-timings.json, then invokes frappe's CLI
+          # from sites/ exactly as bench/cli.py frappe_cmd does. The runner, coverage and the
+          # CI-gated exit code are all still frappe's. See jarvis/ci/test_shards.py, including
+          # how to regenerate the timings when the step's printed plan warns they are stale.
+          #
+          # --with-coverage is this command's spelling of run-tests' --coverage (different
+          # click commands; do not "fix" one to match the other).
+          cd sites
+          ../env/bin/python -m jarvis.ci.test_shards run -- \
+            --site jarvis-ci.test run-parallel-tests \
             --app jarvis \
             --build-number ${{ matrix.shard }} \
             --total-builds 4 \
