@@ -144,8 +144,8 @@ def _resolve_file(file_url: str | None, filename: str | None):
 	if file_url:
 		name = frappe.db.get_value("File", {"file_url": file_url}, "name")
 		if not name:
-			raise InvalidArgumentError(f"no file found for url {file_url!r}")
-		return frappe.get_doc("File", name)
+			raise PermissionDeniedError("no matching file found")
+		return frappe.get_cached_doc("File", name)
 	if filename:
 		# Gather name-matching candidates unfiltered, then gate EACH with the
 		# row-level has_permission check File actually enforces, returning the
@@ -172,7 +172,7 @@ def _resolve_file(file_url: str | None, filename: str | None):
 		)
 		for row in candidates:
 			if frappe.has_permission("File", "read", doc=row.name):
-				return frappe.get_doc("File", row.name)
+				return frappe.get_cached_doc("File", row.name)
 		# Generic on purpose - covers both "nothing matched" and "something
 		# matched but you can't read it"; the latter must not confirm the
 		# existence/name of a private file the caller can't otherwise see.

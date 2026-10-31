@@ -150,8 +150,13 @@ class TestDocumentQuery(unittest.TestCase):
 	def test_markdown_indented_code_and_unequal_rows(self):
 		result = self.query("    | a | b |\n    | --- | --- |\n    | 1 | 2 |\n", "code.md")
 		self.assertEqual([s["table"] for s in result["sheets"]], ["text_lines"])
-		with self.assertRaisesRegex(InvalidArgumentError, "line 3"):
-			self.query("|a|b|\n|---|---|\n|1|2|3|\n", "bad.md")
+		result = self.query(
+			"|a|b|\n|---|---|\n|1|2|3|\n", "bad.md", "SELECT text FROM text_lines WHERE _row=3"
+		)
+		self.assertEqual(result["rows"], [["|1|2|3|"]])
+		self.assertEqual([s["table"] for s in result["sheets"]], ["text_lines"])
+		self.assertEqual(result["warnings"], [{"code": "malformed_markdown_table", "omitted_tables": 1}])
+		self.assertFalse(result["coverage"]["derived_tables_complete"])
 		content = "# C#\n|a|b|\n|---|---|\n|1|2|\n``` language|info\n# Fake\n```\nend"
 		result = self.query(content, "code.md", "SELECT text, section FROM text_lines WHERE text = 'end'")
 		self.assertEqual(result["rows"], [["end", "C#"]])
@@ -181,7 +186,7 @@ class TestDocumentQuery(unittest.TestCase):
 			with self.subTest(sql=sql), self.assertRaises(InvalidArgumentError):
 				self.query("[1,2]", "data.json", sql)
 
-	def test_attachment_hint_routes_documents_without_inlining_source(self):
+	def test_large_attachment_hint_routes_documents_without_inlining_source(self):
 		import frappe
 
 		with patch.object(frappe, "conf", frappe._dict()):
@@ -193,7 +198,7 @@ class TestDocumentQuery(unittest.TestCase):
 				patch("frappe.get_doc", return_value=doc),
 				patch("jarvis.tools._file_source.resolve_file", return_value=doc),
 				patch("frappe.has_permission", return_value=True),
-				patch("jarvis.compat.file_bytes", return_value=b"PRIVATE-DOCUMENT-CONTENT"),
+				patch("jarvis.compat.file_bytes", return_value=b"PRIVATE-DOCUMENT-CONTENT\n" * 1000),
 			):
 				message, images = _prepare_attachments(
 					"Find the last payment.", [{"file_url": "/private/files/" + filename}], False
@@ -202,6 +207,34 @@ class TestDocumentQuery(unittest.TestCase):
 				self.assertIn("original _row line numbers", message)
 				self.assertNotIn("PRIVATE-DOCUMENT-CONTENT", message)
 				self.assertEqual(images, [])
+
+	def test_small_documents_remain_fenced_inline_input(self):
+		import frappe
+
+		with patch.object(frappe, "conf", frappe._dict()):
+			from jarvis.chat.turn_handler import _prepare_attachments
+		for filename in ("records.json", "report.md", "report.markdown", "notes.txt"):
+			doc = SimpleNamespace(name="file", file_name=filename)
+			with (
+				self.subTest(filename=filename),
+				patch("frappe.get_doc", return_value=doc),
+				patch("frappe.has_permission", return_value=True),
+				patch("jarvis.compat.file_bytes", return_value=b"SMALL-DOCUMENT-CONTENT"),
+			):
+				message, images = _prepare_attachments(
+					"Read this.", [{"file_url": "/private/files/" + filename}], False
+				)
+				self.assertIn("SMALL-DOCUMENT-CONTENT", message)
+				self.assertIn("<untrusted-data", message)
+				self.assertEqual(images, [])
+
+	def test_extra_derived_tables_do_not_hide_raw_document_lines(self):
+		content = ("|a|b|\n|---|---|\n|1|2|\n\n" * 32) + "TAIL-RECORD"
+		result = self.query(content, "tables.md", "SELECT text FROM text_lines WHERE text='TAIL-RECORD'")
+		self.assertEqual(result["rows"], [["TAIL-RECORD"]])
+		self.assertEqual(len(result["sheets"]), 32)
+		self.assertEqual(result["warnings"], [{"code": "markdown_table_limit", "omitted_tables": 1}])
+		self.assertFalse(result["coverage"]["derived_tables_complete"])
 
 	def test_real_child_processes_large_json_markdown_and_text(self):
 		json_data = (

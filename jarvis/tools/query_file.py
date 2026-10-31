@@ -9,6 +9,7 @@ from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._archive_api import analyze, enabled, is_archive
 from jarvis.tools._archive_sources import ArchiveSelectionError
+from jarvis.tools._file_scan import MAX_BYTES
 from jarvis.tools._file_source import prepared_handoff, require_file_read, resolve_file
 from jarvis.tools._spreadsheet_process import run_query
 from jarvis.tools._spreadsheet_query import revision_for
@@ -50,7 +51,11 @@ def query_file(
 		)
 	if archive_scope:
 		raise ArchiveSelectionError("Archive member arguments require an archive source.")
+	if int(getattr(fdoc, "file_size", 0) or 0) > MAX_BYTES:
+		raise InvalidArgumentError("File exceeds the 10 MiB input limit. Split the file.")
 	content = compat.file_bytes(fdoc)
+	if len(content) > MAX_BYTES:
+		raise InvalidArgumentError("File exceeds the 10 MiB input limit. Split the file.")
 	# Canonical scope makes reordered selections equivalent and pins identity too.
 	if sheets is not None and (
 		not isinstance(sheets, list) or any(not isinstance(name, str) for name in sheets)

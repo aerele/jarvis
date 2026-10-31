@@ -151,7 +151,7 @@ def _cells(line):
 	return cells
 
 
-def _markdown_tables(lines):
+def _markdown_tables(lines, warnings):
 	index, count, fence = 0, 0, None
 	while index < len(lines):
 		line = lines[index][1][0]
@@ -176,6 +176,7 @@ def _markdown_tables(lines):
 			index += 1
 			continue
 		rows = [(lines[index][0], header)]
+		malformed = False
 		index += 2
 		while index < len(lines):
 			if re.match(r"^ {0,3}(`{3,}|~{3,})", lines[index][1][0]):
@@ -184,17 +185,18 @@ def _markdown_tables(lines):
 			if cells is None:
 				break
 			if len(cells) != len(header):
-				raise InvalidArgumentError(
-					f"Markdown table line {lines[index][0]} has {len(cells)} cells; expected {len(header)}. "
-					"Fix the table or use read_file for raw text. No query was run."
-				)
+				malformed = True
 			rows.append((lines[index][0], cells))
 			index += 1
 		count += 1
+		if malformed or count > 31:
+			code = "malformed_markdown_table" if malformed else "markdown_table_limit"
+			warnings[code] = warnings.get(code, 0) + 1
+			continue
 		yield count, rows
 
 
-def load_document(content, filename, selected, load):
+def load_document(content, filename, selected, load, *, warnings=None):
 	"""All identifiers are fixed here; source names and values never become SQL code."""
 	if selected is not None:
 		raise InvalidArgumentError(
@@ -219,9 +221,5 @@ def load_document(content, filename, selected, load):
 	lines = list(_lines(text, markdown))
 	load("Text lines", "text_lines", lines, columns=["text", "ending", "section"], positions=True)
 	if markdown:
-		for index, rows in _markdown_tables(lines):
-			if index > 31:
-				raise InvalidArgumentError(
-					"Markdown exceeds 31 pipe tables. Split the file or use read_file."
-				)
+		for index, rows in _markdown_tables(lines, warnings if warnings is not None else {}):
 			load(f"Markdown table {index}", f"md_table{index}", rows, positions=True)
