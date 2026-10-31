@@ -1,5 +1,6 @@
-// Keep in step with frontend/src/lib/holidayScenes.js (the desktop original). The phone does
-// not use the hero clearance (its hero does not move), so that export is left out.
+// Keep in step with frontend/src/lib/holidayScenes.js (the desktop original). The phone differs
+// in three ways: no hero clearance (its hero does not move), no isSceneLoading() (the PWA router
+// has no preload-error guard to ask it), and no report for a load that failed offline.
 // Loads a holiday scene's art (jarvis/public/js/shared/holiday/scenes/<design>.mjs) the
 // first time a welcome screen may play it. A static map of literal import paths, never a
 // template string, so the bundler can see every scene and name its chunk `holiday-*`
@@ -7,10 +8,10 @@
 //
 // Like the worn art (lib/holidayWorn.js) the scene is optional decoration, so a failed
 // import (a stale chunk after a deploy, an offline tab) gives null: no scene, the cards
-// show, nothing reloads and nothing throws. (The PWA router has no preload-error guard, so
-// isSceneLoading() is only here to keep the module a twin of the desktop one.)
+// show, nothing reloads and nothing throws.
 // The first failure per design in the session is reported with a fixed text and the design
-// in error_code (the error reporter drops chunk-load messages as already handled).
+// in error_code (the error reporter drops chunk-load messages as already handled). Not while the
+// phone is offline: an import cannot succeed then, so there is nothing for support to learn.
 import { _resetReportedForTests, reportSceneFailure } from "./holidayReport";
 
 // One scene per design (the republic occasion plays the independence design). Each import is
@@ -34,13 +35,11 @@ const loaded = new Map(); // design -> module, kept for the life of the page
 const pending = new Map(); // design -> import in flight
 const retryAt = new Map(); // design -> no new attempt before this time (ms since epoch)
 
+const offline = () => typeof navigator !== "undefined" && navigator.onLine === false;
+
 /** Does this design have a scene in this build? Own keys only: "toString" has none. */
 export function hasScene(design) {
 	return typeof design === "string" && Object.hasOwn(SCENE_LOADERS, design);
-}
-
-export function isSceneLoading() {
-	return pending.size > 0;
 }
 
 /** Resolves to the scene module, or null when there is none or it cannot load. Never rejects. */
@@ -49,8 +48,6 @@ export function loadScene(design, { now = Date.now, loaders = SCENE_LOADERS } = 
 	if (loaded.has(design)) return Promise.resolve(loaded.get(design));
 	if (pending.has(design)) return pending.get(design);
 	if (now() < (retryAt.get(design) || 0)) return Promise.resolve(null);
-	// Registered before the import can settle, so isSceneLoading() is already true when
-	// Vite dispatches its preload error for this very import.
 	const attempt = Promise.resolve()
 		.then(loaders[design])
 		.then((mod) => {
@@ -60,7 +57,7 @@ export function loadScene(design, { now = Date.now, loaders = SCENE_LOADERS } = 
 		})
 		.catch((error) => {
 			retryAt.set(design, now() + SCENE_RETRY_MS);
-			reportSceneFailure("load", design, error);
+			if (!offline()) reportSceneFailure("load", design, error);
 			return null;
 		})
 		.finally(() => {
