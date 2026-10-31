@@ -82,9 +82,19 @@ class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertEqual(_plugin_auth._agent_token(), OWNER)
 
 	def test_settings_reset_clears_callback_key(self):
-		set_settings_password(self.settings, "callback_key", CALLBACK)
-		settings_reset.apply(self.settings, settings_reset.CONNECTION)
-		self.assertEqual(_plugin_auth._callback_key(), "")
+		# Never run the real reset on a live site: assert the scope and drive apply()
+		# against a mock settings object with every side effect patched out.
+		from unittest.mock import MagicMock
+
+		self.assertIn("callback_key", settings_reset.CONNECTION.passwords)
+		mock_settings = MagicMock()
+		with (
+			patch.object(settings_reset, "clear_settings_password") as clear,
+			patch("jarvis.admin_client.clear_cached_token"),
+			patch.object(frappe.db, "delete"),
+		):
+			settings_reset.apply(mock_settings, settings_reset.CONNECTION)
+		clear.assert_any_call(mock_settings, "callback_key")
 
 	def _set_authority(self, gen, handle):
 		self.settings.db_set("tenant_authority_generation", gen)
