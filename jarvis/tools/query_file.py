@@ -7,6 +7,7 @@ import frappe
 
 from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools._file_scan import MAX_BYTES
 from jarvis.tools._spreadsheet_process import run_query
 from jarvis.tools._spreadsheet_query import revision_for
 from jarvis.tools.read_file import _resolve_file
@@ -28,7 +29,11 @@ def query_file(
 	fdoc = _resolve_file(file_url or None, filename or None)
 	if not frappe.has_permission("File", "read", doc=fdoc.name):
 		raise PermissionDeniedError("no matching file found")
+	if int(getattr(fdoc, "file_size", 0) or 0) > MAX_BYTES:
+		raise InvalidArgumentError("File exceeds the 10 MiB input limit. Split the file.")
 	content = compat.file_bytes(fdoc)
+	if len(content) > MAX_BYTES:
+		raise InvalidArgumentError("File exceeds the 10 MiB input limit. Split the file.")
 	# Canonical scope makes reordered selections equivalent and pins identity too.
 	if sheets is not None and (
 		not isinstance(sheets, list) or any(not isinstance(name, str) for name in sheets)
