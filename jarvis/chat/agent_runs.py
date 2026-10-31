@@ -771,11 +771,21 @@ def record_delegate_run(
 	dropped = dropped or []
 	company = (scope.get("company") or "").strip()
 	record_scope = _record_scope(run_doc.get("scope_json"))
-	if record_scope:
-		import json
-
-		stamp = json.loads(run_doc.get("scope_json") or "{}")
-		matches = scope.get("record_scope") == record_scope and all(
+	try:
+		stamp = _json.loads(run_doc.get("scope_json") or "{}")
+		if not isinstance(stamp, dict):
+			stamp = {}
+	except (TypeError, ValueError):
+		stamp = {}
+	# Older delegates omit the new clock key. An explicit different instant (or
+	# an instant with no launch stamp) must not create or resolve findings.
+	clock_mismatch = any(
+		scope.get(key) is not None and str(scope[key]) != str(stamp.get(key) or "")
+		for key in ("report_date", "report_datetime", "execution_user")
+	)
+	record_mismatch = bool(record_scope) and not (
+		scope.get("record_scope") == record_scope
+		and all(
 			str(scope.get(k) or "") == str(stamp.get(k) or "")
 			for k in (
 				"company",
@@ -786,28 +796,30 @@ def record_delegate_run(
 				"prior_period_to",
 			)
 		)
-		if not matches:
-			dropped = [
-				*dropped,
-				*[
-					{
-						"ref_doctype": f.get("ref_doctype"),
-						"ref_name": f.get("ref_name"),
-						"reason": "assessment scope mismatch",
-					}
-					for f in findings or []
-				],
-			]
-			findings = []
-			coverage = {
-				token: {
-					"state": "not_evaluable",
-					"reason_code": "unsupported_customisation",
-					"detail": "assessment record or period scope",
+	)
+	scope_mismatch = clock_mismatch or record_mismatch
+	if scope_mismatch:
+		dropped = [
+			*dropped,
+			*[
+				{
+					"ref_doctype": f.get("ref_doctype"),
+					"ref_name": f.get("ref_name"),
+					"reason": "assessment scope mismatch",
 				}
-				for token in required_coverage_tokens
+				for f in findings or []
+			],
+		]
+		findings = []
+		coverage = {
+			token: {
+				"state": "not_evaluable",
+				"reason_code": "unsupported_customisation",
+				"detail": "assessment record or period scope",
 			}
-			dashboard = canvas_ref = integrity_digest = None
+			for token in required_coverage_tokens
+		}
+		dashboard = canvas_ref = integrity_digest = None
 
 	# Collapse this run's findings by fingerprint (token + doc identity), so a doc
 	# flagged twice by one rule is ONE finding and counts stay consistent.
@@ -956,6 +968,7 @@ def record_delegate_run(
 	if (
 		not truncated
 		and not dropped
+		and not scope_mismatch
 		and not wm_drift
 		and not scoped
 		and not row_shortfall
@@ -1019,7 +1032,9 @@ def record_delegate_run(
 	# coverage verdict's job, not a lifecycle failure. ``partial`` is reserved for an execution
 	# problem OR a coverage gap that needs attention (permanent code, permission slice, or a
 	# truncation note). ``coverage_note`` still fires the warning on a data-gap ``completed`` run.
-	execution_partial = bool(truncated) or wm_drift or scoped or row_shortfall or bool(dropped)
+	execution_partial = (
+		bool(truncated) or wm_drift or scoped or row_shortfall or bool(dropped) or scope_mismatch
+	)
 	non_data_gap = any(not cr.is_data_gap(n.get("reason_code")) for n in coverage_notes)
 	status = "partial" if (execution_partial or non_data_gap) else "completed"
 
@@ -1118,9 +1133,18 @@ def record_delegate_run(
 		except Exception:
 			base = {}
 		pinned_keys = (
-			("company", "from_date", "to_date", "report_date", "prior_period_from", "prior_period_to")
+			(
+				"company",
+				"from_date",
+				"to_date",
+				"report_date",
+				"report_datetime",
+				"execution_user",
+				"prior_period_from",
+				"prior_period_to",
+			)
 			if record_scope
-			else ("prior_period_from", "prior_period_to")
+			else ("prior_period_from", "prior_period_to", "report_date", "report_datetime", "execution_user")
 		)
 		pinned = {k: base[k] for k in pinned_keys if k in base}
 		base.update(scope)
