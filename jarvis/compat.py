@@ -118,9 +118,10 @@ def set_delimiters_flag(data_import_doc) -> None:
 		fn()
 
 
-@functools.cache
 def _get_content_takes_encodings(cls) -> bool:
 	"""Does this File class accept ``get_content(encodings=...)``? (Frappe 16)"""
+	# Storage hooks can replace get_content on the same class. Recheck its
+	# signature so a previous reader cannot make a binary file decode as text.
 	try:
 		return "encodings" in inspect.signature(cls.get_content).parameters
 	except (AttributeError, TypeError, ValueError):
