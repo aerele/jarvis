@@ -9,7 +9,7 @@ import frappe
 
 
 def validate_bearer() -> bool:
-	"""Return True iff the X-Jarvis-Token header contains the correct agent token.
+	"""Return True iff the X-Jarvis-Token header contains the callback key (or, before one is stored, the agent token).
 
 	We use a custom header rather than ``Authorization: Bearer`` so that Frappe's
 	built-in OAuth validator (which runs before our handler) does not see a Bearer
@@ -19,7 +19,11 @@ def validate_bearer() -> bool:
 	if not presented:
 		return False
 	settings = frappe.get_single("Jarvis Settings")
-	expected = settings.get_password("agent_token") or ""
+	expected = (
+		settings.get_password("callback_key", raise_exception=False)
+		or settings.get_password("agent_token", raise_exception=False)
+		or ""
+	)
 	if not expected:
 		return False
 	# Constant-time comparison to prevent timing-oracle attacks

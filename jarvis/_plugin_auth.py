@@ -108,11 +108,11 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			code="AuthenticationError",
 			message="X-Jarvis-Token header missing",
 		)
-	expected_token = _agent_token()
+	expected_token = _callback_key() or _agent_token()
 	if not expected_token:
 		_audit_log(
 			"plugin_auth: agent_token unset on bench",
-			"Jarvis Settings.agent_token is empty; refusing all plugin requests",
+			"Jarvis Settings.callback_key and agent_token are empty; refusing all plugin requests",
 		)
 		raise PluginAuthError(
 			http_status=503,
@@ -245,6 +245,12 @@ def _should_audit_unsigned_reject(session_key: str) -> bool:
 		return bool(cache.set(key, b"1", nx=True, ex=_UNSIGNED_AUDIT_GATE_TTL_S))
 	except Exception:
 		return True
+
+
+def _callback_key() -> str:
+	"""Per-tenant callback key; once stored it is the only key that verifies."""
+	settings = frappe.get_single("Jarvis Settings")
+	return settings.get_password("callback_key", raise_exception=False) or ""
 
 
 def _agent_token() -> str:

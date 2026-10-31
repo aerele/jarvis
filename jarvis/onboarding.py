@@ -3,6 +3,7 @@ Settings, and thin server wrappers the onboarding page calls (so the browser
 never holds admin creds). admin_client returns already-unwrapped admin data."""
 
 import json
+import re
 import unicodedata
 
 import frappe
@@ -125,7 +126,7 @@ def write_connection(data: dict) -> None:
 	"no on_update retrigger" property this function exists for."""
 	if not isinstance(data, dict):
 		return
-	from jarvis._password_utils import set_settings_password
+	from jarvis._password_utils import clear_settings_password, set_settings_password
 	from jarvis.chat import runtime_profile
 
 	# Serialize authority receipt, connection, and profile as one DB transaction.
@@ -227,6 +228,13 @@ def write_connection(data: dict) -> None:
 				runtime_profile.persist(None, s, unavailable=True)
 			if data.get("agent_token"):
 				_store_agent_token(s, data["agent_token"])
+	if data.get("callback_key"):
+		_store_callback_key(data["callback_key"])
+	if data.get("owner_key_retired") is True:
+		# Admin retired the gateway owner key: the plugin now signs with the
+		# callback key only, so the stored owner token must stop verifying.
+		clear_settings_password(s, "agent_token")
+		s.db_set("agent_token_issued_at", None)
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them. Wider than
 	# ``new_admin_login`` above on purpose - a standalone customer_password (the
@@ -271,6 +279,20 @@ def _store_agent_token(settings, token: str) -> None:
 	set_settings_password(settings, "agent_token", token)
 	if changed or not settings.get("agent_token_issued_at"):
 		settings.db_set("agent_token_issued_at", frappe.utils.now_datetime())
+
+
+_CALLBACK_KEY_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _store_callback_key(key: str) -> bool:
+	"""Store the per-tenant callback key. Only a 64 lowercase hex key is accepted;
+	anything else is ignored so a malformed payload cannot lock the plugin out."""
+	from jarvis._password_utils import set_settings_password
+
+	if not isinstance(key, str) or not _CALLBACK_KEY_RE.fullmatch(key):
+		return False
+	set_settings_password(frappe.get_single("Jarvis Settings"), "callback_key", key)
+	return True
 
 
 @frappe.whitelist(methods=["POST"])
@@ -2313,6 +2335,9 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 
 	settings.db_set("agent_url", "")
 	clear_settings_password(settings, "agent_token")
+	# The key belongs to the container being torn down; a stale one would reject
+	# the rebuilt container's owner-token callbacks until admin re-issues it.
+	clear_settings_password(settings, "callback_key")
 	# The rebuilt container is a new authority generation; forget the accepted
 	# (generation, handle) so the poll that re-attaches it is not rejected as
 	# "older" than the pre-reset generation (review plan 04 P0-5).

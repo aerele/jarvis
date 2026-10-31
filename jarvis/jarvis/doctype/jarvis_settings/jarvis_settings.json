@@ -87,6 +87,7 @@
   "pairing_blocked",
   "pairing_blocked_reason",
   "agent_token",
+  "callback_key",
   "agent_token_issued_at",
   "agent_token_max_age_days",
   "tenant_authority_generation",
@@ -708,6 +709,15 @@
    "label": "Agent Token",
    "read_only": 1,
    "description": "Bearer token used to authenticate the secrets.reload RPC and the chat worker's WebSocket session"
+  },
+  {
+   "fieldname": "callback_key",
+   "fieldtype": "Password",
+   "permlevel": 1,
+   "hidden": 1,
+   "label": "Callback Key",
+   "read_only": 1,
+   "description": "Per-tenant key the plugin signs its callbacks to this site with. Once set, the gateway owner token (agent_token) no longer verifies."
   },
   {
    "fieldname": "agent_token_issued_at",
