@@ -7,7 +7,6 @@ import select
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._report_query_data import (
@@ -18,6 +17,7 @@ from jarvis.tools._report_query_data import (
 	MAX_SCHEMA,
 	encode,
 )
+from jarvis.tools._source_process import worker_env, worker_slot
 
 WALL_SECONDS = 22
 RESOURCE_ERROR = "Prepared report analysis exceeded the resource budget. Narrow the report. No complete answer was returned."
@@ -46,22 +46,28 @@ class ReportWorker:
 		self.process = None
 		self.buffer = bytearray()
 		self.received = 0
+		self.capacity = None
 
 	def __enter__(self):
-		env = os.environ.copy()
-		env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get("PYTHONPATH", "")
+		self.capacity = worker_slot()
+		slot = self.capacity.__enter__()
 		# Security review: fixed interpreter/module argv, shell disabled. Caller
 		# data is framed JSON on stdin, never executable arguments.
-		self.process = subprocess.Popen(  # nosemgrep: frappe-subprocess-exec
-			[sys.executable, "-m", self.worker_module],
-			stdin=subprocess.PIPE,
-			stdout=subprocess.PIPE,
-			stderr=subprocess.DEVNULL,
-			shell=False,
-			env=env,
-		)
-		os.set_blocking(self.process.stdin.fileno(), False)
-		os.set_blocking(self.process.stdout.fileno(), False)
+		try:
+			self.process = subprocess.Popen(  # nosemgrep: frappe-subprocess-exec
+				[sys.executable, "-m", self.worker_module],
+				stdin=subprocess.PIPE,
+				stdout=subprocess.PIPE,
+				stderr=subprocess.DEVNULL,
+				shell=False,
+				env=worker_env(),
+				pass_fds=(slot,),
+			)
+			os.set_blocking(self.process.stdin.fileno(), False)
+			os.set_blocking(self.process.stdout.fileno(), False)
+		except BaseException:
+			self.__exit__()
+			raise
 		return self
 
 	def send(self, data, limit=MAX_CONTEXT):
@@ -108,13 +114,18 @@ class ReportWorker:
 		return frame
 
 	def __exit__(self, *_):
-		if self.process is not None:
-			for pipe in (self.process.stdin, self.process.stdout):
-				if pipe is not None:
-					pipe.close()
-			if self.process.poll() is None:
-				self.process.kill()
-			self.process.wait()
+		try:
+			if self.process is not None:
+				for pipe in (self.process.stdin, self.process.stdout):
+					if pipe is not None:
+						pipe.close()
+				if self.process.poll() is None:
+					self.process.kill()
+				self.process.wait()
+		finally:
+			if self.capacity is not None:
+				self.capacity.__exit__(None, None, None)
+				self.capacity = None
 
 
 def analyze_report(content, metadata, *, authorize, validate, sql=None, max_rows=100, deadline=None):
