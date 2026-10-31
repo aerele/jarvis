@@ -276,4 +276,517 @@ describe("Payment Calendar state and async boundaries", () => {
 		await previous;
 		expect(model.detail.value.rows[0].voucher_type).toBe("Sales Invoice");
 	});
+	it("soft refreshes before expiry and swaps a fresh snapshot without losing the view", async () => {
+		await model.initialize();
+		await model.selectDate("2026-10-25");
+		model.browseMonth(1);
+		await model.setDetailView("customers");
+		await model.changeDetailPage("rows", 2);
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		await vi.advanceTimersByTimeAsync(270000);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(2);
+		expect(model.refreshing.value).toBe(true);
+		expect(model.snapshot.value.snapshot_id).toBe(SID);
+		const fresh = complete();
+		fresh.generated_at = new Date().toISOString();
+		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
+		fresh.projection.book_cash = "150.00";
+		late.resolve(ok(fresh));
+		await flushPromises();
+		expect(model.refreshing.value).toBe(false);
+		expect(model.snapshot.value.projection.book_cash).toBe("150.00");
+		expect(model.selectedDate.value).toBe("2026-10-25");
+		expect(model.month.value).toBe("2026-11");
+		expect(model.activeView.value).toBe("customers");
+		expect(model.pages.value.Receivable.rows).toBe(2);
+	});
+	it("does not restart an automatic job on focus and clears expired figures while it finishes", async () => {
+		await model.initialize();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		await vi.advanceTimersByTimeAsync(270000);
+		window.dispatchEvent(new Event("focus"));
+		window.dispatchEvent(new Event("focus"));
+		await flushPromises();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(30001);
+		expect(model.snapshot.value).toBeNull();
+		expect(model.phase.value).not.toBe("expired");
+		const fresh = complete();
+		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
+		late.resolve(ok(fresh));
+		await flushPromises();
+		expect(model.phase.value).toBe("ready");
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(2);
+	});
+	it("defers hidden-tab refresh and resumes once without requiring a manual retry", async () => {
+		await model.initialize();
+		const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+		await vi.advanceTimersByTimeAsync(270000);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(1);
+		const fresh = complete();
+		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
+		api.getSnapshotStatus.mockResolvedValueOnce(ok(fresh));
+		hidden.mockReturnValue(false);
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushPromises();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(2);
+		expect(model.phase.value).toBe("ready");
+		hidden.mockRestore();
+	});
+	it("does not let background work supersede a pending floor write", async () => {
+		await model.initialize();
+		const late = deferred();
+		api.configureFloor.mockReturnValueOnce(late.promise);
+		const saving = model.saveFloor("35.00");
+		await vi.advanceTimersByTimeAsync(270000);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(1);
+		late.resolve(ok(complete().floor));
+		await saving;
+		await flushPromises();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps the displayed snapshot usable while polling a different replacement ID", async () => {
+		await model.initialize();
+		await model.openBucket("Payable", "overdue");
+		const nextId = "b".repeat(32);
+		api.requestSnapshot.mockResolvedValueOnce(ok({ snapshot_id: nextId, state: "queued" }));
+		api.getSnapshotStatus.mockResolvedValueOnce(ok({ snapshot_id: nextId, state: "running" }));
+		await vi.advanceTimersByTimeAsync(270000);
+		expect(model.snapshotId.value).toBe(SID);
+		await model.selectDate("2026-10-26");
+		expect(api.getDayDetail.mock.calls.at(-1)[0]).toBe(SID);
+		const fresh = complete("Manufacturing", ["Bank A"], nextId);
+		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
+		api.getSnapshotStatus.mockResolvedValueOnce(ok(fresh));
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(model.snapshotId.value).toBe(nextId);
+		expect(api.getDayDetail.mock.calls.at(-1)[0]).toBe(nextId);
+		expect(api.getBucketDetail.mock.calls.at(-1)[0]).toBe(nextId);
+		expect(model.bucket.value.name).toBe("overdue");
+	});
+	it("resumes after expiry in a hidden tab and cancels all refresh work on disposal", async () => {
+		await model.initialize();
+		const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+		await vi.advanceTimersByTimeAsync(300001);
+		expect(model.snapshot.value).toBeNull();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(1);
+		const fresh = complete();
+		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
+		api.getSnapshotStatus.mockResolvedValueOnce(ok(fresh));
+		hidden.mockReturnValue(false);
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushPromises();
+		expect(model.snapshot.value).not.toBeNull();
+		scope.stop();
+		await vi.advanceTimersByTimeAsync(600000);
+		window.dispatchEvent(new Event("focus"));
+		await flushPromises();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(2);
+		hidden.mockRestore();
+	});
+	it("rejects a late background snapshot after the company changes", async () => {
+		await model.initialize();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		await vi.advanceTimersByTimeAsync(270000);
+		const fresh = complete("Services", []);
+		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
+		api.getSnapshotStatus.mockResolvedValueOnce(ok(fresh));
+		await model.chooseCompany("Services");
+		late.resolve(ok(complete()));
+		await flushPromises();
+		expect(model.snapshot.value.scope.company).toBe("Services");
+	});
+	it("clears values after a background network failure and does not retry in a loop", async () => {
+		await model.initialize();
+		api.requestSnapshot.mockResolvedValueOnce(refusal("network_error", "failed"));
+		await vi.advanceTimersByTimeAsync(270000);
+		expect(model.phase.value).toBe("failed");
+		expect(model.snapshot.value).toBeNull();
+		expect(model.refreshing.value).toBe(false);
+		window.dispatchEvent(new Event("focus"));
+		await vi.advanceTimersByTimeAsync(600000);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(2);
+	});
+	it("clears financial data and controls when background access is revoked", async () => {
+		await model.initialize();
+		api.requestSnapshot.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
+		api.getCapabilities.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
+		await vi.advanceTimersByTimeAsync(270000);
+		expect(model.phase.value).toBe("forbidden");
+		expect(model.snapshot.value).toBeNull();
+		expect(model.caps.value).toBeNull();
+		expect(model.accounts.value).toEqual([]);
+	});
+	function monthlyApi() {
+		api.requestSnapshot.mockImplementation(async (company, accounts, month = "2026-10") =>
+			ok({
+				snapshot_id: (month === "current"
+					? new Date(Date.now()).toISOString().slice(0, 7)
+					: month
+				)
+					.replace("-", "")
+					.padStart(32, "0"),
+				state: "queued",
+			})
+		);
+		api.getSnapshotStatus.mockImplementation(async (id) => {
+			const month = id.slice(-6, -2) + "-" + id.slice(-2);
+			const value = complete();
+			value.snapshot_id = id;
+			value.expires_at = new Date(Date.now() + 300000).toISOString();
+			value.scope.anchor = new Date(Date.now()).toISOString().slice(0, 10);
+			value.scope = {
+				...value.scope,
+				month,
+				window_start: month + "-01",
+				window_end:
+					month +
+					"-" +
+					new Date(Number(month.slice(0, 4)), Number(month.slice(5)), 0).getDate(),
+			};
+			value.projection.start = value.scope.window_start;
+			value.projection.end = value.scope.window_end;
+			value.projection.month = month;
+			return ok(value);
+		});
+	}
+	it("loads only the current month initially and requests a new month on navigation", async () => {
+		monthlyApi();
+		await model.initialize();
+		expect(model.snapshot.value.scope.month).toBe("2026-10");
+		await model.browseMonth(1);
+		await flushPromises();
+		expect(api.requestSnapshot.mock.calls.at(-1)[2]).toBe("2026-11");
+		expect(model.snapshot.value.scope.month).toBe("2026-11");
+		expect(model.selectedDate.value).toBe("2026-11-01");
+	});
+	it("fetches adjacent selected dates and Today in their own month", async () => {
+		monthlyApi();
+		await model.initialize();
+		await model.selectDate("2026-11-02");
+		await flushPromises();
+		expect(model.snapshot.value.scope.month).toBe("2026-11");
+		expect(api.getDayDetail.mock.calls.at(-1)[1]).toBe("2026-11-02");
+		await model.goToday();
+		await flushPromises();
+		expect(model.snapshot.value.scope.month).toBe("2026-10");
+		expect(model.selectedDate.value).toBe("2026-10-24");
+	});
+	it("does not request a second job for date changes inside the loaded month", async () => {
+		monthlyApi();
+		await model.initialize();
+		await model.selectDate("2026-10-26");
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(1);
+	});
+	it("ignores late results when the user browses several months quickly", async () => {
+		monthlyApi();
+		await model.initialize();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		const old = model.browseMonth(1);
+		await flushPromises();
+		await model.browseMonth(1);
+		await flushPromises();
+		late.resolve(ok(complete()));
+		await old;
+		expect(model.month.value).toBe("2026-12");
+		expect(model.snapshot.value.scope.month).toBe("2026-12");
+	});
+	it("keeps tab changes local while another month is being fetched", async () => {
+		monthlyApi();
+		await model.initialize();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		const pending = model.browseMonth(1);
+		await flushPromises();
+		const before = api.getDayDetail.mock.calls.length;
+		await model.setDetailView("customers");
+		expect(api.getDayDetail).toHaveBeenCalledTimes(before);
+		const monthly = await api.getSnapshotStatus("202611".padStart(32, "0"));
+		late.resolve(monthly);
+		await pending;
+		expect(api.getDayDetail.mock.calls.at(-1)[2]).toBe("Receivable");
+	});
+	it("honours an adjacent click back into the loaded month during a slow navigation", async () => {
+		monthlyApi();
+		await model.initialize();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		const pending = model.browseMonth(1);
+		await flushPromises();
+		await model.selectDate("2026-10-31");
+		late.resolve(await api.getSnapshotStatus("202611".padStart(32, "0")));
+		await pending;
+		expect(model.snapshot.value.scope.month).toBe("2026-10");
+		expect(model.selectedDate.value).toBe("2026-10-31");
+	});
+	it("loads a valid deep-linked month directly rather than building today first", async () => {
+		monthlyApi();
+		scope.stop();
+		scope = effectScope();
+		model = scope.run(() =>
+			usePaymentCalendar({ api, timezone: () => "UTC", initialDate: "2026-11-05" })
+		);
+		await model.initialize();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(1);
+		expect(api.requestSnapshot.mock.calls[0][2]).toBe("2026-11");
+		expect(model.selectedDate.value).toBe("2026-11-05");
+	});
+	it("coalesces rapid month choices behind the active server job", async () => {
+		monthlyApi();
+		await model.initialize();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		const loading = model.browseMonth(1);
+		await flushPromises();
+		await model.browseMonth(1);
+		await model.browseMonth(1);
+		await model.browseMonth(1);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(2);
+		expect(model.month.value).toBe("2027-02");
+		late.resolve(await api.getSnapshotStatus("202611".padStart(32, "0")));
+		await loading;
+		await flushPromises();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(3);
+		expect(model.snapshot.value.scope.month).toBe("2027-02");
+	});
+	it("keeps the current view on worker contention and retries only the latest month", async () => {
+		monthlyApi();
+		await model.initialize();
+		api.requestSnapshot.mockResolvedValueOnce(refusal("worker_busy"));
+		await model.browseMonth(1);
+		expect(model.snapshot.value).not.toBeNull();
+		expect(model.phase.value).toBe("ready");
+		expect(model.refreshing.value).toBe(true);
+		await model.browseMonth(1);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(model.snapshot.value.scope.month).toBe("2026-12");
+		expect(model.error.value).toBeNull();
+	});
+	it("bounds worker-busy retries and keeps only nonfinancial layout after expiry", async () => {
+		monthlyApi();
+		await model.initialize();
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+		try {
+			api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+			await model.browseMonth(1);
+			await vi.advanceTimersByTimeAsync(65000);
+			expect(model.refreshing.value).toBe(false);
+			expect(model.refreshIssue.value.code).toBe("worker_busy");
+			const count = api.requestSnapshot.mock.calls.length;
+			await vi.advanceTimersByTimeAsync(300000);
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+			expect(model.snapshot.value).toBeNull();
+			expect(model.loadingSnapshot.value.projection.book_cash).toBeNull();
+			expect(model.loadingSnapshot.value.projection.days).toEqual({});
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("stops panel loading when a month selection exhausts worker-busy retries", async () => {
+		monthlyApi();
+		await model.initialize();
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+		try {
+			api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+			await model.browseMonth(1);
+			expect(model.detailLoading.value).toBe(true);
+			await vi.advanceTimersByTimeAsync(65000);
+			expect(model.refreshIssue.value.code).toBe("worker_busy");
+			expect(model.detailLoading.value).toBe(false);
+			expect(model.upcomingLoading.value).toBe(false);
+			monthlyApi();
+			await model.refresh();
+			expect(model.snapshot.value.scope.month).toBe("2026-11");
+			expect(model.detailLoading.value).toBe(false);
+			expect(model.upcomingLoading.value).toBe(false);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("keeps a visible wall display fresh without input and stops on disposal", async () => {
+		monthlyApi();
+		await model.initialize();
+		const initialRequests = api.requestSnapshot.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(30 * 60000);
+		const requests = api.requestSnapshot.mock.calls.length;
+		expect(requests).toBeGreaterThan(initialRequests + 5);
+		expect(model.snapshot.value).not.toBeNull();
+		expect(Date.parse(model.snapshot.value.expires_at)).toBeGreaterThan(Date.now());
+		expect(model.detail.value).not.toBeNull();
+		expect(model.phase.value).toBe("ready");
+		expect(model.notice.value).not.toContain("inactive");
+		scope.stop();
+		document.dispatchEvent(new Event("click"));
+		document.dispatchEvent(new Event("keydown"));
+		document.dispatchEvent(new Event("wheel"));
+		await vi.advanceTimersByTimeAsync(20 * 60000);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(requests);
+	});
+	it("keeps refreshing while the user interacts without duplicating accepted jobs", async () => {
+		monthlyApi();
+		await model.initialize();
+		for (let i = 0; i < 5; i++) {
+			await vi.advanceTimersByTimeAsync(4 * 60000);
+			document.dispatchEvent(new Event(i % 2 ? "wheel" : "keydown"));
+			await flushPromises();
+		}
+		expect(api.requestSnapshot.mock.calls.length).toBeGreaterThan(4);
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		const pending = model.refresh({ automatic: true, background: true });
+		await flushPromises();
+		const count = api.requestSnapshot.mock.calls.length;
+		document.dispatchEvent(new Event("click"));
+		document.dispatchEvent(new Event("keydown"));
+		await flushPromises();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+		const fresh = complete();
+		fresh.scope.month = model.month.value;
+		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
+		late.resolve(ok(fresh));
+		await pending;
+	});
+	it("cancels worker-busy retries when the page is disposed", async () => {
+		monthlyApi();
+		await model.initialize();
+		api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+		await model.browseMonth(1);
+		const count = api.requestSnapshot.mock.calls.length;
+		scope.stop();
+		await vi.advanceTimersByTimeAsync(20000);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+		expect(model.loadingSnapshot.value).toBeNull();
+	});
+	it("drops worker-busy retries and old layout when company changes", async () => {
+		await model.initialize();
+		api.requestSnapshot.mockResolvedValueOnce(refusal("worker_busy"));
+		await model.refresh({ background: true });
+		await model.chooseCompany("Services");
+		const count = api.requestSnapshot.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+		expect(model.snapshot.value.scope.company).toBe("Services");
+		expect(model.loadingSnapshot.value).toBeNull();
+	});
+	it("removes the loading frame as soon as a busy retry reports revoked access", async () => {
+		await model.initialize();
+		api.requestSnapshot.mockResolvedValueOnce(refusal("worker_busy"));
+		await model.refresh({ background: true });
+		api.requestSnapshot.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
+		api.getCapabilities.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(model.phase.value).toBe("forbidden");
+		expect(model.snapshot.value).toBeNull();
+		expect(model.loadingSnapshot.value).toBeNull();
+	});
+	it("recovers to the server-current month when an old month leaves the allowed range", async () => {
+		monthlyApi();
+		await model.initialize();
+		await model.selectDate("2025-10-30");
+		vi.setSystemTime(new Date("2026-11-01T00:00:00Z"));
+		api.requestSnapshot.mockResolvedValueOnce(refusal("invalid_request", "invalid"));
+		window.dispatchEvent(new Event("focus"));
+		await flushPromises();
+		expect(api.requestSnapshot.mock.calls.at(-1)[2]).toBe("current");
+		expect(model.month.value).toBe("2026-11");
+		expect(model.selectedDate.value).toBe("2026-11-01");
+		expect(model.phase.value).toBe("ready");
+	});
+	it("does not loop when current-month fallback still has invalid inputs", async () => {
+		monthlyApi();
+		await model.initialize();
+		const count = api.requestSnapshot.mock.calls.length;
+		api.requestSnapshot.mockResolvedValue(refusal("invalid_request", "invalid"));
+		await model.refresh({ background: true });
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(count + 2);
+		expect(model.phase.value).toBe("failed");
+	});
+	it("loads the latest requested month even if the superseded month's job fails", async () => {
+		monthlyApi();
+		await model.initialize();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		const pending = model.browseMonth(1);
+		await flushPromises();
+		await model.browseMonth(1);
+		late.resolve(ok({ state: "failed", code: "job_lost" }));
+		await pending;
+		expect(model.snapshot.value.scope.month).toBe("2026-12");
+		expect(model.phase.value).toBe("ready");
+	});
+	it("rechecks permissions before recovering from a purged superseded snapshot", async () => {
+		monthlyApi();
+		await model.initialize();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		const pending = model.browseMonth(1);
+		await flushPromises();
+		await model.browseMonth(1);
+		const count = api.getCapabilities.mock.calls.length;
+		late.resolve(refusal("not_found_or_expired", "expired"));
+		await pending;
+		expect(api.getCapabilities.mock.calls.length).toBeGreaterThan(count);
+		expect(model.snapshot.value.scope.month).toBe("2026-12");
+	});
+	it("waits and retries worker contention on first open without an immediate error page", async () => {
+		monthlyApi();
+		api.requestSnapshot.mockResolvedValueOnce(refusal("worker_busy"));
+		await model.initialize();
+		expect(model.phase.value).toBe("requesting");
+		expect(model.waitingForWorker.value).toBe(true);
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(model.phase.value).toBe("ready");
+		expect(model.error.value).toBeNull();
+	});
+	it("offers explicit recovery after bounded initial-load worker contention", async () => {
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+		try {
+			api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+			await model.initialize();
+			await vi.advanceTimersByTimeAsync(65000);
+			expect(model.phase.value).toBe("failed");
+			expect(model.error.value.code).toBe("worker_busy");
+			expect(model.loadingSnapshot.value).toBeNull();
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("does not recover a purged superseded snapshot after permissions are revoked", async () => {
+		monthlyApi();
+		await model.initialize();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		const pending = model.browseMonth(1);
+		await flushPromises();
+		await model.browseMonth(1);
+		api.getCapabilities.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
+		late.resolve(refusal("not_found_or_expired", "expired"));
+		await pending;
+		expect(model.phase.value).toBe("forbidden");
+		expect(model.snapshot.value).toBeNull();
+		expect(model.loadingSnapshot.value).toBeNull();
+		expect(api.requestSnapshot).toHaveBeenCalledTimes(2);
+	});
+	it("keeps a newer selection while a server-current month fallback is running", async () => {
+		monthlyApi();
+		await model.initialize();
+		await model.selectDate("2025-10-30");
+		vi.setSystemTime(new Date("2026-11-01T00:00:00Z"));
+		const late = deferred();
+		api.requestSnapshot.mockResolvedValueOnce(refusal("invalid_request", "invalid"));
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		window.dispatchEvent(new Event("focus"));
+		await flushPromises();
+		await model.browseMonth(1);
+		late.resolve(await api.getSnapshotStatus("202611".padStart(32, "0")));
+		await flushPromises();
+		expect(model.month.value).toBe("2025-11");
+		expect(model.snapshot.value.scope.month).toBe("2025-11");
+	});
 });

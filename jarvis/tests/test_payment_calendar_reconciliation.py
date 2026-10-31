@@ -115,6 +115,138 @@ class TestPaymentCalendarReconciliation(TestCase):
 			)
 		return invoice
 
+	def foreign_rounding(self, side="Payable", *, ledger=5733.78, scheduled=5733.79, paid=0):
+		invoice = self.fx.invoice((scheduled,), side=side, gross_total=ledger, paid=paid)
+		doctype = "Purchase Invoice" if side == "Payable" else "Sales Invoice"
+		account = self.fx.payable if side == "Payable" else self.fx.receivable
+		frappe.db.set_value("Account", account, "account_currency", "USD")
+		frappe.db.set_value(
+			doctype,
+			invoice,
+			{
+				"currency": "USD",
+				"party_account_currency": "USD",
+				"conversion_rate": 92.9,
+				"grand_total": 61.72,
+				"rounded_total": 61.72,
+				"base_grand_total": ledger,
+				"base_rounded_total": scheduled,
+			},
+		)
+		doc = frappe.get_doc(doctype, invoice)
+		doc.payment_schedule[0].invoice_portion = 100
+		doc.set_payment_schedule()
+		for term in doc.payment_schedule:
+			term.db_update()
+		frappe.db.set_value(
+			"Payment Ledger Entry",
+			self.fx.prefix + "InvoicePLE" + str(self.fx.serial),
+			{
+				"account_currency": "USD",
+				"amount_in_account_currency": 61.72,
+			},
+		)
+		if paid:
+			frappe.db.set_value(
+				"Payment Ledger Entry",
+				self.fx.prefix + "PaymentPLE" + str(self.fx.serial),
+				{
+					"account_currency": "USD",
+					"amount_in_account_currency": -paid / 92.9,
+				},
+			)
+		return invoice
+
+	def test_foreign_rounding_uses_exact_native_ledger_balance_on_both_sides(self):
+		for side in ("Payable", "Receivable"):
+			with self.subTest(side=side):
+				invoice = self.foreign_rounding(side)
+				result = self.read(side)
+				rows = [r for r in result["rows"] if r["voucher_no"] == invoice]
+				self.assertEqual(len(rows), 1)
+				self.assertEqual(Decimal(rows[0]["remaining"]), Decimal("5733.78"))
+				self.assertEqual(rows[0]["due_date"], add_days(self.fx.today, 10))
+				self.assertEqual(rows[0]["allocation_reason"], "foreign_rounding")
+				self.assertEqual(rows[0]["allocation_basis"], "invoice")
+				self.assertIsNone(rows[0]["paid"])
+
+	def test_foreign_rounding_retains_partial_payment_ledger_residual(self):
+		invoice = self.foreign_rounding(paid=929)
+		rows = [r for r in self.read()["rows"] if r["voucher_no"] == invoice]
+		self.assertEqual(Decimal(rows[0]["remaining"]), Decimal("4804.78"))
+		self.assertEqual(rows[0]["settlement"], "Partially settled")
+
+	def test_foreign_rounding_handles_the_opposite_minor_unit_direction(self):
+		invoice = self.foreign_rounding(ledger=5733.80)
+		rows = [r for r in self.read()["rows"] if r["voucher_no"] == invoice]
+		self.assertEqual(Decimal(rows[0]["remaining"]), Decimal("5733.80"))
+		self.assertEqual(rows[0]["allocation_reason"], "foreign_rounding")
+
+	def test_foreign_rounding_preserves_a_fully_settled_overlay_without_new_dues(self):
+		invoice = self.foreign_rounding(paid=5733.78)
+		frappe.db.set_value(
+			"Payment Ledger Entry",
+			self.fx.prefix + "PaymentPLE" + str(self.fx.serial),
+			"amount_in_account_currency",
+			-61.72,
+		)
+		rows = [r for r in self.read()["rows"] if r["voucher_no"] == invoice]
+		self.assertTrue(rows)
+		self.assertEqual(sum(Decimal(r["remaining"]) for r in rows), 0)
+
+	def test_foreign_rounding_cannot_excuse_an_unexplained_larger_difference(self):
+		self.foreign_rounding(ledger=5733.50)
+		with self.assertRaises(CalendarSourceUnavailable):
+			self.read()
+
+	def test_foreign_rounding_cannot_excuse_a_wrong_schedule(self):
+		invoice = self.foreign_rounding()
+		frappe.db.set_value("Payment Schedule", {"parent": invoice}, "base_payment_amount", 5733.77)
+		with self.assertRaises(CalendarSourceUnavailable):
+			self.read()
+
+	def test_foreign_rounding_cannot_excuse_missing_currency_or_multi_term_splits(self):
+		invoice = self.foreign_rounding()
+		frappe.db.set_value("Purchase Invoice", invoice, "party_account_currency", None)
+		with self.assertRaises(CalendarSourceUnavailable):
+			self.read()
+		frappe.db.set_value("Purchase Invoice", invoice, "party_account_currency", "USD")
+		self.fx.insert(
+			"Payment Schedule",
+			"UnexpectedSplit",
+			parent=invoice,
+			parenttype="Purchase Invoice",
+			parentfield="payment_schedule",
+			payment_amount=0,
+			base_payment_amount=0,
+			due_date=add_days(self.fx.today, 20),
+		)
+		with self.assertRaises(CalendarSourceUnavailable):
+			self.read()
+
+	def test_foreign_rounding_does_not_change_native_reports_or_documents(self):
+		from erpnext.accounts.report.accounts_receivable.accounts_receivable import ReceivablePayableReport
+
+		invoice = self.foreign_rounding()
+
+		def ordinary():
+			return deepcopy(
+				ReceivablePayableReport(
+					{
+						"company": self.fx.company,
+						"report_date": self.fx.today,
+						"based_on_payment_terms": 0,
+						"range": "30,60,90,120",
+					}
+				).run({"account_type": "Payable", "naming_by": ["Buying Settings", "supp_master_name"]})
+			)
+
+		before = ordinary()
+		doc = frappe.get_doc("Purchase Invoice", invoice).as_dict()
+		self.read()
+		self.assertEqual(ordinary(), before)
+		self.assertEqual(frappe.get_doc("Purchase Invoice", invoice).as_dict(), doc)
+
 	def test_withholding_uses_native_invoice_balance_and_preserves_the_only_due_date(self):
 		invoice = self.withholding()
 		result = self.read()
