@@ -2301,6 +2301,12 @@ _ERROR_HINTS = {
 	# #707 B3: a read stopped at the statement time limit. Asking again unchanged
 	# hits the same limit; a narrower question is what runs.
 	"QueryTooSlowError": "Ask a narrower question: add a filter or a date range, or ask for a total.",
+	# A read refused for returning too many rows. Not a dead end: narrow the filters, or
+	# aggregate (GROUP BY / SUM / COUNT), then run it again.
+	"ResultTooLargeError": (
+		"Narrow the filters or aggregate (GROUP BY / SUM / COUNT), then run the read again. "
+		"This is not a failure of the report or the site."
+	),
 }
 # Frappe's User-Permission link denial reads "...not allowed to access this X
 # record because it is linked to Y '...' in field Z" - a more specific hint than
