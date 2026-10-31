@@ -155,10 +155,41 @@ function renderTable(rows) {
 // Build (possibly nested) list HTML from a run of list-item lines, nesting by
 // leading-space indent. A deeper indent nests inside the current item; a mixed
 // bullet/number type at the same indent starts a fresh sibling list.
+function indentColumns(prefix) {
+	let columns = 0;
+	for (const char of prefix) columns += char === "\t" ? 4 - (columns % 4) : 1;
+	return columns;
+}
+
+function startsListBlockBoundary(lines, index) {
+	const line = lines[index];
+	return (
+		/^\s*(#{1,4})\s+/.test(line) ||
+		/^\s*>\s?/.test(line) ||
+		/^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/.test(line) ||
+		(/\|/.test(line) &&
+			index + 1 < lines.length &&
+			/^\s*\|?[\s:-]+\|[\s:|-]*$/.test(lines[index + 1]))
+	);
+}
+
 function renderListBlock(items) {
 	let html = "";
 	const stack = []; // [{ indent, tag }], innermost last
 	for (const it of items) {
+		if (it.continuation) {
+			let closedList = false;
+			while (stack.length && it.indent < stack[stack.length - 1].contentIndent) {
+				html += `</li></${stack.pop().tag}>`;
+				closedList = true;
+			}
+			if (it.block) html += renderMarkdown(it.block);
+			else
+				html +=
+					(closedList ? "" : it.gap ? "<br><br>" : it.hardBreak ? "<br>" : " ") +
+					inline(it.text);
+			continue;
+		}
 		while (stack.length && it.indent < stack[stack.length - 1].indent) {
 			html += `</li></${stack.pop().tag}>`;
 		}
@@ -167,13 +198,14 @@ function renderListBlock(items) {
 			if (top.tag !== it.tag) {
 				html += `</li></${stack.pop().tag}>`;
 				html += `<${it.tag} class="jv-md-list"><li>`;
-				stack.push({ indent: it.indent, tag: it.tag });
+				stack.push({ indent: it.indent, tag: it.tag, contentIndent: it.contentIndent });
 			} else {
 				html += "</li><li>";
+				top.contentIndent = it.contentIndent;
 			}
 		} else {
 			html += `<${it.tag} class="jv-md-list"><li>`;
-			stack.push({ indent: it.indent, tag: it.tag });
+			stack.push({ indent: it.indent, tag: it.tag, contentIndent: it.contentIndent });
 		}
 		html += inline(it.text);
 	}
@@ -263,14 +295,50 @@ export function renderMarkdown(src) {
 		if (/^(\s*)([-*]|\d+\.)\s+/.test(line)) {
 			flushPara();
 			const items = [];
+			const ancestors = [];
+			let gap = false;
 			while (i < lines.length) {
-				const m = lines[i].match(/^(\s*)([-*]|\d+\.)\s+(.*)/);
+				if (startsListBlockBoundary(lines, i)) break;
+				const m = lines[i].match(/^(\s*)([-*]|\d+\.)([ \t]+)(.*)/);
 				if (m) {
-					items.push({
-						indent: m[1].length,
+					const item = {
+						indent: indentColumns(m[1]),
+						contentIndent: indentColumns(m[1] + m[2] + m[3]),
 						tag: /\d/.test(m[2]) ? "ol" : "ul",
-						text: m[3],
+						text: m[4],
+					};
+					while (ancestors.length && ancestors.at(-1).indent >= item.indent)
+						ancestors.pop();
+					ancestors.push(item);
+					items.push(item);
+					gap = false;
+					i++;
+					continue;
+				}
+				const indent = indentColumns(lines[i].match(/^[ \t]*/)[0]);
+				if (lines[i].trim() && ancestors.some((a) => indent >= a.contentIndent)) {
+					while (ancestors.length && indent < ancestors.at(-1).contentIndent)
+						ancestors.pop();
+					if (/^\s*```\s*([\w-]*)\s*$/.test(lines[i])) {
+						const start = i++;
+						while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) i++;
+						if (i < lines.length) i++;
+						items.push({
+							continuation: true,
+							indent,
+							block: lines.slice(start, i).join("\n"),
+						});
+						gap = false;
+						continue;
+					}
+					items.push({
+						continuation: true,
+						indent,
+						text: lines[i].trim(),
+						gap,
+						hardBreak: / {2,}$/.test(lines[i - 1] || ""),
 					});
+					gap = false;
 					i++;
 					continue;
 				}
@@ -281,7 +349,16 @@ export function renderMarkdown(src) {
 				if (!lines[i].trim()) {
 					let j = i + 1;
 					while (j < lines.length && !lines[j].trim()) j++;
-					if (j < lines.length && /^(\s*)([-*]|\d+\.)\s+/.test(lines[j])) {
+					if (
+						j < lines.length &&
+						(/^(\s*)([-*]|\d+\.)\s+/.test(lines[j]) ||
+							(ancestors.some(
+								(a) =>
+									indentColumns(lines[j].match(/^[ \t]*/)[0]) >= a.contentIndent
+							) &&
+								!startsListBlockBoundary(lines, j)))
+					) {
+						gap = true;
 						i = j;
 						continue;
 					}
