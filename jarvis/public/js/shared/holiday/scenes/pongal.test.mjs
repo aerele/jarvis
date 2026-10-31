@@ -105,6 +105,29 @@ test("a hero with no room left for the kolam and the hearth even at the row's sm
   assert.ok(fine.querySelectorAll(".t-kl").length > 0, "kept when it fits");
 });
 
+test("a relayout that leaves the hero no room for the kolam and the hearth takes them out then, and they stay out", () => {
+  const { scene, svg, move } = start();
+  const page = boxes();
+  assert.ok(svg.querySelectorAll(".t-kl").length > 0, "drawn at the start");
+  const crowded = { ...page, hero: { x: 0, y: 0, w: 680, h: 640 } };
+  move(crowded);
+  scene.relayout(crowded);
+  assert.equal(svg.querySelectorAll(".t-kl").length, 0, "taken out");
+  assert.equal(
+    svg.querySelectorAll(".t-floor").length,
+    1,
+    "the rest of the row stays"
+  );
+  assert.equal(
+    svg.querySelectorAll(".t-edge").length,
+    4,
+    "the held props stay"
+  );
+  move(page);
+  scene.relayout(page);
+  assert.equal(svg.querySelectorAll(".t-kl").length, 0, "not drawn again");
+});
+
 test("the canes stay at their edge of the stage when the row shrinks on a short stage", () => {
   const { scene, svg, move } = start();
   const short = boxes({ h: 500, cardsBottom: 700 });
