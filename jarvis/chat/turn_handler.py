@@ -2559,7 +2559,8 @@ def _prepend_doc_context(user_message: str, context, conversation_id: str = "") 
 			'{"report_name":...,"filters":{...}}, for get_list {"doctype":...} - '
 			'never nested inside another "spec" or "args" key (test it with the '
 			"matching jarvis__ tool first); widgets "
-			'fetch with window.jarvis.data("<source_name>"). Style with the injected '
+			'fetch with window.jarvis.data("<source_name>"), which resolves with the '
+			"rows array (a run_report source also has .rows and .columns). Style with the injected "
 			"--jd-* CSS variables (--jd-bg/-surface/-ink/-heading/-muted/-line/"
 			"-accent/-font) and the window.JARVIS_THEME.palette chart colors instead "
 			"of hardcoding design. For a bespoke look the user switches to the Custom "
