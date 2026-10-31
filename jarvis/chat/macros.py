@@ -899,11 +899,8 @@ def _is_the_steps_own_turn(conversation: str, seed: str | None) -> bool:
 	return True
 
 
-def _one_line(text: str | None) -> str:
-	"""Text fit for a run row: one line, bounded, scrubbed. It is stored and shown
-	away from the chat (the run row, a notification, the closing message), so beside
-	the brand scrub an error gets on its way to the chat it loses anything shaped like
-	a credential: a sentence can carry a URL with a key in it."""
+def _scrubbed_line(text: str | None) -> str:
+	"""``text`` as one line, bounded and scrubbed, not yet cut to a reason's length."""
 	from jarvis.admin_client import _scrub_secrets
 	from jarvis.chat import egress_rules
 
@@ -913,7 +910,15 @@ def _one_line(text: str | None) -> str:
 	line = " ".join(str(text or "").split())
 	if len(line) > _SCRUB_INPUT_MAX:
 		line = line[:_SCRUB_INPUT_MAX].rsplit(" ", 1)[0]
-	line = egress_rules.redact(_scrub_secrets(line) or "") or ""
+	return egress_rules.redact(_scrub_secrets(line) or "") or ""
+
+
+def _one_line(text: str | None) -> str:
+	"""Text fit for a run row: one line, bounded, scrubbed. It is stored and shown
+	away from the chat (the run row, a notification, the closing message), so beside
+	the brand scrub an error gets on its way to the chat it loses anything shaped like
+	a credential: a sentence can carry a URL with a key in it."""
+	line = _scrubbed_line(text)
 	return line if len(line) <= _REASON_MAX else line[: _REASON_MAX - 1].rstrip() + "…"
 
 
@@ -942,7 +947,28 @@ def _plain_reason(raw) -> str:
 	if _reads_as_a_sentence(" ".join(str(raw).split())):
 		return line
 	headline = error_taxonomy.headline_for(raw)
-	return _one_line(headline.rstrip(".") + ".") if headline else ""
+	if not headline:
+		return ""
+	return _one_line(headline.rstrip(".") + "." + _reset_note(raw))
+
+
+# The part of a usage-limit error that says when the allowance comes back, up to the
+# separator the CLI puts after it. Read only for an error the "quota" rule matched.
+_RESET_AT = re.compile(r"\bresets?\s+(?:at\s+|on\s+|in\s+)?([^\n|\u00b7\u2219]{1,40})", re.IGNORECASE)
+
+
+def _reset_note(raw) -> str:
+	"""`` Resets 7:20am (UTC).`` for a usage-limit error that names when it resets, else "".
+	The headline alone tells an owner the allowance is used up, not when to try again."""
+	from jarvis.chat import error_taxonomy
+
+	if error_taxonomy.classify_error_text(raw) != "quota":
+		return ""
+	# Cut from the scrubbed line, never from the raw text: a cut can leave a credential
+	# as a prefix the scrub no longer recognises.
+	found = _RESET_AT.search(_scrubbed_line(raw))
+	when = found.group(1).strip(" .") if found else ""
+	return f" Resets {when}." if when else ""
 
 
 _REPLY_FIELDS = ["name", "content", "error", "streaming", "was_recovered"]
