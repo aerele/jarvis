@@ -7386,6 +7386,11 @@ function onOverlayBackdropClick(close) {
 
 // one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<row __key>:<col>"
 const draftLink = ref({ key: "", items: [], open: false, anchor: null });
+// Each popup belongs to one search, including its pending blur and response.
+let draftLinkGeneration = 0;
+onBeforeUnmount(() => {
+	draftLinkGeneration++;
+});
 const draftLinkError = ref("");
 // Company / row dependency changes invalidate suggestions even if a request is
 // still pending or its field remains focused. Existing field values stay intact.
@@ -7615,6 +7620,7 @@ function dismissDraftPanel() {
 	closeDraftPanel();
 }
 function closeDraftPanel() {
+	draftLinkGeneration++;
 	draftLinkError.value = "";
 	draftPanel.value = null;
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
@@ -7622,6 +7628,7 @@ function closeDraftPanel() {
 
 // Link search shared by panel fields + grid cells.
 async function onDraftLink(key, target, doctype, ev) {
+	const generation = ++draftLinkGeneration;
 	const anchor = ev && ev.target;
 	draftLink.value = { key, items: [], open: true, anchor };
 	const search = draftLink.value;
@@ -7640,6 +7647,7 @@ async function onDraftLink(key, target, doctype, ev) {
 			args.filters
 		);
 		if (
+			generation !== draftLinkGeneration ||
 			draftLink.value !== search ||
 			draftLinkContext(draftPanel.value, key) !== filterContext
 		)
@@ -7654,7 +7662,7 @@ async function onDraftLink(key, target, doctype, ev) {
 			filterContext,
 		};
 	} catch (e) {
-		if (draftLink.value === search) {
+		if (generation === draftLinkGeneration && draftLink.value === search) {
 			draftLink.value = { ...draftLink.value, open: false, items: [] };
 			draftLinkError.value =
 				e instanceof DraftLinkFilterError
@@ -7683,6 +7691,7 @@ async function fillRuleValues(doctype, tables, isCurrent = () => true) {
 	);
 }
 function pickDraftLink(setter, item) {
+	draftLinkGeneration++;
 	if (
 		draftLink.value.filterContext !== draftLinkContext(draftPanel.value, draftLink.value.key)
 	) {
@@ -7695,8 +7704,12 @@ function pickDraftLink(setter, item) {
 	const panel = draftPanel.value;
 	if (panel) fillRuleValues(panel.doctype, panel.tables, () => draftPanel.value === panel);
 }
-function closeDraftLink() {
+function closeDraftLink(ev) {
+	const generation = draftLinkGeneration;
+	const anchor = ev?.target || draftLink.value.anchor;
 	setTimeout(() => {
+		if (generation !== draftLinkGeneration || document.activeElement === anchor) return;
+		draftLinkGeneration++;
 		draftLink.value = { ...draftLink.value, open: false };
 	}, 160);
 }
