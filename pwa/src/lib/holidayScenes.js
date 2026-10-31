@@ -1,0 +1,76 @@
+// Keep in step with frontend/src/lib/holidayScenes.js (the desktop original). The phone differs
+// in three ways: no hero clearance (its hero does not move), no isSceneLoading() (the PWA router
+// has no preload-error guard to ask it), and no report for a load that failed offline.
+// Loads a holiday scene's art (jarvis/public/js/shared/holiday/scenes/<design>.mjs) the
+// first time a welcome screen may play it. A static map of literal import paths, never a
+// template string, so the bundler can see every scene and name its chunk `holiday-*`
+// (see holidayChunkNames in vite.config.js). A design with no entry here has no scene.
+//
+// Like the worn art (lib/holidayWorn.js) the scene is optional decoration, so a failed
+// import (a stale chunk after a deploy, an offline tab) gives null: no scene, the cards
+// show, nothing reloads and nothing throws.
+// The first failure per design in the session is reported with a fixed text and the design
+// in error_code (the error reporter drops chunk-load messages as already handled). Not while the
+// phone is offline: an import cannot succeed then, so there is nothing for support to learn.
+import { _resetReportedForTests, reportSceneFailure } from "./holidayReport";
+
+// One scene per design (the republic occasion plays the independence design). Each import is
+// a literal path, so each scene is its own chunk and the shared runtime and art helpers fall
+// into a common holiday-* chunk.
+export const SCENE_LOADERS = {
+	birthday: () => import("@jsshared/holiday/scenes/birthday.mjs"),
+	christmas: () => import("@jsshared/holiday/scenes/christmas.mjs"),
+	diwali: () => import("@jsshared/holiday/scenes/diwali.mjs"),
+	eid: () => import("@jsshared/holiday/scenes/eid.mjs"),
+	holi: () => import("@jsshared/holiday/scenes/holi.mjs"),
+	independence: () => import("@jsshared/holiday/scenes/independence.mjs"),
+	newyear: () => import("@jsshared/holiday/scenes/newyear.mjs"),
+	onam: () => import("@jsshared/holiday/scenes/onam.mjs"),
+	pongal: () => import("@jsshared/holiday/scenes/pongal.mjs"),
+};
+
+export const SCENE_RETRY_MS = 60 * 1000;
+
+const loaded = new Map(); // design -> module, kept for the life of the page
+const pending = new Map(); // design -> import in flight
+const retryAt = new Map(); // design -> no new attempt before this time (ms since epoch)
+
+const offline = () => typeof navigator !== "undefined" && navigator.onLine === false;
+
+/** Does this design have a scene in this build? Own keys only: "toString" has none. */
+export function hasScene(design) {
+	return typeof design === "string" && Object.hasOwn(SCENE_LOADERS, design);
+}
+
+/** Resolves to the scene module, or null when there is none or it cannot load. Never rejects. */
+export function loadScene(design, { now = Date.now, loaders = SCENE_LOADERS } = {}) {
+	if (!Object.hasOwn(loaders, design)) return Promise.resolve(null);
+	if (loaded.has(design)) return Promise.resolve(loaded.get(design));
+	if (pending.has(design)) return pending.get(design);
+	if (now() < (retryAt.get(design) || 0)) return Promise.resolve(null);
+	const attempt = Promise.resolve()
+		.then(loaders[design])
+		.then((mod) => {
+			if (!mod || typeof mod.play !== "function") throw new Error("not a scene");
+			loaded.set(design, mod);
+			return mod;
+		})
+		.catch((error) => {
+			retryAt.set(design, now() + SCENE_RETRY_MS);
+			if (!offline()) reportSceneFailure("load", design, error);
+			return null;
+		})
+		.finally(() => {
+			pending.delete(design);
+		});
+	pending.set(design, attempt);
+	return attempt;
+}
+
+/** Test-only: forget everything, so each spec starts from a fresh page. */
+export function _resetForTests() {
+	loaded.clear();
+	pending.clear();
+	retryAt.clear();
+	_resetReportedForTests();
+}

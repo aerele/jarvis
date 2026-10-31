@@ -127,7 +127,8 @@ export const centreUp = (row) => (row.mid === undefined ? row.up : row.mid);
  *   same amount, as one group about its bottom centre, so its top stays where the layout put it.
  * - `clearTop` (units, y down; the hero's bottom plus HERO_FLOOR_GAP_PX): the part of the row
  *   under the hero may not reach above it, so the row shrinks further about its bottom.
- * Neither rule shrinks past MIN_FLOOR_SCALE. A stage with room gives scale 1. `bottom` is the
+ * Neither rule shrinks past `minScale` (MIN_FLOOR_SCALE; the phone asks for more, see
+ * scene-phone.mjs phoneFloorMinScale). A stage with room gives scale 1. `bottom` is the
  * row's drawn bottom; `anchor` is where that bottom lands; `tight` says the part under the hero
  * still reaches above `clearTop` at the smallest scale (the scene then leaves that part out).
  */
@@ -138,6 +139,7 @@ export function floorFit({
   s,
   gapPx = FLOOR_GAP_PX,
   clearTop,
+  minScale = MIN_FLOOR_SCALE,
 }) {
   const bottom = ground - row.rise;
   const identity = {
@@ -150,13 +152,13 @@ export function floorFit({
   if (!Number.isFinite(bottom) || !(hostH > 0) || !(s > 0)) return identity;
   const over = pulledUp(bottom, hostH, s, gapPx);
   const height = row.up - row.rise;
-  let scale = Math.max(MIN_FLOOR_SCALE, Math.min(1, 1 - over / height));
+  let scale = Math.max(minScale, Math.min(1, 1 - over / height));
   const anchor = bottom - over;
   const mid = centreUp(row);
   let tight = false;
   if (Number.isFinite(clearTop) && Number.isFinite(mid) && mid > row.rise) {
     const room = (anchor - clearTop) / (mid - row.rise);
-    scale = Math.max(MIN_FLOOR_SCALE, Math.min(scale, room));
+    scale = Math.max(minScale, Math.min(scale, room));
     // Even the smallest row still reaches above the hero's clearance: the page can do no more.
     tight = anchor - scale * (mid - row.rise) < clearTop - TIGHT_SLACK_PX / s;
   }

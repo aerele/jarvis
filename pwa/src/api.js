@@ -42,6 +42,12 @@ export const getChatUiSettings = () => call(CHAT + "get_chat_ui_settings");
 export const getPromptSuggestions = () =>
 	call("jarvis.chat.user_settings_api.get_prompt_suggestions");
 
+// The holiday welcome scene asks the server for its showing slot (jarvis.holiday_touch.api).
+// Answers {play: bool}; rejects on a network or server error. frappe-ui's `call` POSTs with
+// the CSRF header, which this method needs. The scene gives it, and the art import, one
+// overall deadline (lib/useHolidayScene.js), so this call sets no timeout of its own.
+export const recordHolidayShown = () => call("jarvis.holiday_touch.api.record_shown");
+
 // The caller's own prefs. Carries default_auto_mode and auto_mode_acknowledged
 // (#581); update_my_settings takes either. Returns {ok, data}.
 const US = "jarvis.chat.user_settings_api.";

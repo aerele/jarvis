@@ -75,7 +75,7 @@ export function placeSplats(geo) {
       band === "top" ? y0 : band === "low" ? y0 + shift : sideY(y0, dyM, shift);
     const hw = r * REACH;
     const x = clearOfHero(
-      { x: edgeX(x0, geo), y, hw, hh: hw },
+      { x: edgeX(x0, geo, hw), y, hw, hh: hw },
       geo.keep,
       geo.from,
       geo.to

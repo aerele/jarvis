@@ -5,6 +5,7 @@
 import { lin, rad, rng } from "../stage.mjs";
 import { CLEAR } from "../scene-geometry.mjs";
 import { sparkleSVG, styleSVG } from "./scene-art.mjs";
+import { clearOfHero, squeezeX } from "./scene-place.mjs";
 
 export const MOON = { x: 652, y: 86, r: 34, glow: 80, rise: 134 };
 export const LANTERN = { string: 60, glowR: 20, drop: 32 };
@@ -56,8 +57,12 @@ export const moonY = ({ shift }) => Math.max(MOON.y + shift, CLEAR + MOON.r);
 export const moonSVG = (p) =>
   `<g class="${p}moon" opacity="0"><circle r="${MOON.glow}" fill="url(#${p}moonGlow)"/><circle r="${MOON.r}" fill="url(#${p}moonG)" mask="url(#${p}moonCut)"/></g>`;
 
-/** Sixteen stars in the sky, kept out of the column over the mark and inside the air. */
-export function starsSVG(p, { shift }) {
+/**
+ * Sixteen stars in the sky, kept out of the column over the mark and inside the air. On a
+ * phone (a squeezed stage) they are squeezed in too and kept off the hero's box.
+ */
+export function starsSVG(p, geo) {
+  const { shift } = geo;
   const rand = rng(41);
   const squeeze = Math.max(0.3, (170 + shift) / 170);
   const stars = Array.from({ length: 16 }, () => {
@@ -66,10 +71,14 @@ export function starsSVG(p, { shift }) {
     do {
       x = 40 + rand() * 720;
       y = 20 + rand() * 170;
-    } while (x > 300 && x < 500 && y > 40);
+    } while (
+      (x > 300 && x < 500 && y > 40) ||
+      (geo.squeeze < 1 &&
+        overHero(geo, squeezeX(x, geo), 20 + (y - 20) * squeeze))
+    );
     return sparkleSVG(
       p,
-      x,
+      squeezeX(x, geo),
       20 + (y - 20) * squeeze,
       0.3 + rand() * 0.35,
       rand() > 0.3 ? "#fbbf24" : "#a5b4fc"
@@ -78,11 +87,39 @@ export function starsSVG(p, { shift }) {
   return `<g class="${p}stars">${stars.join("")}</g>`;
 }
 
+const overHero = ({ keep }, x, y) =>
+  x > keep.l && x < keep.r && y > keep.t && y < keep.b;
+
 /** Where lantern i hangs (its origin): the low pair from the ground, the rest by the mark. */
-export function lanternSpot(i, { shift, ground }) {
+export function lanternSpot(i, geo) {
+  const { shift, ground } = geo;
   const s = SPOTS[i];
-  if (s.low) return [s.x, ground - s.low];
-  return [s.x, Math.max(s.y + shift, CLEAR + LANTERN.string)];
+  const x = squeezeX(s.x, geo);
+  if (s.low) return [x, ground - s.low];
+  return [x, Math.max(s.y + shift, CLEAR + LANTERN.string)];
+}
+
+// A lantern's box, from the top of its string to the bottom of its glow, as clearOfHero takes it.
+const LANTERN_BOX = {
+  hw: LANTERN.glowR,
+  up: LANTERN.string,
+  down: LANTERN.drop,
+};
+
+/**
+ * The x of each lantern on this stage, or null for one left out. On a phone the lanterns that
+ * hang by the mark are pushed out from in front of the hero, to the strip beside it, and are
+ * left out when it has none; the two low ones hang below the hero and stay. On desktop each
+ * is at its own x.
+ */
+export function lanternXs(geo) {
+  return SPOTS.map((s, i) => {
+    const [x, y] = lanternSpot(i, geo);
+    if (!(geo.squeeze < 1) || s.low) return x;
+    const { hw, up, down } = LANTERN_BOX;
+    const box = { x, y: y + (down - up) / 2, hw, hh: (up + down) / 2 };
+    return clearOfHero(box, geo.keep, geo.from, geo.to);
+  });
 }
 
 const lanternSVG = (
@@ -97,8 +134,14 @@ const lanternSVG = (
   <path d="M0 7.4 V22 M-6.4 15 H6.4" stroke="#b45309" stroke-width="1"/>
   <path d="M-5 24 H5 L0 30 Z" fill="#d97706"/></g></g>`;
 
-/** The three lanterns by the mark (`air`) and the two low ones (`low`) that make the floor row. */
-export const lanternsSVG = (p) => ({
-  air: [1, 2, 4].map((i) => lanternSVG(p, i)).join(""),
+/**
+ * The three lanterns by the mark (`air`; `xs` from lanternXs leaves out one with no room) and
+ * the two low ones (`low`) that make the floor row.
+ */
+export const lanternsSVG = (p, xs = SPOTS.map((s) => s.x)) => ({
+  air: [1, 2, 4]
+    .filter((i) => xs[i] !== null)
+    .map((i) => lanternSVG(p, i))
+    .join(""),
   low: LOW.map((i) => lanternSVG(p, i)).join(""),
 });

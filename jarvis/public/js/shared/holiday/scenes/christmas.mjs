@@ -3,9 +3,10 @@
 // clearance line and the top of the hero, at the size that fits.
 import { r2, rng, tr } from "../stage.mjs";
 import { Scene, playScene } from "./scene-runtime.mjs";
-import { toTile } from "./scene-place.mjs";
+import { squeezeX, toTile } from "./scene-place.mjs";
 import { landSparklesSVG, sparkleSVG } from "./scene-art.mjs";
 import {
+  FLOOR_GROW,
   FLOOR_ROW,
   LIGHTS,
   SLEIGH,
@@ -83,7 +84,13 @@ class ChristmasScene extends Scene {
     const floor = this.opts.replay
       ? ""
       : this.floorGroup(
-          this.onGround(floorSVG(p, (x, prop) => this.edge(x, prop)))
+          this.onGround(
+            floorSVG(
+              p,
+              (x, prop) => this.edge(x, prop),
+              (x, hw) => squeezeX(x, geo, { hw, g: FLOOR_GROW })
+            )
+          )
         );
     return `${floor}<g>${flakes}</g><g class="${p}trail">${trail}</g>
         ${this.item("christmas")}

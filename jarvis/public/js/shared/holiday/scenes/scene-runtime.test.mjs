@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { Stage } from "../stage.mjs";
 import { Scene, playScene } from "./scene-runtime.mjs";
 import { heroKeepOut } from "./scene-place.mjs";
+import { phoneBoxes } from "./phone-boxes.test-support.mjs";
 import {
   boxes,
   fakeHost,
@@ -211,4 +212,92 @@ test("a held prop moves back out as the floor row shrinks, and returns to the id
   assert.equal(heldTransform(r), "translate(0 0)");
   r.api.settle("instant");
   r.end();
+});
+
+// ---- the phone layout -------------------------------------------------------------------------
+
+// A scene with a floor row and nothing else; drawnGeo reads the geometry it was drawn with.
+class ReadsGeo extends Scene {
+  constructor(host, opts) {
+    super(host, opts, {
+      ...CFG,
+      row: { up: 52, rise: 0, mid: null, base: 0, g: 1 },
+    });
+  }
+
+  inner() {
+    return this.floorGroup("");
+  }
+}
+
+const drawnGeo = (over) => {
+  let seen;
+  class Spy extends ReadsGeo {
+    inner(geo) {
+      seen = geo;
+      return super.inner(geo);
+    }
+  }
+  const r = run(mod(Spy), over);
+  r.api.settle("instant");
+  r.end();
+  return seen;
+};
+
+test("the phone layout draws, over the 540-unit window at width / 540 px a unit", () => {
+  const page = phoneBoxes({ w: 390, h: 844 });
+  const r = run(mod(ReadsGeo), { layout: "phone", boxes: page });
+  assert.equal(r.host.svgs.length, 1, "the scene is drawn");
+  r.api.settle("instant");
+  r.end();
+  const geo = drawnGeo({ layout: "phone", boxes: page });
+  assert.ok(Math.abs(geo.s - 390 / 540) < 1e-12);
+  assert.ok(Math.abs(geo.from - 130) < 1e-9 && Math.abs(geo.to - 670) < 1e-9);
+  assert.ok(Math.abs(geo.squeeze - 0.675) < 1e-12);
+});
+
+test("a phone floor row never shrinks below 0.5 px a unit", () => {
+  const page = phoneBoxes({ w: 360, h: 640, starters: false });
+  const geo = drawnGeo({ layout: "phone", boxes: page });
+  assert.ok(
+    geo.floor.scale * geo.s >= 0.5 - 1e-9,
+    `${geo.floor.scale * geo.s}`
+  );
+});
+
+test("reduced motion rests on a phone too, and so does a layout the scenes do not draw", async () => {
+  for (const over of [
+    { reduced: true, layout: "phone", boxes: phoneBoxes() },
+    { layout: "rest" },
+  ]) {
+    const r = run(mod(ReadsGeo), over);
+    assert.equal(r.host.svgs.length, 0, "nothing drawn");
+    r.api.settle("end");
+    assert.deepEqual(r.names(), ["settle", "swap", "deliver", "peek"]);
+    await r.done();
+    r.end();
+  }
+});
+
+test("a page with no card band gets one from the hero's bottom to the layer's bottom", () => {
+  const page = phoneBoxes({ w: 390, h: 844, starters: false });
+  const { cards: _gone, ...bare } = page;
+  const geo = drawnGeo({ layout: "phone", boxes: bare });
+  const heroBottom = page.hero.y + page.hero.h;
+  assert.ok(Math.abs(geo.ground - (page.host.h / geo.s - 2)) < 1e-9);
+  assert.ok(heroBottom < page.host.h);
+  const zero = drawnGeo({
+    layout: "phone",
+    boxes: { ...page, cards: { ...page.cards, h: 0 } },
+  });
+  assert.equal(zero.ground, geo.ground);
+});
+
+test("a desktop page is measured as before: s capped at 1.25, no squeeze", () => {
+  const geo = drawnGeo({ boxes: boxes({ w: 2560 }) });
+  assert.equal(geo.s, 1.25);
+  assert.equal(geo.squeeze, 1);
+  const narrow = drawnGeo({ boxes: boxes({ w: 768 }) });
+  assert.equal(narrow.squeeze, 1);
+  assert.ok(Math.abs(narrow.s - 0.96) < 1e-12);
 });
