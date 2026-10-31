@@ -81,19 +81,28 @@ _BOOKKEEPING_KEYS = ("prepared_report_name",)
 _MATCH_SCAN = 50
 
 
-def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
+def handle_prepared(report_name: str, raw_filters: dict, *, user: str, since=None) -> dict:
 	"""Return a status envelope (ready / generating / failed / started) for a
 	prepared report. Pull-model, stateless, runs as ``user``. Raises
-	InvalidArgumentError when the background queue can't run the report."""
+	InvalidArgumentError when the background queue can't run the report.
+
+	``since`` (a macro run's start): only a copy or a run created at/after it counts,
+	so the step reads data made for this run. Nothing newer ⇒ a new run, whose
+	``started`` / ``generating`` envelopes carry ``waiting: True``. ``None`` is the
+	unbounded answer, unchanged."""
 	filters = gate_and_fill(report_name, raw_filters, user=user)
 
 	# 1. A completed copy we can read? (0 rows is a valid answer; unreadable -> fall through)
-	row = _latest(report_name, filters, user, ("Completed",))
+	row = _latest(report_name, filters, user, ("Completed",), since=since)
 	if row:
 		ready = _read_completed(row.name)
 		if ready is not None:
 			return ready
-	return _not_ready(report_name, filters, user)
+		if since is not None:
+			# A copy made for this run that will not read: regenerating would start a
+			# second 25-minute run behind it, so say so.
+			return _unreadable(report_name, row.name)
+	return _not_ready(report_name, filters, user, since=since)
 
 
 def completed_or_status(report_name: str, filters: dict, *, user: str) -> tuple[dict | None, dict | None]:
@@ -150,21 +159,44 @@ def fill_defaults(report_name: str, raw_filters: dict | str | None) -> dict:
 	return {**_report_defaults(report_name), **_canonical_filters(raw_filters)}
 
 
-def _not_ready(report_name: str, filters: dict, user: str) -> dict:
+def _not_ready(report_name: str, filters: dict, user: str, *, since=None) -> dict:
 	"""No readable completed copy: the most recent attempt decides (generating or a
 	terminal failure to surface), else (re)generate. Refuses (raises) if the queue
 	can't run it, so we never leave an orphan Queued row that no worker will drain."""
-	pending = _pending_state(report_name, filters, user)
+	pending = _pending_state(report_name, filters, user, since=since)
 	if pending is not None:
-		return pending
+		return _waiting(pending) if since is not None else pending
 	_require_worker()
 	run = make_prepared_report(report_name, filters)["name"]
+	if since is not None:
+		return _waiting(_envelope(report_name, "started", "", run=run))
 	return _envelope(
 		report_name,
 		"started",
 		"This report is heavy, so it runs in the background - I've started it. "
 		"Ask me again in a little while and I'll have the results.",
 		run=run,
+	)
+
+
+def _waiting(env: dict) -> dict:
+	"""``env`` for a step that waits on the report: a run in flight is marked
+	``waiting`` with the instruction to stop; ``failed`` is left as it is."""
+	if env["status"] in ("started", "generating"):
+		env["waiting"] = True
+		env["message"] = _WAITING_MESSAGE
+	return env
+
+
+def _unreadable(report_name: str, run: str) -> dict:
+	detail = "the report's output could not be read"
+	return _envelope(
+		report_name,
+		"failed",
+		f"That report finished, but {detail}. An administrator can see it in Prepared Report {run}.",
+		run=run,
+		reason="internal",
+		error=detail,
 	)
 
 
@@ -355,7 +387,7 @@ def _ready_message(row_count: int, as_of) -> str:
 # --------------------------------------------------------------------------- #
 # in-flight / recent failure / worker
 # --------------------------------------------------------------------------- #
-def _pending_state(report_name: str, filters: dict, user: str) -> dict | None:
+def _pending_state(report_name: str, filters: dict, user: str, *, since=None) -> dict | None:
 	"""State from the most recent NON-completed run for this owner+filters:
 	`generating` if a run is in flight within its stall deadline, `failed` if the
 	most recent run terminally errored, or None (nothing pending, or the in-flight
@@ -364,7 +396,9 @@ def _pending_state(report_name: str, filters: dict, user: str) -> dict | None:
 	One query over the SINGLE newest attempt, so an old failure can never shadow a
 	newer in-flight run. Owner-scoped with ignore_permissions - a normal ERP user
 	lacks the Prepared Report read role, so a permission-checked read finds nothing."""
-	row = _latest(report_name, filters, user, (*_INFLIGHT_STATUSES, *_FAILED_STATUSES, "Cancelled"))
+	row = _latest(
+		report_name, filters, user, (*_INFLIGHT_STATUSES, *_FAILED_STATUSES, "Cancelled"), since=since
+	)
 	if not row or row.status == "Cancelled":
 		# A run someone stopped (v16 Cancelled) is not pending and is no failure to
 		# surface: asked again, start it again. Counted so it shadows an older Error.
@@ -406,6 +440,12 @@ _FAILED_MESSAGES = {
 	"it. An administrator can see the error in Prepared Report {run}.",
 }
 _FAILURE_DETAIL_MAX = 300
+# What a macro step is told when its report is generating (see ``handle_prepared``).
+_WAITING_MESSAGE = (
+	"This report is generating in the background. Start any other reports this step needs now, "
+	"then stop: Jarvis will continue this step automatically when they are ready. Do not send, "
+	"create or change anything in this step until then."
+)
 _TIMED_OUT = "It took too long to generate and was stopped."
 _NO_PERMISSION = "You don't have permission to run this report."
 # frappe.exceptions that wrap a database error: their message is the driver's
@@ -468,17 +508,21 @@ def _clean_detail(message: str) -> str:
 	return text
 
 
-def _latest(report_name, filters, user, statuses):
-	"""Newest owner-scoped Prepared Report for these filters in one of ``statuses``.
+def _latest(report_name, filters, user, statuses, since=None):
+	"""Newest owner-scoped Prepared Report for these filters in one of ``statuses``,
+	created at/after ``since`` when that is given.
 
 	Matched on the filters' meaning, not Frappe's exact JSON string (#635): a run
 	started from Desk stores the empty filters it showed and its own value types
 	(1 for true, a multi-select in its own order), so the copy it left was never
 	found and the report ran again."""
 	want = _match_key(filters)
+	conditions = {"report_name": report_name, "owner": user, "status": ("in", statuses)}
+	if since is not None:
+		conditions["creation"] = (">=", since)
 	rows = frappe.get_all(
 		"Prepared Report",
-		filters={"report_name": report_name, "owner": user, "status": ("in", statuses)},
+		filters=conditions,
 		fields=["name", "filters", "status", "creation"],
 		order_by="creation desc",
 		limit=_MATCH_SCAN,

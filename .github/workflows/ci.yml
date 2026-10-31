@@ -190,6 +190,7 @@ jobs:
         run: |
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
           node --test jarvis/public/js/*.test.mjs jarvis/public/js/shared/*.test.mjs
+          node --test jarvis/public/js/shared/holiday/*.test.mjs jarvis/public/js/shared/holiday/scenes/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
   # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
@@ -215,6 +216,12 @@ jobs:
           printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
       - name: Build the SPA (Vite) — the /jarvis deploy artifact
         run: npm run install-frontend && npm run build-frontend
+      - name: Holiday worn-item art stays out of the main bundle
+        # The art is lazy (holiday-* chunk). A static import would put it in every
+        # user's first load, and nothing else would notice. The gate has a self-test.
+        run: |
+          node --test frontend/scripts/check-holiday-chunks.test.mjs
+          node frontend/scripts/check-holiday-chunks.mjs
 
   tests:
     runs-on: ubuntu-latest

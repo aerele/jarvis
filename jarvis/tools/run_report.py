@@ -3,6 +3,7 @@ import json
 import frappe
 from frappe.desk.query_report import run as frappe_run_report
 
+from jarvis.chat import macro_report_wait
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools import _prepared_reports
 from jarvis.tools._report_scope import attach_scope, resolve_scope
@@ -33,8 +34,13 @@ def run_report(report_name: str, filters: dict | str | None = None) -> dict:
 	# A raw get_value on the named report reads the correct flag even for a
 	# Custom Report (get_report_doc carries the custom doc's own prepared_report).
 	if frappe.db.get_value("Report", report_name, "prepared_report"):
+		# Inside a macro run's own step a copy must be as new as the run (see macro_report_wait).
+		ctx = macro_report_wait.current_context()
 		return attach_scope(
-			_prepared_reports.handle_prepared(report_name, filters, user=frappe.session.user), scope
+			_prepared_reports.handle_prepared(
+				report_name, filters, user=frappe.session.user, since=ctx.started_at if ctx else None
+			),
+			scope,
 		)
 
 	try:

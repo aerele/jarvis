@@ -2,8 +2,8 @@
 
 Each local day allows at most one showing before 13:00 and one from 13:00, and the
 afternoon one waits 3 hours after the morning one. Showings are stored as UTC instants;
-the slot is derived in the caller's zone. ``add_showing`` builds the stored showing state; nothing on the server calls it yet, it is
-added with the Christmas-track client that reports showings.
+the slot is derived in the caller's zone. ``add_showing`` builds the stored showing state;
+``api.record_shown`` is its caller.
 """
 
 from __future__ import annotations
