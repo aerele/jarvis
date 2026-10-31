@@ -2494,14 +2494,6 @@ def _dispatch_and_wrap(
 			provenance=provenance,
 			provenance_name=provenance_name,
 		)
-	if not envelope_ok(tool, {"ok": True, "data": data}):
-		# A connector call that dispatched but answered {ok: false} inside its own
-		# envelope: the agent got a failure under an outer ok:true, so no failure
-		# branch above saw it.
-		from jarvis import api_errors
-
-		api_errors.record_tool_failure(tool, data.get("error") if isinstance(data, dict) else None)
-		frappe.local.jarvis_tool_failure_recorded = True
 	return {"ok": True, "data": data}
 
 
