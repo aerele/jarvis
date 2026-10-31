@@ -80,6 +80,12 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	"""Prepare one reserved ``queued`` turn for dispatch. Idempotent + re-offer-safe;
 	returns a small status dict. Never raises out (a prepare crash must not kill the
 	pump hop; the deadline watchdog reclaims a stuck ``preparing`` turn)."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(frappe.db.get_value(TURN, run_id, "conversation")):
+		from jarvis.chat.collaboration_workers import prepare_shared
+
+		return prepare_shared(run_id, relay_target_id)
 	try:
 		result = txn.replay_on_conflict(
 			lambda: _claim_preparing_unit(run_id), label=f"prepare.claim_preparing {run_id}", fresh=True
@@ -274,6 +280,9 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 		"turn_start_ms": turn_start_ms,
 		"context": context,
 		"attachments_raw": attachments,
+		# The ack window the pump waits after the frame is written, sized like the
+		# legacy path's (the agent ingests the whole message before it acks).
+		"ack_timeout_s": turn_handler._ack_timeout_s(len(managed_attachments or []), ap.inlined_prompt_chars),
 	}
 	# (CDX-7) store the handoff payload through an ACTOR-fenced CAS: a prepare that
 	# lost the preparing claim discards its payload (never stamping dispatch state onto

@@ -6410,14 +6410,17 @@ const visibleMessages = computed(() =>
 		// placeholder that is not (or no longer) the turn THIS tab has live —
 		// a missed terminal, a different in-flight turn, or a reload landing
 		// between runs. A placeholder that has text, an error, or a canvas is
-		// a real reply and always renders regardless.
+		// a real reply and always renders regardless. So does the row parked for
+		// background recovery: its "Finishing in the background" copy renders
+		// inside it (overrideFor), and run:recovering clears currentRunId.
 		if (
 			m.role === "assistant" &&
 			m.streaming &&
 			!(m.content || "").trim() &&
 			!m.error &&
 			!(m.canvas && m.canvas.length) &&
-			!(currentRunId.value && m.name === currentMsgId.value)
+			!(currentRunId.value && m.name === currentMsgId.value) &&
+			recovering.value?.message_id !== m.name
 		)
 			return false;
 		return true;

@@ -301,6 +301,10 @@ class SessionPinSweep:
 		default is invisible here - and unreachable through sessions.patch, which
 		clears such a selection instead of storing it."""
 		key = row.get("key") or ""
+		from jarvis.chat.collaboration import is_collaborative_session
+
+		if is_collaborative_session(key):
+			return None
 		pinned = _model_ref(row)
 		if not key or not pinned or pinned == default_ref:
 			return None

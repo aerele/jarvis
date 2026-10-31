@@ -71,15 +71,24 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import frappe
+from frappe.query_builder import CustomFunction
+from frappe.query_builder.functions import Coalesce
 
 from jarvis import compat
 from jarvis.chat import empty_reply_recovery, txn
 from jarvis.chat import turn_state as ts
-from jarvis.chat.agent_client import YIELD_CONTINUATION_WAIT_S
+from jarvis.chat.agent_client import (
+	IO_GATE_WAIT_S,
+	IO_WRITE_TIMEOUT_S,
+	YIELD_CONTINUATION_WAIT_S,
+	SendNotStarted,
+)
+from jarvis.chat.collaboration_ownership import executor_clause, legacy_clause
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import AgentUnreachableError, SiteIsCopyError
 
@@ -125,6 +134,17 @@ SLICE_BLOCK_S = 0.2
 # chat.send ack window. Longer than the mux default so a busy accept path still
 # acks; on expiry the mux raises the `ack-timeout` sentinel → park recovering.
 ACK_TIMEOUT_S = 15.0
+
+# #773 per-write lease admission. A gateway write may wait IO_GATE_WAIT_S (5) for the
+# socket and take IO_WRITE_TIMEOUT_S (10) to finish. It is started only when that,
+# plus IO_PRESEND_SLACK_S for the DB work between the check and the send, ends before
+# the LOCAL lease bound minus LEASE_IO_MARGIN_S (clock/renew margin) and
+# SLICE_TAIL_RESERVE_S (the rest of the slice up to its renew). With LEASE_TTL_S=30
+# that admits writes while the lease is at most 7s old; a slice that cannot admit a
+# write defers it (no side effect) and forces a renew at its end.
+LEASE_IO_MARGIN_S = 3
+SLICE_TAIL_RESERVE_S = 4
+IO_PRESEND_SLACK_S = 1
 
 # DB-disconnect bounded backoff (D6 §6): after this many CONSECUTIVE slice-level
 # operational errors the pump PARKS the affected turns and exits (never spins).
@@ -319,6 +339,9 @@ def set_transport_mode(target: str, mode: str) -> int:
 	CALLER already holds (pump_cutover_execute), advancing ``mode_epoch`` by 1 so the change
 	is observable/orderable (CDX-10). No commit here — the caller commits the flip atomically
 	(or rolls it back on a straggler/fault). Returns the new mode_epoch (best-effort read)."""
+	from jarvis.chat.collaboration_ownership import require_drained_for_mode
+
+	require_drained_for_mode(target, mode)
 	frappe.db.sql(
 		"""UPDATE `tabJarvis Relay Pump` SET transport_mode=%(m)s, mode_epoch=mode_epoch+1
 		WHERE relay_target_id=%(t)s""",
@@ -1285,8 +1308,18 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 	event_seq = event.get("event_seq")
 	is_jarvis = (tool_name or "").startswith("jarvis__")
 	conversation = rs.conversation
+	shared_binding = None
+	if ":dashboard:collab:" in rs.session_key:
+		from jarvis.chat.collaboration_turn import binding_for_run
+
+		shared_binding = binding_for_run(rs.run_id)
+	display_id = tool_call_id
+	if shared_binding and tool_call_id:
+		from jarvis.chat.collaboration_tool_claims import receipt_id
+
+		display_id = receipt_id(shared_binding, rs.run_id, tool_call_id)
 	owns_row = (not is_jarvis) and bool(tool_call_id)  # pump owns the durable receipt
-	need_lock = owns_row and phase == "start"  # seq allocation under the conversation lock
+	need_lock = bool(shared_binding) or (owns_row and phase == "start")
 
 	def fenced_step() -> tuple[bool, str | None]:
 		"""One attempt at the fenced tool mutation. Returns ``(committed, message_id)``;
@@ -1296,8 +1329,14 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 			# rank-2 conversation lock; canonical order control->conversation->turn->message
 			# (no shard lock is held on the streaming path, so conversation-first is legal).
 			ts._lock_conversation(conversation)
+		if shared_binding:
+			from jarvis.chat.collaboration_output import lock_reply
+
+			lock_reply(shared_binding, rs.run_id, rs.assistant_message)
 		# CDX-15 fence: same-txn proof the turn is still streaming under epoch E.
-		if not ts.apply_tool_fenced(rs.run_id, rs.version, ctx.epoch, event_seq):
+		if not ts.apply_tool_fenced(
+			rs.run_id, rs.version, ctx.epoch, event_seq, allow_dispatching=bool(shared_binding)
+		):
 			if _epoch_lost(ctx, rs.run_id):
 				ts.lease_lost_exit(rs.run_id)  # rolls back + raises; on_tool -> ctx.lease_lost
 			# Benign 0-rows (watermark dup / version drift): release the lock, apply
@@ -1318,13 +1357,22 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 			rs.version += 1
 			from jarvis.chat.tool_ownership import record_tool_owner
 
-			record_tool_owner(conversation, rs.assistant_message, tool_call_id)
+			if shared_binding and phase == "start" and is_jarvis:
+				from jarvis.chat.collaboration_callbacks import record_gateway_tool
+
+				record_gateway_tool(rs.run_id, tool_call_id, tool_name)
+			record_tool_owner(conversation, rs.assistant_message, display_id)
 			row_id = None
 			if owns_row:
-				if phase == "start":
-					row_id = _insert_tool_start_row(conversation, tool_call_id, tool_name)
-				else:
-					row_id = _update_tool_end_row(conversation, tool_call_id, event.get("status"), rs.run_id)
+				from jarvis.chat.collaboration_turn import turn_context
+
+				with turn_context(shared_binding, rs.run_id) if shared_binding else nullcontext():
+					if phase == "start":
+						row_id = _insert_tool_start_row(conversation, display_id, tool_name)
+					else:
+						row_id = _update_tool_end_row(
+							conversation, display_id, event.get("status"), rs.run_id
+						)
 			frappe.db.commit()  # fence + durable tool row commit ATOMICALLY
 			return True, row_id
 		except Exception:
@@ -1375,7 +1423,7 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 				message_id=message_id,
 				tool_name=tool_name,
 				tool_title=event.get("title"),
-				tool_call_id=tool_call_id,
+				tool_call_id=display_id,
 				pump_epoch=ctx.epoch,
 				relay_target_id=ctx.relay_target_id,
 			)
@@ -1388,7 +1436,7 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 				event_seq=event_seq,
 				message_id=message_id,
 				tool_name=tool_name,
-				tool_call_id=tool_call_id,
+				tool_call_id=display_id,
 				status=event.get("status"),
 				pump_epoch=ctx.epoch,
 				relay_target_id=ctx.relay_target_id,
@@ -1521,10 +1569,17 @@ def _default_snapshot(ctx: "PumpContext") -> dict:
 	there is no active stream to freeze. Issues ``sessions.list`` and awaits the frame,
 	then parses it (:func:`_parse_snapshot_frame`); any error => the CDX-11 fail-CLOSED
 	shape. The MID-HOP refresh does NOT use this — it is issue-and-poll (CDX-17) so a
-	stalled control RPC never blocks delta application."""
+	stalled control RPC never blocks delta application.
+
+	#773: the write is lease-admitted and the wait never outlasts the lease's IO
+	deadline; either refusal is the same fail-closed shape."""
+	if not _io_admit(ctx):
+		return dict(_SNAPSHOT_FAILED)
 	try:
 		fut = ctx.mux.issue_rpc("sessions.list", {}, timeout_s=ACK_TIMEOUT_S)
-		frame = fut.result(ACK_TIMEOUT_S)
+		deadline = _io_deadline(ctx)
+		wait_s = ACK_TIMEOUT_S if deadline is None else min(ACK_TIMEOUT_S, max(0.0, deadline - _monotonic()))
+		frame = fut.result(wait_s)
 	except Exception:
 		return dict(_SNAPSHOT_FAILED)
 	return _parse_snapshot_frame(ctx, frame)
@@ -1724,6 +1779,18 @@ class PumpContext:
 	pending_recoveries: dict[str, _PendingRecovery] = field(default_factory=dict)
 	# CDX-17: the in-flight mid-hop capacity-refresh RPC (issue-and-poll, never blocked on).
 	pending_snapshot: _PendingSnapshot | None = None
+	shared_preflights: dict = field(default_factory=dict)
+	# #773: conservative LOCAL lease bound (monotonic): the stamp taken just BEFORE the
+	# last successful lease_acquire/lease_renew plus LEASE_TTL_S. None (a hand-built
+	# context) means no per-write admission, as before.
+	lease_valid_until: float | None = None
+	# A write site deferred this slice for lack of lease time, or a write was refused
+	# before any byte: renew at the slice end, and send no more of this wave.
+	io_deferred: bool = False
+	# Per-hop counters for the hop telemetry line (#773 review).
+	io_deferrals: int = 0
+	sends_returned: int = 0
+	abort_retries: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -1767,6 +1834,21 @@ def run_pump_hop(
 	holder = f"jarvis-pump::{site}::{relay_target_id}::hop{hop_counter}"
 
 	hop_started_mono = _monotonic()
+	# A stale queued hop must not acquire/restamp legacy-RQ work before its
+	# later kill-switch check. Durable mode flips already hold the shard lock.
+	if _row_transport_mode(relay_target_id) == _MODE_LEGACY and frappe.db.has_column(
+		TURN, "collaboration_executor"
+	):
+		if frappe.db.exists(
+			TURN,
+			{
+				"relay_target_id": relay_target_id,
+				"collaboration_executor": "rq",
+				"state": ["in", ts.NONTERMINAL_STATES],
+			},
+		):
+			return {"acquired": False, "relay_target_id": relay_target_id}
+	lease_stamp = _monotonic()  # taken BEFORE the acquire: the DB expiry is later
 	won, epoch = ts.lease_acquire(relay_target_id, holder, hop_counter=hop_counter)
 	if not won or epoch is None:
 		return {"acquired": False, "relay_target_id": relay_target_id}
@@ -1779,6 +1861,7 @@ def run_pump_hop(
 		hop_counter=hop_counter,
 		site=site,
 		deps=deps,
+		lease_valid_until=lease_stamp + ts.LEASE_TTL_S,
 	)
 	now = _monotonic()
 	ctx.soft_deadline = now + soft_budget_s
@@ -1820,6 +1903,10 @@ def run_pump_hop(
 	op_errors = 0
 	conflicts = 0  # consecutive slices lost to a snapshot race
 	try:
+		# R0 (#773): renew before the first gateway write. Only kill-switch reads and the
+		# connect ran since the committed acquire, and a slow connect can outlive the
+		# lease: a lost lease exits here, before any write.
+		_renew_lease(ctx)
 		_reconcile_on_start(ctx)
 		slices = 0
 		while _monotonic() < ctx.soft_deadline and _monotonic() < ctx.hard_deadline:
@@ -1936,6 +2023,11 @@ def run_pump_hop(
 			stray_frames=mux_stats.get("stray_frames", 0),
 			deltas_dropped=mux_stats.get("deltas_dropped", 0),
 			lanes_quarantined=mux_stats.get("lanes_quarantined", 0),
+			writes_refused=mux_stats.get("writes_refused", 0),
+			writes_poisoned=mux_stats.get("writes_poisoned", 0),
+			io_deferrals=ctx.io_deferrals,
+			sends_returned=ctx.sends_returned,
+			abort_retries=ctx.abort_retries,
 		)
 	return {"acquired": True, "exit": outcome, "epoch": epoch}
 
@@ -2042,6 +2134,10 @@ def _maybe_refresh_capacity(ctx: PumpContext) -> None:
 		return  # a refresh is already in flight — do not stack another
 	if _monotonic() - ctx.last_snapshot_mono < SNAPSHOT_REFRESH_S:
 		return  # not due yet
+	if not _io_admit(ctx):
+		# #773: no lease time for the write. Neither fold a failed snapshot (that would
+		# wrongly fail capacity closed) nor stamp the cadence: retry next slice.
+		return
 	try:
 		fut = ctx.deps.issue_snapshot(ctx)
 	except Exception:
@@ -2220,9 +2316,13 @@ def _pump_active_convs(target: str) -> set[str]:
 
 
 def _pump_queued_reserved(target: str) -> list[dict]:
-	return frappe.db.sql(
-		"""SELECT run_id, conversation FROM `tabJarvis Chat Turn`
-		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=1
+	from jarvis.chat import collaboration as shared
+
+	paused = "" if shared.writes_ready() else legacy_clause()
+	# Only closed executor and schema predicates are formatted; target and time stay bound.
+	return frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
+		f"""SELECT run_id, conversation FROM `tabJarvis Chat Turn`
+		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=1 {executor_clause("pump")} {paused}
 		  AND ( reservation_expires_at IS NULL OR reservation_expires_at > %(now)s )
 		ORDER BY CASE turn_class WHEN 'interactive' THEN 0 ELSE 1 END, enqueued_at ASC, run_id ASC""",
 		{"t": target, "now": ts._now()},
@@ -2234,9 +2334,13 @@ def _pick_next_cold(target: str, active_convs: set[str], promoted_convs: set[str
 	"""Choose the next cold (reserved=0) queued turn to reserve — weighted classes
 	with a background floor of 1 (SUX-4a: when background work is queued,
 	interactive holds at most cap-1 credits), per-conversation single-flight."""
-	rows = frappe.db.sql(
-		"""SELECT run_id, conversation, turn_class FROM `tabJarvis Chat Turn`
-		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=0
+	from jarvis.chat import collaboration as shared
+
+	paused = "" if shared.writes_ready() else legacy_clause()
+	# Only closed executor and schema predicates are formatted; target stays bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
+		f"""SELECT run_id, conversation, turn_class FROM `tabJarvis Chat Turn`
+		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=0 {executor_clause("pump")} {paused}
 		ORDER BY enqueued_at ASC, run_id ASC LIMIT 200""",
 		{"t": target},
 		as_dict=True,
@@ -2278,15 +2382,21 @@ def _turn_state_count(target: str, turn_class: str) -> int:
 
 def _dispatch_ready(ctx: PumpContext) -> int:
 	target = ctx.relay_target_id
-	rows = frappe.db.sql(
-		"""SELECT run_id FROM `tabJarvis Chat Turn`
-		WHERE relay_target_id=%(t)s AND state='ready'
+	# Only the closed pump executor predicate is formatted; target stays bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
+		f"""SELECT run_id FROM `tabJarvis Chat Turn`
+		WHERE relay_target_id=%(t)s AND state='ready' {executor_clause("pump")}
 		ORDER BY ready_at ASC, run_id ASC LIMIT 50""",
 		{"t": target},
 		as_dict=True,
 	)
 	dispatched = 0
 	for r in rows:
+		# #773: stop the wave on a dead/poisoned transport, after a write this slice was
+		# refused or deferred (at most one refusal wait per slice), and defer (no side
+		# effect, the rows stay `ready` first in line) once the lease cannot cover a write.
+		if ctx.io_deferred or (ctx.mux is not None and ctx.mux.is_closed()) or not _io_admit(ctx):
+			break
 		if _dispatch_one(ctx, r["run_id"]):
 			dispatched += 1
 	return dispatched
@@ -2301,7 +2411,18 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 	turn = _read_dispatch_row(run_id)
 	if turn is None or turn["state"] != "ready":
 		return False
+	from jarvis.chat.collaboration import is_collaborative, is_collaborative_session
 
+	if is_collaborative(turn["conversation"]) or is_collaborative_session(
+		_load_dispatch(turn).get("session_key")
+	):
+		from jarvis.chat.collaboration_pump import dispatch_one
+
+		return dispatch_one(ctx, turn)
+
+	# #773: the last check before the first side effect (the CAS); deferred -> untouched.
+	if not _io_admit(ctx):
+		return False
 	# ready -> dispatching: E is FIRST stamped on the turn here, but the CAS now proves
 	# the SHARD control row still holds epoch E (confirm_dispatching's EXISTS clause,
 	# CDX-2) so a stale pump that read this ready row before a takeover cannot win. On
@@ -2357,19 +2478,194 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 			thinking=dispatch.get("thinking"),
 			attachments=dispatch.get("attachments"),
 		)
+	except SendNotStarted as exc:
+		# Refused locally before any byte of the frame left: nothing failed, the turn
+		# goes back to `ready` under the same key (PR #2201 review).
+		_return_unsent(ctx, rs, turn, exc)
+		return False
 	except AgentUnreachableError as exc:
-		# Immediate send failure (socket write failed) — resolve inline (rare).
+		# A write that started and failed is ``ack-timeout``: ambiguous, park
+		# recovering under the same key. This hop no longer tracks the run.
 		_handle_ack_failure(ctx, rs, exc)
+		ctx.runs.pop(run_id, None)
 		return False
 	# Park the ack: polled by _poll_pending; on our deadline the ack-timeout
-	# sentinel path fires (park recovering), never a blocking .result().
+	# sentinel path fires (park recovering), never a blocking .result(). The window
+	# starts now, after the whole frame was written.
 	ctx.pending_acks[run_id] = _PendingAck(
 		fut=fut,
-		deadline=_monotonic() + ACK_TIMEOUT_S,
+		deadline=_monotonic() + _ack_window_s(dispatch),
 		rs=rs,
 		drained_note_ids=dispatch.get("drained_note_ids"),
 	)
 	return True
+
+
+def _return_unsent(
+	ctx: PumpContext, rs: _RunState, prior: dict, exc: SendNotStarted, *, binding=None
+) -> None:
+	"""A ``chat.send`` refused locally, before any byte of it left, after this pump
+	claimed the turn (``ready -> dispatching``). Only the LOCAL ``SendNotStarted`` type
+	proves that; a gateway reply carrying the same code never reaches here.
+
+	The claim is undone (``ts.unclaim_unsent_dispatch``): the turn is back in ``ready``
+	with its key, request, credit and queue position, plus a server-only marker
+	(``unsent_return``) for its new version so a Stop naming this run can still cancel
+	it. Nobody is told anything failed: nothing did. The slice stops its wave and
+	renews the lease before any later write; this is not drain progress.
+
+	If the unclaim matches nothing, another writer moved the row. On a FRESH snapshot
+	(the transaction's own predates that write), ownership comes first: a lost shard
+	epoch exits. Then the row decides: gone or no longer ``dispatching`` -> theirs; a
+	Stop landed -> it is cancelled as never sent (no ``chat.abort``: there is no run);
+	any other version change -> the unclaim is retried once on the new version unless
+	the gateway may have the run, else the turn parks ``recovering``. Bounded: one
+	retry, one re-check after a lost cancel. ``binding`` marks a shared chat."""
+	run_id = rs.run_id
+	ctx.runs.pop(run_id, None)
+	ctx.shared_preflights.pop(run_id, None)
+	ctx.io_deferred = True
+	ctx.sends_returned += 1
+	outcome = "error"  # anything else reaches the hop's crash path
+	try:
+		outcome = _resolve_unsent(ctx, rs, prior, binding)
+	except ts.LeaseLostExit:
+		outcome = "lease_lost"
+		raise
+	finally:
+		_telemetry(
+			"send_returned",
+			target=ctx.relay_target_id,
+			run_id=run_id,
+			method="chat.send",
+			reason=getattr(exc, "reason", "closed"),
+			outcome=outcome,
+		)
+
+
+def _resolve_unsent(ctx: PumpContext, rs: _RunState, prior: dict, binding) -> str:
+	run_id, epoch = rs.run_id, ctx.epoch
+	stored = empty_reply_recovery.stored_dispatch(prior.get("dispatch_payload"))
+
+	def unclaim(version: int) -> bool:
+		payload = None
+		if stored is not None:
+			payload = json.dumps({**stored, "unsent_return": {"version": version + 1, "epoch": epoch}})
+
+		def unit() -> bool:
+			won = ts.unclaim_unsent_dispatch(
+				run_id, version, epoch, ctx.relay_target_id, prior=prior, payload=payload
+			)
+			if won:
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
+			return won
+
+		return txn.replay_on_conflict(unit, label=f"pump.return_unsent {run_id}", fresh=True)
+
+	if unclaim(rs.version):
+		return "ready"
+	retried = rechecked = False
+	while True:
+		# The 0-row UPDATE wrote nothing. End the transaction so the reads below see
+		# the present, not the snapshot it was opened on.
+		frappe.db.rollback()
+		if _shard_epoch_lost(ctx):
+			ts.lease_lost_exit(run_id)
+		row = frappe.db.get_value(
+			TURN,
+			run_id,
+			[
+				"state",
+				"version",
+				"pump_epoch",
+				"cancel_requested",
+				"gateway_run_id",
+				"first_event_at",
+				"last_event_seq",
+				"conversation",
+				"assistant_message",
+			],
+			as_dict=True,
+		)
+		if not row or row.state != "dispatching":
+			return "changed"
+		if int(row.pump_epoch or 0) != epoch:
+			ts.lease_lost_exit(run_id)
+		if row.cancel_requested:
+			if _cancel_unsent(ctx, run_id, row, binding):
+				return "cancelled"
+			if rechecked:
+				return "lost"
+			rechecked = True
+			continue
+		evidence = row.gateway_run_id or row.first_event_at or int(row.last_event_seq or 0)
+		if not evidence and not retried:
+			retried = True
+			if unclaim(int(row.version)):
+				return "ready"
+			continue
+		# No known writer does this; the gateway may hold the run. Never back to ready.
+		_park_recovering(ctx, run_id, reason="send-not-started-drift")
+		return "parked"
+
+
+def _cancel_unsent(ctx: PumpContext, run_id: str, row: dict, binding) -> bool:
+	"""Stop landed between our claim and a write that never left. Personal chats take
+	the aborted terminal and the usual cancelled settlement, fenced on this shard's
+	epoch instead of an abort (there is no run to abort). Shared chats: see
+	``collaboration_pump.cancel_unsent``. False when the fence matched nothing."""
+	if binding is not None:
+		from jarvis.chat.collaboration_pump import cancel_unsent
+
+		return cancel_unsent(ctx, run_id, row, binding)
+
+	def unit() -> bool:
+		won = ts.record_aborted_terminal(
+			run_id, "dispatching", int(row.version), ctx.epoch, control_target=ctx.relay_target_id
+		)
+		if won:
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
+		return won
+
+	if not txn.replay_on_conflict(unit, label=f"pump.cancel_unsent {run_id}", fresh=True):
+		return False
+	_settle_aborted(ctx, run_id, int(row.version) + 1, row.conversation, row.assistant_message)
+	return True
+
+
+def _settle_aborted(
+	ctx: PumpContext, run_id: str, version: int, conversation: str, assistant_message: str | None
+) -> None:
+	"""Settle a recorded aborted terminal (``version`` is the terminal row's) to
+	``cancelled`` through the settlement seam."""
+	owner = frappe.db.get_value(CONV, conversation, "owner")
+	try:
+		ctx.deps.invoke_settlement(
+			run_id,
+			relay_target_id=ctx.relay_target_id,
+			epoch=ctx.epoch,
+			version=version,
+			terminal_kind="relay:error",
+			terminal_payload={"aborted": True},
+			assistant_message=assistant_message,
+			owner=owner,
+			conversation=conversation,
+			deps=ctx.deps,
+		)
+	except ts.LeaseLostExit:
+		ctx.lease_lost = run_id
+		raise
+
+
+def _ack_window_s(dispatch: dict) -> float:
+	"""The ``chat.send`` ack window for a dispatch payload: the size-based window
+	prepare stored (legacy parity, ``turn_handler._ack_timeout_s``), never below
+	ACK_TIMEOUT_S; a payload from before the key existed gets ACK_TIMEOUT_S."""
+	try:
+		stored = float(dispatch.get("ack_timeout_s") or 0)
+	except (TypeError, ValueError):
+		stored = 0.0
+	return max(ACK_TIMEOUT_S, stored)
 
 
 def _poll_pending(ctx: PumpContext) -> None:
@@ -2436,7 +2732,20 @@ def _on_ack_success(ctx: PumpContext, pa: _PendingAck, ack: dict) -> None:
 		# R-2: the ack PROVES delivery, so clear EXACTLY the agent-correction notes
 		# prepare folded into this prompt (id-keyed, idempotent) — never on an
 		# ack-timeout. Best-effort.
-		_clear_agent_notes_on_ack(rs.conversation, pa.drained_note_ids)
+		if ":dashboard:collab:" in rs.session_key:
+			from jarvis.chat.collaboration_notes import clear_after_ack
+			from jarvis.chat.collaboration_turn import binding_for_run
+
+			try:
+				clear_after_ack(binding_for_run(rs.run_id), rs.run_id, pa.drained_note_ids)
+			except Exception as exc:
+				frappe.db.rollback()
+				frappe.log_error(
+					title="shared chat: decision-note cleanup failed",
+					message=f"run={rs.run_id}; cause={type(exc).__name__}",
+				)
+		else:
+			_clear_agent_notes_on_ack(rs.conversation, pa.drained_note_ids)
 		return
 	# 0 rows: distinguish a real epoch loss from a benign version drift (e.g. a
 	# concurrent cancel bumped version out-of-band).
@@ -2449,7 +2758,9 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 	"""Ack did not resolve OK. The ``ack-timeout`` sentinel (also the Closing/WS
 	drop sentinel, OAR-10) is AMBIGUOUS — the request was written, the peer may
 	have accepted it — so park recovering. A DEFINITE pre-ack rejection (ok:false
-	with a concrete code) is dispatching->errored + credit release (OAR-8)."""
+	with a concrete code, whatever the code says) is dispatching->errored + credit
+	release (OAR-8). A local ``SendNotStarted`` at the send never comes here
+	(``_return_unsent``)."""
 	run_id = rs.run_id
 	code = getattr(exc, "code", None)
 	if code == "ack-timeout":
@@ -2549,6 +2860,16 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 	(the caller converts it to ``ctx.lease_lost``); a benign 0-rows (watermark dup
 	/ version drift) re-syncs the version and returns."""
 	if rs.pending_seq is None:
+		return
+	if ":dashboard:collab:" in rs.session_key:
+		# A secret can span arbitrary deltas; publishing an earlier prefix
+		# cannot be undone by a later scrub. Shared replies are projected only
+		# from the complete scrubbed terminal. Status/receipt notices stay live.
+		rs.pending_seq = None
+		rs.pending_text = rs.pending_delta = ""
+		rs.pending_shown = None
+		rs.events_since_flush = 0
+		rs.last_flush_mono = _monotonic()
 		return
 	seq, text, delta = rs.pending_seq, rs.pending_text, rs.pending_delta
 	shown = text if rs.pending_shown is None else rs.pending_shown
@@ -2685,6 +3006,11 @@ def _resend_once(ctx: PumpContext, rs: _RunState, reason: str | None = None) -> 
 	unchanged.
 
 	Returns ``_RESENT``, ``_USED`` (already re-sent), ``_NO_PAYLOAD`` or ``_CAS_LOST``."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(rs.conversation):
+		return _NO_PAYLOAD
+
 	stored = empty_reply_recovery.stored_dispatch(frappe.db.get_value(TURN, rs.run_id, "dispatch_payload"))
 	if stored is None:
 		return _NO_PAYLOAD
@@ -2806,11 +3132,19 @@ def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) 
 	# hop's reach), so start it on the present, and if a plain read ever lands between
 	# the two, replay the CAS once from a fresh transaction instead of quarantining.
 	txn.fresh_snapshot()
-	won = txn.replay_on_conflict(
-		lambda: ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload),
-		label=f"pump settle terminal {rs.run_id}",
-		before_replay=lambda: _resync_fresh(rs),
-	)
+	if ":dashboard:collab:" in rs.session_key:
+		from jarvis.chat.collaboration_pump import record_terminal
+
+		recorded = record_terminal(ctx, rs, kind, payload)
+		won = recorded is not None
+		if won:
+			rs.version, payload = recorded
+	else:
+		won = txn.replay_on_conflict(
+			lambda: ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload),
+			label=f"pump settle terminal {rs.run_id}",
+			before_replay=lambda: _resync_fresh(rs),
+		)
 	if not won:
 		if _epoch_lost(ctx, rs.run_id):
 			ts.lease_lost_exit(rs.run_id)
@@ -2862,6 +3196,14 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 	``dispatch`` returns. Any OTHER exception propagates so the mux applies its
 	integrity class (LOSSY delta -> drop+count+continue; PRECIOUS tool/terminal ->
 	quarantine)."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(rs.conversation):
+		from jarvis.chat.collaboration_turn import binding_for_run
+
+		binding = binding_for_run(rs.run_id)
+		if not binding or binding.session_key != rs.session_key or binding.actor != rs.owner:
+			return LaneHandler()
 
 	def on_delta(event_seq: int, text: str, delta: str, shown: str | None = None) -> None:
 		# OARF-6: BATCH the cumulative mirror (relocated _AssistantContentBatcher).
@@ -3049,6 +3391,10 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 	)
 	swept = 0
 	for r in rows:
+		from jarvis.chat.collaboration import is_collaborative
+
+		if is_collaborative(r.get("conversation")):
+			continue
 		run_id = r["run_id"]
 		rs = ctx.runs.get(run_id)
 		awaiting_continuation = bool(rs and rs.yield_deadline is not None)
@@ -3063,6 +3409,10 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 		# ``gateway_run_id`` is the ORIGINAL run the agent runtime already retired (that is
 		# why we are here waiting) - target the abort at the session's current run
 		# instead of a dead id.
+		if ctx.mux is not None and session_key and not _io_admit(ctx):
+			# #773: no lease time to ask the gateway to stop. Record nothing locally:
+			# cancel_requested stays set and the next slice sends the abort.
+			break
 		try:
 			if ctx.mux is not None and session_key:
 				ctx.mux.abort(
@@ -3070,8 +3420,14 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 					None if awaiting_continuation else r.get("gateway_run_id"),
 					timeout_s=ACK_TIMEOUT_S,
 				)
-		except Exception:
-			pass
+		except AgentUnreachableError:
+			# The abort was refused before any byte, or may not have arrived: the gateway
+			# may still be running this reply and its tools. Record nothing; the Stop
+			# stays set and a later slice, or the successor hop, asks again (aborting a
+			# finished run does nothing). Anything else reaches the hop's crash path.
+			ctx.io_deferred = True
+			ctx.abort_retries += 1
+			break
 		if not ts.record_aborted_terminal(run_id, r["state"], int(r["version"]), ctx.epoch):
 			if _epoch_lost(ctx, run_id):
 				ts.lease_lost_exit(run_id)
@@ -3089,23 +3445,7 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 			_clear_yield_pending(run_id)
 			if ctx.mux is not None:
 				ctx.mux.release_continuation(session_key)
-		owner = frappe.db.get_value(CONV, r["conversation"], "owner")
-		try:
-			ctx.deps.invoke_settlement(
-				run_id,
-				relay_target_id=target,
-				epoch=ctx.epoch,
-				version=int(r["version"]) + 1,
-				terminal_kind="relay:error",
-				terminal_payload={"aborted": True},
-				assistant_message=r.get("assistant_message"),
-				owner=owner,
-				conversation=r["conversation"],
-				deps=ctx.deps,
-			)
-		except ts.LeaseLostExit:
-			ctx.lease_lost = run_id
-			raise
+		_settle_aborted(ctx, run_id, int(r["version"]) + 1, r["conversation"], r.get("assistant_message"))
 		swept += 1
 	return swept
 
@@ -3122,15 +3462,61 @@ def _heartbeat_and_renew(ctx: PumpContext, progressed: bool) -> None:
 	lease-alive-but-not-draining pump goes progress-stale (the watchdog then
 	force-takes it over) while a healthy-but-quiet pump keeps renewing and is never
 	falsely expired. A 0-rows renew/heartbeat means the epoch was lost to a takeover
-	⇒ shared lease-loss exit."""
+	⇒ shared lease-loss exit.
+
+	#773: a slice that deferred a write for lack of lease time (``io_deferred``) also
+	renews here, inside the interval; that renew is not progress and does not move
+	the heartbeat cadence."""
 	now = _monotonic()
-	if now - ctx.last_heartbeat < HEARTBEAT_INTERVAL_S:
+	due = now - ctx.last_heartbeat >= HEARTBEAT_INTERVAL_S
+	if not due and not ctx.io_deferred:
 		return
-	ctx.last_heartbeat = now
-	if progressed and not ts.lease_heartbeat(ctx.relay_target_id, ctx.epoch):
-		ts.lease_lost_exit()
+	ctx.io_deferred = False
+	if due:
+		ctx.last_heartbeat = now
+		if progressed and not ts.lease_heartbeat(ctx.relay_target_id, ctx.epoch):
+			ts.lease_lost_exit()
+	_renew_lease(ctx)
+
+
+def _io_deadline(ctx: PumpContext) -> float | None:
+	"""The monotonic instant no gateway write of this hop may run past (#773)."""
+	if ctx.lease_valid_until is None:
+		return None
+	return ctx.lease_valid_until - LEASE_IO_MARGIN_S - SLICE_TAIL_RESERVE_S
+
+
+def _io_admit(ctx: PumpContext) -> bool:
+	"""May a gateway write start now? Checked BEFORE every write site's first side
+	effect (CAS, publish, key change, local record). False marks the slice
+	``io_deferred`` so it renews at its end; the site leaves its rows untouched."""
+	deadline = _io_deadline(ctx)
+	if deadline is None:
+		return True
+	if _monotonic() + IO_GATE_WAIT_S + IO_WRITE_TIMEOUT_S + IO_PRESEND_SLACK_S <= deadline:
+		return True
+	ctx.io_deferred = True
+	ctx.io_deferrals += 1
+	return False
+
+
+def _sync_io_deadline(ctx: PumpContext) -> None:
+	"""Push the IO deadline to the mux, whose write gate refuses (zero bytes) any
+	write that could not finish by then: the exact backstop to ``_io_admit``."""
+	if ctx.mux is not None:
+		ctx.mux.set_write_deadline(_io_deadline(ctx))
+
+
+def _renew_lease(ctx: PumpContext) -> None:
+	"""Renew the lease (commits first and last) and advance the local bound from a
+	stamp taken BEFORE the call. Call only at a committed boundary. 0 rows means the
+	epoch was lost: the shared lease-loss exit, before any further write."""
+	stamp = _monotonic()
 	if not ts.lease_renew(ctx.relay_target_id, ctx.epoch, holder=ctx.holder):
 		ts.lease_lost_exit()
+	if ctx.lease_valid_until is not None:
+		ctx.lease_valid_until = stamp + ts.LEASE_TTL_S
+		_sync_io_deadline(ctx)
 	_write_lease_mirror(ctx.relay_target_id)
 
 
@@ -3174,6 +3560,10 @@ def _reconcile_on_start(ctx: PumpContext) -> None:
 	# keeps the last-known foreign count (TTL) or goes conservative, never zero.
 	_reconcile_gateway_active(ctx, snap)
 	active_keys = snap.get("active_session_keys")
+	if ctx.lease_valid_until is not None:
+		# R1 (#773): the cold snapshot may have waited up to ACK_TIMEOUT_S; renew before
+		# the row loop's writes. Since the last commit only Redis and ctx changed.
+		_renew_lease(ctx)
 
 	rows = frappe.db.sql(
 		"""SELECT run_id, state, version, conversation, assistant_message,
@@ -3194,6 +3584,11 @@ def _reconcile_on_start(ctx: PumpContext) -> None:
 
 
 def _reconcile_one(ctx: PumpContext, r: dict, active_keys) -> None:
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(r.get("conversation")):
+		return
+
 	run_id = r["run_id"]
 	state = r["state"]
 
@@ -3270,7 +3665,14 @@ def _issue_recovery_tail(ctx: PumpContext, r: dict, session_key: str) -> None:
 	"""OARF-5: issue the missed-terminal ``sessions.get`` recovery-tail RPC WITHOUT
 	blocking and park it (with the OARF-2 watermark window) for ``_poll_recoveries``.
 	Falls back to re-attach when the mux is unavailable."""
-	if ctx.mux is None:
+	from jarvis.chat.collaboration import is_collaborative, is_collaborative_session
+
+	if is_collaborative(r.get("conversation")) or is_collaborative_session(session_key):
+		return
+
+	if ctx.mux is None or not _io_admit(ctx):
+		# No transport, or (#773) no lease time for the write: re-attach; the next hop's
+		# reconcile issues the tail.
 		_reattach_lane(ctx, r)
 		return
 	min_seq, max_seq = _recovery_window(r)
@@ -3470,6 +3872,11 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 	in-flight turn (start_seq seeded from the durable ``last_event_seq`` so the
 	watermark stays monotonic across the hop, WP-1B deviation 2). A breaker-open
 	re-adopt is refused (register_run returns None) — stop-readopting (OAR-7)."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(r.get("conversation")):
+		return
+
 	run_id = r["run_id"]
 	owner = frappe.db.get_value(CONV, r["conversation"], "owner")
 	dispatch = _load_dispatch(_read_dispatch_row(run_id) or {})
@@ -3697,10 +4104,11 @@ def _park_affected_recovering(ctx: PumpContext, *, reason: str = "db-disconnect"
 	transport-budget park all share this one path."""
 	target = ctx.relay_target_id
 	try:
-		rows = frappe.db.sql(
-			"""SELECT run_id, version, conversation, assistant_message FROM `tabJarvis Chat Turn`
+		# Only the closed pump executor predicate is formatted; target stays bound.
+		rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
+			f"""SELECT run_id, version, conversation, assistant_message FROM `tabJarvis Chat Turn`
 			WHERE relay_target_id=%(t)s
-			  AND state IN ('preparing','ready','dispatching','streaming','terminal_observed')""",
+			  AND state IN ('preparing','ready','dispatching','streaming','terminal_observed') {executor_clause("pump")}""",
 			{"t": target},
 			as_dict=True,
 		)
@@ -3804,8 +4212,16 @@ def request_cancel_conversation(relay_or_conversation: str, run_id: str | None =
 	``ready`` has nothing in flight: Stop cancels it there when ``run_id`` (the run
 	``stop_run`` names) is absent or names that turn (``_is_stoppable_ready``). A CAS lost
 	on such a turn (its requeue or dispatch committed after the read) reads again once,
-	on a fresh transaction. Every other turn, and every turn while the re-send is off,
-	is handled exactly as before."""
+	on a fresh transaction.
+
+	A turn the pump returned to ``ready`` after a refused, never-sent claim (PR #2201)
+	carries a server-only ``unsent_return`` marker for its current version. A Stop that
+	names it (the run id the browser holds since ``run:start``, or its ``-r1`` key) and
+	finds nothing else cancels it, re-send switch on or off. A Stop CAS lost after
+	its read (to a fresh claim, or to the pump returning the turn) reads everything
+	again once. Its ``run:end`` carries the marker's epoch (the
+	claim's, where the browser fence sits). Every other turn, and a Stop with no run
+	id, is handled exactly as before."""
 	conversation = relay_or_conversation
 	resend = empty_reply_recovery.switch_on()
 	states = ("dispatching", "streaming")
@@ -3825,6 +4241,7 @@ def request_cancel_conversation(relay_or_conversation: str, run_id: str | None =
 		if row.get("state") == "ready":
 			if not _is_stoppable_ready(row, run_id):
 				return False, None
+			row["unsent_epoch"] = _returned_epoch(row["run_id"], int(row["version"]))
 			won = _cancel_ready_turn(row)
 		elif not stop_names_turn(row["run_id"], run_id):
 			return False, None  # #448: a Stop for another run leaves this one running
@@ -3835,9 +4252,23 @@ def request_cancel_conversation(relay_or_conversation: str, run_id: str | None =
 		return won, row
 
 	label = f"pump.request_cancel_conversation {conversation}"
-	won, row = txn.replay_on_conflict(unit, label=label)
-	if not won and row and resend and _rollback_and_check_resent(row["run_id"]):
+	for _attempt in range(2):
 		won, row = txn.replay_on_conflict(unit, label=label)
+		if not won and row and resend and _rollback_and_check_resent(row["run_id"]):
+			won, row = txn.replay_on_conflict(unit, label=label)
+		if won or not run_id:
+			break
+		if row:
+			# Stop read the turn in flight and its cancel matched nothing: the pump may have
+			# returned it to `ready` since (a server without snapshot isolation reports 0
+			# rows, not a conflict). Read the present once more.
+			frappe.db.rollback()
+			continue
+		won, row = _cancel_returned_ready(conversation, run_id)
+		if won is not None:
+			break
+		# Lost to a concurrent claim: read everything once more on a fresh transaction.
+		frappe.db.rollback()
 	if won and row:
 		if row.get("state") == "ready":
 			_finish_stop_before_dispatch(conversation, row)
@@ -3845,6 +4276,88 @@ def request_cancel_conversation(relay_or_conversation: str, run_id: str | None =
 		lpush_wake(row["relay_target_id"], row["run_id"])
 		return True
 	return False
+
+
+_JSON_VALUE = CustomFunction("JSON_VALUE", ["col", "path"])
+_UNSENT_VERSION = "$.unsent_return.version"
+_UNSENT_EPOCH = "$.unsent_return.epoch"
+
+
+def _unsent_marker(raw_version, raw_epoch) -> tuple[int, int] | None:
+	"""The ``unsent_return`` marker as read by JSON_VALUE (text or NULL): (version,
+	epoch), or None when either is missing or not an integer."""
+	try:
+		return int(raw_version), int(raw_epoch)
+	except (TypeError, ValueError):
+		return None
+
+
+def _returned_epoch(run_id: str, version: int) -> int | None:
+	"""The claim epoch of a ready turn the pump returned unsent, when its marker names
+	``version`` (the row's current one); else None. Reads the marker keys only."""
+	t = frappe.qb.DocType(TURN)
+	rows = (
+		frappe.qb.from_(t)
+		.select(
+			_JSON_VALUE(t.dispatch_payload, _UNSENT_VERSION), _JSON_VALUE(t.dispatch_payload, _UNSENT_EPOCH)
+		)
+		.where(t.name == run_id)
+		.run()
+	)
+	marker = _unsent_marker(*rows[0]) if rows else None
+	return marker[1] if marker and marker[0] == version else None
+
+
+def _cancel_returned_ready(conversation: str, run_id: str) -> tuple[bool | None, dict | None]:
+	"""Stop for a turn the pump returned to ``ready`` unsent: (True, row) when cancelled,
+	(False, None) when no such turn is named, (None, row) when its cancel lost to a
+	concurrent write (the caller reads again once)."""
+	t = frappe.qb.DocType(TURN)
+	query = (
+		frappe.qb.from_(t)
+		.select(
+			t.run_id,
+			t.version,
+			t.assistant_message,
+			t.relay_target_id,
+			t.pump_epoch,
+			_JSON_VALUE(t.dispatch_payload, _UNSENT_VERSION),
+			_JSON_VALUE(t.dispatch_payload, _UNSENT_EPOCH),
+		)
+		.where(
+			t.name.isin(sorted({run_id, run_id.removesuffix("-r1")}))
+			& (t.conversation == conversation)
+			& (t.state == "ready")
+		)
+	)
+	if frappe.db.has_column(TURN, "collaboration_executor"):
+		query = query.where(
+			(Coalesce(t.collaboration_binding, "") == "") | (t.collaboration_executor == "pump")
+		)
+	for rid, version, amsg, target, pump_epoch, raw_version, raw_epoch in query.run():
+		marker = _unsent_marker(raw_version, raw_epoch)
+		if marker is None or marker[0] != int(version):
+			continue
+		row = frappe._dict(
+			run_id=rid,
+			version=int(version),
+			state="ready",
+			assistant_message=amsg,
+			relay_target_id=target,
+			pump_epoch=pump_epoch,
+			unsent_epoch=marker[1],
+		)
+
+		def unit() -> bool:
+			won = _cancel_ready_turn(row)
+			if won:
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
+			return won
+
+		if txn.replay_on_conflict(unit, label=f"pump.cancel_returned_ready {conversation}"):
+			return True, row
+		return None, row
+	return False, None
 
 
 def _rollback_and_check_resent(run_id: str) -> bool:
@@ -3890,9 +4403,11 @@ def _cancel_ready_turn(row: dict) -> bool:
 
 
 def _finish_stop_before_dispatch(conversation: str, row: dict) -> None:
-	"""After Stop cancelled a re-sent turn in ``ready`` (no settlement runs for it). The
-	chat already shows this reply's spinner, so a ``run:end`` (stopped) ends it, with no
-	seq so the client fence takes it. Also pokes a held model switch. Never raises."""
+	"""After Stop cancelled a turn in ``ready`` (no settlement runs for it). The chat
+	already shows this reply's spinner, so a ``run:end`` (stopped) ends it, with no seq
+	so the client fence takes it: at the epoch of the claim a returned-unsent turn
+	carries in its marker (``unsent_epoch``), else at the row's. Also pokes a held model
+	switch. Never raises."""
 	from jarvis.chat import llm_switch
 
 	llm_switch.apply_if_active(source="pump.request_cancel_conversation")
@@ -3908,7 +4423,9 @@ def _finish_stop_before_dispatch(conversation: str, row: dict) -> None:
 			run_id=row["run_id"],
 			event_seq=None,
 			message_id=row["assistant_message"],
-			pump_epoch=row["pump_epoch"] or None,
+			pump_epoch=row["unsent_epoch"]
+			if row.get("unsent_epoch") is not None
+			else row["pump_epoch"] or None,
 			stopped=True,
 		)
 
@@ -4173,12 +4690,13 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 	# A stale lease is not parked here — ensure_pump (below) revives the pump,
 	# which re-stamps + reconciles in-flight turns on start (D6 §5). The watchdog
 	# parks only on a per-turn deadline / recovery budget.
-	rows = frappe.db.sql(
-		"""SELECT run_id, state, version, reserved, reservation_expires_at, enqueued_at,
+	# Only the closed legacy schema predicate is formatted; target and states stay bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
+		f"""SELECT run_id, state, version, reserved, reservation_expires_at, enqueued_at,
 		       preparing_at, deadline_at, dispatching_at, recovery_started_at, conversation,
 		       assistant_message, seed_message, turn_class
 		FROM `tabJarvis Chat Turn`
-		WHERE relay_target_id=%(t)s AND state IN %(states)s""",
+		WHERE relay_target_id=%(t)s AND state IN %(states)s {legacy_clause()}""",
 		{"t": target, "states": ts.NONTERMINAL_STATES},
 		as_dict=True,
 	)
@@ -4344,6 +4862,11 @@ def _read_dispatch_row(run_id: str) -> dict | None:
 			"last_event_seq",
 			"dispatch_payload",
 			"enqueued_at",
+			# What a claim writes, so a refused never-sent claim can be undone exactly.
+			"pump_epoch",
+			"dispatching_at",
+			"deadline_at",
+			"collaboration_send_started_at",
 		],
 		as_dict=True,
 	)
@@ -4354,7 +4877,8 @@ def _load_dispatch(turn: dict) -> dict:
 	prompt + created session into ``dispatch_payload`` JSON for the pump to
 	``chat.send``. Keys the pump reads: ``session_key`` (required), ``message``
 	(assembled prompt; falls back to the seed message content), ``thinking``,
-	``attachments``. Robust to a missing/partial payload."""
+	``attachments``, ``ack_timeout_s`` (#773; absent on older payloads). Robust to a
+	missing/partial payload."""
 	payload: dict = {}
 	raw = turn.get("dispatch_payload") if turn else None
 	if raw:
@@ -4376,6 +4900,7 @@ def _load_dispatch(turn: dict) -> dict:
 		"attachments": payload.get("attachments"),
 		"drained_note_ids": payload.get("drained_note_ids") or [],
 		"redispatch": int(payload.get("redispatch") or 0),
+		"ack_timeout_s": payload.get("ack_timeout_s"),
 	}
 
 
