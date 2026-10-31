@@ -15,11 +15,10 @@ name: CI
 # caught within a day — it just no longer sits in the PR critical path. If that job is red and this
 # one is green, suspect upstream rather than the PR.
 #
-# What was left after that was one serial step: the test run itself, 304s of a 399s job. It is now
-# sharded 4 ways via `bench run-parallel-tests`, taking the job to ~3m45s. The remaining ~90s is
-# per-shard setup (image pull + site restore) that every leg pays again and that no amount of
-# sharding removes. That floor is exactly why the shard count is 4 and not 8; see the `matrix:`
-# comment for the measured split.
+# What was left after that was one serial step: the test run itself, 304s of a 399s job (at the
+# time). It is sharded 4 ways via frappe's run-parallel-tests, with the shards cut by measured
+# time; see the `matrix:` comment for the numbers. The ~90s of per-shard setup (image pull + site
+# restore) is paid again by every leg and no amount of sharding removes it.
 #
 # Because each shard only covers about a quarter of the code, the coverage floor moved OUT of the
 # test job and into the separate `coverage` job, which combines all four data files and gates once.
@@ -216,18 +215,15 @@ jobs:
       # `cancel-in-progress` guard above already exists to avoid.
       fail-fast: false
       matrix:
-        # 4 is the balance point, not an arbitrary pick. Frappe shards per test FILE
-        # weighted by that file's `def test_` count, and its splitter is greedy and
-        # order-preserving, so it starves the LAST shard as the count climbs. Measured
-        # against this suite (176 files, 3560 tests):
+        # Shards are cut by measured TIME, not by test count (jarvis/ci/test_shards.py).
+        # Frappe's own splitter weights each test FILE by its `def test_` count, and test cost
+        # is far from uniform: on this branch on 2026-10-31 (511 files, ~14k tests, ~26 min of
+        # tests) the count split gave est. [7.9, 10.1, 4.5, 3.8] min and the slowest shard set
+        # the wall clock; the time split gives [6.6, 6.7, 6.6, 6.3]. The cut stays contiguous in
+        # frappe's file order, so no file gains new neighbours.
         #
-        #   N=2  [1782, 1778]                    spread    4
-        #   N=4  [899, 891, 893, 877]            spread   22
-        #   N=6  [636, 621, 598, 631, 594, 480]  spread  156
-        #
-        # Past 4, the ~90s of per-shard setup below (image pull + site restore, which every
-        # leg pays again) also stops paying for itself: 6 shards costs 4 more runner-minutes
-        # per run to save a further ~20s of wall clock.
+        # Each leg still pays ~90s of setup (image pull + site restore) on top. At 6 shards the
+        # time split estimates a 4.6 min slowest shard: weigh that against 2 more legs of setup.
         #
         # If you change this list, THREE things have to move together, not two:
         #   1. this list
@@ -377,15 +373,24 @@ jobs:
           done
 
       - name: Run tests + coverage (shard ${{ matrix.shard }} of 4)
-        working-directory: /opt/frappe-bench
+        # sites/, because that is where `bench` itself runs frappe's CLI from.
+        working-directory: /opt/frappe-bench/sites
         run: |
           # coverage + gevent are already in the image's venv (gevent is needed by
           # jarvis/realtime/handlers.py with socketio_backend=python, and its tests).
           #
+          # This is `bench --site jarvis-ci.test run-parallel-tests ...` with ONE change: the
+          # wrapper swaps frappe's count-based split_by_weight for a split by the measured
+          # per-module seconds in jarvis/ci/data/test-timings.json, then invokes frappe's CLI
+          # exactly as bench/cli.py frappe_cmd does. The runner, coverage and the CI-gated exit
+          # code are all still frappe's. See jarvis/ci/test_shards.py, including how to
+          # regenerate the timings when the step's printed plan warns they are stale.
+          #
           # The coverage flag is spelled --with-coverage on THIS command. run-tests spells
           # the same thing --coverage (frappe/commands/testing.py). They are two different
           # click commands; do not "fix" one to match the other.
-          bench --site jarvis-ci.test run-parallel-tests \
+          ../env/bin/python -m jarvis.ci.test_shards run -- \
+            --site jarvis-ci.test run-parallel-tests \
             --app jarvis \
             --build-number ${{ matrix.shard }} \
             --total-builds 4 \
