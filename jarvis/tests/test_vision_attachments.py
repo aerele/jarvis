@@ -25,12 +25,12 @@ class TestPrepareAttachments(FrappeTestCase):
 	def test_no_attachments_passthrough(self):
 		self.assertEqual(_prepare_attachments("hi", None, vision_ok=True), ("hi", []))
 
-	def test_text_file_routes_to_complete_query(self):
+	def test_small_text_file_remains_fenced_inline_input(self):
 		att = _make_file("notes.txt", b"hello world")
 		msg, parts = _prepare_attachments("hi", [att], vision_ok=True)
 		self.assertEqual(parts, [])
-		self.assertNotIn("hello world", msg)
-		self.assertIn("jarvis__query_file", msg)
+		self.assertIn("hello world", msg)
+		self.assertIn("<untrusted-data", msg)
 
 	def test_spreadsheet_routes_to_all_row_reading_instead_of_sampled_arithmetic(self):
 		att = _make_file("whole-table.csv", b"amount\n" + b"10\n" * 10000)

@@ -291,3 +291,26 @@ valid non-boundary positions. Such a read cannot prove prior rows were visited.
 Initial reads may omit cursor/version or send both empty strings/null. Empty or
 null file_url, filename and sheet also mean omission. Continuations require both
 nonempty tokens copied from next_read. Obsolete numbered sections are rejected.
+
+## Parser capacity and failures
+
+Query and exact-scan children share four slots per host OS user, across sites and
+parent processes. Only empty lock files are kept in a private temporary directory.
+The child inherits its locked descriptor, so a parent crash does not release
+capacity while that child still runs. Process exit releases the descriptor. A
+busy request is refused before another child starts; there is no waiting queue.
+This bound does not replace host memory sizing or the existing per-child limits.
+
+Children receive only the module path, locale, time zone, interpreter path and
+fixed numeric-library thread settings. OpenBLAS, OMP, MKL and NumExpr use one
+thread. Bench credentials and unrelated environment variables are excluded.
+IPC text uses UTF-8 explicitly. A timeout or resource signal gives the resource
+budget error. A startup/import failure or malformed reply gives a worker failure.
+Operator logs contain only the worker kind, a fixed reason code and exit status;
+stderr and source values are not copied into logs. Binary and non-finite SQL
+results are refused before serialization.
+
+Malformed or excess derived Markdown tables are omitted with counted warnings.
+All original `text_lines` remain queryable. `derived_tables_complete=false` means
+derived-table totals do not cover every source table; it does not mean the source
+text was cropped. The limits on source bytes, lines, cells and SQL work still apply.
