@@ -15,8 +15,9 @@
 				'jvw-fab--dock-left': side === 'left',
 				'jvw-fab--peek': autoPeek,
 				'jvw-fab--maint': maintenanceActive,
+				'jvw-fab--look': lookAtItem,
 			}"
-			:style="fabStyle"
+			:style="fabButtonStyle"
 			:aria-label="panelOpen ? `Close ${brandName}` : `Ask ${brandName}`"
 			:aria-expanded="panelOpen ? 'true' : 'false'"
 			@click="onFabClick"
@@ -24,8 +25,10 @@
 			@pointermove="onPointerMove"
 			@pointerup="onPointerUp"
 			@pointercancel="onPointerCancel"
-			@pointerenter="wake"
-			@focus="wake"
+			@pointerenter="onFabEnter"
+			@pointerleave="hovered = false"
+			@focus="onFabFocus"
+			@blur="focused = false"
 		>
 			<!-- Six-dot grip: the only place a drag starts (#671). design.md 1.3
 			     forbids hover motion, so it changes on OPACITY alone. -->
@@ -52,6 +55,20 @@
 			>
 		</button>
 
+		<!-- Today's holiday item, over the tile (see FabWorn.vue). Mounted only once the lazy
+		     art is in, so a failed load or a plain day costs nothing here. -->
+		<FabWorn
+			v-if="holidayArt && holidayView.itemReady"
+			:art="holidayArt"
+			:design="holidayView.design"
+			:shown="itemOn"
+			:x="fabXY.x"
+			:y="fabXY.y"
+			:snapping="snapping"
+			:faded="faded && !dragging"
+			:motion="!prefersReduced()"
+		/>
+
 		<!-- Dimming backdrop for the expand-into-the-big-chat handoff: fades the
 		     Desk behind the panel as it grows to fullscreen, so the motion reads
 		     as going full. Inert otherwise. -->
@@ -72,6 +89,7 @@
 			:context="effectiveContext"
 			:layout="panelBox"
 			:leaving="leaving"
+			:holiday="holiday"
 			@close="closePanel"
 			@open-full="openFull"
 			@dismiss-context="contextDismissed = true"
@@ -82,7 +100,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { ref, shallowRef, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { maintenance, startPollIfHeld } from "./maintenance_state.mjs";
 import { FULL_CHAT_URL, conversationUrl, PANEL_MIN_VIEWPORT_PX } from "./config.mjs";
 import { contextFromRoute } from "./desk_context.mjs";
@@ -91,6 +109,11 @@ import * as panelSize from "./panel_size.mjs";
 import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import * as fabPos from "./fab_position.mjs";
 import { fabAction, panelTogglePlan } from "./fab_action.mjs";
+import { createArtLoader } from "./holiday_art_loader.mjs";
+import { createHolidayState, exposeDebugView } from "./holiday_state.mjs";
+import { lookStyle, isItemShown } from "./fab_worn.mjs";
+import { prefersReduced } from "./reduced_motion.mjs";
+import FabWorn from "./FabWorn.vue";
 import Panel from "./Panel.vue";
 
 // ---- FAB: draggable, edge-snapping, idle-fading launcher button.
@@ -118,6 +141,9 @@ let snapTimeoutHandle = null;
 const IDLE_PEEK_INTERVAL_MS = 9000;
 const IDLE_PEEK_HOLD_MS = 4800; // ~1.4 jvw-lookaround cycles: a visible "thinking" glance, then back to resting
 const autoPeek = ref(false);
+// The face shows on hover, on keyboard focus and on the idle peek; the item shows with it.
+const hovered = ref(false);
+const focused = ref(false);
 let idlePeekTimeoutId = null;
 let idlePeekHoldTimeoutId = null;
 let reducedMotionMql = null;
@@ -162,6 +188,17 @@ function handleReducedMotionChange(e) {
 	}
 }
 
+const itemOn = computed(() =>
+	isItemShown({
+		itemReady: holidayView.value.itemReady,
+		faceShown: hovered.value || focused.value || autoPeek.value,
+		dragging: dragging.value,
+		panelOpen: panelOpen.value,
+		brandLogo: !!brandLogoUrl,
+		maintenance: maintenanceActive.value,
+	})
+);
+
 // Access gate: desk boot sets this once for the session (see Task B).
 const hasAccess = Boolean(window.frappe?.boot?.jarvis_has_access);
 // Whitelabel FAB label + mark (set_jarvis_boot); blank => Jarvis defaults.
@@ -172,6 +209,40 @@ const brandLogoUrl = (window.frappe?.boot?.jarvis_brand_logo_url || "").trim();
 // the FAB and the open panel never disagree, and a 60s poll (armed in onMounted) lifts it
 // when the roll finishes - even if the panel is never opened (whitelabel logo -> no face).
 const maintenanceActive = computed(() => maintenance.active);
+
+// ---- Holiday touch: the item the launcher wears while its face shows. The state exists
+// only for a user with Jarvis access whose page booted with the key; for anyone else it is
+// inert (no request, no art). The art is a lazy bundle, loaded by our own <script> tag.
+function safeStorage() {
+	try {
+		return window.localStorage;
+	} catch (e) {
+		return null;
+	}
+}
+const holiday = createHolidayState({
+	ref,
+	shallowRef,
+	computed,
+	boot: window.frappe?.boot,
+	storage: safeStorage(),
+	reduced: prefersReduced,
+	userName: () =>
+		window.frappe?.boot?.user?.full_name || window.frappe?.session?.user_fullname || "",
+	report: (ctx) => window.jarvisReportError?.(ctx),
+	loader: createArtLoader(),
+});
+exposeDebugView(window, holiday);
+const holidayView = holiday.view;
+// The art once it has loaded (version-checked by the loader), else null.
+const holidayArt = holiday.art;
+// A day that crosses midnight into a holiday: the answer starts wearing after the page booted.
+watch(
+	() => holidayView.value.hasItem,
+	(worn) => {
+		if (worn) holiday.ensureArt();
+	}
+);
 
 // ---- Side chat panel: open state and the Desk record it is looking at. ----
 const panelRef = ref(null);
@@ -303,6 +374,13 @@ const fabStyle = computed(() => {
 	return style;
 });
 
+// The eyes look at the item while it shows (the art's LOOK_AT table).
+const lookVars = computed(() =>
+	itemOn.value ? lookStyle(holidayArt.value?.LOOK_AT, holidayView.value.design) : {}
+);
+const lookAtItem = computed(() => Object.keys(lookVars.value).length > 0);
+const fabButtonStyle = computed(() => ({ ...fabStyle.value, ...lookVars.value }));
+
 function readCssPx(el, prop, fallback) {
 	if (!el) return fallback;
 	const n = parseFloat(getComputedStyle(el).getPropertyValue(prop));
@@ -378,6 +456,26 @@ function applyPosition({ animate = false } = {}) {
 function wake() {
 	faded.value = false;
 	idleTimer?.poke();
+}
+
+function onFabEnter() {
+	hovered.value = true;
+	wake();
+}
+
+// :focus-visible is not known to every engine (an old one throws on the selector).
+function isFocusVisible(el) {
+	try {
+		return !!el?.matches?.(":focus-visible");
+	} catch (e) {
+		return false;
+	}
+}
+
+function onFabFocus(e) {
+	// Only keyboard focus shows the face (CSS :focus-visible); a click's focus must not.
+	focused.value = isFocusVisible(e.target);
+	wake();
 }
 
 // Document-level activity also counts as "not idle": today the FAB only woke
@@ -539,6 +637,7 @@ onMounted(() => {
 	// rather than closing. The chip updates live.
 	readDeskContext();
 	if (window.frappe?.router?.on) frappe.router.on("change", readDeskContext);
+	holiday.start();
 });
 
 onBeforeUnmount(() => {
@@ -549,6 +648,7 @@ onBeforeUnmount(() => {
 	document.removeEventListener("touchstart", onDocumentActivity);
 	document.removeEventListener("keydown", onDocumentActivity);
 	idleTimer?.dispose();
+	holiday.stop();
 	if (snapTimeoutHandle) {
 		window.clearTimeout(snapTimeoutHandle);
 		snapTimeoutHandle = null;
@@ -822,6 +922,19 @@ onBeforeUnmount(() => {
 	}
 	70% {
 		transform: translate(0, -8%) scale(0.96, 1.04);
+	}
+}
+
+/* Wearing the item: the eyes glance around and settle on it (the art's jvh-look-* keyframes,
+   named by --jvw-look). Reduced motion holds the settled look instead. */
+@media (prefers-reduced-motion: no-preference) {
+	.jvw-fab.jvw-fab--look .jvw-face {
+		animation: var(--jvw-look) 3.4s ease-in-out infinite;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.jvw-fab.jvw-fab--look .jvw-face {
+		transform: translate(var(--jvw-lx, 0), var(--jvw-ly, 0));
 	}
 }
 
