@@ -1622,6 +1622,17 @@ def _stamp_scope_and_watermark(
 	try:
 		scope = agent_scope.resolve_scope(inst)
 	except Exception:
+		try:
+			config = frappe.parse_json(inst.get("config") or "{}")
+		except (TypeError, ValueError):
+			config = {}
+		if isinstance(config, dict) and any(
+			config.get(k) for k in ("record_scope", "prior_period_from", "prior_period_to")
+		):
+			frappe.log_error(
+				title="jarvis agent: explicit scope resolution failed", message=frappe.get_traceback()
+			)
+			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
@@ -1734,6 +1745,11 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 		apps = ", ".join(str(a) for a in scope["source_apps"])
 		scope_block += f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
 	if scope and scope.get("company"):
+		clock_block = (
+			f'report_datetime="{scope["report_datetime"]}" (site time zone, no offset), '
+			if scope.get("report_datetime")
+			else ""
+		)
 		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period or the current date): "
 			f'company="{scope.get("company")}", '
@@ -1741,7 +1757,9 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			f'from_date="{scope.get("from_date")}", '
 			f'to_date="{scope.get("to_date")}", '
 			f'report_date="{scope.get("report_date")}", '
-			f'prior_fy_start="{scope.get("prior_fy_start")}", '
+			f"{clock_block}"
+			+ (f'execution_user="{scope["execution_user"]}", ' if scope.get("execution_user") else "")
+			+ f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
 		)
 	# EXPLICIT CONFIG (jarvis#1063 delivery): the tenant's declared config_keys values, HANDED
@@ -1750,6 +1768,10 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 	# delegate spills this JSON verbatim into config.json - it does NOT read its own installation
 	# for these tunables. Note ``Run.scope_json`` is a bench-side field that never reaches the
 	# container; the run MESSAGE is the only bench->delegate channel, so config must ride HERE.
+	if scope and any(scope.get(k) for k in ("prior_period_from", "prior_period_to", "record_scope")):
+		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
+			{k: scope[k] for k in ("prior_period_from", "prior_period_to", "record_scope") if scope.get(k)}
+		)
 	explicit_config = _explicit_config(listing, inst)
 	if explicit_config:
 		# ADDITIVE, never a replacement: config.json legitimately carries fields the delegate

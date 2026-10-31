@@ -317,12 +317,15 @@ class TestUninstallStopsALiveRun(AgentBudgetTestCase):
 
 		@contextmanager
 		def _launched_elsewhere_while_waiting(lock_name, **kw):
+			# Launches use the site clock. SQL NOW() follows the database time zone,
+			# which can still be in the previous month at this site's month edge.
+			started_at = frappe.utils.now_datetime()
 			with other_connection() as db:
 				db.sql(
 					f"""INSERT INTO `tab{RUN}` (name, creation, modified, owner, modified_by, agent,
 					installation, `trigger`, status, started_at)
-					VALUES (%s, NOW(), NOW(), %s, %s, %s, %s, 'scheduled', 'running', NOW())""",
-					(name, self.owner, self.owner, SLUG, inst),
+					VALUES (%s, %s, %s, %s, %s, %s, %s, 'scheduled', 'running', %s)""",
+					(name, started_at, started_at, self.owner, self.owner, SLUG, inst, started_at),
 				)
 				db.commit()
 			with real_lock(lock_name, **kw) as acquired:
