@@ -403,6 +403,17 @@ def _run_doc_method(method: str, doctype: str, name: str | int | None, args: dic
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"method {doctype}.{method} is not whitelisted") from e
 
+	# Native read helpers change only this in-memory document. Every other LCV
+	# controller method must pass the same source check as explicit writes.
+	if doctype == "Landed Cost Voucher" and method not in {
+		"cancel",
+		"get_vendor_invoice_amount",
+		"get_items_from_purchase_receipts",
+	}:
+		from jarvis.tools._lcv_source_tax import gate_lcv
+
+		gate_lcv(doc, lock=True)
+
 	# Arg-arity handling copied from frappe.handler.run_doc_method: `bound` is a
 	# bound method, so its signature excludes ``self``.
 	fnargs = list(inspect.signature(bound).parameters)
