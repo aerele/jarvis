@@ -93,6 +93,9 @@ def snapshot_hash():
 class JarvisSettingsSnapshot:
 	"""Mixin: put first in the bases, e.g. ``class T(JarvisSettingsSnapshot, FrappeTestCase)``."""
 
+	# Default so a restore never hits an unset attribute (no child secrets captured).
+	_js_child_auth = ()
+
 	def setUp(self):
 		super().setUp()
 		self._take_snapshot()

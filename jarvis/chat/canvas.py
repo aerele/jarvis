@@ -200,7 +200,8 @@ def _gateway_fakes_missing_canvas_as_ok(agent_url: str, session_key: str) -> boo
 		r = plugin_routes.route_request(
 			agent_url, "GET", plugin_routes.canvas_path(sentinel), session_key, read_timeout_s=10
 		)
-	except plugin_routes.PluginRouteError:
+	except Exception:
+		# Best-effort probe: any failure to complete it is inconclusive, not broken.
 		return False
 	# 401/403 is the plugin refusing this site, not the runtime's catch-all: inconclusive.
 	if r.status_code in (401, 403):

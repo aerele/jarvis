@@ -10,6 +10,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.tests._settings_snapshot import (
 	SETTINGS,
 	JarvisSettingsSnapshot,
+	_child_auth,
 	_child_doctypes,
 	_child_rows,
 	_rows,
@@ -25,6 +26,7 @@ class TestSettingsSnapshot(FrappeTestCase):
 		probe = JarvisSettingsSnapshot()
 		probe._js_singles, probe._js_auth = _rows()
 		probe._js_child = _child_rows()
+		probe._js_child_auth = _child_auth(probe._js_child)
 		real_sql = frappe.db.sql
 
 		def flaky(query, *args, **kwargs):
@@ -65,6 +67,7 @@ class TestSettingsSnapshot(FrappeTestCase):
 		probe = JarvisSettingsSnapshot()
 		probe._js_singles, probe._js_auth = _rows()
 		probe._js_child = _child_rows()
+		probe._js_child_auth = _child_auth(probe._js_child)
 		dt = child_dts[0]
 		rows = probe._js_child[dt]
 		if rows:
