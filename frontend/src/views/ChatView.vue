@@ -3915,6 +3915,11 @@
 								</table>
 							</div>
 						</template>
+						<DocumentBlocks
+							v-else-if="artifact.document"
+							:document="artifact.document"
+							:file-url="artifact.url"
+						/>
 						<pre v-else-if="artifact.kind === 'text'" class="jv-artifact-text">{{
 							artifact.text
 						}}</pre>
@@ -3922,7 +3927,9 @@
 							Loading preview…
 						</div>
 						<div v-else class="jv-artifact-nopreview">
-							<p class="jv-preview-note">No inline preview for this file type.</p>
+							<p class="jv-preview-note">
+								{{ artifact.error || "No inline preview for this file type." }}
+							</p>
 							<a
 								:href="artifact.url"
 								:download="cvFile(artifact.cv)"
@@ -4610,6 +4617,7 @@ import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 import FilePreview from "@/components/FilePreview.vue";
+import DocumentBlocks from "@/components/DocumentBlocks.vue";
 import SheetCharts from "@/components/SheetCharts.vue";
 import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
@@ -9073,6 +9081,14 @@ async function openArtifact(m, cv) {
 	const url = cv.file_url || cvOf(m, cv);
 	const t = cv.type;
 	const conv = currentId.value;
+	function isCurrent(req) {
+		if (artifact.value !== req) return false;
+		if (currentId.value !== conv) {
+			artifact.value = null;
+			return false;
+		}
+		return true;
+	}
 	if (t === "pdf" || t === "image") {
 		artifact.value = { m, cv, url, conv, kind: t };
 		if (t === "pdf") ensurePdfTemplates();
@@ -9082,7 +9098,9 @@ async function openArtifact(m, cv) {
 		let content = cvOf(m, cv);
 		if (!content) {
 			artifact.value = { m, cv, url, conv, kind: "loading" };
+			const req = artifact.value;
 			await ensureCanvas(m);
+			if (!isCurrent(req)) return;
 			content = cvOf(m, cv);
 		}
 		artifact.value = { m, cv, url, conv, kind: content ? t : "nopreview", content };
@@ -9090,8 +9108,12 @@ async function openArtifact(m, cv) {
 	}
 	// "file" (xlsx / csv / txt / …) → ask the backend for a tabular/text preview.
 	artifact.value = { m, cv, url, conv, kind: "loading" };
+	const req = artifact.value;
+	let previewError = "";
 	try {
 		const r = await api.previewFile(cv.file_url);
+		if (!isCurrent(req)) return;
+		previewError = r?.error || "";
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
 			artifact.value = {
 				m,
@@ -9105,13 +9127,21 @@ async function openArtifact(m, cv) {
 			return;
 		}
 		if (r && r.kind === "text") {
-			artifact.value = { m, cv, url, conv, kind: "text", text: r.text || "" };
+			artifact.value = {
+				m,
+				cv,
+				url,
+				conv,
+				kind: "text",
+				text: r.text || "",
+				document: r.document,
+			};
 			return;
 		}
 	} catch (e) {
-		/* fall through to download-only */
+		if (!isCurrent(req)) return;
 	}
-	artifact.value = { m, cv, url, conv, kind: "nopreview" };
+	artifact.value = { m, cv, url, conv, kind: "nopreview", error: previewError };
 }
 
 // --- Per-document PDF template override (jarvis.pdf_templates.rerender_document).

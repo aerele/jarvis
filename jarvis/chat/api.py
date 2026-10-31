@@ -1346,9 +1346,22 @@ def preview_file(file_url: str) -> dict:
 		return {"kind": "binary"}
 	from jarvis import compat
 	from jarvis.chat.xlsx_charts import extract_charts, preview_cell
+	from jarvis.tools._docx_text import DocxReadError
 	from jarvis.tools.read_file import _resolve_file, read_file
 
-	data = read_file(file_url=file_url, max_rows=300, max_chars=8000, preview=True)
+	try:
+		data = read_file(file_url=file_url, max_rows=300, max_chars=8000, preview=True)
+	except DocxReadError as exc:
+		from jarvis.tools._file_scan_worker import RESOURCE_ERROR
+
+		error = str(exc)
+		if error == RESOURCE_ERROR:
+			error = "This DOCX is too complex to preview. Split or simplify it, or download the original."
+		return {"kind": "binary", "error": error, "format": "docx"}
+	if data.get("format") == "docx":
+		from jarvis.tools._docx_preview import document_view
+
+		return {"kind": "text", "text": data["text"], "document": document_view(data)}
 	kind = data.get("kind")
 	if kind == "table":
 		sheets = [
