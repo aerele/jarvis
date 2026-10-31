@@ -65,7 +65,8 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 	2. **Plugin auth** (Jarvis agent plugin, Path A): two custom headers
 	   are presented together:
 
-	   - ``X-Jarvis-Token`` - the shared ``agent_token`` secret
+	   - ``X-Jarvis-Token`` - the per-tenant ``callback_key`` (or, before one is stored,
+     the shared ``agent_token``)
 	     (proves the request originated inside the agent container)
 	   - ``X-Jarvis-Session`` - the agent sessionKey for this conversation
 

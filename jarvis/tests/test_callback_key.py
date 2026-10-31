@@ -6,7 +6,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis import _http, _plugin_auth, onboarding, settings_reset
+from jarvis import onboarding_contract, _http, _plugin_auth, onboarding, settings_reset
 from jarvis._password_utils import clear_settings_password, set_settings_password
 from jarvis._plugin_auth import PluginAuthError
 from jarvis.tests.test_api import _FakeRequest, sign_plugin_headers
@@ -24,7 +24,12 @@ class TestCallbackKey(FrappeTestCase):
 		self._orig_agent = s.get_password("agent_token", raise_exception=False) or ""
 		self._orig_cb = s.get_password("callback_key", raise_exception=False) or ""
 		self._orig_issued = s.get("agent_token_issued_at")
+		self._orig_auth = {
+			f: frappe.db.get_single_value(SETTINGS, f)
+			for f in ("tenant_authority_generation", "tenant_authority_handle", "agent_url")
+		}
 		self.settings = s
+		self._orig_email = s.get("jarvis_admin_customer_email")
 		set_settings_password(s, "agent_token", OWNER, update_modified=False)
 		clear_settings_password(s, "callback_key")
 
@@ -37,6 +42,8 @@ class TestCallbackKey(FrappeTestCase):
 		if self._orig_cb:
 			set_settings_password(s, "callback_key", self._orig_cb, update_modified=False)
 		s.db_set("agent_token_issued_at", self._orig_issued, update_modified=False)
+		for f, v in self._orig_auth.items():
+			s.db_set(f, v, update_modified=False)
 		super().tearDown()
 
 	def _validate(self, token):
@@ -95,3 +102,59 @@ class TestCallbackKey(FrappeTestCase):
 		set_settings_password(self.settings, "callback_key", CALLBACK)
 		settings_reset.apply(self.settings, settings_reset.CONNECTION)
 		self.assertEqual(_plugin_auth._callback_key(), "")
+
+	def _set_authority(self, gen, handle):
+		self.settings.db_set("tenant_authority_generation", gen)
+		self.settings.db_set("tenant_authority_handle", handle)
+
+	def test_rejected_stale_payload_changes_neither_key_nor_token(self):
+		self._set_authority(5, "h-current")
+		payload = {
+			"agent_url": "ws://stale.invalid",
+			"tenant_authority_generation": 3,
+			"tenant_authority_handle": "h-old",
+			"callback_key": CALLBACK,
+			"owner_key_retired": True,
+		}
+		onboarding.write_connection(payload)
+		self.assertEqual(_plugin_auth._callback_key(), "")
+		self.assertEqual(_plugin_auth._agent_token(), OWNER)
+
+	def test_rejected_payload_without_agent_url_changes_neither(self):
+		self._set_authority(5, "h-current")
+		onboarding.write_connection(
+			{"tenant_authority_generation": 3, "callback_key": CALLBACK, "owner_key_retired": True}
+		)
+		self.assertEqual(_plugin_auth._callback_key(), "")
+		self.assertEqual(_plugin_auth._agent_token(), OWNER)
+
+	def test_accepted_payload_stores_key_and_retires_token(self):
+		self._set_authority(5, "h-current")
+		onboarding.write_connection(
+			{
+				"agent_url": "ws://ok.invalid",
+				"tenant_authority_generation": 6,
+				"tenant_authority_handle": "h-new",
+				"callback_key": CALLBACK,
+				"owner_key_retired": True,
+			}
+		)
+		self.assertEqual(_plugin_auth._callback_key(), CALLBACK)
+		self.assertEqual(_plugin_auth._agent_token(), "")
+
+	def test_new_admin_login_clears_old_callback_key(self):
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+		onboarding.write_connection({"customer": "new@example.com"})
+		self.assertEqual(_plugin_auth._callback_key(), "")
+		frappe.db.set_single_value(SETTINGS, "jarvis_admin_customer_email", self._orig_email)
+
+	def test_workspace_reset_disconnect_keeps_callback_key(self):
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+		with patch("jarvis.chat.device.clear_credentials"):
+			onboarding._disconnect_agent_transport(self.settings)
+		self.assertEqual(_plugin_auth._callback_key(), CALLBACK)
+
+	def test_strip_credentials_removes_callback_key(self):
+		out = onboarding_contract.strip_credentials({"callback_key": CALLBACK, "agent_url": "x"})
+		self.assertNotIn("callback_key", out)
+		self.assertEqual(out["agent_url"], "x")

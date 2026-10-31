@@ -176,6 +176,9 @@ def write_connection(data: dict) -> None:
 		from jarvis import tenant_authority
 
 		tenant_authority.clear(s)
+		# A different principal is a different tenant: the old tenant's callback
+		# key must not shadow the new tenant's token.
+		clear_settings_password(s, "callback_key")
 	if data.get("api_key"):
 		set_settings_password(s, "jarvis_admin_api_key", data["api_key"])
 	if data.get("api_secret"):
@@ -196,7 +199,11 @@ def write_connection(data: dict) -> None:
 	# old one. guard() advances the stored (generation, handle) only on ACCEPT, so
 	# the secrets and the authority receipt move together. Credential fields above
 	# are unguarded: they carry no generation and are never part of the race.
-	if data.get("agent_url"):
+	# The callback key and the owner-key retirement ride the same authority
+	# fence, so a stale or foreign payload can neither set the key nor clear the
+	# stored agent_token. A payload without agent_url passes the same guard.
+	retiring = data.get("owner_key_retired") is True
+	if data.get("agent_url") or data.get("callback_key") or retiring:
 		from jarvis import tenant_authority
 
 		write_conn = True
@@ -219,7 +226,7 @@ def write_connection(data: dict) -> None:
 				tenant_authority.log_stale_once(
 					s.get(tenant_authority.GEN_FIELD), data.get(tenant_authority.GEN_FIELD)
 				)
-		if write_conn:
+		if write_conn and data.get("agent_url"):
 			runtime_profile._forget_snapshot()
 			s.db_set("agent_url", data["agent_url"])
 			if isinstance(data, runtime_profile.ConnectionData):
@@ -228,13 +235,14 @@ def write_connection(data: dict) -> None:
 				runtime_profile.persist(None, s, unavailable=True)
 			if data.get("agent_token"):
 				_store_agent_token(s, data["agent_token"])
-	if data.get("callback_key"):
-		_store_callback_key(data["callback_key"])
-	if data.get("owner_key_retired") is True:
-		# Admin retired the gateway owner key: the plugin now signs with the
-		# callback key only, so the stored owner token must stop verifying.
-		clear_settings_password(s, "agent_token")
-		s.db_set("agent_token_issued_at", None)
+		if write_conn:
+			if data.get("callback_key"):
+				_store_callback_key(data["callback_key"])
+			if retiring:
+				# Admin retired the gateway owner key: the plugin now signs with the
+				# callback key only, so the stored owner token must stop verifying.
+				clear_settings_password(s, "agent_token")
+				s.db_set("agent_token_issued_at", None)
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them. Wider than
 	# ``new_admin_login`` above on purpose - a standalone customer_password (the
@@ -2335,9 +2343,6 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 
 	settings.db_set("agent_url", "")
 	clear_settings_password(settings, "agent_token")
-	# The key belongs to the container being torn down; a stale one would reject
-	# the rebuilt container's owner-token callbacks until admin re-issues it.
-	clear_settings_password(settings, "callback_key")
 	# The rebuilt container is a new authority generation; forget the accepted
 	# (generation, handle) so the poll that re-attaches it is not rejected as
 	# "older" than the pre-reset generation (review plan 04 P0-5).
