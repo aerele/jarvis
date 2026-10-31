@@ -48,6 +48,14 @@ def parse_event(
 		out: dict[str, Any] = {"kind": "lifecycle", "phase": data.get("phase")}
 		if data.get("error"):
 			out["error"] = _redact(data["error"])
+		# The run's raw reply as the runtime settled it, on the ``end`` frame. Kept RAW (never
+		# redacted, never shown): it is read only to detect ``MEDIA:`` paths. openclaw strips a
+		# ``MEDIA:`` line from the streamed text AND from the chat final (verified on 2026.9.3 and
+		# 2026.10.6), so the final-text detection never sees it; this is the only frame that still
+		# carries the line.
+		reply = data.get("terminalReply")
+		if data.get("phase") == "end" and isinstance(reply, dict) and isinstance(reply.get("text"), str):
+			out["terminal_reply_raw"] = reply["text"]
 		return out
 
 	if stream == "item":
@@ -143,3 +151,18 @@ def publish_to_user(user: str, payload: dict[str, Any]) -> None:
 			# failure path if the conversation was concurrently removed.
 			pass
 	frappe.publish_realtime(CHANNEL, message, user=user)
+
+
+def accumulate_assistant_text(previous: str, event: dict) -> str:
+	"""Fold one parsed ``assistant`` event into the reply text so far.
+
+	Both stream shapes are handled: openclaw 2026.9.x sends a cumulative ``text`` on every frame
+	(plus ``delta``), while 2026.10.x sends ``text`` only on the first frame (and on ``replace``
+	frames) and the rest as ``delta`` with ``text=""``. Reading only ``text`` therefore kept the
+	FIRST CHUNK of every one-shot reply on 10.x (one-word auto-titles, suggestions never stored,
+	found 2026-10-22 on the openclaw compat stack). A non-empty ``text`` is authoritative; an empty
+	one means "append the delta"."""
+	text = event.get("text") or ""
+	if text:
+		return text
+	return previous + (event.get("delta") or "")

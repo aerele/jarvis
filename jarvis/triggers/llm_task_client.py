@@ -25,6 +25,8 @@ included in a raised error.
 
 from __future__ import annotations
 
+import json
+import time
 import uuid
 
 import frappe
@@ -88,6 +90,23 @@ def _gateway_error_message(status: int, raw: bytes) -> str:
 		return error.get("message") or f"llm-task invocation failed (HTTP {status})"
 	except Exception:
 		return f"llm-task invocation failed (HTTP {status})"
+
+
+def _is_starting_up(status: int, raw: bytes) -> bool:
+	"""Whether a ``/tools/invoke`` answer means "gateway still starting": HTTP 503, or an error
+	envelope whose code is ``UNAVAILABLE``."""
+	if status == 503:
+		return True
+	if status == 200 or not raw:
+		return False
+	try:
+		payload = json.loads(raw.decode("utf-8"))
+	except Exception:
+		return False
+	error = payload.get("error") if isinstance(payload, dict) else None
+	return (
+		isinstance(error, dict) and str(error.get("code") or error.get("type") or "").upper() == "UNAVAILABLE"
+	)
 
 
 def _raise_for_gateway_error(status: int, payload: dict) -> None:
@@ -185,26 +204,39 @@ def llm_task_complete(
 		"sessionKey": f"agent:main:trigger-{uuid.uuid4().hex}",
 		"agentId": "main",
 	}
-	try:
-		# allow_redirects=False: the route only ever answers 200/4xx/5xx, so a
-		# 3xx would mean a compromised gateway trying to pivot the bench at an
-		# internal URL (same reasoning as jarvis.chat.generated_media.fetch_media).
-		with requests.post(
-			f"{base}/tools/invoke",
-			json=body,
-			headers={"Authorization": f"Bearer {token}"},
-			timeout=(_CONNECT_TIMEOUT_S, timeout + _TIMEOUT_BUFFER_S),
-			stream=True,
-			allow_redirects=False,
-		) as response:
-			status = response.status_code
-			raw = _read_bounded(response)
-	except LLMTaskError:
-		raise
-	except requests.Timeout as e:
-		raise LLMTaskError("llm-task request timed out") from e
-	except Exception as e:
-		raise LLMTaskError(f"llm-task request failed: {e}") from e
+	from jarvis.chat.agent_client import _UNAVAILABLE_RETRY_DELAYS, UNAVAILABLE_RETRY_BUDGET_SECONDS
+
+	deadline = time.monotonic() + UNAVAILABLE_RETRY_BUDGET_SECONDS
+	attempt = 0
+	while True:
+		try:
+			# allow_redirects=False: the route only ever answers 200/4xx/5xx, so a
+			# 3xx would mean a compromised gateway trying to pivot the bench at an
+			# internal URL (same reasoning as jarvis.chat.generated_media.fetch_media).
+			with requests.post(
+				f"{base}/tools/invoke",
+				json=body,
+				headers={"Authorization": f"Bearer {token}"},
+				timeout=(_CONNECT_TIMEOUT_S, timeout + _TIMEOUT_BUFFER_S),
+				stream=True,
+				allow_redirects=False,
+			) as response:
+				status = response.status_code
+				raw = _read_bounded(response)
+		except LLMTaskError:
+			raise
+		except requests.Timeout as e:
+			raise LLMTaskError("llm-task request timed out") from e
+		except Exception as e:
+			raise LLMTaskError(f"llm-task request failed: {e}") from e
+		# openclaw 2026.10.x refuses work for ~40 s after a restart while the agent finishes its
+		# startup inspection (see agent_client.UNAVAILABLE_RETRY_BUDGET_SECONDS): wait it out
+		# instead of failing the trigger.
+		delay = _UNAVAILABLE_RETRY_DELAYS[min(attempt, len(_UNAVAILABLE_RETRY_DELAYS) - 1)]
+		if not _is_starting_up(status, raw) or time.monotonic() + delay > deadline:
+			break
+		attempt += 1
+		time.sleep(delay)
 
 	# Checked BEFORE parsing: an older runtime that doesn't even know the
 	# ``/tools/invoke`` route can 404 with a plain-text/HTML body, not the

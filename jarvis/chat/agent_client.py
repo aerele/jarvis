@@ -105,6 +105,21 @@ from jarvis.exceptions import AgentUnreachableError
 
 CONNECT_TIMEOUT_SECONDS = 10
 
+# sessions.create gets its own, longer budget. openclaw 2026.10.x does real work in it (preflight,
+# state snapshot, writer admission): measured 150-230 ms warm, but 18 s on a 1 CPU tenant in the
+# minutes after a restart or image roll, so the shared 10 s budget failed a customer's first new
+# conversation with "sessions.create timed out" (2026-10-22, openclaw compat run). 45 s covers that
+# with headroom and sits well inside the turn's prepare deadline (turn_state.PREPARE_DEADLINE_S = 300;
+# the session is created after the prepare claim). Every other request keeps CONNECT_TIMEOUT_SECONDS.
+SESSION_CREATE_TIMEOUT_SECONDS = 45
+
+# openclaw 2026.10.x answers ``UNAVAILABLE`` ("Agent main has not completed startup inspection and
+# preparation", "The model catalog is still loading") for ~40 s after a restart, even after
+# /healthz is 200 (the fleet agent now also waits on /startupz; this is the bench-side safety net).
+# Session setup RPCs that hit it wait and retry for up to this long instead of failing the turn.
+UNAVAILABLE_RETRY_BUDGET_SECONDS = 60
+_UNAVAILABLE_RETRY_DELAYS = (2, 3, 5, 8, 10)  # then 10 s until the budget runs out
+
 # A dormant / just-recreated container's gateway is unreachable for ~10-30s
 # while `compose up -d` recreates it (see jarvis/api.py rotate_agent_token) or
 # while a rotated-dormant container spins back up. A single 10s connect with no
@@ -1007,10 +1022,30 @@ class AgentSession:
 
 	# -- protocol methods -------------------------------------------------
 
-	def create_session(self, label: str = "jarvis-chat") -> str:
+	def _request_when_available(self, method: str, params: dict, *, timeout_s: float) -> dict:
+		"""``_request``, retried while the gateway answers ``UNAVAILABLE`` (still starting up), for at
+		most ``UNAVAILABLE_RETRY_BUDGET_SECONDS``. Any other error, and the last UNAVAILABLE once the
+		budget is spent, is raised unchanged."""
+		deadline = time.monotonic() + UNAVAILABLE_RETRY_BUDGET_SECONDS
+		attempt = 0
+		while True:
+			try:
+				return self._request(method, params, timeout_s=timeout_s)
+			except AgentUnreachableError as e:
+				delay = _UNAVAILABLE_RETRY_DELAYS[min(attempt, len(_UNAVAILABLE_RETRY_DELAYS) - 1)]
+				if e.code != "UNAVAILABLE" or time.monotonic() + delay > deadline:
+					raise
+				attempt += 1
+				time.sleep(delay)
+
+	def create_session(self, label: str = "jarvis-chat", *, wait_unavailable: bool = True) -> str:
+		"""``wait_unavailable=False`` for request-time callers (preflight, prewarm) that should report a
+		still-starting gateway at once instead of waiting out its startup (see
+		``UNAVAILABLE_RETRY_BUDGET_SECONDS``)."""
 		params = {"label": label}
+		send = self._request_when_available if wait_unavailable else self._request
 		try:
-			res = self._request("sessions.create", params, timeout_s=CONNECT_TIMEOUT_SECONDS)
+			res = send("sessions.create", params, timeout_s=SESSION_CREATE_TIMEOUT_SECONDS)
 		except AgentUnreachableError as e:
 			# agent 2026.9+ makes a MULTI-AGENT roster (>=1 marketplace-agent
 			# delegate installed) reject an unscoped session and demand the caller
@@ -1029,10 +1064,10 @@ class AgentSession:
 			# later image adds a structured reason, prefer it.
 			if e.code != "INVALID_REQUEST" or "no explicit owner" not in str(e).lower():
 				raise
-			res = self._request(
+			res = send(
 				"sessions.create",
 				{**params, "agentId": _PRIMARY_AGENT_ID},
-				timeout_s=CONNECT_TIMEOUT_SECONDS,
+				timeout_s=SESSION_CREATE_TIMEOUT_SECONDS,
 			)
 		key = (res.get("payload") or {}).get("key")
 		if not key:
@@ -1296,7 +1331,7 @@ class AgentSession:
 		NEVER call this for a key the gateway did not just report. Patching an
 		ABSENT key does not fail - agent creates the entry, mints a fresh
 		sessionId and drops the label."""
-		res = self._request(
+		res = self._request_when_available(
 			"sessions.patch",
 			{"key": session_key, "model": None},
 			timeout_s=timeout_s,
@@ -1340,7 +1375,7 @@ class AgentSession:
 		``modelOverrideSource: "auto"`` -- and that marker is not in the sessions.patch
 		schema (the gateway rejects it with INVALID_REQUEST), so not overriding is the
 		supported way to preserve failover. See ``turn_handler._session_model_for``."""
-		self._request(
+		self._request_when_available(
 			"sessions.patch",
 			{"key": session_key, "model": model_ref},
 			timeout_s=timeout_s,
@@ -1379,6 +1414,8 @@ class AgentSession:
 		# (the chat event is the single terminal path); it is the only frame
 		# that names the provider failure, so it is kept for a failed final.
 		failure_detail: str | None = None
+		terminal_reply_raw = ""
+		terminal_end_seen = False
 		# True once a media-generation tool call started this run - see
 		# MEDIA_GEN_TOOL_NAMES. Turns a would-be failed_final bare terminal into
 		# a yield instead (the two are wire-identical without this history).
@@ -1440,6 +1477,10 @@ class AgentSession:
 					# text). media_rels rides the terminal so the worker seeds the image.
 					_red, _rels, _marked = egress_rules.redact_final_with_media(text, run_id=run_id)
 					_final = {"kind": "relay:final", "text": _red}
+					if not _rels and terminal_reply_raw:
+						from jarvis.chat.generated_media import detect_media_paths
+
+						_rels = detect_media_paths(terminal_reply_raw)
 					if _rels:  # fetchable media -> seed downstream (only set when present)
 						_final["media_rels"] = _rels
 					if _marked:  # any MEDIA: line stripped -> force the content overwrite
@@ -1447,6 +1488,9 @@ class AgentSession:
 					_urls = _chat_final_media_urls(payload)
 					if _urls:  # gateway-attached image/video/audio/document content blocks
 						_final["media_urls"] = _urls
+					if not _rels and not _urls and not terminal_end_seen:
+						# See relay_mux: the end frame is late, so read the transcript once instead.
+						_final["harvest_history"] = True
 					yield _final
 					return
 				if state in ("error", "aborted"):
@@ -1474,6 +1518,12 @@ class AgentSession:
 				# failed final; a real answer still wins over it (#543).
 				if parsed is not None and parsed.get("phase") == "error" and parsed.get("error"):
 					failure_detail = str(parsed["error"])
+				# MEDIA: paths the runtime stripped from the final survive only here (see
+				# events.parse_event terminal_reply_raw).
+				if parsed is not None and parsed.get("phase") == "end":
+					terminal_end_seen = True
+				if parsed is not None and parsed.get("terminal_reply_raw"):
+					terminal_reply_raw = parsed["terminal_reply_raw"]
 				continue
 			if (
 				parsed.get("kind") == "tool"

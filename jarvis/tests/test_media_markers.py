@@ -684,6 +684,21 @@ class TestSeedBlockWiring(unittest.TestCase):
 				turn_handler.persist_rich_outputs("MSG-1", "C1", "u@x", "run1", 0)
 		harvest.assert_not_called()
 
+	def test_harvest_history_reads_the_transcript_once(self):
+		# A final that beat the lifecycle end frame (the only carrier of a stripped MEDIA: line)
+		# asks for ONE transcript read: no polling, unlike a yield continuation.
+		from jarvis.chat import turn_handler
+
+		with patch.object(turn_handler, "_harvest_post_yield_media", return_value=([], [])) as harvest:
+			with (
+				patch("frappe.get_single", return_value=Mock(agent_url="ws://h:1")),
+				patch("frappe.db.get_value", return_value=""),
+				patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
+				patch("jarvis.chat.turn_handler._publish_to_user"),
+			):
+				turn_handler.persist_rich_outputs("MSG-1", "C1", "u@x", "run1", 0, harvest_history=True)
+		harvest.assert_called_once_with("C1", 0, poll=False)
+
 	def test_yield_continuation_with_media_already_present_skips_harvest(self):
 		from jarvis.chat import turn_handler
 
@@ -714,7 +729,7 @@ class TestSeedBlockWiring(unittest.TestCase):
 				patch("jarvis.chat.turn_handler._publish_to_user"),
 			):
 				turn_handler.persist_rich_outputs("MSG-1", "C1", "u@x", "run1", 123, yield_continuation=True)
-		harvest.assert_called_once_with("C1", 123)
+		harvest.assert_called_once_with("C1", 123, poll=True)
 		sm.assert_called_once_with("MSG-1", "ws://h:1", "tok", [_IMG])
 
 
