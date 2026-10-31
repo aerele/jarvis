@@ -218,7 +218,9 @@ jobs:
 
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Shards now cover about 4,000 tests each. The first shard can exceed
+    # 25 minutes on hosted runners; allow it to finish and upload coverage.
+    timeout-minutes: 35
 
     strategy:
       # Never fail-fast. The default cancels the surviving shards on the first failure, so
