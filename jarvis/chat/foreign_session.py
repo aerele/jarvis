@@ -10,6 +10,7 @@ import hashlib
 
 import frappe
 
+from jarvis._cache_latch import claim_once
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
@@ -68,8 +69,7 @@ def is_known_key(session_key: str) -> bool:
 
 def _claim(key: str) -> bool:
 	"""Atomic set-if-absent with a 24 h expiry, so parallel first calls record once."""
-	cache = frappe.cache()
-	return bool(cache.set(cache.make_key(key), 1, nx=True, ex=_ONE_DAY))
+	return claim_once(key, _ONE_DAY)
 
 
 def record(session_key: str) -> bool:

@@ -65,13 +65,14 @@ def failed_challenge_rate_limited() -> bool:
 
 
 def _redis_key(nonce: str) -> bytes:
+	"""The prefixed redis key ``set_value`` writes for this nonce (and ``consume`` deletes)."""
 	return frappe.cache().make_key(_PREFIX + nonce)
 
 
 def issue_nonce() -> str:
 	nonce = secrets.token_hex(16)
 	with contextlib.suppress(redis.exceptions.ConnectionError):
-		frappe.cache().set(_redis_key(nonce), b"1", ex=_TTL_S)
+		frappe.cache().set_value(_PREFIX + nonce, 1, expires_in_sec=_TTL_S)
 	return nonce
 
 

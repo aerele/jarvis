@@ -16,21 +16,21 @@ _TTL_SECONDS = 7 * 24 * 3600
 
 
 def _cache_key(session_key: str) -> str:
+	"""The UNPREFIXED key: ``set_value`` and ``exists`` each apply ``make_key`` themselves."""
 	digest = hashlib.sha256(str(session_key).lower().encode()).hexdigest()
-	cache = frappe.cache()
-	return cache.make_key(_PREFIX + digest)
+	return _PREFIX + digest
 
 
 def claim(session_key: str) -> None:
 	try:
-		frappe.cache().set(_cache_key(session_key), 1, ex=_TTL_SECONDS)
+		frappe.cache().set_value(_cache_key(session_key), 1, expires_in_sec=_TTL_SECONDS)
 	except Exception:
 		frappe.logger("jarvis.session_claims").warning("session claim failed", exc_info=True)
 
 
 def is_claimed(session_key: str) -> bool:
 	try:
-		return frappe.cache().get(_cache_key(session_key)) is not None
+		return bool(frappe.cache().exists(_cache_key(session_key)))
 	except Exception:
 		frappe.logger("jarvis.session_claims").warning("session claim lookup failed", exc_info=True)
 		return False
@@ -38,5 +38,9 @@ def is_claimed(session_key: str) -> bool:
 
 def is_claimed_strict(session_key: str) -> bool:
 	"""``is_claimed`` for a caller that must not fail open: a cache error RAISES
-	instead of reading as "not claimed", so ``vouch_session`` can answer 503."""
-	return frappe.cache().get(_cache_key(session_key)) is not None
+	instead of reading as "not claimed", so ``vouch_session`` can answer 503.
+
+	Uses the raw ``ttl`` (-2 = no such key): the cache wrapper's ``exists`` swallows a
+	connection error and would answer False."""
+	cache = frappe.cache()
+	return cache.ttl(cache.make_key(_cache_key(session_key))) != -2

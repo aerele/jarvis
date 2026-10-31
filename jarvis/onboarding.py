@@ -19,6 +19,7 @@ from jarvis import (
 	onboarding_contract,
 	release_notice,
 )
+from jarvis._cache_latch import claim_once
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
@@ -357,8 +358,7 @@ def request_key_resync() -> bool:
 	(``KEY_RESYNC_FAILED_THROTTLE_S`` after a failed run), and the caller has already
 	rejected the request. Returns whether a job was queued; never raises."""
 	try:
-		gate = _KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site
-		if not frappe.cache().set(gate, b"1", nx=True, ex=KEY_RESYNC_THROTTLE_S):
+		if not claim_once(_KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site, KEY_RESYNC_THROTTLE_S):
 			return False
 		frappe.enqueue(
 			"jarvis.onboarding.run_key_resync",
@@ -379,7 +379,7 @@ def run_key_resync() -> None:
 	the self-heal throttle so the next stale request retries within two minutes."""
 	if getattr(frappe.flags, "jarvis_key_fetch", False):
 		return
-	# A background job has no user; the sync writes Jarvis Settings and the Error Log.
+	# nosemgrep: frappe-setuser -- background job has no session user; the key sync writes Jarvis Settings and the Error Log
 	frappe.set_user("Administrator")
 	frappe.flags.jarvis_key_fetch = True
 	try:
@@ -397,7 +397,7 @@ def _shorten_key_resync_throttle() -> None:
 	run. Never raises."""
 	try:
 		cache = frappe.cache()
-		gate = _KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site
+		gate = cache.make_key(_KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site)
 		ttl = cache.ttl(gate)
 		if ttl == -1 or ttl > KEY_RESYNC_FAILED_THROTTLE_S:
 			cache.expire(gate, KEY_RESYNC_FAILED_THROTTLE_S)

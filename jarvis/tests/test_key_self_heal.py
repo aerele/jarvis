@@ -28,8 +28,10 @@ SESSION = "agent:test:heal"
 SECRET = "super-secret-bearer-value"
 
 
-def _throttle_key() -> str:
-	return onboarding._KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site
+def _throttle_key() -> bytes:
+	"""The site-prefixed redis key the throttle latch writes (so it matches the hooks.py
+	``persistent_cache_keys`` prefix)."""
+	return frappe.cache().make_key(onboarding._KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site)
 
 
 def _clear_throttle():
@@ -83,6 +85,16 @@ class TestStaleKeySelfHeal(JarvisSettingsSnapshot, FrappeTestCase):
 		ttl = frappe.cache().ttl(_throttle_key())
 		self.assertTrue(0 < ttl <= 600)
 		self.assertEqual(onboarding.KEY_RESYNC_THROTTLE_S, 600)
+
+	def test_the_throttle_key_is_a_persistent_cache_key(self):
+		"""The latch key survives the 5-minute watchdog cache clear: it is site-prefixed and
+		starts with a ``persistent_cache_keys`` prefix."""
+		self.assertIn(onboarding._KEY_RESYNC_THROTTLE_PREFIX, frappe.get_hooks("persistent_cache_keys"))
+		self.assertTrue(
+			_throttle_key()
+			.decode()
+			.endswith("|" + onboarding._KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site)
+		)
 
 	def test_a_new_window_queues_again(self):
 		with patch("frappe.enqueue") as enq:
@@ -161,7 +173,7 @@ class TestStaleKeySelfHeal(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertEqual(onboarding.KEY_RESYNC_FAILED_THROTTLE_S, 120)
 
 	def test_a_failed_job_never_lengthens_a_shorter_throttle(self):
-		frappe.cache().set(_throttle_key(), b"1", ex=30)
+		frappe.cache().setex(_throttle_key(), 30, 1)
 		with (
 			patch("jarvis.onboarding._sync_connection", side_effect=RuntimeError("admin down")),
 			patch.object(frappe, "log_error"),

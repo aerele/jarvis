@@ -80,6 +80,26 @@ class TestVouchSession(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertEqual(client.create_session(), KEY)
 		self.assertTrue(session_claims.is_claimed(KEY))
 
+	def test_claim_is_stored_with_a_week_long_expiry_and_read_strictly(self):
+		self.assertFalse(session_claims.is_claimed_strict(KEY))
+		session_claims.claim(KEY)
+		ttl = frappe.cache().ttl(frappe.cache().make_key(_claim_key(KEY)))
+		self.assertTrue(6 * 24 * 3600 < ttl <= session_claims._TTL_SECONDS)
+		self.assertTrue(session_claims.is_claimed_strict(KEY))
+		self.assertTrue(session_claims.is_claimed(KEY))
+
+	def test_strict_claim_raises_on_a_redis_error_but_the_lenient_one_does_not(self):
+		import redis
+
+		cache = frappe.cache()
+		with (
+			patch.object(type(cache), "ttl", side_effect=redis.exceptions.ConnectionError("down")),
+			patch.object(type(cache), "exists", side_effect=redis.exceptions.ConnectionError("down")),
+		):
+			with self.assertRaises(redis.exceptions.ConnectionError):
+				session_claims.is_claimed_strict(KEY)
+			self.assertFalse(session_claims.is_claimed(KEY))
+
 	def test_claim_survives_clear_cache(self):
 		session_claims.claim(KEY)
 		frappe.clear_cache()
