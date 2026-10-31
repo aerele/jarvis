@@ -881,24 +881,22 @@
     },
     {
       "agent_slug": "fefo-expiry-compliance-auditor",
-      "title": "FEFO Violation & Expiry Auditor (auditor)",
+      "title": "Batch Rotation and Expiry Reviewer",
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.4.0",
       "status": "Published",
-      "description": "For batch-tracked pharma/FMCG/food stock: replays each day's outward movements to catch FEFO violations — a dispatch that skipped an older-expiry batch that still had stock — and lists on-hand batches inside the near-expiry and past-expiry horizon, ranked by value. Read-only; hyperlinks every finding to its batch and dispatch. Never touches stock, holds a shipment, or writes off a batch.",
+      "description": "Read-only review of native batch stock and dispatches. Shows past and near expiry stock under an owner expiry policy and candidates where a dispatch skipped an older valid batch. Compares signed batch quantities and recorded values with the native report. A person reviews reservations, quality holds and dispatch exceptions. No legal or saleability verdict.",
       "tools_required": [
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__get_my_access",
+        "jarvis__run_report"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
+        "jarvis__get_my_access",
         "jarvis__run_report",
-        "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -906,19 +904,28 @@
         "message"
       ],
       "doctypes_required": [
-        "Stock Ledger Entry",
-        "Batch",
-        "Serial and Batch Bundle",
+        "Company",
+        "Warehouse",
         "Item",
-        "Company"
+        "Batch",
+        "Stock Ledger Entry",
+        "Serial and Batch Bundle",
+        "Serial and Batch Entry",
+        "Stock Entry",
+        "Delivery Note",
+        "Sales Invoice",
+        "Repost Item Valuation",
+        "Stock Closing Entry",
+        "Inventory Dimension"
       ],
       "rule_tokens": [
-        "fef-band-7c30",
-        "fef-mat-2b8e",
-        "fef-order-4a19",
-        "gdp_near_expiry_horizon_convention",
-        "shelf_life_horizon_fraction"
+        "fef-life-3f72",
+        "fef-near-8c30",
+        "fef-past-2d48",
+        "fef-pick-6a91",
+        "fef-total-9b51"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -933,7 +940,10 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "fefo"
+      ]
     },
     {
       "agent_slug": "fixed-asset-depreciation-auditor",
