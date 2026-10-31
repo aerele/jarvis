@@ -763,6 +763,9 @@ def persist_tool_receipt(
 	already carries one of these chips (a pending-action settle whose executed or
 	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``)."""
 	result = result or {}
+	from jarvis.chat.source_receipts import source_receipt
+
+	stored_args, stored_result = source_receipt(tool, args, result)
 	# discarded/cancelled/superseded/expired executed NOTHING; unknown/partial's
 	# write state is UNVERIFIED (an interrupted or mid-dispatch outcome) - none of
 	# these get envelope_ok's binary completed/error classification. The chip
@@ -855,8 +858,8 @@ def persist_tool_receipt(
 					"Jarvis Chat Message",
 					existing,
 					{
-						"tool_args": frappe.as_json(args),
-						"tool_result": frappe.as_json(result) if result else None,
+						"tool_args": frappe.as_json(stored_args),
+						"tool_result": frappe.as_json(stored_result) if stored_result else None,
 						"tool_status": status,
 						"action_outcome": action_outcome or None,
 						"armed_by_macro": armed_by_macro or None,
@@ -877,8 +880,8 @@ def persist_tool_receipt(
 				{
 					"role": "tool",
 					"tool_name": tool,
-					"tool_args": frappe.as_json(args),
-					"tool_result": frappe.as_json(result) if result else None,
+					"tool_args": frappe.as_json(stored_args),
+					"tool_result": frappe.as_json(stored_result) if stored_result else None,
 					"tool_status": status,
 					"tool_call_id": tool_call_id or flip_token or None,
 					"action_outcome": action_outcome or None,
@@ -909,8 +912,8 @@ def persist_tool_receipt(
 			tool_message_id=msg_name,
 			tool_call_id=tool_call_id or flip_token or None,
 			tool_name=tool,
-			args=args,
-			result=result,
+			args=stored_args,
+			result=stored_result,
 			status=status,
 			action_outcome=action_outcome,
 		)
