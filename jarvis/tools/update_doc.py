@@ -98,6 +98,10 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 			doc.set(field, [row_values(r) if isinstance(r, dict) else r for r in value])
 		else:
 			doc.set(field, value)
+	if doctype == "Landed Cost Voucher" and doc.docstatus == 0 and "purchase_receipts" in changes:
+		from jarvis.tools._client_defaults import landed_cost_receipt_details
+
+		landed_cost_receipt_details(doc)
 	cast_numbers(doc)
 	doc.save()  # runs DocType validate() and on_update hooks
 	return doc
