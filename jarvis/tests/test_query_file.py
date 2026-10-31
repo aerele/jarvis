@@ -29,6 +29,19 @@ def workbook(months=6, rows=1200):
 
 
 class TestSpreadsheetQuery(unittest.TestCase):
+	def test_binary_and_nonfinite_query_values_are_refused(self):
+		for sql in ("SELECT x'41'", "SELECT 1e999", "SELECT -1e999"):
+			with self.subTest(sql=sql), self.assertRaisesRegex(InvalidArgumentError, "binary or non-finite"):
+				query_spreadsheet(b"A\n1", "input.csv", sql=sql)
+
+	def test_sql_operation_limit_stops_a_large_cross_join(self):
+		with self.assertRaisesRegex(InvalidArgumentError, "operation budget"):
+			query_spreadsheet(
+				b"A\n" + b"1\n" * 300,
+				"input.csv",
+				sql="SELECT COUNT(*) FROM sheet1 a CROSS JOIN sheet1 b CROSS JOIN sheet1 c",
+			)
+
 	@classmethod
 	def setUpClass(cls):
 		cls.content = workbook()
@@ -204,6 +217,21 @@ class TestSpreadsheetQuery(unittest.TestCase):
 
 
 class TestQueryFileBoundary(unittest.TestCase):
+	def test_oversized_file_is_refused_before_reading_or_hashing(self):
+		from jarvis.tools._file_scan import MAX_BYTES
+
+		doc = SimpleNamespace(name="file", file_name="input.csv", file_size=MAX_BYTES + 1)
+		with (
+			patch("jarvis.tools.query_file._resolve_file", return_value=doc),
+			patch("jarvis.tools.query_file.frappe.has_permission", return_value=True),
+			patch("jarvis.tools.query_file.compat.file_bytes") as read,
+			patch("jarvis.tools.query_file.hashlib.sha256") as digest,
+		):
+			with self.assertRaisesRegex(InvalidArgumentError, "10 MiB"):
+				query_file(filename="input.csv")
+			read.assert_not_called()
+			digest.assert_not_called()
+
 	def test_real_api_dispatch_and_agent_budget_keep_full_source_aggregate(self):
 		import frappe
 

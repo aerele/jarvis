@@ -6,6 +6,11 @@ coverage metadata. They do not retain rows, samples, text, SQL, or source-bearin
 error messages. Activity events use the same minimized receipt. Other tools and
 intentional assistant replies keep their existing behavior.
 
+Small UTF-8 JSON, Markdown and TXT attachments (up to 20,000 characters) remain
+fenced inline prompt input. Larger documents use the source readers. Inline
+attachment text is user input, not a source-tool receipt, and can remain in the
+runtime's prompt history. The source-tool storage hooks do not redact that input.
+
 The paired plugin registers synchronous `tool_result_persist` and
 `before_message_write` hooks. These minimize gateway-owned tool-result records
 and source tool-call arguments. The live result is not mutated. A later turn must

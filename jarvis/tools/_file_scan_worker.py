@@ -3,6 +3,7 @@
 import base64
 import json
 import resource
+import signal
 import sys
 
 WALL_SECONDS = 12
@@ -17,6 +18,7 @@ def main():
 	# Linux production workers enforce address space; macOS has no reliable AS limit.
 	if sys.platform.startswith("linux"):
 		resource.setrlimit(resource.RLIMIT_AS, (MEMORY_BYTES, MEMORY_BYTES))
+	signal.alarm(WALL_SECONDS)
 	from jarvis.exceptions import InvalidArgumentError
 	from jarvis.tools._file_scan import scan_file
 

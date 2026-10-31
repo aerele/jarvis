@@ -3,6 +3,7 @@
 import base64
 import json
 import resource
+import signal
 import sys
 
 
@@ -11,6 +12,8 @@ def main():
 	resource.setrlimit(resource.RLIMIT_CPU, (16, 16))
 	if sys.platform.startswith("linux"):
 		resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+	# Keep a wall bound even if the parent dies before its subprocess timeout.
+	signal.alarm(22)
 	from jarvis.exceptions import InvalidArgumentError
 	from jarvis.tools._spreadsheet_process import RESOURCE_ERROR
 	from jarvis.tools._spreadsheet_query import query_spreadsheet
