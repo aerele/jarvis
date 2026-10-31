@@ -606,8 +606,17 @@ doc_events["Jarvis Personalise Question Rule"] = {
 # raises, never sprays RQ jobs under tests): see
 # jarvis.chat.role_profiles.on_user_update / enqueue_sync.
 doc_events["User"] = {
-	"on_update": ["jarvis.chat.role_profiles.on_user_update", "jarvis.chat.sharing.on_user_update"],
-	"on_trash": "jarvis.chat.sharing.on_user_trash",
+	"on_update": [
+		"jarvis.chat.role_profiles.on_user_update",
+		"jarvis.chat.sharing.on_user_update",
+		"jarvis.payment_calendar.lifecycle.on_user_update",
+	],
+	"on_trash": ["jarvis.chat.sharing.on_user_trash", "jarvis.payment_calendar.lifecycle.on_user_trash"],
+}
+
+doc_events["User Permission"] = {
+	"on_update": "jarvis.payment_calendar.lifecycle.on_permission_change",
+	"on_trash": "jarvis.payment_calendar.lifecycle.on_permission_change",
 }
 
 # Phase-0 admission (chat concurrency, WP-0): a deleted conversation must not
@@ -1004,6 +1013,7 @@ has_permission.update(
 # (``after_migrate`` and ``doc_events`` after commit), never by deleting keys (``delete_keys``
 # is a ``KEYS`` scan); answers expire by TTL (2 h at most, 10 min for an error).
 persistent_cache_keys = [
+	"jarvis:pcal:",  # Financial snapshots retain bounded TTLs across watchdog cache clears.
 	"jarvis:query:",  # Saved result IDs retain their own 24-hour TTL across cache clears.
 	"jarvis:llm_switch",
 	"jarvis:macro_reconcile",
