@@ -67,7 +67,7 @@ def unsupported_reason(namespaces, inst):
 	"""Recheck declared schema guards at writeback; a failed check stays closed."""
 	for key in sorted(set(namespaces) & set(SUPPORTED)):
 		version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", str(inst.get("installed_version") or ""))
-		if not version or tuple(map(int, version.groups())) < MIN_BUNDLE_VERSION[key]:
+		if not version or tuple(int(part) for part in version.groups()) < MIN_BUNDLE_VERSION[key]:
 			return "auditor bundle version"
 		try:
 			value = PROVIDERS[key][0](inst)
