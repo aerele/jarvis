@@ -4,6 +4,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis._password_utils import clear_settings_password, set_settings_password
 from jarvis.api import call_tool
 from jarvis.tests._role_guard import enforced_role_guards
 from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
@@ -94,7 +95,8 @@ class TestCallToolPluginAuth(FrappeTestCase):
 		# real agent config. db_set bypasses on_update - the value persists
 		# only for this test class.
 		cls._original_token = settings.get_password("agent_token", raise_exception=False) or ""
-		settings.db_set("agent_token", "plugin-auth-test-token")
+		# Through the real password storage (__Auth): the plugin-auth read goes straight to it.
+		set_settings_password(settings, "agent_token", "plugin-auth-test-token")
 		# Seed a Jarvis Chat Session row so the user-resolution lookup has
 		# something to find. Use a sentinel key so we can clean up cleanly.
 		_cleanup_session(cls.SESSION_KEY)
@@ -109,8 +111,7 @@ class TestCallToolPluginAuth(FrappeTestCase):
 
 	@classmethod
 	def tearDownClass(cls):
-		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("agent_token", cls._original_token)
+		restore_agent_token(cls._original_token)
 		_cleanup_session(cls.SESSION_KEY)
 		frappe.db.commit()
 		super().tearDownClass()
@@ -421,6 +422,17 @@ class TestCallToolPluginAuth(FrappeTestCase):
 		self.assertTrue(result["ok"], msg=result)
 
 
+def restore_agent_token(original: str) -> None:
+	"""Put the site's agent_token back through the real password storage (__Auth).
+	The plugin-auth read goes straight to __Auth, so a test seeds and restores there,
+	never with a bare ``db_set`` (that writes plaintext into tabSingles only)."""
+	settings = frappe.get_single("Jarvis Settings")
+	if original:
+		set_settings_password(settings, "agent_token", original)
+	else:
+		clear_settings_password(settings, "agent_token")
+
+
 def _cleanup_session(session_key: str) -> None:
 	names = frappe.get_all(
 		"Jarvis Chat Session",
@@ -448,7 +460,7 @@ class _PluginAuthTestBase(FrappeTestCase):
 		super().setUpClass()
 		settings = frappe.get_single("Jarvis Settings")
 		cls._orig_token = settings.get_password("agent_token", raise_exception=False) or ""
-		settings.db_set("agent_token", cls.TOKEN)
+		set_settings_password(settings, "agent_token", cls.TOKEN)
 		_cleanup_session(cls.SESSION_KEY)
 		frappe.get_doc(
 			{
@@ -461,8 +473,7 @@ class _PluginAuthTestBase(FrappeTestCase):
 
 	@classmethod
 	def tearDownClass(cls):
-		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("agent_token", cls._orig_token)
+		restore_agent_token(cls._orig_token)
 		_cleanup_session(cls.SESSION_KEY)
 		frappe.db.commit()
 		super().tearDownClass()
@@ -897,18 +908,10 @@ class TestC2AgentTokenExpiry(_PluginAuthTestBase):
 	(tests/test_agent_token_age.py)."""
 
 	def _patch_settings(self, *, max_age_days: int, age_days: int | None):
-		"""Patch _plugin_auth's view of Jarvis Settings: max_age + issued_at."""
-		import datetime as _dt
-		from unittest.mock import MagicMock
-
-		fake = MagicMock()
-		fake.agent_token_max_age_days = max_age_days
-		if age_days is None:
-			fake.agent_token_issued_at = None
-		else:
-			fake.agent_token_issued_at = _dt.datetime.now() - _dt.timedelta(days=age_days)
-		fake.get_password.return_value = self.TOKEN
-		return patch("jarvis._plugin_auth.frappe.get_single", return_value=fake)
+		"""Patch the token read at its use site (the plugin-auth key read is a direct
+		password lookup, not a Settings doc). The age arguments are what the loop below
+		varies: plugin-auth must not look at them at all."""
+		return patch("jarvis._plugin_auth._agent_token", return_value=self.TOKEN)
 
 	def test_tokens_of_any_age_are_accepted(self):
 		for max_age_days, age_days in ((0, 1000), (90, None), (90, 30), (90, 90), (90, 100)):

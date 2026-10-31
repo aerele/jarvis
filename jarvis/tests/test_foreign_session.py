@@ -118,9 +118,11 @@ class TestForeignSessionHardening(JarvisSettingsSnapshot, FrappeTestCase):
 	def test_known_keys_are_not_recorded(self):
 		"""A match in ANY of the four tables is known, and the whole lookup is ONE query."""
 		queries = []
+		bound = []
 
 		def sql(query, *args, **kwargs):
 			queries.append(str(query))
+			bound.append(args[0] if args else {})
 			return [(1,)]
 
 		with (
@@ -138,7 +140,9 @@ class TestForeignSessionHardening(JarvisSettingsSnapshot, FrappeTestCase):
 			"Jarvis Chat Binding",
 		):
 			self.assertIn(f"`tab{table}`", queries[0])
-		self.assertIn(KEYS[0], queries[0])
+		# The key is a bound parameter (one per table), never part of the SQL text.
+		self.assertNotIn(KEYS[0], queries[0])
+		self.assertEqual(list(bound[0].values()), [KEYS[0]] * 4)
 		self.assertEqual(_count(), 0)
 
 	def test_lookup_skips_tables_that_do_not_exist(self):
