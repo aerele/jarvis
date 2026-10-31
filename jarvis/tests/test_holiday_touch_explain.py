@@ -13,11 +13,12 @@ from unittest import mock
 
 import frappe
 
-from jarvis.holiday_touch import api, resolve
+from jarvis.holiday_touch import api, policy, resolve
 from jarvis.tests.test_holiday_touch_resolve import (
 	DIWALI,
 	HAS_HRMS,
 	IST,
+	SETTINGS,
 	USETT,
 	_Base,
 	_now,
@@ -358,6 +359,22 @@ class TestRows(_Case):
 		(row,) = view["rows"]
 		self.assertEqual((row["description"], row["via"]), ("Sunday", "weekly_off_calendar"))
 		self.assertEqual(row["occasion"], "diwali")
+
+	def test_a_row_the_operators_alias_names_shows_as_matched(self):
+		user = self.person([(DIWALI, "Festival of Lights", 0)])
+		self.assertEqual(self.view(user)["rows"][0]["occasion"], None)
+		policy.persist(
+			{
+				"holiday_policy_supported": True,
+				"holiday_policy": {"aliases": {"diwali": ["festival of lights"]}},
+			},
+			daily=False,
+		)
+		frappe.db.value_cache.pop(SETTINGS, None)
+		view = self.view(user)
+		(row,) = view["rows"]
+		self.assertEqual((row["occasion"], row["design"], row["via"]), ("diwali", "diwali", "match"))
+		self.assertEqual(view["occasion"]["design"], "diwali")  # what answer() computes agrees
 
 	def test_a_row_failure_is_reported_in_the_status_not_raised(self):
 		user = self.person([(DIWALI, "Diwali", 0)])
