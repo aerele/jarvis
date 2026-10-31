@@ -600,6 +600,13 @@ doc_events = {
 	for dt in ("DocType", "Custom Field", "Property Setter", "Workflow", "Client Script")
 }
 
+# Generic RPCs must use the same source gate as dedicated LCV tools. The
+# handler is a no-op outside the scoped tool call, including ordinary Desk.
+doc_events["Landed Cost Voucher"] = {
+	"before_validate": "jarvis.tools._lcv_tool_writes.guard_tool_document",
+	"before_submit": "jarvis.tools._lcv_tool_writes.guard_tool_document",
+}
+
 # Error capture (jarvis.api_errors): name the jarvis caller on an Error Log row
 # written without a traceback, and buffer a jarvis API call that answered 4xx
 # (Frappe writes no Error Log row for those). Both are no-ops for anything that
