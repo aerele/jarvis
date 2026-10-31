@@ -20,6 +20,13 @@ vi.mock("@/branding", async () => {
 		agentName: "Jarvis",
 	};
 });
+// The two banner gates read the boot payload and the router; only whether they show matters here.
+vi.mock("../../../pwa/src/noticeGate", async () => ({
+	showBanner: (await import("vue")).ref(false),
+}));
+vi.mock("../../../pwa/src/announcementGate", async () => ({
+	showAnnouncement: (await import("vue")).ref(false),
+}));
 const api = vi.hoisted(() => ({ recordHolidayShown: vi.fn() }));
 vi.mock("../../../pwa/src/api", () => api);
 const art = vi.hoisted(() => ({ load: null }));
@@ -31,6 +38,9 @@ vi.mock("../../../pwa/src/lib/holidayScenes", async (original) => ({
 import HolidayStage from "../../../pwa/src/components/HolidayStage.vue";
 import { holidayTouch } from "../../../pwa/src/holidayTouch";
 import { _resetSpentForTests } from "../../../pwa/src/lib/useHolidayScene";
+import { installBannerVisible } from "../../../pwa/src/lib/installBanner";
+import { showAnnouncement } from "../../../pwa/src/announcementGate";
+import { showBanner } from "../../../pwa/src/noticeGate";
 import { applyTheme } from "../../../pwa/src/lib/theme";
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -57,18 +67,21 @@ async function today_is(payload) {
 
 // The page's layout: a 390 x 726 art layer (844 px screen less the composer), the mark and the
 // heading in the middle, the starter cards at the bottom.
-const RECTS = {
+const RECT_TABLE = {
 	"jvs-host": [0, 0, 390, 726],
+	hero: [60, 220, 270, 150],
 	mark: [167, 240, 56, 56],
 	heading: [80, 310, 230, 26],
 	cards: [14, 520, 362, 190],
 };
+let RECTS;
 let hostHeight;
 function stubLayout() {
 	vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function () {
 		const key = this.dataset?.hs || [...this.classList].find((c) => c === "jvs-host");
 		const [x, y, w, h0] = RECTS[key] || [0, 0, 0, 0];
-		const height = key === "jvs-host" ? hostHeight : h0;
+		// jsdom has no layout: the art layer is as tall as the page last rendered it.
+		const height = key === "jvs-host" ? parseFloat(this.parentElement.style.height) || 0 : h0;
 		return { x, y, left: x, top: y, width: w, height, right: x + w, bottom: y + height };
 	});
 }
@@ -101,13 +114,12 @@ function fakeScenes() {
 let wrapper;
 let slot; // the latest slot props
 let picked; // taps that reached a starter card
-function mountStage(props = {}) {
+function mountStage(props = {}, options = {}) {
 	slot = null;
 	picked = vi.fn();
 	wrapper = mount(HolidayStage, {
+		...options,
 		props: {
-			greeting: "Good morning, Priya.",
-			words: { heading: "Happy Diwali, Priya.", leadup: null },
 			composerTop: () => hostHeight,
 			...props,
 		},
@@ -115,8 +127,10 @@ function mountStage(props = {}) {
 			default: (p) => {
 				slot = p;
 				return [
-					h("div", { "data-hs": "mark" }),
-					h("h1", { "data-hs": "heading" }, p.showDay ? "day" : "normal"),
+					h("div", { "data-hs": "hero" }, [
+						h("div", { "data-hs": "mark" }),
+						h("h1", { "data-hs": "heading" }, p.showDay ? "day" : "normal"),
+					]),
 					h(
 						"div",
 						{
@@ -143,8 +157,32 @@ function matchMedia({ dark = false, reduced = false } = {}) {
 	}));
 }
 
+// jsdom has no ResizeObserver: a fake the test fires by hand.
+let observer;
+class FakeResizeObserver {
+	constructor(callback) {
+		this.callback = callback;
+		this.targets = new Set();
+		observer = this;
+	}
+	observe(el) {
+		this.targets.add(el);
+	}
+	disconnect() {
+		this.targets.clear();
+	}
+}
+const resized = (name) =>
+	observer.callback([{ target: wrapper.get(`[data-hs="${name}"]`).element }]);
+
 beforeEach(() => {
 	hostHeight = 726;
+	RECTS = structuredClone(RECT_TABLE);
+	observer = null;
+	installBannerVisible.value = false;
+	showAnnouncement.value = false;
+	showBanner.value = false;
+	vi.stubGlobal("ResizeObserver", FakeResizeObserver);
 	globalThis.__brandState.white = false;
 	api.recordHolidayShown.mockReset().mockResolvedValue({ play: true });
 	_resetSpentForTests();
@@ -323,6 +361,245 @@ describe("PWA HolidayStage", () => {
 		made[1].opts.onBeat("settle", "end");
 		await flushPromises();
 		expect(cardsHidden()).toBe(false);
+	});
+
+	describe("when the page moves under the scene", () => {
+		it("watches the hero, the greeting and the starters", async () => {
+			await today_is(answer());
+			fakeScenes();
+			mountStage();
+			await flushPromises();
+			const names = [...observer.targets].map((el) => el.dataset.hs).sort();
+			expect(names).toEqual(["cards", "heading", "hero"]);
+		});
+
+		it("reads the boxes again when the starters change size (the personalised ones arrive)", async () => {
+			await today_is(answer());
+			const { made } = fakeScenes();
+			mountStage();
+			await flushPromises();
+			RECTS.cards = [14, 470, 362, 240];
+			resized("cards");
+			await flushPromises();
+			expect(made[0].relayout).toHaveBeenCalledTimes(1);
+			expect(made[0].relayout.mock.calls[0][0]).toMatchObject({ cards: { y: 470, h: 240 } });
+		});
+
+		it("reads them again when the greeting wraps or the font swaps in", async () => {
+			await today_is(answer());
+			const { made } = fakeScenes();
+			mountStage();
+			await flushPromises();
+			RECTS.heading = [80, 310, 230, 52];
+			resized("heading");
+			await flushPromises();
+			expect(made[0].relayout.mock.calls[0][0]).toMatchObject({ heading: { h: 52 } });
+		});
+
+		it("ignores a change under 1 px", async () => {
+			await today_is(answer());
+			const { made } = fakeScenes();
+			mountStage();
+			await flushPromises();
+			RECTS.cards = [14, 520, 362, 190.6];
+			resized("cards");
+			await flushPromises();
+			expect(made[0].relayout).not.toHaveBeenCalled();
+		});
+
+		it("does nothing once the scene is over", async () => {
+			await today_is(answer());
+			const { made } = fakeScenes();
+			mountStage();
+			await flushPromises();
+			window.dispatchEvent(new Event("pointerdown"));
+			RECTS.cards = [14, 470, 362, 240];
+			resized("cards");
+			await flushPromises();
+			expect(made[0].relayout).not.toHaveBeenCalled();
+		});
+
+		it("also reads them again during a replay", async () => {
+			await today_is(answer());
+			const { made } = fakeScenes();
+			mountStage();
+			await flushPromises();
+			window.dispatchEvent(new Event("pointerdown"));
+			window.dispatchEvent(new Event("pointerdown"));
+			slot.onMarkTap();
+			await flushPromises();
+			RECTS.cards = [14, 470, 362, 240];
+			resized("cards");
+			await flushPromises();
+			expect(made[1].relayout).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	describe("the window changing size", () => {
+		const resizeTo = (w, h) => {
+			window.innerWidth = w;
+			window.innerHeight = h;
+			window.dispatchEvent(new Event("resize"));
+		};
+		beforeEach(() => {
+			window.innerWidth = 390;
+			window.innerHeight = 844;
+		});
+
+		it("does not end a scene when the resize event brings no change of size", async () => {
+			await today_is(answer());
+			const { made } = fakeScenes();
+			mountStage();
+			await flushPromises();
+			resizeTo(390, 844);
+			expect(made[0].settle).not.toHaveBeenCalled();
+		});
+
+		it("ends a scene when the window really changed size", async () => {
+			await today_is(answer());
+			const { made } = fakeScenes();
+			mountStage();
+			await flushPromises();
+			resizeTo(844, 390);
+			expect(made[0].settle).toHaveBeenCalledWith("early");
+		});
+
+		it("does not cost the day's scene when the window settles while the art loads", async () => {
+			await today_is(answer());
+			const { mod, made } = fakeScenes();
+			let arrive;
+			art.load = vi.fn(() => new Promise((resolve) => (arrive = () => resolve(mod))));
+			mountStage();
+			await flushPromises();
+			resizeTo(390, 760); // the bar settling at start-up
+			expect(cardsHidden()).toBe(true);
+			arrive();
+			await flushPromises();
+			expect(api.recordHolidayShown).toHaveBeenCalledTimes(1);
+			expect(made).toHaveLength(1);
+		});
+
+		it("compares with the size last seen, so a replay is not ended by an old change", async () => {
+			await today_is(answer());
+			const { made } = fakeScenes();
+			mountStage();
+			await flushPromises();
+			window.dispatchEvent(new Event("pointerdown")); // ends it
+			resizeTo(390, 760); // at rest: only noted
+			window.dispatchEvent(new Event("pointerdown"));
+			slot.onMarkTap();
+			await flushPromises();
+			resizeTo(390, 760); // a spurious second event, same size
+			expect(made[1].settle).not.toHaveBeenCalled();
+		});
+	});
+
+	it("measures the room again for a replay: a rotation since the first play means a smile, not a scene", async () => {
+		await today_is(answer());
+		const { mod } = fakeScenes();
+		mountStage();
+		await flushPromises();
+		window.dispatchEvent(new Event("pointerdown")); // ends it
+		window.dispatchEvent(new Event("pointerdown"));
+		hostHeight = 250; // now wider than tall
+		slot.onMarkTap();
+		await flushPromises();
+		expect(mod.play).toHaveBeenCalledTimes(1);
+		expect(slot.mark.happy).toBe(true);
+	});
+
+	it("draws a replay in the layer's new height", async () => {
+		await today_is(answer());
+		const { made } = fakeScenes();
+		mountStage();
+		await flushPromises();
+		window.dispatchEvent(new Event("pointerdown"));
+		window.dispatchEvent(new Event("pointerdown"));
+		hostHeight = 640; // the keyboard closed, the bar came back
+		slot.onMarkTap();
+		await flushPromises();
+		expect(made).toHaveLength(2);
+		expect(wrapper.get('[data-testid="holiday-art"]').element.style.height).toBe("640px");
+	});
+
+	it("measures a tab that was hidden at mount when it is shown, not at mount", async () => {
+		await today_is(answer());
+		const { mod } = fakeScenes();
+		let visibility = "hidden";
+		vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+		hostHeight = 0; // nothing laid out in a hidden tab
+		mountStage();
+		await flushPromises();
+		expect(mod.play).not.toHaveBeenCalled();
+		hostHeight = 726;
+		visibility = "visible";
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushPromises();
+		expect(api.recordHolidayShown).toHaveBeenCalledTimes(1);
+		expect(mod.play).toHaveBeenCalledTimes(1);
+	});
+
+	describe("the top banners", () => {
+		const banners = {
+			install: installBannerVisible,
+			announcement: showAnnouncement,
+			update: showBanner,
+		};
+
+		it.each(Object.keys(banners))(
+			"leaves the stage out when the %s banner is up as the screen opens",
+			async (name) => {
+				await today_is(answer());
+				fakeScenes();
+				banners[name].value = true;
+				mountStage();
+				await flushPromises();
+				expect(slot.active).toBe(false);
+				expect(cardsHidden()).toBe(false);
+				expect(api.recordHolidayShown).not.toHaveBeenCalled();
+			}
+		);
+
+		it("ends a scene when a banner turns up during it", async () => {
+			await today_is(answer());
+			const { made } = fakeScenes();
+			mountStage();
+			await flushPromises();
+			installBannerVisible.value = true;
+			await flushPromises();
+			expect(made[0].settle).toHaveBeenCalledWith("early");
+		});
+	});
+
+	describe("the keyboard on the mark", () => {
+		const press = (key, target) =>
+			target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+
+		it.each(["Enter", " "])(
+			"%j on the mark ends the scene without the click it starts replaying it",
+			async (key) => {
+				await today_is(answer());
+				const { mod, made } = fakeScenes();
+				mountStage({}, { attachTo: document.body });
+				await flushPromises();
+				press(key, wrapper.get('[data-hs="mark"]').element);
+				expect(made[0].settle).toHaveBeenCalledWith("early");
+				slot.onMarkTap(); // the click that follows the keydown
+				await flushPromises();
+				expect(mod.play).toHaveBeenCalledTimes(1);
+			}
+		);
+
+		it("a key elsewhere ends the scene and leaves the mark's next tap alone", async () => {
+			await today_is(answer());
+			const { mod } = fakeScenes();
+			mountStage({}, { attachTo: document.body });
+			await flushPromises();
+			press("Enter", wrapper.get(".starter").element);
+			slot.onMarkTap();
+			await flushPromises();
+			expect(mod.play).toHaveBeenCalledTimes(2);
+		});
 	});
 
 	it("leaves nothing behind when the screen goes away mid-scene", async () => {

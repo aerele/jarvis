@@ -6,7 +6,7 @@
 		class="jvh"
 		:class="{ 'jvh-button': clickable }"
 		:type="clickable ? 'button' : undefined"
-		:aria-label="clickable ? 'Show the greeting again' : undefined"
+		:aria-label="clickable ? tapLabel : undefined"
 		:style="wrapperStyle"
 		:data-design="art.design"
 		:data-look="lookOn ? '' : undefined"
@@ -141,6 +141,11 @@ watch(
 		smile();
 	},
 	{ immediate: true }
+);
+
+// What a tap does: the stage replays the scene, otherwise the mark smiles again.
+const tapLabel = computed(() =>
+	props.stage ? "Replay the holiday scene" : "Show the greeting again"
 );
 
 const effectiveMood = computed(() =>
