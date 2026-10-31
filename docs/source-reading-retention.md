@@ -7,7 +7,7 @@ error messages. Activity events use the same minimized receipt. Other tools and
 intentional assistant replies keep their existing behavior.
 
 The paired plugin registers synchronous `tool_result_persist` and
-`before_message_write` hooks. These minimize OpenClaw-owned tool-result records
+`before_message_write` hooks. These minimize gateway-owned tool-result records
 and source tool-call arguments. The live result is not mutated. A later turn must
 query the original source again under current permissions and pin the returned
 version. A shared retry of a minimized receipt returns `SourceReadRequired`; it
@@ -16,10 +16,10 @@ call again.
 
 These changes apply to new writes. They do not delete earlier transcripts,
 backups, original uploads, report artifacts, or user-requested exported files.
-OpenClaw hooks do not establish retention guarantees for native Claude CLI or
+Gateway hooks do not establish retention guarantees for native Claude CLI or
 other provider-owned transcripts. Those paths need separate lifecycle checks.
 An older runtime without the persistence hooks logs an explicit compatibility
-warning and does not provide OpenClaw transcript minimization.
+warning and does not provide gateway transcript minimization.
 
 Compaction must be checked against the deployed runtime's persisted-history path.
 Unit checks of the redactor alone do not prove that a native runner or an existing
