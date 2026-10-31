@@ -123,6 +123,18 @@ class TestCollaborationCallbacks(CollaborationCase):
 		self.assertFalse(WRITE_TOOLS & REFUSED_TOOLS)
 		self.assertEqual(tool_kind("future_unknown_tool"), "refused")
 
+	def test_optional_release_tools_are_unavailable_until_registered(self):
+		from jarvis.chat.collaboration_tools import tool_kind
+		from jarvis.tools.registry import list_tools
+
+		registered = set(list_tools())
+		for name, kind in (
+			("preview_landed_cost_voucher", "read"),
+			("list_connector_actions", "read"),
+			("call_connector", "write"),
+		):
+			self.assertEqual(tool_kind(name), kind if name in registered else "refused")
+
 	def test_generic_tools_cannot_read_private_memory_or_chat_rows(self):
 		from jarvis.chat.collaboration_tools import validate_targets
 
