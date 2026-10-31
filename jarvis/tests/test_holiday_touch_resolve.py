@@ -130,6 +130,7 @@ def _assign(employee: str, company: str, holiday_list: str) -> None:
 
 LOG_KINDS = (
 	"answer",
+	"boot",
 	"holiday",
 	"rotate",
 	"policy_persist",
