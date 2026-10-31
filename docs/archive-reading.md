@@ -54,6 +54,16 @@ The validator also limits a workbook to 4,096 ZIP entries. This is a resource
 ceiling, not a statement that every valid workbook has fewer parts. Representative
 Office export checks remain required; no permissive integrity fallback is used.
 
+Review checks used eight pinned public fixtures from LibreOffice's XLSX test
+corpus. Producer metadata covered Excel, Macintosh Excel, and LibreOffice. Both
+plain query and exact-scan child paths passed. The Excel 2010 fixture exposed an
+empty deflate thumbnail with no file-data bytes. The reader now accepts that
+zero-byte ZIP case only when the verified size and CRC are zero. Nonempty streams
+still require full EOF and integrity checks. A synthetic regression also proves
+that the final worksheet row is preserved and incorrect size/CRC values fail.
+This fixture check does not establish Google Sheets export coverage or universal
+Office compatibility.
+
 All source workers disable core dumps before reading input. The 512 MiB
 address-space cap applies on Linux. macOS does not provide the same address-space
 guarantee. See `source-reading-retention.md` for new tool-receipt minimization,

@@ -164,6 +164,37 @@ class TestArchiveSources(unittest.TestCase):
 
 
 class TestArchiveWorkbookAndZipWriters(unittest.TestCase):
+	def test_empty_deflate_thumbnail_does_not_hide_workbook_rows(self):
+		from jarvis.tools._file_scan import scan_file
+		from jarvis.tools._spreadsheet_query import query_spreadsheet
+
+		buffer = io.BytesIO()
+		with zipfile.ZipFile(io.BytesIO(self.workbook())) as original, zipfile.ZipFile(buffer, "w") as writer:
+			for info in original.infolist():
+				writer.writestr(info, original.read(info))
+			writer.writestr("docProps/thumbnail.wmf", b"", compress_type=zipfile.ZIP_STORED)
+		content = bytearray(buffer.getvalue())
+		with zipfile.ZipFile(io.BytesIO(content)) as book:
+			local = book.getinfo("docProps/thumbnail.wmf").header_offset
+		central = content.rindex(b"PK\x01\x02")
+		# Excel 2010 can mark a zero-byte part as deflate with no data stream.
+		struct.pack_into("<H", content, local + 8, zipfile.ZIP_DEFLATED)
+		struct.pack_into("<H", content, central + 10, zipfile.ZIP_DEFLATED)
+		self.assertGreater(a.validate_workbook(content), 0)
+		result = query_spreadsheet(
+			bytes(content), "empty-thumbnail.xlsx", sql="SELECT A,B FROM sheet1 WHERE _row=2"
+		)
+		self.assertEqual(result["rows"], [["LAST", "0.10"]])
+		self.assertEqual(len(scan_file(bytes(content), "empty-thumbnail.xlsx")["records"]), 2)
+		for crc, size in ((1, 0), (0, 1)):
+			broken = bytearray(content)
+			for offset in (local + 14, central + 16):
+				struct.pack_into("<I", broken, offset, crc)
+			for offset in (local + 22, central + 24):
+				struct.pack_into("<I", broken, offset, size)
+			with self.assertRaises(a.ArchiveIntegrityError):
+				a.validate_workbook(bytes(broken))
+
 	def test_high_ratio_streams_keep_the_last_copy(self):
 		for length in (65536, 65537, 131071, 131072, 131073, 1048576 + 17):
 			content = b"a" * length

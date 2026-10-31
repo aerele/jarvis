@@ -256,6 +256,11 @@ class ZipSource:
 		if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
 			raise ArchiveUnsupportedError("Only stored and deflate ZIP compression are supported.")
 		start, end = self.spans[info.header_offset]
+		# APPNOTE 4.3.8 permits no data for zero-byte ZIP entries. Excel 2010
+		# uses this for an empty deflate thumbnail. Headers, descriptor and
+		# extents were already checked; nonempty/truncated streams still need EOF.
+		if start == end and info.file_size == 0 and info.CRC == 0:
+			return b"" if keep else 0
 		return _decode(
 			memoryview(self.content)[start:end],
 			wbits=-15 if info.compress_type == zipfile.ZIP_DEFLATED else None,
