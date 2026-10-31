@@ -756,6 +756,24 @@ def apply_action(action: dict | str | None = None) -> dict:
 	if _risk == "sensitive":
 		return _park_sensitive(tool, args, conversation, verb, name, (a.get("message") or "").strip())
 
+	# One approval per proposed create (#777): the draft's reply is used once, and a
+	# confirmation card for the same proposal is retired with this write.
+	source = (a.get("message") or "").strip()
+	retired = []
+	if verb == "create":
+		from jarvis.chat import one_approval
+
+		refused, retired = one_approval.claim_create(conversation, doctype, source)
+		if refused is not None:
+			audit.record(
+				tool=f"apply_action.{verb}_doc",
+				args=args,
+				ok=False,
+				error_code=refused["error"]["code"],
+				error_message=refused["error"]["message"],
+			)
+			return refused
+
 	# Surface a failed apply through the SAME {ok:false, error} envelope the
 	# model/confirm paths use (rich detail + hint), instead of leaking Frappe's
 	# raw 403/417 to the SPA. ``mark`` lets _translate_write_error harvest only
@@ -861,6 +879,8 @@ def apply_action(action: dict | str | None = None) -> dict:
 	audit.record(
 		tool=f"apply_action.{verb}_doc", args=args, ok=True, result={"doctype": doctype, "name": name}
 	)
+	if verb == "create":
+		one_approval.mark_saved(source, name)  # commits with the record, not with its receipt
 
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before receipt append
 	receipt = _receipt_text(verb, doctype, name, do_submit)
@@ -881,6 +901,8 @@ def apply_action(action: dict | str | None = None) -> dict:
 		# The mutation is already committed - a receipt hiccup must not
 		# report failure (the SPA would retry and duplicate the create).
 		frappe.log_error(title="apply_action receipt failed", message=frappe.get_traceback())
+	if retired:
+		one_approval.settle_retired(retired)
 	# SUX-3: acknowledge the synchronous write IMMEDIATELY ("Change saved"),
 	# decoupled from the reply queue - the continuation turn below then renders
 	# the standard queued chip with its position. Flag-gated + best-effort.
