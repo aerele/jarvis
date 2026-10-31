@@ -391,7 +391,8 @@ class TestCallToolFailures(CaptureBase):
 	def test_a_refusal_before_the_tool_runs_is_a_tool_failure_of_the_chat_user(self):
 		from jarvis import api
 
-		def refuse(tool, args):
+		def refuse(tool, args, *, result_mode=None):
+			self.assertIsNone(result_mode)
 			frappe.local.jarvis_call_tool_user = USER
 			return api._error("InvalidArgumentError", "args must be an object")
 
@@ -403,7 +404,8 @@ class TestCallToolFailures(CaptureBase):
 	def test_a_tool_failure_is_counted_once(self):
 		from jarvis import api
 
-		def failed_tool(tool, args):
+		def failed_tool(tool, args, *, result_mode=None):
+			self.assertIsNone(result_mode)
 			with patch.object(api, "dispatch", side_effect=frappe.ValidationError("Customer is disabled")):
 				return api._dispatch_and_wrap(tool, {"doctype": "Customer"}, False)
 
