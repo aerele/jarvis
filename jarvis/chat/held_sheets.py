@@ -27,6 +27,7 @@ import re
 
 import frappe
 from frappe.model import table_fields
+from frappe.utils.caching import request_cache
 
 from jarvis.chat import filebox_skills, held_edit, held_parties, held_writes
 from jarvis.chat.pending_actions import _seal
@@ -341,8 +342,11 @@ def identities(item: dict) -> list[str]:
 	return keys or [args_key]
 
 
+@request_cache
 def category(doctype: str) -> str:
-	"""The sheet section: party · address · item · other."""
+	"""The sheet section: party · address · item · other · settings."""
+	if frappe.db.exists("DocType", doctype) and frappe.get_meta(doctype).issingle:
+		return "settings"
 	if doctype in ("Address", "Contact"):
 		return "address"
 	if doctype == "Item":
@@ -686,6 +690,8 @@ def name_of(record: dict) -> str:
 
 
 def _title(record: dict) -> str:
+	if category(record["doctype"]) == "settings":
+		return held_writes._clean_title(record["doctype"])
 	return held_writes._clean_title(f"{record['doctype']} {name_of(record)}")
 
 

@@ -18,7 +18,12 @@
 						class="min-w-0 truncate text-base font-medium text-ink-gray-9"
 						>{{ record.title || record.name || record.doctype }}</span
 					>
-					<Badge variant="subtle" theme="gray" :label="record.doctype" />
+					<Badge
+						v-if="record.category !== 'settings'"
+						variant="subtle"
+						theme="gray"
+						:label="record.doctype"
+					/>
 					<Badge
 						v-if="record.op === 'update'"
 						variant="subtle"

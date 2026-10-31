@@ -143,6 +143,9 @@
 					</div>
 					<div :id="s.id + '-body'">
 						<template v-if="open[s.key] !== false">
+							<p v-if="s.notice" class="mt-2 text-sm text-ink-gray-7">
+								{{ s.notice }}
+							</p>
 							<SetForAll
 								:sheet="name"
 								:section="s.key"

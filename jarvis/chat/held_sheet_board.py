@@ -13,7 +13,7 @@ from jarvis.chat.pending_actions._store import EXECUTING, PENDING
 # --------------------------------------------------------------------------- #
 # Counts (the board and File Box lines read these, never the card)
 # --------------------------------------------------------------------------- #
-_SECTIONS = {"party": 0, "address": 1, "item": 2, "other": 3}
+_SECTIONS = {"party": 0, "address": 1, "item": 2, "other": 3, "settings": 4}
 
 
 def counts(records: list[dict]) -> dict:
