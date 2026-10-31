@@ -325,3 +325,54 @@ class TestGetMyAccess(FrappeTestCase):
 		self._as(ROLED_USER)
 		with self.assertRaises(InvalidArgumentError):
 			get_my_access(docs=[{"doctype": "User", "name": "Administrator"}] * (gma_mod._MAX_DOCTYPES + 1))
+
+
+class TestReadScopeMetadata(FrappeTestCase):
+	def test_owner_conditional_read_is_distinct_from_an_unrestricted_read(self):
+		from frappe.permissions import get_role_permissions
+
+		with patch(
+			"frappe.permissions.get_role_permissions", return_value={"read": 1, "if_owner": {"read": 0}}
+		):
+			self.assertFalse(gma_mod._read_scope("ToDo", "Administrator")["role_unrestricted_read"])
+		with patch("frappe.permissions.get_role_permissions", return_value={"read": 1, "if_owner": {}}):
+			self.assertTrue(gma_mod._read_scope("ToDo", "Administrator")["role_unrestricted_read"])
+		self.assertTrue(get_role_permissions("ToDo", user="Administrator")["read"])
+
+	def test_effective_wildcard_hooks_and_permission_scripts_are_reported(self):
+		def hooks(kind, default=None):
+			return (
+				{"*": ["fake.global.check"], "ToDo": ["fake.todo.check"]}
+				if kind == "permission_query_conditions"
+				else {}
+			)
+
+		with (
+			patch.object(frappe, "get_hooks", side_effect=hooks),
+			patch(
+				"frappe.core.doctype.server_script.server_script_utils.get_server_script_map",
+				return_value={"permission_query": {"ToDo": "private-script-name"}},
+			),
+		):
+			result = gma_mod._read_scope("ToDo", "Administrator")
+		self.assertEqual(result["query_hooks"], ["fake.global.check", "fake.todo.check"])
+		self.assertTrue(result["query_script_present"])
+		self.assertNotIn("private-script-name", str(result))
+
+	def test_hook_names_are_bounded_and_unknown_shapes_fail_closed(self):
+		for configured in [["fake.hook"] * 5, ["x" * 181], [None], {"bad": "shape"}]:
+			with patch.object(frappe, "get_hooks", return_value={"ToDo": configured}):
+				result = gma_mod._read_scope("ToDo", "Administrator")
+			self.assertTrue(result["hooks_truncated"])
+			self.assertLessEqual(len(result["query_hooks"]), 4)
+			self.assertTrue(all(isinstance(x, str) and len(x) <= 180 for x in result["query_hooks"]))
+
+	def test_read_scope_keeps_the_existing_action_contract_and_permissions(self):
+		frappe.set_user("Administrator")
+		before = frappe.get_roles()
+		result = get_my_access(doctypes=["User"], docs=[{"doctype": "User", "name": "Administrator"}])
+		self.assertEqual(set(result["can"]["User"]), {"create", "read", "write", "delete"})
+		self.assertEqual(set(result["can_doc"][0]["can"]), {"read", "write", "delete"})
+		self.assertEqual(frappe.get_roles(), before)
+		self.assertEqual(result["user"], "Administrator")
+		self.assertTrue(result["read_scope"]["User"]["role_unrestricted_read"])
