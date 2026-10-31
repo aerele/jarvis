@@ -1,7 +1,19 @@
 .pcal-root {
-	color: var(--text-1, #20252b);
+	--pcal-positive: #346c4e;
+	--pcal-caution: #956b1d;
+	--pcal-negative: #ae4331;
+	--pcal-link: #21604e;
+	color: var(--ink-gray-9, #20252b);
 	font-variant-numeric: tabular-nums;
 }
+[data-theme="dark"] .pcal-root,
+[data-theme="dark"] .pcal-dialog {
+	--pcal-positive: #6edda1;
+	--pcal-caution: #f2bf5a;
+	--pcal-negative: #fa9285;
+	--pcal-link: #83ceaf;
+}
+
 .pcal-main {
 	flex: 1;
 	min-height: 0;
@@ -25,7 +37,7 @@
 	font-size: 10px;
 	font-weight: 650;
 	letter-spacing: 0.13em;
-	color: var(--text-3, #68727f);
+	color: var(--ink-gray-6, #68727f);
 	margin-bottom: 7px;
 }
 .pcal-title-row h1 {
@@ -36,7 +48,7 @@
 }
 .pcal-subtitle {
 	font-size: 13px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	margin-top: 7px;
 }
 .pcal-button,
@@ -81,7 +93,7 @@
 	font-weight: 400;
 }
 .pcal-text-button {
-	color: var(--text-blue-link, #21604e);
+	color: var(--pcal-link);
 	font-weight: 550;
 	text-decoration: underline;
 	text-underline-offset: 3px;
@@ -109,7 +121,7 @@
 	min-width: 0;
 	font-size: 11px;
 	font-weight: 550;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 }
 .pcal-field select,
 .pcal-field input {
@@ -119,7 +131,7 @@
 	border: 1px solid var(--outline-gray-2, #dce0e5);
 	border-radius: 7px;
 	background: var(--surface-white, #fff);
-	color: var(--text-1, #20252b);
+	color: var(--ink-gray-9, #20252b);
 	font-size: 12px;
 	font-weight: 450;
 	line-height: 1.2;
@@ -128,7 +140,7 @@
 .pcal-select-button {
 	justify-content: space-between;
 	font-weight: 450;
-	color: var(--text-1, #20252b);
+	color: var(--ink-gray-9, #20252b);
 }
 .minimum-field {
 	border-left: 1px solid var(--outline-gray-2, #e2e5e9);
@@ -140,7 +152,7 @@
 	flex-wrap: wrap;
 	gap: 12px;
 	min-height: 36px;
-	color: var(--text-1, #20252b);
+	color: var(--ink-gray-9, #20252b);
 	font-size: 13px;
 	overflow-wrap: anywhere;
 }
@@ -156,7 +168,7 @@
 	margin-top: 14px;
 	margin-bottom: 20px;
 	font-size: 10px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 }
 .pcal-asof > span:first-child {
 	display: inline-flex;
@@ -184,7 +196,7 @@
 	border-radius: 10px;
 }
 .kpi-label {
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	font-size: 11px;
 	font-weight: 550;
 }
@@ -197,7 +209,7 @@
 	overflow-wrap: anywhere;
 }
 .kpi-note {
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	font-size: 10px;
 	line-height: 1.6;
 }
@@ -214,7 +226,7 @@
 }
 .pcal-section-bar p {
 	font-size: 11px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	margin-top: 6px;
 	line-height: 1.5;
 }
@@ -265,7 +277,7 @@
 }
 .pcal-panel-heading p {
 	font-size: 10px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	margin-top: 5px;
 	line-height: 1.6;
 }
@@ -283,7 +295,7 @@
 	grid-template-columns: repeat(7, minmax(0, 1fr));
 }
 .calendar-weekdays {
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	font-size: 9px;
 	text-transform: uppercase;
 	letter-spacing: 0.05em;
@@ -390,7 +402,7 @@
 }
 .calendar-cell.selected,
 .calendar-list-row.selected {
-	outline: 2px solid #1f2933;
+	outline: 2px solid var(--ink-gray-9, #1f2933);
 	outline-offset: 0;
 }
 .pcal-root .calendar-cell:focus-visible,
@@ -419,7 +431,7 @@
 	gap: 12px;
 	padding: 10px 20px 6px;
 	font-size: 9px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 }
 .calendar-legend span {
 	display: inline-flex;
@@ -444,18 +456,18 @@
 	background: #abb2bb;
 }
 .risk-text-red {
-	color: #ae4331;
+	color: var(--pcal-negative, #ae4331);
 }
 .risk-text-orange {
-	color: #956b1d;
+	color: var(--pcal-caution);
 }
 .risk-text-green {
-	color: #346c4e;
+	color: var(--pcal-positive);
 }
 .pcal-footnote {
 	font-size: 10px;
 	line-height: 1.6;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	padding: 12px 20px 17px;
 }
 .calendar-list {
@@ -519,7 +531,7 @@ button.upcoming-row:hover {
 .upcoming-date small {
 	display: block;
 	font-size: 9px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	line-height: 1.5;
 	margin-top: 5px;
 }
@@ -538,7 +550,7 @@ button.upcoming-row:hover {
 	padding: 30px 20px;
 	font-size: 12px;
 	line-height: 1.7;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 }
 .detail-panel {
 	margin-bottom: 22px;
@@ -546,7 +558,7 @@ button.upcoming-row:hover {
 .pcal-chip {
 	padding: 5px 8px;
 	background: var(--surface-gray-2, #f1f3f5);
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	border-radius: 5px;
 	font-size: 10px;
 }
@@ -561,11 +573,11 @@ button.upcoming-row:hover {
 	white-space: nowrap;
 	border-bottom: 2px solid transparent;
 	padding: 12px 0;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	font-size: 11px;
 }
 .pcal-tabs button[aria-pressed="true"] {
-	color: var(--text-1, #20252b);
+	color: var(--ink-gray-9, #20252b);
 	font-weight: 600;
 	border-color: #346752;
 }
@@ -582,7 +594,7 @@ button.upcoming-row:hover {
 .pcal-table th {
 	font-size: 10px;
 	font-weight: 550;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	padding: 12px 20px;
 	background: var(--surface-gray-1, #fafbfc);
 	white-space: nowrap;
@@ -595,7 +607,7 @@ button.upcoming-row:hover {
 .pcal-table small {
 	display: block;
 	font-size: 9px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	margin-top: 3px;
 }
 .pcal-table strong {
@@ -629,7 +641,7 @@ button.upcoming-row:hover {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 20px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	font-size: 10px;
 }
 .allocation-row dl div {
@@ -637,7 +649,7 @@ button.upcoming-row:hover {
 	gap: 5px;
 }
 .allocation-row dd {
-	color: var(--text-2, #47515d);
+	color: var(--ink-gray-7, #47515d);
 }
 .pcal-pagination {
 	display: flex;
@@ -647,7 +659,7 @@ button.upcoming-row:hover {
 	gap: 12px;
 	padding: 16px 20px;
 	font-size: 10px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 }
 .pcal-pagination > div {
 	display: flex;
@@ -683,7 +695,7 @@ button.upcoming-row:hover {
 }
 .reconciliation-summary p {
 	font-size: 10px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	line-height: 1.8;
 	margin-top: 6px;
 }
@@ -711,7 +723,7 @@ button.upcoming-row:hover {
 }
 .pcal-state p {
 	max-width: 480px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	font-size: 13px;
 	line-height: 1.8;
 }
@@ -730,20 +742,20 @@ button.upcoming-row:hover {
 }
 .pcal-notice {
 	font-size: 11px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	padding: 12px 0;
 	line-height: 1.6;
 }
 .pcal-inline-error {
 	font-size: 12px;
-	color: #ab412d;
+	color: var(--pcal-negative, #ae4331);
 	line-height: 1.6;
 	margin: 10px 0;
 }
 .pcal-dialog {
 	font-size: 12px;
 	line-height: 1.7;
-	color: var(--text-2, #47515d);
+	color: var(--ink-gray-7, #47515d);
 }
 .pcal-dialog > * + * {
 	margin-top: 16px;
@@ -788,7 +800,7 @@ button.upcoming-row:hover {
 .account-choices small {
 	display: block;
 	font-size: 10px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	overflow-wrap: anywhere;
 }
 @media (max-width: 1200px) {
@@ -1003,7 +1015,7 @@ button.upcoming-row:hover {
 .pcal-assumptions {
 	margin-top: -14px;
 	margin-bottom: 22px;
-	color: var(--text-3, #697380);
+	color: var(--ink-gray-6, #697380);
 	font-size: 10px;
 	line-height: 1.7;
 }

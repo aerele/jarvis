@@ -221,6 +221,7 @@ const unavailable = computed(
 const allocationLabels = {
 	withholding: "Tax withholding",
 	foreign_advance: "Advance adjustment",
+	foreign_rounding: "Currency rounding",
 };
 const money = (value) =>
 	exactMoney(value, props.snapshot.currency, props.snapshot.projection.precision);

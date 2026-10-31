@@ -94,7 +94,7 @@
 								? "Update paused"
 								: model.refreshing
 								? "Refreshing data…"
-								: "Updates automatically while active"
+								: "Updates automatically while this page is visible"
 						}}</span
 					>
 				</div>
@@ -362,7 +362,9 @@ const bucketTitle = computed(
 				overdue: "overdue balances",
 				undated: "balances without a due date",
 				adjustments: "signed adjustments",
-				outside_horizon: "balances outside the forecast",
+				outside_horizon: model.snapshot?.scope.month
+					? "balances after the selected month"
+					: "balances outside the forecast",
 			}[model.bucket?.name] || "balances"
 		}`
 );
