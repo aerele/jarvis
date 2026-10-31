@@ -17,6 +17,7 @@
     "preferred_persona",
     "support_context_copy_pref",
     "show_holiday_touches",
+    "payment_calendar_preferences",
     "app_state_section",
     "business_greeting_state",
     "business_greeting_chat_count",
@@ -317,6 +318,14 @@
       "read_only": 1,
       "no_copy": 1,
       "description": "Per-model month-to-date token counters + per-model caps. Written only by server code (jarvis.chat.usage). 0 cap = unlimited. Bench keeps the current month only; admin persists history from the daily push."
+    },
+    {
+      "fieldname": "payment_calendar_preferences",
+      "fieldtype": "Small Text",
+      "label": "Payment Calendar Preferences",
+      "hidden": 1,
+      "no_copy": 1,
+      "description": "Company and selected bank/cash account IDs only. Revalidated under the requesting user; never stores balances."
     }
   ],
   "permissions": [
