@@ -122,7 +122,7 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 	if not hmac.compare_digest(presented_token, expected_token):
 		_audit_log(
 			"plugin_auth: bearer mismatch",
-			f"remote_ip={caller_ip!r} session={headers.get('X-Jarvis-Session', '')!r}",
+			f"remote_ip={caller_ip!r} session_hash={_log_hash(headers.get('X-Jarvis-Session', ''))}",
 		)
 		raise PluginAuthError(
 			http_status=401,
@@ -173,7 +173,7 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 		if _should_audit_unsigned_reject(session_key):
 			_audit_log(
 				"plugin_auth: unsigned request rejected",
-				f"remote_ip={caller_ip!r} session={session_key!r}; no signature headers",
+				f"remote_ip={caller_ip!r} session_hash={_log_hash(session_key)}; no signature headers",
 			)
 		raise PluginAuthError(
 			http_status=400,
@@ -305,7 +305,10 @@ def _validate_signature(
 	)
 	expected = hmac.new(token.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
 	if not hmac.compare_digest(expected, signature):
-		_audit_log("plugin_auth: signature mismatch", f"session={session_key!r} nonce_prefix={nonce[:8]!r}")
+		_audit_log(
+			"plugin_auth: signature mismatch",
+			f"session_hash={_log_hash(session_key)} nonce_hash={_log_hash(nonce)}",
+		)
 		raise PluginAuthError(
 			http_status=401,
 			code="AuthenticationError",
@@ -329,7 +332,8 @@ def _validate_signature(
 		return
 	if not got:
 		_audit_log(
-			"plugin_auth: nonce replay rejected", f"session={session_key!r} nonce_prefix={nonce[:8]!r}"
+			"plugin_auth: nonce replay rejected",
+			f"session_hash={_log_hash(session_key)} nonce_hash={_log_hash(nonce)}",
 		)
 		raise PluginAuthError(
 			http_status=401,
@@ -354,12 +358,17 @@ def _enforce_rate_limit(session_key: str) -> None:
 		except Exception:
 			pass
 	if count > 60:
-		_audit_log("plugin_auth: rate limit exceeded", f"session={session_key!r} count={count}")
+		_audit_log("plugin_auth: rate limit exceeded", f"session_hash={_log_hash(session_key)} count={count}")
 		raise PluginAuthError(
 			http_status=429,
 			code="RateLimitExceededError",
 			message="plugin-auth rate limit exceeded for this session",
 		)
+
+
+def _log_hash(value) -> str:
+	"""Correlate refusals without forwarding the session bearer or caller text."""
+	return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if isinstance(value, str) else "absent"
 
 
 def _audit_log(title: str, detail: str) -> None:
