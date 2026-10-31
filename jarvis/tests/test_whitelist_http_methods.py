@@ -31,6 +31,8 @@ GET_ALLOWLIST = frozenset(
 		"jarvis.chat.connectors_api.mcp_oauth_callback",
 		# Read-only boot payload for the holiday touch; refetched by the client without a reload.
 		"jarvis.holiday_touch.api.get_today",
+		# Read-only support view for a Jarvis admin (the Desk console and curl).
+		"jarvis.holiday_touch.api.explain",
 	}
 )
 
