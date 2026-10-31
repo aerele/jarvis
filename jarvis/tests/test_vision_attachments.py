@@ -25,20 +25,21 @@ class TestPrepareAttachments(FrappeTestCase):
 	def test_no_attachments_passthrough(self):
 		self.assertEqual(_prepare_attachments("hi", None, vision_ok=True), ("hi", []))
 
-	def test_text_file_inlined(self):
+	def test_text_file_routes_to_complete_query(self):
 		att = _make_file("notes.txt", b"hello world")
 		msg, parts = _prepare_attachments("hi", [att], vision_ok=True)
 		self.assertEqual(parts, [])
-		self.assertIn("hello world", msg)
+		self.assertNotIn("hello world", msg)
+		self.assertIn("jarvis__query_file", msg)
 
 	def test_spreadsheet_routes_to_all_row_reading_instead_of_sampled_arithmetic(self):
 		att = _make_file("whole-table.csv", b"amount\n" + b"10\n" * 10000)
 		msg, parts = _prepare_attachments("Total this file", [att], vision_ok=False)
 		self.assertEqual(parts, [])
 		self.assertIn("jarvis__read_file", msg)
-		self.assertIn("check the returned contract and coverage", msg)
-		self.assertIn("preserve currency, header, subtotal and total-row semantics", msg)
-		self.assertIn("incomplete coverage", msg)
+		self.assertIn("source coverage", msg)
+		self.assertIn("currencies", msg)
+		self.assertIn("disclose unread ranges", msg)
 
 	def test_small_csv_is_still_inlined(self):
 		att = _make_file("small.csv", b"Amount\n10\n20\n")
@@ -49,8 +50,9 @@ class TestPrepareAttachments(FrappeTestCase):
 	def test_long_text_preview_requests_automatic_full_read(self):
 		att = _make_file("long-file.txt", b"x" * 30000 + b"TAIL CLAUSE")
 		msg, _ = _prepare_attachments("Read this", [att], vision_ok=False)
-		self.assertIn("Attachment preview is incomplete", msg)
-		self.assertIn("follow next_read sequentially when supplied", msg)
+		self.assertNotIn("TAIL CLAUSE", msg)
+		self.assertIn("jarvis__query_file", msg)
+		self.assertIn("full sequential reading", msg)
 
 	def test_image_routed_to_vision(self):
 		att = _make_file("pic.png", b"mocked")
