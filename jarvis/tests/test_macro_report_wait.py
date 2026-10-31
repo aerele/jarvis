@@ -1942,8 +1942,9 @@ class TestTheRealEnqueueOnTheTurnMachine(RealResumeBase):
 		self.assertEqual((seed.role, seed.origin), ("user", "continuation"))
 		self.assertTrue(seed.hidden)
 		self.assertIn(f"`{PREP_REPORT}` (generated ", seed.content)
+		self.assertIn("Read its data with query_report, passing prepared_report ", seed.content)
 		self.assertIn(
-			' and exactly these filters, and finish this step: `{"company": "Acme"}`',
+			' and exactly these filters, only confirms it is ready), and finish this step: `{"company": "Acme"}`',
 			seed.content,
 		)
 		# A second look (the cron after the hook) finds a running run and sends nothing.
