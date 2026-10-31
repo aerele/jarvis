@@ -8,13 +8,8 @@ from frappe.utils import flt
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._doc_parts import _refuse_unreadable
 
-LCV_RECEIPT_FIELDS = (
-	"receipt_document_type",
-	"receipt_document",
-	"supplier",
-	"posting_date",
-	"grand_total",
-)
+LCV_RECEIPT_SUMMARY_FIELDS = ("supplier", "posting_date", "grand_total")
+LCV_RECEIPT_FIELDS = ("receipt_document_type", "receipt_document", *LCV_RECEIPT_SUMMARY_FIELDS)
 _RECEIPT_SOURCE_FIELDS = {
 	"Purchase Receipt": ("supplier", "posting_date", "base_grand_total"),
 	"Purchase Invoice": ("supplier", "posting_date", "base_grand_total"),
@@ -58,12 +53,16 @@ def landed_cost_receipt_details(doc):
 				cache[key] = _receipt_details(doc, doctype, name, native, row.idx)
 			details = cache[key]
 		# Let normal mandatory checks and collect-mode metadata handle blank links.
-		for target in LCV_RECEIPT_FIELDS[2:]:
+		for target in LCV_RECEIPT_SUMMARY_FIELDS:
 			if child.has_field(target):
 				row.set(target, details.get(target))
 
 
 def _receipt_details(doc, doctype, name, native, index):
+	"""Return fetched summaries, or clear them for unsupported legacy fetch types.
+
+	An empty result deliberately replaces existing summary values with None.
+	"""
 	# v15 has only PR/PI add_fetch handlers. Do not guess a mapping for other
 	# receipt types when a different installed version has no native handler.
 	if not native and doctype not in ("Purchase Receipt", "Purchase Invoice"):
