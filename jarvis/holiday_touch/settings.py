@@ -26,6 +26,7 @@ _SITE_FIELDS = (
 	"birthday_greetings_enabled",
 	"holiday_policy_disabled",
 	"holiday_policy_disabled_designs",
+	"holiday_policy_names",
 	"brand_logo",
 	"agent_name",
 )
@@ -70,6 +71,18 @@ def blocked_designs(values: dict) -> frozenset:
 	except Exception:  # ValueError, and RecursionError on a pathologically nested value
 		return frozenset()
 	return frozenset(d for d in data if isinstance(d, str)) if isinstance(data, list) else frozenset()
+
+
+def names(values: dict) -> dict:
+	"""The operator's extra holiday names as stored, ``{"aliases", "near_misses"}``; ``{}``
+	when there are none or the text is unreadable. ``match.match_occasion`` takes it as
+	``extra`` and ignores whatever is the wrong shape."""
+	raw = values.get("holiday_policy_names")
+	try:
+		data = json.loads(raw) if raw else {}
+	except Exception:  # ValueError, and RecursionError on a pathologically nested value
+		return {}
+	return data if isinstance(data, dict) else {}
 
 
 def user_row(user: str):
