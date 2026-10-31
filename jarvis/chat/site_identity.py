@@ -20,17 +20,33 @@ def _valid(value) -> bool:
 
 
 def instance_id() -> str:
+	"""The stored id, minted once. "" when it cannot be stored (never an unpersisted id)."""
 	current = frappe.conf.get(_KEY)
 	if _valid(current):
 		return current
-	with frappe.cache.lock(_LOCK, timeout=10):
-		# frappe.conf can be stale in this process, so re-read the file under the lock.
-		current = frappe.get_site_config().get(_KEY)
-		if _valid(current):
-			return current
-		from frappe.installer import update_site_config
+	try:
+		with frappe.cache.lock(_LOCK, timeout=10):
+			# frappe.conf can be stale in this process, so re-read the file under the lock.
+			current = frappe.get_site_config().get(_KEY)
+			if _valid(current):
+				return current
+			from frappe.installer import update_site_config
 
-		current = secrets.token_hex(16)
-		update_site_config(_KEY, current)
-		frappe.conf[_KEY] = current
-		return current
+			current = secrets.token_hex(16)
+			update_site_config(_KEY, current)
+			frappe.conf[_KEY] = current
+			return current
+	except Exception:
+		_log_once()
+		return ""
+
+
+_logged = False
+
+
+def _log_once() -> None:
+	global _logged
+	if _logged:
+		return
+	_logged = True
+	frappe.log_error(title="site_identity: instance id unavailable")

@@ -232,11 +232,19 @@ def vouch_session(pinned_instance_id: str | None = None) -> dict:
 	from jarvis.chat import foreign_session, session_claims, site_identity
 
 	key = str(session_key).lower()
-	known = foreign_session.is_known_key(key) or session_claims.is_claimed(key)
+	try:
+		# Strict: a lookup error must never read as "known" (that would be fail-open).
+		known = foreign_session.has_row_for_key(key) or session_claims.is_claimed(key)
+	except Exception:
+		frappe.log_error(title="vouch_session: lookup failed")
+		frappe.local.response.http_status_code = 503
+		return _error("ServiceUnavailable", "vouch lookup failed")
 	own_id = site_identity.instance_id()
-	if not known or (pinned_instance_id and pinned_instance_id != own_id):
+	if not known:
 		foreign_session.record(key)
-	if known:
+	else:
+		if own_id and pinned_instance_id and pinned_instance_id != own_id:
+			foreign_session.record_instance_mismatch(key)
 		try:
 			from jarvis.chat import site_pin
 

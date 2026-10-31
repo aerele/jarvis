@@ -31,6 +31,16 @@ def _drop_claim(key: str) -> None:
 	frappe.cache().delete_value(_claim_key(key))
 
 
+def _drop_throttles(key: str) -> None:
+	digest = hashlib.sha256(key.encode()).hexdigest()[:12]
+	for name in (digest, "mismatch:" + digest):
+		frappe.cache().delete_value("jarvis:foreign_session:" + name)
+
+
+def _seen() -> int:
+	return int(frappe.db.get_single_value(SETTINGS, "foreign_sessions_seen") or 0)
+
+
 class TestVouchSession(FrappeTestCase):
 	def setUp(self):
 		super().setUp()
@@ -42,6 +52,8 @@ class TestVouchSession(FrappeTestCase):
 		}
 		_drop_claim(KEY)
 		self.addCleanup(_drop_claim, KEY)
+		self.addCleanup(_drop_throttles, KEY)
+		_drop_throttles(KEY)
 
 	def tearDown(self):
 		if self._had_id:
@@ -105,10 +117,12 @@ class TestVouchSession(FrappeTestCase):
 			self.assertTrue(vouch_session()["known"])
 
 	def test_vouch_unknown_records_foreign_session(self):
-		with self._request(), patch.object(foreign_session, "record") as rec:
+		before = _seen()
+		with self._request(), patch("frappe.enqueue") as enq:
 			result = vouch_session()
 		self.assertFalse(result["known"])
-		rec.assert_called_once_with(KEY)
+		self.assertEqual(_seen(), before + 1)
+		self.assertEqual(enq.call_args.args[0], "jarvis.chat.foreign_session.report")
 
 	def test_vouch_never_known_from_key_shape(self):
 		with self._request(key="agent:main:dashboard:someone-else"), patch.object(foreign_session, "record"):
@@ -129,11 +143,43 @@ class TestVouchSession(FrappeTestCase):
 		self.assertEqual(frappe.get_site_config()["jarvis_instance_id"], first)
 
 	def test_vouch_records_instance_mismatch(self):
-		session_claims.claim(KEY)
-		with self._request(), patch.object(foreign_session, "record") as rec:
+		"""A key WITH a row (a restored database) must still alert, unmocked."""
+		doc = frappe.get_doc(
+			{"doctype": "Jarvis Chat Session", "session_key": KEY, "user": "Administrator"}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "Jarvis Chat Session", doc.name, force=True)
+		before = _seen()
+		with self._request(), patch("frappe.enqueue") as enq:
 			result = vouch_session(pinned_instance_id="f" * 32)
+			again = vouch_session(pinned_instance_id="f" * 32)
+		self.assertTrue(result["known"] and again["known"])
+		self.assertEqual(_seen(), before + 1)
+		self.assertEqual(enq.call_count, 1)
+		self.assertEqual(enq.call_args.args[0], "jarvis.chat.foreign_session.report")
+
+	def test_vouch_lookup_error_is_503_never_known(self):
+		with (
+			self._request(),
+			patch.object(foreign_session, "has_row_for_key", side_effect=RuntimeError("db")),
+			patch("jarvis.chat.site_pin.pin_if_unset") as pin,
+		):
+			result = vouch_session()
+		self.assertEqual(frappe.local.response.http_status_code, 503)
+		self.assertFalse(result["ok"])
+		self.assertNotIn("known", result)
+		pin.assert_not_called()
+
+	def test_vouch_unwritable_site_config_returns_empty_instance_id(self):
+		update_site_config("jarvis_instance_id", "None")
+		frappe.conf.pop("jarvis_instance_id", None)
+		session_claims.claim(KEY)
+		with (
+			self._request(),
+			patch("frappe.installer.update_site_config", side_effect=OSError("read-only")),
+		):
+			result = vouch_session()
 		self.assertTrue(result["known"])
-		rec.assert_called_once_with(KEY)
+		self.assertEqual(result["instance_id"], "")
 
 	def test_vouch_matching_pin_records_nothing(self):
 		session_claims.claim(KEY)

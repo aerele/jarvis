@@ -31,6 +31,17 @@ NOTICE_MESSAGE = (
 _KNOWN_KEY_DOCTYPES = ("Jarvis Agent Run", "Jarvis Conversation", "Jarvis Chat Session")
 
 
+def has_row_for_key(session_key: str) -> bool:
+	"""Strict exact-key lookup: True only on a positive match, and a lookup error
+	RAISES so a caller that must not fail open (``vouch_session``) can refuse."""
+	for doctype in _KNOWN_KEY_DOCTYPES:
+		if frappe.db.table_exists(doctype) and frappe.db.exists(doctype, {"session_key": session_key}):
+			return True
+	from jarvis.chat.collaboration import BINDING
+
+	return bool(frappe.db.table_exists(BINDING) and frappe.db.exists(BINDING, {"session_key": session_key}))
+
+
 def is_known_key(session_key: str) -> bool:
 	"""True when this site knows the session key anywhere (so it is not foreign).
 
@@ -40,14 +51,7 @@ def is_known_key(session_key: str) -> bool:
 	"do not alert".
 	"""
 	try:
-		for doctype in _KNOWN_KEY_DOCTYPES:
-			if frappe.db.table_exists(doctype) and frappe.db.exists(doctype, {"session_key": session_key}):
-				return True
-		from jarvis.chat.collaboration import BINDING
-
-		return bool(
-			frappe.db.table_exists(BINDING) and frappe.db.exists(BINDING, {"session_key": session_key})
-		)
+		return has_row_for_key(session_key)
 	except Exception:
 		frappe.logger("jarvis.foreign_session").warning("known-session lookup failed", exc_info=True)
 		return True
@@ -61,10 +65,22 @@ def _claim(key: str) -> bool:
 
 def record(session_key: str) -> bool:
 	"""True only the first time an unknown session key is seen in 24 h. Never raises."""
-	key = None
+	return _record(_KEY_PREFIX + _digest(session_key), session_key, skip_known=True)
+
+
+def record_instance_mismatch(session_key: str) -> bool:
+	"""Like ``record`` for a key this site DOES know but whose plugin is pinned to another
+	instance id (a database restored elsewhere). Own 24 h throttle; no known-key guard."""
+	return _record(_KEY_PREFIX + "mismatch:" + _digest(session_key), session_key, skip_known=False)
+
+
+def _digest(session_key: str) -> str:
+	return hashlib.sha256(str(session_key).encode()).hexdigest()[:12]
+
+
+def _record(key: str, session_key: str, *, skip_known: bool) -> bool:
 	try:
-		key = _KEY_PREFIX + hashlib.sha256(str(session_key).encode()).hexdigest()[:12]
-		if is_known_key(session_key) or not _claim(key):
+		if (skip_known and is_known_key(session_key)) or not _claim(key):
 			return False
 		seen = int(frappe.db.get_single_value("Jarvis Settings", "foreign_sessions_seen") or 0)
 		frappe.db.set_single_value(
@@ -83,11 +99,10 @@ def record(session_key: str) -> bool:
 		return True
 	except Exception:
 		frappe.logger("jarvis.foreign_session").warning("could not record foreign session", exc_info=True)
-		if key:
-			try:
-				frappe.cache().delete_value(key)
-			except Exception:
-				pass
+		try:
+			frappe.cache().delete_value(key)
+		except Exception:
+			pass
 		return False
 
 
