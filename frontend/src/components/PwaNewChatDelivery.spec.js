@@ -5,6 +5,9 @@ import { ref } from "vue";
 const router = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("vue-router", () => ({ useRouter: () => router }));
 vi.mock("../../../pwa/src/maintenanceGate", () => ({ holdActive: ref(false) }));
+// The holiday stage asks whether a top banner shows; the gates behind that read the router.
+vi.mock("../../../pwa/src/noticeGate", () => ({ showBanner: ref(false) }));
+vi.mock("../../../pwa/src/announcementGate", () => ({ showAnnouncement: ref(false) }));
 // isWhitelabeled: the holiday store reads it, and a strict mock throws on a missing export.
 vi.mock("@/branding", () => ({ agentName: ref("Jarvis"), isWhitelabeled: false }));
 vi.mock("../../../pwa/src/api", () => ({
