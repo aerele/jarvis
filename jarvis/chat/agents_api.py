@@ -2592,7 +2592,9 @@ def list_findings(
 		# get_value bypasses perms, so without the owner check a foreign run id is
 		# an existence/metadata oracle. A run the caller does not own returns empty
 		# (identical to an unknown run), never leaking that it exists.
-		run_row = frappe.db.get_value(RUN, run, ["agent", "creation", "status", "owner"], as_dict=True)
+		run_row = frappe.db.get_value(
+			RUN, run, ["agent", "creation", "status", "owner", "scope_json"], as_dict=True
+		)
 		if not run_row or run_row.owner != me:
 			return _empty()
 		if run_row.status not in ("completed", "partial"):
@@ -2600,14 +2602,20 @@ def list_findings(
 			# (findings_count is 0 there too — the drill-down must match).
 			return _empty()
 		observed = frappe.db.sql(
-			"""SELECT f.name FROM `tabJarvis Agent Finding` f
+			"""SELECT f.name, fr.scope_json FROM `tabJarvis Agent Finding` f
 			JOIN `tabJarvis Agent Run` fr ON fr.name = f.first_seen_run
 			JOIN `tabJarvis Agent Run` lr ON lr.name = f.last_seen_run
 			WHERE f.owner = %(me)s AND f.agent = %(agent)s
 			  AND fr.creation <= %(rc)s AND lr.creation >= %(rc)s""",
 			{"me": me, "agent": run_row.agent, "rc": run_row.creation},
-			pluck=True,
+			as_dict=True,
 		)
+		# Detections from another record can span this run's timestamp. Match the
+		# launch boundary as well, so the drill-down follows finding identity.
+		from jarvis.chat.agent_runs import _record_scope
+
+		boundary = _record_scope(run_row.scope_json)
+		observed = [row.name for row in observed if _record_scope(row.scope_json) == boundary]
 		if not observed:
 			return _empty()
 		filters["name"] = ["in", observed]
