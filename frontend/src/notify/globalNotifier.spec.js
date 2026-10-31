@@ -554,3 +554,38 @@ describe("authoritative activity reconciliation (#591)", () => {
 		expect(store.refreshConversationActivity).not.toHaveBeenCalled();
 	});
 });
+
+describe("Chat questions keep the current native answer surface", () => {
+	const question = {
+		kind: "approval:new",
+		conversation_id: "conv-a",
+		source: "Chat",
+		question: "Which supplier?",
+	};
+	it("keeps the badge and omits the Board toast on the visible chat", () => {
+		store.currentConvId = "conv-a";
+		router.currentRoute.value = { meta: { chat: true } };
+		socket.emit(question);
+		expect(store.refreshApprovalsCount).toHaveBeenCalledOnce();
+		expect(useToasts().value).toHaveLength(0);
+	});
+	it.each([undefined, "File Box", "File Box Wiki", "Agent"])(
+		"preserves same-chat alerts for source %s",
+		(source) => {
+			store.currentConvId = "conv-a";
+			router.currentRoute.value = { meta: { chat: true } };
+			socket.emit({ ...question, source });
+			expect(useToasts().value).toHaveLength(1);
+		}
+	);
+	it("keeps a Chat notice away from its conversation", () => {
+		socket.emit(question);
+		expect(useToasts().value).toHaveLength(1);
+	});
+	it("keeps the dashboard rule for typed Chat questions", () => {
+		localStorage.setItem("jarvis-dash-conv-u@example.com", "conv-a");
+		router.currentRoute.value = { name: "DashboardsPage", hash: "", params: {}, meta: {} };
+		socket.emit({ ...question, origin_page: "dashboards" });
+		expect(useToasts().value).toHaveLength(0);
+	});
+});

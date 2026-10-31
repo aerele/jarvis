@@ -80,3 +80,13 @@ describe("FileBoxWaits", () => {
 		expect(w.find(".jv-fbw-opt").attributes("disabled")).toBeDefined();
 	});
 });
+
+it("reviews a sealed sheet in this chat without deciding it", async () => {
+	const sheet = { ...HELD, src: "sheet", name: "SH-1" };
+	const w = mountWith([sheet]);
+	const button = w.findAll("button").find((b) => b.text() === "Review here");
+	expect(button).toBeDefined();
+	await button.trigger("click");
+	expect(w.emitted("review")).toEqual([[sheet]]);
+	expect(w.emitted("decide")).toBeUndefined();
+});
