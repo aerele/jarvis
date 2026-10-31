@@ -3,7 +3,7 @@
 		ref="element"
 		class="pcal-kpis"
 		:class="{ 'long-values': cards.some(isWide) }"
-		:style="{ minHeight: minimumHeight ? `${minimumHeight}px` : undefined }"
+		:style="{ minHeight: loading && minimumHeight ? `${minimumHeight}px` : undefined }"
 	>
 		<article
 			v-for="card in cards"

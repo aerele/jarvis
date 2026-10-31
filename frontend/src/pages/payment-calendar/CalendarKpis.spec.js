@@ -68,7 +68,7 @@ describe("Payment Calendar KPIs", () => {
 			.spyOn(wrapper.element, "getBoundingClientRect")
 			.mockReturnValue({ height: 240 });
 		await wrapper.setProps({ snapshot: { ...snapshot } });
-		expect(wrapper.element.style.minHeight).toBe("240px");
+		expect(wrapper.element.style.minHeight).toBe("");
 		await wrapper.setProps({
 			loading: true,
 			snapshot: { ...snapshot, projection: { ...snapshot.projection, book_cash: null } },
