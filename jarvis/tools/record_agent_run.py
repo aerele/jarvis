@@ -188,7 +188,7 @@ def record_agent_run(
 	Returns ``{run, status, findings_count, blocker_count, dropped, coverage_note,
 	dashboard}``.
 	"""
-	from jarvis.chat import agent_runs
+	from jarvis.chat import agent_runs, derived_config
 	from jarvis.tools._agent_run_ctx import get_session_key
 
 	# The Run is resolved from the CALLER's session_key (the delegate's opaque
@@ -238,7 +238,7 @@ def record_agent_run(
 		frappe.db.get_value(
 			LISTING,
 			run_row.agent,
-			["rule_tokens", "doctypes_required"],
+			["rule_tokens", "doctypes_required", "config_keys"],
 			as_dict=True,
 		)
 		or {}
@@ -248,6 +248,41 @@ def record_agent_run(
 
 	raw_findings = _as_list(findings)
 	coverage = _as_dict(coverage)
+	guard_dropped = []
+	guard_reason = derived_config.unsupported_reason(_as_list(listing.get("config_keys")), inst)
+	if guard_reason:
+		guard_changed_coverage = any(
+			not isinstance(coverage.get(token), dict)
+			or coverage[token].get("state") != "not_evaluable"
+			or coverage[token].get("reason_code")
+			not in {"unsupported_customisation", "external_evidence_absent"}
+			for token in token_set
+		)
+		guard_dropped = [
+			{
+				"ref_doctype": f.get("ref_doctype", "?") if isinstance(f, dict) else "?",
+				"ref_name": f.get("ref_name", "?") if isinstance(f, dict) else "?",
+				"reason": "unsupported_customisation: " + guard_reason,
+			}
+			for f in raw_findings
+		]
+		raw_findings = []
+		coverage = {
+			token: coverage[token]
+			if isinstance(coverage.get(token), dict)
+			and coverage[token].get("state") == "not_evaluable"
+			and coverage[token].get("reason_code") == "external_evidence_absent"
+			else {
+				"state": "not_evaluable",
+				"reason_code": "unsupported_customisation",
+				"detail": guard_reason,
+			}
+			for token in token_set
+		}
+		# Rebuild a trusted result page if the submitted page could claim unsupported findings.
+		if guard_dropped or guard_changed_coverage:
+			dashboard = canvas_ref = None
+		integrity_digest = None
 	scope = _as_dict(scope)
 	truncated = bool(truncated)
 	from jarvis.chat import operator_review
@@ -279,6 +314,7 @@ def record_agent_run(
 			rows_consumed_val = None
 
 	valid, dropped = _validate_findings(raw_findings, token_set, allowed_refs)
+	dropped.extend(guard_dropped)
 	if review_backend:
 		frappe.db.set_value(
 			RUN,
