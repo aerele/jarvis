@@ -201,6 +201,10 @@ _PERSONALISE_SETTINGS_DEFAULTS = {
 	"personalise_enabled": 1,
 	"chat_question_mining_enabled": 1,
 	"chat_sharing_enabled": 1,
+	# Holiday touches: on by default. The seeder runs on install and on every migrate, so a
+	# fresh install does not depend on the settings reader's own fallback for an absent row.
+	"holiday_touches_enabled": 1,
+	"birthday_greetings_enabled": 1,
 }
 
 
