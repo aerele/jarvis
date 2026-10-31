@@ -23,6 +23,11 @@ These changes apply to new writes. They do not delete earlier transcripts,
 backups, original uploads, report artifacts, or user-requested exported files.
 Gateway hooks do not establish retention guarantees for native Claude CLI or
 other provider-owned transcripts. Those paths need separate lifecycle checks.
+Protected reads require OpenClaw 2026.9.3 or later, explicit
+`plugins.entries.jarvis-openclaw-plugin.hooks.allowConversationAccess=true`, and
+`OPENCLAW_TRAJECTORY=0` set before gateway startup. Native trajectory snapshots
+bypass the transcript hooks. The plugin refuses reads while capture is enabled
+or its setting is absent. It also refuses reads on CLI or unknown runners.
 An older runtime without the persistence hook API logs an explicit compatibility
 warning. The paired plugin refuses source reads before network dispatch until
 the runtime is upgraded. Other tools retain their existing behavior.
