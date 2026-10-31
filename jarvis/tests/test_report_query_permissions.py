@@ -198,8 +198,44 @@ class TestStoredReportPermissions(unittest.TestCase):
 class TestPinnedRestrictions(unittest.TestCase):
 	"""Which restricted doctypes a stored run's filters credit (no database)."""
 
-	def pinned(self, stored, *grants, filters=(TERRITORY_FILTER,)):
-		return _pinned_restrictions(_grants(*grants), list(filters), stored)
+	def pinned(self, stored, *grants, filters=(TERRITORY_FILTER,), ref_links=None, groups=()):
+		links = {"territory": "Territory"} if ref_links is None else ref_links
+		return _pinned_restrictions(
+			_grants(*grants),
+			list(filters),
+			stored,
+			links,
+			lambda doctype, values: set(groups) & set(values),
+		)
+
+	def test_a_filter_that_is_not_the_doctypes_own_link_credits_nothing(self):
+		self.assertEqual(self.pinned({"territory": "North"}, "North", ref_links={}), set())
+		self.assertEqual(
+			self.pinned({"territory": "North"}, "North", ref_links={"territory": "Customer"}), set()
+		)
+
+	def test_every_link_filter_to_the_doctype_must_be_pinned(self):
+		second = {"fieldname": "billing_territory", "fieldtype": "Link", "options": "Territory"}
+		links = {"territory": "Territory", "billing_territory": "Territory"}
+		filters = (TERRITORY_FILTER, second)
+		self.assertEqual(
+			self.pinned({"territory": "North"}, "North", filters=filters, ref_links=links), set()
+		)
+		self.assertEqual(
+			self.pinned(
+				{"territory": "North", "billing_territory": "North"},
+				"North",
+				filters=filters,
+				ref_links=links,
+			),
+			{"Territory"},
+		)
+
+	def test_a_tree_group_value_credits_nothing(self):
+		self.assertEqual(self.pinned({"territory": "North"}, "North", groups=("North",)), set())
+		self.assertEqual(
+			self.pinned({"territory": ["North", "South"]}, "North", "South", groups=("South",)), set()
+		)
 
 	def test_a_permitted_value_credits_the_doctype(self):
 		self.assertEqual(self.pinned({"territory": "North"}, "North"), {"Territory"})
@@ -233,5 +269,12 @@ class TestPinnedRestrictions(unittest.TestCase):
 
 	def test_a_doctype_the_user_is_not_restricted_on_is_not_listed(self):
 		self.assertEqual(
-			_pinned_restrictions({"Territory": []}, [TERRITORY_FILTER], {"territory": "North"}), set()
+			_pinned_restrictions(
+				{"Territory": []},
+				[TERRITORY_FILTER],
+				{"territory": "North"},
+				{"territory": "Territory"},
+				lambda doctype, values: set(),
+			),
+			set(),
 		)
