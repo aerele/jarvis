@@ -236,7 +236,7 @@ jobs:
       # header comment for why that x4 cost is acceptable on this public repo.
       fail-fast: false
       matrix:
-        # Shards are cut by measured TIME, not by test count (jarvis/ci/test_shards.py).
+        # Shards are cut by measured TIME, not by test count (jarvis/ci/shard_split.py).
         # Frappe's own splitter weights each test FILE by its `def test_` count, and test cost
         # is far from uniform: on 2026-10-31 (531 files, ~14k tests, ~67 min of tests) the
         # count split gave est. [17.5, 27.6, 11.5, 10.4] min, the holiday-touch files all
@@ -402,13 +402,13 @@ jobs:
           # wrapper swaps frappe's count-based split_by_weight for a split by the measured
           # per-module seconds in jarvis/ci/data/test-timings.json, then invokes frappe's CLI
           # from sites/ exactly as bench/cli.py frappe_cmd does. The runner, coverage and the
-          # CI-gated exit code are all still frappe's. See jarvis/ci/test_shards.py, including
+          # CI-gated exit code are all still frappe's. See jarvis/ci/shard_split.py, including
           # how to regenerate the timings when the step's printed plan warns they are stale.
           #
           # --with-coverage is this command's spelling of run-tests' --coverage (different
           # click commands; do not "fix" one to match the other).
           cd sites
-          ../env/bin/python -m jarvis.ci.test_shards run -- \
+          ../env/bin/python -m jarvis.ci.shard_split run -- \
             --site jarvis-ci.test run-parallel-tests \
             --app jarvis \
             --build-number ${{ matrix.shard }} \
