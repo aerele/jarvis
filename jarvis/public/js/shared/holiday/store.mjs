@@ -84,16 +84,12 @@ export function createHolidayStore({
   reportGateway = true,
 }) {
   const raw = ref(readAnswer(boot));
-<<<<<<< HEAD
   // The time of the last tick, kept out of the reactive graph on purpose: a ref holding a new
   // Date every minute would wake everything that reads `answer` on every tick (a Vue 3.3 computed
   // tells its readers whenever an input is set). Only whether the answer is stale is reactive,
   // and a ref holding the same boolean tells nobody.
   let clock = now();
   const stale = ref(isStale(raw.value, clock));
-=======
-  const clock = ref(now());
->>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
   const shown = ref(true); // the personal "Show holiday touches" switch
   // A page that booted without the key (dev server, a custom shell) has nothing yet, so
   // its first refresh is not held back by the usual gap.
@@ -107,11 +103,7 @@ export function createHolidayStore({
 
   // What the screens read: today's answer, or none.
   const answer = computed(() =>
-<<<<<<< HEAD
     shown.value && !stale.value ? raw.value : NONE
-=======
-    shown.value && !isStale(raw.value, clock.value) ? raw.value : NONE
->>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
   );
 
   // For support: what the store holds. Read only; nothing here can change the store.
@@ -150,12 +142,8 @@ export function createHolidayStore({
   }
 
   function tick() {
-<<<<<<< HEAD
     clock = now();
     stale.value = isStale(raw.value, clock);
-=======
-    clock.value = now();
->>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
   }
 
   function refresh({ force = false } = {}) {
@@ -167,17 +155,9 @@ export function createHolidayStore({
       return inFlight;
     }
     tick();
-<<<<<<< HEAD
     const gap = stale.value ? staleGap : REFRESH_MIN_MS;
     if (!force && clock.getTime() - lastAttempt < gap) return Promise.resolve();
     lastAttempt = clock.getTime();
-=======
-    const stale = isStale(raw.value, clock.value);
-    const gap = stale ? staleGap : REFRESH_MIN_MS;
-    if (!force && clock.value.getTime() - lastAttempt < gap)
-      return Promise.resolve();
-    lastAttempt = clock.value.getTime();
->>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
     // Cleared here, not inside the loop: a fetchAnswer that throws at once would otherwise
     // clear it before this assignment and leave a settled promise stuck in inFlight.
     inFlight = loadAll(force).finally(() => (inFlight = null));
@@ -214,11 +194,7 @@ export function createHolidayStore({
       tick();
       // Still stale after a good answer: the server and this browser disagree about
       // the date. Ask less and less often rather than every 30 seconds for ever.
-<<<<<<< HEAD
       staleGap = isStale(next, clock)
-=======
-      staleGap = isStale(next, clock.value)
->>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
         ? Math.min(staleGap * 2, STALE_RETRY_MAX_MS)
         : STALE_RETRY_MS;
     } catch (error) {
@@ -259,22 +235,14 @@ export function createHolidayStore({
     if (doc.visibilityState === "hidden") return;
     if (refreshPolicy === "desk") {
       tick();
-<<<<<<< HEAD
       if (!stale.value) return;
-=======
-      if (!isStale(raw.value, clock.value)) return;
->>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
     }
     refresh();
   }
   function onTimer() {
     tick();
     if (doc.visibilityState === "hidden") return;
-<<<<<<< HEAD
     if (stale.value) refresh();
-=======
-    if (isStale(raw.value, clock.value)) refresh();
->>>>>>> d4a977c (feat(holiday): shared framework-free holiday store and worn-room module)
   }
 
   function start() {
