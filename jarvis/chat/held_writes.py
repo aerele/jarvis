@@ -964,7 +964,7 @@ def _resume_one(row, waiter, message: str) -> bool:
 			waiter.conversation,
 			message,
 			origin="file_box",
-			attachments=_attachments(filebox._source_file(waiter.conversation)),
+			attachments=_attachments(filebox._source_file(waiter.conversation, read_as=row.owner_user)),
 			background=1,
 		)
 	except Exception:

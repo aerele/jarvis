@@ -22,6 +22,7 @@
   "agent_initiated",
   "turn_count",
   "session_feedback_asked_at",
+  "filebox_active_source_file",
   "auto_mode",
   "auto_mode_at",
   "collaboration_active",
@@ -128,6 +129,15 @@
    "read_only": 1,
    "no_copy": 1,
    "description": "The File docname dropped into this File Box conversation. Server-set only (drop_file)."
+  },
+  {
+   "fieldname": "filebox_active_source_file",
+   "fieldtype": "Data",
+   "label": "File Box Selected Source File",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Owner-selected replacement File for future File Box turns. Server-set only. The original source remains the drop identity."
   },
   {
    "fieldname": "filebox_result_doctype",

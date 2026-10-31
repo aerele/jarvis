@@ -742,9 +742,9 @@ def _card(records: list[dict]) -> dict:
 
 
 def _summary(conversation: str) -> str:
-	from jarvis.chat.filebox import _source_file
+	from jarvis.chat.filebox_source import display_file
 
-	f = _source_file(conversation)
+	f = display_file(conversation)
 	return held_writes._clean_title(f"Approval sheet: {(f and f.file_name) or conversation}")
 
 

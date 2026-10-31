@@ -975,6 +975,25 @@ ENDPOINTS.update(
 			"arguments": {"conversation": "$conversation"},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.filebox_source.get_source_state": {
+			"arguments": {
+				"conversation": "$conversation",
+				"message": "$message",
+				"item": "artifact",
+				"file_url": "$file_url",
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.filebox_source.set_source": {
+			"arguments": {
+				"conversation": "$conversation",
+				"message": "$message",
+				"item": "artifact",
+				"file_url": "$file_url",
+				"expected": "",
+			},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.macros_admin_api.admin_stop_run": {
 			"arguments": {"run": "$macro_run"},
 			"scope": "chat_scoped",
