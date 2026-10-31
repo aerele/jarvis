@@ -112,13 +112,15 @@ def route_request(
 		raise PluginRouteError("The agent route request failed.") from e
 
 
-def post_session_action(agent_url: str, path: str, session_key: str, body: dict) -> dict:
+def post_session_action(
+	agent_url: str, path: str, session_key: str, body: dict, *, read_timeout_s: float = 30
+) -> dict:
 	"""POST a sessions/delete or sessions/patch body; returns the plugin's payload.
 
 	401/403/404/5xx raise ``PluginRouteError``. Only a 502 carries the gateway's refusal text
 	(for example "session not found"), which the plugin has already scrubbed of secrets.
 	"""
-	response = route_request(agent_url, "POST", path, session_key, body, read_timeout_s=30)
+	response = route_request(agent_url, "POST", path, session_key, body, read_timeout_s=read_timeout_s)
 	try:
 		parsed = response.json()
 	except ValueError:
@@ -134,10 +136,13 @@ def post_session_action(agent_url: str, path: str, session_key: str, body: dict)
 	return payload if isinstance(payload, dict) else {}
 
 
-def delete_session(agent_url: str, session_key: str) -> None:
+def delete_session(agent_url: str, session_key: str, *, read_timeout_s: float = 30) -> None:
 	"""Delete a gateway session through the plugin. Call it BEFORE the site drops its own
-	row for the key: the plugin vouches the key with this site and refuses an unknown one."""
-	post_session_action(agent_url, SESSIONS_DELETE_PATH, session_key, {"key": session_key})
+	row for the key: the plugin vouches the key with this site and refuses an unknown one.
+	``read_timeout_s`` bounds the wait for the reply (sweeps pass a short one)."""
+	post_session_action(
+		agent_url, SESSIONS_DELETE_PATH, session_key, {"key": session_key}, read_timeout_s=read_timeout_s
+	)
 
 
 def patch_session_policy(agent_url: str, session_key: str, patch: dict) -> dict:

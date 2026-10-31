@@ -6,6 +6,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.api import call_tool
 from jarvis.chat import foreign_session
 from jarvis.exceptions import AdminUnreachableError
+from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
 
 _SETTINGS = "Jarvis Settings"
 _NOTICE_SUBJECT = "Another site is using this site's Jarvis connection"
@@ -27,8 +28,9 @@ def _clear_cache(keys: list[str]) -> None:
 KEYS = ["agent:main:dashboard:x", "agent:main:dashboard:y", "agent:main:dashboard:legacy", "jarvis:shared:z"]
 
 
-class TestForeignSession(FrappeTestCase):
+class TestForeignSession(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
+		super().setUp()
 		frappe.db.set_single_value(_SETTINGS, "foreign_sessions_seen", 0, update_modified=False)
 		frappe.db.set_single_value(_SETTINGS, "foreign_session_last_at", None, update_modified=False)
 		_clear_cache(KEYS)
@@ -93,8 +95,9 @@ class TestForeignSession(FrappeTestCase):
 		notify.assert_called_once_with(_NOTICE_SUBJECT, foreign_session.NOTICE_MESSAGE)
 
 
-class TestForeignSessionHardening(FrappeTestCase):
+class TestForeignSessionHardening(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
+		super().setUp()
 		frappe.db.set_single_value(_SETTINGS, "foreign_sessions_seen", 0, update_modified=False)
 		_clear_cache(KEYS)
 		self.addCleanup(_clear_cache, KEYS)
@@ -113,30 +116,62 @@ class TestForeignSessionHardening(FrappeTestCase):
 		self.assertEqual(_count(), 1)
 
 	def test_known_keys_are_not_recorded(self):
-		def known(session_key):
-			return foreign_session.record(session_key)
+		"""A match in ANY of the four tables is known, and the whole lookup is ONE query."""
+		queries = []
 
-		def exists(doctype, filters=None):
-			return doctype == self.hit and filters == {"session_key": KEYS[0]}
+		def sql(query, *args, **kwargs):
+			queries.append(str(query))
+			return [(1,)]
 
-		for hit in ("Jarvis Agent Run", "Jarvis Conversation", "Jarvis Chat Session", "Jarvis Chat Binding"):
-			self.hit = hit
-			_clear_cache(KEYS)
-			with (
-				patch("frappe.db.table_exists", return_value=True),
-				patch("frappe.db.exists", side_effect=exists),
-				patch("frappe.enqueue") as enq,
-			):
-				self.assertFalse(known(KEYS[0]), hit)
-				enq.assert_not_called()
+		with (
+			patch("frappe.db.table_exists", return_value=True),
+			patch("frappe.db.sql", side_effect=sql),
+			patch("frappe.enqueue") as enq,
+		):
+			self.assertFalse(foreign_session.record(KEYS[0]))
+			enq.assert_not_called()
+		self.assertEqual(len(queries), 1)
+		for table in (
+			"Jarvis Agent Run",
+			"Jarvis Conversation",
+			"Jarvis Chat Session",
+			"Jarvis Chat Binding",
+		):
+			self.assertIn(f"`tab{table}`", queries[0])
+		self.assertIn(KEYS[0], queries[0])
 		self.assertEqual(_count(), 0)
+
+	def test_lookup_skips_tables_that_do_not_exist(self):
+		queries = []
+
+		def sql(query, *args, **kwargs):
+			queries.append(str(query))
+			return []
+
+		with (
+			patch("frappe.db.table_exists", side_effect=lambda dt: dt == "Jarvis Chat Session"),
+			patch("frappe.db.sql", side_effect=sql),
+		):
+			self.assertFalse(foreign_session.has_row_for_key(KEYS[0]))
+		self.assertEqual(len(queries), 1)
+		self.assertIn("`tabJarvis Chat Session`", queries[0])
+		self.assertNotIn("`tabJarvis Agent Run`", queries[0])
+
+	def test_lookup_without_any_table_is_false_with_no_query(self):
+		with patch("frappe.db.table_exists", return_value=False), patch("frappe.db.sql") as sql:
+			self.assertFalse(foreign_session.has_row_for_key(KEYS[0]))
+		sql.assert_not_called()
 
 	def test_unknown_key_is_recorded(self):
 		with patch("frappe.enqueue"):
 			self.assertTrue(foreign_session.record(KEYS[1]))
 
 	def test_lookup_error_does_not_record(self):
-		with patch("frappe.db.exists", side_effect=RuntimeError("boom")), patch("frappe.enqueue") as enq:
+		with (
+			patch("frappe.db.table_exists", return_value=True),
+			patch("frappe.db.sql", side_effect=RuntimeError("boom")),
+			patch("frappe.enqueue") as enq,
+		):
 			self.assertFalse(foreign_session.record(KEYS[1]))
 		enq.assert_not_called()
 		self.assertEqual(_count(), 0)
@@ -163,8 +198,9 @@ class TestForeignSessionHardening(FrappeTestCase):
 		notify.assert_called_once_with(_NOTICE_SUBJECT, foreign_session.NOTICE_MESSAGE)
 
 
-class TestCallToolRecordsForeignSession(FrappeTestCase):
+class TestCallToolRecordsForeignSession(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
+		super().setUp()
 		frappe.db.set_single_value(_SETTINGS, "foreign_sessions_seen", 0, update_modified=False)
 		_clear_cache(KEYS)
 		self.addCleanup(_clear_cache, KEYS)

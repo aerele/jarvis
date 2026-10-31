@@ -717,7 +717,7 @@
    "hidden": 1,
    "label": "Callback Key",
    "read_only": 1,
-   "description": "Per-tenant key the plugin signs its callbacks to this site with. Once set, the gateway owner token (agent_token) no longer verifies."
+   "description": "Per-tenant key the plugin signs its callbacks to this site with. Either this key or the gateway owner token (agent_token) verifies until retirement clears agent_token; after that only this key does."
   },
   {
    "fieldname": "agent_token_issued_at",

@@ -216,7 +216,7 @@ def persist_rich_outputs(
 			media_items = gen_media.seed_media(
 				assistant_msg_name,
 				settings.agent_url or "",
-				device.device_bearer(settings),
+				device.device_bearer(),
 				media_rels,
 			)
 			if media_items:
@@ -256,7 +256,7 @@ def persist_rich_outputs(
 			url_items = gen_media.seed_media_urls(
 				assistant_msg_name,
 				settings.agent_url or "",
-				device.device_bearer(settings),
+				device.device_bearer(),
 				media_urls,
 			)
 			if url_items:

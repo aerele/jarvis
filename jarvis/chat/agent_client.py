@@ -1350,15 +1350,14 @@ class AgentSession:
 		main session - callers treat that error as a skip, never retry."""
 		# sessions.delete is owner-only, so it goes through the plugin's signed route.
 		# The plugin vouches the key with this site, so the caller must delete its own
-		# row for the key only AFTER this returns. timeout_s is kept for callers; the
-		# route has its own bounded timeout.
+		# row for the key only AFTER this returns. ``timeout_s`` bounds the reply wait.
 		import frappe
 
 		from jarvis.chat import plugin_routes
 
 		agent_url = frappe.db.get_single_value("Jarvis Settings", "agent_url") or ""
 		try:
-			plugin_routes.delete_session(agent_url, session_key)
+			plugin_routes.delete_session(agent_url, session_key, read_timeout_s=timeout_s)
 		except plugin_routes.PluginRouteError as e:
 			raise AgentUnreachableError(f"sessions.delete failed: {e}") from e
 

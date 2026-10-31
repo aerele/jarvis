@@ -33,13 +33,22 @@ _KNOWN_KEY_DOCTYPES = ("Jarvis Agent Run", "Jarvis Conversation", "Jarvis Chat S
 
 def has_row_for_key(session_key: str) -> bool:
 	"""Strict exact-key lookup: True only on a positive match, and a lookup error
-	RAISES so a caller that must not fail open (``vouch_session``) can refuse."""
-	for doctype in _KNOWN_KEY_DOCTYPES:
-		if frappe.db.table_exists(doctype) and frappe.db.exists(doctype, {"session_key": session_key}):
-			return True
+	RAISES so a caller that must not fail open (``vouch_session``) can refuse.
+
+	One query for all the tables that exist (``table_exists`` answers from a cached
+	table list, so it costs no query)."""
+	from functools import reduce
+
 	from jarvis.chat.collaboration import BINDING
 
-	return bool(frappe.db.table_exists(BINDING) and frappe.db.exists(BINDING, {"session_key": session_key}))
+	tables = [dt for dt in (*_KNOWN_KEY_DOCTYPES, BINDING) if frappe.db.table_exists(dt)]
+	if not tables:
+		return False
+	lookups = []
+	for doctype in tables:
+		table = frappe.qb.DocType(doctype)
+		lookups.append(frappe.qb.from_(table).select(1).where(table.session_key == session_key).limit(1))
+	return bool(reduce(lambda a, b: a.union_all(b), lookups).run())
 
 
 def is_known_key(session_key: str) -> bool:

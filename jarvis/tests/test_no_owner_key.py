@@ -179,13 +179,13 @@ class TestMediaUsesDeviceBearer(FrappeTestCase):
 		asked = []
 		settings = Mock(agent_url=AGENT_URL)
 
-		def get_password(fieldname, raise_exception=True):
+		def get_decrypted_password(doctype, name, fieldname, raise_exception=True):
 			asked.append(fieldname)
 			return {"chat_device_token": "dev-tok"}.get(fieldname, "")
 
-		settings.get_password = get_password
 		with (
 			patch("frappe.get_single", return_value=settings),
+			patch("frappe.utils.password.get_decrypted_password", get_decrypted_password),
 			patch("frappe.db.get_value", return_value=""),
 			patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
 			patch("jarvis.chat.generated_media.seed_media", return_value=[]) as seed,
@@ -257,6 +257,17 @@ class TestSessionActions(FrappeTestCase):
 		self.assertEqual(req.call_args.args, ("POST", f"{HTTP_BASE}/jarvis/sessions/delete"))
 		self.assertEqual(json.loads(req.call_args.kwargs["data"]), {"key": SESSION})
 		self.assertEqual(req.call_args.kwargs["headers"]["X-Jarvis-Session"], SESSION)
+
+	def test_delete_session_passes_timeout_through_as_the_read_timeout(self):
+		with (
+			patch("frappe.db.get_single_value", return_value=AGENT_URL),
+			patch_signer(),
+			patch("requests.request", return_value=_response(payload={"ok": True, "payload": {}})) as req,
+		):
+			self._session().delete_session(SESSION, timeout_s=4)
+			self.assertEqual(req.call_args.kwargs["timeout"][1], 4)
+			self._session().delete_session(SESSION)
+			self.assertEqual(req.call_args.kwargs["timeout"][1], 10)
 
 	def test_delete_session_refusal_surfaces_as_agent_unreachable_with_the_gateway_text(self):
 		refusal = _response(status=502, payload={"error": "session not found"})

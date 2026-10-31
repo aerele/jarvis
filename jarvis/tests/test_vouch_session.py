@@ -1,8 +1,8 @@
 """vouch_session: the site says whether it started a plugin session.
 
-Plugin verification is patched at ``jarvis.api.validate_plugin_request``. Redis claims,
-the site_config instance id and Jarvis Settings counters are restored in tearDown
-because e2e2 is a shared site.
+Plugin verification is patched at ``jarvis.api.validate_plugin_request``. Jarvis
+Settings is restored by ``JarvisSettingsSnapshot``; Redis claims and the site_config
+instance id are restored in cleanups because e2e2 is a shared site.
 """
 
 import contextlib
@@ -16,6 +16,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis._plugin_auth import PluginAuthError
 from jarvis.api import vouch_session
 from jarvis.chat import foreign_session, session_claims, site_identity
+from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
 from jarvis.tests.test_api import _FakeRequest
 
 SETTINGS = "Jarvis Settings"
@@ -41,30 +42,24 @@ def _seen() -> int:
 	return int(frappe.db.get_single_value(SETTINGS, "foreign_sessions_seen") or 0)
 
 
-class TestVouchSession(FrappeTestCase):
+def _restore_instance_id(had: bool, old) -> None:
+	if had:
+		update_site_config("jarvis_instance_id", old)
+		frappe.conf["jarvis_instance_id"] = old
+	else:
+		update_site_config("jarvis_instance_id", "None")
+		frappe.conf.pop("jarvis_instance_id", None)
+
+
+class TestVouchSession(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
 		super().setUp()
-		self._had_id = "jarvis_instance_id" in frappe.get_site_config()
-		self._old_id = frappe.get_site_config().get("jarvis_instance_id")
-		self._old_counts = {
-			f: frappe.db.get_single_value(SETTINGS, f)
-			for f in ("foreign_sessions_seen", "foreign_session_last_at")
-		}
+		conf = frappe.get_site_config()
+		self.addCleanup(_restore_instance_id, "jarvis_instance_id" in conf, conf.get("jarvis_instance_id"))
 		_drop_claim(KEY)
 		self.addCleanup(_drop_claim, KEY)
 		self.addCleanup(_drop_throttles, KEY)
 		_drop_throttles(KEY)
-
-	def tearDown(self):
-		if self._had_id:
-			update_site_config("jarvis_instance_id", self._old_id)
-			frappe.conf["jarvis_instance_id"] = self._old_id
-		else:
-			update_site_config("jarvis_instance_id", "None")
-			frappe.conf.pop("jarvis_instance_id", None)
-		for field, value in self._old_counts.items():
-			frappe.db.set_single_value(SETTINGS, field, value, update_modified=False)
-		super().tearDown()
 
 	@contextlib.contextmanager
 	def _request(self, *, verified=True, key=KEY):
