@@ -208,6 +208,10 @@ class ReportSource:
 		return meta
 
 	def _gate(self):
+		# frappe.throw also queues its raw message for the HTTP JSON envelope.
+		# Keep the framework's exception, but suppress its saved-scope popup text.
+		mute_messages = frappe.flags.mute_messages
+		frappe.flags.mute_messages = True
 		try:
 			try:
 				self.report = get_report_doc(self.meta.report_name)
@@ -242,6 +246,8 @@ class ReportSource:
 			raise PermissionDeniedError(
 				"You do not have permission to read this report or its saved scope."
 			) from None
+		finally:
+			frappe.flags.mute_messages = mute_messages
 
 	def read(self):
 		content = read_bounded(frappe.get_cached_doc("File", self.file.name))
