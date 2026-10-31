@@ -30,7 +30,7 @@ class TestLCVSourceTax(LandedCostFixtures):
 		if "india_compliance" not in frappe.get_installed_apps():
 			self.skipTest("India Compliance integration requires its installed schema and native classifier")
 
-	@patch.object(frappe, "in_test", False)
+	@patch.dict(frappe.flags, in_test=False)
 	def taxed_invoice(self, *, restricted=False, item_flag=False, currency="INR", fx=1, tax=18):
 		frappe.set_user("Administrator")
 		parent = frappe.db.get_value(
@@ -398,7 +398,7 @@ class TestLCVSourceTax(LandedCostFixtures):
 		self.assertFalse(result["valid"], result)
 		self.assertEqual(result["issues"][0]["code"], "source_net_claim_exceeded")
 
-	@patch.object(frappe, "in_test", False)
+	@patch.dict(frappe.flags, in_test=False)
 	def test_structured_withholding_stays_outside_cost(self):
 		frappe.set_user("Administrator")
 		parent = frappe.db.get_value(
