@@ -184,14 +184,14 @@ class TestReportEndpoint(ApiErrorsBase):
 		# error recurring with a different number), so they fold into one row.
 		row = {
 			"surface": "spa_chat",
-			"error_code": "run_error",
-			"error_class": "RunError",
-			"message": "the run failed after 3 tries",
+			"error_code": "export_failed",
+			"error_class": "ExportError",
+			"message": "the export failed after 3 tries",
 			"route": "/c/abc?x=1",
 		}
 		with _as(USER):
 			r1 = api_errors.report_client_errors([row])
-			r2 = api_errors.report_client_errors([dict(row, message="the run failed after 8 tries")])
+			r2 = api_errors.report_client_errors([dict(row, message="the export failed after 8 tries")])
 		self.assertEqual(r1["accepted"], 1)
 		self.assertEqual(r2["accepted"], 1)
 		rows = frappe.get_all(DT, filters={"user": USER}, fields=["name", "count", "route", "message"])
@@ -329,6 +329,9 @@ class TestErrorLogReader(ApiErrorsBase):
 		self.assertFalse(api_errors.is_jarvis_error("jarvis.chat.heartbeat push failed", heartbeat_tb))
 
 	def test_collect_filters_to_jarvis_and_advances_watermark(self):
+		# Pinned like the tests below: since=None scans oldest-first, so on a used
+		# site the two fresh rows fall outside the limit window.
+		since = str(frappe.utils.now_datetime())
 		jtb = (
 			"Traceback (most recent call last):\n"
 			'  File "/home/x/apps/jarvis/jarvis/chat/api.py", line 10, in send_message\n'
@@ -343,11 +346,17 @@ class TestErrorLogReader(ApiErrorsBase):
 		)
 		j = frappe.get_doc({"doctype": "Error Log", "method": "jarvis.chat.api.send_message", "error": jtb})
 		j.insert(ignore_permissions=True)
+		# Written without hooks, as by ERPNext code with no jarvis frame on the
+		# stack: inserted from here, the origin tag would rightly name this test.
 		e = frappe.get_doc({"doctype": "Error Log", "method": "erpnext.stock.x.get", "error": etb})
-		e.insert(ignore_permissions=True)
+		e.set_new_name()
+		e.db_insert()
 		frappe.db.commit()
 
-		result = api_errors.collect_error_log(since=None, limit=500)
+		self.addCleanup(frappe.delete_doc, "Error Log", j.name, force=True, ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "Error Log", e.name, force=True, ignore_permissions=True)
+
+		result = api_errors.collect_error_log(since=since, limit=500)
 		classes = [r["error_class"] for r in result["rows"]]
 		self.assertIn("ValueError", classes)
 		self.assertNotIn("KeyError", classes, "an ERPNext exception must never be forwarded")
@@ -403,6 +412,81 @@ class TestErrorLogReader(ApiErrorsBase):
 		result = api_errors.collect_error_log(since=since, limit=500)
 		row = next(r for r in result["rows"] if "admin owner boom" in r["stack"])
 		self.assertEqual(row["user_ref"], "")
+
+
+def _stored_traceback(rel_path: str, func: str = "boom", exc: str = "ValueError('bad 4242')") -> str:
+	"""A traceback exactly as Frappe stores it in Error Log: raised from code whose
+	file sits at ``<bench>/<rel_path>``, captured with ``frappe.get_traceback()``,
+	which strips the bench path. Every hand-written absolute path above passed
+	while real tracebacks (``File "apps/jarvis/..."``) were all dropped."""
+	from frappe.utils import get_bench_path
+
+	# The raise AND the except both live in the compiled file, so the traceback
+	# holds only its frames - not this test's, which sits under apps/jarvis/ in
+	# CI and would make every traceback look like a jarvis one.
+	src = (
+		f"def {func}():\n    raise {exc}\n"
+		f"def _catch():\n    try:\n        {func}()\n    except Exception:\n        return frappe.get_traceback()\n"
+	)
+	scope: dict = {"frappe": frappe}
+	exec(compile(src, f"{get_bench_path()}/{rel_path}", "exec"), scope)
+	return scope["_catch"]()
+
+
+class TestRealTracebacks(ApiErrorsBase):
+	"""Regression: the Error Log lane must read tracebacks the way Frappe writes them."""
+
+	def test_stored_traceback_has_a_relative_path(self):
+		tb = _stored_traceback("apps/jarvis/jarvis/chat/api.py")
+		self.assertIn('File "apps/jarvis/jarvis/chat/api.py"', tb)
+
+	def test_a_jarvis_error_is_recognised(self):
+		tb = _stored_traceback("apps/jarvis/jarvis/chat/api.py")
+		self.assertTrue(api_errors.is_jarvis_error("pump.make_mux", tb))
+
+	def test_other_apps_are_not(self):
+		for path in (
+			"apps/erpnext/erpnext/stock/utils.py",
+			"apps/frappe/frappe/model/document.py",
+			"apps/jarvis_admin/jarvis_admin/api.py",
+			"apps/jarvis_partner/jarvis_partner/builder.py",
+		):
+			self.assertFalse(api_errors.is_jarvis_error("x", _stored_traceback(path)), path)
+
+	def test_frames_group_errors_by_where_they_happen(self):
+		a = api_errors._parse_traceback(_stored_traceback("apps/jarvis/jarvis/chat/api.py", "send"))
+		b = api_errors._parse_traceback(_stored_traceback("apps/jarvis/jarvis/chat/pump.py", "make_mux"))
+		self.assertEqual(a[0], "ValueError")
+		self.assertEqual(a[2], ["jarvis/chat/api.py:_catch", "jarvis/chat/api.py:send"])
+		self.assertEqual(b[2], ["jarvis/chat/pump.py:_catch", "jarvis/chat/pump.py:make_mux"])
+		self.assertNotEqual(
+			api_errors._traceback_fingerprint(a[0], a[2]), api_errors._traceback_fingerprint(b[0], b[2])
+		)
+
+	def test_the_reporters_own_failures_stay_local(self):
+		for rel in (
+			"error_push.py",
+			"api_errors.py",
+			"chat/heartbeat.py",
+			"admin_client.py",
+			"chat/usage_push.py",
+		):
+			tb = _stored_traceback(f"apps/jarvis/jarvis/{rel}")
+			self.assertFalse(api_errors.is_jarvis_error("jarvis errors: rollup push failed", tb), rel)
+
+	def test_collect_forwards_a_stored_jarvis_error(self):
+		since = str(frappe.utils.now_datetime())
+		tb = _stored_traceback("apps/jarvis/jarvis/chat/pump.py", "make_mux", "RuntimeError('relay gone')")
+		doc = frappe.get_doc({"doctype": "Error Log", "method": "pump.make_mux", "error": tb})
+		# db_insert skips the before_insert tag hook, so only the real traceback can
+		# make this row jarvis's (inserted from here, the hook would rescue it).
+		doc.set_new_name()
+		doc.db_insert()
+		self.addCleanup(frappe.delete_doc, "Error Log", doc.name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		rows = api_errors.collect_error_log(since=since, limit=500)["rows"]
+		row = next(r for r in rows if r["error_class"] == "RuntimeError")
+		self.assertEqual(row["kind"], "exception")
 
 
 # --------------------------------------------------------------------------- #
@@ -484,7 +568,7 @@ class TestPushClaimConfirm(ApiErrorsBase):
 	def test_occurrence_arriving_after_claim_is_not_lost(self):
 		self._seed("window boom")
 
-		def _during_push(errors):
+		def _during_push(errors, **kw):
 			# Same error reported again mid-flight: it must land in a FRESH pushed=0
 			# row (it can't fold into the already-claimed one), so its count lives.
 			with _as(USER):
