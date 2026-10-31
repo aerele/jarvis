@@ -101,12 +101,13 @@ class TestExportReport(FrappeTestCase):
 		self.assertEqual(sheet[1][1], first["description"])
 
 	def test_prepared_copy_exports_past_the_model_row_cap(self):
-		n = 2500  # over _prepared_reports._MAX_ROWS, which run_report applies
+		n = 2500  # Export is complete even though run_report returns metadata only.
 		with _completed(_rows(n), columns=COLUMNS):
 			shown = run_report(PREP_REPORT)
 			env = export_query(report_name=PREP_REPORT)
-		self.assertLess(len(shown["result"]), n)
-		self.assertIn("query_report", shown["row_note"])
+		self.assertNotIn("result", shown)
+		self.assertEqual(shown["read_status"], "not_read")
+		self.assertEqual(shown["next_query"]["tool"], "query_report")
 		self.assertEqual(env["total"], n)
 		self.assertTrue(env["as_of"])
 		sheet = _sheet(env)

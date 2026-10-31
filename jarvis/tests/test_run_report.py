@@ -568,7 +568,9 @@ class TestPreparedReportsSince(FrappeTestCase):
 			frappe.db.set_value("Prepared Report", new, "creation", add_to_date(self.since, seconds=60))
 			env = self._handle()
 		self.assertEqual(env["status"], "ready")
-		self.assertEqual(env["result"], [{"name": "NEW"}])
+		self.assertNotIn("result", env)
+		self.assertEqual(env["read_status"], "not_read")
+		self.assertEqual(env["next_query"], {"tool": "query_report", "args": {"prepared_report": new}})
 		self.assertEqual(env["run"], new)
 		self.assertNotIn("waiting", env)
 
@@ -628,17 +630,25 @@ class TestPreparedReportsSince(FrappeTestCase):
 		self.assertNotIn("waiting", env)
 		self.assertEqual(self._count(), before)
 
-	def test_an_unreadable_copy_from_after_since_fails_and_starts_nothing(self):
+	def test_an_unreadable_copy_from_after_since_returns_metadata_and_starts_nothing(self):
 		bad = _make_pr("Completed")  # no stored output: the real get_prepared_data throws
 		frappe.db.set_value("Prepared Report", bad, "creation", add_to_date(self.since, seconds=5))
 		before = self._count()
-		with patch(_ENQUEUE):
+		with patch(_ENQUEUE) as enqueue, patch.object(PreparedReport, "get_prepared_data") as read:
 			env = self._handle()
-		self.assertEqual(env["status"], "failed")
+		read.assert_not_called()
+		enqueue.assert_not_called()
+		self.assertEqual(env["status"], "ready")
+		self.assertEqual(env["read_status"], "not_read")
 		self.assertEqual(env["run"], bad)
-		self.assertEqual(env["error"], "the report's output could not be read")
+		self.assertNotIn("result", env)
+		self.assertNotIn("error", env)
 		self.assertNotIn("waiting", env)
 		self.assertEqual(self._count(), before)
+		from jarvis.tools.query_report import query_report
+
+		with self.assertRaises(InvalidArgumentError):
+			query_report(bad)
 
 	def test_an_unreadable_copy_from_before_since_is_just_ignored(self):
 		bad = _make_pr("Completed")
@@ -675,11 +685,17 @@ class TestPreparedReportsSince(FrappeTestCase):
 		self.assertNotIn("waiting", generating)
 		self.assertEqual(set(generating), {"prepared_report", "status", "report_name", "message", "run"})
 
-	def test_an_unreadable_copy_without_since_still_regenerates(self):
-		_make_pr("Completed")
-		with patch(_ENQUEUE):
+	def test_an_unreadable_copy_without_since_does_not_regenerate(self):
+		bad = _make_pr("Completed")
+		before = self._count()
+		with patch(_ENQUEUE) as enqueue, patch.object(PreparedReport, "get_prepared_data") as read:
 			env = self._handle(since=None)
-		self.assertEqual(env["status"], "started")
+		read.assert_not_called()
+		enqueue.assert_not_called()
+		self.assertEqual(env["status"], "ready")
+		self.assertEqual(env["read_status"], "not_read")
+		self.assertEqual(env["run"], bad)
+		self.assertEqual(self._count(), before)
 
 	def test_run_report_passes_the_macro_runs_start_as_since(self):
 		ctx = frappe._dict(name="r", started_at=self.since, current_step=1, resume_turn="")
