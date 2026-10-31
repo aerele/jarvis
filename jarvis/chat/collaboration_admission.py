@@ -17,6 +17,7 @@ class SharedAdmission:
 	binding: c.ActorBinding | None = None
 	seed_message: str | None = None
 	request_hash: str | None = None
+	file_ids_supplied: tuple[bool, ...] | None = None
 	validate_inputs: object = None
 	seed_fields: dict = field(default_factory=dict)
 
@@ -56,6 +57,15 @@ class SharedAdmission:
 				)
 				try:
 					attachments = json.loads(seed.canvas or "[]") if seed else None
+					if attachments is not None and self.file_ids_supplied is not None:
+						if len(attachments) != len(self.file_ids_supplied):
+							raise ValueError("Attachment scope changed")
+						# The seed keeps resolved IDs. Match only IDs supplied in the
+						# original request, including mixed old/new client references.
+						attachments = [
+							{key: value for key, value in item.items() if key != "file_id" or supplied}
+							for item, supplied in zip(attachments, self.file_ids_supplied, strict=True)
+						]
 					stored_hash = request_fingerprint(seed.content or "", attachments) if seed else None
 				except (ValueError, TypeError, KeyError, RecursionError):
 					stored_hash = None

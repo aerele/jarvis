@@ -202,11 +202,9 @@ def scan_file(content: bytes, filename: str, sheet: str | None = None, cursor=No
 
 		if content.startswith(bytes.fromhex("d0cf11e0a1b11ae1")):
 			raise InvalidArgumentError("Workbook is encrypted or legacy XLS. Supply an unlocked XLSX copy.")
-		with ZipFile(io.BytesIO(content)) as archive:
-			if sum(z.file_size for z in archive.infolist()) > MAX_EXPANDED_BYTES:
-				raise InvalidArgumentError(
-					"Expanded workbook exceeds 64 MiB. Split the workbook before reading."
-				)
+		from jarvis.tools._archive_sources import validate_workbook
+
+		validate_workbook(content)
 		wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
 		try:
 			if any(len(name) > 128 for name in wb.sheetnames):

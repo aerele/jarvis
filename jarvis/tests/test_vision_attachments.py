@@ -18,7 +18,7 @@ def _make_file(name: str, content: bytes) -> dict:
 	from frappe.utils.file_manager import save_file
 
 	f = save_file(name, content, None, None, is_private=1)
-	return {"file_url": f.file_url, "file_name": f.file_name}
+	return {"file_url": f.file_url, "file_name": f.file_name, "file_id": f.name}
 
 
 class TestPrepareAttachments(FrappeTestCase):
@@ -31,6 +31,7 @@ class TestPrepareAttachments(FrappeTestCase):
 		self.assertEqual(parts, [])
 		self.assertNotIn("hello world", msg)
 		self.assertIn("jarvis__query_file", msg)
+		self.assertIn(att["file_id"], msg)
 
 	def test_spreadsheet_routes_to_all_row_reading_instead_of_sampled_arithmetic(self):
 		att = _make_file("whole-table.csv", b"amount\n" + b"10\n" * 10000)

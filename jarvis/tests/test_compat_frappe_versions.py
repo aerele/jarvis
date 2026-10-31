@@ -90,7 +90,7 @@ class TestFileBytesAcrossMajors(FrappeTestCase):
 	def test_read_file_reads_a_real_attachment(self):
 		"""The reported bug end to end: this raised TypeError (HTTP 500) on 15."""
 		fdoc = _make_file("compat-probe-readable.txt", b"line one\nline two\n")
-		out = read_file(file_url=fdoc.file_url)
+		out = read_file(file_id=fdoc.name, file_url=fdoc.file_url)
 		self.assertEqual(out["kind"], "text")
 		self.assertIn("line two", out["text"])
 		self.assertEqual(out["size_bytes"], 18)
@@ -98,7 +98,7 @@ class TestFileBytesAcrossMajors(FrappeTestCase):
 	def test_read_file_handles_a_pdf_without_raising(self):
 		fdoc = _make_file("compat-probe-readable.pdf", _minimal_pdf())
 		# Exercise immediate bytes/parser compatibility, separate from queued whole-file jobs.
-		out = read_file(file_url=fdoc.file_url, preview=True)
+		out = read_file(file_id=fdoc.name, file_url=fdoc.file_url, preview=True)
 		self.assertEqual(out["kind"], "pdf")
 		# No text layer, so the tool should say so rather than blow up.
 		self.assertIn("note", out)

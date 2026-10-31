@@ -202,19 +202,21 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Read-only pre-payroll integrity checks across your attendance and leave records: cross-references marked Attendance, biometric check-ins, approved Leave Applications, and leave balances per employee to surface unaccounted working days, leave taken without approval, check-in-vs-mark mismatches, and over-drawn balances before payroll runs. Reproducible; never marks attendance, approves leave, edits a balance, or touches payroll.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -239,6 +241,7 @@
         "ali-lwp-9c21",
         "ali-punch-7d14"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -317,19 +320,21 @@
       "domain": "measurement",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Reads 6-12 months of your own ERP history and reports the facts that size everything else: how long receipts take to become invoices, how quickly sales invoices get settled, how many entries were reversed, what your books already carry under interest and late-fee heads, how much stock is aged, and how many documents you process each period. Read-only; writes nothing, decides nothing, and never labels anything good or bad - it reports what your database already knows.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -358,6 +363,7 @@
         "bm-fc-1d7a",
         "bm-inv-6b03"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 3600,
@@ -403,6 +409,7 @@
         "bmhd-lat-4c19",
         "bmhd-win-9e2f"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 900,
@@ -452,6 +459,7 @@
         "bmh-ovl-7d12",
         "bmh-win-3ab8"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 1800,
@@ -475,13 +483,14 @@
       "domain": "india-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Scans your cash payments and cash receipts and lists the ones that cross India's income-tax cash limits: expenses paid in cash above ₹10,000 to one payee in a day (₹35,000 for transporters), and cash received of ₹2,00,000 or more in aggregate from one person. Ships a monthly preventive worklist and a pre-flighted Form 3CD data pack. Read-only breach-candidate list for your CA to review; never edits a voucher, books anything, files a return, or decides that any payment is actually disallowed or penalised.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_engagement_config"
       ],
@@ -489,6 +498,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
@@ -514,6 +524,7 @@
         "s40a3_disallowance_measure",
         "s40a3_limits"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -537,7 +548,7 @@
       "domain": "close",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "status": "Published",
       "description": "Read-only period-end integrity checks: the trial balance must balance (opening and closing), and no ledger may carry a material balance on the wrong side of its group. Structural and reproducible — the same books yield the same findings every run. Never writes; reports and hands off.",
       "tools_required": [
@@ -564,12 +575,6 @@
         "Account",
         "Company"
       ],
-      "config_keys": [
-        "materiality.benchmark_value",
-        "materiality.percentage",
-        "materiality.engagement_risk_level",
-        "materiality.rounding_step"
-      ],
       "rule_tokens": [
         "ca-cl-2b9d",
         "ca-cl-7f31",
@@ -577,6 +582,7 @@
         "ca-cl-a4e6",
         "ca-cl-c058"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 2400,
@@ -591,7 +597,13 @@
       "validated_for_fy": "2026-2027",
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "materiality.benchmark_value",
+        "materiality.percentage",
+        "materiality.engagement_risk_level",
+        "materiality.rounding_step"
+      ]
     },
     {
       "agent_slug": "custom-app-learning",
@@ -599,9 +611,9 @@
       "domain": "knowledge",
       "nature": "scribe",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "status": "Published",
-      "description": "Reads your installed CUSTOM Frappe apps' source and writes business-first wiki pages about them — what each app does, its doctypes, workflows, validations and integrations — so your team and the assistant can rely on it later. Runs on demand in the Jarvis container (your bench never sees a source-laden chat), never reads core-app source, writes only the org wiki (no ERP write tool), and updates pages in place on re-run. Only run it on apps whose code you trust: source is treated as data, not instructions, but could still try to steer the agent. Admin-restricted (System Manager / Jarvis Admin).",
+      "description": "Reads the CUSTOM Frappe apps you select and writes business-first wiki pages about them — what each app does, its doctypes, workflows, validations and integrations — so your team and the assistant can rely on it later. You name the exact apps at launch: it reads only those (never core-app source). Runs on demand in the Jarvis container (your bench never sees a source-laden chat), writes only the org wiki (no ERP write tool), and updates its own pages in place on re-run. Only select apps whose code you trust: source is treated as data, not instructions, but could still try to steer the agent. Admin-restricted (System Manager / Jarvis Admin).",
       "tools_required": [
         "jarvis__list_app_modules",
         "jarvis__read_app_source",
@@ -622,6 +634,7 @@
         "Jarvis Wiki Page"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "",
       "timeout_s": 5400,
@@ -645,7 +658,7 @@
       "domain": "inventory-count",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "Coming Soon",
       "description": "Runs a rolling cycle-count programme ERPNext has no native planner for: ranks the SKU book by value (ABC) and movement (velocity), reads how long since each item/warehouse was last counted, and for the lines due this cycle stages a docstatus-0 draft Stock Reconciliation per warehouse with item rows pre-filled and the counted quantity left blank for the human counter, plus one evidence-carrying Approval Request so a store lead approves the count list first. Proposes only; it never counts, never fills a quantity, and never submits a reconciliation.",
       "tools_required": [
@@ -653,6 +666,7 @@
         "jarvis__get_doc",
         "jarvis__query",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__create_doc",
         "jarvis__update_doc"
       ],
@@ -661,6 +675,7 @@
         "jarvis__get_doc",
         "jarvis__query",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__create_doc",
         "jarvis__update_doc",
         "jarvis__record_agent_run",
@@ -677,6 +692,7 @@
         "Stock Ledger Entry"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": [
         {
           "doctype": "Jarvis Approval Request",
@@ -708,19 +724,21 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only inventory-ageing review: derives each item's last genuine outward movement, buckets it by age, separates slow-moving from non-moving and dead stock, overlays batch-expiry write-off candidates, and totals the working capital frozen per ageing bucket and warehouse. Ships a ranked disposition worklist and dashboard. Never moves, adjusts, or writes off stock, and never sets a write-down value.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -765,7 +783,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Weekly read-only pipeline-hygiene scrub of your open CRM deals: surfaces deals that have gone quiet, aged in their current stage, run past their expected close date, or have no next step scheduled, then ranks them into a per-owner worklist so the forecast reflects deals that are actually moving. Never edits a deal, moves a stage, changes a date, or creates a task.",
       "tools_required": [
@@ -822,19 +840,21 @@
       "domain": "ap",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only AP hygiene sweep. Retrospectively surfaces duplicate-payment candidates — payments that appear to have been made twice (same vendor, same amount, close dates, look-alike references) — pairing documents and cross-checking settlement evidence. Also flags near-duplicate purchase invoices, one vendor entered as two masters, check-digit-invalid GSTIN/PAN, and bank-detail changes just before a payment. Hands finance a ranked, evidence-linked candidate worklist and dashboard. Never edits a master, touches a payment, or decides claw-backs.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -863,6 +883,7 @@
         "gst_gstin_checkdigit_algorithm",
         "pan_format"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "ap-exception-family",
       "timeout_s": 1800,
@@ -885,19 +906,21 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "For batch-tracked pharma/FMCG/food stock: replays each day's outward movements to catch FEFO violations — a dispatch that skipped an older-expiry batch that still had stock — and lists on-hand batches inside the near-expiry and past-expiry horizon, ranked by value. Read-only; hyperlinks every finding to its batch and dispatch. Never touches stock, holds a shipment, or writes off a batch.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -919,6 +942,7 @@
         "gdp_near_expiry_horizon_convention",
         "shelf_life_horizon_fraction"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -941,13 +965,14 @@
       "domain": "accounting",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Read-only month-end fixed-asset integrity checks: ties every due depreciation schedule row to its posted journal, reconciles scheduled vs posted depreciation, lists zero / near-salvage assets still in use as write-off candidates, and ages capital-work-in-progress not yet placed in service. Produces a reproducible, provenance-linked worklist and dashboard. Never edits the register, posts a journal, or signs the close.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -955,6 +980,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -977,6 +1003,7 @@
         "fad-mat-7c21",
         "fad-salv-b1a6"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
@@ -999,19 +1026,21 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Sweeps goods receipts (Purchase Receipts) for receiving-discipline gaps: UOM-conversion anomalies that distort stock quantity, receipts missing the batch/serial capture the Item mandates, ageing received-but-not-billed (GRNI) balances, and direct receipts booked with no Purchase Order to match against. Ranks each gap with a rupee or count figure and hyperlinks it to the offending receipt line. Read-only; never edits a receipt, posts, chases a vendor, or touches stock or valuation.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1035,6 +1064,7 @@
         "grn-offpo-3d51",
         "grn-uomtol-4b17"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1057,13 +1087,14 @@
       "domain": "gst-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Works only the residue left after india_compliance's Purchase Reconciliation Tool: ranks the unmatched, mismatched and aged rows between your GSTR-2B ledger and your purchase register by rupees, groups them into a supplier follow-up worklist, and tracks the ageing window per invoice. Read-only; never edits an invoice, files a return, or decides what you may claim.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1071,6 +1102,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1092,6 +1124,7 @@
         "rule37_180d",
         "s16_4_window"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1115,20 +1148,23 @@
       "domain": "gst-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.4",
       "status": "Published",
       "description": "Pre-file data-quality worklist for your GST returns: on an india_compliance bench it works only the manual-override and data-import residue — lines with a blank or short HSN, invoices whose place-of-supply contradicts the tax head charged, one HSN billed at inconsistent rates across the period, and a books-vs-return tie-out where GSTR-1/3B are generated through india_compliance. Read-only; ranks the residue by rupees. Never edits an invoice, amends or files a return, and asserts no filing-correctness verdict.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
+        "jarvis__get_gstr1_summary",
         "jarvis__get_balance_on"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_gstr1_summary",
         "jarvis__get_balance_on",
@@ -1182,7 +1218,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "status": "Published",
       "description": "Read-only hygiene sweep of your Frappe CRM: finds duplicate and near-duplicate leads (the same person entered twice across leads and deals), flags leads marked converted with no matching deal, and surfaces uncontactable, unassigned, or SLA-breached leads into a ranked worklist. Never merges, edits, assigns, or deletes a record — it hands sales-ops the exceptions and a human decides.",
       "tools_required": [
@@ -1247,13 +1283,14 @@
       "domain": "accounting",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only pre-close ledger scrutiny: scans your general ledger for postings worth a human look — uncleared suspense/clearing balances, dormant accounts that moved, balances on the wrong side of an account, round-number plugs, and possible duplicate manual journal entries. Isolates human-authored journals from system-generated ones. Hands your accountant a ranked, evidence-linked worklist and a dashboard. Never edits the ledger, never books a correction, never decides whether a flag is truly an error.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1261,6 +1298,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1282,6 +1320,7 @@
         "ls-sign-9c14",
         "ls-susp-3d7a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
@@ -1304,13 +1343,14 @@
       "domain": "india-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "For suppliers you have already classified as Micro/Small MSME, this overlays each open payable's elapsed days against its 15/45-day window and projects whether it will still be unpaid on 31-March, when s.43B(h) defers the deduction. Ships a pay-before-year-end worklist on top of ERPNext's native AP Ageing report. Read-only; never records a payment, edits a voucher, classifies a supplier, or decides what you may deduct.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1318,6 +1358,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1337,6 +1378,7 @@
         "msmed_s15_windows",
         "s43bh_yearend_test"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1360,13 +1402,14 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Runs ERPNext's stock-value vs account-value comparison on a schedule and works the residue: flags negative on-hand balances, zero-rate receipts, abnormal valuation-rate jumps, internal stock-value inconsistencies, and where your perpetual stock value drifts from its stock-in-hand GL account. Ranks each exception by rupees with a link to the offending ledger row. Read-only; never adjusts a quantity, books a journal entry, or posts a stock reconciliation.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1374,6 +1417,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1400,6 +1444,7 @@
         "nsv-spike-4b1c",
         "nsv-tieout-7d92"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1422,19 +1467,21 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Read-only pre-run check on your drafted salary slips, run just before you submit payroll. It flags what changed or was overridden after HRMS computed them at generation: an eligible employee missing from the batch, a rostered employee with no slip, post-generation attendance edits the draft no longer reflects, manual payment_days overrides, manually created slips, mover proration that looks off, and net-pay swings versus last month with no attendance or structure cause. Hands you a ranked worklist; never edits a slip, regularises attendance, submits payroll, or draws any statutory conclusion.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1464,6 +1511,7 @@
         "pp-pbo-3d71",
         "pp-swg-2ed8"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -1486,7 +1534,7 @@
       "domain": "inventory",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "Coming Soon",
       "description": "Watches stock position daily and works the replenishment tail: for each item whose velocity- and lead-time-aware reorder point is breached and is not already covered by open supply, it stages a docstatus-0 draft Material Request with a computed reorder qty, target warehouse and required-by date; where demand is ambiguous (no history, erratic, or slow/dead) it raises one evidence-carrying Approval Request instead of guessing. Proposes only; a human confirms and submits every request.",
       "tools_required": [
@@ -1494,6 +1542,7 @@
         "jarvis__get_doc",
         "jarvis__query",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__create_doc",
         "jarvis__update_doc"
       ],
@@ -1502,6 +1551,7 @@
         "jarvis__get_doc",
         "jarvis__query",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__create_doc",
         "jarvis__update_doc",
         "jarvis__record_agent_run",
@@ -1521,6 +1571,7 @@
         "Purchase Order Item"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": [
         {
           "doctype": "Jarvis Approval Request",
@@ -1552,19 +1603,21 @@
       "domain": "helpdesk",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "A scheduled, reproducible queue-health sweep for Frappe Helpdesk. Reads each ticket's already-stored SLA state and folds breached, about-to-breach, unassigned, unacknowledged, reopened and stalled tickets into one de-duplicated, severity-ranked worklist, hyperlinked to each ticket with the deadline it missed and its age. Read-only; never reassigns, replies, re-prioritises, or closes a ticket.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1584,6 +1637,7 @@
         "sb-stat-4d81",
         "sb-win-1e4a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "helpdesk-queue",
       "timeout_s": 1800,
@@ -1606,19 +1660,21 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Reads your computed Salary Slips each month before the PF/ESI/PT deposit and surfaces the employees whose statutory deduction lines don't reconcile with their reconstructed wage bases — PF against the ceiling, ESI at the eligibility boundary and its mid-period continuity, PT against the state slab, LWF presence, and bonus/gratuity eligibility transitions. UAN/ESI identity and challan/portal deposit evidence come only from sources you declare at install; checks needing them stay not-evaluable until then. Read-only; never edits a slip or files a return; a named reviewer owns every decision.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1644,6 +1700,7 @@
         "pt_slabs_karnataka",
         "pt_slabs_maharashtra"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -1694,6 +1751,7 @@
         "s14b_damages_table",
         "s7q_interest_table"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -1717,19 +1775,21 @@
       "domain": "inventory-count",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Reconciles a physical stock count against system on-hand: ranks the SKUs whose counted quantity differs from the system by rupees-at-risk into an investigation worklist. Requires a docstatus=0 physical-count source (manufactured by the paired cycle-count-planner-operator). Read-only; never posts a stock reconciliation, adjusts a quantity, guesses a cause, or touches valuation. Negative-stock and valuation-integrity classes are owned by negative-stock-valuation-auditor, not here.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1746,6 +1806,7 @@
       "rule_tokens": [
         "sv-vtol-7b2c"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1768,13 +1829,14 @@
       "domain": "tds-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Prepares your monthly TDS/TCS data before each deposit due date and before each 26Q/24Q quarter: reconciles the TDS booked in your ledger against the challan payments recorded in your books, tracks each supplier's running total against the section thresholds, checks the rate deducted against the effective section rate, and lists the deductee fields your return is missing. Read-only worklist; never edits a voucher, books TDS, deposits a challan, files a return, or decides what is legally deductible.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1782,6 +1844,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1806,6 +1869,7 @@
         "section_rates",
         "section_thresholds"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1829,7 +1893,7 @@
       "domain": "helpdesk",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "Coming Soon",
       "description": "Reads each new helpdesk ticket and proposes its routing as an evidence-carrying Approval Request: a suggested category, an SLA-aware priority, the owning team and a candidate agent, plus a duplicate suggestion when a recent ticket from the same requester looks like a match. It proposes only; a human confirms on the Approval Board and the confirmed routing is applied on their behalf. It never resolves, replies, closes, merges, reassigns, or touches an in-progress ticket.",
       "tools_required": [
@@ -1860,6 +1924,7 @@
         "HD Agent"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": [
         {
           "doctype": "Jarvis Approval Request",
@@ -1887,7 +1952,7 @@
       "domain": "ap",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Ranks the vendor sub-ledger exceptions worth a human look at AP close: suppliers sitting in a debit balance, advances left unlinked to an invoice, goods received but not yet billed, and any gap between the supplier-wise balances and the creditors control account. A book-to-book self-consistency check with per-finding provenance and a saved worklist. Read-only; never books an entry, clears a balance, or releases a payment.",
       "tools_required": [
@@ -1895,6 +1960,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1903,6 +1969,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1921,12 +1988,6 @@
         "Purchase Receipt",
         "Company"
       ],
-      "config_keys": [
-        "ageing.stale_floor_days",
-        "ageing.advance_floor_days",
-        "ageing.grir_floor_days",
-        "ageing.band_edges"
-      ],
       "rule_tokens": [
         "grir_itc_s16_4_window",
         "vl-adv-ageing-3d92",
@@ -1936,6 +1997,7 @@
         "vl-stale-ageing-5f17",
         "vl-tieout-tol-a9e3"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
@@ -1950,7 +2012,13 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "ageing.stale_floor_days",
+        "ageing.advance_floor_days",
+        "ageing.grir_floor_days",
+        "ageing.band_edges"
+      ]
     }
   ]
 }

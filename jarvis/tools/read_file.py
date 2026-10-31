@@ -29,6 +29,8 @@ import frappe
 
 from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools._archive_sources import ArchiveModeError, ArchiveSelectionError
+from jarvis.tools._file_source import prepared_handoff, require_file_read, resolve_file
 
 _TABLE_EXT = {"xlsx", "csv", "tsv"}
 _PDF_EXT = {"pdf"}
@@ -46,15 +48,44 @@ def read_file(
 	max_rows: int = 500,
 	max_chars: int = 20000,
 	preview: bool = False,
-	read_mode: str = "preview",
+	read_mode: str | None = None,
 	cursor: str | None = None,
 	version: str | None = None,
+	file_id: str | None = None,
+	member: str | None = None,
+	archive_version: str | None = None,
+	payload_format: str | None = None,
 ) -> dict:
 	"""Read a bounded preview, or opt into the file-cursor-v1 exact text contract.
 
 	Cursor continuations require the returned version and identical worksheet scope.
 	Each call rechecks permissions and bytes. No jobs, model calls or cached content.
 	"""
+	from jarvis.tools._archive_api import analyze, enabled, is_archive
+
+	fdoc = resolve_file(file_url or None, filename or None, file_id or None)
+	handoff = prepared_handoff(fdoc)
+	if handoff is not None:
+		return handoff
+	require_file_read(fdoc)
+	archive_scope = any(value is not None for value in (member, archive_version, payload_format))
+	if is_archive(fdoc) and (enabled() or archive_scope):
+		if preview:
+			raise ArchiveModeError("Archive members cannot be read through preview mode.")
+		return analyze(
+			fdoc,
+			member=member,
+			archive_version=archive_version,
+			payload_format=payload_format,
+			sheet=sheet,
+			cursor=cursor,
+			version=version or None,
+			read=True,
+			read_mode=read_mode or "file-cursor-v1",
+		)
+	if archive_scope:
+		raise ArchiveSelectionError("Archive member arguments require an archive source.")
+	read_mode = read_mode or "preview"
 	if read_mode not in {"preview", "file-cursor-v1"}:
 		# Independently upgraded plugins must degrade truthfully, never execute
 		# an unknown mode. A continuation remains distinguishable as a preview.
@@ -66,13 +97,6 @@ def read_file(
 		raise InvalidArgumentError("Cursor and version must be supplied together, without preview.")
 	if cursor is not None and read_mode != "file-cursor-v1":
 		raise InvalidArgumentError("Cursor references require file-cursor-v1 mode.")
-	fdoc = _resolve_file(file_url, filename)
-	if not frappe.has_permission("File", "read", doc=fdoc.name):
-		# Generic on purpose - do not echo the resolved file's real name back
-		# to a caller who isn't permitted to read it (see F12 in
-		# audit-findings.md: that would confirm the existence/name of a
-		# private file the caller has no other way to see).
-		raise PermissionDeniedError("no matching file found")
 
 	ext = (fdoc.file_name or "").rsplit(".", 1)[-1].lower() if "." in (fdoc.file_name or "") else ""
 	# Raw bytes, on either Frappe major. Calling get_content(encodings=[])

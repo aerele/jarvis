@@ -922,7 +922,12 @@ export async function uploadFile(file) {
 	if (!r.ok) throw new Error(`upload failed (${r.status})`);
 	const data = await r.json();
 	const f = data.message || data;
-	return { file_url: f.file_url, file_name: f.file_name || file.name, name: f.name };
+	return {
+		file_id: f.name,
+		file_url: f.file_url,
+		file_name: f.file_name || file.name,
+		name: f.name,
+	};
 }
 
 // Branding logo/favicon: PUBLIC file (the favicon <link> and the PWA manifest
@@ -940,7 +945,7 @@ export async function uploadBrandAsset(file) {
 	if (!r.ok) throw new Error(`upload failed (${r.status})`);
 	const data = await r.json();
 	const f = data.message || data;
-	return { file_url: f.file_url, file_name: f.file_name || file.name };
+	return { file_id: f.name, file_url: f.file_url, file_name: f.file_name || file.name };
 }
 
 // ── File Box: drop an inbound document, get a directed processing chat ──

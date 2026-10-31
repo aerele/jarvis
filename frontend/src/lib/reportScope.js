@@ -18,7 +18,9 @@ export function reportScopes(tools) {
 			}
 		}
 		const data = result?.ok === true ? result.data : null;
-		if (!Array.isArray(data?.result)) continue;
+		const metadataReady =
+			data?.prepared_report && data.status === "ready" && data.read_status === "not_read";
+		if (!Array.isArray(data?.result) && !metadataReady) continue;
 		if (data.prepared_report && data.status !== "ready") continue;
 		if (data.status != null && data.status !== "ready") continue;
 		const scope = data.report_scope;

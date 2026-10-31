@@ -38,7 +38,10 @@ class Deadline:
 
 
 class ReportWorker:
-	def __init__(self, deadline):
+	def __init__(self, deadline, *, worker_module="jarvis.tools._report_query_worker"):
+		if worker_module not in {"jarvis.tools._report_query_worker", "jarvis.tools._archive_worker"}:
+			raise ValueError("Invalid fixed worker module")
+		self.worker_module = worker_module
 		self.deadline = deadline
 		self.process = None
 		self.buffer = bytearray()
@@ -50,7 +53,7 @@ class ReportWorker:
 		# Security review: fixed interpreter/module argv, shell disabled. Caller
 		# data is framed JSON on stdin, never executable arguments.
 		self.process = subprocess.Popen(  # nosemgrep: frappe-subprocess-exec
-			[sys.executable, "-m", "jarvis.tools._report_query_worker"],
+			[sys.executable, "-m", self.worker_module],
 			stdin=subprocess.PIPE,
 			stdout=subprocess.PIPE,
 			stderr=subprocess.DEVNULL,

@@ -43,6 +43,94 @@ class TestCollaborationSend(CommittedCollaborationCase):
 			frappe.db.count("Jarvis Chat Turn", {"conversation": self.conversation}),
 		)
 
+	def test_legacy_and_mixed_attachment_resends_keep_the_original_run(self):
+		from jarvis.chat.collaboration_api import send_message
+
+		with as_user(RECIPIENT):
+			files = []
+			for label in ("first", "second"):
+				doc = frappe.get_doc(
+					{
+						"doctype": "File",
+						"file_name": label + uuid.uuid4().hex + ".txt",
+						"content": label + uuid.uuid4().hex,
+						"is_private": 1,
+					}
+				).insert(ignore_permissions=True)
+				files.append(doc)
+				self.records.append(("File", doc.name))
+			frappe.db.commit()
+			for atts in (
+				[{"file_url": files[0].file_url}],
+				[{"file_url": files[0].file_url}, {"file_url": files[1].file_url, "file_id": files[1].name}],
+			):
+				nonce = uuid.uuid4().hex
+				first = send_message(self.conversation, "Read", nonce, atts)
+				second = send_message(self.conversation, "Read", nonce, atts)
+				self.assertEqual(
+					(first["run_id"], first["message_id"]), (second["run_id"], second["message_id"])
+				)
+				with self.assertRaises(frappe.ValidationError):
+					send_message(
+						self.conversation,
+						"Read",
+						nonce,
+						[{"file_url": files[0].file_url, "file_id": files[1].name}],
+					)
+
+	def test_exact_file_id_survives_shared_send_and_replay_scope(self):
+		from jarvis.chat.collaboration_api import send_message
+		from jarvis.tests.test_archive_sources import archive
+		from jarvis.tools.query_file import query_file
+
+		with as_user(RECIPIENT):
+			content = archive([("bank.csv", "Amount\n0.10\n")])
+			files = []
+			for label in ("first", "second"):
+				doc = frappe.get_doc(
+					{
+						"doctype": "File",
+						"file_name": label + uuid.uuid4().hex + ".zip",
+						"content": content,
+						"is_private": 1,
+					}
+				).insert(ignore_permissions=True)
+				files.append(doc)
+				self.records.append(("File", doc.name))
+			self.assertEqual(files[0].file_url, files[1].file_url)
+			frappe.db.commit()
+			with self.assertRaises(frappe.ValidationError):
+				send_message(self.conversation, "Read", self.nonce, [{"file_url": files[0].file_url}])
+			atts = [{"file_id": files[1].name, "file_url": files[1].file_url}]
+			result = send_message(self.conversation, "Read", self.nonce, atts)
+			turn = frappe.get_doc("Jarvis Chat Turn", result["run_id"])
+			self.assertEqual(json.loads(turn.dispatch_payload)["attachments"][0]["file_id"], files[1].name)
+			canvas = json.loads(frappe.db.get_value("Jarvis Chat Message", result["message_id"], "canvas"))
+			self.assertEqual(canvas[0]["file_id"], files[1].name)
+			self.assertEqual(
+				send_message(self.conversation, "Read", self.nonce, atts)["run_id"], result["run_id"]
+			)
+			with self.assertRaises(frappe.ValidationError):
+				send_message(
+					self.conversation,
+					"Read",
+					self.nonce,
+					[{"file_id": files[0].name, "file_url": files[0].file_url}],
+				)
+			with patch.dict(frappe.conf, {"jarvis_archive_reading_enabled": True}):
+				inventory = query_file(file_id=files[1].name)
+				view = query_file(
+					file_id=files[1].name, archive_version=inventory["archive_version"], members=["m1"]
+				)
+				answer = query_file(
+					file_id=files[1].name,
+					archive_version=inventory["archive_version"],
+					members=["m1"],
+					version=view["version"],
+					sql="SELECT A FROM m1_sheet1 WHERE _row=2",
+				)
+				self.assertEqual(answer["rows"], [["0.10"]])
+
 	def test_recipient_send_is_atomically_admitted_as_recipient(self):
 		result = self.send()
 		self.assertTrue(result["ok"])
