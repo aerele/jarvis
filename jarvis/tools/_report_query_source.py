@@ -89,8 +89,8 @@ def _filter_values(value):
 
 def _pinned_restrictions(linked_matches, filter_defs, stored_filters, ref_links, group_values):
 	"""The restricted doctypes the stored run was pinned inside. A doctype is pinned only
-	when the report has at least one Link filter to it whose fieldname is that same link
-	on the report's DocType (``ref_links``: fieldname -> options), and EVERY such filter's
+	when EVERY link to it on the report's DocType that User Permissions apply through
+	(``ref_links``: fieldname -> options) has a Link filter of the same fieldname whose
 	stored value is set, is one the user may use (``linked_matches``: their User
 	Permissions for it, tree descendants included) and names no tree group node
 	(``group_values``), since a group value can widen the rows to descendants a
@@ -98,14 +98,17 @@ def _pinned_restrictions(linked_matches, filter_defs, stored_filters, ref_links,
 	pinned = set()
 	for doctype, matches in linked_matches.items():
 		permitted = {permission.get("doc") for permission in matches or []}
+		# User Permissions apply through every such link on the DocType, so each one
+		# needs its own pinned filter.
+		required = {fieldname for fieldname, options in ref_links.items() if options == doctype}
 		pins = [
 			definition
 			for definition in filter_defs
 			if definition.get("fieldtype") == "Link"
 			and definition.get("options") == doctype
-			and ref_links.get(definition.get("fieldname")) == doctype
+			and definition.get("fieldname") in required
 		]
-		if not pins:
+		if not required or required - {definition.get("fieldname") for definition in pins}:
 			continue
 		for definition in pins:
 			values = _filter_values(stored_filters.get(definition.get("fieldname")))
@@ -117,21 +120,23 @@ def _pinned_restrictions(linked_matches, filter_defs, stored_filters, ref_links,
 
 
 def _group_values(doctype, values):
-	"""The tree group nodes among ``values``; none for a non-tree doctype. The values are
-	already within the user's permitted set, so the permission-aware list sees them; an
-	error counts every value as a group so the restriction stays uncredited."""
-	if not frappe.get_meta(doctype).is_tree:
-		return set()
+	"""The tree group nodes among ``values``; none for a non-tree doctype. Any error
+	counts every value as a group, so the restriction stays uncredited."""
 	try:
+		if not frappe.get_meta(doctype).is_tree:
+			return set()
+		# get_all, not get_list: this reads only the is_group flag of values already in
+		# the user's permitted set, to decide a gate. A permission-filtered list could
+		# hide a group row and make it pass as a leaf (fail open).
 		return set(
-			frappe.get_list(
+			frappe.get_all(
 				doctype,
 				filters={"name": ["in", list(values)], "is_group": 1},
 				pluck="name",
 				limit_page_length=0,
 			)
 		)
-	except frappe.PermissionError:
+	except Exception:
 		return set(values)
 
 
@@ -323,7 +328,11 @@ class ReportSource:
 		}
 		# A run made with a permitted value for the restricted doctype (Company on Accounts
 		# Receivable) is inside the user's restriction without a column for it.
-		ref_links = {df.fieldname: df.options for df in ref_meta.get_link_fields()}
+		ref_links = {
+			df.fieldname: df.options
+			for df in ref_meta.get_link_fields()
+			if not df.get("ignore_user_permissions")
+		}
 		pinned = _pinned_restrictions(
 			linked_matches, self.filter_defs, self.filters, ref_links, _group_values
 		)
