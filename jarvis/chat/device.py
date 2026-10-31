@@ -15,7 +15,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import frappe
 from cryptography.hazmat.primitives import serialization
@@ -38,9 +38,25 @@ class ChatDeviceCredentials:
 	# bootstrap presents it as ``auth.token`` and signs the v3 payload's token
 	# slot with it (spike invariant #2); steady state and legacy leave it "".
 	bootstrap_token: str = ""
-	# Single-use bootstrap codes admin returned with a proof-backed pairing; the
-	# Mechanism-A handshake (J4b) consumes them. Empty until then.
-	bootstrap_codes: tuple = ()
+	# Single-use bootstrap codes admin returned with a proof-backed pairing. They
+	# live in memory for the pairing attempt only (never persisted or logged) and
+	# replace the owner token as the Mechanism-A credential. ``bootstrap_code_index``
+	# marks the code the connect presents now (0, then 1 after an INVALID reply).
+	bootstrap_codes: tuple = field(default=(), repr=False)
+	bootstrap_code_index: int = 0
+
+	@property
+	def current_bootstrap_code(self) -> str:
+		"""The code the next connect presents, "" when none is left."""
+		if 0 <= self.bootstrap_code_index < len(self.bootstrap_codes):
+			return self.bootstrap_codes[self.bootstrap_code_index]
+		return ""
+
+	def with_next_bootstrap_code(self) -> "ChatDeviceCredentials | None":
+		"""Credentials presenting the next code, or None when both are spent."""
+		if self.bootstrap_code_index + 1 >= len(self.bootstrap_codes):
+			return None
+		return replace(self, bootstrap_code_index=self.bootstrap_code_index + 1)
 
 	@property
 	def needs_bootstrap(self) -> bool:
@@ -51,7 +67,7 @@ class ChatDeviceCredentials:
 		Steady state (``device_token`` set) and the legacy path (token forged
 		synchronously by the CP) are both False -> today's steady-state connect,
 		unchanged."""
-		return not self.device_token and bool(self.bootstrap_token)
+		return not self.device_token and bool(self.bootstrap_codes or self.bootstrap_token)
 
 
 def _b64u(raw: bytes) -> str:
@@ -259,11 +275,12 @@ def _establish_pairing() -> ChatDeviceCredentials:
 	if mode == "legacy":
 		return _pair_legacy(resp, device_id=device_id, pub_b64u=pub_b64u, priv=priv)
 	if mode == "mechanism_a":
-		creds = _pair_mechanism_a(device_id=device_id, pub_b64u=pub_b64u, priv=priv)
-		codes = resp.get("bootstrap_codes")
-		if isinstance(codes, (list, tuple)):
-			creds = replace(creds, bootstrap_codes=tuple(codes))
-		return creds
+		return _pair_mechanism_a(
+			device_id=device_id,
+			pub_b64u=pub_b64u,
+			priv=priv,
+			bootstrap_codes=_clean_codes(resp.get("bootstrap_codes")),
+		)
 	# Unknown/blank mode: fail closed (D-d) - never fabricate a credential.
 	raise AgentUnreachableError(f"request_chat_pairing returned unknown mode {mode!r}")
 
@@ -324,7 +341,16 @@ def _pair_legacy(
 	)
 
 
-def _pair_mechanism_a(*, device_id: str, pub_b64u: str, priv: Ed25519PrivateKey) -> ChatDeviceCredentials:
+def _clean_codes(codes) -> tuple:
+	"""The non-empty string codes admin returned, as a tuple; () when none."""
+	if not isinstance(codes, (list, tuple)):
+		return ()
+	return tuple(c for c in codes if isinstance(c, str) and c)
+
+
+def _pair_mechanism_a(
+	*, device_id: str, pub_b64u: str, priv: Ed25519PrivateKey, bootstrap_codes: tuple = ()
+) -> ChatDeviceCredentials:
 	"""Mechanism-A tenant (9.x): there is NO token yet, and that is a VALID state.
 	The CP has told the fleet-agent to poll + approve this deviceId; the gateway
 	issues the device token on the approved connect. Return bootstrap creds
@@ -333,8 +359,21 @@ def _pair_mechanism_a(*, device_id: str, pub_b64u: str, priv: Ed25519PrivateKey)
 	token. The stable keypair is already persisted, so re-requesting per turn
 	never regenerates the deviceId (no thrash).
 
-	Fail closed (D-d) if the gateway token is unset: without it the bootstrap
-	connect can neither be presented nor signed."""
+	With ``bootstrap_codes`` (admin passed the site proof) the connect presents a
+	one-time code and the owner token is never read. Without codes (older admin or
+	a tenant not yet enforcing) the legacy owner-token connect-first applies.
+
+	Fail closed (D-d) if the gateway token is unset on the legacy path: without it
+	the bootstrap connect can neither be presented nor signed."""
+	if bootstrap_codes:
+		_logger.info("chat pairing: mechanism_a bootstrap codes device_id=%s", device_id)
+		return ChatDeviceCredentials(
+			device_id=device_id,
+			public_key=pub_b64u,
+			private_key=priv,
+			device_token="",
+			bootstrap_codes=bootstrap_codes,
+		)
 	bootstrap_token = _read_gateway_token()
 	if not bootstrap_token:
 		raise AgentUnreachableError("mechanism_a pairing needs the gateway agent_token, but none is set")

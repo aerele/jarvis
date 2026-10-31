@@ -365,6 +365,18 @@ _NOT_PAIRED_DETAIL_CODES = frozenset({"PAIRING_REQUIRED", "NOT_PAIRED"})
 _NOT_PAIRED_REASONS = frozenset({"not-paired"})
 
 
+_BOOTSTRAP_INVALID_CODE = "AUTH_BOOTSTRAP_TOKEN_INVALID"
+
+
+def _is_bootstrap_code_invalid(err: Exception) -> bool:
+	"""True iff the gateway refused the presented bootstrap code. Typed like the
+	other classifiers: only ``.code``/``.details`` are read, never message text."""
+	if getattr(err, "code", None) == _BOOTSTRAP_INVALID_CODE:
+		return True
+	details = getattr(err, "details", None)
+	return isinstance(details, dict) and details.get("code") == _BOOTSTRAP_INVALID_CODE
+
+
 def _is_not_paired(err: Exception) -> bool:
 	"""Return True iff ``err`` is agent's connect-first PENDING signal: the
 	bench presented the gateway token (bootstrap) and agent created/returned a
@@ -781,7 +793,7 @@ class AgentSession:
 		chat-turn budget). Fail-CLOSED at the cap (D-d): raise the honest
 		"still getting ready" error, NEVER fabricate a token.
 		"""
-		if not creds.bootstrap_token:
+		if not (creds.current_bootstrap_code or creds.bootstrap_token):
 			# Can neither present nor sign a bootstrap connect without the gateway
 			# token. Fail closed rather than send an unsignable/empty auth.
 			raise AgentUnreachableError(
@@ -802,6 +814,24 @@ class AgentSession:
 					ws.close()
 				except Exception:
 					pass
+				if _is_bootstrap_code_invalid(e):
+					# The presented code was refused (spent or bound elsewhere): move
+					# to the next code once. Both spent ends like any failed pairing;
+					# the next turn re-pairs through a fresh proof.
+					next_creds = creds.with_next_bootstrap_code()
+					if next_creds is None:
+						_logger.warning(
+							"chat pairing: bootstrap codes exhausted device_id=%s attempts=%d",
+							creds.device_id,
+							attempt,
+						)
+						raise AgentUnreachableError(
+							PAIRING_PENDING_USER_MESSAGE,
+							code="pairing-pending",
+						) from None
+					_logger.info("chat pairing: next bootstrap code device_id=%s", creds.device_id)
+					creds = next_creds
+					continue
 				if _is_not_paired(e):
 					# Still pending. Reconnect on our own timer within the deadline;
 					# agent's pauseReconnect hint is deliberately ignored.
@@ -1747,8 +1777,12 @@ class AgentSession:
 		# token and the signed token can never drift (invariant #2). Bootstrap
 		# (no device token) presents auth.token=<gateway token>; steady state
 		# presents auth.deviceToken=<device token>.
+		# Precedence: device token, else the current one-time bootstrap code, else
+		# the legacy owner token (older admin, no codes).
 		if creds.device_token:
 			auth = {"deviceToken": creds.device_token}
+		elif creds.current_bootstrap_code:
+			auth = {"bootstrapToken": creds.current_bootstrap_code}
 		else:
 			auth = {"token": creds.bootstrap_token}
 		signing_token = auth.get("token") or auth.get("deviceToken") or auth.get("bootstrapToken") or ""
