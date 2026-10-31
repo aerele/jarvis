@@ -18,8 +18,9 @@ These changes apply to new writes. They do not delete earlier transcripts,
 backups, original uploads, report artifacts, or user-requested exported files.
 Gateway hooks do not establish retention guarantees for native Claude CLI or
 other provider-owned transcripts. Those paths need separate lifecycle checks.
-An older runtime without the persistence hooks logs an explicit compatibility
-warning and does not provide gateway transcript minimization.
+An older runtime without the persistence hook API logs an explicit compatibility
+warning. The paired plugin refuses source reads before network dispatch until
+the runtime is upgraded. Other tools retain their existing behavior.
 
 Compaction must be checked against the deployed runtime's persisted-history path.
 Unit checks of the redactor alone do not prove that a native runner or an existing
