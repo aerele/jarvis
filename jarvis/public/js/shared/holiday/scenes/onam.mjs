@@ -32,6 +32,7 @@ const CFG = {
     [0, -7, 1],
   ],
   row: FLOOR_ROW,
+  foldMid: true, // the row's middle group goes if a relayout leaves the hero no room for it
 };
 
 export const END_MS = CFG.end;

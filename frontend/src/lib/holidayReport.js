@@ -13,26 +13,36 @@ export function reportOnce(key, payload, report = reportError) {
 	report(payload);
 }
 
+// A load failure carries no stack: it opens with the browser's own "Failed to fetch dynamically
+// imported module", which the error reporter drops as an already-handled stale chunk, so a
+// stack would make the report vanish. The design in error_code is what support needs.
 const KINDS = {
 	load: {
 		error_class: "HolidaySceneLoadFailed",
 		message: "The holiday scene art could not be loaded",
+		withStack: false,
 	},
-	play: { error_class: "HolidaySceneFailed", message: "The holiday scene failed while playing" },
+	play: {
+		error_class: "HolidaySceneFailed",
+		message: "The holiday scene failed while playing",
+		withStack: true,
+	},
 };
 
 /**
  * Report a scene failure with the design that failed in error_code ("holiday_scene:christmas",
- * from the closed set of designs) and the thrown error's stack. Once per design and kind.
+ * from the closed set of designs) and, for a failure while playing, the thrown error's stack.
+ * Once per design and kind.
  */
 export function reportSceneFailure(kind, design, error, report = reportError) {
 	const known = DESIGNS.includes(design) ? design : "unknown";
+	const { withStack, ...fixed } = KINDS[kind];
 	reportOnce(
 		`${kind}:${known}`,
 		{
-			...KINDS[kind],
+			...fixed,
 			error_code: `holiday_scene:${known}`,
-			stack: error && error.stack ? String(error.stack) : "",
+			stack: withStack && error && error.stack ? String(error.stack) : "",
 		},
 		report
 	);
