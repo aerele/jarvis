@@ -246,7 +246,7 @@ jobs:
       # `cancel-in-progress` guard above already exists to avoid.
       fail-fast: false
       matrix:
-        # Shards are cut by measured TIME, not by test count (jarvis/ci/test_shards.py).
+        # Shards are cut by measured TIME, not by test count (jarvis/ci/shard_split.py).
         # Frappe's own splitter weights each test FILE by its `def test_` count, and test cost
         # is far from uniform: on 2026-10-31 (620 files, ~16k tests, ~42 min of tests) the
         # count split gave est. [14.3, 13.2, 7.9, 6.9] min and the slowest shard set the wall
@@ -414,13 +414,13 @@ jobs:
           # wrapper swaps frappe's count-based split_by_weight for a split by the measured
           # per-module seconds in jarvis/ci/data/test-timings.json, then invokes frappe's CLI
           # exactly as bench/cli.py frappe_cmd does. The runner, coverage and the CI-gated exit
-          # code are all still frappe's. See jarvis/ci/test_shards.py, including how to
+          # code are all still frappe's. See jarvis/ci/shard_split.py, including how to
           # regenerate the timings when the step's printed plan warns they are stale.
           #
           # The coverage flag is spelled --with-coverage on THIS command. run-tests spells
           # the same thing --coverage (frappe/commands/testing.py). They are two different
           # click commands; do not "fix" one to match the other.
-          ../env/bin/python -m jarvis.ci.test_shards run -- \
+          ../env/bin/python -m jarvis.ci.shard_split run -- \
             --site jarvis-ci.test run-parallel-tests \
             --app jarvis \
             --build-number ${{ matrix.shard }} \
