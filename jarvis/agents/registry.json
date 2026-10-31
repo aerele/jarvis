@@ -202,20 +202,14 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "status": "Published",
       "description": "Read-only pre-payroll integrity checks across your attendance and leave records: cross-references marked Attendance, biometric check-ins, approved Leave Applications, and leave balances per employee to surface unaccounted working days, leave taken without approval, check-in-vs-mark mismatches, and over-drawn balances before payroll runs. Reproducible; never marks attendance, approves leave, edits a balance, or touches payroll.",
       "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__query"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -229,7 +223,12 @@
         "Leave Ledger Entry",
         "Leave Allocation",
         "Employee",
-        "Holiday List"
+        "Holiday List",
+        "Company",
+        "Department",
+        "Holiday",
+        "Holiday List Assignment",
+        "Leave Type"
       ],
       "rule_tokens": [
         "ali-bal-5e63",
@@ -239,6 +238,7 @@
         "ali-lwp-9c21",
         "ali-punch-7d14"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -253,7 +253,10 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "attendance"
+      ]
     },
     {
       "agent_slug": "bank-recon-operator",
