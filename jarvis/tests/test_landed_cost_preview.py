@@ -369,7 +369,7 @@ class TestLandedCostPreview(LandedCostFixtures):
 
 	def test_stock_updating_invoice_is_a_receipt_and_nonstock_lines_are_excluded(self):
 		frappe.set_user("Administrator")
-		with patch.object(frappe, "in_test", False):
+		with patch.dict(frappe.flags, in_test=False):
 			invoice = frappe.get_doc(
 				{
 					"doctype": "Purchase Invoice",

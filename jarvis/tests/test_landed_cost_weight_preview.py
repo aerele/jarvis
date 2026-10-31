@@ -10,7 +10,7 @@ from jarvis.tools.preview_landed_cost_voucher import preview_landed_cost_voucher
 
 
 class TestLandedCostWeightPreview(LandedCostFixtures):
-	@patch.object(frappe, "in_test", False)
+	@patch.dict(frappe.flags, in_test=False)
 	def weighted_receipt(self, weights=(15, 70), quantities=(2, 1), rates=(50, 100), boxed=False):
 		frappe.set_user("Administrator")
 		# Minimal CI sites do not install the full standard UOM catalogue.
@@ -224,7 +224,7 @@ class TestLandedCostWeightPreview(LandedCostFixtures):
 	def test_stock_updating_invoice_uses_its_own_recorded_weights(self):
 		receipt = self.weighted_receipt()
 		frappe.set_user("Administrator")
-		with patch.object(frappe, "in_test", False):
+		with patch.dict(frappe.flags, in_test=False):
 			invoice = frappe.get_doc(
 				{
 					"doctype": "Purchase Invoice",
