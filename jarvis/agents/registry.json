@@ -1360,19 +1360,17 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "status": "Published",
-      "description": "Runs ERPNext's stock-value vs account-value comparison on a schedule and works the residue: flags negative on-hand balances, zero-rate receipts, abnormal valuation-rate jumps, internal stock-value inconsistencies, and where your perpetual stock value drifts from its stock-in-hand GL account. Ranks each exception by rupees with a link to the offending ledger row. Read-only; never adjusts a quantity, books a journal entry, or posts a stock reconciliation.",
+      "description": "Checks stock balances and receipt costs against retained ledger records. Compares complete stock accounts with native ERPNext reports and shows warehouse review summaries. Read-only; does not change stock or accounting entries.",
       "tools_required": [
         "jarvis__query",
-        "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
@@ -1384,7 +1382,6 @@
       ],
       "doctypes_required": [
         "Stock Ledger Entry",
-        "Bin",
         "Item",
         "Warehouse",
         "GL Entry",
@@ -1392,14 +1389,19 @@
         "Stock Settings",
         "Repost Item Valuation",
         "Landed Cost Voucher",
-        "Company"
+        "Company",
+        "Stock Entry",
+        "Landed Cost Purchase Receipt"
       ],
       "rule_tokens": [
         "nsv-grade-e058",
         "nsv-integ-2a6f",
+        "nsv-neg-2e73",
         "nsv-spike-4b1c",
-        "nsv-tieout-7d92"
+        "nsv-tieout-7d92",
+        "nsv-zero-8c45"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1414,7 +1416,10 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "negative_stock"
+      ]
     },
     {
       "agent_slug": "payroll-prerun-auditor",
