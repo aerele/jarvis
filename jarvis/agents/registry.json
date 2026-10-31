@@ -387,32 +387,33 @@
       "domain": "measurement",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "status": "Published",
-      "description": "Extends the Retrospective Baseline Meter onto Helpdesk records: how quickly tickets get a first response, how quickly they get resolved, and how many tickets you handle each period. Installable only where Helpdesk is present. Read-only; reads timestamps, statuses, and counts - never ticket conversation content.",
+      "description": "Read-only counts and response or resolution times for one Helpdesk team in fixed closed calendar windows. Uses recorded ticket timestamps and shows missing source coverage. Does not read ticket messages.",
       "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list"
+        "jarvis__get_my_access",
+        "jarvis__query"
       ],
       "tools_allow": [
+        "jarvis__get_my_access",
         "jarvis__query",
-        "jarvis__get_list",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
-        "exec",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
-        "HD Ticket"
+        "HD Ticket",
+        "HD Team"
       ],
       "rule_tokens": [
-        "bmhd-lat-4c19",
-        "bmhd-win-9e2f"
+        "bmhd-resolution-79c2",
+        "bmhd-response-bb17",
+        "bmhd-throughput-f59a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
-      "timeout_s": 900,
+      "timeout_s": 1200,
       "min_apps": [
         "erpnext",
         "helpdesk"
