@@ -314,7 +314,7 @@ class TestLandedCostDefaults(LandedCostFixtures):
 					build_doc("Landed Cost Voucher", values)
 				exists.assert_not_called()
 
-	def test_explicit_amount_does_not_require_a_new_source_read(self):
+	def test_explicit_amount_still_requires_source_tax_read_permission(self):
 		values = self.values(amounts=[25])
 		original = frappe.has_permission
 
@@ -322,8 +322,8 @@ class TestLandedCostDefaults(LandedCostFixtures):
 			return False if doctype == "Purchase Invoice" else original(doctype, *args, **kwargs)
 
 		with patch("jarvis.tools._client_defaults.frappe.has_permission", side_effect=permission):
-			saved = create_doc("Landed Cost Voucher", values)
-		self.assertEqual(saved["total_vendor_invoices_cost"], 25)
+			with self.assertRaises(PermissionDeniedError):
+				create_doc("Landed Cost Voucher", values)
 
 	def test_save_refreshes_an_omitted_default_after_preview(self):
 		values = self.values(charge=90)
