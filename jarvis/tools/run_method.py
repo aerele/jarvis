@@ -51,6 +51,7 @@ from frappe.core.doctype.server_script.server_script_utils import get_server_scr
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools import _write_risk
+from jarvis.tools._lcv_tool_writes import reject_generic_lcv_write, tool_scope
 
 # S6: Jarvis's own gate, turn-entry and decision endpoints are never a tool target
 # (``call_tool`` is allow_guest and ``frappe.call`` skips the HTTP-method check).
@@ -100,6 +101,7 @@ _DENIED = frozenset(
 )
 
 
+@tool_scope()
 def run_method(
 	method: str,
 	args: dict | None = None,
@@ -152,6 +154,7 @@ def run_method(
 	# calls the replacement, so the agent must too, never the original.
 	resolved = resolve_method(method)
 	for name in dict.fromkeys((method, resolved)):
+		reject_generic_lcv_write(name, args)
 		_enforce_blocklist(name)
 		# By name too, so a Server Script API cannot shadow a denied endpoint's path.
 		if _is_denied_path(name):
@@ -400,16 +403,13 @@ def _run_doc_method(method: str, doctype: str, name: str | int | None, args: dic
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"method {doctype}.{method} is not whitelisted") from e
 
-	# Native read helpers change only this in-memory document. Every other LCV
-	# controller method must pass the same source check as explicit writes.
-	if doctype == "Landed Cost Voucher" and method not in {
-		"cancel",
-		"get_vendor_invoice_amount",
-		"get_items_from_purchase_receipts",
-	}:
+	# Native LCV helpers can read raw source money or mutate after this check.
+	# Use the dedicated preview/write tools. Keep cancellation available.
+	if doctype == "Landed Cost Voucher" and method != "cancel":
 		from jarvis.tools._lcv_source_tax import gate_lcv
 
 		gate_lcv(doc, lock=True)
+		raise PermissionDeniedError("Use the dedicated landed-cost preview and write tools for this voucher.")
 
 	# Arg-arity handling copied from frappe.handler.run_doc_method: `bound` is a
 	# bound method, so its signature excludes ``self``.

@@ -162,7 +162,33 @@ def _tds_accounts(pi):
 def _posted_input_matches(pi, expected, precision):
 	"""Do not let a permission-filtered subset prove a complete input-tax balance."""
 	meta = frappe.get_meta("GL Entry")
-	_guard_fields(meta, extra_fields=("account", "voucher_type", "voucher_no", "is_cancelled"))
+	_guard_fields(
+		meta,
+		extra_fields=(
+			"account",
+			"voucher_type",
+			"voucher_no",
+			"is_cancelled",
+			"against_voucher_type",
+			"against_voucher",
+		),
+	)
+	# A later linked journal can change the input-tax treatment. Do not treat
+	# only the original invoice posting as a current proof in that case.
+	adjustments = frappe.get_all(
+		"GL Entry",
+		filters={
+			"against_voucher_type": "Purchase Invoice",
+			"against_voucher": pi.name,
+			"voucher_type": ["!=", "Purchase Invoice"],
+			"account": ["in", sorted(expected)],
+			"is_cancelled": 0,
+		},
+		pluck="name",
+		limit_page_length=1,
+	)
+	if adjustments:
+		return False
 	rows = frappe.get_all(
 		"GL Entry",
 		filters={"voucher_type": "Purchase Invoice", "voucher_no": pi.name, "is_cancelled": 0},
@@ -339,6 +365,23 @@ def _classify(pi):
 	}
 
 
+def _claimed_landed_cost(name, *, exclude_voucher=None, for_update=False):
+	"""Older ERPNext 16 builds have the child table but no public sum helper."""
+	try:
+		from erpnext.stock.doctype.landed_cost_voucher.landed_cost_voucher import get_claimed_landed_cost
+	except ImportError:
+		row = frappe.qb.DocType("Landed Cost Vendor Invoice")
+		query = (
+			frappe.qb.from_(row).select(row.amount).where((row.vendor_invoice == name) & (row.docstatus == 1))
+		)
+		if exclude_voucher:
+			query = query.where(row.parent != exclude_voucher)
+		if for_update:
+			query = query.for_update()
+		return sum(_amount(amount) for amount in query.run(pluck=True))
+	return get_claimed_landed_cost(name, exclude_voucher=exclude_voucher, for_update=for_update)
+
+
 def gate_lcv(doc, *, lock=False, previous_links=None):
 	"""Check current linked sources; real writes retain PI locks until commit."""
 	if doc.doctype != "Landed Cost Voucher":
@@ -363,7 +406,12 @@ def gate_lcv(doc, *, lock=False, previous_links=None):
 		raise PermissionDeniedError(_DENIED)
 	if len(names) > MAX_SOURCES:
 		raise LCVSourceTaxNeedsInput(
-			[{"code": "source_too_large", "message": "Select at most 20 linked service invoices."}]
+			[
+				{
+					"code": "source_too_large",
+					"message": f"Select at most {MAX_SOURCES} linked service invoices.",
+				}
+			]
 		)
 	if previous_links and previous_links - set(names) and doc.get("taxes"):
 		raise LCVSourceTaxNeedsInput(
@@ -416,7 +464,14 @@ def gate_lcv(doc, *, lock=False, previous_links=None):
 			continue
 		try:
 			result = _classify(pi)
-		except (ValueError, TypeError, AttributeError) as exc:
+		except (
+			PermissionDeniedError,
+			frappe.PermissionError,
+			frappe.QueryDeadlockError,
+			frappe.QueryTimeoutError,
+		):
+			raise
+		except Exception as exc:
 			# No record values or exception text enter the operational log.
 			frappe.logger("lcv_source_tax").warning(
 				"Source tax classifier unavailable (%s)", type(exc).__name__
@@ -437,24 +492,21 @@ def gate_lcv(doc, *, lock=False, previous_links=None):
 					)
 				)
 				continue
-			if result["treatment"] == "excluded_per_recorded_treatment" or legacy:
-				from erpnext.stock.doctype.landed_cost_voucher.landed_cost_voucher import (
-					get_claimed_landed_cost,
-				)
-
-				claim = sum(_amount(r.amount) for r in doc.vendor_invoices if r.vendor_invoice == name)
-				prior = get_claimed_landed_cost(name, exclude_voucher=doc.name, for_update=lock)
-				if flt(claim + prior + legacy, pi.precision("base_net_total")) > flt(
-					pi.base_net_total, pi.precision("base_net_total")
-				):
-					issues.append(
-						_issue(
-							name,
-							"source_net_claim_exceeded",
-							"The linked claim exceeds the recorded net service cost after prior claims. Keep excluded GST outside the vendor claim.",
-						)
+			# Invoice-level discounts also reduce untaxed service cost. Apply this
+			# ceiling to every linked source, not only the GST/legacy branches.
+			claim = sum(_amount(r.amount) for r in doc.vendor_invoices if r.vendor_invoice == name)
+			prior = _claimed_landed_cost(name, exclude_voucher=doc.name, for_update=lock)
+			if flt(claim + prior + legacy, pi.precision("base_net_total")) > flt(
+				pi.base_net_total, pi.precision("base_net_total")
+			):
+				issues.append(
+					_issue(
+						name,
+						"source_net_claim_exceeded",
+						"The linked claim exceeds the recorded net service cost after prior claims. Keep discounts and excluded GST outside the vendor claim.",
 					)
-					continue
+				)
+				continue
 			invoices.append(result)
 	if issues:
 		raise LCVSourceTaxNeedsInput(issues, invoices)
