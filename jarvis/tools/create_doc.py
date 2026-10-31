@@ -106,6 +106,11 @@ def build_doc(doctype: str, values: dict) -> "frappe.model.document.Document":
 	doc = frappe.new_doc(doctype)
 	for field, value in values.items():
 		doc.set(field, value)
+	if doctype == "Landed Cost Voucher":
+		from jarvis.tools._client_defaults import landed_cost_receipt_details, landed_cost_vendor_amounts
+
+		landed_cost_vendor_amounts(doc, values)
+		landed_cost_receipt_details(doc)
 	cast_numbers(doc)
 	_set_title_from_title_field(doc)
 	return doc
