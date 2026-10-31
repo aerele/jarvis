@@ -12,6 +12,7 @@ RESOURCE_ERROR = "File parsing exceeded the resource budget. Do not retry unchan
 
 
 def main():
+	resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 	resource.setrlimit(resource.RLIMIT_CPU, (CPU_SECONDS, CPU_SECONDS))
 	# Linux production workers enforce address space; macOS has no reliable AS limit.
 	if sys.platform.startswith("linux"):
