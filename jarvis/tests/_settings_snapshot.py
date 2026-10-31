@@ -23,11 +23,16 @@ def _rows():
 	return singles, auth
 
 
-def snapshot_hash():
-	"""sha256 + row counts of the raw rows (never prints values). For bench execute."""
+def compute_hash():
+	"""(sha256, tabSingles count, __Auth count) of the raw rows."""
 	singles, auth = _rows()
 	h = hashlib.sha256(repr((sorted(map(tuple, singles)), sorted(map(tuple, auth)))).encode()).hexdigest()
-	print(f"hash={h} tabSingles={len(singles)} __Auth={len(auth)}")
+	return h, len(singles), len(auth)
+
+
+def snapshot_hash():
+	"""Print hash + row counts only, never values. For bench execute."""
+	print("hash=%s tabSingles=%s __Auth=%s" % compute_hash())
 
 
 class JarvisSettingsSnapshot:
@@ -35,22 +40,32 @@ class JarvisSettingsSnapshot:
 
 	def setUp(self):
 		super().setUp()
-		self._js_singles, self._js_auth = _rows()
+		self._take_snapshot()
 
-	def tearDown(self):
-		frappe.db.sql("delete from tabSingles where doctype=%s", SETTINGS)
-		frappe.db.sql("delete from `__Auth` where doctype=%s", SETTINGS)
-		for row in self._js_singles:
-			frappe.db.sql("insert into tabSingles (doctype, field, value) values (%s, %s, %s)", row)
-		for row in self._js_auth:
-			frappe.db.sql(
-				"insert into `__Auth` (doctype, name, fieldname, password, encrypted) "
-				"values (%s, %s, %s, %s, %s)",
-				row,
-			)
-		# Commit the restore: code under test may have committed, and the test
-		# class's final rollback would otherwise revert to that leaked state.
-		frappe.db.commit()
-		frappe.clear_document_cache(SETTINGS, SETTINGS)
-		frappe.clear_cache(doctype=SETTINGS)
-		super().tearDown()
+	def _take_snapshot(self):
+		self._js_singles, self._js_auth = _rows()
+		# A cleanup runs even when a later setUp step raises (tearDown would not).
+		self.addCleanup(self._restore)
+
+	def _restore(self):
+		try:
+			frappe.db.sql("delete from tabSingles where doctype=%s", SETTINGS)
+			frappe.db.sql("delete from `__Auth` where doctype=%s", SETTINGS)
+			for row in self._js_singles:
+				frappe.db.sql("insert into tabSingles (doctype, field, value) values (%s, %s, %s)", row)
+			for row in self._js_auth:
+				frappe.db.sql(
+					"insert into `__Auth` (doctype, name, fieldname, password, encrypted) "
+					"values (%s, %s, %s, %s, %s)",
+					row,
+				)
+			# Commit the restore: code under test may have committed, and the test
+			# class's final rollback would otherwise revert to that leaked state.
+			frappe.db.commit()
+		except Exception:
+			# Never commit a partial state.
+			frappe.db.rollback()
+			raise
+		finally:
+			frappe.clear_document_cache(SETTINGS, SETTINGS)
+			frappe.clear_cache(doctype=SETTINGS)
