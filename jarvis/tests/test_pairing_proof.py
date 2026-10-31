@@ -155,7 +155,7 @@ class TestEstablishPairing(JarvisSettingsSnapshot, FrappeTestCase):
 
 		with (
 			patch("jarvis.chat.device.admin_client.request_chat_pairing", side_effect=_fake),
-			patch("jarvis.onboarding.fetch_callback_key_if_missing"),
+			patch("jarvis.onboarding.resync_callback_key_after_pairing"),
 		):
 			chat_device._establish_pairing()
 		self.assertRegex(seen["proof_nonce"], HEX32)
@@ -165,7 +165,7 @@ class TestEstablishPairing(JarvisSettingsSnapshot, FrappeTestCase):
 		set_settings_password(frappe.get_single(SETTINGS), "agent_token", "gw-token", update_modified=False)
 		with (
 			patch("jarvis.chat.device.admin_client.request_chat_pairing", return_value=resp),
-			patch("jarvis.onboarding.fetch_callback_key_if_missing"),
+			patch("jarvis.onboarding.resync_callback_key_after_pairing"),
 		):
 			creds = chat_device._establish_pairing()
 		self.assertEqual(creds.bootstrap_codes, ("c1", "c2"))
@@ -185,6 +185,47 @@ class TestEstablishPairing(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertRegex(get_conn.call_args.kwargs["proof_nonce"], HEX32)
 		stored = frappe.get_single(SETTINGS).get_password("callback_key", raise_exception=False)
 		self.assertEqual(stored, CALLBACK)
+
+
+class TestResyncAfterPairing(JarvisSettingsSnapshot, FrappeTestCase):
+	def setUp(self):
+		super().setUp()
+		_onboard()
+
+	def test_rotated_key_replaces_stored_one_after_pairing(self):
+		set_settings_password(frappe.get_single(SETTINGS), "callback_key", CALLBACK)
+		rotated = "ee" * 32
+		resp = {"mode": "legacy", "device_token": "tok"}
+		conn = {"agent_url": "ws://x.invalid", "callback_key": rotated}
+		with (
+			patch("jarvis.chat.device.admin_client.request_chat_pairing", return_value=resp),
+			patch("jarvis.onboarding.admin_client.get_connection", return_value=conn) as get_conn,
+		):
+			chat_device._establish_pairing()
+		get_conn.assert_called_once()
+		self.assertRegex(get_conn.call_args.kwargs["proof_nonce"], HEX32)
+		stored = frappe.get_single(SETTINGS).get_password("callback_key", raise_exception=False)
+		self.assertEqual(stored, rotated)
+
+	def test_failed_resync_never_fails_pairing(self):
+		resp = {"mode": "legacy", "device_token": "tok"}
+		with (
+			patch("jarvis.chat.device.admin_client.request_chat_pairing", return_value=resp),
+			patch("jarvis.onboarding.admin_client.get_connection", side_effect=RuntimeError("admin down")),
+			patch("jarvis.onboarding.frappe.log_error"),
+		):
+			creds = chat_device._establish_pairing()
+		self.assertEqual(creds.device_token, "tok")
+
+	def test_resync_runs_after_rotate_pairing(self):
+		priv_pub = {"device_token": "tok-new"}
+		with (
+			patch("jarvis.chat.device.admin_client.pair_chat_device", return_value=priv_pub),
+			patch("jarvis.chat.device._save_credentials"),
+			patch("jarvis.onboarding.resync_callback_key_after_pairing") as resync,
+		):
+			chat_device._generate_and_pair()
+		resync.assert_called_once_with()
 
 
 class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):

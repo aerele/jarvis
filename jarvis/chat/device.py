@@ -268,8 +268,9 @@ def _establish_pairing() -> ChatDeviceCredentials:
 		raise AgentUnreachableError(f"chat device pairing request failed: {e}") from e
 
 	# A callback_key in this response is ignored on purpose: the key is stored only
-	# by write_connection. After a proof-backed pairing, fetch it the guarded way.
-	onboarding.fetch_callback_key_if_missing()
+	# by write_connection. After every proof-backed pairing, re-sync the guarded way
+	# (not only when a key is missing), so a rotated key always reaches this site.
+	onboarding.resync_callback_key_after_pairing()
 
 	mode = (resp.get("mode") or "").strip()
 	if mode == "legacy":
@@ -401,6 +402,7 @@ def _generate_and_pair() -> ChatDeviceCredentials:
 	(same family as the deferred ``unpair_devices`` fix); on a Mechanism-A tenant
 	the CP's legacy forge is the broken path, so this stays legacy-only until then.
 	"""
+	from jarvis import onboarding
 	from jarvis.chat import pairing_proof
 
 	priv, _pub_raw, pub_b64u, device_id = _generate_keypair()
@@ -425,6 +427,8 @@ def _generate_and_pair() -> ChatDeviceCredentials:
 		device_id=device_id,
 		device_token=device_token,
 	)
+	# Proof-backed pairing: re-sync the callback key (best effort, never fails the pairing).
+	onboarding.resync_callback_key_after_pairing()
 	return ChatDeviceCredentials(
 		device_id=device_id,
 		public_key=pub_b64u,

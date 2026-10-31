@@ -315,7 +315,20 @@ def fetch_callback_key_if_missing() -> None:
 	arrives through ``write_connection`` (behind the tenant-authority guard), never
 	from a pairing response. Best effort and not re-entrant: a sync that returns no
 	key does not start another."""
-	if has_callback_key() or getattr(frappe.flags, "jarvis_key_fetch", False):
+	if has_callback_key():
+		return
+	_best_effort_key_sync()
+
+
+def resync_callback_key_after_pairing() -> None:
+	"""Run a proof-backed sync after EVERY proof-backed pairing, whether or not a key
+	is stored, so a callback key admin rotated always reaches this site. Best effort:
+	a failed sync never fails the pairing. Not re-entrant."""
+	_best_effort_key_sync()
+
+
+def _best_effort_key_sync() -> None:
+	if getattr(frappe.flags, "jarvis_key_fetch", False):
 		return
 	frappe.flags.jarvis_key_fetch = True
 	try:

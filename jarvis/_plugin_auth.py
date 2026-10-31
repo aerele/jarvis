@@ -108,8 +108,8 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			code="AuthenticationError",
 			message="X-Jarvis-Token header missing",
 		)
-	expected_token = _callback_key() or _agent_token()
-	if not expected_token:
+	accepted_keys = stored_keys()
+	if not accepted_keys:
 		_audit_log(
 			"plugin_auth: agent_token unset on bench",
 			"Jarvis Settings.callback_key and agent_token are empty; refusing all plugin requests",
@@ -119,7 +119,8 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			code="ServiceUnavailable",
 			message="plugin auth not configured on this bench",
 		)
-	if not hmac.compare_digest(presented_token, expected_token):
+	expected_token = match_stored_key(presented_token, accepted_keys)
+	if not expected_token:
 		_audit_log(
 			"plugin_auth: bearer mismatch",
 			f"remote_ip={caller_ip!r} session={headers.get('X-Jarvis-Session', '')!r}",
@@ -247,8 +248,26 @@ def _should_audit_unsigned_reject(session_key: str) -> bool:
 		return True
 
 
+def stored_keys() -> list[str]:
+	"""Every key a plugin request may carry: the callback key and the owner token, empty
+	ones dropped. The owner token verifies until retirement clears it, because before
+	retirement every copy of it is held by the owner anyway."""
+	return [k for k in (_callback_key(), _agent_token()) if k]
+
+
+def match_stored_key(presented: str, keys: list[str]) -> str:
+	"""The stored key equal to ``presented`` ("" when none). Compares against every key
+	in constant time per compare and never short-circuits, so timing does not reveal
+	which key was close."""
+	matched = ""
+	for key in keys:
+		if hmac.compare_digest(presented, key):
+			matched = key
+	return matched
+
+
 def _callback_key() -> str:
-	"""Per-tenant callback key; once stored it is the only key that verifies."""
+	"""Per-tenant callback key (admin delivers it through a proof-backed sync)."""
 	settings = frappe.get_single("Jarvis Settings")
 	return settings.get_password("callback_key", raise_exception=False) or ""
 

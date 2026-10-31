@@ -3,13 +3,13 @@
 Provides ``validate_bearer()`` for X-Jarvis-Token header auth.
 """
 
-import hmac
-
 import frappe
+
+from jarvis._plugin_auth import match_stored_key, stored_keys
 
 
 def validate_bearer() -> bool:
-	"""Return True iff the X-Jarvis-Token header contains the callback key (or, before one is stored, the agent token).
+	"""Return True iff the X-Jarvis-Token header matches either stored key: the callback key or, until retirement clears it, the agent token.
 
 	We use a custom header rather than ``Authorization: Bearer`` so that Frappe's
 	built-in OAuth validator (which runs before our handler) does not see a Bearer
@@ -18,13 +18,8 @@ def validate_bearer() -> bool:
 	presented = frappe.request.headers.get("X-Jarvis-Token", "").strip()
 	if not presented:
 		return False
-	settings = frappe.get_single("Jarvis Settings")
-	expected = (
-		settings.get_password("callback_key", raise_exception=False)
-		or settings.get_password("agent_token", raise_exception=False)
-		or ""
-	)
-	if not expected:
+	keys = stored_keys()
+	if not keys:
 		return False
-	# Constant-time comparison to prevent timing-oracle attacks
-	return hmac.compare_digest(presented, expected)
+	# Constant-time comparison against each stored key (callback key, then owner token).
+	return bool(match_stored_key(presented, keys))

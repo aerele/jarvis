@@ -89,7 +89,7 @@ class TestBootstrapPairing(FrappeTestCase):
 			),
 			patch("jarvis.chat.device.admin_client.request_chat_pairing", return_value=resp),
 			patch("jarvis.chat.pairing_proof.issue_nonce", return_value="n" * 32),
-			patch("jarvis.onboarding.fetch_callback_key_if_missing"),
+			patch("jarvis.onboarding.resync_callback_key_after_pairing"),
 		):
 			creds = chat_device._establish_pairing()
 		self.assertEqual(creds.bootstrap_codes, (CODE1, CODE2))

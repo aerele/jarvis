@@ -1,15 +1,17 @@
-"""Task J2: the per-tenant callback key verifies plugin callbacks, and the stored
-owner token stops verifying once a callback key exists."""
+"""Tasks J2 + J3a: the per-tenant callback key verifies plugin callbacks; the owner
+token keeps verifying until retirement clears it. The site signs plugin-route
+requests with the callback key, else the owner token."""
 
 from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis import onboarding_contract, _http, _plugin_auth, onboarding, settings_reset
-from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
+from jarvis import _http, _plugin_auth, onboarding, onboarding_contract, settings_reset
 from jarvis._password_utils import clear_settings_password, set_settings_password
 from jarvis._plugin_auth import PluginAuthError
+from jarvis.chat import plugin_routes
+from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
 from jarvis.tests.test_api import _FakeRequest, sign_plugin_headers
 
 SETTINGS = "Jarvis Settings"
@@ -39,11 +41,28 @@ class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 		set_settings_password(self.settings, "callback_key", CALLBACK)
 		self.assertEqual(self._validate(CALLBACK), SESSION)
 
-	def test_agent_token_rejected_once_callback_key_set(self):
+	def test_either_key_verifies_before_retirement(self):
 		set_settings_password(self.settings, "callback_key", CALLBACK)
+		self.assertEqual(self._validate(CALLBACK), SESSION)
+		self.assertEqual(self._validate(OWNER), SESSION)
+
+	def test_agent_token_rejected_once_agent_token_cleared(self):
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+		clear_settings_password(self.settings, "agent_token")
 		with self.assertRaises(PluginAuthError) as ctx:
 			self._validate(OWNER)
 		self.assertEqual(ctx.exception.http_status, 401)
+		self.assertEqual(self._validate(CALLBACK), SESSION)
+
+	def test_token_matching_one_key_with_hmac_of_the_other_is_rejected(self):
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+		for token, signer in ((OWNER, CALLBACK), (CALLBACK, OWNER)):
+			headers = {"X-Jarvis-Token": token, "X-Jarvis-Session": SESSION}
+			headers.update(sign_plugin_headers(signer, SESSION))
+			with patch.object(frappe, "request", _FakeRequest(headers), create=True):
+				with self.assertRaises(PluginAuthError) as ctx:
+					_plugin_auth.validate_plugin_request(b"")
+			self.assertEqual(ctx.exception.http_status, 401)
 
 	def test_falls_back_to_agent_token_without_callback_key(self):
 		self.assertEqual(self._validate(OWNER), SESSION)
@@ -55,6 +74,9 @@ class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 
 		self.assertTrue(check(OWNER))
 		set_settings_password(self.settings, "callback_key", CALLBACK)
+		self.assertTrue(check(CALLBACK))
+		self.assertTrue(check(OWNER))
+		clear_settings_password(self.settings, "agent_token")
 		self.assertTrue(check(CALLBACK))
 		self.assertFalse(check(OWNER))
 
@@ -150,3 +172,58 @@ class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 		out = onboarding_contract.strip_credentials({"callback_key": CALLBACK, "agent_url": "x"})
 		self.assertNotIn("callback_key", out)
 		self.assertEqual(out["agent_url"], "x")
+
+
+class TestSignedRouteHeaders(JarvisSettingsSnapshot, FrappeTestCase):
+	def setUp(self):
+		super().setUp()
+		self.settings = frappe.get_single(SETTINGS)
+		set_settings_password(self.settings, "agent_token", OWNER, update_modified=False)
+		clear_settings_password(self.settings, "callback_key")
+
+	def test_header_shape(self):
+		h = plugin_routes.signed_route_headers(SESSION, b"{}")
+		self.assertEqual(
+			set(h),
+			{
+				"X-Jarvis-Token",
+				"X-Jarvis-Session",
+				"X-Jarvis-Signature",
+				"X-Jarvis-Nonce",
+				"X-Jarvis-Timestamp",
+			},
+		)
+		self.assertEqual(h["X-Jarvis-Session"], SESSION)
+		self.assertEqual(len(h["X-Jarvis-Nonce"]), 32)
+		self.assertEqual(len(h["X-Jarvis-Signature"]), 64)
+		self.assertNotEqual(
+			h["X-Jarvis-Nonce"], plugin_routes.signed_route_headers(SESSION, b"{}")["X-Jarvis-Nonce"]
+		)
+
+	def test_signs_with_owner_token_without_callback_key(self):
+		self.assertEqual(plugin_routes.signed_route_headers(SESSION, b"")["X-Jarvis-Token"], OWNER)
+
+	def test_signs_with_callback_key_when_set(self):
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+		self.assertEqual(plugin_routes.signed_route_headers(SESSION, b"")["X-Jarvis-Token"], CALLBACK)
+
+	def test_no_key_raises_fixed_message(self):
+		clear_settings_password(self.settings, "agent_token")
+		with self.assertRaises(plugin_routes.PluginRouteKeyMissingError) as ctx:
+			plugin_routes.signed_route_headers(SESSION, b"")
+		self.assertEqual(str(ctx.exception), "No plugin signing key is stored on this site.")
+
+	def test_signature_verifies_with_the_sites_own_verifier(self):
+		for callback in (None, CALLBACK):
+			if callback:
+				set_settings_password(self.settings, "callback_key", callback)
+			body = b'{"session_key": "x"}'
+			headers = plugin_routes.signed_route_headers(SESSION, body)
+			with patch.object(frappe, "request", _FakeRequest(headers), create=True):
+				self.assertEqual(_plugin_auth.validate_plugin_request(body), SESSION)
+
+	def test_signature_covers_the_body(self):
+		headers = plugin_routes.signed_route_headers(SESSION, b"a")
+		with patch.object(frappe, "request", _FakeRequest(headers), create=True):
+			with self.assertRaises(PluginAuthError):
+				_plugin_auth.validate_plugin_request(b"b")
