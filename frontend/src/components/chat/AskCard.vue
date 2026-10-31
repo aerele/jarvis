@@ -83,33 +83,41 @@
 				@update:model-value="pickSingle(qi, $event)"
 			/>
 			<!-- link: search a record of the given DocType -->
-			<div v-else-if="q.type === 'link'" class="jv-ask-link">
+			<div
+				v-else-if="q.type === 'link'"
+				class="jv-ask-link"
+				@keydown.esc="onLinkEscape(qi, $event)"
+			>
 				<input
 					type="text"
 					class="jv-ask-field"
 					:value="link[qi] && link[qi].q != null ? link[qi].q : sel[qi] || ''"
 					:disabled="answered"
 					@input="onLinkSearch(qi, q.doctype, $event.target.value)"
-					@focus="onLinkSearch(qi, q.doctype, (link[qi] && link[qi].q) || '')"
+					@focus="onLinkFocus(qi, q.doctype, $event)"
 					:placeholder="'Search ' + (q.doctype || 'records') + '…'"
-					@blur="closeLink(qi)"
+					@blur="onLinkLeave(qi, $event)"
 					@keydown.enter.prevent
 				/>
 				<div
 					v-if="!answered && link[qi] && link[qi].open && (link[qi].items || []).length"
 					class="jv-ask-linkmenu"
 					v-scroll-fade
+					@focusout="onLinkLeave(qi, $event)"
 				>
 					<button
 						v-for="(it, ii) in link[qi].items"
 						:key="ii"
-						@mousedown.prevent="pickLink(qi, it)"
+						type="button"
+						@mousedown.prevent="pickLink(qi, it, $event)"
+						@click="pickLink(qi, it, $event)"
 					>
 						<b>{{ it.value }}</b
 						><span v-if="it.label"> · {{ it.label }}</span>
 					</button>
 				</div>
 			</div>
+			<p v-if="q.filterError" class="jv-ask-hint">{{ q.filterError }}</p>
 			<!-- Other free-text only for choice questions -->
 			<input
 				v-if="
@@ -158,11 +166,12 @@ import { ref, computed, watch } from "vue";
 import { FormControl, LoadingIndicator, Select } from "frappe-ui";
 import { getDoctypeFields, searchLink } from "@/api";
 import { controlFor } from "@/lib/docFields";
+import { DraftLinkFilterError, resolveLinkFilters } from "@/lib/draftLinkFilters";
 import { vScrollFade } from "@/composables/useScrollFade";
 import { ASK_FIELD_TYPES, isAskReady, askAnswerText, humanizeFieldname } from "@/lib/chatAsk";
 
 const props = defineProps({
-	// A parsed ask: { questions: [{q, type, options, doctype, fieldname?}] } (see parseAsk).
+	// Parsed questions may carry fieldname and child-field parent/parentfield (see parseAsk).
 	spec: { type: Object, required: true },
 	// True while the host would SILENTLY refuse a submit right now (a send
 	// already in flight, a turn's tail still running for this conversation).
@@ -192,15 +201,15 @@ const isForm = computed(
 
 // A `field` question names a DocType field; the card draws that field's real
 // control from its meta (get_doctype_fields, which checks read permission). One
-// request per DocType per card; a failure (error, bad response or a hung
+// request per DocType/parent/table context per card; a failure (error, bad response or a hung
 // request) is dropped from the cache so it can retry, and the question falls
 // back to a text box.
 const FIELDS_TIMEOUT_MS = 8000;
 const fieldsCache = new Map();
-function fetchFields(doctype) {
+function fetchFields(q) {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => reject(new Error("timeout")), FIELDS_TIMEOUT_MS);
-		Promise.resolve(getDoctypeFields(doctype)).then(
+		Promise.resolve(getDoctypeFields(q.doctype, q.parent, q.parentfield)).then(
 			(r) => {
 				clearTimeout(timer);
 				if (!r || r.ok === false || !Array.isArray(r.fields)) {
@@ -214,16 +223,18 @@ function fetchFields(doctype) {
 		);
 	});
 }
-function loadFields(doctype) {
-	if (!fieldsCache.has(doctype)) {
-		const p = fetchFields(doctype);
-		p.catch(() => fieldsCache.delete(doctype));
-		fieldsCache.set(doctype, p);
+function loadFields(q) {
+	const key = JSON.stringify([q.doctype, q.parent || "", q.parentfield || ""]);
+	if (!fieldsCache.has(key)) {
+		const p = fetchFields(q);
+		p.catch(() => fieldsCache.delete(key));
+		fieldsCache.set(key, p);
 	}
-	return fieldsCache.get(doctype);
+	return fieldsCache.get(key);
 }
-const fieldKey = (q) => `${q.doctype}\n${q.fieldname}`;
-const fieldMeta = ref({}); // "doctype\nfieldname" -> "loading" | "failed" | meta field
+const fieldKey = (q) =>
+	JSON.stringify([q.doctype, q.fieldname, q.parent || "", q.parentfield || ""]);
+const fieldMeta = ref({}); // field/context tuple -> "loading" | "failed" | meta field
 watch(
 	() => props.spec,
 	(spec) => {
@@ -231,7 +242,7 @@ watch(
 			const key = fieldKey(q);
 			if (q.type !== "field" || fieldMeta.value[key]) continue;
 			fieldMeta.value = { ...fieldMeta.value, [key]: "loading" };
-			loadFields(q.doctype)
+			loadFields(q)
 				.then((fields) => fields.find((f) => f.fieldname === q.fieldname) || "failed")
 				.catch(() => "failed")
 				.then((m) => (fieldMeta.value = { ...fieldMeta.value, [key]: m }));
@@ -240,7 +251,7 @@ watch(
 	{ immediate: true }
 );
 // The question as drawn: a field question becomes the control its meta calls for.
-function drawn(q) {
+function drawn(q, i) {
 	if (q.type !== "field") return q;
 	const m = fieldMeta.value[fieldKey(q)];
 	const base = {
@@ -250,13 +261,30 @@ function drawn(q) {
 	};
 	if (m === "loading" || !m) return { ...base, type: "loading" };
 	if (m === "failed") return { ...base, type: "text" };
+	if (link.value[i]?.filterError)
+		return { ...base, type: "text", filterError: link.value[i].filterError };
 	const [control, opts] = controlFor(m.fieldtype, m.options);
 	if (control === "select") {
 		const options = opts.filter(Boolean);
 		return options.length ? { ...base, type: "select", options } : { ...base, type: "text" };
 	}
 	if (control === "link") {
-		return opts ? { ...base, type: "link", doctype: opts } : { ...base, type: "text" };
+		try {
+			resolveLinkFilters(m, {}, null);
+		} catch (e) {
+			if (e instanceof DraftLinkFilterError)
+				return { ...base, type: "text", filterError: e.message };
+			throw e;
+		}
+		return opts
+			? {
+					...base,
+					type: "link",
+					doctype: opts,
+					linkField: m,
+					referenceDoctype: q.parent || q.doctype,
+			  }
+			: { ...base, type: "text" };
 	}
 	if (control === "check") return { ...base, type: "yesno", options: [] };
 	if (control === "date" || control === "datetime") return { ...base, type: control };
@@ -265,28 +293,102 @@ function drawn(q) {
 }
 const questions = computed(() => props.spec.questions.map(drawn));
 const ready = computed(() => isAskReady({ questions: questions.value }, sel.value, other.value));
+const linkSeq = {};
+watch(
+	() => props.spec.questions.map((q) => JSON.stringify([q.type, fieldKey(q)])),
+	(keys, previous) => {
+		keys.forEach((key, i) => {
+			if (key === previous[i]) return;
+			linkSeq[i] = (linkSeq[i] || 0) + 1;
+			sel.value = { ...sel.value, [i]: "" };
+			link.value = { ...link.value, [i]: {} };
+		});
+	}
+);
 
 async function onLinkSearch(i, doctype, val) {
-	link.value = { ...link.value, [i]: { ...(link.value[i] || {}), q: val, open: true } };
+	if (answered.value) return;
+	const seq = (linkSeq[i] = (linkSeq[i] || 0) + 1);
+	const q = questions.value[i];
+	if (val !== sel.value[i]) sel.value = { ...sel.value, [i]: "" };
+	link.value = { ...link.value, [i]: { q: val, items: [], open: true, pending: !!doctype } };
 	if (!doctype) return;
 	try {
-		const r = await searchLink(doctype, val);
+		const filters = q.linkField ? resolveLinkFilters(q.linkField, {}, null) : [];
+		// Preserve the existing lookup for a parentless field with no constraints.
+		const r =
+			q.linkField && (q.parent || filters.length)
+				? await searchLink(doctype, val, 8, q.referenceDoctype, q.fieldname, filters)
+				: await searchLink(doctype, val);
+		if (seq !== linkSeq[i]) return;
 		const items = (r || [])
 			.map((x) => ({ value: x.value, label: x.description || "" }))
 			.slice(0, 8);
 		link.value = { ...link.value, [i]: { q: val, items, open: true } };
 	} catch (e) {
-		link.value = { ...link.value, [i]: { q: val, items: [], open: true } };
+		if (seq !== linkSeq[i]) return;
+		link.value = {
+			...link.value,
+			[i]: {
+				q: val,
+				items: [],
+				open: true,
+				...(e instanceof DraftLinkFilterError ? { filterError: e.message } : {}),
+			},
+		};
 	}
 }
-function pickLink(i, item) {
+// Focus moves between the input and the suggestions of ONE question stay inside
+// the widget; only a move out of it (or to nothing) closes the menu.
+const linkWrap = (e) => e.currentTarget.closest(".jv-ask-link");
+const insideLink = (e) => !!e.relatedTarget && !!linkWrap(e)?.contains(e.relatedTarget);
+// Our own focus restore must not look like the user focusing the field (that
+// would start a lookup).
+let restoringFocus = false;
+function restoreInputFocus(e) {
+	const input = linkWrap(e)?.querySelector("input");
+	if (!input) return;
+	restoringFocus = true;
+	try {
+		input.focus();
+	} finally {
+		restoringFocus = false;
+	}
+}
+function onLinkFocus(i, doctype, e) {
+	if (restoringFocus || insideLink(e)) return;
+	onLinkSearch(i, doctype, (link.value[i] && link.value[i].q) || "");
+}
+function onLinkLeave(i, e) {
+	if (insideLink(e)) return;
+	closeLink(i);
+}
+// Escape closes an open (or still loading) dropdown and nothing else, so the
+// host's own Escape handling still runs when there is nothing to close.
+function onLinkEscape(i, e) {
+	const cur = link.value[i];
+	if (answered.value || !cur || !cur.open || !(cur.pending || (cur.items || []).length)) return;
+	e.preventDefault();
+	e.stopPropagation();
+	restoreInputFocus(e);
+	closeLink(i);
+}
+// A pointer pick fires mousedown then click; the second finds the menu already
+// closed and does nothing. Keyboard Enter/Space only produces the click.
+function pickLink(i, item, e) {
+	const cur = link.value[i];
+	if (!cur || !cur.open || !(cur.items || []).includes(item)) return;
+	// Move focus back to the input BEFORE the focused suggestion is removed.
+	restoreInputFocus(e);
+	linkSeq[i] = (linkSeq[i] || 0) + 1;
 	sel.value = { ...sel.value, [i]: item.value };
 	link.value = { ...link.value, [i]: { q: item.value, items: [], open: false } };
 }
-// Hide the record dropdown when the field loses focus (clicking elsewhere on
-// the screen / tabbing away). @mousedown.prevent on the result buttons lets a
-// pick land before the blur fires.
+// Hide the record dropdown when focus leaves the field and its suggestions
+// (clicking elsewhere on the screen / tabbing away). @mousedown.prevent on the
+// result buttons lets a pointer pick land before the blur fires.
 function closeLink(i) {
+	linkSeq[i] = (linkSeq[i] || 0) + 1;
 	const cur = link.value[i];
 	if (cur && cur.open) link.value = { ...link.value, [i]: { ...cur, open: false } };
 }
