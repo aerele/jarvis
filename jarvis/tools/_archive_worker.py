@@ -8,6 +8,7 @@ import sys
 
 
 def main():
+	resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 	resource.setrlimit(resource.RLIMIT_CPU, (16, 16))
 	if sys.platform.startswith("linux"):
 		resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))

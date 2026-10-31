@@ -38,19 +38,22 @@ def resolve_file(file_url=None, filename=None, file_id=None):
 			file_url = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 	if file_id:
 		try:
-			doc = frappe.get_doc("File", file_id)
+			doc = frappe.get_cached_doc("File", file_id)
 		except frappe.DoesNotExistError:
 			raise PermissionDeniedError(MISSING) from None
 		if (file_url and file_url != doc.file_url) or (filename and filename != doc.file_name):
 			raise PermissionDeniedError(MISSING)
 		return doc
 	if file_url:
-		matches = frappe.get_all("File", filters={"file_url": file_url}, pluck="name", limit=2)
-		if len(matches) != 1:
-			raise PermissionDeniedError(
-				"Use the current attachment reference. No matching file is available."
+		try:
+			matches = frappe.get_list(
+				"File", filters={"file_url": file_url}, pluck="name", limit_page_length=2
 			)
-		return frappe.get_doc("File", matches[0])
+		except frappe.PermissionError:
+			raise PermissionDeniedError(MISSING) from None
+		if len(matches) != 1:
+			raise PermissionDeniedError(MISSING)
+		return frappe.get_cached_doc("File", matches[0])
 	# Keep the existing plain-file filename convenience, but no archive guessing.
 	from jarvis.tools.read_file import _resolve_file
 

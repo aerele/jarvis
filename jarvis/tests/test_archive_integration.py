@@ -51,6 +51,8 @@ class TestArchiveIntegration(unittest.TestCase):
 			frappe.set_user(user.name)
 			source = save_file("bank-" + tag + ".zip", content, None, None, is_private=1)
 			created.append(("File", source.name))
+			with patch.dict(frappe.conf, {"jarvis_archive_reading_enabled": True}):
+				self.assertEqual(query_file(file_url=source.file_url)["read_contract"], "archive-manifest-v1")
 			duplicate = save_file("copy-" + tag + ".zip", content, None, None, is_private=1)
 			created.append(("File", duplicate.name))
 			self.assertEqual(source.file_url, duplicate.file_url)  # Actual Frappe deduplication.

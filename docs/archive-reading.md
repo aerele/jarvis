@@ -44,3 +44,21 @@ Preserve exact File IDs in ordinary and shared chat attachments. A URL shared by
 Keep archives off if an old plugin/backend pair drops scope arguments, if required capabilities are absent, or if supported-runtime checks are incomplete. A rollback must restore the matching backend/plugin pair. Shared XLSX integrity hardening is a separate change from the archive key.
 
 Local evidence is recorded in the implementation work area. Native Frappe 15 execution, representative Microsoft Excel/LibreOffice/Google exports, and full model-driven chat journeys still need release verification. These gaps do not permit a production-ready claim.
+
+## Integrity and retention review
+
+The internal XLSX stream validator also runs on ordinary Excel reads while the
+archive switch is off. This closes a stream-truncation defect; disabling it would
+restore that defect. It is a separate rollout concern from ZIP/GZ enablement.
+The validator also limits a workbook to 4,096 ZIP entries. This is a resource
+ceiling, not a statement that every valid workbook has fewer parts. Representative
+Office export checks remain required; no permissive integrity fallback is used.
+
+All source workers disable core dumps before reading input. The 512 MiB
+address-space cap applies on Linux. macOS does not provide the same address-space
+guarantee. See `source-reading-retention.md` for new tool-receipt minimization,
+re-query behavior, historic records, and native-runner limitations.
+
+URL-only lookup uses Frappe's permission-aware File listing. Exact attachment File
+IDs remain the preferred reference, including native prepared-report handoff.
+Missing, ambiguous, and unreadable URL references use the same denial text.
