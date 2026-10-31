@@ -229,8 +229,7 @@ def dispatch_one(ctx, turn):
 			ctx,
 			turn,
 			binding,
-			retry_allowed=isinstance(exc, AgentUnreachableError)
-			and exc.code not in ("INVALID_REQUEST", SITE_IS_COPY_CODE),
+			retry_allowed=isinstance(exc, AgentUnreachableError) and exc.code != "INVALID_REQUEST",
 		)
 
 	rs = pump._RunState(

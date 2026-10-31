@@ -996,3 +996,72 @@ ENDPOINTS.update(
 		},
 	}
 )
+
+# Actor-aware shared endpoints retain the generic escalation/value sweep.
+ENDPOINTS.update(
+	{
+		"jarvis.chat.collaboration_access.get_access": {
+			"arguments": {"conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_access.set_access": {
+			"arguments": {"access_mode": "Chat", "conversation": "$conversation", "user": "$outsider"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_access.set_recipients": {
+			"arguments": {
+				"conversation": "$conversation",
+				"recipients": [{"access_mode": "Chat", "user": "$outsider"}],
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_actions.confirm_action": {
+			"arguments": {"action": "$pending_action", "conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_actions.discard_action": {
+			"arguments": {"action": "$pending_action", "conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.answer_question": {
+			"arguments": {"conversation": "$conversation", "decision": "yes", "question": "$approval"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.get_canvas": {
+			"arguments": {"message": "$message", "name": "artifact"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.get_conversation": {
+			"arguments": {"conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.get_file": {
+			"arguments": {"conversation": "$conversation", "file_url": "$file_url"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.get_tool_detail": {
+			"arguments": {"message": "$message"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.retry_run": {
+			"arguments": {"conversation": "$conversation", "run_id": "$run"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.send_message": {
+			"arguments": {
+				"conversation": "$conversation",
+				"message": "recipient request",
+				"request_id": "11111111-2222-4333-8444-555555555555",
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.stop_run": {
+			"arguments": {"conversation": "$conversation", "run_id": "$run"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.upload_file": {
+			"arguments": {"conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+	}
+)

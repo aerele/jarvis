@@ -38,7 +38,16 @@
   "finalizing_at",
   "done_at",
   "recovery_started_at",
-  "deadline_at"
+  "deadline_at",
+  "actor",
+  "collaboration_binding",
+  "collaboration_tools",
+  "collaboration_dispatches",
+  "collaboration_send_started_at",
+  "collaboration_executor",
+  "collaboration_recovery_checked_at",
+  "collaboration_retry_allowed",
+  "collaboration_usage_unavailable"
  ],
  "fields": [
   {
@@ -194,7 +203,7 @@
    "label": "Usage Recorded",
    "default": "0",
    "no_copy": 1,
-   "description": "(turn_id) idempotency guard for token-usage accrual (R-4 / §10.7): CAS 0->1 in finalize so a finalize replay can never double-count the soft monthly cap. The naked += is retired; usage is a fenced once-only enrichment effect."
+   "description": "(turn_id) idempotency guard for token-usage accrual (R-4 / \u00a710.7): CAS 0->1 in finalize so a finalize replay can never double-count the soft monthly cap. The naked += is retired; usage is a fenced once-only enrichment effect."
   },
   {
    "fieldname": "enriched_published",
@@ -294,6 +303,85 @@
    "label": "Deadline At",
    "search_index": 1,
    "description": "Per-turn soft deadline (dispatch time + TURN_TIMEOUT_SECONDS=600); the stale-scan sweeper marks recovering/errored past it (D2 #27)."
+  },
+  {
+   "fieldname": "actor",
+   "fieldtype": "Data",
+   "label": "Initiating Actor",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "collaboration_binding",
+   "fieldtype": "Link",
+   "label": "Collaboration Binding",
+   "read_only": 1,
+   "no_copy": 1,
+   "options": "Jarvis Chat Binding",
+   "hidden": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "collaboration_tools",
+   "fieldtype": "Long Text",
+   "label": "Observed Collaboration Tool Calls",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "collaboration_dispatches",
+   "fieldtype": "Long Text",
+   "label": "Collaboration Tool Dispatch Claims",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "collaboration_send_started_at",
+   "fieldtype": "Datetime",
+   "label": "Collaboration Gateway Send Started",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "collaboration_executor",
+   "fieldtype": "Select",
+   "options": "\nrq\npump",
+   "label": "Collaboration Executor",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "collaboration_recovery_checked_at",
+   "fieldtype": "Datetime",
+   "label": "Collaboration Recovery Checked",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "collaboration_retry_allowed",
+   "fieldtype": "Check",
+   "label": "Collaboration Retry Allowed",
+   "default": "0",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "collaboration_usage_unavailable",
+   "fieldtype": "Check",
+   "label": "Collaboration Usage Unavailable",
+   "description": "The bounded meter retry budget ended without trustworthy counters; no charge was invented.",
+   "default": "0",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1
   }
  ],
  "index_web_pages_for_search": 0,
