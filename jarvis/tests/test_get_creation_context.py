@@ -1,25 +1,11 @@
-import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools.get_creation_context import _LAYOUT_FIELDTYPES as _LAYOUT
-from jarvis.tools.get_creation_context import _doctype_for_key, get_creation_context
-
-
-class TestSourceDocTypeKey(unittest.TestCase):
-	def test_context_keys_use_the_stored_doctype_spelling(self):
-		for key, canonical in (("bill_of_entry", "Bill of Entry"), ("bom", "BOM")):
-			with self.subTest(key=key), patch("frappe.db", Mock()) as db:
-				db.exists.return_value = canonical
-				self.assertEqual(_doctype_for_key(key), canonical)
-
-	def test_unknown_context_key_is_not_a_source(self):
-		with patch("frappe.db", Mock()) as db:
-			db.exists.return_value = None
-			self.assertIsNone(_doctype_for_key("unknown_document"))
+from jarvis.tools.get_creation_context import get_creation_context
 
 
 def _todo(description, **kw):

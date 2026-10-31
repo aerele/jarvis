@@ -77,8 +77,7 @@ def preview_doc(doctype: str, values: dict) -> dict:
 	``{valid, resolved, server_filled, empty_fields, items_count, totals}``; a
 	document its own validation rejects returns ``{valid: false, error}`` instead
 	of raising. Use before ``create_doc`` on consequential documents (invoices,
-	orders). This checks draft-save validation, not submit-only conditions. Use
-	preview_landed_cost_voucher for source-backed LCV allocation reconciliation.
+	orders).
 	"""
 	# A structure change is refused before any dry run (round 2): it is set up in
 	# Desk, and its trial would only reach Frappe's implicit-commit refusal.

@@ -249,9 +249,7 @@ def _doctype_for_key(key: str) -> str | None:
 	if not key or not isinstance(key, str):
 		return None
 	guess = key.replace("_", " ").title()
-	# On MariaDB DocType lookup is case-insensitive; use the stored spelling for its table
-	# and mapper ("Bill of Entry", "BOM"), not the title-cased context key.
-	return frappe.db.exists("DocType", guess) or None
+	return guess if frappe.db.exists("DocType", guess) else None
 
 
 def _mapped_from_context(target_doctype: str, context: dict) -> tuple:

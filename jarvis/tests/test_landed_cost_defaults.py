@@ -75,7 +75,7 @@ class LandedCostFixtures(FrappeTestCase):
 			values["gst_hsn_code"] = hsn
 		return frappe.get_doc(values).insert().name
 
-	@patch.object(frappe, "in_test", False)
+	@patch.dict(frappe.flags, in_test=False)
 	def setUp(self):
 		frappe.set_user("Administrator")
 		# Fixture PR/PI payment-term setup passes native date objects to an RPC
@@ -105,7 +105,7 @@ class LandedCostFixtures(FrappeTestCase):
 		frappe.db.rollback(save_point="lcv_defaults_test")
 		frappe.clear_cache()
 
-	@patch.object(frappe, "in_test", False)
+	@patch.dict(frappe.flags, in_test=False)
 	def make_invoice(self, rate, currency="INR", conversion_rate=1):
 		invoice = frappe.get_doc(
 			{
@@ -342,7 +342,7 @@ class TestLandedCostDefaults(LandedCostFixtures):
 	def test_a_draft_invoice_is_not_a_derivable_cost(self):
 		frappe.set_user("Administrator")
 		self.invoice.cancel()
-		with patch.object(frappe, "in_test", False):
+		with patch.dict(frappe.flags, in_test=False):
 			amendment = frappe.copy_doc(self.invoice, ignore_no_copy=False)
 			amendment.amended_from = self.invoice.name
 			amendment.insert()
