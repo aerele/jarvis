@@ -221,6 +221,132 @@ class TestCycleCountConfiguration(FrappeTestCase):
 
 
 class TestCycleCountCollection(FrappeTestCase):
+	@staticmethod
+	def _bin(index, *, item_code=None):
+		item_code = item_code or f"ITEM-{index:05d}"
+		return {
+			"name": f"BIN-{index:05d}",
+			"item_code": item_code,
+			"warehouse": "WH-A",
+			"actual_qty": 5,
+			"stock_value": 100,
+			"valuation_rate": 20,
+		}
+
+	@staticmethod
+	def _item(index):
+		return {
+			"name": f"ITEM-{index:05d}",
+			"is_stock_item": 1,
+			"disabled": 0,
+			"end_of_life": None,
+			"stock_uom": "Nos",
+			"has_batch_no": 0,
+			"has_serial_no": 0,
+		}
+
+	@staticmethod
+	def _ledger(index, *, item_code="ITEM-00000"):
+		return {
+			"name": f"SLE-{index:05d}",
+			"item_code": item_code,
+			"warehouse": "WH-A",
+			"company": "Example",
+			"posting_date": "2026-09-20",
+			"posting_time": "09:00:00",
+			"actual_qty": -1,
+			"voucher_type": "Delivery Note",
+			"voucher_no": f"DN-{index:05d}",
+			"is_cancelled": 0,
+		}
+
+	@staticmethod
+	def _count(name, counted_at):
+		return {
+			"name": name,
+			"company": "Example",
+			"warehouse": "WH-A",
+			"counted_at": counted_at,
+			"approval_request": None,
+			"docstatus": 1,
+		}
+
+	@staticmethod
+	def _count_item(parent, index):
+		return {
+			"name": f"{parent}-ITEM-{index:05d}",
+			"parent": parent,
+			"item_code": "ITEM-00000",
+			"counted_qty": 1,
+			"stock_uom": "Nos",
+			"batch_detail_recorded": 0,
+		}
+
+	@staticmethod
+	def _matches_filters(row, filters):
+		if isinstance(filters, dict):
+			conditions = []
+			for field, value in filters.items():
+				if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
+					conditions.append([field, value[0], value[1]])
+				else:
+					conditions.append([field, "=", value])
+		else:
+			conditions = filters
+		for field, operator, expected in conditions:
+			actual = row.get(field)
+			if operator == "=" and actual != expected:
+				return False
+			if operator == "in" and actual not in expected:
+				return False
+			if operator == "between" and not expected[0] <= actual <= expected[1]:
+				return False
+			if operator == ">" and not actual > expected:
+				return False
+			if operator == ">=" and not actual >= expected:
+				return False
+			if operator == "<" and not actual < expected:
+				return False
+		return True
+
+	@contextmanager
+	def _collection_mocks(self, sources, queries):
+		company = MagicMock(default_currency="INR")
+		company.apply_fieldlevel_read_permissions.return_value = None
+		warehouse = MagicMock(company="Example", is_group=0, disabled=0)
+
+		def get_list(doctype, *, fields, filters, order_by, limit, **options):
+			queries.append(
+				{
+					"doctype": doctype,
+					"fields": fields,
+					"filters": filters,
+					"order_by": order_by,
+					"limit": limit,
+					**options,
+				}
+			)
+			rows = [
+				{field: row[field] for field in fields}
+				for row in sources.get(doctype, [])
+				if self._matches_filters(row, filters)
+			]
+			rows.sort(key=lambda row: row["name"])
+			return rows[:limit]
+
+		with (
+			patch.object(review.frappe, "get_doc", return_value=company),
+			patch.object(review, "_warehouse", return_value=warehouse),
+			patch.object(review.frappe, "has_permission", return_value=True) as permissions,
+			patch.object(review.frappe, "get_list", side_effect=get_list),
+		):
+			yield permissions
+
+	def _collect_sources(self, sources, queries):
+		policy = launch_config()
+		with self._collection_mocks(sources, queries):
+			return review.collect(review.scope_from_config(policy), policy)
+
 	def test_collector_keeps_raw_negative_movement_and_exact_stock_entry_headers_private(self):
 		company = MagicMock(default_currency="INR")
 		company.apply_fieldlevel_read_permissions.return_value = None
@@ -304,6 +430,293 @@ class TestCycleCountCollection(FrappeTestCase):
 			captured["source_counts"],
 			{"Bin": 1, "Item": 1, "Stock Ledger Entry": 2, "Stock Entry": 1, "Jarvis Physical Count": 0},
 		)
+
+	def test_collector_keeps_an_exact_500_bin_source_complete(self):
+		sources = {
+			"Bin": [self._bin(index) for index in range(500)],
+			"Item": [self._item(index) for index in range(500)],
+		}
+		queries = []
+
+		captured = self._collect_sources(sources, queries)
+
+		self.assertTrue(captured["complete"])
+		self.assertEqual(len(captured["datasets"]["bins"]), 500)
+		self.assertEqual(captured["source_counts"]["Bin"], 500)
+		bin_queries = [query for query in queries if query["doctype"] == "Bin"]
+		self.assertEqual(len(bin_queries), 1)
+		self.assertEqual(bin_queries[0]["filters"], [["warehouse", "=", "WH-A"]])
+		self.assertEqual(bin_queries[0]["order_by"], "name asc")
+		self.assertEqual(bin_queries[0]["limit"], review.SOURCE_PAGE_SIZE + 1)
+		body = review._private_output.canonical_bytes({"rows": [captured]})
+		self.assertLessEqual(len(body), review._private_output.MAX_BYTES)
+		wire, receipt = review._private_output.prepare(
+			{"ok": True, "data": {"rows": [captured]}}, tool="get_cycle_count_inputs"
+		)
+		self.assertEqual(wire["data"].encode(), body)
+		self.assertEqual(receipt["data"]["bytes"], len(body))
+
+	def test_collector_reads_501_bins_with_a_stable_second_page(self):
+		sources = {
+			"Bin": [self._bin(index) for index in range(501)],
+			"Item": [self._item(index) for index in range(501)],
+		}
+		queries = []
+
+		captured = self._collect_sources(sources, queries)
+
+		self.assertTrue(captured["complete"])
+		self.assertEqual(len(captured["datasets"]["bins"]), 501)
+		self.assertEqual(captured["source_counts"]["Bin"], 501)
+		bin_queries = [query for query in queries if query["doctype"] == "Bin"]
+		self.assertEqual(len(bin_queries), 2)
+		self.assertEqual(bin_queries[1]["filters"], [["warehouse", "=", "WH-A"], ["name", ">", "BIN-00499"]])
+		self.assertIsNone(
+			review.validate_envelope(
+				frappe._dict(input_snapshot_json=frappe.as_json(captured)),
+				True,
+				False,
+				sum(captured["source_counts"].values()),
+			)
+		)
+
+	def test_collector_accepts_more_than_twenty_thousand_compact_ledger_rows(self):
+		sources = {
+			"Bin": [self._bin(0)],
+			"Item": [self._item(0)],
+			"Stock Ledger Entry": [self._ledger(index) for index in range(20_001)],
+		}
+		queries = []
+
+		captured = self._collect_sources(sources, queries)
+
+		self.assertTrue(captured["complete"])
+		self.assertEqual(len(captured["datasets"]["ledger"]), 20_001)
+		self.assertEqual(captured["source_counts"]["Stock Ledger Entry"], 20_001)
+		ledger_queries = [query for query in queries if query["doctype"] == "Stock Ledger Entry"]
+		self.assertEqual(len(ledger_queries), 41)
+		self.assertEqual(
+			ledger_queries[1]["filters"],
+			[
+				["company", "=", "Example"],
+				["warehouse", "in", ["WH-A"]],
+				["posting_date", "between", ["2026-08-01", "2026-10-05"]],
+				["actual_qty", "<", 0],
+				["is_cancelled", "=", 0],
+				["name", ">", "SLE-00499"],
+			],
+		)
+		self.assertLessEqual(
+			len(review._private_output.canonical_bytes({"rows": [captured]})),
+			review._private_output.MAX_BYTES,
+		)
+
+	def test_collector_pages_physical_count_headers(self):
+		headers = [self._count(f"COUNT-{index:05d}", "2026-10-04 10:00:00") for index in range(501)]
+		sources = {
+			"Bin": [self._bin(0)],
+			"Item": [self._item(0)],
+			"Jarvis Physical Count": headers,
+			"Jarvis Physical Count Item": [self._count_item(header["name"], 0) for header in headers],
+		}
+		queries = []
+
+		captured = self._collect_sources(sources, queries)
+
+		self.assertTrue(captured["complete"])
+		self.assertEqual(captured["source_counts"]["Jarvis Physical Count"], 501)
+		header_queries = [query for query in queries if query["doctype"] == "Jarvis Physical Count"]
+		self.assertEqual(len(header_queries), 2)
+		self.assertEqual(
+			header_queries[1]["filters"],
+			[
+				["company", "=", "Example"],
+				["warehouse", "in", ["WH-A"]],
+				["docstatus", "=", 1],
+				["counted_at", ">=", "2025-10-05"],
+				["name", ">", "COUNT-00499"],
+			],
+		)
+
+	def test_collector_pages_child_rows_with_parent_access_and_restores_count_order(self):
+		sources = {
+			"Bin": [self._bin(0)],
+			"Item": [self._item(0)],
+			"Jarvis Physical Count": [
+				self._count("COUNT-A", "2026-10-04 10:00:00"),
+				self._count("COUNT-B", "2026-10-03 10:00:00"),
+			],
+			"Jarvis Physical Count Item": [
+				*self._count_items("COUNT-A", 501),
+				self._count_item("COUNT-B", 0),
+			],
+		}
+		queries = []
+		policy = launch_config()
+		with self._collection_mocks(sources, queries) as permissions:
+			captured = review.collect(review.scope_from_config(policy), policy)
+
+		self.assertTrue(captured["complete"])
+		self.assertEqual(
+			[row["name"] for row in captured["datasets"]["physical_counts"]], ["COUNT-B", "COUNT-A"]
+		)
+		self.assertEqual(captured["datasets"]["physical_count_items"][0]["parent"], "COUNT-B")
+		child_queries = [query for query in queries if query["doctype"] == "Jarvis Physical Count Item"]
+		self.assertEqual(len(child_queries), 3)
+		self.assertEqual(child_queries[1]["parent_doctype"], "Jarvis Physical Count")
+		self.assertEqual(child_queries[1]["filters"], [["parent", "=", "COUNT-A"]])
+		self.assertEqual(
+			child_queries[2]["filters"],
+			[["parent", "=", "COUNT-A"], ["name", ">", "COUNT-A-ITEM-00499"]],
+		)
+		self.assertIn(
+			(("Jarvis Physical Count Item", "read"), {"parent_doctype": "Jarvis Physical Count"}),
+			[(call.args, call.kwargs) for call in permissions.call_args_list],
+		)
+		first = captured["source_digest"]
+		second = self._collect_sources(sources, [])
+		self.assertEqual(first, second["source_digest"])
+
+	def test_invalid_cursor_and_query_failures_are_small_incomplete_snapshots(self):
+		bins = [self._bin(index, item_code="RAW-CURSOR-MARKER") for index in range(501)]
+		company = MagicMock(default_currency="INR")
+		company.apply_fieldlevel_read_permissions.return_value = None
+		warehouse = MagicMock(company="Example", is_group=0, disabled=0)
+		queries = []
+
+		def repeated_page(doctype, **kwargs):
+			if doctype != "Bin":
+				return []
+			queries.append(kwargs)
+			return bins if len(queries) == 1 else [bins[0]]
+
+		policy = launch_config()
+		with (
+			patch.object(review.frappe, "get_doc", return_value=company),
+			patch.object(review, "_warehouse", return_value=warehouse),
+			patch.object(review.frappe, "has_permission", return_value=True),
+			patch.object(review.frappe, "get_list", side_effect=repeated_page),
+		):
+			captured = review.collect(review.scope_from_config(policy), policy)
+
+		self.assertFalse(captured["complete"])
+		self.assertEqual(captured["reason_code"], "source_page_invalid")
+		self.assertEqual(captured["datasets"], {})
+		self.assertEqual(captured["source_counts"], {})
+		self.assertNotIn("RAW-CURSOR-MARKER", frappe.as_json(captured))
+		self.assertEqual(queries[1]["filters"][-1], ["name", ">", "BIN-00499"])
+
+		with self._collection_mocks({}, []) as _permissions:
+			with patch.object(review.frappe, "get_list", side_effect=RuntimeError("database unavailable")):
+				query_failure = review.collect(review.scope_from_config(policy), policy)
+		self.assertFalse(query_failure["complete"])
+		self.assertEqual(query_failure["reason_code"], "source_page_invalid")
+		self.assertEqual(query_failure["datasets"], {})
+		self.assertEqual(query_failure["source_counts"], {})
+
+	def test_time_and_byte_limits_do_not_persist_raw_input_or_stage_a_plan(self):
+		sources = {"Bin": [self._bin(0, item_code="RAW-CAPACITY-MARKER")], "Item": [self._item(0)]}
+		policy = launch_config()
+		queries = []
+		with self._collection_mocks(sources, queries):
+			with patch.object(review.time, "monotonic", side_effect=[0, 0, 0, review.MAX_SECONDS + 1]):
+				time_limited = review.collect(review.scope_from_config(policy), policy)
+		self.assertFalse(time_limited["complete"])
+		self.assertEqual(time_limited["reason_code"], "source_time_limit")
+		self.assertEqual(time_limited["datasets"], {})
+		self.assertEqual(time_limited["source_counts"], {})
+
+		state = frappe._dict(agent=review.AGENT, status="running", input_snapshot_json=None)
+		run = frappe._dict(
+			name="RUN-CYCLE-CAPACITY",
+			assessment_config_json=frappe.as_json(policy),
+			scope_json=frappe.as_json(review.scope_from_config(policy)),
+		)
+		with (
+			self._collection_mocks(sources, []),
+			patch.object(review._private_output, "MAX_BYTES", 1),
+			patch.object(frappe.db, "get_value", return_value=state),
+			patch.object(frappe.db, "set_value") as persist,
+		):
+			byte_limited = operator_review.get_inputs(run, review)
+
+		self.assertFalse(byte_limited["complete"])
+		self.assertEqual(byte_limited["reason_code"], "source_capacity_limit")
+		self.assertEqual(byte_limited["datasets"], {})
+		self.assertEqual(byte_limited["source_counts"], {})
+		self.assertNotIn("RAW-CAPACITY-MARKER", frappe.as_json(byte_limited))
+		persisted = persist.call_args.args[3]
+		self.assertNotIn("RAW-CAPACITY-MARKER", persisted)
+		coverage = {review.TOKEN: {"state": "evaluated"}}
+		findings, returned_coverage, ready = review.validate_output(
+			frappe._dict(input_snapshot_json=persisted),
+			[],
+			coverage,
+			byte_limited["scope"],
+			review.digest(
+				{
+					"input_digest": byte_limited["source_digest"],
+					"scope": byte_limited["scope"],
+					"findings": [],
+					"coverage": coverage,
+				}
+			),
+		)
+		self.assertEqual(findings, [])
+		self.assertEqual(returned_coverage[review.TOKEN]["reason_code"], "source_capacity_limit")
+		self.assertFalse(ready)
+
+	def test_capture_metadata_byte_boundary_never_persists_raw_source(self):
+		sources = {
+			"Bin": [self._bin(0, item_code="RAW-METADATA-MARKER")],
+			"Item": [{**self._item(0), "name": "RAW-METADATA-MARKER"}],
+		}
+		captured = self._collect_sources(sources, [])
+		self.assertTrue(captured["complete"])
+		pre_capture_bytes = len(review._private_output.canonical_bytes({"rows": [captured]}))
+		state = frappe._dict(agent=review.AGENT, status="running", input_snapshot_json=None)
+		policy = launch_config()
+		run = frappe._dict(
+			name="RUN-CYCLE-METADATA-BOUNDARY",
+			assessment_config_json=frappe.as_json(policy),
+			scope_json=frappe.as_json(review.scope_from_config(policy)),
+		)
+
+		with (
+			self._collection_mocks(sources, []),
+			patch.object(review._private_output, "MAX_BYTES", pre_capture_bytes),
+			patch.object(frappe.utils, "now", return_value="2026-10-05 12:00:00"),
+			patch.object(frappe.db, "get_value", return_value=state),
+			patch.object(frappe.db, "set_value") as persist,
+		):
+			bounded = operator_review.get_inputs(run, review)
+
+		self.assertFalse(bounded["complete"])
+		self.assertEqual(bounded["reason_code"], "source_capacity_limit")
+		self.assertEqual(bounded["datasets"], {})
+		self.assertEqual(bounded["source_counts"], {})
+		self.assertNotIn("captured_at", bounded)
+		self.assertNotIn("captured_by", bounded)
+		self.assertEqual(
+			bounded["source_digest"],
+			review.digest({key: value for key, value in bounded.items() if key != "source_digest"}),
+		)
+		persisted = persist.call_args.args[3]
+		self.assertNotIn("RAW-METADATA-MARKER", persisted)
+		state.input_snapshot_json = persisted
+		with (
+			patch.object(frappe.db, "get_value", return_value=state),
+			patch.object(frappe.db, "set_value") as second_persist,
+			patch.object(review, "collect") as recollect,
+		):
+			retried = operator_review.get_inputs(run, review)
+		self.assertEqual(retried, bounded)
+		recollect.assert_not_called()
+		second_persist.assert_not_called()
+
+	@staticmethod
+	def _count_items(parent, count):
+		return [TestCycleCountCollection._count_item(parent, index) for index in range(count)]
 
 
 class TestCycleCountOutput(FrappeTestCase):

@@ -12,11 +12,13 @@ import time
 from contextlib import contextmanager
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+from itertools import pairwise
 
 import frappe
 from frappe.database import get_db
 
 from jarvis.chat.purchase_match import digest
+from jarvis.tools import _private_output
 
 AGENT = "cycle-count-planner-operator"
 TOKEN = "ccp-plan-v1"
@@ -26,8 +28,7 @@ REVIEW_QUESTION = (
 	"post stock, submit a reconciliation, or change inventory."
 )
 MAX_WAREHOUSES = 10
-MAX_BIN_ROWS = 500
-MAX_SOURCE_ROWS = 20_000
+SOURCE_PAGE_SIZE = 500
 MAX_SECONDS = 25
 MAX_OUTPUT_BYTES = 16 * 1024
 
@@ -87,6 +88,9 @@ PROPOSAL_KEYS = frozenset(
 # partial, but it must never be treated as an evaluated plan or stage a review.
 PRIVATE_INPUT_FAILURE_DETAIL = "The protected count-plan input could not be verified. Start a new run."
 SOURCE_SCHEMA_FAILURE_DETAIL = "The captured count-plan source is no longer compatible. Start a new run."
+SOURCE_CAPACITY_DETAIL = "The complete source does not fit the protected input limit. Start a new run."
+SOURCE_TIME_DETAIL = "The source collection time limit was reached. Start a new run."
+SOURCE_PAGE_DETAIL = "A source page could not be verified. Start a new run."
 LINE_KEYS = frozenset(
 	{
 		"item_code",
@@ -291,6 +295,44 @@ def _numbers(rows, fields: set[str]) -> list[dict]:
 	]
 
 
+def _seal(snapshot: dict) -> dict:
+	snapshot.pop("source_digest", None)
+	snapshot["source_digest"] = digest(snapshot)
+	return snapshot
+
+
+def _incomplete_snapshot(snapshot: dict, reason: str, detail: str) -> dict:
+	"""Remove captured rows before returning a typed incomplete source result."""
+	for key in ("currency", "source_digest", "captured_at", "captured_by"):
+		snapshot.pop(key, None)
+	snapshot.update(
+		complete=False,
+		datasets={},
+		source_counts={},
+		reason_code=reason,
+		detail=detail,
+	)
+	return _seal(snapshot)
+
+
+def enforce_private_input_envelope(snapshot: dict) -> dict:
+	"""Keep the complete source inside one protected private-input file.
+
+	``operator_review`` calls this again after it adds capture metadata and before
+	persistence. That later check closes the final write boundary without adding
+	capture metadata to the stable source digest.
+	"""
+	try:
+		body = _private_output.canonical_bytes({"rows": [snapshot]})
+	except (KeyboardInterrupt, SystemExit):
+		raise
+	except Exception:
+		return _incomplete_snapshot(snapshot, "source_capacity_limit", SOURCE_CAPACITY_DETAIL)
+	if len(body) > _private_output.MAX_BYTES:
+		return _incomplete_snapshot(snapshot, "source_capacity_limit", SOURCE_CAPACITY_DETAIL)
+	return snapshot
+
+
 @contextmanager
 def fresh_source_snapshot():
 	"""Bind one short-lived, fresh, read-only MariaDB snapshot.
@@ -339,7 +381,7 @@ def fresh_source_snapshot():
 
 
 def collect(scope: dict, config: dict) -> dict:
-	"""Read a bounded, permission-filtered source snapshot.
+	"""Read a permission-filtered source snapshot bounded by time and wire bytes.
 
 	The collector never compares a permission-filtered page with a direct database
 	count. A missing readable row fails the associated source rather than being
@@ -353,39 +395,75 @@ def collect(scope: dict, config: dict) -> dict:
 		"datasets": {},
 		"source_counts": {},
 	}
-	started, total = time.monotonic(), 0
+	started, source_row_bytes = time.monotonic(), 0
 
-	def rows(doctype, fields, filters, *, limit=MAX_SOURCE_ROWS, parent=None, order_by="name"):
-		nonlocal total
+	def at_time_limit():
+		return time.monotonic() - started > MAX_SECONDS
+
+	def page_filters(filters, cursor):
+		conditions = []
+		for field, value in filters.items():
+			if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
+				conditions.append([field, value[0], value[1]])
+			else:
+				conditions.append([field, "=", value])
+		if cursor is not None:
+			conditions.append(["name", ">", cursor])
+		return conditions
+
+	def rows(doctype, fields, filters, *, parent=None):
+		nonlocal source_row_bytes
 		if time.monotonic() - started > MAX_SECONDS:
-			raise EvidenceGap(
-				"run_truncated_watermark", "The evidence collection time limit was reached. Reduce the scope."
-			)
+			raise EvidenceGap("source_time_limit", SOURCE_TIME_DETAIL)
 		if not frappe.has_permission(doctype, "read", parent_doctype=parent):
 			raise frappe.PermissionError
 		options = {"parent_doctype": parent} if parent else {}
-		values = frappe.get_list(
-			doctype,
-			fields=list(fields),
-			filters=filters,
-			order_by=order_by,
-			limit=limit + 1,
-			**options,
-		)
-		if time.monotonic() - started > MAX_SECONDS:
-			raise EvidenceGap(
-				"run_truncated_watermark", "The evidence collection time limit was reached. Reduce the scope."
-			)
-		if len(values) > limit or total + len(values) > MAX_SOURCE_ROWS:
-			raise EvidenceGap(
-				"run_truncated_watermark",
-				"A source row limit was reached. Reduce the warehouse, date, or history scope.",
-			)
-		if any(set(row) != set(fields) for row in values):
-			raise frappe.PermissionError("Complete source rows and fields are required.")
-		total += len(values)
-		snapshot["source_counts"][doctype] = snapshot["source_counts"].get(doctype, 0) + len(values)
-		return json.loads(frappe.as_json(values))
+		collected, cursor = [], None
+		while True:
+			if at_time_limit():
+				raise EvidenceGap("source_time_limit", SOURCE_TIME_DETAIL)
+			try:
+				values = frappe.get_list(
+					doctype,
+					fields=list(fields),
+					filters=page_filters(filters, cursor),
+					order_by="name asc",
+					limit=SOURCE_PAGE_SIZE + 1,
+					**options,
+				)
+			except frappe.PermissionError:
+				raise
+			except (KeyboardInterrupt, SystemExit):
+				raise
+			except Exception as exc:
+				raise EvidenceGap("source_page_invalid", SOURCE_PAGE_DETAIL) from exc
+			if at_time_limit():
+				raise EvidenceGap("source_time_limit", SOURCE_TIME_DETAIL)
+			if not isinstance(values, list) or len(values) > SOURCE_PAGE_SIZE + 1:
+				raise EvidenceGap("source_page_invalid", SOURCE_PAGE_DETAIL)
+			if any(not isinstance(row, dict) or set(row) != set(fields) for row in values):
+				raise frappe.PermissionError("Complete source rows and fields are required.")
+			names = [row.get("name") for row in values]
+			if (
+				any(not isinstance(name, str) or not name for name in names)
+				or any(left >= right for left, right in pairwise(names))
+				or (cursor is not None and names and names[0] <= cursor)
+			):
+				raise EvidenceGap("source_page_invalid", SOURCE_PAGE_DETAIL)
+			page = values[:SOURCE_PAGE_SIZE]
+			try:
+				page = json.loads(frappe.as_json(page))
+				page_bytes = sum(len(_private_output.canonical_bytes(row)) + 1 for row in page)
+			except Exception as exc:
+				raise EvidenceGap("source_page_invalid", SOURCE_PAGE_DETAIL) from exc
+			if source_row_bytes + page_bytes > _private_output.MAX_BYTES:
+				raise EvidenceGap("source_capacity_limit", SOURCE_CAPACITY_DETAIL)
+			source_row_bytes += page_bytes
+			collected.extend(page)
+			snapshot["source_counts"][doctype] = snapshot["source_counts"].get(doctype, 0) + len(page)
+			if len(values) <= SOURCE_PAGE_SIZE:
+				return collected
+			cursor = names[SOURCE_PAGE_SIZE - 1]
 
 	try:
 		company = frappe.get_doc("Company", scope["company"])
@@ -400,7 +478,7 @@ def collect(scope: dict, config: dict) -> dict:
 
 		bins = []
 		for name in scope["warehouses"]:
-			bins.extend(rows("Bin", BIN_FIELDS, {"warehouse": name}, limit=MAX_BIN_ROWS))
+			bins.extend(rows("Bin", BIN_FIELDS, {"warehouse": name}))
 		if len({(row["warehouse"], row["item_code"]) for row in bins}) != len(bins):
 			raise EvidenceGap(
 				"unsupported_customisation",
@@ -451,8 +529,8 @@ def collect(scope: dict, config: dict) -> dict:
 				"docstatus": 1,
 				"counted_at": [">=", scope["count_history_from"]],
 			},
-			order_by="counted_at asc, name asc",
 		)
+		counts.sort(key=lambda row: (str(row.get("counted_at") or ""), row["name"]))
 		count_items = []
 		for header in counts:
 			items_for_header = rows(
@@ -476,29 +554,30 @@ def collect(scope: dict, config: dict) -> dict:
 			"physical_count_items": _numbers(count_items, {"counted_qty"}),
 		}
 		snapshot["complete"] = True
+		if at_time_limit():
+			raise EvidenceGap("source_time_limit", SOURCE_TIME_DETAIL)
+		_seal(snapshot)
+		bounded = enforce_private_input_envelope(snapshot)
+		if at_time_limit():
+			raise EvidenceGap("source_time_limit", SOURCE_TIME_DETAIL)
+		return bounded
 	except frappe.PermissionError:
-		snapshot.update(
-			datasets={},
-			reason_code="permission_slice",
-			detail=(
+		return _incomplete_snapshot(
+			snapshot,
+			"permission_slice",
+			(
 				"The execution user cannot read the complete warehouse, item, movement, and physical-count "
 				"evidence for this scope. Check read access and run again."
 			),
 		)
 	except (frappe.DoesNotExistError, frappe.ValidationError):
-		snapshot.update(
-			datasets={},
-			reason_code="configuration_missing",
-			detail="A selected warehouse or required source is no longer available. Check the configuration and run again.",
+		return _incomplete_snapshot(
+			snapshot,
+			"configuration_missing",
+			"A selected warehouse or required source is no longer available. Check the configuration and run again.",
 		)
 	except EvidenceGap as exc:
-		snapshot.update(datasets={}, reason_code=exc.reason, detail=exc.detail)
-	return _seal(snapshot)
-
-
-def _seal(snapshot: dict) -> dict:
-	snapshot["source_digest"] = digest(snapshot)
-	return snapshot
+		return _incomplete_snapshot(snapshot, exc.reason, exc.detail)
 
 
 def get_inputs(run):
