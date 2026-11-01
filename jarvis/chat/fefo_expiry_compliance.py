@@ -10,6 +10,10 @@ sent to the bundle.
 import frappe
 from frappe import _
 
+from jarvis._session import impersonate
+from jarvis.chat.agent_scope import resolve_scope
+from jarvis.permissions import is_valid_unattended_owner
+
 AGENT = "fefo-expiry-compliance-auditor"
 _BUNDLE_KEYS = frozenset(("reviewer", "near_expiry_days", "test_declaration"))
 _INSTALLATION_ONLY_KEYS = frozenset(("record_scope",))
@@ -64,3 +68,36 @@ def assert_configuration(installation) -> None:
 	issues = configuration_issues(installation.get("config") or "{}")
 	if issues:
 		frappe.throw(list(issues.values()), title=_("Complete FEFO configuration"), as_list=True)
+
+
+def assert_schedule_configuration(installation) -> None:
+	"""Refuse an enabled FEFO schedule that cannot launch as its run-as user.
+
+	This is shared by the SPA endpoint and the Installation controller.  The
+	controller is the authoritative path: Desk, REST, import, and direct saves do
+	not pass through ``agents_api.set_schedule``.  Run the policy and the optional
+	Warehouse scope resolution as the identity that will execute the unattended
+	run, before the schedule can be persisted.
+	"""
+	if str(installation.get("agent") or "").strip() != AGENT:
+		return
+	run_as = str(installation.get("run_as_user") or "").strip()
+	if not is_valid_unattended_owner(run_as):
+		frappe.throw(
+			_(
+				"This agent needs an enabled non-system run-as user before you can enable an "
+				"automatic schedule."
+			)
+		)
+	with impersonate(run_as):
+		assert_configuration(installation)
+		# A declared FEFO Warehouse root is binding.  Resolve it here so an
+		# unreadable, disabled, foreign, or malformed scope cannot be saved into an
+		# unattended schedule and fail only on its first tick.  This also validates
+		# the ordinary company/period scope as the eventual run-as identity.
+		from jarvis.exceptions import InvalidArgumentError
+
+		try:
+			resolve_scope(installation)
+		except InvalidArgumentError as exc:
+			frappe.throw(str(exc), title=_("Complete FEFO configuration"))

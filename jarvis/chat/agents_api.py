@@ -26,7 +26,6 @@ from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import (
 	has_jarvis_admin_access,
 	is_skill_reviewer,
-	is_valid_unattended_owner,
 	message_origin,
 	refuse_in_tool_dispatch,
 	require_jarvis_admin,
@@ -1325,26 +1324,13 @@ def set_enabled(installation: str, enabled: int) -> dict:
 def _assert_fefo_schedule_configuration(doc) -> None:
 	"""Validate a FEFO schedule as its eventual run-as identity.
 
-	An unattended schedule must not accept a policy that its first tick would
-	reject.  The current settings have no data read of their own, but use the
-	same run-as boundary as the shared launch path so a future permission-bound
-	FEFO setting cannot silently be checked as the configuring user.
+	The Installation controller owns the authoritative all-write-path gate. This
+	endpoint calls the same shared helper as defense in depth, before it computes
+	and saves a schedule.
 	"""
-	from jarvis.chat.fefo_expiry_compliance import AGENT as FEFO_EXPIRY_AGENT
-	from jarvis.chat.fefo_expiry_compliance import assert_configuration
+	from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
 
-	if doc.agent != FEFO_EXPIRY_AGENT:
-		return
-	run_as = (doc.run_as_user or "").strip()
-	if not is_valid_unattended_owner(run_as):
-		frappe.throw(
-			_(
-				"This agent needs an enabled non-system run-as user before you can enable an "
-				"automatic schedule."
-			)
-		)
-	with impersonate(run_as):
-		assert_configuration(doc)
+	assert_schedule_configuration(doc)
 
 
 @frappe.whitelist(methods=["POST"])

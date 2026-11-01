@@ -52,6 +52,7 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
 		self._validate_agent_config()
+		self._validate_fefo_schedule_configuration()
 		self._validate_schedule_budget()
 		self._guard_activation_transition()
 
@@ -252,6 +253,23 @@ class JarvisAgentInstallation(NotRenamable, Document):
 			validate_fefo_near_expiry_days(config)
 		except InvalidArgumentError as exc:
 			frappe.throw(str(exc))
+
+	def _validate_fefo_schedule_configuration(self):
+		"""Keep an enabled FEFO schedule valid on every installation write path.
+
+		``agents_api.set_schedule`` is a convenience endpoint only. Desk edits,
+		imports, REST writes, and a later ``set_enabled`` all call this controller
+		instead, so the final schedule-enable gate must live here. A legacy invalid
+		row may still turn its schedule off; only an enabled schedule needs a valid
+		policy, readable optional Warehouse scope, and unattended run-as identity.
+		"""
+		from jarvis.chat.agent_scope import FEFO_AGENT
+
+		if self.agent != FEFO_AGENT or not frappe.utils.cint(self.get("schedule_enabled")):
+			return
+		from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
+
+		assert_schedule_configuration(self)
 
 	def _validate_schedule_budget(self):
 		"""A14: warn (do not hard-block) when an enabled schedule's expected monthly

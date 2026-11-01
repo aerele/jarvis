@@ -8,6 +8,10 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_scheduler, agents_api
 from jarvis.chat import fefo_expiry_compliance as fefo
+from jarvis.exceptions import InvalidArgumentError
+from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
+	JarvisAgentInstallation,
+)
 
 
 class ReachedCapabilityGate(Exception):
@@ -137,9 +141,9 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 		with (
 			patch.object(frappe, "get_doc", return_value=doc),
 			patch("jarvis.chat.agent_installability.assert_installable"),
-			patch.object(agents_api, "is_valid_unattended_owner", return_value=True),
+			patch.object(fefo, "is_valid_unattended_owner", return_value=True),
 			patch.object(
-				agents_api,
+				fefo,
 				"impersonate",
 				side_effect=lambda user: self._as_run_as(run_as_contexts, user),
 			),
@@ -155,12 +159,13 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 		with (
 			patch.object(frappe, "get_doc", return_value=doc),
 			patch("jarvis.chat.agent_installability.assert_installable"),
-			patch.object(agents_api, "is_valid_unattended_owner", return_value=True),
+			patch.object(fefo, "is_valid_unattended_owner", return_value=True),
 			patch.object(
-				agents_api,
+				fefo,
 				"impersonate",
 				side_effect=lambda user: self._as_run_as(run_as_contexts, user),
 			),
+			patch.object(fefo, "resolve_scope", return_value={}),
 			patch.object(agents_api, "compute_next_run", return_value="2026-11-02 09:00:00"),
 			patch.object(agents_api, "log_activity"),
 			patch.object(frappe.db, "commit"),
@@ -173,12 +178,102 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 	def test_schedule_preflight_leaves_other_agents_unchanged(self):
 		doc = frappe._dict(agent="close-auditor", run_as_user="any@example.invalid", config="{}")
 		with (
-			patch.object(agents_api, "is_valid_unattended_owner") as valid_owner,
-			patch.object(agents_api, "impersonate") as as_run_as,
+			patch.object(fefo, "is_valid_unattended_owner") as valid_owner,
+			patch.object(fefo, "impersonate") as as_run_as,
 		):
 			agents_api._assert_fefo_schedule_configuration(doc)
 		valid_owner.assert_not_called()
 		as_run_as.assert_not_called()
+
+	def test_controller_blocks_direct_invalid_fefo_schedule_before_save(self):
+		"""The Installation controller covers Desk, REST, import, and ``set_enabled``.
+
+		This deliberately invokes ``validate`` rather than the SPA endpoint.  Before
+		the authoritative guard, that path stored an enabled invalid schedule and the
+		first scheduler tick failed after the user had already seen a saved schedule.
+		"""
+		doc = self._controller_installation({"fefo": {}}, schedule_enabled=1)
+		run_as_contexts = []
+		with (
+			patch.object(fefo, "is_valid_unattended_owner", return_value=True),
+			patch.object(
+				fefo,
+				"impersonate",
+				side_effect=lambda user: self._as_run_as(run_as_contexts, user),
+			),
+			patch.object(fefo, "resolve_scope") as resolve_scope,
+		):
+			with self.assertRaises(frappe.ValidationError):
+				self._controller_validate(doc)
+		self.assertEqual(run_as_contexts, [doc.run_as_user])
+		resolve_scope.assert_not_called()
+
+	def test_controller_blocks_enable_after_legacy_invalid_schedule_but_allows_disable(self):
+		doc = self._controller_installation({"fefo": {}}, schedule_enabled=0)
+		with (
+			patch.object(fefo, "is_valid_unattended_owner") as valid_owner,
+			patch.object(fefo, "impersonate") as as_run_as,
+		):
+			self._controller_validate(doc)
+		valid_owner.assert_not_called()
+		as_run_as.assert_not_called()
+
+		doc.schedule_enabled = 1
+		with patch.object(fefo, "is_valid_unattended_owner", return_value=True):
+			with self.assertRaises(frappe.ValidationError):
+				self._controller_validate(doc)
+
+	def test_controller_accepts_valid_direct_schedule_as_run_as(self):
+		doc = self._controller_installation(self._valid_config(), schedule_enabled=1)
+		run_as_contexts = []
+		with (
+			patch.object(fefo, "is_valid_unattended_owner", return_value=True),
+			patch.object(
+				fefo,
+				"impersonate",
+				side_effect=lambda user: self._as_run_as(run_as_contexts, user),
+			),
+			patch.object(fefo, "resolve_scope", return_value={}) as resolve_scope,
+		):
+			self._controller_validate(doc)
+		self.assertEqual(run_as_contexts, [doc.run_as_user])
+		resolve_scope.assert_called_once_with(doc)
+
+	def test_controller_rejects_unreadable_fefo_scope_as_run_as(self):
+		doc = self._controller_installation(self._valid_config(), schedule_enabled=1)
+		run_as_contexts = []
+		with (
+			patch.object(fefo, "is_valid_unattended_owner", return_value=True),
+			patch.object(
+				fefo,
+				"impersonate",
+				side_effect=lambda user: self._as_run_as(run_as_contexts, user),
+			),
+			patch.object(
+				fefo,
+				"resolve_scope",
+				side_effect=InvalidArgumentError("FEFO record_scope is not readable"),
+			),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				self._controller_validate(doc)
+		self.assertEqual(run_as_contexts, [doc.run_as_user])
+
+	def test_controller_refuses_schedule_without_a_valid_unattended_run_as(self):
+		doc = self._controller_installation(self._valid_config(), schedule_enabled=1)
+		with (
+			patch.object(fefo, "is_valid_unattended_owner", return_value=False),
+			patch.object(fefo, "impersonate") as as_run_as,
+		):
+			with self.assertRaises(frappe.ValidationError):
+				self._controller_validate(doc)
+		as_run_as.assert_not_called()
+
+	def test_controller_leaves_other_agent_schedule_unchanged(self):
+		doc = self._controller_installation({}, schedule_enabled=1, agent="close-auditor")
+		with patch.object(fefo, "assert_schedule_configuration") as configuration:
+			self._controller_validate(doc)
+		configuration.assert_not_called()
 
 	def test_get_agent_exposes_fefo_field_issues(self):
 		installation = frappe._dict(
@@ -249,6 +344,36 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 		doc.check_permission = MagicMock()
 		doc.save = MagicMock()
 		return doc
+
+	@staticmethod
+	def _controller_installation(config, schedule_enabled, agent=fefo.AGENT):
+		return JarvisAgentInstallation(
+			{
+				"doctype": "Jarvis Agent Installation",
+				"agent": agent,
+				"run_as_user": "fefo-runas@example.invalid",
+				"reviewer": "fefo-reviewer@example.invalid",
+				"config": frappe.as_json(config),
+				"schedule_enabled": schedule_enabled,
+			}
+		)
+
+	@staticmethod
+	def _controller_validate(doc):
+		with (
+			patch.object(JarvisAgentInstallation, "_default_reviewer"),
+			patch.object(JarvisAgentInstallation, "_guard_installability"),
+			patch.object(JarvisAgentInstallation, "_guard_operator_visibility"),
+			patch.object(JarvisAgentInstallation, "_validate_unique_per_owner"),
+			patch.object(JarvisAgentInstallation, "_validate_owner_cap"),
+			patch.object(JarvisAgentInstallation, "_validate_run_as_user"),
+			patch.object(JarvisAgentInstallation, "_validate_schedule_time"),
+			patch.object(JarvisAgentInstallation, "_validate_schedule_day_of_month"),
+			patch.object(JarvisAgentInstallation, "_validate_agent_config"),
+			patch.object(JarvisAgentInstallation, "_validate_schedule_budget"),
+			patch.object(JarvisAgentInstallation, "_guard_activation_transition"),
+		):
+			doc.validate()
 
 	@staticmethod
 	def _listing():
