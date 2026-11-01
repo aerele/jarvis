@@ -320,6 +320,8 @@ const form = reactive({
 	percentage: "",
 	engagement_risk_level: "",
 	rounding_step: "",
+	grn_hygiene_reviewer: "",
+	grn_hygiene_test_declaration: "",
 });
 const advanced = ref("{}");
 const advancedError = ref("");

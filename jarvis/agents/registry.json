@@ -1061,7 +1061,8 @@
         "tier": "Advanced"
       },
       "config_keys": [
-        "grn_hygiene"
+        "grn_hygiene.reviewer",
+        "grn_hygiene.test_declaration"
       ]
     },
     {

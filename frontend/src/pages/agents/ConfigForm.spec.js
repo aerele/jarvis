@@ -878,6 +878,67 @@ describe("per-agent gating via the configKeys prop", () => {
 		expect(w.text()).toContain("This agent has no additional settings.");
 	});
 
+	it("GRN hygiene dot paths render the receiving fields and save their namespace", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			},
+		);
+		expect(w.text()).toContain("Receiving reviewer");
+		expect(w.text()).toContain("Test declaration");
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+
+		await field(w, "Receiving reviewer").setValue("Receiving Controller");
+		await field(w, "Test declaration").setValue("Pre-release review");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			grn_hygiene: {
+				reviewer: "Receiving Controller",
+				test_declaration: "Pre-release review",
+			},
+		});
+	});
+
+	it("GRN hygiene fields load saved values and leave only unrelated values in Advanced JSON", async () => {
+		const configKeys = ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"];
+		const config = {
+			grn_hygiene: {
+				reviewer: "Receiving Controller",
+				test_declaration: "Pre-release review",
+			},
+			custom_flag: true,
+		};
+		const w = mountForm(config, { configKeys });
+		expect(field(w, "Receiving reviewer").element.value).toBe("Receiving Controller");
+		expect(field(w, "Test declaration").element.value).toBe("Pre-release review");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({ custom_flag: true });
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual(config);
+	});
+
+	it("GRN hygiene omits an empty optional test declaration", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			},
+		);
+		await field(w, "Receiving reviewer").setValue("Receiving Controller");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		const saved = w.emitted("save")[0][0];
+		expect(saved).toEqual({ grn_hygiene: { reviewer: "Receiving Controller" } });
+		expect(saved.grn_hygiene).not.toHaveProperty("test_declaration");
+	});
+
+	it("a bare GRN hygiene namespace in configKeys renders no fields", () => {
+		const w = mountForm({}, { configKeys: ["grn_hygiene"] });
+		expect(w.text()).not.toContain("Receiving reviewer");
+		expect(w.text()).not.toContain("Test declaration");
+		expect(w.text()).toContain("This agent has no additional settings.");
+	});
+
 	it("the full configKeys set (close-auditor) renders every agent-specific field, no note", () => {
 		const w = mountForm({});
 		expect(w.text()).not.toContain("This agent has no additional settings.");

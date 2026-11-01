@@ -76,6 +76,33 @@ class TestDerivedConfig(FrappeTestCase):
 		out = agent_scheduler._explicit_config({"config_keys": ["ageing.stale_floor_days"]}, inst)
 		self.assertEqual(out, {"ageing": {"stale_floor_days": 9}})
 
+	def test_explicit_config_delivers_grn_hygiene_root_for_declared_dot_paths(self):
+		inst = _inst(
+			config=(
+				'{"grn_hygiene": {"reviewer": "Receiving Controller", '
+				'"test_declaration": "Pre-release review"}, '
+				'"materiality": {"percentage": 5}}'
+			)
+		)
+		out = agent_scheduler._explicit_config(
+			{
+				"config_keys": [
+					"grn_hygiene.reviewer",
+					"grn_hygiene.test_declaration",
+				]
+			},
+			inst,
+		)
+		self.assertEqual(
+			out,
+			{
+				"grn_hygiene": {
+					"reviewer": "Receiving Controller",
+					"test_declaration": "Pre-release review",
+				}
+			},
+		)
+
 	def test_failing_provider_is_omitted_and_logged_without_value(self):
 		salt = derived_config._fingerprint_salt(_inst())
 		boom = patch.dict(

@@ -11,8 +11,8 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), the only agent that
- *     reads any agent-specific config today. Rendered only when the
+ *     CRITICAL fix, they are NOT flat top-level keys), and the GRN Hygiene
+ *     auditor reads its reviewer settings under `grn_hygiene`. Rendered only when the
  *     listing's own `config_keys` (agents_api.py get_agent, jarvis#1063)
  *     names the field's storage `path` (a dot path for a nested key) -
  *     ConfigForm.vue filters this array by that list at render time.
@@ -164,6 +164,20 @@ export const CONFIG_FIELD_SET = [
 		label: "Rounding step",
 		type: "number",
 		help: "Step used to detect round-number plugs",
+	},
+	{
+		key: "grn_hygiene_reviewer",
+		path: "grn_hygiene.reviewer",
+		label: "Receiving reviewer",
+		type: "text",
+		help: "Required. Name the person who reviews receiving results (up to 140 characters).",
+	},
+	{
+		key: "grn_hygiene_test_declaration",
+		path: "grn_hygiene.test_declaration",
+		label: "Test declaration",
+		type: "text",
+		help: "Optional plain-text notice for a test review (up to 500 characters).",
 	},
 	{
 		key: "stale_floor_days",
