@@ -380,9 +380,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	# A mutable listing must never turn a reviewed no-runtime teaser into a
 	# provisioned delegate. This final payload filter also contains legacy or
 	# manually modified DB rows that bypass controller validation.
-	closed_slugs = {
-		slug for slug, agent in reg_by_slug.items() if _is_coming_soon_no_runtime(agent)
-	}
+	closed_slugs = {slug for slug, agent in reg_by_slug.items() if _is_coming_soon_no_runtime(agent)}
 
 	filters = {"enabled": 1}
 	if owner:
