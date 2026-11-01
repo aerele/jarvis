@@ -285,6 +285,22 @@ test("tab-indented descriptions stay inside numbered steps", () => {
 	assert.match(html, /First Details\.<\/li><li>Next/);
 });
 
+test("only space and tabs can follow a list marker", () => {
+	for (const markerSpace of ["\u00a0", "\v", "\f", "\u2028"]) {
+		const html = renderMarkdown(`1.${markerSpace}Pay invoice`);
+		assert.ok(html.startsWith('<p class="jv-md-p">'), "malformed marker stays a paragraph");
+		assert.ok(!html.includes("<ol"), "malformed marker does not start a list");
+	}
+
+	const html = renderMarkdown("1. Pay invoice\n\n2.\u00a0Still text");
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.match(html, /<p class="jv-md-p">2\.\u00a0Still text<\/p>/);
+
+	const adjacent = renderMarkdown("1. Pay invoice\n2.\u00a0Still text");
+	assert.equal((adjacent.match(/<ol\b/g) || []).length, 1);
+	assert.match(adjacent, /<p class="jv-md-p">2\.\u00a0Still text<\/p>/);
+});
+
 test("indented headings, quotes, tables and rules keep their block format", () => {
 	for (const [body, tag] of [
 		["   # Heading", "h3"],
@@ -302,4 +318,14 @@ test("an indented code fence stays inside its step without parsing list text", (
 	const html = renderMarkdown("1. First\n\n   ```\n   8. literal <script>\n   ```\n\n2. Next");
 	assert.equal((html.match(/<ol\b/g) || []).length, 1);
 	assert.match(html, /First<pre.*8\. literal &lt;script&gt;.*<\/pre><\/li><li>Next/s);
+});
+
+test("an indented code fence removes its list indentation from code", () => {
+	const html = renderMarkdown("1. First\n\n\t```\n\tconst total = 1;\n\t  keep this indent;\n\t```\n\n2. Next");
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.match(html, /<code>const total = 1;\n  keep this indent;<\/code>/);
+	assert.ok(!html.includes("\tconst total"));
+
+	const partialTab = renderMarkdown("1. First\n\n   ```\n\tkeep one column\n   ```");
+	assert.match(partialTab, /<code> keep one column<\/code>/);
 });

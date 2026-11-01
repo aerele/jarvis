@@ -155,10 +155,34 @@ function renderTable(rows) {
 // Build (possibly nested) list HTML from a run of list-item lines, nesting by
 // leading-space indent. A deeper indent nests inside the current item; a mixed
 // bullet/number type at the same indent starts a fresh sibling list.
+// Keep this grammar deliberately narrower than `\s`: Markdown list markers use
+// ASCII spaces or tabs after the marker. In particular, accepting a marker with
+// a broader detector than the item parser can leave `renderMarkdown()` at the
+// same line forever.
+const LIST_ITEM_RE = /^([ \t]*)([-*]|\d+\.)([ \t]+)(.*)/;
+
 function indentColumns(prefix) {
 	let columns = 0;
 	for (const char of prefix) columns += char === "\t" ? 4 - (columns % 4) : 1;
 	return columns;
+}
+
+function stripLeadingColumns(line, columns) {
+	let index = 0;
+	let stripped = 0;
+	while (index < line.length && stripped < columns) {
+		if (line[index] === " ") {
+			index++;
+			stripped++;
+			continue;
+		}
+		if (line[index] !== "\t") break;
+		const tabWidth = 4 - (stripped % 4);
+		index++;
+		stripped += tabWidth;
+		if (stripped > columns) return " ".repeat(stripped - columns) + line.slice(index);
+	}
+	return line.slice(index);
 }
 
 function startsListBlockBoundary(lines, index) {
@@ -292,14 +316,14 @@ export function renderMarkdown(src) {
 			continue;
 		}
 		// bullet / numbered lists, indent-nested.
-		if (/^(\s*)([-*]|\d+\.)\s+/.test(line)) {
+		if (LIST_ITEM_RE.test(line)) {
 			flushPara();
 			const items = [];
 			const ancestors = [];
 			let gap = false;
 			while (i < lines.length) {
 				if (startsListBlockBoundary(lines, i)) break;
-				const m = lines[i].match(/^(\s*)([-*]|\d+\.)([ \t]+)(.*)/);
+				const m = lines[i].match(LIST_ITEM_RE);
 				if (m) {
 					const item = {
 						indent: indentColumns(m[1]),
@@ -326,7 +350,10 @@ export function renderMarkdown(src) {
 						items.push({
 							continuation: true,
 							indent,
-							block: lines.slice(start, i).join("\n"),
+							block: lines
+								.slice(start, i)
+								.map((blockLine) => stripLeadingColumns(blockLine, indent))
+								.join("\n"),
 						});
 						gap = false;
 						continue;
@@ -351,7 +378,7 @@ export function renderMarkdown(src) {
 					while (j < lines.length && !lines[j].trim()) j++;
 					if (
 						j < lines.length &&
-						(/^(\s*)([-*]|\d+\.)\s+/.test(lines[j]) ||
+						(LIST_ITEM_RE.test(lines[j]) ||
 							(ancestors.some(
 								(a) =>
 									indentColumns(lines[j].match(/^[ \t]*/)[0]) >= a.contentIndent
@@ -364,6 +391,11 @@ export function renderMarkdown(src) {
 					}
 				}
 				break;
+			}
+			if (!items.length) {
+				para.push(line.trim());
+				i++;
+				continue;
 			}
 			out.push(renderListBlock(items));
 			continue;
