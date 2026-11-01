@@ -9,9 +9,11 @@ Mar-31 / Apr-1 boundary). ``_launch_audit`` stamps the result on the Run
 (``scope_json``) and injects it verbatim into the run message; prior-FY
 selection stays versioned bench code, never LLM prose.
 
-It is DELIBERATELY generic: it carries no rule shape, only ordinary accounting
-dimensions (company / fiscal year / period boundaries), so the delegate bundles
-resolve their run scope from bench-injected, versioned values — never LLM prose.
+It is DELIBERATELY generic for normal delegates: it carries only ordinary
+accounting dimensions (company / fiscal year / period boundaries). A narrow
+delegate can add an explicit record root only through a server-side validation
+hook. Delegate bundles resolve their run scope from these bench-injected,
+versioned values — never LLM prose.
 
 The helper runs under the caller's identity (the run-as user in
 ``_launch_audit``), so ``frappe.defaults`` / erpnext's fiscal-year lookup are
@@ -23,6 +25,46 @@ import frappe
 from jarvis.exceptions import InvalidArgumentError
 
 INSTALLATION = "Jarvis Agent Installation"
+
+
+def _declared_record_scope(installation, config: dict, company: str) -> dict | None:
+	"""Return the validated, agent-owned narrow scope, never a broad fallback.
+
+	Most delegates use only the generic company/date scope.  The negative-stock
+	auditor also needs one Warehouse root so it can prove that its configured leaf
+	set is complete.  Keep that declaration in its own explicit config namespace,
+	validate it on the server, and put only the resulting two-field value in the
+	run scope.  A missing, malformed, foreign-company, or unknown Warehouse is
+	not replaced with all Warehouses: the bundle receives no ``record_scope`` and
+	fails its preflight before it can query a broad slice.
+	"""
+	agent = str(installation.get("agent") or installation.get("agent_slug") or "").strip()
+	if agent != "negative-stock-valuation-auditor":
+		return None
+
+	namespace = config.get("negative_stock")
+	declared = namespace.get("record_scope") if isinstance(namespace, dict) else None
+	if (
+		not isinstance(declared, dict)
+		or set(declared) != {"doctype", "name"}
+		or declared.get("doctype") != "Warehouse"
+		or not isinstance(declared.get("name"), str)
+		or not declared["name"].strip()
+	):
+		return None
+
+	name = declared["name"].strip()
+	try:
+		warehouse_company = frappe.db.get_value("Warehouse", name, "company")
+		# Scope resolution runs as ``run_as_user``.  A valid owner declaration
+		# must still be readable by that identity before its name can reach the
+		# delegate.  This applies Warehouse User Permissions as well as DocPerms.
+		warehouse_readable = frappe.has_permission("Warehouse", "read", doc=name)
+	except Exception:
+		return None
+	if not warehouse_readable or warehouse_company != company:
+		return None
+	return {"doctype": "Warehouse", "name": name}
 
 
 def resolve_scope(installation) -> dict:
@@ -52,7 +94,11 @@ def resolve_scope(installation) -> dict:
 		val = cfg.get(key)
 		return str(val).strip() if val is not None and str(val).strip() else None
 
-	return _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	record_scope = _declared_record_scope(installation, cfg, scope["company"])
+	if record_scope is not None:
+		scope["record_scope"] = record_scope
+	return scope
 
 
 def _resolve(company, fiscal_year, from_date, to_date) -> dict:

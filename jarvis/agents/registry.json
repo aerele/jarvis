@@ -1368,7 +1368,7 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Checks stock balances and receipt costs against retained ledger records. Compares complete stock accounts with native ERPNext reports and shows warehouse review summaries. Read-only; does not change stock or accounting entries.",
       "tools_required": [

@@ -1187,7 +1187,7 @@ def _launch_audit(
 	# before a Run exists, stamp that exact object on the Run, and use the same object
 	# in the dispatch prompt below.  A later settings save must never alter an active
 	# run's evidence or make a model guess a gate value.
-	engagement_config = _explicit_config(listing, inst)
+	engagement_config = _sanitize_delegated_engagement_config(listing, _explicit_config(listing, inst))
 	engagement_config_json = frappe.as_json(engagement_config)
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
@@ -1719,6 +1719,28 @@ def _explicit_config(listing, inst) -> dict:
 	return {**explicit, **derived_config.derive(namespaces, inst, explicit)}
 
 
+def _sanitize_delegated_engagement_config(listing, engagement_config: dict | None) -> dict:
+	"""Return the safe immutable config snapshot for a delegate run.
+
+	The negative-stock Warehouse root is an owner declaration, not evaluator
+	configuration. The server validates it into ``scope_json`` and must never
+	store or hand the unvalidated declaration to the delegate. Keep an empty
+	namespace after removal so the prompt carries an explicit safe object rather
+	than directing the delegate to a mutable installation fallback.
+	"""
+	if not isinstance(engagement_config, dict):
+		return {}
+	safe = dict(engagement_config)
+	agent_slug = listing.get("agent_slug") or listing.get("name")
+	if agent_slug != "negative-stock-valuation-auditor":
+		return safe
+	namespace = safe.get("negative_stock")
+	if not isinstance(namespace, dict) or "record_scope" not in namespace:
+		return safe
+	safe["negative_stock"] = {key: value for key, value in namespace.items() if key != "record_scope"}
+	return safe
+
+
 def _audit_prompt(
 	listing, inst, trigger: str, scope: dict | None = None, engagement_config: dict | None = None
 ) -> str:
@@ -1752,13 +1774,27 @@ def _audit_prompt(
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
 		)
-	# EXPLICIT CONFIG: ``_launch_audit`` resolves declared/derived values ONCE and
-	# stamps them on the Run before dispatch.  This function receives that exact
-	# snapshot; it deliberately does not re-read the mutable installation here.
-	# The delegate merges this JSON into config.json verbatim.  The run message is
-	# the direct bench-to-container channel, while jarvis__get_engagement_config
-	# returns the same stored snapshot to an active run when the object is empty.
-	explicit_config = engagement_config if isinstance(engagement_config, dict) else {}
+	if scope:
+		# Some narrow auditors declare a server-validated record scope in addition
+		# to the generic company/date window. It must be injected verbatim when
+		# present; omitting it makes the delegate fail closed rather than widening
+		# to a company-wide read. JSON keeps a record name data-only in the prompt.
+		record_scope = scope.get("record_scope")
+		if (
+			isinstance(record_scope, dict)
+			and set(record_scope) == {"doctype", "name"}
+			and isinstance(record_scope.get("doctype"), str)
+			and isinstance(record_scope.get("name"), str)
+		):
+			scope_block += f" record_scope={json.dumps(record_scope, sort_keys=True)}."
+	# EXPLICIT CONFIG: ``_launch_audit`` resolves declared/derived values ONCE,
+	# sanitizes the narrow server-bound root, and stamps that safe object on the
+	# Run before dispatch. This function receives only that launch snapshot; it
+	# deliberately does not re-read mutable installation configuration.
+	# Re-sanitization keeps direct callers fail closed without changing the source
+	# of config authority.
+	agent_slug = listing.get("agent_slug") or listing.get("name")
+	explicit_config = _sanitize_delegated_engagement_config(listing, engagement_config)
 	if explicit_config:
 		# ADDITIVE, never a replacement: config.json legitimately carries fields the delegate
 		# fetches or derives at run time (e.g. balances, or a run-as permission set used to
@@ -1780,9 +1816,8 @@ def _audit_prompt(
 	try:
 		from jarvis.chat.agent_catalog import registry_tools_allow
 
-		_slug = listing.get("agent_slug") or listing.get("name")
-		_has_config_tool = bool(_slug) and "jarvis__get_engagement_config" in (
-			registry_tools_allow(_slug) or []
+		_has_config_tool = bool(agent_slug) and "jarvis__get_engagement_config" in (
+			registry_tools_allow(agent_slug) or []
 		)
 	except Exception:
 		# Never blocks prompt-build; fail closed with the branch-3 missing-state

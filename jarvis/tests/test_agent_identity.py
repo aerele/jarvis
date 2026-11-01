@@ -19,6 +19,7 @@ Run ONLY on a throwaway bench:
 """
 
 import unittest
+from unittest import mock
 
 import frappe
 
@@ -468,6 +469,122 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertIn("NEVER read mutable installation configuration", tool_msg)
 		self.assertNotIn("jarvis__get_doc", tool_msg)
 		self.assertNotIn("Jarvis Agent Installation", tool_msg)
+
+	def test_negative_stock_record_scope_is_server_bound_and_never_broadens(self):
+		"""A Warehouse root is delivered only after server-side validation.
+
+		The inventory evaluator needs this narrow boundary to verify its configured
+		leaf set.  Invalid config must not turn into an all-Warehouse scope.
+		"""
+		from jarvis.chat import agent_scope
+
+		base = {
+			"company": "Scope Co",
+			"fiscal_year": None,
+			"from_date": "2026-04-01",
+			"to_date": "2027-03-31",
+			"report_date": "2026-10-30",
+		}
+
+		def resolve(config, warehouse_company="Scope Co", warehouse_readable=True):
+			inst = frappe._dict(
+				agent="negative-stock-valuation-auditor", name="NSV-INST", config=frappe.as_json(config)
+			)
+			with (
+				mock.patch.object(agent_scope, "_resolve", return_value=dict(base)),
+				mock.patch.object(agent_scope.frappe.db, "get_value", return_value=warehouse_company),
+				mock.patch.object(agent_scope.frappe, "has_permission", return_value=warehouse_readable),
+			):
+				return agent_scope.resolve_scope(inst)
+
+		good = {
+			"negative_stock": {
+				"record_scope": {"doctype": "Warehouse", "name": "WH-Scope"},
+				"warehouse_names": ["WH-Scope"],
+				"reviewer": "scope-reviewer@example.invalid",
+			}
+		}
+		scope = resolve(good)
+		self.assertEqual(scope["record_scope"], {"doctype": "Warehouse", "name": "WH-Scope"})
+
+		listing = frappe._dict(
+			{"name": "negative-stock-valuation-auditor", "config_keys": ["negative_stock"]}
+		)
+		inst = frappe._dict(name="NSV-INST", config=frappe.as_json(good))
+		snapshot = agent_scheduler._sanitize_delegated_engagement_config(
+			listing, agent_scheduler._explicit_config(listing, inst)
+		)
+		self.assertNotIn("record_scope", snapshot["negative_stock"])
+		prompt = agent_scheduler._audit_prompt(
+			listing, inst, trigger="manual", scope=scope, engagement_config=snapshot
+		)
+		self.assertIn('record_scope={"doctype": "Warehouse", "name": "WH-Scope"}', prompt)
+		self.assertIn('"reviewer": "scope-reviewer@example.invalid"', prompt)
+		self.assertNotIn('"record_scope"', prompt.split("EXPLICIT CONFIG", 1)[1])
+
+		raw_scope_only = {"negative_stock": {"record_scope": {"doctype": "Warehouse", "name": "WH-Scope"}}}
+		empty_scope = resolve(raw_scope_only)
+		self.assertIn("record_scope", empty_scope)
+		empty_inst = frappe._dict(name="NSV-INST", config=frappe.as_json(raw_scope_only))
+		empty_snapshot = agent_scheduler._sanitize_delegated_engagement_config(
+			listing, agent_scheduler._explicit_config(listing, empty_inst)
+		)
+		self.assertEqual(empty_snapshot, {"negative_stock": {}})
+		empty_prompt = agent_scheduler._audit_prompt(
+			listing, empty_inst, "manual", empty_scope, engagement_config=empty_snapshot
+		)
+		self.assertIn("EXPLICIT CONFIG (your tenant's engagement tunables, authoritative)", empty_prompt)
+		self.assertIn('{"negative_stock": {}}', empty_prompt)
+		self.assertNotIn('"record_scope"', empty_prompt.split("EXPLICIT CONFIG", 1)[1])
+		self.assertNotIn("Jarvis Agent Installation", empty_prompt)
+
+		for bad, warehouse_company, warehouse_readable in (
+			(
+				{"negative_stock": {"warehouse_names": ["WH-Scope"]}},
+				"Scope Co",
+				True,
+			),  # warehouse_names is never a fallback root
+			({"negative_stock": {"record_scope": {"doctype": "Warehouse"}}}, "Scope Co", True),
+			(
+				{"negative_stock": {"record_scope": {"doctype": "Company", "name": "Scope Co"}}},
+				"Scope Co",
+				True,
+			),
+			(
+				{
+					"negative_stock": {
+						"record_scope": {"doctype": "Warehouse", "name": "WH-Scope", "all": True}
+					}
+				},
+				"Scope Co",
+				True,
+			),
+			(good, "Other Co", True),
+			(good, "Scope Co", False),
+		):
+			with self.subTest(
+				bad=bad,
+				warehouse_company=warehouse_company,
+				warehouse_readable=warehouse_readable,
+			):
+				invalid = resolve(bad, warehouse_company, warehouse_readable)
+				self.assertNotIn("record_scope", invalid)
+				invalid_inst = frappe._dict(name="NSV-INST", config=frappe.as_json(bad))
+				invalid_snapshot = agent_scheduler._sanitize_delegated_engagement_config(
+					listing, agent_scheduler._explicit_config(listing, invalid_inst)
+				)
+				invalid_prompt = agent_scheduler._audit_prompt(
+					listing,
+					invalid_inst,
+					"manual",
+					invalid,
+					engagement_config=invalid_snapshot,
+				)
+				self.assertNotIn("record_scope=", invalid_prompt)
+				self.assertNotIn('"record_scope"', invalid_prompt)
+				# A rejected declaration must not reappear through an installation pointer.
+				self.assertIn("EXPLICIT CONFIG", invalid_prompt)
+				self.assertNotIn("Jarvis Agent Installation", invalid_prompt)
 
 	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner
