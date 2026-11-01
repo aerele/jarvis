@@ -374,6 +374,26 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(pane(w).text()).toContain("Ship it?");
 	});
 
+	it("opens the Jarvis count page only for an eligible approved count plan", async () => {
+		state.ar = [ar("AR-COUNT-1", { source: "Agent Review" })];
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, { source: "Agent Review", status: "Approved" }),
+			question: "Approve this count plan.",
+			can_act: 0,
+			count_entry: name === "AR-COUNT-1" ? 1 : 0,
+		}));
+		const w = await board();
+		await flushPromises();
+
+		const record = button(w, "Record physical count");
+		expect(record.exists()).toBe(true);
+		await record.trigger("click");
+		expect(router.push).toHaveBeenLastCalledWith({
+			name: "CountPlanDetail",
+			params: { request: "AR-COUNT-1" },
+		});
+	});
+
 	it("a new selection mounts a fresh detail, so the row shown is the row decided", async () => {
 		const w = await board();
 		await actionRow(w, "1 file waiting").trigger("click");
