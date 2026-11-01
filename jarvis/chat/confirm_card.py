@@ -644,8 +644,9 @@ def _mask_code(text: str) -> str:
 	"""Code text with the credential-shaped literals it holds masked (a key hard-coded
 	in a Server Script, a Bearer token), on both sides of a diff: a Code field is not
 	a Password field, so ``is_secret`` never covers it. Reuses the learning-source
-	guard, which leaves ordinary code (``password = get_password()``) alone."""
-	return redact_secrets(text)[0]
+	guard, which leaves ordinary code (``password = get_password()``) alone. Each
+	secret carries a hash tag: a changed key must still show as a changed line."""
+	return redact_secrets(text, tag=True)[0]
 
 
 def _crlf_as_lf(text: str) -> str:
