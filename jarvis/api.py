@@ -522,7 +522,18 @@ def _dispatch_from_session(
 				try:
 					result, receipt = _private_output.prepare(result, tool=tool)
 				except InvalidArgumentError as exc:
-					result = receipt = _error("InvalidArgumentError", str(exc))
+					message = str(exc)
+					# The tool did run, but its private output cannot safely cross the
+					# delegate boundary. Keep a failure audit for that attempt without
+					# giving the audit logger any source result data.
+					audit.record(
+						tool=tool,
+						args=parsed_args,
+						ok=False,
+						error_code="InvalidArgumentError",
+						error_message=message,
+					)
+					result = receipt = _error("InvalidArgumentError", message)
 			# Recorded BEFORE the result budget trims the payload, so a step's row
 			# count is the count the tool actually returned, not the truncated one.
 			_ok = bool(isinstance(result, dict) and result.get("ok"))

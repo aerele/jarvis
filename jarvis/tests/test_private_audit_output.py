@@ -87,6 +87,20 @@ class TestPrivateAuditOutput(FrappeTestCase):
 		self.assertNotIn(CANARY, str(steps))
 		self.assertTrue(all(s.detail == "1000 rows" for s in steps))
 
+	def test_private_query_keeps_the_requested_page_when_more_rows_exist(self):
+		payload = {"rows": [{"name": "FAKE", "value": CANARY}], "more_rows": True}
+		with patch("jarvis.api.publish_realtime_tool_result"):
+			result = self._dispatch(payload)
+		self.assertTrue(result["ok"], result)
+		self.assertTrue(result["data"]["more_rows"])
+		self.assertEqual(result["result_mode"], _private_output.MODE)
+		message = frappe.get_value("Jarvis Chat Message", {"conversation": self.conv.name}, "tool_result")
+		receipt = json.loads(message)
+		self.assertEqual(receipt["data"]["count"], 1)
+		self.assertEqual(len(receipt["data"]["sha256"]), 64)
+		self.assertNotIn("more_rows", receipt["data"])
+		self.assertNotIn(CANARY, message)
+
 	def test_ordinary_agent_output_is_still_guarded(self):
 		payload = {"rows": [{"name": f"FAKE-{i}", "value": "x" * 200} for i in range(1000)]}
 		result = self._dispatch(payload, mode=None)
@@ -140,6 +154,46 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			self.assertFalse(result["ok"])
 			self.assertNotIn("data", result)
 			self.assertNotIn(CANARY, str(result))
+
+	def test_private_report_completion_markers_refuse_without_source_data(self):
+		for extra in ({"more_rows": True}, {"partial": True}):
+			with self.subTest(extra=extra):
+				result = self._dispatch(
+					{"result": [{"value": CANARY}], **extra}, tool="run_report"
+				)
+				self.assertFalse(result["ok"])
+				self.assertNotIn("data", result)
+				self.assertNotIn(CANARY, str(result))
+
+	def test_private_post_tool_refusal_has_a_safe_failure_audit(self):
+		payload = {"rows": [{"value": CANARY}], "_truncated": True}
+		with (
+			patch("jarvis.api.audit.record") as recorded,
+			patch("jarvis.api.publish_realtime_tool_result") as published,
+		):
+			result = self._dispatch(payload)
+		self.assertFalse(result["ok"])
+		self.assertNotIn("data", result)
+		self.assertNotIn(CANARY, str(result))
+		recorded.assert_called_once()
+		kwargs = recorded.call_args.kwargs
+		self.assertEqual(kwargs["tool"], "query")
+		self.assertFalse(kwargs["ok"])
+		self.assertEqual(kwargs["error_code"], "InvalidArgumentError")
+		self.assertEqual(
+			kwargs["error_message"], "The private source is truncated; coverage is incomplete."
+		)
+		self.assertNotIn("result", kwargs)
+		self.assertNotIn(CANARY, str(recorded.call_args))
+		steps = frappe.get_all("Jarvis Agent Run Step", {"run": self.run}, ["detail"])
+		self.assertEqual(len(steps), 1)
+		self.assertIn("private source is truncated", steps[0].detail)
+		messages = frappe.get_all(
+			"Jarvis Chat Message", {"conversation": self.conv.name}, ["tool_result"]
+		)
+		self.assertEqual(len(messages), 1)
+		self.assertNotIn(CANARY, messages[0].tool_result)
+		self.assertNotIn(CANARY, str(published.call_args))
 
 	def test_nonfinite_private_values_are_refused_without_echoing_source(self):
 		for value in (float("nan"), float("inf"), -float("inf")):
