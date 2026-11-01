@@ -126,6 +126,33 @@ test("a hard reload does not rebuild a terminal safety receipt into a Confirm ca
 	assert.deepEqual(cards[0].preview, { card: { title: "Ordinary pending change" } });
 });
 
+test("a capped legacy cleanup resync keeps its terminal card out after a hard reload", () => {
+	// The legacy list path must settle the stale row before its backstop response
+	// returns. A fresh mount then has neither an in-memory exclusion nor a chance
+	// to merge the revoked token back from its transcript row.
+	const rows = [
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "",
+			tool_call_id: "revoked-token",
+			pending_card: null,
+			action_outcome: "cancelled",
+		},
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "pending",
+			tool_call_id: "ordinary-token",
+			pending_card: { title: "Ordinary pending change" },
+		},
+	];
+	const fromRows = pendingActionsFromRows(rows, "CONV-CAPPED");
+	const fromBackstop = [{ token: "ordinary-token", conversation: "CONV-CAPPED" }];
+	const cards = mergePendingSources([], [fromRows, fromBackstop], new Set());
+	assert.deepEqual(cards.map((card) => card.token), ["ordinary-token"]);
+});
+
 for (const kind of ["action:pending", "run:end", "run:error"]) {
 	test(`${kind} does not restore a settled safety-update card`, () => {
 		const settled = new Set(["safety-token"]);

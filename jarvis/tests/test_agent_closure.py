@@ -676,6 +676,75 @@ class TestAgentClosureIntegration(FrappeTestCase):
 			[current],
 		)
 
+	def test_capped_cleanup_list_resync_settles_stale_legacy_card_before_returning_it(self):
+		"""A reload must not re-show a capped stale legacy card before a click."""
+		before = frappe.db.count("ToDo")
+		conversation = self._conversation()
+		stale, _ = self._legacy_card(conversation=conversation)
+		current, _ = self._legacy_card(conversation=conversation)
+		self._revoke_legacy_fence(stale)
+
+		with patch.object(agent_closure, "_REDIS_SCAN_LIMIT", 0):
+			self.assertEqual(agent_closure.revoke_unfenced_legacy_tokens(), 0)
+		self.assertIsNotNone(pending_confirm_legacy.peek(stale))
+
+		frappe.set_user(OWNER)
+		listed = pending_confirm_legacy.list_for_owner(OWNER, conversation=conversation, strict=True)
+		self.assertEqual([record["token"] for record in listed], [current])
+		self.assertIsNone(pending_confirm_legacy.peek(stale))
+		self._assert_revoked_legacy_receipt(stale)
+		self.assertEqual(frappe.db.count("ToDo"), before)
+
+		resync = actions_api.list_pending_confirmations(conversation)
+		self.assertTrue(resync["ok"])
+		self.assertEqual([item["token"] for item in resync["data"]["pending"]], [current])
+		reloaded = chat_api.get_conversation(conversation)["messages"]
+		self.assertEqual(
+			[
+				row.get("tool_call_id")
+				for row in reloaded
+				if row.get("role") == "tool"
+				and row.get("tool_status") == "pending"
+				and row.get("pending_card")
+			],
+			[current],
+		)
+
+	def test_capped_cleanup_list_resync_keeps_token_when_terminal_settlement_fails(self):
+		"""A failed durable flip must not burn a credential whose card still shows."""
+		conversation = self._conversation()
+		stale, _ = self._legacy_card(conversation=conversation)
+		self._revoke_legacy_fence(stale)
+
+		with patch.object(agent_closure, "settle_revoked_legacy_chat_card", return_value=False):
+			with self.assertRaises(pending_confirm_legacy.PendingConfirmStorageError):
+				pending_confirm_legacy.list_for_owner(OWNER, conversation=conversation, strict=True)
+
+		self.assertIsNotNone(pending_confirm_legacy.peek(stale))
+		self.assertEqual(
+			frappe.db.get_value(MESSAGE, {"tool_call_id": stale}, "tool_status"),
+			"pending",
+		)
+
+	def test_capped_cleanup_list_resync_never_inserts_an_unseen_legacy_receipt(self):
+		"""A stale Redis-only token must disappear without manufacturing a transcript row."""
+		before = frappe.db.count("ToDo")
+		conversation = self._conversation()
+		stale = self._legacy_token(conversation=conversation)
+		self._revoke_legacy_fence(stale)
+
+		with patch.object(agent_closure, "_REDIS_SCAN_LIMIT", 0):
+			self.assertEqual(agent_closure.revoke_unfenced_legacy_tokens(), 0)
+		self.assertFalse(frappe.db.exists(MESSAGE, {"tool_call_id": stale}))
+
+		self.assertEqual(
+			pending_confirm_legacy.list_for_owner(OWNER, conversation=conversation, strict=True),
+			[],
+		)
+		self.assertIsNone(pending_confirm_legacy.peek(stale))
+		self.assertFalse(frappe.db.exists(MESSAGE, {"tool_call_id": stale}))
+		self.assertEqual(frappe.db.count("ToDo"), before)
+
 	def test_durable_confirmation_checks_before_claim_and_after_claim(self):
 		before = frappe.db.count("ToDo")
 		token, conversation = self._durable_card()

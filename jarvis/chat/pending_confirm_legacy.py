@@ -527,6 +527,8 @@ def list_for_owner(owner: str, conversation: str | None = None, *, strict: bool 
 		return []
 	if not members:
 		return []
+	from jarvis.chat.agent_closure import confirmation_is_current, settle_revoked_legacy_chat_card
+
 	out: list[dict] = []
 	dead: list[str] = []
 	for token in members:
@@ -548,6 +550,46 @@ def list_for_owner(owner: str, conversation: str | None = None, *, strict: bool 
 			dead.append(token)
 			continue
 		if record.get("owner") != owner:
+			continue
+		# A capped close-migration sweep can leave an old Redis credential and its
+		# pending display row in place. Do not return that card for a reload and
+		# wait for the user to click it: validate its full immutable fence map here,
+		# then flip the existing display row to a terminal safety receipt before the
+		# stale credential is removed. The credential must stay when the durable flip
+		# fails, otherwise the user would retain a pending card with no safe recovery
+		# record. A non-strict background list skips the unsafe card; a strict client
+		# resync reports the unavailable storage state instead of calling it live.
+		try:
+			current = confirmation_is_current(record, lock=True)
+		except Exception as exc:
+			frappe.logger("jarvis.pending_confirm").error(
+				"confirmation close-fence read failed while listing a legacy card: %s",
+				type(exc).__name__,
+			)
+			if strict:
+				raise PendingConfirmStorageError("pending-confirm close-fence read failed") from exc
+			continue
+		if not current:
+			try:
+				settled = settle_revoked_legacy_chat_card(token, strict=True)
+			except Exception as exc:
+				frappe.logger("jarvis.pending_confirm").error(
+					"confirmation close settlement failed while listing a legacy card: %s",
+					type(exc).__name__,
+				)
+				if strict:
+					raise PendingConfirmStorageError("pending-confirm close settlement failed") from exc
+				continue
+			if not settled:
+				frappe.logger("jarvis.pending_confirm").error(
+					"confirmation close settlement did not terminally flip a legacy card"
+				)
+				if strict:
+					raise PendingConfirmStorageError("pending-confirm close settlement failed")
+				continue
+			# Only remove the Redis credential after the durable row is terminal. This
+			# also removes the owner-index member and the best-effort open-card gauge.
+			rollback_token(token, owner)
 			continue
 		# A conversation-less record ("" - see consume/F1) carries no binding, so
 		# surface it under ANY conversation filter: otherwise the card is
