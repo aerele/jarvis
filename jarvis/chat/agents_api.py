@@ -1582,16 +1582,18 @@ def _installation_finding_names(run_names: list) -> set:
 
 
 def _detach_last_seen_run(run_names: list) -> None:
-	"""Re-point any SURVIVING finding whose ``last_seen_run`` lands in the runs this
-	cascade is about to force-delete.
+	"""Re-point any SURVIVING finding whose ``last_seen_run`` lands in a run this
+	cascade removes from its installation.
 
 	A survivor here is by definition another installation's row that the #454
-	recurrence bump attached to one of our runs. Leaving the pointer would dangle
-	it: ``get_findings``' run drill-down INNER JOINs ``last_seen_run``, so the row
-	would vanish from its real owner's history, and Frappe's link validation would
-	reject that owner's next acknowledge/resolve save outright. Falling back to the
-	row's own ``first_seen_run`` (which belongs to ITS installation and survives, or
-	is empty) keeps the recurrence pointer truthful and the row usable.
+	recurrence bump attached to one of our runs. A deleted run would leave the
+	pointer dangling; a budget- or provenance-retained run loses its installation
+	and also cannot truthfully remain another installation's latest run.
+	``get_findings``' run drill-down INNER JOINs ``last_seen_run``, so either case
+	hides the row from its real owner's history, and Frappe's link validation can
+	reject that owner's next acknowledge/resolve save. Falling back to the row's
+	own ``first_seen_run`` (which belongs to ITS installation and survives, or is
+	empty) keeps the recurrence pointer truthful and the row usable.
 
 	Raw ``db.set_value`` — ``last_seen_run`` is a frozen audit field, so this must
 	bypass the finding controller exactly as the recurrence bump does.
@@ -1823,6 +1825,9 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 			force=True,
 			flags={"jarvis_uninstall_installation": doc.name},
 		)
+	# A cross-install recurrence pointer is not membership. Repair it before a
+	# run is either retained without its installation or force-deleted.
+	_detach_last_seen_run(run_names)
 	# The month's counted runs are KEPT, detached from the installation, so uninstalling
 	# and installing again does not hand the month's run budget back (A14). For the user
 	# the run history is gone all the same: no screen lists a run with no installation.
@@ -1833,7 +1838,6 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 		keep_budget_rows_of_uninstalled(doc.name, doc.owner, exclude=provenance_runs)
 	)
 	deleted_runs = [name for name in run_names if name not in kept]
-	_detach_last_seen_run(deleted_runs)
 	for name in deleted_runs:
 		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	# honors if_owner for an owner; the admin path was authorised above. The append-only
