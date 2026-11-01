@@ -122,7 +122,7 @@ const companySearch = useLinkSearch(
 		searchLink("Company", query, 20, undefined, undefined, [["Company", "is_group", "=", 0]]),
 	{
 		mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })),
-	},
+	}
 );
 const warehouseSearch = useLinkSearch(
 	(query) => {
@@ -132,21 +132,21 @@ const warehouseSearch = useLinkSearch(
 			["Warehouse", "disabled", "=", 0],
 		]);
 	},
-	{ mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })) },
+	{ mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })) }
 );
 const reviewerSearch = useLinkSearch(
 	(query) => searchLink("User", query, 20, undefined, undefined, [["User", "enabled", "=", 1]]),
-	{ mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })) },
+	{ mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })) }
 );
 
 const companyValue = computed(() =>
-	form.company ? { label: form.company, value: form.company } : null,
+	form.company ? { label: form.company, value: form.company } : null
 );
 const warehouseValue = computed(() =>
-	form.warehouse ? { label: form.warehouse, value: form.warehouse } : null,
+	form.warehouse ? { label: form.warehouse, value: form.warehouse } : null
 );
 const reviewerValue = computed(() =>
-	form.reviewer ? { label: form.reviewer, value: form.reviewer } : null,
+	form.reviewer ? { label: form.reviewer, value: form.reviewer } : null
 );
 const shownErrors = computed(() => ({ ...props.validationErrors, ...localErrors.value }));
 
@@ -168,8 +168,8 @@ function seed(config) {
 		settings && typeof settings.test_declaration === "string" ? settings.test_declaration : "";
 	passiveScope.value = Object.fromEntries(
 		PASSIVE_SCOPE_KEYS.filter((key) => typeof source[key] === "string" && source[key]).map(
-			(key) => [key, source[key]],
-		),
+			(key) => [key, source[key]]
+		)
 	);
 	localErrors.value = {};
 	initialState.value = state();
@@ -178,7 +178,7 @@ function seed(config) {
 watch(
 	() => props.config,
 	(value) => seed(value),
-	{ immediate: true, deep: true },
+	{ immediate: true, deep: true }
 );
 watch(form, () => emit("dirty", state() !== initialState.value), { deep: true, immediate: true });
 
