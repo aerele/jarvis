@@ -116,7 +116,7 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
-				f"unknown session: {session_key}",
+				"unknown session",
 			)
 		frappe.local.jarvis_call_tool_user = plugin_user
 		enabled = frappe.db.get_value("User", plugin_user, "enabled")
