@@ -538,7 +538,8 @@ class TestWritebackIntegration(FrappeTestCase):
 		run = _mk_run(
 			self.owner,
 			scope_json='{"company": "Stale Co", "to_date": "2027-03-31", '
-			'"report_date": "2026-09-11", "prior_fy_end": "2026-03-31"}',
+			'"report_date": "2026-09-11", "prior_fy_end": "2026-03-31", '
+			'"scoped_visibility": false}',
 		)
 		agent_runs.record_delegate_run(
 			run,
@@ -550,6 +551,7 @@ class TestWritebackIntegration(FrappeTestCase):
 				"fiscal_year": "2026-2027",
 				"from_date": "2026-04-01",
 				"to_date": "2027-03-31",
+				"scoped_visibility": True,
 			},
 		)
 		sj = _j.loads(frappe.db.get_value(RUN, run.name, "scope_json"))
@@ -557,6 +559,52 @@ class TestWritebackIntegration(FrappeTestCase):
 		self.assertEqual(sj["prior_fy_end"], "2026-03-31")
 		self.assertEqual(sj["company"], self.company)  # delegate value wins
 		self.assertEqual(sj["from_date"], "2026-04-01")  # delegate-added key present
+		self.assertIs(sj["scoped_visibility"], False)  # bench-stamped false cannot be widened
+
+	def test_scope_merge_pins_visibility_true_false_and_absence(self):
+		# The delegate may return a scope for its evaluator, but it cannot change the
+		# server's launch fact. An absent launch key stays absent too.
+		for stamped, delegated in ((True, False), (False, True), (None, True)):
+			with self.subTest(stamped=stamped, delegated=delegated):
+				launch_scope = {"company": self.company}
+				if stamped is not None:
+					launch_scope["scoped_visibility"] = stamped
+				run = _mk_run(self.owner, scope_json=json.dumps(launch_scope))
+				agent_runs.record_delegate_run(
+					run,
+					self.inst,
+					[],
+					coverage={TOKEN: "evaluated"},
+					scope={"company": self.company, "scoped_visibility": delegated},
+				)
+				merged = json.loads(frappe.db.get_value(RUN, run.name, "scope_json"))
+				if stamped is None:
+					self.assertNotIn("scoped_visibility", merged)
+				else:
+					self.assertIs(merged["scoped_visibility"], stamped)
+
+	def test_dropped_delegate_row_keeps_non_payroll_finding_open(self):
+		# The generic A16 gate is still strict. Payroll-specific uncertainty must
+		# not weaken the existing non-payroll dropped-row auto-resolve protection.
+		first = _mk_run(self.owner)
+		agent_runs.record_delegate_run(
+			first,
+			self.inst,
+			[_finding()],
+			coverage={TOKEN: "evaluated"},
+			scope={"company": self.company},
+		)
+		name = frappe.db.get_value(FINDING, {"agent": SLUG, "state": "open"}, "name")
+		second = _mk_run(self.owner)
+		agent_runs.record_delegate_run(
+			second,
+			self.inst,
+			[],
+			coverage={TOKEN: "evaluated"},
+			dropped=[{"ref_doctype": "Company", "ref_name": self.company, "reason": "invalid"}],
+			scope={"company": self.company},
+		)
+		self.assertEqual(frappe.db.get_value(FINDING, name, "state"), "open")
 
 	def test_not_evaluable_persisted_when_all_required_unevaluated(self):
 		run = _mk_run(self.owner)

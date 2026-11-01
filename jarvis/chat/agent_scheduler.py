@@ -1609,23 +1609,22 @@ def _stamp_scope_and_watermark(
 	if review_backend:
 		config = frappe.parse_json(frappe.db.get_value(RUN, run_name, "assessment_config_json"))
 		scope = review_backend.scope_from_config(config)
+		values = {"scope_json": frappe.as_json(scope)}
+		permission_profile = _permission_profile_or_none(run_name, run_as_user)
+		if permission_profile is not None:
+			values["permission_profile"] = permission_profile
 		frappe.db.set_value(
 			RUN,
 			run_name,
-			{"scope_json": frappe.as_json(scope), "permission_profile": _permission_profile(run_as_user)},
+			values,
 			update_modified=False,
 		)
 		return scope
 
 	values: dict = {}
-	permission_profile = None
-	try:
-		permission_profile = _permission_profile(run_as_user)
+	permission_profile = _permission_profile_or_none(run_name, run_as_user)
+	if permission_profile is not None:
 		values["permission_profile"] = permission_profile
-	except Exception:
-		# A profile failure must not widen the run.  The installation's stamped
-		# value remains a conservative fallback for the delegate's coverage label.
-		permission_profile = None
 	scope = None
 	try:
 		scope = agent_scope.resolve_scope(inst)
@@ -1652,8 +1651,13 @@ def _stamp_scope_and_watermark(
 		scope = dict(scope)
 		# This value is bench-derived from the launch-time permission snapshot. It
 		# is scope metadata, not user configuration, so a delegate cannot turn a
-		# record-sliced read into a whole-workforce conclusion.
-		scope["scoped_visibility"] = _scope_has_scoped_visibility(permission_profile, inst)
+		# record-sliced read into a whole-workforce conclusion. Payroll leaves an
+		# unknown snapshot absent so its typed bundle fails closed.
+		scoped_visibility = _scope_has_scoped_visibility(permission_profile, inst)
+		if type(scoped_visibility) is bool:
+			scope["scoped_visibility"] = scoped_visibility
+		else:
+			scope.pop("scoped_visibility", None)
 		values["scope_json"] = frappe.as_json(scope)
 
 	if scope and scope.get("company") and scope.get("to_date"):
@@ -1690,10 +1694,7 @@ def _permission_profile(user: str) -> str:
 	from frappe.permissions import get_user_permissions
 
 	roles = sorted(frappe.get_roles(user))
-	try:
-		perms = get_user_permissions(user) or {}
-	except Exception:
-		perms = {}
+	perms = get_user_permissions(user) or {}
 	up_keys: dict = {}
 	for dt, entries in perms.items():
 		vals = sorted({(e.get("doc") if isinstance(e, dict) else str(e)) for e in (entries or [])})
@@ -1703,19 +1704,30 @@ def _permission_profile(user: str) -> str:
 	return json.dumps({"hash": digest, **summary})
 
 
-def _scope_has_scoped_visibility(permission_profile, inst) -> bool:
-	"""Read a fresh launch profile before falling back to an old install stamp."""
-	from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
-		_GL_SCOPED_DIMENSIONS,
-	)
+def _permission_profile_or_none(run_name: str, user: str) -> str | None:
+	"""Capture a profile without manufacturing an empty permission snapshot."""
+	try:
+		return _permission_profile(user)
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis agent: permission profile failed: {run_name}",
+			message=frappe.get_traceback(),
+		)
+		return None
 
-	if permission_profile:
-		try:
-			permissions = (json.loads(permission_profile) or {}).get("user_permissions") or {}
-			if any(permissions.get(dt) for dt in _GL_SCOPED_DIMENSIONS):
-				return True
-		except (TypeError, ValueError):
-			pass
+
+def _scope_has_scoped_visibility(permission_profile, inst) -> bool | None:
+	"""Use a fresh profile; payroll does not fall back from an unknown snapshot."""
+	from jarvis.chat.agent_catalog import registry_domain
+	from jarvis.chat.agent_visibility import is_payroll_domain, profile_scoped_visibility
+
+	domain = registry_domain(inst.get("agent"))
+	profile_state = profile_scoped_visibility(permission_profile, domain)
+	if is_payroll_domain(domain):
+		return profile_state
+	if profile_state is True:
+		return True
+	# Preserve the legacy non-payroll installation fallback exactly.
 	return bool(inst.get("scoped_visibility"))
 
 
@@ -1785,15 +1797,19 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 	# delegate spills this JSON verbatim into config.json - it does NOT read its own installation
 	# for these tunables. Note ``Run.scope_json`` is a bench-side field that never reaches the
 	# container; the run MESSAGE is the only bench->delegate channel, so config must ride HERE.
-	if scope and any(
-		scope.get(k) for k in ("prior_period_from", "prior_period_to", "record_scope", "scoped_visibility")
-	):
+	additional_scope = {}
+	if scope:
+		for key in ("prior_period_from", "prior_period_to", "record_scope"):
+			if scope.get(key):
+				additional_scope[key] = scope[key]
+		from jarvis.chat.agent_visibility import exact_bool
+
+		scoped_visibility = exact_bool(scope.get("scoped_visibility"))
+		if scoped_visibility is not None:
+			additional_scope["scoped_visibility"] = scoped_visibility
+	if additional_scope:
 		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
-			{
-				k: scope[k]
-				for k in ("prior_period_from", "prior_period_to", "record_scope", "scoped_visibility")
-				if scope.get(k)
-			}
+			additional_scope
 		)
 	explicit_config = _explicit_config(listing, inst)
 	if explicit_config:

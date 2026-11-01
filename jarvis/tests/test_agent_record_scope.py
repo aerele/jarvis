@@ -104,8 +104,24 @@ class TestComparisonPeriod(FrappeTestCase):
 		):
 			self.assertIn(value, prompt)
 
+	def test_exact_false_scoped_visibility_is_delivered_but_malformed_values_are_omitted(self):
+		listing = frappe._dict(agent_slug="payroll-prerun-auditor", config_keys="[]")
+		inst = frappe._dict(name="fake-install", config="{}")
+		with patch.object(agent_scheduler, "_explicit_config", return_value={}):
+			prompt = agent_scheduler._audit_prompt(listing, inst, "manual", {"scoped_visibility": False})
+		self.assertIn('"scoped_visibility": false', prompt)
+		for malformed in (None, 0, 1, "false"):
+			with (
+				self.subTest(malformed=malformed),
+				patch.object(agent_scheduler, "_explicit_config", return_value={}),
+			):
+				prompt = agent_scheduler._audit_prompt(
+					listing, inst, "manual", {"scoped_visibility": malformed}
+				)
+				self.assertNotIn("scoped_visibility", prompt)
+
 	def test_fresh_permission_profile_marks_scope_as_sliced(self):
-		inst = frappe._dict(agent="fake-scope-agent", config="{}", scoped_visibility=0)
+		inst = frappe._dict(agent="payroll-prerun-auditor", config="{}", scoped_visibility=0)
 		profile = json.dumps({"user_permissions": {"Employee": ["EMP-1"]}})
 		resolved = {"company": "Fake Company", "to_date": "2026-09-30"}
 		with (
@@ -121,6 +137,52 @@ class TestComparisonPeriod(FrappeTestCase):
 		with patch.object(agent_scheduler, "_explicit_config", return_value={}):
 			prompt = agent_scheduler._audit_prompt(listing, inst, "manual", stamped)
 		self.assertIn("scoped_visibility", prompt)
+
+	def test_unknown_payroll_profile_omits_the_visibility_flag(self):
+		inst = frappe._dict(agent="payroll-prerun-auditor", config="{}", scoped_visibility=0)
+		resolved = {"company": "Fake Company", "to_date": "2026-09-30"}
+		with (
+			patch.object(agent_scope, "resolve_scope", return_value=resolved),
+			patch.object(agent_scheduler, "_permission_profile", return_value="not json"),
+			patch("jarvis.chat.operator_review.backend", return_value=None),
+			patch.object(frappe.db, "sql", return_value=[frappe._dict(n=0, m=None)]),
+			patch.object(frappe.db, "set_value"),
+		):
+			stamped = agent_scheduler._stamp_scope_and_watermark("unused", inst, "test@example.invalid")
+		self.assertNotIn("scoped_visibility", stamped)
+
+	def test_non_payroll_keeps_the_legacy_installation_fallback(self):
+		profile_without_a_gl_slice = json.dumps({"user_permissions": {}})
+		legacy = frappe._dict(agent="not-a-bundled-agent", scoped_visibility=1)
+		payroll = frappe._dict(agent="payroll-prerun-auditor", scoped_visibility=1)
+		self.assertTrue(agent_scheduler._scope_has_scoped_visibility(profile_without_a_gl_slice, legacy))
+		self.assertFalse(agent_scheduler._scope_has_scoped_visibility(profile_without_a_gl_slice, payroll))
+
+
+class TestPayrollVisibilityAutoResolve(FrappeTestCase):
+	def test_payroll_auto_resolve_needs_two_exact_false_values(self):
+		inst = frappe._dict(agent="payroll-prerun-auditor", scoped_visibility=0)
+		profile_false = json.dumps({"user_permissions": {}})
+
+		def run(profile, persisted):
+			scope = {} if persisted is None else {"scoped_visibility": persisted}
+			return frappe._dict(
+				agent="payroll-prerun-auditor",
+				permission_profile=profile,
+				scope_json=json.dumps(scope),
+			)
+
+		self.assertFalse(agent_runs._scoped_visibility(run(profile_false, False), inst))
+		for profile, persisted in (
+			(None, False),
+			("not json", False),
+			(profile_false, None),
+			(profile_false, 0),
+			(profile_false, True),
+			(json.dumps({"user_permissions": {"Department": ["Finance"]}}), False),
+		):
+			with self.subTest(profile=profile, persisted=persisted):
+				self.assertTrue(agent_runs._scoped_visibility(run(profile, persisted), inst))
 
 
 class TestRecordScopedWriteback(FrappeTestCase):

@@ -658,36 +658,35 @@ def _watermark_drift(run_doc, scope: dict) -> bool:
 
 
 def _scoped_visibility(run_doc, inst) -> bool:
-	"""FIX 1 / A12: is this run's run-as identity record-sliced on a GL dimension?
+	"""Return whether this run must be treated as record-scoped.
 
-	A User Permission on a GL dimension (Cost Center / Project / Account / party …)
-	makes every aggregate the run-as user reads a SLICE — a numerically WRONG total,
-	not merely a narrower one — so a scoped run must NEVER auto-resolve findings it
-	could not see (closing an unseen blocker on a partial view is a silent
-	regression). Derived FRESH from the Run's stamped ``permission_profile`` (the
-	run-as user's user_permissions snapshotted AT LAUNCH — the authoritative signal),
-	so a User Permission added AFTER install is caught even though the installation's
-	``scoped_visibility`` flag (stamped only at map/backfill time) has gone stale.
-	Falls back to that stamped flag when the profile is absent (a legacy run, or one
-	whose profile computation failed)."""
+	Payroll needs two independent, exact ``False`` facts before it can auto-resolve:
+	the launch profile and the server-stamped scope. Any missing, malformed, or
+	conflicting value is scoped. Other domains retain the established profile-then-
+	installation fallback.
+	"""
 	import json as _json
 
+	from jarvis.chat.agent_catalog import registry_domain
+	from jarvis.chat.agent_visibility import exact_bool, is_payroll_domain, profile_scoped_visibility
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
-	from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
-		_GL_SCOPED_DIMENSIONS,
-	)
 
 	if run_doc.get("agent") in REVIEW_OPERATORS:
 		return False
-	profile = run_doc.get("permission_profile")
-	if profile:
+	domain = registry_domain(run_doc.get("agent") or inst.get("agent"))
+	profile_state = profile_scoped_visibility(run_doc.get("permission_profile"), domain)
+	if is_payroll_domain(domain):
 		try:
-			ups = (_json.loads(profile) or {}).get("user_permissions") or {}
-			# A GL-dimension key present AND carrying at least one value = a live slice.
-			if any(ups.get(dt) for dt in _GL_SCOPED_DIMENSIONS):
-				return True
-		except Exception:
-			pass
+			scope = _json.loads(run_doc.get("scope_json") or "{}")
+		except (TypeError, ValueError):
+			scope = {}
+		persisted_state = exact_bool(scope.get("scoped_visibility")) if isinstance(scope, dict) else None
+		# Only the pair (profile=False, persisted=False) proves a complete payroll
+		# view. It also prevents a delegate's later writeback from widening a run.
+		return not (profile_state is False and persisted_state is False)
+	if profile_state is True:
+		return True
+	# Preserve the legacy non-payroll fallback exactly.
 	return bool(inst.get("scoped_visibility"))
 
 
@@ -1121,8 +1120,15 @@ def record_delegate_run(
 			("company", "from_date", "to_date", "report_date", "prior_period_from", "prior_period_to")
 			if record_scope
 			else ("prior_period_from", "prior_period_to")
-		)
-		pinned = {k: base[k] for k in pinned_keys if k in base}
+		) + ("scoped_visibility",)
+		pinned = {k: base[k] for k in pinned_keys if k in base and k != "scoped_visibility"}
+		# Keep only the typed launch fact. A malformed legacy value is treated as
+		# unknown and removed rather than copied into a delegate-controlled scope.
+		from jarvis.chat.agent_visibility import exact_bool
+
+		scoped_visibility = exact_bool(base.get("scoped_visibility"))
+		if scoped_visibility is not None:
+			pinned["scoped_visibility"] = scoped_visibility
 		base.update(scope)
 		for key in pinned_keys:
 			if key in pinned:
