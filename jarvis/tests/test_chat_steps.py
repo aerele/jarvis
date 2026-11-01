@@ -242,10 +242,16 @@ class TestStripLoosePreambles(FrappeTestCase):
 		answer = "This already exists, so I have stopped before drafting anything."
 		self.assertEqual(strip_loose_preambles(f"{p1}\n\n{p2}\n\n{answer}", [p1, p2]), answer)
 
-	def test_cuts_a_preamble_between_answer_paragraphs(self):
+	def test_a_preamble_between_answer_paragraphs_stays(self):
+		# Only leading commentary is cut: a matching paragraph inside the answer is the answer.
 		final = "First part.\n\nChecking the ledger now.\n\nSecond part."
+		self.assertEqual(strip_loose_preambles(final, ["Checking the ledger now."]), final)
+
+	def test_each_preamble_is_cut_once(self):
+		final = "Checking the ledger.\n\nChecking the ledger.\n\nThe balance is 87,000 INR."
 		self.assertEqual(
-			strip_loose_preambles(final, ["Checking the ledger now."]), "First part.\n\nSecond part."
+			strip_loose_preambles(final, ["Checking the ledger."]),
+			"Checking the ledger.\n\nThe balance is 87,000 INR.",
 		)
 
 	def test_a_phrase_inside_an_answer_paragraph_stays(self):

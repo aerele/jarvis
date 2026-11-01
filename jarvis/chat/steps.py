@@ -182,18 +182,22 @@ def strip_loose_preambles(final: str | None, preambles: list[str]) -> str | None
 	The Claude subscription runtime holds text written before a tool call back and
 	sends it only as a preamble item, so it never rides the streamed reply and the
 	relay cannot record it as a step (aerele/jarvis#2367). The runtime's final text
-	can still carry it when it falls back to the CLI's whole-turn result. Such a
-	preamble is cut only where it stands as a whole paragraph, so a matching phrase
-	inside an answer paragraph stays. Kept whole when nothing else would remain.
+	can still carry it when it falls back to the CLI's whole-turn result, where that
+	commentary comes first. Only LEADING paragraphs that equal a preamble are cut,
+	each preamble once, so a paragraph of the answer itself is never touched, even
+	if it repeats a progress line word for word. Kept whole when nothing would remain.
 	"""
 	if not final or not preambles:
 		return final
-	wanted = {p.strip() for p in preambles if p and p.strip()}
-	paragraphs = re.split(r"\n\s*\n", final)
-	kept = [para for para in paragraphs if para.strip() not in wanted]
-	if len(kept) == len(paragraphs):
+	wanted = [p.strip() for p in preambles if p and p.strip()]
+	paragraphs = re.split(r"\n\s*\n", final.strip())
+	cut = 0
+	while cut < len(paragraphs) and paragraphs[cut].strip() in wanted:
+		wanted.remove(paragraphs[cut].strip())
+		cut += 1
+	if not cut:
 		return final
-	answer = "\n\n".join(kept).strip()
+	answer = "\n\n".join(paragraphs[cut:]).strip()
 	return answer if answer else final
 
 

@@ -1648,6 +1648,29 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual([s[1] for s in rec.steps], [p1, p2])
 		self.assertEqual(rec.terminal[1]["text"], answer)
 
+	def test_a_growing_never_streamed_preamble_keeps_only_its_latest_text(self):
+		answer = "Done.\n\nThe invoice is overdue by 41 days, and no payment is recorded against it."
+		rec = self._run(
+			[
+				("item", {"kind": "preamble", "phase": "update", "itemId": "c1", "progressText": "Done."}),
+				(
+					"item",
+					{
+						"kind": "preamble",
+						"phase": "end",
+						"itemId": "c1",
+						"progressText": "Done. Checking the ledger.",
+					},
+				),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": answer, "delta": answer}),
+			],
+			answer,
+		)
+		# "Done." grew into the longer line, so the answer's own "Done." stays.
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
 	def test_a_never_streamed_preamble_inside_an_answer_paragraph_stays(self):
 		answer = "I see. The invoice is overdue by 41 days."
 		rec = self._run(

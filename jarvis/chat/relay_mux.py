@@ -847,7 +847,12 @@ class RelayMux:
 			self._record_preamble_step(lane, stripped)
 			return
 		if stripped and is_preamble_step(stripped) and stripped not in lane.loose_preambles:
-			lane.loose_preambles.append(stripped)
+			# A growing resend replaces the partial it extends (same rule as
+			# _record_preamble_step), so a short partial never lingers to match.
+			if lane.loose_preambles and stripped.startswith(lane.loose_preambles[-1]):
+				lane.loose_preambles[-1] = stripped
+			else:
+				lane.loose_preambles.append(stripped)
 		self._offer_step(lane, text)
 
 	def _record_preamble_step(self, lane: _Lane, text: str) -> None:
