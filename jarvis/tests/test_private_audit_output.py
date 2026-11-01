@@ -1,5 +1,6 @@
 """Exercise private source output through the real bound delegate dispatcher."""
 
+import hashlib
 import json
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -25,7 +26,16 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			self.slug,
 			self.actor,
 			self.key,
-			_snapshot(["jarvis__query", "jarvis__run_report"], "auditor", []),
+			_snapshot(
+				[
+					"jarvis__query",
+					"jarvis__run_report",
+					"jarvis__get_purchase_match_inputs",
+					"jarvis__get_receivables_review_inputs",
+				],
+				"auditor",
+				[],
+			),
 		)
 		self.conv = frappe.get_doc(
 			{"doctype": "Jarvis Conversation", "title": "Private output test", "session_key": self.key}
@@ -53,11 +63,12 @@ class TestPrivateAuditOutput(FrappeTestCase):
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- remove committed test fixtures
 
 	def _dispatch(self, payload, *, mode=_private_output.MODE, tool="query", key=None):
-		args = (
-			{"spec": {"from": "ToDo", "select": ["name"], "limit": 1000}}
-			if tool == "query"
-			else {"report_name": "Fake report"}
-		)
+		if tool == "query":
+			args = {"spec": {"from": "ToDo", "select": ["name"], "limit": 1000}}
+		elif tool in _private_output.PRIVATE_SOURCE_TOOLS:
+			args = {}
+		else:
+			args = {"report_name": "Fake report"}
 		with (
 			patch.dict(registry._TOOLS, {tool: lambda **kwargs: payload}),
 			patch("jarvis.api._get_header", return_value=None),
@@ -100,6 +111,74 @@ class TestPrivateAuditOutput(FrappeTestCase):
 		self.assertEqual(len(receipt["data"]["sha256"]), 64)
 		self.assertNotIn("more_rows", receipt["data"])
 		self.assertNotIn(CANARY, message)
+
+	def test_private_review_input_leaves_only_its_safe_receipt(self):
+		payload = {
+			"rows": [
+				{
+					"source_digest": "a" * 64,
+					"scope": {"company": "Fake Co"},
+					"datasets": {"invoices": [{"bill_no": CANARY, "amount": 0.0}]},
+				}
+			]
+		}
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			with self.subTest(tool=tool), patch("jarvis.api.publish_realtime_tool_result") as published:
+				result = self._dispatch(payload, tool=tool)
+			self.assertTrue(result["ok"], result)
+			self.assertEqual(result["result_mode"], _private_output.MODE)
+			self.assertIsInstance(result["data"], str)
+			self.assertIn('"amount":0.0', result["data"])
+			self.assertEqual(json.loads(result["data"]), payload)
+			self.assertTrue(result["private_output"]["private_output"])
+			self.assertEqual(result["private_output"]["count"], 1)
+			self.assertEqual(result["private_output"]["bytes"], len(result["data"].encode()))
+			self.assertEqual(
+				result["private_output"]["sha256"],
+				hashlib.sha256(result["data"].encode()).hexdigest(),
+			)
+			self.assertNotIn(CANARY, str(published.call_args))
+			message = frappe.get_last_doc("Jarvis Chat Message", {"conversation": self.conv.name})
+			self.assertNotIn(CANARY, message.tool_result)
+			self.assertEqual(json.loads(message.tool_result)["data"], result["private_output"])
+			step = frappe.get_last_doc("Jarvis Agent Run Step", {"run": self.run})
+			self.assertNotIn(CANARY, step.detail)
+
+	def test_private_review_input_rejects_an_unsealed_or_non_singleton_envelope(self):
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			for payload in (
+				{"rows": []},
+				{"rows": [{"source_digest": "a" * 64}, {"source_digest": "b" * 64}]},
+				{"rows": [{"source_digest": "not-a-digest", "secret": CANARY}]},
+				{"rows": [{"source_digest": "a" * 64}], "result": []},
+			):
+				with self.subTest(tool=tool, payload=payload):
+					result = self._dispatch(payload, tool=tool)
+					self.assertFalse(result["ok"], result)
+					self.assertNotIn("data", result)
+					self.assertNotIn(CANARY, str(result))
+
+	def test_ordinary_review_input_never_claims_private_capture(self):
+		payload = {"rows": [{"source_digest": "a" * 64}]}
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			with self.subTest(tool=tool):
+				result = self._dispatch(payload, tool=tool, mode=None)
+				self.assertTrue(result["ok"], result)
+				self.assertNotIn("result_mode", result)
+				self.assertNotIn("private_output", result)
+
+	def test_private_review_input_rejects_model_selected_arguments_before_dispatch(self):
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			with self.subTest(tool=tool), patch("jarvis.api._run_tool") as execute:
+				result = api._dispatch_from_session(
+					self.actor,
+					self.key,
+					tool,
+					{"company": "model-selected"},
+					result_mode=_private_output.MODE,
+				)
+				self.assertFalse(result["ok"], result)
+				execute.assert_not_called()
 
 	def test_ordinary_agent_output_is_still_guarded(self):
 		payload = {"rows": [{"name": f"FAKE-{i}", "value": "x" * 200} for i in range(1000)]}
