@@ -479,6 +479,7 @@ def gate_lcv(doc, *, lock=False, previous_links=None):
 		try:
 			result = _classify(pi)
 		except (
+			LCVSourceTaxNeedsInput,
 			PermissionDeniedError,
 			frappe.PermissionError,
 			frappe.QueryDeadlockError,

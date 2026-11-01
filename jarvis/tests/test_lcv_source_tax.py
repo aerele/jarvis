@@ -413,11 +413,9 @@ class TestLCVSourceTax(LandedCostFixtures):
 			amend_doc(LCV, doc.name)
 		self.assertEqual(before, self.snapshot())
 
-	def test_controller_write_cannot_bypass_tax(self):
-		self.require_ic()
+	def test_controller_write_is_refused_before_tax_gate(self):
 		from jarvis.tools.run_method import _run_doc_method
 
-		self.invoice = self.taxed_invoice(restricted=True)
 		doc = self.legacy_draft()
 		controller = type(doc)
 		called = []
@@ -427,9 +425,16 @@ class TestLCVSourceTax(LandedCostFixtures):
 			called.append(self.name)
 			self.save()
 
-		with patch.object(controller, "test_save_lcv", save_lcv, create=True):
-			with self.assertRaises(LCVSourceTaxNeedsInput):
+		with (
+			patch.object(controller, "test_save_lcv", save_lcv, create=True),
+			patch(
+				"jarvis.tools._lcv_source_tax.gate_lcv",
+				side_effect=AssertionError("must not take source locks"),
+			) as gate,
+		):
+			with self.assertRaises(PermissionDeniedError):
 				_run_doc_method("test_save_lcv", LCV, doc.name, {})
+		gate.assert_not_called()
 		self.assertEqual(called, [])
 
 	def test_held_sheet_marks_tax_gap_as_invalid(self):
