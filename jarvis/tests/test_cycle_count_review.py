@@ -385,6 +385,45 @@ class TestCycleCountOutput(FrappeTestCase):
 		with self.assertRaisesRegex(frappe.ValidationError, "captured scope"):
 			self.check(output, data)
 
+	def test_oversized_result_can_close_with_typed_truncated_output(self):
+		"""The private bundle may return an empty, sealed oversized-result marker."""
+		data = snapshot()
+		coverage = {
+			review.TOKEN: {
+				"state": "truncated",
+				"reason_code": "run_truncated_watermark",
+				"detail": "The count-plan findings exceed the supported result size. Reduce the warehouse scope or line limit and run again.",
+			}
+		}
+		output = {
+			"findings": [],
+			"coverage": coverage,
+			"scope": data["scope"],
+			"truncated": True,
+			"rows_consumed": sum(data["source_counts"].values()),
+			"integrity_digest": review.digest(
+				{
+					"input_digest": data["source_digest"],
+					"scope": data["scope"],
+					"findings": [],
+					"coverage": coverage,
+				}
+			),
+		}
+
+		findings, returned_coverage, ready = self.check(output, data)
+		self.assertEqual(findings, [])
+		self.assertEqual(returned_coverage, coverage)
+		self.assertFalse(ready)
+		self.assertIsNone(
+			review.validate_envelope(
+				frappe._dict(input_snapshot_json=frappe.as_json(data)),
+				ready,
+				output["truncated"],
+				output["rows_consumed"],
+			)
+		)
+
 	def test_private_movement_policy_can_exclude_a_transfer_without_public_reclassification(self):
 		data = snapshot()
 		data["datasets"]["ledger"][0].update(voucher_type="Stock Entry", voucher_no="STE-TRANSFER")

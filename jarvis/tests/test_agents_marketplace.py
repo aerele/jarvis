@@ -567,6 +567,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 			0,
 		)
 
+	def test_sync_agent_listings_writes_cycle_count_catalog_version(self):
+		"""The bundled catalog version must match the paired private assessment bundle."""
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(frappe.db.get_value(LISTING, "cycle-count-planner-operator", "version"), "0.2.3")
+
 	def test_get_agent_returns_config_keys(self):
 		agent_catalog.sync_agent_listings()
 		frappe.set_user(self.owner)
