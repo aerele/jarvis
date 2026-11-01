@@ -70,6 +70,7 @@ NOT_RENAMABLE = (
 	"Jarvis Shared Skill Slug",
 	"Jarvis Trigger Activity",
 	"Jarvis Wiki Graph History",
+	"Jarvis Physical Count",
 )
 
 NOT_RENAMABLE_CHILD = (
@@ -86,6 +87,7 @@ NOT_RENAMABLE_CHILD = (
 	"Jarvis Macro Step",
 	"Jarvis Pending Action Waiter",
 	"Jarvis User Model Usage",
+	"Jarvis Physical Count Item",
 )
 
 # Doctypes whose definition allows renaming (System Manager, from Desk). Kept.
