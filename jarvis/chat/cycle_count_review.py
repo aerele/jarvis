@@ -16,6 +16,7 @@ from decimal import Decimal, InvalidOperation
 import frappe
 from frappe.database import get_db
 
+from jarvis.chat import cycle_count_policy
 from jarvis.chat.purchase_match import digest
 
 AGENT = "cycle-count-planner-operator"
@@ -553,7 +554,7 @@ def _number(value) -> Decimal:
 		frappe.throw("A quoted plan value is not a finite number.")
 
 
-def is_countable_item(item) -> bool:
+def is_countable_item(item, *, as_of: date | None = None) -> bool:
 	"""Return whether an Item can still be included in a human count plan.
 
 	ERPNext stores ``end_of_life`` as a future Date (often 2099-12-31), not a
@@ -565,7 +566,7 @@ def is_countable_item(item) -> bool:
 	if not end_of_life:
 		return True
 	try:
-		return frappe.utils.getdate(end_of_life) > _site_date()
+		return frappe.utils.getdate(end_of_life) > (as_of or _site_date())
 	except Exception:
 		return False
 
@@ -662,6 +663,13 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 		frappe.throw("Count-plan output must use this run's captured scope and evidence.")
 	if stored.get("complete") and not _has_current_source_schema(stored):
 		return [], _unavailable("record_coverage_insufficient", SOURCE_SCHEMA_FAILURE_DETAIL), False
+	if stored.get("complete"):
+		try:
+			expected = cycle_count_policy.evaluate(stored)
+		except cycle_count_policy.PolicyError:
+			return [], _unavailable("record_coverage_insufficient", SOURCE_SCHEMA_FAILURE_DETAIL), False
+	else:
+		expected = None
 	if integrity_digest != digest(
 		{"input_digest": stored["source_digest"], "scope": scope, "findings": findings, "coverage": coverage}
 	):
@@ -762,7 +770,7 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 				frappe.throw("The proposal contains an unknown or duplicate stock line.")
 			seen.add(key)
 			item = items.get(line["item_code"])
-			if not is_countable_item(item):
+			if not is_countable_item(item, as_of=_date(stored["config"]["plan_date"], "plan_date")):
 				frappe.throw("The proposal contains an unavailable stock item.")
 			if line["stock_uom"] != item["stock_uom"]:
 				frappe.throw("The proposed stock unit does not match the captured item.")
@@ -804,6 +812,18 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 		planned_total += proposal["lines_planned"]
 	if planned_total > stored["config"]["line_limit"]:
 		frappe.throw("The plan exceeds the configured total count-list size.")
+	# A digest supplied by the delegate proves only that the delegate can hash its
+	# own payload.  The sealed source snapshot is the authority: require its
+	# canonical evaluator result so a model cannot select a different valid line,
+	# change a cadence class, or move a globally deferred line into the plan and
+	# then recompute the public digest.
+	if (
+		findings != expected["findings"]
+		or coverage != expected["coverage"]
+		or scope != expected["scope"]
+		or integrity_digest != expected["integrity_digest"]
+	):
+		frappe.throw("Count-plan output does not match the sealed policy result.")
 	return findings, coverage, bool(planned_total)
 
 
