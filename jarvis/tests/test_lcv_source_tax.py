@@ -19,6 +19,11 @@ from jarvis.tools.submit_doc import submit_doc
 from jarvis.tools.update_doc import update_doc
 
 LCV = "Landed Cost Voucher"
+FIXED_SOURCE_GAP = {
+	"purchase_invoice": "fixture-source",
+	"code": "forced_source_gap",
+	"message": "Fixed source-tax gap.",
+}
 
 
 class TestLCVSourceTax(LandedCostFixtures):
@@ -107,6 +112,92 @@ class TestLCVSourceTax(LandedCostFixtures):
 		doc = frappe.get_doc({"doctype": LCV, **self.values(amounts=[self.invoice.base_total])}).insert()
 		frappe.set_user(self.reader)
 		return doc
+
+	def test_fixed_classifier_gap_blocks_single_create_without_india_compliance(self):
+		before = self.snapshot()
+		with patch("jarvis.tools._lcv_source_tax._classify", return_value=FIXED_SOURCE_GAP) as classify:
+			with self.assertRaises(LCVSourceTaxNeedsInput) as caught:
+				create_doc(LCV, self.values(amounts=[self.invoice.base_total]))
+		classify.assert_called_once()
+		self.assertEqual(caught.exception.assessment["issues"][0]["code"], "forced_source_gap")
+		self.assertEqual(before, self.snapshot())
+
+	def test_fixed_classifier_gap_rolls_back_a_valid_prior_batch_create_without_india_compliance(self):
+		frappe.set_user("Administrator")
+		other = self.make_invoice(80)
+		frappe.set_user(self.reader)
+		good = self.values(amounts=[self.invoice.base_total])
+		bad = self.values(invoices=[other], amounts=[other.base_total])
+		before = self.snapshot()
+
+		def classify(invoice):
+			if invoice.name == self.invoice.name:
+				return {"purchase_invoice": invoice.name, "treatment": "no_tax"}
+			return FIXED_SOURCE_GAP
+
+		with patch("jarvis.tools._lcv_source_tax._classify", side_effect=classify) as classifier:
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				create_doc(docs=[{"doctype": LCV, "values": good}, {"doctype": LCV, "values": bad}])
+		self.assertEqual(classifier.call_count, 2)
+		self.assertEqual(before, self.snapshot())
+
+	def test_fixed_classifier_gap_blocks_update_and_submit_without_india_compliance(self):
+		doc = self.legacy_draft()
+		before = self.snapshot()
+		before_doc = frappe.get_doc(LCV, doc.name).as_dict()
+		posting_date = str(doc.posting_date)
+		with patch("jarvis.tools._lcv_source_tax._classify", return_value=FIXED_SOURCE_GAP) as classify:
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				update_doc(LCV, doc.name, {"posting_date": "2099-01-01"})
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				submit_doc(LCV, doc.name)
+		self.assertEqual(classify.call_count, 2)
+		doc.reload()
+		self.assertEqual(str(doc.posting_date), posting_date)
+		self.assertEqual(doc.docstatus, 0)
+		self.assertEqual(frappe.get_doc(LCV, doc.name).as_dict(), before_doc)
+		self.assertEqual(before, self.snapshot())
+
+	def test_fixed_classifier_gap_blocks_amend_without_india_compliance(self):
+		from jarvis.tools.amend_doc import amend_doc
+
+		doc = self.legacy_draft()
+		frappe.db.set_value(LCV, doc.name, "docstatus", 2)
+		doc.reload()
+		before = self.snapshot()
+		with patch("jarvis.tools._lcv_source_tax._classify", return_value=FIXED_SOURCE_GAP) as classify:
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				amend_doc(LCV, doc.name)
+		classify.assert_called_once()
+		self.assertEqual(doc.reload().docstatus, 2)
+		self.assertEqual(before, self.snapshot())
+
+	def test_fixed_classifier_gap_blocks_single_and_batch_workflow_without_india_compliance(self):
+		from jarvis.tools.apply_workflow_action import apply_workflow_action
+
+		doc = self.legacy_draft()
+		before = self.snapshot()
+		with (
+			patch("jarvis.tools._lcv_source_tax._classify", return_value=FIXED_SOURCE_GAP) as classify,
+			patch("jarvis.tools.apply_workflow_action.get_workflow_name", return_value="LCV approval"),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_workflow",
+				return_value=frappe._dict(states=[frappe._dict(state="Submitted", doc_status=1)]),
+			),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_transitions",
+				return_value=[frappe._dict(action="Approve", next_state="Submitted")],
+			),
+			patch("jarvis.tools.apply_workflow_action.apply_workflow") as apply,
+		):
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				apply_workflow_action(LCV, doc.name, "Approve")
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				apply_workflow_action(LCV, action="Approve", names=[doc.name])
+		self.assertEqual(classify.call_count, 2)
+		apply.assert_not_called()
+		self.assertEqual(doc.reload().docstatus, 0)
+		self.assertEqual(before, self.snapshot())
 
 	def test_pos_restriction_with_zero_item_flags_blocks_without_effects(self):
 		self.require_ic()
