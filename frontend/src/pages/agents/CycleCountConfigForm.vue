@@ -93,7 +93,7 @@
 			<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
 				<FormControl
 					type="number"
-					label="Items per warehouse"
+					label="Items across this run"
 					description="Choose a whole number from 1 to 40."
 					min="1"
 					max="40"
