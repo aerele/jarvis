@@ -1421,6 +1421,64 @@ describe("AP configuration readiness", () => {
 	});
 });
 
+describe("FEFO configuration readiness", () => {
+	function fefoAgent(issues = {}, installation = {}) {
+		return baseAgent({
+			agent_slug: "fefo-expiry-compliance-auditor",
+			title: "FEFO Expiry Compliance Auditor",
+			nature: "Auditor",
+			config_keys: '["fefo.reviewer","fefo.near_expiry_days","fefo.test_declaration"]',
+			installation: installedInstallation({ configuration_issues: issues, ...installation }),
+		});
+	}
+
+	function runButton(wrapper) {
+		return wrapper.find('[data-label="Run Now"]');
+	}
+
+	it("blocks an incomplete policy before Run Now and exposes field guidance", async () => {
+		const issues = {
+			fefo_reviewer: "Name the expiry reviewer in the agent settings.",
+			fefo_near_expiry_days: "Set near-expiry days to a whole number from 1 through 3650.",
+		};
+		const wrapper = await mountDetail(fefoAgent(issues));
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+		expect(wrapper.text()).toContain(
+			"Enter and save the expiry reviewer and near-expiry window in Configure before running."
+		);
+		await runButton(wrapper).trigger("click");
+		expect(api.runAgentNow).not.toHaveBeenCalled();
+		await wrapper.find('[data-label="Complete configuration"]').trigger("click");
+		expect(wrapper.findComponent({ name: "ConfigForm" }).props("validationErrors")).toEqual(
+			issues
+		);
+	});
+
+	it("allows a complete FEFO policy to run", async () => {
+		const wrapper = await mountDetail(fefoAgent({}));
+		expect(runButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("blocks a new automatic schedule but keeps a legacy schedule disableable", async () => {
+		routeMock.hash = "#configure";
+		const issues = { fefo_reviewer: "Name the expiry reviewer in the agent settings." };
+		const blocked = await mountDetail(fefoAgent(issues));
+		expect(blocked.text()).toContain(
+			"Complete the expiry reviewer and near-expiry window in Configure before enabling an automatic schedule."
+		);
+		expect(blocked.text()).not.toContain("Run automatically");
+
+		const legacy = await mountDetail(fefoAgent(issues, { schedule_enabled: 1 }));
+		api.setAgentSchedule.mockResolvedValueOnce({ ok: true });
+		await legacy.find('[data-label="Turn off automatic schedule"]').trigger("click");
+		await flushPromises();
+		expect(api.setAgentSchedule).toHaveBeenCalledWith(
+			"INST-1",
+			expect.objectContaining({ schedule_enabled: 0 })
+		);
+	});
+});
+
 describe("operator-withdrawn (install_disabled) detail", () => {
 	it("only enables an operator with a server-declared manual dispatch path", async () => {
 		for (const supported of [false, true]) {

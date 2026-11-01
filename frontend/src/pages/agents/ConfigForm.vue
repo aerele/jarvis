@@ -1,5 +1,5 @@
 <template>
-	<fieldset :disabled="operatorReview && saving" class="min-w-0">
+	<fieldset :disabled="requiresConfiguration && saving" class="min-w-0">
 		<p class="text-sm text-ink-gray-6">
 			{{
 				operatorReview
@@ -8,7 +8,9 @@
 						: arReview
 							? "AR review includes older open receivables, uses the evidence cutoff and prepares unsent reminder text only. Manual runs; no sending, Dunning creation or accounting changes."
 							: "AP document review uses the company, fiscal period, evidence cutoff and matching settings below. Manual runs only. Preview creates no review requests; live review never submits or pays an invoice."
-					: "Settings this agent reads when it runs. Leave a field empty to use the default."
+					: fefoConfiguration
+						? "Expiry compliance needs a named reviewer and a near-expiry window. Save both settings before running an audit."
+						: "Settings this agent reads when it runs. Leave a field empty to use the default."
 			}}
 		</p>
 		<div
@@ -41,7 +43,7 @@
 			<p v-if="defaultsMessage" class="mt-2">{{ defaultsMessage }}</p>
 		</div>
 		<div
-			v-if="operatorReview && Object.keys(shownErrors).length"
+			v-if="requiresConfiguration && Object.keys(shownErrors).length"
 			class="mt-3 rounded-lg border border-outline-gray-2 bg-surface-gray-1 p-3 text-sm text-ink-gray-7"
 			role="status"
 		>
@@ -161,9 +163,16 @@
 		<div class="mt-4">
 			<Button label="Save configuration" :loading="saving" @click="save" />
 			<ErrorMessage class="mt-2" :message="saveError" />
-			<p v-if="operatorReview" class="mt-2 text-p-xs text-ink-gray-5">
-				You can save unfinished setup. Run Now stays unavailable until all required
-				settings are valid and saved. Suggestions are not applied to a run until you save.
+			<p v-if="requiresConfiguration" class="mt-2 text-p-xs text-ink-gray-5">
+				<template v-if="operatorReview">
+					You can save unfinished setup. Run Now stays unavailable until all required
+					settings are valid and saved. Suggestions are not applied to a run until you
+					save.
+				</template>
+				<template v-else>
+					You can save unfinished setup. Run Now stays unavailable until all required
+					settings are valid and saved.
+				</template>
 			</p>
 		</div>
 	</fieldset>
@@ -225,6 +234,8 @@ const agentSpecificFields = computed(() =>
 const operatorReview = computed(() => props.configKeys.includes("review_scope"));
 const arReview = computed(() => props.configKeys.includes("settlement_hold_days"));
 const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
+const fefoConfiguration = computed(() => props.configKeys.includes("fefo.reviewer"));
+const requiresConfiguration = computed(() => operatorReview.value || fefoConfiguration.value);
 const defaultsData = ref(null);
 const defaultsLoading = ref(false);
 const defaultsMessage = ref("");

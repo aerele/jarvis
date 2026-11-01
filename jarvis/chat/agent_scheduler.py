@@ -1271,6 +1271,15 @@ def _launch_audit(
 			).format(listing.status or "unknown")
 		)
 
+	# FEFO has a mandatory owner policy that the bundle cannot safely infer. The
+	# current caller is the run-as user on both manual and scheduled paths, so this
+	# is the authoritative preflight before the capability check, savepoint, run,
+	# conversation, session, or fleet request.
+	if listing.agent_slug == "fefo-expiry-compliance-auditor":
+		from jarvis.chat.fefo_expiry_compliance import assert_configuration
+
+		assert_configuration(inst)
+
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
 	# refuse every call the delegate makes — record_agent_run included — so the run

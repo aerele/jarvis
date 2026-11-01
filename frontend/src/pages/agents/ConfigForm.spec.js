@@ -948,6 +948,26 @@ describe("per-agent gating via the configKeys prop", () => {
 		});
 	});
 
+	it("does not claim blank FEFO policy fields use defaults", () => {
+		const w = mountForm(
+			{ fefo: {} },
+			{
+				configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"],
+				validationErrors: {
+					fefo_reviewer: "Name the expiry reviewer in the agent settings.",
+					fefo_near_expiry_days:
+						"Set near-expiry days to a whole number from 1 through 3650.",
+				},
+			},
+		);
+		expect(w.text()).toContain(
+			"Expiry compliance needs a named reviewer and a near-expiry window.",
+		);
+		expect(w.text()).not.toContain("Leave a field empty to use the default.");
+		expect(w.text()).toContain("Name the expiry reviewer in the agent settings.");
+		expect(w.text()).toContain("Set near-expiry days to a whole number from 1 through 3650.");
+	});
+
 	it("FEFO fields load and preserve a saved owner policy", async () => {
 		const configKeys = ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"];
 		const config = {

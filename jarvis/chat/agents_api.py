@@ -26,6 +26,7 @@ from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import (
 	has_jarvis_admin_access,
 	is_skill_reviewer,
+	is_valid_unattended_owner,
 	message_origin,
 	refuse_in_tool_dispatch,
 	require_jarvis_admin,
@@ -496,6 +497,8 @@ def get_agent(agent_slug: str) -> dict:
 	(DESIGN-V3 §8.3 / D39). Any authenticated user may read (listing perms =
 	All read); the ``installation`` block is the caller's own install or None.
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
+	from jarvis.chat.fefo_expiry_compliance import AGENT as FEFO_EXPIRY_AGENT
+	from jarvis.chat.fefo_expiry_compliance import configuration_issues as fefo_configuration_issues
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 	from jarvis.chat.operator_review import backend
 
@@ -616,6 +619,11 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif listing.agent_slug == FEFO_EXPIRY_AGENT:
+			# The FEFO bundle has no defaults for its reviewer or expiry window. Surface
+			# saved-state issues before a person can request a run; _launch_audit checks
+			# the same contract again as the run-as identity.
+			i["configuration_issues"] = fefo_configuration_issues(i.config or "{}")
 		out["installation"] = i
 
 	if is_sm and not _masked:
@@ -1314,6 +1322,31 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "enabled": doc.enabled}}
 
 
+def _assert_fefo_schedule_configuration(doc) -> None:
+	"""Validate a FEFO schedule as its eventual run-as identity.
+
+	An unattended schedule must not accept a policy that its first tick would
+	reject.  The current settings have no data read of their own, but use the
+	same run-as boundary as the shared launch path so a future permission-bound
+	FEFO setting cannot silently be checked as the configuring user.
+	"""
+	from jarvis.chat.fefo_expiry_compliance import AGENT as FEFO_EXPIRY_AGENT
+	from jarvis.chat.fefo_expiry_compliance import assert_configuration
+
+	if doc.agent != FEFO_EXPIRY_AGENT:
+		return
+	run_as = (doc.run_as_user or "").strip()
+	if not is_valid_unattended_owner(run_as):
+		frappe.throw(
+			_(
+				"This agent needs an enabled non-system run-as user before you can enable an "
+				"automatic schedule."
+			)
+		)
+	with impersonate(run_as):
+		assert_configuration(doc)
+
+
 @frappe.whitelist(methods=["POST"])
 def set_schedule(
 	installation: str,
@@ -1345,6 +1378,7 @@ def set_schedule(
 		if doc.agent in REVIEW_OPERATORS:
 			frappe.throw(_("Operator evidence review supports manual runs only."))
 		assert_installable(doc.agent)
+		_assert_fefo_schedule_configuration(doc)
 	if schedule_enabled is not None:
 		doc.schedule_enabled = int(schedule_enabled or 0)
 	if schedule_frequency is not None:
