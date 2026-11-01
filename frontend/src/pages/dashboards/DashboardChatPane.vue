@@ -987,6 +987,20 @@ function removeCard(token) {
 	pendingCards.value = pendingCards.value.filter((c) => c.token !== token);
 }
 
+// `refreshPending()` replaces card objects. A direct action can therefore still
+// hold the old object when its keep-card response arrives. Always update the
+// current rendered token instead of mutating the stale action argument.
+function setCurrentCardBusy(view, busy) {
+	if (!dashboardViewIsCurrent(view)) return false;
+	const card = pendingCards.value.find(
+		(candidate) =>
+			candidate.token === view.token && candidate.conversation === view.conversation
+	);
+	if (!card) return false;
+	card.busy = busy;
+	return true;
+}
+
 function settleSafetyUpdate(token, message) {
 	const seen = safetySettledTokens.value.has(token);
 	safetySettledTokens.value = new Set(safetySettledTokens.value).add(token);
@@ -1114,7 +1128,7 @@ async function approve(pa) {
 				emit("activity");
 				return;
 			}
-			if (keepCard) pa.busy = false;
+			if (keepCard) setCurrentCardBusy(view, false);
 			else removeCard(view.token);
 			// the parked run resumes server-side after a confirm: refresh both the
 			// transcript (receipt chip) and anything list-shaped upstream
@@ -1162,7 +1176,7 @@ async function dismiss(pa) {
 				scheduleRefetch(view);
 				return;
 			}
-			if (keepCard) pa.busy = false;
+			if (keepCard) setCurrentCardBusy(view, false);
 			else removeCard(view.token);
 			scheduleRefetch(view);
 		}

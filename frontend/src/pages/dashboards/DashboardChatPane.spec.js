@@ -348,6 +348,7 @@ describe("DashboardChatPane pending-card freshness", () => {
 		listPendingConfirmations.mockReset();
 		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: [] } });
 		confirmTool.mockReset();
+		dismissTool.mockReset();
 	});
 	const deferred = () => {
 		let resolve;
@@ -560,6 +561,113 @@ describe("DashboardChatPane pending-card freshness", () => {
 		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
 		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
 	});
+
+	it.each(["Approve", "Dismiss"])(
+		"keeps the current %s card retryable after a concurrent resync without changing another chat",
+		async (actionLabel) => {
+			vi.useFakeTimers();
+			try {
+				const firstAction = deferred();
+				const retryAction = deferred();
+				const token = `keep-${actionLabel.toLowerCase()}`;
+				const card = {
+					token,
+					conversation: "conv1",
+					tool: "update_doc",
+					summary: `${actionLabel} stays retryable`,
+					pending_card_safe: true,
+				};
+				const sibling = {
+					token: `sibling-${actionLabel.toLowerCase()}`,
+					conversation: "conv1",
+					tool: "update_doc",
+					summary: "Valid A sibling",
+					pending_card_safe: true,
+				};
+				const otherChatCard = {
+					// Deliberately reuse A's token. A stale response must not touch the
+					// current B card even if a server bug ever reuses a token.
+					token,
+					conversation: "conv2",
+					tool: "update_doc",
+					summary: "B card stays usable",
+					pending_card_safe: true,
+				};
+				let lists = 0;
+				listPendingConfirmations.mockImplementation((conversation) => {
+					lists++;
+					return Promise.resolve({
+						ok: true,
+						data: {
+							pending:
+								conversation === "conv1"
+									? [{ ...card }, { ...sibling }]
+									: [{ ...otherChatCard }],
+						},
+					});
+				});
+				const actionApi = actionLabel === "Approve" ? confirmTool : dismissTool;
+				actionApi.mockReset();
+				actionApi
+					.mockReturnValueOnce(firstAction.promise)
+					.mockReturnValueOnce(retryAction.promise);
+
+				const { wrapper, socket } = mountPane();
+				await flushPromises();
+				await wrapper
+					.findAll("button")
+					.find((button) => button.text() === actionLabel)
+					.trigger("click");
+				await flushPromises();
+
+				// A realtime frame schedules a fresh pending-list read while the RPC
+				// still owns the old card object. The refresh intentionally replaces it.
+				socket.fire({ kind: "tool:start", conversation_id: "conv1", run_id: "run-keep" });
+				await vi.advanceTimersByTimeAsync(310);
+				await flushPromises();
+				expect(lists).toBeGreaterThanOrEqual(2);
+				const busyDismiss = wrapper
+					.findAllComponents({ name: "Button" })
+					.find((button) => button.props("label") === "Dismiss");
+				expect(busyDismiss.props("disabled")).toBe(true);
+				expect(wrapper.text()).toContain("Valid A sibling");
+
+				firstAction.resolve({ ok: false, reason_code: "busy" });
+				await flushPromises();
+
+				const retryDismiss = wrapper
+					.findAllComponents({ name: "Button" })
+					.find((button) => button.props("label") === "Dismiss");
+				expect(retryDismiss.props("disabled")).toBe(false);
+				expect(wrapper.text()).toContain(`${actionLabel} stays retryable`);
+				await wrapper
+					.findAll("button")
+					.find((button) => button.text() === actionLabel)
+					.trigger("click");
+				expect(actionApi).toHaveBeenCalledTimes(2);
+
+				dashboardConversation.slot.value = "conv2";
+				await flushPromises();
+				expect(wrapper.text()).toContain("B card stays usable");
+				const bDismiss = wrapper
+					.findAllComponents({ name: "Button" })
+					.find((button) => button.props("label") === "Dismiss");
+				expect(bDismiss.props("disabled")).toBe(false);
+
+				retryAction.resolve({ ok: false, reason_code: "busy" });
+				await flushPromises();
+				expect(wrapper.text()).toContain("B card stays usable");
+				expect(
+					wrapper
+						.findAllComponents({ name: "Button" })
+						.find((button) => button.props("label") === "Dismiss")
+						.props("disabled")
+				).toBe(false);
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
 });
 
 describe("DashboardChatPane safety-update receipts", () => {
