@@ -6,7 +6,7 @@ from __future__ import annotations
 import frappe
 
 from jarvis.chat import held_edit
-from jarvis.chat.held_sheets import category, json_dict
+from jarvis.chat.held_sheets import category_map, json_dict
 from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._store import EXECUTING, PENDING
 
@@ -38,7 +38,8 @@ def _noun(doctype: str, n: int) -> str:
 def counts_line(by_doctype, questions=0) -> str:
 	""" "1 supplier · 100 items · 2 questions": parties, addresses, items, the rest."""
 	by_doctype = json_dict(by_doctype)
-	order = sorted(by_doctype, key=lambda dt: (_SECTIONS[category(dt)], dt))
+	sections = category_map(by_doctype)
+	order = sorted(by_doctype, key=lambda dt: (_SECTIONS[sections[dt]], dt))
 	parts = [f"{by_doctype[dt]} {_noun(dt, by_doctype[dt])}" for dt in order if by_doctype[dt]]
 	questions = frappe.utils.cint(questions)
 	if questions:

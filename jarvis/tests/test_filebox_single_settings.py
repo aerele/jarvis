@@ -1,7 +1,6 @@
 """Single settings must wait for approval and retain version/policy checks."""
 
 import json
-from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,7 +10,7 @@ from jarvis.chat import approvals_api, held_sheet_board, held_sheet_seal, held_s
 from jarvis.chat.pending_actions import _park, _seal, _sheet, _store
 from jarvis.tests._pending_action_helpers import as_user
 from jarvis.tests.test_filebox_sheet_apply import _ApplyBase
-from jarvis.tests.test_filebox_sheets import OTHER, OWNER
+from jarvis.tests.test_filebox_sheets import OTHER, OWNER, _supplier
 from jarvis.tools import _write_risk
 
 DT = "Buying Settings"
@@ -118,7 +117,9 @@ class TestFileBoxSingleSettings(_ApplyBase):
 			"values": {"acc_frozen_upto": "2026-01-01"},
 		}
 		with patch.object(_park, "single_has_version", return_value=True):
-			self.assertIsNotNone(held_writes._denied_item(item))
+			refusal = held_writes._denied_item(item)
+		self.assertIsNotNone(refusal)
+		self.assertIn("reviewed File Box settings allowlist", refusal["error"]["message"])
 
 	def test_single_update_requires_its_own_complete_snapshot(self):
 		for snapshot in (
@@ -158,17 +159,28 @@ class TestFileBoxSingleSettings(_ApplyBase):
 				with patch("frappe.get_meta", return_value=password):
 					self.assertTrue(held_writes._has_secret(parent, {"rows": [{"credential": "fixture"}]}))
 
-	def test_category_looks_up_each_doctype_once_per_request(self):
-		frappe.get_meta(DT)
-		previous = frappe.local.request_cache
-		frappe.local.request_cache = defaultdict(dict)
-		try:
-			with patch.object(frappe.db, "exists", wraps=frappe.db.exists) as exists:
-				for _ in range(10):
-					self.assertEqual(held_sheets.category(DT), "settings")
-				self.assertEqual(exists.call_args_list.count((("DocType", DT), {})), 1)
-		finally:
-			frappe.local.request_cache = previous
+	def test_category_map_is_bounded_per_operation_and_never_crosses_operations(self):
+		non_single = SimpleNamespace(issingle=False)
+		settings = SimpleNamespace(issingle=True)
+		with (
+			patch.object(frappe.db, "exists", return_value=True) as exists,
+			patch("frappe.get_meta", side_effect=(non_single, non_single, settings)) as get_meta,
+			patch.object(held_sheets.held_parties, "is_party", return_value=False),
+		):
+			self.assertEqual(
+				held_sheets.category_map((DT, DT, "Fixture Other")),
+				{DT: "other", "Fixture Other": "other"},
+			)
+			self.assertEqual((exists.call_count, get_meta.call_count), (2, 2))
+			# A later collection/board operation does fresh lookup rather than reusing
+			# metadata that could have changed in this request.
+			self.assertEqual(held_sheets.category_map((DT,)), {DT: "settings"})
+			self.assertEqual((exists.call_count, get_meta.call_count), (3, 3))
+
+	def test_title_uses_the_stored_category_without_another_lookup(self):
+		record = {"doctype": DT, "name": DT, "op": "update", "category": "settings"}
+		with patch.object(held_sheets, "category", side_effect=AssertionError("unexpected lookup")):
+			self.assertEqual(held_sheets._title(record), DT)
 
 	def test_legacy_non_single_empty_snapshot_can_still_update(self):
 		supplier = frappe.get_doc({"doctype": "Supplier", "supplier_name": "zz-fbs Legacy snapshot"}).insert(
@@ -193,10 +205,28 @@ class TestFileBoxSingleSettings(_ApplyBase):
 		self.assertEqual(result["reason_code"], "stale")
 		self.assertEqual(self.value(), 1)
 
-	def test_cleanup_runs_later_callbacks_and_keeps_the_original_failure(self):
+	def test_callback_manager_cut_is_public_and_keeps_earlier_callbacks(self):
+		callbacks = frappe.utils.CallbackManager()
+		called = []
+
+		def prior():
+			called.append("prior")
+
+		def later():
+			called.append("later")
+
+		callbacks.add(prior)
+		mark = len(callbacks)
+		callbacks.add(later)
+		self.assertEqual(callbacks.cut(mark), [later])
+		callbacks.run()
+		self.assertEqual(called, ["prior"])
+
+	def test_cleanup_callbacks_are_isolated_and_keep_the_original_record_failure(self):
 		from jarvis.tools.update_doc import _update_one
 
 		called = []
+		prior_called = []
 
 		def broken_cleanup():
 			called.append("broken")
@@ -208,13 +238,25 @@ class TestFileBoxSingleSettings(_ApplyBase):
 			frappe.db.after_rollback.add(lambda: called.append("last"))
 			raise frappe.ValidationError("fixture original save failure")
 
-		with as_user(OWNER), patch("frappe.log_error") as logged:
-			with self.assertRaises(RuntimeError) as raised:
-				_sheet._guarded(fail_after_cache, [], clean_single=True)
+		def prior():
+			prior_called.append("prior")
+
+		mark = len(frappe.db.after_rollback)
+		frappe.db.after_rollback.add(prior)
+		try:
+			crashes = []
+			with as_user(OWNER), self.assertRaises(_sheet._Failed) as raised:
+				_sheet._guarded(fail_after_cache, crashes, clean_single=True)
+			self.assertIn("fixture original save failure", raised.exception.message)
 			self.assertEqual(called, ["broken", "last"])
-			self.assertIsInstance(raised.exception.__cause__, frappe.ValidationError)
-			self.assertTrue(logged.called)
-			self.assertIn("fixture original save failure", str(logged.call_args))
+			self.assertEqual(prior_called, [])
+			self.assertEqual(frappe.db.after_rollback.cut(mark), [prior])
+			self.assertEqual(len(frappe.db.after_rollback), mark)
+			logs = "\n".join(crashes)
+			self.assertIn("fixture original save failure", logs)
+			self.assertIn("fixture cleanup failure", logs)
+		finally:
+			frappe.db.after_rollback.cut(mark)
 		self.assertEqual(self.value(), 1)
 		self.assertEqual(frappe.get_cached_doc(DT, DT).get(FIELD), 1)
 
@@ -227,10 +269,18 @@ class TestFileBoxSingleSettings(_ApplyBase):
 		self.assertFalse(self.apply(row.name)["ok"])
 		self.assertEqual(self.value(), 0)
 
-	def test_cleanup_failure_persists_both_errors_in_the_worker_crash_log(self):
+	def test_cleanup_failure_is_record_scoped_and_prior_sheet_record_can_retry(self):
 		from jarvis.tools.update_doc import _update_one
 
-		_, row = self.sealed()
+		conv = self.conv()
+		turn = self.turn(conv)
+		supplier = _supplier("zz-fbs cleanup retry")
+		self.assert_added(self.call("create_doc", supplier, conv), 1)
+		self.assert_added(self.call("update_doc", self.args(), conv), 2)
+		self.set_turn(turn, state="done")
+		held_sheet_seal.seal_turn(conv, turn)
+		row = self.sheet(conv)
+		self.assertEqual([record["doctype"] for record in self.records(row)], ["Supplier", DT])
 
 		def broken_cleanup():
 			raise RuntimeError("fixture persisted cleanup failure")
@@ -244,11 +294,21 @@ class TestFileBoxSingleSettings(_ApplyBase):
 		with patch("jarvis.tools.update_doc._update_one", side_effect=fail_after_cache):
 			result = self.run_job()
 		self.assertEqual(result.status, "Pending")
-		logs = "\n".join(self.logged("jarvis.file_box.sheet_apply_crashed"))
+		errors = held_sheets.json_dict(result.apply_errors)
+		self.assertEqual(set(errors), {"1"})
+		self.assertIn("fixture persisted original failure", errors["1"])
+		self.assertEqual([record["doctype"] for record in self.records(result)], ["Supplier", DT])
+		self.assertFalse(frappe.db.exists("Supplier", {"supplier_name": "zz-fbs cleanup retry"}))
+		self.assertEqual(self.logged("jarvis.file_box.sheet_apply_crashed"), [])
+		logs = "\n".join(self.logged("jarvis.file_box.sheet_apply_record_crashed"))
 		self.assertIn("fixture persisted original failure", logs)
 		self.assertIn("fixture persisted cleanup failure", logs)
 		self.assertEqual(self.value(), 1)
 		self.assertEqual(frappe.get_cached_doc(DT, DT).get(FIELD), 1)
+		done = self.applied(row.name)
+		self.assertEqual(done.status, "Executed")
+		self.assertTrue(frappe.db.exists("Supplier", {"supplier_name": "zz-fbs cleanup retry"}))
+		self.assertEqual(self.value(), 0)
 
 	def test_legacy_hold_waits_and_includes_a_single_target_snapshot(self):
 		conv = self.conv()

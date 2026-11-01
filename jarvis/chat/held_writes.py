@@ -334,7 +334,8 @@ def _denied_item(item: dict, *, batch=False) -> dict | None:
 	if doctype not in FILEBOX_SETTINGS:
 		return _refuse(
 			"FileBoxRefusedError",
-			f"File Box settings proposals are not enabled for {doctype}. {_ASK_A_HUMAN}",
+			f"File Box settings proposals are not enabled for {doctype}. Use Desk for this setting, or ask a "
+			f"developer to add it to the reviewed File Box settings allowlist. {_ASK_A_HUMAN}",
 		)
 	if not single_has_version(doctype):
 		return _refuse(
