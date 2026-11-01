@@ -4480,6 +4480,22 @@ def _finish_stop_before_dispatch(conversation: str, row: dict) -> None:
 		)
 
 
+def _drain_before_handoff(ctx: PumpContext) -> None:
+	"""Apply the lane events the reader queued after the last slice (#2367). The next
+	hop never sees those frames again (it re-attaches from the durable seq), so a step
+	left in the queue was never cached: the new lane re-seeded without it and the
+	narration stayed in the saved reply. One non-blocking pass; a failure here must
+	not stop the handoff."""
+	if ctx.mux is None or ctx.lease_lost:
+		return
+	try:
+		ctx.mux.dispatch(block_s=0)
+	except ts.LeaseLostExit:
+		ctx.lease_lost = ctx.relay_target_id
+	except Exception:
+		frappe.log_error(title="pump.drain_before_handoff", message=frappe.get_traceback())
+
+
 def _handoff(ctx: PumpContext) -> None:
 	"""Hop handoff (D6 §3, CDX-1): an EPOCH-GUARDED ATOMIC lease TRANSFER, then a
 	fresh-id successor enqueue. A bare re-enqueue is NOT enough: the running hop
@@ -4499,6 +4515,7 @@ def _handoff(ctx: PumpContext) -> None:
 	if _kill_switch_engaged(ctx.relay_target_id):
 		_halt_for_kill_switch(ctx)
 		return
+	_drain_before_handoff(ctx)
 	# OARF-6: flush any sub-threshold batched deltas so a tail batch is not left in
 	# memory across the hop boundary (the next hop would re-derive it from the
 	# cumulative mirror, but flushing now keeps the streamed text current).

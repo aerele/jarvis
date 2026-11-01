@@ -742,6 +742,11 @@ class RelayMux:
 		# redact=False: this runs on the reader thread, which has no frappe.local
 		# site. The pump redacts the text fields itself, on its own thread, in
 		# _apply, right before they reach a lane callback.
+		if lane.resume_mark and not lane.stream_text and payload.get("stream") == "tool":
+			# Any tool frame before the first reply frame on a re-attached lane (a
+			# result too: its start fell in the hop gap) means a tool ran after the
+			# text written so far. The first reply frame places it (#2367).
+			lane.boundary_before_text = True
 		parsed = parse_event(payload, redact=False, collaboration=":dashboard:collab:" in lane.session_key)
 		if parsed and parsed.get("kind") == "tool_boundary" and parsed.get("tool_call_id"):
 			parsed = {**parsed, "kind": "tool", "phase": "start"}

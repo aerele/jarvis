@@ -1747,6 +1747,26 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual([s[1] for s in rec.steps], [after])
 		self.assertEqual(rec.terminal[1]["text"], answer)
 
+	def test_a_tool_result_before_any_text_on_a_re_attached_lane_counts_too(self):
+		# The tool's start fell in the hop gap; only its result reaches the new lane.
+		before = "I'll check the drafting rules and the supplier."
+		after = "Both masters exist. Now checking how invoices for this supplier are built."
+		head = "Supplier `MA Inc.` and item `SKU005` both exist."
+		answer = f"{head} Drafted ACC-PINV-2026-00034 with 450.00 freight. Review it before you submit."
+		so_far = f"{before}\n\n{after}"
+		rec = self._run(
+			[
+				("tool", {"phase": "result", "name": "jarvis__get_list", "toolCallId": "t1"}),
+				("assistant", {"text": f"{so_far}\n\n{head}", "delta": f"\n\n{head}"}),
+				("assistant", {"text": f"{so_far}\n\n{answer}", "delta": answer[len(head) :]}),
+			],
+			f"{so_far}\n\n{answer}",
+			steps=[before],
+			is_readopt=True,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [after])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
 	def test_a_re_attached_lane_starts_after_its_last_recorded_step(self):
 		# Prose that was too long to be a step sits before the last recorded step. A
 		# re-attached lane starts its tool stretch after that step, so the long prose is
