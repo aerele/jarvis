@@ -116,7 +116,7 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
-				f"unknown session: {session_key}",
+				"unknown session",
 			)
 		frappe.local.jarvis_call_tool_user = plugin_user
 		enabled = frappe.db.get_value("User", plugin_user, "enabled")
@@ -522,7 +522,18 @@ def _dispatch_from_session(
 				try:
 					result, receipt = _private_output.prepare(result, tool=tool)
 				except InvalidArgumentError as exc:
-					result = receipt = _error("InvalidArgumentError", str(exc))
+					message = str(exc)
+					# The tool did run, but its private output cannot safely cross the
+					# delegate boundary. Keep a failure audit for that attempt without
+					# giving the audit logger any source result data.
+					audit.record(
+						tool=tool,
+						args=parsed_args,
+						ok=False,
+						error_code="InvalidArgumentError",
+						error_message=message,
+					)
+					result = receipt = _error("InvalidArgumentError", message)
 			# Recorded BEFORE the result budget trims the payload, so a step's row
 			# count is the count the tool actually returned, not the truncated one.
 			_ok = bool(isinstance(result, dict) and result.get("ok"))
