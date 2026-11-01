@@ -1612,6 +1612,11 @@ def _stamp_scope_and_watermark(
 	authorization the source-read tools read back — a scribe run either carries its
 	admin-authorized app list or reads nothing."""
 	from jarvis.chat import agent_scope, operator_review
+	from jarvis.chat.ledger_scrutiny_scope import (
+		requires_bound_scope,
+		scoped_visibility,
+		validate_bound_scope,
+	)
 
 	review_backend = operator_review.backend(inst.agent)
 	if review_backend:
@@ -1629,7 +1634,18 @@ def _stamp_scope_and_watermark(
 	scope = None
 	try:
 		scope = agent_scope.resolve_scope(inst)
+		if requires_bound_scope(inst.agent):
+			validate_bound_scope(scope)
+			# This is a launch-time server fact, not a delegate-written config flag.
+			# The evaluator uses it to label a record-sliced run partial.
+			scope["scoped_visibility"] = scoped_visibility(run_as_user)
 	except Exception:
+		if requires_bound_scope(inst.agent):
+			frappe.log_error(
+				title="jarvis agent: required Ledger Scrutiny scope resolution failed",
+				message=frappe.get_traceback(),
+			)
+			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
@@ -1640,7 +1656,8 @@ def _stamp_scope_and_watermark(
 	if scope is not None:
 		values["scope_json"] = frappe.as_json(scope)
 
-	if scope and scope.get("company") and scope.get("to_date"):
+	as_of = agent_scope.as_of_date(scope)
+	if scope and scope.get("company") and as_of:
 		# A17: row-count + max(modified) over the scope's GL as-of window. The old
 		# engine ran the whole pack in one snapshot; the chunked container run
 		# spans minutes, so a mid-run backdated JV (endemic at Indian year-end)
@@ -1649,7 +1666,7 @@ def _stamp_scope_and_watermark(
 			wm = frappe.db.sql(
 				"""select count(*) n, max(modified) m from `tabGL Entry`
 				   where company = %(company)s and posting_date <= %(to_date)s""",
-				{"company": scope["company"], "to_date": scope["to_date"]},
+				{"company": scope["company"], "to_date": as_of},
 				as_dict=True,
 			)[0]
 			values["wm_row_count"] = int(wm.n or 0)
@@ -1752,6 +1769,12 @@ def _audit_prompt(
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
 		)
+		if "scoped_visibility" in scope:
+			scope_block += (
+				" The server-owned permission scope for this run is "
+				f'scoped_visibility="{int(bool(scope.get("scoped_visibility")))}"; '
+				"preserve this value in scope.json and do not replace it with a model inference."
+			)
 	# EXPLICIT CONFIG: ``_launch_audit`` resolves declared/derived values ONCE and
 	# stamps them on the Run before dispatch.  This function receives that exact
 	# snapshot; it deliberately does not re-read the mutable installation here.
