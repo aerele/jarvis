@@ -793,11 +793,18 @@ class TestNativeReceivablesReview(FrappeTestCase):
 			}
 			reviews.extend(review.stage_reviews(run, inst, assessed["findings"]))
 			self.assertEqual(review.stage_reviews(run, inst, assessed["findings"]), reviews)
+			approval = frappe.get_doc("Jarvis Approval Request", reviews[0])
+			self.assertEqual(approval.status, "Pending")
+			self.assertEqual(approval.source, "Agent Review")
+			self.assertEqual(approval.ref_name, invoice.name)
+			self.assertEqual(approval.agent, review.AGENT)
+			self.assertNotIn('"datasets"', approval.assessment_evidence)
 			with patch.object(approvals_api, "_resume_conversation") as resume:
-				self.assertFalse(
-					approvals_api.decide(reviews[0], "Review acknowledged; no sending authorised")["resumed"]
-				)
+				decision = approvals_api.decide(reviews[0], "Review acknowledged; no sending authorised")
+				self.assertTrue(decision["ok"])
+				self.assertFalse(decision["resumed"])
 				resume.assert_not_called()
+			self.assertEqual(frappe.db.get_value("Jarvis Approval Request", reviews[0], "status"), "Approved")
 			for doctype, count in before.items():
 				self.assertEqual(frappe.db.count(doctype), count)
 			payment = get_payment_entry("Sales Invoice", invoice.name, bank_account=bank, party_amount=40)
