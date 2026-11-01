@@ -1,6 +1,7 @@
 """Cycle-Count Planner custody and output regressions."""
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -347,7 +348,8 @@ class TestCycleCountCollection(FrappeTestCase):
 		with self._collection_mocks(sources, queries):
 			return review.collect(review.scope_from_config(policy), policy)
 
-	def test_collector_keeps_raw_negative_movement_and_exact_stock_entry_headers_private(self):
+	def test_collector_keeps_each_reviewed_negative_voucher_type_in_the_private_input(self):
+		"""The collector preserves movement rows; the private evaluator classifies them."""
 		company = MagicMock(default_currency="INR")
 		company.apply_fieldlevel_read_permissions.return_value = None
 		warehouse = MagicMock(company="Example", is_group=0, disabled=0)
@@ -382,31 +384,108 @@ class TestCycleCountCollection(FrappeTestCase):
 				"is_cancelled": 0,
 			},
 			{
-				"name": "SLE-TRANSFER",
+				"name": "SLE-POS",
 				"item_code": "ITEM-A",
 				"warehouse": "WH-A",
 				"company": "Example",
 				"posting_date": "2026-09-21",
 				"posting_time": "09:00:00",
 				"actual_qty": -3,
+				"voucher_type": "POS Invoice",
+				"voucher_no": "POS-1",
+				"is_cancelled": 0,
+			},
+			{
+				"name": "SLE-REPACK",
+				"item_code": "ITEM-A",
+				"warehouse": "WH-A",
+				"company": "Example",
+				"posting_date": "2026-09-22",
+				"posting_time": "09:00:00",
+				"actual_qty": -4,
 				"voucher_type": "Stock Entry",
-				"voucher_no": "STE-TRANSFER",
+				"voucher_no": "STE-REPACK",
+				"is_cancelled": 0,
+			},
+			{
+				"name": "SLE-SALES",
+				"item_code": "ITEM-A",
+				"warehouse": "WH-A",
+				"company": "Example",
+				"posting_date": "2026-09-23",
+				"posting_time": "09:00:00",
+				"actual_qty": -5,
+				"voucher_type": "Sales Invoice",
+				"voucher_no": "SI-1",
+				"is_cancelled": 0,
+			},
+			{
+				"name": "SLE-STE-CONSUME",
+				"item_code": "ITEM-A",
+				"warehouse": "WH-A",
+				"company": "Example",
+				"posting_date": "2026-09-24",
+				"posting_time": "09:00:00",
+				"actual_qty": -6,
+				"voucher_type": "Stock Entry",
+				"voucher_no": "STE-CONSUME",
+				"is_cancelled": 0,
+			},
+			{
+				"name": "SLE-STE-DISASSEMBLE",
+				"item_code": "ITEM-A",
+				"warehouse": "WH-A",
+				"company": "Example",
+				"posting_date": "2026-09-25",
+				"posting_time": "09:00:00",
+				"actual_qty": -7,
+				"voucher_type": "Stock Entry",
+				"voucher_no": "STE-DISASSEMBLE",
+				"is_cancelled": 0,
+			},
+			{
+				"name": "SLE-STE-ISSUE",
+				"item_code": "ITEM-A",
+				"warehouse": "WH-A",
+				"company": "Example",
+				"posting_date": "2026-09-26",
+				"posting_time": "09:00:00",
+				"actual_qty": -8,
+				"voucher_type": "Stock Entry",
+				"voucher_no": "STE-ISSUE",
+				"is_cancelled": 0,
+			},
+			{
+				"name": "SLE-SUBCONTRACTING",
+				"item_code": "ITEM-A",
+				"warehouse": "WH-A",
+				"company": "Example",
+				"posting_date": "2026-09-27",
+				"posting_time": "09:00:00",
+				"actual_qty": -9,
+				"voucher_type": "Subcontracting Delivery",
+				"voucher_no": "SCD-1",
 				"is_cancelled": 0,
 			},
 		]
-		entry_row = {
-			"name": "STE-TRANSFER",
-			"company": "Example",
-			"purpose": "Material Transfer",
-			"docstatus": 1,
-		}
+		entry_rows = [
+			{
+				"name": "STE-CONSUME",
+				"company": "Example",
+				"purpose": "Material Consumption for Manufacture",
+				"docstatus": 1,
+			},
+			{"name": "STE-DISASSEMBLE", "company": "Example", "purpose": "Disassemble", "docstatus": 1},
+			{"name": "STE-ISSUE", "company": "Example", "purpose": "Material Issue", "docstatus": 1},
+			{"name": "STE-REPACK", "company": "Example", "purpose": "Repack", "docstatus": 1},
+		]
 
 		def get_list(doctype, **_kwargs):
 			return {
 				"Bin": [bin_row],
 				"Item": [item_row],
 				"Stock Ledger Entry": ledger_rows,
-				"Stock Entry": [entry_row],
+				"Stock Entry": entry_rows,
 				"Jarvis Physical Count": [],
 			}[doctype]
 
@@ -424,11 +503,23 @@ class TestCycleCountCollection(FrappeTestCase):
 			set(captured["datasets"]),
 			{"bins", "items", "ledger", "stock_entries", "physical_counts", "physical_count_items"},
 		)
-		self.assertEqual([row["name"] for row in captured["datasets"]["ledger"]], ["SLE-DN", "SLE-TRANSFER"])
-		self.assertEqual(captured["datasets"]["stock_entries"], [entry_row])
+		self.assertEqual(
+			[row["name"] for row in captured["datasets"]["ledger"]],
+			[
+				"SLE-DN",
+				"SLE-POS",
+				"SLE-REPACK",
+				"SLE-SALES",
+				"SLE-STE-CONSUME",
+				"SLE-STE-DISASSEMBLE",
+				"SLE-STE-ISSUE",
+				"SLE-SUBCONTRACTING",
+			],
+		)
+		self.assertEqual(captured["datasets"]["stock_entries"], entry_rows)
 		self.assertEqual(
 			captured["source_counts"],
-			{"Bin": 1, "Item": 1, "Stock Ledger Entry": 2, "Stock Entry": 1, "Jarvis Physical Count": 0},
+			{"Bin": 1, "Item": 1, "Stock Ledger Entry": 8, "Stock Entry": 4, "Jarvis Physical Count": 0},
 		)
 
 	def test_collector_keeps_an_exact_500_bin_source_complete(self):
@@ -1308,19 +1399,21 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		)
 		from frappe import client
 
+		generic_items = client.get_list(
+			"Jarvis Physical Count Item",
+			fields=["parent", "counted_qty"],
+			filters={"parent": fact_name},
+			parent="Jarvis Physical Count",
+		)
 		self.assertEqual(
-			[
-				row["parent"]
-				for row in client.get_list(
-					"Jarvis Physical Count Item",
-					fields=["parent"],
-					filters={"parent": fact_name},
-					parent="Jarvis Physical Count",
-				)
-			],
+			[row["parent"] for row in generic_items],
 			expected_parents,
 			"generic child-list API: " + message,
 		)
+		if expected:
+			self.assertIn(
+				"counted_qty", generic_items[0], "authorized count-item response omits its requested field"
+			)
 
 	def _plan(self, *, pending=False):
 		from jarvis.chat.purchase_match import digest
@@ -2026,6 +2119,43 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		finally:
 			frappe.set_user("Administrator")
 
+	def test_cancelled_original_entry_key_is_not_an_idempotent_retry(self):
+		"""A cancelled fact retains its key as audit history, not a retry result."""
+		from jarvis.chat import cycle_count_entry
+
+		if not frappe.db.has_column("Jarvis Physical Count", "amended_from"):
+			self.skipTest("The current test site has not synchronized the new correction column.")
+		approved = self._plan()
+		original_key = "cyclecount" + frappe.generate_hash(length=24)
+		counted_at = frappe.utils.now()
+		frappe.set_user(self.counter)
+		try:
+			original = cycle_count_entry.record_counts(
+				approved.name,
+				counted_at,
+				[{"item_code": self.item, "counted_qty": "0"}],
+				original_key,
+			)["saved"][0]["name"]
+			cycle_count_entry.correct_counts(
+				approved.name,
+				original,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "1"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)
+			with self.assertRaisesRegex(
+				frappe.ValidationError, "count-entry key was already used with different data"
+			):
+				cycle_count_entry.record_counts(
+					approved.name,
+					counted_at,
+					[{"item_code": self.item, "counted_qty": "0"}],
+					original_key,
+				)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.get_doc("Jarvis Physical Count", original).docstatus, 2)
+
 	def test_new_count_refuses_changed_evidence_for_controlled_endpoint(self):
 		from jarvis.chat import cycle_count_entry
 
@@ -2278,6 +2408,13 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		with patch.object(cycle_count_entry.frappe.utils, "get_datetime", return_value=None):
 			with self.assertRaisesRegex(frappe.ValidationError, "valid site date and time"):
 				cycle_count_entry._counted_at("2026-11-01 10:00:00")
+		with patch.object(
+			cycle_count_entry.frappe.utils,
+			"get_datetime",
+			return_value=datetime(2026, 11, 1, 10, tzinfo=timezone.utc),
+		):
+			with self.assertRaisesRegex(frappe.ValidationError, "valid site date and time"):
+				cycle_count_entry._counted_at("2026-11-01 10:00:00+00:00")
 
 	def test_draft_amendment_successor_does_not_block_the_current_fact(self):
 		from jarvis.chat import cycle_count_entry
@@ -2780,6 +2917,12 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			False,
 			"an ordinary Stock Variance run-as user can read a private count outside a dispatch",
 		)
+		self._assert_physical_count_items_readable(
+			self.stock_variance_user,
+			fact_name,
+			False,
+			"an ordinary Stock Variance run-as user can read private count items outside a dispatch",
+		)
 
 		today = frappe.utils.getdate(frappe.utils.today()).isoformat()
 		scope = {
@@ -2795,6 +2938,12 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 					fact_name,
 					True,
 					"a matching active Stock Variance run cannot read its submitted source count",
+				)
+				self._assert_physical_count_items_readable(
+					self.stock_variance_user,
+					fact_name,
+					True,
+					"a matching active Stock Variance run cannot read its submitted count items",
 				)
 				for ptype in ("write", "submit"):
 					self.assertFalse(

@@ -301,10 +301,9 @@ def _may_view_count(doc, user: str) -> bool:
 	return False
 
 
-def _plan_query_condition(user: str) -> str:
+def _plan_query_condition(user: str, count_table: str) -> str:
 	"""The owner/reviewer/exact-approval-share list predicate."""
 	escaped = frappe.db.escape(user)
-	count_table = f"{SQL_QUOTE}tab{COUNT}{SQL_QUOTE}"
 	approval_table = f"{SQL_QUOTE}tab{APPROVAL}{SQL_QUOTE}"
 	conversation_table = f"{SQL_QUOTE}tab{CONVERSATION}{SQL_QUOTE}"
 	share_table = f"{SQL_QUOTE}tabDocShare{SQL_QUOTE}"
@@ -323,12 +322,11 @@ def _plan_query_condition(user: str) -> str:
 	)
 
 
-def _stock_variance_query_condition(scope) -> str:
+def _stock_variance_query_condition(scope, count_table: str) -> str:
 	"""The matching submitted count headers for one Warehouse/date scope."""
 	company = frappe.db.escape(scope.company)
 	start = frappe.db.escape(f"{scope.from_date.isoformat()} 00:00:00")
 	stop = frappe.db.escape(f"{(scope.to_date + timedelta(days=1)).isoformat()} 00:00:00")
-	count_table = f"{SQL_QUOTE}tab{COUNT}{SQL_QUOTE}"
 	warehouse_table = f"{SQL_QUOTE}tabWarehouse{SQL_QUOTE}"
 	docstatus_field = f"{SQL_QUOTE}docstatus{SQL_QUOTE}"
 	company_field = f"{SQL_QUOTE}company{SQL_QUOTE}"
@@ -349,12 +347,11 @@ def _stock_variance_query_condition(scope) -> str:
 	)
 
 
-def _planner_query_condition(scope) -> str:
+def _planner_query_condition(scope, count_table: str) -> str:
 	"""The submitted historical headers for a planner's exact leaf warehouses."""
 	company = frappe.db.escape(scope.company)
 	history_from = frappe.db.escape(f"{scope.count_history_from.isoformat()} 00:00:00")
 	warehouses = ", ".join(frappe.db.escape(name) for name in scope.warehouses)
-	count_table = f"{SQL_QUOTE}tab{COUNT}{SQL_QUOTE}"
 	docstatus_field = f"{SQL_QUOTE}docstatus{SQL_QUOTE}"
 	company_field = f"{SQL_QUOTE}company{SQL_QUOTE}"
 	counted_at_field = f"{SQL_QUOTE}counted_at{SQL_QUOTE}"
@@ -365,6 +362,16 @@ def _planner_query_condition(scope) -> str:
 		f"and {count_table}.{warehouse_field} in ({warehouses}) "
 		f"and {count_table}.{counted_at_field} >= {history_from})"
 	)
+
+
+def _physical_count_visibility_condition(user: str, count_table: str) -> str:
+	"""Return the private count visibility predicate for one trusted SQL table."""
+	conditions = [_plan_query_condition(user, count_table)]
+	if scope := _stock_variance_delegate_scope(user):
+		conditions.append(_stock_variance_query_condition(scope, count_table))
+	if scope := _cycle_count_planner_delegate_scope(user):
+		conditions.append(_planner_query_condition(scope, count_table))
+	return "(" + " or ".join(conditions) + ")"
 
 
 def physical_count_query_conditions(user: str | None = None, doctype: str | None = None) -> str:
@@ -378,12 +385,29 @@ def physical_count_query_conditions(user: str | None = None, doctype: str | None
 	user = user or frappe.session.user
 	if user == "Administrator":
 		return ""
-	conditions = [_plan_query_condition(user)]
-	if scope := _stock_variance_delegate_scope(user):
-		conditions.append(_stock_variance_query_condition(scope))
-	if scope := _cycle_count_planner_delegate_scope(user):
-		conditions.append(_planner_query_condition(scope))
-	return "(" + " or ".join(conditions) + ")"
+	count_table = f"{SQL_QUOTE}tab{COUNT}{SQL_QUOTE}"
+	return _physical_count_visibility_condition(user, count_table)
+
+
+def physical_count_item_query_conditions(user: str | None = None, doctype: str | None = None) -> str:
+	"""Limit child-table lists to rows whose count header is visible.
+
+	Frappe checks a child list's parent DocType permission without a parent row.
+	The parent query condition is therefore not applied to a direct generic child
+	list. Correlate each child row to its header and reuse the exact header rule.
+	"""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return ""
+	count_table = f"{SQL_QUOTE}tab{COUNT}{SQL_QUOTE}"
+	item_table = f"{SQL_QUOTE}tabJarvis Physical Count Item{SQL_QUOTE}"
+	return (
+		f"exists (select 1 from {count_table} count_header "
+		f"where count_header.{SQL_QUOTE}name{SQL_QUOTE} = {item_table}.{SQL_QUOTE}parent{SQL_QUOTE} "
+		f"and {item_table}.{SQL_QUOTE}parenttype{SQL_QUOTE} = {frappe.db.escape(COUNT)} "
+		f"and {item_table}.{SQL_QUOTE}parentfield{SQL_QUOTE} = {frappe.db.escape('items')} "
+		f"and {_physical_count_visibility_condition(user, 'count_header')})"
+	)
 
 
 def has_physical_count_permission(doc, ptype: str = "read", user: str | None = None, debug=False) -> bool:
