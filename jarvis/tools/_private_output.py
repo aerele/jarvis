@@ -12,7 +12,7 @@ from jarvis.exceptions import InvalidArgumentError
 MODE = "private_audit_v1"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_ROWS = 20_000
-TOOLS = frozenset({"query", "run_report"})
+TOOLS = frozenset({"query", "run_report", "get_cycle_count_inputs"})
 _active = ContextVar("jarvis_private_audit_output", default=False)
 
 
@@ -30,6 +30,8 @@ def is_private():
 
 
 def validate_args(tool, args):
+	if tool == "get_cycle_count_inputs" and args != {}:
+		raise InvalidArgumentError("Count-plan evidence takes no model-selected scope or arguments.")
 	if tool == "query":
 		spec = args.get("spec")
 		limit = spec.get("limit") if isinstance(spec, dict) else None

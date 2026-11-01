@@ -1412,6 +1412,15 @@ def get_ar_review_defaults(company: str | None = None) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
+def get_cycle_count_review_defaults(company: str | None = None) -> dict:
+	"""Read-only count-plan suggestions; the owner must save the actual scope."""
+	from jarvis.chat.cycle_count_review import configuration_defaults
+
+	return configuration_defaults(company)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
 def get_bank_recon_review_defaults(company: str | None = None) -> dict:
 	"""Read-only bank reconciliation starter settings; never saves configuration."""
 	from jarvis.chat.bank_reconciliation_review import configuration_defaults

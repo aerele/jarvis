@@ -1,0 +1,147 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-11-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "approval_request",
+  "source_run",
+  "company",
+  "warehouse",
+  "counted_at",
+  "recorded_by",
+  "recorded_at",
+  "entry_key",
+  "entry_digest",
+  "items"
+ ],
+ "fields": [
+  {
+   "fieldname": "approval_request",
+   "fieldtype": "Link",
+   "label": "Approved Count Plan",
+   "options": "Jarvis Approval Request",
+   "reqd": 1,
+   "in_list_view": 1,
+   "search_index": 1,
+   "description": "The approved Cycle-Count Planner request that listed these items. This is a count observation, not a stock adjustment."
+  },
+  {
+   "fieldname": "source_run",
+   "fieldtype": "Data",
+   "label": "Source Run",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Server-copied run identifier. It remains plain text because a run can be removed when an agent is uninstalled."
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1,
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "label": "Warehouse",
+   "options": "Warehouse",
+   "reqd": 1,
+   "read_only": 1,
+   "in_list_view": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "counted_at",
+   "fieldtype": "Datetime",
+   "label": "Physical Count Time",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "The site-local time when this warehouse observation was made. It cannot be before the approved plan or in the future."
+  },
+  {
+   "fieldname": "recorded_by",
+   "fieldtype": "Link",
+   "label": "Recorded By",
+   "options": "User",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "recorded_at",
+   "fieldtype": "Datetime",
+   "label": "Recorded At",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "entry_key",
+   "fieldtype": "Data",
+   "label": "Entry Key",
+   "read_only": 1,
+   "unique": 1,
+   "no_copy": 1,
+   "hidden": 1,
+   "description": "Client-generated idempotency key for one count-save command."
+  },
+  {
+   "fieldname": "entry_digest",
+   "fieldtype": "Data",
+   "label": "Entry Digest",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1,
+   "description": "Server digest of immutable count-entry fields for idempotent retry checks."
+  },
+  {
+   "fieldname": "items",
+   "fieldtype": "Table",
+   "label": "Counted Items",
+   "options": "Jarvis Physical Count Item",
+   "reqd": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-11-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Physical Count",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "print": 1,
+   "read": 1,
+   "submit": 1,
+   "write": 1,
+   "role": "Stock User"
+  },
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "print": 1,
+   "read": 1,
+   "submit": 1,
+   "write": 1,
+   "role": "Stock Manager"
+  },
+  {
+   "read": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

@@ -10,6 +10,7 @@ _BACKENDS = {
 	"ap-3way-match-operator": "jarvis.chat.purchase_match",
 	"ar-collections-operator": "jarvis.chat.receivables_review",
 	"bank-recon-operator": "jarvis.chat.bank_reconciliation_review",
+	"cycle-count-planner-operator": "jarvis.chat.cycle_count_review",
 }
 AGENTS = frozenset(_BACKENDS)
 
@@ -58,7 +59,12 @@ def stage_reviews(run, inst, findings, adapter):
 	if not frappe.has_permission("Jarvis Approval Request", "create"):
 		frappe.throw("Live review requires permission to create Approval Requests.", frappe.PermissionError)
 	stored = frappe.parse_json(run.input_snapshot_json)
-	reviewer = inst.reviewer
+	# The reviewer is sealed with the launch policy. A later installation edit
+	# must not change the person who can receive or decide an in-flight review.
+	# Cycle Count seals a named reviewer in the launch config. Older review
+	# agents keep their installation reviewer because their config has no such
+	# field. This preserves their existing review contract.
+	reviewer = stored["config"].get("reviewer") or inst.reviewer
 	if not reviewer or not frappe.db.get_value("User", reviewer, "enabled"):
 		frappe.throw("An enabled, named reviewer is required.")
 	with impersonate(reviewer):
@@ -103,8 +109,10 @@ def stage_reviews(run, inst, findings, adapter):
 				frappe.db.set_value(
 					"Jarvis Approval Request",
 					name,
-					"assessment_evidence",
-					frappe.as_json({**evidence, "run": prior.run}),
+					{
+						"assessment_evidence": frappe.as_json({**evidence, "run": prior.run}),
+						"assessment_input_digest": stored["source_digest"],
+					},
 					update_modified=False,
 				)
 			requests.append(name)
@@ -126,6 +134,7 @@ def stage_reviews(run, inst, findings, adapter):
 				"result_class": "derived_candidate",
 				"assessment_key": key,
 				"assessment_evidence": frappe.as_json(evidence),
+				"assessment_input_digest": stored["source_digest"],
 				"question": adapter.REVIEW_QUESTION,
 				"context_md": "<pre>"
 				+ escape(context)

@@ -253,6 +253,10 @@ def record_agent_run(
 	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(run_doc.agent)
+	if run_doc.agent != "cycle-count-planner-operator" and any(
+		isinstance(row, dict) and "proposal" in row for row in raw_findings
+	):
+		raise InvalidArgumentError("A physical count proposal is supported only by the count-plan agent.")
 	review_ready = False
 	if review_backend:
 		inst.activation_state = run_doc.preparation_mode or "shadow"
@@ -265,6 +269,13 @@ def record_agent_run(
 		raw_findings, coverage, review_ready = review_backend.validate_output(
 			run_doc, raw_findings, coverage, scope, integrity_digest
 		)
+		validate_envelope = getattr(review_backend, "validate_envelope", None)
+		if validate_envelope:
+			envelope_issue = validate_envelope(run_doc, review_ready, truncated, rows_consumed)
+			if envelope_issue:
+				raw_findings = []
+				coverage = review_backend.envelope_failure(envelope_issue)
+				review_ready = False
 		if not review_ready:
 			integrity_digest = None
 

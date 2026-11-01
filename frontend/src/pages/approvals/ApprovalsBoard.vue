@@ -478,6 +478,13 @@
 							iconLeft="message-circle"
 							@click="openChat"
 						/>
+						<Button
+							v-if="Number(selected.count_entry)"
+							variant="solid"
+							label="Record physical count"
+							iconLeft="clipboard"
+							@click="openCountPlan"
+						/>
 					</div>
 
 					<!-- 2. question + meta rows -->
@@ -1129,6 +1136,14 @@ function openChat() {
 	if (selected.value && selected.value.conversation) {
 		router.push(conversationRoute(selected.value.conversation, selected.value.origin_page));
 	}
+}
+
+// The server exposes this only for an approved Cycle-Count Planner request that
+// this user may record. The count page rechecks the authority before it shows
+// source lines or writes an observation.
+function openCountPlan() {
+	if (selected.value?.name)
+		router.push({ name: "CountPlanDetail", params: { request: selected.value.name } });
 }
 
 // awaiting-reply strip rows answer in the conversation itself
