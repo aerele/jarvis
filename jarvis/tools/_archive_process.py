@@ -11,17 +11,17 @@ def run_archive(content, filename, *, deadline=None, **operation):
 	if len(content) > MAX_INPUT:
 		raise ArchiveCapacityError("Archive exceeds the 10 MiB input limit.")
 	deadline = deadline or Deadline()
-	try:
-		with ReportWorker(deadline, worker_module="jarvis.tools._archive_worker") as worker:
+	with ReportWorker(deadline, worker_module="jarvis.tools._archive_worker") as worker:
+		try:
 			worker.send(
 				{"content": base64.b64encode(content).decode("ascii"), "filename": filename, **operation},
 				14 * 1024 * 1024,
 			)
 			frame = worker.receive(68 * 1024)
-	except InvalidArgumentError:
-		raise ArchiveCapacityError(
-			"Archive analysis exceeded its worker or output budget. No complete answer was returned. Do not retry unchanged."
-		) from None
+		except InvalidArgumentError:
+			raise ArchiveCapacityError(
+				"Archive analysis exceeded its worker or output budget. No complete answer was returned. Do not retry unchanged."
+			) from None
 	if "failure" in frame:
 		failure = frame["failure"]
 		if (

@@ -6,16 +6,20 @@ import json
 import resource
 import signal
 import sys
+import tempfile
 import unittest
+from contextlib import ExitStack
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
 
-from jarvis.exceptions import FeatureDisabledError, PermissionDeniedError
+from jarvis.exceptions import FeatureDisabledError, InvalidArgumentError, PermissionDeniedError
 from jarvis.tests.test_archive_sources import archive
 from jarvis.tools import _archive_api as api
 from jarvis.tools import _report_query_process as process
+from jarvis.tools import _source_process
 from jarvis.tools._archive_process import run_archive
 from jarvis.tools._archive_sources import (
 	ArchiveCapacityError,
@@ -84,6 +88,21 @@ class TestArchiveProcess(unittest.TestCase):
 			)
 		self.assertEqual(len(children), 1)
 		self.assertIsNotNone(children[0].poll())
+
+	def test_busy_archive_worker_is_retryable_and_does_not_spawn_a_child(self):
+		with (
+			tempfile.TemporaryDirectory() as directory,
+			patch.object(_source_process, "_slot_directory", return_value=Path(directory)),
+			ExitStack() as claims,
+			patch.object(process.subprocess, "Popen") as start,
+		):
+			for _ in range(_source_process.MAX_CHILDREN):
+				claims.enter_context(_source_process.worker_slot())
+			with self.assertRaises(InvalidArgumentError) as caught:
+				run_archive(b"archive", "archive.zip", operation="manifest")
+			self.assertEqual(str(caught.exception), _source_process.BUSY)
+			self.assertNotIsInstance(caught.exception, ArchiveCapacityError)
+			start.assert_not_called()
 
 
 class TestArchiveApi(unittest.TestCase):
