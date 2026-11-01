@@ -1777,6 +1777,8 @@ class PumpContext:
 	# OARF-5: in-flight RPCs the reactor polls (never blocks on) each slice.
 	pending_acks: dict[str, _PendingAck] = field(default_factory=dict)
 	pending_recoveries: dict[str, _PendingRecovery] = field(default_factory=dict)
+	# Lane keys whose tool-event request waits for IO time (_observe_tool_events).
+	pending_observes: set[str] = field(default_factory=set)
 	# CDX-17: the in-flight mid-hop capacity-refresh RPC (issue-and-poll, never blocked on).
 	pending_snapshot: _PendingSnapshot | None = None
 	shared_preflights: dict = field(default_factory=dict)
@@ -2066,6 +2068,7 @@ def drain_slice(ctx: PumpContext) -> str:
 	soft budget.
 	"""
 	drain_wake(ctx.relay_target_id)
+	_flush_pending_observes(ctx)
 
 	# CDX-11 + CDX-17: issue -> POLL -> promote. ISSUE the due mid-hop capacity refresh
 	# (non-blocking), then RESOLVE it BEFORE promotion so an already-resolved refresh that
@@ -3937,10 +3940,10 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 		_observe_tool_events(ctx, lane_key)
 
 
-# The plugin method that adds this connection as a tool-event recipient of a run
-# (jarvis-openclaw-plugin src/run-observer.ts). openclaw sends a run's tool starts only
-# to the connection that sent it, so without this a re-attached lane never sees one
-# and records no step after the hop (#2367).
+# The agent plugin's method that adds this connection as a tool-event recipient of a
+# run (the plugin's src/run-observer.ts). The gateway sends a run's tool starts only to
+# the connection that sent it, so without this a re-attached lane never sees one and
+# records no step after the hop (#2367).
 OBSERVE_RUN_METHOD = "jarvis.observe_run"
 
 
@@ -3950,12 +3953,25 @@ def _observe_tool_events(ctx: PumpContext, lane_key: str) -> None:
 	method answers with an error the lane can ignore (it then behaves as before)."""
 	if ctx.mux is None:
 		return
+	if not _io_admit(ctx):
+		# Like every gateway write: no time left in this lease window. The next slice
+		# asks again (_flush_pending_observes).
+		ctx.pending_observes.add(lane_key)
+		return
+	ctx.pending_observes.discard(lane_key)
 	try:
 		ctx.mux.issue_rpc(OBSERVE_RUN_METHOD, {"runId": lane_key}, timeout_s=ACK_TIMEOUT_S)
 	except Exception as e:
 		# A refused or failed write: the transport handles its own poisoning, and the
 		# lane still streams without tool events.
 		_telemetry("observe_run_failed", run_id=lane_key, error=type(e).__name__)
+
+
+def _flush_pending_observes(ctx: PumpContext) -> None:
+	for lane_key in list(ctx.pending_observes):
+		_observe_tool_events(ctx, lane_key)
+		if lane_key in ctx.pending_observes:
+			return  # still no IO time; the rest wait too
 
 
 def _write_message_recovering(assistant_message: str | None) -> None:
