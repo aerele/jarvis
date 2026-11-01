@@ -48,7 +48,6 @@ def snapshot():
 			"Stock Ledger Entry": 1,
 			"Stock Entry": 0,
 			"Jarvis Physical Count": 0,
-			"Jarvis Physical Count Item": 0,
 		},
 		"datasets": {
 			"bins": [
