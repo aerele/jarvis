@@ -26,6 +26,7 @@ from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import (
 	has_jarvis_admin_access,
 	is_skill_reviewer,
+	is_valid_unattended_owner,
 	message_origin,
 	refuse_in_tool_dispatch,
 	require_jarvis_admin,
@@ -1321,6 +1322,34 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "enabled": doc.enabled}}
 
 
+def _assert_sla_schedule_configuration(doc) -> None:
+	"""Validate an SLA schedule's team boundary as its eventual run-as user.
+
+	A schedule is an unattended commitment. Checking the configuration as the
+	requesting owner could accept a Helpdesk team that the scheduled run-as user
+	cannot read. Refuse before the schedule row is saved, so the next cron tick
+	does not have to record a confusing failed run.
+	"""
+	from jarvis.chat.sla_breach_ageing import AGENT as SLA_BREACH_AGENT
+	from jarvis.chat.sla_breach_ageing import assert_configuration
+
+	if doc.agent != SLA_BREACH_AGENT:
+		return
+	run_as = (doc.run_as_user or "").strip()
+	if not is_valid_unattended_owner(run_as):
+		frappe.throw(
+			_(
+				"This agent needs an enabled non-system run-as user before you can enable an "
+				"automatic schedule."
+			)
+		)
+	# The configuration has no scheduler-owned write. Its only side effect is a
+	# permission-bounded HD Team read, which must occur under the identity that
+	# will execute the scheduled audit.
+	with impersonate(run_as):
+		assert_configuration(doc)
+
+
 @frappe.whitelist(methods=["POST"])
 def set_schedule(
 	installation: str,
@@ -1352,6 +1381,7 @@ def set_schedule(
 		if doc.agent in REVIEW_OPERATORS:
 			frappe.throw(_("Operator evidence review supports manual runs only."))
 		assert_installable(doc.agent)
+		_assert_sla_schedule_configuration(doc)
 	if schedule_enabled is not None:
 		doc.schedule_enabled = int(schedule_enabled or 0)
 	if schedule_frequency is not None:
