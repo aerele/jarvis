@@ -1747,8 +1747,17 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual([s[1] for s in rec.steps], [after])
 		self.assertEqual(rec.terminal[1]["text"], answer)
 
-	def test_a_tool_result_before_any_text_on_a_re_attached_lane_counts_too(self):
-		# The tool's start fell in the hop gap; only its result reaches the new lane.
+	def test_a_tool_result_or_thinking_before_any_text_on_a_re_attached_lane_counts_too(self):
+		# The tool's start (and maybe its result) fell in the hop gap; the new lane sees
+		# only its result, or only the model thinking about it (live trace 2026-11-01).
+		for first in (
+			("tool", {"phase": "result", "name": "jarvis__get_list", "toolCallId": "t1"}),
+			("thinking", {"text": "", "delta": ""}),
+		):
+			with self.subTest(first=first[0]):
+				self._check_gap_boundary(first)
+
+	def _check_gap_boundary(self, first):
 		before = "I'll check the drafting rules and the supplier."
 		after = "Both masters exist. Now checking how invoices for this supplier are built."
 		head = "Supplier `MA Inc.` and item `SKU005` both exist."
@@ -1756,7 +1765,7 @@ class TestRelayMuxSteps(FrappeTestCase):
 		so_far = f"{before}\n\n{after}"
 		rec = self._run(
 			[
-				("tool", {"phase": "result", "name": "jarvis__get_list", "toolCallId": "t1"}),
+				first,
 				("assistant", {"text": f"{so_far}\n\n{head}", "delta": f"\n\n{head}"}),
 				("assistant", {"text": f"{so_far}\n\n{answer}", "delta": answer[len(head) :]}),
 			],
