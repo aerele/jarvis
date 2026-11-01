@@ -3193,9 +3193,32 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		real_has_permission = frappe.has_permission
 		target_bin = frappe.db.get_value("Bin", {"warehouse": self.warehouse, "item_code": self.item}, "name")
 		self.assertTrue(target_bin)
+		# The manager must first be a plan member. Without this ownership boundary,
+		# may_read_count_plan correctly stops before it reaches the native-stock
+		# gates, which would make the target-Bin regression a false positive.
+		frappe.db.set_value(
+			"Jarvis Conversation", approved.conversation, "owner", manager, update_modified=False
+		)
+		frappe.clear_cache(user=manager)
 
 		frappe.set_user(manager)
 		try:
+			# Prove the member can initially see this plan through Warehouse, Item,
+			# and Bin access before one exact Bin is denied below.
+			self.assertTrue(cycle_count_permissions.may_read_count_plan(approved, manager))
+			self.assertIn(
+				approved.name, [row["request"] for row in cycle_count_entry.list_count_plans()["rows"]]
+			)
+			self.assertEqual(cycle_count_entry.get_count_plan(approved.name)["request"], approved.name)
+			self.assertTrue(chat_permissions.has_approval_permission(approved, "read", manager))
+			self.assertEqual(
+				frappe.get_list(
+					"Jarvis Approval Request",
+					filters={"name": approved.name},
+					fields=["name", "context_md"],
+				),
+				[{"name": approved.name, "context_md": "COUNT-PLAN-CONTEXT-MARKER"}],
+			)
 			for denied_doctypes, denied_bin, label in (
 				({"Warehouse", "Item"}, None, "Warehouse or Item"),
 				({"Bin"}, None, "Bin"),
@@ -3218,7 +3241,12 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 					with patch(
 						"jarvis.chat.cycle_count_permissions.frappe.has_permission",
 						side_effect=no_native_stock_read,
-					):
+					) as native_permission:
+						if denied_bin:
+							self.assertTrue(
+								frappe.has_permission("Bin", "read", user=manager),
+								"a generic Bin read must not bypass the selected Bin denial",
+							)
 						self.assertEqual(cycle_count_entry.list_count_plans()["rows"], [])
 						self.assertFalse(cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name)))
 						with self.assertRaises(frappe.PermissionError):
@@ -3253,13 +3281,23 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 							False,
 							f"a System Manager without {label} read cannot see count items",
 						)
+						if denied_bin:
+							native_permission.assert_any_call(
+								"Bin", "read", doc=target_bin, user=manager
+							)
 			for bins, label in (([], "missing"), ([target_bin, "duplicate-bin"], "ambiguous")):
 				with self.subTest(bin_source=label), patch.object(
 					cycle_count_permissions.frappe.db, "get_all", return_value=bins
-				):
+				) as selected_bins:
 					self.assertFalse(
 						cycle_count_permissions.may_read_count_plan(approved, manager),
 						f"a {label} selected Bin must fail closed",
+					)
+					selected_bins.assert_called_once_with(
+						"Bin",
+						filters={"warehouse": self.warehouse, "item_code": self.item},
+						pluck="name",
+						limit=2,
 					)
 		finally:
 			frappe.set_user("Administrator")
