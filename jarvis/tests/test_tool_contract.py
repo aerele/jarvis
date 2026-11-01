@@ -135,8 +135,13 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			doc = json.load(fh)
 		entry = next(item for item in doc["agents"] if item["agent_slug"] == "stock-variance-auditor")
 
-		self.assertEqual(entry["version"], "0.4.0")
-		self.assertIn("submitted physical-count facts", entry["description"])
+		self.assertEqual(entry["version"], "0.4.2")
+		self.assertEqual(
+			entry["description"],
+			"Checks submitted physical-count facts against book stock at each saved count time. "
+			"Keeps material lines together in one finding per count and shows the scope, controls "
+			"and source links. Read-only; does not post stock adjustments.",
+		)
 		self.assertEqual(
 			entry["doctypes_required"],
 			[
