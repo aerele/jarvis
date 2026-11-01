@@ -301,6 +301,7 @@ class TestNegativeStockReceiptWritebackHook(unittest.TestCase):
 			name="NEG-HOOK-1",
 			agent=receipt.AGENT,
 			status="running",
+			scope_json=json.dumps(SCOPE_RAW),
 			findings_count=0,
 			blocker_count=0,
 			coverage_note="",
@@ -323,12 +324,23 @@ class TestNegativeStockReceiptWritebackHook(unittest.TestCase):
 			agent=receipt.AGENT,
 		)
 
-		def get_value(doctype, filters, fields, **kwargs):
-			if doctype == writeback.RUN:
+		def get_value(doctype, filters=None, fields=None, **kwargs):
+			fieldname = kwargs.pop("fieldname", fields)
+			if (
+				doctype == writeback.RUN
+				and filters == {"session_key": "negative-session"}
+				and fieldname == ["name", "status", "installation", "agent"]
+				and kwargs == {"as_dict": True}
+			):
 				return run_row
-			if doctype == writeback.LISTING:
+			if (
+				doctype == writeback.LISTING
+				and filters == receipt.AGENT
+				and fieldname == ["rule_tokens", "doctypes_required"]
+				and kwargs == {"as_dict": True}
+			):
 				return frappe._dict(rule_tokens="[]", doctypes_required="[]")
-			raise AssertionError(f"unexpected get_value: {doctype} {filters} {fields}")
+			raise AssertionError(f"unexpected get_value: {doctype} {filters} {fieldname} {kwargs}")
 
 		with (
 			patch("jarvis.tools._agent_run_ctx.get_session_key", return_value="negative-session"),
@@ -336,6 +348,9 @@ class TestNegativeStockReceiptWritebackHook(unittest.TestCase):
 			patch.object(writeback.frappe, "get_doc", side_effect=[inst, start_run]),
 			patch.object(writeback, "_validate_findings", return_value=([], [])),
 			patch("jarvis.chat.operator_review.backend", return_value=None),
+			patch(
+				"jarvis.chat.agent_runs.clear_untrusted_negative_stock_artifacts"
+			) as clear_untrusted,
 			patch("jarvis.chat.agent_runs.record_delegate_run", return_value=finished_run) as finalize,
 			patch("jarvis.chat.agent_run_steps.record_step"),
 			patch(
@@ -343,9 +358,10 @@ class TestNegativeStockReceiptWritebackHook(unittest.TestCase):
 			) as capture_launch,
 			patch("jarvis.chat.negative_stock_receipt.persist") as persist,
 		):
-			out = writeback.record_agent_run(findings=[], coverage={}, scope={})
+			out = writeback.record_agent_run(findings=[], coverage={}, scope=SCOPE_RAW)
 
 		self.assertEqual(out["status"], "completed")
 		capture_launch.assert_called_once_with(start_run)
+		clear_untrusted.assert_not_called()
 		finalize.assert_called_once()
 		persist.assert_called_once_with(capture)

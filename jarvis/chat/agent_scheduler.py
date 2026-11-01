@@ -1614,8 +1614,11 @@ def _stamp_scope_and_watermark(
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
 
-	All best-effort: a bench without a resolvable Company (e.g. no erpnext setup)
-	must NOT abort the launch — it degrades to an unscoped run (no watermark). The
+	Most scope resolution is best-effort: a bench without a resolvable Company
+	(e.g. no erpnext setup) degrades to an unscoped run (no watermark). Negative
+	stock is different: its declared Warehouse is a binding data boundary. If the
+	server cannot validate it as the run-as user, the launch must refuse before
+	dispatch instead of silently widening or producing an unusable run. The
 	watermark + scope are resolved AS the run-as user (this runs under that
 	session). Returns the resolved scope dict (or None).
 
@@ -1642,6 +1645,12 @@ def _stamp_scope_and_watermark(
 	try:
 		scope = agent_scope.resolve_scope(inst)
 	except Exception:
+		if agent_scope.requires_bound_scope(inst):
+			frappe.log_error(
+				title="jarvis agent: Negative stock scope resolution refused launch",
+				message=frappe.get_traceback(),
+			)
+			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
