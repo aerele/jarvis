@@ -491,6 +491,23 @@ def list_agents_page(
 	}
 
 
+def _stock_variance_issues_for_run_as(installation: str, config: str) -> dict:
+	"""Return Stock Variance setup faults as the execution identity.
+
+	get_agent is read by the installation owner, but the Warehouse tree is read
+	by run_as_user. Keep this small identity boundary separate so the UI cannot
+	report a scope as valid or invalid from the wrong user.
+	"""
+	from jarvis._session import impersonate
+	from jarvis.chat.stock_variance_scope import configuration_issues
+
+	run_as_user = (frappe.db.get_value(INSTALLATION, installation, "run_as_user") or "").strip()
+	if not run_as_user:
+		return {"run_as_user": "Set a run-as user before configuring the Warehouse scope."}
+	with impersonate(run_as_user):
+		return configuration_issues(config or "{}")
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_agent(agent_slug: str) -> dict:
@@ -500,6 +517,7 @@ def get_agent(agent_slug: str) -> dict:
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 	from jarvis.chat.operator_review import backend
+	from jarvis.chat.stock_variance_scope import is_stock_variance
 
 	try:
 		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
@@ -618,6 +636,8 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif is_stock_variance(listing.agent_slug):
+			i["configuration_issues"] = _stock_variance_issues_for_run_as(i.name, i.config or "{}")
 		out["installation"] = i
 
 	if is_sm and not _masked:

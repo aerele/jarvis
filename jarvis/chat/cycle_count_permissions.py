@@ -190,9 +190,16 @@ def _scope_from_run_stamp(scope_json, user: str):
 	if not isinstance(scope, dict):
 		return None
 	company = str(scope.get("company") or "").strip()
-	from_date, to_date = _iso_date(scope.get("from_date")), _iso_date(scope.get("to_date"))
+	from_date, to_date, report_date = (
+		_iso_date(scope.get("from_date")),
+		_iso_date(scope.get("to_date")),
+		_iso_date(scope.get("report_date")),
+	)
 	record_scope = scope.get("record_scope")
-	if not company or not from_date or not to_date or from_date > to_date:
+	if not company or not from_date or not to_date or not report_date:
+		return None
+	cutoff = min(to_date, report_date)
+	if from_date > cutoff:
 		return None
 	if not isinstance(record_scope, dict) or record_scope.get("doctype") != WAREHOUSE:
 		return None
@@ -202,10 +209,10 @@ def _scope_from_run_stamp(scope_json, user: str):
 	warehouse = frappe.db.get_value(
 		WAREHOUSE,
 		warehouse_name,
-		["name", "company", "lft", "rgt"],
+		["name", "company", "lft", "rgt", "disabled"],
 		as_dict=True,
 	)
-	if not warehouse or warehouse.company != company:
+	if not warehouse or warehouse.company != company or frappe.utils.cint(warehouse.disabled):
 		return None
 	try:
 		lft, rgt = int(warehouse.lft), int(warehouse.rgt)
@@ -223,7 +230,9 @@ def _scope_from_run_stamp(scope_json, user: str):
 		lft=lft,
 		rgt=rgt,
 		from_date=from_date,
-		to_date=to_date,
+		# Source reads and delegate list access use the report cutoff, never a
+		# later configured period end. The native evaluator uses the same bound.
+		to_date=cutoff,
 	)
 
 
@@ -347,10 +356,15 @@ def _within_stock_variance_scope(doc, scope) -> bool:
 	warehouse = frappe.db.get_value(
 		WAREHOUSE,
 		doc.get("warehouse"),
-		["company", "lft", "rgt"],
+		["company", "lft", "rgt", "is_group", "disabled"],
 		as_dict=True,
 	)
-	if not warehouse or warehouse.company != scope.company:
+	if (
+		not warehouse
+		or warehouse.company != scope.company
+		or frappe.utils.cint(warehouse.is_group)
+		or frappe.utils.cint(warehouse.disabled)
+	):
 		return False
 	try:
 		return scope.lft <= int(warehouse.lft) and int(warehouse.rgt) <= scope.rgt
@@ -537,6 +551,8 @@ def _stock_variance_query_condition(scope) -> str:
 	warehouse_field = f"{SQL_QUOTE}warehouse{SQL_QUOTE}"
 	lft_field = f"{SQL_QUOTE}lft{SQL_QUOTE}"
 	rgt_field = f"{SQL_QUOTE}rgt{SQL_QUOTE}"
+	is_group_field = f"{SQL_QUOTE}is_group{SQL_QUOTE}"
+	disabled_field = f"{SQL_QUOTE}disabled{SQL_QUOTE}"
 	return (
 		f"({count_table}.{docstatus_field} = 1 "
 		f"and {count_table}.{company_field} = {company} "
@@ -545,6 +561,8 @@ def _stock_variance_query_condition(scope) -> str:
 		f"and exists (select 1 from {warehouse_table} scoped_warehouse "
 		f"where scoped_warehouse.name = {count_table}.{warehouse_field} "
 		f"and scoped_warehouse.company = {company} "
+		f"and scoped_warehouse.{is_group_field} = 0 "
+		f"and scoped_warehouse.{disabled_field} = 0 "
 		f"and scoped_warehouse.{lft_field} >= {scope.lft} "
 		f"and scoped_warehouse.{rgt_field} <= {scope.rgt}))"
 	)
