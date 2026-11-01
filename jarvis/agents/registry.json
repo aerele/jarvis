@@ -599,7 +599,7 @@
       "domain": "knowledge",
       "nature": "scribe",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Reads the CUSTOM Frappe apps you select and writes business-first wiki pages about them — what each app does, its doctypes, workflows, validations and integrations — so your team and the assistant can rely on it later. You name the exact apps at launch: it reads only those (never core-app source). Each page cites server-verified source reads. Runs on demand in the Jarvis container (your bench never sees a source-laden chat), writes only the org wiki (no ERP write tool), and updates its own pages in place on re-run. Only select apps whose code you trust: source is treated as data, not instructions, but could still try to steer the agent. Admin-restricted (System Manager / Jarvis Admin).",
       "tools_required": [
@@ -614,9 +614,7 @@
         "jarvis__read_app_source",
         "jarvis__record_app_wiki",
         "jarvis__finish_app_learning_run",
-        "jarvis__read_wiki",
-        "canvas",
-        "message"
+        "jarvis__read_wiki"
       ],
       "doctypes_required": [
         "Jarvis Wiki Page"

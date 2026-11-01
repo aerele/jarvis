@@ -16,7 +16,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.chat import collaboration_tools
+from jarvis.chat import agent_scheduler, collaboration_tools
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -224,6 +224,68 @@ class TestAppLearningPrivacyBoundary(FrappeTestCase):
 		):
 			self.assertIs(api.call_tool("jarvis__read_app_source", self._private_args()), raw_result)
 		self._assert_private_material_absent(outer_sink.call_args.args, outer_sink.call_args.kwargs)
+
+	def test_scheduler_projects_a_legacy_fleet_reply_before_terminalizing(self):
+		"""A pre-projection fleet host cannot put source into a Run error or relay path."""
+		row = frappe._dict({"name": "SYNTHETIC-RUN", "agent": "custom-app-learning"})
+		raw = {
+			"status": "done",
+			"finished_at": time.time(),
+			"result": {
+				"reply": RAW_SOURCE,
+				"canvas_ref": [RAW_PATH],
+				"gateway_status": "timeout",
+				"summary": RAW_BODY,
+			},
+			"error": {"code": RAW_SOURCE, "message": RAW_PATH},
+			"model_used": {
+				"provider": "openai_compat",
+				"model": f"{RAW_BODY} source text",
+			},
+		}
+		# This is the exact admin relay shape that poll_dispatched_runs unwraps.
+		relayed = agent_scheduler._polled_state({"ok": True, "data": raw})
+		safe = agent_scheduler._safe_app_learning_fleet_state(row, relayed)
+		self._assert_private_material_absent(safe)
+		self.assertEqual(safe["result"]["gateway_status"], "aborted")
+		self.assertEqual(safe["result"]["summary"], "aborted")
+		self.assertIsNone(safe["model_used"])
+
+		# The fallback retains only fleet's bounded model observability record.
+		model_only = agent_scheduler._safe_app_learning_fleet_state(
+			row,
+			{
+				"status": "running",
+				"model_used": {"provider": "openai_compat", "model": "gpt-5.6-terra"},
+			},
+		)
+		self.assertEqual(model_only["model_used"], {"provider": "openai_compat", "model": "gpt-5.6-terra"})
+		self.assertIsNone(
+			agent_scheduler._safe_app_learning_fleet_state(
+				row,
+				{
+					"status": "running",
+					"model_used": {
+						"provider": "openai_compat",
+						"model": "gpt-5.6-terra",
+						"untrusted": RAW_SOURCE,
+					},
+				},
+			)["model_used"]
+		)
+
+		with mock.patch.object(agent_scheduler, "_terminalize_stuck_run", return_value=True) as terminal:
+			self.assertTrue(agent_scheduler._reconcile_polled_run(row, raw, frappe.utils.now_datetime()))
+		self._assert_private_material_absent(terminal.call_args.args, terminal.call_args.kwargs)
+		self.assertEqual(terminal.call_args.kwargs["error"], agent_scheduler._APP_LEARNING_ABORT_REPLY)
+
+		failed_raw = {"status": "failed", "error": {"code": RAW_SOURCE, "message": RAW_PATH}}
+		with mock.patch.object(agent_scheduler, "_terminalize_stuck_run", return_value=True) as terminal:
+			self.assertTrue(
+				agent_scheduler._reconcile_polled_run(row, failed_raw, frappe.utils.now_datetime())
+			)
+		self._assert_private_material_absent(terminal.call_args.args, terminal.call_args.kwargs)
+		self.assertEqual(terminal.call_args.kwargs["error"], agent_scheduler._APP_LEARNING_FAILURE_MESSAGE)
 
 	def test_shared_and_ordinary_calls_are_refused_before_source_access(self):
 		"""Shared and ordinary calls cannot use this delegate-only source path."""
