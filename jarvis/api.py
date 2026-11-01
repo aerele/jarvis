@@ -191,16 +191,18 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 				"start a new chat to continue. Then stop.",
 			)
 
+		from jarvis.tools import _private_output
+
+		# AP/AR source snapshots never use the ordinary or shared transports.
+		# Reject here, before either route can claim a callback or collect ERP data.
+		if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
+			frappe.local.response.http_status_code = 400
+			return _error("InvalidArgumentError", "Private review evidence requires private audit output.")
+		if tool in _private_output.PRIVATE_SOURCE_TOOLS and shared_session:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Private review evidence is unavailable in shared chats.")
 		if result_mode is not None and (
-			result_mode != "private_audit_v1"
-			or shared_session
-			or tool
-			not in {
-				"query",
-				"run_report",
-				"get_purchase_match_inputs",
-				"get_receivables_review_inputs",
-			}
+			result_mode != _private_output.MODE or shared_session or tool not in _private_output.TOOLS
 		):
 			frappe.local.response.http_status_code = 400
 			return _error("InvalidArgumentError", "This call cannot use private audit output.")
@@ -429,6 +431,20 @@ def _dispatch_from_session(
 					from jarvis.chat import agent_scheduler
 
 					agent_scheduler.fail_run(denial["run"], denial["run_error"])
+				return result
+			if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
+				message = "Private review evidence requires private audit output."
+				result = _error("InvalidArgumentError", message)
+				audit.record(
+					tool=tool,
+					args={},
+					ok=False,
+					error_code="InvalidArgumentError",
+					error_message=message,
+				)
+				_persist_and_publish_tool_call(
+					session_key=session_key, tool=tool, args={}, result=result, tool_call_id=tool_call_id
+				)
 				return result
 			if result_mode is not None and not _private_output.allowed(result_mode, tool, cap):
 				result = _error(
