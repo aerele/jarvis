@@ -1917,24 +1917,20 @@
       "domain": "ap",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Ranks the vendor sub-ledger exceptions worth a human look at AP close: suppliers sitting in a debit balance, advances left unlinked to an invoice, goods received but not yet billed, and any gap between the supplier-wise balances and the creditors control account. A book-to-book self-consistency check with per-finding provenance and a saved worklist. Read-only; never books an entry, clears a balance, or releases a payment.",
       "tools_required": [
         "jarvis__get_schema",
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc",
-        "jarvis__get_balance_on"
+        "jarvis__get_balance_on",
+        "jarvis__get_engagement_config"
       ],
       "tools_allow": [
         "jarvis__get_schema",
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc",
         "jarvis__get_balance_on",
+        "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -1966,6 +1962,7 @@
         "vl-stale-ageing-5f17",
         "vl-tieout-tol-a9e3"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
