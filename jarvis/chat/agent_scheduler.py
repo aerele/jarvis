@@ -1223,6 +1223,16 @@ def _launch_audit(
 			)
 		)
 
+	# Stock Variance has a second, evaluator-owned reviewer setting plus a
+	# Warehouse record boundary. Validate it while the session is the run-as
+	# user and before any conversation, Run, or session row is created. The
+	# controller repeats this for ordinary enablement; this guard covers legacy
+	# rows and every scheduled/manual launch path.
+	from jarvis.chat.stock_variance_scope import is_stock_variance, require_configuration
+
+	if is_stock_variance(inst.agent):
+		require_configuration(inst.config or "{}")
+
 	# JF-021: validate the launch-time provenance identity BEFORE any row is inserted,
 	# for the same reason as the run-as guard above — a refused launch must leave no
 	# orphan conversation/run behind. Deliberately ORDERED BEFORE the capability
