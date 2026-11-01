@@ -13,7 +13,7 @@ READ_TOOLS = frozenset(
 describe_customizations download_pdf download_vcard export_document export_excel
 export_query find_skills get_balance_on get_bank_recon_inputs get_comments
 get_creation_context get_customer_outstanding get_doc get_employee_shift
-get_cycle_count_inputs get_engagement_config get_exchange_rate get_file_pages get_fiscal_year
+get_engagement_config get_exchange_rate get_file_pages get_fiscal_year
 get_gstr1_summary get_holidays_for_employee get_itemised_tax_breakup
 get_leave_balance_on get_leave_details get_leaves_for_period get_linked_docs
 get_list get_my_access get_naming_series_preview get_party_dashboard_info
@@ -35,7 +35,7 @@ unfollow_document unshare_doc update_comment update_doc
 REFUSED_TOOLS = frozenset(
 	"""
 create_custom_skill create_dashboard create_dashboard_chart finish_app_learning_run
-recall record_agent_run record_app_wiki remember save_agent_dashboard
+get_cycle_count_inputs recall record_agent_run record_app_wiki remember save_agent_dashboard
 save_dashboard schedule_run update_wiki
 """.split()
 )
