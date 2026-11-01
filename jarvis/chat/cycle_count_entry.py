@@ -72,14 +72,7 @@ def _may_view(ar, evidence: dict) -> bool:
 	user = frappe.session.user
 	if frappe.db.get_value("Jarvis Conversation", ar.conversation, "owner") == user:
 		return True
-	if evidence.get("reviewer") == user:
-		return True
-	return bool(
-		frappe.db.exists(
-			"DocShare",
-			{"share_doctype": APPROVAL, "share_name": ar.name, "user": user, "read": 1},
-		)
-	)
+	return evidence.get("reviewer") == user
 
 
 def _may_correct(doc, evidence: dict) -> bool:
