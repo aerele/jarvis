@@ -21,7 +21,6 @@ COUNT = "Jarvis Physical Count"
 RUN = "Jarvis Agent Run"
 AGENT = cycle_count_review.AGENT
 MAX_ENTRIES = 40
-MAX_LIST_CANDIDATES = 500
 _ENTRY_KEY = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _DECIMAL = re.compile(r"^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
 _PLAN_FACT_LOCK_TOKEN = object()
@@ -1100,51 +1099,43 @@ def list_count_plans(start: int = 0, page_length: int = 20) -> dict:
 	where, params = _visible_plan_where()
 	total = _visible_plan_count(where, params)
 	visible = []
-	next_start = start
-	inspected = 0
-	# A damaged legacy approval must not make every later valid plan disappear.
-	# Keep the scan bounded: the client receives an advancing raw cursor and can
-	# continue safely if an unusual number of bad candidates remain.
-	while len(visible) < page_length and next_start < total and inspected < MAX_LIST_CANDIDATES:
-		limit = min(page_length, MAX_LIST_CANDIDATES - inspected)
-		names = _visible_plan_names(where, params, next_start, limit)
-		if not names:
-			next_start = total
-			break
-		for name in names:
-			if len(visible) >= page_length:
-				break
-			next_start += 1
-			inspected += 1
-			try:
-				ar, evidence = _approval_context(name)
-				if not _may_view(ar, evidence):
-					continue
-				planned = _expected_lines(ar, evidence)
-				active = _active_counted_items(ar.name) if frappe.has_permission(COUNT, "read") else {}
-				visible.append(
-					{
-						"request": ar.name,
-						"title": ar.title,
-						"company": evidence["scope"]["company"],
-						"warehouse": ar.ref_name,
-						"line_count": len(planned),
-						"recorded_line_count": len(active),
-						"remaining_line_count": max(0, len(planned) - len(active)),
-						"decided_at": str(ar.decided_at or ""),
-						"can_record": int(_can_record(ar, evidence)),
-					}
-				)
-			except (
-				frappe.DoesNotExistError,
-				frappe.PermissionError,
-				frappe.ValidationError,
-				AttributeError,
-				KeyError,
-				TypeError,
-				ValueError,
-			):
+	# Select exactly one page before any per-plan reads. A valid-looking approval
+	# can still have damaged sealed evidence, so its projection remains guarded
+	# below. In that case the page may be short, but the raw cursor advances and
+	# the client can safely ask for the next page without this list scanning an
+	# unbounded number of private plans.
+	names = _visible_plan_names(where, params, start, page_length)
+	next_start = start + len(names) if names else total
+	for name in names:
+		try:
+			ar, evidence = _approval_context(name)
+			if not _may_view(ar, evidence):
 				continue
+			planned = _expected_lines(ar, evidence)
+			active = _active_counted_items(ar.name) if frappe.has_permission(COUNT, "read") else {}
+			visible.append(
+				{
+					"request": ar.name,
+					"title": ar.title,
+					"company": evidence["scope"]["company"],
+					"warehouse": ar.ref_name,
+					"line_count": len(planned),
+					"recorded_line_count": len(active),
+					"remaining_line_count": max(0, len(planned) - len(active)),
+					"decided_at": str(ar.decided_at or ""),
+					"can_record": int(_can_record(ar, evidence)),
+				}
+			)
+		except (
+			frappe.DoesNotExistError,
+			frappe.PermissionError,
+			frappe.ValidationError,
+			AttributeError,
+			KeyError,
+			TypeError,
+			ValueError,
+		):
+			continue
 	return {
 		"rows": visible,
 		"total": total,
