@@ -1,14 +1,20 @@
 """Cycle-Count Planner custody and output regressions."""
 
+import hashlib
+import json
 from contextlib import contextmanager
+from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import cycle_count_policy, operator_review
 from jarvis.chat import cycle_count_review as review
-from jarvis.chat import operator_review
+
+POLICY_VECTOR_SHA256 = "ac68cfa58925c768c8bf208fb5592a6bf0b104d9ce9a38f669ff23c4f435059c"
 
 
 def config(**over):
@@ -115,55 +121,71 @@ def reseal_result(data, output):
 
 def result(data=None):
 	data = data or snapshot()
-	findings = [
-		{
-			"token": review.TOKEN,
-			"ref_doctype": "Warehouse",
-			"ref_name": "WH-A",
-			"amount": 0,
-			"severity": "note",
-			"result_class": "derived_candidate",
-			"confidence": "medium",
-			"match_basis": "Current records and approved cadence",
-			"false_positive_path": "The store lead can defer a count after review.",
-			"note": "Plan one human physical count for this warehouse.",
-			"proposal": {
-				"outcome": "plan",
-				"reason_code": "cadence_due",
-				"lines_considered": 1,
-				"lines_planned": 1,
-				"lines_rolled": 0,
-				"due_total": 1,
-				"lines": [
-					{
-						"item_code": "ITEM-A",
-						"stock_uom": "Nos",
-						"abc": "A",
-						"velocity": "FAST",
-						"outward_qty": "3",
-						"actual_qty": "5",
-						"stock_value": "100",
-						"last_physical_count_on": None,
-						"capture_required": False,
-					}
-				],
+	canonical = cycle_count_policy.evaluate(data)
+	return {key: canonical[key] for key in ("findings", "coverage", "scope", "integrity_digest")}
+
+
+def policy_snapshot():
+	"""One bounded plan with a due line, a private-cadence hold, and a cap tail."""
+	data = snapshot()
+	data["config"]["line_limit"] = 1
+	data["datasets"]["bins"].extend(
+		[
+			{
+				"name": "BIN-B",
+				"item_code": "ITEM-B",
+				"warehouse": "WH-A",
+				"actual_qty": "5",
+				"stock_value": "10",
+				"valuation_rate": "2",
 			},
+			{
+				"name": "BIN-C",
+				"item_code": "ITEM-C",
+				"warehouse": "WH-A",
+				"actual_qty": "5",
+				"stock_value": "5",
+				"valuation_rate": "1",
+			},
+		]
+	)
+	data["datasets"]["items"].extend(
+		[
+			{
+				"name": "ITEM-B",
+				"is_stock_item": 1,
+				"disabled": 0,
+				"end_of_life": None,
+				"stock_uom": "Nos",
+				"has_batch_no": 0,
+				"has_serial_no": 0,
+			},
+			{
+				"name": "ITEM-C",
+				"is_stock_item": 1,
+				"disabled": 0,
+				"end_of_life": None,
+				"stock_uom": "Nos",
+				"has_batch_no": 0,
+				"has_serial_no": 0,
+			},
+		]
+	)
+	data["datasets"]["physical_counts"] = [
+		{
+			"name": "COUNT-B",
+			"company": "Example",
+			"warehouse": "WH-A",
+			"counted_at": "2026-08-26 09:00:00",
 		}
 	]
-	coverage = {review.TOKEN: {"state": "evaluated"}}
-	return {
-		"findings": findings,
-		"coverage": coverage,
-		"scope": data["scope"],
-		"integrity_digest": review.digest(
-			{
-				"input_digest": data["source_digest"],
-				"scope": data["scope"],
-				"findings": findings,
-				"coverage": coverage,
-			}
-		),
-	}
+	data["datasets"]["physical_count_items"] = [
+		{"name": "COUNT-B-ITEM", "parent": "COUNT-B", "item_code": "ITEM-B", "counted_qty": "5"}
+	]
+	data["source_counts"].update(
+		{"Bin": 3, "Item": 3, "Jarvis Physical Count": 1, "Jarvis Physical Count Item": 1}
+	)
+	return reseal_snapshot(data)
 
 
 class TestCycleCountConfiguration(FrappeTestCase):
@@ -218,6 +240,25 @@ class TestCycleCountConfiguration(FrappeTestCase):
 			self.assertFalse(
 				review.is_countable_item(frappe._dict(is_stock_item=1, disabled=0, end_of_life="2026-10-05"))
 			)
+
+
+class TestCycleCountPolicyContract(FrappeTestCase):
+	def test_shared_golden_policy_vectors(self):
+		"""Pin the server policy to the shared fake vector contract."""
+		path = Path(__file__).with_name("fixtures") / "cycle_count_policy_vectors.json"
+		self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), POLICY_VECTOR_SHA256)
+		vectors = json.loads(path.read_text())["vectors"]
+		for vector in vectors:
+			with self.subTest(vector=vector["name"]):
+				source = deepcopy(vector["snapshot"])
+				source["source_digest"] = review.digest(source)
+				actual = cycle_count_policy.evaluate(source)
+				self.assertEqual(actual["integrity_digest"], vector["expected"]["integrity_digest"])
+				self.assertEqual(actual["rows_consumed"], vector["expected"]["rows_consumed"])
+				self.assertEqual(
+					{finding["ref_name"]: finding["proposal"] for finding in actual["findings"]},
+					vector["expected"]["proposals"],
+				)
 
 
 class TestCycleCountCollection(FrappeTestCase):
@@ -320,7 +361,7 @@ class TestCycleCountOutput(FrappeTestCase):
 	def test_valid_output_is_ready_and_never_mentions_stock_reconciliation(self):
 		findings, coverage, ready = self.check(result())
 		self.assertTrue(ready)
-		self.assertEqual(coverage, {review.TOKEN: {"state": "evaluated"}})
+		self.assertEqual(coverage[review.TOKEN]["state"], "evaluated")
 		self.assertEqual(findings[0]["proposal"]["lines"][0]["item_code"], "ITEM-A")
 		self.assertNotIn("Stock Reconciliation", review.REVIEW_QUESTION)
 
@@ -350,6 +391,57 @@ class TestCycleCountOutput(FrappeTestCase):
 			}
 		)
 		with self.assertRaisesRegex(frappe.ValidationError, "cannot assert"):
+			self.check(out, data)
+
+	def test_recomputed_digest_cannot_select_a_private_cadence_hold(self):
+		data = policy_snapshot()
+		out = result(data)
+		line = out["findings"][0]["proposal"]["lines"][0]
+		line.update(
+			{
+				"item_code": "ITEM-B",
+				"abc": "C",
+				"velocity": "SLOW",
+				"outward_qty": "0",
+				"actual_qty": "5",
+				"stock_value": "10",
+				"last_physical_count_on": "2026-08-26",
+			}
+		)
+		reseal_result(data, out)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "sealed policy"):
+			self.check(out, data)
+
+	def test_recomputed_digest_cannot_change_abc_or_take_the_cap_tail(self):
+		data = policy_snapshot()
+		for mutation in (
+			lambda output: output["findings"][0]["proposal"]["lines"][0].update({"abc": "B"}),
+			lambda output: output["findings"][0]["proposal"]["lines"][0].update(
+				{
+					"item_code": "ITEM-C",
+					"abc": "C",
+					"velocity": "SLOW",
+					"outward_qty": "0",
+					"actual_qty": "5",
+					"stock_value": "5",
+					"last_physical_count_on": None,
+				}
+			),
+		):
+			out = result(data)
+			mutation(out)
+			reseal_result(data, out)
+			with self.assertRaisesRegex(frappe.ValidationError, "sealed policy"):
+				self.check(out, data)
+
+	def test_recomputed_digest_cannot_change_due_or_rolled_totals(self):
+		data = policy_snapshot()
+		out = result(data)
+		out["findings"][0]["proposal"].update({"lines_rolled": 0, "due_total": 1})
+		reseal_result(data, out)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "sealed policy"):
 			self.check(out, data)
 
 	def test_complete_private_file_requires_all_source_rows(self):
@@ -453,7 +545,10 @@ class TestCycleCountOutput(FrappeTestCase):
 		data = snapshot()
 		data["datasets"]["outward_ledger"] = data["datasets"].pop("ledger")
 		reseal_snapshot(data)
-		output = result(data)
+		# A rolling-update source is intentionally not evaluable by the current
+		# policy.  The returned payload is irrelevant once its old schema is
+		# recognised; it must close partial rather than enter the canonical gate.
+		output = result()
 
 		findings, coverage, ready = self.check(output, data)
 		self.assertEqual(findings, [])
@@ -531,6 +626,65 @@ class TestCycleCountOutput(FrappeTestCase):
 		self.assertEqual(persist.call_args.args[2], [])
 		self.assertEqual(persist.call_args.kwargs["coverage"], coverage)
 		save_output.assert_called_once()
+
+	def test_tampered_rehashed_policy_output_cannot_stage_a_review(self):
+		"""The writeback path must stop before the approval side effect."""
+		from jarvis.tools import record_agent_run as writeback
+
+		data = policy_snapshot()
+		output = result(data)
+		output["findings"][0]["proposal"]["lines"][0].update(
+			{
+				"item_code": "ITEM-B",
+				"abc": "C",
+				"velocity": "SLOW",
+				"outward_qty": "0",
+				"actual_qty": "5",
+				"stock_value": "10",
+				"last_physical_count_on": "2026-08-26",
+			}
+		)
+		reseal_result(data, output)
+		output.update({"truncated": False, "rows_consumed": sum(data["source_counts"].values())})
+		run = frappe._dict(
+			name="RUN-CYCLE-POLICY-TAMPER",
+			agent=review.AGENT,
+			installation="INST-CYCLE-POLICY-TAMPER",
+			status="completed",
+			input_snapshot_json=frappe.as_json(data),
+			preparation_mode="live",
+			owner="Administrator",
+		)
+		run_row = frappe._dict(
+			name=run.name,
+			status="running",
+			installation=run.installation,
+			agent=run.agent,
+		)
+		state = frappe._dict(status="running", input_snapshot_json=run.input_snapshot_json)
+		inst = frappe._dict(name=run.installation, reviewer="Administrator")
+		listing = frappe._dict(rule_tokens=frappe.as_json([review.TOKEN]), doctypes_required="[]")
+
+		def get_value(doctype, selector, *_args, **_kwargs):
+			if doctype == writeback.RUN:
+				return run_row if isinstance(selector, dict) else state
+			if doctype == writeback.LISTING:
+				return listing
+			return None
+
+		with (
+			patch("jarvis.tools._agent_run_ctx.get_session_key", return_value="cycle-policy-tamper"),
+			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(
+				frappe,
+				"get_doc",
+				side_effect=lambda doctype, _name: run if doctype == writeback.RUN else inst,
+			),
+			patch.object(review, "stage_reviews") as stage,
+		):
+			with self.assertRaisesRegex(frappe.ValidationError, "sealed policy"):
+				writeback.record_agent_run(**output)
+		stage.assert_not_called()
 
 
 class TestCycleCountPrivateTool(FrappeTestCase):
