@@ -1791,7 +1791,12 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 		keep_budget_rows_of_uninstalled(doc.name, doc.owner, exclude=provenance_runs)
 	)
 	deleted_runs = [name for name in run_names if name not in kept]
-	_detach_last_seen_run(deleted_runs)
+	# A budget-retained generic run is detached from this installation just like a
+	# deleted run. A foreign finding can have its recurrence pointer bumped onto
+	# either shape, so clear that pointer unless this is a Cycle-Count provenance
+	# run that must remain as sealed count evidence.
+	runs_to_detach = [name for name in run_names if name not in provenance_runs]
+	_detach_last_seen_run(runs_to_detach)
 	for name in deleted_runs:
 		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	# honors if_owner for an owner; the admin path was authorised above. The append-only
