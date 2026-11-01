@@ -239,9 +239,7 @@ def approval_query_conditions(user: str | None = None) -> str:
 	if not readable:
 		return f"({base}) AND ({not_cycle})"
 	quoted = ", ".join(frappe.db.escape(name) for name in readable)
-	cycle = (
-		f"({table}.agent = {frappe.db.escape(CYCLE_COUNT_PLANNER)} " f"AND {table}.name IN ({quoted}))"
-	)
+	cycle = f"({table}.agent = {frappe.db.escape(CYCLE_COUNT_PLANNER)} AND {table}.name IN ({quoted}))"
 	if legacy:
 		cycle = f"({cycle} AND {legacy})"
 	return f"(({base}) AND ({not_cycle})) OR {cycle}"

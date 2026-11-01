@@ -94,7 +94,10 @@ def stage_reviews(run, inst, findings, adapter):
 	if not reviewer or not frappe.db.get_value("User", reviewer, "enabled"):
 		frappe.throw("An enabled, named reviewer is required.")
 	with impersonate(reviewer):
-		if _collect_current(adapter, stored["scope"], stored["config"])["source_digest"] != stored["source_digest"]:
+		if (
+			_collect_current(adapter, stored["scope"], stored["config"])["source_digest"]
+			!= stored["source_digest"]
+		):
 			frappe.throw(
 				"The named reviewer cannot read the complete assessment evidence.", frappe.PermissionError
 			)

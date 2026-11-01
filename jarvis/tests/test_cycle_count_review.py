@@ -278,7 +278,8 @@ class TestCycleCountFreshReviewSnapshots(FrappeTestCase):
 		adapter = SimpleNamespace(
 			AGENT=review.AGENT,
 			fresh_source_snapshot=fresh_snapshot,
-			collect=lambda scope, policy: events.append(("collect", scope, policy)) or {"source_digest": "fresh"},
+			collect=lambda scope, policy: events.append(("collect", scope, policy))
+			or {"source_digest": "fresh"},
 		)
 		self.assertEqual(
 			operator_review._collect_current(adapter, {"scope": "current"}, {"policy": "current"}),
@@ -308,7 +309,9 @@ class TestCycleCountFreshReviewSnapshots(FrappeTestCase):
 			scope_json=frappe.as_json(scope),
 			input_snapshot_json="",
 		)
-		capture_state = frappe._dict(agent=review.AGENT, status="running", input_snapshot_json=frappe.as_json(snapshot))
+		capture_state = frappe._dict(
+			agent=review.AGENT, status="running", input_snapshot_json=frappe.as_json(snapshot)
+		)
 		with (
 			patch.object(operator_review.frappe.db, "get_value", return_value=capture_state),
 			patch.object(operator_review, "_collect_current", return_value=snapshot) as collect,
@@ -328,7 +331,9 @@ class TestCycleCountFreshReviewSnapshots(FrappeTestCase):
 			input_snapshot_json=frappe.as_json(snapshot),
 		)
 		installation = frappe._dict(name="fresh-stage-installation", reviewer=policy["reviewer"])
-		created = SimpleNamespace(name="fresh-stage-approval", flags=frappe._dict(), insert=lambda **_kwargs: None)
+		created = SimpleNamespace(
+			name="fresh-stage-approval", flags=frappe._dict(), insert=lambda **_kwargs: None
+		)
 
 		def stage_get_value(doctype, *_args, **_kwargs):
 			if doctype == "User":
@@ -3177,7 +3182,11 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		)
 		approved = self._plan()
 		frappe.db.set_value(
-			"Jarvis Approval Request", approved.name, "context_md", "COUNT-PLAN-CONTEXT-MARKER", update_modified=False
+			"Jarvis Approval Request",
+			approved.name,
+			"context_md",
+			"COUNT-PLAN-CONTEXT-MARKER",
+			update_modified=False,
 		)
 		frappe.set_user(self.counter)
 		try:
@@ -3225,6 +3234,7 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 				(set(), target_bin, "the selected Bin"),
 			):
 				with self.subTest(missing=label):
+
 					def no_native_stock_read(doctype, ptype="read", *args, **kwargs):
 						doc = kwargs.get("doc") or (args[0] if args else None)
 						if doctype in denied_doctypes and ptype in {"read", "select"}:
@@ -3248,7 +3258,9 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 								"a generic Bin read must not bypass the selected Bin denial",
 							)
 						self.assertEqual(cycle_count_entry.list_count_plans()["rows"], [])
-						self.assertFalse(cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name)))
+						self.assertFalse(
+							cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name))
+						)
 						with self.assertRaises(frappe.PermissionError):
 							cycle_count_entry.get_count_plan(approved.name)
 						self.assertFalse(chat_permissions.has_approval_permission(approved, "read", manager))
@@ -3261,7 +3273,10 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 							[],
 						)
 						self.assertFalse(
-							any(row["name"] == approved.name for row in approvals_api.list_approvals(status="All"))
+							any(
+								row["name"] == approved.name
+								for row in approvals_api.list_approvals(status="All")
+							)
 						)
 						page = approvals_api.list_approvals_page(
 							filters={"conversation": approved.conversation}, page_length=20
@@ -3282,13 +3297,14 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 							f"a System Manager without {label} read cannot see count items",
 						)
 						if denied_bin:
-							native_permission.assert_any_call(
-								"Bin", "read", doc=target_bin, user=manager
-							)
+							native_permission.assert_any_call("Bin", "read", doc=target_bin, user=manager)
 			for bins, label in (([], "missing"), ([target_bin, "duplicate-bin"], "ambiguous")):
-				with self.subTest(bin_source=label), patch.object(
-					cycle_count_permissions.frappe.db, "get_all", return_value=bins
-				) as selected_bins:
+				with (
+					self.subTest(bin_source=label),
+					patch.object(
+						cycle_count_permissions.frappe.db, "get_all", return_value=bins
+					) as selected_bins,
+				):
 					self.assertFalse(
 						cycle_count_permissions.may_read_count_plan(approved, manager),
 						f"a {label} selected Bin must fail closed",
@@ -3435,16 +3451,16 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		)
 		frappe.db.commit()
 		try:
-			agents_api._uninstall_cascade(frappe.get_doc("Jarvis Agent Installation", installation.name), True)
+			agents_api._uninstall_cascade(
+				frappe.get_doc("Jarvis Agent Installation", installation.name), True
+			)
 
 			self.assertFalse(frappe.db.exists("Jarvis Agent Installation", installation.name))
 			self.assertFalse(frappe.db.exists("Jarvis Chat Session", {"session_key": session_key}))
 			self.assertEqual(
 				frappe.db.get_value("Jarvis Approval Request", approved.name, "run"), approved.run
 			)
-			self.assertEqual(
-				frappe.db.get_value("Jarvis Approval Request", pending.name, "run"), pending.run
-			)
+			self.assertEqual(frappe.db.get_value("Jarvis Approval Request", pending.name, "run"), pending.run)
 			self.assertTrue(
 				frappe.db.exists("Jarvis Agent Run", pending.run),
 				"a pending Cycle-Count review must not retain a dangling run Link",
@@ -3479,7 +3495,9 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			frappe.db.delete("Jarvis Chat Session", {"session_key": session_key})
 			frappe.db.delete("Jarvis Agent Installation", {"name": installation.name})
 			frappe.db.delete("Jarvis Agent Activity", {"installation": installation.name})
-			frappe.db.delete("Jarvis Conversation", {"name": ["in", [approved.conversation, pending.conversation]]})
+			frappe.db.delete(
+				"Jarvis Conversation", {"name": ["in", [approved.conversation, pending.conversation]]}
+			)
 			frappe.delete_doc("User", installation_owner, force=True, ignore_permissions=True)
 			frappe.db.commit()
 

@@ -536,7 +536,7 @@ def conversation_has_retained_count_plan(conversation: str) -> bool:
 			""",
 			{"conversation": conversation, "agent": CYCLE_COUNT_PLANNER},
 			pluck=True,
-	)
+		)
 	)
 
 

@@ -16,4 +16,6 @@ def get_cycle_count_inputs() -> dict:
 	name = frappe.db.get_value("Jarvis Agent Run", {"session_key": session_key}, "name")
 	if not name:
 		raise InvalidArgumentError("No agent run is bound to this session.")
-	return _private_output.source_envelope(cycle_count_review.get_inputs(frappe.get_doc("Jarvis Agent Run", name)))
+	return _private_output.source_envelope(
+		cycle_count_review.get_inputs(frappe.get_doc("Jarvis Agent Run", name))
+	)
