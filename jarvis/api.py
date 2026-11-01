@@ -756,6 +756,7 @@ def persist_tool_receipt(
 	tool_call_id: str | None = None,
 	flip_token: str | None = None,
 	overwrite_outcomes: tuple = (),
+	require_pending_flip: bool = False,
 ) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
 	publish the realtime tool:result event, running as the conversation owner so
@@ -791,7 +792,11 @@ def persist_tool_receipt(
 
 	``overwrite_outcomes``: with ``flip_token``, also re-flip that token's row when it
 	already carries one of these chips (a pending-action settle whose executed or
-	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``)."""
+	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``).
+
+	``require_pending_flip``: do not use the normal fallback insert when a matching
+	pending row is absent. Close-fence cleanup uses this mode so an unseen or
+	already-settled legacy token cannot manufacture a new terminal receipt."""
 	result = result or {}
 	from jarvis.chat.source_receipts import source_receipt
 
@@ -904,6 +909,11 @@ def persist_tool_receipt(
 					update_modified=True,
 				)
 				msg_name = existing
+		if msg_name is None and require_pending_flip:
+			# Release the conversation lock without manufacturing a new receipt. A
+			# concurrent terminal writer won this card, or it was never displayed.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release flip-only lock
+			return
 		if msg_name is None:
 			msg_name = _locked_insert_chat_message(
 				conv_name,

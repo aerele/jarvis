@@ -26,6 +26,9 @@ from jarvis.chat import (
 	pending_confirm,
 	pending_confirm_legacy,
 )
+from jarvis.chat import (
+	api as chat_api,
+)
 from jarvis.chat.agent_closure import (
 	CLOSED_AGENT_SPECS,
 	CLOSED_STATUS,
@@ -418,6 +421,50 @@ class TestAgentClosureIntegration(FrappeTestCase):
 		self.assertTrue(token)
 		return token
 
+	def _legacy_card(self, *, conversation: str | None = None) -> tuple[str, str]:
+		conversation = conversation or self._conversation()
+		token = self._legacy_token(conversation=conversation)
+		record = pending_confirm_legacy.peek(token)
+		self.assertIsNotNone(record)
+		api.persist_pending_action(
+			conversation,
+			"create_doc",
+			{"card": {"title": "Synthetic legacy closure confirmation", "fields": []}},
+			token,
+			record["expires_at"],
+		)
+		return token, conversation
+
+	def _revoke_legacy_fence(self, token: str) -> None:
+		record = pending_confirm_legacy.peek(token)
+		self.assertIsNotNone(record)
+		record[PENDING_ACTION_FENCE_FIELD] = {
+			CLOSED_AGENT_SPECS[0].slug: CLOSED_AGENT_SPECS[0].generation
+		}
+		frappe.cache().set_value(pending_confirm_legacy._key(token), record, expires_in_sec=900)
+
+	def _assert_revoked_legacy_receipt(self, token: str) -> None:
+		row = frappe.db.get_value(
+			MESSAGE,
+			{"role": "tool", "tool_call_id": token},
+			["tool_args", "tool_result", "tool_status", "action_outcome", "pending_card"],
+			as_dict=True,
+		)
+		self.assertIsNotNone(row)
+		self.assertEqual(row.tool_status, "")
+		self.assertEqual(row.action_outcome, "cancelled")
+		self.assertIsNone(row.pending_card)
+		self.assertEqual(frappe.parse_json(row.tool_args), {})
+		result = frappe.parse_json(row.tool_result)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reason_code"], "safety_update")
+		self.assertEqual(result["error"]["type"], "InvalidConfirmation")
+		self.assertEqual(
+			result["error"]["message"],
+			"This confirmation was cancelled during an agent safety update. "
+			"Submit the action again if it is still needed.",
+		)
+
 	def test_both_agents_refuse_opening_routes_and_fleet_payload(self):
 		for spec in CLOSED_AGENT_SPECS:
 			frappe.db.set_value(LISTING, spec.slug, "status", "Published", update_modified=False)
@@ -554,6 +601,80 @@ class TestAgentClosureIntegration(FrappeTestCase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["reason_code"], "safety_update")
 		self.assertIsNone(pending_confirm_legacy.peek(stale))
+		self.assertFalse(frappe.db.exists(MESSAGE, {"tool_call_id": stale}))
+
+	def test_migration_cleanup_persists_revoked_legacy_card_and_keeps_current_card(self):
+		before = frappe.db.count("ToDo")
+		conversation = self._conversation()
+		stale, _ = self._legacy_card(conversation=conversation)
+		current, _ = self._legacy_card(conversation=conversation)
+		self._revoke_legacy_fence(stale)
+
+		agent_closure.revoke_unfenced_legacy_tokens()
+
+		self.assertIsNone(pending_confirm_legacy.peek(stale))
+		self._assert_revoked_legacy_receipt(stale)
+		self.assertEqual(
+			frappe.db.get_value(MESSAGE, {"tool_call_id": current}, "tool_status"), "pending"
+		)
+		self.assertEqual(frappe.db.count("ToDo"), before)
+
+		frappe.set_user(OWNER)
+		reloaded = chat_api.get_conversation(conversation)["messages"]
+		self.assertFalse(
+			any(
+				row.get("tool_call_id") == stale
+				and row.get("tool_status") == "pending"
+				and row.get("pending_card")
+				for row in reloaded
+			)
+		)
+		self.assertEqual(
+			[
+				row.get("tool_call_id")
+				for row in reloaded
+				if row.get("role") == "tool"
+				and row.get("tool_status") == "pending"
+				and row.get("pending_card")
+			],
+			[current],
+		)
+
+	def test_runtime_fence_rejection_settles_legacy_card_after_capped_cleanup_scan(self):
+		before = frappe.db.count("ToDo")
+		conversation = self._conversation()
+		stale, _ = self._legacy_card(conversation=conversation)
+		current, _ = self._legacy_card(conversation=conversation)
+		self._revoke_legacy_fence(stale)
+
+		with patch.object(agent_closure, "_REDIS_SCAN_LIMIT", 0):
+			self.assertEqual(agent_closure.revoke_unfenced_legacy_tokens(), 0)
+		self.assertIsNotNone(pending_confirm_legacy.peek(stale))
+
+		frappe.set_user(OWNER)
+		with patch.object(api, "dispatch_confirmed") as dispatch_confirmed:
+			result = actions_api._confirm_core(stale, conversation)
+		dispatch_confirmed.assert_not_called()
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reason_code"], "safety_update")
+		self.assertIsNone(pending_confirm_legacy.peek(stale))
+		self._assert_revoked_legacy_receipt(stale)
+		self.assertEqual(
+			frappe.db.get_value(MESSAGE, {"tool_call_id": current}, "tool_status"), "pending"
+		)
+		self.assertEqual(frappe.db.count("ToDo"), before)
+
+		reloaded = chat_api.get_conversation(conversation)["messages"]
+		self.assertEqual(
+			[
+				row.get("tool_call_id")
+				for row in reloaded
+				if row.get("role") == "tool"
+				and row.get("tool_status") == "pending"
+				and row.get("pending_card")
+			],
+			[current],
+		)
 
 	def test_durable_confirmation_checks_before_claim_and_after_claim(self):
 		before = frappe.db.count("ToDo")

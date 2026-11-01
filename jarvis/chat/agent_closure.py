@@ -41,8 +41,24 @@ _INSTALLATION = "Jarvis Agent Installation"
 _LISTING = "Jarvis Agent Listing"
 _RUN = "Jarvis Agent Run"
 _SESSION = "Jarvis Chat Session"
+_MESSAGE = "Jarvis Chat Message"
 _CLOSE_SNAPSHOT_LIMIT = 2_000
 _REDIS_SCAN_LIMIT = 2_000
+
+# A legacy confirmation can contain the model's proposed arguments. A close
+# settlement must not preserve them in a terminal receipt. This is the only
+# result we write for a close-revoked legacy card.
+_SAFETY_UPDATE_RECEIPT = {
+	"ok": False,
+	"reason_code": "safety_update",
+	"error": {
+		"type": "InvalidConfirmation",
+		"message": (
+			"This confirmation was cancelled during an agent safety update. "
+			"Submit the action again if it is still needed."
+		),
+	},
+}
 
 
 @dataclass(frozen=True)
@@ -415,6 +431,58 @@ def cancel_unfenced_chat_cards() -> int:
 	return done
 
 
+def settle_revoked_legacy_chat_card(token: str, *, strict: bool = False) -> bool:
+	"""Make a close-revoked legacy card terminal in its durable chat row.
+
+	Legacy Redis credentials predate ``Jarvis Pending Action``. Their display row
+	is therefore the only reload source for the card. Flip an existing pending
+	row in place, never insert a new receipt for a token that was not displayed,
+	and erase its pre-action arguments and card payload. ``strict`` is used by the
+	migration so a database failure leaves the Redis token for a safe retry;
+	runtime callers keep the execution refusal even if a receipt write fails.
+	"""
+	token = (token or "").strip()
+	if not token or not frappe.db.table_exists(_MESSAGE, cached=False):
+		return True
+
+	rows = frappe.get_all(
+		_MESSAGE,
+		filters={"role": "tool", "tool_call_id": token, "tool_status": "pending"},
+		fields=["name", "conversation", "tool_name"],
+	)
+	if not rows:
+		return True
+
+	try:
+		from jarvis import api
+
+		for row in rows:
+			api.persist_tool_receipt(
+				row.conversation,
+				row.tool_name or "",
+				{},
+				dict(_SAFETY_UPDATE_RECEIPT),
+				action_outcome="cancelled",
+				flip_token=token,
+				require_pending_flip=True,
+			)
+	except Exception:
+		if strict:
+			raise
+		frappe.log_error(
+			title="jarvis.agent_close.legacy_card_settle_failed",
+			message=frappe.get_traceback(),
+		)
+		return False
+
+	# A concurrent terminal writer is safe too. The only unsafe state is a row
+	# that remains pending after the flip-only receipt attempt.
+	return not frappe.db.exists(
+		_MESSAGE,
+		{"name": ["in", [row.name for row in rows]], "tool_status": "pending"},
+	)
+
+
 def revoke_unfenced_legacy_tokens() -> int:
 	"""Remove a bounded Redis snapshot of generic tokens that lack the full map."""
 	from jarvis.chat import pending_confirm_legacy
@@ -445,12 +513,16 @@ def revoke_unfenced_legacy_tokens() -> int:
 			record = None
 		if confirmation_is_current(record):
 			continue
-		cache.delete(raw_key)
-		frappe.local.cache.pop(key, None)
 		try:
 			decoded = token.decode()
 		except UnicodeDecodeError:
 			decoded = ""
+		if decoded and not settle_revoked_legacy_chat_card(decoded, strict=True):
+			# Do not burn this credential while its displayed card could remain
+			# confirmable. The next migration run can retry the durable settlement.
+			frappe.throw("Could not settle a revoked legacy confirmation card.", frappe.ValidationError)
+		cache.delete(raw_key)
+		frappe.local.cache.pop(key, None)
 		if decoded:
 			pending_confirm_legacy._gauge_remove(decoded)
 		done += 1

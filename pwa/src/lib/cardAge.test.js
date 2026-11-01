@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { PROPOSED_LABEL_AFTER_S, proposedLabel } from "./cardAge.js";
+import { pendingActionsFromRows } from "./pendingResync.js";
 
 const NOW = 1_800_000_000_000;
 const ago = (s) => NOW / 1000 - s;
@@ -20,6 +21,18 @@ test("no usable time means no label", () => {
 
 test("ChatView never parses a row's site-timezone creation as a local time", () => {
 	const src = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
-	assert.ok(!src.includes("_rowExpiresEpoch(m.creation)"));
-	assert.ok(src.includes("created_at: m.created_at ?? null,"));
+	assert.ok(src.includes("pendingActionsFromRows("));
+	const [card] = pendingActionsFromRows(
+		[
+			{
+				role: "tool",
+				tool_status: "pending",
+				tool_call_id: "time-token",
+				pending_card: {},
+				created_at: 1_700_000_001,
+			},
+		],
+		"CONV-TIME",
+	);
+	assert.equal(card.created_at, 1_700_000_001);
 });

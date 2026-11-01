@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { admitRealtimePendingCards, mergePendingSources, withExcluded } from "./pendingResync.js";
+import {
+	admitRealtimePendingCards,
+	mergePendingSources,
+	pendingActionsFromRows,
+	withExcluded,
+} from "./pendingResync.js";
 
 // P0c in-flight suppression: a Confirm/Discard RPC in flight for token T must
 // not have its card re-added by a stale resync read racing the RPC's own
@@ -90,6 +95,35 @@ test("a safety-update token stays excluded after Done when a stale pending row r
 	const staleFromRows = [{ token: "safety-token" }, { token: "ordinary-token" }];
 	const afterDone = mergePendingSources([], [staleFromRows], settled);
 	assert.deepEqual(afterDone, [{ token: "ordinary-token" }]);
+});
+
+test("a hard reload does not rebuild a terminal safety receipt into a Confirm card", () => {
+	// A new mount has no settledTokens memory. The server's durable state must be
+	// enough: only a real pending sibling is returned from the transcript rows.
+	const rows = [
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "",
+			tool_call_id: "revoked-token",
+			pending_card: null,
+			tool_args: {},
+			action_outcome: "cancelled",
+		},
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "pending",
+			tool_call_id: "ordinary-token",
+			pending_card: { title: "Ordinary pending change" },
+			created_at: 123,
+			expires_at: null,
+		},
+	];
+	const cards = pendingActionsFromRows(rows, "CONV-RELOAD");
+	assert.deepEqual(cards.map((card) => card.token), ["ordinary-token"]);
+	assert.equal(cards[0].conversation, "CONV-RELOAD");
+	assert.deepEqual(cards[0].preview, { card: { title: "Ordinary pending change" } });
 });
 
 for (const kind of ["action:pending", "run:end", "run:error"]) {

@@ -24,6 +24,40 @@ export function mergePendingSources(base, freshSources, inflightTokens) {
 	return [...byToken.values()];
 }
 
+// A complete page reload has no in-memory settled-token set. It must therefore
+// rebuild cards only from durable rows that still explicitly say "pending" and
+// carry a card payload. A terminal safety receipt has neither property.
+function rowExpiresEpoch(value) {
+	if (!value) return null;
+	// The row's expires_at is a site-timezone datetime string. A live push carries
+	// the authoritative epoch, so a parse failure only removes the local countdown.
+	const time = Date.parse(String(value).replace(" ", "T"));
+	return Number.isFinite(time) ? Math.round(time / 1000) : null;
+}
+
+export function pendingActionsFromRows(rows, conversation) {
+	return (rows || [])
+		.filter(
+			(row) =>
+				row?.role === "tool" &&
+				row.tool_status === "pending" &&
+				row.pending_card &&
+				row.tool_call_id,
+		)
+		.map((row) => ({
+			conversation,
+			token: row.tool_call_id,
+			tool: row.tool_name,
+			summary: "",
+			preview: { card: row.pending_card },
+			run_id: null,
+			created_at: row.created_at ?? null,
+			expires_at: rowExpiresEpoch(row.expires_at),
+			seq: row.seq ?? null,
+			recent: row.recent !== false,
+		}));
+}
+
 // D1: a typed "no" (ChatView.vue's send(), discardedTokens) settles a card by
 // filtering it out of `pending.value`, but messages.value (fromRows' source)
 // keeps tool_status "pending" until the next load(). A resync racing that

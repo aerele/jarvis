@@ -44,6 +44,7 @@ import { sortPendingCards } from "../lib/sortPendingCards.js";
 import {
 	admitRealtimePendingCards,
 	mergePendingSources,
+	pendingActionsFromRows,
 	withExcluded,
 } from "../lib/pendingResync.js";
 import {
@@ -591,33 +592,6 @@ async function loadOlder({ auto = false } = {}) {
 	}
 }
 
-// PR-1: build a confirm-card item from a durable pending action-row (role="tool",
-// tool_status="pending"), mirroring the SPA. pendingCardOf reads preview.card.
-function _rowExpiresEpoch(s) {
-	if (!s) return null;
-	// The row's expires_at is a site-timezone datetime string; parse to epoch seconds
-	// (best-effort - a live push carries the authoritative epoch and the server
-	// enforces the real TTL, so null just omits the client countdown).
-	const t = Date.parse(String(s).replace(" ", "T"));
-	return Number.isFinite(t) ? Math.round(t / 1000) : null;
-}
-function pendingActionFromRow(m, cid) {
-	return {
-		conversation: cid,
-		token: m.tool_call_id,
-		tool: m.tool_name,
-		summary: "",
-		preview: { card: m.pending_card },
-		run_id: null,
-		// Server epoch on every pending row (a legacy one: its own creation); never a
-		// local-time parse (sortPendingCards falls back to expires_at when null).
-		created_at: m.created_at ?? null,
-		expires_at: _rowExpiresEpoch(m.expires_at),
-		seq: m.seq ?? null,
-		recent: m.recent !== false,
-	};
-}
-
 // Parked writes survive a reload: re-ask rather than leaving an approval the user
 // can never reach. PR-1 reliability: the durable pending action-rows
 // (get_conversation) are the PRIMARY source - a reload shows a confirmable card even
@@ -637,15 +611,10 @@ async function recheckPending() {
 async function loadPending(source) {
 	const cid = convId.value;
 	if (!cid) return;
-	const fromRows = [...olderPending.value, ...(messages.value || [])]
-		.filter(
-			(m) =>
-				m.role === "tool" &&
-				m.tool_status === "pending" &&
-				m.pending_card &&
-				m.tool_call_id
-		)
-		.map((m) => pendingActionFromRow(m, cid));
+	const fromRows = pendingActionsFromRows(
+		[...olderPending.value, ...(messages.value || [])],
+		cid,
+	);
 	let fromBackstop = null; // null = backstop read failed/unavailable (a transient blip)
 	try {
 		const r = await api.listPendingConfirmations(cid, source);
