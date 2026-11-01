@@ -107,6 +107,7 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"get_purchase_match_inputs",
 	"get_receivables_review_inputs",
 	"get_bank_recon_inputs",
+	"get_cycle_count_inputs",
 	"get_itemised_tax_breakup",
 	# Read-only GSTR-1 return-side period totals from india_compliance's filed
 	# return (the gzip filed_summary File, reduced server-side to the 5 heads), for
@@ -164,6 +165,10 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# company stamped), coverage-scoped auto-resolves (A16), rechecks the GL
 	# consistency watermark (A17), and finalizes the Run. See A2/A16/A17.
 	"record_agent_run",
+	# Stock Variance has one app-owned evaluator. It captures source rows,
+	# evaluates them, renders the report, and records the terminal result without
+	# exposing any raw source or model-authored writeback surface.
+	"run_stock_variance_evaluation",
 	# Phase-4 delegate → saved dashboard: the delegate authors a self-contained,
 	# A2-safe findings dashboard HTML and persists it here as a Jarvis Dashboard
 	# (User-scoped to the run's owner), linked on Run.dashboard. Resolves the run

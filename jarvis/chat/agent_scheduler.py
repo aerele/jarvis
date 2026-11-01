@@ -184,6 +184,7 @@ def run_due_agent_audits() -> None:
 			"schedule_weekday",
 			"schedule_day_of_month",
 			"installable",
+			"config",
 			"source_apps_json",
 			"activation_state",
 			"next_run_at",
@@ -391,6 +392,22 @@ def _sweep_one(row, now, seen: set) -> None:
 		_record_failed(row, f"scheduled run skipped: {model_gate['message']}")
 		_advance(row, now)
 		return
+
+	# A stale Stock Variance setup needs a human repair. Do this before claiming
+	# a slot so a legacy or later-invalid scope produces one clear failed run and
+	# advances to the next cadence, rather than retrying an enqueue every hour.
+	from jarvis.chat.stock_variance_scope import configuration_issues, is_stock_variance
+
+	if is_stock_variance(row.agent):
+		with impersonate(run_as):
+			issues = configuration_issues(row.config or "{}")
+		if issues:
+			_record_failed(
+				row,
+				"scheduled run skipped: complete the Stock Variance company, Warehouse scope and reviewer in Configure",
+			)
+			_advance(row, now)
+			return
 
 	_dispatch(row, now, run_as=run_as, source_apps=source_apps, model_gate=model_gate)
 
@@ -1182,6 +1199,7 @@ def _launch_audit(
 
 	review_backend = operator_review.backend(inst.agent)
 	review_config = review_backend.configuration(inst) if review_backend else None
+	stock_variance_config = None
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1222,6 +1240,20 @@ def _launch_audit(
 				"have no owner. Set a reviewer on the installation, or disable it."
 			)
 		)
+
+	# Stock Variance has a second, evaluator-owned reviewer setting plus a
+	# Warehouse record boundary. Validate it while the session is the run-as
+	# user and before any conversation, Run, or session row is created. The
+	# controller repeats this for ordinary enablement; this guard covers legacy
+	# rows and every scheduled/manual launch path.
+	from jarvis.chat.stock_variance_scope import is_stock_variance, require_configuration
+
+	if is_stock_variance(inst.agent):
+		validated_stock_config = require_configuration(inst.config or "{}")
+		# The evaluator accepts only its small declared namespace. Company and the
+		# Warehouse boundary are already stamped in scope_json and must not come
+		# from mutable installation configuration during execution.
+		stock_variance_config = _stock_variance_assessment_config(validated_stock_config)
 
 	# JF-021: validate the launch-time provenance identity BEFORE any row is inserted,
 	# for the same reason as the run-as guard above — a refused launch must leave no
@@ -1347,7 +1379,9 @@ def _launch_audit(
 				"preparation_mode": preparation_mode,
 				"initiating_human": initiating_human,
 				"model_source": model_gate.get("model_source"),
-				"assessment_config_json": frappe.as_json(review_config) if review_config else None,
+				"assessment_config_json": frappe.as_json(review_config or stock_variance_config)
+				if (review_config or stock_variance_config)
+				else None,
 				**capability,
 			}
 		)
@@ -1622,6 +1656,17 @@ def _stamp_scope_and_watermark(
 	try:
 		scope = agent_scope.resolve_scope(inst)
 	except Exception:
+		try:
+			config = frappe.parse_json(inst.get("config") or "{}")
+		except (TypeError, ValueError):
+			config = {}
+		if isinstance(config, dict) and any(
+			config.get(k) for k in ("record_scope", "prior_period_from", "prior_period_to")
+		):
+			frappe.log_error(
+				title="jarvis agent: explicit scope resolution failed", message=frappe.get_traceback()
+			)
+			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
@@ -1711,6 +1756,16 @@ def _explicit_config(listing, inst) -> dict:
 	return {**explicit, **derived_config.derive(namespaces, inst, explicit)}
 
 
+def _stock_variance_assessment_config(validated_config: dict) -> dict:
+	"""The immutable evaluator namespace for a Stock Variance launch.
+
+	Company and Warehouse data belong in the separately stamped run scope. This
+	prevents a later installation edit from widening an already launched review.
+	require_configuration validates the input before this helper is called.
+	"""
+	return {"stock_variance": validated_config["stock_variance"]}
+
+
 def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str:
 	"""The GENERIC, non-leaky run message handed to the delegate (A2/A6).
 
@@ -1734,6 +1789,11 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 		apps = ", ".join(str(a) for a in scope["source_apps"])
 		scope_block += f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
 	if scope and scope.get("company"):
+		clock_block = (
+			f'report_datetime="{scope["report_datetime"]}" (site time zone, no offset), '
+			if scope.get("report_datetime")
+			else ""
+		)
 		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period or the current date): "
 			f'company="{scope.get("company")}", '
@@ -1741,7 +1801,9 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			f'from_date="{scope.get("from_date")}", '
 			f'to_date="{scope.get("to_date")}", '
 			f'report_date="{scope.get("report_date")}", '
-			f'prior_fy_start="{scope.get("prior_fy_start")}", '
+			f"{clock_block}"
+			+ (f'execution_user="{scope["execution_user"]}", ' if scope.get("execution_user") else "")
+			+ f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
 		)
 	# EXPLICIT CONFIG (jarvis#1063 delivery): the tenant's declared config_keys values, HANDED
@@ -1750,6 +1812,10 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 	# delegate spills this JSON verbatim into config.json - it does NOT read its own installation
 	# for these tunables. Note ``Run.scope_json`` is a bench-side field that never reaches the
 	# container; the run MESSAGE is the only bench->delegate channel, so config must ride HERE.
+	if scope and any(scope.get(k) for k in ("prior_period_from", "prior_period_to", "record_scope")):
+		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
+			{k: scope[k] for k in ("prior_period_from", "prior_period_to", "record_scope") if scope.get(k)}
+		)
 	explicit_config = _explicit_config(listing, inst)
 	if explicit_config:
 		# ADDITIVE, never a replacement: config.json legitimately carries fields the delegate
@@ -2007,7 +2073,9 @@ def _kept_row_clear_values() -> dict:
 	return values
 
 
-def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
+def keep_budget_rows_of_uninstalled(
+	installation: str, owner: str, *, exclude: set[str] | None = None
+) -> list[str]:
 	"""Keep the run rows of an installation being uninstalled that this month's budget
 	counts, and return their names; the caller deletes the rest.
 
@@ -2023,10 +2091,18 @@ def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
 	Raw writes: the run controller refuses an ORM save that changes a launch field. Does
 	not commit; the caller commits with the rest of the uninstall."""
 	since = _budget_month_start()
+	exclude = set(exclude or ())
+	where_exclude = " AND name NOT IN %(exclude)s" if exclude else ""
 	kept = frappe.db.sql(
 		"""SELECT name FROM `tabJarvis Agent Run`
-		    WHERE installation = %(installation)s AND creation >= %(since)s AND status IN %(statuses)s""",
-		{"installation": installation, "since": since, "statuses": _KEPT_ROW_STATUSES},
+		    WHERE installation = %(installation)s AND creation >= %(since)s AND status IN %(statuses)s"""
+		+ where_exclude,
+		{
+			"installation": installation,
+			"since": since,
+			"statuses": _KEPT_ROW_STATUSES,
+			**({"exclude": tuple(exclude)} if exclude else {}),
+		},
 		pluck=True,
 	)
 	if not kept:

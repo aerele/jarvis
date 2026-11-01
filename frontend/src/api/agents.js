@@ -20,6 +20,8 @@ export const getAPReviewDefaults = (company) => call(AG + "get_ap_review_default
 export const getBankReconReviewDefaults = (company) =>
 	call(AG + "get_bank_recon_review_defaults", { company });
 export const getARReviewDefaults = (company) => call(AG + "get_ar_review_defaults", { company });
+export const getCycleCountReviewDefaults = (company) =>
+	call(AG + "get_cycle_count_review_defaults", { company });
 
 // PART 3 remediation — lightweight capability probe. `review` (skill-reviewer
 // set: Jarvis Skill Reviewer | Jarvis Admin | System Manager) is what

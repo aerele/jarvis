@@ -228,9 +228,9 @@ class TestPurchaseMatch(FrappeTestCase):
 		from jarvis.tools.get_purchase_match_inputs import get_purchase_match_inputs
 
 		with (
-			patch("jarvis.tools.get_purchase_match_inputs.is_private", return_value=False),
+			patch("jarvis.tools._private_output.is_private", return_value=False),
 			patch.object(frappe.db, "get_value") as get_value,
-			self.assertRaisesRegex(InvalidArgumentError, "private audit transport"),
+			self.assertRaisesRegex(InvalidArgumentError, "private audit output"),
 		):
 			get_purchase_match_inputs()
 		get_value.assert_not_called()

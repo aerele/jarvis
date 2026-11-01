@@ -1491,6 +1491,10 @@ _DELETED = "deleted"
 _ALREADY_GONE = "already gone"
 # The delete raised: not deleted, and not "kept" (no reply is in progress).
 _FAILED = "failed"
+# An approved Cycle-Count plan or submitted observation keeps the conversation
+# that supplies its owner boundary.  This is a normal kept outcome, like a
+# reply in progress; it must not be surfaced as a failed history clear.
+_CYCLE_COUNT_EVIDENCE_RETAINED = "cycle_count_evidence_retained"
 # This many chats failing one after another reads as a fault common to all of them
 # (a broken trash hook, a held lock), not as one bad chat: the request stops there.
 # It bounds the Error Log rows of one request (each is forwarded off the bench with
@@ -1502,16 +1506,17 @@ _FAILURES_IN_A_ROW_THAT_END_THE_REQUEST = 3
 def clear_chat_history() -> dict:
 	"""Permanently delete the current user's conversations and messages (the
 	settings "Danger zone" action), except a conversation that is waiting for a
-	reply: that one is left whole and counted in ``skipped``, to be deleted once
-	the reply has finished. Macros, skills and settings are untouched; macro-run
+	reply or retains a Cycle-Count plan/fact: it is left whole and counted in
+	``skipped``. Macros, skills and settings are untouched; macro-run
 	history rows survive but drop their (now deleted) conversation reference.
 
 	``deleted`` counts the conversations this request deleted. ``kept`` names the
-	skipped ones (kept because a reply is in progress, nothing else), ``failed``
-	counts and ``failed_names`` names the ones an error left undeleted. The names are
-	there so the client can tell whether the chat it has open still exists without
-	reading the list again. Every listed conversation is in exactly one of deleted,
-	skipped, failed, or already gone (deleted by someone else meanwhile, not reported).
+	skipped ones (kept because a reply is in progress or retained count evidence), and
+	``retained_count_plan_names`` identifies the latter subset when it is nonempty.
+	``failed`` counts and ``failed_names`` names the ones an error left undeleted. The
+	names let the client tell whether its open chat still exists without reading the
+	list again. Every listed conversation is in exactly one of deleted, skipped,
+	failed, or already gone (deleted by someone else meanwhile, not reported).
 
 	One conversation at a time, each in its own transaction. A conversation whose
 	delete fails is rolled back, logged by name and counted as failed, and the rest
@@ -1525,6 +1530,7 @@ def clear_chat_history() -> dict:
 	names = frappe.get_all(CONV, filters={"owner": frappe.session.user}, pluck="name")
 	deleted = 0
 	kept: list[str] = []
+	retained_count_plan_names: list[str] = []
 	failed: list[str] = []
 	failures_in_a_row = 0
 	for at, name in enumerate(names):
@@ -1550,7 +1556,9 @@ def clear_chat_history() -> dict:
 			failed.append(name)
 		elif outcome != _ALREADY_GONE:
 			kept.append(name)
-	return {
+			if outcome == _CYCLE_COUNT_EVIDENCE_RETAINED:
+				retained_count_plan_names.append(name)
+	result = {
 		"ok": True,
 		"deleted": deleted,
 		"skipped": len(kept),
@@ -1558,6 +1566,11 @@ def clear_chat_history() -> dict:
 		"failed": len(failed),
 		"failed_names": failed,
 	}
+	if retained_count_plan_names:
+		# Optional for a compatible response shape on older client releases. A
+		# client that does not know this field keeps its existing generic notice.
+		result["retained_count_plan_names"] = retained_count_plan_names
+	return result
 
 
 def _delete_idle_conversation(conversation: str) -> str:
@@ -1599,6 +1612,10 @@ def _delete_idle_conversation(conversation: str) -> str:
 		reason = admission.reply_in_progress(conversation)
 		if reason:
 			return reason
+		from jarvis.chat.cycle_count_permissions import conversation_has_retained_count_plan
+
+		if conversation_has_retained_count_plan(conversation):
+			return _CYCLE_COUNT_EVIDENCE_RETAINED
 		frappe.db.delete(MSG, {"conversation": conversation})
 		_unlink_macro_runs(conversation)
 		frappe.delete_doc(CONV, conversation, force=True, ignore_permissions=True)

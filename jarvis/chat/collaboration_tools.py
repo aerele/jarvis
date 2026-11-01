@@ -17,7 +17,7 @@ get_engagement_config get_exchange_rate get_file_pages get_fiscal_year
 get_gstr1_summary get_holidays_for_employee get_itemised_tax_breakup
 get_leave_balance_on get_leave_details get_leaves_for_period get_linked_docs
 get_list get_my_access get_naming_series_preview get_party_dashboard_info
-get_purchase_match_inputs get_receivables_review_inputs get_report_filters
+get_report_filters
 get_schema get_skill get_stock_balance get_submitted_linked_docs get_valuation_rate
 get_workflow_transitions list_app_modules list_connector_actions preview_doc
 preview_import preview_landed_cost_voucher query read_app_source read_file read_wiki report_pdf resolve_links
@@ -35,7 +35,8 @@ unfollow_document unshare_doc update_comment update_doc
 REFUSED_TOOLS = frozenset(
 	"""
 create_custom_skill create_dashboard create_dashboard_chart finish_app_learning_run
-recall record_agent_run record_app_wiki remember save_agent_dashboard
+	get_cycle_count_inputs get_purchase_match_inputs get_receivables_review_inputs recall record_agent_run
+	record_app_wiki remember run_stock_variance_evaluation save_agent_dashboard
 save_dashboard schedule_run update_wiki
 """.split()
 )
