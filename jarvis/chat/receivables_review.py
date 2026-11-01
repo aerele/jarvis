@@ -230,9 +230,12 @@ def _server_terminal_state(invoice, snapshot, groups, credits, pending, customer
 	header_balance = _server_number(invoice.get("outstanding_amount"))
 	if header_balance.quantize(quantum) != header_balance or abs(current - header_balance) > quantum / 2:
 		raise ValueError("Ledger and current invoice outstanding disagree")
-	if invoice.get("currency") == currency and header_balance > max(
-		_server_number(invoice.get("grand_total")), _server_number(invoice.get("rounded_total"))
-	) + quantum / 2:
+	if (
+		invoice.get("currency") == currency
+		and header_balance
+		> max(_server_number(invoice.get("grand_total")), _server_number(invoice.get("rounded_total")))
+		+ quantum / 2
+	):
 		raise ValueError("Recorded receivable exceeds the invoice total")
 	eligible = [row for row in rows if row["posting_date"] <= cutoff]
 	if len(eligible) != len(rows):
@@ -253,10 +256,14 @@ def _server_terminal_state(invoice, snapshot, groups, credits, pending, customer
 		return None
 	if scope["report_date"] != snapshot.get("site_date"):
 		return None
-	settlements = [row["posting_date"] for row in eligible if _server_number(row["amount_in_account_currency"]) < 0]
-	if settlements and (
-		date.fromisoformat(cutoff) - date.fromisoformat(max(settlements))
-	).days <= config["settlement_hold_days"]:
+	settlements = [
+		row["posting_date"] for row in eligible if _server_number(row["amount_in_account_currency"]) < 0
+	]
+	if (
+		settlements
+		and (date.fromisoformat(cutoff) - date.fromisoformat(max(settlements))).days
+		<= config["settlement_hold_days"]
+	):
 		return None
 	return "within_terms" if not _server_terms(invoice, header_balance, cutoff, quantum) else None
 
@@ -279,7 +286,9 @@ def server_terminal_states(snapshot):
 			if snapshot.get("source_digest") != digest(sealed):
 				return {}
 			scope, config = snapshot["scope"], snapshot["config"]
-			start, end, cutoff = (_server_date(scope.get(key)) for key in ("from_date", "to_date", "report_date"))
+			start, end, cutoff = (
+				_server_date(scope.get(key)) for key in ("from_date", "to_date", "report_date")
+			)
 			if (
 				not scope.get("company")
 				or scope.get("basis") != "current_records"
@@ -325,7 +334,11 @@ def server_terminal_states(snapshot):
 			}
 			vouchers = {
 				(doctype, name): row
-				for key, doctype in (("invoices", "Sales Invoice"), ("payments", "Payment Entry"), ("journals", "Journal Entry"))
+				for key, doctype in (
+					("invoices", "Sales Invoice"),
+					("payments", "Payment Entry"),
+					("journals", "Journal Entry"),
+				)
 				for name, row in indexed[key].items()
 			}
 			return {
