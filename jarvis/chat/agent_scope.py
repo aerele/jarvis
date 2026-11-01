@@ -159,6 +159,14 @@ def resolve_scope(installation) -> dict:
 	"""
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
+	# Payroll Pre-Run is not a generic company/period scan.  Its selected
+	# Payroll Entry owns the company, period, report-date cap, and record
+	# boundary.  Route before reading generic config keys so a user cannot widen
+	# that boundary with a saved company, date range, or record_scope object.
+	from jarvis.chat.payroll_prerun_scope import is_payroll_prerun, scope_from_config
+
+	if is_payroll_prerun(installation.get("agent")):
+		return scope_from_config(installation.get("config") or "{}")
 
 	cfg: dict = {}
 	if installation.get("config"):
@@ -174,8 +182,30 @@ def resolve_scope(installation) -> dict:
 		return str(val).strip() if val is not None and str(val).strip() else None
 
 	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	prior_from, prior_to = _s("prior_period_from"), _s("prior_period_to")
+	if prior_from or prior_to:
+		try:
+			if not prior_from or not prior_to:
+				raise ValueError
+			start, end = date.fromisoformat(prior_from), date.fromisoformat(prior_to)
+			if start > end or end >= frappe.utils.getdate(scope["from_date"]):
+				raise ValueError
+		except (ValueError, TypeError):
+			raise InvalidArgumentError("prior_period_from and prior_period_to must define an earlier period")
+		scope.update(prior_period_from=start.isoformat(), prior_period_to=end.isoformat())
 	if requires_bound_scope(installation):
+		# Attendance has one strictly validated Department root. Do not fall
+		# through to generic document parsing, which would accept a wider shape.
 		scope["record_scope"] = _attendance_department_scope(cfg, scope["company"])
+	elif cfg.get("record_scope"):
+		record = cfg["record_scope"]
+		if not isinstance(record, dict) or not all(record.get(k) for k in ("doctype", "name")):
+			raise InvalidArgumentError("record_scope requires a doctype and name")
+		doc = frappe.get_doc(record["doctype"], record["name"])
+		doc.check_permission("read")
+		if doc.get("company") and doc.company != scope["company"]:
+			raise InvalidArgumentError("record_scope must belong to the selected company")
+		scope["record_scope"] = {k: str(record[k]) for k in ("doctype", "name")}
 	return scope
 
 

@@ -164,6 +164,14 @@ vi.mock("@/pages/agents/ConfigForm.vue", () => ({
 		template: "<div />",
 	},
 }));
+vi.mock("@/pages/agents/PayrollPreRunConfigForm.vue", () => ({
+	default: {
+		name: "PayrollPreRunConfigForm",
+		props: ["validationErrors"],
+		emits: ["save", "dirty"],
+		template: "<div />",
+	},
+}));
 // T6: covered by their own spec files (AgentModelCard.spec.js /
 // AgentInstallDialog.spec.js) - stubbed here like every other Configure-tab
 // child, so this file only ever asserts AgentDetail's OWN wiring (props
@@ -1418,6 +1426,37 @@ describe("AP configuration readiness", () => {
 		form.vm.$emit("save", { policy_version: "AP-v1" });
 		await flushPromises();
 		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+	});
+});
+
+describe("Payroll Pre-Run configuration readiness", () => {
+	function payrollAgent(issues = {}) {
+		return baseAgent({
+			name: "payroll-prerun-auditor",
+			agent_slug: "payroll-prerun-auditor",
+			nature: "Auditor",
+			installation: installedInstallation({ configuration_issues: issues }),
+		});
+	}
+
+	it("blocks a run until the server validates the selected entry and reviewer", async () => {
+		const issues = {
+			payroll_entry:
+				"Select a readable Payroll Entry that is not cancelled or fully submitted.",
+		};
+		const wrapper = await mountDetail(payrollAgent(issues));
+		const runButton = wrapper.find('[data-label="Run Now"]');
+		expect(runButton.attributes("disabled")).toBeDefined();
+		expect(wrapper.text()).toContain("Select and save a Payroll Entry and payroll reviewer");
+		await wrapper.find('[data-label="Complete configuration"]').trigger("click");
+		expect(
+			wrapper.findComponent({ name: "PayrollPreRunConfigForm" }).props("validationErrors")
+		).toEqual(issues);
+	});
+
+	it("permits a run only after the server returns an empty validation result", async () => {
+		const wrapper = await mountDetail(payrollAgent({}));
+		expect(wrapper.find('[data-label="Run Now"]').attributes("disabled")).toBeUndefined();
 	});
 });
 
