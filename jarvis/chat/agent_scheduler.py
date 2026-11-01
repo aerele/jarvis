@@ -1791,8 +1791,7 @@ def _audit_prompt(
 	# not in the mutable installation config.  Give the delegate the exact values
 	# it must copy into its evaluator input.
 	if scope and any(
-		scope.get(k)
-		for k in ("prior_period_from", "prior_period_to", "record_scope", "scoped_visibility")
+		scope.get(k) for k in ("prior_period_from", "prior_period_to", "record_scope", "scoped_visibility")
 	):
 		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
 			{
