@@ -443,6 +443,18 @@
 								Manual review only. Confirm the date cutoff and policy before each
 								run.
 							</p>
+							<div v-else-if="scheduleConfigurationBlocked" class="mt-2 space-y-3">
+								<p class="text-sm text-ink-gray-6" role="status">
+									Complete the Helpdesk team configuration before enabling an
+									automatic schedule.
+								</p>
+								<Button
+									v-if="sched.enabled"
+									label="Turn off automatic schedule"
+									:loading="savingSchedule"
+									@click="disableSchedule"
+								/>
+							</div>
 							<div v-else class="mt-2 space-y-5">
 								<Switch
 									label="Run automatically"
@@ -1126,6 +1138,12 @@ const configurationBlocked = computed(
 			!installation.value?.configuration_issues ||
 			Object.keys(configurationIssues.value).length > 0)
 );
+// The SLA auditor is the only scheduled agent with a mandatory launch
+// boundary. Do not offer a schedule that will fail on its first unattended
+// tick; a legacy active schedule still gets a dedicated turn-off control.
+const scheduleConfigurationBlocked = computed(
+	() => isSlaBreachAgeingAuditor.value && configurationBlocked.value
+);
 const configurationHint = computed(() =>
 	configurationDirty.value
 		? "Save your configuration changes before running."
@@ -1432,6 +1450,10 @@ const scheduleSummary = computed(() => {
 
 async function saveSchedule() {
 	if (!installation.value || savingSchedule.value) return;
+	if (scheduleConfigurationBlocked.value && sched.value.enabled) {
+		toast.error(configurationHint.value);
+		return;
+	}
 	savingSchedule.value = true;
 	try {
 		await api.setAgentSchedule(installation.value.name, {
@@ -1449,6 +1471,14 @@ async function saveSchedule() {
 	} finally {
 		savingSchedule.value = false;
 	}
+}
+
+async function disableSchedule() {
+	if (!installation.value || savingSchedule.value) return;
+	// A legacy schedule must always be disableable, even when its current
+	// configuration is no longer valid or visible to the run-as identity.
+	sched.value.enabled = false;
+	await saveSchedule();
 }
 
 // ── Configure: config JSON → ConfigForm (§14 F3) ─────────────────────────────

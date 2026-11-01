@@ -1319,11 +1319,14 @@ describe("AR configuration readiness", () => {
 });
 
 describe("SLA-breach configuration readiness", () => {
-	function slaAgent(issues = {}) {
+	function slaAgent(issues = {}, installationOverrides = {}) {
 		return baseAgent({
 			agent_slug: "sla-breach-ageing-auditor",
 			config_keys: '["sla_config"]',
-			installation: installedInstallation({ configuration_issues: issues }),
+			installation: installedInstallation({
+				configuration_issues: issues,
+				...installationOverrides,
+			}),
 		});
 	}
 
@@ -1354,6 +1357,58 @@ describe("SLA-breach configuration readiness", () => {
 	it("allows Run Now only after a valid saved team configuration", async () => {
 		const wrapper = await mountDetail(slaAgent({}));
 		expect(runButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("does not offer automatic scheduling before the saved Helpdesk team is valid", async () => {
+		routeMock.hash = "#configure";
+		const wrapper = await mountDetail(
+			slaAgent({ sla_team: "Select one readable HD Team record." })
+		);
+		expect(wrapper.text()).toContain(
+			"Complete the Helpdesk team configuration before enabling an automatic schedule."
+		);
+		expect(
+			wrapper.findAll("button").find((b) => b.text() === "Run automatically")
+		).toBeFalsy();
+	});
+
+	it("keeps a legacy invalid SLA schedule disableable without exposing enable controls", async () => {
+		routeMock.hash = "#configure";
+		api.setAgentSchedule.mockResolvedValue({
+			ok: true,
+			data: { name: "INST-1", next_run_at: null },
+		});
+		const wrapper = await mountDetail(
+			slaAgent(
+				{ sla_team: "Select one readable HD Team record." },
+				{
+					schedule_enabled: 1,
+					schedule_frequency: "daily",
+					schedule_time: "09:00:00",
+				}
+			)
+		);
+		expect(
+			wrapper.findAll("button").find((b) => b.text() === "Run automatically")
+		).toBeFalsy();
+		const turnOff = wrapper.find('[data-label="Turn off automatic schedule"]');
+		expect(turnOff.exists()).toBe(true);
+		await turnOff.trigger("click");
+		expect(api.setAgentSchedule).toHaveBeenCalledWith("INST-1", {
+			schedule_enabled: 0,
+			schedule_frequency: "daily",
+			schedule_time: "09:00",
+			schedule_weekday: "",
+			schedule_day_of_month: 0,
+		});
+	});
+
+	it("offers automatic scheduling after a valid saved Helpdesk team", async () => {
+		routeMock.hash = "#configure";
+		const wrapper = await mountDetail(slaAgent({}));
+		expect(
+			wrapper.findAll("button").find((b) => b.text() === "Run automatically")
+		).toBeTruthy();
 	});
 });
 
