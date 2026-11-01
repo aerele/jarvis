@@ -3763,6 +3763,12 @@ def _resolve_recovery_tail(ctx: PumpContext, pr: _PendingRecovery, frame: dict) 
 	from jarvis.chat.turn_recovery import _latest_assistant_raw
 
 	raw = _latest_assistant_raw(messages, min_seq=pr.min_seq, max_seq=pr.max_seq)
+	# The relay never saw this turn's terminal, so its step strip never ran, and the
+	# runtime's stored final carries the narration the user saw as steps (#2367: 5 of 6
+	# leaked replies in the 2026-10-29 bake-off were recovered turns). Strip what the
+	# pump cached for this run, the same rules the relay's terminal applies, BEFORE
+	# redaction so both sides of the match are the same raw text.
+	raw = _strip_cached_steps(pr.r["run_id"], raw)
 	text, rels, marker_stripped = egress_rules.redact_final_with_media(raw)
 	# A media/marker-only reply strips to "" but IS real in-window output — settle
 	# final with the clean (empty) text so the raw marker never lingers in stored
@@ -3774,6 +3780,28 @@ def _resolve_recovery_tail(ctx: PumpContext, pr: _PendingRecovery, frame: dict) 
 		_settle_recovered_final(ctx, pr.r, text, media_rels=rels, marker_stripped=marker_stripped)
 	else:
 		_settle_recovered_errored(ctx, pr.r)
+
+
+def _strip_cached_steps(run_id: str, raw: str) -> str:
+	"""``raw`` minus the step text this run cached (relay terminal rules, #2367).
+	Best-effort: a cache miss (TTL, a lane that never offered a step) returns ``raw``."""
+	from jarvis.chat.steps import is_step, strip_loose_preambles, strip_preambles, strip_steps
+
+	if not raw:
+		return raw
+	try:
+		steps = _read_run_steps(run_id)
+		flagged = set(_read_run_preambles(run_id))
+	except Exception:
+		return raw
+	if not steps:
+		return raw
+	preambles = [step for step in steps if step in flagged]
+	sentences = [step for step in steps if step not in flagged and is_step(step)]
+	out = strip_steps(strip_preambles(raw, preambles), sentences)
+	# Steps the relay offered but could not anchor (never-streamed preambles) are
+	# cached too; cut them only where they lead the text.
+	return strip_loose_preambles(out, steps)
 
 
 def _settle_recovered_final(

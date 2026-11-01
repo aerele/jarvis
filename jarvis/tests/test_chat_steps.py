@@ -416,3 +416,38 @@ class TestPreambleLimitLockstep(FrappeTestCase):
 			match = re.search(r"export const MAX_CANDIDATE_CHARS = (\d+);", fh.read())
 		self.assertIsNotNone(match)
 		self.assertEqual(int(match.group(1)), MAX_PREAMBLE_STEP_CHARS)
+
+
+class TestRecoveredReplyStrip(FrappeTestCase):
+	"""#2367: a recovered turn (the relay missed its terminal) saves the runtime's stored
+	final, which carries the narration; the pump strips what it cached for the run."""
+
+	def setUp(self):
+		from jarvis.chat import pump
+
+		self.pump = pump
+		self.run_id = f"test-2367-{frappe.generate_hash(length=8)}"
+
+	def tearDown(self):
+		frappe.cache().delete_value(self.pump._run_steps_key(self.run_id))
+		frappe.cache().delete_value(self.pump._run_preambles_key(self.run_id))
+
+	def test_cached_steps_are_cut_from_the_recovered_text(self):
+		p1 = "I'll check the drafting rules and look up the supplier and item."
+		p2 = "Supplier, item, and company all resolved. Now checking how similar invoices are filled here."
+		answer = "This already exists: ACC-PINV-2026-00006 matches on supplier, date, item and total."
+		self.pump._append_run_step(self.run_id, p1)
+		self.pump._append_run_step(self.run_id, p2)
+		self.assertEqual(self.pump._strip_cached_steps(self.run_id, f"{p1}\n\n{p2}\n\n{answer}"), answer)
+
+	def test_a_flagged_preamble_is_cut_even_before_a_shorter_answer(self):
+		step = "Checking your customer count now."
+		self.pump._append_run_step(self.run_id, step)
+		self.pump._append_run_preamble(self.run_id, step)
+		self.assertEqual(
+			self.pump._strip_cached_steps(self.run_id, f"{step}\n\n3 customers."), "3 customers."
+		)
+
+	def test_no_cache_leaves_the_text_alone(self):
+		text = "Checking the ledger.\n\nThe balance is 87,000 INR."
+		self.assertEqual(self.pump._strip_cached_steps(self.run_id, text), text)
