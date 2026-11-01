@@ -561,6 +561,28 @@ def registry_domain(agent_slug: str) -> str:
 	return ""
 
 
+def registry_visibility_domain(agent_slug: str) -> str | None:
+	"""Return the reviewed visibility policy selector for one bundled agent.
+
+	``domain`` remains the customer-facing catalog category.  A separate optional
+	``visibility_domain`` lets a cross-domain extension use the permission
+	dimensions that its data actually needs without relabeling the marketplace
+	entry.  ``None`` means a legacy agent has no extra policy; ``""`` means an
+	explicit but malformed policy and callers must fail closed.
+	"""
+	slug = (agent_slug or "").strip()
+	if not slug:
+		return None
+	for agent in _load_registry().get("agents") or []:
+		if (agent.get("agent_slug") or "").strip() != slug:
+			continue
+		if "visibility_domain" not in agent:
+			return None
+		value = agent.get("visibility_domain")
+		return value.strip() if isinstance(value, str) else ""
+	return None
+
+
 def registry_tools_allow(agent_slug: str) -> list[str]:
 	"""The agent's DECLARED tool surface from the BUNDLED registry, verbatim.
 

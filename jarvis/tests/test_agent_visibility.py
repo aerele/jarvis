@@ -1,5 +1,6 @@
 """Unit tests for the pure agent visibility classifier."""
 
+import hashlib
 import json
 import unittest
 
@@ -7,9 +8,22 @@ from jarvis.chat.agent_visibility import (
 	GL_SCOPED_DIMENSIONS,
 	PAYROLL_SCOPED_DIMENSIONS,
 	exact_bool,
+	make_visibility_receipt,
+	parse_visibility_receipt,
+	profile_hash,
 	profile_scoped_visibility,
 	scoped_dimensions,
 )
+
+
+def _profile(*, roles=None, permissions=None):
+	"""Build the exact scheduler profile shape used by receipt tests."""
+	summary = {
+		"roles": roles or ["HR User"],
+		"user_permissions": permissions if permissions is not None else {},
+	}
+	digest = hashlib.sha256(json.dumps(summary, sort_keys=True).encode()).hexdigest()
+	return {"hash": digest, **summary}
 
 
 class TestAgentVisibility(unittest.TestCase):
@@ -69,3 +83,45 @@ class TestAgentVisibility(unittest.TestCase):
 		for malformed in (None, 0, 1, "false", "true", [], {}):
 			with self.subTest(malformed=malformed):
 				self.assertIsNone(exact_bool(malformed))
+
+	def test_hr_visibility_receipt_is_independent_of_catalog_domain(self):
+		"""A Measurement agent can still use the reviewed HR policy selector."""
+		profile = _profile(permissions={"Department": ["Finance"]})
+		self.assertIs(profile_scoped_visibility(profile, "measurement"), False)
+		receipt = make_visibility_receipt(profile, "hrms-payroll")
+		self.assertEqual(receipt["state"], "sliced")
+		self.assertEqual(receipt["visibility_domain"], "hrms-payroll")
+		self.assertTrue(receipt["profile_hash"])
+
+	def test_receipt_fails_closed_for_missing_malformed_or_changed_profiles(self):
+		complete_profile = _profile()
+		complete = make_visibility_receipt(complete_profile, "hrms-payroll")
+		self.assertEqual(complete["state"], "complete")
+		self.assertEqual(profile_hash(complete_profile), complete["profile_hash"])
+
+		for malformed in (
+			None,
+			"not json",
+			{"roles": [], "user_permissions": {}},
+			{"hash": "0" * 64, "roles": [], "user_permissions": {}},
+			_profile(permissions={"Department": "Finance"}),
+			{**_profile(), "unreviewed_new_key": True},
+		):
+			with self.subTest(malformed=malformed):
+				self.assertEqual(make_visibility_receipt(malformed, "hrms-payroll")["state"], "unknown")
+
+		changed = _profile(permissions={"Department": ["Finance"]})
+		self.assertNotEqual(profile_hash(changed), complete["profile_hash"])
+
+	def test_persisted_receipt_rejects_wrong_policy_or_proof(self):
+		receipt = make_visibility_receipt(_profile(), "hrms-payroll")
+		self.assertEqual(parse_visibility_receipt(receipt, "hrms-payroll")["state"], "complete")
+		for bad in (
+			None,
+			"not json",
+			{**receipt, "visibility_domain": "measurement"},
+			{**receipt, "profile_hash": "bad"},
+			{**receipt, "state": "clean"},
+		):
+			with self.subTest(bad=bad):
+				self.assertIsNone(parse_visibility_receipt(bad, "hrms-payroll"))

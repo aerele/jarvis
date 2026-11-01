@@ -1597,7 +1597,9 @@ def _stamp_scope_and_watermark(
 	All best-effort: a bench without a resolvable Company (e.g. no erpnext setup)
 	must NOT abort the launch — it degrades to an unscoped run (no watermark). The
 	watermark + scope are resolved AS the run-as user (this runs under that
-	session). Returns the resolved scope dict (or None).
+	session). A reviewed visibility policy also produces a compact server-only
+	receipt; it is never added to scope_json or the delegate prompt. Returns the
+	resolved scope dict (or None).
 
 	``source_apps`` (CX5-2) is folded into the SAME ``scope_json`` stamp OUTSIDE
 	the best-effort try, so an ERP scope-resolution failure can never drop the
@@ -1609,10 +1611,17 @@ def _stamp_scope_and_watermark(
 	if review_backend:
 		config = frappe.parse_json(frappe.db.get_value(RUN, run_name, "assessment_config_json"))
 		scope = review_backend.scope_from_config(config)
-		values = {"scope_json": frappe.as_json(scope)}
 		permission_profile = _permission_profile_or_none(run_name, run_as_user)
+		visibility_receipt = _visibility_receipt(permission_profile, inst)
+		if visibility_receipt is not None and isinstance(scope, dict):
+			# Keep a reviewed receipt wholly server-side on every scheduler path,
+			# including the operator-review backend path.
+			scope = {k: v for k, v in scope.items() if k != "scoped_visibility"}
+		values = {"scope_json": frappe.as_json(scope)}
 		if permission_profile is not None:
 			values["permission_profile"] = permission_profile
+		if visibility_receipt is not None:
+			values["visibility_receipt_json"] = frappe.as_json(visibility_receipt)
 		frappe.db.set_value(
 			RUN,
 			run_name,
@@ -1625,6 +1634,9 @@ def _stamp_scope_and_watermark(
 	permission_profile = _permission_profile_or_none(run_name, run_as_user)
 	if permission_profile is not None:
 		values["permission_profile"] = permission_profile
+	visibility_receipt = _visibility_receipt(permission_profile, inst)
+	if visibility_receipt is not None:
+		values["visibility_receipt_json"] = frappe.as_json(visibility_receipt)
 	scope = None
 	try:
 		scope = agent_scope.resolve_scope(inst)
@@ -1649,15 +1661,20 @@ def _stamp_scope_and_watermark(
 		scope["source_apps"] = list(source_apps)
 	if scope is not None:
 		scope = dict(scope)
-		# This value is bench-derived from the launch-time permission snapshot. It
-		# is scope metadata, not user configuration, so a delegate cannot turn a
-		# record-sliced read into a whole-workforce conclusion. Payroll leaves an
-		# unknown snapshot absent so its typed bundle fails closed.
-		scoped_visibility = _scope_has_scoped_visibility(permission_profile, inst)
-		if type(scoped_visibility) is bool:
-			scope["scoped_visibility"] = scoped_visibility
-		else:
+		if visibility_receipt is not None:
+			# The reviewed receipt is a server-only proof.  Do not mirror either its
+			# state or a legacy visibility bit into delegate-readable scope.
 			scope.pop("scoped_visibility", None)
+		else:
+			# This value is bench-derived from the launch-time permission snapshot. It
+			# is scope metadata, not user configuration, so a delegate cannot turn a
+			# record-sliced read into a whole-workforce conclusion. Payroll leaves an
+			# unknown snapshot absent so its typed bundle fails closed.
+			scoped_visibility = _scope_has_scoped_visibility(permission_profile, inst)
+			if type(scoped_visibility) is bool:
+				scope["scoped_visibility"] = scoped_visibility
+			else:
+				scope.pop("scoped_visibility", None)
 		values["scope_json"] = frappe.as_json(scope)
 
 	if scope and scope.get("company") and scope.get("to_date"):
@@ -1729,6 +1746,21 @@ def _scope_has_scoped_visibility(permission_profile, inst) -> bool | None:
 		return True
 	# Preserve the legacy non-payroll installation fallback exactly.
 	return bool(inst.get("scoped_visibility"))
+
+
+def _visibility_receipt(permission_profile, inst) -> dict | None:
+	"""Build a reviewed visibility receipt without exposing it to the delegate.
+
+	A missing selector retains the legacy policy.  An explicitly malformed
+	selector returns an ``unknown`` receipt so the terminal writeback fails closed.
+	"""
+	from jarvis.chat.agent_catalog import registry_visibility_domain
+	from jarvis.chat.agent_visibility import make_visibility_receipt
+
+	domain = registry_visibility_domain(inst.get("agent"))
+	if domain is None:
+		return None
+	return make_visibility_receipt(permission_profile, domain)
 
 
 def _explicit_config(listing, inst) -> dict:

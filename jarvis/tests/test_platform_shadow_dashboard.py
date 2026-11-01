@@ -23,11 +23,13 @@ Run:
 """
 
 import json
+from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import dashboard_permissions
+from jarvis.chat import agent_catalog, agent_runs, agent_scheduler, dashboard_permissions
+from jarvis.chat.agent_visibility import make_visibility_receipt
 from jarvis.tools import _agent_run_ctx
 from jarvis.tools.save_agent_dashboard import save_agent_dashboard
 
@@ -35,6 +37,7 @@ LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
 RUN = "Jarvis Agent Run"
 DASHBOARD = "Jarvis Dashboard"
+FINDING = "Jarvis Agent Finding"
 
 SLUG = "platform-shadow-dash-agent"
 TOKEN = "tok_sd_1"
@@ -121,8 +124,8 @@ def _mk_run(owner: str, inst, session_key: str) -> str:
 
 
 def _wipe():
-	for dt in (RUN, DASHBOARD, INSTALLATION):
-		filt = {"agent": SLUG} if dt in (RUN, INSTALLATION) else {"dashboard_title": ["like", "%"]}
+	for dt in (FINDING, RUN, DASHBOARD, INSTALLATION):
+		filt = {"agent": SLUG} if dt in (FINDING, RUN, INSTALLATION) else {"dashboard_title": ["like", "%"]}
 		if dt == DASHBOARD:
 			# Only the dashboards this suite's runs created (owned by our two users).
 			names = frappe.get_all(
@@ -218,3 +221,76 @@ class TestPP4ShadowAuthoredDashboard(FrappeTestCase):
 		# no shadow preview banner — the authored artifact is presented as-is.
 		self.assertNotIn("Preview (shadow)", d.html)
 		self.assertIn("Fully compliant close", d.html)
+
+	# ------------------------------------------------------------------ #
+	# reviewed receipt: no authored artifact, no auto-resolve, safe fallback
+	# ------------------------------------------------------------------ #
+	def test_sliced_receipt_withholds_authored_dashboard_and_terminal_writeback(self):
+		"""An HR receipt outranks authored HTML and the normal auto-resolve path."""
+		inst = _mk_installation(self.owner, self.reviewer, "live")
+		company = frappe.db.get_value("Company", {}, "name")
+
+		# Seed an open finding that a clean, full-coverage run would normally
+		# auto-resolve.  The terminal sliced receipt must leave it open.
+		prior_key = "agent:visibility-prior:" + frappe.generate_hash(length=8)
+		prior_name = _mk_run(self.owner, inst, prior_key)
+		prior = frappe.get_doc(RUN, prior_name)
+		agent_runs.record_delegate_run(
+			prior,
+			inst,
+			[
+				{
+					"token": TOKEN,
+					"ref_doctype": "Company",
+					"ref_name": company,
+					"result_class": "observed_fact",
+					"severity": "note",
+					"note": "Prior observed fact",
+				}
+			],
+			coverage={TOKEN: "evaluated"},
+			scope={"company": company},
+		)
+
+		sk = "agent:visibility-current:" + frappe.generate_hash(length=8)
+		run_name = _mk_run(self.owner, inst, sk)
+		# Use the scheduler's own serializer, then persist the real receipt field.
+		# The only patched item is the reviewed registry selector, which arrives on
+		# the catalog PR; save/writeback execute the production receipt path.
+		with (
+			patch.object(frappe, "get_roles", return_value=["HR User"]),
+			patch("frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}),
+		):
+			profile = agent_scheduler._permission_profile(self.owner)
+		receipt = make_visibility_receipt(profile, "hrms-payroll")
+		frappe.db.set_value(
+			RUN,
+			run_name,
+			{"permission_profile": profile, "visibility_receipt_json": json.dumps(receipt)},
+			update_modified=False,
+		)
+		run = frappe.get_doc(RUN, run_name)
+		with patch.object(agent_catalog, "registry_visibility_domain", return_value="hrms-payroll"):
+			out = self._call_save(self.owner, sk, html=AUTHORED_HTML, title="Unsafe clean report")
+			self.assertTrue(out["withheld"])
+			self.assertEqual(out["visibility_state"], "sliced")
+			dashboard = out["dashboard"]
+			self.assertTrue(dashboard)
+			self.assertNotIn("Fully compliant close", frappe.db.get_value(DASHBOARD, dashboard, "html"))
+
+			agent_runs.record_delegate_run(
+				run,
+				inst,
+				[],
+				coverage={TOKEN: "evaluated"},
+				scope={"company": company},
+			)
+
+		run.reload()
+		self.assertEqual(run.status, "partial")
+		self.assertEqual(run.result_state, "partial")
+		self.assertEqual(run.dashboard, dashboard)  # server fallback replaced it in place
+		html = frappe.db.get_value(DASHBOARD, dashboard, "html")
+		self.assertIn('data-result-state="partial"', html)
+		self.assertNotIn("Fully compliant close", html)
+		self.assertEqual(frappe.db.get_value(FINDING, {"run": prior_name}, "state"), "open")

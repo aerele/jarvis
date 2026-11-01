@@ -659,10 +659,15 @@ class TestWritebackIntegration(FrappeTestCase):
 			bundle_version="1.0.0",
 			preparation_mode="shadow",
 			initiating_human=self.owner,
+			visibility_receipt_json='{"state":"sliced"}',
 		)
 		self.assertEqual(frappe.db.get_value(RUN, run.name, "bundle_version"), "1.0.0")
 		run.reload()
 		run.bundle_version = "2.0.0"
+		with self.assertRaises(frappe.PermissionError):
+			run.save(ignore_permissions=True)
+		run.reload()
+		run.visibility_receipt_json = '{"state":"complete"}'
 		with self.assertRaises(frappe.PermissionError):
 			run.save(ignore_permissions=True)
 

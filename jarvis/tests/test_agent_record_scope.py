@@ -1,12 +1,13 @@
 """Keep record-scoped assessments apart across real writeback transactions."""
 
 import json
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import agent_runs, agent_scheduler, agent_scope, agents_api
+from jarvis.chat import agent_catalog, agent_runs, agent_scheduler, agent_scope, agents_api
+from jarvis.chat.agent_visibility import make_visibility_receipt
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tests.test_platform_false_clean import (
 	FINDING,
@@ -158,6 +159,48 @@ class TestComparisonPeriod(FrappeTestCase):
 		self.assertTrue(agent_scheduler._scope_has_scoped_visibility(profile_without_a_gl_slice, legacy))
 		self.assertFalse(agent_scheduler._scope_has_scoped_visibility(profile_without_a_gl_slice, payroll))
 
+	def test_scheduler_receipt_uses_its_canonical_permission_profile(self):
+		"""The receipt is derived from the scheduler's real profile serializer."""
+		inst = frappe._dict(agent="baseline-meter-auditor-hrms", config="{}", scoped_visibility=0)
+		resolved = {"company": "Fake Company", "to_date": "2026-09-30"}
+		with (
+			patch.object(agent_scope, "resolve_scope", return_value=resolved),
+			patch("jarvis.chat.operator_review.backend", return_value=None),
+			patch.object(agent_catalog, "registry_visibility_domain", return_value="hrms-payroll"),
+			patch.object(frappe, "get_roles", return_value=["HR User"]),
+			patch("frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}),
+			patch.object(frappe.db, "sql", return_value=[frappe._dict(n=0, m=None)]),
+			patch.object(frappe.db, "set_value") as set_value,
+		):
+			agent_scheduler._stamp_scope_and_watermark("unused", inst, "test@example.invalid")
+		values = set_value.call_args.args[2]
+		profile = values["permission_profile"]
+		receipt = json.loads(values["visibility_receipt_json"])
+		self.assertEqual(receipt, make_visibility_receipt(profile, "hrms-payroll"))
+		self.assertEqual(receipt["state"], "sliced")
+		# The receipt and its state are absent from model-visible scope_json.
+		self.assertNotIn("visibility_receipt", json.loads(values["scope_json"]))
+		self.assertNotIn("scoped_visibility", json.loads(values["scope_json"]))
+
+	def test_review_backend_receipt_stays_out_of_delegate_scope(self):
+		"""The operator-review scheduler branch has the same server-only rule."""
+		inst = frappe._dict(agent="baseline-meter-auditor-hrms", config="{}", scoped_visibility=0)
+		backend = Mock()
+		backend.scope_from_config.return_value = {"scoped_visibility": True, "review": "safe"}
+		with (
+			patch("jarvis.chat.operator_review.backend", return_value=backend),
+			patch.object(agent_catalog, "registry_visibility_domain", return_value="hrms-payroll"),
+			patch.object(frappe.db, "get_value", return_value="{}"),
+			patch.object(frappe, "get_roles", return_value=["HR User"]),
+			patch("frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}),
+			patch.object(frappe.db, "set_value") as set_value,
+		):
+			agent_scheduler._stamp_scope_and_watermark("unused", inst, "test@example.invalid")
+		values = set_value.call_args.args[2]
+		scope = json.loads(values["scope_json"])
+		self.assertEqual(scope, {"review": "safe"})
+		self.assertEqual(json.loads(values["visibility_receipt_json"])["state"], "sliced")
+
 
 class TestPayrollVisibilityAutoResolve(FrappeTestCase):
 	def test_payroll_auto_resolve_needs_two_exact_false_values(self):
@@ -183,6 +226,47 @@ class TestPayrollVisibilityAutoResolve(FrappeTestCase):
 		):
 			with self.subTest(profile=profile, persisted=persisted):
 				self.assertTrue(agent_runs._scoped_visibility(run(profile, persisted), inst))
+
+	def test_reviewed_receipt_rechecks_the_same_profile_and_fails_closed_on_change(self):
+		inst = frappe._dict(agent="baseline-meter-auditor-hrms", scoped_visibility=0)
+		# Use the canonical scheduler serializer to avoid a test-only receipt shape.
+		with (
+			patch.object(frappe, "get_roles", return_value=["HR User"]),
+			patch("frappe.permissions.get_user_permissions", return_value={}),
+		):
+			profile = agent_scheduler._permission_profile("test@example.invalid")
+		with (
+			patch.object(frappe, "get_roles", return_value=["HR User"]),
+			patch("frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}),
+		):
+			changed_profile = agent_scheduler._permission_profile("test@example.invalid")
+		receipt = make_visibility_receipt(profile, "hrms-payroll")
+		run = frappe._dict(
+			agent="baseline-meter-auditor-hrms",
+			permission_profile=profile,
+			visibility_receipt_json=json.dumps(receipt),
+			session_key="agent:receipt:test",
+		)
+		with (
+			patch.object(agent_catalog, "registry_visibility_domain", return_value="hrms-payroll"),
+			patch.object(agent_runs, "_run_session_user", return_value="test@example.invalid"),
+			patch.object(agent_scheduler, "_permission_profile", return_value=profile),
+		):
+			self.assertEqual(agent_runs.visibility_receipt_state(run, inst), "complete")
+			self.assertFalse(agent_runs._scoped_visibility(run, inst))
+		with (
+			patch.object(agent_catalog, "registry_visibility_domain", return_value="hrms-payroll"),
+			patch.object(agent_runs, "_run_session_user", return_value="test@example.invalid"),
+			patch.object(agent_scheduler, "_permission_profile", return_value=changed_profile),
+		):
+			self.assertEqual(agent_runs.visibility_receipt_state(run, inst), "unknown")
+			self.assertTrue(agent_runs._scoped_visibility(run, inst))
+		# The policy selector is mutable catalog data.  Once a run has a receipt,
+		# removing that selector must fail closed rather than revive the old
+		# measurement-domain classifier.
+		with patch.object(agent_catalog, "registry_visibility_domain", return_value=None):
+			self.assertEqual(agent_runs.visibility_receipt_state(run, inst), "unknown")
+			self.assertTrue(agent_runs._scoped_visibility(run, inst))
 
 
 class TestRecordScopedWriteback(FrappeTestCase):
