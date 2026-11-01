@@ -1334,6 +1334,22 @@ def _tool_data(phase, call_id="c1"):
 	return {"kind": "tool", "phase": phase, "name": "jarvis__get_list", "toolCallId": call_id}
 
 
+class TestEndOfLastStep(FrappeTestCase):
+	def test_a_step_repeated_later_in_the_answer_does_not_move_the_mark(self):
+		from jarvis.chat.relay_mux import _end_of_last_step
+
+		step = "Checking the ledger."
+		text = f"{step}\n\nThe ledger is clean.\n\nChecking the ledger. is what I did first."
+		self.assertEqual(_end_of_last_step(text, [step]), len(step))
+
+	def test_steps_are_found_in_order_and_missing_ones_skipped(self):
+		from jarvis.chat.relay_mux import _end_of_last_step
+
+		text = "A one.\n\nB two.\n\nAnswer."
+		self.assertEqual(_end_of_last_step(text, ["A one.", "gone", "B two."]), text.index("B two.") + 6)
+		self.assertEqual(_end_of_last_step(text, []), 0)
+
+
 class TestRelayMuxSteps(FrappeTestCase):
 	"""Each connection shape seen live on e2e2 (2026-09-25): Claude's CLI streams
 	one growing text for the whole turn, the API-key loop (DeepSeek) streams one

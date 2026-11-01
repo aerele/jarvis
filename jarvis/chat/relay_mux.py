@@ -439,8 +439,14 @@ def _end_of_last_step(text: str, steps: list[str]) -> int:
 	"""Where the reply text after the latest recorded step starts (0 when none is in
 	``text``). A re-attached lane uses it as its ``since_tool``: steps are recorded at
 	tool calls, so the text past the last one is what the next tool call may move."""
-	ends = [text.rfind(step) + len(step) for step in steps if step and step in text]
-	return max(ends, default=0)
+	# Steps are recorded in order, so find each one after the previous: a step text
+	# that repeats later in the answer must not move the mark past that answer.
+	end = 0
+	for step in steps:
+		at = text.find(step, end) if step else -1
+		if at >= 0:
+			end = at + len(step)
+	return end
 
 
 class RelayMux:
