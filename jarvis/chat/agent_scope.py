@@ -19,13 +19,41 @@ resolved for that user.
 """
 
 import frappe
+from frappe import _
 
 from jarvis.exceptions import InvalidArgumentError
 
 INSTALLATION = "Jarvis Agent Installation"
 
 
-def resolve_scope(installation) -> dict:
+def _configuration(config) -> dict:
+	"""Return a configuration object and preserve the legacy malformed fallback."""
+	if isinstance(config, dict):
+		return config
+	if config:
+		try:
+			parsed = frappe.parse_json(config)
+			if isinstance(parsed, dict):
+				return parsed
+		except Exception:
+			pass
+	return {}
+
+
+def record_scope_requested(config) -> bool:
+	"""True when a tenant supplied the record-scope namespace explicitly."""
+	return "record_scope" in _configuration(config)
+
+
+def assert_record_scope_supported(supports_record_scope: bool, config) -> None:
+	"""Refuse an unsupported boundary before configuration or launch has effects."""
+	if record_scope_requested(config) and supports_record_scope is not True:
+		frappe.throw(
+			_("This agent does not support record-scoped runs. Remove record_scope from its configuration.")
+		)
+
+
+def resolve_scope(installation, *, allow_record_scope: bool = False) -> dict:
 	"""Resolve the explicit run scope for an installation.
 
 	``installation`` may be a ``Jarvis Agent Installation`` doc or its name.
@@ -39,20 +67,30 @@ def resolve_scope(installation) -> dict:
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
 
-	cfg: dict = {}
-	if installation.get("config"):
-		try:
-			parsed = frappe.parse_json(installation.config)
-			if isinstance(parsed, dict):
-				cfg = parsed
-		except Exception:
-			cfg = {}
+	cfg = _configuration(installation.get("config"))
+	if record_scope_requested(cfg) and not allow_record_scope:
+		raise InvalidArgumentError("record_scope is not supported by this agent")
 
 	def _s(key):
 		val = cfg.get(key)
 		return str(val).strip() if val is not None and str(val).strip() else None
 
-	return _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	if not record_scope_requested(cfg):
+		return scope
+
+	record = cfg["record_scope"]
+	# A supported agent may explicitly request no record boundary for this run.
+	if not record:
+		return scope
+	if not isinstance(record, dict) or not all(record.get(k) for k in ("doctype", "name")):
+		raise InvalidArgumentError("record_scope requires a doctype and name")
+	doc = frappe.get_doc(record["doctype"], record["name"])
+	doc.check_permission("read")
+	if doc.get("company") and doc.company != scope["company"]:
+		raise InvalidArgumentError("record_scope must belong to the selected company")
+	scope["record_scope"] = {key: str(record[key]) for key in ("doctype", "name")}
+	return scope
 
 
 def _resolve(company, fiscal_year, from_date, to_date) -> dict:

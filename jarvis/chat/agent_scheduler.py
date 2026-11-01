@@ -53,7 +53,7 @@ from frappe.utils import now_datetime
 from rq.timeouts import JobTimeoutException
 
 from jarvis._session import authenticated_user, impersonate
-from jarvis.chat import derived_config
+from jarvis.chat import agent_scope, derived_config
 from jarvis.chat.agent_activity import ACTIVITY, log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import is_system_manager, is_valid_unattended_owner
@@ -184,6 +184,7 @@ def run_due_agent_audits() -> None:
 			"schedule_weekday",
 			"schedule_day_of_month",
 			"installable",
+			"config",
 			"source_apps_json",
 			"activation_state",
 			"next_run_at",
@@ -296,6 +297,21 @@ def _sweep_one(row, now, seen: set) -> None:
 		)
 		_advance(row, now)
 		return
+
+	# An old configuration can outlive the API save guard. Refuse it before the
+	# per-installation claim and dispatch, record the reason, and consume the
+	# slot. The bundled registry, not a mutable Listing row, is authoritative.
+	if agent_scope.record_scope_requested(row.get("config")):
+		from jarvis.chat.agent_catalog import registry_supports_record_scope
+
+		if not registry_supports_record_scope(row.agent):
+			_record_failed(
+				row,
+				"scheduled audit skipped: this agent does not support record-scoped runs; "
+				"remove record_scope from its configuration",
+			)
+			_advance(row, now)
+			return
 
 	# CX5-5: a scribe writes the LIVE Org wiki with no confirmation gate, so there is
 	# no such thing as a shadow scribe run — refuse it here exactly as the manual path
@@ -1259,6 +1275,17 @@ def _launch_audit(
 			).format(listing.status or "unknown")
 		)
 
+	# A record boundary controls the evidence delivered to the private bundle.
+	# Refuse a legacy or manually edited unsupported configuration before a
+	# savepoint can create a conversation, run, session, activity, or dispatch.
+	# The bundled registry is authoritative; a Listing row cannot opt in.
+	record_scope_supported = False
+	if agent_scope.record_scope_requested(inst.config):
+		from jarvis.chat.agent_catalog import registry_supports_record_scope
+
+		record_scope_supported = registry_supports_record_scope(listing.agent_slug)
+		agent_scope.assert_record_scope_supported(record_scope_supported, inst.config)
+
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
 	# refuse every call the delegate makes — record_agent_run included — so the run
@@ -1389,7 +1416,13 @@ def _launch_audit(
 
 		# A6 explicit scope + A17 consistency watermark + A12 permission profile —
 		# all best-effort (never abort the launch) and computed AS the run-as user.
-		scope = _stamp_scope_and_watermark(run.name, inst, run_as_user, source_apps=source_apps)
+		scope = _stamp_scope_and_watermark(
+			run.name,
+			inst,
+			run_as_user,
+			source_apps=source_apps,
+			record_scope_supported=record_scope_supported,
+		)
 
 	except Exception:
 		# Undo every row this launch wrote, so a caller that later commits (and both
@@ -1423,7 +1456,14 @@ def _launch_audit(
 			run_id=run.name,
 			agent_id=f"agent-{slug}",
 			session_key=session_key,
-			message=_audit_prompt(listing, inst, trigger, scope, engagement_config=engagement_config),
+			message=_audit_prompt(
+				listing,
+				inst,
+				trigger,
+				scope,
+				engagement_config=engagement_config,
+				record_scope_supported=record_scope_supported,
+			),
 			timeout_s=registry_timeout_s(slug),
 		)
 	except admin_client.AdminAmbiguousError:
@@ -1597,7 +1637,11 @@ def _mint_run_session(session_key: str, user: str) -> None:
 
 
 def _stamp_scope_and_watermark(
-	run_name: str, inst, run_as_user: str, source_apps: list[str] | None = None
+	run_name: str,
+	inst,
+	run_as_user: str,
+	source_apps: list[str] | None = None,
+	record_scope_supported: bool = False,
 ) -> dict | None:
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
@@ -1611,7 +1655,7 @@ def _stamp_scope_and_watermark(
 	the best-effort try, so an ERP scope-resolution failure can never drop the
 	authorization the source-read tools read back — a scribe run either carries its
 	admin-authorized app list or reads nothing."""
-	from jarvis.chat import agent_scope, operator_review
+	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(inst.agent)
 	if review_backend:
@@ -1628,8 +1672,17 @@ def _stamp_scope_and_watermark(
 	values: dict = {}
 	scope = None
 	try:
-		scope = agent_scope.resolve_scope(inst)
+		scope = agent_scope.resolve_scope(inst, allow_record_scope=record_scope_supported)
 	except Exception:
+		# A requested record boundary must never silently fall back to a wider
+		# company run. The launch guard has already checked bundle support; this
+		# path handles malformed, unreadable, or cross-company target records.
+		if agent_scope.record_scope_requested(inst.get("config")):
+			frappe.log_error(
+				title="jarvis agent: explicit record scope resolution failed",
+				message=frappe.get_traceback(),
+			)
+			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
@@ -1720,7 +1773,12 @@ def _explicit_config(listing, inst) -> dict:
 
 
 def _audit_prompt(
-	listing, inst, trigger: str, scope: dict | None = None, engagement_config: dict | None = None
+	listing,
+	inst,
+	trigger: str,
+	scope: dict | None = None,
+	engagement_config: dict | None = None,
+	record_scope_supported: bool = False,
 ) -> str:
 	"""The GENERIC, non-leaky run message handed to the delegate (A2/A6).
 
@@ -1751,6 +1809,10 @@ def _audit_prompt(
 			f'report_date="{scope.get("report_date")}", '
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
+		)
+	if record_scope_supported and scope and scope.get("record_scope"):
+		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
+			{"record_scope": scope["record_scope"]}
 		)
 	# EXPLICIT CONFIG: ``_launch_audit`` resolves declared/derived values ONCE and
 	# stamps them on the Run before dispatch.  This function receives that exact

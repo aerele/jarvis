@@ -17,9 +17,10 @@ import frappe
 from frappe import _
 
 from jarvis._session import authenticated_user, impersonate
+from jarvis.chat import agent_scope
 from jarvis.chat import coverage_reasons as cr
 from jarvis.chat.agent_activity import log_activity
-from jarvis.chat.agent_catalog import build_agent_push_payload
+from jarvis.chat.agent_catalog import build_agent_push_payload, registry_supports_record_scope
 from jarvis.chat.filebox import _clamp_page, _lk
 from jarvis.chat.finding_presentation import finding_text
 from jarvis.chat.macro_scheduler import compute_next_run
@@ -1337,6 +1338,14 @@ def set_schedule(
 
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
+	# An old or directly edited record scope must not survive any save that leaves
+	# this schedule enabled. Explicitly turning the schedule off remains allowed
+	# so the owner has a safe recovery path.
+	schedule_will_be_enabled = (
+		int(schedule_enabled or 0) if schedule_enabled is not None else int(doc.schedule_enabled or 0)
+	)
+	if schedule_will_be_enabled and agent_scope.record_scope_requested(doc.config):
+		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
 	# non-installable capability (a scheduled run would only fail its preflight).
 	if int(schedule_enabled or 0):
@@ -1443,6 +1452,7 @@ def set_config(installation: str, config: str) -> dict:
 		frappe.throw(_("Config must be valid JSON."))
 	if not isinstance(parsed, dict):
 		frappe.throw(_("Config must be a JSON object."))
+	agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), parsed)
 	doc.config = frappe.as_json(parsed)
 	doc.save()
 	log_activity(
@@ -1738,6 +1748,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	the run's immutable ``initiating_human`` (JF-021) — three distinct identities."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3: who may trigger
+	# A legacy or directly edited configuration can predate set_config's guard.
+	# Check it before any manual-launch preparation can persist state (including a
+	# model fallback or Custom App Learning's source_apps_json selection).
+	if agent_scope.record_scope_requested(doc.config):
+		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
 	# Operator-visibility gate: a teaser/hidden (operator-withdrawn) agent does not run, even
 	# for an existing install — the install stays but is DISABLED. Reversible (agent -> available
 	# runs it again; never mutates ``enabled``), and applies to everyone incl. an admin
