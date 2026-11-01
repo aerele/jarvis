@@ -544,7 +544,23 @@
 				</div>
 			</div>
 
-			<div v-if="stream.pending.length" class="jvp-pending" role="status" aria-live="polite">
+			<div
+				v-if="settledNotice || orderedPending.length"
+				class="jvp-pending"
+				role="status"
+				aria-live="polite"
+			>
+				<!-- A safety update has already cancelled this token. Keep its terminal
+				     explanation in the confirmation area until the person acknowledges it;
+				     do not make a generic retry banner look like a usable recovery path. -->
+				<div v-if="settledNotice" class="jvp-pending-row">
+					<div class="jvp-pending-txt">{{ settledNotice.message }}</div>
+					<div class="jvp-pending-acts">
+						<button class="jvp-btn-solid" type="button" @click="dismissSettledNotice">
+							Done
+						</button>
+					</div>
+				</div>
 				<div v-for="(p, pi) in orderedPending" :key="p.token" class="jvp-pending-row">
 					<div class="jvp-pending-txt">
 						<b v-if="orderedPending.length > 1"
@@ -580,7 +596,9 @@
 					</div>
 				</div>
 				<!-- Both ways to approve, shown once under the stack. -->
-				<div class="jvp-typehint">{{ typedApprovalHint }}</div>
+				<div v-if="orderedPending.length" class="jvp-typehint">
+					{{ typedApprovalHint }}
+				</div>
 			</div>
 
 			<!-- Jump to latest. stickToBottom already refuses to drag a reader who
@@ -838,6 +856,7 @@ import {
 	keepEarlier,
 	keptCardMessage,
 	markCardsEarlier,
+	settledReasonMessage,
 	sortPendingCards,
 	typedApprovalHint as hintFor,
 	withExcluded,
@@ -994,6 +1013,9 @@ const draft = ref("");
 const sending = ref(false);
 const composerFocused = ref(false);
 const resolving = ref("");
+// A server safety update consumes a card. Keep the terminal explanation in the
+// confirmation area until the person sees and dismisses it; this has no retry.
+const settledNotice = ref(null);
 // D1: tokens a typed "no" discarded (dropDiscarded, below). messages.value keeps
 // tool_status "pending" for that row until the next load(), so resyncPending's
 // rowItems must not rebuild the card from it while stale. Persists past a
@@ -1002,7 +1024,10 @@ let settledTokens = new Set();
 // A typed "confirm 2" binds to the token shown as number 2 here (approval_tokens),
 // so the numbering must be stable: the shared, unit-tested comparator orders by
 // (created_at, token by code unit), whatever order the store listed them in.
-const orderedPending = computed(() => sortPendingCards(stream.value.pending || []));
+const orderedPending = computed(() => {
+	const cards = sortPendingCards(stream.value.pending || []);
+	return cards.filter((card) => card.token !== settledNotice.value?.token);
+});
 // Typed approval works in the widget too. An "Earlier" card never gets the
 // bare-phrase hint: only its number binds it (pending_order.mjs).
 const typedApprovalHint = computed(() => hintFor(orderedPending.value));
@@ -1598,6 +1623,7 @@ function startNewChat() {
 	convId.value = "";
 	messages.value = [];
 	settledTokens = new Set(); // a settled token belonged to the conversation being left
+	settledNotice.value = null;
 	// Keep the fence watermarks: the panel can rebind to the SAME conversation
 	// (list[0]) on reopen, and a wiped fence would readmit a superseded pump's
 	// straggler — the dead-banner resurrection the fence exists to prevent.
@@ -1945,9 +1971,19 @@ async function resolvePending(token) {
 	if (resolving.value) return;
 	resolving.value = token;
 	try {
-		const kept = keptCardMessage(await confirmTool(token, convId.value));
+		const result = await confirmTool(token, convId.value);
+		const kept = keptCardMessage(result);
 		if (kept) {
 			loadError.value = kept;
+			return;
+		}
+		// A cancelled safety-update card is terminal. Show its no-action message
+		// in the confirmation area before removing it, rather than offering a retry
+		// or silently resolving it away.
+		const settled = settledReasonMessage(result);
+		if (settled) {
+			settledTokens = withExcluded(settledTokens, [token]);
+			settledNotice.value = { token, message: settled };
 			return;
 		}
 		stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
@@ -1956,6 +1992,13 @@ async function resolvePending(token) {
 	} finally {
 		resolving.value = "";
 	}
+}
+
+function dismissSettledNotice() {
+	const token = settledNotice.value?.token;
+	if (!token) return;
+	stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
+	settledNotice.value = null;
 }
 
 // The Desk already holds an authenticated socket, so the panel joins it rather

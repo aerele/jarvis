@@ -28,6 +28,7 @@ test("a refusal keeps the card unless it settled it, and says why", () => {
 		{ ok: true },
 		{ ok: false, reason_code: "already_handled" },
 		{ ok: false, reason_code: "not_found" },
+		{ ok: false, reason_code: "safety_update" },
 		{ ok: false, reason_code: "failed", pa_status: "Failed" },
 		{ ok: false, reason_code: "stale", pa_status: "Failed" },
 		{ ok: false, error: { type: "InvalidConfirmation" } },
@@ -77,6 +78,10 @@ test("settledReasonMessage gives the specific reason for a card that settled as 
 		settledReasonMessage({ ok: false, reason_code: "unverifiable", pa_status: "Failed" }),
 		/verified/
 	);
+	assert.match(
+		settledReasonMessage({ ok: false, reason_code: "safety_update", pa_status: "Cancelled" }),
+		/agent safety update/,
+	);
 	assert.equal(settledReasonMessage({ ok: false, error: { type: "InvalidConfirmation" } }), "");
 	assert.equal(settledReasonMessage({ ok: true }), "");
 	assert.equal(settledReasonMessage(undefined), "");
@@ -89,7 +94,22 @@ test("DecisionSheet's approve() checks settledReasonMessage in its InvalidConfir
 	);
 	const body = src.slice(src.indexOf("async function approve("));
 	const invalid = body.indexOf('r.error?.type === "InvalidConfirmation"');
-	const reason = body.indexOf("settledReasonMessage(r)");
+	const reason = body.indexOf("settledReasonMessage(r)", invalid);
 	assert.ok(invalid > -1);
 	assert.ok(reason > invalid);
+});
+
+test("DecisionSheet keeps a safety-update explanation open until the person closes it", () => {
+	const src = fs.readFileSync(
+		new URL("../components/DecisionSheet.vue", import.meta.url),
+		"utf8",
+	);
+	const approve = src.slice(src.indexOf("async function approve("));
+	const safety = approve.indexOf('r.reason_code === "safety_update"');
+	const cancelled = approve.indexOf('state.value = "cancelled"', safety);
+	const expired = approve.indexOf('emit("resolved", props.action.token, "expired")');
+	assert.ok(safety > -1 && cancelled > safety);
+	assert.ok(safety < expired, "safety update must not use the retry/expired path");
+	assert.match(src, /state\.value === "cancelled" && props\.action\?\.token/);
+	assert.match(src, /Confirmation cancelled/);
 });

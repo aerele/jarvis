@@ -499,6 +499,7 @@ def get_agent(agent_slug: str) -> dict:
 	(DESIGN-V3 §8.3 / D39). Any authenticated user may read (listing perms =
 	All read); the ``installation`` block is the caller's own install or None.
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
+	from jarvis.chat.agent_closure import is_closed_agent
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 	from jarvis.chat.operator_review import backend
 
@@ -583,6 +584,11 @@ def get_agent(agent_slug: str) -> dict:
 	# The owner reads a withdrawn (teaser/hidden) install as DISABLED — visible so they can
 	# view / uninstall it, but not runnable while the operator keeps it withdrawn.
 	out["install_disabled"] = 1 if (installed_by_caller and vis in ("teaser", "hidden")) else 0
+	# A reviewed code closure is not a normal marketplace lifecycle state: a
+	# tenant operator cannot re-enable it later. The owner still receives the
+	# installation so they can remove it, but the client needs this distinct
+	# signal to avoid offering controls that the server must reject.
+	out["runtime_closed"] = 1 if (installed_by_caller and is_closed_agent(listing.agent_slug)) else 0
 	if _masked:
 		# Redact the teaser for a non-admin non-owner via the SAME helper the list uses,
 		# so the detail seam can never drift from the list seam.

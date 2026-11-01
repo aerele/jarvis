@@ -11,6 +11,7 @@ import {
   keptCardMessage,
   keepEarlier,
   markCardsEarlier,
+  settledReasonMessage,
   sortPendingCards,
   typedApprovalHint,
   withExcluded,
@@ -245,6 +246,7 @@ test("keptCardMessage: a refusal keeps the card unless it settled it, and says w
     { ok: true },
     { ok: false, reason_code: "already_handled" },
     { ok: false, reason_code: "not_found" },
+    { ok: false, reason_code: "safety_update" },
     { ok: false, reason_code: "failed", pa_status: "Failed" },
     { ok: false, reason_code: "stale", pa_status: "Failed" },
     { ok: false, error: { type: "InvalidConfirmation" } },
@@ -255,6 +257,22 @@ test("keptCardMessage: a refusal keeps the card unless it settled it, and says w
     undefined,
   ])
     assert.equal(keptCardMessage(res), "");
+});
+
+test("settledReasonMessage explains a safety-update cancellation", () => {
+  assert.match(
+    settledReasonMessage({
+      ok: false,
+      reason_code: "safety_update",
+      pa_status: "Cancelled",
+    }),
+    /agent safety update/,
+  );
+  assert.match(
+    settledReasonMessage({ ok: false, reason_code: "safety_update" }),
+    /Submit the action again/,
+  );
+  assert.equal(settledReasonMessage({ ok: false, reason_code: "stale" }), "");
 });
 
 test("Panel.vue folds a typed no's discarded tokens into resyncPending's exclusion set", () => {
@@ -284,4 +302,17 @@ test("Panel.vue keeps a refused card instead of resolving it away", () => {
   );
   assert.ok(kept > -1 && body.includes("const kept = keptCardMessage("));
   assert.ok(kept < body.indexOf('kind: "action:resolved"'));
+});
+
+test("Panel.vue keeps a safety-update message visible before it removes the card", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
+  const body = src.slice(src.indexOf("async function resolvePending("));
+  const settled = body.indexOf("const settled = settledReasonMessage(result)");
+  const notice = body.indexOf("settledNotice.value = { token, message: settled }", settled);
+  const resolved = body.indexOf('kind: "action:resolved"', settled);
+  assert.ok(settled > -1 && notice > settled && resolved > notice);
+  assert.match(src, /function dismissSettledNotice\(\)/);
+  assert.match(src, /@click="dismissSettledNotice"/);
+  assert.doesNotMatch(body.slice(settled, resolved), /loadError\.value = settled/);
 });

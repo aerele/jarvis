@@ -167,7 +167,7 @@
 							v-if="installation"
 							label="Enabled"
 							:modelValue="!!installation.enabled"
-							:disabled="togglingEnabled"
+							:disabled="togglingEnabled || runtimeClosed"
 							@update:modelValue="setEnabled"
 						/>
 					</div>
@@ -175,7 +175,11 @@
 				<!-- #1062 review fix: an installed-but-not-allowed row (role revoked
 				     after install) must say so visibly, not only via the disabled Run
 				     button's tooltip - a tooltip is easy to miss entirely. -->
-				<div v-if="installation && !agent.allowed" class="mt-3 text-sm text-ink-gray-5">
+				<div v-if="installation && runtimeClosed" class="mt-3 text-sm text-ink-gray-5">
+					This agent is Coming Soon while an agent safety update is active. It cannot be
+					enabled, scheduled, or run. You can still uninstall it.
+				</div>
+				<div v-else-if="installation && !agent.allowed" class="mt-3 text-sm text-ink-gray-5">
 					You do not have access to run this agent. Ask your administrator.
 				</div>
 				<!-- jarvis#1062 polish: the same visible-hint treatment for the other
@@ -205,7 +209,7 @@
 				<!-- Operator withdrew this agent: a visible hint (not only badge/tooltip) that Run
 				     Now is off, it resumes if made available, and it can still be uninstalled. -->
 				<div
-					v-if="installation && agent.install_disabled"
+					v-if="installation && agent.install_disabled && !runtimeClosed"
 					class="mt-3 text-sm text-ink-gray-5"
 				>
 					The operator has made this agent unavailable. It won't run until it's available
@@ -434,11 +438,15 @@
 					<div class="min-w-0">
 						<section>
 							<div class="text-base font-medium text-ink-gray-9">Schedule</div>
+							<p v-if="runtimeClosed" class="mt-2 text-sm text-ink-gray-6">
+								This agent is Coming Soon while an agent safety update is active.
+								Scheduling is not available. You can still uninstall it.
+							</p>
 							<!-- mt-2 for the same reason as Configuration above;
 							     space-y-5 (not -4) to match ConfigForm's own
 							     field-to-field rhythm - one consistent gap across
 							     both columns, not two different densities. -->
-							<p v-if="isOperatorReview" class="mt-2 text-sm text-ink-gray-6">
+							<p v-else-if="isOperatorReview" class="mt-2 text-sm text-ink-gray-6">
 								Manual review only. Confirm the date cutoff and policy before each
 								run.
 							</p>
@@ -1139,10 +1147,15 @@ const shadowScribeBlocked = computed(
 			activation.value.activation_state !== "live"
 		)
 );
+// A server-owned close is terminal until a reviewed release reopens the
+// contract. It differs from a normal operator withdrawal, which can later be
+// made available again, so the page needs distinct no-runtime copy.
+const runtimeClosed = computed(() => !!(agent.value && agent.value.runtime_closed));
 const runDisabled = computed(
 	() =>
 		!installation.value ||
 		!installation.value.enabled ||
+		runtimeClosed.value ||
 		(agent.value && agent.value.install_disabled) ||
 		(agent.value &&
 			!agent.value.supports_manual_run &&
@@ -1153,6 +1166,8 @@ const runDisabled = computed(
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
+	if (runtimeClosed.value)
+		return "This agent is Coming Soon while an agent safety update is active. It cannot be run.";
 	// The operator withdrew this agent (teaser/hidden): it can't run for anyone until it is
 	// available again. The install is kept so it can be uninstalled; it resumes automatically
 	// if the operator restores availability.
@@ -1248,7 +1263,7 @@ function confirmUninstall() {
 
 const togglingEnabled = ref(false);
 async function setEnabled(v) {
-	if (!installation.value || togglingEnabled.value) return;
+	if (!installation.value || togglingEnabled.value || runtimeClosed.value) return;
 	togglingEnabled.value = true;
 	try {
 		await api.setAgentEnabled(installation.value.name, v ? 1 : 0);
@@ -1419,7 +1434,7 @@ const scheduleSummary = computed(() => {
 });
 
 async function saveSchedule() {
-	if (!installation.value || savingSchedule.value) return;
+	if (!installation.value || savingSchedule.value || runtimeClosed.value) return;
 	savingSchedule.value = true;
 	try {
 		await api.setAgentSchedule(installation.value.name, {

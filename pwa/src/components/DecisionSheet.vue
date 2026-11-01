@@ -39,7 +39,7 @@ const props = defineProps({
 // resurrect a card the user just acted on.
 const emit = defineEmits(["close", "resolved", "busy"]);
 
-const state = ref("review"); // review | busy | approved | denied
+const state = ref("review"); // review | busy | approved | denied | cancelled
 const error = ref("");
 // A failed confirmation's own id, for support (the bench's error.reference).
 const reference = ref("");
@@ -74,6 +74,18 @@ const rawDetails = computed(() => {
 });
 // F15: the server's wall-clock expiry (epoch seconds) for this parked token.
 const expired = computed(() => pendingExpiry(props.action?.expires_at, Date.now()).expired);
+
+function closeSheet() {
+	// A safety update has already spent the server-side confirmation. Keep the
+	// terminal explanation open until the person acknowledges it, then remove
+	// the card locally. A bare close during normal review still only closes the
+	// sheet and keeps a live card available.
+	if (state.value === "cancelled" && props.action?.token) {
+		emit("resolved", props.action.token, "cancelled");
+		return;
+	}
+	emit("close");
+}
 
 // The preview is either a ready-made string or {note, would} — `described` means
 // the note already says it all and the payload dump would just be noise.
@@ -142,6 +154,14 @@ async function approve(mode = "step") {
 				state.value = "review";
 				return;
 			}
+			// A safety update cancels the token before any action runs. It is a
+			// terminal result, not a retryable approval failure. Keep the sheet
+			// open so the person sees that no action ran before its card is removed.
+			if (r.reason_code === "safety_update") {
+				error.value = settledReasonMessage(r);
+				state.value = "cancelled";
+				return;
+			}
 			// The token is single-use and short-lived: a stale card must say so
 			// rather than look like a failure the user can retry.
 			if (r.error?.type === "InvalidConfirmation") {
@@ -177,9 +197,12 @@ async function approve(mode = "step") {
 </script>
 
 <template>
-	<Sheet :open="!!props.action" @close="emit('close')">
+	<Sheet :open="!!props.action" @close="closeSheet">
 		<div v-if="props.action" class="jv-dsheet">
-			<div v-if="state === 'approved' || state === 'denied'" class="jv-dresult">
+			<div
+				v-if="state === 'approved' || state === 'denied' || state === 'cancelled'"
+				class="jv-dresult"
+			>
 				<div class="jv-dresult-icon" :class="state === 'approved' ? 'is-ok' : 'is-no'">
 					<svg
 						v-if="state === 'approved'"
@@ -208,16 +231,24 @@ async function approve(mode = "step") {
 					</svg>
 				</div>
 				<div class="jv-dresult-title">
-					{{ state === "approved" ? "Approved" : "Denied" }}
+					{{
+						state === "approved"
+							? "Approved"
+							: state === "cancelled"
+								? "Confirmation cancelled"
+								: "Denied"
+					}}
 				</div>
 				<div class="jv-dresult-sub">
 					{{
 						state === "approved"
 							? `${agentName} is running the action now. You'll see the result in the thread.`
-							: `The change was rejected. ${agentName} won't run this action.`
+							: state === "cancelled"
+								? error
+								: `The change was rejected. ${agentName} won't run this action.`
 					}}
 				</div>
-				<button class="jv-btn is-primary" @click="emit('close')">Done</button>
+				<button class="jv-btn is-primary" @click="closeSheet">Done</button>
 			</div>
 
 			<template v-else>

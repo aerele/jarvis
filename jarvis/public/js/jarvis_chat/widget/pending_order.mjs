@@ -83,7 +83,7 @@ const SETTLED_STATUS = [
   "Cancelled",
   "Superseded",
 ];
-const SETTLED_CODE = ["not_found", "already_handled"];
+const SETTLED_CODE = ["not_found", "already_handled", "safety_update"];
 export function keptCardMessage(res) {
   if (!res || res.ok !== false || !res.reason_code) return "";
   if (
@@ -96,6 +96,19 @@ export function keptCardMessage(res) {
     (res.error && res.error.message) ||
     "This action could not be completed."
   );
+}
+
+// A terminal outcome removes the card from the stack. Most outcomes have no
+// safe client-side recovery message. A safety update is different: the server
+// cancelled the card before dispatch, so the person must be told that no action
+// ran and that they can submit it again if still needed.
+const SETTLED_REASONS = {
+  safety_update:
+    "This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
+};
+export function settledReasonMessage(res) {
+  if (!res || res.ok !== false || !res.reason_code) return "";
+  return SETTLED_REASONS[res.reason_code] || "";
 }
 
 // Typed yes/no scope (decision 6), mirrored from frontend/src/lib/typedCardReply.js:

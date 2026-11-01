@@ -42,6 +42,7 @@ from jarvis.chat.agent_closure import (
 from jarvis.exceptions import PermissionDeniedError
 from jarvis.settings_reset import ResetSpec
 from jarvis.settings_reset import apply as apply_settings_reset
+from jarvis.tests._collaboration_helpers import CollaborationCase
 from jarvis.tools import _delegate_capability, _delegate_write_caps
 from jarvis.tools.amend_doc import _amend_one
 from jarvis.tools.apply_workflow_action import apply_workflow_action
@@ -524,6 +525,18 @@ class TestAgentClosureIntegration(FrappeTestCase):
 				self.assertFalse(result["ok"])
 				self.assertEqual(result["error"]["code"], "PermissionError")
 
+	def test_get_agent_marks_an_installed_closed_agent_as_terminal(self):
+		for spec in CLOSED_AGENT_SPECS:
+			self._legacy_install(spec, enabled=0, schedule_enabled=0)
+			frappe.set_user(OWNER)
+			result = agents_api.get_agent(spec.slug)
+			self.assertEqual(result["status"], CLOSED_STATUS)
+			self.assertEqual(result["runtime_closed"], 1)
+			self.assertIsNotNone(result["installation"])
+			frappe.set_user("Administrator")
+		frappe.set_user("Administrator")
+		self.assertEqual(agents_api.get_agent(SAFE_AGENT)["runtime_closed"], 0)
+
 	def test_legacy_confirmation_map_fails_closed_before_dispatch_and_full_map_stays_usable(self):
 		self.assertEqual(expected_confirmation_fences(), _expected_map())
 		token = self._legacy_token()
@@ -572,3 +585,35 @@ class TestAgentClosureIntegration(FrappeTestCase):
 		self.assertEqual(post_claim_result["reason_code"], "safety_update")
 		self.assertEqual(frappe.db.get_value(PENDING_ACTION, post_claim_token, "status"), "Cancelled")
 		self.assertEqual(frappe.db.count("ToDo"), before)
+
+
+class TestAgentClosureCollaborativeDispatch(CollaborationCase):
+	def test_persisted_closed_binding_cannot_reach_callback_or_tool_dispatch(self):
+		from jarvis.chat import collaboration as collaboration_service
+		from jarvis.chat import collaboration_dispatch
+
+		for index, spec in enumerate(CLOSED_AGENT_SPECS):
+			for prefix_index, prefix in enumerate(spec.session_prefixes):
+				binding = self.binding(run=f"{index * 2 + prefix_index + 1:032x}")
+				old_key = binding.session_key
+				historic_key = f"{prefix}closure-binding-{index}-{prefix_index}"
+				# Simulate a retained immutable binding after its ordinary auth/session
+				# row was retired. This is exactly the shared route that cannot rely on
+				# Jarvis Chat Session rows for its identity classification.
+				frappe.db.set_value(collaboration_service.BINDING, binding.name, "session_key", historic_key)
+				frappe.db.delete(collaboration_service.SESSION, {"session_key": old_key})
+				self.assertTrue(collaboration_service.is_collaborative_session(historic_key))
+				with (
+					patch.object(collaboration_dispatch, "callback_scope") as callback_scope,
+					patch.object(api, "_run_tool") as run_tool,
+				):
+					result = collaboration_dispatch.dispatch(
+						historic_key,
+						"create_doc",
+						{"doctype": "ToDo", "values": {"description": "must not run"}},
+						"closed-binding-call",
+					)
+				callback_scope.assert_not_called()
+				run_tool.assert_not_called()
+				self.assertFalse(result["ok"])
+				self.assertEqual(result["error"]["code"], "PermissionError")
