@@ -18,11 +18,15 @@ The helper runs under the caller's identity (the run-as user in
 resolved for that user.
 """
 
+from calendar import monthrange
+from datetime import date
+
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
 
 INSTALLATION = "Jarvis Agent Installation"
+_PAYROLL_DEPOSIT_AGENT = "statutory-payroll-deposit-status"
 
 
 def resolve_scope(installation) -> dict:
@@ -52,7 +56,87 @@ def resolve_scope(installation) -> dict:
 		val = cfg.get(key)
 		return str(val).strip() if val is not None and str(val).strip() else None
 
-	return _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	is_payroll_deposit = installation.get("agent") == _PAYROLL_DEPOSIT_AGENT
+	if is_payroll_deposit and _s("fiscal_year"):
+		raise InvalidArgumentError(
+			"statutory payroll deposit status requires explicit from_date and to_date, not fiscal_year"
+		)
+	if is_payroll_deposit and not (_s("from_date") and _s("to_date")):
+		raise InvalidArgumentError("statutory payroll deposit status requires explicit from_date and to_date")
+	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	if is_payroll_deposit:
+		_validate_payroll_deposit_period(scope, cfg)
+		scope["record_scope"] = _payroll_deposit_record_scope(cfg, scope["company"])
+	return scope
+
+
+def _validate_payroll_deposit_period(scope: dict, cfg: dict) -> None:
+	"""Reject an invalid liability month before any delegate run starts.
+
+	The bundle repeats these checks as its final fail-closed boundary. Keeping the
+	launcher check here prevents an API caller from bypassing the typed Configure
+	panel and creating a run that can only end as not-evaluable.
+	"""
+	deposit = cfg.get("deposit")
+	if not isinstance(deposit, dict):
+		raise InvalidArgumentError("deposit configuration is required")
+	try:
+		start = date.fromisoformat(str(scope["from_date"]))
+		end = date.fromisoformat(str(scope["to_date"]))
+		report_date = date.fromisoformat(str(scope["report_date"]))
+		cutoff = date.fromisoformat(str(deposit["settlement_as_of"]))
+	except (KeyError, TypeError, ValueError):
+		raise InvalidArgumentError(
+			"statutory payroll deposit status requires valid period and booking evidence cutoff dates"
+		)
+	month_end = date(start.year, start.month, monthrange(start.year, start.month)[1])
+	if start.day != 1 or end != month_end:
+		raise InvalidArgumentError("statutory payroll deposit status requires one full calendar month")
+	if cutoff < end:
+		raise InvalidArgumentError("booking evidence cutoff must be on or after the period end")
+	if report_date < end:
+		raise InvalidArgumentError("the selected payroll liability month has not ended")
+
+
+def _payroll_deposit_record_scope(cfg: dict, company: str) -> dict:
+	"""Return the one Account-group scope the deposit agent declares.
+
+	The account group is an explicit part of the agent's nested ``deposit``
+	configuration. It has no default: selecting all accounts would turn a
+	declared-voucher review into an unsafe company-wide scan. Resolve it under
+	the run-as user and retain only the bounded doctype/name pair for the
+	delegate.
+	"""
+	deposit = cfg.get("deposit")
+	if not isinstance(deposit, dict):
+		raise InvalidArgumentError("deposit account group is required")
+	account_name = deposit.get("account_group")
+	if not isinstance(account_name, str) or not account_name.strip():
+		raise InvalidArgumentError("deposit account group is required")
+	account = frappe.get_doc("Account", account_name.strip())
+	account.check_permission("read")
+	if account.company != company:
+		raise InvalidArgumentError("deposit account group must belong to the selected company")
+	if not frappe.utils.cint(account.is_group) or frappe.utils.cint(account.disabled):
+		raise InvalidArgumentError("deposit account group must be an enabled Account group")
+	mapping = deposit.get("liability_accounts")
+	if not isinstance(mapping, dict) or not mapping:
+		raise InvalidArgumentError("a PF or ESI liability account mapping is required")
+	for account_name, scheme in mapping.items():
+		if not isinstance(account_name, str) or not account_name.strip() or scheme not in {"pf", "esi"}:
+			raise InvalidArgumentError("each liability account mapping must name PF or ESI")
+		liability_account = frappe.get_doc("Account", account_name.strip())
+		liability_account.check_permission("read")
+		if (
+			liability_account.company != company
+			or liability_account.parent_account != account.name
+			or frappe.utils.cint(liability_account.is_group)
+			or frappe.utils.cint(liability_account.disabled)
+		):
+			raise InvalidArgumentError(
+				"each liability account must be an enabled direct child of the selected Account group"
+			)
+	return {"doctype": "Account", "name": account.name}
 
 
 def _resolve(company, fiscal_year, from_date, to_date) -> dict:

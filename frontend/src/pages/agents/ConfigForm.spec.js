@@ -905,6 +905,123 @@ describe("per-agent gating via the configKeys prop", () => {
 	});
 });
 
+describe("payroll deposit-status configuration", () => {
+	const configKeys = ["deposit"];
+
+	async function fillDeposit(w, { liabilityMonth = "2024-04" } = {}) {
+		const companyPicker = w
+			.findAllComponents({ name: "Autocomplete" })
+			.find((component) => component.props("placeholder") === "Search Company…");
+		companyPicker.vm.$emit("update:modelValue", {
+			label: "Fake Company",
+			value: "Fake Company",
+		});
+		await w.vm.$nextTick();
+		await field(w, "Period from").setValue("2024-04-01");
+		await field(w, "Period to").setValue("2024-04-30");
+		const accountPicker = w
+			.findAllComponents({ name: "Autocomplete" })
+			.find((component) => component.props("placeholder") === "Search Account…");
+		accountPicker.vm.$emit("update:modelValue", {
+			label: "Payroll liabilities - FC",
+			value: "Payroll liabilities - FC",
+		});
+		await w.vm.$nextTick();
+		await field(w, "Named payroll reviewer").setValue("payroll.reviewer@example.test");
+		await w.find('[data-label="Reviewer capacity confirmed"]').setValue(true);
+		await field(w, "Booking evidence cutoff").setValue("2024-05-31");
+		await w.find('[data-label="Add liability account"]').trigger("click");
+		await field(w, "Liability account 1").setValue("PF payable - FC");
+		await field(w, "Scheme 1").setValue("pf");
+		await w.find('[data-label="Add source voucher"]').trigger("click");
+		await field(w, "Voucher type 1").setValue("Journal Entry");
+		await field(w, "Voucher name 1").setValue("ACC-JV-0001");
+		await field(w, "Liability month 1").setValue(liabilityMonth);
+	}
+
+	it("renders the declared namespace as typed setup and saves its exact nested value", async () => {
+		const w = mountForm(
+			{
+				custom: { keep: true },
+				fiscal_year: "2024-2025",
+				deposit: { test_declaration: "fixture-only" },
+			},
+			{ configKeys }
+		);
+		expect(w.text()).toContain("Payroll deposit-status setup");
+		expect(w.text()).toContain("Liability account group");
+		expect(w.text()).toContain("Declared source vouchers");
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+		expect(fiscalYearPicker(w)).toBeUndefined();
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({ custom: { keep: true } });
+
+		await fillDeposit(w);
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			custom: { keep: true },
+			company: "Fake Company",
+			from_date: "2024-04-01",
+			to_date: "2024-04-30",
+			deposit: {
+				account_group: "Payroll liabilities - FC",
+				reviewer: "payroll.reviewer@example.test",
+				reviewer_capacity: true,
+				settlement_as_of: "2024-05-31",
+				liability_accounts: { "PF payable - FC": "pf" },
+				vouchers: [
+					{
+						doctype: "Journal Entry",
+						name: "ACC-JV-0001",
+						liability_month: "2024-04",
+					},
+				],
+			},
+		});
+	});
+
+	it("refuses incomplete, duplicate and malformed declared rows before save", async () => {
+		const blank = mountForm({}, { configKeys });
+		await blank.find('[data-label="Save configuration"]').trigger("click");
+		expect(blank.emitted("save")).toBeUndefined();
+		expect(blank.text()).toContain("Complete the payroll deposit-status setup before saving.");
+
+		const incomplete = mountForm({}, { configKeys });
+		await field(incomplete, "Named payroll reviewer").setValue("reviewer@example.test");
+		await incomplete.find('[data-label="Save configuration"]').trigger("click");
+		expect(incomplete.emitted("save")).toBeUndefined();
+		expect(incomplete.text()).toContain("Select the liability account group.");
+
+		const duplicate = mountForm({}, { configKeys });
+		await fillDeposit(duplicate, { liabilityMonth: "not-a-month" });
+		await duplicate.find('[data-label="Add liability account"]').trigger("click");
+		await field(duplicate, "Liability account 2").setValue("PF payable - FC");
+		await field(duplicate, "Scheme 2").setValue("esi");
+		await duplicate.find('[data-label="Save configuration"]').trigger("click");
+		expect(duplicate.emitted("save")).toBeUndefined();
+		expect(duplicate.text()).toContain("Each liability account can appear only once.");
+
+		await field(duplicate, "Liability account 2").setValue("ESI payable - FC");
+		await duplicate.find('[data-label="Save configuration"]').trigger("click");
+		expect(duplicate.emitted("save")).toBeUndefined();
+		expect(duplicate.text()).toContain("liability month in YYYY-MM format");
+	});
+
+	it("requires one completed calendar month and a cutoff after that month", async () => {
+		const w = mountForm({}, { configKeys });
+		await fillDeposit(w);
+		await field(w, "Period to").setValue("2024-04-29");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")).toBeUndefined();
+		expect(w.text()).toContain("Period from/to must be one full liability month.");
+
+		await field(w, "Period to").setValue("2024-04-30");
+		await field(w, "Booking evidence cutoff").setValue("2024-04-29");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")).toBeUndefined();
+		expect(w.text()).toContain("Booking evidence cutoff must be on or after Period to.");
+	});
+});
+
 // jarvis#1063 CRITICAL fix: close-auditor/evaluate.py reads materiality
 // config NESTED, not flat. Installations saved before this fix have it flat
 // at the top level - migrate transparently, one-directional (flat -> nested,

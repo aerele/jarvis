@@ -11,8 +11,9 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), the only agent that
- *     reads any agent-specific config today. Rendered only when the
+ *     CRITICAL fix, they are NOT flat top-level keys), while the statutory
+ *     payroll deposit-status agent reads its typed `deposit` object. A field
+ *     renders only when the
  *     listing's own `config_keys` (agents_api.py get_agent, jarvis#1063)
  *     names the field's storage `path` (a dot path for a nested key) -
  *     ConfigForm.vue filters this array by that list at render time.
@@ -34,6 +35,10 @@
  *   - {keys: [from, to], paths: [from, to], labels: [from, to], type: "date-range", help, scope?}
  *   - {key, path, label, type: "number", help, suffix?}
  *   - {key, path, label, type: "select", options: [{label, value}, ...]}
+ *   - {key, path, label, type: "deposit-status", help} for the one
+ *     explicitly typed, nested payroll-deposit setup. The value remains under
+ *     the single declared `deposit` namespace; it is never a free-form
+ *     Advanced JSON payload.
  */
 export const CONFIG_FIELD_SET = [
 	{
@@ -166,6 +171,13 @@ export const CONFIG_FIELD_SET = [
 		help: "Step used to detect round-number plugs",
 	},
 	{
+		key: "deposit",
+		path: "deposit",
+		label: "Payroll deposit-status setup",
+		type: "deposit-status",
+		help: "Set the named reviewer, account group, cutoff, account mapping and declared voucher months. This review never proves a deposit, default, penalty or scheme eligibility.",
+	},
+	{
 		key: "stale_floor_days",
 		path: "ageing.stale_floor_days",
 		label: "Stale-invoice floor",
@@ -228,6 +240,13 @@ export const KEY_TO_PATH = Object.fromEntries(
 	CONFIG_FIELD_SET.flatMap((f) =>
 		f.keys ? f.keys.map((k, i) => [k, (f.paths || f.keys)[i]]) : [[f.key, f.path || f.key]]
 	)
+);
+
+/** Form-local key -> descriptor. ConfigForm uses this to apply the small
+ * number of typed structured fields without treating their object values as
+ * strings. */
+export const CONFIG_FIELD_BY_KEY = Object.fromEntries(
+	CONFIG_FIELD_SET.flatMap((f) => (f.keys ? f.keys.map((k) => [k, f]) : [[f.key, f]]))
 );
 
 // ── dot-path get/set/delete over a plain JSON-shaped object ─────────────────

@@ -63,6 +63,7 @@ INSTALLATION = "Jarvis Agent Installation"
 LISTING = "Jarvis Agent Listing"
 RUN = "Jarvis Agent Run"
 CONV = "Jarvis Conversation"
+_PAYROLL_DEPOSIT_AGENT = "statutory-payroll-deposit-status"
 
 # A14: the per-INSTALLATION monthly run budget (manual + scheduled combined; failed
 # runs excluded). Read from Jarvis Settings.agent_run_budget_monthly at run time; a
@@ -1622,6 +1623,11 @@ def _stamp_scope_and_watermark(
 	try:
 		scope = agent_scope.resolve_scope(inst)
 	except Exception:
+		# Deposit-status cannot safely degrade to an unscoped delegate run. Its
+		# bundle uses the declared Account group before it can evaluate source
+		# records, so an invalid period or account scope must abort before dispatch.
+		if inst.get("agent") == _PAYROLL_DEPOSIT_AGENT:
+			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
@@ -1734,6 +1740,20 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 		apps = ", ".join(str(a) for a in scope["source_apps"])
 		scope_block += f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
 	if scope and scope.get("company"):
+		record_scope = scope.get("record_scope")
+		bounded_record_scope = (
+			{"doctype": "Account", "name": record_scope.get("name")}
+			if isinstance(record_scope, dict)
+			and record_scope.get("doctype") == "Account"
+			and isinstance(record_scope.get("name"), str)
+			and record_scope["name"].strip()
+			else None
+		)
+		record_scope_text = (
+			f", record_scope={json.dumps(bounded_record_scope, sort_keys=True)}"
+			if bounded_record_scope
+			else ""
+		)
 		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period or the current date): "
 			f'company="{scope.get("company")}", '
@@ -1742,7 +1762,7 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			f'to_date="{scope.get("to_date")}", '
 			f'report_date="{scope.get("report_date")}", '
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
-			f'prior_fy_end="{scope.get("prior_fy_end")}".'
+			f'prior_fy_end="{scope.get("prior_fy_end")}"{record_scope_text}.'
 		)
 	# EXPLICIT CONFIG (jarvis#1063 delivery): the tenant's declared config_keys values, HANDED
 	# to the delegate so its evaluator receives them DETERMINISTICALLY. Filtered to the declared
