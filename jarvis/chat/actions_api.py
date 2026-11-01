@@ -1177,6 +1177,17 @@ _CONFIRMATION_OUTCOME_UNKNOWN = {
 	},
 }
 
+_CONFIRMATION_REVOKED = {
+	"ok": False,
+	"error": {
+		"type": "InvalidConfirmation",
+		"message": (
+			"This confirmation was cancelled during an agent safety update. "
+			"Submit the action again if it is still needed."
+		),
+	},
+}
+
 
 # ── "Approve & run" refusals (skill "Approve & run the plan", design §3.3/§3.4) ──
 # Stable "nothing changed" envelopes for approve_and_run. Each is returned WITHOUT
@@ -1232,6 +1243,8 @@ def _confirmation_storage_error(exc) -> dict:
 	"""Stable user envelope for a Redis failure; never mislabel it as expiry."""
 	from jarvis.chat import pending_confirm
 
+	if isinstance(exc, pending_confirm.LegacyConfirmationRevoked):
+		return {**_CONFIRMATION_REVOKED, "reason_code": "safety_update"}
 	frappe.logger("jarvis.pending_confirm").error(
 		"confirmation endpoint stopped before the business action: %s", type(exc).__name__
 	)
@@ -1527,6 +1540,8 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
 	except pending_confirm.PendingConfirmStorageError as exc:
 		res = _confirmation_storage_error(exc)
+		if res.get("reason_code"):
+			return res
 		unknown = res is _CONFIRMATION_OUTCOME_UNKNOWN
 		return {**res, "reason_code": "storage_outcome_unknown" if unknown else "storage_unavailable"}
 	if not record:
@@ -1537,6 +1552,14 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 	from jarvis.chat import turn_message_binding
 
 	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
+	try:
+		# keep_skill_autorun_open commits by design. Re-lock the close fence at
+		# the last possible point before dispatch, so an RRO safety migration that
+		# landed during that commit cancels this already-consumed legacy token.
+		pending_confirm.assert_dispatch_allowed(record)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
+		return _confirmation_storage_error(exc)
 	# STEP 1: execute the parked write AS the scoped exec_user the gate stored.
 	result = _dispatch_call(record, token, guard_conv, "approve_and_run dispatch crashed")
 	ok = isinstance(result, dict) and bool(result.get("ok"))
@@ -1673,6 +1696,13 @@ def _confirm_core(
 	from jarvis.chat import turn_message_binding
 
 	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
+	try:
+		# This is after the helper's deliberate commit and immediately before the
+		# generic write path. The fence lock stays held through _dispatch_call.
+		pending_confirm.assert_dispatch_allowed(record)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
+		return _confirmation_storage_error(exc)
 	result = _dispatch_call(record, token, guard_conv, "confirm dispatch crashed")
 	if not (isinstance(result, dict) and result.get("ok")):
 		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")

@@ -43,6 +43,9 @@ _GL_SCOPED_DIMENSIONS = (
 
 class JarvisAgentInstallation(NotRenamable, Document):
 	def validate(self):
+		from jarvis.chat import reorder_replenishment_gate
+
+		reorder_replenishment_gate.validate_installation(self)
 		self._default_reviewer()
 		self._guard_installability()
 		self._guard_operator_visibility()

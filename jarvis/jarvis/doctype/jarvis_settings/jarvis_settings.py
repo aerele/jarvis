@@ -850,6 +850,7 @@ class JarvisSettings(Document):
 				self.llm_api_key = api_key_val
 
 	def validate(self):
+		self._preserve_agent_catalog_state()
 		self._guard_agent_min_model_authority()
 		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
 		# scrub in on_update. Capture the change here, the same way
@@ -897,6 +898,23 @@ class JarvisSettings(Document):
 		# The Desk boot carries the name and the logo; on_update drops its cache on a change.
 		self.flags.brand_changed = any(self.has_value_changed(f) for f in ("agent_name", "brand_logo"))
 		self.flags.shortcut_visibility_changed = self.has_value_changed("hide_shortcut_without_access")
+
+	def _preserve_agent_catalog_state(self):
+		"""Keep fleet reconciliation state server-owned on every Settings save.
+
+		These hidden fields are written only by the Apply/mutation server paths.
+		A Settings form has permlevel-0 write for tenant administration, and Frappe
+		does not enforce a DocField's ``read_only`` flag for a crafted document
+		save. Reload the current locked values so neither a stale form nor a tenant
+		admin can clear an Apply-pending marker or choose its version.
+		"""
+		for field in ("agent_catalog_dirty", "agent_catalog_version"):
+			self.set(
+				field,
+				frappe.utils.cint(
+					frappe.db.get_single_value("Jarvis Settings", field, cache=False, for_update=True)
+				),
+			)
 
 	def _validate_public_address(self):
 		"""Private network (design 5.2): in Private mode the public address must pass the
