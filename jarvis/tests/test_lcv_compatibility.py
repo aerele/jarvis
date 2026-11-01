@@ -50,7 +50,9 @@ class TestLCVCompatibility(LandedCostFixtures):
 			for lock in (False, True):
 				with self.subTest(lock=lock):
 					self.assertEqual(
-						source._claimed_landed_cost(self.invoice.name, exclude_voucher=doc.name, for_update=lock),
+						source._claimed_landed_cost(
+							self.invoice.name, exclude_voucher=doc.name, for_update=lock
+						),
 						30,
 					)
 					self.assertEqual(calls, [])
@@ -73,8 +75,9 @@ class TestLCVCompatibility(LandedCostFixtures):
 				return SimpleNamespace(get_claimed_landed_cost=broken_helper)
 			return actual_import(name, globals, locals, fromlist, level)
 
-		with patch("builtins.__import__", side_effect=current_version), self.assertRaisesRegex(
-			TypeError, "internal helper failure"
+		with (
+			patch("builtins.__import__", side_effect=current_version),
+			self.assertRaisesRegex(TypeError, "internal helper failure"),
 		):
 			source._claimed_landed_cost(self.invoice.name, for_update=True)
 
