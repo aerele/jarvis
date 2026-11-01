@@ -117,6 +117,12 @@ function fiscalYearPicker(wrapper) {
 		.find((component) => component.props("placeholder") === "Search Fiscal Year…");
 }
 
+function slaTeamPicker(wrapper) {
+	return wrapper
+		.findAllComponents({ name: "Autocomplete" })
+		.find((component) => component.props("placeholder") === "Search HD Team…");
+}
+
 function apDefaults(company = "Example") {
 	return {
 		defaults: {
@@ -902,6 +908,58 @@ describe("per-agent gating via the configKeys prop", () => {
 		const w = mountForm({}, { configKeys: [] });
 		await w.find('[data-label="Save configuration"]').trigger("click");
 		expect(w.emitted("save")[0][0]).toEqual({});
+	});
+});
+
+describe("SLA-breach Helpdesk-team configuration", () => {
+	const configKeys = ["sla_config"];
+	const agentSlug = "sla-breach-ageing-auditor";
+
+	it("shows a readable HD Team picker and saves its exact top-level record scope", async () => {
+		api.searchLink.mockResolvedValue([{ value: "Support East" }]);
+		const w = mountForm({}, { configKeys, agentSlug });
+		expect(w.text()).toContain("Select one readable Helpdesk team");
+		expect(w.text()).toContain("Helpdesk team");
+		expect(w.text()).not.toContain("Materiality benchmark amount");
+
+		const picker = slaTeamPicker(w);
+		await picker.find("input").trigger("focusin");
+		await flushPromises();
+		await picker.find('[data-option="Support East"]').trigger("click");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+
+		expect(w.emitted("save")[0][0]).toEqual({
+			record_scope: { doctype: "HD Team", name: "Support East" },
+		});
+	});
+
+	it("pre-fills the selected team and keeps a saved scope issue visible", () => {
+		const scope = { doctype: "HD Team", name: "Support East" };
+		const w = mountForm(
+			{ record_scope: scope },
+			{
+				configKeys,
+				agentSlug,
+				validationErrors: { sla_team: "Select one readable HD Team record." },
+			}
+		);
+		expect(slaTeamPicker(w).props("modelValue")).toEqual({
+			label: "Support East",
+			value: "Support East",
+		});
+		expect(w.text()).toContain("Select one readable HD Team record.");
+	});
+
+	it("does not expose or rewrite a record scope for another agent", async () => {
+		const record_scope = { doctype: "HD Team", name: "Support East" };
+		const w = mountForm(
+			{ record_scope },
+			{ configKeys, agentSlug: "close-auditor" }
+		);
+		expect(w.text()).not.toContain("Helpdesk team");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({ record_scope });
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({ record_scope });
 	});
 });
 

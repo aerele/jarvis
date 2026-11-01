@@ -1,8 +1,10 @@
 <template>
-	<fieldset :disabled="operatorReview && saving" class="min-w-0">
+	<fieldset :disabled="requiresSetup && saving" class="min-w-0">
 		<p class="text-sm text-ink-gray-6">
 			{{
-				operatorReview
+				slaBreachAgeingAuditor
+					? "Select one readable Helpdesk team. Each run reads only tickets in that team."
+					: operatorReview
 					? bankRecon
 						? "Bank reconciliation review reads one company bank account for the statement window below and proposes matches for a named reviewer. Manual runs only; nothing is reconciled, allocated or posted."
 						: arReview
@@ -41,7 +43,7 @@
 			<p v-if="defaultsMessage" class="mt-2">{{ defaultsMessage }}</p>
 		</div>
 		<div
-			v-if="operatorReview && Object.keys(shownErrors).length"
+			v-if="requiresSetup && Object.keys(shownErrors).length"
 			class="mt-3 rounded-lg border border-outline-gray-2 bg-surface-gray-1 p-3 text-sm text-ink-gray-7"
 			role="status"
 		>
@@ -157,7 +159,7 @@
 
 		<div class="mt-4">
 			<Button label="Save configuration" :loading="saving" @click="save" />
-			<p v-if="operatorReview" class="mt-2 text-p-xs text-ink-gray-5">
+			<p v-if="requiresSetup" class="mt-2 text-p-xs text-ink-gray-5">
 				You can save unfinished setup. Run Now stays unavailable until all required
 				settings are valid and saved. Suggestions are not applied to a run until you save.
 			</p>
@@ -201,18 +203,23 @@ const props = defineProps({
 	config: { type: Object, default: () => ({}) }, // parsed installation config
 	// jarvis#1063 (jarvis-only half): the current agent's Jarvis Agent Listing
 	// config_keys (get_agent), already parsed to a plain array by the parent.
-	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - the scope fields
-	// (SCOPE_CONFIG_FIELDS) always render regardless.
+	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - each field matches its
+	// declared configKey or storage path. The universal SCOPE_CONFIG_FIELDS
+	// always render regardless.
 	configKeys: { type: Array, default: () => [] },
+	// The listing identity determines the one record-scoped field whose storage
+	// is a `{doctype, name}` object rather than a plain config value.
+	agentSlug: { type: String, default: "" },
 	validationErrors: { type: Object, default: () => ({}) },
 	saving: { type: Boolean, default: false },
 });
 
-// The agent-specific fields this agent's config_keys actually names, in
-// CONFIG_FIELD_SET's display order.
+// The agent-specific fields this agent's config_keys actually names (through
+// configKey or storage path), in CONFIG_FIELD_SET's display order.
 const agentSpecificFields = computed(() =>
 	AGENT_SPECIFIC_CONFIG_FIELDS.filter((f) =>
-		(f.paths || [f.path]).some((p) => props.configKeys.includes(p))
+		(!f.agentSlugs || f.agentSlugs.includes(props.agentSlug)) &&
+		(f.paths || [f.path]).some((p) => props.configKeys.includes(f.configKey || p))
 	)
 );
 // Scope fields first (always), then whichever agent-specific fields apply -
@@ -220,6 +227,10 @@ const agentSpecificFields = computed(() =>
 const operatorReview = computed(() => props.configKeys.includes("review_scope"));
 const arReview = computed(() => props.configKeys.includes("settlement_hold_days"));
 const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
+const slaBreachAgeingAuditor = computed(
+	() => props.agentSlug === "sla-breach-ageing-auditor"
+);
+const requiresSetup = computed(() => operatorReview.value || slaBreachAgeingAuditor.value);
 const defaultsData = ref(null);
 const defaultsLoading = ref(false);
 const defaultsMessage = ref("");
@@ -293,7 +304,16 @@ const shownErrors = computed(() =>
 	Object.fromEntries(
 		Object.entries(props.validationErrors || {}).filter(([key]) => {
 			if (!(key in form)) return true;
-			const saved = getPath(props.config || {}, KEY_TO_PATH[key] || key);
+			const path = KEY_TO_PATH[key] || key;
+			const field = visibleFields.value.find((entry) => (entry.keys || [entry.key]).includes(key));
+			const saved = getPath(props.config || {}, path);
+			if (field?.recordScopeDoctype) {
+				const savedName =
+					saved && saved.doctype === field.recordScopeDoctype && typeof saved.name === "string"
+						? saved.name
+						: "";
+				return String(form[key]) === savedName;
+			}
 			return String(form[key]) === String(saved == null ? "" : saved);
 		})
 	)
@@ -320,6 +340,7 @@ const form = reactive({
 	percentage: "",
 	engagement_risk_level: "",
 	rounding_step: "",
+	sla_team: "",
 });
 const advanced = ref("{}");
 const advancedError = ref("");
@@ -344,6 +365,17 @@ function seed(cfg) {
 			continue;
 		}
 		const path = KEY_TO_PATH[key] || key;
+		const field = visibleFields.value.find((entry) => (entry.keys || [entry.key]).includes(key));
+		if (field?.recordScopeDoctype) {
+			const record = getPath(c, path);
+			form[key] =
+				record &&
+				record.doctype === field.recordScopeDoctype &&
+				typeof record.name === "string"
+					? record.name
+					: "";
+			continue;
+		}
 		// jarvis#1063 CRITICAL fix: the nested path (e.g.
 		// "materiality.benchmark_value") is the source of truth. A flat
 		// top-level key of the same name (pre-nesting saves) is a MIGRATION
@@ -419,6 +451,7 @@ const linkFields = {
 	company: makeLinkField("Company"),
 	fiscal_year: makeLinkField("Fiscal Year"),
 	bank_account: makeLinkField("Bank Account"),
+	sla_team: makeLinkField("HD Team"),
 };
 watch([operatorReview, defaultsData], () => {
 	linkFields.fiscal_year.reprime();
@@ -555,10 +588,15 @@ function save() {
 	const merged = JSON.parse(JSON.stringify(base));
 	for (const key of visibleKeys.value) {
 		const path = KEY_TO_PATH[key] || key;
+		const field = visibleFields.value.find((entry) => (entry.keys || [entry.key]).includes(key));
 		const v = String(form[key] ?? "").trim();
 		if (path !== key) delete merged[key];
 		if (v === "") {
 			deletePath(merged, path);
+			continue;
+		}
+		if (field?.recordScopeDoctype) {
+			setPath(merged, path, { doctype: field.recordScopeDoctype, name: v });
 			continue;
 		}
 		if (NUMBER_CONFIG_KEYS.includes(key)) {

@@ -1252,6 +1252,16 @@ def _launch_audit(
 			).format(listing.status or "unknown")
 		)
 
+	# The SLA queue auditor has one mandatory, permission-bounded record
+	# boundary: an HD Team.  Validate it before the launch savepoint so a missing,
+	# malformed, or unreadable team cannot spend budget or create an orphan run.
+	# This runs under the eventual run-as identity on both manual and scheduled
+	# paths; the generic scope resolver later stamps the same boundary verbatim.
+	if listing.agent_slug == "sla-breach-ageing-auditor":
+		from jarvis.chat.sla_breach_ageing import assert_configuration
+
+		assert_configuration(inst)
+
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
 	# refuse every call the delegate makes — record_agent_run included — so the run

@@ -498,6 +498,8 @@ def get_agent(agent_slug: str) -> dict:
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 	from jarvis.chat.operator_review import backend
+	from jarvis.chat.sla_breach_ageing import AGENT as SLA_BREACH_AGENT
+	from jarvis.chat.sla_breach_ageing import configuration_issues as sla_configuration_issues
 
 	try:
 		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
@@ -616,6 +618,11 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif listing.agent_slug == SLA_BREACH_AGENT:
+			# The selected Helpdesk team is an explicit, permission-bounded launch
+			# boundary. Surface its saved-state issues so Run Now can fail closed in
+			# the UI; _launch_audit re-checks under the run-as identity.
+			i["configuration_issues"] = sla_configuration_issues(i.config or "{}")
 		out["installation"] = i
 
 	if is_sm and not _masked:
