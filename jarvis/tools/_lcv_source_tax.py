@@ -7,6 +7,7 @@ native Desk operations are outside this contract.
 """
 
 import copy
+import inspect
 import math
 from collections import defaultdict
 
@@ -365,20 +366,33 @@ def _classify(pi):
 	}
 
 
+def _submitted_claim_total(name, *, exclude_voucher=None, for_update=False):
+	"""Sum submitted native claim rows when the installed helper is incompatible."""
+	row = frappe.qb.DocType("Landed Cost Vendor Invoice")
+	query = frappe.qb.from_(row).select(row.amount).where((row.vendor_invoice == name) & (row.docstatus == 1))
+	if exclude_voucher:
+		query = query.where(row.parent != exclude_voucher)
+	if for_update:
+		query = query.for_update()
+	return sum(_amount(amount) for amount in query.run(pluck=True))
+
+
 def _claimed_landed_cost(name, *, exclude_voucher=None, for_update=False):
-	"""Older ERPNext 16 builds have the child table but no public sum helper."""
+	"""Use the native helper only when it keeps the write-lock contract."""
 	try:
 		from erpnext.stock.doctype.landed_cost_voucher.landed_cost_voucher import get_claimed_landed_cost
 	except ImportError:
-		row = frappe.qb.DocType("Landed Cost Vendor Invoice")
-		query = (
-			frappe.qb.from_(row).select(row.amount).where((row.vendor_invoice == name) & (row.docstatus == 1))
-		)
-		if exclude_voucher:
-			query = query.where(row.parent != exclude_voucher)
-		if for_update:
-			query = query.for_update()
-		return sum(_amount(amount) for amount in query.run(pluck=True))
+		return _submitted_claim_total(name, exclude_voucher=exclude_voucher, for_update=for_update)
+	try:
+		parameters = inspect.signature(get_claimed_landed_cost).parameters
+	except (TypeError, ValueError):
+		return _submitted_claim_total(name, exclude_voucher=exclude_voucher, for_update=for_update)
+	accepted = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+	if not all(
+		(parameter := parameters.get(keyword)) and parameter.kind in accepted
+		for keyword in ("exclude_voucher", "for_update")
+	):
+		return _submitted_claim_total(name, exclude_voucher=exclude_voucher, for_update=for_update)
 	return get_claimed_landed_cost(name, exclude_voucher=exclude_voucher, for_update=for_update)
 
 

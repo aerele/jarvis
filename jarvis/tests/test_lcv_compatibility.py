@@ -1,7 +1,8 @@
 """LCV claim ceilings and compatibility do not require India Compliance in CI."""
 
 import builtins
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import call, patch
 
 import frappe
 
@@ -13,6 +14,70 @@ NATIVE = "erpnext.stock.doctype.landed_cost_voucher.landed_cost_voucher"
 
 
 class TestLCVCompatibility(LandedCostFixtures):
+	def test_native_claim_helper_without_lock_keywords_uses_submitted_child_rows(self):
+		doc = build_doc("Landed Cost Voucher", self.values(amounts=[80]))
+		doc.name = "COMPAT-CURRENT"
+		parent = "COMPAT-PRIOR-" + frappe.generate_hash(length=12)
+		frappe.get_doc({"doctype": "Landed Cost Voucher", "name": parent, "docstatus": 1}).db_insert()
+		frappe.get_doc(
+			{
+				"doctype": "Landed Cost Vendor Invoice",
+				"name": frappe.generate_hash(length=12),
+				"parent": parent,
+				"parenttype": "Landed Cost Voucher",
+				"parentfield": "vendor_invoices",
+				"vendor_invoice": self.invoice.name,
+				"amount": 30,
+				"docstatus": 1,
+			}
+		).db_insert()
+		actual_import = builtins.__import__
+		calls = []
+
+		def old_helper(name, exclude_voucher=None):
+			calls.append((name, exclude_voucher))
+			return 0
+
+		def old_version(name, globals=None, locals=None, fromlist=(), level=0):
+			if name == NATIVE and "get_claimed_landed_cost" in fromlist:
+				return SimpleNamespace(get_claimed_landed_cost=old_helper)
+			return actual_import(name, globals, locals, fromlist, level)
+
+		with (
+			patch("builtins.__import__", side_effect=old_version),
+			patch.object(source, "_submitted_claim_total", wraps=source._submitted_claim_total) as fallback,
+		):
+			for lock in (False, True):
+				with self.subTest(lock=lock):
+					self.assertEqual(
+						source._claimed_landed_cost(self.invoice.name, exclude_voucher=doc.name, for_update=lock),
+						30,
+					)
+					self.assertEqual(calls, [])
+		self.assertEqual(
+			fallback.call_args_list,
+			[
+				call(self.invoice.name, exclude_voucher=doc.name, for_update=False),
+				call(self.invoice.name, exclude_voucher=doc.name, for_update=True),
+			],
+		)
+
+	def test_native_claim_helper_internal_type_error_propagates(self):
+		actual_import = builtins.__import__
+
+		def broken_helper(name, *, exclude_voucher=None, for_update=False):
+			raise TypeError("internal helper failure")
+
+		def current_version(name, globals=None, locals=None, fromlist=(), level=0):
+			if name == NATIVE and "get_claimed_landed_cost" in fromlist:
+				return SimpleNamespace(get_claimed_landed_cost=broken_helper)
+			return actual_import(name, globals, locals, fromlist, level)
+
+		with patch("builtins.__import__", side_effect=current_version), self.assertRaisesRegex(
+			TypeError, "internal helper failure"
+		):
+			source._claimed_landed_cost(self.invoice.name, for_update=True)
+
 	def test_missing_native_claim_helper_uses_submitted_child_rows(self):
 		doc = build_doc("Landed Cost Voucher", self.values(amounts=[80]))
 		doc.name = "COMPAT-CURRENT"
