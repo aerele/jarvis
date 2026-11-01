@@ -403,12 +403,9 @@ def _run_doc_method(method: str, doctype: str, name: str | int | None, args: dic
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"method {doctype}.{method} is not whitelisted") from e
 
-	# Native LCV helpers can read raw source money or mutate after this check.
-	# Use the dedicated preview/write tools. Keep cancellation available.
+	# Native LCV helpers can read raw source money or mutate. Use the dedicated
+	# preview/write tools instead. Keep cancellation available.
 	if doctype == "Landed Cost Voucher" and method != "cancel":
-		from jarvis.tools._lcv_source_tax import gate_lcv
-
-		gate_lcv(doc, lock=True)
 		raise PermissionDeniedError("Use the dedicated landed-cost preview and write tools for this voucher.")
 
 	# Arg-arity handling copied from frappe.handler.run_doc_method: `bound` is a

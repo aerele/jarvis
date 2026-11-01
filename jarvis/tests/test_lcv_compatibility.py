@@ -156,6 +156,25 @@ class TestLCVCompatibility(LandedCostFixtures):
 		self.assertNotIn("PRIVATE-TAX-VALUE", str(caught.exception))
 		self.assertNotIn("PRIVATE-TAX-VALUE", str(logger.mock_calls))
 
+	def test_classifier_input_gap_is_not_degraded(self):
+		doc = build_doc("Landed Cost Voucher", self.values())
+		gap = source.LCVSourceTaxNeedsInput(
+			[
+				{
+					"purchase_invoice": self.invoice.name,
+					"code": "source_too_large",
+					"message": "Narrow the withholding categories before reconciling tax.",
+				}
+			]
+		)
+		with (
+			patch.object(source, "_classify", side_effect=gap),
+			self.assertRaises(source.LCVSourceTaxNeedsInput) as caught,
+		):
+			source.gate_lcv(doc)
+		self.assertIs(caught.exception, gap)
+		self.assertEqual(caught.exception.assessment["issues"][0]["code"], "source_too_large")
+
 	def test_custom_rpc_save_uses_the_native_document_hook_and_scope_resets(self):
 		from jarvis.tools.run_method import run_method
 
@@ -204,12 +223,16 @@ class TestLCVCompatibility(LandedCostFixtures):
 		frappe.set_user("Administrator")
 		doc = frappe.get_doc({"doctype": "Landed Cost Voucher", **self.values()}).insert()
 		frappe.set_user(self.reader)
-		for method, args in [
-			("get_items_from_purchase_receipts", {}),
-			("get_vendor_invoice_amount", {"vendor_invoice": self.invoice.name}),
-		]:
-			with self.subTest(method=method), self.assertRaises(source.PermissionDeniedError):
-				run_method(method, args, doctype="Landed Cost Voucher", name=doc.name)
+		with patch.object(
+			source, "gate_lcv", side_effect=AssertionError("must not take source locks")
+		) as gate:
+			for method, args in [
+				("get_items_from_purchase_receipts", {}),
+				("get_vendor_invoice_amount", {"vendor_invoice": self.invoice.name}),
+			]:
+				with self.subTest(method=method), self.assertRaises(source.PermissionDeniedError):
+					run_method(method, args, doctype="Landed Cost Voucher", name=doc.name)
+		gate.assert_not_called()
 
 	def test_linked_ledger_adjustment_invalidates_original_posting_proof(self):
 		expected = {self.expense: self.invoice.base_net_total}
