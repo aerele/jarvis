@@ -568,24 +568,88 @@ describe("Payment Calendar state and async boundaries", () => {
 		expect(model.snapshot.value.scope.month).toBe("2026-12");
 		expect(model.error.value).toBeNull();
 	});
-	it("bounds worker-busy retries and keeps only nonfinancial layout after expiry", async () => {
+	it("retries a busy visible wall display slowly after expiry", async () => {
 		monthlyApi();
 		await model.initialize();
 		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
 		try {
 			api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
-			await model.browseMonth(1);
-			await vi.advanceTimersByTimeAsync(65000);
+			await vi.advanceTimersByTimeAsync(335000);
 			expect(model.refreshing.value).toBe(false);
 			expect(model.refreshIssue.value.code).toBe("worker_busy");
 			const count = api.requestSnapshot.mock.calls.length;
-			await vi.advanceTimersByTimeAsync(300000);
-			expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
 			expect(model.snapshot.value).toBeNull();
 			expect(model.loadingSnapshot.value.projection.book_cash).toBeNull();
 			expect(model.loadingSnapshot.value.projection.days).toEqual({});
+			await vi.advanceTimersByTimeAsync(50000);
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+			monthlyApi();
+			await vi.advanceTimersByTimeAsync(10000);
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count + 1);
+			expect(model.snapshot.value).not.toBeNull();
+			expect(model.phase.value).toBe("ready");
 		} finally {
 			clock.mockRestore();
+		}
+	});
+	it("does not restart a fast worker-busy loop after a slow retry", async () => {
+		monthlyApi();
+		await model.initialize();
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+		try {
+			api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+			await vi.advanceTimersByTimeAsync(335000);
+			const count = api.requestSnapshot.mock.calls.length;
+			await vi.advanceTimersByTimeAsync(60000);
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count + 1);
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count + 1);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("holds a slow worker-busy retry while hidden and resumes it once", async () => {
+		monthlyApi();
+		await model.initialize();
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+		const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+		try {
+			api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+			await vi.advanceTimersByTimeAsync(335000);
+			const count = api.requestSnapshot.mock.calls.length;
+			hidden.mockReturnValue(true);
+			await vi.advanceTimersByTimeAsync(65000);
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+			monthlyApi();
+			hidden.mockReturnValue(false);
+			document.dispatchEvent(new Event("visibilitychange"));
+			window.dispatchEvent(new Event("focus"));
+			await flushPromises();
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count + 1);
+			expect(model.snapshot.value).not.toBeNull();
+		} finally {
+			hidden.mockRestore();
+			clock.mockRestore();
+		}
+	});
+	it("holds a worker-busy backoff while hidden and resumes it once", async () => {
+		monthlyApi();
+		await model.initialize();
+		api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+		await model.browseMonth(1);
+		const count = api.requestSnapshot.mock.calls.length;
+		const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+		try {
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+			monthlyApi();
+			hidden.mockReturnValue(false);
+			document.dispatchEvent(new Event("visibilitychange"));
+			window.dispatchEvent(new Event("focus"));
+			await flushPromises();
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count + 1);
+		} finally {
+			hidden.mockRestore();
 		}
 	});
 	it("stops panel loading when a month selection exhausts worker-busy retries", async () => {
@@ -622,18 +686,15 @@ describe("Payment Calendar state and async boundaries", () => {
 		expect(model.phase.value).toBe("ready");
 		expect(model.notice.value).not.toContain("inactive");
 		scope.stop();
-		document.dispatchEvent(new Event("click"));
-		document.dispatchEvent(new Event("keydown"));
-		document.dispatchEvent(new Event("wheel"));
 		await vi.advanceTimersByTimeAsync(20 * 60000);
 		expect(api.requestSnapshot).toHaveBeenCalledTimes(requests);
 	});
-	it("keeps refreshing while the user interacts without duplicating accepted jobs", async () => {
+	it("keeps refreshing on focus without duplicating accepted jobs", async () => {
 		monthlyApi();
 		await model.initialize();
 		for (let i = 0; i < 5; i++) {
 			await vi.advanceTimersByTimeAsync(4 * 60000);
-			document.dispatchEvent(new Event(i % 2 ? "wheel" : "keydown"));
+			window.dispatchEvent(new Event("focus"));
 			await flushPromises();
 		}
 		expect(api.requestSnapshot.mock.calls.length).toBeGreaterThan(4);
@@ -642,8 +703,7 @@ describe("Payment Calendar state and async boundaries", () => {
 		const pending = model.refresh({ automatic: true, background: true });
 		await flushPromises();
 		const count = api.requestSnapshot.mock.calls.length;
-		document.dispatchEvent(new Event("click"));
-		document.dispatchEvent(new Event("keydown"));
+		window.dispatchEvent(new Event("focus"));
 		await flushPromises();
 		expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
 		const fresh = complete();
@@ -655,24 +715,56 @@ describe("Payment Calendar state and async boundaries", () => {
 	it("cancels worker-busy retries when the page is disposed", async () => {
 		monthlyApi();
 		await model.initialize();
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
 		api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
-		await model.browseMonth(1);
-		const count = api.requestSnapshot.mock.calls.length;
-		scope.stop();
-		await vi.advanceTimersByTimeAsync(20000);
-		expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
-		expect(model.loadingSnapshot.value).toBeNull();
+		try {
+			await model.browseMonth(1);
+			await vi.advanceTimersByTimeAsync(65000);
+			const count = api.requestSnapshot.mock.calls.length;
+			scope.stop();
+			await vi.advanceTimersByTimeAsync(65000);
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+			expect(model.loadingSnapshot.value).toBeNull();
+		} finally {
+			clock.mockRestore();
+		}
 	});
 	it("drops worker-busy retries and old layout when company changes", async () => {
 		await model.initialize();
-		api.requestSnapshot.mockResolvedValueOnce(refusal("worker_busy"));
-		await model.refresh({ background: true });
-		await model.chooseCompany("Services");
-		const count = api.requestSnapshot.mock.calls.length;
-		await vi.advanceTimersByTimeAsync(2000);
-		expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
-		expect(model.snapshot.value.scope.company).toBe("Services");
-		expect(model.loadingSnapshot.value).toBeNull();
+		const requestSnapshot = api.requestSnapshot.getMockImplementation();
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+		api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+		try {
+			await model.refresh({ background: true });
+			await vi.advanceTimersByTimeAsync(65000);
+			api.requestSnapshot.mockImplementation(requestSnapshot);
+			await model.chooseCompany("Services");
+			const count = api.requestSnapshot.mock.calls.length;
+			await vi.advanceTimersByTimeAsync(65000);
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+			expect(model.snapshot.value.scope.company).toBe("Services");
+			expect(model.loadingSnapshot.value).toBeNull();
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("drops a slow worker-busy retry when the account selection changes", async () => {
+		await model.initialize();
+		const requestSnapshot = api.requestSnapshot.getMockImplementation();
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+		api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+		try {
+			await model.refresh({ background: true });
+			await vi.advanceTimersByTimeAsync(65000);
+			api.requestSnapshot.mockImplementation(requestSnapshot);
+			await model.setAccounts([]);
+			const count = api.requestSnapshot.mock.calls.length;
+			await vi.advanceTimersByTimeAsync(65000);
+			expect(api.requestSnapshot).toHaveBeenCalledTimes(count);
+			expect(model.snapshot.value.scope.accounts).toEqual([]);
+		} finally {
+			clock.mockRestore();
+		}
 	});
 	it("removes the loading frame as soon as a busy retry reports revoked access", async () => {
 		await model.initialize();
