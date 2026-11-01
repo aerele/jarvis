@@ -226,7 +226,7 @@ async function mountBoard(query = {}, params = {}) {
 	return w;
 }
 
-const rail = (w) => w.find(".w-\\[360px\\]");
+const rail = (w) => w.find('[data-testid="approvals-rail"]');
 const group = (w) => w.find('[aria-labelledby="actions-title"]');
 const actionRow = (w, text) =>
 	group(w)
@@ -282,6 +282,27 @@ describe("ApprovalsBoard one inbox", () => {
 		const w = await board();
 		expect(w.element.children).toHaveLength(3);
 		expect(w.element.children[2].contains(group(w).element)).toBe(true);
+	});
+
+	it("stacks the rail before the detail below lg and restores the desktop split", async () => {
+		const w = await board();
+		const split = w.get('[data-testid="approvals-split-view"]');
+		expect(split.classes()).toContain("flex-col");
+		expect(split.classes()).toContain("lg:flex-row");
+		expect(rail(w).classes()).toEqual(
+			expect.arrayContaining([
+				"w-full",
+				"max-h-[40vh]",
+				"border-b",
+				"lg:w-[360px]",
+				"lg:max-h-none",
+				"lg:border-b-0",
+				"lg:border-r",
+			]),
+		);
+		expect(pane(w).classes()).toEqual(
+			expect.arrayContaining(["min-h-0", "min-w-0", "flex-1", "overflow-y-auto"]),
+		);
 	});
 
 	it("re-reads both lists when the sidebar badge moves (#616)", async () => {

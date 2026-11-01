@@ -45,11 +45,16 @@
 			/>
 		</div>
 
-		<div class="flex min-h-0 flex-1">
+		<!-- Stack the rail above the detail pane below lg. A fixed 360px rail in
+		     the horizontal split leaves no usable SheetDetail width on a phone. -->
+		<div data-testid="approvals-split-view" class="flex min-h-0 flex-1 flex-col lg:flex-row">
 			<!-- LEFT rail: inbox-style rows on a standing gray-1 surface so the
 			     selected row's white chip + shadow reads in light mode (CRM
 			     sidebar pattern; dark gray-1 ≠ surface-selected per §2.5) -->
-			<div class="w-[360px] shrink-0 overflow-y-auto border-r bg-surface-gray-1">
+			<div
+				data-testid="approvals-rail"
+				class="max-h-[40vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
+			>
 				<!-- "Waiting for your reply" strip (notify-approvals Part 3): prose
 				     questions the agent asked in chat — derived server-side
 				     (envelope.awaiting_reply, page 1 only), no approval row behind
@@ -367,10 +372,10 @@
 			</div>
 
 			<!-- RIGHT pane: review + act on the selected approval -->
-			<div class="flex-1 overflow-y-auto">
+			<div class="min-h-0 min-w-0 flex-1 overflow-y-auto">
 				<!-- a held write / chat card / wiki note: its own detail, keyed so every
 				     selection mounts (and loads) a fresh one -->
-				<div v-if="selectedKey" class="mx-auto w-full max-w-3xl px-8 py-6">
+				<div v-if="selectedKey" class="mx-auto w-full max-w-3xl px-4 py-6 sm:px-8">
 					<div class="flex items-center gap-3">
 						<h1 class="min-w-0 flex-1 truncate text-xl font-semibold text-ink-gray-9">
 							{{ selectedAction ? selectedAction.title : KIND_LABEL[selectedKind] }}
@@ -453,7 +458,7 @@
 				<div v-else-if="!selected" class="flex h-full items-center justify-center">
 					<JvSpinner />
 				</div>
-				<div v-else class="mx-auto w-full max-w-3xl px-8 py-6">
+				<div v-else class="mx-auto w-full max-w-3xl px-4 py-6 sm:px-8">
 					<!-- 1. title row -->
 					<div class="flex items-center gap-3">
 						<h1 class="min-w-0 flex-1 truncate text-xl font-semibold text-ink-gray-9">
