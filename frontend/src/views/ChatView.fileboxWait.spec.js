@@ -31,7 +31,7 @@ function harness() {
 	};
 	const decideFileboxWait = new Function(
 		...Object.keys(state),
-		body + "\nreturn decideFileboxWait;",
+		body + "\nreturn decideFileboxWait;"
 	)(...Object.values(state));
 	return { ...state, decideFileboxWait };
 }
@@ -48,7 +48,7 @@ describe("File Box wait decisions", () => {
 			"Answer sent. Jarvis carries on with this file.",
 			{
 				type: "success",
-			},
+			}
 		);
 		expect(h.store.refreshApprovalsCount).toHaveBeenCalled();
 		expect(h.loadConversation).toHaveBeenCalledWith("CONV-1");
