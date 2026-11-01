@@ -70,7 +70,7 @@ def _plan_evidence(approval) -> dict | None:
 
 
 def _has_native_plan_read(approval, evidence: dict, user: str) -> bool:
-	"""Require current native Warehouse and Item read for a sealed plan.
+	"""Require current Warehouse, Item, and Bin read for a sealed plan.
 
 	The plan embeds current book quantities and stock identifiers.  An approval
 	share is deliberately not a substitute for the ordinary stock-record read
@@ -79,6 +79,11 @@ def _has_native_plan_read(approval, evidence: dict, user: str) -> bool:
 	"""
 	warehouse = approval.get("ref_name")
 	if not frappe.has_permission(WAREHOUSE, "read", doc=warehouse, user=user):
+		return False
+	# The sealed approval context includes each line's current quantity and
+	# value. Both come from Bin rows, so Warehouse and Item access alone is not
+	# enough to disclose the plan.
+	if not frappe.has_permission("Bin", "read", user=user):
 		return False
 	proposal = evidence["finding"]["proposal"]
 	lines = proposal.get("lines")
@@ -99,9 +104,9 @@ def may_read_count_plan(approval, user: str | None = None, *, lock_share: bool =
 	"""Return whether ``user`` may read a full Cycle-Count plan.
 
 	A plan boundary (conversation owner, sealed reviewer, or exact approval
-	DocShare) grants *plan membership* only.  Native Warehouse and Item read is
-	required as a second boundary for every detail, approval context, and stored
-	physical-count fact.  Administrator remains the framework superuser path.
+	DocShare) grants *plan membership* only. Native Warehouse, Item, and Bin read
+	is required as a second boundary for every detail, approval context, and
+	stored physical-count fact. Administrator remains the framework superuser path.
 	"""
 	user = user or frappe.session.user
 	if not isinstance(user, str) or not user:

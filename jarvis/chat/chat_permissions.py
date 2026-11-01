@@ -200,8 +200,8 @@ def has_session_permission(doc, ptype: str = "read", user: str | None = None) ->
 def approval_query_conditions(user: str | None = None) -> str:
 	"""Scope Jarvis Approval Request queries exactly like ``approvals_api``'s
 	list: the caller owns the linked conversation, OR holds a DocShare read grant
-	on the approval (tagging).  Cycle-Count plans additionally require native
-	Warehouse and Item read because their review context carries stock data.
+	on the approval (tagging). Cycle-Count plans additionally require native
+	Warehouse, Item, and Bin read because their review context carries stock data.
 	System Manager remains subject to that extra count-plan gate; Administrator
 	is the framework superuser exception."""
 	user = user or frappe.session.user

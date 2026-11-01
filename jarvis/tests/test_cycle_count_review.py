@@ -3168,7 +3168,7 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		)
 		frappe.set_user("Administrator")
 
-	def test_native_stock_read_is_required_even_for_a_system_manager(self):
+	def test_all_native_stock_reads_are_required_even_for_a_system_manager(self):
 		"""A sealed-plan member never gets stock details from an approval role alone."""
 		from jarvis.chat import approvals_api, chat_permissions, cycle_count_entry
 
@@ -3192,48 +3192,53 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 
 		real_has_permission = frappe.has_permission
 
-		def no_native_stock_read(doctype, ptype="read", *args, **kwargs):
-			if doctype in {"Warehouse", "Item"} and ptype in {"read", "select"}:
-				return False
-			return real_has_permission(doctype, ptype, *args, **kwargs)
-
 		frappe.set_user(manager)
 		try:
-			with patch("jarvis.chat.cycle_count_permissions.frappe.has_permission", side_effect=no_native_stock_read):
-				self.assertEqual(cycle_count_entry.list_count_plans()["rows"], [])
-				self.assertFalse(cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name)))
-				with self.assertRaises(frappe.PermissionError):
-					cycle_count_entry.get_count_plan(approved.name)
-				self.assertFalse(chat_permissions.has_approval_permission(approved, "read", manager))
-				self.assertEqual(
-					frappe.get_list(
-						"Jarvis Approval Request",
-						filters={"name": approved.name},
-						fields=["name", "context_md"],
-					),
-					[],
-				)
-				self.assertFalse(
-					any(row["name"] == approved.name for row in approvals_api.list_approvals(status="All"))
-				)
-				page = approvals_api.list_approvals_page(
-					filters={"conversation": approved.conversation}, page_length=20
-				)
-				self.assertEqual((page["rows"], page["total"]), ([], 0))
-				with self.assertRaises(frappe.PermissionError):
-					approvals_api.get_approval(approved.name)
-				self._assert_physical_count_readable(
-					manager,
-					fact_name,
-					False,
-					"a System Manager without native stock reads cannot see a count header",
-				)
-				self._assert_physical_count_items_readable(
-					manager,
-					fact_name,
-					False,
-					"a System Manager without native stock reads cannot see count items",
-				)
+			for denied_doctypes, label in (({"Warehouse", "Item"}, "Warehouse or Item"), ({"Bin"}, "Bin")):
+				with self.subTest(missing=label):
+					def no_native_stock_read(doctype, ptype="read", *args, **kwargs):
+						if doctype in denied_doctypes and ptype in {"read", "select"}:
+							return False
+						return real_has_permission(doctype, ptype, *args, **kwargs)
+
+					with patch(
+						"jarvis.chat.cycle_count_permissions.frappe.has_permission",
+						side_effect=no_native_stock_read,
+					):
+						self.assertEqual(cycle_count_entry.list_count_plans()["rows"], [])
+						self.assertFalse(cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name)))
+						with self.assertRaises(frappe.PermissionError):
+							cycle_count_entry.get_count_plan(approved.name)
+						self.assertFalse(chat_permissions.has_approval_permission(approved, "read", manager))
+						self.assertEqual(
+							frappe.get_list(
+								"Jarvis Approval Request",
+								filters={"name": approved.name},
+								fields=["name", "context_md"],
+							),
+							[],
+						)
+						self.assertFalse(
+							any(row["name"] == approved.name for row in approvals_api.list_approvals(status="All"))
+						)
+						page = approvals_api.list_approvals_page(
+							filters={"conversation": approved.conversation}, page_length=20
+						)
+						self.assertEqual((page["rows"], page["total"]), ([], 0))
+						with self.assertRaises(frappe.PermissionError):
+							approvals_api.get_approval(approved.name)
+						self._assert_physical_count_readable(
+							manager,
+							fact_name,
+							False,
+							f"a System Manager without {label} read cannot see a count header",
+						)
+						self._assert_physical_count_items_readable(
+							manager,
+							fact_name,
+							False,
+							f"a System Manager without {label} read cannot see count items",
+						)
 		finally:
 			frappe.set_user("Administrator")
 

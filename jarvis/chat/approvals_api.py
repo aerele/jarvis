@@ -160,7 +160,7 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 	"""Approvals visible to the current user (owner of the linked
 	conversation, or any System Manager).
 
-	Cycle-Count plans also require current native Warehouse and Item read. Keep
+	Cycle-Count plans also require current native Warehouse, Item, and Bin read. Keep
 	that filter in SQL, before the legacy endpoint's limit, so inaccessible plans
 	cannot consume an otherwise visible page.
 	"""
@@ -373,7 +373,7 @@ def list_approvals_page(
 		base.append(IfNull(a.sheet, "") == "")  # answered in its File Box sheet
 	# The Approval Board uses query-builder reads and so does not pass through
 	# the DocType list hook. Bind Cycle-Count rows to the same native
-	# Warehouse/Item access set. A sealed reviewer is a valid Cycle-Count reader
+	# Warehouse/Item/Bin access set. A sealed reviewer is a valid Cycle-Count reader
 	# even if no current DocShare remains; keep that exception within this set.
 	if me != "Administrator":
 		from jarvis.chat.cycle_count_permissions import CYCLE_COUNT_PLANNER, visible_count_plan_approval_names
