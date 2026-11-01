@@ -133,8 +133,7 @@ def _conversation_search_index_setter_rows(fields: list[str]) -> list[frappe._di
 
 def _conversation_search_index_setter_snapshots() -> list[dict]:
 	return [
-		{"doctype": "Property Setter", **dict(row)}
-		for row in _conversation_search_index_setter_rows(["*"])
+		{"doctype": "Property Setter", **dict(row)} for row in _conversation_search_index_setter_rows(["*"])
 	]
 
 
@@ -153,9 +152,7 @@ def _restore_conversation_state(setter_snapshots: list[dict], index_columns: lis
 		_drop_index(*CONVERSATION_INDEX[:2])
 		if index_columns:
 			with patch.dict(frappe.flags, in_migrate=True):
-				frappe.db.add_index(
-					CONVERSATION_INDEX[0], index_columns, index_name=CONVERSATION_INDEX[1]
-				)
+				frappe.db.add_index(CONVERSATION_INDEX[0], index_columns, index_name=CONVERSATION_INDEX[1])
 
 	frappe.clear_cache(doctype=conversation_patch.DOCTYPE)
 	frappe.db.commit()

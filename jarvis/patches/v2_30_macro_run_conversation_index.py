@@ -3,7 +3,6 @@
 import frappe
 from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 
-
 DOCTYPE = "Jarvis Macro Run"
 FIELDNAME = "conversation"
 INDEX_FIELDS = ["conversation"]
