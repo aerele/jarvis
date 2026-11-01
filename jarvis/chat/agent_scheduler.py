@@ -1602,8 +1602,11 @@ def _stamp_scope_and_watermark(
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
 
-	All best-effort: a bench without a resolvable Company (e.g. no erpnext setup)
-	must NOT abort the launch — it degrades to an unscoped run (no watermark). The
+	Most scope resolution is best-effort: a bench without a resolvable Company
+	(e.g. no erpnext setup) degrades to an unscoped run (no watermark). Attendance
+	is different: its declared Department is a binding data boundary. If the
+	server cannot validate it as the run-as user, the launch must refuse before
+	dispatch instead of silently widening or producing an unusable run. The
 	watermark + scope are resolved AS the run-as user (this runs under that
 	session). Returns the resolved scope dict (or None).
 
@@ -1630,6 +1633,12 @@ def _stamp_scope_and_watermark(
 	try:
 		scope = agent_scope.resolve_scope(inst)
 	except Exception:
+		if agent_scope.requires_bound_scope(inst):
+			frappe.log_error(
+				title="jarvis agent: Attendance scope resolution refused launch",
+				message=frappe.get_traceback(),
+			)
+			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
@@ -1752,6 +1761,16 @@ def _audit_prompt(
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
 		)
+	if scope:
+		# A narrow auditor may carry one server-validated root in addition to
+		# its normal company/date scope. It is not copied from installation
+		# configuration: only the exact, already-validated two-field scope stamp
+		# reaches the delegate.
+		from jarvis.chat.agent_scope import attendance_record_scope
+
+		record_scope = attendance_record_scope(scope.get("record_scope"))
+		if record_scope is not None:
+			scope_block += f" record_scope={json.dumps(record_scope, sort_keys=True)}."
 	# EXPLICIT CONFIG: ``_launch_audit`` resolves declared/derived values ONCE and
 	# stamps them on the Run before dispatch.  This function receives that exact
 	# snapshot; it deliberately does not re-read the mutable installation here.
