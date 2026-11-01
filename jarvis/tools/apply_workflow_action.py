@@ -114,13 +114,6 @@ def _lcv_tax_gate(doc, action):
 	if doc.doctype != "Landed Cost Voucher" or doc.docstatus != 0:
 		return
 	doc.check_permission("read")
-	# apply_workflow reloads its target. Keep that reload bound to the document
-	# checked here, including on READ COMMITTED connections.
-	modified = frappe.db.get_value(doc.doctype, doc.name, "modified", for_update=True)
-	if str(modified) != str(doc.modified):
-		raise frappe.TimestampMismatchError(
-			"The LCV changed. Reload it before applying this workflow action."
-		)
 	workflow = get_workflow(doc.doctype)
 	transition = next((t for t in get_transitions(doc, workflow) if t.action == action), None)
 	if not transition or not any(
@@ -133,4 +126,12 @@ def _lcv_tax_gate(doc, action):
 		)
 	from jarvis.tools._lcv_source_tax import gate_lcv
 
+	# Match create/update: retain source PI locks before the LCV row lock.
 	gate_lcv(doc, lock=True)
+	# apply_workflow reloads its target. Keep that reload bound to the document
+	# checked here, including on READ COMMITTED connections.
+	modified = frappe.db.get_value(doc.doctype, doc.name, "modified", for_update=True)
+	if str(modified) != str(doc.modified):
+		raise frappe.TimestampMismatchError(
+			"The LCV changed. Reload it before applying this workflow action."
+		)
