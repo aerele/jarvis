@@ -51,17 +51,7 @@ def _may_view_plan_count(doc, user: str) -> bool:
 		return True
 	if _reviewer(approval) == user:
 		return True
-	return bool(
-		frappe.db.exists(
-			"DocShare",
-			{
-				"share_doctype": APPROVAL,
-				"share_name": approval.name,
-				"user": user,
-				"read": 1,
-			},
-		)
-	)
+	return False
 
 
 def _iso_date(value) -> date | None:
@@ -284,13 +274,11 @@ def _may_view_count(doc, user: str) -> bool:
 
 
 def _plan_query_condition(user: str) -> str:
-	"""The plan-owner, reviewer, and approval-share list predicate."""
+	"""The plan-owner and sealed-reviewer list predicate."""
 	escaped = frappe.db.escape(user)
 	count_table = f"{SQL_QUOTE}tab{COUNT}{SQL_QUOTE}"
 	approval_table = f"{SQL_QUOTE}tab{APPROVAL}{SQL_QUOTE}"
 	conversation_table = f"{SQL_QUOTE}tab{CONVERSATION}{SQL_QUOTE}"
-	share_table = f"{SQL_QUOTE}tabDocShare{SQL_QUOTE}"
-	read_field = f"{SQL_QUOTE}read{SQL_QUOTE}"
 	approval_field = f"{SQL_QUOTE}approval_request{SQL_QUOTE}"
 	return (
 		f"exists (select 1 from {approval_table} approval "
@@ -298,10 +286,6 @@ def _plan_query_condition(user: str) -> str:
 		"on conversation.name = approval.conversation "
 		f"where approval.name = {count_table}.{approval_field} and ("
 		f"conversation.owner = {escaped} "
-		f"or exists (select 1 from {share_table} share_row "
-		f"where share_row.share_doctype = '{APPROVAL}' "
-		"and share_row.share_name = approval.name "
-		f"and share_row.user = {escaped} and share_row.{read_field} = 1) "
 		f"or JSON_UNQUOTE(JSON_EXTRACT(approval.assessment_evidence, '$.reviewer')) = {escaped}"
 		"))"
 	)

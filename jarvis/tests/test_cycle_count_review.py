@@ -1,6 +1,7 @@
 """Cycle-Count Planner custody and output regressions."""
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -259,6 +260,130 @@ class TestCycleCountPrivateTool(FrappeTestCase):
 				tool.get_cycle_count_inputs()
 		self.assertIn("get_cycle_count_inputs", registry._TOOL_NAMES)
 		self.assertIn("get_cycle_count_inputs", _private_output.TOOLS)
+
+	def test_normal_mode_refuses_before_source_collection(self):
+		from jarvis.exceptions import InvalidArgumentError
+		from jarvis.tools import _private_output
+		from jarvis.tools import get_cycle_count_inputs as tool
+
+		with _private_output.request(False), patch.object(tool.cycle_count_review, "get_inputs") as collect:
+			with self.assertRaises(InvalidArgumentError):
+				tool.get_cycle_count_inputs()
+			collect.assert_not_called()
+
+
+class TestCycleCountPrivateDispatch(FrappeTestCase):
+	"""Exercise the real Cycle source tool through the bound delegate path."""
+
+	def setUp(self):
+		from jarvis.tests.test_platform_capability_contract import _mk_listing, _mk_run, _mk_user, _snapshot
+
+		frappe.set_user("Administrator")
+		self.slug = "cycle-private-" + frappe.generate_hash(length=10)
+		self.key = f"agent:agent-{self.slug}:fake-test"
+		self.actor = _mk_user(self.slug + "@example.invalid", roles=("System Manager", "Jarvis User"))
+		_mk_listing(self.slug, "Operator", [])
+		self.run = _mk_run(
+			self.slug,
+			self.actor,
+			self.key,
+			_snapshot(["jarvis__get_cycle_count_inputs"], "operator", []),
+		)
+		self.conv = frappe.get_doc(
+			{"doctype": "Jarvis Conversation", "title": "Cycle private output", "session_key": self.key}
+		).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{"doctype": "Jarvis Chat Session", "session_key": self.key, "user": self.actor}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- private receipt uses a separate transaction
+
+	def tearDown(self):
+		from jarvis.tools import _agent_run_ctx
+
+		frappe.set_user("Administrator")
+		_agent_run_ctx.clear_session_key()
+		for doctype in ("Jarvis Agent Run Step", "Jarvis Agent Activity"):
+			field = "run" if doctype == "Jarvis Agent Run Step" else "agent"
+			if frappe.db.exists("DocType", doctype):
+				frappe.db.delete(doctype, {field: self.run if field == "run" else self.slug})
+		frappe.db.delete("Jarvis Chat Message", {"conversation": self.conv.name})
+		frappe.delete_doc("Jarvis Conversation", self.conv.name, force=True, ignore_permissions=True)
+		frappe.db.delete("Jarvis Chat Session", {"session_key": self.key})
+		for doctype in ("Jarvis Agent Run", "Jarvis Agent Installation"):
+			for name in frappe.get_all(doctype, {"agent": self.slug}, pluck="name"):
+				frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+		frappe.delete_doc("Jarvis Agent Listing", self.slug, force=True, ignore_permissions=True)
+		frappe.delete_doc("User", self.actor, force=True, ignore_permissions=True)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- remove committed test fixtures
+
+	def test_normal_and_malformed_modes_refuse_before_collection(self):
+		from jarvis import api
+		from jarvis.tools import _private_output
+
+		with patch("jarvis.chat.cycle_count_review.get_inputs") as collect:
+			normal = api._dispatch_from_session(
+				self.actor, self.key, "get_cycle_count_inputs", {}, result_mode=None
+			)
+			malformed = api._dispatch_from_session(
+				self.actor,
+				self.key,
+				"get_cycle_count_inputs",
+				{"company": "model-selected"},
+				result_mode=_private_output.MODE,
+			)
+		self.assertFalse(normal["ok"], normal)
+		self.assertFalse(malformed["ok"], malformed)
+		collect.assert_not_called()
+
+	def test_shared_session_refuses_before_cycle_source_collection(self):
+		from jarvis import api
+		from jarvis.tools import _private_output
+
+		headers = {"X-Jarvis-Token": "test-token"}
+		with (
+			patch("jarvis.api._get_header", side_effect=headers.get),
+			patch("jarvis.api.validate_plugin_request", return_value=self.key),
+			patch("jarvis.chat.collaboration.is_collaborative_session", return_value=True),
+			patch(
+				"jarvis.chat.collaboration.resolve_binding", return_value=SimpleNamespace(actor=self.actor)
+			),
+			patch("jarvis.chat.collaboration_dispatch.dispatch") as dispatch,
+			patch("jarvis.chat.cycle_count_review.get_inputs") as collect,
+		):
+			result = api.call_tool("get_cycle_count_inputs", {}, result_mode=_private_output.MODE)
+		self.assertFalse(result["ok"], result)
+		dispatch.assert_not_called()
+		collect.assert_not_called()
+
+	def test_private_source_uses_server_canonical_bytes_and_safe_receipt(self):
+		import hashlib
+		import json
+
+		from jarvis import api
+		from jarvis.tools import _private_output
+
+		snapshot = {
+			"z_key": "CYCLE-RAW-SOURCE-MARKER",
+			"source_digest": "a" * 64,
+			"a_key": "first",
+		}
+		expected = json.dumps(
+			{"rows": [snapshot]}, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True
+		).encode()
+		with patch("jarvis.chat.cycle_count_review.get_inputs", return_value=snapshot):
+			result = api._dispatch_from_session(
+				self.actor,
+				self.key,
+				"get_cycle_count_inputs",
+				{},
+				result_mode=_private_output.MODE,
+			)
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(result["data"].encode(), expected)
+		self.assertEqual(result["private_output"]["bytes"], len(expected))
+		self.assertEqual(result["private_output"]["sha256"], hashlib.sha256(expected).hexdigest())
+		message = frappe.get_last_doc("Jarvis Chat Message", {"conversation": self.conv.name})
+		self.assertNotIn("CYCLE-RAW-SOURCE-MARKER", message.tool_result)
 
 
 class TestNativePhysicalCountEntry(FrappeTestCase):
@@ -539,10 +664,15 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		before_sle = frappe.db.count(
 			"Stock Ledger Entry", {"warehouse": self.warehouse, "item_code": self.item}
 		)
+		before_reconciliation = frappe.db.count("Stock Reconciliation", {"company": self.company})
 		entry_key = "cyclecount" + frappe.generate_hash(length=24)
 		counted_at = frappe.utils.now()
 		frappe.set_user(self.counter)
 		try:
+			self.assertTrue(frappe.has_permission("Jarvis Physical Count", "create"))
+			self.assertTrue(frappe.has_permission("Jarvis Physical Count", "submit"))
+			self.assertTrue(frappe.has_permission("Warehouse", "read", doc=self.warehouse))
+			self.assertTrue(frappe.has_permission("Item", "read", doc=self.item))
 			with self.assertRaisesRegex(frappe.ValidationError, "still pending"):
 				cycle_count_entry.record_counts(
 					approved.name,
@@ -591,9 +721,13 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			before_sle,
 			frappe.db.count("Stock Ledger Entry", {"warehouse": self.warehouse, "item_code": self.item}),
 		)
+		self.assertEqual(
+			before_reconciliation,
+			frappe.db.count("Stock Reconciliation", {"company": self.company}),
+		)
 
 	def test_physical_count_visibility_follows_the_approved_plan(self):
-		"""Same-role users cannot list or directly read another plan's fact."""
+		"""Only the conversation owner and stamped reviewer can use a count plan."""
 		from jarvis.chat import cycle_count_entry
 
 		viewer = self._user("cycle-plan-viewer@example.invalid", ("Jarvis User", "Stock User"))
@@ -622,8 +756,15 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		finally:
 			frappe.set_user("Administrator")
 
-		for allowed in (self.counter, self.reviewer, viewer):
+		for allowed in (self.counter, self.reviewer):
 			frappe.set_user(allowed)
+			self.assertIn(
+				approved.name,
+				[row["request"] for row in cycle_count_entry.list_count_plans()["rows"]],
+				allowed,
+			)
+			self.assertEqual(cycle_count_entry.get_count_plan(approved.name)["request"], approved.name)
+			self.assertTrue(cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name)))
 			self.assertEqual(
 				frappe.get_list("Jarvis Physical Count", filters={"name": fact_name}, pluck="name"),
 				[fact_name],
@@ -632,8 +773,27 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			self.assertTrue(
 				frappe.has_permission("Jarvis Physical Count", "read", doc=fact_name, user=allowed), allowed
 			)
+			self._assert_physical_count_items_readable(
+				allowed,
+				fact_name,
+				True,
+				f"{allowed} can read physical-count items through the approved plan",
+			)
 
-		for denied in (outsider, manager):
+		frappe.set_user(viewer)
+		self.assertEqual(cycle_count_entry.list_count_plans()["rows"], [])
+		self.assertFalse(cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name)))
+		with self.assertRaises(frappe.PermissionError):
+			cycle_count_entry.get_count_plan(approved.name)
+		with self.assertRaises(frappe.PermissionError):
+			cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)
+
+		for denied in (viewer, outsider, manager):
 			frappe.set_user(denied)
 			self.assertEqual(
 				frappe.get_list("Jarvis Physical Count", filters={"name": fact_name}, pluck="name"),
@@ -642,6 +802,12 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			)
 			self.assertFalse(
 				frappe.has_permission("Jarvis Physical Count", "read", doc=fact_name, user=denied), denied
+			)
+			self._assert_physical_count_items_readable(
+				denied,
+				fact_name,
+				False,
+				f"{denied} cannot read physical-count items outside the approved plan",
 			)
 		frappe.set_user("Administrator")
 
