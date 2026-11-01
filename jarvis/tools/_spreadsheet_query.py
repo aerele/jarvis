@@ -473,7 +473,7 @@ def query_loaded(
 			raise InvalidArgumentError(
 				"Query exceeded the operation budget. Simplify joins or filters; no complete result was returned."
 			) from None
-		# SQLite errors may quote query/source names; they go to the caller, never logs.
+		# SQLite errors may quote source values; return a fixed diagnostic only.
 		raise InvalidArgumentError(
 			f"{source_label} SELECT failed. Check the inspected table/column names and SQL syntax. "
 			"Only loaded tables and allowed read functions are available."
