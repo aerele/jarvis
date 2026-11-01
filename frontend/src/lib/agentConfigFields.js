@@ -32,6 +32,7 @@
  * Shapes:
  *   - {key, path, label, type: "link", linkDoctype, help, scope?}
  *   - {keys: [from, to], paths: [from, to], labels: [from, to], type: "date-range", help, scope?}
+ *   - {key, path, label, type: "text", help, maxLength?}
  *   - {key, path, label, type: "number", help, suffix?}
  *   - {key, path, label, type: "select", options: [{label, value}, ...]}
  */
@@ -170,13 +171,15 @@ export const CONFIG_FIELD_SET = [
 		path: "grn_hygiene.reviewer",
 		label: "Receiving reviewer",
 		type: "text",
-		help: "Required. Name the person who reviews receiving results (up to 140 characters).",
+		maxLength: 140,
+		help: "Required before a run. You can save this blank while you finish setup. Name the person who reviews receiving results (up to 140 characters).",
 	},
 	{
 		key: "grn_hygiene_test_declaration",
 		path: "grn_hygiene.test_declaration",
 		label: "Test declaration",
 		type: "text",
+		maxLength: 500,
 		help: "Optional plain-text notice for a test review (up to 500 characters).",
 	},
 	{
@@ -232,6 +235,13 @@ export const CONFIG_FIELD_LABELS = Object.fromEntries(
  * plain string, cleared to absent when blank). */
 export const NUMBER_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "number").map(
 	(f) => f.key
+);
+
+/** Local form key -> its maximum permitted saved text length. This is derived
+ * from the field declaration so the input limit and save-time validation stay
+ * aligned. */
+export const CONFIG_FIELD_MAX_LENGTHS = Object.fromEntries(
+	CONFIG_FIELD_SET.filter((f) => Number.isInteger(f.maxLength)).map((f) => [f.key, f.maxLength])
 );
 
 /** local form key -> its storage dot path ("company" flat, or

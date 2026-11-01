@@ -67,7 +67,7 @@ vi.mock("frappe-ui", () => ({
 	},
 	FormControl: {
 		name: "FormControl",
-		props: ["modelValue", "type", "label", "options", "description"],
+		props: ["modelValue", "type", "label", "options", "description", "maxlength"],
 		emits: ["update:modelValue"],
 		template: `<div>
 			<span class="fc-label">{{ label }}</span>
@@ -89,6 +89,7 @@ vi.mock("frappe-ui", () => ({
 				v-else
 				:data-label="label"
 				:type="type"
+				:maxlength="maxlength"
 				:value="modelValue"
 				@input="$emit('update:modelValue', $event.target.value)"
 			/>
@@ -898,6 +899,57 @@ describe("per-agent gating via the configKeys prop", () => {
 				test_declaration: "Pre-release review",
 			},
 		});
+	});
+
+	it("lets incomplete GRN hygiene setup save and explains the run-time reviewer requirement", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		expect(w.text()).toContain("Required before a run.");
+		expect(w.text()).toContain("You can save this blank while you finish setup.");
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({});
+	});
+
+	it("bounds GRN text in the input and on save, then lets the user recover", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		const reviewer = field(w, "Receiving reviewer");
+		const declaration = field(w, "Test declaration");
+		expect(reviewer.attributes("maxlength")).toBe("140");
+		expect(declaration.attributes("maxlength")).toBe("500");
+
+		// A programmatic input event can bypass the browser maxlength guard.
+		// Save must still reject a value the native bundle will reject.
+		await reviewer.setValue("r".repeat(141));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")).toBeUndefined();
+		expect(w.text()).toContain('"Receiving reviewer" must be at most 140 characters.');
+
+		await reviewer.setValue("r".repeat(140));
+		await declaration.setValue("d".repeat(501));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")).toBeUndefined();
+		expect(w.text()).toContain('"Test declaration" must be at most 500 characters.');
+
+		await declaration.setValue("d".repeat(500));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			grn_hygiene: {
+				reviewer: "r".repeat(140),
+				test_declaration: "d".repeat(500),
+			},
+		});
+		expect(w.text()).not.toContain('"Receiving reviewer" must be at most 140 characters.');
+		expect(w.text()).not.toContain('"Test declaration" must be at most 500 characters.');
 	});
 
 	it("GRN hygiene fields load saved values and leave only unrelated values in Advanced JSON", async () => {
