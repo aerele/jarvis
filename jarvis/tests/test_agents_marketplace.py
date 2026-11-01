@@ -361,14 +361,16 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(captured.get("timeout_s"), 2400)
 		# Async: the Run stays "running" post-dispatch (Phase 3 writeback marks done).
 		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "running")
-		# The generic prompt is NON-LEAKY (no rule/tool/threshold names).
+		# The generic prompt is non-leaky: it names no rule, threshold, or
+		# domain tool. The one zero-argument snapshot tool is intentional.
 		msg = captured.get("message") or ""
-		for leak in ("jarvis__", "rule_id", "rule_pack", "pl_balance", "bs_balance", "$"):
+		for leak in ("rule_id", "rule_pack", "pl_balance", "bs_balance", "$"):
 			self.assertNotIn(leak, msg)
 		# The prompt must not hand a mutable Installation row to the delegate.
-		# This install has no declared snapshot values, so the run preserves that
-		# missing state instead of reading config after dispatch.
-		self.assertIn("No declared engagement settings were stamped", msg)
+		# This install has no declared snapshot values, so it can obtain only its
+		# empty server-stamped Run snapshot, never mutable config after dispatch.
+		self.assertIn("jarvis__get_engagement_config", msg)
+		self.assertNotIn("jarvis__get_doc", msg)
 		self.assertNotIn(inst_name, msg)
 		self.assertNotIn("Jarvis Agent Installation", msg)
 
@@ -414,13 +416,15 @@ class TestAgentsMarketplace(unittest.TestCase):
 			"prior_fy_end": "2026-03-31",
 		}
 		gen = agent_scheduler._audit_prompt(delegate, inst, "scheduled", scope)
-		# The bench-injected run message names NO rule/tool/threshold/engine.
-		for leak in ("jarvis__", "rule_id", "rule_pack", "pl_balance", "bs_balance", "$"):
+		# The bench-injected message names no rule, threshold, or domain tool.
+		# Its one allowed infrastructure name is the zero-argument config snapshot.
+		for leak in ("rule_id", "rule_pack", "pl_balance", "bs_balance", "$"):
 			self.assertNotIn(leak, gen)
 		self.assertIn("EXPLICIT SCOPE", gen)
 		self.assertIn("2026-04-01", gen)  # scope injected verbatim (A6)
 		self.assertIn("2026-09-11", gen)  # as-of report_date conveyed to the delegate
-		self.assertIn("No declared engagement settings were stamped", gen)
+		self.assertIn("jarvis__get_engagement_config", gen)
+		self.assertNotIn("jarvis__get_doc", gen)
 		self.assertNotIn(inst_name, gen)
 		self.assertNotIn("Jarvis Agent Installation", gen)
 

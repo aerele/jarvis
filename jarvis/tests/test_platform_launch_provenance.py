@@ -215,6 +215,7 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 	# Engagement configuration is a server-stamped, hidden Run snapshot.
 	# ------------------------------------------------------------------ #
 	def test_launch_stamps_one_immutable_config_snapshot_for_prompt_and_tool(self):
+		"""Close uses the stamped values before and after an Installation edit."""
 		inst_name = _install_as(self.owner)
 		initial_config = {
 			"materiality": {"percentage": 5, "benchmark_value": 100000},
@@ -250,6 +251,12 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 		self.assertEqual(frappe.parse_json(stamped), expected)
 		self.assertIn(json.dumps(expected, sort_keys=True), captured["message"])
 		self.assertNotIn("undeclared_after_launch", captured["message"])
+		from jarvis.tools.get_engagement_config import get_engagement_config
+
+		with mock.patch(
+			"jarvis.tools._agent_run_ctx.get_session_key", return_value=captured["session_key"]
+		):
+			self.assertEqual(get_engagement_config(), expected)
 		field = frappe.get_meta(RUN).get_field("engagement_config_json")
 		self.assertTrue(field.hidden)
 		self.assertTrue(field.read_only)
@@ -265,6 +272,10 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 		)
 		frappe.db.commit()
 		self.assertEqual(frappe.db.get_value(RUN, run, "engagement_config_json"), stamped)
+		with mock.patch(
+			"jarvis.tools._agent_run_ctx.get_session_key", return_value=captured["session_key"]
+		):
+			self.assertEqual(get_engagement_config(), expected)
 
 		# The ordinary owner-visible Run payload loses the hidden permlevel-1 field.
 		frappe.set_user(self.owner)
@@ -282,6 +293,40 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 		doc.engagement_config_json = frappe.as_json({"materiality": {"percentage": 99}})
 		with self.assertRaises(frappe.PermissionError):
 			doc.save(ignore_permissions=True)
+
+	def test_close_empty_config_snapshot_fails_closed_without_installation_read(self):
+		"""An empty Close config stays empty for the running delegate."""
+		inst_name = _install_as(self.owner)
+		frappe.db.set_value(INSTALLATION, inst_name, "config", frappe.as_json({}), update_modified=False)
+		frappe.db.set_value(INSTALLATION, inst_name, "enabled", 1, update_modified=False)
+		frappe.db.commit()
+		inst = frappe.get_doc(INSTALLATION, inst_name)
+
+		import jarvis.admin_client as admin_client
+
+		captured = {}
+
+		def _capture_dispatch(**kw):
+			captured.update(kw)
+			return {"run_id": kw.get("run_id"), "status": "queued"}
+
+		with mock.patch.object(admin_client, "post_agent_run", side_effect=_capture_dispatch):
+			frappe.set_user(self.owner)
+			try:
+				result = agent_scheduler._launch_audit(inst, trigger="manual")
+			finally:
+				frappe.set_user("Administrator")
+		run = result["run"]
+
+		self.assertEqual(frappe.db.get_value(RUN, run, "engagement_config_json"), "{}")
+		self.assertIn("jarvis__get_engagement_config", captured["message"])
+		self.assertNotIn("Jarvis Agent Installation", captured["message"])
+		from jarvis.tools.get_engagement_config import get_engagement_config
+
+		with mock.patch(
+			"jarvis.tools._agent_run_ctx.get_session_key", return_value=captured["session_key"]
+		):
+			self.assertEqual(get_engagement_config(), {})
 
 	# ------------------------------------------------------------------ #
 	# preparation_mode is a SNAPSHOT: a later promotion does not rewrite it
