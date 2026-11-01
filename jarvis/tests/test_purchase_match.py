@@ -457,6 +457,26 @@ class TestPurchaseMatch(FrappeTestCase):
 			):
 				matching.get_inputs(run)
 
+	def test_private_source_wrapper_seals_an_active_ap_snapshot(self):
+		from jarvis.exceptions import InvalidArgumentError
+		from jarvis.tools import _private_output
+		from jarvis.tools import get_purchase_match_inputs as source_tool
+
+		captured = snapshot()
+		with (
+			patch.object(source_tool, "get_session_key", return_value="active-ap-session"),
+			patch.object(frappe.db, "get_value", return_value="RUN-AP"),
+			patch.object(frappe, "get_doc", return_value=frappe._dict(name="RUN-AP")),
+			patch.object(source_tool, "get_inputs", return_value=captured) as get_inputs,
+		):
+			with self.assertRaises(InvalidArgumentError):
+				source_tool.get_purchase_match_inputs()
+			get_inputs.assert_not_called()
+			with _private_output.request(True):
+				sealed = source_tool.get_purchase_match_inputs()
+		get_inputs.assert_called_once()
+		self.assertEqual(sealed, {"rows": [captured]})
+
 	def test_snapshot_is_set_once_and_retries_check_freshness(self):
 		captured = snapshot()
 		run = MagicMock(
