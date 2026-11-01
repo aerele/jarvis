@@ -433,9 +433,11 @@ test("an indented code fence stays inside its step without parsing list text", (
 });
 
 test("an indented code fence removes its list indentation from code", () => {
-	const html = renderMarkdown("1. First\n\n\t```\n\tconst total = 1;\n\t  keep this indent;\n\t```\n\n2. Next");
+	const html = renderMarkdown(
+		"1. First\n\n\t```\n\tconst total = 1;\n\t  keep this indent;\n\t```\n\n2. Next"
+	);
 	assert.equal((html.match(/<ol\b/g) || []).length, 1);
-	assert.match(html, /<code>const total = 1;\n  keep this indent;<\/code>/);
+	assert.match(html, /<code>const total = 1;\n {2}keep this indent;<\/code>/);
 	assert.ok(!html.includes("\tconst total"));
 
 	const partialTab = renderMarkdown("1. First\n\n   ```\n\tkeep one column\n   ```");
