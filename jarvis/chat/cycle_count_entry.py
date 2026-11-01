@@ -124,15 +124,13 @@ def _approval_cohort_key(ar, evidence: dict) -> tuple[str, str, str, str, str, s
 
 
 def _may_view(ar, evidence: dict, *, lock_share: bool = False) -> bool:
-	"""Return the narrow count-plan access rule, including an exact read share."""
-	user = frappe.session.user
-	if frappe.db.get_value("Jarvis Conversation", ar.conversation, "owner") == user:
-		return True
-	if evidence.get("reviewer") == user:
-		return True
-	from jarvis.chat.cycle_count_permissions import has_approval_read_share
+	"""Require both sealed plan membership and native stock-record read."""
+	from jarvis.chat.cycle_count_permissions import may_read_count_plan
 
-	return has_approval_read_share(ar.name, user, lock=lock_share)
+	# ``evidence`` was validated by the caller.  The permission module parses it
+	# again so the same read rule also protects Desk, REST, and Approval Board
+	# paths that do not enter this controller.
+	return may_read_count_plan(ar, frappe.session.user, lock_share=lock_share)
 
 
 def _may_correct(source, evidence: dict) -> bool:
@@ -383,6 +381,12 @@ def _lock_approval_cohort_run(key: tuple[str, str, str, str, str, str, str]) -> 
 	)
 	if not run or run.agent != AGENT or run.conversation != key[1]:
 		frappe.throw(_("This count plan has no valid sealed review run."), frappe.PermissionError)
+
+
+def _has_approval_cohort_run(key: tuple[str, str, str, str, str, str, str]) -> bool:
+	"""Return whether a plan's frozen run identity still exists for its writer fence."""
+	run = frappe.db.get_value(RUN, key[0], ["name", "agent", "conversation"], as_dict=True)
+	return bool(run and run.agent == AGENT and run.conversation == key[1])
 
 
 def _lock_approval_cohort(key: tuple[str, str, str, str, str, str, str]):
@@ -1017,7 +1021,7 @@ def _rollback_entry_savepoint(name: str) -> None:
 
 
 def _visible_plan_where() -> tuple[str, dict]:
-	"""Return the sealed owner/reviewer predicate for the count-plan list.
+	"""Return the sealed and native-readable predicate for the count-plan list.
 
 	``frappe.db.get_all`` bypasses the Approval Request permission query, which
 	previously let the newest 500 rows of other users crowd a person's older
@@ -1049,7 +1053,16 @@ def _visible_plan_where() -> tuple[str, dict]:
 	"""
 		+ legacy
 	)
-	return where, {"agent": AGENT, "user": frappe.session.user}
+	params = {"agent": AGENT, "user": frappe.session.user}
+	if frappe.session.user != "Administrator":
+		from jarvis.chat.cycle_count_permissions import visible_count_plan_approval_names
+
+		readable = visible_count_plan_approval_names(frappe.session.user)
+		if not readable:
+			return "1=0", {}
+		where += " AND ar.name IN %(readable_plans)s"
+		params["readable_plans"] = readable
+	return where, params
 
 
 def _visible_plan_count(where: str, params: dict) -> int:
@@ -1145,6 +1158,8 @@ def list_count_plans(start: int = 0, page_length: int = 20) -> dict:
 def _can_record(ar, evidence: dict, *, lock_share: bool = False) -> bool:
 	try:
 		if ar.status != "Approved" or not _may_view(ar, evidence, lock_share=lock_share):
+			return False
+		if not _has_approval_cohort_run(_approval_cohort_key(ar, evidence)):
 			return False
 		if not frappe.has_permission(COUNT, "create") or not frappe.has_permission(COUNT, "submit"):
 			return False

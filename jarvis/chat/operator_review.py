@@ -13,11 +13,27 @@ _BACKENDS = {
 	"cycle-count-planner-operator": "jarvis.chat.cycle_count_review",
 }
 AGENTS = frozenset(_BACKENDS)
+_FRESH_SNAPSHOT_AGENT = "cycle-count-planner-operator"
 
 
 def backend(agent):
 	path = _BACKENDS.get(agent)
 	return frappe.get_module(path) if path else None
+
+
+def _collect_current(adapter, scope, config):
+	"""Collect review evidence from the right freshness boundary for an adapter.
+
+	Cycle Count compares live stock, movement, and submitted-count evidence to a
+	sealed result.  Its source read must start after any earlier permission or
+	row read in this request, otherwise MariaDB repeatable-read can quietly reuse
+	an old snapshot.  Other review adapters keep their established collection
+	contract.
+	"""
+	if adapter.AGENT == _FRESH_SNAPSHOT_AGENT:
+		with adapter.fresh_source_snapshot():
+			return adapter.collect(scope, config)
+	return adapter.collect(scope, config)
 
 
 def get_inputs(run, adapter):
@@ -36,7 +52,7 @@ def get_inputs(run, adapter):
 	scope = frappe.parse_json(run.scope_json or "{}")
 	if not config or scope != adapter.scope_from_config(config):
 		frappe.throw("This run has no valid launch-time review scope and policy; launch a new run.")
-	current = adapter.collect(scope, config)
+	current = _collect_current(adapter, scope, config)
 	stored = frappe.parse_json(state.input_snapshot_json or "null")
 	if stored:
 		if stored["source_digest"] != current["source_digest"]:
@@ -68,7 +84,7 @@ def stage_reviews(run, inst, findings, adapter):
 	if not reviewer or not frappe.db.get_value("User", reviewer, "enabled"):
 		frappe.throw("An enabled, named reviewer is required.")
 	with impersonate(reviewer):
-		if adapter.collect(stored["scope"], stored["config"])["source_digest"] != stored["source_digest"]:
+		if _collect_current(adapter, stored["scope"], stored["config"])["source_digest"] != stored["source_digest"]:
 			frappe.throw(
 				"The named reviewer cannot read the complete assessment evidence.", frappe.PermissionError
 			)
@@ -170,7 +186,7 @@ def check_review(doc, approve, adapter=None):
 		frappe.throw("Only the named reviewer may dispose of this assessment.", frappe.PermissionError)
 	if approve:
 		evidence = frappe.parse_json(doc.assessment_evidence)
-		current = adapter.collect(evidence["scope"], evidence["policy"])
+		current = _collect_current(adapter, evidence["scope"], evidence["policy"])
 		if current["source_digest"] != evidence["input_digest"]:
 			frappe.throw(
 				"This review is stale or no longer fully readable. Re-run the assessment; no posting is authorised."

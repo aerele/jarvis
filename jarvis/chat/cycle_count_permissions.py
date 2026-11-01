@@ -28,15 +28,102 @@ SQL_QUOTE = "`"
 _DYNAMIC_READ_PTYPES = frozenset({"read", "select"})
 _MUTATION_PTYPES = frozenset({"create", "write", "submit", "cancel", "amend", "delete"})
 _MAX_PLANNER_WAREHOUSES = 10
+_MAX_NATIVE_PLAN_QUERY_ROWS = 2_000
 
 
-def _reviewer(approval) -> str | None:
-	"""Return the sealed reviewer without treating malformed evidence as access."""
+def _plan_evidence(approval) -> dict | None:
+	"""Return only a structurally valid sealed count-plan evidence object.
+
+	This module is also called from permission hooks.  It must therefore fail
+	closed without importing the count-entry controller (which calls this module
+	from its own access checks).  The entry controller repeats the stronger
+	write-time validation before it records a fact.
+	"""
 	try:
 		evidence = frappe.parse_json(approval.get("assessment_evidence") or "{}")
 	except (TypeError, ValueError):
 		return None
-	return evidence.get("reviewer") if isinstance(evidence, dict) else None
+	if not isinstance(evidence, dict):
+		return None
+	finding = evidence.get("finding")
+	proposal = finding.get("proposal") if isinstance(finding, dict) else None
+	if (
+		approval.get("source") != "Agent Review"
+		or approval.get("agent") != CYCLE_COUNT_PLANNER
+		or approval.get("result_class") != "derived_candidate"
+		or approval.get("ref_doctype") != WAREHOUSE
+		or not isinstance(approval.get("ref_name"), str)
+		or not approval.get("ref_name")
+		or not isinstance(finding, dict)
+		or finding.get("ref_name") != approval.get("ref_name")
+		or not isinstance(proposal, dict)
+		or proposal.get("outcome") != "plan"
+		or not isinstance(proposal.get("lines"), list)
+		or not isinstance(evidence.get("scope"), dict)
+		or not isinstance(evidence["scope"].get("company"), str)
+		or not evidence["scope"]["company"]
+		or not isinstance(evidence.get("reviewer"), str)
+		or not evidence["reviewer"]
+	):
+		return None
+	return evidence
+
+
+def _has_native_plan_read(approval, evidence: dict, user: str) -> bool:
+	"""Require current native Warehouse and Item read for a sealed plan.
+
+	The plan embeds current book quantities and stock identifiers.  An approval
+	share is deliberately not a substitute for the ordinary stock-record read
+	permission.  Check every planned Item, rather than only the visible header,
+	so a partial permission set never reveals a partial count plan.
+	"""
+	warehouse = approval.get("ref_name")
+	if not frappe.has_permission(WAREHOUSE, "read", doc=warehouse, user=user):
+		return False
+	proposal = evidence["finding"]["proposal"]
+	lines = proposal.get("lines")
+	if not isinstance(lines, list) or not lines:
+		return False
+	seen = set()
+	for line in lines:
+		item_code = line.get("item_code") if isinstance(line, dict) else None
+		if not isinstance(item_code, str) or not item_code or item_code in seen:
+			return False
+		seen.add(item_code)
+		if not frappe.has_permission("Item", "read", doc=item_code, user=user):
+			return False
+	return True
+
+
+def may_read_count_plan(approval, user: str | None = None, *, lock_share: bool = False) -> bool:
+	"""Return whether ``user`` may read a full Cycle-Count plan.
+
+	A plan boundary (conversation owner, sealed reviewer, or exact approval
+	DocShare) grants *plan membership* only.  Native Warehouse and Item read is
+	required as a second boundary for every detail, approval context, and stored
+	physical-count fact.  Administrator remains the framework superuser path.
+	"""
+	user = user or frappe.session.user
+	if not isinstance(user, str) or not user:
+		return False
+	if user == "Administrator":
+		return True
+	evidence = _plan_evidence(approval)
+	if not evidence:
+		return False
+	if frappe.db.get_value(CONVERSATION, approval.get("conversation"), "owner") != user:
+		if evidence["reviewer"] != user and not has_approval_read_share(
+			approval.get("name"), user, lock=lock_share
+		):
+			return False
+	return _has_native_plan_read(approval, evidence, user)
+
+
+def require_count_plan_read(approval, user: str | None = None, *, lock_share: bool = False) -> dict:
+	"""Raise a non-disclosing error unless the full count-plan read gate passes."""
+	if not may_read_count_plan(approval, user, lock_share=lock_share):
+		frappe.throw("You are not allowed to view this count plan.", frappe.PermissionError)
+	return _plan_evidence(approval) or {}
 
 
 def has_approval_read_share(approval_name: str, user: str | None = None, *, lock: bool = False) -> bool:
@@ -67,7 +154,7 @@ def has_approval_read_share(approval_name: str, user: str | None = None, *, lock
 
 
 def _may_view_plan_count(doc, user: str) -> bool:
-	"""Mirror the Cycle-Count plan visibility rule for one submitted fact."""
+	"""Apply the full plan and native-stock read gate to one count fact."""
 	approval_name = doc.get("approval_request")
 	if not approval_name:
 		return False
@@ -75,11 +162,7 @@ def _may_view_plan_count(doc, user: str) -> bool:
 		approval = frappe.get_doc(APPROVAL, approval_name)
 	except frappe.DoesNotExistError:
 		return False
-	if frappe.db.get_value(CONVERSATION, approval.conversation, "owner") == user:
-		return True
-	if _reviewer(approval) == user:
-		return True
-	return has_approval_read_share(approval_name, user)
+	return may_read_count_plan(approval, user)
 
 
 def _iso_date(value) -> date | None:
@@ -301,25 +384,143 @@ def _may_view_count(doc, user: str) -> bool:
 	return False
 
 
-def _plan_query_condition(user: str) -> str:
-	"""The owner/reviewer/exact-approval-share list predicate."""
-	escaped = frappe.db.escape(user)
-	count_table = f"{SQL_QUOTE}tab{COUNT}{SQL_QUOTE}"
-	approval_table = f"{SQL_QUOTE}tab{APPROVAL}{SQL_QUOTE}"
-	conversation_table = f"{SQL_QUOTE}tab{CONVERSATION}{SQL_QUOTE}"
-	share_table = f"{SQL_QUOTE}tabDocShare{SQL_QUOTE}"
-	approval_field = f"{SQL_QUOTE}approval_request{SQL_QUOTE}"
-	return (
-		f"exists (select 1 from {approval_table} approval "
-		f"left join {conversation_table} conversation "
-		"on conversation.name = approval.conversation "
-		f"where approval.name = {count_table}.{approval_field} and ("
-		f"conversation.owner = {escaped} "
-		f"or JSON_UNQUOTE(JSON_EXTRACT(approval.assessment_evidence, '$.reviewer')) = {escaped}"
-		f" or exists (select 1 from {share_table} share_row "
-		f"where share_row.share_doctype = {frappe.db.escape(APPROVAL)} "
-		f"and share_row.share_name = approval.name and share_row.user = {escaped} and share_row.`read` = 1)"
-		"))"
+def visible_count_plan_approval_names(user: str | None = None) -> tuple[str, ...]:
+	"""Return readable Cycle-Count approval names for list/query predicates.
+
+	Frappe's list query hooks are SQL predicates and cannot call the native Item
+	permission engine for every JSON-encoded planned line.  Resolve that small
+	sealed plan set once, then return exact approval names to the caller's SQL
+	predicate.  A very large set fails closed rather than turning an incomplete
+	name list into a visibility grant.
+	"""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return ()
+	if not isinstance(user, str) or not user:
+		return ()
+	rows = frappe.db.sql(
+		"""
+		SELECT ar.name, ar.source, ar.agent, ar.result_class, ar.ref_doctype,
+		       ar.ref_name, ar.conversation, ar.assessment_evidence
+		FROM `tabJarvis Approval Request` ar
+		LEFT JOIN `tabJarvis Conversation` c ON c.name = ar.conversation
+		WHERE ar.agent = %(agent)s
+		  AND ar.source = 'Agent Review'
+		  AND (
+			c.owner = %(user)s
+			OR JSON_UNQUOTE(JSON_EXTRACT(ar.assessment_evidence, '$.reviewer')) = %(user)s
+			OR EXISTS (
+				SELECT 1 FROM `tabDocShare` ds
+				WHERE ds.share_doctype = 'Jarvis Approval Request'
+				  AND ds.share_name = ar.name AND ds.user = %(user)s AND ds.`read` = 1
+			)
+		  )
+		ORDER BY ar.name
+		LIMIT %(limit)s
+		""",
+		{"agent": CYCLE_COUNT_PLANNER, "user": user, "limit": _MAX_NATIVE_PLAN_QUERY_ROWS + 1},
+		as_dict=True,
+	)
+	if len(rows) > _MAX_NATIVE_PLAN_QUERY_ROWS:
+		frappe.logger("jarvis.cycle_count_permissions").warning(
+			{
+				"event": "native_plan_query_limit",
+				"user": user,
+				"limit": _MAX_NATIVE_PLAN_QUERY_ROWS,
+			}
+		)
+		return ()
+	return tuple(row.name for row in rows if may_read_count_plan(row, user))
+
+
+def count_plan_approval_query_condition(user: str | None = None, *, table: str | None = None) -> str:
+	"""Return a fail-closed SQL predicate for Approval Request list paths."""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return "1=1"
+	table = table or f"{SQL_QUOTE}tab{APPROVAL}{SQL_QUOTE}"
+	names = visible_count_plan_approval_names(user)
+	not_cycle = f"({table}.agent IS NULL OR {table}.agent <> {frappe.db.escape(CYCLE_COUNT_PLANNER)})"
+	if not names:
+		return not_cycle
+	quoted = ", ".join(frappe.db.escape(name) for name in names)
+	return f"({not_cycle} OR {table}.name IN ({quoted}))"
+
+
+def visible_physical_count_names(user: str | None = None) -> tuple[str, ...]:
+	"""Return count facts whose sealed plan and native sources are both readable."""
+	user = user or frappe.session.user
+	names = visible_count_plan_approval_names(user)
+	if not names:
+		return ()
+	# Do not use ``frappe.get_all(COUNT)`` here. This helper is called by the
+	# Physical Count query-condition hook itself, and a normal ORM list can
+	# re-enter that hook before the predicate has been built.
+	rows = frappe.db.sql(
+		f"SELECT name FROM {SQL_QUOTE}tab{COUNT}{SQL_QUOTE} "
+		"WHERE approval_request IN %(approvals)s ORDER BY name LIMIT %(limit)s",
+		{"approvals": names, "limit": _MAX_NATIVE_PLAN_QUERY_ROWS + 1},
+		pluck=True,
+	)
+	if len(rows) > _MAX_NATIVE_PLAN_QUERY_ROWS:
+		frappe.logger("jarvis.cycle_count_permissions").warning(
+			{
+				"event": "native_count_query_limit",
+				"user": user,
+				"limit": _MAX_NATIVE_PLAN_QUERY_ROWS,
+			}
+		)
+		return ()
+	return tuple(rows)
+
+
+def conversation_has_retained_count_plan(conversation: str) -> bool:
+	"""Lock and detect Cycle-Count state that must keep its chat authority.
+
+	An approved plan stores its ownership boundary through the conversation.  A
+	clear-history delete would otherwise retain a fact while making the owner
+	unable to list, read, or correct it.  Lock a running planner run first so a
+	concurrent staging path cannot add a pending approval after this check and
+	before the conversation is deleted.
+	"""
+	if not isinstance(conversation, str) or not conversation:
+		return False
+	live_runs = frappe.db.sql(
+		"""
+		SELECT name FROM `tabJarvis Agent Run`
+		WHERE conversation = %(conversation)s AND agent = %(agent)s AND status = 'running'
+		FOR UPDATE
+		""",
+		{"conversation": conversation, "agent": CYCLE_COUNT_PLANNER},
+		pluck=True,
+	)
+	if live_runs:
+		return True
+	plans = frappe.db.sql(
+		"""
+		SELECT ar.name FROM `tabJarvis Approval Request` ar
+		WHERE ar.conversation = %(conversation)s
+		  AND ar.agent = %(agent)s
+		  AND ar.source = 'Agent Review'
+		  AND ar.status IN ('Pending', 'Approved')
+		FOR UPDATE
+		""",
+		{"conversation": conversation, "agent": CYCLE_COUNT_PLANNER},
+		pluck=True,
+	)
+	if plans:
+		return True
+	return bool(
+		frappe.db.sql(
+			"""
+			SELECT pc.name FROM `tabJarvis Physical Count` pc
+			INNER JOIN `tabJarvis Approval Request` ar ON ar.name = pc.approval_request
+			WHERE ar.conversation = %(conversation)s AND ar.agent = %(agent)s
+			LIMIT 1 FOR UPDATE
+			""",
+			{"conversation": conversation, "agent": CYCLE_COUNT_PLANNER},
+			pluck=True,
+		)
 	)
 
 
@@ -368,22 +569,28 @@ def _planner_query_condition(scope) -> str:
 
 
 def physical_count_query_conditions(user: str | None = None, doctype: str | None = None) -> str:
-	"""Limit lists to a private plan or an active delegate's stamped scope.
+	"""Limit lists to native-readable plans or an active delegate's scope.
 
-	The reviewer is sealed in the approval evidence. JSON_EXTRACT returns NULL
-	for malformed evidence on the supported MariaDB version, which fails closed.
-	No System Manager bypass is present; Administrator is Frappe's unavoidable
-	superuser bypass and is not used by normal product paths.
+	The human plan path resolves exact readable approval names before it builds a
+	SQL predicate.  This keeps Item and Warehouse permissions in force for list,
+	report, and generic REST queries; a bare approval share is not enough.  The
+	delegate paths remain narrow server-bound source allowances.  Administrator
+	is Frappe's unavoidable superuser path and is not used by product flows.
 	"""
 	user = user or frappe.session.user
 	if user == "Administrator":
 		return ""
-	conditions = [_plan_query_condition(user)]
+	count_table = f"{SQL_QUOTE}tab{COUNT}{SQL_QUOTE}"
+	plan_names = visible_physical_count_names(user)
+	conditions = []
+	if plan_names:
+		quoted = ", ".join(frappe.db.escape(name) for name in plan_names)
+		conditions.append(f"{count_table}.name IN ({quoted})")
 	if scope := _stock_variance_delegate_scope(user):
 		conditions.append(_stock_variance_query_condition(scope))
 	if scope := _cycle_count_planner_delegate_scope(user):
 		conditions.append(_planner_query_condition(scope))
-	return "(" + " or ".join(conditions) + ")"
+	return "(" + " or ".join(conditions) + ")" if conditions else "1=0"
 
 
 def has_physical_count_permission(doc, ptype: str = "read", user: str | None = None, debug=False) -> bool:
