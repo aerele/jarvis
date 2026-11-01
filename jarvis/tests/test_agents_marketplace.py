@@ -527,7 +527,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	# jarvis#1063 (jarvis-only half) - config_keys: which agent-specific
 	# installation config keys an agent's bundle actually reads (verified
-	# against jarvis-agents/agents/<slug>/evaluate.py).
+	# against jarvis-agents/agents/<slug>/evaluate.py). The close auditor and
+	# FEFO reviewer use nested owner namespaces.
 	# ------------------------------------------------------------------ #
 	def test_sync_agent_listings_writes_config_keys_from_the_registry(self):
 		# dot paths - close-auditor/evaluate.py reads these NESTED under a
@@ -545,6 +546,14 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(
 			json.loads(frappe.db.get_value(LISTING, "fixed-asset-depreciation-auditor", "config_keys")),
 			["depr_run_posted", "enable_capex_signal"],
+		)
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "fefo-expiry-compliance-auditor", "config_keys")),
+			[
+				"fefo.reviewer",
+				"fefo.near_expiry_days",
+				"fefo.test_declaration",
+			],
 		)
 
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):

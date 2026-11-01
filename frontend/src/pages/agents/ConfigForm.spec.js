@@ -895,6 +895,80 @@ describe("per-agent gating via the configKeys prop", () => {
 		expect(w.text()).toContain("This agent has no additional settings.");
 	});
 
+	it("FEFO dot paths render the expiry fields and save the owner namespace", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: [
+					"fefo.reviewer",
+					"fefo.near_expiry_days",
+					"fefo.test_declaration",
+				],
+			}
+		);
+		expect(w.text()).toContain("Expiry reviewer");
+		expect(w.text()).toContain("Near-expiry window");
+		expect(w.text()).toContain("Test declaration");
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+
+		await field(w, "Expiry reviewer").setValue("Stock Controller");
+		await field(w, "Near-expiry window").setValue("30");
+		await field(w, "Test declaration").setValue("Pre-release review");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			fefo: {
+				reviewer: "Stock Controller",
+				near_expiry_days: 30,
+				test_declaration: "Pre-release review",
+			},
+		});
+	});
+
+	it("FEFO fields load and preserve a saved owner policy", async () => {
+		const configKeys = [
+			"fefo.reviewer",
+			"fefo.near_expiry_days",
+			"fefo.test_declaration",
+		];
+		const config = {
+			fefo: {
+				reviewer: "Stock Controller",
+				near_expiry_days: 30,
+				test_declaration: "Pre-release review",
+			},
+			custom_flag: true,
+		};
+		const w = mountForm(config, { configKeys });
+		expect(field(w, "Expiry reviewer").element.value).toBe("Stock Controller");
+		expect(field(w, "Near-expiry window").element.value).toBe("30");
+		expect(field(w, "Test declaration").element.value).toBe("Pre-release review");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({ custom_flag: true });
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual(config);
+	});
+
+	it("FEFO omits an empty optional test declaration", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: [
+					"fefo.reviewer",
+					"fefo.near_expiry_days",
+					"fefo.test_declaration",
+				],
+			}
+		);
+		await field(w, "Expiry reviewer").setValue("Stock Controller");
+		await field(w, "Near-expiry window").setValue("30");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		const saved = w.emitted("save")[0][0];
+		expect(saved).toEqual({
+			fefo: { reviewer: "Stock Controller", near_expiry_days: 30 },
+		});
+		expect(saved.fefo).not.toHaveProperty("test_declaration");
+	});
+
 	it("the full configKeys set (close-auditor) renders every agent-specific field, no note", () => {
 		const w = mountForm({});
 		expect(w.text()).not.toContain("This agent has no additional settings.");

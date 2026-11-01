@@ -322,6 +322,9 @@ const form = reactive({
 	percentage: "",
 	engagement_risk_level: "",
 	rounding_step: "",
+	fefo_reviewer: "",
+	fefo_near_expiry_days: "",
+	fefo_test_declaration: "",
 });
 const advanced = ref("{}");
 const advancedError = ref("");

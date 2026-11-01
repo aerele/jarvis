@@ -50,6 +50,9 @@ describe("CONFIG_FIELD_SET", () => {
 				"percentage",
 				"engagement_risk_level",
 				"rounding_step",
+				"fefo_reviewer",
+				"fefo_near_expiry_days",
+				"fefo_test_declaration",
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
@@ -57,7 +60,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders review, fixed-asset, scope, materiality, then vendor-ledger fields", () => {
+	it("orders review, fixed-asset, scope, materiality, FEFO, then vendor-ledger fields", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -77,6 +80,9 @@ describe("CONFIG_FIELD_SET", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"fefo_reviewer",
+			"fefo_near_expiry_days",
+			"fefo_test_declaration",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
@@ -105,6 +111,7 @@ describe("CONFIG_FIELD_SET", () => {
 				"benchmark_value",
 				"percentage",
 				"rounding_step",
+				"fefo_near_expiry_days",
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
@@ -131,7 +138,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes review, fixed-asset, materiality, and vendor-ledger fields", () => {
+	it("agent-specific includes review, fixed-asset, materiality, FEFO, and vendor-ledger fields", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -147,6 +154,9 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"fefo_reviewer",
+			"fefo_near_expiry_days",
+			"fefo_test_declaration",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
@@ -180,6 +190,12 @@ describe("KEY_TO_PATH (local form key -> storage dot path)", () => {
 		expect(KEY_TO_PATH.percentage).toBe("materiality.percentage");
 		expect(KEY_TO_PATH.engagement_risk_level).toBe("materiality.engagement_risk_level");
 		expect(KEY_TO_PATH.rounding_step).toBe("materiality.rounding_step");
+	});
+
+	it("the FEFO keys are nested dot paths", () => {
+		expect(KEY_TO_PATH.fefo_reviewer).toBe("fefo.reviewer");
+		expect(KEY_TO_PATH.fefo_near_expiry_days).toBe("fefo.near_expiry_days");
+		expect(KEY_TO_PATH.fefo_test_declaration).toBe("fefo.test_declaration");
 	});
 });
 

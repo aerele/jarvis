@@ -76,6 +76,25 @@ class TestDerivedConfig(FrappeTestCase):
 		out = agent_scheduler._explicit_config({"config_keys": ["ageing.stale_floor_days"]}, inst)
 		self.assertEqual(out, {"ageing": {"stale_floor_days": 9}})
 
+	def test_explicit_config_dotted_fefo_keys_pass_the_owner_namespace(self):
+		inst = _inst(
+			config='{"fefo": {"reviewer": "Stock Controller", "near_expiry_days": 30}, "other": 1}'
+		)
+		out = agent_scheduler._explicit_config(
+			{
+				"config_keys": [
+					"fefo.reviewer",
+					"fefo.near_expiry_days",
+					"fefo.test_declaration",
+				]
+			},
+			inst,
+		)
+		self.assertEqual(
+			out,
+			{"fefo": {"reviewer": "Stock Controller", "near_expiry_days": 30}},
+		)
+
 	def test_failing_provider_is_omitted_and_logged_without_value(self):
 		salt = derived_config._fingerprint_salt(_inst())
 		boom = patch.dict(

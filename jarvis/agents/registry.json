@@ -944,7 +944,9 @@
         "tier": "Advanced"
       },
       "config_keys": [
-        "fefo"
+        "fefo.reviewer",
+        "fefo.near_expiry_days",
+        "fefo.test_declaration"
       ]
     },
     {
