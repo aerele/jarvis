@@ -18,6 +18,7 @@ Run ONLY on a throwaway bench:
   bench --site patterntest.localhost run-tests --module jarvis.tests.test_agent_identity
 """
 
+import json
 import unittest
 
 import frappe
@@ -468,6 +469,50 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertIn("NEVER read mutable installation configuration", tool_msg)
 		self.assertNotIn("jarvis__get_doc", tool_msg)
 		self.assertNotIn("Jarvis Agent Installation", tool_msg)
+
+	def test_vendor_ledger_ageing_snapshot_is_declared_and_delivered(self):
+		"""The Vendor Ledger bundle reads only these immutable ageing controls."""
+		registry = agent_catalog._load_registry()
+		listing = next(
+			entry for entry in registry["agents"] if entry["agent_slug"] == "vendor-ledger-recon-auditor"
+		)
+		expected_keys = [
+			"ageing.stale_floor_days",
+			"ageing.advance_floor_days",
+			"ageing.grir_floor_days",
+			"ageing.band_edges",
+		]
+		self.assertEqual(listing["config_keys"], expected_keys)
+		self.assertIn("jarvis__get_engagement_config", listing["tools_allow"])
+
+		expected_snapshot = {
+			"ageing": {
+				"stale_floor_days": 45,
+				"advance_floor_days": 50,
+				"grir_floor_days": 55,
+				"band_edges": [45, 75, 105],
+			}
+		}
+		inst = frappe._dict(
+			{
+				"name": "VLR-INST-1",
+				"config": frappe.as_json(
+					{
+						**expected_snapshot,
+						"tolerance": {"tieout": 999},
+						"company": "must-not-reach-the-delegate",
+					}
+				),
+			}
+		)
+		snapshot = agent_scheduler._explicit_config(listing, inst)
+		self.assertEqual(snapshot, expected_snapshot)
+		message = agent_scheduler._audit_prompt(
+			listing, inst, trigger="manual", scope={}, engagement_config=snapshot
+		)
+		self.assertIn(json.dumps(expected_snapshot, sort_keys=True), message)
+		self.assertNotIn("tieout", message)
+		self.assertNotIn("must-not-reach-the-delegate", message)
 
 	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner
