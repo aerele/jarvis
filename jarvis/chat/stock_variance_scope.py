@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import frappe
 
+from jarvis.permissions import is_valid_unattended_owner
+
 AGENT = "stock-variance-auditor"
 RECORD_SCOPE_KEYS = frozenset({"doctype", "name"})
 STOCK_VARIANCE_KEYS = frozenset({"reviewer", "test_declaration"})
@@ -40,9 +42,9 @@ def configuration_issues(raw, *, require_complete: bool = True) -> dict[str, str
 		issues["company"] = "Select a readable company."
 	else:
 		try:
-			frappe.get_doc("Company", company).check_permission("read")
+			_validate_company(company)
 			company_ok = True
-		except (frappe.PermissionError, frappe.DoesNotExistError):
+		except (frappe.PermissionError, frappe.DoesNotExistError, frappe.ValidationError):
 			issues["company"] = "Select a readable company."
 
 	record_supplied = "record_scope" in config
@@ -69,7 +71,7 @@ def configuration_issues(raw, *, require_complete: bool = True) -> dict[str, str
 		issues["stock_variance"] = "Use only the supported stock review settings."
 	else:
 		reviewer = settings.get("reviewer")
-		if not _valid_text(reviewer) or not frappe.db.get_value("User", reviewer, "enabled"):
+		if not _valid_text(reviewer) or not is_valid_unattended_owner(reviewer):
 			if require_complete or reviewer is not None:
 				issues["stock_variance.reviewer"] = "Select an enabled stock reviewer."
 		declaration = settings.get("test_declaration", "")
@@ -114,6 +116,23 @@ def _valid_record_scope(record) -> bool:
 		and record.get("doctype") == "Warehouse"
 		and _valid_text(record.get("name"))
 	)
+
+
+def _validate_company(name: str) -> None:
+	"""Check one readable leaf Company before its Warehouse tree is used.
+
+	The native evaluator requires a leaf Company row. Check the same condition
+	before an installation can be enabled or launched, so a group Company cannot
+	be saved as a scope that will later fail in the evaluator.
+	"""
+	company = frappe.get_doc("Company", name)
+	company.check_permission("read")
+	is_group = company.get("is_group")
+	company.apply_fieldlevel_read_permissions()
+	if is_group is None or company.get("is_group") != is_group:
+		raise frappe.PermissionError("Company group status is not readable.")
+	if frappe.utils.cint(is_group):
+		raise frappe.ValidationError("Company scope must be a leaf Company.")
 
 
 def _validate_warehouse_root(name: str, company: str) -> None:

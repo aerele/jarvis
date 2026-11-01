@@ -41,8 +41,8 @@ class TestStockVarianceScope(FrappeTestCase):
 		base.update(overrides)
 		return base
 
-	def readable_docs(self, *, is_group=1, company=None, disabled=0):
-		company_doc = _ReadableDocument(name=self.company)
+	def readable_docs(self, *, is_group=1, company=None, company_is_group=0, disabled=0):
+		company_doc = _ReadableDocument(name=self.company, is_group=company_is_group)
 		warehouse = _ReadableDocument(
 			name=self.root,
 			company=company or self.company,
@@ -63,6 +63,30 @@ class TestStockVarianceScope(FrappeTestCase):
 					patch.object(frappe, "get_list", return_value=["Scope Leaf - SEL"]),
 				):
 					self.assertEqual(stock_variance_scope.configuration_issues(self.config()), {})
+
+	def test_group_company_is_refused_before_the_native_evaluator_runs(self):
+		company_doc, warehouse = self.readable_docs(company_is_group=1)
+		with (
+			patch.object(frappe, "get_doc", side_effect=[company_doc, warehouse]),
+			patch.object(frappe.db, "get_value", return_value=1),
+			patch.object(frappe, "get_list", return_value=["Scope Leaf - SEL"]),
+		):
+			issues = stock_variance_scope.configuration_issues(self.config())
+
+		self.assertIn("company", issues)
+		self.assertIn("record_scope", issues)
+
+	def test_system_reviewer_is_refused(self):
+		company_doc, warehouse = self.readable_docs()
+		with (
+			patch.object(frappe, "get_doc", side_effect=[company_doc, warehouse]),
+			patch.object(frappe.db, "get_value", return_value=1),
+			patch.object(frappe, "get_list", return_value=["Scope Leaf - SEL"]),
+			patch.object(stock_variance_scope, "is_valid_unattended_owner", return_value=False),
+		):
+			issues = stock_variance_scope.configuration_issues(self.config())
+
+		self.assertIn("stock_variance.reviewer", issues)
 
 	def test_missing_or_wrong_scope_never_counts_as_a_valid_draft_value(self):
 		cases = (
@@ -247,6 +271,8 @@ class TestStockVarianceScope(FrappeTestCase):
 			enabled=0,
 			config=json.dumps(self.config()),
 		)
+		installation.is_new = lambda: False
+		installation.has_value_changed = lambda field: field == "run_as_user"
 
 		def check_draft(config):
 			self.assertEqual(active_user["value"], installation.run_as_user)
@@ -263,6 +289,86 @@ class TestStockVarianceScope(FrappeTestCase):
 
 		require.assert_not_called()
 		validate_draft.assert_called_once_with(installation.config)
+
+	def test_unchanged_disabled_stale_scope_can_be_saved_for_recovery(self):
+		installation = frappe._dict(
+			agent=stock_variance_scope.AGENT,
+			run_as_user="warehouse-reader@example.invalid",
+			enabled=0,
+			config=json.dumps(self.config()),
+		)
+		installation.is_new = lambda: False
+		installation.has_value_changed = lambda field: False
+
+		with (
+			patch("jarvis._session.impersonate") as as_run_as,
+			patch.object(stock_variance_scope, "validate_saved_configuration") as validate_draft,
+		):
+			JarvisAgentInstallation._guard_stock_variance_scope(installation)
+
+		as_run_as.assert_not_called()
+		validate_draft.assert_not_called()
+
+	def test_disabled_config_change_still_checks_the_scope_as_the_run_as_user(self):
+		installation = frappe._dict(
+			agent=stock_variance_scope.AGENT,
+			run_as_user="warehouse-reader@example.invalid",
+			enabled=0,
+			config=json.dumps(self.config()),
+		)
+		installation.is_new = lambda: False
+		installation.has_value_changed = lambda field: field == "config"
+
+		with patch.object(stock_variance_scope, "validate_saved_configuration") as validate_draft:
+			JarvisAgentInstallation._guard_stock_variance_scope(installation)
+
+		validate_draft.assert_called_once_with(installation.config)
+
+	def test_scheduled_invalid_scope_is_skipped_without_an_enqueue_retry(self):
+		row = frappe._dict(
+			name="SV-INSTALL-1",
+			owner="scope-owner@example.invalid",
+			run_as_user="warehouse-reader@example.invalid",
+			agent=stock_variance_scope.AGENT,
+			schedule_frequency="daily",
+			schedule_time="09:00:00",
+			schedule_weekday=None,
+			schedule_day_of_month=None,
+			installable=1,
+			config="{}",
+			activation_state="shadow",
+		)
+		listing = frappe._dict(nature="Auditor", status="Published", operator_visibility="available")
+		now = frappe.utils.now_datetime()
+
+		with (
+			patch.object(frappe.db, "get_value", return_value=listing),
+			patch("jarvis.chat.agents_api._user_allowed_for_agent", return_value=True),
+			patch.object(agent_scheduler, "_valid_owner", return_value=True),
+			patch.object(agent_scheduler, "run_as_mapping_refusal", return_value=None),
+			patch.object(agent_scheduler, "_over_run_budget", return_value=(False, "")),
+			patch.object(agent_scheduler, "_is_app_learning", return_value=False),
+			patch("jarvis.chat.agent_models.gate_run", return_value={"ok": True}),
+			patch.object(
+				stock_variance_scope,
+				"configuration_issues",
+				return_value={"company": "Select a readable company."},
+			) as configuration_issues,
+			patch.object(agent_scheduler, "_record_failed") as record_failed,
+			patch.object(agent_scheduler, "_advance") as advance,
+			patch.object(agent_scheduler, "_dispatch") as dispatch,
+			patch.object(agent_scheduler, "_notify_owner") as notify_owner,
+		):
+			agent_scheduler._sweep_one(row, now, set())
+
+		configuration_issues.assert_called_once_with("{}")
+		record_failed.assert_called_once_with(
+			row,
+			"scheduled run skipped: complete the Stock Variance company, Warehouse scope and reviewer in Configure",
+		)
+		advance.assert_called_once_with(row, now)
+		dispatch.assert_not_called()
+		notify_owner.assert_not_called()
 
 	def test_detail_issues_use_the_run_as_user_without_widening_the_response_shape(self):
 		active_user = {"value": None}
@@ -290,3 +396,17 @@ class TestStockVarianceScope(FrappeTestCase):
 
 		get_value.assert_called_once_with("Jarvis Agent Installation", "SV-INSTALL-1", "run_as_user")
 		self.assertEqual(issues, {"record_scope": "Warehouse is not readable by the run-as user."})
+
+	def test_detail_issues_refuse_a_blank_run_as_user_without_impersonating_the_viewer(self):
+		with (
+			patch.object(frappe.db, "get_value", return_value="") as get_value,
+			patch("jarvis._session.impersonate") as as_run_as,
+		):
+			issues = agents_api._stock_variance_issues_for_run_as("SV-INSTALL-1", json.dumps(self.config()))
+
+		get_value.assert_called_once_with("Jarvis Agent Installation", "SV-INSTALL-1", "run_as_user")
+		as_run_as.assert_not_called()
+		self.assertEqual(
+			issues,
+			{"run_as_user": "Set a run-as user before configuring the Warehouse scope."},
+		)

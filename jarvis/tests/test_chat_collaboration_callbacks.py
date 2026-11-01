@@ -121,6 +121,7 @@ class TestCollaborationCallbacks(CollaborationCase):
 		self.assertFalse(READ_TOOLS & WRITE_TOOLS)
 		self.assertFalse(READ_TOOLS & REFUSED_TOOLS)
 		self.assertFalse(WRITE_TOOLS & REFUSED_TOOLS)
+		self.assertEqual(tool_kind("get_cycle_count_inputs"), "refused")
 		self.assertEqual(tool_kind("future_unknown_tool"), "refused")
 
 	def test_landed_cost_preview_is_read_only_and_bound_to_the_initiating_actor(self):

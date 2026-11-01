@@ -94,6 +94,16 @@ describe("StockVarianceConfigForm", () => {
 		});
 	});
 
+	it("lists only leaf companies", async () => {
+		const wrapper = mountForm();
+		await picker(wrapper, "Search Company…").trigger("focusin");
+		await flushPromises();
+
+		expect(api.searchLink).toHaveBeenCalledWith("Company", "", 20, undefined, undefined, [
+			["Company", "is_group", "=", 0],
+		]);
+	});
+
 	it("does not emit an incomplete root or reviewer configuration", async () => {
 		const wrapper = mountForm({ company: "Example Ltd" });
 		await wrapper.get('[data-label="Save configuration"]').trigger("click");

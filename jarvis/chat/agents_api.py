@@ -499,7 +499,9 @@ def _stock_variance_issues_for_run_as(installation: str, config: str) -> dict:
 	from jarvis._session import impersonate
 	from jarvis.chat.stock_variance_scope import configuration_issues
 
-	run_as_user = frappe.db.get_value(INSTALLATION, installation, "run_as_user")
+	run_as_user = (frappe.db.get_value(INSTALLATION, installation, "run_as_user") or "").strip()
+	if not run_as_user:
+		return {"run_as_user": "Set a run-as user before configuring the Warehouse scope."}
 	with impersonate(run_as_user):
 		return configuration_issues(config or "{}")
 

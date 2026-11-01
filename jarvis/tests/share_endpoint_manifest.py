@@ -911,6 +911,20 @@ ENDPOINTS.update(
 			"arguments": {"name": "$approval"},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.cycle_count_entry.get_count_plan": {
+			"arguments": {"request": "$approval"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.cycle_count_entry.list_count_plans": {"arguments": {}, "scope": "chat_scoped"},
+		"jarvis.chat.cycle_count_entry.record_counts": {
+			"arguments": {
+				"counted_at": "2026-01-01 00:00:00",
+				"entries": [{"counted_qty": "1", "item_code": "share-probe-item"}],
+				"entry_key": "share-probe-entry-key-0001",
+				"request": "$approval",
+			},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.dashboards_api.dashboard_for_conversation": {
 			"arguments": {"conversation": "$conversation"},
 			"scope": "chat_scoped",

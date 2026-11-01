@@ -376,6 +376,13 @@ class JarvisAgentInstallation(NotRenamable, Document):
 
 		if not is_stock_variance(self.agent):
 			return
+		if not frappe.utils.cint(self.get("enabled")) and not (
+			self.is_new()
+			or self.has_value_changed("agent")
+			or self.has_value_changed("config")
+			or self.has_value_changed("run_as_user")
+		):
+			return
 		run_as_user = (self.run_as_user or "").strip()
 		if not run_as_user:
 			return  # _validate_run_as_user() refuses this state when enabled.

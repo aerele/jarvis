@@ -184,6 +184,7 @@ def run_due_agent_audits() -> None:
 			"schedule_weekday",
 			"schedule_day_of_month",
 			"installable",
+			"config",
 			"source_apps_json",
 			"activation_state",
 			"next_run_at",
@@ -391,6 +392,22 @@ def _sweep_one(row, now, seen: set) -> None:
 		_record_failed(row, f"scheduled run skipped: {model_gate['message']}")
 		_advance(row, now)
 		return
+
+	# A stale Stock Variance setup needs a human repair. Do this before claiming
+	# a slot so a legacy or later-invalid scope produces one clear failed run and
+	# advances to the next cadence, rather than retrying an enqueue every hour.
+	from jarvis.chat.stock_variance_scope import configuration_issues, is_stock_variance
+
+	if is_stock_variance(row.agent):
+		with impersonate(run_as):
+			issues = configuration_issues(row.config or "{}")
+		if issues:
+			_record_failed(
+				row,
+				"scheduled run skipped: complete the Stock Variance company, Warehouse scope and reviewer in Configure",
+			)
+			_advance(row, now)
+			return
 
 	_dispatch(row, now, run_as=run_as, source_apps=source_apps, model_gate=model_gate)
 

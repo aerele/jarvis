@@ -10,7 +10,7 @@
 			class="mt-3 rounded-lg border border-outline-gray-2 bg-surface-gray-1 p-3 text-sm text-ink-gray-7"
 			role="status"
 		>
-			<p class="font-medium">Complete these settings before saving</p>
+			<p class="font-medium">Complete these settings before running</p>
 			<ul class="mt-2 list-disc space-y-1 pl-5">
 				<li v-for="(message, key) in shownErrors" :key="key">{{ message }}</li>
 			</ul>
@@ -117,9 +117,13 @@ const passiveScope = ref({});
 const initialState = ref("");
 const localErrors = ref({});
 
-const companySearch = useLinkSearch((query) => searchLink("Company", query), {
-	mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })),
-});
+const companySearch = useLinkSearch(
+	(query) =>
+		searchLink("Company", query, 20, undefined, undefined, [["Company", "is_group", "=", 0]]),
+	{
+		mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })),
+	}
+);
 const warehouseSearch = useLinkSearch(
 	(query) => {
 		if (!form.company) return Promise.resolve([]);
