@@ -318,8 +318,8 @@ class TestUninstallStopsALiveRun(AgentBudgetTestCase):
 		@contextmanager
 		def _launched_elsewhere_while_waiting(lock_name, **kw):
 			with other_connection() as db:
-				# Match the site's budget clock. SQL NOW() can still be in the
-				# previous month when the site has crossed local midnight.
+				# Launches and budget checks use the site clock. SQL NOW() can still
+				# be in the previous month when the site has crossed local midnight.
 				at = now_datetime()
 				db.sql(
 					f"""INSERT INTO `tab{RUN}` (name, creation, modified, owner, modified_by, agent,
