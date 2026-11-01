@@ -13,6 +13,18 @@
 		</div>
 
 		<template v-else-if="rec">
+			<section
+				v-if="safetyUpdateNotice"
+				class="mt-3 text-sm text-ink-gray-7"
+				role="status"
+				aria-live="polite"
+				aria-label="Action cancelled"
+			>
+				<p>{{ safetyUpdateNotice }}</p>
+				<Button class="mt-3" variant="solid" label="Done" @click="dismissSafetyUpdate" />
+			</section>
+
+			<template v-else-if="!dismissedSafetyUpdate">
 			<p class="text-sm text-ink-gray-6">
 				Jarvis proposed this in
 				<span class="font-medium text-ink-gray-8">{{
@@ -59,6 +71,7 @@
 				/>
 			</div>
 			<div v-if="notice" role="alert" class="mt-2 text-sm text-ink-red-5">{{ notice }}</div>
+			</template>
 		</template>
 	</div>
 </template>
@@ -98,6 +111,9 @@ const loading = ref(true);
 const loadError = ref("");
 const busy = ref(null); // "confirm" | "discard" | null
 const notice = ref("");
+const dismissedSafetyUpdate = ref(false);
+const SAFETY_UPDATE_COPY =
+	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
 
 // Only a plain object with a kind renders as a card; anything else is the summary line.
 const card = computed(() => {
@@ -106,6 +122,17 @@ const card = computed(() => {
 });
 const canAct = computed(() => rec.value?.can_act && rec.value?.pending_card_safe === true);
 const closedText = computed(() => chatStatusLine(rec.value));
+// A fenced read can turn a durable Pending row into a terminal safety receipt.
+// This surface must not keep its old Confirm/Discard wording or controls around it.
+const safetyUpdateNotice = computed(() => {
+	if (
+		dismissedSafetyUpdate.value ||
+		rec.value?.pending_card_safe === true ||
+		rec.value?.reason_code !== "safety_update"
+	)
+		return "";
+	return rec.value?.reason || SAFETY_UPDATE_COPY;
+});
 
 let req = 0; // monotonic: a stale load never overwrites a newer one
 async function load() {
@@ -158,6 +185,19 @@ function openChat() {
 			? { name: "DashboardsPage", query: { conversation } }
 			: "/c/" + conversation
 	);
+}
+
+function dismissSafetyUpdate() {
+	if (!safetyUpdateNotice.value) return;
+	dismissedSafetyUpdate.value = true;
+	// This is a local terminal receipt, not a second decision RPC. Tell the board
+	// to remove the selected stale row if it still has one.
+	decided({
+		ok: false,
+		pa_status: rec.value?.status || "",
+		reason_code: "safety_update",
+		outcome: "cancelled",
+	});
 }
 
 // The board calls this when the card leaves its rail: show the settled status, but

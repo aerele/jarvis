@@ -204,11 +204,26 @@
 
 		<!-- parked ERP-write confirmations (create/update Jarvis Dashboard…):
 		     rendered in-pane so a chat-driven save never dead-ends into the
-		     full chat view just to click Approve -->
+		     full chat view just to click Approve. A safety-settled card keeps a
+		     passive receipt here; it can never regain an action button. -->
 		<div
-			v-if="pendingCards.length"
+			v-if="safetyUpdateNotice || pendingCards.length"
 			class="flex max-h-[25%] shrink-0 flex-col gap-2 overflow-y-auto border-t px-4 py-3"
 		>
+			<div
+				v-if="safetyUpdateNotice"
+				class="dashboard-safety-update flex flex-col gap-2 rounded-md bg-surface-gray-2 p-3"
+				role="status"
+				aria-live="polite"
+			>
+				<div class="flex min-w-0 flex-col gap-0.5">
+					<span class="text-sm font-medium text-ink-gray-8">Action cancelled</span>
+					<span class="text-xs text-ink-gray-6">{{ safetyUpdateNotice.message }}</span>
+				</div>
+				<div>
+					<Button variant="subtle" label="Done" @click="dismissSafetyUpdateNotice" />
+				</div>
+			</div>
 			<div
 				v-for="pa in orderedCards"
 				:key="pa.token"
@@ -760,6 +775,7 @@ async function loadTranscript({ initial = false } = {}) {
 		const d = (await getDashboardConversation(conversation.value)) || {};
 		if (id !== loadReq) return;
 		messages.value = d.messages || [];
+		observePassiveSafetyUpdates(messages.value);
 		modelOverride.value = d.conversation?.model_override || "";
 		thinkingOverride.value = d.conversation?.thinking_override || "";
 		loadContext({ applyCompacting: initial });
@@ -807,6 +823,52 @@ function scheduleRefetch() {
 
 // ── parked confirmations (gated ERP writes park for human approval) ──────────
 const pendingCards = ref([]);
+// A close migration can settle a card while this pane still has a cached list.
+// Keep that token excluded until this conversation changes, so a late list
+// response cannot restore a Confirm button after its terminal receipt arrived.
+const safetySettledTokens = ref(new Set());
+const safetyUpdateNotice = ref(null);
+const SAFETY_UPDATE_COPY =
+	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
+
+function passiveSafetyUpdate(row) {
+	if (
+		row?.role !== "tool" ||
+		row.action_outcome !== "cancelled" ||
+		!row.tool_call_id
+	)
+		return null;
+	let result = row.tool_result;
+	if (typeof result === "string") {
+		try {
+			result = JSON.parse(result);
+		} catch {
+			return null;
+		}
+	}
+	if (result?.reason_code !== "safety_update") return null;
+	return {
+		token: row.tool_call_id,
+		message: result?.error?.message || SAFETY_UPDATE_COPY,
+	};
+}
+
+function observePassiveSafetyUpdates(rows) {
+	if (safetyUpdateNotice.value) return;
+	for (const row of rows || []) {
+		const notice = passiveSafetyUpdate(row);
+		if (!notice || safetySettledTokens.value.has(notice.token)) continue;
+		safetySettledTokens.value = new Set(safetySettledTokens.value).add(notice.token);
+		pendingCards.value = pendingCards.value.filter((card) => card.token !== notice.token);
+		safetyUpdateNotice.value = notice;
+		return;
+	}
+}
+
+function dismissSafetyUpdateNotice() {
+	safetyUpdateNotice.value = null;
+}
+
 // Server order, so a typed "confirm 1" / "discard 1" means the card shown first.
 const orderedCards = computed(() => sortPendingCards(pendingCards.value));
 
@@ -822,7 +884,10 @@ async function refreshPending() {
 		// render Confirm: reject raw, delayed, or old-server items unless the
 		// server attached its current close-fence attestation.
 		const items = ((env && env.data && env.data.pending) || []).filter(
-			(item) => item && item.pending_card_safe === true
+			(item) =>
+				item &&
+				item.pending_card_safe === true &&
+				!safetySettledTokens.value.has(item.token)
 		);
 		// keep in-flight busy flags across refreshes
 		const busy = new Set(pendingCards.value.filter((c) => c.busy).map((c) => c.token));
@@ -1223,6 +1288,8 @@ function clearThread({ keepRun = false } = {}) {
 	loadReq++; // drop any in-flight transcript load
 	messages.value = [];
 	pendingCards.value = [];
+	safetySettledTokens.value = new Set();
+	safetyUpdateNotice.value = null;
 	if (!keepRun) runActive.value = false;
 	draft.value = "";
 	pendingRetry = "";

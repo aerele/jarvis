@@ -330,6 +330,55 @@ describe("DashboardChatPane requires the pending-card safety attestation", () =>
 	});
 });
 
+describe("DashboardChatPane safety-update receipts", () => {
+	afterEach(() => {
+		api.getDashboardConversation.mockReset();
+		api.getDashboardConversation.mockResolvedValue({ messages: [] });
+		listPendingConfirmations.mockReset();
+		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: [] } });
+	});
+
+	it("replaces a suppressed card with one Done-only notice and keeps a valid sibling", async () => {
+		api.getDashboardConversation.mockResolvedValue({
+			messages: [
+				{
+					name: "receipt-1",
+					role: "tool",
+					tool_call_id: "stale",
+					action_outcome: "cancelled",
+					tool_result: {
+						reason_code: "safety_update",
+						error: { message: "This action was cancelled during a safety update. Nothing ran." },
+					},
+				},
+			],
+		});
+		listPendingConfirmations.mockResolvedValue({
+			ok: true,
+			data: {
+				pending: [
+					{ token: "stale", conversation: "conv1", tool: "create_doc", pending_card_safe: true },
+					{ token: "current", conversation: "conv1", tool: "create_doc", pending_card_safe: true },
+				],
+			},
+		});
+
+		const { wrapper } = mountPane();
+		await flushPromises();
+
+		const notice = wrapper.find(".dashboard-safety-update");
+		expect(notice.attributes("role")).toBe("status");
+		expect(notice.text()).toContain("This action was cancelled during a safety update. Nothing ran.");
+		expect(notice.findAll("button").map((button) => button.text())).toEqual(["Done"]);
+		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+		expect(wrapper.findAll("button").some((button) => button.text() === "Retry")).toBe(false);
+
+		await notice.find("button").trigger("click");
+		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
+		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+	});
+});
+
 // D3: the pane's Approve/Dismiss used to always show one generic "may have
 // expired" toast on any ok:false besides a storage blip. Now that cards carry
 // a reason_code (stale/target_missing/tampered/unverifiable, busy, …), reuse

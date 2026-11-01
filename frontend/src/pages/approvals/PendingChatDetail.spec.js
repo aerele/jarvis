@@ -142,6 +142,36 @@ describe("PendingChatDetail", () => {
 		expect(core.confirmTool).not.toHaveBeenCalled();
 	});
 
+	it("shows a suppressed safety receipt as one Done-only terminal notice", async () => {
+		const w = await mountWith(
+			rec({
+				pending_card_safe: false,
+				can_act: 0,
+				reason_code: "safety_update",
+				reason: "This action was cancelled during a safety update. Nothing ran.",
+			}),
+		);
+		expect(w.find('[role="status"]').attributes("aria-label")).toBe("Action cancelled");
+		expect(w.text()).toContain(
+			"This action was cancelled during a safety update. Nothing ran.",
+		);
+		expect(button(w, "Done")).toBeTruthy();
+		for (const label of ["Confirm", "Discard", "Open chat", "Try again"]) {
+			expect(button(w, label)).toBeUndefined();
+		}
+		expect(core.confirmTool).not.toHaveBeenCalled();
+		expect(core.dismissTool).not.toHaveBeenCalled();
+
+		await button(w, "Done").trigger("click");
+		expect(onDecided).toHaveBeenCalledWith({
+			ok: false,
+			pa_status: "Pending",
+			reason_code: "safety_update",
+			outcome: "cancelled",
+		});
+		expect(button(w, "Done")).toBeUndefined();
+	});
+
 	it("confirms through the chat's confirm_tool, then says the chat continues", async () => {
 		const w = await mountWith(rec());
 		core.confirmTool.mockResolvedValue({ ok: true, pa_status: "Executed" });
