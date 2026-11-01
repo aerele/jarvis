@@ -1,15 +1,21 @@
 """Cycle-Count Planner custody and output regressions."""
 
+import hashlib
+import json
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import cycle_count_policy, operator_review
 from jarvis.chat import cycle_count_review as review
-from jarvis.chat import operator_review
+
+POLICY_VECTOR_SHA256 = "ac68cfa58925c768c8bf208fb5592a6bf0b104d9ce9a38f669ff23c4f435059c"
 
 
 def config(**over):
@@ -116,55 +122,71 @@ def reseal_result(data, output):
 
 def result(data=None):
 	data = data or snapshot()
-	findings = [
-		{
-			"token": review.TOKEN,
-			"ref_doctype": "Warehouse",
-			"ref_name": "WH-A",
-			"amount": 0,
-			"severity": "note",
-			"result_class": "derived_candidate",
-			"confidence": "medium",
-			"match_basis": "Current records and approved cadence",
-			"false_positive_path": "The store lead can defer a count after review.",
-			"note": "Plan one human physical count for this warehouse.",
-			"proposal": {
-				"outcome": "plan",
-				"reason_code": "cadence_due",
-				"lines_considered": 1,
-				"lines_planned": 1,
-				"lines_rolled": 0,
-				"due_total": 1,
-				"lines": [
-					{
-						"item_code": "ITEM-A",
-						"stock_uom": "Nos",
-						"abc": "A",
-						"velocity": "FAST",
-						"outward_qty": "3",
-						"actual_qty": "5",
-						"stock_value": "100",
-						"last_physical_count_on": None,
-						"capture_required": False,
-					}
-				],
+	canonical = cycle_count_policy.evaluate(data)
+	return {key: canonical[key] for key in ("findings", "coverage", "scope", "integrity_digest")}
+
+
+def policy_snapshot():
+	"""One bounded plan with a due line, a private-cadence hold, and a cap tail."""
+	data = snapshot()
+	data["config"]["line_limit"] = 1
+	data["datasets"]["bins"].extend(
+		[
+			{
+				"name": "BIN-B",
+				"item_code": "ITEM-B",
+				"warehouse": "WH-A",
+				"actual_qty": "5",
+				"stock_value": "10",
+				"valuation_rate": "2",
 			},
+			{
+				"name": "BIN-C",
+				"item_code": "ITEM-C",
+				"warehouse": "WH-A",
+				"actual_qty": "5",
+				"stock_value": "5",
+				"valuation_rate": "1",
+			},
+		]
+	)
+	data["datasets"]["items"].extend(
+		[
+			{
+				"name": "ITEM-B",
+				"is_stock_item": 1,
+				"disabled": 0,
+				"end_of_life": None,
+				"stock_uom": "Nos",
+				"has_batch_no": 0,
+				"has_serial_no": 0,
+			},
+			{
+				"name": "ITEM-C",
+				"is_stock_item": 1,
+				"disabled": 0,
+				"end_of_life": None,
+				"stock_uom": "Nos",
+				"has_batch_no": 0,
+				"has_serial_no": 0,
+			},
+		]
+	)
+	data["datasets"]["physical_counts"] = [
+		{
+			"name": "COUNT-B",
+			"company": "Example",
+			"warehouse": "WH-A",
+			"counted_at": "2026-08-26 09:00:00",
 		}
 	]
-	coverage = {review.TOKEN: {"state": "evaluated"}}
-	return {
-		"findings": findings,
-		"coverage": coverage,
-		"scope": data["scope"],
-		"integrity_digest": review.digest(
-			{
-				"input_digest": data["source_digest"],
-				"scope": data["scope"],
-				"findings": findings,
-				"coverage": coverage,
-			}
-		),
-	}
+	data["datasets"]["physical_count_items"] = [
+		{"name": "COUNT-B-ITEM", "parent": "COUNT-B", "item_code": "ITEM-B", "counted_qty": "5"}
+	]
+	data["source_counts"].update(
+		{"Bin": 3, "Item": 3, "Jarvis Physical Count": 1, "Jarvis Physical Count Item": 1}
+	)
+	return reseal_snapshot(data)
 
 
 class TestCycleCountConfiguration(FrappeTestCase):
@@ -219,6 +241,136 @@ class TestCycleCountConfiguration(FrappeTestCase):
 			self.assertFalse(
 				review.is_countable_item(frappe._dict(is_stock_item=1, disabled=0, end_of_life="2026-10-05"))
 			)
+
+
+class TestCycleCountPolicyContract(FrappeTestCase):
+	def test_shared_golden_policy_vectors(self):
+		"""Pin the server policy to the shared fake vector contract."""
+		path = Path(__file__).with_name("fixtures") / "cycle_count_policy_vectors.json"
+		self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), POLICY_VECTOR_SHA256)
+		vectors = json.loads(path.read_text())["vectors"]
+		for vector in vectors:
+			with self.subTest(vector=vector["name"]):
+				source = deepcopy(vector["snapshot"])
+				source["source_digest"] = review.digest(source)
+				actual = cycle_count_policy.evaluate(source)
+				self.assertEqual(actual["integrity_digest"], vector["expected"]["integrity_digest"])
+				self.assertEqual(actual["rows_consumed"], vector["expected"]["rows_consumed"])
+				self.assertEqual(
+					{finding["ref_name"]: finding["proposal"] for finding in actual["findings"]},
+					vector["expected"]["proposals"],
+				)
+
+
+class TestCycleCountFreshReviewSnapshots(FrappeTestCase):
+	def test_cycle_count_collector_opens_a_fresh_snapshot(self):
+		"""The shared review wrapper starts Cycle Count source reads after prior reads."""
+		events = []
+
+		@contextmanager
+		def fresh_snapshot():
+			events.append("open")
+			try:
+				yield
+			finally:
+				events.append("close")
+
+		adapter = SimpleNamespace(
+			AGENT=review.AGENT,
+			fresh_source_snapshot=fresh_snapshot,
+			collect=lambda scope, policy: events.append(("collect", scope, policy))
+			or {"source_digest": "fresh"},
+		)
+		self.assertEqual(
+			operator_review._collect_current(adapter, {"scope": "current"}, {"policy": "current"}),
+			{"source_digest": "fresh"},
+		)
+		self.assertEqual(
+			events,
+			["open", ("collect", {"scope": "current"}, {"policy": "current"}), "close"],
+		)
+
+	def test_all_cycle_count_review_paths_use_the_current_collector(self):
+		"""Capture, staging, and approval check all use the fresh-source wrapper."""
+		scope = {"company": "Example"}
+		policy = {"reviewer": "fresh-reviewer@example.invalid"}
+		snapshot = {"scope": scope, "config": policy, "source_digest": "fresh"}
+		adapter = SimpleNamespace(
+			AGENT=review.AGENT,
+			LABEL="Cycle Count",
+			REVIEW_QUESTION="Review this plan.",
+			scope_from_config=lambda value: scope,
+			review_context=lambda *_: "safe context",
+		)
+
+		capture_run = frappe._dict(
+			name="fresh-capture-run",
+			assessment_config_json=frappe.as_json(policy),
+			scope_json=frappe.as_json(scope),
+			input_snapshot_json="",
+		)
+		capture_state = frappe._dict(
+			agent=review.AGENT, status="running", input_snapshot_json=frappe.as_json(snapshot)
+		)
+		with (
+			patch.object(operator_review.frappe.db, "get_value", return_value=capture_state),
+			patch.object(operator_review, "_collect_current", return_value=snapshot) as collect,
+		):
+			self.assertEqual(operator_review.get_inputs(capture_run, adapter)["source_digest"], "fresh")
+		collect.assert_called_once_with(adapter, scope, policy)
+
+		@contextmanager
+		def as_reviewer(_user):
+			yield
+
+		staged_run = frappe._dict(
+			name="fresh-stage-run",
+			agent=review.AGENT,
+			conversation="fresh-stage-conversation",
+			preparation_mode="live",
+			input_snapshot_json=frappe.as_json(snapshot),
+		)
+		installation = frappe._dict(name="fresh-stage-installation", reviewer=policy["reviewer"])
+		created = SimpleNamespace(
+			name="fresh-stage-approval", flags=frappe._dict(), insert=lambda **_kwargs: None
+		)
+
+		def stage_get_value(doctype, *_args, **_kwargs):
+			if doctype == "User":
+				return 1
+			if doctype == "Jarvis Approval Request":
+				return None
+			raise AssertionError(doctype)
+
+		with (
+			patch.object(operator_review.frappe, "has_permission", return_value=True),
+			patch.object(operator_review.frappe.db, "get_value", side_effect=stage_get_value),
+			patch.object(operator_review.frappe, "get_doc", return_value=created),
+			patch.object(operator_review.frappe.share, "add"),
+			patch("jarvis._session.impersonate", as_reviewer),
+			patch.object(operator_review, "_collect_current", return_value=snapshot) as collect,
+		):
+			self.assertEqual(
+				operator_review.stage_reviews(
+					staged_run,
+					installation,
+					[{"ref_name": "WH-A", "ref_doctype": "Warehouse"}],
+					adapter,
+				),
+				[created.name],
+			)
+		collect.assert_called_once_with(adapter, scope, policy)
+
+		approval = frappe._dict(
+			agent=review.AGENT,
+			assessment_evidence=frappe.as_json({"scope": scope, "policy": policy, "input_digest": "fresh"}),
+		)
+		with (
+			patch.object(operator_review, "may_review", return_value=True),
+			patch.object(operator_review, "_collect_current", return_value=snapshot) as collect,
+		):
+			operator_review.check_review(approval, True, adapter)
+		collect.assert_called_once_with(adapter, scope, policy)
 
 
 class TestCycleCountCollection(FrappeTestCase):
@@ -824,7 +976,7 @@ class TestCycleCountOutput(FrappeTestCase):
 	def test_valid_output_is_ready_and_never_mentions_stock_reconciliation(self):
 		findings, coverage, ready = self.check(result())
 		self.assertTrue(ready)
-		self.assertEqual(coverage, {review.TOKEN: {"state": "evaluated"}})
+		self.assertEqual(coverage[review.TOKEN]["state"], "evaluated")
 		self.assertEqual(findings[0]["proposal"]["lines"][0]["item_code"], "ITEM-A")
 		self.assertNotIn("Stock Reconciliation", review.REVIEW_QUESTION)
 
@@ -854,6 +1006,57 @@ class TestCycleCountOutput(FrappeTestCase):
 			}
 		)
 		with self.assertRaisesRegex(frappe.ValidationError, "cannot assert"):
+			self.check(out, data)
+
+	def test_recomputed_digest_cannot_select_a_private_cadence_hold(self):
+		data = policy_snapshot()
+		out = result(data)
+		line = out["findings"][0]["proposal"]["lines"][0]
+		line.update(
+			{
+				"item_code": "ITEM-B",
+				"abc": "C",
+				"velocity": "SLOW",
+				"outward_qty": "0",
+				"actual_qty": "5",
+				"stock_value": "10",
+				"last_physical_count_on": "2026-08-26",
+			}
+		)
+		reseal_result(data, out)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "sealed policy"):
+			self.check(out, data)
+
+	def test_recomputed_digest_cannot_change_abc_or_take_the_cap_tail(self):
+		data = policy_snapshot()
+		for mutation in (
+			lambda output: output["findings"][0]["proposal"]["lines"][0].update({"abc": "B"}),
+			lambda output: output["findings"][0]["proposal"]["lines"][0].update(
+				{
+					"item_code": "ITEM-C",
+					"abc": "C",
+					"velocity": "SLOW",
+					"outward_qty": "0",
+					"actual_qty": "5",
+					"stock_value": "5",
+					"last_physical_count_on": None,
+				}
+			),
+		):
+			out = result(data)
+			mutation(out)
+			reseal_result(data, out)
+			with self.assertRaisesRegex(frappe.ValidationError, "sealed policy"):
+				self.check(out, data)
+
+	def test_recomputed_digest_cannot_change_due_or_rolled_totals(self):
+		data = policy_snapshot()
+		out = result(data)
+		out["findings"][0]["proposal"].update({"lines_rolled": 0, "due_total": 1})
+		reseal_result(data, out)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "sealed policy"):
 			self.check(out, data)
 
 	def test_complete_private_file_requires_all_source_rows(self):
@@ -957,7 +1160,10 @@ class TestCycleCountOutput(FrappeTestCase):
 		data = snapshot()
 		data["datasets"]["outward_ledger"] = data["datasets"].pop("ledger")
 		reseal_snapshot(data)
-		output = result(data)
+		# A rolling-update source is intentionally not evaluable by the current
+		# policy.  The returned payload is irrelevant once its old schema is
+		# recognised; it must close partial rather than enter the canonical gate.
+		output = result()
 
 		findings, coverage, ready = self.check(output, data)
 		self.assertEqual(findings, [])
@@ -1035,6 +1241,65 @@ class TestCycleCountOutput(FrappeTestCase):
 		self.assertEqual(persist.call_args.args[2], [])
 		self.assertEqual(persist.call_args.kwargs["coverage"], coverage)
 		save_output.assert_called_once()
+
+	def test_tampered_rehashed_policy_output_cannot_stage_a_review(self):
+		"""The writeback path must stop before the approval side effect."""
+		from jarvis.tools import record_agent_run as writeback
+
+		data = policy_snapshot()
+		output = result(data)
+		output["findings"][0]["proposal"]["lines"][0].update(
+			{
+				"item_code": "ITEM-B",
+				"abc": "C",
+				"velocity": "SLOW",
+				"outward_qty": "0",
+				"actual_qty": "5",
+				"stock_value": "10",
+				"last_physical_count_on": "2026-08-26",
+			}
+		)
+		reseal_result(data, output)
+		output.update({"truncated": False, "rows_consumed": sum(data["source_counts"].values())})
+		run = frappe._dict(
+			name="RUN-CYCLE-POLICY-TAMPER",
+			agent=review.AGENT,
+			installation="INST-CYCLE-POLICY-TAMPER",
+			status="completed",
+			input_snapshot_json=frappe.as_json(data),
+			preparation_mode="live",
+			owner="Administrator",
+		)
+		run_row = frappe._dict(
+			name=run.name,
+			status="running",
+			installation=run.installation,
+			agent=run.agent,
+		)
+		state = frappe._dict(status="running", input_snapshot_json=run.input_snapshot_json)
+		inst = frappe._dict(name=run.installation, reviewer="Administrator")
+		listing = frappe._dict(rule_tokens=frappe.as_json([review.TOKEN]), doctypes_required="[]")
+
+		def get_value(doctype, selector, *_args, **_kwargs):
+			if doctype == writeback.RUN:
+				return run_row if isinstance(selector, dict) else state
+			if doctype == writeback.LISTING:
+				return listing
+			return None
+
+		with (
+			patch("jarvis.tools._agent_run_ctx.get_session_key", return_value="cycle-policy-tamper"),
+			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(
+				frappe,
+				"get_doc",
+				side_effect=lambda doctype, _name: run if doctype == writeback.RUN else inst,
+			),
+			patch.object(review, "stage_reviews") as stage,
+		):
+			with self.assertRaisesRegex(frappe.ValidationError, "sealed policy"):
+				writeback.record_agent_run(**output)
+		stage.assert_not_called()
 
 
 class TestCycleCountPrivateTool(FrappeTestCase):
@@ -2746,7 +3011,7 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 
 	def test_physical_count_visibility_follows_the_approved_plan(self):
 		"""Owner, reviewer, or exact Approval DocShare reader can use one plan."""
-		from jarvis.chat import cycle_count_entry
+		from jarvis.chat import approvals_api, cycle_count_entry
 
 		viewer = self._user("cycle-plan-viewer@example.invalid", ("Jarvis User", "Stock User"))
 		outsider = self._user("cycle-plan-outsider@example.invalid", ("Jarvis User", "Stock User"))
@@ -2835,6 +3100,21 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 				True,
 				f"{allowed} can read physical-count items through the approved plan",
 			)
+		frappe.set_user(self.reviewer)
+		self.assertEqual(
+			frappe.get_list("Jarvis Approval Request", filters={"name": approved.name}, pluck="name"),
+			[approved.name],
+			"the sealed reviewer can list the native-readable plan without a DocShare",
+		)
+		self.assertIn(
+			approved.name,
+			[
+				row["name"]
+				for row in approvals_api.list_approvals_page(
+					filters={"conversation": approved.conversation, "status": "All"}, page_length=20
+				)["rows"]
+			],
+		)
 
 		for denied in (outsider, manager):
 			frappe.set_user(denied)
@@ -2864,7 +3144,11 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		)
 		frappe.clear_cache(user=viewer)
 		frappe.set_user(viewer)
-		self.assertEqual(cycle_count_entry.list_count_plans()["rows"], [])
+		self.assertNotIn(
+			approved.name,
+			[row["request"] for row in cycle_count_entry.list_count_plans()["rows"]],
+			"a revoked reader must not keep this plan through unrelated readable plans",
+		)
 		self.assertFalse(cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name)))
 		with self.assertRaises(frappe.PermissionError):
 			cycle_count_entry.get_count_plan(approved.name)
@@ -2888,6 +3172,237 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			"a revoked Approval DocShare reader cannot read physical-count items",
 		)
 		frappe.set_user("Administrator")
+
+	def test_native_stock_read_is_required_even_for_a_system_manager(self):
+		"""A sealed-plan member never gets stock details from an approval role alone."""
+		from jarvis.chat import approvals_api, chat_permissions, cycle_count_entry
+
+		manager = self._user(
+			"cycle-native-read-manager@example.invalid", ("Jarvis User", "Stock User", "System Manager")
+		)
+		approved = self._plan()
+		frappe.db.set_value(
+			"Jarvis Approval Request",
+			approved.name,
+			"context_md",
+			"COUNT-PLAN-CONTEXT-MARKER",
+			update_modified=False,
+		)
+		frappe.set_user(self.counter)
+		try:
+			fact_name = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)["saved"][0]["name"]
+		finally:
+			frappe.set_user("Administrator")
+
+		real_has_permission = frappe.has_permission
+
+		def no_native_stock_read(doctype, ptype="read", *args, **kwargs):
+			if doctype in {"Warehouse", "Item"} and ptype in {"read", "select"}:
+				return False
+			return real_has_permission(doctype, ptype, *args, **kwargs)
+
+		frappe.set_user(manager)
+		try:
+			with patch(
+				"jarvis.chat.cycle_count_permissions.frappe.has_permission", side_effect=no_native_stock_read
+			):
+				self.assertEqual(cycle_count_entry.list_count_plans()["rows"], [])
+				self.assertFalse(cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name)))
+				with self.assertRaises(frappe.PermissionError):
+					cycle_count_entry.get_count_plan(approved.name)
+				self.assertFalse(chat_permissions.has_approval_permission(approved, "read", manager))
+				self.assertEqual(
+					frappe.get_list(
+						"Jarvis Approval Request",
+						filters={"name": approved.name},
+						fields=["name", "context_md"],
+					),
+					[],
+				)
+				self.assertFalse(
+					any(row["name"] == approved.name for row in approvals_api.list_approvals(status="All"))
+				)
+				page = approvals_api.list_approvals_page(
+					filters={"conversation": approved.conversation}, page_length=20
+				)
+				self.assertEqual((page["rows"], page["total"]), ([], 0))
+				with self.assertRaises(frappe.PermissionError):
+					approvals_api.get_approval(approved.name)
+				self._assert_physical_count_readable(
+					manager,
+					fact_name,
+					False,
+					"a System Manager without native stock reads cannot see a count header",
+				)
+				self._assert_physical_count_items_readable(
+					manager,
+					fact_name,
+					False,
+					"a System Manager without native stock reads cannot see count items",
+				)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_legacy_approval_list_fills_its_limit_after_hiding_a_count_plan(self):
+		"""A hidden newest plan cannot consume the legacy endpoint's only row."""
+		from jarvis.chat import approvals_api
+
+		manager = self._user(
+			"cycle-legacy-list-manager@example.invalid", ("Jarvis User", "Stock User", "System Manager")
+		)
+		conversation = frappe.get_doc(
+			{"doctype": "Jarvis Conversation", "title": "Visible ordinary approval"}
+		).insert(ignore_permissions=True)
+		visible = frappe.get_doc(
+			{
+				"doctype": "Jarvis Approval Request",
+				"title": "Visible ordinary approval",
+				"source": "Chat",
+				"status": "Pending",
+				"document_type": "",
+				"conversation": conversation.name,
+				"question": "Approve the ordinary test request.",
+				"options": "[]",
+			}
+		).insert(ignore_permissions=True)
+		hidden = self._plan(pending=True)
+		# Make the pending count plan unambiguously newest. The endpoint sorts by
+		# creation, while the fixture's rapid inserts could otherwise share a second.
+		frappe.db.set_value(
+			"Jarvis Approval Request",
+			visible.name,
+			"creation",
+			"2099-01-01 00:00:00",
+			update_modified=False,
+		)
+		frappe.db.set_value(
+			"Jarvis Approval Request",
+			hidden.name,
+			"creation",
+			"2099-01-02 00:00:00",
+			update_modified=False,
+		)
+		real_has_permission = frappe.has_permission
+
+		def no_native_stock_read(doctype, ptype="read", *args, **kwargs):
+			if doctype in {"Warehouse", "Item"} and ptype in {"read", "select"}:
+				return False
+			return real_has_permission(doctype, ptype, *args, **kwargs)
+
+		frappe.clear_cache(user=manager)
+		frappe.set_user(manager)
+		try:
+			with patch(
+				"jarvis.chat.cycle_count_permissions.frappe.has_permission", side_effect=no_native_stock_read
+			):
+				rows = approvals_api.list_approvals(status="Pending", limit=1)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual([row["name"] for row in rows], [visible.name])
+
+	def test_uninstall_keeps_a_sanitized_run_for_an_approved_count_plan(self):
+		"""An uninstall leaves the sealed writer fence, but no reusable run capability."""
+		from jarvis.chat import agent_scheduler, agents_api, cycle_count_entry
+
+		approved = self._plan()
+		pending = self._plan(pending=True)
+		installation = frappe.get_doc(
+			{
+				"doctype": "Jarvis Agent Installation",
+				"agent": review.AGENT,
+				"enabled": 0,
+				"run_as_user": self.counter,
+				"reviewer": self.reviewer,
+				"installable": 1,
+				"activation_state": "shadow",
+				"config": "{}",
+			}
+		)
+		installation.flags.ignore_validate = True
+		installation.insert(ignore_permissions=True, ignore_mandatory=True)
+		session_key = "agent:cycle-count-uninstall:" + frappe.generate_hash(length=16)
+		frappe.get_doc(
+			{
+				"doctype": "Jarvis Chat Session",
+				"session_key": session_key,
+				"user": self.counter,
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.set_value(
+			"Jarvis Agent Run",
+			approved.run,
+			{
+				"installation": installation.name,
+				"session_key": session_key,
+				"input_snapshot_json": '{"test":"input"}',
+				"assessment_output_json": '{"test":"output"}',
+				"assessment_config_json": '{"test":"config"}',
+				"scope_json": '{"test":"scope"}',
+				"tools_allow_json": '["jarvis__get_cycle_count_inputs"]',
+				"capability_contract": "snapshot",
+				"capability_nature": "read_only",
+				"capability_writes_json": "[]",
+			},
+			update_modified=False,
+		)
+		frappe.db.set_value(
+			"Jarvis Agent Run", pending.run, "installation", installation.name, update_modified=False
+		)
+		frappe.db.commit()
+		try:
+			agents_api._uninstall_cascade(
+				frappe.get_doc("Jarvis Agent Installation", installation.name), True
+			)
+
+			self.assertFalse(frappe.db.exists("Jarvis Agent Installation", installation.name))
+			self.assertFalse(frappe.db.exists("Jarvis Chat Session", {"session_key": session_key}))
+			self.assertEqual(
+				frappe.db.get_value("Jarvis Approval Request", approved.name, "run"), approved.run
+			)
+			self.assertEqual(frappe.db.get_value("Jarvis Approval Request", pending.name, "run"), pending.run)
+			self.assertTrue(
+				frappe.db.exists("Jarvis Agent Run", pending.run),
+				"a pending Cycle-Count review must not retain a dangling run Link",
+			)
+			row = frappe.db.get_value("Jarvis Agent Run", approved.run, "*", as_dict=True)
+			self.assertIsNotNone(row)
+			self.assertIsNone(row.installation)
+			self.assertFalse(row.session_key)
+			self.assertTrue(
+				all(not row.get(fieldname) for fieldname in agent_scheduler._kept_row_clear_values()),
+				"the retained run kept uninstallable agent state",
+			)
+			frappe.set_user(self.counter)
+			self.assertTrue(cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name)))
+			result = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)
+			self.assertEqual(result["saved"][0]["idempotent"], 0)
+		finally:
+			frappe.set_user("Administrator")
+			count_names = frappe.get_all(
+				"Jarvis Physical Count", filters={"approval_request": approved.name}, pluck="name"
+			)
+			if count_names:
+				frappe.db.delete("Jarvis Physical Count Item", {"parent": ["in", count_names]})
+				frappe.db.delete("Jarvis Physical Count", {"name": ["in", count_names]})
+			frappe.db.delete("Jarvis Approval Request", {"name": ["in", [approved.name, pending.name]]})
+			frappe.db.delete("Jarvis Agent Run", {"name": ["in", [approved.run, pending.run]]})
+			frappe.db.delete("Jarvis Chat Session", {"session_key": session_key})
+			frappe.db.delete("Jarvis Agent Installation", {"name": installation.name})
+			frappe.db.delete("Jarvis Agent Activity", {"installation": installation.name})
+			frappe.db.delete(
+				"Jarvis Conversation", {"name": ["in", [approved.conversation, pending.conversation]]}
+			)
+			frappe.db.commit()
 
 	def test_stock_variance_reads_only_inside_its_active_server_bound_scope(self):
 		"""A running delegate can read its source, but never gains Desk access."""
@@ -2929,6 +3444,7 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			"company": self.company,
 			"from_date": today,
 			"to_date": today,
+			"report_date": today,
 			"record_scope": {"doctype": "Warehouse", "name": self.warehouse},
 		}
 		try:
@@ -2979,6 +3495,14 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 					False,
 					"a run scope for a different date leaked this count",
 				)
+				previous_day = frappe.utils.getdate(frappe.utils.add_days(today, -1)).isoformat()
+				set_scope({**scope, "report_date": previous_day})
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a report cutoff before the count leaked this source fact",
+				)
 				set_scope(
 					{
 						**scope,
@@ -3000,6 +3524,16 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 				)
 
 				set_scope(scope)
+				frappe.db.set_value("Warehouse", self.warehouse, "disabled", 1, update_modified=False)
+				try:
+					self._assert_physical_count_readable(
+						self.stock_variance_user,
+						fact_name,
+						False,
+						"a disabled Warehouse leaked a source fact to the delegate",
+					)
+				finally:
+					frappe.db.set_value("Warehouse", self.warehouse, "disabled", 0, update_modified=False)
 				session = frappe.db.get_value(
 					"Jarvis Chat Session",
 					{"session_key": delegate.session_key},

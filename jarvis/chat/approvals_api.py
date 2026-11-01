@@ -111,11 +111,34 @@ def _may_act_on(conversation: str | None) -> bool:
 	return frappe.db.get_value("Jarvis Conversation", conversation, "owner") == frappe.session.user
 
 
+def _require_cycle_count_plan_read(doc) -> None:
+	"""Apply the stock-source read gate before an Approval path reveals a plan."""
+	if doc.get("agent") != "cycle-count-planner-operator":
+		return
+	from jarvis.chat.cycle_count_permissions import require_count_plan_read
+
+	require_count_plan_read(doc)
+
+
+def _may_list_approval(row) -> bool:
+	"""Filter the legacy list API, which intentionally bypasses DocType hooks."""
+	if row.get("agent") != "cycle-count-planner-operator":
+		return True
+	from jarvis.chat.cycle_count_permissions import may_read_count_plan
+
+	return may_read_count_plan(row)
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 	"""Approvals visible to the current user (owner of the linked
-	conversation, or any System Manager)."""
+	conversation, or any System Manager).
+
+	Cycle-Count plans also require current native Warehouse and Item read. Keep
+	that filter in SQL, before the legacy endpoint's limit, so inaccessible plans
+	cannot consume an otherwise visible page.
+	"""
 	if status not in ("Pending", "Approved", "Rejected", "Answered", "Dismissed", "Decided", "All"):
 		frappe.throw("Invalid status filter")
 	if status == "All":
@@ -137,6 +160,17 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 		if not my_convs:
 			return []
 		filters["conversation"] = ["in", my_convs]
+	or_filters = None
+	if frappe.session.user != "Administrator":
+		from jarvis.chat.cycle_count_permissions import CYCLE_COUNT_PLANNER, visible_count_plan_approval_names
+
+		readable_count_plans = visible_count_plan_approval_names()
+		# ``filters`` ANDs this OR group. The normal rows are unchanged; a
+		# Cycle-Count row must be one of the exact plan names whose owner/reviewer/
+		# share boundary and native stock read both passed above.
+		or_filters = [["agent", "is", "not set"], ["agent", "!=", CYCLE_COUNT_PLANNER]]
+		if readable_count_plans:
+			or_filters.append(["name", "in", readable_count_plans])
 	rows = frappe.get_all(
 		APPROVAL,
 		filters=filters,
@@ -155,13 +189,18 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 			"decided_by",
 			"decided_at",
 			"creation",
+			"agent",
+			"assessment_evidence",
 		],
 		order_by="creation desc",
 		limit_page_length=int(limit),
+		or_filters=or_filters,
 	)
-	rows = [r for r in rows if not is_collaborative(r.get("conversation"))]
+	rows = [r for r in rows if not is_collaborative(r.get("conversation")) and _may_list_approval(r)]
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
+		r.pop("assessment_evidence", None)
+		r.pop("agent", None)
 	conversation_names = [r.get("conversation") for r in rows if r.get("conversation")]
 	conversation_origins = {}
 	if conversation_names:
@@ -307,11 +346,34 @@ def list_approvals_page(
 		base.append(legacy)
 	if _ar.sheet_ready():
 		base.append(IfNull(a.sheet, "") == "")  # answered in its File Box sheet
-	if not is_sm:
-		# Owner OR tagged: the caller owns the linked conversation, or holds a
-		# DocShare read grant on the approval (docmeta_api.toggle_share /
-		# assignment). EXISTS, not JOIN: a row matching BOTH arms must still
-		# appear exactly once in rows/total/facets.
+	# The Approval Board uses query-builder reads and so does not pass through
+	# the DocType list hook. Bind Cycle-Count rows to the same native
+	# Warehouse/Item access set. A sealed reviewer is a valid Cycle-Count reader
+	# even if no current DocShare remains; keep that exception within this set.
+	if me != "Administrator":
+		from jarvis.chat.cycle_count_permissions import CYCLE_COUNT_PLANNER, visible_count_plan_approval_names
+
+		readable_count_plans = visible_count_plan_approval_names(me)
+		not_count_plan = a.agent.isnull() | (a.agent != CYCLE_COUNT_PLANNER)
+		readable_plan = (
+			(a.agent == CYCLE_COUNT_PLANNER) & a.name.isin(readable_count_plans)
+			if readable_count_plans
+			else None
+		)
+		if is_sm:
+			base.append(not_count_plan | readable_plan if readable_count_plans else not_count_plan)
+		else:
+			# Owner OR tagged: the caller owns the linked conversation, or holds a
+			# DocShare read grant on the approval (docmeta_api.toggle_share /
+			# assignment). EXISTS, not JOIN: a row matching BOTH arms must still
+			# appear exactly once in rows/total/facets.
+			membership = _owns_conversation(a, me) | _tagged(a, me)
+			base.append(
+				(membership & not_count_plan) | readable_plan
+				if readable_count_plans
+				else membership & not_count_plan
+			)
+	elif not is_sm:
 		base.append(_owns_conversation(a, me) | _tagged(a, me))
 	status = f.get("status") or "Pending"
 	if status not in _APPROVAL_STATUSES:
@@ -578,6 +640,7 @@ def get_approval(name: str) -> dict:
 	READ but gets ``can_act=0`` so the UI hides the decide controls. ``can_act``
 	mirrors what ``decide()`` would permit; the UI combines it with status."""
 	doc = frappe.get_doc(APPROVAL, name)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.conversation)
@@ -678,9 +741,26 @@ def _ar_pending_count() -> int:
 	legacy = _legacy_approval(a)
 	if legacy is not None:
 		query = query.where(legacy)
-	if "System Manager" not in frappe.get_roles():
-		me = frappe.session.user
-		query = query.where(_owns_conversation(a, me) | _tagged(a, me))
+	me = frappe.session.user
+	if me != "Administrator":
+		from jarvis.chat.cycle_count_permissions import CYCLE_COUNT_PLANNER, visible_count_plan_approval_names
+
+		readable_count_plans = visible_count_plan_approval_names(me)
+		not_count_plan = a.agent.isnull() | (a.agent != CYCLE_COUNT_PLANNER)
+		readable_plan = (
+			(a.agent == CYCLE_COUNT_PLANNER) & a.name.isin(readable_count_plans)
+			if readable_count_plans
+			else None
+		)
+		if "System Manager" in frappe.get_roles():
+			query = query.where(not_count_plan | readable_plan if readable_count_plans else not_count_plan)
+		else:
+			membership = _owns_conversation(a, me) | _tagged(a, me)
+			query = query.where(
+				(membership & not_count_plan) | readable_plan
+				if readable_count_plans
+				else membership & not_count_plan
+			)
 	return query.run()[0][0]
 
 
@@ -742,6 +822,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	if not decision:
 		frappe.throw("Decision text is required")
 	doc = frappe.get_doc(APPROVAL, name)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.get("conversation"))
@@ -848,6 +929,7 @@ def dismiss_approval(name: str) -> dict:
 	"""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.conversation)
@@ -890,6 +972,7 @@ def restore_approval(name: str) -> dict:
 	accidental dismiss."""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.conversation)

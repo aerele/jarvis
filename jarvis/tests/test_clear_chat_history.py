@@ -40,10 +40,9 @@ def setUpModule():
 	install_synthetic_runtime_profile()
 
 
-def _result(*kept, deleted, failed=()):
-	"""``kept``: left because a reply is in progress. ``failed``: not deleted because
-	of an error."""
-	return {
+def _result(*kept, deleted, failed=(), retained_count_plan_names=()):
+	"""``kept``: retained chat names. ``failed``: names left by an error."""
+	result = {
 		"ok": True,
 		"deleted": deleted,
 		"skipped": len(kept),
@@ -51,6 +50,9 @@ def _result(*kept, deleted, failed=()):
 		"failed": len(failed),
 		"failed_names": list(failed),
 	}
+	if retained_count_plan_names:
+		result["retained_count_plan_names"] = list(retained_count_plan_names)
+	return result
 
 
 def _logged(log, title) -> list[dict]:
@@ -455,6 +457,64 @@ class TestWhichChatsAreKept(_ChatsTestCase):
 			frappe.set_user("Administrator")
 			_cleanup_conversations(BYSTANDER)
 			frappe.set_user(TEST_USER)
+
+
+class TestCycleCountHistoryRetention(_ChatsTestCase):
+	def test_an_approved_cycle_count_plan_keeps_its_owner_conversation(self):
+		"""Clear history must not leave an approved plan without its owner boundary."""
+		conv = self._chat("done")
+		run = frappe.get_doc(
+			{
+				"doctype": "Jarvis Agent Run",
+				"agent": "cycle-count-planner-operator",
+				"status": "completed",
+				"started_at": frappe.utils.now(),
+				"finished_at": frappe.utils.now(),
+				"conversation": conv,
+			}
+		)
+		run.flags.ignore_validate = True
+		run.flags.ignore_links = True
+		run.insert(ignore_permissions=True, ignore_mandatory=True)
+		approval = frappe.get_doc(
+			{
+				"doctype": "Jarvis Approval Request",
+				"title": "Retained Cycle Count plan",
+				"source": "Agent Review",
+				"status": "Pending",
+				"conversation": conv,
+				"agent": "cycle-count-planner-operator",
+				"run": run.name,
+				"question": "Approve the count plan.",
+				"options": "[]",
+			}
+		)
+		approval.flags.jarvis_server_write = True
+		approval.flags.ignore_links = True
+		approval.insert(ignore_permissions=True, ignore_mandatory=True)
+		frappe.db.set_value(
+			"Jarvis Approval Request",
+			approval.name,
+			{"status": "Approved", "decision": "Approved for retention test"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		try:
+			self.assertEqual(
+				chat_api.clear_chat_history(),
+				_result(conv, deleted=0, retained_count_plan_names=[conv]),
+			)
+			self.assertTrue(frappe.db.exists(CONV, conv))
+			self.assertTrue(frappe.db.exists("Jarvis Approval Request", approval.name))
+			self.assertEqual(
+				frappe.db.get_value("Jarvis Approval Request", approval.name, "conversation"), conv
+			)
+		finally:
+			# ``clear_chat_history`` commits by design. Remove these test-only linked
+			# rows before the pump fixture clears the conversation.
+			frappe.db.delete("Jarvis Approval Request", {"name": approval.name})
+			frappe.db.delete("Jarvis Agent Run", {"name": run.name})
+			frappe.db.commit()
 
 
 class TestAWriteConflictInTheTrashHook(_ChatsTestCase):
