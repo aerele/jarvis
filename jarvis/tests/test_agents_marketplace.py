@@ -536,6 +536,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 			json.loads(frappe.db.get_value(LISTING, "grn-hygiene-auditor", "config_keys")),
 			["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
 		)
+		self.assertEqual(
+			frappe.db.get_value(LISTING, "grn-hygiene-auditor", "version"),
+			"0.4.1",
+		)
 
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
 		"""An agent the registry declares no config_keys for (everyone but

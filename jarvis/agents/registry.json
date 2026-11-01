@@ -1006,7 +1006,7 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "status": "Published",
       "description": "Reviews receiving metrics for selected stock receipts. Shows conversion candidates, recorded batch and serial capture, Purchase Order links and direct invoice timing. Billing totals use ERPNext current recorded state, not historical liability. Read-only aggregate meter; saves summaries and source receipt links.",
       "tools_required": [
