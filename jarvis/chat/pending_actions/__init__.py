@@ -14,6 +14,7 @@ Extension points for later callers: ``_park.SUPERSEDE_HOOK``,
 from jarvis.chat.pending_actions._execute import ArmHook, ExecuteCrashed, authorize, execute
 from jarvis.chat.pending_actions._lifecycle import (
 	cancel_all_chat_pending,
+	cancel_chat_pending_before_generation,
 	cancel_for_conversation,
 	cancel_unverifiable,
 	discard,
@@ -34,6 +35,7 @@ __all__ = [
 	"_transition",
 	"authorize",
 	"cancel_all_chat_pending",
+	"cancel_chat_pending_before_generation",
 	"cancel_for_conversation",
 	"cancel_unverifiable",
 	"claim_settled",

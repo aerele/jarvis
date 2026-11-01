@@ -37,6 +37,7 @@ from jarvis.chat.pending_confirm_legacy import (  # re-exported for callers
 	_OWNER_PREFIX,
 	_PREFIX,
 	_TTL_S,
+	LegacyConfirmationRevoked,
 	PendingConfirmOutcomeUnknown,
 	PendingConfirmStorageError,
 	_claim_key,
@@ -44,6 +45,7 @@ from jarvis.chat.pending_confirm_legacy import (  # re-exported for callers
 	_owner_key,
 	_pending_item,
 	args_hash,
+	assert_dispatch_allowed,
 )
 
 FLAG = "jarvis_pa_chat_cards"

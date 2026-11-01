@@ -464,6 +464,25 @@ def _dispatch_from_session(
 			# finishes the run. An ordinary chat session yields None and nothing below
 			# does anything.
 			step_run = agent_run_steps.step_target(cap)
+			# Authentication resolves the user before this function. A close migration
+			# can delete an old RRO bearer in between, leaving an orphan session with no
+			# Run record for the normal capability resolver to identify. Check the
+			# immutable agent id in the bearer immediately before generic dispatch.
+			# This is intentionally after all read-only preflight and before _run_tool.
+			from jarvis.chat.reorder_replenishment_gate import assert_session_dispatch_allowed
+
+			try:
+				assert_session_dispatch_allowed(session_key)
+			except frappe.PermissionError as exc:
+				result = _error("PermissionError", str(exc))
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=parsed_args,
+					result=result,
+					tool_call_id=tool_call_id,
+				)
+				return result
 			started_ms = time.monotonic()
 			try:
 				with _agent_read_time_limit(tool):
