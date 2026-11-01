@@ -828,6 +828,7 @@ const pendingCards = ref([]);
 // response cannot restore a Confirm button after its terminal receipt arrived.
 const safetySettledTokens = ref(new Set());
 const safetyUpdateNotice = ref(null);
+const safetyUpdateQueue = ref([]);
 const SAFETY_UPDATE_COPY =
 	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
 
@@ -853,20 +854,27 @@ function passiveSafetyUpdate(row) {
 	};
 }
 
+function enqueueSafetyUpdateNotice(notice) {
+	if (!safetyUpdateNotice.value) {
+		safetyUpdateNotice.value = notice;
+		return;
+	}
+	safetyUpdateQueue.value = [...safetyUpdateQueue.value, notice];
+}
+
 function observePassiveSafetyUpdates(rows) {
-	if (safetyUpdateNotice.value) return;
 	for (const row of rows || []) {
 		const notice = passiveSafetyUpdate(row);
 		if (!notice || safetySettledTokens.value.has(notice.token)) continue;
 		safetySettledTokens.value = new Set(safetySettledTokens.value).add(notice.token);
 		pendingCards.value = pendingCards.value.filter((card) => card.token !== notice.token);
-		safetyUpdateNotice.value = notice;
-		return;
+		enqueueSafetyUpdateNotice(notice);
 	}
 }
 
 function dismissSafetyUpdateNotice() {
-	safetyUpdateNotice.value = null;
+	safetyUpdateNotice.value = safetyUpdateQueue.value[0] || null;
+	safetyUpdateQueue.value = safetyUpdateQueue.value.slice(1);
 }
 
 // Server order, so a typed "confirm 1" / "discard 1" means the card shown first.
@@ -1290,6 +1298,7 @@ function clearThread({ keepRun = false } = {}) {
 	pendingCards.value = [];
 	safetySettledTokens.value = new Set();
 	safetyUpdateNotice.value = null;
+	safetyUpdateQueue.value = [];
 	if (!keepRun) runActive.value = false;
 	draft.value = "";
 	pendingRetry = "";

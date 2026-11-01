@@ -304,14 +304,15 @@ test("Panel.vue keeps a refused card instead of resolving it away", () => {
   assert.ok(kept < body.indexOf('kind: "action:resolved"'));
 });
 
-test("Panel.vue keeps a safety-update message visible before it removes the card", () => {
+test("Panel.vue hides a safety-update card and keeps its Done-only message", () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
   const body = src.slice(src.indexOf("async function resolvePending("));
   const settled = body.indexOf("const settled = settledReasonMessage(result)");
-  const notice = body.indexOf("settledNotice.value = { token, message: settled }", settled);
+  const hidden = body.indexOf("hideSettledPending()", settled);
+  const notice = body.indexOf("enqueueSettledNotice({ token, message: settled })", settled);
   const resolved = body.indexOf('kind: "action:resolved"', settled);
-  assert.ok(settled > -1 && notice > settled && resolved > notice);
+  assert.ok(settled > -1 && hidden > settled && notice > hidden && resolved > notice);
   assert.match(src, /function dismissSettledNotice\(\)/);
   assert.match(src, /@click="dismissSettledNotice"/);
   assert.doesNotMatch(body.slice(settled, resolved), /loadError\.value = settled/);
@@ -339,4 +340,28 @@ test("Desk only admits attested cached and list cards, then shows a passive clos
 
 	const realtime = src.slice(src.indexOf("function onRealtime(payload) {"));
 	assert.match(realtime, /payload\.pending_card_safe === true/);
+});
+
+test("Desk queues passive safety receipts so each Done reveals the next one", () => {
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
+	assert.match(src, /const settledNoticeQueue = ref\(\[\]\)/);
+	assert.match(src, /function enqueueSettledNotice\(notice\)/);
+	const observe = src.slice(
+		src.indexOf("function observePassiveSafetyUpdates(rows)"),
+		src.indexOf("// Typed approval", src.indexOf("function observePassiveSafetyUpdates(rows)"))
+	);
+	assert.doesNotMatch(observe, /if \(settledNotice\.value\) return/);
+	assert.match(observe, /enqueueSettledNotice\(notice\)/);
+	assert.match(observe, /hideSettledPending\(\)/);
+	assert.match(src, /function hideSettledPending\(\)/);
+	assert.match(src, /pending: withoutTokens\(stream\.value\.pending \|\| \[\], settledTokens\)/);
+	const dismiss = src.slice(
+		src.indexOf("function dismissSettledNotice()"),
+		src.indexOf("// The Desk already", src.indexOf("function dismissSettledNotice()"))
+	);
+	assert.match(dismiss, /settledNotice\.value = settledNoticeQueue\.value\[0\] \|\| null/);
+	assert.match(dismiss, /settledNoticeQueue\.value = settledNoticeQueue\.value\.slice\(1\)/);
+	const direct = src.slice(src.indexOf("async function resolvePending("));
+	assert.match(direct, /settledTokens = withExcluded\(settledTokens, \[token\]\);\s*hideSettledPending\(\)/);
 });

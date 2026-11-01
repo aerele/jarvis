@@ -107,9 +107,28 @@ test("DecisionSheet keeps a safety-update explanation open until the person clos
 	const approve = src.slice(src.indexOf("async function approve("));
 	const safety = approve.indexOf('r.reason_code === "safety_update"');
 	const cancelled = approve.indexOf('state.value = "cancelled"', safety);
-	const expired = approve.indexOf('emit("resolved", props.action.token, "expired")');
+	const expired = approve.indexOf('emit("resolved", token, "expired")');
 	assert.ok(safety > -1 && cancelled > safety);
 	assert.ok(safety < expired, "safety update must not use the retry/expired path");
 	assert.match(src, /state\.value === "cancelled" && props\.action\?\.token/);
 	assert.match(src, /Confirmation cancelled/);
+});
+
+test("DecisionSheet keeps an asynchronous result bound to its original card", () => {
+	const src = fs.readFileSync(
+		new URL("../components/DecisionSheet.vue", import.meta.url),
+		"utf8"
+	);
+	for (const fn of ["async function deny()", "async function approve(mode = \"step\")"]) {
+		const body = src.slice(src.indexOf(fn));
+		assert.match(body, /const token = props\.action\?\.token;/);
+		assert.match(body, /const conversation = props\.action\?\.conversation;/);
+		assert.match(body, /emit\("busy", true, token\)/);
+		assert.match(body, /emit\("busy", false, token\)/);
+		assert.match(body, /actionIsCurrent\(token\)/);
+	}
+	const approve = src.slice(src.indexOf('async function approve(mode = "step")'));
+	assert.match(approve, /confirmTool\(token, conversation\)/);
+	assert.match(approve, /emit\("settled", token\)/);
+	assert.match(approve, /emit\("resolved", token, "approved"\)/);
 });

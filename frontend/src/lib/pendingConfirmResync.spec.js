@@ -75,6 +75,27 @@ describe("parked confirmations resync from durable state at every terminal", () 
 		expect(notice).not.toMatch(/Confirm|Retry|Discard/);
 	});
 
+	it("queues passive safety cancellations so each Done reveals the next receipt", () => {
+		expect(src).toContain("const safetyUpdateQueue = ref([])");
+		expect(src).toContain("function enqueueSafetyUpdateNotice(notice)");
+		const observe = src.slice(
+			src.indexOf("function observePassiveSafetyUpdates(rows)"),
+			src.indexOf("function dismissSafetyUpdateNotice()")
+		);
+		expect(observe).not.toContain("if (safetyUpdateNotice.value) return");
+		expect(observe).toContain("enqueueSafetyUpdateNotice(notice)");
+		expect(observe).toContain(
+			"pendingActions.value = pendingActions.value.filter((card) => card.token !== notice.token)"
+		);
+		const dismiss = src.slice(
+			src.indexOf("function dismissSafetyUpdateNotice()"),
+			src.indexOf("// Which card's Approve", src.indexOf("function dismissSafetyUpdateNotice()"))
+		);
+		expect(dismiss).toContain("safetyUpdateNotice.value = safetyUpdateQueue.value[0] || null");
+		expect(dismiss).toContain("safetyUpdateQueue.value = safetyUpdateQueue.value.slice(1)");
+		expect(src).toContain("!safetySettledTokens.value.has(pa.token)");
+	});
+
 	it("run:end resyncs unconditionally, not only when it carried a pending payload", () => {
 		const body = terminalBody("run:end");
 		expect(body).toContain("resyncPendingConfirmations(currentId.value);");

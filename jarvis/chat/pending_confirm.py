@@ -157,6 +157,7 @@ def pending_action_is_safe_to_render(
 	conversation: str | None = None,
 	strict: bool = False,
 	lock: bool = True,
+	expected_fences: dict[str, str] | None = None,
 ) -> bool:
 	"""Return the positive admission attestation for one durable chat card.
 
@@ -175,7 +176,9 @@ def pending_action_is_safe_to_render(
 	try:
 		from jarvis.chat.agent_closure import confirmation_is_current
 
-		return bool(confirmation_is_current(row, lock=lock))
+		if expected_fences is None:
+			return bool(confirmation_is_current(row, lock=lock))
+		return bool(confirmation_is_current(row, lock=lock, expected_fences=expected_fences))
 	except _db_errors() as exc:
 		frappe.logger("jarvis.pending_confirm").error(
 			"pending action fence read failed: %s", type(exc).__name__

@@ -1016,6 +1016,7 @@ const resolving = ref("");
 // A server safety update consumes a card. Keep the terminal explanation in the
 // confirmation area until the person sees and dismisses it; this has no retry.
 const settledNotice = ref(null);
+const settledNoticeQueue = ref([]);
 // D1: tokens a typed "no" discarded (dropDiscarded, below). messages.value keeps
 // tool_status "pending" for that row until the next load(), so resyncPending's
 // rowItems must not rebuild the card from it while stale. Persists past a
@@ -1026,7 +1027,7 @@ let settledTokens = new Set();
 // (created_at, token by code unit), whatever order the store listed them in.
 const orderedPending = computed(() => {
 	const cards = sortPendingCards(stream.value.pending || []);
-	return cards.filter((card) => card.token !== settledNotice.value?.token);
+	return cards.filter((card) => !settledTokens.has(card.token));
 });
 const SAFETY_UPDATE_COPY =
 	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
@@ -1051,14 +1052,28 @@ function passiveSafetyUpdate(row) {
 		message: result?.error?.message || SAFETY_UPDATE_COPY,
 	};
 }
+function enqueueSettledNotice(notice) {
+	if (!settledNotice.value) {
+		settledNotice.value = notice;
+		return;
+	}
+	settledNoticeQueue.value = [...settledNoticeQueue.value, notice];
+}
+function hideSettledPending() {
+	stream.value = {
+		...stream.value,
+		pending: withoutTokens(stream.value.pending || [], settledTokens),
+	};
+}
 function observePassiveSafetyUpdates(rows) {
-	if (settledNotice.value) return;
 	for (const row of rows || []) {
 		const notice = passiveSafetyUpdate(row);
 		if (!notice || settledTokens.has(notice.token)) continue;
 		settledTokens = withExcluded(settledTokens, [notice.token]);
-		settledNotice.value = notice;
-		return;
+		// A stale list can land before its terminal transcript receipt. Remove
+		// every settled token immediately, including a receipt waiting in FIFO.
+		hideSettledPending();
+		enqueueSettledNotice(notice);
 	}
 }
 // Typed approval works in the widget too. An "Earlier" card never gets the
@@ -1675,6 +1690,7 @@ function startNewChat() {
 	messages.value = [];
 	settledTokens = new Set(); // a settled token belonged to the conversation being left
 	settledNotice.value = null;
+	settledNoticeQueue.value = [];
 	// Keep the fence watermarks: the panel can rebind to the SAME conversation
 	// (list[0]) on reopen, and a wiped fence would readmit a superseded pump's
 	// straggler — the dead-banner resurrection the fence exists to prevent.
@@ -2034,7 +2050,8 @@ async function resolvePending(token) {
 		const settled = settledReasonMessage(result);
 		if (settled) {
 			settledTokens = withExcluded(settledTokens, [token]);
-			settledNotice.value = { token, message: settled };
+			hideSettledPending();
+			enqueueSettledNotice({ token, message: settled });
 			return;
 		}
 		stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
@@ -2049,7 +2066,8 @@ function dismissSettledNotice() {
 	const token = settledNotice.value?.token;
 	if (!token) return;
 	stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
-	settledNotice.value = null;
+	settledNotice.value = settledNoticeQueue.value[0] || null;
+	settledNoticeQueue.value = settledNoticeQueue.value.slice(1);
 }
 
 // The Desk already holds an authenticated socket, so the panel joins it rather

@@ -1317,28 +1317,66 @@ def _badge_cutoff():
 	return frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-BOARD_BADGE_DELAY_S)
 
 
-def _chat_pending_count(me: str) -> int:
+def _safe_chat_badge_rows(me: str, *, before=None, after=None) -> list:
+	"""The chat rows that may truthfully contribute to an approval badge.
+
+	The lane already hides a Pending chat action unless its close-fence map is
+	current.  The badge must apply the same positive admission rule: a number for
+	a hidden stale card sends a person to an empty board and can keep refreshing
+	forever after a capped close cleanup.  Older schemas lack the fence field, so
+	they intentionally produce no chat badge until the close migration is ready.
+	"""
+	from jarvis.chat.agent_closure import (
+		PENDING_ACTION_FENCE_FIELD,
+		expected_confirmation_fences,
+		pending_action_fences_ready,
+	)
 	from jarvis.chat.pending_actions._store import table_ready
 
-	if not table_ready():
-		return 0
-	return frappe.db.sql(
-		"SELECT COUNT(*) FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND status='Pending'"
-		" AND owner_user=%(me)s AND creation <= %(cutoff)s",
-		{"k": CHAT, "me": me, "cutoff": _badge_cutoff()},
-	)[0][0]
+	if not table_ready() or not pending_action_fences_ready():
+		return []
+	# A badge is read-only. Take one current, non-locking fence snapshot and run
+	# each row through the same canonical predicate as a card. This avoids a
+	# fence lock (and possible fence-row creation) for every Pending row on a
+	# frequently refreshed badge.
+	try:
+		expected_fences = expected_confirmation_fences()
+	except Exception as exc:
+		frappe.logger("jarvis.pending_confirm").error(
+			"pending action badge fence read failed: %s", type(exc).__name__
+		)
+		return []
+	if expected_fences is None:
+		return []
+	where = ["kind='chat'", "status='Pending'", "owner_user=%(me)s"]
+	params = {"me": me}
+	if before is not None:
+		where.append("creation <= %(before)s")
+		params["before"] = before
+	if after is not None:
+		where.append("creation > %(after)s")
+		params["after"] = after
+	rows = frappe.db.sql(
+		"""SELECT name, kind, status, owner_user, conversation, creation,
+		`{field}` AS `{field}`
+		FROM `tabJarvis Pending Action`
+		WHERE {where}
+		ORDER BY creation ASC, name ASC""".format(
+			field=PENDING_ACTION_FENCE_FIELD, where=" AND ".join(where)
+		),
+		params,
+		as_dict=True,
+	)
+	return [row for row in rows if _chat_card_safe(row, lock=False, expected_fences=expected_fences)]
+
+
+def _chat_pending_count(me: str) -> int:
+	return len(_safe_chat_badge_rows(me, before=_badge_cutoff()))
 
 
 def _chat_badge_next_in(me: str) -> int | None:
-	from jarvis.chat.pending_actions._store import table_ready
-
-	if not table_ready():
-		return None
-	oldest = frappe.db.sql(
-		"SELECT MIN(creation) FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND status='Pending'"
-		" AND owner_user=%(me)s AND creation > %(cutoff)s",
-		{"k": CHAT, "me": me, "cutoff": _badge_cutoff()},
-	)[0][0]
+	rows = _safe_chat_badge_rows(me, after=_badge_cutoff())
+	oldest = rows[0].creation if rows else None
 	if not oldest:
 		return None
 	waited = (frappe.utils.now_datetime() - frappe.utils.get_datetime(oldest)).total_seconds()
@@ -1505,7 +1543,7 @@ def _chat_link(conversation, title, origin_page) -> dict:
 	}
 
 
-def _chat_card_safe(row) -> bool:
+def _chat_card_safe(row, *, lock: bool = True, expected_fences: dict[str, str] | None = None) -> bool:
 	"""Whether this durable chat row may render a confirmation control."""
 	from jarvis.chat.pending_confirm import pending_action_is_safe_to_render
 
@@ -1513,6 +1551,8 @@ def _chat_card_safe(row) -> bool:
 		row,
 		owner=row.get("owner_user"),
 		conversation=row.get("conversation"),
+		lock=lock,
+		expected_fences=expected_fences,
 	)
 
 

@@ -87,6 +87,10 @@ function closeSheet() {
 	emit("close");
 }
 
+function actionIsCurrent(token) {
+	return props.action?.token === token;
+}
+
 // The preview is either a ready-made string or {note, would} — `described` means
 // the note already says it all and the payload dump would just be noise.
 const previewHtml = computed(() => {
@@ -109,21 +113,28 @@ const previewHtml = computed(() => {
 // approve.
 async function deny() {
 	if (state.value === "busy" || props.streaming) return;
+	const token = props.action?.token;
+	const conversation = props.action?.conversation;
+	if (!token) return;
 	if (!window.confirm("Discard this action?")) return;
 	error.value = "";
 	state.value = "busy";
-	emit("busy", true);
+	emit("busy", true, token);
 	try {
-		const r = await api.dismissTool(props.action.token, props.action.conversation);
+		const r = await api.dismissTool(token, conversation);
 		const outcome = denyOutcome(r);
-		state.value = outcome.state;
-		error.value = outcome.error;
-		if (outcome.resolved) emit("resolved", props.action.token, outcome.resolved);
+		if (actionIsCurrent(token)) {
+			state.value = outcome.state;
+			error.value = outcome.error;
+		}
+		if (outcome.resolved) emit("resolved", token, outcome.resolved);
 	} catch (e) {
-		error.value = e?.message || "Couldn't discard this action.";
-		state.value = "review";
+		if (actionIsCurrent(token)) {
+			error.value = e?.message || "Couldn't discard this action.";
+			state.value = "review";
+		}
 	} finally {
-		emit("busy", false);
+		emit("busy", false, token);
 	}
 }
 
@@ -137,21 +148,26 @@ async function deny() {
 // like to the user.
 async function approve(mode = "step") {
 	if (state.value === "busy" || props.streaming) return;
+	const token = props.action?.token;
+	const conversation = props.action?.conversation;
+	if (!token) return;
 	error.value = "";
 	reference.value = "";
 	state.value = "busy";
 	approveMode.value = mode;
-	emit("busy", true);
+	emit("busy", true, token);
 	try {
 		const r =
 			mode === "run"
-				? await api.approveAndRun(props.action.token, props.action.conversation)
-				: await api.confirmTool(props.action.token, props.action.conversation);
+				? await api.approveAndRun(token, conversation)
+				: await api.confirmTool(token, conversation);
 		if (r && r.ok === false) {
 			const kept = keptCardMessage(r);
 			if (kept) {
-				error.value = kept;
-				state.value = "review";
+				if (actionIsCurrent(token)) {
+					error.value = kept;
+					state.value = "review";
+				}
 				return;
 			}
 			// A safety update cancels the token before any action runs. It is a
@@ -161,9 +177,11 @@ async function approve(mode = "step") {
 			// and a stale transcript row must not re-create this spent card while
 			// the terminal explanation is still open or after Done.
 			if (r.reason_code === "safety_update") {
-				if (props.action?.token) emit("settled", props.action.token);
-				error.value = settledReasonMessage(r);
-				state.value = "cancelled";
+				emit("settled", token);
+				if (actionIsCurrent(token)) {
+					error.value = settledReasonMessage(r);
+					state.value = "cancelled";
+				}
 				return;
 			}
 			// The token is single-use and short-lived: a stale card must say so
@@ -174,28 +192,34 @@ async function approve(mode = "step") {
 				// says why. Only a bare legacy token (no reason_code at all) gets
 				// the opaque guess: use the card's own wall-clock expiry (F15).
 				const settledReason = settledReasonMessage(r);
-				error.value =
-					settledReason ||
-					(pendingExpiry(props.action?.expires_at, Date.now()).expired
-						? `This confirmation expired. Tell ${agentName} the action again to retry it.`
-						: `Couldn't confirm. It may have been handled elsewhere. Refresh, or ask ${agentName} to try again.`);
-				state.value = "review";
-				emit("resolved", props.action.token, "expired");
+				if (actionIsCurrent(token)) {
+					error.value =
+						settledReason ||
+						(pendingExpiry(props.action?.expires_at, Date.now()).expired
+							? `This confirmation expired. Tell ${agentName} the action again to retry it.`
+							: `Couldn't confirm. It may have been handled elsewhere. Refresh, or ask ${agentName} to try again.`);
+					state.value = "review";
+				}
+				emit("resolved", token, "expired");
 				return;
 			}
 			// The person's words for a refusal written for the model (error.person_message).
-			error.value = personError(r.error).message || r.reason || "Couldn't run this action.";
-			reference.value = failureReferenceOf(r);
-			state.value = "review";
+			if (actionIsCurrent(token)) {
+				error.value = personError(r.error).message || r.reason || "Couldn't run this action.";
+				reference.value = failureReferenceOf(r);
+				state.value = "review";
+			}
 			return;
 		}
-		state.value = "approved";
-		emit("resolved", props.action.token, "approved");
+		if (actionIsCurrent(token)) state.value = "approved";
+		emit("resolved", token, "approved");
 	} catch (e) {
-		error.value = e?.message || "Couldn't run this action.";
-		state.value = "review";
+		if (actionIsCurrent(token)) {
+			error.value = e?.message || "Couldn't run this action.";
+			state.value = "review";
+		}
 	} finally {
-		emit("busy", false);
+		emit("busy", false, token);
 	}
 }
 </script>

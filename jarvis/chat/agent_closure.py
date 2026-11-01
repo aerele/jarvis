@@ -377,18 +377,22 @@ def pending_action_fences_ready() -> bool:
 		return False
 
 
-def confirmation_is_current(record, *, lock: bool = False) -> bool:
+def confirmation_is_current(
+	record, *, lock: bool = False, expected_fences: dict[str, str] | None = None
+) -> bool:
 	"""Return whether a generic confirmation exactly matches all active fences.
 
 	Non-chat durable pending actions are not generic chat confirmations and retain
 	their own sealed lifecycle. Every legacy Redis record is generic, so it has no
-	``kind`` and must carry the map too.
+	``kind`` and must carry the map too. A read-only caller that checks several
+	rows can supply one current fence snapshot; action paths leave it unset and
+	read under their normal locks.
 	"""
 	if not record:
 		return False
 	if record.get("kind") and record.get("kind") != "chat":
 		return True
-	expected = expected_confirmation_fences(lock=lock)
+	expected = expected_fences if expected_fences is not None else expected_confirmation_fences(lock=lock)
 	if expected is None:
 		return False
 	return legacy_confirmation_is_current(record) and expected == _required_confirmation_fences()

@@ -8272,6 +8272,7 @@ const pendingActions = ref([]);
 // cannot restore a Confirm card before the next durable resync completes.
 const safetySettledTokens = ref(new Set());
 const safetyUpdateNotice = ref(null);
+const safetyUpdateQueue = ref([]);
 const SAFETY_UPDATE_COPY =
 	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
 function passiveSafetyUpdate(row) {
@@ -8295,18 +8296,28 @@ function passiveSafetyUpdate(row) {
 		message: result?.error?.message || SAFETY_UPDATE_COPY,
 	};
 }
+function enqueueSafetyUpdateNotice(notice) {
+	if (!safetyUpdateNotice.value) {
+		safetyUpdateNotice.value = notice;
+		return;
+	}
+	safetyUpdateQueue.value = [...safetyUpdateQueue.value, notice];
+}
 function observePassiveSafetyUpdates(rows) {
-	if (safetyUpdateNotice.value) return;
 	for (const row of rows || []) {
 		const notice = passiveSafetyUpdate(row);
 		if (!notice || safetySettledTokens.value.has(notice.token)) continue;
 		safetySettledTokens.value = new Set(safetySettledTokens.value).add(notice.token);
-		safetyUpdateNotice.value = notice;
-		return;
+		// A list response can arrive before its terminal transcript receipt.
+		// Remove the stale card now, including receipts queued behind the notice
+		// that is currently visible.
+		pendingActions.value = pendingActions.value.filter((card) => card.token !== notice.token);
+		enqueueSafetyUpdateNotice(notice);
 	}
 }
 function dismissSafetyUpdateNotice() {
-	safetyUpdateNotice.value = null;
+	safetyUpdateNotice.value = safetyUpdateQueue.value[0] || null;
+	safetyUpdateQueue.value = safetyUpdateQueue.value.slice(1);
 }
 // Which card's Approve & run is in flight. pa.busy alone disables BOTH of a
 // runnable card's buttons (so a double-click can't fire twice) but can't say
@@ -8345,7 +8356,11 @@ const olderCardsNoteText = computed(() =>
 const visiblePendingActions = computed(() =>
 	// Ordered by the shared, unit-tested comparator (sortPendingCards): stable
 	// numbers for a typed "confirm N". See lib/sortPendingCards.js.
-	sortPendingCards(pendingActions.value.filter((pa) => pa.conversation === currentId.value))
+	sortPendingCards(
+		pendingActions.value.filter(
+			(pa) => pa.conversation === currentId.value && !safetySettledTokens.value.has(pa.token)
+		)
+	)
 );
 
 // A legacy container (persona v0.39, pre write-safety) may still emit a
@@ -10002,6 +10017,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 		reportRuns.value = [];
 		safetySettledTokens.value = new Set();
 		safetyUpdateNotice.value = null;
+		safetyUpdateQueue.value = [];
 	}
 	const _keepScrollTop =
 		_sameConv && !pinnedToBottom.value && threadEl.value ? threadEl.value.scrollTop : null;
@@ -10018,6 +10034,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	if (!id) {
 		safetySettledTokens.value = new Set();
 		safetyUpdateNotice.value = null;
+		safetyUpdateQueue.value = [];
 		resetAutoModeFor(true);
 		messages.value = injectPendingBubbles([], _pendingSends.peek(_NEW_CHAT_SCOPE));
 		fileboxWaits.value = [];

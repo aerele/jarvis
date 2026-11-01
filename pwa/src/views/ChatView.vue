@@ -162,8 +162,13 @@ const decision = ref(null);
 // its card: the RPC's own response already removed it, but a resync request
 // issued just before the RPC committed can still return the token as live.
 const inflightToken = ref(null);
-function onDecisionBusy(busy) {
-	inflightToken.value = busy ? decision.value && decision.value.token : null;
+function onDecisionBusy(busy, token) {
+	if (!token) return;
+	if (busy) {
+		inflightToken.value = token;
+		return;
+	}
+	if (inflightToken.value === token) inflightToken.value = null;
 }
 function onDecisionSettled(token) {
 	// A safety update spends its token but leaves DecisionSheet open until Done.
@@ -182,6 +187,10 @@ const settledTokens = ref(new Set());
 // it. Keep one terminal explanation outside the approval sheet: it has only
 // Done, never Confirm, Discard, or Retry.
 const safetyUpdateNotice = ref(null);
+// Several pre-close cards can be cancelled together. Keep every terminal
+// receipt in order so Done acknowledges one result at a time without making a
+// later cancellation silent until another transcript reload happens.
+const safetyUpdateQueue = ref([]);
 const SAFETY_UPDATE_COPY =
 	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
 function passiveSafetyUpdate(row) {
@@ -205,18 +214,33 @@ function passiveSafetyUpdate(row) {
 		message: result?.error?.message || SAFETY_UPDATE_COPY,
 	};
 }
+function enqueueSafetyUpdateNotice(notice) {
+	if (!safetyUpdateNotice.value) {
+		safetyUpdateNotice.value = notice;
+		return;
+	}
+	safetyUpdateQueue.value = [...safetyUpdateQueue.value, notice];
+}
 function observePassiveSafetyUpdates(rows) {
-	if (safetyUpdateNotice.value) return;
 	for (const row of rows || []) {
 		const notice = passiveSafetyUpdate(row);
 		if (!notice || settledTokens.value.has(notice.token)) continue;
 		settledTokens.value = withExcluded(settledTokens.value, [notice.token]);
-		safetyUpdateNotice.value = notice;
-		return;
+		// A list response may have admitted this card before its terminal
+		// transcript receipt arrived. Remove it at once so a queued receipt can
+		// never leave Confirm or Discard controls on screen while it waits.
+		// The sheet holds a separate card object. A passive cancellation must close
+		// its matching sheet too. A direct sheet cancellation is already in
+		// settledTokens and takes the continue above, so it keeps its own Done
+		// result without adding a duplicate receipt here.
+		if (decision.value?.token === notice.token) decision.value = null;
+		pending.value = pending.value.filter((card) => card.token !== notice.token);
+		enqueueSafetyUpdateNotice(notice);
 	}
 }
 function dismissSafetyUpdateNotice() {
-	safetyUpdateNotice.value = null;
+	safetyUpdateNotice.value = safetyUpdateQueue.value[0] || null;
+	safetyUpdateQueue.value = safetyUpdateQueue.value.slice(1);
 }
 const preview = ref(null);
 const voiceOpen = ref(false);
@@ -1356,7 +1380,7 @@ function onEvent(p) {
 
 function onResolved(token, kind) {
 	pending.value = pending.value.filter((p) => p.token !== token);
-	decision.value = null;
+	if (decision.value?.token === token) decision.value = null;
 	// A real discard (P0c: Deny now calls dismiss_tool) leaves a durable
 	// "discarded" receipt chip, but dismiss_tool fires no agent turn - so
 	// unlike Approve (whose continuation's run:start/run:end already reloads),
@@ -1388,6 +1412,7 @@ watch(
 		pending.value = [];
 		settledTokens.value = new Set(); // a settled token belonged to the previous conversation
 		safetyUpdateNotice.value = null;
+		safetyUpdateQueue.value = [];
 		olderCardsNote.value = false; // the note was about the previous conversation's cards
 		live.value = null;
 		sendBusy.value = false;

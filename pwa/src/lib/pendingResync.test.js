@@ -312,15 +312,39 @@ test("PWA only admits attested list, transcript, and notification cards", () => 
 	);
 });
 
+test("PWA queues every passive safety receipt and shows the next one after Done", () => {
+	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	assert.match(view, /const safetyUpdateQueue = ref\(\[\]\)/);
+	assert.match(view, /function enqueueSafetyUpdateNotice\(notice\)/);
+	const observe = view.slice(
+		view.indexOf("function observePassiveSafetyUpdates(rows)"),
+		view.indexOf("function dismissSafetyUpdateNotice()")
+	);
+	assert.doesNotMatch(observe, /if \(safetyUpdateNotice\.value\) return/);
+	assert.match(observe, /enqueueSafetyUpdateNotice\(notice\)/);
+	assert.match(
+		observe,
+		/pending\.value = pending\.value\.filter\(\(card\) => card\.token !== notice\.token\)/
+	);
+	assert.match(observe, /if \(decision\.value\?\.token === notice\.token\) decision\.value = null/);
+	const dismiss = view.slice(
+		view.indexOf("function dismissSafetyUpdateNotice()"),
+		view.indexOf("const preview", view.indexOf("function dismissSafetyUpdateNotice()"))
+	);
+	assert.match(dismiss, /safetyUpdateNotice\.value = safetyUpdateQueue\.value\[0\] \|\| null/);
+	assert.match(dismiss, /safetyUpdateQueue\.value = safetyUpdateQueue\.value\.slice\(1\)/);
+	assert.match(view, /safetyUpdateQueue\.value = \[\];/);
+});
+
 test("safety update settles its token before DecisionSheet clears the busy guard", () => {
 	const sheet = fs.readFileSync(
 		new URL("../components/DecisionSheet.vue", import.meta.url),
 		"utf8"
 	);
 	const safety = sheet.indexOf('r.reason_code === "safety_update"');
-	const settled = sheet.indexOf('emit("settled", props.action.token)', safety);
+	const settled = sheet.indexOf('emit("settled", token)', safety);
 	const cancelled = sheet.indexOf('state.value = "cancelled"', safety);
-	const busyClear = sheet.indexOf('emit("busy", false)', safety);
+	const busyClear = sheet.indexOf('emit("busy", false, token)', safety);
 	assert.ok(settled > safety && settled < cancelled && settled < busyClear);
 
 	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
@@ -332,4 +356,19 @@ test("safety update settles its token before DecisionSheet clears the busy guard
 	const listener = view.indexOf('@settled="onDecisionSettled"');
 	assert.ok(handler > -1 && exclude > handler);
 	assert.ok(listener > -1);
+});
+
+test("PWA keeps a later sheet out of an earlier request's terminal events", () => {
+	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	const busy = view.slice(
+		view.indexOf("function onDecisionBusy(busy, token)"),
+		view.indexOf("function onDecisionSettled(token)")
+	);
+	assert.match(busy, /inflightToken\.value = token/);
+	assert.match(busy, /if \(inflightToken\.value === token\) inflightToken\.value = null/);
+	const resolved = view.slice(
+		view.indexOf("function onResolved(token, kind)"),
+		view.indexOf("const onResync")
+	);
+	assert.match(resolved, /if \(decision\.value\?\.token === token\) decision\.value = null/);
 });

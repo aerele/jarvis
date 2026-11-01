@@ -457,6 +457,7 @@ class TestChatLane(_Base):
 	def test_bad_close_fence_never_reaches_the_board_card_or_its_confirm_controls(self):
 		"""The board is another card-read surface, not a durable-card bypass."""
 		name, _ = self.chat()
+		current, _ = self.chat()
 		before = frappe.db.count("ToDo")
 		self.set_col(name, agent_close_fences="{}")
 		with as_user(OWNER):
@@ -468,6 +469,42 @@ class TestChatLane(_Base):
 			("Pending", False, 0, None),
 		)
 		self.assertEqual(frappe.db.count("ToDo"), before)
+		# The badge uses the same positive close-fence admission as the lane. A
+		# stale hidden row must not show a count or delay the next board refresh,
+		# while the current sibling remains visible after the badge delay.
+		now = frappe.utils.now_datetime()
+		self.set_col(name, creation=now - timedelta(seconds=board.BOARD_BADGE_DELAY_S + 1))
+		self.set_col(current, creation=now - timedelta(seconds=board.BOARD_BADGE_DELAY_S + 1))
+		with (
+			patch("frappe.utils.now_datetime", return_value=now),
+			patch.object(board, "_chat_card_safe", wraps=board._chat_card_safe) as safe,
+			as_user(OWNER),
+		):
+			self.assertEqual(board._chat_pending_count(OWNER), 1)
+			self.assertEqual(len(safe.call_args_list), 2)
+			self.assertTrue(
+				all(
+					call.kwargs.get("lock") is False and call.kwargs.get("expected_fences")
+					for call in safe.call_args_list
+				)
+			)
+		with patch("frappe.utils.now_datetime", return_value=now), as_user(OWNER):
+			self.assertEqual(board.pending_badge()["count"], 1)
+		# A young current sibling still determines the next refresh. The old
+		# unsafe row cannot leave a phantom immediate badge or next-in hint.
+		self.set_col(current, creation=now - timedelta(seconds=100))
+		with patch("frappe.utils.now_datetime", return_value=now), as_user(OWNER):
+			self.assertEqual(board.pending_badge(), {"count": 0, "next_in": 500})
+
+	def test_badge_fails_closed_when_the_read_only_fence_snapshot_fails(self):
+		self.chat()
+		with (
+			patch("jarvis.chat.agent_closure.expected_confirmation_fences", side_effect=RuntimeError("down")),
+			patch.object(frappe, "logger"),
+			as_user(OWNER),
+		):
+			self.assertEqual(board._chat_pending_count(OWNER), 0)
+			self.assertIsNone(board._chat_badge_next_in(OWNER))
 
 	def test_the_board_decides_through_the_chat_endpoints(self):
 		ran, conv = self.chat()

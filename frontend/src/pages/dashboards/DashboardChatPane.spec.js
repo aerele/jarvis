@@ -338,17 +338,27 @@ describe("DashboardChatPane safety-update receipts", () => {
 		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: [] } });
 	});
 
-	it("replaces a suppressed card with one Done-only notice and keeps a valid sibling", async () => {
+	it("queues each suppressed receipt as a Done-only notice and keeps a valid sibling", async () => {
 		api.getDashboardConversation.mockResolvedValue({
 			messages: [
 				{
 					name: "receipt-1",
 					role: "tool",
-					tool_call_id: "stale",
+					tool_call_id: "stale-1",
 					action_outcome: "cancelled",
 					tool_result: {
 						reason_code: "safety_update",
-						error: { message: "This action was cancelled during a safety update. Nothing ran." },
+						error: { message: "First stale action was cancelled. Nothing ran." },
+					},
+				},
+				{
+					name: "receipt-2",
+					role: "tool",
+					tool_call_id: "stale-2",
+					action_outcome: "cancelled",
+					tool_result: {
+						reason_code: "safety_update",
+						error: { message: "Second stale action was cancelled. Nothing ran." },
 					},
 				},
 			],
@@ -357,7 +367,8 @@ describe("DashboardChatPane safety-update receipts", () => {
 			ok: true,
 			data: {
 				pending: [
-					{ token: "stale", conversation: "conv1", tool: "create_doc", pending_card_safe: true },
+					{ token: "stale-1", conversation: "conv1", tool: "create_doc", pending_card_safe: true },
+					{ token: "stale-2", conversation: "conv1", tool: "create_doc", pending_card_safe: true },
 					{ token: "current", conversation: "conv1", tool: "create_doc", pending_card_safe: true },
 				],
 			},
@@ -368,12 +379,23 @@ describe("DashboardChatPane safety-update receipts", () => {
 
 		const notice = wrapper.find(".dashboard-safety-update");
 		expect(notice.attributes("role")).toBe("status");
-		expect(notice.text()).toContain("This action was cancelled during a safety update. Nothing ran.");
+		expect(notice.text()).toContain("First stale action was cancelled. Nothing ran.");
 		expect(notice.findAll("button").map((button) => button.text())).toEqual(["Done"]);
 		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
 		expect(wrapper.findAll("button").some((button) => button.text() === "Retry")).toBe(false);
 
 		await notice.find("button").trigger("click");
+		await flushPromises();
+		expect(wrapper.find(".dashboard-safety-update").text()).toContain(
+			"Second stale action was cancelled. Nothing ran."
+		);
+		expect(wrapper.find(".dashboard-safety-update").findAll("button").map((button) => button.text())).toEqual([
+			"Done",
+		]);
+		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+
+		await wrapper.find(".dashboard-safety-update button").trigger("click");
+		await flushPromises();
 		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
 		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
 	});
