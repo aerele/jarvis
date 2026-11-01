@@ -124,8 +124,13 @@ def _purge_ap_e2e(roots=()):
 			frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
 	for doctype in ("Account", "Cost Center"):
 		frappe.db.delete(doctype, {"company": AP_E2E_CO})
+	fiscal_years = frappe.get_all(
+		"Fiscal Year", filters={"name": ["like", f"{AP_E2E_FISCAL_YEAR} %"]}, pluck="name"
+	)
+	if fiscal_years:
+		frappe.db.delete("Fiscal Year Company", {"parent": ["in", fiscal_years]})
+		frappe.db.delete("Fiscal Year", {"name": ["in", fiscal_years]})
 	frappe.db.delete("Company", {"name": AP_E2E_CO})
-	frappe.db.delete("Fiscal Year", {"name": ["like", f"{AP_E2E_FISCAL_YEAR} %"]})
 	for doctype, name in roots:
 		frappe.db.delete(doctype, {"name": name})
 	frappe.cache.delete_value("fiscal_years")
@@ -194,12 +199,23 @@ def _ap_e2e_fixtures():
 		},
 	)
 	year = frappe.utils.getdate().year
-	frappe.get_doc(
+	fiscal_year = frappe.get_doc(
 		{
 			"doctype": "Fiscal Year",
 			"year": f"{AP_E2E_FISCAL_YEAR} {year}",
 			"year_start_date": f"{year}-01-01",
 			"year_end_date": f"{year}-12-31",
+		}
+	)
+	fiscal_year.db_insert()
+	frappe.get_doc(
+		{
+			"doctype": "Fiscal Year Company",
+			"parent": fiscal_year.name,
+			"parenttype": "Fiscal Year",
+			"parentfield": "companies",
+			"idx": 1,
+			"company": AP_E2E_CO,
 		}
 	).db_insert()
 	_ap_e2e_insert(
@@ -823,6 +839,14 @@ class TestNativePurchaseMatch(unittest.TestCase):
 		try:
 			roots.extend(_ap_e2e_fixtures())
 			today = frappe.utils.today()
+			self.assertEqual(
+				frappe.get_all(
+					"Fiscal Year Company",
+					filters={"parent": f"{AP_E2E_FISCAL_YEAR} {frappe.utils.getdate(today).year}"},
+					pluck="company",
+				),
+				[AP_E2E_CO],
+			)
 			order = frappe.get_doc(
 				{
 					"doctype": "Purchase Order",
