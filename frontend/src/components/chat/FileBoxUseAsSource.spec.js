@@ -35,12 +35,17 @@ const props = {
 	conversation: "A",
 	message: "message-A",
 	attachment: { name: "item-A", file_url: "/private/files/replacement.pdf" },
+	canSelect: true,
 };
 const Button = {
 	props: ["label", "disabled", "loading"],
 	template: '<button :disabled="disabled || loading">{{ label }}</button>',
 };
-const create = () => mount(FileBoxUseAsSource, { props, global: { stubs: { Button } } });
+const create = (overrides = {}) =>
+	mount(FileBoxUseAsSource, {
+		props: { ...props, ...overrides },
+		global: { stubs: { Button } },
+	});
 const button = (wrapper, text) => wrapper.findAll("button").find((b) => b.text() === text);
 const deferred = () => {
 	let resolve;
@@ -70,6 +75,14 @@ describe("File Box attachment source", () => {
 			expected: "",
 		});
 		expect(button(w, "Current source").attributes("disabled")).toBeDefined();
+		w.unmount();
+	});
+	it("does not render or read a source control for a non-owner", async () => {
+		const w = create({ canSelect: false });
+		await flushPromises();
+		expect(w.find(".filebox-source-control").exists()).toBe(false);
+		expect(api.getFileBoxSourceState).not.toHaveBeenCalled();
+		expect(api.setFileBoxSource).not.toHaveBeenCalled();
 		w.unmount();
 	});
 	it("a reload reads the persistent selection without another write", async () => {

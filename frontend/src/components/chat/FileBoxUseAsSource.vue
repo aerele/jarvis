@@ -1,5 +1,5 @@
 <template>
-	<div class="filebox-source-control">
+	<div v-if="canSelect" class="filebox-source-control">
 		<Button
 			variant="subtle"
 			:label="
@@ -46,6 +46,7 @@ const props = defineProps({
 	conversation: { type: String, required: true },
 	message: { type: String, required: true },
 	attachment: { type: Object, required: true },
+	canSelect: { type: Boolean, default: false },
 });
 const emit = defineEmits(["availability"]);
 const { state, loading, saving, error, current, load, select } = useFileBoxSource(props);

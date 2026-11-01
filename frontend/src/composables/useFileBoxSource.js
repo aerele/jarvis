@@ -20,6 +20,7 @@ export function useFileBoxSource(props) {
 	const read = ({ conversation, message, item, file_url }) =>
 		getFileBoxSourceState(conversation, { message, item, file_url });
 	async function load() {
+		if (!props.canSelect) return;
 		const id = ++generation;
 		loading.value = true;
 		error.value = "";
@@ -34,6 +35,7 @@ export function useFileBoxSource(props) {
 	}
 	async function select() {
 		if (
+			!props.canSelect ||
 			loading.value ||
 			saving.value ||
 			!state.value ||
@@ -70,15 +72,19 @@ export function useFileBoxSource(props) {
 	}
 	watch(
 		() => [
+			props.canSelect,
 			props.conversation,
 			props.message,
 			props.attachment.name,
 			props.attachment.file_url,
 		],
 		() => {
+			++generation;
 			state.value = null;
 			saving.value = false;
-			load();
+			loading.value = false;
+			error.value = "";
+			if (props.canSelect) load();
 		},
 		{ immediate: true, flush: "sync" }
 	);

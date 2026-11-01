@@ -220,6 +220,44 @@ def _busy(conversation):
 	)
 
 
+def _detach_previous_source(conversation: str, original: str | None, current: str) -> None:
+	"""Release only the outgoing replacement link after the conversation lock."""
+	if not current or current == original:
+		return
+	# Do not take a second File lock for a stale pointer. This also avoids a
+	# candidate/old-file lock cycle during a lost-source recovery. Recheck after
+	# the lock before changing the row, so this fast read grants no authority.
+	row = frappe.db.get_value("File", current, ["attached_to_doctype", "attached_to_name"], as_dict=True)
+	if not row or row.attached_to_doctype != CONV or row.attached_to_name != conversation:
+		return
+	rows = frappe.db.sql(
+		"SELECT name, attached_to_doctype, attached_to_name FROM `tabFile` WHERE name=%s FOR UPDATE",
+		(current,),
+		as_dict=True,
+	)
+	if rows and rows[0].attached_to_doctype == CONV and rows[0].attached_to_name == conversation:
+		frappe.db.set_value(
+			"File",
+			current,
+			{"attached_to_doctype": None, "attached_to_name": None},
+			update_modified=False,
+		)
+
+
+def _record_source_change(conversation: str) -> None:
+	"""Keep a durable, non-sensitive source-selection audit event."""
+	frappe.get_doc(
+		{
+			"doctype": "Comment",
+			"comment_type": "Info",
+			"comment_email": frappe.session.user,
+			"reference_doctype": CONV,
+			"reference_name": conversation,
+			"content": frappe.utils.escape_html(_("File Box source changed.")),
+		}
+	).insert(ignore_permissions=True)
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def set_source(conversation: str, message: str, item: str, file_url: str, expected: str) -> dict:
@@ -244,6 +282,7 @@ def set_source(conversation: str, message: str, item: str, file_url: str, expect
 		return {**_state(doc), "ok": False, "reason": "busy"}
 	frappe.db.savepoint("filebox_source_selection")
 	try:
+		_detach_previous_source(conversation, doc.filebox_source_file, current)
 		if not file.attached_to_name:
 			frappe.db.set_value(
 				"File",
@@ -252,6 +291,7 @@ def set_source(conversation: str, message: str, item: str, file_url: str, expect
 				update_modified=False,
 			)
 		frappe.db.set_value(CONV, conversation, FIELD, target or None, update_modified=False)
+		_record_source_change(conversation)
 	except Exception:
 		frappe.db.rollback(save_point="filebox_source_selection")
 		raise

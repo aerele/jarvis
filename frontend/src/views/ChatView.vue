@@ -3854,12 +3854,14 @@
 						v-if="
 							artifact.conv === currentId &&
 							fileboxConversation &&
+							canSelectFileboxSource &&
 							artifact.m?.role === 'user'
 						"
 						:key="artifact.conv + ':' + artifact.m.name + ':' + artifact.cv.name"
 						:conversation="artifact.conv"
 						:message="artifact.m.name"
 						:attachment="artifact.cv"
+						:can-select="canSelectFileboxSource"
 						@availability="artifactSourceAvailability"
 					/>
 					<div class="jv-artifact-body">
@@ -4729,6 +4731,7 @@ import {
 	artifactPhaseList,
 	detectArtifactKind,
 } from "@/lib/artifactActivityCard";
+import { canSelectFileBoxSource } from "@/lib/fileboxSourceOwner";
 import {
 	activityItems,
 	addStep,
@@ -6321,6 +6324,9 @@ const liveElapsedLabel = computed(() => {
 const runMeta = ref({}); // { [message_id]: { ms, tools, names } } — survives reloads
 const canvasContent = ref({}); // { `${msgName}::${canvasName}`: srcdoc html (html/svg) | data-url (pdf/image/file) }
 const fileboxConversation = ref(false);
+const canSelectFileboxSource = computed(() =>
+	canSelectFileBoxSource(currentId.value, store.conversations)
+);
 const pendingFiles = ref([]); // [{ file_url, file_name }] attachments to send
 // Per-file upload state. This was a single `uploading` boolean, which could
 // only ever say "something is happening somewhere" - no file name, no way to

@@ -154,6 +154,7 @@ class TestFileBoxSource(_Base):
 		with as_user(OTHER), self.assertRaises(frappe.PermissionError):
 			set_source(conversation=conv, message=msg, item=item["name"], file_url=pdf.file_url, expected="")
 		self.assertFalse(frappe.db.get_value("File", pdf.name, "attached_to_name"))
+		self.assertFalse(frappe.db.exists("Comment", {"reference_doctype": CONV, "reference_name": conv}))
 
 	def test_reference_to_another_conversations_file_is_not_reparented(self):
 		conv, original, pdf, msg, item = self.fixture()
@@ -168,6 +169,7 @@ class TestFileBoxSource(_Base):
 		conv, original, pdf, msg, item = self.fixture()
 		first = self.select(conv, msg, item)
 		self.assertEqual(self.select(conv, msg, item)["source"], first["source"])
+		self.assertEqual(frappe.db.count("Comment", {"reference_doctype": CONV, "reference_name": conv}), 1)
 		from jarvis.chat.filebox_source import set_source
 
 		original_item = {
@@ -290,7 +292,7 @@ class TestFileBoxSource(_Base):
 			self.select(conv, msg, item)
 		self.assertFalse(frappe.db.get_value("File", pdf.name, "attached_to_name"))
 
-	def test_original_selection_clears_override_and_keeps_both_files(self):
+	def test_original_selection_releases_replacement_and_prevents_stale_fallback(self):
 		from jarvis.chat.filebox_source import set_source
 
 		conv, original, pdf, msg, item = self.fixture()
@@ -313,7 +315,97 @@ class TestFileBoxSource(_Base):
 			)
 		self.assertEqual(state["version"], "")
 		self.assertEqual(state["source"]["name"], original.name)
-		self.assertEqual(frappe.db.get_value("File", pdf.name, "attached_to_name"), conv)
+		self.assertFalse(frappe.db.get_value("File", pdf.name, "attached_to_name"))
+		frappe.delete_doc("File", original.name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		with as_user(USER):
+			self.assertIsNone(filebox._source_file(conv))
+
+	def test_switching_replacements_releases_the_previous_source_file(self):
+		conv, original, pdf, msg, item = self.fixture()
+		with as_user(USER):
+			second = frappe.get_doc(
+				{
+					"doctype": "File",
+					"file_name": f"second-replacement-{conv}.pdf",
+					"content": readable_pdf(f"Second replacement {conv}"),
+					"is_private": 1,
+				}
+			).insert(ignore_permissions=True)
+		self.addCleanup(
+			lambda: frappe.delete_doc("File", second.name, force=True, ignore_permissions=True)
+			if frappe.db.exists("File", second.name)
+			else None
+		)
+		second_item = {
+			"name": "second",
+			"type": "pdf",
+			"file_url": second.file_url,
+			"title": second.file_name,
+		}
+		second_msg = self._msg(
+			conv, 2, "user", "Use the second replacement", canvas=json.dumps([second_item])
+		)
+		frappe.db.commit()
+		self.select(conv, msg, item)
+		state = self.select(conv, second_msg, second_item, expected=pdf.name)
+		self.assertEqual(state["source"]["name"], second.name)
+		self.assertFalse(frappe.db.get_value("File", pdf.name, "attached_to_name"))
+		self.assertEqual(frappe.db.get_value("File", second.name, "attached_to_name"), conv)
+
+	def test_original_selection_does_not_detach_a_foreign_previous_pointer(self):
+		from jarvis.chat.filebox_source import set_source
+
+		conv, original, pdf, msg, item = self.fixture()
+		other = self._conv()
+		frappe.db.set_value("File", pdf.name, {"attached_to_doctype": CONV, "attached_to_name": other})
+		frappe.db.set_value(CONV, conv, "filebox_active_source_file", pdf.name, update_modified=False)
+		original_msg = self._msg(
+			conv,
+			2,
+			"user",
+			"Original",
+			canvas=json.dumps([{"name": "original", "file_url": original.file_url}]),
+		)
+		frappe.db.commit()
+		with as_user(USER):
+			state = set_source(
+				conversation=conv,
+				message=original_msg,
+				item="original",
+				file_url=original.file_url,
+				expected=pdf.name,
+			)
+		self.assertEqual(state["source"]["name"], original.name)
+		self.assertEqual(frappe.db.get_value("File", pdf.name, "attached_to_name"), other)
+
+	def test_source_change_records_a_generic_owner_audit_comment(self):
+		conv, original, pdf, msg, item = self.fixture()
+		self.select(conv, msg, item)
+		comments = frappe.get_all(
+			"Comment",
+			filters={"reference_doctype": CONV, "reference_name": conv},
+			fields=["comment_type", "comment_email", "content"],
+		)
+		self.assertEqual(
+			[(row.comment_type, row.comment_email, row.content) for row in comments],
+			[("Info", USER, "File Box source changed.")],
+		)
+		self.assertNotIn(original.file_name, comments[0].content)
+		self.assertNotIn(pdf.file_name, comments[0].content)
+
+	def test_source_change_rolls_back_when_the_audit_write_fails(self):
+		from jarvis.chat import filebox_source
+
+		conv, original, pdf, msg, item = self.fixture()
+		with (
+			patch.object(filebox_source, "_record_source_change", side_effect=RuntimeError("audit failure")),
+			self.assertRaises(RuntimeError),
+		):
+			self.select(conv, msg, item)
+		self.assertFalse(frappe.db.get_value("File", pdf.name, "attached_to_name"))
+		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_active_source_file"))
+		self.assertFalse(frappe.db.exists("Comment", {"reference_doctype": CONV, "reference_name": conv}))
 
 	def test_queued_and_running_turn_states_refuse_source_changes(self):
 		from jarvis.chat import admission
