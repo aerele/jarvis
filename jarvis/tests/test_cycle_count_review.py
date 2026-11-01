@@ -566,8 +566,9 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		)
 
 	def _assert_physical_count_items_readable(self, user, fact_name, expected, message):
-		"""Exercise the child-table list path through its scoped parent."""
+		"""Exercise both the ORM and generic API child-list paths."""
 		frappe.set_user(user)
+		expected_parents = [fact_name] if expected else []
 		self.assertEqual(
 			frappe.get_list(
 				"Jarvis Physical Count Item",
@@ -575,8 +576,23 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 				pluck="parent",
 				parent_doctype="Jarvis Physical Count",
 			),
-			[fact_name] if expected else [],
+			expected_parents,
 			message,
+		)
+		from frappe import client
+
+		self.assertEqual(
+			[
+				row["parent"]
+				for row in client.get_list(
+					"Jarvis Physical Count Item",
+					fields=["parent"],
+					filters={"parent": fact_name},
+					parent="Jarvis Physical Count",
+				)
+			],
+			expected_parents,
+			"generic child-list API: " + message,
 		)
 
 	def _plan(self, *, pending=False):
