@@ -159,7 +159,7 @@ vi.mock("@/pages/agents/ActivationPanel.vue", () => ({
 vi.mock("@/pages/agents/ConfigForm.vue", () => ({
 	default: {
 		name: "ConfigForm",
-		props: ["validationErrors"],
+		props: ["agentSlug", "validationErrors"],
 		emits: ["save", "dirty"],
 		template: "<div />",
 	},
@@ -1315,6 +1315,45 @@ describe("AR configuration readiness", () => {
 		await wrapper.find('[data-label="Complete configuration"]').trigger("click");
 		expect(wrapper.text()).toContain("Manual review only");
 		expect(wrapper.text()).not.toContain("Run automatically");
+	});
+});
+
+describe("SLA-breach configuration readiness", () => {
+	function slaAgent(issues = {}) {
+		return baseAgent({
+			agent_slug: "sla-breach-ageing-auditor",
+			config_keys: '["sla_config"]',
+			installation: installedInstallation({ configuration_issues: issues }),
+		});
+	}
+
+	function runButton(wrapper) {
+		return wrapper.find('[data-label="Run Now"]');
+	}
+
+	it("blocks an unconfigured SLA auditor and shows the Helpdesk-team action", async () => {
+		const issues = { sla_team: "Select one readable HD Team record." };
+		const wrapper = await mountDetail(slaAgent(issues));
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+		expect(wrapper.text()).toContain(
+			"Select and save one readable Helpdesk team in Configure before running."
+		);
+		await wrapper.find('[data-label="Complete configuration"]').trigger("click");
+		const form = wrapper.findComponent({ name: "ConfigForm" });
+		expect(form.props("agentSlug")).toBe("sla-breach-ageing-auditor");
+		expect(form.props("validationErrors")).toEqual(issues);
+	});
+
+	it("holds Run Now until the server has checked the selected team", async () => {
+		const fixture = slaAgent();
+		delete fixture.installation.configuration_issues;
+		const wrapper = await mountDetail(fixture);
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+	});
+
+	it("allows Run Now only after a valid saved team configuration", async () => {
+		const wrapper = await mountDetail(slaAgent({}));
+		expect(runButton(wrapper).attributes("disabled")).toBeUndefined();
 	});
 });
 

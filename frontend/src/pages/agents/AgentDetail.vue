@@ -191,11 +191,11 @@
 					Still in shadow preview - promote it to live under Configure first
 				</div>
 				<div
-					v-if="installation && apConfigurationBlocked"
+					v-if="installation && configurationBlocked"
 					class="mt-3 flex items-center gap-3 text-sm text-ink-gray-6"
 					role="status"
 				>
-					<span>{{ apConfigurationHint }}</span>
+					<span>{{ configurationHint }}</span>
 					<Button
 						v-if="tab !== 'configure'"
 						label="Complete configuration"
@@ -423,6 +423,7 @@
 								class="mt-2"
 								:config="parsedConfig"
 								:config-keys="configKeys"
+								:agent-slug="agent.agent_slug"
 								:validation-errors="configurationIssues"
 								:saving="savingConfig"
 								@dirty="configurationDirty = $event"
@@ -1102,23 +1103,34 @@ async function doInstall(pick) {
 
 const running = ref(false);
 const configurationDirty = ref(false);
+const SLA_BREACH_AGEING_AUDITOR = "sla-breach-ageing-auditor";
 const isOperatorReview = computed(
 	() => agent.value?.nature === "Operator" && !!agent.value?.supports_manual_run
 );
-const configurationIssues = computed(
-	() => (isOperatorReview.value && installation.value?.configuration_issues) || {}
+const isSlaBreachAgeingAuditor = computed(
+	() => agent.value?.agent_slug === SLA_BREACH_AGEING_AUDITOR
 );
-const apConfigurationBlocked = computed(
+// Most agents can run with ordinary optional settings. The three review
+// operators and the SLA queue auditor each have a required launch contract.
+const requiresRunConfiguration = computed(
+	() => isOperatorReview.value || isSlaBreachAgeingAuditor.value
+);
+const configurationIssues = computed(
+	() => (requiresRunConfiguration.value && installation.value?.configuration_issues) || {}
+);
+const configurationBlocked = computed(
 	() =>
-		isOperatorReview.value &&
+		requiresRunConfiguration.value &&
 		(configurationDirty.value ||
 			savingConfig.value ||
 			!installation.value?.configuration_issues ||
 			Object.keys(configurationIssues.value).length > 0)
 );
-const apConfigurationHint = computed(() =>
+const configurationHint = computed(() =>
 	configurationDirty.value
 		? "Save your configuration changes before running."
+		: isSlaBreachAgeingAuditor.value
+		? "Select and save one readable Helpdesk team in Configure before running."
 		: "Complete and save the required review settings in Configure before running."
 );
 // On-demand run is offered for read-only auditors AND scribes (mirrors the
@@ -1149,7 +1161,7 @@ const runDisabled = computed(
 			!["Auditor", "Scribe"].includes(agent.value.nature)) ||
 		!(agent.value && agent.value.allowed) ||
 		shadowScribeBlocked.value ||
-		apConfigurationBlocked.value
+		configurationBlocked.value
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
@@ -1163,7 +1175,7 @@ const runTooltip = computed(() => {
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
 	if (!agent.value.allowed) return "You do not have access to this agent";
-	if (apConfigurationBlocked.value) return apConfigurationHint.value;
+	if (configurationBlocked.value) return configurationHint.value;
 	// The shadow vocabulary is reviewer language (jarvis#1062): a plain user has
 	// no promote control and no say in the sign-off, so telling them to go and
 	// promote it names an action they cannot take.
