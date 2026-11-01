@@ -114,6 +114,19 @@ test("DecisionSheet keeps a safety-update explanation open until the person clos
 	assert.match(src, /Confirmation cancelled/);
 });
 
+test("DecisionSheet's direct Deny settles a safety-update token before the busy guard clears", () => {
+	const src = fs.readFileSync(
+		new URL("../components/DecisionSheet.vue", import.meta.url),
+		"utf8",
+	);
+	const deny = src.slice(src.indexOf("async function deny()"), src.indexOf("async function approve("));
+	const outcome = deny.indexOf("const outcome = denyOutcome(r)");
+	const settled = deny.indexOf('if (outcome.state === "cancelled") emit("settled", token)', outcome);
+	const busyClear = deny.indexOf('emit("busy", false, token)', outcome);
+	assert.ok(outcome > -1 && settled > outcome && settled < busyClear);
+	assert.match(src, /state\.value === "cancelled" && props\.action\?\.token/);
+});
+
 test("DecisionSheet keeps an asynchronous result bound to its original card", () => {
 	const src = fs.readFileSync(
 		new URL("../components/DecisionSheet.vue", import.meta.url),

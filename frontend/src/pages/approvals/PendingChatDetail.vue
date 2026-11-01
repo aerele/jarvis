@@ -81,7 +81,7 @@
 // board adds no decide path of its own: Confirm / Discard call confirm_tool /
 // dismiss_tool exactly as the chat does, so the server re-checks everything and
 // the chat continues after a Confirm. The words live in lib/chatCardActions.
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import { Button, toast } from "frappe-ui";
 import PendingCard from "@/components/PendingCard.vue";
@@ -135,6 +135,7 @@ const safetyUpdateNotice = computed(() => {
 });
 
 let req = 0; // monotonic: a stale load never overwrites a newer one
+let alive = true;
 async function load() {
 	const id = ++req;
 	loading.value = !rec.value;
@@ -161,6 +162,28 @@ async function decide(action) {
 		if (res.ok) {
 			toast.success(escapeHtml(chatOutcomeMessage(res, action)));
 			decided(res);
+			return;
+		}
+		// A direct Confirm or Discard can race the close migration. Its token is
+		// terminal and must not leave this board detail on the generic retry path.
+		// Keep the standard Done-only notice here until the person acknowledges it;
+		// then the board removes only this selected row and leaves other cards alone.
+		if (res.reason_code === "safety_update") {
+			// A row switch unmounts this detail. There is then no person left to
+			// press Done here, so settle the old selected row through its key-bound
+			// callback instead of leaving a terminal token in the board lane.
+			if (!alive) {
+				decided(res);
+				return;
+			}
+			rec.value = {
+				...rec.value,
+				status: "Cancelled",
+				can_act: 0,
+				pending_card_safe: false,
+				reason_code: "safety_update",
+				reason: res.error?.message || SAFETY_UPDATE_COPY,
+			};
 			return;
 		}
 		const message = chatRefusalMessage(res);
@@ -207,5 +230,8 @@ function refresh() {
 }
 
 onMounted(load);
+onBeforeUnmount(() => {
+	alive = false;
+});
 defineExpose({ refresh });
 </script>

@@ -123,6 +123,10 @@ async function deny() {
 	try {
 		const r = await api.dismissTool(token, conversation);
 		const outcome = denyOutcome(r);
+		// Match Approve's close-migration path. A direct Deny can receive the
+		// terminal safety response too; exclude its token before the in-flight
+		// guard clears, then leave only the cancellation Done control visible.
+		if (outcome.state === "cancelled") emit("settled", token);
 		if (actionIsCurrent(token)) {
 			state.value = outcome.state;
 			error.value = outcome.error;

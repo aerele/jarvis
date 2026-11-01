@@ -26,6 +26,7 @@ describe("chatCardActions copy", () => {
 			"target_missing",
 			"tampered",
 			"unverifiable",
+			"safety_update",
 			// approve_and_run (C5): the card stays Pending on every one of these -
 			// see the "keeps a card" case below.
 			"not_runnable",
@@ -80,6 +81,7 @@ describe("chatCardActions copy", () => {
 			true
 		);
 		expect(isChatSettled({ ok: false, reason_code: "not_found" })).toBe(true);
+		expect(isChatSettled({ ok: false, reason_code: "safety_update" })).toBe(true);
 		expect(isChatSettled({ ok: false, error: { type: "InvalidConfirmation" } })).toBe(true);
 		expect(
 			isChatSettled({
@@ -127,6 +129,7 @@ describe("keepsChatCard", () => {
 			{ ok: true },
 			{ ok: false, reason_code: "already_handled" },
 			{ ok: false, reason_code: "not_found" },
+			{ ok: false, reason_code: "safety_update" },
 			{ ok: false, reason_code: "failed", pa_status: "Failed" },
 			{ ok: false, reason_code: "stale", pa_status: "Failed" },
 			{ ok: false, error: { type: "InvalidConfirmation" } },
@@ -134,6 +137,37 @@ describe("keepsChatCard", () => {
 			null,
 		])
 			expect(keepsChatCard(res)).toBe(false);
+	});
+});
+
+describe("ChatView direct safety-update decisions", () => {
+	const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
+	const actionBody = (name) => {
+		const start = src.indexOf(`async function ${name}(`);
+		const next = src.indexOf("\nasync function ", start + 1);
+		return src.slice(start, next === -1 ? undefined : next);
+	};
+
+	it("makes safety_update terminal before any retryable card branch", () => {
+		const helper = src.slice(
+			src.indexOf("function settleSafetyUpdate(token, response)"),
+			src.indexOf("function confirmationStorageUnavailable(response)")
+		);
+		expect(helper).toContain('response?.reason_code !== "safety_update"');
+		expect(helper).toContain("safetySettledTokens.value");
+		expect(helper).toContain("removePending(token)");
+		expect(helper).toContain("enqueueSafetyUpdateNotice");
+		// Filtering by the response token removes the cancelled card only. The
+		// visible queue still contains an independent safe sibling.
+		expect(src).toContain("pendingActions.value = pendingActions.value.filter((x) => x.token !== token)");
+
+		for (const fn of ["confirmPending", "approveAndRunPending", "discardPending"]) {
+			const body = actionBody(fn);
+			const safety = body.indexOf("settleSafetyUpdate(token, r)");
+			const kept = body.indexOf("keepsChatCard(r)");
+			expect(safety, fn).toBeGreaterThan(-1);
+			expect(kept, fn).toBeGreaterThan(safety);
+		}
 	});
 });
 

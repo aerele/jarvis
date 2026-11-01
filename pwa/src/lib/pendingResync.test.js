@@ -353,8 +353,12 @@ test("safety update settles its token before DecisionSheet clears the busy guard
 		"settledTokens.value = withExcluded(settledTokens.value, [token])",
 		handler
 	);
+	const remove = view.indexOf(
+		"pending.value = pending.value.filter((card) => card.token !== token)",
+		handler
+	);
 	const listener = view.indexOf('@settled="onDecisionSettled"');
-	assert.ok(handler > -1 && exclude > handler);
+	assert.ok(handler > -1 && exclude > handler && remove > exclude);
 	assert.ok(listener > -1);
 });
 

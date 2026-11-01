@@ -15,12 +15,18 @@ import { mount, flushPromises } from "@vue/test-utils";
 // (WikiTab.spec.js precedent: jsdom's localStorage is not reliably usable
 // here). The pane's conversation slot is seeded to a known id up front so a
 // realtime frame naming it passes the "OUR conversation" gate.
+const dashboardConversation = vi.hoisted(() => ({ slot: null }));
 vi.mock("@vueuse/core", async (importOriginal) => {
 	const actual = await importOriginal();
 	const { ref } = await import("vue");
 	return {
 		...actual,
-		useStorage: (key, initial) => ref(key.startsWith("jarvis-dash-conv-") ? "conv1" : initial),
+		useStorage: (key, initial) => {
+			if (!key.startsWith("jarvis-dash-conv-")) return ref(initial);
+			const slot = ref("conv1");
+			dashboardConversation.slot = slot;
+			return slot;
+		},
 	};
 });
 
@@ -137,6 +143,7 @@ function fakeSocket() {
 const mounted = [];
 afterEach(() => {
 	while (mounted.length) mounted.pop().unmount();
+	dashboardConversation.slot = null;
 });
 
 function mountPane({ socket = fakeSocket() } = {}) {
@@ -330,12 +337,59 @@ describe("DashboardChatPane requires the pending-card safety attestation", () =>
 	});
 });
 
+describe("DashboardChatPane pending-card freshness", () => {
+	afterEach(() => {
+		listPendingConfirmations.mockReset();
+		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: [] } });
+	});
+
+	it("does not render a delayed A card after the pane switches to B", async () => {
+		let resolveA;
+		const delayedA = new Promise((resolve) => {
+			resolveA = resolve;
+		});
+		listPendingConfirmations.mockImplementation((conversation) =>
+			conversation === "conv1"
+				? delayedA
+				: Promise.resolve({ ok: true, data: { pending: [] } })
+		);
+
+		const { wrapper } = mountPane();
+		await Promise.resolve();
+		expect(listPendingConfirmations).toHaveBeenCalledWith("conv1");
+
+		dashboardConversation.slot.value = "conv2";
+		await flushPromises();
+		expect(listPendingConfirmations).toHaveBeenCalledWith("conv2");
+
+		resolveA({
+			ok: true,
+			data: {
+				pending: [
+					{
+						token: "only-in-a",
+						conversation: "conv1",
+						tool: "create_doc",
+						pending_card_safe: true,
+					},
+				],
+			},
+		});
+		await flushPromises();
+
+		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(0);
+		expect(wrapper.text()).not.toContain("only-in-a");
+	});
+});
+
 describe("DashboardChatPane safety-update receipts", () => {
 	afterEach(() => {
 		api.getDashboardConversation.mockReset();
 		api.getDashboardConversation.mockResolvedValue({ messages: [] });
 		listPendingConfirmations.mockReset();
 		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: [] } });
+		confirmTool.mockReset();
+		dismissTool.mockReset();
 	});
 
 	it("queues each suppressed receipt as a Done-only notice and keeps a valid sibling", async () => {
@@ -399,6 +453,55 @@ describe("DashboardChatPane safety-update receipts", () => {
 		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
 		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
 	});
+
+	for (const [label, action] of [
+		["Approve", confirmTool],
+		["Dismiss", dismissTool],
+	]) {
+		it(`${label} settles a direct safety update as Done-only and leaves its safe sibling`, async () => {
+			listPendingConfirmations.mockResolvedValue({
+				ok: true,
+				data: {
+					pending: [
+						{
+							token: "cancelled-direct",
+							conversation: "conv1",
+							tool: "create_doc",
+							created_at: 100,
+							pending_card_safe: true,
+						},
+						{
+							token: "safe-sibling",
+							conversation: "conv1",
+							tool: "create_doc",
+							created_at: 200,
+							pending_card_safe: true,
+						},
+					],
+				},
+			});
+			action.mockResolvedValueOnce({
+				ok: false,
+				reason_code: "safety_update",
+				error: { message: "This direct action was cancelled. Nothing ran." },
+			});
+			toast.error.mockClear();
+
+			const { wrapper } = mountPane();
+			await flushPromises();
+			await wrapper.findAll("button").find((button) => button.text() === label).trigger("click");
+			await flushPromises();
+
+			expect(action).toHaveBeenCalledWith("cancelled-direct", "conv1");
+			const notice = wrapper.find(".dashboard-safety-update");
+			expect(notice.text()).toContain("This direct action was cancelled. Nothing ran.");
+			expect(notice.findAll("button").map((button) => button.text())).toEqual(["Done"]);
+			expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+			expect(wrapper.findAll("button").filter((button) => button.text() === "Dismiss")).toHaveLength(1);
+			expect(wrapper.findAll("button").some((button) => button.text() === "Retry")).toBe(false);
+			expect(toast.error).not.toHaveBeenCalled();
+		});
+	}
 });
 
 // D3: the pane's Approve/Dismiss used to always show one generic "may have

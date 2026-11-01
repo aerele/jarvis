@@ -841,6 +841,7 @@ import { tileUnits } from "../../shared/holiday/worn-room.mjs";
 import { prefersReduced, watchReducedMotion } from "./reduced_motion.mjs";
 import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
 import { sendRefusalMessage } from "./panel_send_copy.mjs";
+import { advanceViewGeneration, isViewCurrent } from "./view_generation.mjs";
 import { maintenance, foldSend, startPollIfHeld } from "./maintenance_state.mjs";
 import {
 	emptyStream,
@@ -972,6 +973,15 @@ const bodyEl = ref(null);
 const textareaEl = ref(null);
 
 const convId = ref("");
+// `startNewChat()` clears the current view while network work from the old view
+// can still be in flight. A conversation id alone is not enough to identify the
+// view: a later load can legitimately select the same id again. Keep a monotonic
+// view generation so old reads, sends, confirmations, and polls cannot repaint a
+// fresh chat.
+let viewGeneration = 0;
+function isCurrentView(generation, conversation) {
+	return isViewCurrent(generation, conversation, viewGeneration, convId.value);
+}
 const messages = ref([]);
 const stream = ref(emptyStream());
 const loading = ref(false);
@@ -1492,6 +1502,7 @@ function autoGrow() {
 // - so a resync never re-fetches the whole conversation. `source` tags the call for the
 // server's per-layer rescue signal. Best-effort: chat works without it.
 async function resyncPending(source) {
+	const generation = viewGeneration;
 	const cid = convId.value;
 	if (!cid) return;
 	try {
@@ -1524,8 +1535,9 @@ async function resyncPending(source) {
 			}));
 		const pc = await listPendingConfirmations(cid, source);
 		// A resync in flight across a startNewChat / conversation switch must not write the
-		// previous conversation's cards onto the new one (freshness guard, mirrors the SPA).
-		if (convId.value !== cid) return;
+		// previous conversation's cards onto the new one. The generation matters when a
+		// fresh view later resolves back to the same conversation id.
+		if (!isCurrentView(generation, cid)) return;
 		// Only a CLEAN ok:true read is authoritative. ok:false (a transient store blip) or a
 		// missing/malformed body keeps the current cards as the base so a live-only card is
 		// not wiped; the durable rowItems ALWAYS apply (this is also the open-seed path, so a
@@ -1617,6 +1629,7 @@ function onVisiblePending() {
 }
 
 async function load() {
+	const generation = viewGeneration;
 	// Only blank the panel when there is nothing on screen yet; a refresh over
 	// an existing thread should be invisible.
 	loading.value = messages.value.length === 0;
@@ -1628,16 +1641,21 @@ async function load() {
 	const _hadThread = messages.value.length > 0;
 	const _keepScrollTop =
 		_hadThread && !pinnedToBottom.value && bodyEl.value ? bodyEl.value.scrollTop : null;
+	let requestedConversation = _convAtEntry;
 	try {
 		if (!convId.value) {
 			const list = await listConversations();
+			if (viewGeneration !== generation || convId.value) return;
 			convId.value = Array.isArray(list) && list.length ? list[0].name : "";
 		}
-		if (!convId.value) {
+		requestedConversation = convId.value;
+		if (!requestedConversation) {
+			if (viewGeneration !== generation) return;
 			if (!messages.value.length) messages.value = [];
 			return;
 		}
-		const conv = await getConversation(convId.value);
+		const conv = await getConversation(requestedConversation);
+		if (!isCurrentView(generation, requestedConversation)) return;
 		messages.value = Array.isArray(conv?.messages) ? conv.messages : [];
 		observePassiveSafetyUpdates(messages.value);
 		// Seed recall from what was actually asked in this conversation. The panel
@@ -1651,18 +1669,26 @@ async function load() {
 		// Resync open write confirmations (rows-first + Redis backstop). A routine
 		// open / turn-settle refresh, so untagged. Best-effort: chat works without it.
 		await resyncPending();
-		if (_keepScrollTop !== null && bodyEl.value && convId.value === _convAtEntry) {
+		if (!isCurrentView(generation, requestedConversation)) return;
+		if (_keepScrollTop !== null && bodyEl.value && requestedConversation === _convAtEntry) {
 			// In-place refresh of the thread already on screen, with the reader
 			// parked somewhere in it. Put them back exactly where they were and
 			// leave the blank run alone so it keeps trimming as the answer grows.
 			await nextTick();
+			if (!isCurrentView(generation, requestedConversation)) return;
 			// Re-apply for a moment: the message list was just replaced, so on this
 			// tick the panel is still short and a single assignment clamps against a
 			// small scrollHeight, which would strand the reader near the top.
 			bodyEl.value.scrollTop = _keepScrollTop;
 			const deadline = Date.now() + 900;
 			const hold = () => {
-				if (!bodyEl.value || pinnedToBottom.value || Date.now() > deadline) return;
+				if (
+					!isCurrentView(generation, requestedConversation) ||
+					!bodyEl.value ||
+					pinnedToBottom.value ||
+					Date.now() > deadline
+				)
+					return;
 				if (Math.abs(bodyEl.value.scrollTop - _keepScrollTop) > 2) {
 					bodyEl.value.scrollTop = _keepScrollTop;
 				}
@@ -1678,14 +1704,24 @@ async function load() {
 			await scrollToBottom();
 		}
 	} catch (e) {
-		loadError.value = "Could not load your conversation.";
+		if (
+			viewGeneration === generation &&
+			(!requestedConversation || convId.value === requestedConversation)
+		)
+			loadError.value = "Could not load your conversation.";
 	} finally {
-		loading.value = false;
+		if (
+			viewGeneration === generation &&
+			(!requestedConversation || convId.value === requestedConversation)
+		)
+			loading.value = false;
 	}
 }
 
 function startNewChat() {
+	viewGeneration = advanceViewGeneration(viewGeneration);
 	stopPendingPoll(); // a poll from the conversation being left must not carry over
+	stopPolling();
 	convId.value = "";
 	messages.value = [];
 	settledTokens = new Set(); // a settled token belonged to the conversation being left
@@ -1696,6 +1732,9 @@ function startNewChat() {
 	// straggler — the dead-banner resurrection the fence exists to prevent.
 	// New runs get fresh entries; old entries are three ints per run_id.
 	stream.value = { ...emptyStream(), fence: stream.value.fence };
+	loading.value = false;
+	sending.value = false;
+	resolving.value = "";
 	loadError.value = "";
 	// The failure belonged to the conversation being left behind.
 	clearTurnError();
@@ -1879,6 +1918,7 @@ async function toggleVoice() {
 }
 
 async function send() {
+	const generation = viewGeneration;
 	// Belt and braces: the composer is hidden whenever readiness is "gate" or
 	// still unresolved (see the template), but a stray call (e.g. Enter fired
 	// before that re-render) must not reach the backend for a workspace that was
@@ -1900,9 +1940,11 @@ async function send() {
 		const forConv = convId.value;
 		const before = (stream.value.pending || []).length;
 		await resyncPending("typed");
-		if (convId.value === forConv && (stream.value.pending || []).length > before) {
+		if (!isCurrentView(generation, forConv)) return;
+		if ((stream.value.pending || []).length > before) {
 			draft.value = "";
 			await nextTick();
+			if (!isCurrentView(generation, forConv)) return;
 			autoGrow();
 			return;
 		}
@@ -1931,15 +1973,18 @@ async function send() {
 	draft.value = "";
 	attachments.value = [];
 	await nextTick();
+	if (viewGeneration !== generation) return;
 	autoGrow();
 	// Land on the new turn first, so you see your question and the answer start
 	// without reaching for the arrow — then STOP following, so the answer grows
 	// downward instead of sliding its own opening up out of the panel as it is
 	// written. Staying pinned is what made a long reply unreadable here too.
 	await scrollToBottom();
+	if (viewGeneration !== generation) return;
 	pinnedToBottom.value = false;
 	showScrollDown.value = false;
 
+	const sentConversation = convId.value;
 	try {
 		// Context is read at SEND time, not at open time: a conversation outlives
 		// the page it started on, and pinning it would leave the agent silently
@@ -1947,7 +1992,8 @@ async function send() {
 		// Tokens of the parked cards in the order shown, so a typed "confirm 2"
 		// binds to the card at that number rather than a server-side re-fetch.
 		const approvalTokens = orderedPending.value.map((p) => p.token);
-		const res = await sendMessage(convId.value, text, props.context, atts, approvalTokens);
+		const res = await sendMessage(sentConversation, text, props.context, atts, approvalTokens);
+		if (!isCurrentView(generation, sentConversation)) return;
 		if (res?.conversation_id) convId.value = res.conversation_id;
 		// A typed "no" discarded these cards server-side, even on a send that was then
 		// refused; they must not stay on screen as live offers.
@@ -2009,6 +2055,7 @@ async function send() {
 		ensureRealtime();
 		startPolling();
 	} catch (e) {
+		if (!isCurrentView(generation, sentConversation)) return;
 		sending.value = false;
 		loadError.value = "Could not send. Your message was not delivered.";
 	}
@@ -2036,9 +2083,12 @@ async function stop() {
 
 async function resolvePending(token) {
 	if (resolving.value) return;
+	const generation = viewGeneration;
+	const cid = convId.value;
 	resolving.value = token;
 	try {
-		const result = await confirmTool(token, convId.value);
+		const result = await confirmTool(token, cid);
+		if (!isCurrentView(generation, cid)) return;
 		const kept = keptCardMessage(result);
 		if (kept) {
 			loadError.value = kept;
@@ -2056,9 +2106,10 @@ async function resolvePending(token) {
 		}
 		stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
 	} catch (e) {
+		if (!isCurrentView(generation, cid)) return;
 		loadError.value = "Could not confirm that action.";
 	} finally {
-		resolving.value = "";
+		if (isCurrentView(generation, cid) && resolving.value === token) resolving.value = "";
 	}
 }
 
@@ -2252,8 +2303,10 @@ function settle() {
 
 function startPolling() {
 	stopPolling();
+	const generation = viewGeneration;
 	const before = shownMessages.value.length;
 	pollTimer = window.setInterval(async () => {
+		if (viewGeneration !== generation) return;
 		pollTicks += 1;
 		// ~2 minutes, then give up rather than hammer the site forever.
 		if (pollTicks > 48) {
@@ -2266,9 +2319,11 @@ function startPolling() {
 			if (gaveUp) loadError.value = "Jarvis did not reply. Try again.";
 			return;
 		}
-		if (!convId.value) return;
+		const cid = convId.value;
+		if (!cid) return;
 		try {
-			const conv = await getConversation(convId.value);
+			const conv = await getConversation(cid);
+			if (!isCurrentView(generation, cid)) return;
 			const msgs = Array.isArray(conv && conv.messages) ? conv.messages : [];
 			const next = visibleMessages(msgs);
 			// A COMPLETE assistant turn landed (streaming=0): adopt it and stop.

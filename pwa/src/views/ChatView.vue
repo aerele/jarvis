@@ -174,7 +174,11 @@ function onDecisionSettled(token) {
 	// A safety update spends its token but leaves DecisionSheet open until Done.
 	// Its old transcript row can still say pending, so retain the exclusion after
 	// the RPC's busy guard clears and after the person acknowledges the notice.
-	if (token) settledTokens.value = withExcluded(settledTokens.value, [token]);
+	// Remove the matching card now as well: the terminal sheet is the only
+	// actionable surface until Done, while independent safe siblings stay visible.
+	if (!token) return;
+	settledTokens.value = withExcluded(settledTokens.value, [token]);
+	pending.value = pending.value.filter((card) => card.token !== token);
 }
 // D1: tokens a typed "no" discarded (send()'s discardedTokens, below). The
 // discard only filters pending.value; messages.value keeps tool_status

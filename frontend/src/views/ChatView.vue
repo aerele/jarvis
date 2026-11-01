@@ -8430,6 +8430,22 @@ function removePending(token) {
 	if (!token) return;
 	pendingActions.value = pendingActions.value.filter((x) => x.token !== token);
 }
+
+// A direct Confirm, Approve & run, or Discard can race a close migration. The
+// endpoint then returns the same terminal safety_update envelope as a durable
+// receipt. Treat it as that receipt immediately: exclude only its token, drop
+// only its card, and give the person the one Done-only explanation. A later
+// transcript reload sees the exclusion and cannot add a duplicate notice.
+function settleSafetyUpdate(token, response) {
+	if (!token || response?.reason_code !== "safety_update") return false;
+	safetySettledTokens.value = new Set(safetySettledTokens.value).add(token);
+	removePending(token);
+	enqueueSafetyUpdateNotice({
+		token,
+		message: response?.error?.message || SAFETY_UPDATE_COPY,
+	});
+	return true;
+}
 function confirmationStorageUnavailable(response) {
 	const type = response && response.error && response.error.type;
 	return type === "ConfirmationUnavailableError" || type === "ConfirmationOutcomeUnknownError";
@@ -8527,6 +8543,7 @@ async function confirmPending(pa) {
 	try {
 		const r = await api.confirmTool(token, pa.conversation || currentId.value || "");
 		if (r && r.ok === false) {
+			if (settleSafetyUpdate(token, r)) return;
 			if (confirmationStorageUnavailable(r)) {
 				const card = cardById();
 				if (card) card.error = r.error;
@@ -8615,6 +8632,7 @@ async function approveAndRunPending(pa) {
 	try {
 		const r = await api.approveAndRun(token, pa.conversation || currentId.value || "");
 		if (r && r.ok === false) {
+			if (settleSafetyUpdate(token, r)) return;
 			if (confirmationStorageUnavailable(r)) {
 				const card = cardById();
 				if (card) card.error = r.error;
@@ -8731,6 +8749,7 @@ async function discardPending(pa) {
 	try {
 		try {
 			const r = await api.dismissTool(token, conv);
+			if (settleSafetyUpdate(token, r)) return;
 			if (r && r.ok === false && confirmationStorageUnavailable(r)) {
 				pa.error = r.error;
 				notify(r.error.message, { type: "error" });
@@ -9738,6 +9757,10 @@ async function loadOlder({ auto = false } = {}) {
 		const page = prependOlderPage(messages.value, historyPaging.value, d);
 		messages.value = page.messages;
 		historyPaging.value = { ...page.paging, conv: id };
+		// An old page can contain a terminal receipt for a card that was still
+		// visible from a newer page. Observe the fetched rows as soon as they are
+		// merged so its Done-only safety notice is not lost behind pagination.
+		observePassiveSafetyUpdates(d?.messages || []);
 		promptHistory.value = promptsOf(promptRows(recentPrompts, messages.value));
 		for (const m of d?.messages || []) {
 			if (Array.isArray(m.canvas) && m.canvas.length) ensureCanvas(m);

@@ -881,12 +881,16 @@ function dismissSafetyUpdateNotice() {
 const orderedCards = computed(() => sortPendingCards(pendingCards.value));
 
 async function refreshPending() {
-	if (!conversation.value) {
+	const cid = conversation.value;
+	if (!cid) {
 		pendingCards.value = [];
 		return;
 	}
 	try {
-		const env = await listPendingConfirmations(conversation.value);
+		const env = await listPendingConfirmations(cid);
+		// A delayed list for a chat just left is not authority to render its
+		// cards in the chat now on screen. Check before every assignment below.
+		if (conversation.value !== cid) return;
 		if (env && env.ok === false) return;
 		// A list response is only a delivery channel. It is not authority to
 		// render Confirm: reject raw, delayed, or old-server items unless the
@@ -907,6 +911,21 @@ async function refreshPending() {
 
 function removeCard(token) {
 	pendingCards.value = pendingCards.value.filter((c) => c.token !== token);
+}
+
+// A direct Confirm or Dismiss can race the close migration. The RPC then
+// returns the same terminal safety_update envelope as a durable transcript
+// receipt. Settle only that token and show the standard Done-only notice;
+// other attested cards remain usable.
+function settleSafetyUpdateCard(token, response) {
+	if (!token || response?.reason_code !== "safety_update") return false;
+	safetySettledTokens.value = new Set(safetySettledTokens.value).add(token);
+	removeCard(token);
+	enqueueSafetyUpdateNotice({
+		token,
+		message: response?.error?.message || SAFETY_UPDATE_COPY,
+	});
+	return true;
 }
 
 function confirmationStorageUnavailable(response) {
@@ -979,6 +998,7 @@ async function approve(pa) {
 	let keepCard = false;
 	try {
 		const r = await confirmTool(pa.token, conversation.value);
+		if (settleSafetyUpdateCard(pa.token, r)) return;
 		if (r && r.ok === false) {
 			keepCard = confirmationStorageUnavailable(r) || keepsChatCard(r);
 			toast.error(
@@ -1007,6 +1027,7 @@ async function dismiss(pa) {
 	let keepCard = false;
 	try {
 		const r = await dismissTool(pa.token, conversation.value);
+		if (settleSafetyUpdateCard(pa.token, r)) return;
 		if (r && r.ok === false) {
 			keepCard = confirmationStorageUnavailable(r) || keepsChatCard(r);
 			toast.error(
