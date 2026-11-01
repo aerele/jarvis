@@ -1,5 +1,6 @@
 """AR custody, completeness, human-only disposition and native-ledger integration."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -496,7 +497,9 @@ class TestReceivablesReview(FrappeTestCase):
 				if doctype == writeback.RUN
 				else {"rule_tokens": json.dumps([review.TOKEN]), "doctypes_required": '["Sales Invoice"]'},
 			),
-			patch.object(frappe, "get_doc", side_effect=lambda doctype, name: run if doctype == writeback.RUN else inst),
+			patch.object(
+				frappe, "get_doc", side_effect=lambda doctype, name: run if doctype == writeback.RUN else inst
+			),
 			patch.object(review, "collect", return_value=source),
 			patch.object(review, "stage_reviews") as stage,
 			patch("jarvis.chat.agent_runs.record_delegate_run") as persist,
@@ -589,12 +592,26 @@ class TestReceivablesReview(FrappeTestCase):
 
 
 def assess_native(source, assessment):
-	"""Run the bundle against the one-source private-file envelope."""
+	"""Run the bundle against the protected one-source private-file frame."""
+	data = json.dumps({"rows": [source]}, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+		"utf-8"
+	)
+	receipt = {
+		"private_output": True,
+		"count": 1,
+		"bytes": len(data),
+		"sha256": hashlib.sha256(data).hexdigest(),
+	}
+	header = json.dumps(
+		{"result_mode": "private_audit_v1", "private_output": receipt},
+		separators=(",", ":"),
+		sort_keys=True,
+	).encode("utf-8")
 	with tempfile.TemporaryDirectory() as directory:
 		input_path = os.path.join(directory, "input.json")
 		output_path = os.path.join(directory, "output.json")
-		with open(input_path, "w", encoding="utf-8") as stream:
-			json.dump({"rows": [source]}, stream)
+		with open(input_path, "wb") as stream:
+			stream.write(header + b"\n" + data)
 		subprocess.run(
 			[sys.executable, assessment, "--input", input_path, "--out", output_path], check=True, timeout=30
 		)
@@ -609,6 +626,7 @@ class TestNativeReceivablesReview(FrappeTestCase):
 		from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 
 		from jarvis.chat import approvals_api
+		from jarvis.tests import test_filebox_skills
 		from jarvis.tests.test_filebox_skills import (
 			E2E_ABBR,
 			E2E_CO,
@@ -617,7 +635,6 @@ class TestNativeReceivablesReview(FrappeTestCase):
 			_insert,
 			_purge_e2e,
 		)
-		from jarvis.tests import test_filebox_skills
 
 		frappe.set_user("Administrator")
 		roots, documents, reviews = [], [], []
