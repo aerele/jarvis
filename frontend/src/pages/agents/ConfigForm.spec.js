@@ -864,6 +864,31 @@ describe("per-agent gating via the configKeys prop", () => {
 		});
 	});
 
+	it("FEFO policy controls serialize to fefo and preserve the structured scope declaration", async () => {
+		const configKeys = ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"];
+		const recordScope = { doctype: "Warehouse", name: "Fake FEFO Warehouse" };
+		const w = mountForm({ fefo: { record_scope: recordScope } }, { configKeys });
+		expect(field(w, "Expiry reviewer").element.value).toBe("");
+		expect(field(w, "Near-expiry window").element.value).toBe("");
+		expect(field(w, "Test declaration").element.value).toBe("");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({
+			fefo: { record_scope: recordScope },
+		});
+
+		await field(w, "Expiry reviewer").setValue("reviewer@example.invalid");
+		await field(w, "Near-expiry window").setValue("90");
+		await field(w, "Test declaration").setValue("Fake records only.");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			fefo: {
+				reviewer: "reviewer@example.invalid",
+				near_expiry_days: 90,
+				test_declaration: "Fake records only.",
+				record_scope: recordScope,
+			},
+		});
+	});
+
 	it("configKeys=[] (e.g. bank-recon-operator) renders only the scope fields, plus the note", () => {
 		const w = mountForm({}, { configKeys: [] });
 		expect(w.text()).toContain("Company");

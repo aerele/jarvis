@@ -1604,10 +1604,10 @@ def _stamp_scope_and_watermark(
 
 	Most scope resolution is best-effort: a bench without a resolvable Company
 	(e.g. no erpnext setup) degrades to an unscoped run (no watermark). Negative
-	stock is different: its declared Warehouse is a binding data boundary. If the
-	server cannot validate it as the run-as user, the launch must refuse before
-	dispatch instead of silently widening or producing an unusable run. The
-	watermark + scope are resolved AS the run-as user (this runs under that
+	stock and FEFO are different: their declared Warehouse boundaries must resolve
+	as the run-as user, or the launch must refuse before dispatch rather than
+	widening or producing an unusable run. The watermark + scope are resolved AS
+	the run-as user (this runs under that
 	session). Returns the resolved scope dict (or None).
 
 	``source_apps`` (CX5-2) is folded into the SAME ``scope_json`` stamp OUTSIDE
@@ -1634,8 +1634,13 @@ def _stamp_scope_and_watermark(
 		scope = agent_scope.resolve_scope(inst)
 	except Exception:
 		if agent_scope.requires_bound_scope(inst):
+			agent_slug = (inst.get("agent") or inst.get("agent_slug") or "").strip()
+			title = {
+				"negative-stock-valuation-auditor": "jarvis agent: Negative stock scope resolution refused launch",
+				"fefo-expiry-compliance-auditor": "jarvis agent: FEFO scope resolution refused launch",
+			}.get(agent_slug, "jarvis agent: bound scope resolution refused launch")
 			frappe.log_error(
-				title="jarvis agent: Negative stock scope resolution refused launch",
+				title=title,
 				message=frappe.get_traceback(),
 			)
 			raise
@@ -1731,22 +1736,26 @@ def _explicit_config(listing, inst) -> dict:
 def _sanitize_delegated_engagement_config(listing, engagement_config: dict | None) -> dict:
 	"""Return the safe immutable config snapshot for a delegate run.
 
-	The negative-stock Warehouse root is an owner declaration, not evaluator
-	configuration. The server validates it into ``scope_json`` and must never
-	store or hand the unvalidated declaration to the delegate. Keep an empty
-	namespace after removal so the prompt carries an explicit safe object rather
-	than directing the delegate to a mutable installation fallback.
+	The negative-stock and FEFO Warehouse roots are owner declarations, not
+	evaluator configuration. The server validates each into ``scope_json`` and
+	must never store or hand the unvalidated declaration to the delegate. Keep an
+	empty namespace after removal so the prompt carries an explicit safe object
+	rather than directing the delegate to a mutable installation fallback.
 	"""
 	if not isinstance(engagement_config, dict):
 		return {}
 	safe = dict(engagement_config)
 	agent_slug = listing.get("agent_slug") or listing.get("name")
-	if agent_slug != "negative-stock-valuation-auditor":
+	namespace_name = {
+		"negative-stock-valuation-auditor": "negative_stock",
+		"fefo-expiry-compliance-auditor": "fefo",
+	}.get(agent_slug)
+	if not namespace_name:
 		return safe
-	namespace = safe.get("negative_stock")
+	namespace = safe.get(namespace_name)
 	if not isinstance(namespace, dict) or "record_scope" not in namespace:
 		return safe
-	safe["negative_stock"] = {key: value for key, value in namespace.items() if key != "record_scope"}
+	safe[namespace_name] = {key: value for key, value in namespace.items() if key != "record_scope"}
 	return safe
 
 

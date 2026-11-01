@@ -26,6 +26,7 @@ from jarvis.exceptions import InvalidArgumentError
 
 INSTALLATION = "Jarvis Agent Installation"
 NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
+FEFO_AGENT = "fefo-expiry-compliance-auditor"
 _NEGATIVE_STOCK_OUTPUT_SCOPE_KEYS = ("company", "from_date", "to_date", "report_date")
 
 
@@ -34,13 +35,13 @@ def _agent_slug(installation) -> str:
 
 
 def requires_bound_scope(installation) -> bool:
-	"""Return true when a bad record root must refuse a launch.
+	"""Return true when this agent must refuse a failed scope resolution.
 
-	The negative-stock evaluator needs one Warehouse root to prove that its
-	configured leaf set is complete. A missing or invalid root must never become
-	a company-wide Warehouse scan.
+	Negative stock always needs a Warehouse root. FEFO has a deliberate
+	company-wide mode when no root is declared, but it must not turn a failed
+	scope resolution into an unscoped review.
 	"""
-	return _agent_slug(installation) == NEGATIVE_STOCK_AGENT
+	return _agent_slug(installation) in {NEGATIVE_STOCK_AGENT, FEFO_AGENT}
 
 
 def negative_stock_record_scope(value) -> dict | None:
@@ -122,6 +123,36 @@ def _negative_stock_warehouse_scope(config: dict, company: str) -> dict:
 	return boundary
 
 
+def _fefo_warehouse_scope(config: dict, company: str) -> dict | None:
+	"""Validate an optional FEFO Warehouse leaf as the active run-as user.
+
+	No declaration intentionally retains FEFO's company-wide mode. A present
+	declaration is binding: malformed, foreign, group, or unreadable input must
+	raise rather than widen the review.
+	"""
+	namespace = config.get("fefo")
+	if not isinstance(namespace, dict) or "record_scope" not in namespace:
+		return None
+	boundary = negative_stock_record_scope(namespace["record_scope"])
+	if boundary is None:
+		raise InvalidArgumentError("FEFO record_scope must name one Warehouse leaf")
+
+	name = boundary["name"]
+	try:
+		warehouse = frappe.db.get_value("Warehouse", name, ["company", "is_group"], as_dict=True)
+		warehouse_readable = frappe.has_permission("Warehouse", "read", doc=name)
+	except Exception as exc:
+		raise InvalidArgumentError("FEFO Warehouse scope could not be verified") from exc
+	if (
+		not warehouse_readable
+		or not warehouse
+		or warehouse.get("company") != company
+		or warehouse.get("is_group") != 0
+	):
+		raise InvalidArgumentError("FEFO record_scope must be a readable Warehouse leaf in the company")
+	return boundary
+
+
 def resolve_scope(installation) -> dict:
 	"""Resolve the explicit run scope for an installation.
 
@@ -129,8 +160,8 @@ def resolve_scope(installation) -> dict:
 	Reads ``company`` / ``fiscal_year`` / ``from_date`` / ``to_date`` from the
 	install's ``config`` JSON; falls back to the caller's default Company (or the
 	site's single Company) and erpnext's current fiscal year for the missing
-	pieces. The negative-stock auditor also requires a server-validated Warehouse
-	root. A missing, malformed, foreign, disabled, or unreadable root raises
+	pieces. Negative stock requires a server-validated Warehouse root. FEFO may
+	run company-wide only when no root is declared; a declared invalid leaf raises
 	instead of broadening the review.
 	"""
 	if isinstance(installation, str):
@@ -150,8 +181,13 @@ def resolve_scope(installation) -> dict:
 		return str(val).strip() if val is not None and str(val).strip() else None
 
 	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
-	if requires_bound_scope(installation):
+	agent_slug = _agent_slug(installation)
+	if agent_slug == NEGATIVE_STOCK_AGENT:
 		scope["record_scope"] = _negative_stock_warehouse_scope(cfg, scope["company"])
+	elif agent_slug == FEFO_AGENT:
+		fefo_scope = _fefo_warehouse_scope(cfg, scope["company"])
+		if fefo_scope is not None:
+			scope["record_scope"] = fefo_scope
 	return scope
 
 

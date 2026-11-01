@@ -887,7 +887,7 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "status": "Published",
       "description": "Read-only review of native batch stock and dispatches. Shows past and near expiry stock under an owner expiry policy and candidates where a dispatch skipped an older valid batch. Compares signed batch quantities and recorded values with the native report. A person reviews reservations, quality holds and dispatch exceptions. No legal or saleability verdict.",
       "tools_required": [

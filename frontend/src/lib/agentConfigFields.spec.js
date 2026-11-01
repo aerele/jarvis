@@ -119,6 +119,21 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
+	it("keeps FEFO policy values in the declared nested namespace", () => {
+		const byKey = Object.fromEntries(
+			CONFIG_FIELD_SET.filter((f) => f.key).map((f) => [f.key, f])
+		);
+		expect(byKey.fefo_reviewer).toMatchObject({ path: "fefo.reviewer", type: "text" });
+		expect(byKey.fefo_near_expiry_days).toMatchObject({
+			path: "fefo.near_expiry_days",
+			type: "number",
+		});
+		expect(byKey.fefo_test_declaration).toMatchObject({
+			path: "fefo.test_declaration",
+			type: "text",
+		});
+	});
+
 	it("every field has a human label reachable from CONFIG_FIELD_LABELS", () => {
 		for (const key of KNOWN_CONFIG_KEYS) {
 			expect(CONFIG_FIELD_LABELS[key]).toBeTruthy();

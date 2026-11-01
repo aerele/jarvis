@@ -725,6 +725,150 @@ class TestAgentIdentity(unittest.TestCase):
 			"jarvis agent: Negative stock scope resolution refused launch",
 		)
 
+	def test_fefo_record_scope_is_leaf_bound_or_the_run_fails_closed(self):
+		"""FEFO may be company-wide only when the owner declares no root."""
+		from jarvis.chat import agent_scope
+		from jarvis.exceptions import InvalidArgumentError
+
+		base = {
+			"company": "Scope Co",
+			"fiscal_year": None,
+			"from_date": "2026-04-01",
+			"to_date": "2027-03-31",
+			"report_date": "2026-10-30",
+		}
+
+		def resolve(config, warehouse=None, warehouse_readable=True):
+			inst = frappe._dict(
+				agent="fefo-expiry-compliance-auditor", name="FEFO-INST", config=frappe.as_json(config)
+			)
+			warehouse = warehouse or {"company": "Scope Co", "is_group": 0}
+			with (
+				mock.patch.object(agent_scope, "_resolve", return_value=dict(base)),
+				mock.patch.object(agent_scope.frappe.db, "get_value", return_value=warehouse),
+				mock.patch.object(agent_scope.frappe, "has_permission", return_value=warehouse_readable),
+			):
+				return agent_scope.resolve_scope(inst)
+
+		policy = {
+			"reviewer": "scope-reviewer@example.invalid",
+			"near_expiry_days": 90,
+			"test_declaration": "Fake records only.",
+		}
+		good = {
+			"fefo": {
+				**policy,
+				"record_scope": {"doctype": "Warehouse", "name": "WH-Scope"},
+			}
+		}
+		scope = resolve(good)
+		self.assertEqual(scope["record_scope"], {"doctype": "Warehouse", "name": "WH-Scope"})
+
+		listing = frappe._dict(
+			{
+				"name": "fefo-expiry-compliance-auditor",
+				"config_keys": [
+					"fefo.reviewer",
+					"fefo.near_expiry_days",
+					"fefo.test_declaration",
+				],
+			}
+		)
+		inst = frappe._dict(name="FEFO-INST", config=frappe.as_json(good))
+		snapshot = agent_scheduler._sanitize_delegated_engagement_config(
+			listing, agent_scheduler._explicit_config(listing, inst)
+		)
+		self.assertEqual(snapshot, {"fefo": policy})
+		prompt = agent_scheduler._audit_prompt(
+			listing, inst, trigger="manual", scope=scope, engagement_config=snapshot
+		)
+		self.assertIn('record_scope={"doctype": "Warehouse", "name": "WH-Scope"}', prompt)
+		self.assertIn('"near_expiry_days": 90', prompt)
+		self.assertNotIn('"record_scope"', prompt.split("EXPLICIT CONFIG", 1)[1])
+
+		# A root is optional. With no declaration, FEFO keeps its intentional
+		# company-wide mode and retains only the declared policy values.
+		company_scope = resolve({"fefo": policy})
+		self.assertNotIn("record_scope", company_scope)
+		company_inst = frappe._dict(name="FEFO-INST", config=frappe.as_json({"fefo": policy}))
+		company_snapshot = agent_scheduler._sanitize_delegated_engagement_config(
+			listing, agent_scheduler._explicit_config(listing, company_inst)
+		)
+		self.assertEqual(company_snapshot, {"fefo": policy})
+		company_prompt = agent_scheduler._audit_prompt(
+			listing, company_inst, "manual", company_scope, engagement_config=company_snapshot
+		)
+		self.assertNotIn("record_scope", company_prompt)
+
+		# A scope-only configuration proves that the raw owner declaration is
+		# stripped even when another preflight later rejects the missing policy.
+		scope_only = {"fefo": {"record_scope": {"doctype": "Warehouse", "name": "WH-Scope"}}}
+		scope_only_inst = frappe._dict(name="FEFO-INST", config=frappe.as_json(scope_only))
+		scope_only_snapshot = agent_scheduler._sanitize_delegated_engagement_config(
+			listing, agent_scheduler._explicit_config(listing, scope_only_inst)
+		)
+		self.assertEqual(scope_only_snapshot, {"fefo": {}})
+
+		for bad, warehouse, warehouse_readable in (
+			({"fefo": {**policy, "record_scope": None}}, None, True),
+			({"fefo": {**policy, "record_scope": {"doctype": "Warehouse"}}}, None, True),
+			(
+				{"fefo": {**policy, "record_scope": {"doctype": "Company", "name": "Scope Co"}}},
+				None,
+				True,
+			),
+			(
+				{
+					"fefo": {
+						**policy,
+						"record_scope": {"doctype": "Warehouse", "name": "WH-Scope", "all": True},
+					}
+				},
+				None,
+				True,
+			),
+			(good, {"company": "Other Co", "is_group": 0}, True),
+			(good, {"company": "Scope Co", "is_group": 1}, True),
+			(good, {"company": "Scope Co", "is_group": 0}, False),
+		):
+			with self.subTest(bad=bad, warehouse=warehouse, warehouse_readable=warehouse_readable):
+				with self.assertRaises(InvalidArgumentError):
+					resolve(bad, warehouse, warehouse_readable)
+				invalid_inst = frappe._dict(name="FEFO-INST", config=frappe.as_json(bad))
+				invalid_snapshot = agent_scheduler._sanitize_delegated_engagement_config(
+					listing, agent_scheduler._explicit_config(listing, invalid_inst)
+				)
+				self.assertNotIn("record_scope", invalid_snapshot["fefo"])
+				invalid_prompt = agent_scheduler._audit_prompt(
+					listing, invalid_inst, "manual", {}, engagement_config=invalid_snapshot
+				)
+				self.assertNotIn("record_scope", invalid_prompt)
+				self.assertNotIn("Jarvis Agent Installation", invalid_prompt)
+
+	def test_fefo_scope_resolution_error_refuses_the_launch_path(self):
+		"""A declared invalid FEFO root cannot turn into a broad unscoped run."""
+		from jarvis.chat import agent_scope, operator_review
+		from jarvis.exceptions import InvalidArgumentError
+
+		inst = frappe._dict(agent="fefo-expiry-compliance-auditor", name="FEFO-INST")
+		with (
+			mock.patch.object(operator_review, "backend", return_value=None),
+			mock.patch.object(
+				agent_scope,
+				"resolve_scope",
+				side_effect=InvalidArgumentError("FEFO record_scope must name one Warehouse leaf"),
+			),
+			mock.patch.object(agent_scheduler.frappe, "log_error") as log_error,
+			mock.patch.object(agent_scheduler.frappe.db, "set_value") as set_value,
+		):
+			with self.assertRaises(InvalidArgumentError):
+				agent_scheduler._stamp_scope_and_watermark("FEFO-RUN", inst, self.owner)
+
+		set_value.assert_not_called()
+		self.assertEqual(
+			log_error.call_args.kwargs["title"], "jarvis agent: FEFO scope resolution refused launch"
+		)
+
 	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner
 	# ------------------------------------------------------------------ #
