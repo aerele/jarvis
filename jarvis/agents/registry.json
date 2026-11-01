@@ -86,7 +86,7 @@
       "domain": "ap",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Reviews existing draft Purchase Invoices against exact PO and receipt links, cumulative invoice allocations and an explicitly configured price policy. Preview produces findings; live runs create evidence-backed human review requests. Never creates duplicate invoices, submits, pays, or certifies tax compliance. Manual runs only.",
       "tools_required": [
@@ -652,48 +652,34 @@
       "domain": "inventory-count",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
-      "status": "Coming Soon",
-      "description": "Runs a rolling cycle-count programme ERPNext has no native planner for: ranks the SKU book by value (ABC) and movement (velocity), reads how long since each item/warehouse was last counted, and for the lines due this cycle stages a docstatus-0 draft Stock Reconciliation per warehouse with item rows pre-filled and the counted quantity left blank for the human counter, plus one evidence-carrying Approval Request so a store lead approves the count list first. Proposes only; it never counts, never fills a quantity, and never submits a reconciliation.",
+      "version": "0.2.3",
+      "status": "Published",
+      "description": "Builds a reviewable physical-count plan from current stock, permitted movement evidence, and submitted Jarvis physical-count history. A named reviewer approves a warehouse plan. A human then records observed quantities in a separate Jarvis physical-count record. It never creates a Stock Reconciliation, fills a count, submits a document, or changes stock.",
       "tools_required": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc"
+        "jarvis__get_cycle_count_inputs"
       ],
       "tools_allow": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc",
+        "jarvis__get_cycle_count_inputs",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
         "Jarvis Approval Request",
-        "Stock Reconciliation",
-        "Stock Reconciliation Item",
+        "Jarvis Physical Count",
+        "Jarvis Physical Count Item",
         "Bin",
         "Item",
-        "Stock Ledger Entry"
+        "Stock Ledger Entry",
+        "Stock Entry",
+        "Warehouse",
+        "Company"
       ],
-      "rule_tokens": [],
-      "writes": [
-        {
-          "doctype": "Jarvis Approval Request",
-          "mode": "approval-request"
-        },
-        {
-          "doctype": "Stock Reconciliation",
-          "mode": "draft"
-        }
+      "rule_tokens": [
+        "ccp-plan-v1"
       ],
+      "advisory_tokens": [],
+      "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 600,
       "min_apps": [
@@ -707,7 +693,19 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Standard"
-      }
+      },
+      "config_keys": [
+        "company",
+        "from_date",
+        "to_date",
+        "count_history_from",
+        "warehouses",
+        "line_limit",
+        "recount_after_days",
+        "basis",
+        "review_scope",
+        "policy_version"
+      ]
     },
     {
       "agent_slug": "dead-stock-ageing-auditor",
@@ -1724,35 +1722,30 @@
       "domain": "inventory-count",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.5.0",
       "status": "Published",
-      "description": "Reconciles a physical stock count against system on-hand: ranks the SKUs whose counted quantity differs from the system by rupees-at-risk into an investigation worklist. Requires a docstatus=0 physical-count source (manufactured by the paired cycle-count-planner-operator). Read-only; never posts a stock reconciliation, adjusts a quantity, guesses a cause, or touches valuation. Negative-stock and valuation-integrity classes are owned by negative-stock-valuation-auditor, not here.",
+      "description": "Checks selected submitted Jarvis physical-count facts against book stock at the saved count time. The protected service keeps material lines together in one finding per count and shows the scope, controls and source links. Read-only; it does not post stock adjustments.",
       "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__run_stock_variance_evaluation"
       ],
       "tools_allow": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc",
-        "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "exec",
-        "canvas",
+        "jarvis__run_stock_variance_evaluation",
         "message"
       ],
       "doctypes_required": [
-        "Stock Reconciliation",
-        "Bin",
+        "Jarvis Physical Count",
+        "Jarvis Physical Count Item",
         "Item",
-        "Stock Ledger Entry"
+        "Stock Ledger Entry",
+        "Warehouse",
+        "Company",
+        "Repost Item Valuation",
+        "Inventory Dimension"
       ],
       "rule_tokens": [
         "sv-vtol-7b2c"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1767,7 +1760,10 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "stock_variance"
+      ]
     },
     {
       "agent_slug": "tds-compliance-auditor",

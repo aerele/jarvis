@@ -6668,8 +6668,9 @@ const toolOpen = ref({});
 const showActivityDetail = computed(() => store.activityDetail);
 const notifyEnabled = computed(() => store.notifyEnabled);
 
-// Danger zone: wipe every conversation + message (macros/skills untouched). A chat
-// waiting for a reply is kept by the server; lib/clearHistory.js decides the rest.
+// Danger zone: wipe every conversation + message (macros/skills untouched). The
+// server can retain a live reply or physical-count evidence; clearHistory decides
+// the user-safe explanation.
 const clearingHistory = ref(false);
 async function clearAllHistory() {
 	if (
@@ -6690,9 +6691,9 @@ async function clearAllHistory() {
 				duration: 9000,
 			});
 		if (outcome.openChatKept) {
-			// The open chat was not deleted (it is waiting for its reply, or its
-			// delete failed): leave it exactly as it is (a reply goes on streaming)
-			// and only refresh the sidebar.
+			// The open chat was not deleted (it has a live reply, retained physical
+			// count evidence, or a delete failure). Leave it as it is and refresh the
+			// sidebar.
 			settingsOpen.value = false;
 			store.loadConversations();
 			return;

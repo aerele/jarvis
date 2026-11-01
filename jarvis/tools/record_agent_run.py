@@ -147,6 +147,7 @@ def record_agent_run(
 	coverage=None,
 	scope=None,
 	truncated: bool = False,
+	partial: bool = False,
 	canvas_ref: str | None = None,
 	integrity_digest: str | None = None,
 	dashboard: str | None = None,
@@ -173,6 +174,8 @@ def record_agent_run(
 	    watermark recompute.
 	  truncated: True when the delegate's fetch hit its budget — auto-resolve is
 	    skipped entirely and the run is partial (A16).
+	  partial: True when a trusted evaluator completed some coverage but excluded
+	    source records. It keeps the run partial and blocks auto-resolution.
 	  canvas_ref: the delegate's saved canvas/dashboard ref (stored for Phase 4).
 	  integrity_digest: the evaluator's sha256 over canonicalized findings.
 	  dashboard: the ``Jarvis Dashboard`` name the delegate got back from
@@ -218,6 +221,15 @@ def record_agent_run(
 			"idempotent": True,
 			"note": "run already finalized; writeback ignored",
 		}
+	# Stock Variance is evaluated in the app. A delegate may start that server
+	# evaluator, but may not land a model-authored result or a forged source claim.
+	if run_row.agent == "stock-variance-auditor":
+		from jarvis.chat.stock_variance_evaluation import is_server_writeback
+
+		if not is_server_writeback():
+			raise InvalidArgumentError(
+				"Stock Variance results are server-owned; call run_stock_variance_evaluation."
+			)
 	if not run_row.installation:
 		raise InvalidArgumentError("run has no installation")
 
@@ -250,9 +262,14 @@ def record_agent_run(
 	coverage = _as_dict(coverage)
 	scope = _as_dict(scope)
 	truncated = bool(truncated)
+	partial = bool(partial)
 	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(run_doc.agent)
+	if run_doc.agent != "cycle-count-planner-operator" and any(
+		isinstance(row, dict) and "proposal" in row for row in raw_findings
+	):
+		raise InvalidArgumentError("A physical count proposal is supported only by the count-plan agent.")
 	review_ready = False
 	if review_backend:
 		inst.activation_state = run_doc.preparation_mode or "shadow"
@@ -265,6 +282,13 @@ def record_agent_run(
 		raw_findings, coverage, review_ready = review_backend.validate_output(
 			run_doc, raw_findings, coverage, scope, integrity_digest
 		)
+		validate_envelope = getattr(review_backend, "validate_envelope", None)
+		if validate_envelope:
+			envelope_issue = validate_envelope(run_doc, review_ready, truncated, rows_consumed)
+			if envelope_issue:
+				raw_findings = []
+				coverage = review_backend.envelope_failure(envelope_issue)
+				review_ready = False
 		if not review_ready:
 			integrity_digest = None
 
@@ -322,6 +346,7 @@ def record_agent_run(
 		coverage=coverage,
 		scope=scope,
 		truncated=truncated,
+		partial=partial,
 		dropped=dropped,
 		canvas_ref=canvas_ref,
 		integrity_digest=integrity_digest,
