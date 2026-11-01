@@ -22,7 +22,7 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 		values = self.values(amounts=[120])
 		values["posting_date"] = add_days(nowdate(), 1)
 		if not frappe.get_meta("Landed Cost Voucher").has_field("vendor_invoices"):
-			values.pop("vendor_invoices")
+			values.pop("vendor_invoices", None)
 		return values
 
 	def assert_receipt_summary(self, row, source=None):
