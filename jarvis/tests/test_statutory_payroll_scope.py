@@ -8,6 +8,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_scheduler, agent_scope, agents_api, derived_config, statutory_payroll_scope
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
 	JarvisAgentInstallation,
 )
@@ -301,7 +302,6 @@ class TestStatutoryPayrollScope(FrappeTestCase):
 		set_value.assert_not_called()
 
 	def test_writeback_scope_must_match_the_server_scope(self):
-		from jarvis.exceptions import InvalidArgumentError
 		from jarvis.tools import record_agent_run as writeback
 
 		server_scope = {
@@ -333,6 +333,106 @@ class TestStatutoryPayrollScope(FrappeTestCase):
 					statutory_payroll_scope.canonical_writeback_scope(server_scope, changed)
 				with self.assertRaises(InvalidArgumentError):
 					writeback._canonical_scope_for_writeback(run, changed)
+
+	def test_complete_statutory_echo_is_checked_before_generic_authority(self):
+		from jarvis.tools import record_agent_run as writeback
+
+		server_scope = {
+			"company": self.company,
+			"fiscal_year": None,
+			"from_date": "2026-10-01",
+			"to_date": "2026-10-31",
+			"prior_period_from": "2026-09-01",
+			"prior_period_to": "2026-09-30",
+			"report_date": "2026-11-01",
+			"record_scope": {"doctype": "Payroll Entry", "name": self.entry_name},
+		}
+		run = frappe._dict(agent=statutory_payroll_scope.AGENT, scope_json=json.dumps(server_scope))
+		returned = dict(server_scope)
+		canonical = writeback._canonical_scope_for_writeback(run, returned)
+		self.assertEqual(canonical, server_scope)
+		self.assertEqual(
+			agent_scope.authoritative_writeback_scope(run, returned),
+			server_scope,
+		)
+		self.assertEqual(
+			writeback._canonical_scope_for_writeback(run, json.dumps(returned)),
+			server_scope,
+		)
+		self.assertEqual(
+			agent_scope.authoritative_writeback_scope(run, json.dumps(returned)),
+			server_scope,
+		)
+		for returned in (
+			None,
+			{},
+			{"company": self.company},
+			{key: value for key, value in server_scope.items() if key != "fiscal_year"},
+			{**server_scope, "prior_period_from": "2026-08-01"},
+			{**server_scope, "record_scope": {"doctype": "Payroll Entry", "name": "FORGED"}},
+		):
+			with self.subTest(returned=returned):
+				with self.assertRaises(InvalidArgumentError):
+					writeback._canonical_scope_for_writeback(run, returned)
+		with self.assertRaises(InvalidArgumentError):
+			agent_scope.authoritative_writeback_scope(run, {**server_scope, "scoped_visibility": False})
+
+	def test_invalid_statutory_scope_echo_stops_before_persistence(self):
+		from jarvis.tools import record_agent_run as writeback
+
+		server_scope = {
+			"company": self.company,
+			"fiscal_year": None,
+			"from_date": "2026-10-01",
+			"to_date": "2026-10-31",
+			"prior_period_from": "2026-09-01",
+			"prior_period_to": "2026-09-30",
+			"report_date": "2026-11-01",
+			"record_scope": {"doctype": "Payroll Entry", "name": self.entry_name},
+		}
+		run_row = frappe._dict(
+			name="STAT-SCOPE-RUN",
+			status="running",
+			installation="STAT-SCOPE-INSTALLATION",
+			agent=statutory_payroll_scope.AGENT,
+		)
+		run_doc = frappe._dict(
+			name=run_row.name,
+			agent=run_row.agent,
+			scope_json=json.dumps(server_scope),
+		)
+		installation = frappe._dict(name=run_row.installation)
+
+		def get_value(doctype, *args, **kwargs):
+			if doctype == writeback.RUN:
+				return run_row
+			if doctype == writeback.LISTING:
+				return {"rule_tokens": "[]", "doctypes_required": "[]"}
+			raise AssertionError(f"unexpected get_value for {doctype}")
+
+		with (
+			patch("jarvis.tools._agent_run_ctx.get_session_key", return_value="stat-scope-session"),
+			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(
+				frappe,
+				"get_doc",
+				side_effect=lambda doctype, name: installation
+				if doctype == writeback.INSTALLATION
+				else run_doc,
+			),
+			patch("jarvis.chat.agent_runs.record_delegate_run") as persist,
+		):
+			for returned_scope in (
+				{"record_scope": {"doctype": "Payroll Entry", "name": "FORGED"}},
+				{"company": self.company},
+				{**server_scope, "scoped_visibility": False},
+				{key: value for key, value in server_scope.items() if key != "fiscal_year"},
+				None,
+			):
+				with self.subTest(returned_scope=returned_scope):
+					with self.assertRaises(InvalidArgumentError):
+						writeback.record_agent_run(findings=[], coverage={}, scope=returned_scope)
+		persist.assert_not_called()
 
 	def test_snapshot_and_prompt_exclude_raw_scope_but_include_server_scope(self):
 		statutory = {"reviewer": "reviewer@example.invalid", "mapping_confirmed": True}

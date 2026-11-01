@@ -127,7 +127,7 @@ def canonical_writeback_scope(stamped_scope, returned_scope) -> dict:
 		) from None
 	_validate_server_scope(expected)
 	if not isinstance(returned_scope, dict) or any(
-		returned_scope.get(key) != expected[key] for key in _SERVER_SCOPE_KEYS
+		key not in returned_scope or returned_scope[key] != expected[key] for key in _SERVER_SCOPE_KEYS
 	):
 		raise ConfigurationError(
 			"scope", "The output does not match this run's server-bound Payroll Entry scope."
