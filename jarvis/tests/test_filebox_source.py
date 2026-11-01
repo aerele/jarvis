@@ -83,6 +83,21 @@ class TestFileBoxSource(_Base):
 		)
 		return conv, original, pdf, msg, item
 
+	def comments(self, conv):
+		return [
+			(row.name, row.comment_type, row.comment_email, row.content)
+			for row in frappe.get_all(
+				"Comment",
+				filters={"reference_doctype": CONV, "reference_name": conv},
+				fields=["name", "comment_type", "comment_email", "content"],
+				order_by="creation asc, name asc",
+			)
+		]
+
+	def new_comments(self, conv, before):
+		before_names = {row[0] for row in before}
+		return [row[1:] for row in self.comments(conv) if row[0] not in before_names]
+
 	def select(self, conv, msg, item, expected=""):
 		from jarvis.chat.filebox_source import set_source
 
@@ -151,10 +166,11 @@ class TestFileBoxSource(_Base):
 		from jarvis.chat.filebox_source import set_source
 
 		conv, original, pdf, msg, item = self.fixture()
+		comments_before = self.comments(conv)
 		with as_user(OTHER), self.assertRaises(frappe.PermissionError):
 			set_source(conversation=conv, message=msg, item=item["name"], file_url=pdf.file_url, expected="")
 		self.assertFalse(frappe.db.get_value("File", pdf.name, "attached_to_name"))
-		self.assertFalse(frappe.db.exists("Comment", {"reference_doctype": CONV, "reference_name": conv}))
+		self.assertEqual(self.comments(conv), comments_before)
 
 	def test_reference_to_another_conversations_file_is_not_reparented(self):
 		conv, original, pdf, msg, item = self.fixture()
@@ -167,9 +183,15 @@ class TestFileBoxSource(_Base):
 
 	def test_same_source_retry_is_idempotent_and_a_stale_switch_is_refused(self):
 		conv, original, pdf, msg, item = self.fixture()
+		comments_before = self.comments(conv)
 		first = self.select(conv, msg, item)
+		comments_after_first = self.comments(conv)
+		self.assertEqual(
+			self.new_comments(conv, comments_before),
+			[("Info", USER, "File Box source changed.")],
+		)
 		self.assertEqual(self.select(conv, msg, item)["source"], first["source"])
-		self.assertEqual(frappe.db.count("Comment", {"reference_doctype": CONV, "reference_name": conv}), 1)
+		self.assertEqual(self.comments(conv), comments_after_first)
 		from jarvis.chat.filebox_source import set_source
 
 		original_item = {
@@ -381,23 +403,21 @@ class TestFileBoxSource(_Base):
 
 	def test_source_change_records_a_generic_owner_audit_comment(self):
 		conv, original, pdf, msg, item = self.fixture()
+		comments_before = self.comments(conv)
 		self.select(conv, msg, item)
-		comments = frappe.get_all(
-			"Comment",
-			filters={"reference_doctype": CONV, "reference_name": conv},
-			fields=["comment_type", "comment_email", "content"],
-		)
+		comments = self.new_comments(conv, comments_before)
 		self.assertEqual(
-			[(row.comment_type, row.comment_email, row.content) for row in comments],
+			comments,
 			[("Info", USER, "File Box source changed.")],
 		)
-		self.assertNotIn(original.file_name, comments[0].content)
-		self.assertNotIn(pdf.file_name, comments[0].content)
+		self.assertNotIn(original.file_name, comments[0][2])
+		self.assertNotIn(pdf.file_name, comments[0][2])
 
 	def test_source_change_rolls_back_when_the_audit_write_fails(self):
 		from jarvis.chat import filebox_source
 
 		conv, original, pdf, msg, item = self.fixture()
+		comments_before = self.comments(conv)
 		with (
 			patch.object(filebox_source, "_record_source_change", side_effect=RuntimeError("audit failure")),
 			self.assertRaises(RuntimeError),
@@ -405,7 +425,7 @@ class TestFileBoxSource(_Base):
 			self.select(conv, msg, item)
 		self.assertFalse(frappe.db.get_value("File", pdf.name, "attached_to_name"))
 		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_active_source_file"))
-		self.assertFalse(frappe.db.exists("Comment", {"reference_doctype": CONV, "reference_name": conv}))
+		self.assertEqual(self.comments(conv), comments_before)
 
 	def test_queued_and_running_turn_states_refuse_source_changes(self):
 		from jarvis.chat import admission
