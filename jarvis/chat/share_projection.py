@@ -123,10 +123,12 @@ def project_row(row: dict, conversation: str) -> dict:
 			"awaiting_owner": True,
 		}
 	result = {key: safe_value(row.get(key), conversation) for key in ROW_KEYS}
-	# A close-fenced terminal receipt still needs its token in the owner's history
-	# to reconcile the local card. A shared transcript has no action authority, so
-	# it must not disclose that former confirmation identifier.
-	if row.get("pending_card_safe") is False:
+	# An unsafe card is only stamped on the in-memory owner response. A later
+	# shared reload reads the persisted close receipt instead, where its durable
+	# action_outcome is the fence. Both forms retain the token for the owner so
+	# their local card can reconcile. A shared transcript has no action authority,
+	# so neither form may disclose an action token.
+	if row.get("pending_card_safe") is False or row.get("action_outcome"):
 		result["tool_call_id"] = None
 		result["tool_call_ids"] = None
 	result["error_headline"] = headline_for(row.get("error")) if row.get("error") else None
