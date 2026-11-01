@@ -1,6 +1,7 @@
 """AP evidence custody, fail-closed writeback and human-only review regressions."""
 
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -778,6 +779,51 @@ class TestPurchaseMatch(FrappeTestCase):
 
 
 class TestNativePurchaseMatch(unittest.TestCase):
+	def test_sorted_private_wire_with_nonlexical_source_keys_reaches_bundle(self):
+		assessment_path = os.environ.get("AP_ASSESSMENT_PATH")
+		if not assessment_path:
+			self.skipTest("AP_ASSESSMENT_PATH is required for the app-to-bundle contract test")
+		from jarvis.tools._private_output import prepare
+
+		policy = config()
+		source = {
+			"z_order": "last",
+			"scope": matching.scope_from_config(policy),
+			"config": policy,
+			"complete": True,
+			"datasets": {"invoices": [], "orders": [], "receipts": []},
+			"a_order": "first",
+		}
+		matching._seal(source)
+		self.assertNotEqual(list(source), sorted(source))
+		private_data = {"rows": [source]}
+		wire, receipt = prepare({"ok": True, "data": private_data}, tool="get_purchase_match_inputs")
+		expected = json.dumps(
+			private_data, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+		).encode()
+		self.assertEqual(wire["data"].encode(), expected)
+		self.assertEqual(wire["private_output"]["bytes"], len(expected))
+		self.assertEqual(wire["private_output"]["sha256"], hashlib.sha256(expected).hexdigest())
+		self.assertEqual(receipt["data"], wire["private_output"])
+		with tempfile.TemporaryDirectory() as temporary:
+			source_path = os.path.join(temporary, "input.json")
+			result_path = os.path.join(temporary, "output.json")
+			with open(source_path, "wb") as stream:
+				header = json.dumps(
+					{"result_mode": wire["result_mode"], "private_output": wire["private_output"]},
+					separators=(",", ":"),
+				).encode()
+				stream.write(header + b"\n" + expected)
+			subprocess.run(
+				[sys.executable, assessment_path, "--input", source_path, "--out", result_path],
+				check=True,
+				timeout=30,
+			)
+			with open(result_path, encoding="utf-8") as stream:
+				assessed = json.load(stream)
+		self.assertEqual(assessed["coverage"][matching.TOKEN]["state"], "evaluated", assessed)
+		self.assertEqual(assessed["findings"], [])
+
 	def test_native_po_receipt_draft_and_idempotent_human_review_never_post(self):
 		if "erpnext" not in frappe.get_installed_apps():
 			self.skipTest("ERPNext is required for native purchasing integration")
