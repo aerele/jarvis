@@ -36,7 +36,7 @@ def is_private():
 
 
 def require_source_transport(tool):
-	"""Refuse an AP/AR snapshot unless the private delegate boundary is active."""
+	"""Refuse a review snapshot unless the private delegate boundary is active."""
 	if tool in PRIVATE_SOURCE_TOOLS and not is_private():
 		raise InvalidArgumentError("Private review evidence requires private audit output.")
 
