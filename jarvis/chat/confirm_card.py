@@ -96,6 +96,7 @@ from jarvis.chat._record_summary import (
 	visible,
 	visible_char,
 )
+from jarvis.learning.source_guard import redact_secrets
 
 _MAX_ROWS = 20  # cap fields / diff rows / batch bullets / targets shown
 # A sensitive card is never clipped; one larger than this is refused instead.
@@ -371,10 +372,15 @@ def _code_diff_rows(doctype, changes: dict, old: dict) -> list[dict]:
 	out = []
 	for label, before, after in _code_cells(doctype, changes, old):
 		if before == after:
-			text = fmt_full(after)
+			text = _mask_code(fmt_full(after))
 			out.append({"label": f"{label} (unchanged)", "from": text, "to": text, "multiline": True})
 			continue
-		row = {"label": label, "from": fmt_full(before), "to": fmt_full(after), "multiline": True}
+		row = {
+			"label": label,
+			"from": _mask_code(fmt_full(before)),
+			"to": _mask_code(fmt_full(after)),
+			"multiline": True,
+		}
 		lines = line_diff(row["from"], row["to"], force=True)
 		if lines:
 			row["lines"] = lines
@@ -567,6 +573,8 @@ def _diff_row(meta, key, from_val, to_val, doc, full: bool) -> dict:
 	if not full:
 		return {"label": label, "from": fmt(from_val, df, doc), "to": fmt(to_val, df)}
 	row = {"label": label, "from": fmt_full(from_val, df, doc), "to": fmt_full(to_val, df)}
+	if df is not None and df.fieldtype == "Code":
+		row["from"], row["to"] = _mask_code(row["from"]), _mask_code(row["to"])
 	if df is not None and df.fieldtype in ("Table", "Table MultiSelect"):
 		# A child table (webhook headers, roles) in full, not "N rows": the from / to
 		# strings are the row counts and each non-empty side is a table (the
@@ -591,6 +599,14 @@ def _diff_row(meta, key, from_val, to_val, doc, full: bool) -> dict:
 	elif row["from"] != row["to"] and _crlf_as_lf(row["from"]) == _crlf_as_lf(row["to"]):
 		row["note"] = "Only the line endings change."
 	return row
+
+
+def _mask_code(text: str) -> str:
+	"""Code text with the credential-shaped literals it holds masked (a key hard-coded
+	in a Server Script, a Bearer token), on both sides of a diff: a Code field is not
+	a Password field, so ``is_secret`` never covers it. Reuses the learning-source
+	guard, which leaves ordinary code (``password = get_password()``) alone."""
+	return redact_secrets(text)[0]
 
 
 def _crlf_as_lf(text: str) -> str:
