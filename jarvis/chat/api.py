@@ -1511,11 +1511,12 @@ def clear_chat_history() -> dict:
 	history rows survive but drop their (now deleted) conversation reference.
 
 	``deleted`` counts the conversations this request deleted. ``kept`` names the
-	skipped ones (kept because a reply is in progress or retained count evidence), ``failed``
-	counts and ``failed_names`` names the ones an error left undeleted. The names are
-	there so the client can tell whether the chat it has open still exists without
-	reading the list again. Every listed conversation is in exactly one of deleted,
-	skipped, failed, or already gone (deleted by someone else meanwhile, not reported).
+	skipped ones (kept because a reply is in progress or retained count evidence), and
+	``retained_count_plan_names`` identifies the latter subset when it is nonempty.
+	``failed`` counts and ``failed_names`` names the ones an error left undeleted. The
+	names let the client tell whether its open chat still exists without reading the
+	list again. Every listed conversation is in exactly one of deleted, skipped,
+	failed, or already gone (deleted by someone else meanwhile, not reported).
 
 	One conversation at a time, each in its own transaction. A conversation whose
 	delete fails is rolled back, logged by name and counted as failed, and the rest
@@ -1529,6 +1530,7 @@ def clear_chat_history() -> dict:
 	names = frappe.get_all(CONV, filters={"owner": frappe.session.user}, pluck="name")
 	deleted = 0
 	kept: list[str] = []
+	retained_count_plan_names: list[str] = []
 	failed: list[str] = []
 	failures_in_a_row = 0
 	for at, name in enumerate(names):
@@ -1554,7 +1556,9 @@ def clear_chat_history() -> dict:
 			failed.append(name)
 		elif outcome != _ALREADY_GONE:
 			kept.append(name)
-	return {
+			if outcome == _CYCLE_COUNT_EVIDENCE_RETAINED:
+				retained_count_plan_names.append(name)
+	result = {
 		"ok": True,
 		"deleted": deleted,
 		"skipped": len(kept),
@@ -1562,6 +1566,11 @@ def clear_chat_history() -> dict:
 		"failed": len(failed),
 		"failed_names": failed,
 	}
+	if retained_count_plan_names:
+		# Optional for a compatible response shape on older client releases. A
+		# client that does not know this field keeps its existing generic notice.
+		result["retained_count_plan_names"] = retained_count_plan_names
+	return result
 
 
 def _delete_idle_conversation(conversation: str) -> str:
