@@ -431,8 +431,17 @@
 							<!-- mt-2, matching AgentAccessEditor's own heading->content gap
 							     (its "Access" heading is immediately followed by an
 							     mt-2 description) - the Admin tab is the reference. -->
+							<StockVarianceConfigForm
+								v-if="agent?.agent_slug === 'stock-variance-auditor'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
 							<ReorderConfigForm
-								v-if="agent?.agent_slug === 'reorder-replenishment-operator'"
+								v-else-if="agent?.agent_slug === 'reorder-replenishment-operator'"
 								class="mt-2"
 								:config="parsedConfig"
 								:validation-errors="configurationIssues"
@@ -780,6 +789,7 @@ import AgentInstallDialog from "@/pages/agents/AgentInstallDialog.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import ReorderConfigForm from "@/pages/agents/ReorderConfigForm.vue";
 import CycleCountConfigForm from "@/pages/agents/CycleCountConfigForm.vue";
+import StockVarianceConfigForm from "@/pages/agents/StockVarianceConfigForm.vue";
 import TicketTriageConfigForm from "@/pages/agents/TicketTriageConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
@@ -1176,10 +1186,12 @@ const SLA_BREACH_AGEING_AUDITOR = "sla-breach-ageing-auditor";
 const isSlaBreachAgeingAuditor = computed(
 	() => agent.value?.agent_slug === SLA_BREACH_AGEING_AUDITOR
 );
-// Review operators, FEFO and SLA have required launch configuration.
+const isStockVariance = computed(() => agent.value?.agent_slug === "stock-variance-auditor");
+// Each native review keeps its required saved configuration.
 const requiresRunConfiguration = computed(
 	() =>
 		isOperatorReview.value ||
+		isStockVariance.value ||
 		isFefoExpiryComplianceAuditor.value ||
 		isSlaBreachAgeingAuditor.value
 );
@@ -1204,6 +1216,8 @@ const scheduleConfigurationBlocked = computed(
 const configurationHint = computed(() =>
 	configurationDirty.value
 		? "Save your configuration changes before running."
+		: isStockVariance.value
+		? "Complete and save the company, Warehouse scope, and stock reviewer in Configure before running."
 		: isFefoExpiryComplianceAuditor.value
 		? "Enter and save the expiry reviewer and near-expiry window in Configure before running."
 		: isSlaBreachAgeingAuditor.value
