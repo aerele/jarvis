@@ -10,7 +10,8 @@ unsupported, changed or unreadable treatment returns an input gap.
 The native vendor-invoice flow requires ERPNext 16 with `vendor_invoices` and the
 `Landed Cost Vendor Invoice` child table. ERPNext 16.52.1 is the tested release
 baseline. Older feature-equivalent builds can use the fallback when
-`get_claimed_landed_cost` is absent. The fallback sums submitted child rows,
+`get_claimed_landed_cost` is absent or does not explicitly accept its lock
+keywords. The fallback sums submitted child rows,
 excludes the current voucher, and uses row locks for a write. It does not make a
 v15 schema a native v16 schema. Use the separate v15 backport for that case.
 
