@@ -17,6 +17,7 @@ from jarvis.exceptions import (
 	FeatureDisabledError,
 	InvalidArgumentError,
 	JarvisError,
+	PermissionDeniedError,
 	PreviewSandboxLost,
 	RunDisarmedError,
 	RunHaltedError,
@@ -422,6 +423,31 @@ def _dispatch_from_session(
 					tool=tool,
 					args={},
 					result=result,
+					tool_call_id=tool_call_id,
+				)
+				return result
+			# A snapshot-config delegate may read its immutable launch snapshot through
+			# get_engagement_config only. The Installation is mutable and the Run stores
+			# the raw stamped data, so generic reads must not provide a second authority.
+			# The check is after parsing, before a tool body or conversation-dependent
+			# guard can read any record.
+			snapshot_read_denial = _delegate_capability.snapshot_config_read_denial(cap, tool, parsed_args)
+			if snapshot_read_denial:
+				code = PermissionDeniedError.__name__
+				hint = _hint_for(code, "")
+				result = _error(code, snapshot_read_denial["message"], hint=hint)
+				audit.record(
+					tool=tool,
+					args=parsed_args,
+					ok=False,
+					error_code=code,
+					error_message=snapshot_read_denial["message"],
+				)
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=parsed_args,
+					result=_error(code, snapshot_read_denial["chat_message"], hint=hint),
 					tool_call_id=tool_call_id,
 				)
 				return result
