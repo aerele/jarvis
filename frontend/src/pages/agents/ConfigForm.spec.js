@@ -899,11 +899,7 @@ describe("per-agent gating via the configKeys prop", () => {
 		const w = mountForm(
 			{},
 			{
-				configKeys: [
-					"fefo.reviewer",
-					"fefo.near_expiry_days",
-					"fefo.test_declaration",
-				],
+				configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"],
 			}
 		);
 		expect(w.text()).toContain("Expiry reviewer");
@@ -925,11 +921,7 @@ describe("per-agent gating via the configKeys prop", () => {
 	});
 
 	it("FEFO fields load and preserve a saved owner policy", async () => {
-		const configKeys = [
-			"fefo.reviewer",
-			"fefo.near_expiry_days",
-			"fefo.test_declaration",
-		];
+		const configKeys = ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"];
 		const config = {
 			fefo: {
 				reviewer: "Stock Controller",
@@ -952,11 +944,7 @@ describe("per-agent gating via the configKeys prop", () => {
 		const w = mountForm(
 			{},
 			{
-				configKeys: [
-					"fefo.reviewer",
-					"fefo.near_expiry_days",
-					"fefo.test_declaration",
-				],
+				configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"],
 			}
 		);
 		await field(w, "Expiry reviewer").setValue("Stock Controller");

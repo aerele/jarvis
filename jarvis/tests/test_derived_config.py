@@ -77,9 +77,7 @@ class TestDerivedConfig(FrappeTestCase):
 		self.assertEqual(out, {"ageing": {"stale_floor_days": 9}})
 
 	def test_explicit_config_dotted_fefo_keys_pass_the_owner_namespace(self):
-		inst = _inst(
-			config='{"fefo": {"reviewer": "Stock Controller", "near_expiry_days": 30}, "other": 1}'
-		)
+		inst = _inst(config='{"fefo": {"reviewer": "Stock Controller", "near_expiry_days": 30}, "other": 1}')
 		out = agent_scheduler._explicit_config(
 			{
 				"config_keys": [
