@@ -12,10 +12,12 @@
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
  *     CRITICAL fix, they are NOT flat top-level keys), the only agent that
- *     reads any agent-specific config today. Rendered only when the
- *     listing's own `config_keys` (agents_api.py get_agent, jarvis#1063)
- *     names the field's storage `path` (a dot path for a nested key) -
- *     ConfigForm.vue filters this array by that list at render time.
+ *     reads any agent-specific config today. Rendered only when the listing's
+ *     own `config_keys` (agents_api.py get_agent, jarvis#1063) names the
+ *     field's `configKey` or, when that is absent, its storage `path` (a dot
+ *     path for a nested key). The SLA team's `configKey` is `sla_config` only
+ *     as a listing gate: its `record_scope` value stays bench-owned launch
+ *     scope and must not enter delegate configuration.
  *
  * `key` is the LOCAL form-state / label / validation identity (unchanged by
  * nesting); `path` is WHERE the value actually lives in the saved config
@@ -30,7 +32,9 @@
  * `type` and filters agent-specific entries by `config_keys`.
  *
  * Shapes:
- *   - {key, path, label, type: "link", linkDoctype, help, scope?}
+ *   - {key, path, label, type: "link", linkDoctype, help, scope?, configKey?}
+ *   - a link can set `recordScopeDoctype`; ConfigForm then saves its value as
+ *     `{doctype, name}` at the field's path instead of a bare string
  *   - {keys: [from, to], paths: [from, to], labels: [from, to], type: "date-range", help, scope?}
  *   - {key, path, label, type: "number", help, suffix?}
  *   - {key, path, label, type: "select", options: [{label, value}, ...]}
@@ -132,6 +136,17 @@ export const CONFIG_FIELD_SET = [
 		scope: true,
 	},
 	{
+		key: "sla_team",
+		path: "record_scope",
+		label: "Helpdesk team",
+		type: "link",
+		linkDoctype: "HD Team",
+		recordScopeDoctype: "HD Team",
+		configKey: "sla_config",
+		agentSlugs: ["sla-breach-ageing-auditor"],
+		help: "One readable Helpdesk team. Each run reviews only tickets in this team.",
+	},
+	{
 		key: "benchmark_value",
 		path: "materiality.benchmark_value",
 		label: "Materiality benchmark amount",
@@ -198,7 +213,7 @@ export const CONFIG_FIELD_SET = [
 export const SCOPE_CONFIG_FIELDS = CONFIG_FIELD_SET.filter((f) => f.scope);
 
 /** The agent-specific subset - each rendered only when the listing's
- * `config_keys` (get_agent) names its key. */
+ * `config_keys` (get_agent) names its `configKey` or storage path. */
 export const AGENT_SPECIFIC_CONFIG_FIELDS = CONFIG_FIELD_SET.filter((f) => !f.scope);
 
 /** Every config key CONFIG_FIELD_SET renders a dedicated field for - anything
