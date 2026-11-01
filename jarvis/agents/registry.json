@@ -1057,7 +1057,7 @@
       "domain": "gst-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Works only the residue left after india_compliance's Purchase Reconciliation Tool: ranks the unmatched, mismatched and aged rows between your GSTR-2B ledger and your purchase register by rupees, groups them into a supplier follow-up worklist, and tracks the ageing window per invoice. Read-only; never edits an invoice, files a return, or decides what you may claim.",
       "tools_required": [
