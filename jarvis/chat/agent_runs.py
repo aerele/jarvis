@@ -31,9 +31,7 @@ LISTING = "Jarvis Agent Listing"
 DASHBOARD = "Jarvis Dashboard"
 SESSION = "Jarvis Chat Session"
 NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
-_NEGATIVE_STOCK_SCOPE_REJECTION = (
-	"The evaluator scope did not match the server-stamped Warehouse boundary."
-)
+_NEGATIVE_STOCK_SCOPE_REJECTION = "The evaluator scope did not match the server-stamped Warehouse boundary."
 
 
 # --------------------------------------------------------------------------- #
@@ -369,9 +367,7 @@ def clear_untrusted_negative_stock_artifacts(run_doc, inst) -> None:
 		return
 	conversation = str(run_doc.get("conversation") or "").strip()
 	owners = {
-		str(value).strip()
-		for value in (inst.get("owner"), inst.get("reviewer"))
-		if str(value or "").strip()
+		str(value).strip() for value in (inst.get("owner"), inst.get("reviewer")) if str(value or "").strip()
 	}
 	if not conversation or not owners:
 		raise frappe.ValidationError("could not safely remove rejected dashboard output")
@@ -872,9 +868,7 @@ def record_delegate_run(
 			# Strip model-only keys before all downstream persistence decisions.
 			scope = trusted_scope
 	company = (scope.get("company") or "").strip()
-	negative_stock_run_scope = (
-		scope.get("record_scope") if agent == NEGATIVE_STOCK_AGENT else None
-	)
+	negative_stock_run_scope = scope.get("record_scope") if agent == NEGATIVE_STOCK_AGENT else None
 
 	# Collapse this run's findings by fingerprint (token + doc identity), so a doc
 	# flagged twice by one rule is ONE finding and counts stay consistent.
@@ -1053,11 +1047,15 @@ def record_delegate_run(
 				}
 			)
 			try:
-				prior_runs = frappe.get_all(
-					RUN,
-					filters={"name": ["in", run_names]},
-					fields=["name", "scope_json"],
-				) if run_names else []
+				prior_runs = (
+					frappe.get_all(
+						RUN,
+						filters={"name": ["in", run_names]},
+						fields=["name", "scope_json"],
+					)
+					if run_names
+					else []
+				)
 			except Exception:
 				prior_runs = []
 			for prior_run in prior_runs:

@@ -76,9 +76,7 @@ class TestNegativeStockScope(FrappeTestCase):
 				frappe.delete_doc(doctype, name, ignore_permissions=True, force=True)
 		for name in frappe.get_all(CONVERSATION, filters={"owner": cls.owner}, pluck="name"):
 			frappe.delete_doc(CONVERSATION, name, ignore_permissions=True, force=True)
-		for name in frappe.get_all(
-			writeback.INSTALLATION, filters={"owner": cls.owner}, pluck="name"
-		):
+		for name in frappe.get_all(writeback.INSTALLATION, filters={"owner": cls.owner}, pluck="name"):
 			frappe.delete_doc(writeback.INSTALLATION, name, ignore_permissions=True, force=True)
 		frappe.db.commit()
 
@@ -296,7 +294,8 @@ class TestNegativeStockScope(FrappeTestCase):
 
 		set_value.assert_not_called()
 		self.assertEqual(
-			log_error.call_args.kwargs["title"], "jarvis agent: Negative stock scope resolution refused launch"
+			log_error.call_args.kwargs["title"],
+			"jarvis agent: Negative stock scope resolution refused launch",
 		)
 
 	def test_every_invalid_warehouse_case_refuses_before_any_scope_stamp(self):
@@ -382,7 +381,8 @@ class TestNegativeStockScope(FrappeTestCase):
 						return run_row
 					if doctype == writeback.LISTING:
 						return frappe._dict(
-							rule_tokens=frappe.as_json(tokens), doctypes_required=frappe.as_json(["Warehouse"])
+							rule_tokens=frappe.as_json(tokens),
+							doctypes_required=frappe.as_json(["Warehouse"]),
 						)
 					self.fail(f"unexpected get_value for {doctype}")
 
@@ -395,7 +395,8 @@ class TestNegativeStockScope(FrappeTestCase):
 				}
 				with (
 					mock.patch(
-						"jarvis.tools._agent_run_ctx.get_session_key", return_value="agent:negative-stock:NSV-RUN"
+						"jarvis.tools._agent_run_ctx.get_session_key",
+						return_value="agent:negative-stock:NSV-RUN",
 					),
 					mock.patch.object(writeback.frappe.db, "get_value", side_effect=get_value),
 					mock.patch.object(
@@ -433,7 +434,10 @@ class TestNegativeStockScope(FrappeTestCase):
 				self.assertEqual(set(kwargs["coverage"]), set(tokens))
 				self.assertTrue(all(row["state"] == "not_evaluable" for row in kwargs["coverage"].values()))
 				self.assertTrue(
-					all(row["reason_code"] == "unsupported_customisation" for row in kwargs["coverage"].values())
+					all(
+						row["reason_code"] == "unsupported_customisation"
+						for row in kwargs["coverage"].values()
+					)
 				)
 				self.assertIsNone(kwargs["integrity_digest"])
 				self.assertIsNone(kwargs["rows_consumed"])
@@ -485,7 +489,9 @@ class TestNegativeStockScope(FrappeTestCase):
 			"owner_config": {"all_warehouses": True},
 		}
 		with (
-			mock.patch("jarvis.tools._agent_run_ctx.get_session_key", return_value="agent:negative-stock:NSV-RUN"),
+			mock.patch(
+				"jarvis.tools._agent_run_ctx.get_session_key", return_value="agent:negative-stock:NSV-RUN"
+			),
 			mock.patch.object(writeback.frappe.db, "get_value", side_effect=get_value),
 			mock.patch.object(
 				writeback.frappe,

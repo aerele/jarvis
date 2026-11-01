@@ -586,8 +586,8 @@ class TestAgentIdentity(unittest.TestCase):
 
 	def test_negative_stock_launch_stamps_canonical_root_and_sanitized_config(self):
 		"""The real launch stores the safe root and never forwards owner JSON."""
-		from jarvis.chat import agent_models, agent_scope
 		import jarvis.admin_client as admin_client
+		from jarvis.chat import agent_models, agent_scope
 
 		negative_stock_agent = agent_scope.NEGATIVE_STOCK_AGENT
 		allow_listing_for(negative_stock_agent, user=self.owner)
@@ -665,8 +665,8 @@ class TestAgentIdentity(unittest.TestCase):
 
 	def test_negative_stock_missing_root_rolls_back_run_session_and_dispatch(self):
 		"""A bound agent must not leave an unscoped launch behind."""
-		from jarvis.chat import agent_models, agent_scope
 		import jarvis.admin_client as admin_client
+		from jarvis.chat import agent_models, agent_scope
 
 		negative_stock_agent = agent_scope.NEGATIVE_STOCK_AGENT
 		allow_listing_for(negative_stock_agent, user=self.owner)
@@ -721,7 +721,8 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertEqual(frappe.db.count(SESSION, {"user": self.owner}), before_sessions)
 		dispatch.assert_not_called()
 		self.assertEqual(
-			log_error.call_args.kwargs["title"], "jarvis agent: Negative stock scope resolution refused launch"
+			log_error.call_args.kwargs["title"],
+			"jarvis agent: Negative stock scope resolution refused launch",
 		)
 
 	# ------------------------------------------------------------------ #
