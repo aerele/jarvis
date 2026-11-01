@@ -98,6 +98,13 @@ class TestDelegateWritebackAudit(FrappeTestCase):
 		self.assertIn("save_agent_dashboard", api._WRITE_TOOLS)
 		self.assertNotIn("save_agent_dashboard", api._GATED_WRITES)
 
+	def test_stock_variance_server_evaluator_is_write_but_not_gated(self):
+		from jarvis import api
+
+		self.assertIn("run_stock_variance_evaluation", api._WRITE_TOOLS)
+		self.assertNotIn("run_stock_variance_evaluation", api._GATED_WRITES)
+		self.assertIn("run_stock_variance_evaluation", api._SELF_NARRATING_TOOLS)
+
 	def test_record_agent_run_is_write_but_not_gated(self):
 		from jarvis import api
 
@@ -122,7 +129,7 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "801600a8e7b656110e7e99ccba2ccd8505d613d765057c1b422607016358d0bf"
+	PINNED_CAPABILITY_DIGEST = "cda63899e439cf801ead4940bf1adeccceb2dd3e0b6fd56f8613bed63bbc7f55"
 
 	def test_stock_variance_uses_the_submitted_physical_count_contract(self):
 		"""The evaluator may reference only its declared native count facts."""
@@ -135,12 +142,12 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			doc = json.load(fh)
 		entry = next(item for item in doc["agents"] if item["agent_slug"] == "stock-variance-auditor")
 
-		self.assertEqual(entry["version"], "0.4.2")
+		self.assertEqual(entry["version"], "0.5.0")
+		self.assertIn("selected submitted Jarvis physical-count facts", entry["description"])
+		self.assertEqual(entry["tools_required"], ["jarvis__run_stock_variance_evaluation"])
 		self.assertEqual(
-			entry["description"],
-			"Checks submitted physical-count facts against book stock at each saved count time. "
-			"Keeps material lines together in one finding per count and shows the scope, controls "
-			"and source links. Read-only; does not post stock adjustments.",
+			entry["tools_allow"],
+			["jarvis__run_stock_variance_evaluation", "message"],
 		)
 		self.assertEqual(
 			entry["doctypes_required"],

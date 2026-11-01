@@ -1199,6 +1199,7 @@ def _launch_audit(
 
 	review_backend = operator_review.backend(inst.agent)
 	review_config = review_backend.configuration(inst) if review_backend else None
+	stock_variance_config = None
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1248,7 +1249,11 @@ def _launch_audit(
 	from jarvis.chat.stock_variance_scope import is_stock_variance, require_configuration
 
 	if is_stock_variance(inst.agent):
-		require_configuration(inst.config or "{}")
+		validated_stock_config = require_configuration(inst.config or "{}")
+		# The evaluator accepts only its small declared namespace. Company and the
+		# Warehouse boundary are already stamped in scope_json and must not come
+		# from mutable installation configuration during execution.
+		stock_variance_config = _stock_variance_assessment_config(validated_stock_config)
 
 	# JF-021: validate the launch-time provenance identity BEFORE any row is inserted,
 	# for the same reason as the run-as guard above — a refused launch must leave no
@@ -1374,7 +1379,9 @@ def _launch_audit(
 				"preparation_mode": preparation_mode,
 				"initiating_human": initiating_human,
 				"model_source": model_gate.get("model_source"),
-				"assessment_config_json": frappe.as_json(review_config) if review_config else None,
+				"assessment_config_json": frappe.as_json(review_config or stock_variance_config)
+				if (review_config or stock_variance_config)
+				else None,
 				**capability,
 			}
 		)
@@ -1747,6 +1754,16 @@ def _explicit_config(listing, inst) -> dict:
 			full = {}
 	explicit = {k: full[k] for k in namespaces if k in full and derived_config.customer_may_set(k)}
 	return {**explicit, **derived_config.derive(namespaces, inst, explicit)}
+
+
+def _stock_variance_assessment_config(validated_config: dict) -> dict:
+	"""The immutable evaluator namespace for a Stock Variance launch.
+
+	Company and Warehouse data belong in the separately stamped run scope. This
+	prevents a later installation edit from widening an already launched review.
+	``require_configuration`` validates the input before this helper is called.
+	"""
+	return {"stock_variance": validated_config["stock_variance"]}
 
 
 def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str:

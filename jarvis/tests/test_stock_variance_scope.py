@@ -7,7 +7,13 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import agent_scheduler, agent_scope, agents_api, stock_variance_scope
+from jarvis.chat import (
+	agent_scheduler,
+	agent_scope,
+	agents_api,
+	stock_variance_native,
+	stock_variance_scope,
+)
 from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
 	JarvisAgentInstallation,
 )
@@ -136,6 +142,13 @@ class TestStockVarianceScope(FrappeTestCase):
 
 		self.assertEqual(
 			agent_scheduler._explicit_config(listing, installation),
+			{"stock_variance": {"reviewer": self.reviewer}},
+		)
+
+	def test_launch_snapshot_keeps_only_the_evaluator_namespace(self):
+		config = self.config()
+		self.assertEqual(
+			agent_scheduler._stock_variance_assessment_config(config),
 			{"stock_variance": {"reviewer": self.reviewer}},
 		)
 
@@ -410,3 +423,54 @@ class TestStockVarianceScope(FrappeTestCase):
 			issues,
 			{"run_as_user": "Set a run-as user before configuring the Warehouse scope."},
 		)
+
+
+class TestStockVarianceNativeDimensionScope(FrappeTestCase):
+	def test_dimension_sources_exclude_unrelated_inventory_documents(self):
+		scope = {
+			"company": "Scope Example Ltd",
+			"record_scope": {"doctype": "Warehouse", "name": "Scope Root - SEL"},
+			"from_date": "2026-10-01",
+			"to_date": "2026-10-31",
+			"report_date": "2026-10-31",
+		}
+		config = {"stock_variance": {"reviewer": "scope-reviewer@example.invalid"}}
+
+		plan = stock_variance_native.query_specs(scope, config)
+		fingerprints = stock_variance_native.fingerprint_specs(scope, config)
+
+		self.assertNotIn("dimensions", plan)
+		self.assertEqual(
+			stock_variance_native.DIMENSION_SOURCE_KEYS,
+			("dimensions_global", "dimensions_scoped"),
+		)
+		self.assertEqual(
+			plan["dimensions_global"]["where"],
+			[{"field": "r.apply_to_all_doctypes", "op": "=", "value": 1}],
+		)
+		self.assertEqual(
+			plan["dimensions_scoped"]["where"],
+			[
+				{"field": "r.apply_to_all_doctypes", "op": "=", "value": 0},
+				{
+					"field": "r.document_type",
+					"op": "in",
+					"value": list(stock_variance_native.RELEVANT_DIMENSION_DOCTYPES),
+				},
+			],
+		)
+		self.assertNotIn(
+			"Delivery Note Item",
+			plan["dimensions_scoped"]["where"][1]["value"],
+		)
+		for key in stock_variance_native.DIMENSION_SOURCE_KEYS:
+			self.assertEqual(fingerprints[key]["where"], plan[key]["where"])
+
+		combined = stock_variance_native.combined_source_rows(
+			{
+				"dimensions_global": [{"name": "global-dimension"}],
+				"dimensions_scoped": [{"name": "count-dimension"}],
+			},
+			stock_variance_native.DIMENSION_SOURCE_KEYS,
+		)
+		self.assertEqual([row["name"] for row in combined], ["global-dimension", "count-dimension"])

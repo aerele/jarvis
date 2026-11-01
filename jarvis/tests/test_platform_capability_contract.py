@@ -47,7 +47,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import agent_catalog, agent_scheduler
 from jarvis.exceptions import CapabilityDeniedError, JarvisError, PermissionDeniedError
-from jarvis.tools import _agent_run_ctx, _delegate_capability
+from jarvis.tools import _agent_run_ctx, _delegate_capability, registry
 from jarvis.tools.create_doc import create_doc
 
 LISTING = "Jarvis Agent Listing"
@@ -61,6 +61,7 @@ PATCH_LOG = "Patch Log"
 
 AUD_SLUG = "cc-auditor"
 OP_SLUG = "cc-operator"
+STOCK_SLUG = "stock-variance-auditor"
 OP_WRITES = [{"doctype": "ToDo", "mode": "draft"}]
 
 # What the auditor's manifest declared: two reads + the writeback pair + the
@@ -295,6 +296,157 @@ class TestDelegateToolAllowGate(_DelegateCase):
 		res = self._dispatch(self.aud_key, "get_schema", {"doctype": "ToDo"})
 		self.assertFalse(res["ok"], res)
 		self.assertEqual(res["error"]["code"], "CapabilityDeniedError")
+
+
+class TestStockVarianceServerBoundary(FrappeTestCase):
+	"""Old delegate contracts cannot bypass the app-owned evaluator."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.run_as = _mk_user("cc-stock-runas@example.com")
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.key = f"agent:agent-{STOCK_SLUG}:cc-stock-run"
+		for dt in (ACTIVITY, RUN, INSTALLATION):
+			for name in frappe.get_all(
+				dt, filters={"agent": STOCK_SLUG}, pluck="name", ignore_permissions=True
+			):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		if frappe.db.exists(LISTING, STOCK_SLUG):
+			frappe.delete_doc(LISTING, STOCK_SLUG, force=True, ignore_permissions=True)
+		_mk_listing(STOCK_SLUG, "Auditor", [])
+		self.run = _mk_run(
+			STOCK_SLUG,
+			self.run_as,
+			self.key,
+			_snapshot(
+				[
+					"jarvis__query",
+					"jarvis__record_agent_run",
+					"jarvis__save_agent_dashboard",
+				],
+				"auditor",
+				[],
+			),
+		)
+
+	def tearDown(self):
+		_agent_run_ctx.clear_session_key()
+		frappe.set_user("Administrator")
+		frappe.db.delete(SESSION, {"session_key": self.key})
+		for dt in (ACTIVITY, RUN, INSTALLATION):
+			for name in frappe.get_all(
+				dt, filters={"agent": STOCK_SLUG}, pluck="name", ignore_permissions=True
+			):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		if frappe.db.exists(LISTING, STOCK_SLUG):
+			frappe.delete_doc(LISTING, STOCK_SLUG, force=True, ignore_permissions=True)
+
+	def test_old_snapshot_direct_query_is_refused_before_dispatch(self):
+		with mock.patch.object(api, "_run_tool") as run_tool:
+			result = api._dispatch_from_session(
+				self.run_as,
+				self.key,
+				"query",
+				{"from": "ToDo", "select": ["name"], "limit": 1},
+			)
+
+		run_tool.assert_not_called()
+		self.assertFalse(result["ok"], result)
+		self.assertEqual(result["error"]["code"], "CapabilityDeniedError")
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "status"), "failed")
+
+	def test_old_snapshot_permitted_nonserver_tool_is_terminal_before_dispatch(self):
+		frappe.db.set_value(
+			RUN,
+			self.run,
+			"tools_allow_json",
+			frappe.as_json(["jarvis__get_doc"]),
+			update_modified=False,
+		)
+		with mock.patch.object(api, "_run_tool") as run_tool:
+			result = api._dispatch_from_session(
+				self.run_as,
+				self.key,
+				"get_doc",
+				{"doctype": "ToDo", "name": "never-dispatched"},
+			)
+
+		run_tool.assert_not_called()
+		self.assertFalse(result["ok"], result)
+		self.assertEqual(result["error"]["code"], "CapabilityDeniedError")
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "status"), "failed")
+
+	def test_legacy_stock_variance_contract_refuses_every_bench_tool(self):
+		legacy = {
+			"run": self.run,
+			"agent": STOCK_SLUG,
+			"legacy": True,
+			"tools_allow": [],
+		}
+		# This is the complete bench dispatch surface, rather than a short list of
+		# former Stock Variance tools. A new registered tool must stay denied for a
+		# pre-server-evaluator run too.
+		for tool in registry.list_tools():
+			with self.subTest(tool=tool):
+				denial = _delegate_capability.tool_denial(None, tool, cap=legacy)
+				self.assertIsNotNone(denial)
+				self.assertTrue(denial["fatal"])
+
+		frappe.db.set_value(
+			RUN,
+			self.run,
+			"capability_contract",
+			_delegate_capability.CONTRACT_LEGACY,
+			update_modified=False,
+		)
+		with mock.patch.object(api, "_run_tool") as run_tool:
+			result = api._dispatch_from_session(
+				self.run_as,
+				self.key,
+				"get_doc",
+				{"doctype": "ToDo", "name": "never-dispatched"},
+			)
+
+		run_tool.assert_not_called()
+		self.assertFalse(result["ok"], result)
+		self.assertEqual(result["error"]["code"], "CapabilityDeniedError")
+		self.assertEqual(frappe.db.get_value(RUN, self.run, "status"), "failed")
+
+	def test_snapshot_without_server_evaluator_is_terminal_for_every_bench_tool(self):
+		old_snapshot = {
+			"run": self.run,
+			"agent": STOCK_SLUG,
+			"legacy": False,
+			"tools_allow": ["jarvis__get_doc"],
+		}
+		for tool in registry.list_tools():
+			with self.subTest(tool=tool):
+				denial = _delegate_capability.tool_denial(None, tool, cap=old_snapshot)
+				self.assertIsNotNone(denial)
+				self.assertTrue(denial["fatal"])
+
+	def test_current_stock_contract_allows_only_server_evaluator(self):
+		current = {
+			"run": self.run,
+			"agent": STOCK_SLUG,
+			"legacy": False,
+			"tools_allow": ["jarvis__run_stock_variance_evaluation"],
+		}
+		for tool in registry.list_tools():
+			if tool == "run_stock_variance_evaluation":
+				continue
+			with self.subTest(tool=tool):
+				denial = _delegate_capability.tool_denial(None, tool, cap=current)
+				self.assertIsNotNone(denial)
+				self.assertFalse(denial["fatal"])
+		self.assertIsNone(
+			_delegate_capability.tool_denial(None, "run_stock_variance_evaluation", cap=current)
+		)
 
 
 # --------------------------------------------------------------------------- #
