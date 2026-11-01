@@ -63,8 +63,52 @@ test("Panel fences each old read, send, confirmation, and poll continuation", ()
 	assert.match(send, /await sendMessage\(sentConversation,[^]*?\);\s*if \(!isCurrentView\(generation, sentConversation\)\) return/);
 
 	const resolve = section("async function resolvePending(token)", "function dismissSettledNotice()");
-	assert.match(resolve, /await confirmTool\(token, cid\);\s*if \(!isCurrentView\(generation, cid\)\) return/);
+	assert.match(resolve, /const actionIsCurrent = \(\) =>/);
+	assert.match(resolve, /resolving\.value === token \|\| \(stream\.value\.pending \|\| \[\]\)\.some/);
+	assert.match(resolve, /await confirmTool\(token, cid\);[^]*?if \(!actionIsCurrent\(\)\) return/);
 
 	const poll = section("function startPolling()", "onMounted(()");
 	assert.match(poll, /await getConversation\(cid\);\s*if \(!isCurrentView\(generation, cid\)\) return/);
+});
+
+test("Desk scroll continuations retain the view that scheduled them", () => {
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	const panel = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
+	const section = (from, to) => panel.slice(panel.indexOf(from), panel.indexOf(to, panel.indexOf(from)));
+
+	const scroll = section("async function scrollToBottom", "// Sticky-bottom guard");
+	assert.match(scroll, /await nextTick\(\);\s*if \(stillCurrent\(\) && bodyEl\.value\)/);
+
+	const stick = section("function stickToBottom()", "// Arrow click");
+	assert.match(stick, /const generation = viewGeneration;/);
+	assert.match(stick, /scrollToBottom\(current\);/);
+
+	const load = section("async function load()", "function startNewChat()");
+	assert.match(
+		load,
+		/await scrollToBottom\(\(\) => isCurrentView\(generation, requestedConversation\)\);\s*if \(!isCurrentView\(generation, requestedConversation\)\) return/
+	);
+
+	const send = section("async function send()", "function retryLast()");
+	assert.match(send, /await scrollToBottom\(\(\) => isCurrentView\(generation, sentConversation\)\);/);
+});
+
+test("Desk composer uploads and dictation cannot finish in a new chat", () => {
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	const panel = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
+	const section = (from, to) => panel.slice(panel.indexOf(from), panel.indexOf(to, panel.indexOf(from)));
+
+	const fresh = section("function startNewChat()", "function pickFile()");
+	assert.match(fresh, /abortRecording\(\);/);
+	assert.match(fresh, /uploading\.value = false;/);
+	assert.match(fresh, /transcribing\.value = false;/);
+	assert.match(fresh, /attachments\.value = \[\];/);
+
+	const upload = section("async function onFilePicked(e)", "function removeAttachment");
+	assert.match(upload, /const generation = viewGeneration;/);
+	assert.match(upload, /await uploadFile\(f\);\s*if \(!isCurrentView\(generation, conversation\)\) return/);
+
+	const voice = section("async function toggleVoice()", "async function send()");
+	assert.match(voice, /await navigator\.mediaDevices\.getUserMedia\(\{ audio: true \}\);\s*if \(!isCurrentView\(generation, conversation\)\)/);
+	assert.match(voice, /await transcribeAudio\([^]*?\);\s*if \(!isCurrentView\(generation, conversation\)\) return/);
 });

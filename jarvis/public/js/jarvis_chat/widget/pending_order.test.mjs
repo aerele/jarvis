@@ -11,6 +11,7 @@ import {
   keptCardMessage,
   keepEarlier,
   markCardsEarlier,
+  safetyUpdateTransition,
   settledReasonMessage,
   sortPendingCards,
   typedApprovalHint,
@@ -161,6 +162,55 @@ test("a token settled locally (typed no) is never resurrected by a stale transcr
   assert.deepEqual(withoutTokens(merged, settled), []);
 });
 
+test("a passive and direct safety update remove the same token but enqueue only one Done notice", () => {
+  const initial = {
+    settledTokens: new Set(),
+    safetyNoticeTokens: new Set(),
+    pending: [{ token: "cancelled-a" }, { token: "safe-b" }],
+  };
+  const passive = safetyUpdateTransition(initial, "cancelled-a");
+  const direct = safetyUpdateTransition(passive, "cancelled-a");
+
+  assert.equal(passive.shouldEnqueue, true);
+  assert.equal(direct.shouldEnqueue, false);
+  assert.deepEqual(
+    direct.pending.map((card) => card.token),
+    ["safe-b"],
+    "the valid sibling stays visible"
+  );
+  assert.deepEqual([...direct.settledTokens], ["cancelled-a"]);
+  assert.deepEqual([...direct.safetyNoticeTokens], ["cancelled-a"]);
+});
+
+test("a direct safety update also suppresses a later passive duplicate", () => {
+  const direct = safetyUpdateTransition(
+    {
+      settledTokens: new Set(),
+      safetyNoticeTokens: new Set(),
+      pending: [{ token: "cancelled-a" }, { token: "safe-b" }],
+    },
+    "cancelled-a"
+  );
+  const passive = safetyUpdateTransition(direct, "cancelled-a");
+
+  assert.equal(direct.shouldEnqueue, true);
+  assert.equal(passive.shouldEnqueue, false);
+  assert.deepEqual(passive.pending.map((card) => card.token), ["safe-b"]);
+});
+
+test("a typed discard does not suppress a later safety-update explanation", () => {
+  const out = safetyUpdateTransition(
+    {
+      settledTokens: new Set(["a"]),
+      safetyNoticeTokens: new Set(),
+      pending: [{ token: "a" }, { token: "safe-b" }],
+    },
+    "a"
+  );
+  assert.equal(out.shouldEnqueue, true);
+  assert.deepEqual(out.pending.map((card) => card.token), ["safe-b"]);
+});
+
 // Decision 6: a bare phrase binds only cards parked since the user last spoke, so
 // the widget must never advertise one for an "Earlier" card (the SPA/PWA mirror).
 test("the bare-phrase hint is only for cards parked since the user last spoke", () => {
@@ -309,10 +359,9 @@ test("Panel.vue hides a safety-update card and keeps its Done-only message", () 
   const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
   const body = src.slice(src.indexOf("async function resolvePending("));
   const settled = body.indexOf("const settled = settledReasonMessage(result)");
-  const hidden = body.indexOf("hideSettledPending()", settled);
-  const notice = body.indexOf("enqueueSettledNotice({ token, message: settled })", settled);
+  const settle = body.indexOf("settleSafetyUpdate({ token, message: settled })", settled);
   const resolved = body.indexOf('kind: "action:resolved"', settled);
-  assert.ok(settled > -1 && hidden > settled && notice > hidden && resolved > notice);
+  assert.ok(settled > -1 && settle > settled && resolved > settle);
   assert.match(src, /function dismissSettledNotice\(\)/);
   assert.match(src, /@click="dismissSettledNotice"/);
   assert.doesNotMatch(body.slice(settled, resolved), /loadError\.value = settled/);
@@ -352,10 +401,15 @@ test("Desk queues passive safety receipts so each Done reveals the next one", ()
 		src.indexOf("// Typed approval", src.indexOf("function observePassiveSafetyUpdates(rows)"))
 	);
 	assert.doesNotMatch(observe, /if \(settledNotice\.value\) return/);
-	assert.match(observe, /enqueueSettledNotice\(notice\)/);
-	assert.match(observe, /hideSettledPending\(\)/);
-	assert.match(src, /function hideSettledPending\(\)/);
-	assert.match(src, /pending: withoutTokens\(stream\.value\.pending \|\| \[\], settledTokens\)/);
+	assert.match(observe, /settleSafetyUpdate\(notice\)/);
+	assert.match(src, /function settleSafetyUpdate\(notice\)/);
+	assert.match(src, /safetyUpdateTransition\(/);
+	assert.match(src, /if \(next\.shouldEnqueue\) enqueueSettledNotice\(notice\)/);
+	const newChat = src.slice(
+		src.indexOf("function startNewChat()"),
+		src.indexOf("function pickFile()", src.indexOf("function startNewChat()"))
+	);
+	assert.match(newChat, /safetyNoticeTokens = new Set\(\)/);
 	const dismiss = src.slice(
 		src.indexOf("function dismissSettledNotice()"),
 		src.indexOf("// The Desk already", src.indexOf("function dismissSettledNotice()"))
@@ -363,5 +417,5 @@ test("Desk queues passive safety receipts so each Done reveals the next one", ()
 	assert.match(dismiss, /settledNotice\.value = settledNoticeQueue\.value\[0\] \|\| null/);
 	assert.match(dismiss, /settledNoticeQueue\.value = settledNoticeQueue\.value\.slice\(1\)/);
 	const direct = src.slice(src.indexOf("async function resolvePending("));
-	assert.match(direct, /settledTokens = withExcluded\(settledTokens, \[token\]\);\s*hideSettledPending\(\)/);
+	assert.match(direct, /settleSafetyUpdate\(\{ token, message: settled \}\)/);
 });

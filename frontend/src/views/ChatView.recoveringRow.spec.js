@@ -131,6 +131,26 @@ function harness(rows) {
 		input: ref(""),
 		threadEl: ref(null),
 	});
+	let viewGeneration = 0;
+	watch(
+		state.currentId,
+		(id, previous) => {
+			if (id !== previous) viewGeneration++;
+		},
+		{ flush: "sync" }
+	);
+	Object.assign(state, {
+		directActionViewGeneration: ref(0),
+		captureChatView: (token = "") => ({
+			generation: viewGeneration,
+			conversation: state.currentId.value,
+			token,
+		}),
+		chatViewIsCurrent: (view) =>
+			!!view &&
+			view.generation === viewGeneration &&
+			view.conversation === state.currentId.value,
+	});
 	for (const name of declared) delete state[name];
 	const fns = new Function(
 		...Object.keys(state),

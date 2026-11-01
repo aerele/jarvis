@@ -858,6 +858,7 @@ import {
 	keptCardMessage,
 	markCardsEarlier,
 	settledReasonMessage,
+	safetyUpdateTransition,
 	sortPendingCards,
 	typedApprovalHint as hintFor,
 	withExcluded,
@@ -1032,6 +1033,9 @@ const settledNoticeQueue = ref([]);
 // rowItems must not rebuild the card from it while stale. Persists past a
 // single resync - reset only on a conversation switch (startNewChat).
 let settledTokens = new Set();
+// This is deliberately separate from settledTokens. A typed discard suppresses
+// a stale card, but it must not suppress a future terminal safety explanation.
+let safetyNoticeTokens = new Set();
 // A typed "confirm 2" binds to the token shown as number 2 here (approval_tokens),
 // so the numbering must be stable: the shared, unit-tested comparator orders by
 // (created_at, token by code unit), whatever order the store listed them in.
@@ -1069,21 +1073,31 @@ function enqueueSettledNotice(notice) {
 	}
 	settledNoticeQueue.value = [...settledNoticeQueue.value, notice];
 }
-function hideSettledPending() {
-	stream.value = {
-		...stream.value,
-		pending: withoutTokens(stream.value.pending || [], settledTokens),
-	};
+function settleSafetyUpdate(notice) {
+	if (!notice?.token) return false;
+	const next = safetyUpdateTransition(
+		{
+			settledTokens,
+			safetyNoticeTokens,
+			pending: stream.value.pending || [],
+		},
+		notice.token
+	);
+	settledTokens = next.settledTokens;
+	safetyNoticeTokens = next.safetyNoticeTokens;
+	// Always drop the terminal token, even when a passive receipt already
+	// queued its notice before this direct response arrived.
+	stream.value = { ...stream.value, pending: next.pending };
+	if (next.shouldEnqueue) enqueueSettledNotice(notice);
+	return next.shouldEnqueue;
 }
 function observePassiveSafetyUpdates(rows) {
 	for (const row of rows || []) {
 		const notice = passiveSafetyUpdate(row);
-		if (!notice || settledTokens.has(notice.token)) continue;
-		settledTokens = withExcluded(settledTokens, [notice.token]);
+		if (!notice) continue;
 		// A stale list can land before its terminal transcript receipt. Remove
 		// every settled token immediately, including a receipt waiting in FIFO.
-		hideSettledPending();
-		enqueueSettledNotice(notice);
+		settleSafetyUpdate(notice);
 	}
 }
 // Typed approval works in the widget too. An "Earlier" card never gets the
@@ -1413,9 +1427,9 @@ const hint = computed(() => {
 	return ""; // idle needs no caption
 });
 
-async function scrollToBottom() {
+async function scrollToBottom(stillCurrent = () => true) {
 	await nextTick();
-	if (bodyEl.value) bodyEl.value.scrollTop = bodyEl.value.scrollHeight;
+	if (stillCurrent() && bodyEl.value) bodyEl.value.scrollTop = bodyEl.value.scrollHeight;
 }
 
 // Sticky-bottom guard: auto-scroll ONLY while the reader is already at the newest
@@ -1440,11 +1454,14 @@ function onBodyScroll() {
 	showScrollDown.value = d > 140;
 }
 function stickToBottom() {
+	const generation = viewGeneration;
+	const conversation = convId.value;
+	const current = () => isCurrentView(generation, conversation);
 	// Growing content must never RE-PIN a reader who scrolled up: only their own
 	// scroll does that (onBodyScroll, on the @scroll listener). Just keep the
 	// jump-to-latest arrow's visibility honest as the panel grows.
 	if (pinnedToBottom.value) {
-		scrollToBottom();
+		scrollToBottom(current);
 		// Following means we are at the newest text: clear any arrow a mid-growth
 		// scroll event flipped on, or it lingers pointing nowhere.
 		showScrollDown.value = false;
@@ -1452,9 +1469,11 @@ function stickToBottom() {
 }
 // Arrow click: re-pin so the panel follows the rest of the reply again.
 function jumpToBottom() {
+	const generation = viewGeneration;
+	const conversation = convId.value;
 	pinnedToBottom.value = true;
 	showScrollDown.value = false;
-	scrollToBottom();
+	scrollToBottom(() => isCurrentView(generation, conversation));
 }
 // The arrow has to track the CONTENT, not the delivery path. stickToBottom()
 // runs only on live realtime frames (see onRealtime), so when a reply lands via
@@ -1701,7 +1720,8 @@ async function load() {
 			// A genuinely fresh open: land on the newest message.
 			pinnedToBottom.value = true;
 			showScrollDown.value = false;
-			await scrollToBottom();
+			await scrollToBottom(() => isCurrentView(generation, requestedConversation));
+			if (!isCurrentView(generation, requestedConversation)) return;
 		}
 	} catch (e) {
 		if (
@@ -1720,11 +1740,13 @@ async function load() {
 
 function startNewChat() {
 	viewGeneration = advanceViewGeneration(viewGeneration);
+	abortRecording();
 	stopPendingPoll(); // a poll from the conversation being left must not carry over
 	stopPolling();
 	convId.value = "";
 	messages.value = [];
 	settledTokens = new Set(); // a settled token belonged to the conversation being left
+	safetyNoticeTokens = new Set();
 	settledNotice.value = null;
 	settledNoticeQueue.value = [];
 	// Keep the fence watermarks: the panel can rebind to the SAME conversation
@@ -1734,11 +1756,14 @@ function startNewChat() {
 	stream.value = { ...emptyStream(), fence: stream.value.fence };
 	loading.value = false;
 	sending.value = false;
+	uploading.value = false;
+	transcribing.value = false;
 	resolving.value = "";
 	loadError.value = "";
 	// The failure belonged to the conversation being left behind.
 	clearTurnError();
 	draft.value = "";
+	attachments.value = [];
 	// Recall belongs to the conversation you are in, not to the panel.
 	promptHistory.value = [];
 	histIdx.value = null;
@@ -1756,16 +1781,21 @@ async function onFilePicked(e) {
 	const files = Array.from(e.target.files || []);
 	e.target.value = ""; // let the same file be picked again
 	if (!files.length) return;
+	const generation = viewGeneration;
+	const conversation = convId.value;
 	uploading.value = true;
 	loadError.value = "";
 	try {
 		for (const f of files) {
-			attachments.value.push(await uploadFile(f));
+			const uploaded = await uploadFile(f);
+			if (!isCurrentView(generation, conversation)) return;
+			attachments.value.push(uploaded);
 		}
 	} catch (err) {
-		loadError.value = err?.serverReason || "That file could not be attached.";
+		if (isCurrentView(generation, conversation))
+			loadError.value = err?.serverReason || "That file could not be attached.";
 	} finally {
-		uploading.value = false;
+		if (isCurrentView(generation, conversation)) uploading.value = false;
 	}
 }
 
@@ -1880,8 +1910,14 @@ async function toggleVoice() {
 		loadError.value = "Recording is not supported in this browser.";
 		return;
 	}
+	const generation = viewGeneration;
+	const conversation = convId.value;
 	try {
 		const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+		if (!isCurrentView(generation, conversation)) {
+			stream.getTracks().forEach((t) => t.stop());
+			return;
+		}
 		recChunks = [];
 		recStartedAt = Date.now();
 		recorder = new MediaRecorder(stream);
@@ -1889,14 +1925,19 @@ async function toggleVoice() {
 			if (ev.data && ev.data.size) recChunks.push(ev.data);
 		};
 		recorder.onstop = async () => {
-			recording.value = false;
 			stream.getTracks().forEach((t) => t.stop());
+			if (!isCurrentView(generation, conversation)) {
+				recChunks = [];
+				return;
+			}
+			recording.value = false;
 			const blob = new Blob(recChunks, { type: recorder.mimeType || "audio/webm" });
 			recChunks = [];
 			if (!blob.size) return;
 			transcribing.value = true;
 			try {
 				const res = await transcribeAudio(blob, (Date.now() - recStartedAt) / 1000);
+				if (!isCurrentView(generation, conversation)) return;
 				const text = (res && res.text) || "";
 				if (text) {
 					draft.value = draft.value ? `${draft.value} ${text}` : text;
@@ -1905,20 +1946,23 @@ async function toggleVoice() {
 					textareaEl.value?.focus();
 				}
 			} catch (err) {
-				loadError.value = "Could not transcribe that recording.";
+				if (isCurrentView(generation, conversation))
+					loadError.value = "Could not transcribe that recording.";
 			} finally {
-				transcribing.value = false;
+				if (isCurrentView(generation, conversation)) transcribing.value = false;
 			}
 		};
 		recorder.start();
 		recording.value = true;
 	} catch (err) {
-		loadError.value = "Microphone permission was refused.";
+		if (isCurrentView(generation, conversation))
+			loadError.value = "Microphone permission was refused.";
 	}
 }
 
 async function send() {
 	const generation = viewGeneration;
+	const sentConversation = convId.value;
 	// Belt and braces: the composer is hidden whenever readiness is "gate" or
 	// still unresolved (see the template), but a stray call (e.g. Enter fired
 	// before that re-render) must not reach the backend for a workspace that was
@@ -1973,18 +2017,17 @@ async function send() {
 	draft.value = "";
 	attachments.value = [];
 	await nextTick();
-	if (viewGeneration !== generation) return;
+	if (!isCurrentView(generation, sentConversation)) return;
 	autoGrow();
 	// Land on the new turn first, so you see your question and the answer start
 	// without reaching for the arrow — then STOP following, so the answer grows
 	// downward instead of sliding its own opening up out of the panel as it is
 	// written. Staying pinned is what made a long reply unreadable here too.
-	await scrollToBottom();
-	if (viewGeneration !== generation) return;
+	await scrollToBottom(() => isCurrentView(generation, sentConversation));
+	if (!isCurrentView(generation, sentConversation)) return;
 	pinnedToBottom.value = false;
 	showScrollDown.value = false;
 
-	const sentConversation = convId.value;
 	try {
 		// Context is read at SEND time, not at open time: a conversation outlives
 		// the page it started on, and pinning it would leave the agent silently
@@ -2085,10 +2128,16 @@ async function resolvePending(token) {
 	if (resolving.value) return;
 	const generation = viewGeneration;
 	const cid = convId.value;
+	const actionIsCurrent = () =>
+		isCurrentView(generation, cid) &&
+		(resolving.value === token || (stream.value.pending || []).some((card) => card.token === token));
 	resolving.value = token;
 	try {
 		const result = await confirmTool(token, cid);
-		if (!isCurrentView(generation, cid)) return;
+		// A passive terminal receipt can remove this card while its direct RPC is
+		// in flight. The matching in-flight token still owns that terminal result;
+		// another card or a new chat never does.
+		if (!actionIsCurrent()) return;
 		const kept = keptCardMessage(result);
 		if (kept) {
 			loadError.value = kept;
@@ -2099,17 +2148,15 @@ async function resolvePending(token) {
 		// or silently resolving it away.
 		const settled = settledReasonMessage(result);
 		if (settled) {
-			settledTokens = withExcluded(settledTokens, [token]);
-			hideSettledPending();
-			enqueueSettledNotice({ token, message: settled });
+			settleSafetyUpdate({ token, message: settled });
 			return;
 		}
 		stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
 	} catch (e) {
-		if (!isCurrentView(generation, cid)) return;
+		if (!actionIsCurrent()) return;
 		loadError.value = "Could not confirm that action.";
 	} finally {
-		if (isCurrentView(generation, cid) && resolving.value === token) resolving.value = "";
+		if (actionIsCurrent() && resolving.value === token) resolving.value = "";
 	}
 }
 

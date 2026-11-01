@@ -473,6 +473,65 @@ const { paletteVars } = useJarvisTheme();
 
 // ── conversation persistence (per user, ChatComposer's namespacing idiom) ────
 const conversation = useStorage(`jarvis-dash-conv-${session.user || "anon"}`, "");
+// A conversation id alone is not a view identity: A → B → A can reuse the
+// same id while an old A request is still in flight. Every request that can
+// change this pane captures this monotonic generation as well as its chat id.
+let dashboardViewGeneration = 0;
+function captureDashboardView(token = "") {
+	return {
+		generation: dashboardViewGeneration,
+		conversation: conversation.value,
+		token,
+	};
+}
+function dashboardViewIsCurrent(view) {
+	return (
+		!!view &&
+		dashboardViewGeneration === view.generation &&
+		conversation.value === view.conversation
+	);
+}
+function dashboardActionIsCurrent(view) {
+	return (
+		dashboardViewIsCurrent(view) &&
+		(pendingCardInFlight.has(view.token) ||
+			pendingCards.value.some(
+				(card) => card.token === view.token && card.conversation === view.conversation
+			))
+	);
+}
+// The ordinary conversation watcher batches changes. This small synchronous
+// watcher gives each A → B → A switch its own generation, even when a caller
+// makes all three assignments in one tick.
+watch(
+	conversation,
+	(id, previous) => {
+		if (id !== previous) {
+			dashboardViewGeneration++;
+			// A batched A → B → A assignment can skip the ordinary state-reset
+			// watcher. All controls that belong to the old thread must still clear
+			// before a new generation can render them.
+			pendingCards.value = [];
+			pendingCardInFlight.clear();
+			safetySettledTokens.value = new Set();
+			safetyUpdateNotice.value = null;
+			safetyUpdateQueue.value = [];
+			sending.value = false;
+			retrying.value = false;
+			compactSubmitting.value = false;
+			compactDialogOpen.value = false;
+			contextInfo.value = null;
+			compacting.value = false;
+			compactedChip.value = false;
+			compactHintSeed.value = "";
+			runActive.value = false;
+			pendingRetry = "";
+			fencedReply = "";
+			clearLadder();
+		}
+	},
+	{ flush: "sync" }
+);
 // The message whose canvas the BUILDER last rendered - the page stamps it, this
 // pane replays exactly that one. Scanning the transcript for "the newest html"
 // could hand the builder an unrelated legacy/promoted artifact and arm Save
@@ -547,15 +606,15 @@ const compactBusyReason = computed(() => {
 // conversation-open read that may CLEAR the lock; elsewhere a fetch may only
 // turn it on (run:end / run:error / context:* are the other clearers).
 async function loadContext({ applyCompacting = false } = {}) {
-	const id = conversation.value;
-	if (!id) {
-		contextInfo.value = null;
+	const view = captureDashboardView();
+	if (!view.conversation) {
+		if (dashboardViewIsCurrent(view)) contextInfo.value = null;
 		return;
 	}
 	try {
-		const c = await getConversationContext(id);
+		const c = await getConversationContext(view.conversation);
+		if (!dashboardViewIsCurrent(view)) return;
 		takeUsage(c);
-		if (conversation.value !== id) return;
 		if (c && c.fresh) contextInfo.value = c;
 		if (applyCompacting) compacting.value = !!(c && c.compacting);
 		else if (c && c.compacting) compacting.value = true;
@@ -570,10 +629,12 @@ function openCompactDialog(seed = "") {
 }
 
 async function runCompact(hint) {
-	if (!conversation.value) return;
+	const view = captureDashboardView();
+	if (!view.conversation) return;
 	compactSubmitting.value = true;
 	try {
-		const res = await compactConversation(conversation.value, hint);
+		const res = await compactConversation(view.conversation, hint);
+		if (!dashboardViewIsCurrent(view)) return;
 		if (!res || !res.ok) {
 			toast.error(compactFailureCopy(res && res.reason));
 			return;
@@ -585,9 +646,9 @@ async function runCompact(hint) {
 	} catch (e) {
 		// frappe-ui toast renders `message` via v-html: feed it the escaped
 		// errHtml, never the plain-text errMessage (lib/noInlineErrorFormatter guard).
-		toast.error(errHtml(e));
+		if (dashboardViewIsCurrent(view)) toast.error(errHtml(e));
 	} finally {
-		compactSubmitting.value = false;
+		if (dashboardViewIsCurrent(view)) compactSubmitting.value = false;
 	}
 }
 const thinkingLevels = computed(() => chatUi.value.thinking_levels || ["low", "medium", "high"]);
@@ -632,28 +693,34 @@ const canConnectModel =
 	typeof window !== "undefined" && !!(window.is_jarvis_admin || window.is_system_manager);
 
 async function selectModel(model) {
+	const view = captureDashboardView();
 	const previous = modelOverride.value;
 	modelOverride.value = model;
-	if (!conversation.value) return;
+	if (!view.conversation) return;
 	try {
-		const result = await setConversationModel(conversation.value, model);
+		const result = await setConversationModel(view.conversation, model);
+		if (!dashboardViewIsCurrent(view)) return;
 		if (result && result.ok === false)
 			throw new Error(result.reason || "Model change rejected");
 	} catch {
+		if (!dashboardViewIsCurrent(view)) return;
 		modelOverride.value = previous;
 		toast.error("Couldn't change the model for this dashboard chat.");
 	}
 }
 
 async function selectThinking(level) {
+	const view = captureDashboardView();
 	const previous = thinkingOverride.value;
 	thinkingOverride.value = level;
-	if (!conversation.value) return;
+	if (!view.conversation) return;
 	try {
-		const result = await setConversationThinking(conversation.value, level);
+		const result = await setConversationThinking(view.conversation, level);
+		if (!dashboardViewIsCurrent(view)) return;
 		if (result && result.ok === false)
 			throw new Error(result.reason || "Effort change rejected");
 	} catch {
+		if (!dashboardViewIsCurrent(view)) return;
 		thinkingOverride.value = previous;
 		toast.error("Couldn't change the effort for this dashboard chat.");
 	}
@@ -768,12 +835,13 @@ function isGone(e) {
 // monotonic request id - stale refetches dropped (useListPage idiom)
 let loadReq = 0;
 async function loadTranscript({ initial = false } = {}) {
+	const view = captureDashboardView();
 	const id = ++loadReq;
-	if (!conversation.value) return;
+	if (!view.conversation) return;
 	if (initial) loadingTranscript.value = true;
 	try {
-		const d = (await getDashboardConversation(conversation.value)) || {};
-		if (id !== loadReq) return;
+		const d = (await getDashboardConversation(view.conversation)) || {};
+		if (id !== loadReq || !dashboardViewIsCurrent(view)) return;
 		messages.value = d.messages || [];
 		observePassiveSafetyUpdates(messages.value);
 		modelOverride.value = d.conversation?.model_override || "";
@@ -787,7 +855,7 @@ async function loadTranscript({ initial = false } = {}) {
 		if (initial || (!socket && !pendingRetry)) {
 			const restoredRun = restoreDashboardRunState(messages.value);
 			applyRestoredRun(restoredRun);
-			if (initial && restoredRun.active && !socket) startNoSocketLadder();
+			if (initial && restoredRun.active && !socket) startNoSocketLadder("", view);
 		}
 		// Navigating away unmounts the builder and drops its canvas html, but the
 		// transcript we just reloaded still carries every artifact the agent drew
@@ -796,9 +864,11 @@ async function loadTranscript({ initial = false } = {}) {
 		// page ignores it when a canvas is already on screen.
 		const frame = builderCanvasFrame(messages.value, canvasMsg.value);
 		if (frame) emit("canvas", { ...frame, restore: true });
-		nextTick(scrollBottom);
+		nextTick(() => {
+			if (dashboardViewIsCurrent(view)) scrollBottom();
+		});
 	} catch (e) {
-		if (id !== loadReq) return;
+		if (id !== loadReq || !dashboardViewIsCurrent(view)) return;
 		if (isGone(e)) {
 			// the stored conversation was deleted (or reassigned) - start fresh
 			conversation.value = "";
@@ -807,15 +877,16 @@ async function loadTranscript({ initial = false } = {}) {
 		}
 		// transient errors keep the last-good transcript; the next frame retries
 	} finally {
-		if (id === loadReq) loadingTranscript.value = false;
+		if (id === loadReq && dashboardViewIsCurrent(view)) loadingTranscript.value = false;
 	}
 }
 
 // debounced refetch driven by realtime frames
 let refetchTimer = null;
-function scheduleRefetch() {
+function scheduleRefetch(view = captureDashboardView()) {
 	clearTimeout(refetchTimer);
 	refetchTimer = setTimeout(() => {
+		if (!dashboardViewIsCurrent(view)) return;
 		loadTranscript();
 		refreshPending();
 	}, 300);
@@ -823,6 +894,10 @@ function scheduleRefetch() {
 
 // ── parked confirmations (gated ERP writes park for human approval) ──────────
 const pendingCards = ref([]);
+// Keep a direct action's token while its RPC is pending. A concurrent list can
+// remove the card before the response lands; that response still belongs to
+// this view and must be able to settle its own safety-update receipt.
+const pendingCardInFlight = new Set();
 // A close migration can settle a card while this pane still has a cached list.
 // Keep that token excluded until this conversation changes, so a late list
 // response cannot restore a Confirm button after its terminal receipt arrived.
@@ -865,10 +940,8 @@ function enqueueSafetyUpdateNotice(notice) {
 function observePassiveSafetyUpdates(rows) {
 	for (const row of rows || []) {
 		const notice = passiveSafetyUpdate(row);
-		if (!notice || safetySettledTokens.value.has(notice.token)) continue;
-		safetySettledTokens.value = new Set(safetySettledTokens.value).add(notice.token);
-		pendingCards.value = pendingCards.value.filter((card) => card.token !== notice.token);
-		enqueueSafetyUpdateNotice(notice);
+		if (!notice) continue;
+		settleSafetyUpdate(notice.token, notice.message);
 	}
 }
 
@@ -881,16 +954,16 @@ function dismissSafetyUpdateNotice() {
 const orderedCards = computed(() => sortPendingCards(pendingCards.value));
 
 async function refreshPending() {
-	const cid = conversation.value;
-	if (!cid) {
-		pendingCards.value = [];
+	const view = captureDashboardView();
+	if (!view.conversation) {
+		if (dashboardViewIsCurrent(view)) pendingCards.value = [];
 		return;
 	}
 	try {
-		const env = await listPendingConfirmations(cid);
+		const env = await listPendingConfirmations(view.conversation);
 		// A delayed list for a chat just left is not authority to render its
 		// cards in the chat now on screen. Check before every assignment below.
-		if (conversation.value !== cid) return;
+		if (!dashboardViewIsCurrent(view)) return;
 		if (env && env.ok === false) return;
 		// A list response is only a delivery channel. It is not authority to
 		// render Confirm: reject raw, delayed, or old-server items unless the
@@ -898,6 +971,7 @@ async function refreshPending() {
 		const items = ((env && env.data && env.data.pending) || []).filter(
 			(item) =>
 				item &&
+				item.conversation === view.conversation &&
 				item.pending_card_safe === true &&
 				!safetySettledTokens.value.has(item.token)
 		);
@@ -913,18 +987,22 @@ function removeCard(token) {
 	pendingCards.value = pendingCards.value.filter((c) => c.token !== token);
 }
 
+function settleSafetyUpdate(token, message) {
+	const seen = safetySettledTokens.value.has(token);
+	safetySettledTokens.value = new Set(safetySettledTokens.value).add(token);
+	// Always remove the affected token. A passive receipt may have run first,
+	// but a later direct receipt must still repair a late list response.
+	removeCard(token);
+	if (!seen) enqueueSafetyUpdateNotice({ token, message: message || SAFETY_UPDATE_COPY });
+}
+
 // A direct Confirm or Dismiss can race the close migration. The RPC then
 // returns the same terminal safety_update envelope as a durable transcript
 // receipt. Settle only that token and show the standard Done-only notice;
 // other attested cards remain usable.
 function settleSafetyUpdateCard(token, response) {
 	if (!token || response?.reason_code !== "safety_update") return false;
-	safetySettledTokens.value = new Set(safetySettledTokens.value).add(token);
-	removeCard(token);
-	enqueueSafetyUpdateNotice({
-		token,
-		message: response?.error?.message || SAFETY_UPDATE_COPY,
-	});
+	settleSafetyUpdate(token, response?.error?.message || SAFETY_UPDATE_COPY);
 	return true;
 }
 
@@ -994,11 +1072,20 @@ function cardMeta(pa) {
 // expired" guess for every ok:false. A bare legacy token (no reason_code at
 // all) still gets that guess - chatRefusalMessage falls back to it below.
 async function approve(pa) {
+	if (!pa) return;
+	const view = captureDashboardView(pa.token);
+	if (pa.conversation !== view.conversation || !dashboardActionIsCurrent(view)) return;
 	pa.busy = true;
 	let keepCard = false;
+	let settledSafetyUpdate = false;
+	pendingCardInFlight.add(view.token);
 	try {
-		const r = await confirmTool(pa.token, conversation.value);
-		if (settleSafetyUpdateCard(pa.token, r)) return;
+		const r = await confirmTool(view.token, view.conversation);
+		if (!dashboardActionIsCurrent(view)) return;
+		if (settleSafetyUpdateCard(view.token, r)) {
+			settledSafetyUpdate = true;
+			return;
+		}
 		if (r && r.ok === false) {
 			keepCard = confirmationStorageUnavailable(r) || keepsChatCard(r);
 			toast.error(
@@ -1010,24 +1097,48 @@ async function approve(pa) {
 			);
 		}
 	} catch (e) {
+		if (!dashboardActionIsCurrent(view)) return;
 		keepCard = true;
 		toast.error(errHtml(e));
 	} finally {
-		if (keepCard) pa.busy = false;
-		else removeCard(pa.token);
-		// the parked run resumes server-side after a confirm: refresh both the
-		// transcript (receipt chip) and anything list-shaped upstream
-		scheduleRefetch();
-		emit("activity");
+		if (dashboardViewIsCurrent(view)) {
+			// The switch fence already cleared the old guard. Do not clear a
+			// same-token action that a later A view started after A → B → A.
+			// Test this before deleting the in-flight marker: a concurrent fresh
+			// list can already have removed the card, but this direct response
+			// still owns the current view and must refresh its durable receipt.
+			if (!dashboardActionIsCurrent(view)) return;
+			pendingCardInFlight.delete(view.token);
+			if (settledSafetyUpdate) {
+				scheduleRefetch(view);
+				emit("activity");
+				return;
+			}
+			if (keepCard) pa.busy = false;
+			else removeCard(view.token);
+			// the parked run resumes server-side after a confirm: refresh both the
+			// transcript (receipt chip) and anything list-shaped upstream
+			scheduleRefetch(view);
+			emit("activity");
+		}
 	}
 }
 
 async function dismiss(pa) {
+	if (!pa) return;
+	const view = captureDashboardView(pa.token);
+	if (pa.conversation !== view.conversation || !dashboardActionIsCurrent(view)) return;
 	pa.busy = true;
 	let keepCard = false;
+	let settledSafetyUpdate = false;
+	pendingCardInFlight.add(view.token);
 	try {
-		const r = await dismissTool(pa.token, conversation.value);
-		if (settleSafetyUpdateCard(pa.token, r)) return;
+		const r = await dismissTool(view.token, view.conversation);
+		if (!dashboardActionIsCurrent(view)) return;
+		if (settleSafetyUpdateCard(view.token, r)) {
+			settledSafetyUpdate = true;
+			return;
+		}
 		if (r && r.ok === false) {
 			keepCard = confirmationStorageUnavailable(r) || keepsChatCard(r);
 			toast.error(
@@ -1039,12 +1150,22 @@ async function dismiss(pa) {
 			);
 		}
 	} catch (e) {
+		if (!dashboardActionIsCurrent(view)) return;
 		keepCard = true;
 		toast.error(errHtml(e));
 	} finally {
-		if (keepCard) pa.busy = false;
-		else removeCard(pa.token);
-		scheduleRefetch();
+		if (dashboardViewIsCurrent(view)) {
+			// Keep a new view's busy token intact when this older request settles.
+			if (!dashboardActionIsCurrent(view)) return;
+			pendingCardInFlight.delete(view.token);
+			if (settledSafetyUpdate) {
+				scheduleRefetch(view);
+				return;
+			}
+			if (keepCard) pa.busy = false;
+			else removeCard(view.token);
+			scheduleRefetch(view);
+		}
 	}
 }
 
@@ -1163,16 +1284,19 @@ function forgetGotoClaim(messageId) {
 async function send(gotoMessageId = "") {
 	const text = draft.value.trim();
 	if (!text || sending.value || runActive.value) return;
+	const tmpName = `tmp-${Date.now()}`;
+	const view = captureDashboardView(tmpName);
 	sending.value = true;
 	draft.value = "";
 	// optimistic user bubble - reconciled by the next transcript refetch
-	const tmpName = `tmp-${Date.now()}`;
 	messages.value = [...messages.value, { name: tmpName, role: "user", content: text }];
-	nextTick(scrollBottom);
+	nextTick(() => {
+		if (dashboardViewIsCurrent(view)) scrollBottom();
+	});
 	try {
 		const r =
 			(await sendDashboardChat(
-				conversation.value,
+				view.conversation,
 				text,
 				dataMode.value,
 				props.editingName,
@@ -1181,6 +1305,7 @@ async function send(gotoMessageId = "") {
 				thinkingOverride.value,
 				orderedCards.value.map((c) => c.token)
 			)) || {};
+		if (!dashboardViewIsCurrent(view)) return;
 		for (const t of discardedTokens(r)) removeCard(t);
 		// A typed go-ahead ran the confirmation instead of a turn: no run events are
 		// coming, and nothing was persisted for the typed words.
@@ -1204,21 +1329,24 @@ async function send(gotoMessageId = "") {
 			toastRejection(r);
 			return;
 		}
-		if (r.conversation_id && r.conversation_id !== conversation.value) {
+		let runView = view;
+		if (r.conversation_id && r.conversation_id !== view.conversation) {
 			ownRepoint = true;
 			conversation.value = r.conversation_id;
+			runView = captureDashboardView(tmpName);
 		}
 		loadDashboardChats();
-		recordGotoConversation(gotoMessageId, r.conversation_id || conversation.value);
+		recordGotoConversation(gotoMessageId, r.conversation_id || runView.conversation);
 		ownRunId = r.run_id || "";
-		markRunStarted();
+		markRunStarted("", runView);
 	} catch (e) {
+		if (!dashboardViewIsCurrent(view)) return;
 		messages.value = messages.value.filter((m) => m.name !== tmpName);
 		if (!draft.value) draft.value = text;
 		forgetGotoClaim(gotoMessageId);
 		toast.error(errHtml(e));
 	} finally {
-		sending.value = false;
+		if (dashboardViewIsCurrent(view)) sending.value = false;
 	}
 }
 
@@ -1246,12 +1374,16 @@ function toastRejection(r, fallback) {
 // moments later and does the same reset, but the ticks should read
 // "Understanding" from the instant of the click, not lag behind the socket
 // round trip. `retried`: the failed reply a retry replaces (see the ladder).
-function markRunStarted(retried = "") {
+function markRunStarted(retried = "", view = captureDashboardView(retried)) {
+	if (!dashboardViewIsCurrent(view)) return false;
 	runStarts++;
 	resetRun(true);
 	pendingRetry = retried;
-	nextTick(scrollBottom);
-	if (!socket) startNoSocketLadder(retried);
+	nextTick(() => {
+		if (dashboardViewIsCurrent(view)) scrollBottom();
+	});
+	if (!socket) startNoSocketLadder(retried, view);
+	return true;
 }
 
 // Undo markRunStarted for a retry the server did not start.
@@ -1277,15 +1409,15 @@ function staleTerminal(p) {
 // since left, or for an unmounted pane, changes nothing here.
 async function retryFailed(m) {
 	if (retryDisabled.value) return;
-	const conv = conversation.value;
+	const view = captureDashboardView(m.name);
 	retrying.value = true;
 	ownRunId = "";
 	fencedReply = m.name;
-	markRunStarted(m.name);
+	if (!markRunStarted(m.name, view)) return;
 	const starts = runStarts;
 	try {
 		const r = (await retryMessage(m.name)) || {};
-		if (disposed || conversation.value !== conv) return;
+		if (disposed || !dashboardViewIsCurrent(view)) return;
 		if (r.ok === false) {
 			if (runStarts === starts) endStartedRun();
 			toastRejection(r, RETRY_FALLBACK);
@@ -1294,11 +1426,11 @@ async function retryFailed(m) {
 		}
 		ownRunId = r.run_id || "";
 	} catch (e) {
-		if (disposed || conversation.value !== conv) return;
+		if (disposed || !dashboardViewIsCurrent(view)) return;
 		if (runStarts === starts) endStartedRun();
 		toast.error(errHtml(e, RETRY_FALLBACK));
 	} finally {
-		retrying.value = false;
+		if (dashboardViewIsCurrent(view)) retrying.value = false;
 	}
 }
 
@@ -1315,8 +1447,14 @@ function newChat() {
 // one case where the thread moved but the run did not: our own send.
 function clearThread({ keepRun = false } = {}) {
 	loadReq++; // drop any in-flight transcript load
+	// An own send can move from the provisional chat to its server id. Its
+	// no-socket ladder belongs to that same newly-started run, so do not cancel
+	// it here; a user switch already cleared the old ladder in the synchronous
+	// generation watcher above.
+	if (!keepRun) clearLadder();
 	messages.value = [];
 	pendingCards.value = [];
+	pendingCardInFlight.clear();
 	safetySettledTokens.value = new Set();
 	safetyUpdateNotice.value = null;
 	safetyUpdateQueue.value = [];
@@ -1466,12 +1604,16 @@ function clearLadder() {
 	ladderTimers.forEach(clearTimeout);
 	ladderTimers = [];
 }
-function startNoSocketLadder(retried = "") {
+function startNoSocketLadder(retried = "", view = captureDashboardView(retried)) {
+	if (!dashboardViewIsCurrent(view)) return;
 	clearLadder();
 	ladderTimers = [3000, 8000, 15000, 30000, 60000].map((ms, i, arr) =>
 		setTimeout(async () => {
+			if (!dashboardViewIsCurrent(view)) return;
 			await loadTranscript();
+			if (!dashboardViewIsCurrent(view)) return;
 			await refreshPending();
+			if (!dashboardViewIsCurrent(view)) return;
 			const last = bubbles.value[bubbles.value.length - 1];
 			const settled =
 				last && last.role === "assistant" && !last.streaming && last.name !== retried;

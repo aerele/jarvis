@@ -11,19 +11,20 @@ import { firstSendPicks } from "../lib/firstSendPicks.js";
 import { heldNewestSeq, mergeNewestPage, refreshNames } from "../lib/historyPaging.js";
 const source = readFileSync(
 	process.env.DESKTOP_CHAT_SOURCE || new URL("../views/ChatView.vue", import.meta.url),
-	"utf8"
+	"utf8",
 );
 const body = source.slice(
 	source.indexOf("function resendFailed(m) {"),
-	source.indexOf("// Proactive (Jarvis-initiated) conversation toast.")
+	source.indexOf("// Proactive (Jarvis-initiated) conversation toast."),
 );
 const file = { file_url: "/private/files/invoice.pdf", file_name: "invoice.pdf" };
 const image = { file_url: "/private/files/photo.png", file_name: "photo.png" };
 const copy = (value) => JSON.parse(JSON.stringify(value));
 function harness(pendingStore) {
 	const s = Object.fromEntries(
-		[...body.matchAll(/\b(\w+)\.value\b/g)].map((m) => [m[1], { value: null }])
+		[...body.matchAll(/\b(\w+)\.value\b/g)].map((m) => [m[1], { value: null }]),
 	);
+	let viewGeneration = 0;
 	const calls = [],
 		errors = [];
 	const noop = () => {};
@@ -60,6 +61,17 @@ function harness(pendingStore) {
 		},
 		_pendingSends: pendingStore || createPendingSends(),
 		_currentScope: () => s.currentId.value || "NEW",
+		captureChatView: () => ({
+			generation: viewGeneration,
+			conversation: s.currentId.value,
+		}),
+		chatViewIsCurrent: (view) =>
+			!!view &&
+			view.generation === viewGeneration &&
+			view.conversation === s.currentId.value,
+		// This harness isolates delivery state. Its fixture rows are not mounted in
+		// `messages`, so view identity is the relevant part of the message gate.
+		messageActionIsCurrent: (view) => s.chatViewIsCurrent(view),
 		dismissFeedback: noop,
 		notify: noop,
 		notifyActionError: (_label, error) => errors.push(error),
@@ -102,6 +114,7 @@ function harness(pendingStore) {
 		_saveConnectorFocusFor: noop,
 		_checkPulseOnce: noop,
 		onTypedConfirmResolved: async () => {
+			s.typedConfirmCalls = (s.typedConfirmCalls || 0) + 1;
 			if (s.failReload) throw new Error("reload failed");
 		},
 		api: {
@@ -147,7 +160,7 @@ function harness(pendingStore) {
 	const f = new Function(
 		...Object.keys(s),
 		body +
-			"\nreturn {send,resendFailed,recoverSend,dismissUncertain,unmount: () => {_recoveryViewActive=false;},invalidateRefresh: () => {_recoveryRefreshEpoch++;}, getPrefill: () => _prefillSendContext, setPrefill: value => {_prefillSendRevision++;_prefillSendContext=value;}};"
+			"\nreturn {send,resendFailed,recoverSend,dismissUncertain,unmount: () => {_recoveryViewActive=false;},invalidateRefresh: () => {_recoveryRefreshEpoch++;}, getPrefill: () => _prefillSendContext, setPrefill: value => {_prefillSendRevision++;_prefillSendContext=value;}};",
 	)(...Object.values(s));
 	f.setPrefill({ doctype: "Sales Invoice", name: "INV-1" });
 	return {
@@ -155,6 +168,10 @@ function harness(pendingStore) {
 		f,
 		calls,
 		errors,
+		switchView(id) {
+			viewGeneration++;
+			s.currentId.value = id;
+		},
 		failed: () => s._pendingSends.peek(s._currentScope()).find((m) => m.failed),
 	};
 }
@@ -259,7 +276,7 @@ test("successful retry acknowledges only the original voice token", async () => 
 	};
 	// Build a fresh evaluator to bind the voice service, then use the actual functions.
 	const f = new Function(...Object.keys(h.s), body + "\nreturn {send,resendFailed};")(
-		...Object.values(h.s)
+		...Object.values(h.s),
 	);
 	await f.send();
 	const bubble = h.failed();
@@ -558,6 +575,70 @@ test("confirmed approval remains settled when transcript refresh fails", async (
 	assert.equal(s.sending.value, false);
 });
 
+test("late typed confirmation does not clear or load a newer chat", async () => {
+	const h = harness();
+	let resolve;
+	h.s.api.sendMessage = () =>
+		new Promise((done) => {
+			resolve = done;
+		});
+	const sending = h.f.send();
+	await new Promise((done) => setImmediate(done));
+	h.switchView("B");
+	h.s.messages.value = [{ name: "b-receipt", role: "tool" }];
+	h.s.pendingActions.value = [{ token: "b-token", conversation: "B" }];
+	h.s.sending.value = true;
+	h.s.waiting.value = true;
+
+	resolve({
+		ok: true,
+		confirmed: true,
+		conversation_id: "A",
+		tokens: ["approval-1"],
+		queued: true,
+	});
+	await sending;
+
+	assert.deepEqual(h.s.messages.value, [{ name: "b-receipt", role: "tool" }]);
+	assert.deepEqual(h.s.pendingActions.value, [{ token: "b-token", conversation: "B" }]);
+	assert.equal(h.s.sending.value, true);
+	assert.equal(h.s.waiting.value, true);
+	assert.equal(h.s.typedConfirmCalls, undefined);
+});
+
+test("late accepted send does not change a newer chat's controls", async () => {
+	const h = harness();
+	let resolve;
+	h.s.api.sendMessage = () =>
+		new Promise((done) => {
+			resolve = done;
+		});
+	const sending = h.f.send();
+	await new Promise((done) => setImmediate(done));
+	h.switchView("B");
+	h.s.messages.value = [{ name: "b-message", role: "assistant", content: "B" }];
+	h.s.pendingActions.value = [{ token: "b-token", conversation: "B" }];
+	h.s.queuedTurn.value = { run_id: "b-run", position: 2 };
+	h.s.sending.value = true;
+	h.s.waiting.value = true;
+
+	resolve({
+		ok: true,
+		conversation_id: "A",
+		message_id: "a-message",
+		queued: true,
+		tokens: ["b-token"],
+		older_cards_waiting: true,
+	});
+	await sending;
+
+	assert.deepEqual(h.s.messages.value, [{ name: "b-message", role: "assistant", content: "B" }]);
+	assert.deepEqual(h.s.pendingActions.value, [{ token: "b-token", conversation: "B" }]);
+	assert.deepEqual(h.s.queuedTurn.value, { run_id: "b-run", position: 2 });
+	assert.equal(h.s.sending.value, true);
+	assert.equal(h.s.waiting.value, true);
+});
+
 test("late delivery updates reactive bubble observers without unrelated UI changes", async () => {
 	const h = harness();
 	let finish;
@@ -784,20 +865,30 @@ for (const ok of [true, false])
 function eventsHarness() {
 	const events = source.slice(
 		source.indexOf("function onEvent(p) {"),
-		source.indexOf('// A brief "answer landed"')
+		source.indexOf('// A brief "answer landed"'),
 	);
 	const stopBody = source.slice(
 		source.indexOf("function stopRun() {"),
-		source.indexOf("async function", source.indexOf("function stopRun() {"))
+		source.indexOf("async function", source.indexOf("function stopRun() {")),
 	);
 	// Cut at the matching closing brace using the next top-level declaration.
 	const stopFunction = stopBody.split(/\n(?:const|let|function|\/\/)/)[0];
 	const body = events + stopFunction;
 	const s = Object.fromEntries(
-		[...body.matchAll(/\b(\w+)\.value\b/g)].map((m) => [m[1], { value: null }])
+		[...body.matchAll(/\b(\w+)\.value\b/g)].map((m) => [m[1], { value: null }]),
 	);
+	let viewGeneration = 0;
 	Object.assign(s, {
 		currentId: { value: "A" },
+		captureChatView: (token = "") => ({
+			generation: viewGeneration,
+			conversation: s.currentId.value,
+			token,
+		}),
+		chatViewIsCurrent: (view) =>
+			!!view &&
+			view.generation === viewGeneration &&
+			view.conversation === s.currentId.value,
 		messages: { value: [] },
 		stoppedMsgIds: { value: new Set() },
 		activeTools: { value: [] },
@@ -830,9 +921,16 @@ function eventsHarness() {
 		},
 	});
 	const f = new Function(...Object.keys(s), body + "\nreturn {onEvent,stopRun};")(
-		...Object.values(s)
+		...Object.values(s),
 	);
-	return { s, ...f };
+	return {
+		s,
+		...f,
+		switchView(id) {
+			viewGeneration++;
+			s.currentId.value = id;
+		},
+	};
 }
 for (const kind of ["run:start", "assistant:delta"])
 	test(`a late ${kind} restores actionable Stop after the delivery timeout`, async () => {

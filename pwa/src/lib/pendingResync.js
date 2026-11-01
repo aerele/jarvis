@@ -72,6 +72,27 @@ export function withExcluded(exclusions, tokens) {
 	return out;
 }
 
+// A safety update can arrive through either the active DecisionSheet RPC or a
+// passive transcript read. Both paths must remove only the spent token, while
+// the caller shows one terminal receipt only on the first settlement.
+export function settleSafetyUpdate(current, exclusions, safetyNotices, token) {
+	if (!token)
+		return {
+			pending: [...(current || [])],
+			settledTokens: new Set(exclusions || []),
+			safetyNoticeTokens: new Set(safetyNotices || []),
+			newlySettled: false,
+		};
+	const settledTokens = withExcluded(exclusions, [token]);
+	const safetyNoticeTokens = withExcluded(safetyNotices, [token]);
+	return {
+		pending: (current || []).filter((card) => card?.token !== token),
+		settledTokens,
+		safetyNoticeTokens,
+		newlySettled: !safetyNotices?.has(token),
+	};
+}
+
 // Realtime confirmations use three event shapes: one direct action:pending
 // event, or the pending list attached to run:end and run:error. Keep the
 // admission decision in one pure helper so every live path applies the same

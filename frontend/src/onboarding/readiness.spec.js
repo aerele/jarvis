@@ -561,7 +561,13 @@ describe("workersWarnNotice self-heal (round 2 mainchat warning)", () => {
 			"send() must also clear workersWarnNotice on a successful response"
 		).not.toBe(-1);
 		// Gated on a genuinely accepted send, same as retry() above.
-		expect(chatSrc.slice(Math.max(0, second - 120), second)).toContain("r.ok !== false");
+		// A view-identity fence and explanatory comments can sit between the
+		// accepted response and this visible-state reset. Pin it to the enclosing
+		// send branch, rather than a fragile character distance.
+		const sendStart = chatSrc.indexOf("async function send(");
+		const accepted = chatSrc.lastIndexOf("if (r && r.ok !== false)", second);
+		expect(accepted).toBeGreaterThan(sendStart);
+		expect(accepted).toBeLessThan(second);
 	});
 
 	it("never gates canSend on workersWarnNotice (composer must stay enabled - heads-up only)", () => {

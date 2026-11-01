@@ -154,9 +154,15 @@ describe("ChatView direct safety-update decisions", () => {
 			src.indexOf("function confirmationStorageUnavailable(response)")
 		);
 		expect(helper).toContain('response?.reason_code !== "safety_update"');
-		expect(helper).toContain("safetySettledTokens.value");
-		expect(helper).toContain("removePending(token)");
-		expect(helper).toContain("enqueueSafetyUpdateNotice");
+		expect(helper).toContain("settleSafetyUpdateNotice");
+		const notice = src.slice(
+			src.indexOf("function settleSafetyUpdateNotice(token, message)"),
+			src.indexOf("function settleSafetyUpdate(token, response)")
+		);
+		expect(notice).toContain("safetySettledTokens.value");
+		expect(notice).toContain("removePending(token)");
+		expect(notice).toContain("if (!seen)");
+		expect(notice).toContain("enqueueSafetyUpdateNotice");
 		// Filtering by the response token removes the cancelled card only. The
 		// visible queue still contains an independent safe sibling.
 		expect(src).toContain("pendingActions.value = pendingActions.value.filter((x) => x.token !== token)");
@@ -167,6 +173,21 @@ describe("ChatView direct safety-update decisions", () => {
 			const kept = body.indexOf("keepsChatCard(r)");
 			expect(safety, fn).toBeGreaterThan(-1);
 			expect(kept, fn).toBeGreaterThan(safety);
+		}
+	});
+
+	it("captures the view, conversation and token before every direct decision", () => {
+		for (const [fn, rpc] of [
+			["confirmPending", "api.confirmTool(token, view.conversation)"],
+			["approveAndRunPending", "api.approveAndRun(token, view.conversation)"],
+			["discardPending", "api.dismissTool(token, view.conversation)"],
+		]) {
+			const body = actionBody(fn);
+			expect(body, fn).toContain("const view = captureChatView(token);");
+			expect(body, fn).toContain("pa.conversation !== view.conversation");
+			expect(body, fn).toContain(rpc);
+			expect(body, fn).toContain("if (!pendingActionIsCurrent(view)) return;");
+			expect(body, fn).toContain("if (!chatViewIsCurrent(view)) return;");
 		}
 	});
 });

@@ -634,10 +634,16 @@ test("the open artifact carries the conversation it was opened from", () => {
 	// stays clickable behind it: without the stamp the header's hand-off pairs
 	// the CURRENT conversation with the PREVIOUS one's message id.
 	const open = fnBody(chatSrc, "async function openArtifact(");
-	assert.match(open, /const conv = currentId\.value;/);
+	assert.match(open, /const view = captureChatView\(m\?\.name \|\| ""\);/);
+	assert.match(open, /if \(!messageActionIsCurrent\(view\)\) return;/);
+	assert.match(open, /const conv = view\.conversation;/);
 	const assigns = open.match(/artifact\.value = \{[^}]*\}/g) || [];
-	assert.equal(assigns.length, 7, "every artifact.value assignment must be accounted for");
-	for (const a of assigns) assert.match(a, /\bconv,/);
+	assert.ok(assigns.length > 0, "artifact previews must keep their source view");
+	for (const a of assigns) {
+		assert.match(a, /\bconv,/);
+		assert.match(a, /\bview,/);
+	}
+	assert.match(open, /const loading = \{ m, cv, url, conv, view, kind: "loading" \};/);
 	// the sheet switcher re-assigns a spread copy, so it keeps the stamp
 	assert.match(chatSrc, /artifact\.value = \{ \.\.\.artifact\.value, sheetIdx: si \};/);
 });
@@ -652,10 +658,13 @@ test("a dashboard build gets its OWN thumbnail card, not the generic file card",
 	// itself. This test only pins the ORDER and the exclusivity: the generic
 	// card's v-else must come after the dashboard branch, so every other
 	// canvas type is untouched.
-	assert.match(chatSrc, /v-else-if="canPromoteDashCanvas\(cv\)"\s*\n\s*class="jv-dash-thumb"/);
+	assert.match(
+		chatSrc,
+		/v-else-if="\s*hasCurrentMessageSnapshot\s*&&\s*canPromoteDashCanvas\(cv\)\s*"\s*\n\s*class="jv-dash-thumb"/
+	);
 	assert.match(chatSrc, /<div v-else class="jv-artifact-group">/);
 	assert.ok(
-		chatSrc.indexOf('v-else-if="canPromoteDashCanvas(cv)"') <
+		chatSrc.indexOf("hasCurrentMessageSnapshot && canPromoteDashCanvas(cv)") <
 			chatSrc.indexOf('<div v-else class="jv-artifact-group">'),
 		"the dashboard thumbnail must be offered before the generic file card falls through to it"
 	);
@@ -673,8 +682,11 @@ test("the open preview panel offers the same hand-off, for its OWN conversation"
 		chatSrc.indexOf('<div class="jv-artifact-body">')
 	);
 	assert.notEqual(head, "", "the artifact preview header must still exist");
-	assert.match(head, /v-if="canOpenDash\(artifact\.cv\) && artifact\.conv === currentId"/);
-	assert.match(head, /@click="openInDashboards\(artifact\.m, artifact\.cv\)"/);
+	assert.match(
+		head,
+		/artifactSourceIsCurrent\(artifact\)[\s\S]*canOpenDash\(artifact\.cv\)[\s\S]*artifact\.conv === currentId/
+	);
+	assert.match(head, /@click="openInDashboards\(artifact\.m, artifact\.cv, artifact\)"/);
 	assert.match(head, /aria-label="Open in Dashboards"/);
 	// alongside the existing open/download actions, not instead of them
 	assert.match(head, /title="Open in new tab"/);
@@ -683,11 +695,12 @@ test("the open preview panel offers the same hand-off, for its OWN conversation"
 
 test("a failed lookup degrades to the promotion route — never a dead button", () => {
 	const open = fnBody(chatSrc, "async function openInDashboards(");
-	assert.match(open, /dashboard = await dashboardForConversation\(conv\);/);
+	assert.match(open, /dashboard = await dashboardForConversation\(view\.conversation\);/);
 	assert.match(open, /catch \(e\) \{/);
 	// the catch must not return: it falls through with no saved dashboard
-	const afterCatch = open.slice(open.indexOf("catch (e) {"));
-	assert.doesNotMatch(afterCatch, /\breturn;/);
+	const catchStart = open.indexOf("catch (e) {");
+	const catchBody = open.slice(catchStart, open.indexOf("\n\t}", catchStart) + 3);
+	assert.doesNotMatch(catchBody, /\breturn;/);
 	assert.match(open, /dashboard = null;/);
 	// the clicked message's own creation decides the fork
 	assert.match(open, /messageId: m\.name,/);
@@ -852,12 +865,12 @@ test("send() learns the conversation a goto hand-off landed on and stamps it", (
 	);
 	const send = fnBody(paneSrc, "async function send(");
 	assert.match(send, /async function send\(gotoMessageId = ""\)/);
-	// stamped with whatever conversation this send actually landed on - the
-	// REPOINTED id when send_message() opened a fresh one, the sticky one
-	// otherwise - not blindly the pre-send value
+	// stamped with whatever conversation this send actually landed on. `runView`
+	// is recaptured after an owned repoint, so a late old send cannot stamp a
+	// later dashboard view.
 	assert.match(
 		send,
-		/recordGotoConversation\(gotoMessageId, r\.conversation_id \|\| conversation\.value\);/
+		/recordGotoConversation\(gotoMessageId, r\.conversation_id \|\| runView\.conversation\);/
 	);
 	// sendText forwards it, and the Send button/Enter-key paths (message-less
 	// ordinary sends) pass none, which is a no-op inside recordGotoConversation

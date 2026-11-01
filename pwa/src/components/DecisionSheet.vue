@@ -27,6 +27,9 @@ import { agentName } from "@/branding";
 // already behind the Frappe session, so the confirmation itself is the gate.
 const props = defineProps({
 	action: { type: Object, default: null },
+	// The parent increments this whenever the visible conversation changes.
+	// Capture it with an RPC so late callbacks cannot settle a different view.
+	viewGeneration: { type: Number, default: 0 },
 	// PR-1: true while the parent reply is still streaming. A card is parked
 	// mid-turn, so Approve/Deny stay disabled until the parent turn settles (the
 	// SPA gates the same way via convStreaming) - a confirm must not run a
@@ -49,9 +52,11 @@ const reference = ref("");
 // approve-and-run, §3.5).
 const approveMode = ref("step"); // "step" | "run"
 
-// Fresh card → fresh sheet.
+// Fresh card or fresh chat view → fresh sheet. The generation check matters
+// when a user returns to A after A → B: a late A RPC must not change the new
+// A sheet, even if it happens to use the same token.
 watch(
-	() => props.action?.token,
+	() => [props.action?.token, props.action?.conversation, props.viewGeneration],
 	() => {
 		state.value = "review";
 		error.value = "";
@@ -81,14 +86,29 @@ function closeSheet() {
 	// the card locally. A bare close during normal review still only closes the
 	// sheet and keeps a live card available.
 	if (state.value === "cancelled" && props.action?.token) {
-		emit("resolved", props.action.token, "cancelled");
+		emit(
+			"resolved",
+			props.action.token,
+			"cancelled",
+			props.action.conversation,
+			props.viewGeneration
+		);
 		return;
 	}
-	emit("close");
+	emit(
+		"close",
+		props.action?.token,
+		props.action?.conversation,
+		props.viewGeneration
+	);
 }
 
-function actionIsCurrent(token) {
-	return props.action?.token === token;
+function actionIsCurrent(token, conversation, generation) {
+	return (
+		props.action?.token === token &&
+		props.action?.conversation === conversation &&
+		props.viewGeneration === generation
+	);
 }
 
 // The preview is either a ready-made string or {note, would} — `described` means
@@ -115,30 +135,31 @@ async function deny() {
 	if (state.value === "busy" || props.streaming) return;
 	const token = props.action?.token;
 	const conversation = props.action?.conversation;
+	const generation = props.viewGeneration;
 	if (!token) return;
 	if (!window.confirm("Discard this action?")) return;
 	error.value = "";
 	state.value = "busy";
-	emit("busy", true, token);
+	emit("busy", true, token, conversation, generation);
 	try {
 		const r = await api.dismissTool(token, conversation);
 		const outcome = denyOutcome(r);
 		// Match Approve's close-migration path. A direct Deny can receive the
 		// terminal safety response too; exclude its token before the in-flight
 		// guard clears, then leave only the cancellation Done control visible.
-		if (outcome.state === "cancelled") emit("settled", token);
-		if (actionIsCurrent(token)) {
+		if (outcome.state === "cancelled") emit("settled", token, conversation, generation);
+		if (actionIsCurrent(token, conversation, generation)) {
 			state.value = outcome.state;
 			error.value = outcome.error;
 		}
-		if (outcome.resolved) emit("resolved", token, outcome.resolved);
+		if (outcome.resolved) emit("resolved", token, outcome.resolved, conversation, generation);
 	} catch (e) {
-		if (actionIsCurrent(token)) {
+		if (actionIsCurrent(token, conversation, generation)) {
 			error.value = e?.message || "Couldn't discard this action.";
 			state.value = "review";
 		}
 	} finally {
-		emit("busy", false, token);
+		emit("busy", false, token, conversation, generation);
 	}
 }
 
@@ -154,12 +175,13 @@ async function approve(mode = "step") {
 	if (state.value === "busy" || props.streaming) return;
 	const token = props.action?.token;
 	const conversation = props.action?.conversation;
+	const generation = props.viewGeneration;
 	if (!token) return;
 	error.value = "";
 	reference.value = "";
 	state.value = "busy";
 	approveMode.value = mode;
-	emit("busy", true, token);
+	emit("busy", true, token, conversation, generation);
 	try {
 		const r =
 			mode === "run"
@@ -168,7 +190,7 @@ async function approve(mode = "step") {
 		if (r && r.ok === false) {
 			const kept = keptCardMessage(r);
 			if (kept) {
-				if (actionIsCurrent(token)) {
+				if (actionIsCurrent(token, conversation, generation)) {
 					error.value = kept;
 					state.value = "review";
 				}
@@ -181,8 +203,8 @@ async function approve(mode = "step") {
 			// and a stale transcript row must not re-create this spent card while
 			// the terminal explanation is still open or after Done.
 			if (r.reason_code === "safety_update") {
-				emit("settled", token);
-				if (actionIsCurrent(token)) {
+				emit("settled", token, conversation, generation);
+				if (actionIsCurrent(token, conversation, generation)) {
 					error.value = settledReasonMessage(r);
 					state.value = "cancelled";
 				}
@@ -196,7 +218,7 @@ async function approve(mode = "step") {
 				// says why. Only a bare legacy token (no reason_code at all) gets
 				// the opaque guess: use the card's own wall-clock expiry (F15).
 				const settledReason = settledReasonMessage(r);
-				if (actionIsCurrent(token)) {
+				if (actionIsCurrent(token, conversation, generation)) {
 					error.value =
 						settledReason ||
 						(pendingExpiry(props.action?.expires_at, Date.now()).expired
@@ -204,26 +226,26 @@ async function approve(mode = "step") {
 							: `Couldn't confirm. It may have been handled elsewhere. Refresh, or ask ${agentName} to try again.`);
 					state.value = "review";
 				}
-				emit("resolved", token, "expired");
+				emit("resolved", token, "expired", conversation, generation);
 				return;
 			}
 			// The person's words for a refusal written for the model (error.person_message).
-			if (actionIsCurrent(token)) {
+			if (actionIsCurrent(token, conversation, generation)) {
 				error.value = personError(r.error).message || r.reason || "Couldn't run this action.";
 				reference.value = failureReferenceOf(r);
 				state.value = "review";
 			}
 			return;
 		}
-		if (actionIsCurrent(token)) state.value = "approved";
-		emit("resolved", token, "approved");
+		if (actionIsCurrent(token, conversation, generation)) state.value = "approved";
+		emit("resolved", token, "approved", conversation, generation);
 	} catch (e) {
-		if (actionIsCurrent(token)) {
+		if (actionIsCurrent(token, conversation, generation)) {
 			error.value = e?.message || "Couldn't run this action.";
 			state.value = "review";
 		}
 	} finally {
-		emit("busy", false, token);
+		emit("busy", false, token, conversation, generation);
 	}
 }
 </script>

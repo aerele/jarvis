@@ -126,6 +126,26 @@ function harness(initial = "A") {
 		originOf: ref("A"),
 		composerRef: ref({ focusInput: vi.fn() }),
 	});
+	let viewGeneration = 0;
+	watch(
+		state.currentId,
+		(id, previous) => {
+			if (id !== previous) viewGeneration++;
+		},
+		{ flush: "sync" }
+	);
+	Object.assign(state, {
+		directActionViewGeneration: ref(0),
+		captureChatView: (token = "") => ({
+			generation: viewGeneration,
+			conversation: state.currentId.value,
+			token,
+		}),
+		chatViewIsCurrent: (view) =>
+			!!view &&
+			view.generation === viewGeneration &&
+			view.conversation === state.currentId.value,
+	});
 	const functions = new Function(
 		...Object.keys(state),
 		body +

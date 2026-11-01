@@ -14,21 +14,21 @@ const between = (s, from, to) => {
 
 describe("ChatView shows what changed outside the grid", () => {
 	it("auto-opens on a build of the panel, passing the panel that was open", () => {
-		const fn = between(src, "async function openDraftPanel(a) {", "function addDraftRow");
+		const fn = between(src, "async function openDraftPanel(", "function addDraftRow");
 		expect(fn).toMatch(/applyAutoOpen\(model, draftPanel\.value\)/);
 		// before the model is stamped into the panel, so the first render already has the rows open
 		expect(fn.indexOf("applyAutoOpen(")).toBeLessThan(
-			fn.indexOf("draftPanel.value = stampDraftModel")
+			fn.indexOf("draftPanel.value = stampDraftModel"),
 		);
 	});
 	it("never moves focus when it opens rows", () => {
-		const fn = between(src, "async function openDraftPanel(a) {", "function addDraftRow");
+		const fn = between(src, "async function openDraftPanel(", "function addDraftRow");
 		expect(fn).not.toMatch(/\.focus\(|nextTick/);
 		expect(between(tables, "export function applyAutoOpen", "// A row toggle's")).not.toMatch(
-			/focus/
+			/focus/,
 		);
 		expect(
-			between(tables, "export function openChangedRows", "// On the first build")
+			between(tables, "export function openChangedRows", "// On the first build"),
 		).not.toMatch(/focus/);
 	});
 	it("renders the summary above the grid, with the button only when grouped", () => {
@@ -51,14 +51,14 @@ describe("ChatView shows what changed outside the grid", () => {
 		expect(src).toMatch(/import \{[^}]*showRowForm[^}]*\} from "@\/lib\/rowFormFocus"/);
 	});
 	it("a throw in the auto-open can never stop the panel opening", () => {
-		const fn = between(src, "async function openDraftPanel(a) {", "function addDraftRow");
+		const fn = between(src, "async function openDraftPanel(", "function addDraftRow");
 		expect(fn).toMatch(
-			/try \{\s*applyAutoOpen\(model, draftPanel\.value\);\s*\} catch \(e\) \{/
+			/try \{\s*applyAutoOpen\(model, draftPanel\.value\);\s*\} catch \(e\) \{/,
 		);
 		expect(fn).toMatch(/console\.warn\(/);
 		// and the panel is still set after it
 		expect(fn.indexOf("catch (e) {", fn.indexOf("applyAutoOpen("))).toBeLessThan(
-			fn.indexOf("draftPanel.value = stampDraftModel")
+			fn.indexOf("draftPanel.value = stampDraftModel"),
 		);
 	});
 	it("the toggle shows short text from toggleParts, and its title is its aria-label", () => {
@@ -70,7 +70,7 @@ describe("ChatView shows what changed outside the grid", () => {
 	});
 	it("the row form block gets the saved row, for 'was X' and the rule-hidden rule", () => {
 		expect(between(src, "<DraftRowBlock", "/>")).toMatch(
-			/:saved-row="\s*rowStatusFor\(t, r, ri\)\.savedRow\s*"/
+			/:saved-row="\s*rowStatusFor\(t, r, ri\)\.savedRow\s*"/,
 		);
 	});
 });

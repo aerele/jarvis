@@ -5,6 +5,7 @@ import {
 	admitRealtimePendingCards,
 	mergePendingSources,
 	pendingActionsFromRows,
+	settleSafetyUpdate,
 	withExcluded,
 } from "./pendingResync.js";
 
@@ -95,6 +96,38 @@ test("a safety-update token stays excluded after Done when a stale pending row r
 	const staleFromRows = [{ token: "safety-token" }, { token: "ordinary-token" }];
 	const afterDone = mergePendingSources([], [staleFromRows], settled);
 	assert.deepEqual(afterDone, [{ token: "ordinary-token" }]);
+});
+
+test("a safety update removes only its card and creates one terminal receipt", () => {
+	const cards = [
+		{ token: "safety-token", conversation: "A" },
+		{ token: "safe-sibling", conversation: "A" },
+	];
+	const passive = settleSafetyUpdate(cards, new Set(), new Set(), "safety-token");
+	assert.equal(passive.newlySettled, true);
+	assert.deepEqual(passive.pending, [{ token: "safe-sibling", conversation: "A" }]);
+
+	// A direct response after the passive transcript result removes the target
+	// again if it reappeared, but it cannot add a second Done-only receipt.
+	const direct = settleSafetyUpdate(
+		[...passive.pending, { token: "safety-token", conversation: "A" }],
+		passive.settledTokens,
+		passive.safetyNoticeTokens,
+		"safety-token",
+	);
+	assert.equal(direct.newlySettled, false);
+	assert.deepEqual(direct.pending, [{ token: "safe-sibling", conversation: "A" }]);
+});
+
+test("a typed discard does not suppress a later safety-update explanation", () => {
+	const update = settleSafetyUpdate(
+		[{ token: "typed-token", conversation: "A" }, { token: "safe-sibling", conversation: "A" }],
+		new Set(["typed-token"]),
+		new Set(),
+		"typed-token",
+	);
+	assert.equal(update.newlySettled, true);
+	assert.deepEqual(update.pending, [{ token: "safe-sibling", conversation: "A" }]);
 });
 
 test("a hard reload does not rebuild a terminal safety receipt into a Confirm card", () => {
@@ -324,9 +357,10 @@ test("PWA queues every passive safety receipt and shows the next one after Done"
 	assert.match(observe, /enqueueSafetyUpdateNotice\(notice\)/);
 	assert.match(
 		observe,
-		/pending\.value = pending\.value\.filter\(\(card\) => card\.token !== notice\.token\)/
+		/const newlySettled = settleSafetyUpdateInView\(notice\.token\);/
 	);
-	assert.match(observe, /if \(decision\.value\?\.token === notice\.token\) decision\.value = null/);
+	assert.match(observe, /if \(!newlySettled\) continue;/);
+	assert.match(observe, /if \(decision\.value\?\.token === notice\.token\) clearDecision\(\);/);
 	const dismiss = view.slice(
 		view.indexOf("function dismissSafetyUpdateNotice()"),
 		view.indexOf("const preview", view.indexOf("function dismissSafetyUpdateNotice()"))
@@ -342,37 +376,76 @@ test("safety update settles its token before DecisionSheet clears the busy guard
 		"utf8"
 	);
 	const safety = sheet.indexOf('r.reason_code === "safety_update"');
-	const settled = sheet.indexOf('emit("settled", token)', safety);
+	const settled = sheet.indexOf('emit("settled", token, conversation, generation)', safety);
 	const cancelled = sheet.indexOf('state.value = "cancelled"', safety);
-	const busyClear = sheet.indexOf('emit("busy", false, token)', safety);
+	const busyClear = sheet.indexOf('emit("busy", false, token, conversation, generation)', safety);
 	assert.ok(settled > safety && settled < cancelled && settled < busyClear);
 
 	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
-	const handler = view.indexOf("function onDecisionSettled(token)");
+	const handler = view.indexOf("function onDecisionSettled(token, conversation, generation)");
 	const exclude = view.indexOf(
-		"settledTokens.value = withExcluded(settledTokens.value, [token])",
-		handler
-	);
-	const remove = view.indexOf(
-		"pending.value = pending.value.filter((card) => card.token !== token)",
+		"settleSafetyUpdateInView(token);",
 		handler
 	);
 	const listener = view.indexOf('@settled="onDecisionSettled"');
-	assert.ok(handler > -1 && exclude > handler && remove > exclude);
+	assert.ok(handler > -1 && exclude > handler);
 	assert.ok(listener > -1);
 });
 
 test("PWA keeps a later sheet out of an earlier request's terminal events", () => {
 	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
 	const busy = view.slice(
-		view.indexOf("function onDecisionBusy(busy, token)"),
-		view.indexOf("function onDecisionSettled(token)")
+		view.indexOf("function onDecisionBusy(busy, token, conversation, generation)"),
+		view.indexOf("function onDecisionSettled(token, conversation, generation)")
 	);
 	assert.match(busy, /inflightToken\.value = token/);
-	assert.match(busy, /if \(inflightToken\.value === token\) inflightToken\.value = null/);
+	assert.match(
+		busy,
+		/if \(isCurrent\(conversation, generation\) && inflightToken\.value === token\)/,
+	);
 	const resolved = view.slice(
-		view.indexOf("function onResolved(token, kind)"),
+		view.indexOf("function onResolved(token, kind, conversation, generation)"),
 		view.indexOf("const onResync")
 	);
-	assert.match(resolved, /if \(decision\.value\?\.token === token\) decision\.value = null/);
+	assert.match(resolved, /if \(decision\.value\?\.token === token\) clearDecision\(\);/);
+});
+
+test("PWA fences a sheet and pending read to the view that started them", () => {
+	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	assert.match(view, /import \{ advanceViewGeneration, isViewCurrent \} from "\.\.\/lib\/viewGeneration\.js";/);
+	assert.match(view, /const decisionContext = ref\(null\)/);
+	assert.match(view, /function decisionIsCurrent\(token, conversation, generation\)/);
+	assert.match(view, /function openDecision\(card\)/);
+	assert.match(view, /viewGeneration = advanceViewGeneration\(viewGeneration\)/);
+	const switcher = view.slice(view.indexOf("() => props.id,"), view.indexOf("onMounted("));
+	assert.match(switcher, /clearDecision\(\);/);
+	assert.match(switcher, /inflightToken\.value = null;/);
+	assert.match(switcher, /\{ flush: "sync" \}/);
+	const loadPending = view.slice(
+		view.indexOf("async function loadPending("),
+		view.indexOf("// Auto-heal", view.indexOf("async function loadPending("))
+	);
+	assert.match(loadPending, /const generation = viewGeneration;/);
+	assert.match(loadPending, /if \(!isCurrent\(cid, generation\)\) return;/);
+	assert.match(view, /:view-generation="decisionContext\?\.generation \?\? viewGeneration"/);
+	assert.match(view, /@close="onDecisionClose"/);
+	assert.match(view, /@settled="onDecisionSettled"/);
+	assert.match(view, /@busy="onDecisionBusy"/);
+});
+
+test("DecisionSheet carries its original conversation and generation through async events", () => {
+	const sheet = fs.readFileSync(
+		new URL("../components/DecisionSheet.vue", import.meta.url),
+		"utf8"
+	);
+	assert.match(sheet, /viewGeneration: \{ type: Number, default: 0 \}/);
+	assert.match(sheet, /const conversation = props\.action\?\.conversation;/);
+	assert.match(sheet, /const generation = props\.viewGeneration;/);
+	assert.match(sheet, /emit\("settled", token, conversation, generation\)/);
+	assert.match(sheet, /emit\("busy", false, token, conversation, generation\)/);
+	assert.match(
+		sheet,
+		/emit\(\s*"close",\s*props\.action\?\.token,\s*props\.action\?\.conversation,\s*props\.viewGeneration\s*\)/,
+	);
+	assert.match(sheet, /function actionIsCurrent\(token, conversation, generation\)/);
 });

@@ -107,7 +107,7 @@ test("DecisionSheet keeps a safety-update explanation open until the person clos
 	const approve = src.slice(src.indexOf("async function approve("));
 	const safety = approve.indexOf('r.reason_code === "safety_update"');
 	const cancelled = approve.indexOf('state.value = "cancelled"', safety);
-	const expired = approve.indexOf('emit("resolved", token, "expired")');
+	const expired = approve.indexOf('emit("resolved", token, "expired", conversation, generation)');
 	assert.ok(safety > -1 && cancelled > safety);
 	assert.ok(safety < expired, "safety update must not use the retry/expired path");
 	assert.match(src, /state\.value === "cancelled" && props\.action\?\.token/);
@@ -121,8 +121,11 @@ test("DecisionSheet's direct Deny settles a safety-update token before the busy 
 	);
 	const deny = src.slice(src.indexOf("async function deny()"), src.indexOf("async function approve("));
 	const outcome = deny.indexOf("const outcome = denyOutcome(r)");
-	const settled = deny.indexOf('if (outcome.state === "cancelled") emit("settled", token)', outcome);
-	const busyClear = deny.indexOf('emit("busy", false, token)', outcome);
+	const settled = deny.indexOf(
+		'if (outcome.state === "cancelled") emit("settled", token, conversation, generation)',
+		outcome,
+	);
+	const busyClear = deny.indexOf('emit("busy", false, token, conversation, generation)', outcome);
 	assert.ok(outcome > -1 && settled > outcome && settled < busyClear);
 	assert.match(src, /state\.value === "cancelled" && props\.action\?\.token/);
 });
@@ -136,12 +139,13 @@ test("DecisionSheet keeps an asynchronous result bound to its original card", ()
 		const body = src.slice(src.indexOf(fn));
 		assert.match(body, /const token = props\.action\?\.token;/);
 		assert.match(body, /const conversation = props\.action\?\.conversation;/);
-		assert.match(body, /emit\("busy", true, token\)/);
-		assert.match(body, /emit\("busy", false, token\)/);
-		assert.match(body, /actionIsCurrent\(token\)/);
+		assert.match(body, /const generation = props\.viewGeneration;/);
+		assert.match(body, /emit\("busy", true, token, conversation, generation\)/);
+		assert.match(body, /emit\("busy", false, token, conversation, generation\)/);
+		assert.match(body, /actionIsCurrent\(token, conversation, generation\)/);
 	}
 	const approve = src.slice(src.indexOf('async function approve(mode = "step")'));
 	assert.match(approve, /confirmTool\(token, conversation\)/);
-	assert.match(approve, /emit\("settled", token\)/);
-	assert.match(approve, /emit\("resolved", token, "approved"\)/);
+	assert.match(approve, /emit\("settled", token, conversation, generation\)/);
+	assert.match(approve, /emit\("resolved", token, "approved", conversation, generation\)/);
 });

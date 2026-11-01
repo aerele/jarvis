@@ -83,10 +83,14 @@ describe("parked confirmations resync from durable state at every terminal", () 
 			src.indexOf("function dismissSafetyUpdateNotice()")
 		);
 		expect(observe).not.toContain("if (safetyUpdateNotice.value) return");
-		expect(observe).toContain("enqueueSafetyUpdateNotice(notice)");
-		expect(observe).toContain(
-			"pendingActions.value = pendingActions.value.filter((card) => card.token !== notice.token)"
+		expect(observe).toContain("settleSafetyUpdateNotice(notice.token, notice.message)");
+		const settle = src.slice(
+			src.indexOf("function settleSafetyUpdateNotice(token, message)"),
+			src.indexOf("function settleSafetyUpdate(token, response)")
 		);
+		expect(settle).toContain("removePending(token)");
+		expect(settle).toContain("if (!seen)");
+		expect(settle).toContain("enqueueSafetyUpdateNotice");
 		const dismiss = src.slice(
 			src.indexOf("function dismissSafetyUpdateNotice()"),
 			src.indexOf("// Which card's Approve", src.indexOf("function dismissSafetyUpdateNotice()"))
@@ -119,14 +123,26 @@ describe("parked confirmations resync from durable state at every terminal", () 
 		expect(body).toContain("pendingActions.value.some((x) => x.token === card.token)");
 	});
 
-	it("the resync is freshness-guarded against a mid-flight conversation switch", () => {
+	it("the resync is generation-fenced against a mid-flight switch and ABA return", () => {
 		const fn = src.slice(
 			src.indexOf("async function resyncPendingConfirmations(id, source) {")
 		);
 		const body = fn.slice(0, fn.indexOf("\n}"));
-		expect(body).toContain("if (currentId.value !== id) return;");
+		expect(body).toContain("const view = captureChatView();");
+		expect(body).toContain("if (!chatViewIsCurrent(view)) return;");
+		expect(body).toContain("it.conversation === view.conversation");
 		// and never throws into the terminal handler that now calls it unawaited
 		expect(body).toContain("catch (e) {");
+	});
+
+	it("fences older-page and full-chat loads with the same generation", () => {
+		const older = src.slice(src.indexOf("async function loadOlder({ auto = false } = {})"));
+		expect(older).toContain("const view = captureChatView();");
+		expect(older).toContain("!chatViewIsCurrent(view)");
+		const load = src.slice(src.indexOf("async function loadConversation(id, { staleRetry = true } = {})"));
+		expect(load).toContain("const view = captureChatView();");
+		expect(load).toContain("if (id !== view.conversation) return false;");
+		expect(load).toContain("!chatViewIsCurrent(view)");
 	});
 
 	it("loadConversation still resyncs, so a reload/reconnect path keeps working", () => {
