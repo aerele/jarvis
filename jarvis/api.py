@@ -191,17 +191,9 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 				"start a new chat to continue. Then stop.",
 			)
 
-		if result_mode is not None and (
-			result_mode != "private_audit_v1"
-			or shared_session
-			or tool
-			not in {
-				"query",
-				"run_report",
-				"get_purchase_match_inputs",
-				"get_receivables_review_inputs",
-			}
-		):
+		from jarvis.tools._private_output import MODE, TOOLS
+
+		if result_mode is not None and (result_mode != MODE or shared_session or tool not in TOOLS):
 			frappe.local.response.http_status_code = 400
 			return _error("InvalidArgumentError", "This call cannot use private audit output.")
 		if shared_session:
