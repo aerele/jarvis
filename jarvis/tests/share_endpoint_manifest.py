@@ -852,7 +852,7 @@ ENDPOINTS.update(
 			"arguments": {
 				"request": "$approval",
 				"counted_at": "2026-10-01 10:00:00",
-				"entries": [],
+				"entries": [{"item_code": "share-probe-item", "counted_qty": "1"}],
 				"entry_key": "cycle-count-share",
 			},
 			"scope": "chat_scoped",
