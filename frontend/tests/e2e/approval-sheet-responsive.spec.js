@@ -167,7 +167,7 @@ test("approval sheet controls remain reachable at 390px", async ({ page }) => {
 	expect((await rail.boundingBox()).width).toBeCloseTo(390, 0);
 	expect(await page.getByText(sheet.counts_line, { exact: true }).count()).toBe(2);
 	expect(
-		await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
+		await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
 	).toBeLessThanOrEqual(0);
 
 	await proceed.scrollIntoViewIfNeeded();
@@ -185,9 +185,9 @@ test("approval board keeps its 360px desktop rail", async ({ page }) => {
 	expect(
 		await page.locator('[data-testid="approvals-split-view"]').evaluate((el) => {
 			return getComputedStyle(el).flexDirection;
-		}),
+		})
 	).toBe("row");
 	expect(
-		await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
+		await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
 	).toBeLessThanOrEqual(0);
 });

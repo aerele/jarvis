@@ -298,10 +298,10 @@ describe("ApprovalsBoard one inbox", () => {
 				"lg:max-h-none",
 				"lg:border-b-0",
 				"lg:border-r",
-			]),
+			])
 		);
 		expect(pane(w).classes()).toEqual(
-			expect.arrayContaining(["min-h-0", "min-w-0", "flex-1", "overflow-y-auto"]),
+			expect.arrayContaining(["min-h-0", "min-w-0", "flex-1", "overflow-y-auto"])
 		);
 	});
 
