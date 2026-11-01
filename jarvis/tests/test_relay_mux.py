@@ -2013,8 +2013,14 @@ class TestReaderThreadIsFrappeFree(FrappeTestCase):
 			return TEST_PROFILE
 
 		mux, rec = self._mux_with_lane()
+		# The lifecycle end frame normally precedes the final (it carries terminalReply); routing it
+		# must be frappe-free too.
+		end = _agent_frame(
+			"r1", "s1", "lifecycle", {"phase": "end", "terminalReply": {"text": "hello there"}}
+		)
 		frame = _chat_final_frame("r1", "s1", text="hello there")
 		with mock_patch("jarvis.chat.generated_media.get_profile", site_bound_profile):
+			_drive_on_bare_thread(mux._route_event, end)
 			_drive_on_bare_thread(mux._route_event, frame)
 			applied = mux.dispatch()
 		self.assertEqual(applied, 1, "the terminal must be queued and applied, never silently dropped")
@@ -2061,3 +2067,61 @@ class TestReaderThreadIsFrappeFree(FrappeTestCase):
 		mux.dispatch()
 		self.assertEqual(rec.quarantined, "reader_fault")
 		self.assertIsNone(rec.terminal)
+
+
+class TestRelayMuxStrippedMediaMarker(FrappeTestCase):
+	"""openclaw strips a ``MEDIA:`` line from the streamed text AND from the chat final (2026.9.3 and
+	2026.10.6). The raw reply survives only on the lifecycle ``end`` frame (``terminalReply.text``),
+	which arrived before the final in 20/20 measured runs; when it does not, the final asks for one
+	transcript read instead."""
+
+	_PATH = "/srv/test-gateway/media/probe/red.png"  # under the synthetic profile's media_root
+
+	def _terminal_for(self, frames):
+		mux = RelayMux(MagicMock(), "sm-target")
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		for frame in frames:
+			mux._classify(frame)
+		mux.dispatch()
+		return rec.terminal
+
+	def _end(self, text):
+		return _agent_frame(
+			"r1",
+			"s1",
+			"lifecycle",
+			{"phase": "end", "terminalReply": {"disposition": "visible", "text": text}},
+		)
+
+	def test_media_path_is_taken_from_the_end_frame(self):
+		term = self._terminal_for(
+			[
+				self._end(f"Here is the chart.\nMEDIA:{self._PATH}"),
+				_chat_final_frame("r1", "s1", "Here is the chart."),
+			]
+		)
+		self.assertEqual(term[0], "relay:final")
+		self.assertEqual(term[1]["text"], "Here is the chart.")
+		self.assertEqual(term[1]["media_rels"], [self._PATH])
+		self.assertNotIn("harvest_history", term[1])
+		self.assertNotIn("marker_stripped", term[1])  # nothing left to strip from the final text
+
+	def test_a_reply_without_media_is_unchanged(self):
+		term = self._terminal_for(
+			[self._end("Plain answer."), _chat_final_frame("r1", "s1", "Plain answer.")]
+		)
+		self.assertEqual(term[1], {"text": "Plain answer."})
+
+	def test_a_late_end_frame_asks_for_one_transcript_read(self):
+		term = self._terminal_for([_chat_final_frame("r1", "s1", "Here is the chart.")])
+		self.assertEqual(term[0], "relay:final")
+		self.assertTrue(term[1].get("harvest_history"))
+		self.assertNotIn("media_rels", term[1])
+
+	def test_an_invalid_path_on_the_end_frame_seeds_nothing(self):
+		term = self._terminal_for(
+			[self._end("See this.\nMEDIA:../../etc/passwd"), _chat_final_frame("r1", "s1", "See this.")]
+		)
+		self.assertNotIn("media_rels", term[1])
+		self.assertNotIn("harvest_history", term[1])

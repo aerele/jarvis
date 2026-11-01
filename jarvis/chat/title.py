@@ -33,7 +33,7 @@ import time
 import frappe
 
 from jarvis.chat import txn
-from jarvis.chat.events import publish_to_user
+from jarvis.chat.events import accumulate_assistant_text, publish_to_user
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -354,8 +354,8 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 					model=model,
 					provider=provider,
 				):
-					if ev.get("kind") == "assistant" and ev.get("text"):
-						text = ev["text"]
+					if ev.get("kind") == "assistant":
+						text = accumulate_assistant_text(text, ev)
 					elif ev.get("kind") == "lifecycle" and ev.get("phase") == "error" and ev.get("error"):
 						# the agent runtime's ONLY place the run names a provider failure
 						# (see agent_client.failed_final_error). Not raised - the

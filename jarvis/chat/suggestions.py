@@ -32,6 +32,7 @@ import time
 import frappe
 
 from jarvis.chat import txn
+from jarvis.chat.events import accumulate_assistant_text
 from jarvis.chat.title import (
 	_auth_fault_detail,
 	_clean,
@@ -237,8 +238,8 @@ def _generate_via_gateway(gateway_url, titles: list[str], *, model, provider) ->
 					model=model,
 					provider=provider,
 				):
-					if ev.get("kind") == "assistant" and ev.get("text"):
-						text = ev["text"]
+					if ev.get("kind") == "assistant":
+						text = accumulate_assistant_text(text, ev)
 					elif ev.get("kind") == "lifecycle" and ev.get("phase") == "error" and ev.get("error"):
 						# See jarvis.chat.title._generate_via_gateway's copy of
 						# this branch: the agent runtime's only place the run names a
