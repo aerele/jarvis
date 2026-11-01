@@ -13,6 +13,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import purchase_match as matching
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.jarvis.doctype.jarvis_approval_request.jarvis_approval_request import JarvisApprovalRequest
 
 
@@ -91,9 +92,163 @@ def output(captured):
 	}
 
 
+AP_E2E_CO, AP_E2E_ABBR = "zz-apm Test Co", "ZAPM"
+AP_E2E_SUPPLIER, AP_E2E_ITEM = "zz-apm Acme Traders", "ZZ-APM-WIDGET"
+AP_E2E_ITEM_GROUP = "zz-apm Products"
+AP_E2E_FISCAL_YEAR = "zz-apm"
+AP_E2E_ADDRESS = f"{AP_E2E_CO}-Billing"
+
+
+def _ap_e2e_insert(doctype, values, root=False):
+	doc = frappe.get_doc({"doctype": doctype, **values})
+	doc.flags.ignore_mandatory = bool(root)
+	doc.insert(ignore_permissions=True)
+	return doc.name
+
+
+def _purge_ap_e2e(roots=()):
+	"""Remove only this test's fake AP records, in transaction dependency order."""
+	frappe.db.rollback()
+	for doctype in ("Purchase Invoice", "Purchase Receipt", "Purchase Order"):
+		for name in frappe.get_all(doctype, filters={"company": AP_E2E_CO}, pluck="name"):
+			doc = frappe.get_doc(doctype, name)
+			if doc.docstatus == 1:
+				doc.cancel()
+			frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+	for doctype, name in (
+		("Address", AP_E2E_ADDRESS),
+		("Item", AP_E2E_ITEM),
+		("Supplier", AP_E2E_SUPPLIER),
+		("Item Group", AP_E2E_ITEM_GROUP),
+	):
+		if frappe.db.exists(doctype, name):
+			frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+	for doctype in ("Account", "Cost Center"):
+		frappe.db.delete(doctype, {"company": AP_E2E_CO})
+	frappe.db.delete("Company", {"name": AP_E2E_CO})
+	frappe.db.delete("Fiscal Year", {"name": ["like", f"{AP_E2E_FISCAL_YEAR} %"]})
+	for doctype, name in roots:
+		frappe.db.delete(doctype, {"name": name})
+	frappe.cache.delete_value("fiscal_years")
+	frappe.db.commit()
+
+
+def _ap_e2e_fixtures():
+	"""Build AP-only fake masters that satisfy the site's HSN validation."""
+	_purge_ap_e2e()
+	roots = []
+	for doctype, name, values in (
+		("UOM", "Nos", {"uom_name": "Nos"}),
+		("Item Group", "All Item Groups", {"item_group_name": "All Item Groups", "is_group": 1}),
+		(
+			"Supplier Group",
+			"All Supplier Groups",
+			{"supplier_group_name": "All Supplier Groups", "is_group": 1},
+		),
+	):
+		if not frappe.db.exists(doctype, name):
+			roots.append((doctype, _ap_e2e_insert(doctype, values)))
+	company = frappe.get_doc(
+		{
+			"doctype": "Company",
+			"company_name": AP_E2E_CO,
+			"abbr": AP_E2E_ABBR,
+			"default_currency": "INR",
+			"country": "India",
+			"gst_category": "Unregistered",
+		}
+	)
+	company.name = AP_E2E_CO
+	company.db_insert()
+	for doctype, values, root in (
+		("Account", {"account_name": "zz-apm Liabilities", "is_group": 1, "root_type": "Liability"}, True),
+		(
+			"Account",
+			{
+				"account_name": "zz-apm Creditors",
+				"parent_account": f"zz-apm Liabilities - {AP_E2E_ABBR}",
+				"account_type": "Payable",
+			},
+			False,
+		),
+		("Account", {"account_name": "zz-apm Expenses", "is_group": 1, "root_type": "Expense"}, True),
+		(
+			"Account",
+			{"account_name": "zz-apm Purchases", "parent_account": f"zz-apm Expenses - {AP_E2E_ABBR}"},
+			False,
+		),
+		("Cost Center", {"cost_center_name": AP_E2E_CO, "is_group": 1}, True),
+		(
+			"Cost Center",
+			{"cost_center_name": "zz-apm Main", "parent_cost_center": f"{AP_E2E_CO} - {AP_E2E_ABBR}"},
+			False,
+		),
+	):
+		_ap_e2e_insert(doctype, {"company": AP_E2E_CO, **values}, root)
+	frappe.db.set_value(
+		"Company",
+		AP_E2E_CO,
+		{
+			"default_payable_account": f"zz-apm Creditors - {AP_E2E_ABBR}",
+			"default_expense_account": f"zz-apm Purchases - {AP_E2E_ABBR}",
+			"cost_center": f"zz-apm Main - {AP_E2E_ABBR}",
+		},
+	)
+	year = frappe.utils.getdate().year
+	frappe.get_doc(
+		{
+			"doctype": "Fiscal Year",
+			"year": f"{AP_E2E_FISCAL_YEAR} {year}",
+			"year_start_date": f"{year}-01-01",
+			"year_end_date": f"{year}-12-31",
+		}
+	).db_insert()
+	_ap_e2e_insert(
+		"Address",
+		{
+			"address_title": AP_E2E_CO,
+			"address_type": "Billing",
+			"address_line1": "1 AP Test Lane",
+			"city": "Test City",
+			"state": "Tamil Nadu",
+			"pincode": "600001",
+			"country": "India",
+			"is_your_company_address": 1,
+			"links": [{"link_doctype": "Company", "link_name": AP_E2E_CO}],
+		},
+	)
+	_ap_e2e_insert(
+		"Item Group", {"item_group_name": AP_E2E_ITEM_GROUP, "parent_item_group": "All Item Groups"}
+	)
+	_ap_e2e_insert("Supplier", {"supplier_name": AP_E2E_SUPPLIER, "supplier_group": "All Supplier Groups"})
+	item = {
+		"item_code": AP_E2E_ITEM,
+		"item_group": AP_E2E_ITEM_GROUP,
+		"stock_uom": "Nos",
+		"is_stock_item": 0,
+	}
+	if frappe.get_meta("Item").has_field("gst_hsn_code"):
+		item["gst_hsn_code"] = "999900"
+	_ap_e2e_insert("Item", item)
+	frappe.cache.delete_value("fiscal_years")
+	frappe.db.commit()
+	return roots
+
+
 class TestPurchaseMatch(FrappeTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
+
+	def test_input_tool_refuses_ordinary_transport_before_any_source_lookup(self):
+		from jarvis.tools.get_purchase_match_inputs import get_purchase_match_inputs
+
+		with (
+			patch("jarvis.tools.get_purchase_match_inputs.is_private", return_value=False),
+			patch.object(frappe.db, "get_value") as get_value,
+			self.assertRaisesRegex(InvalidArgumentError, "private audit transport"),
+		):
+			get_purchase_match_inputs()
+		get_value.assert_not_called()
 
 	def test_configuration_requires_explicit_policy_and_cutoff(self):
 		with (
@@ -631,21 +786,22 @@ class TestNativePurchaseMatch(unittest.TestCase):
 		from erpnext.stock.doctype.purchase_receipt.purchase_receipt import make_purchase_invoice
 
 		from jarvis.chat import approvals_api
-		from jarvis.tests.test_filebox_skills import E2E_CO, E2E_ITEM, E2E_SUPPLIER, _e2e_fixtures, _purge_e2e
+		from jarvis.tools._private_output import prepare, request
 
 		frappe.set_user("Administrator")
 		roots, documents, reviews = [], [], []
 		try:
-			roots.extend(_e2e_fixtures())
+			roots.extend(_ap_e2e_fixtures())
 			today = frappe.utils.today()
 			order = frappe.get_doc(
 				{
 					"doctype": "Purchase Order",
-					"company": E2E_CO,
-					"supplier": E2E_SUPPLIER,
+					"company": AP_E2E_CO,
+					"supplier": AP_E2E_SUPPLIER,
+					"billing_address": AP_E2E_ADDRESS,
 					"transaction_date": today,
 					"schedule_date": today,
-					"items": [{"item_code": E2E_ITEM, "qty": 10, "rate": 100, "schedule_date": today}],
+					"items": [{"item_code": AP_E2E_ITEM, "qty": 10, "rate": 100, "schedule_date": today}],
 				}
 			).insert()
 			documents.append((order.doctype, order.name))
@@ -661,8 +817,8 @@ class TestNativePurchaseMatch(unittest.TestCase):
 			documents.append((invoice.doctype, invoice.name))
 			policy = {
 				**config(),
-				"company": E2E_CO,
-				"fiscal_year": get_fiscal_year(today, company=E2E_CO)[0],
+				"company": AP_E2E_CO,
+				"fiscal_year": get_fiscal_year(today, company=AP_E2E_CO)[0],
 				"from_date": today,
 				"to_date": today,
 				"report_date": today,
@@ -691,10 +847,17 @@ class TestNativePurchaseMatch(unittest.TestCase):
 			documents.append((run.doctype, run.name))
 			from jarvis.tools.get_purchase_match_inputs import get_purchase_match_inputs
 
-			with patch(
-				"jarvis.tools.get_purchase_match_inputs.get_session_key", return_value=run.session_key
+			with (
+				patch("jarvis.tools.get_purchase_match_inputs.get_session_key", return_value=run.session_key),
+				request(True),
 			):
-				captured = get_purchase_match_inputs()
+				private_data = get_purchase_match_inputs()
+			wire, receipt = prepare({"ok": True, "data": private_data}, tool="get_purchase_match_inputs")
+			self.assertEqual(wire["result_mode"], "private_audit_v1")
+			self.assertTrue(wire["private_output"]["private_output"])
+			self.assertNotIn(invoice.bill_no, frappe.as_json(receipt))
+			self.assertEqual(receipt["data"], wire["private_output"])
+			captured = json.loads(wire["data"])["rows"][0]
 			run.reload()
 			self.assertEqual(captured["captured_by"], "Administrator")
 			self.assertTrue(captured["captured_at"])
@@ -704,8 +867,12 @@ class TestNativePurchaseMatch(unittest.TestCase):
 				with tempfile.TemporaryDirectory() as temporary:
 					source = os.path.join(temporary, "input.json")
 					result_path = os.path.join(temporary, "output.json")
-					with open(source, "w", encoding="utf-8") as stream:
-						json.dump(captured, stream)
+					with open(source, "wb") as stream:
+						header = json.dumps(
+							{"result_mode": wire["result_mode"], "private_output": wire["private_output"]},
+							separators=(",", ":"),
+						).encode()
+						stream.write(header + b"\n" + wire["data"].encode())
 					subprocess.run(
 						[sys.executable, assessment_path, "--input", source, "--out", result_path],
 						check=True,
@@ -729,12 +896,15 @@ class TestNativePurchaseMatch(unittest.TestCase):
 			inst = frappe._dict(name="ap-native-test", reviewer="Administrator")
 			reviews.extend(matching.stage_reviews(run, inst, [finding]))
 			self.assertEqual(matching.stage_reviews(run, inst, [finding]), reviews)
+			review = frappe.get_doc("Jarvis Approval Request", reviews[0])
+			self.assertEqual(review.source, "Agent Review")
+			self.assertNotIn(invoice.bill_no, review.context_md)
 			with patch.object(approvals_api, "_resume_conversation") as resume:
 				result = approvals_api.decide(reviews[0], "Review acknowledged; no posting authorised")
 				self.assertFalse(result["resumed"])
 				resume.assert_not_called()
 			self.assertEqual(frappe.db.get_value("Purchase Invoice", invoice.name, "docstatus"), 0)
-			self.assertEqual(frappe.db.count("Purchase Invoice", {"company": E2E_CO}), 1)
+			self.assertEqual(frappe.db.count("Purchase Invoice", {"company": AP_E2E_CO}), 1)
 		finally:
 			frappe.set_user("Administrator")
 			for name in reviews:
@@ -746,4 +916,4 @@ class TestNativePurchaseMatch(unittest.TestCase):
 						document.cancel()
 					frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
 			frappe.db.commit()
-			_purge_e2e(roots)
+			_purge_ap_e2e(roots)
