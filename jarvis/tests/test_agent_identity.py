@@ -849,9 +849,7 @@ class TestAgentIdentity(unittest.TestCase):
 		# verification failure, preserves its exception cause, and never falls back
 		# to a company-wide scope.
 		db_failure = RuntimeError("Warehouse lookup unavailable")
-		inst = frappe._dict(
-			agent=agent_scope.FEFO_AGENT, name="FEFO-INST", config=frappe.as_json(good)
-		)
+		inst = frappe._dict(agent=agent_scope.FEFO_AGENT, name="FEFO-INST", config=frappe.as_json(good))
 		with (
 			mock.patch.object(agent_scope, "_resolve", return_value=dict(base)),
 			mock.patch.object(agent_scope.frappe.db, "get_value", side_effect=db_failure),
