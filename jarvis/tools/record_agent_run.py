@@ -37,6 +37,7 @@ from jarvis.exceptions import InvalidArgumentError
 RUN = "Jarvis Agent Run"
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
+NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
 
 _SEVERITIES = {"blocker", "warning", "note"}
 # Aggregate-dimension ref doctypes verified by EXISTENCE only, not a read-perm
@@ -63,6 +64,21 @@ def _as_dict(value) -> dict:
 		except Exception:
 			return {}
 	return value if isinstance(value, dict) else {}
+
+
+def _bound_negative_stock_scope(stamped: dict, submitted: dict) -> dict | None:
+	"""Return the safe scope only when it matches the launch boundary exactly.
+
+	The delegate can write a local evaluator config, but it cannot select another
+	Warehouse, company, period, or report-date cutoff at writeback. The launch
+	scope is trusted because the server validated it as the run-as user before
+	dispatch. The submitted object is untrusted model output.
+	"""
+	from jarvis.chat.agent_scope import negative_stock_output_scope
+
+	trusted = negative_stock_output_scope(stamped)
+	output = negative_stock_output_scope(submitted)
+	return trusted if trusted is not None and output == trusted else None
 
 
 def _ref_verifiable(ref_doctype: str, ref_name: str) -> tuple[bool, str]:
@@ -250,6 +266,37 @@ def record_agent_run(
 	coverage = _as_dict(coverage)
 	scope = _as_dict(scope)
 	truncated = bool(truncated)
+	scope_dropped = []
+
+	# Negative stock has one server-validated Warehouse boundary. A delegate may
+	# return only the safe five-field projection of that scope. It may not replace
+	# the Warehouse, company, period, or report-date cutoff after launch. On a
+	# mismatch, persist no model findings and produce an explicit non-evaluable
+	# result instead of accepting a widened or unrelated review.
+	if run_row.agent == NEGATIVE_STOCK_AGENT:
+		trusted_scope = _bound_negative_stock_scope(_as_dict(run_doc.get("scope_json")), scope)
+		if trusted_scope is None:
+			from jarvis.chat.agent_scope import negative_stock_output_scope
+
+			stamped_scope = negative_stock_output_scope(_as_dict(run_doc.get("scope_json"))) or {}
+			raw_findings = []
+			coverage = agent_runs._negative_stock_scope_rejection_coverage(token_set)
+			scope = stamped_scope
+			integrity_digest = None
+			rows_consumed = None
+			canvas_ref = None
+			dashboard = None
+			agent_runs.clear_untrusted_negative_stock_artifacts(run_doc, inst)
+			scope_dropped.append(
+				{
+					"ref_doctype": "Warehouse",
+					"ref_name": (stamped_scope.get("record_scope") or {}).get("name") or "?",
+					"reason": "scope did not match server-stamped Warehouse boundary",
+				}
+			)
+		else:
+			# Strip unknown model keys before the downstream Run snapshot merge.
+			scope = trusted_scope
 	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(run_doc.agent)
@@ -279,6 +326,7 @@ def record_agent_run(
 			rows_consumed_val = None
 
 	valid, dropped = _validate_findings(raw_findings, token_set, allowed_refs)
+	dropped.extend(scope_dropped)
 	if review_backend:
 		frappe.db.set_value(
 			RUN,

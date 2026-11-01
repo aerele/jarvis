@@ -25,46 +25,101 @@ import frappe
 from jarvis.exceptions import InvalidArgumentError
 
 INSTALLATION = "Jarvis Agent Installation"
+NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
+_NEGATIVE_STOCK_OUTPUT_SCOPE_KEYS = ("company", "from_date", "to_date", "report_date")
 
 
-def _declared_record_scope(installation, config: dict, company: str) -> dict | None:
-	"""Return the validated, agent-owned narrow scope, never a broad fallback.
+def _agent_slug(installation) -> str:
+	return str(installation.get("agent") or installation.get("agent_slug") or "").strip()
 
-	Most delegates use only the generic company/date scope.  The negative-stock
-	auditor also needs one Warehouse root so it can prove that its configured leaf
-	set is complete.  Keep that declaration in its own explicit config namespace,
-	validate it on the server, and put only the resulting two-field value in the
-	run scope.  A missing, malformed, foreign-company, or unknown Warehouse is
-	not replaced with all Warehouses: the bundle receives no ``record_scope`` and
-	fails its preflight before it can query a broad slice.
+
+def requires_bound_scope(installation) -> bool:
+	"""Return true when a bad record root must refuse a launch.
+
+	The negative-stock evaluator needs one Warehouse root to prove that its
+	configured leaf set is complete. A missing or invalid root must never become
+	a company-wide Warehouse scan.
 	"""
-	agent = str(installation.get("agent") or installation.get("agent_slug") or "").strip()
-	if agent != "negative-stock-valuation-auditor":
-		return None
+	return _agent_slug(installation) == NEGATIVE_STOCK_AGENT
 
-	namespace = config.get("negative_stock")
-	declared = namespace.get("record_scope") if isinstance(namespace, dict) else None
+
+def negative_stock_record_scope(value) -> dict | None:
+	"""Return a canonical Warehouse root, or ``None`` for untrusted input.
+
+	This is only a shape check. Launch resolution also checks existence, company,
+	enabled state, and the active run-as user's read permissions. Warehouse groups
+	are valid roots: the evaluator may use a group to prove its leaf set.
+	"""
 	if (
-		not isinstance(declared, dict)
-		or set(declared) != {"doctype", "name"}
-		or declared.get("doctype") != "Warehouse"
-		or not isinstance(declared.get("name"), str)
-		or not declared["name"].strip()
+		not isinstance(value, dict)
+		or set(value) != {"doctype", "name"}
+		or value.get("doctype") != "Warehouse"
+		or not isinstance(value.get("name"), str)
+		or not value["name"].strip()
+		or value["name"] != value["name"].strip()
 	):
 		return None
+	return {"doctype": "Warehouse", "name": value["name"]}
 
-	name = declared["name"].strip()
+
+def negative_stock_output_scope(value) -> dict | None:
+	"""Return the five safe negative-stock writeback keys, or ``None``.
+
+	The evaluator may return this small projection at writeback. The server
+	compares it with the launch-stamped projection, so no model field can change
+	the Warehouse, company, period, or report-date cutoff during global merge.
+	"""
+	if not isinstance(value, dict):
+		return None
+	boundary = negative_stock_record_scope(value.get("record_scope"))
+	if boundary is None:
+		return None
+	output = {}
+	for key in _NEGATIVE_STOCK_OUTPUT_SCOPE_KEYS:
+		item = value.get(key)
+		if not isinstance(item, str) or not item.strip() or item != item.strip():
+			return None
+		output[key] = item
+	output["record_scope"] = boundary
+	return output
+
+
+def _negative_stock_warehouse_scope(config: dict, company: str) -> dict:
+	"""Validate the configured Warehouse root as the active run-as user.
+
+	Only the canonical two-field value may enter ``Run.scope_json``. A Warehouse
+	group is allowed, but a disabled, foreign, unreadable, or missing root is not.
+	"""
+	namespace = config.get("negative_stock")
+	declared = namespace.get("record_scope") if isinstance(namespace, dict) else None
+	boundary = negative_stock_record_scope(declared)
+	if boundary is None:
+		raise InvalidArgumentError("Negative stock record_scope must name one Warehouse")
+
+	name = boundary["name"]
 	try:
-		warehouse_company = frappe.db.get_value("Warehouse", name, "company")
-		# Scope resolution runs as ``run_as_user``.  A valid owner declaration
-		# must still be readable by that identity before its name can reach the
-		# delegate.  This applies Warehouse User Permissions as well as DocPerms.
+		warehouse = frappe.db.get_value("Warehouse", name, ["company", "disabled"], as_dict=True)
 		warehouse_readable = frappe.has_permission("Warehouse", "read", doc=name)
-	except Exception:
-		return None
-	if not warehouse_readable or warehouse_company != company:
-		return None
-	return {"doctype": "Warehouse", "name": name}
+	except Exception as exc:
+		raise InvalidArgumentError("Negative stock Warehouse scope could not be verified") from exc
+	if not warehouse or not warehouse_readable:
+		raise InvalidArgumentError(
+			"Negative stock record_scope must be a readable enabled Warehouse in the company"
+		)
+	try:
+		company_readable = frappe.has_permission("Company", "read", doc=company)
+	except Exception as exc:
+		raise InvalidArgumentError("Negative stock Company scope could not be verified") from exc
+	if (
+		not company_readable
+		or warehouse.get("company") != company
+		or warehouse.get("disabled") is None
+		or frappe.utils.cint(warehouse.get("disabled"))
+	):
+		raise InvalidArgumentError(
+			"Negative stock record_scope must be a readable enabled Warehouse in the company"
+		)
+	return boundary
 
 
 def resolve_scope(installation) -> dict:
@@ -74,9 +129,9 @@ def resolve_scope(installation) -> dict:
 	Reads ``company`` / ``fiscal_year`` / ``from_date`` / ``to_date`` from the
 	install's ``config`` JSON; falls back to the caller's default Company (or the
 	site's single Company) and erpnext's current fiscal year for the missing
-	pieces. Raises :class:`InvalidArgumentError` when no company / period can be
-	determined — the caller (``_launch_audit``) treats that as a soft failure and
-	degrades to an unscoped run rather than aborting the launch.
+	pieces. The negative-stock auditor also requires a server-validated Warehouse
+	root. A missing, malformed, foreign, disabled, or unreadable root raises
+	instead of broadening the review.
 	"""
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
@@ -95,9 +150,8 @@ def resolve_scope(installation) -> dict:
 		return str(val).strip() if val is not None and str(val).strip() else None
 
 	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
-	record_scope = _declared_record_scope(installation, cfg, scope["company"])
-	if record_scope is not None:
-		scope["record_scope"] = record_scope
+	if requires_bound_scope(installation):
+		scope["record_scope"] = _negative_stock_warehouse_scope(cfg, scope["company"])
 	return scope
 
 
