@@ -131,6 +131,11 @@ class TestLedgerScrutinyScope(TestCase):
 		self.assertIn('scoped_visibility="1"', message)
 		self.assertIn("preserve this value in scope.json", message)
 
+		scope["scoped_visibility"] = False
+		with patch("jarvis.chat.agent_catalog.registry_tools_allow", return_value=[]):
+			message = agent_scheduler._audit_prompt({"agent_slug": AGENT}, MagicMock(), "manual", scope, {})
+		self.assertIn('scoped_visibility="0"', message)
+
 	def test_declared_controls_reach_the_immutable_launch_snapshot(self):
 		listing = {
 			"config_keys": '["materiality", "suspense_accounts", "subledger_owned_accounts", '

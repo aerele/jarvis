@@ -30,6 +30,7 @@ INSTALLATION = "Jarvis Agent Installation"
 LISTING = "Jarvis Agent Listing"
 DASHBOARD = "Jarvis Dashboard"
 SESSION = "Jarvis Chat Session"
+ATTENDANCE_AGENT = "attendance-leave-integrity-auditor"
 
 
 # --------------------------------------------------------------------------- #
@@ -1075,7 +1076,21 @@ def record_delegate_run(
 				base = {}
 		except Exception:
 			base = {}
-		base.update(scope)
+		if agent == ATTENDANCE_AGENT:
+			# Defence in depth for direct internal callers: Attendance output may
+			# carry only the canonical five-field projection and its Department
+			# boundary must equal the one the server stamped at launch. Never merge
+			# raw model scope/config into this Run snapshot.
+			from jarvis.chat.agent_scope import attendance_output_scope
+
+			trusted_scope = attendance_output_scope(base)
+			submitted_scope = attendance_output_scope(scope)
+			if trusted_scope is not None:
+				if submitted_scope == trusted_scope:
+					base.update(submitted_scope)
+				base["record_scope"] = trusted_scope["record_scope"]
+		else:
+			base.update(scope)
 		run_values["scope_json"] = frappe.as_json(base)[:60000]
 	if integrity_digest:
 		run_values["integrity_digest"] = str(integrity_digest)[:64]

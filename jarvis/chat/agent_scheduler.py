@@ -1387,8 +1387,9 @@ def _launch_audit(
 		_mint_run_session(session_key, run_as_user)
 		frappe.db.set_value(RUN, run.name, "session_key", session_key, update_modified=False)
 
-		# A6 explicit scope + A17 consistency watermark + A12 permission profile —
-		# all best-effort (never abort the launch) and computed AS the run-as user.
+		# A6 explicit scope + A17 consistency watermark + A12 permission profile.
+		# Most scopes are best-effort; binding Attendance and Ledger scopes can
+		# refuse the launch. All values are computed AS the run-as user.
 		scope = _stamp_scope_and_watermark(run.name, inst, run_as_user, source_apps=source_apps)
 
 	except Exception:
@@ -1602,8 +1603,11 @@ def _stamp_scope_and_watermark(
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
 
-	All best-effort: a bench without a resolvable Company (e.g. no erpnext setup)
-	must NOT abort the launch — it degrades to an unscoped run (no watermark). The
+	Most scope resolution is best-effort: a bench without a resolvable Company
+	(e.g. no erpnext setup) degrades to an unscoped run (no watermark). Attendance
+	and Ledger Scrutiny are different: their declared server boundaries are binding.
+	If the server cannot validate one as the run-as user, the launch must refuse
+	before dispatch instead of silently widening or producing an unusable run. The
 	watermark + scope are resolved AS the run-as user (this runs under that
 	session). Returns the resolved scope dict (or None).
 
@@ -1613,9 +1617,13 @@ def _stamp_scope_and_watermark(
 	admin-authorized app list or reads nothing."""
 	from jarvis.chat import agent_scope, operator_review
 	from jarvis.chat.ledger_scrutiny_scope import (
-		requires_bound_scope,
-		scoped_visibility,
-		validate_bound_scope,
+		requires_bound_scope as ledger_requires_bound_scope,
+	)
+	from jarvis.chat.ledger_scrutiny_scope import (
+		scoped_visibility as ledger_scoped_visibility,
+	)
+	from jarvis.chat.ledger_scrutiny_scope import (
+		validate_bound_scope as validate_ledger_bound_scope,
 	)
 
 	review_backend = operator_review.backend(inst.agent)
@@ -1632,15 +1640,23 @@ def _stamp_scope_and_watermark(
 
 	values: dict = {}
 	scope = None
+	attendance_required = agent_scope.requires_bound_scope(inst)
+	ledger_required = ledger_requires_bound_scope(inst.agent)
 	try:
 		scope = agent_scope.resolve_scope(inst)
-		if requires_bound_scope(inst.agent):
-			validate_bound_scope(scope)
+		if ledger_required:
+			validate_ledger_bound_scope(scope)
 			# This is a launch-time server fact, not a delegate-written config flag.
 			# The evaluator uses it to label a record-sliced run partial.
-			scope["scoped_visibility"] = scoped_visibility(run_as_user)
+			scope["scoped_visibility"] = ledger_scoped_visibility(run_as_user)
 	except Exception:
-		if requires_bound_scope(inst.agent):
+		if attendance_required:
+			frappe.log_error(
+				title="jarvis agent: Attendance scope resolution refused launch",
+				message=frappe.get_traceback(),
+			)
+			raise
+		if ledger_required:
 			frappe.log_error(
 				title="jarvis agent: required Ledger Scrutiny scope resolution failed",
 				message=frappe.get_traceback(),
@@ -1769,6 +1785,16 @@ def _audit_prompt(
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
 		)
+	if scope:
+		# A narrow auditor may carry one server-validated root in addition to
+		# its normal company/date scope. It is not copied from installation
+		# configuration: only the exact, already-validated two-field scope stamp
+		# reaches the delegate.
+		from jarvis.chat.agent_scope import attendance_record_scope
+
+		record_scope = attendance_record_scope(scope.get("record_scope"))
+		if record_scope is not None:
+			scope_block += f" record_scope={json.dumps(record_scope, sort_keys=True)}."
 		if "scoped_visibility" in scope:
 			scope_block += (
 				" The server-owned permission scope for this run is "
