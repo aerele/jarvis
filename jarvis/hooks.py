@@ -1088,6 +1088,12 @@ has_permission.update(
 # wiped them: the cache never held, and an error logged on every tick instead of once an hour. The cache is invalidated by rotating ``gen``
 # (``after_migrate`` and ``doc_events`` after commit), never by deleting keys (``delete_keys``
 # is a ``KEYS`` scan); answers expire by TTL (2 h at most, 10 min for an error).
+#
+# jarvis:pump:steps:, jarvis:pump:step_lines:, jarvis:pump:preambles: (2026-11-01, #2367): a
+# running turn's recorded step text (``pump._append_run_step`` and its siblings). A pump hop
+# re-seeds the next lane from it, and settlement strips the saved reply and saves the step
+# list from it. Without it the watchdog tick wiped a long turn's steps mid-turn, so the saved
+# reply kept the narration and showed no steps. Every key keeps its one-hour TTL.
 persistent_cache_keys = [
 	"jarvis:pcal:",  # Financial snapshots retain bounded TTLs across watchdog cache clears.
 	"jarvis:query:",  # Saved result IDs retain their own 24-hour TTL across cache clears.
@@ -1101,6 +1107,9 @@ persistent_cache_keys = [
 	"jarvis:mcp_oauth_signin_error:",
 	"jarvis:memory_seen:",
 	"jarvis:holiday:",
+	"jarvis:pump:steps:",
+	"jarvis:pump:step_lines:",
+	"jarvis:pump:preambles:",
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.

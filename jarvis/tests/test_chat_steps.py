@@ -451,3 +451,55 @@ class TestRecoveredReplyStrip(FrappeTestCase):
 	def test_no_cache_leaves_the_text_alone(self):
 		text = "Checking the ledger.\n\nThe balance is 87,000 INR."
 		self.assertEqual(self.pump._strip_cached_steps(self.run_id, text), text)
+
+
+class TestRunStepCacheSurvivesTheWatchdogClear(FrappeTestCase):
+	"""#2367: pump.watchdog ends every five-minute tick with frappe.db.set_default, which runs
+	a full frappe.clear_cache(). That deleted a long turn's recorded steps mid-turn, so the next
+	hop re-seeded nothing and settlement neither stripped the narration nor saved the steps."""
+
+	_RUN = "steps_cache_probe_2367"
+	_PROBE = "jarvis:test_non_persistent_probe_2367"
+
+	def tearDown(self):
+		from jarvis.chat import pump
+
+		for key in (
+			pump._run_steps_key(self._RUN),
+			pump._run_step_lines_key(self._RUN),
+			pump._run_preambles_key(self._RUN),
+			self._PROBE,
+		):
+			frappe.cache.delete_value(key)
+		super().tearDown()
+
+	def test_hook_prefixes_cover_every_step_cache_key(self):
+		# Read from the module: the bench may serve another checkout's hooks.
+		from jarvis import hooks
+		from jarvis.chat import pump
+
+		for key in (
+			pump._run_steps_key(self._RUN),
+			pump._run_step_lines_key(self._RUN),
+			pump._run_preambles_key(self._RUN),
+		):
+			self.assertTrue(any(key.startswith(p) for p in hooks.persistent_cache_keys), key)
+
+	def test_the_steps_survive_the_watchdog_tick(self):
+		from jarvis.chat import pump
+
+		step = "Checking the supplier and the item."
+		pump._append_run_step(self._RUN, step)
+		pump._append_run_step_line(self._RUN, step)
+		pump._append_run_preamble(self._RUN, step)
+		frappe.cache.set_value(self._PROBE, "x")
+
+		frappe.db.set_default(pump.WATCHDOG_LAST_COMPLETED_KEY, frappe.utils.now())
+
+		self.assertIsNone(
+			frappe.cache.get_value(self._PROBE),
+			"an ordinary key must still be cleared - proves the hook, not a no-op clear",
+		)
+		self.assertEqual(pump._read_run_steps(self._RUN), [step])
+		self.assertEqual([line["text"] for line in pump._read_run_step_lines(self._RUN)], [step])
+		self.assertEqual(pump._read_run_preambles(self._RUN), [step])

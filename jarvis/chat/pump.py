@@ -3934,6 +3934,28 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 			steps=_read_run_steps(run_id),
 			preamble_steps=_read_run_preambles(run_id),
 		)
+		_observe_tool_events(ctx, lane_key)
+
+
+# The plugin method that adds this connection as a tool-event recipient of a run
+# (jarvis-openclaw-plugin src/run-observer.ts). openclaw sends a run's tool starts only
+# to the connection that sent it, so without this a re-attached lane never sees one
+# and records no step after the hop (#2367).
+OBSERVE_RUN_METHOD = "jarvis.observe_run"
+
+
+def _observe_tool_events(ctx: PumpContext, lane_key: str) -> None:
+	"""Ask the gateway for this run's tool events on the hop's own connection. Not
+	awaited: the answer only matters to the gateway, and an older plugin without the
+	method answers with an error the lane can ignore (it then behaves as before)."""
+	if ctx.mux is None:
+		return
+	try:
+		ctx.mux.issue_rpc(OBSERVE_RUN_METHOD, {"runId": lane_key}, timeout_s=ACK_TIMEOUT_S)
+	except Exception as e:
+		# A refused or failed write: the transport handles its own poisoning, and the
+		# lane still streams without tool events.
+		_telemetry("observe_run_failed", run_id=lane_key, error=type(e).__name__)
 
 
 def _write_message_recovering(assistant_message: str | None) -> None:

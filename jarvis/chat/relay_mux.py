@@ -354,6 +354,10 @@ class _Lane:
 		# text can still carry it (aerele/jarvis#2367); the terminal cuts these where
 		# they stand as whole paragraphs (steps.strip_loose_preambles).
 		self.loose_preambles: list[str] = []
+		# Set on a hop re-attach that re-seeded ``steps``: the first reply frame then
+		# moves ``since_tool`` past the last recorded step, so the next tool call finds
+		# only the text written after it (the old lane's offset is not carried over).
+		self.resume_mark = False
 		self.shown_text = ""
 		# R6 saved-reply glue: the tail of each earlier segment (relay_mux
 		# module docstring / _reply_delta), reader-thread only like the steps
@@ -425,6 +429,14 @@ class _Lane:
 # --------------------------------------------------------------------------- #
 # The multiplexer
 # --------------------------------------------------------------------------- #
+
+
+def _end_of_last_step(text: str, steps: list[str]) -> int:
+	"""Where the reply text after the latest recorded step starts (0 when none is in
+	``text``). A re-attached lane uses it as its ``since_tool``: steps are recorded at
+	tool calls, so the text past the last one is what the next tool call may move."""
+	ends = [text.rfind(step) + len(step) for step in steps if step and step in text]
+	return max(ends, default=0)
 
 
 class RelayMux:
@@ -793,6 +805,9 @@ class RelayMux:
 					lane.segment_tails.append(tail)
 			lane.since_tool = 0
 		lane.stream_text = text
+		if lane.resume_mark:
+			lane.resume_mark = False
+			lane.since_tool = _end_of_last_step(text, lane.steps)
 		return self._shown_delta(lane, remove_steps(text, lane.steps), parsed.get("delta", ""))
 
 	def _move_pending_step(self, lane: _Lane) -> None:
@@ -1285,6 +1300,7 @@ class RelayMux:
 		lane = _Lane(run_id, handler, session_key=session_key, start_seq=start_seq)
 		lane.steps = list(steps or [])
 		lane.preamble_steps = {step for step in preamble_steps or [] if step in lane.steps}
+		lane.resume_mark = is_readopt and bool(lane.steps)
 		with self._map_lock:
 			self._runs[run_id] = lane
 		return lane

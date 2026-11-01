@@ -1344,12 +1344,27 @@ class TestRelayMuxSteps(FrappeTestCase):
 	stop, error or recovery saves what streamed exactly as before; only what the
 	chat displays (``shown``) and the saved final drop the step text."""
 
-	def _run(self, frames, final_text, steps=None, register=True, mux=None, rec=None, preamble_steps=None):
+	def _run(
+		self,
+		frames,
+		final_text,
+		steps=None,
+		register=True,
+		mux=None,
+		rec=None,
+		preamble_steps=None,
+		is_readopt=False,
+	):
 		mux = mux or RelayMux(MagicMock(), "steps-target")
 		rec = rec or _Recorder()
 		if register:
 			mux.register_run(
-				"r1", rec.handler(), session_key="s1", steps=steps, preamble_steps=preamble_steps
+				"r1",
+				rec.handler(),
+				session_key="s1",
+				steps=steps,
+				preamble_steps=preamble_steps,
+				is_readopt=is_readopt,
 			)
 		for stream, data in frames:
 			mux._classify(_agent_frame("r1", "s1", stream, data))
@@ -1683,6 +1698,54 @@ class TestRelayMuxSteps(FrappeTestCase):
 			answer,
 		)
 		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_re_attached_lane_records_the_narration_written_after_the_hop(self):
+		# #2367: a pump hop re-attaches mid-turn with the steps recorded before it. Once the
+		# plugin's jarvis.observe_run gives the new connection the run's tool starts, the
+		# narration written after the hop is a step too, and the saved reply drops it.
+		before = "I'll check the drafting rules and the supplier."
+		after = "Supplier and item both exist. Checking the warehouses."
+		answer = (
+			"Drafted ACC-PINV-2026-00031 for MA Inc.: 10 x SKU005 at 1,200.00, with 450.00 "
+			"freight and 300.00 customs duty as charges. Review it before you submit."
+		)
+		so_far = f"{before}\n\n{after}"
+		rec = self._run(
+			[
+				("assistant", {"text": so_far, "delta": so_far}),
+				("tool", {"phase": "start", "name": "jarvis__get_list", "toolCallId": "t1"}),
+				("assistant", {"text": f"{so_far}\n\n{answer}", "delta": f"\n\n{answer}"}),
+			],
+			f"{so_far}\n\n{answer}",
+			steps=[before],
+			is_readopt=True,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [after])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_re_attached_lane_starts_after_its_last_recorded_step(self):
+		# Prose that was too long to be a step sits before the last recorded step. A
+		# re-attached lane starts its tool stretch after that step, so the long prose is
+		# not glued onto the next narration (which would then fail is_step and stay).
+		prose = (
+			"The supplier record has two addresses. The billing one is in Chennai. The "
+			"shipping one is in Pune. I will use the billing one, as the order does."
+		)
+		before = "Checking the item."
+		after = "Item found. Checking the warehouses."
+		answer = "Drafted ACC-PINV-2026-00032. Review it before you submit, since freight is estimated."
+		so_far = f"{prose}\n\n{before}\n\n{after}"
+		frames = [
+			("assistant", {"text": so_far, "delta": so_far}),
+			("tool", {"phase": "start", "name": "jarvis__get_list", "toolCallId": "t1"}),
+			("assistant", {"text": f"{so_far}\n\n{answer}", "delta": f"\n\n{answer}"}),
+		]
+		rec = self._run(frames, f"{so_far}\n\n{answer}", steps=[before], is_readopt=True)
+		self.assertEqual([s[1] for s in rec.steps], [after])
+		self.assertEqual(rec.terminal[1]["text"], f"{prose}\n\n{answer}")
+		# Control: a fresh (not re-attached) lane keeps today's whole-text stretch.
+		rec = self._run(frames, f"{so_far}\n\n{answer}", steps=[before])
+		self.assertEqual(rec.steps, [])
 
 	def test_preamble_not_in_the_reply_keeps_todays_path(self):
 		# The Codex-harness shape: the preamble text never rides the reply, so
