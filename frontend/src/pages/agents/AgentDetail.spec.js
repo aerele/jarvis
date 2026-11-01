@@ -1403,6 +1403,39 @@ describe("SLA-breach configuration readiness", () => {
 		});
 	});
 
+	it("restores a failed legacy schedule disable so the user can retry", async () => {
+		routeMock.hash = "#configure";
+		api.setAgentSchedule
+			.mockRejectedValueOnce(new Error("Schedule update failed"))
+			.mockResolvedValueOnce({
+				ok: true,
+				data: { name: "INST-1", next_run_at: null },
+			});
+		const wrapper = await mountDetail(
+			slaAgent(
+				{ sla_team: "Select one readable HD Team record." },
+				{
+					schedule_enabled: 1,
+					schedule_frequency: "daily",
+					schedule_time: "09:00:00",
+				}
+			)
+		);
+		const turnOff = () => wrapper.find('[data-label="Turn off automatic schedule"]');
+
+		await turnOff().trigger("click");
+		await flushPromises();
+
+		expect(api.setAgentSchedule).toHaveBeenCalledTimes(1);
+		expect(turnOff().exists()).toBe(true);
+		expect(wrapper.text()).toContain("Complete the Helpdesk team configuration");
+
+		await turnOff().trigger("click");
+		await flushPromises();
+
+		expect(api.setAgentSchedule).toHaveBeenCalledTimes(2);
+	});
+
 	it("offers automatic scheduling after a valid saved Helpdesk team", async () => {
 		routeMock.hash = "#configure";
 		const wrapper = await mountDetail(slaAgent({}));
