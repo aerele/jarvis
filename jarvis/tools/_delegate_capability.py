@@ -520,6 +520,36 @@ _CHAT_NO_SURFACE = (
 # failing here rather than letting the 3h stale-run sweep call it a timeout.
 _RUN_ERROR_NO_SURFACE = "the agent's capability contract authorises no tools; refused at the first call"
 
+<<<<<<< HEAD
+=======
+# Tools that must NEVER slip through the ``legacy`` short-circuit below, MCP
+# connectors: call_connector reaches a connector credential under the
+# delegate's identity, and a Personal-scope row can be the run-as user's OWN
+# PAT, so handing it to a marketplace agent is a privilege escalation, not an
+# ordinary tool call. Every OTHER tool is already default-denied for a
+# non-legacy run by the ordinary snapshot check below; the one gap is a
+# ``legacy`` run, whose whole definition is "no snapshot was ever captured" -
+# there is no contract that could have named this tool, so it can never be
+# authorised, not "authorised because nothing said otherwise". Checked BEFORE
+# the ``cap.get("legacy")`` return, which otherwise skips enforcement (and
+# every other tool's own gate) entirely for such a run.
+_ALWAYS_GATED = frozenset({"call_connector"})
+_CHAT_CONNECTOR_NOT_DECLARED = (
+	"This agent tried to use a connector, which isn't allowed for this kind of run, so the step was skipped."
+)
+
+# Stock Variance moved its complete evaluator into the bench. A delegate may use
+# only that server-owned tool: raw source reads and model-authored output are no
+# longer a valid boundary. This lives in the dispatcher capability gate, not in
+# the tools, because the trusted server runner invokes query directly after it
+# has resolved the run.
+_STOCK_VARIANCE_AGENT = "stock-variance-auditor"
+_STOCK_VARIANCE_SERVER_TOOL = "run_stock_variance_evaluation"
+_CHAT_STOCK_VARIANCE_SERVER_ONLY = (
+	"This Stock Variance review must run through its protected server evaluator, so this step was skipped."
+)
+
+>>>>>>> e7d9719 (fix(stock-variance): evaluate submitted counts on server)
 
 #: Distinguishes "caller passed no contract" from "caller resolved and got None"
 #: (a non-delegate). Without it, a caller that correctly resolved None would make
@@ -563,7 +593,92 @@ def tool_denial(session_key: str | None, tool: str, cap=_UNRESOLVED) -> dict | N
 	closed_denial = delegate_tool_denial(cap, tool)
 	if closed_denial:
 		return closed_denial
+<<<<<<< HEAD
 	# Missing legacy flags remain in the enforced path.
+=======
+	name = normalize_tool(tool)
+
+	# A legacy Stock Variance run has no trustworthy server-evaluator contract.
+	# Its bearer must not retain the old broad legacy fallback: a leaked bearer
+	# could otherwise use a different read tool to stream source rows through the
+	# delegate, even though the old query/writeback path is denied below. Refuse
+	# every bench tool and terminalize the obsolete run at its first call.
+	if cap.get("agent") == _STOCK_VARIANCE_AGENT and cap.get("legacy"):
+		return {
+			"run": cap.get("run"),
+			"agent": cap.get("agent"),
+			"tool": name,
+			"fatal": True,
+			"message": (
+				"This Stock Variance run predates the protected server evaluator and cannot "
+				"complete safely. All delegate tools are refused and the run has been marked failed."
+			),
+			"chat_message": _CHAT_STOCK_VARIANCE_SERVER_ONLY,
+			"run_error": (
+				"Stock Variance run uses an obsolete direct evaluator contract; server-owned evaluation is required"
+			),
+		}
+
+	# A current Stock Variance snapshot is usable only when it carries the sole
+	# server-owned evaluator. An older snapshot may name a former direct tool, or
+	# another arbitrary bench tool: neither can safely collect source data or
+	# write model-authored findings. Fail such a run on its first attempted call,
+	# including an attempted call to the missing replacement tool, so it cannot
+	# remain running until the stale-run reaper. A valid current snapshot can make
+	# progress through the server evaluator, so deny any other tool without
+	# terminalizing it.
+	if cap.get("agent") == _STOCK_VARIANCE_AGENT:
+		allowed = bench_tools(cap.get("tools_allow") or [])
+		recoverable = _STOCK_VARIANCE_SERVER_TOOL in allowed
+		if recoverable and name == _STOCK_VARIANCE_SERVER_TOOL:
+			return None
+		return {
+			"run": cap.get("run"),
+			"agent": cap.get("agent"),
+			"tool": name,
+			"fatal": not recoverable,
+			"message": (
+				"Stock Variance source collection and writeback are server-owned. "
+				f"Call '{_STOCK_VARIANCE_SERVER_TOOL}' instead; '{name}' is refused."
+				if recoverable
+				else (
+					"This Stock Variance run predates the protected server evaluator and cannot "
+					"complete safely. Its tool calls are refused; the run has been marked failed."
+				)
+			),
+			"chat_message": _CHAT_STOCK_VARIANCE_SERVER_ONLY,
+			"run_error": (
+				"Stock Variance run uses an obsolete direct evaluator contract; server-owned evaluation is required"
+				if not recoverable
+				else ""
+			),
+		}
+
+	# _ALWAYS_GATED tools are refused for a legacy run OUTRIGHT, before the
+	# ordinary ``legacy`` bypass below: ``resolve`` hardcodes ``tools_allow: []``
+	# for a legacy cap (see above), so there is no declared surface a legacy run
+	# could ever have named this tool in. Not the ``fatal``/no-surface branch:
+	# a legacy run's OTHER tools still run exactly as before, only this one is
+	# refused.
+	if name in _ALWAYS_GATED and cap.get("legacy"):
+		return {
+			"run": cap.get("run"),
+			"agent": cap.get("agent"),
+			"tool": name,
+			"fatal": False,
+			"message": (
+				f"agent '{cap.get('agent')}' is not permitted to call '{name}': legacy "
+				"delegate runs (no capability snapshot) can never authorise a connector "
+				"call, which requires an explicit, snapshotted contract naming it. "
+				"Retrying will not help, continue with the tools you do have."
+			),
+			"chat_message": _CHAT_CONNECTOR_NOT_DECLARED,
+			"run_error": "",
+		}
+
+	# ``.get`` so a cap missing the key is treated as NOT legacy, i.e. enforced -
+	# the fail-closed direction.
+>>>>>>> e7d9719 (fix(stock-variance): evaluate submitted counts on server)
 	if cap.get("legacy"):
 		return None
 	allowed = bench_tools(cap["tools_allow"])

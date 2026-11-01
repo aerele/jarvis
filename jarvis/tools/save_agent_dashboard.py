@@ -132,6 +132,13 @@ def save_agent_dashboard(
 			"idempotent": True,
 			"note": "run already finalized; existing dashboard returned",
 		}
+	if run_row.agent == "stock-variance-auditor":
+		from jarvis.chat.stock_variance_evaluation import is_server_writeback
+
+		if not is_server_writeback():
+			raise InvalidArgumentError(
+				"Stock Variance results are server-owned; call run_stock_variance_evaluation."
+			)
 	if not run_row.installation:
 		raise InvalidArgumentError("run has no installation")
 	inst = frappe.get_doc(INSTALLATION, run_row.installation)
