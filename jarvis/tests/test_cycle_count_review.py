@@ -2511,6 +2511,102 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		self.assertIn(approved.name, [row["request"] for row in listed["rows"]])
 		self.assertGreaterEqual(listed["next_start"], 2)
 
+	def test_count_plan_list_limits_candidate_queries_to_one_page(self):
+		"""A damaged page advances without reading hundreds of later plans."""
+		from jarvis.chat import cycle_count_entry
+
+		candidates = [f"malformed-{index}" for index in range(501)]
+		candidate_queries = []
+		inspected = []
+
+		def plan_sql(query, params=None, as_dict=False):
+			if "SELECT COUNT(*)" in query:
+				return [(len(candidates),)]
+			self.assertIn("SELECT ar.name", query)
+			candidate_queries.append((params["start"], params["limit"]))
+			return [
+				frappe._dict(name=name)
+				for name in candidates[params["start"] : params["start"] + params["limit"]]
+			]
+
+		def malformed_context(name):
+			inspected.append(name)
+			raise frappe.ValidationError("malformed approved count plan")
+
+		with (
+			patch.object(cycle_count_entry, "_visible_plan_where", return_value=("1 = 1", {})),
+			patch.object(cycle_count_entry.frappe.db, "sql", side_effect=plan_sql),
+			patch.object(cycle_count_entry, "_approval_context", side_effect=malformed_context),
+		):
+			listed = cycle_count_entry.list_count_plans(start=0, page_length=2)
+
+		self.assertEqual(candidate_queries, [(0, 2)])
+		self.assertEqual(inspected, candidates[:2])
+		self.assertEqual(listed["rows"], [])
+		self.assertEqual(listed["next_start"], 2)
+		self.assertEqual(listed["has_more"], 1)
+		self.assertEqual(listed["total"], len(candidates))
+
+	def test_count_plan_list_keeps_valid_rows_from_a_damaged_page(self):
+		"""One damaged approval does not hide a valid plan in the same page."""
+		from jarvis.chat import cycle_count_entry
+
+		candidates = ["malformed", "valid", "later"]
+		candidate_queries = []
+		inspected = []
+
+		def plan_sql(query, params=None, as_dict=False):
+			if "SELECT COUNT(*)" in query:
+				return [(len(candidates),)]
+			self.assertIn("SELECT ar.name", query)
+			candidate_queries.append((params["start"], params["limit"]))
+			return [
+				frappe._dict(name=name)
+				for name in candidates[params["start"] : params["start"] + params["limit"]]
+			]
+
+		def context(name):
+			inspected.append(name)
+			if name == "malformed":
+				raise frappe.ValidationError("malformed approved count plan")
+			return (
+				frappe._dict(name=name, title="North count", ref_name="Example - North", decided_at=None),
+				{"scope": {"company": "Example Ltd"}},
+			)
+
+		with (
+			patch.object(cycle_count_entry, "_visible_plan_where", return_value=("1 = 1", {})),
+			patch.object(cycle_count_entry.frappe.db, "sql", side_effect=plan_sql),
+			patch.object(cycle_count_entry, "_approval_context", side_effect=context),
+			patch.object(cycle_count_entry, "_may_view", return_value=True),
+			patch.object(cycle_count_entry, "_expected_lines", return_value={"ITEM-1": {}}),
+			patch.object(cycle_count_entry, "_active_counted_items", return_value={"ITEM-1": "COUNT-1"}),
+			patch.object(cycle_count_entry, "_can_record", return_value=True),
+			patch.object(cycle_count_entry.frappe, "has_permission", return_value=True),
+		):
+			listed = cycle_count_entry.list_count_plans(start=0, page_length=2)
+
+		self.assertEqual(candidate_queries, [(0, 2)])
+		self.assertEqual(inspected, candidates[:2])
+		self.assertEqual(
+			listed["rows"],
+			[
+				{
+					"request": "valid",
+					"title": "North count",
+					"company": "Example Ltd",
+					"warehouse": "Example - North",
+					"line_count": 1,
+					"recorded_line_count": 1,
+					"remaining_line_count": 0,
+					"decided_at": "",
+					"can_record": 1,
+				}
+			],
+		)
+		self.assertEqual(listed["next_start"], 2)
+		self.assertEqual(listed["has_more"], 1)
+
 	def test_physical_count_visibility_follows_the_approved_plan(self):
 		"""Owner, reviewer, or exact Approval DocShare reader can use one plan."""
 		from jarvis.chat import cycle_count_entry
