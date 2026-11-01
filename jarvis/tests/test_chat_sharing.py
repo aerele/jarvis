@@ -314,6 +314,7 @@ class TestShareReads(SharingCase):
 				tool_name="submit_doc",
 				tool_status="pending",
 				tool_call_id="PRIVATE-PENDING-ID",
+				tool_call_ids=json.dumps(["PRIVATE-PENDING-ID"]),
 				pending_card='{"token":"PRIVATE-PENDING-SENTINEL"}',
 			)
 			tool = make_message(
@@ -386,6 +387,7 @@ class TestShareReads(SharingCase):
 							"provider",
 							"created_at",
 							"recent",
+							"pending_card_safe",
 							"activity_state",
 						}
 					)
@@ -452,9 +454,11 @@ class TestShareReads(SharingCase):
 		refreshed = self.read(limit=1, refresh=json.dumps([pending]))
 		for key in ("older_pending", "refreshed"):
 			row = next(r for r in refreshed[key] if r["name"] == pending)
-			self.assertEqual(set(row), PENDING_KEYS)
-			self.assertTrue(row["awaiting_owner"])
+			self.assertEqual(set(row), ROW_KEYS)
+			self.assertEqual(row["action_outcome"], "cancelled")
+			self.assertIsNone(row["tool_call_id"])
 		self.assertNotIn("PENDING-SECRET", payload(refreshed))
+		self.assertNotIn("PENDING-SENTINEL", payload(refreshed))
 
 	def test_projection_exact_allowlists_and_nested_secret_scrubbing(self):
 		from jarvis.chat.share_projection import project_conversation

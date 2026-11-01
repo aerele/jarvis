@@ -196,9 +196,9 @@
     ],
     "older_pending": [
       {
-        "action_outcome": "",
+        "action_outcome": "cancelled",
         "canvas": null,
-        "content": null,
+        "content": "submit_doc → cancelled",
         "created_at": 1609502400,
         "creation": "2021-01-01 12:00:00",
         "error": null,
@@ -206,12 +206,9 @@
         "model": null,
         "modified": "2021-01-01 12:00:00",
         "name": "CHAR-MESSAGE-03",
-        "pending_card": {
-          "title": "Owner confirmation",
-          "token": "owner-only-token"
-        },
+        "pending_card": null,
+        "pending_card_safe": false,
         "provider": null,
-        "recent": false,
         "recovering": 0,
         "ref_doctype": null,
         "ref_name": null,
@@ -221,12 +218,19 @@
         "steps": null,
         "stopped": 0,
         "streaming": 0,
-        "tool_args": null,
+        "tool_args": {},
         "tool_call_id": "characterization-pending",
         "tool_call_ids": null,
         "tool_name": "submit_doc",
-        "tool_result": null,
-        "tool_status": "pending"
+        "tool_result": {
+          "error": {
+            "message": "This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
+            "type": "InvalidConfirmation"
+          },
+          "ok": false,
+          "reason_code": "safety_update"
+        },
+        "tool_status": ""
       }
     ],
     "paging": {
@@ -477,9 +481,9 @@
     ],
     "older_pending": [
       {
-        "action_outcome": "",
+        "action_outcome": "cancelled",
         "canvas": null,
-        "content": null,
+        "content": "submit_doc → cancelled",
         "created_at": 1609502400,
         "creation": "2021-01-01 12:00:00",
         "error": null,
@@ -487,12 +491,9 @@
         "model": null,
         "modified": "2021-01-01 12:00:00",
         "name": "CHAR-MESSAGE-03",
-        "pending_card": {
-          "title": "Owner confirmation",
-          "token": "owner-only-token"
-        },
+        "pending_card": null,
+        "pending_card_safe": false,
         "provider": null,
-        "recent": false,
         "recovering": 0,
         "ref_doctype": null,
         "ref_name": null,
@@ -502,12 +503,19 @@
         "steps": null,
         "stopped": 0,
         "streaming": 0,
-        "tool_args": null,
+        "tool_args": {},
         "tool_call_id": "characterization-pending",
         "tool_call_ids": null,
         "tool_name": "submit_doc",
-        "tool_result": null,
-        "tool_status": "pending"
+        "tool_result": {
+          "error": {
+            "message": "This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
+            "type": "InvalidConfirmation"
+          },
+          "ok": false,
+          "reason_code": "safety_update"
+        },
+        "tool_status": ""
       }
     ],
     "paging": {
@@ -649,9 +657,9 @@
     ],
     "older_pending": [
       {
-        "action_outcome": "",
+        "action_outcome": "cancelled",
         "canvas": null,
-        "content": null,
+        "content": "submit_doc → cancelled",
         "created_at": 1609502400,
         "creation": "2021-01-01 12:00:00",
         "error": null,
@@ -659,12 +667,9 @@
         "model": null,
         "modified": "2021-01-01 12:00:00",
         "name": "CHAR-MESSAGE-03",
-        "pending_card": {
-          "title": "Owner confirmation",
-          "token": "owner-only-token"
-        },
+        "pending_card": null,
+        "pending_card_safe": false,
         "provider": null,
-        "recent": false,
         "recovering": 0,
         "ref_doctype": null,
         "ref_name": null,
@@ -674,12 +679,19 @@
         "steps": null,
         "stopped": 0,
         "streaming": 0,
-        "tool_args": null,
+        "tool_args": {},
         "tool_call_id": "characterization-pending",
         "tool_call_ids": null,
         "tool_name": "submit_doc",
-        "tool_result": null,
-        "tool_status": "pending"
+        "tool_result": {
+          "error": {
+            "message": "This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
+            "type": "InvalidConfirmation"
+          },
+          "ok": false,
+          "reason_code": "safety_update"
+        },
+        "tool_status": ""
       }
     ],
     "paging": {
@@ -709,9 +721,9 @@
     ],
     "refreshed": [
       {
-        "action_outcome": "",
+        "action_outcome": "cancelled",
         "canvas": null,
-        "content": null,
+        "content": "submit_doc → cancelled",
         "created_at": 1609502400,
         "creation": "2021-01-01 12:00:00",
         "error": null,
@@ -719,12 +731,9 @@
         "model": null,
         "modified": "2021-01-01 12:00:00",
         "name": "CHAR-MESSAGE-03",
-        "pending_card": {
-          "title": "Owner confirmation",
-          "token": "owner-only-token"
-        },
+        "pending_card": null,
+        "pending_card_safe": false,
         "provider": null,
-        "recent": false,
         "recovering": 0,
         "ref_doctype": null,
         "ref_name": null,
@@ -734,12 +743,19 @@
         "steps": null,
         "stopped": 0,
         "streaming": 0,
-        "tool_args": null,
+        "tool_args": {},
         "tool_call_id": "characterization-pending",
         "tool_call_ids": null,
         "tool_name": "submit_doc",
-        "tool_result": null,
-        "tool_status": "pending"
+        "tool_result": {
+          "error": {
+            "message": "This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
+            "type": "InvalidConfirmation"
+          },
+          "ok": false,
+          "reason_code": "safety_update"
+        },
+        "tool_status": ""
       },
       {
         "action_outcome": "",
@@ -855,9 +871,9 @@
         "tool_status": ""
       },
       {
-        "action_outcome": "",
+        "action_outcome": "cancelled",
         "canvas": null,
-        "content": null,
+        "content": "submit_doc → cancelled",
         "created_at": 1609502400,
         "creation": "2021-01-01 12:00:00",
         "error": null,
@@ -865,12 +881,9 @@
         "model": null,
         "modified": "2021-01-01 12:00:00",
         "name": "CHAR-MESSAGE-03",
-        "pending_card": {
-          "title": "Owner confirmation",
-          "token": "owner-only-token"
-        },
+        "pending_card": null,
+        "pending_card_safe": false,
         "provider": null,
-        "recent": false,
         "recovering": 0,
         "ref_doctype": null,
         "ref_name": null,
@@ -880,12 +893,19 @@
         "steps": null,
         "stopped": 0,
         "streaming": 0,
-        "tool_args": null,
+        "tool_args": {},
         "tool_call_id": "characterization-pending",
         "tool_call_ids": null,
         "tool_name": "submit_doc",
-        "tool_result": null,
-        "tool_status": "pending"
+        "tool_result": {
+          "error": {
+            "message": "This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
+            "type": "InvalidConfirmation"
+          },
+          "ok": false,
+          "reason_code": "safety_update"
+        },
+        "tool_status": ""
       },
       {
         "action_outcome": "",

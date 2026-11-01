@@ -123,6 +123,12 @@ def project_row(row: dict, conversation: str) -> dict:
 			"awaiting_owner": True,
 		}
 	result = {key: safe_value(row.get(key), conversation) for key in ROW_KEYS}
+	# A close-fenced terminal receipt still needs its token in the owner's history
+	# to reconcile the local card. A shared transcript has no action authority, so
+	# it must not disclose that former confirmation identifier.
+	if row.get("pending_card_safe") is False:
+		result["tool_call_id"] = None
+		result["tool_call_ids"] = None
 	result["error_headline"] = headline_for(row.get("error")) if row.get("error") else None
 	result["steps"] = _steps(row.get("steps"), conversation)
 	result["live_steps"] = _steps(row.get("live_steps"), conversation)
