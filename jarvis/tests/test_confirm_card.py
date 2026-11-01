@@ -112,6 +112,30 @@ class TestCodeSecretsMasked(FrappeTestCase):
 		self.assertNotIn("sk_live_abc123", repr(row))
 		self.assertEqual(row["to"], "doc.ok")
 
+	def test_changed_secret_alone_still_differs(self):
+		old = 'api_key = "sk_live_abc123DEF456ghi789jkl"\n'
+		new = 'api_key = "sk_live_zzz999XYZ000uvw111mno"\n'
+		meta = frappe.get_meta("Server Script")
+		row = _diff_row(meta, "script", old, new, None, True)
+		self.assertNotIn("sk_live_", repr(row))
+		self.assertNotEqual(row["from"], row["to"])
+		self.assertTrue(row.get("lines"))
+		cells = {"transitions": [{"name": "t1", "action": "Go", "state": "A", "next_state": "B"}]}
+		before = {"transitions": [{**cells["transitions"][0], "condition": old}]}
+		after = {"transitions": [{**cells["transitions"][0], "condition": new}]}
+		(cell,) = _code_diff_rows("Workflow", after, before)
+		self.assertNotIn("sk_live_", repr(cell))
+		self.assertNotEqual(cell["from"], cell["to"])
+		self.assertTrue(cell.get("lines"))
+
+	def test_same_secret_masks_identically(self):
+		meta = frappe.get_meta("Server Script")
+		old = 'api_key = "sk_live_abc123DEF456ghi789jkl"\nx = 1\n'
+		new = 'api_key = "sk_live_abc123DEF456ghi789jkl"\nx = 2\n'
+		row = _diff_row(meta, "script", old, new, None, True)
+		self.assertEqual(row["from"].splitlines()[0], row["to"].splitlines()[0])
+		self.assertNotIn("sk_live_", repr(row))
+
 
 class TestVerbCard(FrappeTestCase):
 	def test_single_verb(self):
