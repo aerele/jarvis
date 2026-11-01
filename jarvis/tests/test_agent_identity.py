@@ -725,6 +725,7 @@ class TestAgentIdentity(unittest.TestCase):
 			log_error.call_args.kwargs["title"],
 			"jarvis agent: Negative stock scope resolution refused launch",
 		)
+
 	def test_vendor_ledger_ageing_snapshot_is_declared_and_delivered(self):
 		"""The Vendor Ledger bundle reads only these immutable ageing controls."""
 		registry = agent_catalog._load_registry()

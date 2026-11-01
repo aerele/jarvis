@@ -1195,7 +1195,8 @@ def record_delegate_run(
 			# different root has no evidence that an older root became clean.
 			if (
 				agent == NEGATIVE_STOCK_AGENT
-				and prior_record_scopes.get(c.get("last_seen_run") or c.get("run")) != negative_stock_run_scope
+				and prior_record_scopes.get(c.get("last_seen_run") or c.get("run"))
+				!= negative_stock_run_scope
 			):
 				continue
 			# PP-5 review provenance: an A16 coverage-scoped auto-resolve is machine,
