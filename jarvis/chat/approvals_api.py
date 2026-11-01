@@ -158,7 +158,12 @@ def list_approval_reviewers() -> list[dict]:
 @require_jarvis_user
 def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 	"""Approvals visible to the current user (owner of the linked
-	conversation, or any System Manager)."""
+	conversation, or any System Manager).
+
+	Cycle-Count plans also require current native Warehouse and Item read. Keep
+	that filter in SQL, before the legacy endpoint's limit, so inaccessible plans
+	cannot consume an otherwise visible page.
+	"""
 	if status not in ("Pending", "Approved", "Rejected", "Answered", "Dismissed", "Decided", "All"):
 		frappe.throw("Invalid status filter")
 	if status == "All":
@@ -180,6 +185,17 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 		if not my_convs:
 			return []
 		filters["conversation"] = ["in", my_convs]
+	or_filters = None
+	if frappe.session.user != "Administrator":
+		from jarvis.chat.cycle_count_permissions import CYCLE_COUNT_PLANNER, visible_count_plan_approval_names
+
+		readable_count_plans = visible_count_plan_approval_names()
+		# ``filters`` ANDs this OR group. The normal rows are unchanged; a
+		# Cycle-Count row must be one of the exact plan names whose owner/reviewer/
+		# share boundary and native stock read both passed above.
+		or_filters = [["agent", "is", "not set"], ["agent", "!=", CYCLE_COUNT_PLANNER]]
+		if readable_count_plans:
+			or_filters.append(["name", "in", readable_count_plans])
 	rows = frappe.get_all(
 		APPROVAL,
 		filters=filters,
@@ -203,6 +219,7 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 		],
 		order_by="creation desc",
 		limit_page_length=int(limit),
+		or_filters=or_filters,
 	)
 	rows = [r for r in rows if not is_collaborative(r.get("conversation")) and _may_list_approval(r)]
 	for r in rows:

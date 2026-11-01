@@ -2591,6 +2591,61 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		finally:
 			frappe.set_user("Administrator")
 
+	def test_legacy_approval_list_fills_its_limit_after_hiding_a_count_plan(self):
+		"""A hidden newest plan cannot consume the legacy endpoint's only row."""
+		from jarvis.chat import approvals_api
+
+		manager = self._user(
+			"cycle-legacy-list-manager@example.invalid", ("Jarvis User", "Stock User", "System Manager")
+		)
+		conversation = frappe.get_doc(
+			{"doctype": "Jarvis Conversation", "title": "Visible ordinary approval"}
+		).insert(ignore_permissions=True)
+		visible = frappe.get_doc(
+			{
+				"doctype": "Jarvis Approval Request",
+				"title": "Visible ordinary approval",
+				"source": "Chat",
+				"status": "Pending",
+				"document_type": "",
+				"conversation": conversation.name,
+				"question": "Approve the ordinary test request.",
+				"options": "[]",
+			}
+		).insert(ignore_permissions=True)
+		hidden = self._plan(pending=True)
+		# Make the pending count plan unambiguously newest. The endpoint sorts by
+		# creation, while the fixture's rapid inserts could otherwise share a second.
+		frappe.db.set_value(
+			"Jarvis Approval Request",
+			visible.name,
+			"creation",
+			"2099-01-01 00:00:00",
+			update_modified=False,
+		)
+		frappe.db.set_value(
+			"Jarvis Approval Request",
+			hidden.name,
+			"creation",
+			"2099-01-02 00:00:00",
+			update_modified=False,
+		)
+		real_has_permission = frappe.has_permission
+
+		def no_native_stock_read(doctype, ptype="read", *args, **kwargs):
+			if doctype in {"Warehouse", "Item"} and ptype in {"read", "select"}:
+				return False
+			return real_has_permission(doctype, ptype, *args, **kwargs)
+
+		frappe.clear_cache(user=manager)
+		frappe.set_user(manager)
+		try:
+			with patch("jarvis.chat.cycle_count_permissions.frappe.has_permission", side_effect=no_native_stock_read):
+				rows = approvals_api.list_approvals(status="Pending", limit=1)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual([row["name"] for row in rows], [visible.name])
+
 	def test_uninstall_keeps_a_sanitized_run_for_an_approved_count_plan(self):
 		"""An uninstall leaves the sealed writer fence, but no reusable run capability."""
 		from jarvis.chat import agent_scheduler, agents_api, cycle_count_entry
