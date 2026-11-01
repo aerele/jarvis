@@ -41,7 +41,11 @@ import {
 import { spanBetween } from "../lib/time";
 import { proposedLabel } from "../lib/cardAge.js";
 import { sortPendingCards } from "../lib/sortPendingCards.js";
-import { mergePendingSources, withExcluded } from "../lib/pendingResync.js";
+import {
+	admitRealtimePendingCards,
+	mergePendingSources,
+	withExcluded,
+} from "../lib/pendingResync.js";
 import {
 	heldNewestSeq,
 	mergeNewestPage,
@@ -1245,28 +1249,14 @@ function onEvent(p) {
 			// turn-end WITHOUT a manual reload. Deduped by token; a conv-less token ("")
 			// binds to this conversation, mirroring the action:pending case below. Skip a
 			// run the user STOPPED - its cards were swept server-side; don't resurrect them.
-			if (!ignored && Array.isArray(p.pending)) {
-				for (const card of p.pending) {
-					if (
-						!card.token ||
-						card.token === inflightToken.value ||
-						pending.value.some((x) => x.token === card.token)
-					)
-						continue;
-					pending.value.push({
-						token: card.token,
-						tool: card.tool || "",
-						summary: card.summary || "",
-						preview: card.preview ?? null,
-						conversation: card.conversation || conv,
-						run_id: card.run_id,
-						created_at: card.created_at ?? null,
-						expires_at: card.expires_at ?? null,
-						seq: card.seq ?? null,
-						recent: card.recent !== false,
-					});
-				}
-			}
+			if (!ignored)
+				pending.value = admitRealtimePendingCards(
+					pending.value,
+					p,
+					settledTokens.value,
+					inflightToken.value,
+					conv,
+				);
 			// The reply is durable now; reconcile against it (canvas items, final
 			// formatting) instead of trusting the streamed copy.
 			load();
@@ -1285,55 +1275,33 @@ function onEvent(p) {
 			// must still auto-recover — drain p.pending here too, not only on run:end.
 			// Deduped by token; a conv-less token ("") binds to this conversation; a
 			// user-STOPPED run is skipped (its cards were swept server-side).
-			if (!ignored && Array.isArray(p.pending)) {
-				for (const card of p.pending) {
-					if (
-						!card.token ||
-						card.token === inflightToken.value ||
-						pending.value.some((x) => x.token === card.token)
-					)
-						continue;
-					pending.value.push({
-						token: card.token,
-						tool: card.tool || "",
-						summary: card.summary || "",
-						preview: card.preview ?? null,
-						conversation: card.conversation || conv,
-						run_id: card.run_id,
-						created_at: card.created_at ?? null,
-						expires_at: card.expires_at ?? null,
-						seq: card.seq ?? null,
-						recent: card.recent !== false,
-					});
-				}
-			}
+			if (!ignored)
+				pending.value = admitRealtimePendingCards(
+					pending.value,
+					p,
+					settledTokens.value,
+					inflightToken.value,
+					conv,
+				);
 			load();
 			break;
 
-		case "action:pending":
-			if (
-				!p.token ||
-				p.token === inflightToken.value ||
-				pending.value.some((x) => x.token === p.token)
-			)
-				return;
-			pending.value.push({
-				token: p.token,
-				tool: p.tool || "",
-				summary: p.summary || "",
-				preview: p.preview ?? null,
-				conversation: conv,
-				run_id: p.run_id,
-				created_at: p.created_at ?? null,
-				expires_at: p.expires_at ?? null,
-				seq: p.seq ?? null,
-				recent: p.recent !== false,
-			});
+		case "action:pending": {
+			const before = pending.value.length;
+			pending.value = admitRealtimePendingCards(
+				pending.value,
+				p,
+				settledTokens.value,
+				inflightToken.value,
+				conv,
+			);
+			if (pending.value.length === before) return;
 			scrollToBottom();
 			// This push arrived; keep polling so a SIBLING card whose push was dropped
 			// in the same turn still self-heals (mirrors the desktop SPA).
 			startPendingPoll();
 			break;
+		}
 
 		case "canvas":
 		case "conversation:renamed":

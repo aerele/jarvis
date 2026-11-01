@@ -36,3 +36,48 @@ export function withExcluded(exclusions, tokens) {
 	for (const t of tokens || []) if (t) out.add(t);
 	return out;
 }
+
+// Realtime confirmations use three event shapes: one direct action:pending
+// event, or the pending list attached to run:end and run:error. Keep the
+// admission decision in one pure helper so every live path applies the same
+// settled-token and in-flight exclusions as the durable resync path.
+export function admitRealtimePendingCards(
+	current,
+	event,
+	excludedTokens,
+	inflightToken,
+	fallbackConversation,
+) {
+	const incoming =
+		event?.kind === "action:pending"
+			? [event]
+			: Array.isArray(event?.pending)
+				? event.pending
+				: [];
+	const next = [...(current || [])];
+	const known = new Set(next.map((card) => card?.token).filter(Boolean));
+
+	for (const card of incoming || []) {
+		if (
+			!card?.token ||
+			card.token === inflightToken ||
+			excludedTokens?.has(card.token) ||
+			known.has(card.token)
+		)
+			continue;
+		known.add(card.token);
+		next.push({
+			token: card.token,
+			tool: card.tool || "",
+			summary: card.summary || "",
+			preview: card.preview ?? null,
+			conversation: card.conversation || fallbackConversation,
+			run_id: card.run_id,
+			created_at: card.created_at ?? null,
+			expires_at: card.expires_at ?? null,
+			seq: card.seq ?? null,
+			recent: card.recent !== false,
+		});
+	}
+	return next;
+}

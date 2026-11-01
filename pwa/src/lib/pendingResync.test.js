@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { mergePendingSources, withExcluded } from "./pendingResync.js";
+import { admitRealtimePendingCards, mergePendingSources, withExcluded } from "./pendingResync.js";
 
 // P0c in-flight suppression: a Confirm/Discard RPC in flight for token T must
 // not have its card re-added by a stale resync read racing the RPC's own
@@ -90,6 +90,71 @@ test("a safety-update token stays excluded after Done when a stale pending row r
 	const staleFromRows = [{ token: "safety-token" }, { token: "ordinary-token" }];
 	const afterDone = mergePendingSources([], [staleFromRows], settled);
 	assert.deepEqual(afterDone, [{ token: "ordinary-token" }]);
+});
+
+for (const kind of ["action:pending", "run:end", "run:error"]) {
+	test(`${kind} does not restore a settled safety-update card`, () => {
+		const settled = new Set(["safety-token"]);
+		const card = (token) => ({
+			token,
+			tool: "write_todo",
+			summary: `${token} summary`,
+		});
+		let pending = [];
+
+		if (kind === "action:pending") {
+			pending = admitRealtimePendingCards(
+				pending,
+				{ kind, ...card("safety-token") },
+				settled,
+				null,
+				"CONV-1",
+			);
+			pending = admitRealtimePendingCards(
+				pending,
+				{ kind, ...card("ordinary-token") },
+				settled,
+				null,
+				"CONV-1",
+			);
+		} else {
+			pending = admitRealtimePendingCards(
+				pending,
+				{ kind, pending: [card("safety-token"), card("ordinary-token")] },
+				settled,
+				null,
+				"CONV-1",
+			);
+		}
+
+		assert.deepEqual(
+			pending.map((item) => item.token),
+			["ordinary-token"],
+		);
+		assert.equal(pending[0].conversation, "CONV-1");
+	});
+}
+
+test("realtime terminal admission ignores a malformed pending list", () => {
+	assert.deepEqual(
+		admitRealtimePendingCards([], { kind: "run:end", pending: {} }, new Set(), null, "CONV-1"),
+		[]
+	);
+});
+
+test("ChatView routes every realtime pending event through the settled-token admission gate", () => {
+	const src = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	const cases = [
+		["run:end", "run:error"],
+		["run:error", "action:pending"],
+		["action:pending", "canvas"],
+	];
+	for (const [kind, next] of cases) {
+		const start = src.indexOf(`case "${kind}"`);
+		const end = src.indexOf(`case "${next}"`, start + 1);
+		assert.ok(start > -1 && end > start, `${kind} case must be present`);
+		assert.match(src.slice(start, end), /admitRealtimePendingCards\(/);
+	}
 });
 
 test("ChatView folds a typed no's discarded tokens into loadPending's exclusion set", () => {
