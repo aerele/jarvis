@@ -1723,6 +1723,30 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual([s[1] for s in rec.steps], [after])
 		self.assertEqual(rec.terminal[1]["text"], answer)
 
+	def test_a_tool_start_before_any_text_on_a_re_attached_lane_still_moves_its_step(self):
+		# #2367, live trace 2026-11-01: reply frames come only when the text grows, so the
+		# first frame a hop's new lane sees is often the tool start that follows narration
+		# written before the hop. The next reply frame places it: all text before that
+		# frame's delta was already there when the tool started.
+		before = "I'll check the drafting rules and the supplier."
+		after = "Checking the charge accounts and warehouses before I draft."
+		head = "Supplier `MA Inc.` and item `SKU005` both exist."
+		answer = f"{head} Drafted ACC-PINV-2026-00033 with 450.00 freight. Review it before you submit."
+		so_far = f"{before}\n\n{after}"
+		rec = self._run(
+			[
+				("tool", {"phase": "start", "name": "jarvis__get_list", "toolCallId": "t1"}),
+				("tool", {"phase": "result", "name": "jarvis__get_list", "toolCallId": "t1"}),
+				("assistant", {"text": f"{so_far}\n\n{head}", "delta": f"\n\n{head}"}),
+				("assistant", {"text": f"{so_far}\n\n{answer}", "delta": answer[len(head) :]}),
+			],
+			f"{so_far}\n\n{answer}",
+			steps=[before],
+			is_readopt=True,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [after])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
 	def test_a_re_attached_lane_starts_after_its_last_recorded_step(self):
 		# Prose that was too long to be a step sits before the last recorded step. A
 		# re-attached lane starts its tool stretch after that step, so the long prose is
