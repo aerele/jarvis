@@ -1599,10 +1599,11 @@ def _stamp_scope_and_watermark(
 	watermark + scope are resolved AS the run-as user (this runs under that
 	session). Returns the resolved scope dict (or None).
 
-	``source_apps`` (CX5-2) is folded into the SAME ``scope_json`` stamp OUTSIDE
-	the best-effort try, so an ERP scope-resolution failure can never drop the
-	authorization the source-read tools read back — a scribe run either carries its
-	admin-authorized app list or reads nothing."""
+	``source_apps`` (CX5-2) is folded into ``scope_json`` only as a prompt
+	courtesy. The authorization itself is a server-signed immutable selection on
+	the run row. A Custom App Learning run therefore fails launch if its
+	permission profile or selection stamp cannot be created; it never falls back
+	to an editable scope blob."""
 	from jarvis.chat import agent_scope, operator_review
 
 	review_backend = operator_review.backend(inst.agent)
@@ -1652,10 +1653,31 @@ def _stamp_scope_and_watermark(
 				message=frappe.get_traceback(),
 			)
 
+	profile = None
 	try:
-		values["permission_profile"] = _permission_profile(run_as_user)
+		if source_apps is not None:
+			# Custom App Learning rechecks this at every source boundary. Use its
+			# cache-independent profile here too, so a cache outage does not look like
+			# a role change while a real role/User Permission change still fails closed.
+			from jarvis.learning import app_source_receipts
+
+			profile = app_source_receipts.permission_profile_for_user(run_as_user)
+		else:
+			profile = _permission_profile(run_as_user)
+		values["permission_profile"] = profile
 	except Exception:
-		pass
+		# Auditor launch metadata remains best-effort. Custom App Learning cannot
+		# safely serve source without this identity binding, so it refuses launch.
+		if source_apps is not None:
+			raise
+
+	if source_apps is not None:
+		from jarvis.learning import app_source_receipts
+
+		profile_digest = app_source_receipts.permission_profile_digest(profile)
+		values["source_selection_json"] = app_source_receipts.encode_selection(
+			run_name, list(source_apps), profile_digest
+		)
 
 	if values:
 		frappe.db.set_value(RUN, run_name, values, update_modified=False)
