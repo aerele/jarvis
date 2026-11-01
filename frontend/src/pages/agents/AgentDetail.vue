@@ -1127,9 +1127,7 @@ const isOperatorReview = computed(
 	() => agent.value?.nature === "Operator" && !!agent.value?.supports_manual_run
 );
 const isStockVariance = computed(() => agent.value?.name === "stock-variance-auditor");
-const requiresSavedConfiguration = computed(
-	() => isOperatorReview.value || isStockVariance.value
-);
+const requiresSavedConfiguration = computed(() => isOperatorReview.value || isStockVariance.value);
 const configurationIssues = computed(
 	() => (requiresSavedConfiguration.value && installation.value?.configuration_issues) || {}
 );

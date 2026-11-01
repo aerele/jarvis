@@ -46,7 +46,8 @@
 					/>
 				</div>
 				<p class="mt-1.5 text-p-xs text-ink-gray-5">
-					You can select an enabled group or leaf. A group includes its enabled leaf warehouses.
+					You can select an enabled group or leaf. A group includes its enabled leaf
+					warehouses.
 				</p>
 			</div>
 
@@ -78,7 +79,8 @@
 		<div class="mt-4">
 			<Button label="Save configuration" :loading="saving" @click="save" />
 			<p class="mt-2 text-p-xs text-ink-gray-5">
-				Jarvis checks the selected company, Warehouse root, and reviewer again before it enables or runs the audit.
+				Jarvis checks the selected company, Warehouse root, and reviewer again before it
+				enables or runs the audit.
 			</p>
 		</div>
 	</fieldset>
@@ -90,7 +92,13 @@ import { Autocomplete, Button, FormControl } from "frappe-ui";
 import { searchLink } from "@/api";
 import { useLinkSearch } from "@/composables/useLinkSearch";
 
-const PASSIVE_SCOPE_KEYS = ["fiscal_year", "from_date", "to_date", "prior_period_from", "prior_period_to"];
+const PASSIVE_SCOPE_KEYS = [
+	"fiscal_year",
+	"from_date",
+	"to_date",
+	"prior_period_from",
+	"prior_period_to",
+];
 
 const props = defineProps({
 	config: { type: Object, default: () => ({}) },
@@ -148,12 +156,16 @@ function seed(config) {
 	const settings = source.stock_variance;
 	form.company = typeof source.company === "string" ? source.company : "";
 	form.warehouse =
-		record && record.doctype === "Warehouse" && typeof record.name === "string" ? record.name : "";
+		record && record.doctype === "Warehouse" && typeof record.name === "string"
+			? record.name
+			: "";
 	form.reviewer = settings && typeof settings.reviewer === "string" ? settings.reviewer : "";
 	form.test_declaration =
 		settings && typeof settings.test_declaration === "string" ? settings.test_declaration : "";
 	passiveScope.value = Object.fromEntries(
-		PASSIVE_SCOPE_KEYS.filter((key) => typeof source[key] === "string" && source[key]).map((key) => [key, source[key]])
+		PASSIVE_SCOPE_KEYS.filter((key) => typeof source[key] === "string" && source[key]).map(
+			(key) => [key, source[key]]
+		)
 	);
 	localErrors.value = {};
 	initialState.value = state();
@@ -195,9 +207,11 @@ function save() {
 	const errors = {};
 	if (!form.company.trim()) errors.company = "Select a company.";
 	if (!form.warehouse.trim()) errors.record_scope = "Select an enabled Warehouse group or leaf.";
-	if (!form.reviewer.trim()) errors["stock_variance.reviewer"] = "Select an enabled stock reviewer.";
+	if (!form.reviewer.trim())
+		errors["stock_variance.reviewer"] = "Select an enabled stock reviewer.";
 	if (form.test_declaration.length > 500)
-		errors["stock_variance.test_declaration"] = "Keep the test notice to 500 characters or less.";
+		errors["stock_variance.test_declaration"] =
+			"Keep the test notice to 500 characters or less.";
 	if (Object.keys(errors).length) {
 		localErrors.value = errors;
 		return;
