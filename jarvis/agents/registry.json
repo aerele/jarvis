@@ -1614,7 +1614,7 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "status": "Published",
       "description": "Reviews one submitted payroll batch using dated PF and ESI rules and owner-classified native remuneration. It keeps missing remuneration, contract sources and unreviewed law periods visible. The revised PF ceiling uses an official announcement; the Gazette text and qualified legal review remain pending. Read-only; a named reviewer owns each decision.",
       "tools_required": [

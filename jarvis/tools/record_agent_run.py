@@ -142,6 +142,27 @@ def _validate_findings(raw_findings: list, token_set: set, allowed_refs: set):
 	return valid, dropped
 
 
+def _canonical_scope_for_writeback(run_doc, scope: dict) -> dict:
+	"""Keep a Statutory Payroll writeback on its launch-stamped batch scope."""
+	from jarvis.chat.statutory_payroll_scope import (
+		ConfigurationError,
+		canonical_writeback_scope,
+		is_statutory_payroll,
+	)
+
+	if not is_statutory_payroll(run_doc.agent):
+		return scope
+	try:
+		stamped_scope = frappe.parse_json(run_doc.scope_json or "{}")
+		if not isinstance(stamped_scope, dict):
+			raise ConfigurationError("scope", "invalid server scope")
+		return canonical_writeback_scope(stamped_scope, scope)
+	except (ConfigurationError, TypeError, ValueError, frappe.ValidationError):
+		raise InvalidArgumentError(
+			"Statutory Payroll output scope does not match this run's server-bound Payroll Entry scope."
+		) from None
+
+
 def record_agent_run(
 	findings=None,
 	coverage=None,
@@ -250,6 +271,12 @@ def record_agent_run(
 	coverage = _as_dict(coverage)
 	scope = _as_dict(scope)
 	truncated = bool(truncated)
+	# A Statutory Payroll delegate may relay its evaluator's scope, but it may
+	# not author it. The Payroll Entry, company, completed month, preceding month
+	# and report date were stamped before dispatch under the run-as identity. A
+	# mismatched local scope file could otherwise overwrite that evidence during
+	# writeback and make a foreign batch look like this run.
+	scope = _canonical_scope_for_writeback(run_doc, scope)
 	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(run_doc.agent)

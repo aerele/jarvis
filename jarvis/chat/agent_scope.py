@@ -38,6 +38,16 @@ def resolve_scope(installation) -> dict:
 	"""
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
+	# Statutory Payroll is a batch-bound monthly audit, not a generic accounting
+	# period scan.  Its selected Payroll Entry is validated as the run-as user and
+	# is the sole source for company, period, preceding month and report cutoff.
+	# Do this before parsing generic config so a stored company/fiscal-year/range
+	# can never widen or replace the batch boundary.
+	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
+	from jarvis.chat.statutory_payroll_scope import resolve_scope as statutory_scope
+
+	if is_statutory_payroll(installation.get("agent")):
+		return statutory_scope(installation.get("config") or "{}")
 
 	cfg: dict = {}
 	if installation.get("config"):

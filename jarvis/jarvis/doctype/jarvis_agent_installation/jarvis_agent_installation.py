@@ -49,6 +49,7 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		self._validate_unique_per_owner()
 		self._validate_owner_cap()
 		self._validate_run_as_user()
+		self._guard_statutory_payroll_scope()
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
 		self._validate_schedule_budget()
@@ -356,6 +357,41 @@ class JarvisAgentInstallation(NotRenamable, Document):
 
 		self._validate_run_as_escalation(target)
 		self._validate_run_as_permissions(target)
+
+	def _guard_statutory_payroll_scope(self):
+		"""Validate the Payroll Entry as the identity that will run the audit.
+
+		A person who edits an installation can be different from ``run_as_user``.
+		The entry, company and required dates must therefore be read as the execution
+		identity. A disabled empty draft remains repairable; any supplied entry is
+		checked immediately, and enabled installations require a complete scope.
+		Launch repeats this guard for legacy rows and direct database writes.
+		"""
+		from jarvis.chat.statutory_payroll_scope import (
+			is_statutory_payroll,
+			require_configuration,
+			validate_saved_configuration,
+		)
+
+		if not is_statutory_payroll(self.agent):
+			return
+		if not frappe.utils.cint(self.get("enabled")) and not (
+			self.is_new()
+			or self.has_value_changed("agent")
+			or self.has_value_changed("config")
+			or self.has_value_changed("run_as_user")
+		):
+			return
+		run_as_user = (self.run_as_user or "").strip()
+		if not run_as_user:
+			return  # _validate_run_as_user() refuses this state when enabled.
+		from jarvis._session import impersonate
+
+		with impersonate(run_as_user):
+			if frappe.utils.cint(self.get("enabled")):
+				require_configuration(self.config or "{}")
+			else:
+				validate_saved_configuration(self.config or "{}")
 
 	def _validate_run_as_escalation(self, target: str) -> None:
 		"""A4: mapping an install to run as ANOTHER user needs the setter to be

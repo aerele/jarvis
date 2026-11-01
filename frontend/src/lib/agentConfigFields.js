@@ -130,6 +130,14 @@ export const CONFIG_FIELD_SET = [
 		help: "Optional review signal only. It does not create a scored audit finding.",
 	},
 	{
+		key: "payroll_entry",
+		path: "payroll_entry",
+		label: "Payroll Entry",
+		type: "link",
+		linkDoctype: "Payroll Entry",
+		help: "Select one submitted, completed monthly Payroll Entry. Jarvis derives the company and period from this record.",
+	},
+	{
 		key: "company",
 		path: "company",
 		label: "Company",

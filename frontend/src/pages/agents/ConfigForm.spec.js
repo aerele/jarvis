@@ -847,6 +847,23 @@ describe("an unknown config key survives untouched in Advanced (JSON)", () => {
 // listing's config_keys, matched against each field's storage PATH (a dot
 // path for a nested key) - the scope fields never are.
 describe("per-agent gating via the configKeys prop", () => {
+	it("statutory payroll selects one Payroll Entry and hides the generic period controls", () => {
+		const w = mountForm(
+			{ payroll_entry: "PAY-FAKE-2026-10" },
+			{ configKeys: ["payroll_entry", "statutory", "statutory_schema"] }
+		);
+		expect(w.text()).toContain("Payroll Entry");
+		expect(w.text()).toContain("Jarvis fixes the company and period from that record.");
+		expect(w.text()).not.toContain("Fiscal year");
+		expect(w.text()).not.toContain("Period from");
+		expect(
+			w
+				.findAllComponents({ name: "Autocomplete" })
+				.find((component) => component.props("placeholder") === "Search Payroll Entry…")
+				.props("modelValue")
+		).toEqual({ label: "PAY-FAKE-2026-10", value: "PAY-FAKE-2026-10" });
+	});
+
 	it("fixed-asset controls preserve the server-evaluated posting gate", async () => {
 		const w = mountForm(
 			{ depr_run_posted: "false", enable_capex_signal: "true" },
