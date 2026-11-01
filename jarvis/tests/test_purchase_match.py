@@ -97,7 +97,6 @@ AP_E2E_CO, AP_E2E_ABBR = "zz-apm Test Co", "ZAPM"
 AP_E2E_SUPPLIER, AP_E2E_ITEM = "zz-apm Acme Traders", "ZZ-APM-WIDGET"
 AP_E2E_ITEM_GROUP = "zz-apm Products"
 AP_E2E_FISCAL_YEAR = "zz-apm"
-AP_E2E_ADDRESS = f"{AP_E2E_CO}-Billing"
 
 
 def _ap_e2e_insert(doctype, values, root=False):
@@ -117,7 +116,6 @@ def _purge_ap_e2e(roots=()):
 				doc.cancel()
 			frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
 	for doctype, name in (
-		("Address", AP_E2E_ADDRESS),
 		("Item", AP_E2E_ITEM),
 		("Supplier", AP_E2E_SUPPLIER),
 		("Item Group", AP_E2E_ITEM_GROUP),
@@ -204,20 +202,6 @@ def _ap_e2e_fixtures():
 			"year_end_date": f"{year}-12-31",
 		}
 	).db_insert()
-	_ap_e2e_insert(
-		"Address",
-		{
-			"address_title": AP_E2E_CO,
-			"address_type": "Billing",
-			"address_line1": "1 AP Test Lane",
-			"city": "Test City",
-			"state": "Tamil Nadu",
-			"pincode": "600001",
-			"country": "India",
-			"is_your_company_address": 1,
-			"links": [{"link_doctype": "Company", "link_name": AP_E2E_CO}],
-		},
-	)
 	_ap_e2e_insert(
 		"Item Group", {"item_group_name": AP_E2E_ITEM_GROUP, "parent_item_group": "All Item Groups"}
 	)
@@ -844,7 +828,6 @@ class TestNativePurchaseMatch(unittest.TestCase):
 					"doctype": "Purchase Order",
 					"company": AP_E2E_CO,
 					"supplier": AP_E2E_SUPPLIER,
-					"billing_address": AP_E2E_ADDRESS,
 					"transaction_date": today,
 					"schedule_date": today,
 					"items": [{"item_code": AP_E2E_ITEM, "qty": 10, "rate": 100, "schedule_date": today}],
