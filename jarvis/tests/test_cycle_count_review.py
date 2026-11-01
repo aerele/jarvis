@@ -1,5 +1,6 @@
 """Cycle-Count Planner custody and output regressions."""
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -186,14 +187,10 @@ class TestCycleCountConfiguration(FrappeTestCase):
 	def test_future_item_end_of_life_is_not_a_boolean_unavailable_flag(self):
 		with patch.object(review, "_site_date", return_value=frappe.utils.getdate("2026-10-05")):
 			self.assertTrue(
-				review.is_countable_item(
-					frappe._dict(is_stock_item=1, disabled=0, end_of_life="2099-12-31")
-				)
+				review.is_countable_item(frappe._dict(is_stock_item=1, disabled=0, end_of_life="2099-12-31"))
 			)
 			self.assertFalse(
-				review.is_countable_item(
-					frappe._dict(is_stock_item=1, disabled=0, end_of_life="2026-10-05")
-				)
+				review.is_countable_item(frappe._dict(is_stock_item=1, disabled=0, end_of_life="2026-10-05"))
 			)
 
 
@@ -219,7 +216,12 @@ class TestCycleCountOutput(FrappeTestCase):
 		data, out = snapshot(), result()
 		out["findings"][0]["proposal"]["lines"][0]["actual_qty"] = "4"
 		out["integrity_digest"] = review.digest(
-			{"input_digest": data["source_digest"], "scope": out["scope"], "findings": out["findings"], "coverage": out["coverage"]}
+			{
+				"input_digest": data["source_digest"],
+				"scope": out["scope"],
+				"findings": out["findings"],
+				"coverage": out["coverage"],
+			}
 		)
 		with self.assertRaisesRegex(frappe.ValidationError, "captured stock"):
 			self.check(out, data)
@@ -228,7 +230,12 @@ class TestCycleCountOutput(FrappeTestCase):
 		data, out = snapshot(), result()
 		out["findings"][0]["note"] = "A variance needs an inventory adjustment."
 		out["integrity_digest"] = review.digest(
-			{"input_digest": data["source_digest"], "scope": out["scope"], "findings": out["findings"], "coverage": out["coverage"]}
+			{
+				"input_digest": data["source_digest"],
+				"scope": out["scope"],
+				"findings": out["findings"],
+				"coverage": out["coverage"],
+			}
 		)
 		with self.assertRaisesRegex(frappe.ValidationError, "cannot assert"):
 			self.check(out, data)
@@ -244,7 +251,8 @@ class TestCycleCountOutput(FrappeTestCase):
 class TestCycleCountPrivateTool(FrappeTestCase):
 	def test_tool_is_private_and_registered(self):
 		from jarvis.exceptions import InvalidArgumentError
-		from jarvis.tools import _private_output, get_cycle_count_inputs as tool, registry
+		from jarvis.tools import _private_output, registry
+		from jarvis.tools import get_cycle_count_inputs as tool
 
 		with patch.object(tool._private_output, "is_private", return_value=False):
 			with self.assertRaises(InvalidArgumentError):
@@ -269,9 +277,7 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		cls.item = cls._stock_item(masters)
 		masters.ensure_stock_entry_type("Material Receipt")
 		masters.ensure_fiscal_years(frappe.utils.today())
-		cls.warehouse = frappe.db.get_value(
-			"Warehouse", {"company": cls.company, "warehouse_name": "Stores"}
-		)
+		cls.warehouse = frappe.db.get_value("Warehouse", {"company": cls.company, "warehouse_name": "Stores"})
 		receipt = frappe.get_doc(
 			{
 				"doctype": "Stock Entry",
@@ -291,6 +297,10 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		receipt.submit()
 		cls.counter = cls._user("cycle-counter@example.invalid", ("Jarvis User", "Stock User"))
 		cls.reviewer = cls._user("cycle-reviewer@example.invalid", ("Jarvis User", "Stock User"))
+		cls.stock_variance_user = cls._user(
+			"cycle-stock-variance-run@example.invalid", ("Jarvis User", "Stock User")
+		)
+		cls.other_warehouse = cls._other_warehouse()
 
 	@staticmethod
 	def _user(email, roles):
@@ -329,6 +339,120 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			}
 		).insert(ignore_permissions=True)
 		return name
+
+	@classmethod
+	def _other_warehouse(cls):
+		"""A distinct leaf that cannot be an ancestor of the Stores warehouse."""
+		warehouse_name = "_J2A Cycle Count Other Scope"
+		existing = frappe.db.get_value(
+			"Warehouse",
+			{"company": cls.company, "warehouse_name": warehouse_name},
+			"name",
+		)
+		if existing:
+			return existing
+		return (
+			frappe.get_doc(
+				{
+					"doctype": "Warehouse",
+					"warehouse_name": warehouse_name,
+					"company": cls.company,
+					"is_group": 0,
+				}
+			)
+			.insert(ignore_permissions=True)
+			.name
+		)
+
+	@contextmanager
+	def _delegate_run(self, agent, scope):
+		"""Create the server-side rows that an active delegate dispatch owns."""
+		from jarvis.tools import _agent_run_ctx
+
+		user = self.stock_variance_user
+		if not frappe.db.exists("Jarvis Agent Listing", agent):
+			from jarvis.chat import agent_catalog
+
+			agent_catalog.sync_agent_listings()
+		session_key = f"agent:agent-{agent}:{frappe.generate_hash(length=16)}"
+		original_user = frappe.session.user
+		frappe.set_user(user)
+		try:
+			installation = frappe.get_doc(
+				{
+					"doctype": "Jarvis Agent Installation",
+					"agent": agent,
+					"enabled": 1,
+					"run_as_user": user,
+					"installable": 1,
+					"activation_state": "shadow",
+					"reviewer": user,
+					# This deliberately has no scope. The permission exception must
+					# use only the server-stamped Run.scope_json below.
+					"config": "{}",
+				}
+			)
+			installation.flags.ignore_validate = True
+			installation.insert(ignore_permissions=True, ignore_mandatory=True)
+			frappe.get_doc(
+				{
+					"doctype": "Jarvis Chat Session",
+					"session_key": session_key,
+					"user": user,
+				}
+			).insert(ignore_permissions=True)
+			run = frappe.get_doc(
+				{
+					"doctype": "Jarvis Agent Run",
+					"agent": agent,
+					"installation": installation.name,
+					"status": "running",
+					"started_at": frappe.utils.now(),
+					"session_key": session_key,
+					"scope_json": frappe.as_json(scope),
+				}
+			)
+			run.flags.ignore_validate = True
+			run.insert(ignore_permissions=True, ignore_mandatory=True)
+			_agent_run_ctx.set_session_key(session_key)
+			yield frappe._dict(installation=installation.name, run=run.name, session_key=session_key)
+		finally:
+			_agent_run_ctx.clear_session_key()
+			frappe.set_user("Administrator")
+			if "run" in locals():
+				frappe.db.delete("Jarvis Agent Run", {"name": run.name})
+			frappe.db.delete("Jarvis Chat Session", {"session_key": session_key})
+			if "installation" in locals():
+				frappe.db.delete("Jarvis Agent Installation", {"name": installation.name})
+			frappe.set_user(original_user)
+
+	def _assert_physical_count_readable(self, user, fact_name, expected, message):
+		"""Exercise the real list and single-document permission paths."""
+		frappe.set_user(user)
+		self.assertEqual(
+			frappe.get_list("Jarvis Physical Count", filters={"name": fact_name}, pluck="name"),
+			[fact_name] if expected else [],
+			message,
+		)
+		self.assertEqual(
+			frappe.has_permission("Jarvis Physical Count", "read", doc=fact_name, user=user),
+			expected,
+			message,
+		)
+
+	def _assert_physical_count_items_readable(self, user, fact_name, expected, message):
+		"""Exercise the child-table list path through its scoped parent."""
+		frappe.set_user(user)
+		self.assertEqual(
+			frappe.get_list(
+				"Jarvis Physical Count Item",
+				filters={"parent": fact_name},
+				pluck="parent",
+				parent_doctype="Jarvis Physical Count",
+			),
+			[fact_name] if expected else [],
+			message,
+		)
 
 	def _plan(self, *, pending=False):
 		from jarvis.chat.purchase_match import digest
@@ -409,8 +533,12 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			},
 			update_modified=False,
 		)
-		before_qty = frappe.db.get_value("Bin", {"warehouse": self.warehouse, "item_code": self.item}, "actual_qty")
-		before_sle = frappe.db.count("Stock Ledger Entry", {"warehouse": self.warehouse, "item_code": self.item})
+		before_qty = frappe.db.get_value(
+			"Bin", {"warehouse": self.warehouse, "item_code": self.item}, "actual_qty"
+		)
+		before_sle = frappe.db.count(
+			"Stock Ledger Entry", {"warehouse": self.warehouse, "item_code": self.item}
+		)
 		entry_key = "cyclecount" + frappe.generate_hash(length=24)
 		counted_at = frappe.utils.now()
 		frappe.set_user(self.counter)
@@ -452,6 +580,371 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		self.assertEqual(first["saved"][0]["idempotent"], 0)
 		self.assertEqual(second["saved"][0]["idempotent"], 1)
 		fact = frappe.get_doc("Jarvis Physical Count", first["saved"][0]["name"])
-		self.assertEqual((fact.docstatus, fact.recorded_by, fact.items[0].counted_qty), (1, self.counter, "0"))
-		self.assertEqual(before_qty, frappe.db.get_value("Bin", {"warehouse": self.warehouse, "item_code": self.item}, "actual_qty"))
-		self.assertEqual(before_sle, frappe.db.count("Stock Ledger Entry", {"warehouse": self.warehouse, "item_code": self.item}))
+		self.assertEqual(
+			(fact.docstatus, fact.recorded_by, fact.items[0].counted_qty), (1, self.counter, "0")
+		)
+		self.assertEqual(
+			before_qty,
+			frappe.db.get_value("Bin", {"warehouse": self.warehouse, "item_code": self.item}, "actual_qty"),
+		)
+		self.assertEqual(
+			before_sle,
+			frappe.db.count("Stock Ledger Entry", {"warehouse": self.warehouse, "item_code": self.item}),
+		)
+
+	def test_physical_count_visibility_follows_the_approved_plan(self):
+		"""Same-role users cannot list or directly read another plan's fact."""
+		from jarvis.chat import cycle_count_entry
+
+		viewer = self._user("cycle-plan-viewer@example.invalid", ("Jarvis User", "Stock User"))
+		outsider = self._user("cycle-plan-outsider@example.invalid", ("Jarvis User", "Stock User"))
+		manager = self._user(
+			"cycle-plan-manager@example.invalid", ("Jarvis User", "Stock User", "System Manager")
+		)
+		approved = self._plan()
+		frappe.share.add(
+			"Jarvis Approval Request",
+			approved.name,
+			user=viewer,
+			read=1,
+			flags={"ignore_share_permission": True},
+		)
+		frappe.clear_cache(user=viewer)
+		entry_key = "cyclecount" + frappe.generate_hash(length=24)
+		frappe.set_user(self.counter)
+		try:
+			fact_name = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				entry_key,
+			)["saved"][0]["name"]
+		finally:
+			frappe.set_user("Administrator")
+
+		for allowed in (self.counter, self.reviewer, viewer):
+			frappe.set_user(allowed)
+			self.assertEqual(
+				frappe.get_list("Jarvis Physical Count", filters={"name": fact_name}, pluck="name"),
+				[fact_name],
+				allowed,
+			)
+			self.assertTrue(
+				frappe.has_permission("Jarvis Physical Count", "read", doc=fact_name, user=allowed), allowed
+			)
+
+		for denied in (outsider, manager):
+			frappe.set_user(denied)
+			self.assertEqual(
+				frappe.get_list("Jarvis Physical Count", filters={"name": fact_name}, pluck="name"),
+				[],
+				denied,
+			)
+			self.assertFalse(
+				frappe.has_permission("Jarvis Physical Count", "read", doc=fact_name, user=denied), denied
+			)
+		frappe.set_user("Administrator")
+
+	def test_stock_variance_reads_only_inside_its_active_server_bound_scope(self):
+		"""A running delegate can read its source, but never gains Desk access."""
+		from jarvis.chat import cycle_count_entry
+		from jarvis.tools import _agent_run_ctx
+
+		approved = self._plan()
+		frappe.set_user(self.counter)
+		try:
+			fact_name = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)["saved"][0]["name"]
+		finally:
+			frappe.set_user("Administrator")
+
+		# A DocType-level check must keep working for installation validation. It
+		# does not itself grant a record: the following real Desk-like list and
+		# single-doc checks deny this unrelated Stock User without a run context.
+		self.assertTrue(frappe.has_permission("Jarvis Physical Count", "read", user=self.stock_variance_user))
+		_agent_run_ctx.clear_session_key()
+		self._assert_physical_count_readable(
+			self.stock_variance_user,
+			fact_name,
+			False,
+			"an ordinary Stock Variance run-as user can read a private count outside a dispatch",
+		)
+
+		today = frappe.utils.getdate(frappe.utils.today()).isoformat()
+		scope = {
+			"company": self.company,
+			"from_date": today,
+			"to_date": today,
+			"record_scope": {"doctype": "Warehouse", "name": self.warehouse},
+		}
+		try:
+			with self._delegate_run("stock-variance-auditor", scope) as delegate:
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					True,
+					"a matching active Stock Variance run cannot read its submitted source count",
+				)
+				for ptype in ("write", "submit"):
+					self.assertFalse(
+						frappe.has_permission(
+							"Jarvis Physical Count",
+							ptype,
+							doc=fact_name,
+							user=self.stock_variance_user,
+						),
+						f"active source scope incorrectly grants {ptype}",
+					)
+
+				def set_scope(value):
+					frappe.db.set_value(
+						"Jarvis Agent Run",
+						delegate.run,
+						"scope_json",
+						frappe.as_json(value),
+						update_modified=False,
+					)
+
+				set_scope({**scope, "company": f"{self.company}-other"})
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a run scope for a different company leaked this count",
+				)
+				set_scope({**scope, "from_date": "2000-01-01", "to_date": "2000-01-01"})
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a run scope for a different date leaked this count",
+				)
+				set_scope(
+					{
+						**scope,
+						"record_scope": {"doctype": "Warehouse", "name": self.other_warehouse},
+					}
+				)
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a run scope for a different Warehouse subtree leaked this count",
+				)
+				set_scope({"company": self.company, "from_date": today, "to_date": today})
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a malformed server scope leaked this count",
+				)
+
+				set_scope(scope)
+				session = frappe.db.get_value(
+					"Jarvis Chat Session",
+					{"session_key": delegate.session_key},
+					"name",
+				)
+				frappe.db.set_value(
+					"Jarvis Chat Session",
+					session,
+					"user",
+					self.counter,
+					update_modified=False,
+				)
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a session mapped to a different user leaked this count",
+				)
+				frappe.db.set_value(
+					"Jarvis Chat Session",
+					session,
+					"user",
+					self.stock_variance_user,
+					update_modified=False,
+				)
+				frappe.db.set_value(
+					"Jarvis Agent Run",
+					delegate.run,
+					"status",
+					"completed",
+					update_modified=False,
+				)
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a terminal run leaked this count",
+				)
+				frappe.db.set_value(
+					"Jarvis Agent Run",
+					delegate.run,
+					"status",
+					"running",
+					update_modified=False,
+				)
+				frappe.db.set_value(
+					"Jarvis Agent Installation",
+					delegate.installation,
+					"enabled",
+					0,
+					update_modified=False,
+				)
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a disabled installation leaked this count",
+				)
+				frappe.db.set_value(
+					"Jarvis Agent Installation",
+					delegate.installation,
+					"enabled",
+					1,
+					update_modified=False,
+				)
+				frappe.db.set_value(
+					"Jarvis Agent Installation",
+					delegate.installation,
+					"run_as_user",
+					self.counter,
+					update_modified=False,
+				)
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a remapped installation leaked this count",
+				)
+				frappe.db.set_value(
+					"Jarvis Agent Installation",
+					delegate.installation,
+					"run_as_user",
+					self.stock_variance_user,
+					update_modified=False,
+				)
+				frappe.db.set_value(
+					"Jarvis Physical Count",
+					fact_name,
+					"docstatus",
+					0,
+					update_modified=False,
+				)
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a draft count leaked to the source run",
+				)
+				frappe.db.set_value(
+					"Jarvis Physical Count",
+					fact_name,
+					"docstatus",
+					1,
+					update_modified=False,
+				)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_cycle_count_planner_history_is_session_bound_and_read_only(self):
+		"""The planner reads only its stamped history set while its run is active."""
+		from jarvis.chat import cycle_count_entry
+		from jarvis.tools import _agent_run_ctx
+
+		approved = self._plan()
+		frappe.set_user(self.counter)
+		try:
+			fact_name = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)["saved"][0]["name"]
+		finally:
+			frappe.set_user("Administrator")
+
+		_agent_run_ctx.clear_session_key()
+		self._assert_physical_count_readable(
+			self.stock_variance_user,
+			fact_name,
+			False,
+			"a planner run-as user can read private history outside a dispatch",
+		)
+		self._assert_physical_count_items_readable(
+			self.stock_variance_user,
+			fact_name,
+			False,
+			"a planner run-as user can read private count items outside a dispatch",
+		)
+
+		today = frappe.utils.getdate(frappe.utils.today()).isoformat()
+		scope = {
+			"company": self.company,
+			"from_date": today,
+			"to_date": today,
+			"count_history_from": today,
+			"warehouses": [self.warehouse],
+		}
+		try:
+			with self._delegate_run("cycle-count-planner-operator", scope) as delegate:
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					True,
+					"a matching active planner run cannot read its submitted history",
+				)
+				self._assert_physical_count_items_readable(
+					self.stock_variance_user,
+					fact_name,
+					True,
+					"a matching active planner run cannot read its count-item history",
+				)
+				for ptype in ("write", "submit"):
+					self.assertFalse(
+						frappe.has_permission(
+							"Jarvis Physical Count",
+							ptype,
+							doc=fact_name,
+							user=self.stock_variance_user,
+						),
+						f"active planner source scope incorrectly grants {ptype}",
+					)
+
+				def set_scope(value):
+					frappe.db.set_value(
+						"Jarvis Agent Run",
+						delegate.run,
+						"scope_json",
+						frappe.as_json(value),
+						update_modified=False,
+					)
+
+				set_scope({**scope, "company": f"{self.company}-other"})
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a planner scope for another company leaked count history",
+				)
+				set_scope({**scope, "count_history_from": "2099-01-01"})
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a planner scope after the count date leaked history",
+				)
+				set_scope({**scope, "warehouses": [self.other_warehouse]})
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a planner scope for another leaf warehouse leaked history",
+				)
+		finally:
+			frappe.set_user("Administrator")
