@@ -53,7 +53,7 @@ from frappe.utils import now_datetime
 from rq.timeouts import JobTimeoutException
 
 from jarvis._session import authenticated_user, impersonate
-from jarvis.chat import derived_config
+from jarvis.chat import agent_scope, derived_config
 from jarvis.chat.agent_activity import ACTIVITY, log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import is_system_manager, is_valid_unattended_owner
@@ -184,6 +184,7 @@ def run_due_agent_audits() -> None:
 			"schedule_weekday",
 			"schedule_day_of_month",
 			"installable",
+			"config",
 			"source_apps_json",
 			"activation_state",
 			"next_run_at",
@@ -296,6 +297,21 @@ def _sweep_one(row, now, seen: set) -> None:
 		)
 		_advance(row, now)
 		return
+
+	# A6: an old config can outlive the API save guard. Refuse it before the
+	# per-installation claim and dispatch, record the clear reason, and consume
+	# the slot; no runnable job, session, or normal run is created.
+	if agent_scope.record_scope_requested(row.get("config")):
+		from jarvis.chat.agent_catalog import registry_supports_record_scope
+
+		if not registry_supports_record_scope(row.agent):
+			_record_failed(
+				row,
+				"scheduled audit skipped: this agent does not support record-scoped runs; "
+				"remove record_scope from its configuration",
+			)
+			_advance(row, now)
+			return
 
 	# CX5-5: a scribe writes the LIVE Org wiki with no confirmation gate, so there is
 	# no such thing as a shadow scribe run — refuse it here exactly as the manual path
@@ -1252,6 +1268,27 @@ def _launch_audit(
 			).format(listing.status or "unknown")
 		)
 
+	# A6 record boundaries are an explicit bundle capability. Refuse an old or
+	# manually edited unsupported config here, before the launch savepoint can
+	# create a conversation, run, session, activity row, or dispatch. The bundled
+	# registry is the authority; a mutable listing row cannot opt an agent in.
+	record_scope_supported = False
+	if agent_scope.record_scope_requested(inst.config):
+		from jarvis.chat.agent_catalog import registry_supports_record_scope
+
+		record_scope_supported = registry_supports_record_scope(listing.agent_slug)
+		agent_scope.assert_record_scope_supported(record_scope_supported, inst.config)
+
+	# The SLA queue auditor has one mandatory, permission-bounded record
+	# boundary: an HD Team.  Validate it before the launch savepoint so a missing,
+	# malformed, or unreadable team cannot spend budget or create an orphan run.
+	# This runs under the eventual run-as identity on both manual and scheduled
+	# paths; the generic scope resolver later stamps the same boundary verbatim.
+	if listing.agent_slug == "sla-breach-ageing-auditor":
+		from jarvis.chat.sla_breach_ageing import assert_configuration
+
+		assert_configuration(inst)
+
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
 	# refuse every call the delegate makes — record_agent_run included — so the run
@@ -1381,7 +1418,13 @@ def _launch_audit(
 
 		# A6 explicit scope + A17 consistency watermark + A12 permission profile —
 		# all best-effort (never abort the launch) and computed AS the run-as user.
-		scope = _stamp_scope_and_watermark(run.name, inst, run_as_user, source_apps=source_apps)
+		scope = _stamp_scope_and_watermark(
+			run.name,
+			inst,
+			run_as_user,
+			source_apps=source_apps,
+			record_scope_supported=record_scope_supported,
+		)
 
 	except Exception:
 		# Undo every row this launch wrote, so a caller that later commits (and both
@@ -1415,7 +1458,9 @@ def _launch_audit(
 			run_id=run.name,
 			agent_id=f"agent-{slug}",
 			session_key=session_key,
-			message=_audit_prompt(listing, inst, trigger, scope),
+			message=_audit_prompt(
+				listing, inst, trigger, scope, record_scope_supported=record_scope_supported
+			),
 			timeout_s=registry_timeout_s(slug),
 		)
 	except admin_client.AdminAmbiguousError:
@@ -1589,7 +1634,11 @@ def _mint_run_session(session_key: str, user: str) -> None:
 
 
 def _stamp_scope_and_watermark(
-	run_name: str, inst, run_as_user: str, source_apps: list[str] | None = None
+	run_name: str,
+	inst,
+	run_as_user: str,
+	source_apps: list[str] | None = None,
+	record_scope_supported: bool = False,
 ) -> dict | None:
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
@@ -1620,8 +1669,20 @@ def _stamp_scope_and_watermark(
 	values: dict = {}
 	scope = None
 	try:
-		scope = agent_scope.resolve_scope(inst)
+		scope = agent_scope.resolve_scope(inst, allow_record_scope=record_scope_supported)
 	except Exception:
+		try:
+			config = frappe.parse_json(inst.get("config") or "{}")
+		except (TypeError, ValueError):
+			config = {}
+		if isinstance(config, dict) and (
+			agent_scope.record_scope_requested(config)
+			or any(config.get(k) for k in ("prior_period_from", "prior_period_to"))
+		):
+			frappe.log_error(
+				title="jarvis agent: explicit scope resolution failed", message=frappe.get_traceback()
+			)
+			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
@@ -1711,7 +1772,9 @@ def _explicit_config(listing, inst) -> dict:
 	return {**explicit, **derived_config.derive(namespaces, inst, explicit)}
 
 
-def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str:
+def _audit_prompt(
+	listing, inst, trigger: str, scope: dict | None = None, record_scope_supported: bool = False
+) -> str:
 	"""The GENERIC, non-leaky run message handed to the delegate (A2/A6).
 
 	It names NO rule, tool, threshold, engagement step, or domain — the delegate's
@@ -1734,6 +1797,11 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 		apps = ", ".join(str(a) for a in scope["source_apps"])
 		scope_block += f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
 	if scope and scope.get("company"):
+		clock_block = (
+			f'report_datetime="{scope["report_datetime"]}" (site time zone, no offset), '
+			if scope.get("report_datetime")
+			else ""
+		)
 		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period or the current date): "
 			f'company="{scope.get("company")}", '
@@ -1741,7 +1809,9 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			f'from_date="{scope.get("from_date")}", '
 			f'to_date="{scope.get("to_date")}", '
 			f'report_date="{scope.get("report_date")}", '
-			f'prior_fy_start="{scope.get("prior_fy_start")}", '
+			f"{clock_block}"
+			+ (f'execution_user="{scope["execution_user"]}", ' if scope.get("execution_user") else "")
+			+ f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
 		)
 	# EXPLICIT CONFIG (jarvis#1063 delivery): the tenant's declared config_keys values, HANDED
@@ -1750,6 +1820,13 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 	# delegate spills this JSON verbatim into config.json - it does NOT read its own installation
 	# for these tunables. Note ``Run.scope_json`` is a bench-side field that never reaches the
 	# container; the run MESSAGE is the only bench->delegate channel, so config must ride HERE.
+	additional_scope_keys = ["prior_period_from", "prior_period_to"]
+	if record_scope_supported:
+		additional_scope_keys.append("record_scope")
+	if scope and any(scope.get(k) for k in additional_scope_keys):
+		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
+			{k: scope[k] for k in additional_scope_keys if scope.get(k)}
+		)
 	explicit_config = _explicit_config(listing, inst)
 	if explicit_config:
 		# ADDITIVE, never a replacement: config.json legitimately carries fields the delegate

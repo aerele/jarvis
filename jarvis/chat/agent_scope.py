@@ -18,14 +18,44 @@ The helper runs under the caller's identity (the run-as user in
 resolved for that user.
 """
 
+from datetime import date
+
 import frappe
+from frappe import _
 
 from jarvis.exceptions import InvalidArgumentError
 
 INSTALLATION = "Jarvis Agent Installation"
 
 
-def resolve_scope(installation) -> dict:
+def _configuration(config) -> dict:
+	"""Return a config object, preserving the legacy malformed-config fallback."""
+	if isinstance(config, dict):
+		return config
+	if config:
+		try:
+			parsed = frappe.parse_json(config)
+			if isinstance(parsed, dict):
+				return parsed
+		except Exception:
+			pass
+	return {}
+
+
+def record_scope_requested(config) -> bool:
+	"""True when a tenant explicitly supplied the record-scope namespace."""
+	return "record_scope" in _configuration(config)
+
+
+def assert_record_scope_supported(supports_record_scope: bool, config) -> None:
+	"""Refuse an unsupported boundary before config or launch can have effects."""
+	if record_scope_requested(config) and supports_record_scope is not True:
+		frappe.throw(
+			_("This agent does not support record-scoped runs. Remove record_scope from its configuration.")
+		)
+
+
+def resolve_scope(installation, *, allow_record_scope: bool = False) -> dict:
 	"""Resolve the explicit run scope for an installation.
 
 	``installation`` may be a ``Jarvis Agent Installation`` doc or its name.
@@ -39,20 +69,40 @@ def resolve_scope(installation) -> dict:
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
 
-	cfg: dict = {}
-	if installation.get("config"):
-		try:
-			parsed = frappe.parse_json(installation.config)
-			if isinstance(parsed, dict):
-				cfg = parsed
-		except Exception:
-			cfg = {}
+	cfg = _configuration(installation.get("config"))
+	if record_scope_requested(cfg) and not allow_record_scope:
+		raise InvalidArgumentError("record_scope is not supported by this agent")
 
 	def _s(key):
 		val = cfg.get(key)
 		return str(val).strip() if val is not None and str(val).strip() else None
 
-	return _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	prior_from, prior_to = _s("prior_period_from"), _s("prior_period_to")
+	if prior_from or prior_to:
+		try:
+			if not prior_from or not prior_to:
+				raise ValueError
+			start, end = date.fromisoformat(prior_from), date.fromisoformat(prior_to)
+			if start > end or end >= frappe.utils.getdate(scope["from_date"]):
+				raise ValueError
+		except (ValueError, TypeError):
+			raise InvalidArgumentError("prior_period_from and prior_period_to must define an earlier period")
+		scope.update(prior_period_from=start.isoformat(), prior_period_to=end.isoformat())
+	if record_scope_requested(cfg):
+		record = cfg["record_scope"]
+		# Keep the supported agents' legacy optional-boundary behavior: a null
+		# record_scope means this particular run is company-wide.
+		if not record:
+			return scope
+		if not isinstance(record, dict) or not all(record.get(k) for k in ("doctype", "name")):
+			raise InvalidArgumentError("record_scope requires a doctype and name")
+		doc = frappe.get_doc(record["doctype"], record["name"])
+		doc.check_permission("read")
+		if doc.get("company") and doc.company != scope["company"]:
+			raise InvalidArgumentError("record_scope must belong to the selected company")
+		scope["record_scope"] = {k: str(record[k]) for k in ("doctype", "name")}
+	return scope
 
 
 def _resolve(company, fiscal_year, from_date, to_date) -> dict:
@@ -89,6 +139,7 @@ def _resolve(company, fiscal_year, from_date, to_date) -> dict:
 			raise InvalidArgumentError("from_date and to_date (or fiscal_year) are required")
 
 	prior = _prior_fiscal_year(from_date)
+	report_datetime = frappe.utils.now_datetime()
 	return {
 		"company": company,
 		"fiscal_year": fiscal_year,
@@ -101,7 +152,10 @@ def _resolve(company, fiscal_year, from_date, to_date) -> dict:
 		# end), but a period-end finding must not assess data that has not happened
 		# yet: an evaluator caps its "due" cutoff at report_date so future-dated
 		# schedule rows (e.g. the rest of the year's depreciation) are never flagged.
-		"report_date": frappe.utils.today(),
+		"report_date": report_datetime.date().isoformat(),
+		# One bench-owned instant in the site time zone, without a UTC offset.
+		"report_datetime": report_datetime.isoformat(sep=" "),
+		"execution_user": frappe.session.user,
 	}
 
 

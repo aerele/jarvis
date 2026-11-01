@@ -159,7 +159,7 @@ vi.mock("@/pages/agents/ActivationPanel.vue", () => ({
 vi.mock("@/pages/agents/ConfigForm.vue", () => ({
 	default: {
 		name: "ConfigForm",
-		props: ["validationErrors"],
+		props: ["agentSlug", "validationErrors"],
 		emits: ["save", "dirty"],
 		template: "<div />",
 	},
@@ -1315,6 +1315,133 @@ describe("AR configuration readiness", () => {
 		await wrapper.find('[data-label="Complete configuration"]').trigger("click");
 		expect(wrapper.text()).toContain("Manual review only");
 		expect(wrapper.text()).not.toContain("Run automatically");
+	});
+});
+
+describe("SLA-breach configuration readiness", () => {
+	function slaAgent(issues = {}, installationOverrides = {}) {
+		return baseAgent({
+			agent_slug: "sla-breach-ageing-auditor",
+			config_keys: '["sla_config"]',
+			installation: installedInstallation({
+				configuration_issues: issues,
+				...installationOverrides,
+			}),
+		});
+	}
+
+	function runButton(wrapper) {
+		return wrapper.find('[data-label="Run Now"]');
+	}
+
+	it("blocks an unconfigured SLA auditor and shows the Helpdesk-team action", async () => {
+		const issues = { sla_team: "Select one readable HD Team record." };
+		const wrapper = await mountDetail(slaAgent(issues));
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+		expect(wrapper.text()).toContain(
+			"Select and save one readable Helpdesk team in Configure before running."
+		);
+		await wrapper.find('[data-label="Complete configuration"]').trigger("click");
+		const form = wrapper.findComponent({ name: "ConfigForm" });
+		expect(form.props("agentSlug")).toBe("sla-breach-ageing-auditor");
+		expect(form.props("validationErrors")).toEqual(issues);
+	});
+
+	it("holds Run Now until the server has checked the selected team", async () => {
+		const fixture = slaAgent();
+		delete fixture.installation.configuration_issues;
+		const wrapper = await mountDetail(fixture);
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+	});
+
+	it("allows Run Now only after a valid saved team configuration", async () => {
+		const wrapper = await mountDetail(slaAgent({}));
+		expect(runButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("does not offer automatic scheduling before the saved Helpdesk team is valid", async () => {
+		routeMock.hash = "#configure";
+		const wrapper = await mountDetail(
+			slaAgent({ sla_team: "Select one readable HD Team record." })
+		);
+		expect(wrapper.text()).toContain(
+			"Complete the Helpdesk team configuration before enabling an automatic schedule."
+		);
+		expect(
+			wrapper.findAll("button").find((b) => b.text() === "Run automatically")
+		).toBeFalsy();
+	});
+
+	it("keeps a legacy invalid SLA schedule disableable without exposing enable controls", async () => {
+		routeMock.hash = "#configure";
+		api.setAgentSchedule.mockResolvedValue({
+			ok: true,
+			data: { name: "INST-1", next_run_at: null },
+		});
+		const wrapper = await mountDetail(
+			slaAgent(
+				{ sla_team: "Select one readable HD Team record." },
+				{
+					schedule_enabled: 1,
+					schedule_frequency: "daily",
+					schedule_time: "09:00:00",
+				}
+			)
+		);
+		expect(
+			wrapper.findAll("button").find((b) => b.text() === "Run automatically")
+		).toBeFalsy();
+		const turnOff = wrapper.find('[data-label="Turn off automatic schedule"]');
+		expect(turnOff.exists()).toBe(true);
+		await turnOff.trigger("click");
+		expect(api.setAgentSchedule).toHaveBeenCalledWith("INST-1", {
+			schedule_enabled: 0,
+			schedule_frequency: "daily",
+			schedule_time: "09:00",
+			schedule_weekday: "",
+			schedule_day_of_month: 0,
+		});
+	});
+
+	it("restores a failed legacy schedule disable so the user can retry", async () => {
+		routeMock.hash = "#configure";
+		api.setAgentSchedule
+			.mockRejectedValueOnce(new Error("Schedule update failed"))
+			.mockResolvedValueOnce({
+				ok: true,
+				data: { name: "INST-1", next_run_at: null },
+			});
+		const wrapper = await mountDetail(
+			slaAgent(
+				{ sla_team: "Select one readable HD Team record." },
+				{
+					schedule_enabled: 1,
+					schedule_frequency: "daily",
+					schedule_time: "09:00:00",
+				}
+			)
+		);
+		const turnOff = () => wrapper.find('[data-label="Turn off automatic schedule"]');
+
+		await turnOff().trigger("click");
+		await flushPromises();
+
+		expect(api.setAgentSchedule).toHaveBeenCalledTimes(1);
+		expect(turnOff().exists()).toBe(true);
+		expect(wrapper.text()).toContain("Complete the Helpdesk team configuration");
+
+		await turnOff().trigger("click");
+		await flushPromises();
+
+		expect(api.setAgentSchedule).toHaveBeenCalledTimes(2);
+	});
+
+	it("offers automatic scheduling after a valid saved Helpdesk team", async () => {
+		routeMock.hash = "#configure";
+		const wrapper = await mountDetail(slaAgent({}));
+		expect(
+			wrapper.findAll("button").find((b) => b.text() === "Run automatically")
+		).toBeTruthy();
 	});
 });
 
