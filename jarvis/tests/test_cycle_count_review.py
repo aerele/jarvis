@@ -3244,13 +3244,14 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		manager = self._user(
 			"cycle-legacy-list-manager@example.invalid", ("Jarvis User", "Stock User", "System Manager")
 		)
-		conversation = frappe.get_doc(
-			{"doctype": "Jarvis Conversation", "title": "Visible ordinary approval"}
-		).insert(ignore_permissions=True)
+		ordinary_title = "Visible ordinary approval " + frappe.generate_hash(length=12)
+		conversation = frappe.get_doc({"doctype": "Jarvis Conversation", "title": ordinary_title}).insert(
+			ignore_permissions=True
+		)
 		visible = frappe.get_doc(
 			{
 				"doctype": "Jarvis Approval Request",
-				"title": "Visible ordinary approval",
+				"title": ordinary_title,
 				"source": "Chat",
 				"status": "Pending",
 				"document_type": "",
@@ -3260,20 +3261,31 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			}
 		).insert(ignore_permissions=True)
 		hidden = self._plan(pending=True)
-		# Make the pending count plan unambiguously newest. The endpoint sorts by
-		# creation, while the fixture's rapid inserts could otherwise share a second.
+		# Make these two rows newer than every pre-existing fixture. The endpoint
+		# sorts by creation, while test-site fixtures can otherwise occupy its limit.
+		latest_creation = frappe.get_all(
+			"Jarvis Approval Request",
+			fields=["creation"],
+			order_by="creation desc",
+			limit=1,
+			pluck="creation",
+		)
+		visible_creation = frappe.utils.add_to_date(
+			latest_creation[0] if latest_creation else frappe.utils.now_datetime(), seconds=1
+		)
+		hidden_creation = frappe.utils.add_to_date(visible_creation, seconds=1)
 		frappe.db.set_value(
 			"Jarvis Approval Request",
 			visible.name,
 			"creation",
-			"2099-01-01 00:00:00",
+			visible_creation,
 			update_modified=False,
 		)
 		frappe.db.set_value(
 			"Jarvis Approval Request",
 			hidden.name,
 			"creation",
-			"2099-01-02 00:00:00",
+			hidden_creation,
 			update_modified=False,
 		)
 		real_has_permission = frappe.has_permission
@@ -3283,14 +3295,21 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 				return False
 			return real_has_permission(doctype, ptype, *args, **kwargs)
 
-		frappe.clear_cache(user=manager)
-		frappe.set_user(manager)
 		try:
-			with patch("jarvis.chat.cycle_count_permissions.frappe.has_permission", side_effect=no_native_stock_read):
+			frappe.clear_cache(user=manager)
+			frappe.set_user(manager)
+			with patch(
+				"jarvis.chat.cycle_count_permissions.frappe.has_permission", side_effect=no_native_stock_read
+			):
 				rows = approvals_api.list_approvals(status="Pending", limit=1)
+			self.assertEqual([row["name"] for row in rows], [visible.name])
 		finally:
 			frappe.set_user("Administrator")
-		self.assertEqual([row["name"] for row in rows], [visible.name])
+			frappe.db.delete("Jarvis Approval Request", {"name": ["in", [visible.name, hidden.name]]})
+			frappe.db.delete("Jarvis Agent Run", {"name": hidden.run})
+			frappe.db.delete(
+				"Jarvis Conversation", {"name": ["in", [conversation.name, hidden.conversation]]}
+			)
 
 	def test_uninstall_keeps_a_sanitized_run_for_an_approved_count_plan(self):
 		"""An uninstall leaves the sealed writer fence, but no reusable run capability."""
@@ -3298,20 +3317,29 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 
 		approved = self._plan()
 		pending = self._plan(pending=True)
-		installation = frappe.get_doc(
-			{
-				"doctype": "Jarvis Agent Installation",
-				"agent": review.AGENT,
-				"enabled": 0,
-				"run_as_user": self.counter,
-				"reviewer": self.reviewer,
-				"installable": 1,
-				"activation_state": "shadow",
-				"config": "{}",
-			}
+		installation_owner = self._user(
+			"cycle-uninstall-owner-" + frappe.generate_hash(length=12) + "@example.invalid",
+			("Jarvis User",),
 		)
-		installation.flags.ignore_validate = True
-		installation.insert(ignore_permissions=True, ignore_mandatory=True)
+		original_user = frappe.session.user
+		frappe.set_user(installation_owner)
+		try:
+			installation = frappe.get_doc(
+				{
+					"doctype": "Jarvis Agent Installation",
+					"agent": review.AGENT,
+					"enabled": 0,
+					"run_as_user": self.counter,
+					"reviewer": self.reviewer,
+					"installable": 1,
+					"activation_state": "shadow",
+					"config": "{}",
+				}
+			)
+			installation.flags.ignore_validate = True
+			installation.insert(ignore_permissions=True, ignore_mandatory=True)
+		finally:
+			frappe.set_user(original_user)
 		session_key = "agent:cycle-count-uninstall:" + frappe.generate_hash(length=16)
 		frappe.get_doc(
 			{
@@ -3387,6 +3415,7 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			frappe.db.delete("Jarvis Agent Installation", {"name": installation.name})
 			frappe.db.delete("Jarvis Agent Activity", {"installation": installation.name})
 			frappe.db.delete("Jarvis Conversation", {"name": ["in", [approved.conversation, pending.conversation]]})
+			frappe.delete_doc("User", installation_owner, force=True, ignore_permissions=True)
 			frappe.db.commit()
 
 	def test_stock_variance_reads_only_inside_its_active_server_bound_scope(self):
