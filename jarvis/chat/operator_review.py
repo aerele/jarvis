@@ -52,14 +52,24 @@ def get_inputs(run, adapter):
 	scope = frappe.parse_json(run.scope_json or "{}")
 	if not config or scope != adapter.scope_from_config(config):
 		frappe.throw("This run has no valid launch-time review scope and policy; launch a new run.")
-	current = _collect_current(adapter, scope, config)
 	stored = frappe.parse_json(state.input_snapshot_json or "null")
+	# An incomplete source is the terminal, typed result for this run. In
+	# particular, a byte-boundary failure intentionally has a scrubbed digest,
+	# so recollecting its original complete source could never match it.
+	if isinstance(stored, dict) and stored.get("complete") is False:
+		return stored
+	current = _collect_current(adapter, scope, config)
 	if stored:
 		if stored["source_digest"] != current["source_digest"]:
 			frappe.throw("Review evidence or permissions changed since capture; launch a new run.")
 		return stored
 	current["captured_at"] = frappe.utils.now()
 	current["captured_by"] = frappe.session.user
+	# A review adapter can own a protected one-file source contract. Run its
+	# final byte check after server capture metadata is present, but before this
+	# payload reaches persistent storage. Older adapters have no such contract.
+	if callable(enforce_envelope := getattr(adapter, "enforce_private_input_envelope", None)):
+		current = enforce_envelope(current)
 	frappe.db.set_value(
 		"Jarvis Agent Run", run.name, "input_snapshot_json", frappe.as_json(current), update_modified=False
 	)

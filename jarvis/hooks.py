@@ -840,6 +840,9 @@ permission_query_conditions.update(
 		# not a stock-wide desk record. Keep the fact on the same owner/reviewer/
 		# approval-share visibility boundary as that plan.
 		"Jarvis Physical Count": "jarvis.chat.cycle_count_permissions.physical_count_query_conditions",
+		# Frappe does not apply a parent's list condition to a direct child-table
+		# query. Scope count lines through their visible count header as well.
+		"Jarvis Physical Count Item": "jarvis.chat.cycle_count_permissions.physical_count_item_query_conditions",
 	}
 )
 has_permission.update(
