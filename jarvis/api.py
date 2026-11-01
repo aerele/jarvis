@@ -227,6 +227,15 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 		frappe.local.response.http_status_code = 403
 		return _error("PermissionError", "you do not have access to Jarvis")
 
+	from jarvis.tools import _private_output
+
+	# A sealed source is only available to its bound plugin delegate. Keep this
+	# guard at the shared HTTP entry point so a future handler cannot expose its
+	# capture through the normal Frappe-authenticated route.
+	if tool in _private_output.PRIVATE_SOURCE_TOOLS:
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", "Private review evidence requires a bound plugin delegate.")
+
 	if result_mode is not None:
 		frappe.local.response.http_status_code = 400
 		return _error("InvalidArgumentError", "Private audit output requires a bound plugin delegate.")

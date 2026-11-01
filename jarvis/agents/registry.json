@@ -1867,43 +1867,15 @@
       "domain": "helpdesk",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "Coming Soon",
-      "description": "Reads each new helpdesk ticket and proposes its routing as an evidence-carrying Approval Request: a suggested category, an SLA-aware priority, the owning team and a candidate agent, plus a duplicate suggestion when a recent ticket from the same requester looks like a match. It proposes only; a human confirms on the Approval Board and the confirmed routing is applied on their behalf. It never resolves, replies, closes, merges, reassigns, or touches an in-progress ticket.",
-      "tools_required": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc"
-      ],
-      "tools_allow": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc",
-        "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "canvas",
-        "message"
-      ],
-      "doctypes_required": [
-        "Jarvis Approval Request",
-        "HD Ticket",
-        "HD Team",
-        "HD Service Level Agreement",
-        "HD Agent"
-      ],
+      "description": "Coming Soon. Ticket routing is not available. This agent has no runtime tool or write surface. It cannot read tickets, create approvals, change tickets, or send messages. A later server-owned workflow will require private source transport and a human-confirmed routing action.",
+      "tools_required": [],
+      "tools_allow": [],
+      "doctypes_required": [],
       "rule_tokens": [],
-      "writes": [
-        {
-          "doctype": "Jarvis Approval Request",
-          "mode": "approval-request"
-        }
-      ],
+      "advisory_tokens": [],
+      "writes": null,
       "rule_pack": "helpdesk-queue",
       "timeout_s": 300,
       "min_apps": [

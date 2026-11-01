@@ -82,6 +82,34 @@ def _load_registry() -> dict:
 	return frappe.get_file_json(_REGISTRY_PATH)
 
 
+def _is_coming_soon_no_runtime(agent) -> bool:
+	"""True for the reviewed no-runtime teaser shape in the bundled registry."""
+	return bool(
+		isinstance(agent, dict)
+		and agent.get("status") == "Coming Soon"
+		and agent.get("tools_required") == []
+		and agent.get("tools_allow") == []
+		and agent.get("doctypes_required") == []
+		and agent.get("writes") is None
+	)
+
+
+def registry_is_coming_soon_no_runtime(agent_slug: str) -> bool:
+	"""Whether a bundled agent is a fixed no-runtime Coming Soon teaser.
+
+	A mutable marketplace listing cannot make this reviewed bundle runnable. The
+	strict registry shape deliberately leaves ordinary Coming Soon agents with a
+	real reviewed tool surface alone.
+	"""
+	slug = (agent_slug or "").strip()
+	if not slug:
+		return False
+	for agent in _load_registry().get("agents") or []:
+		if isinstance(agent, dict) and (agent.get("agent_slug") or "").strip() == slug:
+			return _is_coming_soon_no_runtime(agent)
+	return False
+
+
 # --------------------------------------------------------------------------- #
 # sync
 # --------------------------------------------------------------------------- #
@@ -349,6 +377,10 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		for a in (_load_registry().get("agents") or [])
 		if (a.get("agent_slug") or "").strip()
 	}
+	# A mutable listing must never turn a reviewed no-runtime teaser into a
+	# provisioned delegate. This final payload filter also contains legacy or
+	# manually modified DB rows that bypass controller validation.
+	closed_slugs = {slug for slug, agent in reg_by_slug.items() if _is_coming_soon_no_runtime(agent)}
 
 	filters = {"enabled": 1}
 	if owner:
@@ -374,6 +406,8 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	# on either therefore ships exactly the same set of slugs.
 	seen_agents: set[str] = set()
 	for row in installs:
+		if row.agent in closed_slugs:
+			continue
 		# De-dupe by AGENT. An install is per-(owner, agent) but the container's
 		# agent_skills namespace is per-slug, so two users who each install AND
 		# enable the same agent produce two rows for ONE slug. Admin REJECTS a
@@ -475,7 +509,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 			order_by="name asc",
 		)
 		for lst in allowed_listings:
-			if lst.name in seen_agents or lst.name not in granted:
+			if lst.name in closed_slugs or lst.name in seen_agents or lst.name not in granted:
 				continue
 			# Operator overlay: a teaser (coming-soon) / hidden (withdrawn) agent is not
 			# installable, so leg 1 must not pre-provision its delegate into a container.
