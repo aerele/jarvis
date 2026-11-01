@@ -24,6 +24,29 @@ BASE_SCOPE = {
 	"report_date": "2026-10-31",
 }
 _DEFAULT_WAREHOUSE = object()
+COMPANY_A = "Negative Stock Scope Company A"
+COMPANY_B = "Negative Stock Scope Company B"
+
+
+def _ensure_company(name: str, abbr: str) -> bool:
+	"""Create only the bare Link target this isolated scope test needs."""
+	if not frappe.db.exists("Company", name):
+		company = frappe.get_doc(
+			{
+				"doctype": "Company",
+				"company_name": name,
+				"abbr": abbr,
+				"default_currency": "INR",
+				"country": "India",
+			}
+		)
+		company.name = name
+		company.flags.ignore_links = True
+		company.flags.ignore_mandatory = True
+		company.db_insert()
+		frappe.db.commit()
+		return True
+	return False
 
 
 class TestNegativeStockScope(FrappeTestCase):
@@ -49,6 +72,9 @@ class TestNegativeStockScope(FrappeTestCase):
 			).insert(ignore_permissions=True)
 		if "Jarvis User" not in frappe.get_roles(cls.owner):
 			frappe.get_doc("User", cls.owner).add_roles("Jarvis User")
+		cls._created_companies = [
+			name for name, abbr in ((COMPANY_A, "JNSA"), (COMPANY_B, "JNSB")) if _ensure_company(name, abbr)
+		]
 		frappe.db.commit()
 
 	@classmethod
@@ -57,6 +83,9 @@ class TestNegativeStockScope(FrappeTestCase):
 		cls._reset_live_fixture()
 		if frappe.db.exists("User", cls.owner):
 			frappe.delete_doc("User", cls.owner, ignore_permissions=True, force=True)
+		for company in cls._created_companies:
+			frappe.db.delete("Company", {"name": company})
+			frappe.clear_document_cache("Company", company)
 		frappe.db.commit()
 		super().tearDownClass()
 
@@ -713,9 +742,7 @@ class TestNegativeStockScope(FrappeTestCase):
 			session_key=f"agent:negative-stock:first-company-{frappe.generate_hash(length=8)}"
 		)
 		token = frappe.parse_json(frappe.db.get_value(writeback.LISTING, AGENT, "rule_tokens"))[0]
-		companies = frappe.get_all("Company", pluck="name")
-		self.assertGreaterEqual(len(companies), 2)
-		trusted_company, other_company = companies[:2]
+		trusted_company, other_company = COMPANY_A, COMPANY_B
 		other_company_scope = {**first_scope, "company": other_company}
 		frappe.db.set_value(
 			writeback.RUN,
@@ -791,7 +818,7 @@ class TestNegativeStockScope(FrappeTestCase):
 			warehouse_name="Warehouse Root A",
 		)
 		token = frappe.parse_json(frappe.db.get_value(writeback.LISTING, AGENT, "rule_tokens"))[0]
-		company = frappe.get_all("Company", pluck="name")[0]
+		company = COMPANY_A
 		first_scope = {**first_scope, "company": company}
 		frappe.db.set_value(
 			writeback.RUN,
