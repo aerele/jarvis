@@ -40,10 +40,9 @@ def setUpModule():
 	install_synthetic_runtime_profile()
 
 
-def _result(*kept, deleted, failed=()):
-	"""``kept``: left because a reply is in progress. ``failed``: not deleted because
-	of an error."""
-	return {
+def _result(*kept, deleted, failed=(), retained_count_plan_names=()):
+	"""``kept``: retained chat names. ``failed``: names left by an error."""
+	result = {
 		"ok": True,
 		"deleted": deleted,
 		"skipped": len(kept),
@@ -51,6 +50,9 @@ def _result(*kept, deleted, failed=()):
 		"failed": len(failed),
 		"failed_names": list(failed),
 	}
+	if retained_count_plan_names:
+		result["retained_count_plan_names"] = list(retained_count_plan_names)
+	return result
 
 
 def _logged(log, title) -> list[dict]:
@@ -498,7 +500,10 @@ class TestCycleCountHistoryRetention(_ChatsTestCase):
 		)
 		frappe.db.commit()
 		try:
-			self.assertEqual(chat_api.clear_chat_history(), _result(conv, deleted=0))
+			self.assertEqual(
+				chat_api.clear_chat_history(),
+				_result(conv, deleted=0, retained_count_plan_names=[conv]),
+			)
 			self.assertTrue(frappe.db.exists(CONV, conv))
 			self.assertTrue(frappe.db.exists("Jarvis Approval Request", approval.name))
 			self.assertEqual(
