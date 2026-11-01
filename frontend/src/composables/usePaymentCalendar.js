@@ -17,6 +17,7 @@ const safeError = (result) => ({
 	state: result?.state || "failed",
 	retryable: result?.retryable !== false,
 });
+const WORKER_BUSY_RETRY_MS = 60000;
 
 export function usePaymentCalendar({
 	api = calendarApi,
@@ -92,8 +93,10 @@ export function usePaymentCalendar({
 		pollTimer,
 		expiryTimer,
 		midnightTimer,
+		workerRetryTimer,
 		pollStarted = 0,
 		recoveries = 0;
+	let workerRetry = null;
 	let preferencePending = null,
 		preferenceDraining = false;
 	const handledMidnights = new Set();
@@ -101,11 +104,17 @@ export function usePaymentCalendar({
 	const sameSelection = (value) =>
 		value.company === company.value &&
 		JSON.stringify(value.accounts) === JSON.stringify(accounts.value);
+	const clearWorkerRetry = () => {
+		clearTimeout(workerRetryTimer);
+		workerRetryTimer = null;
+		workerRetry = null;
+	};
 	const stopTimers = () => {
 		clearTimeout(refreshTimer);
 		clearTimeout(pollTimer);
 		clearTimeout(expiryTimer);
 		clearTimeout(midnightTimer);
+		clearWorkerRetry();
 	};
 
 	function clearFinance() {
@@ -302,6 +311,41 @@ export function usePaymentCalendar({
 		pollStarted = performance.now();
 		await requestSelection(token, selection);
 	}
+	function resumeWorkerRetry() {
+		const retry = workerRetry;
+		if (
+			!retry ||
+			!retry.ready ||
+			document.hidden ||
+			floorSaving.value ||
+			!current(retry.token)
+		)
+			return false;
+		clearTimeout(workerRetryTimer);
+		workerRetryTimer = null;
+		workerRetry = null;
+		refreshing.value = true;
+		waitingForWorker.value = false;
+		refreshIssue.value = null;
+		void requestSelection(retry.token, retry.selection, retry.attempt);
+		return true;
+	}
+	function scheduleWorkerRetry(token, selection, attempt, delay) {
+		clearWorkerRetry();
+		workerRetry = {
+			token,
+			selection,
+			attempt,
+			ready: document.hidden,
+		};
+		if (workerRetry.ready) return;
+		workerRetryTimer = setTimeout(() => {
+			workerRetryTimer = null;
+			if (!workerRetry || workerRetry.token !== token) return;
+			workerRetry.ready = true;
+			resumeWorkerRetry();
+		}, delay);
+	}
 	async function requestSelection(token, selection, attempt = 0) {
 		if (!current(token)) return;
 		if (refreshing.value && selection.month !== "current" && month.value)
@@ -321,11 +365,15 @@ export function usePaymentCalendar({
 				refreshIssue.value = safeError(result);
 				detailLoading.value = false;
 				upcomingLoading.value = false;
+				scheduleWorkerRetry(token, selection, attempt, WORKER_BUSY_RETRY_MS);
 				return;
 			}
-			pollTimer = setTimeout(() => {
-				void requestSelection(token, selection, attempt + 1);
-			}, [1000, 2000, 3000, 5000][Math.min(attempt, 3)]);
+			scheduleWorkerRetry(
+				token,
+				selection,
+				attempt + 1,
+				[1000, 2000, 3000, 5000][Math.min(attempt, 3)]
+			);
 			return;
 		}
 		if (
@@ -493,7 +541,12 @@ export function usePaymentCalendar({
 		midnightTimer = setTimeout(checkClock, msUntilSiteMidnight(timezone()) + 20);
 	}
 	function checkClock() {
-		if (disposed || document.hidden || refreshing.value || floorSaving.value) return;
+		if (disposed || document.hidden || floorSaving.value) return;
+		if (workerRetry) {
+			resumeWorkerRetry();
+			return;
+		}
+		if (refreshing.value) return;
 		if (!snapshot.value) {
 			if (phase.value === "expired" && resumeRefresh)
 				void refresh({ automatic: true, background: true });
@@ -707,9 +760,6 @@ export function usePaymentCalendar({
 	}
 	window.addEventListener("focus", onActivity);
 	document.addEventListener("visibilitychange", onActivity);
-	document.addEventListener("click", onActivity);
-	document.addEventListener("keydown", onActivity);
-	document.addEventListener("wheel", onActivity, { passive: true });
 	onScopeDispose(() => {
 		disposed = true;
 		generation++;
@@ -718,9 +768,6 @@ export function usePaymentCalendar({
 		layout.value = null;
 		window.removeEventListener("focus", onActivity);
 		document.removeEventListener("visibilitychange", onActivity);
-		document.removeEventListener("click", onActivity);
-		document.removeEventListener("keydown", onActivity);
-		document.removeEventListener("wheel", onActivity);
 	});
 	return {
 		loadingSnapshot,
