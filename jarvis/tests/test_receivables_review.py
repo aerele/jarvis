@@ -536,11 +536,12 @@ class TestReceivablesReview(FrappeTestCase):
 		from jarvis.tools import _private_output, registry
 		from jarvis.tools import get_receivables_review_inputs as tool
 
-		with patch.object(tool._private_output, "is_private", return_value=False):
+		with _private_output.request(False), patch.object(tool, "get_inputs") as collect:
 			with self.assertRaises(InvalidArgumentError):
 				tool.get_receivables_review_inputs()
+			collect.assert_not_called()
 		with (
-			patch.object(tool._private_output, "is_private", return_value=True),
+			_private_output.request(True),
 			patch.object(tool, "get_session_key", return_value="agent:ar-private"),
 			patch.object(frappe.db, "get_value", return_value="RUN-AR-PRIVATE"),
 			patch.object(frappe, "get_doc", return_value=frappe._dict(name="RUN-AR-PRIVATE")),
