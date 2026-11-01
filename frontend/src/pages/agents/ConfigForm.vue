@@ -92,6 +92,143 @@
 					<p class="mt-1.5 text-p-xs text-ink-gray-5">{{ f.help }}</p>
 				</div>
 
+				<div
+					v-else-if="f.type === 'deposit-status'"
+					class="space-y-4 rounded-lg border border-outline-gray-2 p-4"
+				>
+					<div>
+						<p class="text-sm font-medium text-ink-gray-8">{{ f.label }}</p>
+						<p class="mt-1 text-p-xs text-ink-gray-5">{{ f.help }}</p>
+						<p class="mt-1 text-p-xs text-ink-gray-5">
+							Set Company and Period from/to above to one completed calendar month.
+							This agent does not use Fiscal year because it would replace the
+							selected period. The cutoff must be on or after the period end.
+						</p>
+					</div>
+
+					<div>
+						<label class="mb-1.5 block text-xs text-ink-gray-5"
+							>Liability account group</label
+						>
+						<div
+							@focusin="linkFields.depositAccountGroup.prime()"
+							@click="linkFields.depositAccountGroup.prime()"
+						>
+							<Autocomplete
+								:options="linkFields.depositAccountGroup.options.value"
+								:modelValue="depositAccountGroupValue()"
+								placeholder="Search Account…"
+								@update:query="(q) => linkFields.depositAccountGroup.onQuery(q)"
+								@update:modelValue="onDepositAccountGroupPick"
+							/>
+						</div>
+						<p class="mt-1.5 text-p-xs text-ink-gray-5">
+							Select the readable Account group that contains the declared PF and ESI
+							liability accounts. Jarvis does not infer an account group.
+						</p>
+					</div>
+
+					<FormControl
+						type="text"
+						label="Named payroll reviewer"
+						description="Name the reviewer who owns the result."
+						:modelValue="deposit.reviewer"
+						@update:modelValue="(value) => (deposit.reviewer = value)"
+					/>
+					<label class="flex items-start gap-2 text-sm text-ink-gray-7">
+						<input
+							data-label="Reviewer capacity confirmed"
+							type="checkbox"
+							:checked="deposit.reviewer_capacity"
+							@change="deposit.reviewer_capacity = $event.target.checked"
+						/>
+						<span>
+							I confirm that this reviewer has capacity to review the result.
+						</span>
+					</label>
+					<FormControl
+						type="date"
+						label="Booking evidence cutoff"
+						description="Bookings after this date are not assessed. This date does not prove a deposit or payment."
+						:modelValue="deposit.settlement_as_of"
+						@update:modelValue="(value) => (deposit.settlement_as_of = value)"
+					/>
+
+					<div class="space-y-2">
+						<div>
+							<p class="text-sm font-medium text-ink-gray-8">
+								Liability account mapping
+							</p>
+							<p class="mt-1 text-p-xs text-ink-gray-5">
+								Map each direct liability account to PF or ESI. The evaluator
+								checks that each account belongs to the selected group and company.
+							</p>
+						</div>
+						<div
+							v-for="(row, index) in deposit.liability_accounts"
+							:key="`deposit-account-${index}`"
+							class="grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_9rem_auto] md:items-end"
+						>
+							<FormControl
+								type="text"
+								:label="`Liability account ${index + 1}`"
+								:modelValue="row.account"
+								@update:modelValue="(value) => (row.account = value)"
+							/>
+							<FormControl
+								type="select"
+								:label="`Scheme ${index + 1}`"
+								:options="depositSchemeOptions"
+								:modelValue="row.scheme"
+								@update:modelValue="(value) => (row.scheme = value)"
+							/>
+							<Button label="Remove account" @click="removeDepositAccount(index)" />
+						</div>
+						<Button label="Add liability account" @click="addDepositAccount" />
+					</div>
+
+					<div class="space-y-2">
+						<div>
+							<p class="text-sm font-medium text-ink-gray-8">
+								Declared source vouchers
+							</p>
+							<p class="mt-1 text-p-xs text-ink-gray-5">
+								Declare the Journal Entry or Payment Entry and its liability month.
+								Jarvis does not infer a liability month from a booking date or
+								remark.
+							</p>
+						</div>
+						<div
+							v-for="(row, index) in deposit.vouchers"
+							:key="`deposit-voucher-${index}`"
+							class="grid grid-cols-1 gap-2 md:grid-cols-[9rem_minmax(0,1fr)_9rem_auto] md:items-end"
+						>
+							<FormControl
+								type="select"
+								:label="`Voucher type ${index + 1}`"
+								:options="depositVoucherTypeOptions"
+								:modelValue="row.doctype"
+								@update:modelValue="(value) => (row.doctype = value)"
+							/>
+							<FormControl
+								type="text"
+								:label="`Voucher name ${index + 1}`"
+								:modelValue="row.name"
+								@update:modelValue="(value) => (row.name = value)"
+							/>
+							<FormControl
+								type="month"
+								:label="`Liability month ${index + 1}`"
+								:modelValue="row.liability_month"
+								@update:modelValue="(value) => (row.liability_month = value)"
+							/>
+							<Button label="Remove voucher" @click="removeDepositVoucher(index)" />
+						</div>
+						<Button label="Add source voucher" @click="addDepositVoucher" />
+					</div>
+					<ErrorMessage v-if="depositError" :message="depositError" />
+				</div>
+
 				<FormControl
 					v-else-if="['text', 'date'].includes(f.type)"
 					:type="f.type"
@@ -189,6 +326,7 @@ import { useLinkSearch } from "@/composables/useLinkSearch";
 import {
 	SCOPE_CONFIG_FIELDS,
 	AGENT_SPECIFIC_CONFIG_FIELDS,
+	CONFIG_FIELD_BY_KEY,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
 	KEY_TO_PATH,
@@ -220,6 +358,7 @@ const agentSpecificFields = computed(() =>
 const operatorReview = computed(() => props.configKeys.includes("review_scope"));
 const arReview = computed(() => props.configKeys.includes("settlement_hold_days"));
 const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
+const payrollDepositReview = computed(() => props.configKeys.includes("deposit"));
 const defaultsData = ref(null);
 const defaultsLoading = ref(false);
 const defaultsMessage = ref("");
@@ -227,7 +366,8 @@ let defaultsRequest = 0;
 const visibleFields = computed(() => [
 	// Bank reconciliation reads a statement window only; a fiscal year does not apply.
 	...SCOPE_CONFIG_FIELDS.filter(
-		(field) => !(bankRecon.value && field.key === "fiscal_year")
+		(field) =>
+			!((bankRecon.value || payrollDepositReview.value) && field.key === "fiscal_year")
 	).map((field) => {
 		if (!operatorReview.value || field.key === "fiscal_year") return field;
 		if (bankRecon.value && field.type === "date-range")
@@ -321,6 +461,185 @@ const form = reactive({
 	engagement_risk_level: "",
 	rounding_step: "",
 });
+
+const depositSchemeOptions = [
+	{ label: "Select scheme", value: "" },
+	{ label: "PF", value: "pf" },
+	{ label: "ESI", value: "esi" },
+];
+const depositVoucherTypeOptions = [
+	{ label: "Select voucher type", value: "" },
+	{ label: "Journal Entry", value: "Journal Entry" },
+	{ label: "Payment Entry", value: "Payment Entry" },
+];
+
+function emptyDeposit() {
+	return {
+		account_group: "",
+		reviewer: "",
+		reviewer_capacity: false,
+		settlement_as_of: "",
+		liability_accounts: [],
+		vouchers: [],
+	};
+}
+
+const deposit = reactive(emptyDeposit());
+const depositError = ref("");
+
+function replaceDeposit(value) {
+	const next = emptyDeposit();
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		next.account_group = typeof value.account_group === "string" ? value.account_group : "";
+		next.reviewer = typeof value.reviewer === "string" ? value.reviewer : "";
+		next.reviewer_capacity = value.reviewer_capacity === true;
+		next.settlement_as_of =
+			typeof value.settlement_as_of === "string" ? value.settlement_as_of : "";
+		if (value.liability_accounts && typeof value.liability_accounts === "object") {
+			next.liability_accounts = Object.entries(value.liability_accounts)
+				.filter(
+					([account, scheme]) =>
+						typeof account === "string" && typeof scheme === "string"
+				)
+				.map(([account, scheme]) => ({ account, scheme }));
+		}
+		if (Array.isArray(value.vouchers)) {
+			next.vouchers = value.vouchers
+				.filter((row) => row && typeof row === "object" && !Array.isArray(row))
+				.map((row) => ({
+					doctype: typeof row.doctype === "string" ? row.doctype : "",
+					name: typeof row.name === "string" ? row.name : "",
+					liability_month:
+						typeof row.liability_month === "string" ? row.liability_month : "",
+				}));
+		}
+	}
+	Object.assign(deposit, next);
+	depositError.value = "";
+}
+
+function addDepositAccount() {
+	deposit.liability_accounts.push({ account: "", scheme: "" });
+}
+
+function removeDepositAccount(index) {
+	deposit.liability_accounts.splice(index, 1);
+}
+
+function addDepositVoucher() {
+	deposit.vouchers.push({ doctype: "", name: "", liability_month: "" });
+}
+
+function removeDepositVoucher(index) {
+	deposit.vouchers.splice(index, 1);
+}
+
+function depositAccountGroupValue() {
+	return deposit.account_group
+		? { label: deposit.account_group, value: deposit.account_group }
+		: null;
+}
+
+function onDepositAccountGroupPick(opt) {
+	deposit.account_group = opt && opt.value ? String(opt.value) : "";
+}
+
+function isIsoDate(value) {
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+	const parsed = new Date(`${value}T00:00:00Z`);
+	return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function isLiabilityMonth(value) {
+	return /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+}
+
+function depositScopeError(cutoff) {
+	const company = String(form.company || "").trim();
+	const fiscalYear = String(form.fiscal_year || "").trim();
+	const fromDate = String(form.from_date || "").trim();
+	const toDate = String(form.to_date || "").trim();
+	if (!company) return "Select the company for this payroll deposit review.";
+	if (fiscalYear)
+		return "Clear Fiscal year and enter one full liability month in Period from/to.";
+	if (!isIsoDate(fromDate) || !isIsoDate(toDate))
+		return "Enter Period from and Period to for one full liability month.";
+	const start = new Date(`${fromDate}T00:00:00Z`);
+	const monthEnd = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0))
+		.toISOString()
+		.slice(0, 10);
+	if (start.getUTCDate() !== 1 || toDate !== monthEnd)
+		return "Period from/to must be one full liability month.";
+	if (cutoff < toDate) return "Booking evidence cutoff must be on or after Period to.";
+	return null;
+}
+
+function normaliseDeposit() {
+	const accountRows = deposit.liability_accounts
+		.map((row) => ({
+			account: String(row.account || "").trim(),
+			scheme: String(row.scheme || "").trim(),
+		}))
+		.filter((row) => row.account || row.scheme);
+	const voucherRows = deposit.vouchers
+		.map((row) => ({
+			doctype: String(row.doctype || "").trim(),
+			name: String(row.name || "").trim(),
+			liability_month: String(row.liability_month || "").trim(),
+		}))
+		.filter((row) => row.doctype || row.name || row.liability_month);
+	const accountGroup = String(deposit.account_group || "").trim();
+	const reviewer = String(deposit.reviewer || "").trim();
+	const cutoff = String(deposit.settlement_as_of || "").trim();
+	if (
+		!accountGroup &&
+		!reviewer &&
+		!deposit.reviewer_capacity &&
+		!cutoff &&
+		!accountRows.length &&
+		!voucherRows.length
+	)
+		return "Complete the payroll deposit-status setup before saving.";
+	if (!accountGroup) return "Select the liability account group.";
+	if (!reviewer) return "Enter the named payroll reviewer.";
+	if (!deposit.reviewer_capacity) return "Confirm the reviewer has capacity.";
+	if (!isIsoDate(cutoff)) return "Enter a valid booking evidence cutoff.";
+	const scopeError = depositScopeError(cutoff);
+	if (scopeError) return scopeError;
+	if (!accountRows.length) return "Add at least one liability account mapping.";
+	if (!voucherRows.length) return "Add at least one declared source voucher.";
+
+	const liabilityAccounts = {};
+	for (const row of accountRows) {
+		if (!row.account || !["pf", "esi"].includes(row.scheme))
+			return "Each liability account mapping needs an account and PF or ESI.";
+		if (liabilityAccounts[row.account]) return "Each liability account can appear only once.";
+		liabilityAccounts[row.account] = row.scheme;
+	}
+
+	const voucherKeys = new Set();
+	const vouchers = [];
+	for (const row of voucherRows) {
+		if (!row.name || !["Journal Entry", "Payment Entry"].includes(row.doctype))
+			return "Each declared source voucher needs a Journal Entry or Payment Entry and a name.";
+		if (!isLiabilityMonth(row.liability_month))
+			return "Each declared source voucher needs a liability month in YYYY-MM format.";
+		const key = `${row.doctype}:${row.name}`;
+		if (voucherKeys.has(key)) return "Each declared source voucher can appear only once.";
+		voucherKeys.add(key);
+		vouchers.push(row);
+	}
+
+	return {
+		account_group: accountGroup,
+		reviewer,
+		reviewer_capacity: true,
+		settlement_as_of: cutoff,
+		liability_accounts: liabilityAccounts,
+		vouchers,
+	};
+}
+
 const advanced = ref("{}");
 const advancedError = ref("");
 const initialState = ref("");
@@ -328,7 +647,9 @@ const initialState = ref("");
 // Only rendered fields count: a default filled into a field this agent never
 // shows or saves (e.g. report_date) must not leave the form looking unsaved.
 function formState() {
-	const shown = Object.fromEntries([...visibleKeys.value].sort().map((key) => [key, form[key]]));
+	const shown = Object.fromEntries(
+		[...visibleKeys.value].sort().map((key) => [key, key === "deposit" ? deposit : form[key]])
+	);
 	return JSON.stringify({ form: shown, advanced: advanced.value });
 }
 
@@ -353,6 +674,8 @@ function seed(cfg) {
 		if (v == null && path !== key) v = c[key];
 		form[key] = v == null ? "" : String(v);
 	}
+	if (visibleKeys.value.has("deposit")) replaceDeposit(getPath(c, KEY_TO_PATH.deposit));
+	else replaceDeposit(null);
 	// Advanced (JSON) holds everything NOT covered by a visible field's path -
 	// a deep clone with each visible path (and its flat legacy counterpart,
 	// now migrated into `form` above) removed. deletePath also drops a
@@ -365,6 +688,7 @@ function seed(cfg) {
 		deletePath(rest, path);
 		if (path !== key) delete rest[key];
 	}
+	if (payrollDepositReview.value) delete rest.fiscal_year;
 	advanced.value = JSON.stringify(rest, null, 2);
 	advancedError.value = "";
 	initialState.value = formState();
@@ -373,10 +697,14 @@ function seed(cfg) {
 watch([() => props.config, () => [...visibleKeys.value].join(",")], () => seed(props.config), {
 	immediate: true,
 });
-watch([form, advanced, initialState], () => emit("dirty", formState() !== initialState.value), {
-	deep: true,
-	immediate: true,
-});
+watch(
+	[form, deposit, advanced, initialState],
+	() => emit("dirty", formState() !== initialState.value),
+	{
+		deep: true,
+		immediate: true,
+	}
+);
 
 function onAdvancedInput(v) {
 	advanced.value = v;
@@ -419,6 +747,7 @@ const linkFields = {
 	company: makeLinkField("Company"),
 	fiscal_year: makeLinkField("Fiscal Year"),
 	bank_account: makeLinkField("Bank Account"),
+	depositAccountGroup: makeLinkField("Account"),
 };
 watch([operatorReview, defaultsData], () => {
 	linkFields.fiscal_year.reprime();
@@ -529,6 +858,7 @@ onBeforeUnmount(() => {
 function save() {
 	// 1) advanced JSON must parse to an object
 	let base = {};
+	depositError.value = "";
 	const raw = advanced.value.trim();
 	if (raw) {
 		try {
@@ -555,6 +885,17 @@ function save() {
 	const merged = JSON.parse(JSON.stringify(base));
 	for (const key of visibleKeys.value) {
 		const path = KEY_TO_PATH[key] || key;
+		const field = CONFIG_FIELD_BY_KEY[key];
+		if (field?.type === "deposit-status") {
+			const normalised = normaliseDeposit();
+			if (typeof normalised === "string") {
+				depositError.value = normalised;
+				return;
+			}
+			delete merged.fiscal_year;
+			setPath(merged, path, normalised);
+			continue;
+		}
 		const v = String(form[key] ?? "").trim();
 		if (path !== key) delete merged[key];
 		if (v === "") {

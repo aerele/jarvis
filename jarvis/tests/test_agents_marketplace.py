@@ -657,6 +657,34 @@ class TestAgentsMarketplace(unittest.TestCase):
 		stored = json.loads(frappe.db.get_value(INSTALLATION, inst, "config"))
 		self.assertEqual(stored, payload)
 
+	def test_set_config_persists_a_bounded_payroll_deposit_object_unchanged(self):
+		slug = "statutory-payroll-deposit-status"
+		allow_listing_for(slug, user=self.owner)
+		inst = _install_as(self.owner, slug)
+		payload = {
+			"deposit": {
+				"account_group": "PAYROLL-LIABILITIES-TEST",
+				"liability_accounts": {"PF-PAYABLE-TEST": "pf", "ESI-PAYABLE-TEST": "esi"},
+				"vouchers": [
+					{
+						"doctype": "Journal Entry",
+						"name": "JE-PAYROLL-TEST",
+						"liability_month": "2024-04",
+					}
+				],
+				"settlement_as_of": "2024-05-31",
+				"reviewer": "payroll.reviewer@example.test",
+				"reviewer_capacity": True,
+			}
+		}
+		frappe.set_user(self.owner)
+		try:
+			agents_api.set_config(inst, json.dumps(payload))
+		finally:
+			frappe.set_user("Administrator")
+		stored = json.loads(frappe.db.get_value(INSTALLATION, inst, "config"))
+		self.assertEqual(stored, payload)
+
 	# ------------------------------------------------------------------ #
 	# (d4) jarvis#1062 polish: Published operator listings with no dispatch
 	# path were flipped to Coming Soon in the registry; a re-sync must carry

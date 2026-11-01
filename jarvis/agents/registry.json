@@ -1668,7 +1668,7 @@
       "delivery": "delegate",
       "version": "0.4.1",
       "status": "Published",
-      "description": "Reviews each owner-declared native outgoing payroll booking against a dated due-date reference. It keeps current interest and damages evidence-review gaps visible and shows VISHWAS as an external-review reference only. It does not decide eligibility, receipt, default or penalty. Gazette text and qualified legal review remain pending.",
+      "description": "Reviews each owner-declared native outgoing payroll booking in one configured Account group against a dated due-date reference. It keeps current interest and damages evidence-review gaps visible and shows VISHWAS as an external-review reference only. It does not decide eligibility, receipt, default or penalty. Gazette text and qualified legal review remain pending.",
       "tools_required": [
         "jarvis__query"
       ],
