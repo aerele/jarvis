@@ -234,7 +234,7 @@ async function mountBoard(query = {}, params = {}) {
 	return w;
 }
 
-const rail = (w) => w.find(".w-\\[360px\\]");
+const rail = (w) => w.find('[data-testid="approvals-rail"]');
 const group = (w) => w.find('[aria-labelledby="actions-title"]');
 const actionRow = (w, text) =>
 	group(w)
@@ -304,6 +304,24 @@ describe("ApprovalsBoard one inbox", () => {
 		const w = await board();
 		expect(w.element.children).toHaveLength(3);
 		expect(w.element.children[2].contains(group(w).element)).toBe(true);
+	});
+
+	it("stacks the board and wraps its tag control below lg", async () => {
+		const w = await board();
+		const split = w.get('[data-testid="approvals-split-view"]');
+		expect(split.classes()).toContain("flex-col");
+		expect(split.classes()).toContain("lg:flex-row");
+		expect(rail(w).classes()).toContain("w-full");
+		expect(rail(w).classes()).toContain("max-h-[40vh]");
+		expect(rail(w).classes()).toContain("lg:w-[360px]");
+		expect(pane(w).classes()).toContain("min-w-0");
+
+		const actions = w.get('[data-testid="approval-decision-actions"]');
+		expect(actions.classes()).toContain("flex-wrap");
+		expect(button(actions, "Tag for review").exists()).toBe(true);
+		expect(w.get('[data-testid="approval-tag-picker"]').classes()).toContain(
+			"max-w-[calc(100vw-2rem)]"
+		);
 	});
 
 	it("re-reads both lists when the sidebar badge moves (#616)", async () => {
