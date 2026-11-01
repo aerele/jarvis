@@ -15,9 +15,7 @@ MAX_ROWS = 20_000
 # These tools have an explicit plugin-owned local-input contract. Adding a read
 # here is not enough by itself: its tool implementation must reject the ordinary
 # transport and its bundle must verify the returned receipt before it can assess.
-PRIVATE_SOURCE_TOOLS = frozenset(
-	{"get_cycle_count_inputs", "get_purchase_match_inputs", "get_receivables_review_inputs"}
-)
+PRIVATE_SOURCE_TOOLS = frozenset({"get_purchase_match_inputs", "get_receivables_review_inputs"})
 TOOLS = frozenset({"query", "run_report"}) | PRIVATE_SOURCE_TOOLS
 _active = ContextVar("jarvis_private_audit_output", default=False)
 
