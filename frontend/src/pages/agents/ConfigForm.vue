@@ -320,6 +320,10 @@ const form = reactive({
 	percentage: "",
 	engagement_risk_level: "",
 	rounding_step: "",
+	baseline_hrms_reviewer: "",
+	baseline_hrms_reviewer_capacity: "",
+	baseline_hrms_history_from: "",
+	baseline_hrms_test_declaration: "",
 });
 const advanced = ref("{}");
 const advancedError = ref("");

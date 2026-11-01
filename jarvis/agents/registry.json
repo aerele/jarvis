@@ -472,7 +472,10 @@
         "tier": "Advanced"
       },
       "config_keys": [
-        "baseline_hrms"
+        "baseline_hrms.reviewer",
+        "baseline_hrms.reviewer_capacity",
+        "baseline_hrms.history_from",
+        "baseline_hrms.test_declaration"
       ]
     },
     {

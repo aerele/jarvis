@@ -29,6 +29,13 @@ const ALL_AGENT_SPECIFIC_PATHS = [
 	"materiality.rounding_step",
 ];
 
+const HRMS_BASELINE_PATHS = [
+	"baseline_hrms.reviewer",
+	"baseline_hrms.reviewer_capacity",
+	"baseline_hrms.history_from",
+	"baseline_hrms.test_declaration",
+];
+
 const api = vi.hoisted(() => ({ searchLink: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/api", () => api);
 const apiAgents = vi.hoisted(() => ({
@@ -881,6 +888,37 @@ describe("per-agent gating via the configKeys prop", () => {
 	it("the full configKeys set (close-auditor) renders every agent-specific field, no note", () => {
 		const w = mountForm({});
 		expect(w.text()).not.toContain("This agent has no additional settings.");
+	});
+
+	it("the HRMS nested config paths render the payroll fields and save their exact object", async () => {
+		const w = mountForm(
+			{
+				baseline_hrms: {
+					reviewer: "Payroll lead",
+					reviewer_capacity: "HR reviewer",
+					history_from: "2025-10-01",
+					test_declaration: "Quarterly payroll baseline",
+				},
+			},
+			{ configKeys: HRMS_BASELINE_PATHS }
+		);
+		expect(w.text()).toContain("Payroll reviewer");
+		expect(w.text()).toContain("Payroll reviewer role");
+		expect(w.text()).toContain("Retained payroll history starts");
+		expect(w.text()).toContain("Payroll test declaration");
+		expect(w.text()).not.toContain("Materiality benchmark amount");
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+
+		await field(w, "Payroll reviewer").setValue("Payroll controller");
+		await field(w, "Save configuration").trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			baseline_hrms: {
+				reviewer: "Payroll controller",
+				reviewer_capacity: "HR reviewer",
+				history_from: "2025-10-01",
+				test_declaration: "Quarterly payroll baseline",
+			},
+		});
 	});
 
 	it("a stale agent-specific value this agent doesn't declare stays visible in Advanced (JSON), not lost", async () => {

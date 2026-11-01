@@ -11,8 +11,8 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), the only agent that
- *     reads any agent-specific config today. Rendered only when the
+ *     CRITICAL fix, they are NOT flat top-level keys), and the payroll
+ *     baseline's `baseline_hrms` declaration. Rendered only when the
  *     listing's own `config_keys` (agents_api.py get_agent, jarvis#1063)
  *     names the field's storage `path` (a dot path for a nested key) -
  *     ConfigForm.vue filters this array by that list at render time.
@@ -164,6 +164,34 @@ export const CONFIG_FIELD_SET = [
 		label: "Rounding step",
 		type: "number",
 		help: "Step used to detect round-number plugs",
+	},
+	{
+		key: "baseline_hrms_reviewer",
+		path: "baseline_hrms.reviewer",
+		label: "Payroll reviewer",
+		type: "text",
+		help: "Name the reviewer for this payroll activity report.",
+	},
+	{
+		key: "baseline_hrms_reviewer_capacity",
+		path: "baseline_hrms.reviewer_capacity",
+		label: "Payroll reviewer role",
+		type: "text",
+		help: "State the reviewer's role or capacity for this report.",
+	},
+	{
+		key: "baseline_hrms_history_from",
+		path: "baseline_hrms.history_from",
+		label: "Retained payroll history starts",
+		type: "date",
+		help: "The first date for which the owner says payroll records are retained.",
+	},
+	{
+		key: "baseline_hrms_test_declaration",
+		path: "baseline_hrms.test_declaration",
+		label: "Payroll test declaration",
+		type: "text",
+		help: "Optional text shown with the payroll activity report.",
 	},
 	{
 		key: "stale_floor_days",

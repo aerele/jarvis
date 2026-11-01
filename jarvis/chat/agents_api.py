@@ -1433,8 +1433,9 @@ def set_config(installation: str, config: str) -> dict:
 	inputs are nested under a top-level ``materiality`` object
 	(``materiality.benchmark_value`` / ``.percentage`` /
 	``.engagement_risk_level`` / ``.rounding_step`` — verified against
-	jarvis-agents/agents/close-auditor/evaluate.py's ``_materiality_pl_balance``,
-	the only bundle that reads any agent-specific config today)."""
+	jarvis-agents/agents/close-auditor/evaluate.py's ``_materiality_pl_balance``).
+	The HRMS payroll baseline reads its closed ``baseline_hrms`` namespace through
+	its four declared dot paths."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	try:

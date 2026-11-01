@@ -48,6 +48,10 @@ describe("CONFIG_FIELD_SET", () => {
 				"percentage",
 				"engagement_risk_level",
 				"rounding_step",
+				"baseline_hrms_reviewer",
+				"baseline_hrms_reviewer_capacity",
+				"baseline_hrms_history_from",
+				"baseline_hrms_test_declaration",
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
@@ -55,7 +59,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders scope, the materiality set, then the vendor-ledger ageing floors", () => {
+	it("orders scope, materiality, payroll baseline and vendor-ledger ageing fields", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -73,6 +77,10 @@ describe("CONFIG_FIELD_SET", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"baseline_hrms_reviewer",
+			"baseline_hrms_reviewer_capacity",
+			"baseline_hrms_history_from",
+			"baseline_hrms_test_declaration",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
@@ -127,7 +135,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific is the close-auditor materiality set plus the vendor-ledger ageing floors", () => {
+	it("agent-specific includes materiality, payroll baseline and vendor-ledger ageing fields", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -141,6 +149,10 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"baseline_hrms_reviewer",
+			"baseline_hrms_reviewer_capacity",
+			"baseline_hrms_history_from",
+			"baseline_hrms_test_declaration",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
@@ -174,6 +186,15 @@ describe("KEY_TO_PATH (local form key -> storage dot path)", () => {
 		expect(KEY_TO_PATH.percentage).toBe("materiality.percentage");
 		expect(KEY_TO_PATH.engagement_risk_level).toBe("materiality.engagement_risk_level");
 		expect(KEY_TO_PATH.rounding_step).toBe("materiality.rounding_step");
+	});
+
+	it("the payroll baseline keys are nested dot paths", () => {
+		expect(KEY_TO_PATH.baseline_hrms_reviewer).toBe("baseline_hrms.reviewer");
+		expect(KEY_TO_PATH.baseline_hrms_reviewer_capacity).toBe(
+			"baseline_hrms.reviewer_capacity"
+		);
+		expect(KEY_TO_PATH.baseline_hrms_history_from).toBe("baseline_hrms.history_from");
+		expect(KEY_TO_PATH.baseline_hrms_test_declaration).toBe("baseline_hrms.test_declaration");
 	});
 });
 

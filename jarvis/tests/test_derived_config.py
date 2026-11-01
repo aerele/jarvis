@@ -76,6 +76,34 @@ class TestDerivedConfig(FrappeTestCase):
 		out = agent_scheduler._explicit_config({"config_keys": ["ageing.stale_floor_days"]}, inst)
 		self.assertEqual(out, {"ageing": {"stale_floor_days": 9}})
 
+	def test_explicit_config_passes_the_declared_hrms_namespace_only(self):
+		keys = [
+			"baseline_hrms.reviewer",
+			"baseline_hrms.reviewer_capacity",
+			"baseline_hrms.history_from",
+			"baseline_hrms.test_declaration",
+		]
+		inst = _inst(
+			config=(
+				'{"baseline_hrms":{"reviewer":"Payroll lead",'
+				'"reviewer_capacity":"HR reviewer",'
+				'"history_from":"2025-10-01",'
+				'"test_declaration":"Quarterly baseline"},"other":1}'
+			)
+		)
+		out = agent_scheduler._explicit_config({"config_keys": keys}, inst)
+		self.assertEqual(
+			out,
+			{
+				"baseline_hrms": {
+					"reviewer": "Payroll lead",
+					"reviewer_capacity": "HR reviewer",
+					"history_from": "2025-10-01",
+					"test_declaration": "Quarterly baseline",
+				}
+			},
+		)
+
 	def test_failing_provider_is_omitted_and_logged_without_value(self):
 		salt = derived_config._fingerprint_salt(_inst())
 		boom = patch.dict(
