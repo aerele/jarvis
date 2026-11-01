@@ -340,6 +340,14 @@ class TestHumanizeToolCall(unittest.TestCase):
 		self.assertEqual(label, "Queried GL Entry")
 		self.assertEqual(detail, "2 rows")
 
+	def test_ar_evidence_step_names_only_the_private_source_shape(self):
+		label, detail = agent_run_steps.humanize_tool_call(
+			"get_receivables_review_inputs", {}, {"rows": [{"customer": "private"}]}
+		)
+		self.assertEqual(label, "Captured AR review evidence")
+		self.assertEqual(detail, "1 row")
+		self.assertNotIn("private", label + detail)
+
 	def test_get_balance_on_names_the_account(self):
 		label, _ = agent_run_steps.humanize_tool_call(
 			"get_balance_on", {"account": "Debtors - AB"}, {"balance": 1200.0}
