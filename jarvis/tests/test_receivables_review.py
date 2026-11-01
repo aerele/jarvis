@@ -1,6 +1,5 @@
 """AR custody, completeness, human-only disposition and native-ledger integration."""
 
-import hashlib
 import json
 import os
 import subprocess
@@ -593,18 +592,15 @@ class TestReceivablesReview(FrappeTestCase):
 
 
 def assess_native(source, assessment):
-	"""Run the bundle against the protected one-source private-file frame."""
-	data = json.dumps({"rows": [source]}, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
-		"utf-8"
+	"""Run the exact server-sealed source bytes through the paired private runtime."""
+	from jarvis.tools import _private_output
+
+	wire, _ = _private_output.prepare(
+		{"ok": True, "data": {"rows": [source]}}, tool="get_receivables_review_inputs"
 	)
-	receipt = {
-		"private_output": True,
-		"count": 1,
-		"bytes": len(data),
-		"sha256": hashlib.sha256(data).hexdigest(),
-	}
+	data = wire["data"].encode("utf-8")
 	header = json.dumps(
-		{"result_mode": "private_audit_v1", "private_output": receipt},
+		{"result_mode": wire["result_mode"], "private_output": wire["private_output"]},
 		separators=(",", ":"),
 		sort_keys=True,
 	).encode("utf-8")
@@ -776,7 +772,12 @@ class TestNativeReceivablesReview(FrappeTestCase):
 			documents.append((run.doctype, run.name))
 			captured = review.get_inputs(run)
 			self.assertTrue(captured["complete"], captured)
-			assessed = assess_native(captured, assessment)
+			# Deliberately reverse the source key order. The server must seal sorted
+			# canonical bytes that the strict paired runtime accepts, not a Python dict
+			# serialization that happens to match this test process.
+			nonlexical_captured = {key: captured[key] for key in reversed(sorted(captured))}
+			self.assertNotEqual(list(nonlexical_captured), sorted(nonlexical_captured))
+			assessed = assess_native(nonlexical_captured, assessment)
 			self.assertEqual(assessed["findings"][0]["review_state"], "reminder_candidate", assessed)
 			self.assertIn("Opening/prior-period", assessed["findings"][0]["note"])
 			self.assertTrue(
