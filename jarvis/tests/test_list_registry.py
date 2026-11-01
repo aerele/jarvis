@@ -54,6 +54,7 @@ EXPECTED_VIEW_KEYS = {
 	"agent_findings",
 	"agent_admin_overview",
 	"approvals",
+	"count_plans",
 	"macro_runs",
 	"personalise_questions",
 	"personalise_notes",
@@ -328,10 +329,10 @@ class TestListRegistryIntegrity(FrappeTestCase):
 			"the migrated view set drifted from what this wave built — update "
 			"EXPECTED_MIGRATED in the SAME commit that migrates a view",
 		)
-		# And the counts follow from it: 5 migrated / 18 pending / 23 active.
+		# And the counts follow from it: 5 migrated / 19 pending / 24 active.
 		self.assertEqual(len(migrated), 5)
-		self.assertEqual(len(pending), 18)
-		self.assertEqual(len(active), 23)
+		self.assertEqual(len(pending), 19)
+		self.assertEqual(len(active), 24)
 
 	def test_migrated_views_actually_accept_filters_v2(self):
 		"""'migrated' is a claim; this checks the wiring behind it."""
