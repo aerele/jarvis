@@ -130,7 +130,7 @@ test("a leaving A decision sheet cannot inherit B props", () => {
 	const sheet = chatView.slice(start, chatView.indexOf("/>", start));
 	assert.match(
 		sheet,
-		/:key="`\$\{decisionContext\?\.generation \?\? viewGeneration\}:\$\{decisionContext\?\.conversation \?\? ''\}:\$\{decisionContext\?\.token \?\? ''\}`"/,
+		/:key="`\$\{decisionContext\?\.generation\s*\?\?\s*viewGeneration\}:\$\{\s*decisionContext\?\.conversation\s*\?\?\s*''\s*\}:\$\{\s*decisionContext\?\.token\s*\?\?\s*''\s*\}`"/,
 		"a conversation change must remount the sheet before a leaving transition can emit"
 	);
 });
