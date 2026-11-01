@@ -122,7 +122,9 @@ def _require_native_read(doctype: str, name: str):
 def _book_qty(warehouse: str, item_code: str, *, required: bool) -> str | None:
 	if not frappe.has_permission("Bin", "read"):
 		if required:
-			frappe.throw(_("You need read access to current stock before recording a count."), frappe.PermissionError)
+			frappe.throw(
+				_("You need read access to current stock before recording a count."), frappe.PermissionError
+			)
 		return None
 	rows = frappe.get_list(
 		"Bin",
@@ -134,7 +136,10 @@ def _book_qty(warehouse: str, item_code: str, *, required: bool) -> str | None:
 		frappe.throw(_("This item has duplicate current-stock rows and cannot be counted safely."))
 	if not rows:
 		if required:
-			frappe.throw(_("The current stock row is no longer readable. Refresh the count plan."), frappe.PermissionError)
+			frappe.throw(
+				_("The current stock row is no longer readable. Refresh the count plan."),
+				frappe.PermissionError,
+			)
 		return None
 	return str(rows[0]["actual_qty"])
 
@@ -168,13 +173,18 @@ def _counted_at(value) -> datetime:
 def _require_entry_rights(doc, ar, evidence: dict, *, action: str) -> None:
 	if action == "cancel" or doc.get("amended_from"):
 		if not _may_correct(doc, evidence):
-			frappe.throw(_("Only the recorder or the named reviewer can correct this physical count."), frappe.PermissionError)
+			frappe.throw(
+				_("Only the recorder or the named reviewer can correct this physical count."),
+				frappe.PermissionError,
+			)
 		permission = "cancel" if action == "cancel" else "amend"
 	else:
 		_require_visible(ar, evidence)
 		permission = "create" if doc.is_new() or doc.docstatus == 0 else "submit"
 	if not frappe.has_permission(COUNT, permission):
-		frappe.throw(_("You need Stock User permission to record this physical count."), frappe.PermissionError)
+		frappe.throw(
+			_("You need Stock User permission to record this physical count."), frappe.PermissionError
+		)
 
 
 def _lock_sibling_reviews(input_digest: str) -> list[str]:
@@ -202,7 +212,9 @@ def _assert_no_pending_sibling(ar, evidence: dict) -> None:
 	)
 	if pending:
 		frappe.throw(
-			_("Another warehouse review from this plan is still pending. Decide every plan review before recording a count."),
+			_(
+				"Another warehouse review from this plan is still pending. Decide every plan review before recording a count."
+			),
 			frappe.ValidationError,
 		)
 
@@ -337,7 +349,12 @@ def _parse_entries(value: str | list[dict]) -> list[dict]:
 		if not isinstance(entry, dict) or set(entry) != {"item_code", "counted_qty"}:
 			frappe.throw(_("Each counted item must contain only item_code and counted_qty."))
 		item_code = entry.get("item_code")
-		if not isinstance(item_code, str) or not item_code or item_code != item_code.strip() or item_code in seen:
+		if (
+			not isinstance(item_code, str)
+			or not item_code
+			or item_code != item_code.strip()
+			or item_code in seen
+		):
 			frappe.throw(_("Counted item codes must be unique."))
 		seen.add(item_code)
 		parsed.append({"item_code": item_code, "counted_qty": _decimal_text(entry.get("counted_qty"))})
@@ -504,7 +521,9 @@ def record_counts(request: str, counted_at: str, entries: str | list[dict], entr
 		frappe.throw(_("Only an approved count plan can receive a physical count."), frappe.PermissionError)
 	_require_visible(ar, evidence)
 	if not _can_record(ar, evidence):
-		frappe.throw(_("You do not have the required stock access to record this count."), frappe.PermissionError)
+		frappe.throw(
+			_("You do not have the required stock access to record this count."), frappe.PermissionError
+		)
 
 	# Lock every sibling in canonical order. A count in one warehouse otherwise
 	# changes the shared source digest while another review stays Pending.
