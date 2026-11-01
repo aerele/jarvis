@@ -359,7 +359,8 @@ def collect(scope: dict, config: dict) -> dict:
 		catalog = rows("Item", ITEM_FIELDS, {"name": ["in", items]}) if items else []
 		if len(catalog) != len(items):
 			raise EvidenceGap(
-				"permission_slice", "Some in-scope stock items are not completely readable to the execution user."
+				"permission_slice",
+				"Some in-scope stock items are not completely readable to the execution user.",
 			)
 
 		for doctype in ("Stock Ledger Entry", "Stock Entry", "Jarvis Physical Count"):
@@ -417,8 +418,8 @@ def collect(scope: dict, config: dict) -> dict:
 			)
 			if not items_for_header:
 				raise EvidenceGap(
-				"unsupported_customisation", "A submitted physical count has no readable item rows."
-			)
+					"unsupported_customisation", "A submitted physical count has no readable item rows."
+				)
 			count_items.extend(items_for_header)
 
 		snapshot["datasets"] = {
@@ -557,7 +558,10 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 		if findings:
 			frappe.throw("Incomplete count plans cannot stage proposals.")
 		return [], coverage, False
-	if not isinstance(findings, list) or len(json.dumps(findings, ensure_ascii=True).encode()) > MAX_OUTPUT_BYTES:
+	if (
+		not isinstance(findings, list)
+		or len(json.dumps(findings, ensure_ascii=True).encode()) > MAX_OUTPUT_BYTES
+	):
 		frappe.throw("The count plan is too large. Reduce its line limit or warehouse scope.")
 	if len(findings) != len(scope["warehouses"]) or {row.get("ref_name") for row in findings} != set(
 		scope["warehouses"]
@@ -610,7 +614,10 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 		warehouse = finding["ref_name"]
 		population = sum(key[0] == warehouse for key in bins)
 		if (
-			any(type(proposal[key]) is not int or proposal[key] < 0 for key in ("lines_considered", "lines_planned", "lines_rolled"))
+			any(
+				type(proposal[key]) is not int or proposal[key] < 0
+				for key in ("lines_considered", "lines_planned", "lines_rolled")
+			)
 			or proposal["lines_considered"] != population
 			or not isinstance(proposal["lines"], list)
 			or proposal["lines_planned"] != len(proposal["lines"])
@@ -647,16 +654,19 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 			if line["stock_uom"] != item["stock_uom"]:
 				frappe.throw("The proposed stock unit does not match the captured item.")
 			if any(
-				_number(line[field]) != _number(bins[key][field])
-				for field in ("actual_qty", "stock_value")
+				_number(line[field]) != _number(bins[key][field]) for field in ("actual_qty", "stock_value")
 			) or _number(line["outward_qty"]) != outward.get(key, Decimal(0)):
 				frappe.throw("The proposed values do not match the captured stock and movement evidence.")
 			if line["last_physical_count_on"] != history.get(key):
-				frappe.throw("The proposed count history does not match the captured submitted physical counts.")
+				frappe.throw(
+					"The proposed count history does not match the captured submitted physical counts."
+				)
 			if line["last_physical_count_on"]:
 				try:
 					if _date(line["last_physical_count_on"], "last_physical_count_on") > cutoff:
-						frappe.throw("The proposal includes an item that was counted within its configured cadence.")
+						frappe.throw(
+							"The proposal includes an item that was counted within its configured cadence."
+						)
 				except ValueError:
 					frappe.throw("The proposed physical-count date is invalid.")
 			if type(line["capture_required"]) is not bool or line["capture_required"] != bool(

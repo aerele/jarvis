@@ -42,7 +42,9 @@ class JarvisPhysicalCount(NotRenamable, Document):
 		# A cancellation is retained as evidence. A count fact must never become
 		# erasable by cancelling it first.
 		if self.docstatus != 0:
-			frappe.throw(_("Submitted or cancelled physical-count facts cannot be deleted."), frappe.PermissionError)
+			frappe.throw(
+				_("Submitted or cancelled physical-count facts cannot be deleted."), frappe.PermissionError
+			)
 
 	def _guard_immutable_submitted_fields(self):
 		if self.is_new() or self.docstatus == 0:
