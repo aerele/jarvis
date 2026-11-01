@@ -409,6 +409,142 @@ class TestApplyAction(FrappeTestCase):
 		self.assertEqual(msgs[0].tool_name, "create_doc")
 		self.assertIn(r["name"], msgs[1].content)
 
+<<<<<<< HEAD
+=======
+	def _apply_todo(self, conv, **extra):
+		payload = {
+			"verb": "create",
+			"doctype": "ToDo",
+			"values": {"description": "applied note test"},
+			"conversation": conv,
+			**extra,
+		}
+		r = apply_action(frappe.as_json(payload))
+		self._cleanup_doc("ToDo", r["name"])
+		return r
+
+	def test_confirm_without_continue_notes_the_agent(self):
+		# jarvis#2253: the agent never sees the receipt rows, so a Confirm that queues
+		# no turn must leave a note for the next turn's context bracket.
+		from unittest.mock import patch
+
+		conv = self._conv()
+		with patch("jarvis.chat.agent_notes.append") as append:
+			r = self._apply_todo(conv)
+		append.assert_called_once()
+		self.assertEqual(append.call_args.args[0], conv)
+		self.assertIn(f"Created ToDo {r['name']}.", append.call_args.args[1])
+
+	def test_confirm_with_continue_does_not_add_a_note(self):
+		from unittest.mock import patch
+
+		conv = self._conv()
+		with (
+			patch("jarvis.chat.agent_notes.append") as append,
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={"queued": False}),
+		):
+			self._apply_todo(conv, **{"continue": 1})
+		append.assert_not_called()
+
+	def test_failed_apply_does_not_note_the_agent(self):
+		from unittest.mock import patch
+
+		conv = self._conv()
+		with patch("jarvis.chat.agent_notes.append") as append:
+			apply_action(
+				frappe.as_json({"verb": "create", "doctype": "ToDo", "values": {}, "conversation": conv})
+			)
+		append.assert_not_called()
+
+	def _trigger_values(self, **overrides):
+		values = {
+			"trigger_name": "zz-596-note",
+			"target_doctype": "ToDo",
+			"doc_event": "after_insert",
+			"action_type": "LLM",
+			"llm_instruction": "Say ok.",
+		}
+		values.update(overrides)
+		return values
+
+	def _last_assistant_content(self, conv) -> str:
+		msgs = frappe.get_all(
+			"Jarvis Chat Message",
+			filters={"conversation": conv, "role": "assistant"},
+			fields=["content"],
+			order_by="seq asc",
+		)
+		return msgs[-1].content
+
+	def test_create_trigger_receipt_reports_enabled_on(self):
+		# jarvis#596: the draft-panel receipt must state the real enabled state,
+		# not stay silent (the managed Server Script always shows Disabled).
+		conv = self._conv()
+		r = apply_action(
+			frappe.as_json(
+				{
+					"verb": "create",
+					"doctype": "Jarvis Trigger",
+					"values": self._trigger_values(),
+					"conversation": conv,
+				}
+			)
+		)
+		self._cleanup_doc("Jarvis Trigger", r["name"])
+		self.assertIn("It is on.", self._last_assistant_content(conv))
+
+	def test_create_trigger_receipt_reports_paused_when_disabled(self):
+		conv = self._conv()
+		r = apply_action(
+			frappe.as_json(
+				{
+					"verb": "create",
+					"doctype": "Jarvis Trigger",
+					"values": self._trigger_values(enabled=0),
+					"conversation": conv,
+				}
+			)
+		)
+		self._cleanup_doc("Jarvis Trigger", r["name"])
+		self.assertIn("It is paused.", self._last_assistant_content(conv))
+
+	def test_update_trigger_receipt_reports_current_state(self):
+		trig = frappe.get_doc({"doctype": "Jarvis Trigger", **self._trigger_values()}).insert(
+			ignore_permissions=True
+		)
+		self._cleanup_doc("Jarvis Trigger", trig.name)
+		conv = self._conv()
+		apply_action(
+			frappe.as_json(
+				{
+					"verb": "update",
+					"doctype": "Jarvis Trigger",
+					"name": trig.name,
+					"values": {"enabled": 0},
+					"conversation": conv,
+				}
+			)
+		)
+		self.assertIn("It is paused.", self._last_assistant_content(conv))
+
+	def test_create_other_doctype_receipt_has_no_trigger_note(self):
+		conv = self._conv()
+		r = apply_action(
+			frappe.as_json(
+				{
+					"verb": "create",
+					"doctype": "ToDo",
+					"values": {"description": "no note"},
+					"conversation": conv,
+				}
+			)
+		)
+		self._cleanup_doc("ToDo", r["name"])
+		content = self._last_assistant_content(conv)
+		self.assertNotIn("It is on.", content)
+		self.assertNotIn("It is paused.", content)
+
+>>>>>>> 5952a8a (Tell the agent about a draft Confirm that queues no turn)
 	def test_conversation_ownership_enforced(self):
 		conv = self._conv()  # owner = Administrator
 		frappe.set_user("Guest")
