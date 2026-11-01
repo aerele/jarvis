@@ -223,6 +223,22 @@ def record_agent_run(
 
 	inst = frappe.get_doc(INSTALLATION, run_row.installation)
 	run_doc = frappe.get_doc(RUN, run_row.name)
+	negative_receipt_capture = None
+	if run_doc.agent == "negative-stock-valuation-auditor":
+		# Capture only server-stamped launch facts while the delegate session still
+		# exists. Any missing #2338/#2339 prerequisite is a safe no-receipt, not a
+		# writeback failure. The receipt module rechecks terminal state after this
+		# normal writeback completes.
+		from jarvis.chat import negative_stock_receipt
+
+		try:
+			negative_receipt_capture = negative_stock_receipt.capture_launch(run_doc)
+		except negative_stock_receipt.ReceiptRefused:
+			pass
+		except Exception:
+			frappe.logger("jarvis.negative_stock_receipt").warning(
+				{"event": "negative_stock_receipt_capture_refused", "run": run_doc.name}, exc_info=True
+			)
 
 	# The agent's bench-held id-only token manifest + allowed ref doctypes. Tokens
 	# are opaque (A2); allowed refs = the agent's declared doctypes_required plus the
@@ -347,6 +363,10 @@ def record_agent_run(
 		detail=(f"{plural(len(dropped), 'row')} dropped" if dropped else None),
 		owner=run_doc.owner,
 	)
+	if negative_receipt_capture:
+		# Best-effort only for the completed Negative Stock audit. A refusal leaves
+		# its normal findings intact and holds the future Reorder stage closed.
+		negative_stock_receipt.persist(negative_receipt_capture)
 
 	return {
 		"run": run_doc.name,
