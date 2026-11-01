@@ -10,13 +10,30 @@ _BACKENDS = {
 	"ap-3way-match-operator": "jarvis.chat.purchase_match",
 	"ar-collections-operator": "jarvis.chat.receivables_review",
 	"bank-recon-operator": "jarvis.chat.bank_reconciliation_review",
+	"cycle-count-planner-operator": "jarvis.chat.cycle_count_review",
 }
 AGENTS = frozenset(_BACKENDS)
+_FRESH_SNAPSHOT_AGENT = "cycle-count-planner-operator"
 
 
 def backend(agent):
 	path = _BACKENDS.get(agent)
 	return frappe.get_module(path) if path else None
+
+
+def _collect_current(adapter, scope, config):
+	"""Collect review evidence from the right freshness boundary for an adapter.
+
+	Cycle Count compares live stock, movement, and submitted-count evidence to a
+	sealed result.  Its source read must start after any earlier permission or
+	row read in this request, otherwise MariaDB repeatable-read can quietly reuse
+	an old snapshot.  Other review adapters keep their established collection
+	contract.
+	"""
+	if adapter.AGENT == _FRESH_SNAPSHOT_AGENT:
+		with adapter.fresh_source_snapshot():
+			return adapter.collect(scope, config)
+	return adapter.collect(scope, config)
 
 
 def get_inputs(run, adapter):
@@ -35,14 +52,24 @@ def get_inputs(run, adapter):
 	scope = frappe.parse_json(run.scope_json or "{}")
 	if not config or scope != adapter.scope_from_config(config):
 		frappe.throw("This run has no valid launch-time review scope and policy; launch a new run.")
-	current = adapter.collect(scope, config)
 	stored = frappe.parse_json(state.input_snapshot_json or "null")
+	# An incomplete source is the terminal, typed result for this run. In
+	# particular, a byte-boundary failure intentionally has a scrubbed digest,
+	# so recollecting its original complete source could never match it.
+	if isinstance(stored, dict) and stored.get("complete") is False:
+		return stored
+	current = _collect_current(adapter, scope, config)
 	if stored:
 		if stored["source_digest"] != current["source_digest"]:
 			frappe.throw("Review evidence or permissions changed since capture; launch a new run.")
 		return stored
 	current["captured_at"] = frappe.utils.now()
 	current["captured_by"] = frappe.session.user
+	# A review adapter can own a protected one-file source contract. Run its
+	# final byte check after server capture metadata is present, but before this
+	# payload reaches persistent storage. Older adapters have no such contract.
+	if callable(enforce_envelope := getattr(adapter, "enforce_private_input_envelope", None)):
+		current = enforce_envelope(current)
 	frappe.db.set_value(
 		"Jarvis Agent Run", run.name, "input_snapshot_json", frappe.as_json(current), update_modified=False
 	)
@@ -58,11 +85,19 @@ def stage_reviews(run, inst, findings, adapter):
 	if not frappe.has_permission("Jarvis Approval Request", "create"):
 		frappe.throw("Live review requires permission to create Approval Requests.", frappe.PermissionError)
 	stored = frappe.parse_json(run.input_snapshot_json)
-	reviewer = inst.reviewer
+	# The reviewer is sealed with the launch policy. A later installation edit
+	# must not change the person who can receive or decide an in-flight review.
+	# Cycle Count seals a named reviewer in the launch config. Older review
+	# agents keep their installation reviewer because their config has no such
+	# field. This preserves their existing review contract.
+	reviewer = stored["config"].get("reviewer") or inst.reviewer
 	if not reviewer or not frappe.db.get_value("User", reviewer, "enabled"):
 		frappe.throw("An enabled, named reviewer is required.")
 	with impersonate(reviewer):
-		if adapter.collect(stored["scope"], stored["config"])["source_digest"] != stored["source_digest"]:
+		if (
+			_collect_current(adapter, stored["scope"], stored["config"])["source_digest"]
+			!= stored["source_digest"]
+		):
 			frappe.throw(
 				"The named reviewer cannot read the complete assessment evidence.", frappe.PermissionError
 			)
@@ -84,6 +119,31 @@ def stage_reviews(run, inst, findings, adapter):
 		)
 		name = frappe.db.get_value("Jarvis Approval Request", {"assessment_key": key}, "name")
 		if name:
+			prior = frappe.db.get_value(
+				"Jarvis Approval Request",
+				name,
+				["run", "status", "assessment_evidence"],
+				as_dict=True,
+				for_update=True,
+			)
+			if not prior.assessment_evidence:
+				original = frappe.parse_json(
+					frappe.db.get_value("Jarvis Agent Run", prior.run, "input_snapshot_json") or "{}"
+				)
+				if prior.status != "Pending" or original.get("source_digest") != stored["source_digest"]:
+					frappe.throw(
+						"The saved review has no matching source evidence; an administrator must check it."
+					)
+				# Repair a pending request from the same sealed evidence. Keep its original run.
+				frappe.db.set_value(
+					"Jarvis Approval Request",
+					name,
+					{
+						"assessment_evidence": frappe.as_json({**evidence, "run": prior.run}),
+						"assessment_input_digest": stored["source_digest"],
+					},
+					update_modified=False,
+				)
 			requests.append(name)
 			continue
 		context = adapter.review_context(stored, finding)
@@ -103,6 +163,7 @@ def stage_reviews(run, inst, findings, adapter):
 				"result_class": "derived_candidate",
 				"assessment_key": key,
 				"assessment_evidence": frappe.as_json(evidence),
+				"assessment_input_digest": stored["source_digest"],
 				"question": adapter.REVIEW_QUESTION,
 				"context_md": "<pre>"
 				+ escape(context)
@@ -112,7 +173,8 @@ def stage_reviews(run, inst, findings, adapter):
 			}
 		)
 		doc.flags.jarvis_server_write = True
-		doc.insert()
+		# Create permission is checked above. Keep the server-owned evidence at permlevel 1.
+		doc.insert(ignore_permissions=True)
 		frappe.share.add(
 			"Jarvis Approval Request",
 			doc.name,
@@ -137,7 +199,7 @@ def check_review(doc, approve, adapter=None):
 		frappe.throw("Only the named reviewer may dispose of this assessment.", frappe.PermissionError)
 	if approve:
 		evidence = frappe.parse_json(doc.assessment_evidence)
-		current = adapter.collect(evidence["scope"], evidence["policy"])
+		current = _collect_current(adapter, evidence["scope"], evidence["policy"])
 		if current["source_digest"] != evidence["input_digest"]:
 			frappe.throw(
 				"This review is stale or no longer fully readable. Re-run the assessment; no posting is authorised."

@@ -391,7 +391,17 @@ class TestReceivablesReview(FrappeTestCase):
 		artifact.name = "REVIEW"
 		with (
 			patch.object(frappe, "has_permission", return_value=True),
-			patch.object(frappe.db, "get_value", side_effect=[1, None, 1, "REVIEW"]),
+			patch.object(
+				frappe.db,
+				"get_value",
+				side_effect=[
+					1,
+					None,
+					1,
+					"REVIEW",
+					frappe._dict(run="RUN", status="Pending", assessment_evidence="{}"),
+				],
+			),
 			patch.object(frappe, "get_doc", return_value=artifact) as create,
 			patch.object(review, "collect", return_value=source),
 			patch.object(frappe.share, "add"),

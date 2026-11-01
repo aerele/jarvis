@@ -15,7 +15,9 @@ MAX_ROWS = 20_000
 # These tools have an explicit plugin-owned local-input contract. Adding a read
 # here is not enough by itself: its tool implementation must reject the ordinary
 # transport and its bundle must verify the returned receipt before it can assess.
-PRIVATE_SOURCE_TOOLS = frozenset({"get_purchase_match_inputs", "get_receivables_review_inputs"})
+PRIVATE_SOURCE_TOOLS = frozenset(
+	{"get_cycle_count_inputs", "get_purchase_match_inputs", "get_receivables_review_inputs"}
+)
 TOOLS = frozenset({"query", "run_report"}) | PRIVATE_SOURCE_TOOLS
 _active = ContextVar("jarvis_private_audit_output", default=False)
 
@@ -34,7 +36,7 @@ def is_private():
 
 
 def require_source_transport(tool):
-	"""Refuse an AP/AR snapshot unless the private delegate boundary is active."""
+	"""Refuse a private source snapshot unless the delegate boundary is active."""
 	if tool in PRIVATE_SOURCE_TOOLS and not is_private():
 		raise InvalidArgumentError("Private review evidence requires private audit output.")
 
@@ -67,6 +69,27 @@ def allowed(mode, tool, cap):
 	)
 
 
+def canonical_bytes(data) -> bytes:
+	"""Return the exact canonical private-envelope bytes for ``data``.
+
+	Callers that capture a private source use this before persistence. This keeps
+	the source-size guard identical to the later transport guard in ``prepare``.
+	"""
+	try:
+		return json.dumps(
+			data,
+			default=json_handler,
+			sort_keys=True,
+			ensure_ascii=False,
+			allow_nan=False,
+			separators=(",", ":"),
+		).encode()
+	except (TypeError, ValueError, OverflowError) as exc:
+		raise InvalidArgumentError(
+			"The private source cannot be serialized; coverage is incomplete."
+		) from exc
+
+
 def prepare(result, *, tool):
 	"""Return the wire envelope and the safe receipt, or one bounded error."""
 	if not result.get("ok"):
@@ -97,19 +120,7 @@ def prepare(result, *, tool):
 		raise InvalidArgumentError("The private report is not a complete inline result.")
 	if data.get("_truncated") or data.get("partial") or (tool == "run_report" and data.get("more_rows")):
 		raise InvalidArgumentError("The private source is truncated; coverage is incomplete.")
-	try:
-		body = json.dumps(
-			data,
-			default=json_handler,
-			sort_keys=True,
-			ensure_ascii=False,
-			allow_nan=False,
-			separators=(",", ":"),
-		).encode()
-	except (TypeError, ValueError, OverflowError) as exc:
-		raise InvalidArgumentError(
-			"The private source cannot be serialized; coverage is incomplete."
-		) from exc
+	body = canonical_bytes(data)
 	if len(body) > MAX_BYTES:
 		raise InvalidArgumentError(
 			"The private source exceeds its row or byte limit; coverage is incomplete."

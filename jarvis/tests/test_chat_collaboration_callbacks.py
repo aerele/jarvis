@@ -108,6 +108,7 @@ class TestCollaborationCallbacks(CollaborationCase):
 
 	def test_unknown_new_tool_and_private_evidence_never_admit_callbacks(self):
 		for tool in (
+			"get_cycle_count_inputs",
 			"get_purchase_match_inputs",
 			"get_receivables_review_inputs",
 			"recall",

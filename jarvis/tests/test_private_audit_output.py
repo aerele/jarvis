@@ -31,6 +31,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 				[
 					"jarvis__query",
 					"jarvis__run_report",
+					"jarvis__get_cycle_count_inputs",
 					"jarvis__get_purchase_match_inputs",
 					"jarvis__get_receivables_review_inputs",
 				],
@@ -72,6 +73,10 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			args = {"report_name": "Fake report"}
 		with (
 			patch.dict(registry._TOOLS, {tool: lambda **kwargs: payload}),
+			# The core test substitutes a source handler before the Cycle child
+			# registers it. Keep the registry's signature cache aligned with that
+			# ``**kwargs`` substitute.
+			patch.dict(registry._ACCEPTS_VAR_KW, {tool: True}),
 			patch("jarvis.api._get_header", return_value=None),
 		):
 			return api._dispatch_from_session(self.actor, key or self.key, tool, args, result_mode=mode)
