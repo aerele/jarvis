@@ -1,10 +1,8 @@
-"""Direct tests for the zero-arg jarvis__get_engagement_config tool.
+"""Direct tests for the zero-argument engagement-configuration tool.
 
-The tool resolves the run's installation from the trusted session_key (never a model
-id) and returns ONLY the installation's `config` JSON. These exercise its four raise
-paths, the parse/return-shape guards, and the secret-minimisation claim (only the
-`config` field is ever read), with the two DB reads + session lookup mocked so the
-suite stays deterministic and DB-free (backport-safe unittest.TestCase).
+The delegate gets only the immutable snapshot stamped on its *running* Run. It
+must never recover configuration from the mutable installation row: an operator
+save after dispatch belongs to the next run, not the in-flight evidence.
 """
 
 import unittest
@@ -20,83 +18,124 @@ INSTALLATION = "Jarvis Agent Installation"
 
 
 class TestGetEngagementConfig(unittest.TestCase):
-	def _call(self, *, session_key, run_row, config):
-		"""Run the tool with get_session_key + both frappe.db.get_value reads mocked.
+	def _call(self, *, session_key, run_row):
+		"""Run the tool with the trusted session and Run query mocked.
 
-		Returns (result, get_value_mock). `run_row` is the RUN lookup's return (dict or
-		None); `config` is the INSTALLATION `config` column's raw value (str or None).
+		The fake preserves the SQL status predicate: a terminal row is not an
+		active match even when it has the same session key.
 		"""
 
-		def fake_get_value(doctype, name, fieldname=None, **kw):
-			if doctype == RUN:
-				return run_row
-			if doctype == INSTALLATION:
-				return config
-			raise AssertionError(f"unexpected get_value doctype: {doctype}")
+		def fake_get_value(doctype, filters, fieldname=None, **kw):
+			if doctype != RUN:
+				raise AssertionError(f"the config tool must not read {doctype}")
+			if filters != {"session_key": session_key, "status": "running"}:
+				raise AssertionError(f"unexpected Run filters: {filters!r}")
+			if fieldname != ["name", "engagement_config_json"]:
+				raise AssertionError(f"unexpected Run fields: {fieldname!r}")
+			if not run_row or run_row.get("status") != "running":
+				return None
+			return run_row
 
 		with (
 			mock.patch("jarvis.tools._agent_run_ctx.get_session_key", return_value=session_key),
-			mock.patch.object(frappe.db, "get_value", side_effect=fake_get_value) as gv,
-			mock.patch.object(frappe, "log_error"),  # malformed-config path logs; no DB in tests
+			mock.patch.object(frappe.db, "get_value", side_effect=fake_get_value) as get_value,
+			mock.patch.object(frappe, "log_error") as log_error,
 		):
-			return get_engagement_config(), gv
+			result = get_engagement_config()
+		return result, get_value, log_error
 
-	def test_no_session_key_raises(self):
-		# valid run_row + config so ONLY the missing session_key can raise: if guard 1 were
-		# removed the tool would return the config instead of raising, failing this test.
+	def test_no_session_key_raises_before_any_database_read(self):
 		with self.assertRaises(InvalidArgumentError):
 			self._call(
 				session_key=None,
-				run_row=frappe._dict(name="R1", installation="INST-1"),
-				config=frappe.as_json({"x": 1}),
+				run_row=frappe._dict(name="R1", status="running", engagement_config_json="{}"),
 			)
 
-	def test_no_run_bound_to_session_raises(self):
+	def test_no_active_run_bound_to_session_raises(self):
 		with self.assertRaises(InvalidArgumentError):
-			self._call(session_key="agent:agent-x:R1", run_row=None, config=None)
+			self._call(session_key="agent:agent-x:R1", run_row=None)
 
-	def test_run_without_installation_raises(self):
+	def test_terminal_run_is_not_a_valid_config_source(self):
 		with self.assertRaises(InvalidArgumentError):
 			self._call(
 				session_key="agent:agent-x:R1",
-				run_row=frappe._dict(name="R1", installation=None),
-				config=None,
+				run_row=frappe._dict(
+					name="R1", status="completed", engagement_config_json=frappe.as_json({"x": 1})
+				),
 			)
 
-	def test_happy_path_returns_parsed_config_dict(self):
-		cfg = {"materiality": {"percentage": 5}, "s269st_limit": 200000}
-		result, gv = self._call(
+	def test_happy_path_returns_the_stamped_snapshot_only(self):
+		cfg = {"depr_run_posted": False, "materiality": {"percentage": 5}}
+		result, get_value, _ = self._call(
 			session_key="agent:agent-x:R1",
-			run_row=frappe._dict(name="R1", installation="INST-1"),
-			config=frappe.as_json(cfg),
+			run_row=frappe._dict(
+				name="R1", status="running", engagement_config_json=frappe.as_json(cfg)
+			),
 		)
 		self.assertEqual(dict(result), cfg)
-		# secret minimisation: the installation read asks for the `config` field ONLY -
-		# never the whole row (which carries agent_url / device tokens / run-as identity).
-		inst_calls = [c for c in gv.call_args_list if c.args and c.args[0] == INSTALLATION]
-		self.assertEqual(len(inst_calls), 1)
-		self.assertEqual(inst_calls[0].args[2], "config")
+		get_value.assert_called_once_with(
+			RUN,
+			{"session_key": "agent:agent-x:R1", "status": "running"},
+			["name", "engagement_config_json"],
+			as_dict=True,
+		)
 
-	def test_empty_config_returns_empty_dict(self):
-		result, _ = self._call(
+	def test_legacy_run_without_snapshot_fails_closed_to_empty_config(self):
+		result, get_value, _ = self._call(
 			session_key="agent:agent-x:R1",
-			run_row=frappe._dict(name="R1", installation="INST-1"),
-			config=None,
+			run_row=frappe._dict(name="R1", status="running", engagement_config_json=None),
 		)
 		self.assertEqual(result, {})
+		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
 
-	def test_malformed_json_config_returns_empty_dict(self):
-		result, _ = self._call(
+	def test_empty_snapshot_fails_closed_to_empty_config(self):
+		result, get_value, _ = self._call(
 			session_key="agent:agent-x:R1",
-			run_row=frappe._dict(name="R1", installation="INST-1"),
-			config="{not valid json",
+			run_row=frappe._dict(name="R1", status="running", engagement_config_json=""),
 		)
 		self.assertEqual(result, {})
+		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
 
-	def test_non_dict_json_config_returns_empty_dict(self):
-		result, _ = self._call(
+	def test_empty_object_snapshot_fails_closed_to_empty_config(self):
+		result, get_value, _ = self._call(
 			session_key="agent:agent-x:R1",
-			run_row=frappe._dict(name="R1", installation="INST-1"),
-			config="[1, 2, 3]",
+			run_row=frappe._dict(name="R1", status="running", engagement_config_json="{}"),
 		)
 		self.assertEqual(result, {})
+		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
+
+	def test_malformed_snapshot_fails_closed_to_empty_config(self):
+		result, get_value, log_error = self._call(
+			session_key="agent:agent-x:R1",
+			run_row=frappe._dict(name="R1", status="running", engagement_config_json="{not json"),
+		)
+		self.assertEqual(result, {})
+		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
+		log_error.assert_called_once()
+
+	def test_non_object_snapshot_fails_closed_to_empty_config(self):
+		result, get_value, _ = self._call(
+			session_key="agent:agent-x:R1",
+			run_row=frappe._dict(name="R1", status="running", engagement_config_json="[1, 2, 3]"),
+		)
+		self.assertEqual(result, {})
+		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
+
+	def test_mutable_installation_config_cannot_change_a_running_run(self):
+		"""A later save that changes `depr_run_posted` cannot rewrite this run."""
+		# The hypothetical Installation now says True. The mocked DB throws if the
+		# tool even attempts to read that row; only the server-stamped False snapshot
+		# may reach the delegate.
+		mutable_installation = {"depr_run_posted": True}
+		self.assertTrue(mutable_installation["depr_run_posted"])
+		result, get_value, _ = self._call(
+			session_key="agent:agent-x:R1",
+			run_row=frappe._dict(
+				name="R1", status="running", engagement_config_json='{"depr_run_posted": false}'
+			),
+		)
+		self.assertEqual(result, {"depr_run_posted": False})
+		# `_call` raises on any non-Run query. This exact call list makes the
+		# prohibited mutable Installation read an explicit regression assertion.
+		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
+		self.assertNotIn(INSTALLATION, [call.args[0] for call in get_value.call_args_list])

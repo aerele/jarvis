@@ -312,6 +312,8 @@ const form = reactive({
 	settlement_hold_days: "",
 	basis: "",
 	review_scope: "",
+	depr_run_posted: "",
+	enable_capex_signal: "",
 	company: "",
 	fiscal_year: "",
 	from_date: "",

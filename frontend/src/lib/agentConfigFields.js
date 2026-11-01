@@ -11,8 +11,9 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), the only agent that
- *     reads any agent-specific config today. Rendered only when the
+ *     CRITICAL fix, they are NOT flat top-level keys), and the Fixed Asset
+ *     auditor's flat `depr_run_posted` / `enable_capex_signal` values.
+ *     Rendered only when the
  *     listing's own `config_keys` (agents_api.py get_agent, jarvis#1063)
  *     names the field's storage `path` (a dot path for a nested key) -
  *     ConfigForm.vue filters this array by that list at render time.
@@ -104,6 +105,29 @@ export const CONFIG_FIELD_SET = [
 				value: "document_matching_only",
 			},
 		],
+	},
+	{
+		key: "depr_run_posted",
+		path: "depr_run_posted",
+		label: "Depreciation run status",
+		type: "select",
+		options: [
+			{ label: "Confirm posting status", value: "" },
+			{ label: "Posted for this period", value: "true" },
+			{ label: "Not posted", value: "false" },
+		],
+		help: "Required before the Fixed Asset auditor can assess missing depreciation postings. Leave it unconfirmed to mark that check not evaluable.",
+	},
+	{
+		key: "enable_capex_signal",
+		path: "enable_capex_signal",
+		label: "Capex/opex review signal",
+		type: "select",
+		options: [
+			{ label: "Off (default)", value: "" },
+			{ label: "On", value: "true" },
+		],
+		help: "Optional review signal only. It does not create a scored audit finding.",
 	},
 	{
 		key: "company",

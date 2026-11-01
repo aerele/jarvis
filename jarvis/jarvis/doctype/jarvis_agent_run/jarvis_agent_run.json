@@ -33,6 +33,7 @@
   "pages_json",
   "coverage_json",
   "scope_json",
+  "engagement_config_json",
   "assessment_config_json",
   "input_snapshot_json",
   "assessment_output_json",
@@ -53,6 +54,15 @@
    "label": "Assessment Output Evidence",
    "read_only": 1,
    "permlevel": 1
+  },
+  {
+   "fieldname": "engagement_config_json",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Engagement Configuration Snapshot",
+   "permlevel": 1,
+   "read_only": 1,
+   "description": "Server-selected declared and derived engagement values, stamped once at launch. The zero-argument delegate configuration tool returns this Run snapshot only; it never reads mutable installation configuration."
   },
   {
    "fieldname": "assessment_config_json",

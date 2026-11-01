@@ -24,6 +24,7 @@ authenticated (pre-impersonation) session user, so the three identities a run ha
 — triggerer / row owner / run-as — stay distinct and correct.
 """
 
+import json
 import unittest
 from unittest import mock
 
@@ -207,6 +208,78 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 		# stored is now NON-empty, so the PP-5 guard engages on an ORM re-save.
 		doc = frappe.get_doc(RUN, run)
 		doc.bundle_version = "tampered-9.9.9"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save(ignore_permissions=True)
+
+	# ------------------------------------------------------------------ #
+	# Engagement configuration is a server-stamped, hidden Run snapshot.
+	# ------------------------------------------------------------------ #
+	def test_launch_stamps_one_immutable_config_snapshot_for_prompt_and_tool(self):
+		inst_name = _install_as(self.owner)
+		initial_config = {
+			"materiality": {"percentage": 5, "benchmark_value": 100000},
+			"undeclared_after_launch": "must never reach the delegate",
+		}
+		frappe.db.set_value(
+			INSTALLATION, inst_name, "config", frappe.as_json(initial_config), update_modified=False
+		)
+		frappe.db.set_value(INSTALLATION, inst_name, "enabled", 1, update_modified=False)
+		frappe.db.commit()
+		inst = frappe.get_doc(INSTALLATION, inst_name)
+		listing = frappe.get_doc(LISTING, AGENT)
+		expected = agent_scheduler._explicit_config(listing, inst)
+		self.assertTrue(expected, "the fixture must exercise a declared configuration value")
+
+		import jarvis.admin_client as admin_client
+
+		captured = {}
+
+		def _capture_dispatch(**kw):
+			captured.update(kw)
+			return {"run_id": kw.get("run_id"), "status": "queued"}
+
+		with mock.patch.object(admin_client, "post_agent_run", side_effect=_capture_dispatch):
+			frappe.set_user(self.owner)
+			try:
+				result = agent_scheduler._launch_audit(inst, trigger="manual")
+			finally:
+				frappe.set_user("Administrator")
+		run = result["run"]
+
+		stamped = frappe.db.get_value(RUN, run, "engagement_config_json")
+		self.assertEqual(frappe.parse_json(stamped), expected)
+		self.assertIn(json.dumps(expected, sort_keys=True), captured["message"])
+		self.assertNotIn("undeclared_after_launch", captured["message"])
+		field = frappe.get_meta(RUN).get_field("engagement_config_json")
+		self.assertTrue(field.hidden)
+		self.assertTrue(field.read_only)
+		self.assertEqual(int(field.permlevel or 0), 1)
+
+		# Saving a new installation config after dispatch only affects a future run.
+		frappe.db.set_value(
+			INSTALLATION,
+			inst_name,
+			"config",
+			frappe.as_json({"materiality": {"percentage": 99}}),
+			update_modified=False,
+		)
+		frappe.db.commit()
+		self.assertEqual(frappe.db.get_value(RUN, run, "engagement_config_json"), stamped)
+
+		# The ordinary owner-visible Run payload loses the hidden permlevel-1 field.
+		frappe.set_user(self.owner)
+		try:
+			owner_view = frappe.get_doc(RUN, run)
+			owner_view.apply_fieldlevel_read_permissions()
+			# Frappe retains the field key but redacts its value for an ordinary
+			# owner. Desk and standard REST serialization use this filtered view.
+			self.assertIsNone(owner_view.get("engagement_config_json"))
+		finally:
+			frappe.set_user("Administrator")
+
+		# A later ORM save cannot replace the evidence snapshot either.
+		doc = frappe.get_doc(RUN, run)
+		doc.engagement_config_json = frappe.as_json({"materiality": {"percentage": 99}})
 		with self.assertRaises(frappe.PermissionError):
 			doc.save(ignore_permissions=True)
 

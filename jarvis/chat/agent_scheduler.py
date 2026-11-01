@@ -1182,6 +1182,13 @@ def _launch_audit(
 
 	review_backend = operator_review.backend(inst.agent)
 	review_config = review_backend.configuration(inst) if review_backend else None
+	# The delegate's engagement settings are a launch-time fact, not a live view of
+	# ``Installation.config``.  Resolve ONLY the bundle-declared/bench-derived keys
+	# before a Run exists, stamp that exact object on the Run, and use the same object
+	# in the dispatch prompt below.  A later settings save must never alter an active
+	# run's evidence or make a model guess a gate value.
+	engagement_config = _explicit_config(listing, inst)
+	engagement_config_json = frappe.as_json(engagement_config)
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1348,6 +1355,7 @@ def _launch_audit(
 				"initiating_human": initiating_human,
 				"model_source": model_gate.get("model_source"),
 				"assessment_config_json": frappe.as_json(review_config) if review_config else None,
+				"engagement_config_json": engagement_config_json,
 				**capability,
 			}
 		)
@@ -1415,7 +1423,9 @@ def _launch_audit(
 			run_id=run.name,
 			agent_id=f"agent-{slug}",
 			session_key=session_key,
-			message=_audit_prompt(listing, inst, trigger, scope),
+			message=_audit_prompt(
+				listing, inst, trigger, scope, engagement_config=engagement_config
+			),
 			timeout_s=registry_timeout_s(slug),
 		)
 	except admin_client.AdminAmbiguousError:
@@ -1711,15 +1721,15 @@ def _explicit_config(listing, inst) -> dict:
 	return {**explicit, **derived_config.derive(namespaces, inst, explicit)}
 
 
-def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str:
+def _audit_prompt(
+	listing, inst, trigger: str, scope: dict | None = None, engagement_config: dict | None = None
+) -> str:
 	"""The GENERIC, non-leaky run message handed to the delegate (A2/A6).
 
 	It names NO rule, tool, threshold, engagement step, or domain — the delegate's
 	bundled SKILL.md (sourced admin-side from the PRIVATE bundle store, never the
 	bench) carries the actual "how". The bench injects only:
-	  * a pointer to the engagement config on the installation (the delegate reads
-	    it there via its own permission-bounded tools — the config is not dumped
-	    into context), and
+	  * the launch-stamped engagement-config snapshot (only when non-empty), and
 	  * the EXPLICIT resolved SCOPE verbatim (A6), so the bundle NEVER infers "the
 	    current period" (a UTC container clock vs an IST site picks the wrong FY for
 	    ~5.5h/day, catastrophic at Mar-31/Apr-1). Prior-FY selection stays versioned
@@ -1744,13 +1754,13 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
 		)
-	# EXPLICIT CONFIG (jarvis#1063 delivery): the tenant's declared config_keys values, HANDED
-	# to the delegate so its evaluator receives them DETERMINISTICALLY. Filtered to the declared
-	# namespaces (never the whole config); absent when the agent declares no config_keys. The
-	# delegate spills this JSON verbatim into config.json - it does NOT read its own installation
-	# for these tunables. Note ``Run.scope_json`` is a bench-side field that never reaches the
-	# container; the run MESSAGE is the only bench->delegate channel, so config must ride HERE.
-	explicit_config = _explicit_config(listing, inst)
+	# EXPLICIT CONFIG: ``_launch_audit`` resolves declared/derived values ONCE and
+	# stamps them on the Run before dispatch.  This function receives that exact
+	# snapshot; it deliberately does not re-read the mutable installation here.
+	# The delegate merges this JSON into config.json verbatim.  The run message is
+	# the direct bench-to-container channel, while jarvis__get_engagement_config
+	# returns the same stored snapshot to an active run when the object is empty.
+	explicit_config = engagement_config if isinstance(engagement_config, dict) else {}
 	if explicit_config:
 		# ADDITIVE, never a replacement: config.json legitimately carries fields the delegate
 		# fetches or derives at run time (e.g. balances, or a run-as permission set used to
@@ -1764,15 +1774,11 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			f"builds into config.json. {json.dumps(explicit_config, sort_keys=True)}"
 		)
 	# Config pointer, preference order:
-	#  1) explicit_config declared -> hand the tunables inline (no read at all).
-	#  2) the agent's tools_allow includes jarvis__get_engagement_config -> PREFER the
-	#     zero-arg tool (nothing to fumble), but keep the named-doctype get_doc as a fallback
-	#     so a deploy-skew window (app registry ahead of the container plugin / tenant
-	#     tools_allow Apply) degrades to the working A' path, not a dead end.
-	#  3) fallback -> NAME the real doctype (A6/hallucination fix). The friendly
-	#     "engagement configuration" is the customer-facing label (agent_run_steps.py)
-	#     for `Jarvis Agent Installation`; handing the label but not the doctype made a
-	#     weak model invent one ("Jarvis Engagement Configuration").
+	#  1) explicit_config declared -> hand the immutable launch snapshot inline.
+	#  2) the agent's tools_allow includes jarvis__get_engagement_config -> use the
+	#     zero-arg tool, which reads that same server-stamped Run snapshot.
+	#  3) no stamped values and no tool -> preserve the missing state.  A launched
+	#     run must never fall back to the mutable Installation.config record.
 	try:
 		from jarvis.chat.agent_catalog import registry_tools_allow
 
@@ -1781,30 +1787,30 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			registry_tools_allow(_slug) or []
 		)
 	except Exception:
-		# Never blocks prompt-build; degrades to the branch-3 fallback. The dominant
-		# failure (missing/corrupt registry) already aborts the launch upstream, so a
-		# fault reaching here is genuinely unexpected - log it rather than swallow silently.
+		# Never blocks prompt-build; fail closed with the branch-3 missing-state
+		# instruction. The dominant failure (missing/corrupt registry) already aborts
+		# the launch upstream, so a fault reaching here is genuinely unexpected - log it
+		# rather than swallow silently.
 		frappe.log_error(
 			title="jarvis _audit_prompt: config-tool lookup failed", message=frappe.get_traceback()
 		)
 		_has_config_tool = False
 	if explicit_config:
 		config_pointer = (
-			"Your tenant's engagement tunables are handed below (authoritative) - use them exactly and "
-			"build the rest of your config.json as your skill directs."
+			"Your tenant's engagement tunables are the immutable launch snapshot handed below "
+			"(authoritative) - use them exactly and build the rest of your config.json as your skill directs."
 		)
 	elif _has_config_tool:
 		config_pointer = (
-			"Read your engagement configuration by calling jarvis__get_engagement_config - it takes "
-			"NO arguments and returns your tunables. If that tool is unavailable, read the "
-			f"`Jarvis Agent Installation` record '{inst.name}' (its `config` field) with jarvis__get_doc "
-			"instead; never invent another doctype for it."
+			"Read your immutable launch-time engagement configuration by calling "
+			"jarvis__get_engagement_config - it takes NO arguments and returns only this run's "
+			"server-stamped snapshot. If it is unavailable or empty, preserve that missing state for "
+			"the evaluator; NEVER read mutable installation configuration as a fallback."
 		)
 	else:
 		config_pointer = (
-			f"Your engagement configuration is the `Jarvis Agent Installation` record "
-			f"'{inst.name}' (its `config` field) - read it if your skill needs it. That is the "
-			f"ONLY configuration record; never invent another doctype for it."
+			"No declared engagement settings were stamped for this run. Preserve that missing "
+			"state for the evaluator. NEVER read mutable installation configuration as a fallback."
 		)
 	return (
 		f"[Automated {trigger} run] Run your bundled playbook for this trigger now over "

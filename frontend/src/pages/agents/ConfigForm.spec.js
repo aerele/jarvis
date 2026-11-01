@@ -847,6 +847,23 @@ describe("an unknown config key survives untouched in Advanced (JSON)", () => {
 // listing's config_keys, matched against each field's storage PATH (a dot
 // path for a nested key) - the scope fields never are.
 describe("per-agent gating via the configKeys prop", () => {
+	it("fixed-asset controls preserve the server-evaluated posting gate", async () => {
+		const w = mountForm(
+			{ depr_run_posted: "false", enable_capex_signal: "true" },
+			{ configKeys: ["depr_run_posted", "enable_capex_signal"] }
+		);
+		expect(field(w, "Depreciation run status").element.value).toBe("false");
+		expect(field(w, "Capex/opex review signal").element.value).toBe("true");
+		expect(w.text()).not.toContain("Materiality percentage");
+
+		await field(w, "Depreciation run status").setValue("true");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			depr_run_posted: "true",
+			enable_capex_signal: "true",
+		});
+	});
+
 	it("configKeys=[] (e.g. bank-recon-operator) renders only the scope fields, plus the note", () => {
 		const w = mountForm({}, { configKeys: [] });
 		expect(w.text()).toContain("Company");
