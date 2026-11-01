@@ -1159,8 +1159,8 @@ def _launch_audit(
 	model_gate: dict | None = None,
 ) -> dict:
 	"""Create the audit conversation + a ``running`` Jarvis Agent Run + enqueue
-	the triggering turn. MUST run as the installation owner (the scheduler
-	set_user's it; run_agent_now is already the owner). Returns
+	the triggering turn. MUST run as the installation's ``run_as_user`` (the
+	scheduler and ``run_agent_now`` impersonate it before this call). Returns
 	``{run, conversation, session_key}``. Identity/budget guards + next_run_at
 	advancement are the caller's job.
 
@@ -1182,13 +1182,6 @@ def _launch_audit(
 
 	review_backend = operator_review.backend(inst.agent)
 	review_config = review_backend.configuration(inst) if review_backend else None
-	# The delegate's engagement settings are a launch-time fact, not a live view of
-	# ``Installation.config``.  Resolve ONLY the bundle-declared/bench-derived keys
-	# before a Run exists, stamp that exact object on the Run, and use the same object
-	# in the dispatch prompt below.  A later settings save must never alter an active
-	# run's evidence or make a model guess a gate value.
-	engagement_config = _explicit_config(listing, inst)
-	engagement_config_json = frappe.as_json(engagement_config)
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1258,6 +1251,33 @@ def _launch_audit(
 				"This agent is no longer published ({0}); uninstall it or ask an admin to republish it."
 			).format(listing.status or "unknown")
 		)
+
+	# Payroll Pre-Run has a server-owned, single-entry boundary.  Validate the
+	# selected Payroll Entry as the run-as user before a conversation, Run, or
+	# session exists.  This also covers legacy rows and callers that bypass the
+	# installation controller.  Identity and listing status are checked first so
+	# the error cannot become a record probe.
+	from jarvis.chat.payroll_prerun_scope import is_payroll_prerun, require_configuration
+
+	if is_payroll_prerun(inst.agent):
+		# Payroll Entry scope is an authorization boundary, not only configuration.
+		# The normal callers already impersonate ``run_as_user``. Refuse a future
+		# direct/internal caller instead of validating or deriving that boundary as
+		# the installation owner, Administrator, or another ambient identity.
+		if frappe.session.user != run_as_user:
+			frappe.throw(
+				_("Payroll Pre-Run must be launched as its configured run-as user."),
+				frappe.PermissionError,
+			)
+		require_configuration(inst.config or "{}")
+
+	# The delegate's engagement settings are a launch-time fact, not a live view of
+	# ``Installation.config``.  Resolve ONLY the bundle-declared/bench-derived keys
+	# after the bound configuration is accepted, stamp that exact object on the Run,
+	# and use the same object in the dispatch prompt below.  A later settings save
+	# must never alter an active run's evidence or make a model guess a gate value.
+	engagement_config = _explicit_config(listing, inst)
+	engagement_config_json = frappe.as_json(engagement_config)
 
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
@@ -1612,6 +1632,7 @@ def _stamp_scope_and_watermark(
 	authorization the source-read tools read back — a scribe run either carries its
 	admin-authorized app list or reads nothing."""
 	from jarvis.chat import agent_scope, operator_review
+	from jarvis.chat.payroll_prerun_scope import requires_bound_scope
 
 	review_backend = operator_review.backend(inst.agent)
 	if review_backend:
@@ -1642,8 +1663,9 @@ def _stamp_scope_and_watermark(
 			config = frappe.parse_json(inst.get("config") or "{}")
 		except (TypeError, ValueError):
 			config = {}
-		if isinstance(config, dict) and any(
-			config.get(k) for k in ("record_scope", "prior_period_from", "prior_period_to")
+		if requires_bound_scope(inst.agent) or (
+			isinstance(config, dict)
+			and any(config.get(k) for k in ("record_scope", "prior_period_from", "prior_period_to"))
 		):
 			frappe.log_error(
 				title="jarvis agent: explicit scope resolution failed", message=frappe.get_traceback()

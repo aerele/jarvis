@@ -40,6 +40,14 @@ def resolve_scope(installation) -> dict:
 	"""
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
+	# Payroll Pre-Run is not a generic company/period scan.  Its selected
+	# Payroll Entry owns the company, period, report-date cap, and record
+	# boundary.  Route before reading generic config keys so a user cannot widen
+	# that boundary with a saved company, date range, or record_scope object.
+	from jarvis.chat.payroll_prerun_scope import is_payroll_prerun, scope_from_config
+
+	if is_payroll_prerun(installation.get("agent")):
+		return scope_from_config(installation.get("config") or "{}")
 
 	cfg: dict = {}
 	if installation.get("config"):
