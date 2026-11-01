@@ -37,7 +37,7 @@ const props = defineProps({
 // parent can exclude this card's token from its pending-list resync while it
 // settles (see ChatView.vue's inflightToken) - a stale resync must not
 // resurrect a card the user just acted on.
-const emit = defineEmits(["close", "resolved", "busy"]);
+const emit = defineEmits(["close", "resolved", "settled", "busy"]);
 
 const state = ref("review"); // review | busy | approved | denied | cancelled
 const error = ref("");
@@ -157,7 +157,11 @@ async function approve(mode = "step") {
 			// A safety update cancels the token before any action runs. It is a
 			// terminal result, not a retryable approval failure. Keep the sheet
 			// open so the person sees that no action ran before its card is removed.
+			// Tell the parent first: the finally block clears its in-flight guard,
+			// and a stale transcript row must not re-create this spent card while
+			// the terminal explanation is still open or after Done.
 			if (r.reason_code === "safety_update") {
+				if (props.action?.token) emit("settled", props.action.token);
 				error.value = settledReasonMessage(r);
 				state.value = "cancelled";
 				return;

@@ -82,6 +82,16 @@ test("a token settled locally (typed no) is never resurrected by a stale transcr
 	assert.deepEqual(out, []);
 });
 
+test("a safety-update token stays excluded after Done when a stale pending row resyncs", () => {
+	// Safety update keeps DecisionSheet visible until Done, then removes the card.
+	// The old tool row may still report pending when a fresh resync lands. Its token
+	// must be retained in settledTokens before the sheet's busy guard clears.
+	const settled = withExcluded(new Set(), ["safety-token"]);
+	const staleFromRows = [{ token: "safety-token" }, { token: "ordinary-token" }];
+	const afterDone = mergePendingSources([], [staleFromRows], settled);
+	assert.deepEqual(afterDone, [{ token: "ordinary-token" }]);
+});
+
 test("ChatView folds a typed no's discarded tokens into loadPending's exclusion set", () => {
 	const src = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
 	const settle = src.indexOf(
@@ -91,4 +101,26 @@ test("ChatView folds a typed no's discarded tokens into loadPending's exclusion 
 	const load = src.indexOf("async function loadPending(");
 	const inflight = src.indexOf("const inflight = withExcluded(", load);
 	assert.ok(inflight > -1, "loadPending must build its exclusion set from settledTokens");
+});
+
+test("safety update settles its token before DecisionSheet clears the busy guard", () => {
+	const sheet = fs.readFileSync(
+		new URL("../components/DecisionSheet.vue", import.meta.url),
+		"utf8"
+	);
+	const safety = sheet.indexOf('r.reason_code === "safety_update"');
+	const settled = sheet.indexOf('emit("settled", props.action.token)', safety);
+	const cancelled = sheet.indexOf('state.value = "cancelled"', safety);
+	const busyClear = sheet.indexOf('emit("busy", false)', safety);
+	assert.ok(settled > safety && settled < cancelled && settled < busyClear);
+
+	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	const handler = view.indexOf("function onDecisionSettled(token)");
+	const exclude = view.indexOf(
+		"settledTokens.value = withExcluded(settledTokens.value, [token])",
+		handler
+	);
+	const listener = view.indexOf('@settled="onDecisionSettled"');
+	assert.ok(handler > -1 && exclude > handler);
+	assert.ok(listener > -1);
 });

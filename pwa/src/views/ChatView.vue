@@ -160,6 +160,12 @@ const inflightToken = ref(null);
 function onDecisionBusy(busy) {
 	inflightToken.value = busy ? decision.value && decision.value.token : null;
 }
+function onDecisionSettled(token) {
+	// A safety update spends its token but leaves DecisionSheet open until Done.
+	// Its old transcript row can still say pending, so retain the exclusion after
+	// the RPC's busy guard clears and after the person acknowledges the notice.
+	if (token) settledTokens.value = withExcluded(settledTokens.value, [token]);
+}
 // D1: tokens a typed "no" discarded (send()'s discardedTokens, below). The
 // discard only filters pending.value; messages.value keeps tool_status
 // "pending" for that row until the next load(), so a resync racing that
@@ -1877,6 +1883,7 @@ onUnmounted(() => {
 		:streaming="sending"
 		@close="decision = null"
 		@resolved="onResolved"
+		@settled="onDecisionSettled"
 		@busy="onDecisionBusy"
 	/>
 	<FilePreviewSheet
