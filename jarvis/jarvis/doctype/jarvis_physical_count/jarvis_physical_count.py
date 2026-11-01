@@ -11,8 +11,22 @@ from frappe.model.document import Document
 
 from jarvis.permissions import NotRenamable, refuse_in_tool_dispatch
 
+_MUTATION_PTYPES = frozenset({"create", "write", "submit", "cancel", "amend", "delete"})
+
 
 class JarvisPhysicalCount(NotRenamable, Document):
+	def check_permission(self, permtype="read", permlevel=None):
+		"""Reject native writes before Frappe locks a draft or source row."""
+		if permtype in _MUTATION_PTYPES and not self.flags.ignore_permissions:
+			from jarvis.chat.cycle_count_entry import is_controlled_count_mutation
+
+			if not is_controlled_count_mutation(self):
+				frappe.throw(
+					_("Record or correct physical counts from the approved count plan."),
+					frappe.PermissionError,
+				)
+		return super().check_permission(permtype, permlevel)
+
 	def before_insert(self):
 		refuse_in_tool_dispatch()
 		if self.docstatus not in (0, None):
@@ -69,6 +83,18 @@ class JarvisPhysicalCount(NotRenamable, Document):
 				),
 				frappe.PermissionError,
 			)
+
+	def discard(self):
+		"""Refuse an obsolete native draft action before Frappe locks the row."""
+		if self.flags.ignore_permissions:
+			return super().discard()
+		refuse_in_tool_dispatch()
+		frappe.throw(
+			_(
+				"Physical-count drafts cannot be discarded. Record or correct counts from the approved count plan."
+			),
+			frappe.PermissionError,
+		)
 
 	def on_trash(self):
 		refuse_in_tool_dispatch()

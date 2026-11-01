@@ -19,7 +19,19 @@
 					observation. It does not post stock or reconcile inventory.
 				</p>
 
-				<p v-if="error" class="mt-6 text-sm text-ink-red-4" role="alert">{{ error }}</p>
+				<div
+					v-if="refreshError && !rows.length"
+					class="mt-6 flex flex-wrap items-center gap-3 text-sm text-ink-red-4"
+					role="alert"
+				>
+					<span>{{ refreshError }}</span>
+					<Button
+						label="Retry refresh"
+						variant="subtle"
+						:loading="loading"
+						@click="load"
+					/>
+				</div>
 				<div
 					v-else-if="loading && !rows.length"
 					class="mt-10 flex items-center gap-2 text-sm text-ink-gray-5"
@@ -36,42 +48,60 @@
 							: "No approved physical-count plans are ready for you."
 					}}
 				</div>
-				<div v-else class="mt-6 overflow-hidden rounded-lg border">
-					<button
-						v-for="row in rows"
-						:key="row.request"
-						class="flex w-full items-center gap-4 border-b px-4 py-4 text-left last:border-b-0 hover:bg-surface-gray-1 focus-visible:outline focus-visible:outline-2"
-						@click="open(row.request)"
+				<div v-else>
+					<div
+						v-if="refreshError"
+						class="mt-6 flex flex-wrap items-center gap-3 text-sm text-ink-red-4"
+						role="alert"
 					>
-						<div class="min-w-0 flex-1">
-							<div class="truncate text-base font-medium text-ink-gray-9">
-								{{ row.title || row.warehouse }}
-							</div>
-							<div class="mt-1 truncate text-sm text-ink-gray-6">
-								{{ row.company }} · {{ row.warehouse }} ·
-								{{ row.line_count }} item{{
-									Number(row.line_count) === 1 ? "" : "s"
-								}}
-							</div>
-						</div>
-						<Badge
+						<span>{{ refreshError }}</span>
+						<Button
+							label="Retry refresh"
 							variant="subtle"
-							:theme="Number(row.can_record) ? 'green' : 'gray'"
-							:label="Number(row.can_record) ? 'Ready to record' : 'View only'"
+							:loading="loading"
+							@click="load"
 						/>
-						<FeatherIcon
-							name="chevron-right"
-							class="size-4 shrink-0 text-ink-gray-5"
-						/>
-					</button>
+					</div>
+					<div class="mt-6 overflow-hidden rounded-lg border">
+						<button
+							v-for="row in rows"
+							:key="row.request"
+							class="flex w-full items-center gap-4 border-b px-4 py-4 text-left last:border-b-0 hover:bg-surface-gray-1 focus-visible:outline focus-visible:outline-2"
+							@click="open(row.request)"
+						>
+							<div class="min-w-0 flex-1">
+								<div class="truncate text-base font-medium text-ink-gray-9">
+									{{ row.title || row.warehouse }}
+								</div>
+								<div class="mt-1 truncate text-sm text-ink-gray-6">
+									{{ row.company }} · {{ row.warehouse }} ·
+									{{ row.line_count }} item{{
+										Number(row.line_count) === 1 ? "" : "s"
+									}}
+								</div>
+							</div>
+							<Badge
+								variant="subtle"
+								:theme="planStatus(row).theme"
+								:label="planStatus(row).label"
+							/>
+							<FeatherIcon
+								name="chevron-right"
+								class="size-4 shrink-0 text-ink-gray-5"
+							/>
+						</button>
+					</div>
 				</div>
-				<div v-if="hasMore" class="mt-4">
+				<div v-if="hasMore || loadMoreError" class="mt-4">
 					<Button
-						label="Load more"
+						:label="loadMoreError ? 'Retry load more' : 'Load more'"
 						variant="subtle"
 						:loading="loadingMore"
 						@click="loadMore"
 					/>
+					<p v-if="loadMoreError" class="mt-2 text-sm text-ink-red-4" role="alert">
+						{{ loadMoreError }}
+					</p>
 				</div>
 			</div>
 		</main>
@@ -93,7 +123,8 @@ const start = ref(0);
 const hasMore = ref(false);
 const loading = ref(false);
 const loadingMore = ref(false);
-const error = ref("");
+const refreshError = ref("");
+const loadMoreError = ref("");
 
 async function fetchPage(offset, append = false) {
 	const response = await listCountPlans({ start: offset, pageLength: 20 });
@@ -108,13 +139,14 @@ async function fetchPage(offset, append = false) {
 }
 
 async function load() {
-	if (loading.value) return;
+	if (loading.value || loadingMore.value) return;
 	loading.value = true;
-	error.value = "";
+	refreshError.value = "";
+	loadMoreError.value = "";
 	try {
 		await fetchPage(0);
 	} catch (cause) {
-		error.value = errMessage(cause, "Could not load physical-count plans.");
+		refreshError.value = errMessage(cause, "Could not load physical-count plans.");
 	} finally {
 		loading.value = false;
 	}
@@ -123,13 +155,46 @@ async function load() {
 async function loadMore() {
 	if (loadingMore.value || loading.value) return;
 	loadingMore.value = true;
+	loadMoreError.value = "";
 	try {
 		await fetchPage(start.value, true);
 	} catch (cause) {
-		error.value = errMessage(cause, "Could not load more physical-count plans.");
+		loadMoreError.value = errMessage(cause, "Could not load more physical-count plans.");
 	} finally {
 		loadingMore.value = false;
 	}
+}
+
+function count(value) {
+	if (
+		(typeof value !== "number" && typeof value !== "string") ||
+		(typeof value === "string" && !value.trim())
+	) {
+		return null;
+	}
+	const numeric = Number(value);
+	return Number.isInteger(numeric) && numeric >= 0 ? numeric : null;
+}
+
+function planStatus(row) {
+	const lineCount = count(row.line_count);
+	const recordedLineCount = count(row.recorded_line_count);
+	const remainingLineCount = count(row.remaining_line_count);
+	const allItemsRecorded =
+		lineCount !== null &&
+		lineCount > 0 &&
+		((recordedLineCount !== null && recordedLineCount >= lineCount) ||
+			remainingLineCount === 0);
+
+	if (allItemsRecorded) return { theme: "blue", label: "All items recorded" };
+	if (recordedLineCount !== null && recordedLineCount > 0) {
+		return Number(row.can_record)
+			? { theme: "green", label: "Continue recording" }
+			: { theme: "gray", label: "Partly recorded" };
+	}
+	return Number(row.can_record)
+		? { theme: "green", label: "Ready to record" }
+		: { theme: "gray", label: "View only" };
 }
 
 function open(request) {

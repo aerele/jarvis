@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
 import frappe
+from frappe.database import get_db
 
 from jarvis.chat.purchase_match import digest
 
@@ -287,6 +289,53 @@ def _numbers(rows, fields: set[str]) -> list[dict]:
 		{key: str(value) if key in fields and value is not None else value for key, value in row.items()}
 		for row in rows
 	]
+
+
+@contextmanager
+def fresh_source_snapshot():
+	"""Bind one short-lived, fresh, read-only MariaDB snapshot.
+
+	The request connection can already have a repeatable-read snapshot from an
+	access or permission check. A new connection starts its snapshot only here,
+	after the count writer has its plan and approval-cohort locks. It takes no
+	row or gap locks on source records. Always restore the request connection
+	before an error can return to a caller.
+
+	This is a point-in-time freshness proof, not a serializable source-write
+	barrier. A source transaction that commits after this snapshot begins can
+	still commit before the count submit. Broad ERP source locks would create an
+	unsafe lock and availability contract, so the write path deliberately does
+	not claim that stronger guarantee.
+	"""
+	if frappe.db.db_type != "mariadb":
+		raise RuntimeError("A fresh Cycle-Count source snapshot requires MariaDB.")
+	conf = frappe.conf
+	snapshot_db = get_db(
+		socket=conf.db_socket,
+		host=conf.db_host,
+		port=conf.db_port,
+		user=conf.db_user or conf.db_name,
+		password=conf.db_password,
+		cur_db_name=conf.db_name,
+	)
+	primary_db = frappe.local.db
+	bound = False
+	try:
+		snapshot_db.connect()
+		# This connection ends with close(), so its session setting cannot leak.
+		snapshot_db.sql("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+		snapshot_db.sql("START TRANSACTION READ ONLY, WITH CONSISTENT SNAPSHOT")
+		frappe.local.db = snapshot_db
+		bound = True
+		yield
+	finally:
+		if bound:
+			frappe.local.db = primary_db
+		try:
+			if snapshot_db._conn:
+				snapshot_db.sql("ROLLBACK")
+		finally:
+			snapshot_db.close()
 
 
 def collect(scope: dict, config: dict) -> dict:
@@ -778,11 +827,41 @@ def review_context(stored: dict, finding: dict) -> str:
 	)
 
 
+def _lock_stage_run_fence(run) -> None:
+	"""Serialize Cycle-Count approval staging with later human count writes.
+
+	``record_agent_run`` already holds this row while it calls ``stage_reviews``.
+	Taking it here as well makes that protocol explicit for every Cycle-Count
+	staging caller. A human writer takes the same row after its plan-fact range,
+	so it cannot scan a partially staged sealed cohort.
+	"""
+	name = getattr(run, "name", None)
+	if not isinstance(name, str) or not name:
+		frappe.throw("A Cycle-Count review must have a valid Agent Run.", frappe.PermissionError)
+	state = frappe.db.get_value(
+		"Jarvis Agent Run",
+		name,
+		["name", "agent", "conversation", "status"],
+		as_dict=True,
+		for_update=True,
+	)
+	if (
+		not state
+		or state.agent != AGENT
+		or state.conversation != getattr(run, "conversation", None)
+		or state.status != "running"
+		or getattr(run, "agent", None) != AGENT
+	):
+		frappe.throw("A Cycle-Count review must have a valid Agent Run.", frappe.PermissionError)
+
+
 def stage_reviews(run, inst, findings):
 	"""Only a plan with lines needs an approval request."""
 	from jarvis.chat import operator_review
 
 	planned = [row for row in findings if row["proposal"]["outcome"] == "plan"]
+	if planned:
+		_lock_stage_run_fence(run)
 	return operator_review.stage_reviews(run, inst, planned, operator_review.backend(AGENT))
 
 

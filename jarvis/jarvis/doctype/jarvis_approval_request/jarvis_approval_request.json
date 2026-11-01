@@ -178,7 +178,8 @@
    "label": "Run",
    "options": "Jarvis Agent Run",
    "read_only": 1,
-   "description": "PP-5: the Jarvis Agent Run that raised this request (agent-originated requests only)."
+   "search_index": 1,
+   "description": "PP-5: the Jarvis Agent Run that raised this request (agent-originated requests only). Indexed for bounded Cycle-Count sealed-cohort locking."
   },
   {
    "fieldname": "preparation_mode",
