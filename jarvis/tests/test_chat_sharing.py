@@ -501,7 +501,7 @@ class TestShareReads(SharingCase):
 		stored = frappe.db.get_value(
 			MESSAGE,
 			receipt,
-			["tool_status", "action_outcome", "pending_card", "tool_call_id", "tool_call_ids"],
+			["tool_status", "action_outcome", "pending_card", "tool_call_id", "tool_call_ids", "tool_result"],
 			as_dict=True,
 		)
 		self.assertEqual(stored.tool_status, "")
@@ -509,11 +509,14 @@ class TestShareReads(SharingCase):
 		self.assertIsNone(stored.pending_card)
 		self.assertEqual(stored.tool_call_id, token)
 		self.assertEqual(stored.tool_call_ids, token_ids)
+		self.assertEqual(frappe.parse_json(stored.tool_result)["reason_code"], "safety_update")
 
 		# Owner history remains the reconciliation surface for its local card.
 		with as_user(OWNER):
 			owner_row = next(
-				row for row in chat_api.get_conversation(self.conversation)["messages"] if row["name"] == receipt
+				row
+				for row in chat_api.get_conversation(self.conversation)["messages"]
+				if row["name"] == receipt
 			)
 		self.assertEqual(owner_row["tool_call_id"], token)
 		self.assertEqual(owner_row["tool_call_ids"], token_ids)
@@ -532,6 +535,47 @@ class TestShareReads(SharingCase):
 			self.assertIsNone(row["tool_call_ids"])
 			self.assertNotIn(token, payload(row))
 			self.assertNotIn("CLOSE-FENCED-ACTION-TOKEN-SECOND", payload(row))
+
+	def test_safety_update_receipt_detection_handles_dict_and_stored_json(self):
+		from jarvis.chat.share_projection import project_row
+
+		for tool_result in ({"reason_code": "safety_update"}, '{"reason_code":"safety_update"}'):
+			with self.subTest(tool_result=tool_result):
+				row = project_row(
+					{
+						"tool_result": tool_result,
+						"tool_call_id": "CLOSE-SAFETY-ID",
+						"tool_call_ids": '["CLOSE-SAFETY-ID"]',
+					},
+					self.conversation,
+				)
+				self.assertIsNone(row["tool_call_id"])
+				self.assertIsNone(row["tool_call_ids"])
+
+	def test_normal_terminal_receipt_keeps_action_identifiers_shared(self):
+		from jarvis.chat.sharing import get_shared_tool_detail
+
+		tool_call_id = "ordinary-auto-applied-id"
+		tool_call_ids = json.dumps([tool_call_id, "ordinary-auto-applied-id-2"])
+		with as_user(OWNER):
+			receipt = make_message(
+				self.conversation,
+				role="tool",
+				tool_name="submit_doc",
+				tool_status="completed",
+				action_outcome="auto_applied",
+				tool_call_id=tool_call_id,
+				tool_call_ids=tool_call_ids,
+				tool_result=json.dumps({"ok": True, "reason_code": "ordinary_completion"}),
+			)
+		self.share()
+		shared_message = next(row for row in self.read()["messages"] if row["name"] == receipt)
+		with as_user(RECIPIENT):
+			shared_detail = get_shared_tool_detail(receipt)
+
+		for row in (shared_message, shared_detail):
+			self.assertEqual(row["tool_call_id"], tool_call_id)
+			self.assertEqual(row["tool_call_ids"], tool_call_ids)
 
 	def test_projection_exact_allowlists_and_nested_secret_scrubbing(self):
 		from jarvis.chat.share_projection import project_conversation
