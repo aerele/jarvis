@@ -430,39 +430,46 @@ class TestAgentIdentity(unittest.TestCase):
 				),
 			}
 		)
-		msg = agent_scheduler._audit_prompt(listing, inst, trigger="manual", scope={})
+		# `_launch_audit` resolves this once before it inserts the Run. The prompt
+		# receives that same object; it must not read `inst.config` itself because an
+		# owner can change the installation after launch.
+		snapshot = agent_scheduler._explicit_config(listing, inst)
+		msg = agent_scheduler._audit_prompt(
+			listing, inst, trigger="manual", scope={}, engagement_config=snapshot
+		)
 		self.assertIn("EXPLICIT CONFIG", msg)
 		self.assertIn('"stale_floor_days": 45', msg)  # declared ageing tunable handed
 		self.assertNotIn("percentage", msg)  # non-declared namespace filtered out
 		self.assertNotIn('"company"', msg.split("EXPLICIT CONFIG", 1)[1])  # non-declared filtered
-		# an agent declaring NO config_keys gets no EXPLICIT CONFIG (points to its installation).
+		# An agent declaring NO config_keys gets no EXPLICIT CONFIG and must preserve
+		# the missing state. A run must never fall back to mutable installation config.
 		bare = frappe._dict({"name": "y", "config_keys": []})
-		bare_msg = agent_scheduler._audit_prompt(bare, inst, trigger="manual", scope={})
+		bare_msg = agent_scheduler._audit_prompt(
+			bare, inst, trigger="manual", scope={}, engagement_config={}
+		)
 		self.assertNotIn("EXPLICIT CONFIG", bare_msg)
-		# A6/hallucination fix: the pointer NAMES the real doctype so a weak model cannot invent
-		# one (e.g. "Jarvis Engagement Configuration"). Per the non-leak control the bench prompt
-		# names the doctype + the installation ROW but NO tool (the SKILL owns get_doc); the old
-		# doctype-less "read it there" phrasing is gone.
-		self.assertIn("Jarvis Agent Installation", bare_msg)
-		self.assertIn("INST-1", bare_msg)  # the installation ROW name is still handed
-		self.assertNotIn("read it there", bare_msg)
+		self.assertIn("No declared engagement settings were stamped", bare_msg)
+		self.assertIn("NEVER read mutable installation configuration", bare_msg)
+		self.assertNotIn("Jarvis Agent Installation", bare_msg)
+		self.assertNotIn("INST-1", bare_msg)
 		self.assertNotIn("jarvis__", bare_msg)  # non-leak control: the bench prompt names NO tool
-		# fix #1: when the agent's tools_allow includes the zero-arg tool, the prompt PREFERS it
-		# (nothing for a weak model to fumble) but KEEPS the named-doctype get_doc as a fallback,
-		# so a deploy-skew window (tool not yet in the container / tenant Apply) degrades to the
-		# working A' path, never a dead end.
+		# A config-tool agent must use its zero-argument, server-bound snapshot. It
+		# must never receive a mutable Installation fallback after launch.
 		from unittest import mock
 
 		with mock.patch(
 			"jarvis.chat.agent_catalog.registry_tools_allow",
 			return_value=["jarvis__get_engagement_config", "jarvis__get_doc"],
 		) as _rta:
-			tool_msg = agent_scheduler._audit_prompt(bare, inst, trigger="manual", scope={})
+			tool_msg = agent_scheduler._audit_prompt(
+				bare, inst, trigger="manual", scope={}, engagement_config={}
+			)
 		_rta.assert_called_once_with("y")  # looked up by the resolved slug, not the listing dict
-		self.assertIn("jarvis__get_engagement_config", tool_msg)  # preferred path
+		self.assertIn("jarvis__get_engagement_config", tool_msg)  # only config path
 		self.assertIn("NO arguments", tool_msg)  # zero-arg steering present
-		self.assertIn("jarvis__get_doc", tool_msg)  # fallback retained (deploy-skew safety)
-		self.assertIn("Jarvis Agent Installation", tool_msg)  # fallback names the real doctype
+		self.assertIn("NEVER read mutable installation configuration", tool_msg)
+		self.assertNotIn("jarvis__get_doc", tool_msg)
+		self.assertNotIn("Jarvis Agent Installation", tool_msg)
 
 	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner

@@ -365,7 +365,12 @@ class TestAgentsMarketplace(unittest.TestCase):
 		msg = captured.get("message") or ""
 		for leak in ("jarvis__", "rule_id", "rule_pack", "pl_balance", "bs_balance", "$"):
 			self.assertNotIn(leak, msg)
-		self.assertIn(inst_name, msg)  # installation pointer for the config
+		# The prompt must not hand a mutable Installation row to the delegate.
+		# This install has no declared snapshot values, so the run preserves that
+		# missing state instead of reading config after dispatch.
+		self.assertIn("No declared engagement settings were stamped", msg)
+		self.assertNotIn(inst_name, msg)
+		self.assertNotIn("Jarvis Agent Installation", msg)
 
 	def test_delegate_dispatch_failure_marks_run_failed_and_reraises(self):
 		inst_name = _install_as(self.owner, "close-auditor")
@@ -415,7 +420,9 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertIn("EXPLICIT SCOPE", gen)
 		self.assertIn("2026-04-01", gen)  # scope injected verbatim (A6)
 		self.assertIn("2026-09-11", gen)  # as-of report_date conveyed to the delegate
-		self.assertIn(inst_name, gen)  # installation pointer
+		self.assertIn("No declared engagement settings were stamped", gen)
+		self.assertNotIn(inst_name, gen)
+		self.assertNotIn("Jarvis Agent Installation", gen)
 
 	def test_resolve_scope_injects_report_date_and_preserves_to_date(self):
 		"""to_date bounds the analysis window (may be a future FY end) and is left
@@ -516,8 +523,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	# jarvis#1063 (jarvis-only half) - config_keys: which agent-specific
 	# installation config keys an agent's bundle actually reads (verified
-	# against jarvis-agents/agents/<slug>/evaluate.py; only close-auditor
-	# reads any today).
+	# against jarvis-agents/agents/<slug>/evaluate.py).
 	# ------------------------------------------------------------------ #
 	def test_sync_agent_listings_writes_config_keys_from_the_registry(self):
 		# dot paths - close-auditor/evaluate.py reads these NESTED under a
@@ -532,10 +538,15 @@ class TestAgentsMarketplace(unittest.TestCase):
 				"materiality.rounding_step",
 			],
 		)
+		self.assertEqual(
+			json.loads(
+				frappe.db.get_value(LISTING, "fixed-asset-depreciation-auditor", "config_keys")
+			),
+			["depr_run_posted", "enable_capex_signal"],
+		)
 
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
-		"""An agent the registry declares no config_keys for (everyone but
-		close-auditor today) gets [], not null/absent - ConfigForm.vue can
+		"""An agent the registry declares no config_keys for gets [], not null/absent - ConfigForm.vue can
 		always safely parse it."""
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(

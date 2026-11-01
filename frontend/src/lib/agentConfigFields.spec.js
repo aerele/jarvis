@@ -40,6 +40,8 @@ describe("CONFIG_FIELD_SET", () => {
 				"price_tolerance_percent",
 				"basis",
 				"review_scope",
+				"depr_run_posted",
+				"enable_capex_signal",
 				"company",
 				"fiscal_year",
 				"from_date",
@@ -55,7 +57,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders scope, the materiality set, then the vendor-ledger ageing floors", () => {
+	it("orders review, fixed-asset, scope, materiality, then vendor-ledger fields", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -66,6 +68,8 @@ describe("CONFIG_FIELD_SET", () => {
 			"price_tolerance_percent",
 			"basis",
 			"review_scope",
+			"depr_run_posted",
+			"enable_capex_signal",
 			"company",
 			"fiscal_year",
 			"from_date/to_date",
@@ -127,7 +131,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific is the close-auditor materiality set plus the vendor-ledger ageing floors", () => {
+	it("agent-specific includes review, fixed-asset, materiality, and vendor-ledger fields", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -137,6 +141,8 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"price_tolerance_percent",
 			"basis",
 			"review_scope",
+			"depr_run_posted",
+			"enable_capex_signal",
 			"benchmark_value",
 			"percentage",
 			"engagement_risk_level",
