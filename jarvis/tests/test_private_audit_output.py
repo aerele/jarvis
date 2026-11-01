@@ -158,9 +158,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 	def test_private_report_completion_markers_refuse_without_source_data(self):
 		for extra in ({"more_rows": True}, {"partial": True}):
 			with self.subTest(extra=extra):
-				result = self._dispatch(
-					{"result": [{"value": CANARY}], **extra}, tool="run_report"
-				)
+				result = self._dispatch({"result": [{"value": CANARY}], **extra}, tool="run_report")
 				self.assertFalse(result["ok"])
 				self.assertNotIn("data", result)
 				self.assertNotIn(CANARY, str(result))
@@ -180,17 +178,13 @@ class TestPrivateAuditOutput(FrappeTestCase):
 		self.assertEqual(kwargs["tool"], "query")
 		self.assertFalse(kwargs["ok"])
 		self.assertEqual(kwargs["error_code"], "InvalidArgumentError")
-		self.assertEqual(
-			kwargs["error_message"], "The private source is truncated; coverage is incomplete."
-		)
+		self.assertEqual(kwargs["error_message"], "The private source is truncated; coverage is incomplete.")
 		self.assertNotIn("result", kwargs)
 		self.assertNotIn(CANARY, str(recorded.call_args))
 		steps = frappe.get_all("Jarvis Agent Run Step", {"run": self.run}, ["detail"])
 		self.assertEqual(len(steps), 1)
 		self.assertIn("private source is truncated", steps[0].detail)
-		messages = frappe.get_all(
-			"Jarvis Chat Message", {"conversation": self.conv.name}, ["tool_result"]
-		)
+		messages = frappe.get_all("Jarvis Chat Message", {"conversation": self.conv.name}, ["tool_result"])
 		self.assertEqual(len(messages), 1)
 		self.assertNotIn(CANARY, messages[0].tool_result)
 		self.assertNotIn(CANARY, str(published.call_args))
