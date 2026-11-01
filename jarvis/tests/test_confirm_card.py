@@ -136,6 +136,13 @@ class TestCodeSecretsMasked(FrappeTestCase):
 		self.assertEqual(row["from"].splitlines()[0], row["to"].splitlines()[0])
 		self.assertNotIn("sk_live_", repr(row))
 
+	def test_same_secret_tags_differ_across_rows(self):
+		meta = frappe.get_meta("Server Script")
+		text = 'api_key = "sk_live_abc123DEF456ghi789jkl"\n'
+		first = _diff_row(meta, "script", text, text + "x = 1\n", None, True)
+		second = _diff_row(meta, "script", text, text + "x = 1\n", None, True)
+		self.assertNotEqual(first["from"].splitlines()[0], second["from"].splitlines()[0])
+
 
 class TestVerbCard(FrappeTestCase):
 	def test_single_verb(self):
