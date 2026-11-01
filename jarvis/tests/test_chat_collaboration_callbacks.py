@@ -107,7 +107,13 @@ class TestCollaborationCallbacks(CollaborationCase):
 			self.authorize()
 
 	def test_unknown_new_tool_and_private_memory_never_admit_callbacks(self):
-		for tool in ("recall", "remember", "future_unknown_tool", "record_app_wiki"):
+		for tool in (
+			"recall",
+			"remember",
+			"future_unknown_tool",
+			"record_app_wiki",
+			"run_stock_variance_evaluation",
+		):
 			with self.subTest(tool=tool):
 				self.record(call=tool, tool="jarvis__" + tool)
 				with self.assertRaises(frappe.PermissionError):
@@ -122,6 +128,7 @@ class TestCollaborationCallbacks(CollaborationCase):
 		self.assertFalse(READ_TOOLS & REFUSED_TOOLS)
 		self.assertFalse(WRITE_TOOLS & REFUSED_TOOLS)
 		self.assertEqual(tool_kind("get_cycle_count_inputs"), "refused")
+		self.assertEqual(tool_kind("run_stock_variance_evaluation"), "refused")
 		self.assertEqual(tool_kind("future_unknown_tool"), "refused")
 
 	def test_landed_cost_preview_is_read_only_and_bound_to_the_initiating_actor(self):
