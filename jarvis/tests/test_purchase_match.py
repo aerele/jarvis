@@ -689,12 +689,14 @@ class TestNativePurchaseMatch(unittest.TestCase):
 				}
 			).insert(ignore_permissions=True)
 			documents.append((run.doctype, run.name))
+			from jarvis.tools import _private_output
 			from jarvis.tools.get_purchase_match_inputs import get_purchase_match_inputs
 
-			with patch(
-				"jarvis.tools.get_purchase_match_inputs.get_session_key", return_value=run.session_key
+			with (
+				patch("jarvis.tools.get_purchase_match_inputs.get_session_key", return_value=run.session_key),
+				_private_output.request(True),
 			):
-				captured = get_purchase_match_inputs()
+				captured = get_purchase_match_inputs()["rows"][0]
 			run.reload()
 			self.assertEqual(captured["captured_by"], "Administrator")
 			self.assertTrue(captured["captured_at"])

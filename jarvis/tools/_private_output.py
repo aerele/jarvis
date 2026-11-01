@@ -33,6 +33,19 @@ def is_private():
 	return _active.get()
 
 
+def require_source_transport(tool):
+	"""Refuse an AP/AR snapshot unless the private delegate boundary is active."""
+	if tool in PRIVATE_SOURCE_TOOLS and not is_private():
+		raise InvalidArgumentError("Private review evidence requires private audit output.")
+
+
+def source_envelope(snapshot):
+	"""Put one server-captured review snapshot on the sealed source contract."""
+	if not isinstance(snapshot, dict):
+		raise InvalidArgumentError("The private review source has an invalid snapshot.")
+	return {"rows": [snapshot]}
+
+
 def validate_args(tool, args):
 	if tool in PRIVATE_SOURCE_TOOLS and args != {}:
 		raise InvalidArgumentError("Private review evidence takes no model-selected arguments.")

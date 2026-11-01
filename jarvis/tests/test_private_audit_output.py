@@ -1,6 +1,7 @@
 """Exercise private source output through the real bound delegate dispatcher."""
 
 import hashlib
+import importlib
 import json
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -170,14 +171,59 @@ class TestPrivateAuditOutput(FrappeTestCase):
 					self.assertNotIn("data", result)
 					self.assertNotIn(CANARY, str(result))
 
-	def test_ordinary_review_input_never_claims_private_capture(self):
-		payload = {"rows": [{"source_digest": "a" * 64}]}
+	def test_private_review_handlers_seal_the_actual_captured_snapshot(self):
+		snapshot = {
+			"source_digest": "a" * 64,
+			"scope": {"company": "Fake Co"},
+			"datasets": {"invoices": [{"bill_no": CANARY, "amount": 0.0}]},
+		}
 		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
-			with self.subTest(tool=tool):
-				result = self._dispatch(payload, tool=tool, mode=None)
-				self.assertTrue(result["ok"], result)
-				self.assertNotIn("result_mode", result)
-				self.assertNotIn("private_output", result)
+			module = importlib.import_module(f"jarvis.tools.{tool}")
+			with (
+				self.subTest(tool=tool),
+				patch.object(module, "get_inputs", return_value=snapshot) as source,
+				patch("jarvis.api.publish_realtime_tool_result") as published,
+			):
+				result = api._dispatch_from_session(
+					self.actor, self.key, tool, {}, result_mode=_private_output.MODE
+				)
+			source.assert_called_once()
+			self.assertTrue(result["ok"], result)
+			self.assertEqual(json.loads(result["data"]), {"rows": [snapshot]})
+			self.assertEqual(result["private_output"]["count"], 1)
+			self.assertEqual(result["private_output"]["bytes"], len(result["data"].encode()))
+			self.assertNotIn(CANARY, str(published.call_args))
+			message = frappe.get_last_doc("Jarvis Chat Message", {"conversation": self.conv.name})
+			self.assertNotIn(CANARY, message.tool_result)
+			step = frappe.get_last_doc("Jarvis Agent Run Step", {"run": self.run})
+			self.assertNotIn(CANARY, step.detail)
+
+	def test_private_review_handlers_refuse_malformed_captured_snapshot_without_leak(self):
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			module = importlib.import_module(f"jarvis.tools.{tool}")
+			for snapshot in (None, {}, {"source_digest": "not-a-digest", "secret": CANARY}):
+				with (
+					self.subTest(tool=tool, snapshot=snapshot),
+					patch.object(module, "get_inputs", return_value=snapshot) as source,
+					patch("jarvis.api.publish_realtime_tool_result") as published,
+				):
+					result = api._dispatch_from_session(
+						self.actor, self.key, tool, {}, result_mode=_private_output.MODE
+					)
+				source.assert_called_once()
+				self.assertFalse(result["ok"], result)
+				self.assertNotIn("data", result)
+				self.assertNotIn(CANARY, str(result))
+				self.assertNotIn(CANARY, str(published.call_args))
+
+	def test_review_input_requires_private_mode_before_tool_dispatch(self):
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			for mode in (None, "ordinary-output"):
+				with self.subTest(tool=tool, mode=mode), patch("jarvis.api._run_tool") as execute:
+					result = api._dispatch_from_session(self.actor, self.key, tool, {}, result_mode=mode)
+				self.assertFalse(result["ok"], result)
+				self.assertNotIn("data", result)
+				execute.assert_not_called()
 
 	def test_private_review_input_rejects_model_selected_arguments_before_dispatch(self):
 		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
@@ -320,6 +366,19 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			self.assertFalse(api.call_tool("query", {}, result_mode=_private_output.MODE)["ok"])
 			execute.assert_not_called()
 
+	def test_standard_external_source_cannot_collect_private_evidence(self):
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			module = importlib.import_module(f"jarvis.tools.{tool}")
+			with (
+				self.subTest(tool=tool),
+				patch.object(module, "get_inputs") as source,
+				patch("jarvis.api._get_header", return_value=None),
+			):
+				result = api.call_tool(tool, {})
+			source.assert_not_called()
+			self.assertFalse(result["ok"], result)
+			self.assertNotIn("data", result)
+
 	def test_plugin_endpoint_requires_the_bound_read_contract(self):
 		headers = {"X-Jarvis-Token": "fake-test-token"}
 		payload = {"rows": [{"name": "FAKE", "value": CANARY}]}
@@ -340,6 +399,37 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			):
 				self.assertFalse(api.call_tool(tool, {}, result_mode=mode)["ok"])
 				execute.assert_not_called()
+
+	def test_plugin_source_calls_refuse_ordinary_and_shared_paths_before_dispatch(self):
+		headers = {"X-Jarvis-Token": "fake-test-token"}
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			for mode in (None, "ordinary-output"):
+				with (
+					self.subTest(tool=tool, mode=mode),
+					patch("jarvis.api._get_header", side_effect=headers.get),
+					patch("jarvis.api.validate_plugin_request", return_value=self.key),
+					patch("jarvis.api._dispatch_from_session") as execute,
+				):
+					result = api.call_tool(tool, {}, result_mode=mode)
+				self.assertFalse(result["ok"], result)
+				execute.assert_not_called()
+			for mode in (None, _private_output.MODE):
+				with (
+					self.subTest(tool=tool, shared_mode=mode),
+					patch("jarvis.api._get_header", side_effect=headers.get),
+					patch("jarvis.api.validate_plugin_request", return_value=self.key),
+					patch("jarvis.chat.collaboration.is_collaborative_session", return_value=True),
+					patch(
+						"jarvis.chat.collaboration.resolve_binding",
+						return_value=SimpleNamespace(actor=self.actor),
+					),
+					patch("jarvis.chat.collaboration_dispatch.dispatch") as shared_dispatch,
+					patch("jarvis.api._dispatch_from_session") as direct_dispatch,
+				):
+					result = api.call_tool(tool, {}, result_mode=mode)
+				self.assertFalse(result["ok"], result)
+				shared_dispatch.assert_not_called()
+				direct_dispatch.assert_not_called()
 
 	def test_external_output_without_private_mode_remains_uncapped(self):
 		payload = {"rows": [{"name": "FAKE", "value": "x" * 200}] * 1000}
