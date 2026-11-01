@@ -2029,7 +2029,9 @@ def _kept_row_clear_values() -> dict:
 	return values
 
 
-def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
+def keep_budget_rows_of_uninstalled(
+	installation: str, owner: str, *, exclude: set[str] | None = None
+) -> list[str]:
 	"""Keep the run rows of an installation being uninstalled that this month's budget
 	counts, and return their names; the caller deletes the rest.
 
@@ -2045,10 +2047,18 @@ def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
 	Raw writes: the run controller refuses an ORM save that changes a launch field. Does
 	not commit; the caller commits with the rest of the uninstall."""
 	since = _budget_month_start()
+	exclude = set(exclude or ())
+	where_exclude = " AND name NOT IN %(exclude)s" if exclude else ""
 	kept = frappe.db.sql(
 		"""SELECT name FROM `tabJarvis Agent Run`
-		    WHERE installation = %(installation)s AND creation >= %(since)s AND status IN %(statuses)s""",
-		{"installation": installation, "since": since, "statuses": _KEPT_ROW_STATUSES},
+		    WHERE installation = %(installation)s AND creation >= %(since)s AND status IN %(statuses)s"""
+		+ where_exclude,
+		{
+			"installation": installation,
+			"since": since,
+			"statuses": _KEPT_ROW_STATUSES,
+			**({"exclude": tuple(exclude)} if exclude else {}),
+		},
 		pluck=True,
 	)
 	if not kept:
