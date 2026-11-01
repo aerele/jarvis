@@ -232,19 +232,35 @@ def exists(dt, alias, where, joins=None):
 	return {"op": "exists", "value": s}
 
 
-def warehouse_predicate(reference, p, prefix):
+def warehouse_predicate(reference, p, prefix, *, active_leaf=True):
+	"""Match a selected Warehouse subtree, optionally only active leaves.
+
+	The warehouse metadata pull needs every descendant to validate the nested-set
+	tree. Every fact source, however, must stop at enabled leaf warehouses. This
+	keeps a disabled descendant out of the captured source, rather than merely
+	excluding it after it consumes a source row or page budget.
+	"""
 	w, root = prefix + "w", prefix + "root"
+	where = [
+		pred(w + ".name", "=", {"$field": reference}),
+		pred(w + ".company", "=", p["company"]),
+		pred(root + ".company", "=", p["company"]),
+		pred(root + ".name", "=", p["root"]),
+		pred(w + ".lft", ">=", {"$field": root + ".lft"}),
+		pred(w + ".rgt", "<=", {"$field": root + ".rgt"}),
+	]
+	if active_leaf:
+		where.extend(
+			[
+				pred(root + ".disabled", "=", 0),
+				pred(w + ".is_group", "=", 0),
+				pred(w + ".disabled", "=", 0),
+			]
+		)
 	return exists(
 		"Warehouse",
 		w,
-		[
-			pred(w + ".name", "=", {"$field": reference}),
-			pred(w + ".company", "=", p["company"]),
-			pred(root + ".company", "=", p["company"]),
-			pred(root + ".name", "=", p["root"]),
-			pred(w + ".lft", ">=", {"$field": root + ".lft"}),
-			pred(w + ".rgt", "<=", {"$field": root + ".rgt"}),
-		],
+		where,
 		[
 			{
 				"doctype": "Warehouse",
@@ -305,9 +321,9 @@ def query_specs(scope, config):
 				# The selected root is a record boundary, not only an input to
 				# later evaluator checks.  Do not collect sibling warehouse
 				# metadata from the same company.
-				q["where"].append(warehouse_predicate("r.name", p, "wh"))
+				q["where"].append(warehouse_predicate("r.name", p, "wh", active_leaf=False))
 		elif key == "counts":
-			q["where"] = parent_where("r", p, "pc")
+			q["where"] = parent_where("r", p, "pc", through_cutoff=True)
 		elif key == "count_lines":
 			q["joins"] = [
 				{
@@ -333,6 +349,9 @@ def query_specs(scope, config):
 						pred("ic.parentfield", "=", "items"),
 						*parent_filters("ip", p, through_cutoff=True),
 						pred("iw.company", "=", p["company"]),
+						pred("ir.disabled", "=", 0),
+						pred("iw.is_group", "=", 0),
+						pred("iw.disabled", "=", 0),
 						pred("ir.name", "=", p["root"]),
 						pred("iw.lft", ">=", {"$field": "ir.lft"}),
 						pred("iw.rgt", "<=", {"$field": "ir.rgt"}),
@@ -403,7 +422,10 @@ def query_specs(scope, config):
 						pred("rp.warehouse", "=", {"$field": "r.warehouse"}),
 						*parent_filters("rp", p, through_cutoff=True),
 						pred("rqw.company", "=", p["company"]),
+						pred("rqw.is_group", "=", 0),
+						pred("rqw.disabled", "=", 0),
 						pred("rqroot.company", "=", p["company"]),
+						pred("rqroot.disabled", "=", 0),
 						pred("rqroot.name", "=", p["root"]),
 						pred("rqw.lft", ">=", {"$field": "rqroot.lft"}),
 						pred("rqw.rgt", "<=", {"$field": "rqroot.rgt"}),
@@ -457,7 +479,10 @@ def query_specs(scope, config):
 						*parent_filters("rp", p, through_cutoff=True),
 						pred("rp.warehouse", "=", {"$field": "rs.warehouse"}),
 						pred("rtw.company", "=", p["company"]),
+						pred("rtw.is_group", "=", 0),
+						pred("rtw.disabled", "=", 0),
 						pred("rtroot.company", "=", p["company"]),
+						pred("rtroot.disabled", "=", 0),
 						pred("rtroot.name", "=", p["root"]),
 						pred("rtw.lft", ">=", {"$field": "rtroot.lft"}),
 						pred("rtw.rgt", "<=", {"$field": "rtroot.rgt"}),
@@ -660,6 +685,7 @@ def warehouse_set(rows, p):
 		root["name"] == p["root"] and root["company"] == p["company"],
 		"The warehouse root is outside the scope",
 	)
+	require(not root["disabled"], "The selected warehouse is disabled", "source_stale")
 	warehouses = {w["name"]: w for w in rows["warehouses"]}
 	require(warehouses.get(p["root"]) == root, "The warehouse root changed", "source_stale")
 	require(
@@ -694,7 +720,7 @@ def warehouse_set(rows, p):
 		else:
 			require(w["name"] == p["root"], "The warehouse tree has more than one root")
 		stack.append(w)
-	leaves = {k for k, w in inside.items() if not w["is_group"]}
+	leaves = {k for k, w in inside.items() if not w["is_group"] and not w["disabled"]}
 	require(bool(leaves), "a leaf warehouse in the selected scope", "configuration_missing")
 	require(
 		all(w["is_group"] or w["rgt"] == w["lft"] + 1 for w in inside.values()),

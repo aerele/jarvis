@@ -1,11 +1,13 @@
 """Focused checks for the server-owned Stock Variance evaluator."""
 
 from contextlib import nullcontext
+from datetime import date
 from unittest import TestCase
 from unittest.mock import patch
 
 import frappe
 
+from jarvis.chat import cycle_count_permissions
 from jarvis.chat import stock_variance_evaluation as evaluation
 from jarvis.chat import stock_variance_native as native
 from jarvis.chat import stock_variance_render as renderer
@@ -24,6 +26,17 @@ CONFIG = {"stock_variance": {"reviewer": "reviewer@example.invalid"}}
 
 
 class TestStockVarianceSourcePlan(TestCase):
+	@staticmethod
+	def _predicates(value):
+		if isinstance(value, dict):
+			if set(value) == {"field", "op", "value"}:
+				yield value
+			for child in value.values():
+				yield from TestStockVarianceSourcePlan._predicates(child)
+		elif isinstance(value, list):
+			for child in value:
+				yield from TestStockVarianceSourcePlan._predicates(child)
+
 	def test_warehouse_metadata_plan_excludes_a_company_sibling(self):
 		"""The selected Warehouse root is a source boundary, not a later filter."""
 		query = native.query_specs(SCOPE, CONFIG)["warehouses"]
@@ -47,8 +60,123 @@ class TestStockVarianceSourcePlan(TestCase):
 			where,
 		)
 
+	def test_fact_sources_use_enabled_leaves_and_the_report_cutoff(self):
+		"""Excluded warehouses and post-cutoff counts never enter a source query."""
+		scope = {**SCOPE, "report_date": "2026-10-15"}
+		plan = native.query_specs(scope, CONFIG)
+
+		self.assertIn(
+			{"field": "r.counted_at", "op": "<=", "value": "2026-10-15 23:59:59.999999"},
+			plan["counts"]["where"],
+		)
+		self.assertNotIn(
+			{"field": "r.counted_at", "op": "<=", "value": "2026-10-31 23:59:59.999999"},
+			plan["counts"]["where"],
+		)
+		self.assertEqual(
+			plan["counts"]["where"],
+			native.fingerprint_specs(scope, CONFIG)["counts"]["where"],
+		)
+
+		for key, alias in {
+			"counts": "pcww",
+			"count_lines": "lcww",
+			"items": "iw",
+			"sle_entries": "sww",
+			"repost_queue": "rqw",
+			"repost_transactions": "rtw",
+		}.items():
+			predicates = list(self._predicates(plan[key]))
+			with self.subTest(source=key):
+				self.assertIn({"field": alias + ".is_group", "op": "=", "value": 0}, predicates)
+				self.assertIn({"field": alias + ".disabled", "op": "=", "value": 0}, predicates)
+
+	def test_warehouse_set_keeps_only_enabled_leaves(self):
+		scope = {**SCOPE, "record_scope": {"doctype": "Warehouse", "name": "ROOT"}}
+		policy = native.policy(scope, CONFIG)
+		root = {
+			"name": "ROOT",
+			"company": SCOPE["company"],
+			"parent_warehouse": "",
+			"is_group": 1,
+			"disabled": 0,
+			"lft": 1,
+			"rgt": 6,
+		}
+		enabled = {
+			"name": "ENABLED",
+			"company": SCOPE["company"],
+			"parent_warehouse": "ROOT",
+			"is_group": 0,
+			"disabled": 0,
+			"lft": 2,
+			"rgt": 3,
+		}
+		disabled = {
+			"name": "DISABLED",
+			"company": SCOPE["company"],
+			"parent_warehouse": "ROOT",
+			"is_group": 0,
+			"disabled": 1,
+			"lft": 4,
+			"rgt": 5,
+		}
+
+		self.assertEqual(
+			native.warehouse_set({"warehouse_root": [root], "warehouses": [root, enabled, disabled]}, policy),
+			{"ENABLED"},
+		)
+
 	def test_native_version_matches_the_server_contract_release(self):
 		self.assertEqual(native.VERSION, "0.5.0")
+
+
+class TestStockVarianceDelegateScope(TestCase):
+	def test_delegate_scope_uses_report_cutoff_before_its_query(self):
+		stamped = {
+			"company": SCOPE["company"],
+			"from_date": "2026-10-01",
+			"to_date": "2026-10-31",
+			"report_date": "2026-10-15",
+			"record_scope": {"doctype": "Warehouse", "name": "Main Stores - EM"},
+		}
+		warehouse = frappe._dict(name="Main Stores - EM", company=SCOPE["company"], lft=1, rgt=2, disabled=0)
+		with (
+			patch.object(cycle_count_permissions.frappe.db, "get_value", return_value=warehouse),
+			patch.object(cycle_count_permissions.frappe, "has_permission", return_value=True),
+		):
+			scope = cycle_count_permissions._scope_from_run_stamp(
+				frappe.as_json(stamped), "reader@example.invalid"
+			)
+
+		self.assertIsNotNone(scope)
+		self.assertEqual(scope.to_date, date(2026, 10, 15))
+		condition = cycle_count_permissions._stock_variance_query_condition(scope)
+		self.assertIn("2026-10-16 00:00:00", condition)
+		self.assertIn("scoped_warehouse.`is_group` = 0", condition)
+		self.assertIn("scoped_warehouse.`disabled` = 0", condition)
+
+	def test_disabled_or_group_warehouse_is_outside_the_delegate_scope(self):
+		scope = frappe._dict(
+			company=SCOPE["company"],
+			from_date=date(2026, 10, 1),
+			to_date=date(2026, 10, 15),
+			lft=1,
+			rgt=6,
+		)
+		doc = frappe._dict(
+			docstatus=1,
+			company=SCOPE["company"],
+			counted_at="2026-10-10 09:00:00",
+			warehouse="disabled-leaf",
+		)
+		for is_group, disabled in ((0, 1), (1, 0)):
+			with self.subTest(is_group=is_group, disabled=disabled):
+				warehouse = frappe._dict(
+					company=SCOPE["company"], lft=2, rgt=3, is_group=is_group, disabled=disabled
+				)
+				with patch.object(cycle_count_permissions.frappe.db, "get_value", return_value=warehouse):
+					self.assertFalse(cycle_count_permissions._within_stock_variance_scope(doc, scope))
 
 
 class TestStockVarianceCaptureLimits(TestCase):
