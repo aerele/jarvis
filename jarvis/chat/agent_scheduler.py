@@ -1618,7 +1618,11 @@ def _stamp_scope_and_watermark(
 	from jarvis.chat import agent_scope, operator_review
 	from jarvis.chat.ledger_scrutiny_scope import (
 		requires_bound_scope as ledger_requires_bound_scope,
+	)
+	from jarvis.chat.ledger_scrutiny_scope import (
 		scoped_visibility as ledger_scoped_visibility,
+	)
+	from jarvis.chat.ledger_scrutiny_scope import (
 		validate_bound_scope as validate_ledger_bound_scope,
 	)
 
