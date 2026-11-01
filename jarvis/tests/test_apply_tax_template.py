@@ -16,7 +16,9 @@ ROWS = [{"charge_type": "On Net Total", "account_head": "IGST - X", "rate": 18}]
 class FakeDoc:
 	def __init__(self, options, **values):
 		field = frappe._dict(options=options) if options else None
-		self.meta = types.SimpleNamespace(get_field=lambda name: field if name == "taxes_and_charges" else None)
+		self.meta = types.SimpleNamespace(
+			get_field=lambda name: field if name == "taxes_and_charges" else None
+		)
 		self.values = values
 		self.appended = []
 
