@@ -51,6 +51,13 @@ class Node {
     parseInto(this.svg, html, this);
   }
 
+  // Takes the node, with everything inside it, out of the tree and out of the layer's list.
+  remove() {
+    const gone = new Set([this, ...this.descendants()]);
+    this.parent.children = this.parent.children.filter((n) => n !== this);
+    this.svg.all = this.svg.all.filter((n) => !gone.has(n));
+  }
+
   matches(simple) {
     return simple.startsWith(".")
       ? this.classes.includes(simple.slice(1))

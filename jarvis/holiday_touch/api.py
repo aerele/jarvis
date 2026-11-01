@@ -5,6 +5,9 @@ asked about someone else. The same payload rides the desktop page boot
 (``context.boot["holiday_touch"]`` in ``www/jarvis.py``); this endpoint is for a client that
 must refresh it without a reload. A 403 here means "none" to the client.
 
+``explain`` is the support view for a Jarvis admin: the reason chain, the window and the
+holiday rows for any user (see ``support_view``). It never returns a date of birth.
+
 ``record_shown`` is the client's report that it is about to play the scene. It answers
 ``{"play": bool}`` and, when the answer is true, has already recorded the showing, so the
 client plays exactly when told to. Every fault answers ``{"play": False}``; the only error a
@@ -19,10 +22,10 @@ from datetime import datetime, timezone
 import frappe
 
 from jarvis.chat import txn, usage
-from jarvis.holiday_touch import cadence, force, resolve
+from jarvis.holiday_touch import cadence, force, resolve, support_view
 from jarvis.holiday_touch.report import report
 from jarvis.holiday_touch.settings import shown_times
-from jarvis.permissions import require_jarvis_access
+from jarvis.permissions import require_jarvis_access, require_jarvis_admin
 
 _USER_SETTINGS = "Jarvis User Settings"
 _SHOWN = "holiday_touch_shown"
@@ -34,6 +37,15 @@ def get_today() -> dict:
 	access gets ``frappe.PermissionError`` (403); any other fault becomes a ``none`` payload."""
 	require_jarvis_access()  # a Guest has no access: it is refused here too
 	return resolve.safe_answer(frappe.session.user)
+
+
+@frappe.whitelist(methods=["GET"])
+def explain(user: str | None = None) -> dict:
+	"""Support view: why ``user`` (default the session user) got or missed a holiday touch.
+	Jarvis admins only (403 otherwise). Read only. An unknown user gets an ``unknown user``
+	view, and a fault inside the view an ``explain failed`` one: it never raises."""
+	require_jarvis_admin()
+	return support_view.build(user or frappe.session.user, _now())
 
 
 @frappe.whitelist(methods=["POST"])
@@ -50,6 +62,8 @@ def record_shown() -> dict:
 	answer = resolve.safe_answer(user, now)
 	if not answer.get("scene"):
 		return {"play": False}
+	if answer.get("may_play") is False:
+		return {"play": False}  # the stored showings already say no: skip the row lock
 	if force.forced_occasion(now) is not None:
 		# The developer-mode override bypasses the cadence, so there is nothing to record and
 		# the scene can be replayed as often as the tester likes.

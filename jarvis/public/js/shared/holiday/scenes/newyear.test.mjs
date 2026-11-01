@@ -8,7 +8,10 @@ import { readFileSync } from "node:fs";
 import * as scene from "./newyear.mjs";
 import {
   BURSTS,
+  CANNON,
+  CANNON_REACH,
   FIREWORKS_MIN_SHIFT,
+  FLOOR_ROW,
   FLASHES,
   PEAK,
   YEAR,
@@ -18,6 +21,7 @@ import {
 } from "./newyear-art.mjs";
 import {
   CLEAR,
+  HERO_FLOOR_GAP_PX,
   HERO_TOP_UNITS,
   MARK_TOP,
   TILE_K,
@@ -28,6 +32,7 @@ import {
 import {
   boxes,
   contractSuite,
+  edgeDrift,
   floorTransformOf,
   run,
   stageBoxes,
@@ -207,6 +212,146 @@ test("the cannons fit a short stage as one group, and a tall stage leaves them",
   assert.equal(row.querySelectorAll(".t-cr").length, 44);
   short.api.settle("instant");
   short.end();
+});
+
+// ---- the cannons stay clear of the hero ----------------------------------------------------
+
+// A short window: the stage 1060 x 408 px with the card band running below its bottom, so
+// the floor row is lifted and shrunk to its smallest. The hero is the page's own box: the
+// mark, heading and sub-line, at most 680 px wide.
+function shortPage({ w = 1060, h = 408, heroH = 250 } = {}) {
+  const page = stageBoxes({ w, h, markY: 119, cardsBottom: h + 192 });
+  return {
+    ...page,
+    hero: {
+      x: w / 2 - Math.min(340, w / 2 - 60),
+      y: 119,
+      w: Math.min(680, w - 120),
+      h: heroH,
+    },
+  };
+}
+
+// Each drawn cannon as a box in px: where it stands, and how far up it reaches, as the row is
+// fitted now.
+function cannonBoxes(r, page) {
+  const s = Math.min(page.host.w / 800, 1.25);
+  const cx = page.mark.x + page.mark.w / 2;
+  const fit = floorTransformOf(r);
+  return r.host.svg.querySelectorAll(".t-edge").map((el) => {
+    const x = Number(el.dataset.x);
+    const reach = CANNON_REACH * fit.scale;
+    return {
+      l: cx + (x - 400 - reach) * s,
+      r: cx + (x - 400 + reach) * s,
+      t: (fit.anchor - FLOOR_ROW.up * fit.scale) * s,
+    };
+  });
+}
+
+// Clear of the hero's box by the gap on one side at least: beside it, or under it.
+function clearOfHeroBox(box, hero) {
+  const gap = HERO_FLOOR_GAP_PX - 1e-6;
+  const beside = box.r <= hero.x - gap || box.l >= hero.x + hero.w + gap;
+  const under = box.t >= hero.y + hero.h + gap - 0.5;
+  return beside || under;
+}
+
+test("the cannon's stated reach is what the drawn barrel reaches sideways", () => {
+  const a = (CANNON.tilt * Math.PI) / 180;
+  // The farthest corner of the barrel's rim (15 wide, its top 29 above the base) once tilted.
+  const reach = (7.5 * Math.cos(a) + 29 * Math.sin(a)) * CANNON.scale;
+  assert.ok(CANNON_REACH >= reach && CANNON_REACH <= reach + 1, `${reach}`);
+});
+
+test("the cannons stay at their own places when the row shrinks, not drawn in towards the hero", () => {
+  const page = shortPage();
+  const r = run(scene, { boxes: page });
+  assert.ok(floorTransformOf(r).scale < 1, "the row shrank");
+  const drift = edgeDrift(r);
+  assert.equal(drift.length, 2, "both cannons are held");
+  for (const [x, off] of drift)
+    assert.ok(off < 0.01, `cannon at ${x} drifts ${off}`);
+  r.api.settle("instant");
+  r.end();
+});
+
+test("at a roomy size the cannons are where they always were, held with an identity shift", () => {
+  const r = run(scene);
+  assert.deepEqual(
+    r.host.svg
+      .querySelectorAll(".t-edge")
+      .map((el) => [el.dataset.x, el.getAttribute("transform")]),
+    [
+      ["70", "translate(0 0)"],
+      ["730", "translate(0 0)"],
+    ]
+  );
+  r.api.settle("instant");
+  r.end();
+});
+
+test("on a short stage no cannon is inside the hero's box, or within 16 px of it", () => {
+  for (const w of [780, 900, 1060, 1300])
+    for (const h of [408, 480, 560, 700]) {
+      const page = shortPage({ w, h });
+      const r = run(scene, { boxes: page });
+      assert.equal(cannonBoxes(r, page).length, 2, "both cannons are drawn");
+      for (const box of cannonBoxes(r, page))
+        assert.ok(
+          clearOfHeroBox(box, page.hero),
+          `${w}x${h}: ${JSON.stringify(box)}`
+        );
+      r.api.settle("instant");
+      r.end();
+    }
+});
+
+test("a stage too narrow to keep both clear puts the cannons as far out as the stage goes", () => {
+  const page = shortPage({ w: 700, h: 408 });
+  const r = run(scene, { boxes: page });
+  const s = 700 / 800;
+  const [left, right] = r.host.svg
+    .querySelectorAll(".t-edge")
+    .map((el) => Number(el.dataset.x));
+  const reach = CANNON_REACH * floorTransformOf(r).scale;
+  assert.ok(
+    left - reach >= 400 - 350 / s - 1e-6,
+    "the left one is on the stage"
+  );
+  assert.ok(
+    right + reach <= 400 + 350 / s + 1e-6,
+    "the right one is on the stage"
+  );
+  r.api.settle("instant");
+  r.end();
+});
+
+test("on a short stage the hat leaves the right cannon's muzzle where that cannon now stands", () => {
+  const page = shortPage();
+  const r = run(scene, { boxes: page });
+  r.tick(2301);
+  const fit = floorTransformOf(r);
+  const x0 = Number(r.host.svg.querySelectorAll(".t-edge")[1].dataset.x);
+  const a = r.host.svg.animations.find((x) =>
+    x.node.classes.includes("t-drop")
+  );
+  const [tx, ty] = a.frames[0].transform
+    .match(/translate\(([\d.-]+)px, ([\d.-]+)px\)/)
+    .slice(1)
+    .map(Number);
+  const s = Math.min(page.host.w / 800, 1.25);
+  const k = page.mark.w / s / 56;
+  // The tile's units back to the stage's: the mark's own column is x = 400.
+  const [x, y] = [400 + (tx - 28) * k, page.mark.y / s + ty * k];
+  const P = CANNON.scale;
+  assert.ok(Math.abs(x - (x0 - 17.9 * P * fit.scale)) < 0.2, `x ${x}`);
+  assert.ok(
+    Math.abs(y - (fit.anchor - fit.scale * (CANNON.lift + 22.9 * P))) < 0.2,
+    `y ${y}`
+  );
+  r.api.settle("instant");
+  r.end();
 });
 
 test("the party hat leaves the right cannon and lands on the mark, handing over", () => {

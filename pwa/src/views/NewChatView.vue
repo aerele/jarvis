@@ -1,6 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import BrandMark from "../components/BrandMark.vue";
+import HolidayMark from "../components/HolidayMark.vue";
 import { holdActive } from "../maintenanceGate";
 import { agentName } from "@/branding";
 import { useRouter } from "vue-router";
@@ -17,6 +17,9 @@ import AutoModeToggle from "../components/AutoModeToggle.vue";
 import { autoModeView } from "../lib/autoMode";
 import { recoveryState, sendRecovery } from "../sendRecoveryStore";
 import { observeDelivery, deliveryFailureCopy } from "@shared/lib/sendDelivery.js";
+import { holidayTouch, wornAnswer } from "../holidayTouch";
+import { heroWords } from "../lib/holidayWords";
+import { heroRoomPx } from "../lib/holidayRoom";
 
 // New chat: the hero screen, not an empty thread with a chat bar bolted to the
 // bottom. Brand mark, a greeting that knows the time of day and who you are, and
@@ -65,13 +68,24 @@ const fileEl = ref(null);
 
 // Morning / afternoon / evening, by the clock on THIS device — the phone's own
 // timezone is the one the user is standing in.
+const firstName = String(window.frappe_full_name || "")
+	.trim()
+	.split(/\s+/)[0];
 const greeting = computed(() => {
 	const h = new Date().getHours();
 	const part = h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
-	const first = String(window.frappe_full_name || "")
-		.trim()
-		.split(/\s+/)[0];
-	return first ? `${part}, ${first}.` : `${part}.`;
+	return firstName ? `${part}, ${firstName}.` : `${part}.`;
+});
+// Today's holiday words: a day or birthday heading, or the ordinary greeting plus an
+// advance wish under it.
+const words = computed(() =>
+	heroWords(holidayTouch.answer.value, { greeting: greeting.value, firstName })
+);
+// The worn item hangs above the mark: keep room for all of it (and a gap) below the top of
+// the hero, so it is never cut off under the app bar. Nothing extra when it wears nothing.
+const heroRoom = computed(() => {
+	const room = heroRoomPx(wornAnswer.value, holdActive.value);
+	return room ? { paddingTop: `${room}px` } : undefined;
 });
 
 // Same derivation the desktop uses: the configured pool if there is one, else
@@ -375,9 +389,12 @@ onUnmounted(() => {
 		</button>
 	</div>
 
-	<div class="jv-hero">
-		<BrandMark :size="56" :mood="holdActive ? 'upgrading' : 'star'" />
-		<h1 class="jv-greeting">{{ greeting }}</h1>
+	<div class="jv-hero" :style="heroRoom">
+		<HolidayMark :size="56" :radius="14" :mood="holdActive ? 'upgrading' : 'star'" />
+		<h1 class="jv-greeting" data-testid="welcome-greeting">{{ words.heading }}</h1>
+		<p v-if="words.leadup" class="jv-leadup" data-testid="welcome-leadup">
+			{{ words.leadup }}
+		</p>
 	</div>
 
 	<!-- Starter prompts: tap to prefill the composer (never sends). Shown from
@@ -723,6 +740,17 @@ onUnmounted(() => {
 	letter-spacing: -0.3px;
 	line-height: 1.25;
 	color: var(--ink9);
+	text-align: center;
+	text-wrap: balance;
+}
+
+/* The advance wish sits under the greeting like a quiet sub-line. */
+.jv-leadup {
+	margin: -4px 0 0;
+	max-width: 28ch;
+	font-size: 14px;
+	line-height: 1.45;
+	color: var(--ink6);
 	text-align: center;
 	text-wrap: balance;
 }

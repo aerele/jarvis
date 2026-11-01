@@ -1,10 +1,14 @@
 // A regression net for all nine day scenes: each scene's mounted markup, the animations it
 // starts (what, keyframes, options, and the absolute time each begins) and its beats, taken
-// at a few moments of a light-theme run, are hashed and compared with the table below. A
-// refactor that keeps this table passing draws and times every scene exactly as before. When
-// a scene is changed ON PURPOSE, run with SCENE_SNAPSHOT_DIR=<dir> to dump each run as JSON
-// (diff it against the dump from before the change), then paste the new hashes the failure
-// message prints.
+// at a few moments of a run, are hashed field by field and compared with the table below, so a
+// failure names the design, the run and the field (markup at one moment, animations, beats)
+// that changed. A refactor that keeps this table passing draws and times every scene exactly
+// as before. When a scene is changed ON PURPOSE, run with SCENE_SNAPSHOT_DIR=<dir> to dump each
+// run as JSON (diff it against the dump from before the change), then paste the row the
+// failure message prints.
+//
+// The scenes do not read the theme: the dark theme is CSS inside the markup, so the markup
+// hashes already cover it, and the second half of this file reads those dark rules out by name.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -79,49 +83,133 @@ function capture(mod, over) {
 }
 
 const dir = process.env.SCENE_SNAPSHOT_DIR;
-const hashOf = (text) =>
-  createHash("sha256").update(text).digest("hex").slice(0, 16);
+const hashOf = (value) =>
+  createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 8);
 
+// A run's parts, each hashed on its own: the markup (at the first moment, and at each later
+// moment where it has changed since the one before), the animations, the beats.
+const fieldsOf = ({ moments, animations, beats }) => ({
+  ...Object.fromEntries(
+    moments
+      .filter(([, markup], i) => i === 0 || markup !== moments[i - 1][1])
+      .map(([t, markup]) => [`markup at ${t} ms`, markup])
+  ),
+  animations,
+  beats,
+});
+
+// One row per run: the hashes of its fields, in the order of fieldsOf.
 const EXPECTED = {
-  "birthday/replay": "44608047a13757c2",
-  "birthday/roomy": "579c60eb0cb24d64",
-  "birthday/short": "97cfbdab1ca83fb6",
-  "christmas/replay": "0d359ca3e84de087",
-  "christmas/roomy": "4f5efbb2b18370de",
-  "christmas/short": "c66083e64ef31b28",
-  "diwali/replay": "c206fdccd7ffed5a",
-  "diwali/roomy": "bc8ac6c09a46fe59",
-  "diwali/short": "277dc54916e65623",
-  "eid/replay": "0100c076cea273b3",
-  "eid/roomy": "e00b760d02cb212d",
-  "eid/short": "d629bc6d638ab591",
-  "holi/replay": "756910b7b46e0cf2",
-  "holi/roomy": "49e33ea079b4a1b3",
-  "holi/short": "4b44f2aa3fab257e",
-  "independence/replay": "7fbdce855d9e9f78",
-  "independence/roomy": "eaa5d9c2028cad75",
-  "independence/short": "2ca59fe12ba042f9",
-  "newyear/replay": "308e5a56db1637e5",
-  "newyear/roomy": "727a08d65f659e1a",
-  "newyear/short": "1a0a921e28293673",
-  "onam/replay": "f6f659edb8e53d8b",
-  "onam/roomy": "eed184c6b4e0e3a1",
-  "onam/short": "7680bf5590382010",
-  "pongal/replay": "409ce8ce56ad1110",
-  "pongal/roomy": "90423e7a93af4bab",
-  "pongal/short": "01e2d607d8a18099",
+  "birthday/replay": "f63991a6 6003e96e fa727a46",
+  "birthday/roomy": "f63991a6 6003e96e e0f40c7e",
+  "birthday/short": "f63991a6 c0112047 e0f40c7e",
+  "christmas/replay": "3413110b 869009ee 44c3ceb6 d72f8430",
+  "christmas/roomy": "91301ba4 fc276ab4 e2ba2750 da298c33",
+  "christmas/short": "c04d4461 d9cb11f1 4c62bc72 da298c33",
+  "diwali/replay": "d75555e8 f24ff791 b8b16b58 2d5ca61e",
+  "diwali/roomy": "d6b5a5d5 a49074be 2a83e870 1edb8737",
+  "diwali/short": "87c7f4cb 17ae24d7 ba3b4f94 1edb8737",
+  "eid/replay": "d3d5e4e3 32c05b87 7e9d52c7",
+  "eid/roomy": "1d5f2d09 0c0c7688 4240175c",
+  "eid/short": "d626b78f 457944e2 4240175c",
+  "holi/replay": "5ef3d821 1114e533 cbe79e2b d7005a01",
+  "holi/roomy": "fafb4610 8be04f13 6dedc4e6 9b86db1d",
+  "holi/short": "63a3aa22 ea04ccad dc3c3601 9b86db1d",
+  "independence/replay": "c56dfaa7 68ae810c 385ef482 571065cf",
+  "independence/roomy": "c56dfaa7 68ae810c 385ef482 7a2d15e0",
+  "independence/short": "f08bd65f 3293dffe 3c4e1ec2 7a2d15e0",
+  "newyear/replay": "5c4fb432 6910fc9d 53a8f53c",
+  "newyear/roomy": "87a86316 7bd942d3 2aea645f",
+  "newyear/short": "023ff55b 14452d90 2aea645f",
+  "onam/replay": "84e044ba 5d9144b2 e6e2cb15 b2ee7c82",
+  "onam/roomy": "bc934b95 d32162d9 d17c720f e2348697",
+  "onam/short": "5ead1cb5 57235fce 6b83a5c8 e2348697",
+  "pongal/replay": "c23ad67d 93d83f04 6b3f5ef5 b3c549d2",
+  "pongal/roomy": "9df76d48 71b13b41 4d0784a0 eab288f9",
+  "pongal/short": "c0ca7506 9b7ecde3 4d0784a0 eab288f9",
 };
 
 for (const [design, mod] of Object.entries(SCENES)) {
   for (const [name, over] of Object.entries(RUNS)) {
     const key = `${design}/${name}`;
     test(`${key}: markup, animations and beats are as recorded`, () => {
-      const text = JSON.stringify(capture(mod, over()), null, 1);
+      const run = capture(mod, over());
       if (dir) {
         mkdirSync(dir, { recursive: true });
-        writeFileSync(`${dir}/${design}-${name}.json`, text);
+        writeFileSync(
+          `${dir}/${design}-${name}.json`,
+          JSON.stringify(run, null, 1)
+        );
       }
-      assert.equal(hashOf(text), EXPECTED[key], `${key} hash`);
+      const fields = fieldsOf(run);
+      const names = Object.keys(fields);
+      const actual = Object.values(fields).map(hashOf);
+      const expected = (EXPECTED[key] || "").split(" ");
+      const differs = names.filter((_, i) => actual[i] !== expected[i]);
+      assert.ok(
+        differs.length === 0 && actual.length === expected.length,
+        `${key}: ${
+          differs.join("; ") || "the field list"
+        } differ(s). New row: "${key}": "${actual.join(" ")}",`
+      );
     });
   }
+}
+
+// ---- the dark theme's overrides -----------------------------------------------------------
+
+// Every `[data-theme="dark"]` rule in a run's markup, each followed by the gradient it
+// points at (its id and stops), so a changed colour reads as itself, not as a hash.
+function darkRules(markup) {
+  const stops = (id) => {
+    const gradient = new RegExp(
+      `<linearGradient id="${id}"[^>]*>(.*?)</linearGradient>`
+    ).exec(markup);
+    const parts = [
+      ...gradient[1].matchAll(
+        /offset="([^"]+)" stop-color="([^"]+)" stop-opacity="([^"]+)"/g
+      ),
+    ].map(([, offset, colour, alpha]) => `${offset} ${colour} @${alpha}`);
+    return `${id}: ${parts.join(", ")}`;
+  };
+  return [...markup.matchAll(/\[data-theme="dark"\][^{]*\{[^}]*\}/g)].flatMap(
+    ([rule]) => {
+      const id = /url\(#([^)]+)\)/.exec(rule);
+      return id ? [rule, stops(id[1])] : [rule];
+    }
+  );
+}
+
+const SKY = '[data-theme="dark"] .t-sky{fill:url(#t-skyd)}';
+// What each design's dark theme changes (the designs not listed change nothing). The sky
+// washes and the stalk's end stop swap in a gradient; the rest recolour or dim a class.
+const DARK_EXPECTED = {
+  birthday: [SKY, "t-skyd: 0 #f472b6 @0.34, 0.3 #8b5cf6 @0.2, 0.52 #8b5cf6 @0"],
+  christmas: ['[data-theme="dark"] .t-flake{stroke:#e0e7ff}'],
+  diwali: [],
+  eid: [],
+  holi: [SKY, "t-skyd: 0 #ec4899 @0.34, 0.3 #7c3aed @0.22, 0.52 #7c3aed @0"],
+  independence: [
+    '[data-theme="dark"] .t-tbw{fill-opacity:.55;stroke-opacity:.55}',
+    SKY,
+    "t-skyd: 0 #ea7a17 @0.4, 0.3 #f97316 @0.2, 0.52 #f97316 @0",
+  ],
+  newyear: [],
+  onam: [],
+  pongal: [
+    '[data-theme="dark"] .t-stalk{stroke:url(#t-scaned)}',
+    "t-scaned: 0 #9d4b73 @1, 0.5 #5b1a3a @1, 1 #7a2f57 @1",
+    SKY,
+    "t-skyd: 0 #c2410c @0.62, 0.28 #f59e0b @0.3, 0.52 #f59e0b @0",
+  ],
+};
+
+for (const [design, mod] of Object.entries(SCENES)) {
+  test(`${design}: the dark theme's overrides are as recorded`, () => {
+    const r = run(mod);
+    const rules = darkRules(r.markup());
+    r.api.settle("instant");
+    r.end();
+    assert.deepEqual(rules, DARK_EXPECTED[design], `${design} dark rules`);
+  });
 }

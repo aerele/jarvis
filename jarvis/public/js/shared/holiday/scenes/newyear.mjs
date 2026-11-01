@@ -13,6 +13,7 @@ import {
   FLOOR_ROW,
   PEAK,
   ROCKET_MS,
+  cannonXs,
   defsSVG,
   floorSVG,
   muzzle,
@@ -58,9 +59,14 @@ class NewYearScene extends Scene {
     super(host, opts, CFG);
   }
 
-  // The fireworks follow the mark, but never up past the clearance line.
+  // The fireworks follow the mark, but never up past the clearance line. The cannons stand
+  // where they clear the hero, worked out at the start (inner): a later relayout moves the
+  // row, and the cannons are held at their places in it, but does not move them along it.
   extra(_b, geo) {
-    return { dy: Math.max(geo.shift, FIREWORKS_MIN_SHIFT) };
+    return {
+      dy: Math.max(geo.shift, FIREWORKS_MIN_SHIFT),
+      cannons: cannonXs(geo),
+    };
   }
 
   px() {
@@ -69,9 +75,12 @@ class NewYearScene extends Scene {
 
   inner(geo) {
     const { p } = this;
+    this.cannonX = geo.cannons;
     const floor = this.opts.replay
       ? ""
-      : this.floorGroup(floorSVG(p, geo.ground));
+      : this.floorGroup(
+          floorSVG(p, geo.ground, geo.cannons, (x, prop) => this.edge(x, prop))
+        );
     return `${skySVG(p, geo.dy)}${yearSVG(
       p,
       yearText(this.opts.year),
@@ -170,10 +179,11 @@ class NewYearScene extends Scene {
   // cannons are not drawn, so the hat comes in from the bottom right corner instead.
   prepare() {
     const arc = (g) => {
-      const [mx, my] = muzzle(CANNON.x[1], -1);
+      const x = this.cannonX[1];
+      const [mx, my] = muzzle(x, -1);
       const mouth = this.opts.replay
         ? [g.to - 20, g.hu + 20]
-        : this.fitted([mx, this.floorBottom + my]);
+        : this.fittedHeld(x, [mx, this.floorBottom + my]);
       return quadPath(toTile(g, mouth), [140, -150], [0, 0], 14, -720);
     };
     this.fly(arc, {

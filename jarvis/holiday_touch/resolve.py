@@ -29,6 +29,7 @@ from frappe.utils import get_system_timezone, getdate
 
 from jarvis.holiday_touch import cache, cadence, force, pick, settings
 from jarvis.holiday_touch.match import match_occasion
+from jarvis.holiday_touch.names import OCCASIONS
 from jarvis.holiday_touch.report import report
 from jarvis.holiday_touch.weekly_off import calendar_name, country_code_for
 from jarvis.permissions import has_jarvis_access
@@ -69,7 +70,8 @@ def answer(user: str, now: datetime | None = None) -> dict:
 	if forced is not None and has_jarvis_access(user):
 		occ = forced
 	else:
-		occ = cache.occasion_cached(user, zone, now, lambda: occasion(user, now, zone))
+		names = settings.names(site)
+		occ = cache.occasion_cached(user, zone, now, lambda: occasion(user, now, zone, names))
 	chosen = _choose(
 		occ,
 		settings.on(site, "birthday_greetings_enabled"),
@@ -92,9 +94,12 @@ def answer(user: str, now: datetime | None = None) -> dict:
 	return payload
 
 
-def occasion(user: str, now: datetime | None = None, zone: str | None = None) -> dict:
+def occasion(
+	user: str, now: datetime | None = None, zone: str | None = None, names: dict | None = None
+) -> dict:
 	"""The cacheable occasion for ``user`` (see the module docstring). ``zone`` is the user's
-	already validated zone (``zone_for``); it is read here when the caller has not."""
+	already validated zone (``zone_for``) and ``names`` the operator's extra holiday names
+	(``settings.names``); each is read here when the caller has not."""
 	if not user or user == "Guest":
 		return _none("guest")
 	if not has_jarvis_access(user):
@@ -105,7 +110,7 @@ def occasion(user: str, now: datetime | None = None, zone: str | None = None) ->
 	if not employee:
 		return _none("no_employee")
 	today = _utc(now).astimezone(ZoneInfo(zone or zone_for(user))).date()
-	holiday = _holiday_candidate(employee, today)
+	holiday = _holiday_candidate(employee, today, names)
 	state = _birthday_state(employee, today)
 	if state == "yes":
 		win = pick.hit("birthday", "birthday", "birthday", None, True, "birthday")
@@ -201,7 +206,7 @@ def _placeholder_dates(company: str) -> set[date]:
 # -- holidays -------------------------------------------------------------------------
 
 
-def _holiday_candidate(employee, today: date) -> dict:
+def _holiday_candidate(employee, today: date, names: dict | None = None) -> dict:
 	"""The holiday for ``today``, or a ``none`` with a reason. A failure here never costs the
 	birthday: it is logged once an hour and counts as "no holiday" (reason ``holiday_error``).
 	Reasons: ``no_list`` (no Holiday List resolves), ``no_rows`` (a list, but no row within
@@ -215,7 +220,7 @@ def _holiday_candidate(employee, today: date) -> dict:
 			return _none("no_list")
 		if not rows:
 			return _none("no_rows")
-		return pick.pick(_matches(rows, employee.company), today)
+		return pick.pick(_matches(rows, employee.company, names), today)
 	except Exception:
 		report("holiday", "Holiday touch: holiday lookup failed")
 		return _none("holiday_error")
@@ -261,21 +266,35 @@ def _holiday_rows(employee: str, start: date, end: date):
 	)
 
 
-def _matches(rows, company: str) -> dict:
-	"""``{date: {occasion: via}}`` for the rows that name an occasion."""
-	country = frappe.get_cached_value("Company", company, "country")
-	lists, found = {}, {}
-	for row in rows:
-		on = getdate(row.get("holiday_date"))
-		occ, via = match_occasion(row.get("description"), on, country), "match"
-		if occ is None and row.get("weekly_off"):
-			occ, via = _calendar_occasion(row.get("parent"), on, country, lists), "weekly_off_calendar"
-		if occ:
-			found.setdefault(on, {})[occ] = via
+def _matches(rows, company: str, names: dict | None = None) -> dict:
+	"""``{date: {occasion: via}}`` for the rows that name an occasion. ``names`` are the
+	operator's extra names; ``None`` means the caller has not read them."""
+	found = {}
+	for hit in _row_matches(rows, company, names):
+		if hit["occasion"]:
+			found.setdefault(hit["on"], {})[hit["occasion"]] = hit["via"]
 	return found
 
 
-def _calendar_occasion(parent, on: date, company_country, lists: dict):
+def _row_matches(rows, company: str, names: dict | None = None) -> list[dict]:
+	"""One ``{on, description, occasion, via}`` per row, in row order; ``occasion`` and
+	``via`` are None for a row that names none. The one place a row is matched. ``names`` are
+	the operator's extra names; ``None`` means the caller has not read them."""
+	country = frappe.get_cached_value("Company", company, "country")
+	extra = settings.names(settings.site()) if names is None else names
+	lists, hits = {}, []
+	for row in rows:
+		on = getdate(row.get("holiday_date"))
+		occ, via = match_occasion(row.get("description"), on, country, extra), "match"
+		if occ is None and row.get("weekly_off"):
+			occ, via = _calendar_occasion(row.get("parent"), on, country, lists, extra), "weekly_off_calendar"
+		hits.append(
+			{"on": on, "description": row.get("description"), "occasion": occ, "via": via if occ else None}
+		)
+	return hits
+
+
+def _calendar_occasion(parent, on: date, company_country, lists: dict, extra=None):
 	"""What the country's own calendar calls this weekly-off date (ERPNext's "Get Local
 	Holidays" skips a date that already has a row, so a festival on a Sunday stays "Sunday").
 	The row's list country and subdivision win; without a country, the Company's ISO code and
@@ -285,7 +304,7 @@ def _calendar_occasion(parent, on: date, company_country, lists: dict):
 	country, subdivision = lists[parent]
 	code = country_code_for(country or company_country)
 	name = calendar_name(on, code, subdivision if country else None)
-	return match_occasion(name, on, company_country) if name else None
+	return match_occasion(name, on, company_country, extra) if name else None
 
 
 def _list_region(parent):
@@ -296,6 +315,55 @@ def _list_region(parent):
 	except Exception:
 		region = None
 	return region or (None, None)
+
+
+# -- support view ---------------------------------------------------------------------
+
+
+def window_view(user: str, now: datetime | None = None, zone: str | None = None) -> dict:
+	"""What ``occasion`` reads for ``user``, for the admin support view (``explain``).
+
+	``{employee, birthday_today, rows_status, rows}``. ``birthday_today`` is a bool: the date
+	of birth itself never leaves this module. ``rows`` are the Holiday rows within ``SPAN``
+	days of today as ``{date, description, occasion, design, via}``; ``rows_status`` is ``ok``,
+	``no_employee``, ``no_hrms``, ``no_list`` or ``error`` (a lookup fault is a status, not a
+	raise). Writes nothing."""
+	employee = _employee(user) if frappe.db.table_exists("Employee") else None
+	if not employee:
+		return _view(False, False, "no_employee", [])
+	today = _utc(now).astimezone(ZoneInfo(zone or zone_for(user))).date()
+	birthday = _birthday_state(employee, today) == "yes"
+	status, rows = _window_rows(employee, today)
+	return _view(True, birthday, status, rows)
+
+
+def _view(employee: bool, birthday: bool, status: str, rows: list) -> dict:
+	return {"employee": employee, "birthday_today": birthday, "rows_status": status, "rows": rows}
+
+
+def _window_rows(employee, today: date) -> tuple[str, list]:
+	try:
+		if "hrms" not in frappe.get_installed_apps():
+			return "no_hrms", []
+		span = timedelta(days=pick.SPAN)
+		rows = _holiday_rows(employee.name, today - span, today + span)
+		if rows is None:
+			return "no_list", []
+		return "ok", [_row_view(hit) for hit in _row_matches(rows, employee.company)]
+	except Exception:
+		report("explain_rows", "Holiday touch: explain rows lookup failed")
+		return "error", []
+
+
+def _row_view(hit: dict) -> dict:
+	occ = hit["occasion"]
+	return {
+		"date": hit["on"].isoformat(),
+		"description": hit["description"],
+		"occasion": occ,
+		"design": OCCASIONS[occ] if occ else None,
+		"via": hit["via"],
+	}
 
 
 # -- small helpers --------------------------------------------------------------------

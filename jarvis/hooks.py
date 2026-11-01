@@ -13,6 +13,9 @@ app_license = "AGPL-3.0-only"
 # access state (see jarvis/boot.py) so JS can branch on it without a
 # round-trip back to the server.
 boot_session = "jarvis.boot.set_jarvis_boot"
+# Runs after Frappe reads the cached boot_session blob, on every Desk load: the holiday
+# touch answer depends on the date, so it cannot live in the cached blob.
+extend_bootinfo = "jarvis.holiday_touch.boot.extend_bootinfo"
 
 # ---------------------------------------------------------------------------
 # Deployment constants

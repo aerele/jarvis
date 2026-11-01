@@ -4,8 +4,11 @@
 // group. The year is text drawn from the `year` option, never part of the art.
 import { burstSVG, lin, rad, r2 } from "../stage.mjs";
 import { styleSVG } from "./scene-art.mjs";
+import { clearOfHero } from "./scene-place.mjs";
 import {
   CLEAR,
+  GAP,
+  HERO_FLOOR_GAP_PX,
   MARK_TOP,
   TILE_K,
   WORN_OVERHANG,
@@ -155,6 +158,9 @@ export const yearSVG = (p, text, plan) =>
 // ---- the cannons -----------------------------------------------------------------------
 
 export const CANNON = { scale: 1.55, lift: 8, tilt: 38, x: [70, 730] };
+// How far (units, at the row's full size) a cannon reaches sideways from its base: the far
+// corner of the barrel's rim once it is tilted. The page keeps this much of it clear of the hero.
+export const CANNON_REACH = 37;
 // The floor row: a cannon at each end, standing on the baseline; the muzzle is where the
 // confetti and the party hat leave from.
 // Nothing stands under the hero (mid: null).
@@ -195,18 +201,47 @@ const confetti = (cls) =>
       }" opacity="0"/>`
   ).join("");
 
-/** The floor row's drawing: two confetti cannons, standing on `ground`. */
-export function floorSVG(p, ground) {
-  const [left, right] = CANNON.x;
+/**
+ * The floor row's drawing: two confetti cannons, standing on `ground` at the x of `xs`.
+ * `hold(x, prop)` wraps a cannon with its confetti so it keeps its place at its end of the
+ * stage while the row shrinks (Scene.edge); a shrinking row would draw them in over the hero.
+ */
+export function floorSVG(p, ground, xs = CANNON.x, hold = (_x, prop) => prop) {
   const at = ([mx, my]) => `translate(${mx} ${r2(ground + my)})`;
-  return `<g transform="${at(muzzle(left, 1))}">${confetti(
-    `${p}cl`
-  )}</g><g transform="${at(muzzle(right, -1))}">${confetti(
-    `${p}cr`
-  )}</g>${cannonSVG(p, ground, left, false)}${cannonSVG(
-    p,
-    ground,
-    right,
-    true
-  )}`;
+  const cannon = (x, dir, cls) =>
+    hold(
+      x,
+      `<g transform="${at(muzzle(x, dir))}">${confetti(
+        `${p}${cls}`
+      )}</g>${cannonSVG(p, ground, x, dir < 0)}`
+    );
+  return `${cannon(xs[0], 1, "cl")}${cannon(xs[1], -1, "cr")}`;
+}
+
+/**
+ * Where the two cannons' bases stand on this stage: at CANNON.x, moved out towards the stage's
+ * edge when the hero's box (geo.keep) would come within HERO_FLOOR_GAP_PX of them, as the
+ * floor row is fitted now. A stage with no room for that puts a cannon as far out as the
+ * stage goes. geo: {floor, keep, s, from, to}.
+ */
+export function cannonXs(geo) {
+  const { scale, anchor } = geo.floor;
+  const [hw, hh] = [CANNON_REACH * scale, (FLOOR_ROW.up * scale) / 2];
+  const more = Math.max(0, HERO_FLOOR_GAP_PX / geo.s - GAP); // keep already holds GAP
+  const keep = {
+    l: geo.keep.l - more,
+    r: geo.keep.r + more,
+    t: geo.keep.t - more,
+    b: geo.keep.b + more,
+  };
+  return CANNON.x.map((x, i) => {
+    const moved = clearOfHero(
+      { x, y: anchor - hh, hw, hh },
+      keep,
+      geo.from,
+      geo.to
+    );
+    if (moved !== null) return moved;
+    return i === 0 ? geo.from + hw : geo.to - hw;
+  });
 }

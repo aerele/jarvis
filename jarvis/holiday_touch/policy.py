@@ -1,24 +1,28 @@
 """Mirror the operator's holiday-touch policy locally.
 
-The control plane owns two switches, ``disabled`` and ``disabled_designs``. The bench pulls
-them with ``get_connection`` (daily in ``onboarding.sync_connection``, and on the chat gate)
-and stores them on Jarvis Settings. ``resolve.answer`` reads the mirror fields per request,
-so a change takes effect at once and nothing here rotates the cache.
+The control plane owns two switches, ``disabled`` and ``disabled_designs``, and two name
+lists, ``aliases`` and ``near_misses``. The bench pulls them with ``get_connection`` (daily in
+``onboarding.sync_connection``, and on the chat gate) and stores them on Jarvis Settings.
+``resolve.answer`` reads the switches per request, so a change takes effect at once. The
+names feed the matcher, whose answers are cached, so a change to the stored names rotates the
+cache generation once the write commits.
 
 Rules:
 
-* The two subkeys are independent: a malformed ``disabled_designs`` never stops ``disabled``
-  from applying, and the other way round.
+* The four subkeys are independent: a malformed ``disabled_designs`` never stops ``disabled``
+  from applying, and malformed names never stop either switch.
 * A missing marker, a missing ``holiday_policy`` or a missing subkey KEEPS the stored value.
   A malformed subkey keeps the stored value and logs (rate limited, no payload content).
   Unknown design names inside a valid ``disabled_designs`` are dropped and logged the same way.
+  An empty ``{}`` / ``[]`` is a value, not a missing key: it clears that list.
 * Writes happen only on change: the gate path runs about every 30 s and Jarvis Settings, a
   Single, keeps a version history on every save, so an unchanged payload writes nothing.
 * ``holiday_policy_synced_at`` is stamped by the daily sync only, never by the chat gate, and
   only when the stored stamp is empty or over an hour old (the onboarding wizard polls the
   same sync).
-* The names subkeys (``aliases``, ``near_misses``) are ignored here: the matcher does not use
-  an admin overlay yet.
+* The names are not trusted: ``name_check`` keeps the nine designs, names of 3-60 characters
+  and 200 names in all, and drops (and logs, counts only) the rest. They are stored as
+  canonical JSON in ``holiday_policy_names``.
 * Never raises.
 """
 
@@ -28,7 +32,8 @@ import json
 
 import frappe
 
-from jarvis.holiday_touch import settings
+from jarvis.holiday_touch import cache, settings
+from jarvis.holiday_touch.name_check import NameCheck
 from jarvis.holiday_touch.names import DESIGNS
 from jarvis.holiday_touch.report import report
 
@@ -37,6 +42,7 @@ _MARKER = "holiday_policy_supported"
 _KEY = "holiday_policy"
 _DISABLED = "holiday_policy_disabled"
 _DESIGNS = "holiday_policy_disabled_designs"
+_NAMES = "holiday_policy_names"
 _SYNCED_AT = "holiday_policy_synced_at"
 _STAMP_GAP_SECONDS = 3600
 _MALFORMED = "Holiday touch: admin policy malformed"
@@ -65,9 +71,20 @@ def _persist(payload, daily: bool) -> None:
 		)
 		return
 	meta = frappe.get_meta(_SETTINGS)
-	if not all(meta.has_field(f) for f in (_DISABLED, _DESIGNS, _SYNCED_AT)):
+	if not all(meta.has_field(f) for f in (_DISABLED, _DESIGNS, _NAMES, _SYNCED_AT)):
 		return  # the release is not migrated yet
 	stored = frappe.db.get_singles_dict(_SETTINGS)
+	changes = _changes(policy, stored)
+	if daily and _stamp_due(stored):
+		changes[_SYNCED_AT] = frappe.utils.now()
+	if changes:
+		frappe.db.set_single_value(_SETTINGS, changes, update_modified=False)
+	if _NAMES in changes:
+		cache.rotate_after_commit()  # answers cached under the old names must be matched again
+
+
+def _changes(policy: dict, stored: dict) -> dict:
+	"""The mirror fields whose value differs from ``stored``. Each subkey is judged alone."""
 	changes, bad = {}, []
 	if "disabled" in policy:
 		flag = _as_flag(policy["disabled"])
@@ -89,12 +106,46 @@ def _persist(payload, daily: bool) -> None:
 				)
 			if designs != _designs_json(settings.blocked_designs(stored)):
 				changes[_DESIGNS] = designs
+	names = _names_change(policy, stored, bad)
+	if names is not None:
+		changes[_NAMES] = names
 	if bad:
 		report("policy_malformed", _MALFORMED, f"subkeys=[{', '.join(bad)}] kept the stored values")
-	if daily and _stamp_due(stored):
-		changes[_SYNCED_AT] = frappe.utils.now()
-	if changes:
-		frappe.db.set_single_value(_SETTINGS, changes, update_modified=False)
+	return changes
+
+
+def _names_change(policy: dict, stored: dict, bad: list) -> str | None:
+	"""The canonical names JSON to store, or None when the names stay as they are. A subkey
+	that is missing keeps its stored half; a malformed one is added to ``bad`` and does too."""
+	if "aliases" not in policy and "near_misses" not in policy:
+		return None
+	check = NameCheck()
+	names = _stored_names(stored)
+	for key, clean in (("aliases", check.aliases), ("near_misses", check.near_misses)):
+		if key not in policy:
+			continue
+		found = clean(policy[key])
+		if found is None:
+			bad.append(key)
+		else:
+			names[key] = found
+	names = check.fit(names)
+	if check.dropped:
+		report(
+			"policy_names",
+			"Holiday touch: admin policy names ignored entries",
+			f"{check.dropped} entries in aliases or near_misses were ignored",
+		)
+	return json.dumps(names, ensure_ascii=False) if names != _stored_names(stored) else None
+
+
+def _stored_names(stored: dict) -> dict:
+	"""The stored names in canonical shape; anything unreadable counts as none."""
+	raw, check = settings.names(stored), NameCheck()
+	return {
+		"aliases": check.aliases(raw.get("aliases")) or {},
+		"near_misses": check.near_misses(raw.get("near_misses")) or [],
+	}
 
 
 def _stamp_due(stored: dict) -> bool:
