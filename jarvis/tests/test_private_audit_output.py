@@ -130,6 +130,18 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			step = frappe.get_last_doc("Jarvis Agent Run Step", {"run": self.run})
 			self.assertNotIn(CANARY, step.detail)
 
+	def test_private_review_input_uses_sorted_canonical_source_bytes(self):
+		payload = {"rows": [{"z_key": "last", "source_digest": "a" * 64, "a_key": "first"}]}
+		expected = json.dumps(
+			payload, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+		).encode()
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			with self.subTest(tool=tool):
+				result = self._dispatch(payload, tool=tool)
+				self.assertEqual(result["data"].encode(), expected)
+				self.assertEqual(result["private_output"]["bytes"], len(expected))
+				self.assertEqual(result["private_output"]["sha256"], hashlib.sha256(expected).hexdigest())
+
 	def test_private_review_input_rejects_an_unsealed_or_non_singleton_envelope(self):
 		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
 			for payload in (

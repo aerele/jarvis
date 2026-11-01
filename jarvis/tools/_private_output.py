@@ -86,7 +86,12 @@ def prepare(result, *, tool):
 		raise InvalidArgumentError("The private source is truncated; coverage is incomplete.")
 	try:
 		body = json.dumps(
-			data, default=json_handler, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+			data,
+			default=json_handler,
+			sort_keys=True,
+			ensure_ascii=False,
+			allow_nan=False,
+			separators=(",", ":"),
 		).encode()
 	except (TypeError, ValueError, OverflowError) as exc:
 		raise InvalidArgumentError(
