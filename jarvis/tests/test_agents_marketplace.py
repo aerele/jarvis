@@ -515,28 +515,30 @@ class TestAgentsMarketplace(unittest.TestCase):
 
 	# ------------------------------------------------------------------ #
 	# jarvis#1063 (jarvis-only half) - config_keys: which agent-specific
-	# installation config keys an agent's bundle actually reads (verified
-	# against jarvis-agents/agents/<slug>/evaluate.py; only close-auditor
-	# reads any today).
+	# installation config keys an agent's bundle actually reads. The registry
+	# currently has close-auditor's nested materiality keys and the statutory
+	# payroll deposit-status agent's top-level deposit key.
 	# ------------------------------------------------------------------ #
 	def test_sync_agent_listings_writes_config_keys_from_the_registry(self):
-		# dot paths - close-auditor/evaluate.py reads these NESTED under a
-		# top-level "materiality" object, not as flat top-level keys.
 		agent_catalog.sync_agent_listings()
-		self.assertEqual(
-			json.loads(frappe.db.get_value(LISTING, "close-auditor", "config_keys")),
-			[
+		expected = {
+			"close-auditor": [
 				"materiality.benchmark_value",
 				"materiality.percentage",
 				"materiality.engagement_risk_level",
 				"materiality.rounding_step",
 			],
-		)
+			"statutory-payroll-deposit-status": ["deposit"],
+		}
+		for slug, config_keys in expected.items():
+			with self.subTest(agent=slug):
+				self.assertEqual(json.loads(frappe.db.get_value(LISTING, slug, "config_keys")), config_keys)
 
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
-		"""An agent the registry declares no config_keys for (everyone but
-		close-auditor today) gets [], not null/absent - ConfigForm.vue can
-		always safely parse it."""
+		"""An agent with no declared config keys gets [], not null or absent.
+
+		ConfigForm.vue can then always parse the value safely.
+		"""
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(
 			json.loads(frappe.db.get_value(LISTING, "cycle-count-planner-operator", "config_keys")), []
@@ -546,18 +548,22 @@ class TestAgentsMarketplace(unittest.TestCase):
 		agent_catalog.sync_agent_listings()
 		frappe.set_user(self.owner)
 		try:
-			out = agents_api.get_agent("close-auditor")
+			expected = {
+				"close-auditor": [
+					"materiality.benchmark_value",
+					"materiality.percentage",
+					"materiality.engagement_risk_level",
+					"materiality.rounding_step",
+				],
+				"statutory-payroll-deposit-status": ["deposit"],
+			}
+			for slug, config_keys in expected.items():
+				allow_listing_for(slug, user=self.owner)
+				with self.subTest(agent=slug):
+					out = agents_api.get_agent(slug)
+					self.assertEqual(json.loads(out["config_keys"]), config_keys)
 		finally:
 			frappe.set_user("Administrator")
-		self.assertEqual(
-			json.loads(out["config_keys"]),
-			[
-				"materiality.benchmark_value",
-				"materiality.percentage",
-				"materiality.engagement_risk_level",
-				"materiality.rounding_step",
-			],
-		)
 
 	def test_ap_detail_exposes_saved_configuration_readiness(self):
 		slug = "ap-3way-match-operator"
