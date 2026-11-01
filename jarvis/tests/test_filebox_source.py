@@ -724,6 +724,7 @@ class TestFileBoxSource(_Base):
 		frappe.db.commit()
 		with (
 			as_user(USER),
+			patch.object(filebox, "_rerun_row", return_value=frappe._dict(live=False, has_draft=False)),
 			patch.object(filebox, "_send_inbound") as send,
 			patch.object(frappe, "log_error") as log_error,
 		):
