@@ -114,7 +114,7 @@ test("Panel fences each old read, send, confirmation, and poll continuation", ()
   assert.match(resolve, /const actionIsCurrent = \(\) =>/);
   assert.match(
     resolve,
-    /resolving\.value === token \|\| \(stream\.value\.pending \|\| \[\]\)\.some/
+    /resolving\.value === token\s*\|\|\s*\(\s*stream\.value\.pending\s*\|\|\s*\[\]\s*\)\.some/
   );
   assert.match(
     resolve,
