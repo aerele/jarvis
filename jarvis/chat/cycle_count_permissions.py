@@ -26,6 +26,7 @@ CYCLE_COUNT_PLANNER = "cycle-count-planner-operator"
 SQL_QUOTE = "`"
 
 _DYNAMIC_READ_PTYPES = frozenset({"read", "select"})
+_MUTATION_PTYPES = frozenset({"create", "write", "submit", "cancel", "amend", "delete"})
 _MAX_PLANNER_WAREHOUSES = 10
 
 
@@ -36,6 +37,33 @@ def _reviewer(approval) -> str | None:
 	except (TypeError, ValueError):
 		return None
 	return evidence.get("reviewer") if isinstance(evidence, dict) else None
+
+
+def has_approval_read_share(approval_name: str, user: str | None = None, *, lock: bool = False) -> bool:
+	"""Return a current read grant on this exact count-plan approval.
+
+	This is narrower than generic Approval Request permission. A System Manager
+	can read approvals broadly, but a count plan stays private unless the person
+	owns its conversation, is its sealed reviewer, or holds this exact DocShare.
+	Controlled mutations use ``lock=True`` after their writer locks so a grant or
+	revoke cannot race their final authorization.
+	"""
+	user = user or frappe.session.user
+	if not isinstance(approval_name, str) or not approval_name or not isinstance(user, str) or not user:
+		return False
+	return bool(
+		frappe.db.get_value(
+			"DocShare",
+			{
+				"share_doctype": APPROVAL,
+				"share_name": approval_name,
+				"user": user,
+				"read": 1,
+			},
+			"name",
+			for_update=lock,
+		)
+	)
 
 
 def _may_view_plan_count(doc, user: str) -> bool:
@@ -51,7 +79,7 @@ def _may_view_plan_count(doc, user: str) -> bool:
 		return True
 	if _reviewer(approval) == user:
 		return True
-	return False
+	return has_approval_read_share(approval_name, user)
 
 
 def _iso_date(value) -> date | None:
@@ -274,11 +302,12 @@ def _may_view_count(doc, user: str) -> bool:
 
 
 def _plan_query_condition(user: str) -> str:
-	"""The plan-owner and sealed-reviewer list predicate."""
+	"""The owner/reviewer/exact-approval-share list predicate."""
 	escaped = frappe.db.escape(user)
 	count_table = f"{SQL_QUOTE}tab{COUNT}{SQL_QUOTE}"
 	approval_table = f"{SQL_QUOTE}tab{APPROVAL}{SQL_QUOTE}"
 	conversation_table = f"{SQL_QUOTE}tab{CONVERSATION}{SQL_QUOTE}"
+	share_table = f"{SQL_QUOTE}tabDocShare{SQL_QUOTE}"
 	approval_field = f"{SQL_QUOTE}approval_request{SQL_QUOTE}"
 	return (
 		f"exists (select 1 from {approval_table} approval "
@@ -287,6 +316,9 @@ def _plan_query_condition(user: str) -> str:
 		f"where approval.name = {count_table}.{approval_field} and ("
 		f"conversation.owner = {escaped} "
 		f"or JSON_UNQUOTE(JSON_EXTRACT(approval.assessment_evidence, '$.reviewer')) = {escaped}"
+		f" or exists (select 1 from {share_table} share_row "
+		f"where share_row.share_doctype = {frappe.db.escape(APPROVAL)} "
+		f"and share_row.share_name = approval.name and share_row.user = {escaped} and share_row.`read` = 1)"
 		"))"
 	)
 
@@ -357,11 +389,19 @@ def physical_count_query_conditions(user: str | None = None, doctype: str | None
 def has_physical_count_permission(doc, ptype: str = "read", user: str | None = None, debug=False) -> bool:
 	"""Deny access unless the caller can view its plan or active delegate scope.
 
-	Frappe calls this hook only with a document. A new document has no approved
-	plan yet, so create is left to the existing role and controller checks.
+	All writes must start at the controlled count endpoints. This hook runs before
+	Frappe's ``check_if_latest`` locks an existing draft or submitted fact, so it
+	must reject a Desk, REST, or ORM write here rather than in a document hook.
 	"""
 	user = user or frappe.session.user
-	if user == "Administrator" or ptype == "create" or not doc:
+	if doc and ptype in _MUTATION_PTYPES:
+		# Import lazily to avoid importing the entry controller while hooks load.
+		# The marker is a module object identity, never a client-controlled flag.
+		from jarvis.chat.cycle_count_entry import is_controlled_count_mutation
+
+		if not is_controlled_count_mutation(doc):
+			return False
+	if user == "Administrator" or not doc:
 		return True
 	if ptype in _DYNAMIC_READ_PTYPES:
 		return _may_view_count(doc, user)

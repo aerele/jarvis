@@ -31,7 +31,10 @@ vi.mock("@/components/JvSpinner.vue", () => ({
 
 import CountPlansList from "./CountPlansList.vue";
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+	vi.clearAllMocks();
+	countApi.listCountPlans.mockReset();
+});
 
 describe("CountPlansList", () => {
 	it("continues after an empty page caused by unreadable approved rows", async () => {
@@ -63,5 +66,147 @@ describe("CountPlansList", () => {
 
 		expect(countApi.listCountPlans).toHaveBeenLastCalledWith({ start: 500, pageLength: 20 });
 		expect(wrapper.text()).toContain("North count");
+	});
+
+	it("does not call a fully recorded plan ready when optional count totals are present", async () => {
+		countApi.listCountPlans.mockResolvedValueOnce({
+			rows: [
+				{
+					request: "AR-COUNT-COMPLETE",
+					title: "Complete count",
+					company: "Example Ltd",
+					warehouse: "Example - North",
+					line_count: 2,
+					recorded_line_count: 2,
+					remaining_line_count: 0,
+					can_record: 1,
+				},
+				{
+					request: "AR-COUNT-LEGACY",
+					title: "Legacy count",
+					company: "Example Ltd",
+					warehouse: "Example - South",
+					line_count: 1,
+					can_record: 1,
+				},
+			],
+			start: 0,
+			next_start: 2,
+			has_more: 0,
+		});
+		const wrapper = mount(CountPlansList);
+		await flushPromises();
+
+		const completeRow = wrapper
+			.findAll("button")
+			.find((button) => button.text().includes("Complete count"));
+		const legacyRow = wrapper
+			.findAll("button")
+			.find((button) => button.text().includes("Legacy count"));
+
+		expect(completeRow?.text()).toContain("All items recorded");
+		expect(completeRow?.text()).not.toContain("Ready to record");
+		expect(legacyRow?.text()).toContain("Ready to record");
+	});
+
+	it("keeps visible rows and gives an inline refresh retry after a failed refresh", async () => {
+		countApi.listCountPlans
+			.mockResolvedValueOnce({
+				rows: [
+					{
+						request: "AR-COUNT-1",
+						title: "North count",
+						company: "Example Ltd",
+						warehouse: "Example - North",
+						line_count: 1,
+						can_record: 1,
+					},
+				],
+				start: 0,
+				next_start: 1,
+				has_more: 0,
+			})
+			.mockRejectedValueOnce(new Error("Refresh failed"))
+			.mockResolvedValueOnce({
+				rows: [
+					{
+						request: "AR-COUNT-1",
+						title: "North count",
+						company: "Example Ltd",
+						warehouse: "Example - North",
+						line_count: 1,
+						can_record: 1,
+					},
+				],
+				start: 0,
+				next_start: 1,
+				has_more: 0,
+			});
+		const wrapper = mount(CountPlansList);
+		await flushPromises();
+
+		await wrapper.get('[data-label="Refresh"]').trigger("click");
+		await flushPromises();
+
+		expect(wrapper.text()).toContain("North count");
+		expect(wrapper.text()).toContain("Refresh failed");
+		expect(wrapper.find('[data-label="Retry refresh"]').exists()).toBe(true);
+
+		await wrapper.get('[data-label="Retry refresh"]').trigger("click");
+		await flushPromises();
+
+		expect(wrapper.text()).toContain("North count");
+		expect(wrapper.text()).not.toContain("Refresh failed");
+	});
+
+	it("keeps visible rows and gives an inline load-more retry after a failed page", async () => {
+		countApi.listCountPlans
+			.mockResolvedValueOnce({
+				rows: [
+					{
+						request: "AR-COUNT-1",
+						title: "North count",
+						company: "Example Ltd",
+						warehouse: "Example - North",
+						line_count: 1,
+						can_record: 1,
+					},
+				],
+				start: 0,
+				next_start: 1,
+				has_more: 1,
+			})
+			.mockRejectedValueOnce(new Error("Load more failed"))
+			.mockResolvedValueOnce({
+				rows: [
+					{
+						request: "AR-COUNT-2",
+						title: "South count",
+						company: "Example Ltd",
+						warehouse: "Example - South",
+						line_count: 1,
+						can_record: 1,
+					},
+				],
+				start: 1,
+				next_start: 2,
+				has_more: 0,
+			});
+		const wrapper = mount(CountPlansList);
+		await flushPromises();
+
+		await wrapper.get('[data-label="Load more"]').trigger("click");
+		await flushPromises();
+
+		expect(wrapper.text()).toContain("North count");
+		expect(wrapper.text()).toContain("Load more failed");
+		expect(wrapper.find('[data-label="Retry load more"]').exists()).toBe(true);
+
+		await wrapper.get('[data-label="Retry load more"]').trigger("click");
+		await flushPromises();
+
+		expect(wrapper.text()).toContain("North count");
+		expect(wrapper.text()).toContain("South count");
+		expect(wrapper.text()).not.toContain("Load more failed");
 	});
 });
