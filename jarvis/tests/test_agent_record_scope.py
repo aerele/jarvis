@@ -146,16 +146,20 @@ class TestRecordScopedWriteback(FrappeTestCase):
 		frappe.set_user("Administrator")
 		frappe.db.delete(FINDING, {"agent": SLUG})
 
-	def record(self, boundary, findings=True, claimed_boundary=None):
+	def record(
+		self, boundary, findings=True, claimed_boundary=None, launch_overrides=None, scope_overrides=None
+	):
 		run = _mk_run(self.owner)
 		stamp = {"company": self.company}
 		if boundary:
 			stamp["record_scope"] = boundary
+		stamp.update(launch_overrides or {})
 		frappe.db.set_value(RUN, run.name, "scope_json", json.dumps(stamp))
 		run.reload()
 		payload = dict(stamp)
 		if claimed_boundary:
 			payload["record_scope"] = claimed_boundary
+		payload.update(scope_overrides or {})
 		rows = (
 			[
 				{
@@ -214,6 +218,40 @@ class TestRecordScopedWriteback(FrappeTestCase):
 		first = self.record(self.a)
 		run = self.record(self.a, claimed_boundary=self.b)
 		self.assertEqual(json.loads(run.scope_json)["record_scope"], self.a)
+		self.assertEqual(run.status, "partial")
+		self.assertEqual(run.findings_count, 0)
+		self.assertEqual(frappe.db.get_value(FINDING, {"run": first.name}, "state"), "open")
+
+	def test_payroll_scope_forgery_cannot_change_any_server_launch_field(self):
+		payroll_entry = {"doctype": "Payroll Entry", "name": "PAY-TEST-2026-10"}
+		launch = {
+			"fiscal_year": "2026-2027",
+			"from_date": "2026-10-01",
+			"to_date": "2026-10-31",
+			"report_date": "2026-10-15",
+			"prior_fy_start": "2025-04-01",
+			"prior_fy_end": "2026-03-31",
+			"prior_period_from": "2026-09-01",
+			"prior_period_to": "2026-09-30",
+			"scope_kind": "single_batch",
+			"scoped_visibility": False,
+		}
+		first = self.record(payroll_entry, launch_overrides=launch)
+		run = self.record(
+			payroll_entry,
+			launch_overrides=launch,
+			scope_overrides={
+				"fiscal_year": "forged-year",
+				"prior_fy_start": "2000-01-01",
+				"prior_period_to": "2099-12-31",
+				"scope_kind": "firm_wide",
+				"scoped_visibility": True,
+			},
+		)
+		persisted = json.loads(run.scope_json)
+		self.assertEqual(persisted["record_scope"], payroll_entry)
+		for key, value in launch.items():
+			self.assertEqual(persisted[key], value)
 		self.assertEqual(run.status, "partial")
 		self.assertEqual(run.findings_count, 0)
 		self.assertEqual(frappe.db.get_value(FINDING, {"run": first.name}, "state"), "open")

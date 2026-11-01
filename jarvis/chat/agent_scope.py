@@ -9,9 +9,11 @@ Mar-31 / Apr-1 boundary). ``_launch_audit`` stamps the result on the Run
 (``scope_json``) and injects it verbatim into the run message; prior-FY
 selection stays versioned bench code, never LLM prose.
 
-It is DELIBERATELY generic: it carries no rule shape, only ordinary accounting
-dimensions (company / fiscal year / period boundaries), so the delegate bundles
-resolve their run scope from bench-injected, versioned values — never LLM prose.
+It is DELIBERATELY generic for normal delegates: it carries only ordinary
+accounting dimensions (company / fiscal year / period boundaries). A narrow
+delegate can add an explicit record root only through a server-side validation
+hook, so its bundle receives a bench-injected boundary — never owner JSON or
+LLM prose.
 
 The helper runs under the caller's identity (the run-as user in
 ``_launch_audit``), so ``frappe.defaults`` / erpnext's fiscal-year lookup are
@@ -25,6 +27,123 @@ import frappe
 from jarvis.exceptions import InvalidArgumentError
 
 INSTALLATION = "Jarvis Agent Installation"
+ATTENDANCE_AGENT = "attendance-leave-integrity-auditor"
+_ATTENDANCE_OUTPUT_SCOPE_KEYS = ("company", "from_date", "to_date", "report_date")
+
+
+def _agent_slug(installation) -> str:
+	return str(installation.get("agent") or installation.get("agent_slug") or "").strip()
+
+
+def requires_bound_scope(installation) -> bool:
+	"""True when a missing or bad root must refuse a launch.
+
+	Most delegates can safely use the ordinary company/date scope. Attendance is
+	different: its native evaluator requires one exact Department, and omitting a
+	configured root would otherwise turn a narrow review into an unbounded one.
+	"""
+	return _agent_slug(installation) == ATTENDANCE_AGENT
+
+
+def attendance_record_scope(value) -> dict | None:
+	"""Return the canonical Attendance Department root, or ``None``.
+
+	This is intentionally a shape check only. Launch validation also confirms the
+	Department's company, leaf state, enabled state, and run-as-user read access.
+	The shared shape check lets writeback code reject a model-created or widened
+	root without copying any raw owner configuration into a Run snapshot.
+	"""
+	if (
+		not isinstance(value, dict)
+		or set(value) != {"doctype", "name"}
+		or value.get("doctype") != "Department"
+		or not isinstance(value.get("name"), str)
+		or not value["name"].strip()
+		or value["name"] != value["name"].strip()
+	):
+		return None
+	return {"doctype": "Department", "name": value["name"]}
+
+
+def attendance_output_scope(value) -> dict | None:
+	"""Return the five safe Attendance output keys, or ``None``.
+
+	The evaluator may return this small projection at writeback. It cannot return
+	raw installation configuration or widen the Department root through this
+	helper. The server compares this projection with the launch-stamped scope.
+	"""
+	if not isinstance(value, dict):
+		return None
+	boundary = attendance_record_scope(value.get("record_scope"))
+	if boundary is None:
+		return None
+	output = {}
+	for key in _ATTENDANCE_OUTPUT_SCOPE_KEYS:
+		item = value.get(key)
+		if not isinstance(item, str) or not item.strip() or item != item.strip():
+			return None
+		output[key] = item
+	output["record_scope"] = boundary
+	return output
+
+
+def _attendance_department_scope(config: dict, company: str) -> dict:
+	"""Validate the Attendance Department root as the active run-as user.
+
+	Only this two-field, server-checked object may enter the run scope. The
+	caller runs ``resolve_scope`` after it has impersonated ``run_as_user``, so
+	``has_permission`` applies that identity's DocPerm and User Permission rules.
+	"""
+	declared = attendance_record_scope(config.get("record_scope"))
+	if declared is None:
+		raise InvalidArgumentError("Attendance record_scope must name one Department leaf")
+
+	name = declared["name"]
+	try:
+		department = frappe.db.get_value(
+			"Department", name, ["company", "is_group", "disabled"], as_dict=True
+		)
+		department_readable = frappe.has_permission("Department", "read", doc=name)
+	except Exception as exc:
+		raise InvalidArgumentError("Attendance Department scope could not be verified") from exc
+	if not department or not department_readable:
+		raise InvalidArgumentError(
+			"Attendance record_scope must be a readable leaf Department in the company"
+		)
+	try:
+		company_readable = frappe.has_permission("Company", "read", doc=company)
+	except Exception as exc:
+		raise InvalidArgumentError("Attendance Company scope could not be verified") from exc
+	if (
+		not company_readable
+		or department.get("company") != company
+		or department.get("is_group") is None
+		or frappe.utils.cint(department.get("is_group"))
+		or department.get("disabled") is None
+		or frappe.utils.cint(department.get("disabled"))
+	):
+		raise InvalidArgumentError(
+			"Attendance record_scope must be a readable leaf Department in the company"
+		)
+	return {"doctype": "Department", "name": name}
+
+
+def as_of_date(scope: dict | None) -> str | None:
+	"""Return the server-owned report-date cap for a resolved scope.
+
+	``to_date`` can be a future fiscal-year end.  A run must not call future
+	postings part of its observed ledger, so the effective as-of boundary is the
+	earlier of that endpoint and the stamped site report date.  Invalid scope
+	values return ``None`` so callers can fail closed instead of guessing.
+	"""
+	if not isinstance(scope, dict):
+		return None
+	try:
+		to_date = date.fromisoformat(str(scope.get("to_date") or "")[:10])
+		report_date = date.fromisoformat(str(scope.get("report_date") or scope.get("to_date") or "")[:10])
+	except (TypeError, ValueError):
+		return None
+	return min(to_date, report_date).isoformat()
 
 
 def resolve_scope(installation) -> dict:
@@ -34,9 +153,9 @@ def resolve_scope(installation) -> dict:
 	Reads ``company`` / ``fiscal_year`` / ``from_date`` / ``to_date`` from the
 	install's ``config`` JSON; falls back to the caller's default Company (or the
 	site's single Company) and erpnext's current fiscal year for the missing
-	pieces. Raises :class:`InvalidArgumentError` when no company / period can be
-	determined — the caller (``_launch_audit``) treats that as a soft failure and
-	degrades to an unscoped run rather than aborting the launch.
+	pieces. Attendance also requires a server-validated Department root. A
+	missing, malformed, foreign, group, or unreadable root raises instead of
+	falling back to a broader review.
 	"""
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
@@ -74,7 +193,11 @@ def resolve_scope(installation) -> dict:
 		except (ValueError, TypeError):
 			raise InvalidArgumentError("prior_period_from and prior_period_to must define an earlier period")
 		scope.update(prior_period_from=start.isoformat(), prior_period_to=end.isoformat())
-	if cfg.get("record_scope"):
+	if requires_bound_scope(installation):
+		# Attendance has one strictly validated Department root. Do not fall
+		# through to generic document parsing, which would accept a wider shape.
+		scope["record_scope"] = _attendance_department_scope(cfg, scope["company"])
+	elif cfg.get("record_scope"):
 		record = cfg["record_scope"]
 		if not isinstance(record, dict) or not all(record.get(k) for k in ("doctype", "name")):
 			raise InvalidArgumentError("record_scope requires a doctype and name")
