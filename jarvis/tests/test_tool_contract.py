@@ -124,6 +124,35 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 
 	PINNED_CAPABILITY_DIGEST = "801600a8e7b656110e7e99ccba2ccd8505d613d765057c1b422607016358d0bf"
 
+	def test_stock_variance_uses_the_submitted_physical_count_contract(self):
+		"""The evaluator may reference only its declared native count facts."""
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			doc = json.load(fh)
+		entry = next(item for item in doc["agents"] if item["agent_slug"] == "stock-variance-auditor")
+
+		self.assertEqual(entry["version"], "0.4.0")
+		self.assertIn("submitted physical-count facts", entry["description"])
+		self.assertEqual(
+			entry["doctypes_required"],
+			[
+				"Jarvis Physical Count",
+				"Jarvis Physical Count Item",
+				"Item",
+				"Stock Ledger Entry",
+				"Warehouse",
+				"Company",
+				"Repost Item Valuation",
+				"Inventory Dimension",
+			],
+		)
+		self.assertNotIn("Stock Reconciliation", entry["doctypes_required"])
+
+
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
 		import json

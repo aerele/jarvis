@@ -1723,9 +1723,9 @@
       "domain": "inventory-count",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "status": "Published",
-      "description": "Checks selected draft physical counts against book stock at each saved count time. Keeps all material lines together in one finding per count and shows the scope, controls and source links. Read-only; does not post stock adjustments.",
+      "description": "Checks submitted physical-count facts against book stock at each saved count time. Keeps all material lines together in one finding per count and shows the scope, controls and source links. Read-only; does not post stock adjustments.",
       "tools_required": [
         "jarvis__query"
       ],
@@ -1738,8 +1738,8 @@
         "message"
       ],
       "doctypes_required": [
-        "Stock Reconciliation",
-        "Stock Reconciliation Item",
+        "Jarvis Physical Count",
+        "Jarvis Physical Count Item",
         "Item",
         "Stock Ledger Entry",
         "Warehouse",
