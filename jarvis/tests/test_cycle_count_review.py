@@ -3170,7 +3170,7 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 
 	def test_all_native_stock_reads_are_required_even_for_a_system_manager(self):
 		"""A sealed-plan member never gets stock details from an approval role alone."""
-		from jarvis.chat import approvals_api, chat_permissions, cycle_count_entry
+		from jarvis.chat import approvals_api, chat_permissions, cycle_count_entry, cycle_count_permissions
 
 		manager = self._user(
 			"cycle-native-read-manager@example.invalid", ("Jarvis User", "Stock User", "System Manager")
@@ -3191,16 +3191,30 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			frappe.set_user("Administrator")
 
 		real_has_permission = frappe.has_permission
+		target_bin = frappe.db.get_value("Bin", {"warehouse": self.warehouse, "item_code": self.item}, "name")
+		self.assertTrue(target_bin)
 
 		frappe.set_user(manager)
 		try:
-			for denied_doctypes, label in (({"Warehouse", "Item"}, "Warehouse or Item"), ({"Bin"}, "Bin")):
+			for denied_doctypes, denied_bin, label in (
+				({"Warehouse", "Item"}, None, "Warehouse or Item"),
+				({"Bin"}, None, "Bin"),
+				(set(), target_bin, "the selected Bin"),
+			):
 				with self.subTest(missing=label):
 					def no_native_stock_read(doctype, ptype="read", *args, **kwargs):
+						doc = kwargs.get("doc") or (args[0] if args else None)
 						if doctype in denied_doctypes and ptype in {"read", "select"}:
+							return False
+						if doctype == "Bin" and doc == denied_bin and ptype in {"read", "select"}:
 							return False
 						return real_has_permission(doctype, ptype, *args, **kwargs)
 
+					if denied_bin:
+						self.assertTrue(
+							no_native_stock_read("Bin", "read", user=manager),
+							"a generic Bin read must not bypass the selected Bin denial",
+						)
 					with patch(
 						"jarvis.chat.cycle_count_permissions.frappe.has_permission",
 						side_effect=no_native_stock_read,
@@ -3239,6 +3253,14 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 							False,
 							f"a System Manager without {label} read cannot see count items",
 						)
+			for bins, label in (([], "missing"), ([target_bin, "duplicate-bin"], "ambiguous")):
+				with self.subTest(bin_source=label), patch.object(
+					cycle_count_permissions.frappe.db, "get_all", return_value=bins
+				):
+					self.assertFalse(
+						cycle_count_permissions.may_read_count_plan(approved, manager),
+						f"a {label} selected Bin must fail closed",
+					)
 		finally:
 			frappe.set_user("Administrator")
 

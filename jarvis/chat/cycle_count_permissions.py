@@ -97,6 +97,17 @@ def _has_native_plan_read(approval, evidence: dict, user: str) -> bool:
 		seen.add(item_code)
 		if not frappe.has_permission("Item", "read", doc=item_code, user=user):
 			return False
+		# A doctype-level Bin grant or an unrelated Bin share cannot disclose this
+		# plan's book values. Resolve its one exact source Bin without applying the
+		# caller's list permissions, then apply the record-level check explicitly.
+		bins = frappe.db.get_all(
+			"Bin",
+			filters={"warehouse": warehouse, "item_code": item_code},
+			pluck="name",
+			limit=2,
+		)
+		if len(bins) != 1 or not frappe.has_permission("Bin", "read", doc=bins[0], user=user):
+			return False
 	return True
 
 
