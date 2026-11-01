@@ -501,6 +501,16 @@ class TestAgentsMarketplace(unittest.TestCase):
 		unmapped = domains - set(agent_catalog._DOMAIN_CATEGORY_LABELS)
 		self.assertEqual(unmapped, set(), f"registry domain(s) with no explicit category label: {unmapped}")
 
+	def test_hrms_baseline_retains_measurement_category_with_hr_visibility_policy(self):
+		entry = next(
+			a
+			for a in agent_catalog._load_registry().get("agents") or []
+			if a.get("agent_slug") == "baseline-meter-auditor-hrms"
+		)
+		self.assertEqual(entry.get("domain"), "measurement")
+		self.assertEqual(entry.get("visibility_domain"), "hrms-payroll")
+		self.assertEqual(entry.get("version"), "0.3.1")
+
 	def test_category_from_domain_falls_back_to_title_case_for_unknown_codes(self):
 		self.assertEqual(agent_catalog._category_from_domain("widget-foo"), "Widget Foo")
 		self.assertEqual(agent_catalog._category_from_domain(""), "")

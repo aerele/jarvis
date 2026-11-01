@@ -426,7 +426,7 @@
       "domain": "measurement",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Read-only payroll activity counts for three fixed periods: overlapping payroll runs, one-time and recurring additional salary entries, submitted amended salary slips and captured change-log records. Counts cover the declared Department and retained history. It reads no individual pay values and makes no payroll error or saving verdict.",
       "tools_required": [
@@ -471,6 +471,7 @@
       "min_model": {
         "tier": "Advanced"
       },
+      "visibility_domain": "hrms-payroll",
       "config_keys": [
         "baseline_hrms.reviewer",
         "baseline_hrms.reviewer_capacity",
