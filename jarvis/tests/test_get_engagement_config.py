@@ -68,9 +68,7 @@ class TestGetEngagementConfig(unittest.TestCase):
 		cfg = {"depr_run_posted": False, "materiality": {"percentage": 5}}
 		result, get_value, _ = self._call(
 			session_key="agent:agent-x:R1",
-			run_row=frappe._dict(
-				name="R1", status="running", engagement_config_json=frappe.as_json(cfg)
-			),
+			run_row=frappe._dict(name="R1", status="running", engagement_config_json=frappe.as_json(cfg)),
 		)
 		self.assertEqual(dict(result), cfg)
 		get_value.assert_called_once_with(

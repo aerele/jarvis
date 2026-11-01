@@ -444,9 +444,7 @@ class TestAgentIdentity(unittest.TestCase):
 		# An agent declaring NO config_keys gets no EXPLICIT CONFIG and must preserve
 		# the missing state. A run must never fall back to mutable installation config.
 		bare = frappe._dict({"name": "y", "config_keys": []})
-		bare_msg = agent_scheduler._audit_prompt(
-			bare, inst, trigger="manual", scope={}, engagement_config={}
-		)
+		bare_msg = agent_scheduler._audit_prompt(bare, inst, trigger="manual", scope={}, engagement_config={})
 		self.assertNotIn("EXPLICIT CONFIG", bare_msg)
 		self.assertIn("No declared engagement settings were stamped", bare_msg)
 		self.assertIn("NEVER read mutable installation configuration", bare_msg)

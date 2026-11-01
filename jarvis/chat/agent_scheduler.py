@@ -1423,9 +1423,7 @@ def _launch_audit(
 			run_id=run.name,
 			agent_id=f"agent-{slug}",
 			session_key=session_key,
-			message=_audit_prompt(
-				listing, inst, trigger, scope, engagement_config=engagement_config
-			),
+			message=_audit_prompt(listing, inst, trigger, scope, engagement_config=engagement_config),
 			timeout_s=registry_timeout_s(slug),
 		)
 	except admin_client.AdminAmbiguousError:
