@@ -883,7 +883,7 @@ describe("per-agent gating via the configKeys prop", () => {
 			{},
 			{
 				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
-			},
+			}
 		);
 		expect(w.text()).toContain("Receiving reviewer");
 		expect(w.text()).toContain("Test declaration");
@@ -923,7 +923,7 @@ describe("per-agent gating via the configKeys prop", () => {
 			{},
 			{
 				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
-			},
+			}
 		);
 		await field(w, "Receiving reviewer").setValue("Receiving Controller");
 		await w.find('[data-label="Save configuration"]').trigger("click");
