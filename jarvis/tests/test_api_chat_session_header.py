@@ -197,9 +197,13 @@ class TestCallToolWithSessionHeader(FrappeTestCase):
 	def test_unknown_session_now_rejected(self):
 		"""Without a Chat Session row we have no user to dispatch as - fail
 		fast rather than silently fall back to a different identity."""
-		req = _FakeRequest(_plugin_headers("agent:nonexistent"))
-		with _patch_request(req):
+		unknown_session = "agent:PRIVATE-UNKNOWN-SESSION-BEARER"
+		req = _FakeRequest(_plugin_headers(unknown_session))
+		with _patch_request(req), patch("jarvis.api_errors.record_server_error") as recorded:
 			result = call_tool("get_schema", args={"doctype": "Customer"})
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["code"], "InvalidArgumentError")
 		self.assertIn("unknown session", result["error"]["message"])
+		self.assertNotIn(unknown_session, result["error"]["message"])
+		self.assertTrue(recorded.called)
+		self.assertNotIn(unknown_session, str(recorded.call_args_list))
