@@ -151,7 +151,11 @@ class TestStockVarianceDelegateScope(TestCase):
 
 		self.assertIsNotNone(scope)
 		self.assertEqual(scope.to_date, date(2026, 10, 15))
-		condition = cycle_count_permissions._stock_variance_query_condition(scope)
+		condition = cycle_count_permissions._stock_variance_query_condition(
+			scope,
+			f"{cycle_count_permissions.SQL_QUOTE}tab{cycle_count_permissions.COUNT}"
+			f"{cycle_count_permissions.SQL_QUOTE}",
+		)
 		self.assertIn("2026-10-16 00:00:00", condition)
 		self.assertIn("scoped_warehouse.`is_group` = 0", condition)
 		self.assertIn("scoped_warehouse.`disabled` = 0", condition)
