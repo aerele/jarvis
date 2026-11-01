@@ -259,7 +259,9 @@ class TestPP4ShadowAuthoredDashboard(FrappeTestCase):
 		# the catalog PR; save/writeback execute the production receipt path.
 		with (
 			patch.object(frappe, "get_roles", return_value=["HR User"]),
-			patch("frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}),
+			patch(
+				"frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}
+			),
 		):
 			profile = agent_scheduler._permission_profile(self.owner)
 		receipt = make_visibility_receipt(profile, "hrms-payroll")

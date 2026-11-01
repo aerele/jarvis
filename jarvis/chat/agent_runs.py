@@ -751,7 +751,6 @@ def _watermark_drift(run_doc, scope: dict) -> bool:
 	return False
 
 
-
 _VISIBILITY_UNSET = object()
 
 

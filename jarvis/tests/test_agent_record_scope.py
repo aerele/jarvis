@@ -168,7 +168,9 @@ class TestComparisonPeriod(FrappeTestCase):
 			patch("jarvis.chat.operator_review.backend", return_value=None),
 			patch.object(agent_catalog, "registry_visibility_domain", return_value="hrms-payroll"),
 			patch.object(frappe, "get_roles", return_value=["HR User"]),
-			patch("frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}),
+			patch(
+				"frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}
+			),
 			patch.object(frappe.db, "sql", return_value=[frappe._dict(n=0, m=None)]),
 			patch.object(frappe.db, "set_value") as set_value,
 		):
@@ -192,7 +194,9 @@ class TestComparisonPeriod(FrappeTestCase):
 			patch.object(agent_catalog, "registry_visibility_domain", return_value="hrms-payroll"),
 			patch.object(frappe.db, "get_value", return_value="{}"),
 			patch.object(frappe, "get_roles", return_value=["HR User"]),
-			patch("frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}),
+			patch(
+				"frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}
+			),
 			patch.object(frappe.db, "set_value") as set_value,
 		):
 			agent_scheduler._stamp_scope_and_watermark("unused", inst, "test@example.invalid")
@@ -237,7 +241,9 @@ class TestPayrollVisibilityAutoResolve(FrappeTestCase):
 			profile = agent_scheduler._permission_profile("test@example.invalid")
 		with (
 			patch.object(frappe, "get_roles", return_value=["HR User"]),
-			patch("frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}),
+			patch(
+				"frappe.permissions.get_user_permissions", return_value={"Department": [{"doc": "Finance"}]}
+			),
 		):
 			changed_profile = agent_scheduler._permission_profile("test@example.invalid")
 		receipt = make_visibility_receipt(profile, "hrms-payroll")
