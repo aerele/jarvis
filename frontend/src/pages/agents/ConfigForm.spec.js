@@ -952,10 +952,7 @@ describe("SLA-breach Helpdesk-team configuration", () => {
 
 	it("does not expose or rewrite a record scope for another agent", async () => {
 		const record_scope = { doctype: "HD Team", name: "Support East" };
-		const w = mountForm(
-			{ record_scope },
-			{ configKeys, agentSlug: "close-auditor" }
-		);
+		const w = mountForm({ record_scope }, { configKeys, agentSlug: "close-auditor" });
 		expect(w.text()).not.toContain("Helpdesk team");
 		expect(JSON.parse(w.find("textarea").element.value)).toEqual({ record_scope });
 		await w.find('[data-label="Save configuration"]').trigger("click");

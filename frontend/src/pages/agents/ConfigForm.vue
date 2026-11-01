@@ -217,9 +217,10 @@ const props = defineProps({
 // The agent-specific fields this agent's config_keys actually names (through
 // configKey or storage path), in CONFIG_FIELD_SET's display order.
 const agentSpecificFields = computed(() =>
-	AGENT_SPECIFIC_CONFIG_FIELDS.filter((f) =>
-		(!f.agentSlugs || f.agentSlugs.includes(props.agentSlug)) &&
-		(f.paths || [f.path]).some((p) => props.configKeys.includes(f.configKey || p))
+	AGENT_SPECIFIC_CONFIG_FIELDS.filter(
+		(f) =>
+			(!f.agentSlugs || f.agentSlugs.includes(props.agentSlug)) &&
+			(f.paths || [f.path]).some((p) => props.configKeys.includes(f.configKey || p))
 	)
 );
 // Scope fields first (always), then whichever agent-specific fields apply -
@@ -227,9 +228,7 @@ const agentSpecificFields = computed(() =>
 const operatorReview = computed(() => props.configKeys.includes("review_scope"));
 const arReview = computed(() => props.configKeys.includes("settlement_hold_days"));
 const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
-const slaBreachAgeingAuditor = computed(
-	() => props.agentSlug === "sla-breach-ageing-auditor"
-);
+const slaBreachAgeingAuditor = computed(() => props.agentSlug === "sla-breach-ageing-auditor");
 const requiresSetup = computed(() => operatorReview.value || slaBreachAgeingAuditor.value);
 const defaultsData = ref(null);
 const defaultsLoading = ref(false);
@@ -305,11 +304,15 @@ const shownErrors = computed(() =>
 		Object.entries(props.validationErrors || {}).filter(([key]) => {
 			if (!(key in form)) return true;
 			const path = KEY_TO_PATH[key] || key;
-			const field = visibleFields.value.find((entry) => (entry.keys || [entry.key]).includes(key));
+			const field = visibleFields.value.find((entry) =>
+				(entry.keys || [entry.key]).includes(key)
+			);
 			const saved = getPath(props.config || {}, path);
 			if (field?.recordScopeDoctype) {
 				const savedName =
-					saved && saved.doctype === field.recordScopeDoctype && typeof saved.name === "string"
+					saved &&
+					saved.doctype === field.recordScopeDoctype &&
+					typeof saved.name === "string"
 						? saved.name
 						: "";
 				return String(form[key]) === savedName;
@@ -365,7 +368,9 @@ function seed(cfg) {
 			continue;
 		}
 		const path = KEY_TO_PATH[key] || key;
-		const field = visibleFields.value.find((entry) => (entry.keys || [entry.key]).includes(key));
+		const field = visibleFields.value.find((entry) =>
+			(entry.keys || [entry.key]).includes(key)
+		);
 		if (field?.recordScopeDoctype) {
 			const record = getPath(c, path);
 			form[key] =
@@ -588,7 +593,9 @@ function save() {
 	const merged = JSON.parse(JSON.stringify(base));
 	for (const key of visibleKeys.value) {
 		const path = KEY_TO_PATH[key] || key;
-		const field = visibleFields.value.find((entry) => (entry.keys || [entry.key]).includes(key));
+		const field = visibleFields.value.find((entry) =>
+			(entry.keys || [entry.key]).includes(key)
+		);
 		const v = String(form[key] ?? "").trim();
 		if (path !== key) delete merged[key];
 		if (v === "") {
