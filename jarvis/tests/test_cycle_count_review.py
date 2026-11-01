@@ -3549,6 +3549,7 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			"company": self.company,
 			"from_date": today,
 			"to_date": today,
+			"report_date": today,
 			"record_scope": {"doctype": "Warehouse", "name": self.warehouse},
 		}
 		try:
@@ -3599,6 +3600,14 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 					False,
 					"a run scope for a different date leaked this count",
 				)
+				previous_day = frappe.utils.getdate(frappe.utils.add_days(today, -1)).isoformat()
+				set_scope({**scope, "report_date": previous_day})
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a report cutoff before the count leaked this source fact",
+				)
 				set_scope(
 					{
 						**scope,
@@ -3620,6 +3629,16 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 				)
 
 				set_scope(scope)
+				frappe.db.set_value("Warehouse", self.warehouse, "disabled", 1, update_modified=False)
+				try:
+					self._assert_physical_count_readable(
+						self.stock_variance_user,
+						fact_name,
+						False,
+						"a disabled Warehouse leaked a source fact to the delegate",
+					)
+				finally:
+					frappe.db.set_value("Warehouse", self.warehouse, "disabled", 0, update_modified=False)
 				session = frappe.db.get_value(
 					"Jarvis Chat Session",
 					{"session_key": delegate.session_key},
