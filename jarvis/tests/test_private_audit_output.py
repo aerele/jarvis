@@ -16,6 +16,11 @@ from jarvis.tools import _agent_run_ctx, _private_output, registry
 CANARY = "PRIVATE-SOURCE-CANARY"
 
 
+def _registered_private_source_tools():
+	"""Return sealed source tools whose server handlers are installed."""
+	return sorted(set(_private_output.PRIVATE_SOURCE_TOOLS) & set(registry._TOOLS))
+
+
 class TestPrivateAuditOutput(FrappeTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -31,6 +36,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 				[
 					"jarvis__query",
 					"jarvis__run_report",
+					"jarvis__get_cycle_count_inputs",
 					"jarvis__get_purchase_match_inputs",
 					"jarvis__get_receivables_review_inputs",
 				],
@@ -72,6 +78,10 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			args = {"report_name": "Fake report"}
 		with (
 			patch.dict(registry._TOOLS, {tool: lambda **kwargs: payload}),
+			# The core test substitutes a source handler before the Cycle child
+			# registers it. Keep the registry's signature cache aligned with that
+			# ``**kwargs`` substitute.
+			patch.dict(registry._ACCEPTS_VAR_KW, {tool: True}),
 			patch("jarvis.api._get_header", return_value=None),
 		):
 			return api._dispatch_from_session(self.actor, key or self.key, tool, args, result_mode=mode)
@@ -177,7 +187,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			"scope": {"company": "Fake Co"},
 			"datasets": {"invoices": [{"bill_no": CANARY, "amount": 0.0}]},
 		}
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in _registered_private_source_tools():
 			module = importlib.import_module(f"jarvis.tools.{tool}")
 			with (
 				self.subTest(tool=tool),
@@ -199,7 +209,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			self.assertNotIn(CANARY, step.detail)
 
 	def test_private_review_handlers_refuse_malformed_captured_snapshot_without_leak(self):
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in _registered_private_source_tools():
 			module = importlib.import_module(f"jarvis.tools.{tool}")
 			for snapshot in (None, {}, {"source_digest": "not-a-digest", "secret": CANARY}):
 				with (
@@ -367,7 +377,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			execute.assert_not_called()
 
 	def test_standard_external_source_cannot_collect_private_evidence(self):
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in _registered_private_source_tools():
 			module = importlib.import_module(f"jarvis.tools.{tool}")
 			with (
 				self.subTest(tool=tool),
