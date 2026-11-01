@@ -35,6 +35,7 @@ _CANDIDATES = 200
 _RECORD_CAP = 20
 _BACKSTOP_LIST = 10
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_SOURCE_UNAVAILABLE = object()
 
 _LIST_HEAD = (
 	"File Box skills for step 2 (the ONLY skills this run may follow). Each entry is quoted as "
@@ -444,7 +445,8 @@ def apply_answer(doc) -> bool:
 	a run was started or resumed."""
 	if doc.routing == MISSING:
 		if doc.decision == PROCESS_AUTO:
-			return _start_unpinned(doc.conversation)
+			outcome = _start_unpinned(doc.conversation)
+			return _SOURCE_UNAVAILABLE if outcome is _SOURCE_UNAVAILABLE else bool(outcome)
 		skip_file(doc.conversation)
 		return False
 	if doc.decision == SKIP:
@@ -459,7 +461,8 @@ def apply_answer(doc) -> bool:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before resume
 		then = _FOLLOW.format(slug=doc.decision, creates=_safe(creates, 140))
 	message = _ANSWER.format(name=doc.name, title=_safe(doc.title, 140), decision=doc.decision, then=then)
-	return _resume(doc.conversation, message)
+	outcome = _resume(doc.conversation, message)
+	return _SOURCE_UNAVAILABLE if outcome is _SOURCE_UNAVAILABLE else bool(outcome)
 
 
 def sheet_answer(conversation: str, routing: str, decision: str) -> None:
@@ -487,6 +490,7 @@ def _start_unpinned(conversation: str) -> bool:
 	claim-first, as a re-run."""
 	from jarvis._session import impersonate
 	from jarvis.chat import approvals_api, filebox
+	from jarvis.chat.filebox_source import SourceLost
 	from jarvis.chat.pending_actions._store import lock_conversation
 	from jarvis.permissions import delegated_send
 
@@ -516,7 +520,23 @@ def _start_unpinned(conversation: str) -> bool:
 	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before run starts
 	try:
-		f = filebox._source_file(conversation, read_as=frappe.db.get_value(CONV, conversation, "owner"))
+		try:
+			f = filebox._source_file(conversation, read_as=frappe.db.get_value(CONV, conversation, "owner"))
+		except SourceLost:
+			# Keep the existing generic File Box state safe for the ladder while
+			# exposing the specific recovery outcome only to the approval caller.
+			frappe.db.set_value(
+				CONV,
+				conversation,
+				{
+					"filebox_last_error": "Couldn't start: the original file is no longer available",
+					"filebox_last_error_at": frappe.utils.now_datetime(),
+					"filebox_rerun_at": None,
+				},
+				update_modified=False,
+			)
+			frappe.db.commit()
+			return _SOURCE_UNAVAILABLE
 		ok, switch_to = approvals_api.owner_run_identity(conversation)
 		if not (f and ok):
 			reason = "the original file is no longer available" if not f else "the file's owner can't run it"
@@ -543,8 +563,12 @@ def _start_unpinned(conversation: str) -> bool:
 
 def _resume(conversation: str, message: str) -> bool:
 	from jarvis.chat import approvals_api, filebox
+	from jarvis.chat.filebox_source import SourceLost
 
-	f = filebox._source_file(conversation, read_as=frappe.db.get_value(CONV, conversation, "owner"))
+	try:
+		f = filebox._source_file(conversation, read_as=frappe.db.get_value(CONV, conversation, "owner"))
+	except SourceLost:
+		return _SOURCE_UNAVAILABLE
 	attachments = json.dumps([{"file_url": f.file_url, "file_name": f.file_name}]) if f else None
 	try:
 		res = approvals_api._resume_conversation(

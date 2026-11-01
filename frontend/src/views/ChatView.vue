@@ -9932,10 +9932,17 @@ async function decideFileboxWait(item, text, approve) {
 	const id = currentId.value;
 	fileboxWaitBusy.value = item.name;
 	try {
-		await api.decideApproval(item.name, text, approve);
-		notify(approve ? "Answer sent. Jarvis carries on with this file." : "Rejected.", {
-			type: "success",
-		});
+		const res = (await api.decideApproval(item.name, text, approve)) || {};
+		if (res.reason === "source_unavailable") {
+			notify(
+				"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue.",
+				{ type: "warning" }
+			);
+		} else {
+			notify(approve ? "Answer sent. Jarvis carries on with this file." : "Rejected.", {
+				type: "success",
+			});
+		}
 		store.refreshApprovalsCount?.();
 	} catch (e) {
 		notifyActionError("Couldn't send that answer", e);

@@ -125,6 +125,25 @@ class TestFileBoxSource(_Base):
 		frappe.db.commit()
 		return doc.name
 
+	def routing_approval(self, conv, routing, options):
+		with as_user(USER):
+			doc = frappe.get_doc(
+				{
+					"doctype": "Jarvis Approval Request",
+					"title": "Which File Box route?",
+					"question": "Which File Box route?",
+					"conversation": conv,
+					"source": "File Box",
+					"routing": routing,
+					"options": json.dumps(options),
+					"status": "Pending",
+				}
+			)
+			doc.flags.jarvis_server_write = True
+			doc.insert(ignore_permissions=True)
+		frappe.db.commit()
+		return doc.name
+
 	def decided_attachment(self, conv):
 		name = self.approval(conv)
 		with (
@@ -342,6 +361,59 @@ class TestFileBoxSource(_Base):
 		frappe.db.commit()
 		with as_user(USER):
 			self.assertIsNone(filebox._source_file(conv))
+
+	def test_reselecting_original_keeps_the_newest_generic_resume_fallback(self):
+		from jarvis.chat.filebox_source import set_source
+
+		conv, original, pdf, msg, item = self.fixture()
+		self.select(conv, msg, item)
+		with as_user(USER):
+			newer = frappe.get_doc(
+				{
+					"doctype": "File",
+					"file_name": f"newer-fallback-{conv}.txt",
+					"content": "A newer attached fallback",
+					"is_private": 1,
+					"attached_to_doctype": CONV,
+					"attached_to_name": conv,
+				}
+			).insert(ignore_permissions=True)
+		self.addCleanup(
+			lambda: frappe.delete_doc("File", newer.name, force=True, ignore_permissions=True)
+			if frappe.db.exists("File", newer.name)
+			else None
+		)
+		# The decision path deliberately keeps its historical newest-attached
+		# fallback when selecting the original clears the explicit override.
+		frappe.db.set_value("File", newer.name, "creation", "2099-01-01 00:00:00", update_modified=False)
+		original_msg = self._msg(
+			conv,
+			2,
+			"user",
+			"Original",
+			canvas=json.dumps([{"name": "original", "file_url": original.file_url}]),
+		)
+		frappe.db.commit()
+		with as_user(USER):
+			state = set_source(
+				conversation=conv,
+				message=original_msg,
+				item="original",
+				file_url=original.file_url,
+				expected=pdf.name,
+			)
+		self.assertEqual(state["version"], "")
+		self.assertFalse(frappe.db.get_value("File", pdf.name, "attached_to_name"))
+		name = self.approval(conv)
+		with (
+			as_user(USER),
+			patch.object(approvals_api, "_resume_conversation", return_value={"ok": True}) as resume,
+		):
+			out = approvals_api.decide(name, "Supplier A")
+		self.assertTrue(out["resumed"])
+		self.assertEqual(
+			[a["file_url"] for a in json.loads(resume.call_args.kwargs["attachments"])], [newer.file_url]
+		)
 
 	def test_switching_replacements_releases_the_previous_source_file(self):
 		conv, original, pdf, msg, item = self.fixture()
@@ -608,17 +680,103 @@ class TestFileBoxSource(_Base):
 		self.assertEqual(row["file_name"], pdf.file_name)
 		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_source_file"), original.name)
 
-	def test_lost_selected_file_cannot_resume_an_approved_question_with_docx(self):
+	def test_lost_selected_file_keeps_generic_decisions_durable_without_resuming(self):
+		for approve, status in ((1, "Approved"), (0, "Rejected")):
+			with self.subTest(status=status):
+				conv, original, pdf, msg, item = self.fixture()
+				self.select(conv, msg, item)
+				name = self.approval(conv)
+				frappe.delete_doc("File", pdf.name, force=True, ignore_permissions=True)
+				frappe.db.commit()
+				with (
+					as_user(USER),
+					patch.object(approvals_api, "_resume_conversation") as resume,
+					patch.object(frappe, "log_error") as log_error,
+				):
+					out = approvals_api.decide(name, "Supplier A", approve=approve)
+				self.assertEqual(
+					out,
+					{
+						"ok": True,
+						"status": status,
+						"resumed": False,
+						"reason": "source_unavailable",
+					},
+				)
+				row = frappe.db.get_value(
+					"Jarvis Approval Request", name, ["status", "decided_by"], as_dict=True
+				)
+				self.assertEqual((row.status, row.decided_by), (status, USER))
+				resume.assert_not_called()
+				log_error.assert_not_called()
+
+	def test_routing_decide_with_lost_selected_source_returns_recovery_reason(self):
+		from jarvis.chat import filebox_skills
+
 		conv, original, pdf, msg, item = self.fixture()
 		self.select(conv, msg, item)
-		name = self.approval(conv)
+		with as_user(USER):
+			filebox_skills.file_skill_missing(conv, "no-longer-available")
+		name = frappe.db.get_value(
+			"Jarvis Approval Request", {"conversation": conv, "routing": filebox_skills.MISSING}, "name"
+		)
 		frappe.delete_doc("File", pdf.name, force=True, ignore_permissions=True)
 		frappe.db.commit()
-		with as_user(USER), patch.object(approvals_api, "_resume_conversation") as resume:
-			out = approvals_api.decide(name, "Supplier A")
-		self.assertEqual(out["status"], "Approved")
-		self.assertFalse(out["resumed"])
+		with (
+			as_user(USER),
+			patch.object(filebox, "_send_inbound") as send,
+			patch.object(frappe, "log_error") as log_error,
+		):
+			out = approvals_api.decide(name, filebox_skills.PROCESS_AUTO)
+		self.assertEqual(
+			out,
+			{
+				"ok": True,
+				"status": "Approved",
+				"resumed": False,
+				"reason": "source_unavailable",
+			},
+		)
+		row = frappe.db.get_value("Jarvis Approval Request", name, ["status", "decided_by"], as_dict=True)
+		self.assertEqual((row.status, row.decided_by), ("Approved", USER))
+		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_rerun_at"))
+		self.assertEqual(
+			frappe.db.get_value(CONV, conv, "filebox_last_error"),
+			"Couldn't start: the original file is no longer available",
+		)
+		send.assert_not_called()
+		log_error.assert_not_called()
+
+	def test_routing_dismiss_with_lost_selected_source_returns_recovery_reason(self):
+		from jarvis.chat import filebox_skills
+
+		conv, original, pdf, msg, item = self.fixture()
+		self.select(conv, msg, item)
+		name = self.routing_approval(conv, filebox_skills.CONFLICT, [filebox_skills.SKIP])
+		frappe.delete_doc("File", pdf.name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		with (
+			as_user(USER),
+			patch.object(approvals_api, "_resume_conversation") as resume,
+			patch.object(frappe, "log_error") as log_error,
+		):
+			out = approvals_api.dismiss_approval(name)
+		self.assertEqual(
+			out,
+			{
+				"ok": True,
+				"status": "Dismissed",
+				"resumed": False,
+				"reason": "source_unavailable",
+			},
+		)
+		row = frappe.db.get_value(
+			"Jarvis Approval Request", name, ["status", "decision", "decided_by"], as_dict=True
+		)
+		self.assertEqual((row.status, row.decision, row.decided_by), ("Dismissed", filebox_skills.SKIP, USER))
+		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_rerun_at"))
 		resume.assert_not_called()
+		log_error.assert_not_called()
 
 	def test_duplicate_blob_url_uses_the_selected_file_permission(self):
 		from jarvis.chat import turn_handler
