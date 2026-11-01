@@ -160,6 +160,10 @@ def sync_agent_listings() -> dict:
 			# (company/fiscal_year/from_date/to_date, which stay flat). Drives
 			# ConfigForm.vue's per-agent field set; [] for an agent with none.
 			"config_keys": frappe.as_json(a.get("config_keys") or []),
+			# A6: explicit bundle capability for the optional record boundary. A
+			# missing or malformed registry value stays false, so an old registry
+			# can never enable scope injection by accident.
+			"supports_record_scope": 1 if a.get("supports_record_scope") is True else 0,
 			# A2/A16: the delegate auditor's OPAQUE rule-token set, id-only. The
 			# bench needs it to validate a finding's rule in record_agent_run
 			# without ever holding a rule body/threshold. Empty for operators /
@@ -567,6 +571,22 @@ def registry_tools_allow(agent_slug: str) -> list[str]:
 				return []
 			return [str(t).strip() for t in declared if str(t or "").strip()]
 	return []
+
+
+def registry_supports_record_scope(agent_slug: str) -> bool:
+	"""Whether the bundled agent declaration explicitly supports ``record_scope``.
+
+	This deliberately reads the reviewed registry artifact rather than the mutable
+	listing row. A record scope controls what evidence reaches a private bundle, so
+	an old, malformed, or manually edited listing must never opt an agent in.
+	"""
+	slug = (agent_slug or "").strip()
+	if not slug:
+		return False
+	for agent in _load_registry().get("agents") or []:
+		if (agent.get("agent_slug") or "").strip() == slug:
+			return agent.get("supports_record_scope") is True
+	return False
 
 
 def after_migrate() -> None:

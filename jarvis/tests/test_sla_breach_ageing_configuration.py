@@ -212,7 +212,7 @@ class TestSlaBreachAgeingConfiguration(FrappeTestCase):
 
 	@staticmethod
 	def _documents(team):
-		listing = frappe._dict(agent_slug=sla.AGENT, status="Published")
+		listing = frappe._dict(agent_slug=sla.AGENT, status="Published", supports_record_scope=1)
 
 		def get_doc(doctype, name=None, *args, **kwargs):
 			if doctype == "Jarvis Agent Listing" and name == sla.AGENT:

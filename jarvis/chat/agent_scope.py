@@ -21,13 +21,41 @@ resolved for that user.
 from datetime import date
 
 import frappe
+from frappe import _
 
 from jarvis.exceptions import InvalidArgumentError
 
 INSTALLATION = "Jarvis Agent Installation"
 
 
-def resolve_scope(installation) -> dict:
+def _configuration(config) -> dict:
+	"""Return a config object, preserving the legacy malformed-config fallback."""
+	if isinstance(config, dict):
+		return config
+	if config:
+		try:
+			parsed = frappe.parse_json(config)
+			if isinstance(parsed, dict):
+				return parsed
+		except Exception:
+			pass
+	return {}
+
+
+def record_scope_requested(config) -> bool:
+	"""True when a tenant explicitly supplied the record-scope namespace."""
+	return "record_scope" in _configuration(config)
+
+
+def assert_record_scope_supported(supports_record_scope: bool, config) -> None:
+	"""Refuse an unsupported boundary before config or launch can have effects."""
+	if record_scope_requested(config) and supports_record_scope is not True:
+		frappe.throw(
+			_("This agent does not support record-scoped runs. Remove record_scope from its configuration.")
+		)
+
+
+def resolve_scope(installation, *, allow_record_scope: bool = False) -> dict:
 	"""Resolve the explicit run scope for an installation.
 
 	``installation`` may be a ``Jarvis Agent Installation`` doc or its name.
@@ -41,14 +69,9 @@ def resolve_scope(installation) -> dict:
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
 
-	cfg: dict = {}
-	if installation.get("config"):
-		try:
-			parsed = frappe.parse_json(installation.config)
-			if isinstance(parsed, dict):
-				cfg = parsed
-		except Exception:
-			cfg = {}
+	cfg = _configuration(installation.get("config"))
+	if record_scope_requested(cfg) and not allow_record_scope:
+		raise InvalidArgumentError("record_scope is not supported by this agent")
 
 	def _s(key):
 		val = cfg.get(key)
@@ -66,8 +89,12 @@ def resolve_scope(installation) -> dict:
 		except (ValueError, TypeError):
 			raise InvalidArgumentError("prior_period_from and prior_period_to must define an earlier period")
 		scope.update(prior_period_from=start.isoformat(), prior_period_to=end.isoformat())
-	if cfg.get("record_scope"):
+	if record_scope_requested(cfg):
 		record = cfg["record_scope"]
+		# Keep the supported agents' legacy optional-boundary behavior: a null
+		# record_scope means this particular run is company-wide.
+		if not record:
+			return scope
 		if not isinstance(record, dict) or not all(record.get(k) for k in ("doctype", "name")):
 			raise InvalidArgumentError("record_scope requires a doctype and name")
 		doc = frappe.get_doc(record["doctype"], record["name"])

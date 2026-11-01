@@ -125,6 +125,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       },
@@ -182,6 +183,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       },
@@ -251,6 +253,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -298,6 +301,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       },
@@ -374,6 +378,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       },
@@ -424,6 +429,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -473,6 +479,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -535,6 +542,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -597,6 +605,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -643,6 +652,7 @@
         "Jarvis Admin"
       ],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       }
@@ -706,6 +716,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       }
@@ -763,6 +774,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -820,6 +832,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -883,6 +896,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -939,6 +953,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -997,6 +1012,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1055,6 +1071,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1113,6 +1130,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1180,6 +1198,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1241,6 +1260,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       },
@@ -1302,6 +1322,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1358,6 +1379,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1420,6 +1442,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1484,6 +1507,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1550,6 +1574,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       }
@@ -1601,6 +1626,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       },
@@ -1664,6 +1690,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1715,6 +1742,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1766,6 +1794,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1827,6 +1856,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1885,6 +1915,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       }
@@ -1956,6 +1987,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }

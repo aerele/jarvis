@@ -542,6 +542,21 @@ class TestAgentsMarketplace(unittest.TestCase):
 			json.loads(frappe.db.get_value(LISTING, "cycle-count-planner-operator", "config_keys")), []
 		)
 
+	def test_sync_agent_listings_writes_record_scope_capability_from_registry(self):
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(
+			int(frappe.db.get_value(LISTING, "baseline-meter-auditor", "supports_record_scope") or 0),
+			0,
+		)
+		self.assertEqual(
+			int(frappe.db.get_value(LISTING, "payroll-prerun-auditor", "supports_record_scope") or 0),
+			1,
+		)
+		self.assertEqual(
+			int(frappe.db.get_value(LISTING, "close-auditor", "supports_record_scope") or 0),
+			0,
+		)
+
 	def test_get_agent_returns_config_keys(self):
 		agent_catalog.sync_agent_listings()
 		frappe.set_user(self.owner)

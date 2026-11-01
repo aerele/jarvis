@@ -17,9 +17,10 @@ import frappe
 from frappe import _
 
 from jarvis._session import authenticated_user, impersonate
+from jarvis.chat import agent_scope
 from jarvis.chat import coverage_reasons as cr
 from jarvis.chat.agent_activity import log_activity
-from jarvis.chat.agent_catalog import build_agent_push_payload
+from jarvis.chat.agent_catalog import build_agent_push_payload, registry_supports_record_scope
 from jarvis.chat.filebox import _clamp_page, _lk
 from jarvis.chat.finding_presentation import finding_text
 from jarvis.chat.macro_scheduler import compute_next_run
@@ -1378,6 +1379,8 @@ def set_schedule(
 	if int(schedule_enabled or 0):
 		from jarvis.chat.agent_installability import assert_installable
 
+		if agent_scope.record_scope_requested(doc.config):
+			agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
 		if doc.agent in REVIEW_OPERATORS:
 			frappe.throw(_("Operator evidence review supports manual runs only."))
 		assert_installable(doc.agent)
@@ -1480,6 +1483,8 @@ def set_config(installation: str, config: str) -> dict:
 		frappe.throw(_("Config must be valid JSON."))
 	if not isinstance(parsed, dict):
 		frappe.throw(_("Config must be a JSON object."))
+	if agent_scope.record_scope_requested(parsed):
+		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), parsed)
 	doc.config = frappe.as_json(parsed)
 	doc.save()
 	log_activity(
