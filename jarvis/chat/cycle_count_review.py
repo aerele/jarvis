@@ -76,13 +76,15 @@ COUNT_ITEM_FIELDS = (
 	"stock_uom",
 	"batch_detail_recorded",
 )
-OUTWARD_STOCK_ENTRY_PURPOSES = frozenset(
-	{"Material Issue", "Material Transfer for Manufacture", "Manufacture", "Send to Subcontractor"}
-)
-OUTWARD_NON_ENTRY_VOUCHERS = frozenset({"Delivery Note"})
 PROPOSAL_KEYS = frozenset(
 	{"outcome", "reason_code", "lines_considered", "lines_planned", "lines_rolled", "due_total", "lines"}
 )
+
+# This exact typed result is emitted only when the private evaluator cannot
+# verify its protected local input file.  It is safe to finish the bound run as
+# partial, but it must never be treated as an evaluated plan or stage a review.
+PRIVATE_INPUT_FAILURE_DETAIL = "The protected count-plan input could not be verified. Start a new run."
+SOURCE_SCHEMA_FAILURE_DETAIL = "The captured count-plan source is no longer compatible. Start a new run."
 LINE_KEYS = frozenset(
 	{
 		"item_code",
@@ -366,6 +368,10 @@ def collect(scope: dict, config: dict) -> dict:
 		for doctype in ("Stock Ledger Entry", "Stock Entry", "Jarvis Physical Count"):
 			if not frappe.has_permission(doctype, "read"):
 				raise frappe.PermissionError
+		# Keep every bounded, in-scope negative movement in the sealed private
+		# snapshot.  The private evaluator owns the consumption policy; this public
+		# collector must not decide that a transfer, return, or reconciliation is
+		# demand.
 		ledger = rows(
 			"Stock Ledger Entry",
 			LEDGER_FIELDS,
@@ -387,16 +393,6 @@ def collect(scope: dict, config: dict) -> dict:
 			raise EvidenceGap(
 				"permission_slice", "Some in-scope stock-entry movement records are not completely readable."
 			)
-		entry_by_name = {row["name"]: row for row in entries}
-		outward_ledger = []
-		for row in ledger:
-			if row["voucher_type"] == "Stock Entry":
-				entry = entry_by_name.get(row["voucher_no"])
-				if entry and entry["docstatus"] == 1 and entry["purpose"] in OUTWARD_STOCK_ENTRY_PURPOSES:
-					outward_ledger.append(row)
-			elif row["voucher_type"] in OUTWARD_NON_ENTRY_VOUCHERS:
-				outward_ledger.append(row)
-
 		counts = rows(
 			"Jarvis Physical Count",
 			COUNT_FIELDS,
@@ -425,7 +421,7 @@ def collect(scope: dict, config: dict) -> dict:
 		snapshot["datasets"] = {
 			"bins": _numbers(bins, {"actual_qty", "stock_value", "valuation_rate"}),
 			"items": catalog,
-			"outward_ledger": _numbers(outward_ledger, {"actual_qty"}),
+			"ledger": _numbers(ledger, {"actual_qty"}),
 			"stock_entries": entries,
 			"physical_counts": _numbers(counts, set()),
 			"physical_count_items": _numbers(count_items, {"counted_qty"}),
@@ -542,10 +538,81 @@ def _history_by_line(stored: dict) -> dict[tuple[str, str], str]:
 	return history
 
 
+def _private_input_failure(findings, coverage, scope, integrity_digest) -> bool:
+	"""Recognise only the bundle's fixed no-source partial result.
+
+	A corrupted private file has no reliable source scope or digest.  The
+	evaluator therefore returns this exact, empty sentinel.  Accepting anything
+	broader would let malformed evaluator output hide a plan, so every field and
+	the null-input integrity digest are fixed here.
+	"""
+	expected_coverage = _unavailable("record_coverage_insufficient", PRIVATE_INPUT_FAILURE_DETAIL)
+	expected_digest = digest(
+		{
+			"input_digest": None,
+			"scope": {},
+			"findings": [],
+			"coverage": expected_coverage,
+		}
+	)
+	return (
+		findings == []
+		and coverage == expected_coverage
+		and scope == {}
+		and integrity_digest == expected_digest
+	)
+
+
+def _movement_upper_bounds(stored: dict, bins: dict[tuple[str, str], dict]) -> dict[tuple[str, str], Decimal]:
+	"""Return only a rule-free upper bound for a quoted movement total.
+
+	The private bundle decides which voucher types are consumption.  The bench
+	still refuses a negative or invented quantity larger than all captured
+	negative movement for a line.  This keeps the policy private while retaining
+	a useful source-data cross-check at the writeback boundary.
+	"""
+	bounds: dict[tuple[str, str], Decimal] = {}
+	for row in stored["datasets"]["ledger"]:
+		if not isinstance(row, dict):
+			frappe.throw("The captured movement evidence is invalid.")
+		key = (row.get("warehouse"), row.get("item_code"))
+		if key not in bins:
+			frappe.throw("The captured movement evidence is outside the count-plan scope.")
+		quantity = _number(row.get("actual_qty"))
+		if quantity >= 0:
+			frappe.throw("The captured movement evidence is not a negative stock movement.")
+		bounds[key] = bounds.get(key, Decimal(0)) - quantity
+	return bounds
+
+
+def _has_current_source_schema(stored) -> bool:
+	"""Keep an old captured run safely partial during a rolling update.
+
+	Version 0.2.2 moves movement classification into the private bundle and
+	replaces ``outward_ledger`` with the complete raw ``ledger`` dataset.  A run
+	captured by an older app can still receive a delayed evaluator writeback.
+	It must end as partial rather than raise a KeyError and remain running.
+	"""
+	if not isinstance(stored, dict) or not isinstance(stored.get("datasets"), dict):
+		return False
+	return set(stored["datasets"]) == {
+		"bins",
+		"items",
+		"ledger",
+		"stock_entries",
+		"physical_counts",
+		"physical_count_items",
+	}
+
+
 def validate_output(run, findings, coverage, scope, integrity_digest):
+	if _private_input_failure(findings, coverage, scope, integrity_digest):
+		return [], coverage, False
 	stored = frappe.parse_json(run.input_snapshot_json or "null")
-	if not stored or scope != stored["scope"]:
+	if not isinstance(stored, dict) or not isinstance(stored.get("scope"), dict) or scope != stored["scope"]:
 		frappe.throw("Count-plan output must use this run's captured scope and evidence.")
+	if stored.get("complete") and not _has_current_source_schema(stored):
+		return [], _unavailable("record_coverage_insufficient", SOURCE_SCHEMA_FAILURE_DETAIL), False
 	if integrity_digest != digest(
 		{"input_digest": stored["source_digest"], "scope": scope, "findings": findings, "coverage": coverage}
 	):
@@ -570,10 +637,7 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 	bins = {(row["warehouse"], row["item_code"]): row for row in stored["datasets"]["bins"]}
 	items = {row["name"]: row for row in stored["datasets"]["items"]}
 	history = _history_by_line(stored)
-	outward: dict[tuple[str, str], Decimal] = {}
-	for row in stored["datasets"]["outward_ledger"]:
-		key = (row["warehouse"], row["item_code"])
-		outward[key] = outward.get(key, Decimal(0)) - _number(row["actual_qty"])
+	movement_bounds = _movement_upper_bounds(stored, bins)
 	try:
 		cutoff = _date(stored["config"]["plan_date"], "plan_date") - timedelta(
 			days=stored["config"]["recount_after_days"]
@@ -655,8 +719,16 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 				frappe.throw("The proposed stock unit does not match the captured item.")
 			if any(
 				_number(line[field]) != _number(bins[key][field]) for field in ("actual_qty", "stock_value")
-			) or _number(line["outward_qty"]) != outward.get(key, Decimal(0)):
+			):
 				frappe.throw("The proposed values do not match the captured stock and movement evidence.")
+			outward_qty = line["outward_qty"]
+			if outward_qty is None:
+				if line["velocity"] != "":
+					frappe.throw("A plan without a verified movement signal cannot claim a velocity.")
+			else:
+				quoted_outward = _number(outward_qty)
+				if quoted_outward < 0 or quoted_outward > movement_bounds.get(key, Decimal(0)):
+					frappe.throw("The proposed movement value exceeds the captured negative stock movement.")
 			if line["last_physical_count_on"] != history.get(key):
 				frappe.throw(
 					"The proposed count history does not match the captured submitted physical counts."

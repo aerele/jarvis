@@ -42,7 +42,14 @@ def snapshot():
 		"config": policy,
 		"currency": "INR",
 		"complete": True,
-		"source_counts": {"Bin": 1, "Item": 1, "Stock Ledger Entry": 1, "Stock Entry": 0},
+		"source_counts": {
+			"Bin": 1,
+			"Item": 1,
+			"Stock Ledger Entry": 1,
+			"Stock Entry": 0,
+			"Jarvis Physical Count": 0,
+			"Jarvis Physical Count Item": 0,
+		},
 		"datasets": {
 			"bins": [
 				{
@@ -65,7 +72,7 @@ def snapshot():
 					"has_serial_no": 0,
 				}
 			],
-			"outward_ledger": [
+			"ledger": [
 				{
 					"name": "SLE-1",
 					"item_code": "ITEM-A",
@@ -86,6 +93,25 @@ def snapshot():
 	}
 	data["source_digest"] = review.digest(data)
 	return data
+
+
+def reseal_snapshot(data):
+	data["source_digest"] = review.digest(
+		{key: value for key, value in data.items() if key != "source_digest"}
+	)
+	return data
+
+
+def reseal_result(data, output):
+	output["integrity_digest"] = review.digest(
+		{
+			"input_digest": data["source_digest"],
+			"scope": output["scope"],
+			"findings": output["findings"],
+			"coverage": output["coverage"],
+		}
+	)
+	return output
 
 
 def result(data=None):
@@ -195,6 +221,92 @@ class TestCycleCountConfiguration(FrappeTestCase):
 			)
 
 
+class TestCycleCountCollection(FrappeTestCase):
+	def test_collector_keeps_raw_negative_movement_and_exact_stock_entry_headers_private(self):
+		company = MagicMock(default_currency="INR")
+		company.apply_fieldlevel_read_permissions.return_value = None
+		warehouse = MagicMock(company="Example", is_group=0, disabled=0)
+		bin_row = {
+			"name": "BIN-A",
+			"item_code": "ITEM-A",
+			"warehouse": "WH-A",
+			"actual_qty": 5,
+			"stock_value": 100,
+			"valuation_rate": 20,
+		}
+		item_row = {
+			"name": "ITEM-A",
+			"is_stock_item": 1,
+			"disabled": 0,
+			"end_of_life": None,
+			"stock_uom": "Nos",
+			"has_batch_no": 0,
+			"has_serial_no": 0,
+		}
+		ledger_rows = [
+			{
+				"name": "SLE-DN",
+				"item_code": "ITEM-A",
+				"warehouse": "WH-A",
+				"company": "Example",
+				"posting_date": "2026-09-20",
+				"posting_time": "09:00:00",
+				"actual_qty": -2,
+				"voucher_type": "Delivery Note",
+				"voucher_no": "DN-1",
+				"is_cancelled": 0,
+			},
+			{
+				"name": "SLE-TRANSFER",
+				"item_code": "ITEM-A",
+				"warehouse": "WH-A",
+				"company": "Example",
+				"posting_date": "2026-09-21",
+				"posting_time": "09:00:00",
+				"actual_qty": -3,
+				"voucher_type": "Stock Entry",
+				"voucher_no": "STE-TRANSFER",
+				"is_cancelled": 0,
+			},
+		]
+		entry_row = {
+			"name": "STE-TRANSFER",
+			"company": "Example",
+			"purpose": "Material Transfer",
+			"docstatus": 1,
+		}
+
+		def get_list(doctype, **_kwargs):
+			return {
+				"Bin": [bin_row],
+				"Item": [item_row],
+				"Stock Ledger Entry": ledger_rows,
+				"Stock Entry": [entry_row],
+				"Jarvis Physical Count": [],
+			}[doctype]
+
+		scope = review.scope_from_config(launch_config())
+		with (
+			patch.object(review.frappe, "get_doc", return_value=company),
+			patch.object(review, "_warehouse", return_value=warehouse),
+			patch.object(review.frappe, "has_permission", return_value=True),
+			patch.object(review.frappe, "get_list", side_effect=get_list),
+		):
+			captured = review.collect(scope, launch_config())
+
+		self.assertTrue(captured["complete"])
+		self.assertEqual(
+			set(captured["datasets"]),
+			{"bins", "items", "ledger", "stock_entries", "physical_counts", "physical_count_items"},
+		)
+		self.assertEqual([row["name"] for row in captured["datasets"]["ledger"]], ["SLE-DN", "SLE-TRANSFER"])
+		self.assertEqual(captured["datasets"]["stock_entries"], [entry_row])
+		self.assertEqual(
+			captured["source_counts"],
+			{"Bin": 1, "Item": 1, "Stock Ledger Entry": 2, "Stock Entry": 1, "Jarvis Physical Count": 0},
+		)
+
+
 class TestCycleCountOutput(FrappeTestCase):
 	def check(self, output, data=None):
 		data = data or snapshot()
@@ -247,6 +359,140 @@ class TestCycleCountOutput(FrappeTestCase):
 		expected = sum(data["source_counts"].values())
 		self.assertIsNone(review.validate_envelope(run, True, False, expected))
 		self.assertIn("did not read every", review.validate_envelope(run, True, False, expected - 1))
+
+	def test_invalid_private_file_can_close_only_with_the_fixed_partial_sentinel(self):
+		data = snapshot()
+		coverage = {
+			review.TOKEN: {
+				"state": "not_evaluable",
+				"reason_code": "record_coverage_insufficient",
+				"detail": review.PRIVATE_INPUT_FAILURE_DETAIL,
+			}
+		}
+		output = {
+			"findings": [],
+			"coverage": coverage,
+			"scope": {},
+			"integrity_digest": review.digest(
+				{"input_digest": None, "scope": {}, "findings": [], "coverage": coverage}
+			),
+		}
+		findings, returned_coverage, ready = self.check(output, data)
+		self.assertEqual(findings, [])
+		self.assertEqual(returned_coverage, coverage)
+		self.assertFalse(ready)
+
+		output["integrity_digest"] = "0" * 64
+		with self.assertRaisesRegex(frappe.ValidationError, "captured scope"):
+			self.check(output, data)
+
+	def test_private_movement_policy_can_exclude_a_transfer_without_public_reclassification(self):
+		data = snapshot()
+		data["datasets"]["ledger"][0].update(voucher_type="Stock Entry", voucher_no="STE-TRANSFER")
+		data["datasets"]["stock_entries"] = [
+			{"name": "STE-TRANSFER", "company": "Example", "purpose": "Material Transfer", "docstatus": 1}
+		]
+		data["source_counts"]["Stock Entry"] = 1
+		reseal_snapshot(data)
+		output = result(data)
+		line = output["findings"][0]["proposal"]["lines"][0]
+		line["outward_qty"] = "0"
+		line["velocity"] = ""
+		reseal_result(data, output)
+
+		self.assertTrue(self.check(output, data)[2])
+
+	def test_private_movement_value_cannot_exceed_all_captured_negative_movement(self):
+		data = snapshot()
+		output = result(data)
+		output["findings"][0]["proposal"]["lines"][0]["outward_qty"] = "4"
+		reseal_result(data, output)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "exceeds the captured negative"):
+			self.check(output, data)
+
+	def test_old_outward_ledger_snapshot_finishes_as_partial_during_a_rolling_update(self):
+		data = snapshot()
+		data["datasets"]["outward_ledger"] = data["datasets"].pop("ledger")
+		reseal_snapshot(data)
+		output = result(data)
+
+		findings, coverage, ready = self.check(output, data)
+		self.assertEqual(findings, [])
+		self.assertEqual(coverage[review.TOKEN]["state"], "not_evaluable")
+		self.assertEqual(coverage[review.TOKEN]["reason_code"], "record_coverage_insufficient")
+		self.assertFalse(ready)
+
+	def test_invalid_private_frame_writeback_ends_partial_without_staging_a_review(self):
+		from jarvis.tools import record_agent_run as writeback
+
+		data = snapshot()
+		coverage = {
+			review.TOKEN: {
+				"state": "not_evaluable",
+				"reason_code": "record_coverage_insufficient",
+				"detail": review.PRIVATE_INPUT_FAILURE_DETAIL,
+			}
+		}
+		output = {
+			"findings": [],
+			"coverage": coverage,
+			"scope": {},
+			"truncated": False,
+			"rows_consumed": 0,
+			"integrity_digest": review.digest(
+				{"input_digest": None, "scope": {}, "findings": [], "coverage": coverage}
+			),
+		}
+		run = frappe._dict(
+			name="RUN-CYCLE-PRIVATE-FAILURE",
+			agent=review.AGENT,
+			installation="INST-CYCLE-PRIVATE-FAILURE",
+			status="completed",
+			input_snapshot_json=frappe.as_json(data),
+			preparation_mode="live",
+			owner="Administrator",
+			findings_count=0,
+			blocker_count=0,
+			coverage_note="",
+			dashboard=None,
+		)
+		run_row = frappe._dict(
+			name=run.name,
+			status="running",
+			installation=run.installation,
+			agent=run.agent,
+		)
+		state = frappe._dict(status="running", input_snapshot_json=run.input_snapshot_json)
+		inst = frappe._dict(name=run.installation, reviewer="Administrator")
+		listing = frappe._dict(rule_tokens=frappe.as_json([review.TOKEN]), doctypes_required="[]")
+
+		def get_value(doctype, selector, *_args, **_kwargs):
+			if doctype == writeback.RUN:
+				return run_row if isinstance(selector, dict) else state
+			if doctype == writeback.LISTING:
+				return listing
+			return None
+
+		with (
+			patch("jarvis.tools._agent_run_ctx.get_session_key", return_value="cycle-private-failure"),
+			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(frappe.db, "set_value") as save_output,
+			patch.object(
+				frappe,
+				"get_doc",
+				side_effect=lambda doctype, _name: run if doctype == writeback.RUN else inst,
+			),
+			patch("jarvis.chat.agent_runs.record_delegate_run", return_value=run) as persist,
+			patch.object(review, "stage_reviews") as stage,
+			patch("jarvis.chat.agent_run_steps.record_step"),
+		):
+			writeback.record_agent_run(**output)
+
+		stage.assert_not_called()
+		self.assertEqual(persist.call_args.args[2], [])
+		self.assertEqual(persist.call_args.kwargs["coverage"], coverage)
+		save_output.assert_called_once()
 
 
 class TestCycleCountPrivateTool(FrappeTestCase):
