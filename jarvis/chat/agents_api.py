@@ -187,6 +187,23 @@ def _allowed_users_map() -> dict[str, list[str]]:
 # --------------------------------------------------------------------------- #
 # catalog + install state (read)
 # --------------------------------------------------------------------------- #
+def _payroll_prerun_issues_for_run_as(installation: str, config: str) -> dict:
+	"""Return Payroll Pre-Run setup faults as the execution identity.
+
+	The installation owner can differ from ``run_as_user``.  The selected
+	Payroll Entry is therefore checked as the user who would read it, so the UI
+	cannot mark a scope ready based on the wrong person's access.
+	"""
+	from jarvis._session import impersonate
+	from jarvis.chat.payroll_prerun_scope import configuration_issues
+
+	run_as_user = (frappe.db.get_value(INSTALLATION, installation, "run_as_user") or "").strip()
+	if not run_as_user:
+		return {"run_as_user": "Set a run-as user before configuring the Payroll Entry."}
+	with impersonate(run_as_user):
+		return configuration_issues(config or "{}")
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_agents() -> list[dict]:
@@ -500,6 +517,7 @@ def get_agent(agent_slug: str) -> dict:
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 	from jarvis.chat.operator_review import backend
+	from jarvis.chat.payroll_prerun_scope import is_payroll_prerun
 
 	try:
 		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
@@ -618,6 +636,8 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif is_payroll_prerun(listing.agent_slug):
+			i["configuration_issues"] = _payroll_prerun_issues_for_run_as(i.name, i.config or "{}")
 		out["installation"] = i
 
 	if is_sm and not _masked:
@@ -2660,7 +2680,9 @@ def list_findings(
 		# get_value bypasses perms, so without the owner check a foreign run id is
 		# an existence/metadata oracle. A run the caller does not own returns empty
 		# (identical to an unknown run), never leaking that it exists.
-		run_row = frappe.db.get_value(RUN, run, ["agent", "creation", "status", "owner"], as_dict=True)
+		run_row = frappe.db.get_value(
+			RUN, run, ["agent", "creation", "status", "owner", "scope_json"], as_dict=True
+		)
 		if not run_row or run_row.owner != me:
 			return _empty()
 		if run_row.status not in ("completed", "partial"):
@@ -2668,14 +2690,20 @@ def list_findings(
 			# (findings_count is 0 there too — the drill-down must match).
 			return _empty()
 		observed = frappe.db.sql(
-			"""SELECT f.name FROM `tabJarvis Agent Finding` f
+			"""SELECT f.name, fr.scope_json FROM `tabJarvis Agent Finding` f
 			JOIN `tabJarvis Agent Run` fr ON fr.name = f.first_seen_run
 			JOIN `tabJarvis Agent Run` lr ON lr.name = f.last_seen_run
 			WHERE f.owner = %(me)s AND f.agent = %(agent)s
 			  AND fr.creation <= %(rc)s AND lr.creation >= %(rc)s""",
 			{"me": me, "agent": run_row.agent, "rc": run_row.creation},
-			pluck=True,
+			as_dict=True,
 		)
+		# Detections from another record can span this run's timestamp. Match the
+		# launch boundary as well, so the drill-down follows finding identity.
+		from jarvis.chat.agent_runs import _record_scope
+
+		boundary = _record_scope(run_row.scope_json)
+		observed = [row.name for row in observed if _record_scope(row.scope_json) == boundary]
 		if not observed:
 			return _empty()
 		filters["name"] = ["in", observed]

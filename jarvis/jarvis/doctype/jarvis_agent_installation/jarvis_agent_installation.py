@@ -52,6 +52,7 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		self._validate_unique_per_owner()
 		self._validate_owner_cap()
 		self._validate_run_as_user()
+		self._guard_payroll_prerun_scope()
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
 		self._validate_schedule_budget()
@@ -359,6 +360,40 @@ class JarvisAgentInstallation(NotRenamable, Document):
 
 		self._validate_run_as_escalation(target)
 		self._validate_run_as_permissions(target)
+
+	def _guard_payroll_prerun_scope(self):
+		"""Validate Payroll Pre-Run as its execution identity.
+
+		The selected Payroll Entry is an authority boundary.  Check it as the
+		run-as user on every relevant save, including a run-as remap and an
+		enable.  A disabled installation may remain an empty draft, but it cannot
+		store an alternate company, date range, or raw record boundary.
+		"""
+		from jarvis.chat.payroll_prerun_scope import (
+			is_payroll_prerun,
+			require_configuration,
+			validate_saved_configuration,
+		)
+
+		if not is_payroll_prerun(self.agent):
+			return
+		if not frappe.utils.cint(self.get("enabled")) and not (
+			self.is_new()
+			or self.has_value_changed("agent")
+			or self.has_value_changed("config")
+			or self.has_value_changed("run_as_user")
+		):
+			return
+		run_as_user = (self.run_as_user or "").strip()
+		if not run_as_user:
+			return  # _validate_run_as_user() refuses this state when enabled.
+		from jarvis._session import impersonate
+
+		with impersonate(run_as_user):
+			if frappe.utils.cint(self.get("enabled")):
+				require_configuration(self.config or "{}")
+			else:
+				validate_saved_configuration(self.config or "{}")
 
 	def _validate_run_as_escalation(self, target: str) -> None:
 		"""A4: mapping an install to run as ANOTHER user needs the setter to be

@@ -12,13 +12,15 @@ selection stays versioned bench code, never LLM prose.
 It is DELIBERATELY generic for normal delegates: it carries only ordinary
 accounting dimensions (company / fiscal year / period boundaries). A narrow
 delegate can add an explicit record root only through a server-side validation
-hook. Delegate bundles resolve their run scope from these bench-injected,
-versioned values — never LLM prose.
+hook, so its bundle receives a bench-injected boundary — never owner JSON or
+LLM prose.
 
 The helper runs under the caller's identity (the run-as user in
 ``_launch_audit``), so ``frappe.defaults`` / erpnext's fiscal-year lookup are
 resolved for that user.
 """
+
+from datetime import date
 
 import frappe
 
@@ -27,6 +29,8 @@ from jarvis.exceptions import InvalidArgumentError
 INSTALLATION = "Jarvis Agent Installation"
 NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
 _NEGATIVE_STOCK_OUTPUT_SCOPE_KEYS = ("company", "from_date", "to_date", "report_date")
+ATTENDANCE_AGENT = "attendance-leave-integrity-auditor"
+_ATTENDANCE_OUTPUT_SCOPE_KEYS = ("company", "from_date", "to_date", "report_date")
 
 
 def _agent_slug(installation) -> str:
@@ -34,22 +38,17 @@ def _agent_slug(installation) -> str:
 
 
 def requires_bound_scope(installation) -> bool:
-	"""Return true when a bad record root must refuse a launch.
+	"""True when a missing or bad record root must refuse a launch.
 
-	The negative-stock evaluator needs one Warehouse root to prove that its
-	configured leaf set is complete. A missing or invalid root must never become
-	a company-wide Warehouse scan.
+	Attendance needs one exact Department. Negative Stock needs one Warehouse
+	root to prove that its configured leaf set is complete. Neither agent can
+	fall back to a broader company scan.
 	"""
-	return _agent_slug(installation) == NEGATIVE_STOCK_AGENT
+	return _agent_slug(installation) in {ATTENDANCE_AGENT, NEGATIVE_STOCK_AGENT}
 
 
 def negative_stock_record_scope(value) -> dict | None:
-	"""Return a canonical Warehouse root, or ``None`` for untrusted input.
-
-	This is only a shape check. Launch resolution also checks existence, company,
-	enabled state, and the active run-as user's read permissions. Warehouse groups
-	are valid roots: the evaluator may use a group to prove its leaf set.
-	"""
+	"""Return a canonical Warehouse root, or ``None`` for untrusted input."""
 	if (
 		not isinstance(value, dict)
 		or set(value) != {"doctype", "name"}
@@ -62,13 +61,22 @@ def negative_stock_record_scope(value) -> dict | None:
 	return {"doctype": "Warehouse", "name": value["name"]}
 
 
-def negative_stock_output_scope(value) -> dict | None:
-	"""Return the five safe negative-stock writeback keys, or ``None``.
+def attendance_record_scope(value) -> dict | None:
+	"""Return the canonical Attendance Department root, or ``None``."""
+	if (
+		not isinstance(value, dict)
+		or set(value) != {"doctype", "name"}
+		or value.get("doctype") != "Department"
+		or not isinstance(value.get("name"), str)
+		or not value["name"].strip()
+		or value["name"] != value["name"].strip()
+	):
+		return None
+	return {"doctype": "Department", "name": value["name"]}
 
-	The evaluator may return this small projection at writeback. The server
-	compares it with the launch-stamped projection, so no model field can change
-	the Warehouse, company, period, or report-date cutoff during global merge.
-	"""
+
+def negative_stock_output_scope(value) -> dict | None:
+	"""Return the five safe Negative Stock writeback keys, or ``None``."""
 	if not isinstance(value, dict):
 		return None
 	boundary = negative_stock_record_scope(value.get("record_scope"))
@@ -84,12 +92,25 @@ def negative_stock_output_scope(value) -> dict | None:
 	return output
 
 
-def _negative_stock_warehouse_scope(config: dict, company: str) -> dict:
-	"""Validate the configured Warehouse root as the active run-as user.
+def attendance_output_scope(value) -> dict | None:
+	"""Return the five safe Attendance writeback keys, or ``None``."""
+	if not isinstance(value, dict):
+		return None
+	boundary = attendance_record_scope(value.get("record_scope"))
+	if boundary is None:
+		return None
+	output = {}
+	for key in _ATTENDANCE_OUTPUT_SCOPE_KEYS:
+		item = value.get(key)
+		if not isinstance(item, str) or not item.strip() or item != item.strip():
+			return None
+		output[key] = item
+	output["record_scope"] = boundary
+	return output
 
-	Only the canonical two-field value may enter ``Run.scope_json``. A Warehouse
-	group is allowed, but a disabled, foreign, unreadable, or missing root is not.
-	"""
+
+def _negative_stock_warehouse_scope(config: dict, company: str) -> dict:
+	"""Validate the configured Warehouse root as the active run-as user."""
 	namespace = config.get("negative_stock")
 	declared = namespace.get("record_scope") if isinstance(namespace, dict) else None
 	boundary = negative_stock_record_scope(declared)
@@ -100,18 +121,13 @@ def _negative_stock_warehouse_scope(config: dict, company: str) -> dict:
 	try:
 		warehouse = frappe.db.get_value("Warehouse", name, ["company", "disabled"], as_dict=True)
 		warehouse_readable = frappe.has_permission("Warehouse", "read", doc=name)
-	except Exception as exc:
-		raise InvalidArgumentError("Negative stock Warehouse scope could not be verified") from exc
-	if not warehouse or not warehouse_readable:
-		raise InvalidArgumentError(
-			"Negative stock record_scope must be a readable enabled Warehouse in the company"
-		)
-	try:
 		company_readable = frappe.has_permission("Company", "read", doc=company)
 	except Exception as exc:
-		raise InvalidArgumentError("Negative stock Company scope could not be verified") from exc
+		raise InvalidArgumentError("Negative stock scope could not be verified") from exc
 	if (
-		not company_readable
+		not warehouse
+		or not warehouse_readable
+		or not company_readable
 		or warehouse.get("company") != company
 		or warehouse.get("disabled") is None
 		or frappe.utils.cint(warehouse.get("disabled"))
@@ -122,6 +138,49 @@ def _negative_stock_warehouse_scope(config: dict, company: str) -> dict:
 	return boundary
 
 
+def _attendance_department_scope(config: dict, company: str) -> dict:
+	"""Validate the Attendance Department root as the active run-as user."""
+	declared = attendance_record_scope(config.get("record_scope"))
+	if declared is None:
+		raise InvalidArgumentError("Attendance record_scope must name one Department leaf")
+
+	name = declared["name"]
+	try:
+		department = frappe.db.get_value(
+			"Department", name, ["company", "is_group", "disabled"], as_dict=True
+		)
+		department_readable = frappe.has_permission("Department", "read", doc=name)
+		company_readable = frappe.has_permission("Company", "read", doc=company)
+	except Exception as exc:
+		raise InvalidArgumentError("Attendance scope could not be verified") from exc
+	if (
+		not department
+		or not department_readable
+		or not company_readable
+		or department.get("company") != company
+		or department.get("is_group") is None
+		or frappe.utils.cint(department.get("is_group"))
+		or department.get("disabled") is None
+		or frappe.utils.cint(department.get("disabled"))
+	):
+		raise InvalidArgumentError(
+			"Attendance record_scope must be a readable leaf Department in the company"
+		)
+	return {"doctype": "Department", "name": name}
+
+
+def as_of_date(scope: dict | None) -> str | None:
+	"""Return the server-owned report-date cap for a resolved scope."""
+	if not isinstance(scope, dict):
+		return None
+	try:
+		to_date = date.fromisoformat(str(scope.get("to_date") or "")[:10])
+		report_date = date.fromisoformat(str(scope.get("report_date") or scope.get("to_date") or "")[:10])
+	except (TypeError, ValueError):
+		return None
+	return min(to_date, report_date).isoformat()
+
+
 def resolve_scope(installation) -> dict:
 	"""Resolve the explicit run scope for an installation.
 
@@ -129,12 +188,20 @@ def resolve_scope(installation) -> dict:
 	Reads ``company`` / ``fiscal_year`` / ``from_date`` / ``to_date`` from the
 	install's ``config`` JSON; falls back to the caller's default Company (or the
 	site's single Company) and erpnext's current fiscal year for the missing
-	pieces. The negative-stock auditor also requires a server-validated Warehouse
-	root. A missing, malformed, foreign, disabled, or unreadable root raises
-	instead of broadening the review.
+	pieces. Attendance requires a server-validated Department root and Negative
+	Stock requires a server-validated Warehouse root. A bad root never broadens a
+	review.
 	"""
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
+	# Payroll Pre-Run is not a generic company/period scan.  Its selected
+	# Payroll Entry owns the company, period, report-date cap, and record
+	# boundary.  Route before reading generic config keys so a user cannot widen
+	# that boundary with a saved company, date range, or record_scope object.
+	from jarvis.chat.payroll_prerun_scope import is_payroll_prerun, scope_from_config
+
+	if is_payroll_prerun(installation.get("agent")):
+		return scope_from_config(installation.get("config") or "{}")
 
 	cfg: dict = {}
 	if installation.get("config"):
@@ -150,8 +217,33 @@ def resolve_scope(installation) -> dict:
 		return str(val).strip() if val is not None and str(val).strip() else None
 
 	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
-	if requires_bound_scope(installation):
+	prior_from, prior_to = _s("prior_period_from"), _s("prior_period_to")
+	if prior_from or prior_to:
+		try:
+			if not prior_from or not prior_to:
+				raise ValueError
+			start, end = date.fromisoformat(prior_from), date.fromisoformat(prior_to)
+			if start > end or end >= frappe.utils.getdate(scope["from_date"]):
+				raise ValueError
+		except (ValueError, TypeError):
+			raise InvalidArgumentError("prior_period_from and prior_period_to must define an earlier period")
+		scope.update(prior_period_from=start.isoformat(), prior_period_to=end.isoformat())
+	slug = _agent_slug(installation)
+	if slug == NEGATIVE_STOCK_AGENT:
 		scope["record_scope"] = _negative_stock_warehouse_scope(cfg, scope["company"])
+	elif slug == ATTENDANCE_AGENT:
+		# Attendance has one strictly validated Department root. Do not fall
+		# through to generic document parsing, which would accept a wider shape.
+		scope["record_scope"] = _attendance_department_scope(cfg, scope["company"])
+	elif cfg.get("record_scope"):
+		record = cfg["record_scope"]
+		if not isinstance(record, dict) or not all(record.get(k) for k in ("doctype", "name")):
+			raise InvalidArgumentError("record_scope requires a doctype and name")
+		doc = frappe.get_doc(record["doctype"], record["name"])
+		doc.check_permission("read")
+		if doc.get("company") and doc.company != scope["company"]:
+			raise InvalidArgumentError("record_scope must belong to the selected company")
+		scope["record_scope"] = {k: str(record[k]) for k in ("doctype", "name")}
 	return scope
 
 

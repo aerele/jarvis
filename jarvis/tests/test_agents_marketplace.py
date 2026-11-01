@@ -546,6 +546,21 @@ class TestAgentsMarketplace(unittest.TestCase):
 			json.loads(frappe.db.get_value(LISTING, "fixed-asset-depreciation-auditor", "config_keys")),
 			["depr_run_posted", "enable_capex_signal"],
 		)
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "ledger-scrutiny-auditor", "config_keys")),
+			[
+				"materiality",
+				"suspense_accounts",
+				"subledger_owned_accounts",
+				"subledger_account_owner",
+				"chart_standard",
+				"suspense_confirmed",
+			],
+		)
+		self.assertIn(
+			"jarvis__get_engagement_config",
+			agent_catalog.registry_tools_allow("ledger-scrutiny-auditor"),
+		)
 
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
 		"""An agent the registry declares no config_keys for gets [], not null/absent - ConfigForm.vue can

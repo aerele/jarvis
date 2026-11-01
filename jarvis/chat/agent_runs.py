@@ -32,6 +32,7 @@ DASHBOARD = "Jarvis Dashboard"
 SESSION = "Jarvis Chat Session"
 NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
 _NEGATIVE_STOCK_SCOPE_REJECTION = "The evaluator scope did not match the server-stamped Warehouse boundary."
+ATTENDANCE_AGENT = "attendance-leave-integrity-auditor"
 
 
 # --------------------------------------------------------------------------- #
@@ -514,11 +515,28 @@ def _notify_owner_dashboard(
 		pass
 
 
-def _fingerprint(rule_id, ref_doctype, ref_name) -> str:
+def _fingerprint(rule_id, ref_doctype, ref_name, record_scope=None) -> str:
 	"""Stable dedupe key for a finding — identity only (rule + the doc it hit),
 	NOT the amount (which can drift run to run while it stays the same finding)."""
 	raw = "|".join([str(rule_id or ""), str(ref_doctype or ""), str(ref_name or "")])
+	if record_scope:
+		import json
+
+		raw += "|" + json.dumps(record_scope, sort_keys=True, separators=(",", ":"))
 	return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+
+
+def _record_scope(raw):
+	"""Use the record boundary saved by the launcher, never a delegate claim."""
+	import json
+
+	try:
+		value = json.loads(raw or "{}").get("record_scope")
+		if isinstance(value, dict) and all(value.get(k) for k in ("doctype", "name")):
+			return {k: str(value[k]) for k in ("doctype", "name")}
+	except (ValueError, TypeError, AttributeError):
+		pass
+	return None
 
 
 def _safe_date(value):
@@ -528,6 +546,17 @@ def _safe_date(value):
 		return getdate(value)
 	except Exception:
 		return None
+
+
+def _scope_from_run(run_doc) -> dict | None:
+	"""Parse the server-stamped launch scope without trusting a delegate value."""
+	import json as _json
+
+	try:
+		scope = _json.loads(run_doc.get("scope_json") or "{}")
+	except (TypeError, ValueError):
+		return None
+	return scope if isinstance(scope, dict) else None
 
 
 def _reassign_owner(doctype: str, name: str, owner: str) -> None:
@@ -695,8 +724,10 @@ def _watermark_drift(run_doc, scope: dict) -> bool:
 	if run_doc.get("agent") in REVIEW_OPERATORS:
 		return False
 	stamped_count = run_doc.get("wm_row_count")
+	from jarvis.chat.agent_scope import as_of_date
+
 	company = (scope or {}).get("company")
-	to_date = (scope or {}).get("to_date")
+	to_date = as_of_date(scope)
 	if stamped_count is None or not company or not to_date:
 		return False
 	try:
@@ -732,8 +763,10 @@ def _scoped_visibility(run_doc, inst) -> bool:
 	run-as user's user_permissions snapshotted AT LAUNCH — the authoritative signal),
 	so a User Permission added AFTER install is caught even though the installation's
 	``scoped_visibility`` flag (stamped only at map/backfill time) has gone stale.
-	Falls back to that stamped flag when the profile is absent (a legacy run, or one
-	whose profile computation failed)."""
+	For Ledger Scrutiny, the server-owned launch scope also records this fact. Use
+	it before the installation fallback when the profile is absent, so a failed
+	permission-profile stamp cannot let a record-sliced Ledger run auto-resolve
+	findings. Other agents retain the established installation fallback."""
 	import json as _json
 
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
@@ -743,6 +776,10 @@ def _scoped_visibility(run_doc, inst) -> bool:
 
 	if run_doc.get("agent") in REVIEW_OPERATORS:
 		return False
+	if run_doc.get("agent") == "ledger-scrutiny-auditor":
+		launch_scope = _scope_from_run(run_doc)
+		if isinstance(launch_scope, dict) and launch_scope.get("scoped_visibility") is True:
+			return True
 	profile = run_doc.get("permission_profile")
 	if profile:
 		try:
@@ -834,6 +871,15 @@ def record_delegate_run(
 	scope = scope if isinstance(scope, dict) else {}
 	dropped = dropped or []
 	scope_rejected = False
+	launch_scope = _scope_from_run(run_doc)
+	if agent == "ledger-scrutiny-auditor":
+		# Ledger Scrutiny results are meaningful only for the exact company,
+		# period and run-as visibility state stamped before dispatch. The
+		# delegate echoes that scope for a reproducible evaluator digest, but it
+		# must never be able to replace the server snapshot at writeback.
+		from jarvis.chat.ledger_scrutiny_scope import bind_writeback_scope
+
+		scope = bind_writeback_scope(launch_scope, scope)
 	if agent == NEGATIVE_STOCK_AGENT:
 		# ``record_delegate_run`` is also a server-side API. Normalize its scope
 		# before ANY side effect (finding company, watermark, or A16) so a direct
@@ -867,6 +913,62 @@ def record_delegate_run(
 		else:
 			# Strip model-only keys before all downstream persistence decisions.
 			scope = trusted_scope
+	record_scope = _record_scope(run_doc.get("scope_json"))
+	if record_scope and agent != NEGATIVE_STOCK_AGENT:
+		stamp = launch_scope if isinstance(launch_scope, dict) else {}
+		if agent == ATTENDANCE_AGENT:
+			# Attendance deliberately permits its compact five-field evaluator echo,
+			# but never treats it as authority to change the launch stamp.
+			from jarvis.chat.agent_scope import attendance_output_scope
+
+			trusted_scope = attendance_output_scope(stamp)
+			matches = trusted_scope is not None and attendance_output_scope(scope) == trusted_scope
+		else:
+			# A record-scoped evaluator must echo every server-owned launch fact.
+			# This includes fields that affect a period's meaning or the conclusion's
+			# visibility label, not only the record name and dates.
+			matches = scope.get("record_scope") == record_scope and all(
+				scope.get(key) == stamp.get(key)
+				for key in (
+					"company",
+					"fiscal_year",
+					"from_date",
+					"to_date",
+					"report_date",
+					"prior_fy_start",
+					"prior_fy_end",
+					"prior_period_from",
+					"prior_period_to",
+					"scope_kind",
+					"scoped_visibility",
+				)
+			)
+		if not matches:
+			dropped = [
+				*dropped,
+				*[
+					{
+						"ref_doctype": f.get("ref_doctype"),
+						"ref_name": f.get("ref_name"),
+						"reason": "assessment scope mismatch",
+					}
+					for f in findings or []
+				],
+			]
+			findings = []
+			coverage = {
+				token: {
+					"state": "not_evaluable",
+					"reason_code": "unsupported_customisation",
+					"detail": "assessment record or period scope",
+				}
+				for token in required_coverage_tokens
+			}
+			dashboard = canvas_ref = integrity_digest = None
+		# Record-scoped runs persist and compute against the launch stamp, not
+		# delegate data. The mismatch path above still records a partial outcome,
+		# but cannot leak a forged company or period into any later operation.
+		scope = dict(stamp)
 	company = (scope.get("company") or "").strip()
 	negative_stock_run_scope = scope.get("record_scope") if agent == NEGATIVE_STOCK_AGENT else None
 
@@ -875,7 +977,7 @@ def record_delegate_run(
 	by_fp: dict = {}
 	for f in findings or []:
 		token = f.get("token") or f.get("rule_id")
-		fp = _fingerprint(token, f.get("ref_doctype"), f.get("ref_name"))
+		fp = _fingerprint(token, f.get("ref_doctype"), f.get("ref_name"), record_scope)
 		by_fp.setdefault(fp, f)
 	seen_fps = set(by_fp)
 
@@ -1017,6 +1119,7 @@ def record_delegate_run(
 	if (
 		not truncated
 		and not scope_rejected
+		and not dropped
 		and not wm_drift
 		and not scoped
 		and not row_shortfall
@@ -1031,7 +1134,18 @@ def record_delegate_run(
 				"state": "open",
 				"rule_id": ["in", list(evaluated_tokens)],
 			},
-			fields=["name", "fingerprint", "company", "last_seen_run"],
+			fields=["name", "fingerprint", "company", "run", "last_seen_run"],
+		)
+		candidate_runs = {c.last_seen_run or c.run for c in candidates if c.last_seen_run or c.run}
+		run_scopes = (
+			{
+				r.name: _record_scope(r.scope_json)
+				for r in frappe.get_all(
+					RUN, filters={"name": ["in", list(candidate_runs)]}, fields=["name", "scope_json"]
+				)
+			}
+			if candidate_runs
+			else {}
 		)
 		prior_record_scopes = {}
 		if agent == NEGATIVE_STOCK_AGENT:
@@ -1041,9 +1155,9 @@ def record_delegate_run(
 
 			run_names = sorted(
 				{
-					str(candidate.get("last_seen_run") or "").strip()
+					str(candidate.get("last_seen_run") or candidate.get("run") or "").strip()
 					for candidate in candidates
-					if str(candidate.get("last_seen_run") or "").strip()
+					if str(candidate.get("last_seen_run") or candidate.get("run") or "").strip()
 				}
 			)
 			try:
@@ -1067,6 +1181,8 @@ def record_delegate_run(
 					prior_scope.get("record_scope") if isinstance(prior_scope, dict) else None
 				)
 		for c in candidates:
+			if run_scopes.get(c.last_seen_run or c.run) != record_scope:
+				continue
 			if c.fingerprint in seen_fps:
 				continue  # still present this run
 			# Company scope gate: only resolve a finding whose company matches this
@@ -1079,7 +1195,7 @@ def record_delegate_run(
 			# different root has no evidence that an older root became clean.
 			if (
 				agent == NEGATIVE_STOCK_AGENT
-				and prior_record_scopes.get(c.get("last_seen_run")) != negative_stock_run_scope
+				and prior_record_scopes.get(c.get("last_seen_run") or c.get("run")) != negative_stock_run_scope
 			):
 				continue
 			# PP-5 review provenance: an A16 coverage-scoped auto-resolve is machine,
@@ -1194,12 +1310,9 @@ def record_delegate_run(
 		"coverage_json": coverage_blob[:60000],
 	}
 	if scope:
-		# Merge the delegate's writeback scope ONTO the trigger-stamped scope rather
-		# than overwriting it. The delegate forwards only the core dims (company,
-		# fiscal_year, from_date, to_date), so a blind overwrite drops the
-		# bench-stamped as-of date (report_date) and prior-FY bounds -- and a run
-		# persisted without report_date replays against to_date, changing findings and
-		# the integrity digest. Delegate values win where present; bench-only keys survive.
+		# Merge ordinary delegate scope onto its launch stamp. A record-scoped run
+		# is different: its server launch stamp has already been selected above and
+		# must remain authoritative at writeback.
 		import json as _json
 
 		base = {}
@@ -1209,19 +1322,8 @@ def record_delegate_run(
 				base = {}
 		except Exception:
 			base = {}
-		if agent == NEGATIVE_STOCK_AGENT:
-			# Defence in depth for direct internal callers: negative-stock output
-			# may carry only the canonical five-field projection and its Warehouse
-			# boundary must equal the one the server stamped at launch. Never merge
-			# raw model scope/config into this Run snapshot.
-			from jarvis.chat.agent_scope import negative_stock_output_scope
-
-			trusted_scope = negative_stock_output_scope(base)
-			submitted_scope = negative_stock_output_scope(scope)
-			if trusted_scope is not None:
-				if submitted_scope == trusted_scope:
-					base.update(submitted_scope)
-				base["record_scope"] = trusted_scope["record_scope"]
+		if record_scope:
+			base = dict(launch_scope or {})
 		else:
 			base.update(scope)
 		run_values["scope_json"] = frappe.as_json(base)[:60000]
