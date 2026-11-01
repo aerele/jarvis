@@ -42,6 +42,7 @@ export function pendingActionsFromRows(rows, conversation) {
 				row?.role === "tool" &&
 				row.tool_status === "pending" &&
 				row.pending_card &&
+				row.pending_card_safe === true &&
 				row.tool_call_id,
 		)
 		.map((row) => ({

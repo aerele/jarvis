@@ -483,6 +483,64 @@ def settle_revoked_legacy_chat_card(token: str, *, strict: bool = False) -> bool
 	)
 
 
+def legacy_confirmation_is_safe_to_render(
+	token: str, *, owner: str | None, conversation: str | None
+) -> bool:
+	"""Return whether a legacy confirmation may become a client-side Confirm card.
+
+	A legacy card has a durable transcript row but its execution authority remains
+	in Redis. The transcript therefore cannot be trusted on its own after an agent
+	close: a capped cleanup, a stale browser page, or a failed resync could otherwise
+	replay an unfenced row before the user clicks it. Validate the owner-bound Redis
+	record under the close locks before any history reader returns the row. If it is
+	revoked, settle the existing row first and only then remove the credential.
+
+	Any read, fence, ownership, conversation, or settlement uncertainty returns
+	``False``. The caller must suppress the card rather than turn uncertainty into a
+	Confirm control. This helper never inserts a receipt for an unseen token.
+	"""
+	token = (token or "").strip()
+	if not token:
+		return False
+
+	from jarvis.chat import pending_confirm_legacy
+
+	try:
+		record = pending_confirm_legacy.peek(token, strict=True)
+	except Exception:
+		frappe.log_error(
+			title="jarvis.agent_close.legacy_card_read_failed",
+			message=frappe.get_traceback(),
+		)
+		return False
+	if not isinstance(record, dict):
+		return False
+
+	# A mismatched record must never be rendered through another conversation's
+	# transcript, and it must not be deleted by this reader either.
+	if owner and record.get("owner") != owner:
+		return False
+	stored_conversation = record.get("conversation") or ""
+	if conversation and stored_conversation and stored_conversation != conversation:
+		return False
+
+	try:
+		if confirmation_is_current(record, lock=True):
+			return True
+		# The row was actually displayed, so a durable terminal flip is required
+		# before its credential can be removed. A concurrent terminal writer makes
+		# the helper return True only when the row is no longer pending.
+		if not settle_revoked_legacy_chat_card(token, strict=True):
+			return False
+		pending_confirm_legacy.rollback_token(token, str(record.get("owner") or ""))
+	except Exception:
+		frappe.log_error(
+			title="jarvis.agent_close.legacy_card_read_settle_failed",
+			message=frappe.get_traceback(),
+		)
+	return False
+
+
 def revoke_unfenced_legacy_tokens() -> int:
 	"""Remove a bounded Redis snapshot of generic tokens that lack the full map."""
 	from jarvis.chat import pending_confirm_legacy

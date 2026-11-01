@@ -29,6 +29,7 @@ test("ChatView never parses a row's site-timezone creation as a local time", () 
 				tool_status: "pending",
 				tool_call_id: "time-token",
 				pending_card: {},
+				pending_card_safe: true,
 				created_at: 1_700_000_001,
 			},
 		],

@@ -326,6 +326,7 @@ class TestReads(_Base):
 		with as_user(OWNER):
 			[shown] = [m for m in get_conversation(conv)["messages"] if m.get("tool_call_id") == token]
 		self.assertEqual(shown["pending_card"], PREVIEW["card"])
+		self.assertTrue(shown["pending_card_safe"])
 
 
 class TestConsumeClearRollback(_Base):

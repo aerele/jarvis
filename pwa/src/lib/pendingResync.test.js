@@ -116,6 +116,7 @@ test("a hard reload does not rebuild a terminal safety receipt into a Confirm ca
 			tool_status: "pending",
 			tool_call_id: "ordinary-token",
 			pending_card: { title: "Ordinary pending change" },
+			pending_card_safe: true,
 			created_at: 123,
 			expires_at: null,
 		},
@@ -124,6 +125,34 @@ test("a hard reload does not rebuild a terminal safety receipt into a Confirm ca
 	assert.deepEqual(cards.map((card) => card.token), ["ordinary-token"]);
 	assert.equal(cards[0].conversation, "CONV-RELOAD");
 	assert.deepEqual(cards[0].preview, { card: { title: "Ordinary pending change" } });
+});
+
+test("a transcript row needs the server's safe-read attestation before it can make a card", () => {
+	// getConversation can finish before list_pending_confirmations. The transcript
+	// endpoint therefore stamps every safe pending row itself; an unsafe or old
+	// server row must fail closed instead of becoming a client-side Confirm card.
+	const rows = [
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "pending",
+			tool_call_id: "revoked-token",
+			pending_card: { title: "Never show this" },
+			pending_card_safe: false,
+		},
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "pending",
+			tool_call_id: "ordinary-token",
+			pending_card: { title: "Still confirmable" },
+			pending_card_safe: true,
+		},
+	];
+	assert.deepEqual(
+		pendingActionsFromRows(rows, "CONV-TRANSCRIPT").map((card) => card.token),
+		["ordinary-token"],
+	);
 });
 
 test("a capped legacy cleanup resync keeps its terminal card out after a hard reload", () => {
@@ -145,6 +174,7 @@ test("a capped legacy cleanup resync keeps its terminal card out after a hard re
 			tool_status: "pending",
 			tool_call_id: "ordinary-token",
 			pending_card: { title: "Ordinary pending change" },
+			pending_card_safe: true,
 		},
 	];
 	const fromRows = pendingActionsFromRows(rows, "CONV-CAPPED");

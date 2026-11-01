@@ -710,6 +710,80 @@ class TestAgentClosureIntegration(FrappeTestCase):
 			[current],
 		)
 
+	def test_transcript_read_fences_capped_stale_legacy_card_before_resync(self):
+		"""History cannot show a stale card while list resync is still in flight."""
+		conversation = self._conversation()
+		stale, _ = self._legacy_card(conversation=conversation)
+		current, _ = self._legacy_card(conversation=conversation)
+		self._revoke_legacy_fence(stale)
+
+		with patch.object(agent_closure, "_REDIS_SCAN_LIMIT", 0):
+			self.assertEqual(agent_closure.revoke_unfenced_legacy_tokens(), 0)
+		self.assertIsNotNone(pending_confirm_legacy.peek(stale))
+
+		frappe.set_user(OWNER)
+		# PWA mount starts getConversation and list_pending_confirmations together.
+		# Make the transcript read win: it must settle and redact the stale row itself.
+		history = chat_api.get_conversation(conversation)["messages"]
+		self.assertEqual(
+			[
+				row.get("tool_call_id")
+				for row in history
+				if row.get("role") == "tool"
+				and row.get("tool_status") == "pending"
+				and row.get("pending_card")
+			],
+			[current],
+		)
+		current_row = next(row for row in history if row.get("tool_call_id") == current)
+		self.assertTrue(current_row["pending_card_safe"])
+		self.assertIsNone(pending_confirm_legacy.peek(stale))
+		self._assert_revoked_legacy_receipt(stale)
+
+		resync = actions_api.list_pending_confirmations(conversation)
+		self.assertTrue(resync["ok"])
+		self.assertEqual([item["token"] for item in resync["data"]["pending"]], [current])
+
+	def test_transcript_read_hides_stale_legacy_card_when_durable_settlement_fails(self):
+		"""A failed terminal flip must fail closed instead of offering Confirm."""
+		conversation = self._conversation()
+		stale, _ = self._legacy_card(conversation=conversation)
+		current, _ = self._legacy_card(conversation=conversation)
+		self._revoke_legacy_fence(stale)
+
+		with patch.object(agent_closure, "settle_revoked_legacy_chat_card", return_value=False):
+			frappe.set_user(OWNER)
+			history = chat_api.get_conversation(conversation)["messages"]
+			resync = actions_api.list_pending_confirmations(conversation)
+
+		self.assertEqual(
+			[
+				row.get("tool_call_id")
+				for row in history
+				if row.get("role") == "tool"
+				and row.get("tool_status") == "pending"
+				and row.get("pending_card")
+			],
+			[current],
+		)
+		current_row = next(row for row in history if row.get("tool_call_id") == current)
+		self.assertTrue(current_row["pending_card_safe"])
+		stale_row = next(row for row in history if row.get("tool_call_id") == stale)
+		self.assertEqual(stale_row.get("tool_status"), "")
+		self.assertIsNone(stale_row.get("pending_card"))
+		self.assertFalse(stale_row.get("pending_card_safe"))
+		# The facade deliberately keeps the valid sibling when a legacy token cannot
+		# settle. It must exclude the stale token rather than returning it as pending.
+		self.assertTrue(resync["ok"])
+		self.assertEqual([item["token"] for item in resync["data"]["pending"]], [current])
+		# The failed flip leaves the credential intact for a later durable retry, but
+		# the response must never turn that unsafe state into a client-side Confirm.
+		self.assertIsNotNone(pending_confirm_legacy.peek(stale))
+		self.assertEqual(
+			frappe.db.get_value(MESSAGE, {"tool_call_id": stale}, "tool_status"),
+			"pending",
+		)
+
 	def test_capped_cleanup_list_resync_keeps_token_when_terminal_settlement_fails(self):
 		"""A failed durable flip must not burn a credential whose card still shows."""
 		conversation = self._conversation()
