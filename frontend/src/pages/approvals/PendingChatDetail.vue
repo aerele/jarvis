@@ -25,52 +25,58 @@
 			</section>
 
 			<template v-else-if="!dismissedSafetyUpdate">
-			<p class="text-sm text-ink-gray-6">
-				Jarvis proposed this in
-				<span class="font-medium text-ink-gray-8">{{
-					rec.conversation_title || "a chat"
-				}}</span>
-				and runs it only once you confirm.
-			</p>
+				<p class="text-sm text-ink-gray-6">
+					Jarvis proposed this in
+					<span class="font-medium text-ink-gray-8">{{
+						rec.conversation_title || "a chat"
+					}}</span>
+					and runs it only once you confirm.
+				</p>
 
-			<div class="mt-3">
-				<PendingCard v-if="card" :card="card" details="" />
-				<div v-else class="text-base text-ink-gray-8">{{ rec.summary || rec.tool }}</div>
-			</div>
+				<div class="mt-3">
+					<PendingCard v-if="card" :card="card" details="" />
+					<div v-else class="text-base text-ink-gray-8">
+						{{ rec.summary || rec.tool }}
+					</div>
+				</div>
 
-			<div v-if="!rec.can_act" class="mt-3 text-sm text-ink-gray-6" role="status">
-				{{ closedText }}
-			</div>
-			<FailureReference v-if="rec.status === 'Failed'" :id="rec.name" />
+				<div v-if="!rec.can_act" class="mt-3 text-sm text-ink-gray-6" role="status">
+					{{ closedText }}
+				</div>
+				<FailureReference v-if="rec.status === 'Failed'" :id="rec.name" />
 
-			<div class="mt-4 flex flex-wrap items-center gap-2">
-				<template v-if="canAct">
+				<div class="mt-4 flex flex-wrap items-center gap-2">
+					<template v-if="canAct">
+						<Button
+							variant="solid"
+							label="Confirm"
+							:loading="busy === 'confirm'"
+							:disabled="busy !== null"
+							@click="decide('confirm')"
+						/>
+						<Button
+							variant="ghost"
+							theme="red"
+							label="Discard"
+							:loading="busy === 'discard'"
+							:disabled="busy !== null"
+							@click="decide('discard')"
+						/>
+					</template>
 					<Button
-						variant="solid"
-						label="Confirm"
-						:loading="busy === 'confirm'"
+						v-if="rec.conversation"
+						variant="subtle"
+						label="Open chat"
+						:aria-label="
+							'Open chat: ' + (rec.conversation_title || 'the conversation')
+						"
 						:disabled="busy !== null"
-						@click="decide('confirm')"
+						@click="openChat"
 					/>
-					<Button
-						variant="ghost"
-						theme="red"
-						label="Discard"
-						:loading="busy === 'discard'"
-						:disabled="busy !== null"
-						@click="decide('discard')"
-					/>
-				</template>
-				<Button
-					v-if="rec.conversation"
-					variant="subtle"
-					label="Open chat"
-					:aria-label="'Open chat: ' + (rec.conversation_title || 'the conversation')"
-					:disabled="busy !== null"
-					@click="openChat"
-				/>
-			</div>
-			<div v-if="notice" role="alert" class="mt-2 text-sm text-ink-red-5">{{ notice }}</div>
+				</div>
+				<div v-if="notice" role="alert" class="mt-2 text-sm text-ink-red-5">
+					{{ notice }}
+				</div>
 			</template>
 		</template>
 	</div>
@@ -118,7 +124,9 @@ const SAFETY_UPDATE_COPY =
 // Only a plain object with a kind renders as a card; anything else is the summary line.
 const card = computed(() => {
 	const c = rec.value && rec.value.card;
-	return rec.value?.pending_card_safe === true && c && typeof c === "object" && c.kind ? c : null;
+	return rec.value?.pending_card_safe === true && c && typeof c === "object" && c.kind
+		? c
+		: null;
 });
 const canAct = computed(() => rec.value?.can_act && rec.value?.pending_card_safe === true);
 const closedText = computed(() => chatStatusLine(rec.value));

@@ -1046,11 +1046,7 @@ const orderedPending = computed(() => {
 const SAFETY_UPDATE_COPY =
 	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
 function passiveSafetyUpdate(row) {
-	if (
-		row?.role !== "tool" ||
-		row.action_outcome !== "cancelled" ||
-		!row.tool_call_id
-	)
+	if (row?.role !== "tool" || row.action_outcome !== "cancelled" || !row.tool_call_id)
 		return null;
 	let result = row.tool_result;
 	if (typeof result === "string") {
@@ -2130,7 +2126,8 @@ async function resolvePending(token) {
 	const cid = convId.value;
 	const actionIsCurrent = () =>
 		isCurrentView(generation, cid) &&
-		(resolving.value === token || (stream.value.pending || []).some((card) => card.token === token));
+		(resolving.value === token ||
+			(stream.value.pending || []).some((card) => card.token === token));
 	resolving.value = token;
 	try {
 		const result = await confirmTool(token, cid);

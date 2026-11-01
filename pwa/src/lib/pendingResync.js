@@ -43,7 +43,7 @@ export function pendingActionsFromRows(rows, conversation) {
 				row.tool_status === "pending" &&
 				row.pending_card &&
 				row.pending_card_safe === true &&
-				row.tool_call_id,
+				row.tool_call_id
 		)
 		.map((row) => ({
 			conversation,
@@ -102,14 +102,14 @@ export function admitRealtimePendingCards(
 	event,
 	excludedTokens,
 	inflightToken,
-	fallbackConversation,
+	fallbackConversation
 ) {
 	const incoming =
 		event?.kind === "action:pending"
 			? [event]
 			: Array.isArray(event?.pending)
-				? event.pending
-				: [];
+			? event.pending
+			: [];
 	const next = [...(current || [])];
 	const known = new Set(next.map((card) => card?.token).filter(Boolean));
 

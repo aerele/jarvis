@@ -607,12 +607,13 @@ const compactBusyReason = computed(() => {
 // turn it on (run:end / run:error / context:* are the other clearers).
 async function loadContext({ applyCompacting = false } = {}) {
 	const view = captureDashboardView();
-	if (!view.conversation) {
+	const id = view.conversation;
+	if (!id) {
 		if (dashboardViewIsCurrent(view)) contextInfo.value = null;
 		return;
 	}
 	try {
-		const c = await getConversationContext(view.conversation);
+		const c = await getConversationContext(id);
 		if (!dashboardViewIsCurrent(view)) return;
 		takeUsage(c);
 		if (c && c.fresh) contextInfo.value = c;
@@ -908,11 +909,7 @@ const SAFETY_UPDATE_COPY =
 	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
 
 function passiveSafetyUpdate(row) {
-	if (
-		row?.role !== "tool" ||
-		row.action_outcome !== "cancelled" ||
-		!row.tool_call_id
-	)
+	if (row?.role !== "tool" || row.action_outcome !== "cancelled" || !row.tool_call_id)
 		return null;
 	let result = row.tool_result;
 	if (typeof result === "string") {

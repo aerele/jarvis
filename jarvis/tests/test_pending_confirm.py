@@ -288,7 +288,9 @@ class TestReads(_Base):
 		conv = self.make_conv()
 		self.mint(conv)
 		with (
-			patch("jarvis.chat.agent_closure.confirmation_is_current", side_effect=RuntimeError("fence read")),
+			patch(
+				"jarvis.chat.agent_closure.confirmation_is_current", side_effect=RuntimeError("fence read")
+			),
 			patch.object(frappe, "logger"),
 		):
 			with self.assertRaises(pending_confirm.PendingConfirmStorageError):
@@ -362,9 +364,7 @@ class TestRealtimeCardAttestation(_Base):
 			captured["token"] = token
 			self.set_col(
 				token,
-				agent_close_fences=json.dumps(
-					{"ticket-triage-operator": "ticket-triage-close-v1"}
-				),
+				agent_close_fences=json.dumps({"ticket-triage-operator": "ticket-triage-close-v1"}),
 			)
 			return token
 

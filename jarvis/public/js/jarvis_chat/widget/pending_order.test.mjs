@@ -195,7 +195,10 @@ test("a direct safety update also suppresses a later passive duplicate", () => {
 
   assert.equal(direct.shouldEnqueue, true);
   assert.equal(passive.shouldEnqueue, false);
-  assert.deepEqual(passive.pending.map((card) => card.token), ["safe-b"]);
+  assert.deepEqual(
+    passive.pending.map((card) => card.token),
+    ["safe-b"]
+  );
 });
 
 test("a typed discard does not suppress a later safety-update explanation", () => {
@@ -208,7 +211,10 @@ test("a typed discard does not suppress a later safety-update explanation", () =
     "a"
   );
   assert.equal(out.shouldEnqueue, true);
-  assert.deepEqual(out.pending.map((card) => card.token), ["safe-b"]);
+  assert.deepEqual(
+    out.pending.map((card) => card.token),
+    ["safe-b"]
+  );
 });
 
 // Decision 6: a bare phrase binds only cards parked since the user last spoke, so
@@ -316,11 +322,11 @@ test("settledReasonMessage explains a safety-update cancellation", () => {
       reason_code: "safety_update",
       pa_status: "Cancelled",
     }),
-    /agent safety update/,
+    /agent safety update/
   );
   assert.match(
     settledReasonMessage({ ok: false, reason_code: "safety_update" }),
-    /Submit the action again/,
+    /Submit the action again/
   );
   assert.equal(settledReasonMessage({ ok: false, reason_code: "stale" }), "");
 });
@@ -359,63 +365,90 @@ test("Panel.vue hides a safety-update card and keeps its Done-only message", () 
   const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
   const body = src.slice(src.indexOf("async function resolvePending("));
   const settled = body.indexOf("const settled = settledReasonMessage(result)");
-  const settle = body.indexOf("settleSafetyUpdate({ token, message: settled })", settled);
+  const settle = body.indexOf(
+    "settleSafetyUpdate({ token, message: settled })",
+    settled
+  );
   const resolved = body.indexOf('kind: "action:resolved"', settled);
   assert.ok(settled > -1 && settle > settled && resolved > settle);
   assert.match(src, /function dismissSettledNotice\(\)/);
   assert.match(src, /@click="dismissSettledNotice"/);
-  assert.doesNotMatch(body.slice(settled, resolved), /loadError\.value = settled/);
+  assert.doesNotMatch(
+    body.slice(settled, resolved),
+    /loadError\.value = settled/
+  );
 });
 
 test("Desk only admits attested cached and list cards, then shows a passive close as Done-only", () => {
-	const here = path.dirname(fileURLToPath(import.meta.url));
-	const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
-	const resync = src.slice(
-		src.indexOf("async function resyncPending(source) {"),
-		src.indexOf("// Auto-heal", src.indexOf("async function resyncPending(source) {"))
-	);
-	assert.match(resync, /m\.pending_card_safe === true/);
-	assert.match(resync, /r\?\.pending_card_safe === true/);
-	assert.match(resync, /removedByCleanResync/);
-	assert.match(resync, /void load\(\)/);
-	assert.match(src, /function observePassiveSafetyUpdates\(rows\)/);
-	assert.match(src, /result\?\.reason_code !== "safety_update"/);
-	const noticeAt = src.indexOf('v-if="settledNotice"');
-	const nextPending = src.indexOf('v-for="(p, pi) in orderedPending"', noticeAt);
-	assert.ok(noticeAt > -1 && nextPending > noticeAt);
-	const notice = src.slice(noticeAt, nextPending);
-	assert.match(notice, />\s*Done\s*</);
-	assert.doesNotMatch(notice, /Confirm|Retry|Discard/);
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
+  const resync = src.slice(
+    src.indexOf("async function resyncPending(source) {"),
+    src.indexOf(
+      "// Auto-heal",
+      src.indexOf("async function resyncPending(source) {")
+    )
+  );
+  assert.match(resync, /m\.pending_card_safe === true/);
+  assert.match(resync, /r\?\.pending_card_safe === true/);
+  assert.match(resync, /removedByCleanResync/);
+  assert.match(resync, /void load\(\)/);
+  assert.match(src, /function observePassiveSafetyUpdates\(rows\)/);
+  assert.match(src, /result\?\.reason_code !== "safety_update"/);
+  const noticeAt = src.indexOf('v-if="settledNotice"');
+  const nextPending = src.indexOf(
+    'v-for="(p, pi) in orderedPending"',
+    noticeAt
+  );
+  assert.ok(noticeAt > -1 && nextPending > noticeAt);
+  const notice = src.slice(noticeAt, nextPending);
+  assert.match(notice, />\s*Done\s*</);
+  assert.doesNotMatch(notice, /Confirm|Retry|Discard/);
 
-	const realtime = src.slice(src.indexOf("function onRealtime(payload) {"));
-	assert.match(realtime, /payload\.pending_card_safe === true/);
+  const realtime = src.slice(src.indexOf("function onRealtime(payload) {"));
+  assert.match(realtime, /payload\.pending_card_safe === true/);
 });
 
 test("Desk queues passive safety receipts so each Done reveals the next one", () => {
-	const here = path.dirname(fileURLToPath(import.meta.url));
-	const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
-	assert.match(src, /const settledNoticeQueue = ref\(\[\]\)/);
-	assert.match(src, /function enqueueSettledNotice\(notice\)/);
-	const observe = src.slice(
-		src.indexOf("function observePassiveSafetyUpdates(rows)"),
-		src.indexOf("// Typed approval", src.indexOf("function observePassiveSafetyUpdates(rows)"))
-	);
-	assert.doesNotMatch(observe, /if \(settledNotice\.value\) return/);
-	assert.match(observe, /settleSafetyUpdate\(notice\)/);
-	assert.match(src, /function settleSafetyUpdate\(notice\)/);
-	assert.match(src, /safetyUpdateTransition\(/);
-	assert.match(src, /if \(next\.shouldEnqueue\) enqueueSettledNotice\(notice\)/);
-	const newChat = src.slice(
-		src.indexOf("function startNewChat()"),
-		src.indexOf("function pickFile()", src.indexOf("function startNewChat()"))
-	);
-	assert.match(newChat, /safetyNoticeTokens = new Set\(\)/);
-	const dismiss = src.slice(
-		src.indexOf("function dismissSettledNotice()"),
-		src.indexOf("// The Desk already", src.indexOf("function dismissSettledNotice()"))
-	);
-	assert.match(dismiss, /settledNotice\.value = settledNoticeQueue\.value\[0\] \|\| null/);
-	assert.match(dismiss, /settledNoticeQueue\.value = settledNoticeQueue\.value\.slice\(1\)/);
-	const direct = src.slice(src.indexOf("async function resolvePending("));
-	assert.match(direct, /settleSafetyUpdate\(\{ token, message: settled \}\)/);
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
+  assert.match(src, /const settledNoticeQueue = ref\(\[\]\)/);
+  assert.match(src, /function enqueueSettledNotice\(notice\)/);
+  const observe = src.slice(
+    src.indexOf("function observePassiveSafetyUpdates(rows)"),
+    src.indexOf(
+      "// Typed approval",
+      src.indexOf("function observePassiveSafetyUpdates(rows)")
+    )
+  );
+  assert.doesNotMatch(observe, /if \(settledNotice\.value\) return/);
+  assert.match(observe, /settleSafetyUpdate\(notice\)/);
+  assert.match(src, /function settleSafetyUpdate\(notice\)/);
+  assert.match(src, /safetyUpdateTransition\(/);
+  assert.match(
+    src,
+    /if \(next\.shouldEnqueue\) enqueueSettledNotice\(notice\)/
+  );
+  const newChat = src.slice(
+    src.indexOf("function startNewChat()"),
+    src.indexOf("function pickFile()", src.indexOf("function startNewChat()"))
+  );
+  assert.match(newChat, /safetyNoticeTokens = new Set\(\)/);
+  const dismiss = src.slice(
+    src.indexOf("function dismissSettledNotice()"),
+    src.indexOf(
+      "// The Desk already",
+      src.indexOf("function dismissSettledNotice()")
+    )
+  );
+  assert.match(
+    dismiss,
+    /settledNotice\.value = settledNoticeQueue\.value\[0\] \|\| null/
+  );
+  assert.match(
+    dismiss,
+    /settledNoticeQueue\.value = settledNoticeQueue\.value\.slice\(1\)/
+  );
+  const direct = src.slice(src.indexOf("async function resolvePending("));
+  assert.match(direct, /settleSafetyUpdate\(\{ token, message: settled \}\)/);
 });

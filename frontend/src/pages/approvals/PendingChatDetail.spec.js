@@ -149,11 +149,11 @@ describe("PendingChatDetail", () => {
 				can_act: 0,
 				reason_code: "safety_update",
 				reason: "This action was cancelled during a safety update. Nothing ran.",
-			}),
+			})
 		);
 		expect(w.find('[role="status"]').attributes("aria-label")).toBe("Action cancelled");
 		expect(w.text()).toContain(
-			"This action was cancelled during a safety update. Nothing ran.",
+			"This action was cancelled during a safety update. Nothing ran."
 		);
 		expect(button(w, "Done")).toBeTruthy();
 		for (const label of ["Confirm", "Discard", "Open chat", "Try again"]) {

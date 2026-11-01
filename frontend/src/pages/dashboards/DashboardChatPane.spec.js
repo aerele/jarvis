@@ -319,12 +319,12 @@ describe("DashboardChatPane requires the pending-card safety attestation", () =>
 			data: {
 				pending: [
 					{ token: "raw", conversation: "conv1", tool: "update_doc" },
-				{
-					token: "wrong-chat",
-					conversation: "conv2",
-					tool: "update_doc",
-					pending_card_safe: true,
-				},
+					{
+						token: "wrong-chat",
+						conversation: "conv2",
+						tool: "update_doc",
+						pending_card_safe: true,
+					},
 					{
 						token: "safe",
 						conversation: "conv1",
@@ -336,8 +336,13 @@ describe("DashboardChatPane requires the pending-card safety attestation", () =>
 		});
 		const { wrapper } = mountPane();
 		await flushPromises();
-		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
-		await wrapper.findAll("button").find((button) => button.text() === "Approve").trigger("click");
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
+		await wrapper
+			.findAll("button")
+			.find((button) => button.text() === "Approve")
+			.trigger("click");
 		await flushPromises();
 		expect(confirmTool).toHaveBeenCalledWith("safe", "conv1");
 	});
@@ -392,7 +397,9 @@ describe("DashboardChatPane pending-card freshness", () => {
 		});
 		await flushPromises();
 
-		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(0);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(0);
 		expect(wrapper.text()).not.toContain("only-in-a");
 	});
 
@@ -447,7 +454,9 @@ describe("DashboardChatPane pending-card freshness", () => {
 
 		expect(wrapper.text()).toContain("Fresh A card");
 		expect(wrapper.text()).not.toContain("Old A card");
-		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
 	});
 
 	it("does not let a direct A response change B", async () => {
@@ -466,7 +475,7 @@ describe("DashboardChatPane pending-card freshness", () => {
 										summary: "A action",
 										pending_card_safe: true,
 									},
-								]
+							  ]
 							: [
 									{
 										token: "b-token",
@@ -475,14 +484,17 @@ describe("DashboardChatPane pending-card freshness", () => {
 										summary: "B action",
 										pending_card_safe: true,
 									},
-								],
+							  ],
 				},
 			})
 		);
 		confirmTool.mockReturnValueOnce(action.promise);
 		const { wrapper } = mountPane();
 		await flushPromises();
-		await wrapper.findAll("button").find((button) => button.text() === "Approve").trigger("click");
+		await wrapper
+			.findAll("button")
+			.find((button) => button.text() === "Approve")
+			.trigger("click");
 		expect(confirmTool).toHaveBeenCalledWith("a-token", "conv1");
 
 		dashboardConversation.slot.value = "conv2";
@@ -499,7 +511,9 @@ describe("DashboardChatPane pending-card freshness", () => {
 		expect(wrapper.text()).toContain("B action");
 		expect(wrapper.text()).not.toContain("A was cancelled.");
 		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
-		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
 	});
 
 	it("does not let a direct old A response change a later A view", async () => {
@@ -541,7 +555,10 @@ describe("DashboardChatPane pending-card freshness", () => {
 		confirmTool.mockReturnValueOnce(action.promise);
 		const { wrapper } = mountPane();
 		await flushPromises();
-		await wrapper.findAll("button").find((button) => button.text() === "Approve").trigger("click");
+		await wrapper
+			.findAll("button")
+			.find((button) => button.text() === "Approve")
+			.trigger("click");
 
 		dashboardConversation.slot.value = "conv2";
 		await flushPromises();
@@ -559,7 +576,9 @@ describe("DashboardChatPane pending-card freshness", () => {
 		expect(wrapper.text()).toContain("Later A action");
 		expect(wrapper.text()).not.toContain("Old A was cancelled.");
 		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
-		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
 	});
 
 	it.each(["Approve", "Dismiss"])(
@@ -709,9 +728,24 @@ describe("DashboardChatPane safety-update receipts", () => {
 			ok: true,
 			data: {
 				pending: [
-					{ token: "stale-1", conversation: "conv1", tool: "create_doc", pending_card_safe: true },
-					{ token: "stale-2", conversation: "conv1", tool: "create_doc", pending_card_safe: true },
-					{ token: "current", conversation: "conv1", tool: "create_doc", pending_card_safe: true },
+					{
+						token: "stale-1",
+						conversation: "conv1",
+						tool: "create_doc",
+						pending_card_safe: true,
+					},
+					{
+						token: "stale-2",
+						conversation: "conv1",
+						tool: "create_doc",
+						pending_card_safe: true,
+					},
+					{
+						token: "current",
+						conversation: "conv1",
+						tool: "create_doc",
+						pending_card_safe: true,
+					},
 				],
 			},
 		});
@@ -723,7 +757,9 @@ describe("DashboardChatPane safety-update receipts", () => {
 		expect(notice.attributes("role")).toBe("status");
 		expect(notice.text()).toContain("First stale action was cancelled. Nothing ran.");
 		expect(notice.findAll("button").map((button) => button.text())).toEqual(["Done"]);
-		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
 		expect(wrapper.findAll("button").some((button) => button.text() === "Retry")).toBe(false);
 
 		await notice.find("button").trigger("click");
@@ -731,15 +767,22 @@ describe("DashboardChatPane safety-update receipts", () => {
 		expect(wrapper.find(".dashboard-safety-update").text()).toContain(
 			"Second stale action was cancelled. Nothing ran."
 		);
-		expect(wrapper.find(".dashboard-safety-update").findAll("button").map((button) => button.text())).toEqual([
-			"Done",
-		]);
-		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+		expect(
+			wrapper
+				.find(".dashboard-safety-update")
+				.findAll("button")
+				.map((button) => button.text())
+		).toEqual(["Done"]);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
 
 		await wrapper.find(".dashboard-safety-update button").trigger("click");
 		await flushPromises();
 		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
-		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
 	});
 
 	for (const [label, action] of [
@@ -777,16 +820,25 @@ describe("DashboardChatPane safety-update receipts", () => {
 
 			const { wrapper } = mountPane();
 			await flushPromises();
-			await wrapper.findAll("button").find((button) => button.text() === label).trigger("click");
+			await wrapper
+				.findAll("button")
+				.find((button) => button.text() === label)
+				.trigger("click");
 			await flushPromises();
 
 			expect(action).toHaveBeenCalledWith("cancelled-direct", "conv1");
 			const notice = wrapper.find(".dashboard-safety-update");
 			expect(notice.text()).toContain("This direct action was cancelled. Nothing ran.");
 			expect(notice.findAll("button").map((button) => button.text())).toEqual(["Done"]);
-			expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
-			expect(wrapper.findAll("button").filter((button) => button.text() === "Dismiss")).toHaveLength(1);
-			expect(wrapper.findAll("button").some((button) => button.text() === "Retry")).toBe(false);
+			expect(
+				wrapper.findAll("button").filter((button) => button.text() === "Approve")
+			).toHaveLength(1);
+			expect(
+				wrapper.findAll("button").filter((button) => button.text() === "Dismiss")
+			).toHaveLength(1);
+			expect(wrapper.findAll("button").some((button) => button.text() === "Retry")).toBe(
+				false
+			);
 			expect(toast.error).not.toHaveBeenCalled();
 		});
 	}
@@ -825,7 +877,10 @@ describe("DashboardChatPane safety-update receipts", () => {
 
 		const { wrapper } = mountPane();
 		await flushPromises();
-		await wrapper.findAll("button").find((button) => button.text() === "Approve").trigger("click");
+		await wrapper
+			.findAll("button")
+			.find((button) => button.text() === "Approve")
+			.trigger("click");
 
 		transcript.resolve({
 			messages: [
@@ -841,7 +896,9 @@ describe("DashboardChatPane safety-update receipts", () => {
 			],
 		});
 		await flushPromises();
-		expect(wrapper.find(".dashboard-safety-update").text()).toContain("This action was cancelled.");
+		expect(wrapper.find(".dashboard-safety-update").text()).toContain(
+			"This action was cancelled."
+		);
 
 		action.resolve({
 			ok: false,
@@ -853,7 +910,9 @@ describe("DashboardChatPane safety-update receipts", () => {
 		await flushPromises();
 
 		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
-		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
 	});
 });
 
@@ -863,7 +922,9 @@ describe("DashboardChatPane safety-update receipts", () => {
 // the SPA's chatCardActions mapping so the words - and the keep-vs-drop
 // decision - match ChatView's, instead of a second, cruder copy here.
 describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
-	const cards = [{ token: "tok1", conversation: "conv1", tool: "update_doc", pending_card_safe: true }];
+	const cards = [
+		{ token: "tok1", conversation: "conv1", tool: "update_doc", pending_card_safe: true },
+	];
 
 	it("settles a card as Failed with its specific reason, not the opaque guess", async () => {
 		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });

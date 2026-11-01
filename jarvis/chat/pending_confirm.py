@@ -403,9 +403,7 @@ def list_for_owner(owner: str, conversation: str | None = None, *, strict: bool 
 	for row in durable_rows:
 		if row.status != "Pending":
 			continue
-		if not pending_action_is_safe_to_render(
-			row, owner=owner, conversation=conversation, strict=strict
-		):
+		if not pending_action_is_safe_to_render(row, owner=owner, conversation=conversation, strict=strict):
 			continue
 		cards.append({**_record(row), "pending_card_safe": True})
 	legacy_cards = legacy.list_for_owner(owner, conversation=conversation, strict=_legacy_strict(strict))

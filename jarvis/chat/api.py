@@ -1174,9 +1174,7 @@ def _pending_action_cards(messages: list, *, owner: str, conversation: str) -> s
 	except Exception:
 		# A table/fence read uncertainty must not turn an old transcript payload
 		# into Confirm. Keep every token out of the legacy fallback too.
-		frappe.log_error(
-			title="jarvis.chat.pending_action_card_read_failed", message=frappe.get_traceback()
-		)
+		frappe.log_error(title="jarvis.chat.pending_action_card_read_failed", message=frappe.get_traceback())
 		for message in pending:
 			_redact_unsafe_pending_card(message)
 		return set(tokens)
@@ -1220,19 +1218,13 @@ def _fence_legacy_pending_cards(
 	from jarvis.chat.agent_closure import legacy_confirmation_is_safe_to_render
 
 	for row in messages:
-		if (
-			row.get("role") != "tool"
-			or row.get("tool_status") != "pending"
-			or not row.get("tool_call_id")
-		):
+		if row.get("role") != "tool" or row.get("tool_status") != "pending" or not row.get("tool_call_id"):
 			continue
 		# This set is private read-path state. Do not infer the durable lifecycle
 		# from a client-visible row field or from a transcript token alone.
 		if row.get("tool_call_id") in pending_action_tokens:
 			continue
-		if legacy_confirmation_is_safe_to_render(
-			row.tool_call_id, owner=owner, conversation=conversation
-		):
+		if legacy_confirmation_is_safe_to_render(row.tool_call_id, owner=owner, conversation=conversation):
 			row["pending_card_safe"] = True
 			continue
 		_redact_unsafe_pending_card(row)

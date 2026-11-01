@@ -17,6 +17,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import actions_api, held_parties
 from jarvis.chat import approvals_api as board
+from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, expected_confirmation_fences
 from jarvis.tests._pending_action_helpers import (
 	DEFAULT_ARGS,
 	DEFAULT_TOOL,
@@ -505,6 +506,26 @@ class TestChatLane(_Base):
 		):
 			self.assertEqual(board._chat_pending_count(OWNER), 0)
 			self.assertIsNone(board._chat_badge_next_in(OWNER))
+
+	def test_badge_lookup_binds_an_owner_value_with_sql_metacharacters(self):
+		name, _ = self.chat()
+		self.chat(owner=OTHER)
+		owner = "pa-owner@example.invalid' OR 1=1 --"
+		self.set_col(
+			name,
+			owner_user=owner,
+			**{PENDING_ACTION_FENCE_FIELD: json.dumps(expected_confirmation_fences())},
+		)
+		try:
+			# The query must bind the supplied owner before it applies the normal
+			# current-fence predicate. This also keeps the test independent of a
+			# test site's pending-action metadata sync state.
+			with patch("jarvis.chat.agent_closure.pending_action_fences_ready", return_value=True):
+				rows = board._safe_chat_badge_rows(owner)
+			self.assertEqual([row["name"] for row in rows], [name])
+		finally:
+			# Restore the shared-fixture owner so its normal cleanup removes this row.
+			self.set_col(name, owner_user=OWNER, **{PENDING_ACTION_FENCE_FIELD: None})
 
 	def test_the_board_decides_through_the_chat_endpoints(self):
 		ran, conv = self.chat()

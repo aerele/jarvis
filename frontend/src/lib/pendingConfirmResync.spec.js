@@ -36,7 +36,10 @@ describe("parked confirmations resync from durable state at every terminal", () 
 	it("requires a positive server attestation at every desktop card admission", () => {
 		const seed = src.slice(
 			src.indexOf("function seedPendingFromRows(msgs, convId) {"),
-			src.indexOf("// Tokens with a Confirm/Discard RPC", src.indexOf("function seedPendingFromRows"))
+			src.indexOf(
+				"// Tokens with a Confirm/Discard RPC",
+				src.indexOf("function seedPendingFromRows")
+			)
 		);
 		expect(seed).toContain("m.pending_card_safe === true");
 
@@ -48,7 +51,10 @@ describe("parked confirmations resync from durable state at every terminal", () 
 
 		const resync = src.slice(
 			src.indexOf("async function resyncPendingConfirmations(id, source) {"),
-			src.indexOf("// Authoritative pull.", src.indexOf("async function resyncPendingConfirmations"))
+			src.indexOf(
+				"// Authoritative pull.",
+				src.indexOf("async function resyncPendingConfirmations")
+			)
 		);
 		expect(resync).toContain("it?.pending_card_safe === true");
 		expect(resync).toContain("pending_card_safe: it.pending_card_safe");
@@ -93,7 +99,10 @@ describe("parked confirmations resync from durable state at every terminal", () 
 		expect(settle).toContain("enqueueSafetyUpdateNotice");
 		const dismiss = src.slice(
 			src.indexOf("function dismissSafetyUpdateNotice()"),
-			src.indexOf("// Which card's Approve", src.indexOf("function dismissSafetyUpdateNotice()"))
+			src.indexOf(
+				"// Which card's Approve",
+				src.indexOf("function dismissSafetyUpdateNotice()")
+			)
 		);
 		expect(dismiss).toContain("safetyUpdateNotice.value = safetyUpdateQueue.value[0] || null");
 		expect(dismiss).toContain("safetyUpdateQueue.value = safetyUpdateQueue.value.slice(1)");
@@ -139,7 +148,9 @@ describe("parked confirmations resync from durable state at every terminal", () 
 		const older = src.slice(src.indexOf("async function loadOlder({ auto = false } = {})"));
 		expect(older).toContain("const view = captureChatView();");
 		expect(older).toContain("!chatViewIsCurrent(view)");
-		const load = src.slice(src.indexOf("async function loadConversation(id, { staleRetry = true } = {})"));
+		const load = src.slice(
+			src.indexOf("async function loadConversation(id, { staleRetry = true } = {})")
+		);
 		expect(load).toContain("const view = captureChatView();");
 		expect(load).toContain("if (id !== view.conversation) return false;");
 		expect(load).toContain("!chatViewIsCurrent(view)");

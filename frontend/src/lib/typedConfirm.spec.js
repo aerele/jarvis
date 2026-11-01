@@ -38,12 +38,12 @@ describe("send() handles a confirmed response", () => {
 		const sendStart = src.indexOf("async function send(textArg, resendAck)");
 		const consumed = src.indexOf(
 			"consumeRecoveredContext(sendRequest, _sentScope);",
-			sendStart,
+			sendStart
 		);
 		expect(consumed).toBeGreaterThan(sendStart);
 		expect(consumed).toBeLessThan(confirmedAt);
 		expect(src.indexOf("if (_voiceAck) voiceStore?.acknowledge(_voiceAck);")).toBeLessThan(
-			confirmedAt,
+			confirmedAt
 		);
 	});
 
@@ -69,7 +69,7 @@ describe("send() handles a confirmed response", () => {
 	it("routes both outcomes through one shared resolver", () => {
 		// The typed path and the button must not drift in what the user then sees.
 		expect(src).toContain(
-			"async function onTypedConfirmResolved(r, view = captureChatView())",
+			"async function onTypedConfirmResolved(r, view = captureChatView())"
 		);
 		expect(src).toContain("await onTypedConfirmResolved(r, _sentView);");
 	});
@@ -78,7 +78,7 @@ describe("send() handles a confirmed response", () => {
 		const sendStart = src.indexOf("async function send(textArg, resendAck)");
 		const sendBody = src.slice(
 			sendStart,
-			src.indexOf("// Proactive (Jarvis-initiated)", sendStart),
+			src.indexOf("// Proactive (Jarvis-initiated)", sendStart)
 		);
 		expect(sendBody).toContain("const _sentView = captureChatView();");
 		expect(sendConfirmedBlock).toContain("if (!chatViewIsCurrent(_sentView)) return;");
@@ -122,7 +122,7 @@ describe("the card advertises both ways to approve", () => {
 		// parked before the user's latest message) lives in lib/typedCardReply.js,
 		// whose behaviour is pinned by typedCardReply.spec.js.
 		expect(src).toContain(
-			"const typedApprovalHint = computed(() => hintFor(visiblePendingActions.value));",
+			"const typedApprovalHint = computed(() => hintFor(visiblePendingActions.value));"
 		);
 		expect(src).not.toContain('or type "go ahead"');
 	});
@@ -158,14 +158,14 @@ describe("a typed reply that goes on to Jarvis (decisions 13 and 14)", () => {
 	it("ages the stack and raises the non-blocking older-card note", () => {
 		expect(accepted).toContain("markCardsEarlier(pendingActions.value, _spokeIn);");
 		expect(accepted).toContain(
-			'olderCardsNoteFor.value = r?.older_cards_waiting ? _spokeIn : "";',
+			'olderCardsNoteFor.value = r?.older_cards_waiting ? _spokeIn : "";'
 		);
 	});
 
 	it("keeps the note only while an older card is still on screen", () => {
 		expect(src).toContain("visiblePendingActions.value.some((pa) => !isRecentCard(pa))");
 		expect(src).toContain(
-			'<div class="jv-pending-older-note" role="status" aria-live="polite">',
+			'<div class="jv-pending-older-note" role="status" aria-live="polite">'
 		);
 	});
 
@@ -183,7 +183,7 @@ describe("a typed go-ahead is deliberately confirm-only (never approve_and_run)"
 	// many gated writes it declares.
 	it("documents the pin at the approvalTokens send site", () => {
 		expect(src).toContain(
-			"const approvalTokens = visiblePendingActions.value.map((a) => a.token);",
+			"const approvalTokens = visiblePendingActions.value.map((a) => a.token);"
 		);
 		expect(src).toContain("Deliberately confirm-only (step-by-step)");
 	});
@@ -218,7 +218,7 @@ describe("the older-cards note", () => {
 		expect(open).not.toMatch(/v-if|v-show|v-else/);
 		expect(src.slice(at, src.indexOf("</div>", at))).toContain("{{ olderCardsNoteText }}");
 		expect(src).toMatch(
-			/const olderCardsNoteText = computed\(\(\) =>\s+showOlderCardsNote\.value/,
+			/const olderCardsNoteText = computed\(\(\) =>\s+showOlderCardsNote\.value/
 		);
 	});
 });

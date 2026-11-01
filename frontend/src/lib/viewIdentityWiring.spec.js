@@ -5,7 +5,7 @@ import path from "path";
 const desktop = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
 const dashboard = fs.readFileSync(
 	path.resolve(__dirname, "../pages/dashboards/DashboardChatPane.vue"),
-	"utf8",
+	"utf8"
 );
 
 function body(source, head, next) {
@@ -20,7 +20,7 @@ describe("client view identity wiring", () => {
 		const refresh = body(
 			desktop,
 			"async function refreshFileboxWaits(",
-			"async function decideFileboxWait(",
+			"async function decideFileboxWait("
 		);
 		expect(refresh).toContain("const view = captureChatView();");
 		expect(refresh).toContain("if (!chatViewIsCurrent(view)) return;");
@@ -29,7 +29,7 @@ describe("client view identity wiring", () => {
 		const decide = body(
 			desktop,
 			"async function decideFileboxWait(",
-			"// Whether the last loadConversation",
+			"// Whether the last loadConversation"
 		);
 		expect(decide).toContain("const view = captureChatView(item.name);");
 		expect(decide).toContain("item.conversation !== view.conversation");
@@ -44,7 +44,7 @@ describe("client view identity wiring", () => {
 		const transcript = body(
 			dashboard,
 			"async function loadTranscript(",
-			"// debounced refetch",
+			"// debounced refetch"
 		);
 		expect(transcript).toContain("if (dashboardViewIsCurrent(view)) scrollBottom();");
 
@@ -60,7 +60,7 @@ describe("client view identity wiring", () => {
 		const context = body(
 			desktop,
 			"async function loadContext(",
-			"function openCompactDialog(",
+			"function openCompactDialog("
 		);
 		expect(context).toContain("const view = captureChatView();");
 		expect(context).toContain("if (!chatViewIsCurrent(view)) return;");
@@ -68,7 +68,7 @@ describe("client view identity wiring", () => {
 		const queued = body(
 			desktop,
 			"async function resyncQueuedTurn(",
-			"// --- interactive clarifying",
+			"// --- interactive clarifying"
 		);
 		expect(queued).toContain("const view = captureChatView();");
 		expect(queued).toContain("api.getActiveTurn(view.conversation)");
@@ -99,7 +99,7 @@ describe("client view identity wiring", () => {
 		const model = body(
 			desktop,
 			"async function selectModel(",
-			"async function selectThinking(",
+			"async function selectThinking("
 		);
 		expect(model).toContain("api.setConversationModel(view.conversation, m)");
 		expect(model).toContain("chatViewIsCurrent(view)");
@@ -120,7 +120,7 @@ describe("client view identity wiring", () => {
 		const action = body(
 			desktop,
 			"function captureDraftActionView(",
-			"const confirmFor = computed",
+			"const confirmFor = computed"
 		);
 		expect(action).toContain("captureChatView(actionKey)");
 		expect(action).toContain("actionFor.value === view.messageKey");
@@ -190,7 +190,7 @@ describe("client view identity wiring", () => {
 		expect(artifact).toContain("artifact.value !== loading");
 		expect(artifact).toContain("{ m, cv, url, conv, view, kind: t }");
 		expect(desktop).toContain("function artifactSourceIsCurrent(source)");
-		expect(desktop).toContain("@click=\"openInDashboards(artifact.m, artifact.cv, artifact)\"");
+		expect(desktop).toContain('@click="openInDashboards(artifact.m, artifact.cv, artifact)"');
 	});
 
 	it("keeps feedback and tool-detail controls in their accepted message snapshot", () => {

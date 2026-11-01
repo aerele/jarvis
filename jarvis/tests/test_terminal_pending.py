@@ -100,7 +100,5 @@ class TestTerminalCarriesPending(FrappeTestCase):
 			update_modified=False,
 		)
 		frappe.db.commit()
-		out = settlement._extra_with_pending(
-			{"enrichment_pending": True}, owner, conversation.name
-		)
+		out = settlement._extra_with_pending({"enrichment_pending": True}, owner, conversation.name)
 		self.assertNotIn("pending", out)

@@ -500,7 +500,9 @@ def _cancel_unrun_safety_update(row, approver: str, *, batch_id=None, defer=Fals
 def _cancel_claimed_safety_update(row, approver: str, *, batch_id=None, defer=False) -> dict:
 	"""Cancel a claimed card when a close lands before final dispatch."""
 	cols = {"batch_id": batch_id} if batch_id else {}
-	_terminal_update(row.name, [EXECUTING], CANCELLED, reason_code="safety_update", decided_by=approver, **cols)
+	_terminal_update(
+		row.name, [EXECUTING], CANCELLED, reason_code="safety_update", decided_by=approver, **cols
+	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	if row.kind == "chat" and not row.get("collaboration_binding"):
 		from jarvis.chat import turn_message_binding
@@ -584,9 +586,7 @@ def _execute_locked(
 	# Check before claim under the shared fence lock; malformed, partial, and
 	# code-before-migration maps all fail closed.
 	if not confirmation_is_current(row, lock=True):
-		return _cancel_unrun_safety_update(
-			row, approver, batch_id=batch_id, defer=defer_continuation
-		)
+		return _cancel_unrun_safety_update(row, approver, batch_id=batch_id, defer=defer_continuation)
 
 	refused = _preflight(row, approver, arm)
 	if refused:
@@ -675,9 +675,7 @@ def _claim_and_run(
 	# the only generic dispatch so a migration between claim and dispatch cannot
 	# execute an old card.
 	if not confirmation_is_current(row, lock=True):
-		return _cancel_claimed_safety_update(
-			row, approver, batch_id=batch_id, defer=defer_continuation
-		)
+		return _cancel_claimed_safety_update(row, approver, batch_id=batch_id, defer=defer_continuation)
 	args = call.get("args") or {}
 	with ExitStack() as stamped:
 		if structure is not None:

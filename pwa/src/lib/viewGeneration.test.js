@@ -22,7 +22,7 @@ function applyListIfCurrent(request, current, cards, next) {
 			request.generation,
 			request.conversation,
 			current.generation,
-			current.conversation,
+			current.conversation
 		)
 	)
 		return cards;
@@ -35,7 +35,7 @@ function applySheetSettlementIfCurrent(action, current, pending, decision) {
 			action.generation,
 			action.conversation,
 			current.generation,
-			current.conversation,
+			current.conversation
 		)
 	)
 		return { pending, decision };
@@ -92,7 +92,7 @@ test("an old A sheet cannot close or settle B's safe sibling", () => {
 		oldAction,
 		current,
 		pending,
-		decision,
+		decision
 	);
 	assert.deepEqual(afterOldSettlement.pending, pending);
 	assert.deepEqual(afterOldSettlement.decision, decision);
@@ -103,9 +103,9 @@ test("an old A sheet cannot close or settle B's safe sibling", () => {
 			mismatch.generation,
 			mismatch.conversation,
 			current.generation,
-			current.conversation,
+			current.conversation
 		),
-		false,
+		false
 	);
 });
 
@@ -157,7 +157,10 @@ test("other deferred chat controls keep the view that started them", () => {
 	};
 	const cancel = body("async function cancelWaiting()");
 	assert.match(cancel, /const generation = viewGeneration;/);
-	assert.match(cancel, /if \(!isCurrent\(cid, generation\) \|\| recoveryState\.queued\[cid\] !== q\) return;/);
+	assert.match(
+		cancel,
+		/if \(!isCurrent\(cid, generation\) \|\| recoveryState\.queued\[cid\] !== q\) return;/
+	);
 
 	const stop = body("async function stop()");
 	assert.match(stop, /const generation = viewGeneration;/);

@@ -33,7 +33,7 @@ test("ChatView never parses a row's site-timezone creation as a local time", () 
 				created_at: 1_700_000_001,
 			},
 		],
-		"CONV-TIME",
+		"CONV-TIME"
 	);
 	assert.equal(card.created_at, 1_700_000_001);
 });

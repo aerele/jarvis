@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 
 const source = readFileSync(
 	process.env.DESKTOP_CHAT_SOURCE || new URL("../views/ChatView.vue", import.meta.url),
-	"utf8",
+	"utf8"
 );
 const start = source.indexOf("async function applyDraft(");
 const end = source.indexOf("// SUX-3/SUXI-2:", start);
@@ -90,7 +90,7 @@ function harness() {
 		errMessage: () => "save failed",
 	};
 	const { applyDraft } = new Function(...Object.keys(deps), `${body}\nreturn { applyDraft };`)(
-		...Object.values(deps),
+		...Object.values(deps)
 	);
 	return {
 		model,

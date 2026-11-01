@@ -23,9 +23,7 @@ export function reconcilePending(existing, conversationId, items, inflightTokens
 	// older-server item must never make (or keep) a Confirm card. The server
 	// stamps the positive attestation only after it proves the action is still
 	// Pending and its close fence is current.
-	const attestedItems = (items || []).filter(
-		(it) => it?.token && it.pending_card_safe === true
-	);
+	const attestedItems = (items || []).filter((it) => it?.token && it.pending_card_safe === true);
 	const live = new Set(attestedItems.map((it) => it.token));
 	const kept = (existing || []).filter(
 		(pa) => pa.conversation !== conversationId || pa.busy || live.has(pa.token)

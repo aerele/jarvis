@@ -1097,13 +1097,13 @@ def _lock_catalog_state() -> None:
 		return
 	params = {"name": _CATALOG_LOCK_NAME, "user": "Administrator"}
 	frappe.db.sql(
-		f"""INSERT IGNORE INTO `tab{_CATALOG_LOCK}`
+		"""INSERT IGNORE INTO `tabJarvis Agent Catalog Lock`
 		(`name`, `creation`, `modified`, `modified_by`, `owner`, `docstatus`, `idx`, `state_key`)
 		VALUES (%(name)s, NOW(6), NOW(6), %(user)s, %(user)s, 0, 0, %(name)s)""",
 		params,
 	)
 	rows = frappe.db.sql(
-		f"SELECT `name` FROM `tab{_CATALOG_LOCK}` WHERE `name`=%(name)s FOR UPDATE", params
+		"SELECT `name` FROM `tabJarvis Agent Catalog Lock` WHERE `name`=%(name)s FOR UPDATE", params
 	)
 	if not rows:
 		frappe.throw("The agent catalog lock could not be acquired.", frappe.ValidationError)

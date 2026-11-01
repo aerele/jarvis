@@ -1465,7 +1465,9 @@ describe("code-closed runtime detail", () => {
 			})
 		);
 
-		expect(w.text()).toContain("This agent is Coming Soon while an agent safety update is active.");
+		expect(w.text()).toContain(
+			"This agent is Coming Soon while an agent safety update is active."
+		);
 		expect(w.text()).toContain("Scheduling is not available.");
 		expect(w.text()).not.toContain("Run automatically");
 		const enabled = w.findAll("button").find((b) => b.text() === "Enabled");

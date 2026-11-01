@@ -134,9 +134,7 @@ class TestCollaborationRead(CommittedCollaborationCase):
 
 	def test_a_mapless_pending_action_never_projects_a_collaboration_control(self):
 		token = self.pending()
-		frappe.db.set_value(
-			"Jarvis Pending Action", token, "agent_close_fences", None, update_modified=False
-		)
+		frappe.db.set_value("Jarvis Pending Action", token, "agent_close_fences", None, update_modified=False)
 		frappe.db.commit()
 		body = self.read(RECIPIENT)
 		self.assertFalse(any(row.get("control") for row in body["messages"]))

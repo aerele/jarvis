@@ -179,7 +179,10 @@
 					This agent is Coming Soon while an agent safety update is active. It cannot be
 					enabled, scheduled, or run. You can still uninstall it.
 				</div>
-				<div v-else-if="installation && !agent.allowed" class="mt-3 text-sm text-ink-gray-5">
+				<div
+					v-else-if="installation && !agent.allowed"
+					class="mt-3 text-sm text-ink-gray-5"
+				>
 					You do not have access to run this agent. Ask your administrator.
 				</div>
 				<!-- jarvis#1062 polish: the same visible-hint treatment for the other

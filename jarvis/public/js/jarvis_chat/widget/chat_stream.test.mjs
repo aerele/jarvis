@@ -276,7 +276,10 @@ test("action:pending rejects a raw or delayed frame without the safety attestati
     summary: "Still confirmable",
     pending_card_safe: true,
   });
-  assert.deepEqual(s.pending.map((card) => card.token), ["safe-sibling"]);
+  assert.deepEqual(
+    s.pending.map((card) => card.token),
+    ["safe-sibling"]
+  );
 });
 
 for (const kind of ["run:end", "run:error"]) {
@@ -292,7 +295,10 @@ for (const kind of ["run:end", "run:error"]) {
         },
       ],
     });
-    assert.deepEqual(s.pending.map((card) => card.token), ["safe-sibling"]);
+    assert.deepEqual(
+      s.pending.map((card) => card.token),
+      ["safe-sibling"]
+    );
     assert.equal(s.reload, true);
   });
 }

@@ -165,7 +165,9 @@ describe("ChatView direct safety-update decisions", () => {
 		expect(notice).toContain("enqueueSafetyUpdateNotice");
 		// Filtering by the response token removes the cancelled card only. The
 		// visible queue still contains an independent safe sibling.
-		expect(src).toContain("pendingActions.value = pendingActions.value.filter((x) => x.token !== token)");
+		expect(src).toContain(
+			"pendingActions.value = pendingActions.value.filter((x) => x.token !== token)"
+		);
 
 		for (const fn of ["confirmPending", "approveAndRunPending", "discardPending"]) {
 			const body = actionBody(fn);

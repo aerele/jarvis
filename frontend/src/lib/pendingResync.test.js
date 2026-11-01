@@ -108,6 +108,12 @@ test("a raw list item cannot restore a cached confirmation, but an attested sibl
 		],
 		new Set()
 	);
-	assert.deepEqual(kept.map((card) => card.token), ["safe"]);
-	assert.deepEqual(toAdd.map((card) => card.token), ["new-safe"]);
+	assert.deepEqual(
+		kept.map((card) => card.token),
+		["safe"]
+	);
+	assert.deepEqual(
+		toAdd.map((card) => card.token),
+		["new-safe"]
+	);
 });

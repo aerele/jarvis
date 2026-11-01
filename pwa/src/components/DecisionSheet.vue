@@ -95,12 +95,7 @@ function closeSheet() {
 		);
 		return;
 	}
-	emit(
-		"close",
-		props.action?.token,
-		props.action?.conversation,
-		props.viewGeneration
-	);
+	emit("close", props.action?.token, props.action?.conversation, props.viewGeneration);
 }
 
 function actionIsCurrent(token, conversation, generation) {
@@ -231,7 +226,8 @@ async function approve(mode = "step") {
 			}
 			// The person's words for a refusal written for the model (error.person_message).
 			if (actionIsCurrent(token, conversation, generation)) {
-				error.value = personError(r.error).message || r.reason || "Couldn't run this action.";
+				error.value =
+					personError(r.error).message || r.reason || "Couldn't run this action.";
 				reference.value = failureReferenceOf(r);
 				state.value = "review";
 			}
@@ -289,8 +285,8 @@ async function approve(mode = "step") {
 						state === "approved"
 							? "Approved"
 							: state === "cancelled"
-								? "Confirmation cancelled"
-								: "Denied"
+							? "Confirmation cancelled"
+							: "Denied"
 					}}
 				</div>
 				<div class="jv-dresult-sub">
@@ -298,8 +294,8 @@ async function approve(mode = "step") {
 						state === "approved"
 							? `${agentName} is running the action now. You'll see the result in the thread.`
 							: state === "cancelled"
-								? error
-								: `The change was rejected. ${agentName} won't run this action.`
+							? error
+							: `The change was rejected. ${agentName} won't run this action.`
 					}}
 				</div>
 				<button class="jv-btn is-primary" @click="closeSheet">Done</button>

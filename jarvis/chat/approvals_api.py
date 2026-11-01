@@ -1348,25 +1348,29 @@ def _safe_chat_badge_rows(me: str, *, before=None, after=None) -> list:
 		return []
 	if expected_fences is None:
 		return []
-	where = ["kind='chat'", "status='Pending'", "owner_user=%(me)s"]
-	params = {"me": me}
-	if before is not None:
-		where.append("creation <= %(before)s")
-		params["before"] = before
-	if after is not None:
-		where.append("creation > %(after)s")
-		params["after"] = after
-	rows = frappe.db.sql(
-		"""SELECT name, kind, status, owner_user, conversation, creation,
-		`{field}` AS `{field}`
-		FROM `tabJarvis Pending Action`
-		WHERE {where}
-		ORDER BY creation ASC, name ASC""".format(
-			field=PENDING_ACTION_FENCE_FIELD, where=" AND ".join(where)
-		),
-		params,
-		as_dict=True,
+	pending_action = frappe.qb.DocType("Jarvis Pending Action")
+	query = (
+		frappe.qb.from_(pending_action)
+		.select(
+			pending_action.name,
+			pending_action.kind,
+			pending_action.status,
+			pending_action.owner_user,
+			pending_action.conversation,
+			pending_action.creation,
+			pending_action[PENDING_ACTION_FENCE_FIELD].as_(PENDING_ACTION_FENCE_FIELD),
+		)
+		.where(pending_action.kind == "chat")
+		.where(pending_action.status == "Pending")
+		.where(pending_action.owner_user == me)
+		.orderby(pending_action.creation)
+		.orderby(pending_action.name)
 	)
+	if before is not None:
+		query = query.where(pending_action.creation <= before)
+	if after is not None:
+		query = query.where(pending_action.creation > after)
+	rows = query.run(as_dict=True)
 	return [row for row in rows if _chat_card_safe(row, lock=False, expected_fences=expected_fences)]
 
 
@@ -1586,7 +1590,11 @@ def _chat_detail(row) -> dict:
 		"pending_card_safe": bool(row.status == PENDING and safe),
 		"reason_code": code,
 		"reason": REASON_TEXT.get(code, "")
-		or ("This action was cancelled during a safety update. Nothing ran." if code == "safety_update" else ""),
+		or (
+			"This action was cancelled during a safety update. Nothing ran."
+			if code == "safety_update"
+			else ""
+		),
 	}
 
 

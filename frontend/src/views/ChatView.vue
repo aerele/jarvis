@@ -1583,7 +1583,7 @@
 									:key="m.name"
 									:spec="activeAsk"
 									:busy="sending"
-									@submit="submitAsk($event, m.name)"
+									@submit="answerAsk($event, m.name)"
 								/>
 								<!-- record cards: scrollable card strip instead of a wide table -->
 								<div v-if="cardsOf(m)" class="jv-cards">
@@ -1709,39 +1709,38 @@
 								     redirect, so a second/third click resumes the builder
 								     conversation the first hand-off created instead of starting a
 								     new one. -->
-								<div
-									v-if="hasCurrentMessageSnapshot && gotoOf(m)"
-									class="jv-macrocard"
-								>
-									<div class="jv-macrocard-ic">
-										<svg
-											width="16"
-											height="16"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.7"
-											stroke-linecap="round"
-											stroke-linejoin="round"
+								<template v-if="hasCurrentMessageSnapshot">
+									<div v-if="gotoOf(m)" class="jv-macrocard">
+										<div class="jv-macrocard-ic">
+											<svg
+												width="16"
+												height="16"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.7"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path d="M18 20V10M12 20V4M6 20v-6" />
+											</svg>
+										</div>
+										<div class="jv-macrocard-txt">
+											<span class="jv-macrocard-title"
+												>Continue in Dashboards</span
+											>
+											<span class="jv-macrocard-sub">{{
+												gotoOf(m).prompt
+											}}</span>
+										</div>
+										<button
+											class="jv-macrocard-btn"
+											@click="gotoDashboards(gotoOf(m).prompt, m.name)"
 										>
-											<path d="M18 20V10M12 20V4M6 20v-6" />
-										</svg>
+											Open Dashboards
+										</button>
 									</div>
-									<div class="jv-macrocard-txt">
-										<span class="jv-macrocard-title"
-											>Continue in Dashboards</span
-										>
-										<span class="jv-macrocard-sub">{{
-											gotoOf(m).prompt
-										}}</span>
-									</div>
-									<button
-										class="jv-macrocard-btn"
-										@click="gotoDashboards(gotoOf(m).prompt, m.name)"
-									>
-										Open Dashboards
-									</button>
-								</div>
+								</template>
 								<!-- inline charts: ECharts rendered from the agent's jarvis-chart spec -->
 								<div
 									v-for="(spec, ci) in chartsOf(m)"
@@ -7742,7 +7741,7 @@ function answerConfirm(ok, label, messageId) {
 	const l = (label || "").trim();
 	send(ok ? (l ? `Yes: ${l}` : "Yes, go ahead.") : "No, cancel that.");
 }
-function submitAsk(answer, messageId) {
+function answerAsk(answer, messageId) {
 	if (!messageActionIsCurrent(captureChatView(messageId || ""))) return;
 	send(answer);
 }
@@ -9008,8 +9007,7 @@ async function approveAndRunPending(pa) {
 		if (chatViewIsCurrent(view)) {
 			const card = cardById();
 			if (card) card.busy = false;
-			if (approveRunBusyToken.value === token)
-				approveRunBusyToken.value = null;
+			if (approveRunBusyToken.value === token) approveRunBusyToken.value = null;
 			inflightTokens.delete(token);
 		}
 	}
@@ -10146,7 +10144,7 @@ async function loadOlder({ auto = false } = {}) {
 		await nextTick();
 		if (!chatViewIsCurrent(view)) return;
 		if (fromBottom !== null) holdFromBottom(fromBottom);
-		armOlderNextFrame(view);
+		armOlderNextFrame();
 		processMermaid(view);
 	} catch (e) {
 		if (chatViewIsCurrent(view)) {
@@ -10779,7 +10777,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 		showScrollDown.value = false;
 		scrollBottom();
 	}
-	armOlderNextFrame(view);
+	armOlderNextFrame();
 	processMermaid(view);
 	// An older page loaded while this read was in flight brought pending cards it did
 	// not ask about: refresh once more so none stays confirmable after it resolved.

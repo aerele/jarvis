@@ -694,7 +694,9 @@ class TestConsume(_FenceReadyFrappeTestCase):
 			patch.object(
 				agent_closure,
 				"confirmation_is_current",
-				side_effect=lambda record, *, lock=False: agent_closure.legacy_confirmation_is_current(record),
+				side_effect=lambda record, *, lock=False: agent_closure.legacy_confirmation_is_current(
+					record
+				),
 			),
 		):
 			t1.start()

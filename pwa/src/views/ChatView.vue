@@ -194,7 +194,7 @@ function settleSafetyUpdateInView(token) {
 		pending.value,
 		settledTokens.value,
 		safetyNoticeTokens.value,
-		token,
+		token
 	);
 	pending.value = update.pending;
 	settledTokens.value = update.settledTokens;
@@ -252,11 +252,7 @@ const safetyUpdateQueue = ref([]);
 const SAFETY_UPDATE_COPY =
 	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
 function passiveSafetyUpdate(row) {
-	if (
-		row?.role !== "tool" ||
-		row.action_outcome !== "cancelled" ||
-		!row.tool_call_id
-	)
+	if (row?.role !== "tool" || row.action_outcome !== "cancelled" || !row.tool_call_id)
 		return null;
 	let result = row.tool_result;
 	if (typeof result === "string") {
@@ -436,8 +432,7 @@ async function cancelWaiting() {
 		if (!isCurrent(cid, generation)) return;
 		q.note = "Cancellation is not confirmed. Check status before trying again.";
 	} finally {
-		if (isCurrent(cid, generation) && recoveryState.queued[cid] === q)
-			q.cancelling = false;
+		if (isCurrent(cid, generation) && recoveryState.queued[cid] === q) q.cancelling = false;
 	}
 }
 let viewActive = true;
@@ -750,7 +745,7 @@ async function loadPending(source) {
 	if (!cid) return;
 	const fromRows = pendingActionsFromRows(
 		[...olderPending.value, ...(messages.value || [])],
-		cid,
+		cid
 	);
 	let fromBackstop = null; // null = backstop read failed/unavailable (a transient blip)
 	try {
@@ -761,7 +756,7 @@ async function loadPending(source) {
 		// helper is also the open-seed path, so durable rows below always apply.
 		if (r?.ok && Array.isArray(r?.data?.pending))
 			fromBackstop = r.data.pending.filter(
-				(p) => p?.conversation === cid && p.pending_card_safe === true,
+				(p) => p?.conversation === cid && p.pending_card_safe === true
 			);
 	} catch {
 		/* leave null: durable rows still apply, live cards kept */
@@ -786,7 +781,7 @@ async function loadPending(source) {
 			(card) =>
 				card?.conversation === cid &&
 				!next.some((candidate) => candidate?.token === card.token) &&
-				!inflight.has(card.token),
+				!inflight.has(card.token)
 		);
 	pending.value = next;
 	// A clean resync can be the first evidence of a passive close. Reload the
@@ -1394,7 +1389,7 @@ function onEvent(p) {
 					p,
 					settledTokens.value,
 					inflightToken.value,
-					conv,
+					conv
 				);
 			// The reply is durable now; reconcile against it (canvas items, final
 			// formatting) instead of trusting the streamed copy.
@@ -1420,7 +1415,7 @@ function onEvent(p) {
 					p,
 					settledTokens.value,
 					inflightToken.value,
-					conv,
+					conv
 				);
 			load();
 			break;
@@ -1432,7 +1427,7 @@ function onEvent(p) {
 				p,
 				settledTokens.value,
 				inflightToken.value,
-				conv,
+				conv
 			);
 			if (pending.value.length === before) return;
 			scrollToBottom(false, current);
@@ -1851,7 +1846,11 @@ onUnmounted(() => {
 		<!-- aria-live so a card surfaced by auto-heal / the menu re-check is announced to a
 		     screen reader, not silently inserted. display:contents = zero layout change. -->
 		<div style="display: contents" role="status" aria-live="polite">
-			<section v-if="safetyUpdateNotice" class="jv-safety-update" aria-label="Action cancelled">
+			<section
+				v-if="safetyUpdateNotice"
+				class="jv-safety-update"
+				aria-label="Action cancelled"
+			>
 				<strong>Action cancelled</strong>
 				<p>{{ safetyUpdateNotice.message }}</p>
 				<button type="button" class="jv-btn is-primary" @click="dismissSafetyUpdateNotice">
@@ -2005,7 +2004,9 @@ onUnmounted(() => {
 	</Sheet>
 
 	<DecisionSheet
-		:key="`${decisionContext?.generation ?? viewGeneration}:${decisionContext?.conversation ?? ''}:${decisionContext?.token ?? ''}`"
+		:key="`${decisionContext?.generation ?? viewGeneration}:${
+			decisionContext?.conversation ?? ''
+		}:${decisionContext?.token ?? ''}`"
 		:action="decision"
 		:view-generation="decisionContext?.generation ?? viewGeneration"
 		:streaming="sending"

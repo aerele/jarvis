@@ -194,7 +194,7 @@ def retire_legacy_installation(name: str | None, agent: str | None = None) -> No
 	if not name or not spec:
 		return
 	frappe.db.sql(
-		f"""UPDATE `tab{_INSTALLATION}`
+		"""UPDATE `tabJarvis Agent Installation`
 		SET enabled = 0, schedule_enabled = 0, next_run_at = NULL
 		WHERE name = %s AND agent = %s""",
 		(name, spec.slug),
@@ -282,17 +282,21 @@ def _fence_generation(spec: ClosedAgentSpec, *, lock: bool) -> str | None:
 		# The normal DocType's primary key serializes a confirmation and an
 		# activation even when this request is the first code path to touch it.
 		frappe.db.sql(
-			f"""INSERT IGNORE INTO `tab{FENCE_DOCTYPE}`
+			"""INSERT IGNORE INTO `tabJarvis Agent Close Fence`
 			(`name`, `creation`, `modified`, `modified_by`, `owner`, `docstatus`, `idx`,
 			`agent_slug`, `generation`)
 			VALUES (%(name)s, NOW(6), NOW(6), %(user)s, %(user)s, 0, 0, %(slug)s, '')""",
 			params,
 		)
-	rows = frappe.db.sql(
-		f"SELECT `generation` FROM `tab{FENCE_DOCTYPE}` WHERE `name`=%(name)s"
-		+ (" FOR UPDATE" if lock else ""),
-		params,
-	)
+	if lock:
+		rows = frappe.db.sql(
+			"SELECT `generation` FROM `tabJarvis Agent Close Fence` WHERE `name`=%(name)s FOR UPDATE",
+			params,
+		)
+	else:
+		rows = frappe.db.sql(
+			"SELECT `generation` FROM `tabJarvis Agent Close Fence` WHERE `name`=%(name)s", params
+		)
 	if lock and not rows:
 		frappe.throw("The agent close fence could not be locked.", frappe.ValidationError)
 	stored = str(rows[0][0] or "") if rows else ""
@@ -358,7 +362,10 @@ def legacy_confirmation_is_current(record) -> bool:
 	"""
 	if not record or (record.get("kind") and record.get("kind") != "chat"):
 		return False
-	return normalize_confirmation_fences(record.get(PENDING_ACTION_FENCE_FIELD)) == _required_confirmation_fences()
+	return (
+		normalize_confirmation_fences(record.get(PENDING_ACTION_FENCE_FIELD))
+		== _required_confirmation_fences()
+	)
 
 
 def stamp_confirmation_fences() -> dict[str, str] | None:
@@ -487,9 +494,7 @@ def settle_revoked_legacy_chat_card(token: str, *, strict: bool = False) -> bool
 	)
 
 
-def legacy_confirmation_is_safe_to_render(
-	token: str, *, owner: str | None, conversation: str | None
-) -> bool:
+def legacy_confirmation_is_safe_to_render(token: str, *, owner: str | None, conversation: str | None) -> bool:
 	"""Return whether a legacy confirmation may become a client-side Confirm card.
 
 	A legacy card has a durable transcript row but its execution authority remains
@@ -600,7 +605,7 @@ def activate_close_fence(agent: str | ClosedAgentSpec) -> str:
 		frappe.throw("The agent close fence table is not ready.", frappe.ValidationError)
 	_fence_generation(spec, lock=True)
 	frappe.db.sql(
-		f"""UPDATE `tab{FENCE_DOCTYPE}`
+		"""UPDATE `tabJarvis Agent Close Fence`
 		SET `agent_slug`=%(slug)s, `generation`=%(generation)s,
 			`modified`=NOW(6), `modified_by`=%(user)s
 		WHERE `name`=%(name)s""",
@@ -630,17 +635,17 @@ def run_close_migration(agent: str | ClosedAgentSpec) -> None:
 	# Keep installations, runs, findings, and activity as audit history. Only the
 	# active route is removed.
 	frappe.db.sql(
-		f"""UPDATE `tab{_INSTALLATION}`
+		"""UPDATE `tabJarvis Agent Installation`
 		SET enabled = 0, schedule_enabled = 0, next_run_at = NULL
 		WHERE agent = %s""",
 		(spec.slug,),
 	)
 	frappe.db.sql(
-		f"UPDATE `tab{_LISTING}` SET status = %s WHERE name = %s",
+		"UPDATE `tabJarvis Agent Listing` SET status = %s WHERE name = %s",
 		(CLOSED_STATUS, spec.slug),
 	)
 	for pattern in spec.session_prefixes:
-		frappe.db.sql(f"DELETE FROM `tab{_SESSION}` WHERE session_key LIKE %s", (f"{pattern}%",))
+		frappe.db.sql("DELETE FROM `tabJarvis Chat Session` WHERE session_key LIKE %s", (f"{pattern}%",))
 
 	# The raw retirement changes the desired fleet payload. A non-skippable close
 	# must not get a Patch Log row if the durable Apply marker cannot be stored.
@@ -657,7 +662,7 @@ def run_close_migration(agent: str | ClosedAgentSpec) -> None:
 	)
 	for run in runs:
 		if run.session_key:
-			frappe.db.sql(f"DELETE FROM `tab{_SESSION}` WHERE session_key = %s", (run.session_key,))
+			frappe.db.sql("DELETE FROM `tabJarvis Chat Session` WHERE session_key = %s", (run.session_key,))
 	for run in runs:
 		if run.status != "running":
 			continue

@@ -113,10 +113,13 @@ def _make_safe_listing() -> None:
 
 class TestAgentClosureContracts(FrappeTestCase):
 	def test_static_registry_and_catalog_contract_close_both_agents(self):
-		self.assertEqual({spec.slug for spec in CLOSED_AGENT_SPECS}, {
-			"reorder-replenishment-operator",
-			"ticket-triage-operator",
-		})
+		self.assertEqual(
+			{spec.slug for spec in CLOSED_AGENT_SPECS},
+			{
+				"reorder-replenishment-operator",
+				"ticket-triage-operator",
+			},
+		)
 		self.assertEqual(len({spec.fence_name for spec in CLOSED_AGENT_SPECS}), 2)
 		self.assertEqual(len({spec.patch for spec in CLOSED_AGENT_SPECS}), 2)
 
@@ -135,7 +138,7 @@ class TestAgentClosureContracts(FrappeTestCase):
 			self.assertEqual(contract["rule_tokens"], [])
 			self.assertEqual(contract["advisory_tokens"], [])
 			self.assertIsNone(contract["writes"])
-			forced = closed_catalog_values(spec.slug, {"status": "Published", "tools_required": "[\"x\"]"})
+			forced = closed_catalog_values(spec.slug, {"status": "Published", "tools_required": '["x"]'})
 			self.assertEqual(forced["status"], CLOSED_STATUS)
 			self.assertEqual(frappe.parse_json(forced["tools_required"]), [])
 			self.assertEqual(frappe.parse_json(forced["writes"]), [])
@@ -179,7 +182,9 @@ class TestAgentClosureContracts(FrappeTestCase):
 			savepoint = f"agent_closure_fence_order_{index}"
 			frappe.db.savepoint(savepoint)
 			try:
-				frappe.db.delete(FENCE_DOCTYPE, {"name": ["in", [spec.fence_name for spec in CLOSED_AGENT_SPECS]]})
+				frappe.db.delete(
+					FENCE_DOCTYPE, {"name": ["in", [spec.fence_name for spec in CLOSED_AGENT_SPECS]]}
+				)
 				with patch.object(agent_closure, "_patch_logged", return_value=False):
 					agent_closure.activate_close_fence(first)
 					self.assertIsNone(expected_confirmation_fences())
@@ -232,10 +237,12 @@ class TestAgentClosureContracts(FrappeTestCase):
 		self.assertEqual(frappe.db.count("ToDo"), before)
 
 	def test_ordinary_agent_closure_helpers_are_inert(self):
-		values = {"status": "Published", "tools_required": "[\"jarvis__get_doc\"]"}
+		values = {"status": "Published", "tools_required": '["jarvis__get_doc"]'}
 		self.assertIs(closed_catalog_values(SAFE_AGENT, values), values)
 		self.assertIsNone(direct_write_refusal(SAFE_AGENT, "create", "ToDo"))
-		self.assertIsNone(agent_closure.delegate_tool_denial({"run": "ORDINARY", "agent": SAFE_AGENT}, "get_doc"))
+		self.assertIsNone(
+			agent_closure.delegate_tool_denial({"run": "ORDINARY", "agent": SAFE_AGENT}, "get_doc")
+		)
 
 	def test_catalog_lock_helper_always_locks_catalog_then_version_then_dirty(self):
 		with (
@@ -287,7 +294,11 @@ class TestAgentClosureContracts(FrappeTestCase):
 			with patch.object(module, "run_close_migration") as run_close_migration:
 				module.execute()
 			run_close_migration.assert_called_once_with(spec.slug)
-		self.assertTrue(set(spec.patch for spec in CLOSED_AGENT_SPECS).issubset(set(frappe.get_hooks("never_skip_patches"))))
+		self.assertTrue(
+			set(spec.patch for spec in CLOSED_AGENT_SPECS).issubset(
+				set(frappe.get_hooks("never_skip_patches"))
+			)
+		)
 
 
 class TestAgentClosureIntegration(FrappeTestCase):
@@ -438,9 +449,7 @@ class TestAgentClosureIntegration(FrappeTestCase):
 	def _revoke_legacy_fence(self, token: str) -> None:
 		record = pending_confirm_legacy.peek(token)
 		self.assertIsNotNone(record)
-		record[PENDING_ACTION_FENCE_FIELD] = {
-			CLOSED_AGENT_SPECS[0].slug: CLOSED_AGENT_SPECS[0].generation
-		}
+		record[PENDING_ACTION_FENCE_FIELD] = {CLOSED_AGENT_SPECS[0].slug: CLOSED_AGENT_SPECS[0].generation}
 		frappe.cache().set_value(pending_confirm_legacy._key(token), record, expires_in_sec=900)
 
 	def _assert_revoked_legacy_receipt(self, token: str) -> None:
@@ -520,7 +529,10 @@ class TestAgentClosureIntegration(FrappeTestCase):
 			frappe.db.set_value(LISTING, spec.slug, "status", "Published", update_modified=False)
 			frappe.db.set_value(INSTALLATION, installation, "enabled", 1, update_modified=False)
 
-		for payload in (agent_catalog.build_agent_push_payload(), agent_catalog.build_agent_push_payload(owner=OWNER)):
+		for payload in (
+			agent_catalog.build_agent_push_payload(),
+			agent_catalog.build_agent_push_payload(owner=OWNER),
+		):
 			slugs = {entry["slug"] for entry in payload}
 			for spec in CLOSED_AGENT_SPECS:
 				self.assertNotIn(f"agent-{spec.slug}", slugs)
@@ -627,9 +639,7 @@ class TestAgentClosureIntegration(FrappeTestCase):
 
 		self.assertIsNone(pending_confirm_legacy.peek(stale))
 		self._assert_revoked_legacy_receipt(stale)
-		self.assertEqual(
-			frappe.db.get_value(MESSAGE, {"tool_call_id": current}, "tool_status"), "pending"
-		)
+		self.assertEqual(frappe.db.get_value(MESSAGE, {"tool_call_id": current}, "tool_status"), "pending")
 		self.assertEqual(frappe.db.count("ToDo"), before)
 
 		frappe.set_user(OWNER)
@@ -672,9 +682,7 @@ class TestAgentClosureIntegration(FrappeTestCase):
 		self.assertEqual(result["reason_code"], "safety_update")
 		self.assertIsNone(pending_confirm_legacy.peek(stale))
 		self._assert_revoked_legacy_receipt(stale)
-		self.assertEqual(
-			frappe.db.get_value(MESSAGE, {"tool_call_id": current}, "tool_status"), "pending"
-		)
+		self.assertEqual(frappe.db.get_value(MESSAGE, {"tool_call_id": current}, "tool_status"), "pending")
 		self.assertEqual(frappe.db.count("ToDo"), before)
 
 		reloaded = chat_api.get_conversation(conversation)["messages"]
@@ -881,7 +889,9 @@ class TestAgentClosureIntegration(FrappeTestCase):
 		frappe.db.set_value(PENDING_ACTION, token, "status", "Cancelled", update_modified=False)
 		frappe.db.commit()
 
-		with patch.object(agent_closure, "legacy_confirmation_is_safe_to_render", return_value=True) as legacy:
+		with patch.object(
+			agent_closure, "legacy_confirmation_is_safe_to_render", return_value=True
+		) as legacy:
 			self._assert_suppressed_durable_card(conversation, token)
 		legacy.assert_not_called()
 		frappe.set_user(OWNER)

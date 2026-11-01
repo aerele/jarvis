@@ -80,7 +80,7 @@ test("settledReasonMessage gives the specific reason for a card that settled as 
 	);
 	assert.match(
 		settledReasonMessage({ ok: false, reason_code: "safety_update", pa_status: "Cancelled" }),
-		/agent safety update/,
+		/agent safety update/
 	);
 	assert.equal(settledReasonMessage({ ok: false, error: { type: "InvalidConfirmation" } }), "");
 	assert.equal(settledReasonMessage({ ok: true }), "");
@@ -102,12 +102,14 @@ test("DecisionSheet's approve() checks settledReasonMessage in its InvalidConfir
 test("DecisionSheet keeps a safety-update explanation open until the person closes it", () => {
 	const src = fs.readFileSync(
 		new URL("../components/DecisionSheet.vue", import.meta.url),
-		"utf8",
+		"utf8"
 	);
 	const approve = src.slice(src.indexOf("async function approve("));
 	const safety = approve.indexOf('r.reason_code === "safety_update"');
 	const cancelled = approve.indexOf('state.value = "cancelled"', safety);
-	const expired = approve.indexOf('emit("resolved", token, "expired", conversation, generation)');
+	const expired = approve.indexOf(
+		'emit("resolved", token, "expired", conversation, generation)'
+	);
 	assert.ok(safety > -1 && cancelled > safety);
 	assert.ok(safety < expired, "safety update must not use the retry/expired path");
 	assert.match(src, /state\.value === "cancelled" && props\.action\?\.token/);
@@ -117,15 +119,21 @@ test("DecisionSheet keeps a safety-update explanation open until the person clos
 test("DecisionSheet's direct Deny settles a safety-update token before the busy guard clears", () => {
 	const src = fs.readFileSync(
 		new URL("../components/DecisionSheet.vue", import.meta.url),
-		"utf8",
+		"utf8"
 	);
-	const deny = src.slice(src.indexOf("async function deny()"), src.indexOf("async function approve("));
+	const deny = src.slice(
+		src.indexOf("async function deny()"),
+		src.indexOf("async function approve(")
+	);
 	const outcome = deny.indexOf("const outcome = denyOutcome(r)");
 	const settled = deny.indexOf(
 		'if (outcome.state === "cancelled") emit("settled", token, conversation, generation)',
-		outcome,
+		outcome
 	);
-	const busyClear = deny.indexOf('emit("busy", false, token, conversation, generation)', outcome);
+	const busyClear = deny.indexOf(
+		'emit("busy", false, token, conversation, generation)',
+		outcome
+	);
 	assert.ok(outcome > -1 && settled > outcome && settled < busyClear);
 	assert.match(src, /state\.value === "cancelled" && props\.action\?\.token/);
 });
@@ -135,7 +143,7 @@ test("DecisionSheet keeps an asynchronous result bound to its original card", ()
 		new URL("../components/DecisionSheet.vue", import.meta.url),
 		"utf8"
 	);
-	for (const fn of ["async function deny()", "async function approve(mode = \"step\")"]) {
+	for (const fn of ["async function deny()", 'async function approve(mode = "step")']) {
 		const body = src.slice(src.indexOf(fn));
 		assert.match(body, /const token = props\.action\?\.token;/);
 		assert.match(body, /const conversation = props\.action\?\.conversation;/);
