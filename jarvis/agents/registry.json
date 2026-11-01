@@ -1723,18 +1723,14 @@
       "domain": "inventory-count",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.4.2",
+      "version": "0.5.0",
       "status": "Published",
-      "description": "Checks submitted physical-count facts against book stock at each saved count time. Keeps material lines together in one finding per count and shows the scope, controls and source links. Read-only; does not post stock adjustments.",
+      "description": "Checks selected submitted Jarvis physical-count facts against book stock at the saved count time. The protected service keeps material lines together in one finding per count and shows the scope, controls and source links. Read-only; it does not post stock adjustments.",
       "tools_required": [
-        "jarvis__query"
+        "jarvis__run_stock_variance_evaluation"
       ],
       "tools_allow": [
-        "jarvis__query",
-        "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "exec",
-        "canvas",
+        "jarvis__run_stock_variance_evaluation",
         "message"
       ],
       "doctypes_required": [

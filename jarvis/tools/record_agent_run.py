@@ -218,6 +218,15 @@ def record_agent_run(
 			"idempotent": True,
 			"note": "run already finalized; writeback ignored",
 		}
+	# Stock Variance is evaluated in the app. A delegate may start that server
+	# evaluator, but may not land a model-authored result or a forged source claim.
+	if run_row.agent == "stock-variance-auditor":
+		from jarvis.chat.stock_variance_evaluation import is_server_writeback
+
+		if not is_server_writeback():
+			raise InvalidArgumentError(
+				"Stock Variance results are server-owned; call run_stock_variance_evaluation."
+			)
 	if not run_row.installation:
 		raise InvalidArgumentError("run has no installation")
 
