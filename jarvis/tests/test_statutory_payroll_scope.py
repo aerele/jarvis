@@ -416,7 +416,7 @@ class TestStatutoryPayrollScope(FrappeTestCase):
 				for row in json.load(registry_file)["agents"]
 				if row["agent_slug"] == statutory_payroll_scope.AGENT
 			)
-		self.assertEqual(entry["version"], "0.4.2")
+		self.assertEqual(entry["version"], "0.4.3")
 		self.assertEqual(entry["tools_required"], ["jarvis__query", "jarvis__get_doc"])
 		self.assertNotIn("jarvis__get_list", entry["tools_allow"])
 		self.assertNotIn("jarvis__run_report", entry["tools_allow"])
