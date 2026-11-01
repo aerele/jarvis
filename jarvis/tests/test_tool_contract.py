@@ -152,7 +152,6 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 		)
 		self.assertNotIn("Stock Reconciliation", entry["doctypes_required"])
 
-
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
 		import json
