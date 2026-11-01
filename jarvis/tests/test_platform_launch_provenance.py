@@ -253,9 +253,7 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 		self.assertNotIn("undeclared_after_launch", captured["message"])
 		from jarvis.tools.get_engagement_config import get_engagement_config
 
-		with mock.patch(
-			"jarvis.tools._agent_run_ctx.get_session_key", return_value=captured["session_key"]
-		):
+		with mock.patch("jarvis.tools._agent_run_ctx.get_session_key", return_value=captured["session_key"]):
 			self.assertEqual(get_engagement_config(), expected)
 		field = frappe.get_meta(RUN).get_field("engagement_config_json")
 		self.assertTrue(field.hidden)
@@ -272,9 +270,7 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 		)
 		frappe.db.commit()
 		self.assertEqual(frappe.db.get_value(RUN, run, "engagement_config_json"), stamped)
-		with mock.patch(
-			"jarvis.tools._agent_run_ctx.get_session_key", return_value=captured["session_key"]
-		):
+		with mock.patch("jarvis.tools._agent_run_ctx.get_session_key", return_value=captured["session_key"]):
 			self.assertEqual(get_engagement_config(), expected)
 
 		# The ordinary owner-visible Run payload loses the hidden permlevel-1 field.
@@ -323,9 +319,7 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 		self.assertNotIn("Jarvis Agent Installation", captured["message"])
 		from jarvis.tools.get_engagement_config import get_engagement_config
 
-		with mock.patch(
-			"jarvis.tools._agent_run_ctx.get_session_key", return_value=captured["session_key"]
-		):
+		with mock.patch("jarvis.tools._agent_run_ctx.get_session_key", return_value=captured["session_key"]):
 			self.assertEqual(get_engagement_config(), {})
 
 	# ------------------------------------------------------------------ #

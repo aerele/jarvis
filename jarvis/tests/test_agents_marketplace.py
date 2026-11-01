@@ -543,9 +543,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 			],
 		)
 		self.assertEqual(
-			json.loads(
-				frappe.db.get_value(LISTING, "fixed-asset-depreciation-auditor", "config_keys")
-			),
+			json.loads(frappe.db.get_value(LISTING, "fixed-asset-depreciation-auditor", "config_keys")),
 			["depr_run_posted", "enable_capex_signal"],
 		)
 
