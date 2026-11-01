@@ -49,6 +49,7 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		self._validate_unique_per_owner()
 		self._validate_owner_cap()
 		self._validate_run_as_user()
+		self._guard_stock_variance_scope()
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
 		self._validate_schedule_budget()
@@ -356,6 +357,42 @@ class JarvisAgentInstallation(NotRenamable, Document):
 
 		self._validate_run_as_escalation(target)
 		self._validate_run_as_permissions(target)
+
+	def _guard_stock_variance_scope(self):
+		"""Check a Stock Variance Warehouse root as its execution identity.
+
+		The person who edits an installation can differ from run_as_user. The
+		Warehouse and Company checks must therefore run as run_as_user on every
+		save: this covers an enable, a run-as remap, and a disabled setup draft.
+		An empty disabled draft remains valid, but any supplied scope must already
+		be readable by the identity that will run the audit. The launch guard keeps
+		this invariant true for legacy rows and direct database writes.
+		"""
+		from jarvis.chat.stock_variance_scope import (
+			is_stock_variance,
+			require_configuration,
+			validate_saved_configuration,
+		)
+
+		if not is_stock_variance(self.agent):
+			return
+		if not frappe.utils.cint(self.get("enabled")) and not (
+			self.is_new()
+			or self.has_value_changed("agent")
+			or self.has_value_changed("config")
+			or self.has_value_changed("run_as_user")
+		):
+			return
+		run_as_user = (self.run_as_user or "").strip()
+		if not run_as_user:
+			return  # _validate_run_as_user() refuses this state when enabled.
+		from jarvis._session import impersonate
+
+		with impersonate(run_as_user):
+			if frappe.utils.cint(self.get("enabled")):
+				require_configuration(self.config or "{}")
+			else:
+				validate_saved_configuration(self.config or "{}")
 
 	def _validate_run_as_escalation(self, target: str) -> None:
 		"""A4: mapping an install to run as ANOTHER user needs the setter to be

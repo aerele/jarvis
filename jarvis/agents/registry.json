@@ -1722,35 +1722,30 @@
       "domain": "inventory-count",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.5.0",
       "status": "Published",
-      "description": "Reconciles a physical stock count against system on-hand: ranks the SKUs whose counted quantity differs from the system by rupees-at-risk into an investigation worklist. Requires a docstatus=0 physical-count source (manufactured by the paired cycle-count-planner-operator). Read-only; never posts a stock reconciliation, adjusts a quantity, guesses a cause, or touches valuation. Negative-stock and valuation-integrity classes are owned by negative-stock-valuation-auditor, not here.",
+      "description": "Checks selected submitted Jarvis physical-count facts against book stock at the saved count time. The protected service keeps material lines together in one finding per count and shows the scope, controls and source links. Read-only; it does not post stock adjustments.",
       "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__run_stock_variance_evaluation"
       ],
       "tools_allow": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc",
-        "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "exec",
-        "canvas",
+        "jarvis__run_stock_variance_evaluation",
         "message"
       ],
       "doctypes_required": [
-        "Stock Reconciliation",
-        "Bin",
+        "Jarvis Physical Count",
+        "Jarvis Physical Count Item",
         "Item",
-        "Stock Ledger Entry"
+        "Stock Ledger Entry",
+        "Warehouse",
+        "Company",
+        "Repost Item Valuation",
+        "Inventory Dimension"
       ],
       "rule_tokens": [
         "sv-vtol-7b2c"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1765,7 +1760,10 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "stock_variance"
+      ]
     },
     {
       "agent_slug": "tds-compliance-auditor",

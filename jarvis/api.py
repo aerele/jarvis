@@ -569,11 +569,10 @@ def _dispatch_from_session(
 		_agent_run_ctx.take_request_autorun_applied()  # belt: same for the request-scoped marker
 
 
-#: The findings writeback narrates ITSELF (``record_agent_run`` records a
-#: ``writeback`` step naming the finding count it actually persisted), so the
-#: generic per-tool hook below skips it rather than writing a second row for the
-#: same act.
-_SELF_NARRATING_TOOLS = frozenset({"record_agent_run"})
+#: Terminal server-owned evaluators narrate their own findings writeback
+#: (``record_agent_run`` records the closing ``writeback`` step). The generic
+#: per-tool hook must not add a second step after the Run is finalized.
+_SELF_NARRATING_TOOLS = frozenset({"record_agent_run", "run_stock_variance_evaluation"})
 
 
 def _record_tool_step(
@@ -1420,6 +1419,10 @@ _WRITE_TOOLS = frozenset(
 		"report_pdf",
 		"export_document",
 		"record_agent_run",
+		# Server-owned Stock Variance source capture/evaluation/dashboard/writeback.
+		# It is audited but not confirmation-gated: it is the delegate's only
+		# terminal path and has no model-authored data arguments.
+		"run_stock_variance_evaluation",
 		"record_app_wiki",
 		"finish_app_learning_run",
 		"save_agent_dashboard",
