@@ -482,7 +482,9 @@ def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=No
 def _fail_claimed_safety_update(row, approver: str, *, batch_id=None, defer=False) -> dict:
 	"""End a just-claimed old card if the close fence changed before dispatch."""
 	cols = {"batch_id": batch_id} if batch_id else {}
-	_terminal_update(row.name, [EXECUTING], CANCELLED, reason_code="safety_update", decided_by=approver, **cols)
+	_terminal_update(
+		row.name, [EXECUTING], CANCELLED, reason_code="safety_update", decided_by=approver, **cols
+	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	if row.kind == "chat" and not row.get("collaboration_binding"):
 		from jarvis.chat import turn_message_binding
@@ -659,9 +661,7 @@ def _claim_and_run(
 		from jarvis.chat.reorder_replenishment_gate import pending_confirmation_allowed
 
 		if not pending_confirmation_allowed(row):
-			return _fail_claimed_safety_update(
-				row, approver, batch_id=batch_id, defer=defer_continuation
-			)
+			return _fail_claimed_safety_update(row, approver, batch_id=batch_id, defer=defer_continuation)
 		result, interfered, crash_tb = _dispatch(row, args)
 	if structure is not None and not crash_tb and isinstance(result, dict) and result.get("ok"):
 		result = _held_to_the_card(name, args, structure, result)

@@ -151,9 +151,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 
 	def _confirmation_conversation(self) -> str:
 		frappe.set_user(OWNER)
-		conversation = frappe.get_doc(
-			{"doctype": CONVERSATION, "title": _CONFIRMATION_TITLE}
-		).insert(ignore_permissions=True)
+		conversation = frappe.get_doc({"doctype": CONVERSATION, "title": _CONFIRMATION_TITLE}).insert(
+			ignore_permissions=True
+		)
 		frappe.db.commit()
 		return conversation.name
 
@@ -163,8 +163,7 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 			conversation=conversation,
 			owner=OWNER,
 			tool=tool,
-			args=args
-			or {"doctype": "Material Request", "values": {"material_request_type": "Purchase"}},
+			args=args or {"doctype": "Material Request", "values": {"material_request_type": "Purchase"}},
 			run_id="",
 		)
 		record = pending_confirm_legacy.peek(token)
@@ -234,14 +233,12 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		}
 		if status != "running":
 			values["finished_at"] = now_datetime()
-		run = frappe.get_doc(
-			values
-		)
+		run = frappe.get_doc(values)
 		run.insert(ignore_permissions=True)
 		frappe.db.set_value(RUN, run.name, "owner", OWNER, update_modified=False)
-		frappe.get_doc(
-			{"doctype": SESSION, "session_key": session_key, "user": OWNER}
-		).insert(ignore_permissions=True)
+		frappe.get_doc({"doctype": SESSION, "session_key": session_key, "user": OWNER}).insert(
+			ignore_permissions=True
+		)
 		frappe.db.commit()
 		return run.name, session_key
 
@@ -335,7 +332,10 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		self._publish_reorder_raw()
 		self._legacy_install(enabled=1)
 
-		for payload in (agent_catalog.build_agent_push_payload(), agent_catalog.build_agent_push_payload(owner=OWNER)):
+		for payload in (
+			agent_catalog.build_agent_push_payload(),
+			agent_catalog.build_agent_push_payload(owner=OWNER),
+		):
 			self.assertNotIn(f"agent-{REORDER_AGENT}", [entry["slug"] for entry in payload])
 
 	def test_legacy_delegate_and_direct_generic_writes_are_refused(self):
@@ -383,10 +383,14 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		# This key is not one of the two historical prefixes. The close must still
 		# revoke it because the Run row says it is a bearer for this agent.
 		frappe.db.set_value(RUN, terminal_run, "session_key", ODD_SESSION_KEY, update_modified=False)
-		frappe.db.set_value(SESSION, terminal_session_key, "session_key", ODD_SESSION_KEY, update_modified=False)
+		frappe.db.set_value(
+			SESSION, terminal_session_key, "session_key", ODD_SESSION_KEY, update_modified=False
+		)
 		frappe.db.commit()
 		self._publish_reorder_raw()
-		patch_module = importlib.import_module("jarvis.patches.v2_31_disable_reorder_replenishment_installations")
+		patch_module = importlib.import_module(
+			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
+		)
 		with patch.object(agents_api, "_mark_catalog_dirty") as mark_catalog_dirty:
 			patch_module.execute()
 		mark_catalog_dirty.assert_called_once_with(strict=True)
@@ -410,7 +414,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		"""A swallowed scheduler error must not let the never-skip close complete."""
 		installation = self._legacy_install(enabled=1)
 		run, _session_key = self._legacy_run(installation)
-		patch_module = importlib.import_module("jarvis.patches.v2_31_disable_reorder_replenishment_installations")
+		patch_module = importlib.import_module(
+			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
+		)
 		with (
 			patch.object(agents_api, "_mark_catalog_dirty"),
 			patch.object(agent_scheduler, "fail_run", return_value=False),
@@ -421,7 +427,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 
 	def test_migration_requests_apply_without_a_legacy_install(self):
 		self._publish_reorder_raw()
-		patch_module = importlib.import_module("jarvis.patches.v2_31_disable_reorder_replenishment_installations")
+		patch_module = importlib.import_module(
+			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
+		)
 		with patch.object(agents_api, "_mark_catalog_dirty") as mark_catalog_dirty:
 			patch_module.execute()
 		mark_catalog_dirty.assert_called_once_with(strict=True)
@@ -433,7 +441,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 			frappe.get_doc({"doctype": SESSION, "session_key": key, "user": OWNER}).insert(
 				ignore_permissions=True
 			)
-		patch_module = importlib.import_module("jarvis.patches.v2_31_disable_reorder_replenishment_installations")
+		patch_module = importlib.import_module(
+			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
+		)
 		with patch.object(agents_api, "_mark_catalog_dirty"):
 			patch_module.execute()
 		for key in keys:
@@ -445,7 +455,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		frappe.get_doc({"doctype": SESSION, "session_key": session_key, "user": OWNER}).insert(
 			ignore_permissions=True
 		)
-		patch_module = importlib.import_module("jarvis.patches.v2_31_disable_reorder_replenishment_installations")
+		patch_module = importlib.import_module(
+			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
+		)
 		with patch.object(agents_api, "_mark_catalog_dirty"):
 			patch_module.execute()
 		self.assertFalse(frappe.db.exists(SESSION, {"session_key": session_key}))
@@ -492,10 +504,13 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 			run_id="",
 		)
 		self.assertEqual(
-			pending_confirm_legacy.peek(post_close_legacy_token)[PENDING_ACTION_FENCE_FIELD], CLOSURE_GENERATION
+			pending_confirm_legacy.peek(post_close_legacy_token)[PENDING_ACTION_FENCE_FIELD],
+			CLOSURE_GENERATION,
 		)
 		before = frappe.db.count("Material Request")
-		patch_module = importlib.import_module("jarvis.patches.v2_31_disable_reorder_replenishment_installations")
+		patch_module = importlib.import_module(
+			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
+		)
 		with (
 			patch.object(agents_api, "_mark_catalog_dirty"),
 			patch.object(api, "dispatch_confirmed") as dispatch_confirmed,
@@ -519,7 +534,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 
 	def test_close_fence_rejects_an_old_token_that_arrives_after_the_cleanup(self):
 		"""The runtime fence closes a token an old worker races in after the scan."""
-		patch_module = importlib.import_module("jarvis.patches.v2_31_disable_reorder_replenishment_installations")
+		patch_module = importlib.import_module(
+			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
+		)
 		with patch.object(agents_api, "_mark_catalog_dirty"):
 			patch_module.execute()
 		legacy_token = self._historic_legacy_token()
@@ -535,7 +552,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 
 	def test_close_fence_reports_a_safety_update_for_approve_and_run_too(self):
 		"""The alternate confirm endpoint does not mislabel this as a Redis outage."""
-		patch_module = importlib.import_module("jarvis.patches.v2_31_disable_reorder_replenishment_installations")
+		patch_module = importlib.import_module(
+			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
+		)
 		with patch.object(agents_api, "_mark_catalog_dirty"):
 			patch_module.execute()
 		legacy_token = self._historic_legacy_token()
@@ -565,7 +584,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 
 	def test_close_fence_rejects_an_old_durable_card_that_arrives_after_the_cleanup(self):
 		"""The durable executor checks the fence under its row lock before dispatch."""
-		patch_module = importlib.import_module("jarvis.patches.v2_31_disable_reorder_replenishment_installations")
+		patch_module = importlib.import_module(
+			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
+		)
 		with patch.object(agents_api, "_mark_catalog_dirty"):
 			patch_module.execute()
 		token, conversation = self._historic_durable_card()
@@ -607,7 +628,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 
 	def test_post_close_legacy_tokens_are_stamped_and_stay_confirmable(self):
 		"""The close does not break later ordinary legacy confirmation cards."""
-		patch_module = importlib.import_module("jarvis.patches.v2_31_disable_reorder_replenishment_installations")
+		patch_module = importlib.import_module(
+			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
+		)
 		with patch.object(agents_api, "_mark_catalog_dirty"):
 			patch_module.execute()
 		token = pending_confirm_legacy.mint(
@@ -635,7 +658,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 	def test_settings_save_cannot_clear_the_server_owned_apply_marker(self):
 		"""A crafted settings save cannot keep a retired agent in the fleet roster."""
 		fields = ("agent_catalog_dirty", "agent_catalog_version")
-		before = {field: frappe.db.get_single_value("Jarvis Settings", field, cache=False) for field in fields}
+		before = {
+			field: frappe.db.get_single_value("Jarvis Settings", field, cache=False) for field in fields
+		}
 		try:
 			frappe.db.set_single_value("Jarvis Settings", "agent_catalog_dirty", 1)
 			frappe.db.set_single_value("Jarvis Settings", "agent_catalog_version", 37)
@@ -647,7 +672,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 			# update_single path still run, which is the crafted-save threat surface.
 			with patch.object(settings, "on_update"):
 				settings.save(ignore_permissions=True)
-			self.assertEqual(frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "agent_catalog_dirty")), 1)
+			self.assertEqual(
+				frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "agent_catalog_dirty")), 1
+			)
 			self.assertEqual(
 				frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "agent_catalog_version")), 37
 			)
