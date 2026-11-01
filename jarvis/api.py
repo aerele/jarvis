@@ -464,6 +464,23 @@ def _dispatch_from_session(
 			# finishes the run. An ordinary chat session yields None and nothing below
 			# does anything.
 			step_run = agent_run_steps.step_target(cap)
+			# Plugin authentication can have resolved a user before a close migration
+			# deleted this bearer. Check its immutable historic prefix at the last
+			# generic dispatch boundary so an orphan session cannot reach a tool.
+			from jarvis.chat.agent_closure import assert_session_dispatch_allowed
+
+			try:
+				assert_session_dispatch_allowed(session_key)
+			except frappe.PermissionError as exc:
+				result = _error("PermissionError", str(exc))
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=parsed_args,
+					result=result,
+					tool_call_id=tool_call_id,
+				)
+				return result
 			started_ms = time.monotonic()
 			try:
 				with _agent_read_time_limit(tool):

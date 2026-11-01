@@ -37,6 +37,7 @@ from jarvis.chat.pending_confirm_legacy import (  # re-exported for callers
 	_OWNER_PREFIX,
 	_PREFIX,
 	_TTL_S,
+	LegacyConfirmationRevoked,
 	PendingConfirmOutcomeUnknown,
 	PendingConfirmStorageError,
 	_claim_key,

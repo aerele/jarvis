@@ -61,6 +61,10 @@ class PendingConfirmStorageError(RuntimeError):
 	"""Redis could not provide a definite pending-confirmation result."""
 
 
+class LegacyConfirmationRevoked(PendingConfirmStorageError):
+	"""A close-fence update revoked this token before it could dispatch."""
+
+
 class PendingConfirmOutcomeUnknown(PendingConfirmStorageError):
 	"""Redis may have committed a consume, but its durable claim is unreadable."""
 
@@ -195,6 +199,13 @@ def mint(
 		# constant" by convention.
 		"created_at": resolved_expires_at - _TTL_S,
 	}
+	# Historic generic tokens do not carry trustworthy agent provenance. New ones
+	# therefore carry the complete shared close-fence map. Before both close
+	# migrations are active this returns None, and confirmation fails closed.
+	from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, stamp_confirmation_fences
+
+	if fences := stamp_confirmation_fences():
+		record[PENDING_ACTION_FENCE_FIELD] = fences
 	cache = frappe.cache()
 	# Persist the record, index it under its owner, and VERIFY it landed - all three
 	# must hold or the park is a failure. Two ways a park silently breaks:
@@ -284,6 +295,17 @@ def rollback_token(token: str, owner: str) -> None:
 		except Exception:
 			pass
 	_gauge_remove(token)
+
+
+def assert_dispatch_allowed(record: dict) -> None:
+	"""Reject a stale generic token at the final point before dispatch."""
+	from jarvis.chat.agent_closure import confirmation_is_current
+
+	# Dispatch runs in the request worker, after a claim may have been held for
+	# some time. Re-read and lock every durable fence here so a close that wins
+	# after the Redis claim cannot reach a tool call.
+	if not confirmation_is_current(record, lock=True):
+		raise LegacyConfirmationRevoked("pending confirmation was revoked by a safety update")
 
 
 def _read_record(token: str, *, swallow: bool = True) -> dict | None:
@@ -422,6 +444,17 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	record = _read_record(token, swallow=False)
 	if not record:
 		return None
+	# Check before ownership and before the claim/delete. A code-before-migration
+	# or partial-fence token is not safely attributable to either closed agent.
+	from jarvis.chat.agent_closure import confirmation_is_current
+
+	# Check every durable fence before the claim/delete. This keeps a
+	# code-before-migration or partial-fence token fail-closed even for callers
+	# that use the legacy primitive directly. The request-level dispatch fence
+	# takes the locks again after the claim because a close can land meanwhile.
+	if not confirmation_is_current(record, lock=True):
+		rollback_token(token, str(record.get("owner") or ""))
+		raise LegacyConfirmationRevoked("pending confirmation was revoked by a safety update")
 	# Owner is the real security boundary and is always enforced.
 	if record.get("owner") != owner:
 		return None

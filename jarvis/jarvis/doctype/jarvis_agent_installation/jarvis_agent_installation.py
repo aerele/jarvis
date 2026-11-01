@@ -43,6 +43,11 @@ _GL_SCOPED_DIMENSIONS = (
 
 class JarvisAgentInstallation(NotRenamable, Document):
 	def validate(self):
+		# Code-owned closure comes before mutable listing/installability state.
+		# This blocks Desk, REST, imports, and crafted ORM saves alike.
+		from jarvis.chat.agent_closure import validate_installation
+
+		validate_installation(self)
 		self._default_reviewer()
 		self._guard_installability()
 		self._guard_operator_visibility()
