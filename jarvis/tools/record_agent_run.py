@@ -37,6 +37,7 @@ from jarvis.exceptions import InvalidArgumentError
 RUN = "Jarvis Agent Run"
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
+ATTENDANCE_AGENT = "attendance-leave-integrity-auditor"
 
 _SEVERITIES = {"blocker", "warning", "note"}
 # Aggregate-dimension ref doctypes verified by EXISTENCE only, not a read-perm
@@ -45,6 +46,7 @@ _SEVERITIES = {"blocker", "warning", "note"}
 # doctype must be readable by the run-as user or the row is dropped (a
 # mistranscribed / out-of-scope ref).
 _PERM_EXEMPT_REFS = frozenset({"Company", "Account"})
+_ATTENDANCE_SCOPE_REJECTION = "The evaluator scope did not match the server-stamped Department boundary."
 
 
 def _as_list(value) -> list:
@@ -63,6 +65,33 @@ def _as_dict(value) -> dict:
 		except Exception:
 			return {}
 	return value if isinstance(value, dict) else {}
+
+
+def _bound_attendance_scope(stamped: dict, submitted: dict) -> dict | None:
+	"""Return the safe submitted scope only when it equals the server boundary.
+
+	The delegate can write a file for its native evaluator, but it must not select
+	a different Department or period when it writes the result back. The launch
+	scope is trusted because the server validated it as the run-as user before
+	dispatch; the submitted object is untrusted model output.
+	"""
+	from jarvis.chat.agent_scope import attendance_output_scope
+
+	trusted = attendance_output_scope(stamped)
+	output = attendance_output_scope(submitted)
+	return output if trusted is not None and output == trusted else None
+
+
+def _attendance_scope_rejection_coverage(tokens: set) -> dict:
+	"""Make a rejected Attendance scope explicitly non-evaluable."""
+	return {
+		token: {
+			"state": "not_evaluable",
+			"reason_code": "unsupported_customisation",
+			"detail": _ATTENDANCE_SCOPE_REJECTION,
+		}
+		for token in tokens
+	}
 
 
 def _ref_verifiable(ref_doctype: str, ref_name: str) -> tuple[bool, str]:
@@ -250,6 +279,7 @@ def record_agent_run(
 	coverage = _as_dict(coverage)
 	scope = _as_dict(scope)
 	truncated = bool(truncated)
+	scope_dropped = []
 	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(run_doc.agent)
@@ -278,7 +308,35 @@ def record_agent_run(
 		except (TypeError, ValueError):
 			rows_consumed_val = None
 
+	# Attendance has one server-validated Department boundary. A delegate may
+	# return only the safe five-field projection of that scope. It may not replace
+	# the Department, the company, the period, or the report-date cutoff after the
+	# launch. On mismatch, persist no model findings and produce an explicit
+	# non-evaluable result instead of accepting a widened or unrelated review.
+	if run_row.agent == ATTENDANCE_AGENT:
+		trusted_scope = _bound_attendance_scope(_as_dict(run_doc.get("scope_json")), scope)
+		if trusted_scope is None:
+			from jarvis.chat.agent_scope import attendance_output_scope
+
+			stamped_scope = attendance_output_scope(_as_dict(run_doc.get("scope_json"))) or {}
+			raw_findings = []
+			coverage = _attendance_scope_rejection_coverage(token_set)
+			scope = stamped_scope
+			integrity_digest = None
+			rows_consumed_val = None
+			scope_dropped.append(
+				{
+					"ref_doctype": "Department",
+					"ref_name": (stamped_scope.get("record_scope") or {}).get("name") or "?",
+					"reason": "scope did not match server-stamped Department boundary",
+				}
+			)
+		else:
+			# Strip unknown model keys before the downstream Run snapshot merge.
+			scope = trusted_scope
+
 	valid, dropped = _validate_findings(raw_findings, token_set, allowed_refs)
+	dropped.extend(scope_dropped)
 	if review_backend:
 		frappe.db.set_value(
 			RUN,

@@ -1159,8 +1159,8 @@ def _launch_audit(
 	model_gate: dict | None = None,
 ) -> dict:
 	"""Create the audit conversation + a ``running`` Jarvis Agent Run + enqueue
-	the triggering turn. MUST run as the installation owner (the scheduler
-	set_user's it; run_agent_now is already the owner). Returns
+	the triggering turn. MUST run as the installation's ``run_as_user`` (the
+	scheduler and ``run_agent_now`` impersonate it before this call). Returns
 	``{run, conversation, session_key}``. Identity/budget guards + next_run_at
 	advancement are the caller's job.
 
@@ -1182,13 +1182,6 @@ def _launch_audit(
 
 	review_backend = operator_review.backend(inst.agent)
 	review_config = review_backend.configuration(inst) if review_backend else None
-	# The delegate's engagement settings are a launch-time fact, not a live view of
-	# ``Installation.config``.  Resolve ONLY the bundle-declared/bench-derived keys
-	# before a Run exists, stamp that exact object on the Run, and use the same object
-	# in the dispatch prompt below.  A later settings save must never alter an active
-	# run's evidence or make a model guess a gate value.
-	engagement_config = _explicit_config(listing, inst)
-	engagement_config_json = frappe.as_json(engagement_config)
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1258,6 +1251,33 @@ def _launch_audit(
 				"This agent is no longer published ({0}); uninstall it or ask an admin to republish it."
 			).format(listing.status or "unknown")
 		)
+
+	# Payroll Pre-Run has a server-owned, single-entry boundary.  Validate the
+	# selected Payroll Entry as the run-as user before a conversation, Run, or
+	# session exists.  This also covers legacy rows and callers that bypass the
+	# installation controller.  Identity and listing status are checked first so
+	# the error cannot become a record probe.
+	from jarvis.chat.payroll_prerun_scope import is_payroll_prerun, require_configuration
+
+	if is_payroll_prerun(inst.agent):
+		# Payroll Entry scope is an authorization boundary, not only configuration.
+		# The normal callers already impersonate ``run_as_user``. Refuse a future
+		# direct/internal caller instead of validating or deriving that boundary as
+		# the installation owner, Administrator, or another ambient identity.
+		if frappe.session.user != run_as_user:
+			frappe.throw(
+				_("Payroll Pre-Run must be launched as its configured run-as user."),
+				frappe.PermissionError,
+			)
+		require_configuration(inst.config or "{}")
+
+	# The delegate's engagement settings are a launch-time fact, not a live view of
+	# ``Installation.config``.  Resolve ONLY the bundle-declared/bench-derived keys
+	# after the bound configuration is accepted, stamp that exact object on the Run,
+	# and use the same object in the dispatch prompt below.  A later settings save
+	# must never alter an active run's evidence or make a model guess a gate value.
+	engagement_config = _explicit_config(listing, inst)
+	engagement_config_json = frappe.as_json(engagement_config)
 
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
@@ -1387,8 +1407,9 @@ def _launch_audit(
 		_mint_run_session(session_key, run_as_user)
 		frappe.db.set_value(RUN, run.name, "session_key", session_key, update_modified=False)
 
-		# A6 explicit scope + A17 consistency watermark + A12 permission profile —
-		# all best-effort (never abort the launch) and computed AS the run-as user.
+		# A6 explicit scope + A17 consistency watermark + A12 permission profile.
+		# Most scopes are best-effort; binding Attendance, Ledger, and Payroll
+		# scopes can refuse the launch. All values are computed AS the run-as user.
 		scope = _stamp_scope_and_watermark(run.name, inst, run_as_user, source_apps=source_apps)
 
 	except Exception:
@@ -1602,8 +1623,11 @@ def _stamp_scope_and_watermark(
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
 
-	All best-effort: a bench without a resolvable Company (e.g. no erpnext setup)
-	must NOT abort the launch — it degrades to an unscoped run (no watermark). The
+	Most scope resolution is best-effort: a bench without a resolvable Company
+	(e.g. no erpnext setup) degrades to an unscoped run (no watermark). Attendance,
+	Ledger Scrutiny, and Payroll Pre-Run have binding server boundaries. If the
+	server cannot validate one as the run-as user, the launch must refuse
+	before dispatch instead of silently widening or producing an unusable run. The
 	watermark + scope are resolved AS the run-as user (this runs under that
 	session). Returns the resolved scope dict (or None).
 
@@ -1612,6 +1636,18 @@ def _stamp_scope_and_watermark(
 	authorization the source-read tools read back — a scribe run either carries its
 	admin-authorized app list or reads nothing."""
 	from jarvis.chat import agent_scope, operator_review
+	from jarvis.chat.ledger_scrutiny_scope import (
+		requires_bound_scope as ledger_requires_bound_scope,
+	)
+	from jarvis.chat.ledger_scrutiny_scope import (
+		scoped_visibility as ledger_scoped_visibility,
+	)
+	from jarvis.chat.ledger_scrutiny_scope import (
+		validate_bound_scope as validate_ledger_bound_scope,
+	)
+	from jarvis.chat.payroll_prerun_scope import (
+		requires_bound_scope as payroll_requires_bound_scope,
+	)
 
 	review_backend = operator_review.backend(inst.agent)
 	if review_backend:
@@ -1626,10 +1662,55 @@ def _stamp_scope_and_watermark(
 		return scope
 
 	values: dict = {}
+	permission_profile = None
+	try:
+		permission_profile = _permission_profile(run_as_user)
+		values["permission_profile"] = permission_profile
+	except Exception:
+		# A profile failure must not widen the run.  The installation's stamped
+		# value remains a conservative fallback for the delegate's coverage label.
+		permission_profile = None
 	scope = None
+	attendance_required = agent_scope.requires_bound_scope(inst)
+	ledger_required = ledger_requires_bound_scope(inst.agent)
+	payroll_required = payroll_requires_bound_scope(inst.agent)
 	try:
 		scope = agent_scope.resolve_scope(inst)
+		if ledger_required:
+			validate_ledger_bound_scope(scope)
+			# This is a launch-time server fact, not a delegate-written config flag.
+			# The evaluator uses it to label a record-sliced run partial.
+			scope["scoped_visibility"] = ledger_scoped_visibility(run_as_user)
 	except Exception:
+		if attendance_required:
+			frappe.log_error(
+				title="jarvis agent: Attendance scope resolution refused launch",
+				message=frappe.get_traceback(),
+			)
+			raise
+		if payroll_required:
+			frappe.log_error(
+				title="jarvis agent: Payroll Pre-Run scope resolution refused launch",
+				message=frappe.get_traceback(),
+			)
+			raise
+		if ledger_required:
+			frappe.log_error(
+				title="jarvis agent: required Ledger Scrutiny scope resolution failed",
+				message=frappe.get_traceback(),
+			)
+			raise
+		try:
+			config = frappe.parse_json(inst.get("config") or "{}")
+		except (TypeError, ValueError):
+			config = {}
+		if isinstance(config, dict) and any(
+			config.get(k) for k in ("record_scope", "prior_period_from", "prior_period_to")
+		):
+			frappe.log_error(
+				title="jarvis agent: explicit scope resolution failed", message=frappe.get_traceback()
+			)
+			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
 			message=frappe.get_traceback(),
@@ -1638,9 +1719,18 @@ def _stamp_scope_and_watermark(
 		scope = dict(scope or {})
 		scope["source_apps"] = list(source_apps)
 	if scope is not None:
+		scope = dict(scope)
+		# This value is bench-derived from the launch-time permission snapshot. It
+		# is scope metadata, not user configuration, so a delegate cannot turn a
+		# record-sliced read into a whole-workforce conclusion. Ledger has a
+		# stricter server-owned calculation that fails safe when permissions cannot
+		# be read; do not replace it with the generic installation fallback.
+		if not ledger_required:
+			scope["scoped_visibility"] = _scope_has_scoped_visibility(permission_profile, inst)
 		values["scope_json"] = frappe.as_json(scope)
 
-	if scope and scope.get("company") and scope.get("to_date"):
+	as_of = agent_scope.as_of_date(scope)
+	if scope and scope.get("company") and as_of:
 		# A17: row-count + max(modified) over the scope's GL as-of window. The old
 		# engine ran the whole pack in one snapshot; the chunked container run
 		# spans minutes, so a mid-run backdated JV (endemic at Indian year-end)
@@ -1649,7 +1739,7 @@ def _stamp_scope_and_watermark(
 			wm = frappe.db.sql(
 				"""select count(*) n, max(modified) m from `tabGL Entry`
 				   where company = %(company)s and posting_date <= %(to_date)s""",
-				{"company": scope["company"], "to_date": scope["to_date"]},
+				{"company": scope["company"], "to_date": as_of},
 				as_dict=True,
 			)[0]
 			values["wm_row_count"] = int(wm.n or 0)
@@ -1659,11 +1749,6 @@ def _stamp_scope_and_watermark(
 				title="jarvis agent: GL watermark computation failed",
 				message=frappe.get_traceback(),
 			)
-
-	try:
-		values["permission_profile"] = _permission_profile(run_as_user)
-	except Exception:
-		pass
 
 	if values:
 		frappe.db.set_value(RUN, run_name, values, update_modified=False)
@@ -1690,6 +1775,22 @@ def _permission_profile(user: str) -> str:
 	summary = {"roles": roles, "user_permissions": up_keys}
 	digest = hashlib.sha256(json.dumps(summary, sort_keys=True).encode()).hexdigest()
 	return json.dumps({"hash": digest, **summary})
+
+
+def _scope_has_scoped_visibility(permission_profile, inst) -> bool:
+	"""Read a fresh launch profile before falling back to an old install stamp."""
+	from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
+		_GL_SCOPED_DIMENSIONS,
+	)
+
+	if permission_profile:
+		try:
+			permissions = (json.loads(permission_profile) or {}).get("user_permissions") or {}
+			if any(permissions.get(dt) for dt in _GL_SCOPED_DIMENSIONS):
+				return True
+		except (TypeError, ValueError):
+			pass
+	return bool(inst.get("scoped_visibility"))
 
 
 def _explicit_config(listing, inst) -> dict:
@@ -1752,6 +1853,36 @@ def _audit_prompt(
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
 		)
+	if scope:
+		# The record root comes from the already-stamped server scope. Both the
+		# Department and Payroll Entry contracts use this exact two-field shape.
+		record_scope = scope.get("record_scope")
+		if (
+			isinstance(record_scope, dict)
+			and set(record_scope) == {"doctype", "name"}
+			and all(
+				isinstance(record_scope.get(key), str)
+				and record_scope[key].strip()
+				and record_scope[key] == record_scope[key].strip()
+				for key in ("doctype", "name")
+			)
+		):
+			scope_block += f" record_scope={json.dumps(record_scope, sort_keys=True)}."
+		additional_scope = {
+			key: scope[key]
+			for key in ("prior_period_from", "prior_period_to", "scope_kind")
+			if scope.get(key)
+		}
+		if additional_scope:
+			scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
+				additional_scope
+			)
+		if "scoped_visibility" in scope:
+			scope_block += (
+				" The server-owned permission scope for this run is "
+				f'scoped_visibility="{int(bool(scope.get("scoped_visibility")))}"; '
+				"preserve this value in scope.json and do not replace it with a model inference."
+			)
 	# EXPLICIT CONFIG: ``_launch_audit`` resolves declared/derived values ONCE and
 	# stamps them on the Run before dispatch.  This function receives that exact
 	# snapshot; it deliberately does not re-read the mutable installation here.
