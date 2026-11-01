@@ -1,10 +1,9 @@
 """Exercise private source output through the real bound delegate dispatcher."""
 
 import hashlib
-import importlib
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -16,9 +15,9 @@ from jarvis.tools import _agent_run_ctx, _private_output, registry
 CANARY = "PRIVATE-SOURCE-CANARY"
 
 
-def _registered_private_source_tools():
-	"""Return sealed source tools whose server handlers are installed."""
-	return sorted(set(_private_output.PRIVATE_SOURCE_TOOLS) & set(registry._TOOLS))
+def _private_source_handler(snapshot):
+	"""Return a source capture at the registered tool-handler seam."""
+	return Mock(return_value={"rows": [snapshot]})
 
 
 class TestPrivateAuditOutput(FrappeTestCase):
@@ -69,18 +68,19 @@ class TestPrivateAuditOutput(FrappeTestCase):
 		frappe.delete_doc("User", self.actor, force=True, ignore_permissions=True)
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- remove committed test fixtures
 
-	def _dispatch(self, payload, *, mode=_private_output.MODE, tool="query", key=None):
+	def _dispatch(self, payload, *, mode=_private_output.MODE, tool="query", key=None, handler=None):
 		if tool == "query":
 			args = {"spec": {"from": "ToDo", "select": ["name"], "limit": 1000}}
 		elif tool in _private_output.PRIVATE_SOURCE_TOOLS:
 			args = {}
 		else:
 			args = {"report_name": "Fake report"}
+		handler = handler if handler is not None else lambda **kwargs: payload
 		with (
-			patch.dict(registry._TOOLS, {tool: lambda **kwargs: payload}),
-			# The core test substitutes a source handler before the Cycle child
-			# registers it. Keep the registry's signature cache aligned with that
-			# ``**kwargs`` substitute.
+			# ``registry._TOOLS`` is the stable handler boundary. A source tool can
+			# use a direct import or a module-qualified capture function internally.
+			# Generic transport tests must not depend on either implementation detail.
+			patch.dict(registry._TOOLS, {tool: handler}),
 			patch.dict(registry._ACCEPTS_VAR_KW, {tool: True}),
 			patch("jarvis.api._get_header", return_value=None),
 		):
@@ -181,23 +181,20 @@ class TestPrivateAuditOutput(FrappeTestCase):
 					self.assertNotIn("data", result)
 					self.assertNotIn(CANARY, str(result))
 
-	def test_private_review_handlers_seal_the_actual_captured_snapshot(self):
+	def test_private_source_handler_contract_seals_the_captured_snapshot(self):
 		snapshot = {
 			"source_digest": "a" * 64,
 			"scope": {"company": "Fake Co"},
 			"datasets": {"invoices": [{"bill_no": CANARY, "amount": 0.0}]},
 		}
-		for tool in _registered_private_source_tools():
-			module = importlib.import_module(f"jarvis.tools.{tool}")
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			source = _private_source_handler(snapshot)
 			with (
 				self.subTest(tool=tool),
-				patch.object(module, "get_inputs", return_value=snapshot) as source,
 				patch("jarvis.api.publish_realtime_tool_result") as published,
 			):
-				result = api._dispatch_from_session(
-					self.actor, self.key, tool, {}, result_mode=_private_output.MODE
-				)
-			source.assert_called_once()
+				result = self._dispatch(None, tool=tool, handler=source)
+			source.assert_called_once_with()
 			self.assertTrue(result["ok"], result)
 			self.assertEqual(json.loads(result["data"]), {"rows": [snapshot]})
 			self.assertEqual(result["private_output"]["count"], 1)
@@ -208,19 +205,31 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			step = frappe.get_last_doc("Jarvis Agent Run Step", {"run": self.run})
 			self.assertNotIn(CANARY, step.detail)
 
-	def test_private_review_handlers_refuse_malformed_captured_snapshot_without_leak(self):
-		for tool in _registered_private_source_tools():
-			module = importlib.import_module(f"jarvis.tools.{tool}")
+	def test_registered_source_handler_can_use_a_module_qualified_capture(self):
+		snapshot = {"source_digest": "a" * 64, "secret": CANARY}
+		run = object()
+		capture_module = SimpleNamespace(get_inputs=Mock(return_value=snapshot))
+
+		def handler():
+			return {"rows": [capture_module.get_inputs(run)]}
+
+		with patch("jarvis.api.publish_realtime_tool_result") as published:
+			result = self._dispatch(None, tool="get_cycle_count_inputs", handler=handler)
+		capture_module.get_inputs.assert_called_once_with(run)
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(json.loads(result["data"]), {"rows": [snapshot]})
+		self.assertNotIn(CANARY, str(published.call_args))
+
+	def test_private_source_handler_contract_refuses_malformed_captures_without_leak(self):
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
 			for snapshot in (None, {}, {"source_digest": "not-a-digest", "secret": CANARY}):
+				source = _private_source_handler(snapshot)
 				with (
 					self.subTest(tool=tool, snapshot=snapshot),
-					patch.object(module, "get_inputs", return_value=snapshot) as source,
 					patch("jarvis.api.publish_realtime_tool_result") as published,
 				):
-					result = api._dispatch_from_session(
-						self.actor, self.key, tool, {}, result_mode=_private_output.MODE
-					)
-				source.assert_called_once()
+					result = self._dispatch(None, tool=tool, handler=source)
+				source.assert_called_once_with()
 				self.assertFalse(result["ok"], result)
 				self.assertNotIn("data", result)
 				self.assertNotIn(CANARY, str(result))
@@ -377,17 +386,19 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			execute.assert_not_called()
 
 	def test_standard_external_source_cannot_collect_private_evidence(self):
-		for tool in _registered_private_source_tools():
-			module = importlib.import_module(f"jarvis.tools.{tool}")
-			with (
-				self.subTest(tool=tool),
-				patch.object(module, "get_inputs") as source,
-				patch("jarvis.api._get_header", return_value=None),
-			):
-				result = api.call_tool(tool, {})
-			source.assert_not_called()
-			self.assertFalse(result["ok"], result)
-			self.assertNotIn("data", result)
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+			for mode in (None, _private_output.MODE):
+				source = _private_source_handler({"source_digest": "a" * 64})
+				with (
+					self.subTest(tool=tool, mode=mode),
+					patch.dict(registry._TOOLS, {tool: source}),
+					patch.dict(registry._ACCEPTS_VAR_KW, {tool: True}),
+					patch("jarvis.api._get_header", return_value=None),
+				):
+					result = api.call_tool(tool, {}, result_mode=mode)
+				source.assert_not_called()
+				self.assertFalse(result["ok"], result)
+				self.assertNotIn("data", result)
 
 	def test_plugin_endpoint_requires_the_bound_read_contract(self):
 		headers = {"X-Jarvis-Token": "fake-test-token"}
