@@ -30,7 +30,11 @@
 					v-else-if="!rows.length"
 					class="mt-10 rounded-lg border bg-surface-gray-1 px-5 py-8 text-sm text-ink-gray-6"
 				>
-					No approved physical-count plans are ready for you.
+					{{
+						hasMore
+							? "Some approved plans could not be read. Load more to continue."
+							: "No approved physical-count plans are ready for you."
+					}}
 				</div>
 				<div v-else class="mt-6 overflow-hidden rounded-lg border">
 					<button
@@ -95,7 +99,11 @@ async function fetchPage(offset, append = false) {
 	const response = await listCountPlans({ start: offset, pageLength: 20 });
 	const page = Array.isArray(response?.rows) ? response.rows : [];
 	rows.value = append ? [...rows.value, ...page] : page;
-	start.value = Number(response?.start || offset) + page.length;
+	const nextStart = Number(response?.next_start);
+	start.value =
+		Number.isInteger(nextStart) && nextStart >= offset
+			? nextStart
+			: Number(response?.start || offset) + page.length;
 	hasMore.value = Boolean(response?.has_more);
 }
 

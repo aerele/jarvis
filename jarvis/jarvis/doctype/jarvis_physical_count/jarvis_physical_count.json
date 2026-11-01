@@ -15,6 +15,7 @@
   "recorded_at",
   "entry_key",
   "entry_digest",
+  "amended_from",
   "items"
  ],
  "fields": [
@@ -96,6 +97,16 @@
    "no_copy": 1,
    "hidden": 1,
    "description": "Server digest of immutable count-entry fields for idempotent retry checks."
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "options": "Jarvis Physical Count",
+   "read_only": 1,
+   "no_copy": 1,
+   "hidden": 1,
+   "description": "Server-set predecessor for one controlled correction."
   },
   {
    "fieldname": "items",

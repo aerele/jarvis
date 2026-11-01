@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 
 const countApi = vi.hoisted(() => ({
+	correctCounts: vi.fn(),
 	getCountPlan: vi.fn(),
 	recordCounts: vi.fn(),
 }));
@@ -117,6 +118,41 @@ describe("CountPlanDetail", () => {
 			"Every planned item already has a submitted physical-count observation."
 		);
 		expect(wrapper.find('[data-label="Save physical count"]').exists()).toBe(false);
+	});
+
+	it("lets the recorder correct one current observation through the controlled endpoint", async () => {
+		countApi.getCountPlan.mockResolvedValue({
+			...plan,
+			lines: [{ ...plan.lines[0], count_name: "JPC-1" }],
+			active_counts: [
+				{
+					name: "JPC-1",
+					can_correct: 1,
+					items: [{ item_code: "ITEM-ONE", counted_qty: "2" }],
+				},
+			],
+		});
+		countApi.correctCounts.mockResolvedValue({
+			saved: [
+				{ name: "JPC-2", entry_key: "unused", item_codes: ["ITEM-ONE"], idempotent: 0 },
+			],
+		});
+		const wrapper = mount(CountPlanDetail, { props: { request: "AR-COUNT-1" } });
+		await flushPromises();
+
+		await wrapper.get('[data-label="Correct JPC-1"]').trigger("click");
+		const input = wrapper.get('input[placeholder="Leave blank"]');
+		expect(input.element.value).toBe("2");
+		await input.setValue("3");
+		await wrapper.get('[data-label="Save corrected count"]').trigger("click");
+		await flushPromises();
+
+		expect(countApi.correctCounts).toHaveBeenCalledTimes(1);
+		const call = countApi.correctCounts.mock.calls[0];
+		expect(call[0]).toBe("AR-COUNT-1");
+		expect(call[1]).toBe("JPC-1");
+		expect(call[3]).toEqual([{ item_code: "ITEM-ONE", counted_qty: "3" }]);
+		expect(call[4]).toMatch(/^ccp_/);
 	});
 
 	it("reloads the approved plan when the route request changes", async () => {

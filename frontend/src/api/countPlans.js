@@ -21,3 +21,12 @@ export const recordCounts = (request, countedAt, entries, entryKey) =>
 		entries: JSON.stringify(entries),
 		entry_key: entryKey,
 	});
+
+export const correctCounts = (request, replaces, countedAt, entries, entryKey) =>
+	call(CC + "correct_counts", {
+		request,
+		replaces,
+		counted_at: countedAt,
+		entries: JSON.stringify(entries),
+		entry_key: entryKey,
+	});

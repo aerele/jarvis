@@ -268,6 +268,34 @@ class TestShareEndpointSweep(SharingCase):
 					cycle_count_entry.record_counts(**args)
 		self.assertEqual(frappe.db.count("Jarvis Physical Count"), counts)
 
+	def test_correct_counts_share_probe_reaches_conversation_gateway(self):
+		from jarvis.chat import collaboration, cycle_count_entry
+
+		self.share()
+		args = substitute(
+			ENDPOINTS["jarvis.chat.cycle_count_entry.correct_counts"]["arguments"], self.identifiers()
+		)
+		counts = frappe.db.count("Jarvis Physical Count")
+		with (
+			as_user(RECIPIENT),
+			patch.object(
+				cycle_count_entry,
+				"require_legacy_conversation",
+				wraps=collaboration.require_legacy_conversation,
+			) as gateway,
+		):
+			# In a legacy shared chat, the plan-shape refusal follows the gateway.
+			with self.assertRaises(frappe.PermissionError):
+				cycle_count_entry.correct_counts(**args)
+			gateway.assert_called_once_with(self.conversation)
+
+			# In a collaborative chat, the gateway itself must refuse the call.
+			if frappe.db.has_column("Jarvis Conversation", "collaboration_active"):
+				frappe.db.set_value("Jarvis Conversation", self.conversation, "collaboration_active", 1)
+				with self.assertRaisesRegex(frappe.PermissionError, "Collaborative chat execution"):
+					cycle_count_entry.correct_counts(**args)
+		self.assertEqual(frappe.db.count("Jarvis Physical Count"), counts)
+
 	def identifiers(self):
 		if hasattr(self, "fixture_identifiers"):
 			return self.fixture_identifiers

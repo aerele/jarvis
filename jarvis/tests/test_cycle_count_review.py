@@ -635,6 +635,15 @@ class TestCycleCountPrivateDispatch(FrappeTestCase):
 class TestNativePhysicalCountEntry(FrappeTestCase):
 	"""One normal Stock User records a fake observation without posting stock."""
 
+	def setUp(self):
+		super().setUp()
+		# Most native lifecycle tests construct a minimal sealed approval directly.
+		# The dedicated stale-evidence regression below exercises the reviewer
+		# re-collection guard with its own controlled source result.
+		self._current_evidence = patch("jarvis.chat.cycle_count_entry._assert_current_evidence")
+		self._current_evidence.start()
+		self.addCleanup(self._current_evidence.stop)
+
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
@@ -853,6 +862,7 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			"run": "TEST-CYCLE-RUN",
 			"input_digest": input_digest,
 			"scope": {"company": self.company},
+			"policy": {"test": "cycle-count-entry"},
 			"reviewer": self.reviewer,
 			"finding": {
 				"ref_name": self.warehouse,
@@ -890,6 +900,12 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		)
 		doc.flags.jarvis_server_write = True
 		doc.insert(ignore_permissions=True)
+		# The production staging path writes this Link from a real Agent Run. These
+		# focused fixtures use a synthetic run name, so stamp it after link
+		# validation to exercise sealed cohort selection.
+		frappe.db.set_value(
+			"Jarvis Approval Request", doc.name, "run", evidence["run"], update_modified=False
+		)
 		if not pending:
 			frappe.db.set_value(
 				"Jarvis Approval Request",
@@ -987,6 +1003,671 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			before_reconciliation,
 			frappe.db.count("Stock Reconciliation", {"company": self.company}),
 		)
+
+	def test_api_writer_lock_order_keeps_fact_locks_before_the_shared_plan_gate(self):
+		from jarvis.chat import cycle_count_entry
+
+		approved = self._plan()
+		events = []
+		real_existing = cycle_count_entry._existing_entry
+		real_gate = cycle_count_entry._lock_sibling_reviews
+
+		def tracked_existing(entry_key, *, lock=False):
+			if lock:
+				events.append("fact")
+			return real_existing(entry_key, lock=lock)
+
+		def tracked_gate(input_digest):
+			events.append("review")
+			return real_gate(input_digest)
+
+		frappe.set_user(self.counter)
+		try:
+			with (
+				patch.object(cycle_count_entry, "_existing_entry", side_effect=tracked_existing),
+				patch.object(cycle_count_entry, "_lock_sibling_reviews", side_effect=tracked_gate),
+			):
+				cycle_count_entry.record_counts(
+					approved.name,
+					frappe.utils.now(),
+					[{"item_code": self.item, "counted_qty": "0"}],
+					"cyclecount" + frappe.generate_hash(length=24),
+				)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(events[0], "fact")
+		first_review = events.index("review")
+		self.assertNotIn("fact", events[first_review + 1 :])
+
+		class StopAtReviewGate(Exception):
+			pass
+
+		correction_events = []
+		ar = frappe._dict(name="AR-CYCLE-LOCK", status="Approved")
+		evidence = {"input_digest": "cycle-lock-digest"}
+		source = SimpleNamespace(approval_request=ar.name, docstatus=1)
+
+		def correction_existing(entry_key, *, lock=False):
+			if lock:
+				correction_events.append("fact")
+			return None
+
+		def correction_get_doc(doctype, name, *, for_update=False):
+			self.assertEqual((doctype, name, for_update), (cycle_count_entry.COUNT, "COUNT-LOCK", True))
+			correction_events.append("source")
+			return source
+
+		def stop_at_review_gate(input_digest):
+			self.assertEqual(input_digest, evidence["input_digest"])
+			correction_events.append("review")
+			raise StopAtReviewGate
+
+		with (
+			patch.object(cycle_count_entry, "_approval_context", return_value=(ar, evidence)),
+			patch.object(cycle_count_entry, "_require_visible"),
+			patch.object(cycle_count_entry, "_can_record", return_value=True),
+			patch.object(cycle_count_entry, "_existing_entry", side_effect=correction_existing),
+			patch.object(cycle_count_entry.frappe, "get_doc", side_effect=correction_get_doc),
+			patch.object(cycle_count_entry, "_lock_sibling_reviews", side_effect=stop_at_review_gate),
+			self.assertRaises(StopAtReviewGate),
+		):
+			cycle_count_entry.correct_counts(
+				ar.name,
+				"COUNT-LOCK",
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)
+		self.assertEqual(correction_events, ["fact", "source", "review"])
+
+	def test_counter_and_reviewer_can_correct_only_the_current_count_fact(self):
+		from jarvis.chat import cycle_count_entry
+
+		if not frappe.db.has_column("Jarvis Physical Count", "amended_from"):
+			self.skipTest("The current test site has not synchronized the new correction column.")
+		approved = self._plan()
+		first_key = "cyclecount" + frappe.generate_hash(length=24)
+		counter_key = "cyclecount" + frappe.generate_hash(length=24)
+		reviewer_key = "cyclecount" + frappe.generate_hash(length=24)
+		counter_at = frappe.utils.now()
+		frappe.set_user(self.counter)
+		try:
+			first = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				first_key,
+			)["saved"][0]["name"]
+			counter = cycle_count_entry.correct_counts(
+				approved.name,
+				first,
+				counter_at,
+				[{"item_code": self.item, "counted_qty": "1"}],
+				counter_key,
+			)
+			self.assertEqual(counter["saved"][0]["idempotent"], 0)
+			self.assertEqual(
+				cycle_count_entry.correct_counts(
+					approved.name,
+					first,
+					counter_at,
+					[{"item_code": self.item, "counted_qty": "1"}],
+					counter_key,
+				)["saved"][0]["idempotent"],
+				1,
+			)
+		finally:
+			frappe.set_user("Administrator")
+		second = counter["saved"][0]["name"]
+		self.assertEqual(frappe.get_doc("Jarvis Physical Count", first).docstatus, 2)
+		second_doc = frappe.get_doc("Jarvis Physical Count", second)
+		self.assertEqual(
+			(
+				second_doc.docstatus,
+				second_doc.amended_from,
+				second_doc.recorded_by,
+				second_doc.items[0].counted_qty,
+			),
+			(1, first, self.counter, "1"),
+		)
+
+		frappe.set_user(self.reviewer)
+		try:
+			third = cycle_count_entry.correct_counts(
+				approved.name,
+				second,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "2"}],
+				reviewer_key,
+			)["saved"][0]["name"]
+		finally:
+			frappe.set_user("Administrator")
+		third_doc = frappe.get_doc("Jarvis Physical Count", third)
+		self.assertEqual(
+			(third_doc.docstatus, third_doc.amended_from, third_doc.recorded_by), (1, second, self.reviewer)
+		)
+		self.assertEqual(frappe.get_doc("Jarvis Physical Count", second).docstatus, 2)
+		# Frappe Desk copies no_copy fields during Amend. The controller must issue
+		# a new idempotency key and stamp the reviewer instead of inheriting either
+		# server-owned value from the cancelled predecessor.
+		frappe.set_user(self.reviewer)
+		try:
+			third_doc.cancel()
+			# A user can leave a Desk amendment draft behind. It has not replaced the
+			# cancelled fact and must not make the correction chain permanently stuck.
+			abandoned = frappe.copy_doc(third_doc)
+			abandoned.name = None
+			abandoned.docstatus = 0
+			abandoned.amended_from = third_doc.name
+			abandoned.insert()
+			self.assertEqual(abandoned.docstatus, 0)
+			with self.assertRaisesRegex(frappe.PermissionError, "cannot be discarded"):
+				abandoned.discard()
+			native = frappe.copy_doc(third_doc)
+			native.name = None
+			native.docstatus = 0
+			native.amended_from = third_doc.name
+			native.insert()
+			self.assertNotEqual(native.name, abandoned.name)
+			self.assertNotEqual(native.entry_key, third_doc.entry_key)
+			self.assertFalse(native.recorded_by)
+			native.submit()
+		finally:
+			frappe.set_user("Administrator")
+		fourth_doc = frappe.get_doc("Jarvis Physical Count", native.name)
+		self.assertEqual(
+			(fourth_doc.docstatus, fourth_doc.amended_from, fourth_doc.recorded_by),
+			(1, third, self.reviewer),
+		)
+
+		frappe.set_user(self.counter)
+		try:
+			with self.assertRaisesRegex(frappe.ValidationError, "newer correction"):
+				stale = frappe.get_doc(
+					{
+						"doctype": "Jarvis Physical Count",
+						"approval_request": approved.name,
+						"amended_from": first,
+						"counted_at": frappe.utils.now(),
+						"entry_key": "cyclecount" + frappe.generate_hash(length=24),
+						"items": [{"item_code": self.item, "counted_qty": "3"}],
+					}
+				)
+				stale.insert()
+		finally:
+			frappe.set_user("Administrator")
+
+		outsider = self._user("cycle-correct-outsider@example.invalid", ("Jarvis User", "Stock User"))
+		frappe.set_user(outsider)
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				cycle_count_entry.correct_counts(
+					approved.name,
+					fourth_doc.name,
+					frappe.utils.now(),
+					[{"item_code": self.item, "counted_qty": "4"}],
+					"cyclecount" + frappe.generate_hash(length=24),
+				)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_new_count_refuses_changed_evidence_for_endpoint_and_direct_submit(self):
+		from jarvis.chat import cycle_count_entry
+
+		approved = self._plan()
+		self._current_evidence.stop()
+		seen_users = []
+
+		def changed_source(scope, policy):
+			seen_users.append(frappe.session.user)
+			return {"source_digest": "changed-source-digest"}
+
+		frappe.set_user(self.counter)
+		try:
+			with patch.object(cycle_count_entry.cycle_count_review, "collect", side_effect=changed_source):
+				with self.assertRaisesRegex(frappe.ValidationError, "stale or no longer fully readable"):
+					cycle_count_entry.record_counts(
+						approved.name,
+						frappe.utils.now(),
+						[{"item_code": self.item, "counted_qty": "0"}],
+						"cyclecount" + frappe.generate_hash(length=24),
+					)
+				frappe.db.savepoint("cycle_count_direct_stale")
+				try:
+					direct = frappe.get_doc(
+						{
+							"doctype": "Jarvis Physical Count",
+							"approval_request": approved.name,
+							"counted_at": frappe.utils.now(),
+							"entry_key": "cyclecount" + frappe.generate_hash(length=24),
+							"items": [{"item_code": self.item, "counted_qty": "0"}],
+						}
+					)
+					direct.insert()
+					with self.assertRaisesRegex(frappe.ValidationError, "stale or no longer fully readable"):
+						direct.submit()
+				finally:
+					frappe.db.rollback(save_point="cycle_count_direct_stale")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(seen_users, [self.reviewer, self.reviewer])
+
+	def test_savedocs_cannot_clear_an_amendment_drafts_lineage_before_discard(self):
+		from frappe.desk.form.save import savedocs
+
+		from jarvis.chat import cycle_count_entry
+
+		if not frappe.db.has_column("Jarvis Physical Count", "amended_from"):
+			self.skipTest("The current test site has not synchronized the new correction column.")
+		approved = self._plan()
+		frappe.set_user(self.counter)
+		try:
+			source_name = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)["saved"][0]["name"]
+			source = frappe.get_doc("Jarvis Physical Count", source_name)
+			source.cancel()
+			draft = frappe.copy_doc(source)
+			draft.name = None
+			draft.docstatus = 0
+			draft.amended_from = source.name
+			draft.insert()
+		finally:
+			frappe.set_user("Administrator")
+		viewer = self._user("cycle-amendment-draft-viewer@example.invalid", ("Jarvis User", "Stock User"))
+		frappe.db.set_value(
+			"Jarvis Conversation", approved.conversation, "owner", viewer, update_modified=False
+		)
+		payload = frappe.get_doc("Jarvis Physical Count", draft.name).as_dict()
+		payload["amended_from"] = ""
+		frappe.set_user(viewer)
+		try:
+			with self.assertRaisesRegex(frappe.PermissionError, "must keep its original"):
+				savedocs(frappe.as_json(payload), "Save")
+			submit_payload = frappe.get_doc("Jarvis Physical Count", draft.name).as_dict()
+			submit_payload["amended_from"] = ""
+			submit_payload["items"][0]["counted_qty"] = "999"
+			with self.assertRaisesRegex(frappe.PermissionError, "must keep its original"):
+				savedocs(frappe.as_json(submit_payload), "Submit")
+			with self.assertRaisesRegex(frappe.PermissionError, "cannot be discarded"):
+				frappe.get_doc("Jarvis Physical Count", draft.name).discard()
+		finally:
+			frappe.set_user("Administrator")
+		stored = frappe.get_doc("Jarvis Physical Count", draft.name)
+		self.assertEqual((stored.docstatus, stored.amended_from), (0, source_name))
+
+	def test_correction_refuses_changed_evidence_for_endpoint_and_direct_submit(self):
+		from jarvis.chat import cycle_count_entry
+
+		if not frappe.db.has_column("Jarvis Physical Count", "amended_from"):
+			self.skipTest("The current test site has not synchronized the new correction column.")
+		approved = self._plan()
+		frappe.set_user(self.counter)
+		try:
+			source_name = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)["saved"][0]["name"]
+		finally:
+			frappe.set_user("Administrator")
+
+		self._current_evidence.stop()
+		seen_users = []
+
+		def changed_source(scope, policy):
+			seen_users.append(frappe.session.user)
+			return {"source_digest": "changed-source-digest"}
+
+		frappe.set_user(self.counter)
+		try:
+			with patch.object(cycle_count_entry.cycle_count_review, "collect", side_effect=changed_source):
+				with self.assertRaisesRegex(frappe.ValidationError, "stale or no longer fully readable"):
+					cycle_count_entry.correct_counts(
+						approved.name,
+						source_name,
+						frappe.utils.now(),
+						[{"item_code": self.item, "counted_qty": "1"}],
+						"cyclecount" + frappe.generate_hash(length=24),
+					)
+				frappe.db.savepoint("cycle_count_direct_correction_stale")
+				try:
+					source = frappe.get_doc("Jarvis Physical Count", source_name)
+					source.cancel()
+					amendment = frappe.copy_doc(source)
+					amendment.name = None
+					amendment.docstatus = 0
+					amendment.amended_from = source.name
+					amendment.insert()
+					with self.assertRaisesRegex(frappe.ValidationError, "stale or no longer fully readable"):
+						amendment.submit()
+				finally:
+					frappe.db.rollback(save_point="cycle_count_direct_correction_stale")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(seen_users, [self.reviewer, self.reviewer])
+
+	def test_cancelled_fact_cannot_be_replaced_by_a_new_count(self):
+		from jarvis.chat import cycle_count_entry
+
+		if not frappe.db.has_column("Jarvis Physical Count", "amended_from"):
+			self.skipTest("The current test site has not synchronized the new correction column.")
+		owner = self._user("cycle-plan-owner@example.invalid", ("Jarvis User", "Stock User"))
+		approved = self._plan()
+		frappe.db.set_value(
+			"Jarvis Conversation", approved.conversation, "owner", owner, update_modified=False
+		)
+		frappe.set_user(self.reviewer)
+		try:
+			source_name = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)["saved"][0]["name"]
+			frappe.get_doc("Jarvis Physical Count", source_name).cancel()
+		finally:
+			frappe.set_user("Administrator")
+		frappe.set_user(owner)
+		try:
+			with self.assertRaisesRegex(frappe.PermissionError, "controlled amendment"):
+				cycle_count_entry.record_counts(
+					approved.name,
+					frappe.utils.now(),
+					[{"item_code": self.item, "counted_qty": "1"}],
+					"cyclecount" + frappe.generate_hash(length=24),
+				)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_savedocs_cancel_cannot_forge_the_recorder(self):
+		from frappe.desk.form.save import savedocs
+
+		from jarvis.chat import cycle_count_entry
+
+		approved = self._plan()
+		frappe.set_user(self.counter)
+		try:
+			fact_name = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "0"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)["saved"][0]["name"]
+		finally:
+			frappe.set_user("Administrator")
+		viewer = self._user("cycle-cancel-viewer@example.invalid", ("Jarvis User", "Stock User"))
+		frappe.db.set_value(
+			"Jarvis Conversation", approved.conversation, "owner", viewer, update_modified=False
+		)
+		payload = frappe.get_doc("Jarvis Physical Count", fact_name).as_dict()
+		payload["recorded_by"] = viewer
+		frappe.set_user(viewer)
+		try:
+			with self.assertRaisesRegex(
+				frappe.PermissionError, "Submitted physical-count fields cannot be changed"
+			):
+				savedocs(frappe.as_json(payload), "Cancel")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Jarvis Physical Count", fact_name, "docstatus"), 1)
+		payload = frappe.get_doc("Jarvis Physical Count", fact_name).as_dict()
+		payload["items"][0]["counted_qty"] = "999"
+		frappe.set_user(viewer)
+		try:
+			with self.assertRaisesRegex(
+				frappe.PermissionError, "Submitted physical-count items cannot be changed"
+			):
+				savedocs(frappe.as_json(payload), "Cancel")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Jarvis Physical Count", fact_name, "docstatus"), 1)
+		frappe.db.set_value(
+			"Jarvis Conversation", approved.conversation, "owner", self.counter, update_modified=False
+		)
+		frappe.set_user(self.counter)
+		try:
+			savedocs(frappe.as_json(frappe.get_doc("Jarvis Physical Count", fact_name).as_dict()), "Cancel")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Jarvis Physical Count", fact_name, "docstatus"), 2)
+
+	def test_malformed_count_time_is_a_validation_error(self):
+		from jarvis.chat import cycle_count_entry
+
+		with patch.object(cycle_count_entry.frappe.utils, "get_datetime", return_value=None):
+			with self.assertRaisesRegex(frappe.ValidationError, "valid site date and time"):
+				cycle_count_entry._counted_at("2026-11-01 10:00:00")
+
+	def test_draft_amendment_successor_does_not_block_the_current_fact(self):
+		from jarvis.chat import cycle_count_entry
+
+		ar = frappe._dict(name="AR-CYCLE-SUCCESSOR", ref_name=self.warehouse)
+		evidence = {"scope": {"company": self.company}}
+		source = frappe._dict(
+			name="COUNT-SOURCE",
+			docstatus=2,
+			approval_request=ar.name,
+			company=self.company,
+			warehouse=self.warehouse,
+		)
+		draft = frappe._dict(name="COUNT-DRAFT", amended_from=source.name)
+		observed_filters = []
+
+		def no_finished_successor(doctype, filters, fieldname, *, for_update=False):
+			observed_filters.append(filters)
+			self.assertEqual((doctype, fieldname, for_update), (cycle_count_entry.COUNT, "name", True))
+			return None
+
+		with (
+			patch.object(cycle_count_entry.frappe, "get_doc", return_value=source),
+			patch.object(cycle_count_entry.frappe.db, "get_value", side_effect=no_finished_successor),
+		):
+			self.assertIs(cycle_count_entry._amendment_source(draft, ar, evidence), source)
+		self.assertEqual(observed_filters[0]["docstatus"], ["!=", 0])
+
+		with (
+			patch.object(cycle_count_entry.frappe, "get_doc", return_value=source),
+			patch.object(cycle_count_entry.frappe.db, "get_value", return_value="COUNT-CANCELLED"),
+			self.assertRaisesRegex(frappe.ValidationError, "newer correction"),
+		):
+			cycle_count_entry._amendment_source(draft, ar, evidence)
+
+	def test_amendment_draft_discard_is_refused(self):
+		from jarvis.jarvis.doctype.jarvis_physical_count.jarvis_physical_count import JarvisPhysicalCount
+
+		draft = frappe._dict(amended_from="")
+		draft.get_doc_before_save = lambda: frappe._dict(amended_from="COUNT-DRAFT-SOURCE")
+		with self.assertRaisesRegex(frappe.PermissionError, "cannot be discarded"):
+			JarvisPhysicalCount.before_discard(draft)
+
+	def test_saved_amendment_draft_cannot_clear_its_lineage(self):
+		from jarvis.jarvis.doctype.jarvis_physical_count.jarvis_physical_count import JarvisPhysicalCount
+
+		draft = frappe._dict(docstatus=0, amended_from="")
+		draft.is_new = lambda: False
+		draft.get_doc_before_save = lambda: frappe._dict(docstatus=0, amended_from="COUNT-DRAFT-SOURCE")
+		with self.assertRaisesRegex(frappe.PermissionError, "must keep its original"):
+			JarvisPhysicalCount._guard_draft_amendment_lineage(draft)
+
+	def test_source_freshness_excludes_only_this_sealed_cohorts_observations(self):
+		from jarvis.chat import cycle_count_entry
+
+		baseline = snapshot()
+		baseline["source_counts"]["Jarvis Physical Count"] = 0
+		baseline["source_digest"] = review.digest(
+			{key: value for key, value in baseline.items() if key != "source_digest"}
+		)
+		current = frappe.parse_json(frappe.as_json(baseline))
+		current["datasets"]["physical_counts"] = [
+			{
+				"name": "COUNT-SELF",
+				"company": "Example",
+				"warehouse": "WH-A",
+				"counted_at": "2026-10-05 10:00:00",
+				"approval_request": "AR-SELF",
+			}
+		]
+		current["datasets"]["physical_count_items"] = [
+			{
+				"name": "COUNT-ITEM-SELF",
+				"parent": "COUNT-SELF",
+				"item_code": "ITEM-A",
+				"counted_qty": "1",
+				"stock_uom": "Nos",
+				"batch_detail_recorded": 0,
+			}
+		]
+		current["source_counts"].update({"Jarvis Physical Count": 1, "Jarvis Physical Count Item": 1})
+		self.assertEqual(
+			cycle_count_entry._source_digest_excluding_cohort_facts(current, {"AR-SELF"}),
+			baseline["source_digest"],
+		)
+		current["datasets"]["physical_counts"].append(
+			{
+				"name": "COUNT-OTHER",
+				"company": "Example",
+				"warehouse": "WH-A",
+				"counted_at": "2026-10-05 11:00:00",
+				"approval_request": "AR-SIBLING",
+			}
+		)
+		current["datasets"]["physical_count_items"].append(
+			{
+				"name": "COUNT-ITEM-OTHER",
+				"parent": "COUNT-OTHER",
+				"item_code": "ITEM-A",
+				"counted_qty": "2",
+				"stock_uom": "Nos",
+				"batch_detail_recorded": 0,
+			}
+		)
+		current["source_counts"].update({"Jarvis Physical Count": 2, "Jarvis Physical Count Item": 2})
+		self.assertEqual(
+			cycle_count_entry._source_digest_excluding_cohort_facts(current, {"AR-SELF", "AR-SIBLING"}),
+			baseline["source_digest"],
+		)
+		self.assertNotEqual(
+			cycle_count_entry._source_digest_excluding_cohort_facts(current, {"AR-SELF"}),
+			baseline["source_digest"],
+		)
+
+	def test_two_approved_siblings_can_record_against_one_sealed_source_baseline(self):
+		from jarvis.chat import cycle_count_entry
+
+		first, second = self._plan(), self._plan()
+		frappe.db.set_value("Jarvis Approval Request", second.name, "conversation", first.conversation)
+		baseline = snapshot()
+		baseline["source_counts"]["Jarvis Physical Count"] = 0
+		baseline["source_digest"] = review.digest(
+			{key: value for key, value in baseline.items() if key != "source_digest"}
+		)
+		shared_run = "TEST-CYCLE-SIBLING-" + frappe.generate_hash(length=12)
+		for approved in (first, second):
+			evidence = frappe.parse_json(approved.assessment_evidence)
+			evidence.update({"run": shared_run, "input_digest": baseline["source_digest"]})
+			frappe.db.set_value(
+				"Jarvis Approval Request",
+				approved.name,
+				{
+					"run": shared_run,
+					"assessment_evidence": frappe.as_json(evidence),
+					"assessment_input_digest": baseline["source_digest"],
+				},
+				update_modified=False,
+			)
+		first = frappe.get_doc("Jarvis Approval Request", first.name)
+		second = frappe.get_doc("Jarvis Approval Request", second.name)
+		with_first = frappe.parse_json(frappe.as_json(baseline))
+		with_first["datasets"]["physical_counts"] = [
+			{
+				"name": "COUNT-SIBLING-FIRST",
+				"company": "Example",
+				"warehouse": "WH-A",
+				"counted_at": "2026-10-05 10:00:00",
+				"approval_request": first.name,
+			}
+		]
+		with_first["datasets"]["physical_count_items"] = [
+			{
+				"name": "COUNT-ITEM-SIBLING-FIRST",
+				"parent": "COUNT-SIBLING-FIRST",
+				"item_code": "ITEM-A",
+				"counted_qty": "1",
+				"stock_uom": "Nos",
+				"batch_detail_recorded": 0,
+			}
+		]
+		with_first["source_counts"].update({"Jarvis Physical Count": 1, "Jarvis Physical Count Item": 1})
+		self._current_evidence.stop()
+		seen_users = []
+
+		def source_for_cohort(scope, policy):
+			seen_users.append(frappe.session.user)
+			if frappe.db.exists("Jarvis Physical Count", {"approval_request": first.name, "docstatus": 1}):
+				return with_first
+			return baseline
+
+		frappe.set_user(self.counter)
+		try:
+			with patch.object(cycle_count_entry.cycle_count_review, "collect", side_effect=source_for_cohort):
+				first_result = cycle_count_entry.record_counts(
+					first.name,
+					frappe.utils.now(),
+					[{"item_code": self.item, "counted_qty": "0"}],
+					"cyclecount" + frappe.generate_hash(length=24),
+				)
+				second_result = cycle_count_entry.record_counts(
+					second.name,
+					frappe.utils.now(),
+					[{"item_code": self.item, "counted_qty": "1"}],
+					"cyclecount" + frappe.generate_hash(length=24),
+				)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(
+			(first_result["saved"][0]["idempotent"], second_result["saved"][0]["idempotent"]), (0, 0)
+		)
+		self.assertTrue(seen_users)
+		self.assertTrue(all(user == self.reviewer for user in seen_users))
+
+	def test_count_plan_list_skips_malformed_approved_rows(self):
+		from jarvis.chat import cycle_count_entry
+
+		approved = self._plan()
+		malformed = frappe.get_doc(
+			{
+				"doctype": "Jarvis Approval Request",
+				"title": "Malformed test physical count plan",
+				"source": "Agent Review",
+				"status": "Approved",
+				"decision": "Approved test fixture.",
+				"document_type": "Warehouse",
+				"conversation": approved.conversation,
+				"ref_doctype": "Warehouse",
+				"ref_name": self.warehouse,
+				"agent": review.AGENT,
+				"result_class": "derived_candidate",
+				"assessment_key": frappe.generate_hash(length=32),
+				"assessment_evidence": frappe.as_json({"reviewer": self.reviewer}),
+				"assessment_input_digest": "malformed-test",
+				"question": "Malformed test count plan.",
+				"options": "[]",
+			}
+		)
+		malformed.flags.jarvis_server_write = True
+		malformed.insert(ignore_permissions=True)
+		frappe.set_user(self.counter)
+		try:
+			listed = cycle_count_entry.list_count_plans(page_length=20)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIn(approved.name, [row["request"] for row in listed["rows"]])
+		self.assertGreaterEqual(listed["next_start"], 2)
 
 	def test_physical_count_visibility_follows_the_approved_plan(self):
 		"""Only the conversation owner and stamped reviewer can use a count plan."""

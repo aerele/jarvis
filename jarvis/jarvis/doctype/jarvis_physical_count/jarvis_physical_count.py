@@ -17,11 +17,26 @@ class JarvisPhysicalCount(NotRenamable, Document):
 		refuse_in_tool_dispatch()
 		if self.docstatus not in (0, None):
 			frappe.throw(_("A physical count must be inserted as a draft before it is submitted."))
+		if self.get("amended_from"):
+			# Desk copies no_copy fields when a user selects Amend. These values are
+			# stamped only when the replacement submits. The controlled API owns its
+			# fresh idempotency key and marks that one in-memory document explicitly.
+			# Frappe's default amended-name rule assigns the same suffix to every
+			# draft from one source. A retained, unsubmitted draft must not prevent a
+			# later correction, so use this hash-named DocType's normal opaque name.
+			self.name = frappe.generate_hash(length=20)
+			self.flags.name_set = True
+			self.recorded_by = ""
+			self.recorded_at = None
+			self.entry_digest = ""
+			if not self.flags.get("cycle_count_controlled_entry"):
+				self.entry_key = ""
 
 	def validate(self):
 		refuse_in_tool_dispatch()
 		from jarvis.chat.cycle_count_entry import validate_count_document
 
+		self._guard_draft_amendment_lineage()
 		validate_count_document(self, action="cancel" if self.docstatus == 2 else "record")
 		self._guard_immutable_submitted_fields()
 
@@ -35,7 +50,25 @@ class JarvisPhysicalCount(NotRenamable, Document):
 		refuse_in_tool_dispatch()
 		from jarvis.chat.cycle_count_entry import validate_count_document
 
+		# Desk savedocs supplies client JSON and calls before_cancel without this
+		# controller's validate hook. Reject changed server-owned facts before
+		# authorization, then authorize against the locked stored predecessor.
+		self._guard_immutable_submitted_fields()
 		validate_count_document(self, action="cancel")
+
+	def before_discard(self):
+		refuse_in_tool_dispatch()
+		# A Desk client can edit the in-memory draft before it asks to discard it.
+		# Use the saved draft so a plan viewer cannot clear amended_from and turn a
+		# correction attempt into permanent cancelled history.
+		before = self.get_doc_before_save()
+		if (before or self).get("amended_from"):
+			frappe.throw(
+				_(
+					"Amendment drafts cannot be discarded. Leave the draft unsubmitted and create a fresh correction."
+				),
+				frappe.PermissionError,
+			)
 
 	def on_trash(self):
 		refuse_in_tool_dispatch()
@@ -57,6 +90,7 @@ class JarvisPhysicalCount(NotRenamable, Document):
 			return
 		for field in (
 			"approval_request",
+			"amended_from",
 			"source_run",
 			"company",
 			"warehouse",
@@ -66,10 +100,41 @@ class JarvisPhysicalCount(NotRenamable, Document):
 			"entry_key",
 			"entry_digest",
 		):
-			if self.get(field) != before.get(field):
+			if not self._same_immutable_value(field, self.get(field), before.get(field)):
 				frappe.throw(_("Submitted physical-count fields cannot be changed."), frappe.PermissionError)
-		if self.has_value_changed("items"):
+		if not self._same_submitted_items(before):
 			frappe.throw(_("Submitted physical-count items cannot be changed."), frappe.PermissionError)
+
+	def _guard_draft_amendment_lineage(self):
+		"""Keep a saved amendment draft in its controlled correction path."""
+		if self.is_new():
+			return
+		before = self.get_doc_before_save()
+		if before and before.docstatus == 0 and before.get("amended_from"):
+			if self.get("amended_from") != before.get("amended_from"):
+				frappe.throw(
+					_("An amendment draft must keep its original physical-count fact."),
+					frappe.PermissionError,
+				)
+
+	@staticmethod
+	def _same_immutable_value(field, value, before_value):
+		"""Compare stored facts without rejecting the Desk JSON datetime form."""
+		if field not in {"counted_at", "recorded_at"}:
+			return value == before_value
+		if not value or not before_value:
+			return value == before_value
+		try:
+			return frappe.utils.get_datetime(value) == frappe.utils.get_datetime(before_value)
+		except (TypeError, ValueError):
+			return False
+
+	def _same_submitted_items(self, before):
+		"""Allow only Frappe's submit-to-cancel status transition on child rows."""
+		fields = ("name", "item_code", "counted_qty", "stock_uom", "batch_detail_recorded")
+		current = [tuple(row.get(field) for field in fields) for row in self.items or []]
+		stored = [tuple(row.get(field) for field in fields) for row in before.items or []]
+		return len(current) == len(stored) and set(current) == set(stored)
 
 
 def on_doctype_update():
@@ -83,4 +148,9 @@ def on_doctype_update():
 		"Jarvis Physical Count",
 		["approval_request", "docstatus"],
 		index_name="physical_count_approval_index",
+	)
+	frappe.db.add_index(
+		"Jarvis Physical Count",
+		["amended_from", "docstatus"],
+		index_name="physical_count_amendment_index",
 	)

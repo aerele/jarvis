@@ -40,10 +40,14 @@
 					</div>
 					<Badge
 						variant="subtle"
-						:theme="canRecord ? 'green' : recordPermission ? 'blue' : 'gray'"
+						:theme="canSubmit ? 'green' : recordPermission ? 'blue' : 'gray'"
 						:label="
-							canRecord
+							activeCorrection
+								? 'Correcting observation'
+								: canRecord
 								? 'Ready to record'
+								: canCorrect
+								? 'Ready to correct'
 								: recordPermission
 								? 'All planned items recorded'
 								: 'View only'
@@ -73,11 +77,50 @@
 					read permissions that are required to record an observation.
 				</div>
 				<div
-					v-else-if="!remainingLines.length"
+					v-else-if="!remainingLines.length && !canCorrect"
 					class="mt-4 rounded-lg border bg-surface-gray-1 px-4 py-3 text-sm text-ink-gray-6"
 				>
 					Every planned item already has a submitted physical-count observation.
 				</div>
+
+				<section
+					v-if="correctableCounts.length"
+					class="mt-6 rounded-lg border p-4"
+					aria-labelledby="correct-count-title"
+				>
+					<h2 id="correct-count-title" class="text-base font-medium text-ink-gray-9">
+						Correct a recorded observation
+					</h2>
+					<p class="mt-1 text-sm text-ink-gray-6">
+						A correction replaces one current observation with the same planned items.
+						It does not adjust stock.
+					</p>
+					<div class="mt-3 flex flex-wrap gap-2">
+						<Button
+							v-for="count in correctableCounts"
+							:key="count.name"
+							variant="subtle"
+							:label="
+								activeCorrection && activeCorrection.name === count.name
+									? 'Correcting ' + count.name
+									: 'Correct ' + count.name
+							"
+							:disabled="saving || uncertain || !!activeCorrection"
+							@click="startCorrection(count)"
+						/>
+					</div>
+					<div v-if="activeCorrection" class="mt-3 flex flex-wrap items-center gap-2">
+						<p class="text-sm text-ink-gray-6">
+							Enter every corrected quantity for {{ activeCorrection.name }} below.
+						</p>
+						<Button
+							variant="subtle"
+							label="Cancel correction"
+							:disabled="saving || uncertain"
+							@click="cancelCorrection"
+						/>
+					</div>
+				</section>
 
 				<section
 					class="mt-6 overflow-hidden rounded-lg border"
@@ -131,9 +174,7 @@
 									inputmode="decimal"
 									autocomplete="off"
 									placeholder="Leave blank"
-									:disabled="
-										!canRecord || !!line.count_name || saving || uncertain
-									"
+									:disabled="!canEditLine(line) || saving || uncertain"
 									class="w-full rounded border border-outline-gray-2 px-2 py-1.5 text-sm disabled:bg-surface-gray-1"
 								/>
 							</div>
@@ -142,12 +183,12 @@
 				</section>
 
 				<section
-					v-if="canRecord"
+					v-if="canSubmit"
 					class="mt-6 rounded-lg border p-4"
 					aria-labelledby="record-count-title"
 				>
 					<h2 id="record-count-title" class="text-base font-medium text-ink-gray-9">
-						Save observation
+						{{ activeCorrection ? "Save corrected observation" : "Save observation" }}
 					</h2>
 					<div class="mt-3 max-w-xs">
 						<label class="mb-1 block text-xs text-ink-gray-5" for="counted-at"
@@ -173,9 +214,11 @@
 					<div class="mt-4 flex flex-wrap items-center gap-2">
 						<Button
 							variant="solid"
-							label="Save physical count"
+							:label="
+								activeCorrection ? 'Save corrected count' : 'Save physical count'
+							"
 							:loading="saving"
-							:disabled="!entries.length || !countedAt || uncertain"
+							:disabled="!canSave || !countedAt || uncertain"
 							@click="save"
 						/>
 						<Button
@@ -186,7 +229,7 @@
 							@click="retry"
 						/>
 						<Button
-							v-if="hasRecordedLines && !uncertain"
+							v-if="hasRecordedLines && !uncertain && !activeCorrection"
 							variant="subtle"
 							label="Start another record"
 							:disabled="saving"
@@ -208,7 +251,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
 import { Badge, Breadcrumbs, Button } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
-import { getCountPlan, recordCounts } from "@/api/countPlans";
+import { correctCounts, getCountPlan, recordCounts } from "@/api/countPlans";
 import { errMessage } from "@/lib/errors";
 import { siteTimezone, toSiteDatetime } from "@/utils/datetime";
 import { session } from "@/data/session";
@@ -224,6 +267,7 @@ const countedAt = ref(localDateTime());
 const nowLocal = ref(localDateTime());
 const entryKey = ref(newEntryKey());
 const uncertain = ref(false);
+const correctionName = ref("");
 let uncertainPayload = null;
 let draftAllowed = true;
 let loadSequence = 0;
@@ -240,14 +284,37 @@ const remainingLines = computed(() =>
 );
 const canRecord = computed(() => recordPermission.value && remainingLines.value.length > 0);
 const hasRecordedLines = computed(() => plan.value?.lines?.some((line) => line.count_name));
+const activeCounts = computed(() =>
+	Array.isArray(plan.value?.active_counts) ? plan.value.active_counts : []
+);
+const correctableCounts = computed(() =>
+	activeCounts.value.filter((count) => Number(count?.can_correct) === 1)
+);
+const activeCorrection = computed(
+	() => correctableCounts.value.find((count) => count.name === correctionName.value) || null
+);
+const canCorrect = computed(() => correctableCounts.value.length > 0);
+const canSubmit = computed(() => canRecord.value || !!activeCorrection.value || uncertain.value);
+const editableLines = computed(() => {
+	if (!activeCorrection.value) return remainingLines.value;
+	const correctedItems = new Set(
+		(activeCorrection.value.items || []).map((item) => item.item_code)
+	);
+	return (plan.value?.lines || []).filter((line) => correctedItems.has(line.item_code));
+});
 const siteTimeZone = siteTimezone();
 const entries = computed(() =>
-	(plan.value?.lines || [])
-		.filter((line) => !line.count_name && String(quantities[line.item_code] ?? "").trim())
+	editableLines.value
+		.filter((line) => String(quantities[line.item_code] ?? "").trim())
 		.map((line) => ({
 			item_code: line.item_code,
 			counted_qty: String(quantities[line.item_code]).trim(),
 		}))
+);
+const canSave = computed(
+	() =>
+		entries.value.length > 0 &&
+		(!activeCorrection.value || entries.value.length === editableLines.value.length)
 );
 
 function localDateTime(date = new Date()) {
@@ -276,6 +343,7 @@ function readDraft() {
 		if (!saved || typeof saved !== "object" || typeof saved.entryKey !== "string") return;
 		entryKey.value = saved.entryKey;
 		if (typeof saved.countedAt === "string") countedAt.value = saved.countedAt;
+		if (typeof saved.replaces === "string") correctionName.value = saved.replaces;
 		if (saved.quantities && typeof saved.quantities === "object") {
 			for (const [itemCode, value] of Object.entries(saved.quantities)) {
 				if (typeof value === "string") quantities[itemCode] = value;
@@ -294,6 +362,7 @@ function writeDraft() {
 			JSON.stringify({
 				entryKey: entryKey.value,
 				countedAt: countedAt.value,
+				replaces: correctionName.value,
 				quantities: { ...quantities },
 			})
 		);
@@ -315,6 +384,12 @@ function inputId(itemCode) {
 	return "count-" + encodeURIComponent(itemCode);
 }
 
+function canEditLine(line) {
+	if (!canSubmit.value) return false;
+	if (!activeCorrection.value) return !line.count_name;
+	return (activeCorrection.value.items || []).some((item) => item.item_code === line.item_code);
+}
+
 function applyPlan(next) {
 	plan.value = next;
 	for (const line of next?.lines || []) {
@@ -327,8 +402,11 @@ function applyPlan(next) {
 	) {
 		uncertain.value = false;
 		uncertainPayload = null;
+		correctionName.value = "";
 		clearDraft();
 		message.value = "This physical-count record was already saved.";
+	} else if (correctionName.value && !activeCorrection.value && !uncertain.value) {
+		correctionName.value = "";
 	}
 }
 
@@ -353,11 +431,8 @@ function payload() {
 	return {
 		countedAt: toSiteDatetime(countedAt.value),
 		entries: entries.value.map((entry) => ({ ...entry })),
+		replaces: correctionName.value,
 	};
-}
-
-function equalPayload(left, right) {
-	return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function isConfirmedRefusal(cause) {
@@ -368,10 +443,10 @@ function isConfirmedRefusal(cause) {
 }
 
 async function submit(forceRetry = false) {
-	const next = payload();
+	const next = uncertain.value ? uncertainPayload : payload();
 	const request = props.request;
 	if (!next.entries.length || !next.countedAt || saving.value) return;
-	if (uncertain.value && (!forceRetry || !equalPayload(next, uncertainPayload))) {
+	if (uncertain.value && !forceRetry) {
 		error.value =
 			"Retry the exact saved values first. The prior save result is still not confirmed.";
 		return;
@@ -381,22 +456,40 @@ async function submit(forceRetry = false) {
 	message.value = "";
 	writeDraft();
 	try {
-		const result = await recordCounts(request, next.countedAt, next.entries, entryKey.value);
+		const result = next.replaces
+			? await correctCounts(
+					request,
+					next.replaces,
+					next.countedAt,
+					next.entries,
+					entryKey.value
+			  )
+			: await recordCounts(request, next.countedAt, next.entries, entryKey.value);
 		if (request !== props.request) return;
 		const saved = result?.saved?.[0];
 		message.value = saved?.idempotent
-			? "This physical-count record was already saved."
+			? next.replaces
+				? "This corrected physical-count record was already saved."
+				: "This physical-count record was already saved."
+			: next.replaces
+			? "Corrected physical-count record saved."
 			: "Physical-count record saved.";
 		uncertain.value = false;
 		uncertainPayload = null;
 		clearDraft();
 		await load();
 		entryKey.value = newEntryKey();
+		correctionName.value = "";
 		draftAllowed = true;
 		writeDraft();
 	} catch (cause) {
 		if (request !== props.request) return;
-		const failure = errMessage(cause, "Could not confirm the physical-count save.");
+		const failure = errMessage(
+			cause,
+			next.replaces
+				? "Could not confirm the corrected physical-count save."
+				: "Could not confirm the physical-count save."
+		);
 		if (isConfirmedRefusal(cause)) {
 			uncertain.value = false;
 			uncertainPayload = null;
@@ -419,9 +512,30 @@ function save() {
 function retry() {
 	submit(true);
 }
+function startCorrection(count) {
+	if (uncertain.value || activeCorrection.value || Number(count?.can_correct) !== 1) return;
+	correctionName.value = count.name;
+	entryKey.value = newEntryKey();
+	countedAt.value = localDateTime();
+	for (const item of count.items || []) quantities[item.item_code] = String(item.counted_qty);
+	message.value = "Correct the recorded quantities, then save the replacement observation.";
+	draftAllowed = true;
+	writeDraft();
+}
+function cancelCorrection() {
+	if (uncertain.value) return;
+	for (const item of activeCorrection.value?.items || []) quantities[item.item_code] = "";
+	correctionName.value = "";
+	entryKey.value = newEntryKey();
+	countedAt.value = localDateTime();
+	message.value = "Correction cancelled. No observation was changed.";
+	draftAllowed = true;
+	writeDraft();
+}
 function startAnotherRecord() {
 	if (uncertain.value) return;
 	draftAllowed = true;
+	correctionName.value = "";
 	entryKey.value = newEntryKey();
 	countedAt.value = localDateTime();
 	for (const key of Object.keys(quantities)) quantities[key] = "";
@@ -436,6 +550,7 @@ function openRequest() {
 	message.value = "";
 	uncertain.value = false;
 	uncertainPayload = null;
+	correctionName.value = "";
 	entryKey.value = newEntryKey();
 	countedAt.value = localDateTime();
 	for (const key of Object.keys(quantities)) delete quantities[key];
@@ -443,7 +558,7 @@ function openRequest() {
 	load();
 }
 
-watch([quantities, countedAt], writeDraft, { deep: true });
+watch([quantities, countedAt, correctionName], writeDraft, { deep: true });
 watch(
 	() => props.request,
 	(request, previous) => {
