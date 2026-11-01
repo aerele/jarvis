@@ -1083,7 +1083,8 @@ class TestBankReconApprovalPermissions(FrappeTestCase):
 		with impersonate(self.caller), self.assertRaises(frappe.PermissionError):
 			self._stage([first, second])
 		self.assertEqual(
-			frappe.db.count("Jarvis Approval Request", {"run": self.run.name, "ref_name": first["ref_name"]}), 0
+			frappe.db.count("Jarvis Approval Request", {"run": self.run.name, "ref_name": first["ref_name"]}),
+			0,
 		)
 		self.assertEqual(self._reviewer_shares(), before_shares)
 
@@ -1099,7 +1100,8 @@ class TestBankReconApprovalPermissions(FrappeTestCase):
 		with impersonate(self.caller), self.assertRaises(frappe.ValidationError):
 			self._stage([first, second])
 		self.assertEqual(
-			frappe.db.count("Jarvis Approval Request", {"run": self.run.name, "ref_name": first["ref_name"]}), 0
+			frappe.db.count("Jarvis Approval Request", {"run": self.run.name, "ref_name": first["ref_name"]}),
+			0,
 		)
 		self.assertEqual(self._reviewer_shares(), before_shares)
 
