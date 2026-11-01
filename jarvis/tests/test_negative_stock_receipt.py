@@ -348,9 +348,7 @@ class TestNegativeStockReceiptWritebackHook(unittest.TestCase):
 			patch.object(writeback.frappe, "get_doc", side_effect=[inst, start_run]),
 			patch.object(writeback, "_validate_findings", return_value=([], [])),
 			patch("jarvis.chat.operator_review.backend", return_value=None),
-			patch(
-				"jarvis.chat.agent_runs.clear_untrusted_negative_stock_artifacts"
-			) as clear_untrusted,
+			patch("jarvis.chat.agent_runs.clear_untrusted_negative_stock_artifacts") as clear_untrusted,
 			patch("jarvis.chat.agent_runs.record_delegate_run", return_value=finished_run) as finalize,
 			patch("jarvis.chat.agent_run_steps.record_step"),
 			patch(
