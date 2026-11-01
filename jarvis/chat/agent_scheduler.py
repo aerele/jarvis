@@ -1626,6 +1626,14 @@ def _stamp_scope_and_watermark(
 		return scope
 
 	values: dict = {}
+	permission_profile = None
+	try:
+		permission_profile = _permission_profile(run_as_user)
+		values["permission_profile"] = permission_profile
+	except Exception:
+		# A profile failure must not widen the run.  The installation's stamped
+		# value remains a conservative fallback for the delegate's coverage label.
+		permission_profile = None
 	scope = None
 	try:
 		scope = agent_scope.resolve_scope(inst)
@@ -1649,6 +1657,11 @@ def _stamp_scope_and_watermark(
 		scope = dict(scope or {})
 		scope["source_apps"] = list(source_apps)
 	if scope is not None:
+		scope = dict(scope)
+		# This value is bench-derived from the launch-time permission snapshot. It
+		# is scope metadata, not user configuration, so a delegate cannot turn a
+		# record-sliced read into a whole-workforce conclusion.
+		scope["scoped_visibility"] = _scope_has_scoped_visibility(permission_profile, inst)
 		values["scope_json"] = frappe.as_json(scope)
 
 	if scope and scope.get("company") and scope.get("to_date"):
@@ -1670,11 +1683,6 @@ def _stamp_scope_and_watermark(
 				title="jarvis agent: GL watermark computation failed",
 				message=frappe.get_traceback(),
 			)
-
-	try:
-		values["permission_profile"] = _permission_profile(run_as_user)
-	except Exception:
-		pass
 
 	if values:
 		frappe.db.set_value(RUN, run_name, values, update_modified=False)
@@ -1701,6 +1709,22 @@ def _permission_profile(user: str) -> str:
 	summary = {"roles": roles, "user_permissions": up_keys}
 	digest = hashlib.sha256(json.dumps(summary, sort_keys=True).encode()).hexdigest()
 	return json.dumps({"hash": digest, **summary})
+
+
+def _scope_has_scoped_visibility(permission_profile, inst) -> bool:
+	"""Read a fresh launch profile before falling back to an old install stamp."""
+	from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
+		_GL_SCOPED_DIMENSIONS,
+	)
+
+	if permission_profile:
+		try:
+			permissions = (json.loads(permission_profile) or {}).get("user_permissions") or {}
+			if any(permissions.get(dt) for dt in _GL_SCOPED_DIMENSIONS):
+				return True
+		except (TypeError, ValueError):
+			pass
+	return bool(inst.get("scoped_visibility"))
 
 
 def _explicit_config(listing, inst) -> dict:
@@ -1766,9 +1790,16 @@ def _audit_prompt(
 	# Bound record and comparison-period values live in the server-stamped scope,
 	# not in the mutable installation config.  Give the delegate the exact values
 	# it must copy into its evaluator input.
-	if scope and any(scope.get(k) for k in ("prior_period_from", "prior_period_to", "record_scope")):
+	if scope and any(
+		scope.get(k)
+		for k in ("prior_period_from", "prior_period_to", "record_scope", "scoped_visibility")
+	):
 		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
-			{k: scope[k] for k in ("prior_period_from", "prior_period_to", "record_scope") if scope.get(k)}
+			{
+				k: scope[k]
+				for k in ("prior_period_from", "prior_period_to", "record_scope", "scoped_visibility")
+				if scope.get(k)
+			}
 		)
 	# EXPLICIT CONFIG: ``_launch_audit`` resolves declared/derived values ONCE and
 	# stamps them on the Run before dispatch.  This function receives that exact

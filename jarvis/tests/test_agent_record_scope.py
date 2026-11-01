@@ -89,6 +89,7 @@ class TestComparisonPeriod(FrappeTestCase):
 			"prior_period_from": "2026-08-01",
 			"prior_period_to": "2026-08-31",
 			"record_scope": {"doctype": "Payroll Entry", "name": "Fake Batch"},
+			"scoped_visibility": True,
 		}
 		with patch.object(agent_scheduler, "_explicit_config", return_value={}):
 			prompt = agent_scheduler._audit_prompt(listing, inst, "manual", scope)
@@ -99,8 +100,27 @@ class TestComparisonPeriod(FrappeTestCase):
 			"2026-08-31",
 			"record_scope",
 			"Fake Batch",
+			"scoped_visibility",
 		):
 			self.assertIn(value, prompt)
+
+	def test_fresh_permission_profile_marks_scope_as_sliced(self):
+		inst = frappe._dict(agent="fake-scope-agent", config="{}", scoped_visibility=0)
+		profile = json.dumps({"user_permissions": {"Employee": ["EMP-1"]}})
+		resolved = {"company": "Fake Company", "to_date": "2026-09-30"}
+		with (
+			patch.object(agent_scope, "resolve_scope", return_value=resolved),
+			patch.object(agent_scheduler, "_permission_profile", return_value=profile),
+			patch("jarvis.chat.operator_review.backend", return_value=None),
+			patch.object(frappe.db, "sql", return_value=[frappe._dict(n=0, m=None)]),
+			patch.object(frappe.db, "set_value"),
+		):
+			stamped = agent_scheduler._stamp_scope_and_watermark("unused", inst, "test@example.invalid")
+		self.assertTrue(stamped["scoped_visibility"])
+		listing = frappe._dict(agent_slug="payroll-prerun-auditor", config_keys="[]")
+		with patch.object(agent_scheduler, "_explicit_config", return_value={}):
+			prompt = agent_scheduler._audit_prompt(listing, inst, "manual", stamped)
+		self.assertIn("scoped_visibility", prompt)
 
 
 class TestRecordScopedWriteback(FrappeTestCase):
