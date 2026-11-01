@@ -1786,8 +1786,7 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 	# for these tunables. Note ``Run.scope_json`` is a bench-side field that never reaches the
 	# container; the run MESSAGE is the only bench->delegate channel, so config must ride HERE.
 	if scope and any(
-		scope.get(k)
-		for k in ("prior_period_from", "prior_period_to", "record_scope", "scoped_visibility")
+		scope.get(k) for k in ("prior_period_from", "prior_period_to", "record_scope", "scoped_visibility")
 	):
 		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
 			{
