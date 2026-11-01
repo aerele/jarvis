@@ -191,11 +191,11 @@
 					Still in shadow preview - promote it to live under Configure first
 				</div>
 				<div
-					v-if="installation && apConfigurationBlocked"
+					v-if="installation && configurationBlocked"
 					class="mt-3 flex items-center gap-3 text-sm text-ink-gray-6"
 					role="status"
 				>
-					<span>{{ apConfigurationHint }}</span>
+					<span>{{ configurationHint }}</span>
 					<Button
 						v-if="tab !== 'configure'"
 						label="Complete configuration"
@@ -419,8 +419,17 @@
 							<!-- mt-2, matching AgentAccessEditor's own heading->content gap
 							     (its "Access" heading is immediately followed by an
 							     mt-2 description) - the Admin tab is the reference. -->
+							<StockVarianceConfigForm
+								v-if="agent.name === 'stock-variance-auditor'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
 							<CycleCountConfigForm
-								v-if="agent.name === 'cycle-count-planner-operator'"
+								v-else-if="agent.name === 'cycle-count-planner-operator'"
 								class="mt-2"
 								:config="parsedConfig"
 								:validation-errors="configurationIssues"
@@ -729,6 +738,7 @@ import AgentModelCard from "@/pages/agents/AgentModelCard.vue";
 import AgentInstallDialog from "@/pages/agents/AgentInstallDialog.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import CycleCountConfigForm from "@/pages/agents/CycleCountConfigForm.vue";
+import StockVarianceConfigForm from "@/pages/agents/StockVarianceConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import ShadowChip from "@/components/ShadowChip.vue";
@@ -1116,22 +1126,25 @@ const configurationDirty = ref(false);
 const isOperatorReview = computed(
 	() => agent.value?.nature === "Operator" && !!agent.value?.supports_manual_run
 );
+const isStockVariance = computed(() => agent.value?.name === "stock-variance-auditor");
+const requiresSavedConfiguration = computed(() => isOperatorReview.value || isStockVariance.value);
 const configurationIssues = computed(
-	() => (isOperatorReview.value && installation.value?.configuration_issues) || {}
+	() => (requiresSavedConfiguration.value && installation.value?.configuration_issues) || {}
 );
-const apConfigurationBlocked = computed(
+const configurationBlocked = computed(
 	() =>
-		isOperatorReview.value &&
+		requiresSavedConfiguration.value &&
 		(configurationDirty.value ||
 			savingConfig.value ||
 			!installation.value?.configuration_issues ||
 			Object.keys(configurationIssues.value).length > 0)
 );
-const apConfigurationHint = computed(() =>
-	configurationDirty.value
-		? "Save your configuration changes before running."
-		: "Complete and save the required review settings in Configure before running."
-);
+const configurationHint = computed(() => {
+	if (configurationDirty.value) return "Save your configuration changes before running.";
+	return isStockVariance.value
+		? "Complete and save the company, Warehouse scope, and stock reviewer in Configure before running."
+		: "Complete and save the required review settings in Configure before running.";
+});
 // On-demand run is offered for read-only auditors AND scribes (mirrors the
 // backend run_agent_now gate: nature in Auditor/Scribe, or an operator that
 // declares supports_manual_run); other operators draft through the Approval
@@ -1160,7 +1173,7 @@ const runDisabled = computed(
 			!["Auditor", "Scribe"].includes(agent.value.nature)) ||
 		!(agent.value && agent.value.allowed) ||
 		shadowScribeBlocked.value ||
-		apConfigurationBlocked.value
+		configurationBlocked.value
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
@@ -1174,7 +1187,7 @@ const runTooltip = computed(() => {
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
 	if (!agent.value.allowed) return "You do not have access to this agent";
-	if (apConfigurationBlocked.value) return apConfigurationHint.value;
+	if (configurationBlocked.value) return configurationHint.value;
 	// The shadow vocabulary is reviewer language (jarvis#1062): a plain user has
 	// no promote control and no say in the sign-off, so telling them to go and
 	// promote it names an action they cannot take.

@@ -35,7 +35,7 @@ unfollow_document unshare_doc update_comment update_doc
 REFUSED_TOOLS = frozenset(
 	"""
 create_custom_skill create_dashboard create_dashboard_chart finish_app_learning_run
-get_cycle_count_inputs recall record_agent_run record_app_wiki remember save_agent_dashboard
+get_cycle_count_inputs recall record_agent_run record_app_wiki remember run_stock_variance_evaluation save_agent_dashboard
 save_dashboard schedule_run update_wiki
 """.split()
 )

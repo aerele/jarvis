@@ -579,6 +579,34 @@ class TestWritebackIntegration(FrappeTestCase):
 		self.assertEqual(blob["result_state"], "partial")
 		self.assertEqual(blob["required_tokens"], [TOKEN])
 
+	def test_completed_subset_stays_partial_and_does_not_auto_resolve(self):
+		run1 = _mk_run(self.owner)
+		agent_runs.record_delegate_run(
+			run1,
+			self.inst,
+			[_finding(result_class="observed_fact")],
+			coverage={TOKEN: "evaluated"},
+			scope={"company": self.company},
+		)
+		name = frappe.db.get_value(FINDING, {"agent": SLUG, "state": "open"}, "name")
+		self.assertIsNotNone(name)
+
+		run2 = _mk_run(self.owner)
+		agent_runs.record_delegate_run(
+			run2,
+			self.inst,
+			[],
+			coverage={TOKEN: "evaluated"},
+			partial=True,
+			scope={"company": self.company},
+		)
+
+		self.assertEqual(frappe.db.get_value(RUN, run2.name, "status"), "partial")
+		self.assertEqual(frappe.db.get_value(RUN, run2.name, "result_state"), "partial")
+		self.assertEqual(frappe.db.get_value(FINDING, name, "state"), "open")
+		blob = json.loads(frappe.db.get_value(RUN, run2.name, "coverage_json"))
+		self.assertTrue(blob["partial"])
+
 	# ---- PP-5 auto-resolve provenance + launch immutability --------------- #
 	def test_auto_resolve_stamps_resolution_provenance(self):
 		# run 1 raises an open finding under the company scope
