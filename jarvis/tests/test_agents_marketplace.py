@@ -533,13 +533,23 @@ class TestAgentsMarketplace(unittest.TestCase):
 			],
 		)
 
-	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
-		"""An agent the registry declares no config_keys for (everyone but
-		close-auditor today) gets [], not null/absent - ConfigForm.vue can
-		always safely parse it."""
+	def test_sync_agent_listings_writes_cycle_count_config_keys(self):
+		"""Cycle Count owns a closed configuration namespace, including its list field."""
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(
-			json.loads(frappe.db.get_value(LISTING, "cycle-count-planner-operator", "config_keys")), []
+			json.loads(frappe.db.get_value(LISTING, "cycle-count-planner-operator", "config_keys")),
+			[
+				"company",
+				"from_date",
+				"to_date",
+				"count_history_from",
+				"warehouses",
+				"line_limit",
+				"recount_after_days",
+				"basis",
+				"review_scope",
+				"policy_version",
+			],
 		)
 
 	def test_sync_agent_listings_writes_record_scope_capability_from_registry(self):
@@ -672,10 +682,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# an already-deployed Published row down with it.
 	# ------------------------------------------------------------------ #
 	def test_dispatchless_operators_downgrade_to_coming_soon_on_resync(self):
-		operator_slugs = [
-			"cycle-count-planner-operator",
-			"reorder-replenishment-operator",
-		]
+		operator_slugs = ["reorder-replenishment-operator"]
 		agent_catalog.sync_agent_listings()
 		# Simulate the pre-change deployed state, as if synced before the flip.
 		for slug in operator_slugs:
@@ -692,7 +699,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 			)
 
 	def test_ap_ar_review_operators_publish_on_resync(self):
-		operator_slugs = ("ap-3way-match-operator", "ar-collections-operator")
+		operator_slugs = (
+			"ap-3way-match-operator",
+			"ar-collections-operator",
+			"cycle-count-planner-operator",
+		)
 		for slug in operator_slugs:
 			frappe.db.set_value(LISTING, slug, "status", "Coming Soon", update_modified=False)
 

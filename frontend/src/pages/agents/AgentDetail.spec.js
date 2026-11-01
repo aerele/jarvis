@@ -164,6 +164,14 @@ vi.mock("@/pages/agents/ConfigForm.vue", () => ({
 		template: "<div />",
 	},
 }));
+vi.mock("@/pages/agents/CycleCountConfigForm.vue", () => ({
+	default: {
+		name: "CycleCountConfigForm",
+		props: ["validationErrors"],
+		emits: ["save", "dirty"],
+		template: "<div />",
+	},
+}));
 // T6: covered by their own spec files (AgentModelCard.spec.js /
 // AgentInstallDialog.spec.js) - stubbed here like every other Configure-tab
 // child, so this file only ever asserts AgentDetail's OWN wiring (props
@@ -1468,6 +1476,31 @@ describe("bank reconciliation on-demand review", () => {
 		expect(wrapper.text()).toContain(
 			"Complete and save the required review settings in Configure before running."
 		);
+	});
+});
+
+describe("Cycle-Count Planner configuration", () => {
+	function cycleCountAgent(issues = {}) {
+		return baseAgent({
+			name: "cycle-count-planner-operator",
+			agent_slug: "cycle-count-planner-operator",
+			nature: "Operator",
+			supports_manual_run: true,
+			installation: installedInstallation({ configuration_issues: issues }),
+		});
+	}
+
+	it("uses the dedicated count form and keeps Run Now gated by its saved validation", async () => {
+		routeMock.hash = "#configure";
+		const issues = { warehouses: "Select a readable warehouse." };
+		const wrapper = await mountDetail(cycleCountAgent(issues));
+
+		expect(wrapper.findComponent({ name: "CycleCountConfigForm" }).exists()).toBe(true);
+		expect(wrapper.findComponent({ name: "ConfigForm" }).exists()).toBe(false);
+		expect(
+			wrapper.findComponent({ name: "CycleCountConfigForm" }).props("validationErrors")
+		).toEqual(issues);
+		expect(wrapper.find('[data-label="Run Now"]').attributes("disabled")).toBeDefined();
 	});
 });
 

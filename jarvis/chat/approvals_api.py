@@ -621,6 +621,11 @@ def get_approval(name: str) -> dict:
 		)
 	):
 		frappe.throw("Not permitted", frappe.PermissionError)
+	count_entry = 0
+	if doc.agent == "cycle-count-planner-operator" and doc.status == "Approved":
+		from jarvis.chat.cycle_count_entry import can_record_count_plan
+
+		count_entry = int(can_record_count_plan(doc))
 	return {
 		"name": doc.name,
 		"title": doc.title,
@@ -650,6 +655,7 @@ def get_approval(name: str) -> dict:
 		"creation": str(doc.creation or ""),
 		"owner": doc.owner,
 		"can_act": int(can_act and not doc.get("sheet")),  # a sheet's question: answered in the sheet
+		"count_entry": count_entry,
 	}
 
 
