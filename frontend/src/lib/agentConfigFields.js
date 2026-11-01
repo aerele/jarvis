@@ -259,22 +259,22 @@ export const KNOWN_CONFIG_KEYS = new Set(CONFIG_FIELD_SET.flatMap((f) => f.keys 
  * ("\"Materiality percentage\" must be a number."). */
 export const CONFIG_FIELD_LABELS = Object.fromEntries(
 	CONFIG_FIELD_SET.flatMap((f) =>
-		f.keys ? f.keys.map((k, i) => [k, f.labels[i]]) : [[f.key, f.label]],
-	),
+		f.keys ? f.keys.map((k, i) => [k, f.labels[i]]) : [[f.key, f.label]]
+	)
 );
 
 /** The subset of known keys that are numeric on save (everyone else is a
  * plain string, cleared to absent when blank). */
 export const NUMBER_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "number").map(
-	(f) => f.key,
+	(f) => f.key
 );
 
 /** Optional per-number constraints used by ConfigForm before it emits a save.
  * Values absent from this map retain the existing generic numeric behaviour. */
 export const NUMBER_CONFIG_CONSTRAINTS = Object.fromEntries(
 	CONFIG_FIELD_SET.filter(
-		(f) => f.type === "number" && (f.integer || f.min != null || f.max != null),
-	).map(({ key, integer, min, max }) => [key, { integer: !!integer, min, max }]),
+		(f) => f.type === "number" && (f.integer || f.min != null || f.max != null)
+	).map(({ key, integer, min, max }) => [key, { integer: !!integer, min, max }])
 );
 
 /** local form key -> its storage dot path ("company" flat, or
@@ -283,8 +283,8 @@ export const NUMBER_CONFIG_CONSTRAINTS = Object.fromEntries(
  * flat save of a key the bundle reads nested never reaches the evaluator. */
 export const KEY_TO_PATH = Object.fromEntries(
 	CONFIG_FIELD_SET.flatMap((f) =>
-		f.keys ? f.keys.map((k, i) => [k, (f.paths || f.keys)[i]]) : [[f.key, f.path || f.key]],
-	),
+		f.keys ? f.keys.map((k, i) => [k, (f.paths || f.keys)[i]]) : [[f.key, f.path || f.key]]
+	)
 );
 
 // ── dot-path get/set/delete over a plain JSON-shaped object ─────────────────

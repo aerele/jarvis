@@ -20,10 +20,10 @@ describe("bank reconciliation fields", () => {
 				key: "bank_account",
 				type: "link",
 				linkDoctype: "Bank Account",
-			}),
+			})
 		);
 		expect(CONFIG_FIELD_SET).toContainEqual(
-			expect.objectContaining({ key: "voucher_lookback_days", type: "number" }),
+			expect.objectContaining({ key: "voucher_lookback_days", type: "number" })
 		);
 		expect(NUMBER_CONFIG_KEYS).toContain("voucher_lookback_days");
 	});
@@ -57,7 +57,7 @@ describe("CONFIG_FIELD_SET", () => {
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
-			].sort(),
+			].sort()
 		);
 	});
 
@@ -92,7 +92,7 @@ describe("CONFIG_FIELD_SET", () => {
 
 	it("company and fiscal_year are link fields over the right DocType", () => {
 		const byKey = Object.fromEntries(
-			CONFIG_FIELD_SET.filter((f) => f.key).map((f) => [f.key, f]),
+			CONFIG_FIELD_SET.filter((f) => f.key).map((f) => [f.key, f])
 		);
 		expect(byKey.company).toMatchObject({ type: "link", linkDoctype: "Company" });
 		expect(byKey.fiscal_year).toMatchObject({ type: "link", linkDoctype: "Fiscal Year" });
@@ -116,13 +116,13 @@ describe("CONFIG_FIELD_SET", () => {
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
-			].sort(),
+			].sort()
 		);
 	});
 
 	it("keeps FEFO policy values in the declared nested namespace", () => {
 		const byKey = Object.fromEntries(
-			CONFIG_FIELD_SET.filter((f) => f.key).map((f) => [f.key, f]),
+			CONFIG_FIELD_SET.filter((f) => f.key).map((f) => [f.key, f])
 		);
 		expect(byKey.fefo_reviewer).toMatchObject({ path: "fefo.reviewer", type: "text" });
 		expect(byKey.fefo_near_expiry_days).toMatchObject({
@@ -192,7 +192,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 
 	it("the two subsets partition CONFIG_FIELD_SET with no overlap and no gap", () => {
 		expect(SCOPE_CONFIG_FIELDS.length + AGENT_SPECIFIC_CONFIG_FIELDS.length).toBe(
-			CONFIG_FIELD_SET.length,
+			CONFIG_FIELD_SET.length
 		);
 		const scopeSet = new Set(SCOPE_CONFIG_FIELDS);
 		for (const f of AGENT_SPECIFIC_CONFIG_FIELDS) {

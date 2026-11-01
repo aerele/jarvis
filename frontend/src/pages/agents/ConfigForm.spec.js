@@ -199,7 +199,7 @@ describe("AR review configuration", () => {
 		apiAgents.getARReviewDefaults.mockReturnValue(
 			new Promise((done) => {
 				resolve = done;
-			}),
+			})
 		);
 		const wrapper = mountForm({}, { configKeys });
 		await field(wrapper, "AR review policy reference").setValue("Reviewed-v2");
@@ -283,7 +283,7 @@ describe("bank reconciliation review configuration", () => {
 					bank_account: "Select an enabled company bank account.",
 					config: "Configuration must be a JSON object.",
 				},
-			},
+			}
 		);
 		expect(wrapper.text()).toContain("Select a company.");
 		await flushPromises();
@@ -301,7 +301,7 @@ describe("bank reconciliation review configuration", () => {
 				validationErrors: {
 					voucher_lookback_days: "Choose a voucher lookback from 0 to 90 calendar days.",
 				},
-			},
+			}
 		);
 		await flushPromises();
 		expect(wrapper.text()).toContain("Choose a voucher lookback from 0 to 90 calendar days.");
@@ -342,7 +342,7 @@ describe("AP explicit review configuration", () => {
 		const other = mountForm(config);
 		await flushPromises();
 		expect(fiscalYearPicker(wrapper).props("modelValue")).toEqual(
-			fiscalYearPicker(other).props("modelValue"),
+			fiscalYearPicker(other).props("modelValue")
 		);
 		expect(fiscalYearPicker(wrapper).props("options")).toEqual([
 			{ label: "2026-2027", value: "2026-2027" },
@@ -382,10 +382,10 @@ describe("AP explicit review configuration", () => {
 					policy_version: "Enter an AP matching policy reference (1–128 characters).",
 					price_tolerance_percent: "Enter a net-price tolerance from 0 to 100%.",
 				},
-			},
+			}
 		);
 		expect(wrapper.find('[role="status"]').text()).toContain(
-			"Complete these settings before running",
+			"Complete these settings before running"
 		);
 		await flushPromises();
 		expect(wrapper.text()).toContain("Could not load suggested settings");
@@ -455,7 +455,7 @@ describe("AP explicit review configuration", () => {
 				basis: "current_records",
 				review_scope: "document_matching_only",
 			},
-			{ configKeys },
+			{ configKeys }
 		);
 		await flushPromises();
 		expect(wrapper.text()).toContain("company, fiscal period");
@@ -485,7 +485,7 @@ describe("AP explicit review configuration", () => {
 		expect(field(wrapper, "Evidence cutoff").element.value).toBe("2026-09-30");
 		expect(field(wrapper, "Net-price tolerance").element.value).toBe("0");
 		expect(wrapper.text()).toContain(
-			"not accounting-standard certification or policy approval",
+			"not accounting-standard certification or policy approval"
 		);
 		expect(wrapper.emitted("dirty").at(-1)).toEqual([true]);
 		expect(wrapper.emitted("save")).toBeUndefined();
@@ -564,7 +564,7 @@ describe("AP explicit review configuration", () => {
 			apiAgents.getAPReviewDefaults.mockReturnValue(
 				new Promise((resolve) => {
 					resolveDefaults = resolve;
-				}),
+				})
 			);
 			const wrapper = mountForm({ company: "Example" }, { configKeys });
 			if (action === "edit") await field(wrapper, "Net-price tolerance").setValue("7");
@@ -572,7 +572,7 @@ describe("AP explicit review configuration", () => {
 			resolveDefaults(apDefaults());
 			await flushPromises();
 			expect(field(wrapper, "Net-price tolerance").element.value).toBe(
-				action === "edit" ? "7" : "",
+				action === "edit" ? "7" : ""
 			);
 			expect(field(wrapper, "Period from").element.value).toBe("");
 			wrapper.unmount();
@@ -585,13 +585,13 @@ describe("AP explicit review configuration", () => {
 			company === "Example"
 				? new Promise((resolve) => {
 						resolveOld = resolve;
-					})
+				  })
 				: Promise.resolve({
 						...apDefaults("Second"),
 						fiscal_years: [
 							{ name: "Second FY", from_date: "2026-07-01", to_date: "2027-06-30" },
 						],
-					}),
+				  })
 		);
 		const wrapper = mountForm({ company: "Example" }, { configKeys });
 		wrapper
@@ -622,7 +622,7 @@ describe("the known-settings form always renders, config empty or not", () => {
 	it("renders every field with an empty config", () => {
 		const w = mountForm({});
 		expect(w.text()).toContain(
-			"Settings this agent reads when it runs. Leave a field empty to use the default.",
+			"Settings this agent reads when it runs. Leave a field empty to use the default."
 		);
 		expect(w.text()).toContain("Company");
 		expect(w.text()).toContain("Fiscal year");
@@ -644,7 +644,7 @@ describe("the known-settings form always renders, config empty or not", () => {
 		expect(w.text()).toContain("Optional; overrides the fiscal year");
 		expect(w.text()).toContain("Used to judge which differences matter");
 		expect(w.text()).toContain(
-			"Auditors report checks as not evaluable when materiality is unset",
+			"Auditors report checks as not evaluable when materiality is unset"
 		);
 		expect(w.text()).toContain("Step used to detect round-number plugs");
 	});
@@ -853,7 +853,7 @@ describe("per-agent gating via the configKeys prop", () => {
 	it("fixed-asset controls preserve the server-evaluated posting gate", async () => {
 		const w = mountForm(
 			{ depr_run_posted: "false", enable_capex_signal: "true" },
-			{ configKeys: ["depr_run_posted", "enable_capex_signal"] },
+			{ configKeys: ["depr_run_posted", "enable_capex_signal"] }
 		);
 		expect(field(w, "Depreciation run status").element.value).toBe("false");
 		expect(field(w, "Capex/opex review signal").element.value).toBe("true");
@@ -908,7 +908,7 @@ describe("per-agent gating via the configKeys prop", () => {
 	it("a partial configKeys (dot paths) renders only the matching agent-specific fields, no note", () => {
 		const w = mountForm(
 			{},
-			{ configKeys: ["materiality.percentage", "materiality.rounding_step"] },
+			{ configKeys: ["materiality.percentage", "materiality.rounding_step"] }
 		);
 		expect(w.text()).toContain("Materiality percentage");
 		expect(w.text()).toContain("Rounding step");
@@ -928,7 +928,7 @@ describe("per-agent gating via the configKeys prop", () => {
 			{},
 			{
 				configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"],
-			},
+			}
 		);
 		expect(w.text()).toContain("Expiry reviewer");
 		expect(w.text()).toContain("Near-expiry window");
@@ -958,10 +958,10 @@ describe("per-agent gating via the configKeys prop", () => {
 					fefo_near_expiry_days:
 						"Set near-expiry days to a whole number from 1 through 3650.",
 				},
-			},
+			}
 		);
 		expect(w.text()).toContain(
-			"Expiry compliance needs a named reviewer and a near-expiry window.",
+			"Expiry compliance needs a named reviewer and a near-expiry window."
 		);
 		expect(w.text()).not.toContain("Leave a field empty to use the default.");
 		expect(w.text()).toContain("Name the expiry reviewer in the agent settings.");
@@ -999,15 +999,15 @@ describe("per-agent gating via the configKeys prop", () => {
 						"fefo.near_expiry_days",
 						"fefo.test_declaration",
 					],
-				},
+				}
 			);
 			await field(w, "Near-expiry window").setValue(value);
 			await w.find('[data-label="Save configuration"]').trigger("click");
 			expect(w.emitted("save")).toBeUndefined();
 			expect(w.text()).toContain(
-				'"Near-expiry window" must be a whole number from 1 to 3650.',
+				'"Near-expiry window" must be a whole number from 1 to 3650.'
 			);
-		},
+		}
 	);
 
 	it("FEFO accepts a whole near-expiry window in range and exposes browser constraints", async () => {
@@ -1015,7 +1015,7 @@ describe("per-agent gating via the configKeys prop", () => {
 			{},
 			{
 				configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"],
-			},
+			}
 		);
 		const nearExpiry = field(w, "Near-expiry window");
 		expect(nearExpiry.attributes("min")).toBe("1");
@@ -1031,7 +1031,7 @@ describe("per-agent gating via the configKeys prop", () => {
 			{},
 			{
 				configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"],
-			},
+			}
 		);
 		await field(w, "Expiry reviewer").setValue("Stock Controller");
 		await field(w, "Near-expiry window").setValue("30");

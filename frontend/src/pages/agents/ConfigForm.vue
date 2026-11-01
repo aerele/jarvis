@@ -6,11 +6,11 @@
 					? bankRecon
 						? "Bank reconciliation review reads one company bank account for the statement window below and proposes matches for a named reviewer. Manual runs only; nothing is reconciled, allocated or posted."
 						: arReview
-							? "AR review includes older open receivables, uses the evidence cutoff and prepares unsent reminder text only. Manual runs; no sending, Dunning creation or accounting changes."
-							: "AP document review uses the company, fiscal period, evidence cutoff and matching settings below. Manual runs only. Preview creates no review requests; live review never submits or pays an invoice."
+						? "AR review includes older open receivables, uses the evidence cutoff and prepares unsent reminder text only. Manual runs; no sending, Dunning creation or accounting changes."
+						: "AP document review uses the company, fiscal period, evidence cutoff and matching settings below. Manual runs only. Preview creates no review requests; live review never submits or pays an invoice."
 					: fefoConfiguration
-						? "Expiry compliance needs a named reviewer and a near-expiry window. Save both settings before running an audit."
-						: "Settings this agent reads when it runs. Leave a field empty to use the default."
+					? "Expiry compliance needs a named reviewer and a near-expiry window. Save both settings before running an audit."
+					: "Settings this agent reads when it runs. Leave a field empty to use the default."
 			}}
 		</p>
 		<div
@@ -226,8 +226,8 @@ const props = defineProps({
 // CONFIG_FIELD_SET's display order.
 const agentSpecificFields = computed(() =>
 	AGENT_SPECIFIC_CONFIG_FIELDS.filter((f) =>
-		(f.paths || [f.path]).some((p) => props.configKeys.includes(p)),
-	),
+		(f.paths || [f.path]).some((p) => props.configKeys.includes(p))
+	)
 );
 // Scope fields first (always), then whichever agent-specific fields apply -
 // the single list the template's v-for renders.
@@ -243,7 +243,7 @@ let defaultsRequest = 0;
 const visibleFields = computed(() => [
 	// Bank reconciliation reads a statement window only; a fiscal year does not apply.
 	...SCOPE_CONFIG_FIELDS.filter(
-		(field) => !(bankRecon.value && field.key === "fiscal_year"),
+		(field) => !(bankRecon.value && field.key === "fiscal_year")
 	).map((field) => {
 		if (!operatorReview.value || field.key === "fiscal_year") return field;
 		if (bankRecon.value && field.type === "date-range")
@@ -254,8 +254,8 @@ const visibleFields = computed(() => [
 				field.key === "company"
 					? "Suggested from your readable default company; confirm the company before saving."
 					: arReview.value
-						? "Fiscal-year review context only: all older open receivables remain included through the evidence cutoff. Choosing a year resets dates through today or year end."
-						: "Choosing a fiscal year resets this posting-date window through today or year end. Dates remain editable; clear Fiscal year for a cross-year period. Linked sources may predate it.",
+					? "Fiscal-year review context only: all older open receivables remain included through the evidence cutoff. Choosing a year resets dates through today or year end."
+					: "Choosing a fiscal year resets this posting-date window through today or year end. Dates remain editable; clear Fiscal year for a cross-year period. Linked sources may predate it.",
 		};
 	}),
 	...agentSpecificFields.value.map((field) => {
@@ -311,8 +311,8 @@ const shownErrors = computed(() =>
 			if (!(key in form)) return true;
 			const saved = getPath(props.config || {}, KEY_TO_PATH[key] || key);
 			return String(form[key]) === String(saved == null ? "" : saved);
-		}),
-	),
+		})
+	)
 );
 
 const emit = defineEmits(["save", "dirty"]);
@@ -416,7 +416,7 @@ function makeLinkField(doctype) {
 				if (data?.defaults.company !== form.company) return [];
 				return data.fiscal_years
 					.filter((fiscal) =>
-						fiscal.name.toLowerCase().includes(query.trim().toLowerCase()),
+						fiscal.name.toLowerCase().includes(query.trim().toLowerCase())
 					)
 					.map((fiscal) => ({ value: fiscal.name }));
 			}
@@ -427,13 +427,13 @@ function makeLinkField(doctype) {
 					.filter((row) =>
 						`${row.name} ${row.account || ""}`
 							.toLowerCase()
-							.includes(query.trim().toLowerCase()),
+							.includes(query.trim().toLowerCase())
 					)
 					.map((row) => ({ value: row.name }));
 			}
 			return searchLink(doctype, query);
 		},
-		{ mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })) },
+		{ mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })) }
 	);
 }
 
@@ -521,13 +521,11 @@ async function loadDefaults() {
 	const state = formState();
 	defaultsLoading.value = true;
 	try {
-		const data = await (
-			bankRecon.value
-				? getBankReconReviewDefaults
-				: arReview.value
-					? getARReviewDefaults
-					: getAPReviewDefaults
-		)(form.company || undefined);
+		const data = await (bankRecon.value
+			? getBankReconReviewDefaults
+			: arReview.value
+			? getARReviewDefaults
+			: getAPReviewDefaults)(form.company || undefined);
 		if (request !== defaultsRequest) return;
 		defaultsData.value = data;
 		defaultsMessage.value = data.message || "";
