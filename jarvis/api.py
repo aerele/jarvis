@@ -191,9 +191,19 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 				"start a new chat to continue. Then stop.",
 			)
 
-		from jarvis.tools._private_output import MODE, TOOLS
+		from jarvis.tools import _private_output
 
-		if result_mode is not None and (result_mode != MODE or shared_session or tool not in TOOLS):
+		# Private source snapshots never use the ordinary or shared transports.
+		# Reject here, before either route can claim a callback or collect ERP data.
+		if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
+			frappe.local.response.http_status_code = 400
+			return _error("InvalidArgumentError", "Private review evidence requires private audit output.")
+		if tool in _private_output.PRIVATE_SOURCE_TOOLS and shared_session:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Private review evidence is unavailable in shared chats.")
+		if result_mode is not None and (
+			result_mode != _private_output.MODE or shared_session or tool not in _private_output.TOOLS
+		):
 			frappe.local.response.http_status_code = 400
 			return _error("InvalidArgumentError", "This call cannot use private audit output.")
 		if shared_session:
@@ -422,6 +432,20 @@ def _dispatch_from_session(
 
 					agent_scheduler.fail_run(denial["run"], denial["run_error"])
 				return result
+			if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
+				message = "Private review evidence requires private audit output."
+				result = _error("InvalidArgumentError", message)
+				audit.record(
+					tool=tool,
+					args={},
+					ok=False,
+					error_code="InvalidArgumentError",
+					error_message=message,
+				)
+				_persist_and_publish_tool_call(
+					session_key=session_key, tool=tool, args={}, result=result, tool_call_id=tool_call_id
+				)
+				return result
 			if result_mode is not None and not _private_output.allowed(result_mode, tool, cap):
 				result = _error(
 					"CapabilityDeniedError", "Private audit output requires an active delegate contract."
@@ -522,7 +546,18 @@ def _dispatch_from_session(
 				try:
 					result, receipt = _private_output.prepare(result, tool=tool)
 				except InvalidArgumentError as exc:
-					result = receipt = _error("InvalidArgumentError", str(exc))
+					message = str(exc)
+					# The tool did run, but its private output cannot safely cross the
+					# delegate boundary. Keep a failure audit for that attempt without
+					# giving the audit logger any source result data.
+					audit.record(
+						tool=tool,
+						args=parsed_args,
+						ok=False,
+						error_code="InvalidArgumentError",
+						error_message=message,
+					)
+					result = receipt = _error("InvalidArgumentError", message)
 			# Recorded BEFORE the result budget trims the payload, so a step's row
 			# count is the count the tool actually returned, not the truncated one.
 			_ok = bool(isinstance(result, dict) and result.get("ok"))
