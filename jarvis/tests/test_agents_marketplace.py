@@ -459,7 +459,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertIn("close-auditor", published)
 		self.assertEqual(
 			frappe.db.get_value(LISTING, "attendance-leave-integrity-auditor", "version"),
-			"0.4.2",
+			"0.4.3",
 		)
 		# bank-recon-operator ships Published at 0.3.0 (proposals-only review).
 		self.assertEqual(frappe.db.get_value(LISTING, "bank-recon-operator", "status"), "Published")

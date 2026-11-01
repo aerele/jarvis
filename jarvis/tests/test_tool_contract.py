@@ -8,10 +8,12 @@ bench answers with ToolNotFoundError, or a delegate could not discover a tool th
 bench implements.
 """
 
+import json
 import os
 import tempfile
 from unittest.mock import patch
 
+import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.tools import _tool_contract as tc
@@ -122,7 +124,27 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "85034148e6cbf7da2da9561ea1bf4689f91bbe3aa0778d2452ddbb66dd3d9b30"
+	PINNED_CAPABILITY_DIGEST = "0b9a2cdf754e7292790c05a2a3845714478dce8a42154bfd3b991451115208f2"
+
+	def test_attendance_catalog_excludes_unused_presentation_tools(self):
+		with open(
+			frappe.get_app_path("jarvis", "agents", "registry.json"), encoding="utf-8"
+		) as registry_file:
+			entry = next(
+				row
+				for row in json.load(registry_file)["agents"]
+				if row["agent_slug"] == "attendance-leave-integrity-auditor"
+			)
+		self.assertEqual(entry["version"], "0.4.3")
+		self.assertEqual(
+			entry["tools_allow"],
+			[
+				"jarvis__query",
+				"jarvis__record_agent_run",
+				"jarvis__save_agent_dashboard",
+				"exec",
+			],
+		)
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
