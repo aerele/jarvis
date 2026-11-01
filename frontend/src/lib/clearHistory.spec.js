@@ -180,8 +180,7 @@ describe("clearHistoryOutcome", () => {
 			"count-plan-chat"
 		);
 		expect(out).toEqual({
-			notice:
-				"Deleted 2 chats. 1 chat was kept because it contains physical count evidence. Open Physical count plans to view it.",
+			notice: "Deleted 2 chats. 1 chat was kept because it contains physical count evidence. Open Physical count plans to view it.",
 			failed: false,
 			openChatKept: true,
 		});
@@ -207,7 +206,13 @@ describe("clearHistoryOutcome", () => {
 	it("ignores retained names that the server did not keep", () => {
 		expect(
 			clearHistoryOutcome(
-				{ ok: true, deleted: 0, skipped: 1, kept: ["live-chat"], retained_count_plan_names: ["other"] },
+				{
+					ok: true,
+					deleted: 0,
+					skipped: 1,
+					kept: ["live-chat"],
+					retained_count_plan_names: ["other"],
+				},
 				"live-chat"
 			).notice
 		).toBe(keptChatsNotice(1, 0));
@@ -286,7 +291,9 @@ describe("clearHistoryOutcome when chats could not be deleted", () => {
 describe("the confirmation", () => {
 	it("says that live replies and physical-count evidence are kept", () => {
 		expect(CLEAR_HISTORY_CONFIRM).toContain("permanently deleted");
-		expect(CLEAR_HISTORY_CONFIRM).toContain("reply in progress or physical count evidence are kept");
+		expect(CLEAR_HISTORY_CONFIRM).toContain(
+			"reply in progress or physical count evidence are kept"
+		);
 	});
 });
 

@@ -277,7 +277,8 @@ class TestCycleCountFreshReviewSnapshots(FrappeTestCase):
 		adapter = SimpleNamespace(
 			AGENT=review.AGENT,
 			fresh_source_snapshot=fresh_snapshot,
-			collect=lambda scope, policy: events.append(("collect", scope, policy)) or {"source_digest": "fresh"},
+			collect=lambda scope, policy: events.append(("collect", scope, policy))
+			or {"source_digest": "fresh"},
 		)
 		self.assertEqual(
 			operator_review._collect_current(adapter, {"scope": "current"}, {"policy": "current"}),
@@ -307,7 +308,9 @@ class TestCycleCountFreshReviewSnapshots(FrappeTestCase):
 			scope_json=frappe.as_json(scope),
 			input_snapshot_json="",
 		)
-		capture_state = frappe._dict(agent=review.AGENT, status="running", input_snapshot_json=frappe.as_json(snapshot))
+		capture_state = frappe._dict(
+			agent=review.AGENT, status="running", input_snapshot_json=frappe.as_json(snapshot)
+		)
 		with (
 			patch.object(operator_review.frappe.db, "get_value", return_value=capture_state),
 			patch.object(operator_review, "_collect_current", return_value=snapshot) as collect,
@@ -327,7 +330,9 @@ class TestCycleCountFreshReviewSnapshots(FrappeTestCase):
 			input_snapshot_json=frappe.as_json(snapshot),
 		)
 		installation = frappe._dict(name="fresh-stage-installation", reviewer=policy["reviewer"])
-		created = SimpleNamespace(name="fresh-stage-approval", flags=frappe._dict(), insert=lambda **_kwargs: None)
+		created = SimpleNamespace(
+			name="fresh-stage-approval", flags=frappe._dict(), insert=lambda **_kwargs: None
+		)
 
 		def stage_get_value(doctype, *_args, **_kwargs):
 			if doctype == "User":
@@ -2531,7 +2536,11 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		)
 		approved = self._plan()
 		frappe.db.set_value(
-			"Jarvis Approval Request", approved.name, "context_md", "COUNT-PLAN-CONTEXT-MARKER", update_modified=False
+			"Jarvis Approval Request",
+			approved.name,
+			"context_md",
+			"COUNT-PLAN-CONTEXT-MARKER",
+			update_modified=False,
 		)
 		frappe.set_user(self.counter)
 		try:
@@ -2553,7 +2562,9 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 
 		frappe.set_user(manager)
 		try:
-			with patch("jarvis.chat.cycle_count_permissions.frappe.has_permission", side_effect=no_native_stock_read):
+			with patch(
+				"jarvis.chat.cycle_count_permissions.frappe.has_permission", side_effect=no_native_stock_read
+			):
 				self.assertEqual(cycle_count_entry.list_count_plans()["rows"], [])
 				self.assertFalse(cycle_count_entry.can_record_count_plan(frappe._dict(name=approved.name)))
 				with self.assertRaises(frappe.PermissionError):
@@ -2640,7 +2651,9 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		frappe.clear_cache(user=manager)
 		frappe.set_user(manager)
 		try:
-			with patch("jarvis.chat.cycle_count_permissions.frappe.has_permission", side_effect=no_native_stock_read):
+			with patch(
+				"jarvis.chat.cycle_count_permissions.frappe.has_permission", side_effect=no_native_stock_read
+			):
 				rows = approvals_api.list_approvals(status="Pending", limit=1)
 		finally:
 			frappe.set_user("Administrator")
@@ -2696,16 +2709,16 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		)
 		frappe.db.commit()
 		try:
-			agents_api._uninstall_cascade(frappe.get_doc("Jarvis Agent Installation", installation.name), True)
+			agents_api._uninstall_cascade(
+				frappe.get_doc("Jarvis Agent Installation", installation.name), True
+			)
 
 			self.assertFalse(frappe.db.exists("Jarvis Agent Installation", installation.name))
 			self.assertFalse(frappe.db.exists("Jarvis Chat Session", {"session_key": session_key}))
 			self.assertEqual(
 				frappe.db.get_value("Jarvis Approval Request", approved.name, "run"), approved.run
 			)
-			self.assertEqual(
-				frappe.db.get_value("Jarvis Approval Request", pending.name, "run"), pending.run
-			)
+			self.assertEqual(frappe.db.get_value("Jarvis Approval Request", pending.name, "run"), pending.run)
 			self.assertTrue(
 				frappe.db.exists("Jarvis Agent Run", pending.run),
 				"a pending Cycle-Count review must not retain a dangling run Link",
@@ -2740,7 +2753,9 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			frappe.db.delete("Jarvis Chat Session", {"session_key": session_key})
 			frappe.db.delete("Jarvis Agent Installation", {"name": installation.name})
 			frappe.db.delete("Jarvis Agent Activity", {"installation": installation.name})
-			frappe.db.delete("Jarvis Conversation", {"name": ["in", [approved.conversation, pending.conversation]]})
+			frappe.db.delete(
+				"Jarvis Conversation", {"name": ["in", [approved.conversation, pending.conversation]]}
+			)
 			frappe.db.commit()
 
 	def test_stock_variance_reads_only_inside_its_active_server_bound_scope(self):
