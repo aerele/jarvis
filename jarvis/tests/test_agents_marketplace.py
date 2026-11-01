@@ -457,6 +457,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(r2["created"], 0)  # nothing created the second time
 		published = set(frappe.get_all(LISTING, filters={"status": "Published"}, pluck="name"))
 		self.assertIn("close-auditor", published)
+		self.assertEqual(
+			frappe.db.get_value(LISTING, "attendance-leave-integrity-auditor", "version"),
+			"0.4.2",
+		)
 		# bank-recon-operator ships Published at 0.3.0 (proposals-only review).
 		self.assertEqual(frappe.db.get_value(LISTING, "bank-recon-operator", "status"), "Published")
 		# Every shipped agent is delegate and BODY-FREE: the proprietary SKILL must
