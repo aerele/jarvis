@@ -51,6 +51,7 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		self._validate_run_as_user()
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
+		self._validate_agent_config()
 		self._validate_schedule_budget()
 		self._guard_activation_transition()
 
@@ -224,6 +225,33 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		from jarvis.chat.macro_scheduler import validate_schedule_day_of_month_or_throw
 
 		validate_schedule_day_of_month_or_throw(self.schedule_day_of_month)
+
+	def _validate_agent_config(self):
+		"""Validate newly saved agent settings that have bench-side invariants.
+
+		Only validate when ``config`` changes on an existing row. A legacy invalid
+		configuration must remain editable and disableable. New writes, on the other
+		hand, must not let Advanced JSON or a direct API call bypass the browser
+		validation for the FEFO evaluator's integer expiry window.
+		"""
+		if not self.is_new() and not self.has_value_changed("config"):
+			return
+		from jarvis.chat.agent_scope import FEFO_AGENT, validate_fefo_near_expiry_days
+
+		if self.agent != FEFO_AGENT:
+			return
+		try:
+			config = frappe.parse_json(self.config or "{}")
+		except Exception:
+			return
+		if not isinstance(config, dict):
+			return
+		from jarvis.exceptions import InvalidArgumentError
+
+		try:
+			validate_fefo_near_expiry_days(config)
+		except InvalidArgumentError as exc:
+			frappe.throw(str(exc))
 
 	def _validate_schedule_budget(self):
 		"""A14: warn (do not hard-block) when an enabled schedule's expected monthly

@@ -201,6 +201,9 @@ export const CONFIG_FIELD_SET = [
 		path: "fefo.near_expiry_days",
 		label: "Near-expiry window",
 		type: "number",
+		integer: true,
+		min: 1,
+		max: 3650,
 		suffix: "calendar days",
 		help: "Required. Include batches that expire within 1 to 3650 calendar days.",
 	},
@@ -264,6 +267,14 @@ export const CONFIG_FIELD_LABELS = Object.fromEntries(
  * plain string, cleared to absent when blank). */
 export const NUMBER_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "number").map(
 	(f) => f.key
+);
+
+/** Optional per-number constraints used by ConfigForm before it emits a save.
+ * Values absent from this map retain the existing generic numeric behaviour. */
+export const NUMBER_CONFIG_CONSTRAINTS = Object.fromEntries(
+	CONFIG_FIELD_SET.filter(
+		(f) => f.type === "number" && (f.integer || f.min != null || f.max != null),
+	).map(({ key, integer, min, max }) => [key, { integer: !!integer, min, max }]),
 );
 
 /** local form key -> its storage dot path ("company" flat, or

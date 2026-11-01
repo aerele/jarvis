@@ -6,6 +6,7 @@ import {
 	KNOWN_CONFIG_KEYS,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
+	NUMBER_CONFIG_CONSTRAINTS,
 	KEY_TO_PATH,
 	getPath,
 	setPath,
@@ -127,10 +128,21 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(byKey.fefo_near_expiry_days).toMatchObject({
 			path: "fefo.near_expiry_days",
 			type: "number",
+			integer: true,
+			min: 1,
+			max: 3650,
 		});
 		expect(byKey.fefo_test_declaration).toMatchObject({
 			path: "fefo.test_declaration",
 			type: "text",
+		});
+	});
+
+	it("declares the FEFO near-expiry integer range once for the form", () => {
+		expect(NUMBER_CONFIG_CONSTRAINTS.fefo_near_expiry_days).toEqual({
+			integer: true,
+			min: 1,
+			max: 3650,
 		});
 	});
 

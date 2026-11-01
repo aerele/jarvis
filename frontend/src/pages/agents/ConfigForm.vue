@@ -117,6 +117,9 @@
 					:label="f.label"
 					:description="f.help"
 					:placeholder="f.placeholder"
+					:min="f.min"
+					:max="f.max"
+					:step="f.integer ? 1 : undefined"
 					:modelValue="form[f.key]"
 					@update:modelValue="(v) => (form[f.key] = v)"
 				>
@@ -157,6 +160,7 @@
 
 		<div class="mt-4">
 			<Button label="Save configuration" :loading="saving" @click="save" />
+			<ErrorMessage class="mt-2" :message="saveError" />
 			<p v-if="operatorReview" class="mt-2 text-p-xs text-ink-gray-5">
 				You can save unfinished setup. Run Now stays unavailable until all required
 				settings are valid and saved. Suggestions are not applied to a run until you save.
@@ -191,6 +195,7 @@ import {
 	AGENT_SPECIFIC_CONFIG_FIELDS,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
+	NUMBER_CONFIG_CONSTRAINTS,
 	KEY_TO_PATH,
 	getPath,
 	setPath,
@@ -328,6 +333,7 @@ const form = reactive({
 });
 const advanced = ref("{}");
 const advancedError = ref("");
+const saveError = ref("");
 const initialState = ref("");
 
 // Only rendered fields count: a default filled into a field this agent never
@@ -532,6 +538,7 @@ onBeforeUnmount(() => {
 });
 
 function save() {
+	saveError.value = "";
 	// 1) advanced JSON must parse to an object
 	let base = {};
 	const raw = advanced.value.trim();
@@ -569,7 +576,17 @@ function save() {
 		if (NUMBER_CONFIG_KEYS.includes(key)) {
 			const n = Number(v);
 			if (isNaN(n)) {
-				advancedError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
+				saveError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
+				return;
+			}
+			const constraints = NUMBER_CONFIG_CONSTRAINTS[key];
+			if (
+				constraints &&
+				((constraints.integer && !/^\d+$/.test(v)) ||
+					(constraints.min != null && n < constraints.min) ||
+					(constraints.max != null && n > constraints.max))
+			) {
+				saveError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a whole number from ${constraints.min} to ${constraints.max}.`;
 				return;
 			}
 			setPath(merged, path, n);

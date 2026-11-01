@@ -455,7 +455,7 @@ def _dispatch(
 	"""
 	from jarvis import admin_client
 	from jarvis._redis_lock import redis_lock
-	from jarvis.chat import agent_models
+	from jarvis.chat import agent_models, agent_scope
 
 	with redis_lock(_dispatch_lock_name(row.name), timeout_s=DISPATCH_LOCK_TTL_S) as acquired:
 		if not acquired:
@@ -509,6 +509,18 @@ def _dispatch(
 				# Only a human or a platform upgrade fixes these: one notice, slot spent.
 				_notify_owner(row.owner, row, reason=str(e))
 				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- spent slot survives the sweep
+			return
+		except agent_scope.InvalidFefoRecordScopeError:
+			# A declared FEFO Warehouse root is a persistent configuration refusal,
+			# not an infrastructure outage. It must never widen into company scope,
+			# and retrying it every 55 minutes only creates Error Logs until an owner
+			# corrects the declaration. Record a safe action for the owner and consume
+			# this cadence slot. Do not include the Warehouse name: the scheduler runs
+			# as Administrator and the row may not be visible to the installation owner.
+			_record_failed(
+				row,
+				"scheduled FEFO audit skipped: update or remove the declared Warehouse scope in agent configuration",
+			)
 			return
 		except Exception:
 			frappe.log_error(
@@ -1632,9 +1644,13 @@ def _stamp_scope_and_watermark(
 	scope = None
 	try:
 		scope = agent_scope.resolve_scope(inst)
-	except Exception:
+	except Exception as exc:
 		if agent_scope.requires_bound_scope(inst):
 			agent_slug = (inst.get("agent") or inst.get("agent_slug") or "").strip()
+			if agent_slug == agent_scope.FEFO_AGENT and isinstance(
+				exc, agent_scope.InvalidFefoRecordScopeError
+			):
+				raise
 			title = {
 				"negative-stock-valuation-auditor": "jarvis agent: Negative stock scope resolution refused launch",
 				"fefo-expiry-compliance-auditor": "jarvis agent: FEFO scope resolution refused launch",

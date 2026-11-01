@@ -832,7 +832,7 @@ class TestAgentIdentity(unittest.TestCase):
 			(good, {"company": "Scope Co", "is_group": 0}, False),
 		):
 			with self.subTest(bad=bad, warehouse=warehouse, warehouse_readable=warehouse_readable):
-				with self.assertRaises(InvalidArgumentError):
+				with self.assertRaises(agent_scope.InvalidFefoRecordScopeError):
 					resolve(bad, warehouse, warehouse_readable)
 				invalid_inst = frappe._dict(name="FEFO-INST", config=frappe.as_json(bad))
 				invalid_snapshot = agent_scheduler._sanitize_delegated_engagement_config(
@@ -845,10 +845,62 @@ class TestAgentIdentity(unittest.TestCase):
 				self.assertNotIn("record_scope", invalid_prompt)
 				self.assertNotIn("Jarvis Agent Installation", invalid_prompt)
 
+		# A database failure is not a bad declaration. It remains a retryable
+		# verification failure, preserves its exception cause, and never falls back
+		# to a company-wide scope.
+		db_failure = RuntimeError("Warehouse lookup unavailable")
+		inst = frappe._dict(
+			agent=agent_scope.FEFO_AGENT, name="FEFO-INST", config=frappe.as_json(good)
+		)
+		with (
+			mock.patch.object(agent_scope, "_resolve", return_value=dict(base)),
+			mock.patch.object(agent_scope.frappe.db, "get_value", side_effect=db_failure),
+			mock.patch.object(agent_scope.frappe, "has_permission") as has_permission,
+		):
+			with self.assertRaises(InvalidArgumentError) as raised:
+				agent_scope.resolve_scope(inst)
+		self.assertNotIsInstance(raised.exception, agent_scope.InvalidFefoRecordScopeError)
+		self.assertIs(raised.exception.__cause__, db_failure)
+		has_permission.assert_not_called()
+
+	def test_fefo_near_expiry_window_rejects_only_invalid_supplied_values(self):
+		"""Advanced JSON and direct API saves share the evaluator's strict integer rule."""
+		from jarvis.chat import agent_scope
+		from jarvis.exceptions import InvalidArgumentError
+
+		for value in (True, 0, -1, 1.5, 3651, "30", None):
+			with self.subTest(value=value):
+				with self.assertRaises(InvalidArgumentError):
+					agent_scope.validate_fefo_near_expiry_days({"fefo": {"near_expiry_days": value}})
+		self.assertIsNone(agent_scope.validate_fefo_near_expiry_days({"fefo": {}}))
+		self.assertIsNone(agent_scope.validate_fefo_near_expiry_days({"fefo": {"near_expiry_days": 30}}))
+
+	def test_fefo_near_expiry_window_is_checked_at_the_installation_save_boundary(self):
+		"""A direct config save cannot bypass the browser's FEFO integer range check."""
+		from jarvis.chat.agent_scope import FEFO_AGENT
+		from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
+			JarvisAgentInstallation,
+		)
+
+		doc = mock.Mock(agent=FEFO_AGENT, config=frappe.as_json({"fefo": {"near_expiry_days": 0}}))
+		doc.is_new.return_value = False
+		doc.has_value_changed.return_value = True
+		with self.assertRaises(frappe.ValidationError) as raised:
+			JarvisAgentInstallation._validate_agent_config(doc)
+		self.assertIn("FEFO near_expiry_days must be an integer from 1 to 3650", str(raised.exception))
+
+		doc.config = frappe.as_json({"fefo": {"near_expiry_days": 30}})
+		JarvisAgentInstallation._validate_agent_config(doc)
+
+		# Do not strand an owner who needs to repair a legacy invalid row by saving
+		# another field first. The changed config itself is still rejected above.
+		doc.has_value_changed.return_value = False
+		doc.config = frappe.as_json({"fefo": {"near_expiry_days": 0}})
+		JarvisAgentInstallation._validate_agent_config(doc)
+
 	def test_fefo_scope_resolution_error_refuses_the_launch_path(self):
 		"""A declared invalid FEFO root cannot turn into a broad unscoped run."""
 		from jarvis.chat import agent_scope, operator_review
-		from jarvis.exceptions import InvalidArgumentError
 
 		inst = frappe._dict(agent="fefo-expiry-compliance-auditor", name="FEFO-INST")
 		with (
@@ -856,18 +908,18 @@ class TestAgentIdentity(unittest.TestCase):
 			mock.patch.object(
 				agent_scope,
 				"resolve_scope",
-				side_effect=InvalidArgumentError("FEFO record_scope must name one Warehouse leaf"),
+				side_effect=agent_scope.InvalidFefoRecordScopeError(
+					"FEFO record_scope must name one Warehouse leaf"
+				),
 			),
 			mock.patch.object(agent_scheduler.frappe, "log_error") as log_error,
 			mock.patch.object(agent_scheduler.frappe.db, "set_value") as set_value,
 		):
-			with self.assertRaises(InvalidArgumentError):
+			with self.assertRaises(agent_scope.InvalidFefoRecordScopeError):
 				agent_scheduler._stamp_scope_and_watermark("FEFO-RUN", inst, self.owner)
 
 		set_value.assert_not_called()
-		self.assertEqual(
-			log_error.call_args.kwargs["title"], "jarvis agent: FEFO scope resolution refused launch"
-		)
+		log_error.assert_not_called()
 
 	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner

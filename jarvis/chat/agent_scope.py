@@ -30,6 +30,32 @@ FEFO_AGENT = "fefo-expiry-compliance-auditor"
 _NEGATIVE_STOCK_OUTPUT_SCOPE_KEYS = ("company", "from_date", "to_date", "report_date")
 
 
+class InvalidFefoRecordScopeError(InvalidArgumentError):
+	"""A saved FEFO Warehouse root needs an owner correction.
+
+	This excludes verification failures such as a database error. Those can clear
+	on their own and must remain on the scheduler retry path. This error only
+	represents a present declaration that cannot ever be used without a change to
+	the declaration, Warehouse, company, or read permission.
+	"""
+
+
+def validate_fefo_near_expiry_days(config: dict) -> None:
+	"""Reject a supplied FEFO expiry window that the evaluator cannot use.
+
+	A missing value remains an incomplete configuration and is handled by the
+	delegate's existing setup guidance. Validate a supplied value at the bench
+	write boundary too, because Advanced JSON and direct API callers bypass the
+	form's browser validation.
+	"""
+	namespace = config.get("fefo")
+	if not isinstance(namespace, dict) or "near_expiry_days" not in namespace:
+		return
+	days = namespace["near_expiry_days"]
+	if type(days) is not int or not 1 <= days <= 3650:
+		raise InvalidArgumentError("FEFO near_expiry_days must be an integer from 1 to 3650")
+
+
 def _agent_slug(installation) -> str:
 	return str(installation.get("agent") or installation.get("agent_slug") or "").strip()
 
@@ -135,7 +161,7 @@ def _fefo_warehouse_scope(config: dict, company: str) -> dict | None:
 		return None
 	boundary = negative_stock_record_scope(namespace["record_scope"])
 	if boundary is None:
-		raise InvalidArgumentError("FEFO record_scope must name one Warehouse leaf")
+		raise InvalidFefoRecordScopeError("FEFO record_scope must name one Warehouse leaf")
 
 	name = boundary["name"]
 	try:
@@ -149,7 +175,9 @@ def _fefo_warehouse_scope(config: dict, company: str) -> dict | None:
 		or warehouse.get("company") != company
 		or warehouse.get("is_group") != 0
 	):
-		raise InvalidArgumentError("FEFO record_scope must be a readable Warehouse leaf in the company")
+		raise InvalidFefoRecordScopeError(
+			"FEFO record_scope must be a readable Warehouse leaf in the company"
+		)
 	return boundary
 
 
