@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import frappe
@@ -30,10 +31,23 @@ class TestDerivedConfig(FrappeTestCase):
 		self.assertFalse(out["statutory_schema"]["india_fields_present"]["micr_code"])
 		self.assertTrue(out["statutory_schema"]["india_fields_present"]["pan_number"])
 
+	def test_statutory_schema_failure_is_omitted_and_cannot_fall_back_to_customer_value(self):
+		inst = _inst(config=json.dumps({"statutory_schema": {"forged": True}}))
+		with (
+			patch.object(
+				derived_config.frappe.db, "has_column", side_effect=RuntimeError("schema unavailable")
+			),
+			patch.object(derived_config.frappe, "log_error") as le,
+		):
+			out = agent_scheduler._explicit_config({"config_keys": ["statutory_schema"]}, inst)
+		self.assertEqual(out, {})
+		le.assert_called_once()
+		self.assertEqual(le.call_args.kwargs["title"], "derived_config provider failed")
+		self.assertIn("statutory_schema", le.call_args.kwargs["message"])
+		self.assertNotIn("forged", str(le.call_args))
+
 	def test_statutory_wage_basis_reaches_the_agent_unchanged(self):
 		basis = {"source": "salary_detail", "component_classes": {"Fake Basic": "included"}}
-		import json
-
 		config = {"statutory": {"wage_basis": basis}, "other": {"forged": True}}
 		out = agent_scheduler._explicit_config(
 			{"config_keys": ["statutory"]}, _inst(config=json.dumps(config))
