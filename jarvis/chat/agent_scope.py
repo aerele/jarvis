@@ -20,6 +20,8 @@ The helper runs under the caller's identity (the run-as user in
 resolved for that user.
 """
 
+from datetime import date
+
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
@@ -124,6 +126,24 @@ def _attendance_department_scope(config: dict, company: str) -> dict:
 			"Attendance record_scope must be a readable leaf Department in the company"
 		)
 	return {"doctype": "Department", "name": name}
+
+
+def as_of_date(scope: dict | None) -> str | None:
+	"""Return the server-owned report-date cap for a resolved scope.
+
+	``to_date`` can be a future fiscal-year end.  A run must not call future
+	postings part of its observed ledger, so the effective as-of boundary is the
+	earlier of that endpoint and the stamped site report date.  Invalid scope
+	values return ``None`` so callers can fail closed instead of guessing.
+	"""
+	if not isinstance(scope, dict):
+		return None
+	try:
+		to_date = date.fromisoformat(str(scope.get("to_date") or "")[:10])
+		report_date = date.fromisoformat(str(scope.get("report_date") or scope.get("to_date") or "")[:10])
+	except (TypeError, ValueError):
+		return None
+	return min(to_date, report_date).isoformat()
 
 
 def resolve_scope(installation) -> dict:

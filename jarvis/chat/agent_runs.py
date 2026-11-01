@@ -450,6 +450,17 @@ def _safe_date(value):
 		return None
 
 
+def _scope_from_run(run_doc) -> dict | None:
+	"""Parse the server-stamped launch scope without trusting a delegate value."""
+	import json as _json
+
+	try:
+		scope = _json.loads(run_doc.get("scope_json") or "{}")
+	except (TypeError, ValueError):
+		return None
+	return scope if isinstance(scope, dict) else None
+
+
 def _reassign_owner(doctype: str, name: str, owner: str) -> None:
 	"""Hand a server-inserted (ignore_permissions) row to the installation owner
 	so ``if_owner`` shows it to the right customer only — mirrors macros.py."""
@@ -615,8 +626,10 @@ def _watermark_drift(run_doc, scope: dict) -> bool:
 	if run_doc.get("agent") in REVIEW_OPERATORS:
 		return False
 	stamped_count = run_doc.get("wm_row_count")
+	from jarvis.chat.agent_scope import as_of_date
+
 	company = (scope or {}).get("company")
-	to_date = (scope or {}).get("to_date")
+	to_date = as_of_date(scope)
 	if stamped_count is None or not company or not to_date:
 		return False
 	try:
@@ -652,8 +665,10 @@ def _scoped_visibility(run_doc, inst) -> bool:
 	run-as user's user_permissions snapshotted AT LAUNCH — the authoritative signal),
 	so a User Permission added AFTER install is caught even though the installation's
 	``scoped_visibility`` flag (stamped only at map/backfill time) has gone stale.
-	Falls back to that stamped flag when the profile is absent (a legacy run, or one
-	whose profile computation failed)."""
+	For Ledger Scrutiny, the server-owned launch scope also records this fact. Use
+	it before the installation fallback when the profile is absent, so a failed
+	permission-profile stamp cannot let a record-sliced Ledger run auto-resolve
+	findings. Other agents retain the established installation fallback."""
 	import json as _json
 
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
@@ -663,6 +678,10 @@ def _scoped_visibility(run_doc, inst) -> bool:
 
 	if run_doc.get("agent") in REVIEW_OPERATORS:
 		return False
+	if run_doc.get("agent") == "ledger-scrutiny-auditor":
+		launch_scope = _scope_from_run(run_doc)
+		if isinstance(launch_scope, dict) and launch_scope.get("scoped_visibility") is True:
+			return True
 	profile = run_doc.get("permission_profile")
 	if profile:
 		try:
@@ -752,6 +771,14 @@ def record_delegate_run(
 	required_coverage_tokens, advisory_token_set = _listing_token_sets(agent)
 	coverage = coverage or {}
 	scope = scope or {}
+	if agent == "ledger-scrutiny-auditor":
+		# Ledger Scrutiny results are meaningful only for the exact company,
+		# period and run-as visibility state stamped before dispatch.  The
+		# delegate echoes that scope for a reproducible evaluator digest, but it
+		# must never be able to replace the server snapshot at writeback.
+		from jarvis.chat.ledger_scrutiny_scope import bind_writeback_scope
+
+		scope = bind_writeback_scope(_scope_from_run(run_doc), scope)
 	dropped = dropped or []
 	company = (scope.get("company") or "").strip()
 
