@@ -1000,14 +1000,21 @@ class TestSnapshotConfigReadBoundary(FrappeTestCase):
 		key = f"agent:agent-{slug}:snapshot-config-read:{frappe.generate_hash()}"
 		contract = _snapshot(tools_allow, "auditor", [])
 		contract["engagement_config_json"] = frappe.as_json(stamped)
-		with impersonate(self.run_as), mock.patch.object(JarvisAgentInstallation, "_validate_run_as_permissions"):
+		with (
+			impersonate(self.run_as),
+			mock.patch.object(JarvisAgentInstallation, "_validate_run_as_permissions"),
+		):
 			run = _mk_run(slug, self.run_as, key, contract)
 		if frappe.get_meta(RUN).has_field("engagement_config_json"):
-			self.assertEqual(frappe.parse_json(frappe.db.get_value(RUN, run, "engagement_config_json")), stamped)
+			self.assertEqual(
+				frappe.parse_json(frappe.db.get_value(RUN, run, "engagement_config_json")), stamped
+			)
 		installation = frappe.db.get_value(RUN, run, "installation")
 		marker = f"mutable-installation-config-{slug}"
 		mutable = {"marker": marker, "source": "installation-after-launch"}
-		frappe.db.set_value(INSTALLATION, installation, "config", frappe.as_json(mutable), update_modified=False)
+		frappe.db.set_value(
+			INSTALLATION, installation, "config", frappe.as_json(mutable), update_modified=False
+		)
 		return {
 			"key": key,
 			"run": run,
@@ -1063,9 +1070,7 @@ class TestSnapshotConfigReadBoundary(FrappeTestCase):
 							"from": "jarvis agent installation",
 							"alias": "install",
 							"select": ["install.name", "install.config"],
-							"where": [
-								{"field": "install.name", "op": "=", "value": state["installation"]}
-							],
+							"where": [{"field": "install.name", "op": "=", "value": state["installation"]}],
 						}
 					},
 				)
@@ -1096,9 +1101,7 @@ class TestSnapshotConfigReadBoundary(FrappeTestCase):
 							"from": "Version",
 							"alias": "version",
 							"select": ["version.data"],
-							"where": [
-								{"field": "version.ref_doctype", "op": "=", "value": INSTALLATION}
-							],
+							"where": [{"field": "version.ref_doctype", "op": "=", "value": INSTALLATION}],
 						}
 					},
 				)
@@ -1261,5 +1264,7 @@ class TestSnapshotConfigReadBoundary(FrappeTestCase):
 			run = _mk_run(self.CONTROL_SLUG, self.run_as, key, _snapshot(self.CONTROL_TOOLS, "auditor", []))
 		installation = frappe.db.get_value(RUN, run, "installation")
 		mutable = {"marker": "control-installation-config", "source": "installation"}
-		frappe.db.set_value(INSTALLATION, installation, "config", frappe.as_json(mutable), update_modified=False)
+		frappe.db.set_value(
+			INSTALLATION, installation, "config", frappe.as_json(mutable), update_modified=False
+		)
 		return {"key": key, "run": run, "installation": installation, "mutable": mutable}

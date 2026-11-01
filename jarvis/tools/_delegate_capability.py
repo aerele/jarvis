@@ -105,9 +105,7 @@ _SNAPSHOT_CONFIG_READ_MESSAGE = (
 	"get_engagement_config instead; it returns the immutable configuration "
 	"snapshot stamped when this run started. Retrying this read will not help."
 )
-_CHAT_SNAPSHOT_CONFIG_READ_MESSAGE = (
-	"This agent used the configuration snapshot fixed when this run started."
-)
+_CHAT_SNAPSHOT_CONFIG_READ_MESSAGE = "This agent used the configuration snapshot fixed when this run started."
 _SNAPSHOT_CONFIG_REPORT_MESSAGE = (
 	"this run cannot execute saved reports because their definitions can change "
 	"the data source during the run. Use query for the audit data and "
@@ -120,9 +118,7 @@ _SNAPSHOT_CONFIG_REPORT_MESSAGE = (
 # plain field/filter/order expression on the requested base DocType. This is
 # stronger than looking for ``Jarvis Agent Installation`` text: a link such as
 # ``installation.config`` names the mutable row without spelling its DocType.
-_PLAIN_LIST_FIELD = re.compile(
-	r"\*|[A-Za-z_][A-Za-z0-9_]*(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?", re.IGNORECASE
-)
+_PLAIN_LIST_FIELD = re.compile(r"\*|[A-Za-z_][A-Za-z0-9_]*(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?", re.IGNORECASE)
 _PLAIN_LIST_ORDER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:asc|desc))?", re.IGNORECASE)
 _PLAIN_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -166,6 +162,7 @@ def _query_mentions_config_source(spec) -> bool:
 	``query._collect_doctypes``. It deliberately ignores ordinary literal values:
 	a filter value that merely contains the DocType's words is not a read.
 	"""
+
 	def walk(node) -> bool:
 		if not isinstance(node, dict):
 			return False
@@ -220,7 +217,11 @@ def snapshot_config_report_refusal(report_name, *, cap=None) -> str | None:
 
 def _same_doctype(left, right) -> bool:
 	"""Case-insensitive DocType equality, matching Frappe's lookup behaviour."""
-	return isinstance(left, str) and isinstance(right, str) and left.strip().casefold() == right.strip().casefold()
+	return (
+		isinstance(left, str)
+		and isinstance(right, str)
+		and left.strip().casefold() == right.strip().casefold()
+	)
 
 
 def _get_list_fields_are_base_fields(fields) -> bool:
@@ -245,14 +246,18 @@ def _get_list_order_is_base_fields(order_by) -> bool:
 def _get_list_filter_is_base(condition, doctype) -> bool:
 	"""Whether one Frappe filter stays on ``doctype`` and a plain field."""
 	if isinstance(condition, dict):
-		return all(isinstance(field, str) and _PLAIN_FIELD_NAME.fullmatch(field.strip()) for field in condition)
+		return all(
+			isinstance(field, str) and _PLAIN_FIELD_NAME.fullmatch(field.strip()) for field in condition
+		)
 	if not isinstance(condition, list | tuple):
 		return False
 	if len(condition) in (2, 3):
 		return isinstance(condition[0], str) and bool(_PLAIN_FIELD_NAME.fullmatch(condition[0].strip()))
 	if len(condition) in (4, 5):
-		return _same_doctype(condition[0], doctype) and isinstance(condition[1], str) and bool(
-			_PLAIN_FIELD_NAME.fullmatch(condition[1].strip())
+		return (
+			_same_doctype(condition[0], doctype)
+			and isinstance(condition[1], str)
+			and bool(_PLAIN_FIELD_NAME.fullmatch(condition[1].strip()))
 		)
 	return False
 
