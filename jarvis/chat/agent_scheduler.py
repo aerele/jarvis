@@ -1821,6 +1821,10 @@ def _audit_prompt(
 				"record_scope",
 			)
 		}
+		# Only the server-stamped Boolean may reach the delegate. An absent or
+		# malformed value stays absent so the bundle degrades to partial coverage.
+		if type(scope.get("scoped_visibility")) is bool:
+			payroll_scope["scoped_visibility"] = scope["scoped_visibility"]
 		scope_block += "\n\nSERVER-BOUND PAYROLL SCOPE (copy this JSON unchanged): " + json.dumps(
 			payroll_scope, sort_keys=True
 		)

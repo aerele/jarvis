@@ -383,6 +383,43 @@ class TestStatutoryPayrollScope(FrappeTestCase):
 		self.assertNotIn("Forged Company", prompt)
 		self.assertNotIn("FORGED", prompt)
 		self.assertNotIn('"payroll_entry"', prompt)
+		for value, expected in (
+			(True, "true"),
+			(False, "false"),
+			("false", None),
+			("true", None),
+			(0, None),
+			(1, None),
+			([], None),
+			({}, None),
+			(None, None),
+		):
+			with self.subTest(scoped_visibility=value):
+				scope = {**server_scope, "scoped_visibility": value}
+				with patch(
+					"jarvis.chat.agent_catalog.registry_tools_allow",
+					return_value=["jarvis__get_engagement_config"],
+				):
+					prompt = agent_scheduler._audit_prompt(
+						listing, installation, "manual", scope, engagement_config=snapshot
+					)
+				if expected is None:
+					self.assertNotIn('"scoped_visibility"', prompt)
+				else:
+					self.assertIn(f'"scoped_visibility": {expected}', prompt)
+
+	def test_vendored_statutory_catalog_uses_only_native_read_tools(self):
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as registry_file:
+			entry = next(
+				row
+				for row in json.load(registry_file)["agents"]
+				if row["agent_slug"] == statutory_payroll_scope.AGENT
+			)
+		self.assertEqual(entry["version"], "0.4.2")
+		self.assertEqual(entry["tools_required"], ["jarvis__query", "jarvis__get_doc"])
+		self.assertNotIn("jarvis__get_list", entry["tools_allow"])
+		self.assertNotIn("jarvis__run_report", entry["tools_allow"])
 
 	def test_scheduled_invalid_scope_is_skipped_before_dispatch(self):
 		row = frappe._dict(
