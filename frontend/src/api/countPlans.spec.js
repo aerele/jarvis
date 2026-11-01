@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const call = vi.hoisted(() => vi.fn());
 vi.mock("frappe-ui", () => ({ call }));
 
-import { getCountPlan, listCountPlans, recordCounts } from "./countPlans";
+import { correctCounts, getCountPlan, listCountPlans, recordCounts } from "./countPlans";
 
 beforeEach(() => call.mockReset());
 
@@ -16,6 +16,13 @@ describe("count-plan API client", () => {
 			"2026-11-01T10:30",
 			[{ item_code: "ITEM-ONE", counted_qty: "0" }],
 			"ccp-key-1234567890"
+		);
+		correctCounts(
+			"AR-COUNT-1",
+			"COUNT-1",
+			"2026-11-01T10:45",
+			[{ item_code: "ITEM-ONE", counted_qty: "1" }],
+			"ccp-key-1234567891"
 		);
 
 		expect(call.mock.calls).toEqual([
@@ -31,6 +38,16 @@ describe("count-plan API client", () => {
 					counted_at: "2026-11-01T10:30",
 					entries: '[{"item_code":"ITEM-ONE","counted_qty":"0"}]',
 					entry_key: "ccp-key-1234567890",
+				},
+			],
+			[
+				"jarvis.chat.cycle_count_entry.correct_counts",
+				{
+					request: "AR-COUNT-1",
+					replaces: "COUNT-1",
+					counted_at: "2026-11-01T10:45",
+					entries: '[{"item_code":"ITEM-ONE","counted_qty":"1"}]',
+					entry_key: "ccp-key-1234567891",
 				},
 			],
 		]);

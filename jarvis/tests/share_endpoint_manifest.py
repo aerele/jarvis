@@ -857,6 +857,16 @@ ENDPOINTS.update(
 			},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.cycle_count_entry.correct_counts": {
+			"arguments": {
+				"request": "$approval",
+				"replaces": "$approval",
+				"counted_at": "2026-10-01 10:00:00",
+				"entries": [{"item_code": "share-probe-item", "counted_qty": "1"}],
+				"entry_key": "cycle-count-share-correct",
+			},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.approvals_api.approve_wiki_write": {
 			"arguments": {"name": "$approval"},
 			"scope": "chat_scoped",
