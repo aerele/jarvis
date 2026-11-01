@@ -465,6 +465,19 @@ class TestAgentClosureIntegration(FrappeTestCase):
 			"Submit the action again if it is still needed.",
 		)
 
+	def _assert_suppressed_durable_card(self, conversation: str, token: str) -> None:
+		"""The read response must make an unsafe durable row terminal without
+		manufacturing another chat receipt. The migration can settle it later."""
+		frappe.set_user(OWNER)
+		history = chat_api.get_conversation(conversation)["messages"]
+		row = next(item for item in history if item.get("tool_call_id") == token)
+		self.assertEqual(row.get("tool_status"), "")
+		self.assertEqual(row.get("action_outcome"), "cancelled")
+		self.assertIsNone(row.get("pending_card"))
+		self.assertFalse(row.get("pending_card_safe"))
+		self.assertEqual(row.get("tool_args"), {})
+		self.assertEqual(row.get("tool_result", {}).get("reason_code"), "safety_update")
+
 	def test_both_agents_refuse_opening_routes_and_fleet_payload(self):
 		for spec in CLOSED_AGENT_SPECS:
 			frappe.db.set_value(LISTING, spec.slug, "status", "Published", update_modified=False)
@@ -817,6 +830,101 @@ class TestAgentClosureIntegration(FrappeTestCase):
 		)
 		self.assertIsNone(pending_confirm_legacy.peek(stale))
 		self.assertFalse(frappe.db.exists(MESSAGE, {"tool_call_id": stale}))
+		self.assertEqual(frappe.db.count("ToDo"), before)
+
+	def test_capped_durable_cards_with_bad_fences_are_suppressed_but_a_valid_sibling_survives(self):
+		"""The bounded close cleanup is not a card-read authority.
+
+		A card beyond its cleanup snapshot can remain Pending in storage. It must
+		still be hidden from both transcript and resync until a later cleanup can
+		settle it. A separate current card must not be lost with it.
+		"""
+		before = frappe.db.count("ToDo")
+		for label, fences in (
+			("mapless", None),
+			("malformed", json.dumps(["not", "a", "fence", "map"])),
+			("partial", json.dumps({CLOSED_AGENT_SPECS[0].slug: CLOSED_AGENT_SPECS[0].generation})),
+		):
+			with self.subTest(label=label):
+				stale, conversation = self._durable_card()
+				current, _ = self._durable_card()
+				frappe.db.set_value(
+					PENDING_ACTION,
+					stale,
+					PENDING_ACTION_FENCE_FIELD,
+					fences,
+					update_modified=False,
+				)
+				frappe.db.commit()
+
+				with patch.object(agent_closure, "_CLOSE_SNAPSHOT_LIMIT", 0):
+					self.assertEqual(agent_closure.cancel_unfenced_chat_cards(), 0)
+				self.assertEqual(frappe.db.get_value(PENDING_ACTION, stale, "status"), "Pending")
+
+				self._assert_suppressed_durable_card(conversation, stale)
+				resync = actions_api.list_pending_confirmations()
+				self.assertTrue(resync["ok"])
+				items = {item["token"]: item for item in resync["data"]["pending"]}
+				self.assertNotIn(stale, items)
+				self.assertIn(current, items)
+				self.assertTrue(items[current]["pending_card_safe"])
+				self.assertEqual(frappe.db.count("ToDo"), before)
+
+	def test_cancelled_durable_row_never_falls_back_to_a_legacy_confirmation_card(self):
+		"""A Pending transcript row is not proof that its durable action is live.
+
+		The test doubles the legacy gate as permissive. The durable row must still
+		be redacted before that legacy path gets a chance to re-enable its token.
+		"""
+		before = frappe.db.count("ToDo")
+		token, conversation = self._durable_card()
+		frappe.db.set_value(PENDING_ACTION, token, "status", "Cancelled", update_modified=False)
+		frappe.db.commit()
+
+		with patch.object(agent_closure, "legacy_confirmation_is_safe_to_render", return_value=True) as legacy:
+			self._assert_suppressed_durable_card(conversation, token)
+		legacy.assert_not_called()
+		frappe.set_user(OWNER)
+		resync = actions_api.list_pending_confirmations(conversation)
+		self.assertTrue(resync["ok"])
+		self.assertNotIn(token, [item["token"] for item in resync["data"]["pending"]])
+		# A stale Redis record with the same token must not revive a cancelled
+		# durable action. A distinct legacy sibling remains usable.
+		with patch.object(
+			pending_confirm_legacy,
+			"list_for_owner",
+			return_value=[
+				{"token": token, "conversation": conversation},
+				{"token": "legacy-safe-sibling", "conversation": conversation},
+			],
+		):
+			listed = pending_confirm.list_for_owner(OWNER, conversation)
+		self.assertEqual([item["token"] for item in listed], ["legacy-safe-sibling"])
+		self.assertTrue(listed[0]["pending_card_safe"])
+		self.assertEqual(frappe.db.count("ToDo"), before)
+
+	def test_durable_card_fails_closed_when_the_close_fence_is_not_ready(self):
+		"""A code-before or partial migration must not attest an otherwise-live row."""
+		before = frappe.db.count("ToDo")
+		token, conversation = self._durable_card()
+		with patch.object(agent_closure, "expected_confirmation_fences", return_value=None):
+			self._assert_suppressed_durable_card(conversation, token)
+			frappe.set_user(OWNER)
+			resync = actions_api.list_pending_confirmations(conversation)
+		self.assertTrue(resync["ok"])
+		self.assertNotIn(token, [item["token"] for item in resync["data"]["pending"]])
+		self.assertEqual(frappe.db.count("ToDo"), before)
+
+	def test_durable_card_fails_closed_before_the_fence_column_migration(self):
+		"""Do not read a missing map column as proof that a durable card is safe."""
+		before = frappe.db.count("ToDo")
+		token, conversation = self._durable_card()
+		with patch.object(agent_closure, "pending_action_fences_ready", return_value=False):
+			self._assert_suppressed_durable_card(conversation, token)
+			frappe.set_user(OWNER)
+			resync = actions_api.list_pending_confirmations(conversation)
+		self.assertTrue(resync["ok"])
+		self.assertNotIn(token, [item["token"] for item in resync["data"]["pending"]])
 		self.assertEqual(frappe.db.count("ToDo"), before)
 
 	def test_durable_confirmation_checks_before_claim_and_after_claim(self):

@@ -178,6 +178,46 @@ function onDecisionSettled(token) {
 // the card from it. Persists past the single RPC inflightToken covers -
 // reset only on a conversation switch (below).
 const settledTokens = ref(new Set());
+// A passive close migration can remove a cached card before the person clicks
+// it. Keep one terminal explanation outside the approval sheet: it has only
+// Done, never Confirm, Discard, or Retry.
+const safetyUpdateNotice = ref(null);
+const SAFETY_UPDATE_COPY =
+	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
+function passiveSafetyUpdate(row) {
+	if (
+		row?.role !== "tool" ||
+		row.action_outcome !== "cancelled" ||
+		!row.tool_call_id
+	)
+		return null;
+	let result = row.tool_result;
+	if (typeof result === "string") {
+		try {
+			result = JSON.parse(result);
+		} catch {
+			return null;
+		}
+	}
+	if (result?.reason_code !== "safety_update") return null;
+	return {
+		token: row.tool_call_id,
+		message: result?.error?.message || SAFETY_UPDATE_COPY,
+	};
+}
+function observePassiveSafetyUpdates(rows) {
+	if (safetyUpdateNotice.value) return;
+	for (const row of rows || []) {
+		const notice = passiveSafetyUpdate(row);
+		if (!notice || settledTokens.value.has(notice.token)) continue;
+		settledTokens.value = withExcluded(settledTokens.value, [notice.token]);
+		safetyUpdateNotice.value = notice;
+		return;
+	}
+}
+function dismissSafetyUpdateNotice() {
+	safetyUpdateNotice.value = null;
+}
 const preview = ref(null);
 const voiceOpen = ref(false);
 const menuOpen = ref(false);
@@ -507,6 +547,7 @@ async function load(force = false, staleRetry = true) {
 		messages.value = page.messages;
 		historyPaging.value = page.paging;
 		olderPending.value = d?.older_pending || [];
+		observePassiveSafetyUpdates([...page.messages, ...olderPending.value]);
 		sendRecovery.reconcile(cid, messages.value);
 		const row = store.conversations.find((c) => c.name === convId.value);
 		if (row) starred.value = !!row.starred;
@@ -573,6 +614,7 @@ async function loadOlder({ auto = false } = {}) {
 		const page = prependOlderPage(messages.value, historyPaging.value, d);
 		messages.value = page.messages;
 		historyPaging.value = page.paging;
+		observePassiveSafetyUpdates(page.messages);
 		await nextTick();
 		const hold = () => {
 			if (scroller.value && fromBottom !== null)
@@ -622,7 +664,10 @@ async function loadPending(source) {
 		// missing/malformed body leaves fromBackstop null so we KEEP the on-screen queue
 		// rather than wipe a live-only card (the fail-closed hole the SPA guards). This
 		// helper is also the open-seed path, so durable rows below always apply.
-		if (r?.ok && r.data) fromBackstop = r.data.pending.filter((p) => p.conversation === cid);
+		if (r?.ok && Array.isArray(r?.data?.pending))
+			fromBackstop = r.data.pending.filter(
+				(p) => p?.conversation === cid && p.pending_card_safe === true,
+			);
 	} catch {
 		/* leave null: durable rows still apply, live cards kept */
 	}
@@ -639,7 +684,19 @@ async function loadPending(source) {
 		settledTokens.value,
 		inflightToken.value ? [inflightToken.value] : []
 	);
-	pending.value = mergePendingSources(base, [fromRows, fromBackstop || []], inflight);
+	const next = mergePendingSources(base, [fromRows, fromBackstop || []], inflight);
+	const removedByCleanResync =
+		fromBackstop !== null &&
+		pending.value.some(
+			(card) =>
+				card?.conversation === cid &&
+				!next.some((candidate) => candidate?.token === card.token) &&
+				!inflight.has(card.token),
+		);
+	pending.value = next;
+	// A clean resync can be the first evidence of a passive close. Reload the
+	// transcript once so its terminal safety receipt gets the Done-only notice.
+	if (removedByCleanResync) load();
 }
 
 // Auto-heal (layered design, phase 1): recover a card the live push dropped with NO user
@@ -1330,6 +1387,7 @@ watch(
 		conversation.value = null;
 		pending.value = [];
 		settledTokens.value = new Set(); // a settled token belonged to the previous conversation
+		safetyUpdateNotice.value = null;
 		olderCardsNote.value = false; // the note was about the previous conversation's cards
 		live.value = null;
 		sendBusy.value = false;
@@ -1669,6 +1727,13 @@ onUnmounted(() => {
 		<!-- aria-live so a card surfaced by auto-heal / the menu re-check is announced to a
 		     screen reader, not silently inserted. display:contents = zero layout change. -->
 		<div style="display: contents" role="status" aria-live="polite">
+			<section v-if="safetyUpdateNotice" class="jv-safety-update" aria-label="Action cancelled">
+				<strong>Action cancelled</strong>
+				<p>{{ safetyUpdateNotice.message }}</p>
+				<button type="button" class="jv-btn is-primary" @click="dismissSafetyUpdateNotice">
+					Done
+				</button>
+			</section>
 			<DecisionCard
 				v-for="(p, pi) in orderedPending"
 				:key="p.token"
@@ -2200,5 +2265,24 @@ onUnmounted(() => {
 	padding: 0 12px;
 	margin: 6px 6px 0 0;
 	font-size: 13px;
+}
+.jv-safety-update {
+	border: 1px solid var(--border2);
+	border-radius: 12px;
+	background: var(--card);
+	padding: 14px;
+	margin: 10px 0;
+	color: var(--ink8);
+}
+.jv-safety-update strong {
+	color: var(--ink9);
+}
+.jv-safety-update p {
+	margin: 8px 0;
+	line-height: 1.5;
+}
+.jv-safety-update .jv-btn {
+	max-width: 140px;
+	padding: 0 12px;
 }
 </style>

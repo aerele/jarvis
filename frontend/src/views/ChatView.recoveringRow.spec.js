@@ -99,6 +99,7 @@ function harness(rows) {
 		resetAutoModeFor: noop,
 		loadContext: noop,
 		_loadConnectorFocusFor: () => null,
+		observePassiveSafetyUpdates: noop,
 		seedPendingFromRows: noop,
 		pendingSeedRows: () => [],
 		resyncPendingConfirmations: noop,

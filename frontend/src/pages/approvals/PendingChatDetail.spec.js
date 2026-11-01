@@ -42,6 +42,7 @@ const rec = (over = {}) => ({
 	conversation_title: "Quarter close",
 	origin_page: "",
 	can_act: 1,
+	pending_card_safe: true,
 	reason_code: "",
 	reason: "",
 	...over,
@@ -131,6 +132,14 @@ describe("PendingChatDetail", () => {
 	it("falls back to the summary when the card can't render", async () => {
 		const w = await mountWith(rec({ card: "not a card" }));
 		expect(w.text()).toContain("Create a ToDo");
+	});
+
+	it("does not render or act on a raw card without the safety attestation", async () => {
+		const w = await mountWith(rec({ pending_card_safe: false }));
+		expect(w.text()).toContain("Create a ToDo");
+		expect(button(w, "Confirm")).toBeUndefined();
+		expect(button(w, "Discard")).toBeUndefined();
+		expect(core.confirmTool).not.toHaveBeenCalled();
 	});
 
 	it("confirms through the chat's confirm_tool, then says the chat continues", async () => {

@@ -1028,6 +1028,39 @@ const orderedPending = computed(() => {
 	const cards = sortPendingCards(stream.value.pending || []);
 	return cards.filter((card) => card.token !== settledNotice.value?.token);
 });
+const SAFETY_UPDATE_COPY =
+	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
+function passiveSafetyUpdate(row) {
+	if (
+		row?.role !== "tool" ||
+		row.action_outcome !== "cancelled" ||
+		!row.tool_call_id
+	)
+		return null;
+	let result = row.tool_result;
+	if (typeof result === "string") {
+		try {
+			result = JSON.parse(result);
+		} catch {
+			return null;
+		}
+	}
+	if (result?.reason_code !== "safety_update") return null;
+	return {
+		token: row.tool_call_id,
+		message: result?.error?.message || SAFETY_UPDATE_COPY,
+	};
+}
+function observePassiveSafetyUpdates(rows) {
+	if (settledNotice.value) return;
+	for (const row of rows || []) {
+		const notice = passiveSafetyUpdate(row);
+		if (!notice || settledTokens.has(notice.token)) continue;
+		settledTokens = withExcluded(settledTokens, [notice.token]);
+		settledNotice.value = notice;
+		return;
+	}
+}
 // Typed approval works in the widget too. An "Earlier" card never gets the
 // bare-phrase hint: only its number binds it (pending_order.mjs).
 const typedApprovalHint = computed(() => hintFor(orderedPending.value));
@@ -1457,6 +1490,7 @@ async function resyncPending(source) {
 					m.role === "tool" &&
 					m.tool_status === "pending" &&
 					m.pending_card &&
+					m.pending_card_safe === true &&
 					m.tool_call_id
 			)
 			.map((m) => ({
@@ -1471,6 +1505,7 @@ async function resyncPending(source) {
 				expires_at: toEpoch(m.expires_at),
 				approve_run: !!(m.pending_card && m.pending_card.approve_run),
 				recent: m.recent !== false,
+				pending_card_safe: true,
 			}));
 		const pc = await listPendingConfirmations(cid, source);
 		// A resync in flight across a startNewChat / conversation switch must not write the
@@ -1480,17 +1515,20 @@ async function resyncPending(source) {
 		// missing/malformed body keeps the current cards as the base so a live-only card is
 		// not wiped; the durable rowItems ALWAYS apply (this is also the open-seed path, so a
 		// blip on open must still show a parked card's durable row). Mirrors the PWA.
-		const clean = !!(pc && pc.ok !== false && pc.data);
+		const clean = !!(pc && pc.ok !== false && Array.isArray(pc.data?.pending));
 		const backstop = clean
-			? (pc.data.pending || []).map((r) => ({
-					token: r.token,
-					tool: r.tool || "",
-					summary: r.summary || r.preview || "",
-					created_at: r.created_at ?? null,
-					expires_at: r.expires_at ?? null,
-					approve_run: pendingApproveRun(r.preview),
-					recent: r.recent !== false,
-			  }))
+			? pc.data.pending
+					.filter((r) => r?.pending_card_safe === true)
+					.map((r) => ({
+						token: r.token,
+						tool: r.tool || "",
+						summary: r.summary || r.preview || "",
+						created_at: r.created_at ?? null,
+						expires_at: r.expires_at ?? null,
+						approve_run: pendingApproveRun(r.preview),
+						recent: r.recent !== false,
+						pending_card_safe: true,
+					}))
 			: [];
 		const base = clean ? [] : stream.value.pending || [];
 		const byToken = new Map();
@@ -1503,9 +1541,21 @@ async function resyncPending(source) {
 			rowItems,
 			backstop
 		);
+		const removedByCleanResync =
+			clean &&
+			(stream.value.pending || []).some(
+				(card) =>
+					card?.token &&
+					!settledTokens.has(card.token) &&
+					!merged.some((candidate) => candidate.token === card.token)
+			);
 		// A token settled locally (a typed "no") must not be resurrected by
 		// rowItems' still-stale transcript row (D1).
 		stream.value = { ...stream.value, pending: withoutTokens(merged, settledTokens) };
+		// A clean list can be the first sign that a cached card was cancelled by
+		// a close migration. Read its durable terminal receipt for the Done-only
+		// notice. The replacement queue makes the follow-up load inert.
+		if (removedByCleanResync) void load();
 	} catch (e) {
 		/* leave whatever the live stream captured */
 	}
@@ -1574,6 +1624,7 @@ async function load() {
 		}
 		const conv = await getConversation(convId.value);
 		messages.value = Array.isArray(conv?.messages) ? conv.messages : [];
+		observePassiveSafetyUpdates(messages.value);
 		// Seed recall from what was actually asked in this conversation. The panel
 		// is usually opened fresh on a Desk page, so without this Up would do
 		// nothing until you had already sent something in this page load.
@@ -2026,7 +2077,11 @@ function onRealtime(payload) {
 	// Auto-heal: arm the run-scoped pending poll on a turn start / a card push (mirrors the
 	// SPA/PWA). Arming here - not only in send() - covers a cold-start turn whose run:start
 	// lands after the send-armed poll would have idled out, and a turn not locally initiated.
-	if (payload.kind === "run:start" || payload.kind === "action:pending") startPendingPoll();
+	if (
+		payload.kind === "run:start" ||
+		(payload.kind === "action:pending" && payload.pending_card_safe === true)
+	)
+		startPendingPoll();
 
 	// NB: we deliberately do NOT stop polling when a realtime frame arrives.
 	// Realtime gives the smooth live stream, but the relay can drop the TAIL

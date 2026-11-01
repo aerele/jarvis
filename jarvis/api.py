@@ -4307,26 +4307,20 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# still surface it.
 		try:
 			origin_page = frappe.db.get_value("Jarvis Conversation", conv, "origin_page") or ""
-			# Same shared item shape the resync endpoint + run:end terminal use, so
-			# the live push can't drift from them (and gets the summary guard too).
-			item = pending_confirm._pending_item(
-				token=token,
-				tool=tool,
-				args=args,
-				preview=preview,
-				conversation=conv,
-				run_id=run_id,
-				expires_at=expires_at,
-				created_at=now_s,
-			)
-			events.publish_to_user(
-				owner_user,
-				{
-					"kind": "action:pending",
-					"origin_page": origin_page,
-					**pending_confirm.with_recency([item])[0],
-				},
-			)
+			# Read back the stored card through the same positive close-fence
+			# attestation used by list resync and terminal payloads. Never rebuild a
+			# realtime Confirm control from raw tool arguments: a close may have landed
+			# after park committed but before this best-effort publish.
+			item = pending_confirm.item_for_owner_token(token, owner_user, conv, strict=True)
+			if item:
+				events.publish_to_user(
+					owner_user,
+					{
+						"kind": "action:pending",
+						"origin_page": origin_page,
+						**item,
+					},
+				)
 		except Exception:
 			frappe.log_error(
 				title="action:pending publish failed",

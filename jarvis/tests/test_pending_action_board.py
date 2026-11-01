@@ -442,6 +442,7 @@ class TestChatLane(_Base):
 		with as_user(OWNER):
 			res = board.get_pending_action(name)
 		self.assertEqual((res["kind"], res["status"], res["can_act"]), ("chat", "Pending", 1))
+		self.assertTrue(res["pending_card_safe"])
 		self.assertEqual(res["card"], json.loads(self.row(name)["card"]))
 		self.assertEqual((res["conversation"], res["conversation_title"]), (conv, "Quarterly <b>close</b>"))
 		dump = json.dumps(res)
@@ -452,6 +453,21 @@ class TestChatLane(_Base):
 				board.get_pending_action(name)
 		with as_user(SM_USER):
 			self.assertEqual(board.decide_held_action(name, "skip")["reason_code"], "not_found")
+
+	def test_bad_close_fence_never_reaches_the_board_card_or_its_confirm_controls(self):
+		"""The board is another card-read surface, not a durable-card bypass."""
+		name, _ = self.chat()
+		before = frappe.db.count("ToDo")
+		self.set_col(name, agent_close_fences="{}")
+		with as_user(OWNER):
+			lane = board.list_pending_actions_lane()["rows"]
+			detail = board.get_pending_action(name)
+		self.assertNotIn(name, [row["name"] for row in lane])
+		self.assertEqual(
+			(detail["status"], detail["pending_card_safe"], detail["can_act"], detail["card"]),
+			("Pending", False, 0, None),
+		)
+		self.assertEqual(frappe.db.count("ToDo"), before)
 
 	def test_the_board_decides_through_the_chat_endpoints(self):
 		ran, conv = self.chat()

@@ -618,13 +618,15 @@ def _pending_item(
 	run_id: str,
 	expires_at: int | None,
 	created_at: int | None = None,
+	pending_card_safe: bool = False,
 ) -> dict:
 	"""The ONE client-facing pending-confirmation item shape, shared by the live
 	``action:pending`` push (jarvis.api), the resync endpoint, and the ``run:end``
 	terminal - so the three cannot drift. Carries
 	``token``/``tool``/``preview``/``summary``/``conversation``/``run_id``/
-	``expires_at``/``created_at`` and NEVER the internal ``args``/``exec_user``/
-	``args_hash``.
+	``expires_at``/``created_at``/``pending_card_safe`` and NEVER the internal
+	``args``/``exec_user``/``args_hash``. The positive safety bit is required by
+	all current clients before a payload can render Confirm.
 
 	``created_at`` (P0c) is the primary card-ordering key; ``None`` for a record
 	minted before it existed (a mixed deploy) - every ordering comparator falls
@@ -652,6 +654,7 @@ def _pending_item(
 		"run_id": run_id,
 		"expires_at": expires_at,
 		"created_at": created_at,
+		"pending_card_safe": bool(pending_card_safe),
 	}
 
 
@@ -672,6 +675,7 @@ def list_items_for_owner(owner: str, conversation: str | None = None, *, strict:
 			run_id=r.get("run_id"),
 			expires_at=r.get("expires_at"),
 			created_at=r.get("created_at"),
+			pending_card_safe=True,
 		)
 		for r in list_for_owner(owner, conversation=conversation, strict=strict)
 	]

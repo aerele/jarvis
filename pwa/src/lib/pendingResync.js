@@ -95,6 +95,7 @@ export function admitRealtimePendingCards(
 	for (const card of incoming || []) {
 		if (
 			!card?.token ||
+			card.pending_card_safe !== true ||
 			card.token === inflightToken ||
 			excludedTokens?.has(card.token) ||
 			known.has(card.token)

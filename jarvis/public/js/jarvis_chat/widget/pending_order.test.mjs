@@ -316,3 +316,27 @@ test("Panel.vue keeps a safety-update message visible before it removes the card
   assert.match(src, /@click="dismissSettledNotice"/);
   assert.doesNotMatch(body.slice(settled, resolved), /loadError\.value = settled/);
 });
+
+test("Desk only admits attested cached and list cards, then shows a passive close as Done-only", () => {
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
+	const resync = src.slice(
+		src.indexOf("async function resyncPending(source) {"),
+		src.indexOf("// Auto-heal", src.indexOf("async function resyncPending(source) {"))
+	);
+	assert.match(resync, /m\.pending_card_safe === true/);
+	assert.match(resync, /r\?\.pending_card_safe === true/);
+	assert.match(resync, /removedByCleanResync/);
+	assert.match(resync, /void load\(\)/);
+	assert.match(src, /function observePassiveSafetyUpdates\(rows\)/);
+	assert.match(src, /result\?\.reason_code !== "safety_update"/);
+	const noticeAt = src.indexOf('v-if="settledNotice"');
+	const nextPending = src.indexOf('v-for="(p, pi) in orderedPending"', noticeAt);
+	assert.ok(noticeAt > -1 && nextPending > noticeAt);
+	const notice = src.slice(noticeAt, nextPending);
+	assert.match(notice, />\s*Done\s*</);
+	assert.doesNotMatch(notice, /Confirm|Retry|Discard/);
+
+	const realtime = src.slice(src.indexOf("function onRealtime(payload) {"));
+	assert.match(realtime, /payload\.pending_card_safe === true/);
+});

@@ -32,7 +32,7 @@
 			<FailureReference v-if="rec.status === 'Failed'" :id="rec.name" />
 
 			<div class="mt-4 flex flex-wrap items-center gap-2">
-				<template v-if="rec.can_act">
+				<template v-if="canAct">
 					<Button
 						variant="solid"
 						label="Confirm"
@@ -102,8 +102,9 @@ const notice = ref("");
 // Only a plain object with a kind renders as a card; anything else is the summary line.
 const card = computed(() => {
 	const c = rec.value && rec.value.card;
-	return c && typeof c === "object" && c.kind ? c : null;
+	return rec.value?.pending_card_safe === true && c && typeof c === "object" && c.kind ? c : null;
 });
+const canAct = computed(() => rec.value?.can_act && rec.value?.pending_card_safe === true);
 const closedText = computed(() => chatStatusLine(rec.value));
 
 let req = 0; // monotonic: a stale load never overwrites a newer one

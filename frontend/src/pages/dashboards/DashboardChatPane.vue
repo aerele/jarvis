@@ -818,7 +818,12 @@ async function refreshPending() {
 	try {
 		const env = await listPendingConfirmations(conversation.value);
 		if (env && env.ok === false) return;
-		const items = (env && env.data && env.data.pending) || [];
+		// A list response is only a delivery channel. It is not authority to
+		// render Confirm: reject raw, delayed, or old-server items unless the
+		// server attached its current close-fence attestation.
+		const items = ((env && env.data && env.data.pending) || []).filter(
+			(item) => item && item.pending_card_safe === true
+		);
 		// keep in-flight busy flags across refreshes
 		const busy = new Set(pendingCards.value.filter((c) => c.busy).map((c) => c.token));
 		pendingCards.value = items.map((it) => ({ ...it, busy: busy.has(it.token) }));

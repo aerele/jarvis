@@ -11,7 +11,12 @@ test("drops a card no longer server-live, keeps one the server still lists", () 
 		{ token: "gone", conversation: "c1", busy: false },
 		{ token: "live", conversation: "c1", busy: false },
 	];
-	const { kept, toAdd } = reconcilePending(existing, "c1", [{ token: "live" }], new Set());
+	const { kept, toAdd } = reconcilePending(
+		existing,
+		"c1",
+		[{ token: "live", pending_card_safe: true }],
+		new Set()
+	);
 	assert.deepEqual(
 		kept.map((c) => c.token),
 		["live"]
@@ -38,7 +43,12 @@ test("leaves other conversations' cards untouched", () => {
 });
 
 test("adds a server-live token the queue does not have yet", () => {
-	const { kept, toAdd } = reconcilePending([], "c1", [{ token: "new" }], new Set());
+	const { kept, toAdd } = reconcilePending(
+		[],
+		"c1",
+		[{ token: "new", pending_card_safe: true }],
+		new Set()
+	);
 	assert.deepEqual(kept, []);
 	assert.deepEqual(
 		toAdd.map((c) => c.token),
@@ -50,13 +60,23 @@ test("an in-flight token is never added, even though the server still lists it l
 	// The realistic P0c race: confirmPending already removed "x" from
 	// pendingActions, but a stale resync response (issued before the confirm
 	// committed) still carries it as pending.
-	const { toAdd } = reconcilePending([], "c1", [{ token: "x" }], new Set(["x"]));
+	const { toAdd } = reconcilePending(
+		[],
+		"c1",
+		[{ token: "x", pending_card_safe: true }],
+		new Set(["x"])
+	);
 	assert.deepEqual(toAdd, []);
 });
 
 test("an in-flight token already kept (still on screen, busy) is not duplicated into toAdd", () => {
 	const existing = [{ token: "x", conversation: "c1", busy: true }];
-	const { kept, toAdd } = reconcilePending(existing, "c1", [{ token: "x" }], new Set(["x"]));
+	const { kept, toAdd } = reconcilePending(
+		existing,
+		"c1",
+		[{ token: "x", pending_card_safe: true }],
+		new Set(["x"])
+	);
 	assert.deepEqual(
 		kept.map((c) => c.token),
 		["x"]
@@ -70,4 +90,24 @@ test("tolerates missing/empty inputs without throwing", () => {
 		kept: [],
 		toAdd: [],
 	});
+});
+
+test("a raw list item cannot restore a cached confirmation, but an attested sibling survives", () => {
+	const existing = [
+		{ token: "raw", conversation: "c1", busy: false },
+		{ token: "safe", conversation: "c1", busy: false },
+	];
+	const { kept, toAdd } = reconcilePending(
+		existing,
+		"c1",
+		[
+			{ token: "raw" },
+			{ token: "safe", pending_card_safe: true },
+			{ token: "new-raw" },
+			{ token: "new-safe", pending_card_safe: true },
+		],
+		new Set()
+	);
+	assert.deepEqual(kept.map((card) => card.token), ["safe"]);
+	assert.deepEqual(toAdd.map((card) => card.token), ["new-safe"]);
 });

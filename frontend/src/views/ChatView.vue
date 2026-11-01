@@ -2136,6 +2136,22 @@
 					     carries its own server-minted one-time token. A single turn can
 					     park more than one, so we stack a card per queued token (#4). -->
 					<div
+						v-if="safetyUpdateNotice"
+						class="jv-action jv-safety-update"
+						role="status"
+						aria-live="polite"
+					>
+						<div class="jv-action-head">
+							<span class="jv-action-title">Action cancelled</span>
+						</div>
+						<div class="jv-pending-body">{{ safetyUpdateNotice.message }}</div>
+						<div class="jv-action-foot">
+							<button class="jv-action-primary" @click="dismissSafetyUpdateNotice">
+								Done
+							</button>
+						</div>
+					</div>
+					<div
 						v-for="(pa, pi) in visiblePendingActions"
 						:key="pa.token"
 						class="jv-action jv-pending"
@@ -8251,6 +8267,47 @@ function discardDraft() {
 // confirmable card + busy/error state. Each item:
 // { conversation, token, tool, summary, preview, run_id, busy, error }.
 const pendingActions = ref([]);
+// A close migration can settle a card while it is cached on this page. Keep
+// its token locally after the terminal receipt arrives, so a late socket frame
+// cannot restore a Confirm card before the next durable resync completes.
+const safetySettledTokens = ref(new Set());
+const safetyUpdateNotice = ref(null);
+const SAFETY_UPDATE_COPY =
+	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
+function passiveSafetyUpdate(row) {
+	if (
+		row?.role !== "tool" ||
+		row.action_outcome !== "cancelled" ||
+		!row.tool_call_id
+	)
+		return null;
+	let result = row.tool_result;
+	if (typeof result === "string") {
+		try {
+			result = JSON.parse(result);
+		} catch {
+			return null;
+		}
+	}
+	if (result?.reason_code !== "safety_update") return null;
+	return {
+		token: row.tool_call_id,
+		message: result?.error?.message || SAFETY_UPDATE_COPY,
+	};
+}
+function observePassiveSafetyUpdates(rows) {
+	if (safetyUpdateNotice.value) return;
+	for (const row of rows || []) {
+		const notice = passiveSafetyUpdate(row);
+		if (!notice || safetySettledTokens.value.has(notice.token)) continue;
+		safetySettledTokens.value = new Set(safetySettledTokens.value).add(notice.token);
+		safetyUpdateNotice.value = notice;
+		return;
+	}
+}
+function dismissSafetyUpdateNotice() {
+	safetyUpdateNotice.value = null;
+}
 // Which card's Approve & run is in flight. pa.busy alone disables BOTH of a
 // runnable card's buttons (so a double-click can't fire twice) but can't say
 // WHICH one is running - this is just the label disambiguator (P1, skill
@@ -8389,6 +8446,7 @@ function pendingActionFromRow(m, convId) {
 		expires_at: _rowExpiresEpoch(m.expires_at),
 		seq: m.seq ?? null,
 		recent: m.recent !== false,
+		pending_card_safe: m.pending_card_safe === true,
 	};
 }
 function seedPendingFromRows(msgs, convId) {
@@ -8398,6 +8456,7 @@ function seedPendingFromRows(msgs, convId) {
 			m.role === "tool" &&
 			m.tool_status === "pending" &&
 			m.pending_card &&
+			m.pending_card_safe === true &&
 			m.tool_call_id
 		) {
 			enqueuePending(pendingActionFromRow(m, convId));
@@ -8414,7 +8473,8 @@ function seedPendingFromRows(msgs, convId) {
 const inflightTokens = new Set();
 
 function enqueuePending(card) {
-	if (!card || !card.token) return;
+	if (!card || !card.token || card.pending_card_safe !== true) return;
+	if (safetySettledTokens.value.has(card.token)) return;
 	if (inflightTokens.has(card.token)) return;
 	if (pendingActions.value.some((x) => x.token === card.token)) return;
 	pendingActions.value.push({
@@ -8428,6 +8488,7 @@ function enqueuePending(card) {
 		expires_at: card.expires_at || null,
 		seq: card.seq ?? null,
 		recent: card.recent !== false,
+		pending_card_safe: true,
 		busy: false,
 		error: null,
 	});
@@ -8741,6 +8802,10 @@ async function resyncPendingConfirmations(id, source) {
 	}
 	if (currentId.value !== id) return; // navigated away while the request was in flight
 	if (!Array.isArray(items)) return;
+	// A clean list is authoritative only for positively attested cards. Do not
+	// let an old/raw list item bypass the per-card enqueue gate or retain a
+	// cached Confirm card.
+	items = items.filter((it) => it?.pending_card_safe === true);
 	// Reconcile the on-screen queue to the server's authoritative live set for
 	// THIS conversation: DROP cards the store no longer holds (confirmed/expired,
 	// or a stale token orphaned by a model restage) and ADD any a dropped
@@ -8748,6 +8813,12 @@ async function resyncPendingConfirmations(id, source) {
 	// (busy) confirms, are left untouched. Server truth (not a caught socket
 	// frame) decides what shows. A token whose Confirm/Discard RPC is in flight
 	// is never (re)added (P0c in-flight suppression) - see reconcilePending.
+	const removedByCleanResync = pendingActions.value.some(
+		(pa) =>
+			pa.conversation === id &&
+			!inflightTokens.has(pa.token) &&
+			!items.some((it) => it.token === pa.token)
+	);
 	const { kept, toAdd } = reconcilePending(pendingActions.value, id, items, inflightTokens);
 	// Server truth also says which kept cards are still "recent" (decision 6).
 	const fresh = new Map(items.map((it) => [it.token, it]));
@@ -8767,8 +8838,12 @@ async function resyncPendingConfirmations(id, source) {
 			expires_at: it.expires_at || null,
 			seq: it.seq ?? null,
 			recent: it.recent,
+			pending_card_safe: it.pending_card_safe,
 		});
 	}
+	// A missing formerly-visible token can be a passive close migration. Fetch
+	// the terminal receipt once so the person gets the Done-only explanation.
+	if (removedByCleanResync) loadConversation(id);
 }
 
 // Authoritative pull. A confirmation card (and therefore its Confirm button AND
@@ -9925,6 +10000,8 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 		// another chat's cards must not linger (or be acted on) while this one loads
 		fileboxWaits.value = [];
 		reportRuns.value = [];
+		safetySettledTokens.value = new Set();
+		safetyUpdateNotice.value = null;
 	}
 	const _keepScrollTop =
 		_sameConv && !pinnedToBottom.value && threadEl.value ? threadEl.value.scrollTop : null;
@@ -9939,6 +10016,8 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// _loadConnectorFocusFor).
 	connectorFocus.value = null;
 	if (!id) {
+		safetySettledTokens.value = new Set();
+		safetyUpdateNotice.value = null;
 		resetAutoModeFor(true);
 		messages.value = injectPendingBubbles([], _pendingSends.peek(_NEW_CHAT_SCOPE));
 		fileboxWaits.value = [];
@@ -10046,6 +10125,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// switch. Dedupe by name (a rejection that lands while we're on-screen already holds one).
 	_pendingSends.reconcile(id, messages.value);
 	messages.value = injectPendingBubbles(messages.value, _pendingSends.peek(id));
+	observePassiveSafetyUpdates(messages.value);
 	// Auto mode: the server flag always wins. The local armed choice is reset only
 	// on a real chat switch, never on an in-place resync of the chat on screen (a
 	// tab-focus reload must not undo what the user just toggled).
@@ -11580,10 +11660,11 @@ function onEvent(p) {
 				expires_at: p.expires_at || null,
 				seq: p.seq ?? null,
 				recent: p.recent,
+				pending_card_safe: p.pending_card_safe,
 			});
 			// Keep pulling server truth for the rest of the turn: if THIS push
 			// arrived but a sibling's was dropped, the poll fills the gap.
-			startPendingPoll();
+			if (p.pending_card_safe === true) startPendingPoll();
 		}
 		return;
 	}
@@ -11910,11 +11991,13 @@ function onEvent(p) {
 			// finalize backstop re-publish can't double-render; a conv-less token ("") binds
 			// to this conversation, mirroring the action:pending handler's rescue.
 			if (Array.isArray(p.pending)) {
-				for (const card of p.pending)
+				for (const card of p.pending) {
+					if (card?.pending_card_safe !== true) continue;
 					enqueuePending({
 						...card,
 						conversation: card.conversation || p.conversation_id,
 					});
+				}
 			}
 			// UNCONDITIONAL backstop: re-read the parked list from durable server
 			// state at every terminal, whether or not this payload carried `pending`.
@@ -12155,11 +12238,13 @@ function onEvent(p) {
 			// (run:error reloads the conversation, not the pending list). Deduped by token;
 			// a conv-less token ("") binds to this conversation.
 			if (Array.isArray(p.pending)) {
-				for (const card of p.pending)
+				for (const card of p.pending) {
+					if (card?.pending_card_safe !== true) continue;
 					enqueuePending({
 						...card,
 						conversation: card.conversation || p.conversation_id,
 					});
+				}
 			}
 			// …and the unconditional backstop, for the same reason as run:end below.
 			resyncPendingConfirmations(currentId.value);
@@ -17119,6 +17204,9 @@ onUnmounted(() => {
    marks a write parked awaiting the owner's Confirm click. */
 .jv-pending {
 	border-color: var(--amber);
+}
+.jv-safety-update {
+	border-color: var(--border-2);
 }
 .jv-pending .jv-action-head {
 	border-bottom-color: var(--border);

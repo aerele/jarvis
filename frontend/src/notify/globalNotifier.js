@@ -278,6 +278,9 @@ export function attachGlobalNotifier({ socket, router }) {
 				return;
 			}
 			case "action:pending": {
+				// The live frame is a delivery hint, not proof that a Confirm card is
+				// still safe. Do not tell the user to approve a raw or delayed frame.
+				if (p.pending_card_safe !== true) return;
 				// keyed `conversation` (may be "" when the server can't resolve one —
 				// it still reached THIS user's socket, so fall back to the active chat)
 				const conv = p.conversation || store.currentConvId || null;

@@ -132,6 +132,7 @@ test("action:pending queues a confirmation, ignoring duplicate tokens", () => {
   let s = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "t1",
+    pending_card_safe: true,
     tool: "create_doc",
     summary: "Create ToDo",
     created_at: 1600,
@@ -140,6 +141,7 @@ test("action:pending queues a confirmation, ignoring duplicate tokens", () => {
   s = applyEvent(s, {
     kind: "action:pending",
     token: "t1",
+    pending_card_safe: true,
     tool: "create_doc",
     summary: "Create ToDo",
     created_at: 1600,
@@ -154,6 +156,7 @@ test("action:pending queues a confirmation, ignoring duplicate tokens", () => {
     expires_at: 1700,
     approve_run: false,
     recent: true,
+    pending_card_safe: true,
   });
 });
 
@@ -161,6 +164,7 @@ test("action:pending keeps the server's Earlier marking (decision 6)", () => {
   const s = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "t1",
+    pending_card_safe: true,
     recent: false,
   });
   assert.equal(s.pending[0].recent, false);
@@ -173,6 +177,7 @@ test("action:pending carries approve_run as a plain boolean, never the preview i
   const s = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "t1",
+    pending_card_safe: true,
     tool: "run_method",
     summary: "Run a skill step",
     preview: {
@@ -191,12 +196,14 @@ test("action:pending: approve_run is false for an ordinary card, a missing card,
   const noPreview = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "t1",
+    pending_card_safe: true,
   });
   assert.equal(noPreview.pending[0].approve_run, false);
 
   const noCard = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "t2",
+    pending_card_safe: true,
     preview: { would: {} },
   });
   assert.equal(noCard.pending[0].approve_run, false);
@@ -204,6 +211,7 @@ test("action:pending: approve_run is false for an ordinary card, a missing card,
   const notArmed = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "t3",
+    pending_card_safe: true,
     preview: { card: { kind: "create" } },
   });
   assert.equal(notArmed.pending[0].approve_run, false);
@@ -226,6 +234,7 @@ test("action:pending carries created_at so numbered typed approval sorts by mint
   const s = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "abc",
+    pending_card_safe: true,
     tool: "delete_doc",
     summary: "Delete Customer",
     created_at: 1802,
@@ -239,6 +248,7 @@ test("action:pending with no created_at/expires_at on the wire falls back to nul
   const s = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "z",
+    pending_card_safe: true,
     tool: "submit_doc",
     summary: "Submit SO",
   });
@@ -254,13 +264,52 @@ test("action:pending without a token is ignored", () => {
   assert.deepEqual(s.pending, []);
 });
 
+test("action:pending rejects a raw or delayed frame without the safety attestation", () => {
+  let s = applyEvent(emptyStream(), {
+    kind: "action:pending",
+    token: "raw",
+    summary: "Never show this",
+  });
+  s = applyEvent(s, {
+    kind: "action:pending",
+    token: "safe-sibling",
+    summary: "Still confirmable",
+    pending_card_safe: true,
+  });
+  assert.deepEqual(s.pending.map((card) => card.token), ["safe-sibling"]);
+});
+
+for (const kind of ["run:end", "run:error"]) {
+  test(`${kind} rejects raw pending payload items but keeps an attested sibling`, () => {
+    const s = applyEvent(emptyStream(), {
+      kind,
+      pending: [
+        { token: "raw", summary: "Never show this" },
+        {
+          token: "safe-sibling",
+          summary: "Still confirmable",
+          pending_card_safe: true,
+        },
+      ],
+    });
+    assert.deepEqual(s.pending.map((card) => card.token), ["safe-sibling"]);
+    assert.equal(s.reload, true);
+  });
+}
+
 test("action:pending queues distinct tokens in arrival order", () => {
   let s = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "t1",
+    pending_card_safe: true,
     summary: "first",
   });
-  s = applyEvent(s, { kind: "action:pending", token: "t2", summary: "second" });
+  s = applyEvent(s, {
+    kind: "action:pending",
+    token: "t2",
+    pending_card_safe: true,
+    summary: "second",
+  });
   assert.deepEqual(
     s.pending.map((p) => p.token),
     ["t1", "t2"]
@@ -271,6 +320,7 @@ test("action:resolved drops the token", () => {
   let s = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "t1",
+    pending_card_safe: true,
     summary: "x",
   });
   s = applyEvent(s, { kind: "action:resolved", token: "t1" });
@@ -303,6 +353,7 @@ test("applyEvent does not mutate the input state", () => {
   const withPending = applyEvent(before, {
     kind: "action:pending",
     token: "t1",
+    pending_card_safe: true,
     summary: "x",
   });
   applyEvent(withPending, { kind: "action:resolved", token: "t1" });
@@ -315,7 +366,12 @@ test("live text survives an unrelated event", () => {
     run_id: "r1",
     text: "partial",
   });
-  s = applyEvent(s, { kind: "action:pending", token: "t1", summary: "x" });
+  s = applyEvent(s, {
+    kind: "action:pending",
+    token: "t1",
+    pending_card_safe: true,
+    summary: "x",
+  });
   assert.equal(s.live.text, "partial");
 });
 
@@ -412,6 +468,7 @@ test("fence: approvals and renames bypass it (they are not pump-sequenced)", () 
   s = applyEvent(s, {
     kind: "action:pending",
     token: "t1",
+    pending_card_safe: true,
     pump_epoch: 1,
     event_seq: 1,
   });

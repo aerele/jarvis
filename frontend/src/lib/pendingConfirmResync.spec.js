@@ -33,6 +33,48 @@ const terminalBody = (kind) => {
 };
 
 describe("parked confirmations resync from durable state at every terminal", () => {
+	it("requires a positive server attestation at every desktop card admission", () => {
+		const seed = src.slice(
+			src.indexOf("function seedPendingFromRows(msgs, convId) {"),
+			src.indexOf("// Tokens with a Confirm/Discard RPC", src.indexOf("function seedPendingFromRows"))
+		);
+		expect(seed).toContain("m.pending_card_safe === true");
+
+		const enqueue = src.slice(
+			src.indexOf("function enqueuePending(card) {"),
+			src.indexOf("\n}", src.indexOf("function enqueuePending(card) {"))
+		);
+		expect(enqueue).toContain("card.pending_card_safe !== true");
+
+		const resync = src.slice(
+			src.indexOf("async function resyncPendingConfirmations(id, source) {"),
+			src.indexOf("// Authoritative pull.", src.indexOf("async function resyncPendingConfirmations"))
+		);
+		expect(resync).toContain("it?.pending_card_safe === true");
+		expect(resync).toContain("pending_card_safe: it.pending_card_safe");
+
+		for (const kind of ["run:end", "run:error"]) {
+			const body = terminalBody(kind);
+			expect(body).toContain("card?.pending_card_safe !== true");
+		}
+		const direct = src.slice(
+			src.indexOf('if (p.kind === "action:pending")'),
+			src.indexOf("if (p.conversation_id !== currentId.value)")
+		);
+		expect(direct).toContain("pending_card_safe: p.pending_card_safe");
+	});
+
+	it("shows a passive safety cancellation as a Done-only terminal notice", () => {
+		expect(src).toContain("function observePassiveSafetyUpdates(rows)");
+		expect(src).toContain('result?.reason_code !== "safety_update"');
+		const notice = src.slice(
+			src.indexOf('v-if="safetyUpdateNotice"'),
+			src.indexOf('v-for="(pa, pi) in visiblePendingActions"')
+		);
+		expect(notice).toContain("Done");
+		expect(notice).not.toMatch(/Confirm|Retry|Discard/);
+	});
+
 	it("run:end resyncs unconditionally, not only when it carried a pending payload", () => {
 		const body = terminalBody("run:end");
 		expect(body).toContain("resyncPendingConfirmations(currentId.value);");

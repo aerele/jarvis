@@ -40,6 +40,7 @@ class TestTerminalCarriesPending(FrappeTestCase):
 		self.assertEqual(len(out["pending"]), 1)
 		self.assertEqual(out["pending"][0]["tool"], "create_doc")
 		self.assertIn("token", out["pending"][0])
+		self.assertTrue(out["pending"][0]["pending_card_safe"])
 		# The caller's dict is NOT mutated (a new dict is returned).
 		self.assertNotIn("pending", base)
 
@@ -67,4 +68,39 @@ class TestTerminalCarriesPending(FrappeTestCase):
 			preview={"preview": True},
 		)
 		out = settlement._extra_with_pending({"enrichment_pending": True}, self._OWNER, self._CONV)
+		self.assertNotIn("pending", out)
+
+	def test_terminal_never_carries_a_stale_durable_card(self):
+		"""run:end and run:error share this helper, so both fail closed here."""
+		owner = frappe.session.user
+		conversation = frappe.get_doc(
+			{"doctype": "Jarvis Conversation", "title": "terminal stale durable fixture"}
+		).insert(ignore_permissions=True)
+
+		def cleanup():
+			frappe.db.delete("Jarvis Chat Message", {"conversation": conversation.name})
+			frappe.db.delete("Jarvis Pending Action", {"conversation": conversation.name})
+			frappe.db.delete("Jarvis Conversation", {"name": conversation.name})
+			frappe.db.commit()
+
+		self.addCleanup(cleanup)
+		token = pending_confirm.mint(
+			conversation=conversation.name,
+			owner=owner,
+			tool="create_doc",
+			args={"docs": [{"doctype": "ToDo", "values": {"description": "c2-stale"}}]},
+			run_id="",
+			preview={"preview": True},
+		)
+		frappe.db.set_value(
+			"Jarvis Pending Action",
+			token,
+			"agent_close_fences",
+			'{"ticket-triage-operator":"old"}',
+			update_modified=False,
+		)
+		frappe.db.commit()
+		out = settlement._extra_with_pending(
+			{"enrichment_pending": True}, owner, conversation.name
+		)
 		self.assertNotIn("pending", out)

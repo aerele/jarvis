@@ -190,6 +190,7 @@ for (const kind of ["action:pending", "run:end", "run:error"]) {
 			token,
 			tool: "write_todo",
 			summary: `${token} summary`,
+			pending_card_safe: true,
 		});
 		let pending = [];
 
@@ -233,6 +234,33 @@ test("realtime terminal admission ignores a malformed pending list", () => {
 	);
 });
 
+for (const kind of ["action:pending", "run:end", "run:error"]) {
+	test(`${kind} rejects a raw or delayed pending frame without attestation`, () => {
+		const raw = { token: "raw", tool: "write_todo", summary: "raw" };
+		const safe = {
+			token: "safe-sibling",
+			tool: "write_todo",
+			summary: "safe sibling",
+			pending_card_safe: true,
+		};
+		const event =
+			kind === "action:pending"
+				? { kind, ...raw }
+				: { kind, pending: [raw, safe] };
+		let admitted = admitRealtimePendingCards([], event, new Set(), null, "CONV-1");
+		if (kind === "action:pending") {
+			admitted = admitRealtimePendingCards(
+				admitted,
+				{ kind, ...safe },
+				new Set(),
+				null,
+				"CONV-1",
+			);
+		}
+		assert.deepEqual(admitted.map((card) => card.token), ["safe-sibling"]);
+	});
+}
+
 test("ChatView routes every realtime pending event through the settled-token admission gate", () => {
 	const src = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
 	const cases = [
@@ -257,6 +285,31 @@ test("ChatView folds a typed no's discarded tokens into loadPending's exclusion 
 	const load = src.indexOf("async function loadPending(");
 	const inflight = src.indexOf("const inflight = withExcluded(", load);
 	assert.ok(inflight > -1, "loadPending must build its exclusion set from settledTokens");
+});
+
+test("PWA only admits attested list, transcript, and notification cards", () => {
+	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	const loadPending = view.indexOf("async function loadPending(");
+	assert.ok(loadPending > -1);
+	assert.match(view.slice(loadPending), /p\.pending_card_safe === true/);
+	assert.match(view, /observePassiveSafetyUpdates\(/);
+	const notice = view.indexOf('v-if="safetyUpdateNotice"');
+	const decision = view.indexOf("<DecisionCard", notice);
+	assert.ok(notice > -1 && decision > notice);
+	const noticeMarkup = view.slice(notice, decision);
+	assert.match(noticeMarkup, />\s*Done\s*</);
+	assert.doesNotMatch(noticeMarkup, /Confirm|Retry|Discard/);
+
+	const app = fs.readFileSync(new URL("../App.vue", import.meta.url), "utf8");
+	const notification = app.indexOf('p.kind === "action:pending"');
+	assert.ok(notification > -1);
+	assert.match(app.slice(notification, notification + 180), /p\.pending_card_safe === true/);
+
+	const notifications = fs.readFileSync(new URL("./notifications.js", import.meta.url), "utf8");
+	assert.match(
+		notifications,
+		/e\.kind === "action:pending" && e\.pending_card_safe === true/,
+	);
 });
 
 test("safety update settles its token before DecisionSheet clears the busy guard", () => {

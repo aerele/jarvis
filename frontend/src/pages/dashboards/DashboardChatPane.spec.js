@@ -240,8 +240,20 @@ describe("DashboardChatPane history menu", () => {
 
 describe("DashboardChatPane typed replies to its parked cards (PR-3b)", () => {
 	const cards = [
-		{ token: "tok-late", conversation: "conv1", tool: "create_doc", created_at: 200 },
-		{ token: "tok-early", conversation: "conv1", tool: "create_doc", created_at: 100 },
+		{
+			token: "tok-late",
+			conversation: "conv1",
+			tool: "create_doc",
+			created_at: 200,
+			pending_card_safe: true,
+		},
+		{
+			token: "tok-early",
+			conversation: "conv1",
+			tool: "create_doc",
+			created_at: 100,
+			pending_card_safe: true,
+		},
 	];
 
 	async function typeAndSend(wrapper, text) {
@@ -293,13 +305,38 @@ describe("DashboardChatPane typed replies to its parked cards (PR-3b)", () => {
 	});
 });
 
+describe("DashboardChatPane requires the pending-card safety attestation", () => {
+	it("does not render a raw list item, while it keeps an attested sibling", async () => {
+		listPendingConfirmations.mockResolvedValueOnce({
+			ok: true,
+			data: {
+				pending: [
+					{ token: "raw", conversation: "conv1", tool: "update_doc" },
+					{
+						token: "safe",
+						conversation: "conv1",
+						tool: "update_doc",
+						pending_card_safe: true,
+					},
+				],
+			},
+		});
+		const { wrapper } = mountPane();
+		await flushPromises();
+		expect(wrapper.findAll("button").filter((button) => button.text() === "Approve")).toHaveLength(1);
+		await wrapper.findAll("button").find((button) => button.text() === "Approve").trigger("click");
+		await flushPromises();
+		expect(confirmTool).toHaveBeenCalledWith("safe", "conv1");
+	});
+});
+
 // D3: the pane's Approve/Dismiss used to always show one generic "may have
 // expired" toast on any ok:false besides a storage blip. Now that cards carry
 // a reason_code (stale/target_missing/tampered/unverifiable, busy, …), reuse
 // the SPA's chatCardActions mapping so the words - and the keep-vs-drop
 // decision - match ChatView's, instead of a second, cruder copy here.
 describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
-	const cards = [{ token: "tok1", conversation: "conv1", tool: "update_doc" }];
+	const cards = [{ token: "tok1", conversation: "conv1", tool: "update_doc", pending_card_safe: true }];
 
 	it("settles a card as Failed with its specific reason, not the opaque guess", async () => {
 		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });

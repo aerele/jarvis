@@ -283,6 +283,20 @@ class TestReads(_Base):
 			self.assertIsNone(pending_confirm.peek(token))
 		self.assertEqual(res["error"]["type"], "ConfirmationUnavailableError")
 
+	def test_a_close_fence_read_error_is_unavailable_on_a_strict_list(self):
+		"""A clean resync must not remove a live card after an uncertain fence read."""
+		conv = self.make_conv()
+		self.mint(conv)
+		with (
+			patch("jarvis.chat.agent_closure.confirmation_is_current", side_effect=RuntimeError("fence read")),
+			patch.object(frappe, "logger"),
+		):
+			with self.assertRaises(pending_confirm.PendingConfirmStorageError):
+				pending_confirm.list_for_owner(OWNER, conv, strict=True)
+			with as_user(OWNER):
+				res = actions_api.list_pending_confirmations(conversation=conv)
+		self.assertEqual(res["error"]["type"], "ConfirmationUnavailableError")
+
 	def test_lists_union_both_stores_owner_only_and_never_unseal(self):
 		pa_conv, legacy_conv, foreign = self.make_conv(), self.make_conv(), self.make_conv(OTHER)
 		pa_token = self.mint(pa_conv)
@@ -305,10 +319,12 @@ class TestReads(_Base):
 				"run_id",
 				"expires_at",
 				"created_at",
+				"pending_card_safe",
 				"seq",
 				"recent",
 			},
 		)
+		self.assertTrue(only["pending_card_safe"])
 		self.assertTrue(only["recent"], "parked after the last human message (none yet)")
 		self.assertEqual((only["token"], only["preview"]), (pa_token, PREVIEW))
 		self.assertIsInstance(only["created_at"], int)
@@ -327,6 +343,42 @@ class TestReads(_Base):
 			[shown] = [m for m in get_conversation(conv)["messages"] if m.get("tool_call_id") == token]
 		self.assertEqual(shown["pending_card"], PREVIEW["card"])
 		self.assertTrue(shown["pending_card_safe"])
+
+
+class TestRealtimeCardAttestation(_Base):
+	def test_a_close_between_park_and_publish_never_emits_a_raw_confirmation_card(self):
+		"""The best-effort push must re-read the durable card after park.
+
+		A close can land after the park transaction commits. The stored row remains
+		for later migration settlement, but no realtime frame may revive Confirm.
+		"""
+		conv = self.make_conv()
+		before = frappe.db.count("ToDo")
+		real_mint = pending_confirm.mint
+		captured = {}
+
+		def mint_then_revoke(**kwargs):
+			token = real_mint(**kwargs)
+			captured["token"] = token
+			self.set_col(
+				token,
+				agent_close_fences=json.dumps(
+					{"ticket-triage-operator": "ticket-triage-close-v1"}
+				),
+			)
+			return token
+
+		with (
+			patch.object(pending_confirm, "mint", side_effect=mint_then_revoke),
+			patch("jarvis.chat.events.publish_to_user") as publish,
+			as_user(OWNER),
+		):
+			result = api._run_tool("create_doc", dict(TODO), conversation=conv)
+		self.assertTrue(result["ok"])
+		self.assertEqual(result["data"]["status"], "pending_confirmation")
+		publish.assert_not_called()
+		self.assertEqual(self.row(captured["token"]).status, "Pending")
+		self.assertEqual(frappe.db.count("ToDo"), before)
 
 
 class TestConsumeClearRollback(_Base):

@@ -93,6 +93,7 @@ function harness(initial = "A") {
 		resetAutoModeFor: vi.fn(),
 		loadContext: noop,
 		_loadConnectorFocusFor: () => null,
+		observePassiveSafetyUpdates: noop,
 		seedPendingFromRows: noop,
 		pendingSeedRows: () => [],
 		resyncPendingConfirmations: noop,
