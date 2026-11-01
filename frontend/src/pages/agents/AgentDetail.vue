@@ -1449,12 +1449,13 @@ const scheduleSummary = computed(() => {
 });
 
 async function saveSchedule() {
-	if (!installation.value || savingSchedule.value) return;
+	if (!installation.value || savingSchedule.value) return false;
 	if (scheduleConfigurationBlocked.value && sched.value.enabled) {
 		toast.error(configurationHint.value);
-		return;
+		return false;
 	}
 	savingSchedule.value = true;
+	let scheduleSaved = false;
 	try {
 		await api.setAgentSchedule(installation.value.name, {
 			schedule_enabled: sched.value.enabled ? 1 : 0,
@@ -1464,10 +1465,16 @@ async function saveSchedule() {
 			schedule_day_of_month:
 				sched.value.frequency === "monthly" ? Number(sched.value.day) || 0 : 0,
 		});
+		scheduleSaved = true;
 		toast.success("Schedule saved");
 		await load();
+		return true;
 	} catch (e) {
 		toast.error(errHtml(e));
+		// A refresh failure happens after the API has persisted the schedule.
+		// Keep the draft aligned with that saved state instead of restoring a
+		// legacy schedule that is already off on the server.
+		return scheduleSaved;
 	} finally {
 		savingSchedule.value = false;
 	}
@@ -1477,8 +1484,14 @@ async function disableSchedule() {
 	if (!installation.value || savingSchedule.value) return;
 	// A legacy schedule must always be disableable, even when its current
 	// configuration is no longer valid or visible to the run-as identity.
+	const wasEnabled = sched.value.enabled;
 	sched.value.enabled = false;
-	await saveSchedule();
+	if (!(await saveSchedule())) {
+		// Keep the only recovery action visible when the server rejects the
+		// change or a transient request fails. The saved schedule is still on
+		// until the next successful request.
+		sched.value.enabled = wasEnabled;
+	}
 }
 
 // ── Configure: config JSON → ConfigForm (§14 F3) ─────────────────────────────
