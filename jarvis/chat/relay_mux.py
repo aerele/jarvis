@@ -100,6 +100,7 @@ from jarvis.chat.steps import (
 	is_step,
 	join_segments,
 	remove_steps,
+	strip_loose_preambles,
 	strip_preambles,
 	strip_steps,
 )
@@ -347,6 +348,12 @@ class _Lane:
 		# on a pump hop from the pump's preamble cache (register_run's
 		# ``preamble_steps=``); a flag lost with that cache falls back to is_step.
 		self.preamble_steps: set[str] = set()
+		# Runtime-flagged preambles that were NOT in the streamed reply when they
+		# arrived (_route_preamble_step's offer-only path). The Claude subscription
+		# runtime sends pre-tool text this way and never streams it, but its final
+		# text can still carry it (aerele/jarvis#2367); the terminal cuts these where
+		# they stand as whole paragraphs (steps.strip_loose_preambles).
+		self.loose_preambles: list[str] = []
 		self.shown_text = ""
 		# R6 saved-reply glue: the tail of each earlier segment (relay_mux
 		# module docstring / _reply_delta), reader-thread only like the steps
@@ -839,6 +846,8 @@ class RelayMux:
 		if stripped and anchored and is_preamble_step(stripped):
 			self._record_preamble_step(lane, stripped)
 			return
+		if stripped and is_preamble_step(stripped) and stripped not in lane.loose_preambles:
+			lane.loose_preambles.append(stripped)
 		self._offer_step(lane, text)
 
 	def _record_preamble_step(self, lane: _Lane, text: str) -> None:
@@ -953,6 +962,7 @@ class RelayMux:
 					"text": text,
 					"steps": list(lane.steps),
 					"preamble_steps": [s for s in lane.steps if s in lane.preamble_steps],
+					"loose_preambles": list(lane.loose_preambles),
 					# R6: segment tails recorded so far (see _Lane.segment_tails)
 					# so _finalize_terminal can glue the runtime's separator-
 					# free segment boundaries back together on the pump thread.
@@ -1049,6 +1059,9 @@ class RelayMux:
 		flagged = set(raw.get("preamble_steps") or [])
 		preambles = [step for step in raw["steps"] if step in flagged]
 		sentences = [step for step in raw["steps"] if step not in flagged and is_step(step)]
+		# A preamble that never streamed (Claude subscription runtime, #2367) can still
+		# come back in the final text; cut it where it is a whole paragraph.
+		joined = strip_loose_preambles(joined, raw.get("loose_preambles") or [])
 		stripped_of_steps = strip_steps(strip_preambles(joined, preambles), sentences)
 		answer, _, _ = egress_rules.redact_final_with_media(stripped_of_steps, run_id=raw["run_id"])
 		reshow = None

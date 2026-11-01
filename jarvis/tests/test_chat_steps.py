@@ -25,6 +25,7 @@ from jarvis.chat.steps import (
 	is_step,
 	join_segments,
 	remove_steps,
+	strip_loose_preambles,
 	strip_preambles,
 	strip_steps,
 )
@@ -229,6 +230,35 @@ class TestStripPreambles(FrappeTestCase):
 		self.assertEqual(strip_preambles("Answer.", []), "Answer.")
 		self.assertEqual(strip_preambles("", ["Checking."]), "")
 		self.assertIsNone(strip_preambles(None, ["Checking."]))
+
+
+class TestStripLoosePreambles(FrappeTestCase):
+	"""#2367: Claude-route pre-tool text sent only as preamble items, then carried by
+	the final text, is cut where it stands as a whole paragraph."""
+
+	def test_cuts_leading_preamble_paragraphs(self):
+		p1 = "I'll check the drafting rules and look up the supplier and item."
+		p2 = "Supplier, item, and company all resolved. Now checking how similar invoices are filled here."
+		answer = "This already exists, so I have stopped before drafting anything."
+		self.assertEqual(strip_loose_preambles(f"{p1}\n\n{p2}\n\n{answer}", [p1, p2]), answer)
+
+	def test_cuts_a_preamble_between_answer_paragraphs(self):
+		final = "First part.\n\nChecking the ledger now.\n\nSecond part."
+		self.assertEqual(
+			strip_loose_preambles(final, ["Checking the ledger now."]), "First part.\n\nSecond part."
+		)
+
+	def test_a_phrase_inside_an_answer_paragraph_stays(self):
+		final = "I see. The invoice is overdue by 41 days."
+		self.assertEqual(strip_loose_preambles(final, ["I see."]), final)
+
+	def test_keeps_the_reply_whole_when_nothing_would_remain(self):
+		final = "Checking the ledger now."
+		self.assertEqual(strip_loose_preambles(final, [final]), final)
+
+	def test_no_preambles_or_no_text_is_a_no_op(self):
+		self.assertEqual(strip_loose_preambles("Answer.", []), "Answer.")
+		self.assertIsNone(strip_loose_preambles(None, ["Checking."]))
 
 
 class TestIsPreambleStep(FrappeTestCase):

@@ -1626,6 +1626,41 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual(rec.step_raws, [None])  # offered on the step line only, never recorded
 		self.assertEqual(rec.terminal[1]["text"], answer)
 
+	def test_claude_commentary_preambles_that_never_streamed_are_cut_from_final(self):
+		# #2367: the Claude subscription runtime sends pre-tool text ONLY as preamble
+		# items (never as reply deltas), then its final text falls back to the CLI's
+		# whole-turn result, which still carries that commentary.
+		p1 = "I'll check the drafting rules and look up the supplier and item."
+		p2 = "Supplier, item, and company all resolved. Now checking how similar invoices are filled here."
+		answer = "This already exists: ACC-PINV-2026-00006 matches on supplier, date, item and total, so I stopped before drafting."
+		rec = self._run(
+			[
+				("item", {"kind": "preamble", "phase": "update", "itemId": "c1", "progressText": p1}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("item", {"kind": "preamble", "phase": "update", "itemId": "c2", "progressText": p2}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": answer, "delta": answer}),
+			],
+			f"{p1}\n\n{p2}\n\n{answer}",
+		)
+		self.assertEqual([s[1] for s in rec.steps], [p1, p2])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_never_streamed_preamble_inside_an_answer_paragraph_stays(self):
+		answer = "I see. The invoice is overdue by 41 days."
+		rec = self._run(
+			[
+				("item", {"kind": "preamble", "phase": "update", "itemId": "c1", "progressText": "I see."}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": answer, "delta": answer}),
+			],
+			answer,
+		)
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
 	def test_preamble_not_in_the_reply_keeps_todays_path(self):
 		# The Codex-harness shape: the preamble text never rides the reply, so
 		# it is offered as a step with raw=None and the reply/final are untouched.

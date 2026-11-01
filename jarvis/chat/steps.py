@@ -176,6 +176,27 @@ def strip_preambles(final: str | None, preambles: list[str]) -> str | None:
 	return answer if answer.strip() else final
 
 
+def strip_loose_preambles(final: str | None, preambles: list[str]) -> str | None:
+	"""The saved reply: ``final`` minus runtime-flagged preambles that never streamed.
+
+	The Claude subscription runtime holds text written before a tool call back and
+	sends it only as a preamble item, so it never rides the streamed reply and the
+	relay cannot record it as a step (aerele/jarvis#2367). The runtime's final text
+	can still carry it when it falls back to the CLI's whole-turn result. Such a
+	preamble is cut only where it stands as a whole paragraph, so a matching phrase
+	inside an answer paragraph stays. Kept whole when nothing else would remain.
+	"""
+	if not final or not preambles:
+		return final
+	wanted = {p.strip() for p in preambles if p and p.strip()}
+	paragraphs = re.split(r"\n\s*\n", final)
+	kept = [para for para in paragraphs if para.strip() not in wanted]
+	if len(kept) == len(paragraphs):
+		return final
+	answer = "\n\n".join(kept).strip()
+	return answer if answer else final
+
+
 # C2 (code review): join_segments must never insert a break that could split
 # a token/URL/word. A boundary is only safe when the text right before it
 # looks like the END of something (sentence punctuation, a closing quote/
