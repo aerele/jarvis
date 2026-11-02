@@ -1117,10 +1117,16 @@ def _locked_catalog_state() -> dict[str, int]:
 	migration, or Settings save; a reversed pair deadlocks under concurrent Apply.
 	"""
 	_lock_catalog_state()
-	return {
-		field: frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, field, cache=False, for_update=True))
-		for field in _CATALOG_STATE_FIELDS
-	}
+	# Frappe v15 get_single_value has no for_update option. Read Singles directly
+	# so these are fresh locking reads, still version first and dirty second.
+	state = {}
+	for field in _CATALOG_STATE_FIELDS:
+		rows = frappe.db.sql(
+			"SELECT value FROM `tabSingles` WHERE doctype=%s AND field=%s FOR UPDATE",
+			(_SETTINGS, field),
+		)
+		state[field] = frappe.utils.cint(rows[0][0] if rows else None)
+	return state
 
 
 def _locked_catalog_version() -> int:
