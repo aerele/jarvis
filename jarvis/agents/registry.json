@@ -490,7 +490,6 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_engagement_config"
       ],
@@ -498,7 +497,6 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
@@ -914,14 +912,12 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1424,7 +1420,6 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1432,7 +1427,6 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1489,14 +1483,12 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
