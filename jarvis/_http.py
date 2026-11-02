@@ -19,18 +19,19 @@ def constant_time_equal(a: str, b: str) -> bool:
 
 
 def validate_bearer() -> bool:
-	"""Return True iff the X-Jarvis-Token header contains the correct agent token.
+	"""Return True iff the X-Jarvis-Token header matches either stored key: the callback key or, until retirement clears it, the agent token.
 
 	We use a custom header rather than ``Authorization: Bearer`` so that Frappe's
 	built-in OAuth validator (which runs before our handler) does not see a Bearer
 	token it cannot resolve and raise AuthenticationError prematurely.
 	"""
+	from jarvis._plugin_auth import match_stored_key, stored_keys
+
 	presented = frappe.request.headers.get("X-Jarvis-Token", "").strip()
 	if not presented:
 		return False
-	settings = frappe.get_single("Jarvis Settings")
-	expected = settings.get_password("agent_token") or ""
-	if not expected:
+	keys = stored_keys()
+	if not keys:
 		return False
-	# Constant-time comparison to prevent timing-oracle attacks.
-	return constant_time_equal(presented, expected)
+	# Constant-time comparison against each stored key (callback key, then owner token).
+	return bool(match_stored_key(presented, keys))

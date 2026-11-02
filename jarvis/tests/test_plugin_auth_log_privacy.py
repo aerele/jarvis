@@ -110,13 +110,18 @@ class TestPluginAuthLogPrivacy(TestCase):
 
 	def test_legacy_bearer_helper_rejects_non_ascii_without_raising(self):
 		request = Mock(headers={"X-Jarvis-Token": "t\u00f6k\u00e9n"})
-		settings = Mock()
-		settings.get_password.return_value = TOKEN
 		with (
 			patch.object(_http.frappe, "request", request, create=True),
-			patch.object(_http.frappe, "get_single", return_value=settings),
+			patch.object(auth, "stored_keys", return_value=["callback-key", TOKEN]),
 		):
 			self.assertFalse(_http.validate_bearer())
+
+	def test_matching_stored_keys_handles_unicode_and_preserves_both_keys(self):
+		keys = ["callback-key", TOKEN]
+		for key in keys:
+			self.assertEqual(auth.match_stored_key(key, keys), key)
+		for invalid in ("t\u00f6k\u00e9n", "\ud800", "", "unknown"):
+			self.assertEqual(auth.match_stored_key(invalid, keys), "")
 
 	def test_non_ascii_signature_is_a_clean_authentication_rejection(self):
 		with (
