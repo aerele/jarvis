@@ -64,6 +64,7 @@ INSTALLATION = "Jarvis Agent Installation"
 LISTING = "Jarvis Agent Listing"
 RUN = "Jarvis Agent Run"
 CONV = "Jarvis Conversation"
+_PAYROLL_DEPOSIT_AGENT = "statutory-payroll-deposit-status"
 
 # A14: the per-INSTALLATION monthly run budget (manual + scheduled combined; failed
 # runs excluded). Read from Jarvis Settings.agent_run_budget_monthly at run time; a
@@ -830,6 +831,28 @@ def _terminalize_failed(
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- failure survives later runs
 
 
+def fail_locked_run(run, error: str, *, detail: str | None = None) -> bool:
+	"""Fail a Run whose caller already holds its ``FOR UPDATE`` row lock.
+
+	The status check and terminal write stay in one lock interval. This is for
+	server paths which already proved a run identity and must not release it only
+	to have :func:`fail_run` lock a newer state. The terminal tail commits before
+	session teardown, as required by :func:`_terminalize_failed`.
+	"""
+	if not isinstance(run, dict) or run.get("status") != "running" or not run.get("name"):
+		return False
+	_terminalize_failed(
+		run.name,
+		agent=run.get("agent"),
+		installation=run.get("installation"),
+		session_key=run.get("session_key"),
+		owner=run.get("owner"),
+		error=error,
+		detail=detail,
+	)
+	return True
+
+
 def fail_run(run_name: str, error: str, *, detail: str | None = None) -> bool:
 	"""Terminalize a RUNNING agent run as ``failed`` with ``error``. Returns True
 	iff this call is the one that transitioned it.
@@ -852,23 +875,14 @@ def fail_run(run_name: str, error: str, *, detail: str | None = None) -> bool:
 		cur = frappe.db.get_value(
 			RUN,
 			run_name,
-			["status", "agent", "installation", "session_key", "owner"],
+			["name", "status", "agent", "installation", "session_key", "owner"],
 			as_dict=True,
 			for_update=True,
 		)
 		if not cur or cur.status != "running":
 			frappe.db.commit()  # release the lock; a concurrent finish already won
 			return False
-		_terminalize_failed(
-			run_name,
-			agent=cur.agent,
-			installation=cur.installation,
-			session_key=cur.session_key,
-			owner=cur.owner,
-			error=error,
-			detail=detail,
-		)
-		return True
+		return fail_locked_run(cur, error, detail=detail)
 	except Exception:
 		frappe.log_error(
 			title=f"jarvis agent: run failure stamp failed: {run_name}",
@@ -1364,6 +1378,13 @@ def _launch_audit(
 		review_config = review_backend.configuration(inst) if review_backend else None
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
+	deposit_launch = None
+	if inst.agent == _PAYROLL_DEPOSIT_AGENT:
+		# Capture this before the Run exists. The source tool later reads only this
+		# immutable Run value, never the mutable installation row.
+		from jarvis.chat import payroll_deposit_snapshot
+
+		deposit_launch = payroll_deposit_snapshot.launch_config(inst)
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
 	# run_agent_now) has already switched the session to this user, so
 	# frappe.session.user == run_as_user here — scope + watermark below are
@@ -1422,7 +1443,11 @@ def _launch_audit(
 	# ``Installation.config``. Resolve only declared, non-scope values after the
 	# statutory boundary has passed validation. A later settings save must never
 	# alter an active run's evidence or make a model guess a gate value.
-	engagement_config = _sanitize_delegated_engagement_config(listing, _explicit_config(listing, inst))
+	engagement_config = (
+		payroll_deposit_snapshot.prompt_config(deposit_launch)
+		if deposit_launch
+		else _sanitize_delegated_engagement_config(listing, _explicit_config(listing, inst))
+	)
 	engagement_config_json = frappe.as_json(engagement_config)
 
 	# JF-021: validate the launch-time provenance identity BEFORE any row is inserted,
@@ -1586,7 +1611,11 @@ def _launch_audit(
 				"preparation_mode": preparation_mode,
 				"initiating_human": initiating_human,
 				"model_source": model_gate.get("model_source"),
-				"assessment_config_json": frappe.as_json(review_config) if review_config else None,
+				"assessment_config_json": frappe.as_json(deposit_launch)
+				if deposit_launch
+				else frappe.as_json(review_config)
+				if review_config
+				else None,
 				"engagement_config_json": engagement_config_json,
 				**capability,
 			}
@@ -1658,6 +1687,11 @@ def _launch_audit(
 	from jarvis.chat.agent_catalog import registry_timeout_s
 
 	try:
+		prompt_config = None
+		if deposit_launch:
+			from jarvis.chat import payroll_deposit_snapshot
+
+			prompt_config = payroll_deposit_snapshot.prompt_config(deposit_launch)
 		started = admin_client.post_agent_run(
 			run_id=run.name,
 			agent_id=f"agent-{slug}",
@@ -1669,6 +1703,7 @@ def _launch_audit(
 				scope,
 				engagement_config=engagement_config,
 				record_scope_supported=record_scope_supported,
+				explicit_config=prompt_config,
 			),
 			timeout_s=registry_timeout_s(slug),
 		)
@@ -1931,6 +1966,13 @@ def _stamp_scope_and_watermark(
 	scope = resolved_scope if isinstance(resolved_scope, dict) else None
 	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
 
+	deposit_launch = None
+	if inst.get("agent") == _PAYROLL_DEPOSIT_AGENT:
+		from jarvis.chat import payroll_deposit_snapshot
+
+		deposit_launch = payroll_deposit_snapshot.load_launch_config(
+			frappe.db.get_value(RUN, run_name, "assessment_config_json")
+		)
 	try:
 		if is_statutory_payroll(inst.agent):
 			# Recheck the batch as its execution user immediately before stamping.
@@ -1938,6 +1980,12 @@ def _stamp_scope_and_watermark(
 
 			with impersonate(run_as_user):
 				scope = agent_scope.resolve_scope(inst)
+		elif deposit_launch:
+			scope = agent_scope.resolve_scope(
+				inst,
+				allow_record_scope=record_scope_supported,
+				config=payroll_deposit_snapshot.scope_config(deposit_launch),
+			)
 		elif scope is None:
 			scope = agent_scope.resolve_scope(inst, allow_record_scope=record_scope_supported)
 	except agent_scope.InvalidFefoRecordScopeError:
@@ -1945,6 +1993,8 @@ def _stamp_scope_and_watermark(
 		# transient verification errors on the separate logged retry path.
 		raise
 	except Exception:
+		if inst.get("agent") == _PAYROLL_DEPOSIT_AGENT:
+			raise
 		try:
 			config = frappe.parse_json(inst.get("config") or "{}")
 		except (TypeError, ValueError):
@@ -1988,6 +2038,11 @@ def _stamp_scope_and_watermark(
 			else:
 				scope.pop("scoped_visibility", None)
 		values["scope_json"] = frappe.as_json(scope)
+		if deposit_launch:
+			# This receipt holds only launch scope/config digests. It is stamped
+			# before dispatch and prevents a later installation edit from changing
+			# the source plan or a writeback scope.
+			payroll_deposit_snapshot.stamp_launch(run_name, deposit_launch, scope)
 	if inst.agent == agent_scope.FEFO_AGENT:
 		# Resolve the opaque visibility proof again immediately before dispatch.  The
 		# early FEFO preflight prevents row creation for a bad policy; this second
@@ -2153,6 +2208,7 @@ def _audit_prompt(
 	scope: dict | None = None,
 	engagement_config: dict | None = None,
 	record_scope_supported: bool = False,
+	explicit_config: dict | None = None,
 ) -> str:
 	"""The GENERIC, non-leaky run message handed to the delegate (A2/A6).
 
@@ -2225,6 +2281,20 @@ def _audit_prompt(
 			if scope.get("report_datetime")
 			else ""
 		)
+		record_scope = scope.get("record_scope")
+		bounded_record_scope = (
+			{"doctype": "Account", "name": record_scope.get("name")}
+			if isinstance(record_scope, dict)
+			and record_scope.get("doctype") == "Account"
+			and isinstance(record_scope.get("name"), str)
+			and record_scope["name"].strip()
+			else None
+		)
+		record_scope_text = (
+			f", record_scope={json.dumps(bounded_record_scope, sort_keys=True)}"
+			if bounded_record_scope
+			else ""
+		)
 		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period or the current date): "
 			f'company="{scope.get("company")}", '
@@ -2235,7 +2305,7 @@ def _audit_prompt(
 			f"{clock_block}"
 			+ (f'execution_user="{scope["execution_user"]}", ' if scope.get("execution_user") else "")
 			+ f'prior_fy_start="{scope.get("prior_fy_start")}", '
-			f'prior_fy_end="{scope.get("prior_fy_end")}"{fefo_contract}.'
+			f'prior_fy_end="{scope.get("prior_fy_end")}"{fefo_contract}{record_scope_text}.'
 		)
 	agent_slug = listing.get("agent_slug") or listing.get("name")
 	# Some agents use a server-bound scope narrower than the generic accounting
@@ -2268,7 +2338,8 @@ def _audit_prompt(
 	# The delegate merges this JSON into config.json verbatim.  The run message is
 	# the direct bench-to-container channel, while jarvis__get_engagement_config
 	# returns the same stored snapshot to an active run when the object is empty.
-	explicit_config = _sanitize_delegated_engagement_config(listing, engagement_config)
+	if explicit_config is None:
+		explicit_config = _sanitize_delegated_engagement_config(listing, engagement_config)
 	if explicit_config:
 		# ADDITIVE, never a replacement: config.json legitimately carries fields the delegate
 		# fetches or derives at run time (e.g. balances, or a run-as permission set used to
@@ -2604,13 +2675,32 @@ def purge_kept_budget_rows(owner: str | None = None) -> int:
 	)
 	if not names:
 		return 0
+	run_rows = frappe.get_all(
+		RUN,
+		filters={"name": ["in", names]},
+		fields=["name", "agent"],
+		ignore_permissions=True,
+	)
+	from jarvis.chat.dashboard_permissions import (
+		DEPOSIT_AGENT,
+		delete_deposit_dashboard_for_retention,
+	)
+	from jarvis.jarvis.doctype.jarvis_agent_run.jarvis_agent_run import trusted_deposit_run_removal
+
+	deposit_names = [row.name for row in run_rows if row.agent == DEPOSIT_AGENT]
 	for file in frappe.get_all(
 		"File", filters={"attached_to_doctype": RUN, "attached_to_name": ["in", names]}, pluck="name"
 	):
 		frappe.delete_doc("File", file, ignore_permissions=True, force=True)
 	for doctype, dt_field, name_field in _KEPT_ROW_TRACES:
 		frappe.db.delete(doctype, {dt_field: RUN, name_field: ["in", names]})
-	frappe.db.delete(RUN, {"name": ["in", names]})
+	for name in deposit_names:
+		delete_deposit_dashboard_for_retention(name)
+		with trusted_deposit_run_removal(None):
+			frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
+	generic_names = list(set(names) - set(deposit_names))
+	if generic_names:
+		frappe.db.delete(RUN, {"name": ["in", generic_names]})
 	return len(names)
 
 

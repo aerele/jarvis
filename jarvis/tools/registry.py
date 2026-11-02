@@ -111,6 +111,9 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# intentionally receives no generic document/query/message/write surface.
 	"get_ticket_triage_inputs",
 	"stage_ticket_triage_proposals",
+	# Payroll Deposit-Status: one server-owned, fixed private snapshot. The
+	# delegate never selects generic queries for this evidence path.
+	"get_payroll_deposit_inputs",
 	"get_bank_recon_inputs",
 	"prepare_reorder_review",
 	"get_cycle_count_inputs",

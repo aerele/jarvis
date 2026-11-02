@@ -59,6 +59,7 @@ describe("CONFIG_FIELD_SET", () => {
 				"fefo_test_declaration",
 				"grn_hygiene_reviewer",
 				"grn_hygiene_test_declaration",
+				"deposit",
 				"annual_aggregate_turnover",
 				"same_hsn_rate_allowlist",
 				"stale_floor_days",
@@ -68,7 +69,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders review, fixed-asset, payroll, scope, SLA, materiality, FEFO, GRN, then vendor-ledger fields", () => {
+	it("orders review, fixed-asset, payroll, scope, SLA, materiality, FEFO, GRN, Deposit, then vendor-ledger fields", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -95,6 +96,7 @@ describe("CONFIG_FIELD_SET", () => {
 			"fefo_test_declaration",
 			"grn_hygiene_reviewer",
 			"grn_hygiene_test_declaration",
+			"deposit",
 			"annual_aggregate_turnover",
 			"same_hsn_rate_allowlist",
 			"stale_floor_days",
@@ -175,6 +177,12 @@ describe("CONFIG_FIELD_SET", () => {
 		});
 	});
 
+	it("declares the payroll deposit panel at its one nested namespace", () => {
+		expect(CONFIG_FIELD_SET).toContainEqual(
+			expect.objectContaining({ key: "deposit", path: "deposit", type: "deposit-status" })
+		);
+	});
+
 	it("stores the GST same-HSN exclusions as a short text list", () => {
 		expect(TEXT_LIST_CONFIG_KEYS).toEqual(["same_hsn_rate_allowlist"]);
 	});
@@ -198,7 +206,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes review, fixed-asset, payroll, SLA, materiality, FEFO, GRN, GST and vendor-ledger settings", () => {
+	it("agent-specific includes review, fixed-asset, payroll, SLA, materiality, FEFO, GRN, Deposit, GST and vendor-ledger settings", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -221,6 +229,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"fefo_test_declaration",
 			"grn_hygiene_reviewer",
 			"grn_hygiene_test_declaration",
+			"deposit",
 			"annual_aggregate_turnover",
 			"same_hsn_rate_allowlist",
 			"stale_floor_days",
@@ -268,6 +277,10 @@ describe("KEY_TO_PATH (local form key -> storage dot path)", () => {
 		expect(KEY_TO_PATH.fefo_reviewer).toBe("fefo.reviewer");
 		expect(KEY_TO_PATH.fefo_near_expiry_days).toBe("fefo.near_expiry_days");
 		expect(KEY_TO_PATH.fefo_test_declaration).toBe("fefo.test_declaration");
+	});
+
+	it("the deposit panel owns the whole declared namespace", () => {
+		expect(KEY_TO_PATH.deposit).toBe("deposit");
 	});
 });
 

@@ -89,9 +89,7 @@
       "version": "0.2.1",
       "status": "Published",
       "description": "Reviews existing draft Purchase Invoices against exact PO and receipt links, cumulative invoice allocations and an explicitly configured price policy. Preview produces findings; live runs create evidence-backed human review requests. Never creates duplicate invoices, submits, pays, or certifies tax compliance. Manual runs only.",
-      "tools_required": [
-        "jarvis__get_purchase_match_inputs"
-      ],
+      "tools_required": ["jarvis__get_purchase_match_inputs"],
       "tools_allow": [
         "jarvis__get_purchase_match_inputs",
         "jarvis__record_agent_run",
@@ -109,16 +107,12 @@
         "Purchase Invoice Item",
         "Company"
       ],
-      "rule_tokens": [
-        "ap3-match-v1"
-      ],
+      "rule_tokens": ["ap3-match-v1"],
       "advisory_tokens": [],
       "writes": null,
       "rule_pack": "ap-exception-family",
       "timeout_s": 600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -149,9 +143,7 @@
       "version": "0.2.1",
       "status": "Published",
       "description": "Reviews submitted receivables and opening balances against typed payment-ledger evidence and recorded payment terms. Produces findings and neutral, unsent reminder text for a named reviewer. Detects India Compliance context when applicable. No sending, Dunning creation, reconciliation, posting, interest or write-offs. Manual runs only.",
-      "tools_required": [
-        "jarvis__get_receivables_review_inputs"
-      ],
+      "tools_required": ["jarvis__get_receivables_review_inputs"],
       "tools_allow": [
         "jarvis__get_receivables_review_inputs",
         "jarvis__record_agent_run",
@@ -167,16 +159,12 @@
         "Customer",
         "Company"
       ],
-      "rule_tokens": [
-        "ar-review-v1"
-      ],
+      "rule_tokens": ["ar-review-v1"],
       "advisory_tokens": [],
       "writes": null,
       "rule_pack": "revops-hygiene",
       "timeout_s": 600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -241,12 +229,11 @@
         "ali-lwp-9c21",
         "ali-punch-7d14"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
-      "min_apps": [
-        "hrms"
-      ],
+      "min_apps": ["hrms"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -267,9 +254,7 @@
       "version": "0.3.0",
       "status": "Published",
       "description": "Reviews unreconciled bank lines for one company bank account and statement window against booked Payment Entries and Journal Entries. Proposes matches, flags ambiguous lines and reversals, and describes entries a person may create for bank charges or interest. A named reviewer confirms each proposal and reconciles in ERPNext. No reconciliation, allocation, document creation or posting. Manual runs only.",
-      "tools_required": [
-        "jarvis__get_bank_recon_inputs"
-      ],
+      "tools_required": ["jarvis__get_bank_recon_inputs"],
       "tools_allow": [
         "jarvis__get_bank_recon_inputs",
         "jarvis__record_agent_run",
@@ -285,16 +270,12 @@
         "Account",
         "Company"
       ],
-      "rule_tokens": [
-        "bank-recon-review-v1"
-      ],
+      "rule_tokens": ["bank-recon-review-v1"],
       "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
@@ -369,9 +350,7 @@
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 3600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Quarterly"
@@ -382,9 +361,7 @@
       "min_model": {
         "tier": "Advanced"
       },
-      "config_keys": [
-        "baseline"
-      ]
+      "config_keys": ["baseline"]
     },
     {
       "agent_slug": "baseline-meter-auditor-helpdesk",
@@ -395,10 +372,7 @@
       "version": "0.3.0",
       "status": "Published",
       "description": "Read-only counts and response or resolution times for one Helpdesk team in fixed closed calendar windows. Uses recorded ticket timestamps and shows missing source coverage. Does not read ticket messages.",
-      "tools_required": [
-        "jarvis__get_my_access",
-        "jarvis__query"
-      ],
+      "tools_required": ["jarvis__get_my_access", "jarvis__query"],
       "tools_allow": [
         "jarvis__get_my_access",
         "jarvis__query",
@@ -406,10 +380,7 @@
         "jarvis__save_agent_dashboard",
         "exec"
       ],
-      "doctypes_required": [
-        "HD Ticket",
-        "HD Team"
-      ],
+      "doctypes_required": ["HD Ticket", "HD Team"],
       "rule_tokens": [
         "bmhd-resolution-79c2",
         "bmhd-response-bb17",
@@ -419,10 +390,7 @@
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 1200,
-      "min_apps": [
-        "erpnext",
-        "helpdesk"
-      ],
+      "min_apps": ["erpnext", "helpdesk"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Quarterly"
@@ -443,10 +411,7 @@
       "version": "0.2.0",
       "status": "Published",
       "description": "Extends the Retrospective Baseline Meter onto HRMS payroll records: how often payroll was re-run for the same period, how many corrections were booked as additional salary, and how many salary slips were changed after submission. Installable only where HRMS is present. Read-only; reports run counts, correction counts, and dates - never individual pay values.",
-      "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list"
-      ],
+      "tools_required": ["jarvis__query", "jarvis__get_list"],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
@@ -462,17 +427,12 @@
         "Additional Salary",
         "Version"
       ],
-      "rule_tokens": [
-        "bmh-ovl-7d12",
-        "bmh-win-3ab8"
-      ],
+      "rule_tokens": ["bmh-ovl-7d12", "bmh-win-3ab8"],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "hrms"
-      ],
+      "min_apps": ["erpnext", "hrms"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Quarterly"
@@ -532,10 +492,7 @@
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "india_compliance"
-      ],
+      "min_apps": ["erpnext", "india_compliance"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -575,11 +532,7 @@
         "canvas",
         "message"
       ],
-      "doctypes_required": [
-        "GL Entry",
-        "Account",
-        "Company"
-      ],
+      "doctypes_required": ["GL Entry", "Account", "Company"],
       "config_keys": [
         "materiality.benchmark_value",
         "materiality.percentage",
@@ -593,12 +546,11 @@
         "ca-cl-a4e6",
         "ca-cl-c058"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 2400,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -633,9 +585,7 @@
         "jarvis__finish_app_learning_run",
         "jarvis__read_wiki"
       ],
-      "doctypes_required": [
-        "Jarvis Wiki Page"
-      ],
+      "doctypes_required": ["Jarvis Wiki Page"],
       "rule_tokens": [],
       "advisory_tokens": [],
       "writes": null,
@@ -646,10 +596,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
-      "default_allowed_roles": [
-        "System Manager",
-        "Jarvis Admin"
-      ],
+      "default_allowed_roles": ["System Manager", "Jarvis Admin"],
       "validated_for_fy": null,
       "supports_record_scope": false,
       "min_model": {
@@ -665,9 +612,7 @@
       "version": "0.2.3",
       "status": "Published",
       "description": "Builds a reviewable physical-count plan from current stock, permitted movement evidence, and submitted Jarvis physical-count history. A named reviewer approves a warehouse plan. A human then records observed quantities in a separate Jarvis physical-count record. It never creates a Stock Reconciliation, fills a count, submits a document, or changes stock.",
-      "tools_required": [
-        "jarvis__get_cycle_count_inputs"
-      ],
+      "tools_required": ["jarvis__get_cycle_count_inputs"],
       "tools_allow": [
         "jarvis__get_cycle_count_inputs",
         "jarvis__record_agent_run",
@@ -685,16 +630,12 @@
         "Warehouse",
         "Company"
       ],
-      "rule_tokens": [
-        "ccp-plan-v1"
-      ],
+      "rule_tokens": ["ccp-plan-v1"],
       "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
@@ -762,9 +703,7 @@
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -820,9 +759,7 @@
       "writes": null,
       "rule_pack": "revops-hygiene",
       "timeout_s": 1800,
-      "min_apps": [
-        "crm"
-      ],
+      "min_apps": ["crm"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
@@ -887,9 +824,7 @@
       "writes": null,
       "rule_pack": "ap-exception-family",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -952,9 +887,7 @@
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -1013,12 +946,11 @@
         "fad-mat-7c21",
         "fad-salv-b1a6"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1082,9 +1014,7 @@
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
@@ -1095,10 +1025,7 @@
       "min_model": {
         "tier": "Advanced"
       },
-      "config_keys": [
-        "grn_hygiene.reviewer",
-        "grn_hygiene.test_declaration"
-      ]
+      "config_keys": ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"]
     },
     {
       "agent_slug": "gst-itc-recon-auditor",
@@ -1136,18 +1063,12 @@
         "Supplier",
         "Company"
       ],
-      "rule_tokens": [
-        "rule36_4_in2b",
-        "rule37_180d",
-        "s16_4_window"
-      ],
+      "rule_tokens": ["rule36_4_in2b", "rule37_180d", "s16_4_window"],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "india_compliance"
-      ],
+      "min_apps": ["erpnext", "india_compliance"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1208,17 +1129,11 @@
         "hsn_rate_drift",
         "notified_rcm_categories"
       ],
-      "advisory_tokens": [
-        "books_ic_consistency",
-        "hsn_rate_drift"
-      ],
+      "advisory_tokens": ["books_ic_consistency", "hsn_rate_drift"],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "india_compliance"
-      ],
+      "min_apps": ["erpnext", "india_compliance"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1229,10 +1144,7 @@
       "min_model": {
         "tier": "Advanced"
       },
-      "config_keys": [
-        "annual_aggregate_turnover",
-        "same_hsn_rate_allowlist"
-      ]
+      "config_keys": ["annual_aggregate_turnover", "same_hsn_rate_allowlist"]
     },
     {
       "agent_slug": "lead-hygiene-auditor",
@@ -1260,12 +1172,7 @@
         "canvas",
         "message"
       ],
-      "doctypes_required": [
-        "CRM Lead",
-        "CRM Deal",
-        "CRM Task",
-        "CRM Call Log"
-      ],
+      "doctypes_required": ["CRM Lead", "CRM Deal", "CRM Task", "CRM Call Log"],
       "rule_tokens": [
         "lh-email-4a1c",
         "lh-name-3e0f",
@@ -1282,9 +1189,7 @@
       "writes": null,
       "rule_pack": "revops-hygiene",
       "timeout_s": 900,
-      "min_apps": [
-        "crm"
-      ],
+      "min_apps": ["crm"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -1295,10 +1200,7 @@
       "min_model": {
         "tier": "Advanced"
       },
-      "config_keys": [
-        "open_workable_status_set",
-        "fingerprint_salt"
-      ]
+      "config_keys": ["open_workable_status_set", "fingerprint_salt"]
     },
     {
       "agent_slug": "ledger-scrutiny-auditor",
@@ -1328,12 +1230,7 @@
         "canvas",
         "message"
       ],
-      "doctypes_required": [
-        "GL Entry",
-        "Account",
-        "Journal Entry",
-        "Company"
-      ],
+      "doctypes_required": ["GL Entry", "Account", "Journal Entry", "Company"],
       "rule_tokens": [
         "ls-dup-5f06",
         "ls-mat-a81c",
@@ -1341,12 +1238,11 @@
         "ls-sign-9c14",
         "ls-susp-3d7a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1393,18 +1289,12 @@
         "Supplier",
         "Company"
       ],
-      "rule_tokens": [
-        "msmed_s15_windows",
-        "s43bh_yearend_test"
-      ],
+      "rule_tokens": ["msmed_s15_windows", "s43bh_yearend_test"],
       "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "india_compliance"
-      ],
+      "min_apps": ["erpnext", "india_compliance"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1474,9 +1364,7 @@
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1547,9 +1435,7 @@
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
-      "min_apps": [
-        "hrms"
-      ],
+      "min_apps": ["hrms"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1560,10 +1446,7 @@
       "min_model": {
         "tier": "Advanced"
       },
-      "config_keys": [
-        "payroll_entry",
-        "reviewer_of_record"
-      ]
+      "config_keys": ["payroll_entry", "reviewer_of_record"]
     },
     {
       "agent_slug": "reorder-replenishment-operator",
@@ -1603,9 +1486,7 @@
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -1631,10 +1512,7 @@
       "version": "0.3.0",
       "status": "Published",
       "description": "Read-only review of the visible tickets in one selected Helpdesk team. Checks SLA deadlines, assignment, first replies, recorded reopen activity, calendar age and policy gaps at a bench-stamped instant.",
-      "tools_required": [
-        "jarvis__get_my_access",
-        "jarvis__query"
-      ],
+      "tools_required": ["jarvis__get_my_access", "jarvis__query"],
       "tools_allow": [
         "jarvis__get_my_access",
         "jarvis__query",
@@ -1644,10 +1522,7 @@
         "canvas",
         "message"
       ],
-      "doctypes_required": [
-        "HD Ticket",
-        "HD Team"
-      ],
+      "doctypes_required": ["HD Ticket", "HD Team"],
       "rule_tokens": [
         "sb-age-c9f3",
         "sb-assign-34d1",
@@ -1660,9 +1535,7 @@
       "writes": null,
       "rule_pack": "helpdesk-queue",
       "timeout_s": 1800,
-      "min_apps": [
-        "helpdesk"
-      ],
+      "min_apps": ["helpdesk"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -1673,9 +1546,7 @@
       "min_model": {
         "tier": "Advanced"
       },
-      "config_keys": [
-        "sla_config"
-      ]
+      "config_keys": ["sla_config"]
     },
     {
       "agent_slug": "statutory-payroll-compliance-auditor",
@@ -1726,9 +1597,7 @@
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
-      "min_apps": [
-        "hrms"
-      ],
+      "min_apps": ["hrms"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1751,51 +1620,45 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.5.0",
       "status": "Published",
-      "description": "Extends the Statutory Payroll auditor onto your own recorded PF/ESI deposit bookings: it reads the Journal Entry or Payment Entry you post against your PF/ESI liability account and reports whether that booking is dated on or before the effective-dated deposit due date. Installable only where ERPNext and HRMS are present. Read-only; reports a booked-liability date only, never that a deposit reached EPFO/ESIC, and never books, edits, or deposits. Custom challan doctypes and portal receipts are not read here; they enter as a declared import artifact.",
-      "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__get_doc"
-      ],
+      "description": "Reviews each owner-declared native outgoing payroll booking in one configured Account group against a dated due-date reference. It keeps current interest and damages evidence-review gaps visible and shows VISHWAS as an external-review reference only. It does not decide eligibility, receipt, default or penalty. Gazette text and qualified legal review remain pending.",
+      "tools_required": ["jarvis__get_payroll_deposit_inputs"],
       "tools_allow": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__get_doc",
+        "jarvis__get_payroll_deposit_inputs",
         "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "exec",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
         "Journal Entry",
         "Payment Entry",
-        "Company"
+        "Company",
+        "Account",
+        "Journal Entry Account",
+        "Payment Entry Deduction",
+        "Advance Taxes and Charges"
       ],
       "rule_tokens": [
         "pf_esi_deposit_due_date",
         "s14b_damages_table",
         "s7q_interest_table"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "hrms"
-      ],
+      "min_apps": ["erpnext", "hrms"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027",
+      "validated_for_fy": null,
       "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": ["deposit"]
     },
     {
       "agent_slug": "stock-variance-auditor",
@@ -1829,15 +1692,12 @@
         "Item",
         "Stock Ledger Entry"
       ],
-      "rule_tokens": [
-        "sv-vtol-7b2c"
-      ],
+      "rule_tokens": ["sv-vtol-7b2c"],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -1858,9 +1718,7 @@
       "version": "0.4.2",
       "status": "Published",
       "description": "Prepares your monthly TDS/TCS data before each deposit due date and before each 26Q/24Q quarter: reconciles the TDS booked in your ledger against the challan payments recorded in your books, tracks each supplier's running total against the section thresholds, checks the rate deducted against the effective section rate, and lists the deductee fields your return is missing. Read-only worklist; never edits a voucher, books TDS, deposits a challan, files a return, or decides what is legally deductible.",
-      "tools_required": [
-        "jarvis__query"
-      ],
+      "tools_required": ["jarvis__query"],
       "tools_allow": [
         "jarvis__query",
         "jarvis__record_agent_run",
@@ -1890,10 +1748,7 @@
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "india_compliance"
-      ],
+      "min_apps": ["erpnext", "india_compliance"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1944,9 +1799,7 @@
       "writes": null,
       "rule_pack": "helpdesk-queue",
       "timeout_s": 300,
-      "min_apps": [
-        "helpdesk"
-      ],
+      "min_apps": ["helpdesk"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -2024,12 +1877,11 @@
         "vl-stale-ageing-5f17",
         "vl-tieout-tol-a9e3"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"

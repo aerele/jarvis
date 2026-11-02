@@ -650,6 +650,10 @@ class TestAgentIdentity(unittest.TestCase):
 		try:
 			with (
 				mock.patch.object(agent_scope, "resolve_scope", return_value=stamped_scope),
+				# This case exercises the legacy permission projection, independently
+				# of a catalog update that opts into a reviewed visibility receipt.
+				mock.patch.object(agent_scheduler, "_visibility_receipt", return_value=None),
+				mock.patch.object(agent_scheduler, "_scope_has_scoped_visibility", return_value=False),
 				mock.patch.object(
 					agent_models, "gate_run", return_value={"ok": True, "model_source": "choice"}
 				),
@@ -674,7 +678,10 @@ class TestAgentIdentity(unittest.TestCase):
 					"\n\nEXPLICIT CONFIG", 1
 				)[0]
 			),
-			{"record_scope": {"doctype": "Warehouse", "name": "Canonical Warehouse Group"}},
+			{
+				"record_scope": {"doctype": "Warehouse", "name": "Canonical Warehouse Group"},
+				"scoped_visibility": False,
+			},
 		)
 		self.assertNotIn('"record_scope"', message.split("EXPLICIT CONFIG", 1)[1])
 		self.assertNotIn("Raw Owner Warehouse", message)
@@ -988,7 +995,9 @@ class TestAgentIdentity(unittest.TestCase):
 		admin_client.post_agent_run = _cap
 		frappe.set_user(self.owner)  # the human owner triggers their own install
 		try:
-			result = agents_api.run_agent_now(inst_name)
+			# Identity checks must not depend on run rows left by other modules.
+			with mock.patch.object(agent_scheduler, "_agent_run_budget_monthly", return_value=1000000):
+				result = agents_api.run_agent_now(inst_name)
 		finally:
 			frappe.set_user("Administrator")
 			admin_client.post_agent_run = orig
