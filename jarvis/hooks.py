@@ -598,6 +598,13 @@ doc_events = {
 	for dt in ("DocType", "Custom Field", "Property Setter", "Workflow", "Client Script")
 }
 
+# Generic RPCs must use the same source gate as dedicated LCV tools. The
+# handler is a no-op outside the scoped tool call, including ordinary Desk.
+doc_events["Landed Cost Voucher"] = {
+	"before_validate": "jarvis.tools._lcv_tool_writes.guard_tool_document",
+	"before_submit": "jarvis.tools._lcv_tool_writes.guard_tool_document",
+}
+
 # Org-scope wiki pages are mirrored as markdown into the tenant container
 # workspace; every page write/delete enqueues a debounced mirror sync (the
 # handler filters to Org scope itself and no-ops when the tenant is
