@@ -441,7 +441,7 @@ jobs:
           # Keep the ordinary suite unchanged. Run the accounting integration
           # on a separate site, with a pinned v15 classifier and native schema.
           bench get-app --branch version-15 --skip-assets https://github.com/resilient-tech/india-compliance.git
-          git -C apps/india_compliance fetch origin eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
+          git -C apps/india_compliance fetch upstream eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
           git -C apps/india_compliance checkout --detach eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
           ./env/bin/pip install -e apps/india_compliance
           bench new-site jarvis-lcv-ci.test \
