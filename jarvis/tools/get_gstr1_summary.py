@@ -54,6 +54,7 @@ _TAX_KEYS = (
 )
 _AMOUNT_KEYS = ("total_taxable_value",) + tuple(ic for _, ic in _TAX_KEYS)
 _PERIOD_RE = re.compile(r"^\d{6}$")  # MMYYYY
+_GSTR1_RETURN_TYPES = {"GSTR1", "GSTR-1"}
 
 
 def _na(reason: str, **extra) -> dict:
@@ -117,8 +118,10 @@ def _resolve_log(company: str, return_period: str, gstin: str | None, return_typ
 	"""The single GSTR-1 log for (company, period[, gstin]), read-only.
 
 	Uses get_all/get_doc ONLY — never ``get_gst_return_log`` (which inserts). ``require_filed``
-	(the ``filed`` source) additionally demands filing_status "Filed". Returns the loaded doc,
-	or an ``_na`` dict when absent / ambiguous / (filed source) not filed."""
+	(the ``filed`` source) additionally demands filing_status "Filed". It filters every
+	candidate through the run-as record permission before it decides whether the result is
+	absent or ambiguous. Returns the loaded doc, or an ``_na`` dict when no visible record,
+	multiple visible registrations, or (filed source) no visible filed record exists."""
 	filters = {
 		"company": company,
 		"return_period": return_period,
@@ -127,12 +130,18 @@ def _resolve_log(company: str, return_period: str, gstin: str | None, return_typ
 	if gstin:
 		filters["gstin"] = gstin
 	names = frappe.get_all(RETURN_LOG, filters=filters, pluck="name", ignore_permissions=True)
-	if not names:
+	docs = []
+	for name in sorted(names):
+		candidate = frappe.get_doc(RETURN_LOG, name)
+		if frappe.has_permission(RETURN_LOG, ptype="read", doc=candidate):
+			docs.append(candidate)
+	if not docs:
+		# Do not distinguish an absent log from a hidden one. This protects the
+		# existence, GSTIN count, and filing state of rows outside the run-as slice.
 		return _na("no_log")
-	if len(names) > 1 and not gstin:
-		# a multi-registration company has one log per GSTIN — never blend them.
-		return _na("ambiguous_gstin", gstins_found=len(names))
-	docs = [frappe.get_doc(RETURN_LOG, n) for n in sorted(names)]  # latest name = stable tie-break
+	if len(docs) > 1 and not gstin:
+		# A multi-registration company has one log per GSTIN — never blend them.
+		return _na("ambiguous_gstin")
 	if require_filed:
 		docs = [d for d in docs if (d.get("filing_status") or "").strip().lower() == "filed"]
 		if not docs:
@@ -153,7 +162,7 @@ def get_gstr1_summary(
 	tie-out; needs filing_status "Filed"). ``source="books"`` reads IC's own GSTR-1-from-books
 	rollup (a books-vs-IC-mapping CONSISTENCY signal, NOT a return tie-out; needs only that IC
 	has generated the period — far more common). ``return_period`` is ``MMYYYY`` (e.g. "122026").
-	On success: ``{available: True, source: "filed_summary"|"books_summary", log_name, gstin,
+	On success: ``{available: True, company, source: "filed_summary"|"books_summary", log_name, gstin,
 	return_period, return_type, from_date, to_date, filing_status, generation_status,
 	total_taxable_value, total_igst, total_cgst, total_sgst, total_cess}``. Otherwise
 	``{available: False, reason}`` — the delegate then leaves that check un-fed. Raises
@@ -162,13 +171,23 @@ def get_gstr1_summary(
 	# --- arg validation: RAISE (caller bugs must not hide behind not-available) ---
 	company = (company or "").strip()
 	return_period = (return_period or "").strip()
+	return_type = (return_type or "GSTR1").strip().upper()
 	source = (source or "filed").strip().lower()
 	if not company:
 		raise InvalidArgumentError("company is required")
 	if not _PERIOD_RE.match(return_period):
 		raise InvalidArgumentError(f"return_period must be MMYYYY (e.g. '122026'); got {return_period!r}")
+	if return_type not in _GSTR1_RETURN_TYPES:
+		raise InvalidArgumentError(
+			f"return_type must be one of {sorted(_GSTR1_RETURN_TYPES)}; got {return_type!r}"
+		)
 	if source not in _SUMMARY_FIELD:
 		raise InvalidArgumentError(f"source must be one of {sorted(_SUMMARY_FIELD)}; got {source!r}")
+	# A Company-sliced caller must not use argument validation to enumerate Company
+	# records outside its run-as scope.  The public response is the same whether
+	# that unseen name exists or not.
+	if not is_company_permitted(company):
+		return _na("permission_denied")
 	if not frappe.db.exists("Company", company):
 		raise InvalidArgumentError(f"unknown Company: {company}")
 	field = _SUMMARY_FIELD[source]
@@ -177,8 +196,6 @@ def get_gstr1_summary(
 	try:
 		if "india_compliance" not in frappe.get_installed_apps():
 			return _na("app_absent")
-		if not is_company_permitted(company):  # Company User-Permission slice
-			return _na("permission_denied")
 		# doctype-level read ROLE gate BEFORE any resolution, so a caller without GST
 		# Return Log read can't learn a log's existence / GSTIN count / filed-status for a
 		# named company+period. The per-record check below still enforces the record slice.
@@ -196,10 +213,10 @@ def get_gstr1_summary(
 			return resolved
 		log = resolved
 
-		# per-RECORD read perm under the run-as identity (enforces the Company/GSTIN User
-		# Permission slice on THIS log — the doctype-level check above would not).
+		# Defence in depth for a permission change after _resolve_log filtered the
+		# candidates. Keep the hidden/absent response identical.
 		if not frappe.has_permission(RETURN_LOG, ptype="read", doc=log):
-			return _na("permission_denied")
+			return _na("no_log")
 
 		# QRMP quarterly deferred (D2): the log covers a quarter but the auditor sums a
 		# month -> windows mismatch. Degrade honestly rather than tie the wrong windows.
@@ -215,6 +232,7 @@ def get_gstr1_summary(
 		from_date, to_date = _period_window(return_period)
 		result = {
 			"available": True,
+			"company": company,
 			"source": field,
 			"log_name": log.name,
 			"gstin": log.get("gstin"),
