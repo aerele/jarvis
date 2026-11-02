@@ -258,7 +258,17 @@ class ArrivesClean:
 	def test_it_arrives_off_unscheduled_disarmed_and_with_nothing_of_the_old_owners(self):
 		macro = self._full_macro()
 		res = self._handover(macro)
-		self.assertEqual(res, {"ok": True, "handed_over": True, "new_owner": TARGET, "stopped_runs": 0})
+		self.assertEqual(
+			res,
+			{
+				"ok": True,
+				"handed_over": True,
+				"new_owner": TARGET,
+				"stopped_runs": 0,
+				"copies": [],
+				"copy_failed": [],
+			},
+		)
 		row = self._row(macro)
 		self.assertEqual(row.owner, TARGET)
 		self.assertEqual(

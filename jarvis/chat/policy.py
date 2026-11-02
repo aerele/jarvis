@@ -8,7 +8,8 @@ this module's contract.
 
 Returns (True, None) on success or (False, reason: str) on rejection. The
 reason is a machine code the SPA maps to a human toast: ``"usage_limit"`` for
-enforcement, ``"subscription_suspended"`` for billing,
+enforcement, ``"site_is_copy"`` on a restored copy of another site,
+``"subscription_suspended"`` for billing,
 ``"release_update_required"`` while a release rollout is blocking this
 bench, and ``"maintenance"`` during an upgrade maintenance hold. Worker
 health is never a gate here: RQ's worker registry can read zero
@@ -29,6 +30,10 @@ def validate_can_send(user: str, model: str | None = None) -> tuple[bool, str | 
 		return False, "no authenticated user"
 	if user == "Guest":
 		return False, "Guest users cannot use Jarvis chat"
+	# A restored copy of another site never reaches the tenant's agent: refuse before
+	# anything is persisted or enqueued (else the worker retries a connect that cannot succeed).
+	if _site_is_copy():
+		return False, "site_is_copy"
 	# Aggregate all-time cap is the OUTER gate — checked first (fleet spec §7).
 	if _over_total_limit(user):
 		return False, "usage_limit"
@@ -52,6 +57,17 @@ def validate_can_send(user: str, model: str | None = None) -> tuple[bool, str | 
 	if model and _over_model_limit(user, model):
 		return False, "usage_limit"
 	return True, None
+
+
+def _site_is_copy() -> bool:
+	"""True only on an unambiguous pin mismatch. ``site_pin.status`` already fails
+	OPEN on a read error; this guards the rest."""
+	try:
+		from jarvis.chat import site_pin
+
+		return bool(site_pin.status()["blocked"])
+	except Exception:
+		return False
 
 
 def _release_update_required() -> bool:

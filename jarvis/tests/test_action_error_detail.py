@@ -190,6 +190,7 @@ class TestDispatchAndWrapEnrichment(FrappeTestCase):
 					patch("frappe.log_error") as crash_log,
 					patch("jarvis.api.audit.record") as audit,
 					patch("jarvis.agent_audit.record_write"),
+					patch("jarvis.api_errors.record_tool_failure"),
 				):
 					env = _dispatch_call(
 						{"tool": "send_email", "args": args, "exec_user": frappe.session.user},
@@ -226,6 +227,7 @@ class TestDispatchAndWrapEnrichment(FrappeTestCase):
 			patch("jarvis.api.dispatch", side_effect=fail),
 			patch("jarvis.api.audit.record"),
 			patch("jarvis.agent_audit.record_write"),
+			patch("jarvis.api_errors.record_tool_failure"),
 		):
 			env = api.dispatch_confirmed("send_email", {})
 		self.assertFalse(env["ok"])

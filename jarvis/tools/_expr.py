@@ -246,6 +246,25 @@ def _build_date_add(args: list, dialect: str) -> Term:
 	return fn.Function("DATE_ADD", x, fn.LiteralValue(f"INTERVAL {n} {unit.upper()}"))
 
 
+def _build_date_diff(args: list, dialect: str) -> Term:
+	"""``date_diff(end, start)`` → whole days from ``start`` to ``end``.
+
+	The order is Frappe's own ``frappe.utils.date_diff(end, start)``, so the days
+	from quotation to order are ``date_diff(so.transaction_date, q.transaction_date)``.
+	The time of day is ignored on every dialect, as MariaDB's ``DATEDIFF`` ignores it.
+	"""
+	end, start = args
+	if dialect == "postgres":
+		return fn.Cast(end, "DATE") - fn.Cast(start, "DATE")
+	if dialect == "sqlite":
+		return fn.Cast(
+			fn.Function("julianday", fn.Function("date", end))
+			- fn.Function("julianday", fn.Function("date", start)),
+			"INTEGER",
+		)
+	return fn.Function("DATEDIFF", end, start)
+
+
 _register(
 	"date_part",
 	arity=(2, 2),
@@ -266,6 +285,12 @@ _register(
 	args=["expr", "literal", "literal"],
 	literal_constraint={2: _DATE_UNITS},
 	builder=_build_date_add,
+)
+_register(
+	"date_diff",
+	arity=(2, 2),
+	args=["expr", "expr"],
+	builder=_build_date_diff,
 )
 
 

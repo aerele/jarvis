@@ -503,6 +503,8 @@ def held_title(items: list[dict]) -> str:
 	if len(items) == 1:
 		verb = "New" if first["op"] == "create" else "Update"
 		head = f"{verb} {first['doctype'].lower()}"
+		if held_parties.company_scoped(first["doctype"]) and first["values"].get("company"):
+			label = f"{label} · {first['values']['company']}"
 		return _clean_title(f"{head}: {label}" if label else head)
 	head = "New records" if all(i["op"] == "create" for i in items) else "Record changes"
 	lead = f"{first['doctype']} {label}".strip()
@@ -521,16 +523,19 @@ def _primary_key(keys: list[str]) -> str:
 def _existing_party(items: list[dict]) -> dict | None:
 	"""A new party that already exists (read as the running user, the exec_user)."""
 	for item in items:
-		if item["op"] != "create" or not held_parties.is_party(item["doctype"]):
+		if item["op"] != "create" or not (
+			held_parties.is_party(item["doctype"]) or held_parties.company_scoped(item["doctype"])
+		):
 			continue
 		party = held_parties.party_of(item)
 		if not (party["title"] or party["gstin"]):
 			continue
-		found = held_parties.find_existing(
-			item["doctype"], title=party["title"], gstin=party["gstin"], limit=1
-		)
+		found = held_parties.existing_of(item, limit=1)
 		if found:
-			return {"doctype": item["doctype"], **found[0]}
+			match = {"doctype": item["doctype"], **found[0]}
+			if held_parties.company_scoped(item["doctype"]):
+				match["requested_currency"] = item["values"].get("account_currency")
+			return match
 	return None
 
 
@@ -552,15 +557,13 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 			f"too many records in one batch ({len(items)}); the max is {_MAX_BATCH}. Split them into "
 			f"batches of {_MAX_BATCH}; each batch waits for a human on the Approval Board.",
 		)
+	if held_parties.missing_scope(items):
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
+		return _refuse("InvalidArgumentError", held_parties.SCOPE_REQUIRED)
 	match = _existing_party(items)
 	if match:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
-		label = match["title"] or match["name"]
-		return _refuse(
-			"InvalidArgumentError",
-			f"{match['doctype']} {label} already exists (name: {match['name']}). Use it: leave it out "
-			"of this call and do not create it again.",
-		)
+		return _refuse("InvalidArgumentError", held_parties.existing_note(match))
 	needs_input = []
 	try:
 		preview = api._run_preview(tool, args)

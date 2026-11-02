@@ -322,5 +322,29 @@
   {
     "error": "Agent run failed.",
     "code": "gateway"
+  },
+  {
+    "error": "You've hit your session limit · resets 7:20am (UTC)",
+    "code": "quota"
+  },
+  {
+    "error": "You've hit your weekly limit · resets Mon 9:00am",
+    "code": "quota"
+  },
+  {
+    "error": "5-hour limit reached ∙ resets 3pm",
+    "code": "quota"
+  },
+  {
+    "error": "Claude AI usage limit reached|1760000000",
+    "code": "quota"
+  },
+  {
+    "error": "Daily limit of 5 emails reached",
+    "code": "gateway"
+  },
+  {
+    "error": "Output token limit reached for this reply",
+    "code": "gateway"
   }
 ]

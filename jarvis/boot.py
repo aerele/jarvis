@@ -56,9 +56,15 @@ def set_jarvis_boot(bootinfo):
 		readiness = is_ready_for_chat() or {}
 		bootinfo.jarvis_onboarded = bool(readiness.get("ready"))
 		bootinfo.jarvis_ready_reason = "" if bootinfo.jarvis_onboarded else (readiness.get("reason") or "")
+		# Copy of another site: the desk banner shows the block message instead of the
+		# onboarding nudge. Read off the verdict above, not a second status() call.
+		bootinfo.jarvis_pairing_blocked = readiness.get("reason") == "site_is_copy"
+		bootinfo.jarvis_paired_site = (readiness.get("copy_notice") or {}).get("paired_site") or ""
 	except Exception:
 		bootinfo.jarvis_onboarded = True  # fail-safe: never nag on a boot error
 		bootinfo.jarvis_ready_reason = ""
+		bootinfo.jarvis_pairing_blocked = False  # fail-safe: never claim a block on a boot error
+		bootinfo.jarvis_paired_site = ""
 
 	# has_been_chat_ready() is its own fail-safe (returns False on error) and
 	# reads the same lightweight raw-settings fields is_ready_for_chat's own

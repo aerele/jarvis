@@ -3,6 +3,7 @@ import { boundedDelivery, settledSendResult } from "./lib/sendDelivery.js";
 // the session cookie + CSRF). Same backend the Desk chat uses, so conversations
 // stay consistent across surfaces.
 import { call } from "frappe-ui";
+import { fetchToday } from "@jsshared/holiday/store.mjs";
 import { firstServerMessage, messageText } from "./lib/errors.js";
 import { listPageArgs as _page } from "./api/listPageArgs";
 import { HISTORY_PAGE_SIZE } from "./lib/historyPaging.js";
@@ -58,6 +59,18 @@ export async function downloadConversation(conversation, format) {
 		setTimeout(() => URL.revokeObjectURL(url), 10000);
 	}
 }
+
+// What the holiday touch shows the session user today (jarvis.holiday_touch.api). The
+// method is GET-only server-side and frappe-ui's `call` always POSTs, so this is a plain
+// fetch (jarvis/public/js/shared/holiday/store.mjs, shared with the Desk widget). A non-2xx
+// (a 403 for a user without Jarvis access) rejects with .status; a 200 whose message is not
+// an object rejects with malformed: true. The holiday store reads a 403 as "none".
+export const getHolidayToday = () => fetchToday();
+
+// The welcome scene asks the server for its showing slot (jarvis.holiday_touch.api).
+// Answers {play: bool}; rejects on a network or server error. The scene gives it, and
+// the scene's import, one overall deadline, so this call sets no timeout of its own.
+export const recordHolidayShown = () => call("jarvis.holiday_touch.api.record_shown");
 
 export const listConversations = ({ refresh = false } = {}) =>
 	call("jarvis.chat.api.list_conversations", refresh ? { refresh: 1 } : {});
@@ -198,6 +211,9 @@ export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
 // 180s server-side. Admin-gated (require_jarvis_admin). Returns get_llm_sync_status()'s
 // shape plus `outcome`: converged | queued | throttled | not_configured.
 export const resyncLlm = () => call("jarvis.onboarding.resync_llm");
+// System Manager only. Asks admin to prove, through the tenant container, that this is the
+// registered site; a pass clears the copy block. Returns the site status plus `proved`.
+export const reverifySite = () => call("jarvis.chat.site_pin.reverify");
 // Read-only poll of a durable LLM-apply operation (plan-05 D2). The single
 // Start-chatting controller (frontend/src/lib/llmOperation.js) follows exactly one
 // operation id to a terminal state through this; it never spends the apply bucket.
@@ -1023,6 +1039,8 @@ export const listMacrosPage = (p) => call(MC + "list_macros_page", _page(p));
 export const fileboxListPage = (p) => call("jarvis.chat.filebox.list_inbound_page", _page(p));
 export const listApprovalsPage = (p) =>
 	call("jarvis.chat.approvals_api.list_approvals_page", _page(p));
+export const listApprovalReviewers = () =>
+	call("jarvis.chat.approvals_api.list_approval_reviewers");
 
 // ── File Box FB-1: cascade delete + clear-processed + bulk delete (Q4) ──────
 // delete_inbound: owner-gated cascade (approvals + messages + File docs + the

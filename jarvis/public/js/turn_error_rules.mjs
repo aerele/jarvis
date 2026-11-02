@@ -146,7 +146,7 @@ export default [
   },
   {
     "code": "quota",
-    "pattern": "\\bquota\\b|usage limit|usage cap",
+    "pattern": "\\bquota\\b|usage limit|usage cap|\\b(?:session|weekly|daily|monthly|hourly|5-hour|five-hour) limit\\b[^\\n]{0,80}\\bresets?\\b|\\blimit reached\\b[^\\n]{0,40}\\bresets?\\b|\\bhit your [a-z0-9 -]{0,20}\\blimit\\b",
     "headline": "The model account’s usage allowance was reached",
     "hint": "Try another available model, or ask the account owner when the allowance resets and whether it can be increased.",
     "retryable": false,

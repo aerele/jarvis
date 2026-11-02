@@ -7,6 +7,7 @@ import frappe
 
 from jarvis.payment_calendar.access import authorize_scope
 from jarvis.payment_calendar.banks import read_bank_balances
+from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.projection import project_snapshot
 from jarvis.payment_calendar.sources import read_obligations
@@ -33,7 +34,8 @@ def _source_caches():
 	Called only from the sequential RQ source reader. The client-cache invalidator
 	thread does not call these primitives. No web request uses this context.
 	"""
-	cache, client = frappe.cache, frappe.client_cache
+	profile = source_profile()
+	cache = frappe.cache
 	hits, policies = set(), {}
 
 	def document(key):
@@ -61,6 +63,9 @@ def _source_caches():
 	original_hget, original_hset = cache.hget, cache.hset
 
 	def hget(name, key, generator=None, shared=False):
+		if profile.major == "15" and name == "defaults" and key == "__default":
+			hits.add(profile.defaults_cache_hit)
+			return None
 		if name == "fiscal_years":
 			hits.add(("hget", name))
 			return None
@@ -72,6 +77,8 @@ def _source_caches():
 		return original_hget(name, key, generator=generator, shared=shared)
 
 	def hset(name, key, value, *args, **kwargs):
+		if profile.major == "15" and name == "defaults" and key == "__default":
+			return None
 		if name == "fiscal_years":
 			return None
 		if name in ("roles", "user_permissions"):
@@ -79,15 +86,18 @@ def _source_caches():
 			return None
 		return original_hset(name, key, value, *args, **kwargs)
 
+	replacements = [
+		(cache, "get_value", wrap(cache, "get_value", document)),
+		(cache, "set_value", wrap(cache, "set_value", document)),
+		(cache, "hget", hget),
+		(cache, "hset", hset),
+	]
+	if profile.major == "16":
+		client = frappe.client_cache
+		for name in ("get_value", "set_value"):
+			replacements.append((client, name, wrap(client, name, lambda key: key == "defaults::__default")))
 	with ExitStack() as stack:
-		for target, name, replacement in (
-			(cache, "get_value", wrap(cache, "get_value", document)),
-			(cache, "set_value", wrap(cache, "set_value", document)),
-			(client, "get_value", wrap(client, "get_value", lambda key: key == "defaults::__default")),
-			(client, "set_value", wrap(client, "set_value", lambda key: key == "defaults::__default")),
-			(cache, "hget", hget),
-			(cache, "hset", hset),
-		):
+		for target, name, replacement in replacements:
 			if name in vars(target):
 				raise CalendarSourceUnavailable("source_contract_unavailable")
 			stack.enter_context(_replace(target, name, replacement))
@@ -142,6 +152,7 @@ def consistent_read():
 
 def collect(scope: dict, fingerprint: str) -> dict:
 	"""All financial sources share the fixed view; fresh policy also fences publish."""
+	profile = source_profile()
 	with consistent_read() as hits:
 		cutoff = datetime.now(timezone.utc).isoformat()
 		proof = authorize_scope(scope, expected_fingerprint=fingerprint)
@@ -168,7 +179,7 @@ def collect(scope: dict, fingerprint: str) -> dict:
 					)
 			except CalendarSourceUnavailable as exc:
 				unavailable[side] = exc.code
-		if any(sources.values()) and ("get_value", "defaults::__default") not in hits:
+		if any(sources.values()) and profile.defaults_cache_hit not in hits:
 			raise CalendarSourceUnavailable("source_contract_unavailable")
 		from erpnext.accounts.utils import get_currency_precision
 
@@ -191,7 +202,7 @@ def collect(scope: dict, fingerprint: str) -> dict:
 		if bank and (("hget", "fiscal_years") not in hits or bank["precision"] != precision):
 			raise CalendarSourceUnavailable("source_contract_unavailable")
 		if any(sources.values()) and (
-			("get_value", "defaults::__default") not in hits
+			profile.defaults_cache_hit not in hits
 			or not any(
 				key.startswith("document_cache::Company::") for method, key in hits if method == "get_value"
 			)

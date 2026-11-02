@@ -214,7 +214,9 @@ def list_conversations(refresh: bool = False) -> list[dict]:
 
 	Empty conversations (a "New Chat" opened and abandoned with no message) are
 	hidden so a stray draft never lingers in the sidebar; it surfaces the moment
-	it gets its first message (the send path reloads this list). ``message_count``
+	it gets its first message (the send path reloads this list). A macro run's
+	chat is hidden too: it is a run log, opened from the Runs page, its macro's
+	page or the run's notification, and still opens at its own URL. ``message_count``
 	is still returned for the UI, and is always >= 1 given the EXISTS filter.
 	``activity`` carries unfinished run/message identities. ``refresh`` is an
 	observational sidebar reconciliation: it never queues billed prewarming.
@@ -247,6 +249,10 @@ def list_conversations(refresh: bool = False) -> list[dict]:
 		  AND EXISTS (
 		    SELECT 1 FROM `tabJarvis Chat Message` m2
 		    WHERE m2.conversation = c.name
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM `tabJarvis Macro Run` r
+		    WHERE r.conversation = c.name
 		  )
 		ORDER BY c.starred DESC, c.last_active_at DESC
 		""",
@@ -318,6 +324,7 @@ def search_conversations(search: str = "", start: int = 0, page_length: int = 20
 
 	c = frappe.qb.DocType("Jarvis Conversation")
 	m = frappe.qb.DocType("Jarvis Chat Message")
+	r = frappe.qb.DocType("Jarvis Macro Run")
 	query = (
 		frappe.qb.from_(c)
 		.where(c.owner == me)
@@ -326,8 +333,10 @@ def search_conversations(search: str = "", start: int = 0, page_length: int = 20
 		# leak into the general chat palette. Other origin markers retain their
 		# established behavior.
 		.where(Coalesce(c.origin_page, "") != "dashboards")
-		# Hide empty (message-less) drafts, mirroring list_conversations.
+		# Hide empty (message-less) drafts and macro run chats, mirroring
+		# list_conversations.
 		.where(ExistsCriterion(frappe.qb.from_(m).select(1).where(m.conversation == c.name)))
+		.where(ExistsCriterion(frappe.qb.from_(r).select(1).where(r.conversation == c.name)).negate())
 	)
 	if search:
 		escaped = (search or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -1683,7 +1692,7 @@ import uuid
 
 from frappe import _
 
-from jarvis.chat import role_profiles
+from jarvis.chat import device, role_profiles
 from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.entities import scrub
 from jarvis.chat.policy import blocking_limit_period, validate_can_send
@@ -1698,6 +1707,10 @@ def _send_rejection(user: str, reason: str) -> dict:
 	monthly) fires the same code but leaves the window out, and the SPA keeps
 	its period-neutral copy."""
 	out = {"ok": False, "reason": reason}
+	if reason == "site_is_copy":
+		from jarvis.chat import site_pin
+
+		out["message"] = site_pin.copy_message(site_pin.status()["paired_site"])
 	if reason == "usage_limit":
 		period = blocking_limit_period(user)
 		if period:
@@ -5212,8 +5225,9 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile:
 		# create_session/sessions.create entirely: a totally unconfigured
 		# agent must still fail fast here, not silently mint a key nothing
 		# can ever connect to.
-		gateway_token = settings.get_password("agent_token")
-		if not gateway_url or not gateway_token:
+		# A profile pick skips the connect, so check here that the agent is reachable in
+		# principle: an agent_url and a paired chat device (never the owner token).
+		if not gateway_url or not device.has_paired_token(settings):
 			frappe.throw(_("agent is not configured"))
 		# ":dashboard:" is the SAME chat-session namespace marker the gateway
 		# stamps into every legacy-minted key - session_lifecycle.py's
@@ -5228,8 +5242,9 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile:
 		# deduplicates sessions by label and rejects collisions.
 		session_key = sess.create_session(label=f"jarvis-chat-{user}-{int(time.time() * 1000)}")
 	else:
-		gateway_token = settings.get_password("agent_token")
-		if not gateway_url or not gateway_token:
+		# AgentSession.connect pairs the chat device on first use, so only the URL
+		# can be checked up front; a device that cannot pair fails the connect itself.
+		if not gateway_url:
 			frappe.throw(_("agent is not configured"))
 
 		one_shot = AgentSession.connect(gateway_url)

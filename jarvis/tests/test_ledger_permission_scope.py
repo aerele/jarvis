@@ -11,6 +11,7 @@ committed, so FrappeTestCase's per-class rollback removes them.
 from __future__ import annotations
 
 import contextlib
+import importlib
 from unittest.mock import patch
 
 import frappe
@@ -43,6 +44,7 @@ USER_UNRESTRICTED = "jls-unrestricted@example.com"
 # Accounts User reads GL Entry; each user below is narrowed by one GL
 # dimension User Permission (or none).
 CUSTOMER = "_JLS Customer"
+CUSTOMER_RETURNS = "_JLS Customer Returns"
 PROJECT = "_JLS Project"
 PROJECT_2 = "_JLS Project 2"
 ACCOUNT_ROOT_PL = "_JLS Expenses"
@@ -211,6 +213,12 @@ def _as(user: str):
 		yield
 	finally:
 		frappe.set_user(orig)
+
+
+def _name_chunk(size: int):
+	"""Make get_customer_outstanding price Delivery Notes ``size`` names at a time."""
+	module = importlib.import_module("jarvis.tools.get_customer_outstanding")
+	return patch.object(module, "_NAME_CHUNK", size)
 
 
 class LedgerScopeTestCase(FrappeTestCase):
@@ -519,9 +527,13 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 	  SO-1  P1      1000 x 75% unbilled = 750
 	  SO-2  P2       400 x 100% unbilled = 400
 	  SO closed / fully billed: excluded
-	  DN-1  P1      600 item, 200 billed -> 400 / 600 x 708 = 472
-	  DN-2  P2      300 item -> 300 / 300 x 354 = 354
+	  DN-1  P1      600 item (6 qty), 2 qty billed -> 4 / 6 x 600 / 600 x 708 = 472
+	  DN-2  P2      300 item (3 qty), 1 qty returned -> 2 / 3 x 300 / 300 x 354 = 236
 	  DN item against a Sales Order: excluded
+
+	ERPNext prices a Delivery Note by quantity (net of billed and returned stock
+	quantity), so the rows carry stock_qty and base_net_amount (the formula
+	divides by them) and the billing Sales Invoice exists.
 	"""
 
 	GL_TOTAL = 4300.0
@@ -529,7 +541,7 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 	SO_P1 = 750.0
 	SO_ALL = 1150.0
 	DN_P1 = 472.0
-	DN_ALL = 826.0
+	DN_ALL = 708.0
 
 	@classmethod
 	def setUpClass(cls):
@@ -617,7 +629,7 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 			**{**dn, "status": "Closed"},
 		)
 
-		def dn_item(name, parent, amount, **extra):
+		def dn_item(name, parent, amount, stock_qty, **extra):
 			cls._insert(
 				"Delivery Note Item",
 				name,
@@ -625,14 +637,24 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 				parenttype="Delivery Note",
 				parentfield="items",
 				amount=amount,
+				base_net_amount=amount,
+				stock_qty=stock_qty,
 				docstatus=1,
 				**extra,
 			)
 
-		dn_item("_JLS-DNI-1", "_JLS-DN-1", 600)
-		dn_item("_JLS-DNI-2", "_JLS-DN-2", 300)
-		dn_item("_JLS-DNI-3", "_JLS-DN-1", 250, against_sales_order="_JLS-SO-1")
-		dn_item("_JLS-DNI-4", "_JLS-DN-3", 500)
+		dn_item("_JLS-DNI-1", "_JLS-DN-1", 600, 6)
+		dn_item("_JLS-DNI-2", "_JLS-DN-2", 300, 3, returned_qty=1)
+		dn_item("_JLS-DNI-3", "_JLS-DN-1", 250, 5, against_sales_order="_JLS-SO-1")
+		dn_item("_JLS-DNI-4", "_JLS-DN-3", 500, 5)
+		cls._insert(
+			"Sales Invoice",
+			"_JLS-SI-1",
+			customer=cls.customer,
+			company=COMPANY_A,
+			docstatus=1,
+			is_return=0,
+		)
 		cls._insert(
 			"Sales Invoice Item",
 			"_JLS-SII-1",
@@ -641,6 +663,7 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 			parentfield="items",
 			dn_detail="_JLS-DNI-1",
 			amount=200,
+			stock_qty=2,
 			docstatus=1,
 		)
 
@@ -707,3 +730,142 @@ class TestGetCustomerOutstandingReadableDocuments(LedgerScopeTestCase):
 		with _as(user):
 			out = get_customer_outstanding(self.customer, COMPANY_A)
 		self.assertAlmostEqual(out["outstanding"], self.GL_TOTAL + self.SO_ALL, places=4)
+
+
+class TestGetCustomerOutstandingDeliveryReturns(LedgerScopeTestCase):
+	"""Delivery Note part with returns, chunking and an unreadable return note.
+
+	A separate customer keeps these documents out of the totals above. The
+	customer has no ledger or order rows, so the whole figure is Delivery Notes:
+
+	  DN-R1  P1  1000 net / 1180 gross, one row of 10 qty with 4 returned
+	  DN-R1-RET  P2  the return note (is_return, negative total: never counted itself)
+	  SI-1   bills 3 qty of the DN-R1 row; SI-CN is a credit note against the
+	         return row (-4 qty, update_billed_amount_in_delivery_note)
+	         -> billed 3 - 4 = -1, so (10 + 1 - 4) / 10 x 1180 = 826
+	  DN-R2  P2  500 net / 590 gross, 5 qty unbilled = 590
+	  DN-R3  P1  200 net / 236 gross, 2 qty unbilled = 236
+	"""
+
+	DN_R1 = 826.0
+	DN_R2 = 590.0
+	DN_R3 = 236.0
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.customer = _ensure_customer(CUSTOMER_RETURNS)
+		cls.p1 = _ensure_project(PROJECT, COMPANY_A)
+		cls.p2 = _ensure_project(PROJECT_2, COMPANY_A)
+		_ensure_user_permission(USER_OUTSTANDING_PROJECT, "Project", cls.p1)
+		cls._insert_documents()
+
+	@classmethod
+	def _insert(cls, doctype: str, name: str, **values) -> None:
+		frappe.get_doc({"doctype": doctype, "name": name, **values}).db_insert()
+
+	@classmethod
+	def _insert_documents(cls):
+		dn = {"customer": cls.customer, "company": COMPANY_A, "docstatus": 1, "status": "To Bill"}
+		cls._insert(
+			"Delivery Note", "_JLS-RDN-1", base_net_total=1000, base_grand_total=1180, project=cls.p1, **dn
+		)
+		cls._insert(
+			"Delivery Note",
+			"_JLS-RDN-1-RET",
+			base_net_total=-400,
+			base_grand_total=-472,
+			is_return=1,
+			project=cls.p2,
+			**dn,
+		)
+		cls._insert(
+			"Delivery Note", "_JLS-RDN-2", base_net_total=500, base_grand_total=590, project=cls.p2, **dn
+		)
+		cls._insert(
+			"Delivery Note", "_JLS-RDN-3", base_net_total=200, base_grand_total=236, project=cls.p1, **dn
+		)
+
+		def dn_item(name, parent, amount, stock_qty, **extra):
+			cls._insert(
+				"Delivery Note Item",
+				name,
+				parent=parent,
+				parenttype="Delivery Note",
+				parentfield="items",
+				amount=amount,
+				base_net_amount=amount,
+				stock_qty=stock_qty,
+				docstatus=1,
+				**extra,
+			)
+
+		dn_item("_JLS-RDNI-1", "_JLS-RDN-1", 1000, 10, returned_qty=4)
+		dn_item("_JLS-RDNI-1-RET", "_JLS-RDN-1-RET", -400, -4, dn_detail="_JLS-RDNI-1")
+		dn_item("_JLS-RDNI-2", "_JLS-RDN-2", 500, 5)
+		dn_item("_JLS-RDNI-3", "_JLS-RDN-3", 200, 2)
+
+		def invoice(name, item_name, dn_detail, stock_qty, **extra):
+			cls._insert(
+				"Sales Invoice",
+				name,
+				customer=cls.customer,
+				company=COMPANY_A,
+				docstatus=1,
+				**extra,
+			)
+			cls._insert(
+				"Sales Invoice Item",
+				item_name,
+				parent=name,
+				parenttype="Sales Invoice",
+				parentfield="items",
+				dn_detail=dn_detail,
+				stock_qty=stock_qty,
+				docstatus=1,
+			)
+
+		invoice("_JLS-RSI-1", "_JLS-RSII-1", "_JLS-RDNI-1", 3, is_return=0)
+		invoice(
+			"_JLS-RSI-CN",
+			"_JLS-RSII-CN",
+			"_JLS-RDNI-1-RET",
+			-4,
+			is_return=1,
+			update_billed_amount_in_delivery_note=1,
+		)
+
+	def _erpnext(self) -> float:
+		from erpnext.selling.doctype.customer.customer import get_customer_outstanding as erpnext_gco
+
+		return erpnext_gco(customer=self.customer, company=COMPANY_A)
+
+	def _outstanding(self, user: str) -> float:
+		with _as(user):
+			return get_customer_outstanding(self.customer, COMPANY_A)["outstanding"]
+
+	def test_unrestricted_user_matches_erpnext_with_credit_note_against_return(self):
+		got = self._outstanding("Administrator")
+		self.assertAlmostEqual(got, self._erpnext(), places=4)
+		self.assertAlmostEqual(got, self.DN_R1 + self.DN_R2 + self.DN_R3, places=4)
+
+	def test_total_is_unchanged_across_several_chunks(self):
+		for chunk in (1, 2):
+			with _name_chunk(chunk):
+				got = self._outstanding("Administrator")
+			self.assertAlmostEqual(got, self._erpnext(), places=4, msg=f"chunk={chunk}")
+
+	def test_restricted_user_chunked_counts_only_readable_notes(self):
+		with _name_chunk(1):
+			got = self._outstanding(USER_OUTSTANDING_PROJECT)
+		self.assertAlmostEqual(got, self.DN_R1 + self.DN_R3, places=4)
+
+	def test_unreadable_return_note_only_reduces_readable_rows(self):
+		user = USER_OUTSTANDING_PROJECT
+		self.assertFalse(frappe.has_permission("Delivery Note", "read", doc="_JLS-RDN-1-RET", user=user))
+		self.assertTrue(frappe.has_permission("Delivery Note", "read", doc="_JLS-RDN-1", user=user))
+		# The credit note against the unreadable return still lands on the readable
+		# row (826, not the 826 + 590 an unrestricted caller sees): no leak, no crash.
+		got = self._outstanding(user)
+		self.assertAlmostEqual(got, self.DN_R1 + self.DN_R3, places=4)
+		self.assertLess(got, self._erpnext())

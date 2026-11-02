@@ -295,6 +295,17 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				paged: false,
 				title: "Your subscription is paused",
 			};
+		case "site_is_copy":
+			return {
+				observed: true,
+				state: PHASE_STATE.UNKNOWN,
+				kind: PHASE_KIND.NONE,
+				label: "This site is a copy",
+				detail: say,
+				stop: true,
+				paged: false,
+				title: "This site is a copy",
+			};
 		case "site_replaced":
 			return {
 				observed: true,

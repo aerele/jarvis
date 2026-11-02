@@ -13,6 +13,25 @@ from jarvis.chat.collaboration_runtime import RuntimePolicy, verify_dispatched_s
 from jarvis.chat.collaboration_turn import binding_for_run
 
 
+def stamp_stopped_reply(binding, run_id: str, assistant_message: str) -> None:
+	"""Make THIS turn's stored reply inert (not streaming, stopped). Only the row bound
+	to this binding and run qualifies: no other actor's message is changed by a
+	client-supplied pointer. Inside the caller's transaction; no commit."""
+	message = frappe.db.get_value(
+		ts.MSG,
+		assistant_message,
+		["conversation", "actor", "collaboration_binding", "collaboration_run_id", "role"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not message or tuple(
+		message.get(k)
+		for k in ("conversation", "actor", "collaboration_binding", "collaboration_run_id", "role")
+	) != (binding.conversation, binding.actor, binding.name, run_id, "assistant"):
+		c._deny()
+	frappe.db.set_value(ts.MSG, assistant_message, {"streaming": 0, "stopped": 1})
+
+
 def stop(conversation: str, run_id: str):
 	actor = frappe.session.user
 	binding = binding_for_run(run_id)
@@ -57,13 +76,7 @@ def stop(conversation: str, run_id: str):
 		elif state in {"preparing", "ready"}:
 			won = ts.cancel_preparing_or_ready(run_id, v)
 		elif state == "dispatching" and not row.collaboration_send_started_at:
-			won = ts._run_cas(
-				f"""UPDATE `tab{ts.TURN}` SET state='cancelled', cancel_requested=1,
-				reserved=0, reservation_expires_at=NULL, done_at=%(now)s, version=version+1
-				WHERE name=%(r)s AND state='dispatching' AND version=%(v)s
-				AND collaboration_send_started_at IS NULL""",
-				{"now": frappe.utils.now_datetime(), "r": run_id, "v": v},
-			)
+			won = ts.cancel_unsent_dispatch(run_id, v)
 		elif state in {"dispatching", "streaming"}:
 			won = ts.request_cancel(run_id, v)
 			abort = bool(won)
@@ -91,21 +104,7 @@ def stop(conversation: str, run_id: str):
 				update_modified=False,
 			)
 		if won and not abort and state != "recovering" and row.assistant_message:
-			# Only the stored row for THIS turn may be made inert. No other
-			# actor's message is changed by a client-supplied pointer.
-			message = frappe.db.get_value(
-				ts.MSG,
-				row.assistant_message,
-				["conversation", "actor", "collaboration_binding", "collaboration_run_id", "role"],
-				as_dict=True,
-				for_update=True,
-			)
-			if not message or tuple(
-				message.get(k)
-				for k in ("conversation", "actor", "collaboration_binding", "collaboration_run_id", "role")
-			) != (conversation, binding.actor, binding.name, run_id, "assistant"):
-				c._deny()
-			frappe.db.set_value(ts.MSG, row.assistant_message, {"streaming": 0, "stopped": 1})
+			stamp_stopped_reply(binding, run_id, row.assistant_message)
 		# Persist stop intent and release actor locks before abort RPC or queue wake.
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		return row, "abort" if abort else "cancelled" if won else "changed"

@@ -7,6 +7,8 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import add_days
 
+from jarvis.payment_calendar.compatibility import source_profile
+from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.sources import read_obligations
 from jarvis.tests.payment_calendar_fixtures import CalendarFixtures, require_calendar_test_site
 
@@ -207,6 +209,16 @@ class TestPaymentCalendarSources(TestCase):
 			enabled=1,
 		)
 		frappe.set_user(self._restricted_user("Sales Person", person))
+		if source_profile().major == "15":
+			with (
+				patch("jarvis.payment_calendar.sources._report_class") as report,
+				self.assertRaises(CalendarSourceUnavailable) as error,
+			):
+				self.read("Receivable")
+			self.assertEqual(error.exception.code, "restricted_obligations")
+			report.assert_not_called()
+			self.assertFalse(self.read("Payable")["complete_for_company"])
+			return
 		result = self.read("Receivable")
 		self.assertEqual(result["rows"], [])
 		self.assertFalse(result["complete_for_company"])
@@ -350,7 +362,7 @@ class TestPaymentCalendarSources(TestCase):
 		)
 		frappe.clear_document_cache("Accounts Settings")
 		self.assertEqual(
-			frappe.get_single_value("Accounts Settings", "receivable_payable_fetch_method"),
+			frappe.db.get_single_value("Accounts Settings", "receivable_payable_fetch_method", cache=False),
 			"UnBuffered Cursor",
 		)
 		unbuffered = self.read()

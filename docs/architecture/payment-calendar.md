@@ -6,9 +6,17 @@ Accounting documents and existing report results are unchanged.
 
 ## Supported source and completeness
 
-The adapter targets ERPNext v16. Its allocation contract was checked against
-ERPNext 16.50.0 (`7474d9e786277383de1242ab882f16856d17a9c9`). It calls the
-canonical `ReceivablePayableReport` allocator rather than copying its maths.
+The adapter supports matching Frappe/ERPNext v15 and v16 pairs. Its allocation
+contract was checked against ERPNext 15.124.1
+(`4e0dce9ea8d351cd7023ad5ed66faf3cdec0680e`) and 16.50.0
+(`7474d9e786277383de1242ab882f16856d17a9c9`), with Frappe 15.124.0
+(`f1cf50cf9bbc641bb015adb7008bf2ea1c8483ab`) and 16.51.1
+(`2871914b69b6e14a4b023d9b7cc52dc3e269cc1b`). Unknown or mismatched majors fail
+closed. It calls the canonical `ReceivablePayableReport` allocator rather than
+copying its maths. The inspected allocation methods are identical; the invoice
+schedule classifier accepts only each version's audited controller source hash.
+The v15 schedule differs in initial numeric normalization and its settings
+helper, while the classified advance and withholding formulas are unchanged.
 Standard Supplier/Customer Party Type mappings and company-side accounts are
 required before invoking the report: ERPNext otherwise skips common filters.
 Incomplete accounting setup fails closed. Method signatures and required runtime
@@ -40,6 +48,20 @@ company-currency book values. Selected accounts must be readable, enabled leaf
 Bank/Cash accounts of the same company. Fiscal coverage is required; missing
 coverage cannot become zero cash. Request form fields are isolated from the
 balance helper. Existing ledger/dimension gates remain authoritative.
+The v15 bank helper has no finance-book keyword arguments; the adapter omits
+only those arguments after the same alternative-book rejection. The bank helper
+also changed within v16: 16.50's default call includes all books, while 16.52
+requires explicitly including the company default. Conversely, that flag excludes
+blank books on 16.50. Exact audited helper-source hashes select each variant's
+arguments; unknown helper implementations fail closed for bank balances. The
+guard and canonical call together retain the same NULL/blank/default-book union.
+
+Frappe/ERPNext v15 does not apply the v16 canonical Sales Person user-permission
+filter. For v15 viewers with Sales Person restrictions, receivables are
+unavailable with `restricted_obligations`; the adapter refuses them before source
+execution and again during cached delivery. Permitted payables and bank balances
+remain available, but whole-company forecast colours remain unavailable. This
+restricted case does not claim the same permitted-row coverage as v16.
 
 ## Bounds and measured cost
 
@@ -85,10 +107,14 @@ floor even when the financial view itself is coherent.
 Canonical helpers retain their cache-miss logic. For the sequential RQ source
 window only, allowlisted Company/Accounts Settings/System Settings documents,
 global defaults and fiscal-year caches miss locally and never fill shared caches.
+Frappe v15 global defaults use the `defaults` hash's `__default` member; v16
+uses the `defaults::__default` key and client cache. Each supported profile must
+prove that its actual defaults path was bypassed. Field-mask metadata is included
+where the framework provides native masks; v15 has no native mask column.
 Role/User Permission fills remain private to that source window. Wrappers are
 restored on every exit; this context must never run in a threaded web request.
 Tripwires check the required helper-cache paths and source precision. Schema,
-hooks and permission metadata remain part of the maintained v16 contract.
+hooks and permission metadata remain part of the maintained versioned contract.
 
 ## API, retention and recovery
 

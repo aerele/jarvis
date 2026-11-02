@@ -1,11 +1,16 @@
 // What a macro's schedule reads as in a list: "Daily · 9:00 am", "Weekly on Monday
-// · 9:00 am", "Once · Mon, 19 Oct 2026 · 9:00 am". One implementation for the
+// · 9:00 am", "Every 2 hours at :15", "Once · Mon, 19 Oct 2026 · 9:00 am". One implementation for the
 // owner's Macros list and the admin's.
 import { dayjs } from "frappe-ui";
 import { formatTime12h } from "@/utils/datetime";
 import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
+import { cronListLabel } from "@/lib/macroCron";
 
 export function scheduleLabel(row) {
+	// A cron schedule says its days and every time ("Weekly on Mon and Thu · 9:00 am,
+	// 6:00 pm"); a macro saved before cron schedules keeps the label below.
+	const cron = cronListLabel(row);
+	if (cron) return cron;
 	const freq = row.schedule_frequency || "scheduled";
 	let label = freq.charAt(0).toUpperCase() + freq.slice(1);
 	// A one-time schedule names its date: "Once · Mon, 19 Oct 2026 · 9:00 am". The

@@ -53,6 +53,7 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# dependencies (one gated card).
 	"create_doc",
 	"preview_doc",
+	"preview_landed_cost_voucher",
 	# Read-only: static-check a Server Script / Script Report body against the
 	# safe_exec sandbox (imports, get_all/db.sql, RestrictedPython compile) before
 	# staging its create. See the frappe-scripting skill.
@@ -88,6 +89,7 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# content so a "give me a PDF of this report" ask produces a real download.
 	"export_document",
 	"read_file",
+	"query_file",
 	"get_file_pages",
 	"attach_to_doc",
 	"download_vcard",

@@ -45,12 +45,17 @@
 			/>
 		</div>
 
-		<div class="flex min-h-0 flex-1 flex-col lg:flex-row">
+		<!-- Keep both review panes usable at phone widths. A 360px rail plus a
+		     detail pane previously made the latter unreachable: the page clipped
+		     its horizontal overflow. Stack below lg, like AgentRunsBoard, and let
+		     each pane keep its own vertical scroll. -->
+		<div data-testid="approvals-split-view" class="flex min-h-0 flex-1 flex-col lg:flex-row">
 			<!-- LEFT rail: inbox-style rows on a standing gray-1 surface so the
 			     selected row's white chip + shadow reads in light mode (CRM
 			     sidebar pattern; dark gray-1 ≠ surface-selected per §2.5) -->
 			<div
-				class="max-h-[35%] w-[360px] shrink-0 overflow-y-auto border-b border-r bg-surface-gray-1 max-lg:w-full max-lg:border-r-0 lg:max-h-none lg:border-b-0"
+				data-testid="approvals-rail"
+				class="max-h-[35%] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
 			>
 				<!-- "Waiting for your reply" strip (notify-approvals Part 3): prose
 				     questions the agent asked in chat — derived server-side
@@ -369,12 +374,14 @@
 			</div>
 
 			<!-- RIGHT pane: review + act on the selected approval -->
+			<!-- min-w-0 prevents a long detail/control row from widening the desktop
+			     split view beyond its container. -->
 			<div class="min-h-0 min-w-0 flex-1 overflow-y-auto">
 				<!-- a held write / chat card / wiki note: its own detail, keyed so every
 				     selection mounts (and loads) a fresh one -->
 				<div
 					v-if="selectedKey"
-					class="approval-record-preview mx-auto w-full max-w-3xl px-8 py-6"
+					class="approval-record-preview mx-auto w-full max-w-3xl px-4 py-6 sm:px-8"
 				>
 					<div class="flex items-center gap-3">
 						<h1 class="min-w-0 flex-1 truncate text-xl font-semibold text-ink-gray-9">
@@ -458,7 +465,7 @@
 				<div v-else-if="!selected" class="flex h-full items-center justify-center">
 					<JvSpinner />
 				</div>
-				<div v-else class="mx-auto w-full max-w-3xl px-8 py-6">
+				<div v-else class="mx-auto w-full max-w-3xl px-4 py-6 sm:px-8">
 					<!-- 1. title row -->
 					<div class="flex items-center gap-3">
 						<h1 class="min-w-0 flex-1 truncate text-xl font-semibold text-ink-gray-9">
@@ -590,7 +597,8 @@
 										@update:modelValue="(v) => (note = v)"
 									/>
 									<div
-										class="flex items-center gap-2"
+										data-testid="approval-decision-actions"
+										class="flex flex-wrap items-center gap-2"
 										:class="chatAnswerOnly ? '' : 'mt-3'"
 									>
 										<!-- chat asks without options are free-form questions: a
@@ -641,11 +649,10 @@
 											:disabled="deciding !== null"
 											@click="submitDismiss"
 										/>
-										<div class="flex-1" />
 										<!-- tag for review - the DocShare path DocMetaPanel's
 										     "Shared with" block uses (same docmeta object, so the
 										     Record details block stays in sync) -->
-										<Popover placement="bottom-end">
+										<Popover class="ml-auto" placement="bottom-end">
 											<template #target="{ togglePopover }">
 												<Button
 													variant="subtle"
@@ -658,7 +665,8 @@
 											</template>
 											<template #body>
 												<div
-													class="my-2 w-[320px] rounded-lg bg-surface-modal p-3 shadow-2xl ring-1 ring-black ring-opacity-5"
+													data-testid="approval-tag-picker"
+													class="my-2 w-[320px] max-w-[calc(100vw-2rem)] rounded-lg bg-surface-modal p-3 shadow-2xl ring-1 ring-black ring-opacity-5"
 												>
 													<div
 														v-if="shares.length"
@@ -1216,7 +1224,7 @@ async function loadShareUsers() {
 	if (shareUsersLoaded) return;
 	shareUsersLoaded = true;
 	try {
-		shareUsers.value = (await api.listShareableUsers()) || [];
+		shareUsers.value = (await api.listApprovalReviewers()) || [];
 	} catch (e) {
 		shareUsersLoaded = false; // retry on next open
 	}
