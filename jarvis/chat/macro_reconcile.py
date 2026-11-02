@@ -75,6 +75,10 @@ STEP_END_GRACE_S = 120
 # ended less than this long ago. Found later, the run ends and says which steps ran:
 # nobody is watching, and on an armed macro the step writes.
 CONTINUE_WITHIN_S = 20 * 60
+# A continuation (``resume_turn``) the run stored and that has no Turn row this long
+# after the run was last written never went out: the enqueue died between the flip and
+# the Turn. The longest enqueue (the shard lock wait) is seconds.
+CONTINUATION_NOT_SENT_AFTER_S = 10 * 60
 # A run that has sent nothing and written nothing for this long has no dispatch in
 # flight: the longest one (a gateway handshake, the shard lock wait) is seconds.
 NOT_STARTED_AFTER_S = 10 * 60
@@ -107,6 +111,7 @@ _GATE_CLOSED = "This macro cannot run right now."
 SHAPE_FORCE_DONE = "force_done"  # the finalize job died in the hook until it was given up on
 SHAPE_HOOK_DROPPED = "hook_dropped"  # the hook gave up waiting for the run lock
 SHAPE_NO_STEP_SENT = "no_step_sent"  # the run's first step was never written
+SHAPE_CONTINUATION_NOT_SENT = "continuation_not_sent"  # a resumed step's turn was never written
 # The same for a summary: its turn's finalize job died in the hook until it was given
 # up on, or its chat has no turn (the request that started it died before the dispatch).
 SHAPE_SUMMARY_FORCE_DONE = "summary_force_done"
@@ -117,7 +122,16 @@ TICK_CUT_SHORT = "jarvis.chat.macros.reconcile_cut_short"
 LOCK_WAIT = "jarvis.chat.macros.reconcile_lock_wait"
 REAPED_DESPITE_CHECK = "jarvis.chat.macros.reaped_despite_check"
 
-_RUN_FIELDS = ["name", "macro", "conversation", "status", "current_step", "total_steps", "modified"]
+_RUN_FIELDS = [
+	"name",
+	"macro",
+	"conversation",
+	"status",
+	"current_step",
+	"total_steps",
+	"modified",
+	"resume_turn",
+]
 
 
 class _LockFault(Exception):
@@ -344,6 +358,8 @@ class _RunCheck:
 		step = _current_step(run, sent)
 		if step is _NOTHING_SENT:
 			return self._nothing_sent()
+		if step is _NO_CONTINUATION:
+			return self._continuation_not_sent()
 		if step is None or not step_is_over(step.name):
 			return False
 		return self._apply_the_end(step, sent)
@@ -397,6 +413,25 @@ class _RunCheck:
 		if macros._fail_run_unless_one_owner(run, self.macro_doc):
 			return True
 		return self._fail(_RUN_NOT_STARTED, SHAPE_NO_STEP_SENT)
+
+	def _continuation_not_sent(self) -> bool:
+		"""A step was resumed after its report (``resume_turn`` stored in the flip to
+		``running``) and no Turn of that id exists ``CONTINUATION_NOT_SENT_AFTER_S`` later:
+		the process died between the flip and the enqueue. The report is still ready, so
+		the run goes back to waiting and is woken, to send it again under the same id. The
+		one watcher of that gap, under the run's lock; the wake-up itself makes no such
+		repair. Counted like any enqueue that failed (``resume_compensations``): past its
+		cap the run ends failed, so a continuation that never goes out cannot go round for
+		ever."""
+		run = self.run_doc
+		if _seconds_since(run.modified) < CONTINUATION_NOT_SENT_AFTER_S:
+			return False
+		from jarvis.chat import macro_report_wait, txn
+
+		txn.fresh_snapshot(owned=True)
+		macro_report_wait.resume_not_delivered(run, self.macro_doc)
+		self.signal = (SHAPE_CONTINUATION_NOT_SENT, None)
+		return True
 
 	def _fail(self, error: str, shape: str) -> bool:
 		"""End the run ``failed``, from ``running`` only: a stop that went ahead without
@@ -700,6 +735,8 @@ def _cut_short(summary: dict) -> None:
 
 
 _NOTHING_SENT = object()
+# A resumed step whose continuation has no Turn row (yet, or ever).
+_NO_CONTINUATION = object()
 _STEP_TURN_FIELDS = [*macros._TURN_FIELDS, "done_at"]
 
 
@@ -734,6 +771,19 @@ def _current_step(run, sent: int):
 		return None
 	if sent == 0:
 		return None if newest else _NOTHING_SENT
+	if run.get("resume_turn"):
+		# The step was parked for a report and resumed: the continuation is the turn
+		# that ends it (``macros._step_turn``), and the step's original turn is never
+		# judged again, however old it is. While the continuation is queued or running
+		# the step is not over (``step_is_over``); and ``CONTINUE_WITHIN_S`` is
+		# measured from its end.
+		rows = frappe.get_all(
+			TURN,
+			filters={"name": run.resume_turn, "conversation": run.conversation},
+			fields=_STEP_TURN_FIELDS,
+			limit=1,
+		)
+		return rows[0] if rows else _NO_CONTINUATION
 	seed = frappe.db.get_value(
 		TURN,
 		{"name": macros._step_turn_id(run.name, sent - 1), "conversation": run.conversation},
@@ -782,6 +832,8 @@ def _stuck(run) -> dict | None:
 	step = _current_step(run, _steps_sent(run))
 	if step is _NOTHING_SENT:
 		return row("no_step_sent", run.modified)
+	if step is _NO_CONTINUATION:
+		return row("continuation_not_sent", run.modified)
 	if step is None or not step_is_over(step.name, grace_s=STUCK_AFTER_S):
 		return None
 	return row("step_over", step.done_at, step)
