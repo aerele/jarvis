@@ -423,6 +423,23 @@ def _sweep_one(row, now, seen: set) -> None:
 		_advance(row, now)
 		return
 
+	# A selected Payroll Entry is a server-bound audit boundary. Check it as the
+	# run-as user before a scheduled slot is claimed, so a stale, unreadable or
+	# malformed setup produces one clear failed run instead of repeated dispatch
+	# attempts or a generic fiscal-year fallback.
+	from jarvis.chat.statutory_payroll_scope import configuration_issues, is_statutory_payroll
+
+	if is_statutory_payroll(row.agent):
+		with impersonate(run_as):
+			issues = configuration_issues(row.config or "{}")
+		if issues:
+			_record_failed(
+				row,
+				"scheduled run skipped: select a readable submitted monthly Payroll Entry in Configure",
+			)
+			_advance(row, now)
+			return
+
 	_dispatch(row, now, run_as=run_as, source_apps=source_apps, model_gate=model_gate)
 
 
@@ -1225,13 +1242,6 @@ def _launch_audit(
 
 	review_backend = operator_review.backend(inst.agent)
 	review_config = review_backend.configuration(inst) if review_backend else None
-	# The delegate's engagement settings are a launch-time fact, not a live view of
-	# ``Installation.config``.  Resolve ONLY the bundle-declared/bench-derived keys
-	# before a Run exists, stamp that exact object on the Run, and use the same object
-	# in the dispatch prompt below.  A later settings save must never alter an active
-	# run's evidence or make a model guess a gate value.
-	engagement_config = _sanitize_delegated_engagement_config(listing, _explicit_config(listing, inst))
-	engagement_config_json = frappe.as_json(engagement_config)
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1272,6 +1282,28 @@ def _launch_audit(
 				"have no owner. Set a reviewer on the installation, or disable it."
 			)
 		)
+
+	# Statutory Payroll can run only over one exact, readable, completed monthly
+	# Payroll Entry. This is checked before any conversation, Run or session row
+	# exists. The installation controller checks normal saves too; this protects
+	# legacy rows and every direct launch path.
+	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll, require_configuration
+
+	if is_statutory_payroll(inst.agent):
+		# Do not rely on callers to have already changed identity. A future direct
+		# launch path must not validate a Payroll Entry as an elevated caller and
+		# then create a session for a narrower run-as user.
+		from jarvis._session import impersonate
+
+		with impersonate(run_as_user):
+			require_configuration(inst.config or "{}")
+
+	# The delegate's engagement settings are a launch-time fact, not a live view of
+	# ``Installation.config``. Resolve only declared, non-scope values after the
+	# statutory boundary has passed validation. A later settings save must never
+	# alter an active run's evidence or make a model guess a gate value.
+	engagement_config = _sanitize_delegated_engagement_config(listing, _explicit_config(listing, inst))
+	engagement_config_json = frappe.as_json(engagement_config)
 
 	# JF-021: validate the launch-time provenance identity BEFORE any row is inserted,
 	# for the same reason as the run-as guard above — a refused launch must leave no
@@ -1720,19 +1752,26 @@ def _stamp_scope_and_watermark(
 
 	values: dict = {}
 	scope = resolved_scope if isinstance(resolved_scope, dict) else None
+	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
+
 	try:
-		if scope is None:
+		if is_statutory_payroll(inst.agent):
+			# Recheck the batch as its execution user immediately before stamping.
+			from jarvis._session import impersonate
+
+			with impersonate(run_as_user):
+				scope = agent_scope.resolve_scope(inst)
+		elif scope is None:
 			scope = agent_scope.resolve_scope(inst, allow_record_scope=record_scope_supported)
 	except agent_scope.InvalidFefoRecordScopeError:
 		# The scheduler reports invalid saved declarations to the owner. Keep
 		# transient verification errors on the separate logged retry path.
 		raise
 	except Exception:
-		# A requested record boundary must never silently fall back to a wider
-		# company run. The launch guard has already checked bundle support; this
-		# path handles malformed, unreadable, or cross-company target records.
+		# An explicit batch or record boundary must never fall back to wider scope.
 		if (
 			agent_scope.requires_bound_scope(inst)
+			or is_statutory_payroll(inst.agent)
 			or agent_scope.record_scope_requested(inst.get("config"))
 			or inst.agent == "fefo-expiry-compliance-auditor"
 		):
@@ -1825,6 +1864,15 @@ def _explicit_config(listing, inst) -> dict:
 	except Exception:
 		keys = []
 	namespaces = {str(k).split(".", 1)[0] for k in keys if k}
+	# ``payroll_entry`` is an installation selector, not engagement evidence. For
+	# Statutory Payroll the server validates it as the run-as user and sends only
+	# the resulting immutable ``record_scope`` plus derived dates. Keeping the raw
+	# config value out of the prompt and Run snapshot prevents a later setting save
+	# or a forged auxiliary scope from changing what the evaluator believes it read.
+	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
+
+	if is_statutory_payroll(listing.get("agent_slug") or listing.get("name")):
+		namespaces.discard("payroll_entry")
 	if not namespaces:
 		return {}
 	full = {}
@@ -1886,13 +1934,40 @@ def _audit_prompt(
 	Kept short: the delegate resolves the run/installation linkage for its Phase-3
 	writeback from the session_key the bench minted, not from this text."""
 	scope_block = ""
+	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
+
+	statutory_payroll = is_statutory_payroll(listing.get("agent_slug") or listing.get("name"))
 	# CX5-2: name the admin-authorized apps explicitly. The bench ENFORCES the same
 	# list on every source-read/wiki call, so this is a courtesy so the delegate does
 	# not waste the run discovering that everything else is refused.
 	if scope and scope.get("source_apps"):
 		apps = ", ".join(str(a) for a in scope["source_apps"])
 		scope_block += f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
-	if scope and scope.get("company"):
+	if statutory_payroll and scope:
+		# This is JSON rather than the generic quoted key/value sentence: fiscal_year
+		# is intentionally null for a Payroll Entry batch, and the delegate must not
+		# turn Python's ``None`` display value into the string "None" in scope.json.
+		payroll_scope = {
+			key: scope.get(key)
+			for key in (
+				"company",
+				"fiscal_year",
+				"from_date",
+				"to_date",
+				"prior_period_from",
+				"prior_period_to",
+				"report_date",
+				"record_scope",
+			)
+		}
+		# Only the server-stamped Boolean may reach the delegate. An absent or
+		# malformed value stays absent so the bundle degrades to partial coverage.
+		if type(scope.get("scoped_visibility")) is bool:
+			payroll_scope["scoped_visibility"] = scope["scoped_visibility"]
+		scope_block += "\n\nSERVER-BOUND PAYROLL SCOPE (copy this JSON unchanged): " + json.dumps(
+			payroll_scope, sort_keys=True
+		)
+	elif scope and scope.get("company"):
 		fefo_contract = ""
 		if (
 			listing.get("agent_slug") or listing.get("name")
@@ -1911,14 +1986,25 @@ def _audit_prompt(
 			f'prior_fy_end="{scope.get("prior_fy_end")}"{fefo_contract}.'
 		)
 	agent_slug = listing.get("agent_slug") or listing.get("name")
-	if (
-		(record_scope_supported or agent_slug == agent_scope.NEGATIVE_STOCK_AGENT)
-		and scope
-		and scope.get("record_scope")
-	):
-		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
-			{"record_scope": scope["record_scope"]}
-		)
+	# Some agents use a server-bound scope narrower than the generic accounting
+	# window. Send these values only after the bench has resolved them. Do not copy
+	# arbitrary installation config keys here: this is the sole path by which a
+	# delegate receives a record boundary or a preceding monthly period.
+	if scope and not statutory_payroll:
+		additional_scope = {
+			key: scope[key]
+			for key in ("record_scope", "prior_period_from", "prior_period_to")
+			if key in scope
+			and (
+				key != "record_scope"
+				or record_scope_supported
+				or agent_slug == agent_scope.NEGATIVE_STOCK_AGENT
+			)
+		}
+		if additional_scope:
+			scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + json.dumps(
+				additional_scope, sort_keys=True
+			)
 	# EXPLICIT CONFIG: ``_launch_audit`` resolves declared/derived values ONCE and
 	# stamps them on the Run before dispatch.  This function receives that exact
 	# snapshot; it deliberately does not re-read the mutable installation here.

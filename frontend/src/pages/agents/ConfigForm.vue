@@ -8,6 +8,8 @@
 						: arReview
 						? "AR review includes older open receivables, uses the evidence cutoff and prepares unsent reminder text only. Manual runs; no sending, Dunning creation or accounting changes."
 						: "AP document review uses the company, fiscal period, evidence cutoff and matching settings below. Manual runs only. Preview creates no review requests; live review never submits or pays an invoice."
+					: statutoryPayroll
+					? "Select the submitted monthly Payroll Entry. Jarvis fixes the company and period from that record. Complete the statutory mapping in Advanced (JSON)."
 					: fefoConfiguration
 					? "Expiry compliance needs a named reviewer and a near-expiry window. Save both settings before running an audit."
 					: "Settings this agent reads when it runs. Leave a field empty to use the default."
@@ -234,6 +236,7 @@ const agentSpecificFields = computed(() =>
 const operatorReview = computed(() => props.configKeys.includes("review_scope"));
 const arReview = computed(() => props.configKeys.includes("settlement_hold_days"));
 const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
+const statutoryPayroll = computed(() => props.configKeys.includes("payroll_entry"));
 const fefoConfiguration = computed(() => props.configKeys.includes("fefo.reviewer"));
 const requiresConfiguration = computed(() => operatorReview.value || fefoConfiguration.value);
 const defaultsData = ref(null);
@@ -242,8 +245,12 @@ const defaultsMessage = ref("");
 let defaultsRequest = 0;
 const visibleFields = computed(() => [
 	// Bank reconciliation reads a statement window only; a fiscal year does not apply.
-	...SCOPE_CONFIG_FIELDS.filter(
-		(field) => !fefoConfiguration.value && !(bankRecon.value && field.key === "fiscal_year")
+	...(statutoryPayroll.value
+		? []
+		: SCOPE_CONFIG_FIELDS.filter(
+				(field) =>
+					!fefoConfiguration.value && !(bankRecon.value && field.key === "fiscal_year")
+		  )
 	).map((field) => {
 		if (!operatorReview.value || field.key === "fiscal_year") return field;
 		if (bankRecon.value && field.type === "date-range")
@@ -330,6 +337,7 @@ const form = reactive({
 	review_scope: "",
 	depr_run_posted: "",
 	enable_capex_signal: "",
+	payroll_entry: "",
 	company: "",
 	fiscal_year: "",
 	from_date: "",
@@ -441,6 +449,7 @@ const linkFields = {
 	company: makeLinkField("Company"),
 	fiscal_year: makeLinkField("Fiscal Year"),
 	bank_account: makeLinkField("Bank Account"),
+	payroll_entry: makeLinkField("Payroll Entry"),
 };
 watch([operatorReview, defaultsData], () => {
 	linkFields.fiscal_year.reprime();

@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import frappe
@@ -17,6 +18,42 @@ def _inst(name="INST-1", config=None):
 
 
 class TestDerivedConfig(FrappeTestCase):
+	def test_statutory_schema_is_metadata_only_and_cannot_be_overridden(self):
+		self.assertFalse(derived_config.customer_may_set("statutory_schema"))
+		with patch.object(
+			derived_config.frappe.db, "has_column", side_effect=lambda dt, field: field != "micr_code"
+		):
+			out = agent_scheduler._explicit_config(
+				{"config_keys": ["statutory_schema"]},
+				_inst(config='{"statutory_schema": {"forged": true}}'),
+			)
+		self.assertNotIn("forged", out["statutory_schema"])
+		self.assertFalse(out["statutory_schema"]["india_fields_present"]["micr_code"])
+		self.assertTrue(out["statutory_schema"]["india_fields_present"]["pan_number"])
+
+	def test_statutory_schema_failure_is_omitted_and_cannot_fall_back_to_customer_value(self):
+		inst = _inst(config=json.dumps({"statutory_schema": {"forged": True}}))
+		with (
+			patch.object(
+				derived_config.frappe.db, "has_column", side_effect=RuntimeError("schema unavailable")
+			),
+			patch.object(derived_config.frappe, "log_error") as le,
+		):
+			out = agent_scheduler._explicit_config({"config_keys": ["statutory_schema"]}, inst)
+		self.assertEqual(out, {})
+		le.assert_called_once()
+		self.assertEqual(le.call_args.kwargs["title"], "derived_config provider failed")
+		self.assertIn("statutory_schema", le.call_args.kwargs["message"])
+		self.assertNotIn("forged", str(le.call_args))
+
+	def test_statutory_wage_basis_reaches_the_agent_unchanged(self):
+		basis = {"source": "salary_detail", "component_classes": {"Fake Basic": "included"}}
+		config = {"statutory": {"wage_basis": basis}, "other": {"forged": True}}
+		out = agent_scheduler._explicit_config(
+			{"config_keys": ["statutory"]}, _inst(config=json.dumps(config))
+		)
+		self.assertEqual(out, {"statutory": {"wage_basis": basis}})
+
 	def test_salt_stable_distinct_and_hex(self):
 		a = derived_config._fingerprint_salt(_inst("A"))
 		self.assertEqual(a, derived_config._fingerprint_salt(_inst("A")))

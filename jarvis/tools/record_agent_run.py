@@ -32,6 +32,7 @@ import json
 import frappe
 
 from jarvis.chat import coverage_reasons as cr
+from jarvis.chat.agent_scope import authoritative_writeback_scope
 from jarvis.exceptions import InvalidArgumentError
 
 RUN = "Jarvis Agent Run"
@@ -168,6 +169,29 @@ def _validate_findings(raw_findings: list, token_set: set, allowed_refs: set):
 	return valid, dropped
 
 
+def _canonical_scope_for_writeback(run_doc, scope: dict) -> dict:
+	"""Keep a Statutory Payroll writeback on its launch-stamped batch scope."""
+	from jarvis.chat.statutory_payroll_scope import (
+		ConfigurationError,
+		canonical_writeback_scope,
+		is_statutory_payroll,
+	)
+
+	if not is_statutory_payroll(run_doc.agent):
+		return scope
+	try:
+		if isinstance(scope, str):
+			scope = frappe.parse_json(scope)
+		stamped_scope = frappe.parse_json(run_doc.scope_json or "{}")
+		if not isinstance(stamped_scope, dict):
+			raise ConfigurationError("scope", "invalid server scope")
+		return canonical_writeback_scope(stamped_scope, scope)
+	except (ConfigurationError, TypeError, ValueError, frappe.ValidationError):
+		raise InvalidArgumentError(
+			"Statutory Payroll output scope does not match this run's server-bound Payroll Entry scope."
+		) from None
+
+
 def record_agent_run(
 	findings=None,
 	coverage=None,
@@ -194,8 +218,9 @@ def record_agent_run(
 	    ``{token: "evaluated"|"not_evaluable(reason)"|"truncated"}``; a reason outside
 	    the closed PP-3 enum is coerced to ``unsupported_customisation`` (never
 	    dropped). Gates coverage-scoped auto-resolve (A16) and the PP-2 run state.
-	  scope: the resolved run scope ``{company, fiscal_year, from_date, to_date,
-	    ...}`` — company is stamped on each Finding + scopes auto-resolve + the
+	  scope: the evaluator's echo of the resolved run scope. Each supplied
+	    dimension must match the server-stamped launch scope. The server stamp,
+	    not this argument, supplies company persistence, auto-resolve, and the
 	    watermark recompute.
 	  truncated: True when the delegate's fetch hit its budget — auto-resolve is
 	    skipped entirely and the run is partial (A16).
@@ -274,7 +299,21 @@ def record_agent_run(
 
 	raw_findings = _as_list(findings)
 	coverage = _as_dict(coverage)
-	scope = _as_dict(scope)
+	# Statutory Payroll requires a complete raw echo of its Payroll Entry scope.
+	# Check that stricter contract before generic scope authority checks the same
+	# raw evaluator object against the trusted launch stamp.
+	submitted_scope = scope
+	_canonical_scope_for_writeback(run_doc, submitted_scope)
+	# The model can relay its evaluator's scope, but it cannot select or amend the
+	# scope that controls persistence. Validate before review validation or any
+	# finding/company work, then use only the launch-stamped values downstream.
+	if run_row.agent in {NEGATIVE_STOCK_AGENT, FEFO_AGENT}:
+		# These agents validate their narrow projection below and finish a rejected
+		# scope as partial, clearing untrusted artifacts. Do not replace the raw
+		# echo with the stamp first: that would hide a mismatch from their guards.
+		scope = _as_dict(submitted_scope)
+	else:
+		scope = authoritative_writeback_scope(run_doc, submitted_scope)
 	truncated = bool(truncated)
 	scope_dropped = []
 
