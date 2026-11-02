@@ -3,7 +3,6 @@
 Run on a dedicated test site. Each test removes its committed fixtures.
 """
 
-import gzip
 import json
 import time
 import unittest
@@ -31,7 +30,7 @@ class TestPreparedReportIntegration(unittest.TestCase):
 			return doc
 
 		try:
-			from frappe.utils.file_manager import save_file
+			from frappe.core.doctype.prepared_report.prepared_report import create_json_gz_file
 
 			from jarvis.api import _run_tool
 			from jarvis.tools._result_guard import enforce_result_budget
@@ -115,12 +114,12 @@ class TestPreparedReportIntegration(unittest.TestCase):
 					"result": rows + [["Total", "", f"{len(rows) / 10:.2f}", "INR"]],
 					"skip_total_row": 0,
 				}
-				f = save_file(
-					"prepared-" + tag + "-" + doc.name + ".json.gz",
-					gzip.compress(json.dumps(body).encode()),
-					"Prepared Report",
-					doc.name,
-					is_private=1,
+				# Use the native prepared-report writer. The legacy file-manager
+				# helper reopens the blob during File insertion and can guess a
+				# text encoding for a small gzip, changing its bytes before reading.
+				create_json_gz_file(body, "Prepared Report", doc.name, report.name)
+				f = frappe.get_doc(
+					"File", {"attached_to_doctype": "Prepared Report", "attached_to_name": doc.name}
 				)
 				created.append(("File", f.name))
 				return doc
