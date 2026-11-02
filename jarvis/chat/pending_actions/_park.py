@@ -173,6 +173,13 @@ def park(
 	try:
 		if not locked:
 			lock_conversation(conversation)
+		from jarvis.chat.collaboration_actions import park_identity
+
+		identity = park_identity(conversation, owner_user, exec_user, tool, run_id, kind)
+		if identity and frappe.db.exists(PA, {"collaboration_call_key": identity["collaboration_call_key"]}):
+			raise ConfirmationPendingError(
+				"This tool call already proposed an action; do not execute it again."
+			)
 		superseded = (
 			_check_single_flight(conversation, owner_user, legacy_pending)
 			if kind == "chat" and conversation
@@ -204,6 +211,7 @@ def park(
 					{"conversation": c, "role": "primary" if i == 0 else "waiter"}
 					for i, c in enumerate(waiters)
 				],
+				**identity,
 			}
 		)
 		doc.flags.jarvis_server_write = True

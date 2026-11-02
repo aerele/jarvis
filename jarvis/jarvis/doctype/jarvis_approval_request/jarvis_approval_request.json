@@ -31,7 +31,13 @@
   "apply_reason",
   "wiki_digest",
   "routing",
-  "sheet"
+  "sheet",
+  "actor",
+  "collaboration_binding",
+  "collaboration_run_id",
+  "collaboration_grant_revision",
+  "collaboration_epoch",
+  "collaboration_question_key"
  ],
  "fields": [
   {
@@ -240,6 +246,57 @@
    "no_copy": 1,
    "search_index": 1,
    "description": "The File Box approval sheet (Jarvis Pending Action) this question is answered in, with the document's other decisions. Server-set only; a linked question is frozen and never decided on its own."
+  },
+  {
+   "fieldname": "actor",
+   "fieldtype": "Data",
+   "label": "Initiating Actor",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_binding",
+   "fieldtype": "Link",
+   "label": "Collaboration Binding",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "options": "Jarvis Chat Binding",
+   "search_index": 1
+  },
+  {
+   "fieldname": "collaboration_run_id",
+   "fieldtype": "Data",
+   "label": "Collaboration Run",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_grant_revision",
+   "fieldtype": "Int",
+   "label": "Collaboration Grant Revision",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_epoch",
+   "fieldtype": "Int",
+   "label": "Collaboration Epoch",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_question_key",
+   "fieldtype": "Data",
+   "label": "Collaboration Question Key",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "unique": 1
   }
  ],
  "index_web_pages_for_search": 0,

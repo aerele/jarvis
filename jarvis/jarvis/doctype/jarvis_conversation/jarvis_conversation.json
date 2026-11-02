@@ -23,7 +23,9 @@
   "turn_count",
   "session_feedback_asked_at",
   "auto_mode",
-  "auto_mode_at"
+  "auto_mode_at",
+  "collaboration_active",
+  "collaboration_epoch"
  ],
  "fields": [
   {
@@ -376,6 +378,24 @@
    "read_only": 1,
    "no_copy": 1,
    "description": "Set once the once-per-session feedback popup has been answered or skipped for this conversation, by jarvis.chat.feedback.submit_session_feedback. Server-side (not localStorage) so the \"asked once\" guarantee survives a reload and a second tab. Server-set only."
+  },
+  {
+   "fieldname": "collaboration_active",
+   "fieldtype": "Check",
+   "label": "Collaboration Active",
+   "read_only": 1,
+   "no_copy": 1,
+   "default": "0",
+   "hidden": 1
+  },
+  {
+   "fieldname": "collaboration_epoch",
+   "fieldtype": "Int",
+   "label": "Collaboration Epoch",
+   "read_only": 1,
+   "no_copy": 1,
+   "default": "0",
+   "hidden": 1
   }
  ],
  "permissions": [
