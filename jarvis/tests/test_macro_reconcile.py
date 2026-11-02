@@ -503,7 +503,15 @@ class TestAStepThatEndedWithNoHook(CheckBase):
 		self.assertEqual(
 			int(frappe.db.get_value(MSG, amsg, "streaming")), 0, "premise: the reply was stamped"
 		)
-		self._assert_ended(run, conv, rid, status="failed", reason="Step 1 failed")
+		# Not an end with no hook any more: the budget edge owes the macro hook like a
+		# settled end does, and the finalize job (run for real here) moves the run.
+		self.assertEqual(self._effects(rid), {"macro_advance": "pending"})
+		self.assertEqual(self._run(run).status, "running", "premise: before finalize runs")
+		finalize.run_finalize(rid, self._target)
+		row = self._run(run)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("Step 1 failed", row.error or "")
+		self.assertEqual(len(self._seeds(conv)), 1, "no step was sent after a failed one (Stop on error)")
 
 	def test_the_step_waited_too_long_in_the_queue(self):
 		# Through the pump's own watchdog.

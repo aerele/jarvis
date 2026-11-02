@@ -219,6 +219,13 @@ describe("SheetDetail", () => {
 		vi.useRealTimers();
 	});
 
+	it("hides Open chat only for an embedded review", async () => {
+		const embedded = await mountSheet(detail(), { showOpenChat: false });
+		expect(button(embedded, "Open chat")).toBeFalsy();
+		const board = await mountSheet(detail());
+		expect(button(board, "Open chat")).toBeTruthy();
+	});
+
 	it("loads, then lists the sections in order with counts, and the header", async () => {
 		let resolve;
 		api.getPendingAction.mockReturnValue(new Promise((r) => (resolve = r)));

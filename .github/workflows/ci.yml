@@ -15,11 +15,10 @@ name: CI
 # caught within a day — it just no longer sits in the PR critical path. If that job is red and this
 # one is green, suspect upstream rather than the PR.
 #
-# What was left after that was one serial step: the test run itself, 304s of a 399s job. It is now
-# sharded 4 ways via `bench run-parallel-tests`, taking the job to ~3m45s. The remaining ~90s is
-# per-shard setup (image pull + site restore) that every leg pays again and that no amount of
-# sharding removes. That floor is exactly why the shard count is 4 and not 8; see the `matrix:`
-# comment for the measured split.
+# What was left after that was one serial step: the test run itself, 304s of a 399s job (at the
+# time). It is sharded 4 ways via frappe's run-parallel-tests, with the shards cut by measured
+# time; see the `matrix:` comment for the numbers. The ~90s of per-shard setup (image pull + site
+# restore) is paid again by every leg and no amount of sharding removes it.
 #
 # Because each shard only covers about a quarter of the code, the coverage floor moved OUT of the
 # test job and into the separate `coverage` job, which combines all four data files and gates once.
@@ -85,6 +84,37 @@ jobs:
           SKIP: no-commit-to-branch
         with:
           extra_args: --all-files --show-diff-on-failure
+
+  # #773: the product socket gate (jarvis/chat/socket_io.py) relies on websocket-client
+  # internals, and pyproject allows any websocket-client >=1.6,<2 while the tests job
+  # installs only the newest. This runs the contract harness against BOTH ends of that
+  # range: the 1.6.0 floor and the newest release inside it. It needs only Python and
+  # cryptography (for the local TLS pair): no bench, no Frappe, no network beyond pip.
+  ws-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        websocket-client: ["==1.6.0", ">=1.6,<2"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the harness's only dependency
+        run: python -m pip install cryptography
+      - name: Unpack websocket-client${{ matrix.websocket-client }}
+        run: |
+          python -m pip download --no-deps --only-binary=:all: "websocket-client${{ matrix.websocket-client }}" -d "$RUNNER_TEMP/dl"
+          python -m zipfile -e "$RUNNER_TEMP"/dl/websocket_client-*.whl "$RUNNER_TEMP/ws"
+      - name: Run the contract harness
+        run: |
+          version="$(basename "$RUNNER_TEMP"/dl/websocket_client-*.whl | cut -d- -f2)"
+          echo "websocket-client $version"
+          python -I jarvis/tests/harness/ws_io_contract.py --ws-dir "$RUNNER_TEMP/ws" \
+            --expect-version "$version" --out "$RUNNER_TEMP/ws-contract.json"
+          cat "$RUNNER_TEMP/ws-contract.json"
 
   # The frontend Vue SPA carries its own two test suites and, until this job, NOTHING ran either of
   # them on a PR: `frontend/package.json` defines `test` (vitest) and `test:node` (node's built-in
@@ -159,12 +189,15 @@ jobs:
         run: |
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
           node --test jarvis/public/js/*.test.mjs jarvis/public/js/shared/*.test.mjs
+          node --test jarvis/public/js/shared/holiday/*.test.mjs jarvis/public/js/shared/holiday/scenes/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
   # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
   # would slip through green and only surface at Frappe Cloud deploy time as a 404 on /jarvis. This gate
-  # builds the SPA (the /jarvis artifact) the way the deploy does. (The PWA build resolves the bench site
-  # config via a bench-relative path a bare runner lacks, so it is not gated here — a follow-up.)
+  # builds the SPA (the /jarvis artifact) and the PWA (the /jarvis-mobile artifact) the way the deploy does.
+  # The PWA imports modules from frontend/src (@shared, e.g. voice.js -> frappe-ui), so it builds AFTER the
+  # SPA's dependencies are installed. Its socket.js reads the bench site config by the same fixed relative
+  # path as the SPA's, which the stub step below satisfies (pwa/vite.config.js aliases it like the SPA's).
   frontend-build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -174,7 +207,9 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            frontend/package-lock.json
+            pwa/package-lock.json
       - name: Stub the bench site config the SPA build reads (no bench in CI)
         # src/socket.js imports sites/common_site_config.json at build time (for the socketio
         # port); a bare runner has no bench, so provide a minimal stub. Frappe Cloud builds
@@ -184,10 +219,27 @@ jobs:
           printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
       - name: Build the SPA (Vite) — the /jarvis deploy artifact
         run: npm run install-frontend && npm run build-frontend
+      - name: Holiday worn-item art stays out of the main bundle
+        # The art is lazy (holiday-* chunk). A static import would put it in every
+        # user's first load, and nothing else would notice. The gate has a self-test.
+        run: |
+          node --test frontend/scripts/check-holiday-chunks.test.mjs
+          node frontend/scripts/check-holiday-chunks.mjs
+      - name: Build the PWA (Vite) — the /jarvis-mobile deploy artifact
+        # After the SPA build on purpose: the PWA imports from frontend/src, which needs
+        # frontend/node_modules.
+        run: npm run install-pwa && npm run build-pwa
+      - name: Holiday worn-item art stays lazy and out of the PWA precache
+        # The same art rule for the phone build, plus: no holiday-* file in the built sw.js
+        # precache, and no precached chunk statically imports a file that is not precached
+        # (it would fail offline). Its self-test ran in the step above.
+        run: node frontend/scripts/check-holiday-chunks.mjs --pwa
 
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Shards now cover about 4,000 tests each. The first shard can exceed
+    # 25 minutes on hosted runners; allow it to finish and upload coverage.
+    timeout-minutes: 35
 
     strategy:
       # Never fail-fast. The default cancels the surviving shards on the first failure, so
@@ -196,18 +248,15 @@ jobs:
       # `cancel-in-progress` guard above already exists to avoid.
       fail-fast: false
       matrix:
-        # 4 is the balance point, not an arbitrary pick. Frappe shards per test FILE
-        # weighted by that file's `def test_` count, and its splitter is greedy and
-        # order-preserving, so it starves the LAST shard as the count climbs. Measured
-        # against this suite (176 files, 3560 tests):
+        # Shards are cut by measured TIME, not by test count (jarvis/ci/shard_split.py).
+        # Frappe's own splitter weights each test FILE by its `def test_` count, and test cost
+        # is far from uniform: on this branch on 2026-10-31 (511 files, ~14k tests, ~26 min of
+        # tests) the count split gave est. [7.9, 10.1, 4.5, 3.8] min and the slowest shard set
+        # the wall clock; the time split gives [6.6, 6.7, 6.6, 6.3]. The cut stays contiguous in
+        # frappe's file order, so no file gains new neighbours.
         #
-        #   N=2  [1782, 1778]                    spread    4
-        #   N=4  [899, 891, 893, 877]            spread   22
-        #   N=6  [636, 621, 598, 631, 594, 480]  spread  156
-        #
-        # Past 4, the ~90s of per-shard setup below (image pull + site restore, which every
-        # leg pays again) also stops paying for itself: 6 shards costs 4 more runner-minutes
-        # per run to save a further ~20s of wall clock.
+        # Each leg still pays ~90s of setup (image pull + site restore) on top. At 6 shards the
+        # time split estimates a 4.6 min slowest shard: weigh that against 2 more legs of setup.
         #
         # If you change this list, THREE things have to move together, not two:
         #   1. this list
@@ -357,15 +406,24 @@ jobs:
           done
 
       - name: Run tests + coverage (shard ${{ matrix.shard }} of 4)
-        working-directory: /opt/frappe-bench
+        # sites/, because that is where `bench` itself runs frappe's CLI from.
+        working-directory: /opt/frappe-bench/sites
         run: |
           # coverage + gevent are already in the image's venv (gevent is needed by
           # jarvis/realtime/handlers.py with socketio_backend=python, and its tests).
           #
+          # This is `bench --site jarvis-ci.test run-parallel-tests ...` with ONE change: the
+          # wrapper swaps frappe's count-based split_by_weight for a split by the measured
+          # per-module seconds in jarvis/ci/data/test-timings.json, then invokes frappe's CLI
+          # exactly as bench/cli.py frappe_cmd does. The runner, coverage and the CI-gated exit
+          # code are all still frappe's. See jarvis/ci/shard_split.py, including how to
+          # regenerate the timings when the step's printed plan warns they are stale.
+          #
           # The coverage flag is spelled --with-coverage on THIS command. run-tests spells
           # the same thing --coverage (frappe/commands/testing.py). They are two different
           # click commands; do not "fix" one to match the other.
-          bench --site jarvis-ci.test run-parallel-tests \
+          ../env/bin/python -m jarvis.ci.shard_split run -- \
+            --site jarvis-ci.test run-parallel-tests \
             --app jarvis \
             --build-number ${{ matrix.shard }} \
             --total-builds 4 \

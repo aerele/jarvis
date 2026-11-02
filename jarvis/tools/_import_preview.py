@@ -77,6 +77,16 @@ def build_import_preview(
 	if mapping is not None and not isinstance(mapping, dict):
 		raise InvalidArgumentError("mapping must be an object of {column: field} entries")
 
+	# Background imports cannot run the current-source LCV tax gate. Keep the
+	# native non-importable policy even if custom metadata enables Data Import.
+	if doctype in {"Landed Cost Voucher", "Landed Cost Taxes and Charges"}:
+		return {
+			"doctype": doctype,
+			"import_type": import_type,
+			"importable": False,
+			"reason": "LCV imports cannot verify source tax. Use the LCV preview and draft tools.",
+		}
+
 	# 1-2. The file, permission-gated as the caller and byte-bounded (_import_file).
 	file_doc = _import_file(file_url, filename)
 	resolved_url = file_doc.file_url

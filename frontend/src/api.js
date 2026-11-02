@@ -3,6 +3,7 @@ import { boundedDelivery, settledSendResult } from "./lib/sendDelivery.js";
 // the session cookie + CSRF). Same backend the Desk chat uses, so conversations
 // stay consistent across surfaces.
 import { call } from "frappe-ui";
+import { fetchToday } from "@jsshared/holiday/store.mjs";
 import { firstServerMessage, messageText } from "./lib/errors.js";
 import { listPageArgs as _page } from "./api/listPageArgs";
 import { HISTORY_PAGE_SIZE } from "./lib/historyPaging.js";
@@ -58,6 +59,18 @@ export async function downloadConversation(conversation, format) {
 		setTimeout(() => URL.revokeObjectURL(url), 10000);
 	}
 }
+
+// What the holiday touch shows the session user today (jarvis.holiday_touch.api). The
+// method is GET-only server-side and frappe-ui's `call` always POSTs, so this is a plain
+// fetch (jarvis/public/js/shared/holiday/store.mjs, shared with the Desk widget). A non-2xx
+// (a 403 for a user without Jarvis access) rejects with .status; a 200 whose message is not
+// an object rejects with malformed: true. The holiday store reads a 403 as "none".
+export const getHolidayToday = () => fetchToday();
+
+// The welcome scene asks the server for its showing slot (jarvis.holiday_touch.api).
+// Answers {play: bool}; rejects on a network or server error. The scene gives it, and
+// the scene's import, one overall deadline, so this call sets no timeout of its own.
+export const recordHolidayShown = () => call("jarvis.holiday_touch.api.record_shown");
 
 export const listConversations = ({ refresh = false } = {}) =>
 	call("jarvis.chat.api.list_conversations", refresh ? { refresh: 1 } : {});
@@ -496,8 +509,12 @@ export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkField
 
 // Field metadata for the record-edit action card: powers Link/Select/Date
 // controls (returns {ok, doctype, fields:[{fieldname,label,fieldtype,options}]}).
-export const getDoctypeFields = (doctype) =>
-	call("jarvis.chat.api.get_doctype_fields", { doctype });
+export const getDoctypeFields = (doctype, parentDoctype, parentfield) =>
+	call("jarvis.chat.api.get_doctype_fields", {
+		doctype,
+		...(parentDoctype ? { parent_doctype: parentDoctype } : {}),
+		...(parentfield ? { parentfield } : {}),
+	});
 
 // --- LLM pool / models config (System-Manager only, gated server-side) ---
 export const getLlmConfig = () => call("jarvis.onboarding.get_llm_config");
@@ -907,6 +924,10 @@ export const listApprovals = (status = "Pending") =>
 export const approvalsBadge = () => call("jarvis.chat.approvals_api.pending_badge", {});
 export const decideApproval = (name, decision, approve = 1) =>
 	call("jarvis.chat.approvals_api.decide", { name, decision, approve });
+// The requester sends a decided Chat question's stored decision to their own chat
+// when it did not reach it (requester-only, never resends a delivered decision).
+export const continueApprovalChat = (name) =>
+	call("jarvis.chat.approvals_api.continue_approval_chat", { name });
 // Ignore a request off the board (no verdict, no chat resume); reversible.
 export const dismissApproval = (name) =>
 	call("jarvis.chat.approvals_api.dismiss_approval", { name });
@@ -998,6 +1019,14 @@ export const listMacrosPage = (p) => call(MC + "list_macros_page", _page(p));
 export const fileboxListPage = (p) => call("jarvis.chat.filebox.list_inbound_page", _page(p));
 export const listApprovalsPage = (p) =>
 	call("jarvis.chat.approvals_api.list_approvals_page", _page(p));
+export const listApprovalReviewers = () =>
+	call("jarvis.chat.approvals_api.list_approval_reviewers");
+// A Chat question's reviewers are explicit grants (requester only), never DocShares.
+// Both answer with the current reviewers: [{ user, full_name }].
+export const tagApprovalReviewer = (name, user) =>
+	call("jarvis.chat.approvals_api.tag_reviewer", { name, user });
+export const untagApprovalReviewer = (name, user) =>
+	call("jarvis.chat.approvals_api.untag_reviewer", { name, user });
 
 // ── File Box FB-1: cascade delete + clear-processed + bulk delete (Q4) ──────
 // delete_inbound: owner-gated cascade (approvals + messages + File docs + the

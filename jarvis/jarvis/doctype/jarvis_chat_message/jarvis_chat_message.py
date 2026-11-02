@@ -17,7 +17,15 @@ from jarvis.permissions import NotRenamable
 # Server-owned fields (P0a chat-row integrity): only a writer that sets
 # ``flags.jarvis_server_write`` may set them on insert or change them on save.
 # Deliberately NOT keyed on ignore_permissions, and REST cannot set flags.
-GUARDED_FIELDS = ("pending_card", "tool_call_id", "tool_status", "action_outcome", "tool_args", "origin")
+GUARDED_FIELDS = (
+	"pending_card",
+	"tool_call_id",
+	"tool_status",
+	"action_outcome",
+	"tool_args",
+	"origin",
+	"draft_saved_as",
+)
 _JSON_FIELDS = frozenset({"pending_card", "tool_args"})
 
 
@@ -34,6 +42,9 @@ def _norm(fieldname: str, value):
 
 class JarvisChatMessage(NotRenamable, Document):
 	def validate(self):
+		from jarvis.chat.collaboration import guard_record_binding
+
+		guard_record_binding(self)
 		self._validate_conversation_owner()
 		self._guard_server_fields()
 

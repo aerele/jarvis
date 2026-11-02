@@ -53,6 +53,8 @@ from __future__ import annotations
 
 import frappe
 
+from jarvis.chat.collaboration import is_collaborative
+
 CONVERSATION = "Jarvis Conversation"
 MESSAGE = "Jarvis Chat Message"
 APPROVAL = "Jarvis Approval Request"
@@ -74,6 +76,12 @@ def _conversation_owner(conversation) -> str | None:
 	return frappe.db.get_value(CONVERSATION, conversation, "owner")
 
 
+def _legacy_condition(alias: str) -> str:
+	if not frappe.db.has_column(CONVERSATION, "collaboration_active"):
+		return ""
+	return f" AND COALESCE({alias}.collaboration_active, 0)=0"
+
+
 # --------------------------------------------------------------------------- #
 # Jarvis Conversation - the row's own owner is the axis (matches ``if_owner``).
 # --------------------------------------------------------------------------- #
@@ -85,7 +93,9 @@ def conversation_query_conditions(user: str | None = None) -> str:
 	user = user or frappe.session.user
 	if user == "Administrator":
 		return ""
-	return f"`tabJarvis Conversation`.`owner` = {frappe.db.escape(user)}"
+	return f"`tabJarvis Conversation`.`owner` = {frappe.db.escape(user)}" + _legacy_condition(
+		"`tabJarvis Conversation`"
+	)
 
 
 def has_conversation_permission(doc, ptype: str = "read", user: str | None = None) -> bool:
@@ -98,7 +108,7 @@ def has_conversation_permission(doc, ptype: str = "read", user: str | None = Non
 		# would race the owner assignment. Reads/writes/deletes of EXISTING rows
 		# are gated below.
 		return True
-	return doc.get("owner") == user
+	return doc.get("owner") == user and (ptype in ("write", "delete") or not is_collaborative(doc.name))
 
 
 # --------------------------------------------------------------------------- #
@@ -115,7 +125,7 @@ def message_query_conditions(user: str | None = None) -> str:
 	return (
 		"exists (select 1 from `tabJarvis Conversation` c "
 		"where c.name = `tabJarvis Chat Message`.`conversation` "
-		f"and c.owner = {esc})"
+		f"and c.owner = {esc}" + _legacy_condition("c") + ")"
 	)
 
 
@@ -127,7 +137,9 @@ def has_message_permission(doc, ptype: str = "read", user: str | None = None) ->
 	user = user or frappe.session.user
 	if user == "Administrator":
 		return True
-	return _conversation_owner(doc.get("conversation")) == user
+	return _conversation_owner(doc.get("conversation")) == user and not is_collaborative(
+		doc.get("conversation")
+	)
 
 
 # --------------------------------------------------------------------------- #
@@ -145,7 +157,7 @@ def turn_query_conditions(user: str | None = None) -> str:
 	return (
 		"exists (select 1 from `tabJarvis Conversation` c "
 		"where c.name = `tabJarvis Chat Turn`.`conversation` "
-		f"and c.owner = {esc})"
+		f"and c.owner = {esc}" + _legacy_condition("c") + ")"
 	)
 
 
@@ -156,19 +168,47 @@ def has_turn_permission(doc, ptype: str = "read", user: str | None = None) -> bo
 	user = user or frappe.session.user
 	if user == "Administrator":
 		return True
-	return _conversation_owner(doc.get("conversation")) == user
+	return _conversation_owner(doc.get("conversation")) == user and not is_collaborative(
+		doc.get("conversation")
+	)
+
+
+def session_query_conditions(user: str | None = None) -> str:
+	if (user or frappe.session.user) == "Administrator":
+		return ""
+	conditions = "`tabJarvis Chat Session`.session_key NOT LIKE " + frappe.db.escape("%:dashboard:collab:%")
+	if frappe.db.has_column("Jarvis Chat Session", "collaboration_binding"):
+		conditions += " AND COALESCE(`tabJarvis Chat Session`.collaboration_binding, '')=''"
+	if frappe.db.table_exists("Jarvis Chat Binding"):
+		conditions += " AND NOT EXISTS (SELECT 1 FROM `tabJarvis Chat Binding` b WHERE b.session_key=`tabJarvis Chat Session`.session_key)"
+	if frappe.db.has_column(CONVERSATION, "collaboration_active"):
+		conditions += " AND NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` c WHERE c.session_key=`tabJarvis Chat Session`.session_key AND COALESCE(c.collaboration_active, 0)<>0)"
+	return conditions
+
+
+def has_session_permission(doc, ptype: str = "read", user: str | None = None) -> bool:
+	from jarvis.chat.collaboration import is_collaborative_session
+
+	return (user or frappe.session.user) == "Administrator" or not is_collaborative_session(
+		doc.get("session_key")
+	)
 
 
 # --------------------------------------------------------------------------- #
 # Jarvis Approval Request - linked-conversation owner OR DocShare read grant.
 # --------------------------------------------------------------------------- #
-def approval_query_conditions(user: str | None = None) -> str:
+def _legacy_approval_query_conditions(user: str | None = None) -> str:
 	"""Scope Jarvis Approval Request queries exactly like ``approvals_api``'s
 	list: the caller owns the linked conversation, OR holds a DocShare read grant
 	on the approval (tagging). System Manager (and Administrator) see all."""
 	user = user or frappe.session.user
-	if _is_sm(user):
+	legacy = ""
+	if frappe.db.has_column(CONVERSATION, "collaboration_active"):
+		legacy = "NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` cc WHERE cc.name=`tabJarvis Approval Request`.conversation AND COALESCE(cc.collaboration_active, 0)<>0)"
+	if user == "Administrator":
 		return ""
+	if _is_sm(user):
+		return legacy
 	esc = frappe.db.escape(user)
 	return (
 		"(exists (select 1 from `tabJarvis Conversation` c "
@@ -177,8 +217,27 @@ def approval_query_conditions(user: str | None = None) -> str:
 		"or exists (select 1 from `tabDocShare` ds "
 		"where ds.share_doctype = 'Jarvis Approval Request' "
 		"and ds.share_name = `tabJarvis Approval Request`.`name` "
-		f"and ds.user = {esc} and ds.`read` = 1))"
+		f"and ds.user = {esc} and ds.`read` = 1))" + (f" AND {legacy}" if legacy else "")
 	)
+
+
+def approval_query_conditions(user: str | None = None) -> str:
+	"""Review grants belong to the review APIs, not generic REST or Desk."""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return ""
+	esc = frappe.db.escape(user)
+	a = "`tabJarvis Approval Request`"
+	owned = (
+		f"EXISTS (SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name={a}.conversation AND c.owner={esc})"
+	)
+	orphan = f"NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name={a}.conversation) AND {a}.owner={esc}"
+	legacy = _legacy_approval_query_conditions(user) or "1=1"
+	chat = f"({owned} OR ({orphan}))"
+	if frappe.db.has_column(CONVERSATION, "collaboration_active"):
+		chat += f" AND NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` cc WHERE cc.name={a}.conversation AND COALESCE(cc.collaboration_active, 0)<>0)"
+	scoped = f"COALESCE({a}.source, '')='Chat' AND NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` fb WHERE fb.name={a}.conversation AND COALESCE(fb.file_box, 0)<>0)"
+	return f"((NOT ({scoped}) AND ({legacy})) OR (({scoped}) AND ({chat})))"
 
 
 def has_approval_permission(doc, ptype: str = "read", user: str | None = None) -> bool:
@@ -188,6 +247,17 @@ def has_approval_permission(doc, ptype: str = "read", user: str | None = None) -
 	row that names another user's conversation is denied (cross-inject guard),
 	but a conversation-less agent approval is allowed."""
 	user = user or frappe.session.user
+	if user != "Administrator" and is_collaborative(doc.get("conversation")):
+		return False
+	from jarvis.chat import approval_reviewers
+
+	if approval_reviewers.is_chat(doc):
+		if user == "Administrator":
+			return True
+		owner = _conversation_owner(doc.get("conversation"))
+		if ptype == "create":
+			return owner is None or owner == user
+		return (owner or doc.owner) == user
 	if _is_sm(user):
 		return True
 	owner = _conversation_owner(doc.get("conversation"))

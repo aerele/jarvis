@@ -281,6 +281,17 @@ async function fetchSessionCsrfToken(req, logger) {
 	}
 }
 
+// Chunks made only of shared/holiday modules (the lazy worn-item art) get a
+// `holiday-` name so the router's stale-chunk guard and the build check can
+// tell them from app code. Every other chunk keeps vite's default name.
+const HOLIDAY_DIR = "/js/shared/holiday/";
+function holidayChunkNames(chunk) {
+	const ids = (chunk.moduleIds || []).filter((id) => !id.includes("\0"));
+	const holidayOnly =
+		ids.length > 0 && ids.every((id) => id.replaceAll("\\", "/").includes(HOLIDAY_DIR));
+	return holidayOnly ? "assets/holiday-[name]-[hash].js" : "assets/[name]-[hash].js";
+}
+
 export default defineConfig({
 	plugins: [
 		frappeui({
@@ -298,6 +309,10 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			"@": path.resolve(__dirname, "src"),
+			// Framework-free modules shared with the PWA and the Desk widget (holiday
+			// touches). They live under jarvis/public/js because the widget is an
+			// esbuild bundle that can only reach that tree; same alias as pwa/vite.config.js.
+			"@jsshared": path.resolve(__dirname, "../jarvis/public/js/shared"),
 			"../../../../sites/common_site_config.json": commonSiteConfigPath(),
 		},
 		// wiki-graph-core is a self-contained file: package (own vue in its
@@ -308,7 +323,15 @@ export default defineConfig({
 		include: ["frappe-ui > feather-icons", "showdown", "engine.io-client"],
 		exclude: ["frappe-ui"],
 	},
+	build: {
+		rollupOptions: {
+			output: { chunkFileNames: holidayChunkNames },
+		},
+	},
 	server: {
 		allowedHosts: true,
+		// @jsshared reaches outside this app's root: allow it and nothing else beside the
+		// app (not the whole repository, and not the parent of a bench).
+		fs: { allow: [__dirname, path.resolve(__dirname, "../jarvis/public/js/shared")] },
 	},
 });

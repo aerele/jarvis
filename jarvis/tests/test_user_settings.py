@@ -939,6 +939,54 @@ class TestPersonaPreference(_UsageTestBase):
 
 
 # --------------------------------------------------------------------------- #
+# show_holiday_touches: the per-user holiday-touch switch. A plain
+#     permlevel-0 Check, default ON. holiday_touch_shown (permlevel 1) is
+#     server-owned state and is deliberately NOT part of update_my_settings.
+# --------------------------------------------------------------------------- #
+class TestShowHolidayTouches(_UsageTestBase):
+	def test_get_my_settings_returns_key_default_on(self):
+		frappe.set_user(USER_A)
+		data = user_settings_api.get_my_settings()["data"]
+		self.assertEqual(data["show_holiday_touches"], 1)
+		self.assertNotIn("holiday_touch_shown", data)
+		frappe.set_user("Administrator")
+
+	def test_update_flips_and_persists_and_echoes(self):
+		frappe.set_user(USER_A)
+		out = user_settings_api.update_my_settings(show_holiday_touches=0)
+		self.assertEqual(out["data"]["show_holiday_touches"], 0)
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "show_holiday_touches"), 0)
+		frappe.set_user(USER_A)
+		self.assertEqual(
+			user_settings_api.update_my_settings(show_holiday_touches="1")["data"]["show_holiday_touches"], 1
+		)
+		frappe.set_user("Administrator")
+
+	def test_unrelated_update_leaves_switch_alone(self):
+		frappe.set_user(USER_A)
+		user_settings_api.update_my_settings(show_holiday_touches=0)
+		out = user_settings_api.update_my_settings(notify_enabled=0)
+		self.assertEqual(out["data"]["show_holiday_touches"], 0)
+		frappe.set_user("Administrator")
+
+	def test_holiday_touch_shown_is_not_writable_through_update_my_settings(self):
+		# Not in the signature, so a direct call rejects it (TypeError); over HTTP
+		# frappe.call drops form_dict keys that are not in the signature. Either way the
+		# stored value cannot change, and the allow-list must not grow to include it.
+		import inspect
+
+		self.assertNotIn(
+			"holiday_touch_shown", inspect.signature(user_settings_api.update_my_settings).parameters
+		)
+		frappe.set_user(USER_A)
+		with self.assertRaises(TypeError):
+			user_settings_api.update_my_settings(holiday_touch_shown='{"date": "2026-12-25", "times": []}')
+		frappe.set_user("Administrator")
+		self.assertFalse(frappe.db.get_value(USETT, {"user": USER_A}, "holiday_touch_shown"))
+
+
+# --------------------------------------------------------------------------- #
 # 8.5 support_context_copy_pref: the "copy this chat into your ticket?"
 #     don't-ask-again answer ("" | "Yes" | "No"). Direct analog of
 #     preferred_persona above (same owner-scoped save/echo path, same
