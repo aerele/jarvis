@@ -743,6 +743,8 @@ class TestFefoExpiryCompliance(FrappeTestCase):
 			raise ReachedRunFinalization
 
 		with (
+			# Keep the finalization clock outside this test's scoped database mock.
+			patch.object(frappe.utils, "now", return_value="2026-10-31 12:00:00"),
 			patch.object(agent_runs, "_listing_token_sets", return_value=({"fef-life-3f72"}, set())),
 			patch.object(agent_runs, "_watermark_drift", return_value=False),
 			patch.object(agent_runs, "_scoped_visibility", return_value=False),
