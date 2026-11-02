@@ -145,7 +145,7 @@ class TestChatApprovalContinuationRaces(continuation_fixture.ComposedChatReviewF
 			},
 		)
 
-	def test_claim_and_answer_in_chat_wait_briefly_and_never_deadlock(self):
+	def test_claim_and_answer_in_chat_never_deadlock(self):
 		"""N13, both orders: a send claims decided question A while the chat's
 		answer-in-chat settles open question B, on two connections."""
 		self.tag()
@@ -168,9 +168,9 @@ class TestChatApprovalContinuationRaces(continuation_fixture.ComposedChatReviewF
 		self.assertEqual(sent, {"ok": True, "continuation": "done"})
 		self.assertEqual(frappe.db.get_value(AR, other_question, "status"), "Answered")
 		# Order 2: a send in flight holds the conversation and A's row (its claim).
-		# The answer's existing FOR UPDATE scan of the conversation's questions waits
-		# for that send to commit (prepare and the legacy handler hold no row lock
-		# when they call it), then settles B: a wait, never a deadlock.
+		# The answer locks only Pending questions. Depending on the query plan, it
+		# can settle B now or wait while scanning past the decided A row. Both are
+		# valid: no deadlock, no second answer to A, and B settles after release.
 		third = self.fx.question("Chat")
 		frappe.db.set_value(AR, third, "conversation", conv)
 		frappe.db.commit()
@@ -178,22 +178,19 @@ class TestChatApprovalContinuationRaces(continuation_fixture.ComposedChatReviewF
 		frappe.db.sql("SELECT name FROM `tabJarvis Approval Request` WHERE name=%s FOR UPDATE", self.chat)
 		with patch("frappe.publish_realtime"):
 			answer = self.fx.other_request(self.owner, lambda: chat_asks.resolve_on_user_message(conv))
-			waiting = not answer.done()
 			try:
 				answer.result(timeout=1)
 			except TimeoutError:
 				pass
-			still_waiting = not answer.done()
 			frappe.db.rollback()  # the send commits / ends
 			answer.result(timeout=40)
 		self.assertEqual(
 			(
-				waiting and still_waiting,
 				frappe.db.get_value(AR, third, "status"),
 				frappe.get_doc(AR, self.chat).get("resume_state"),
 				frappe.db.get_value(AR, self.chat, "status"),
 			),
-			(True, "Answered", "done", "Approved"),
+			("Answered", "done", "Approved"),
 		)
 
 	def test_frozen_decision_rewrite_racing_a_send_is_refused_and_the_original_is_sent(self):
