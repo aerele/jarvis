@@ -46,6 +46,8 @@ class TestLandedCostWeightPreview(LandedCostFixtures):
 			{
 				"doctype": "Purchase Receipt",
 				"company": self.company,
+				"currency": self.receipt.currency,
+				"conversion_rate": self.receipt.conversion_rate,
 				"supplier": self.supplier,
 				"posting_date": self.receipt.posting_date,
 				"set_posting_time": 1,
