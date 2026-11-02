@@ -31,7 +31,7 @@ describe("client view identity wiring", () => {
 		expect(decide).toContain("const view = captureChatView(item.name);");
 		expect(decide).toContain("item.conversation !== view.conversation");
 		expect(decide).toContain("fileboxWaitIsCurrent(view)");
-		expect(decide).toContain("await api.decideApproval(view.token, text, approve);");
+		expect(decide).toContain("await api.decideApproval(view.token, text, approve)");
 		expect(decide).toContain("store.refreshApprovalsCount?.();");
 		expect(decide).toContain("fileboxWaitBusy.value === view.token");
 		expect(decide).toContain("loadConversation(view.conversation)");

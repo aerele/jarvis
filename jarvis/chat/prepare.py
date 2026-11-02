@@ -39,6 +39,7 @@ import frappe
 from jarvis._session import impersonate
 from jarvis.chat import seq_watermark, txn
 from jarvis.chat import turn_state as ts
+from jarvis.chat.filebox_source import SourceLost
 from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
 
@@ -186,6 +187,11 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 				attachments=attachments,
 				user=owner,
 			)
+	except SourceLost as exc:
+		_prepare_error(
+			run_id, version, assistant_msg, conversation, owner, str(exc), code="source_unavailable"
+		)
+		return {"ok": False, "reason": "source_unavailable"}
 	except Exception:
 		# Assembly is all best-effort reads; a hard failure here is unexpected. Error
 		# the turn (release credit) rather than dispatch a broken prompt.

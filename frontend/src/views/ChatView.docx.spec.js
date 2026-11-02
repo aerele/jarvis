@@ -105,3 +105,14 @@ it("closes a pending artifact if the conversation changes", async () => {
 	await pending;
 	expect(h.artifact.value).toBeNull();
 });
+
+it("keeps source loss visible when a delayed preview succeeds", async () => {
+	const h = harness(),
+		a = deferred();
+	h.api.previewFile.mockReturnValue(a.promise);
+	const pending = h.open({ name: "message790" }, file("a"));
+	h.artifact.value.sourceUnavailable = true;
+	a.resolve({ kind: "text", text: "Earlier source content" });
+	await pending;
+	expect(h.artifact.value.sourceUnavailable).toBe(true);
+});
