@@ -1250,10 +1250,14 @@ def _launch_audit(
 	reorder_replenishment_gate.assert_launch_allowed(inst.agent)
 	listing = frappe.get_doc(LISTING, inst.agent)
 	owner = inst.owner
-	from jarvis.chat import operator_review
+	from jarvis.chat import operator_review, reorder_review
 
 	review_backend = operator_review.backend(inst.agent)
-	review_config = review_backend.configuration(inst) if review_backend else None
+	review_config = (
+		reorder_review.configuration(inst)
+		if inst.agent == reorder_review.AGENT
+		else (review_backend.configuration(inst) if review_backend else None)
+	)
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1750,7 +1754,18 @@ def _stamp_scope_and_watermark(
 	the best-effort try, so an ERP scope-resolution failure can never drop the
 	authorization the source-read tools read back — a scribe run either carries its
 	admin-authorized app list or reads nothing."""
-	from jarvis.chat import operator_review
+	from jarvis.chat import agent_scope, operator_review, reorder_review
+
+	if inst.agent == reorder_review.AGENT:
+		config = frappe.parse_json(frappe.db.get_value(RUN, run_name, "assessment_config_json"))
+		scope = reorder_review.scope_from_config(config)
+		frappe.db.set_value(
+			RUN,
+			run_name,
+			{"scope_json": frappe.as_json(scope), "permission_profile": _permission_profile(run_as_user)},
+			update_modified=False,
+		)
+		return scope
 
 	review_backend = operator_review.backend(inst.agent)
 	if review_backend:
@@ -2020,6 +2035,8 @@ def _audit_prompt(
 	    bench code, injected — never LLM prose.
 	Kept short: the delegate resolves the run/installation linkage for its Phase-3
 	writeback from the session_key the bench minted, not from this text."""
+	if (listing.get("agent_slug") or listing.get("name")) == "reorder-replenishment-operator":
+		return "Run the bundled native Reorder Review workflow. Call jarvis__prepare_reorder_review with no arguments, then stop. The server owns evidence, quantities, review and completion."
 	scope_block = ""
 	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
 

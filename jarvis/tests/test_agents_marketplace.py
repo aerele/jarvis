@@ -709,7 +709,6 @@ class TestAgentsMarketplace(unittest.TestCase):
 	def test_dispatchless_operators_downgrade_to_coming_soon_on_resync(self):
 		operator_slugs = [
 			"cycle-count-planner-operator",
-			"reorder-replenishment-operator",
 		]
 		agent_catalog.sync_agent_listings()
 		# Simulate the pre-change deployed state, as if synced before the flip.
@@ -726,8 +725,12 @@ class TestAgentsMarketplace(unittest.TestCase):
 				f"{slug} must follow the registry's Coming Soon status on re-sync",
 			)
 
-	def test_ap_ar_review_operators_publish_on_resync(self):
-		operator_slugs = ("ap-3way-match-operator", "ar-collections-operator")
+	def test_native_review_operators_publish_on_resync(self):
+		operator_slugs = (
+			"ap-3way-match-operator",
+			"ar-collections-operator",
+			"reorder-replenishment-operator",
+		)
 		for slug in operator_slugs:
 			frappe.db.set_value(LISTING, slug, "status", "Coming Soon", update_modified=False)
 

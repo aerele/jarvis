@@ -107,6 +107,9 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		frappe.db.commit()
 
 	def setUp(self):
+		closed_release = patch("jarvis.chat.reorder_review.release_available", return_value=False)
+		closed_release.start()
+		self.addCleanup(closed_release.stop)
 		frappe.set_user("Administrator")
 		self._wipe()
 		_make_safe_listing()
