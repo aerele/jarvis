@@ -148,9 +148,24 @@ def parse_ask(content: str | None) -> list[dict]:
 			source = nested or q
 			doctype = str(source.get("doctype") or "").strip()
 			fieldname = str(source.get("fieldname") or "").strip()
-			if _DOCTYPE_RE.fullmatch(doctype) and _FIELDNAME_RE.fullmatch(fieldname):
+			parent = str(source.get("parent") or "").strip()
+			parentfield = str(source.get("parentfield") or "").strip()
+			if (
+				_DOCTYPE_RE.fullmatch(doctype)
+				and _FIELDNAME_RE.fullmatch(fieldname)
+				and (not parent or _DOCTYPE_RE.fullmatch(parent))
+				and (not parentfield or (parent and _FIELDNAME_RE.fullmatch(parentfield)))
+			):
 				out.append(
-					{"q": text, "type": qtype, "options": [], "doctype": doctype, "fieldname": fieldname}
+					{
+						"q": text,
+						"type": qtype,
+						"options": [],
+						"doctype": doctype,
+						"fieldname": fieldname,
+						**({"parent": parent} if parent else {}),
+						**({"parentfield": parentfield} if parentfield else {}),
+					}
 				)
 				continue
 			# a bad identifier degrades to a typed answer instead of vanishing
