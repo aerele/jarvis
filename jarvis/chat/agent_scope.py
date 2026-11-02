@@ -18,11 +18,64 @@ The helper runs under the caller's identity (the run-as user in
 resolved for that user.
 """
 
+from datetime import date
+
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
 
 INSTALLATION = "Jarvis Agent Installation"
+
+
+def authoritative_writeback_scope(run_doc, submitted_scope) -> dict:
+	"""Return the launch-stamped scope after checking the evaluator echo.
+
+	The evaluator receives the scope in its run message and returns the scope it
+	used with its findings. That return value is useful as a consistency check,
+	but it is not an authority to change a run. In particular, it must never
+	select the company used for finding persistence or auto-resolution.
+
+	An evaluator may return only the dimensions that apply to its data model. For
+	example, a CRM evaluator does not bind a Company dimension. Each supplied key
+	must therefore exist in, and exactly match, the server-stamped launch scope.
+	A scoped run also requires a non-empty evaluator scope, so a missing result
+	cannot silently bypass the check. An unscoped legacy run may return an empty
+	scope, but it may not introduce a scope of its own.
+	"""
+	# Older unscoped launches leave scope_json unset. Treat that as an empty server
+	# scope, never as permission for the evaluator to add a replacement scope.
+	stamped = _scope_object(run_doc.get("scope_json"), label="server-stamped run scope", allow_missing=True)
+	submitted = _scope_object(submitted_scope, label="evaluator scope", allow_missing=True)
+
+	if not stamped:
+		if submitted:
+			raise InvalidArgumentError("evaluator scope cannot add dimensions to an unscoped run")
+		return {}
+	if not submitted:
+		raise InvalidArgumentError("evaluator scope is required for a scoped run")
+
+	for key, value in submitted.items():
+		if key not in stamped:
+			raise InvalidArgumentError(f"evaluator scope has unstamped dimension: {key}")
+		if stamped[key] != value:
+			raise InvalidArgumentError(f"evaluator scope does not match server-stamped {key}")
+
+	# A fresh dict prevents later code from mutating the run's trusted stamp.
+	return dict(stamped)
+
+
+def _scope_object(value, *, label: str, allow_missing: bool = False) -> dict:
+	"""Parse one scope object without the old silent fallback-to-empty behavior."""
+	if value is None and allow_missing:
+		return {}
+	if isinstance(value, str):
+		try:
+			value = frappe.parse_json(value)
+		except Exception:
+			raise InvalidArgumentError(f"{label} must be a JSON object") from None
+	if not isinstance(value, dict):
+		raise InvalidArgumentError(f"{label} must be a JSON object")
+	return value
 
 
 def resolve_scope(installation) -> dict:
@@ -52,7 +105,28 @@ def resolve_scope(installation) -> dict:
 		val = cfg.get(key)
 		return str(val).strip() if val is not None and str(val).strip() else None
 
-	return _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	prior_from, prior_to = _s("prior_period_from"), _s("prior_period_to")
+	if prior_from or prior_to:
+		try:
+			if not prior_from or not prior_to:
+				raise ValueError
+			start, end = date.fromisoformat(prior_from), date.fromisoformat(prior_to)
+			if start > end or end >= frappe.utils.getdate(scope["from_date"]):
+				raise ValueError
+		except (ValueError, TypeError):
+			raise InvalidArgumentError("prior_period_from and prior_period_to must define an earlier period")
+		scope.update(prior_period_from=start.isoformat(), prior_period_to=end.isoformat())
+	if cfg.get("record_scope"):
+		record = cfg["record_scope"]
+		if not isinstance(record, dict) or not all(record.get(k) for k in ("doctype", "name")):
+			raise InvalidArgumentError("record_scope requires a doctype and name")
+		doc = frappe.get_doc(record["doctype"], record["name"])
+		doc.check_permission("read")
+		if doc.get("company") and doc.company != scope["company"]:
+			raise InvalidArgumentError("record_scope must belong to the selected company")
+		scope["record_scope"] = {k: str(record[k]) for k in ("doctype", "name")}
+	return scope
 
 
 def _resolve(company, fiscal_year, from_date, to_date) -> dict:

@@ -409,6 +409,51 @@ class TestApplyAction(FrappeTestCase):
 		self.assertEqual(msgs[0].tool_name, "create_doc")
 		self.assertIn(r["name"], msgs[1].content)
 
+	def _apply_todo(self, conv, **extra):
+		payload = {
+			"verb": "create",
+			"doctype": "ToDo",
+			"values": {"description": "applied note test"},
+			"conversation": conv,
+			**extra,
+		}
+		r = apply_action(frappe.as_json(payload))
+		self._cleanup_doc("ToDo", r["name"])
+		return r
+
+	def test_confirm_without_continue_notes_the_agent(self):
+		# jarvis#2253: the agent never sees the receipt rows, so a Confirm that queues
+		# no turn must leave a note for the next turn's context bracket.
+		from unittest.mock import patch
+
+		conv = self._conv()
+		with patch("jarvis.chat.agent_notes.append") as append:
+			r = self._apply_todo(conv)
+		append.assert_called_once()
+		self.assertEqual(append.call_args.args[0], conv)
+		self.assertIn(f"Created ToDo {r['name']}.", append.call_args.args[1])
+
+	def test_confirm_with_continue_does_not_add_a_note(self):
+		from unittest.mock import patch
+
+		conv = self._conv()
+		with (
+			patch("jarvis.chat.agent_notes.append") as append,
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={"queued": False}),
+		):
+			self._apply_todo(conv, **{"continue": 1})
+		append.assert_not_called()
+
+	def test_failed_apply_does_not_note_the_agent(self):
+		from unittest.mock import patch
+
+		conv = self._conv()
+		with patch("jarvis.chat.agent_notes.append") as append:
+			apply_action(
+				frappe.as_json({"verb": "create", "doctype": "ToDo", "values": {}, "conversation": conv})
+			)
+		append.assert_not_called()
+
 	def _trigger_values(self, **overrides):
 		values = {
 			"trigger_name": "zz-596-note",
