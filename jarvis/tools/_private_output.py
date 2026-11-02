@@ -43,13 +43,26 @@ def is_private() -> bool:
 
 def is_active_deposit_delegate(cap) -> bool:
 	"""True only for the running, non-legacy Deposit delegate contract."""
+	return is_deposit_delegate(cap) and cap.get("status") == "running" and not cap.get("legacy")
+
+
+def is_deposit_delegate(cap) -> bool:
+	"""True for any Deposit Run capability, including a terminal one.
+
+	A run can move to a terminal state just before its session bearer is deleted.
+	That short interval is still a Deposit boundary: caller-controlled tool data
+	must remain redacted even though the run is no longer allowed to dispatch.
+	"""
 	return (
 		isinstance(cap, dict)
 		and bool(cap.get("run"))
-		and cap.get("status") == "running"
 		and cap.get("agent") == "statutory-payroll-deposit-status"
-		and not cap.get("legacy")
 	)
+
+
+def is_terminal_deposit_delegate(cap) -> bool:
+	"""True when a Deposit capability exists but its Run may not dispatch."""
+	return is_deposit_delegate(cap) and cap.get("status") != "running"
 
 
 def has_private_source_capability(cap) -> bool:
@@ -62,8 +75,8 @@ def has_private_source_capability(cap) -> bool:
 
 
 def begin_delegate_redaction(cap):
-	"""Enable fixed argument projections for one active Deposit dispatch."""
-	return _redact_delegate_args.set(is_active_deposit_delegate(cap))
+	"""Enable fixed projections for one Deposit dispatch or terminal denial."""
+	return _redact_delegate_args.set(is_deposit_delegate(cap))
 
 
 def end_delegate_redaction(token) -> None:
@@ -72,7 +85,7 @@ def end_delegate_redaction(token) -> None:
 
 def mark_delegate_metadata(cap) -> None:
 	"""Keep the request-level marker through call_tool's outer error capture."""
-	if not is_active_deposit_delegate(cap):
+	if not is_deposit_delegate(cap):
 		return
 	try:
 		frappe.local.jarvis_private_delegate_metadata = True

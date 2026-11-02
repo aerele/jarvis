@@ -77,6 +77,32 @@ def recover_private_input(session_key: str, session_user: str) -> bool:
 	)
 
 
+def has_unresolved_private_input_run(session_key: str) -> bool:
+	"""Return whether a locked current view still has an eligible running Run.
+
+	This is an endpoint outcome check, not an authorization route.  It reveals
+	nothing to the caller: the API maps a true result to one fixed retryable
+	failure.  The current locking read avoids a stale false acknowledgement when
+	a source capture or writeback wins the same Run lock while recovery checks it.
+	"""
+	if not session_key:
+		return False
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- open the locked current view
+	try:
+		run = frappe.db.get_value(
+			RUN,
+			{"session_key": session_key, "agent": AGENT, "status": "running"},
+			["name", "capability_contract", "tools_allow_json"],
+			as_dict=True,
+			for_update=True,
+		)
+		return bool(run and _locked_source_capability(run))
+	finally:
+		# The query owns this transaction and may hold a row lock. Release it on
+		# both the retryable and inert paths before the HTTP response is sent.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release outcome lock
+
+
 def _valid_capability(cap, session_user: str) -> bool:
 	"""Accept only an active, non-legacy Deposit source capability."""
 	return bool(

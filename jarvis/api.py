@@ -41,12 +41,132 @@ _REGISTERED_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _PRIVATE_INPUT_RECOVERY_BODY = b"{}"
 _PRIVATE_INPUT_RECOVERY_ACK = {"ok": True}
 _PRIVATE_INPUT_RECOVERY_BODY_ERROR = "Invalid private input recovery request."
+_PRIVATE_INPUT_RECOVERY_CMD = "jarvis.api.terminalize_unusable_payroll_deposit_private_source"
+_PRIVATE_INPUT_RECOVERY_ALLOWED_REQUEST_KEYS = frozenset({"cmd"})
+_PRIVATE_INPUT_RECOVERY_FORBIDDEN_HEADERS = frozenset({"x-jarvis-tool", "x-jarvis-tool-call-id"})
+_PRIVATE_INPUT_RECOVERY_UNAVAILABLE = "Private payroll input recovery is unavailable."
+_TERMINAL_DEPOSIT_RUN_MESSAGE = "This private payroll delegate run is no longer active."
+_DEPOSIT_V3_WRITEBACK_KEYS = frozenset(
+	{
+		"findings",
+		"coverage",
+		"scope",
+		"truncated",
+		"rows_consumed",
+		"input_snapshot_id",
+		"input_snapshot_digest",
+	}
+)
+_DEPOSIT_V3_WRITEBACK_ERROR = "This private payroll delegate writeback must use the exact v3 handoff."
 
 
 def _canonical_registered_tool(tool) -> str | None:
 	"""Return a valid bare registry name, never an attacker display value."""
 	name = str(tool or "").strip()
 	return name if _REGISTERED_TOOL_NAME.fullmatch(name) and name in _ACCEPTED_PARAMS else None
+
+
+def _terminal_deposit_run_refusal() -> dict:
+	"""Return the fixed, data-free refusal for a terminal Deposit bearer.
+
+	``tool_denial`` enforces the frozen tool list, but deliberately has no Run
+	status rule: a terminal run can still have a valid source/writeback entry in
+	that list. This refusal must therefore stay before tool-name, call-id, and
+	argument processing in every signed-session dispatch path.
+	"""
+	return _error(RunHaltedError.__name__, _TERMINAL_DEPOSIT_RUN_MESSAGE)
+
+
+def _deposit_v3_writeback_args(args: dict | str | None) -> dict | None:
+	"""Decode and admit only the Deposit v3 top-level handoff shape.
+
+	This runs before :func:`_parse_args`, which intentionally removes legacy
+	identity keys for generic callers, and before registry dispatch filters
+	unknown keys. A private Deposit writeback cannot use either compatibility
+	behavior because even a JSON ``null`` legacy dashboard field is evidence that
+	the delegate did not emit the sealed seven-field contract.
+	"""
+	decoded = args
+	if isinstance(decoded, str):
+		try:
+			decoded = json.loads(decoded)
+		except (TypeError, ValueError):
+			return None
+	if not isinstance(decoded, dict) or set(decoded) != _DEPOSIT_V3_WRITEBACK_KEYS:
+		return None
+	return decoded
+
+
+def _requires_deposit_v3_writeback(tool: str, cap) -> bool:
+	"""True only for a running Deposit Run's final structured handoff."""
+	return bool(
+		tool == "record_agent_run"
+		and isinstance(cap, dict)
+		and cap.get("agent") == "statutory-payroll-deposit-status"
+		and cap.get("status") == "running"
+	)
+
+
+def _private_input_recovery_request_is_neutral(ignored: dict) -> bool:
+	"""Accept only the plugin's JSON ``{}`` request shape.
+
+	Frappe passes RPC data as keyword arguments and, for JSON requests, keeps URL
+	query data outside ``form_dict``. Inspect both sources before authentication so
+	text/form bodies and caller-selected query data cannot reach a later log,
+	receipt, or state transition. ``cmd`` is the framework's own RPC selector and
+	must name this exact endpoint when it is present.
+	"""
+	try:
+		request = frappe.request
+		media_type = (
+			getattr(request, "mimetype", None)
+			or getattr(request, "content_type", None)
+			or request.headers.get("Content-Type")
+		)
+	except (AttributeError, RuntimeError):
+		return False
+	if str(media_type or "").split(";", 1)[0].strip().lower() != "application/json":
+		return False
+	if not _private_input_recovery_headers_are_safe(request):
+		return False
+	if not _private_input_recovery_keys_are_safe(ignored):
+		return False
+	try:
+		sources = (getattr(request, "args", None), getattr(request, "form", None))
+	except (AttributeError, RuntimeError):
+		return False
+	for source in sources:
+		if not _private_input_recovery_keys_are_safe(source):
+			return False
+	return True
+
+
+def _private_input_recovery_headers_are_safe(request) -> bool:
+	"""Reject tool-dispatch metadata before it crosses the neutral boundary."""
+	try:
+		header_names = {str(name).lower() for name in request.headers.keys()}
+	except (AttributeError, TypeError, ValueError):
+		return False
+	return not bool(header_names & _PRIVATE_INPUT_RECOVERY_FORBIDDEN_HEADERS)
+
+
+def _private_input_recovery_keys_are_safe(values) -> bool:
+	"""Check only fixed framework keys without retaining caller values."""
+	if values is None:
+		return True
+	try:
+		keys = set(values.keys())
+	except (AttributeError, TypeError, ValueError):
+		return False
+	if not keys.issubset(_PRIVATE_INPUT_RECOVERY_ALLOWED_REQUEST_KEYS):
+		return False
+	if "cmd" not in keys:
+		return True
+	try:
+		cmd_values = values.getlist("cmd") if hasattr(values, "getlist") else [values.get("cmd")]
+		return len(cmd_values) == 1 and str(cmd_values[0] or "") == _PRIVATE_INPUT_RECOVERY_CMD
+	except (AttributeError, TypeError, ValueError):
+		return False
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -57,31 +177,56 @@ def terminalize_unusable_payroll_deposit_private_source(**_ignored) -> dict:
 	``{}``; the session bearer is the only selector. The fixed acknowledgement
 	reveals neither a run state nor a source transport outcome.
 	"""
+	if not _private_input_recovery_request_is_neutral(_ignored):
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", _PRIVATE_INPUT_RECOVERY_BODY_ERROR)
 	body = _request_body_bytes()
+	if body != _PRIVATE_INPUT_RECOVERY_BODY:
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", _PRIVATE_INPUT_RECOVERY_BODY_ERROR)
 	try:
 		session_key = validate_private_input_recovery_request(body)
 	except PluginAuthError as exc:
 		frappe.local.response.http_status_code = exc.http_status
 		return _error(exc.code, exc.message)
-	if body != _PRIVATE_INPUT_RECOVERY_BODY:
-		frappe.local.response.http_status_code = 400
-		return _error("InvalidArgumentError", _PRIVATE_INPUT_RECOVERY_BODY_ERROR)
 
 	try:
+		from jarvis.chat import payroll_deposit_recovery
+
 		user = _private_input_recovery_user(session_key)
 		if user:
-			from jarvis.chat import payroll_deposit_recovery
-
-			payroll_deposit_recovery.recover_private_input(session_key, user)
+			recovered = payroll_deposit_recovery.recover_private_input(session_key, user)
+		else:
+			recovered = False
+		# A 200 acknowledgement is safe only after this callback changed the
+		# active Run, or the locked current view proves there is no eligible
+		# running source Run left for this signed bearer. A false helper result can
+		# otherwise be a concurrent/corrupt identity mismatch that left the Run
+		# open; tell the plugin to retain its local private input in that case.
+		if not recovered and payroll_deposit_recovery.has_unresolved_private_input_run(session_key):
+			return _private_input_recovery_unavailable()
 	except Exception:
 		# The request carries no caller content other than the signed empty body.
 		# Do not let an unexpected server failure echo an internal exception or
-		# leave an open transaction behind this neutral recovery path.
+		# leave an open transaction behind this neutral recovery path. A fixed
+		# failure is required here: a success acknowledgement tells the plugin the
+		# Run is safely terminal, so it must not be sent before that transition
+		# committed (or the request was safely inert).
 		frappe.db.rollback()
-		frappe.logger("jarvis").error("private payroll input recovery failed", exc_info=True)
+		# Keep this log line fixed too. An unexpected database/helper exception can
+		# include a run or session value, and this endpoint must not turn it into an
+		# Error Log payload.
+		frappe.logger("jarvis").error("private payroll input recovery failed")
+		return _private_input_recovery_unavailable()
 
 	frappe.local.response.http_status_code = 200
 	return dict(_PRIVATE_INPUT_RECOVERY_ACK)
+
+
+def _private_input_recovery_unavailable() -> dict:
+	"""Return the fixed non-success response when terminal state is not proved."""
+	frappe.local.response.http_status_code = 503
+	return _error("ServiceUnavailable", _PRIVATE_INPUT_RECOVERY_UNAVAILABLE)
 
 
 def _private_input_recovery_user(session_key: str) -> str | None:
@@ -275,6 +420,12 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 			redaction_token = _private_output.begin_delegate_redaction(cap)
 			_private_output.mark_delegate_metadata(cap)
 			try:
+				# A terminal Deposit Run can retain its signed Chat Session only for
+				# the commit-to-teardown interval. Do not read caller metadata or
+				# create the normal stale-device notice in that interval: it would
+				# retain an attacker-selected tool name or call id after the Run ended.
+				if _private_output.is_terminal_deposit_delegate(cap):
+					return _terminal_deposit_run_refusal()
 				tool_call_id = _private_output.safe_tool_call_id(_get_header("X-Jarvis-Tool-Call-Id"))
 				_notify_stale_pairing(session_key=session_key, tool=tool, tool_call_id=tool_call_id)
 			finally:
@@ -292,6 +443,25 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 		# conversation, ordinary tool result, or generic private result must never
 		# receive its raw source rows.
 		from jarvis.tools import _private_output
+
+		# Most plugin calls enter _dispatch_from_session, which resolves the
+		# capability before it reads a call id or parses arguments. These two
+		# transport refusals return before that dispatcher, though. Resolve only
+		# their non-shared sessions here so a Run which became terminal after its
+		# status commit cannot use this shortcut to send caller metadata to the
+		# outer error sink. Generic calls retain their existing fast path.
+		if not shared_session and (result_mode is not None or tool in _private_output.PRIVATE_SOURCE_TOOLS):
+			from jarvis.tools import _delegate_capability
+
+			with impersonate(plugin_user):
+				cap = _delegate_capability.resolve(session_key)
+			redaction_token = _private_output.begin_delegate_redaction(cap)
+			_private_output.mark_delegate_metadata(cap)
+			try:
+				if _private_output.is_terminal_deposit_delegate(cap):
+					return _terminal_deposit_run_refusal()
+			finally:
+				_private_output.end_delegate_redaction(redaction_token)
 
 		if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
 			frappe.local.response.http_status_code = 403
@@ -565,6 +735,22 @@ def _dispatch_from_session(
 			# branch below.
 			redaction_token = _private_output.begin_delegate_redaction(cap)
 			_private_output.mark_delegate_metadata(cap)
+			# ``tool_denial`` intentionally checks the frozen tool list only. A Run
+			# that just became terminal still has its source/writeback tools in that
+			# list, so it would otherwise reach the normal denial/receipt paths. Stop
+			# before reading caller metadata or parsing caller arguments instead.
+			if _private_output.is_terminal_deposit_delegate(cap):
+				return _terminal_deposit_run_refusal()
+			# Deposit v3 is a closed seven-field handoff. Validate the decoded
+			# caller object before the generic parser can remove ``_user``/
+			# ``_session`` or registry dispatch can drop a legacy dashboard key.
+			# A malformed private handoff leaves no receipt, audit, step, or realtime
+			# row: those generic observability paths are not a safe compatibility lane.
+			deposit_v3_args = None
+			if _requires_deposit_v3_writeback(tool, cap):
+				deposit_v3_args = _deposit_v3_writeback_args(args)
+				if deposit_v3_args is None:
+					return _error("InvalidArgumentError", _DEPOSIT_V3_WRITEBACK_ERROR)
 			# Only a bounded opaque id is valid for normal delegates.  A Deposit
 			# delegate intentionally retains no client-provided id at all.
 			raw_tool_call_id = _get_header("X-Jarvis-Tool-Call-Id")
@@ -682,7 +868,10 @@ def _dispatch_from_session(
 			# dict shape the tool ran against (or the empty dict on a
 			# malformed-args rejection).
 			try:
-				parsed_args = _parse_args(args, tool)
+				parsed_args = _parse_args(
+					deposit_v3_args if deposit_v3_args is not None else args,
+					tool,
+				)
 				if result_mode is not None:
 					_private_output.validate_args(tool, parsed_args)
 			except InvalidArgumentError as e:

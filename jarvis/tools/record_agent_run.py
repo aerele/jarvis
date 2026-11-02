@@ -149,11 +149,11 @@ def record_agent_run(
 	scope=None,
 	input_snapshot_id: str | None = None,
 	input_snapshot_digest: str | None = None,
-	report_sha256: str | None = None,
+	report_sha256: str | None = _MISSING,
 	truncated: bool = False,
-	canvas_ref: str | None = None,
+	canvas_ref: str | None = _MISSING,
 	integrity_digest: str | None = _MISSING,
-	dashboard: str | None = None,
+	dashboard: str | None = _MISSING,
 	rows_consumed=None,
 ) -> dict:
 	"""Land a delegate's evaluator output on its running Jarvis Agent Run.
@@ -227,8 +227,10 @@ def record_agent_run(
 	# Keep the Deposit v3 grammar exact even on a duplicate terminal call. A
 	# legacy payload must fail closed and be re-run, rather than using the
 	# generic idempotency response as a compatibility bypass.
-	if run_row.agent == "statutory-payroll-deposit-status" and integrity_digest is not _MISSING:
-		raise InvalidArgumentError("Payroll deposit writeback does not accept a delegate integrity digest.")
+	if run_row.agent == "statutory-payroll-deposit-status" and any(
+		value is not _MISSING for value in (integrity_digest, dashboard, report_sha256, canvas_ref)
+	):
+		raise InvalidArgumentError("Payroll deposit writeback does not accept delegate report output.")
 	if run_row.status != "running":
 		# Idempotency: the run already finalized (a retried / duplicate writeback).
 		# Return current state without touching anything.
@@ -282,14 +284,7 @@ def record_agent_run(
 			"rows_consumed": rows_consumed,
 			"input_snapshot_id": input_snapshot_id,
 			"input_snapshot_digest": input_snapshot_digest,
-			"dashboard": dashboard,
-			"report_sha256": report_sha256,
-			"canvas_ref": canvas_ref,
 		}
-		# The exact v3 grammar omits this key. A supplied JSON null must not
-		# collapse into an indistinguishable omitted Python default.
-		if integrity_digest is not _MISSING:
-			deposit_args["integrity_digest"] = integrity_digest
 		deposit = payroll_deposit_snapshot.validate_writeback(run_doc, **deposit_args)
 		raw_findings = deposit["findings"]
 		coverage = deposit["coverage"]
@@ -306,6 +301,15 @@ def record_agent_run(
 		canvas_ref = None
 		dashboard = None
 	else:
+		# Generic agents retain the historical optional report/dashboard defaults.
+		# Deposit uses ``_MISSING`` above so an explicit JSON null cannot collapse
+		# into an omitted v3 contract field.
+		if report_sha256 is _MISSING:
+			report_sha256 = None
+		if canvas_ref is _MISSING:
+			canvas_ref = None
+		if dashboard is _MISSING:
+			dashboard = None
 		if integrity_digest is _MISSING:
 			integrity_digest = None
 		raw_findings = _as_list(findings)

@@ -870,9 +870,9 @@ def validate_writeback(
 	input_snapshot_id,
 	input_snapshot_digest,
 	integrity_digest: str | None = _MISSING,
-	dashboard=None,
-	report_sha256=None,
-	canvas_ref=None,
+	dashboard=_MISSING,
+	report_sha256=_MISSING,
+	canvas_ref=_MISSING,
 ) -> dict:
 	"""Validate and safely project the Deposit v3 handoff.
 
@@ -884,7 +884,7 @@ def validate_writeback(
 	"""
 	if run.get("agent") != AGENT or run.get("status") != "running":
 		_fail("Payroll deposit writeback requires its active delegate run.")
-	if dashboard is not None or report_sha256 is not None or canvas_ref is not None:
+	if dashboard is not _MISSING or report_sha256 is not _MISSING or canvas_ref is not _MISSING:
 		_fail("Payroll deposit writeback does not accept delegate dashboard output.")
 	launch, receipt, launch_scope = _load_receipt(run)
 	metadata = _validate_snapshot_metadata(receipt.get("source_snapshot"))

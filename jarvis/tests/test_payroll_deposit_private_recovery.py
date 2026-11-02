@@ -25,9 +25,21 @@ SENTINEL = "SECRET-PRIVATE-ROW"
 
 
 class _FakeRequest:
-	def __init__(self, headers: dict[str, str], body: bytes):
+	def __init__(
+		self,
+		headers: dict[str, str],
+		body: bytes,
+		*,
+		content_type: str = "application/json",
+		args: dict | None = None,
+		form: dict | None = None,
+	):
 		self.headers = headers
 		self._body = body
+		self.content_type = content_type
+		self.mimetype = content_type.split(";", 1)[0].strip().lower()
+		self.args = args or {}
+		self.form = form or {}
 
 	def get_data(self, cache: bool = True) -> bytes:
 		return self._body
@@ -162,15 +174,76 @@ class TestPayrollDepositPrivateRecovery(FrappeTestCase):
 		return frappe._dict(run=run.name, session_key=session_key, installation=installation_name, user=user)
 
 	@contextmanager
-	def _request(self, record, *, body: bytes = b"{}", headers: dict[str, str] | None = None):
+	def _request(
+		self,
+		record,
+		*,
+		body: bytes = b"{}",
+		headers: dict[str, str] | None = None,
+		content_type: str = "application/json",
+	):
 		request_headers = _signed_headers(TOKEN, record.session_key, body)
 		request_headers.update(headers or {})
-		with patch.object(frappe, "request", _FakeRequest(request_headers, body), create=True):
+		with patch.object(
+			frappe,
+			"request",
+			_FakeRequest(request_headers, body, content_type=content_type),
+			create=True,
+		):
 			yield
 
-	def _callback(self, record, *, body: bytes = b"{}", headers: dict[str, str] | None = None) -> dict:
-		with self._request(record, body=body, headers=headers):
+	def _callback(
+		self,
+		record,
+		*,
+		body: bytes = b"{}",
+		headers: dict[str, str] | None = None,
+		content_type: str = "application/json",
+	) -> dict:
+		with self._request(record, body=body, headers=headers, content_type=content_type):
 			return api.terminalize_unusable_payroll_deposit_private_source()
+
+	def _handler_callback(
+		self, *, body: bytes, content_type: str, query_string=None, headers: dict[str, str] | None = None
+	) -> tuple[int, dict]:
+		"""Drive the recovery method through Frappe's RPC handler and serializer."""
+		from frappe.app import make_form_dict
+		from frappe.handler import execute_cmd
+		from frappe.utils.response import build_response
+		from werkzeug.test import EnvironBuilder
+		from werkzeug.wrappers import Request
+
+		method = "jarvis.api.terminalize_unusable_payroll_deposit_private_source"
+		saved = (
+			getattr(frappe.local, "response", None),
+			getattr(frappe.local, "form_dict", None),
+			getattr(frappe.local, "request", None),
+			getattr(frappe.local, "message_log", None),
+		)
+		try:
+			request = Request(
+				EnvironBuilder(
+					path=f"/api/method/{method}",
+					method="POST",
+					data=body,
+					content_type=content_type,
+					query_string=query_string,
+					headers=headers,
+				).get_environ()
+			)
+			frappe.local.request = request
+			frappe.local.response = frappe._dict({"type": "json"})
+			frappe.local.message_log = []
+			make_form_dict(request)
+			frappe.local.form_dict["cmd"] = method
+			data = execute_cmd(method)
+			frappe.local.response["message"] = data
+			response = build_response("json")
+			return response.status_code, json.loads(response.get_data(as_text=True))
+		finally:
+			frappe.local.response, frappe.local.form_dict, frappe.local.request, frappe.local.message_log = (
+				saved
+			)
 
 	def _status(self, record) -> frappe._dict:
 		frappe.db.commit()
@@ -179,13 +252,7 @@ class TestPayrollDepositPrivateRecovery(FrappeTestCase):
 		)
 
 	def test_signed_empty_callback_fails_only_its_active_run_with_a_fixed_ack(self):
-		result = self._callback(
-			self.record,
-			headers={
-				"X-Jarvis-Tool-Call-Id": SENTINEL,
-				"X-Jarvis-Tool": SENTINEL,
-			},
-		)
+		result = self._callback(self.record)
 
 		self.assertEqual(result, {"ok": True})
 		final = self._status(self.record)
@@ -207,10 +274,7 @@ class TestPayrollDepositPrivateRecovery(FrappeTestCase):
 			patch.object(api, "publish_realtime_tool_result") as realtime,
 			patch.object(frappe, "log_error") as error_log,
 		):
-			result = self._callback(
-				self.record,
-				headers={"X-Jarvis-Tool-Call-Id": SENTINEL, "X-Jarvis-Tool": SENTINEL},
-			)
+			result = self._callback(self.record)
 		self.assertEqual(result, {"ok": True})
 		receipt.assert_not_called()
 		audit_record.assert_not_called()
@@ -267,13 +331,22 @@ class TestPayrollDepositPrivateRecovery(FrappeTestCase):
 		try:
 			for record in (no_source, legacy, disabled):
 				with self.subTest(record=record.run):
-					self.assertEqual(self._callback(record), {"ok": True})
+					result = self._callback(record)
+					if record is disabled:
+						# The callback cannot use a disabled identity to terminalize an
+						# otherwise eligible running source Run. It must not acknowledge
+						# success and let the plugin discard its private input.
+						self.assertFalse(result["ok"])
+						self.assertEqual(result["error"]["code"], "ServiceUnavailable")
+						self.assertNotIn(record.run, json.dumps(result))
+					else:
+						self.assertEqual(result, {"ok": True})
 					self.assertEqual(self._status(record).status, "running")
 		finally:
 			frappe.db.set_value("User", disabled_user, "enabled", 1)
 			frappe.db.commit()
 
-	def test_stale_device_callback_is_inert(self):
+	def test_stale_device_callback_does_not_acknowledge_an_unresolved_run(self):
 		settings = frappe.get_single("Jarvis Settings")
 		settings.db_set("chat_device_id", "recovery-current-device")
 		frappe.db.set_value(
@@ -284,7 +357,10 @@ class TestPayrollDepositPrivateRecovery(FrappeTestCase):
 		)
 		frappe.db.commit()
 
-		self.assertEqual(self._callback(self.record), {"ok": True})
+		result = self._callback(self.record)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "ServiceUnavailable")
+		self.assertNotIn(self.record.run, json.dumps(result))
 		self.assertEqual(self._status(self.record).status, "running")
 
 	def test_raw_body_is_exact_and_never_echoes_caller_values(self):
@@ -296,12 +372,146 @@ class TestPayrollDepositPrivateRecovery(FrappeTestCase):
 				"tool_call_id": SENTINEL,
 			}
 		).encode()
-		result = self._callback(self.record, body=body)
+		with patch.object(api, "validate_private_input_recovery_request") as authenticate:
+			result = self._callback(self.record, body=body)
 
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["code"], "InvalidArgumentError")
+		authenticate.assert_not_called()
 		self.assertNotIn(SENTINEL, json.dumps(result))
 		self.assertNotIn(self.record.run, json.dumps(result))
+		self.assertEqual(self._status(self.record).status, "running")
+
+	def test_tool_dispatch_headers_are_rejected_before_auth_or_terminalization(self):
+		headers = _signed_headers(TOKEN, self.record.session_key, b"{}")
+		headers.update({"X-Jarvis-Tool": SENTINEL, "X-Jarvis-Tool-Call-Id": SENTINEL})
+		with (
+			patch.object(api, "validate_private_input_recovery_request") as authenticate,
+			patch("jarvis.chat.payroll_deposit_recovery.recover_private_input") as terminalize,
+			patch.object(frappe, "log_error") as error_log,
+		):
+			status, payload = self._handler_callback(
+				body=b"{}", content_type="application/json", headers=headers
+			)
+
+		result = payload["message"]
+		self.assertEqual(status, 400)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "InvalidArgumentError")
+		self.assertNotIn(SENTINEL, json.dumps(payload))
+		authenticate.assert_not_called()
+		terminalize.assert_not_called()
+		error_log.assert_not_called()
+		self.assertEqual(self._status(self.record).status, "running")
+
+	def test_json_content_type_with_charset_is_accepted(self):
+		result = self._callback(self.record, content_type="application/json; charset=utf-8")
+
+		self.assertEqual(result, {"ok": True})
+		self.assertEqual(self._status(self.record).status, "failed")
+
+	def test_non_neutral_request_shapes_are_refused_by_the_frappe_handler_before_auth(self):
+		for label, body, content_type, query_string in (
+			("text", b"{}", "text/plain", None),
+			("form", f"reason={SENTINEL}".encode(), "application/x-www-form-urlencoded", None),
+			("query", b"{}", "application/json", {"reason": SENTINEL}),
+			(
+				"duplicate_cmd",
+				b"{}",
+				"application/json",
+				[
+					("cmd", "jarvis.api.terminalize_unusable_payroll_deposit_private_source"),
+					("cmd", SENTINEL),
+				],
+			),
+		):
+			with (
+				self.subTest(label=label),
+				patch.object(api, "validate_private_input_recovery_request") as authenticate,
+				patch("jarvis.chat.payroll_deposit_recovery.recover_private_input") as terminalize,
+				patch.object(frappe, "log_error") as error_log,
+			):
+				status, payload = self._handler_callback(
+					body=body, content_type=content_type, query_string=query_string
+				)
+				message = payload["message"]
+				self.assertEqual(status, 400)
+				self.assertFalse(message["ok"])
+				self.assertEqual(message["error"]["code"], "InvalidArgumentError")
+				self.assertNotIn(SENTINEL, json.dumps(payload))
+				authenticate.assert_not_called()
+				terminalize.assert_not_called()
+				error_log.assert_not_called()
+				self.assertEqual(self._status(self.record).status, "running")
+
+	def test_three_signed_malformed_callbacks_do_not_spend_the_recovery_budget(self):
+		body = b"{}"
+		with patch.object(frappe, "log_error") as error_log:
+			results = [
+				self._callback(self.record, content_type="text/plain"),
+				self._callback(self.record, body=f'{{"reason":"{SENTINEL}"}}'.encode()),
+			]
+			headers = _signed_headers(TOKEN, self.record.session_key, body)
+			with patch.object(
+				frappe,
+				"request",
+				_FakeRequest(headers, body, args={"reason": SENTINEL}),
+				create=True,
+			):
+				results.append(api.terminalize_unusable_payroll_deposit_private_source())
+
+		for result in results:
+			self.assertFalse(result["ok"])
+			self.assertEqual(result["error"]["code"], "InvalidArgumentError")
+			self.assertNotIn(SENTINEL, json.dumps(result))
+		self.assertEqual(self._status(self.record).status, "running")
+		error_log.assert_not_called()
+
+		self.assertEqual(self._callback(self.record), {"ok": True})
+		self.assertEqual(self._status(self.record).status, "failed")
+
+	def test_unexpected_recovery_failure_returns_a_fixed_non_success(self):
+		with (
+			patch(
+				"jarvis.chat.payroll_deposit_recovery.recover_private_input",
+				side_effect=RuntimeError(SENTINEL),
+			),
+			patch.object(frappe.db, "rollback", wraps=frappe.db.rollback) as rollback,
+			patch.object(frappe, "logger") as logger,
+		):
+			status, payload = self._handler_callback(
+				body=b"{}",
+				content_type="application/json",
+				headers=_signed_headers(TOKEN, self.record.session_key, b"{}"),
+			)
+			result = payload["message"]
+
+		self.assertEqual(status, 503)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "ServiceUnavailable")
+		self.assertEqual(result["error"]["message"], "Private payroll input recovery is unavailable.")
+		rollback.assert_called_once()
+		self.assertNotIn(SENTINEL, json.dumps(result))
+		logger.return_value.error.assert_called_once_with("private payroll input recovery failed")
+		self.assertNotIn(SENTINEL, json.dumps(logger.return_value.error.call_args, default=str))
+		self.assertEqual(self._status(self.record).status, "running")
+
+	def test_unresolved_active_run_never_gets_a_success_acknowledgement(self):
+		"""A false recovery outcome must not let the plugin discard source data."""
+		with patch.object(payroll_deposit_recovery, "_locked_run_matches", return_value=False):
+			status, payload = self._handler_callback(
+				body=b"{}",
+				content_type="application/json",
+				headers=_signed_headers(TOKEN, self.record.session_key, b"{}"),
+			)
+
+		result = payload["message"]
+		self.assertEqual(status, 503)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "ServiceUnavailable")
+		self.assertEqual(result["error"]["message"], "Private payroll input recovery is unavailable.")
+		self.assertNotIn(self.record.run, json.dumps(result))
+		self.assertNotIn(SENTINEL, json.dumps(result))
 		self.assertEqual(self._status(self.record).status, "running")
 
 	def test_normal_rate_limit_does_not_spend_or_block_recovery_budget(self):
@@ -465,6 +675,152 @@ class TestPayrollDepositPrivateRecovery(FrappeTestCase):
 		final = self._status(self.record)
 		self.assertEqual(final.status, "failed")
 		self.assertIsNone(final.dashboard)
+
+	def test_terminal_commit_gap_rejects_source_and_writeback_before_any_egress(self):
+		"""A bearer that survives status commit cannot dispatch one last tool."""
+		from jarvis.chat import agent_runs
+		from jarvis.tools import _private_output
+
+		status_committed, release = threading.Event(), threading.Event()
+		results, errors = [], []
+		call_id = "PRIVATE-TERMINAL-GAP-CALL-ID"
+		sentinel = "PRIVATE-TERMINAL-GAP-SOURCE"
+		real_teardown = agent_runs.teardown_run_session
+
+		def held_teardown(session_key):
+			status_committed.set()
+			if not release.wait(10):
+				raise TimeoutError("terminal session teardown was not released")
+			return real_teardown(session_key)
+
+		with patch.object(agent_runs, "teardown_run_session", side_effect=held_teardown):
+			terminal_thread = self._thread(
+				lambda: payroll_deposit_recovery.recover_private_input(self.record.session_key, self.user),
+				errors,
+				results,
+			)
+			terminal_thread.start()
+			try:
+				self.assertTrue(status_committed.wait(10), errors)
+				# Release this connection's old read view before it observes the
+				# committed terminal state from the other real DB connection.
+				frappe.db.commit()
+				self.assertEqual(frappe.db.get_value("Jarvis Agent Run", self.record.run, "status"), "failed")
+
+				with (
+					patch("jarvis.chat.site_pin.pin_if_unset"),
+					patch.object(api, "_persist_and_publish_tool_call") as receipt,
+					patch.object(api.audit, "record") as audit_record,
+					patch.object(api, "_record_tool_step") as step,
+					patch.object(api, "publish_realtime_tool_result") as realtime,
+					patch.object(
+						api,
+						"_run_tool",
+						side_effect=AssertionError("terminal Deposit tool reached execution"),
+					),
+					patch("jarvis.api_errors.record_server_error") as error_capture,
+					patch.object(frappe, "log_error") as error_log,
+				):
+					with self._request(self.record, headers={"X-Jarvis-Tool-Call-Id": call_id}):
+						source_result = api.call_tool(
+							"get_payroll_deposit_inputs",
+							{"source": sentinel},
+							result_mode=_private_output.MODE,
+						)
+					with self._request(self.record, headers={"X-Jarvis-Tool-Call-Id": call_id}):
+						writeback_result = api.call_tool(
+							"record_agent_run", {"findings": [{"token": sentinel}]}
+						)
+
+				for result in (source_result, writeback_result):
+					self.assertFalse(result["ok"])
+					self.assertEqual(result["error"]["code"], api.RunHaltedError.__name__)
+				receipt.assert_not_called()
+				audit_record.assert_not_called()
+				step.assert_not_called()
+				realtime.assert_not_called()
+				error_log.assert_not_called()
+				for surface in (
+					source_result,
+					writeback_result,
+					error_capture.call_args_list,
+				):
+					serialized = json.dumps(surface, default=str)
+					for hidden in (
+						sentinel,
+						call_id,
+						"get_payroll_deposit_inputs",
+						"record_agent_run",
+					):
+						self.assertNotIn(hidden, serialized)
+				self.assertEqual(
+					error_capture.call_args.kwargs["route"],
+					_private_output.PRIVATE_DELEGATE_TOOL_LABEL,
+				)
+			finally:
+				release.set()
+				terminal_thread.join(15)
+
+		self.assertFalse(terminal_thread.is_alive())
+		self.assertEqual(errors, [])
+		self.assertEqual(results, [True])
+		final = self._status(self.record)
+		self.assertEqual(final.status, "failed")
+		self.assertEqual(final.error, payroll_deposit_recovery.PRIVATE_SOURCE_UNAVAILABLE)
+		self.assertIsNone(final.dashboard)
+		self.assertFalse(frappe.db.exists("Jarvis Chat Session", {"session_key": self.record.session_key}))
+		self.assertEqual(frappe.db.count("Jarvis Dashboard", {"agent_run": self.record.run}), 0)
+		self.assertEqual(frappe.db.count("Jarvis Agent Finding", {"run": self.record.run}), 0)
+		self.assertEqual(frappe.db.count("Jarvis Agent Finding", {"last_seen_run": self.record.run}), 0)
+		self.assertEqual(frappe.db.count("Jarvis Agent Run Step", {"run": self.record.run}), 0)
+		self.assertNotIn(sentinel, json.dumps(final, default=str))
+
+	def test_active_deposit_v3_extra_keys_create_no_durable_output(self):
+		from jarvis.tools import _private_output
+
+		sentinel = "PRIVATE-V3-EXTRA-KEY"
+		call_id = "PRIVATE-V3-EXTRA-CALL-ID"
+		args = {
+			"findings": [{"token": sentinel}],
+			"coverage": {},
+			"scope": {},
+			"truncated": False,
+			"rows_consumed": 0,
+			"input_snapshot_id": "snapshot",
+			"input_snapshot_digest": "digest",
+			"dashboard": None,
+			"_session": sentinel,
+		}
+		with (
+			patch("jarvis.chat.site_pin.pin_if_unset"),
+			patch.object(api, "_persist_and_publish_tool_call") as receipt,
+			patch.object(api.audit, "record") as audit_record,
+			patch.object(api, "_record_tool_step") as step,
+			patch.object(api, "publish_realtime_tool_result") as realtime,
+			patch.object(api, "_run_tool") as run_tool,
+			patch("jarvis.api_errors.record_server_error") as error_capture,
+		):
+			with self._request(self.record, headers={"X-Jarvis-Tool-Call-Id": call_id}):
+				result = api.call_tool("record_agent_run", json.dumps(args))
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "InvalidArgumentError")
+		receipt.assert_not_called()
+		audit_record.assert_not_called()
+		step.assert_not_called()
+		realtime.assert_not_called()
+		run_tool.assert_not_called()
+		for surface in (result, error_capture.call_args_list):
+			serialized = json.dumps(surface, default=str)
+			self.assertNotIn(sentinel, serialized)
+			self.assertNotIn(call_id, serialized)
+		self.assertEqual(error_capture.call_args.kwargs["route"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+		final = self._status(self.record)
+		self.assertEqual(final.status, "running")
+		self.assertIsNone(final.dashboard)
+		self.assertEqual(frappe.db.count("Jarvis Dashboard", {"agent_run": self.record.run}), 0)
+		self.assertEqual(frappe.db.count("Jarvis Agent Finding", {"run": self.record.run}), 0)
+		self.assertEqual(frappe.db.count("Jarvis Agent Run Step", {"run": self.record.run}), 0)
 
 	def _thread(self, target, errors: list, results: list | None = None) -> threading.Thread:
 		site, sites_path = frappe.local.site, frappe.local.sites_path

@@ -440,8 +440,11 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 			bad_finding,
 			bad_coverage,
 			_v2_output(captured, dashboard=sentinel),
+			_v2_output(captured, dashboard=None),
 			_v2_output(captured, report_sha256=sentinel),
+			_v2_output(captured, report_sha256=None),
 			_v2_output(captured, canvas_ref=sentinel),
+			_v2_output(captured, canvas_ref=None),
 		):
 			with self.subTest(bad=bad), self.assertRaises(InvalidArgumentError):
 				snapshot.validate_writeback(run, **bad)
@@ -1020,8 +1023,9 @@ class TestPayrollDepositWritebackClaim(TestCase):
 				patch("jarvis.chat.agent_run_steps.record_step"),
 			):
 				result = tool.record_agent_run(**_v2_output(captured))
-				with self.assertRaises(InvalidArgumentError):
-					tool.record_agent_run(**_v2_output(captured, integrity_digest=None))
+				for field in ("integrity_digest", "dashboard", "report_sha256", "canvas_ref"):
+					with self.subTest(field=field), self.assertRaises(InvalidArgumentError):
+						tool.record_agent_run(**_v2_output(captured, **{field: None}))
 		finally:
 			_agent_run_ctx.clear_session_key()
 
@@ -1036,17 +1040,30 @@ class TestPayrollDepositWritebackClaim(TestCase):
 
 
 class TestPayrollDepositPrivateAuditRedaction(TestCase):
-	def _cap(self, tools_allow):
+	def _cap(self, tools_allow, *, status="running"):
 		return {
 			"run": "DEP-PRIVATE-RUN",
 			"owner": "owner@example.test",
-			"status": "running",
+			"status": status,
 			"agent": snapshot.AGENT,
 			"legacy": False,
 			"tools_allow": tools_allow,
 		}
 
-	def _dispatch_with_receipt_capture(self, cap, tool, args, run_result=None, tool_call_id=None):
+	def _v3_args(self, token="safe-token"):
+		return {
+			"findings": [{"token": token}],
+			"coverage": {},
+			"scope": {},
+			"truncated": False,
+			"rows_consumed": 0,
+			"input_snapshot_id": "snapshot",
+			"input_snapshot_digest": "digest",
+		}
+
+	def _dispatch_with_receipt_capture(
+		self, cap, tool, args, run_result=None, tool_call_id=None, result_mode=None
+	):
 		from jarvis import api
 
 		frappe.local.jarvis_private_delegate_metadata = False
@@ -1094,13 +1111,17 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			patches[10],
 		):
 			if run_result is None:
-				result = api._dispatch_from_session("owner@example.test", "private-session", tool, args)
+				result = api._dispatch_from_session(
+					"owner@example.test", "private-session", tool, args, result_mode=result_mode
+				)
 			else:
 				with (
 					patch.object(api, "_run_tool", return_value=run_result),
 					patch("jarvis.chat.connector_focus.refusal", return_value=None),
 				):
-					result = api._dispatch_from_session("owner@example.test", "private-session", tool, args)
+					result = api._dispatch_from_session(
+						"owner@example.test", "private-session", tool, args, result_mode=result_mode
+					)
 		return result, receipts, logs
 
 	def test_caller_tool_and_call_id_are_redacted_on_allowed_and_denied_paths(self):
@@ -1113,7 +1134,7 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 				"allowed",
 				["jarvis__record_agent_run"],
 				"record_agent_run",
-				{"integrity_digest": sentinel_tool},
+				self._v3_args(sentinel_tool),
 				{"ok": True, "data": {"safe": True}},
 				sentinel_tool,
 			),
@@ -1130,7 +1151,7 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 				"malformed",
 				["jarvis__record_agent_run"],
 				"record_agent_run",
-				{},
+				self._v3_args(),
 				{"ok": False, "error": {"code": "InvalidArgumentError", "message": sentinel_tool}},
 				sentinel_tool,
 			),
@@ -1157,7 +1178,7 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 		result, receipts, logs = self._dispatch_with_receipt_capture(
 			self._cap(["jarvis__record_agent_run"]),
 			"record_agent_run",
-			{},
+			self._v3_args(),
 			run_result={"ok": True, "data": {"safe": True}},
 			tool_call_id=too_long,
 		)
@@ -1167,6 +1188,45 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 		self.assertNotIn(too_long, "\n".join(str(row) for row in logs))
 		self.assertEqual(receipts[0]["tool_name"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
 		self.assertIsNone(receipts[0]["tool_call_id"])
+
+	def test_terminal_deposit_dispatch_stops_before_metadata_or_argument_egress(self):
+		from jarvis import api
+
+		sentinel = "PRIVATE-TERMINAL-SOURCE"
+		call_id = "PRIVATE-TERMINAL-CALL-ID"
+		for tool, args, result_mode in (
+			(
+				"get_payroll_deposit_inputs",
+				{"source": sentinel},
+				_private_output.MODE,
+			),
+			("record_agent_run", {"findings": [{"token": sentinel}]}, None),
+		):
+			with (
+				self.subTest(tool=tool),
+				patch.object(api, "_parse_args") as parse_args,
+				patch.object(api.audit, "record") as audit_record,
+				patch.object(api, "_record_tool_step") as step,
+			):
+				result, receipts, logs = self._dispatch_with_receipt_capture(
+					self._cap(
+						["jarvis__get_payroll_deposit_inputs", "jarvis__record_agent_run"],
+						status="failed",
+					),
+					tool,
+					args,
+					tool_call_id=call_id,
+					result_mode=result_mode,
+				)
+			self.assertFalse(result["ok"])
+			self.assertEqual(result["error"]["code"], api.RunHaltedError.__name__)
+			parse_args.assert_not_called()
+			audit_record.assert_not_called()
+			step.assert_not_called()
+			self.assertEqual(receipts, [])
+			for surface in (result, receipts, logs):
+				self.assertNotIn(sentinel, json.dumps(surface, default=str))
+				self.assertNotIn(call_id, json.dumps(surface, default=str))
 
 	def test_stale_deposit_metadata_is_redacted_before_the_receipt(self):
 		from jarvis import api
@@ -1232,6 +1292,61 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 		self.assertIsNone(events[0]["tool_call_id"])
 		self.assertEqual(error_capture.call_args.kwargs["route"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
 
+	def test_terminal_stale_deposit_call_has_no_notice_or_raw_metadata_egress(self):
+		from jarvis import api
+
+		cap = self._cap(["jarvis__record_agent_run"], status="failed")
+		sentinel_tool = "PRIVATE-TERMINAL-STALE-TOOL"
+		sentinel_id = "PRIVATE-TERMINAL-STALE-CALL-ID"
+		sentinel_arg = "PRIVATE-TERMINAL-STALE-SOURCE"
+
+		def get_value(doctype, *_args, **_kwargs):
+			if doctype == "User":
+				return 1
+			if doctype == "Jarvis Chat Session":
+				return "old"
+			return None
+
+		with (
+			patch.object(
+				api,
+				"_get_header",
+				side_effect=lambda name: {
+					"X-Jarvis-Token": "token",
+					"X-Jarvis-Tool-Call-Id": sentinel_id,
+				}.get(name),
+			),
+			patch.object(api, "_request_body_bytes", return_value=b"{}"),
+			patch.object(api, "validate_plugin_request", return_value="private-terminal-stale-session"),
+			patch("jarvis.chat.site_pin.pin_if_unset"),
+			patch("jarvis.chat.collaboration.is_collaborative_session", return_value=False),
+			patch("jarvis.chat.collaboration.legacy_session_user", return_value="owner@example.test"),
+			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(frappe.db, "get_single_value", return_value="new"),
+			patch("jarvis.chat.device.session_device_is_stale", return_value=True),
+			patch.object(_delegate_capability, "resolve", return_value=cap),
+			patch.object(api, "impersonate"),
+			patch.object(api, "_persist_and_publish_tool_call") as receipt,
+			patch.object(api.audit, "record") as audit_record,
+			patch.object(api, "_record_tool_step") as step,
+			patch.object(api, "publish_realtime_tool_result") as realtime,
+			patch("jarvis.api_errors.record_server_error") as error_capture,
+		):
+			result = api.call_tool(sentinel_tool, {"source": sentinel_arg})
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], api.RunHaltedError.__name__)
+		receipt.assert_not_called()
+		audit_record.assert_not_called()
+		step.assert_not_called()
+		realtime.assert_not_called()
+		for surface in (result, error_capture.call_args_list):
+			serialized = json.dumps(surface, default=str)
+			self.assertNotIn(sentinel_tool, serialized)
+			self.assertNotIn(sentinel_id, serialized)
+			self.assertNotIn(sentinel_arg, serialized)
+		self.assertEqual(error_capture.call_args.kwargs["route"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+
 	def test_denied_dashboard_arguments_never_reach_audit_or_transcript(self):
 		sentinel = "PRIVATE-SOURCE-SENTINEL"
 		result, receipts, logs = self._dispatch_with_receipt_capture(
@@ -1265,7 +1380,8 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			run_result={"ok": False, "error": {"code": "InvalidArgumentError", "message": "invalid"}},
 		)
 		self.assertFalse(result["ok"])
-		self.assertEqual(len(receipts), 1)
+		self.assertEqual(result["error"]["code"], "InvalidArgumentError")
+		self.assertEqual(receipts, [])
 		self.assertNotIn(sentinel, json.dumps(receipts))
 		self.assertNotIn(hex_sentinel, json.dumps(receipts))
 		self.assertNotIn(hex_sentinel, "\n".join(str(row) for row in logs))
@@ -1293,3 +1409,42 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			_private_output.end_delegate_redaction(token)
 		self.assertNotIn(sentinel, json.dumps(humanize.call_args.args[1]))
 		self.assertEqual(humanize.call_args.args[1], {"private_delegate_args_redacted": True})
+
+	def test_active_deposit_writeback_rejects_every_non_v3_original_key_before_dispatch(self):
+		from jarvis import api
+
+		sentinel = "PRIVATE-V3-ORIGINAL-KEY"
+		for label, mutate in (
+			("dashboard_null", lambda value: value.update({"dashboard": None})),
+			("report_null", lambda value: value.update({"report_sha256": None})),
+			("canvas_null", lambda value: value.update({"canvas_ref": None})),
+			("integrity_null", lambda value: value.update({"integrity_digest": None})),
+			("unknown", lambda value: value.update({"unexpected": sentinel})),
+			("legacy_user", lambda value: value.update({"_user": sentinel})),
+			("legacy_session", lambda value: value.update({"_session": sentinel})),
+			("legacy_session_key", lambda value: value.update({"_session_key": sentinel})),
+			("missing", lambda value: value.pop("rows_consumed")),
+		):
+			args = self._v3_args(sentinel)
+			mutate(args)
+			with (
+				self.subTest(label=label),
+				patch.object(api, "_parse_args") as parse_args,
+				patch.object(api, "_run_tool") as run_tool,
+				patch.object(api.audit, "record") as audit_record,
+				patch.object(api, "_record_tool_step") as step,
+			):
+				result, receipts, logs = self._dispatch_with_receipt_capture(
+					self._cap(["jarvis__record_agent_run"]),
+					"record_agent_run",
+					json.dumps(args),
+				)
+			self.assertFalse(result["ok"])
+			self.assertEqual(result["error"]["code"], "InvalidArgumentError")
+			parse_args.assert_not_called()
+			run_tool.assert_not_called()
+			audit_record.assert_not_called()
+			step.assert_not_called()
+			self.assertEqual(receipts, [])
+			for surface in (result, receipts, logs):
+				self.assertNotIn(sentinel, json.dumps(surface, default=str))
