@@ -439,13 +439,17 @@ def supersede_on_park(row, *, conversation: str, owner_user: str) -> bool:
 		return False
 	if _transition(row.name, [PENDING], SUPERSEDED, reason_code="superseded") != "ok":
 		return False
+	_flip_superseded_chip(conversation, row.name, row.tool)
+	_end_paused_autorun(conversation)
+	return True
+
+
+def _flip_superseded_chip(conversation: str, token: str, tool: str) -> None:
 	frappe.db.sql(
 		f"UPDATE `tab{MSG}` SET tool_status='', action_outcome='superseded', pending_card=NULL,"
 		" content=%(content)s WHERE conversation=%(c)s AND tool_call_id=%(t)s AND tool_status='pending'",
-		{"c": conversation, "t": row.name, "content": f"{row.tool} → superseded"},
+		{"c": conversation, "t": token, "content": f"{tool} → superseded"},
 	)
-	_end_paused_autorun(conversation)
-	return True
 
 
 def _end_paused_autorun(conversation: str) -> None:

@@ -22,14 +22,29 @@ def _streamed_response(status=200, body=b"{}"):
 	return cm
 
 
-def _settings(agent_url="ws://agent.host:9000", token="tok123"):
+def _settings(agent_url="ws://agent.host:9000"):
 	settings = Mock()
 	settings.agent_url = agent_url
-	settings.get_password = Mock(return_value=token)
 	return settings
 
 
+def _sent_json(kwargs):
+	"""The JSON body the plugin route was sent (the exact signed bytes)."""
+	return json.loads(kwargs["data"])
+
+
 class TestLLMTaskComplete(unittest.TestCase):
+	def setUp(self):
+		# The signer and the session claim are other modules' concerns (J3a / J1); this
+		# file pins what the client sends to the plugin route.
+		for target, kwargs in (
+			("jarvis.chat.plugin_routes.signed_route_headers", {"return_value": {"X-Jarvis-Token": "k"}}),
+			("jarvis.chat.session_claims.claim", {}),
+		):
+			patcher = patch(target, **kwargs)
+			patcher.start()
+			self.addCleanup(patcher.stop)
+
 	def test_success_prefers_string_details_json(self):
 		body = json.dumps(
 			{
@@ -42,17 +57,17 @@ class TestLLMTaskComplete(unittest.TestCase):
 		).encode()
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
-			patch("requests.post", return_value=_streamed_response(body=body)) as post,
+			patch("requests.request", return_value=_streamed_response(body=body)) as post,
 		):
 			out = lt.llm_task_complete("do the thing", "<untrusted-data>{}</untrusted-data>")
 		self.assertEqual(out, "All good.")
 		args, kwargs = post.call_args
-		self.assertEqual(args[0], "http://agent.host:9000/tools/invoke")
-		self.assertEqual(kwargs["headers"]["Authorization"], "Bearer tok123")
+		self.assertEqual(args, ("POST", "http://agent.host:9000/jarvis/llm-task"))
+		self.assertNotIn("Authorization", kwargs["headers"])
 		self.assertFalse(kwargs["allow_redirects"])
 		self.assertTrue(kwargs["stream"])
-		payload = kwargs["json"]
-		self.assertEqual(payload["name"], "llm-task")
+		payload = _sent_json(kwargs)
+		self.assertEqual(list(payload), ["args"])
 		self.assertEqual(
 			payload["args"],
 			{
@@ -63,8 +78,6 @@ class TestLLMTaskComplete(unittest.TestCase):
 				"timeoutMs": 60_000,
 			},
 		)
-		self.assertEqual(payload["agentId"], "main")
-		self.assertTrue(payload["sessionKey"].startswith("agent:main:trigger-"))
 		# provider/model must never be sent - overriding the tenant's own
 		# configured model must stay impossible from this client.
 		self.assertNotIn("provider", payload["args"])
@@ -77,13 +90,13 @@ class TestLLMTaskComplete(unittest.TestCase):
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
 			patch(
-				"requests.post", return_value=_streamed_response(body=b'{"ok": true, "result": {}}')
+				"requests.request", return_value=_streamed_response(body=b'{"ok": true, "result": {}}')
 			) as post,
 		):
 			with self.assertRaises(lt.LLMTaskError):  # empty result -> raises, timing still checked below
 				lt.llm_task_complete("p", "i", timeout=30)
 		args, kwargs = post.call_args
-		self.assertEqual(kwargs["json"]["args"]["timeoutMs"], 30_000)
+		self.assertEqual(_sent_json(kwargs)["args"]["timeoutMs"], 30_000)
 		self.assertGreater(kwargs["timeout"][1], 30)
 
 	def test_falls_back_to_content_text_when_json_not_a_string(self):
@@ -98,7 +111,7 @@ class TestLLMTaskComplete(unittest.TestCase):
 		).encode()
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
-			patch("requests.post", return_value=_streamed_response(body=body)),
+			patch("requests.request", return_value=_streamed_response(body=body)),
 		):
 			out = lt.llm_task_complete("p", "i")
 		self.assertEqual(out, "prose reply")
@@ -107,10 +120,10 @@ class TestLLMTaskComplete(unittest.TestCase):
 		body = json.dumps({"ok": True, "result": result}).encode()
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
-			patch("requests.post", return_value=_streamed_response(body=body)) as post,
+			patch("requests.request", return_value=_streamed_response(body=body)) as post,
 		):
 			out = lt.llm_task_complete("p", "i", expect_object=True)
-		return out, post.call_args.kwargs["json"]["args"]
+		return out, _sent_json(post.call_args.kwargs)["args"]
 
 	def test_expect_object_returns_details_json_dict_and_asks_for_the_union_schema(self):
 		out, args = self._object_call(
@@ -143,10 +156,10 @@ class TestLLMTaskComplete(unittest.TestCase):
 		body = json.dumps({"ok": True, "result": {"details": {"json": "fine"}}}).encode()
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
-			patch("requests.post", return_value=_streamed_response(body=body)) as post,
+			patch("requests.request", return_value=_streamed_response(body=body)) as post,
 		):
 			self.assertEqual(lt.llm_task_complete("p", "i"), "fine")
-		self.assertEqual(post.call_args.kwargs["json"]["args"]["schema"], {"type": "string"})
+		self.assertEqual(_sent_json(post.call_args.kwargs)["args"]["schema"], {"type": "string"})
 
 	def test_tool_not_available_raises_typed_error(self):
 		body = json.dumps(
@@ -158,7 +171,7 @@ class TestLLMTaskComplete(unittest.TestCase):
 		).encode()
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
-			patch("requests.post", return_value=_streamed_response(status=404, body=body)),
+			patch("requests.request", return_value=_streamed_response(status=404, body=body)),
 		):
 			with self.assertRaises(lt.LLMTaskNotAvailableError):
 				lt.llm_task_complete("p", "i")
@@ -171,7 +184,8 @@ class TestLLMTaskComplete(unittest.TestCase):
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
 			patch(
-				"requests.post", return_value=_streamed_response(status=404, body=b"<html>not found</html>")
+				"requests.request",
+				return_value=_streamed_response(status=404, body=b"<html>not found</html>"),
 			),
 		):
 			with self.assertRaises(lt.LLMTaskNotAvailableError):
@@ -183,34 +197,40 @@ class TestLLMTaskComplete(unittest.TestCase):
 		).encode()
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
-			patch("requests.post", return_value=_streamed_response(status=400, body=body)),
+			patch("requests.request", return_value=_streamed_response(status=400, body=body)),
 		):
 			with self.assertRaises(lt.LLMTaskError) as ctx:
 				lt.llm_task_complete("p", "i")
 		self.assertNotIsInstance(ctx.exception, lt.LLMTaskNotAvailableError)
 		self.assertIn("bad args", str(ctx.exception))
 
-	def test_missing_agent_url_or_token_raises_without_network_call(self):
+	def test_missing_agent_url_raises_without_network_call(self):
 		with (
-			patch("frappe.get_cached_doc", return_value=_settings(agent_url="", token="tok")),
-			patch("requests.post") as post,
-		):
-			with self.assertRaises(lt.LLMTaskError):
-				lt.llm_task_complete("p", "i")
-		post.assert_not_called()
-		with (
-			patch("frappe.get_cached_doc", return_value=_settings(agent_url="ws://h:1", token="")),
-			patch("requests.post") as post,
+			patch("frappe.get_cached_doc", return_value=_settings(agent_url="")),
+			patch("requests.request") as post,
 		):
 			with self.assertRaises(lt.LLMTaskError):
 				lt.llm_task_complete("p", "i")
 		post.assert_not_called()
 
+	def test_plugin_refusal_raises_fixed_error_without_fallback_signal(self):
+		for status in (401, 403):
+			with (
+				patch("frappe.get_cached_doc", return_value=_settings()),
+				patch(
+					"requests.request",
+					return_value=_streamed_response(status=status, body=b'{"error": "unauthorized"}'),
+				),
+			):
+				with self.assertRaises(lt.LLMTaskError) as ctx:
+					lt.llm_task_complete("p", "i")
+			self.assertNotIsInstance(ctx.exception, lt.LLMTaskNotAvailableError)
+
 	def test_oversize_response_raises(self):
 		big = b"x" * (lt._MAX_RESPONSE_BYTES + 1)
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
-			patch("requests.post", return_value=_streamed_response(body=big)),
+			patch("requests.request", return_value=_streamed_response(body=big)),
 		):
 			with self.assertRaises(lt.LLMTaskError):
 				lt.llm_task_complete("p", "i")
@@ -218,7 +238,7 @@ class TestLLMTaskComplete(unittest.TestCase):
 	def test_non_json_response_raises(self):
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
-			patch("requests.post", return_value=_streamed_response(body=b"not json")),
+			patch("requests.request", return_value=_streamed_response(body=b"not json")),
 		):
 			with self.assertRaises(lt.LLMTaskError):
 				lt.llm_task_complete("p", "i")
@@ -226,7 +246,7 @@ class TestLLMTaskComplete(unittest.TestCase):
 	def test_network_error_raises_base_error(self):
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
-			patch("requests.post", side_effect=RuntimeError("boom")),
+			patch("requests.request", side_effect=RuntimeError("boom")),
 		):
 			with self.assertRaises(lt.LLMTaskError):
 				lt.llm_task_complete("p", "i")
@@ -243,11 +263,10 @@ class TestLLMTaskComplete(unittest.TestCase):
 	def test_headers_never_echoed_into_raised_error_message(self):
 		# The client builds its own error messages from the parsed gateway
 		# payload / a fixed literal - never from the request object (which
-		# would carry the Authorization header) - so a raised error can never
-		# echo the bearer token.
+		# would carry the signing headers - so a raised error can never echo a key.
 		with (
-			patch("frappe.get_cached_doc", return_value=_settings(token="super-secret-token")),
-			patch("requests.post", side_effect=RuntimeError("boom")),
+			patch("frappe.get_cached_doc", return_value=_settings()),
+			patch("requests.request", side_effect=RuntimeError("super-secret-token")),
 		):
 			with self.assertRaises(lt.LLMTaskError) as ctx:
 				lt.llm_task_complete("p", "i")

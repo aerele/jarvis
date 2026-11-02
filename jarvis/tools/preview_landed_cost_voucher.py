@@ -11,6 +11,7 @@ import frappe
 from frappe.utils import flt, getdate, nowdate
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError, PreviewSandboxLost, RetryLaterError
+from jarvis.tools._client_defaults import LCV_RECEIPT_FIELDS, landed_cost_receipt_details
 from jarvis.tools._preview_sandbox import preview_sandbox
 from jarvis.tools._result_guard import MAX_RESULT_CHARS, _size
 from jarvis.tools.preview_doc import _error_text
@@ -304,6 +305,7 @@ class _Preparation:
 			self.doc.append(
 				"purchase_receipts", {"receipt_document_type": key[0], "receipt_document": key[1]}
 			)
+		landed_cost_receipt_details(self.doc)
 		self.doc.get_items_from_purchase_receipts()
 		if not self.doc.items or len(self.doc.items) > MAX_ROWS:
 			raise _Gap("receipt_items", "No supported stock/asset lines, or too many lines, were found.")
@@ -902,7 +904,7 @@ class _Preparation:
 				"posting_date": str(doc.posting_date),
 				"distribute_charges_based_on": doc.distribute_charges_based_on,
 				"purchase_receipts": [
-					{"receipt_document_type": r.receipt_document_type, "receipt_document": r.receipt_document}
+					{field: r.get(field) for field in LCV_RECEIPT_FIELDS if r.meta.has_field(field)}
 					for r in doc.purchase_receipts
 				],
 				"items": items,

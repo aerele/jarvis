@@ -32,7 +32,11 @@ vi.mock("@vueuse/core", async (importOriginal) => {
 	return { ...actual, useStorage: (_key, initial) => ref(initial) };
 });
 vi.mock("frappe-ui", () => ({
-	Autocomplete: { template: "<div/>" },
+	Autocomplete: {
+		props: ["options"],
+		template:
+			'<div class="reviewer-options"><span v-for="o in options" :key="o.value">{{ o.label }}</span></div>',
+	},
 	Badge: { props: ["label", "theme"], template: '<span class="badge">{{ label }}</span>' },
 	Breadcrumbs: { props: ["items"], template: "<nav/>" },
 	Button: {
@@ -47,7 +51,10 @@ vi.mock("frappe-ui", () => ({
 		emits: ["update:modelValue"],
 		template: `<select v-if="type === 'select'" :value="modelValue" @change="$emit('update:modelValue', $event.target.value)"><option v-for="o in options" :key="o.value" :value="o.value">{{ o.label }}</option></select><input v-else :placeholder="placeholder" :value="modelValue" @input="$emit('update:modelValue', $event.target.value)" />`,
 	},
-	Popover: { template: '<div><slot name="target" :togglePopover="() => {}" /></div>' },
+	Popover: {
+		template:
+			'<div><slot name="target" :togglePopover="() => {}" /><slot name="body" /></div>',
+	},
 	Tooltip: { template: "<span><slot/></span>" },
 	toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 	call: vi.fn(),
@@ -62,6 +69,7 @@ vi.mock("@/api", () => ({
 	rejectWikiWrite: vi.fn(),
 	retryWikiWrite: vi.fn(),
 	listShareableUsers: vi.fn(async () => []),
+	listApprovalReviewers: vi.fn(async () => []),
 	getListFilterSchema: vi.fn(),
 	getListFilterCapabilities: vi.fn(),
 }));
@@ -226,7 +234,7 @@ async function mountBoard(query = {}, params = {}) {
 	return w;
 }
 
-const rail = (w) => w.find(".w-\\[360px\\]");
+const rail = (w) => w.find('[data-testid="approvals-rail"]');
 const group = (w) => w.find('[aria-labelledby="actions-title"]');
 const actionRow = (w, text) =>
 	group(w)
@@ -240,6 +248,20 @@ const pane = (w) => w.find(".flex-1.overflow-y-auto");
 const button = (w, label) => w.findAll("button").find((b) => b.text() === label);
 
 describe("ApprovalsBoard one inbox", () => {
+	it("loads the dedicated approval reviewer roster instead of generic sharing users", async () => {
+		api.listApprovalReviewers.mockResolvedValueOnce([
+			{ name: "reviewer@example.com", full_name: "Eligible Reviewer" },
+			{ name: "unnamed@example.com", full_name: null },
+		]);
+		const w = await board();
+		await button(w, "Tag for review").trigger("click");
+		await flushPromises();
+		expect(api.listApprovalReviewers).toHaveBeenCalledOnce();
+		expect(api.listShareableUsers).not.toHaveBeenCalled();
+		expect(w.get(".reviewer-options").text()).toContain("Eligible Reviewer");
+		expect(w.get(".reviewer-options").text()).toContain("unnamed@example.com");
+	});
+
 	let mounted = [];
 	beforeEach(() => {
 		vi.clearAllMocks();
@@ -282,6 +304,24 @@ describe("ApprovalsBoard one inbox", () => {
 		const w = await board();
 		expect(w.element.children).toHaveLength(3);
 		expect(w.element.children[2].contains(group(w).element)).toBe(true);
+	});
+
+	it("stacks the board and wraps its tag control below lg", async () => {
+		const w = await board();
+		const split = w.get('[data-testid="approvals-split-view"]');
+		expect(split.classes()).toContain("flex-col");
+		expect(split.classes()).toContain("lg:flex-row");
+		expect(rail(w).classes()).toContain("w-full");
+		expect(rail(w).classes()).toContain("max-h-[40vh]");
+		expect(rail(w).classes()).toContain("lg:w-[360px]");
+		expect(pane(w).classes()).toContain("min-w-0");
+
+		const actions = w.get('[data-testid="approval-decision-actions"]');
+		expect(actions.classes()).toContain("flex-wrap");
+		expect(button(actions, "Tag for review").exists()).toBe(true);
+		expect(w.get('[data-testid="approval-tag-picker"]').classes()).toContain(
+			"max-w-[calc(100vw-2rem)]"
+		);
 	});
 
 	it("re-reads both lists when the sidebar badge moves (#616)", async () => {

@@ -313,7 +313,7 @@ import { useDocmeta } from "@/composables/useDocmeta";
 import StepsBuilder from "./StepsBuilder.vue";
 import ScheduleEditor from "./ScheduleEditor.vue";
 import { takeMacroPrefill } from "@/composables/macroPrefill";
-import { exactDate, formatTime12h, onAnotherClock, siteTimezone } from "@/utils/datetime";
+import { exactDate, formatTime12h, onAnotherClock, siteTimezone, timeAgo } from "@/utils/datetime";
 import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
 import {
 	cronLinesOf,
@@ -334,7 +334,7 @@ import {
 	deleteWarning,
 	stoppedRunsNote,
 	deleteGuard,
-	isLiveRun,
+	progressChangesLastRun,
 } from "@/lib/macroRunOutcome";
 
 const props = defineProps({
@@ -376,8 +376,15 @@ const lastRun = ref(null);
 // When the scheduler last consumed a slot (the saved last_run_at), for the
 // one-time schedule's "Ran once on ..." line.
 const lastRunAt = ref("");
-const lastRunNote = computed(() => lastRunLine(lastRun.value));
-const LAST_RUN_BANNER = { bad: "error", warn: "warning" };
+const lastRunNote = computed(() =>
+	lastRunLine(lastRun.value, {
+		waitingSince:
+			lastRun.value && lastRun.value.waiting_since
+				? timeAgo(lastRun.value.waiting_since)
+				: "",
+	})
+);
+const LAST_RUN_BANNER = { bad: "error", warn: "warning", info: "info" };
 const nextRunIsRetry = ref(false);
 // An admin's hold (null when not held): Run is off, and nothing can be switched on.
 const hold = ref(null);
@@ -1163,8 +1170,10 @@ function onEvent(p) {
 	if (p.kind === "macro:done") return refreshLastRun();
 	// A run of it STARTED (the scheduler, another tab) since the page loaded: the
 	// delete confirmation should know. Once per run: later steps find it live.
+	// ... or moved between two live states (running <-> waiting for a report): the
+	// notice names the state.
 	if (p.kind === "macro:progress")
-		return isLiveRun(lastRun.value) ? undefined : refreshLastRun();
+		return progressChangesLastRun(lastRun.value, p) ? refreshLastRun() : undefined;
 	if (p.kind !== "macro:merged") return;
 	refreshMergeFields();
 	if (p.status === "ready") {

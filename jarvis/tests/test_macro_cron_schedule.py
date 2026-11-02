@@ -263,15 +263,17 @@ class TestCronOnTheMacro(FrappeTestCase):
 
 	def test_a_retry_is_told_apart_from_a_cron_slot(self):
 		doc = self._macro("retry", schedule_frequency="custom", schedule_cron="0 * * * *")
+		# A pinned clock: off the wall clock, now + 30 min lands on :00 once an hour.
+		now = now_datetime().replace(hour=10, minute=12, second=5, microsecond=0)
 		row = frappe._dict(
 			schedule_enabled=1,
 			schedule_frequency="custom",
 			schedule_cron="0 * * * *",
-			next_run_at=add_to_date(now_datetime(), minutes=30).replace(second=17, microsecond=0),
+			next_run_at=add_to_date(now, minutes=30).replace(second=17),
 		)
-		self.assertTrue(macro_scheduler.is_retry_pending(row))
-		row.next_run_at = macro_scheduler.next_cron_run(["0 * * * *"], now_datetime())
-		self.assertFalse(macro_scheduler.is_retry_pending(row))
+		self.assertTrue(macro_scheduler.is_retry_pending(row, now))
+		row.next_run_at = macro_scheduler.next_cron_run(["0 * * * *"], now)
+		self.assertFalse(macro_scheduler.is_retry_pending(row, now))
 		self.assertTrue(doc.name)
 
 	def test_the_sweep_moves_a_cron_macro_to_its_next_slot(self):

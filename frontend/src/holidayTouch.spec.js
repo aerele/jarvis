@@ -506,5 +506,15 @@ describe("holidayTouch store", () => {
 				view.raw = null;
 			}).toThrow();
 		});
+
+		it("says why today's scene is or is not playing, as the stage reports it", () => {
+			const { store: s } = setup();
+			store = s;
+			expect(store.debugView.sceneReason).toBeNull();
+			store.setSceneReason("deadline");
+			expect(store.debugView.sceneReason).toBe("deadline");
+			store.setSceneReason(undefined);
+			expect(store.debugView.sceneReason).toBeNull();
+		});
 	});
 });

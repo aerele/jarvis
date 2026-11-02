@@ -140,6 +140,15 @@ describe("HolidayMark", () => {
 			expect(layer(w).exists()).toBe(false);
 		});
 
+		it("shows for a hover an overlay reports, as for its own", async () => {
+			const w = await mountMark({ mood: "star", hoverPeek: true, hover: false });
+			expect(layer(w).exists()).toBe(false);
+			await w.setProps({ hover: true });
+			expect(layer(w).exists()).toBe(true);
+			await w.setProps({ hover: false });
+			expect(layer(w).exists()).toBe(false);
+		});
+
 		it("hoverPeek alone does not show it, and a plain mark ignores hover", async () => {
 			const w = await mountMark({ mood: "star" });
 			await w.find(".jvh").trigger("mouseenter");
@@ -610,6 +619,60 @@ describe("HolidayMark", () => {
 				(name) => !(name in HolidayMark.props)
 			);
 			expect(missing).toEqual([]);
+		});
+	});
+
+	describe("driven by the welcome stage", () => {
+		const stage = (over = {}) => ({
+			face: false,
+			item: false,
+			happy: false,
+			look: null,
+			...over,
+		});
+		const jv = (w) => w.find(".jv-mark");
+
+		it("a stage with no face is the plain star, with no item", async () => {
+			const w = await mountMark({ stage: stage() });
+			expect(layer(w).exists()).toBe(false);
+			expect(jv(w).classes()).toContain("jv-mood-star");
+			expect(jv(w).classes()).not.toContain("jv-peek-on");
+		});
+
+		it("the face shows without the item until the stage delivers it", async () => {
+			const w = await mountMark({ stage: stage({ face: true }) });
+			expect(jv(w).classes()).toContain("jv-peek-on");
+			expect(layer(w).exists()).toBe(false);
+			await w.setProps({ stage: stage({ face: true, item: true }) });
+			await flushPromises();
+			expect(layer(w).exists()).toBe(true);
+		});
+
+		it("happy is the smile with the item", async () => {
+			const w = await mountMark({ stage: stage({ face: true, item: true, happy: true }) });
+			expect(jv(w).classes()).toContain("jv-mood-happy");
+			expect(layer(w).attributes("data-state")).toBe("happy");
+		});
+
+		it("look holds the eyes at an offset scaled to the mark, and is dropped by the smile", async () => {
+			const w = await mountMark({ size: 112, stage: stage({ face: true, look: [-9, 3] }) });
+			const root = w.get(".jvh");
+			expect(root.attributes("data-look")).toBeDefined();
+			expect(root.attributes("style")).toContain("--jvh-lx: -18px");
+			expect(root.attributes("style")).toContain("--jvh-ly: 6px");
+			await w.setProps({ stage: stage({ face: true, happy: true, look: [-9, 3] }) });
+			expect(w.get(".jvh").attributes("data-look")).toBeUndefined();
+		});
+
+		it("on the stage the mark is not a button; the replay button over it does that", async () => {
+			const w = await mountMark({ welcome: true, stage: stage({ face: true, item: true }) });
+			expect(w.find("button").exists()).toBe(false);
+		});
+
+		it("a white-label mark ignores the stage and stays plain", async () => {
+			brand.name = "Acme Assistant";
+			const w = await mountMark({ stage: stage({ face: true, item: true }) });
+			expect(layer(w).exists()).toBe(false);
 		});
 	});
 });
