@@ -114,6 +114,7 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# delegate never selects generic queries for this evidence path.
 	"get_payroll_deposit_inputs",
 	"get_bank_recon_inputs",
+	"prepare_reorder_review",
 	"get_cycle_count_inputs",
 	"get_itemised_tax_breakup",
 	# Read-only GSTR-1 return-side period totals from india_compliance's filed

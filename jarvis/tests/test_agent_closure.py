@@ -46,6 +46,7 @@ from jarvis.exceptions import PermissionDeniedError
 from jarvis.settings_reset import ResetSpec
 from jarvis.settings_reset import apply as apply_settings_reset
 from jarvis.tests._collaboration_helpers import CollaborationCase
+from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
 from jarvis.tools import _delegate_capability, _delegate_write_caps
 from jarvis.tools.amend_doc import _amend_one
 from jarvis.tools.apply_workflow_action import apply_workflow_action
@@ -133,7 +134,7 @@ class TestAgentClosureContracts(FrappeTestCase):
 			contract = registry[spec.slug]
 			release = agent_closure.native_release_spec(spec.slug)
 			if release:
-				self.assertEqual(spec.slug, "ticket-triage-operator")
+				self.assertIn(spec.slug, {"reorder-replenishment-operator", "ticket-triage-operator"})
 				self.assertEqual(contract["version"], "0.2.0")
 				self.assertEqual(contract["status"], "Published")
 				self.assertEqual(contract["tools_allow"], list(release.tools))
@@ -253,18 +254,25 @@ class TestAgentClosureContracts(FrappeTestCase):
 		)
 
 	def test_catalog_lock_helper_always_locks_catalog_then_version_then_dirty(self):
+		events = []
+
+		def read_single(sql, values):
+			self.assertIn("FOR UPDATE", sql)
+			events.append(values)
+			return [(17 if values[1] == "agent_catalog_version" else 1,)]
+
 		with (
-			patch.object(agents_api, "_lock_catalog_state") as lock_catalog,
-			patch.object(frappe.db, "get_single_value", side_effect=[17, 1]) as get_single,
+			patch.object(agents_api, "_lock_catalog_state", side_effect=lambda: events.append("catalog")),
+			patch.object(frappe.db, "sql", side_effect=read_single),
 		):
 			state = agents_api._locked_catalog_state()
 		self.assertEqual(state, {"agent_catalog_version": 17, "agent_catalog_dirty": 1})
-		lock_catalog.assert_called_once_with()
 		self.assertEqual(
-			get_single.call_args_list,
+			events,
 			[
-				call("Jarvis Settings", "agent_catalog_version", cache=False, for_update=True),
-				call("Jarvis Settings", "agent_catalog_dirty", cache=False, for_update=True),
+				"catalog",
+				("Jarvis Settings", "agent_catalog_version"),
+				("Jarvis Settings", "agent_catalog_dirty"),
 			],
 		)
 
@@ -1009,3 +1017,24 @@ class TestAgentClosureCollaborativeDispatch(CollaborationCase):
 				run_tool.assert_not_called()
 				self.assertFalse(result["ok"])
 				self.assertEqual(result["error"]["code"], "PermissionError")
+
+
+class TestCatalogStateSingleReads(JarvisSettingsSnapshot, FrappeTestCase):
+	def test_locked_state_reads_real_rows_without_the_v16_single_api(self):
+		frappe.db.set_single_value("Jarvis Settings", "agent_catalog_version", 37)
+		frappe.db.set_single_value("Jarvis Settings", "agent_catalog_dirty", 1)
+		with patch.object(
+			frappe.db, "get_single_value", side_effect=TypeError("v15 has no for_update parameter")
+		):
+			state = agents_api._locked_catalog_state()
+		self.assertEqual(state, {"agent_catalog_version": 37, "agent_catalog_dirty": 1})
+
+	def test_missing_single_rows_have_zero_state(self):
+		frappe.db.sql(
+			"DELETE FROM `tabSingles` WHERE doctype=%s AND field IN (%s, %s)",
+			("Jarvis Settings", "agent_catalog_version", "agent_catalog_dirty"),
+		)
+		self.assertEqual(
+			agents_api._locked_catalog_state(),
+			{"agent_catalog_version": 0, "agent_catalog_dirty": 0},
+		)

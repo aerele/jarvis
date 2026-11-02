@@ -427,6 +427,17 @@ def _enriched_catalog() -> list[dict]:
 	return out
 
 
+def _statutory_payroll_issues_for_run_as(installation: str, config: str) -> dict:
+	"""Return Payroll Entry setup faults as the configured execution identity."""
+	from jarvis.chat.statutory_payroll_scope import configuration_issues
+
+	run_as_user = (frappe.db.get_value(INSTALLATION, installation, "run_as_user") or "").strip()
+	if not run_as_user:
+		return {"run_as_user": "Set a run-as user before configuring the Payroll Entry."}
+	with impersonate(run_as_user):
+		return configuration_issues(config or "{}")
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_agents_page(
@@ -504,10 +515,13 @@ def get_agent(agent_slug: str) -> dict:
 	All read); the ``installation`` block is the caller's own install or None.
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
 	from jarvis.chat.agent_closure import is_closed_agent, is_closed_installation
+	from jarvis.chat.fefo_expiry_compliance import AGENT as FEFO_EXPIRY_AGENT
+	from jarvis.chat.fefo_expiry_compliance import configuration_issues as fefo_configuration_issues
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 	from jarvis.chat.operator_review import backend
 	from jarvis.chat.sla_breach_ageing import AGENT as SLA_BREACH_AGENT
 	from jarvis.chat.sla_breach_ageing import configuration_issues as sla_configuration_issues
+	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
 
 	try:
 		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
@@ -560,7 +574,7 @@ def get_agent(agent_slug: str) -> dict:
 		"nature": listing.nature,
 		"supports_manual_run": listing.nature in ("Auditor", "Scribe")
 		or listing.agent_slug in REVIEW_OPERATORS
-		or listing.agent_slug == "ticket-triage-operator",
+		or listing.agent_slug in {"reorder-replenishment-operator", "ticket-triage-operator"},
 		"version": listing.version,
 		"publisher": listing.publisher,
 		"status": listing.status,
@@ -633,6 +647,17 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif listing.agent_slug == "reorder-replenishment-operator":
+			from jarvis.chat.reorder_review import configuration_issues
+
+			i["configuration_issues"] = configuration_issues(i.config or "{}")
+		elif is_statutory_payroll(listing.agent_slug):
+			i["configuration_issues"] = _statutory_payroll_issues_for_run_as(i.name, i.config or "{}")
+		elif listing.agent_slug == FEFO_EXPIRY_AGENT:
+			# The FEFO bundle has no defaults for its reviewer or expiry window. Surface
+			# saved-state issues before a person can request a run; _launch_audit checks
+			# the same contract again as the run-as identity.
+			i["configuration_issues"] = fefo_configuration_issues(i.config or "{}")
 		elif listing.agent_slug == "ticket-triage-operator":
 			from jarvis.chat import ticket_triage
 
@@ -1134,10 +1159,16 @@ def _locked_catalog_state() -> dict[str, int]:
 	migration, or Settings save; a reversed pair deadlocks under concurrent Apply.
 	"""
 	_lock_catalog_state()
-	return {
-		field: frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, field, cache=False, for_update=True))
-		for field in _CATALOG_STATE_FIELDS
-	}
+	# Frappe v15 get_single_value has no for_update option. Read Singles directly
+	# so these are fresh locking reads, still version first and dirty second.
+	state = {}
+	for field in _CATALOG_STATE_FIELDS:
+		rows = frappe.db.sql(
+			"SELECT value FROM `tabSingles` WHERE doctype=%s AND field=%s FOR UPDATE",
+			(_SETTINGS, field),
+		)
+		state[field] = frappe.utils.cint(rows[0][0] if rows else None)
+	return state
 
 
 def _locked_catalog_version() -> int:
@@ -1397,6 +1428,18 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "enabled": doc.enabled}}
 
 
+def _assert_fefo_schedule_configuration(doc) -> None:
+	"""Validate a FEFO schedule as its eventual run-as identity.
+
+	The Installation controller owns the authoritative all-write-path gate. This
+	endpoint calls the same shared helper as defense in depth, before it computes
+	and saves a schedule.
+	"""
+	from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
+
+	assert_schedule_configuration(doc)
+
+
 def _assert_sla_schedule_configuration(doc) -> None:
 	"""Validate an SLA schedule's team boundary as its eventual run-as user.
 
@@ -1448,6 +1491,21 @@ def set_schedule(
 
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
+	# An old or directly edited record scope must not survive any save that leaves
+	# this schedule enabled. Explicitly turning the schedule off remains allowed
+	# so the owner has a safe recovery path.
+	schedule_will_be_enabled = (
+		int(schedule_enabled or 0) if schedule_enabled is not None else int(doc.schedule_enabled or 0)
+	)
+	if schedule_will_be_enabled and agent_scope.record_scope_requested(doc.config):
+		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
+	if schedule_will_be_enabled and doc.agent == "fefo-expiry-compliance-auditor":
+		# Validate the immutable policy and any optional leaf before this endpoint
+		# computes next_run_at, writes activity, or saves the installation.  The
+		# controller repeats this for Desk/REST/import/direct saves.
+		from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
+
+		assert_schedule_configuration(doc)
 	from jarvis.chat.agent_closure import assert_scheduled, is_closed_installation, retire_document
 
 	was_enabled = frappe.utils.cint(doc.enabled)
@@ -1580,8 +1638,14 @@ def set_config(installation: str, config: str) -> dict:
 		frappe.throw(_("Config must be valid JSON."))
 	if not isinstance(parsed, dict):
 		frappe.throw(_("Config must be a JSON object."))
-	if agent_scope.record_scope_requested(parsed):
-		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), parsed)
+	agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), parsed)
+	if doc.agent == "fefo-expiry-compliance-auditor":
+		from jarvis.chat.fefo_expiry_compliance import validate_configuration_edit
+
+		try:
+			validate_configuration_edit(parsed)
+		except ValueError as exc:
+			frappe.throw(str(exc))
 	doc.config = frappe.as_json(parsed)
 	doc.save()
 	log_activity(
@@ -1970,6 +2034,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	the run's immutable ``initiating_human`` (JF-021) — three distinct identities."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3: who may trigger
+	# A legacy or directly edited configuration can predate set_config's guard.
+	# Check it before any manual-launch preparation can persist state (including a
+	# model fallback or Custom App Learning's source_apps_json selection).
+	if agent_scope.record_scope_requested(doc.config):
+		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
 	from jarvis.chat.agent_closure import assert_launch_allowed
 
 	assert_launch_allowed(doc.agent, doc)
@@ -2027,6 +2096,7 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	if (
 		nature not in ("Auditor", "Scribe")
 		and doc.agent not in REVIEW_OPERATORS
+		and doc.agent != "reorder-replenishment-operator"
 		and doc.agent != "ticket-triage-operator"
 	):
 		frappe.throw(

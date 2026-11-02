@@ -177,6 +177,16 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.chat.reorder_review",
+	"Sealed Reorder suggestions require the named reviewer and current native source permissions; conversation shares grant no review or write authority.",
+	"""
+    list_reviews
+    get_review
+    decide
+    """,
+)
+
+_unrelated(
 	"jarvis.chat.ticket_triage",
 	"Sealed Ticket Triage proposals require the named reviewer and current ticket permissions; conversation shares grant no review or write authority.",
 	"""

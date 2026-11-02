@@ -188,9 +188,9 @@ def sync_agent_listings() -> dict:
 			# (company/fiscal_year/from_date/to_date, which stay flat). Drives
 			# ConfigForm.vue's per-agent field set; [] for an agent with none.
 			"config_keys": frappe.as_json(a.get("config_keys") or []),
-			# A6: explicit bundle capability for the optional record boundary. A
-			# missing or malformed registry value stays false, so an old registry
-			# can never enable scope injection by accident.
+			# An evidence boundary is declared only by the reviewed bundled registry.
+			# Missing or malformed metadata stays false so a mutable Listing row can
+			# never opt a delegate into record-scope injection.
 			"supports_record_scope": 1 if a.get("supports_record_scope") is True else 0,
 			# A2/A16: the delegate auditor's OPAQUE rule-token set, id-only. The
 			# bench needs it to validate a finding's rule in record_agent_run
@@ -662,9 +662,8 @@ def registry_tools_allow(agent_slug: str) -> list[str]:
 def registry_supports_record_scope(agent_slug: str) -> bool:
 	"""Whether the bundled agent declaration explicitly supports ``record_scope``.
 
-	This deliberately reads the reviewed registry artifact rather than the mutable
-	listing row. A record scope controls what evidence reaches a private bundle, so
-	an old, malformed, or manually edited listing must never opt an agent in.
+	The registry is a reviewed deploy artifact. Listing rows are mutable local
+	state and must not enable a boundary that the private bundle did not declare.
 	"""
 	slug = (agent_slug or "").strip()
 	if not slug:
