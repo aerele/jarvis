@@ -2178,6 +2178,9 @@ def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_ll
 		except Exception:
 			pass
 	out = _surface(admin_client.reset_workspace, reason)
+	from jarvis.payment_calendar.lifecycle import reset_workspace
+
+	reset_workspace()
 	if cint(wipe_data):
 		_wipe_workspace_content()
 	if cint(revoke_llm):
