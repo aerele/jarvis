@@ -242,7 +242,7 @@ def _load_sources(db, content, filename, selected, *, prefix="", budget=None, wa
 		)
 
 	if ext in DOCUMENT_EXTENSIONS:
-		load_document(content, filename, selected, load, warnings=warnings)
+		load_document(content, filename, selected, load, warnings=warnings, max_rows=MAX_TOTAL_ROWS)
 	elif ext in {"csv", "tsv"}:
 		if selected is not None and selected != ["Sheet1"]:
 			raise InvalidArgumentError("CSV/TSV has one worksheet named Sheet1.")
