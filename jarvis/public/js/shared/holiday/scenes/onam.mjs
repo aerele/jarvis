@@ -4,8 +4,10 @@
 import { tr } from "../stage.mjs";
 import { Scene, playScene } from "./scene-runtime.mjs";
 import { landSparklesSVG } from "./scene-art.mjs";
+import { squeezeX } from "./scene-place.mjs";
 import {
   FLOOR_ROW,
+  LAMP_GROW,
   RAMP_MS,
   UMBRELLA,
   defsSVG,
@@ -65,7 +67,12 @@ class OnamScene extends Scene {
       ? ""
       : this.floorGroup(
           this.onGround(
-            floorProps(p, !geo.floor.tight, (x, lamp) => this.edge(x, lamp))
+            floorProps(
+              p,
+              !geo.floor.tight,
+              (x, lamp) => this.edge(x, lamp),
+              (x, hw) => squeezeX(x, geo, { hw, g: LAMP_GROW })
+            )
           )
         );
     return `${floor}${this.item("onam", { crownOnly: true })}${petalsSVG(
