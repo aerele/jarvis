@@ -10,6 +10,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.tests.test_platform_capability_contract import _mk_listing, _mk_run, _mk_user, _snapshot
 from jarvis.tools import _agent_run_ctx, _private_output, registry
 
@@ -68,7 +69,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 	def _dispatch(self, payload, *, mode=_private_output.MODE, tool="query", key=None):
 		if tool == "query":
 			args = {"spec": {"from": "ToDo", "select": ["name"], "limit": 1000}}
-		elif tool in _private_output.PRIVATE_SOURCE_TOOLS:
+		elif tool in _private_output.REVIEW_SOURCE_TOOLS:
 			args = {}
 		else:
 			args = {"report_name": "Fake report"}
@@ -118,7 +119,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 				}
 			]
 		}
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in sorted(_private_output.REVIEW_SOURCE_TOOLS):
 			with self.subTest(tool=tool), patch("jarvis.api.publish_realtime_tool_result") as published:
 				result = self._dispatch(payload, tool=tool)
 			self.assertTrue(result["ok"], result)
@@ -187,12 +188,49 @@ class TestPrivateAuditOutput(FrappeTestCase):
 		for step in frappe.get_all("Jarvis Agent Run Step", {"run": self.run}, ["detail"]):
 			self.assertNotIn(marker, step.detail)
 
+	def test_deposit_and_native_review_keep_distinct_capabilities(self):
+		deposit = {
+			"run": "private-run",
+			"agent": "statutory-payroll-deposit-status",
+			"status": "running",
+			"legacy": False,
+			"tools_allow": ["jarvis__get_payroll_deposit_inputs", "jarvis__query"],
+		}
+		self.assertTrue(_private_output.allowed(_private_output.MODE, "get_payroll_deposit_inputs", deposit))
+		for tool in {"query", "run_report"} | _private_output.REVIEW_SOURCE_TOOLS:
+			with self.subTest(tool=tool):
+				self.assertFalse(_private_output.allowed(_private_output.MODE, tool, deposit))
+		self.assertFalse(
+			_private_output.allowed(
+				_private_output.MODE,
+				"get_payroll_deposit_inputs",
+				{**deposit, "agent": "cycle-count-planner-operator"},
+			)
+		)
+		self.assertEqual(
+			_private_output.PRIVATE_SOURCE_TOOLS,
+			_private_output.REVIEW_SOURCE_TOOLS | {"get_payroll_deposit_inputs"},
+		)
+
+	def test_private_source_grammars_cannot_be_substituted(self):
+		snapshot = {"source_digest": "a" * 64, "private_value": CANARY}
+		self.assertEqual(_private_output.source_envelope(snapshot), {"rows": [snapshot]})
+		self.assertEqual(
+			_private_output.source_envelope(snapshot, tool="get_payroll_deposit_inputs"), snapshot
+		)
+		for tool, data in (
+			("get_payroll_deposit_inputs", {"rows": [snapshot]}),
+			("get_purchase_match_inputs", snapshot),
+		):
+			with self.subTest(tool=tool), self.assertRaises(InvalidArgumentError):
+				_private_output.prepare({"ok": True, "data": data}, tool=tool)
+
 	def test_private_review_input_uses_sorted_canonical_source_bytes(self):
 		payload = {"rows": [{"z_key": "last", "source_digest": "a" * 64, "a_key": "first"}]}
 		expected = json.dumps(
 			payload, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")
 		).encode()
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in sorted(_private_output.REVIEW_SOURCE_TOOLS):
 			with self.subTest(tool=tool):
 				result = self._dispatch(payload, tool=tool)
 				self.assertEqual(result["data"].encode(), expected)
@@ -200,7 +238,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 				self.assertEqual(result["private_output"]["sha256"], hashlib.sha256(expected).hexdigest())
 
 	def test_private_review_input_rejects_an_unsealed_or_non_singleton_envelope(self):
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in sorted(_private_output.REVIEW_SOURCE_TOOLS):
 			for payload in (
 				{"rows": []},
 				{"rows": [{"source_digest": "a" * 64}, {"source_digest": "b" * 64}]},
@@ -221,7 +259,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 		}
 		# Ticket Triage uses its own session-bound capture and typed dispatcher;
 		# its real-record dispatch tests live in test_ticket_triage.
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS - {"get_ticket_triage_inputs"}):
+		for tool in sorted(_private_output.REVIEW_SOURCE_TOOLS - {"get_ticket_triage_inputs"}):
 			module = self._source_capture_module(tool)
 			with (
 				self.subTest(tool=tool),
@@ -243,7 +281,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			self.assertNotIn(CANARY, step.detail)
 
 	def test_private_review_handlers_refuse_malformed_captured_snapshot_without_leak(self):
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS - {"get_ticket_triage_inputs"}):
+		for tool in sorted(_private_output.REVIEW_SOURCE_TOOLS - {"get_ticket_triage_inputs"}):
 			module = self._source_capture_module(tool)
 			for snapshot in (None, {}, {"source_digest": "not-a-digest", "secret": CANARY}):
 				with (
@@ -261,7 +299,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 				self.assertNotIn(CANARY, str(published.call_args))
 
 	def test_review_input_requires_private_mode_before_tool_dispatch(self):
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in sorted(_private_output.REVIEW_SOURCE_TOOLS):
 			for mode in (None, "ordinary-output"):
 				with self.subTest(tool=tool, mode=mode), patch("jarvis.api._run_tool") as execute:
 					result = api._dispatch_from_session(self.actor, self.key, tool, {}, result_mode=mode)
@@ -270,7 +308,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 				execute.assert_not_called()
 
 	def test_private_review_input_rejects_model_selected_arguments_before_dispatch(self):
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in sorted(_private_output.REVIEW_SOURCE_TOOLS):
 			with self.subTest(tool=tool), patch("jarvis.api._run_tool") as execute:
 				result = api._dispatch_from_session(
 					self.actor,
@@ -426,7 +464,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 
 	def test_standard_external_source_entry_guard_refuses_before_dispatch(self):
 		self.assertEqual(
-			_private_output.PRIVATE_SOURCE_TOOLS,
+			_private_output.REVIEW_SOURCE_TOOLS,
 			frozenset(
 				{
 					"get_cycle_count_inputs",
@@ -436,7 +474,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 				}
 			),
 		)
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in sorted(_private_output.REVIEW_SOURCE_TOOLS):
 			module = self._source_capture_module(tool)
 			for mode in (None, _private_output.MODE):
 				with (
@@ -479,7 +517,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 
 	def test_plugin_source_calls_refuse_ordinary_and_shared_paths_before_dispatch(self):
 		headers = {"X-Jarvis-Token": "fake-test-token"}
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in sorted(_private_output.REVIEW_SOURCE_TOOLS):
 			for mode in (None, "ordinary-output"):
 				with (
 					self.subTest(tool=tool, mode=mode),

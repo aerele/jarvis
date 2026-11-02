@@ -527,30 +527,22 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# dot paths, while the scheduler delivers only their declared root object.
 	# ------------------------------------------------------------------ #
 	def test_sync_agent_listings_writes_config_keys_from_the_registry(self):
-		# dot paths - close-auditor/evaluate.py reads these NESTED under a
-		# top-level "materiality" object, not as flat top-level keys.
 		agent_catalog.sync_agent_listings()
-		self.assertEqual(
-			json.loads(frappe.db.get_value(LISTING, "close-auditor", "config_keys")),
-			[
+		expected = {
+			"close-auditor": [
 				"materiality.benchmark_value",
 				"materiality.percentage",
 				"materiality.engagement_risk_level",
 				"materiality.rounding_step",
 			],
-		)
-		self.assertEqual(
-			json.loads(frappe.db.get_value(LISTING, "gst-return-prep-auditor", "config_keys")),
-			["annual_aggregate_turnover", "same_hsn_rate_allowlist"],
-		)
-		self.assertEqual(
-			json.loads(frappe.db.get_value(LISTING, "grn-hygiene-auditor", "config_keys")),
-			["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
-		)
-		self.assertEqual(
-			frappe.db.get_value(LISTING, "grn-hygiene-auditor", "version"),
-			"0.4.1",
-		)
+			"grn-hygiene-auditor": ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			"statutory-payroll-deposit-status": ["deposit"],
+			"gst-return-prep-auditor": ["annual_aggregate_turnover", "same_hsn_rate_allowlist"],
+		}
+		for slug, config_keys in expected.items():
+			with self.subTest(agent=slug):
+				self.assertEqual(json.loads(frappe.db.get_value(LISTING, slug, "config_keys")), config_keys)
+		self.assertEqual(frappe.db.get_value(LISTING, "grn-hygiene-auditor", "version"), "0.4.1")
 
 	def test_sync_agent_listings_writes_cycle_count_config_keys(self):
 		"""Cycle Count owns a closed configuration namespace, including its list field."""
@@ -595,18 +587,22 @@ class TestAgentsMarketplace(unittest.TestCase):
 		agent_catalog.sync_agent_listings()
 		frappe.set_user(self.owner)
 		try:
-			out = agents_api.get_agent("close-auditor")
+			expected = {
+				"close-auditor": [
+					"materiality.benchmark_value",
+					"materiality.percentage",
+					"materiality.engagement_risk_level",
+					"materiality.rounding_step",
+				],
+				"statutory-payroll-deposit-status": ["deposit"],
+			}
+			for slug, config_keys in expected.items():
+				allow_listing_for(slug, user=self.owner)
+				with self.subTest(agent=slug):
+					out = agents_api.get_agent(slug)
+					self.assertEqual(json.loads(out["config_keys"]), config_keys)
 		finally:
 			frappe.set_user("Administrator")
-		self.assertEqual(
-			json.loads(out["config_keys"]),
-			[
-				"materiality.benchmark_value",
-				"materiality.percentage",
-				"materiality.engagement_risk_level",
-				"materiality.rounding_step",
-			],
-		)
 
 	def test_ap_detail_exposes_saved_configuration_readiness(self):
 		slug = "ap-3way-match-operator"
@@ -691,6 +687,34 @@ class TestAgentsMarketplace(unittest.TestCase):
 				"engagement_risk_level": "medium",
 				"rounding_step": 100,
 			},
+		}
+		frappe.set_user(self.owner)
+		try:
+			agents_api.set_config(inst, json.dumps(payload))
+		finally:
+			frappe.set_user("Administrator")
+		stored = json.loads(frappe.db.get_value(INSTALLATION, inst, "config"))
+		self.assertEqual(stored, payload)
+
+	def test_set_config_persists_a_bounded_payroll_deposit_object_unchanged(self):
+		slug = "statutory-payroll-deposit-status"
+		allow_listing_for(slug, user=self.owner)
+		inst = _install_as(self.owner, slug)
+		payload = {
+			"deposit": {
+				"account_group": "PAYROLL-LIABILITIES-TEST",
+				"liability_accounts": {"PF-PAYABLE-TEST": "pf", "ESI-PAYABLE-TEST": "esi"},
+				"vouchers": [
+					{
+						"doctype": "Journal Entry",
+						"name": "JE-PAYROLL-TEST",
+						"liability_month": "2024-04",
+					}
+				],
+				"settlement_as_of": "2024-05-31",
+				"reviewer": "payroll.reviewer@example.test",
+				"reviewer_capacity": True,
+			}
 		}
 		frappe.set_user(self.owner)
 		try:

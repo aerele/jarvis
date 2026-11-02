@@ -13,7 +13,7 @@
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
  *     CRITICAL fix, they are NOT flat top-level keys), and the GRN Hygiene
  *     auditor reads its reviewer settings under `grn_hygiene`. GST has flat
- *     turnover and HSN exclusion settings. Rendered only
+ *     turnover and HSN exclusion settings; Deposit uses its typed `deposit` object. Rendered only
  *     when the listing's own `config_keys` (agents_api.py get_agent,
  *     jarvis#1063) names the field's `configKey` or, when that is absent, its
  *     storage `path` (a dot path for a nested key). The SLA team's
@@ -41,6 +41,10 @@
  *   - {key, path, label, type: "text", help, maxLength?}
  *   - {key, path, label, type: "number", help, suffix?}
  *   - {key, path, label, type: "select", options: [{label, value}, ...]}
+ *   - {key, path, label, type: "deposit-status", help} for the one
+ *     explicitly typed, nested payroll-deposit setup. The value remains under
+ *     the single declared `deposit` namespace; it is never a free-form
+ *     Advanced JSON payload.
  *   - {key, path, label, type: "text-list", help}
  */
 export const CONFIG_FIELD_SET = [
@@ -201,6 +205,13 @@ export const CONFIG_FIELD_SET = [
 		help: "Optional plain-text notice for a test review (up to 500 characters).",
 	},
 	{
+		key: "deposit",
+		path: "deposit",
+		label: "Payroll deposit-status setup",
+		type: "deposit-status",
+		help: "Set the named reviewer, account group, cutoff, account mapping and declared voucher months. This review never proves a deposit, default, penalty or scheme eligibility.",
+	},
+	{
 		key: "annual_aggregate_turnover",
 		path: "annual_aggregate_turnover",
 		label: "Previous financial-year aggregate turnover",
@@ -289,6 +300,13 @@ export const KEY_TO_PATH = Object.fromEntries(
 	CONFIG_FIELD_SET.flatMap((f) =>
 		f.keys ? f.keys.map((k, i) => [k, (f.paths || f.keys)[i]]) : [[f.key, f.path || f.key]]
 	)
+);
+
+/** Form-local key -> descriptor. ConfigForm uses this to apply the small
+ * number of typed structured fields without treating their object values as
+ * strings. */
+export const CONFIG_FIELD_BY_KEY = Object.fromEntries(
+	CONFIG_FIELD_SET.flatMap((f) => (f.keys ? f.keys.map((k) => [k, f]) : [[f.key, f]]))
 );
 
 // ── dot-path get/set/delete over a plain JSON-shaped object ─────────────────

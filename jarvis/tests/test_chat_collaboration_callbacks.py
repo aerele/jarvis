@@ -116,6 +116,7 @@ class TestCollaborationCallbacks(CollaborationCase):
 			"remember",
 			"future_unknown_tool",
 			"record_app_wiki",
+			"get_payroll_deposit_inputs",
 		):
 			with self.subTest(tool=tool):
 				self.record(call=tool, tool="jarvis__" + tool)

@@ -1569,8 +1569,9 @@ def set_config(installation: str, config: str) -> dict:
 	inputs are nested under a top-level ``materiality`` object
 	(``materiality.benchmark_value`` / ``.percentage`` /
 	``.engagement_risk_level`` / ``.rounding_step`` — verified against
-	jarvis-agents/agents/close-auditor/evaluate.py's ``_materiality_pl_balance``,
-	the only bundle that reads any agent-specific config today)."""
+	jarvis-agents/agents/close-auditor/evaluate.py's ``_materiality_pl_balance``).
+	The payroll deposit-status agent similarly reads its bounded ``deposit``
+	namespace from the paired bundle."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	try:
@@ -1916,7 +1917,15 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 	# The month's counted runs are KEPT, detached from the installation, so uninstalling
 	# and installing again does not hand the month's run budget back (A14). For the user
 	# the run history is gone all the same: no screen lists a run with no installation.
+	# A Deposit report is immutable while its Run links it. Remove each such
+	# report through the narrow server lifecycle helper before either deleting a
+	# Run or detaching a kept budget row. A generic dashboard is untouched.
+	from jarvis.chat.dashboard_permissions import delete_deposit_dashboard_for_uninstall
+
+	for name in run_names:
+		delete_deposit_dashboard_for_uninstall(name, doc.name)
 	from jarvis.chat.agent_scheduler import keep_budget_rows_of_uninstalled
+	from jarvis.jarvis.doctype.jarvis_agent_run.jarvis_agent_run import trusted_deposit_run_removal
 
 	provenance_runs = _detach_cycle_count_provenance_runs(run_names, doc.owner)
 	kept = provenance_runs | set(
@@ -1924,7 +1933,8 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 	)
 	deleted_runs = [name for name in run_names if name not in kept]
 	for name in deleted_runs:
-		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
+		with trusted_deposit_run_removal(doc.name):
+			frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	# honors if_owner for an owner; the admin path was authorised above. The append-only
 	# provenance ledger is preserved (immutable audit trail); see the helper.
 	_delete_installation_preserving_provenance(doc, via_admin)
