@@ -289,12 +289,10 @@ def reclaim_runtime(name, sess):
 			if not _remember_unsent_runtime(row, entry["sessionId"]):
 				return False
 			row.runtime_session_id = entry["sessionId"]
-		# The deployed probe proves UUID refusal happens before drain.
-		sess._request(
-			"sessions.delete",
-			{"key": row.session_key, "expectedSessionId": row.runtime_session_id},
-			timeout_s=5,
-		)
+		# sessions.delete is owner-only: delete_session goes through the plugin's signed
+		# route. The list above just proved this exact idle UUID, and the binding row
+		# still exists, so the plugin can vouch the key. The route takes the key alone.
+		sess.delete_session(row.session_key)
 	else:
 		# Lost delete acknowledgement: absence from a label search alone is
 		# insufficient. Inspect the exact key without creating a new session.

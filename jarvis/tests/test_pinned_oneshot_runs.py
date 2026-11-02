@@ -60,6 +60,8 @@ def _streaming_session() -> AgentSession:
 	)
 	sess._send = lambda method, params: "req1"
 	sess._recv = lambda timeout_s: next(frames, None)
+	# The model pin is a sessions.patch ahead of the agent RPC; it is acked here.
+	sess.set_session_model = lambda *args, **kwargs: None
 	return sess
 
 
