@@ -1612,3 +1612,34 @@ describe("operator-withdrawn (install_disabled) detail", () => {
 		expect(runBtn.attributes("disabled")).toBeDefined();
 	});
 });
+
+describe("code-closed runtime detail", () => {
+	it("shows a terminal Coming Soon state and disables enable, run, and schedule controls", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				agent_slug: "ticket-triage-operator",
+				status: "Coming Soon",
+				runtime_closed: 1,
+				installation: installedInstallation({ enabled: 1, schedule_enabled: 1 }),
+			})
+		);
+
+		expect(w.text()).toContain(
+			"This agent is Coming Soon while an agent safety update is active."
+		);
+		expect(w.text()).toContain("Scheduling is not available.");
+		expect(w.text()).not.toContain("Run automatically");
+		const enabled = w.findAll("button").find((b) => b.text() === "Enabled");
+		expect(enabled).toBeTruthy();
+		expect(enabled.attributes("disabled")).toBeDefined();
+		const run = w.findAll("button").find((b) => b.attributes("data-label") === "Run Now");
+		expect(run).toBeTruthy();
+		expect(run.attributes("disabled")).toBeDefined();
+		expect(w.find('[data-label="Agent actions"]').exists()).toBe(true);
+		await enabled.trigger("click");
+		await run.trigger("click");
+		expect(api.setAgentEnabled).not.toHaveBeenCalled();
+		expect(api.runAgentNow).not.toHaveBeenCalled();
+	});
+});

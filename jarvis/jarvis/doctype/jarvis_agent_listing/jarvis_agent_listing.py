@@ -18,6 +18,11 @@ from jarvis.permissions import NotRenamable
 
 class JarvisAgentListing(NotRenamable, Document):
 	def validate(self):
+		# ``name`` is immutable and is therefore the authority even if a crafted
+		# save tries to spoof agent_slug before Frappe restores it.
+		from jarvis.chat.agent_closure import assert_listing_status
+
+		assert_listing_status(self.name or self.agent_slug, self.status)
 		self._guard_registry_runtime_status()
 		self._guard_operator_visibility_authority()
 

@@ -513,6 +513,7 @@ class TestTicketTriageFakeRecords(FrappeTestCase):
 				"started_at": frappe.utils.now_datetime(),
 				"session_key": self.session_key,
 				"assessment_config_json": json.dumps(config),
+				"bundle_version": "0.2.0",
 				"capability_contract": "snapshot",
 				"tools_allow_json": json.dumps(
 					[f"jarvis__{triage.SOURCE_TOOL}", f"jarvis__{triage.STAGE_TOOL}"]

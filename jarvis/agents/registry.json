@@ -1551,51 +1551,15 @@
       "domain": "inventory",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "Coming Soon",
-      "description": "Watches stock position daily and works the replenishment tail: for each item whose velocity- and lead-time-aware reorder point is breached and is not already covered by open supply, it stages a docstatus-0 draft Material Request with a computed reorder qty, target warehouse and required-by date; where demand is ambiguous (no history, erratic, or slow/dead) it raises one evidence-carrying Approval Request instead of guessing. Proposes only; a human confirms and submits every request.",
-      "tools_required": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc"
-      ],
-      "tools_allow": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc",
-        "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "canvas",
-        "message"
-      ],
-      "doctypes_required": [
-        "Jarvis Approval Request",
-        "Material Request",
-        "Material Request Item",
-        "Bin",
-        "Item",
-        "Item Reorder",
-        "Stock Ledger Entry",
-        "Purchase Order",
-        "Purchase Order Item"
-      ],
+      "description": "Coming Soon. Replenishment work is not available. This agent has no runtime tool or write surface. It cannot read stock records, create approvals, change Material Requests, or send messages. A later server-owned workflow will require a typed and human-confirmed path.",
+      "tools_required": [],
+      "tools_allow": [],
+      "doctypes_required": [],
       "rule_tokens": [],
-      "writes": [
-        {
-          "doctype": "Jarvis Approval Request",
-          "mode": "approval-request"
-        },
-        {
-          "doctype": "Material Request",
-          "mode": "draft"
-        }
-      ],
+      "advisory_tokens": [],
+      "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 600,
       "min_apps": [

@@ -628,6 +628,23 @@ def _dispatch_from_session(
 			# finishes the run. An ordinary chat session yields None and nothing below
 			# does anything.
 			step_run = agent_run_steps.step_target(cap)
+			# Plugin authentication can have resolved a user before a close migration
+			# deleted this bearer. Check its immutable historic prefix at the last
+			# generic dispatch boundary so an orphan session cannot reach a tool.
+			from jarvis.chat.agent_closure import assert_session_dispatch_allowed
+
+			try:
+				assert_session_dispatch_allowed(session_key)
+			except frappe.PermissionError as exc:
+				result = _error("PermissionError", str(exc))
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=parsed_args,
+					result=result,
+					tool_call_id=tool_call_id,
+				)
+				return result
 			started_ms = time.monotonic()
 			try:
 				with _private_output.request(result_mode is not None), _agent_read_time_limit(tool):
@@ -1015,6 +1032,7 @@ def persist_tool_receipt(
 	tool_call_id: str | None = None,
 	flip_token: str | None = None,
 	overwrite_outcomes: tuple = (),
+	require_pending_flip: bool = False,
 ) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
 	publish the realtime tool:result event, running as the conversation owner so
@@ -1050,7 +1068,11 @@ def persist_tool_receipt(
 
 	``overwrite_outcomes``: with ``flip_token``, also re-flip that token's row when it
 	already carries one of these chips (a pending-action settle whose executed or
-	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``)."""
+	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``).
+
+	``require_pending_flip``: do not use the normal fallback insert when a matching
+	pending row is absent. Close-fence cleanup uses this mode so an unseen or
+	already-settled legacy token cannot manufacture a new terminal receipt."""
 	result = result or {}
 	from jarvis.chat.source_receipts import source_receipt
 
@@ -1163,6 +1185,11 @@ def persist_tool_receipt(
 					update_modified=True,
 				)
 				msg_name = existing
+		if msg_name is None and require_pending_flip:
+			# Release the conversation lock without manufacturing a new receipt. A
+			# concurrent terminal writer won this card, or it was never displayed.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release flip-only lock
+			return
 		if msg_name is None:
 			msg_name = _locked_insert_chat_message(
 				conv_name,
@@ -4615,26 +4642,20 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# still surface it.
 		try:
 			origin_page = frappe.db.get_value("Jarvis Conversation", conv, "origin_page") or ""
-			# Same shared item shape the resync endpoint + run:end terminal use, so
-			# the live push can't drift from them (and gets the summary guard too).
-			item = pending_confirm._pending_item(
-				token=token,
-				tool=tool,
-				args=args,
-				preview=preview,
-				conversation=conv,
-				run_id=run_id,
-				expires_at=expires_at,
-				created_at=now_s,
-			)
-			events.publish_to_user(
-				owner_user,
-				{
-					"kind": "action:pending",
-					"origin_page": origin_page,
-					**pending_confirm.with_recency([item])[0],
-				},
-			)
+			# Read back the stored card through the same positive close-fence
+			# attestation used by list resync and terminal payloads. Never rebuild a
+			# realtime Confirm control from raw tool arguments: a close may have landed
+			# after park committed but before this best-effort publish.
+			item = pending_confirm.item_for_owner_token(token, owner_user, conv, strict=True)
+			if item:
+				events.publish_to_user(
+					owner_user,
+					{
+						"kind": "action:pending",
+						"origin_page": origin_page,
+						**item,
+					},
+				)
 		except Exception:
 			frappe.log_error(
 				title="action:pending publish failed",

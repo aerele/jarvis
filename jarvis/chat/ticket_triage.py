@@ -441,6 +441,11 @@ def _run_reviewer(run) -> str:
 
 
 def _require_ticket_run(run, *, statuses: set[str]) -> None:
+	from jarvis.chat.agent_closure import is_native_run, native_release_spec
+
+	release = native_release_spec(AGENT)
+	if release is None or not run or not is_native_run(run, release):
+		_refuse(_RUN_REQUIRED, InvalidArgumentError)
 	if (
 		not run
 		or run.get("agent") != AGENT

@@ -163,6 +163,14 @@ FULL = CONNECTION | LLM
 def apply(settings, spec: ResetSpec) -> None:
 	"""Clear ``spec`` on Jarvis Settings. db_set only - never save() - so
 	on_update (creds push / pool sync) cannot fire mid-reset."""
+	# Reset intentionally changes the catalog marker/version, but it must still
+	# join the same catalog lock -> version -> dirty order as Apply, mutation,
+	# migration, and Settings save paths. Otherwise a reset can deadlock an Apply
+	# worker after it has taken one of the two Single rows.
+	if {"agent_catalog_version", "agent_catalog_dirty"}.intersection(spec.zero):
+		from jarvis.chat.agents_api import _locked_catalog_state
+
+		_locked_catalog_state()
 	for field in spec.blank:
 		settings.db_set(field, "")
 	for field in spec.passwords:

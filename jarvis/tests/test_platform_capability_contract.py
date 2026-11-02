@@ -874,6 +874,10 @@ class TestLaunchStampsTheContract(unittest.TestCase):
 # registry sourcing
 # --------------------------------------------------------------------------- #
 class TestRegistryToolsAllow(FrappeTestCase):
+	_CLOSED_EMPTY_TOOL_AGENTS = (
+		"reorder-replenishment-operator",
+	)
+
 	def test_unknown_slug_yields_an_empty_surface(self):
 		self.assertEqual(agent_catalog.registry_tools_allow("no-such-agent"), [])
 		self.assertEqual(agent_catalog.registry_tools_allow(""), [])
@@ -884,13 +888,11 @@ class TestRegistryToolsAllow(FrappeTestCase):
 			self.assertEqual(agent_catalog.registry_tools_allow("cc-bad"), [])
 
 	def test_every_runnable_bundled_agent_declares_a_usable_bench_surface(self):
-		"""A runnable bundled agent with no declared tools is refused at launch, and
-		one that declares only container-side tools is refused at its first call.
+		"""A runnable bundled agent with no declared tools is refused at launch.
 
-		The sole no-tool exception is a complete, explicit Coming Soon contract. It
-		is not a runnable empty allow-list and it must carry no source or write
-		surface. Keep this exact allow-list small so a new disabled agent receives a
-		deliberate review here.
+		The explicit closed roster is the only no-tool exception. It has no source,
+		write, schedule, or role surface, so an empty allow-list cannot re-open it.
+		Keep this tuple exact. A new closed agent needs a deliberate review here.
 		"""
 		disabled = []
 		for a in agent_catalog._load_registry().get("agents") or []:
@@ -898,18 +900,22 @@ class TestRegistryToolsAllow(FrappeTestCase):
 			declared = agent_catalog.registry_tools_allow(slug)
 			if not declared:
 				disabled.append(slug)
+				self.assertIn(slug, self._CLOSED_EMPTY_TOOL_AGENTS)
 				self.assertEqual(a.get("status"), "Coming Soon")
 				self.assertEqual(a.get("nature"), "operator")
 				self.assertEqual(a.get("tools_required"), [])
 				self.assertEqual(a.get("doctypes_required"), [])
+				self.assertEqual(a.get("rule_tokens"), [])
+				self.assertEqual(a.get("advisory_tokens"), [])
 				self.assertIsNone(a.get("writes"))
 				self.assertEqual((a.get("default_schedule") or {}).get("schedule_enabled"), 0)
+				self.assertEqual(a.get("default_allowed_roles"), [])
 				continue
 			self.assertTrue(
 				_delegate_capability.bench_tools(declared),
 				f"{slug} declares no jarvis__ tool, so every bench call would be refused",
 			)
-		self.assertEqual(disabled, [])
+		self.assertEqual(disabled, list(self._CLOSED_EMPTY_TOOL_AGENTS))
 
 	def test_normalize_strips_only_the_jarvis_prefix(self):
 		self.assertEqual(_delegate_capability.normalize_tool("jarvis__get_doc"), "get_doc")

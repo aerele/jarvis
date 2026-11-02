@@ -68,6 +68,8 @@ test("switching chats drops the paging state of the chat left behind", () => {
 	const body = sw.slice(0, sw.indexOf("\n);"));
 	assert.match(body, /historyPaging\.value = \{ hasMore: false, before: null, newest: null \};/);
 	assert.match(body, /olderPending\.value = \[\];/);
+	assert.match(body, /loadingOlder\.value = false;/);
+	assert.match(body, /olderArmed = false;/);
 });
 
 test("a failed older page pauses the scroll trigger and says so", () => {
@@ -96,9 +98,12 @@ test("the scroll trigger waits for an open or a prepend to land", () => {
 	const older = fnBody("async function loadOlder(");
 	assert.ok(older.indexOf("olderArmed = false;") < older.indexOf("prependOlderPage("));
 	assert.ok(
-		older.indexOf("armOlderNextFrame();") > older.indexOf("requestAnimationFrame(hold)")
+		older.indexOf("armOlderNextFrame(() => isCurrent(cid, generation));") >
+			older.indexOf("requestAnimationFrame(() =>")
 	);
+	assert.match(older, /if \(isCurrent\(cid, generation\)\) loadingOlder\.value = false;/);
 	const load = fnBody("async function load(");
 	assert.match(load, /if \(!messages\.value\.length\) olderArmed = false;/);
-	assert.match(load.slice(load.indexOf("} finally {")), /armOlderNextFrame\(\);/);
+	assert.match(load.slice(load.indexOf("} finally {")), /armOlderNextFrame\(current\);/);
+	assert.match(load, /await scrollToBottom\(force, current\);/);
 });

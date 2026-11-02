@@ -826,7 +826,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self._use_unshipped_ticket_triage_catalog()
 		frappe.set_user(self.owner)
 		try:
-			with self.assertRaisesRegex(frappe.ValidationError, "not available to install"):
+			with self.assertRaisesRegex(frappe.PermissionError, "not available yet"):
 				agents_api.install_agent("ticket-triage-operator")
 		finally:
 			frappe.set_user("Administrator")
@@ -841,11 +841,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self._use_unshipped_ticket_triage_catalog()
 		frappe.set_user(self.admin)
 		try:
-			with self.assertRaisesRegex(frappe.PermissionError, "Coming Soon teaser"):
+			with self.assertRaisesRegex(frappe.PermissionError, "status must stay Coming Soon"):
 				agents_api.set_listing_status("ticket-triage-operator", "Published")
 			listing = frappe.get_doc(LISTING, "ticket-triage-operator")
 			listing.status = "Published"
-			with self.assertRaisesRegex(frappe.PermissionError, "Coming Soon teaser"):
+			with self.assertRaisesRegex(frappe.PermissionError, "status must stay Coming Soon"):
 				listing.save()
 		finally:
 			frappe.set_user("Administrator")
@@ -857,7 +857,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 		frappe.db.commit()
 		frappe.set_user(self.owner)
 		try:
-			with self.assertRaisesRegex(frappe.PermissionError, "not available to install"):
+			with self.assertRaisesRegex(frappe.PermissionError, "not available yet"):
 				agents_api.install_agent("ticket-triage-operator")
 		finally:
 			frappe.set_user("Administrator")
@@ -881,7 +881,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 				agents_api.set_enabled(inst, 1)
 			self.assertTrue(
 				any(
-					"no runnable bundled workflow" in (message.get("message") or "")
+					"not available yet" in (message.get("message") or "")
 					for message in frappe.get_message_log()
 				)
 			)
@@ -920,7 +920,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 		runs_before = frappe.db.count(RUN, {"agent": inst.agent})
 		frappe.set_user(self.owner)
 		try:
-			with self.assertRaisesRegex(frappe.ValidationError, r"no longer published \(Coming Soon\)"):
+			with self.assertRaisesRegex(frappe.PermissionError, "not available yet"):
 				agent_scheduler._launch_audit(inst, trigger="manual")
 		finally:
 			frappe.set_user("Administrator")
@@ -933,7 +933,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 		frappe.db.commit()
 		frappe.set_user(self.owner)
 		try:
-			with self.assertRaisesRegex(frappe.ValidationError, "bundle declares no tools"):
+			with self.assertRaisesRegex(frappe.PermissionError, "not available yet"):
 				agent_scheduler._launch_audit(inst, trigger="manual")
 		finally:
 			frappe.set_user("Administrator")

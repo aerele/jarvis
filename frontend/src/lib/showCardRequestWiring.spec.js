@@ -62,7 +62,7 @@ describe("the fast-path swallows the message ONLY when a card actually surfaced"
 	// The whole reason a false positive is safe: if nothing surfaced, the phrase
 	// falls through to a normal send and the persona backstop still handles it.
 	const SURFACED_GUARD =
-		"if (currentId.value === _typedConv && visiblePendingActions.value.length > before) {";
+		"if (chatViewIsCurrent(_typedView) && visiblePendingActions.value.length > before) {";
 
 	it("guards the swallow on a real increase in visible cards", () => {
 		expect(typedBlock).toContain("const before = visiblePendingActions.value.length;");
@@ -81,6 +81,6 @@ describe("the fast-path swallows the message ONLY when a card actually surfaced"
 	it("re-checks the conversation after the await, so a switch can't clear the new composer", () => {
 		// resyncPendingConfirmations is async; the user may have switched chats while
 		// it ran. Clearing input then would wipe an unrelated draft.
-		expect(SURFACED_GUARD).toContain("currentId.value === _typedConv");
+		expect(SURFACED_GUARD).toContain("chatViewIsCurrent(_typedView)");
 	});
 });

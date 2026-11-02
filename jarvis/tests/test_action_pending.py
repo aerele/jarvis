@@ -36,6 +36,7 @@ class TestActionPendingEvent(FrappeTestCase):
 		self.assertEqual(user_arg, frappe.session.user)
 		self.assertEqual(payload["kind"], "action:pending")
 		self.assertEqual(payload["tool"], "create_doc")
+		self.assertTrue(payload["pending_card_safe"])
 		self.assertIn("preview", payload)
 		self.assertIn("conversation", payload)
 		self.assertIn("run_id", payload)
