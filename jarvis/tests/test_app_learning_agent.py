@@ -33,6 +33,7 @@ from unittest import mock
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from jarvis import api
 from jarvis.exceptions import InvalidArgumentError
@@ -332,8 +333,8 @@ class TestAppLearningAgentTools(FrappeTestCase):
 	def test_budgets_survive_a_cache_outage(self):
 		# CX5-3: the budgets used to live in the cache, so a redis outage silently reset
 		# them to zero — a fresh 5 MB + 15 pages for a looping delegate behind an
-		# intact-looking gate. With the counters on the run row, a cache that RAISES on
-		# every call changes nothing about enforcement.
+		# intact-looking gate. With the counters on the run row, failed Redis
+		# commands must not reset either budget.
 		run = self._bind_scribe_run()
 		# Seed a valid receipt before consuming the remaining source budget. The
 		# wiki call below must still be rejected only by the page cap, not by a
@@ -346,10 +347,11 @@ class TestAppLearningAgentTools(FrappeTestCase):
 			update_modified=False,
 		)
 
-		def _boom(*a, **k):
-			raise RuntimeError("cache is down")
-
-		with mock.patch.object(frappe, "cache", side_effect=_boom):
+		# Preserve Frappe's real cache wrapper and metadata fallback. Replacing
+		# frappe.cache itself with a MagicMock can return mock DocType metadata.
+		with mock.patch.object(
+			frappe.cache(), "execute_command", side_effect=RedisConnectionError("cache is down")
+		):
 			with self.assertRaises(InvalidArgumentError):
 				read_app_source("fakeapp", "hooks.py")
 			res = record_app_wiki(
