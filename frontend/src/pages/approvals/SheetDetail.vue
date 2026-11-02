@@ -21,7 +21,7 @@
 					>{{ headline }}
 				</p>
 				<Button
-					v-if="rec.conversation && !rec.for_user"
+					v-if="showOpenChat && rec.conversation && !rec.for_user"
 					variant="subtle"
 					size="sm"
 					:label="__('Open chat')"
@@ -354,6 +354,7 @@ const props = defineProps({
 	onChanged: { type: Function, default: null },
 	// false when the pane's heading already names the file
 	showFileName: { type: Boolean, default: true },
+	showOpenChat: { type: Boolean, default: true },
 });
 const router = useRouter();
 const socket = inject("$socket", null);

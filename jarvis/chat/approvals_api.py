@@ -20,8 +20,10 @@ from pypika.terms import Criterion, ExistsCriterion, Not, ValueWrapper
 
 from jarvis._session import impersonate
 from jarvis.chat import filebox_skills
+from jarvis.chat.collaboration import is_collaborative
 from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as _ar
 from jarvis.permissions import (
+	JARVIS_ADMIN_ROLES,
 	message_origin,
 	refuse_in_tool_dispatch,
 	require_jarvis_user,
@@ -101,11 +103,37 @@ def _parse_options(raw: str | None) -> list[str]:
 
 def _may_act_on(conversation: str | None) -> bool:
 	# SM, or the owner of the linked conversation.
+	if is_collaborative(conversation):
+		return False
 	if "System Manager" in frappe.get_roles():
 		return True
 	if not conversation:
 		return False
 	return frappe.db.get_value("Jarvis Conversation", conversation, "owner") == frappe.session.user
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def list_approval_reviewers() -> list[dict]:
+	"""Capped Tag-for-review choices; generic sharing keeps its own policy."""
+	user = frappe.qb.DocType("User")
+	role = frappe.qb.DocType("Has Role")
+	return (
+		frappe.qb.from_(user)
+		.join(role)
+		.on((role.parent == user.name) & (role.parenttype == "User"))
+		.select(user.name, user.full_name)
+		.distinct()
+		.where(
+			(user.enabled == 1)
+			& (user.user_type == "System User")
+			& role.role.isin(JARVIS_ADMIN_ROLES)
+			& user.name.notin([frappe.session.user, "Guest", "Administrator"])
+		)
+		.orderby(Coalesce(NullIf(user.full_name, ""), user.name), user.name)
+		.limit(500)
+		.run(as_dict=True)
+	)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -156,6 +184,7 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 		order_by="creation desc",
 		limit_page_length=int(limit),
 	)
+	rows = [r for r in rows if not is_collaborative(r.get("conversation"))]
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
 	conversation_names = [r.get("conversation") for r in rows if r.get("conversation")]
@@ -238,6 +267,20 @@ def _owns_conversation(a, me: str):
 	return ExistsCriterion(frappe.qb.from_(c).select(1).where((c.name == a.conversation) & (c.owner == me)))
 
 
+def _legacy_approval(a):
+	"""The legacy board never exposes a collaborative actor's raw payload."""
+	if not frappe.db.has_column("Jarvis Conversation", "collaboration_active"):
+		return None
+	c = frappe.qb.DocType("Jarvis Conversation").as_("collaborative_thread")
+	return Not(
+		ExistsCriterion(
+			frappe.qb.from_(c)
+			.select(1)
+			.where((c.name == a.conversation) & (IfNull(c.collaboration_active, 0) != 0))
+		)
+	)
+
+
 def _tagged(a, me: str):
 	ds = frappe.qb.DocType("DocShare").as_("ds")
 	return ExistsCriterion(
@@ -284,6 +327,9 @@ def list_approvals_page(
 	# the customer decide board and its facet/badge counts. NULL-safe so legacy
 	# rows (source NULL = File Box) still show.
 	base = [a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE)]
+	legacy = _legacy_approval(a)
+	if legacy is not None:
+		base.append(legacy)
 	if _ar.sheet_ready():
 		base.append(IfNull(a.sheet, "") == "")  # answered in its File Box sheet
 	if not is_sm:
@@ -465,7 +511,7 @@ def _awaiting_reply(me: str) -> list[dict]:
 			"last_at": str(r.last_at or ""),
 		}
 		for r in rows
-		if not _shows_a_card(r.content)  # the chat shows its card, listed under open drafts
+		if not is_collaborative(r.conversation) and not _shows_a_card(r.content)
 	]
 
 
@@ -525,6 +571,8 @@ def _open_drafts(me: str) -> list[dict]:
 	)
 	out = []
 	for r in rows:
+		if is_collaborative(r.conversation):
+			continue
 		a = parse_action(r.content)
 		if not a:
 			continue  # a submit/email card, or one the chat can't draw either
@@ -555,6 +603,9 @@ def get_approval(name: str) -> dict:
 	READ but gets ``can_act=0`` so the UI hides the decide controls. ``can_act``
 	mirrors what ``decide()`` would permit; the UI combines it with status."""
 	doc = frappe.get_doc(APPROVAL, name)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	can_act = _may_act_on(doc.conversation)
 	can_read = can_act
 	if doc.get("assessment_key"):
@@ -643,6 +694,9 @@ def _ar_pending_count() -> int:
 	)
 	if _ar.sheet_ready():
 		query = query.where(IfNull(a.sheet, "") == "")
+	legacy = _legacy_approval(a)
+	if legacy is not None:
+		query = query.where(legacy)
 	if "System Manager" not in frappe.get_roles():
 		me = frappe.session.user
 		query = query.where(_owns_conversation(a, me) | _tagged(a, me))
@@ -707,6 +761,9 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	if not decision:
 		frappe.throw("Decision text is required")
 	doc = frappe.get_doc(APPROVAL, name)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.get("conversation"))
 	_refuse_if_wiki_write(doc)
 	if doc.get("assessment_key"):
 		from jarvis.chat.operator_review import check_review
@@ -810,6 +867,9 @@ def dismiss_approval(name: str) -> dict:
 	"""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	_refuse_if_wiki_write(doc)
 	if doc.get("assessment_key"):
 		from jarvis.chat.operator_review import check_review
@@ -849,6 +909,9 @@ def restore_approval(name: str) -> dict:
 	accidental dismiss."""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	_refuse_if_wiki_write(doc)
 	if doc.get("assessment_key"):
 		from jarvis.chat.operator_review import check_review
@@ -920,6 +983,9 @@ def _wiki_proposal_or_throw(name: str):
 	"""Load a proposal, reviewer-gated, asserting it really is a wiki-write row."""
 	require_skill_reviewer()
 	doc = frappe.get_doc(APPROVAL, name)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	if not _is_wiki_write(doc):
 		frappe.throw(f"{name} is not a wiki-write proposal", frappe.DoesNotExistError)
 	return doc
@@ -1482,7 +1548,7 @@ def _candidates_as(exec_user: str, item: dict) -> list[dict]:
 		return []
 	try:
 		with impersonate(exec_user):
-			return held_parties.find_existing(item["doctype"], title=party["title"], gstin=party["gstin"])
+			return held_parties.existing_of(item)
 	except Exception:
 		frappe.log_error(title="jarvis.pending_action.candidates_failed", message=frappe.get_traceback())
 		return []
@@ -1650,10 +1716,27 @@ def _first_existing(exec_user: str, items: list[dict]) -> tuple[dict, dict] | No
 	from jarvis.chat import held_parties
 
 	for item in items:
-		if item["op"] != "create" or not held_parties.is_party(item["doctype"]):
+		if item["op"] != "create" or not (
+			held_parties.is_party(item["doctype"]) or held_parties.company_scoped(item["doctype"])
+		):
 			continue
 		for match in _candidates_as(exec_user, item):
 			return item, match
+	return None
+
+
+def _existing_account_conflict(item: dict, match: dict) -> dict | None:
+	from jarvis.chat import held_parties
+
+	if held_parties.company_scoped(item["doctype"]) and held_parties.account_currency_conflict(
+		item["values"], match.get("currency")
+	):
+		return _held_refusal(
+			"scope_mismatch",
+			f"Account {match['name']} already exists in {match['company']} "
+			f"({match.get('currency') or 'currency not set'}) with a different currency. "
+			"Skip this proposal and request a different account name or number; nothing was created.",
+		)
 	return None
 
 
@@ -1701,6 +1784,9 @@ def _create_locked(row, approver: str) -> dict:
 	frappe.db.rollback()
 	if existing:
 		item, match = existing
+		conflict = _existing_account_conflict(item, match)
+		if conflict:
+			return conflict
 		label = match["title"] or match["name"]
 		hint = (
 			"Choose Use existing."
@@ -1781,6 +1867,12 @@ def _use_existing_locked(row, approver: str, link) -> dict:
 			"record_not_found",
 			f"That {doctype} was not found, or the person who dropped the file can't open it.",
 		)
+	if held_parties.company_scoped(doctype):
+		with impersonate(locked.exec_user):
+			problem = held_parties.account_selection_error(item["values"], link)
+		if problem:
+			frappe.db.rollback()
+			return _held_refusal("scope_mismatch", problem)
 	result = {"ok": True, "data": {"doctype": doctype, "name": link, "used_existing": True}}
 	_terminal_update(
 		locked.name,
@@ -1903,13 +1995,33 @@ def _edit_precheck(locked, items: list[dict], merged: list[dict], approver: str)
 	existing = _first_existing(locked.exec_user, merged)
 	if existing:
 		item, match = existing
+		conflict = _existing_account_conflict(item, match)
+		if conflict:
+			return conflict
 		label = match["title"] or match["name"]
+		if held_parties.company_scoped(item["doctype"]):
+			index = merged.index(item)
+			if items[index]["values"].get("company") != item["values"].get("company"):
+				return _held_refusal(
+					"scope_exists",
+					f"Account {match['name']} already exists in {match['company']} "
+					f"({match.get('currency') or 'currency not set'}). Skip this old-company proposal "
+					"and continue with the existing Account; nothing was created.",
+				)
 		return _held_refusal(
 			"exists",
 			f"{item['doctype']} {label} already exists now. Choose Use existing.",
 			candidates=[match],
 		)
-	keys = list(dict.fromkeys(held_parties.item_key(i) for i in (*items, *merged)))
+	# A company/number correction supersedes the old Account scope. Unrelated
+	# identity fields retain the original-and-edited overlap contract.
+	original = [
+		item
+		for index, item in enumerate(items)
+		if not held_parties.company_scoped(item["doctype"])
+		or held_parties.account_scope(item["values"]) == held_parties.account_scope(merged[index]["values"])
+	]
+	keys = list(dict.fromkeys(held_parties.item_key(i) for i in (*original, *merged)))
 	sibling = held_writes.sibling_of(locked.name, keys)
 	if sibling:
 		seen = sibling.owner_user == approver or "System Manager" in frappe.get_roles(approver)
@@ -1935,12 +2047,13 @@ def _claim_lost(name: str, ref: tuple[str, str] = ("", "")) -> None:
 	)
 
 
-def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, str]) -> dict:
+def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, str], items=()) -> dict:
 	"""A successful Edit & create, the row re-read under its lock (a mid-dispatch commit
 	or rollback may have moved it): our claim -> Executed; Pending (a rollback dropped
 	the uncommitted claim, the insert went on) -> Failed/``partial`` naming the record,
 	never Pending with a record; decided elsewhere (the reconciler) -> its verdict
 	stands and the outcome is late."""
+	from jarvis.chat import held_parties
 	from jarvis.chat.pending_actions import _seal, settle
 	from jarvis.chat.pending_actions._execute import late_outcome, outcome_of
 	from jarvis.chat.pending_actions._store import (
@@ -1955,6 +2068,13 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 
 	fresh = get_row(locked.name, lock="update")
 	cols = {"decided_by": approver, "result_doctype": ref[0], "result_name": ref[1], "edited": 1}
+	scope_cols = {}
+	if any(held_parties.company_scoped(i["doctype"]) for i in items):
+		# These are derived fingerprints, not sealed values. A successful company
+		# correction must not leave a recent-approval claim on the old company.
+		scope_cols["dedup_keys"] = _seal.canonical(
+			[_seal.open_key(locked.owner_user, held_parties.item_key(i)) for i in items]
+		)
 	if _our_claim(fresh, approver, stamp) and _terminal_update(
 		locked.name,
 		[EXECUTING],
@@ -1962,6 +2082,7 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 		reason=_EDITED_REASON,
 		sealed_settlement=_seal.seal_settlement(locked.name, {"result": result, "outcome": "confirmed"}),
 		**cols,
+		**scope_cols,
 	):
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 		settle(locked.name)
@@ -2077,7 +2198,7 @@ def _edit_create_locked(row, approver: str, patches: list[dict]) -> dict:
 	refs = held_edit.created_refs(locked.tool, edited, result) if ok else []
 	hidden = [dt for dt, n in refs if not frappe.has_permission(dt, "read", doc=n, user=locked.exec_user)]
 	if ok and not hidden:
-		return _edit_created(locked, approver, stamp, result, refs[0] if refs else ("", ""))
+		return _edit_created(locked, approver, stamp, result, refs[0] if refs else ("", ""), merged)
 
 	_discard_failed_dispatch(locked, edited, crash_tb, actor=approver, result=result)  # full rollback
 	if ok and not interfered:
