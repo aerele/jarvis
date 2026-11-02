@@ -850,6 +850,7 @@ class JarvisSettings(Document):
 				self.llm_api_key = api_key_val
 
 	def validate(self):
+		self._preserve_agent_catalog_state()
 		self._guard_agent_min_model_authority()
 		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
 		# scrub in on_update. Capture the change here, the same way
@@ -897,6 +898,19 @@ class JarvisSettings(Document):
 		# The Desk boot carries the name and the logo; on_update drops its cache on a change.
 		self.flags.brand_changed = any(self.has_value_changed(f) for f in ("agent_name", "brand_logo"))
 		self.flags.shortcut_visibility_changed = self.has_value_changed("hide_shortcut_without_access")
+
+	def _preserve_agent_catalog_state(self):
+		"""Keep server-owned Apply state out of a crafted Settings save.
+
+		The shared helper takes catalog lock -> version FOR UPDATE -> dirty FOR
+		UPDATE. A Settings form must not invert that order while an Apply worker or
+		close migration is changing the same state.
+		"""
+		from jarvis.chat.agents_api import _locked_catalog_state
+
+		state = _locked_catalog_state()
+		for field, value in state.items():
+			self.set(field, value)
 
 	def _validate_public_address(self):
 		"""Private network (design 5.2): in Private mode the public address must pass the
@@ -1232,11 +1246,12 @@ class JarvisSettings(Document):
 			agent_models.on_enforcement_enabled()
 		else:
 			agent_models.on_enforcement_disabled()
-		# This in-memory doc must not write the catalog flag/version back on a later save.
-		for field in ("agent_catalog_dirty", "agent_catalog_version"):
-			self.set(
-				field, frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", field, cache=False))
-			)
+		# This in-memory doc must not write the catalog flag/version back on a later
+		# save. Re-read through the same lock order as mutation and Apply paths.
+		from jarvis.chat.agents_api import _locked_catalog_state
+
+		for field, value in _locked_catalog_state().items():
+			self.set(field, value)
 		# The dirty mark moved `modified`; keep this doc current so saving it again
 		# (a Desk form, a second save in one request) is not a TimestampMismatch.
 		# Raw text, exactly as load_from_db reads it back for check_if_latest.

@@ -55,6 +55,29 @@ export function visibleMessages(messages) {
   );
 }
 
+// A pending frame is untrusted until the server attaches this positive proof.
+// Do not infer safety from a token, preview, or a still-pending transcript row:
+// all three can be delayed after a close migration has cancelled the action.
+export function appendAttestedPending(s, item) {
+  if (!item?.token || item.pending_card_safe !== true) return s;
+  if (s.pending.some((x) => x.token === item.token)) return s;
+  s.pending.push({
+    token: item.token,
+    tool: item.tool || "",
+    summary: item.summary || "",
+    // created_at (P0c) is the primary sort key for numbered typed approval
+    // ("confirm 2"); expires_at is kept as the fallback for a pre-P0c record.
+    created_at: item.created_at ?? null,
+    expires_at: item.expires_at ?? null,
+    // Text-only signal (see pendingApproveRun) - never the preview/plan itself.
+    approve_run: pendingApproveRun(item.preview),
+    // Parked since the user's latest message (decision 6); false = "Earlier".
+    recent: item.recent !== false,
+    pending_card_safe: true,
+  });
+  return s;
+}
+
 // Returns a NEW state; never mutates the input. The caller assigns the result
 // to a Vue ref, so structural sharing is not worth the aliasing risk.
 export function applyEvent(state, payload) {
@@ -123,6 +146,9 @@ function applyAdmitted(s, p) {
       s.busy = false;
       s.live = null;
       s.status = null;
+      if (Array.isArray(p.pending)) {
+        for (const item of p.pending) appendAttestedPending(s, item);
+      }
       // The reply is durable now; re-fetch rather than trusting the streamed
       // copy, which lacks the final formatting.
       s.reload = true;
@@ -133,31 +159,16 @@ function applyAdmitted(s, p) {
       s.live = null;
       s.status = null;
       s.error = p.error || "That turn failed.";
+      if (Array.isArray(p.pending)) {
+        for (const item of p.pending) appendAttestedPending(s, item);
+      }
       s.reload = true;
       return s;
 
     case "action:pending":
       // The agent is blocked waiting on a write confirmation. Without this the
       // panel would sit on "Jarvis is replying..." forever.
-      if (!p.token) return s;
-      if (s.pending.some((x) => x.token === p.token)) return s;
-      s.pending.push({
-        token: p.token,
-        tool: p.tool || "",
-        summary: p.summary || "",
-        // created_at (P0c) is the primary sort key for numbered typed approval
-        // ("confirm 2"); expires_at is kept as the fallback for a pre-P0c
-        // record. Dropping both makes orderedPending fall back to token order,
-        // which disagrees with the server and can run the wrong card.
-        created_at: p.created_at ?? null,
-        expires_at: p.expires_at ?? null,
-        // Text-only signal (see pendingApproveRun) - never the preview/plan
-        // itself, so the widget stays a plain confirm/deflect surface.
-        approve_run: pendingApproveRun(p.preview),
-        // Parked since the user's latest message (decision 6); false = "Earlier".
-        recent: p.recent !== false,
-      });
-      return s;
+      return appendAttestedPending(s, p);
 
     case "action:resolved":
       s.pending = s.pending.filter((x) => x.token !== p.token);

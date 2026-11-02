@@ -14,7 +14,7 @@ const between = (s, from, to) => {
 
 describe("ChatView shows what changed outside the grid", () => {
 	it("auto-opens on a build of the panel, passing the panel that was open", () => {
-		const fn = between(src, "async function openDraftPanel(a) {", "function addDraftRow");
+		const fn = between(src, "async function openDraftPanel(", "function addDraftRow");
 		expect(fn).toMatch(/applyAutoOpen\(model, draftPanel\.value\)/);
 		// before the model is stamped into the panel, so the first render already has the rows open
 		expect(fn.indexOf("applyAutoOpen(")).toBeLessThan(
@@ -22,7 +22,7 @@ describe("ChatView shows what changed outside the grid", () => {
 		);
 	});
 	it("never moves focus when it opens rows", () => {
-		const fn = between(src, "async function openDraftPanel(a) {", "function addDraftRow");
+		const fn = between(src, "async function openDraftPanel(", "function addDraftRow");
 		expect(fn).not.toMatch(/\.focus\(|nextTick/);
 		expect(between(tables, "export function applyAutoOpen", "// A row toggle's")).not.toMatch(
 			/focus/
@@ -51,7 +51,7 @@ describe("ChatView shows what changed outside the grid", () => {
 		expect(src).toMatch(/import \{[^}]*showRowForm[^}]*\} from "@\/lib\/rowFormFocus"/);
 	});
 	it("a throw in the auto-open can never stop the panel opening", () => {
-		const fn = between(src, "async function openDraftPanel(a) {", "function addDraftRow");
+		const fn = between(src, "async function openDraftPanel(", "function addDraftRow");
 		expect(fn).toMatch(
 			/try \{\s*applyAutoOpen\(model, draftPanel\.value\);\s*\} catch \(e\) \{/
 		);

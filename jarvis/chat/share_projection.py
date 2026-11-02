@@ -116,6 +116,17 @@ def _steps(value, conversation):
 	]
 
 
+def _is_safety_update_receipt(row: dict) -> bool:
+	"""Return whether a durable tool result is the close-fence receipt."""
+	result = row.get("tool_result")
+	if isinstance(result, str):
+		try:
+			result = json.loads(result)
+		except (RecursionError, ValueError):
+			return False
+	return isinstance(result, dict) and result.get("reason_code") == "safety_update"
+
+
 def project_row(row: dict, conversation: str) -> dict:
 	if row.get("tool_status") == "pending":
 		return {
@@ -123,6 +134,15 @@ def project_row(row: dict, conversation: str) -> dict:
 			"awaiting_owner": True,
 		}
 	result = {key: safe_value(row.get(key), conversation) for key in ROW_KEYS}
+	# An unsafe card is only stamped on the in-memory owner response. A later
+	# shared reload reads the persisted close receipt instead, where its
+	# tool_result.reason_code is safety_update. Normal macro, skill, and request
+	# receipts also have action_outcome and must keep their identifiers. Both forms
+	# retain the token for the owner so their local card can reconcile. A shared
+	# transcript has no action authority, so it must not disclose the close token.
+	if row.get("pending_card_safe") is False or _is_safety_update_receipt(row):
+		result["tool_call_id"] = None
+		result["tool_call_ids"] = None
 	result["error_headline"] = headline_for(row.get("error")) if row.get("error") else None
 	result["steps"] = _steps(row.get("steps"), conversation)
 	result["live_steps"] = _steps(row.get("live_steps"), conversation)

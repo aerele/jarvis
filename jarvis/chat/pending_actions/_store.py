@@ -44,6 +44,7 @@ REASON_TEXT = {
 	# Only rows PR-3a cancelled for age still carry it (cards no longer expire).
 	"expired": "The action expired.",
 	"use_existing": "An existing record was used instead; nothing new was created.",
+	"safety_update": "This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
 }
 
 # Extra columns a terminal write may set (keys are interpolated, so allowlisted).

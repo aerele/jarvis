@@ -87,6 +87,7 @@ describe("heldActions copy", () => {
 		expect(isSettled({ ok: true })).toBe(true);
 		expect(isSettled({ ok: false, reason_code: "failed", pa_status: "Failed" })).toBe(true);
 		expect(isSettled({ ok: false, reason_code: "already_handled" })).toBe(true);
+		expect(isSettled({ ok: false, reason_code: "safety_update" })).toBe(true);
 		for (const code of ["busy", "exists", "identity_refused", "record_not_found"]) {
 			expect(isSettled({ ok: false, reason_code: code }), code).toBe(false);
 		}
