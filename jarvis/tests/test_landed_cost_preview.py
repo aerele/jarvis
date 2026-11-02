@@ -377,6 +377,8 @@ class TestLandedCostPreview(LandedCostFixtures):
 					"supplier": self.supplier,
 					"posting_date": self.receipt.posting_date,
 					"due_date": self.receipt.posting_date,
+					"currency": self.receipt.currency,
+					"conversion_rate": 1,
 					"set_posting_time": 1,
 					"update_stock": 1,
 					"bill_no": frappe.generate_hash(length=10),
