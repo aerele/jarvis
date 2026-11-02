@@ -6,6 +6,7 @@ import {
 	KNOWN_CONFIG_KEYS,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
+	TEXT_LIST_CONFIG_KEYS,
 	KEY_TO_PATH,
 	getPath,
 	setPath,
@@ -52,6 +53,8 @@ describe("CONFIG_FIELD_SET", () => {
 				"baseline_hrms_reviewer_capacity",
 				"baseline_hrms_history_from",
 				"baseline_hrms_test_declaration",
+				"annual_aggregate_turnover",
+				"same_hsn_rate_allowlist",
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
@@ -81,6 +84,8 @@ describe("CONFIG_FIELD_SET", () => {
 			"baseline_hrms_reviewer_capacity",
 			"baseline_hrms_history_from",
 			"baseline_hrms_test_declaration",
+			"annual_aggregate_turnover",
+			"same_hsn_rate_allowlist",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
@@ -100,7 +105,7 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(field.options.map((o) => o.value)).toEqual(["", "low", "medium", "high"]);
 	});
 
-	it("the materiality amounts and the ageing floors are numeric", () => {
+	it("the materiality amounts, GST turnover, and ageing floors are numeric", () => {
 		expect(NUMBER_CONFIG_KEYS.sort()).toEqual(
 			[
 				"settlement_hold_days",
@@ -109,11 +114,16 @@ describe("CONFIG_FIELD_SET", () => {
 				"benchmark_value",
 				"percentage",
 				"rounding_step",
+				"annual_aggregate_turnover",
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
 			].sort()
 		);
+	});
+
+	it("stores the GST same-HSN exclusions as a short text list", () => {
+		expect(TEXT_LIST_CONFIG_KEYS).toEqual(["same_hsn_rate_allowlist"]);
 	});
 
 	it("every field has a human label reachable from CONFIG_FIELD_LABELS", () => {
@@ -135,7 +145,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes materiality, payroll baseline and vendor-ledger ageing fields", () => {
+	it("agent-specific includes materiality, payroll, GST and vendor-ledger settings", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -153,6 +163,8 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"baseline_hrms_reviewer_capacity",
 			"baseline_hrms_history_from",
 			"baseline_hrms_test_declaration",
+			"annual_aggregate_turnover",
+			"same_hsn_rate_allowlist",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",

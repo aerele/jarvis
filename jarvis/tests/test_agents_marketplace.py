@@ -545,6 +545,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 				"materiality.rounding_step",
 			],
 		)
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "gst-return-prep-auditor", "config_keys")),
+			["annual_aggregate_turnover", "same_hsn_rate_allowlist"],
+		)
 
 	def test_sync_agent_listings_writes_hrms_nested_config_keys_from_the_registry(self):
 		agent_catalog.sync_agent_listings()
@@ -559,7 +563,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 		)
 
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
-		"""An agent the registry declares no config_keys gets [], not null/absent - ConfigForm.vue can
+		"""An agent the registry declares no config_keys for gets [], not null/absent - ConfigForm.vue can
 		always safely parse it."""
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(

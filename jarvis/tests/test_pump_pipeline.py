@@ -1415,6 +1415,92 @@ class TestRedispatchKeyAcrossAHandOff(_PipelineCase):
 		)
 		self.assertEqual(registered, [f"{rid}-r1"])
 
+	def test_reattach_asks_the_gateway_for_the_run_tool_events(self):
+		# #2367: the gateway sends a run's tool starts only to the connection that sent
+		# it, so a hop's new connection asks for them (the agent plugin's observe_run).
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="hi")
+		rid = "pmp_cli_observe"
+		payload = json.dumps({"session_key": f"sess-{rid}", "message": "hi"})
+		self._mk_turn(
+			conv, rid, seed, "dispatching", version=4, pump_epoch=2, reserved=1, dispatch_payload=payload
+		)
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+		rpcs = []
+		ctx.mux = type(
+			"_Mux",
+			(),
+			{
+				"register_run": lambda self, key, *a, **k: None,
+				"issue_rpc": lambda self, method, params, **k: rpcs.append((method, params)),
+			},
+		)()
+		pump._reattach_lane(
+			ctx,
+			{
+				"run_id": rid,
+				"conversation": conv,
+				"version": 4,
+				"gateway_run_id": "gw-7",
+				"last_event_seq": 0,
+			},
+		)
+		self.assertEqual(rpcs, [(pump.OBSERVE_RUN_METHOD, {"runId": "gw-7"})])
+
+	def test_reattach_waits_for_io_time_before_asking_for_tool_events(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="hi")
+		rid = "pmp_cli_observe_io"
+		payload = json.dumps({"session_key": f"sess-{rid}", "message": "hi"})
+		self._mk_turn(
+			conv, rid, seed, "dispatching", version=4, pump_epoch=2, reserved=1, dispatch_payload=payload
+		)
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+		rpcs = []
+		ctx.mux = type(
+			"_Mux",
+			(),
+			{
+				"register_run": lambda self, key, *a, **k: None,
+				"issue_rpc": lambda self, method, params, **k: rpcs.append(params["runId"]),
+			},
+		)()
+		row = {"run_id": rid, "conversation": conv, "version": 4, "gateway_run_id": None, "last_event_seq": 0}
+		with patch.object(pump, "_io_admit", return_value=False):
+			pump._reattach_lane(ctx, row)
+		self.assertEqual(rpcs, [])
+		self.assertEqual(ctx.pending_observes, {rid})
+		with patch.object(pump, "_io_admit", return_value=True):
+			pump._flush_pending_observes(ctx)
+		self.assertEqual(rpcs, [rid])
+		self.assertEqual(ctx.pending_observes, set())
+
+	def test_reattach_carries_on_when_the_observe_write_fails(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="hi")
+		rid = "pmp_cli_observe_fail"
+		payload = json.dumps({"session_key": f"sess-{rid}", "message": "hi"})
+		self._mk_turn(
+			conv, rid, seed, "dispatching", version=4, pump_epoch=2, reserved=1, dispatch_payload=payload
+		)
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+		registered = []
+
+		def refuse(self, method, params, **k):
+			raise RuntimeError("relay connection is closed")
+
+		ctx.mux = type(
+			"_Mux",
+			(),
+			{"register_run": lambda self, key, *a, **k: registered.append(key), "issue_rpc": refuse},
+		)()
+		pump._reattach_lane(
+			ctx,
+			{"run_id": rid, "conversation": conv, "version": 4, "gateway_run_id": None, "last_event_seq": 0},
+		)
+		self.assertEqual(registered, [rid])
+		self.assertIn(rid, ctx.runs)
+
 
 # --------------------------------------------------------------------------- #
 # 7c. jarvis#681: a SUCCESSFUL turn whose follow-up enrichment lane keeps failing

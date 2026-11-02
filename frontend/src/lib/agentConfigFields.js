@@ -1,6 +1,6 @@
 /**
  * The engagement-config keys ConfigForm.vue renders as real, purpose-built
- * form fields (link pickers / dates / numbers / a select), in display order.
+ * form fields (link pickers / dates / numbers / selects / short lists), in display order.
  *
  * Verified against the run path that actually reads them - not a schema:
  *   - agent_scope.py's `_resolve`: company, fiscal_year, from_date, to_date -
@@ -11,8 +11,8 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), and the payroll
- *     baseline's `baseline_hrms` declaration. Rendered only when the
+ *     CRITICAL fix, they are NOT flat top-level keys), the payroll baseline
+ *     baseline_hrms fields, and the GST turnover and HSN allow-list. Rendered only when the
  *     listing's own `config_keys` (agents_api.py get_agent, jarvis#1063)
  *     names the field's storage `path` (a dot path for a nested key) -
  *     ConfigForm.vue filters this array by that list at render time.
@@ -34,6 +34,7 @@
  *   - {keys: [from, to], paths: [from, to], labels: [from, to], type: "date-range", help, scope?}
  *   - {key, path, label, type: "number", help, suffix?}
  *   - {key, path, label, type: "select", options: [{label, value}, ...]}
+ *   - {key, path, label, type: "text-list", help}
  */
 export const CONFIG_FIELD_SET = [
 	{
@@ -194,6 +195,20 @@ export const CONFIG_FIELD_SET = [
 		help: "Optional text shown with the payroll activity report.",
 	},
 	{
+		key: "annual_aggregate_turnover",
+		path: "annual_aggregate_turnover",
+		label: "Previous financial-year aggregate turnover",
+		type: "number",
+		help: "Whole-rupee turnover for the preceding financial year. The GST return-prep HSN check uses this saved value to select its reporting band.",
+	},
+	{
+		key: "same_hsn_rate_allowlist",
+		path: "same_hsn_rate_allowlist",
+		label: "Same-HSN rate review exclusions",
+		type: "text-list",
+		help: "Optional comma-separated HSN or SAC codes that have an approved mixed-rate reason. This only suppresses the review-only rate-drift worklist item.",
+	},
+	{
 		key: "stale_floor_days",
 		path: "ageing.stale_floor_days",
 		label: "Stale-invoice floor",
@@ -245,6 +260,11 @@ export const CONFIG_FIELD_LABELS = Object.fromEntries(
 /** The subset of known keys that are numeric on save (everyone else is a
  * plain string, cleared to absent when blank). */
 export const NUMBER_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "number").map(
+	(f) => f.key
+);
+
+/** Known keys stored as a JSON string array but edited as a short comma-separated list. */
+export const TEXT_LIST_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "text-list").map(
 	(f) => f.key
 );
 
