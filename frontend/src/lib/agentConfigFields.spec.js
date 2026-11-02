@@ -49,6 +49,7 @@ describe("CONFIG_FIELD_SET", () => {
 				"percentage",
 				"engagement_risk_level",
 				"rounding_step",
+				"deposit",
 				"annual_aggregate_turnover",
 				"same_hsn_rate_allowlist",
 				"stale_floor_days",
@@ -58,7 +59,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders scope, the materiality set, then the vendor-ledger ageing floors", () => {
+	it("orders scope, the materiality and deposit sets, then the vendor-ledger ageing floors", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -76,6 +77,7 @@ describe("CONFIG_FIELD_SET", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"deposit",
 			"annual_aggregate_turnover",
 			"same_hsn_rate_allowlist",
 			"stale_floor_days",
@@ -114,6 +116,12 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
+	it("declares the payroll deposit panel at its one nested namespace", () => {
+		expect(CONFIG_FIELD_SET).toContainEqual(
+			expect.objectContaining({ key: "deposit", path: "deposit", type: "deposit-status" })
+		);
+	});
+
 	it("stores the GST same-HSN exclusions as a short text list", () => {
 		expect(TEXT_LIST_CONFIG_KEYS).toEqual(["same_hsn_rate_allowlist"]);
 	});
@@ -137,7 +145,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes materiality, GST, and vendor-ledger settings", () => {
+	it("agent-specific includes deposit, materiality, GST, and vendor-ledger settings", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -151,6 +159,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"deposit",
 			"annual_aggregate_turnover",
 			"same_hsn_rate_allowlist",
 			"stale_floor_days",
@@ -186,6 +195,10 @@ describe("KEY_TO_PATH (local form key -> storage dot path)", () => {
 		expect(KEY_TO_PATH.percentage).toBe("materiality.percentage");
 		expect(KEY_TO_PATH.engagement_risk_level).toBe("materiality.engagement_risk_level");
 		expect(KEY_TO_PATH.rounding_step).toBe("materiality.rounding_step");
+	});
+
+	it("the deposit panel owns the whole declared namespace", () => {
+		expect(KEY_TO_PATH.deposit).toBe("deposit");
 	});
 });
 
