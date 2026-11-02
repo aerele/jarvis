@@ -156,8 +156,8 @@ describe("the Diwali scene", () => {
 		await again.done;
 	});
 
-	it("a phone layout or reduced motion is only the rest state, at once", async () => {
-		for (const extra of [{ layout: "phone" }, { reduced: true }]) {
+	it("a layout the scene does not draw (no room on a phone) or reduced motion is only the rest state, at once", async () => {
+		for (const extra of [{ layout: "rest" }, { reduced: true }]) {
 			beats = [];
 			const scene = run(extra);
 			expect(host.querySelector("svg")).toBeNull();
