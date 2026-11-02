@@ -54,8 +54,8 @@
 			     selected row's white chip + shadow reads in light mode (CRM
 			     sidebar pattern; dark gray-1 ≠ surface-selected per §2.5) -->
 			<div
-				data-testid="approvals-rail"
 				class="max-h-[40vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
+				data-testid="approvals-rail"
 			>
 				<!-- "Waiting for your reply" strip (notify-approvals Part 3): prose
 				     questions the agent asked in chat — derived server-side
@@ -394,7 +394,7 @@
 			<!-- RIGHT pane: review + act on the selected approval -->
 			<!-- min-w-0 prevents a long detail/control row from widening the desktop
 			     split view beyond its container. -->
-			<div class="min-w-0 flex-1 overflow-y-auto">
+			<div class="min-h-0 min-w-0 flex-1 overflow-y-auto">
 				<!-- a held write / chat card / wiki note: its own detail, keyed so every
 				     selection mounts (and loads) a fresh one -->
 				<div v-if="selectedKey" class="mx-auto w-full max-w-3xl px-4 py-6 sm:px-8">
