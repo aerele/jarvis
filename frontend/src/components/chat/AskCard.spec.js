@@ -398,11 +398,14 @@ describe("AskCard Link suggestions: keyboard and focus", () => {
 		});
 		it("while a read is pending consumes the key, cancels the read and blocks a late reopen", async () => {
 			const w = await attached();
+			await open(w);
 			const host = hostKeydown();
 			const late = deferred();
 			searchLink.mockReturnValueOnce(late.promise);
-			input(w).element.focus();
+			const started = searches();
+			await input(w).setValue("PENDING");
 			await flushPromises();
+			expect(searches()).toBe(started + 1);
 			const before = searches();
 			const ev = pressEscape(input(w).element);
 			expect(ev.defaultPrevented).toBe(true);
