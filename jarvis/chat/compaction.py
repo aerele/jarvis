@@ -176,6 +176,9 @@ def start_compaction(conversation: str, user: str, hint: str) -> dict:
 	already checked the conversation looks idle (api.compact_conversation),
 	but that earlier check is only an optimization - the CAS here is what
 	actually serializes two near-simultaneous callers."""
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	if not _try_take_lock(conversation):
 		return {"ok": False, "reason": "already_compacting"}
 	# ``jarvis_compact_queue`` (site config) lets a sidecar deployment route the
@@ -246,6 +249,9 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 	"""RQ entry point. One pooled gateway session for the whole operation."""
 	from jarvis.chat import agent_session_pool, usage
 	from jarvis.chat.agent_client import AgentUnreachableError
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 
 	conv = frappe.db.get_value(CONV, conversation, ["session_key"], as_dict=True) or {}
 	session_key = conv.get("session_key") or ""

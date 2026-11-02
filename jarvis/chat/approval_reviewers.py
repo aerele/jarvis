@@ -132,7 +132,7 @@ def _locked_user(user: str):
 
 def change_tag(name: str, user: str, *, remove=False) -> list[dict]:
 	from jarvis.chat import txn
-	from jarvis.chat.approval_backport import require_legacy_conversation
+	from jarvis.chat.collaboration import require_legacy_conversation
 
 	txn.fresh_snapshot(owned=True)
 	_locked_user(user)

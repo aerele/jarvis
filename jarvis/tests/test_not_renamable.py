@@ -17,6 +17,7 @@ USER = "nr-user@example.com"
 
 NOT_RENAMABLE = (
 	"Jarvis Approval Reviewer",
+	"Jarvis Chat Binding",
 	"Jarvis Export Job",
 	"Jarvis Chat Send Request",
 	"Jarvis User Settings",

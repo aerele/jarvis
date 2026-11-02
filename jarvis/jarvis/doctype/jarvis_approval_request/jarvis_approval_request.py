@@ -58,7 +58,7 @@ class JarvisApprovalRequest(NotRenamable, Document):
 
 	def validate(self):
 		from jarvis.chat import approval_reviewers
-		from jarvis.chat.approval_backport import guard_record
+		from jarvis.chat.collaboration_asks import guard_record
 
 		guard_record(self)
 		if not self.is_new() and not self.flags.jarvis_server_write:
