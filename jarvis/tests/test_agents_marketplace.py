@@ -506,6 +506,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(agent_catalog._category_from_domain(""), "")
 		self.assertEqual(agent_catalog._category_from_domain(None), "")
 
+	def test_registry_domain_uses_the_bundled_payroll_entry(self):
+		self.assertEqual(agent_catalog.registry_domain("payroll-prerun-auditor"), "hrms-payroll")
+		self.assertEqual(agent_catalog.registry_domain("not-a-bundled-agent"), "")
+
 	def test_sync_agent_listings_writes_the_mapped_category_not_the_raw_domain(self):
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(frappe.db.get_value(LISTING, "close-auditor", "category"), "Close and Reporting")
