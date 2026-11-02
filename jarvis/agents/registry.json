@@ -1185,7 +1185,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "status": "Published",
       "description": "Read-only hygiene sweep of your Frappe CRM: finds duplicate and near-duplicate leads (the same person entered twice across leads and deals), flags leads marked converted with no matching deal, and surfaces uncontactable, unassigned, or SLA-breached leads into a ranked worklist. Never merges, edits, assigns, or deletes a record — it hands sales-ops the exceptions and a human decides.",
       "tools_required": [
