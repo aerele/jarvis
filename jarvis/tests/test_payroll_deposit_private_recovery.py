@@ -78,6 +78,11 @@ class TestPayrollDepositPrivateRecovery(JarvisSettingsSnapshot, FrappeTestCase):
 
 	def setUp(self):
 		super().setUp()
+		# Direct request calls reuse Frappe local state in the test process.
+		# A real request discards this marker after outer error capture.
+		marker = patch.object(frappe.local, "jarvis_private_delegate_metadata", False, create=True)
+		marker.start()
+		self.addCleanup(marker.stop)
 		self._run_names: list[str] = []
 		self._installation_names: list[str] = []
 		self._installations_by_user: dict[str, str] = {}
