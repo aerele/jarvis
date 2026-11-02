@@ -202,6 +202,7 @@ class TestReceivablesReview(FrappeTestCase):
 				agent=review.AGENT,
 				installation="INST-AR",
 				status="running",
+				scope_json=json.dumps(source["scope"]),
 				input_snapshot_json=json.dumps(source),
 				preparation_mode=mode,
 				owner="Administrator",
@@ -389,9 +390,16 @@ class TestReceivablesReview(FrappeTestCase):
 		)
 		artifact = MagicMock()
 		artifact.name = "REVIEW"
+		prior = frappe._dict(
+			run=run.name,
+			status="Pending",
+			assessment_evidence=json.dumps(
+				{"reviewer": "Administrator", "input_digest": source["source_digest"]}
+			),
+		)
 		with (
 			patch.object(frappe, "has_permission", return_value=True),
-			patch.object(frappe.db, "get_value", side_effect=[1, None, 1, "REVIEW"]),
+			patch.object(frappe.db, "get_value", side_effect=[1, None, 1, "REVIEW", prior]),
 			patch.object(frappe, "get_doc", return_value=artifact) as create,
 			patch.object(review, "collect", return_value=source),
 			patch.object(frappe.share, "add"),

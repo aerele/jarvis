@@ -1,7 +1,7 @@
 """Tests for the server-owned Negative Stock receipt gate.
 
-These use synthetic in-memory values only. They do not install or run an agent,
-and they do not read a customer company.
+These use synthetic fixtures and isolated database transactions. They do not
+install or run an agent, and they do not read a customer company.
 """
 
 from __future__ import annotations
@@ -398,6 +398,7 @@ class TestNegativeStockReceiptWritebackHook(unittest.TestCase):
 		capture = {"run": "NEG-HOOK-1"}
 		start_run = frappe._dict(
 			name="NEG-HOOK-1",
+			scope_json=frappe.as_json(SCOPE_RAW),
 			agent=receipt.AGENT,
 			status="running",
 			findings_count=0,
@@ -442,7 +443,7 @@ class TestNegativeStockReceiptWritebackHook(unittest.TestCase):
 			) as capture_launch,
 			patch("jarvis.chat.negative_stock_receipt.persist") as persist,
 		):
-			out = writeback.record_agent_run(findings=[], coverage={}, scope={})
+			out = writeback.record_agent_run(findings=[], coverage={}, scope=SCOPE_RAW)
 
 		self.assertEqual(out["status"], "completed")
 		capture_launch.assert_called_once_with(start_run)

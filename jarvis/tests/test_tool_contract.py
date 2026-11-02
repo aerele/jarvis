@@ -115,14 +115,16 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	Wave-A adversarial P2-2: nothing gated this, so a re-vendor lag would
 	silently split bench authorization from container capability.
 
-	The digest is SEMANTIC (canonical JSON of {slug: {nature, sorted
-	tools_allow}}), so formatting/descriptions may move freely. The SAME literal
-	is pinned in the private agents repo
+	The tool/nature digest is SEMANTIC (canonical JSON of {slug: {nature, sorted
+	tools_allow}}), so formatting/descriptions may move freely. A second digest
+	pins the bench-only record-scope declaration {slug: supports_record_scope}.
+	The SAME literals are pinned in the private agents repo
 	(lib/check_registry_capability_contract.py); its docstring holds the paired
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "6aacd193a0e96ba3879f14bed65617840d927797a6356c728fccf64e377afa5b"
+	PINNED_CAPABILITY_DIGEST = "713d4d022b2245dd1e841751b4e1e32df649de88a0bd889fe6c71239289ff107"
+	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "3bca5faa9337568cc955bbff866bc275b25d0bcab3111a59c0f629ab1f87ec02"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
@@ -152,6 +154,35 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			"(see lib/check_registry_capability_contract.py there)",
 		)
 
+	def test_vendored_registry_record_scope_capability_digest_is_pinned(self):
+		import hashlib
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			doc = json.load(fh)
+		contract = {}
+		for entry in doc["agents"]:
+			slug = entry.get("agent_slug") or entry.get("slug")
+			self.assertTrue(slug, "registry entry with no slug")
+			self.assertNotIn(slug, contract, f"duplicate slug {slug}")
+			value = entry.get("supports_record_scope")
+			self.assertIsInstance(value, bool, f"{slug}: record scope capability is not explicit")
+			contract[slug] = value
+		canonical = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+		got = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+		self.assertEqual(
+			got,
+			self.PINNED_RECORD_SCOPE_CAPABILITY_DIGEST,
+			"the vendored record-scope capability contract moved — re-vendor the scope declarations "
+			"and update BOTH pinned digests (see lib/check_registry_capability_contract.py in the "
+			"private agents repo)",
+		)
+
+
+class TestReorderClosedGateContract(FrappeTestCase):
 	def test_reorder_remains_coming_soon_without_inventory_or_erp_write_capability(self):
 		"""A future receipt gate must not silently restore the retired operator."""
 		import json

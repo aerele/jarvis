@@ -32,11 +32,14 @@ import json
 import frappe
 
 from jarvis.chat import coverage_reasons as cr
+from jarvis.chat.agent_scope import authoritative_writeback_scope
 from jarvis.exceptions import InvalidArgumentError
 
 RUN = "Jarvis Agent Run"
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
+NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
+FEFO_AGENT = "fefo-expiry-compliance-auditor"
 
 _SEVERITIES = {"blocker", "warning", "note"}
 # Aggregate-dimension ref doctypes verified by EXISTENCE only, not a read-perm
@@ -63,6 +66,30 @@ def _as_dict(value) -> dict:
 		except Exception:
 			return {}
 	return value if isinstance(value, dict) else {}
+
+
+def _bound_negative_stock_scope(stamped: dict, submitted: dict) -> dict | None:
+	"""Return the safe scope only when it matches the launch boundary exactly.
+
+	The delegate can write a local evaluator config, but it cannot select another
+	Warehouse, company, period, or report-date cutoff at writeback. The launch
+	scope is trusted because the server validated it as the run-as user before
+	dispatch. The submitted object is untrusted model output.
+	"""
+	from jarvis.chat.agent_scope import negative_stock_output_scope
+
+	trusted = negative_stock_output_scope(stamped)
+	output = negative_stock_output_scope(submitted)
+	return trusted if trusted is not None and output == trusted else None
+
+
+def _bound_fefo_scope(stamped: dict, submitted: dict) -> dict | None:
+	"""Return the immutable FEFO scope only on exact safe-projection equality."""
+	from jarvis.chat.agent_scope import fefo_output_scope, fefo_stamped_scope
+
+	trusted = fefo_stamped_scope(stamped)
+	output = fefo_output_scope(submitted)
+	return trusted if trusted is not None and output == trusted else None
 
 
 def _ref_verifiable(ref_doctype: str, ref_name: str) -> tuple[bool, str]:
@@ -142,6 +169,29 @@ def _validate_findings(raw_findings: list, token_set: set, allowed_refs: set):
 	return valid, dropped
 
 
+def _canonical_scope_for_writeback(run_doc, scope: dict) -> dict:
+	"""Keep a Statutory Payroll writeback on its launch-stamped batch scope."""
+	from jarvis.chat.statutory_payroll_scope import (
+		ConfigurationError,
+		canonical_writeback_scope,
+		is_statutory_payroll,
+	)
+
+	if not is_statutory_payroll(run_doc.agent):
+		return scope
+	try:
+		if isinstance(scope, str):
+			scope = frappe.parse_json(scope)
+		stamped_scope = frappe.parse_json(run_doc.scope_json or "{}")
+		if not isinstance(stamped_scope, dict):
+			raise ConfigurationError("scope", "invalid server scope")
+		return canonical_writeback_scope(stamped_scope, scope)
+	except (ConfigurationError, TypeError, ValueError, frappe.ValidationError):
+		raise InvalidArgumentError(
+			"Statutory Payroll output scope does not match this run's server-bound Payroll Entry scope."
+		) from None
+
+
 def record_agent_run(
 	findings=None,
 	coverage=None,
@@ -168,8 +218,9 @@ def record_agent_run(
 	    ``{token: "evaluated"|"not_evaluable(reason)"|"truncated"}``; a reason outside
 	    the closed PP-3 enum is coerced to ``unsupported_customisation`` (never
 	    dropped). Gates coverage-scoped auto-resolve (A16) and the PP-2 run state.
-	  scope: the resolved run scope ``{company, fiscal_year, from_date, to_date,
-	    ...}`` — company is stamped on each Finding + scopes auto-resolve + the
+	  scope: the evaluator's echo of the resolved run scope. Each supplied
+	    dimension must match the server-stamped launch scope. The server stamp,
+	    not this argument, supplies company persistence, auto-resolve, and the
 	    watermark recompute.
 	  truncated: True when the delegate's fetch hit its budget — auto-resolve is
 	    skipped entirely and the run is partial (A16).
@@ -264,8 +315,87 @@ def record_agent_run(
 
 	raw_findings = _as_list(findings)
 	coverage = _as_dict(coverage)
-	scope = _as_dict(scope)
+	# Statutory Payroll requires a complete raw echo of its Payroll Entry scope.
+	# Check that stricter contract before generic scope authority checks the same
+	# raw evaluator object against the trusted launch stamp.
+	submitted_scope = scope
+	_canonical_scope_for_writeback(run_doc, submitted_scope)
+	# The model can relay its evaluator's scope, but it cannot select or amend the
+	# scope that controls persistence. Validate before review validation or any
+	# finding/company work, then use only the launch-stamped values downstream.
+	if run_row.agent in {NEGATIVE_STOCK_AGENT, FEFO_AGENT}:
+		# These agents validate their narrow projection below and finish a rejected
+		# scope as partial, clearing untrusted artifacts. Do not replace the raw
+		# echo with the stamp first: that would hide a mismatch from their guards.
+		scope = _as_dict(submitted_scope)
+	else:
+		scope = authoritative_writeback_scope(run_doc, submitted_scope)
 	truncated = bool(truncated)
+	scope_dropped = []
+
+	if run_row.agent == NEGATIVE_STOCK_AGENT:
+		trusted_scope = _bound_negative_stock_scope(_as_dict(run_doc.get("scope_json")), scope)
+		if trusted_scope is None:
+			from jarvis.chat.agent_scope import negative_stock_output_scope
+
+			stamped_scope = negative_stock_output_scope(_as_dict(run_doc.get("scope_json"))) or {}
+			raw_findings = []
+			coverage = agent_runs._negative_stock_scope_rejection_coverage(token_set)
+			scope = stamped_scope
+			integrity_digest = None
+			rows_consumed = None
+			canvas_ref = None
+			dashboard = None
+			agent_runs.clear_untrusted_negative_stock_artifacts(run_doc, inst)
+			scope_dropped.append(
+				{
+					"ref_doctype": "Warehouse",
+					"ref_name": (stamped_scope.get("record_scope") or {}).get("name") or "?",
+					"reason": "scope did not match server-stamped Warehouse boundary",
+				}
+			)
+		else:
+			# Strip unknown model keys before the downstream Run snapshot merge.
+			scope = trusted_scope
+	if run_row.agent == FEFO_AGENT:
+		# Apply the same boundary before finding validation/review staging as the
+		# direct persistence seam.  The public tool must not briefly trust a forged
+		# scope merely because its later callee would reject it.
+		trusted_scope = _bound_fefo_scope(_as_dict(run_doc.get("scope_json")), scope)
+		if trusted_scope is not None:
+			try:
+				from jarvis.chat.agent_scope import fefo_stamped_scope_as_user
+
+				trusted_scope = fefo_stamped_scope_as_user(
+					_as_dict(run_doc.get("scope_json")),
+					agent_runs._fefo_run_as_user(run_doc),
+					run_doc.get("fefo_visibility_proof_json"),
+				)
+			except Exception:
+				trusted_scope = None
+		if trusted_scope is None:
+			from jarvis.chat.agent_scope import fefo_stamped_scope
+
+			stamped_scope = fefo_stamped_scope(_as_dict(run_doc.get("scope_json"))) or {}
+			raw_findings = []
+			coverage = agent_runs._fefo_scope_rejection_coverage(token_set)
+			# Keep an invalid marker through the direct persistence seam.  It restores
+			# only the server projection and clears artifacts there; passing the stamp
+			# itself here would make a forged public writeback look trusted again.
+			scope = {}
+			integrity_digest = None
+			rows_consumed = None
+			canvas_ref = None
+			dashboard = None
+			scope_dropped.append(
+				{
+					"ref_doctype": "Warehouse",
+					"ref_name": (stamped_scope.get("record_scope") or {}).get("name") or "?",
+					"reason": "scope did not match server-stamped FEFO boundary",
+				}
+			)
+		else:
+			scope = trusted_scope
 	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(run_doc.agent)
@@ -295,6 +425,7 @@ def record_agent_run(
 			rows_consumed_val = None
 
 	valid, dropped = _validate_findings(raw_findings, token_set, allowed_refs)
+	dropped.extend(scope_dropped)
 	if review_backend:
 		frappe.db.set_value(
 			RUN,

@@ -18,12 +18,15 @@ Run ONLY on a throwaway bench:
   bench --site patterntest.localhost run-tests --module jarvis.tests.test_agent_identity
 """
 
+import json
+import os
 import unittest
 from unittest import mock
 
 import frappe
 
 from jarvis.chat import agent_catalog, agent_scheduler, agents_api
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.tests._agent_access import allow_listing_for, clear_listing_access
 
 LISTING = "Jarvis Agent Listing"
@@ -486,14 +489,22 @@ class TestAgentIdentity(unittest.TestCase):
 			"report_date": "2026-10-30",
 		}
 
-		def resolve(config, warehouse_company="Scope Co", warehouse_readable=True):
+		def resolve(config, warehouse_company="Scope Co", warehouse_readable=True, company_readable=True):
 			inst = frappe._dict(
 				agent="negative-stock-valuation-auditor", name="NSV-INST", config=frappe.as_json(config)
 			)
 			with (
 				mock.patch.object(agent_scope, "_resolve", return_value=dict(base)),
-				mock.patch.object(agent_scope.frappe.db, "get_value", return_value=warehouse_company),
-				mock.patch.object(agent_scope.frappe, "has_permission", return_value=warehouse_readable),
+				mock.patch.object(
+					agent_scope.frappe.db,
+					"get_value",
+					return_value=frappe._dict(company=warehouse_company, disabled=0),
+				),
+				mock.patch.object(
+					agent_scope.frappe,
+					"has_permission",
+					side_effect=(warehouse_readable, company_readable),
+				),
 			):
 				return agent_scope.resolve_scope(inst)
 
@@ -518,7 +529,14 @@ class TestAgentIdentity(unittest.TestCase):
 		prompt = agent_scheduler._audit_prompt(
 			listing, inst, trigger="manual", scope=scope, engagement_config=snapshot
 		)
-		self.assertIn('record_scope={"doctype": "Warehouse", "name": "WH-Scope"}', prompt)
+		self.assertEqual(
+			frappe.parse_json(
+				prompt.split("ADDITIONAL SCOPE (copy these values unchanged): ", 1)[1].split(
+					"\n\nEXPLICIT CONFIG", 1
+				)[0]
+			),
+			{"record_scope": {"doctype": "Warehouse", "name": "WH-Scope"}},
+		)
 		self.assertIn('"reviewer": "scope-reviewer@example.invalid"', prompt)
 		self.assertNotIn('"record_scope"', prompt.split("EXPLICIT CONFIG", 1)[1])
 
@@ -538,16 +556,18 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertNotIn('"record_scope"', empty_prompt.split("EXPLICIT CONFIG", 1)[1])
 		self.assertNotIn("Jarvis Agent Installation", empty_prompt)
 
-		for bad, warehouse_company, warehouse_readable in (
+		for bad, warehouse_company, warehouse_readable, company_readable in (
 			(
 				{"negative_stock": {"warehouse_names": ["WH-Scope"]}},
 				"Scope Co",
 				True,
+				True,
 			),  # warehouse_names is never a fallback root
-			({"negative_stock": {"record_scope": {"doctype": "Warehouse"}}}, "Scope Co", True),
+			({"negative_stock": {"record_scope": {"doctype": "Warehouse"}}}, "Scope Co", True, True),
 			(
 				{"negative_stock": {"record_scope": {"doctype": "Company", "name": "Scope Co"}}},
 				"Scope Co",
+				True,
 				True,
 			),
 			(
@@ -558,33 +578,392 @@ class TestAgentIdentity(unittest.TestCase):
 				},
 				"Scope Co",
 				True,
+				True,
 			),
-			(good, "Other Co", True),
-			(good, "Scope Co", False),
+			(good, "Other Co", True, True),
+			(good, "Scope Co", False, True),
+			(good, "Scope Co", True, False),
 		):
 			with self.subTest(
 				bad=bad,
 				warehouse_company=warehouse_company,
 				warehouse_readable=warehouse_readable,
+				company_readable=company_readable,
 			):
-				invalid = resolve(bad, warehouse_company, warehouse_readable)
-				self.assertNotIn("record_scope", invalid)
-				invalid_inst = frappe._dict(name="NSV-INST", config=frappe.as_json(bad))
+				with self.assertRaises(InvalidArgumentError):
+					resolve(bad, warehouse_company, warehouse_readable, company_readable)
+
+	def test_negative_stock_launch_stamps_canonical_root_and_sanitized_config(self):
+		"""The real launch stores the safe root and never forwards owner JSON."""
+		import jarvis.admin_client as admin_client
+		from jarvis.chat import agent_models, agent_scope
+
+		negative_stock_agent = agent_scope.NEGATIVE_STOCK_AGENT
+		allow_listing_for(negative_stock_agent, user=self.owner)
+		stock_roles = [
+			role
+			for role in ("Stock User", "Stock Manager")
+			if frappe.db.exists("Role", role) and role not in frappe.get_roles(self.owner)
+		]
+		if stock_roles:
+			frappe.get_doc("User", self.owner).add_roles(*stock_roles)
+			frappe.clear_cache(user=self.owner)
+			frappe.db.commit()
+
+		company = _ensure_test_company()
+		inst_name = _install_as(self.owner, negative_stock_agent)
+		raw_root = {"doctype": "Warehouse", "name": "Raw Owner Warehouse"}
+		canonical_root = {"doctype": "Warehouse", "name": "Canonical Warehouse Group"}
+		stamped_scope = {
+			"company": company,
+			"fiscal_year": None,
+			"from_date": "2026-04-01",
+			"to_date": "2027-03-31",
+			"report_date": "2026-10-30",
+			"record_scope": canonical_root,
+		}
+		frappe.db.set_value(
+			INSTALLATION,
+			inst_name,
+			{
+				"enabled": 1,
+				"config": frappe.as_json(
+					{
+						"company": company,
+						"from_date": stamped_scope["from_date"],
+						"to_date": stamped_scope["to_date"],
+						"negative_stock": {"record_scope": raw_root},
+					}
+				),
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		inst = frappe.get_doc(INSTALLATION, inst_name)
+		captured = {}
+
+		def dispatch(**kwargs):
+			captured.update(kwargs)
+			return {"run_id": kwargs["run_id"], "status": "queued"}
+
+		frappe.set_user(self.owner)
+		try:
+			with (
+				mock.patch.object(agent_scope, "resolve_scope", return_value=stamped_scope),
+				mock.patch.object(
+					agent_models, "gate_run", return_value={"ok": True, "model_source": "choice"}
+				),
+				mock.patch.object(admin_client, "post_agent_run", side_effect=dispatch),
+			):
+				result = agent_scheduler._launch_audit(inst, trigger="manual")
+		finally:
+			frappe.set_user("Administrator")
+
+		run = result["run"]
+		self.assertEqual(
+			frappe.parse_json(frappe.db.get_value(RUN, run, "scope_json"))["record_scope"], canonical_root
+		)
+		self.assertEqual(
+			frappe.parse_json(frappe.db.get_value(RUN, run, "engagement_config_json")),
+			{"negative_stock": {}},
+		)
+		message = captured["message"]
+		self.assertEqual(
+			frappe.parse_json(
+				message.split("ADDITIONAL SCOPE (copy these values unchanged): ", 1)[1].split(
+					"\n\nEXPLICIT CONFIG", 1
+				)[0]
+			),
+			{"record_scope": {"doctype": "Warehouse", "name": "Canonical Warehouse Group"}},
+		)
+		self.assertNotIn('"record_scope"', message.split("EXPLICIT CONFIG", 1)[1])
+		self.assertNotIn("Raw Owner Warehouse", message)
+
+	def test_negative_stock_missing_root_rolls_back_run_session_and_dispatch(self):
+		"""A bound agent must not leave an unscoped launch behind."""
+		import jarvis.admin_client as admin_client
+		from jarvis.chat import agent_models, agent_scope
+
+		negative_stock_agent = agent_scope.NEGATIVE_STOCK_AGENT
+		allow_listing_for(negative_stock_agent, user=self.owner)
+		stock_roles = [
+			role
+			for role in ("Stock User", "Stock Manager")
+			if frappe.db.exists("Role", role) and role not in frappe.get_roles(self.owner)
+		]
+		if stock_roles:
+			frappe.get_doc("User", self.owner).add_roles(*stock_roles)
+			frappe.clear_cache(user=self.owner)
+			frappe.db.commit()
+
+		company = _ensure_test_company()
+		inst_name = _install_as(self.owner, negative_stock_agent)
+		frappe.db.set_value(
+			INSTALLATION,
+			inst_name,
+			{
+				"enabled": 1,
+				"config": frappe.as_json(
+					{
+						"company": company,
+						"from_date": "2026-04-01",
+						"to_date": "2027-03-31",
+						"negative_stock": {},
+					}
+				),
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		inst = frappe.get_doc(INSTALLATION, inst_name)
+		before_runs = frappe.db.count(RUN, {"installation": inst_name})
+		before_sessions = frappe.db.count(SESSION, {"user": self.owner})
+
+		frappe.set_user(self.owner)
+		try:
+			with (
+				mock.patch.object(
+					agent_models, "gate_run", return_value={"ok": True, "model_source": "choice"}
+				),
+				mock.patch.object(admin_client, "post_agent_run") as dispatch,
+				mock.patch.object(frappe, "log_error") as log_error,
+			):
+				with self.assertRaises(InvalidArgumentError):
+					agent_scheduler._launch_audit(inst, trigger="manual")
+		finally:
+			frappe.set_user("Administrator")
+
+		self.assertEqual(frappe.db.count(RUN, {"installation": inst_name}), before_runs)
+		self.assertEqual(frappe.db.count(SESSION, {"user": self.owner}), before_sessions)
+		dispatch.assert_not_called()
+		self.assertEqual(
+			log_error.call_args.kwargs["title"],
+			"jarvis agent: explicit record scope resolution failed",
+		)
+
+	def test_fefo_record_scope_is_leaf_bound_or_the_run_fails_closed(self):
+		"""FEFO may be company-wide only when the owner declares no root."""
+		from jarvis.chat import agent_scope
+		from jarvis.exceptions import InvalidArgumentError
+
+		base = {
+			"company": "Scope Co",
+			"fiscal_year": None,
+			"from_date": "2026-04-01",
+			"to_date": "2027-03-31",
+			"report_date": "2026-10-30",
+		}
+
+		def resolve(config, warehouse=None, warehouse_readable=True):
+			inst = frappe._dict(
+				agent="fefo-expiry-compliance-auditor", name="FEFO-INST", config=frappe.as_json(config)
+			)
+			warehouse = warehouse or {"company": "Scope Co", "is_group": 0, "disabled": 0}
+			with (
+				mock.patch.object(agent_scope, "_resolve", return_value=dict(base)),
+				mock.patch.object(agent_scope.frappe.db, "get_value", return_value=warehouse),
+				mock.patch.object(agent_scope.frappe, "has_permission", return_value=warehouse_readable),
+				mock.patch.object(agent_scope, "fefo_visibility_proof", return_value={}),
+			):
+				return agent_scope.resolve_scope(inst, allow_record_scope=True)
+
+		policy = {
+			"reviewer": "scope-reviewer@example.invalid",
+			"near_expiry_days": 90,
+			"test_declaration": "Fake records only.",
+		}
+		good = {
+			"fefo": policy,
+			"record_scope": {"doctype": "Warehouse", "name": "WH-Scope"},
+		}
+		scope = resolve(good)
+		self.assertEqual(scope["record_scope"], {"doctype": "Warehouse", "name": "WH-Scope"})
+
+		listing = frappe._dict(
+			{
+				"name": "fefo-expiry-compliance-auditor",
+				"config_keys": [
+					"fefo.reviewer",
+					"fefo.near_expiry_days",
+					"fefo.test_declaration",
+				],
+			}
+		)
+		inst = frappe._dict(name="FEFO-INST", config=frappe.as_json(good))
+		snapshot = agent_scheduler._sanitize_delegated_engagement_config(
+			listing, agent_scheduler._explicit_config(listing, inst)
+		)
+		self.assertEqual(snapshot, {"fefo": policy})
+		prompt = agent_scheduler._audit_prompt(
+			listing,
+			inst,
+			trigger="manual",
+			scope=scope,
+			engagement_config=snapshot,
+			record_scope_supported=True,
+		)
+		self.assertEqual(
+			frappe.parse_json(
+				prompt.split("ADDITIONAL SCOPE (copy these values unchanged): ", 1)[1].split(
+					"\n\nEXPLICIT CONFIG", 1
+				)[0]
+			),
+			{"record_scope": {"doctype": "Warehouse", "name": "WH-Scope"}},
+		)
+		self.assertIn('"near_expiry_days": 90', prompt)
+		self.assertNotIn('"record_scope"', prompt.split("EXPLICIT CONFIG", 1)[1])
+
+		# A root is optional. With no declaration, FEFO keeps its intentional
+		# company-wide mode and retains only the declared policy values.
+		company_scope = resolve({"fefo": policy})
+		self.assertNotIn("record_scope", company_scope)
+		company_inst = frappe._dict(name="FEFO-INST", config=frappe.as_json({"fefo": policy}))
+		company_snapshot = agent_scheduler._sanitize_delegated_engagement_config(
+			listing, agent_scheduler._explicit_config(listing, company_inst)
+		)
+		self.assertEqual(company_snapshot, {"fefo": policy})
+		company_prompt = agent_scheduler._audit_prompt(
+			listing, company_inst, "manual", company_scope, engagement_config=company_snapshot
+		)
+		self.assertNotIn("record_scope", company_prompt)
+
+		# A scope-only configuration proves that the raw owner declaration is
+		# stripped even when another preflight later rejects the missing policy.
+		scope_only = {"record_scope": {"doctype": "Warehouse", "name": "WH-Scope"}}
+		scope_only_inst = frappe._dict(name="FEFO-INST", config=frappe.as_json(scope_only))
+		scope_only_snapshot = agent_scheduler._sanitize_delegated_engagement_config(
+			listing, agent_scheduler._explicit_config(listing, scope_only_inst)
+		)
+		self.assertEqual(scope_only_snapshot, {})
+
+		for bad, warehouse, warehouse_readable in (
+			({"fefo": policy, "record_scope": None}, None, True),
+			({"fefo": policy, "record_scope": {"doctype": "Warehouse"}}, None, True),
+			(
+				{"fefo": policy, "record_scope": {"doctype": "Company", "name": "Scope Co"}},
+				None,
+				True,
+			),
+			(
+				{
+					"fefo": policy,
+					"record_scope": {"doctype": "Warehouse", "name": "WH-Scope", "all": True},
+				},
+				None,
+				True,
+			),
+			(good, {"company": "Other Co", "is_group": 0, "disabled": 0}, True),
+			(good, {"company": "Scope Co", "is_group": 1, "disabled": 0}, True),
+			(good, {"company": "Scope Co", "is_group": 0, "disabled": 0}, False),
+		):
+			with self.subTest(bad=bad, warehouse=warehouse, warehouse_readable=warehouse_readable):
+				with self.assertRaises(agent_scope.InvalidFefoRecordScopeError):
+					resolve(bad, warehouse, warehouse_readable)
+				invalid_inst = frappe._dict(name="FEFO-INST", config=frappe.as_json(bad))
 				invalid_snapshot = agent_scheduler._sanitize_delegated_engagement_config(
 					listing, agent_scheduler._explicit_config(listing, invalid_inst)
 				)
+				self.assertNotIn("record_scope", invalid_snapshot["fefo"])
 				invalid_prompt = agent_scheduler._audit_prompt(
-					listing,
-					invalid_inst,
-					"manual",
-					invalid,
-					engagement_config=invalid_snapshot,
+					listing, invalid_inst, "manual", {}, engagement_config=invalid_snapshot
 				)
-				self.assertNotIn("record_scope=", invalid_prompt)
-				self.assertNotIn('"record_scope"', invalid_prompt)
-				# A rejected declaration must not reappear through an installation pointer.
-				self.assertIn("EXPLICIT CONFIG", invalid_prompt)
+				self.assertNotIn("record_scope", invalid_prompt)
 				self.assertNotIn("Jarvis Agent Installation", invalid_prompt)
+
+		# A database failure is not a bad declaration. It remains a retryable
+		# verification failure, preserves its exception cause, and never falls back
+		# to a company-wide scope.
+		db_failure = RuntimeError("Warehouse lookup unavailable")
+		inst = frappe._dict(agent=agent_scope.FEFO_AGENT, name="FEFO-INST", config=frappe.as_json(good))
+		with (
+			mock.patch.object(agent_scope, "_resolve", return_value=dict(base)),
+			mock.patch.object(agent_scope.frappe.db, "get_value", side_effect=db_failure),
+			mock.patch.object(agent_scope.frappe, "has_permission") as has_permission,
+		):
+			with self.assertRaises(InvalidArgumentError) as raised:
+				agent_scope.resolve_scope(inst, allow_record_scope=True)
+		self.assertNotIsInstance(raised.exception, agent_scope.InvalidFefoRecordScopeError)
+		self.assertIs(raised.exception.__cause__, db_failure)
+		has_permission.assert_not_called()
+
+	def test_fefo_near_expiry_window_rejects_only_invalid_supplied_values(self):
+		"""Advanced JSON and direct API saves share the evaluator's strict integer rule."""
+		from jarvis.chat.fefo_expiry_compliance import validate_configuration_edit
+
+		for value in (True, 0, -1, 1.5, 3651, "30", None):
+			with self.subTest(value=value):
+				with self.assertRaises(ValueError):
+					validate_configuration_edit({"fefo": {"near_expiry_days": value}})
+		self.assertIsNone(validate_configuration_edit({"fefo": {}}))
+		self.assertIsNone(validate_configuration_edit({"fefo": {"near_expiry_days": 30}}))
+
+	def test_fefo_near_expiry_window_is_checked_at_the_installation_save_boundary(self):
+		"""A direct config save cannot bypass the browser's FEFO integer range check."""
+		from jarvis.chat.agent_scope import FEFO_AGENT
+		from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
+			JarvisAgentInstallation,
+		)
+
+		doc = mock.Mock(agent=FEFO_AGENT, config=frappe.as_json({"fefo": {"near_expiry_days": 0}}))
+		doc.is_new.return_value = False
+		doc.has_value_changed.return_value = True
+		with self.assertRaises(frappe.ValidationError) as raised:
+			JarvisAgentInstallation._validate_agent_config(doc)
+		self.assertIn("FEFO near_expiry_days must be an integer from 1 to 3650", str(raised.exception))
+
+		doc.config = frappe.as_json({"fefo": {"near_expiry_days": 30}})
+		JarvisAgentInstallation._validate_agent_config(doc)
+
+		# Do not strand an owner who needs to repair a legacy invalid row by saving
+		# another field first. The changed config itself is still rejected above.
+		doc.has_value_changed.return_value = False
+		doc.config = frappe.as_json({"fefo": {"near_expiry_days": 0}})
+		JarvisAgentInstallation._validate_agent_config(doc)
+
+	def test_fefo_scope_resolution_error_refuses_the_launch_path(self):
+		"""A declared invalid FEFO root cannot turn into a broad unscoped run."""
+		from jarvis.chat import agent_scope, operator_review
+
+		inst = frappe._dict(agent="fefo-expiry-compliance-auditor", name="FEFO-INST")
+		with (
+			mock.patch.object(operator_review, "backend", return_value=None),
+			mock.patch.object(
+				agent_scope,
+				"resolve_scope",
+				side_effect=agent_scope.InvalidFefoRecordScopeError(
+					"FEFO record_scope must name one Warehouse leaf"
+				),
+			),
+			mock.patch.object(agent_scheduler.frappe, "log_error") as log_error,
+			mock.patch.object(agent_scheduler.frappe.db, "set_value") as set_value,
+		):
+			with self.assertRaises(agent_scope.InvalidFefoRecordScopeError):
+				agent_scheduler._stamp_scope_and_watermark("FEFO-RUN", inst, self.owner)
+
+		set_value.assert_not_called()
+		log_error.assert_not_called()
+
+	def test_duplicate_payment_uses_session_bound_config_for_cross_user_runs(self):
+		"""The mapped run-as user cannot read the owner's installation row."""
+		from unittest import mock
+
+		registry_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "registry.json")
+		with open(registry_path, encoding="utf-8") as fh:
+			registry = json.load(fh)
+		entry = next(a for a in registry["agents"] if a["agent_slug"] == "duplicate-payment-hygiene-auditor")
+		self.assertEqual(entry["version"], "0.2.2")
+		self.assertIn("jarvis__get_engagement_config", entry["tools_allow"])
+		self.assertIn("jarvis__get_engagement_config", entry["tools_required"])
+		self.assertEqual(entry["advisory_tokens"], [])
+
+		from jarvis.chat.agent_permissions import has_installation_permission
+
+		self.assertFalse(has_installation_permission(frappe._dict({"owner": self.owner}), user=self.mapped))
+		inst = frappe._dict({"name": "DUP-CONFIG-1", "config": frappe.as_json({"company": TEST_COMPANY})})
+		with mock.patch("jarvis.chat.agent_catalog.registry_tools_allow", return_value=entry["tools_allow"]):
+			message = agent_scheduler._audit_prompt(frappe._dict(entry), inst, trigger="manual", scope={})
+		self.assertIn("jarvis__get_engagement_config", message)
+		self.assertIn("NO arguments", message)
 
 	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner

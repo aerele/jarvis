@@ -125,7 +125,7 @@ export function createHolidayStore({
       return state.lastFetchAt;
     },
     // Why today's scene is or is not playing (loaded | load-failed | deadline | declined |
-    // threw | hidden), set by the welcome stage; null before it has an answer.
+    // no-room | threw | hidden), set by the welcome stage; null before it has an answer.
     get sceneReason() {
       return state.sceneReason;
     },

@@ -59,11 +59,14 @@ as their only gate.
 from __future__ import annotations
 
 import json
+import re
 
 import frappe
 
 RUN = "Jarvis Agent Run"
 LISTING = "Jarvis Agent Listing"
+INSTALLATION = "Jarvis Agent Installation"
+VERSION = "Version"
 
 # ``capability_contract`` values (Select on Jarvis Agent Run).
 CONTRACT_SNAPSHOT = "snapshot"
@@ -92,6 +95,33 @@ LEGACY_GRACE_SECONDS = 6 * 3600
 # bench tool name.
 _TOOL_PREFIX = "jarvis__"
 
+# An agent that declares this tool uses a launch-time copy of its engagement
+# configuration.  Its installation row is mutable, so it must never become a
+# second configuration authority while the run is active.
+_ENGAGEMENT_CONFIG_TOOL = "get_engagement_config"
+_CONFIG_SOURCE_DOCTYPES = frozenset({RUN.casefold(), INSTALLATION.casefold(), VERSION.casefold()})
+_SNAPSHOT_CONFIG_READ_MESSAGE = (
+	"this run cannot read raw engagement configuration through generic tools. Use "
+	"get_engagement_config instead; it returns the immutable configuration "
+	"snapshot stamped when this run started. Retrying this read will not help."
+)
+_CHAT_SNAPSHOT_CONFIG_READ_MESSAGE = "This agent used the configuration snapshot fixed when this run started."
+_SNAPSHOT_CONFIG_REPORT_MESSAGE = (
+	"this run cannot execute saved reports because their definitions can change "
+	"the data source during the run. Use query for the audit data and "
+	"get_engagement_config for the immutable configuration snapshot. Retrying this "
+	"report will not help."
+)
+
+# ``frappe.get_list`` accepts enough SQL-shaped syntax to read a linked or
+# explicitly named second DocType. For a snapshot-config run, allow only a
+# plain field/filter/order expression on the requested base DocType. This is
+# stronger than looking for ``Jarvis Agent Installation`` text: a link such as
+# ``installation.config`` names the mutable row without spelling its DocType.
+_PLAIN_LIST_FIELD = re.compile(r"\*|[A-Za-z_][A-Za-z0-9_]*(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?", re.IGNORECASE)
+_PLAIN_LIST_ORDER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:asc|desc))?", re.IGNORECASE)
+_PLAIN_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
 
 def normalize_tool(name) -> str:
 	"""A registry/manifest tool id reduced to the bench dispatch name."""
@@ -108,6 +138,206 @@ def bench_tools(tools_allow) -> set:
 	satisfy a bench tool name, today or the day a bench tool happens to be called
 	``message``."""
 	return {normalize_tool(t) for t in tools_allow if str(t or "").strip().startswith(_TOOL_PREFIX)}
+
+
+def _is_config_source_doctype(value) -> bool:
+	"""True when ``value`` can expose an engagement configuration value.
+
+	Frappe resolves DocType names without case sensitivity. Match that behaviour
+	here so a differently cased model argument cannot bypass the boundary before
+	the generic read tool canonicalises it. A Run stores the stamped snapshot, but
+	only ``get_engagement_config`` may return it to its active delegate.
+	``Version`` is included because Installation tracks changes: its Version rows
+	can preserve a prior mutable ``config`` value after the Installation changed.
+	"""
+	return isinstance(value, str) and value.strip().casefold() in _CONFIG_SOURCE_DOCTYPES
+
+
+def _query_mentions_config_source(spec) -> bool:
+	"""Whether a structured query can read a mutable configuration source.
+
+	``query`` supports FROM tables, joins, and EXISTS / NOT EXISTS sub-specs. A
+	check of only the outer FROM table would leave both join and nested-query
+	routes open, so this walker follows the same source locations as
+	``query._collect_doctypes``. It deliberately ignores ordinary literal values:
+	a filter value that merely contains the DocType's words is not a read.
+	"""
+
+	def walk(node) -> bool:
+		if not isinstance(node, dict):
+			return False
+		if _is_config_source_doctype(node.get("from")):
+			return True
+		joins = node.get("joins")
+		if isinstance(joins, list):
+			for join in joins:
+				if isinstance(join, dict) and _is_config_source_doctype(join.get("doctype")):
+					return True
+		for key in ("where", "having"):
+			predicates = node.get(key)
+			if not isinstance(predicates, list):
+				continue
+			for predicate in predicates:
+				if not isinstance(predicate, dict):
+					continue
+				op = str(predicate.get("op") or "").strip().lower()
+				if op in {"exists", "not exists"} and walk(predicate.get("value")):
+					return True
+		return False
+
+	return walk(spec)
+
+
+def _is_snapshot_config_cap(cap) -> bool:
+	"""Whether an immutable delegate contract uses the config snapshot boundary."""
+	if not isinstance(cap, dict) or cap.get("legacy"):
+		return False
+	tools_allow = cap.get("tools_allow")
+	return isinstance(tools_allow, list) and _ENGAGEMENT_CONFIG_TOOL in bench_tools(tools_allow)
+
+
+def snapshot_config_report_refusal(report_name, *, cap=None) -> str | None:
+	"""Refuse saved reports for a snapshot-config delegate.
+
+	A saved report is mutable data access policy. Query and Script Reports can run
+	arbitrary sources. Report Builder reports can name a linked source in their
+	saved body, and Frappe's normal report runner does not execute them through a
+	stable, lockable route. Refusing the whole route keeps the launch snapshot as
+	the sole configuration authority. The paired bundle contract removes this
+	tool for new runs; this execution-time guard also protects already-stamped
+	runs that still list it.
+	"""
+	cap = resolve() if cap is None else cap
+	if not _is_snapshot_config_cap(cap):
+		return None
+	if not isinstance(report_name, str) or not report_name.strip():
+		return None  # Preserve run_report's normal missing-argument error.
+	return _SNAPSHOT_CONFIG_REPORT_MESSAGE
+
+
+def _same_doctype(left, right) -> bool:
+	"""Case-insensitive DocType equality, matching Frappe's lookup behaviour."""
+	return (
+		isinstance(left, str)
+		and isinstance(right, str)
+		and left.strip().casefold() == right.strip().casefold()
+	)
+
+
+def _get_list_fields_are_base_fields(fields) -> bool:
+	"""Whether every selected get_list field is a plain base-DocType field."""
+	if fields is None:
+		return True
+	return isinstance(fields, list) and all(
+		isinstance(field, str) and bool(_PLAIN_LIST_FIELD.fullmatch(field.strip())) for field in fields
+	)
+
+
+def _get_list_order_is_base_fields(order_by) -> bool:
+	"""Whether get_list ordering cannot reference a linked or extra table."""
+	if order_by in (None, ""):
+		return True
+	if not isinstance(order_by, str):
+		return False
+	parts = [part.strip() for part in order_by.split(",")]
+	return bool(parts) and all(part and _PLAIN_LIST_ORDER.fullmatch(part) for part in parts)
+
+
+def _get_list_filter_is_base(condition, doctype) -> bool:
+	"""Whether one Frappe filter stays on ``doctype`` and a plain field."""
+	if isinstance(condition, dict):
+		return all(
+			isinstance(field, str) and _PLAIN_FIELD_NAME.fullmatch(field.strip()) for field in condition
+		)
+	if not isinstance(condition, list | tuple):
+		return False
+	if len(condition) in (2, 3):
+		return isinstance(condition[0], str) and bool(_PLAIN_FIELD_NAME.fullmatch(condition[0].strip()))
+	if len(condition) in (4, 5):
+		return (
+			_same_doctype(condition[0], doctype)
+			and isinstance(condition[1], str)
+			and bool(_PLAIN_FIELD_NAME.fullmatch(condition[1].strip()))
+		)
+	return False
+
+
+def _get_list_filters_are_base_fields(filters, doctype) -> bool:
+	"""Whether Frappe filter syntax cannot add a second data source.
+
+	``get_list`` accepts a mapping, one two/three/four-part condition, or a list
+	of conditions. JSON text is decoded before validation because the tool accepts
+	it too. Invalid JSON never reaches a read, so leave its normal validation
+	error to the tool instead of changing that error into a security refusal.
+	"""
+	if filters is None:
+		return True
+	if isinstance(filters, str):
+		try:
+			filters = json.loads(filters)
+		except (TypeError, ValueError):
+			return True
+	if isinstance(filters, dict):
+		return _get_list_filter_is_base(filters, doctype)
+	if not isinstance(filters, list | tuple):
+		return False
+	if not filters:
+		return True
+	conditions = [filters] if isinstance(filters[0], str) else filters
+	return all(_get_list_filter_is_base(condition, doctype) for condition in conditions)
+
+
+def _get_list_args_are_canonical(args: dict) -> bool:
+	"""Reject Frappe's legacy field/filter argument swap for this guarded call."""
+	fields = args.get("fields")
+	filters = args.get("filters")
+	if isinstance(fields, dict):
+		return False
+	if isinstance(fields, list) and fields and isinstance(fields[0], list):
+		return False
+	return not (fields and isinstance(filters, list) and len(filters) > 1 and isinstance(filters[0], str))
+
+
+def _get_list_can_only_read_its_base_doctype(args: dict) -> bool:
+	"""Whether a snapshot delegate's generic list call has one data source."""
+	doctype = args.get("doctype")
+	if not isinstance(doctype, str) or not doctype.strip():
+		return True  # Let get_list return its normal missing-argument error.
+	if _is_config_source_doctype(doctype) or _is_config_source_doctype(args.get("parent_doctype")):
+		return False
+	return (
+		_get_list_args_are_canonical(args)
+		and _get_list_fields_are_base_fields(args.get("fields"))
+		and _get_list_filters_are_base_fields(args.get("filters"), doctype)
+		and _get_list_order_is_base_fields(args.get("order_by"))
+	)
+
+
+def snapshot_config_read_denial(cap, tool: str, args: dict | None) -> dict | None:
+	"""Refuse generic configuration reads for a run with an immutable snapshot.
+
+	The immutable capability row, not the mutable Listing or Installation row,
+	decides whether this boundary applies. A snapshot contract that declared
+	``get_engagement_config`` must get its configuration only through that tool.
+	Legacy and ordinary sessions retain their existing read behaviour.
+
+	The caller invokes this after argument parsing and before dispatch. Therefore
+	it protects the real delegate route. ``get_list`` is restricted to a single,
+	plain base-DocType read because Frappe otherwise lets fields and filters add
+	linked or explicitly named sources.
+	"""
+	if not _is_snapshot_config_cap(cap):
+		return None
+	name = normalize_tool(tool)
+	args = args if isinstance(args, dict) else {}
+	must_refuse = (
+		(name == "get_doc" and _is_config_source_doctype(args.get("doctype")))
+		or (name == "get_list" and not _get_list_can_only_read_its_base_doctype(args))
+		or (name == "query" and _query_mentions_config_source(args.get("spec")))
+	)
+	if not must_refuse:
+		return None
+	return {"message": _SNAPSHOT_CONFIG_READ_MESSAGE, "chat_message": _CHAT_SNAPSHOT_CONFIG_READ_MESSAGE}
 
 
 def _parse_list(raw) -> list:
