@@ -161,6 +161,11 @@ def seal_output(source, result):
 class TestReceivablesReview(FrappeTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
+		# Synthetic source dates must not depend on the system-settings cache or
+		# reach a mocked get_doc while the collector reads its evidence clock.
+		clock = patch.object(frappe.utils, "today", return_value="2026-09-30")
+		self.addCleanup(clock.stop)
+		clock.start()
 		# Mocked source documents must not replace System Settings on a cold date cache.
 		clock = patch.object(frappe.utils, "today", return_value="2026-09-30")
 		clock.start()

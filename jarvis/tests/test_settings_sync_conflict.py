@@ -456,7 +456,14 @@ class TestResyncLlm(_Base):
 		):
 			out = onboarding.resync_llm()
 		self.assertEqual(out["leg"], "pool")
-		self.assertEqual([c.kwargs.get("job_id") for c in enq.call_args_list], ["jarvis_settings_sync:pool"])
+		# Settings can also queue a custom-skill sync. This case checks which
+		# credentials leg runs; an unrelated skill job does not change that choice.
+		settings_jobs = [
+			c.kwargs.get("job_id")
+			for c in enq.call_args_list
+			if str(c.kwargs.get("job_id") or "").startswith("jarvis_settings_sync:")
+		]
+		self.assertEqual(settings_jobs, ["jarvis_settings_sync:pool"])
 
 	def test_a_second_click_inside_the_cooldown_pushes_nothing(self):
 		"""A status that has not moved is exactly what makes someone click again, and
