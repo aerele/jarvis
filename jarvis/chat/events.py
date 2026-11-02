@@ -23,7 +23,9 @@ from jarvis.chat import egress_rules
 CHANNEL = "jarvis:event"
 
 
-def parse_event(payload: dict[str, Any], *, redact: bool = True) -> dict[str, Any] | None:
+def parse_event(
+	payload: dict[str, Any], *, redact: bool = True, collaboration: bool = False
+) -> dict[str, Any] | None:
 	"""Normalize an agent WS frame to a flat dict, or return None to drop it.
 
 	``redact=False`` skips every ``egress_rules.redact`` call and returns the RAW
@@ -79,7 +81,12 @@ def parse_event(payload: dict[str, Any], *, redact: bool = True) -> dict[str, An
 		# rows still come from the item stream; a start here only marks where
 		# a tool call began (the Claude-subscription runtime sends no item
 		# frames), so the relay can find step text before it.
-		return {"kind": "tool_boundary"} if data.get("phase") == "start" else None
+		if data.get("phase") != "start":
+			return None
+		out = {"kind": "tool_boundary"}
+		if collaboration:
+			out.update(tool_name=data.get("name"), tool_call_id=data.get("toolCallId"))
+		return out
 
 	if stream == "assistant":
 		# Redact the live stream (both transports funnel through here). Silent — no
@@ -108,6 +115,13 @@ def parse_event(payload: dict[str, Any], *, redact: bool = True) -> dict[str, An
 
 def publish_to_user(user: str, payload: dict[str, Any]) -> None:
 	"""Broadcast a payload to a single user's socketio channel."""
+	conversation = payload.get("conversation_id") or payload.get("conversation")
+	if conversation:
+		from jarvis.chat.collaboration_realtime import is_shared, notify
+
+		if is_shared(conversation):
+			notify(user, conversation, payload.get("kind"))
+			return
 	message = payload
 	# Terminal events drive global unread/toast routing after the originating
 	# builder may have been hidden or switched to another thread. Attach the

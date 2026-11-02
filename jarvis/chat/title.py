@@ -417,6 +417,10 @@ def enqueue_autotitle(conversation_id: str, user: str) -> None:
 	ends instead of running a 2-8s title LLM turn inline. Cheap still-unnamed
 	gate here so already-titled conversations never spawn a pointless job.
 	"""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(conversation_id):
+		return
 	title = frappe.db.get_value(CONV, conversation_id, "title")
 	if title and title != "New chat":
 		return  # user renamed it, or we already titled it
@@ -470,6 +474,10 @@ def maybe_autotitle(
 	Publishes a ``conversation:renamed`` event so the sidebar updates live.
 	``plain`` takes the title from the first real message instead of a model turn.
 	"""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(conversation_id):
+		return
 	title = frappe.db.get_value(CONV, conversation_id, "title")
 	if title and title != "New chat":
 		return  # user renamed it, or we already titled it
