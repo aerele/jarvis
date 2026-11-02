@@ -88,12 +88,12 @@ def scan_file(content: bytes, filename: str, sheet: str | None = None, cursor=No
 		else:
 			out["stop_reason"] = {"code": code, **where}
 
-	def add(unit, value, is_row=False):
+	def add(unit, value, is_row=False, extra=None):
 		"""Native rows normally; oversized single units resume exact serialized text."""
 		nonlocal used
 		char = offset if unit == start else 0
-		key = "row" if is_row else "page" if ext == "pdf" else "text"
-		record = {key: unit, "values" if is_row else "text": value}
+		key = "block" if ext == "docx" else "row" if is_row else "page" if ext == "pdf" else "text"
+		record = {**(extra or {}), key: unit, "values" if is_row else "text": value}
 		encoded = json.dumps(record, ensure_ascii=False)
 		if char and len(encoded) + 3 <= WINDOW_CHARS:
 			raise InvalidArgumentError(
@@ -115,6 +115,7 @@ def scan_file(content: bytes, filename: str, sheet: str | None = None, cursor=No
 		while low < high:
 			mid = (low + high + 1) // 2
 			candidate = {
+				**(extra or {}),
 				key: unit,
 				"offset": char,
 				"fragment": text[char : char + mid],
@@ -126,6 +127,7 @@ def scan_file(content: bytes, filename: str, sheet: str | None = None, cursor=No
 				high = mid - 1
 		out["records"].append(
 			{
+				**(extra or {}),
 				key: unit,
 				"offset": char,
 				"fragment": text[char : char + low],
@@ -285,6 +287,34 @@ def scan_file(content: bytes, filename: str, sheet: str | None = None, cursor=No
 					stop("sheet_limit", next_sheet=source + 1)
 		finally:
 			wb.close()
+	elif ext == "docx":
+		from jarvis.tools._docx_text import iter_docx
+
+		if source != 0 or sheet is not None:
+			raise InvalidArgumentError("DOCX has no worksheet scope. Use source 0 and omit sheet.")
+		summary = {}
+		out["kind"] = "document"
+		out["source"]["scope"] = (
+			"DOCX text and tables; layout, images, charts, diagram text and comments are not read"
+		)
+		for number, (kind, value, extra) in enumerate(iter_docx(content, summary), 1):
+			# Drain and validate the complete XML even after filling this window.
+			if number > MAX_ROWS:
+				if out["stop_reason"] is None:
+					stop("block_limit", next_block=MAX_ROWS + 1)
+				continue
+			if number < start or out["next_cursor"] is not None:
+				continue
+			if number >= start + WINDOW_ROWS:
+				out["next_cursor"] = pos(number)
+				continue
+			add(number, value, kind == "row", extra)
+		out["source"].update({key: summary[key] for key in ("blocks_total", "parts_total", "omitted")})
+		out["issues"] = summary["issues"]
+		if start > max(summary["blocks_total"], 1):
+			raise InvalidArgumentError("DOCX cursor is outside its source. Restart this file read.")
+		if not out["records"] and not out["stop_reason"]:
+			out["records"].append({"source_empty": True})
 	else:
 		if source != 0:
 			raise InvalidArgumentError("Text/CSV cursor must use source 0.")
