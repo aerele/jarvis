@@ -94,6 +94,10 @@ def _insert_one(
 	doc = build_doc(doctype, values)
 	if ignore_mandatory:
 		doc.flags.ignore_mandatory = True
+	if doctype == "Landed Cost Voucher":
+		from jarvis.tools._lcv_source_tax import gate_lcv
+
+		gate_lcv(doc, lock=True)
 	doc.insert()  # runs DocType validate() + on_insert hooks; sets autoname
 	return doc
 
