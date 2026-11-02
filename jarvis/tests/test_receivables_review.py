@@ -394,6 +394,26 @@ class TestReceivablesReview(FrappeTestCase):
 				with self.assertRaises(frappe.PermissionError):
 					review.get_inputs(frappe._dict(name="RUN"))
 
+	def test_private_source_wrapper_seals_an_active_ar_snapshot(self):
+		from jarvis.exceptions import InvalidArgumentError
+		from jarvis.tools import _private_output
+		from jarvis.tools import get_receivables_review_inputs as source_tool
+
+		captured = snapshot()
+		with (
+			patch.object(source_tool, "get_session_key", return_value="active-ar-session"),
+			patch.object(frappe.db, "get_value", return_value="RUN-AR"),
+			patch.object(frappe, "get_doc", return_value=frappe._dict(name="RUN-AR")),
+			patch.object(source_tool, "get_inputs", return_value=captured) as get_inputs,
+		):
+			with self.assertRaises(InvalidArgumentError):
+				source_tool.get_receivables_review_inputs()
+			get_inputs.assert_not_called()
+			with _private_output.request(True):
+				sealed = source_tool.get_receivables_review_inputs()
+		get_inputs.assert_called_once()
+		self.assertEqual(sealed, {"rows": [captured]})
+
 	def test_review_dispatches_ar_backend_and_requires_named_reviewer(self):
 		source = snapshot()
 		doc = frappe._dict(

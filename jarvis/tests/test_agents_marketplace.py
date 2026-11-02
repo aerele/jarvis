@@ -10,6 +10,7 @@ dedupe (O2), and catalog-sync idempotency.
 
 import json
 import unittest
+from unittest.mock import patch
 
 import frappe
 
@@ -34,6 +35,7 @@ _MODULE_SLUGS = (
 	"bank-recon-operator",
 	"ledger-scrutiny-auditor",
 	"custom-app-learning",
+	"ticket-triage-operator",
 )
 
 
@@ -700,6 +702,175 @@ class TestAgentsMarketplace(unittest.TestCase):
 
 		for slug in operator_slugs:
 			self.assertEqual(frappe.db.get_value(LISTING, slug, "status"), "Published")
+
+	# ------------------------------------------------------------------ #
+	# Ticket Triage: hardened catalog state. The typed private workflow is not
+	# implemented yet, so this operator must remain a non-runnable teaser.
+	# ------------------------------------------------------------------ #
+	def _ticket_triage_stale_install(self):
+		return frappe._dict(
+			name="test-ticket-triage-stale",
+			agent="ticket-triage-operator",
+			owner=self.owner,
+			run_as_user=self.owner,
+			reviewer=self.owner,
+		)
+
+	def _insert_ticket_triage_stale_install(self, *, enabled: int) -> str:
+		"""Insert a pre-guard legacy row without treating it as a valid install."""
+		original = frappe.session.user
+		frappe.set_user(self.owner)
+		try:
+			doc = frappe.get_doc(
+				{
+					"doctype": INSTALLATION,
+					"agent": "ticket-triage-operator",
+					"enabled": enabled,
+					"run_as_user": self.owner,
+					"reviewer": self.owner,
+					"activation_state": "shadow",
+					"installable": 1,
+					"installed_version": "0.1.1",
+					"installed_at": frappe.utils.now(),
+				}
+			)
+			doc.flags.ignore_validate = True
+			doc.insert(ignore_permissions=True)
+			frappe.db.commit()
+			return doc.name
+		finally:
+			frappe.set_user(original)
+
+	def test_ticket_triage_stays_coming_soon_with_no_runtime_surface(self):
+		agent_catalog.sync_agent_listings()
+		listing = frappe.get_doc(LISTING, "ticket-triage-operator")
+		self.assertEqual(listing.status, "Coming Soon")
+		self.assertEqual(listing.version, "0.1.1")
+		self.assertIn("no runtime tool or write surface", listing.description)
+		self.assertEqual(frappe.parse_json(listing.tools_required), [])
+		self.assertEqual(agent_catalog.registry_tools_allow("ticket-triage-operator"), [])
+		self.assertTrue(agent_catalog.registry_is_coming_soon_no_runtime("ticket-triage-operator"))
+		self.assertFalse(agent_catalog.registry_is_coming_soon_no_runtime("cycle-count-planner-operator"))
+		self.assertFalse(
+			any(
+				entry["slug"] == "agent-ticket-triage-operator"
+				for entry in agent_catalog.build_agent_push_payload()
+			),
+			"a Coming Soon agent must never reach the delegate payload",
+		)
+
+	def test_ticket_triage_refuses_install(self):
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaisesRegex(frappe.ValidationError, "not available to install"):
+				agents_api.install_agent("ticket-triage-operator")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertFalse(
+			frappe.db.exists(
+				INSTALLATION,
+				{"owner": self.owner, "agent": "ticket-triage-operator"},
+			)
+		)
+
+	def test_ticket_triage_admin_cannot_publish_the_no_runtime_bundle(self):
+		frappe.set_user(self.admin)
+		try:
+			with self.assertRaisesRegex(frappe.PermissionError, "Coming Soon teaser"):
+				agents_api.set_listing_status("ticket-triage-operator", "Published")
+			listing = frappe.get_doc(LISTING, "ticket-triage-operator")
+			listing.status = "Published"
+			with self.assertRaisesRegex(frappe.PermissionError, "Coming Soon teaser"):
+				listing.save()
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(LISTING, "ticket-triage-operator", "status"), "Coming Soon")
+
+	def test_ticket_triage_legacy_published_listing_cannot_install(self):
+		frappe.db.set_value(LISTING, "ticket-triage-operator", "status", "Published", update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaisesRegex(frappe.PermissionError, "not available to install"):
+				agents_api.install_agent("ticket-triage-operator")
+		finally:
+			frappe.set_user("Administrator")
+			agent_catalog.sync_agent_listings()
+		self.assertFalse(
+			frappe.db.exists(
+				INSTALLATION,
+				{"owner": self.owner, "agent": "ticket-triage-operator"},
+			)
+		)
+
+	def test_ticket_triage_stale_install_cannot_enable_but_can_disable(self):
+		frappe.db.set_value(LISTING, "ticket-triage-operator", "status", "Published", update_modified=False)
+		frappe.db.commit()
+		inst = self._insert_ticket_triage_stale_install(enabled=0)
+		frappe.set_user(self.owner)
+		try:
+			frappe.clear_messages()
+			with self.assertRaises(frappe.PermissionError):
+				agents_api.set_enabled(inst, 1)
+			self.assertTrue(
+				any(
+					"no runnable bundled workflow" in (message.get("message") or "")
+					for message in frappe.get_message_log()
+				)
+			)
+			res = agents_api.set_enabled(inst, 0)
+			persisted_enabled = frappe.db.get_value(INSTALLATION, inst, "enabled")
+		finally:
+			frappe.set_user("Administrator")
+			agent_catalog.sync_agent_listings()
+			frappe.delete_doc(INSTALLATION, inst, force=True, ignore_permissions=True)
+			frappe.db.commit()
+		self.assertEqual(res["data"]["enabled"], 0)
+		self.assertEqual(persisted_enabled, 0)
+
+	def test_ticket_triage_stale_rows_never_reach_any_push_payload_leg(self):
+		frappe.db.set_value(LISTING, "ticket-triage-operator", "status", "Published", update_modified=False)
+		frappe.db.commit()
+		inst = self._insert_ticket_triage_stale_install(enabled=1)
+		try:
+			with patch(
+				"jarvis.chat.agent_installability.evaluate_installability", return_value=(True, "", "")
+			):
+				owner_payload = agent_catalog.build_agent_push_payload(owner=self.owner)
+				bench_payload = agent_catalog.build_agent_push_payload()
+		finally:
+			agent_catalog.sync_agent_listings()
+			frappe.delete_doc(INSTALLATION, inst, force=True, ignore_permissions=True)
+			frappe.db.commit()
+		self.assertEqual(self._count_slug(owner_payload, "agent-ticket-triage-operator"), 0)
+		self.assertEqual(self._count_slug(bench_payload, "agent-ticket-triage-operator"), 0)
+
+	def test_ticket_triage_refuses_stale_launch_before_creating_a_run(self):
+		inst = self._ticket_triage_stale_install()
+		conversations_before = frappe.db.count("Jarvis Conversation")
+		runs_before = frappe.db.count(RUN, {"agent": inst.agent})
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaisesRegex(frappe.ValidationError, r"no longer published \(Coming Soon\)"):
+				agent_scheduler._launch_audit(inst, trigger="manual")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.count("Jarvis Conversation"), conversations_before)
+		self.assertEqual(frappe.db.count(RUN, {"agent": inst.agent}), runs_before)
+
+		# A stale pre-hardening listing might still say Published. The empty bundled
+		# surface remains a second server-side refusal before any run is created.
+		frappe.db.set_value(LISTING, inst.agent, "status", "Published", update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaisesRegex(frappe.ValidationError, "bundle declares no tools"):
+				agent_scheduler._launch_audit(inst, trigger="manual")
+		finally:
+			frappe.set_user("Administrator")
+			agent_catalog.sync_agent_listings()
+		self.assertEqual(frappe.db.count("Jarvis Conversation"), conversations_before)
+		self.assertEqual(frappe.db.count(RUN, {"agent": inst.agent}), runs_before)
 
 	# ------------------------------------------------------------------ #
 	# (d2) Phase 0A — delegate agent stub + body-free enablement signal

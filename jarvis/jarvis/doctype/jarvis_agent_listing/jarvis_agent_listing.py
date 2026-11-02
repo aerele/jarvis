@@ -18,7 +18,23 @@ from jarvis.permissions import NotRenamable
 
 class JarvisAgentListing(NotRenamable, Document):
 	def validate(self):
+		self._guard_registry_runtime_status()
 		self._guard_operator_visibility_authority()
+
+	def _guard_registry_runtime_status(self):
+		"""Keep a reviewed no-runtime teaser at its fixed marketplace status.
+
+		The listing is tenant-mutable, but the bundle metadata is reviewed deploy
+		code. A Desk, REST, or API write must not publish a bundle that declares no
+		runtime surface.
+		"""
+		from jarvis.chat.agent_catalog import registry_is_coming_soon_no_runtime
+
+		if registry_is_coming_soon_no_runtime(self.agent_slug or self.name) and self.status != "Coming Soon":
+			frappe.throw(
+				_("This agent is a Coming Soon teaser and cannot be published."),
+				frappe.PermissionError,
+			)
 
 	def _guard_operator_visibility_authority(self):
 		"""``operator_visibility`` is OPERATOR-GLOBAL state: only a System Manager may

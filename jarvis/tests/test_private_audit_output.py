@@ -99,20 +99,6 @@ class TestPrivateAuditOutput(FrappeTestCase):
 		self.assertNotIn(CANARY, str(steps))
 		self.assertTrue(all(s.detail == "1000 rows" for s in steps))
 
-	def test_private_query_keeps_the_requested_page_when_more_rows_exist(self):
-		payload = {"rows": [{"name": "FAKE", "value": CANARY}], "more_rows": True}
-		with patch("jarvis.api.publish_realtime_tool_result"):
-			result = self._dispatch(payload)
-		self.assertTrue(result["ok"], result)
-		self.assertTrue(result["data"]["more_rows"])
-		self.assertEqual(result["result_mode"], _private_output.MODE)
-		message = frappe.get_value("Jarvis Chat Message", {"conversation": self.conv.name}, "tool_result")
-		receipt = json.loads(message)
-		self.assertEqual(receipt["data"]["count"], 1)
-		self.assertEqual(len(receipt["data"]["sha256"]), 64)
-		self.assertNotIn("more_rows", receipt["data"])
-		self.assertNotIn(CANARY, message)
-
 	def test_private_review_input_leaves_only_its_safe_receipt(self):
 		payload = {
 			"rows": [
@@ -237,6 +223,20 @@ class TestPrivateAuditOutput(FrappeTestCase):
 				)
 				self.assertFalse(result["ok"], result)
 				execute.assert_not_called()
+
+	def test_private_query_keeps_the_requested_page_when_more_rows_exist(self):
+		payload = {"rows": [{"name": "FAKE", "value": CANARY}], "more_rows": True}
+		with patch("jarvis.api.publish_realtime_tool_result"):
+			result = self._dispatch(payload)
+		self.assertTrue(result["ok"], result)
+		self.assertTrue(result["data"]["more_rows"])
+		self.assertEqual(result["result_mode"], _private_output.MODE)
+		message = frappe.get_value("Jarvis Chat Message", {"conversation": self.conv.name}, "tool_result")
+		receipt = json.loads(message)
+		self.assertEqual(receipt["data"]["count"], 1)
+		self.assertEqual(len(receipt["data"]["sha256"]), 64)
+		self.assertNotIn("more_rows", receipt["data"])
+		self.assertNotIn(CANARY, message)
 
 	def test_ordinary_agent_output_is_still_guarded(self):
 		payload = {"rows": [{"name": f"FAKE-{i}", "value": "x" * 200} for i in range(1000)]}
@@ -366,18 +366,27 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			self.assertFalse(api.call_tool("query", {}, result_mode=_private_output.MODE)["ok"])
 			execute.assert_not_called()
 
-	def test_standard_external_source_cannot_collect_private_evidence(self):
+	def test_standard_external_source_entry_guard_refuses_before_dispatch(self):
+		self.assertEqual(
+			_private_output.PRIVATE_SOURCE_TOOLS,
+			frozenset({"get_purchase_match_inputs", "get_receivables_review_inputs"}),
+		)
 		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
 			module = importlib.import_module(f"jarvis.tools.{tool}")
-			with (
-				self.subTest(tool=tool),
-				patch.object(module, "get_inputs") as source,
-				patch("jarvis.api._get_header", return_value=None),
-			):
-				result = api.call_tool(tool, {})
-			source.assert_not_called()
-			self.assertFalse(result["ok"], result)
-			self.assertNotIn("data", result)
+			for mode in (None, _private_output.MODE):
+				with (
+					self.subTest(tool=tool, mode=mode),
+					patch.object(module, "get_inputs") as source,
+					patch("jarvis.api._get_header", return_value=None),
+					patch("jarvis.api._dispatch_current_user") as dispatch,
+					patch("jarvis.api._run_tool") as run_tool,
+				):
+					result = api.call_tool(tool, {}, result_mode=mode)
+				source.assert_not_called()
+				dispatch.assert_not_called()
+				run_tool.assert_not_called()
+				self.assertFalse(result["ok"], result)
+				self.assertNotIn("data", result)
 
 	def test_plugin_endpoint_requires_the_bound_read_contract(self):
 		headers = {"X-Jarvis-Token": "fake-test-token"}

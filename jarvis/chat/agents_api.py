@@ -1178,6 +1178,13 @@ def install_agent(
 		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
 	if listing.status != "Published":
 		frappe.throw(_("This agent is not available to install."))
+	# A mutable legacy listing can say Published even though its reviewed bundle
+	# is a no-runtime Coming Soon teaser. Refuse before installability checks so
+	# a missing optional app cannot mask the closed bundle contract.
+	from jarvis.chat.agent_catalog import registry_is_coming_soon_no_runtime
+
+	if registry_is_coming_soon_no_runtime(listing.name):
+		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
 	if frappe.db.exists(INSTALLATION, {"owner": me, "agent": listing.name}):
 		frappe.throw(_("You have already installed this agent."))
 	# R5-J8: refuse when the listing's min_apps are not all installed / a required
@@ -1301,6 +1308,14 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	# absent at install, or one that vanished after install and was reconciled to
 	# installable=0). Disabling is always allowed.
 	if int(enabled or 0):
+		from jarvis.chat.agent_catalog import registry_is_coming_soon_no_runtime
+
+		if registry_is_coming_soon_no_runtime(doc.agent):
+			frappe.throw(
+				_("This agent has no runnable bundled workflow and cannot be enabled."),
+				frappe.PermissionError,
+				title=_("Agent not available"),
+			)
 		from jarvis.chat.agent_installability import assert_installable
 
 		assert_installable(doc.agent)
