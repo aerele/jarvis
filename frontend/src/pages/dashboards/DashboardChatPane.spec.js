@@ -15,12 +15,18 @@ import { mount, flushPromises } from "@vue/test-utils";
 // (WikiTab.spec.js precedent: jsdom's localStorage is not reliably usable
 // here). The pane's conversation slot is seeded to a known id up front so a
 // realtime frame naming it passes the "OUR conversation" gate.
+const dashboardConversation = vi.hoisted(() => ({ slot: null }));
 vi.mock("@vueuse/core", async (importOriginal) => {
 	const actual = await importOriginal();
 	const { ref } = await import("vue");
 	return {
 		...actual,
-		useStorage: (key, initial) => ref(key.startsWith("jarvis-dash-conv-") ? "conv1" : initial),
+		useStorage: (key, initial) => {
+			if (!key.startsWith("jarvis-dash-conv-")) return ref(initial);
+			const slot = ref("conv1");
+			dashboardConversation.slot = slot;
+			return slot;
+		},
 	};
 });
 
@@ -137,6 +143,7 @@ function fakeSocket() {
 const mounted = [];
 afterEach(() => {
 	while (mounted.length) mounted.pop().unmount();
+	dashboardConversation.slot = null;
 });
 
 function mountPane({ socket = fakeSocket() } = {}) {
@@ -240,8 +247,20 @@ describe("DashboardChatPane history menu", () => {
 
 describe("DashboardChatPane typed replies to its parked cards (PR-3b)", () => {
 	const cards = [
-		{ token: "tok-late", conversation: "conv1", tool: "create_doc", created_at: 200 },
-		{ token: "tok-early", conversation: "conv1", tool: "create_doc", created_at: 100 },
+		{
+			token: "tok-late",
+			conversation: "conv1",
+			tool: "create_doc",
+			created_at: 200,
+			pending_card_safe: true,
+		},
+		{
+			token: "tok-early",
+			conversation: "conv1",
+			tool: "create_doc",
+			created_at: 100,
+			pending_card_safe: true,
+		},
 	];
 
 	async function typeAndSend(wrapper, text) {
@@ -293,13 +312,619 @@ describe("DashboardChatPane typed replies to its parked cards (PR-3b)", () => {
 	});
 });
 
+describe("DashboardChatPane requires the pending-card safety attestation", () => {
+	it("does not render a raw list item, while it keeps an attested sibling", async () => {
+		listPendingConfirmations.mockResolvedValueOnce({
+			ok: true,
+			data: {
+				pending: [
+					{ token: "raw", conversation: "conv1", tool: "update_doc" },
+					{
+						token: "wrong-chat",
+						conversation: "conv2",
+						tool: "update_doc",
+						pending_card_safe: true,
+					},
+					{
+						token: "safe",
+						conversation: "conv1",
+						tool: "update_doc",
+						pending_card_safe: true,
+					},
+				],
+			},
+		});
+		const { wrapper } = mountPane();
+		await flushPromises();
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
+		await wrapper
+			.findAll("button")
+			.find((button) => button.text() === "Approve")
+			.trigger("click");
+		await flushPromises();
+		expect(confirmTool).toHaveBeenCalledWith("safe", "conv1");
+	});
+});
+
+describe("DashboardChatPane pending-card freshness", () => {
+	afterEach(() => {
+		listPendingConfirmations.mockReset();
+		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: [] } });
+		confirmTool.mockReset();
+		dismissTool.mockReset();
+	});
+	const deferred = () => {
+		let resolve;
+		const promise = new Promise((done) => {
+			resolve = done;
+		});
+		return { promise, resolve };
+	};
+
+	it("does not render a delayed A card after the pane switches to B", async () => {
+		let resolveA;
+		const delayedA = new Promise((resolve) => {
+			resolveA = resolve;
+		});
+		listPendingConfirmations.mockImplementation((conversation) =>
+			conversation === "conv1"
+				? delayedA
+				: Promise.resolve({ ok: true, data: { pending: [] } })
+		);
+
+		const { wrapper } = mountPane();
+		await Promise.resolve();
+		expect(listPendingConfirmations).toHaveBeenCalledWith("conv1");
+
+		dashboardConversation.slot.value = "conv2";
+		await flushPromises();
+		expect(listPendingConfirmations).toHaveBeenCalledWith("conv2");
+
+		resolveA({
+			ok: true,
+			data: {
+				pending: [
+					{
+						token: "only-in-a",
+						conversation: "conv1",
+						tool: "create_doc",
+						pending_card_safe: true,
+					},
+				],
+			},
+		});
+		await flushPromises();
+
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(0);
+		expect(wrapper.text()).not.toContain("only-in-a");
+	});
+
+	it("does not accept an old A list after A switches to B and back to A", async () => {
+		const oldA = deferred();
+		const freshA = deferred();
+		let aCalls = 0;
+		listPendingConfirmations.mockImplementation((conversation) => {
+			if (conversation === "conv1") return ++aCalls === 1 ? oldA.promise : freshA.promise;
+			return Promise.resolve({ ok: true, data: { pending: [] } });
+		});
+
+		const { wrapper } = mountPane();
+		await Promise.resolve();
+		dashboardConversation.slot.value = "conv2";
+		await flushPromises();
+		dashboardConversation.slot.value = "conv1";
+		await flushPromises();
+
+		freshA.resolve({
+			ok: true,
+			data: {
+				pending: [
+					{
+						token: "fresh-a",
+						conversation: "conv1",
+						tool: "create_doc",
+						summary: "Fresh A card",
+						pending_card_safe: true,
+					},
+				],
+			},
+		});
+		await flushPromises();
+		expect(wrapper.text()).toContain("Fresh A card");
+
+		oldA.resolve({
+			ok: true,
+			data: {
+				pending: [
+					{
+						token: "old-a",
+						conversation: "conv1",
+						tool: "create_doc",
+						summary: "Old A card",
+						pending_card_safe: true,
+					},
+				],
+			},
+		});
+		await flushPromises();
+
+		expect(wrapper.text()).toContain("Fresh A card");
+		expect(wrapper.text()).not.toContain("Old A card");
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
+	});
+
+	it("does not let a direct A response change B", async () => {
+		const action = deferred();
+		listPendingConfirmations.mockImplementation((conversation) =>
+			Promise.resolve({
+				ok: true,
+				data: {
+					pending:
+						conversation === "conv1"
+							? [
+									{
+										token: "a-token",
+										conversation: "conv1",
+										tool: "create_doc",
+										summary: "A action",
+										pending_card_safe: true,
+									},
+							  ]
+							: [
+									{
+										token: "b-token",
+										conversation: "conv2",
+										tool: "create_doc",
+										summary: "B action",
+										pending_card_safe: true,
+									},
+							  ],
+				},
+			})
+		);
+		confirmTool.mockReturnValueOnce(action.promise);
+		const { wrapper } = mountPane();
+		await flushPromises();
+		await wrapper
+			.findAll("button")
+			.find((button) => button.text() === "Approve")
+			.trigger("click");
+		expect(confirmTool).toHaveBeenCalledWith("a-token", "conv1");
+
+		dashboardConversation.slot.value = "conv2";
+		await flushPromises();
+		expect(wrapper.text()).toContain("B action");
+
+		action.resolve({
+			ok: false,
+			reason_code: "safety_update",
+			error: { message: "A was cancelled." },
+		});
+		await flushPromises();
+
+		expect(wrapper.text()).toContain("B action");
+		expect(wrapper.text()).not.toContain("A was cancelled.");
+		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
+	});
+
+	it("does not let a direct old A response change a later A view", async () => {
+		const action = deferred();
+		let aLoads = 0;
+		listPendingConfirmations.mockImplementation((conversation) => {
+			if (conversation === "conv1") {
+				aLoads++;
+				return Promise.resolve({
+					ok: true,
+					data: {
+						pending: [
+							{
+								token: aLoads === 1 ? "old-a-token" : "later-a-token",
+								conversation: "conv1",
+								tool: "create_doc",
+								summary: aLoads === 1 ? "Old A action" : "Later A action",
+								pending_card_safe: true,
+							},
+						],
+					},
+				});
+			}
+			return Promise.resolve({
+				ok: true,
+				data: {
+					pending: [
+						{
+							token: "b-token",
+							conversation: "conv2",
+							tool: "create_doc",
+							summary: "B action",
+							pending_card_safe: true,
+						},
+					],
+				},
+			});
+		});
+		confirmTool.mockReturnValueOnce(action.promise);
+		const { wrapper } = mountPane();
+		await flushPromises();
+		await wrapper
+			.findAll("button")
+			.find((button) => button.text() === "Approve")
+			.trigger("click");
+
+		dashboardConversation.slot.value = "conv2";
+		await flushPromises();
+		dashboardConversation.slot.value = "conv1";
+		await flushPromises();
+		expect(wrapper.text()).toContain("Later A action");
+
+		action.resolve({
+			ok: false,
+			reason_code: "safety_update",
+			error: { message: "Old A was cancelled." },
+		});
+		await flushPromises();
+
+		expect(wrapper.text()).toContain("Later A action");
+		expect(wrapper.text()).not.toContain("Old A was cancelled.");
+		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
+	});
+
+	it.each(["Approve", "Dismiss"])(
+		"keeps the current %s card retryable after a concurrent resync without changing another chat",
+		async (actionLabel) => {
+			vi.useFakeTimers();
+			try {
+				const firstAction = deferred();
+				const retryAction = deferred();
+				const token = `keep-${actionLabel.toLowerCase()}`;
+				const card = {
+					token,
+					conversation: "conv1",
+					tool: "update_doc",
+					summary: `${actionLabel} stays retryable`,
+					pending_card_safe: true,
+				};
+				const sibling = {
+					token: `sibling-${actionLabel.toLowerCase()}`,
+					conversation: "conv1",
+					tool: "update_doc",
+					summary: "Valid A sibling",
+					pending_card_safe: true,
+				};
+				const otherChatCard = {
+					// Deliberately reuse A's token. A stale response must not touch the
+					// current B card even if a server bug ever reuses a token.
+					token,
+					conversation: "conv2",
+					tool: "update_doc",
+					summary: "B card stays usable",
+					pending_card_safe: true,
+				};
+				let lists = 0;
+				listPendingConfirmations.mockImplementation((conversation) => {
+					lists++;
+					return Promise.resolve({
+						ok: true,
+						data: {
+							pending:
+								conversation === "conv1"
+									? [{ ...card }, { ...sibling }]
+									: [{ ...otherChatCard }],
+						},
+					});
+				});
+				const actionApi = actionLabel === "Approve" ? confirmTool : dismissTool;
+				actionApi.mockReset();
+				actionApi
+					.mockReturnValueOnce(firstAction.promise)
+					.mockReturnValueOnce(retryAction.promise);
+
+				const { wrapper, socket } = mountPane();
+				await flushPromises();
+				await wrapper
+					.findAll("button")
+					.find((button) => button.text() === actionLabel)
+					.trigger("click");
+				await flushPromises();
+
+				// A realtime frame schedules a fresh pending-list read while the RPC
+				// still owns the old card object. The refresh intentionally replaces it.
+				socket.fire({ kind: "tool:start", conversation_id: "conv1", run_id: "run-keep" });
+				await vi.advanceTimersByTimeAsync(310);
+				await flushPromises();
+				expect(lists).toBeGreaterThanOrEqual(2);
+				const busyDismiss = wrapper
+					.findAllComponents({ name: "Button" })
+					.find((button) => button.props("label") === "Dismiss");
+				expect(busyDismiss.props("disabled")).toBe(true);
+				expect(wrapper.text()).toContain("Valid A sibling");
+
+				firstAction.resolve({ ok: false, reason_code: "busy" });
+				await flushPromises();
+
+				const retryDismiss = wrapper
+					.findAllComponents({ name: "Button" })
+					.find((button) => button.props("label") === "Dismiss");
+				expect(retryDismiss.props("disabled")).toBe(false);
+				expect(wrapper.text()).toContain(`${actionLabel} stays retryable`);
+				await wrapper
+					.findAll("button")
+					.find((button) => button.text() === actionLabel)
+					.trigger("click");
+				expect(actionApi).toHaveBeenCalledTimes(2);
+
+				dashboardConversation.slot.value = "conv2";
+				await flushPromises();
+				expect(wrapper.text()).toContain("B card stays usable");
+				const bDismiss = wrapper
+					.findAllComponents({ name: "Button" })
+					.find((button) => button.props("label") === "Dismiss");
+				expect(bDismiss.props("disabled")).toBe(false);
+
+				retryAction.resolve({ ok: false, reason_code: "busy" });
+				await flushPromises();
+				expect(wrapper.text()).toContain("B card stays usable");
+				expect(
+					wrapper
+						.findAllComponents({ name: "Button" })
+						.find((button) => button.props("label") === "Dismiss")
+						.props("disabled")
+				).toBe(false);
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
+});
+
+describe("DashboardChatPane safety-update receipts", () => {
+	afterEach(() => {
+		api.getDashboardConversation.mockReset();
+		api.getDashboardConversation.mockResolvedValue({ messages: [] });
+		listPendingConfirmations.mockReset();
+		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: [] } });
+		confirmTool.mockReset();
+		dismissTool.mockReset();
+	});
+
+	it("queues each suppressed receipt as a Done-only notice and keeps a valid sibling", async () => {
+		api.getDashboardConversation.mockResolvedValue({
+			messages: [
+				{
+					name: "receipt-1",
+					role: "tool",
+					tool_call_id: "stale-1",
+					action_outcome: "cancelled",
+					tool_result: {
+						reason_code: "safety_update",
+						error: { message: "First stale action was cancelled. Nothing ran." },
+					},
+				},
+				{
+					name: "receipt-2",
+					role: "tool",
+					tool_call_id: "stale-2",
+					action_outcome: "cancelled",
+					tool_result: {
+						reason_code: "safety_update",
+						error: { message: "Second stale action was cancelled. Nothing ran." },
+					},
+				},
+			],
+		});
+		listPendingConfirmations.mockResolvedValue({
+			ok: true,
+			data: {
+				pending: [
+					{
+						token: "stale-1",
+						conversation: "conv1",
+						tool: "create_doc",
+						pending_card_safe: true,
+					},
+					{
+						token: "stale-2",
+						conversation: "conv1",
+						tool: "create_doc",
+						pending_card_safe: true,
+					},
+					{
+						token: "current",
+						conversation: "conv1",
+						tool: "create_doc",
+						pending_card_safe: true,
+					},
+				],
+			},
+		});
+
+		const { wrapper } = mountPane();
+		await flushPromises();
+
+		const notice = wrapper.find(".dashboard-safety-update");
+		expect(notice.attributes("role")).toBe("status");
+		expect(notice.text()).toContain("First stale action was cancelled. Nothing ran.");
+		expect(notice.findAll("button").map((button) => button.text())).toEqual(["Done"]);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
+		expect(wrapper.findAll("button").some((button) => button.text() === "Retry")).toBe(false);
+
+		await notice.find("button").trigger("click");
+		await flushPromises();
+		expect(wrapper.find(".dashboard-safety-update").text()).toContain(
+			"Second stale action was cancelled. Nothing ran."
+		);
+		expect(
+			wrapper
+				.find(".dashboard-safety-update")
+				.findAll("button")
+				.map((button) => button.text())
+		).toEqual(["Done"]);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
+
+		await wrapper.find(".dashboard-safety-update button").trigger("click");
+		await flushPromises();
+		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
+	});
+
+	for (const [label, action] of [
+		["Approve", confirmTool],
+		["Dismiss", dismissTool],
+	]) {
+		it(`${label} settles a direct safety update as Done-only and leaves its safe sibling`, async () => {
+			listPendingConfirmations.mockResolvedValue({
+				ok: true,
+				data: {
+					pending: [
+						{
+							token: "cancelled-direct",
+							conversation: "conv1",
+							tool: "create_doc",
+							created_at: 100,
+							pending_card_safe: true,
+						},
+						{
+							token: "safe-sibling",
+							conversation: "conv1",
+							tool: "create_doc",
+							created_at: 200,
+							pending_card_safe: true,
+						},
+					],
+				},
+			});
+			action.mockResolvedValueOnce({
+				ok: false,
+				reason_code: "safety_update",
+				error: { message: "This direct action was cancelled. Nothing ran." },
+			});
+			toast.error.mockClear();
+
+			const { wrapper } = mountPane();
+			await flushPromises();
+			await wrapper
+				.findAll("button")
+				.find((button) => button.text() === label)
+				.trigger("click");
+			await flushPromises();
+
+			expect(action).toHaveBeenCalledWith("cancelled-direct", "conv1");
+			const notice = wrapper.find(".dashboard-safety-update");
+			expect(notice.text()).toContain("This direct action was cancelled. Nothing ran.");
+			expect(notice.findAll("button").map((button) => button.text())).toEqual(["Done"]);
+			expect(
+				wrapper.findAll("button").filter((button) => button.text() === "Approve")
+			).toHaveLength(1);
+			expect(
+				wrapper.findAll("button").filter((button) => button.text() === "Dismiss")
+			).toHaveLength(1);
+			expect(wrapper.findAll("button").some((button) => button.text() === "Retry")).toBe(
+				false
+			);
+			expect(toast.error).not.toHaveBeenCalled();
+		});
+	}
+
+	it("queues one Done notice when a passive receipt settles an in-flight direct action", async () => {
+		const defer = () => {
+			let resolve;
+			const promise = new Promise((done) => {
+				resolve = done;
+			});
+			return { promise, resolve };
+		};
+		const transcript = defer();
+		const action = defer();
+		api.getDashboardConversation.mockReturnValueOnce(transcript.promise);
+		listPendingConfirmations.mockResolvedValue({
+			ok: true,
+			data: {
+				pending: [
+					{
+						token: "cancelled-direct",
+						conversation: "conv1",
+						tool: "create_doc",
+						pending_card_safe: true,
+					},
+					{
+						token: "safe-sibling",
+						conversation: "conv1",
+						tool: "create_doc",
+						pending_card_safe: true,
+					},
+				],
+			},
+		});
+		confirmTool.mockReturnValueOnce(action.promise);
+
+		const { wrapper } = mountPane();
+		await flushPromises();
+		await wrapper
+			.findAll("button")
+			.find((button) => button.text() === "Approve")
+			.trigger("click");
+
+		transcript.resolve({
+			messages: [
+				{
+					role: "tool",
+					tool_call_id: "cancelled-direct",
+					action_outcome: "cancelled",
+					tool_result: {
+						reason_code: "safety_update",
+						error: { message: "This action was cancelled." },
+					},
+				},
+			],
+		});
+		await flushPromises();
+		expect(wrapper.find(".dashboard-safety-update").text()).toContain(
+			"This action was cancelled."
+		);
+
+		action.resolve({
+			ok: false,
+			reason_code: "safety_update",
+			error: { message: "This action was cancelled." },
+		});
+		await flushPromises();
+		await wrapper.find(".dashboard-safety-update button").trigger("click");
+		await flushPromises();
+
+		expect(wrapper.find(".dashboard-safety-update").exists()).toBe(false);
+		expect(
+			wrapper.findAll("button").filter((button) => button.text() === "Approve")
+		).toHaveLength(1);
+	});
+});
+
 // D3: the pane's Approve/Dismiss used to always show one generic "may have
 // expired" toast on any ok:false besides a storage blip. Now that cards carry
 // a reason_code (stale/target_missing/tampered/unverifiable, busy, …), reuse
 // the SPA's chatCardActions mapping so the words - and the keep-vs-drop
 // decision - match ChatView's, instead of a second, cruder copy here.
 describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
-	const cards = [{ token: "tok1", conversation: "conv1", tool: "update_doc" }];
+	const cards = [
+		{ token: "tok1", conversation: "conv1", tool: "update_doc", pending_card_safe: true },
+	];
 
 	it("settles a card as Failed with its specific reason, not the opaque guess", async () => {
 		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
@@ -815,5 +1440,75 @@ describe("DashboardChatPane send", () => {
 		const [message] = toast.error.mock.calls.at(-1);
 		expect(message).not.toContain("<img");
 		expect(message).toContain("&lt;img src=x onerror=1&gt;");
+	});
+
+	it("does not let a delayed A send start a run in B", async () => {
+		let resolve;
+		const pending = new Promise((done) => {
+			resolve = done;
+		});
+		api.sendDashboardChat.mockReturnValueOnce(pending);
+		const { wrapper } = mountPane();
+		await flushPromises();
+		await send(wrapper, "A-only request");
+		expect(api.sendDashboardChat.mock.calls[0].slice(0, 2)).toEqual([
+			"conv1",
+			"A-only request",
+		]);
+
+		dashboardConversation.slot.value = "conv2";
+		await flushPromises();
+		resolve({ ok: true, conversation_id: "conv1", run_id: "a-run" });
+		await flushPromises();
+
+		expect(dashboardConversation.slot.value).toBe("conv2");
+		expect(wrapper.text()).not.toContain("A-only request");
+		expect(running(wrapper)).toBe(false);
+	});
+
+	it("does not let an in-flight A no-socket ladder emit activity in B", async () => {
+		vi.useFakeTimers();
+		let resolveOldA;
+		const oldA = new Promise((done) => {
+			resolveOldA = done;
+		});
+		let aLoads = 0;
+		api.getDashboardConversation.mockImplementation((conversation) => {
+			if (conversation === "conv1" && ++aLoads === 2) return oldA;
+			return Promise.resolve({
+				messages:
+					conversation === "conv2"
+						? [{ name: "b-done", role: "assistant", content: "B only" }]
+						: [],
+			});
+		});
+		api.sendDashboardChat.mockResolvedValueOnce({
+			ok: true,
+			conversation_id: "conv1",
+			run_id: "a-run",
+		});
+		try {
+			const { wrapper } = mountPane({ socket: null });
+			await vi.advanceTimersByTimeAsync(10);
+			const box = wrapper.find("textarea");
+			await box.setValue("start A");
+			await box.trigger("keydown", { key: "Enter" });
+			await vi.advanceTimersByTimeAsync(10);
+
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(aLoads).toBe(2);
+			dashboardConversation.slot.value = "conv2";
+			await vi.advanceTimersByTimeAsync(10);
+			resolveOldA({ messages: [{ name: "a-done", role: "assistant", content: "A only" }] });
+			await vi.advanceTimersByTimeAsync(10);
+
+			expect(wrapper.text()).toContain("B only");
+			expect(wrapper.text()).not.toContain("A only");
+			expect(wrapper.emitted("activity")).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+			api.getDashboardConversation.mockReset();
+			api.getDashboardConversation.mockResolvedValue({ messages: [] });
+		}
 	});
 });

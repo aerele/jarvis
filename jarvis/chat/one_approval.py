@@ -151,14 +151,31 @@ def _pa_cards(conversation: str, since) -> list[frappe._dict]:
 	whatever this request read before: a card a Confirm is claiming right now raises
 	``frappe.QueryTimeoutError``, one changed after this request's read view (snapshot
 	isolation on) ``frappe.QueryDeadlockError``."""
+	from jarvis.chat import pending_confirm
+	from jarvis.chat.agent_closure import pending_action_fences_ready
+
 	pa = frappe.qb.DocType(PA)
 	status = pa.status.isin(["Pending", "Executing"])
 	ran = pa.status == "Executed"
 	if since is not None:
 		ran = ran & (pa.decided_at >= since)
+	columns = [
+		pa.name,
+		pa.kind,
+		pa.status,
+		pa.conversation,
+		pa.owner_user,
+		pa.preview,
+		pa.result_doctype,
+		pa.result_name,
+	]
+	# A code-before-model window has no close-fence column. Omit it from the
+	# query and let the canonical admission check fail closed for Pending rows.
+	if pending_action_fences_ready():
+		columns.append(pa.agent_close_fences)
 	rows = (
 		frappe.qb.from_(pa)
-		.select(pa.name, pa.status, pa.preview, pa.result_doctype, pa.result_name)
+		.select(*columns)
 		.where(
 			(pa.kind == "chat")
 			& (pa.conversation == conversation)
@@ -169,6 +186,17 @@ def _pa_cards(conversation: str, since) -> list[frappe._dict]:
 	).run(as_dict=True)
 	cards = []
 	for row in rows:
+		# A hidden mapless/stale close card must not block a human-authored draft
+		# with a request to confirm or discard something they cannot see. This is
+		# a read-only check because this path already holds the Pending Action row
+		# lock; the executor remains the authoritative locked write boundary.
+		if row.status == "Pending" and not pending_confirm.pending_action_is_safe_to_render(
+			row,
+			owner=frappe.session.user,
+			conversation=conversation,
+			lock=False,
+		):
+			continue
 		card = _card_of(row.preview)
 		cards.append(
 			frappe._dict(

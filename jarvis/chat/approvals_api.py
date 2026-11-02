@@ -1582,28 +1582,70 @@ def _badge_cutoff():
 	return frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-BOARD_BADGE_DELAY_S)
 
 
-def _chat_pending_count(me: str) -> int:
+def _safe_chat_badge_rows(me: str, *, before=None, after=None) -> list:
+	"""The chat rows that may truthfully contribute to an approval badge.
+
+	The lane already hides a Pending chat action unless its close-fence map is
+	current.  The badge must apply the same positive admission rule: a number for
+	a hidden stale card sends a person to an empty board and can keep refreshing
+	forever after a capped close cleanup.  Older schemas lack the fence field, so
+	they intentionally produce no chat badge until the close migration is ready.
+	"""
+	from jarvis.chat.agent_closure import (
+		PENDING_ACTION_FENCE_FIELD,
+		expected_confirmation_fences,
+		pending_action_fences_ready,
+	)
 	from jarvis.chat.pending_actions._store import table_ready
 
-	if not table_ready():
-		return 0
-	return frappe.db.sql(
-		"SELECT COUNT(*) FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND status='Pending'"
-		" AND owner_user=%(me)s AND creation <= %(cutoff)s",
-		{"k": CHAT, "me": me, "cutoff": _badge_cutoff()},
-	)[0][0]
+	if not table_ready() or not pending_action_fences_ready():
+		return []
+	# A badge is read-only. Take one current, non-locking fence snapshot and run
+	# each row through the same canonical predicate as a card. This avoids a
+	# fence lock (and possible fence-row creation) for every Pending row on a
+	# frequently refreshed badge.
+	try:
+		expected_fences = expected_confirmation_fences()
+	except Exception as exc:
+		frappe.logger("jarvis.pending_confirm").error(
+			"pending action badge fence read failed: %s", type(exc).__name__
+		)
+		return []
+	if expected_fences is None:
+		return []
+	pending_action = frappe.qb.DocType("Jarvis Pending Action")
+	query = (
+		frappe.qb.from_(pending_action)
+		.select(
+			pending_action.name,
+			pending_action.kind,
+			pending_action.status,
+			pending_action.owner_user,
+			pending_action.conversation,
+			pending_action.creation,
+			pending_action[PENDING_ACTION_FENCE_FIELD].as_(PENDING_ACTION_FENCE_FIELD),
+		)
+		.where(pending_action.kind == "chat")
+		.where(pending_action.status == "Pending")
+		.where(pending_action.owner_user == me)
+		.orderby(pending_action.creation)
+		.orderby(pending_action.name)
+	)
+	if before is not None:
+		query = query.where(pending_action.creation <= before)
+	if after is not None:
+		query = query.where(pending_action.creation > after)
+	rows = query.run(as_dict=True)
+	return [row for row in rows if _chat_card_safe(row, lock=False, expected_fences=expected_fences)]
+
+
+def _chat_pending_count(me: str) -> int:
+	return len(_safe_chat_badge_rows(me, before=_badge_cutoff()))
 
 
 def _chat_badge_next_in(me: str) -> int | None:
-	from jarvis.chat.pending_actions._store import table_ready
-
-	if not table_ready():
-		return None
-	oldest = frappe.db.sql(
-		"SELECT MIN(creation) FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND status='Pending'"
-		" AND owner_user=%(me)s AND creation > %(cutoff)s",
-		{"k": CHAT, "me": me, "cutoff": _badge_cutoff()},
-	)[0][0]
+	rows = _safe_chat_badge_rows(me, after=_badge_cutoff())
+	oldest = rows[0].creation if rows else None
 	if not oldest:
 		return None
 	waited = (frappe.utils.now_datetime() - frappe.utils.get_datetime(oldest)).total_seconds()
@@ -1658,6 +1700,7 @@ def list_pending_actions_lane() -> dict:
 	4). Each row's ``document_type`` is its card's doctype; the card itself never
 	ships. A sheet reads its plain columns (counts; ``collecting`` = still listing,
 	not actionable yet)."""
+	from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, pending_action_fences_ready
 	from jarvis.chat.pending_actions._store import table_ready
 
 	if not table_ready():
@@ -1666,10 +1709,16 @@ def list_pending_actions_lane() -> dict:
 	sm = int("System Manager" in frappe.get_roles())
 	params = {"sm": sm, "me": me, "lim": _HELD_LANE_LIMIT}
 	rows = []
+	# A chat card is only a navigation row when its current close-fence map says
+	# it may still be confirmed. Older schemas omit the field; that deliberately
+	# makes those chat rows fail closed below rather than showing a stale card.
+	fence_column = f", pa.`{PENDING_ACTION_FENCE_FIELD}`" if pending_action_fences_ready() else ""
 	# One capped query per kind: an SM's backlog of held rows never crowds out their own cards.
 	for kind, any_owner in ((HELD, sm), (CHAT, 0)):
 		rows += frappe.db.sql(
-			"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.card, pa.owner_user, pa.creation,
+			"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.card, pa.owner_user, pa.creation"""
+			+ fence_column
+			+ """,
 			pa.conversation, c.title AS conversation_title, c.origin_page,
 			(SELECT COUNT(*) FROM `tabJarvis Pending Action Waiter` w
 			 WHERE w.parent = pa.name AND w.parenttype = 'Jarvis Pending Action') AS waiters_count
@@ -1714,6 +1763,11 @@ def list_pending_actions_lane() -> dict:
 	for r in rows:
 		if r.kind == SHEET:
 			out.append(_sheet_lane_row(r, me))
+			continue
+		if r.kind == CHAT and r.status == "Pending" and not _chat_card_safe(r):
+			# Do not let the Approval Board link a stale durable card to its own
+			# Confirm/Discard detail. The chat transcript gets its terminal receipt
+			# through the normal history/resync path, without this read writing one.
 			continue
 		row = {
 			"name": r.name,
@@ -1764,6 +1818,19 @@ def _chat_link(conversation, title, origin_page) -> dict:
 	}
 
 
+def _chat_card_safe(row, *, lock: bool = True, expected_fences: dict[str, str] | None = None) -> bool:
+	"""Whether this durable chat row may render a confirmation control."""
+	from jarvis.chat.pending_confirm import pending_action_is_safe_to_render
+
+	return pending_action_is_safe_to_render(
+		row,
+		owner=row.get("owner_user"),
+		conversation=row.get("conversation"),
+		lock=lock,
+		expected_fences=expected_fences,
+	)
+
+
 def _chat_detail(row) -> dict:
 	"""A chat card for its owner: the stored card (secret-masked at park), never the seal."""
 	from jarvis.chat.pending_actions._store import PENDING, REASON_TEXT
@@ -1776,20 +1843,29 @@ def _chat_detail(row) -> dict:
 			)
 			or conv
 		)
-	code = row.reason_code or ""
+	safe = _chat_card_safe(row)
+	code = row.reason_code or ("safety_update" if row.status == PENDING and not safe else "")
 	return {
 		"name": row.name,
 		"kind": row.kind,
 		"status": row.status,
 		"tool": row.tool,
 		"summary": row.summary or "",
-		"card": json.loads(row.card) if row.card else None,
+		# Never return the card itself unless it has the same positive current
+		# fence attestation used by history, list resync, and realtime delivery.
+		"card": json.loads(row.card) if safe and row.card else None,
 		"created_at": str(row.creation),
 		"age": _age_s(row.creation),
 		**_chat_link(row.conversation, conv.title, conv.origin_page),
-		"can_act": int(row.status == PENDING),
+		"can_act": int(row.status == PENDING and safe),
+		"pending_card_safe": bool(row.status == PENDING and safe),
 		"reason_code": code,
-		"reason": REASON_TEXT.get(code, ""),
+		"reason": REASON_TEXT.get(code, "")
+		or (
+			"This action was cancelled during a safety update. Nothing ran."
+			if code == "safety_update"
+			else ""
+		),
 	}
 
 

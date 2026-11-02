@@ -33,6 +33,82 @@ const terminalBody = (kind) => {
 };
 
 describe("parked confirmations resync from durable state at every terminal", () => {
+	it("requires a positive server attestation at every desktop card admission", () => {
+		const seed = src.slice(
+			src.indexOf("function seedPendingFromRows(msgs, convId) {"),
+			src.indexOf(
+				"// Tokens with a Confirm/Discard RPC",
+				src.indexOf("function seedPendingFromRows")
+			)
+		);
+		expect(seed).toContain("m.pending_card_safe === true");
+
+		const enqueue = src.slice(
+			src.indexOf("function enqueuePending(card) {"),
+			src.indexOf("\n}", src.indexOf("function enqueuePending(card) {"))
+		);
+		expect(enqueue).toContain("card.pending_card_safe !== true");
+
+		const resync = src.slice(
+			src.indexOf("async function resyncPendingConfirmations(id, source) {"),
+			src.indexOf(
+				"// Authoritative pull.",
+				src.indexOf("async function resyncPendingConfirmations")
+			)
+		);
+		expect(resync).toContain("it?.pending_card_safe === true");
+		expect(resync).toContain("pending_card_safe: it.pending_card_safe");
+
+		for (const kind of ["run:end", "run:error"]) {
+			const body = terminalBody(kind);
+			expect(body).toContain("card?.pending_card_safe !== true");
+		}
+		const direct = src.slice(
+			src.indexOf('if (p.kind === "action:pending")'),
+			src.indexOf("if (p.conversation_id !== currentId.value)")
+		);
+		expect(direct).toContain("pending_card_safe: p.pending_card_safe");
+	});
+
+	it("shows a passive safety cancellation as a Done-only terminal notice", () => {
+		expect(src).toContain("function observePassiveSafetyUpdates(rows)");
+		expect(src).toContain('result?.reason_code !== "safety_update"');
+		const notice = src.slice(
+			src.indexOf('v-if="safetyUpdateNotice"'),
+			src.indexOf('v-for="(pa, pi) in visiblePendingActions"')
+		);
+		expect(notice).toContain("Done");
+		expect(notice).not.toMatch(/Confirm|Retry|Discard/);
+	});
+
+	it("queues passive safety cancellations so each Done reveals the next receipt", () => {
+		expect(src).toContain("const safetyUpdateQueue = ref([])");
+		expect(src).toContain("function enqueueSafetyUpdateNotice(notice)");
+		const observe = src.slice(
+			src.indexOf("function observePassiveSafetyUpdates(rows)"),
+			src.indexOf("function dismissSafetyUpdateNotice()")
+		);
+		expect(observe).not.toContain("if (safetyUpdateNotice.value) return");
+		expect(observe).toContain("settleSafetyUpdateNotice(notice.token, notice.message)");
+		const settle = src.slice(
+			src.indexOf("function settleSafetyUpdateNotice(token, message)"),
+			src.indexOf("function settleSafetyUpdate(token, response)")
+		);
+		expect(settle).toContain("removePending(token)");
+		expect(settle).toContain("if (!seen)");
+		expect(settle).toContain("enqueueSafetyUpdateNotice");
+		const dismiss = src.slice(
+			src.indexOf("function dismissSafetyUpdateNotice()"),
+			src.indexOf(
+				"// Which card's Approve",
+				src.indexOf("function dismissSafetyUpdateNotice()")
+			)
+		);
+		expect(dismiss).toContain("safetyUpdateNotice.value = safetyUpdateQueue.value[0] || null");
+		expect(dismiss).toContain("safetyUpdateQueue.value = safetyUpdateQueue.value.slice(1)");
+		expect(src).toContain("!safetySettledTokens.value.has(pa.token)");
+	});
+
 	it("run:end resyncs unconditionally, not only when it carried a pending payload", () => {
 		const body = terminalBody("run:end");
 		expect(body).toContain("resyncPendingConfirmations(currentId.value);");
@@ -56,14 +132,28 @@ describe("parked confirmations resync from durable state at every terminal", () 
 		expect(body).toContain("pendingActions.value.some((x) => x.token === card.token)");
 	});
 
-	it("the resync is freshness-guarded against a mid-flight conversation switch", () => {
+	it("the resync is generation-fenced against a mid-flight switch and ABA return", () => {
 		const fn = src.slice(
 			src.indexOf("async function resyncPendingConfirmations(id, source) {")
 		);
 		const body = fn.slice(0, fn.indexOf("\n}"));
-		expect(body).toContain("if (currentId.value !== id) return;");
+		expect(body).toContain("const view = captureChatView();");
+		expect(body).toContain("if (!chatViewIsCurrent(view)) return;");
+		expect(body).toContain("it.conversation === view.conversation");
 		// and never throws into the terminal handler that now calls it unawaited
 		expect(body).toContain("catch (e) {");
+	});
+
+	it("fences older-page and full-chat loads with the same generation", () => {
+		const older = src.slice(src.indexOf("async function loadOlder({ auto = false } = {})"));
+		expect(older).toContain("const view = captureChatView();");
+		expect(older).toContain("!chatViewIsCurrent(view)");
+		const load = src.slice(
+			src.indexOf("async function loadConversation(id, { staleRetry = true } = {})")
+		);
+		expect(load).toContain("const view = captureChatView();");
+		expect(load).toContain("if (id !== view.conversation) return false;");
+		expect(load).toContain("!chatViewIsCurrent(view)");
 	});
 
 	it("loadConversation still resyncs, so a reload/reconnect path keeps working", () => {

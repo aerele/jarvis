@@ -13,52 +13,71 @@
 		</div>
 
 		<template v-else-if="rec">
-			<p class="text-sm text-ink-gray-6">
-				Jarvis proposed this in
-				<span class="font-medium text-ink-gray-8">{{
-					rec.conversation_title || "a chat"
-				}}</span>
-				and runs it only once you confirm.
-			</p>
+			<section
+				v-if="safetyUpdateNotice"
+				class="mt-3 text-sm text-ink-gray-7"
+				role="status"
+				aria-live="polite"
+				aria-label="Action cancelled"
+			>
+				<p>{{ safetyUpdateNotice }}</p>
+				<Button class="mt-3" variant="solid" label="Done" @click="dismissSafetyUpdate" />
+			</section>
 
-			<div class="mt-3">
-				<PendingCard v-if="card" :card="card" details="" />
-				<div v-else class="text-base text-ink-gray-8">{{ rec.summary || rec.tool }}</div>
-			</div>
+			<template v-else-if="!dismissedSafetyUpdate">
+				<p class="text-sm text-ink-gray-6">
+					Jarvis proposed this in
+					<span class="font-medium text-ink-gray-8">{{
+						rec.conversation_title || "a chat"
+					}}</span>
+					and runs it only once you confirm.
+				</p>
 
-			<div v-if="!rec.can_act" class="mt-3 text-sm text-ink-gray-6" role="status">
-				{{ closedText }}
-			</div>
-			<FailureReference v-if="rec.status === 'Failed'" :id="rec.name" />
+				<div class="mt-3">
+					<PendingCard v-if="card" :card="card" details="" />
+					<div v-else class="text-base text-ink-gray-8">
+						{{ rec.summary || rec.tool }}
+					</div>
+				</div>
 
-			<div class="mt-4 flex flex-wrap items-center gap-2">
-				<template v-if="rec.can_act">
+				<div v-if="!rec.can_act" class="mt-3 text-sm text-ink-gray-6" role="status">
+					{{ closedText }}
+				</div>
+				<FailureReference v-if="rec.status === 'Failed'" :id="rec.name" />
+
+				<div class="mt-4 flex flex-wrap items-center gap-2">
+					<template v-if="canAct">
+						<Button
+							variant="solid"
+							label="Confirm"
+							:loading="busy === 'confirm'"
+							:disabled="busy !== null"
+							@click="decide('confirm')"
+						/>
+						<Button
+							variant="ghost"
+							theme="red"
+							label="Discard"
+							:loading="busy === 'discard'"
+							:disabled="busy !== null"
+							@click="decide('discard')"
+						/>
+					</template>
 					<Button
-						variant="solid"
-						label="Confirm"
-						:loading="busy === 'confirm'"
+						v-if="rec.conversation"
+						variant="subtle"
+						label="Open chat"
+						:aria-label="
+							'Open chat: ' + (rec.conversation_title || 'the conversation')
+						"
 						:disabled="busy !== null"
-						@click="decide('confirm')"
+						@click="openChat"
 					/>
-					<Button
-						variant="ghost"
-						theme="red"
-						label="Discard"
-						:loading="busy === 'discard'"
-						:disabled="busy !== null"
-						@click="decide('discard')"
-					/>
-				</template>
-				<Button
-					v-if="rec.conversation"
-					variant="subtle"
-					label="Open chat"
-					:aria-label="'Open chat: ' + (rec.conversation_title || 'the conversation')"
-					:disabled="busy !== null"
-					@click="openChat"
-				/>
-			</div>
-			<div v-if="notice" role="alert" class="mt-2 text-sm text-ink-red-5">{{ notice }}</div>
+				</div>
+				<div v-if="notice" role="alert" class="mt-2 text-sm text-ink-red-5">
+					{{ notice }}
+				</div>
+			</template>
 		</template>
 	</div>
 </template>
@@ -68,7 +87,7 @@
 // board adds no decide path of its own: Confirm / Discard call confirm_tool /
 // dismiss_tool exactly as the chat does, so the server re-checks everything and
 // the chat continues after a Confirm. The words live in lib/chatCardActions.
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import { Button, toast } from "frappe-ui";
 import PendingCard from "@/components/PendingCard.vue";
@@ -98,15 +117,33 @@ const loading = ref(true);
 const loadError = ref("");
 const busy = ref(null); // "confirm" | "discard" | null
 const notice = ref("");
+const dismissedSafetyUpdate = ref(false);
+const SAFETY_UPDATE_COPY =
+	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
 
 // Only a plain object with a kind renders as a card; anything else is the summary line.
 const card = computed(() => {
 	const c = rec.value && rec.value.card;
-	return c && typeof c === "object" && c.kind ? c : null;
+	return rec.value?.pending_card_safe === true && c && typeof c === "object" && c.kind
+		? c
+		: null;
 });
+const canAct = computed(() => rec.value?.can_act && rec.value?.pending_card_safe === true);
 const closedText = computed(() => chatStatusLine(rec.value));
+// A fenced read can turn a durable Pending row into a terminal safety receipt.
+// This surface must not keep its old Confirm/Discard wording or controls around it.
+const safetyUpdateNotice = computed(() => {
+	if (
+		dismissedSafetyUpdate.value ||
+		rec.value?.pending_card_safe === true ||
+		rec.value?.reason_code !== "safety_update"
+	)
+		return "";
+	return rec.value?.reason || SAFETY_UPDATE_COPY;
+});
 
 let req = 0; // monotonic: a stale load never overwrites a newer one
+let alive = true;
 async function load() {
 	const id = ++req;
 	loading.value = !rec.value;
@@ -135,6 +172,28 @@ async function decide(action) {
 			decided(res);
 			return;
 		}
+		// A direct Confirm or Discard can race the close migration. Its token is
+		// terminal and must not leave this board detail on the generic retry path.
+		// Keep the standard Done-only notice here until the person acknowledges it;
+		// then the board removes only this selected row and leaves other cards alone.
+		if (res.reason_code === "safety_update") {
+			// A row switch unmounts this detail. There is then no person left to
+			// press Done here, so settle the old selected row through its key-bound
+			// callback instead of leaving a terminal token in the board lane.
+			if (!alive) {
+				decided(res);
+				return;
+			}
+			rec.value = {
+				...rec.value,
+				status: "Cancelled",
+				can_act: 0,
+				pending_card_safe: false,
+				reason_code: "safety_update",
+				reason: res.error?.message || SAFETY_UPDATE_COPY,
+			};
+			return;
+		}
 		const message = chatRefusalMessage(res);
 		if (isChatSettled(res)) {
 			toast.error(escapeHtml(message));
@@ -159,6 +218,19 @@ function openChat() {
 	);
 }
 
+function dismissSafetyUpdate() {
+	if (!safetyUpdateNotice.value) return;
+	dismissedSafetyUpdate.value = true;
+	// This is a local terminal receipt, not a second decision RPC. Tell the board
+	// to remove the selected stale row if it still has one.
+	decided({
+		ok: false,
+		pa_status: rec.value?.status || "",
+		reason_code: "safety_update",
+		outcome: "cancelled",
+	});
+}
+
 // The board calls this when the card leaves its rail: show the settled status, but
 // never over a decision in flight.
 function refresh() {
@@ -166,5 +238,8 @@ function refresh() {
 }
 
 onMounted(load);
+onBeforeUnmount(() => {
+	alive = false;
+});
 defineExpose({ refresh });
 </script>

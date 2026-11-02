@@ -61,6 +61,10 @@ class PendingConfirmStorageError(RuntimeError):
 	"""Redis could not provide a definite pending-confirmation result."""
 
 
+class LegacyConfirmationRevoked(PendingConfirmStorageError):
+	"""A close-fence update revoked this token before it could dispatch."""
+
+
 class PendingConfirmOutcomeUnknown(PendingConfirmStorageError):
 	"""Redis may have committed a consume, but its durable claim is unreadable."""
 
@@ -195,6 +199,13 @@ def mint(
 		# constant" by convention.
 		"created_at": resolved_expires_at - _TTL_S,
 	}
+	# Historic generic tokens do not carry trustworthy agent provenance. New ones
+	# therefore carry the complete shared close-fence map. Before both close
+	# migrations are active this returns None, and confirmation fails closed.
+	from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, stamp_confirmation_fences
+
+	if fences := stamp_confirmation_fences():
+		record[PENDING_ACTION_FENCE_FIELD] = fences
 	cache = frappe.cache()
 	# Persist the record, index it under its owner, and VERIFY it landed - all three
 	# must hold or the park is a failure. Two ways a park silently breaks:
@@ -284,6 +295,17 @@ def rollback_token(token: str, owner: str) -> None:
 		except Exception:
 			pass
 	_gauge_remove(token)
+
+
+def assert_dispatch_allowed(record: dict) -> None:
+	"""Reject a stale generic token at the final point before dispatch."""
+	from jarvis.chat.agent_closure import confirmation_is_current
+
+	# Dispatch runs in the request worker, after a claim may have been held for
+	# some time. Re-read and lock every durable fence here so a close that wins
+	# after the Redis claim cannot reach a tool call.
+	if not confirmation_is_current(record, lock=True):
+		raise LegacyConfirmationRevoked("pending confirmation was revoked by a safety update")
 
 
 def _read_record(token: str, *, swallow: bool = True) -> dict | None:
@@ -422,6 +444,17 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	record = _read_record(token, swallow=False)
 	if not record:
 		return None
+	# Check before ownership and before the claim/delete. A code-before-migration
+	# or partial-fence token is not safely attributable to either closed agent.
+	from jarvis.chat.agent_closure import confirmation_is_current
+
+	# Check every durable fence before the claim/delete. This keeps a
+	# code-before-migration or partial-fence token fail-closed even for callers
+	# that use the legacy primitive directly. The request-level dispatch fence
+	# takes the locks again after the claim because a close can land meanwhile.
+	if not confirmation_is_current(record, lock=True):
+		rollback_token(token, str(record.get("owner") or ""))
+		raise LegacyConfirmationRevoked("pending confirmation was revoked by a safety update")
 	# Owner is the real security boundary and is always enforced.
 	if record.get("owner") != owner:
 		return None
@@ -494,6 +527,8 @@ def list_for_owner(owner: str, conversation: str | None = None, *, strict: bool 
 		return []
 	if not members:
 		return []
+	from jarvis.chat.agent_closure import confirmation_is_current, settle_revoked_legacy_chat_card
+
 	out: list[dict] = []
 	dead: list[str] = []
 	for token in members:
@@ -515,6 +550,46 @@ def list_for_owner(owner: str, conversation: str | None = None, *, strict: bool 
 			dead.append(token)
 			continue
 		if record.get("owner") != owner:
+			continue
+		# A capped close-migration sweep can leave an old Redis credential and its
+		# pending display row in place. Do not return that card for a reload and
+		# wait for the user to click it: validate its full immutable fence map here,
+		# then flip the existing display row to a terminal safety receipt before the
+		# stale credential is removed. The credential must stay when the durable flip
+		# fails, otherwise the user would retain a pending card with no safe recovery
+		# record. A non-strict background list skips the unsafe card; a strict client
+		# resync reports the unavailable storage state instead of calling it live.
+		try:
+			current = confirmation_is_current(record, lock=True)
+		except Exception as exc:
+			frappe.logger("jarvis.pending_confirm").error(
+				"confirmation close-fence read failed while listing a legacy card: %s",
+				type(exc).__name__,
+			)
+			if strict:
+				raise PendingConfirmStorageError("pending-confirm close-fence read failed") from exc
+			continue
+		if not current:
+			try:
+				settled = settle_revoked_legacy_chat_card(token, strict=True)
+			except Exception as exc:
+				frappe.logger("jarvis.pending_confirm").error(
+					"confirmation close settlement failed while listing a legacy card: %s",
+					type(exc).__name__,
+				)
+				if strict:
+					raise PendingConfirmStorageError("pending-confirm close settlement failed") from exc
+				continue
+			if not settled:
+				frappe.logger("jarvis.pending_confirm").error(
+					"confirmation close settlement did not terminally flip a legacy card"
+				)
+				if strict:
+					raise PendingConfirmStorageError("pending-confirm close settlement failed")
+				continue
+			# Only remove the Redis credential after the durable row is terminal. This
+			# also removes the owner-index member and the best-effort open-card gauge.
+			rollback_token(token, owner)
 			continue
 		# A conversation-less record ("" - see consume/F1) carries no binding, so
 		# surface it under ANY conversation filter: otherwise the card is
@@ -543,13 +618,15 @@ def _pending_item(
 	run_id: str,
 	expires_at: int | None,
 	created_at: int | None = None,
+	pending_card_safe: bool = False,
 ) -> dict:
 	"""The ONE client-facing pending-confirmation item shape, shared by the live
 	``action:pending`` push (jarvis.api), the resync endpoint, and the ``run:end``
 	terminal - so the three cannot drift. Carries
 	``token``/``tool``/``preview``/``summary``/``conversation``/``run_id``/
-	``expires_at``/``created_at`` and NEVER the internal ``args``/``exec_user``/
-	``args_hash``.
+	``expires_at``/``created_at``/``pending_card_safe`` and NEVER the internal
+	``args``/``exec_user``/``args_hash``. The positive safety bit is required by
+	all current clients before a payload can render Confirm.
 
 	``created_at`` (P0c) is the primary card-ordering key; ``None`` for a record
 	minted before it existed (a mixed deploy) - every ordering comparator falls
@@ -577,6 +654,7 @@ def _pending_item(
 		"run_id": run_id,
 		"expires_at": expires_at,
 		"created_at": created_at,
+		"pending_card_safe": bool(pending_card_safe),
 	}
 
 
@@ -597,6 +675,7 @@ def list_items_for_owner(owner: str, conversation: str | None = None, *, strict:
 			run_id=r.get("run_id"),
 			expires_at=r.get("expires_at"),
 			created_at=r.get("created_at"),
+			pending_card_safe=True,
 		)
 		for r in list_for_owner(owner, conversation=conversation, strict=strict)
 	]
