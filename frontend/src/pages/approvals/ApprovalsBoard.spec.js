@@ -315,7 +315,7 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(rail(w).classes()).toEqual(
 			expect.arrayContaining([
 				"w-full",
-				"max-h-[40vh]",
+				"max-h-[35%]",
 				"border-b",
 				"lg:w-[360px]",
 				"lg:max-h-none",
@@ -326,7 +326,6 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(pane(w).classes()).toEqual(
 			expect.arrayContaining(["min-h-0", "min-w-0", "flex-1", "overflow-y-auto"])
 		);
-
 		const actions = w.get('[data-testid="approval-decision-actions"]');
 		expect(actions.classes()).toContain("flex-wrap");
 		expect(button(actions, "Tag for review").exists()).toBe(true);
