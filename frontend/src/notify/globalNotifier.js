@@ -201,6 +201,10 @@ export function attachGlobalNotifier({ socket, router }) {
 	}
 
 	function onEvent(p) {
+		if (p?.kind === "share:changed") {
+			store.loadSharedConversations?.({ refresh: true });
+			return;
+		}
 		if (!p || !p.kind) return;
 		if (p.conversation_id) store.scheduleConversationActivityRefresh();
 		switch (p.kind) {
@@ -282,6 +286,8 @@ export function attachGlobalNotifier({ socket, router }) {
 				const conv = p.conversation_id || null;
 				const dashboardApproval = p.origin_page === "dashboards";
 				if (dashboardApproval && conv === dashboardsPaneConv() && !document.hidden) return;
+				if (p.source === "Chat" && conv && conv === onScreenConv() && !document.hidden)
+					return;
 				signal({
 					conv: null,
 					toastAnywhere: true, // waiting-on-you is worth a toast even on-conversation

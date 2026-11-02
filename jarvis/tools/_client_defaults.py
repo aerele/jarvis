@@ -1,17 +1,15 @@
 """Native form link fetches that server-side document writes do not run."""
 
+import math
+
 import frappe
+from frappe.utils import flt
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._doc_parts import _refuse_unreadable
 
-LCV_RECEIPT_FIELDS = (
-	"receipt_document_type",
-	"receipt_document",
-	"supplier",
-	"posting_date",
-	"grand_total",
-)
+LCV_RECEIPT_SUMMARY_FIELDS = ("supplier", "posting_date", "grand_total")
+LCV_RECEIPT_FIELDS = ("receipt_document_type", "receipt_document", *LCV_RECEIPT_SUMMARY_FIELDS)
 _RECEIPT_SOURCE_FIELDS = {
 	"Purchase Receipt": ("supplier", "posting_date", "base_grand_total"),
 	"Purchase Invoice": ("supplier", "posting_date", "base_grand_total"),
@@ -55,12 +53,16 @@ def landed_cost_receipt_details(doc):
 				cache[key] = _receipt_details(doc, doctype, name, native, row.idx)
 			details = cache[key]
 		# Let normal mandatory checks and collect-mode metadata handle blank links.
-		for target in LCV_RECEIPT_FIELDS[2:]:
+		for target in LCV_RECEIPT_SUMMARY_FIELDS:
 			if child.has_field(target):
 				row.set(target, details.get(target))
 
 
 def _receipt_details(doc, doctype, name, native, index):
+	"""Return fetched summaries, or clear them for unsupported legacy fetch types.
+
+	An empty result deliberately replaces existing summary values with None.
+	"""
 	# v15 has only PR/PI add_fetch handlers. Do not guess a mapping for other
 	# receipt types when a different installed version has no native handler.
 	if not native and doctype not in ("Purchase Receipt", "Purchase Invoice"):
@@ -90,6 +92,46 @@ def _receipt_details(doc, doctype, name, native, index):
 		_clear_new_messages(mark)
 		raise PermissionDeniedError(message)
 	return details
+
+
+def landed_cost_vendor_amounts(doc, values):
+	"""Mirror the LCV vendor link's native fetch, only for omitted input amounts.
+
+	Explicit amounts remain caller-owned, including zero. This is a create default,
+	not a reservation of costs or a change to ERPNext's claim/submission rules.
+	"""
+	if doc.doctype != "Landed Cost Voucher":
+		return
+	method = getattr(type(doc), "get_vendor_invoice_amount", None)
+	field = doc.meta.get_field("vendor_invoices")
+	if not callable(method) or not field:
+		return  # older ERPNext versions do not have this form behavior
+	pending = [
+		(idx, row)
+		for idx, (row, proposed) in enumerate(
+			zip(doc.get("vendor_invoices") or [], values.get("vendor_invoices") or [], strict=True), start=1
+		)
+		if row.vendor_invoice not in (None, "") and "amount" not in proposed
+	]
+	if not pending or not frappe.get_meta(field.options).has_field("amount"):
+		return
+	if not doc.company:
+		raise InvalidArgumentError("company is required to fetch vendor invoice amounts")
+	for idx, row in pending:
+		_require_invoice_read(row.vendor_invoice)
+		result = doc.get_vendor_invoice_amount(row.vendor_invoice)
+		amount = flt(result.get("amount")) if isinstance(result, dict) and "amount" in result else 0
+		if not math.isfinite(amount) or amount <= 0:
+			raise InvalidArgumentError(
+				f"Cannot derive an unclaimed vendor amount for row {idx}; "
+				"supply its amount explicitly or remove the row."
+			)
+		row.amount = amount
+
+
+def _require_invoice_read(name):
+	message = "Cannot read the vendor invoice amounts; supply an amount explicitly or use a readable invoice."
+	_require_source_read("Purchase Invoice", name, ("base_total", "claimed_landed_cost_amount"), message)
 
 
 def _clear_new_messages(mark):

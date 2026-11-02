@@ -509,8 +509,12 @@ export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkField
 
 // Field metadata for the record-edit action card: powers Link/Select/Date
 // controls (returns {ok, doctype, fields:[{fieldname,label,fieldtype,options}]}).
-export const getDoctypeFields = (doctype) =>
-	call("jarvis.chat.api.get_doctype_fields", { doctype });
+export const getDoctypeFields = (doctype, parentDoctype, parentfield) =>
+	call("jarvis.chat.api.get_doctype_fields", {
+		doctype,
+		...(parentDoctype ? { parent_doctype: parentDoctype } : {}),
+		...(parentfield ? { parentfield } : {}),
+	});
 
 // --- LLM pool / models config (System-Manager only, gated server-side) ---
 export const getLlmConfig = () => call("jarvis.onboarding.get_llm_config");
@@ -1011,6 +1015,8 @@ export const listMacrosPage = (p) => call(MC + "list_macros_page", _page(p));
 export const fileboxListPage = (p) => call("jarvis.chat.filebox.list_inbound_page", _page(p));
 export const listApprovalsPage = (p) =>
 	call("jarvis.chat.approvals_api.list_approvals_page", _page(p));
+export const listApprovalReviewers = () =>
+	call("jarvis.chat.approvals_api.list_approval_reviewers");
 
 // ── File Box FB-1: cascade delete + clear-processed + bulk delete (Q4) ──────
 // delete_inbound: owner-gated cascade (approvals + messages + File docs + the

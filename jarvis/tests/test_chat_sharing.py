@@ -166,13 +166,15 @@ class TestShareWrites(SharingCase):
 			self.share([RECIPIENT, ADMIN])
 		self.share([])
 
-	def test_total_cap_counts_hidden_rows_and_duplicate_is_noop(self):
+	def test_visible_cap_keeps_hidden_rows_and_duplicate_is_noop(self):
 		users = [make_user(f"share-cap-{n}@example.com") for n in range(25)]
 		self.share(users)
 		frappe.db.set_value("User", users[0], "enabled", 0)
 		self.share(users + [users[1]])
+		self.share(users + [RECIPIENT])
+		self.assertEqual(frappe.db.count(SHARE, {"conversation": self.conversation}), 26)
 		with self.assertRaises(frappe.ValidationError):
-			self.share(users + [RECIPIENT])
+			self.share(users + [RECIPIENT, OUTSIDER])
 		self.share(users[1:] + [RECIPIENT])
 		self.assertEqual(frappe.db.count(SHARE, {"conversation": self.conversation}), 25)
 

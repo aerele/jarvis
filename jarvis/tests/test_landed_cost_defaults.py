@@ -15,11 +15,17 @@ from jarvis.tools.preview_doc import preview_doc
 
 
 class LandedCostFixtures(FrappeTestCase):
+	requires_vendor_amounts = False
+
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
 		if not frappe.db.exists("DocType", "Landed Cost Voucher"):
 			raise unittest.SkipTest("ERPNext is not installed")
+		if cls.requires_vendor_amounts and not hasattr(
+			type(frappe.new_doc("Landed Cost Voucher")), "get_vendor_invoice_amount"
+		):
+			raise unittest.SkipTest("ERPNext does not have vendor-invoice cost fetching")
 		frappe.set_user("Administrator")
 		cls.company = masters.ensure_ledger_company()
 		masters.ensure_fiscal_years(nowdate())
@@ -184,3 +190,218 @@ class LandedCostFixtures(FrappeTestCase):
 		from jarvis.tools._lcv_source_tax import _prior_claims
 
 		return sum((_prior_claims(self.invoice.name, None, False) or {}).values())
+
+
+class TestLandedCostDefaults(LandedCostFixtures):
+	# These native vendor-table tests stay separate from the v15 adapter fixtures.
+	requires_vendor_amounts = True
+
+	def values(self, invoices=None, amounts=None, charge=None):
+		invoices = invoices or [self.invoice]
+		values = super().values(invoices, amounts, charge)
+		rows = [{"vendor_invoice": invoice.name} for invoice in invoices]
+		if amounts is not None:
+			for row, amount in zip(rows, amounts, strict=True):
+				row["amount"] = amount
+		values["vendor_invoices"] = rows
+		values["taxes"] = [
+			{
+				"expense_account": self.expense,
+				"cost_center": self.cost_center,
+				"description": "Freight",
+				"amount": charge if charge is not None else sum(i.base_total for i in invoices),
+			}
+		]
+		return values
+
+	def test_preview_and_save_fetch_company_currency_costs(self):
+		frappe.set_user("Administrator")
+		invoices = [self.invoice, self.make_invoice(80), self.make_invoice(2, "USD", 83.4)]
+		frappe.set_user(self.reader)
+		values = self.values(invoices)
+		expected = sum(invoice.base_total for invoice in invoices)
+		before = frappe.db.count("Landed Cost Voucher")
+		preview = preview_doc("Landed Cost Voucher", values)
+		self.assertTrue(preview["valid"], preview)
+		self.assertAlmostEqual(preview["resolved"]["total_vendor_invoices_cost"], expected)
+		self.assertEqual(frappe.db.count("Landed Cost Voucher"), before)
+		self.assertFalse(self.invoice.reload().claimed_landed_cost_amount)
+		saved = create_doc("Landed Cost Voucher", values)
+		self.assertEqual(saved["docstatus"], 0)
+		self.assertAlmostEqual(saved["total_vendor_invoices_cost"], expected)
+		self.assertEqual(
+			[row["amount"] for row in saved["vendor_invoices"]], [i.base_total for i in invoices]
+		)
+
+	def test_partial_native_claim_is_subtracted_on_the_next_create(self):
+		first = create_doc("Landed Cost Voucher", self.values(amounts=[30], charge=30))
+		frappe.get_doc("Landed Cost Voucher", first["name"]).submit()
+		self.assertEqual(self.invoice.reload().claimed_landed_cost_amount, 30)
+		saved = create_doc("Landed Cost Voucher", self.values(charge=90))
+		self.assertEqual(saved["total_vendor_invoices_cost"], 90)
+
+	def test_explicit_zero_null_blank_and_partial_are_not_fetched(self):
+		controller = type(frappe.new_doc("Landed Cost Voucher"))
+		for amount in (0, None, "", 25):
+			with self.subTest(amount=amount), patch.object(controller, "get_vendor_invoice_amount") as fetch:
+				saved = create_doc("Landed Cost Voucher", self.values(amounts=[amount]))
+				fetch.assert_not_called()
+				self.assertEqual(saved["total_vendor_invoices_cost"], amount or 0)
+
+	def test_ineligible_or_missing_invoice_is_not_silently_zero(self):
+		values = self.values()
+		frappe.db.set_value(
+			"Purchase Invoice", self.invoice.name, "claimed_landed_cost_amount", self.invoice.base_total
+		)
+		with self.assertRaises(InvalidArgumentError):
+			create_doc("Landed Cost Voucher", values)
+		values["vendor_invoices"][0]["vendor_invoice"] = "_JLCV Missing"
+		with self.assertRaises(PermissionDeniedError):
+			preview_doc("Landed Cost Voucher", values)
+
+	def test_record_and_field_permission_failures_precede_native_fetch(self):
+		controller = type(frappe.new_doc("Landed Cost Voucher"))
+		values = self.values()
+		with patch.object(controller, "get_vendor_invoice_amount") as fetch:
+			with patch("jarvis.tools._client_defaults.frappe.has_permission", return_value=False):
+				with self.assertRaises(PermissionDeniedError):
+					build_doc("Landed Cost Voucher", values)
+			with patch(
+				"jarvis.tools._client_defaults._refuse_unreadable",
+				side_effect=PermissionDeniedError("hidden"),
+			):
+				with self.assertRaises(PermissionDeniedError):
+					build_doc("Landed Cost Voucher", values)
+			fetch.assert_not_called()
+
+	def test_real_field_permission_blocks_derived_money(self):
+		values = self.values()
+		field = frappe.get_meta("Purchase Invoice").get_field("base_total")
+		with patch.object(field, "permlevel", 99), self.assertRaises(PermissionDeniedError):
+			build_doc("Landed Cost Voucher", values)
+
+	def test_real_supplier_user_permission_blocks_derived_money(self):
+		values = self.values()
+		frappe.set_user("Administrator")
+		other = frappe.copy_doc(frappe.get_doc("Supplier", self.supplier))
+		other.supplier_name = "_JLCV Allowed Supplier"
+		other.insert()
+		frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": self.reader,
+				"allow": "Supplier",
+				"for_value": other.name,
+				"apply_to_all_doctypes": 0,
+				"applicable_for": "Purchase Invoice",
+			}
+		).insert()
+		frappe.clear_cache(user=self.reader)
+		frappe.set_user(self.reader)
+		self.assertFalse(frappe.has_permission("Purchase Invoice", "read", doc=self.invoice.name))
+		with self.assertRaises(PermissionDeniedError):
+			preview_doc("Landed Cost Voucher", values)
+
+	def test_real_source_field_mask_blocks_derived_money(self):
+		from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+		meta = frappe.get_meta("Purchase Invoice")
+		if not hasattr(meta, "get_masked_fields"):
+			self.skipTest("Frappe does not support field masking")
+		values = self.values()
+		frappe.set_user("Administrator")
+		make_property_setter("Purchase Invoice", "base_total", "mask", 1, "Check")
+		frappe.clear_cache(doctype="Purchase Invoice")
+		frappe.set_user(self.reader)
+		self.assertIn(
+			"base_total",
+			[field.fieldname for field in frappe.get_meta("Purchase Invoice").get_masked_fields()],
+		)
+		controller = type(frappe.new_doc("Landed Cost Voucher"))
+		with patch.object(controller, "get_vendor_invoice_amount") as fetch:
+			with self.assertRaises(PermissionDeniedError):
+				build_doc("Landed Cost Voucher", values)
+			fetch.assert_not_called()
+
+	def test_request_context_preview_and_create(self):
+		from werkzeug.wrappers import Request
+
+		request = getattr(frappe.local, "request", None)
+		frappe.local.request = Request.from_values(method="POST")
+		try:
+			values = self.values()
+			preview = preview_doc("Landed Cost Voucher", values)
+			self.assertTrue(preview["valid"], preview)
+			self.assertEqual(preview["resolved"]["total_vendor_invoices_cost"], 120)
+			saved = create_doc("Landed Cost Voucher", values)
+			self.assertEqual(saved["docstatus"], 0)
+			self.assertEqual(saved["total_vendor_invoices_cost"], 120)
+		finally:
+			frappe.local.request = request
+
+	def test_filter_shaped_links_are_refused_without_a_lookup(self):
+		for name in ({"base_total": [">", 5000]}, [["base_total", ">", 5000]], {}, [], 5, True):
+			values = self.values()
+			values["vendor_invoices"][0]["vendor_invoice"] = name
+			with self.subTest(name=name), patch("jarvis.tools._client_defaults.frappe.db.exists") as exists:
+				with self.assertRaises(PermissionDeniedError):
+					build_doc("Landed Cost Voucher", values)
+				exists.assert_not_called()
+
+	def test_explicit_amount_does_not_require_a_new_source_read(self):
+		values = self.values(amounts=[25])
+		original = frappe.has_permission
+
+		def permission(doctype, *args, **kwargs):
+			return False if doctype == "Purchase Invoice" else original(doctype, *args, **kwargs)
+
+		with patch("jarvis.tools._client_defaults.frappe.has_permission", side_effect=permission):
+			saved = create_doc("Landed Cost Voucher", values)
+		self.assertEqual(saved["total_vendor_invoices_cost"], 25)
+
+	def test_save_refreshes_an_omitted_default_after_preview(self):
+		values = self.values(charge=90)
+		preview = preview_doc("Landed Cost Voucher", values)
+		self.assertEqual(preview["resolved"]["total_vendor_invoices_cost"], 120)
+		self.assertNotIn("amount", values["vendor_invoices"][0])
+		first = create_doc("Landed Cost Voucher", self.values(amounts=[30], charge=30))
+		frappe.get_doc("Landed Cost Voucher", first["name"]).submit()
+		saved = create_doc("Landed Cost Voucher", values)
+		self.assertEqual(saved["total_vendor_invoices_cost"], 90)
+
+	def test_a_draft_invoice_is_not_a_derivable_cost(self):
+		frappe.set_user("Administrator")
+		self.invoice.cancel()
+		with patch.dict(frappe.flags, in_test=False):
+			amendment = frappe.copy_doc(self.invoice, ignore_no_copy=False)
+			amendment.amended_from = self.invoice.name
+			amendment.insert()
+		frappe.set_user(self.reader)
+		with self.assertRaises(InvalidArgumentError):
+			create_doc("Landed Cost Voucher", self.values([amendment]))
+
+	def test_native_fetch_failure_is_not_an_optional_version_fallback(self):
+		values = self.values()
+		controller = type(frappe.new_doc("Landed Cost Voucher"))
+		with patch.object(controller, "get_vendor_invoice_amount", side_effect=frappe.QueryTimeoutError):
+			with self.assertRaises(frappe.QueryTimeoutError):
+				build_doc("Landed Cost Voucher", values)
+
+	def test_batch_refusal_rolls_back_earlier_rows(self):
+		before = frappe.db.count("Landed Cost Voucher")
+		values = self.values()
+		bad = self.values()
+		bad["vendor_invoices"][0]["vendor_invoice"] = "_JLCV Missing"
+		with self.assertRaises(PermissionDeniedError):
+			create_doc(
+				docs=[
+					{"doctype": "Landed Cost Voucher", "values": values},
+					{"doctype": "Landed Cost Voucher", "values": bad},
+				]
+			)
+		self.assertEqual(frappe.db.count("Landed Cost Voucher"), before)
+
+	def test_old_controller_without_fetch_keeps_its_existing_behavior(self):
+		controller = type(frappe.new_doc("Landed Cost Voucher"))
+		with patch.object(controller, "get_vendor_invoice_amount", None):
+			self.assertFalse(build_doc("Landed Cost Voucher", self.values()).vendor_invoices[0].amount)
