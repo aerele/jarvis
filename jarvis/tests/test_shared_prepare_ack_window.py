@@ -111,7 +111,7 @@ class TestSharedPrepareStoresAckWindow(_shared_prepare.TestCollaborationPrepare)
 		self.assertLess(payload["ack_timeout_s"], 60.0)
 
 	def test_inlined_text_extends_the_window(self):
-		self._attach([("figures.txt", ("row,amount\n" + "line-item,1250.00\n" * 300).encode())])
+		self._attach([("figures.log", ("row,amount\n" + "line-item,1250.00\n" * 300).encode())])
 		payload = self._prepared()
 		ap = self.assembled[0]
 		self.assertGreater(ap.inlined_prompt_chars, 5000, "premise: the text was inlined")

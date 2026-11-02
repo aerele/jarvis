@@ -1,0 +1,58 @@
+{
+ "doctype": "DocType",
+ "name": "Jarvis Approval Reviewer",
+ "module": "Jarvis",
+ "engine": "InnoDB",
+ "autoname": "hash",
+ "allow_rename": 0,
+ "field_order": [
+  "approval",
+  "user",
+  "tagged_by",
+  "tagged_at"
+ ],
+ "fields": [
+  {
+   "fieldname": "approval",
+   "fieldtype": "Link",
+   "label": "Approval",
+   "options": "Jarvis Approval Request",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "label": "Reviewer",
+   "options": "User",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "tagged_by",
+   "fieldtype": "Link",
+   "label": "Tagged By",
+   "options": "User",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "tagged_at",
+   "fieldtype": "Datetime",
+   "label": "Tagged At",
+   "options": "",
+   "read_only": 1,
+   "reqd": 1
+  }
+ ],
+ "permissions": [],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "track_changes": 1,
+ "creation": "2026-10-28 00:00:00.000000",
+ "modified": "2026-10-28 00:00:00.000000",
+ "owner": "Administrator",
+ "modified_by": "Administrator"
+}

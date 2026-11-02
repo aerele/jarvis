@@ -14,12 +14,16 @@ from jarvis.tools.preview_doc import preview_doc
 
 
 class LandedCostFixtures(FrappeTestCase):
+	requires_vendor_amounts = True
+
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
 		if not frappe.db.exists("DocType", "Landed Cost Voucher"):
 			raise unittest.SkipTest("ERPNext is not installed")
-		if not hasattr(type(frappe.new_doc("Landed Cost Voucher")), "get_vendor_invoice_amount"):
+		if cls.requires_vendor_amounts and not hasattr(
+			type(frappe.new_doc("Landed Cost Voucher")), "get_vendor_invoice_amount"
+		):
 			raise unittest.SkipTest("ERPNext does not have vendor-invoice cost fetching")
 		frappe.set_user("Administrator")
 		cls.company = masters.ensure_ledger_company()
@@ -314,7 +318,7 @@ class TestLandedCostDefaults(LandedCostFixtures):
 					build_doc("Landed Cost Voucher", values)
 				exists.assert_not_called()
 
-	def test_explicit_amount_does_not_require_a_new_source_read(self):
+	def test_explicit_amount_still_requires_source_tax_read_permission(self):
 		values = self.values(amounts=[25])
 		original = frappe.has_permission
 
@@ -322,8 +326,8 @@ class TestLandedCostDefaults(LandedCostFixtures):
 			return False if doctype == "Purchase Invoice" else original(doctype, *args, **kwargs)
 
 		with patch("jarvis.tools._client_defaults.frappe.has_permission", side_effect=permission):
-			saved = create_doc("Landed Cost Voucher", values)
-		self.assertEqual(saved["total_vendor_invoices_cost"], 25)
+			with self.assertRaises(PermissionDeniedError):
+				create_doc("Landed Cost Voucher", values)
 
 	def test_save_refreshes_an_omitted_default_after_preview(self):
 		values = self.values(charge=90)

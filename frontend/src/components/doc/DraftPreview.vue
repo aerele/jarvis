@@ -41,6 +41,7 @@ const tables = computed(() => {
 		.filter((t) => (t.rows || []).length)
 		.map((t) => {
 			const saved = savedRowsByName(t);
+			const displayedColumns = new Set(t.columns.map((c) => c.fieldname));
 			const extras = t.rows.map((r, ri) => {
 				const items = rowExtraValues(t, r, parent, {
 					index: ri,
@@ -51,7 +52,9 @@ const tables = computed(() => {
 				});
 				return {
 					changed: items.filter((x) => x.changed),
-					also: items.filter((x) => !x.changed),
+					// Proposed columns are already visible above. Keep changed fields
+					// here for their before/after values, but do not repeat plain values.
+					also: items.filter((x) => !x.changed && !displayedColumns.has(x.fieldname)),
 				};
 			});
 			// Changed rows open by default only when few changed, as on the card.
