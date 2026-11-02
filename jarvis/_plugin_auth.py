@@ -56,6 +56,8 @@ import time
 
 import frappe
 
+from jarvis._http import constant_time_equal
+
 _MAX_CLOCK_SKEW_S = 60
 _NONCE_TTL_S = 120
 _NONCE_REDIS_PREFIX = "jarvis:plugin_nonce:"
@@ -119,7 +121,7 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			code="ServiceUnavailable",
 			message="plugin auth not configured on this bench",
 		)
-	if not hmac.compare_digest(presented_token, expected_token):
+	if not constant_time_equal(presented_token, expected_token):
 		_audit_log(
 			"plugin_auth: bearer mismatch",
 			f"remote_ip={caller_ip!r} session_hash={_log_hash(headers.get('X-Jarvis-Session', ''))}",
@@ -304,7 +306,7 @@ def _validate_signature(
 		timestamp_s=ts,
 	)
 	expected = hmac.new(token.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
-	if not hmac.compare_digest(expected, signature):
+	if not constant_time_equal(expected, signature):
 		_audit_log(
 			"plugin_auth: signature mismatch",
 			f"session_hash={_log_hash(session_key)} nonce_hash={_log_hash(nonce)}",

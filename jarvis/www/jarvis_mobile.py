@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import frappe
 
 from jarvis import announcement, maintenance_notice, release_notice
@@ -60,5 +62,24 @@ def get_context(context):
 	# Customer announcement (operator-authored) — same soft banner on the PWA path.
 	context.boot["announcement"] = announcement.boot_payload()
 	context.boot["maintenance"] = maintenance_notice.boot_payload()
+	context.boot["holiday_touch"] = _holiday_touch()
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return context
+
+
+def _holiday_touch() -> dict:
+	"""What the welcome screen shows this user today. Never raises: the shell must render.
+
+	Nothing from holiday_touch is imported at the top of this module and the fallback
+	imports nothing from it either, so a broken package cannot break the page. A Guest has
+	no answer to give, so the resolver is not called for one.
+	"""
+	if frappe.session.user != "Guest":
+		try:
+			from jarvis.holiday_touch import resolve
+
+			return resolve.safe_answer(frappe.session.user)
+		except Exception:
+			pass
+	# The same four keys and version as holiday_touch.pick.none_payload, inlined on purpose.
+	return {"v": 1, "date": datetime.now(timezone.utc).date().isoformat(), "tz": "UTC", "kind": "none"}

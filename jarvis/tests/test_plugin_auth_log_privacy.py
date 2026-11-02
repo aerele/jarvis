@@ -5,7 +5,9 @@ import hmac
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
+from jarvis import _http
 from jarvis import _plugin_auth as auth
+from jarvis._http import constant_time_equal
 
 SESSION = "agent:agent-log-fixture:PRIVATE-SESSION-BEARER"
 NONCE = "PRIVATE-NONCE-FIXTURE-123456"
@@ -90,3 +92,50 @@ class TestPluginAuthLogPrivacy(TestCase):
 		):
 			auth.validate_plugin_request(b"{}")
 		self.assert_private_log()
+
+	def test_non_ascii_bearer_is_a_clean_authentication_rejection(self):
+		presented = "t\u00f6k\u00e9n"
+		headers = {"X-Jarvis-Token": presented, "X-Jarvis-Session": SESSION}
+		with (
+			patch.object(auth, "_safe_headers", return_value=headers),
+			patch.object(auth, "_agent_token", return_value=TOKEN),
+			patch.object(auth, "_caller_ip", return_value="127.0.0.1"),
+			self.assertRaises(auth.PluginAuthError) as caught,
+		):
+			auth.validate_plugin_request(b"{}")
+		self.assertEqual(caught.exception.http_status, 401)
+		self.assertEqual(caught.exception.code, "AuthenticationError")
+		self.assertNotIn(presented, str(self.log.call_args_list))
+		self.assert_private_log()
+
+	def test_legacy_bearer_helper_rejects_non_ascii_without_raising(self):
+		request = Mock(headers={"X-Jarvis-Token": "t\u00f6k\u00e9n"})
+		settings = Mock()
+		settings.get_password.return_value = TOKEN
+		with (
+			patch.object(_http.frappe, "request", request, create=True),
+			patch.object(_http.frappe, "get_single", return_value=settings),
+		):
+			self.assertFalse(_http.validate_bearer())
+
+	def test_non_ascii_signature_is_a_clean_authentication_rejection(self):
+		with (
+			patch.object(auth.time, "time", return_value=1000),
+			self.assertRaises(auth.PluginAuthError) as caught,
+		):
+			auth._validate_signature(
+				token=TOKEN,
+				session_key=SESSION,
+				body_bytes=b"{}",
+				signature="\u00e9" * 64,
+				nonce=NONCE,
+				timestamp_str="1000",
+			)
+		self.assertEqual(caught.exception.http_status, 401)
+		self.assertEqual(caught.exception.code, "AuthenticationError")
+		self.assert_private_log()
+
+	def test_text_compare_remains_strict_and_never_raises_for_a_lone_surrogate(self):
+		self.assertTrue(constant_time_equal("same", "same"))
+		self.assertFalse(constant_time_equal("same", "SAME"))
+		self.assertFalse(constant_time_equal("\ud800", "x"))

@@ -191,8 +191,18 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 				"start a new chat to continue. Then stop.",
 			)
 
+		from jarvis.tools import _private_output
+
+		# AP/AR source snapshots never use the ordinary or shared transports.
+		# Reject here, before either route can claim a callback or collect ERP data.
+		if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
+			frappe.local.response.http_status_code = 400
+			return _error("InvalidArgumentError", "Private review evidence requires private audit output.")
+		if tool in _private_output.PRIVATE_SOURCE_TOOLS and shared_session:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Private review evidence is unavailable in shared chats.")
 		if result_mode is not None and (
-			result_mode != "private_audit_v1" or shared_session or tool not in {"query", "run_report"}
+			result_mode != _private_output.MODE or shared_session or tool not in _private_output.TOOLS
 		):
 			frappe.local.response.http_status_code = 400
 			return _error("InvalidArgumentError", "This call cannot use private audit output.")
@@ -216,6 +226,15 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 	if not has_jarvis_access():
 		frappe.local.response.http_status_code = 403
 		return _error("PermissionError", "you do not have access to Jarvis")
+
+	from jarvis.tools import _private_output
+
+	# A sealed source is only available to its bound plugin delegate. Keep this
+	# guard at the shared HTTP entry point so a future handler cannot expose its
+	# capture through the normal Frappe-authenticated route.
+	if tool in _private_output.PRIVATE_SOURCE_TOOLS:
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", "Private review evidence requires a bound plugin delegate.")
 
 	if result_mode is not None:
 		frappe.local.response.http_status_code = 400
@@ -422,6 +441,20 @@ def _dispatch_from_session(
 
 					agent_scheduler.fail_run(denial["run"], denial["run_error"])
 				return result
+			if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
+				message = "Private review evidence requires private audit output."
+				result = _error("InvalidArgumentError", message)
+				audit.record(
+					tool=tool,
+					args={},
+					ok=False,
+					error_code="InvalidArgumentError",
+					error_message=message,
+				)
+				_persist_and_publish_tool_call(
+					session_key=session_key, tool=tool, args={}, result=result, tool_call_id=tool_call_id
+				)
+				return result
 			if result_mode is not None and not _private_output.allowed(result_mode, tool, cap):
 				result = _error(
 					"CapabilityDeniedError", "Private audit output requires an active delegate contract."
@@ -522,7 +555,18 @@ def _dispatch_from_session(
 				try:
 					result, receipt = _private_output.prepare(result, tool=tool)
 				except InvalidArgumentError as exc:
-					result = receipt = _error("InvalidArgumentError", str(exc))
+					message = str(exc)
+					# The tool did run, but its private output cannot safely cross the
+					# delegate boundary. Keep a failure audit for that attempt without
+					# giving the audit logger any source result data.
+					audit.record(
+						tool=tool,
+						args=parsed_args,
+						ok=False,
+						error_code="InvalidArgumentError",
+						error_message=message,
+					)
+					result = receipt = _error("InvalidArgumentError", message)
 			# Recorded BEFORE the result budget trims the payload, so a step's row
 			# count is the count the tool actually returned, not the truncated one.
 			_ok = bool(isinstance(result, dict) and result.get("ok"))
@@ -812,6 +856,9 @@ def persist_tool_receipt(
 	already carries one of these chips (a pending-action settle whose executed or
 	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``)."""
 	result = result or {}
+	from jarvis.chat.source_receipts import source_receipt
+
+	stored_args, stored_result = source_receipt(tool, args, result)
 	# discarded/cancelled/superseded/expired executed NOTHING; unknown/partial's
 	# write state is UNVERIFIED (an interrupted or mid-dispatch outcome) - none of
 	# these get envelope_ok's binary completed/error classification. The chip
@@ -904,8 +951,8 @@ def persist_tool_receipt(
 					"Jarvis Chat Message",
 					existing,
 					{
-						"tool_args": frappe.as_json(args),
-						"tool_result": frappe.as_json(result) if result else None,
+						"tool_args": frappe.as_json(stored_args),
+						"tool_result": frappe.as_json(stored_result) if stored_result else None,
 						"tool_status": status,
 						"action_outcome": action_outcome or None,
 						"armed_by_macro": armed_by_macro or None,
@@ -926,8 +973,8 @@ def persist_tool_receipt(
 				{
 					"role": "tool",
 					"tool_name": tool,
-					"tool_args": frappe.as_json(args),
-					"tool_result": frappe.as_json(result) if result else None,
+					"tool_args": frappe.as_json(stored_args),
+					"tool_result": frappe.as_json(stored_result) if stored_result else None,
 					"tool_status": status,
 					"tool_call_id": tool_call_id or flip_token or None,
 					"action_outcome": action_outcome or None,
@@ -958,8 +1005,8 @@ def persist_tool_receipt(
 			tool_message_id=msg_name,
 			tool_call_id=tool_call_id or flip_token or None,
 			tool_name=tool,
-			args=args,
-			result=result,
+			args=stored_args,
+			result=stored_result,
 			status=status,
 			action_outcome=action_outcome,
 		)

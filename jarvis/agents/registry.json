@@ -86,7 +86,7 @@
       "domain": "ap",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Reviews existing draft Purchase Invoices against exact PO and receipt links, cumulative invoice allocations and an explicitly configured price policy. Preview produces findings; live runs create evidence-backed human review requests. Never creates duplicate invoices, submits, pays, or certifies tax compliance. Manual runs only.",
       "tools_required": [
@@ -125,6 +125,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       },
@@ -145,7 +146,7 @@
       "domain": "ar",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Reviews submitted receivables and opening balances against typed payment-ledger evidence and recorded payment terms. Produces findings and neutral, unsent reminder text for a named reviewer. Detects India Compliance context when applicable. No sending, Dunning creation, reconciliation, posting, interest or write-offs. Manual runs only.",
       "tools_required": [
@@ -182,6 +183,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       },
@@ -251,6 +253,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -298,6 +301,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       },
@@ -374,6 +378,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       },
@@ -387,32 +392,33 @@
       "domain": "measurement",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "status": "Published",
-      "description": "Extends the Retrospective Baseline Meter onto Helpdesk records: how quickly tickets get a first response, how quickly they get resolved, and how many tickets you handle each period. Installable only where Helpdesk is present. Read-only; reads timestamps, statuses, and counts - never ticket conversation content.",
+      "description": "Read-only counts and response or resolution times for one Helpdesk team in fixed closed calendar windows. Uses recorded ticket timestamps and shows missing source coverage. Does not read ticket messages.",
       "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list"
+        "jarvis__get_my_access",
+        "jarvis__query"
       ],
       "tools_allow": [
+        "jarvis__get_my_access",
         "jarvis__query",
-        "jarvis__get_list",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
-        "exec",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
-        "HD Ticket"
+        "HD Ticket",
+        "HD Team"
       ],
       "rule_tokens": [
-        "bmhd-lat-4c19",
-        "bmhd-win-9e2f"
+        "bmhd-resolution-79c2",
+        "bmhd-response-bb17",
+        "bmhd-throughput-f59a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
-      "timeout_s": 900,
+      "timeout_s": 1200,
       "min_apps": [
         "erpnext",
         "helpdesk"
@@ -423,6 +429,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -472,6 +479,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -534,6 +542,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -596,6 +605,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -642,6 +652,7 @@
         "Jarvis Admin"
       ],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       }
@@ -705,6 +716,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       }
@@ -762,6 +774,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -819,6 +832,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -882,6 +896,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -938,6 +953,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -996,6 +1012,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1057,6 +1074,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       },
@@ -1119,6 +1137,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1186,6 +1205,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1247,6 +1267,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       },
@@ -1308,6 +1329,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1364,6 +1386,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1426,6 +1449,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1490,6 +1514,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1556,6 +1581,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       }
@@ -1566,20 +1592,16 @@
       "domain": "helpdesk",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "status": "Published",
-      "description": "A scheduled, reproducible queue-health sweep for Frappe Helpdesk. Reads each ticket's already-stored SLA state and folds breached, about-to-breach, unassigned, unacknowledged, reopened and stalled tickets into one de-duplicated, severity-ranked worklist, hyperlinked to each ticket with the deadline it missed and its age. Read-only; never reassigns, replies, re-prioritises, or closes a ticket.",
+      "description": "Read-only review of the visible tickets in one selected Helpdesk team. Checks SLA deadlines, assignment, first replies, recorded reopen activity, calendar age and policy gaps at a bench-stamped instant.",
       "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__get_my_access",
+        "jarvis__query"
       ],
       "tools_allow": [
+        "jarvis__get_my_access",
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -1588,16 +1610,17 @@
       ],
       "doctypes_required": [
         "HD Ticket",
-        "HD Service Level Agreement",
         "HD Team"
       ],
       "rule_tokens": [
         "sb-age-c9f3",
-        "sb-quiet-a260",
+        "sb-assign-34d1",
+        "sb-policy-90c7",
+        "sb-reopen-6e42",
         "sb-risk-7b2c",
-        "sb-stat-4d81",
-        "sb-win-1e4a"
+        "sb-touch-2a8f"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "helpdesk-queue",
       "timeout_s": 1800,
@@ -1610,9 +1633,13 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "sla_config"
+      ]
     },
     {
       "agent_slug": "statutory-payroll-compliance-auditor",
@@ -1670,6 +1697,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1721,6 +1749,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1772,6 +1801,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1833,6 +1863,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": "2026-2027",
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }
@@ -1843,43 +1874,15 @@
       "domain": "helpdesk",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "Coming Soon",
-      "description": "Reads each new helpdesk ticket and proposes its routing as an evidence-carrying Approval Request: a suggested category, an SLA-aware priority, the owning team and a candidate agent, plus a duplicate suggestion when a recent ticket from the same requester looks like a match. It proposes only; a human confirms on the Approval Board and the confirmed routing is applied on their behalf. It never resolves, replies, closes, merges, reassigns, or touches an in-progress ticket.",
-      "tools_required": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc"
-      ],
-      "tools_allow": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc",
-        "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "canvas",
-        "message"
-      ],
-      "doctypes_required": [
-        "Jarvis Approval Request",
-        "HD Ticket",
-        "HD Team",
-        "HD Service Level Agreement",
-        "HD Agent"
-      ],
+      "description": "Coming Soon. Ticket routing is not available. This agent has no runtime tool or write surface. It cannot read tickets, create approvals, change tickets, or send messages. A later server-owned workflow will require private source transport and a human-confirmed routing action.",
+      "tools_required": [],
+      "tools_allow": [],
+      "doctypes_required": [],
       "rule_tokens": [],
-      "writes": [
-        {
-          "doctype": "Jarvis Approval Request",
-          "mode": "approval-request"
-        }
-      ],
+      "advisory_tokens": [],
+      "writes": null,
       "rule_pack": "helpdesk-queue",
       "timeout_s": 300,
       "min_apps": [
@@ -1891,6 +1894,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
       }
@@ -1962,6 +1966,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
       }

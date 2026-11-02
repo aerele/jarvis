@@ -46,6 +46,84 @@ def snapshot():
 	return result
 
 
+def terminal_snapshot(state):
+	"""A sealed, fully readable source with one server-provable terminal result."""
+	policy = config()
+	invoice = {
+		"name": "SI-1",
+		"company": "Example",
+		"customer": "Customer A",
+		"docstatus": 1,
+		"is_return": 0,
+		"posting_date": "2026-03-01",
+		"due_date": "2026-09-30" if state == "within_terms" else "2026-08-30",
+		"currency": "INR",
+		"party_account_currency": "INR",
+		"debit_to": "Debtors",
+		"outstanding_amount": "100.00" if state == "within_terms" else "0.00",
+		"grand_total": "100.00",
+		"rounded_total": "100.00",
+		"outstanding_precision": 2,
+		"payment_schedule": [],
+	}
+	ledger = [
+		{
+			"name": "PLE-1",
+			"company": "Example",
+			"party_type": "Customer",
+			"party": "Customer A",
+			"account": "Debtors",
+			"account_currency": "INR",
+			"account_type": "Receivable",
+			"voucher_type": "Sales Invoice",
+			"voucher_no": "SI-1",
+			"against_voucher_type": "Sales Invoice",
+			"against_voucher_no": "SI-1",
+			"posting_date": "2026-03-01",
+			"amount_in_account_currency": "100.00",
+			"delinked": 0,
+			"finance_book": None,
+		}
+	]
+	payments = []
+	if state == "settled":
+		ledger.append(
+			{
+				**ledger[0],
+				"name": "PLE-2",
+				"voucher_type": "Payment Entry",
+				"voucher_no": "PE-1",
+				"amount_in_account_currency": "-100.00",
+				"posting_date": "2026-09-01",
+			}
+		)
+		payments.append(
+			{
+				"name": "PE-1",
+				"company": "Example",
+				"docstatus": 1,
+				"party_type": "Customer",
+				"party": "Customer A",
+			}
+		)
+	result = {
+		"scope": review.scope_from_config(policy),
+		"config": policy,
+		"complete": True,
+		"site_date": "2026-09-30",
+		"jurisdiction": {"india_compliance_installed": False, "company_country": "India"},
+		"datasets": {
+			"invoices": [invoice],
+			"ledger": ledger,
+			"payments": payments,
+			"journals": [],
+			"customers": [{"name": "Customer A", "customer_name": "Customer A", "disabled": 0}],
+		},
+	}
+	result["source_digest"] = review.digest(result)
+	return result
+
+
 def output(source):
 	result = {
 		"scope": source["scope"],
@@ -316,6 +394,26 @@ class TestReceivablesReview(FrappeTestCase):
 				with self.assertRaises(frappe.PermissionError):
 					review.get_inputs(frappe._dict(name="RUN"))
 
+	def test_private_source_wrapper_seals_an_active_ar_snapshot(self):
+		from jarvis.exceptions import InvalidArgumentError
+		from jarvis.tools import _private_output
+		from jarvis.tools import get_receivables_review_inputs as source_tool
+
+		captured = snapshot()
+		with (
+			patch.object(source_tool, "get_session_key", return_value="active-ar-session"),
+			patch.object(frappe.db, "get_value", return_value="RUN-AR"),
+			patch.object(frappe, "get_doc", return_value=frappe._dict(name="RUN-AR")),
+			patch.object(source_tool, "get_inputs", return_value=captured) as get_inputs,
+		):
+			with self.assertRaises(InvalidArgumentError):
+				source_tool.get_receivables_review_inputs()
+			get_inputs.assert_not_called()
+			with _private_output.request(True):
+				sealed = source_tool.get_receivables_review_inputs()
+		get_inputs.assert_called_once()
+		self.assertEqual(sealed, {"rows": [captured]})
+
 	def test_review_dispatches_ar_backend_and_requires_named_reviewer(self):
 		source = snapshot()
 		doc = frappe._dict(
@@ -366,6 +464,112 @@ class TestReceivablesReview(FrappeTestCase):
 					frappe._dict(input_snapshot_json=json.dumps(source)), **seal_output(source, result)
 				)
 
+	def test_server_is_the_only_authority_for_terminal_invoice_states(self):
+		for terminal, forged in (("settled", "within_terms"), ("within_terms", "settled")):
+			with self.subTest(terminal=terminal, forged=forged):
+				source = terminal_snapshot(terminal)
+				valid = output(source)
+				valid["findings"][0].update(review_state=terminal, reminder_draft=None)
+				with patch.object(review, "collect", return_value=source):
+					self.assertTrue(
+						review.validate_output(
+							frappe._dict(input_snapshot_json=json.dumps(source)), **seal_output(source, valid)
+						)[2]
+					)
+				forged_output = output(source)
+				forged_output["findings"][0].update(review_state=forged, reminder_draft=None)
+				with (
+					patch.object(review, "collect", return_value=source),
+					self.assertRaisesRegex(frappe.ValidationError, "Only server evidence"),
+				):
+					review.validate_output(
+						frappe._dict(input_snapshot_json=json.dumps(source)),
+						**seal_output(source, forged_output),
+					)
+
+	def test_forged_terminal_state_cannot_reach_live_review_staging(self):
+		from jarvis.tools import record_agent_run as writeback
+
+		source = snapshot()
+		forged = output(source)
+		forged["findings"][0].update(review_state="settled", reminder_draft=None)
+		run = frappe._dict(
+			name="RUN-AR-FORGED",
+			agent=review.AGENT,
+			installation="INST-AR-FORGED",
+			status="running",
+			input_snapshot_json=json.dumps(source),
+			preparation_mode="live",
+			owner="Administrator",
+			findings_count=0,
+			blocker_count=0,
+			coverage_note="",
+			dashboard=None,
+		)
+		inst = frappe._dict(name="INST-AR-FORGED", reviewer="Administrator")
+		with (
+			patch("jarvis.tools._agent_run_ctx.get_session_key", return_value="session"),
+			patch.object(
+				frappe.db,
+				"get_value",
+				side_effect=lambda doctype, *args, **kwargs: run
+				if doctype == writeback.RUN
+				else {"rule_tokens": json.dumps([review.TOKEN]), "doctypes_required": '["Sales Invoice"]'},
+			),
+			patch.object(
+				frappe, "get_doc", side_effect=lambda doctype, name: run if doctype == writeback.RUN else inst
+			),
+			patch.object(review, "collect", return_value=source),
+			patch.object(review, "stage_reviews") as stage,
+			patch("jarvis.chat.agent_runs.record_delegate_run") as persist,
+			patch("jarvis.chat.agent_run_steps.record_step"),
+			self.assertRaisesRegex(frappe.ValidationError, "Only server evidence"),
+		):
+			writeback.record_agent_run(**seal_output(source, forged))
+		stage.assert_not_called()
+		persist.assert_not_called()
+
+	def test_finalized_retry_does_not_create_or_stage_a_duplicate_review(self):
+		from jarvis.tools import record_agent_run as writeback
+
+		run = frappe._dict(
+			name="RUN-AR-RETRY",
+			status="completed",
+			installation="INST-AR-RETRY",
+			agent=review.AGENT,
+		)
+		with (
+			patch("jarvis.tools._agent_run_ctx.get_session_key", return_value="session"),
+			patch.object(frappe.db, "get_value", return_value=run),
+			patch.object(frappe, "get_doc") as get_doc,
+			patch.object(review, "stage_reviews") as stage,
+		):
+			result = writeback.record_agent_run()
+		self.assertTrue(result["idempotent"])
+		self.assertEqual(result["run"], run.name)
+		get_doc.assert_not_called()
+		stage.assert_not_called()
+
+	def test_ar_input_tool_requires_private_output_and_returns_one_private_source_row(self):
+		from jarvis.exceptions import InvalidArgumentError
+		from jarvis.tools import _private_output, registry
+		from jarvis.tools import get_receivables_review_inputs as tool
+
+		with _private_output.request(False), patch.object(tool, "get_inputs") as collect:
+			with self.assertRaises(InvalidArgumentError):
+				tool.get_receivables_review_inputs()
+			collect.assert_not_called()
+		with (
+			_private_output.request(True),
+			patch.object(tool, "get_session_key", return_value="agent:ar-private"),
+			patch.object(frappe.db, "get_value", return_value="RUN-AR-PRIVATE"),
+			patch.object(frappe, "get_doc", return_value=frappe._dict(name="RUN-AR-PRIVATE")),
+			patch.object(tool, "get_inputs", return_value={"source_digest": "sealed"}),
+		):
+			self.assertEqual(tool.get_receivables_review_inputs(), {"rows": [{"source_digest": "sealed"}]})
+		self.assertIn("get_receivables_review_inputs", registry._TOOL_NAMES)
+		self.assertIn("get_receivables_review_inputs", _private_output.TOOLS)
+
 	def test_ar_uses_snapshot_completeness_not_gl_shortcuts(self):
 		from jarvis.chat import agent_runs
 
@@ -408,11 +612,23 @@ class TestReceivablesReview(FrappeTestCase):
 
 
 def assess_native(source, assessment):
+	"""Run the exact server-sealed source bytes through the paired private runtime."""
+	from jarvis.tools import _private_output
+
+	wire, _ = _private_output.prepare(
+		{"ok": True, "data": {"rows": [source]}}, tool="get_receivables_review_inputs"
+	)
+	data = wire["data"].encode("utf-8")
+	header = json.dumps(
+		{"result_mode": wire["result_mode"], "private_output": wire["private_output"]},
+		separators=(",", ":"),
+		sort_keys=True,
+	).encode("utf-8")
 	with tempfile.TemporaryDirectory() as directory:
 		input_path = os.path.join(directory, "input.json")
 		output_path = os.path.join(directory, "output.json")
-		with open(input_path, "w", encoding="utf-8") as stream:
-			json.dump(source, stream)
+		with open(input_path, "wb") as stream:
+			stream.write(header + b"\n" + data)
 		subprocess.run(
 			[sys.executable, assessment, "--input", input_path, "--out", output_path], check=True, timeout=30
 		)
@@ -427,6 +643,7 @@ class TestNativeReceivablesReview(FrappeTestCase):
 		from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 
 		from jarvis.chat import approvals_api
+		from jarvis.tests import test_filebox_skills
 		from jarvis.tests.test_filebox_skills import (
 			E2E_ABBR,
 			E2E_CO,
@@ -439,7 +656,13 @@ class TestNativeReceivablesReview(FrappeTestCase):
 		frappe.set_user("Administrator")
 		roots, documents, reviews = [], [], []
 		try:
-			roots.extend(_e2e_fixtures())
+			# Keep the India Compliance prerequisites local to this AR scenario;
+			# other File Box test fixtures must not inherit a tax assumption.
+			masters = list(test_filebox_skills._E2E_MASTERS)
+			doctype, values = masters[-1]
+			masters[-1] = (doctype, {**values, "gst_hsn_code": "84713010"})
+			with patch.object(test_filebox_skills, "_E2E_MASTERS", tuple(masters)):
+				roots.extend(_e2e_fixtures())
 			for doctype in ("GL Entry", "Payment Ledger Entry"):
 				frappe.db.delete(doctype, {"company": E2E_CO})
 			if not frappe.db.exists("Party Type", "Customer"):
@@ -500,6 +723,22 @@ class TestNativeReceivablesReview(FrappeTestCase):
 			customer.flags.ignore_mandatory = True
 			customer.insert(ignore_permissions=True)
 			documents.append((customer.doctype, customer.name))
+			company_address = frappe.get_doc(
+				{
+					"doctype": "Address",
+					"address_title": "zz-AR Review Company",
+					"address_type": "Billing",
+					"address_line1": "1 AR Review Lane",
+					"city": "Ahmedabad",
+					"state": "Gujarat",
+					"pincode": "380015",
+					"country": "India",
+					"gstin": "24AANCA4892J1Z8",
+					"gst_category": "Registered Regular",
+					"links": [{"link_doctype": "Company", "link_name": E2E_CO}],
+				}
+			).insert(ignore_permissions=True)
+			documents.append((company_address.doctype, company_address.name))
 			today = frappe.utils.today()
 			invoice = frappe.get_doc(
 				{
@@ -512,6 +751,9 @@ class TestNativeReceivablesReview(FrappeTestCase):
 					"currency": "INR",
 					"conversion_rate": 1,
 					"debit_to": debtors,
+					"company_address": company_address.name,
+					"company_gstin": "24AANCA4892J1Z8",
+					"place_of_supply": "24-Gujarat",
 					"selling_price_list": price_list,
 					"price_list_currency": "INR",
 					"plc_conversion_rate": 1,
@@ -550,7 +792,12 @@ class TestNativeReceivablesReview(FrappeTestCase):
 			documents.append((run.doctype, run.name))
 			captured = review.get_inputs(run)
 			self.assertTrue(captured["complete"], captured)
-			assessed = assess_native(captured, assessment)
+			# Deliberately reverse the source key order. The server must seal sorted
+			# canonical bytes that the strict paired runtime accepts, not a Python dict
+			# serialization that happens to match this test process.
+			nonlexical_captured = {key: captured[key] for key in reversed(sorted(captured))}
+			self.assertNotEqual(list(nonlexical_captured), sorted(nonlexical_captured))
+			assessed = assess_native(nonlexical_captured, assessment)
 			self.assertEqual(assessed["findings"][0]["review_state"], "reminder_candidate", assessed)
 			self.assertIn("Opening/prior-period", assessed["findings"][0]["note"])
 			self.assertTrue(
@@ -566,11 +813,18 @@ class TestNativeReceivablesReview(FrappeTestCase):
 			}
 			reviews.extend(review.stage_reviews(run, inst, assessed["findings"]))
 			self.assertEqual(review.stage_reviews(run, inst, assessed["findings"]), reviews)
+			approval = frappe.get_doc("Jarvis Approval Request", reviews[0])
+			self.assertEqual(approval.status, "Pending")
+			self.assertEqual(approval.source, "Agent Review")
+			self.assertEqual(approval.ref_name, invoice.name)
+			self.assertEqual(approval.agent, review.AGENT)
+			self.assertNotIn('"datasets"', approval.assessment_evidence)
 			with patch.object(approvals_api, "_resume_conversation") as resume:
-				self.assertFalse(
-					approvals_api.decide(reviews[0], "Review acknowledged; no sending authorised")["resumed"]
-				)
+				decision = approvals_api.decide(reviews[0], "Review acknowledged; no sending authorised")
+				self.assertTrue(decision["ok"])
+				self.assertFalse(decision["resumed"])
 				resume.assert_not_called()
+			self.assertEqual(frappe.db.get_value("Jarvis Approval Request", reviews[0], "status"), "Approved")
 			for doctype, count in before.items():
 				self.assertEqual(frappe.db.count(doctype), count)
 			payment = get_payment_entry("Sales Invoice", invoice.name, bank_account=bank, party_amount=40)

@@ -883,19 +883,33 @@ class TestRegistryToolsAllow(FrappeTestCase):
 		with mock.patch.object(agent_catalog, "_load_registry", return_value=synth):
 			self.assertEqual(agent_catalog.registry_tools_allow("cc-bad"), [])
 
-	def test_every_bundled_agent_declares_a_usable_bench_surface(self):
-		"""A bundled agent with no declared tools is now refused at LAUNCH, and one
-		that declares only container-side tools (``exec``/``canvas``/``message``)
-		launches but is fatally refused at its first call. Either is a shipped agent
-		nobody can run — catch it here, not in prod."""
+	def test_every_runnable_bundled_agent_declares_a_usable_bench_surface(self):
+		"""A runnable bundled agent with no declared tools is refused at launch, and
+		one that declares only container-side tools is refused at its first call.
+
+		The sole no-tool exception is a complete, explicit Coming Soon contract. It
+		is not a runnable empty allow-list and it must carry no source or write
+		surface. Keep this exact allow-list small so a new disabled agent receives a
+		deliberate review here.
+		"""
+		disabled = []
 		for a in agent_catalog._load_registry().get("agents") or []:
 			slug = (a.get("agent_slug") or "").strip()
 			declared = agent_catalog.registry_tools_allow(slug)
-			self.assertTrue(declared, f"{slug} declares no tools_allow")
+			if not declared:
+				disabled.append(slug)
+				self.assertEqual(a.get("status"), "Coming Soon")
+				self.assertEqual(a.get("nature"), "operator")
+				self.assertEqual(a.get("tools_required"), [])
+				self.assertEqual(a.get("doctypes_required"), [])
+				self.assertIsNone(a.get("writes"))
+				self.assertEqual((a.get("default_schedule") or {}).get("schedule_enabled"), 0)
+				continue
 			self.assertTrue(
 				_delegate_capability.bench_tools(declared),
 				f"{slug} declares no jarvis__ tool, so every bench call would be refused",
 			)
+		self.assertEqual(disabled, ["ticket-triage-operator"])
 
 	def test_normalize_strips_only_the_jarvis_prefix(self):
 		self.assertEqual(_delegate_capability.normalize_tool("jarvis__get_doc"), "get_doc")

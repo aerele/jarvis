@@ -17,15 +17,17 @@ import frappe
 from frappe import _
 
 from jarvis._session import authenticated_user, impersonate
+from jarvis.chat import agent_scope
 from jarvis.chat import coverage_reasons as cr
 from jarvis.chat.agent_activity import log_activity
-from jarvis.chat.agent_catalog import build_agent_push_payload
+from jarvis.chat.agent_catalog import build_agent_push_payload, registry_supports_record_scope
 from jarvis.chat.filebox import _clamp_page, _lk
 from jarvis.chat.finding_presentation import finding_text
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import (
 	has_jarvis_admin_access,
 	is_skill_reviewer,
+	is_valid_unattended_owner,
 	message_origin,
 	refuse_in_tool_dispatch,
 	require_jarvis_admin,
@@ -498,6 +500,8 @@ def get_agent(agent_slug: str) -> dict:
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 	from jarvis.chat.operator_review import backend
+	from jarvis.chat.sla_breach_ageing import AGENT as SLA_BREACH_AGENT
+	from jarvis.chat.sla_breach_ageing import configuration_issues as sla_configuration_issues
 
 	try:
 		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
@@ -616,6 +620,11 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif listing.agent_slug == SLA_BREACH_AGENT:
+			# The selected Helpdesk team is an explicit, permission-bounded launch
+			# boundary. Surface its saved-state issues so Run Now can fail closed in
+			# the UI; _launch_audit re-checks under the run-as identity.
+			i["configuration_issues"] = sla_configuration_issues(i.config or "{}")
 		out["installation"] = i
 
 	if is_sm and not _masked:
@@ -1169,6 +1178,13 @@ def install_agent(
 		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
 	if listing.status != "Published":
 		frappe.throw(_("This agent is not available to install."))
+	# A mutable legacy listing can say Published even though its reviewed bundle
+	# is a no-runtime Coming Soon teaser. Refuse before installability checks so
+	# a missing optional app cannot mask the closed bundle contract.
+	from jarvis.chat.agent_catalog import registry_is_coming_soon_no_runtime
+
+	if registry_is_coming_soon_no_runtime(listing.name):
+		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
 	if frappe.db.exists(INSTALLATION, {"owner": me, "agent": listing.name}):
 		frappe.throw(_("You have already installed this agent."))
 	# R5-J8: refuse when the listing's min_apps are not all installed / a required
@@ -1292,6 +1308,14 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	# absent at install, or one that vanished after install and was reconciled to
 	# installable=0). Disabling is always allowed.
 	if int(enabled or 0):
+		from jarvis.chat.agent_catalog import registry_is_coming_soon_no_runtime
+
+		if registry_is_coming_soon_no_runtime(doc.agent):
+			frappe.throw(
+				_("This agent has no runnable bundled workflow and cannot be enabled."),
+				frappe.PermissionError,
+				title=_("Agent not available"),
+			)
 		from jarvis.chat.agent_installability import assert_installable
 
 		assert_installable(doc.agent)
@@ -1312,6 +1336,34 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "enabled": doc.enabled}}
+
+
+def _assert_sla_schedule_configuration(doc) -> None:
+	"""Validate an SLA schedule's team boundary as its eventual run-as user.
+
+	A schedule is an unattended commitment. Checking the configuration as the
+	requesting owner could accept a Helpdesk team that the scheduled run-as user
+	cannot read. Refuse before the schedule row is saved, so the next cron tick
+	does not have to record a confusing failed run.
+	"""
+	from jarvis.chat.sla_breach_ageing import AGENT as SLA_BREACH_AGENT
+	from jarvis.chat.sla_breach_ageing import assert_configuration
+
+	if doc.agent != SLA_BREACH_AGENT:
+		return
+	run_as = (doc.run_as_user or "").strip()
+	if not is_valid_unattended_owner(run_as):
+		frappe.throw(
+			_(
+				"This agent needs an enabled non-system run-as user before you can enable an "
+				"automatic schedule."
+			)
+		)
+	# The configuration has no scheduler-owned write. Its only side effect is a
+	# permission-bounded HD Team read, which must occur under the identity that
+	# will execute the scheduled audit.
+	with impersonate(run_as):
+		assert_configuration(doc)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1342,9 +1394,12 @@ def set_schedule(
 	if int(schedule_enabled or 0):
 		from jarvis.chat.agent_installability import assert_installable
 
+		if agent_scope.record_scope_requested(doc.config):
+			agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
 		if doc.agent in REVIEW_OPERATORS:
 			frappe.throw(_("Operator evidence review supports manual runs only."))
 		assert_installable(doc.agent)
+		_assert_sla_schedule_configuration(doc)
 	if schedule_enabled is not None:
 		doc.schedule_enabled = int(schedule_enabled or 0)
 	if schedule_frequency is not None:
@@ -1443,6 +1498,8 @@ def set_config(installation: str, config: str) -> dict:
 		frappe.throw(_("Config must be valid JSON."))
 	if not isinstance(parsed, dict):
 		frappe.throw(_("Config must be a JSON object."))
+	if agent_scope.record_scope_requested(parsed):
+		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), parsed)
 	doc.config = frappe.as_json(parsed)
 	doc.save()
 	log_activity(

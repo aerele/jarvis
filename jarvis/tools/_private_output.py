@@ -12,7 +12,11 @@ from jarvis.exceptions import InvalidArgumentError
 MODE = "private_audit_v1"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_ROWS = 20_000
-TOOLS = frozenset({"query", "run_report"})
+# These tools have an explicit plugin-owned local-input contract. Adding a read
+# here is not enough by itself: its tool implementation must reject the ordinary
+# transport and its bundle must verify the returned receipt before it can assess.
+PRIVATE_SOURCE_TOOLS = frozenset({"get_purchase_match_inputs", "get_receivables_review_inputs"})
+TOOLS = frozenset({"query", "run_report"}) | PRIVATE_SOURCE_TOOLS
 _active = ContextVar("jarvis_private_audit_output", default=False)
 
 
@@ -29,7 +33,22 @@ def is_private():
 	return _active.get()
 
 
+def require_source_transport(tool):
+	"""Refuse an AP/AR snapshot unless the private delegate boundary is active."""
+	if tool in PRIVATE_SOURCE_TOOLS and not is_private():
+		raise InvalidArgumentError("Private review evidence requires private audit output.")
+
+
+def source_envelope(snapshot):
+	"""Put one server-captured review snapshot on the sealed source contract."""
+	if not isinstance(snapshot, dict):
+		raise InvalidArgumentError("The private review source has an invalid snapshot.")
+	return {"rows": [snapshot]}
+
+
 def validate_args(tool, args):
+	if tool in PRIVATE_SOURCE_TOOLS and args != {}:
+		raise InvalidArgumentError("Private review evidence takes no model-selected arguments.")
 	if tool == "query":
 		spec = args.get("spec")
 		limit = spec.get("limit") if isinstance(spec, dict) else None
@@ -58,6 +77,20 @@ def prepare(result, *, tool):
 		raise InvalidArgumentError("The private source has no row array; coverage is incomplete.")
 	if len(rows) > MAX_ROWS:
 		raise InvalidArgumentError("The private source exceeds its row limit; coverage is incomplete.")
+	if tool in PRIVATE_SOURCE_TOOLS:
+		# Each review tool carries exactly one server-captured snapshot in a row envelope.
+		# Do not accept an arbitrary result-shaped object: the plugin and bundle use
+		# this stable boundary to reject a normal transcript result or a stale spill.
+		if set(data) != {"rows"} or len(rows) != 1 or not isinstance(rows[0], dict):
+			raise InvalidArgumentError("The private review source has an invalid snapshot envelope.")
+		snapshot = rows[0]
+		digest = snapshot.get("source_digest")
+		if (
+			not isinstance(digest, str)
+			or len(digest) != 64
+			or any(char not in "0123456789abcdef" for char in digest)
+		):
+			raise InvalidArgumentError("The private review source has no valid evidence digest.")
 	if tool == "run_report" and (
 		data.get("prepared_report") or data.get("status") not in (None, "", "ready")
 	):
@@ -66,7 +99,12 @@ def prepare(result, *, tool):
 		raise InvalidArgumentError("The private source is truncated; coverage is incomplete.")
 	try:
 		body = json.dumps(
-			data, default=json_handler, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+			data,
+			default=json_handler,
+			sort_keys=True,
+			ensure_ascii=False,
+			allow_nan=False,
+			separators=(",", ":"),
 		).encode()
 	except (TypeError, ValueError, OverflowError) as exc:
 		raise InvalidArgumentError(
@@ -82,4 +120,18 @@ def prepare(result, *, tool):
 		"bytes": len(body),
 		"sha256": hashlib.sha256(body).hexdigest(),
 	}
-	return {**result, "result_mode": MODE}, {"ok": True, "data": summary}
+	if tool in PRIVATE_SOURCE_TOOLS:
+		# Do not make the plugin parse and re-serialize source JSON. JavaScript
+		# formatting can change numeric text or key order, which would make a good
+		# server receipt fail spuriously. This canonical UTF-8 string is the exact
+		# byte sequence that the bench hashed. The plugin verifies it, then saves a
+		# mode-0600 envelope containing this string plus the server receipt.
+		wire = {
+			"ok": True,
+			"data": body.decode("utf-8"),
+			"result_mode": MODE,
+			"private_output": summary,
+		}
+		return wire, {"ok": True, "data": summary}
+	# Generic private query/report callers retain their existing object contract.
+	return {**result, "result_mode": MODE, "private_output": summary}, {"ok": True, "data": summary}

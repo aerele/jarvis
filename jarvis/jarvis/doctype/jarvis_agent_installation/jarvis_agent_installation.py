@@ -43,6 +43,7 @@ _GL_SCOPED_DIMENSIONS = (
 
 class JarvisAgentInstallation(NotRenamable, Document):
 	def validate(self):
+		self._guard_registry_no_runtime()
 		self._default_reviewer()
 		self._guard_installability()
 		self._guard_operator_visibility()
@@ -53,6 +54,29 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		self._validate_schedule_day_of_month()
 		self._validate_schedule_budget()
 		self._guard_activation_transition()
+
+	def _guard_registry_no_runtime(self):
+		"""Refuse new or enabled installs of a reviewed no-runtime teaser.
+
+		Existing disabled rows stay recoverable, so an old or manually changed row
+		can still be disabled, repaired, or removed without becoming runnable.
+		"""
+		from jarvis.chat.agent_catalog import registry_is_coming_soon_no_runtime
+
+		if not registry_is_coming_soon_no_runtime(self.agent):
+			return
+		if self.is_new():
+			frappe.throw(
+				_("This agent is not available to install."),
+				frappe.PermissionError,
+				title=_("Agent not available"),
+			)
+		if frappe.utils.cint(self.get("enabled")):
+			frappe.throw(
+				_("This agent has no runnable bundled workflow and cannot be enabled."),
+				frappe.PermissionError,
+				title=_("Agent not available"),
+			)
 
 	def on_update(self):
 		self._audit_cross_user_run_as()
