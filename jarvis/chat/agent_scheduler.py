@@ -117,6 +117,22 @@ _FLEET_UNKNOWN_RUN = "unknown agent run"
 # flight" (the mistake this constant replaces: the poll originally matched only
 # ``completed`` and would never have seen a real ``done``).
 _FLEET_FINISHED_STATUSES = ("done", "completed")
+# Custom App Learning reads customer source. A fleet host deployed before its
+# terminal-output projection can still return an old raw reply/error during a
+# rolling upgrade. Project that response by the run's immutable marketplace slug
+# before it reaches a Run error, activity row, log, or user-facing response.
+_APP_LEARNING_AGENT_SLUG = "custom-app-learning"
+_APP_LEARNING_SUCCESS_REPLY = "Custom App Learning finished. The server saved any verified wiki results."
+_APP_LEARNING_ABORT_REPLY = "Custom App Learning ended before it completed."
+_APP_LEARNING_FAILURE_MESSAGE = (
+	"Custom App Learning did not complete. Retry the run or review its server status."
+)
+_APP_LEARNING_FLEET_STATUSES = frozenset({"missing", "queued", "running", "done", "completed", "failed"})
+# Match the validated fleet ``AgentModelRef`` shape. The scheduler applies this
+# again because it can read a state file from a fleet host that predates the
+# fleet-side projection during a rolling deployment.
+_APP_LEARNING_MODEL_PROVIDER_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
+_APP_LEARNING_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}")
 # Circuit breaker on the poll's outbound calls. The sweep is SEQUENTIAL and each admin
 # call can block for admin_client.DEFAULT_TIMEOUT_S (150s), so with admin down three
 # in-flight runs already outlast the 5-minute cron interval and sweeps start stacking.
@@ -921,7 +937,7 @@ def _backfill_model_used(now) -> int:
 			["finished_at", ">", now - timedelta(seconds=MODEL_USED_BACKFILL_WINDOW_SECONDS)],
 			["finished_at", "<", now - timedelta(seconds=MODEL_USED_BACKFILL_MIN_AGE_SECONDS)],
 		],
-		pluck="name",
+		fields=["name", "agent"],
 		order_by="finished_at asc",
 		limit=MODEL_USED_BACKFILL_SCAN,
 		ignore_permissions=True,
@@ -929,7 +945,8 @@ def _backfill_model_used(now) -> int:
 	cache = frappe.cache()
 	stored = asked = 0
 	pool = None
-	for name in rows:
+	for row in rows:
+		name = row.name
 		if asked >= MODEL_USED_BACKFILL_BATCH:
 			break
 		key = f"jarvis:model_used_backfill:{name}"
@@ -938,7 +955,9 @@ def _backfill_model_used(now) -> int:
 			continue
 		asked += 1
 		try:
-			state = _polled_state(admin_client.get_agent_run_status(name))
+			state = _safe_app_learning_fleet_state(
+				row, _polled_state(admin_client.get_agent_run_status(name))
+			)
 		except Exception as e:
 			if _FLEET_UNKNOWN_RUN not in str(e).lower() and not isinstance(
 				e, admin_client.AdminValidationError
@@ -974,6 +993,75 @@ def _polled_state(payload) -> dict:
 	return payload
 
 
+def _safe_app_learning_fleet_state(row, state: dict) -> dict:
+	"""Return a source-free fleet projection for Custom App Learning only.
+	Fleet owns the primary projection. This is the mixed-version backstop: while
+	fleet-first deployment reaches every host, an old terminal file can still be
+	read through admin. The scheduler must not turn that old reply or error into a
+	Jarvis Agent Run, activity record, error log, or user response.
+	"""
+	if not isinstance(state, dict) or getattr(row, "agent", None) != _APP_LEARNING_AGENT_SLUG:
+		return state
+
+	raw_status = state.get("status")
+	status = raw_status.strip().lower() if isinstance(raw_status, str) else "failed"
+	if status not in _APP_LEARNING_FLEET_STATUSES:
+		status = "failed"
+	raw_result = state.get("result")
+	if not isinstance(raw_result, dict):
+		raw_result = {}
+	raw_gateway_status = raw_result.get("gateway_status")
+	raw_summary = raw_result.get("summary")
+	aborted = (
+		isinstance(raw_gateway_status, str)
+		and raw_gateway_status.strip().lower()
+		in {"error", "failed", "rejected", "denied", "cancelled", "aborted", "timeout"}
+	) or (isinstance(raw_summary, str) and raw_summary.strip().lower() == "aborted")
+	finished_at = state.get("finished_at")
+	return {
+		"status": status,
+		"finished_at": finished_at if isinstance(finished_at, (int, float)) else None,
+		"model_used": _safe_app_learning_model_used(state.get("model_used")),
+		"result": (
+			{
+				"reply": _APP_LEARNING_ABORT_REPLY if aborted else _APP_LEARNING_SUCCESS_REPLY,
+				"canvas_ref": [],
+				"gateway_status": "aborted" if aborted else "completed",
+				"summary": "aborted" if aborted else "completed",
+				"private_terminal": True,
+			}
+			if status in _FLEET_FINISHED_STATUSES
+			else None
+		),
+		"error": (
+			{"code": "run_failed", "message": _APP_LEARNING_FAILURE_MESSAGE} if status == "failed" else None
+		),
+	}
+
+
+def _safe_app_learning_model_used(value) -> dict | None:
+	"""Return only a complete, bounded fleet model record.
+
+	``model_used`` is observability, not model output. An old fleet state is
+	untrusted here, so no partial record, extra key, or non-model-shaped text can
+	pass through this rollout fallback.
+	"""
+	if not isinstance(value, dict) or set(value) != {"provider", "model"}:
+		return None
+	provider = value["provider"]
+	model = value["model"]
+	if (
+		not isinstance(model, str)
+		or not _APP_LEARNING_MODEL_ID_RE.fullmatch(model)
+		or (
+			provider is not None
+			and (not isinstance(provider, str) or not _APP_LEARNING_MODEL_PROVIDER_RE.fullmatch(provider))
+		)
+	):
+		return None
+	return {"provider": provider, "model": model}
+
+
 def _reconcile_polled_run(row, state: dict, now) -> bool:
 	"""Decide what the fleet's run-state means for a bench row still ``running``, and
 	transition it if it is over. Returns True iff this call terminalized it.
@@ -981,6 +1069,7 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 	``state`` is the fleet's run-state record relayed verbatim through admin
 	(``{run_id, status: queued|running|completed|failed, error, finished_at, ...}``),
 	plus the synthetic ``missing`` this module uses for a relayed 404."""
+	state = _safe_app_learning_fleet_state(row, state)
 	status = (state.get("status") or "").strip().lower()
 	if state.get("model_used"):
 		# Observability only: it must never stop the run from terminalizing below.
@@ -1613,10 +1702,11 @@ def _stamp_scope_and_watermark(
 	receipt; it is never added to scope_json or the delegate prompt. Returns the
 	resolved scope dict (or None).
 
-	``source_apps`` (CX5-2) is folded into the SAME ``scope_json`` stamp OUTSIDE
-	the best-effort try, so an ERP scope-resolution failure can never drop the
-	authorization the source-read tools read back — a scribe run either carries its
-	admin-authorized app list or reads nothing."""
+	``source_apps`` (CX5-2) is folded into ``scope_json`` only as a prompt
+	courtesy. The authorization itself is a server-signed immutable selection on
+	the run row. A Custom App Learning run therefore fails launch if its
+	permission profile or selection stamp cannot be created; it never falls back
+	to an editable scope blob."""
 	from jarvis.chat import agent_scope, operator_review
 
 	review_backend = operator_review.backend(inst.agent)
@@ -1643,7 +1733,18 @@ def _stamp_scope_and_watermark(
 		return scope
 
 	values: dict = {}
-	permission_profile = _permission_profile_or_none(run_name, run_as_user)
+	if source_apps is not None:
+		# Bind the selection and visibility to the same cache-independent profile.
+		# Failure must stop Custom App Learning before any source can be served.
+		from jarvis.learning import app_source_receipts
+
+		permission_profile = app_source_receipts.permission_profile_for_user(run_as_user)
+		profile_digest = app_source_receipts.permission_profile_digest(permission_profile)
+		values["source_selection_json"] = app_source_receipts.encode_selection(
+			run_name, list(source_apps), profile_digest
+		)
+	else:
+		permission_profile = _permission_profile_or_none(run_name, run_as_user)
 	if permission_profile is not None:
 		values["permission_profile"] = permission_profile
 	visibility_receipt = _visibility_receipt(permission_profile, inst)
