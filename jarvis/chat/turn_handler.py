@@ -2717,6 +2717,12 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 					title="chat worker: attached image could not be decoded",
 					message=f"{name} ({len(raw)} bytes)",
 				)
+		elif ext == "docx":
+			blocks.append(
+				f"[Attached DOCX `{name}`: use jarvis__read_file with its attachment URL to read its text and tables. "
+				"Follow next_read sequentially when supplied; check the returned contract and coverage before claiming a whole-file read. "
+				"Images, page layout and comments require the original document; do not claim those were read.]"
+			)
 		elif ext in {"json", "md", "markdown", "txt"}:
 			try:
 				text = raw.decode("utf-8")
