@@ -29,6 +29,8 @@
   "session_key",
   "dashboard",
   "source_bytes_read",
+  "source_selection_json",
+  "source_receipt_json",
   "pages_written",
   "pages_json",
   "coverage_json",
@@ -182,6 +184,20 @@
    "label": "Source Bytes Read",
    "read_only": 1,
    "description": "CX5-3 (Custom App Learning scribe run only): DURABLE running total of custom-app source bytes this run has been served. read_app_source enforces + advances the per-run byte budget against this row under a lock, so the budget survives a cache outage (fail-closed: an unreadable row refuses the read)."
+  },
+  {
+   "fieldname": "source_selection_json",
+   "fieldtype": "Long Text",
+   "label": "Source Selection Receipt",
+   "read_only": 1,
+   "description": "Custom App Learning only: server-signed immutable run selection binding the run id, selected custom apps and launch-time run-as permission profile. Source tools fail closed if this stamp is missing, altered or no longer matches the current permission profile."
+  },
+  {
+   "fieldname": "source_receipt_json",
+   "fieldtype": "Long Text",
+   "label": "Source Evidence Receipt",
+   "read_only": 1,
+   "description": "Custom App Learning only: server-signed metadata-only source evidence. It records approved root/manifest identity and successful cited file digests and byte counts; it never stores source text. Wiki writeback validates it before any page write."
   },
   {
    "default": "0",
