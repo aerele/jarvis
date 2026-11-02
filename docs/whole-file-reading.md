@@ -140,3 +140,53 @@ valid non-boundary positions. Such a read cannot prove prior rows were visited.
 Initial reads may omit cursor/version or send both empty strings/null. Empty or
 null file_url, filename and sheet also mean omission. Continuations require both
 nonempty tokens copied from next_read. Obsolete numbered sections are rejected.
+
+
+## DOCX text and tables
+
+DOCX uploads use the existing `read_file` tool in chat and File Box. No new tool
+name or conversion service is required. The original private File is retained.
+`preview_file` returns a text fallback plus structured document blocks for the
+shared desktop and phone preview. The original DOCX remains downloadable.
+
+The reader includes paragraphs, table cells and referenced headers, footers,
+footnotes and endnotes. It keeps hyperlink display text and cached field results.
+It reads each referenced part once; headers and footers use filename order, not page order.
+Supported text revisions use the accepted view. Hidden runs, deleted text and
+field instructions are omitted. Common direct/style-based decimal, letter,
+Roman and bullet list labels are supported. Other numbering forms report
+`list_numbering_partial`. Merged cells never duplicate their value across grid
+positions; nested tables become text within their parent cell and report a gap.
+
+This is a text/table view, not Word page layout. Images, charts, diagram text and
+comments remain in the original document. Unsupported visible text constructs, missing
+field results, equations, symbols, column limits and empty extraction are reported.
+A preview may end before the full document. It carries no cursor contract,
+version or continuation authority, even when its extracted text fits the preview.
+
+For sequential reads, request `read_mode="file-cursor-v1"` and follow the returned
+`next_read` unchanged. DOCX uses source `0` and global one-based `block` positions.
+Paragraph records have `text`; table-row records have `values`. Oversized blocks
+use `offset`, `fragment` and `encoding` exactly as other file windows do. Join all
+fragments of one block before decoding `json-row`. A final window does not prove
+that earlier windows were read. Omit `sheet` for DOCX. File bytes, identity and
+DOCX reader revision bind the version; changes require a restart.
+
+Each call checks File read permission before reading bytes or starting the parser.
+The existing isolated child enforces 12 seconds wall time, 8 seconds CPU and
+512 MiB address space on Linux. Input is limited to 10 MiB, expanded package data
+to 64 MiB, archive entries to 2,048, selected text parts to 64, XML depth to 256,
+table nesting to 8, columns to 128 and global blocks to 100,000. Windows retain
+at most 200 blocks and 12,000 serialized record characters. Limits are ceilings,
+not a guarantee that every file below them parses within the resource budget.
+
+Only stored/deflated, unlocked, macro-free DOCX packages are read. DTDs, entity
+declarations, unsafe or duplicate members and missing/corrupt selected XML parts
+are refused. The reader never extracts ZIP members to disk, fetches external
+relationships or executes document content. All selected XML is parsed before a
+window succeeds, so a malformed tail cannot masquerade as a valid first window.
+
+Shared-recipient previews and exact visual/Google Docs/Word layout comparisons
+are outside this change. Automated native File/permission checks, bounded child
+checks and browser fixtures establish separate boundaries; none proves that a
+live model will interpret a document correctly or create the correct ERP record.
