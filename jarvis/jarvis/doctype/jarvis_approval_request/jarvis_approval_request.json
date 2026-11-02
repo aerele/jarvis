@@ -25,6 +25,7 @@
   "decision",
   "decided_by",
   "decided_at",
+  "resume_state",
   "trace_comment_added",
   "wiki_payload",
   "apply_status",
@@ -143,6 +144,17 @@
    "permlevel": 1,
    "fieldtype": "Datetime",
    "label": "Decided At"
+  },
+  {
+   "description": "Server-managed: whether the decision was sent to the requester's chat (empty = not tracked).",
+   "fieldname": "resume_state",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Chat Continuation",
+   "no_copy": 1,
+   "options": "\ndue\nfailed\ndone",
+   "permlevel": 1,
+   "read_only": 1
   },
   {
    "default": "0",
@@ -301,7 +313,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-24 00:00:00.000000",
+ "modified": "2026-10-28 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Approval Request",
