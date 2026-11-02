@@ -374,6 +374,34 @@ class TestChatApprovalAuditJson(
 			}
 		)
 
+	def test_audit_row_names_with_sql_characters_are_literal_identifiers(self):
+		from jarvis.chat import approval_reviewers
+
+		for doctype, fields, check in (
+			(
+				"Version",
+				{"ref_doctype": AR, "docname": self.chat, "data": "{}"},
+				approval_reviewers.has_version_permission,
+			),
+			(
+				"Deleted Document",
+				{
+					"deleted_doctype": "Comment",
+					"deleted_name": "qa756-quoted-comment",
+					"data": json.dumps(self.comment_link(self.chat)),
+				},
+				approval_reviewers.has_deleted_document_permission,
+			),
+		):
+			with self.subTest(doctype=doctype):
+				doc = frappe.get_doc({"doctype": doctype, **fields})
+				doc.name = f"qa756-{uuid4().hex[:10]}' OR 1=1 --"
+				doc.db_insert()
+				self.raw[doctype].append(doc.name)
+				self.assertTrue(check(doc.name, "read", self.owner))
+				self.assertFalse(check(doc.name, "read", self.manager))
+				self.assertFalse(check(doc.name + "'", "read", self.owner))
+
 	def test_a_loaded_audit_row_that_is_gone_is_not_readable(self):
 		"""R1 hardening: a NAMED row missing at check time denies read; creating,
 		unnamed documents and Administrator are unchanged."""

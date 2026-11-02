@@ -601,7 +601,10 @@ def _row_allowed(doctype: str, conditions, doc, user: str | None, ptype: str) ->
 	name = doc if isinstance(doc, str) else doc.get("name")
 	if user == "Administrator" or not name:
 		return True
-	row = frappe.db.sql(f"SELECT ({conditions(user)}) FROM `tab{doctype}` WHERE name = %s", name)
+	table = frappe.qb.DocType(doctype)
+	# These hooks pass a server-owned permission predicate. The query builder
+	# quotes the table identifier and binds the requested row name separately.
+	row = frappe.qb.from_(table).select(LiteralValue(f"({conditions(user)})")).where(table.name == name).run()
 	if not row:
 		return ptype == "create"
 	return bool(row[0][0])
