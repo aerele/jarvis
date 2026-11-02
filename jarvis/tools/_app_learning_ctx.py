@@ -19,9 +19,10 @@ binds the capability.
 
 CX5-2 — the RUN SCOPE. "Installed custom app" is not consent. The admin who
 launches a run names the exact apps whose source may leave the bench for the
-model; the server validates + stamps that selection into the run's ``scope_json``
-(``source_apps``) at launch, and ``assert_custom_app`` refuses any app outside it.
-The model can neither author nor widen the selection, and the roster tool shows
+model; the server validates + signs that selection in immutable
+``source_selection_json`` at launch. ``scope_json.source_apps`` is a prompt
+convenience only. ``assert_custom_app`` refuses any app outside the signed
+selection. The model can neither author nor widen it, and the roster tool shows
 only the selected apps.
 
 Two per-run budgets keep a looping delegate bounded well inside the 90-minute run
@@ -44,7 +45,7 @@ import json
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
-from jarvis.learning import app_source
+from jarvis.learning import app_source, app_source_receipts
 from jarvis.permissions import has_jarvis_admin_access
 from jarvis.tools._agent_run_ctx import get_session_key
 
@@ -129,28 +130,50 @@ def is_app_learning_agent(agent: str) -> bool:
 	return slug == APP_LEARNING_AGENT_SLUG
 
 
-def allowed_source_apps(run_name: str) -> frozenset:
-	"""The apps the ADMIN explicitly authorized for THIS run (CX5-2).
+def _current_permission_profile_digest() -> str:
+	"""Recompute the executing identity's profile at each source boundary.
 
-	Server-authored at launch into ``Jarvis Agent Run.scope_json`` under
-	``source_apps``; the model can never author or widen it. FAIL-CLOSED by
-	construction: a missing run, an unreadable/unparseable ``scope_json``, a
-	missing ``source_apps`` key or a non-list value all yield the EMPTY set, and an
-	empty set refuses every app — so a run launched before this field existed (or
-	one whose scope stamp failed) reads nothing rather than everything."""
+	The launch stamp is not enough: a role or User Permission can change while a
+	long-running delegate is still alive.  Import lazily to avoid the scheduler's
+	launch-time dependency cycle.
+	"""
+	return app_source_receipts.permission_profile_digest(
+		app_source_receipts.permission_profile_for_user(frappe.session.user)
+	)
+
+
+def source_selection_from_row(row: dict, run_name: str) -> tuple[dict, str]:
+	"""Validate immutable selection and current run-as permissions.
+
+	``row`` should be the locked run row for a mutating source boundary. The
+	function also works with a plain row for the roster and first app gate.
+	"""
+	profile = app_source_receipts.permission_profile_digest(row.get("permission_profile"))
+	current = _current_permission_profile_digest()
+	if not current or current != profile:
+		raise InvalidArgumentError(
+			"the run-as permission profile changed after launch; refusing app-source access"
+		)
+	return app_source_receipts.selection_from_row(row, run_name, profile), profile
+
+
+def allowed_source_apps(run_name: str) -> frozenset:
+	"""The signed, immutable app selection for this run, or an empty fail-closed set."""
 	if not run_name:
 		return frozenset()
 	try:
-		raw = frappe.db.get_value(RUN, run_name, "scope_json")
-		scope = json.loads(raw or "{}")
+		row = frappe.db.get_value(
+			RUN,
+			run_name,
+			["source_selection_json", "permission_profile"],
+			as_dict=True,
+		)
+		if not row:
+			return frozenset()
+		selection, _profile = source_selection_from_row(row, run_name)
+		return frozenset(selection["apps"])
 	except Exception:
 		return frozenset()
-	if not isinstance(scope, dict):
-		return frozenset()
-	apps = scope.get("source_apps")
-	if not isinstance(apps, list):
-		return frozenset()
-	return frozenset(str(a or "").strip() for a in apps if str(a or "").strip())
 
 
 def assert_custom_app(app: str, run_name: str) -> None:
@@ -161,8 +184,8 @@ def assert_custom_app(app: str, run_name: str) -> None:
 	     a containment-valid source root on this bench. Core apps
 	     (frappe/erpnext/hrms/india_compliance/jarvis) are excluded via
 	     ``app_source.EXCLUDED_APPS`` and are NEVER served; and
-	  2. CX5-2 — ``app`` must be in THIS RUN's admin-authorized selection
-	     (``scope_json.source_apps``). "Installed" is not consent: an admin
+	  2. CX5-2 — ``app`` must be in THIS RUN's signed, admin-authorized selection
+	     (``source_selection_json``). "Installed" is not consent: an admin
 	     authorises the exact apps whose source may be shipped to the model, per
 	     run, and a run may never widen itself to a sibling app.
 	"""
