@@ -3564,6 +3564,7 @@
 						<span class="jv-artifact-head-title">{{ artifact.cv.title }}</span>
 						<span class="jv-canvas-type">{{ artifact.cv.type }}</span>
 						<a
+							v-if="!artifact.sourceUnavailable"
 							class="jv-art-act"
 							:href="artifact.url"
 							target="_blank"
@@ -3587,6 +3588,7 @@
 							</svg>
 						</a>
 						<a
+							v-if="!artifact.sourceUnavailable"
 							class="jv-art-act"
 							:href="artifact.url"
 							:download="cvFile(artifact.cv)"
@@ -3688,9 +3690,31 @@
 							</svg>
 						</button>
 					</div>
+					<FileBoxUseAsSource
+						v-if="
+							artifact.conv === currentId &&
+							fileboxConversation &&
+							canSelectFileboxSource &&
+							artifact.m?.role === 'user'
+						"
+						:key="artifact.conv + ':' + artifact.m.name + ':' + artifact.cv.name"
+						:conversation="artifact.conv"
+						:message="artifact.m.name"
+						:attachment="artifact.cv"
+						:can-select="canSelectFileboxSource"
+						@availability="artifactSourceAvailability"
+					/>
 					<div class="jv-artifact-body">
+						<div
+							v-if="artifact.sourceUnavailable"
+							class="jv-artifact-nopreview"
+							role="status"
+						>
+							<p>This attachment is unavailable.</p>
+							<p>Close this preview and attach another file.</p>
+						</div>
 						<iframe
-							v-if="artifact.kind === 'pdf'"
+							v-else-if="artifact.kind === 'pdf'"
 							:src="artifact.url"
 							class="jv-artifact-frame"
 							title="PDF preview"
@@ -4435,6 +4459,7 @@ const CHECK_DEADLINE_MS = 15000;
 import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
+import FileBoxUseAsSource from "@/components/chat/FileBoxUseAsSource.vue";
 import SheetCharts from "@/components/SheetCharts.vue";
 import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
@@ -4544,6 +4569,7 @@ import {
 	artifactPhaseList,
 	detectArtifactKind,
 } from "@/lib/artifactActivityCard";
+import { canSelectFileBoxSource } from "@/lib/fileboxSourceOwner";
 import {
 	activityItems,
 	addStep,
@@ -6116,6 +6142,10 @@ const liveElapsedLabel = computed(() => {
 });
 const runMeta = ref({}); // { [message_id]: { ms, tools, names } } — survives reloads
 const canvasContent = ref({}); // { `${msgName}::${canvasName}`: srcdoc html (html/svg) | data-url (pdf/image/file) }
+const fileboxConversation = ref(false);
+const canSelectFileboxSource = computed(() =>
+	canSelectFileBoxSource(currentId.value, store.conversations)
+);
 const pendingFiles = ref([]); // [{ file_url, file_name }] attachments to send
 // Per-file upload state. This was a single `uploading` boolean, which could
 // only ever say "something is happening somewhere" - no file name, no way to
@@ -8803,6 +8833,18 @@ const curCharts = computed(() => {
 		  )
 		: [];
 });
+function artifactSourceAvailability({ conversation, message, item, file_url, available }) {
+	const current = artifact.value;
+	if (
+		current &&
+		current.conv === currentId.value &&
+		current.conv === conversation &&
+		current.m.name === message &&
+		current.cv.name === item &&
+		current.cv.file_url === file_url
+	)
+		current.sourceUnavailable = !available;
+}
 function closeArtifact() {
 	artifact.value = null;
 }
@@ -8813,6 +8855,7 @@ async function openArtifact(m, cv) {
 	const url = cv.file_url || cvOf(m, cv);
 	const t = cv.type;
 	const conv = currentId.value;
+	const isCurrent = (request) => artifact.value === request && currentId.value === conv;
 	if (t === "pdf" || t === "image") {
 		artifact.value = { m, cv, url, conv, kind: t };
 		if (t === "pdf") ensurePdfTemplates();
@@ -8820,20 +8863,36 @@ async function openArtifact(m, cv) {
 	}
 	if (t === "html" || t === "svg") {
 		let content = cvOf(m, cv);
+		let pending;
 		if (!content) {
 			artifact.value = { m, cv, url, conv, kind: "loading" };
+			pending = artifact.value;
 			await ensureCanvas(m);
+			if (!isCurrent(pending)) return;
 			content = cvOf(m, cv);
 		}
-		artifact.value = { m, cv, url, conv, kind: content ? t : "nopreview", content };
+		artifact.value = {
+			...pending,
+			m,
+			cv,
+			url,
+			conv,
+			kind: content ? t : "nopreview",
+			content,
+		};
 		return;
 	}
 	// "file" (xlsx / csv / txt / …) → ask the backend for a tabular/text preview.
 	artifact.value = { m, cv, url, conv, kind: "loading" };
+	const pending = artifact.value;
+	let previewError = "";
 	try {
 		const r = await api.previewFile(cv.file_url);
+		if (!isCurrent(pending)) return;
+		previewError = r?.error || "";
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
 			artifact.value = {
+				...pending,
 				m,
 				cv,
 				url,
@@ -8845,13 +8904,22 @@ async function openArtifact(m, cv) {
 			return;
 		}
 		if (r && r.kind === "text") {
-			artifact.value = { m, cv, url, conv, kind: "text", text: r.text || "" };
+			artifact.value = {
+				...pending,
+				m,
+				cv,
+				url,
+				conv,
+				kind: "text",
+				text: r.text || "",
+				document: r.document,
+			};
 			return;
 		}
 	} catch (e) {
-		/* fall through to download-only */
+		if (!isCurrent(pending)) return;
 	}
-	artifact.value = { m, cv, url, conv, kind: "nopreview" };
+	artifact.value = { ...pending, m, cv, url, conv, kind: "nopreview", error: previewError };
 }
 
 // --- Per-document PDF template override (jarvis.pdf_templates.rerender_document).
@@ -9630,10 +9698,17 @@ async function decideFileboxWait(item, text, approve) {
 	const id = currentId.value;
 	fileboxWaitBusy.value = item.name;
 	try {
-		await api.decideApproval(item.name, text, approve);
-		notify(approve ? "Answer sent. Jarvis carries on with this file." : "Rejected.", {
-			type: "success",
-		});
+		const res = (await api.decideApproval(item.name, text, approve)) || {};
+		if (res.reason === "source_unavailable") {
+			notify(
+				"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue.",
+				{ type: "warning" }
+			);
+		} else {
+			notify(approve ? "Answer sent. Jarvis carries on with this file." : "Rejected.", {
+				type: "success",
+			});
+		}
 		store.refreshApprovalsCount?.();
 	} catch (e) {
 		notifyActionError("Couldn't send that answer", e);
@@ -9796,6 +9871,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// SUXI-1: rebuild the queued chip from server truth (reload / switch / second
 	// tab / reconnect all lose the client-only chip otherwise).
 	resyncQueuedTurn(id);
+	fileboxConversation.value = !!d?.conversation?.file_box;
 	refreshFileboxWaits(id, d?.conversation?.file_box);
 	refreshReportRuns(id);
 	// Seed Up/Down recall from THIS conversation's past prompts. Without this,

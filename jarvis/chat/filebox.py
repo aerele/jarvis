@@ -192,9 +192,13 @@ def _refuse_foreign_attachment(fdoc) -> None:
 	)
 
 
-def _source_file(conv: str, fields: tuple = ("file_url", "file_name")):
-	"""The dropped File (``file_url``, ``file_name``) a resume re-attaches: the one
-	stamped at drop, else the conversation's earliest attachment."""
+def _source_file(conv: str, fields: tuple = ("file_url", "file_name"), *, read_as=None):
+	"""The explicit source, else the dropped File or earliest legacy attachment."""
+	from jarvis.chat.filebox_source import selected_file
+
+	selected = selected_file(conv, fields, read_as=read_as)
+	if selected is not None:
+		return selected
 	fields = list(fields)
 	name = frappe.db.get_value(CONV, conv, "filebox_source_file")
 	row = frappe.db.get_value("File", name, fields, as_dict=True) if name else None
@@ -239,7 +243,20 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 		)
 		if existing:
 			return {"attached_file": existing}
-		files = add_attachments(doctype, name, [src["name"]])
+		from jarvis.chat.filebox_source import selected_file
+
+		if selected_file(conv) is not None:
+			# Native File copies retain the blob. Re-saving a binary PDF through
+			# save_url can decode/re-encode it and change its URL and bytes.
+			if not frappe.has_permission(doctype, "write", doc=name):
+				frappe.throw("Not permitted", frappe.PermissionError)
+			files = [
+				frappe.get_doc("File", src["name"]).create_attachment_copy(
+					doctype, name, ignore_permissions=True
+				)
+			]
+		else:
+			files = add_attachments(doctype, name, [src["name"]])
 		return {"attached_file": files[0].name if files else None}
 	except Exception as e:
 		frappe.db.rollback(save_point=savepoint)
@@ -847,6 +864,13 @@ def _source_attached(rows: list[dict]) -> None:
 	dropped file is attached to it, False when not. Left unset (the line says
 	nothing) for a deleted draft or a row with no recorded source file. Two queries
 	for the whole page."""
+	from jarvis.chat.filebox_source import selection_previews
+
+	selected = selection_previews([r["name"] for r in rows])
+	# These are page-local private calculation inputs, never the persisted original.
+	for r in rows:
+		if r["name"] in selected:
+			r["filebox_source_file"] = (selected[r["name"]] or {}).get("name")
 	rows = [
 		r
 		for r in rows
@@ -1165,6 +1189,9 @@ def list_inbound_page(
 		by_conv: dict = {}
 		for fr in file_rows:
 			by_conv.setdefault(fr["attached_to_name"], fr)  # earliest wins
+		from jarvis.chat.filebox_source import selection_previews
+
+		by_conv.update(selection_previews(names))
 		for r in rows:
 			fr = by_conv.get(r["name"])
 			r["file_url"] = fr["file_url"] if fr else None

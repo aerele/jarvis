@@ -1280,13 +1280,19 @@ async function submitDecide(approve) {
 		}
 		selectedOption.value = "";
 		note.value = "";
-		toast.success(
-			(approve
-				? reviewOnly
-					? "Review acknowledged: no accounting or sending action"
-					: "Approved"
-				: "Rejected") + (res.resumed ? " - conversation resumed" : "")
-		);
+		if (res.reason === "source_unavailable") {
+			toast.warning(
+				"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue."
+			);
+		} else {
+			toast.success(
+				(approve
+					? reviewOnly
+						? "Review acknowledged: no accounting or sending action"
+						: "Approved"
+					: "Rejected") + (res.resumed ? " - conversation resumed" : "")
+			);
+		}
 		store.refreshApprovalsCount();
 		if ((filters.status || "Pending") === "Pending") {
 			// the decided row no longer matches the Pending quick-filter -
@@ -1311,7 +1317,7 @@ async function submitDismiss() {
 	dismissing.value = true;
 	const id = selected.value.name;
 	try {
-		await api.dismissApproval(id);
+		const res = (await api.dismissApproval(id)) || {};
 		const r = railRows.value.find((x) => x.name === id);
 		if (r) {
 			r.status = "Dismissed";
@@ -1329,7 +1335,13 @@ async function submitDismiss() {
 		}
 		note.value = "";
 		selectedOption.value = "";
-		toast.success("Ignored. The assistant was not notified");
+		if (res.reason === "source_unavailable") {
+			toast.warning(
+				"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue."
+			);
+		} else {
+			toast.success("Ignored. The assistant was not notified");
+		}
 		store.refreshApprovalsCount();
 		if ((filters.status || "Pending") === "Pending") advanceAfterDecide(id);
 		else loadRecord(id, { keep: true });
