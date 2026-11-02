@@ -256,6 +256,26 @@
 										>
 									</span>
 								</button>
+								<button
+									v-if="
+										store.conversations.some(
+											(c) =>
+												c.name === currentId &&
+												!c.file_box &&
+												c.origin_page !== 'dashboards'
+										)
+									"
+									type="button"
+									role="menuitem"
+									data-create-item="share"
+									class="jv-create-item"
+									@click="
+										createMenuOpen = false;
+										openChatShare(currentId, loadedConvTitle);
+									"
+								>
+									<span class="jv-create-item-t">{{ __("Share…") }}</span>
+								</button>
 								<Dropdown
 									:options="downloadMenuOption.submenu"
 									:disabled="downloadMenuOption.disabled"
@@ -1151,6 +1171,21 @@
 										>
 											{{ errorInfo(m).actionLabel }}
 										</button>
+										<button
+											v-if="canReportError(m)"
+											type="button"
+											class="jv-retry"
+											:disabled="openSupportInFlight"
+											:style="{
+												cursor: openSupportInFlight
+													? 'default'
+													: 'pointer',
+												opacity: openSupportInFlight ? 0.6 : 1,
+											}"
+											@click="openErrorSupport(m)"
+										>
+											{{ __("Report error") }}
+										</button>
 									</div>
 								</div>
 							</template>
@@ -1971,10 +2006,11 @@
 					</template>
 					<!-- a File Box file's open questions, also on the Approval Board -->
 					<FileBoxWaits
-						v-if="fileboxWaits.length"
-						:items="fileboxWaits"
+						v-if="visibleFileboxWaits.length"
+						:items="visibleFileboxWaits"
 						:busy="fileboxWaitBusy"
 						@decide="decideFileboxWait"
+						@review="reviewFileboxSheet"
 					/>
 					<!-- background reports this chat started, until their results are shown -->
 					<ReportRunCards
@@ -4258,6 +4294,13 @@
 			@confirm="onPreviewConfirm"
 		/>
 
+		<FileBoxSheetReview
+			v-if="fileboxReviewSession"
+			:key="fileboxReviewSession.id"
+			:session="fileboxReviewSession"
+			:onChanged="fileboxReviewChanged"
+			:onClosed="closeFileboxReview"
+		/>
 		<ConnectPhoneDialog v-model="showConnect" />
 
 		<CompactDialog
@@ -4392,6 +4435,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
+import { supportErrorDraft } from "@/lib/supportErrorDraft";
 import {
 	supportPillLabel as supportPillLabelFor,
 	supportAwaitingPhrase,
@@ -4440,6 +4484,8 @@ import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
+import FileBoxSheetReview from "@/components/chat/FileBoxSheetReview.vue";
+import { useFileBoxWaits } from "@/composables/useFileBoxWaits";
 import ReportRunCards from "@/components/chat/ReportRunCards.vue";
 import VersionPill from "@/components/chat/VersionPill.vue";
 import UpdateBanner from "@/components/chat/UpdateBanner.vue";
@@ -4531,6 +4577,7 @@ import {
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { __ } from "@/lib/i18n";
 import { conversationLoadFailure } from "@/lib/conversationLoadFailure";
+import { openChatShare } from "@/composables/useChatSharing";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
 	dashboardThumbnailTransform,
@@ -5064,7 +5111,7 @@ function recentMessagesForSupport() {
 // a double-click firing openSupport() twice concurrently: without this, a
 // second click could race the first to SupportNew before the first's prompt
 // even resolves.
-let openSupportInFlight = false;
+const openSupportInFlight = ref(false);
 async function openSupport() {
 	if (!supportOn) {
 		// Unconfigured-but-visible state (see supportEntryVisible): explain rather
@@ -5078,12 +5125,12 @@ async function openSupport() {
 	// supportMenuOptions below), and its "New ticket from this chat" row calls
 	// straight into this same function - so openSupport() itself never needs to
 	// know which of the two paths got it here.
-	if (openSupportInFlight) return;
-	openSupportInFlight = true;
+	if (openSupportInFlight.value) return;
+	openSupportInFlight.value = true;
 	try {
 		const recent = recentMessagesForSupport();
 		if (!recent.length) {
-			router.push({ name: "SupportNew" });
+			await router.push({ name: "SupportNew" });
 			return;
 		}
 		let copyBody = "";
@@ -5110,9 +5157,49 @@ async function openSupport() {
 				supportStore.setCopyPref("No");
 			}
 		}
-		router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
+		await router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
 	} finally {
-		openSupportInFlight = false;
+		openSupportInFlight.value = false;
+	}
+}
+
+function canReportError(m) {
+	const id = currentId.value;
+	// During selection, currentId/route can already name the next chat while the
+	// old history remains on screen. Never pair those IDs in a support draft.
+	if (!supportOn || !id || _shownConvId !== id || (route.params.id && route.params.id !== id))
+		return false;
+	const row = m?.name && messages.value.find((item) => item.name === m.name);
+	return !!(
+		row &&
+		row.role === "assistant" &&
+		row.error &&
+		!row.hidden &&
+		!row.stopped &&
+		!row.streaming &&
+		errorInfo(row).code !== "cancelled"
+	);
+}
+
+async function openErrorSupport(m) {
+	if (openSupportInFlight.value || !canReportError(m)) return;
+	const row = messages.value.find((item) => item.name === m.name);
+	const info = errorInfo(row);
+	const draft = supportErrorDraft({
+		code: info.code,
+		upstream: info.upstream,
+		conversation: currentId.value,
+		message: row.name,
+		at: row.modified || row.creation,
+	});
+	if (!draft) return;
+	openSupportInFlight.value = true;
+	try {
+		await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		notify(__("Could not open Support. Try again."), { type: "error" });
+	} finally {
+		openSupportInFlight.value = false;
 	}
 }
 // Waiting-reply count pill (header headphones button). awaiting_count is a
@@ -7383,6 +7470,11 @@ function onOverlayBackdropClick(close) {
 
 // one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<row __key>:<col>"
 const draftLink = ref({ key: "", items: [], open: false, anchor: null });
+// Each popup belongs to one search, including its pending blur and response.
+let draftLinkGeneration = 0;
+onBeforeUnmount(() => {
+	draftLinkGeneration++;
+});
 const draftLinkError = ref("");
 // Company / row dependency changes invalidate suggestions even if a request is
 // still pending or its field remains focused. Existing field values stay intact.
@@ -7612,6 +7704,7 @@ function dismissDraftPanel() {
 	closeDraftPanel();
 }
 function closeDraftPanel() {
+	draftLinkGeneration++;
 	draftLinkError.value = "";
 	draftPanel.value = null;
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
@@ -7619,6 +7712,7 @@ function closeDraftPanel() {
 
 // Link search shared by panel fields + grid cells.
 async function onDraftLink(key, target, doctype, ev) {
+	const generation = ++draftLinkGeneration;
 	const anchor = ev && ev.target;
 	draftLink.value = { key, items: [], open: true, anchor };
 	const search = draftLink.value;
@@ -7637,6 +7731,7 @@ async function onDraftLink(key, target, doctype, ev) {
 			args.filters
 		);
 		if (
+			generation !== draftLinkGeneration ||
 			draftLink.value !== search ||
 			draftLinkContext(draftPanel.value, key) !== filterContext
 		)
@@ -7651,7 +7746,7 @@ async function onDraftLink(key, target, doctype, ev) {
 			filterContext,
 		};
 	} catch (e) {
-		if (draftLink.value === search) {
+		if (generation === draftLinkGeneration && draftLink.value === search) {
 			draftLink.value = { ...draftLink.value, open: false, items: [] };
 			draftLinkError.value =
 				e instanceof DraftLinkFilterError
@@ -7680,6 +7775,7 @@ async function fillRuleValues(doctype, tables, isCurrent = () => true) {
 	);
 }
 function pickDraftLink(setter, item) {
+	draftLinkGeneration++;
 	if (
 		draftLink.value.filterContext !== draftLinkContext(draftPanel.value, draftLink.value.key)
 	) {
@@ -7692,8 +7788,12 @@ function pickDraftLink(setter, item) {
 	const panel = draftPanel.value;
 	if (panel) fillRuleValues(panel.doctype, panel.tables, () => draftPanel.value === panel);
 }
-function closeDraftLink() {
+function closeDraftLink(ev) {
+	const generation = draftLinkGeneration;
+	const anchor = ev?.target || draftLink.value.anchor;
 	setTimeout(() => {
+		if (generation !== draftLinkGeneration || document.activeElement === anchor) return;
+		draftLinkGeneration++;
 		draftLink.value = { ...draftLink.value, open: false };
 	}, 160);
 }
@@ -9574,7 +9674,21 @@ function _checkPulseOnce(id) {
 // A File Box file's chat shows what the file waits on, the same items the Approval
 // Board lists: its questions are answered here as on the board. Re-read on every load
 // (a run's end reloads the chat, which is when a new question appears).
-const fileboxWaits = ref([]);
+const {
+	items: fileboxWaits,
+	visibleItems: visibleFileboxWaits,
+	refresh: refreshFileboxWaits,
+	onEvent: onFileboxWaitEvent,
+	reviewSession: fileboxReviewSession,
+	openReview: reviewFileboxSheet,
+	reviewChanged: fileboxReviewChanged,
+	closeReview: closeFileboxReview,
+} = useFileBoxWaits({
+	conversation: currentId,
+	activeAsk,
+	load: api.fileboxOpenWaits,
+	onChanged: () => store.refreshApprovalsCount?.(),
+});
 const fileboxWaitBusy = ref("");
 // Background reports this chat started: a card each until Jarvis shows the results.
 // Re-read on every load, on Frappe's report_generated event, and every 15s while one
@@ -9612,18 +9726,6 @@ function onReportGenerated() {
 function showReportResults(item) {
 	if (busy.value || convStreaming.value) return;
 	send(`Show me the ${item.report_name} results${item.filters ? ` (${item.filters})` : ""}.`);
-}
-async function refreshFileboxWaits(id, isFileBox) {
-	if (!id || !isFileBox) {
-		fileboxWaits.value = [];
-		return;
-	}
-	try {
-		const r = await api.fileboxOpenWaits(id);
-		if (currentId.value === id) fileboxWaits.value = (r && r.items) || [];
-	} catch (e) {
-		// best-effort: the board still lists them
-	}
 }
 async function decideFileboxWait(item, text, approve) {
 	if (fileboxWaitBusy.value || !text) return;
@@ -9696,7 +9798,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	const refresh = holding ? refreshNames(messages.value) : [];
 	// The newest seq held, so the page reaches back to it and the older pages join.
 	const after = holding ? heldNewestSeq(messages.value, historyPaging.value) : null;
-	const d = await api.getConversation(id, { refresh, after }).catch((error) => {
+	const d = await api.getConversation(id, { refresh, after }).catch(async (error) => {
 		const failure = conversationLoadFailure(error, {
 			requestedId: id,
 			currentId: currentId.value,
@@ -9706,14 +9808,34 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 		});
 		if (failure === "throw") throw error;
 		if (failure === "unavailable") {
+			// Keep the shared-link probe off the normal chat bundle/load path.
+			let sharedTarget = null;
+			try {
+				const { sharedConversationRoute } = await import("@/lib/sharedConversationRoute");
+				sharedTarget = await sharedConversationRoute(
+					id,
+					undefined,
+					() =>
+						_recoveryViewActive &&
+						id === currentId.value &&
+						loadId === _conversationLoadId
+				);
+			} catch {
+				/* Fall through to existing unavailable-chat recovery. */
+			}
+			if (!_recoveryViewActive || id !== currentId.value || loadId !== _conversationLoadId)
+				return null;
 			// Restore home's draft before changing the scope. Never create a chat
 			// or stop a server turn just because this read was refused.
 			swapDraft(null);
 			currentId.value = null;
 			resetRunState();
 			loadConversation(null);
-			notify(__("That chat isn't available"), { type: "error" });
-			router.replace({ name: "Chat" });
+			if (sharedTarget) router.replace(sharedTarget);
+			else {
+				notify(__("That chat isn't available"), { type: "error" });
+				router.replace({ name: "Chat" });
+			}
 		}
 		return null;
 	});
@@ -13151,6 +13273,7 @@ onMounted(async () => {
 		})
 		.catch(() => {});
 	socket?.on("jarvis:event", onEvent);
+	socket?.on("jarvis:event", onFileboxWaitEvent);
 	socket?.on("jarvis:llm_switch", onLlmSwitch);
 	socket?.on("connect", onResync);
 	socket?.on("report_generated", onReportGenerated);
@@ -13366,6 +13489,7 @@ onBeforeUnmount(() => {
 	// away, app close) — nothing here is visible to blank.
 	flushReveal(); // cancels the frame loop and leaves every row whole
 	socket?.off("jarvis:event", onEvent);
+	socket?.off("jarvis:event", onFileboxWaitEvent);
 	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
 	socket?.off("report_generated", onReportGenerated);

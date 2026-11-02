@@ -277,15 +277,13 @@ def _set_shares(conversation: str, wanted: set[str]) -> dict:
 	}
 	added, removed = wanted - existing.keys(), existing.keys() - wanted
 	if added:
-		if len(wanted) > MAX_RECIPIENTS:
-			frappe.throw(_("A chat can have at most 25 recipients, including hidden users."))
 		# A roles-cache miss can read the earlier request snapshot even after
 		# a User lock sees the latest row. Validate live role rows as well.
 		current_roles = set(
 			frappe.db.get_values(
 				"Has Role",
 				filters={
-					"parent": ["in", sorted(added | {doc.owner})],
+					"parent": ["in", sorted(wanted | {doc.owner})],
 					"parenttype": "User",
 					"role": ["in", JARVIS_ACCESS_ROLES],
 				},
@@ -305,6 +303,19 @@ def _set_shares(conversation: str, wanted: set[str]) -> dict:
 				frappe.throw(_("Choose enabled users with Jarvis access."), frappe.PermissionError)
 		for user in added:
 			_validate_addition(doc, user)
+		# Existing hidden grants are retained without consuming visible capacity.
+		# User and role rows above are locked and read fresh for the whole request.
+		visible = sum(
+			1
+			for user in wanted
+			if user in current_roles
+			and user in locked_users
+			and locked_users[user].enabled
+			and locked_users[user].user_type == "System User"
+			and user not in {"Guest", "Administrator", doc.owner}
+		)
+		if visible > MAX_RECIPIENTS:
+			frappe.throw(_("A chat can have at most 25 visible recipients."))
 	# Validate the full request before deleting anything. Revoking requires no
 	# enabled/shareable check and remains possible while sharing is switched off.
 	for user in removed:
