@@ -2330,9 +2330,21 @@
 					v-if="copyAlert"
 					type="warning"
 					:title="copyAlert.title"
-					:message="copyAlert.message"
+					:message="
+						reverifyError ? `${copyAlert.message} ${reverifyError}` : copyAlert.message
+					"
 					style="margin-bottom: 10px"
-				/>
+				>
+					<template v-if="canReverifySite" #action>
+						<button
+							class="jv-btn jv-btn--sm"
+							:disabled="reverifying"
+							@click="reverifySite"
+						>
+							Re-verify this site
+						</button>
+					</template>
+				</Banner>
 				<Banner
 					v-else-if="replacedAlert"
 					type="warning"
@@ -5077,6 +5089,29 @@ const replacedAlert = computed(() => replacedBanner(replacedNotice.value));
 // Set by the readiness poll when this site is a restored copy of another one.
 const copyNotice = ref(null);
 const copyAlert = computed(() => copyBanner(copyNotice.value));
+// Re-verify asks admin to prove this is the registered site (System Manager only,
+// matching jarvis.chat.site_pin.reverify). A pass clears the block; a refusal keeps it.
+const canReverifySite = !!window.is_system_manager;
+const reverifying = ref(false);
+const reverifyError = ref("");
+async function reverifySite() {
+	if (reverifying.value || !canReverifySite) return;
+	reverifying.value = true;
+	reverifyError.value = "";
+	try {
+		const res = await api.reverifySite();
+		if (res && res.proved && !res.blocked) {
+			forgetReady();
+			copyNotice.value = null;
+		} else {
+			reverifyError.value = "Re-verify did not confirm this site.";
+		}
+	} catch (e) {
+		reverifyError.value = "Could not reach Jarvis to verify this site. Try again in a minute.";
+	} finally {
+		reverifying.value = false;
+	}
+}
 function goReconnect() {
 	// The wizard owns the reconnect flow; land on it rather than duplicating the
 	// code-entry screen here. The flag matters: without it the wizard resumes down

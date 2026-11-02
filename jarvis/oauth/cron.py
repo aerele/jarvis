@@ -149,6 +149,13 @@ def check_agent_token_age() -> None:
 	if max_age_days <= 0:
 		return
 
+	# Once a callback key is stored the site refuses to rotate the owner token
+	# (api.rotate_agent_token), so a rotate notice would be one nobody can act on.
+	from jarvis import _plugin_auth
+
+	if _plugin_auth._callback_key():
+		return
+
 	issued_at = getattr(settings, "agent_token_issued_at", None)
 	if not issued_at:
 		frappe.logger().warning("check_agent_token_age: agent_token has no issued_at timestamp yet")

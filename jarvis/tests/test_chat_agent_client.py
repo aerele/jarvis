@@ -446,24 +446,33 @@ class TestStreamAgentTurn(FrappeTestCase):
 		self.assertEqual(params["message"], "hi")
 		self.assertEqual(params["sessionKey"], "sess-1")
 
-	def test_agent_payload_includes_model_and_provider_when_set(self):
-		"""Per-turn model override threads into the agent RPC params."""
+	def _scripted_oneshot(self, run_id: str):
+		"""A session whose next frames ack a sessions.patch, ack the agent RPC, end the run."""
 		sess, ws = _build_session()
 
-		def _ack():
-			req_id = ws.sent[-1]["id"]
-			return _frame({"type": "res", "id": req_id, "ok": True, "payload": {"runId": "r2"}})
+		def _ack(payload):
+			def _frame_for_last_request():
+				return _frame({"type": "res", "id": ws.sent[-1]["id"], "ok": True, "payload": payload})
 
-		ws._frames.append(_ack)
+			return _frame_for_last_request
+
+		ws._frames.append(_ack({"ok": True}))
+		ws._frames.append(_ack({"runId": run_id}))
 		ws._frames.append(
 			_frame(
 				{
 					"type": "event",
 					"event": "agent.event",
-					"payload": {"runId": "r2", "stream": "lifecycle", "data": {"phase": "end"}},
+					"payload": {"runId": run_id, "stream": "lifecycle", "data": {"phase": "end"}},
 				}
 			)
 		)
+		return sess, ws
+
+	def test_model_and_provider_ride_sessions_patch_not_the_agent_rpc(self):
+		"""A non-admin caller may not send model/provider on the agent RPC, so the
+		override is set on the session first and the agent params stay clean."""
+		sess, ws = self._scripted_oneshot("r2")
 		list(
 			sess.stream_agent_turn(
 				"sess-2",
@@ -473,33 +482,29 @@ class TestStreamAgentTurn(FrappeTestCase):
 				provider="openai-codex",
 			)
 		)
-		agent_req = [s for s in ws.sent if s.get("method") == "agent"][0]
-		params = agent_req["params"]
-		self.assertEqual(params["model"], "gpt-5.4-mini")
-		self.assertEqual(params["provider"], "openai-codex")
+		methods = [s["method"] for s in ws.sent if "method" in s and s["method"] != "connect"]
+		self.assertEqual(methods, ["sessions.patch", "agent"])
+		patch_req = [s for s in ws.sent if s.get("method") == "sessions.patch"][0]
+		self.assertEqual(patch_req["params"], {"key": "sess-2", "model": "openai-codex/gpt-5.4-mini"})
+		params = [s for s in ws.sent if s.get("method") == "agent"][0]["params"]
+		self.assertNotIn("model", params)
+		self.assertNotIn("provider", params)
 
-	def test_agent_payload_includes_only_model_when_provider_omitted(self):
-		"""Either kwarg may be set independently; absent ones aren't emitted."""
-		sess, ws = _build_session()
-
-		def _ack():
-			req_id = ws.sent[-1]["id"]
-			return _frame({"type": "res", "id": req_id, "ok": True, "payload": {"runId": "r3"}})
-
-		ws._frames.append(_ack)
-		ws._frames.append(
-			_frame(
-				{
-					"type": "event",
-					"event": "agent.event",
-					"payload": {"runId": "r3", "stream": "lifecycle", "data": {"phase": "end"}},
-				}
-			)
-		)
+	def test_bare_model_is_patched_without_a_provider_prefix(self):
+		sess, ws = self._scripted_oneshot("r3")
 		list(sess.stream_agent_turn("sess-3", "hi", "idem-3", model="gpt-5.5"))
-		agent_req = [s for s in ws.sent if s.get("method") == "agent"][0]
-		params = agent_req["params"]
-		self.assertEqual(params["model"], "gpt-5.5")
+		patch_req = [s for s in ws.sent if s.get("method") == "sessions.patch"][0]
+		self.assertEqual(patch_req["params"], {"key": "sess-3", "model": "gpt-5.5"})
+		params = [s for s in ws.sent if s.get("method") == "agent"][0]["params"]
+		self.assertNotIn("model", params)
+		self.assertNotIn("provider", params)
+
+	def test_a_provider_without_a_model_patches_nothing(self):
+		sess, ws = self._scripted_oneshot("r4")
+		ws._frames.pop(0)  # no sessions.patch ack is needed
+		list(sess.stream_agent_turn("sess-4", "hi", "idem-4", provider="openai"))
+		self.assertEqual([s["method"] for s in ws.sent if s.get("method") == "sessions.patch"], [])
+		params = [s for s in ws.sent if s.get("method") == "agent"][0]["params"]
 		self.assertNotIn("provider", params)
 
 
