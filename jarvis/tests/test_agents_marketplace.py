@@ -520,8 +520,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	# jarvis#1063 (jarvis-only half) - config_keys: which agent-specific
 	# installation config keys an agent's bundle actually reads (verified
-	# against jarvis-agents/agents/<slug>/evaluate.py; only close-auditor
-	# reads any today).
+	# against jarvis-agents/agents/<slug>/evaluate.py).
 	# ------------------------------------------------------------------ #
 	def test_sync_agent_listings_writes_config_keys_from_the_registry(self):
 		# dot paths - close-auditor/evaluate.py reads these NESTED under a
@@ -535,6 +534,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 				"materiality.engagement_risk_level",
 				"materiality.rounding_step",
 			],
+		)
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "gst-return-prep-auditor", "config_keys")),
+			["annual_aggregate_turnover", "same_hsn_rate_allowlist"],
 		)
 
 	def test_sync_preserves_vendor_ledger_configuration_keys(self):
@@ -550,8 +553,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 		)
 
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
-		"""An agent the registry declares no config_keys for (everyone but
-		close-auditor today) gets [], not null/absent - ConfigForm.vue can
+		"""An agent the registry declares no config_keys for gets [], not null/absent - ConfigForm.vue can
 		always safely parse it."""
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(
