@@ -878,6 +878,8 @@ class TestCycleCountCollection(FrappeTestCase):
 		with (
 			self._collection_mocks(sources, []),
 			patch.object(review._private_output, "MAX_BYTES", 1),
+			# Keep timestamp lookup outside the mocked source database/document seams.
+			patch.object(frappe.utils, "now", return_value="2026-10-05 12:00:00"),
 			patch.object(frappe.db, "get_value", return_value=state),
 			patch.object(frappe.db, "set_value") as persist,
 		):
