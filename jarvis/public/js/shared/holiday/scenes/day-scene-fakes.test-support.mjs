@@ -9,6 +9,7 @@ import {
   centreUp,
   floorFit,
 } from "../scene-geometry.mjs";
+import { phoneBoxes } from "./phone-boxes.test-support.mjs";
 
 // ---- a tiny DOM --------------------------------------------------------------------------
 
@@ -332,14 +333,37 @@ export function contractSuite(label, mod, ms) {
     r.end();
   });
 
-  test(`${label}: reduced motion and the phone layout only rest`, async () => {
-    for (const over of [{ reduced: true }, { layout: "phone" }]) {
+  test(`${label}: reduced motion, and a layout the scenes do not draw, only rest`, async () => {
+    for (const over of [
+      { reduced: true },
+      { reduced: true, layout: "phone", boxes: phoneBoxes() },
+      { layout: "rest", boxes: phoneBoxes() },
+    ]) {
       const r = scene(over);
       assert.equal(r.host.svgs.length, 0, "nothing drawn");
       r.api.settle("end");
       r.api.settle("end");
       assert.deepEqual(r.names(), ["settle", "swap", "deliver", "peek"]);
       await r.done();
+      r.end();
+    }
+  });
+
+  test(`${label}: the phone layout plays the whole scene, on a roomy and a short phone`, async () => {
+    for (const page of [
+      phoneBoxes({ w: 390, h: 844 }),
+      phoneBoxes({ w: 375, h: 667 }),
+      phoneBoxes({ w: 360, h: 640, starters: false }),
+    ]) {
+      const r = scene({ layout: "phone", boxes: page });
+      assert.equal(r.host.svgs.length, 1, "the scene is drawn");
+      r.tick(mod.END_MS - 1);
+      assert.ok(!/undefined|NaN/.test(r.markup()), "no bad number in the art");
+      assert.ok(r.names().indexOf("deliver") > 0);
+      r.tick(1);
+      r.tick(700);
+      await r.done();
+      assert.equal(r.count("deliver"), 1);
       r.end();
     }
   });

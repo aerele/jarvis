@@ -1,38 +1,80 @@
 """Configuration boundary for the FEFO expiry-compliance auditor.
 
-The bundle requires a named reviewer and a bounded near-expiry window.  Keep
-that contract on the bench too, so a missing policy stops before a run,
-conversation, or fleet request exists.  The optional Warehouse declaration is
-validated separately by :mod:`jarvis.chat.agent_scope` and is intentionally not
-sent to the bundle.
+The policy belongs to the private evaluator. The optional Warehouse boundary
+belongs only to the public top-level ``record_scope`` contract and is resolved
+by :mod:`jarvis.chat.agent_scope` as the run-as user.
 """
 
 import frappe
 from frappe import _
 
 from jarvis._session import impersonate
-from jarvis.chat.agent_scope import resolve_scope
 from jarvis.permissions import is_valid_unattended_owner
 
 AGENT = "fefo-expiry-compliance-auditor"
 _BUNDLE_KEYS = frozenset(("reviewer", "near_expiry_days", "test_declaration"))
-_INSTALLATION_ONLY_KEYS = frozenset(("record_scope",))
+_TOP_LEVEL_KEYS = frozenset(("fefo", "record_scope"))
+
+
+def validate_configuration_edit(raw) -> None:
+	"""Reject malformed supplied FEFO values but allow an unfinished setup.
+
+	The form deliberately lets an owner save reviewer/window fields in more than
+	one step.  A supplied value, however, cannot be malformed or use the retired
+	nested scope shape.  Launch and schedule preflight enforce completeness.
+	"""
+	try:
+		config = frappe.parse_json(raw) if isinstance(raw, str) else raw
+	except (TypeError, ValueError) as exc:
+		raise ValueError("Configuration must be a valid JSON object.") from exc
+	if not isinstance(config, dict):
+		raise ValueError("Configuration must be a JSON object.")
+	if set(config) - _TOP_LEVEL_KEYS:
+		raise ValueError("Use only FEFO settings and the optional top-level record_scope.")
+
+	policy = config.get("fefo")
+	if policy is not None:
+		if not isinstance(policy, dict):
+			raise ValueError("FEFO settings must be a JSON object.")
+		if set(policy) - _BUNDLE_KEYS:
+			raise ValueError(
+				"Use only the expiry reviewer, near-expiry days, and test declaration in the FEFO settings."
+			)
+		if "reviewer" in policy:
+			reviewer = policy["reviewer"]
+			if not isinstance(reviewer, str) or not 0 < len(reviewer.strip()) <= 140:
+				raise ValueError("FEFO reviewer must contain 1 to 140 characters.")
+		if "near_expiry_days" in policy:
+			days = policy["near_expiry_days"]
+			if type(days) is not int or not 1 <= days <= 3650:
+				raise ValueError("FEFO near_expiry_days must be an integer from 1 to 3650.")
+		if "test_declaration" in policy:
+			declaration = policy["test_declaration"]
+			if not isinstance(declaration, str) or len(declaration) > 500:
+				raise ValueError("FEFO test_declaration must contain at most 500 characters.")
+
+	if "record_scope" in config:
+		from jarvis.chat.agent_scope import fefo_record_scope
+
+		if fefo_record_scope(config["record_scope"]) is None:
+			raise ValueError("FEFO record_scope must name one Warehouse leaf.")
 
 
 def configuration_issues(raw) -> dict[str, str]:
-	"""Return field-level FEFO setup guidance for saved installation settings.
-
-	The evaluator receives only the ``fefo`` policy after the bench removes its
-	optional Warehouse declaration.  Validate the same policy shape here, while
-	allowing that declaration to continue through the separate, permission-bound
-	scope resolver.
-	"""
+	"""Return safe field-level setup guidance for a FEFO policy."""
 	try:
 		config = frappe.parse_json(raw) if isinstance(raw, str) else raw
 	except (TypeError, ValueError):
 		return {"config": _("Configuration must be a valid JSON object.")}
 	if not isinstance(config, dict):
 		return {"config": _("Configuration must be a JSON object.")}
+	if set(config) - _TOP_LEVEL_KEYS:
+		return {"config": _("Use only FEFO settings and the optional top-level record_scope.")}
+	if "record_scope" in config:
+		from jarvis.chat.agent_scope import fefo_record_scope
+
+		if fefo_record_scope(config["record_scope"]) is None:
+			return {"config": _("FEFO record_scope must name one Warehouse leaf.")}
 
 	policy = config.get("fefo")
 	if not isinstance(policy, dict):
@@ -42,10 +84,9 @@ def configuration_issues(raw) -> dict[str, str]:
 		}
 
 	issues: dict[str, str] = {}
-	unsupported = set(policy) - _BUNDLE_KEYS - _INSTALLATION_ONLY_KEYS
-	if unsupported:
+	if set(policy) - _BUNDLE_KEYS:
 		issues["config"] = _(
-			"Use only the expiry reviewer, near-expiry days, test declaration, and optional Warehouse scope."
+			"Use only the expiry reviewer, near-expiry days, and test declaration in the FEFO settings."
 		)
 
 	reviewer = policy.get("reviewer")
@@ -59,7 +100,6 @@ def configuration_issues(raw) -> dict[str, str]:
 	declaration = policy.get("test_declaration", "")
 	if not isinstance(declaration, str) or len(declaration) > 500:
 		issues["fefo_test_declaration"] = _("Use a plain test declaration of 500 characters or less.")
-
 	return issues
 
 
@@ -71,14 +111,7 @@ def assert_configuration(installation) -> None:
 
 
 def assert_schedule_configuration(installation) -> None:
-	"""Refuse an enabled FEFO schedule that cannot launch as its run-as user.
-
-	This is shared by the SPA endpoint and the Installation controller.  The
-	controller is the authoritative path: Desk, REST, import, and direct saves do
-	not pass through ``agents_api.set_schedule``.  Run the policy and the optional
-	Warehouse scope resolution as the identity that will execute the unattended
-	run, before the schedule can be persisted.
-	"""
+	"""Validate an enabled FEFO schedule as its eventual run-as identity."""
 	if str(installation.get("agent") or "").strip() != AGENT:
 		return
 	run_as = str(installation.get("run_as_user") or "").strip()
@@ -91,13 +124,10 @@ def assert_schedule_configuration(installation) -> None:
 		)
 	with impersonate(run_as):
 		assert_configuration(installation)
-		# A declared FEFO Warehouse root is binding.  Resolve it here so an
-		# unreadable, disabled, foreign, or malformed scope cannot be saved into an
-		# unattended schedule and fail only on its first tick.  This also validates
-		# the ordinary company/period scope as the eventual run-as identity.
+		from jarvis.chat.agent_scope import resolve_scope
 		from jarvis.exceptions import InvalidArgumentError
 
 		try:
-			resolve_scope(installation)
+			resolve_scope(installation, allow_record_scope=True)
 		except InvalidArgumentError as exc:
 			frappe.throw(str(exc), title=_("Complete FEFO configuration"))

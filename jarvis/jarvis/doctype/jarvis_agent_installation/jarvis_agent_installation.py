@@ -228,44 +228,32 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		validate_schedule_day_of_month_or_throw(self.schedule_day_of_month)
 
 	def _validate_agent_config(self):
-		"""Validate newly saved agent settings that have bench-side invariants.
+		"""Keep malformed FEFO settings out of every direct save surface.
 
-		Only validate when ``config`` changes on an existing row. A legacy invalid
-		configuration must remain editable and disableable. New writes, on the other
-		hand, must not let Advanced JSON or a direct API call bypass the browser
-		validation for the FEFO evaluator's integer expiry window.
+		Incomplete policy is intentionally allowed so an owner can save setup in
+		steps.  A supplied invalid value or the retired nested scope declaration is
+		never useful and must not persist through Desk, REST, import, or the SPA.
 		"""
+		if self.agent != "fefo-expiry-compliance-auditor":
+			return
 		if not self.is_new() and not self.has_value_changed("config"):
 			return
-		from jarvis.chat.agent_scope import FEFO_AGENT, validate_fefo_near_expiry_days
-
-		if self.agent != FEFO_AGENT:
-			return
-		try:
-			config = frappe.parse_json(self.config or "{}")
-		except Exception:
-			return
-		if not isinstance(config, dict):
-			return
-		from jarvis.exceptions import InvalidArgumentError
+		from jarvis.chat.fefo_expiry_compliance import validate_configuration_edit
 
 		try:
-			validate_fefo_near_expiry_days(config)
-		except InvalidArgumentError as exc:
+			validate_configuration_edit(self.config or "{}")
+		except ValueError as exc:
 			frappe.throw(str(exc))
 
 	def _validate_fefo_schedule_configuration(self):
-		"""Keep an enabled FEFO schedule valid on every installation write path.
+		"""Preflight every enabled FEFO schedule before this document is saved.
 
-		``agents_api.set_schedule`` is a convenience endpoint only. Desk edits,
-		imports, REST writes, and a later ``set_enabled`` all call this controller
-		instead, so the final schedule-enable gate must live here. A legacy invalid
-		row may still turn its schedule off; only an enabled schedule needs a valid
-		policy, readable optional Warehouse scope, and unattended run-as identity.
+		This is the authoritative direct-save guard.  It deliberately does not run
+		on a disable, so a legacy invalid schedule remains recoverable.
 		"""
-		from jarvis.chat.agent_scope import FEFO_AGENT
-
-		if self.agent != FEFO_AGENT or not frappe.utils.cint(self.get("schedule_enabled")):
+		if self.agent != "fefo-expiry-compliance-auditor" or not frappe.utils.cint(
+			self.get("schedule_enabled")
+		):
 			return
 		from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
 

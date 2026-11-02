@@ -25,7 +25,7 @@ import frappe
 
 from jarvis import compat
 from jarvis.chat._record_summary import fmt, is_secret
-from jarvis.exceptions import InvalidArgumentError
+from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools.read_file import _resolve_file
 
 _TABLE_FIELDTYPES = ("Table", "Table MultiSelect")
@@ -174,7 +174,12 @@ def _import_file(file_url: str | None, filename: str | None):
 	to a caller who cannot see it. Byte-bounded BEFORE any parse (cheap metadata read;
 	the importer would otherwise fully parse even a huge file just to show 10 rows),
 	falling back to the content length when file_size is missing."""
-	file_doc = _resolve_file(file_url, filename)
+	try:
+		file_doc = _resolve_file(file_url, filename)
+	except PermissionDeniedError:
+		# Preserve the import validation contract when the shared reader denies
+		# a missing or unreadable reference. Do not expose which case occurred.
+		raise InvalidArgumentError("no matching file found") from None
 	if not frappe.has_permission("File", "read", doc=file_doc.name):
 		raise InvalidArgumentError("no matching file found")
 	size = file_doc.file_size or len(file_doc.get_content() or b"")

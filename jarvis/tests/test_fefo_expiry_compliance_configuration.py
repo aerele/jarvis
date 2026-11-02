@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import agent_scheduler, agents_api
+from jarvis.chat import agent_scheduler, agent_scope, agents_api
 from jarvis.chat import fefo_expiry_compliance as fefo
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
@@ -28,8 +28,8 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 				"reviewer": " Stock Controller ",
 				"near_expiry_days": 90,
 				"test_declaration": "",
-				"record_scope": {"doctype": "Warehouse", "name": "Optional FEFO Scope"},
-			}
+			},
+			"record_scope": {"doctype": "Warehouse", "name": "Optional FEFO Scope"},
 		}
 		self.assertEqual(fefo.configuration_issues(valid), {})
 
@@ -110,6 +110,7 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 				registry_tools = MagicMock(side_effect=AssertionError("must not reach capability gate"))
 				with (
 					patch.object(frappe, "get_doc", return_value=self._listing()),
+					patch.object(frappe, "log_error"),
 					patch("jarvis.chat.operator_review.backend", return_value=None),
 					patch("jarvis.chat.agent_catalog.registry_tools_allow", registry_tools),
 					patch(
@@ -130,6 +131,7 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 			patch.object(frappe, "get_doc", return_value=self._listing()),
 			patch("jarvis.chat.operator_review.backend", return_value=None),
 			patch("jarvis.chat.agent_catalog.registry_tools_allow", registry_tools),
+			patch.object(agent_scope, "resolve_scope", return_value={}),
 		):
 			with self.assertRaises(ReachedCapabilityGate):
 				agent_scheduler._launch_audit(self._installation(self._valid_config()), trigger="scheduled")
@@ -165,7 +167,7 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 				"impersonate",
 				side_effect=lambda user: self._as_run_as(run_as_contexts, user),
 			),
-			patch.object(fefo, "resolve_scope", return_value={}),
+			patch.object(agent_scope, "resolve_scope", return_value={}),
 			patch.object(agents_api, "compute_next_run", return_value="2026-11-02 09:00:00"),
 			patch.object(agents_api, "log_activity"),
 			patch.object(frappe.db, "commit"),
@@ -201,7 +203,7 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 				"impersonate",
 				side_effect=lambda user: self._as_run_as(run_as_contexts, user),
 			),
-			patch.object(fefo, "resolve_scope") as resolve_scope,
+			patch.object(agent_scope, "resolve_scope") as resolve_scope,
 		):
 			with self.assertRaises(frappe.ValidationError):
 				self._controller_validate(doc)
@@ -233,11 +235,11 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 				"impersonate",
 				side_effect=lambda user: self._as_run_as(run_as_contexts, user),
 			),
-			patch.object(fefo, "resolve_scope", return_value={}) as resolve_scope,
+			patch.object(agent_scope, "resolve_scope", return_value={}) as resolve_scope,
 		):
 			self._controller_validate(doc)
 		self.assertEqual(run_as_contexts, [doc.run_as_user])
-		resolve_scope.assert_called_once_with(doc)
+		resolve_scope.assert_called_once_with(doc, allow_record_scope=True)
 
 	def test_controller_rejects_unreadable_fefo_scope_as_run_as(self):
 		doc = self._controller_installation(self._valid_config(), schedule_enabled=1)
@@ -250,7 +252,7 @@ class TestFefoExpiryComplianceConfiguration(FrappeTestCase):
 				side_effect=lambda user: self._as_run_as(run_as_contexts, user),
 			),
 			patch.object(
-				fefo,
+				agent_scope,
 				"resolve_scope",
 				side_effect=InvalidArgumentError("FEFO record_scope is not readable"),
 			),

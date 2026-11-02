@@ -870,12 +870,12 @@ describe("per-agent gating via the configKeys prop", () => {
 	it("FEFO policy controls serialize to fefo and preserve the structured scope declaration", async () => {
 		const configKeys = ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"];
 		const recordScope = { doctype: "Warehouse", name: "Fake FEFO Warehouse" };
-		const w = mountForm({ fefo: { record_scope: recordScope } }, { configKeys });
+		const w = mountForm({ record_scope: recordScope }, { configKeys });
 		expect(field(w, "Expiry reviewer").element.value).toBe("");
 		expect(field(w, "Near-expiry window").element.value).toBe("");
 		expect(field(w, "Test declaration").element.value).toBe("");
 		expect(JSON.parse(w.find("textarea").element.value)).toEqual({
-			fefo: { record_scope: recordScope },
+			record_scope: recordScope,
 		});
 
 		await field(w, "Expiry reviewer").setValue("reviewer@example.invalid");
@@ -883,11 +883,11 @@ describe("per-agent gating via the configKeys prop", () => {
 		await field(w, "Test declaration").setValue("Fake records only.");
 		await w.find('[data-label="Save configuration"]').trigger("click");
 		expect(w.emitted("save")[0][0]).toEqual({
+			record_scope: recordScope,
 			fefo: {
 				reviewer: "reviewer@example.invalid",
 				near_expiry_days: 90,
 				test_declaration: "Fake records only.",
-				record_scope: recordScope,
 			},
 		});
 	});
@@ -923,27 +923,29 @@ describe("per-agent gating via the configKeys prop", () => {
 		expect(w.text()).toContain("This agent has no additional settings.");
 	});
 
-	it("FEFO dot paths render the expiry fields and save the owner namespace", async () => {
-		const w = mountForm(
-			{},
-			{
-				configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"],
-			}
-		);
+	it("FEFO renders only its policy fields and stores the public scope at top level", async () => {
+		const configKeys = ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"];
+		const recordScope = { doctype: "Warehouse", name: "Fake FEFO Warehouse" };
+		const w = mountForm({ record_scope: recordScope }, { configKeys });
 		expect(w.text()).toContain("Expiry reviewer");
 		expect(w.text()).toContain("Near-expiry window");
 		expect(w.text()).toContain("Test declaration");
-		expect(w.text()).not.toContain("This agent has no additional settings.");
+		expect(w.text()).not.toContain("Company");
+		expect(w.text()).not.toContain("Fiscal year");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({
+			record_scope: recordScope,
+		});
 
 		await field(w, "Expiry reviewer").setValue("Stock Controller");
 		await field(w, "Near-expiry window").setValue("30");
-		await field(w, "Test declaration").setValue("Pre-release review");
+		await field(w, "Test declaration").setValue("Fake records only.");
 		await w.find('[data-label="Save configuration"]').trigger("click");
 		expect(w.emitted("save")[0][0]).toEqual({
+			record_scope: recordScope,
 			fefo: {
 				reviewer: "Stock Controller",
 				near_expiry_days: 30,
-				test_declaration: "Pre-release review",
+				test_declaration: "Fake records only.",
 			},
 		});
 	});

@@ -103,7 +103,7 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(field.options.map((o) => o.value)).toEqual(["", "low", "medium", "high"]);
 	});
 
-	it("the materiality amounts and the ageing floors are numeric", () => {
+	it("the materiality amounts, FEFO window, and ageing floors are numeric", () => {
 		expect(NUMBER_CONFIG_KEYS.sort()).toEqual(
 			[
 				"settlement_hold_days",

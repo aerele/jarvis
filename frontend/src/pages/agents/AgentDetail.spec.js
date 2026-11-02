@@ -1425,7 +1425,7 @@ describe("FEFO configuration readiness", () => {
 	function fefoAgent(issues = {}, installation = {}) {
 		return baseAgent({
 			agent_slug: "fefo-expiry-compliance-auditor",
-			title: "FEFO Expiry Compliance Auditor",
+			title: "Batch Rotation and Expiry Reviewer",
 			nature: "Auditor",
 			config_keys: '["fefo.reviewer","fefo.near_expiry_days","fefo.test_declaration"]',
 			installation: installedInstallation({ configuration_issues: issues, ...installation }),

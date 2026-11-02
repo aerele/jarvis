@@ -104,6 +104,7 @@ const swFor = (...files) =>
     .join(",") +
   "])";
 const WORN = WORN_MARKERS.join(" ");
+const SCENES = ART_MARKERS.slice(WORN_MARKERS.length).join(" ");
 
 function pwaBuild(files, sw) {
   const dir = mkdtempSync(path.join(tmpdir(), "holiday-pwa-"));
@@ -120,6 +121,7 @@ const GOOD = {
   "vendor-DDDD.js": "export default 1",
   "NewChatView-EEEE.js": `import{x}from"./vendor-DDDD.js";const w="${WORDS}";import("./holiday-worn-BBBB.js")`,
   "holiday-worn-BBBB.js": WORN,
+  "holiday-diwali-HHHH.js": SCENES,
 };
 const GOOD_SW = swFor("index-AAAA.js", "vendor-DDDD.js", "NewChatView-EEEE.js");
 
@@ -205,14 +207,51 @@ test("pwa: worn art in a precached chunk fails", () => {
   );
 });
 
-test("pwa: scene art in a non-holiday chunk fails, there are no scenes on the phone yet", () => {
+test("pwa: scene art in a non-holiday chunk fails", () => {
   const files = {
     ...GOOD,
     "NewChatView-EEEE.js": GOOD["NewChatView-EEEE.js"] + ' stroke="#a16207"',
   };
   assert.match(
     check(pwaBuild(files, GOOD_SW)),
-    /scene art.*NewChatView-EEEE\.js/
+    /holiday art.*is in NewChatView-EEEE\.js, not only holiday/
+  );
+});
+
+test("pwa: scene art in a chunk that lost its holiday- name fails, and so does one in the precache", () => {
+  const renamed = { ...GOOD, "diwali-HHHH.js": SCENES };
+  delete renamed["holiday-diwali-HHHH.js"];
+  assert.match(
+    check(pwaBuild(renamed, GOOD_SW)),
+    /is in diwali-HHHH\.js, not only holiday/
+  );
+  const sw = swFor(
+    "index-AAAA.js",
+    "vendor-DDDD.js",
+    "NewChatView-EEEE.js",
+    "holiday-diwali-HHHH.js"
+  );
+  assert.match(
+    check(pwaBuild(GOOD, sw)),
+    /precache lists holiday-diwali-HHHH\.js/
+  );
+});
+
+test("pwa: a build with no scene art in any holiday chunk fails (the scenes were dropped)", () => {
+  const files = { ...GOOD };
+  delete files["holiday-diwali-HHHH.js"];
+  assert.match(check(pwaBuild(files, GOOD_SW)), /holiday-\* chunks lack/);
+});
+
+test("pwa: a scene chunk that a precached chunk imports statically fails", () => {
+  const files = {
+    ...GOOD,
+    "NewChatView-EEEE.js":
+      GOOD["NewChatView-EEEE.js"] + 'import{y}from"./holiday-diwali-HHHH.js";',
+  };
+  assert.match(
+    check(pwaBuild(files, GOOD_SW)),
+    /NewChatView-EEEE\.js is precached but statically imports holiday-diwali-HHHH\.js/
   );
 });
 

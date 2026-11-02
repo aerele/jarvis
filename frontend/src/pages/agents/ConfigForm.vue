@@ -243,7 +243,7 @@ let defaultsRequest = 0;
 const visibleFields = computed(() => [
 	// Bank reconciliation reads a statement window only; a fiscal year does not apply.
 	...SCOPE_CONFIG_FIELDS.filter(
-		(field) => !(bankRecon.value && field.key === "fiscal_year")
+		(field) => !fefoConfiguration.value && !(bankRecon.value && field.key === "fiscal_year")
 	).map((field) => {
 		if (!operatorReview.value || field.key === "fiscal_year") return field;
 		if (bankRecon.value && field.type === "date-range")

@@ -302,7 +302,14 @@ class TestNegativeStockScope(FrappeTestCase):
 			{**BASE_SCOPE, "record_scope": {"doctype": "Warehouse", "name": "Main Warehouse Group"}},
 			engagement_config=snapshot,
 		)
-		self.assertIn('record_scope={"doctype": "Warehouse", "name": "Main Warehouse Group"}', prompt)
+		self.assertEqual(
+			frappe.parse_json(
+				prompt.split("ADDITIONAL SCOPE (copy these values unchanged): ", 1)[1].split(
+					"\n\nEXPLICIT CONFIG", 1
+				)[0]
+			),
+			{"record_scope": {"doctype": "Warehouse", "name": "Main Warehouse Group"}},
+		)
 		self.assertNotIn('"record_scope"', prompt.split("EXPLICIT CONFIG", 1)[1])
 		self.assertNotIn("Raw Owner Warehouse", prompt.split("EXPLICIT CONFIG", 1)[1])
 
@@ -324,7 +331,7 @@ class TestNegativeStockScope(FrappeTestCase):
 		set_value.assert_not_called()
 		self.assertEqual(
 			log_error.call_args.kwargs["title"],
-			"jarvis agent: Negative stock scope resolution refused launch",
+			"jarvis agent: explicit record scope resolution failed",
 		)
 
 	def test_every_invalid_warehouse_case_refuses_before_any_scope_stamp(self):

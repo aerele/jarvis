@@ -144,7 +144,7 @@ export const toranSVG = (p, from, to) =>
  * baseline. The scene's floor group (scene-runtime.mjs floorGroup) shrinks the whole row as
  * one group on a short stage, so the glow and the fountain sparks scale with the pots.
  */
-export function floorSVG(p, ground) {
+export function floorSVG(p, ground, at = (x) => x) {
   const P = DIYA.pot;
   const rand = rng(13);
   const diya = (x) => `<g transform="translate(${x} ${
@@ -175,30 +175,35 @@ export function floorSVG(p, ground) {
     <path d="M-6.6 -5 H6.6 M-5.4 -10.5 H5.4" stroke="#fde68a" stroke-width="1.3"/>
     <ellipse cx="0" cy="-16" rx="4.5" ry="1.4" fill="#7f1d1d"/></g>`;
   const xs = [90, 193, 297, 400, 503, 607, 710];
-  return `${xs.map(diya).join("")}${anar(245)}${anar(555)}`;
+  return `${xs.map((x) => diya(at(x))).join("")}${anar(at(245))}${anar(
+    at(555)
+  )}`;
 }
 
-/** Rockets and the three bursts. `dy` is the mark's y shift from MARK_TOP. */
-export function skyShowSVG(p, dy) {
+/**
+ * Rockets and the three bursts. `dy` is the mark's y shift from MARK_TOP, `xs` where each burst
+ * stands across the stage (the phone squeezes them into its window).
+ */
+export function skyShowSVG(p, dy, xs = BURSTS.map((b) => b.x)) {
   const flash = (n, x, y) =>
     `<g transform="translate(${x} ${y})"><circle class="${p}flash${n} ${p}fb" r="${radiusOf(
       `flash${n}`
     )}" fill="url(#${p}flash)" opacity="0"/>`;
   const rocket = (n) =>
     `<g class="${p}rk${n}" opacity="0"><path d="M0 0 L0 18" stroke="url(#${p}rkt)" stroke-width="2.2" stroke-linecap="round"/><circle r="2.3" fill="#fff7ed"/></g>`;
-  return `${flash(1, BURSTS[0].x, BURSTS[0].y + dy)}${burstSVG(
+  return `${flash(1, xs[0], BURSTS[0].y + dy)}${burstSVG(
     `${p}b1`,
     40,
     ["#f59e0b", "#ea580c", "#facc15", "#e11d48"],
     3
   )}</g>
-    ${flash(2, BURSTS[1].x, BURSTS[1].y + dy)}${burstSVG(
+    ${flash(2, xs[1], BURSTS[1].y + dy)}${burstSVG(
     `${p}b2`,
     40,
     ["#db2777", "#9333ea", "#ec4899", "#f59e0b"],
     6
   )}</g>
-    ${flash(3, BURSTS[2].x, BURSTS[2].y + dy)}${burstSVG(
+    ${flash(3, xs[2], BURSTS[2].y + dy)}${burstSVG(
     `${p}b3`,
     32,
     ["#fde047", "#fbbf24", "#fff7ed"],
