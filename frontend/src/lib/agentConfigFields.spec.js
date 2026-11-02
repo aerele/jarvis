@@ -49,6 +49,8 @@ describe("CONFIG_FIELD_SET", () => {
 				"percentage",
 				"engagement_risk_level",
 				"rounding_step",
+				"grn_hygiene_reviewer",
+				"grn_hygiene_test_declaration",
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
@@ -56,7 +58,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders scope, the SLA team, the materiality set, then the vendor-ledger ageing floors", () => {
+	it("orders scope, the SLA team, materiality, GRN settings, then the vendor-ledger ageing floors", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -75,6 +77,8 @@ describe("CONFIG_FIELD_SET", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"grn_hygiene_reviewer",
+			"grn_hygiene_test_declaration",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
@@ -106,7 +110,7 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(field.options.map((o) => o.value)).toEqual(["", "low", "medium", "high"]);
 	});
 
-	it("the materiality amounts and the ageing floors are numeric", () => {
+	it("the materiality amounts and the ageing floors are numeric, but GRN text settings are not", () => {
 		expect(NUMBER_CONFIG_KEYS.sort()).toEqual(
 			[
 				"settlement_hold_days",
@@ -120,6 +124,8 @@ describe("CONFIG_FIELD_SET", () => {
 				"grir_floor_days",
 			].sort()
 		);
+		expect(NUMBER_CONFIG_KEYS).not.toContain("grn_hygiene_reviewer");
+		expect(NUMBER_CONFIG_KEYS).not.toContain("grn_hygiene_test_declaration");
 	});
 
 	it("every field has a human label reachable from CONFIG_FIELD_LABELS", () => {
@@ -141,7 +147,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes the SLA team, materiality set and vendor-ledger ageing floors", () => {
+	it("agent-specific includes the SLA team, materiality, GRN settings, and vendor-ledger ageing floors", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -156,6 +162,8 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"grn_hygiene_reviewer",
+			"grn_hygiene_test_declaration",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
@@ -188,11 +196,13 @@ describe("KEY_TO_PATH (local form key -> storage dot path)", () => {
 		expect(KEY_TO_PATH.sla_team).toBe("record_scope");
 	});
 
-	it("the materiality keys are nested dot paths", () => {
+	it("the materiality and GRN keys are nested dot paths", () => {
 		expect(KEY_TO_PATH.benchmark_value).toBe("materiality.benchmark_value");
 		expect(KEY_TO_PATH.percentage).toBe("materiality.percentage");
 		expect(KEY_TO_PATH.engagement_risk_level).toBe("materiality.engagement_risk_level");
 		expect(KEY_TO_PATH.rounding_step).toBe("materiality.rounding_step");
+		expect(KEY_TO_PATH.grn_hygiene_reviewer).toBe("grn_hygiene.reviewer");
+		expect(KEY_TO_PATH.grn_hygiene_test_declaration).toBe("grn_hygiene.test_declaration");
 	});
 });
 

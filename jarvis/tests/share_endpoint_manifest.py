@@ -80,6 +80,23 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.api",
+	"Nonce-authenticated pairing challenge and plugin-signed session-vouch endpoints answering this site's own instance identity; no transcript lookup.",
+	"""
+    pairing_challenge
+    vouch_session
+    """,
+)
+
+_unrelated(
+	"jarvis.chat.site_pin",
+	"System Manager action re-checking this site's registration with admin; no conversation data.",
+	"""
+    reverify
+    """,
+)
+
+_unrelated(
 	"jarvis.api_errors",
 	"Receives caller-supplied client telemetry; does not resolve conversation identifiers.",
 	"""
@@ -871,6 +888,10 @@ ENDPOINTS.update(
 			"arguments": {"name": "$approval"},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.approvals_api.continue_approval_chat": {
+			"arguments": {"name": "$approval"},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.approvals_api.decide": {
 			"arguments": {"approve": 1, "decision": "approve", "name": "$approval"},
 			"scope": "chat_scoped",
@@ -901,6 +922,14 @@ ENDPOINTS.update(
 		},
 		"jarvis.chat.approvals_api.get_sheet_candidates": {
 			"arguments": {"name": "$approval"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.approvals_api.tag_reviewer": {
+			"arguments": {"name": "$approval", "user": "$recipient"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.approvals_api.untag_reviewer": {
+			"arguments": {"name": "$approval", "user": "$recipient"},
 			"scope": "chat_scoped",
 		},
 		"jarvis.chat.approvals_api.list_approvals": {"arguments": {}, "scope": "chat_scoped"},

@@ -211,6 +211,9 @@ export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
 // 180s server-side. Admin-gated (require_jarvis_admin). Returns get_llm_sync_status()'s
 // shape plus `outcome`: converged | queued | throttled | not_configured.
 export const resyncLlm = () => call("jarvis.onboarding.resync_llm");
+// System Manager only. Asks admin to prove, through the tenant container, that this is the
+// registered site; a pass clears the copy block. Returns the site status plus `proved`.
+export const reverifySite = () => call("jarvis.chat.site_pin.reverify");
 // Read-only poll of a durable LLM-apply operation (plan-05 D2). The single
 // Start-chatting controller (frontend/src/lib/llmOperation.js) follows exactly one
 // operation id to a terminal state through this; it never spends the apply bucket.
@@ -532,8 +535,12 @@ export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkField
 
 // Field metadata for the record-edit action card: powers Link/Select/Date
 // controls (returns {ok, doctype, fields:[{fieldname,label,fieldtype,options}]}).
-export const getDoctypeFields = (doctype) =>
-	call("jarvis.chat.api.get_doctype_fields", { doctype });
+export const getDoctypeFields = (doctype, parentDoctype, parentfield) =>
+	call("jarvis.chat.api.get_doctype_fields", {
+		doctype,
+		...(parentDoctype ? { parent_doctype: parentDoctype } : {}),
+		...(parentfield ? { parentfield } : {}),
+	});
 
 // --- LLM pool / models config (System-Manager only, gated server-side) ---
 export const getLlmConfig = () => call("jarvis.onboarding.get_llm_config");
@@ -945,6 +952,10 @@ export const listApprovals = (status = "Pending") =>
 export const approvalsBadge = () => call("jarvis.chat.approvals_api.pending_badge", {});
 export const decideApproval = (name, decision, approve = 1) =>
 	call("jarvis.chat.approvals_api.decide", { name, decision, approve });
+// The requester sends a decided Chat question's stored decision to their own chat
+// when it did not reach it (requester-only, never resends a delivered decision).
+export const continueApprovalChat = (name) =>
+	call("jarvis.chat.approvals_api.continue_approval_chat", { name });
 // Ignore a request off the board (no verdict, no chat resume); reversible.
 export const dismissApproval = (name) =>
 	call("jarvis.chat.approvals_api.dismiss_approval", { name });
@@ -1038,6 +1049,12 @@ export const listApprovalsPage = (p) =>
 	call("jarvis.chat.approvals_api.list_approvals_page", _page(p));
 export const listApprovalReviewers = () =>
 	call("jarvis.chat.approvals_api.list_approval_reviewers");
+// A Chat question's reviewers are explicit grants (requester only), never DocShares.
+// Both answer with the current reviewers: [{ user, full_name }].
+export const tagApprovalReviewer = (name, user) =>
+	call("jarvis.chat.approvals_api.tag_reviewer", { name, user });
+export const untagApprovalReviewer = (name, user) =>
+	call("jarvis.chat.approvals_api.untag_reviewer", { name, user });
 
 // ── File Box FB-1: cascade delete + clear-processed + bulk delete (Q4) ──────
 // delete_inbound: owner-gated cascade (approvals + messages + File docs + the

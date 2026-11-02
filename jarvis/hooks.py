@@ -490,7 +490,7 @@ scheduler_events = {
 		"jarvis.oauth.pending_capture.sweep_expired",
 	],
 	"daily": [
-		"jarvis.onboarding.sync_connection",
+		"jarvis.onboarding.scheduled_sync_connection",
 		# Jarvis Pending Action purge (D3): settled terminal rows older than 7 days,
 		# in committed batches; never Pending/Executing or a held row still resuming.
 		"jarvis.chat.pending_actions.purge",
@@ -609,6 +609,13 @@ doc_events = {
 	for dt in ("DocType", "Custom Field", "Property Setter", "Workflow", "Client Script")
 }
 
+# Generic RPCs must use the same source gate as dedicated LCV tools. The
+# handler is a no-op outside the scoped tool call, including ordinary Desk.
+doc_events["Landed Cost Voucher"] = {
+	"before_validate": "jarvis.tools._lcv_tool_writes.guard_tool_document",
+	"before_submit": "jarvis.tools._lcv_tool_writes.guard_tool_document",
+}
+
 # Error capture (jarvis.api_errors): name the jarvis caller on an Error Log row
 # written without a traceback, and buffer a jarvis API call that answered 4xx
 # (Frappe writes no Error Log row for those). Both are no-ops for anything that
@@ -644,9 +651,18 @@ doc_events["User"] = {
 	"on_update": [
 		"jarvis.chat.role_profiles.on_user_update",
 		"jarvis.chat.sharing.on_user_update",
+		"jarvis.chat.approval_reviewers.on_user_update",
 		"jarvis.payment_calendar.lifecycle.on_user_update",
 	],
-	"on_trash": ["jarvis.chat.sharing.on_user_trash", "jarvis.payment_calendar.lifecycle.on_user_trash"],
+	"on_trash": [
+		"jarvis.chat.sharing.on_user_trash",
+		"jarvis.chat.approval_reviewers.on_user_update",
+		"jarvis.payment_calendar.lifecycle.on_user_trash",
+	],
+}
+
+doc_events["Jarvis Approval Request"] = {
+	"on_trash": "jarvis.chat.approval_reviewers.on_approval_trash",
 }
 
 doc_events["User Permission"] = {
@@ -835,6 +851,11 @@ permission_query_conditions.update(
 		# A pattern mined from someone's chats stays theirs until they answer (#18).
 		"Jarvis Learned Pattern": "jarvis.learning.chat_pattern_privacy.pattern_query_conditions",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.approval_query_conditions",
+		"Comment": "jarvis.chat.approval_reviewers.comment_query_conditions",
+		"Jarvis Approval Reviewer": "jarvis.chat.approval_reviewers.grant_query_conditions",
+		# Audit copies of a private Chat question: requester-only, like the question.
+		"Version": "jarvis.chat.approval_reviewers.version_query_conditions",
+		"Deleted Document": "jarvis.chat.approval_reviewers.deleted_document_query_conditions",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.voice_note_query_conditions",
 		# A physical count is a private observation attached to one approved plan,
 		# not a stock-wide desk record. Keep the fact on the same owner/reviewer/
@@ -853,6 +874,10 @@ has_permission.update(
 		"Jarvis Chat Session": "jarvis.chat.chat_permissions.has_session_permission",
 		"Jarvis Learned Pattern": "jarvis.learning.chat_pattern_privacy.has_pattern_permission",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.has_approval_permission",
+		"Jarvis Approval Reviewer": "jarvis.chat.approval_reviewers.has_grant_permission",
+		"Comment": "jarvis.chat.approval_reviewers.has_comment_permission",
+		"Version": "jarvis.chat.approval_reviewers.has_version_permission",
+		"Deleted Document": "jarvis.chat.approval_reviewers.has_deleted_document_permission",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.has_voice_note_permission",
 		"Jarvis Physical Count": "jarvis.chat.cycle_count_permissions.has_physical_count_permission",
 	}
@@ -1097,6 +1122,8 @@ has_permission.update(
 # (``after_migrate`` and ``doc_events`` after commit), never by deleting keys (``delete_keys``
 # is a ``KEYS`` scan); answers expire by TTL (2 h at most, 10 min for an error).
 persistent_cache_keys = [
+	"jarvis:pairing_proof:",  # One-time site-proof nonces: 600 s TTL must survive watchdog clears.
+	"jarvis:key_resync:",  # The 10-minute stale-key self-heal throttle must survive the 5-minute clear.
 	"jarvis:pcal:",  # Financial snapshots retain bounded TTLs across watchdog cache clears.
 	"jarvis:query:",  # Saved result IDs retain their own 24-hour TTL across cache clears.
 	"jarvis:llm_switch",
@@ -1109,6 +1136,8 @@ persistent_cache_keys = [
 	"jarvis:mcp_oauth_signin_error:",
 	"jarvis:memory_seen:",
 	"jarvis:holiday:",
+	"jarvis:session_claim:",  # Claims must outlive the 5-minute watchdog cache clear.
+	"jarvis:foreign_session:",  # Once-a-day throttles must survive the 5-minute watchdog cache clear.
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.

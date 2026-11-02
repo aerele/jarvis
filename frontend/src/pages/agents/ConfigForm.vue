@@ -99,8 +99,9 @@
 					:type="f.type"
 					:label="f.label"
 					:description="f.help"
+					:maxlength="f.maxLength"
 					:modelValue="form[f.key]"
-					@update:modelValue="(value) => (form[f.key] = value)"
+					@update:modelValue="(value) => onTextInput(f.key, value)"
 				/>
 
 				<FormControl
@@ -192,6 +193,7 @@ import {
 	SCOPE_CONFIG_FIELDS,
 	AGENT_SPECIFIC_CONFIG_FIELDS,
 	CONFIG_FIELD_LABELS,
+	CONFIG_FIELD_MAX_LENGTHS,
 	NUMBER_CONFIG_KEYS,
 	KEY_TO_PATH,
 	getPath,
@@ -299,8 +301,9 @@ const visibleKeys = computed(() => new Set(visibleFields.value.flatMap((f) => f.
 // Server issues describe the SAVED config. Hide a field's issue once its value
 // differs from what is saved (a filled default or an edit) until the next save
 // re-checks it; issues without a form field always show.
-const shownErrors = computed(() =>
-	Object.fromEntries(
+const localValidationErrors = ref({});
+const shownErrors = computed(() => ({
+	...Object.fromEntries(
 		Object.entries(props.validationErrors || {}).filter(([key]) => {
 			if (!(key in form)) return true;
 			const path = KEY_TO_PATH[key] || key;
@@ -319,8 +322,9 @@ const shownErrors = computed(() =>
 			}
 			return String(form[key]) === String(saved == null ? "" : saved);
 		})
-	)
-);
+	),
+	...localValidationErrors.value,
+}));
 
 const emit = defineEmits(["save", "dirty"]);
 
@@ -339,11 +343,13 @@ const form = reactive({
 	fiscal_year: "",
 	from_date: "",
 	to_date: "",
+	sla_team: "",
 	benchmark_value: "",
 	percentage: "",
 	engagement_risk_level: "",
 	rounding_step: "",
-	sla_team: "",
+	grn_hygiene_reviewer: "",
+	grn_hygiene_test_declaration: "",
 });
 const advanced = ref("{}");
 const advancedError = ref("");
@@ -404,6 +410,7 @@ function seed(cfg) {
 	}
 	advanced.value = JSON.stringify(rest, null, 2);
 	advancedError.value = "";
+	localValidationErrors.value = {};
 	initialState.value = formState();
 }
 
@@ -418,6 +425,20 @@ watch([form, advanced, initialState], () => emit("dirty", formState() !== initia
 function onAdvancedInput(v) {
 	advanced.value = v;
 	advancedError.value = "";
+}
+
+function clearLocalValidationError(key) {
+	if (!(key in localValidationErrors.value)) return;
+	const remaining = { ...localValidationErrors.value };
+	delete remaining[key];
+	localValidationErrors.value = remaining;
+}
+
+function onTextInput(key, value) {
+	form[key] = value;
+	const maxLength = CONFIG_FIELD_MAX_LENGTHS[key];
+	if (!maxLength || String(value ?? "").trim().length <= maxLength)
+		clearLocalValidationError(key);
 }
 
 // ── Company / Fiscal year: debounced + fenced Link search, primed on open ───
@@ -602,6 +623,14 @@ function save() {
 			deletePath(merged, path);
 			continue;
 		}
+		const maxLength = CONFIG_FIELD_MAX_LENGTHS[key];
+		if (maxLength && v.length > maxLength) {
+			localValidationErrors.value = {
+				...localValidationErrors.value,
+				[key]: `"${CONFIG_FIELD_LABELS[key]}" must be at most ${maxLength} characters.`,
+			};
+			return;
+		}
 		if (field?.recordScopeDoctype) {
 			setPath(merged, path, { doctype: field.recordScopeDoctype, name: v });
 			continue;
@@ -618,6 +647,7 @@ function save() {
 		}
 	}
 	advancedError.value = "";
+	localValidationErrors.value = {};
 	defaultsRequest += 1;
 	defaultsLoading.value = false;
 	emit("save", merged);

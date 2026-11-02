@@ -593,12 +593,16 @@ class TestReceivablesReview(FrappeTestCase):
 		)
 		artifact = MagicMock()
 		artifact.name = "REVIEW"
-		existing = frappe._dict(
-			run="RUN", status="Pending", assessment_evidence=frappe.as_json({"sealed": True})
+		prior = frappe._dict(
+			run=run.name,
+			status="Pending",
+			assessment_evidence=json.dumps(
+				{"reviewer": "Administrator", "input_digest": source["source_digest"]}
+			),
 		)
 		with (
 			patch.object(frappe, "has_permission", return_value=True),
-			patch.object(frappe.db, "get_value", side_effect=[1, None, 1, "REVIEW", existing]) as get_value,
+			patch.object(frappe.db, "get_value", side_effect=[1, None, 1, "REVIEW", prior]) as get_value,
 			patch.object(frappe, "get_doc", return_value=artifact) as create,
 			patch.object(review, "collect", return_value=source),
 			patch.object(frappe.share, "add"),
@@ -616,7 +620,7 @@ class TestReceivablesReview(FrappeTestCase):
 			get_value.assert_any_call(
 				"Jarvis Approval Request",
 				"REVIEW",
-				["run", "status", "assessment_evidence"],
+				["run", "status", "assessment_evidence", "conversation"],
 				as_dict=True,
 				for_update=True,
 			)

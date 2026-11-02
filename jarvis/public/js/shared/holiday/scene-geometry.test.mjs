@@ -105,7 +105,7 @@ test("at the least fireworks shift the highest spark is still below the toran", 
 // drawn; a short one pulls the row's bottom up to the stage bottom minus FLOOR_GAP_PX and
 // shrinks the row by the same amount, as a group.
 test("the floor row's extent comes from the diya the art draws", () => {
-  const svg = floorSVG("t-", 300, floorFit({ ground: 300, hostH: 2000, s: 1 }));
+  const svg = floorSVG("t-", 300);
   // The diya sits `lift` above the baseline at DIYA.scale; the glow and shadow numbers
   // the extent is built from are the ones in the markup.
   assert.ok(
@@ -361,6 +361,27 @@ test("the tight slack is one pixel: a row exactly that far short still fits, a h
     assert.equal(fit(edge).tight, false, `s ${s}: at the slack`);
     assert.equal(fit(edge + 1e-6).tight, true, `s ${s}: past the slack`);
   }
+});
+
+test("a larger minScale stops the shrink there, and reports tight sooner", () => {
+  const roomy = floorFit({ ...CROWDED, clearTop: 346.2 });
+  assert.equal(roomy.scale, MIN_FLOOR_SCALE);
+  assert.equal(roomy.tight, true);
+  const phone = floorFit({ ...CROWDED, clearTop: 300, minScale: 0.8 });
+  assert.equal(phone.scale >= 0.8, true);
+  assert.equal(
+    floorFit({ ...CROWDED, clearTop: 360, minScale: 0.8 }).scale,
+    0.8
+  );
+  assert.equal(
+    floorFit({ ...CROWDED, clearTop: 360, minScale: 0.8 }).tight,
+    true
+  );
+  // Without it nothing changes.
+  assert.deepEqual(
+    floorFit({ ...CROWDED, clearTop: 360 }),
+    floorFit({ ...CROWDED, clearTop: 360, minScale: MIN_FLOOR_SCALE })
+  );
 });
 
 // ---- the rows with something tall under the hero (the page places the hero by them) ----------

@@ -22,24 +22,6 @@ LISTING = "Jarvis Agent Listing"
 # Per-owner install cap, mirroring jarvis_custom_skill._validate_owner_cap.
 MAX_INSTALLS_PER_OWNER = 20
 
-# GL-linked dimensions (OTHER than Company) whose User Permissions silently
-# record-scope aggregates BEFORE they are summed — so a run_as_user carrying one
-# would compute a numerically WRONG total (a false "TB out by X" blocker, wrong
-# party balances, flipped YoY). Detected at mapping time -> scoped_visibility=1
-# (A12). Company is deliberately excluded: the audit is already company-scoped,
-# so a Company User Permission is a scoping consistency, not a slice.
-_GL_SCOPED_DIMENSIONS = (
-	"Account",
-	"Cost Center",
-	"Project",
-	"Fiscal Year",
-	"Finance Book",
-	"Customer",
-	"Supplier",
-	"Employee",
-	"Shareholder",
-)
-
 
 class JarvisAgentInstallation(NotRenamable, Document):
 	def validate(self):
@@ -457,13 +439,17 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		return [d.strip() for d in vals if isinstance(d, str) and d.strip()]
 
 	def _detect_scoped_visibility(self, target: str) -> bool:
+		"""Detect a launch identity slice using its bundled agent domain."""
 		from frappe.permissions import get_user_permissions
+
+		from jarvis.chat.agent_catalog import registry_domain
+		from jarvis.chat.agent_visibility import permissions_scoped_visibility
 
 		try:
 			perms = get_user_permissions(target) or {}
+			return permissions_scoped_visibility(perms, registry_domain(self.agent)) is True
 		except Exception:
 			return False
-		return any(dt in perms for dt in _GL_SCOPED_DIMENSIONS)
 
 
 def on_doctype_update():

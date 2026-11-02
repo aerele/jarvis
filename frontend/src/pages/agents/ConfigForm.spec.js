@@ -67,7 +67,7 @@ vi.mock("frappe-ui", () => ({
 	},
 	FormControl: {
 		name: "FormControl",
-		props: ["modelValue", "type", "label", "options", "description"],
+		props: ["modelValue", "type", "label", "options", "description", "maxlength"],
 		emits: ["update:modelValue"],
 		template: `<div>
 			<span class="fc-label">{{ label }}</span>
@@ -89,6 +89,7 @@ vi.mock("frappe-ui", () => ({
 				v-else
 				:data-label="label"
 				:type="type"
+				:maxlength="maxlength"
 				:value="modelValue"
 				@input="$emit('update:modelValue', $event.target.value)"
 			/>
@@ -881,6 +882,118 @@ describe("per-agent gating via the configKeys prop", () => {
 	it("a bare flat key (no materiality. prefix) in configKeys matches nothing - paths are dot paths, not local keys", () => {
 		const w = mountForm({}, { configKeys: ["percentage"] });
 		expect(w.text()).not.toContain("Materiality percentage");
+		expect(w.text()).toContain("This agent has no additional settings.");
+	});
+
+	it("GRN hygiene dot paths render the receiving fields and save their namespace", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		expect(w.text()).toContain("Receiving reviewer");
+		expect(w.text()).toContain("Test declaration");
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+
+		await field(w, "Receiving reviewer").setValue("Receiving Controller");
+		await field(w, "Test declaration").setValue("Pre-release review");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			grn_hygiene: {
+				reviewer: "Receiving Controller",
+				test_declaration: "Pre-release review",
+			},
+		});
+	});
+
+	it("lets incomplete GRN hygiene setup save and explains the run-time reviewer requirement", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		expect(w.text()).toContain("Required before a run.");
+		expect(w.text()).toContain("You can save this blank while you finish setup.");
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({});
+	});
+
+	it("bounds GRN text in the input and on save, then lets the user recover", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		const reviewer = field(w, "Receiving reviewer");
+		const declaration = field(w, "Test declaration");
+		expect(reviewer.attributes("maxlength")).toBe("140");
+		expect(declaration.attributes("maxlength")).toBe("500");
+
+		// A programmatic input event can bypass the browser maxlength guard.
+		// Save must still reject a value the native bundle will reject.
+		await reviewer.setValue("r".repeat(141));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")).toBeUndefined();
+		expect(w.text()).toContain('"Receiving reviewer" must be at most 140 characters.');
+
+		await reviewer.setValue("r".repeat(140));
+		await declaration.setValue("d".repeat(501));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")).toBeUndefined();
+		expect(w.text()).toContain('"Test declaration" must be at most 500 characters.');
+
+		await declaration.setValue("d".repeat(500));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			grn_hygiene: {
+				reviewer: "r".repeat(140),
+				test_declaration: "d".repeat(500),
+			},
+		});
+		expect(w.text()).not.toContain('"Receiving reviewer" must be at most 140 characters.');
+		expect(w.text()).not.toContain('"Test declaration" must be at most 500 characters.');
+	});
+
+	it("GRN hygiene fields load saved values and leave only unrelated values in Advanced JSON", async () => {
+		const configKeys = ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"];
+		const config = {
+			grn_hygiene: {
+				reviewer: "Receiving Controller",
+				test_declaration: "Pre-release review",
+			},
+			custom_flag: true,
+		};
+		const w = mountForm(config, { configKeys });
+		expect(field(w, "Receiving reviewer").element.value).toBe("Receiving Controller");
+		expect(field(w, "Test declaration").element.value).toBe("Pre-release review");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({ custom_flag: true });
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual(config);
+	});
+
+	it("GRN hygiene omits an empty optional test declaration", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		await field(w, "Receiving reviewer").setValue("Receiving Controller");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		const saved = w.emitted("save")[0][0];
+		expect(saved).toEqual({ grn_hygiene: { reviewer: "Receiving Controller" } });
+		expect(saved.grn_hygiene).not.toHaveProperty("test_declaration");
+	});
+
+	it("a bare GRN hygiene namespace in configKeys renders no fields", () => {
+		const w = mountForm({}, { configKeys: ["grn_hygiene"] });
+		expect(w.text()).not.toContain("Receiving reviewer");
+		expect(w.text()).not.toContain("Test declaration");
 		expect(w.text()).toContain("This agent has no additional settings.");
 	});
 

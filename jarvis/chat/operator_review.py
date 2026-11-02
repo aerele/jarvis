@@ -4,6 +4,7 @@ from html import escape
 
 import frappe
 
+from jarvis.chat import chat_permissions
 from jarvis.chat.purchase_match import digest
 
 _BACKENDS = {
@@ -84,6 +85,10 @@ def stage_reviews(run, inst, findings, adapter):
 		return []
 	if not frappe.has_permission("Jarvis Approval Request", "create"):
 		frappe.throw("Live review requires permission to create Approval Requests.", frappe.PermissionError)
+	if not chat_permissions.has_approval_permission(
+		frappe._dict(conversation=run.conversation), ptype="create"
+	):
+		frappe.throw("Live review requires access to the linked conversation.", frappe.PermissionError)
 	stored = frappe.parse_json(run.input_snapshot_json)
 	# The reviewer is sealed with the launch policy. A later installation edit
 	# must not change the person who can receive or decide an in-flight review.
@@ -101,7 +106,7 @@ def stage_reviews(run, inst, findings, adapter):
 			frappe.throw(
 				"The named reviewer cannot read the complete assessment evidence.", frappe.PermissionError
 			)
-	requests = []
+	prepared = []
 	for finding in findings:
 		evidence = {
 			"run": run.name,
@@ -117,36 +122,69 @@ def stage_reviews(run, inst, findings, adapter):
 				**{field: value for field, value in evidence.items() if field != "run"},
 			}
 		)
+		prepared.append((finding, evidence, key))
+
+	# Check every existing request before making any change. A matching key may
+	# belong to another conversation because the key deliberately identifies the
+	# assessment, not the run that produced it.
+	existing = {}
+	for _finding, evidence, key in prepared:
+		if key in existing:
+			continue
 		name = frappe.db.get_value("Jarvis Approval Request", {"assessment_key": key}, "name")
-		if name:
-			prior = frappe.db.get_value(
-				"Jarvis Approval Request",
-				name,
-				["run", "status", "assessment_evidence"],
-				as_dict=True,
-				for_update=True,
+		if not name:
+			existing[key] = None
+			continue
+		prior = frappe.db.get_value(
+			"Jarvis Approval Request",
+			name,
+			["run", "status", "assessment_evidence", "conversation"],
+			as_dict=True,
+			for_update=True,
+		)
+		if not prior:
+			existing[key] = None
+			continue
+		if not chat_permissions.has_approval_permission(
+			frappe._dict(name=name, conversation=prior.conversation), ptype="create"
+		):
+			frappe.throw("Live review requires access to the linked conversation.", frappe.PermissionError)
+		if not prior.assessment_evidence:
+			original = frappe.parse_json(
+				frappe.db.get_value("Jarvis Agent Run", prior.run, "input_snapshot_json") or "{}"
 			)
-			if not prior.assessment_evidence:
-				original = frappe.parse_json(
-					frappe.db.get_value("Jarvis Agent Run", prior.run, "input_snapshot_json") or "{}"
+			if prior.status != "Pending" or original.get("source_digest") != stored["source_digest"]:
+				frappe.throw(
+					"The saved review has no matching source evidence; an administrator must check it."
 				)
-				if prior.status != "Pending" or original.get("source_digest") != stored["source_digest"]:
-					frappe.throw(
-						"The saved review has no matching source evidence; an administrator must check it."
-					)
-				# Repair a pending request from the same sealed evidence. Keep its original run.
+			# Keep the original run when repairing a request from the same sealed evidence.
+			prior.repair_evidence = frappe.as_json({**evidence, "run": prior.run})
+		existing[key] = frappe._dict(name=name, prior=prior)
+
+	# Context rendering can reject a malformed finding. Do it before the write
+	# phase so one bad row cannot leave another staged request behind.
+	contexts = {}
+	for finding, _evidence, key in prepared:
+		if existing[key] is None and key not in contexts:
+			contexts[key] = adapter.review_context(stored, finding)
+
+	requests = []
+	for finding, evidence, key in prepared:
+		if entry := existing[key]:
+			name, prior = entry.name, entry.prior
+			if not prior.assessment_evidence:
 				frappe.db.set_value(
 					"Jarvis Approval Request",
 					name,
 					{
-						"assessment_evidence": frappe.as_json({**evidence, "run": prior.run}),
+						"assessment_evidence": prior.repair_evidence,
 						"assessment_input_digest": stored["source_digest"],
 					},
 					update_modified=False,
 				)
+				prior.assessment_evidence = True
 			requests.append(name)
 			continue
-		context = adapter.review_context(stored, finding)
 		doc = frappe.get_doc(
 			{
 				"doctype": "Jarvis Approval Request",
@@ -166,7 +204,7 @@ def stage_reviews(run, inst, findings, adapter):
 				"assessment_input_digest": stored["source_digest"],
 				"question": adapter.REVIEW_QUESTION,
 				"context_md": "<pre>"
-				+ escape(context)
+				+ escape(contexts[key])
 				+ "</pre>\n\nEvidence digest: "
 				+ stored["source_digest"],
 				"options": "[]",
@@ -182,6 +220,7 @@ def stage_reviews(run, inst, findings, adapter):
 			read=1,
 			flags={"ignore_share_permission": True},
 		)
+		existing[key] = frappe._dict(name=doc.name, prior=frappe._dict(assessment_evidence=True))
 		requests.append(doc.name)
 	return requests
 

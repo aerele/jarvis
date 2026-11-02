@@ -725,7 +725,7 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only inventory-ageing review: derives each item's last genuine outward movement, buckets it by age, separates slow-moving from non-moving and dead stock, overlays batch-expiry write-off candidates, and totals the working capital frozen per ageing bucket and warehouse. Ships a ranked disposition worklist and dashboard. Never moves, adjusts, or writes off stock, and never sets a write-down value.",
       "tools_required": [
@@ -783,7 +783,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Weekly read-only pipeline-hygiene scrub of your open CRM deals: surfaces deals that have gone quiet, aged in their current stage, run past their expected close date, or have no next step scheduled, then ranks them into a per-owner worklist so the forecast reflects deals that are actually moving. Never edits a deal, moves a stage, changes a date, or creates a task.",
       "tools_required": [
@@ -841,20 +841,22 @@
       "domain": "ap",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only AP hygiene sweep. Retrospectively surfaces duplicate-payment candidates — payments that appear to have been made twice (same vendor, same amount, close dates, look-alike references) — pairing documents and cross-checking settlement evidence. Also flags near-duplicate purchase invoices, one vendor entered as two masters, check-digit-invalid GSTIN/PAN, and bank-detail changes just before a payment. Hands finance a ranked, evidence-linked candidate worklist and dashboard. Never edits a master, touches a payment, or decides claw-backs.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__get_doc",
+        "jarvis__get_engagement_config"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
+        "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -882,6 +884,7 @@
         "gst_gstin_checkdigit_algorithm",
         "pan_format"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "ap-exception-family",
       "timeout_s": 1800,
@@ -1021,20 +1024,18 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.4.1",
       "status": "Published",
-      "description": "Sweeps goods receipts (Purchase Receipts) for receiving-discipline gaps: UOM-conversion anomalies that distort stock quantity, receipts missing the batch/serial capture the Item mandates, ageing received-but-not-billed (GRNI) balances, and direct receipts booked with no Purchase Order to match against. Ranks each gap with a rupee or count figure and hyperlinks it to the offending receipt line. Read-only; never edits a receipt, posts, chases a vendor, or touches stock or valuation.",
+      "description": "Reviews receiving metrics for selected stock receipts. Shows conversion candidates, recorded batch and serial capture, Purchase Order links and direct invoice timing. Billing totals use ERPNext current recorded state, not historical liability. Read-only aggregate meter; saves summaries and source receipt links.",
       "tools_required": [
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__get_my_access",
+        "jarvis__run_report"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
+        "jarvis__get_my_access",
         "jarvis__run_report",
-        "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -1042,12 +1043,16 @@
         "message"
       ],
       "doctypes_required": [
+        "Company",
+        "Supplier",
         "Purchase Receipt",
+        "Purchase Receipt Item",
         "Item",
-        "Purchase Order",
+        "UOM Conversion Detail",
         "Purchase Invoice",
+        "Purchase Invoice Item",
         "Serial and Batch Bundle",
-        "Company"
+        "Serial and Batch Entry"
       ],
       "rule_tokens": [
         "grn-grniband-9c2e",
@@ -1057,6 +1062,7 @@
         "grn-offpo-3d51",
         "grn-uomtol-4b17"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1072,7 +1078,11 @@
       "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "grn_hygiene.reviewer",
+        "grn_hygiene.test_declaration"
+      ]
     },
     {
       "agent_slug": "gst-itc-recon-auditor",
@@ -1207,7 +1217,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "status": "Published",
       "description": "Read-only hygiene sweep of your Frappe CRM: finds duplicate and near-duplicate leads (the same person entered twice across leads and deals), flags leads marked converted with no matching deal, and surfaces uncontactable, unassigned, or SLA-breached leads into a ranked worklist. Never merges, edits, assigns, or deletes a record — it hands sales-ops the exceptions and a human decides.",
       "tools_required": [
@@ -1451,9 +1461,9 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.4.3",
       "status": "Published",
-      "description": "Read-only pre-run check on your drafted salary slips, run just before you submit payroll. It flags what changed or was overridden after HRMS computed them at generation: an eligible employee missing from the batch, a rostered employee with no slip, post-generation attendance edits the draft no longer reflects, manual payment_days overrides, manually created slips, mover proration that looks off, and net-pay swings versus last month with no attendance or structure cause. Hands you a ranked worklist; never edits a slip, regularises attendance, submits payroll, or draws any statutory conclusion.",
+      "description": "Read-only pre-run check on one drafted payroll batch. It first verifies complete private HRMS source files, then flags what changed or was overridden after HRMS computed salary slips: roster gaps, attendance or leave drift, payment-day differences, manual slips, mover proration, and pay-change candidates. It gives a ranked worklist; it never edits payroll, submits a slip, or makes a statutory conclusion.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
@@ -1481,7 +1491,11 @@
         "Employee",
         "Leave Ledger Entry",
         "Salary Component",
-        "Payroll Settings"
+        "Payroll Settings",
+        "Holiday List Assignment",
+        "Holiday List",
+        "Leave Application",
+        "Leave Type"
       ],
       "rule_tokens": [
         "pp-ari-6c53",
@@ -1493,6 +1507,7 @@
         "pp-pbo-3d71",
         "pp-swg-2ed8"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -1508,7 +1523,11 @@
       "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "payroll_entry",
+        "reviewer_of_record"
+      ]
     },
     {
       "agent_slug": "reorder-replenishment-operator",

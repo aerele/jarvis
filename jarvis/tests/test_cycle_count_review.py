@@ -3326,9 +3326,14 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			"cycle-legacy-list-manager@example.invalid", ("Jarvis User", "Stock User", "System Manager")
 		)
 		ordinary_title = "Visible ordinary approval " + frappe.generate_hash(length=12)
-		conversation = frappe.get_doc({"doctype": "Jarvis Conversation", "title": ordinary_title}).insert(
-			ignore_permissions=True
-		)
+		# Chat questions now use requester/reviewer access, even for System Managers.
+		# This ordinary row belongs to the caller; only the stock plan is hidden.
+		from jarvis._session import impersonate
+
+		with impersonate(manager):
+			conversation = frappe.get_doc({"doctype": "Jarvis Conversation", "title": ordinary_title}).insert(
+				ignore_permissions=True
+			)
 		visible = frappe.get_doc(
 			{
 				"doctype": "Jarvis Approval Request",

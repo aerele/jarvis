@@ -11,13 +11,14 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), the only agent that
- *     reads any agent-specific config today. Rendered only when the listing's
- *     own `config_keys` (agents_api.py get_agent, jarvis#1063) names the
- *     field's `configKey` or, when that is absent, its storage `path` (a dot
- *     path for a nested key). The SLA team's `configKey` is `sla_config` only
- *     as a listing gate: its `record_scope` value stays bench-owned launch
- *     scope and must not enter delegate configuration.
+ *     CRITICAL fix, they are NOT flat top-level keys), and the GRN Hygiene
+ *     auditor reads its reviewer settings under `grn_hygiene`. Rendered only
+ *     when the listing's own `config_keys` (agents_api.py get_agent,
+ *     jarvis#1063) names the field's `configKey` or, when that is absent, its
+ *     storage `path` (a dot path for a nested key). The SLA team's
+ *     `configKey` is `sla_config` only as a listing gate: its
+ *     `record_scope` value stays bench-owned launch scope and must not enter
+ *     delegate configuration.
  *
  * `key` is the LOCAL form-state / label / validation identity (unchanged by
  * nesting); `path` is WHERE the value actually lives in the saved config
@@ -36,6 +37,7 @@
  *   - a link can set `recordScopeDoctype`; ConfigForm then saves its value as
  *     `{doctype, name}` at the field's path instead of a bare string
  *   - {keys: [from, to], paths: [from, to], labels: [from, to], type: "date-range", help, scope?}
+ *   - {key, path, label, type: "text", help, maxLength?}
  *   - {key, path, label, type: "number", help, suffix?}
  *   - {key, path, label, type: "select", options: [{label, value}, ...]}
  */
@@ -181,6 +183,22 @@ export const CONFIG_FIELD_SET = [
 		help: "Step used to detect round-number plugs",
 	},
 	{
+		key: "grn_hygiene_reviewer",
+		path: "grn_hygiene.reviewer",
+		label: "Receiving reviewer",
+		type: "text",
+		maxLength: 140,
+		help: "Required before a run. You can save this blank while you finish setup. Name the person who reviews receiving results (up to 140 characters).",
+	},
+	{
+		key: "grn_hygiene_test_declaration",
+		path: "grn_hygiene.test_declaration",
+		label: "Test declaration",
+		type: "text",
+		maxLength: 500,
+		help: "Optional plain-text notice for a test review (up to 500 characters).",
+	},
+	{
 		key: "stale_floor_days",
 		path: "ageing.stale_floor_days",
 		label: "Stale-invoice floor",
@@ -233,6 +251,13 @@ export const CONFIG_FIELD_LABELS = Object.fromEntries(
  * plain string, cleared to absent when blank). */
 export const NUMBER_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "number").map(
 	(f) => f.key
+);
+
+/** Local form key -> its maximum permitted saved text length. This is derived
+ * from the field declaration so the input limit and save-time validation stay
+ * aligned. */
+export const CONFIG_FIELD_MAX_LENGTHS = Object.fromEntries(
+	CONFIG_FIELD_SET.filter((f) => Number.isInteger(f.maxLength)).map((f) => [f.key, f.maxLength])
 );
 
 /** local form key -> its storage dot path ("company" flat, or

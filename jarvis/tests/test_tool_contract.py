@@ -123,7 +123,7 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "ad22449f74d832bc76544dc9cf7e96b97fd2264dbd4c6be3ba21a7605352bd3f"
+	PINNED_CAPABILITY_DIGEST = "a49cafe47e0af2687d3bad2be36cf424bb66875c781f3a42939bc645b33aa5da"
 	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "0b4cc098bbec4f5c43a8f1c694589793ef85881ba61c5e389db1a2616b71892a"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
@@ -179,4 +179,40 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			"the vendored record-scope capability contract moved — re-vendor the scope declarations "
 			"and update BOTH pinned digests (see lib/check_registry_capability_contract.py in the "
 			"private agents repo)",
+		)
+
+
+class TestLeadHygieneRegistryContract(FrappeTestCase):
+	"""Keep the installed CRM delegate contract at the evaluator release version.
+
+	The private bundle carries the implementation, while this vendored entry is the
+	bench authority for installation and run capability. A version mismatch can leave
+	the tenant running an older evaluator after Apply even when the bundle PR is ready.
+	"""
+
+	def test_cross_funnel_fingerprint_release_is_vendored(self):
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			entry = next(
+				item for item in json.load(fh)["agents"] if item["agent_slug"] == "lead-hygiene-auditor"
+			)
+		self.assertEqual(entry["version"], "0.2.4")
+		self.assertEqual(entry["config_keys"], ["open_workable_status_set", "fingerprint_salt"])
+		self.assertEqual(
+			entry["tools_allow"],
+			[
+				"jarvis__query",
+				"jarvis__get_list",
+				"jarvis__run_report",
+				"jarvis__get_doc",
+				"jarvis__record_agent_run",
+				"jarvis__save_agent_dashboard",
+				"exec",
+				"canvas",
+				"message",
+			],
 		)

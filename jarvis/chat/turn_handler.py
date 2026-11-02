@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis import compat
-from jarvis.chat import agent_session_pool, empty_reply_recovery, seq_watermark, txn, vision
+from jarvis.chat import agent_session_pool, device, empty_reply_recovery, seq_watermark, txn, vision
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.chat.runtime_profile import get_profile
@@ -145,12 +145,13 @@ def persist_rich_outputs(
 		from jarvis.chat import canvas as canvas_mod
 
 		final_content = frappe.db.get_value(MSG, assistant_msg_name, "content") or ""
-		canvas_token = settings.get_password("agent_token", raise_exception=False) or ""
+		# The canvas route is signed for the conversation's session key: the plugin
+		# vouches the key with this site before it reads the artifact.
 		canvas_items = canvas_mod.persist_canvases(
 			assistant_msg_name,
 			final_content,
 			settings.agent_url or "",
-			canvas_token,
+			frappe.db.get_value(CONV, conversation_id, "session_key") or "",
 		)
 		if canvas_items:
 			_publish_to_user(
@@ -215,7 +216,7 @@ def persist_rich_outputs(
 			media_items = gen_media.seed_media(
 				assistant_msg_name,
 				settings.agent_url or "",
-				settings.get_password("agent_token", raise_exception=False) or "",
+				device.device_bearer(),
 				media_rels,
 			)
 			if media_items:
@@ -255,7 +256,7 @@ def persist_rich_outputs(
 			url_items = gen_media.seed_media_urls(
 				assistant_msg_name,
 				settings.agent_url or "",
-				settings.get_password("agent_token", raise_exception=False) or "",
+				device.device_bearer(),
 				media_urls,
 			)
 			if url_items:
@@ -1557,7 +1558,7 @@ def handle_chat_send(payload: dict) -> None:
 	try:
 		from jarvis.chat import chat_asks
 
-		chat_asks.resolve_on_user_message(conversation_id)
+		chat_asks.resolve_on_user_message(conversation_id, seed_message=message_id)
 	except Exception:
 		frappe.log_error(
 			title="chat asks: resolve_on_user_message failed",
@@ -2559,7 +2560,8 @@ def _prepend_doc_context(user_message: str, context, conversation_id: str = "") 
 			'{"report_name":...,"filters":{...}}, for get_list {"doctype":...} - '
 			'never nested inside another "spec" or "args" key (test it with the '
 			"matching jarvis__ tool first); widgets "
-			'fetch with window.jarvis.data("<source_name>"). Style with the injected '
+			'fetch with window.jarvis.data("<source_name>"), which resolves with the '
+			"rows array (a run_report source also has .rows and .columns). Style with the injected "
 			"--jd-* CSS variables (--jd-bg/-surface/-ink/-heading/-muted/-line/"
 			"-accent/-font) and the window.JARVIS_THEME.palette chart colors instead "
 			"of hardcoding design. For a bespoke look the user switches to the Custom "
