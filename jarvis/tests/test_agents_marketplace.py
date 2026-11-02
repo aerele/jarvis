@@ -510,6 +510,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(entry.get("domain"), "measurement")
 		self.assertEqual(entry.get("visibility_domain"), "hrms-payroll")
 		self.assertEqual(entry.get("version"), "0.3.1")
+		self.assertIs(entry.get("supports_record_scope"), True)
 
 	def test_category_from_domain_falls_back_to_title_case_for_unknown_codes(self):
 		self.assertEqual(agent_catalog._category_from_domain("widget-foo"), "Widget Foo")
