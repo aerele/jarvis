@@ -559,6 +559,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 				"fefo.test_declaration",
 			],
 		)
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "gst-return-prep-auditor", "config_keys")),
+			["annual_aggregate_turnover", "same_hsn_rate_allowlist"],
+		)
 
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
 		"""An agent the registry declares no config_keys for gets [], not null/absent - ConfigForm.vue can

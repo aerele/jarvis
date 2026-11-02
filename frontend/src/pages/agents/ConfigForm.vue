@@ -131,6 +131,16 @@
 						<span class="text-ink-gray-5">{{ f.suffix }}</span>
 					</template>
 				</FormControl>
+
+				<FormControl
+					v-else-if="f.type === 'text-list'"
+					type="textarea"
+					:rows="2"
+					:label="f.label"
+					:description="f.help"
+					:modelValue="form[f.key]"
+					@update:modelValue="(value) => (form[f.key] = value)"
+				/>
 				<ErrorMessage
 					v-for="key in (f.keys || [f.key]).filter((field) => shownErrors[field])"
 					:key="key"
@@ -183,7 +193,7 @@
 <script setup>
 // ConfigForm - jarvis#1062 owner feedback: the known engagement settings
 // (CONFIG_FIELD_SET, @/lib/agentConfigFields) get real, purpose-built fields -
-// link pickers, dates, numbers, a select - ALWAYS rendered, not a code-key
+// link pickers, dates, numbers, selects, and short lists - ALWAYS rendered, not a code-key
 // reference list. Everything else (an unrecognised key, or any array/object
 // value) lives in the collapsed "Advanced (JSON)" editor (mono textarea,
 // JSON.parse-validated). Save merges the known fields OVER the advanced JSON
@@ -207,6 +217,7 @@ import {
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
 	NUMBER_CONFIG_CONSTRAINTS,
+	TEXT_LIST_CONFIG_KEYS,
 	KEY_TO_PATH,
 	getPath,
 	setPath,
@@ -349,6 +360,8 @@ const form = reactive({
 	fefo_reviewer: "",
 	fefo_near_expiry_days: "",
 	fefo_test_declaration: "",
+	annual_aggregate_turnover: "",
+	same_hsn_rate_allowlist: "",
 });
 const advanced = ref("{}");
 const advancedError = ref("");
@@ -381,7 +394,12 @@ function seed(cfg) {
 		// other way round.
 		let v = getPath(c, path);
 		if (v == null && path !== key) v = c[key];
-		form[key] = v == null ? "" : String(v);
+		form[key] =
+			v == null
+				? ""
+				: TEXT_LIST_CONFIG_KEYS.includes(key) && Array.isArray(v)
+				? v.join(", ")
+				: String(v);
 	}
 	// Advanced (JSON) holds everything NOT covered by a visible field's path -
 	// a deep clone with each visible path (and its flat legacy counterpart,
@@ -610,6 +628,15 @@ function save() {
 				return;
 			}
 			setPath(merged, path, n);
+		} else if (TEXT_LIST_CONFIG_KEYS.includes(key)) {
+			setPath(
+				merged,
+				path,
+				v
+					.split(",")
+					.map((item) => item.trim())
+					.filter(Boolean)
+			);
 		} else {
 			setPath(merged, path, v);
 		}

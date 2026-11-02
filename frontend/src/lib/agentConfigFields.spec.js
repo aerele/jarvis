@@ -7,6 +7,7 @@ import {
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
 	NUMBER_CONFIG_CONSTRAINTS,
+	TEXT_LIST_CONFIG_KEYS,
 	KEY_TO_PATH,
 	getPath,
 	setPath,
@@ -55,6 +56,8 @@ describe("CONFIG_FIELD_SET", () => {
 				"fefo_reviewer",
 				"fefo_near_expiry_days",
 				"fefo_test_declaration",
+				"annual_aggregate_turnover",
+				"same_hsn_rate_allowlist",
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
@@ -86,6 +89,8 @@ describe("CONFIG_FIELD_SET", () => {
 			"fefo_reviewer",
 			"fefo_near_expiry_days",
 			"fefo_test_declaration",
+			"annual_aggregate_turnover",
+			"same_hsn_rate_allowlist",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
@@ -106,7 +111,7 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(field.options.map((o) => o.value)).toEqual(["", "low", "medium", "high"]);
 	});
 
-	it("the materiality amounts, FEFO window, and ageing floors are numeric", () => {
+	it("the materiality amounts, GST turnover, FEFO window, and ageing floors are numeric", () => {
 		expect(NUMBER_CONFIG_KEYS.sort()).toEqual(
 			[
 				"settlement_hold_days",
@@ -116,6 +121,7 @@ describe("CONFIG_FIELD_SET", () => {
 				"percentage",
 				"rounding_step",
 				"fefo_near_expiry_days",
+				"annual_aggregate_turnover",
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
@@ -149,6 +155,10 @@ describe("CONFIG_FIELD_SET", () => {
 		});
 	});
 
+	it("stores the GST same-HSN exclusions as a short text list", () => {
+		expect(TEXT_LIST_CONFIG_KEYS).toEqual(["same_hsn_rate_allowlist"]);
+	});
+
 	it("every field has a human label reachable from CONFIG_FIELD_LABELS", () => {
 		for (const key of KNOWN_CONFIG_KEYS) {
 			expect(CONFIG_FIELD_LABELS[key]).toBeTruthy();
@@ -168,7 +178,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes review, fixed-asset, payroll, materiality, FEFO, and vendor-ledger fields", () => {
+	it("agent-specific includes review, fixed-asset, payroll, materiality, FEFO, GST, and vendor-ledger fields", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -188,6 +198,8 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"fefo_reviewer",
 			"fefo_near_expiry_days",
 			"fefo_test_declaration",
+			"annual_aggregate_turnover",
+			"same_hsn_rate_allowlist",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
