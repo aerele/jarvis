@@ -56,6 +56,7 @@ from jarvis._session import authenticated_user, impersonate
 from jarvis.chat import agent_scope, derived_config
 from jarvis.chat.agent_activity import ACTIVITY, log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.permissions import is_system_manager, is_valid_unattended_owner
 from jarvis.tools import _delegate_capability
 
@@ -1729,6 +1730,15 @@ def _stamp_scope_and_watermark(
 		scope["source_apps"] = list(source_apps)
 	if scope is not None:
 		values["scope_json"] = frappe.as_json(scope)
+	if inst.agent == agent_scope.FEFO_AGENT:
+		# Resolve the opaque visibility proof again immediately before dispatch.  The
+		# early FEFO preflight prevents row creation for a bad policy; this second
+		# proof catches a permission/hook change between preflight and the stamp.
+		# It stays in a hidden Run field and is never included in scope_json or the
+		# delegate prompt.
+		if not scope:
+			raise InvalidArgumentError("FEFO native visibility could not be verified")
+		values["fefo_visibility_proof_json"] = frappe.as_json(agent_scope.fefo_visibility_proof(scope))
 
 	if scope and scope.get("company") and scope.get("to_date"):
 		# A17: row-count + max(modified) over the scope's GL as-of window. The old

@@ -270,7 +270,9 @@ def record_agent_run(
 				from jarvis.chat.agent_scope import fefo_stamped_scope_as_user
 
 				trusted_scope = fefo_stamped_scope_as_user(
-					_as_dict(run_doc.get("scope_json")), agent_runs._fefo_run_as_user(run_doc)
+					_as_dict(run_doc.get("scope_json")),
+					agent_runs._fefo_run_as_user(run_doc),
+					run_doc.get("fefo_visibility_proof_json"),
 				)
 			except Exception:
 				trusted_scope = None

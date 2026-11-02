@@ -15,6 +15,7 @@ Auto-resolve is coverage-scoped (A16) + gated on the GL consistency watermark
 """
 
 import hashlib
+import json
 
 import frappe
 from frappe.utils import getdate
@@ -358,61 +359,240 @@ def _fefo_scope_rejection_coverage(tokens: set) -> dict:
 	}
 
 
-def clear_untrusted_fefo_artifacts(run_doc, inst) -> None:
-	"""Remove only output that provenates to a rejected FEFO run scope.
-
-	FEFO has no Reorder receipt. Its dashboard uses the same ownership and
-	conversation proof as the run cleanup path, so a forged writeback can
-	never delete an unrelated customer artifact.
-	"""
-	frappe.db.set_value(
-		RUN,
-		run_doc.name,
-		{"assessment_output_json": None, "canvas_ref": None, "integrity_digest": None},
-		update_modified=False,
-	)
-	run_doc.assessment_output_json = None
-	dashboard_name = str(run_doc.get("dashboard") or "").strip()
-	if not dashboard_name:
-		frappe.db.set_value(RUN, run_doc.name, {"dashboard": None}, update_modified=False)
-		return
+def _fefo_dedicated_conversation(run_doc) -> str | None:
+	"""Return the exact dedicated FEFO Run conversation, or refuse ambiguity."""
 	conversation = str(run_doc.get("conversation") or "").strip()
+	if not conversation:
+		return None
+	try:
+		runs = frappe.get_all(
+			RUN,
+			filters={"conversation": conversation},
+			fields=["name", "agent"],
+			limit_page_length=2,
+		)
+	except Exception as exc:
+		raise frappe.ValidationError("could not safely verify rejected FEFO output provenance") from exc
+	if len(runs) != 1 or runs[0].get("name") != run_doc.name or runs[0].get("agent") != FEFO_AGENT:
+		raise frappe.ValidationError("could not safely verify rejected FEFO output provenance")
+	return conversation
+
+
+def _fefo_canvas_messages(conversation: str) -> list[dict]:
+	"""Return only assistant canvas metadata from the verified Run conversation."""
+	try:
+		return frappe.get_all(
+			"Jarvis Chat Message",
+			filters={"conversation": conversation, "role": "assistant"},
+			fields=["name", "canvas", "owner"],
+			order_by="seq asc",
+			limit_page_length=0,
+		)
+	except Exception as exc:
+		raise frappe.ValidationError("could not safely verify rejected FEFO canvas output") from exc
+
+
+def _fefo_canvas_file_urls(value) -> tuple[set[str], bool]:
+	"""Return verified private URLs and whether the canvas also has unsafe data.
+
+	An invalid File reference must never broaden deletion.  It also must not keep
+	a separately proven dashboard, File, or Run link visible after a rejected
+	FEFO result.  The boolean lets cleanup retain and report only the ambiguous
+	part while it removes the safe part.
+	"""
+	try:
+		if isinstance(value, str):
+			value = json.loads(value)
+	except Exception:
+		return set(), True
+	if value in (None, ""):
+		return set(), False
+	if not isinstance(value, list):
+		return set(), True
+	urls = set()
+	unsafe = False
+	for item in value:
+		url = item.get("file_url") if isinstance(item, dict) else None
+		if not isinstance(url, str) or not url.startswith("/private/files/"):
+			unsafe = True
+			continue
+		urls.add(url)
+	return urls, unsafe
+
+
+def _fefo_cleanup_log(message: str) -> None:
+	"""Record an internal cleanup refusal without blocking run terminalization."""
+	try:
+		frappe.log_error(
+			title="jarvis agent: FEFO rejected-output cleanup retained artifact", message=message
+		)
+	except Exception:
+		# A failing error-log sink must not leave a rejected run linked to output.
+		pass
+
+
+def _clear_fefo_run_artifact_links(run_doc) -> None:
+	"""Remove every Run-owned output link even if an external artifact is unsafe."""
+	values = {
+		"assessment_output_json": None,
+		"canvas_ref": None,
+		"integrity_digest": None,
+		"dashboard": None,
+	}
+	try:
+		frappe.db.set_value(RUN, run_doc.name, values, update_modified=False)
+	except Exception:
+		_fefo_cleanup_log("could not clear rejected FEFO Run artifact links")
+	for field in values:
+		run_doc[field] = None
+
+
+def clear_untrusted_fefo_artifacts(run_doc, inst, *, proof_must_be_invalid: bool = False) -> None:
+	"""Remove exact rejected-FEFO output after a fresh server-side proof check.
+
+	The cleanup does not trust a caller's error text.  When the rejection was a
+	stale/missing proof it proves that condition again before deletion.  A forged
+	evaluator scope can also require cleanup while the proof remains current; that
+	path still uses only a dedicated Run conversation, assistant message canvas
+	metadata, and File attachment provenance.
+	"""
+	from jarvis.chat.agent_scope import fefo_run_visibility_is_current
+
+	try:
+		proof_current = fefo_run_visibility_is_current(run_doc)
+	except Exception:
+		proof_current = False
+	if proof_must_be_invalid and proof_current:
+		raise frappe.ValidationError("could not safely remove rejected FEFO output")
+
+	dashboard_name = str(run_doc.get("dashboard") or "").strip()
+	conversation = None
+	try:
+		conversation = _fefo_dedicated_conversation(run_doc)
+	except Exception:
+		_fefo_cleanup_log("could not verify rejected FEFO conversation provenance")
+	canvas_messages = []
+	if conversation:
+		try:
+			canvas_messages = _fefo_canvas_messages(conversation)
+		except Exception:
+			_fefo_cleanup_log("could not verify rejected FEFO canvas provenance")
+
+	# A dashboard has a separate exact provenance check.  An ambiguous File must
+	# not prevent this known dashboard from being removed.
+	dashboard = None
 	owners = {
 		str(value).strip() for value in (inst.get("owner"), inst.get("reviewer")) if str(value or "").strip()
 	}
-	if not conversation or not owners:
-		raise frappe.ValidationError("could not safely remove rejected FEFO dashboard output")
-	try:
-		dashboard = frappe.db.get_value(
-			DASHBOARD,
-			dashboard_name,
-			["name", "source_conversation", "owner", "target_user"],
-			as_dict=True,
-		)
-	except Exception as error:
-		frappe.log_error(
-			title="jarvis agent: rejected FEFO dashboard provenance lookup failed",
-			message=frappe.get_traceback(),
-		)
-		raise frappe.ValidationError("could not safely remove rejected FEFO dashboard output") from error
-	if dashboard and (
-		dashboard.get("source_conversation") != conversation
-		or dashboard.get("owner") != dashboard.get("target_user")
-		or dashboard.get("owner") not in owners
-	):
-		raise frappe.ValidationError("could not safely remove rejected FEFO dashboard output")
+	if dashboard_name and conversation and owners:
+		try:
+			candidate = frappe.db.get_value(
+				DASHBOARD,
+				dashboard_name,
+				["name", "source_conversation", "owner", "target_user"],
+				as_dict=True,
+			)
+			if candidate and (
+				candidate.get("name") == dashboard_name
+				and candidate.get("source_conversation") == conversation
+				and candidate.get("owner") == candidate.get("target_user")
+				and candidate.get("owner") in owners
+			):
+				dashboard = candidate
+			elif candidate:
+				_fefo_cleanup_log("retained a rejected FEFO dashboard with ambiguous provenance")
+		except Exception:
+			_fefo_cleanup_log("could not verify rejected FEFO dashboard provenance")
+	elif dashboard_name:
+		_fefo_cleanup_log("retained a rejected FEFO dashboard without exact provenance")
+
+	# Build only individually proven File deletion candidates.  Bad canvas JSON,
+	# an external URL, a public File, or an owner mismatch is retained and logged;
+	# it cannot abort terminal cleanup for other artifacts.
+	canvas_files = {}
+	for message in canvas_messages:
+		if not hasattr(message, "get"):
+			_fefo_cleanup_log("could not verify rejected FEFO assistant canvas message provenance")
+			continue
+		message_name = str(message.get("name") or "").strip()
+		if not message_name:
+			_fefo_cleanup_log("could not verify rejected FEFO assistant canvas message provenance")
+			continue
+		urls, unsafe_canvas = _fefo_canvas_file_urls(message.get("canvas"))
+		if unsafe_canvas:
+			_fefo_cleanup_log("retained an ambiguous rejected FEFO canvas File reference")
+		if urls:
+			try:
+				files = frappe.get_all(
+					"File",
+					filters={
+						"attached_to_doctype": "Jarvis Chat Message",
+						"attached_to_name": message_name,
+						"file_url": ["in", sorted(urls)],
+					},
+					fields=[
+						"name",
+						"file_url",
+						"is_private",
+						"attached_to_doctype",
+						"attached_to_name",
+						"owner",
+					],
+					limit_page_length=0,
+				)
+			except Exception:
+				files = []
+				_fefo_cleanup_log("could not verify rejected FEFO canvas File provenance")
+			for file_doc in files:
+				if not hasattr(file_doc, "get"):
+					_fefo_cleanup_log("retained a rejected FEFO canvas File with ambiguous provenance")
+					continue
+				file_name = str(file_doc.get("name") or "").strip()
+				if (
+					file_name
+					and file_doc.get("file_url") in urls
+					and frappe.utils.cint(file_doc.get("is_private"))
+					and file_doc.get("attached_to_doctype") == "Jarvis Chat Message"
+					and file_doc.get("attached_to_name") == message_name
+					and file_doc.get("owner") == message.get("owner")
+				):
+					canvas_files[file_name] = file_doc
+				else:
+					_fefo_cleanup_log("retained a rejected FEFO canvas File with ambiguous provenance")
+
 	if dashboard:
 		try:
 			frappe.delete_doc(DASHBOARD, dashboard.name, ignore_permissions=True, force=True)
 		except Exception:
 			try:
 				frappe.db.delete(DASHBOARD, {"name": dashboard.name})
-			except Exception as error:
-				raise frappe.ValidationError(
-					"could not safely remove rejected FEFO dashboard output"
-				) from error
-	frappe.db.set_value(RUN, run_doc.name, {"dashboard": None}, update_modified=False)
-	run_doc.dashboard = None
+			except Exception:
+				_fefo_cleanup_log("could not remove a proven rejected FEFO dashboard")
+	for file_doc in canvas_files.values():
+		try:
+			frappe.delete_doc("File", file_doc.get("name"), ignore_permissions=True, force=True)
+		except Exception:
+			try:
+				frappe.db.delete("File", {"name": file_doc.get("name")})
+			except Exception:
+				_fefo_cleanup_log("could not remove a proven rejected FEFO canvas File")
+	for message in canvas_messages:
+		if not hasattr(message, "get"):
+			continue
+		message_name = str(message.get("name") or "").strip()
+		if message_name and message.get("canvas"):
+			try:
+				# Removing the conversation link makes a retained ambiguous File
+				# unreadable from the rejected assistant message.
+				frappe.db.set_value(
+					"Jarvis Chat Message", message_name, "canvas", None, update_modified=False
+				)
+			except Exception:
+				_fefo_cleanup_log("could not clear a rejected FEFO assistant canvas link")
+
+	_clear_fefo_run_artifact_links(run_doc)
+
+
 def persist_agent_dashboard(
 	run_doc, inst, html: str, *, title=None, description=None, set_on_run: bool = True, owner_override=None
 ) -> str:
@@ -836,7 +1016,8 @@ def record_delegate_run(
 	if agent == FEFO_AGENT:
 		# FEFO may run company-wide only when the launch stamp omitted the leaf.
 		# Compare the full safe projection, then revalidate any stamped leaf as the
-		# immutable run-as user before findings or artifacts can be persisted.
+		# immutable run-as user and its opaque native-visibility proof before
+		# findings or artifacts can be persisted.
 		from jarvis.chat.agent_scope import fefo_output_scope, fefo_stamped_scope, fefo_stamped_scope_as_user
 
 		try:
@@ -845,17 +1026,21 @@ def record_delegate_run(
 			stamped = {}
 		trusted_scope = fefo_stamped_scope(stamped)
 		submitted_scope = fefo_output_scope(scope)
-		if trusted_scope is None or submitted_scope != trusted_scope:
-			scope_rejected = True
-		else:
-			# A lost session identity is the same safety condition as an unreadable
-			# or stale leaf.  Do not let the direct seam throw before it clears a
-			# potentially untrusted FEFO artifact and records non-evaluable coverage.
-			try:
-				trusted_scope = fefo_stamped_scope_as_user(stamped, _fefo_run_as_user(run_doc))
-			except Exception:
-				trusted_scope = None
-			scope_rejected = trusted_scope is None
+		scope_mismatch = trusted_scope is None or submitted_scope != trusted_scope
+		# Recompute even when evaluator output is forged. Terminal cleanup must know
+		# whether the server proof is stale; it cannot infer that from model scope.
+		try:
+			fresh_scope = fefo_stamped_scope_as_user(
+				stamped,
+				_fefo_run_as_user(run_doc),
+				run_doc.get("fefo_visibility_proof_json"),
+			)
+		except Exception:
+			fresh_scope = None
+		proof_invalid = fresh_scope is None
+		scope_rejected = scope_mismatch or proof_invalid
+		if not scope_rejected:
+			trusted_scope = fresh_scope
 		if scope_rejected:
 			findings = []
 			coverage = _fefo_scope_rejection_coverage(required_coverage_tokens)
@@ -871,7 +1056,7 @@ def record_delegate_run(
 					"reason": "scope did not match server-stamped FEFO boundary",
 				}
 			)
-			clear_untrusted_fefo_artifacts(run_doc, inst)
+			clear_untrusted_fefo_artifacts(run_doc, inst, proof_must_be_invalid=proof_invalid)
 		else:
 			scope = trusted_scope
 	company = (scope.get("company") or "").strip()
@@ -1056,7 +1241,7 @@ def record_delegate_run(
 					frappe.get_all(
 						RUN,
 						filters={"name": ["in", run_names]},
-						fields=["name", "scope_json"],
+						fields=["name", "scope_json", "fefo_visibility_proof_json"],
 					)
 					if run_names
 					else []
@@ -1070,8 +1255,16 @@ def record_delegate_run(
 					prior_scope = {}
 				# Only replacement runs carry the server-owned marker. A legacy
 				# v0.2.2 snapshot can look like the same company-wide projection,
-				# but it did not produce this coverage contract and stays open.
-				prior_record_scopes[prior_run.name] = fefo_stamped_scope(prior_scope)
+				# but it did not produce this coverage contract and stays open. A
+				# v0.4.2 marker without its opaque proof is also not an eligible
+				# predecessor: it cannot establish this source-completeness lifecycle.
+				from jarvis.chat.agent_scope import _fefo_visibility_proof_value
+
+				prior_record_scopes[prior_run.name] = (
+					fefo_stamped_scope(prior_scope)
+					if _fefo_visibility_proof_value(prior_run.get("fefo_visibility_proof_json"))
+					else None
+				)
 		for c in candidates:
 			if c.fingerprint in seen_fps:
 				continue  # still present this run

@@ -126,6 +126,20 @@ def persist_rich_outputs(
 	media_urls landed on the terminal itself, poll the transcript for the
 	image that arrives moments later (see ``_harvest_post_yield_media``).
 	Never raises."""
+	# All four blocks below persist private Files/canvas metadata.  Do one server
+	# proof gate before any gateway fetch, generated-image pull, native MEDIA seed,
+	# or gateway media-block seed.  ``persist_canvases`` has its own gate because it
+	# is callable independently; this gate covers the later generated-media paths.
+	try:
+		from jarvis.chat.agent_scope import assert_fefo_message_artifact_scope
+
+		assert_fefo_message_artifact_scope(assistant_msg_name)
+	except Exception:
+		frappe.log_error(
+			title="chat worker: FEFO artifact persistence refused",
+			message=frappe.get_traceback(),
+		)
+		return
 	if yield_continuation and not media_rels and not media_urls:
 		try:
 			media_rels, media_urls = _harvest_post_yield_media(conversation_id, turn_start_ms)
