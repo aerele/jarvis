@@ -217,6 +217,14 @@ after_install = ["jarvis.legacy_compatibility.seed", "jarvis.install.after_insta
 
 before_migrate = "jarvis.legacy_compatibility.seed"
 
+# A skipped close can leave fleet routing and historic confirmation credentials
+# in different safety states. Stop migration instead of recording either patch
+# as skipped when its retirement work fails.
+never_skip_patches = [
+	"jarvis.patches.v2_31_disable_reorder_replenishment_installations",
+	"jarvis.patches.v2_31_disable_ticket_triage_installations",
+]
+
 # Keep the Agents Marketplace catalog (Jarvis Agent Listing) in lockstep with
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
 # fetch — bundles are reviewed deploy artifacts, adversarial S2).

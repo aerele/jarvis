@@ -324,10 +324,17 @@ def tool_denial(session_key: str | None, tool: str, cap=_UNRESOLVED) -> dict | N
 	cap = resolve(session_key) if cap is _UNRESOLVED else cap
 	# Shape-checked like resolve's own row guard: a non-delegate (None) and a
 	# stubbed/mocked cap both mean "nothing to enforce here", which is what a
-	# patched resolve already produced before the contract was passed in. ``.get``
-	# so a cap missing the key is treated as NOT legacy, i.e. enforced - the
-	# fail-closed direction.
-	if not isinstance(cap, dict) or cap.get("legacy"):
+	# patched resolve already produced before the contract was passed in.
+	if not isinstance(cap, dict):
+		return None
+	# The immutable closure precedes the legacy bypass as well as modern caps.
+	from jarvis.chat.agent_closure import delegate_tool_denial
+
+	closed_denial = delegate_tool_denial(cap, tool)
+	if closed_denial:
+		return closed_denial
+	# Missing legacy flags remain in the enforced path.
+	if cap.get("legacy"):
 		return None
 	allowed = bench_tools(cap["tools_allow"])
 	name = normalize_tool(tool)

@@ -17,6 +17,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import actions_api, held_parties
 from jarvis.chat import approvals_api as board
+from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, expected_confirmation_fences
 from jarvis.tests._pending_action_helpers import (
 	DEFAULT_ARGS,
 	DEFAULT_TOOL,
@@ -442,6 +443,7 @@ class TestChatLane(_Base):
 		with as_user(OWNER):
 			res = board.get_pending_action(name)
 		self.assertEqual((res["kind"], res["status"], res["can_act"]), ("chat", "Pending", 1))
+		self.assertTrue(res["pending_card_safe"])
 		self.assertEqual(res["card"], json.loads(self.row(name)["card"]))
 		self.assertEqual((res["conversation"], res["conversation_title"]), (conv, "Quarterly <b>close</b>"))
 		dump = json.dumps(res)
@@ -452,6 +454,78 @@ class TestChatLane(_Base):
 				board.get_pending_action(name)
 		with as_user(SM_USER):
 			self.assertEqual(board.decide_held_action(name, "skip")["reason_code"], "not_found")
+
+	def test_bad_close_fence_never_reaches_the_board_card_or_its_confirm_controls(self):
+		"""The board is another card-read surface, not a durable-card bypass."""
+		name, _ = self.chat()
+		current, _ = self.chat()
+		before = frappe.db.count("ToDo")
+		self.set_col(name, agent_close_fences="{}")
+		with as_user(OWNER):
+			lane = board.list_pending_actions_lane()["rows"]
+			detail = board.get_pending_action(name)
+		self.assertNotIn(name, [row["name"] for row in lane])
+		self.assertEqual(
+			(detail["status"], detail["pending_card_safe"], detail["can_act"], detail["card"]),
+			("Pending", False, 0, None),
+		)
+		self.assertEqual(frappe.db.count("ToDo"), before)
+		# The badge uses the same positive close-fence admission as the lane. A
+		# stale hidden row must not show a count or delay the next board refresh,
+		# while the current sibling remains visible after the badge delay.
+		now = frappe.utils.now_datetime()
+		self.set_col(name, creation=now - timedelta(seconds=board.BOARD_BADGE_DELAY_S + 1))
+		self.set_col(current, creation=now - timedelta(seconds=board.BOARD_BADGE_DELAY_S + 1))
+		with (
+			patch("frappe.utils.now_datetime", return_value=now),
+			patch.object(board, "_chat_card_safe", wraps=board._chat_card_safe) as safe,
+			as_user(OWNER),
+		):
+			self.assertEqual(board._chat_pending_count(OWNER), 1)
+			self.assertEqual(len(safe.call_args_list), 2)
+			self.assertTrue(
+				all(
+					call.kwargs.get("lock") is False and call.kwargs.get("expected_fences")
+					for call in safe.call_args_list
+				)
+			)
+		with patch("frappe.utils.now_datetime", return_value=now), as_user(OWNER):
+			self.assertEqual(board.pending_badge()["count"], 1)
+		# A young current sibling still determines the next refresh. The old
+		# unsafe row cannot leave a phantom immediate badge or next-in hint.
+		self.set_col(current, creation=now - timedelta(seconds=100))
+		with patch("frappe.utils.now_datetime", return_value=now), as_user(OWNER):
+			self.assertEqual(board.pending_badge(), {"count": 0, "next_in": 500})
+
+	def test_badge_fails_closed_when_the_read_only_fence_snapshot_fails(self):
+		self.chat()
+		with (
+			patch("jarvis.chat.agent_closure.expected_confirmation_fences", side_effect=RuntimeError("down")),
+			patch.object(frappe, "logger"),
+			as_user(OWNER),
+		):
+			self.assertEqual(board._chat_pending_count(OWNER), 0)
+			self.assertIsNone(board._chat_badge_next_in(OWNER))
+
+	def test_badge_lookup_binds_an_owner_value_with_sql_metacharacters(self):
+		name, _ = self.chat()
+		self.chat(owner=OTHER)
+		owner = "pa-owner@example.invalid' OR 1=1 --"
+		self.set_col(
+			name,
+			owner_user=owner,
+			**{PENDING_ACTION_FENCE_FIELD: json.dumps(expected_confirmation_fences())},
+		)
+		try:
+			# The query must bind the supplied owner before it applies the normal
+			# current-fence predicate. This also keeps the test independent of a
+			# test site's pending-action metadata sync state.
+			with patch("jarvis.chat.agent_closure.pending_action_fences_ready", return_value=True):
+				rows = board._safe_chat_badge_rows(owner)
+			self.assertEqual([row["name"] for row in rows], [name])
+		finally:
+			# Restore the shared-fixture owner so its normal cleanup removes this row.
+			self.set_col(name, owner_user=OWNER, **{PENDING_ACTION_FENCE_FIELD: None})
 
 	def test_the_board_decides_through_the_chat_endpoints(self):
 		ran, conv = self.chat()
