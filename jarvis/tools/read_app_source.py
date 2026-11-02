@@ -8,7 +8,7 @@ fence (the source is DATA, never instructions). The guard stack, in order:
      from the caller's session_key (never a model-supplied id) + admin-tier.
   2. Custom-apps allowlist + RUN SCOPE — ``app`` must be an installed non-core app
      (``EXCLUDED_APPS`` is absolute) AND one the launching admin explicitly
-     selected for this run (CX5-2, ``scope_json.source_apps``).
+     selected for this run (CX5-2, signed ``source_selection_json``).
   3. Per-run source-BYTES budget — refuse once the run has already read its
      budget, so a looping delegate cannot exhaust the run reading source. The
      counter is DURABLE (``Jarvis Agent Run.source_bytes_read``, read + advanced
@@ -32,7 +32,7 @@ from __future__ import annotations
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
-from jarvis.learning import app_source, source_guard
+from jarvis.learning import app_source, app_source_receipts, source_guard
 from jarvis.tools import _app_learning_ctx as ctx
 
 RUN = "Jarvis Agent Run"
@@ -63,7 +63,22 @@ def read_app_source(app: str, path: str) -> dict:
 	# FAILS CLOSED — an unreadable row raises rather than serving on an unknown
 	# budget. The per-file 200 KB cap bounds the overshoot from the file that tips it
 	# over.
-	row = ctx.lock_run_budget(run_name, ["source_bytes_read"])
+	try:
+		path = app_source.canonical_source_path(path)
+	except ValueError as e:
+		raise InvalidArgumentError(str(e)) from e
+	row = ctx.lock_run_budget(
+		run_name,
+		["source_bytes_read", "source_selection_json", "permission_profile", "source_receipt_json"],
+	)
+	if row.get("status") != "running":
+		raise InvalidArgumentError("this agent run has already finalized")
+	selection, profile_digest = ctx.source_selection_from_row(row, run_name)
+	receipt, manifest = app_source_receipts.prepare_manifest(row, run_name, app, selection, profile_digest)
+	known = {entry["path"]: entry for entry in manifest["files"]}
+	entry = known.get(path)
+	if not entry:
+		raise InvalidArgumentError("this path is not in the approved app-source manifest")
 	used_before = int(row.get("source_bytes_read") or 0)
 	if used_before >= ctx.PER_RUN_SOURCE_BYTES_BUDGET:
 		raise InvalidArgumentError(
@@ -71,18 +86,36 @@ def read_app_source(app: str, path: str) -> dict:
 			"source you have already read"
 		)
 
+	# Refuse before a source open when the manifest's exact byte count would exceed
+	# the durable budget. An over-budget attempt records no usable source receipt.
+	if used_before + int(entry["bytes"]) > ctx.PER_RUN_SOURCE_BYTES_BUDGET:
+		raise InvalidArgumentError(
+			"this source file would exceed the remaining per-run source-read budget; no receipt was issued"
+		)
+
 	# File-level guards live in the shared module (identical to the legacy walk):
 	# extension allowlist, realpath-containment + symlink skip, per-file 200 KB.
 	try:
-		text, size = app_source.read_source_file(app, path)
+		text, size, digest = app_source.read_source_file_with_digest(app, path)
 	except ValueError as e:
 		raise InvalidArgumentError(str(e))
+	if size != int(entry["bytes"]):
+		raise InvalidArgumentError("source changed while it was read; no usable receipt was issued")
 
 	used = used_before + size
 	# Advance the durable counter while STILL holding the row lock, so a concurrent
 	# read for the same run cannot spend the same remaining budget. The budget is
 	# charged the file's REAL size, before redaction — the guard is not a discount.
-	frappe.db.set_value(RUN, run_name, "source_bytes_read", used, update_modified=False)
+	app_source_receipts.record_successful_read(receipt, app, path, bytes_read=size, digest=digest)
+	frappe.db.set_value(
+		RUN,
+		run_name,
+		{
+			"source_bytes_read": used,
+			"source_receipt_json": app_source_receipts.encode_receipt(receipt),
+		},
+		update_modified=False,
+	)
 
 	# CX5-4: redact credential-shaped values BEFORE the text is fenced (and therefore
 	# before it can reach the model provider). Committed secrets are a real pattern in
