@@ -249,6 +249,9 @@ def _saved_note(result_id: str, limit) -> str:
 def compile_spec(spec: dict):
 	"""Steps 1-6 of ``query``: validate the spec, run every permission gate, and
 	build the permission-woven qb query, NOT executed."""
+	from jarvis.chat.agent_scope import assert_active_fefo_query_scope
+
+	assert_active_fefo_query_scope(spec)
 	return _compile(spec)[0]
 
 
@@ -344,6 +347,9 @@ def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:
 	``_weave_record_gate`` scopes it to), so its Export permission is that
 	parent's, exactly as Desk exports a child through its parent. Administrator
 	has no scoping parent and exports everything anyway."""
+	from jarvis.chat.agent_scope import assert_active_fefo_query_scope
+
+	assert_active_fefo_query_scope(spec)
 	q, alias_map = _compile(spec, export_limit=export_limit)
 	tables = {alias: dt for alias, (dt, _table) in alias_map.items()}
 	export_doctypes = []

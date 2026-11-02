@@ -263,6 +263,12 @@ def persist_canvases(
 	"""Detect artifacts referenced in the assistant reply, fetch each from the
 	gateway, save as private Files, stamp the message's ``canvas`` JSON field,
 	strip the dead links, and return ``[{name, title, type, file_url}]``."""
+	# A FEFO delegate can create a canvas before writeback. The Run association and
+	# opaque visibility proof are resolved by server data before even probing the
+	# gateway, so an invalid proof cannot cause a source fetch or private File save.
+	from jarvis.chat.agent_scope import assert_fefo_message_artifact_scope
+
+	assert_fefo_message_artifact_scope(assistant_msg_name)
 	names = detect_canvas_names(content)
 	if not names:
 		return []

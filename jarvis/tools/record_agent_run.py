@@ -37,6 +37,7 @@ from jarvis.exceptions import InvalidArgumentError
 RUN = "Jarvis Agent Run"
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
+FEFO_AGENT = "fefo-expiry-compliance-auditor"
 
 _SEVERITIES = {"blocker", "warning", "note"}
 # Aggregate-dimension ref doctypes verified by EXISTENCE only, not a read-perm
@@ -63,6 +64,15 @@ def _as_dict(value) -> dict:
 		except Exception:
 			return {}
 	return value if isinstance(value, dict) else {}
+
+
+def _bound_fefo_scope(stamped: dict, submitted: dict) -> dict | None:
+	"""Return the immutable FEFO scope only on exact safe-projection equality."""
+	from jarvis.chat.agent_scope import fefo_output_scope, fefo_stamped_scope
+
+	trusted = fefo_stamped_scope(stamped)
+	output = fefo_output_scope(submitted)
+	return trusted if trusted is not None and output == trusted else None
 
 
 def _ref_verifiable(ref_doctype: str, ref_name: str) -> tuple[bool, str]:
@@ -250,6 +260,47 @@ def record_agent_run(
 	coverage = _as_dict(coverage)
 	scope = _as_dict(scope)
 	truncated = bool(truncated)
+	scope_dropped = []
+
+	if run_row.agent == FEFO_AGENT:
+		# Apply the same boundary before finding validation/review staging as the
+		# direct persistence seam.  The public tool must not briefly trust a forged
+		# scope merely because its later callee would reject it.
+		trusted_scope = _bound_fefo_scope(_as_dict(run_doc.get("scope_json")), scope)
+		if trusted_scope is not None:
+			try:
+				from jarvis.chat.agent_scope import fefo_stamped_scope_as_user
+
+				trusted_scope = fefo_stamped_scope_as_user(
+					_as_dict(run_doc.get("scope_json")),
+					agent_runs._fefo_run_as_user(run_doc),
+					run_doc.get("fefo_visibility_proof_json"),
+				)
+			except Exception:
+				trusted_scope = None
+		if trusted_scope is None:
+			from jarvis.chat.agent_scope import fefo_stamped_scope
+
+			stamped_scope = fefo_stamped_scope(_as_dict(run_doc.get("scope_json"))) or {}
+			raw_findings = []
+			coverage = agent_runs._fefo_scope_rejection_coverage(token_set)
+			# Keep an invalid marker through the direct persistence seam.  It restores
+			# only the server projection and clears artifacts there; passing the stamp
+			# itself here would make a forged public writeback look trusted again.
+			scope = {}
+			integrity_digest = None
+			rows_consumed = None
+			canvas_ref = None
+			dashboard = None
+			scope_dropped.append(
+				{
+					"ref_doctype": "Warehouse",
+					"ref_name": (stamped_scope.get("record_scope") or {}).get("name") or "?",
+					"reason": "scope did not match server-stamped FEFO boundary",
+				}
+			)
+		else:
+			scope = trusted_scope
 	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(run_doc.agent)

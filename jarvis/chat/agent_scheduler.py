@@ -56,6 +56,7 @@ from jarvis._session import authenticated_user, impersonate
 from jarvis.chat import agent_scope, derived_config
 from jarvis.chat.agent_activity import ACTIVITY, log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.permissions import is_system_manager, is_valid_unattended_owner
 from jarvis.tools import _delegate_capability
 
@@ -388,6 +389,20 @@ def _sweep_one(row, now, seen: set) -> None:
 		_advance(row, now)
 		return
 
+	if row.agent == "fefo-expiry-compliance-auditor":
+		# A direct DB edit can bypass both the SPA endpoint and the Installation
+		# controller.  Check the FEFO policy and optional leaf before _dispatch can
+		# claim a slot or create a failed run.  Return without advancing so the owner
+		# can repair or disable the legacy schedule without generated side effects.
+		try:
+			from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
+
+			assert_schedule_configuration(row)
+		except Exception:
+			frappe.logger("jarvis.agent_scheduler").warning(
+				{"event": "fefo_schedule_scope_refused", "installation": row.name}
+			)
+			return
 	# A14 cost cap — per installation + per-tenant aggregate (the subscription is
 	# the tenant's). Manual + scheduled counted together; failed rows excluded, so
 	# the _record_failed row we write below can never self-perpetuate the cap.
@@ -1280,11 +1295,28 @@ def _launch_audit(
 	# savepoint can create a conversation, run, session, activity, or dispatch.
 	# The bundled registry is authoritative; a Listing row cannot opt in.
 	record_scope_supported = False
+	is_fefo = inst.agent == "fefo-expiry-compliance-auditor"
 	if agent_scope.record_scope_requested(inst.config):
 		from jarvis.chat.agent_catalog import registry_supports_record_scope
 
 		record_scope_supported = registry_supports_record_scope(listing.agent_slug)
 		agent_scope.assert_record_scope_supported(record_scope_supported, inst.config)
+
+	pre_resolved_scope = None
+	if is_fefo:
+		try:
+			# FEFO has a mandatory owner policy and an optional but binding leaf.
+			# Do both checks before the savepoint can create any run state.
+			from jarvis.chat.fefo_expiry_compliance import assert_configuration
+
+			assert_configuration(inst)
+			pre_resolved_scope = agent_scope.resolve_scope(inst, allow_record_scope=True)
+		except Exception:
+			frappe.log_error(
+				title="jarvis agent: FEFO scope resolution refused launch",
+				message=frappe.get_traceback(),
+			)
+			raise
 
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
@@ -1422,6 +1454,7 @@ def _launch_audit(
 			run_as_user,
 			source_apps=source_apps,
 			record_scope_supported=record_scope_supported,
+			resolved_scope=pre_resolved_scope,
 		)
 
 	except Exception:
@@ -1642,6 +1675,7 @@ def _stamp_scope_and_watermark(
 	run_as_user: str,
 	source_apps: list[str] | None = None,
 	record_scope_supported: bool = False,
+	resolved_scope: dict | None = None,
 ) -> dict | None:
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
@@ -1670,14 +1704,18 @@ def _stamp_scope_and_watermark(
 		return scope
 
 	values: dict = {}
-	scope = None
+	scope = resolved_scope if isinstance(resolved_scope, dict) else None
 	try:
-		scope = agent_scope.resolve_scope(inst, allow_record_scope=record_scope_supported)
+		if scope is None:
+			scope = agent_scope.resolve_scope(inst, allow_record_scope=record_scope_supported)
 	except Exception:
 		# A requested record boundary must never silently fall back to a wider
 		# company run. The launch guard has already checked bundle support; this
 		# path handles malformed, unreadable, or cross-company target records.
-		if agent_scope.record_scope_requested(inst.get("config")):
+		if (
+			agent_scope.record_scope_requested(inst.get("config"))
+			or inst.agent == "fefo-expiry-compliance-auditor"
+		):
 			frappe.log_error(
 				title="jarvis agent: explicit record scope resolution failed",
 				message=frappe.get_traceback(),
@@ -1692,6 +1730,15 @@ def _stamp_scope_and_watermark(
 		scope["source_apps"] = list(source_apps)
 	if scope is not None:
 		values["scope_json"] = frappe.as_json(scope)
+	if inst.agent == agent_scope.FEFO_AGENT:
+		# Resolve the opaque visibility proof again immediately before dispatch.  The
+		# early FEFO preflight prevents row creation for a bad policy; this second
+		# proof catches a permission/hook change between preflight and the stamp.
+		# It stays in a hidden Run field and is never included in scope_json or the
+		# delegate prompt.
+		if not scope:
+			raise InvalidArgumentError("FEFO native visibility could not be verified")
+		values["fefo_visibility_proof_json"] = frappe.as_json(agent_scope.fefo_visibility_proof(scope))
 
 	if scope and scope.get("company") and scope.get("to_date"):
 		# A17: row-count + max(modified) over the scope's GL as-of window. The old
@@ -1800,6 +1847,13 @@ def _audit_prompt(
 		apps = ", ".join(str(a) for a in scope["source_apps"])
 		scope_block += f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
 	if scope and scope.get("company"):
+		fefo_contract = ""
+		if (
+			listing.get("agent_slug") or listing.get("name")
+		) == "fefo-expiry-compliance-auditor" and scope.get("fefo_scope_contract"):
+			# FEFO's private evaluator requires this server-owned replacement
+			# marker. It is launch data, not mutable owner configuration.
+			fefo_contract = f', fefo_scope_contract="{scope.get("fefo_scope_contract")}"'
 		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period or the current date): "
 			f'company="{scope.get("company")}", '
@@ -1808,7 +1862,7 @@ def _audit_prompt(
 			f'to_date="{scope.get("to_date")}", '
 			f'report_date="{scope.get("report_date")}", '
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
-			f'prior_fy_end="{scope.get("prior_fy_end")}".'
+			f'prior_fy_end="{scope.get("prior_fy_end")}"{fefo_contract}.'
 		)
 	if record_scope_supported and scope and scope.get("record_scope"):
 		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(

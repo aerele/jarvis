@@ -67,7 +67,7 @@ vi.mock("frappe-ui", () => ({
 	},
 	FormControl: {
 		name: "FormControl",
-		props: ["modelValue", "type", "label", "options", "description"],
+		props: ["modelValue", "type", "label", "options", "description", "min", "max", "step"],
 		emits: ["update:modelValue"],
 		template: `<div>
 			<span class="fc-label">{{ label }}</span>
@@ -90,6 +90,9 @@ vi.mock("frappe-ui", () => ({
 				:data-label="label"
 				:type="type"
 				:value="modelValue"
+				:min="min"
+				:max="max"
+				:step="step"
 				@input="$emit('update:modelValue', $event.target.value)"
 			/>
 			<slot name="suffix" />
@@ -893,6 +896,60 @@ describe("per-agent gating via the configKeys prop", () => {
 		const w = mountForm({}, { configKeys: ["percentage"] });
 		expect(w.text()).not.toContain("Materiality percentage");
 		expect(w.text()).toContain("This agent has no additional settings.");
+	});
+
+	it("FEFO renders only its policy fields and stores the public scope at top level", async () => {
+		const configKeys = ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"];
+		const recordScope = { doctype: "Warehouse", name: "Fake FEFO Warehouse" };
+		const w = mountForm({ record_scope: recordScope }, { configKeys });
+		expect(w.text()).toContain("Expiry reviewer");
+		expect(w.text()).toContain("Near-expiry window");
+		expect(w.text()).toContain("Test declaration");
+		expect(w.text()).not.toContain("Company");
+		expect(w.text()).not.toContain("Fiscal year");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({
+			record_scope: recordScope,
+		});
+
+		await field(w, "Expiry reviewer").setValue("Stock Controller");
+		await field(w, "Near-expiry window").setValue("30");
+		await field(w, "Test declaration").setValue("Fake records only.");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			record_scope: recordScope,
+			fefo: {
+				reviewer: "Stock Controller",
+				near_expiry_days: 30,
+				test_declaration: "Fake records only.",
+			},
+		});
+	});
+
+	it.each(["0", "3651", "30.5", "1e2"])(
+		"FEFO refuses an invalid near-expiry window of %s before save",
+		async (value) => {
+			const w = mountForm(
+				{},
+				{ configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"] }
+			);
+			await field(w, "Near-expiry window").setValue(value);
+			await w.find('[data-label="Save configuration"]').trigger("click");
+			expect(w.emitted("save")).toBeUndefined();
+			expect(w.text()).toContain(
+				'"Near-expiry window" must be a whole number from 1 to 3650.'
+			);
+		}
+	);
+
+	it("FEFO exposes the near-expiry browser constraints", () => {
+		const w = mountForm(
+			{},
+			{ configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"] }
+		);
+		const nearExpiry = field(w, "Near-expiry window");
+		expect(nearExpiry.attributes("min")).toBe("1");
+		expect(nearExpiry.attributes("max")).toBe("3650");
+		expect(nearExpiry.attributes("step")).toBe("1");
 	});
 
 	it("the full configKeys set (close-auditor) renders every agent-specific field, no note", () => {

@@ -6,6 +6,7 @@ import {
 	KNOWN_CONFIG_KEYS,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
+	NUMBER_CONFIG_CONSTRAINTS,
 	KEY_TO_PATH,
 	getPath,
 	setPath,
@@ -50,6 +51,9 @@ describe("CONFIG_FIELD_SET", () => {
 				"percentage",
 				"engagement_risk_level",
 				"rounding_step",
+				"fefo_reviewer",
+				"fefo_near_expiry_days",
+				"fefo_test_declaration",
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
@@ -57,7 +61,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders review, fixed-asset, scope, materiality, then vendor-ledger fields", () => {
+	it("orders review, fixed-asset, scope, materiality, FEFO, then vendor-ledger fields", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -77,6 +81,9 @@ describe("CONFIG_FIELD_SET", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"fefo_reviewer",
+			"fefo_near_expiry_days",
+			"fefo_test_declaration",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
@@ -96,7 +103,7 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(field.options.map((o) => o.value)).toEqual(["", "low", "medium", "high"]);
 	});
 
-	it("the materiality amounts and the ageing floors are numeric", () => {
+	it("the materiality amounts, FEFO window, and ageing floors are numeric", () => {
 		expect(NUMBER_CONFIG_KEYS.sort()).toEqual(
 			[
 				"settlement_hold_days",
@@ -105,11 +112,38 @@ describe("CONFIG_FIELD_SET", () => {
 				"benchmark_value",
 				"percentage",
 				"rounding_step",
+				"fefo_near_expiry_days",
 				"stale_floor_days",
 				"advance_floor_days",
 				"grir_floor_days",
 			].sort()
 		);
+	});
+
+	it("keeps FEFO policy values in the declared nested namespace", () => {
+		const byKey = Object.fromEntries(
+			CONFIG_FIELD_SET.filter((f) => f.key).map((f) => [f.key, f])
+		);
+		expect(byKey.fefo_reviewer).toMatchObject({ path: "fefo.reviewer", type: "text" });
+		expect(byKey.fefo_near_expiry_days).toMatchObject({
+			path: "fefo.near_expiry_days",
+			type: "number",
+			integer: true,
+			min: 1,
+			max: 3650,
+		});
+		expect(byKey.fefo_test_declaration).toMatchObject({
+			path: "fefo.test_declaration",
+			type: "text",
+		});
+	});
+
+	it("declares the FEFO near-expiry integer range once for the form", () => {
+		expect(NUMBER_CONFIG_CONSTRAINTS.fefo_near_expiry_days).toEqual({
+			integer: true,
+			min: 1,
+			max: 3650,
+		});
 	});
 
 	it("every field has a human label reachable from CONFIG_FIELD_LABELS", () => {
@@ -131,7 +165,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes review, fixed-asset, materiality, and vendor-ledger fields", () => {
+	it("agent-specific includes review, fixed-asset, materiality, FEFO, and vendor-ledger fields", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -147,6 +181,9 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"fefo_reviewer",
+			"fefo_near_expiry_days",
+			"fefo_test_declaration",
 			"stale_floor_days",
 			"advance_floor_days",
 			"grir_floor_days",
@@ -180,6 +217,12 @@ describe("KEY_TO_PATH (local form key -> storage dot path)", () => {
 		expect(KEY_TO_PATH.percentage).toBe("materiality.percentage");
 		expect(KEY_TO_PATH.engagement_risk_level).toBe("materiality.engagement_risk_level");
 		expect(KEY_TO_PATH.rounding_step).toBe("materiality.rounding_step");
+	});
+
+	it("the FEFO keys are nested dot paths", () => {
+		expect(KEY_TO_PATH.fefo_reviewer).toBe("fefo.reviewer");
+		expect(KEY_TO_PATH.fefo_near_expiry_days).toBe("fefo.near_expiry_days");
+		expect(KEY_TO_PATH.fefo_test_declaration).toBe("fefo.test_declaration");
 	});
 });
 

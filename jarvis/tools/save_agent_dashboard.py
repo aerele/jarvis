@@ -134,6 +134,12 @@ def save_agent_dashboard(
 
 	inst = frappe.get_doc(INSTALLATION, run_row.installation)
 	run_doc = frappe.get_doc(RUN, run_row.name)
+	# A delegate can save a dashboard before it calls record_agent_run. Recheck the
+	# hidden FEFO visibility proof at this earlier persistence seam so a permission
+	# slice cannot leave a readable artifact when later writeback fails.
+	from jarvis.chat.agent_scope import assert_fefo_run_artifact_scope
+
+	assert_fefo_run_artifact_scope(run_doc)
 
 	# PP-4: the delegate-authored dashboard WINS the precedence in
 	# ``record_delegate_run`` (richer artifact), so it must carry the SAME shadow
