@@ -1,7 +1,119 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { JSDOM } from "jsdom";
+
 import { renderMarkdown } from "./markdown.js";
+
+// Parse like a browser would, so invalid nesting shows up as repaired (empty) elements.
+const dom = (html) => new JSDOM(`<body>${html}</body>`).window.document.body;
+const assertValid = (html) => {
+	const body = dom(html);
+	assert.equal(body.querySelectorAll("p details, p summary").length, 0);
+	assert.equal([...body.querySelectorAll("p")].filter((p) => !p.textContent.trim()).length, 0);
+	return body;
+};
+
+test("renders bare disclosure tags around a calculation while retaining markdown", () => {
+	const html = renderMarkdown(
+		"<details><summary>How this was worked out</summary>\n\nRequired: **10**\n</details>"
+	);
+	assert.ok(html.includes("<details><summary>How this was worked out</summary>"));
+	assert.ok(html.includes("Required: <strong>10</strong>"));
+	assert.ok(html.includes("</details>"));
+	assert.ok(!html.includes("&lt;details&gt;"));
+});
+
+test("disclosure tags never permit attributes or unescape other HTML", () => {
+	for (const tag of [
+		"<details open>",
+		"<details ontoggle=alert(1)>",
+		'<summary onclick="alert(1)">',
+		"<details/name=x>",
+		"<script>alert(1)</script>",
+	]) {
+		assert.ok(!renderMarkdown(tag).includes(tag));
+		assert.ok(renderMarkdown(tag).includes("&lt;"));
+	}
+});
+
+test("disclosure examples in inline and fenced code stay literal", () => {
+	for (const src of [
+		"`<details><summary>Example</summary></details>`",
+		"```html\n<details><summary>Example</summary></details>\n```",
+	])
+		assert.ok(!renderMarkdown(src).includes("<details>"));
+});
+
+test("a disclosure parses to valid structure with the list inside it", () => {
+	const html = renderMarkdown(
+		"Intro.\n\n<details><summary>Calculation</summary>\n\n- On hand: **120**\n- Spare: **10**\n</details>\n\nAfter."
+	);
+	const body = assertValid(html);
+	const d = body.querySelector("details");
+	assert.equal(d.firstElementChild.tagName, "SUMMARY");
+	assert.equal(d.querySelectorAll("ul > li").length, 2);
+	assert.equal(body.querySelector("p:last-child").textContent, "After.");
+	assert.equal(body.querySelectorAll("details").length, 1);
+});
+
+test("a bare details line with a separate summary line is a disclosure", () => {
+	const body = assertValid(
+		renderMarkdown("<details>\n<summary>Why</summary>\nBecause **math**.\n</details>")
+	);
+	assert.equal(body.querySelector("details > summary").textContent, "Why");
+	assert.equal(body.querySelector("details > p strong").textContent, "math");
+});
+
+test("a one-line disclosure and nested disclosures stay block structure", () => {
+	const one = assertValid(renderMarkdown("<details><summary>S</summary>Body text</details>"));
+	assert.equal(one.querySelector("details > p").textContent, "Body text");
+	const nested = assertValid(
+		renderMarkdown(
+			"<details><summary>A</summary>\n<details><summary>B</summary>\n\n1. x\n</details>\n</details>"
+		)
+	);
+	assert.equal(nested.querySelectorAll("details details > ol").length, 1);
+});
+
+test("tables and paragraphs inside a disclosure keep their markup", () => {
+	const body = assertValid(
+		renderMarkdown(
+			"<details><summary>T</summary>\n\n| a | b |\n|---|---|\n| 1 | 2 |\n</details>"
+		)
+	);
+	assert.equal(body.querySelectorAll("details table td").length, 2);
+});
+
+test("orphan, unterminated and inline disclosure tags never yield invalid HTML", () => {
+	for (const src of [
+		"</details>",
+		"</details>\n\nText",
+		"<summary>Lone</summary>",
+		"Text <details>inline</details> text",
+		"Total = 10</details>",
+		"<details><summary>Cut off</summary>\n\n- item",
+	]) {
+		const html = renderMarkdown(src);
+		assertValid(html);
+	}
+	assert.ok(renderMarkdown("</details>").includes("&lt;/details&gt;"));
+	assert.ok(renderMarkdown("Text <details>x</details>").includes("&lt;details&gt;"));
+	assert.equal(
+		dom(renderMarkdown("<details><summary>Cut off</summary>\n\n- item")).querySelectorAll(
+			"details"
+		).length,
+		1
+	);
+});
+
+test("disclosure summary text is escaped and fenced disclosure tags stay literal", () => {
+	const html = renderMarkdown("<details><summary><b onclick=x>Hi</b></summary>\n</details>");
+	assert.ok(!html.includes("<b"));
+	assert.ok(html.includes("&lt;b onclick=x&gt;"));
+	const fenced = renderMarkdown("```\n<details>\n<summary>S</summary>\n```");
+	assert.ok(!fenced.includes("<details>"));
+});
 
 test("finding evidence links retain their document labels and local targets", () => {
 	const html = renderMarkdown(

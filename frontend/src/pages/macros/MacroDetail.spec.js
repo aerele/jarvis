@@ -410,6 +410,57 @@ describe("MacroDetail: how the last run went", () => {
 		expect(api.getMacro).toHaveBeenCalledTimes(1);
 	});
 
+	it("a run waiting for a report is named in the notice, and the names survive a reload", async () => {
+		const waiting = baseMacro({
+			last_run: {
+				status: "waiting_report",
+				error: "",
+				conversation: "conv-run",
+				waiting_reports: ["Stock Ageing", "Sales Register"],
+				waiting_since: "2026-10-28 09:00:00",
+			},
+		});
+		const w = await mountDetail(waiting);
+		expect(note(w).text()).toContain("Waiting for report: Stock Ageing, Sales Register");
+		expect(note(w).text()).toContain("Jarvis continues this run when the report is ready");
+		expect(openChat(w)).toBeTruthy();
+		w.unmount();
+		const again = await mountDetail(waiting); // a reload asks the server again
+		expect(note(again).text()).toContain("Waiting for report: Stock Ageing, Sales Register");
+	});
+
+	it("a run that moves between live states is learned of: running, waiting, running", async () => {
+		// Today the page ignores progress events once it knows of a live run. The notice
+		// names the state, so a change between two live states must be asked for.
+		const running = baseMacro({ last_run: { status: "running", error: "" } });
+		const waiting = baseMacro({
+			last_run: {
+				status: "waiting_report",
+				error: "",
+				waiting_reports: ["Stock Ageing"],
+				waiting_since: "2026-10-28 09:00:00",
+			},
+		});
+		const { w, emit } = await withSocket(running);
+		expect(note(w).exists()).toBe(false);
+		api.getMacro.mockClear();
+		emit({ kind: "macro:progress", macro: "MACRO-1", status: "running", step: 2 });
+		await flushPromises();
+		expect(api.getMacro).not.toHaveBeenCalled(); // same state: nothing to ask
+
+		api.getMacro.mockResolvedValue(waiting);
+		emit({ kind: "macro:progress", macro: "MACRO-1", status: "waiting_report", step: 1 });
+		await flushPromises();
+		expect(api.getMacro).toHaveBeenCalledTimes(1);
+		expect(note(w).text()).toContain("Waiting for report: Stock Ageing");
+
+		api.getMacro.mockResolvedValue(running);
+		emit({ kind: "macro:progress", macro: "MACRO-1", status: "running", step: 1 });
+		await flushPromises();
+		expect(api.getMacro).toHaveBeenCalledTimes(2);
+		expect(note(w).exists()).toBe(false);
+	});
+
 	it("a refresh that lands after the user opened another macro is dropped", async () => {
 		const { w, emit } = await withSocket(baseMacro({ last_run: null }));
 		let landLate;
