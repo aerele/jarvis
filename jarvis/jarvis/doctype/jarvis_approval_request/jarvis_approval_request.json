@@ -15,6 +15,7 @@
   "result_class",
   "assessment_key",
   "assessment_evidence",
+  "assessment_input_digest",
   "document_type",
   "conversation",
   "question",
@@ -56,6 +57,16 @@
    "permlevel": 1
   },
   {
+   "fieldname": "assessment_input_digest",
+   "fieldtype": "Data",
+   "label": "Assessment Input Digest",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "search_index": 1,
+   "description": "Server-set source digest for an Agent Review. It permits a safe sibling-review lock without querying JSON evidence."
+  },
+  {
    "fieldname": "title",
    "fieldtype": "Data",
    "in_list_view": 1,
@@ -80,7 +91,7 @@
    "fieldtype": "Select",
    "in_standard_filter": 1,
    "label": "Source",
-   "options": "File Box\nChat\nFile Box Wiki\nAgent Review"
+   "options": "File Box\nChat\nFile Box Wiki\nAgent Review\nTicket Triage"
   },
   {
    "description": "The business document type this decision concerns (e.g. Purchase Invoice). Blank = the document type itself is undetermined (Unclassified tab).",
@@ -179,7 +190,8 @@
    "label": "Run",
    "options": "Jarvis Agent Run",
    "read_only": 1,
-   "description": "PP-5: the Jarvis Agent Run that raised this request (agent-originated requests only)."
+   "search_index": 1,
+   "description": "PP-5: the Jarvis Agent Run that raised this request (agent-originated requests only). Indexed for bounded Cycle-Count sealed-cohort locking."
   },
   {
    "fieldname": "preparation_mode",

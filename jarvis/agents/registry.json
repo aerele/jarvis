@@ -663,48 +663,34 @@
       "domain": "inventory-count",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
-      "status": "Coming Soon",
-      "description": "Runs a rolling cycle-count programme ERPNext has no native planner for: ranks the SKU book by value (ABC) and movement (velocity), reads how long since each item/warehouse was last counted, and for the lines due this cycle stages a docstatus-0 draft Stock Reconciliation per warehouse with item rows pre-filled and the counted quantity left blank for the human counter, plus one evidence-carrying Approval Request so a store lead approves the count list first. Proposes only; it never counts, never fills a quantity, and never submits a reconciliation.",
+      "version": "0.2.3",
+      "status": "Published",
+      "description": "Builds a reviewable physical-count plan from current stock, permitted movement evidence, and submitted Jarvis physical-count history. A named reviewer approves a warehouse plan. A human then records observed quantities in a separate Jarvis physical-count record. It never creates a Stock Reconciliation, fills a count, submits a document, or changes stock.",
       "tools_required": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc"
+        "jarvis__get_cycle_count_inputs"
       ],
       "tools_allow": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc",
+        "jarvis__get_cycle_count_inputs",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
         "Jarvis Approval Request",
-        "Stock Reconciliation",
-        "Stock Reconciliation Item",
+        "Jarvis Physical Count",
+        "Jarvis Physical Count Item",
         "Bin",
         "Item",
-        "Stock Ledger Entry"
+        "Stock Ledger Entry",
+        "Stock Entry",
+        "Warehouse",
+        "Company"
       ],
-      "rule_tokens": [],
-      "writes": [
-        {
-          "doctype": "Jarvis Approval Request",
-          "mode": "approval-request"
-        },
-        {
-          "doctype": "Stock Reconciliation",
-          "mode": "draft"
-        }
+      "rule_tokens": [
+        "ccp-plan-v1"
       ],
+      "advisory_tokens": [],
+      "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 600,
       "min_apps": [
@@ -719,7 +705,19 @@
       "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
-      }
+      },
+      "config_keys": [
+        "company",
+        "from_date",
+        "to_date",
+        "count_history_from",
+        "warehouses",
+        "line_limit",
+        "recount_after_days",
+        "basis",
+        "review_scope",
+        "policy_version"
+      ]
     },
     {
       "agent_slug": "dead-stock-ageing-auditor",
@@ -1882,16 +1880,30 @@
     },
     {
       "agent_slug": "ticket-triage-operator",
-      "title": "Ticket-Triage & Assignment Operator",
+      "title": "Ticket Triage Review",
       "domain": "helpdesk",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.1",
-      "status": "Coming Soon",
-      "description": "Coming Soon. Ticket routing is not available. This agent has no runtime tool or write surface. It cannot read tickets, create approvals, change tickets, or send messages. A later server-owned workflow will require private source transport and a human-confirmed routing action.",
-      "tools_required": [],
-      "tools_allow": [],
-      "doctypes_required": [],
+      "version": "0.2.0",
+      "status": "Published",
+      "description": "Suggests a controlled ticket type or priority when the subject names one unique allowed label. A named reviewer confirms each change. Ambiguous tickets stay for manual review. Manual runs only; no assignment, status change, message, or automatic ticket update.",
+      "tools_required": [
+        "jarvis__get_ticket_triage_inputs",
+        "jarvis__stage_ticket_triage_proposals"
+      ],
+      "tools_allow": [
+        "jarvis__get_ticket_triage_inputs",
+        "jarvis__stage_ticket_triage_proposals",
+        "exec"
+      ],
+      "doctypes_required": [
+        "HD Ticket",
+        "HD Team",
+        "HD Ticket Type",
+        "HD Ticket Priority",
+        "HD Ticket Status",
+        "Jarvis Approval Request"
+      ],
       "rule_tokens": [],
       "advisory_tokens": [],
       "writes": null,
@@ -1909,7 +1921,18 @@
       "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
-      }
+      },
+      "config_keys": [
+        "policy_version",
+        "from_at",
+        "to_at",
+        "eligible_team_names",
+        "eligible_status_names",
+        "allowed_ticket_types",
+        "allowed_priorities",
+        "max_tickets",
+        "assignment_mode"
+      ]
     },
     {
       "agent_slug": "vendor-ledger-recon-auditor",

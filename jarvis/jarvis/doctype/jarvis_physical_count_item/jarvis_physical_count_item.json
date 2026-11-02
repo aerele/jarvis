@@ -1,0 +1,46 @@
+{
+ "doctype": "DocType",
+ "name": "Jarvis Physical Count Item",
+ "module": "Jarvis",
+ "istable": 1,
+ "custom": 0,
+ "engine": "InnoDB",
+ "field_order": ["item_code", "counted_qty", "stock_uom", "batch_detail_recorded"],
+ "fields": [
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "label": "Item",
+   "options": "Item",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "counted_qty",
+   "fieldtype": "Data",
+   "label": "Counted Quantity",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "A finite decimal text. Zero is a valid physical observation; empty is not zero."
+  },
+  {
+   "fieldname": "stock_uom",
+   "fieldtype": "Link",
+   "label": "Stock UOM",
+   "options": "UOM",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "batch_detail_recorded",
+   "fieldtype": "Check",
+   "label": "Batch or Serial Detail Recorded",
+   "read_only": 1,
+   "default": "0",
+   "description": "0 means this count is a total-only cadence record. Record batch or serial detail through the normal ERPNext process."
+  }
+ ],
+ "permissions": [],
+ "sort_field": "idx",
+ "sort_order": "ASC"
+}

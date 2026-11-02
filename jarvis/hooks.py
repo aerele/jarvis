@@ -857,6 +857,13 @@ permission_query_conditions.update(
 		"Version": "jarvis.chat.approval_reviewers.version_query_conditions",
 		"Deleted Document": "jarvis.chat.approval_reviewers.deleted_document_query_conditions",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.voice_note_query_conditions",
+		# A physical count is a private observation attached to one approved plan,
+		# not a stock-wide desk record. Keep the fact on the same owner/reviewer/
+		# approval-share visibility boundary as that plan.
+		"Jarvis Physical Count": "jarvis.chat.cycle_count_permissions.physical_count_query_conditions",
+		# Frappe does not apply a parent's list condition to a direct child-table
+		# query. Scope count lines through their visible count header as well.
+		"Jarvis Physical Count Item": "jarvis.chat.cycle_count_permissions.physical_count_item_query_conditions",
 	}
 )
 has_permission.update(
@@ -872,6 +879,7 @@ has_permission.update(
 		"Version": "jarvis.chat.approval_reviewers.has_version_permission",
 		"Deleted Document": "jarvis.chat.approval_reviewers.has_deleted_document_permission",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.has_voice_note_permission",
+		"Jarvis Physical Count": "jarvis.chat.cycle_count_permissions.has_physical_count_permission",
 	}
 )
 

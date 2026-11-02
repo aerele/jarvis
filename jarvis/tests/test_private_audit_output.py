@@ -31,8 +31,10 @@ class TestPrivateAuditOutput(FrappeTestCase):
 				[
 					"jarvis__query",
 					"jarvis__run_report",
+					"jarvis__get_cycle_count_inputs",
 					"jarvis__get_purchase_match_inputs",
 					"jarvis__get_receivables_review_inputs",
+					"jarvis__get_ticket_triage_inputs",
 				],
 				"auditor",
 				[],
@@ -75,6 +77,13 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			patch("jarvis.api._get_header", return_value=None),
 		):
 			return api._dispatch_from_session(self.actor, key or self.key, tool, args, result_mode=mode)
+
+	@staticmethod
+	def _source_capture_module(tool):
+		module = importlib.import_module(f"jarvis.tools.{tool}")
+		# Cycle Count captures from its review module. AP and AR expose the
+		# same capture seam directly from their tool wrapper.
+		return getattr(module, "ticket_triage", getattr(module, "cycle_count_review", module))
 
 	def test_full_private_query_and_report_leave_only_safe_receipts(self):
 		for tool, row_key in (("query", "rows"), ("run_report", "result")):
@@ -131,6 +140,53 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			step = frappe.get_last_doc("Jarvis Agent Run Step", {"run": self.run})
 			self.assertNotIn(CANARY, step.detail)
 
+	def test_ticket_triage_private_marker_never_reaches_receipt_realtime_step_or_error(self):
+		"""Exercise the real dispatcher, not only the private-output formatter."""
+		marker = "TT-RAW-MARKER-DO-NOT-PERSIST"
+		payload = {
+			"rows": [
+				{
+					"source_digest": "a" * 64,
+					"capture_id": "TT-private-capture",
+					"tickets": [
+						{
+							"name": "TT-0001",
+							"subject": marker,
+							"description": marker,
+							"raised_by": marker,
+						}
+					],
+				}
+			]
+		}
+		with patch("jarvis.api.publish_realtime_tool_result") as published:
+			result = self._dispatch(payload, tool="get_ticket_triage_inputs")
+		self.assertTrue(result["ok"], result)
+		self.assertIn(marker, result["data"])
+		self.assertNotIn(marker, str(published.call_args))
+		for message in frappe.get_all(
+			"Jarvis Chat Message", {"conversation": self.conv.name}, ["tool_result"]
+		):
+			self.assertNotIn(marker, message.tool_result)
+		for step in frappe.get_all("Jarvis Agent Run Step", {"run": self.run}, ["detail"]):
+			self.assertNotIn(marker, step.detail)
+
+		# A malformed private source is a real persisted error receipt.  It must
+		# not echo the rejected source row into the chat, realtime, step, or error
+		# envelope.
+		bad_payload = {"rows": [{"source_digest": "not-a-digest", "subject": marker}]}
+		with patch("jarvis.api.publish_realtime_tool_result") as published:
+			result = self._dispatch(bad_payload, tool="get_ticket_triage_inputs")
+		self.assertFalse(result["ok"], result)
+		self.assertNotIn(marker, str(result))
+		self.assertNotIn(marker, str(published.call_args))
+		for message in frappe.get_all(
+			"Jarvis Chat Message", {"conversation": self.conv.name}, ["tool_result"]
+		):
+			self.assertNotIn(marker, message.tool_result)
+		for step in frappe.get_all("Jarvis Agent Run Step", {"run": self.run}, ["detail"]):
+			self.assertNotIn(marker, step.detail)
+
 	def test_private_review_input_uses_sorted_canonical_source_bytes(self):
 		payload = {"rows": [{"z_key": "last", "source_digest": "a" * 64, "a_key": "first"}]}
 		expected = json.dumps(
@@ -163,8 +219,10 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			"scope": {"company": "Fake Co"},
 			"datasets": {"invoices": [{"bill_no": CANARY, "amount": 0.0}]},
 		}
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
-			module = importlib.import_module(f"jarvis.tools.{tool}")
+		# Ticket Triage uses its own session-bound capture and typed dispatcher;
+		# its real-record dispatch tests live in test_ticket_triage.
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS - {"get_ticket_triage_inputs"}):
+			module = self._source_capture_module(tool)
 			with (
 				self.subTest(tool=tool),
 				patch.object(module, "get_inputs", return_value=snapshot) as source,
@@ -185,8 +243,8 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			self.assertNotIn(CANARY, step.detail)
 
 	def test_private_review_handlers_refuse_malformed_captured_snapshot_without_leak(self):
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
-			module = importlib.import_module(f"jarvis.tools.{tool}")
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS - {"get_ticket_triage_inputs"}):
+			module = self._source_capture_module(tool)
 			for snapshot in (None, {}, {"source_digest": "not-a-digest", "secret": CANARY}):
 				with (
 					self.subTest(tool=tool, snapshot=snapshot),
@@ -369,14 +427,24 @@ class TestPrivateAuditOutput(FrappeTestCase):
 	def test_standard_external_source_entry_guard_refuses_before_dispatch(self):
 		self.assertEqual(
 			_private_output.PRIVATE_SOURCE_TOOLS,
-			frozenset({"get_purchase_match_inputs", "get_receivables_review_inputs"}),
+			frozenset(
+				{
+					"get_cycle_count_inputs",
+					"get_purchase_match_inputs",
+					"get_receivables_review_inputs",
+					"get_ticket_triage_inputs",
+				}
+			),
 		)
 		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
-			module = importlib.import_module(f"jarvis.tools.{tool}")
+			module = self._source_capture_module(tool)
 			for mode in (None, _private_output.MODE):
 				with (
 					self.subTest(tool=tool, mode=mode),
-					patch.object(module, "get_inputs") as source,
+					patch.object(
+						module,
+						"capture_private_inputs" if tool == "get_ticket_triage_inputs" else "get_inputs",
+					) as source,
 					patch("jarvis.api._get_header", return_value=None),
 					patch("jarvis.api._dispatch_current_user") as dispatch,
 					patch("jarvis.api._run_tool") as run_tool,

@@ -45,6 +45,8 @@ PROVENANCE = "Jarvis Agent Provenance Event"
 ALLOWED_ROLE = "Jarvis Agent Allowed Role"
 ALLOWED_USER = "Jarvis Agent Allowed User"
 _SETTINGS = "Jarvis Settings"
+CYCLE_COUNT_PLANNER = "cycle-count-planner-operator"
+PHYSICAL_COUNT = "Jarvis Physical Count"
 
 # PP-6 — the stage-maximum global activation ceiling. The initial ceiling is 1
 # (every customer starts with a single live module); a Jarvis Admin may raise it
@@ -553,7 +555,8 @@ def get_agent(agent_slug: str) -> dict:
 		"category": listing.category,
 		"nature": listing.nature,
 		"supports_manual_run": listing.nature in ("Auditor", "Scribe")
-		or listing.agent_slug in REVIEW_OPERATORS,
+		or listing.agent_slug in REVIEW_OPERATORS
+		or listing.agent_slug == "ticket-triage-operator",
 		"version": listing.version,
 		"publisher": listing.publisher,
 		"status": listing.status,
@@ -620,6 +623,10 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif listing.agent_slug == "ticket-triage-operator":
+			from jarvis.chat import ticket_triage
+
+			i["configuration_issues"] = ticket_triage.configuration_issues(i.config or "{}")
 		elif listing.agent_slug == SLA_BREACH_AGENT:
 			# The selected Helpdesk team is an explicit, permission-bounded launch
 			# boundary. Surface its saved-state issues so Run Now can fail closed in
@@ -1396,7 +1403,7 @@ def set_schedule(
 
 		if agent_scope.record_scope_requested(doc.config):
 			agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
-		if doc.agent in REVIEW_OPERATORS:
+		if doc.agent in REVIEW_OPERATORS or doc.agent == "ticket-triage-operator":
 			frappe.throw(_("Operator evidence review supports manual runs only."))
 		assert_installable(doc.agent)
 		_assert_sla_schedule_configuration(doc)
@@ -1461,6 +1468,15 @@ def get_ap_review_defaults(company: str | None = None) -> dict:
 def get_ar_review_defaults(company: str | None = None) -> dict:
 	"""Read-only AR suggestions, including company-bound fiscal years."""
 	from jarvis.chat.receivables_review import configuration_defaults
+
+	return configuration_defaults(company)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def get_cycle_count_review_defaults(company: str | None = None) -> dict:
+	"""Read-only count-plan suggestions; the owner must save the actual scope."""
+	from jarvis.chat.cycle_count_review import configuration_defaults
 
 	return configuration_defaults(company)
 
@@ -1586,16 +1602,18 @@ def _installation_finding_names(run_names: list) -> set:
 
 
 def _detach_last_seen_run(run_names: list) -> None:
-	"""Re-point any SURVIVING finding whose ``last_seen_run`` lands in the runs this
-	cascade is about to force-delete.
+	"""Re-point any SURVIVING finding whose ``last_seen_run`` lands in a run this
+	cascade removes from its installation.
 
 	A survivor here is by definition another installation's row that the #454
-	recurrence bump attached to one of our runs. Leaving the pointer would dangle
-	it: ``get_findings``' run drill-down INNER JOINs ``last_seen_run``, so the row
-	would vanish from its real owner's history, and Frappe's link validation would
-	reject that owner's next acknowledge/resolve save outright. Falling back to the
-	row's own ``first_seen_run`` (which belongs to ITS installation and survives, or
-	is empty) keeps the recurrence pointer truthful and the row usable.
+	recurrence bump attached to one of our runs. A deleted run would leave the
+	pointer dangling; a budget- or provenance-retained run loses its installation
+	and also cannot truthfully remain another installation's latest run.
+	``get_findings``' run drill-down INNER JOINs ``last_seen_run``, so either case
+	hides the row from its real owner's history, and Frappe's link validation can
+	reject that owner's next acknowledge/resolve save. Falling back to the row's
+	own ``first_seen_run`` (which belongs to ITS installation and survives, or is
+	empty) keeps the recurrence pointer truthful and the row usable.
 
 	Raw ``db.set_value`` — ``last_seen_run`` is a frozen audit field, so this must
 	bypass the finding controller exactly as the recurrence bump does.
@@ -1725,6 +1743,83 @@ def _stop_live_runs_for_uninstall(installation: str) -> int:
 	return stopped
 
 
+def _detach_cycle_count_provenance_runs(run_names: list[str], owner: str) -> set[str]:
+	"""Keep the minimal sealed-run authority behind retained count facts.
+
+	An approved Cycle-Count plan and its submitted observations remain useful
+	after uninstall: a permitted human can still read or correct an observation.
+	The approval's ``run`` Link is also the writer fence.  Deleting that row
+	would leave a truthful-looking plan that fails only when the user submits it.
+
+	The retained row is detached from the installation and loses every live
+	delegate capability and raw input/output payload.  It cannot resume or
+	restore a budget, but it remains a stable immutable identity for the approval
+	cohort and the factual ``source_run`` value.
+	"""
+	if not run_names:
+		return set()
+	# Take the same run fence that review staging and fact recording use before
+	# we inspect linked reviews. A staging writer either finishes before this
+	# query (and its link is retained) or sees the detached/deleted run after the
+	# uninstall commits; it cannot create an Approval Request whose run vanishes.
+	fenced_runs = tuple(
+		frappe.db.get_values(
+			RUN,
+			filters={"name": ["in", tuple(run_names)]},
+			fieldname="name",
+			pluck=True,
+			for_update=True,
+		)
+	)
+	if not fenced_runs:
+		return set()
+	# Keep every Cycle-Count review that still links one of these runs, not only
+	# approved rows. Otherwise a pending review can be approved after uninstall
+	# and point at a deleted run. The retained row has no live capability.
+	review_runs = set(
+		frappe.db.sql(
+			"""SELECT `run` FROM `tabJarvis Approval Request`
+			WHERE `run` IN %(runs)s AND agent = %(agent)s AND source = 'Agent Review'
+			FOR UPDATE""",
+			{"runs": fenced_runs, "agent": CYCLE_COUNT_PLANNER},
+			pluck=True,
+		)
+	)
+	count_runs = set()
+	if frappe.db.table_exists(PHYSICAL_COUNT):
+		count_runs = set(
+			frappe.get_all(
+				PHYSICAL_COUNT,
+				filters={"source_run": ["in", run_names], "docstatus": ["in", [1, 2]]},
+				pluck="source_run",
+				ignore_permissions=True,
+			)
+		)
+	kept = {name for name in review_runs | count_runs if isinstance(name, str) and name in fenced_runs}
+	if not kept:
+		return set()
+	keys = frappe.get_all(
+		RUN,
+		filters={"name": ["in", tuple(kept)]},
+		pluck="session_key",
+		ignore_permissions=True,
+	)
+	keys = [key for key in keys if isinstance(key, str) and key]
+	if keys:
+		frappe.db.delete("Jarvis Chat Session", {"session_key": ["in", keys]})
+	# Keep only the immutable identity that the approval writer fence needs.
+	# Use the same dynamic clearing policy as a budget-retained run so a new
+	# Agent Run field cannot silently become an uninstalled agent capability.
+	from jarvis.chat.agent_scheduler import _kept_row_clear_values
+
+	run = frappe.qb.DocType(RUN)
+	query = frappe.qb.update(run).set(run.installation, None).set(run.owner, owner)
+	for fieldname, value in _kept_row_clear_values().items():
+		query = query.set(run[fieldname], value)
+	query.where(run.name.isin(tuple(kept))).run()
+	return kept
+
+
 def _uninstall_cascade(doc, via_admin: bool) -> None:
 	"""The delete itself, under the caller's dispatch lock; commits."""
 	log_activity(
@@ -1750,16 +1845,21 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 			force=True,
 			flags={"jarvis_uninstall_installation": doc.name},
 		)
+	# A cross-install recurrence pointer is not membership. Repair it before a
+	# run is either retained without its installation or force-deleted.
 	_detach_last_seen_run(run_names)
 	# The month's counted runs are KEPT, detached from the installation, so uninstalling
 	# and installing again does not hand the month's run budget back (A14). For the user
 	# the run history is gone all the same: no screen lists a run with no installation.
 	from jarvis.chat.agent_scheduler import keep_budget_rows_of_uninstalled
 
-	kept = set(keep_budget_rows_of_uninstalled(doc.name, doc.owner))
-	for name in run_names:
-		if name not in kept:
-			frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
+	provenance_runs = _detach_cycle_count_provenance_runs(run_names, doc.owner)
+	kept = provenance_runs | set(
+		keep_budget_rows_of_uninstalled(doc.name, doc.owner, exclude=provenance_runs)
+	)
+	deleted_runs = [name for name in run_names if name not in kept]
+	for name in deleted_runs:
+		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	# honors if_owner for an owner; the admin path was authorised above. The append-only
 	# provenance ledger is preserved (immutable audit trail); see the helper.
 	_delete_installation_preserving_provenance(doc, via_admin)
@@ -1846,7 +1946,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 
 	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
 	nature = listing.get("nature")
-	if nature not in ("Auditor", "Scribe") and doc.agent not in REVIEW_OPERATORS:
+	if (
+		nature not in ("Auditor", "Scribe")
+		and doc.agent not in REVIEW_OPERATORS
+		and doc.agent != "ticket-triage-operator"
+	):
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
 		)

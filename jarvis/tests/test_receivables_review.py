@@ -602,10 +602,11 @@ class TestReceivablesReview(FrappeTestCase):
 		)
 		with (
 			patch.object(frappe, "has_permission", return_value=True),
-			patch.object(frappe.db, "get_value", side_effect=[1, None, 1, "REVIEW", prior]),
+			patch.object(frappe.db, "get_value", side_effect=[1, None, 1, "REVIEW", prior]) as get_value,
 			patch.object(frappe, "get_doc", return_value=artifact) as create,
 			patch.object(review, "collect", return_value=source),
 			patch.object(frappe.share, "add"),
+			patch.object(frappe.db, "set_value") as update,
 		):
 			inst = frappe._dict(name="INST", reviewer="Administrator")
 			self.assertEqual(review.stage_reviews(run, inst, [finding]), ["REVIEW"])
@@ -616,6 +617,14 @@ class TestReceivablesReview(FrappeTestCase):
 			self.assertEqual(payload["ref_doctype"], "Sales Invoice")
 			self.assertIn("&lt;script&gt;", payload["context_md"])
 			self.assertNotIn("<script>", payload["context_md"])
+			get_value.assert_any_call(
+				"Jarvis Approval Request",
+				"REVIEW",
+				["run", "status", "assessment_evidence", "conversation"],
+				as_dict=True,
+				for_update=True,
+			)
+			update.assert_not_called()
 
 
 def assess_native(source, assessment):

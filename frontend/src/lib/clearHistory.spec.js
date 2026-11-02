@@ -7,12 +7,12 @@ import {
 	clearHistoryOutcome,
 	failedChatsNotice,
 	keptChatsNotice,
+	retainedCountPlanNotice,
 } from "./clearHistory";
 
-// "Delete all chat history" keeps a chat that is waiting for a reply, and may fail
-// on a chat (the server answers { ok, deleted, skipped, kept: [names], failed,
-// failed_names: [names] }). What the user is told, and whether the chat they have
-// open stays open, is decided here.
+// "Delete all chat history" keeps a chat for a live reply or retained count
+// evidence, and may fail on a chat. What the user is told, and whether the chat
+// they have open stays open, is decided here.
 
 describe("keptChatsNotice", () => {
 	const ONE =
@@ -48,6 +48,7 @@ describe("keptChatsNotice", () => {
 			ONE,
 			TWO,
 			keptChatsNotice(2, 3),
+			retainedCountPlanNotice(2),
 			clearHistoryFailedNotice(""),
 			failedChatsNotice(1),
 			failedChatsNotice(2),
@@ -68,6 +69,21 @@ describe("failedChatsNotice", () => {
 
 	it("does not claim a reply is in progress", () => {
 		for (const failed of [1, 4]) expect(failedChatsNotice(failed)).not.toMatch(/repl/i);
+	});
+});
+
+describe("retainedCountPlanNotice", () => {
+	it("explains retained physical-count evidence without suggesting a retry", () => {
+		const one = retainedCountPlanNotice(1);
+		const many = retainedCountPlanNotice(2);
+		expect(one).toBe(
+			"1 chat was kept because it contains physical count evidence. Open Physical count plans to view it."
+		);
+		expect(many).toBe(
+			"2 chats were kept because they contain physical count evidence. Open Physical count plans to view them."
+		);
+		expect(one).not.toMatch(/reply|again/i);
+		expect(retainedCountPlanNotice(0)).toBe("");
 	});
 });
 
@@ -151,6 +167,56 @@ describe("clearHistoryOutcome", () => {
 			keptChatsNotice(2, 5)
 		);
 	});
+
+	it("explains retained plans instead of a reply that cannot finish", () => {
+		const out = clearHistoryOutcome(
+			{
+				ok: true,
+				deleted: 2,
+				skipped: 1,
+				kept: ["count-plan-chat"],
+				retained_count_plan_names: ["count-plan-chat"],
+			},
+			"count-plan-chat"
+		);
+		expect(out).toEqual({
+			notice: "Deleted 2 chats. 1 chat was kept because it contains physical count evidence. Open Physical count plans to view it.",
+			failed: false,
+			openChatKept: true,
+		});
+	});
+
+	it("states each retained reason when live replies and retained plans mix", () => {
+		const out = clearHistoryOutcome(
+			{
+				ok: true,
+				deleted: 1,
+				skipped: 2,
+				kept: ["live-chat", "count-plan-chat"],
+				retained_count_plan_names: ["count-plan-chat"],
+			},
+			"count-plan-chat"
+		);
+		expect(out.notice).toBe(
+			"Deleted 1 chat. 1 chat was kept because a reply is still in progress. Delete all again once the reply finishes. 1 chat was kept because it contains physical count evidence. Open Physical count plans to view it."
+		);
+		expect(out.openChatKept).toBe(true);
+	});
+
+	it("ignores retained names that the server did not keep", () => {
+		expect(
+			clearHistoryOutcome(
+				{
+					ok: true,
+					deleted: 0,
+					skipped: 1,
+					kept: ["live-chat"],
+					retained_count_plan_names: ["other"],
+				},
+				"live-chat"
+			).notice
+		).toBe(keptChatsNotice(1, 0));
+	});
 });
 
 describe("clearHistoryOutcome when chats could not be deleted", () => {
@@ -223,9 +289,11 @@ describe("clearHistoryOutcome when chats could not be deleted", () => {
 });
 
 describe("the confirmation", () => {
-	it("says that a chat with a reply in progress is kept", () => {
+	it("says that live replies and physical-count evidence are kept", () => {
 		expect(CLEAR_HISTORY_CONFIRM).toContain("permanently deleted");
-		expect(CLEAR_HISTORY_CONFIRM).toContain("A chat with a reply still in progress is kept.");
+		expect(CLEAR_HISTORY_CONFIRM).toContain(
+			"reply in progress or physical count evidence are kept"
+		);
 	});
 });
 
@@ -238,7 +306,7 @@ describe("the Settings pane line", () => {
 			)
 			.replace(/\s+/g, " ");
 		expect(pane).toContain(
-			"Every conversation and message, permanently. Chats still waiting for a reply are kept. Macros and skills stay."
+			"Every conversation and message, permanently. Chats with a reply in progress or physical count evidence are kept. Macros and skills stay."
 		);
 	});
 });

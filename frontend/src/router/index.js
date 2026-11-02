@@ -197,6 +197,22 @@ const routes = [
 		component: () => import("@/pages/approvals/ApprovalsBoard.vue"),
 	},
 	{
+		path: "/count-plans",
+		name: "CountPlansList",
+		component: () => import("@/pages/count-plans/CountPlansList.vue"),
+	},
+	{
+		path: "/ticket-triage",
+		name: "TicketTriageReviews",
+		component: () => import("@/pages/agents/TicketTriageReviews.vue"),
+	},
+	{
+		path: "/count-plans/:request",
+		name: "CountPlanDetail",
+		component: () => import("@/pages/count-plans/CountPlanDetail.vue"),
+		props: true,
+	},
+	{
 		path: "/agents",
 		name: "AgentsList",
 		component: () => import("@/pages/agents/AgentsList.vue"),
