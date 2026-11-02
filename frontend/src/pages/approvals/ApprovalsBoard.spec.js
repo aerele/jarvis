@@ -306,7 +306,7 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(w.element.children[2].contains(group(w).element)).toBe(true);
 	});
 
-	it("stacks the board and wraps its tag control below lg", async () => {
+	it("keeps the sheet reachable and the tag control wrapped below lg", async () => {
 		const w = await board();
 		const split = w.get('[data-testid="approvals-split-view"]');
 		expect(split.classes()).toContain("flex-col");
