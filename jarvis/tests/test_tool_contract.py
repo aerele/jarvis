@@ -122,7 +122,7 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "2396b6d4bc28163b40ff821d90a13d01a85807c25dcb2f18d91baf350530071c"
+	PINNED_CAPABILITY_DIGEST = "2f8affa32142cce0ac8344df47528dcb5c52eb9e142d2dfa92eaeb640e75ca8c"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
