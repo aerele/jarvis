@@ -5,8 +5,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flush } from "@/lib/errorReporter";
 import * as desktop from "./holidayReport";
+import * as phone from "../../../pwa/src/lib/holidayReport";
 
-describe.each([["desktop", desktop]])("%s scene failure reports", (_name, mod) => {
+describe.each([
+	["desktop", desktop],
+	["phone", phone],
+])("%s scene failure reports", (_name, mod) => {
 	beforeEach(() => {
 		mod._resetReportedForTests();
 		vi.stubGlobal(
