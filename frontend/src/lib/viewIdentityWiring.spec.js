@@ -17,14 +17,11 @@ function body(source, head, next) {
 
 describe("client view identity wiring", () => {
 	it("fences a File Box approve or deny RPC to its original view and wait item", () => {
-		const refresh = body(
-			desktop,
-			"async function refreshFileboxWaits(",
-			"async function decideFileboxWait("
-		);
-		expect(refresh).toContain("const view = captureChatView();");
-		expect(refresh).toContain("if (!chatViewIsCurrent(view)) return;");
-		expect(refresh).toContain("conversation: view.conversation");
+		// The composable owns refresh generations and binds each item to its chat.
+		// Its runtime tests cover late responses and A -> B -> A navigation.
+		const refresh = body(desktop, "} = useFileBoxWaits({", "const fileboxWaitBusy");
+		expect(refresh).toContain("conversation: currentId,");
+		expect(refresh).toContain("load: api.fileboxOpenWaits,");
 
 		const decide = body(
 			desktop,
