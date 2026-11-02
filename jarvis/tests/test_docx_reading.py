@@ -493,7 +493,7 @@ class TestDocxNativePermissions(unittest.TestCase):
 			result = preview_file(self.file.file_url)
 		self.assertEqual(result["kind"], "binary")
 		self.assertIn("DOCX", result["error"])
-		with self.assertRaises(InvalidArgumentError):
+		with self.assertRaises(PermissionDeniedError):
 			preview_file("/private/files/does-not-exist-790.docx")
 
 	def test_turn_preparation_routes_docx_without_parse_dispatch_or_vision(self):

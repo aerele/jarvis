@@ -638,13 +638,23 @@ function cheeks(design, o) {
  * opts: idPrefix (unique per mark), radius (tile corner, in 56-unit space, for
  * the clip the contact shadow and powder use), small (drop fine detail, for
  * marks of 32px or less), motion (false under reduced motion: no SMIL sway).
+ * The scenes fly a copy of the item over the page: noShadow leaves out the contact shadow
+ * (it belongs on the tile, not on a flying copy), crownOnly (Onam) draws the umbrella alone,
+ * without the kasavu.
  */
 export function wornMarkup(
   design,
-  { idPrefix, radius = 14, small = false, motion = true } = {}
+  {
+    idPrefix,
+    radius = 14,
+    small = false,
+    motion = true,
+    noShadow = false,
+    crownOnly = false,
+  } = {}
 ) {
   if (!Object.prototype.hasOwnProperty.call(ACC, design)) return "";
-  const o = { id: idPrefix, small, motion };
+  const o = { id: idPrefix, small, motion, noShadow, crownOnly };
   return `<defs><clipPath id="t${
     o.id
   }"><rect width="56" height="56" rx="${radius}"/></clipPath></defs>
