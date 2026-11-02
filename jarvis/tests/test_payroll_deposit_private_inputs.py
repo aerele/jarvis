@@ -782,10 +782,16 @@ class TestPayrollDepositWritebackClaim(TestCase):
 			self.assertFalse(first.is_alive())
 			self.assertFalse(second.is_alive())
 			self.assertEqual(errors, [])
-			self.assertEqual(len([r for r in results if not r.get("idempotent")]), 1)
+			terminal_results = [r for r in results if not r.get("idempotent")]
+			self.assertEqual(len(terminal_results), 1)
 			self.assertEqual(len([r for r in results if r.get("idempotent")]), 1)
 			final = frappe.db.get_value("Jarvis Agent Run", run_name, ["status", "dashboard"], as_dict=True)
-			self.assertEqual(final.status, "completed")
+			# This test does not grant the synthetic run-as user full HR visibility.
+			# The newer visibility gate may therefore finish the one valid writer as
+			# partial.  The concurrency contract is that it still terminalizes exactly
+			# once and that the database row matches that winning writeback.
+			self.assertIn(final.status, ("completed", "partial"))
+			self.assertEqual(final.status, terminal_results[0]["status"])
 			self.assertEqual(len(created), 1)
 			self.assertEqual(final.dashboard, created[0])
 			self.assertEqual(frappe.db.count("Jarvis Dashboard", {"name": final.dashboard}), 1)

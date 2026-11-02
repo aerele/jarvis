@@ -15,9 +15,11 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
+from jarvis._password_utils import set_settings_password
 from jarvis._plugin_auth import _RECOVERY_RATE_PER_MINUTE
 from jarvis._session import impersonate
 from jarvis.chat import payroll_deposit_recovery
+from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
 
 AGENT = "statutory-payroll-deposit-status"
 TOKEN = "deposit-private-recovery-test-token"
@@ -71,7 +73,7 @@ def _ensure_user(email: str) -> str:
 	return email
 
 
-class TestPayrollDepositPrivateRecovery(FrappeTestCase):
+class TestPayrollDepositPrivateRecovery(JarvisSettingsSnapshot, FrappeTestCase):
 	"""Use real signed requests and database locks with isolated fake rows."""
 
 	def setUp(self):
@@ -81,9 +83,10 @@ class TestPayrollDepositPrivateRecovery(FrappeTestCase):
 		self._installations_by_user: dict[str, str] = {}
 		self._session_keys: list[str] = []
 		settings = frappe.get_single("Jarvis Settings")
-		self._original_token = settings.get_password("agent_token", raise_exception=False) or ""
-		self._original_device = settings.chat_device_id or ""
-		settings.db_set("agent_token", TOKEN)
+		# Plugin authentication reads Password values straight from __Auth.  Keep
+		# the token there, and let JarvisSettingsSnapshot restore both that row and
+		# the Settings singleton after a test that commits its callback outcome.
+		set_settings_password(settings, "agent_token", TOKEN)
 		self.user = _ensure_user("payroll-deposit-recovery@example.test")
 		self.record = self._new_record()
 
@@ -98,9 +101,6 @@ class TestPayrollDepositPrivateRecovery(FrappeTestCase):
 			frappe.db.delete("Jarvis Agent Run", {"name": run_name})
 		for installation_name in self._installation_names:
 			frappe.db.delete("Jarvis Agent Installation", {"name": installation_name})
-		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("agent_token", self._original_token)
-		settings.db_set("chat_device_id", self._original_device)
 		for session_key in self._session_keys:
 			for prefix in ("jarvis:plugin_rl:", "jarvis:plugin_recovery_rl:"):
 				try:
