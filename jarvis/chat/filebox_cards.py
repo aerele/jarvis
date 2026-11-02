@@ -5,7 +5,8 @@ still end a turn with a create/update card - typically on a resume turn. That ca
 lived only in the chat: nothing reached the Approval Board, and a chat Confirm wrote
 straight past the policy. At turn end the card now runs as the tool call it stands
 for, as the conversation owner: a draft applies, a master is held on the board, and a
-refused write (a Single such as GST Settings) becomes a question on the board. The
+refused write (such as sensitive settings) becomes a question on the board. Ordinary
+settings updates wait for human approval like masters. The
 card is then replaced by a one-line note, so it can't also be confirmed in chat."""
 
 from __future__ import annotations
