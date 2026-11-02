@@ -81,7 +81,7 @@ def read_file(conversation: str, url: str):
 
 
 def get_file(conversation: str, url: str):
-	download(read_file(conversation, url))
+	return download(read_file(conversation, url))
 
 
 @fresh_read
