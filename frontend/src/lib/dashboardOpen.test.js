@@ -643,7 +643,10 @@ test("the open artifact carries the conversation it was opened from", () => {
 		assert.match(a, /\bconv,/);
 		assert.match(a, /\bview,/);
 	}
-	assert.match(open, /const loading = \{ m, cv, url, conv, view, kind: "loading" \};/);
+	assert.match(
+		open,
+		/artifact\.value = \{ m, cv, url, conv, view, kind: "loading" \};\s+const loading = artifact\.value;/
+	);
 	// the sheet switcher re-assigns a spread copy, so it keeps the stamp
 	assert.match(chatSrc, /artifact\.value = \{ \.\.\.artifact\.value, sheetIdx: si \};/);
 });
