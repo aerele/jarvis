@@ -18,6 +18,7 @@ _SERVER_FIELDS = (
 	"sheet",
 	"assessment_key",
 	"assessment_evidence",
+	"assessment_input_digest",
 )
 # Frozen on a wiki proposal: what the reviewer reads and where it lands.
 _WIKI_FIELDS = ("title", "question", "context_md", "document_type", "conversation", "source", "status")

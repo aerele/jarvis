@@ -31,6 +31,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 				[
 					"jarvis__query",
 					"jarvis__run_report",
+					"jarvis__get_cycle_count_inputs",
 					"jarvis__get_purchase_match_inputs",
 					"jarvis__get_receivables_review_inputs",
 				],
@@ -75,6 +76,13 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			patch("jarvis.api._get_header", return_value=None),
 		):
 			return api._dispatch_from_session(self.actor, key or self.key, tool, args, result_mode=mode)
+
+	@staticmethod
+	def _source_capture_module(tool):
+		module = importlib.import_module(f"jarvis.tools.{tool}")
+		# Cycle Count captures from its review module. AP and AR expose the
+		# same capture seam directly from their tool wrapper.
+		return getattr(module, "cycle_count_review", module)
 
 	def test_full_private_query_and_report_leave_only_safe_receipts(self):
 		for tool, row_key in (("query", "rows"), ("run_report", "result")):
@@ -164,7 +172,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			"datasets": {"invoices": [{"bill_no": CANARY, "amount": 0.0}]},
 		}
 		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
-			module = importlib.import_module(f"jarvis.tools.{tool}")
+			module = self._source_capture_module(tool)
 			with (
 				self.subTest(tool=tool),
 				patch.object(module, "get_inputs", return_value=snapshot) as source,
@@ -186,7 +194,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 
 	def test_private_review_handlers_refuse_malformed_captured_snapshot_without_leak(self):
 		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
-			module = importlib.import_module(f"jarvis.tools.{tool}")
+			module = self._source_capture_module(tool)
 			for snapshot in (None, {}, {"source_digest": "not-a-digest", "secret": CANARY}):
 				with (
 					self.subTest(tool=tool, snapshot=snapshot),
@@ -369,10 +377,12 @@ class TestPrivateAuditOutput(FrappeTestCase):
 	def test_standard_external_source_entry_guard_refuses_before_dispatch(self):
 		self.assertEqual(
 			_private_output.PRIVATE_SOURCE_TOOLS,
-			frozenset({"get_purchase_match_inputs", "get_receivables_review_inputs"}),
+			frozenset(
+				{"get_cycle_count_inputs", "get_purchase_match_inputs", "get_receivables_review_inputs"}
+			),
 		)
 		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
-			module = importlib.import_module(f"jarvis.tools.{tool}")
+			module = self._source_capture_module(tool)
 			for mode in (None, _private_output.MODE):
 				with (
 					self.subTest(tool=tool, mode=mode),

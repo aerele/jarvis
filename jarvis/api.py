@@ -193,7 +193,7 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 
 		from jarvis.tools import _private_output
 
-		# AP/AR source snapshots never use the ordinary or shared transports.
+		# Sealed review source snapshots never use the ordinary or shared transports.
 		# Reject here, before either route can claim a callback or collect ERP data.
 		if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
 			frappe.local.response.http_status_code = 400
