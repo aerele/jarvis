@@ -83,7 +83,7 @@ describe("the scene loader map", () => {
 		expect(reported.mock.calls[0][0]).toMatchObject({
 			error_class: "HolidaySceneLoadFailed",
 			error_code: "holiday_scene:diwali",
-			stack: expect.stringContaining("Failed to fetch dynamically imported module"),
+			stack: "", // the browser's message would make the reporter drop it (holidayReportDelivery.spec.js)
 		});
 		clock += SCENE_RETRY_MS;
 		expect(

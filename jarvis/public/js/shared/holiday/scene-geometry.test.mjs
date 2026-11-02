@@ -31,6 +31,7 @@ import {
   heroTopMin,
   sceneHeroTop,
   toranBottom,
+  TIGHT_SLACK_PX,
 } from "./scene-geometry.mjs";
 import { DESIGNS } from "./answer.mjs";
 import { r2 } from "./stage.mjs";
@@ -104,7 +105,7 @@ test("at the least fireworks shift the highest spark is still below the toran", 
 // drawn; a short one pulls the row's bottom up to the stage bottom minus FLOOR_GAP_PX and
 // shrinks the row by the same amount, as a group.
 test("the floor row's extent comes from the diya the art draws", () => {
-  const svg = floorSVG("t-", 300, floorFit({ ground: 300, hostH: 2000, s: 1 }));
+  const svg = floorSVG("t-", 300);
   // The diya sits `lift` above the baseline at DIYA.scale; the glow and shadow numbers
   // the extent is built from are the ones in the markup.
   assert.ok(
@@ -348,6 +349,39 @@ test("a row the hero is too close to even at its smallest is reported as tight, 
   assert.equal(floorFit({ ...CROWDED, s: 2, clearTop: 345.6 }).tight, true); // 1.2 px
   assert.equal(floorFit({ ...CROWDED, clearTop: undefined }).tight, false);
   assert.equal(floorFit({ ground: NaN, hostH: 500, s: 1 }).tight, false);
+});
+
+test("the tight slack is one pixel: a row exactly that far short still fits, a hair more is tight", () => {
+  assert.equal(TIGHT_SLACK_PX, 1);
+  // At 0.55 the row's top reaches 345 (CROWDED); the slack is in px, so it is 1 / s in units.
+  for (const s of [1, 2, 4]) {
+    const edge = 345 + TIGHT_SLACK_PX / s;
+    const fit = (clearTop) => floorFit({ ...CROWDED, s, clearTop });
+    assert.equal(fit(edge).scale, MIN_FLOOR_SCALE);
+    assert.equal(fit(edge).tight, false, `s ${s}: at the slack`);
+    assert.equal(fit(edge + 1e-6).tight, true, `s ${s}: past the slack`);
+  }
+});
+
+test("a larger minScale stops the shrink there, and reports tight sooner", () => {
+  const roomy = floorFit({ ...CROWDED, clearTop: 346.2 });
+  assert.equal(roomy.scale, MIN_FLOOR_SCALE);
+  assert.equal(roomy.tight, true);
+  const phone = floorFit({ ...CROWDED, clearTop: 300, minScale: 0.8 });
+  assert.equal(phone.scale >= 0.8, true);
+  assert.equal(
+    floorFit({ ...CROWDED, clearTop: 360, minScale: 0.8 }).scale,
+    0.8
+  );
+  assert.equal(
+    floorFit({ ...CROWDED, clearTop: 360, minScale: 0.8 }).tight,
+    true
+  );
+  // Without it nothing changes.
+  assert.deepEqual(
+    floorFit({ ...CROWDED, clearTop: 360 }),
+    floorFit({ ...CROWDED, clearTop: 360, minScale: MIN_FLOOR_SCALE })
+  );
 });
 
 // ---- the rows with something tall under the hero (the page places the hero by them) ----------

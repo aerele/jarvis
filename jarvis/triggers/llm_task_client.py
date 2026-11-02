@@ -4,8 +4,8 @@ jarvis-admin-v2#597: LLM triggers used ``jarvis.chat.voice.openrouter_complete``
 (the voice/STT OpenRouter key), which most tenants never configure - every
 trigger ended as a Failed activity, "Speech-to-text is not configured on this
 site." The gateway already runs completions with NO tools on the tenant's own
-configured model via ``POST {http base of Jarvis Settings.agent_url}/tools/invoke``
-(same bearer as ``jarvis.chat.canvas`` / ``jarvis.chat.generated_media``), so
+configured model via the plugin's signed ``POST {http base of Jarvis Settings.agent_url}/jarvis/llm-task``
+route (the plugin holds the gateway owner token; this site never does), so
 triggers use that instead and only fall back to OpenRouter when the tool is
 unavailable (older/unconfigured runtime).
 
@@ -19,7 +19,7 @@ string.
 
 Same SSRF-safe conventions as ``fetch_media``: the host is ALWAYS the tenant's
 own ``agent_url`` (never attacker-influenced), redirects are disabled, and the
-response body is read bounded/streamed. The bearer token is never logged or
+response body is read bounded/streamed. The signing key is never logged or
 included in a raised error.
 """
 
@@ -29,7 +29,7 @@ import uuid
 
 import frappe
 
-from jarvis.chat.canvas import _http_base
+from jarvis.chat import plugin_routes, session_claims
 
 _CONNECT_TIMEOUT_S = 10
 _MAX_RESPONSE_BYTES = 1 * 1024 * 1024
@@ -53,13 +53,10 @@ class LLMTaskNotAvailableError(LLMTaskError):
 	error, never on the base ``LLMTaskError``."""
 
 
-def _agent_gateway_creds() -> tuple[str, str]:
-	"""``(http_base, bearer_token)`` for this site's agent gateway, or
-	``("", "")`` when either half is unset."""
+def _agent_url() -> str:
+	"""The agent URL from Jarvis Settings, or "" when unset."""
 	settings = frappe.get_cached_doc("Jarvis Settings")
-	base = _http_base(getattr(settings, "agent_url", "") or "")
-	token = (settings.get_password("agent_token", raise_exception=False) or "").strip()
-	return base, token
+	return (getattr(settings, "agent_url", "") or "").strip()
 
 
 def _read_bounded(response) -> bytes:
@@ -169,45 +166,52 @@ def llm_task_complete(
 	except SiteIsCopyError as e:
 		raise LLMTaskError(str(e)) from e
 
-	base, token = _agent_gateway_creds()
-	if not base or not token:
+	agent_url = _agent_url()
+	if not agent_url:
 		raise LLMTaskError("agent gateway is not configured on this site")
 
-	body = {
-		"name": "llm-task",
-		"args": {
-			"prompt": prompt,
-			"input": input_payload,
-			"schema": {"type": ["object", "string"] if expect_object else "string"},
-			"maxTokens": _MAX_TOKENS,
-			"timeoutMs": timeout * 1000,
-		},
-		"sessionKey": f"agent:main:trigger-{uuid.uuid4().hex}",
-		"agentId": "main",
+	args = {
+		"prompt": prompt,
+		"input": input_payload,
+		"schema": {"type": ["object", "string"] if expect_object else "string"},
+		"maxTokens": _MAX_TOKENS,
+		"timeoutMs": timeout * 1000,
 	}
+	# The plugin vouches this key with the site before it runs the task, so claim it
+	# first: a trigger key has no row until the activity is written.
+	session_key = f"agent:main:trigger-{uuid.uuid4().hex}"
+	session_claims.claim(session_key)
 	try:
-		# allow_redirects=False: the route only ever answers 200/4xx/5xx, so a
-		# 3xx would mean a compromised gateway trying to pivot the bench at an
-		# internal URL (same reasoning as jarvis.chat.generated_media.fetch_media).
-		with requests.post(
-			f"{base}/tools/invoke",
-			json=body,
-			headers={"Authorization": f"Bearer {token}"},
-			timeout=(_CONNECT_TIMEOUT_S, timeout + _TIMEOUT_BUFFER_S),
+		# route_request never follows a redirect: the route only ever answers
+		# 200/4xx/5xx, so a 3xx would mean a compromised gateway trying to pivot the
+		# bench at an internal URL (same reasoning as generated_media.fetch_media).
+		with plugin_routes.route_request(
+			agent_url,
+			"POST",
+			plugin_routes.LLM_TASK_PATH,
+			session_key,
+			{"args": args},
+			read_timeout_s=timeout + _TIMEOUT_BUFFER_S,
 			stream=True,
-			allow_redirects=False,
 		) as response:
 			status = response.status_code
 			raw = _read_bounded(response)
 	except LLMTaskError:
 		raise
+	except plugin_routes.PluginRouteError as e:
+		raise LLMTaskError(str(e)) from e
 	except requests.Timeout as e:
 		raise LLMTaskError("llm-task request timed out") from e
 	except Exception as e:
-		raise LLMTaskError(f"llm-task request failed: {e}") from e
+		raise LLMTaskError("llm-task request failed") from e
+
+	# 401/403 are the plugin refusing this site (bad key, or a session it will not
+	# vouch for): a fixed error, never a fallback to another completion path.
+	if status in (401, 403):
+		raise LLMTaskError("llm-task request was refused by the agent plugin")
 
 	# Checked BEFORE parsing: an older runtime that doesn't even know the
-	# ``/tools/invoke`` route can 404 with a plain-text/HTML body, not the
+	# ``/jarvis/llm-task`` route can 404 with a plain-text/HTML body, not the
 	# ``{"ok": false, "error": {...}}`` envelope - that must still resolve to
 	# "not available" so callers fall back, not to a generic parse failure.
 	if status == 404:

@@ -10,6 +10,8 @@
 // the page scales a unit to s = min(width / 800, 1.25) px. Every "units" in the scenes' code
 // and comments means these.
 
+import { WORN_OVERHANG } from "./worn-room.mjs";
+
 // The toran: a thread sagging TORAN.sag units between hooks at y = TORAN.top, hung with
 // blooms (radius TORAN.bloom) and mango leaves (TORAN.leaf tall). It drops in from above
 // and overshoots TORAN.overshoot units before settling.
@@ -125,7 +127,8 @@ export const centreUp = (row) => (row.mid === undefined ? row.up : row.mid);
  *   same amount, as one group about its bottom centre, so its top stays where the layout put it.
  * - `clearTop` (units, y down; the hero's bottom plus HERO_FLOOR_GAP_PX): the part of the row
  *   under the hero may not reach above it, so the row shrinks further about its bottom.
- * Neither rule shrinks past MIN_FLOOR_SCALE. A stage with room gives scale 1. `bottom` is the
+ * Neither rule shrinks past `minScale` (MIN_FLOOR_SCALE; the phone asks for more, see
+ * scene-phone.mjs phoneFloorMinScale). A stage with room gives scale 1. `bottom` is the
  * row's drawn bottom; `anchor` is where that bottom lands; `tight` says the part under the hero
  * still reaches above `clearTop` at the smallest scale (the scene then leaves that part out).
  */
@@ -136,6 +139,7 @@ export function floorFit({
   s,
   gapPx = FLOOR_GAP_PX,
   clearTop,
+  minScale = MIN_FLOOR_SCALE,
 }) {
   const bottom = ground - row.rise;
   const identity = {
@@ -148,13 +152,13 @@ export function floorFit({
   if (!Number.isFinite(bottom) || !(hostH > 0) || !(s > 0)) return identity;
   const over = pulledUp(bottom, hostH, s, gapPx);
   const height = row.up - row.rise;
-  let scale = Math.max(MIN_FLOOR_SCALE, Math.min(1, 1 - over / height));
+  let scale = Math.max(minScale, Math.min(1, 1 - over / height));
   const anchor = bottom - over;
   const mid = centreUp(row);
   let tight = false;
   if (Number.isFinite(clearTop) && Number.isFinite(mid) && mid > row.rise) {
     const room = (anchor - clearTop) / (mid - row.rise);
-    scale = Math.max(MIN_FLOOR_SCALE, Math.min(scale, room));
+    scale = Math.max(minScale, Math.min(scale, room));
     // Even the smallest row still reaches above the hero's clearance: the page can do no more.
     tight = anchor - scale * (mid - row.rise) < clearTop - TIGHT_SLACK_PX / s;
   }
@@ -167,7 +171,7 @@ const pulledUp = (bottom, hostH, s, gapPx) =>
 
 // The page puts the hero on a whole pixel, which can be up to half a pixel lower than the place
 // it worked out, so a row that is a pixel short of its gap still counts as fitting.
-const TIGHT_SLACK_PX = 1;
+export const TIGHT_SLACK_PX = 1;
 
 /** Where a point of the drawn row lands once the row is fitted (the row scales about x = 400). */
 export function fitPoint(fit, [x, y]) {
@@ -246,24 +250,9 @@ export const sceneHeroTop = (design, s) =>
   Object.hasOwn(HERO_TOP_UNITS, design) ? HERO_TOP_UNITS[design] * s : 0;
 
 // ---- the worn item above the mark ------------------------------------------------------------
-// The item the mark wears (hat, umbrella, crescent ...) is drawn on a layer over the mark and
-// hangs past the tile's top. The page keeps all of it, plus WORN_GAP_PX, below the top of the
-// stage: while the hero is centred, as it glides up and at rest. The real box is measured from
-// the drawn layer when there is one (HolidayStage.vue); this table is what the page uses before
-// the layer is mounted, and its floor afterwards. Units are the 56-unit tile space the worn
-// art is drawn in: how far the item reaches above the tile's top, rounded up with a little
-// room for the reactions (worn-overhang.test.mjs works the real reach out from the markup and
-// the reaction keyframes and holds each number to it, so the table cannot drift from worn.mjs).
-// A design with no entry wears nothing above the tile (its item sits on the tile or beside it).
-export const WORN_OVERHANG = {
-  christmas: 36,
-  newyear: 22.5,
-  eid: 19.5,
-  onam: 19.5,
-  holi: 19,
-};
-
-export const WORN_GAP_PX = 12; // room kept between the item's top and the stage's top
+// The item the mark wears (hat, umbrella, crescent ...) hangs past the tile's top; its
+// numbers (WORN_OVERHANG, WORN_GAP_PX) live in worn-room.mjs and are re-exported here.
+export { WORN_GAP_PX, WORN_OVERHANG } from "./worn-room.mjs";
 
 /** How far (tile units) the design's item reaches above the tile's top. */
 export const wornOverhangUnits = (design) =>

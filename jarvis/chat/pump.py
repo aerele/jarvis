@@ -3987,6 +3987,13 @@ def _mark_recovering_mirror(
 	return True
 
 
+# What a budget-exhausted ``recovering -> errored`` owes. Only the macro hook: this edge
+# writes no ``terminal_kind``/``terminal_payload`` (``terminal_publish`` would re-publish
+# it as a ``run:end``) and publishes its own ``run:error`` and File Box seal below, so the
+# rest of ``settlement.TERMINAL_EFFECTS`` would repeat or contradict them.
+_RECOVERY_END_EFFECTS = ("macro_advance",)
+
+
 def _settle_recover_errored(
 	run_id: str,
 	version: int,
@@ -3994,6 +4001,8 @@ def _settle_recover_errored(
 	assistant_message: str | None,
 	*,
 	error: str | None = None,
+	deps: PumpDeps | None = None,
+	relay_target_id: str | None = None,
 ) -> bool:
 	"""SUXF-1: budget-exhausted ``recovering -> errored`` (D2 row 24) that reaches
 	the SAME terminal user experience as a mid-stream ``relay:error`` — write the
@@ -4001,10 +4010,17 @@ def _settle_recover_errored(
 	sits forever at ``streaming=1`` with an empty spinner and no backstop, then
 	publish the fenced ``run:error`` with today's classification. No
 	``changed_data`` (the interrupted run may have streamed/tool-called; we do NOT
-	claim nothing changed). Returns won/lost."""
+	claim nothing changed). Returns won/lost.
+
+	The end owes the macro hook (``_RECOVERY_END_EFFECTS``), written in the SAME commit
+	as the end like ``settlement`` does, so a macro run or summary whose turn ends here
+	is moved by the finalize job and not left to the five minute check. The finalize job
+	is enqueued after that commit; a lost enqueue is the effect-ledger scan's to resend
+	(``_watchdog_shard``). ``deps``/``relay_target_id``: where to enqueue it."""
 	err = error or _STALLED_ERROR
 	if not ts.recover_errored(run_id, version, error=err):
 		return False
+	ts.insert_required_effects(run_id, _RECOVERY_END_EFFECTS)
 	code = _classify_error(err)
 	if code == "subscription-expired":
 		from jarvis import subscription_health
@@ -4038,6 +4054,13 @@ def _settle_recover_errored(
 	from jarvis.chat import llm_switch
 
 	llm_switch.apply_if_active(source="pump._settle_recover_errored")
+	if deps is not None and relay_target_id:
+		try:
+			deps.enqueue_finalize(run_id, relay_target_id)
+		except Exception:
+			# The end and its effect rows are committed: the watchdog's effect-ledger
+			# scan sends the finalize again. Not worth undoing the end for.
+			frappe.log_error(title="pump.recover_errored enqueue_finalize", message=frappe.get_traceback())
 	return True
 
 
@@ -4751,7 +4774,9 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 				if ts.mark_recovering(run_id, v):
 					frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 					v += 1
-				if _settle_recover_errored(run_id, v, conv, am, error=_STALLED_ERROR):
+				if _settle_recover_errored(
+					run_id, v, conv, am, error=_STALLED_ERROR, deps=deps, relay_target_id=target
+				):
 					summary["errored"] += 1
 			elif r.get("deadline_at") and _expired(r.get("deadline_at"), now):
 				if _mark_recovering_mirror(
@@ -4765,7 +4790,7 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 			# as a mid-stream error (Message streaming=0 + error + run:error) instead
 			# of stranding the Message row at streaming=1 with no backstop.
 			if _recovery_budget_exhausted(r, now):
-				if _settle_recover_errored(run_id, v, conv, am):
+				if _settle_recover_errored(run_id, v, conv, am, deps=deps, relay_target_id=target):
 					summary["errored"] += 1
 			elif r.get("dispatching_at") is None:
 				if ts.recover_to_queued(run_id, v):

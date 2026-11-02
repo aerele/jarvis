@@ -3,6 +3,7 @@ Settings, and thin server wrappers the onboarding page calls (so the browser
 never holds admin creds). admin_client returns already-unwrapped admin data."""
 
 import json
+import re
 import unicodedata
 
 import frappe
@@ -18,6 +19,7 @@ from jarvis import (
 	onboarding_contract,
 	release_notice,
 )
+from jarvis._cache_latch import claim_once
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
@@ -125,7 +127,7 @@ def write_connection(data: dict) -> None:
 	"no on_update retrigger" property this function exists for."""
 	if not isinstance(data, dict):
 		return
-	from jarvis._password_utils import set_settings_password
+	from jarvis._password_utils import clear_settings_password, set_settings_password
 	from jarvis.chat import runtime_profile
 
 	# Serialize authority receipt, connection, and profile as one DB transaction.
@@ -175,6 +177,9 @@ def write_connection(data: dict) -> None:
 		from jarvis import tenant_authority
 
 		tenant_authority.clear(s)
+		# A different principal is a different tenant: the old tenant's callback
+		# key must not shadow the new tenant's token.
+		clear_settings_password(s, "callback_key")
 	if data.get("api_key"):
 		set_settings_password(s, "jarvis_admin_api_key", data["api_key"])
 	if data.get("api_secret"):
@@ -195,7 +200,11 @@ def write_connection(data: dict) -> None:
 	# old one. guard() advances the stored (generation, handle) only on ACCEPT, so
 	# the secrets and the authority receipt move together. Credential fields above
 	# are unguarded: they carry no generation and are never part of the race.
-	if data.get("agent_url"):
+	# The callback key and the owner-key retirement ride the same authority
+	# fence, so a stale or foreign payload can neither set the key nor clear the
+	# stored agent_token. A payload without agent_url passes the same guard.
+	retiring = data.get("owner_key_retired") is True
+	if data.get("agent_url") or data.get("callback_key") or retiring:
 		from jarvis import tenant_authority
 
 		write_conn = True
@@ -218,7 +227,7 @@ def write_connection(data: dict) -> None:
 				tenant_authority.log_stale_once(
 					s.get(tenant_authority.GEN_FIELD), data.get(tenant_authority.GEN_FIELD)
 				)
-		if write_conn:
+		if write_conn and data.get("agent_url"):
 			runtime_profile._forget_snapshot()
 			s.db_set("agent_url", data["agent_url"])
 			if isinstance(data, runtime_profile.ConnectionData):
@@ -227,6 +236,18 @@ def write_connection(data: dict) -> None:
 				runtime_profile.persist(None, s, unavailable=True)
 			if data.get("agent_token"):
 				_store_agent_token(s, data["agent_token"])
+		if write_conn:
+			if data.get("callback_key"):
+				_store_callback_key(data["callback_key"])
+			if retiring:
+				# Admin retired the gateway owner key: the plugin now signs with the
+				# callback key only, so the stored owner token must stop verifying.
+				clear_settings_password(s, "agent_token")
+				s.db_set("agent_token_issued_at", None)
+				# Retired with no callback key stored: tool calls 503 until it
+				# arrives, so fetch it with a proof. Never inline: this runs under the
+				# Jarvis Settings row lock, and the fetch is an admin round trip.
+				schedule_callback_key_fetch()
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them. Wider than
 	# ``new_admin_login`` above on purpose - a standalone customer_password (the
@@ -273,13 +294,163 @@ def _store_agent_token(settings, token: str) -> None:
 		settings.db_set("agent_token_issued_at", frappe.utils.now_datetime())
 
 
+_CALLBACK_KEY_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _store_callback_key(key: str) -> bool:
+	"""Store the per-tenant callback key. Only a 64 lowercase hex key is accepted;
+	anything else is ignored so a malformed payload cannot lock the plugin out."""
+	from jarvis._password_utils import set_settings_password
+
+	if not isinstance(key, str) or not _CALLBACK_KEY_RE.fullmatch(key):
+		return False
+	set_settings_password(frappe.get_single("Jarvis Settings"), "callback_key", key)
+	return True
+
+
+def has_callback_key() -> bool:
+	from frappe.utils.password import get_decrypted_password
+
+	return bool(
+		get_decrypted_password("Jarvis Settings", "Jarvis Settings", "callback_key", raise_exception=False)
+	)
+
+
+def fetch_callback_key_if_missing() -> None:
+	"""Run a proof-backed sync when no callback key is stored. The key only ever
+	arrives through ``write_connection`` (behind the tenant-authority guard), never
+	from a pairing response. Best effort and not re-entrant: a sync that returns no
+	key does not start another."""
+	if has_callback_key():
+		return
+	_best_effort_key_sync()
+
+
+def schedule_callback_key_fetch() -> None:
+	"""``fetch_callback_key_if_missing`` as a background job that starts after the
+	current transaction commits, so no lock is held across the admin call. Deduplicated
+	per site; skipped inside a key sync already running (its own write must not queue
+	another) and when a key is already stored. Never raises."""
+	if getattr(frappe.flags, "jarvis_key_fetch", False) or has_callback_key():
+		return
+	try:
+		frappe.enqueue(
+			"jarvis.onboarding.fetch_callback_key_if_missing",
+			queue="short",
+			job_id=f"jarvis_callback_key_fetch:{frappe.local.site}",
+			deduplicate=True,
+			enqueue_after_commit=True,
+		)
+	except Exception:
+		frappe.log_error(title="callback key fetch: enqueue failed", message=frappe.get_traceback())
+
+
+KEY_RESYNC_THROTTLE_S = 600
+# A FAILED self-heal retries sooner: the throttle's expiry is cut to this.
+KEY_RESYNC_FAILED_THROTTLE_S = 120
+_KEY_RESYNC_THROTTLE_PREFIX = "jarvis:key_resync:"
+
+
+def request_key_resync() -> bool:
+	"""Stale-key self-heal. A plugin request carried a key this site does not hold
+	(admin rotated it, or a delivery was missed): queue ONE proof-backed key sync so
+	the next request can match. At most once per ``KEY_RESYNC_THROTTLE_S`` per site
+	(``KEY_RESYNC_FAILED_THROTTLE_S`` after a failed run), and the caller has already
+	rejected the request. Returns whether a job was queued; never raises."""
+	try:
+		if not claim_once(_KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site, KEY_RESYNC_THROTTLE_S):
+			return False
+		frappe.enqueue(
+			"jarvis.onboarding.run_key_resync",
+			queue="short",
+			job_id=f"jarvis_key_resync:{frappe.local.site}",
+			deduplicate=True,
+			enqueue_after_commit=True,
+		)
+		return True
+	except Exception:
+		return False
+
+
+def run_key_resync() -> None:
+	"""The key-resync job (stale-key self-heal and the post-pairing resync): one
+	proof-backed sync as Administrator with the normal admin timeout (no request is
+	held open). Failures are logged without frame locals, and a failed run shortens
+	the self-heal throttle so the next stale request retries within two minutes."""
+	if getattr(frappe.flags, "jarvis_key_fetch", False):
+		return
+	# nosemgrep: frappe-setuser -- background job has no session user; the key sync writes Jarvis Settings and the Error Log
+	frappe.set_user("Administrator")
+	frappe.flags.jarvis_key_fetch = True
+	try:
+		_sync_connection(prove=True)
+	except Exception:
+		frappe.log_error(title="callback key resync failed", message=frappe.get_traceback())
+		_shorten_key_resync_throttle()
+	finally:
+		frappe.flags.jarvis_key_fetch = False
+
+
+def _shorten_key_resync_throttle() -> None:
+	"""Cut the self-heal throttle's remaining life to ``KEY_RESYNC_FAILED_THROTTLE_S``
+	(never extend it). A no-op when no throttle key exists, e.g. after a post-pairing
+	run. Never raises."""
+	try:
+		cache = frappe.cache()
+		gate = cache.make_key(_KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site)
+		ttl = cache.ttl(gate)
+		if ttl == -1 or ttl > KEY_RESYNC_FAILED_THROTTLE_S:
+			cache.expire(gate, KEY_RESYNC_FAILED_THROTTLE_S)
+	except Exception:
+		pass
+
+
+def resync_callback_key_after_pairing() -> None:
+	"""Queue a proof-backed sync after EVERY proof-backed pairing, whether or not a key
+	is stored, so a callback key admin rotated always reaches this site. A background
+	job that starts after the current transaction commits: pairing never waits for it
+	(admin's pairing approval holds a container lock for up to 30 s, which an inline
+	sync would stall behind and give up on). Deduplicated per site; skipped inside a
+	running key sync. A failure to queue never fails the pairing."""
+	if getattr(frappe.flags, "jarvis_key_fetch", False):
+		return
+	try:
+		frappe.enqueue(
+			"jarvis.onboarding.run_key_resync",
+			queue="short",
+			job_id=f"jarvis_key_resync_pairing:{frappe.local.site}",
+			deduplicate=True,
+			enqueue_after_commit=True,
+		)
+	except Exception:
+		frappe.log_error(title="callback key resync: enqueue failed", message=frappe.get_traceback())
+
+
+def _best_effort_key_sync() -> None:
+	if getattr(frappe.flags, "jarvis_key_fetch", False):
+		return
+	frappe.flags.jarvis_key_fetch = True
+	try:
+		_sync_connection(timeout_s=8, prove=True)
+	except Exception:
+		# message= on purpose: without it Frappe dumps every frame's locals, and these
+		# frames hold the admin Authorization header and the connection payload.
+		frappe.log_error(title="callback key fetch failed", message=frappe.get_traceback())
+	finally:
+		frappe.flags.jarvis_key_fetch = False
+
+
 @frappe.whitelist(methods=["POST"])
-def sync_connection(timeout_s: int | None = None) -> dict:
-	"""Pull the container connection from admin and store it. Daily scheduled +
-	the page's 'Sync connection' button + the reconnect landing. No-op until
-	onboarded/assigned.
+def sync_connection(timeout_s: int | None = None, prove: int = 0) -> dict:
+	"""Pull the container connection from admin and store it. The page's 'Sync
+	connection' button, the onboarding wizard's poll and the reconnect landing; the
+	daily job is ``scheduled_sync_connection``. No-op until onboarded/assigned.
 
 	``timeout_s`` bounds the admin fetch (None = default); the reconnect landing passes a short one.
+	``prove`` attaches a fresh site proof (admin charges it to a shared hourly budget and
+	runs a container exec). Off by default so the wizard's 2 s poll never spends it; an
+	enforced tenant then gets the connection without secrets, an unenforced one still
+	gets agent_token, which first onboarding needs.
 
 	Gated on System Manager: writes admin credentials and container connection
 	into Jarvis Settings (jarvis_admin_api_key, agent_url, agent_token). The
@@ -287,6 +458,19 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	from the 2026-06-16 code review.
 	"""
 	require_jarvis_admin()
+	return _sync_connection(timeout_s, prove=bool(prove))
+
+
+def scheduled_sync_connection() -> dict:
+	"""The daily job: ``sync_connection`` with a site proof. Not whitelisted."""
+	return sync_connection(prove=True)
+
+
+def _sync_connection(timeout_s: int | None = None, prove: bool = False) -> dict:
+	"""``sync_connection`` without the role check, for the callers that must fetch
+	the connection themselves. Carries a fresh site proof only when ``prove``."""
+	from jarvis.chat import pairing_proof
+
 	settings = frappe.get_single("Jarvis Settings")
 	api_key = settings.get_password("jarvis_admin_api_key", raise_exception=False) or ""
 	api_secret = settings.get_password("jarvis_admin_api_secret", raise_exception=False) or ""
@@ -295,7 +479,9 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	)
 	if not ((api_key and api_secret) or oauth_ready):
 		return {"synced": False, "reason": "not onboarded"}
-	get_conn_kwargs = {} if timeout_s is None else {"timeout_s": timeout_s}
+	get_conn_kwargs = {"proof_nonce": pairing_proof.issue_nonce()} if prove else {}
+	if timeout_s is not None:
+		get_conn_kwargs["timeout_s"] = timeout_s
 	data = admin_client.get_connection(**get_conn_kwargs)
 	# Outside the agent_url branch: a payload without one must still be able to
 	# raise or clear the release notice, and this is the only refresh an idle
@@ -1820,7 +2006,7 @@ def _land_reconnect(data: dict) -> dict:
 	# best-effort) not on the daily cron, or every call_tool 401s for up to a day.
 	# require_jarvis_admin (sync_connection's gate) already passed at the entry.
 	try:
-		sync_connection(timeout_s=15)
+		sync_connection(timeout_s=15, prove=True)
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), "reconnect: eager agent_token sync failed")
 	return {"status": "connected"}

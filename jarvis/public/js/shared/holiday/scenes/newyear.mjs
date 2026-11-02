@@ -4,7 +4,7 @@
 // text. The year and the fireworks stay between the clearance line and the top of the hero.
 import { quadPath, r2, rng, tr } from "../stage.mjs";
 import { Scene, playScene } from "./scene-runtime.mjs";
-import { toTile } from "./scene-place.mjs";
+import { squeezeX, toTile } from "./scene-place.mjs";
 import {
   BURSTS,
   CANNON,
@@ -13,6 +13,7 @@ import {
   FLOOR_ROW,
   PEAK,
   ROCKET_MS,
+  cannonXs,
   defsSVG,
   floorSVG,
   muzzle,
@@ -58,9 +59,15 @@ class NewYearScene extends Scene {
     super(host, opts, CFG);
   }
 
-  // The fireworks follow the mark, but never up past the clearance line.
+  // The fireworks follow the mark, but never up past the clearance line. The cannons stand
+  // where they clear the hero, worked out at the start (inner): a later relayout moves the
+  // row, and the cannons are held at their places in it, but does not move them along it.
   extra(_b, geo) {
-    return { dy: Math.max(geo.shift, FIREWORKS_MIN_SHIFT) };
+    return {
+      dy: Math.max(geo.shift, FIREWORKS_MIN_SHIFT),
+      cannons: cannonXs(geo),
+      burstX: BURSTS.map((b) => squeezeX(b.x, geo)),
+    };
   }
 
   px() {
@@ -69,10 +76,13 @@ class NewYearScene extends Scene {
 
   inner(geo) {
     const { p } = this;
+    this.cannonX = geo.cannons;
     const floor = this.opts.replay
       ? ""
-      : this.floorGroup(floorSVG(p, geo.ground));
-    return `${skySVG(p, geo.dy)}${yearSVG(
+      : this.floorGroup(
+          floorSVG(p, geo.ground, geo.cannons, (x, prop) => this.edge(x, prop))
+        );
+    return `${skySVG(p, geo.dy, geo.burstX)}${yearSVG(
       p,
       yearText(this.opts.year),
       yearPlan(geo)
@@ -100,12 +110,13 @@ class NewYearScene extends Scene {
     const { stage, p, geo } = this;
     const t = rocketAt(b.n);
     const y = b.y + geo.dy;
+    const x = geo.burstX[b.n];
     stage.animate(
       stage.q(`.${p}nrk${b.n}`),
       [
-        { transform: tr(b.x + (b.n % 2 ? 14 : -14), geo.hu), opacity: 1 },
-        { transform: tr(b.x, y), opacity: 1, offset: 0.95 },
-        { transform: tr(b.x, y - 3), opacity: 0 },
+        { transform: tr(x + (b.n % 2 ? 14 : -14), geo.hu), opacity: 1 },
+        { transform: tr(x, y), opacity: 1, offset: 0.95 },
+        { transform: tr(x, y - 3), opacity: 0 },
       ],
       {
         duration: ROCKET_MS,
@@ -170,10 +181,11 @@ class NewYearScene extends Scene {
   // cannons are not drawn, so the hat comes in from the bottom right corner instead.
   prepare() {
     const arc = (g) => {
-      const [mx, my] = muzzle(CANNON.x[1], -1);
+      const x = this.cannonX[1];
+      const [mx, my] = muzzle(x, -1);
       const mouth = this.opts.replay
         ? [g.to - 20, g.hu + 20]
-        : this.fitted([mx, this.floorBottom + my]);
+        : this.fittedHeld(x, [mx, this.floorBottom + my]);
       return quadPath(toTile(g, mouth), [140, -150], [0, 0], 14, -720);
     };
     this.fly(arc, {

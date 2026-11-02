@@ -210,6 +210,40 @@ class TestCadence(_Case):
 		self.assertIsNone(_stored(user))
 
 
+class TestRefusalTakesNoLock(_Case):
+	"""When the stored showings already say no, the answer's ``may_play`` is False: the
+	endpoint returns before the row lock, so a refused request never queues behind a writer."""
+
+	def test_a_cadence_refusal_neither_locks_nor_writes(self):
+		user = self.person(dob=BIRTHDAY)
+		self.assertTrue(self.record(user, _at(9))["play"])
+		before = _stored(user)
+		real_get_value = frappe.db.get_value
+		locked = []
+
+		def get_value(*args, **kwargs):
+			if kwargs.get("for_update"):
+				locked.append(args)
+			return real_get_value(*args, **kwargs)
+
+		with (
+			mock.patch.object(frappe.db, "get_value", get_value),
+			mock.patch.object(frappe.db, "set_value") as set_value,
+			mock.patch.object(api, "_claim_showing") as claim,
+		):
+			self.assertEqual(self.record(user, _at(10)), {"play": False})
+		self.assertEqual(locked, [])
+		set_value.assert_not_called()
+		claim.assert_not_called()
+		self.assertEqual(_stored(user), before)
+
+	def test_an_allowed_showing_still_takes_the_lock_and_writes(self):
+		user = self.person(dob=BIRTHDAY)
+		with mock.patch.object(api, "_claim_showing", return_value=True) as claim:
+			self.assertEqual(self.record(user, _at(9)), {"play": True})
+		claim.assert_called_once()
+
+
 class TestForceOverride(_Case):
 	def test_the_override_plays_every_time_and_records_nothing(self):
 		user = self.person()  # no occasion of its own

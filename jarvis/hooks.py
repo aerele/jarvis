@@ -13,6 +13,9 @@ app_license = "AGPL-3.0-only"
 # access state (see jarvis/boot.py) so JS can branch on it without a
 # round-trip back to the server.
 boot_session = "jarvis.boot.set_jarvis_boot"
+# Runs after Frappe reads the cached boot_session blob, on every Desk load: the holiday
+# touch answer depends on the date, so it cannot live in the cached blob.
+extend_bootinfo = "jarvis.holiday_touch.boot.extend_bootinfo"
 
 # ---------------------------------------------------------------------------
 # Deployment constants
@@ -487,7 +490,7 @@ scheduler_events = {
 		"jarvis.oauth.pending_capture.sweep_expired",
 	],
 	"daily": [
-		"jarvis.onboarding.sync_connection",
+		"jarvis.onboarding.scheduled_sync_connection",
 		# Jarvis Pending Action purge (D3): settled terminal rows older than 7 days,
 		# in committed batches; never Pending/Executing or a held row still resuming.
 		"jarvis.chat.pending_actions.purge",
@@ -1086,6 +1089,8 @@ has_permission.update(
 # (``after_migrate`` and ``doc_events`` after commit), never by deleting keys (``delete_keys``
 # is a ``KEYS`` scan); answers expire by TTL (2 h at most, 10 min for an error).
 persistent_cache_keys = [
+	"jarvis:pairing_proof:",  # One-time site-proof nonces: 600 s TTL must survive watchdog clears.
+	"jarvis:key_resync:",  # The 10-minute stale-key self-heal throttle must survive the 5-minute clear.
 	"jarvis:pcal:",  # Financial snapshots retain bounded TTLs across watchdog cache clears.
 	"jarvis:query:",  # Saved result IDs retain their own 24-hour TTL across cache clears.
 	"jarvis:llm_switch",
@@ -1098,6 +1103,8 @@ persistent_cache_keys = [
 	"jarvis:mcp_oauth_signin_error:",
 	"jarvis:memory_seen:",
 	"jarvis:holiday:",
+	"jarvis:session_claim:",  # Claims must outlive the 5-minute watchdog cache clear.
+	"jarvis:foreign_session:",  # Once-a-day throttles must survive the 5-minute watchdog cache clear.
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.
