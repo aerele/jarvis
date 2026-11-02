@@ -18,7 +18,7 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
-  "digest": "sha256:89e2f218487a7399a3b7018a7b5f420aebe0f28a4424ea63f6c8fc5b25cee0bd",
+  "digest": "sha256:33bf672d0062e9266e123e30edbd9cbf98f62021662d32dba637b67d2e106e67",
   "tools": [
     "add_comment",
     "add_tag",
@@ -63,6 +63,7 @@
     "get_my_access",
     "get_naming_series_preview",
     "get_party_dashboard_info",
+    "get_payroll_deposit_inputs",
     "get_purchase_match_inputs",
     "get_receivables_review_inputs",
     "get_report_filters",
