@@ -100,6 +100,7 @@ from jarvis.chat.steps import (
 	is_step,
 	join_segments,
 	remove_steps,
+	strip_loose_preambles,
 	strip_preambles,
 	strip_steps,
 )
@@ -347,6 +348,20 @@ class _Lane:
 		# on a pump hop from the pump's preamble cache (register_run's
 		# ``preamble_steps=``); a flag lost with that cache falls back to is_step.
 		self.preamble_steps: set[str] = set()
+		# Runtime-flagged preambles that were NOT in the streamed reply when they
+		# arrived (_route_preamble_step's offer-only path). The Claude subscription
+		# runtime sends pre-tool text this way and never streams it, but its final
+		# text can still carry it (aerele/jarvis#2367); the terminal cuts these where
+		# they stand as whole paragraphs (steps.strip_loose_preambles).
+		self.loose_preambles: list[str] = []
+		# Set on a hop re-attach: the first reply frame then moves ``since_tool`` past
+		# the last recorded step, so the next tool call finds only the text written
+		# after it (the old lane's offset is not carried over). Reply frames come only
+		# when the text grows, so a re-attached lane often sees a tool start BEFORE any
+		# text; ``boundary_before_text`` keeps that tool call until the first reply frame
+		# can place it (#2367).
+		self.resume_mark = False
+		self.boundary_before_text = False
 		self.shown_text = ""
 		# R6 saved-reply glue: the tail of each earlier segment (relay_mux
 		# module docstring / _reply_delta), reader-thread only like the steps
@@ -418,6 +433,20 @@ class _Lane:
 # --------------------------------------------------------------------------- #
 # The multiplexer
 # --------------------------------------------------------------------------- #
+
+
+def _end_of_last_step(text: str, steps: list[str]) -> int:
+	"""Where the reply text after the latest recorded step starts (0 when none is in
+	``text``). A re-attached lane uses it as its ``since_tool``: steps are recorded at
+	tool calls, so the text past the last one is what the next tool call may move."""
+	# Steps are recorded in order, so find each one after the previous: a step text
+	# that repeats later in the answer must not move the mark past that answer.
+	end = 0
+	for step in steps:
+		at = text.find(step, end) if step else -1
+		if at >= 0:
+			end = at + len(step)
+	return end
 
 
 class RelayMux:
@@ -719,6 +748,13 @@ class RelayMux:
 		# redact=False: this runs on the reader thread, which has no frappe.local
 		# site. The pump redacts the text fields itself, on its own thread, in
 		# _apply, right before they reach a lane callback.
+		if lane.resume_mark and not lane.stream_text and payload.get("stream") in ("tool", "thinking"):
+			# On a re-attached lane, a tool frame before the first reply frame (a result
+			# too: its start fell in the hop gap) means a tool ran after the text written
+			# so far. So does a thinking frame: the model thinks at the start of a step,
+			# after a tool result, never between two text blocks. The first reply frame
+			# places it (#2367).
+			lane.boundary_before_text = True
 		parsed = parse_event(payload, redact=False, collaboration=":dashboard:collab:" in lane.session_key)
 		if parsed and parsed.get("kind") == "tool_boundary" and parsed.get("tool_call_id"):
 			parsed = {**parsed, "kind": "tool", "phase": "start"}
@@ -786,13 +822,32 @@ class RelayMux:
 					lane.segment_tails.append(tail)
 			lane.since_tool = 0
 		lane.stream_text = text
+		if lane.resume_mark:
+			lane.resume_mark = False
+			lane.since_tool = _end_of_last_step(text, lane.steps)
+			if lane.boundary_before_text:
+				lane.boundary_before_text = False
+				self._move_step_before_delta(lane, text, parsed.get("delta", ""))
 		return self._shown_delta(lane, remove_steps(text, lane.steps), parsed.get("delta", ""))
+
+	def _move_step_before_delta(self, lane: _Lane, text: str, delta: str) -> None:
+		"""Place a tool call a re-attached lane saw before any reply text. The text was
+		already written up to this frame's ``delta``, so that is where the tool call
+		started: move the narration before it, as the tool boundary would have."""
+		if not delta or not text.endswith(delta):
+			return
+		lane.stream_text = text[: len(text) - len(delta)]
+		self._move_pending_step(lane)
+		lane.stream_text = text
 
 	def _move_pending_step(self, lane: _Lane) -> None:
 		"""At a tool call: if the reply text written since the previous tool call
 		is a short run of narration (is_step: one line, up to three sentences), it was
 		a step. Show it on the step line and take it out of the live display.
 		Anything longer stays in the reply."""
+		if lane.resume_mark and not lane.stream_text:
+			lane.boundary_before_text = True
+			return
 		pending = remove_steps(lane.stream_text[lane.since_tool :], lane.steps).strip()
 		lane.since_tool = len(lane.stream_text)
 		if not is_step(pending):
@@ -839,6 +894,13 @@ class RelayMux:
 		if stripped and anchored and is_preamble_step(stripped):
 			self._record_preamble_step(lane, stripped)
 			return
+		if stripped and is_preamble_step(stripped) and stripped not in lane.loose_preambles:
+			# A growing resend replaces the partial it extends (same rule as
+			# _record_preamble_step), so a short partial never lingers to match.
+			if lane.loose_preambles and stripped.startswith(lane.loose_preambles[-1]):
+				lane.loose_preambles[-1] = stripped
+			else:
+				lane.loose_preambles.append(stripped)
 		self._offer_step(lane, text)
 
 	def _record_preamble_step(self, lane: _Lane, text: str) -> None:
@@ -953,6 +1015,7 @@ class RelayMux:
 					"text": text,
 					"steps": list(lane.steps),
 					"preamble_steps": [s for s in lane.steps if s in lane.preamble_steps],
+					"loose_preambles": list(lane.loose_preambles),
 					# R6: segment tails recorded so far (see _Lane.segment_tails)
 					# so _finalize_terminal can glue the runtime's separator-
 					# free segment boundaries back together on the pump thread.
@@ -1049,6 +1112,9 @@ class RelayMux:
 		flagged = set(raw.get("preamble_steps") or [])
 		preambles = [step for step in raw["steps"] if step in flagged]
 		sentences = [step for step in raw["steps"] if step not in flagged and is_step(step)]
+		# A preamble that never streamed (Claude subscription runtime, #2367) can still
+		# come back in the final text; cut it where it is a whole paragraph.
+		joined = strip_loose_preambles(joined, raw.get("loose_preambles") or [])
 		stripped_of_steps = strip_steps(strip_preambles(joined, preambles), sentences)
 		answer, _, _ = egress_rules.redact_final_with_media(stripped_of_steps, run_id=raw["run_id"])
 		reshow = None
@@ -1267,6 +1333,7 @@ class RelayMux:
 		lane = _Lane(run_id, handler, session_key=session_key, start_seq=start_seq)
 		lane.steps = list(steps or [])
 		lane.preamble_steps = {step for step in preamble_steps or [] if step in lane.steps}
+		lane.resume_mark = is_readopt
 		with self._map_lock:
 			self._runs[run_id] = lane
 		return lane

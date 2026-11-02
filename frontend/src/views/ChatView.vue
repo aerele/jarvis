@@ -1176,6 +1176,21 @@
 										>
 											{{ errorInfo(m).actionLabel }}
 										</button>
+										<button
+											v-if="canReportError(m)"
+											type="button"
+											class="jv-retry"
+											:disabled="openSupportInFlight"
+											:style="{
+												cursor: openSupportInFlight
+													? 'default'
+													: 'pointer',
+												opacity: openSupportInFlight ? 0.6 : 1,
+											}"
+											@click="openErrorSupport(m)"
+										>
+											{{ __("Report error") }}
+										</button>
 									</div>
 								</div>
 							</template>
@@ -1996,10 +2011,11 @@
 					</template>
 					<!-- a File Box file's open questions, also on the Approval Board -->
 					<FileBoxWaits
-						v-if="fileboxWaits.length"
-						:items="fileboxWaits"
+						v-if="visibleFileboxWaits.length"
+						:items="visibleFileboxWaits"
 						:busy="fileboxWaitBusy"
 						@decide="decideFileboxWait"
+						@review="reviewFileboxSheet"
 					/>
 					<!-- background reports this chat started, until their results are shown -->
 					<ReportRunCards
@@ -3927,6 +3943,11 @@
 								</table>
 							</div>
 						</template>
+						<DocumentBlocks
+							v-else-if="artifact.document"
+							:document="artifact.document"
+							:file-url="artifact.url"
+						/>
 						<pre v-else-if="artifact.kind === 'text'" class="jv-artifact-text">{{
 							artifact.text
 						}}</pre>
@@ -3934,7 +3955,9 @@
 							Loading preview…
 						</div>
 						<div v-else class="jv-artifact-nopreview">
-							<p class="jv-preview-note">No inline preview for this file type.</p>
+							<p class="jv-preview-note">
+								{{ artifact.error || "No inline preview for this file type." }}
+							</p>
 							<a
 								:href="artifact.url"
 								:download="cvFile(artifact.cv)"
@@ -4444,6 +4467,13 @@
 			@confirm="onPreviewConfirm"
 		/>
 
+		<FileBoxSheetReview
+			v-if="fileboxReviewSession"
+			:key="fileboxReviewSession.id"
+			:session="fileboxReviewSession"
+			:onChanged="fileboxReviewChanged"
+			:onClosed="closeFileboxReview"
+		/>
 		<ConnectPhoneDialog v-model="showConnect" />
 
 		<CompactDialog
@@ -4578,6 +4608,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
+import { supportErrorDraft } from "@/lib/supportErrorDraft";
 import {
 	supportPillLabel as supportPillLabelFor,
 	supportAwaitingPhrase,
@@ -4622,11 +4653,14 @@ import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 import FilePreview from "@/components/FilePreview.vue";
+import DocumentBlocks from "@/components/DocumentBlocks.vue";
 import SheetCharts from "@/components/SheetCharts.vue";
 import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
+import FileBoxSheetReview from "@/components/chat/FileBoxSheetReview.vue";
+import { useFileBoxWaits } from "@/composables/useFileBoxWaits";
 import ReportRunCards from "@/components/chat/ReportRunCards.vue";
 import VersionPill from "@/components/chat/VersionPill.vue";
 import UpdateBanner from "@/components/chat/UpdateBanner.vue";
@@ -5286,7 +5320,7 @@ function recentMessagesForSupport() {
 // a double-click firing openSupport() twice concurrently: without this, a
 // second click could race the first to SupportNew before the first's prompt
 // even resolves.
-let openSupportInFlight = false;
+const openSupportInFlight = ref(false);
 async function openSupport() {
 	if (!supportOn) {
 		// Unconfigured-but-visible state (see supportEntryVisible): explain rather
@@ -5300,12 +5334,12 @@ async function openSupport() {
 	// supportMenuOptions below), and its "New ticket from this chat" row calls
 	// straight into this same function - so openSupport() itself never needs to
 	// know which of the two paths got it here.
-	if (openSupportInFlight) return;
-	openSupportInFlight = true;
+	if (openSupportInFlight.value) return;
+	openSupportInFlight.value = true;
 	try {
 		const recent = recentMessagesForSupport();
 		if (!recent.length) {
-			router.push({ name: "SupportNew" });
+			await router.push({ name: "SupportNew" });
 			return;
 		}
 		let copyBody = "";
@@ -5332,9 +5366,49 @@ async function openSupport() {
 				supportStore.setCopyPref("No");
 			}
 		}
-		router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
+		await router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
 	} finally {
-		openSupportInFlight = false;
+		openSupportInFlight.value = false;
+	}
+}
+
+function canReportError(m) {
+	const id = currentId.value;
+	// During selection, currentId/route can already name the next chat while the
+	// old history remains on screen. Never pair those IDs in a support draft.
+	if (!supportOn || !id || _shownConvId !== id || (route.params.id && route.params.id !== id))
+		return false;
+	const row = m?.name && messages.value.find((item) => item.name === m.name);
+	return !!(
+		row &&
+		row.role === "assistant" &&
+		row.error &&
+		!row.hidden &&
+		!row.stopped &&
+		!row.streaming &&
+		errorInfo(row).code !== "cancelled"
+	);
+}
+
+async function openErrorSupport(m) {
+	if (openSupportInFlight.value || !canReportError(m)) return;
+	const row = messages.value.find((item) => item.name === m.name);
+	const info = errorInfo(row);
+	const draft = supportErrorDraft({
+		code: info.code,
+		upstream: info.upstream,
+		conversation: currentId.value,
+		message: row.name,
+		at: row.modified || row.creation,
+	});
+	if (!draft) return;
+	openSupportInFlight.value = true;
+	try {
+		await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		notify(__("Could not open Support. Try again."), { type: "error" });
+	} finally {
+		openSupportInFlight.value = false;
 	}
 }
 // Waiting-reply count pill (header headphones button). awaiting_count is a
@@ -9108,6 +9182,14 @@ async function openArtifact(m, cv) {
 	const url = cv.file_url || cvOf(m, cv);
 	const t = cv.type;
 	const conv = currentId.value;
+	function isCurrent(req) {
+		if (artifact.value !== req) return false;
+		if (currentId.value !== conv) {
+			artifact.value = null;
+			return false;
+		}
+		return true;
+	}
 	if (t === "pdf" || t === "image") {
 		artifact.value = { m, cv, url, conv, kind: t };
 		if (t === "pdf") ensurePdfTemplates();
@@ -9117,7 +9199,9 @@ async function openArtifact(m, cv) {
 		let content = cvOf(m, cv);
 		if (!content) {
 			artifact.value = { m, cv, url, conv, kind: "loading" };
+			const req = artifact.value;
 			await ensureCanvas(m);
+			if (!isCurrent(req)) return;
 			content = cvOf(m, cv);
 		}
 		artifact.value = { m, cv, url, conv, kind: content ? t : "nopreview", content };
@@ -9125,8 +9209,12 @@ async function openArtifact(m, cv) {
 	}
 	// "file" (xlsx / csv / txt / …) → ask the backend for a tabular/text preview.
 	artifact.value = { m, cv, url, conv, kind: "loading" };
+	const req = artifact.value;
+	let previewError = "";
 	try {
 		const r = await api.previewFile(cv.file_url);
+		if (!isCurrent(req)) return;
+		previewError = r?.error || "";
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
 			artifact.value = {
 				m,
@@ -9140,13 +9228,21 @@ async function openArtifact(m, cv) {
 			return;
 		}
 		if (r && r.kind === "text") {
-			artifact.value = { m, cv, url, conv, kind: "text", text: r.text || "" };
+			artifact.value = {
+				m,
+				cv,
+				url,
+				conv,
+				kind: "text",
+				text: r.text || "",
+				document: r.document,
+			};
 			return;
 		}
 	} catch (e) {
-		/* fall through to download-only */
+		if (!isCurrent(req)) return;
 	}
-	artifact.value = { m, cv, url, conv, kind: "nopreview" };
+	artifact.value = { m, cv, url, conv, kind: "nopreview", error: previewError };
 }
 
 // --- Per-document PDF template override (jarvis.pdf_templates.rerender_document).
@@ -9869,7 +9965,21 @@ function _checkPulseOnce(id) {
 // A File Box file's chat shows what the file waits on, the same items the Approval
 // Board lists: its questions are answered here as on the board. Re-read on every load
 // (a run's end reloads the chat, which is when a new question appears).
-const fileboxWaits = ref([]);
+const {
+	items: fileboxWaits,
+	visibleItems: visibleFileboxWaits,
+	refresh: refreshFileboxWaits,
+	onEvent: onFileboxWaitEvent,
+	reviewSession: fileboxReviewSession,
+	openReview: reviewFileboxSheet,
+	reviewChanged: fileboxReviewChanged,
+	closeReview: closeFileboxReview,
+} = useFileBoxWaits({
+	conversation: currentId,
+	activeAsk,
+	load: api.fileboxOpenWaits,
+	onChanged: () => store.refreshApprovalsCount?.(),
+});
 const fileboxWaitBusy = ref("");
 // Background reports this chat started: a card each until Jarvis shows the results.
 // Re-read on every load, on Frappe's report_generated event, and every 15s while one
@@ -9907,18 +10017,6 @@ function onReportGenerated() {
 function showReportResults(item) {
 	if (busy.value || convStreaming.value) return;
 	send(`Show me the ${item.report_name} results${item.filters ? ` (${item.filters})` : ""}.`);
-}
-async function refreshFileboxWaits(id, isFileBox) {
-	if (!id || !isFileBox) {
-		fileboxWaits.value = [];
-		return;
-	}
-	try {
-		const r = await api.fileboxOpenWaits(id);
-		if (currentId.value === id) fileboxWaits.value = (r && r.items) || [];
-	} catch (e) {
-		// best-effort: the board still lists them
-	}
 }
 async function decideFileboxWait(item, text, approve) {
 	if (fileboxWaitBusy.value || !text) return;
@@ -13643,6 +13741,7 @@ onMounted(async () => {
 		})
 		.catch(() => {});
 	socket?.on("jarvis:event", onEvent);
+	socket?.on("jarvis:event", onFileboxWaitEvent);
 	socket?.on("jarvis:llm_switch", onLlmSwitch);
 	socket?.on("connect", onResync);
 	socket?.on("report_generated", onReportGenerated);
@@ -13871,6 +13970,7 @@ onBeforeUnmount(() => {
 	// away, app close) — nothing here is visible to blank.
 	flushReveal(); // cancels the frame loop and leaves every row whole
 	socket?.off("jarvis:event", onEvent);
+	socket?.off("jarvis:event", onFileboxWaitEvent);
 	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
 	socket?.off("report_generated", onReportGenerated);
