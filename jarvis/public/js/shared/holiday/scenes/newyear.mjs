@@ -4,7 +4,7 @@
 // text. The year and the fireworks stay between the clearance line and the top of the hero.
 import { quadPath, r2, rng, tr } from "../stage.mjs";
 import { Scene, playScene } from "./scene-runtime.mjs";
-import { toTile } from "./scene-place.mjs";
+import { squeezeX, toTile } from "./scene-place.mjs";
 import {
   BURSTS,
   CANNON,
@@ -66,6 +66,7 @@ class NewYearScene extends Scene {
     return {
       dy: Math.max(geo.shift, FIREWORKS_MIN_SHIFT),
       cannons: cannonXs(geo),
+      burstX: BURSTS.map((b) => squeezeX(b.x, geo)),
     };
   }
 
@@ -81,7 +82,7 @@ class NewYearScene extends Scene {
       : this.floorGroup(
           floorSVG(p, geo.ground, geo.cannons, (x, prop) => this.edge(x, prop))
         );
-    return `${skySVG(p, geo.dy)}${yearSVG(
+    return `${skySVG(p, geo.dy, geo.burstX)}${yearSVG(
       p,
       yearText(this.opts.year),
       yearPlan(geo)
@@ -109,12 +110,13 @@ class NewYearScene extends Scene {
     const { stage, p, geo } = this;
     const t = rocketAt(b.n);
     const y = b.y + geo.dy;
+    const x = geo.burstX[b.n];
     stage.animate(
       stage.q(`.${p}nrk${b.n}`),
       [
-        { transform: tr(b.x + (b.n % 2 ? 14 : -14), geo.hu), opacity: 1 },
-        { transform: tr(b.x, y), opacity: 1, offset: 0.95 },
-        { transform: tr(b.x, y - 3), opacity: 0 },
+        { transform: tr(x + (b.n % 2 ? 14 : -14), geo.hu), opacity: 1 },
+        { transform: tr(x, y), opacity: 1, offset: 0.95 },
+        { transform: tr(x, y - 3), opacity: 0 },
       ],
       {
         duration: ROCKET_MS,
