@@ -38,7 +38,15 @@ def dispatch(session_key: str, tool: str, raw_args, call_id: str) -> dict:
 			)
 			if cached and cached.tool_result:
 				complete(permit, cached.name)
-				return scrub_for_share(json.loads(cached.tool_result))
+				stored = json.loads(cached.tool_result)
+				from jarvis.chat.source_receipts import SOURCE_TOOLS, is_source_receipt
+
+				if tool in SOURCE_TOOLS and is_source_receipt(stored):
+					return api._error(
+						"SourceReadRequired",
+						"Source values are not retained. Make a new read call; current permissions and source versions will be checked again.",
+					)
+				return scrub_for_share(stored)
 			existing = frappe.db.get_value(
 				"Jarvis Pending Action", {"collaboration_call_key": call_key(permit)}, "status"
 			)
