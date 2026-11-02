@@ -32,6 +32,7 @@ import json
 import frappe
 
 from jarvis.chat import coverage_reasons as cr
+from jarvis.chat.agent_scope import authoritative_writeback_scope
 from jarvis.exceptions import InvalidArgumentError
 
 RUN = "Jarvis Agent Run"
@@ -172,8 +173,9 @@ def record_agent_run(
 	    ``{token: "evaluated"|"not_evaluable(reason)"|"truncated"}``; a reason outside
 	    the closed PP-3 enum is coerced to ``unsupported_customisation`` (never
 	    dropped). Gates coverage-scoped auto-resolve (A16) and the PP-2 run state.
-	  scope: the resolved run scope ``{company, fiscal_year, from_date, to_date,
-	    ...}`` — company is stamped on each Finding + scopes auto-resolve + the
+	  scope: the evaluator's echo of the resolved run scope. Each supplied
+	    dimension must match the server-stamped launch scope. The server stamp,
+	    not this argument, supplies company persistence, auto-resolve, and the
 	    watermark recompute.
 	  input_snapshot_id/input_snapshot_digest: required only by the statutory
 	    payroll Deposit-Status agent. That agent accepts the strict v3 compact
@@ -314,7 +316,8 @@ def record_agent_run(
 			integrity_digest = None
 		raw_findings = _as_list(findings)
 		coverage = _as_dict(coverage)
-		scope = _as_dict(scope)
+		# Generic writeback uses the immutable server scope, after checking its echo.
+		scope = authoritative_writeback_scope(run_doc, scope)
 		truncated = bool(truncated)
 		# A model-supplied rows_consumed is only ever used to DETECT an under-fetch (it
 		# can force a run partial, never mask one — a bogus value cannot upgrade a run to

@@ -8,7 +8,6 @@ transaction holds its naming-series rows until it commits."""
 
 from __future__ import annotations
 
-from collections import deque
 from contextlib import contextmanager
 
 import frappe
@@ -67,7 +66,7 @@ _ACTIONS = {"create": ("create", "edit", "use_existing", "skip"), "update": ("ap
 _DEFAULT = {"create": "create", "update": "apply"}
 _KNOWN = (JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError)
 _ABORT = (frappe.QueryDeadlockError, frappe.QueryTimeoutError)
-_QUEUES = ("before_commit", "after_commit", "after_rollback")
+_QUEUES = ("before_commit", "after_commit", "before_rollback", "after_rollback")
 
 _CHANGED = ("changed", "This sheet changed since you opened it: reload it and apply again.")
 _COLLECTING = ("collecting", "This sheet is still being listed: apply it once the run pauses.")
@@ -346,7 +345,7 @@ def _record_errors(row, records: list[dict], merged: list[dict], plan: dict, err
 		if key in errors or kind == "skip" or i in cascade:
 			continue
 		entry = plan["records"][key]
-		denied = held_writes._denied(record["doctype"])
+		denied = held_writes._denied_item(record)
 		if denied:
 			errors[key] = denied["error"]["message"]
 		elif kind == "use_existing":
@@ -685,19 +684,47 @@ def _one(i: int, record: dict, original: dict, kind: str, entry: dict, remap: di
 	return _create(i, record, original, values, remap, crashes)
 
 
-def _savepoint() -> tuple[str, dict]:
-	queues = {q: tuple(getattr(frappe.db, q)._functions) for q in _QUEUES if hasattr(frappe.db, q)}
+def _savepoint() -> tuple[str, dict[str, int]]:
+	"""Mark public callback queues before one record's savepoint."""
+	queues = {q: len(getattr(frappe.db, q)) for q in _QUEUES if hasattr(frappe.db, q)}
 	sp = "jsa_" + frappe.generate_hash(length=10)
 	frappe.db.savepoint(sp)
 	return sp, queues
 
 
-def _undo(sp: str, queues: dict) -> None:
-	"""Back to the savepoint, and nothing that record queued runs at the commit."""
+def _cut_callbacks(queues: dict[str, int]) -> dict[str, list]:
+	"""Detach callbacks this record added, without touching earlier records' callbacks."""
+	return {q: getattr(frappe.db, q).cut(mark) for q, mark in queues.items()}
+
+
+def _cleanup_trace(original_error: Exception | None) -> str:
+	return f"Original write error: {original_error}\nRollback cleanup error:\n{frappe.get_traceback()}"
+
+
+def _undo(
+	sp: str, queues: dict[str, int], *, clean_single=False, original_error: Exception | None = None
+) -> list[str]:
+	"""Back to the savepoint and retain cleanup faults as record diagnostics."""
 	frappe.db.rollback(save_point=sp)
-	for q, functions in queues.items():
-		getattr(frappe.db, q)._functions = deque(functions)
-	frappe.clear_messages()
+	callbacks = _cut_callbacks(queues)
+	cleanup_errors = []
+	try:
+		if clean_single:
+			# Savepoint rollback does not run Frappe's native cache cleanup. Run only
+			# this failed save's callbacks; earlier records still belong to the pass.
+			for callback in callbacks.get("after_rollback", []):
+				try:
+					callback()
+				except Exception:
+					# The record's write error remains the result. The caller logs this
+					# diagnostic after the sheet rollback, where it cannot be lost.
+					cleanup_errors.append(_cleanup_trace(original_error))
+	finally:
+		# A cleanup callback can queue more work. Drop that work too, so a later
+		# sheet rollback cannot run it or callbacks from this failed record again.
+		_cut_callbacks(queues)
+		frappe.clear_messages()
+	return cleanup_errors
 
 
 def _message(e: Exception) -> str:
@@ -709,7 +736,7 @@ def _message(e: Exception) -> str:
 	return filebox_skills._safe(text, ERROR_CAP) or "This record can't be saved."
 
 
-def _guarded(fn, crashes: list, *, duplicate=None):
+def _guarded(fn, crashes: list, *, duplicate=None, clean_single=False):
 	"""``fn()`` in its own savepoint. A deadlock aborts the pass; a duplicate goes to
 	``duplicate(e)`` when given; any other error is the record's (an unexpected one
 	logged after the pass)."""
@@ -720,7 +747,7 @@ def _guarded(fn, crashes: list, *, duplicate=None):
 		raise
 	except Exception as e:
 		tb = "" if isinstance(e, _KNOWN) else frappe.get_traceback()
-		_undo(sp, queues)
+		crashes.extend(_undo(sp, queues, clean_single=clean_single, original_error=e))
 		if duplicate and isinstance(e, frappe.DuplicateEntryError):
 			return duplicate(e)
 		if tb:
@@ -732,10 +759,21 @@ def _guarded(fn, crashes: list, *, duplicate=None):
 def _update(i: int, record: dict, values: dict, crashes: list) -> dict:
 	from jarvis.tools.update_doc import _update_one
 
+	single = bool(frappe.get_meta(record["doctype"]).issingle)
+	if single:
+		from jarvis.chat.pending_actions._park import valid_single_snapshot
+
+		if not valid_single_snapshot(record.get("snapshot"), record["doctype"]):
+			raise _Failed(
+				"This settings proposal has no valid version snapshot. Skip it and propose it again."
+			)
+		denied = held_writes._denied_item({**record, "values": values})
+		if denied:
+			raise _Failed(denied["error"]["message"])
 	stale = _stale_code([record["snapshot"]]) if record.get("snapshot") else None
 	if stale:
 		raise _Failed(REASON_TEXT[stale])
-	_guarded(lambda: _update_one(record["doctype"], record["name"], values), crashes)
+	_guarded(lambda: _update_one(record["doctype"], record["name"], values), crashes, clean_single=single)
 	return _entry(i, record, "updated", record["name"])
 
 

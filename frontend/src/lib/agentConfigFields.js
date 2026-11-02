@@ -1,6 +1,6 @@
 /**
  * The engagement-config keys ConfigForm.vue renders as real, purpose-built
- * form fields (link pickers / dates / numbers / a select), in display order.
+ * form fields (link pickers / dates / numbers / selects / short lists), in display order.
  *
  * Verified against the run path that actually reads them - not a schema:
  *   - agent_scope.py's `_resolve`: company, fiscal_year, from_date, to_date -
@@ -11,9 +11,9 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), while the statutory
- *     payroll deposit-status agent reads its typed `deposit` object. A field
- *     renders only when the
+ *     CRITICAL fix, they are NOT flat top-level keys), the payroll deposit-status
+ *     agent reads its typed `deposit` object, and GST uses flat turnover and
+ *     HSN exclusion settings. A field renders only when the
  *     listing's own `config_keys` (agents_api.py get_agent, jarvis#1063)
  *     names the field's storage `path` (a dot path for a nested key) -
  *     ConfigForm.vue filters this array by that list at render time.
@@ -39,6 +39,7 @@
  *     explicitly typed, nested payroll-deposit setup. The value remains under
  *     the single declared `deposit` namespace; it is never a free-form
  *     Advanced JSON payload.
+ *   - {key, path, label, type: "text-list", help}
  */
 export const CONFIG_FIELD_SET = [
 	{
@@ -178,6 +179,20 @@ export const CONFIG_FIELD_SET = [
 		help: "Set the named reviewer, account group, cutoff, account mapping and declared voucher months. This review never proves a deposit, default, penalty or scheme eligibility.",
 	},
 	{
+		key: "annual_aggregate_turnover",
+		path: "annual_aggregate_turnover",
+		label: "Previous financial-year aggregate turnover",
+		type: "number",
+		help: "Whole-rupee turnover for the preceding financial year. The GST return-prep HSN check uses this saved value to select its reporting band.",
+	},
+	{
+		key: "same_hsn_rate_allowlist",
+		path: "same_hsn_rate_allowlist",
+		label: "Same-HSN rate review exclusions",
+		type: "text-list",
+		help: "Optional comma-separated HSN or SAC codes that have an approved mixed-rate reason. This only suppresses the review-only rate-drift worklist item.",
+	},
+	{
 		key: "stale_floor_days",
 		path: "ageing.stale_floor_days",
 		label: "Stale-invoice floor",
@@ -229,6 +244,11 @@ export const CONFIG_FIELD_LABELS = Object.fromEntries(
 /** The subset of known keys that are numeric on save (everyone else is a
  * plain string, cleared to absent when blank). */
 export const NUMBER_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "number").map(
+	(f) => f.key
+);
+
+/** Known keys stored as a JSON string array but edited as a short comma-separated list. */
+export const TEXT_LIST_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "text-list").map(
 	(f) => f.key
 );
 

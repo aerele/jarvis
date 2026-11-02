@@ -1046,6 +1046,14 @@ class TestPayrollDepositWritebackClaim(TestCase):
 
 
 class TestPayrollDepositPrivateAuditRedaction(TestCase):
+	def setUp(self):
+		super().setUp()
+		# These direct dispatch calls share Frappe local state in the test runner.
+		# A real request owns this marker through outer error capture, then discards it.
+		marker = patch.object(frappe.local, "jarvis_private_delegate_metadata", False, create=True)
+		marker.start()
+		self.addCleanup(marker.stop)
+
 	def _cap(self, tools_allow, *, status="running", legacy=False):
 		return {
 			"run": "DEP-PRIVATE-RUN",

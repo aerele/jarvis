@@ -475,13 +475,13 @@
     },
     {
       "agent_slug": "cash-limit-269st-40a3-auditor",
-      "title": "Cash-Limit Breach-Candidate Worklist — s.40A(3) / s.269ST (auditor)",
+      "title": "Cash-Limit Breach-Candidate Worklist (auditor)",
       "domain": "india-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "status": "Published",
-      "description": "Scans your cash payments and cash receipts and lists the ones that cross India's income-tax cash limits: expenses paid in cash above ₹10,000 to one payee in a day (₹35,000 for transporters), and cash received of ₹2,00,000 or more in aggregate from one person. Ships a monthly preventive worklist and a pre-flighted Form 3CD data pack. Read-only breach-candidate list for your CA to review; never edits a voucher, books anything, files a return, or decides that any payment is actually disallowed or penalised.",
+      "description": "Uses effective-dated India income-tax cash-payment and cash-receipt rules for the server-stamped period. It lists cash-account review candidates, applies the matching statutory rule version, and provides a tax-audit review pack. Read-only: it never edits a voucher, books anything, files a return, or decides that a deduction, exception, or penalty applies.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
@@ -516,7 +516,8 @@
         "s269st_limit",
         "s271da_penalty_measure",
         "s40a3_disallowance_measure",
-        "s40a3_limits"
+        "s40a3_limits",
+        "s40a3_prior_liability_measure"
       ],
       "advisory_tokens": [],
       "writes": null,
@@ -568,6 +569,12 @@
         "GL Entry",
         "Account",
         "Company"
+      ],
+      "config_keys": [
+        "materiality.benchmark_value",
+        "materiality.percentage",
+        "materiality.engagement_risk_level",
+        "materiality.rounding_step"
       ],
       "rule_tokens": [
         "ca-cl-2b9d",
@@ -1065,7 +1072,7 @@
       "domain": "gst-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Works only the residue left after india_compliance's Purchase Reconciliation Tool: ranks the unmatched, mismatched and aged rows between your GSTR-2B ledger and your purchase register by rupees, groups them into a supplier follow-up worklist, and tracks the ageing window per invoice. Read-only; never edits an invoice, files a return, or decides what you may claim.",
       "tools_required": [
@@ -1124,7 +1131,7 @@
       "domain": "gst-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "status": "Published",
       "description": "Pre-file data-quality worklist for your GST returns: on an india_compliance bench it works only the manual-override and data-import residue — lines with a blank or short HSN, invoices whose place-of-supply contradicts the tax head charged, one HSN billed at inconsistent rates across the period, and a books-vs-return tie-out where GSTR-1/3B are generated through india_compliance. Read-only; ranks the residue by rupees. Never edits an invoice, amends or files a return, and asserts no filing-correctness verdict.",
       "tools_required": [
@@ -1132,6 +1139,7 @@
         "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
+        "jarvis__get_engagement_config",
         "jarvis__get_gstr1_summary",
         "jarvis__get_balance_on"
       ],
@@ -1140,6 +1148,7 @@
         "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
+        "jarvis__get_engagement_config",
         "jarvis__get_gstr1_summary",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1184,7 +1193,11 @@
       "validated_for_fy": "2026-2027",
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "annual_aggregate_turnover",
+        "same_hsn_rate_allowlist"
+      ]
     },
     {
       "agent_slug": "lead-hygiene-auditor",
@@ -1949,6 +1962,12 @@
         "Payment Entry",
         "Purchase Receipt",
         "Company"
+      ],
+      "config_keys": [
+        "ageing.stale_floor_days",
+        "ageing.advance_floor_days",
+        "ageing.grir_floor_days",
+        "ageing.band_edges"
       ],
       "rule_tokens": [
         "grir_itc_s16_4_window",

@@ -519,9 +519,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 
 	# ------------------------------------------------------------------ #
 	# jarvis#1063 (jarvis-only half) - config_keys: which agent-specific
-	# installation config keys an agent's bundle actually reads. The registry
-	# currently has close-auditor's nested materiality keys and the statutory
-	# payroll deposit-status agent's top-level deposit key.
+	# installation config keys an agent's bundle actually reads (verified
+	# against jarvis-agents/agents/<slug>/evaluate.py).
 	# ------------------------------------------------------------------ #
 	def test_sync_agent_listings_writes_config_keys_from_the_registry(self):
 		agent_catalog.sync_agent_listings()
@@ -533,6 +532,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 				"materiality.rounding_step",
 			],
 			"statutory-payroll-deposit-status": ["deposit"],
+			"gst-return-prep-auditor": ["annual_aggregate_turnover", "same_hsn_rate_allowlist"],
 		}
 		for slug, config_keys in expected.items():
 			with self.subTest(agent=slug):

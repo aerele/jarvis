@@ -883,6 +883,28 @@ describe("per-agent gating via the configKeys prop", () => {
 		expect(w.text()).not.toContain("This agent has no additional settings.");
 	});
 
+	it("renders GST return-prep config and saves its numeric and list shapes", async () => {
+		const w = mountForm(
+			{
+				annual_aggregate_turnover: 60000000,
+				same_hsn_rate_allowlist: ["1006", "9983"],
+				custom_flag: true,
+			},
+			{ configKeys: ["annual_aggregate_turnover", "same_hsn_rate_allowlist"] }
+		);
+		expect(field(w, "Previous financial-year aggregate turnover").element.value).toBe(
+			"60000000"
+		);
+		expect(field(w, "Same-HSN rate review exclusions").element.value).toBe("1006, 9983");
+		await field(w, "Same-HSN rate review exclusions").setValue("1006,  9983, 1006");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			annual_aggregate_turnover: 60000000,
+			same_hsn_rate_allowlist: ["1006", "9983", "1006"],
+			custom_flag: true,
+		});
+	});
+
 	it("a stale agent-specific value this agent doesn't declare stays visible in Advanced (JSON), not lost", async () => {
 		// e.g. a materiality.percentage saved on a non-close-auditor installation.
 		// With configKeys=[] the field has no control here - it must NOT
