@@ -94,7 +94,7 @@ def _scheduled_macro_run(conversation: str) -> bool:
 			{
 				"conversation": conversation,
 				"trigger": "scheduled",
-				"status": ["in", ["queued", "running", "waiting_capacity"]],
+				"status": ["in", ["queued", "running", "waiting_capacity", "waiting_report"]],
 			},
 		)
 	)
