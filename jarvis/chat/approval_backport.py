@@ -26,6 +26,7 @@ def guard_record(doc):
 	if any(
 		doc.get(field)
 		for field in (
+			"actor",
 			"collaboration_binding",
 			"collaboration_run_id",
 			"collaboration_grant_revision",
