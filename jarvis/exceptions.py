@@ -262,7 +262,15 @@ class AgentReloadFailedError(JarvisError):
 
 
 class AdminUnreachableError(JarvisError):
-	"""HTTPS call to jarvis_admin failed (network, timeout, 5xx, non-JSON)."""
+	"""HTTPS call to jarvis_admin failed (network, timeout, 5xx, non-JSON).
+
+	``status_code`` is the HTTP status admin (or a proxy in front of it) answered
+	with, None for a transport failure. The error push reads it to tell a gateway
+	502/503/504 from admin refusing a request."""
+
+	def __init__(self, *args, status_code: int | None = None):
+		super().__init__(*args)
+		self.status_code = status_code
 
 
 SITE_IS_COPY_CODE = "site_is_copy"
