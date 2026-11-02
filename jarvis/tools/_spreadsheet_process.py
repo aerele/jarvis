@@ -36,7 +36,11 @@ def run_query(content, filename, *, sql=None, sheets=None, max_rows=100):
 				text=True,
 				encoding="utf-8",
 				pass_fds=(slot,),
-				capture_output=True,
+				# Source-controlled parser warnings can be arbitrarily large. Keep only
+				# the bounded JSON stdout protocol; stderr is neither evidence nor a
+				# safe diagnostic channel for the parent web worker.
+				stdout=subprocess.PIPE,
+				stderr=subprocess.DEVNULL,
 				timeout=WALL_SECONDS,
 				check=False,
 				env=env,

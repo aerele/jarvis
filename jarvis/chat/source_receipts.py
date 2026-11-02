@@ -1,11 +1,12 @@
 """Retain source references, never file/report cells or SQL, in tool receipts."""
 
-SOURCE_TOOLS = frozenset({"query_file", "query_report", "read_file"})
+SOURCE_TOOLS = frozenset({"get_file_pages", "query_file", "query_report", "read_file"})
 REFERENCE_FIELDS = frozenset(
 	{
 		"file_id",
 		"file_url",
 		"filename",
+		"file_name",
 		"prepared_report",
 		"version",
 		"archive_version",
@@ -17,7 +18,7 @@ REFERENCE_FIELDS = frozenset(
 		"cursor",
 	}
 )
-COUNT_FIELDS = frozenset({"source_rows", "data_rows", "total_rows"})
+COUNT_FIELDS = frozenset({"source_rows", "data_rows", "total_rows", "page_count"})
 
 
 def _references(value):
@@ -41,7 +42,8 @@ def _references(value):
 
 def source_receipt(tool, args, result):
 	"""Return detached storage values; the live API result remains unchanged."""
-	if tool.removeprefix("jarvis__") not in SOURCE_TOOLS:
+	source_tool = tool.removeprefix("jarvis__")
+	if source_tool not in SOURCE_TOOLS:
 		return args, result
 	data = result.get("data") if isinstance(result, dict) else None
 	stub = {
@@ -59,6 +61,8 @@ def source_receipt(tool, args, result):
 			stub["coverage"] = {"complete": coverage["complete"]}
 		if type(data.get("result_truncated")) is bool:
 			stub["result_truncated"] = data["result_truncated"]
+		if type(data.get("has_more")) is bool:
+			stub["has_more"] = data["has_more"]
 	if isinstance(result, dict) and result.get("ok") is True:
 		stored = {"ok": True, "data": stub}
 	else:
@@ -68,7 +72,7 @@ def source_receipt(tool, args, result):
 			"data": stub,
 		}
 	stored_args = _references(args)
-	if tool.removeprefix("jarvis__") in {"query_file", "query_report"}:
+	if source_tool in {"query_file", "query_report"}:
 		stored_args["source_query_executed"] = bool(isinstance(args, dict) and args.get("sql"))
 	return stored_args, stored
 

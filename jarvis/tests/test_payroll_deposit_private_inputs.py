@@ -1040,13 +1040,13 @@ class TestPayrollDepositWritebackClaim(TestCase):
 
 
 class TestPayrollDepositPrivateAuditRedaction(TestCase):
-	def _cap(self, tools_allow, *, status="running"):
+	def _cap(self, tools_allow, *, status="running", legacy=False):
 		return {
 			"run": "DEP-PRIVATE-RUN",
 			"owner": "owner@example.test",
 			"status": status,
 			"agent": snapshot.AGENT,
-			"legacy": False,
+			"legacy": legacy,
 			"tools_allow": tools_allow,
 		}
 
@@ -1207,8 +1207,10 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			self.assertNotIn(sentinel, json.dumps(surface, default=str))
 			self.assertNotIn(call_id, json.dumps(surface, default=str))
 
-		terminal, terminal_receipts, terminal_events, terminal_audit = self._dispatch_with_full_egress_capture(
-			self._cap(["jarvis__record_agent_run"], status="failed"), "query_file", args, call_id
+		terminal, terminal_receipts, terminal_events, terminal_audit = (
+			self._dispatch_with_full_egress_capture(
+				self._cap(["jarvis__record_agent_run"], status="failed"), "query_file", args, call_id
+			)
 		)
 		self.assertFalse(terminal["ok"])
 		self.assertEqual(terminal["error"]["code"], api.RunHaltedError.__name__)
@@ -1217,6 +1219,92 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 		self.assertEqual(terminal_audit, [])
 		self.assertNotIn(sentinel, json.dumps(terminal))
 		self.assertNotIn(call_id, json.dumps(terminal))
+
+	def test_legacy_deposit_query_file_stops_before_source_receipt_or_artifact(self):
+		"""A legacy Deposit bearer cannot use an unsealed new source tool."""
+		from jarvis import api
+		from jarvis.chat import source_receipts
+
+		sentinel = "PRIVATE-LEGACY-QUERY-FILE-SOURCE"
+		call_id = "PRIVATE-LEGACY-QUERY-FILE-CALL-ID"
+		args = {"file_url": sentinel, "sql": f"SELECT '{sentinel}'"}
+		raw_result = {
+			"ok": True,
+			"data": {"file_url": sentinel, "filename": f"{sentinel}.xlsx", "rows": [[sentinel]]},
+		}
+		with (
+			patch("jarvis.chat.collaboration.require_legacy_session"),
+			patch.object(api, "impersonate"),
+			patch.object(
+				_delegate_capability,
+				"resolve",
+				return_value=self._cap([], legacy=True),
+			),
+			patch("jarvis.chat.agent_scheduler.fail_run", return_value=True) as fail_run,
+			patch.object(api, "_get_header") as get_header,
+			patch.object(api, "_parse_args") as parse_args,
+			patch.object(api, "_run_tool", return_value=raw_result) as run_tool,
+			patch.object(api.audit, "record") as audit_record,
+			patch.object(api, "_persist_and_publish_tool_call") as receipt,
+			patch.object(api, "_record_tool_step") as step,
+			patch.object(api, "publish_realtime_tool_result") as realtime,
+			patch.object(api, "_maybe_attach_artifact") as artifact,
+			patch.object(source_receipts, "source_receipt") as source_receipt,
+			patch.object(frappe, "log_error") as error_log,
+			patch("jarvis.api_errors.record_server_error") as error_capture,
+			patch.object(frappe.db, "set_value") as set_value,
+			patch.object(frappe, "get_doc") as get_doc,
+		):
+			result = api._dispatch_from_session(
+				"owner@example.test", "private-legacy-session", "query_file", args
+			)
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], api.RunHaltedError.__name__)
+		fail_run.assert_called_once_with("DEP-PRIVATE-RUN", api._LEGACY_DEPOSIT_RUN_ERROR)
+		for call in (
+			get_header,
+			parse_args,
+			run_tool,
+			audit_record,
+			receipt,
+			step,
+			realtime,
+			artifact,
+			source_receipt,
+			error_log,
+			error_capture,
+			set_value,
+			get_doc,
+		):
+			call.assert_not_called()
+		for surface in (result,):
+			serialized = json.dumps(surface, default=str)
+			self.assertNotIn(sentinel, serialized)
+			self.assertNotIn(call_id, serialized)
+
+	def test_legacy_deposit_refusal_failure_is_fixed_and_a_terminal_race_is_inert(self):
+		"""The legacy refusal can only request the fixed CAS failure transition."""
+		from jarvis import api
+
+		cap = self._cap([], legacy=True)
+		with patch("jarvis.chat.agent_scheduler.fail_run", side_effect=(True, False)) as fail_run:
+			first = api._deposit_dispatch_refusal(cap)
+			# The second scheduler result models a concurrent writeback or stop that
+			# won its locked terminal transition before this refusal acquired the row.
+			second = api._deposit_dispatch_refusal(cap)
+
+		for result in (first, second):
+			self.assertFalse(result["ok"])
+			self.assertEqual(result["error"]["code"], api.RunHaltedError.__name__)
+			self.assertNotIn("DEP-PRIVATE-RUN", json.dumps(result))
+		self.assertEqual(
+			fail_run.call_args_list,
+			[
+				(("DEP-PRIVATE-RUN", api._LEGACY_DEPOSIT_RUN_ERROR), {}),
+				(("DEP-PRIVATE-RUN", api._LEGACY_DEPOSIT_RUN_ERROR), {}),
+			],
+		)
 
 	def test_caller_tool_and_call_id_are_redacted_on_allowed_and_denied_paths(self):
 		from jarvis import api
@@ -1322,6 +1410,100 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 				self.assertNotIn(sentinel, json.dumps(surface, default=str))
 				self.assertNotIn(call_id, json.dumps(surface, default=str))
 
+	def test_legacy_private_transport_stops_before_mode_refusal_or_dispatch(self):
+		"""The early private transport route must not bypass the legacy refusal."""
+		from jarvis import api
+
+		cap = self._cap([], legacy=True)
+		sentinel = "PRIVATE-LEGACY-TRANSPORT-SOURCE"
+		call_id = "PRIVATE-LEGACY-TRANSPORT-CALL-ID"
+		headers = {
+			"X-Jarvis-Token": "token",
+			"X-Jarvis-Tool-Call-Id": call_id,
+		}
+
+		def db_value(doctype, *_args, **_kwargs):
+			if doctype == "User":
+				return 1
+			if doctype == "Jarvis Chat Session":
+				return ""
+			return None
+
+		with (
+			patch.object(api, "_get_header", side_effect=lambda name: headers.get(name)) as get_header,
+			patch.object(api, "_request_body_bytes", return_value=b"{}"),
+			patch.object(api, "validate_plugin_request", return_value="private-legacy-transport"),
+			patch("jarvis.chat.site_pin.pin_if_unset"),
+			patch("jarvis.chat.collaboration.is_collaborative_session", return_value=False),
+			patch("jarvis.chat.collaboration.legacy_session_user", return_value="owner@example.test"),
+			patch.object(frappe.db, "get_value", side_effect=db_value),
+			patch.object(frappe.db, "get_single_value", return_value=""),
+			patch("jarvis.chat.device.session_device_is_stale", return_value=False),
+			patch.object(_delegate_capability, "resolve", return_value=cap),
+			patch("jarvis.chat.agent_scheduler.fail_run", return_value=True),
+			patch.object(api, "impersonate"),
+			patch.object(api, "_dispatch_from_session") as dispatch,
+			patch.object(api.audit, "record") as audit_record,
+			patch.object(api, "_persist_and_publish_tool_call") as receipt,
+			patch.object(api, "_record_tool_step") as step,
+			patch.object(api, "publish_realtime_tool_result") as realtime,
+			patch("jarvis.api_errors.record_server_error") as error_capture,
+		):
+			result = api.call_tool(
+				"get_payroll_deposit_inputs", {"source": sentinel}, result_mode=_private_output.MODE
+			)
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], api.RunHaltedError.__name__)
+		self.assertEqual([call.args[0] for call in get_header.call_args_list], ["X-Jarvis-Token"])
+		for call in (dispatch, audit_record, receipt, step, realtime):
+			call.assert_not_called()
+		for surface in (result, error_capture.call_args_list):
+			serialized = json.dumps(surface, default=str)
+			self.assertNotIn(sentinel, serialized)
+			self.assertNotIn(call_id, serialized)
+		self.assertEqual(error_capture.call_args.kwargs["route"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+
+	def test_legacy_shared_memory_route_stops_before_binding_or_metadata_egress(self):
+		"""The shared pre-dispatch refusal is also outside normal capability dispatch."""
+		from jarvis import api
+
+		cap = self._cap([], legacy=True)
+		sentinel = "PRIVATE-LEGACY-SHARED-SOURCE"
+		call_id = "PRIVATE-LEGACY-SHARED-CALL-ID"
+		headers = {
+			"X-Jarvis-Token": "token",
+			"X-Jarvis-Tool-Call-Id": call_id,
+		}
+		with (
+			patch.object(api, "_get_header", side_effect=lambda name: headers.get(name)) as get_header,
+			patch.object(api, "_request_body_bytes", return_value=b"{}"),
+			patch.object(api, "validate_plugin_request", return_value="private-legacy-shared"),
+			patch("jarvis.chat.site_pin.pin_if_unset"),
+			patch("jarvis.chat.collaboration.is_collaborative_session", return_value=True),
+			patch("jarvis.chat.collaboration.resolve_binding") as resolve_binding,
+			patch.object(_delegate_capability, "resolve", return_value=cap),
+			patch("jarvis.chat.agent_scheduler.fail_run", return_value=True),
+			patch.object(api.audit, "record") as audit_record,
+			patch.object(api, "_persist_and_publish_tool_call") as receipt,
+			patch.object(api, "_record_tool_step") as step,
+			patch.object(api, "publish_realtime_tool_result") as realtime,
+			patch("jarvis.api_errors.record_server_error") as error_capture,
+		):
+			result = api.call_tool("recall", {"source": sentinel})
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], api.RunHaltedError.__name__)
+		self.assertEqual([call.args[0] for call in get_header.call_args_list], ["X-Jarvis-Token"])
+		resolve_binding.assert_not_called()
+		for call in (audit_record, receipt, step, realtime):
+			call.assert_not_called()
+		for surface in (result, error_capture.call_args_list):
+			serialized = json.dumps(surface, default=str)
+			self.assertNotIn(sentinel, serialized)
+			self.assertNotIn(call_id, serialized)
+		self.assertEqual(error_capture.call_args.kwargs["route"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+
 	def test_stale_deposit_metadata_is_redacted_before_the_receipt(self):
 		from jarvis import api
 
@@ -1362,6 +1544,7 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			patch.object(frappe.db, "get_single_value", return_value="new"),
 			patch("jarvis.chat.device.session_device_is_stale", return_value=True),
 			patch.object(_delegate_capability, "resolve", return_value=cap),
+			patch("jarvis.chat.agent_scheduler.fail_run", return_value=True),
 			patch.object(api, "impersonate"),
 			patch.object(frappe.db, "commit"),
 			patch.object(api, "_locked_insert_chat_message", side_effect=insert),
@@ -1434,6 +1617,59 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 		audit_record.assert_not_called()
 		step.assert_not_called()
 		realtime.assert_not_called()
+		for surface in (result, error_capture.call_args_list):
+			serialized = json.dumps(surface, default=str)
+			self.assertNotIn(sentinel_tool, serialized)
+			self.assertNotIn(sentinel_id, serialized)
+			self.assertNotIn(sentinel_arg, serialized)
+		self.assertEqual(error_capture.call_args.kwargs["route"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+
+	def test_legacy_stale_deposit_call_has_no_notice_or_raw_metadata_egress(self):
+		from jarvis import api
+
+		cap = self._cap([], legacy=True)
+		sentinel_tool = "PRIVATE-LEGACY-STALE-TOOL"
+		sentinel_id = "PRIVATE-LEGACY-STALE-CALL-ID"
+		sentinel_arg = "PRIVATE-LEGACY-STALE-SOURCE"
+		headers = {
+			"X-Jarvis-Token": "token",
+			"X-Jarvis-Tool-Call-Id": sentinel_id,
+		}
+
+		def get_value(doctype, *_args, **_kwargs):
+			if doctype == "User":
+				return 1
+			if doctype == "Jarvis Chat Session":
+				return "old"
+			return None
+
+		with (
+			patch.object(api, "_get_header", side_effect=lambda name: headers.get(name)) as get_header,
+			patch.object(api, "_request_body_bytes", return_value=b"{}"),
+			patch.object(api, "validate_plugin_request", return_value="private-legacy-stale-session"),
+			patch("jarvis.chat.site_pin.pin_if_unset"),
+			patch("jarvis.chat.collaboration.is_collaborative_session", return_value=False),
+			patch("jarvis.chat.collaboration.legacy_session_user", return_value="owner@example.test"),
+			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(frappe.db, "get_single_value", return_value="new"),
+			patch("jarvis.chat.device.session_device_is_stale", return_value=True),
+			patch.object(_delegate_capability, "resolve", return_value=cap),
+			patch.object(api, "impersonate"),
+			patch.object(api, "_persist_and_publish_tool_call") as receipt,
+			patch.object(api.audit, "record") as audit_record,
+			patch.object(api, "_record_tool_step") as step,
+			patch.object(api, "publish_realtime_tool_result") as realtime,
+			patch.object(api, "_maybe_attach_artifact") as artifact,
+			patch.object(frappe, "log_error") as error_log,
+			patch("jarvis.api_errors.record_server_error") as error_capture,
+		):
+			result = api.call_tool("query_file", {"file_url": sentinel_arg, "sql": sentinel_arg})
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], api.RunHaltedError.__name__)
+		self.assertEqual([call.args[0] for call in get_header.call_args_list], ["X-Jarvis-Token"])
+		for call in (receipt, audit_record, step, realtime, artifact, error_log):
+			call.assert_not_called()
 		for surface in (result, error_capture.call_args_list):
 			serialized = json.dumps(surface, default=str)
 			self.assertNotIn(sentinel_tool, serialized)

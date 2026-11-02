@@ -46,6 +46,10 @@ _PRIVATE_INPUT_RECOVERY_ALLOWED_REQUEST_KEYS = frozenset({"cmd"})
 _PRIVATE_INPUT_RECOVERY_FORBIDDEN_HEADERS = frozenset({"x-jarvis-tool", "x-jarvis-tool-call-id"})
 _PRIVATE_INPUT_RECOVERY_UNAVAILABLE = "Private payroll input recovery is unavailable."
 _TERMINAL_DEPOSIT_RUN_MESSAGE = "This private payroll delegate run is no longer active."
+_LEGACY_DEPOSIT_RUN_MESSAGE = (
+	"This private payroll delegate run must be started again with the current protocol."
+)
+_LEGACY_DEPOSIT_RUN_ERROR = "private payroll delegate uses an unsupported legacy protocol; restart the run"
 _DEPOSIT_V3_WRITEBACK_KEYS = frozenset(
 	{
 		"findings",
@@ -75,6 +79,33 @@ def _terminal_deposit_run_refusal() -> dict:
 	argument processing in every signed-session dispatch path.
 	"""
 	return _error(RunHaltedError.__name__, _TERMINAL_DEPOSIT_RUN_MESSAGE)
+
+
+def _deposit_dispatch_refusal(cap) -> dict | None:
+	"""Refuse Deposit bearers that cannot safely enter generic dispatch.
+
+	This runs before caller-selected tool metadata, arguments, receipts, audit,
+	realtime, steps, or artifacts.  A legacy Deposit run has no sealed private
+	output contract, so it cannot safely use newer source tools even while its
+	Run row still says ``running``.  The legacy exception remains unchanged for
+	all non-Deposit agents.
+	"""
+	from jarvis.tools import _private_output
+
+	if _private_output.is_legacy_deposit_delegate(cap):
+		# A Deposit legacy run has no safe path to its structured writeback.  Do
+		# not leave it running for the stale reaper to call this an ordinary timeout.
+		# ``fail_run`` locks and compares ``status='running'``, so a concurrent
+		# writeback or stop wins without being overwritten.  Its input is fixed
+		# server metadata only; no caller tool, call-id, or arguments reach it.
+		if cap.get("status") == "running":
+			from jarvis.chat import agent_scheduler
+
+			agent_scheduler.fail_run(cap.get("run"), _LEGACY_DEPOSIT_RUN_ERROR)
+		return _error(RunHaltedError.__name__, _LEGACY_DEPOSIT_RUN_MESSAGE)
+	if _private_output.is_terminal_deposit_delegate(cap):
+		return _terminal_deposit_run_refusal()
+	return None
 
 
 def _deposit_v3_writeback_args(args: dict | str | None) -> dict | None:
@@ -331,6 +362,19 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 
 		shared_session = is_collaborative_session(session_key)
 		if shared_session and tool in {"recall", "remember"}:
+			# This early shared-session refusal predates normal capability dispatch.
+			# Inspect the run before returning so a legacy Deposit bearer cannot use
+			# it to bypass the same metadata boundary as every other tool route.
+			from jarvis.tools import _delegate_capability, _private_output
+
+			cap = _delegate_capability.resolve(session_key)
+			redaction_token = _private_output.begin_delegate_redaction(cap)
+			_private_output.mark_delegate_metadata(cap)
+			try:
+				if refusal := _deposit_dispatch_refusal(cap):
+					return refusal
+			finally:
+				_private_output.end_delegate_redaction(redaction_token)
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", "Private memory is unavailable in shared chats.")
 		try:
@@ -424,8 +468,8 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 				# the commit-to-teardown interval. Do not read caller metadata or
 				# create the normal stale-device notice in that interval: it would
 				# retain an attacker-selected tool name or call id after the Run ended.
-				if _private_output.is_terminal_deposit_delegate(cap):
-					return _terminal_deposit_run_refusal()
+				if refusal := _deposit_dispatch_refusal(cap):
+					return refusal
 				tool_call_id = _private_output.safe_tool_call_id(_get_header("X-Jarvis-Tool-Call-Id"))
 				_notify_stale_pairing(session_key=session_key, tool=tool, tool_call_id=tool_call_id)
 			finally:
@@ -458,8 +502,26 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 			redaction_token = _private_output.begin_delegate_redaction(cap)
 			_private_output.mark_delegate_metadata(cap)
 			try:
-				if _private_output.is_terminal_deposit_delegate(cap):
-					return _terminal_deposit_run_refusal()
+				if refusal := _deposit_dispatch_refusal(cap):
+					return refusal
+			finally:
+				_private_output.end_delegate_redaction(redaction_token)
+
+		# Collaborative sessions normally have no delegate capability, but resolve
+		# one before their dispatcher reads a caller-supplied call id.  This keeps a
+		# legacy Deposit bearer from using the shared route as a metadata or source
+		# receipt bypass.  Non-delegate and generic legacy sessions retain the
+		# existing collaborative dispatch behavior.
+		if shared_session:
+			from jarvis.tools import _delegate_capability
+
+			with impersonate(plugin_user):
+				cap = _delegate_capability.resolve(session_key)
+			redaction_token = _private_output.begin_delegate_redaction(cap)
+			_private_output.mark_delegate_metadata(cap)
+			try:
+				if refusal := _deposit_dispatch_refusal(cap):
+					return refusal
 			finally:
 				_private_output.end_delegate_redaction(redaction_token)
 
@@ -739,8 +801,8 @@ def _dispatch_from_session(
 			# that just became terminal still has its source/writeback tools in that
 			# list, so it would otherwise reach the normal denial/receipt paths. Stop
 			# before reading caller metadata or parsing caller arguments instead.
-			if _private_output.is_terminal_deposit_delegate(cap):
-				return _terminal_deposit_run_refusal()
+			if refusal := _deposit_dispatch_refusal(cap):
+				return refusal
 			# Deposit v3 is a closed seven-field handoff. Validate the decoded
 			# caller object before the generic parser can remove ``_user``/
 			# ``_session`` or registry dispatch can drop a legacy dashboard key.

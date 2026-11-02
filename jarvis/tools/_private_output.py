@@ -65,6 +65,16 @@ def is_terminal_deposit_delegate(cap) -> bool:
 	return is_deposit_delegate(cap) and cap.get("status") != "running"
 
 
+def is_legacy_deposit_delegate(cap) -> bool:
+	"""True for an old Deposit bearer with no safe private-output contract.
+
+	Generic legacy delegates retain their historical migration behavior.  Deposit
+	does not: its old contract can reach new file-query tools which were never
+	part of the sealed private-source protocol.
+	"""
+	return is_deposit_delegate(cap) and bool(cap.get("legacy"))
+
+
 def has_private_source_capability(cap) -> bool:
 	"""Require the exact snapshotted bench tool declaration before source capture."""
 	if not is_active_deposit_delegate(cap) or not isinstance(cap.get("tools_allow"), list):
