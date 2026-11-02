@@ -18,11 +18,7 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
-<<<<<<< HEAD
-  "digest": "sha256:cd45b92262c187acf6808c55d6f1841c4ee06b611c2117147d3b236a09295574",
-=======
-  "digest": "sha256:f966cdcc042bc7ec56b9a6203819765398c41e2df19ddf76ccccaa9fac6785ef",
->>>>>>> 1c89615 (feat(files): query complete uploads in isolated SQLite)
+  "digest": "sha256:89e2f218487a7399a3b7018a7b5f420aebe0f28a4424ea63f6c8fc5b25cee0bd",
   "tools": [
     "add_comment",
     "add_tag",

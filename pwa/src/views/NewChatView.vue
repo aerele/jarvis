@@ -1,6 +1,7 @@
 <script setup>
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import HolidayMark from "../components/HolidayMark.vue";
+import HolidayStage from "../components/HolidayStage.vue";
 import { holdActive } from "../maintenanceGate";
 import { agentName } from "@/branding";
 import { useRouter } from "vue-router";
@@ -65,6 +66,9 @@ const autoView = computed(() =>
 );
 const inputEl = ref(null);
 const fileEl = ref(null);
+const composerEl = ref(null);
+// Where the holiday scene's art layer ends: the top of the composer, in px from the screen top.
+const composerTop = () => (composerEl.value ? composerEl.value.getBoundingClientRect().top : 0);
 
 // Morning / afternoon / evening, by the clock on THIS device — the phone's own
 // timezone is the one the user is standing in.
@@ -115,6 +119,10 @@ const hasDraft = computed(
 	() => input.value.trim().length > 0 || attachments.value.some((a) => a.file_url)
 );
 const uploading = computed(() => attachments.value.some((a) => a.uploading || !a.file_url));
+
+// The day greeting and the ordinary one share one grid cell, so the swap never changes the
+// height; an instant swap (rest, or the person ended the scene) has no motion at all.
+const swapClass = (on, instant) => ({ "is-off": !on, "is-instant": instant });
 
 function modelDesc(name) {
 	const n = String(name).toLowerCase();
@@ -389,35 +397,81 @@ onUnmounted(() => {
 		</button>
 	</div>
 
-	<div class="jv-hero" :style="heroRoom">
-		<HolidayMark :size="56" :radius="14" :mood="holdActive ? 'upgrading' : 'star'" />
-		<h1 class="jv-greeting" data-testid="welcome-greeting">{{ words.heading }}</h1>
-		<p v-if="words.leadup" class="jv-leadup" data-testid="welcome-leadup">
-			{{ words.leadup }}
-		</p>
-	</div>
-
-	<!-- Starter prompts: tap to prefill the composer (never sends). Shown from
-	     first paint (defaults, then personalised) and hidden once the user has a
-	     draft, so a tap can never clobber text they've started. -->
-	<div v-if="starters.length && !hasDraft" class="jv-starters">
-		<div class="jv-starters-grid">
-			<button
-				v-for="(s, i) in starters"
-				:key="`${s.title}-${i}`"
-				type="button"
-				class="jv-starter"
-				:class="`jv-tint-${starterTint(i)}`"
-				@click="useStarter(s)"
+	<!-- On a scene day the stage plays the holiday scene over the hero and hides the starters
+	     meanwhile; any other day it hands the slot straight back (see HolidayStage.vue). -->
+	<HolidayStage
+		:hold-active="holdActive"
+		:has-draft="hasDraft"
+		:composer-top="composerTop"
+		v-slot="stage"
+	>
+		<div
+			class="jv-hero"
+			:class="{ 'is-stage': stage.active }"
+			:style="heroRoom"
+			data-hs="hero"
+		>
+			<HolidayMark
+				data-hs="mark"
+				:size="56"
+				:radius="14"
+				:mood="holdActive ? 'upgrading' : 'star'"
+				:stage="stage.mark"
+				@tap="stage.onMarkTap"
+			/>
+			<h1
+				class="jv-greeting"
+				:class="{ 'is-grid': stage.active }"
+				data-hs="heading"
+				data-testid="welcome-greeting"
 			>
-				<span class="jv-starter-k">{{ s.title }}</span>
-				<span class="jv-starter-p">{{ s.prompt }}</span>
-			</button>
+				<template v-if="stage.active">
+					<span
+						class="jv-greeting-t"
+						:class="swapClass(!stage.showDay, stage.instant)"
+						>{{ greeting }}</span
+					>
+					<span class="jv-greeting-t" :class="swapClass(stage.showDay, stage.instant)">{{
+						words.heading
+					}}</span>
+				</template>
+				<template v-else>{{ words.heading }}</template>
+			</h1>
+			<p v-if="words.leadup" class="jv-leadup" data-testid="welcome-leadup">
+				{{ words.leadup }}
+			</p>
 		</div>
-		<p class="jv-starter-hint">Tap to start. You can edit before sending.</p>
-	</div>
 
-	<div class="jv-heroc jv-safe-bottom">
+		<!-- Starter prompts: tap to prefill the composer (never sends). Shown from
+		     first paint (defaults, then personalised) and hidden once the user has a
+		     draft, so a tap can never clobber text they've started. During a holiday scene
+		     they fade out, and the tap that ends the scene is not a pick. -->
+		<div
+			v-if="starters.length && !hasDraft"
+			class="jv-starters"
+			:class="stage.cardsClass"
+			:style="stage.cardsStyle"
+			data-hs="cards"
+			@click.capture="stage.guardCardTap"
+		>
+			<div class="jv-starters-grid">
+				<button
+					v-for="(s, i) in starters"
+					:key="`${s.title}-${i}`"
+					type="button"
+					class="jv-starter"
+					:class="`jv-tint-${starterTint(i)}`"
+					@click="useStarter(s)"
+				>
+					<span class="jv-starter-k">{{ s.title }}</span>
+					<span class="jv-starter-p">{{ s.prompt }}</span>
+				</button>
+			</div>
+			<p class="jv-starter-hint">Tap to start. You can edit before sending.</p>
+		</div>
+	</HolidayStage>
+
+	<div ref="composerEl" class="jv-heroc jv-safe-bottom">
 		<div v-if="error" class="jv-heroc-err">
 			<svg
 				viewBox="0 0 24 24"
@@ -701,6 +755,9 @@ onUnmounted(() => {
 .jv-bar.is-bare {
 	background: transparent;
 	border-bottom: 0;
+	/* Above a holiday scene's art layer, which runs from the top of the screen. */
+	position: relative;
+	z-index: 2;
 }
 .jv-icon-btn {
 	position: relative;
@@ -726,6 +783,31 @@ onUnmounted(() => {
 	justify-content: center;
 	gap: 14px;
 	padding: 18px;
+}
+.jv-hero.is-stage {
+	position: relative;
+	z-index: 2;
+}
+/* On a scene day the two greetings share one cell. */
+.jv-greeting.is-grid {
+	display: grid;
+}
+.jv-greeting-t {
+	grid-area: 1 / 1;
+	transition: opacity 0.52s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.jv-greeting-t.is-off {
+	opacity: 0;
+	visibility: hidden;
+	transition: opacity 0.25s ease, visibility 0s 0.25s;
+}
+.jv-greeting-t.is-instant {
+	transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+	.jv-greeting-t {
+		transition: none !important;
+	}
 }
 /* The name is arbitrary-length, so this line has to survive "Administrator"
    as well as "Jo". At 24px/600 the longest common case measured 326px against

@@ -30,9 +30,8 @@ export const ART_MARKERS = [
   '<feGaussianBlur stdDeviation="2"/>',
   "M0 -16 L12 0 L0 18 L-12 0 Z",
 ];
-// The worn item's markers alone (the first two above): the phone has no scenes yet.
+// The worn item's markers alone (the first two above).
 export const WORN_MARKERS = ART_MARKERS.slice(0, 2);
-const SCENE_MARKERS = ART_MARKERS.slice(2);
 // A string only the always-loaded words contain.
 const WORDS_MARKER = "Wishing you a happy Diwali in advance!";
 
@@ -65,7 +64,7 @@ export function checkHolidayChunks(
     for (const [file, body] of text) {
       if (body.includes(marker) && !file.startsWith("holiday-")) {
         problems.push(
-          `worn art (${JSON.stringify(
+          `holiday art (${JSON.stringify(
             marker
           )}) is in ${file}, not only holiday-*`
         );
@@ -98,16 +97,16 @@ const STATIC_IMPORT = /(?:\bfrom|\bimport)\s*["']\.\/([^"']+\.js)["']/g;
 
 /**
  * The PWA build, in `distDir` (assets/ and the service worker sw.js): the art rules above
- * (worn art only in holiday-* chunks, no scene art, words present and outside holiday-*)
- * plus the precache rules: no holiday-* file is precached, and no precached chunk
- * statically imports a file that is not, or it would fail offline.
+ * (the worn item and the scenes only in holiday-* chunks, every marker present there, words
+ * present and outside holiday-*) plus the precache rules: no holiday-* file is precached, and
+ * no precached chunk statically imports a file that is not, or it would fail offline.
  */
 export function checkPwaBuild(distDir, indexHtml) {
   const swFile = path.join(distDir, "sw.js");
   if (!existsSync(swFile)) return [`${swFile}: sw.js not found`];
   const assetsDir = path.join(distDir, "assets");
   const problems = checkHolidayChunks(assetsDir, indexHtml, {
-    markers: WORN_MARKERS,
+    markers: ART_MARKERS,
     wordsIn: "any",
   });
   const sw = readFileSync(swFile, "utf8");
@@ -124,14 +123,8 @@ export function checkPwaBuild(distDir, indexHtml) {
       problems.push(`the precache lists ${name}; holiday art must stay lazy`);
   }
   for (const file of readdirSync(assetsDir).filter((f) => f.endsWith(".js"))) {
-    const body = readFileSync(path.join(assetsDir, file), "utf8");
-    // The phone has no scenes yet, so scene art outside a lazy chunk is a leak. (A scene
-    // marker may sit in the worn chunk: the worn art draws some of the same shapes.)
-    for (const marker of SCENE_MARKERS) {
-      if (!file.startsWith("holiday-") && body.includes(marker))
-        problems.push(`scene art (${JSON.stringify(marker)}) is in ${file}`);
-    }
     if (!precached.has(file)) continue;
+    const body = readFileSync(path.join(assetsDir, file), "utf8");
     for (const [, target] of body.matchAll(STATIC_IMPORT)) {
       if (!precached.has(path.posix.basename(target)))
         problems.push(
@@ -170,7 +163,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (problems.length) process.exit(1);
   console.log(
     pwa
-      ? "check-holiday-chunks: ok (PWA: worn art only in holiday-* chunks, none precached, precache closed under static imports)"
+      ? "check-holiday-chunks: ok (PWA: worn and scene art only in holiday-* chunks, none precached, precache closed under static imports)"
       : "check-holiday-chunks: ok (worn and scene art only in holiday-* chunks, words in main)"
   );
 }

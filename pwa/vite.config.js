@@ -31,17 +31,28 @@ function commonSiteConfigPath() {
 		: path.resolve(__dirname, "../../../../sites/common_site_config.json");
 }
 
-// The worn-item art is lazy and must stay out of the service worker's precache, so its
-// chunk is named `holiday-*` (globIgnores below skips it and the build gate looks for the
-// name). Only a chunk made ENTIRELY of art modules gets the name: a chunk that mixes art
-// with app code must not be hidden from the precache by its name. Add a module here only
-// when it is art. The words and the answer reader are text and stay in the main bundle.
-const HOLIDAY_ART = ["/js/shared/holiday/worn.mjs"];
+// The holiday art is lazy and must stay out of the service worker's precache, so its chunks
+// are named `holiday-*` (globIgnores below skips them and the build gate looks for the name):
+// the worn item, and each welcome scene with the runtime and art helpers the scenes share.
+// Only a chunk made ENTIRELY of art modules gets the name: a chunk that mixes art with app
+// code must not be hidden from the precache by its name. Add a module here only when it is
+// art. The words, the answer reader, the cadence and the numbers the welcome needs before
+// the art arrives (scene-geometry.mjs, scene-phone.mjs) are not art: the page imports them
+// statically, so they live outside holiday-* chunks, which the precached view may import.
+const HOLIDAY_ART = [
+	"/js/shared/holiday/worn.mjs",
+	"/js/shared/holiday/stage.mjs",
+	"/js/shared/holiday/scenes/", // every scene, its art, runtime, layout, motion and placement
+];
+function isHolidayArt(id) {
+	const path = id.replaceAll("\\", "/");
+	return HOLIDAY_ART.some((art) =>
+		art.endsWith("/") ? path.includes(art) : path.endsWith(art)
+	);
+}
 function holidayChunkNames(chunk) {
 	const ids = (chunk.moduleIds || []).filter((id) => !id.includes("\0"));
-	const artOnly =
-		ids.length > 0 &&
-		ids.every((id) => HOLIDAY_ART.some((art) => id.replaceAll("\\", "/").endsWith(art)));
+	const artOnly = ids.length > 0 && ids.every(isHolidayArt);
 	return artOnly ? "assets/holiday-[name]-[hash].js" : "assets/[name]-[hash].js";
 }
 
@@ -120,8 +131,8 @@ export default defineConfig({
 				// data), so a cached copy would go stale and hand the app a dead
 				// token. Offline navigations fall back to offline.html instead.
 				globPatterns: ["**/*.{js,css,woff,woff2,svg,png,ico}", "offline.html"],
-				// holiday-* is the lazy worn-item art: not precached, so a cold offline open
-				// has no item (and no 404 for one).
+				// holiday-* is the lazy worn-item and scene art: not precached, so a cold
+				// offline open has no item or scene (and no 404 for one).
 				globIgnores: ["**/index.html", "**/holiday-*"],
 				// Workbox emits precache URLs relative to the worker, and resolves
 				// them against wherever the worker is SERVED from. Ours is served
