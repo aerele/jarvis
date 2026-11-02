@@ -399,6 +399,10 @@ def recover_pending_turns(limit: int = 20) -> dict:
 	# gateway reachable or not, so a row is never stranded at a spinner.
 	live = []
 	for r in rows:
+		from jarvis.chat.collaboration import is_collaborative
+
+		if is_collaborative(r.get("conversation")):
+			continue
 		if _age_minutes(r["recovery_started_at"]) > _RECOVERY_CEILING_MINUTES:
 			# P8: same try/log shape as the eligible loop below (#13): a snapshot-race
 			# loss on this row's terminal write must not crash the whole cycle and
@@ -477,6 +481,10 @@ def _recover_one(sess: AgentSession, row: dict, active: dict) -> str:
 	"""Drive one eligible (latest-per-conversation) recovering row. Returns
 	'finalized' | 'active' | 'waiting'. Ceiling/error is handled by the caller
 	and the unconditional backstop, not here."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(row.get("conversation")):
+		return "waiting"
 	session_key = row["session_key"]
 	# Absent from sessions.list -> treat as not-active, but only finalize when
 	# the transcript actually has content (#9: never finalize from a stale
@@ -525,6 +533,10 @@ def recover_now(conversation_id: str) -> str:
 	does not wait for the cron. Dedicated connection - the pooled WS may be
 	the very thing that just died. Idempotent vs the cron via
 	_conditional_clear inside _finalize/_error_clear."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(conversation_id):
+		return "waiting"
 	m = frappe.qb.DocType(MSG)
 	c = frappe.qb.DocType(CONV)
 	rows = (

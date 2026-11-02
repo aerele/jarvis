@@ -603,9 +603,14 @@ class TestChatApprovalContinuation(ComposedChatReviewFixture, FrappeTestCase):
 					approvals_api.continue_approval_chat(name)
 				send.assert_not_called()
 		# A collaborative conversation is refused by the existing legacy-only guard.
-		with patch("jarvis.chat.approval_backport.is_collaborative", return_value=True):
+		frappe.db.set_value("Jarvis Conversation", conv, "collaboration_active", 1)
+		frappe.db.commit()
+		try:
 			with as_user(self.owner), self.assertRaises((frappe.PermissionError, frappe.ValidationError)):
 				approvals_api.continue_approval_chat(self.chat)
+		finally:
+			frappe.db.set_value("Jarvis Conversation", conv, "collaboration_active", 0)
+			frappe.db.commit()
 		self.assertEqual(len(self.user_messages(conv)), before)
 		self.assertEqual(frappe.get_doc(AR, self.chat).get("resume_state"), "failed")
 
