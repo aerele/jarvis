@@ -24,12 +24,15 @@ Run:
 """
 
 import json
+from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_runs
 from jarvis.chat import coverage_reasons as cr
+from jarvis.chat.agent_scope import authoritative_writeback_scope
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools.record_agent_run import _validate_findings
 
 LISTING = "Jarvis Agent Listing"
@@ -175,6 +178,98 @@ def _wipe_residue() -> None:
 	if dashboards:
 		frappe.db.delete(DASHBOARD, {"name": ["in", dashboards]})
 	frappe.db.commit()
+
+
+# --------------------------------------------------------------------------- #
+# Launch scope authority — the delegate can prove, never select, its scope.
+# --------------------------------------------------------------------------- #
+class TestWritebackScopeAuthority(FrappeTestCase):
+	STAMPED_SCOPE = {
+		"company": "Scope Company A",
+		"fiscal_year": "2026-2027",
+		"from_date": "2026-04-01",
+		"to_date": "2027-03-31",
+		"report_date": "2026-09-11",
+		"prior_fy_start": "2025-04-01",
+		"prior_fy_end": "2026-03-31",
+	}
+
+	def _run(self, scope=None):
+		return frappe._dict(scope_json=json.dumps(self.STAMPED_SCOPE if scope is None else scope))
+
+	def test_uses_the_full_server_stamp_not_the_evaluator_subset(self):
+		actual = authoritative_writeback_scope(
+			self._run(),
+			{
+				"company": "Scope Company A",
+				"fiscal_year": "2026-2027",
+				"from_date": "2026-04-01",
+				"to_date": "2027-03-31",
+			},
+		)
+		self.assertEqual(actual, self.STAMPED_SCOPE)
+		self.assertEqual(actual["report_date"], "2026-09-11")
+
+	def test_rejects_a_foreign_company_before_writeback(self):
+		with self.assertRaisesRegex(InvalidArgumentError, "company"):
+			authoritative_writeback_scope(self._run(), {"company": "Scope Company B"})
+
+	def test_rejects_a_widened_scope_dimension(self):
+		with self.assertRaisesRegex(InvalidArgumentError, "unstamped dimension"):
+			authoritative_writeback_scope(
+				self._run(),
+				{"company": "Scope Company A", "other_company": "Scope Company B"},
+			)
+
+	def test_rejects_missing_or_invalid_evaluator_scope(self):
+		for submitted in (None, {}, [], "not-json", "[]"):
+			with self.subTest(submitted=submitted):
+				with self.assertRaisesRegex(InvalidArgumentError, "evaluator scope"):
+					authoritative_writeback_scope(self._run(), submitted)
+
+	def test_unscoped_run_cannot_be_scoped_by_the_evaluator(self):
+		self.assertEqual(authoritative_writeback_scope(self._run({}), {}), {})
+		with self.assertRaisesRegex(InvalidArgumentError, "cannot add dimensions"):
+			authoritative_writeback_scope(self._run({}), {"company": "Scope Company A"})
+
+	def test_tool_rejects_foreign_scope_before_finding_persistence(self):
+		from jarvis.tools import record_agent_run as writeback
+
+		run_row = frappe._dict(
+			name="SCOPE-RUN",
+			status="running",
+			installation="SCOPE-INSTALLATION",
+			agent="scope-test-agent",
+		)
+		run_doc = frappe._dict(
+			name=run_row.name,
+			agent=run_row.agent,
+			scope_json=json.dumps(self.STAMPED_SCOPE),
+		)
+		installation = frappe._dict(name=run_row.installation)
+
+		def get_value(doctype, *args, **kwargs):
+			if doctype == writeback.RUN:
+				return run_row
+			if doctype == writeback.LISTING:
+				return {"rule_tokens": "[]", "doctypes_required": "[]"}
+			raise AssertionError(f"unexpected get_value for {doctype}")
+
+		with (
+			patch("jarvis.tools._agent_run_ctx.get_session_key", return_value="scope-session"),
+			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(
+				frappe,
+				"get_doc",
+				side_effect=lambda doctype, name: installation
+				if doctype == writeback.INSTALLATION
+				else run_doc,
+			),
+			patch("jarvis.chat.agent_runs.record_delegate_run") as persist,
+		):
+			with self.assertRaisesRegex(InvalidArgumentError, "company"):
+				writeback.record_agent_run(findings=[], coverage={}, scope={"company": "Scope Company B"})
+		persist.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
@@ -528,35 +623,47 @@ class TestWritebackIntegration(FrappeTestCase):
 		)
 		self.assertEqual(frappe.db.get_value(RUN, run.name, "result_state"), "evaluated_clean")
 
-	def test_scope_merge_preserves_bench_stamped_report_date(self):
-		# The bench stamps report_date (+ prior-FY) at trigger; the delegate's writeback
-		# scope carries only the core dims. record_delegate_run MERGES onto the existing
-		# stamp rather than overwriting, so the persisted scope keeps report_date -- a run
-		# missing it would replay against to_date and change findings + digest.
+	def test_authoritative_scope_preserves_bench_stamped_report_date(self):
+		# The writeback boundary returns the complete server stamp. The evaluator may
+		# echo only its core dimensions, but it cannot replace bench-only as-of data.
 		import json as _j
 
+		stamped_scope = {
+			"company": self.company,
+			"fiscal_year": "2026-2027",
+			"from_date": "2026-04-01",
+			"to_date": "2027-03-31",
+			"report_date": "2026-09-11",
+			"prior_fy_end": "2026-03-31",
+			"scoped_visibility": False,
+		}
 		run = _mk_run(
 			self.owner,
-			scope_json='{"company": "Stale Co", "to_date": "2027-03-31", '
-			'"report_date": "2026-09-11", "prior_fy_end": "2026-03-31"}',
+			scope_json=_j.dumps(stamped_scope),
+		)
+		scope = authoritative_writeback_scope(
+			run,
+			{
+				"company": self.company,
+				"fiscal_year": "2026-2027",
+				"from_date": "2026-04-01",
+				"to_date": "2027-03-31",
+				"scoped_visibility": False,
+			},
 		)
 		agent_runs.record_delegate_run(
 			run,
 			self.inst,
 			[],
 			coverage={TOKEN: "evaluated"},
-			scope={
-				"company": self.company,
-				"fiscal_year": "2026-2027",
-				"from_date": "2026-04-01",
-				"to_date": "2027-03-31",
-			},
+			scope=scope,
 		)
 		sj = _j.loads(frappe.db.get_value(RUN, run.name, "scope_json"))
-		self.assertEqual(sj["report_date"], "2026-09-11")  # bench-only key survives
+		self.assertEqual(sj["report_date"], "2026-09-11")
 		self.assertEqual(sj["prior_fy_end"], "2026-03-31")
-		self.assertEqual(sj["company"], self.company)  # delegate value wins
-		self.assertEqual(sj["from_date"], "2026-04-01")  # delegate-added key present
+		self.assertEqual(sj["company"], self.company)
+		self.assertEqual(sj["from_date"], "2026-04-01")
+		self.assertIs(sj["scoped_visibility"], False)  # bench-stamped false cannot be widened
 
 	def test_not_evaluable_persisted_when_all_required_unevaluated(self):
 		run = _mk_run(self.owner)
