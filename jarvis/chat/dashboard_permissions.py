@@ -35,6 +35,8 @@ from jarvis.chat.wiki_permissions import _NON_TARGETABLE_ROLES
 from jarvis.permissions import JARVIS_ADMIN_ROLE, has_jarvis_admin_access
 
 DASHBOARD = "Jarvis Dashboard"
+RUN = "Jarvis Agent Run"
+DEPOSIT_AGENT = "statutory-payroll-deposit-status"
 
 # ptypes that reveal dashboard content; everything read-shaped maps to
 # visibility (mirrors wiki_permissions).
@@ -50,6 +52,37 @@ def _is_sm(user: str) -> bool:
 def _get(doc, field: str):
 	# dict rows (frappe.get_all) and Document both expose .get.
 	return doc.get(field)
+
+
+def is_immutable_deposit_dashboard(doc) -> bool:
+	"""True when this dashboard is the server-owned Deposit report.
+
+	The link on the Agent Run is the authority.  It is checked before owner or
+	admin privileges so an ordinary dashboard keeps its normal edit behavior.
+	"""
+	name = _get(doc, "name")
+	if not name:
+		return False
+	return bool(frappe.db.exists(RUN, {"agent": DEPOSIT_AGENT, "dashboard": name}))
+
+
+def release_deposit_dashboard_for_retention(run_name: str, dashboard_name: str) -> None:
+	"""Clear a Deposit report link for a trusted retention or uninstall job.
+
+	This is intentionally not a whitelisted endpoint and never grants a caller a
+	permission bypass.  A server job must clear the exact locked link first; only
+	then can normal dashboard deletion proceed.
+	"""
+	run = frappe.db.get_value(
+		RUN,
+		run_name,
+		["name", "agent", "dashboard"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not run or run.agent != DEPOSIT_AGENT or run.dashboard != dashboard_name:
+		frappe.throw("Deposit report link cannot be released.", frappe.PermissionError)
+	frappe.db.set_value(RUN, run.name, "dashboard", None, update_modified=False)
 
 
 def can_read_dashboard(doc, user: str | None = None) -> bool:
@@ -72,6 +105,10 @@ def can_read_dashboard(doc, user: str | None = None) -> bool:
 
 def can_edit_dashboard(doc, user: str | None = None) -> bool:
 	"""Write matrix: the owner, or the admin tier."""
+	# This check must come before the owner/admin tier.  The linked report is an
+	# immutable server receipt, not an editable dashboard owned by its reviewer.
+	if is_immutable_deposit_dashboard(doc):
+		return False
 	user = user or frappe.session.user
 	if has_jarvis_admin_access(user):
 		return True

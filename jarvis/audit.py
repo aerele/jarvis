@@ -45,6 +45,11 @@ def record(
 		from jarvis.tools import _private_output
 
 		args = _private_output.redact_delegate_args(args)
+		tool = _private_output.redact_delegate_tool(tool)
+		# A capability denial can include the caller's unknown tool name in its
+		# normal message.  Deposit observability uses a fixed result instead.
+		if _private_output.metadata_redacted() and not ok:
+			error_message = "Private payroll delegate call was refused."
 		doctype, name, method = _ref(args, result)
 		scrubbed = _scrub(args, _password_fields(doctype))
 		rendered = json.dumps(scrubbed, default=str)

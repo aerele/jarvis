@@ -28,6 +28,7 @@ AGENT = "statutory-payroll-deposit-status"
 CONTRACT = "payroll_deposit_snapshot_v1"
 RECEIPT_CONTRACT = "payroll_deposit_snapshot_receipt_v2"
 LAUNCH_CONTRACT = "payroll_deposit_launch_v1"
+WRITEBACK_CONTRACT = "payroll_deposit_writeback_v3"
 RUN = "Jarvis Agent Run"
 
 SOURCE_ORDER = (
@@ -824,7 +825,10 @@ def _safe_findings(findings, launch: dict) -> list[dict]:
 				"false_positive_path": "Check the declared voucher, payment evidence, and an approved exception.",
 			}
 		)
-	return projected
+	# The evaluator has no ordering authority.  A semantically identical result
+	# therefore receives the same server receipt even when the worker emits its
+	# references in a different order.
+	return sorted(projected, key=lambda row: (row["token"], row["ref_doctype"], row["ref_name"]))
 
 
 def _safe_coverage(coverage) -> dict:
@@ -863,18 +867,20 @@ def validate_writeback(
 	scope,
 	truncated,
 	rows_consumed,
-	integrity_digest,
 	input_snapshot_id,
 	input_snapshot_digest,
+	integrity_digest=None,
 	dashboard=None,
 	report_sha256=None,
 	canvas_ref=None,
 ) -> dict:
-	"""Validate and safely project the exact v2 Deposit handoff.
+	"""Validate and safely project the Deposit v3 handoff.
 
 	There is no delegate dashboard in this contract.  A generic server fallback
 	dashboard is rendered only after this function has accepted the compact,
-	row-free projection and the writeback has persisted it.
+	row-free projection and the writeback has persisted it.  ``integrity_digest``
+	is accepted only for an in-flight v2 caller.  It is never trusted, returned,
+	or persisted; v3 receives no such field and the server creates the digest.
 	"""
 	if run.get("agent") != AGENT or run.get("status") != "running":
 		_fail("Payroll deposit writeback requires its active delegate run.")
@@ -902,13 +908,33 @@ def validate_writeback(
 	expected_rows = sum(row["data"]["rows"] for row in metadata["source_receipts"])
 	if rows_consumed != expected_rows:
 		_fail("Payroll deposit writeback row count does not match the sealed input.")
-	if not isinstance(integrity_digest, str) or not _SHA256.fullmatch(integrity_digest):
+	# Keep a narrow compatibility window for an already-running v2 bundle.  The
+	# caller-owned value can encode source bytes, so it must never influence a
+	# durable record, dashboard, response, or digest calculation.
+	if integrity_digest is not None and (
+		not isinstance(integrity_digest, str) or not _SHA256.fullmatch(integrity_digest)
+	):
 		_fail("Payroll deposit writeback integrity digest is malformed.")
+	safe_findings = _safe_findings(findings, launch)
+	safe_coverage = _safe_coverage(coverage)
+	safe_scope = deepcopy(launch_scope)
+	server_integrity_digest = canonical_digest(
+		{
+			"contract": WRITEBACK_CONTRACT,
+			"input_snapshot_id": metadata["snapshot_id"],
+			"input_snapshot_digest": metadata["snapshot_digest"],
+			"scope": safe_scope,
+			"findings": safe_findings,
+			"coverage": safe_coverage,
+			"truncated": truncated,
+			"rows_consumed": expected_rows,
+		}
+	)
 	return {
-		"findings": _safe_findings(findings, launch),
-		"coverage": _safe_coverage(coverage),
-		"scope": deepcopy(launch_scope),
+		"findings": safe_findings,
+		"coverage": safe_coverage,
+		"scope": safe_scope,
 		"truncated": truncated,
-		"rows_consumed": rows_consumed,
-		"integrity_digest": integrity_digest,
+		"rows_consumed": expected_rows,
+		"integrity_digest": server_integrity_digest,
 	}

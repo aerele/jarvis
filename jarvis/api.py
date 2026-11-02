@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from collections import deque
 from contextlib import contextmanager, nullcontext
@@ -32,6 +33,14 @@ from jarvis.permissions import (
 from jarvis.tools._result_guard import enforce_result_budget
 from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
+_REGISTERED_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+
+
+def _canonical_registered_tool(tool) -> str | None:
+	"""Return a valid bare registry name, never an attacker display value."""
+	name = str(tool or "").strip()
+	return name if _REGISTERED_TOOL_NAME.fullmatch(name) and name in _ACCEPTED_PARAMS else None
+
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def call_tool(tool: str, args: dict | str | None = None, result_mode: str | None = None) -> dict:
@@ -45,6 +54,10 @@ def call_tool(tool: str, args: dict | str | None = None, result_mode: str | None
 	already in the Error Log."""
 	frappe.local.jarvis_tool_failure_recorded = False
 	frappe.local.jarvis_call_tool_user = None
+	# A stale-device refusal can happen before normal delegate dispatch.  Reset
+	# this request marker here so an outer failure reporter can still use the
+	# Deposit-safe metadata decision made below.
+	frappe.local.jarvis_private_delegate_metadata = False
 	result = _call_tool(tool, args, result_mode=result_mode)
 	from jarvis import api_errors
 
@@ -182,8 +195,20 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 			# the NEXT turn on this conversation, so this call_tool rejection
 			# is expected to be transient in practice - but the in-flight turn
 			# that hit it still needs an honest, visible outcome now.
-			tool_call_id = (_get_header("X-Jarvis-Tool-Call-Id") or "").strip() or None
-			_notify_stale_pairing(session_key=session_key, tool=tool, tool_call_id=tool_call_id)
+			# This branch predates _dispatch_from_session.  Resolve the capability
+			# enough to apply the same Deposit metadata boundary before a receipt,
+			# realtime event, or outer error reporter can see caller-controlled text.
+			from jarvis.tools import _delegate_capability, _private_output
+
+			with impersonate(plugin_user):
+				cap = _delegate_capability.resolve(session_key)
+			redaction_token = _private_output.begin_delegate_redaction(cap)
+			_private_output.mark_delegate_metadata(cap)
+			try:
+				tool_call_id = _private_output.safe_tool_call_id(_get_header("X-Jarvis-Tool-Call-Id"))
+				_notify_stale_pairing(session_key=session_key, tool=tool, tool_call_id=tool_call_id)
+			finally:
+				_private_output.end_delegate_redaction(redaction_token)
 			return _error(
 				"AuthenticationError",
 				"session is bound to a previous device pairing; "
@@ -353,13 +378,15 @@ def _log_read_too_slow(result, tool: str, user: str, conversation: str | None, s
 	often it fires, and for which tool, can be read from the log. Never raises. The
 	session key is left out on purpose: it is a bearer."""
 	try:
+		from jarvis.tools import _private_output
+
 		error = result.get("error") if isinstance(result, dict) else None
 		if not isinstance(error, dict) or error.get("code") != "QueryTooSlowError":
 			return
 		frappe.logger("jarvis").warning(
 			"agent read stopped at the statement time limit: tool=%s user=%s conversation=%s "
 			"limit_s=%s duration_ms=%s",
-			tool,
+			_private_output.redact_delegate_tool(tool),
 			user,
 			conversation,
 			_agent_read_timeout_s(),
@@ -444,7 +471,7 @@ def _dispatch_from_session(
 	# R-6: the agent tool-call id, when the plugin sends it (forward-compatible
 	# header), keys the out-of-band receipt idempotency. Absent today => no dedupe,
 	# but the seq race is still fixed under the conversation lock.
-	tool_call_id = (_get_header("X-Jarvis-Tool-Call-Id") or "").strip() or None
+	tool_call_id = None
 	_agent_run_ctx.set_session_key(session_key)
 	redaction_token = None
 	try:
@@ -467,14 +494,58 @@ def _dispatch_from_session(
 			# the fixed safe projection before every denial, receipt, audit, and step
 			# branch below.
 			redaction_token = _private_output.begin_delegate_redaction(cap)
+			_private_output.mark_delegate_metadata(cap)
+			# Only a bounded opaque id is valid for normal delegates.  A Deposit
+			# delegate intentionally retains no client-provided id at all.
+			raw_tool_call_id = _get_header("X-Jarvis-Tool-Call-Id")
+			tool_call_id = _private_output.safe_tool_call_id(raw_tool_call_id)
+			# Active Deposit calls get an early fixed tool grammar/registered-name
+			# check and a bounded opaque call-id check. The raw values remain only in
+			# this stack frame for authorization and execution; none can reach a
+			# durable or realtime sink.
 			denial = _delegate_capability.tool_denial(session_key, tool, cap=cap)
+			if _private_output.metadata_redacted() and (
+				_canonical_registered_tool(tool) is None
+				or not _private_output.is_opaque_tool_call_id(raw_tool_call_id)
+			):
+				code = CapabilityDeniedError.__name__
+				message = "This private payroll delegate call is not permitted by its run contract."
+				result = _error(code, message, hint=_hint_for(code, ""))
+				audit.record(tool=tool, args={}, ok=False, error_code=code, error_message=message)
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args={},
+					result=_error(
+						code,
+						"This private payroll review cannot complete this tool request.",
+						hint=_hint_for(code, ""),
+					),
+					tool_call_id=tool_call_id,
+				)
+				if denial and denial["fatal"]:
+					from jarvis.chat import agent_scheduler
+
+					agent_scheduler.fail_run(denial["run"], denial["run_error"])
+				return result
 			if denial:
 				code = CapabilityDeniedError.__name__
 				hint = _hint_for(code, "")
+				private_message = _private_output.metadata_redacted()
+				delegate_message = (
+					"This private payroll delegate call is not permitted by its run contract."
+					if private_message
+					else denial["message"]
+				)
+				chat_message = (
+					"This private payroll review cannot complete this tool request."
+					if private_message
+					else denial["chat_message"]
+				)
 				# The DELEGATE reads this one: the contract vocabulary, and (inside the
 				# message, the only field the plugin relays to the model) the fact that
 				# retrying can never help because the snapshot is fixed for the run.
-				result = _error(code, denial["message"], hint=hint)
+				result = _error(code, delegate_message, hint=hint)
 				# What was ATTEMPTED is the forensic value of a refusal, so record the
 				# args too — scrubbed + truncated by audit.record. Parsed only here,
 				# inside the deny branch, so the gate itself stays the first thing that
@@ -488,7 +559,7 @@ def _dispatch_from_session(
 					args=attempted,
 					ok=False,
 					error_code=code,
-					error_message=denial["message"],
+					error_message=delegate_message,
 				)
 				# The CUSTOMER reads this one. The transcript receipt renders verbatim
 				# in chat, so it carries plain language plus the remedy — the contract
@@ -497,7 +568,7 @@ def _dispatch_from_session(
 					session_key=session_key,
 					tool=tool,
 					args=attempted,
-					result=_error(code, denial["chat_message"], hint=hint),
+					result=_error(code, chat_message, hint=hint),
 					tool_call_id=tool_call_id,
 				)
 				if denial["fatal"]:
@@ -613,10 +684,17 @@ def _dispatch_from_session(
 					None,
 					ok=False,
 					started_ms=started_ms,
-					error_message=str(exc),
+					error_message=(
+						"Private payroll delegate call failed."
+						if _private_output.metadata_redacted()
+						else str(exc)
+					),
 				)
+				if _private_output.metadata_redacted():
+					raise InvalidArgumentError("Private payroll delegate call failed.") from None
 				raise
 			_log_read_too_slow(result, tool, user, conv, started_ms)
+			result = _private_output.redact_delegate_result(result)
 			receipt = result
 			if result_mode is not None:
 				try:
@@ -626,7 +704,7 @@ def _dispatch_from_session(
 					# The source tool may have read rows, but an invalid private envelope
 					# must not hand those rows to an audit, transcript, or run step.
 					audit.record(
-						tool=tool,
+						tool=_private_output.redact_delegate_tool(tool),
 						args=parsed_args,
 						ok=False,
 						error_code="InvalidArgumentError",
@@ -657,7 +735,7 @@ def _dispatch_from_session(
 				if event:
 					result["data"] = guarded
 					telemetry.record_budget_event(
-						tool=tool,
+						tool=_private_output.redact_delegate_tool(tool),
 						outcome=event["kind"],
 						original_chars=event["original_chars"],
 						shown=event["shown"],
@@ -716,8 +794,12 @@ def _record_tool_step(
 
 		if agent_run_steps.bare_tool(tool) in _SELF_NARRATING_TOOLS:
 			return
+		# Keep the raw name only for the self-narrating decision above.  A
+		# Deposit tool value is caller-controlled and must not reach a step label,
+		# stored tool field, or even this hook's fallback logger.
+		safe_tool = _private_output.redact_delegate_tool(tool)
 		label, detail = agent_run_steps.humanize_tool_call(
-			tool, _private_output.redact_delegate_args(args), data if ok else None
+			safe_tool, _private_output.redact_delegate_args(args), data if ok else None
 		)
 		if not ok:
 			detail = agent_run_steps.error_detail(error_message) or detail
@@ -730,7 +812,7 @@ def _record_tool_step(
 		agent_run_steps.record_step(
 			step_run.get("name"),
 			kind="tool",
-			tool=tool,
+			tool=safe_tool,
 			label=label,
 			detail=detail,
 			status="ok" if ok else "error",
@@ -739,8 +821,10 @@ def _record_tool_step(
 		)
 	except Exception:
 		try:
+			from jarvis.tools import _private_output
+
 			frappe.logger("jarvis.agents").warning(
-				f"run-step hook failed for tool {tool}: {frappe.get_traceback()}"
+				f"run-step hook failed for tool {_private_output.redact_delegate_tool(tool)}: {frappe.get_traceback()}"
 			)
 		except Exception:
 			pass
@@ -930,6 +1014,8 @@ def persist_tool_receipt(
 	# Do this before entity extraction and JSON persistence. It covers normal
 	# calls, capability refusals, parse errors, and failed Deposit writebacks.
 	args = _private_output.redact_delegate_args(args)
+	tool = _private_output.redact_delegate_tool(tool)
+	tool_call_id = _private_output.safe_tool_call_id(tool_call_id)
 	result = result or {}
 	from jarvis.chat.source_receipts import source_receipt
 
@@ -1384,6 +1470,11 @@ def publish_realtime_tool_result(
 	SPA can bind a live report to the reply it belongs to (the "Reports
 	consulted" card) the same way the saved rows do."""
 	from jarvis.chat.collaboration_realtime import is_shared
+	from jarvis.tools import _private_output
+
+	tool_name = _private_output.redact_delegate_tool(tool_name)
+	tool_call_id = _private_output.safe_tool_call_id(tool_call_id)
+	args = _private_output.redact_delegate_args(args)
 
 	payload = {
 		"kind": "tool:result",

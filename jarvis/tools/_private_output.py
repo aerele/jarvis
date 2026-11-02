@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+import frappe
 from frappe.utils.response import json_handler
 
 from jarvis.exceptions import InvalidArgumentError
@@ -18,6 +20,12 @@ PRIVATE_SOURCE_TOOLS = frozenset({"get_payroll_deposit_inputs"})
 TOOLS = PRIVATE_SOURCE_TOOLS
 _active = ContextVar("jarvis_private_audit_output", default=False)
 _redact_delegate_args = ContextVar("jarvis_private_delegate_args", default=False)
+
+# This label is deliberately not a registered tool.  It is an observability
+# marker, not an execution name: a Deposit delegate's caller-controlled tool
+# name must not cross any durable or realtime boundary.
+PRIVATE_DELEGATE_TOOL_LABEL = "private_delegate_tool"
+_CALL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 @contextmanager
@@ -62,6 +70,16 @@ def end_delegate_redaction(token) -> None:
 	_redact_delegate_args.reset(token)
 
 
+def mark_delegate_metadata(cap) -> None:
+	"""Keep the request-level marker through call_tool's outer error capture."""
+	if not is_active_deposit_delegate(cap):
+		return
+	try:
+		frappe.local.jarvis_private_delegate_metadata = True
+	except Exception:
+		pass
+
+
 def redact_delegate_args(args):
 	"""Return a durable-safe argument projection for the active delegate.
 
@@ -69,9 +87,52 @@ def redact_delegate_args(args):
 	failed calls.  Their argument projection therefore cannot retain a caller
 	value for Deposit runs, even when the tool itself never receives the value.
 	"""
-	if _redact_delegate_args.get():
+	if metadata_redacted():
 		return {"private_delegate_args_redacted": True}
 	return args
+
+
+def metadata_redacted() -> bool:
+	"""True when Deposit metadata must be replaced at every egress boundary."""
+	if _redact_delegate_args.get():
+		return True
+	try:
+		return bool(getattr(frappe.local, "jarvis_private_delegate_metadata", False))
+	except Exception:
+		return False
+
+
+def redact_delegate_tool(tool):
+	"""Return the fixed Deposit label, or the normal execution name."""
+	return PRIVATE_DELEGATE_TOOL_LABEL if metadata_redacted() else tool
+
+
+def safe_tool_call_id(value) -> str | None:
+	"""Keep no caller id for Deposit; preserve generic receipt behavior."""
+	if metadata_redacted():
+		return None
+	value = str(value or "").strip()
+	return value or None
+
+
+def is_opaque_tool_call_id(value) -> bool:
+	"""Validate the bounded client id before an active Deposit call proceeds."""
+	value = str(value or "").strip()
+	return not value or bool(_CALL_ID.fullmatch(value))
+
+
+def redact_delegate_result(result):
+	"""Remove caller-controlled failure text from an active Deposit envelope."""
+	if not metadata_redacted() or not isinstance(result, dict) or result.get("ok") is not False:
+		return result
+	error = result.get("error") if isinstance(result.get("error"), dict) else {}
+	return {
+		**result,
+		"error": {
+			"code": str(error.get("code") or "InvalidArgumentError"),
+			"message": "Private payroll delegate call failed.",
+		},
+	}
 
 
 def require_source_transport(tool: str) -> None:

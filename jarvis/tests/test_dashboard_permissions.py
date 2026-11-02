@@ -14,7 +14,9 @@ from jarvis.chat.dashboard_permissions import (
 	can_read_dashboard,
 	creatable_scopes,
 	has_dashboard_permission,
+	is_immutable_deposit_dashboard,
 	manageable_roles,
+	release_deposit_dashboard_for_retention,
 )
 from jarvis.exceptions import PermissionDeniedError
 from jarvis.permissions import (
@@ -26,6 +28,8 @@ from jarvis.permissions import (
 from jarvis.tools.get_doc import get_doc as tool_get_doc
 
 DASHBOARD = "Jarvis Dashboard"
+RUN = "Jarvis Agent Run"
+DEPOSIT_AGENT = "statutory-payroll-deposit-status"
 
 ADMIN_USER = "jarvis-dash-admin@example.com"
 PLAIN_A = "jarvis-dash-user-a@example.com"
@@ -76,9 +80,16 @@ class _DashboardPermTestCase(FrappeTestCase):
 		_ensure_user(ROLE_USER, [JARVIS_USER_ROLE, CUSTOM_ROLE])
 		self._orig_user = frappe.session.user
 		self._dashboards: list[str] = []
+		self._runs: list[str] = []
 
 	def tearDown(self):
 		frappe.set_user(self._orig_user)
+		for name in self._runs:
+			if frappe.db.exists(RUN, name):
+				dashboard = frappe.db.get_value(RUN, name, "dashboard")
+				if dashboard and frappe.db.exists(DASHBOARD, dashboard):
+					release_deposit_dashboard_for_retention(name, dashboard)
+				frappe.db.delete(RUN, {"name": name})
 		for name in self._dashboards:
 			if frappe.db.exists(DASHBOARD, name):
 				frappe.delete_doc(DASHBOARD, name, ignore_permissions=True, force=True)
@@ -111,6 +122,21 @@ class _DashboardPermTestCase(FrappeTestCase):
 
 	def _doc(self, name: str):
 		return frappe.get_doc(DASHBOARD, name)
+
+	def _link_deposit_report(self, dashboard: str, owner: str = ROLE_USER) -> str:
+		"""Make a real linked run. Raw rehome is intentionally server-only."""
+		run = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"agent": DEPOSIT_AGENT,
+				"status": "completed",
+				"dashboard": dashboard,
+				"owner": owner,
+			}
+		).insert(ignore_permissions=True, ignore_links=True)
+		self._runs.append(run.name)
+		frappe.db.commit()
+		return run.name
 
 	def _visible_names(self, user: str, names: list[str]) -> set:
 		frappe.set_user(user)
@@ -219,6 +245,65 @@ class TestWriteMatrix(_DashboardPermTestCase):
 		frappe.set_user(PLAIN_B)
 		self.assertRaises(PermissionDeniedError, tool_get_doc, DASHBOARD, name)
 		frappe.clear_messages()
+
+	def test_linked_deposit_report_is_immutable_for_reviewer_owner_and_admin(self):
+		# A shadow report is readable by its reviewer, then trusted raw rehome makes
+		# the same artifact visible to the live owner. Neither party can mutate it.
+		name = self._mk("User", target_user=ROLE_USER, owner=ROLE_USER)
+		run = self._link_deposit_report(name)
+		doc = self._doc(name)
+		self.assertTrue(can_read_dashboard(doc, ROLE_USER))
+		self.assertTrue(is_immutable_deposit_dashboard(doc))
+		for user in (ROLE_USER, ADMIN_USER, "Administrator"):
+			with self.subTest(user=user):
+				self.assertFalse(can_edit_dashboard(doc, user))
+				self.assertFalse(has_dashboard_permission(doc, "write", user))
+				self.assertFalse(has_dashboard_permission(doc, "delete", user))
+				frappe.set_user(user)
+				candidate = frappe.get_doc(DASHBOARD, name)
+				candidate.description = "must not save"
+				self.assertRaises(frappe.PermissionError, candidate.save, ignore_permissions=True)
+
+		# Server-only shadow -> live rehome bypasses the ORM lock, as intended.
+		frappe.db.set_value(
+			DASHBOARD, name, {"owner": PLAIN_A, "target_user": PLAIN_A}, update_modified=False
+		)
+		frappe.db.commit()
+		rehomed = self._doc(name)
+		self.assertTrue(can_read_dashboard(rehomed, PLAIN_A))
+		self.assertFalse(can_edit_dashboard(rehomed, PLAIN_A))
+		frappe.set_user(PLAIN_A)
+		self.assertRaises(
+			frappe.PermissionError,
+			frappe.client.set_value,
+			DASHBOARD,
+			name,
+			"description",
+			"must not set",
+		)
+		frappe.set_user("Administrator")
+		self.assertRaises(
+			frappe.PermissionError,
+			frappe.delete_doc,
+			DASHBOARD,
+			name,
+			ignore_permissions=True,
+			force=True,
+		)
+
+		# Retention has one explicit server route: unlink under the Run lock, then
+		# normal deletion is again available. This is not an external permission bypass.
+		release_deposit_dashboard_for_retention(run, name)
+		frappe.delete_doc(DASHBOARD, name, ignore_permissions=True, force=True)
+		self.assertFalse(frappe.db.exists(DASHBOARD, name))
+
+	def test_generic_dashboard_remains_editable(self):
+		name = self._mk("User", target_user=PLAIN_A, owner=PLAIN_A)
+		frappe.set_user(PLAIN_A)
+		doc = self._doc(name)
+		doc.description = "generic owner edit"
+		doc.save()
+		self.assertEqual(frappe.db.get_value(DASHBOARD, name, "description"), "generic owner edit")
 
 
 class TestScopeHelpers(_DashboardPermTestCase):

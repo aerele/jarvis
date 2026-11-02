@@ -175,16 +175,19 @@ def record_agent_run(
 	    ...}`` — company is stamped on each Finding + scopes auto-resolve + the
 	    watermark recompute.
 	  input_snapshot_id/input_snapshot_digest: required only by the statutory
-	    payroll Deposit-Status agent. That agent accepts the strict v2 compact
+	    payroll Deposit-Status agent. That agent accepts the strict v3 compact
 	    handoff only: reference-only findings, closed coverage states, the frozen
-	    scope, an exact sealed-source row count, and a SHA-256 integrity digest.
+	    scope, and an exact sealed-source row count. The server computes the
+	    SHA-256 integrity digest after safe projection. A legacy lower-hex digest
+	    is accepted only for in-flight compatibility and is discarded.
 	    It rejects delegate dashboard, report-hash, and canvas output. The server
 	    creates the normal fallback dashboard after safe persistence.
 	  truncated: True when the delegate's fetch hit its budget — auto-resolve is
 	    skipped entirely and the run is partial (A16).
 	  canvas_ref: the delegate's saved canvas/dashboard ref (stored for Phase 4).
 	    It is not accepted for statutory payroll Deposit-Status.
-	  integrity_digest: the evaluator's sha256 over canonicalized findings.
+	  integrity_digest: legacy Deposit v2 compatibility only; never trusted or
+	    persisted for Deposit v3.
 	  dashboard: the ``Jarvis Dashboard`` name a generic delegate got back from
 	    ``jarvis__save_agent_dashboard`` — linked on the Run. When omitted, a
 	    minimal A2-safe dashboard is built server-side from the persisted findings

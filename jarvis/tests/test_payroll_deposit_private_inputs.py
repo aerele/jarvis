@@ -1,6 +1,8 @@
 """Regression tests for the private payroll Deposit-Status input contract."""
 
 import json
+import threading
+import time
 from copy import deepcopy
 from unittest import TestCase
 from unittest.mock import patch
@@ -173,7 +175,7 @@ def _ensure_run_as_user(email: str) -> str:
 
 
 def _v2_output(captured: dict, **overrides) -> dict:
-	"""The exact compact handoff shape accepted from the v2 bundle."""
+	"""The exact seven-field compact handoff shape accepted from the v3 bundle."""
 	value = {
 		"findings": [
 			{
@@ -190,7 +192,6 @@ def _v2_output(captured: dict, **overrides) -> dict:
 		"scope": deepcopy(SCOPE),
 		"truncated": False,
 		"rows_consumed": sum(row["data"]["rows"] for row in captured["source_receipts"]),
-		"integrity_digest": "a" * 64,
 		"input_snapshot_id": captured["snapshot_id"],
 		"input_snapshot_digest": captured["snapshot_digest"],
 	}
@@ -351,7 +352,7 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 		self.assertNotIn("SECRET-PRIVATE-ROW", json.dumps(receipt))
 		self.assertNotIn("SECRET-PRIVATE-ROW", json.dumps(receipt["data"]))
 
-	def test_v2_writeback_accepts_only_a_compact_server_projected_shape(self):
+	def test_v3_writeback_accepts_only_a_compact_server_projected_shape(self):
 		captured, _ = _captured_snapshot()
 		run = _run(source_snapshot=snapshot._metadata(captured))
 		projected = snapshot.validate_writeback(run, **_v2_output(captured))
@@ -359,8 +360,53 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 		self.assertEqual(projected["findings"][0]["severity"], "warning")
 		self.assertEqual(projected["findings"][0]["result_class"], "derived_candidate")
 		self.assertNotIn("SECRET-PRIVATE-ROW", json.dumps(projected))
+		self.assertRegex(projected["integrity_digest"], r"^[0-9a-f]{64}$")
 
-	def test_v2_writeback_refuses_scope_snapshot_and_row_count_changes(self):
+	def test_server_digest_is_stable_and_ignores_legacy_delegate_digest(self):
+		captured, _ = _captured_snapshot()
+		run = _run(source_snapshot=snapshot._metadata(captured))
+		v3 = _v2_output(captured)
+		first = snapshot.validate_writeback(run, **v3)
+		second = snapshot.validate_writeback(run, **deepcopy(v3))
+		sentinel = "73" * 32
+		legacy = snapshot.validate_writeback(run, **_v2_output(captured, integrity_digest=sentinel))
+		changed = snapshot.validate_writeback(
+			run,
+			**_v2_output(captured, findings=[]),
+		)
+		coverage_changed = snapshot.validate_writeback(
+			run,
+			**_v2_output(
+				captured,
+				coverage={
+					**_v2_output(captured)["coverage"],
+					"s7q_interest_table": {
+						"state": "not_evaluable",
+						"reason_code": "external_evidence_absent",
+					},
+				},
+				truncated=True,
+			),
+		)
+		self.assertEqual(
+			set(v3),
+			{
+				"findings",
+				"coverage",
+				"scope",
+				"truncated",
+				"rows_consumed",
+				"input_snapshot_id",
+				"input_snapshot_digest",
+			},
+		)
+		self.assertEqual(first["integrity_digest"], second["integrity_digest"])
+		self.assertEqual(first["integrity_digest"], legacy["integrity_digest"])
+		self.assertNotEqual(first["integrity_digest"], changed["integrity_digest"])
+		self.assertNotEqual(first["integrity_digest"], coverage_changed["integrity_digest"])
+		self.assertNotIn(sentinel, json.dumps(legacy))
+
+	def test_v3_writeback_refuses_scope_snapshot_and_row_count_changes(self):
 		captured, _ = _captured_snapshot()
 		run = _run(source_snapshot=snapshot._metadata(captured))
 		for changed in (
@@ -378,7 +424,7 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 			with self.subTest(changed=changed), self.assertRaises(InvalidArgumentError):
 				snapshot.validate_writeback(run, **_v2_output(captured, **changed))
 
-	def test_v2_writeback_refuses_every_delegate_free_text_route(self):
+	def test_v3_writeback_refuses_every_delegate_free_text_route(self):
 		captured, _ = _captured_snapshot()
 		run = _run(source_snapshot=snapshot._metadata(captured))
 		sentinel = "PRIVATE-SOURCE-SENTINEL"
@@ -618,6 +664,95 @@ class TestPayrollDepositPrivateTransport(TestCase):
 
 
 class TestPayrollDepositWritebackClaim(TestCase):
+	def test_real_db_row_lock_allows_one_deposit_finalizer_and_dashboard(self):
+		"""Two MariaDB connections serialize one Deposit terminal writeback.
+
+		This is intentionally a real connection test, not a mocked ``for_update``
+		assertion.  The first worker holds the Run lock while the second starts;
+		the second can only observe the terminal row and cannot create another
+		fallback dashboard.
+		"""
+		run = frappe.get_doc(
+			{
+				"doctype": "Jarvis Agent Run",
+				"agent": snapshot.AGENT,
+				"status": "running",
+				"owner": "Administrator",
+			}
+		).insert(ignore_permissions=True, ignore_links=True)
+		frappe.db.commit()
+		site, sites_path, run_name = frappe.local.site, frappe.local.sites_path, run.name
+		locked, release = threading.Event(), threading.Event()
+		outcomes, errors, created = [], [], []
+
+		def finalizer(first: bool):
+			try:
+				frappe.init(site, sites_path=sites_path)
+				frappe.connect()
+				row = frappe.db.get_value(
+					"Jarvis Agent Run", run_name, ["status"], as_dict=True, for_update=True
+				)
+				if row.status != "running":
+					outcomes.append(f"idempotent:{row.status}")
+					frappe.db.commit()
+					return
+				if first:
+					locked.set()
+					release.wait(5)
+				# This represents the fallback creation after record_agent_run has
+				# claimed the Run. Only the lock winner reaches this block.
+				dashboard = frappe.get_doc(
+					{
+						"doctype": "Jarvis Dashboard",
+						"dashboard_title": f"deposit-lock-{run_name}",
+						"scope": "User",
+						"html": "<h1>deposit lock test</h1>",
+					}
+				).insert(ignore_permissions=True)
+				created.append(dashboard.name)
+				frappe.db.set_value(
+					"Jarvis Agent Run",
+					run_name,
+					{"status": "completed", "dashboard": dashboard.name},
+					update_modified=False,
+				)
+				outcomes.append("winner")
+				frappe.db.commit()
+			except Exception as exc:
+				errors.append(repr(exc))
+			finally:
+				try:
+					frappe.destroy()
+				except Exception:
+					pass
+
+		first = threading.Thread(target=finalizer, args=(True,))
+		second = threading.Thread(target=finalizer, args=(False,))
+		try:
+			first.start()
+			self.assertTrue(locked.wait(5), errors)
+			second.start()
+			time.sleep(0.1)
+			release.set()
+			first.join(10)
+			second.join(10)
+			self.assertFalse(first.is_alive())
+			self.assertFalse(second.is_alive())
+			self.assertEqual(errors, [])
+			self.assertEqual(outcomes.count("winner"), 1)
+			self.assertEqual(outcomes.count("idempotent:completed"), 1)
+			final = frappe.db.get_value("Jarvis Agent Run", run_name, ["status", "dashboard"], as_dict=True)
+			self.assertEqual(final.status, "completed")
+			self.assertEqual(final.dashboard, created[0])
+			self.assertEqual(frappe.db.count("Jarvis Dashboard", {"name": final.dashboard}), 1)
+		finally:
+			# The report is linked only after the winner commits. Remove the trusted
+			# Run link first, then clean the isolated test artifact.
+			frappe.db.delete("Jarvis Agent Run", {"name": run_name})
+			for name in created:
+				frappe.db.delete("Jarvis Dashboard", {"name": name})
+			frappe.db.commit()
+
 	def test_finalized_claim_is_idempotent_under_the_run_row_lock(self):
 		"""A second writer that waited on the claim lock must not persist again."""
 		from jarvis.tools import _agent_run_ctx
@@ -695,7 +830,7 @@ class TestPayrollDepositWritebackClaim(TestCase):
 		self.assertTrue(get_value.call_args_list[0].kwargs["for_update"])
 		persist.assert_not_called()
 
-	def test_valid_v2_writeback_forces_the_server_fallback_dashboard(self):
+	def test_valid_v3_writeback_forces_the_server_fallback_dashboard(self):
 		from jarvis.tools import _agent_run_ctx
 		from jarvis.tools import record_agent_run as tool
 
@@ -729,6 +864,7 @@ class TestPayrollDepositWritebackClaim(TestCase):
 			raise AssertionError(f"unexpected read: {doctype}")
 
 		inst = frappe._dict(agent=snapshot.AGENT, activation_state="shadow")
+		legacy_digest = "73" * 32
 		_agent_run_ctx.set_session_key("private-writeback-session")
 		try:
 			with (
@@ -746,16 +882,19 @@ class TestPayrollDepositWritebackClaim(TestCase):
 				patch("jarvis.chat.agent_runs.record_delegate_run", return_value=final) as persist,
 				patch("jarvis.chat.agent_run_steps.record_step"),
 			):
-				result = tool.record_agent_run(**_v2_output(captured))
+				result = tool.record_agent_run(**_v2_output(captured, integrity_digest=legacy_digest))
 		finally:
 			_agent_run_ctx.clear_session_key()
 
 		self.assertEqual(result["dashboard"], "SERVER-FALLBACK-DASHBOARD")
 		self.assertIsNone(persist.call_args.kwargs["dashboard"])
 		self.assertIsNone(persist.call_args.kwargs["canvas_ref"])
+		self.assertNotEqual(persist.call_args.kwargs["integrity_digest"], legacy_digest)
+		self.assertRegex(persist.call_args.kwargs["integrity_digest"], r"^[0-9a-f]{64}$")
 		persisted = persist.call_args.args[2][0]
 		self.assertEqual(persisted["severity"], "warning")
 		self.assertNotIn("SECRET-PRIVATE-ROW", json.dumps(persist.call_args))
+		self.assertNotIn(legacy_digest, json.dumps(persist.call_args))
 
 
 class TestPayrollDepositPrivateAuditRedaction(TestCase):
@@ -769,9 +908,10 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			"tools_allow": tools_allow,
 		}
 
-	def _dispatch_with_receipt_capture(self, cap, tool, args, run_result=None):
+	def _dispatch_with_receipt_capture(self, cap, tool, args, run_result=None, tool_call_id=None):
 		from jarvis import api
 
+		frappe.local.jarvis_private_delegate_metadata = False
 		receipts, logs = [], []
 
 		class Logger:
@@ -789,7 +929,11 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			patch("jarvis.chat.collaboration.require_legacy_session"),
 			patch.object(api, "impersonate"),
 			patch.object(_delegate_capability, "resolve", return_value=cap),
-			patch.object(api, "_get_header", return_value=None),
+			patch.object(
+				api,
+				"_get_header",
+				side_effect=lambda name: tool_call_id if name == "X-Jarvis-Tool-Call-Id" else None,
+			),
 			patch.object(frappe.db, "get_value", return_value="owner@example.test"),
 			patch.object(frappe.db, "commit"),
 			patch.object(api, "_locked_insert_chat_message", side_effect=insert),
@@ -821,6 +965,135 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 					result = api._dispatch_from_session("owner@example.test", "private-session", tool, args)
 		return result, receipts, logs
 
+	def test_caller_tool_and_call_id_are_redacted_on_allowed_and_denied_paths(self):
+		from jarvis import api
+
+		sentinel_tool = "PRIVATE-TOOL-SENTINEL"
+		sentinel_id = "PRIVATE-CALL-ID-SENTINEL"
+		for label, allowed, tool, args, run_result, hidden_tool in (
+			(
+				"allowed",
+				["jarvis__record_agent_run"],
+				"record_agent_run",
+				{"integrity_digest": sentinel_tool},
+				{"ok": True, "data": {"safe": True}},
+				sentinel_tool,
+			),
+			("denied", ["jarvis__record_agent_run"], sentinel_tool, {}, None, sentinel_tool),
+			(
+				"unregistered",
+				["jarvis__record_agent_run"],
+				"private_tool_sentinel",
+				{},
+				None,
+				"private_tool_sentinel",
+			),
+			(
+				"malformed",
+				["jarvis__record_agent_run"],
+				"record_agent_run",
+				{},
+				{"ok": False, "error": {"code": "InvalidArgumentError", "message": sentinel_tool}},
+				sentinel_tool,
+			),
+		):
+			with self.subTest(label=label):
+				result, receipts, logs = self._dispatch_with_receipt_capture(
+					self._cap(allowed),
+					tool,
+					args,
+					run_result=run_result,
+					tool_call_id=sentinel_id,
+				)
+				self.assertNotIn(hidden_tool, json.dumps(result))
+				self.assertNotIn(sentinel_id, json.dumps(result))
+				self.assertNotIn(hidden_tool, json.dumps(receipts))
+				self.assertNotIn(sentinel_id, json.dumps(receipts))
+				self.assertNotIn(hidden_tool, "\n".join(str(row) for row in logs))
+				self.assertNotIn(sentinel_id, "\n".join(str(row) for row in logs))
+				self.assertEqual(receipts[0]["tool_name"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+				self.assertIsNone(receipts[0]["tool_call_id"])
+
+	def test_unbounded_deposit_call_id_is_refused_without_raw_persistence(self):
+		too_long = "x" * 129
+		result, receipts, logs = self._dispatch_with_receipt_capture(
+			self._cap(["jarvis__record_agent_run"]),
+			"record_agent_run",
+			{},
+			run_result={"ok": True, "data": {"safe": True}},
+			tool_call_id=too_long,
+		)
+		self.assertFalse(result["ok"])
+		self.assertNotIn(too_long, json.dumps(result))
+		self.assertNotIn(too_long, json.dumps(receipts))
+		self.assertNotIn(too_long, "\n".join(str(row) for row in logs))
+		self.assertEqual(receipts[0]["tool_name"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+		self.assertIsNone(receipts[0]["tool_call_id"])
+
+	def test_stale_deposit_metadata_is_redacted_before_the_receipt(self):
+		from jarvis import api
+
+		cap = self._cap(["jarvis__record_agent_run"])
+		sentinel_tool = "PRIVATE-STALE-TOOL"
+		sentinel_id = "PRIVATE-STALE-CALL-ID"
+		frappe.cache().delete_value("jarvis:stale_pairing_notified:private-stale-session")
+		receipts, events = [], []
+
+		def get_value(doctype, name=None, fieldname=None, *_args, **_kwargs):
+			if doctype == "User":
+				return 1
+			if doctype == "Jarvis Chat Session":
+				return "old"
+			if doctype == "Jarvis Conversation":
+				return "STALE-CONVERSATION" if isinstance(name, dict) else "owner@example.test"
+			return None
+
+		def insert(_conversation, fields, **_kwargs):
+			receipts.append(deepcopy(fields))
+			return "STALE-TOOL-MESSAGE"
+
+		with (
+			patch.object(
+				api,
+				"_get_header",
+				side_effect=lambda name: {
+					"X-Jarvis-Token": "token",
+					"X-Jarvis-Tool-Call-Id": sentinel_id,
+				}.get(name),
+			),
+			patch.object(api, "_request_body_bytes", return_value=b"{}"),
+			patch.object(api, "validate_plugin_request", return_value="private-stale-session"),
+			patch("jarvis.chat.site_pin.pin_if_unset"),
+			patch("jarvis.chat.collaboration.is_collaborative_session", return_value=False),
+			patch("jarvis.chat.collaboration.legacy_session_user", return_value="owner@example.test"),
+			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(frappe.db, "get_single_value", return_value="new"),
+			patch("jarvis.chat.device.session_device_is_stale", return_value=True),
+			patch.object(_delegate_capability, "resolve", return_value=cap),
+			patch.object(api, "impersonate"),
+			patch.object(frappe.db, "commit"),
+			patch.object(api, "_locked_insert_chat_message", side_effect=insert),
+			patch.object(
+				api, "publish_realtime_tool_result", side_effect=lambda **event: events.append(event)
+			),
+			patch.object(api, "_maybe_attach_artifact"),
+			patch("jarvis.chat.collaboration_turn.current_turn", return_value=None),
+			patch("jarvis.api_errors.record_server_error") as error_capture,
+		):
+			result = api.call_tool(sentinel_tool, {})
+		self.assertNotIn(sentinel_tool, json.dumps(result))
+		self.assertNotIn(sentinel_id, json.dumps(result))
+		self.assertEqual(len(receipts), 1)
+		self.assertEqual(len(events), 1)
+		for surface in (receipts, events, error_capture.call_args_list):
+			self.assertNotIn(sentinel_tool, json.dumps(surface, default=str))
+			self.assertNotIn(sentinel_id, json.dumps(surface, default=str))
+		self.assertEqual(receipts[0]["tool_name"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+		self.assertIsNone(receipts[0]["tool_call_id"])
+		self.assertEqual(events[0]["tool_name"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+		self.assertIsNone(events[0]["tool_call_id"])
+		self.assertEqual(error_capture.call_args.kwargs["route"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+
 	def test_denied_dashboard_arguments_never_reach_audit_or_transcript(self):
 		sentinel = "PRIVATE-SOURCE-SENTINEL"
 		result, receipts, logs = self._dispatch_with_receipt_capture(
@@ -840,12 +1113,14 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 		from jarvis.chat import agent_run_steps
 
 		sentinel = "PRIVATE-SOURCE-SENTINEL"
+		hex_sentinel = "73" * 32
 		args = {
 			"findings": [{"note": sentinel}],
 			"coverage": {"detail": sentinel},
 			"dashboard": sentinel,
+			"integrity_digest": hex_sentinel,
 		}
-		result, receipts, _logs = self._dispatch_with_receipt_capture(
+		result, receipts, logs = self._dispatch_with_receipt_capture(
 			self._cap(["jarvis__record_agent_run"]),
 			"record_agent_run",
 			args,
@@ -854,6 +1129,9 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(len(receipts), 1)
 		self.assertNotIn(sentinel, json.dumps(receipts))
+		self.assertNotIn(hex_sentinel, json.dumps(receipts))
+		self.assertNotIn(hex_sentinel, "\n".join(str(row) for row in logs))
+		self.assertNotIn(hex_sentinel, json.dumps(result))
 
 		cap = self._cap(["jarvis__record_agent_run"])
 		token = _private_output.begin_delegate_redaction(cap)
