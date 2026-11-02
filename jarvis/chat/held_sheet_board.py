@@ -6,14 +6,14 @@ from __future__ import annotations
 import frappe
 
 from jarvis.chat import held_edit
-from jarvis.chat.held_sheets import category, json_dict
+from jarvis.chat.held_sheets import category_map, json_dict
 from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._store import EXECUTING, PENDING
 
 # --------------------------------------------------------------------------- #
 # Counts (the board and File Box lines read these, never the card)
 # --------------------------------------------------------------------------- #
-_SECTIONS = {"party": 0, "address": 1, "item": 2, "other": 3}
+_SECTIONS = {"party": 0, "address": 1, "item": 2, "other": 3, "settings": 4}
 
 
 def counts(records: list[dict]) -> dict:
@@ -38,7 +38,8 @@ def _noun(doctype: str, n: int) -> str:
 def counts_line(by_doctype, questions=0) -> str:
 	""" "1 supplier · 100 items · 2 questions": parties, addresses, items, the rest."""
 	by_doctype = json_dict(by_doctype)
-	order = sorted(by_doctype, key=lambda dt: (_SECTIONS[category(dt)], dt))
+	sections = category_map(by_doctype)
+	order = sorted(by_doctype, key=lambda dt: (_SECTIONS[sections[dt]], dt))
 	parts = [f"{by_doctype[dt]} {_noun(dt, by_doctype[dt])}" for dt in order if by_doctype[dt]]
 	questions = frappe.utils.cint(questions)
 	if questions:
@@ -101,7 +102,7 @@ def detail(row, me: str) -> dict:
 	survive a bounce), its progress while it runs, and the outcome once applied.
 	Never the sealed call."""
 	from jarvis.chat import approvals_api
-	from jarvis.chat.filebox import _source_file
+	from jarvis.chat.filebox_source import display_file
 	from jarvis.chat.pending_actions import _sheet
 	from jarvis.chat.pending_actions._store import REASON_TEXT
 
@@ -130,7 +131,7 @@ def detail(row, me: str) -> dict:
 				"needs_fix": _fix(fix.get(str(r.get("index")))),
 			}
 		)
-	source = _source_file(row.conversation) if row.conversation else None
+	source = display_file(row.conversation) if row.conversation else None
 	code = row.reason_code or ""
 	return {
 		"name": row.name,
