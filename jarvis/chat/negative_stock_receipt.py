@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from datetime import date
 
 import frappe
+from frappe.database import get_db
 from frappe.utils import get_datetime
 
 AGENT = "negative-stock-valuation-auditor"
@@ -34,7 +36,7 @@ REQUIRED_TOKENS = frozenset(
 )
 RECEIPT_KEY = "negative_stock_trust_receipt"
 RECEIPT_SCHEMA = "negative-stock-trust-receipt-v1"
-SOURCE_SCHEMA = "negative-stock-source-receipt-v1"
+SOURCE_SCHEMA = "negative-stock-source-receipt-v2"
 SUPPORTED_BUNDLE_VERSION = "0.3.1"
 RUN = "Jarvis Agent Run"
 FINDING = "Jarvis Agent Finding"
@@ -245,7 +247,7 @@ def _complete(run) -> None:
 
 
 def _rows(label: str, query: str, values=()) -> list[dict]:
-	"""Read identity + modification time only, with a hard complete-source bound."""
+	"""Hash source values as well as timestamps, with a complete-source bound."""
 	rows = frappe.db.sql(query, values, as_dict=True)
 	if len(rows) > MAX_SOURCE_ROWS:
 		raise ReceiptRefused(f"{label} source is too large for a trust receipt")
@@ -254,8 +256,28 @@ def _rows(label: str, query: str, values=()) -> list[dict]:
 		name, modified = row.get("name"), row.get("modified")
 		if not isinstance(name, str) or not name or modified is None:
 			raise ReceiptRefused(f"{label} source identity is incomplete")
-		result.append({"name": name, "modified": str(modified)})
+		result.append({**row, "modified": str(modified)})
 	return result
+
+
+def _stock_settings_rows() -> list[dict]:
+	"""A Single has no normal table. Read and seal its complete stored values."""
+	rows = frappe.db.sql(
+		"select field, value from `tabSingles` where doctype=%s order by field limit 513",
+		("Stock Settings",),
+		as_dict=True,
+	)
+	if not rows or len(rows) > 512:
+		raise ReceiptRefused("Stock Settings source is unavailable or too large")
+	settings = {row["field"]: row["value"] for row in rows}
+	if (
+		len(settings) != len(rows)
+		or not settings.get("modified")
+		or settings.get("allow_negative_stock") not in ("0", "1")
+		or settings.get("valuation_method") not in ("FIFO", "Moving Average", "LIFO")
+	):
+		raise ReceiptRefused("Stock Settings source is incomplete")
+	return [{"name": "Stock Settings", "modified": settings["modified"], "values_digest": _digest(settings)}]
 
 
 def _marks_stable(rows: list[dict], started_at) -> None:
@@ -272,6 +294,41 @@ def _marks_stable(rows: list[dict], started_at) -> None:
 		# update made after the run started in the same tick.
 		if modified >= started:
 			raise ReceiptRefused("source changed during or after the Negative Stock run")
+
+
+@contextmanager
+def fresh_source_snapshot():
+	"""Do not let an earlier permission read hide a newly committed source change.
+
+	This is a point-in-time check. It does not lock ERP source rows or prevent a
+	later source commit. The dedicated connection cannot commit the request's run,
+	approval, or pending action writes.
+	"""
+	if frappe.db.db_type != "mariadb":
+		raise ReceiptRefused("A fresh Negative Stock source check requires MariaDB")
+	conf = frappe.conf
+	snapshot_db = get_db(
+		socket=conf.db_socket,
+		host=conf.db_host,
+		port=conf.db_port,
+		user=conf.db_user or conf.db_name,
+		password=conf.db_password,
+		cur_db_name=conf.db_name,
+	)
+	primary_db = frappe.local.db
+	try:
+		snapshot_db.connect()
+		snapshot_db.sql("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+		snapshot_db.sql("START TRANSACTION READ ONLY, WITH CONSISTENT SNAPSHOT")
+		frappe.local.db = snapshot_db
+		yield
+	finally:
+		frappe.local.db = primary_db
+		try:
+			if snapshot_db._conn:
+				snapshot_db.sql("ROLLBACK")
+		finally:
+			snapshot_db.close()
 
 
 def _source_state(scope: dict, started_at) -> dict:
@@ -296,66 +353,77 @@ def _source_state(scope: dict, started_at) -> dict:
 	tables = {
 		"Account": _rows(
 			"Account",
-			"select name, modified from `tabAccount` where company=%s order by name asc limit %s",
+			"""select name, modified, company, account_type, root_type, is_group, disabled, account_currency
+			from `tabAccount` where company=%s order by name asc limit %s""",
 			(company, MAX_SOURCE_ROWS + 1),
 		),
 		"Bin": _rows(
 			"Bin",
-			"""select b.name, b.modified from `tabBin` b
+			"""select b.name, b.modified, b.item_code, b.warehouse, b.actual_qty, b.projected_qty,
+			b.ordered_qty, b.indented_qty, b.reserved_qty, b.valuation_rate, b.stock_value from `tabBin` b
 			   inner join `tabWarehouse` w on w.name=b.warehouse
 			   where w.company=%s order by b.name asc limit %s""",
 			(company, MAX_SOURCE_ROWS + 1),
 		),
 		"Company": _rows(
 			"Company",
-			"select name, modified from `tabCompany` where name=%s order by name asc limit %s",
+			"""select name, modified, is_group, default_currency, enable_perpetual_inventory,
+			default_inventory_account from `tabCompany` where name=%s order by name asc limit %s""",
 			(company, 2),
 		),
 		"GL Entry": _rows(
 			"GL Entry",
-			"""select name, modified from `tabGL Entry`
+			"""select name, modified, company, account, posting_date, voucher_type, voucher_no,
+			debit, credit, debit_in_account_currency, credit_in_account_currency, is_cancelled from `tabGL Entry`
 			   where company=%s and posting_date <= %s order by name asc limit %s""",
 			(company, as_of, MAX_SOURCE_ROWS + 1),
 		),
 		"Item": _rows(
-			"Item", "select name, modified from `tabItem` order by name asc limit %s", (MAX_SOURCE_ROWS + 1,)
+			"Item",
+			"""select name, modified, item_code, is_stock_item, valuation_method, allow_negative_stock,
+			stock_uom from `tabItem` order by name asc limit %s""",
+			(MAX_SOURCE_ROWS + 1,),
 		),
 		"Landed Cost Purchase Receipt": _rows(
 			"Landed Cost Purchase Receipt",
-			"""select r.name, r.modified from `tabLanded Cost Purchase Receipt` r
+			"""select r.name, r.modified, r.parent, r.parenttype, r.receipt_document_type,
+			r.receipt_document from `tabLanded Cost Purchase Receipt` r
 			   inner join `tabLanded Cost Voucher` p on p.name=r.parent
 			   where p.company=%s order by r.name asc limit %s""",
 			(company, MAX_SOURCE_ROWS + 1),
 		),
 		"Landed Cost Voucher": _rows(
 			"Landed Cost Voucher",
-			"select name, modified from `tabLanded Cost Voucher` where company=%s order by name asc limit %s",
+			"""select name, modified, company, posting_date, docstatus from `tabLanded Cost Voucher`
+			where company=%s order by name asc limit %s""",
 			(company, MAX_SOURCE_ROWS + 1),
 		),
 		"Repost Item Valuation": _rows(
 			"Repost Item Valuation",
-			"select name, modified from `tabRepost Item Valuation` where company=%s order by name asc limit %s",
+			"""select name, modified, company, based_on, item_code, warehouse, voucher_type, voucher_no,
+			status, posting_date, docstatus from `tabRepost Item Valuation`
+			where company=%s order by name asc limit %s""",
 			(company, MAX_SOURCE_ROWS + 1),
 		),
 		"Stock Entry": _rows(
 			"Stock Entry",
-			"select name, modified from `tabStock Entry` where company=%s order by name asc limit %s",
+			"""select name, modified, company, purpose, posting_date, docstatus from `tabStock Entry`
+			where company=%s order by name asc limit %s""",
 			(company, MAX_SOURCE_ROWS + 1),
 		),
 		"Stock Ledger Entry": _rows(
 			"Stock Ledger Entry",
-			"""select name, modified from `tabStock Ledger Entry`
+			"""select name, modified, company, item_code, warehouse, actual_qty, qty_after_transaction,
+			valuation_rate, incoming_rate, stock_value, stock_value_difference, voucher_type, voucher_no,
+			posting_date, posting_time, creation, is_cancelled, is_adjustment_entry from `tabStock Ledger Entry`
 			   where company=%s and posting_date <= %s order by name asc limit %s""",
 			(company, as_of, MAX_SOURCE_ROWS + 1),
 		),
-		"Stock Settings": _rows(
-			"Stock Settings",
-			"select name, modified from `tabStock Settings` order by name asc limit %s",
-			(2,),
-		),
+		"Stock Settings": _stock_settings_rows(),
 		"Warehouse": _rows(
 			"Warehouse",
-			"select name, modified from `tabWarehouse` where company=%s order by name asc limit %s",
+			"""select name, modified, company, parent_warehouse, account, is_group, disabled, lft, rgt
+			from `tabWarehouse` where company=%s order by name asc limit %s""",
 			(company, MAX_SOURCE_ROWS + 1),
 		),
 	}
@@ -570,7 +638,8 @@ def verify_for_reorder(negative_run_name: str, reorder_run) -> dict:
 		raise ReceiptRefused("Reorder run-as identity or permission profile does not match Negative Stock")
 	if _live_profile_fingerprint(reorder_user) != reorder_profile:
 		raise ReceiptRefused("Reorder run-as permission profile changed")
-	current_source = _source_state(reorder_scope, negative.get("started_at"))
+	with fresh_source_snapshot():
+		current_source = _source_state(reorder_scope, negative.get("started_at"))
 	if receipt.get("source") != current_source:
 		raise ReceiptRefused("Negative Stock source is stale")
 	return receipt
