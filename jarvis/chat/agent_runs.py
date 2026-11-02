@@ -30,6 +30,19 @@ INSTALLATION = "Jarvis Agent Installation"
 LISTING = "Jarvis Agent Listing"
 DASHBOARD = "Jarvis Dashboard"
 SESSION = "Jarvis Chat Session"
+FEFO_AGENT = "fefo-expiry-compliance-auditor"
+_FEFO_SCOPE_REJECTION = "The evaluator scope did not match the server-stamped FEFO boundary."
+
+
+def _fefo_run_as_user(run_doc) -> str:
+	"""Read the immutable delegate identity for FEFO scope revalidation."""
+	key = str(run_doc.get("session_key") or "").strip()
+	if not key:
+		raise frappe.ValidationError("FEFO run-as identity is unavailable")
+	user = str(frappe.db.get_value(SESSION, {"session_key": key}, "user") or "").strip()
+	if not user or user == "Guest":
+		raise frappe.ValidationError("FEFO run-as identity is unavailable")
+	return user
 
 
 # --------------------------------------------------------------------------- #
@@ -333,6 +346,73 @@ def _visibility_owner(inst) -> str:
 	return inst.owner
 
 
+def _fefo_scope_rejection_coverage(tokens: set) -> dict:
+	"""Return a fail-closed coverage envelope for an untrusted FEFO scope."""
+	return {
+		token: {
+			"state": "not_evaluable",
+			"reason_code": "unsupported_customisation",
+			"detail": _FEFO_SCOPE_REJECTION,
+		}
+		for token in tokens
+	}
+
+
+def clear_untrusted_fefo_artifacts(run_doc, inst) -> None:
+	"""Remove only output that provenates to a rejected FEFO run scope.
+
+	FEFO has no Reorder receipt. Its dashboard uses the same ownership and
+	conversation proof as the run cleanup path, so a forged writeback can
+	never delete an unrelated customer artifact.
+	"""
+	frappe.db.set_value(
+		RUN,
+		run_doc.name,
+		{"assessment_output_json": None, "canvas_ref": None, "integrity_digest": None},
+		update_modified=False,
+	)
+	run_doc.assessment_output_json = None
+	dashboard_name = str(run_doc.get("dashboard") or "").strip()
+	if not dashboard_name:
+		frappe.db.set_value(RUN, run_doc.name, {"dashboard": None}, update_modified=False)
+		return
+	conversation = str(run_doc.get("conversation") or "").strip()
+	owners = {
+		str(value).strip() for value in (inst.get("owner"), inst.get("reviewer")) if str(value or "").strip()
+	}
+	if not conversation or not owners:
+		raise frappe.ValidationError("could not safely remove rejected FEFO dashboard output")
+	try:
+		dashboard = frappe.db.get_value(
+			DASHBOARD,
+			dashboard_name,
+			["name", "source_conversation", "owner", "target_user"],
+			as_dict=True,
+		)
+	except Exception as error:
+		frappe.log_error(
+			title="jarvis agent: rejected FEFO dashboard provenance lookup failed",
+			message=frappe.get_traceback(),
+		)
+		raise frappe.ValidationError("could not safely remove rejected FEFO dashboard output") from error
+	if dashboard and (
+		dashboard.get("source_conversation") != conversation
+		or dashboard.get("owner") != dashboard.get("target_user")
+		or dashboard.get("owner") not in owners
+	):
+		raise frappe.ValidationError("could not safely remove rejected FEFO dashboard output")
+	if dashboard:
+		try:
+			frappe.delete_doc(DASHBOARD, dashboard.name, ignore_permissions=True, force=True)
+		except Exception:
+			try:
+				frappe.db.delete(DASHBOARD, {"name": dashboard.name})
+			except Exception as error:
+				raise frappe.ValidationError(
+					"could not safely remove rejected FEFO dashboard output"
+				) from error
+	frappe.db.set_value(RUN, run_doc.name, {"dashboard": None}, update_modified=False)
+	run_doc.dashboard = None
 def persist_agent_dashboard(
 	run_doc, inst, html: str, *, title=None, description=None, set_on_run: bool = True, owner_override=None
 ) -> str:
@@ -750,9 +830,52 @@ def record_delegate_run(
 	# from the clean gate + blocker_count; advisory tokens are excluded from required_tokens.
 	required_coverage_tokens, advisory_token_set = _listing_token_sets(agent)
 	coverage = coverage or {}
-	scope = scope or {}
+	scope = scope if isinstance(scope, dict) else {}
 	dropped = dropped or []
+	scope_rejected = False
+	if agent == FEFO_AGENT:
+		# FEFO may run company-wide only when the launch stamp omitted the leaf.
+		# Compare the full safe projection, then revalidate any stamped leaf as the
+		# immutable run-as user before findings or artifacts can be persisted.
+		from jarvis.chat.agent_scope import fefo_output_scope, fefo_stamped_scope, fefo_stamped_scope_as_user
+
+		try:
+			stamped = _json.loads(frappe.db.get_value(RUN, run_doc.name, "scope_json") or "{}")
+		except Exception:
+			stamped = {}
+		trusted_scope = fefo_stamped_scope(stamped)
+		submitted_scope = fefo_output_scope(scope)
+		if trusted_scope is None or submitted_scope != trusted_scope:
+			scope_rejected = True
+		else:
+			# A lost session identity is the same safety condition as an unreadable
+			# or stale leaf.  Do not let the direct seam throw before it clears a
+			# potentially untrusted FEFO artifact and records non-evaluable coverage.
+			try:
+				trusted_scope = fefo_stamped_scope_as_user(stamped, _fefo_run_as_user(run_doc))
+			except Exception:
+				trusted_scope = None
+			scope_rejected = trusted_scope is None
+		if scope_rejected:
+			findings = []
+			coverage = _fefo_scope_rejection_coverage(required_coverage_tokens)
+			scope = fefo_stamped_scope(stamped) or {}
+			rows_consumed = None
+			canvas_ref = None
+			integrity_digest = None
+			dashboard = None
+			dropped.append(
+				{
+					"ref_doctype": "Warehouse",
+					"ref_name": (scope.get("record_scope") or {}).get("name") or "?",
+					"reason": "scope did not match server-stamped FEFO boundary",
+				}
+			)
+			clear_untrusted_fefo_artifacts(run_doc, inst)
+		else:
+			scope = trusted_scope
 	company = (scope.get("company") or "").strip()
+	fefo_run_scope = scope if agent == FEFO_AGENT else None
 
 	# Collapse this run's findings by fingerprint (token + doc identity), so a doc
 	# flagged twice by one rule is ONE finding and counts stay consistent.
@@ -900,6 +1023,7 @@ def record_delegate_run(
 
 	if (
 		not truncated
+		and not scope_rejected
 		and not wm_drift
 		and not scoped
 		and not row_shortfall
@@ -914,8 +1038,40 @@ def record_delegate_run(
 				"state": "open",
 				"rule_id": ["in", list(evaluated_tokens)],
 			},
-			fields=["name", "fingerprint", "company"],
+			fields=["name", "fingerprint", "company", "last_seen_run"],
 		)
+		prior_record_scopes = {}
+		if agent == FEFO_AGENT:
+			from jarvis.chat.agent_scope import fefo_stamped_scope
+
+			run_names = sorted(
+				{
+					str(candidate.get("last_seen_run") or "").strip()
+					for candidate in candidates
+					if str(candidate.get("last_seen_run") or "").strip()
+				}
+			)
+			try:
+				prior_runs = (
+					frappe.get_all(
+						RUN,
+						filters={"name": ["in", run_names]},
+						fields=["name", "scope_json"],
+					)
+					if run_names
+					else []
+				)
+			except Exception:
+				prior_runs = []
+			for prior_run in prior_runs:
+				try:
+					prior_scope = _json.loads(prior_run.get("scope_json") or "{}")
+				except Exception:
+					prior_scope = {}
+				# Only replacement runs carry the server-owned marker. A legacy
+				# v0.2.2 snapshot can look like the same company-wide projection,
+				# but it did not produce this coverage contract and stays open.
+				prior_record_scopes[prior_run.name] = fefo_stamped_scope(prior_scope)
 		for c in candidates:
 			if c.fingerprint in seen_fps:
 				continue  # still present this run
@@ -923,6 +1079,8 @@ def record_delegate_run(
 			# run's company (both non-empty). A scopeless run, or an empty-company
 			# legacy row, is left untouched (exempt) — never cross-company resolved.
 			if not company or not c.company or c.company != company:
+				continue
+			if agent == FEFO_AGENT and prior_record_scopes.get(c.get("last_seen_run")) != fefo_run_scope:
 				continue
 			# PP-5 review provenance: an A16 coverage-scoped auto-resolve is machine,
 			# not human — stamp resolution_kind + resolved_at so a coverage close is
@@ -950,7 +1108,7 @@ def record_delegate_run(
 	# coverage verdict's job, not a lifecycle failure. ``partial`` is reserved for an execution
 	# problem OR a coverage gap that needs attention (permanent code, permission slice, or a
 	# truncation note). ``coverage_note`` still fires the warning on a data-gap ``completed`` run.
-	execution_partial = bool(truncated) or wm_drift or scoped or row_shortfall or bool(dropped)
+	execution_partial = bool(truncated) or scope_rejected or wm_drift or scoped or row_shortfall or bool(dropped)
 	non_data_gap = any(not cr.is_data_gap(n.get("reason_code")) for n in coverage_notes)
 	status = "partial" if (execution_partial or non_data_gap) else "completed"
 
@@ -1010,6 +1168,8 @@ def record_delegate_run(
 			"not_evaluable_scoped": sorted(evaluated_tokens) if scoped else [],
 			"dropped": dropped,
 			"watermark_drift": wm_drift,
+			"scope_rejected": scope_rejected,
+			"scope_proof_valid": agent != FEFO_AGENT or not scope_rejected,
 			"scoped_visibility": scoped,
 			"row_shortfall": row_shortfall,
 			"rows_consumed": rows_consumed,
@@ -1048,7 +1208,15 @@ def record_delegate_run(
 				base = {}
 		except Exception:
 			base = {}
-		base.update(scope)
+		if agent == FEFO_AGENT:
+			from jarvis.chat.agent_scope import fefo_output_scope, fefo_stamped_scope
+
+			trusted_scope = fefo_stamped_scope(base)
+			submitted_scope = fefo_output_scope(scope)
+			if trusted_scope is not None and submitted_scope == trusted_scope:
+				base.update(trusted_scope)
+		else:
+			base.update(scope)
 		run_values["scope_json"] = frappe.as_json(base)[:60000]
 	if integrity_digest:
 		run_values["integrity_digest"] = str(integrity_digest)[:64]
@@ -1071,10 +1239,10 @@ def record_delegate_run(
 	# dashboard. Best-effort: a dashboard hiccup must never fail the writeback.
 	agent_title = frappe.db.get_value(LISTING, agent, "title")
 	dashboard_name = frappe.db.get_value(RUN, run_doc.name, "dashboard")
-	if not dashboard_name and dashboard and frappe.db.exists(DASHBOARD, dashboard):
+	if not scope_rejected and not dashboard_name and dashboard and frappe.db.exists(DASHBOARD, dashboard):
 		frappe.db.set_value(RUN, run_doc.name, "dashboard", dashboard, update_modified=False)
 		dashboard_name = dashboard
-	if not dashboard_name:
+	if not scope_rejected and not dashboard_name:
 		try:
 			title = _default_dashboard_title(run_doc, agent_title)
 			html = _fallback_dashboard_html(

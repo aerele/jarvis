@@ -11,9 +11,9 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), and the Fixed Asset
- *     auditor's flat `depr_run_posted` / `enable_capex_signal` values.
- *     Rendered only when the
+ *     CRITICAL fix, they are NOT flat top-level keys), the Fixed Asset
+ *     auditor's flat `depr_run_posted` / `enable_capex_signal` values, and
+ *     the FEFO reviewer's owner settings under `fefo`. Rendered only when the
  *     listing's own `config_keys` (agents_api.py get_agent, jarvis#1063)
  *     names the field's storage `path` (a dot path for a nested key) -
  *     ConfigForm.vue filters this array by that list at render time.
@@ -190,6 +190,31 @@ export const CONFIG_FIELD_SET = [
 		help: "Step used to detect round-number plugs",
 	},
 	{
+		key: "fefo_reviewer",
+		path: "fefo.reviewer",
+		label: "Expiry reviewer",
+		type: "text",
+		help: "Name the person who reviews expiry candidates.",
+	},
+	{
+		key: "fefo_near_expiry_days",
+		path: "fefo.near_expiry_days",
+		label: "Near-expiry window",
+		type: "number",
+		integer: true,
+		min: 1,
+		max: 3650,
+		suffix: "calendar days",
+		help: "Required. Include batches that expire within 1 to 3650 calendar days.",
+	},
+	{
+		key: "fefo_test_declaration",
+		path: "fefo.test_declaration",
+		label: "Test declaration",
+		type: "text",
+		help: "Optional plain-text notice for a test review (up to 500 characters).",
+	},
+	{
 		key: "stale_floor_days",
 		path: "ageing.stale_floor_days",
 		label: "Stale-invoice floor",
@@ -242,6 +267,14 @@ export const CONFIG_FIELD_LABELS = Object.fromEntries(
  * plain string, cleared to absent when blank). */
 export const NUMBER_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "number").map(
 	(f) => f.key
+);
+
+/** Optional per-number constraints used by ConfigForm before it emits a save.
+ * Values absent from this map retain the existing generic numeric behaviour. */
+export const NUMBER_CONFIG_CONSTRAINTS = Object.fromEntries(
+	CONFIG_FIELD_SET.filter(
+		(f) => f.type === "number" && (f.integer || f.min != null || f.max != null)
+	).map(({ key, integer, min, max }) => [key, { integer: !!integer, min, max }])
 );
 
 /** local form key -> its storage dot path ("company" flat, or

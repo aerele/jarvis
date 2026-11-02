@@ -617,6 +617,10 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif listing.agent_slug == "fefo-expiry-compliance-auditor":
+			from jarvis.chat.fefo_expiry_compliance import configuration_issues
+
+			i["configuration_issues"] = configuration_issues(i.config or "{}")
 		out["installation"] = i
 
 	if is_sm and not _masked:
@@ -1346,6 +1350,13 @@ def set_schedule(
 	)
 	if schedule_will_be_enabled and agent_scope.record_scope_requested(doc.config):
 		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
+	if schedule_will_be_enabled and doc.agent == "fefo-expiry-compliance-auditor":
+		# Validate the immutable policy and any optional leaf before this endpoint
+		# computes next_run_at, writes activity, or saves the installation.  The
+		# controller repeats this for Desk/REST/import/direct saves.
+		from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
+
+		assert_schedule_configuration(doc)
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
 	# non-installable capability (a scheduled run would only fail its preflight).
 	if int(schedule_enabled or 0):
@@ -1453,6 +1464,13 @@ def set_config(installation: str, config: str) -> dict:
 	if not isinstance(parsed, dict):
 		frappe.throw(_("Config must be a JSON object."))
 	agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), parsed)
+	if doc.agent == "fefo-expiry-compliance-auditor":
+		from jarvis.chat.fefo_expiry_compliance import validate_configuration_edit
+
+		try:
+			validate_configuration_edit(parsed)
+		except ValueError as exc:
+			frappe.throw(str(exc))
 	doc.config = frappe.as_json(parsed)
 	doc.save()
 	log_activity(
