@@ -36,6 +36,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.patches import v2_12_reload_agent_doctypes_for_indexes as agent_patch
 from jarvis.patches import v2_12_reload_macro_doctypes_for_indexes as macro_patch
 from jarvis.patches import v2_30_macro_run_conversation_index as conversation_patch
+from jarvis.patches import v2_31_reload_agent_run_for_history_lock_index as history_lock_patch
 
 # (doctype, index name, columns in SEQ_IN_INDEX order). Verified against a real
 # bench with:
@@ -49,6 +50,9 @@ AGENT_INDEXES = (
 MACRO_INDEXES = (
 	("Jarvis Macro Run", "owner_creation_index", ["owner", "creation"]),
 	("Jarvis Macro", "owner_macro_name_index", ["owner", "macro_name"]),
+)
+HISTORY_LOCK_INDEXES = (
+	("Jarvis Agent Run", "conversation_agent_status_index", ["conversation", "agent", "status"]),
 )
 CONVERSATION_INDEX = (
 	conversation_patch.DOCTYPE,
@@ -270,6 +274,11 @@ class TestReloadAgentDoctypesForIndexes(_ReloadPatchChecks, FrappeTestCase):
 class TestReloadMacroDoctypesForIndexes(_ReloadPatchChecks, FrappeTestCase):
 	PATCH = macro_patch
 	INDEXES = MACRO_INDEXES
+
+
+class TestReloadAgentRunForHistoryLockIndex(_ReloadPatchChecks, FrappeTestCase):
+	PATCH = history_lock_patch
+	INDEXES = HISTORY_LOCK_INDEXES
 
 
 class TestMacroRunConversationIndexPatch(FrappeTestCase):

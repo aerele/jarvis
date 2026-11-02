@@ -812,10 +812,7 @@ class TestLaunchStampsTheContract(unittest.TestCase):
 # registry sourcing
 # --------------------------------------------------------------------------- #
 class TestRegistryToolsAllow(FrappeTestCase):
-	_CLOSED_EMPTY_TOOL_AGENTS = (
-		"reorder-replenishment-operator",
-		"ticket-triage-operator",
-	)
+	_CLOSED_EMPTY_TOOL_AGENTS = ("reorder-replenishment-operator",)
 
 	def test_unknown_slug_yields_an_empty_surface(self):
 		self.assertEqual(agent_catalog.registry_tools_allow("no-such-agent"), [])

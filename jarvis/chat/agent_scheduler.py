@@ -53,7 +53,7 @@ from frappe.utils import now_datetime
 from rq.timeouts import JobTimeoutException
 
 from jarvis._session import authenticated_user, impersonate
-from jarvis.chat import derived_config
+from jarvis.chat import agent_scope, derived_config
 from jarvis.chat.agent_activity import ACTIVITY, log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import is_system_manager, is_valid_unattended_owner
@@ -201,6 +201,7 @@ def run_due_agent_audits() -> None:
 			"schedule_weekday",
 			"schedule_day_of_month",
 			"installable",
+			"config",
 			"source_apps_json",
 			"activation_state",
 			"next_run_at",
@@ -258,10 +259,10 @@ def _sweep_one(row, now, seen: set) -> None:
 	"""Handle ONE due installation. Extracted from the loop so ``run_due_agent_audits``
 	can wrap it whole (#648); every ``return`` here was a ``continue`` in the loop it
 	came from. ``seen`` is the caller's dedupe set and is mutated in place."""
-	from jarvis.chat.agent_closure import is_closed_agent, retire_legacy_installation
+	from jarvis.chat.agent_closure import closed_agent_spec, retire_legacy_installation
 	from jarvis.chat.agents_api import _mark_catalog_dirty, _user_allowed_for_agent
 
-	if is_closed_agent(row.agent):
+	if closed_agent_spec(row.agent):
 		# A raw historic row can survive until migrate or a failed import repair.
 		# Retire it without a run, dispatch, or another scheduler wake-up.
 		retire_legacy_installation(row.name, row.agent)
@@ -322,6 +323,21 @@ def _sweep_one(row, now, seen: set) -> None:
 		)
 		_advance(row, now)
 		return
+
+	# A6: an old config can outlive the API save guard. Refuse it before the
+	# per-installation claim and dispatch, record the clear reason, and consume
+	# the slot; no runnable job, session, or normal run is created.
+	if agent_scope.record_scope_requested(row.get("config")):
+		from jarvis.chat.agent_catalog import registry_supports_record_scope
+
+		if not registry_supports_record_scope(row.agent):
+			_record_failed(
+				row,
+				"scheduled audit skipped: this agent does not support record-scoped runs; "
+				"remove record_scope from its configuration",
+			)
+			_advance(row, now)
+			return
 
 	# CX5-5: a scribe writes the LIVE Org wiki with no confirmation gate, so there is
 	# no such thing as a shadow scribe run — refuse it here exactly as the manual path
@@ -1121,8 +1137,12 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 		# reaper's "exceeded max duration".
 		return _terminalize_stuck_run(
 			row.name,
-			error=_fleet_error_message(state),
-			detail="polled: the delegate reported a failure",
+			error=_fleet_error_message(state, agent=row.agent),
+			detail=(
+				"polled: Ticket Triage host result was refused"
+				if _is_ticket_triage_agent(row.agent)
+				else "polled: the delegate reported a failure"
+			),
 		)
 
 	if status not in _FLEET_FINISHED_STATUSES:
@@ -1143,8 +1163,12 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 		if aborted:
 			return _terminalize_stuck_run(
 				row.name,
-				error=_gateway_abort_error_message(result, gateway_status),
-				detail=f"polled: gateway reported {gateway_status}",
+				error=_gateway_abort_error_message(result, gateway_status, agent=row.agent),
+				detail=(
+					"polled: Ticket Triage gateway result was refused"
+					if _is_ticket_triage_agent(row.agent)
+					else f"polled: gateway reported {gateway_status}"
+				),
 			)
 
 	# Finished on the host, still ``running`` on the bench: the writeback is either in
@@ -1162,11 +1186,13 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 	)
 
 
-def _gateway_abort_error_message(result: dict, gateway_status) -> str:
+def _gateway_abort_error_message(result: dict, gateway_status, *, agent: str | None = None) -> str:
 	"""The delegate's real abort sentence out of the fleet result's ``reply`` - its
 	first line, trimmed to the same 140-char budget every polled error uses - falling
 	back to a generic-but-honest sentence naming the gateway status when there is no
 	reply to read."""
+	if _is_ticket_triage_agent(agent):
+		return "Ticket Triage stopped before it could safely complete."
 	reply = result.get("reply")
 	if isinstance(reply, str) and reply.strip():
 		first_line = reply.strip().splitlines()[0].strip()
@@ -1175,10 +1201,12 @@ def _gateway_abort_error_message(result: dict, gateway_status) -> str:
 	return f"the agent turn was aborted by the gateway ({gateway_status})"
 
 
-def _fleet_error_message(state: dict) -> str:
+def _fleet_error_message(state: dict, *, agent: str | None = None) -> str:
 	"""The delegate's real failure sentence out of the fleet run-state ``error``
 	(``{code, message}``), falling back to something honest rather than empty — an
 	error field the customer reads as blank is worse than a generic sentence."""
+	if _is_ticket_triage_agent(agent):
+		return "Ticket Triage stopped before it could safely complete."
 	err = state.get("error")
 	if isinstance(err, dict):
 		msg = (err.get("message") or "").strip() or (err.get("code") or "").strip()
@@ -1290,13 +1318,9 @@ def _launch_audit(
 	refuse everything."""
 	from jarvis.chat.agent_closure import assert_launch_allowed
 
-	assert_launch_allowed(inst.agent)
+	assert_launch_allowed(inst.agent, inst)
 	listing = frappe.get_doc(LISTING, inst.agent)
 	owner = inst.owner
-	from jarvis.chat import operator_review
-
-	review_backend = operator_review.backend(inst.agent)
-	review_config = review_backend.configuration(inst) if review_backend else None
 	deposit_launch = None
 	if inst.agent == _PAYROLL_DEPOSIT_AGENT:
 		# Capture this before the Run exists. The source tool later reads only this
@@ -1304,8 +1328,6 @@ def _launch_audit(
 		from jarvis.chat import payroll_deposit_snapshot
 
 		deposit_launch = payroll_deposit_snapshot.launch_config(inst)
-	if review_config and trigger != "manual":
-		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
 	# run_agent_now) has already switched the session to this user, so
 	# frappe.session.user == run_as_user here — scope + watermark below are
@@ -1374,6 +1396,27 @@ def _launch_audit(
 			).format(listing.status or "unknown")
 		)
 
+	# A6 record boundaries are an explicit bundle capability. Refuse an old or
+	# manually edited unsupported config here, before the launch savepoint can
+	# create a conversation, run, session, activity row, or dispatch. The bundled
+	# registry is the authority; a mutable listing row cannot opt an agent in.
+	record_scope_supported = False
+	if agent_scope.record_scope_requested(inst.config):
+		from jarvis.chat.agent_catalog import registry_supports_record_scope
+
+		record_scope_supported = registry_supports_record_scope(listing.agent_slug)
+		agent_scope.assert_record_scope_supported(record_scope_supported, inst.config)
+
+	# The SLA queue auditor has one mandatory, permission-bounded record
+	# boundary: an HD Team.  Validate it before the launch savepoint so a missing,
+	# malformed, or unreadable team cannot spend budget or create an orphan run.
+	# This runs under the eventual run-as identity on both manual and scheduled
+	# paths; the generic scope resolver later stamps the same boundary verbatim.
+	if listing.agent_slug == "sla-breach-ageing-auditor":
+		from jarvis.chat.sla_breach_ageing import assert_configuration
+
+		assert_configuration(inst)
+
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
 	# refuse every call the delegate makes — record_agent_run included — so the run
@@ -1393,6 +1436,16 @@ def _launch_audit(
 				"contact support: nothing was started."
 			)
 		)
+
+	from jarvis.chat import operator_review, ticket_triage
+
+	review_backend = operator_review.backend(inst.agent)
+	# Ticket Triage is a typed private workflow.  It never joins operator_review,
+	# whose generic snapshot/decision paths are unsafe for Helpdesk raw text.
+	ticket_config = ticket_triage.configuration(inst) if _is_ticket_triage_agent(inst.agent) else None
+	review_config = ticket_config or (review_backend.configuration(inst) if review_backend else None)
+	if review_config and trigger != "manual":
+		frappe.throw("This evidence review supports manual runs only.")
 
 	# Enforced min-model backstop for a launch path that did not gate itself; the
 	# manual and scheduled paths pass the verdict they already reached.
@@ -1507,7 +1560,13 @@ def _launch_audit(
 
 		# A6 explicit scope + A17 consistency watermark + A12 permission profile —
 		# all best-effort (never abort the launch) and computed AS the run-as user.
-		scope = _stamp_scope_and_watermark(run.name, inst, run_as_user, source_apps=source_apps)
+		scope = _stamp_scope_and_watermark(
+			run.name,
+			inst,
+			run_as_user,
+			source_apps=source_apps,
+			record_scope_supported=record_scope_supported,
+		)
 
 	except Exception:
 		# Undo every row this launch wrote, so a caller that later commits (and both
@@ -1546,7 +1605,14 @@ def _launch_audit(
 			run_id=run.name,
 			agent_id=f"agent-{slug}",
 			session_key=session_key,
-			message=_audit_prompt(listing, inst, trigger, scope, explicit_config=prompt_config),
+			message=_audit_prompt(
+				listing,
+				inst,
+				trigger,
+				scope,
+				record_scope_supported=record_scope_supported,
+				explicit_config=prompt_config,
+			),
 			timeout_s=registry_timeout_s(slug),
 		)
 	except admin_client.AdminAmbiguousError:
@@ -1720,7 +1786,11 @@ def _mint_run_session(session_key: str, user: str) -> None:
 
 
 def _stamp_scope_and_watermark(
-	run_name: str, inst, run_as_user: str, source_apps: list[str] | None = None
+	run_name: str,
+	inst,
+	run_as_user: str,
+	source_apps: list[str] | None = None,
+	record_scope_supported: bool = False,
 ) -> dict | None:
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
@@ -1737,7 +1807,20 @@ def _stamp_scope_and_watermark(
 	the run row. A Custom App Learning run therefore fails launch if its
 	permission profile or selection stamp cannot be created; it never falls back
 	to an editable scope blob."""
-	from jarvis.chat import agent_scope, operator_review
+	from jarvis.chat import agent_scope, operator_review, ticket_triage
+
+	if _is_ticket_triage_agent(inst.agent):
+		config = ticket_triage.configuration(
+			frappe._dict(config=frappe.db.get_value(RUN, run_name, "assessment_config_json") or "")
+		)
+		scope = ticket_triage.scope_from_config(config)
+		frappe.db.set_value(
+			RUN,
+			run_name,
+			{"scope_json": frappe.as_json(scope), "permission_profile": _permission_profile(run_as_user)},
+			update_modified=False,
+		)
+		return scope
 
 	review_backend = operator_review.backend(inst.agent)
 	if review_backend:
@@ -1791,6 +1874,7 @@ def _stamp_scope_and_watermark(
 	try:
 		scope = agent_scope.resolve_scope(
 			inst,
+			allow_record_scope=record_scope_supported,
 			config=payroll_deposit_snapshot.scope_config(deposit_launch) if deposit_launch else None,
 		)
 	except Exception:
@@ -1800,8 +1884,9 @@ def _stamp_scope_and_watermark(
 			config = frappe.parse_json(inst.get("config") or "{}")
 		except (TypeError, ValueError):
 			config = {}
-		if isinstance(config, dict) and any(
-			config.get(k) for k in ("record_scope", "prior_period_from", "prior_period_to")
+		if isinstance(config, dict) and (
+			agent_scope.record_scope_requested(config)
+			or any(config.get(k) for k in ("prior_period_from", "prior_period_to"))
 		):
 			frappe.log_error(
 				title="jarvis agent: explicit scope resolution failed", message=frappe.get_traceback()
@@ -1951,7 +2036,12 @@ def _explicit_config(listing, inst) -> dict:
 
 
 def _audit_prompt(
-	listing, inst, trigger: str, scope: dict | None = None, explicit_config: dict | None = None
+	listing,
+	inst,
+	trigger: str,
+	scope: dict | None = None,
+	record_scope_supported: bool = False,
+	explicit_config: dict | None = None,
 ) -> str:
 	"""The GENERIC, non-leaky run message handed to the delegate (A2/A6).
 
@@ -1967,6 +2057,16 @@ def _audit_prompt(
 	    bench code, injected — never LLM prose.
 	Kept short: the delegate resolves the run/installation linkage for its Phase-3
 	writeback from the session_key the bench minted, not from this text."""
+	if _is_ticket_triage_agent(listing.get("agent_slug") or listing.get("name")):
+		# The Ticket bundle receives ticket text only from its sealed local file.
+		# Do not point it at installation/get_doc, generic tools, or a conversation.
+		return (
+			"[Manual Ticket Triage run] Follow the bundled typed workflow. Use only the named private "
+			"Ticket Triage source and typed staging tools. Do not send ticket text, write a message, "
+			"change status, team, assignment, or any field other than a reviewer-confirmed type/priority. "
+			"The server owns scope, evidence, approval, and completion."
+		)
+
 	scope_block = ""
 	# CX5-2: name the admin-authorized apps explicitly. The bench ENFORCES the same
 	# list on every source-read/wiki call, so this is a courtesy so the delegate does
@@ -1975,6 +2075,11 @@ def _audit_prompt(
 		apps = ", ".join(str(a) for a in scope["source_apps"])
 		scope_block += f"\n\nAUTHORIZED APPS (the ONLY apps you may read source from or write about): {apps}."
 	if scope and scope.get("company"):
+		clock_block = (
+			f'report_datetime="{scope["report_datetime"]}" (site time zone, no offset), '
+			if scope.get("report_datetime")
+			else ""
+		)
 		record_scope = scope.get("record_scope")
 		bounded_record_scope = (
 			{"doctype": "Account", "name": record_scope.get("name")}
@@ -1996,7 +2101,9 @@ def _audit_prompt(
 			f'from_date="{scope.get("from_date")}", '
 			f'to_date="{scope.get("to_date")}", '
 			f'report_date="{scope.get("report_date")}", '
-			f'prior_fy_start="{scope.get("prior_fy_start")}", '
+			f"{clock_block}"
+			+ (f'execution_user="{scope["execution_user"]}", ' if scope.get("execution_user") else "")
+			+ f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}"{record_scope_text}.'
 		)
 	# EXPLICIT CONFIG (jarvis#1063 delivery): the tenant's declared config_keys values, HANDED
@@ -2005,9 +2112,12 @@ def _audit_prompt(
 	# delegate spills this JSON verbatim into config.json - it does NOT read its own installation
 	# for these tunables. Note ``Run.scope_json`` is a bench-side field that never reaches the
 	# container; the run MESSAGE is the only bench->delegate channel, so config must ride HERE.
+	additional_scope_keys = ["prior_period_from", "prior_period_to"]
+	if record_scope_supported:
+		additional_scope_keys.append("record_scope")
 	additional_scope = {}
 	if scope:
-		for key in ("prior_period_from", "prior_period_to", "record_scope"):
+		for key in additional_scope_keys:
 			if scope.get(key):
 				additional_scope[key] = (
 					{k: scope[key][k] for k in ("doctype", "name") if k in scope[key]}
@@ -2097,6 +2207,11 @@ def _is_app_learning(agent: str) -> bool:
 	from jarvis.tools import _app_learning_ctx
 
 	return _app_learning_ctx.is_app_learning_agent(agent)
+
+
+def _is_ticket_triage_agent(agent: str | None) -> bool:
+	"""Exact slug check used by the private Ticket Triage egress gate."""
+	return (agent or "").strip() == "ticket-triage-operator"
 
 
 def _valid_owner(owner: str) -> bool:
@@ -2281,7 +2396,9 @@ def _kept_row_clear_values() -> dict:
 	return values
 
 
-def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
+def keep_budget_rows_of_uninstalled(
+	installation: str, owner: str, *, exclude: set[str] | None = None
+) -> list[str]:
 	"""Keep the run rows of an installation being uninstalled that this month's budget
 	counts, and return their names; the caller deletes the rest.
 
@@ -2297,10 +2414,18 @@ def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
 	Raw writes: the run controller refuses an ORM save that changes a launch field. Does
 	not commit; the caller commits with the rest of the uninstall."""
 	since = _budget_month_start()
+	exclude = set(exclude or ())
+	where_exclude = " AND name NOT IN %(exclude)s" if exclude else ""
 	kept = frappe.db.sql(
 		"""SELECT name FROM `tabJarvis Agent Run`
-		    WHERE installation = %(installation)s AND creation >= %(since)s AND status IN %(statuses)s""",
-		{"installation": installation, "since": since, "statuses": _KEPT_ROW_STATUSES},
+		    WHERE installation = %(installation)s AND creation >= %(since)s AND status IN %(statuses)s"""
+		+ where_exclude,
+		{
+			"installation": installation,
+			"since": since,
+			"statuses": _KEPT_ROW_STATUSES,
+			**({"exclude": tuple(exclude)} if exclude else {}),
+		},
 		pluck=True,
 	)
 	if not kept:
