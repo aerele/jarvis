@@ -49,6 +49,7 @@ describe("CONFIG_FIELD_SET", () => {
 				"fiscal_year",
 				"from_date",
 				"to_date",
+				"sla_team",
 				"benchmark_value",
 				"percentage",
 				"engagement_risk_level",
@@ -56,6 +57,8 @@ describe("CONFIG_FIELD_SET", () => {
 				"fefo_reviewer",
 				"fefo_near_expiry_days",
 				"fefo_test_declaration",
+				"grn_hygiene_reviewer",
+				"grn_hygiene_test_declaration",
 				"annual_aggregate_turnover",
 				"same_hsn_rate_allowlist",
 				"stale_floor_days",
@@ -65,7 +68,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders review, fixed-asset, payroll, scope, materiality, FEFO, then vendor-ledger fields", () => {
+	it("orders review, fixed-asset, payroll, scope, SLA, materiality, FEFO, GRN, then vendor-ledger fields", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -82,6 +85,7 @@ describe("CONFIG_FIELD_SET", () => {
 			"company",
 			"fiscal_year",
 			"from_date/to_date",
+			"sla_team",
 			"benchmark_value",
 			"percentage",
 			"engagement_risk_level",
@@ -89,6 +93,8 @@ describe("CONFIG_FIELD_SET", () => {
 			"fefo_reviewer",
 			"fefo_near_expiry_days",
 			"fefo_test_declaration",
+			"grn_hygiene_reviewer",
+			"grn_hygiene_test_declaration",
 			"annual_aggregate_turnover",
 			"same_hsn_rate_allowlist",
 			"stale_floor_days",
@@ -106,12 +112,24 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(byKey.payroll_entry).toMatchObject({ type: "link", linkDoctype: "Payroll Entry" });
 	});
 
+	it("the SLA team field writes the exact HD Team record-scope shape", () => {
+		const field = CONFIG_FIELD_SET.find((entry) => entry.key === "sla_team");
+		expect(field).toMatchObject({
+			path: "record_scope",
+			type: "link",
+			linkDoctype: "HD Team",
+			recordScopeDoctype: "HD Team",
+			configKey: "sla_config",
+			agentSlugs: ["sla-breach-ageing-auditor"],
+		});
+	});
+
 	it("engagement_risk_level offers exactly Low/Medium/High plus an unset option", () => {
 		const field = CONFIG_FIELD_SET.find((f) => f.key === "engagement_risk_level");
 		expect(field.options.map((o) => o.value)).toEqual(["", "low", "medium", "high"]);
 	});
 
-	it("the materiality amounts, GST turnover, FEFO window, and ageing floors are numeric", () => {
+	it("materiality, turnover, FEFO window and ageing floors are numeric; GRN settings are text", () => {
 		expect(NUMBER_CONFIG_KEYS.sort()).toEqual(
 			[
 				"settlement_hold_days",
@@ -127,6 +145,8 @@ describe("CONFIG_FIELD_SET", () => {
 				"grir_floor_days",
 			].sort()
 		);
+		expect(NUMBER_CONFIG_KEYS).not.toContain("grn_hygiene_reviewer");
+		expect(NUMBER_CONFIG_KEYS).not.toContain("grn_hygiene_test_declaration");
 	});
 
 	it("keeps FEFO policy values in the declared nested namespace", () => {
@@ -178,7 +198,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes review, fixed-asset, payroll, materiality, FEFO, GST, and vendor-ledger fields", () => {
+	it("agent-specific includes review, fixed-asset, payroll, SLA, materiality, FEFO, GRN, GST and vendor-ledger settings", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -191,6 +211,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"depr_run_posted",
 			"enable_capex_signal",
 			"payroll_entry",
+			"sla_team",
 			"benchmark_value",
 			"percentage",
 			"engagement_risk_level",
@@ -198,6 +219,8 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"fefo_reviewer",
 			"fefo_near_expiry_days",
 			"fefo_test_declaration",
+			"grn_hygiene_reviewer",
+			"grn_hygiene_test_declaration",
 			"annual_aggregate_turnover",
 			"same_hsn_rate_allowlist",
 			"stale_floor_days",
@@ -228,11 +251,17 @@ describe("KEY_TO_PATH (local form key -> storage dot path)", () => {
 		expect(KEY_TO_PATH.to_date).toBe("to_date");
 	});
 
-	it("the materiality keys are nested dot paths", () => {
+	it("the SLA team local key maps to the top-level record scope", () => {
+		expect(KEY_TO_PATH.sla_team).toBe("record_scope");
+	});
+
+	it("the materiality and GRN keys are nested dot paths", () => {
 		expect(KEY_TO_PATH.benchmark_value).toBe("materiality.benchmark_value");
 		expect(KEY_TO_PATH.percentage).toBe("materiality.percentage");
 		expect(KEY_TO_PATH.engagement_risk_level).toBe("materiality.engagement_risk_level");
 		expect(KEY_TO_PATH.rounding_step).toBe("materiality.rounding_step");
+		expect(KEY_TO_PATH.grn_hygiene_reviewer).toBe("grn_hygiene.reviewer");
+		expect(KEY_TO_PATH.grn_hygiene_test_declaration).toBe("grn_hygiene.test_declaration");
 	});
 
 	it("the FEFO keys are nested dot paths", () => {

@@ -11,12 +11,15 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), the Fixed Asset
- *     auditor's flat settings, the FEFO owner namespace, and GST turnover
- *     and HSN exclusions. Rendered only when the
- *     listing's own `config_keys` (agents_api.py get_agent, jarvis#1063)
- *     names the field's storage `path` (a dot path for a nested key) -
- *     ConfigForm.vue filters this array by that list at render time.
+ *     CRITICAL fix, they are NOT flat top-level keys), the Fixed Asset and FEFO settings, and the GRN Hygiene
+ *     auditor reads its reviewer settings under `grn_hygiene`. GST has flat
+ *     turnover and HSN exclusion settings. Rendered only
+ *     when the listing's own `config_keys` (agents_api.py get_agent,
+ *     jarvis#1063) names the field's `configKey` or, when that is absent, its
+ *     storage `path` (a dot path for a nested key). The SLA team's
+ *     `configKey` is `sla_config` only as a listing gate: its
+ *     `record_scope` value stays bench-owned launch scope and must not enter
+ *     delegate configuration.
  *
  * `key` is the LOCAL form-state / label / validation identity (unchanged by
  * nesting); `path` is WHERE the value actually lives in the saved config
@@ -31,8 +34,11 @@
  * `type` and filters agent-specific entries by `config_keys`.
  *
  * Shapes:
- *   - {key, path, label, type: "link", linkDoctype, help, scope?}
+ *   - {key, path, label, type: "link", linkDoctype, help, scope?, configKey?}
+ *   - a link can set `recordScopeDoctype`; ConfigForm then saves its value as
+ *     `{doctype, name}` at the field's path instead of a bare string
  *   - {keys: [from, to], paths: [from, to], labels: [from, to], type: "date-range", help, scope?}
+ *   - {key, path, label, type: "text", help, maxLength?}
  *   - {key, path, label, type: "number", help, suffix?}
  *   - {key, path, label, type: "select", options: [{label, value}, ...]}
  *   - {key, path, label, type: "text-list", help}
@@ -165,6 +171,17 @@ export const CONFIG_FIELD_SET = [
 		scope: true,
 	},
 	{
+		key: "sla_team",
+		path: "record_scope",
+		label: "Helpdesk team",
+		type: "link",
+		linkDoctype: "HD Team",
+		recordScopeDoctype: "HD Team",
+		configKey: "sla_config",
+		agentSlugs: ["sla-breach-ageing-auditor"],
+		help: "One readable Helpdesk team. Each run reviews only tickets in this team.",
+	},
+	{
 		key: "benchmark_value",
 		path: "materiality.benchmark_value",
 		label: "Materiality benchmark amount",
@@ -221,6 +238,22 @@ export const CONFIG_FIELD_SET = [
 		path: "fefo.test_declaration",
 		label: "Test declaration",
 		type: "text",
+		help: "Optional plain-text notice for a test review.",
+	},
+	{
+		key: "grn_hygiene_reviewer",
+		path: "grn_hygiene.reviewer",
+		label: "Receiving reviewer",
+		type: "text",
+		maxLength: 140,
+		help: "Required before a run. You can save this blank while you finish setup. Name the person who reviews receiving results (up to 140 characters).",
+	},
+	{
+		key: "grn_hygiene_test_declaration",
+		path: "grn_hygiene.test_declaration",
+		label: "Test declaration",
+		type: "text",
+		maxLength: 500,
 		help: "Optional plain-text notice for a test review (up to 500 characters).",
 	},
 	{
@@ -270,7 +303,7 @@ export const CONFIG_FIELD_SET = [
 export const SCOPE_CONFIG_FIELDS = CONFIG_FIELD_SET.filter((f) => f.scope);
 
 /** The agent-specific subset - each rendered only when the listing's
- * `config_keys` (get_agent) names its key. */
+ * `config_keys` (get_agent) names its `configKey` or storage path. */
 export const AGENT_SPECIFIC_CONFIG_FIELDS = CONFIG_FIELD_SET.filter((f) => !f.scope);
 
 /** Every config key CONFIG_FIELD_SET renders a dedicated field for - anything
@@ -298,6 +331,13 @@ export const NUMBER_CONFIG_CONSTRAINTS = Object.fromEntries(
 	CONFIG_FIELD_SET.filter(
 		(f) => f.type === "number" && (f.integer || f.min != null || f.max != null)
 	).map(({ key, integer, min, max }) => [key, { integer: !!integer, min, max }])
+);
+
+/** Local form key -> its maximum permitted saved text length. This is derived
+ * from the field declaration so the input limit and save-time validation stay
+ * aligned. */
+export const CONFIG_FIELD_MAX_LENGTHS = Object.fromEntries(
+	CONFIG_FIELD_SET.filter((f) => Number.isInteger(f.maxLength)).map((f) => [f.key, f.maxLength])
 );
 
 /** Known keys stored as a JSON string array but edited as a short comma-separated list. */

@@ -44,6 +44,11 @@
 				</template>
 				<template v-else-if="agent">
 					<Button
+						v-if="agent.name === 'ticket-triage-operator'"
+						label="Review proposals"
+						@click="router.push({ name: 'TicketTriageReviews' })"
+					/>
+					<Button
 						variant="solid"
 						label="Run Now"
 						iconLeft="play"
@@ -435,11 +440,30 @@
 								@dirty="configurationDirty = $event"
 								@save="saveConfig"
 							/>
+							<CycleCountConfigForm
+								v-else-if="agent.name === 'cycle-count-planner-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
+							<TicketTriageConfigForm
+								v-else-if="agent.name === 'ticket-triage-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
 							<ConfigForm
 								v-else
 								class="mt-2"
 								:config="parsedConfig"
 								:config-keys="configKeys"
+								:agent-slug="agent.agent_slug"
 								:validation-errors="configurationIssues"
 								:saving="savingConfig"
 								@dirty="configurationDirty = $event"
@@ -465,8 +489,11 @@
 							</p>
 							<div v-else-if="scheduleConfigurationBlocked" class="mt-2 space-y-3">
 								<p class="text-sm text-ink-gray-6" role="status">
-									Complete the expiry reviewer and near-expiry window in
-									Configure before enabling an automatic schedule.
+									{{
+										isFefoExpiryComplianceAuditor
+											? "Complete the expiry reviewer and near-expiry window in Configure before enabling an automatic schedule."
+											: "Complete the Helpdesk team configuration before enabling an automatic schedule."
+									}}
 								</p>
 								<Button
 									v-if="sched.enabled"
@@ -752,6 +779,8 @@ import AgentModelCard from "@/pages/agents/AgentModelCard.vue";
 import AgentInstallDialog from "@/pages/agents/AgentInstallDialog.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import ReorderConfigForm from "@/pages/agents/ReorderConfigForm.vue";
+import CycleCountConfigForm from "@/pages/agents/CycleCountConfigForm.vue";
+import TicketTriageConfigForm from "@/pages/agents/TicketTriageConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import ShadowChip from "@/components/ShadowChip.vue";
@@ -1143,10 +1172,16 @@ const isOperatorReview = computed(
 const isFefoExpiryComplianceAuditor = computed(
 	() => agent.value?.agent_slug === FEFO_EXPIRY_COMPLIANCE_AUDITOR
 );
-// Most agents can run with optional settings. The review operators and FEFO
-// expiry auditor each have a mandatory launch contract.
+const SLA_BREACH_AGEING_AUDITOR = "sla-breach-ageing-auditor";
+const isSlaBreachAgeingAuditor = computed(
+	() => agent.value?.agent_slug === SLA_BREACH_AGEING_AUDITOR
+);
+// Review operators, FEFO and SLA have required launch configuration.
 const requiresRunConfiguration = computed(
-	() => isOperatorReview.value || isFefoExpiryComplianceAuditor.value
+	() =>
+		isOperatorReview.value ||
+		isFefoExpiryComplianceAuditor.value ||
+		isSlaBreachAgeingAuditor.value
 );
 const configurationIssues = computed(
 	() => (requiresRunConfiguration.value && installation.value?.configuration_issues) || {}
@@ -1160,14 +1195,19 @@ const configurationBlocked = computed(
 			!installation.value?.configuration_issues ||
 			Object.keys(configurationIssues.value).length > 0)
 );
+// Keep an invalid legacy schedule disableable while required setup is incomplete.
 const scheduleConfigurationBlocked = computed(
-	() => isFefoExpiryComplianceAuditor.value && configurationBlocked.value
+	() =>
+		(isFefoExpiryComplianceAuditor.value || isSlaBreachAgeingAuditor.value) &&
+		configurationBlocked.value
 );
 const configurationHint = computed(() =>
 	configurationDirty.value
 		? "Save your configuration changes before running."
 		: isFefoExpiryComplianceAuditor.value
 		? "Enter and save the expiry reviewer and near-expiry window in Configure before running."
+		: isSlaBreachAgeingAuditor.value
+		? "Select and save one readable Helpdesk team in Configure before running."
 		: "Complete and save the required review settings in Configure before running."
 );
 // On-demand run is offered for read-only auditors AND scribes (mirrors the
@@ -1483,6 +1523,7 @@ async function saveSchedule() {
 		return false;
 	}
 	savingSchedule.value = true;
+	let scheduleSaved = false;
 	try {
 		await api.setAgentSchedule(installation.value.name, {
 			schedule_enabled: sched.value.enabled ? 1 : 0,
@@ -1492,12 +1533,16 @@ async function saveSchedule() {
 			schedule_day_of_month:
 				sched.value.frequency === "monthly" ? Number(sched.value.day) || 0 : 0,
 		});
+		scheduleSaved = true;
 		toast.success("Schedule saved");
 		await load();
 		return true;
 	} catch (e) {
 		toast.error(errHtml(e));
-		return false;
+		// A refresh failure happens after the API has persisted the schedule.
+		// Keep the draft aligned with that saved state instead of restoring a
+		// legacy schedule that is already off on the server.
+		return scheduleSaved;
 	} finally {
 		savingSchedule.value = false;
 	}
@@ -1505,12 +1550,16 @@ async function saveSchedule() {
 
 async function disableSchedule() {
 	if (!installation.value || savingSchedule.value) return;
-	// An old active schedule must remain repairable even when the saved FEFO
-	// policy is incomplete. Restore the local toggle when the request fails, so
-	// the one recovery action stays visible for a retry.
+	// A legacy schedule must always be disableable, even when its current
+	// configuration is no longer valid or visible to the run-as identity.
 	const wasEnabled = sched.value.enabled;
 	sched.value.enabled = false;
-	if (!(await saveSchedule())) sched.value.enabled = wasEnabled;
+	if (!(await saveSchedule())) {
+		// Keep the only recovery action visible when the server rejects the
+		// change or a transient request fails. The saved schedule is still on
+		// until the next successful request.
+		sched.value.enabled = wasEnabled;
+	}
 }
 
 // ── Configure: config JSON → ConfigForm (§14 F3) ─────────────────────────────

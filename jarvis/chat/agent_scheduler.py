@@ -1167,8 +1167,12 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 		# reaper's "exceeded max duration".
 		return _terminalize_stuck_run(
 			row.name,
-			error=_fleet_error_message(state),
-			detail="polled: the delegate reported a failure",
+			error=_fleet_error_message(state, agent=row.agent),
+			detail=(
+				"polled: Ticket Triage host result was refused"
+				if _is_ticket_triage_agent(row.agent)
+				else "polled: the delegate reported a failure"
+			),
 		)
 
 	if status not in _FLEET_FINISHED_STATUSES:
@@ -1189,8 +1193,12 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 		if aborted:
 			return _terminalize_stuck_run(
 				row.name,
-				error=_gateway_abort_error_message(result, gateway_status),
-				detail=f"polled: gateway reported {gateway_status}",
+				error=_gateway_abort_error_message(result, gateway_status, agent=row.agent),
+				detail=(
+					"polled: Ticket Triage gateway result was refused"
+					if _is_ticket_triage_agent(row.agent)
+					else f"polled: gateway reported {gateway_status}"
+				),
 			)
 
 	# Finished on the host, still ``running`` on the bench: the writeback is either in
@@ -1208,11 +1216,13 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 	)
 
 
-def _gateway_abort_error_message(result: dict, gateway_status) -> str:
+def _gateway_abort_error_message(result: dict, gateway_status, *, agent: str | None = None) -> str:
 	"""The delegate's real abort sentence out of the fleet result's ``reply`` - its
 	first line, trimmed to the same 140-char budget every polled error uses - falling
 	back to a generic-but-honest sentence naming the gateway status when there is no
 	reply to read."""
+	if _is_ticket_triage_agent(agent):
+		return "Ticket Triage stopped before it could safely complete."
 	reply = result.get("reply")
 	if isinstance(reply, str) and reply.strip():
 		first_line = reply.strip().splitlines()[0].strip()
@@ -1221,10 +1231,12 @@ def _gateway_abort_error_message(result: dict, gateway_status) -> str:
 	return f"the agent turn was aborted by the gateway ({gateway_status})"
 
 
-def _fleet_error_message(state: dict) -> str:
+def _fleet_error_message(state: dict, *, agent: str | None = None) -> str:
 	"""The delegate's real failure sentence out of the fleet run-state ``error``
 	(``{code, message}``), falling back to something honest rather than empty — an
 	error field the customer reads as blank is worse than a generic sentence."""
+	if _is_ticket_triage_agent(agent):
+		return "Ticket Triage stopped before it could safely complete."
 	err = state.get("error")
 	if isinstance(err, dict):
 		msg = (err.get("message") or "").strip() or (err.get("code") or "").strip()
@@ -1339,14 +1351,17 @@ def _launch_audit(
 	assert_launch_allowed(inst.agent, inst)
 	listing = frappe.get_doc(LISTING, inst.agent)
 	owner = inst.owner
-	from jarvis.chat import operator_review, reorder_review
+	from jarvis.chat import operator_review, reorder_review, ticket_triage
 
 	review_backend = operator_review.backend(inst.agent)
-	review_config = (
-		reorder_review.configuration(inst)
-		if inst.agent == reorder_review.AGENT
-		else (review_backend.configuration(inst) if review_backend else None)
-	)
+	# Native Reorder and Ticket Triage keep distinct typed configuration. Neither
+	# may fall through to the generic operator path or overwrite the other's stamp.
+	if inst.agent == reorder_review.AGENT:
+		review_config = reorder_review.configuration(inst)
+	elif _is_ticket_triage_agent(inst.agent):
+		review_config = ticket_triage.configuration(inst)
+	else:
+		review_config = review_backend.configuration(inst) if review_backend else None
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1466,6 +1481,15 @@ def _launch_audit(
 				message=frappe.get_traceback(),
 			)
 			raise
+	# The SLA queue auditor has one mandatory, permission-bounded record
+	# boundary: an HD Team.  Validate it before the launch savepoint so a missing,
+	# malformed, or unreadable team cannot spend budget or create an orphan run.
+	# This runs under the eventual run-as identity on both manual and scheduled
+	# paths; the generic scope resolver later stamps the same boundary verbatim.
+	if listing.agent_slug == "sla-breach-ageing-auditor":
+		from jarvis.chat.sla_breach_ageing import assert_configuration
+
+		assert_configuration(inst)
 
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
@@ -1844,11 +1868,17 @@ def _stamp_scope_and_watermark(
 	the run row. A Custom App Learning run therefore fails launch if its
 	permission profile or selection stamp cannot be created; it never falls back
 	to an editable scope blob."""
-	from jarvis.chat import agent_scope, operator_review, reorder_review
+	from jarvis.chat import agent_scope, operator_review, reorder_review, ticket_triage
 
 	if inst.agent == reorder_review.AGENT:
 		config = frappe.parse_json(frappe.db.get_value(RUN, run_name, "assessment_config_json"))
 		scope = reorder_review.scope_from_config(config)
+	elif _is_ticket_triage_agent(inst.agent):
+		config = ticket_triage.configuration(
+			frappe._dict(config=frappe.db.get_value(RUN, run_name, "assessment_config_json") or "")
+		)
+		scope = ticket_triage.scope_from_config(config)
+	if inst.agent == reorder_review.AGENT or _is_ticket_triage_agent(inst.agent):
 		frappe.db.set_value(
 			RUN,
 			run_name,
@@ -2138,6 +2168,16 @@ def _audit_prompt(
 	writeback from the session_key the bench minted, not from this text."""
 	if (listing.get("agent_slug") or listing.get("name")) == "reorder-replenishment-operator":
 		return "Run the bundled native Reorder Review workflow. Call jarvis__prepare_reorder_review with no arguments, then stop. The server owns evidence, quantities, review and completion."
+	if _is_ticket_triage_agent(listing.get("agent_slug") or listing.get("name")):
+		# The Ticket bundle receives ticket text only from its sealed local file.
+		# Do not point it at installation/get_doc, generic tools, or a conversation.
+		return (
+			"[Manual Ticket Triage run] Follow the bundled typed workflow. Use only the named private "
+			"Ticket Triage source and typed staging tools. Do not send ticket text, write a message, "
+			"change status, team, assignment, or any field other than a reviewer-confirmed type/priority. "
+			"The server owns scope, evidence, approval, and completion."
+		)
+
 	scope_block = ""
 	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
 
@@ -2180,6 +2220,11 @@ def _audit_prompt(
 			# FEFO's private evaluator requires this server-owned replacement
 			# marker. It is launch data, not mutable owner configuration.
 			fefo_contract = f', fefo_scope_contract="{scope.get("fefo_scope_contract")}"'
+		clock_block = (
+			f'report_datetime="{scope["report_datetime"]}" (site time zone, no offset), '
+			if scope.get("report_datetime")
+			else ""
+		)
 		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period or the current date): "
 			f'company="{scope.get("company")}", '
@@ -2187,7 +2232,9 @@ def _audit_prompt(
 			f'from_date="{scope.get("from_date")}", '
 			f'to_date="{scope.get("to_date")}", '
 			f'report_date="{scope.get("report_date")}", '
-			f'prior_fy_start="{scope.get("prior_fy_start")}", '
+			f"{clock_block}"
+			+ (f'execution_user="{scope["execution_user"]}", ' if scope.get("execution_user") else "")
+			+ f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}"{fefo_contract}.'
 		)
 	agent_slug = listing.get("agent_slug") or listing.get("name")
@@ -2289,6 +2336,11 @@ def _is_app_learning(agent: str) -> bool:
 	from jarvis.tools import _app_learning_ctx
 
 	return _app_learning_ctx.is_app_learning_agent(agent)
+
+
+def _is_ticket_triage_agent(agent: str | None) -> bool:
+	"""Exact slug check used by the private Ticket Triage egress gate."""
+	return (agent or "").strip() == "ticket-triage-operator"
 
 
 def _valid_owner(owner: str) -> bool:
@@ -2473,7 +2525,9 @@ def _kept_row_clear_values() -> dict:
 	return values
 
 
-def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
+def keep_budget_rows_of_uninstalled(
+	installation: str, owner: str, *, exclude: set[str] | None = None
+) -> list[str]:
 	"""Keep the run rows of an installation being uninstalled that this month's budget
 	counts, and return their names; the caller deletes the rest.
 
@@ -2489,10 +2543,18 @@ def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
 	Raw writes: the run controller refuses an ORM save that changes a launch field. Does
 	not commit; the caller commits with the rest of the uninstall."""
 	since = _budget_month_start()
+	exclude = set(exclude or ())
+	where_exclude = " AND name NOT IN %(exclude)s" if exclude else ""
 	kept = frappe.db.sql(
 		"""SELECT name FROM `tabJarvis Agent Run`
-		    WHERE installation = %(installation)s AND creation >= %(since)s AND status IN %(statuses)s""",
-		{"installation": installation, "since": since, "statuses": _KEPT_ROW_STATUSES},
+		    WHERE installation = %(installation)s AND creation >= %(since)s AND status IN %(statuses)s"""
+		+ where_exclude,
+		{
+			"installation": installation,
+			"since": since,
+			"statuses": _KEPT_ROW_STATUSES,
+			**({"exclude": tuple(exclude)} if exclude else {}),
+		},
 		pluck=True,
 	)
 	if not kept:

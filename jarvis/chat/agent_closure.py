@@ -118,6 +118,12 @@ _NATIVE_RELEASES = {
 		policy="erpnext-reorder-v1",
 		configuration_validator="jarvis.chat.reorder_review.configuration_issues",
 	),
+	"ticket-triage-operator": NativeAgentRelease(
+		version="0.2.0",
+		tools=("jarvis__get_ticket_triage_inputs", "jarvis__stage_ticket_triage_proposals", "exec"),
+		policy="ticket-triage-v1",
+		configuration_validator="jarvis.chat.ticket_triage.configuration_issues",
+	),
 }
 
 

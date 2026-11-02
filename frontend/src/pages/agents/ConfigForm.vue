@@ -2,7 +2,9 @@
 	<fieldset :disabled="requiresConfiguration && saving" class="min-w-0">
 		<p class="text-sm text-ink-gray-6">
 			{{
-				operatorReview
+				slaBreachAgeingAuditor
+					? "Select one readable Helpdesk team. Each run reads only tickets in that team."
+					: operatorReview
 					? bankRecon
 						? "Bank reconciliation review reads one company bank account for the statement window below and proposes matches for a named reviewer. Manual runs only; nothing is reconciled, allocated or posted."
 						: arReview
@@ -101,8 +103,9 @@
 					:type="f.type"
 					:label="f.label"
 					:description="f.help"
+					:maxlength="f.maxLength"
 					:modelValue="form[f.key]"
-					@update:modelValue="(value) => (form[f.key] = value)"
+					@update:modelValue="(value) => onTextInput(f.key, value)"
 				/>
 
 				<FormControl
@@ -215,6 +218,7 @@ import {
 	SCOPE_CONFIG_FIELDS,
 	AGENT_SPECIFIC_CONFIG_FIELDS,
 	CONFIG_FIELD_LABELS,
+	CONFIG_FIELD_MAX_LENGTHS,
 	NUMBER_CONFIG_KEYS,
 	NUMBER_CONFIG_CONSTRAINTS,
 	TEXT_LIST_CONFIG_KEYS,
@@ -228,18 +232,24 @@ const props = defineProps({
 	config: { type: Object, default: () => ({}) }, // parsed installation config
 	// jarvis#1063 (jarvis-only half): the current agent's Jarvis Agent Listing
 	// config_keys (get_agent), already parsed to a plain array by the parent.
-	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - the scope fields
-	// (SCOPE_CONFIG_FIELDS) always render regardless.
+	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - each field matches its
+	// declared configKey or storage path. The universal SCOPE_CONFIG_FIELDS
+	// always render regardless.
 	configKeys: { type: Array, default: () => [] },
+	// The listing identity determines the one record-scoped field whose storage
+	// is a `{doctype, name}` object rather than a plain config value.
+	agentSlug: { type: String, default: "" },
 	validationErrors: { type: Object, default: () => ({}) },
 	saving: { type: Boolean, default: false },
 });
 
-// The agent-specific fields this agent's config_keys actually names, in
-// CONFIG_FIELD_SET's display order.
+// The agent-specific fields this agent's config_keys actually names (through
+// configKey or storage path), in CONFIG_FIELD_SET's display order.
 const agentSpecificFields = computed(() =>
-	AGENT_SPECIFIC_CONFIG_FIELDS.filter((f) =>
-		(f.paths || [f.path]).some((p) => props.configKeys.includes(p))
+	AGENT_SPECIFIC_CONFIG_FIELDS.filter(
+		(f) =>
+			(!f.agentSlugs || f.agentSlugs.includes(props.agentSlug)) &&
+			(f.paths || [f.path]).some((p) => props.configKeys.includes(f.configKey || p))
 	)
 );
 // Scope fields first (always), then whichever agent-specific fields apply -
@@ -249,7 +259,10 @@ const arReview = computed(() => props.configKeys.includes("settlement_hold_days"
 const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
 const statutoryPayroll = computed(() => props.configKeys.includes("payroll_entry"));
 const fefoConfiguration = computed(() => props.configKeys.includes("fefo.reviewer"));
-const requiresConfiguration = computed(() => operatorReview.value || fefoConfiguration.value);
+const slaBreachAgeingAuditor = computed(() => props.agentSlug === "sla-breach-ageing-auditor");
+const requiresConfiguration = computed(
+	() => operatorReview.value || fefoConfiguration.value || slaBreachAgeingAuditor.value
+);
 const defaultsData = ref(null);
 const defaultsLoading = ref(false);
 const defaultsMessage = ref("");
@@ -323,15 +336,30 @@ const visibleKeys = computed(() => new Set(visibleFields.value.flatMap((f) => f.
 // Server issues describe the SAVED config. Hide a field's issue once its value
 // differs from what is saved (a filled default or an edit) until the next save
 // re-checks it; issues without a form field always show.
-const shownErrors = computed(() =>
-	Object.fromEntries(
+const localValidationErrors = ref({});
+const shownErrors = computed(() => ({
+	...Object.fromEntries(
 		Object.entries(props.validationErrors || {}).filter(([key]) => {
 			if (!(key in form)) return true;
-			const saved = getPath(props.config || {}, KEY_TO_PATH[key] || key);
+			const path = KEY_TO_PATH[key] || key;
+			const field = visibleFields.value.find((entry) =>
+				(entry.keys || [entry.key]).includes(key)
+			);
+			const saved = getPath(props.config || {}, path);
+			if (field?.recordScopeDoctype) {
+				const savedName =
+					saved &&
+					saved.doctype === field.recordScopeDoctype &&
+					typeof saved.name === "string"
+						? saved.name
+						: "";
+				return String(form[key]) === savedName;
+			}
 			return String(form[key]) === String(saved == null ? "" : saved);
 		})
-	)
-);
+	),
+	...localValidationErrors.value,
+}));
 
 const emit = defineEmits(["save", "dirty"]);
 
@@ -353,6 +381,7 @@ const form = reactive({
 	fiscal_year: "",
 	from_date: "",
 	to_date: "",
+	sla_team: "",
 	benchmark_value: "",
 	percentage: "",
 	engagement_risk_level: "",
@@ -360,6 +389,8 @@ const form = reactive({
 	fefo_reviewer: "",
 	fefo_near_expiry_days: "",
 	fefo_test_declaration: "",
+	grn_hygiene_reviewer: "",
+	grn_hygiene_test_declaration: "",
 	annual_aggregate_turnover: "",
 	same_hsn_rate_allowlist: "",
 });
@@ -387,6 +418,19 @@ function seed(cfg) {
 			continue;
 		}
 		const path = KEY_TO_PATH[key] || key;
+		const field = visibleFields.value.find((entry) =>
+			(entry.keys || [entry.key]).includes(key)
+		);
+		if (field?.recordScopeDoctype) {
+			const record = getPath(c, path);
+			form[key] =
+				record &&
+				record.doctype === field.recordScopeDoctype &&
+				typeof record.name === "string"
+					? record.name
+					: "";
+			continue;
+		}
 		// jarvis#1063 CRITICAL fix: the nested path (e.g.
 		// "materiality.benchmark_value") is the source of truth. A flat
 		// top-level key of the same name (pre-nesting saves) is a MIGRATION
@@ -415,6 +459,7 @@ function seed(cfg) {
 	}
 	advanced.value = JSON.stringify(rest, null, 2);
 	advancedError.value = "";
+	localValidationErrors.value = {};
 	initialState.value = formState();
 }
 
@@ -429,6 +474,20 @@ watch([form, advanced, initialState], () => emit("dirty", formState() !== initia
 function onAdvancedInput(v) {
 	advanced.value = v;
 	advancedError.value = "";
+}
+
+function clearLocalValidationError(key) {
+	if (!(key in localValidationErrors.value)) return;
+	const remaining = { ...localValidationErrors.value };
+	delete remaining[key];
+	localValidationErrors.value = remaining;
+}
+
+function onTextInput(key, value) {
+	form[key] = value;
+	const maxLength = CONFIG_FIELD_MAX_LENGTHS[key];
+	if (!maxLength || String(value ?? "").trim().length <= maxLength)
+		clearLocalValidationError(key);
 }
 
 // ── Company / Fiscal year: debounced + fenced Link search, primed on open ───
@@ -468,6 +527,7 @@ const linkFields = {
 	fiscal_year: makeLinkField("Fiscal Year"),
 	bank_account: makeLinkField("Bank Account"),
 	payroll_entry: makeLinkField("Payroll Entry"),
+	sla_team: makeLinkField("HD Team"),
 };
 watch([operatorReview, defaultsData], () => {
 	linkFields.fiscal_year.reprime();
@@ -605,10 +665,25 @@ function save() {
 	const merged = JSON.parse(JSON.stringify(base));
 	for (const key of visibleKeys.value) {
 		const path = KEY_TO_PATH[key] || key;
+		const field = visibleFields.value.find((entry) =>
+			(entry.keys || [entry.key]).includes(key)
+		);
 		const v = String(form[key] ?? "").trim();
 		if (path !== key) delete merged[key];
 		if (v === "") {
 			deletePath(merged, path);
+			continue;
+		}
+		const maxLength = CONFIG_FIELD_MAX_LENGTHS[key];
+		if (maxLength && v.length > maxLength) {
+			localValidationErrors.value = {
+				...localValidationErrors.value,
+				[key]: `"${CONFIG_FIELD_LABELS[key]}" must be at most ${maxLength} characters.`,
+			};
+			return;
+		}
+		if (field?.recordScopeDoctype) {
+			setPath(merged, path, { doctype: field.recordScopeDoctype, name: v });
 			continue;
 		}
 		if (NUMBER_CONFIG_KEYS.includes(key)) {
@@ -642,6 +717,7 @@ function save() {
 		}
 	}
 	advancedError.value = "";
+	localValidationErrors.value = {};
 	defaultsRequest += 1;
 	defaultsLoading.value = false;
 	emit("save", merged);

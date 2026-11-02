@@ -1762,6 +1762,7 @@ def _resolve(company, fiscal_year, from_date, to_date) -> dict:
 			raise InvalidArgumentError("from_date and to_date (or fiscal_year) are required")
 
 	prior = _prior_fiscal_year(from_date)
+	report_datetime = frappe.utils.now_datetime()
 	return {
 		"company": company,
 		"fiscal_year": fiscal_year,
@@ -1769,7 +1770,15 @@ def _resolve(company, fiscal_year, from_date, to_date) -> dict:
 		"to_date": to_date,
 		"prior_fy_start": prior["py_start"] if prior else None,
 		"prior_fy_end": prior["py_end"] if prior else None,
-		"report_date": frappe.utils.today(),
+		# The run's as-of date (site date, never a container clock). to_date bounds
+		# the analysis window and MAY be in the future (a user-set or fiscal-year
+		# end), but a period-end finding must not assess data that has not happened
+		# yet: an evaluator caps its "due" cutoff at report_date so future-dated
+		# schedule rows (e.g. the rest of the year's depreciation) are never flagged.
+		"report_date": report_datetime.date().isoformat(),
+		# One bench-owned instant in the site time zone, without a UTC offset.
+		"report_datetime": report_datetime.isoformat(sep=" "),
+		"execution_user": frappe.session.user,
 	}
 
 

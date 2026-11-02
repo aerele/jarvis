@@ -129,7 +129,7 @@
    "fieldtype": "Check",
    "label": "Supports Record Scope",
    "read_only": 1,
-   "description": "Bundle-declared capability for a record-scoped run. Catalog sync reads the bundled registry. A false value rejects record_scope before configuration is saved or a run starts."
+   "description": "Bundle-declared capability for a record-scoped run. The catalog sync writes this from the bundled registry. A false value rejects record_scope before configuration is saved or a run starts."
   },
   {
    "fieldname": "rule_tokens",

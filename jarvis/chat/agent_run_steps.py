@@ -365,6 +365,13 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 		n = _n_rows(result)
 		if n is not None:
 			detail = plural(n, "row")
+	elif name == "get_receivables_review_inputs":
+		# The evidence itself stays in the private delegate file. The timeline
+		# may state only the shape of the captured source.
+		label = "Captured AR review evidence"
+		n = _n_rows(result)
+		if n is not None:
+			detail = plural(n, "row")
 	elif name == "get_balance_on":
 		account = args.get("account") or args.get("party") or ""
 		label = f"Checked balance for {account}".strip() if account else "Checked a balance"
