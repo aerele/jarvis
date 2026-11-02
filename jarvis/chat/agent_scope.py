@@ -238,6 +238,8 @@ _FEFO_QUERY_SOURCE_FIELDS = (
 		("name", "company", "docstatus", "from_date", "to_date", "creation", "modified"),
 	),
 )
+
+
 def fefo_record_scope(value) -> dict | None:
 	"""Return the exact optional FEFO Warehouse leaf declaration."""
 	if (
@@ -1320,7 +1322,9 @@ def _fefo_cutoff(scope: dict) -> str:
 
 def _fefo_main_equal(spec: dict, suffix: str, value) -> bool:
 	alias = spec.get("alias")
-	return isinstance(alias, str) and bool(alias) and _fefo_equal(spec.get("where"), f"{alias}.{suffix}", value)
+	return (
+		isinstance(alias, str) and bool(alias) and _fefo_equal(spec.get("where"), f"{alias}.{suffix}", value)
+	)
 
 
 def _fefo_sle_exists(
@@ -1404,7 +1408,9 @@ def _fefo_native_source_is_fenced(spec: dict, doctype: str, scope: dict) -> bool
 	if doctype == "Stock Ledger Entry":
 		return (
 			_fefo_main_equal(spec, "company", scope["company"])
-			and _fefo_predicate(spec.get("where"), f"{spec.get('alias')}.posting_date", "<=", _fefo_cutoff(scope))
+			and _fefo_predicate(
+				spec.get("where"), f"{spec.get('alias')}.posting_date", "<=", _fefo_cutoff(scope)
+			)
 			and _fefo_predicate(spec.get("where"), f"{spec.get('alias')}.docstatus", "<", 2)
 			and _fefo_equal(spec.get("where"), f"{spec.get('alias')}.is_cancelled", 0)
 			and (boundary is None or _fefo_main_equal(spec, "warehouse", boundary["name"]))

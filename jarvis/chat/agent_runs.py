@@ -1301,7 +1301,9 @@ def record_delegate_run(
 	# coverage verdict's job, not a lifecycle failure. ``partial`` is reserved for an execution
 	# problem OR a coverage gap that needs attention (permanent code, permission slice, or a
 	# truncation note). ``coverage_note`` still fires the warning on a data-gap ``completed`` run.
-	execution_partial = bool(truncated) or scope_rejected or wm_drift or scoped or row_shortfall or bool(dropped)
+	execution_partial = (
+		bool(truncated) or scope_rejected or wm_drift or scoped or row_shortfall or bool(dropped)
+	)
 	non_data_gap = any(not cr.is_data_gap(n.get("reason_code")) for n in coverage_notes)
 	status = "partial" if (execution_partial or non_data_gap) else "completed"
 

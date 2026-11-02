@@ -73,6 +73,8 @@ def _bound_fefo_scope(stamped: dict, submitted: dict) -> dict | None:
 	trusted = fefo_stamped_scope(stamped)
 	output = fefo_output_scope(submitted)
 	return trusted if trusted is not None and output == trusted else None
+
+
 def _ref_verifiable(ref_doctype: str, ref_name: str) -> tuple[bool, str]:
 	"""Existence + (permission-bounded) readability of a finding ref AS the
 	run-as user (this tool runs impersonated). Aggregate-dim doctypes are checked
