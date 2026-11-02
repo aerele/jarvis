@@ -22,6 +22,13 @@ from jarvis.tools.update_doc import update_doc
 LCV = "Landed Cost Voucher"
 
 
+FIXED_SOURCE_GAP = {
+	"purchase_invoice": "fixture-source",
+	"code": "forced_source_gap",
+	"message": "Fixed source-tax gap.",
+}
+
+
 class TestLCVSourceTax(LandedCostFixtures):
 	prepare = preview_tests.TestLandedCostPreview.prepare
 	snapshot = preview_tests.TestLandedCostPreview.snapshot
@@ -323,25 +330,6 @@ class TestLCVSourceTax(LandedCostFixtures):
 			amend_doc(LCV, doc.name)
 		self.assertEqual(before, self.snapshot())
 
-	def test_controller_write_cannot_bypass_tax(self):
-		self.require_ic()
-		from jarvis.tools.run_method import _run_doc_method
-
-		self.invoice = self.taxed_invoice(restricted=True)
-		doc = self.legacy_draft()
-		controller = type(doc)
-		called = []
-
-		@frappe.whitelist()
-		def save_lcv(self):
-			called.append(self.name)
-			self.save()
-
-		with patch.object(controller, "test_save_lcv", save_lcv, create=True):
-			with self.assertRaises(LCVSourceTaxNeedsInput):
-				_run_doc_method("test_save_lcv", LCV, doc.name, {})
-		self.assertEqual(called, [])
-
 	def test_held_sheet_marks_tax_gap_as_invalid(self):
 		self.require_ic()
 		from jarvis.chat import held_sheets
@@ -486,5 +474,248 @@ class TestLCVSourceTax(LandedCostFixtures):
 
 		doc = self.legacy_draft()
 		frappe.db.set_value(LCV, doc.name, "modified", "2099-01-01 00:00:00", update_modified=False)
-		with self.assertRaises(frappe.TimestampMismatchError):
+		with (
+			patch(
+				"jarvis.tools.apply_workflow_action.get_workflow",
+				return_value=frappe._dict(states=[frappe._dict(state="Submitted", doc_status=1)]),
+			),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_transitions",
+				return_value=[frappe._dict(action="Approve", next_state="Submitted")],
+			),
+			patch("jarvis.tools._lcv_source_tax.gate_lcv") as gate,
+		):
+			with self.assertRaises(frappe.TimestampMismatchError):
+				_lcv_tax_gate(doc, "Approve")
+		gate.assert_called_once_with(doc, lock=True)
+
+	def debit_note(self, *, source=None, submit=True, cancel=False):
+		"""Make a native service return without exposing it through the source gate."""
+		source = source or self.invoice
+		frappe.set_user("Administrator")
+		try:
+			note = frappe.get_doc(
+				{
+					"doctype": "Purchase Invoice",
+					"company": source.company,
+					"supplier": source.supplier,
+					"posting_date": source.posting_date,
+					"due_date": source.due_date,
+					"currency": source.currency,
+					"conversion_rate": source.conversion_rate,
+					"bill_no": frappe.generate_hash(length=10),
+					"is_return": 1,
+					"return_against": source.name,
+					"items": [
+						{
+							"item_code": row.item_code,
+							"qty": -abs(row.qty),
+							"rate": row.rate,
+							"expense_account": row.expense_account,
+							"cost_center": row.cost_center,
+						}
+						for row in source.items
+					],
+				}
+			).insert()
+			if submit or cancel:
+				note.submit()
+			if cancel:
+				note.cancel()
+			return note
+		finally:
+			frappe.set_user(self.reader)
+
+	def test_fixed_classifier_gap_blocks_single_create_without_india_compliance(self):
+		before = self.snapshot()
+		with patch("jarvis.tools._lcv_source_tax._classify", return_value=FIXED_SOURCE_GAP) as classify:
+			with self.assertRaises(LCVSourceTaxNeedsInput) as caught:
+				create_doc(LCV, self.values(amounts=[self.invoice.base_total]))
+		classify.assert_called_once()
+		self.assertEqual(caught.exception.assessment["issues"][0]["code"], "forced_source_gap")
+		self.assertEqual(before, self.snapshot())
+
+	def test_submitted_debit_note_blocks_preview_and_create_without_exposing_return(self):
+		note = self.debit_note()
+		before = self.snapshot()
+		preview = preview_doc(LCV, self.values(amounts=[self.invoice.base_total]))
+		self.assertFalse(preview["valid"], preview)
+		self.assertEqual(preview["issues"][0]["code"], "source_debit_note")
+		self.assertNotIn(note.name, str(preview))
+		with self.assertRaises(LCVSourceTaxNeedsInput) as caught:
+			create_doc(LCV, self.values(amounts=[self.invoice.base_total]))
+		self.assertEqual(caught.exception.assessment["issues"][0]["code"], "source_debit_note")
+		self.assertNotIn(note.name, str(caught.exception))
+		self.assertEqual(before, self.snapshot())
+
+	def test_draft_or_cancelled_debit_note_does_not_block_source(self):
+		self.debit_note(submit=False)
+		self.assertTrue(preview_doc(LCV, self.values(amounts=[self.invoice.base_total]))["valid"])
+		self.debit_note(cancel=True)
+		self.assertTrue(preview_doc(LCV, self.values(amounts=[self.invoice.base_total]))["valid"])
+
+	def test_submitted_debit_note_for_another_source_does_not_block_this_lcv(self):
+		frappe.set_user("Administrator")
+		other = self.make_invoice(80)
+		frappe.set_user(self.reader)
+		self.debit_note(source=other)
+		before = self.snapshot()
+		preview = preview_doc(LCV, self.values(amounts=[self.invoice.base_total]))
+		self.assertTrue(preview["valid"], preview)
+		self.assertEqual(before, self.snapshot())
+
+	def test_fixed_classifier_gap_rolls_back_a_valid_prior_batch_create_without_india_compliance(self):
+		frappe.set_user("Administrator")
+		other = self.make_invoice(80)
+		frappe.set_user(self.reader)
+		good = self.values(amounts=[self.invoice.base_total])
+		bad = self.values(invoices=[other], amounts=[other.base_total])
+		before = self.snapshot()
+
+		def classify(invoice):
+			if invoice.name == self.invoice.name:
+				return {"purchase_invoice": invoice.name, "treatment": "no_tax"}
+			return FIXED_SOURCE_GAP
+
+		with patch("jarvis.tools._lcv_source_tax._classify", side_effect=classify) as classifier:
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				create_doc(docs=[{"doctype": LCV, "values": good}, {"doctype": LCV, "values": bad}])
+		self.assertEqual(classifier.call_count, 2)
+		self.assertEqual(before, self.snapshot())
+
+	def test_fixed_classifier_gap_blocks_update_and_submit_without_india_compliance(self):
+		doc = self.legacy_draft()
+		before = self.snapshot()
+		before_doc = frappe.get_doc(LCV, doc.name).as_dict()
+		posting_date = str(doc.posting_date)
+		with patch("jarvis.tools._lcv_source_tax._classify", return_value=FIXED_SOURCE_GAP) as classify:
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				update_doc(LCV, doc.name, {"posting_date": "2099-01-01"})
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				submit_doc(LCV, doc.name)
+		self.assertEqual(classify.call_count, 2)
+		doc.reload()
+		self.assertEqual(str(doc.posting_date), posting_date)
+		self.assertEqual(doc.docstatus, 0)
+		self.assertEqual(frappe.get_doc(LCV, doc.name).as_dict(), before_doc)
+		self.assertEqual(before, self.snapshot())
+
+	def test_fixed_classifier_gap_blocks_amend_without_india_compliance(self):
+		from jarvis.tools.amend_doc import amend_doc
+
+		doc = self.legacy_draft()
+		frappe.db.set_value(LCV, doc.name, "docstatus", 2)
+		doc.reload()
+		before = self.snapshot()
+		with patch("jarvis.tools._lcv_source_tax._classify", return_value=FIXED_SOURCE_GAP) as classify:
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				amend_doc(LCV, doc.name)
+		classify.assert_called_once()
+		self.assertEqual(doc.reload().docstatus, 2)
+		self.assertEqual(before, self.snapshot())
+
+	def test_fixed_classifier_gap_blocks_single_and_batch_workflow_without_india_compliance(self):
+		from jarvis.tools.apply_workflow_action import apply_workflow_action
+
+		doc = self.legacy_draft()
+		before = self.snapshot()
+		with (
+			patch("jarvis.tools._lcv_source_tax._classify", return_value=FIXED_SOURCE_GAP) as classify,
+			patch("jarvis.tools.apply_workflow_action.get_workflow_name", return_value="LCV approval"),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_workflow",
+				return_value=frappe._dict(states=[frappe._dict(state="Submitted", doc_status=1)]),
+			),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_transitions",
+				return_value=[frappe._dict(action="Approve", next_state="Submitted")],
+			),
+			patch("jarvis.tools.apply_workflow_action.apply_workflow") as apply,
+		):
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				apply_workflow_action(LCV, doc.name, "Approve")
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				apply_workflow_action(LCV, action="Approve", names=[doc.name])
+		self.assertEqual(classify.call_count, 2)
+		apply.assert_not_called()
+		self.assertEqual(doc.reload().docstatus, 0)
+		self.assertEqual(before, self.snapshot())
+
+	def test_controller_write_is_refused_before_tax_gate(self):
+		from jarvis.tools.run_method import _run_doc_method
+
+		doc = self.legacy_draft()
+		controller = type(doc)
+		called = []
+
+		@frappe.whitelist()
+		def save_lcv(self):
+			called.append(self.name)
+			self.save()
+
+		with (
+			patch.object(controller, "test_save_lcv", save_lcv, create=True),
+			patch(
+				"jarvis.tools._lcv_source_tax.gate_lcv",
+				side_effect=AssertionError("must not take source locks"),
+			) as gate,
+		):
+			with self.assertRaises(PermissionDeniedError):
+				_run_doc_method("test_save_lcv", LCV, doc.name, {})
+		gate.assert_not_called()
+		self.assertEqual(called, [])
+
+	def test_workflow_source_locks_precede_the_lcv_lock(self):
+		from jarvis.tools.apply_workflow_action import _lcv_tax_gate
+
+		doc = self.legacy_draft()
+		events = []
+
+		def source_gate(*args, **kwargs):
+			events.append(("source", args, kwargs))
+
+		def lock_lcv(*args, **kwargs):
+			events.append(("lcv", args, kwargs))
+			return doc.modified
+
+		with (
+			patch.object(doc, "check_permission"),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_workflow",
+				return_value=frappe._dict(states=[frappe._dict(state="Submitted", doc_status=1)]),
+			),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_transitions",
+				return_value=[frappe._dict(action="Approve", next_state="Submitted")],
+			),
+			patch("jarvis.tools._lcv_source_tax.gate_lcv", side_effect=source_gate) as gate,
+			patch("jarvis.tools.apply_workflow_action.frappe.db.get_value", side_effect=lock_lcv) as locked,
+		):
 			_lcv_tax_gate(doc, "Approve")
+		gate.assert_called_once_with(doc, lock=True)
+		locked.assert_called_once_with(LCV, doc.name, "modified", for_update=True)
+		self.assertEqual(
+			events,
+			[("source", (doc,), {"lock": True}), ("lcv", (LCV, doc.name, "modified"), {"for_update": True})],
+		)
+
+	def test_non_submit_workflow_action_does_not_take_source_locks(self):
+		from jarvis.tools.apply_workflow_action import _lcv_tax_gate
+
+		doc = self.legacy_draft()
+		with (
+			patch.object(doc, "check_permission"),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_workflow",
+				return_value=frappe._dict(states=[frappe._dict(state="Rejected", doc_status=0)]),
+			),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_transitions",
+				return_value=[frappe._dict(action="Reject", next_state="Rejected")],
+			),
+			patch("jarvis.tools._lcv_source_tax.gate_lcv") as gate,
+			patch("jarvis.tools.apply_workflow_action.frappe.db.get_value") as locked,
+		):
+			_lcv_tax_gate(doc, "Reject")
+		gate.assert_not_called()
+		locked.assert_not_called()

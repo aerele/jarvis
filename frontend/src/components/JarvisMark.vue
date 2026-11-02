@@ -84,12 +84,17 @@ const props = defineProps({
 	idlePeek: { type: Boolean, default: false },
 });
 
-// The face element only exists when something can show it: an active mood, a
-// hover-peek surface (where mood stays "star" but hover reveals the eyes), or
-// an idle auto-peek cycle.
-const hasFace = computed(
-	() => props.mood !== "star" || props.hoverPeek || props.peek || autoPeek.value
-);
+// Tells a wrapper (HolidayMark) when the face is actually showing: a mood, the
+// `peek` prop or the idle auto-peek. Hover is not here (it is pure CSS on the
+// tile, and hoverPeek alone does not show a face). Nothing else listens, so this
+// changes nothing for the other call sites.
+const emit = defineEmits(["face"]);
+
+// The face is showing: an active mood, an external peek, or the idle auto-peek.
+const faceShown = computed(() => props.mood !== "star" || props.peek || autoPeek.value);
+// The face element only exists when something can show it: the above, or a
+// hover-peek surface (where mood stays "star" but hover reveals the eyes).
+const hasFace = computed(() => faceShown.value || props.hoverPeek);
 
 // ---- idle auto-peek: the same friendly blink hoverPeek/peek give on demand,
 // but self-triggered every IDLE_PEEK_INTERVAL_MS while nothing else is
@@ -136,6 +141,8 @@ function handleReducedMotionChange(e) {
 		scheduleIdlePeek();
 	}
 }
+
+watch(faceShown, (shown) => emit("face", shown), { immediate: true });
 
 // A mood taking over the face (e.g. a reply starts streaming) mid-hold must
 // not leave jv-peek-on layered on top of it - the new mood should own the

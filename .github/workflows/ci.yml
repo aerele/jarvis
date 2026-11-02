@@ -162,6 +162,7 @@ jobs:
         run: |
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
           node --test jarvis/public/js/*.test.mjs jarvis/public/js/shared/*.test.mjs
+          node --test jarvis/public/js/shared/holiday/*.test.mjs jarvis/public/js/shared/holiday/scenes/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
   # Builds BOTH deploy artifacts (the /jarvis SPA and the /jarvis-mobile PWA) on Node
@@ -203,6 +204,17 @@ jobs:
         # that only shows up on Node 18 fails in CI instead of at Frappe Cloud deploy time.
         # The stub above satisfies pwa/src/socket.js's bench-config import, same as the SPA.
         run: npm run install-pwa && npm run build-pwa
+      - name: Holiday worn-item art stays out of the main bundle
+        # The art is lazy (holiday-* chunk). A static import would put it in every
+        # user's first load, and nothing else would notice. The gate has a self-test.
+        run: |
+          node --test frontend/scripts/check-holiday-chunks.test.mjs
+          node frontend/scripts/check-holiday-chunks.mjs
+      - name: Holiday worn-item art stays lazy and out of the PWA precache
+        # The same art rule for the phone build, plus: no holiday-* file in the built sw.js
+        # precache, and no precached chunk statically imports a file that is not precached
+        # (it would fail offline). Its self-test ran in the step above.
+        run: node frontend/scripts/check-holiday-chunks.mjs --pwa
 
   # The v15 gate: from-scratch Frappe version-15 bench + the full jarvis suite.
   #
@@ -224,6 +236,16 @@ jobs:
       # header comment for why that x4 cost is acceptable on this public repo.
       fail-fast: false
       matrix:
+        # Shards are cut by measured TIME, not by test count (jarvis/ci/shard_split.py).
+        # Frappe's own splitter weights each test FILE by its `def test_` count, and test cost
+        # is far from uniform: on 2026-10-31 (531 files, ~14k tests, ~67 min of tests) the
+        # count split gave est. [17.5, 27.6, 11.5, 10.4] min, the holiday-touch files all
+        # landing on shard 2; the time split gives [16.9, 16.9, 16.9, 16.4]. The cut stays
+        # contiguous in frappe's file order, so no file gains new neighbours. At 6 shards the
+        # time split estimates a 12.0 min slowest shard, for 2 more from-scratch bench builds.
+        #
+        # If you change this list, --total-builds in the test step and the shard-count guard
+        # in the `coverage` job move with it.
         shard: [1, 2, 3, 4]
 
     services:
@@ -374,10 +396,20 @@ jobs:
           # websockets: needed by the fake gateway imported by harness configuration tests.
           ./env/bin/pip install coverage gevent websockets
           # run-parallel-tests shards by test FILE across --total-builds, so each
-          # --build-number runs a disjoint quarter of the suite. --with-coverage is this
-          # command's spelling of run-tests' --coverage (different click commands; do not
-          # "fix" one to match the other).
-          bench --site jarvis-ci.test run-parallel-tests \
+          # --build-number runs a disjoint part of the suite.
+          #
+          # This is `bench --site jarvis-ci.test run-parallel-tests ...` with ONE change: the
+          # wrapper swaps frappe's count-based split_by_weight for a split by the measured
+          # per-module seconds in jarvis/ci/data/test-timings.json, then invokes frappe's CLI
+          # from sites/ exactly as bench/cli.py frappe_cmd does. The runner, coverage and the
+          # CI-gated exit code are all still frappe's. See jarvis/ci/shard_split.py, including
+          # how to regenerate the timings when the step's printed plan warns they are stale.
+          #
+          # --with-coverage is this command's spelling of run-tests' --coverage (different
+          # click commands; do not "fix" one to match the other).
+          cd sites
+          ../env/bin/python -m jarvis.ci.shard_split run -- \
+            --site jarvis-ci.test run-parallel-tests \
             --app jarvis \
             --build-number ${{ matrix.shard }} \
             --total-builds 4 \
@@ -399,6 +431,31 @@ jobs:
           path: frappe-bench/sites/coverage-data-${{ matrix.shard }}
           retention-days: 1
           if-no-files-found: error
+
+      - name: Verify v15 landed costs with India Compliance
+        if: matrix.shard == 1
+        working-directory: frappe-bench
+        env:
+          CI: "1"
+        run: |
+          # Keep the ordinary suite unchanged. Run the accounting integration
+          # on a separate site, with a pinned v15 classifier and native schema.
+          bench get-app --branch version-15 --skip-assets https://github.com/resilient-tech/india-compliance.git
+          git -C apps/india_compliance fetch origin eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
+          git -C apps/india_compliance checkout --detach eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
+          ./env/bin/pip install -e apps/india_compliance
+          bench new-site jarvis-lcv-ci.test \
+            --db-host 127.0.0.1 \
+            --mariadb-user-host-login-scope='%' \
+            --mariadb-root-password root \
+            --db-root-username root \
+            --admin-password admin
+          bench --site jarvis-lcv-ci.test install-app erpnext india_compliance jarvis
+          bench --site jarvis-lcv-ci.test set-config allow_tests true
+          bench --site jarvis-lcv-ci.test set-config -p throttle_user_limit 100000
+          for module in test_landed_cost_defaults test_landed_cost_preview test_lcv_source_tax test_lcv_compatibility test_lcv_run_method; do
+            bench --site jarvis-lcv-ci.test run-tests --module "jarvis.tests.${module}"
+          done
 
   # The coverage floor cannot be enforced inside a shard: each one exercises roughly a
   # quarter of the code, so all four would "fail" the gate. Combine the four data files,

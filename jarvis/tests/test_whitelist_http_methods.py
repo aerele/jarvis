@@ -28,6 +28,8 @@ GET_ALLOWLIST = frozenset(
 		# MCP connectors (and their OAuth callback) are not on this branch.
 		# Read-only boot payload for the holiday touch; refetched by the client without a reload.
 		"jarvis.holiday_touch.api.get_today",
+		# Read-only support view for a Jarvis admin (the Desk console and curl).
+		"jarvis.holiday_touch.api.explain",
 	}
 )
 

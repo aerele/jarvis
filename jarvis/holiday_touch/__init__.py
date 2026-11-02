@@ -34,6 +34,9 @@ Support recipe, when a user says "I did not get a greeting" or "I got one by mis
    6, 0)`` (UTC) to preview another date. ``resolve.answer("<user>")`` is the payload the
    client gets, after the switches below.
 2. Check the three switches and the policy mirror above.
+   To see what the browser itself holds (the answer the page booted with, the one it shows
+   after its own day check, the personal switch, the last fetch error and time), open the
+   desktop app's browser console and read ``window.__holidayTouch``. It is read only.
 3. If the data was just fixed but the answer has not changed, drop the cached answers::
 
        from jarvis.holiday_touch import cache

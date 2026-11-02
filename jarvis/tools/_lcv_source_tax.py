@@ -121,6 +121,16 @@ def _read(doctype, name):
 	return doc
 
 
+def _has_submitted_debit_note(source_name):
+	"""Return source state only; do not expose a return invoice to the caller."""
+	return bool(
+		frappe.db.exists(
+			"Purchase Invoice",
+			{"is_return": 1, "return_against": source_name, "docstatus": 1},
+		)
+	)
+
+
 def _amount(value):
 	value = float(value or 0)
 	if not math.isfinite(value):
@@ -163,7 +173,33 @@ def _tds_accounts(pi):
 def _posted_input_matches(pi, expected, precision):
 	"""Do not let a permission-filtered subset prove a complete input-tax balance."""
 	meta = frappe.get_meta("GL Entry")
-	_guard_fields(meta, extra_fields=("account", "voucher_type", "voucher_no", "is_cancelled"))
+	_guard_fields(
+		meta,
+		extra_fields=(
+			"account",
+			"voucher_type",
+			"voucher_no",
+			"is_cancelled",
+			"against_voucher_type",
+			"against_voucher",
+		),
+	)
+	# A later linked journal can change the input-tax treatment. Do not treat
+	# only the original invoice posting as a current proof in that case.
+	adjustments = frappe.get_all(
+		"GL Entry",
+		filters={
+			"against_voucher_type": "Purchase Invoice",
+			"against_voucher": pi.name,
+			"voucher_type": ["!=", "Purchase Invoice"],
+			"account": ["in", sorted(expected)],
+			"is_cancelled": 0,
+		},
+		pluck="name",
+		limit_page_length=1,
+	)
+	if adjustments:
+		return False
 	rows = frappe.get_all(
 		"GL Entry",
 		filters={"voucher_type": "Purchase Invoice", "voucher_no": pi.name, "is_cancelled": 0},
@@ -529,13 +565,31 @@ def gate_lcv(doc, *, lock=False, previous_links=None, previous_rows=None):
 				_issue(name, "source_state", "Use a submitted non-stock service invoice in this company.")
 			)
 			continue
+		if _has_submitted_debit_note(name):
+			issues.append(
+				_issue(
+					name,
+					"source_debit_note",
+					"A submitted debit note changes this source. Reconcile it in the ERP form before continuing.",
+				)
+			)
+			continue
 		try:
 			result = _classify(pi)
 			if not result.get("code"):
 				claim_issue = _check_claim(doc, pi, lock)
 				if claim_issue:
 					result = claim_issue
-		except (ValueError, TypeError, AttributeError) as exc:
+		except (
+			LCVSourceTaxNeedsInput,
+			PermissionDeniedError,
+			frappe.PermissionError,
+			frappe.QueryDeadlockError,
+			frappe.QueryTimeoutError,
+		):
+			raise
+		except Exception as exc:
+			# No record values or exception text enter the operational log.
 			frappe.logger("lcv_source_tax").warning(
 				"Source tax classifier unavailable (%s)", type(exc).__name__
 			)
