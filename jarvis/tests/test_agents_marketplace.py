@@ -527,7 +527,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	# jarvis#1063 (jarvis-only half) - config_keys: which agent-specific
 	# installation config keys an agent's bundle actually reads (verified
-	# against jarvis-agents/agents/<slug>/evaluate.py).
+	# against jarvis-agents/agents/<slug>/evaluate.py). The close auditor and
+	# FEFO reviewer use nested owner namespaces.
 	# ------------------------------------------------------------------ #
 	def test_sync_agent_listings_writes_config_keys_from_the_registry(self):
 		# dot paths - close-auditor/evaluate.py reads these NESTED under a
@@ -546,6 +547,14 @@ class TestAgentsMarketplace(unittest.TestCase):
 			json.loads(frappe.db.get_value(LISTING, "fixed-asset-depreciation-auditor", "config_keys")),
 			["depr_run_posted", "enable_capex_signal"],
 		)
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "fefo-expiry-compliance-auditor", "config_keys")),
+			[
+				"fefo.reviewer",
+				"fefo.near_expiry_days",
+				"fefo.test_declaration",
+			],
+		)
 
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
 		"""An agent the registry declares no config_keys for gets [], not null/absent - ConfigForm.vue can
@@ -553,6 +562,26 @@ class TestAgentsMarketplace(unittest.TestCase):
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(
 			json.loads(frappe.db.get_value(LISTING, "cycle-count-planner-operator", "config_keys")), []
+		)
+
+	def test_sync_agent_listings_derives_record_scope_capability_from_the_registry(self):
+		"""A stale mutable Listing value cannot enable a private-bundle boundary."""
+		frappe.db.set_value(LISTING, "baseline-meter-auditor", "supports_record_scope", 1)
+		frappe.db.set_value(LISTING, "payroll-prerun-auditor", "supports_record_scope", 0)
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(
+			int(frappe.db.get_value(LISTING, "baseline-meter-auditor", "supports_record_scope") or 0),
+			0,
+		)
+		self.assertEqual(
+			int(frappe.db.get_value(LISTING, "payroll-prerun-auditor", "supports_record_scope") or 0),
+			1,
+		)
+		self.assertEqual(
+			int(
+				frappe.db.get_value(LISTING, "fixed-asset-depreciation-auditor", "supports_record_scope") or 0
+			),
+			0,
 		)
 
 	def test_get_agent_returns_config_keys(self):

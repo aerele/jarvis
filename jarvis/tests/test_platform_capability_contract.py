@@ -906,3 +906,365 @@ class TestRegistryToolsAllow(FrappeTestCase):
 	def test_bench_tools_ignores_container_side_entries(self):
 		declared = ["jarvis__get_doc", "exec", "canvas", "message", "", None]
 		self.assertEqual(_delegate_capability.bench_tools(declared), {"get_doc"})
+
+
+# --------------------------------------------------------------------------- #
+# immutable engagement configuration is the only configuration authority
+# --------------------------------------------------------------------------- #
+class TestSnapshotConfigReadBoundary(FrappeTestCase):
+	"""Drive real delegate dispatches against the two snapshot-config agents.
+
+	The installation is deliberately self-mapped and the run-as user is a System
+	Manager. Ordinary Frappe permissions therefore allow the raw read. A refusal
+	here proves the immutable run contract, not a role or record-permission
+	accident, stopped it before the generic tool body ran.
+	"""
+
+	SLUGS = ("close-auditor", "fixed-asset-depreciation-auditor")
+	SNAPSHOT_CONFIG_SLUGS = ("cash-limit-269st-40a3-auditor", *SLUGS)
+	CONTROL_SLUG = "cc-snapshot-config-read-control"
+	CONTROL_TOOLS = ["jarvis__get_doc", "jarvis__get_list", "jarvis__query"]
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		agent_catalog.sync_agent_listings()
+		# This identity owns the installation and has broad ordinary read access.
+		# It makes a successful raw read possible unless the delegate boundary stops it.
+		cls.run_as = _mk_user("cc-snapshot-config-read@example.com")
+		frappe.clear_cache(user=cls.run_as)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self._cleanup()
+		self.runs = {}
+		for slug, stamped in (
+			(
+				"close-auditor",
+				{"materiality": {"benchmark_value": 100000, "percentage": 2.5}},
+			),
+			(
+				"fixed-asset-depreciation-auditor",
+				{"depr_run_posted": True, "enable_capex_signal": False},
+			),
+		):
+			# Existing runs retain their launch contract. Keep the old report tool in
+			# this fixture so the execution-time guard is tested after the paired
+			# registry removes it from every new run.
+			declared = [*agent_catalog.registry_tools_allow(slug), "jarvis__run_report"]
+			self.runs[slug] = self._make_snapshot_run(slug, stamped, declared)
+
+	def tearDown(self):
+		_agent_run_ctx.clear_session_key()
+		frappe.db.rollback()
+		frappe.set_user("Administrator")
+		self._cleanup()
+		frappe.db.commit()
+
+	def _cleanup(self):
+		frappe.db.delete("Jarvis Agent Allowed Role", {"parent": self.CONTROL_SLUG})
+		for doctype in (RUN, INSTALLATION):
+			for name in frappe.get_all(
+				doctype,
+				filters={"owner": self.run_as, "agent": ["in", [*self.SLUGS, self.CONTROL_SLUG]]},
+				pluck="name",
+				ignore_permissions=True,
+			):
+				frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+		# The synthetic control slug belongs only to this fixture, unlike the two
+		# shipped slugs above. Sweep it regardless of owner so an interrupted older
+		# run cannot leave an Administrator-owned duplicate behind.
+		for doctype in (RUN, INSTALLATION):
+			for name in frappe.get_all(
+				doctype,
+				filters={"agent": self.CONTROL_SLUG},
+				pluck="name",
+				ignore_permissions=True,
+			):
+				frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+		if frappe.db.exists(LISTING, self.CONTROL_SLUG):
+			frappe.delete_doc(LISTING, self.CONTROL_SLUG, force=True, ignore_permissions=True)
+
+	def _make_snapshot_run(self, slug: str, stamped: dict, tools_allow: list[str]) -> dict:
+		# The fixture is not an installation-preflight test. Some minimal test sites
+		# do not define every business role required by the real agents, while the
+		# delegate read boundary needs only a self-mapped run and its immutable
+		# contract. Leave the controller active for every other installation rule.
+		from jarvis._session import impersonate
+		from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
+			JarvisAgentInstallation,
+		)
+
+		key = f"agent:agent-{slug}:snapshot-config-read:{frappe.generate_hash()}"
+		contract = _snapshot(tools_allow, "auditor", [])
+		contract["engagement_config_json"] = frappe.as_json(stamped)
+		with (
+			impersonate(self.run_as),
+			mock.patch.object(JarvisAgentInstallation, "_validate_run_as_permissions"),
+		):
+			run = _mk_run(slug, self.run_as, key, contract)
+		if frappe.get_meta(RUN).has_field("engagement_config_json"):
+			self.assertEqual(
+				frappe.parse_json(frappe.db.get_value(RUN, run, "engagement_config_json")), stamped
+			)
+		installation = frappe.db.get_value(RUN, run, "installation")
+		marker = f"mutable-installation-config-{slug}"
+		mutable = {"marker": marker, "source": "installation-after-launch"}
+		frappe.db.set_value(
+			INSTALLATION, installation, "config", frappe.as_json(mutable), update_modified=False
+		)
+		return {
+			"key": key,
+			"run": run,
+			"installation": installation,
+			"stamped": stamped,
+			"mutable": mutable,
+			"marker": marker,
+		}
+
+	def _dispatch(self, state: dict, tool: str, args: dict | None = None) -> dict:
+		return api._dispatch_from_session(self.run_as, state["key"], tool, args or {})
+
+	def _assert_refused(self, state: dict, tool: str, args: dict) -> None:
+		result = self._dispatch(state, tool, args)
+		self.assertFalse(result["ok"], f"{tool} unexpectedly read the mutable config: {result}")
+		self.assertEqual(result["error"]["code"], PermissionDeniedError.__name__)
+		self.assertIn("get_engagement_config", result["error"]["message"])
+		self.assertNotIn(state["marker"], frappe.as_json(result))
+
+	def test_snapshot_agents_refuse_raw_config_sources_before_dispatch(self):
+		"""Generic reads cannot disclose mutable or stamped engagement config."""
+		with mock.patch.object(api, "_run_tool") as run_tool:
+			for state in self.runs.values():
+				self._assert_refused(
+					state,
+					"get_list",
+					{
+						"doctype": RUN,
+						"fields": ["name", "engagement_config_json"],
+						"filters": {"name": state["run"]},
+					},
+				)
+				self._assert_refused(state, "get_doc", {"doctype": RUN, "name": state["run"]})
+				self._assert_refused(
+					state,
+					"get_list",
+					{
+						"doctype": "Jarvis Agent Installation",
+						"fields": ["name", "config"],
+						"filters": {"name": state["installation"]},
+					},
+				)
+				self._assert_refused(
+					state,
+					"get_doc",
+					{"doctype": "Jarvis Agent Installation", "name": state["installation"]},
+				)
+				self._assert_refused(
+					state,
+					"query",
+					{
+						"spec": {
+							"from": "jarvis agent installation",
+							"alias": "install",
+							"select": ["install.name", "install.config"],
+							"where": [{"field": "install.name", "op": "=", "value": state["installation"]}],
+						}
+					},
+				)
+		run_tool.assert_not_called()
+
+	def test_snapshot_agents_refuse_installation_config_history_before_dispatch(self):
+		"""Tracked Installation changes cannot disclose a prior mutable config."""
+		with mock.patch.object(api, "_run_tool") as run_tool:
+			for state in self.runs.values():
+				self._assert_refused(
+					state,
+					"get_list",
+					{
+						"doctype": "Version",
+						"fields": ["name", "data"],
+						"filters": {
+							"ref_doctype": INSTALLATION,
+							"docname": state["installation"],
+						},
+					},
+				)
+				self._assert_refused(state, "get_doc", {"doctype": "Version", "name": "version-name"})
+				self._assert_refused(
+					state,
+					"query",
+					{
+						"spec": {
+							"from": "Version",
+							"alias": "version",
+							"select": ["version.data"],
+							"where": [{"field": "version.ref_doctype", "op": "=", "value": INSTALLATION}],
+						}
+					},
+				)
+		run_tool.assert_not_called()
+
+	def test_snapshot_agents_refuse_get_list_cross_source_shapes_before_dispatch(self):
+		"""Frappe get_list fields and filters cannot add Installation as a source."""
+		with mock.patch.object(api, "_run_tool") as run_tool:
+			for state in self.runs.values():
+				self._assert_refused(
+					state,
+					"get_list",
+					{
+						"doctype": RUN,
+						"fields": ["installation.config"],
+						"filters": {"name": state["run"]},
+					},
+				)
+				self._assert_refused(
+					state,
+					"get_list",
+					{
+						"doctype": "ToDo",
+						"fields": ["name"],
+						"filters": [[INSTALLATION, "config", "like", "%mutable-installation-config%"]],
+					},
+				)
+				self._assert_refused(
+					state,
+					"get_list",
+					{
+						# Frappe treats this legacy shape as fields/filters swapped.
+						"doctype": "ToDo",
+						"fields": [["name", "=", "not-a-data-field"]],
+						"filters": ["`tabJarvis Agent Installation`.`config`", "name"],
+					},
+				)
+				self._assert_refused(
+					state,
+					"get_list",
+					{
+						"doctype": RUN,
+						"fields": ["name"],
+						"filters": {"name": state["run"]},
+						"order_by": "installation.config desc",
+					},
+				)
+		run_tool.assert_not_called()
+
+	def test_snapshot_agents_keep_plain_base_get_list_access(self):
+		"""The boundary preserves a normal one-DocType list read."""
+		for state in self.runs.values():
+			result = self._dispatch(
+				state,
+				"get_list",
+				{
+					"doctype": "ToDo",
+					"fields": ["name"],
+					"filters": {"name": ["like", "%"]},
+					"order_by": "name asc",
+					"limit": 1,
+				},
+			)
+			self.assertTrue(result["ok"], result)
+
+	def test_snapshot_agents_refuse_join_and_nested_query_routes(self):
+		"""The query boundary follows joins and EXISTS sub-specifications too."""
+		for state in self.runs.values():
+			self._assert_refused(
+				state,
+				"query",
+				{
+					"spec": {
+						"from": "User",
+						"alias": "user",
+						"select": ["user.name"],
+						"joins": [
+							{
+								"type": "inner",
+								"doctype": "Jarvis Agent Installation",
+								"alias": "install",
+								"on": {"install.run_as_user": "user.name"},
+							}
+						],
+					}
+				},
+			)
+			self._assert_refused(
+				state,
+				"query",
+				{
+					"spec": {
+						"from": "User",
+						"alias": "user",
+						"select": ["user.name"],
+						"where": [
+							{
+								"op": "exists",
+								"value": {
+									"from": "Jarvis Agent Installation",
+									"alias": "install",
+									"where": [
+										{
+											"field": "install.run_as_user",
+											"op": "=",
+											"value": {"$field": "user.name"},
+										}
+									],
+								},
+							}
+						],
+					}
+				},
+			)
+
+	def test_snapshot_agents_get_only_the_stamped_config_after_mutation(self):
+		"""The declared zero-argument tool returns the run row, never the install."""
+		# This source branch adds the persisted field. Do not migrate a shared test
+		# site from a focused test: a migrated CI database exercises the assertion,
+		# while an older local schema cannot store the launch snapshot at all.
+		if not frappe.db.has_column(RUN, "engagement_config_json") or not frappe.get_meta(RUN).has_field(
+			"engagement_config_json"
+		):
+			self.skipTest("test site is missing Jarvis Agent Run.engagement_config_json")
+		for state in self.runs.values():
+			result = self._dispatch(state, "get_engagement_config")
+			self.assertTrue(result["ok"], result)
+			self.assertEqual(result["data"], state["stamped"])
+			self.assertNotIn(state["marker"], frappe.as_json(result))
+
+	def test_snapshot_agents_refuse_stale_declared_reports_before_execution(self):
+		"""A pre-change run cannot use its old report declaration as a bypass."""
+		with mock.patch("jarvis.tools.run_report.frappe_run_report") as report_run:
+			for state in self.runs.values():
+				self._assert_refused(state, "run_report", {"report_name": "any-saved-report"})
+		report_run.assert_not_called()
+
+	def test_new_snapshot_config_agents_do_not_declare_saved_reports(self):
+		"""New contracts make the enforced report boundary visible to delegates."""
+		for slug in self.SNAPSHOT_CONFIG_SLUGS:
+			self.assertNotIn("jarvis__run_report", agent_catalog.registry_tools_allow(slug))
+
+	def test_non_snapshot_config_agent_keeps_its_declared_generic_read(self):
+		"""A normal snapshot agent without the config tool keeps generic reads."""
+		_mk_listing(self.CONTROL_SLUG, "Auditor", [])
+		state = self._make_control_run()
+		result = self._dispatch(
+			state,
+			"get_doc",
+			{"doctype": INSTALLATION, "name": state["installation"], "fields": ["name", "config"]},
+		)
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(result["data"]["config"], frappe.as_json(state["mutable"]))
+
+	def _make_control_run(self) -> dict:
+		from jarvis._session import impersonate
+
+		key = "agent:agent-cc-snapshot-config-read-control:run"
+		with impersonate(self.run_as):
+			run = _mk_run(self.CONTROL_SLUG, self.run_as, key, _snapshot(self.CONTROL_TOOLS, "auditor", []))
+		installation = frappe.db.get_value(RUN, run, "installation")
+		mutable = {"marker": "control-installation-config", "source": "installation"}
+		frappe.db.set_value(
+			INSTALLATION, installation, "config", frappe.as_json(mutable), update_modified=False
+		)
+		return {"key": key, "run": run, "installation": installation, "mutable": mutable}

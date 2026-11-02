@@ -339,6 +339,58 @@ class DispatchIdempotencyTestCase(FrappeTestCase):
 class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 	"""The reported defect and its immediate neighbours."""
 
+	def test_invalid_fefo_root_records_one_safe_failure_and_consumes_the_slot(self):
+		"""A persisted bad root needs an owner fix, not hourly Error Logs or a broad run."""
+		from jarvis.chat.agent_scope import InvalidFefoRecordScopeError
+
+		inst = self._due_install()
+		now = now_datetime()
+
+		def _invalid_root(inst_doc, **kw):
+			raise InvalidFefoRecordScopeError("FEFO record_scope must name one Warehouse leaf")
+
+		with patch.object(agent_scheduler.frappe, "log_error") as log_error:
+			self._sweep(launch=_invalid_root)
+
+		failed = frappe.get_all(
+			RUN,
+			filters={"installation": inst, "status": "failed"},
+			fields=["error"],
+			ignore_permissions=True,
+		)
+		self.assertEqual(len(failed), 1)
+		self.assertEqual(
+			failed[0].error,
+			"scheduled FEFO audit skipped: update or remove the declared Warehouse scope in agent configuration",
+		)
+		self.assertEqual(self._dispatched_for(inst), [], "an invalid root never reaches the delegate")
+		log_error.assert_not_called()
+		self.assertGreater(
+			self._next_run_at(inst),
+			add_to_date(now, seconds=agent_scheduler._RETRY_AFTER_S + 60),
+			"the next normal cadence replaces the hourly retry",
+		)
+
+	def test_fefo_database_scope_verification_failure_remains_retryable(self):
+		"""A transient verification failure must not be mislabeled as an owner error."""
+		from jarvis.exceptions import InvalidArgumentError
+
+		inst = self._due_install()
+		now = now_datetime()
+
+		def _database_unavailable(inst_doc, **kw):
+			raise InvalidArgumentError("FEFO Warehouse scope could not be verified") from RuntimeError(
+				"database unavailable"
+			)
+
+		with patch.object(agent_scheduler.frappe, "log_error") as log_error:
+			self._sweep(launch=_database_unavailable)
+
+		self.assertEqual(len(self._runs(inst, "failed")), 1)
+		self.assertEqual(self._dispatched_for(inst), [])
+		log_error.assert_called_once()
+		self._assert_retry_scheduled(inst, now)
+
 	def test_a_crash_after_the_launch_does_not_re_dispatch_the_completed_slot(self):
 		"""THE regression. The launch succeeds, the sweep dies before the schedule can
 		be advanced, the audit finishes normally within the hour, and the next tick

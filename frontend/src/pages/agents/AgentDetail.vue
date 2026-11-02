@@ -191,11 +191,11 @@
 					Still in shadow preview - promote it to live under Configure first
 				</div>
 				<div
-					v-if="installation && apConfigurationBlocked"
+					v-if="installation && configurationBlocked"
 					class="mt-3 flex items-center gap-3 text-sm text-ink-gray-6"
 					role="status"
 				>
-					<span>{{ apConfigurationHint }}</span>
+					<span>{{ configurationHint }}</span>
 					<Button
 						v-if="tab !== 'configure'"
 						label="Complete configuration"
@@ -452,6 +452,18 @@
 								Manual review only. Confirm the date cutoff and policy before each
 								run.
 							</p>
+							<div v-else-if="scheduleConfigurationBlocked" class="mt-2 space-y-3">
+								<p class="text-sm text-ink-gray-6" role="status">
+									Complete the expiry reviewer and near-expiry window in
+									Configure before enabling an automatic schedule.
+								</p>
+								<Button
+									v-if="sched.enabled"
+									label="Turn off automatic schedule"
+									:loading="savingSchedule"
+									@click="disableSchedule"
+								/>
+							</div>
 							<div v-else class="mt-2 space-y-5">
 								<Switch
 									label="Run automatically"
@@ -1113,23 +1125,38 @@ async function doInstall(pick) {
 
 const running = ref(false);
 const configurationDirty = ref(false);
+const FEFO_EXPIRY_COMPLIANCE_AUDITOR = "fefo-expiry-compliance-auditor";
 const isOperatorReview = computed(
 	() => agent.value?.nature === "Operator" && !!agent.value?.supports_manual_run
 );
-const configurationIssues = computed(
-	() => (isOperatorReview.value && installation.value?.configuration_issues) || {}
+const isFefoExpiryComplianceAuditor = computed(
+	() => agent.value?.agent_slug === FEFO_EXPIRY_COMPLIANCE_AUDITOR
 );
-const apConfigurationBlocked = computed(
+// Most agents can run with optional settings. The review operators and FEFO
+// expiry auditor each have a mandatory launch contract.
+const requiresRunConfiguration = computed(
+	() => isOperatorReview.value || isFefoExpiryComplianceAuditor.value
+);
+const configurationIssues = computed(
+	() => (requiresRunConfiguration.value && installation.value?.configuration_issues) || {}
+);
+
+const configurationBlocked = computed(
 	() =>
-		isOperatorReview.value &&
+		requiresRunConfiguration.value &&
 		(configurationDirty.value ||
 			savingConfig.value ||
 			!installation.value?.configuration_issues ||
 			Object.keys(configurationIssues.value).length > 0)
 );
-const apConfigurationHint = computed(() =>
+const scheduleConfigurationBlocked = computed(
+	() => isFefoExpiryComplianceAuditor.value && configurationBlocked.value
+);
+const configurationHint = computed(() =>
 	configurationDirty.value
 		? "Save your configuration changes before running."
+		: isFefoExpiryComplianceAuditor.value
+		? "Enter and save the expiry reviewer and near-expiry window in Configure before running."
 		: "Complete and save the required review settings in Configure before running."
 );
 // On-demand run is offered for read-only auditors AND scribes (mirrors the
@@ -1160,7 +1187,7 @@ const runDisabled = computed(
 			!["Auditor", "Scribe"].includes(agent.value.nature)) ||
 		!(agent.value && agent.value.allowed) ||
 		shadowScribeBlocked.value ||
-		apConfigurationBlocked.value
+		configurationBlocked.value
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
@@ -1174,7 +1201,7 @@ const runTooltip = computed(() => {
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
 	if (!agent.value.allowed) return "You do not have access to this agent";
-	if (apConfigurationBlocked.value) return apConfigurationHint.value;
+	if (configurationBlocked.value) return configurationHint.value;
 	// The shadow vocabulary is reviewer language (jarvis#1062): a plain user has
 	// no promote control and no say in the sign-off, so telling them to go and
 	// promote it names an action they cannot take.
@@ -1432,7 +1459,11 @@ const scheduleSummary = computed(() => {
 });
 
 async function saveSchedule() {
-	if (!installation.value || savingSchedule.value) return;
+	if (!installation.value || savingSchedule.value) return false;
+	if (scheduleConfigurationBlocked.value && sched.value.enabled) {
+		toast.error(configurationHint.value);
+		return false;
+	}
 	savingSchedule.value = true;
 	try {
 		await api.setAgentSchedule(installation.value.name, {
@@ -1445,11 +1476,23 @@ async function saveSchedule() {
 		});
 		toast.success("Schedule saved");
 		await load();
+		return true;
 	} catch (e) {
 		toast.error(errHtml(e));
+		return false;
 	} finally {
 		savingSchedule.value = false;
 	}
+}
+
+async function disableSchedule() {
+	if (!installation.value || savingSchedule.value) return;
+	// An old active schedule must remain repairable even when the saved FEFO
+	// policy is incomplete. Restore the local toggle when the request fails, so
+	// the one recovery action stays visible for a retry.
+	const wasEnabled = sched.value.enabled;
+	sched.value.enabled = false;
+	if (!(await saveSchedule())) sched.value.enabled = wasEnabled;
 }
 
 // ── Configure: config JSON → ConfigForm (§14 F3) ─────────────────────────────

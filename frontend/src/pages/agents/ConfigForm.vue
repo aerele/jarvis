@@ -1,5 +1,5 @@
 <template>
-	<fieldset :disabled="operatorReview && saving" class="min-w-0">
+	<fieldset :disabled="requiresConfiguration && saving" class="min-w-0">
 		<p class="text-sm text-ink-gray-6">
 			{{
 				operatorReview
@@ -8,6 +8,10 @@
 						: arReview
 						? "AR review includes older open receivables, uses the evidence cutoff and prepares unsent reminder text only. Manual runs; no sending, Dunning creation or accounting changes."
 						: "AP document review uses the company, fiscal period, evidence cutoff and matching settings below. Manual runs only. Preview creates no review requests; live review never submits or pays an invoice."
+					: statutoryPayroll
+					? "Select the submitted monthly Payroll Entry. Jarvis fixes the company and period from that record. Complete the statutory mapping in Advanced (JSON)."
+					: fefoConfiguration
+					? "Expiry compliance needs a named reviewer and a near-expiry window. Save both settings before running an audit."
 					: "Settings this agent reads when it runs. Leave a field empty to use the default."
 			}}
 		</p>
@@ -41,7 +45,7 @@
 			<p v-if="defaultsMessage" class="mt-2">{{ defaultsMessage }}</p>
 		</div>
 		<div
-			v-if="operatorReview && Object.keys(shownErrors).length"
+			v-if="requiresConfiguration && Object.keys(shownErrors).length"
 			class="mt-3 rounded-lg border border-outline-gray-2 bg-surface-gray-1 p-3 text-sm text-ink-gray-7"
 			role="status"
 		>
@@ -117,6 +121,9 @@
 					:label="f.label"
 					:description="f.help"
 					:placeholder="f.placeholder"
+					:min="f.min"
+					:max="f.max"
+					:step="f.integer ? 1 : undefined"
 					:modelValue="form[f.key]"
 					@update:modelValue="(v) => (form[f.key] = v)"
 				>
@@ -157,9 +164,17 @@
 
 		<div class="mt-4">
 			<Button label="Save configuration" :loading="saving" @click="save" />
-			<p v-if="operatorReview" class="mt-2 text-p-xs text-ink-gray-5">
-				You can save unfinished setup. Run Now stays unavailable until all required
-				settings are valid and saved. Suggestions are not applied to a run until you save.
+			<ErrorMessage class="mt-2" :message="saveError" />
+			<p v-if="requiresConfiguration" class="mt-2 text-p-xs text-ink-gray-5">
+				<template v-if="operatorReview">
+					You can save unfinished setup. Run Now stays unavailable until all required
+					settings are valid and saved. Suggestions are not applied to a run until you
+					save.
+				</template>
+				<template v-else>
+					You can save unfinished setup. Run Now stays unavailable until all required
+					settings are valid and saved.
+				</template>
 			</p>
 		</div>
 	</fieldset>
@@ -191,6 +206,7 @@ import {
 	AGENT_SPECIFIC_CONFIG_FIELDS,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
+	NUMBER_CONFIG_CONSTRAINTS,
 	KEY_TO_PATH,
 	getPath,
 	setPath,
@@ -220,14 +236,21 @@ const agentSpecificFields = computed(() =>
 const operatorReview = computed(() => props.configKeys.includes("review_scope"));
 const arReview = computed(() => props.configKeys.includes("settlement_hold_days"));
 const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
+const statutoryPayroll = computed(() => props.configKeys.includes("payroll_entry"));
+const fefoConfiguration = computed(() => props.configKeys.includes("fefo.reviewer"));
+const requiresConfiguration = computed(() => operatorReview.value || fefoConfiguration.value);
 const defaultsData = ref(null);
 const defaultsLoading = ref(false);
 const defaultsMessage = ref("");
 let defaultsRequest = 0;
 const visibleFields = computed(() => [
 	// Bank reconciliation reads a statement window only; a fiscal year does not apply.
-	...SCOPE_CONFIG_FIELDS.filter(
-		(field) => !(bankRecon.value && field.key === "fiscal_year")
+	...(statutoryPayroll.value
+		? []
+		: SCOPE_CONFIG_FIELDS.filter(
+				(field) =>
+					!fefoConfiguration.value && !(bankRecon.value && field.key === "fiscal_year")
+		  )
 	).map((field) => {
 		if (!operatorReview.value || field.key === "fiscal_year") return field;
 		if (bankRecon.value && field.type === "date-range")
@@ -314,6 +337,7 @@ const form = reactive({
 	review_scope: "",
 	depr_run_posted: "",
 	enable_capex_signal: "",
+	payroll_entry: "",
 	company: "",
 	fiscal_year: "",
 	from_date: "",
@@ -322,9 +346,13 @@ const form = reactive({
 	percentage: "",
 	engagement_risk_level: "",
 	rounding_step: "",
+	fefo_reviewer: "",
+	fefo_near_expiry_days: "",
+	fefo_test_declaration: "",
 });
 const advanced = ref("{}");
 const advancedError = ref("");
+const saveError = ref("");
 const initialState = ref("");
 
 // Only rendered fields count: a default filled into a field this agent never
@@ -421,6 +449,7 @@ const linkFields = {
 	company: makeLinkField("Company"),
 	fiscal_year: makeLinkField("Fiscal Year"),
 	bank_account: makeLinkField("Bank Account"),
+	payroll_entry: makeLinkField("Payroll Entry"),
 };
 watch([operatorReview, defaultsData], () => {
 	linkFields.fiscal_year.reprime();
@@ -529,6 +558,7 @@ onBeforeUnmount(() => {
 });
 
 function save() {
+	saveError.value = "";
 	// 1) advanced JSON must parse to an object
 	let base = {};
 	const raw = advanced.value.trim();
@@ -566,7 +596,17 @@ function save() {
 		if (NUMBER_CONFIG_KEYS.includes(key)) {
 			const n = Number(v);
 			if (isNaN(n)) {
-				advancedError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
+				saveError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
+				return;
+			}
+			const constraints = NUMBER_CONFIG_CONSTRAINTS[key];
+			if (
+				constraints &&
+				((constraints.integer && !/^\d+$/.test(v)) ||
+					(constraints.min != null && n < constraints.min) ||
+					(constraints.max != null && n > constraints.max))
+			) {
+				saveError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a whole number from ${constraints.min} to ${constraints.max}.`;
 				return;
 			}
 			setPath(merged, path, n);

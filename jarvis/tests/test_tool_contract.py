@@ -115,14 +115,16 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	Wave-A adversarial P2-2: nothing gated this, so a re-vendor lag would
 	silently split bench authorization from container capability.
 
-	The digest is SEMANTIC (canonical JSON of {slug: {nature, sorted
-	tools_allow}}), so formatting/descriptions may move freely. The SAME literal
-	is pinned in the private agents repo
+	The tool/nature digest is SEMANTIC (canonical JSON of {slug: {nature, sorted
+	tools_allow}}), so formatting/descriptions may move freely. A second digest
+	pins the bench-only record-scope declaration {slug: supports_record_scope}.
+	The SAME literals are pinned in the private agents repo
 	(lib/check_registry_capability_contract.py); its docstring holds the paired
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "9f750b31eb970103b1a81f7171c1182d6122e03eceb66637e5cf4cc8824ddebf"
+	PINNED_CAPABILITY_DIGEST = "d4b5e1683150e3dc3cd9928b7696ffc35c333670e81714aec3de28ac991d7072"
+	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "7b009e6a873dffef3cf7a911ed919a65ce8b43d4452dd62b88eb133d23841ecc"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
@@ -150,6 +152,33 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			"the vendored registry's capability contract moved — re-vendor from the "
 			"agents repo and update BOTH pinned digests in the same change set "
 			"(see lib/check_registry_capability_contract.py there)",
+		)
+
+	def test_vendored_registry_record_scope_capability_digest_is_pinned(self):
+		import hashlib
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			doc = json.load(fh)
+		contract = {}
+		for entry in doc["agents"]:
+			slug = entry.get("agent_slug") or entry.get("slug")
+			self.assertTrue(slug, "registry entry with no slug")
+			self.assertNotIn(slug, contract, f"duplicate slug {slug}")
+			value = entry.get("supports_record_scope")
+			self.assertIsInstance(value, bool, f"{slug}: record scope capability is not explicit")
+			contract[slug] = value
+		canonical = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+		got = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+		self.assertEqual(
+			got,
+			self.PINNED_RECORD_SCOPE_CAPABILITY_DIGEST,
+			"the vendored record-scope capability contract moved — re-vendor the scope declarations "
+			"and update BOTH pinned digests (see lib/check_registry_capability_contract.py in the "
+			"private agents repo)",
 		)
 
 	def test_reorder_native_release_has_only_metadata_preparation_authority(self):

@@ -294,7 +294,8 @@ def has_embedded_media_path(text: str) -> bool:
 
 def fetch_media(agent_url: str, token: str, source: str) -> bytes | None:
 	"""GET one media file from the container gateway (binary-safe,
-	redirect-disabled, size-bounded). Returns the raw bytes, or ``None`` on any
+	redirect-disabled, size-bounded). ``token`` is the paired device token
+	(``device.device_bearer()``), never the gateway owner token. Returns the raw bytes, or ``None`` on any
 	failure / oversize.
 
 	The host is ALWAYS the tenant's own gateway (``agent_url``); the LLM marker

@@ -1,7 +1,7 @@
 """Tests for the server-owned Negative Stock receipt gate.
 
-These use synthetic in-memory values only. They do not install or run an agent,
-and they do not read a customer company.
+These use synthetic fixtures and isolated database transactions. They do not
+install or run an agent, and they do not read a customer company.
 """
 
 from __future__ import annotations
@@ -98,6 +98,18 @@ def _receipt_value(run, capture, source):
 
 
 class TestNegativeStockReceipt(unittest.TestCase):
+	def test_receipt_accepts_the_current_published_negative_stock_bundle(self):
+		with open(frappe.get_app_path("jarvis", "agents", "registry.json"), encoding="utf-8") as source:
+			entry = next(row for row in json.load(source)["agents"] if row["agent_slug"] == receipt.AGENT)
+		self.assertEqual(entry["status"], "Published")
+		with patch.object(receipt.frappe.db, "exists", return_value=False):
+			receipt._complete(_run(bundle_version=entry["version"]))
+
+	def test_old_or_unknown_negative_stock_bundles_cannot_supply_a_receipt(self):
+		for version in ("0.3.1", "0.3.3", "", None):
+			with self.subTest(version=version), self.assertRaises(receipt.ReceiptRefused):
+				receipt._complete(_run(bundle_version=version))
+
 	def test_scope_binds_effective_as_of_date(self):
 		scope = receipt._scope(SCOPE_RAW)
 		self.assertEqual(scope["effective_as_of"], "2026-10-30")
@@ -398,6 +410,7 @@ class TestNegativeStockReceiptWritebackHook(unittest.TestCase):
 		capture = {"run": "NEG-HOOK-1"}
 		start_run = frappe._dict(
 			name="NEG-HOOK-1",
+			scope_json=frappe.as_json(SCOPE_RAW),
 			agent=receipt.AGENT,
 			status="running",
 			findings_count=0,
@@ -442,7 +455,7 @@ class TestNegativeStockReceiptWritebackHook(unittest.TestCase):
 			) as capture_launch,
 			patch("jarvis.chat.negative_stock_receipt.persist") as persist,
 		):
-			out = writeback.record_agent_run(findings=[], coverage={}, scope={})
+			out = writeback.record_agent_run(findings=[], coverage={}, scope=SCOPE_RAW)
 
 		self.assertEqual(out["status"], "completed")
 		capture_launch.assert_called_once_with(start_run)

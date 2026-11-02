@@ -231,7 +231,16 @@ class TestNativeReorderJourney(FrappeTestCase):
 			doc = frappe.get_doc(
 				{"doctype": "User", "email": email, "first_name": "Reorder test", "send_welcome_email": 0}
 			).insert(ignore_permissions=True)
-			doc.add_roles("Jarvis User", "Stock Manager", "Accounts Manager", "Purchase Manager")
+			# Reader roles are explicit; Manager roles do not imply them on every site.
+			doc.add_roles(
+				"Jarvis User",
+				"Stock Manager",
+				"Stock User",
+				"Accounts Manager",
+				"Accounts User",
+				"Purchase Manager",
+				"Purchase User",
+			)
 		masters.ensure_ledger_company()
 		frappe.get_doc(
 			{

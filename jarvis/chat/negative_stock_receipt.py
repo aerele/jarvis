@@ -37,7 +37,9 @@ REQUIRED_TOKENS = frozenset(
 RECEIPT_KEY = "negative_stock_trust_receipt"
 RECEIPT_SCHEMA = "negative-stock-trust-receipt-v1"
 SOURCE_SCHEMA = "negative-stock-source-receipt-v2"
-SUPPORTED_BUNDLE_VERSION = "0.3.1"
+# The reviewed native lifecycle release supplies the same six complete coverage tokens.
+# Older runs must be repeated; do not accept an unknown future evaluator contract.
+SUPPORTED_BUNDLE_VERSION = "0.3.2"
 RUN = "Jarvis Agent Run"
 FINDING = "Jarvis Agent Finding"
 SESSION = "Jarvis Chat Session"
