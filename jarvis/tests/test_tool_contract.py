@@ -122,7 +122,7 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "6aacd193a0e96ba3879f14bed65617840d927797a6356c728fccf64e377afa5b"
+	PINNED_CAPABILITY_DIGEST = "9f750b31eb970103b1a81f7171c1182d6122e03eceb66637e5cf4cc8824ddebf"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
@@ -152,8 +152,8 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			"(see lib/check_registry_capability_contract.py there)",
 		)
 
-	def test_reorder_remains_coming_soon_without_inventory_or_erp_write_capability(self):
-		"""A future receipt gate must not silently restore the retired operator."""
+	def test_reorder_native_release_has_only_metadata_preparation_authority(self):
+		"""Publication cannot restore the retired generic read or write tools."""
 		import json
 
 		import frappe
@@ -164,11 +164,11 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 		entry = next(
 			item for item in doc["agents"] if item.get("agent_slug") == "reorder-replenishment-operator"
 		)
-		self.assertEqual(entry["status"], "Coming Soon")
-		self.assertEqual(entry["tools_required"], [])
+		self.assertEqual(entry["status"], "Published")
+		self.assertEqual(entry["tools_required"], ["jarvis__prepare_reorder_review"])
 		self.assertEqual(
 			sorted(entry["tools_allow"]),
-			["canvas", "jarvis__record_agent_run", "jarvis__save_agent_dashboard", "message"],
+			["jarvis__prepare_reorder_review"],
 		)
-		self.assertEqual(entry["doctypes_required"], [])
+		self.assertNotIn("Jarvis Approval Request", entry["doctypes_required"])
 		self.assertIsNone(entry["writes"])

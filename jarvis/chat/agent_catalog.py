@@ -353,7 +353,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	installs = frappe.get_all(
 		"Jarvis Agent Installation",
 		filters=filters,
-		fields=["agent", "owner", "installable", "run_as_user"],
+		fields=["agent", "owner", "installable", "run_as_user", "installed_version"],
 		# ``agent`` alone is not a total order once two owners install the same
 		# agent; the ``name`` tiebreak makes the iteration — and therefore which
 		# install wins the de-dupe below — stable across runs. The payload is a
@@ -373,7 +373,10 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	for row in installs:
 		# Reorder remains closed even if an old installation or a privileged listing
 		# edit says otherwise. Do not advertise its delegate to the fleet.
-		if reorder_replenishment_gate.is_reorder(row.agent):
+		if reorder_replenishment_gate.is_reorder(row.agent) and (
+			not frappe.get_attr("jarvis.chat.reorder_review.release_available")()
+			or row.installed_version != "0.2.0"
+		):
 			continue
 		# De-dupe by AGENT. An install is per-(owner, agent) but the container's
 		# agent_skills namespace is per-slug, so two users who each install AND
@@ -476,7 +479,10 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 			order_by="name asc",
 		)
 		for lst in allowed_listings:
-			if reorder_replenishment_gate.is_reorder(lst.name):
+			if (
+				reorder_replenishment_gate.is_reorder(lst.name)
+				and not frappe.get_attr("jarvis.chat.reorder_review.release_available")()
+			):
 				continue
 			if lst.name in seen_agents or lst.name not in granted:
 				continue

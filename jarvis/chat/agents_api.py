@@ -551,7 +551,8 @@ def get_agent(agent_slug: str) -> dict:
 		"category": listing.category,
 		"nature": listing.nature,
 		"supports_manual_run": listing.nature in ("Auditor", "Scribe")
-		or listing.agent_slug in REVIEW_OPERATORS,
+		or listing.agent_slug in REVIEW_OPERATORS
+		or listing.agent_slug == "reorder-replenishment-operator",
 		"version": listing.version,
 		"publisher": listing.publisher,
 		"status": listing.status,
@@ -618,6 +619,10 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif listing.agent_slug == "reorder-replenishment-operator":
+			from jarvis.chat.reorder_review import configuration_issues
+
+			i["configuration_issues"] = configuration_issues(i.config or "{}")
 		out["installation"] = i
 
 	if is_sm and not _masked:
@@ -1336,7 +1341,7 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	from jarvis.chat import reorder_replenishment_gate
 
 	reorder_replenishment_gate.assert_enabled(doc.agent, enabled)
-	if reorder_replenishment_gate.is_reorder(doc.agent):
+	if reorder_replenishment_gate.is_reorder(doc.agent) and doc.installed_version != "0.2.0":
 		reorder_replenishment_gate.retire_document(doc)
 	# R5-J8: never enable a non-installable capability (a min_apps dependency
 	# absent at install, or one that vanished after install and was reconciled to
@@ -1395,7 +1400,7 @@ def set_schedule(
 		else frappe.utils.cint(doc.schedule_enabled)
 	)
 	reorder_replenishment_gate.assert_scheduled(doc.agent, final_schedule_enabled)
-	if reorder_replenishment_gate.is_reorder(doc.agent):
+	if reorder_replenishment_gate.is_reorder(doc.agent) and doc.installed_version != "0.2.0":
 		reorder_replenishment_gate.retire_document(doc)
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
 	# non-installable capability (a scheduled run would only fail its preflight).
@@ -1857,7 +1862,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 
 	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
 	nature = listing.get("nature")
-	if nature not in ("Auditor", "Scribe") and doc.agent not in REVIEW_OPERATORS:
+	if (
+		nature not in ("Auditor", "Scribe")
+		and doc.agent not in REVIEW_OPERATORS
+		and doc.agent != "reorder-replenishment-operator"
+	):
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
 		)

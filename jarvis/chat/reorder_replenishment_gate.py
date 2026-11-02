@@ -1,10 +1,10 @@
-"""Hard-close the unreleased Reorder & Replenishment operator.
+"""Keep legacy Reorder authority closed beside the native review release.
 
 The marketplace listing is useful display data, but it is mutable tenant data.
-This module is the server-side authority while the operator has no native,
-typed proposal path. It intentionally does not inspect a model result, an
-installation configuration, or a Negative Stock receipt: none of those facts
-can make the unreleased operator safe to run.
+The exact native release may install and prepare server-owned review rows.
+Historical sessions and generic ERP document writes remain closed. The native
+backend owns source, version, permission and receipt validation; listing edits
+and model results cannot grant the retired authority.
 """
 
 from __future__ import annotations
@@ -166,19 +166,29 @@ def refuse() -> None:
 
 def assert_new_install_allowed(agent: str | None) -> None:
 	"""Refuse a new install before it can create any installation state."""
-	if is_reorder(agent):
+	from jarvis.chat.reorder_review import release_available
+
+	if is_reorder(agent) and not release_available():
 		refuse()
 
 
 def assert_listing_status(agent: str | None, status: str | None) -> None:
 	"""Keep the Reorder listing closed on every ORM save surface."""
-	if is_reorder(agent) and (status or "").strip() != CLOSED_STATUS:
+	from jarvis.chat.reorder_review import release_available
+
+	if (
+		is_reorder(agent)
+		and (status or "").strip() != CLOSED_STATUS
+		and not (status == "Published" and release_available())
+	):
 		frappe.throw(_(_LISTING_UNAVAILABLE), frappe.PermissionError)
 
 
 def assert_enabled(agent: str | None, enabled: int | bool) -> None:
 	"""Refuse an attempt to enable the closed operator."""
-	if is_reorder(agent) and frappe.utils.cint(enabled):
+	from jarvis.chat.reorder_review import release_available
+
+	if is_reorder(agent) and frappe.utils.cint(enabled) and not release_available():
 		refuse()
 
 
@@ -190,7 +200,9 @@ def assert_scheduled(agent: str | None, schedule_enabled: int | bool) -> None:
 
 def assert_launch_allowed(agent: str | None) -> None:
 	"""Refuse a direct or normal launch before it creates a run or conversation."""
-	if is_reorder(agent):
+	from jarvis.chat.reorder_review import release_available
+
+	if is_reorder(agent) and not release_available():
 		refuse()
 
 
@@ -206,6 +218,15 @@ def retire_document(doc) -> None:
 def validate_installation(doc) -> None:
 	"""Reject new installs and active legacy rows on Desk, import, and REST saves."""
 	if not is_reorder(doc.get("agent")):
+		return
+	from jarvis.chat import reorder_review
+
+	if reorder_review.release_available() and doc.get("installed_version") == reorder_review.VERSION:
+		if frappe.utils.cint(doc.get("schedule_enabled")):
+			refuse()
+		if frappe.utils.cint(doc.get("enabled")) and reorder_review.configuration_issues(doc.get("config")):
+			refuse()
+		doc.next_run_at = None
 		return
 	if doc.is_new():
 		refuse()
@@ -235,6 +256,14 @@ def delegate_tool_denial(cap: dict, tool: str) -> dict | None:
 	"""Return a fatal denial for every old Reorder delegate tool call."""
 	if not is_reorder(cap.get("agent")):
 		return None
+	from jarvis.chat import reorder_review
+
+	if not cap.get("legacy") and tool == reorder_review.TOOL:
+		try:
+			if reorder_review.modern_run(frappe.get_doc("Jarvis Agent Run", cap.get("run"))):
+				return None
+		except frappe.DoesNotExistError:
+			pass
 	name = str(tool or "").strip()
 	return {
 		"run": cap.get("run"),

@@ -206,7 +206,7 @@ class TestNegativeStockReceipt(unittest.TestCase):
 
 		def get_value(doctype, name, field, **kwargs):
 			if doctype == receipt.SESSION:
-				self.assertEqual(name, "reorder-session")
+				self.assertEqual(name, {"session_key": "reorder-session"})
 				return USER
 			if doctype == receipt.RUN:
 				self.assertEqual(name, negative.name)
