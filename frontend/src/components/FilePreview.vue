@@ -103,6 +103,12 @@
 					</div>
 				</template>
 
+				<DocumentBlocks
+					v-else-if="view.document"
+					:document="view.document"
+					:file-url="fileUrl"
+				/>
+
 				<pre
 					v-else-if="view.kind === 'text'"
 					class="max-h-[65vh] overflow-auto whitespace-pre-wrap break-words px-5 py-4 font-mono text-sm text-ink-gray-8"
@@ -122,7 +128,7 @@
 				>
 					<FeatherIcon name="file" class="size-6 text-ink-gray-4" />
 					<div class="text-base text-ink-gray-6">
-						Preview not available for this file.
+						{{ view.error || "Preview not available for this file." }}
 					</div>
 					<a
 						v-if="fileUrl"
@@ -145,7 +151,8 @@
 // iframe (raw file fetched over the session cookie), everything else →
 // api.previewFile (xlsx/csv → sheets table, txt/code → text), and a
 // download-only fallback when nothing can render.
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
+import DocumentBlocks from "./DocumentBlocks.vue";
 import { Dialog, Button, FeatherIcon } from "frappe-ui";
 import * as api from "@/api";
 import SheetCharts from "@/components/SheetCharts.vue";
@@ -219,6 +226,9 @@ function detectKind() {
 // seq guards a stale async load from clobbering a newer one (reopen on
 // another file while a preview fetch is still in flight)
 let loadSeq = 0;
+onBeforeUnmount(() => {
+	loadSeq++;
+});
 async function load() {
 	const seq = ++loadSeq;
 	sheetIdx.value = 0;
@@ -251,8 +261,12 @@ async function load() {
 			view.value = { kind: "table", ...tablePreviewFields(r) };
 			return;
 		}
+		if (r && r.error) {
+			view.value = { kind: "none", error: r.error };
+			return;
+		}
 		if (r && r.kind === "text") {
-			view.value = { kind: "text", text: r.text || "" };
+			view.value = { kind: "text", text: r.text || "", document: r.document };
 			return;
 		}
 	} catch (e) {
@@ -268,6 +282,10 @@ watch(
 	() => [props.modelValue, props.fileUrl],
 	([open]) => {
 		if (open) load();
+		else {
+			loadSeq++;
+			view.value = { kind: "none" };
+		}
 	}
 );
 </script>

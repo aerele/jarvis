@@ -22,10 +22,13 @@ def read_sections(fdoc, content, *, sheet=None, cursor=None, version=None):
 	parse_cursor(cursor)
 	if (cursor is None) != (version is None):
 		raise InvalidArgumentError("Cursor and version must be supplied together.")
+	profile = scanner_profile()
+	if (fdoc.file_name or "").lower().endswith(".docx"):
+		from jarvis.tools import _docx_text
+
+		profile = [*profile, _docx_text.DOCX_REVISION]
 	digest = hashlib.sha256(
-		json.dumps(
-			[CONTRACT, scanner_profile(), fdoc.name, fdoc.file_name, sheet], ensure_ascii=False
-		).encode()
+		json.dumps([CONTRACT, profile, fdoc.name, fdoc.file_name, sheet], ensure_ascii=False).encode()
 		+ b"\0"
 		+ content
 	).hexdigest()

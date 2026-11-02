@@ -11,7 +11,22 @@ from jarvis.tools._file_scan_worker import RESOURCE_ERROR, WALL_SECONDS
 from jarvis.tools._source_process import check_exit, decode_result, fail_worker, worker_env, worker_slot
 
 
+def reader_error(filename, message):
+	if isinstance(filename, str) and filename.lower().endswith(".docx"):
+		from jarvis.tools._docx_text import DocxReadError
+
+		return DocxReadError(message)
+	return InvalidArgumentError(message)
+
+
 def scan_file(content, filename, sheet=None, cursor=None):
+	try:
+		return _scan_file(content, filename, sheet, cursor)
+	except InvalidArgumentError as error:
+		raise reader_error(filename, str(error)) from None
+
+
+def _scan_file(content, filename, sheet=None, cursor=None):
 	if len(content) > MAX_BYTES:
 		raise InvalidArgumentError("File exceeds the 10 MiB input limit. Split it into smaller files.")
 	env = worker_env()
