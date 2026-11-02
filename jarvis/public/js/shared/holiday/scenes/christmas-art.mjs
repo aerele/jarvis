@@ -6,7 +6,7 @@ import { floorRow, styleSVG } from "./scene-art.mjs";
 
 // The floor row (tree and gifts, drawn at FLOOR_GROW times their own size) stands on y = 378;
 // the tree's star-glow top is 160 units above that.
-const FLOOR_GROW = 1.2;
+export const FLOOR_GROW = 1.2;
 // The tree and the gifts stand at the two ends: nothing stands under the hero (core: null).
 export const FLOOR_ROW = floorRow({
   base: 378,
@@ -14,6 +14,10 @@ export const FLOOR_ROW = floorRow({
   top: 218,
   core: null,
 });
+
+// How far each prop reaches sideways from its x (its shadow), before FLOOR_GROW.
+const TREE_REACH = 50;
+const GIFTS_REACH = 62;
 
 // Twinkling fairy lights: how many, the shortest twinkle, and the radius of the glow drawn.
 export const LIGHTS = { n: 12, periodMs: 900, glowR: 4.6 };
@@ -194,10 +198,14 @@ function giftsSVG(p, x) {
 /**
  * The floor row's drawing: the tree bottom left, the gifts bottom right, at the art's own y.
  * `hold(x, prop)` wraps a prop so it keeps its place at its end of the stage while the row
- * shrinks (Scene.edge); a shrinking row would draw them in over the heading.
+ * shrinks (Scene.edge); a shrinking row would draw them in over the heading. `at(x, reach)`
+ * is where a prop drawn for x, `reach` units wide on each side, stands on this stage (the phone
+ * squeezes them into its window).
  */
-export const floorSVG = (p, hold = (_x, prop) => prop) =>
-  `${hold(150, treeSVG(p, 150))}${hold(650, giftsSVG(p, 650))}`;
+export const floorSVG = (p, hold = (_x, prop) => prop, at = (x) => x) => {
+  const [tree, gifts] = [at(150, TREE_REACH), at(650, GIFTS_REACH)];
+  return `${hold(tree, treeSVG(p, tree))}${hold(gifts, giftsSVG(p, gifts))}`;
+};
 
 // ---- Santa's sleigh ----------------------------------------------------------------------
 

@@ -80,6 +80,23 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.api",
+	"Nonce-authenticated pairing challenge and plugin-signed session-vouch endpoints answering this site's own instance identity; no transcript lookup.",
+	"""
+    pairing_challenge
+    vouch_session
+    """,
+)
+
+_unrelated(
+	"jarvis.chat.site_pin",
+	"System Manager action re-checking this site's registration with admin; no conversation data.",
+	"""
+    reverify
+    """,
+)
+
+_unrelated(
 	"jarvis.api_errors",
 	"Receives caller-supplied client telemetry; does not resolve conversation identifiers.",
 	"""
@@ -876,6 +893,7 @@ ENDPOINTS.update(
 			"scope": "chat_scoped",
 		},
 		"jarvis.chat.approvals_api.list_approvals": {"arguments": {}, "scope": "chat_scoped"},
+		"jarvis.chat.approvals_api.list_approval_reviewers": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_approvals_page": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_pending_actions_lane": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_wiki_write_proposals": {"arguments": {}, "scope": "chat_scoped"},
