@@ -79,3 +79,15 @@ class TestOpenWaits(PendingActionTestMixin, FrappeTestCase):
 		with as_user(OWNER):
 			self.assertEqual(get_conversation(conv)["conversation"]["file_box"], 1)
 			self.assertEqual(get_conversation(chat)["conversation"]["file_box"], 0)
+
+	def test_wait_source_distinguishes_chat_from_file_box_and_legacy_rows(self):
+		conv = self._filebox_conv()
+		chat = self._ar(conv, source="Chat")
+		file_box = self._ar(conv)
+		legacy = self._ar(conv)
+		frappe.db.set_value(APPROVAL, legacy, "source", None, update_modified=False)
+		frappe.db.commit()
+		items = {item["name"]: item for item in self._waits(conv)}
+		self.assertEqual(items[chat]["source"], "Chat")
+		self.assertEqual(items[file_box]["source"], "File Box")
+		self.assertEqual(items[legacy]["source"], "File Box")

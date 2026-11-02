@@ -490,6 +490,11 @@ class TestMaterialize(unittest.TestCase):
 			materialize_from_turn(self.conv, _fence([_ask()]))
 		self.assertEqual(pub.call_args[0][1]["origin_page"], "dashboards")
 
+	def test_publish_identifies_the_native_chat_answer_surface(self):
+		with patch("jarvis.chat.chat_asks.publish_to_user") as pub:
+			materialize_from_turn(self.conv, _fence([_ask()]))
+		self.assertEqual(pub.call_args[0][1]["source"], "Chat")
+
 	def test_no_fence_and_malformed_fence_skip(self):
 		with patch("jarvis.chat.chat_asks.publish_to_user") as pub:
 			self.assertIsNone(materialize_from_turn(self.conv, "plain question?"))

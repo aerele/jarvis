@@ -89,6 +89,11 @@ def preview_doc(doctype: str, values: dict) -> dict:
 
 	try:
 		with preview_sandbox():
+			source_tax = None
+			if doctype == "Landed Cost Voucher":
+				from jarvis.tools._lcv_source_tax import gate_lcv
+
+				source_tax = gate_lcv(doc)
 			doc.insert()
 	except PreviewSandboxLost:
 		# Not "this document is invalid": the dry run could not be undone
@@ -100,10 +105,17 @@ def preview_doc(doctype: str, values: dict) -> dict:
 			# statement time limit (#707 B3).
 			raise
 		frappe.clear_messages()
+		from jarvis.tools._lcv_source_tax import LCVSourceTaxNeedsInput
+
+		if isinstance(e, LCVSourceTaxNeedsInput):
+			return {"valid": False, **e.assessment}
 		return {"valid": False, "error": _error_text(e)}
 	# Outside the try: a summarization bug must never mislabel a document
 	# that validated cleanly. The in-memory doc survives the rollback.
-	return _summarize(doc, values)
+	result = _summarize(doc, values)
+	if source_tax is not None:
+		result["source_tax"] = source_tax
+	return result
 
 
 def _summarize(doc, caller_values: dict) -> dict:

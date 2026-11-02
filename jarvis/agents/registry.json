@@ -775,7 +775,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Weekly read-only pipeline-hygiene scrub of your open CRM deals: surfaces deals that have gone quiet, aged in their current stage, run past their expected close date, or have no next step scheduled, then ranks them into a per-owner worklist so the forecast reflects deals that are actually moving. Never edits a deal, moves a stage, changes a date, or creates a task.",
       "tools_required": [
@@ -1195,7 +1195,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "status": "Published",
       "description": "Read-only hygiene sweep of your Frappe CRM: finds duplicate and near-duplicate leads (the same person entered twice across leads and deals), flags leads marked converted with no matching deal, and surfaces uncontactable, unassigned, or SLA-breached leads into a ranked worklist. Never merges, edits, assigns, or deletes a record — it hands sales-ops the exceptions and a human decides.",
       "tools_required": [
@@ -1435,9 +1435,9 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.4.3",
       "status": "Published",
-      "description": "Read-only pre-run check on your drafted salary slips, run just before you submit payroll. It flags what changed or was overridden after HRMS computed them at generation: an eligible employee missing from the batch, a rostered employee with no slip, post-generation attendance edits the draft no longer reflects, manual payment_days overrides, manually created slips, mover proration that looks off, and net-pay swings versus last month with no attendance or structure cause. Hands you a ranked worklist; never edits a slip, regularises attendance, submits payroll, or draws any statutory conclusion.",
+      "description": "Read-only pre-run check on one drafted payroll batch. It first verifies complete private HRMS source files, then flags what changed or was overridden after HRMS computed salary slips: roster gaps, attendance or leave drift, payment-day differences, manual slips, mover proration, and pay-change candidates. It gives a ranked worklist; it never edits payroll, submits a slip, or makes a statutory conclusion.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
@@ -1465,7 +1465,11 @@
         "Employee",
         "Leave Ledger Entry",
         "Salary Component",
-        "Payroll Settings"
+        "Payroll Settings",
+        "Holiday List Assignment",
+        "Holiday List",
+        "Leave Application",
+        "Leave Type"
       ],
       "rule_tokens": [
         "pp-ari-6c53",
@@ -1477,6 +1481,7 @@
         "pp-pbo-3d71",
         "pp-swg-2ed8"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -1491,7 +1496,11 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "payroll_entry",
+        "reviewer_of_record"
+      ]
     },
     {
       "agent_slug": "reorder-replenishment-operator",
