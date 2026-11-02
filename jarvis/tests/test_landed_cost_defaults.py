@@ -87,6 +87,8 @@ class LandedCostFixtures(FrappeTestCase):
 			{
 				"doctype": "Purchase Receipt",
 				"company": self.company,
+				"currency": company.default_currency,
+				"conversion_rate": 1,
 				"supplier": self.supplier,
 				"posting_date": nowdate(),
 				"set_posting_time": 1,

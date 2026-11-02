@@ -453,7 +453,7 @@ jobs:
           bench --site jarvis-lcv-ci.test install-app erpnext india_compliance jarvis
           bench --site jarvis-lcv-ci.test set-config allow_tests true
           bench --site jarvis-lcv-ci.test set-config -p throttle_user_limit 100000
-          for module in test_landed_cost_defaults test_landed_cost_preview test_lcv_source_tax test_lcv_compatibility test_lcv_run_method; do
+          for module in test_landed_cost_defaults test_landed_cost_preview test_landed_cost_v15 test_lcv_source_tax test_lcv_compatibility test_lcv_run_method; do
             bench --site jarvis-lcv-ci.test run-tests --module "jarvis.tests.${module}"
           done
 
