@@ -27,7 +27,9 @@ stay INSIDE the app dir before it is opened.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import posixpath
 
 import frappe
 
@@ -264,6 +266,27 @@ def _is_contained(full: str, root_real: str) -> bool:
 	return real == root_real or real.startswith(root_real + os.sep)
 
 
+def canonical_source_path(rel_path: str) -> str:
+	"""Return one safe, canonical source-relative path.
+
+	The receipt contract keys reads by path.  It must not give one file several
+	spellings (``mod/../hooks.py`` versus ``hooks.py``), or let a caller turn a
+	receipt for a safe path into a traversal-shaped citation.
+	"""
+	raw = str(rel_path or "")
+	if not raw or "\x00" in raw or os.path.isabs(raw):
+		raise ValueError("path must be a relative path inside the app source tree")
+	path = raw.strip().replace("\\", "/")
+	if not path or path.startswith("/") or os.path.isabs(path):
+		raise ValueError("path must be a relative path inside the app source tree")
+	canonical = posixpath.normpath(path)
+	if canonical in ("", ".", "..") or canonical.startswith("../"):
+		raise ValueError("path escapes the app source tree (symlink or traversal)")
+	if os.path.splitext(canonical)[1].lower() not in EXT_ALLOWLIST:
+		raise ValueError("file type not permitted for source reading")
+	return canonical
+
+
 def _collect_files(src_dir: str) -> tuple[list[str], dict]:
 	"""Snapshot-eligible relative paths (sorted for determinism) + coverage
 	notes. Applies the extension allowlist, dir excludes, the per-file size
@@ -341,14 +364,18 @@ def read_source_file(app: str, rel_path: str, src_dir: str | None = None) -> tup
 	The custom-apps allowlist, the per-run byte budget and the untrusted-data
 	fence are the caller's job (``jarvis.tools.read_app_source``) — this function
 	is the file-level guard only, shared with the legacy collection walk."""
-	raw_rel = rel_path or ""
-	if os.path.isabs(raw_rel):
-		raise ValueError("path must be a relative path inside the app source tree")
-	rel = raw_rel.strip().replace("\\", "/").lstrip("/")
-	if not rel:
-		raise ValueError("path must be a relative path inside the app source tree")
-	if os.path.splitext(rel)[1].lower() not in EXT_ALLOWLIST:
-		raise ValueError("file type not permitted for source reading")
+	text, size, _digest = read_source_file_with_digest(app, rel_path, src_dir=src_dir)
+	return text, size
+
+
+def read_source_file_with_digest(app: str, rel_path: str, src_dir: str | None = None) -> tuple[str, int, str]:
+	"""Read one safe source file and return text, exact byte count and SHA-256.
+
+	The digest is server-only evidence for the Custom App Learning receipt gate.
+	Callers must not put it in a model-authored argument, and this helper never
+	logs or stores the file text itself.
+	"""
+	rel = canonical_source_path(rel_path)
 	# Canonicalize + validate the trust ROOT before any read: a symlinked app root
 	# (``apps/<app> -> <bench>/sites``) would otherwise make every regular file
 	# beneath it pass the per-file containment guard and exfiltrate site secrets.
@@ -367,4 +394,10 @@ def read_source_file(app: str, rel_path: str, src_dir: str | None = None) -> tup
 		raise ValueError(f"file exceeds the per-file {PER_FILE_CAP_BYTES // 1024} KB cap")
 	# nosemgrep: frappe-security-file-traversal -- confined to the app tree, checked above
 	with open(full, "rb") as fh:
-		return fh.read().decode("utf-8", errors="replace"), size
+		raw = fh.read()
+	# The source may have changed after stat. Charge and attest exactly the bytes
+	# actually read; reject an over-cap race rather than returning a partial file.
+	size = len(raw)
+	if size > PER_FILE_CAP_BYTES:
+		raise ValueError(f"file exceeds the per-file {PER_FILE_CAP_BYTES // 1024} KB cap")
+	return raw.decode("utf-8", errors="replace"), size, hashlib.sha256(raw).hexdigest()
