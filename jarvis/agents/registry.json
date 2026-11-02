@@ -708,7 +708,7 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only inventory-ageing review: derives each item's last genuine outward movement, buckets it by age, separates slow-moving from non-moving and dead stock, overlays batch-expiry write-off candidates, and totals the working capital frozen per ageing bucket and warehouse. Ships a ranked disposition worklist and dashboard. Never moves, adjusts, or writes off stock, and never sets a write-down value.",
       "tools_required": [
@@ -822,20 +822,22 @@
       "domain": "ap",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only AP hygiene sweep. Retrospectively surfaces duplicate-payment candidates — payments that appear to have been made twice (same vendor, same amount, close dates, look-alike references) — pairing documents and cross-checking settlement evidence. Also flags near-duplicate purchase invoices, one vendor entered as two masters, check-digit-invalid GSTIN/PAN, and bank-detail changes just before a payment. Hands finance a ranked, evidence-linked candidate worklist and dashboard. Never edits a master, touches a payment, or decides claw-backs.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__get_doc",
+        "jarvis__get_engagement_config"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
+        "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -863,6 +865,7 @@
         "gst_gstin_checkdigit_algorithm",
         "pan_format"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "ap-exception-family",
       "timeout_s": 1800,

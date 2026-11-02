@@ -76,6 +76,10 @@ export const defsSVG = (p) => `<defs>
 </defs>`;
 
 /** A brass nilavilakku standing on the floor at `x`, with four small flames. */
+// How far a lamp reaches sideways from its x (its glow), before the row's own scale g.
+const LAMP_REACH = 38;
+export const LAMP_GROW = FLOOR_ROW.g;
+
 export function lampSVG(p, x) {
   const flames = [-18, -9, 9, 18]
     .map(
@@ -167,11 +171,21 @@ export function pookalamSVG(p) {
  * The floor props: the pookalam between two lamps (`middle` false: the lamps alone).
  * `hold(x, lamp)` wraps a lamp so it keeps its place at its end of the stage while the row
  * shrinks (Scene.edge): the lamps are the tall props that must stay out from under the
- * sub-line, which the shrinking row would otherwise draw them in to.
+ * sub-line, which the shrinking row would otherwise draw them in to. `at(x, reach)` is where
+ * a lamp drawn for x, `reach` units wide on each side, stands on this stage (the phone
+ * squeezes them into its window).
  */
-export const floorProps = (p, middle = true, hold = (_x, lamp) => lamp) =>
+export const floorProps = (
+  p,
+  middle = true,
+  hold = (_x, lamp) => lamp,
+  at = (x) => x
+) =>
   `${middle ? pookalamSVG(p) : ""}${[150, 650]
-    .map((x) => hold(x, lampSVG(p, x)))
+    .map((x0) => {
+      const x = at(x0, LAMP_REACH);
+      return hold(x, lampSVG(p, x));
+    })
     .join("")}`;
 
 /** Thirty-six petals above the top edge, spread over the stage's width [from, to]. */
