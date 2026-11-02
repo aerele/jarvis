@@ -18,6 +18,8 @@ Run ONLY on a throwaway bench:
   bench --site patterntest.localhost run-tests --module jarvis.tests.test_agent_identity
 """
 
+import json
+import os
 import unittest
 
 import frappe
@@ -468,6 +470,28 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertIn("NEVER read mutable installation configuration", tool_msg)
 		self.assertNotIn("jarvis__get_doc", tool_msg)
 		self.assertNotIn("Jarvis Agent Installation", tool_msg)
+
+	def test_duplicate_payment_uses_session_bound_config_for_cross_user_runs(self):
+		"""The mapped run-as user cannot read the owner's installation row."""
+		from unittest import mock
+
+		registry_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "registry.json")
+		with open(registry_path, encoding="utf-8") as fh:
+			registry = json.load(fh)
+		entry = next(a for a in registry["agents"] if a["agent_slug"] == "duplicate-payment-hygiene-auditor")
+		self.assertEqual(entry["version"], "0.2.2")
+		self.assertIn("jarvis__get_engagement_config", entry["tools_allow"])
+		self.assertIn("jarvis__get_engagement_config", entry["tools_required"])
+		self.assertEqual(entry["advisory_tokens"], [])
+
+		from jarvis.chat.agent_permissions import has_installation_permission
+
+		self.assertFalse(has_installation_permission(frappe._dict({"owner": self.owner}), user=self.mapped))
+		inst = frappe._dict({"name": "DUP-CONFIG-1", "config": frappe.as_json({"company": TEST_COMPANY})})
+		with mock.patch("jarvis.chat.agent_catalog.registry_tools_allow", return_value=entry["tools_allow"]):
+			message = agent_scheduler._audit_prompt(frappe._dict(entry), inst, trigger="manual", scope={})
+		self.assertIn("jarvis__get_engagement_config", message)
+		self.assertIn("NO arguments", message)
 
 	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner
