@@ -110,6 +110,8 @@ class TestCollaborationCallbacks(CollaborationCase):
 		for tool in (
 			"get_purchase_match_inputs",
 			"get_receivables_review_inputs",
+			"get_ticket_triage_inputs",
+			"stage_ticket_triage_proposals",
 			"recall",
 			"remember",
 			"future_unknown_tool",
