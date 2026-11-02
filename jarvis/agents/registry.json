@@ -477,7 +477,8 @@
         "baseline_hrms.reviewer_capacity",
         "baseline_hrms.history_from",
         "baseline_hrms.test_declaration"
-      ]
+      ],
+      "supports_record_scope": true
     },
     {
       "agent_slug": "cash-limit-269st-40a3-auditor",
