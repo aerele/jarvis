@@ -860,6 +860,10 @@ ENDPOINTS.update(
 			"arguments": {"name": "$approval"},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.approvals_api.continue_approval_chat": {
+			"arguments": {"name": "$approval"},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.approvals_api.decide": {
 			"arguments": {"approve": 1, "decision": "approve", "name": "$approval"},
 			"scope": "chat_scoped",
@@ -890,6 +894,14 @@ ENDPOINTS.update(
 		},
 		"jarvis.chat.approvals_api.get_sheet_candidates": {
 			"arguments": {"name": "$approval"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.approvals_api.tag_reviewer": {
+			"arguments": {"name": "$approval", "user": "$recipient"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.approvals_api.untag_reviewer": {
+			"arguments": {"name": "$approval", "user": "$recipient"},
 			"scope": "chat_scoped",
 		},
 		"jarvis.chat.approvals_api.list_approvals": {"arguments": {}, "scope": "chat_scoped"},

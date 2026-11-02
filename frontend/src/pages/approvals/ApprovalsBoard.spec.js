@@ -311,11 +311,20 @@ describe("ApprovalsBoard one inbox", () => {
 		const split = w.get('[data-testid="approvals-split-view"]');
 		expect(split.classes()).toContain("flex-col");
 		expect(split.classes()).toContain("lg:flex-row");
-		expect(rail(w).classes()).toContain("w-full");
-		expect(rail(w).classes()).toContain("max-h-[35%]");
-		expect(rail(w).classes()).toContain("lg:w-[360px]");
-		expect(pane(w).classes()).toContain("min-w-0");
-
+		expect(rail(w).classes()).toEqual(
+			expect.arrayContaining([
+				"w-full",
+				"max-h-[35%]",
+				"border-b",
+				"lg:w-[360px]",
+				"lg:max-h-none",
+				"lg:border-b-0",
+				"lg:border-r",
+			])
+		);
+		expect(pane(w).classes()).toEqual(
+			expect.arrayContaining(["min-h-0", "min-w-0", "flex-1", "overflow-y-auto"])
+		);
 		const actions = w.get('[data-testid="approval-decision-actions"]');
 		expect(actions.classes()).toContain("flex-wrap");
 		expect(button(actions, "Tag for review").exists()).toBe(true);

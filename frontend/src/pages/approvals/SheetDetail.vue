@@ -21,7 +21,7 @@
 					>{{ headline }}
 				</p>
 				<Button
-					v-if="rec.conversation && !rec.for_user"
+					v-if="showOpenChat && rec.conversation && !rec.for_user"
 					variant="subtle"
 					size="sm"
 					:label="__('Open chat')"
@@ -146,6 +146,9 @@
 					</div>
 					<div :id="s.id + '-body'">
 						<template v-if="open[s.key] !== false">
+							<p v-if="s.notice" class="mt-2 text-sm text-ink-gray-7">
+								{{ s.notice }}
+							</p>
 							<SetForAll
 								:sheet="name"
 								:section="s.key"
@@ -357,6 +360,7 @@ const props = defineProps({
 	onChanged: { type: Function, default: null },
 	// false when the pane's heading already names the file
 	showFileName: { type: Boolean, default: true },
+	showOpenChat: { type: Boolean, default: true },
 });
 const router = useRouter();
 const socket = inject("$socket", null);

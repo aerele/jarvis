@@ -5,13 +5,15 @@ still end a turn with a create/update card - typically on a resume turn. That ca
 lived only in the chat: nothing reached the Approval Board, and a chat Confirm wrote
 straight past the policy. At turn end the card now runs as the tool call it stands
 for, as the conversation owner: a draft applies, a master is held on the board, and a
-refused write (a Single such as GST Settings) becomes a question on the board. The
+refused write (such as sensitive settings) becomes a question on the board. Ordinary
+settings updates wait for human approval like masters. The
 card is then replaced by a one-line note, so it can't also be confirmed in chat."""
 
 from __future__ import annotations
 
 import json
 import re
+from urllib.parse import quote
 
 import frappe
 
@@ -148,7 +150,34 @@ def _ask(conversation: str, owner: str, a: dict, reason: str) -> str:
 	return doc.name
 
 
-def _note(tool: str | None, res: dict, asked: str | None) -> str:
+def _desk_link(doctype, name, user: str | None) -> str | None:
+	"""Cosmetic only: a failed lookup must never strand an already-saved result."""
+	if not user or not isinstance(doctype, str) or not isinstance(name, str):
+		return None
+	if re.search(r"[\[\]`*~\\\x00-\x1f\x7f]", name):
+		return None
+	try:
+		if not (
+			frappe.db.exists("DocType", doctype)
+			and frappe.db.exists(doctype, name)
+			and frappe.has_permission(doctype, "read", doc=name, user=user)
+		):
+			return None
+		slug = frappe.scrub(doctype).replace("_", "-")
+		# The renderer trims a bare path's final dot; quote() leaves dots literal.
+		target = quote(name, safe="").replace(".", "%2E")
+		return f"[{name}](/app/{slug}/{target})"
+	except (frappe.DoesNotExistError, frappe.PermissionError):
+		return None
+	except Exception:
+		try:
+			frappe.log_error(title="jarvis.file_box.result_link_failed", message=frappe.get_traceback())
+		except Exception:
+			pass  # Logging is optional too; retain the successful plain-text receipt.
+		return None
+
+
+def _note(tool: str | None, res: dict, asked: str | None, user: str | None = None) -> str:
 	if asked:
 		return "This change is waiting for you on the Approval Board."
 	if not res.get("ok"):
@@ -157,7 +186,10 @@ def _note(tool: str | None, res: dict, asked: str | None) -> str:
 	if data.get("held_for") == "approval_board" or not data.get("name"):
 		return "This change is waiting for approval on the Approval Board."
 	verb = "Updated" if tool == "update_doc" else "Created"
-	return f"{verb} {data.get('doctype') or ''} {data['name']}.".replace("  ", " ")
+	doctype, name = data.get("doctype"), data["name"]
+	# Link only a real result the requester can read, never the worker's privilege.
+	name = _desk_link(doctype, name, user) or name
+	return f"{verb} {doctype or ''} {name}.".replace("  ", " ")
 
 
 def _outcome(conversation: str, owner: str, a: dict, call) -> tuple[dict, str | None]:
@@ -191,7 +223,7 @@ def _park(conversation: str, message: str, content: str, a: dict, call=None, fen
 		frappe.db.rollback()
 		_swap(message, claimed, content)
 		raise
-	note = _note(call[0] if call else None, res, asked)
+	note = _note(call[0] if call else None, res, asked, user=owner)
 	_swap(message, claimed, _sub(content, note, fence))
 	if asked:
 		publish_to_user(owner, {"kind": "approval:new", "conversation_id": conversation, "name": asked})

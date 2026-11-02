@@ -1334,6 +1334,22 @@ def _tool_data(phase, call_id="c1"):
 	return {"kind": "tool", "phase": phase, "name": "jarvis__get_list", "toolCallId": call_id}
 
 
+class TestEndOfLastStep(FrappeTestCase):
+	def test_a_step_repeated_later_in_the_answer_does_not_move_the_mark(self):
+		from jarvis.chat.relay_mux import _end_of_last_step
+
+		step = "Checking the ledger."
+		text = f"{step}\n\nThe ledger is clean.\n\nChecking the ledger. is what I did first."
+		self.assertEqual(_end_of_last_step(text, [step]), len(step))
+
+	def test_steps_are_found_in_order_and_missing_ones_skipped(self):
+		from jarvis.chat.relay_mux import _end_of_last_step
+
+		text = "A one.\n\nB two.\n\nAnswer."
+		self.assertEqual(_end_of_last_step(text, ["A one.", "gone", "B two."]), text.index("B two.") + 6)
+		self.assertEqual(_end_of_last_step(text, []), 0)
+
+
 class TestRelayMuxSteps(FrappeTestCase):
 	"""Each connection shape seen live on e2e2 (2026-09-25): Claude's CLI streams
 	one growing text for the whole turn, the API-key loop (DeepSeek) streams one
@@ -1344,12 +1360,27 @@ class TestRelayMuxSteps(FrappeTestCase):
 	stop, error or recovery saves what streamed exactly as before; only what the
 	chat displays (``shown``) and the saved final drop the step text."""
 
-	def _run(self, frames, final_text, steps=None, register=True, mux=None, rec=None, preamble_steps=None):
+	def _run(
+		self,
+		frames,
+		final_text,
+		steps=None,
+		register=True,
+		mux=None,
+		rec=None,
+		preamble_steps=None,
+		is_readopt=False,
+	):
 		mux = mux or RelayMux(MagicMock(), "steps-target")
 		rec = rec or _Recorder()
 		if register:
 			mux.register_run(
-				"r1", rec.handler(), session_key="s1", steps=steps, preamble_steps=preamble_steps
+				"r1",
+				rec.handler(),
+				session_key="s1",
+				steps=steps,
+				preamble_steps=preamble_steps,
+				is_readopt=is_readopt,
 			)
 		for stream, data in frames:
 			mux._classify(_agent_frame("r1", "s1", stream, data))
@@ -1625,6 +1656,165 @@ class TestRelayMuxSteps(FrappeTestCase):
 		)
 		self.assertEqual(rec.step_raws, [None])  # offered on the step line only, never recorded
 		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_claude_commentary_preambles_that_never_streamed_are_cut_from_final(self):
+		# #2367: the Claude subscription runtime sends pre-tool text ONLY as preamble
+		# items (never as reply deltas), then its final text falls back to the CLI's
+		# whole-turn result, which still carries that commentary.
+		p1 = "I'll check the drafting rules and look up the supplier and item."
+		p2 = "Supplier, item, and company all resolved. Now checking how similar invoices are filled here."
+		answer = "This already exists: ACC-PINV-2026-00006 matches on supplier, date, item and total, so I stopped before drafting."
+		rec = self._run(
+			[
+				("item", {"kind": "preamble", "phase": "update", "itemId": "c1", "progressText": p1}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("item", {"kind": "preamble", "phase": "update", "itemId": "c2", "progressText": p2}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": answer, "delta": answer}),
+			],
+			f"{p1}\n\n{p2}\n\n{answer}",
+		)
+		self.assertEqual([s[1] for s in rec.steps], [p1, p2])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_growing_never_streamed_preamble_keeps_only_its_latest_text(self):
+		answer = "Done.\n\nThe invoice is overdue by 41 days, and no payment is recorded against it."
+		rec = self._run(
+			[
+				("item", {"kind": "preamble", "phase": "update", "itemId": "c1", "progressText": "Done."}),
+				(
+					"item",
+					{
+						"kind": "preamble",
+						"phase": "end",
+						"itemId": "c1",
+						"progressText": "Done. Checking the ledger.",
+					},
+				),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": answer, "delta": answer}),
+			],
+			answer,
+		)
+		# "Done." grew into the longer line, so the answer's own "Done." stays.
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_never_streamed_preamble_inside_an_answer_paragraph_stays(self):
+		answer = "I see. The invoice is overdue by 41 days."
+		rec = self._run(
+			[
+				("item", {"kind": "preamble", "phase": "update", "itemId": "c1", "progressText": "I see."}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": answer, "delta": answer}),
+			],
+			answer,
+		)
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_re_attached_lane_records_the_narration_written_after_the_hop(self):
+		# #2367: a pump hop re-attaches mid-turn with the steps recorded before it. Once the
+		# plugin's jarvis.observe_run gives the new connection the run's tool starts, the
+		# narration written after the hop is a step too, and the saved reply drops it.
+		before = "I'll check the drafting rules and the supplier."
+		after = "Supplier and item both exist. Checking the warehouses."
+		answer = (
+			"Drafted ACC-PINV-2026-00031 for MA Inc.: 10 x SKU005 at 1,200.00, with 450.00 "
+			"freight and 300.00 customs duty as charges. Review it before you submit."
+		)
+		so_far = f"{before}\n\n{after}"
+		rec = self._run(
+			[
+				("assistant", {"text": so_far, "delta": so_far}),
+				("tool", {"phase": "start", "name": "jarvis__get_list", "toolCallId": "t1"}),
+				("assistant", {"text": f"{so_far}\n\n{answer}", "delta": f"\n\n{answer}"}),
+			],
+			f"{so_far}\n\n{answer}",
+			steps=[before],
+			is_readopt=True,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [after])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_tool_start_before_any_text_on_a_re_attached_lane_still_moves_its_step(self):
+		# #2367, live trace 2026-11-01: reply frames come only when the text grows, so the
+		# first frame a hop's new lane sees is often the tool start that follows narration
+		# written before the hop. The next reply frame places it: all text before that
+		# frame's delta was already there when the tool started.
+		before = "I'll check the drafting rules and the supplier."
+		after = "Checking the charge accounts and warehouses before I draft."
+		head = "Supplier `MA Inc.` and item `SKU005` both exist."
+		answer = f"{head} Drafted ACC-PINV-2026-00033 with 450.00 freight. Review it before you submit."
+		so_far = f"{before}\n\n{after}"
+		rec = self._run(
+			[
+				("tool", {"phase": "start", "name": "jarvis__get_list", "toolCallId": "t1"}),
+				("tool", {"phase": "result", "name": "jarvis__get_list", "toolCallId": "t1"}),
+				("assistant", {"text": f"{so_far}\n\n{head}", "delta": f"\n\n{head}"}),
+				("assistant", {"text": f"{so_far}\n\n{answer}", "delta": answer[len(head) :]}),
+			],
+			f"{so_far}\n\n{answer}",
+			steps=[before],
+			is_readopt=True,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [after])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_tool_result_or_thinking_before_any_text_on_a_re_attached_lane_counts_too(self):
+		# The tool's start (and maybe its result) fell in the hop gap; the new lane sees
+		# only its result, or only the model thinking about it (live trace 2026-11-01).
+		for first in (
+			("tool", {"phase": "result", "name": "jarvis__get_list", "toolCallId": "t1"}),
+			("thinking", {"text": "", "delta": ""}),
+		):
+			with self.subTest(first=first[0]):
+				self._check_gap_boundary(first)
+
+	def _check_gap_boundary(self, first):
+		before = "I'll check the drafting rules and the supplier."
+		after = "Both masters exist. Now checking how invoices for this supplier are built."
+		head = "Supplier `MA Inc.` and item `SKU005` both exist."
+		answer = f"{head} Drafted ACC-PINV-2026-00034 with 450.00 freight. Review it before you submit."
+		so_far = f"{before}\n\n{after}"
+		rec = self._run(
+			[
+				first,
+				("assistant", {"text": f"{so_far}\n\n{head}", "delta": f"\n\n{head}"}),
+				("assistant", {"text": f"{so_far}\n\n{answer}", "delta": answer[len(head) :]}),
+			],
+			f"{so_far}\n\n{answer}",
+			steps=[before],
+			is_readopt=True,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [after])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_re_attached_lane_starts_after_its_last_recorded_step(self):
+		# Prose that was too long to be a step sits before the last recorded step. A
+		# re-attached lane starts its tool stretch after that step, so the long prose is
+		# not glued onto the next narration (which would then fail is_step and stay).
+		prose = (
+			"The supplier record has two addresses. The billing one is in Chennai. The "
+			"shipping one is in Pune. I will use the billing one, as the order does."
+		)
+		before = "Checking the item."
+		after = "Item found. Checking the warehouses."
+		answer = "Drafted ACC-PINV-2026-00032. Review it before you submit, since freight is estimated."
+		so_far = f"{prose}\n\n{before}\n\n{after}"
+		frames = [
+			("assistant", {"text": so_far, "delta": so_far}),
+			("tool", {"phase": "start", "name": "jarvis__get_list", "toolCallId": "t1"}),
+			("assistant", {"text": f"{so_far}\n\n{answer}", "delta": f"\n\n{answer}"}),
+		]
+		rec = self._run(frames, f"{so_far}\n\n{answer}", steps=[before], is_readopt=True)
+		self.assertEqual([s[1] for s in rec.steps], [after])
+		self.assertEqual(rec.terminal[1]["text"], f"{prose}\n\n{answer}")
+		# Control: a fresh (not re-attached) lane keeps today's whole-text stretch.
+		rec = self._run(frames, f"{so_far}\n\n{answer}", steps=[before])
+		self.assertEqual(rec.steps, [])
 
 	def test_preamble_not_in_the_reply_keeps_todays_path(self):
 		# The Codex-harness shape: the preamble text never rides the reply, so

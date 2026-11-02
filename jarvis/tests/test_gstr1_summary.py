@@ -190,8 +190,11 @@ class TestGstr1SummaryTool(FrappeTestCase):
 	def test_filed_log_returns_reduced_totals(self):
 		r = get_gstr1_summary(self.company, PERIOD, gstin=GSTIN_A)
 		self.assertTrue(r["available"])
+		self.assertEqual(r["company"], self.company)
 		self.assertEqual(r["source"], "filed_summary")
 		self.assertEqual(r["log_name"], self.filed)
+		self.assertEqual(r["gstin"], GSTIN_A)
+		self.assertEqual(r["return_period"], PERIOD)
 		self.assertEqual(r["total_taxable_value"], 160000.0)
 		self.assertEqual(r["total_igst"], 25200.0)
 		self.assertEqual((r["from_date"], r["to_date"]), ("2026-12-01", "2026-12-31"))
@@ -252,6 +255,8 @@ class TestGstr1SummaryTool(FrappeTestCase):
 		with self.assertRaises(InvalidArgumentError):
 			get_gstr1_summary(self.company, "2026-12")  # not MMYYYY
 		with self.assertRaises(InvalidArgumentError):
+			get_gstr1_summary(self.company, PERIOD, return_type="GSTR3B")
+		with self.assertRaises(InvalidArgumentError):
 			get_gstr1_summary("No Such Co Ltd", PERIOD)
 
 	# ---- READ-ONLY: no mutation of the log or its summary ---------------- #
@@ -293,15 +298,20 @@ class TestGstr1SummaryTool(FrappeTestCase):
 			r = get_gstr1_summary(self.company, PERIOD, gstin=GSTIN_A)
 			self.assertFalse(r["available"])
 			self.assertEqual(r["reason"], "permission_denied")
+			# A hidden Company name must not be distinguishable from an unknown
+			# name while the run-as user is Company-sliced.
+			unknown = get_gstr1_summary("No Such Co Ltd", PERIOD)
+			self.assertFalse(unknown["available"])
+			self.assertEqual(unknown["reason"], "permission_denied")
 		finally:
 			frappe.set_user("Administrator")
 			frappe.db.delete("User Permission", {"user": user, "allow": "Company"})
 			frappe.db.commit()
 
-	def test_per_record_permission_layer_enforced(self):
-		# a user unrestricted by Company (passes is_company_permitted) but User-Permission
-		# sliced to a DIFFERENT GST Return Log record must be refused at the per-record
-		# has_permission gate — never read the filed log's figures.
+	def test_per_record_permission_layer_hides_out_of_slice_log(self):
+		# A user unrestricted by Company (passes is_company_permitted) but User-Permission
+		# sliced to a DIFFERENT GST Return Log record cannot distinguish a hidden filed log
+		# from no log. The response must not expose its figures or its existence.
 		user = "gstr1-recperm@example.com"
 		if not frappe.db.exists("User", user):
 			frappe.get_doc(
@@ -323,7 +333,17 @@ class TestGstr1SummaryTool(FrappeTestCase):
 			frappe.set_user(user)
 			r = get_gstr1_summary(self.company, PERIOD, gstin=GSTIN_A)
 			self.assertFalse(r["available"])
-			self.assertEqual(r["reason"], "permission_denied")
+			self.assertEqual(r["reason"], "no_log")
+			self.assertNotIn("gstins_found", r)
+			for key in ("log_name", "gstin", "total_taxable_value", "total_igst"):
+				self.assertNotIn(key, r)
+
+			# With no GSTIN and the books source, the one visible record is usable.
+			# The hidden filed record does not make the response ambiguous.
+			visible = get_gstr1_summary(self.company, PERIOD, source="books")
+			self.assertTrue(visible["available"])
+			self.assertEqual(visible["log_name"], self.notfiled)
+			self.assertEqual(visible["company"], self.company)
 		finally:
 			frappe.set_user("Administrator")
 			frappe.db.delete("User Permission", {"user": user, "allow": RETURN_LOG})
