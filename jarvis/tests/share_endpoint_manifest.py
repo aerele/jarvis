@@ -97,6 +97,14 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.api",
+	"Neutral signed Deposit recovery: only an authenticated session bearer selects its active run; the raw body is exactly {}, and chat identifiers grant no authority.",
+	"""
+    terminalize_unusable_payroll_deposit_private_source
+    """,
+)
+
+_unrelated(
 	"jarvis.api_errors",
 	"Receives caller-supplied client telemetry; does not resolve conversation identifiers.",
 	"""
