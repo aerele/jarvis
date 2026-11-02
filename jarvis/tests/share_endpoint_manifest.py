@@ -186,6 +186,17 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.chat.ticket_triage",
+	"Sealed Ticket Triage proposals require the named reviewer and current ticket permissions; conversation shares grant no review or write authority.",
+	"""
+    list_ticket_triage_proposals
+    get_ticket_triage_proposal
+    reject_ticket_triage_proposal
+    confirm_ticket_triage_proposal
+    """,
+)
+
+_unrelated(
 	"jarvis.chat.api",
 	"Workspace catalogue/search/prewarm or doctype metadata, not a conversation-directed operation.",
 	"""

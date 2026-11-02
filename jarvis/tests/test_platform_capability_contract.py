@@ -909,7 +909,7 @@ class TestRegistryToolsAllow(FrappeTestCase):
 				_delegate_capability.bench_tools(declared),
 				f"{slug} declares no jarvis__ tool, so every bench call would be refused",
 			)
-		self.assertEqual(disabled, ["ticket-triage-operator"])
+		self.assertEqual(disabled, [])
 
 	def test_normalize_strips_only_the_jarvis_prefix(self):
 		self.assertEqual(_delegate_capability.normalize_tool("jarvis__get_doc"), "get_doc")

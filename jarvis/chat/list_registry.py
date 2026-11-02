@@ -323,6 +323,21 @@ _VIEWS: tuple[ListView, ...] = (
 		notes="Computed `shared` flag + DocShare/owner visibility. Its document_type facet deliberately drops its own dimension — the C08-3 rule this module implements.",
 	),
 	ListView(
+		view_key="ticket_triage_proposals",
+		label="Ticket triage reviews",
+		classification=PROJECTION,
+		projection_root="Jarvis Approval Request",
+		endpoints=("jarvis.chat.ticket_triage.list_ticket_triage_proposals",),
+		surface="frontend/src/pages/agents/TicketTriageReviews.vue",
+		wave=2,
+		curated_filters={},
+		notes=(
+			"Sealed proposals visible only to their named reviewer with current ticket permissions. "
+			"Rows project controlled current/proposed values and confirmation permission. "
+			"The page has bounded pagination and no user-selectable metadata filters."
+		),
+	),
+	ListView(
 		view_key="count_plans",
 		label="Physical count plans",
 		classification=PROJECTION,
