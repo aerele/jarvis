@@ -38,6 +38,7 @@ from jarvis.exceptions import InvalidArgumentError
 RUN = "Jarvis Agent Run"
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
+NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
 FEFO_AGENT = "fefo-expiry-compliance-auditor"
 
 _SEVERITIES = {"blocker", "warning", "note"}
@@ -65,6 +66,21 @@ def _as_dict(value) -> dict:
 		except Exception:
 			return {}
 	return value if isinstance(value, dict) else {}
+
+
+def _bound_negative_stock_scope(stamped: dict, submitted: dict) -> dict | None:
+	"""Return the safe scope only when it matches the launch boundary exactly.
+
+	The delegate can write a local evaluator config, but it cannot select another
+	Warehouse, company, period, or report-date cutoff at writeback. The launch
+	scope is trusted because the server validated it as the run-as user before
+	dispatch. The submitted object is untrusted model output.
+	"""
+	from jarvis.chat.agent_scope import negative_stock_output_scope
+
+	trusted = negative_stock_output_scope(stamped)
+	output = negative_stock_output_scope(submitted)
+	return trusted if trusted is not None and output == trusted else None
 
 
 def _bound_fefo_scope(stamped: dict, submitted: dict) -> dict | None:
@@ -258,6 +274,22 @@ def record_agent_run(
 
 	inst = frappe.get_doc(INSTALLATION, run_row.installation)
 	run_doc = frappe.get_doc(RUN, run_row.name)
+	negative_receipt_capture = None
+	if run_doc.agent == "negative-stock-valuation-auditor":
+		# Capture only server-stamped launch facts while the delegate session still
+		# exists. Any missing #2338/#2339 prerequisite is a safe no-receipt, not a
+		# writeback failure. The receipt module rechecks terminal state after this
+		# normal writeback completes.
+		from jarvis.chat import negative_stock_receipt
+
+		try:
+			negative_receipt_capture = negative_stock_receipt.capture_launch(run_doc)
+		except negative_stock_receipt.ReceiptRefused:
+			pass
+		except Exception:
+			frappe.logger("jarvis.negative_stock_receipt").warning(
+				{"event": "negative_stock_receipt_capture_refused", "run": run_doc.name}, exc_info=True
+			)
 
 	# The agent's bench-held id-only token manifest + allowed ref doctypes. Tokens
 	# are opaque (A2); allowed refs = the agent's declared doctypes_required plus the
@@ -291,10 +323,40 @@ def record_agent_run(
 	# The model can relay its evaluator's scope, but it cannot select or amend the
 	# scope that controls persistence. Validate before review validation or any
 	# finding/company work, then use only the launch-stamped values downstream.
-	scope = authoritative_writeback_scope(run_doc, submitted_scope)
+	if run_row.agent in {NEGATIVE_STOCK_AGENT, FEFO_AGENT}:
+		# These agents validate their narrow projection below and finish a rejected
+		# scope as partial, clearing untrusted artifacts. Do not replace the raw
+		# echo with the stamp first: that would hide a mismatch from their guards.
+		scope = _as_dict(submitted_scope)
+	else:
+		scope = authoritative_writeback_scope(run_doc, submitted_scope)
 	truncated = bool(truncated)
 	scope_dropped = []
 
+	if run_row.agent == NEGATIVE_STOCK_AGENT:
+		trusted_scope = _bound_negative_stock_scope(_as_dict(run_doc.get("scope_json")), scope)
+		if trusted_scope is None:
+			from jarvis.chat.agent_scope import negative_stock_output_scope
+
+			stamped_scope = negative_stock_output_scope(_as_dict(run_doc.get("scope_json"))) or {}
+			raw_findings = []
+			coverage = agent_runs._negative_stock_scope_rejection_coverage(token_set)
+			scope = stamped_scope
+			integrity_digest = None
+			rows_consumed = None
+			canvas_ref = None
+			dashboard = None
+			agent_runs.clear_untrusted_negative_stock_artifacts(run_doc, inst)
+			scope_dropped.append(
+				{
+					"ref_doctype": "Warehouse",
+					"ref_name": (stamped_scope.get("record_scope") or {}).get("name") or "?",
+					"reason": "scope did not match server-stamped Warehouse boundary",
+				}
+			)
+		else:
+			# Strip unknown model keys before the downstream Run snapshot merge.
+			scope = trusted_scope
 	if run_row.agent == FEFO_AGENT:
 		# Apply the same boundary before finding validation/review staging as the
 		# direct persistence seam.  The public tool must not briefly trust a forged
@@ -363,6 +425,7 @@ def record_agent_run(
 			rows_consumed_val = None
 
 	valid, dropped = _validate_findings(raw_findings, token_set, allowed_refs)
+	dropped.extend(scope_dropped)
 	if review_backend:
 		frappe.db.set_value(
 			RUN,
@@ -431,6 +494,10 @@ def record_agent_run(
 		detail=(f"{plural(len(dropped), 'row')} dropped" if dropped else None),
 		owner=run_doc.owner,
 	)
+	if negative_receipt_capture:
+		# Best-effort only for the completed Negative Stock audit. A refusal leaves
+		# its normal findings intact and holds the future Reorder stage closed.
+		negative_stock_receipt.persist(negative_receipt_capture)
 
 	return {
 		"run": run_doc.name,

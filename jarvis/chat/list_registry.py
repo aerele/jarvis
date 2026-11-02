@@ -323,6 +323,21 @@ _VIEWS: tuple[ListView, ...] = (
 		notes="Computed `shared` flag + DocShare/owner visibility. Its document_type facet deliberately drops its own dimension — the C08-3 rule this module implements.",
 	),
 	ListView(
+		view_key="reorder_reviews",
+		label="Reorder reviews",
+		classification=PROJECTION,
+		projection_root="Jarvis Agent Run",
+		endpoints=("jarvis.chat.reorder_review.list_reviews",),
+		surface="frontend/src/pages/agents/ReorderReviews.vue",
+		wave=2,
+		curated_filters={},
+		notes=(
+			"Completed Reorder runs with sealed review state visible to the named reviewer. "
+			"Each row projects the frozen scope and current review decisions after permission checks. "
+			"The page has bounded pagination and no user-selectable metadata filters."
+		),
+	),
+	ListView(
 		view_key="macro_runs",
 		label="Macro runs",
 		classification=DOCUMENT_LIST,

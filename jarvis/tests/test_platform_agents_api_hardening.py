@@ -21,6 +21,7 @@ Run:
 """
 
 import json
+import threading
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -637,6 +638,19 @@ def _concurrent_catalog_mutation() -> None:
 	the catalog version and re-marks the catalog dirty, and COMMITS."""
 	conn = _second_connection()
 	try:
+		# The production mutation takes this fixed primary-key row before it
+		# touches either Settings field. Model that exact order here; tabSingles
+		# has no unique (doctype, field) key and is not a safe lock seed.
+		conn.sql(
+			"""INSERT IGNORE INTO `tabJarvis Agent Catalog Lock`
+			(`name`, `creation`, `modified`, `modified_by`, `owner`, `docstatus`, `idx`, `state_key`)
+			VALUES ('agent-catalog-lock', NOW(6), NOW(6), 'Administrator', 'Administrator', 0, 0,
+			'agent-catalog-lock')"""
+		)
+		conn.sql(
+			"""SELECT `name` FROM `tabJarvis Agent Catalog Lock`
+			WHERE `name` = 'agent-catalog-lock' FOR UPDATE"""
+		)
 		conn.sql(
 			"""UPDATE `tabSingles`
 			SET `value` = CAST(COALESCE(NULLIF(`value`, ''), '0') AS UNSIGNED) + 1
@@ -755,6 +769,93 @@ class TestAgentCatalogPushTOCTOU(FrappeTestCase):
 			10,
 			"the increment must be applied to the ROW, never to a stale read",
 		)
+
+	def test_catalog_mutation_refreshes_a_stale_snapshot_after_waiting_for_the_lock(self):
+		"""A waiter must increment the committed version, not its old snapshot."""
+		snapshot_ready = threading.Event()
+		done = threading.Event()
+		errors = []
+		site = frappe.local.site
+
+		# This simulates the first mutation: it holds the fixed lock and has staged
+		# version 8, while a second request still sees committed version 7.
+		self.assertEqual(agents_api._locked_catalog_version(), 7)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_version", 8)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_dirty", 1)
+
+		def mutate_after_a_plain_read():
+			try:
+				frappe.init(site=site)
+				frappe.connect()
+				frappe.set_user("Administrator")
+				self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 7)
+				snapshot_ready.set()
+				agents_api._mark_catalog_dirty()
+				frappe.db.commit()
+			except Exception as exc:
+				errors.append(exc)
+			finally:
+				frappe.destroy()
+				done.set()
+
+		worker = threading.Thread(target=mutate_after_a_plain_read)
+		worker.start()
+		self.assertTrue(snapshot_ready.wait(1), "the stale-snapshot mutation did not start")
+		self.assertFalse(done.wait(0.2), "the mutation bypassed the primary-key lock")
+		frappe.db.commit()
+		worker.join(5)
+		self.assertFalse(worker.is_alive(), "the stale-snapshot mutation did not finish")
+		self.assertFalse(errors, f"the stale-snapshot mutation failed: {errors}")
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 9)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
+
+	def test_catalog_version_lock_seeds_one_primary_key_row(self):
+		"""Repeated final checks keep one fixed lock row and the real version."""
+		self.assertEqual(agents_api._locked_catalog_version(), 7)
+		frappe.db.commit()
+		self.assertEqual(agents_api._locked_catalog_version(), 7)
+		frappe.db.commit()
+		self.assertEqual(
+			frappe.db.count("Jarvis Agent Catalog Lock", {"name": "agent-catalog-lock"}),
+			1,
+		)
+
+	def test_final_version_lock_serializes_the_dirty_clear_with_a_mutation(self):
+		"""A terminal Apply decision cannot clear dirty over a late mutation.
+
+		The worker holds the version row while it writes dirty=0. A concurrent
+		mutation takes that same row first, so it waits here and re-dirties only
+		after this terminal transaction commits.
+		"""
+		started = threading.Event()
+		done = threading.Event()
+		errors = []
+		site = frappe.local.site
+
+		def mutate():
+			try:
+				frappe.init(site=site)
+				frappe.connect()
+				started.set()
+				_concurrent_catalog_mutation()
+			except Exception as exc:
+				errors.append(exc)
+			finally:
+				frappe.destroy()
+				done.set()
+
+		self.assertEqual(agents_api._locked_catalog_version(), 7)
+		worker = threading.Thread(target=mutate)
+		worker.start()
+		self.assertTrue(started.wait(1), "the concurrent mutation did not start")
+		self.assertFalse(done.wait(0.2), "the mutation bypassed the version-row lock")
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_dirty", 0)
+		frappe.db.commit()
+		worker.join(5)
+		self.assertFalse(worker.is_alive(), "the concurrent mutation did not finish")
+		self.assertFalse(errors, f"the locked concurrent mutation failed: {errors}")
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 8)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
 
 
 # --------------------------------------------------------------------------- #

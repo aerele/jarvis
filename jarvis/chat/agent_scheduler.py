@@ -243,7 +243,16 @@ def _sweep_one(row, now, seen: set) -> None:
 	"""Handle ONE due installation. Extracted from the loop so ``run_due_agent_audits``
 	can wrap it whole (#648); every ``return`` here was a ``continue`` in the loop it
 	came from. ``seen`` is the caller's dedupe set and is mutated in place."""
-	from jarvis.chat.agents_api import _user_allowed_for_agent
+	from jarvis.chat import reorder_replenishment_gate
+	from jarvis.chat.agents_api import _mark_catalog_dirty, _user_allowed_for_agent
+
+	if reorder_replenishment_gate.is_reorder(row.agent):
+		# A raw legacy row can survive until its migration runs. Retire it without a
+		# failure run, a dispatch, or a recurring scheduler wake-up.
+		reorder_replenishment_gate.retire_legacy_installation(row.name)
+		_mark_catalog_dirty()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- retire and unship a legacy operator
+		return
 
 	key = (row.owner, row.agent, row.schedule_frequency, str(row.schedule_time))
 	if key in seen:
@@ -503,7 +512,7 @@ def _dispatch(
 	"""
 	from jarvis import admin_client
 	from jarvis._redis_lock import redis_lock
-	from jarvis.chat import agent_models
+	from jarvis.chat import agent_models, agent_scope
 
 	with redis_lock(_dispatch_lock_name(row.name), timeout_s=DISPATCH_LOCK_TTL_S) as acquired:
 		if not acquired:
@@ -557,6 +566,18 @@ def _dispatch(
 				# Only a human or a platform upgrade fixes these: one notice, slot spent.
 				_notify_owner(row.owner, row, reason=str(e))
 				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- spent slot survives the sweep
+			return
+		except agent_scope.InvalidFefoRecordScopeError:
+			# A declared FEFO Warehouse root is a persistent configuration refusal,
+			# not an infrastructure outage. It must never widen into company scope,
+			# and retrying it every 55 minutes only creates Error Logs until an owner
+			# corrects the declaration. Record a safe action for the owner and consume
+			# this cadence slot. Do not include the Warehouse name: the scheduler runs
+			# as Administrator and the row may not be visible to the installation owner.
+			_record_failed(
+				row,
+				"scheduled FEFO audit skipped: update or remove the declared Warehouse scope in agent configuration",
+			)
 			return
 		except Exception:
 			frappe.log_error(
@@ -1224,19 +1245,19 @@ def _launch_audit(
 	neither author nor widen it. Both launch paths (manual + cron) must supply it
 	for that agent; ``None`` leaves the run with no authorized apps, i.e. the tools
 	refuse everything."""
+	from jarvis.chat import reorder_replenishment_gate
+
+	reorder_replenishment_gate.assert_launch_allowed(inst.agent)
 	listing = frappe.get_doc(LISTING, inst.agent)
 	owner = inst.owner
-	from jarvis.chat import operator_review
+	from jarvis.chat import operator_review, reorder_review
 
 	review_backend = operator_review.backend(inst.agent)
-	review_config = review_backend.configuration(inst) if review_backend else None
-	# The delegate's engagement settings are a launch-time fact, not a live view of
-	# ``Installation.config``.  Resolve ONLY the bundle-declared/bench-derived keys
-	# before a Run exists, stamp that exact object on the Run, and use the same object
-	# in the dispatch prompt below.  A later settings save must never alter an active
-	# run's evidence or make a model guess a gate value.
-	engagement_config = _explicit_config(listing, inst)
-	engagement_config_json = frappe.as_json(engagement_config)
+	review_config = (
+		reorder_review.configuration(inst)
+		if inst.agent == reorder_review.AGENT
+		else (review_backend.configuration(inst) if review_backend else None)
+	)
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1297,7 +1318,7 @@ def _launch_audit(
 	# ``Installation.config``. Resolve only declared, non-scope values after the
 	# statutory boundary has passed validation. A later settings save must never
 	# alter an active run's evidence or make a model guess a gate value.
-	engagement_config = _explicit_config(listing, inst)
+	engagement_config = _sanitize_delegated_engagement_config(listing, _explicit_config(listing, inst))
 	engagement_config_json = frappe.as_json(engagement_config)
 
 	# JF-021: validate the launch-time provenance identity BEFORE any row is inserted,
@@ -1719,16 +1740,30 @@ def _stamp_scope_and_watermark(
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
 
-	All best-effort: a bench without a resolvable Company (e.g. no erpnext setup)
-	must NOT abort the launch — it degrades to an unscoped run (no watermark). The
-	watermark + scope are resolved AS the run-as user (this runs under that
+	Most scope resolution is best-effort: a bench without a resolvable Company
+	(e.g. no erpnext setup) degrades to an unscoped run (no watermark). Negative
+	stock and FEFO are different: their declared Warehouse boundaries must resolve
+	as the run-as user, or the launch must refuse before dispatch rather than
+	widening or producing an unusable run. The watermark + scope are resolved AS
+	the run-as user (this runs under that
 	session). Returns the resolved scope dict (or None).
 
 	``source_apps`` (CX5-2) is folded into the SAME ``scope_json`` stamp OUTSIDE
 	the best-effort try, so an ERP scope-resolution failure can never drop the
 	authorization the source-read tools read back — a scribe run either carries its
 	admin-authorized app list or reads nothing."""
-	from jarvis.chat import operator_review
+	from jarvis.chat import agent_scope, operator_review, reorder_review
+
+	if inst.agent == reorder_review.AGENT:
+		config = frappe.parse_json(frappe.db.get_value(RUN, run_name, "assessment_config_json"))
+		scope = reorder_review.scope_from_config(config)
+		frappe.db.set_value(
+			RUN,
+			run_name,
+			{"scope_json": frappe.as_json(scope), "permission_profile": _permission_profile(run_as_user)},
+			update_modified=False,
+		)
+		return scope
 
 	review_backend = operator_review.backend(inst.agent)
 	if review_backend:
@@ -1755,10 +1790,15 @@ def _stamp_scope_and_watermark(
 				scope = agent_scope.resolve_scope(inst)
 		elif scope is None:
 			scope = agent_scope.resolve_scope(inst, allow_record_scope=record_scope_supported)
+	except agent_scope.InvalidFefoRecordScopeError:
+		# The scheduler reports invalid saved declarations to the owner. Keep
+		# transient verification errors on the separate logged retry path.
+		raise
 	except Exception:
 		# An explicit batch or record boundary must never fall back to wider scope.
 		if (
-			is_statutory_payroll(inst.agent)
+			agent_scope.requires_bound_scope(inst)
+			or is_statutory_payroll(inst.agent)
 			or agent_scope.record_scope_requested(inst.get("config"))
 			or inst.agent == "fefo-expiry-compliance-auditor"
 		):
@@ -1874,6 +1914,32 @@ def _explicit_config(listing, inst) -> dict:
 	return {**explicit, **derived_config.derive(namespaces, inst, explicit)}
 
 
+def _sanitize_delegated_engagement_config(listing, engagement_config: dict | None) -> dict:
+	"""Return the safe immutable config snapshot for a delegate run.
+
+	The negative-stock and FEFO Warehouse roots are owner declarations, not
+	evaluator configuration. The server validates each into ``scope_json`` and
+	must never store or hand the unvalidated declaration to the delegate. Keep an
+	empty namespace after removal so the prompt carries an explicit safe object
+	rather than directing the delegate to a mutable installation fallback.
+	"""
+	if not isinstance(engagement_config, dict):
+		return {}
+	safe = dict(engagement_config)
+	agent_slug = listing.get("agent_slug") or listing.get("name")
+	namespace_name = {
+		"negative-stock-valuation-auditor": "negative_stock",
+		"fefo-expiry-compliance-auditor": "fefo",
+	}.get(agent_slug)
+	if not namespace_name:
+		return safe
+	namespace = safe.get(namespace_name)
+	if not isinstance(namespace, dict) or "record_scope" not in namespace:
+		return safe
+	safe[namespace_name] = {key: value for key, value in namespace.items() if key != "record_scope"}
+	return safe
+
+
 def _audit_prompt(
 	listing,
 	inst,
@@ -1894,6 +1960,8 @@ def _audit_prompt(
 	    bench code, injected — never LLM prose.
 	Kept short: the delegate resolves the run/installation linkage for its Phase-3
 	writeback from the session_key the bench minted, not from this text."""
+	if (listing.get("agent_slug") or listing.get("name")) == "reorder-replenishment-operator":
+		return "Run the bundled native Reorder Review workflow. Call jarvis__prepare_reorder_review with no arguments, then stop. The server owns evidence, quantities, review and completion."
 	scope_block = ""
 	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
 
@@ -1946,6 +2014,7 @@ def _audit_prompt(
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}"{fefo_contract}.'
 		)
+	agent_slug = listing.get("agent_slug") or listing.get("name")
 	# Some agents use a server-bound scope narrower than the generic accounting
 	# window. Send these values only after the bench has resolved them. Do not copy
 	# arbitrary installation config keys here: this is the sole path by which a
@@ -1954,7 +2023,12 @@ def _audit_prompt(
 		additional_scope = {
 			key: scope[key]
 			for key in ("record_scope", "prior_period_from", "prior_period_to")
-			if key in scope and (key != "record_scope" or record_scope_supported)
+			if key in scope
+			and (
+				key != "record_scope"
+				or record_scope_supported
+				or agent_slug == agent_scope.NEGATIVE_STOCK_AGENT
+			)
 		}
 		if additional_scope:
 			scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + json.dumps(
@@ -1966,7 +2040,7 @@ def _audit_prompt(
 	# The delegate merges this JSON into config.json verbatim.  The run message is
 	# the direct bench-to-container channel, while jarvis__get_engagement_config
 	# returns the same stored snapshot to an active run when the object is empty.
-	explicit_config = engagement_config if isinstance(engagement_config, dict) else {}
+	explicit_config = _sanitize_delegated_engagement_config(listing, engagement_config)
 	if explicit_config:
 		# ADDITIVE, never a replacement: config.json legitimately carries fields the delegate
 		# fetches or derives at run time (e.g. balances, or a run-as permission set used to
@@ -1988,9 +2062,8 @@ def _audit_prompt(
 	try:
 		from jarvis.chat.agent_catalog import registry_tools_allow
 
-		_slug = listing.get("agent_slug") or listing.get("name")
-		_has_config_tool = bool(_slug) and "jarvis__get_engagement_config" in (
-			registry_tools_allow(_slug) or []
+		_has_config_tool = bool(agent_slug) and "jarvis__get_engagement_config" in (
+			registry_tools_allow(agent_slug) or []
 		)
 	except Exception:
 		# Never blocks prompt-build; fail closed with the branch-3 missing-state

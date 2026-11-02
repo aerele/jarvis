@@ -91,6 +91,10 @@ def _match(writes: list, doctype: str, operation: str) -> dict | None:
 def _refuse_non_operator(cap: dict, operation: str, doctype: str) -> None:
 	"""Refuse a write from a caller that is not a write-capable operator (an auditor,
 	or an operator whose contract is empty). Raised BEFORE Frappe permission checks."""
+	from jarvis.chat import reorder_replenishment_gate
+
+	if reorder_replenishment_gate.is_reorder(cap["agent"]):
+		raise PermissionDeniedError(reorder_replenishment_gate.direct_write_refusal(operation, doctype))
 	if cap["nature"] != "operator" or not cap["writes"]:
 		raise PermissionDeniedError(
 			f"agent '{cap['agent']}' is not permitted to {operation} documents "

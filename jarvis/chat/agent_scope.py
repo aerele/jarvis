@@ -9,9 +9,11 @@ Mar-31 / Apr-1 boundary). ``_launch_audit`` stamps the result on the Run
 (``scope_json``) and injects it verbatim into the run message; prior-FY
 selection stays versioned bench code, never LLM prose.
 
-It is DELIBERATELY generic: it carries no rule shape, only ordinary accounting
-dimensions (company / fiscal year / period boundaries), so the delegate bundles
-resolve their run scope from bench-injected, versioned values — never LLM prose.
+It is DELIBERATELY generic for normal delegates: it carries only ordinary
+accounting dimensions (company / fiscal year / period boundaries). A narrow
+delegate can add an explicit record root only through a server-side validation
+hook. Delegate bundles resolve their run scope from these bench-injected,
+versioned values — never LLM prose.
 
 The helper runs under the caller's identity (the run-as user in
 ``_launch_audit``), so ``frappe.defaults`` / erpnext's fiscal-year lookup are
@@ -240,6 +242,114 @@ _FEFO_QUERY_SOURCE_FIELDS = (
 )
 
 
+NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
+
+_NEGATIVE_STOCK_OUTPUT_SCOPE_KEYS = ("company", "from_date", "to_date", "report_date")
+
+
+class InvalidFefoRecordScopeError(InvalidArgumentError):
+	"""A saved FEFO Warehouse root needs an owner correction.
+
+	This excludes verification failures such as a database error. Those can clear
+	on their own and must remain on the scheduler retry path. This error only
+	represents a present declaration that cannot ever be used without a change to
+	the declaration, Warehouse, company, or read permission.
+	"""
+
+
+def _agent_slug(installation) -> str:
+	return str(installation.get("agent") or installation.get("agent_slug") or "").strip()
+
+
+def requires_bound_scope(installation) -> bool:
+	"""Return true when this agent must refuse a failed scope resolution.
+
+	Negative stock always needs a Warehouse root. FEFO has a deliberate
+	company-wide mode when no root is declared, but it must not turn a failed
+	scope resolution into an unscoped review.
+	"""
+	return _agent_slug(installation) in {NEGATIVE_STOCK_AGENT, FEFO_AGENT}
+
+
+def negative_stock_record_scope(value) -> dict | None:
+	"""Return a canonical Warehouse root, or ``None`` for untrusted input.
+
+	This is only a shape check. Launch resolution also checks existence, company,
+	enabled state, and the active run-as user's read permissions. Warehouse groups
+	are valid roots: the evaluator may use a group to prove its leaf set.
+	"""
+	if (
+		not isinstance(value, dict)
+		or set(value) != {"doctype", "name"}
+		or value.get("doctype") != "Warehouse"
+		or not isinstance(value.get("name"), str)
+		or not value["name"].strip()
+		or value["name"] != value["name"].strip()
+	):
+		return None
+	return {"doctype": "Warehouse", "name": value["name"]}
+
+
+def negative_stock_output_scope(value) -> dict | None:
+	"""Return the five safe negative-stock writeback keys, or ``None``.
+
+	The evaluator may return this small projection at writeback. The server
+	compares it with the launch-stamped projection, so no model field can change
+	the Warehouse, company, period, or report-date cutoff during global merge.
+	"""
+	if not isinstance(value, dict):
+		return None
+	boundary = negative_stock_record_scope(value.get("record_scope"))
+	if boundary is None:
+		return None
+	output = {}
+	for key in _NEGATIVE_STOCK_OUTPUT_SCOPE_KEYS:
+		item = value.get(key)
+		if not isinstance(item, str) or not item.strip() or item != item.strip():
+			return None
+		output[key] = item
+	output["record_scope"] = boundary
+	return output
+
+
+def _negative_stock_warehouse_scope(config: dict, company: str) -> dict:
+	"""Validate the configured Warehouse root as the active run-as user.
+
+	Only the canonical two-field value may enter ``Run.scope_json``. A Warehouse
+	group is allowed, but a disabled, foreign, unreadable, or missing root is not.
+	"""
+	namespace = config.get("negative_stock")
+	declared = namespace.get("record_scope") if isinstance(namespace, dict) else None
+	boundary = negative_stock_record_scope(declared)
+	if boundary is None:
+		raise InvalidArgumentError("Negative stock record_scope must name one Warehouse")
+
+	name = boundary["name"]
+	try:
+		warehouse = frappe.db.get_value("Warehouse", name, ["company", "disabled"], as_dict=True)
+		warehouse_readable = frappe.has_permission("Warehouse", "read", doc=name)
+	except Exception as exc:
+		raise InvalidArgumentError("Negative stock Warehouse scope could not be verified") from exc
+	if not warehouse or not warehouse_readable:
+		raise InvalidArgumentError(
+			"Negative stock record_scope must be a readable enabled Warehouse in the company"
+		)
+	try:
+		company_readable = frappe.has_permission("Company", "read", doc=company)
+	except Exception as exc:
+		raise InvalidArgumentError("Negative stock Company scope could not be verified") from exc
+	if (
+		not company_readable
+		or warehouse.get("company") != company
+		or warehouse.get("disabled") is None
+		or frappe.utils.cint(warehouse.get("disabled"))
+	):
+		raise InvalidArgumentError(
+			"Negative stock record_scope must be a readable enabled Warehouse in the company"
+		)
+	return boundary
+
+
 def authoritative_writeback_scope(run_doc, submitted_scope) -> dict:
 	"""Return the launch-stamped scope after checking the evaluator echo.
 
@@ -309,7 +419,7 @@ def _fefo_warehouse_boundary(value, company: str) -> dict:
 	"""Validate one FEFO Warehouse leaf as the active run-as user."""
 	boundary = fefo_record_scope(value)
 	if boundary is None:
-		raise InvalidArgumentError("FEFO record_scope must name one readable enabled Warehouse leaf")
+		raise InvalidFefoRecordScopeError("FEFO record_scope must name one readable enabled Warehouse leaf")
 	name = boundary["name"]
 	try:
 		warehouse = frappe.db.get_value("Warehouse", name, ["company", "is_group", "disabled"], as_dict=True)
@@ -327,7 +437,7 @@ def _fefo_warehouse_boundary(value, company: str) -> dict:
 		or frappe.utils.cint(warehouse.get("is_group"))
 		or frappe.utils.cint(warehouse.get("disabled"))
 	):
-		raise InvalidArgumentError("FEFO record_scope must name one readable enabled Warehouse leaf")
+		raise InvalidFefoRecordScopeError("FEFO record_scope must name one readable enabled Warehouse leaf")
 	return boundary
 
 
@@ -1581,7 +1691,9 @@ def resolve_scope(installation, *, allow_record_scope: bool = False) -> dict:
 		return str(val).strip() if val is not None and str(val).strip() else None
 
 	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
-	if agent_slug == FEFO_AGENT:
+	if agent_slug == NEGATIVE_STOCK_AGENT:
+		scope["record_scope"] = _negative_stock_warehouse_scope(cfg, scope["company"])
+	elif agent_slug == FEFO_AGENT:
 		boundary = _fefo_warehouse_scope(cfg, scope["company"])
 		if boundary is not None:
 			scope["record_scope"] = boundary

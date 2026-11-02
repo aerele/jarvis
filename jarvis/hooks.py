@@ -217,6 +217,11 @@ after_install = ["jarvis.legacy_compatibility.seed", "jarvis.install.after_insta
 
 before_migrate = "jarvis.legacy_compatibility.seed"
 
+# A skipped close would leave the fleet roster and historic confirmation cleanup
+# in different states. Frappe must stop the release instead of writing a skipped
+# Patch Log row when this safety migration fails.
+never_skip_patches = ["jarvis.patches.v2_31_disable_reorder_replenishment_installations"]
+
 # Tests run without an admin; seed the catalog snapshot from test fixtures.
 before_tests = "jarvis.tests.catalog_seed.seed_catalog_snapshot"
 

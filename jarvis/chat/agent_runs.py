@@ -31,6 +31,8 @@ INSTALLATION = "Jarvis Agent Installation"
 LISTING = "Jarvis Agent Listing"
 DASHBOARD = "Jarvis Dashboard"
 SESSION = "Jarvis Chat Session"
+NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
+_NEGATIVE_STOCK_SCOPE_REJECTION = "The evaluator scope did not match the server-stamped Warehouse boundary."
 FEFO_AGENT = "fefo-expiry-compliance-auditor"
 _FEFO_SCOPE_REJECTION = "The evaluator scope did not match the server-stamped FEFO boundary."
 
@@ -967,6 +969,85 @@ def _rowcount_shortfall(run_doc, rows_consumed) -> bool:
 		return False
 
 
+def _negative_stock_scope_rejection_coverage(tokens: set) -> dict:
+	"""Return a fail-closed coverage envelope for an untrusted writeback scope."""
+	return {
+		token: {
+			"state": "not_evaluable",
+			"reason_code": "unsupported_customisation",
+			"detail": _NEGATIVE_STOCK_SCOPE_REJECTION,
+		}
+		for token in tokens
+	}
+
+
+def clear_untrusted_negative_stock_artifacts(run_doc, inst) -> None:
+	"""Delete a proven wrong-scope delegate dashboard or refuse finalization.
+
+	A dashboard can be saved before writeback. Only the exact Run conversation and
+	the installation's current or prior visibility owner prove that the linked
+	dashboard belongs to this run. If that proof or deletion is unavailable, do not
+	finalize the rejected output: deleting an arbitrary dashboard is unsafe, while
+	letting a possibly wrong-scope dashboard survive as a completed run is a leak.
+	"""
+	dashboard_name = str(run_doc.get("dashboard") or "").strip()
+	if not dashboard_name:
+		frappe.db.set_value(
+			RUN,
+			run_doc.name,
+			{"dashboard": None, "canvas_ref": None, "integrity_digest": None},
+			update_modified=False,
+		)
+		return
+	conversation = str(run_doc.get("conversation") or "").strip()
+	owners = {
+		str(value).strip() for value in (inst.get("owner"), inst.get("reviewer")) if str(value or "").strip()
+	}
+	if not conversation or not owners:
+		raise frappe.ValidationError("could not safely remove rejected dashboard output")
+	try:
+		dashboard = frappe.db.get_value(
+			DASHBOARD,
+			dashboard_name,
+			["name", "source_conversation", "owner", "target_user"],
+			as_dict=True,
+		)
+	except Exception as error:
+		frappe.log_error(
+			title="jarvis agent: rejected dashboard provenance lookup failed",
+			message=frappe.get_traceback(),
+		)
+		raise frappe.ValidationError("could not safely remove rejected dashboard output") from error
+	if dashboard and (
+		dashboard.get("source_conversation") != conversation
+		or dashboard.get("owner") != dashboard.get("target_user")
+		or dashboard.get("owner") not in owners
+	):
+		frappe.logger("jarvis.agent_runs").warning(
+			"refused to delete a dashboard without negative-stock run provenance"
+		)
+		raise frappe.ValidationError("could not safely remove rejected dashboard output")
+	if dashboard:
+		try:
+			frappe.delete_doc(DASHBOARD, dashboard.name, ignore_permissions=True, force=True)
+		except Exception:
+			try:
+				frappe.db.delete(DASHBOARD, {"name": dashboard.name})
+			except Exception as error:
+				frappe.log_error(
+					title="jarvis agent: rejected dashboard removal failed",
+					message=frappe.get_traceback(),
+				)
+				raise frappe.ValidationError("could not safely remove rejected dashboard output") from error
+	frappe.db.set_value(
+		RUN,
+		run_doc.name,
+		{"dashboard": None, "canvas_ref": None, "integrity_digest": None},
+		update_modified=False,
+	)
+	run_doc.dashboard = None
+
+
 def record_delegate_run(
 	run,
 	installation,
@@ -1013,6 +1094,39 @@ def record_delegate_run(
 	scope = scope if isinstance(scope, dict) else {}
 	dropped = dropped or []
 	scope_rejected = False
+	if agent == NEGATIVE_STOCK_AGENT:
+		# ``record_delegate_run`` is also a server-side API. Normalize its scope
+		# before ANY side effect (finding company, watermark, or A16) so a direct
+		# caller cannot retain a trusted Run snapshot while persisting data for a
+		# different company/date/Warehouse boundary.
+		from jarvis.chat.agent_scope import negative_stock_output_scope
+
+		try:
+			stamped = _json.loads(frappe.db.get_value(RUN, run_doc.name, "scope_json") or "{}")
+		except Exception:
+			stamped = {}
+		trusted_scope = negative_stock_output_scope(stamped)
+		submitted_scope = negative_stock_output_scope(scope)
+		if trusted_scope is None or submitted_scope != trusted_scope:
+			scope_rejected = True
+			findings = []
+			coverage = _negative_stock_scope_rejection_coverage(required_coverage_tokens)
+			scope = trusted_scope or {}
+			rows_consumed = None
+			canvas_ref = None
+			integrity_digest = None
+			dashboard = None
+			dropped.append(
+				{
+					"ref_doctype": "Warehouse",
+					"ref_name": (trusted_scope or {}).get("record_scope", {}).get("name") or "?",
+					"reason": "scope did not match server-stamped Warehouse boundary",
+				}
+			)
+			clear_untrusted_negative_stock_artifacts(run_doc, inst)
+		else:
+			# Strip model-only keys before all downstream persistence decisions.
+			scope = trusted_scope
 	if agent == FEFO_AGENT:
 		# FEFO may run company-wide only when the launch stamp omitted the leaf.
 		# Compare the full safe projection, then revalidate any stamped leaf as the
@@ -1060,6 +1174,7 @@ def record_delegate_run(
 		else:
 			scope = trusted_scope
 	company = (scope.get("company") or "").strip()
+	negative_stock_run_scope = scope.get("record_scope") if agent == NEGATIVE_STOCK_AGENT else None
 	fefo_run_scope = scope if agent == FEFO_AGENT else None
 
 	# Collapse this run's findings by fingerprint (token + doc identity), so a doc
@@ -1226,8 +1341,8 @@ def record_delegate_run(
 			fields=["name", "fingerprint", "company", "last_seen_run"],
 		)
 		prior_record_scopes = {}
-		if agent == FEFO_AGENT:
-			from jarvis.chat.agent_scope import fefo_stamped_scope
+		if agent in {FEFO_AGENT, NEGATIVE_STOCK_AGENT}:
+			from jarvis.chat.agent_scope import fefo_stamped_scope, negative_stock_record_scope
 
 			run_names = sorted(
 				{
@@ -1253,6 +1368,11 @@ def record_delegate_run(
 					prior_scope = _json.loads(prior_run.get("scope_json") or "{}")
 				except Exception:
 					prior_scope = {}
+				if agent == NEGATIVE_STOCK_AGENT:
+					prior_record_scopes[prior_run.name] = negative_stock_record_scope(
+						prior_scope.get("record_scope") if isinstance(prior_scope, dict) else None
+					)
+					continue
 				# Only replacement runs carry the server-owned marker. A legacy
 				# v0.2.2 snapshot can look like the same company-wide projection,
 				# but it did not produce this coverage contract and stays open. A
@@ -1272,6 +1392,11 @@ def record_delegate_run(
 			# run's company (both non-empty). A scopeless run, or an empty-company
 			# legacy row, is left untouched (exempt) — never cross-company resolved.
 			if not company or not c.company or c.company != company:
+				continue
+			if (
+				agent == NEGATIVE_STOCK_AGENT
+				and prior_record_scopes.get(c.get("last_seen_run")) != negative_stock_run_scope
+			):
 				continue
 			if agent == FEFO_AGENT and prior_record_scopes.get(c.get("last_seen_run")) != fefo_run_scope:
 				continue
@@ -1403,7 +1528,20 @@ def record_delegate_run(
 				base = {}
 		except Exception:
 			base = {}
-		if agent == FEFO_AGENT:
+		if agent == NEGATIVE_STOCK_AGENT:
+			# Defence in depth for direct internal callers: negative-stock output
+			# may carry only the canonical five-field projection and its Warehouse
+			# boundary must equal the one the server stamped at launch. Never merge
+			# raw model scope/config into this Run snapshot.
+			from jarvis.chat.agent_scope import negative_stock_output_scope
+
+			trusted_scope = negative_stock_output_scope(base)
+			submitted_scope = negative_stock_output_scope(scope)
+			if trusted_scope is not None:
+				if submitted_scope == trusted_scope:
+					base.update(submitted_scope)
+				base["record_scope"] = trusted_scope["record_scope"]
+		elif agent == FEFO_AGENT:
 			from jarvis.chat.agent_scope import fefo_output_scope, fefo_stamped_scope
 
 			trusted_scope = fefo_stamped_scope(base)

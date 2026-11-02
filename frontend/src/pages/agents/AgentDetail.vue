@@ -419,7 +419,17 @@
 							<!-- mt-2, matching AgentAccessEditor's own heading->content gap
 							     (its "Access" heading is immediately followed by an
 							     mt-2 description) - the Admin tab is the reference. -->
+							<ReorderConfigForm
+								v-if="agent?.agent_slug === 'reorder-replenishment-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
 							<ConfigForm
+								v-else
 								class="mt-2"
 								:config="parsedConfig"
 								:config-keys="configKeys"
@@ -730,6 +740,7 @@ import AgentAccessEditor from "@/pages/agents/AgentAccessEditor.vue";
 import AgentModelCard from "@/pages/agents/AgentModelCard.vue";
 import AgentInstallDialog from "@/pages/agents/AgentInstallDialog.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
+import ReorderConfigForm from "@/pages/agents/ReorderConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import ShadowChip from "@/components/ShadowChip.vue";
@@ -1121,14 +1132,15 @@ const isOperatorReview = computed(
 const isFefoExpiryComplianceAuditor = computed(
 	() => agent.value?.agent_slug === FEFO_EXPIRY_COMPLIANCE_AUDITOR
 );
-// Review operators and FEFO have required configuration. Other agents can run
-// with their declared optional settings.
+// Most agents can run with optional settings. The review operators and FEFO
+// expiry auditor each have a mandatory launch contract.
 const requiresRunConfiguration = computed(
 	() => isOperatorReview.value || isFefoExpiryComplianceAuditor.value
 );
 const configurationIssues = computed(
 	() => (requiresRunConfiguration.value && installation.value?.configuration_issues) || {}
 );
+
 const configurationBlocked = computed(
 	() =>
 		requiresRunConfiguration.value &&
@@ -1197,7 +1209,9 @@ const runTooltip = computed(() => {
 		return canReview.value
 			? "Still in shadow preview - promote it to live under Configure first"
 			: "Not yet enabled for live runs - ask your administrator";
-	return agent.value.agent_slug === "bank-recon-operator"
+	return agent.value.agent_slug === "reorder-replenishment-operator"
+		? "Prepare reorder suggestions for buyer review"
+		: agent.value.agent_slug === "bank-recon-operator"
 		? "Review bank lines, proposals only"
 		: agent.value.agent_slug === "ar-collections-operator"
 		? "Review receivables: unsent drafts only"
@@ -1473,6 +1487,9 @@ async function saveSchedule() {
 
 async function disableSchedule() {
 	if (!installation.value || savingSchedule.value) return;
+	// An old active schedule must remain repairable even when the saved FEFO
+	// policy is incomplete. Restore the local toggle when the request fails, so
+	// the one recovery action stays visible for a retry.
 	const wasEnabled = sched.value.enabled;
 	sched.value.enabled = false;
 	if (!(await saveSchedule())) sched.value.enabled = wasEnabled;

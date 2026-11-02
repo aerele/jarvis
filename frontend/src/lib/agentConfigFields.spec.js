@@ -62,7 +62,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders review, fixed-asset, payroll, scope, materiality, then vendor-ledger fields", () => {
+	it("orders review, fixed-asset, payroll, scope, materiality, FEFO, then vendor-ledger fields", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -168,7 +168,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes review, fixed-asset, payroll, materiality, and vendor-ledger fields", () => {
+	it("agent-specific includes review, fixed-asset, payroll, materiality, FEFO, and vendor-ledger fields", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",

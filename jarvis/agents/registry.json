@@ -1400,19 +1400,17 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.3.2",
       "status": "Published",
-      "description": "Runs ERPNext's stock-value vs account-value comparison on a schedule and works the residue: flags negative on-hand balances, zero-rate receipts, abnormal valuation-rate jumps, internal stock-value inconsistencies, and where your perpetual stock value drifts from its stock-in-hand GL account. Ranks each exception by rupees with a link to the offending ledger row. Read-only; never adjusts a quantity, books a journal entry, or posts a stock reconciliation.",
+      "description": "Checks stock balances and receipt costs against retained ledger records. Compares complete stock accounts with native ERPNext reports and shows warehouse review summaries. Read-only; does not change stock or accounting entries.",
       "tools_required": [
         "jarvis__query",
-        "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
@@ -1424,7 +1422,6 @@
       ],
       "doctypes_required": [
         "Stock Ledger Entry",
-        "Bin",
         "Item",
         "Warehouse",
         "GL Entry",
@@ -1432,14 +1429,19 @@
         "Stock Settings",
         "Repost Item Valuation",
         "Landed Cost Voucher",
-        "Company"
+        "Company",
+        "Stock Entry",
+        "Landed Cost Purchase Receipt"
       ],
       "rule_tokens": [
         "nsv-grade-e058",
         "nsv-integ-2a6f",
+        "nsv-neg-2e73",
         "nsv-spike-4b1c",
-        "nsv-tieout-7d92"
+        "nsv-tieout-7d92",
+        "nsv-zero-8c45"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1452,10 +1454,13 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
-      "supports_record_scope": false,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "negative_stock"
+      ]
     },
     {
       "agent_slug": "payroll-prerun-auditor",
@@ -1524,55 +1529,40 @@
     },
     {
       "agent_slug": "reorder-replenishment-operator",
-      "title": "Reorder & Replenishment Operator",
+      "title": "Reorder Review",
       "domain": "inventory",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
-      "status": "Coming Soon",
-      "description": "Watches stock position daily and works the replenishment tail: for each item whose velocity- and lead-time-aware reorder point is breached and is not already covered by open supply, it stages a docstatus-0 draft Material Request with a computed reorder qty, target warehouse and required-by date; where demand is ambiguous (no history, erratic, or slow/dead) it raises one evidence-carrying Approval Request instead of guessing. Proposes only; a human confirms and submits every request.",
+      "version": "0.2.0",
+      "status": "Published",
+      "description": "Prepares purchase suggestions from saved ERPNext reorder levels after a current Negative Stock receipt and fresh native stock checks. A named buyer reviews each suggestion. Manual runs only. Review does not create or submit a Material Request or Purchase Order. Grouped policies and draft supply require manual action.",
       "tools_required": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc"
+        "jarvis__prepare_reorder_review"
       ],
       "tools_allow": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc",
-        "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "canvas",
-        "message"
+        "jarvis__prepare_reorder_review"
       ],
       "doctypes_required": [
-        "Jarvis Approval Request",
-        "Material Request",
-        "Material Request Item",
-        "Bin",
+        "Company",
+        "Warehouse",
         "Item",
         "Item Reorder",
+        "Bin",
         "Stock Ledger Entry",
+        "Account",
+        "GL Entry",
+        "Stock Settings",
+        "Repost Item Valuation",
+        "Landed Cost Voucher",
+        "Material Request",
+        "Material Request Item",
         "Purchase Order",
-        "Purchase Order Item"
+        "Purchase Order Item",
+        "UOM"
       ],
       "rule_tokens": [],
-      "writes": [
-        {
-          "doctype": "Jarvis Approval Request",
-          "mode": "approval-request"
-        },
-        {
-          "doctype": "Material Request",
-          "mode": "draft"
-        }
-      ],
+      "advisory_tokens": [],
+      "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 600,
       "min_apps": [
@@ -1587,7 +1577,12 @@
       "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
-      }
+      },
+      "config_keys": [
+        "policy_version",
+        "negative_stock_run",
+        "max_proposals"
+      ]
     },
     {
       "agent_slug": "sla-breach-ageing-auditor",
