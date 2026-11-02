@@ -56,10 +56,9 @@ def get_payroll_deposit_inputs() -> dict:
 
 
 def _private_output_allowed(cap) -> bool:
-	return (
-		isinstance(cap, dict)
-		and cap.get("run")
-		and cap.get("agent") == payroll_deposit_snapshot.AGENT
-		and cap.get("status") == "running"
-		and not cap.get("legacy")
-	)
+	# Keep this direct-call guard independent of the API dispatcher.  A caller
+	# that reaches this Python function with a borrowed run bearer must still hold
+	# the exact snapshotted ``jarvis__get_payroll_deposit_inputs`` capability.
+	from jarvis.tools import _private_output
+
+	return _private_output.has_private_source_capability(cap)

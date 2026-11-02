@@ -17,6 +17,7 @@ MAX_ROWS = 20_000
 PRIVATE_SOURCE_TOOLS = frozenset({"get_payroll_deposit_inputs"})
 TOOLS = PRIVATE_SOURCE_TOOLS
 _active = ContextVar("jarvis_private_audit_output", default=False)
+_redact_delegate_args = ContextVar("jarvis_private_delegate_args", default=False)
 
 
 @contextmanager
@@ -30,6 +31,47 @@ def request(enabled: bool):
 
 def is_private() -> bool:
 	return _active.get()
+
+
+def is_active_deposit_delegate(cap) -> bool:
+	"""True only for the running, non-legacy Deposit delegate contract."""
+	return (
+		isinstance(cap, dict)
+		and bool(cap.get("run"))
+		and cap.get("status") == "running"
+		and cap.get("agent") == "statutory-payroll-deposit-status"
+		and not cap.get("legacy")
+	)
+
+
+def has_private_source_capability(cap) -> bool:
+	"""Require the exact snapshotted bench tool declaration before source capture."""
+	if not is_active_deposit_delegate(cap) or not isinstance(cap.get("tools_allow"), list):
+		return False
+	from jarvis.tools import _delegate_capability
+
+	return "get_payroll_deposit_inputs" in _delegate_capability.bench_tools(cap["tools_allow"])
+
+
+def begin_delegate_redaction(cap):
+	"""Enable fixed argument projections for one active Deposit dispatch."""
+	return _redact_delegate_args.set(is_active_deposit_delegate(cap))
+
+
+def end_delegate_redaction(token) -> None:
+	_redact_delegate_args.reset(token)
+
+
+def redact_delegate_args(args):
+	"""Return a durable-safe argument projection for the active delegate.
+
+	Audit lines, transcript receipts, and step labels may execute on denied or
+	failed calls.  Their argument projection therefore cannot retain a caller
+	value for Deposit runs, even when the tool itself never receives the value.
+	"""
+	if _redact_delegate_args.get():
+		return {"private_delegate_args_redacted": True}
+	return args
 
 
 def require_source_transport(tool: str) -> None:
@@ -49,15 +91,7 @@ def validate_args(tool: str, args: dict) -> None:
 
 
 def allowed(mode: str | None, tool: str, cap) -> bool:
-	return (
-		mode == MODE
-		and tool in PRIVATE_SOURCE_TOOLS
-		and isinstance(cap, dict)
-		and bool(cap.get("run"))
-		and cap.get("status") == "running"
-		and cap.get("agent") == "statutory-payroll-deposit-status"
-		and not cap.get("legacy")
-	)
+	return mode == MODE and tool in PRIVATE_SOURCE_TOOLS and has_private_source_capability(cap)
 
 
 def prepare(result: dict, *, tool: str) -> tuple[dict, dict]:

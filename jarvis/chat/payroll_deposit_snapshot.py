@@ -20,12 +20,13 @@ from decimal import Decimal
 import frappe
 from frappe.utils.response import json_handler
 
+from jarvis.chat import coverage_reasons as cr
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools import query as query_tool
 
 AGENT = "statutory-payroll-deposit-status"
 CONTRACT = "payroll_deposit_snapshot_v1"
-RECEIPT_CONTRACT = "payroll_deposit_snapshot_receipt_v1"
+RECEIPT_CONTRACT = "payroll_deposit_snapshot_receipt_v2"
 LAUNCH_CONTRACT = "payroll_deposit_launch_v1"
 RUN = "Jarvis Agent Run"
 
@@ -56,7 +57,8 @@ _DEPOSIT_KEYS = frozenset(
 _SCOPE_CONFIG_KEYS = ("company", "fiscal_year", "from_date", "to_date")
 _MONTH = re.compile(r"^\d{4}-\d{2}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_REPORT_PROOF_KEYS = frozenset({"dashboard", "report_sha256"})
+_WRITEBACK_TOKENS = frozenset({"pf_esi_deposit_due_date", "s7q_interest_table", "s14b_damages_table"})
+_WRITEBACK_FINDING_KEYS = frozenset({"token", "ref_doctype", "ref_name"})
 
 
 def _fail(message: str = "Payroll deposit inputs cannot be captured safely.") -> None:
@@ -80,13 +82,6 @@ def canonical_json(value) -> str:
 
 def canonical_digest(value) -> str:
 	return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
-
-
-def report_sha256(html: str) -> str:
-	"""Hash original delegate HTML before any dashboard transform or persistence."""
-	if not isinstance(html, str):
-		_fail("Payroll deposit dashboard HTML is invalid.")
-	return hashlib.sha256(html.encode("utf-8")).hexdigest()
 
 
 def _normalise(value):
@@ -278,7 +273,6 @@ def stamp_launch(run_name: str, launch: dict, scope: dict) -> None:
 			"scope_config_digest": launch["scope_config_digest"],
 		},
 		"source_snapshot": None,
-		"report": None,
 	}
 	frappe.db.set_value(RUN, run_name, "input_snapshot_json", canonical_json(receipt), update_modified=False)
 
@@ -289,7 +283,7 @@ def _load_receipt(run) -> tuple[dict, dict, dict]:
 		run.get("input_snapshot_json"), "Payroll deposit input receipt is missing or malformed."
 	)
 	if (
-		set(receipt) != {"contract", "launch", "source_snapshot", "report"}
+		set(receipt) != {"contract", "launch", "source_snapshot"}
 		or receipt.get("contract") != RECEIPT_CONTRACT
 	):
 		_fail("Payroll deposit input receipt is missing or malformed.")
@@ -522,7 +516,7 @@ def _aggregate_spec(spec: dict) -> dict:
 
 def _count_watermark(spec: dict) -> dict:
 	try:
-		result = query_tool.query(_aggregate_spec(spec), confirm_large=True)
+		result = query_tool._query_private_server(_aggregate_spec(spec), confirm_large=True)
 		rows = result.get("rows") if isinstance(result, dict) else None
 		if result.get("more_rows") or result.get("partial") or not isinstance(rows, list) or len(rows) != 1:
 			_fail()
@@ -546,7 +540,7 @@ def _source_rows(key: str, spec: dict, expected_count: int) -> list:
 	if expected_count > SOURCE_CAP:
 		_fail("Payroll deposit source exceeds its fixed review cap.")
 	try:
-		result = query_tool.query(spec, confirm_large=True)
+		result = query_tool._query_private_server(spec, confirm_large=True)
 		rows = result.get("rows") if isinstance(result, dict) else None
 		if result.get("more_rows") or result.get("partial") or not isinstance(rows, list):
 			_fail()
@@ -671,64 +665,6 @@ def _validate_snapshot_metadata(value) -> dict:
 	return value
 
 
-def _validate_report_proof(value) -> dict:
-	"""Validate the row-free report binding stamped by save_agent_dashboard."""
-	if not isinstance(value, dict) or set(value) != _REPORT_PROOF_KEYS:
-		_fail("Payroll deposit dashboard proof is missing or malformed.")
-	if not isinstance(value.get("dashboard"), str) or not value["dashboard"].strip():
-		_fail("Payroll deposit dashboard proof is missing or malformed.")
-	if not isinstance(value.get("report_sha256"), str) or not _SHA256.fullmatch(value["report_sha256"]):
-		_fail("Payroll deposit dashboard proof is missing or malformed.")
-	return value
-
-
-def stamp_report(run_name: str, dashboard: str, report_digest: str) -> None:
-	"""Bind one original dashboard report hash to this captured input receipt.
-
-	Only the dashboard-save tool calls this after it has linked the generated
-	Dashboard to the running Deposit run. The receipt stores the dashboard id and
-	SHA-256 only, never the authored HTML or its shadow-transformed copy.
-	"""
-	proof = _validate_report_proof({"dashboard": dashboard, "report_sha256": report_digest})
-	try:
-		run = frappe.db.get_value(
-			RUN,
-			run_name,
-			[
-				"name",
-				"agent",
-				"status",
-				"dashboard",
-				"assessment_config_json",
-				"input_snapshot_json",
-				"scope_json",
-			],
-			as_dict=True,
-			for_update=True,
-		)
-	except Exception as exc:
-		raise InvalidArgumentError("Payroll deposit dashboard proof could not be stamped safely.") from exc
-	if (
-		not isinstance(run, dict)
-		or run.get("agent") != AGENT
-		or run.get("status") != "running"
-		or run.get("dashboard") != proof["dashboard"]
-	):
-		_fail("Payroll deposit dashboard proof does not match its active run.")
-	_launch, receipt, _scope = _load_receipt(run)
-	_validate_snapshot_metadata(receipt.get("source_snapshot"))
-	existing = receipt.get("report")
-	if existing is not None:
-		existing = _validate_report_proof(existing)
-		if hmac.compare_digest(existing["dashboard"], proof["dashboard"]) and hmac.compare_digest(
-			existing["report_sha256"], proof["report_sha256"]
-		):
-			return
-		_fail("Payroll deposit dashboard proof changed after it was stamped.")
-	receipt["report"] = proof
-	frappe.db.set_value(RUN, run_name, "input_snapshot_json", canonical_json(receipt), update_modified=False)
-
-
 def validate_snapshot(snapshot) -> dict:
 	"""Verify the complete private object before it crosses the sealed boundary."""
 	if (
@@ -792,7 +728,7 @@ def capture(run) -> dict:
 	if run.get("agent") != AGENT or run.get("status") != "running":
 		_fail("Payroll deposit inputs require its active delegate run.")
 	launch, receipt, scope = _load_receipt(run)
-	if receipt.get("source_snapshot") is not None or receipt.get("report") is not None:
+	if receipt.get("source_snapshot") is not None:
 		_fail("Payroll deposit inputs were already captured for this run.")
 	specs = source_specs(scope, launch["config"])
 	if set(specs) != set(SOURCE_ORDER):
@@ -840,32 +776,139 @@ def capture(run) -> dict:
 	return snapshot
 
 
+def _declared_voucher_refs(launch: dict) -> set[tuple[str, str]]:
+	return {(row["doctype"], row["name"]) for row in launch["config"]["deposit"]["vouchers"]}
+
+
+def _safe_findings(findings, launch: dict) -> list[dict]:
+	"""Project compact Deposit references into fixed server-owned findings.
+
+	The bundle may identify a declared voucher and token, but it must never place
+	row values or authored explanation text into a durable record.  This routine
+	accepts no extensible fields and builds every persisted text field itself.
+	"""
+	if not isinstance(findings, list):
+		_fail("Payroll deposit writeback findings are malformed.")
+	declared = _declared_voucher_refs(launch)
+	seen = set()
+	projected = []
+	for row in findings:
+		if not isinstance(row, dict) or set(row) != _WRITEBACK_FINDING_KEYS:
+			_fail("Payroll deposit writeback findings are malformed.")
+		token = row.get("token")
+		ref_doctype = row.get("ref_doctype")
+		ref_name = row.get("ref_name")
+		if (
+			token != "pf_esi_deposit_due_date"
+			or not isinstance(ref_doctype, str)
+			or not isinstance(ref_name, str)
+			or not ref_name
+			or (ref_doctype, ref_name) not in declared
+		):
+			_fail("Payroll deposit writeback findings are outside the sealed voucher scope.")
+		ref = (ref_doctype, ref_name)
+		if ref in seen:
+			_fail("Payroll deposit writeback repeats a declared voucher reference.")
+		seen.add(ref)
+		projected.append(
+			{
+				"token": token,
+				"ref_doctype": ref_doctype,
+				"ref_name": ref_name,
+				"amount": None,
+				"severity": "warning",
+				"note": "Potential payroll deposit timing issue. Review the declared voucher and payment evidence.",
+				"result_class": "derived_candidate",
+				"confidence": "low",
+				"match_basis": "Reference was checked against the sealed payroll deposit input.",
+				"false_positive_path": "Check the declared voucher, payment evidence, and an approved exception.",
+			}
+		)
+	return projected
+
+
+def _safe_coverage(coverage) -> dict:
+	"""Validate the compact closed coverage grammar without accepting detail text."""
+	if not isinstance(coverage, dict) or set(coverage) != _WRITEBACK_TOKENS:
+		_fail("Payroll deposit writeback coverage is malformed.")
+	projected = {}
+	for token in _WRITEBACK_TOKENS:
+		entry = coverage.get(token)
+		if not isinstance(entry, dict):
+			_fail("Payroll deposit writeback coverage is malformed.")
+		state = entry.get("state")
+		if not isinstance(state, str):
+			_fail("Payroll deposit writeback coverage is malformed.")
+		if state == "evaluated" and set(entry) == {"state"}:
+			projected[token] = {"state": state}
+			continue
+		reason_code = entry.get("reason_code")
+		if (
+			state in {"not_evaluable", "truncated"}
+			and set(entry) == {"state", "reason_code"}
+			and isinstance(reason_code, str)
+			and reason_code in cr.REASON_CODES
+		):
+			projected[token] = {"state": state, "reason_code": reason_code}
+			continue
+		_fail("Payroll deposit writeback coverage is malformed.")
+	return projected
+
+
 def validate_writeback(
-	run, scope, input_snapshot_id, input_snapshot_digest, dashboard, report_digest
+	run,
+	*,
+	findings,
+	coverage,
+	scope,
+	truncated,
+	rows_consumed,
+	integrity_digest,
+	input_snapshot_id,
+	input_snapshot_digest,
+	dashboard=None,
+	report_sha256=None,
+	canvas_ref=None,
 ) -> dict:
-	"""Require a Deposit result and dashboard to bind to server-captured inputs."""
+	"""Validate and safely project the exact v2 Deposit handoff.
+
+	There is no delegate dashboard in this contract.  A generic server fallback
+	dashboard is rendered only after this function has accepted the compact,
+	row-free projection and the writeback has persisted it.
+	"""
 	if run.get("agent") != AGENT or run.get("status") != "running":
 		_fail("Payroll deposit writeback requires its active delegate run.")
+	if dashboard is not None or report_sha256 is not None or canvas_ref is not None:
+		_fail("Payroll deposit writeback does not accept delegate dashboard output.")
 	launch, receipt, launch_scope = _load_receipt(run)
 	metadata = _validate_snapshot_metadata(receipt.get("source_snapshot"))
-	if not isinstance(input_snapshot_id, str) or not isinstance(input_snapshot_digest, str):
-		_fail("Payroll deposit writeback must name the server input snapshot.")
-	if not hmac.compare_digest(input_snapshot_id, metadata["snapshot_id"]) or not hmac.compare_digest(
-		input_snapshot_digest, metadata["snapshot_digest"]
+	if (
+		not isinstance(input_snapshot_id, str)
+		or not isinstance(input_snapshot_digest, str)
+		or not hmac.compare_digest(input_snapshot_id, metadata["snapshot_id"])
+		or not hmac.compare_digest(input_snapshot_digest, metadata["snapshot_digest"])
 	):
 		_fail("Payroll deposit writeback does not match the server input snapshot.")
-	proof = _validate_report_proof({"dashboard": dashboard, "report_sha256": report_digest})
-	stamped_report = _validate_report_proof(receipt.get("report"))
-	if not hmac.compare_digest(proof["dashboard"], stamped_report["dashboard"]) or not hmac.compare_digest(
-		proof["report_sha256"], stamped_report["report_sha256"]
-	):
-		_fail("Payroll deposit writeback does not match the saved dashboard report.")
-	if run.get("dashboard") != stamped_report["dashboard"]:
-		_fail("Payroll deposit dashboard changed after its report proof was stamped.")
 	if scope != launch_scope:
 		_fail("Payroll deposit writeback scope does not match the launch scope.")
 	if not hmac.compare_digest(metadata["config_digest"], launch["config_digest"]) or not hmac.compare_digest(
 		metadata["scope_digest"], canonical_digest(launch_scope)
 	):
 		_fail("Payroll deposit input receipt changed after capture.")
-	return deepcopy(launch_scope)
+	if type(truncated) is not bool:
+		_fail("Payroll deposit writeback truncation state is malformed.")
+	if isinstance(rows_consumed, bool) or not isinstance(rows_consumed, int):
+		_fail("Payroll deposit writeback row count is malformed.")
+	expected_rows = sum(row["data"]["rows"] for row in metadata["source_receipts"])
+	if rows_consumed != expected_rows:
+		_fail("Payroll deposit writeback row count does not match the sealed input.")
+	if not isinstance(integrity_digest, str) or not _SHA256.fullmatch(integrity_digest):
+		_fail("Payroll deposit writeback integrity digest is malformed.")
+	return {
+		"findings": _safe_findings(findings, launch),
+		"coverage": _safe_coverage(coverage),
+		"scope": deepcopy(launch_scope),
+		"truncated": truncated,
+		"rows_consumed": rows_consumed,
+		"integrity_digest": integrity_digest,
+	}

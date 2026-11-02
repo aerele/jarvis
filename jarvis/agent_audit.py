@@ -69,11 +69,13 @@ def record_write(actor, tool, args, result, outcome, provenance, provenance_name
 	try:
 		from jarvis.api import _BULK_ARG_KEYS, _bulk_len, _is_bulk_call
 		from jarvis.audit import _ref
+		from jarvis.tools import _private_output
 
 		if outcome not in OUTCOMES:
 			outcome = "applied"
 		provenance = _coerce_provenance(provenance, tool)
-		a = args if isinstance(args, dict) else {}
+		a = _private_output.redact_delegate_args(args)
+		a = a if isinstance(a, dict) else {}
 
 		# _ref returns a 3-tuple (doctype, name, method); we keep the first two.
 		ref_doctype_from_args = ref_name = ""

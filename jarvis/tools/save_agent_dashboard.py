@@ -117,14 +117,12 @@ def save_agent_dashboard(
 	)
 	if not run_row:
 		raise InvalidArgumentError("no agent run is bound to this session")
-	deposit_report_digest = None
 	if run_row.get("agent") == "statutory-payroll-deposit-status":
-		from jarvis.chat import payroll_deposit_snapshot
-
-		# This is deliberately the caller's original UTF-8 HTML. Do not hash the
-		# persisted shadow preview: that value is server-transformed and cannot
-		# prove which report the bundle produced.
-		deposit_report_digest = payroll_deposit_snapshot.report_sha256(html)
+		# Deposit output is a compact reference-only contract.  The server creates
+		# the ordinary fallback dashboard after it persists that safe projection;
+		# accepting delegate HTML here would create a second persistence route for
+		# private source rows or model-authored prose.
+		raise InvalidArgumentError("Payroll deposit writeback creates its dashboard server-side.")
 	if run_row.status != "running":
 		# Idempotency: the run already finalized — return its dashboard (if any)
 		# without creating a second one.
@@ -173,8 +171,6 @@ def save_agent_dashboard(
 	if run_row.dashboard:
 		# Already attached this run (a retried author step) — reuse it only after
 		# the fresh server visibility check above confirms that it is allowed.
-		if deposit_report_digest is not None:
-			payroll_deposit_snapshot.stamp_report(run_row.name, run_row.dashboard, deposit_report_digest)
 		return {"run": run_row.name, "dashboard": run_row.dashboard, "idempotent": True}
 
 	# PP-4: the delegate-authored dashboard WINS the precedence in
@@ -220,10 +216,6 @@ def save_agent_dashboard(
 			{"owner": visibility_owner, "target_user": visibility_owner},
 			update_modified=False,
 		)
-	if deposit_report_digest is not None:
-		# The sealed receipt holds only this dashboard id and hash. It never stores
-		# report HTML, source rows, or the shadow-transformed dashboard body.
-		payroll_deposit_snapshot.stamp_report(run_doc.name, dashboard, deposit_report_digest)
 	# Skip the commit under FrappeTestCase so the enclosing transaction rolls back at
 	# teardown (no leaked Dashboard/Run rows); same-connection asserts still see the
 	# uncommitted writes.

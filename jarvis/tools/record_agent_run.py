@@ -174,18 +174,22 @@ def record_agent_run(
 	  scope: the resolved run scope ``{company, fiscal_year, from_date, to_date,
 	    ...}`` — company is stamped on each Finding + scopes auto-resolve + the
 	    watermark recompute.
-	  input_snapshot_id/input_snapshot_digest/report_sha256: required only by the
-	    statutory payroll Deposit-Status agent. They bind the evaluator result and
-	    its original dashboard report to the exact server-owned private input
-	    snapshot captured for this run.
+	  input_snapshot_id/input_snapshot_digest: required only by the statutory
+	    payroll Deposit-Status agent. That agent accepts the strict v2 compact
+	    handoff only: reference-only findings, closed coverage states, the frozen
+	    scope, an exact sealed-source row count, and a SHA-256 integrity digest.
+	    It rejects delegate dashboard, report-hash, and canvas output. The server
+	    creates the normal fallback dashboard after safe persistence.
 	  truncated: True when the delegate's fetch hit its budget — auto-resolve is
 	    skipped entirely and the run is partial (A16).
 	  canvas_ref: the delegate's saved canvas/dashboard ref (stored for Phase 4).
+	    It is not accepted for statutory payroll Deposit-Status.
 	  integrity_digest: the evaluator's sha256 over canonicalized findings.
-	  dashboard: the ``Jarvis Dashboard`` name the delegate got back from
-	    ``jarvis__save_agent_dashboard`` — linked on the Run. When omitted (and the
-	    delegate authored none), a minimal A2-safe dashboard is built server-side
-	    from the persisted findings so every run yields one openable dashboard.
+	  dashboard: the ``Jarvis Dashboard`` name a generic delegate got back from
+	    ``jarvis__save_agent_dashboard`` — linked on the Run. When omitted, a
+	    minimal A2-safe dashboard is built server-side from the persisted findings
+	    so every run yields one openable dashboard. It is not accepted for statutory
+	    payroll Deposit-Status.
 	  rows_consumed: the count of rollup rows the evaluator actually read (its
 	    ``rows_consumed`` output). The bench reconciles it against the GL watermark it
 	    stamped at launch — a ZERO-read on a proven-non-empty ledger forces the run
@@ -213,6 +217,7 @@ def record_agent_run(
 		{"session_key": session_key},
 		["name", "status", "installation", "agent"],
 		as_dict=True,
+		for_update=True,
 	)
 	if not run_row:
 		raise InvalidArgumentError("no agent run is bound to this session")
@@ -253,19 +258,56 @@ def record_agent_run(
 	token_set = set(_as_list(listing.get("rule_tokens")))
 	allowed_refs = set(_as_list(listing.get("doctypes_required"))) | {"Company", "Account", "Journal Entry"}
 
-	raw_findings = _as_list(findings)
-	coverage = _as_dict(coverage)
-	scope = _as_dict(scope)
-	truncated = bool(truncated)
 	if run_doc.agent == "statutory-payroll-deposit-status":
 		from jarvis.chat import payroll_deposit_snapshot
 
-		# Do not merge a model-supplied scope for this agent. The result may only
-		# use the scope stamped at launch and the one private source receipt the
-		# server captured for this session.
-		scope = payroll_deposit_snapshot.validate_writeback(
-			run_doc, scope, input_snapshot_id, input_snapshot_digest, dashboard, report_sha256
+		# This branch intentionally runs before any coercion or persistence.  The
+		# Deposit delegate supplies only the v2 compact grammar; free text, HTML,
+		# and source-bearing values fail closed instead of being converted and saved.
+		# The run row is already locked above, so a concurrent writeback waits and
+		# then observes the terminal state through the idempotency branch.
+		deposit = payroll_deposit_snapshot.validate_writeback(
+			run_doc,
+			findings=findings,
+			coverage=coverage,
+			scope=scope,
+			truncated=truncated,
+			rows_consumed=rows_consumed,
+			integrity_digest=integrity_digest,
+			input_snapshot_id=input_snapshot_id,
+			input_snapshot_digest=input_snapshot_digest,
+			dashboard=dashboard,
+			report_sha256=report_sha256,
+			canvas_ref=canvas_ref,
 		)
+		raw_findings = deposit["findings"]
+		coverage = deposit["coverage"]
+		scope = deposit["scope"]
+		truncated = deposit["truncated"]
+		rows_consumed_val = deposit["rows_consumed"]
+		integrity_digest = deposit["integrity_digest"]
+		# A valid Deposit finding may name either declared voucher type.  The
+		# server projection above has already proved the pair came from the frozen
+		# launch config; retain the generic existence/read-permission check below.
+		allowed_refs.add("Payment Entry")
+		if "pf_esi_deposit_due_date" not in token_set:
+			raise InvalidArgumentError("Payroll deposit rule tokens do not match the active agent listing.")
+		canvas_ref = None
+		dashboard = None
+	else:
+		raw_findings = _as_list(findings)
+		coverage = _as_dict(coverage)
+		scope = _as_dict(scope)
+		truncated = bool(truncated)
+		# A model-supplied rows_consumed is only ever used to DETECT an under-fetch (it
+		# can force a run partial, never mask one — a bogus value cannot upgrade a run to
+		# completed), so coercing a bad value to None (skip reconciliation) is safe.
+		rows_consumed_val = None
+		if rows_consumed is not None:
+			try:
+				rows_consumed_val = int(rows_consumed)
+			except (TypeError, ValueError):
+				rows_consumed_val = None
 	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(run_doc.agent)
@@ -283,16 +325,6 @@ def record_agent_run(
 		)
 		if not review_ready:
 			integrity_digest = None
-
-	# A model-supplied rows_consumed is only ever used to DETECT an under-fetch (it
-	# can force a run partial, never mask one — a bogus value cannot upgrade a run to
-	# completed), so coercing a bad value to None (skip reconciliation) is safe.
-	rows_consumed_val = None
-	if rows_consumed is not None:
-		try:
-			rows_consumed_val = int(rows_consumed)
-		except (TypeError, ValueError):
-			rows_consumed_val = None
 
 	valid, dropped = _validate_findings(raw_findings, token_set, allowed_refs)
 	if review_backend:

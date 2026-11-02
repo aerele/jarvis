@@ -33,8 +33,6 @@ DEPOSIT = {
 	"reviewer": "reviewer@example.test",
 	"reviewer_capacity": True,
 }
-DASHBOARD = "PRIVATE-DEPOSIT-DASHBOARD"
-REPORT_HTML = "<!doctype html><html><body>Private payroll deposit report</body></html>"
 
 
 def _launch() -> dict:
@@ -52,7 +50,7 @@ def _launch() -> dict:
 	)
 
 
-def _receipt(launch: dict, source_snapshot=None, report=None) -> dict:
+def _receipt(launch: dict, source_snapshot=None) -> dict:
 	return {
 		"contract": snapshot.RECEIPT_CONTRACT,
 		"launch": {
@@ -62,11 +60,10 @@ def _receipt(launch: dict, source_snapshot=None, report=None) -> dict:
 			"scope_config_digest": launch["scope_config_digest"],
 		},
 		"source_snapshot": source_snapshot,
-		"report": report,
 	}
 
 
-def _run(launch=None, source_snapshot=None, report=None, dashboard=None) -> frappe._dict:
+def _run(launch=None, source_snapshot=None, dashboard=None) -> frappe._dict:
 	launch = launch or _launch()
 	return frappe._dict(
 		{
@@ -77,7 +74,7 @@ def _run(launch=None, source_snapshot=None, report=None, dashboard=None) -> frap
 			"session_key": "agent:agent-statutory-payroll-deposit-status:DEP-PRIVATE-RUN",
 			"assessment_config_json": json.dumps(launch),
 			"scope_json": json.dumps(SCOPE),
-			"input_snapshot_json": json.dumps(_receipt(launch, source_snapshot, report)),
+			"input_snapshot_json": json.dumps(_receipt(launch, source_snapshot)),
 		}
 	)
 
@@ -175,8 +172,30 @@ def _ensure_run_as_user(email: str) -> str:
 	return email
 
 
-def _report_proof(dashboard=DASHBOARD, html=REPORT_HTML) -> dict:
-	return {"dashboard": dashboard, "report_sha256": snapshot.report_sha256(html)}
+def _v2_output(captured: dict, **overrides) -> dict:
+	"""The exact compact handoff shape accepted from the v2 bundle."""
+	value = {
+		"findings": [
+			{
+				"token": "pf_esi_deposit_due_date",
+				"ref_doctype": "Journal Entry",
+				"ref_name": "JE-DEP-TEST",
+			}
+		],
+		"coverage": {
+			"pf_esi_deposit_due_date": {"state": "evaluated"},
+			"s7q_interest_table": {"state": "evaluated"},
+			"s14b_damages_table": {"state": "evaluated"},
+		},
+		"scope": deepcopy(SCOPE),
+		"truncated": False,
+		"rows_consumed": sum(row["data"]["rows"] for row in captured["source_receipts"]),
+		"integrity_digest": "a" * 64,
+		"input_snapshot_id": captured["snapshot_id"],
+		"input_snapshot_digest": captured["snapshot_digest"],
+	}
+	value.update(overrides)
+	return value
 
 
 class TestPayrollDepositPrivateSnapshot(TestCase):
@@ -211,6 +230,47 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 		finally:
 			frappe.set_user(previous_user)
 
+	def test_private_server_query_keeps_a_complete_200_row_source_over_model_budget(self):
+		"""The server source path must not inherit the model result-byte cap."""
+		from jarvis.tools import query as query_tool
+
+		rows = [{"name": f"COMP-{n}-{'x' * 220}", "default_currency": "INR"} for n in range(200)]
+
+		class Query:
+			def limit(self, value):
+				self.limit_value = value
+				return self
+
+			def run(self, *, as_dict):
+				if not as_dict:
+					raise AssertionError("private query must request dict rows")
+				return deepcopy(rows)
+
+			def get_sql(self):
+				return "select name, default_currency from tabCompany"
+
+		query = Query()
+		spec = {"from": "Company", "select": ["name", "default_currency"], "limit": 200}
+		with (
+			patch.object(query_tool, "compile_spec", return_value=query),
+			patch.object(query_tool, "_masking_for_rows", return_value=([], {})),
+			patch.object(query_tool.masking, "mask_rows"),
+			patch("jarvis.tools._export.saved_queries.save", return_value="SAVED-QUERY"),
+		):
+			public = query_tool.query(spec, confirm_large=True)
+			with _private_output.request(True):
+				private = query_tool._query_private_server(spec, confirm_large=True)
+				captured = snapshot._source_rows("company", spec, 200)
+
+		self.assertTrue(public["partial"])
+		self.assertEqual(len(public["rows"]), 200)
+		self.assertNotIn("partial", private)
+		self.assertNotIn("more_rows", private)
+		self.assertEqual(private["rows"], rows)
+		self.assertEqual(captured, rows)
+		with self.assertRaises(InvalidArgumentError):
+			query_tool._query_private_server(spec, confirm_large=True)
+
 	def test_launch_config_does_not_follow_later_installation_mutation(self):
 		launch = _launch()
 		mutated = frappe._dict(
@@ -243,7 +303,9 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 		spec = snapshot.source_specs(SCOPE, _launch()["config"])["company"]
 		with self.assertRaises(InvalidArgumentError):
 			snapshot._source_rows("company", spec, snapshot.SOURCE_CAP + 1)
-		with patch.object(snapshot.query_tool, "query", return_value={"rows": [], "more_rows": True}):
+		with patch.object(
+			snapshot.query_tool, "_query_private_server", return_value={"rows": [], "more_rows": True}
+		):
 			with self.assertRaises(InvalidArgumentError):
 				snapshot._source_rows("company", spec, 0)
 
@@ -263,7 +325,7 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 		run = _run()
 		run.assessment_config_json = None
 		with (
-			patch.object(snapshot.query_tool, "query") as query,
+			patch.object(snapshot.query_tool, "_query_private_server") as query,
 			self.assertRaises(InvalidArgumentError),
 		):
 			snapshot.capture(run)
@@ -289,91 +351,65 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 		self.assertNotIn("SECRET-PRIVATE-ROW", json.dumps(receipt))
 		self.assertNotIn("SECRET-PRIVATE-ROW", json.dumps(receipt["data"]))
 
-	def test_writeback_refuses_changed_scope_and_bad_snapshot_proof(self):
+	def test_v2_writeback_accepts_only_a_compact_server_projected_shape(self):
 		captured, _ = _captured_snapshot()
-		launch = _launch()
-		proof = _report_proof()
-		run = _run(launch, snapshot._metadata(captured), proof, DASHBOARD)
-		with self.assertRaises(InvalidArgumentError):
-			snapshot.validate_writeback(
-				run,
-				{**SCOPE, "company": "Other Company"},
-				captured["snapshot_id"],
-				captured["snapshot_digest"],
-				DASHBOARD,
-				proof["report_sha256"],
-			)
-		with self.assertRaises(InvalidArgumentError):
-			snapshot.validate_writeback(
-				run, SCOPE, "other", captured["snapshot_digest"], DASHBOARD, proof["report_sha256"]
-			)
-		self.assertEqual(
-			snapshot.validate_writeback(
-				run,
-				SCOPE,
-				captured["snapshot_id"],
-				captured["snapshot_digest"],
-				DASHBOARD,
-				proof["report_sha256"],
-			),
-			SCOPE,
-		)
+		run = _run(source_snapshot=snapshot._metadata(captured))
+		projected = snapshot.validate_writeback(run, **_v2_output(captured))
+		self.assertEqual(projected["scope"], SCOPE)
+		self.assertEqual(projected["findings"][0]["severity"], "warning")
+		self.assertEqual(projected["findings"][0]["result_class"], "derived_candidate")
+		self.assertNotIn("SECRET-PRIVATE-ROW", json.dumps(projected))
 
-	def test_dashboard_proof_refuses_missing_fake_or_changed_report(self):
+	def test_v2_writeback_refuses_scope_snapshot_and_row_count_changes(self):
 		captured, _ = _captured_snapshot()
-		launch = _launch()
-		proof = _report_proof()
-		missing = _run(launch, snapshot._metadata(captured), dashboard=DASHBOARD)
-		with self.assertRaises(InvalidArgumentError):
-			snapshot.validate_writeback(
-				missing,
-				SCOPE,
-				captured["snapshot_id"],
-				captured["snapshot_digest"],
-				DASHBOARD,
-				proof["report_sha256"],
-			)
-
-		stamped = _run(launch, snapshot._metadata(captured), proof, DASHBOARD)
-		with self.assertRaises(InvalidArgumentError):
-			snapshot.validate_writeback(
-				stamped,
-				SCOPE,
-				captured["snapshot_id"],
-				captured["snapshot_digest"],
-				"FAKE-DASHBOARD",
-				proof["report_sha256"],
-			)
-		with self.assertRaises(InvalidArgumentError):
-			snapshot.validate_writeback(
-				stamped,
-				SCOPE,
-				captured["snapshot_id"],
-				captured["snapshot_digest"],
-				DASHBOARD,
-				"0" * 64,
-			)
-
-	def test_report_stamp_keeps_dashboard_html_out_of_the_run_receipt(self):
-		captured, _ = _captured_snapshot()
-		launch = _launch()
-		run = _run(launch, snapshot._metadata(captured), dashboard=DASHBOARD)
-		proof = _report_proof()
-		with (
-			patch.object(frappe.db, "get_value", return_value=run),
-			patch.object(frappe.db, "set_value") as set_value,
+		run = _run(source_snapshot=snapshot._metadata(captured))
+		for changed in (
+			{"scope": {**SCOPE, "company": "Other Company"}},
+			{"input_snapshot_id": "other"},
+			{"rows_consumed": 0},
+			{"integrity_digest": "A" * 64},
+			{
+				"coverage": {
+					**_v2_output(captured)["coverage"],
+					"pf_esi_deposit_due_date": {"state": []},
+				}
+			},
 		):
-			snapshot.stamp_report(run.name, DASHBOARD, proof["report_sha256"])
-		stored = set_value.call_args.args[3]
-		self.assertEqual(json.loads(stored)["report"], proof)
-		self.assertNotIn(REPORT_HTML, stored)
+			with self.subTest(changed=changed), self.assertRaises(InvalidArgumentError):
+				snapshot.validate_writeback(run, **_v2_output(captured, **changed))
 
-	def test_dashboard_save_hashes_original_html_before_shadow_transform(self):
+	def test_v2_writeback_refuses_every_delegate_free_text_route(self):
+		captured, _ = _captured_snapshot()
+		run = _run(source_snapshot=snapshot._metadata(captured))
+		sentinel = "PRIVATE-SOURCE-SENTINEL"
+		bad_finding = _v2_output(captured)
+		bad_finding["findings"][0]["note"] = sentinel
+		bad_coverage = _v2_output(captured)
+		bad_coverage["coverage"]["pf_esi_deposit_due_date"]["detail"] = sentinel
+		for bad in (
+			bad_finding,
+			bad_coverage,
+			_v2_output(captured, dashboard=sentinel),
+			_v2_output(captured, report_sha256=sentinel),
+			_v2_output(captured, canvas_ref=sentinel),
+		):
+			with self.subTest(bad=bad), self.assertRaises(InvalidArgumentError):
+				snapshot.validate_writeback(run, **bad)
+
+	def test_v1_report_bound_receipts_fail_closed(self):
+		captured, _ = _captured_snapshot()
+		run = _run(source_snapshot=snapshot._metadata(captured))
+		legacy = json.loads(run.input_snapshot_json)
+		legacy["contract"] = "payroll_deposit_snapshot_receipt_v1"
+		legacy["report"] = {"dashboard": "old", "report_sha256": "a" * 64}
+		run.input_snapshot_json = json.dumps(legacy)
+		with self.assertRaises(InvalidArgumentError):
+			snapshot.validate_writeback(run, **_v2_output(captured))
+
+	def test_deposit_dashboard_save_is_refused_before_any_html_persistence(self):
 		from jarvis.tools import _agent_run_ctx
 		from jarvis.tools import save_agent_dashboard as tool
 
-		original = "<html><body>Original private deposit report</body></html>"
-		transformed = "<html><body>Server shadow preview</body></html>"
 		run_row = frappe._dict(
 			name="DEP-PRIVATE-RUN",
 			agent=snapshot.AGENT,
@@ -381,45 +417,25 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 			installation="DEP-PRIVATE-INSTALL",
 			dashboard=None,
 		)
-		run_doc = frappe._dict(name=run_row.name)
-		inst = frappe._dict(activation_state="shadow")
-
-		def db_value(doctype, _filters_or_name, fieldname, **_kwargs):
-			if doctype == "Jarvis Agent Run":
-				return run_row
-			if doctype == "Jarvis Dashboard" and fieldname == "owner":
-				return "reviewer@example.test"
-			if doctype == "Jarvis Dashboard" and fieldname == "dashboard_title":
-				return "Private Deposit Report"
-			raise AssertionError(f"unexpected dashboard database read: {doctype}/{fieldname}")
-
 		_agent_run_ctx.set_session_key("private-dashboard-session")
 		try:
 			with (
-				patch.object(frappe.db, "get_value", side_effect=db_value),
-				patch.object(
-					frappe,
-					"get_doc",
-					side_effect=lambda doctype, _name: inst
-					if doctype == "Jarvis Agent Installation"
-					else run_doc,
-				),
-				patch("jarvis.chat.agent_runs._visibility_owner", return_value="reviewer@example.test"),
-				patch("jarvis.chat.agent_runs.persist_agent_dashboard", return_value=DASHBOARD) as persist,
-				patch.object(tool, "_shadow_gate_html", return_value=transformed),
-				patch.object(snapshot, "stamp_report") as stamp_report,
+				patch.object(frappe.db, "get_value", return_value=run_row),
+				patch.object(frappe, "get_doc") as get_doc,
 			):
-				saved = tool.save_agent_dashboard(html=original, title="Private Deposit Report")
+				for kwargs in (
+					{"html": "<html>PRIVATE-SOURCE-SENTINEL</html>"},
+					{
+						"html": "<html>safe</html>",
+						"title": "PRIVATE-SOURCE-SENTINEL",
+						"description": "PRIVATE-SOURCE-SENTINEL",
+					},
+				):
+					with self.subTest(kwargs=kwargs), self.assertRaises(InvalidArgumentError):
+						tool.save_agent_dashboard(**kwargs)
 		finally:
 			_agent_run_ctx.clear_session_key()
-
-		self.assertEqual(saved["dashboard"], DASHBOARD)
-		self.assertEqual(persist.call_args.args[2], transformed)
-		self.assertEqual(
-			stamp_report.call_args.args,
-			(run_doc.name, DASHBOARD, snapshot.report_sha256(original)),
-		)
-		self.assertNotEqual(snapshot.report_sha256(original), snapshot.report_sha256(transformed))
+		get_doc.assert_not_called()
 
 
 class TestPayrollDepositPrivateTransport(TestCase):
@@ -509,11 +525,33 @@ class TestPayrollDepositPrivateTransport(TestCase):
 		capture.assert_not_called()
 
 		correct_cap = {**wrong_agent, "agent": snapshot.AGENT}
+		correct_cap["tools_allow"] = ["jarvis__get_payroll_deposit_inputs"]
 		with (
 			_private_output.request(True),
 			patch.object(tool, "get_session_key", return_value="private-session"),
 			patch.object(tool._delegate_capability, "resolve", return_value=correct_cap),
 			patch.object(frappe.db, "get_value", return_value="different-user@example.test"),
+			patch.object(tool.payroll_deposit_snapshot, "capture") as capture,
+			self.assertRaises(InvalidArgumentError),
+		):
+			tool.get_payroll_deposit_inputs()
+		capture.assert_not_called()
+
+	def test_direct_source_capture_requires_the_exact_snapshotted_tool(self):
+		from jarvis.tools import get_payroll_deposit_inputs as tool
+
+		cap = {
+			"run": "DEP-PRIVATE-RUN",
+			"status": "running",
+			"agent": snapshot.AGENT,
+			"run_as": "run-as@example.test",
+			"legacy": False,
+			"tools_allow": ["get_payroll_deposit_inputs"],
+		}
+		with (
+			_private_output.request(True),
+			patch.object(tool, "get_session_key", return_value="private-session"),
+			patch.object(tool._delegate_capability, "resolve", return_value=cap),
 			patch.object(tool.payroll_deposit_snapshot, "capture") as capture,
 			self.assertRaises(InvalidArgumentError),
 		):
@@ -559,6 +597,7 @@ class TestPayrollDepositPrivateTransport(TestCase):
 			"agent": snapshot.AGENT,
 			"run_as": run_as,
 			"legacy": False,
+			"tools_allow": ["jarvis__get_payroll_deposit_inputs"],
 		}
 		try:
 			frappe.set_user(run_as)
@@ -568,7 +607,7 @@ class TestPayrollDepositPrivateTransport(TestCase):
 				patch.object(tool._delegate_capability, "resolve", return_value=cap),
 				patch.object(frappe.db, "get_value", side_effect=db_value),
 				patch.object(frappe.db, "set_value"),
-				patch.object(snapshot.query_tool, "query", side_effect=query),
+				patch.object(snapshot.query_tool, "_query_private_server", side_effect=query),
 			):
 				captured = tool.get_payroll_deposit_inputs()
 		finally:
@@ -576,3 +615,265 @@ class TestPayrollDepositPrivateTransport(TestCase):
 
 		self.assertEqual(captured["contract"], snapshot.CONTRACT)
 		self.assertEqual(queried_as, [run_as] * (len(snapshot.SOURCE_ORDER) * 3))
+
+
+class TestPayrollDepositWritebackClaim(TestCase):
+	def test_finalized_claim_is_idempotent_under_the_run_row_lock(self):
+		"""A second writer that waited on the claim lock must not persist again."""
+		from jarvis.tools import _agent_run_ctx
+		from jarvis.tools import record_agent_run as tool
+
+		row = frappe._dict(
+			name="DEP-PRIVATE-RUN",
+			status="completed",
+			installation="DEP-PRIVATE-INSTALL",
+			agent=snapshot.AGENT,
+		)
+		_agent_run_ctx.set_session_key("private-writeback-session")
+		try:
+			with patch.object(frappe.db, "get_value", return_value=row) as get_value:
+				result = tool.record_agent_run(findings=[{"note": "PRIVATE-SOURCE-SENTINEL"}])
+		finally:
+			_agent_run_ctx.clear_session_key()
+		self.assertTrue(result["idempotent"])
+		self.assertEqual(result["status"], "completed")
+		self.assertTrue(get_value.call_args.kwargs["for_update"])
+
+	def test_malformed_deposit_writeback_stops_before_persistence(self):
+		from jarvis.tools import _agent_run_ctx
+		from jarvis.tools import record_agent_run as tool
+
+		captured, _ = _captured_snapshot()
+		run_doc = _run(source_snapshot=snapshot._metadata(captured))
+		run_row = frappe._dict(
+			name=run_doc.name,
+			status="running",
+			installation="DEP-PRIVATE-INSTALL",
+			agent=snapshot.AGENT,
+		)
+		listing = frappe._dict(
+			rule_tokens=json.dumps(sorted(snapshot._WRITEBACK_TOKENS)), doctypes_required="[]"
+		)
+
+		def db_value(doctype, *_args, **_kwargs):
+			if doctype == "Jarvis Agent Run":
+				return run_row
+			if doctype == "Jarvis Agent Listing":
+				return listing
+			raise AssertionError(f"unexpected read: {doctype}")
+
+		inst = frappe._dict(agent=snapshot.AGENT, activation_state="shadow")
+		_agent_run_ctx.set_session_key("private-writeback-session")
+		try:
+			with (
+				patch.object(frappe.db, "get_value", side_effect=db_value) as get_value,
+				patch.object(
+					frappe,
+					"get_doc",
+					side_effect=lambda doctype, _name: inst
+					if doctype == "Jarvis Agent Installation"
+					else run_doc,
+				),
+				patch("jarvis.chat.agent_runs.record_delegate_run") as persist,
+				self.assertRaises(InvalidArgumentError),
+			):
+				tool.record_agent_run(
+					**_v2_output(
+						captured,
+						findings=[
+							{
+								"token": "pf_esi_deposit_due_date",
+								"ref_doctype": "Journal Entry",
+								"ref_name": "JE-DEP-TEST",
+								"note": "PRIVATE-SOURCE-SENTINEL",
+							}
+						],
+					)
+				)
+		finally:
+			_agent_run_ctx.clear_session_key()
+		self.assertTrue(get_value.call_args_list[0].kwargs["for_update"])
+		persist.assert_not_called()
+
+	def test_valid_v2_writeback_forces_the_server_fallback_dashboard(self):
+		from jarvis.tools import _agent_run_ctx
+		from jarvis.tools import record_agent_run as tool
+
+		captured, _ = _captured_snapshot()
+		run_doc = _run(source_snapshot=snapshot._metadata(captured))
+		run_doc.owner = "owner@example.test"
+		run_row = frappe._dict(
+			name=run_doc.name,
+			status="running",
+			installation="DEP-PRIVATE-INSTALL",
+			agent=snapshot.AGENT,
+		)
+		listing = frappe._dict(
+			rule_tokens=json.dumps(sorted(snapshot._WRITEBACK_TOKENS)), doctypes_required="[]"
+		)
+		final = frappe._dict(
+			name=run_doc.name,
+			status="completed",
+			findings_count=1,
+			blocker_count=0,
+			coverage_note="",
+			dashboard="SERVER-FALLBACK-DASHBOARD",
+			owner=run_doc.owner,
+		)
+
+		def db_value(doctype, *_args, **_kwargs):
+			if doctype == "Jarvis Agent Run":
+				return run_row
+			if doctype == "Jarvis Agent Listing":
+				return listing
+			raise AssertionError(f"unexpected read: {doctype}")
+
+		inst = frappe._dict(agent=snapshot.AGENT, activation_state="shadow")
+		_agent_run_ctx.set_session_key("private-writeback-session")
+		try:
+			with (
+				patch.object(frappe.db, "get_value", side_effect=db_value),
+				patch.object(frappe.db, "exists", return_value=True),
+				patch.object(frappe, "has_permission", return_value=True),
+				patch.object(
+					frappe,
+					"get_doc",
+					side_effect=lambda doctype, _name: inst
+					if doctype == "Jarvis Agent Installation"
+					else run_doc,
+				),
+				patch("jarvis.chat.operator_review.backend", return_value=None),
+				patch("jarvis.chat.agent_runs.record_delegate_run", return_value=final) as persist,
+				patch("jarvis.chat.agent_run_steps.record_step"),
+			):
+				result = tool.record_agent_run(**_v2_output(captured))
+		finally:
+			_agent_run_ctx.clear_session_key()
+
+		self.assertEqual(result["dashboard"], "SERVER-FALLBACK-DASHBOARD")
+		self.assertIsNone(persist.call_args.kwargs["dashboard"])
+		self.assertIsNone(persist.call_args.kwargs["canvas_ref"])
+		persisted = persist.call_args.args[2][0]
+		self.assertEqual(persisted["severity"], "warning")
+		self.assertNotIn("SECRET-PRIVATE-ROW", json.dumps(persist.call_args))
+
+
+class TestPayrollDepositPrivateAuditRedaction(TestCase):
+	def _cap(self, tools_allow):
+		return {
+			"run": "DEP-PRIVATE-RUN",
+			"owner": "owner@example.test",
+			"status": "running",
+			"agent": snapshot.AGENT,
+			"legacy": False,
+			"tools_allow": tools_allow,
+		}
+
+	def _dispatch_with_receipt_capture(self, cap, tool, args, run_result=None):
+		from jarvis import api
+
+		receipts, logs = [], []
+
+		class Logger:
+			def info(self, value):
+				logs.append(value)
+
+			def error(self, value, *args, **kwargs):
+				logs.append(value)
+
+		def insert(_conversation, fields, **_kwargs):
+			receipts.append(deepcopy(fields))
+			return "TOOL-MESSAGE"
+
+		patches = (
+			patch("jarvis.chat.collaboration.require_legacy_session"),
+			patch.object(api, "impersonate"),
+			patch.object(_delegate_capability, "resolve", return_value=cap),
+			patch.object(api, "_get_header", return_value=None),
+			patch.object(frappe.db, "get_value", return_value="owner@example.test"),
+			patch.object(frappe.db, "commit"),
+			patch.object(api, "_locked_insert_chat_message", side_effect=insert),
+			patch.object(api, "publish_realtime_tool_result"),
+			patch.object(api, "_maybe_attach_artifact"),
+			patch("jarvis.chat.collaboration_turn.current_turn", return_value=None),
+			patch.object(frappe, "logger", return_value=Logger()),
+		)
+		with (
+			patches[0],
+			patches[1],
+			patches[2],
+			patches[3],
+			patches[4],
+			patches[5],
+			patches[6],
+			patches[7],
+			patches[8],
+			patches[9],
+			patches[10],
+		):
+			if run_result is None:
+				result = api._dispatch_from_session("owner@example.test", "private-session", tool, args)
+			else:
+				with (
+					patch.object(api, "_run_tool", return_value=run_result),
+					patch("jarvis.chat.connector_focus.refusal", return_value=None),
+				):
+					result = api._dispatch_from_session("owner@example.test", "private-session", tool, args)
+		return result, receipts, logs
+
+	def test_denied_dashboard_arguments_never_reach_audit_or_transcript(self):
+		sentinel = "PRIVATE-SOURCE-SENTINEL"
+		result, receipts, logs = self._dispatch_with_receipt_capture(
+			self._cap(["jarvis__record_agent_run"]),
+			"save_agent_dashboard",
+			{"html": f"<html>{sentinel}</html>"},
+		)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "CapabilityDeniedError")
+		self.assertEqual(len(receipts), 1)
+		self.assertNotIn(sentinel, json.dumps(receipts))
+		self.assertNotIn(sentinel, "\n".join(str(row) for row in logs))
+		self.assertIn("private_delegate_args_redacted", receipts[0]["tool_args"])
+
+	def test_malformed_writeback_arguments_never_reach_receipt_or_step(self):
+		from jarvis import api
+		from jarvis.chat import agent_run_steps
+
+		sentinel = "PRIVATE-SOURCE-SENTINEL"
+		args = {
+			"findings": [{"note": sentinel}],
+			"coverage": {"detail": sentinel},
+			"dashboard": sentinel,
+		}
+		result, receipts, _logs = self._dispatch_with_receipt_capture(
+			self._cap(["jarvis__record_agent_run"]),
+			"record_agent_run",
+			args,
+			run_result={"ok": False, "error": {"code": "InvalidArgumentError", "message": "invalid"}},
+		)
+		self.assertFalse(result["ok"])
+		self.assertEqual(len(receipts), 1)
+		self.assertNotIn(sentinel, json.dumps(receipts))
+
+		cap = self._cap(["jarvis__record_agent_run"])
+		token = _private_output.begin_delegate_redaction(cap)
+		try:
+			with (
+				patch.object(
+					agent_run_steps, "humanize_tool_call", return_value=("label", "detail")
+				) as humanize,
+				patch.object(agent_run_steps, "record_step"),
+			):
+				api._record_tool_step(
+					{"name": "DEP-PRIVATE-RUN", "owner": "owner@example.test"},
+					"save_agent_dashboard",
+					{"html": sentinel},
+					None,
+					ok=False,
+					started_ms=0,
+					error_message="invalid",
+				)
+		finally:
+			_private_output.end_delegate_redaction(token)
+		self.assertNotIn(sentinel, json.dumps(humanize.call_args.args[1]))
+		self.assertEqual(humanize.call_args.args[1], {"private_delegate_args_redacted": True})

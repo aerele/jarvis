@@ -446,6 +446,7 @@ def _dispatch_from_session(
 	# but the seq race is still fixed under the conversation lock.
 	tool_call_id = (_get_header("X-Jarvis-Tool-Call-Id") or "").strip() or None
 	_agent_run_ctx.set_session_key(session_key)
+	redaction_token = None
 	try:
 		with impersonate(user):
 			# JF-017 — the delegate capability gate, BEFORE anything is dispatched.
@@ -462,6 +463,10 @@ def _dispatch_from_session(
 			# #1062 step timeline further down, which needs the run's name, owner and
 			# status. A non-delegate session resolves to None and both are no-ops.
 			cap = _delegate_capability.resolve(session_key)
+			# A denied Deposit call can still carry source-bearing arguments. Enable
+			# the fixed safe projection before every denial, receipt, audit, and step
+			# branch below.
+			redaction_token = _private_output.begin_delegate_redaction(cap)
 			denial = _delegate_capability.tool_denial(session_key, tool, cap=cap)
 			if denial:
 				code = CapabilityDeniedError.__name__
@@ -667,6 +672,8 @@ def _dispatch_from_session(
 			)
 			return result
 	finally:
+		if redaction_token is not None:
+			_private_output.end_delegate_redaction(redaction_token)
 		_agent_run_ctx.clear_session_key()
 		_agent_run_ctx.take_armed_by_macro()  # belt: never leak an armed marker across dispatches
 		_agent_run_ctx.take_armed_by_skill()  # belt: same for the approved-skill-run marker
@@ -705,10 +712,13 @@ def _record_tool_step(
 		return
 	try:
 		from jarvis.chat import agent_run_steps
+		from jarvis.tools import _private_output
 
 		if agent_run_steps.bare_tool(tool) in _SELF_NARRATING_TOOLS:
 			return
-		label, detail = agent_run_steps.humanize_tool_call(tool, args, data if ok else None)
+		label, detail = agent_run_steps.humanize_tool_call(
+			tool, _private_output.redact_delegate_args(args), data if ok else None
+		)
 		if not ok:
 			detail = agent_run_steps.error_detail(error_message) or detail
 		elif agent_run_steps.is_pending_confirmation(data):
@@ -915,6 +925,11 @@ def persist_tool_receipt(
 	``overwrite_outcomes``: with ``flip_token``, also re-flip that token's row when it
 	already carries one of these chips (a pending-action settle whose executed or
 	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``)."""
+	from jarvis.tools import _private_output
+
+	# Do this before entity extraction and JSON persistence. It covers normal
+	# calls, capability refusals, parse errors, and failed Deposit writebacks.
+	args = _private_output.redact_delegate_args(args)
 	result = result or {}
 	from jarvis.chat.source_receipts import source_receipt
 

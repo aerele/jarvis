@@ -1687,10 +1687,7 @@
       "tools_allow": [
         "jarvis__get_payroll_deposit_inputs",
         "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "exec",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
         "Journal Entry",

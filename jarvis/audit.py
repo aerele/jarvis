@@ -40,6 +40,11 @@ def record(
 
 	Best-effort: never raises (audit must not break or fail the tool)."""
 	try:
+		# Deposit calls can be refused before their tool runs.  Project arguments at
+		# the logging boundary so those failures cannot retain private source values.
+		from jarvis.tools import _private_output
+
+		args = _private_output.redact_delegate_args(args)
 		doctype, name, method = _ref(args, result)
 		scrubbed = _scrub(args, _password_fields(doctype))
 		rendered = json.dumps(scrubbed, default=str)
