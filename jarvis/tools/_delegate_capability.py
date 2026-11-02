@@ -345,6 +345,13 @@ def tool_denial(session_key: str | None, tool: str, cap=_UNRESOLVED) -> dict | N
 	# patched resolve already produced before the contract was passed in.
 	if not isinstance(cap, dict):
 		return None
+	# A code-owned close outranks both a historic live-listing fallback and a
+	# launch snapshot. It must run before the legacy bypass below.
+	from jarvis.chat.agent_closure import delegate_tool_denial
+
+	closed_denial = delegate_tool_denial(cap, tool)
+	if closed_denial:
+		return closed_denial
 	name = normalize_tool(tool)
 
 	# _ALWAYS_GATED tools are refused for a legacy run OUTRIGHT, before the

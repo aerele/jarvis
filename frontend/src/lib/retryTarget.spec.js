@@ -83,7 +83,7 @@ describe("ChatView uses the rule", () => {
 		expect(gate).toContain("mi === retryIdx");
 		expect(gate).not.toContain("visibleMessages.length - 1");
 		expect(src).toMatch(
-			/const retryIdx = computed\(\(\) => retryTargetIndex\(visibleMessages\.value\)\)/
+			/const retryIdx = computed\(\(\) =>\s*hasCurrentMessageSnapshot\.value \? retryTargetIndex\(visibleMessages\.value\) : -1,?\s*\)/
 		);
 	});
 
@@ -93,7 +93,7 @@ describe("ChatView uses the rule", () => {
 		expect(button).toContain("retryText");
 		expect(button).not.toContain('"Retry"');
 		expect(src).toMatch(
-			/const retryText = computed\(\(\) => retryLabel\(visibleMessages\.value\)\)/
+			/const retryText = computed\(\(\) =>\s*hasCurrentMessageSnapshot\.value \? retryLabel\(visibleMessages\.value\) : "",?\s*\)/
 		);
 	});
 });

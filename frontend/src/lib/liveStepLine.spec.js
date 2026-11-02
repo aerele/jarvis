@@ -84,7 +84,7 @@ describe("live steps box wiring", () => {
 			"const slot = artifactKind.value ? artifactTickIndex.value : null;"
 		);
 		expect(body).toMatch(
-			/steps: addStep\(\s*sameRun \? liveSteps\.value\.steps : \[\],\s*p\.text,\s*slot,\s*nextActivityOrd\(\)\s*\)/
+			/steps: addStep\(\s*sameRun \? liveSteps\.value\.steps : \[\],\s*p\.text,\s*slot,\s*nextActivityOrd\(\)\s*,?\s*\)/
 		);
 	});
 
