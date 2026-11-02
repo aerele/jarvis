@@ -83,6 +83,10 @@ def seal_output(source, result):
 class TestReceivablesReview(FrappeTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
+		# Mocked source documents must not replace System Settings on a cold date cache.
+		clock = patch.object(frappe.utils, "today", return_value="2026-09-30")
+		clock.start()
+		self.addCleanup(clock.stop)
 
 	def test_configuration_required_and_explicit(self):
 		with patch.object(frappe.utils, "today", return_value="2026-09-30"), patch.object(frappe, "get_doc"):
@@ -401,7 +405,7 @@ class TestReceivablesReview(FrappeTestCase):
 			patch.object(frappe.db, "get_value", side_effect=[1, None, 1, "REVIEW", prior]),
 			patch.object(frappe, "get_doc", return_value=artifact) as create,
 			patch.object(review, "collect", return_value=source),
-			patch.object(frappe.share, "add"),
+			patch.object(frappe.share, "add_docshare"),
 		):
 			inst = frappe._dict(name="INST", reviewer="Administrator")
 			self.assertEqual(review.stage_reviews(run, inst, [finding]), ["REVIEW"])

@@ -14,8 +14,38 @@ from jarvis.permissions import NotRenamable
 
 
 class JarvisChatSession(NotRenamable, Document):
-	# Minimal controller - all validation is handled by field constraints.
-	# session_key is unique+mandatory; user is a mandatory Link to User.
+	# Legacy rows retain their field constraints. Collaborative auth rows also
+	# require an immutable, matching identity ledger entry.
+	def validate(self):
+		from jarvis.chat import collaboration as c
+
+		c.guard_server_fields(self, ("collaboration_binding",))
+		before = None if self.is_new() else self.get_doc_before_save()
+		if (
+			self.get("collaboration_binding")
+			or (before and before.get("collaboration_binding"))
+			or c.NAMESPACE in (self.session_key or "")
+		):
+			if not self.flags.jarvis_collaboration_write:
+				c._deny()
+			if before and (self.has_value_changed("user") or self.has_value_changed("session_key")):
+				c._deny()
+			binding = frappe.db.get_value(
+				c.BINDING, self.get("collaboration_binding"), ["actor", "session_key", "state"], as_dict=True
+			)
+			if (
+				not binding
+				or binding.state != "Active"
+				or binding.actor != self.user
+				or binding.session_key != self.session_key
+			):
+				c._deny()
+
+	def on_trash(self):
+		from jarvis.chat import collaboration as c
+
+		if c.is_collaborative_session(self.session_key):
+			c._deny()
 
 	def before_insert(self):
 		if not self.created_at:

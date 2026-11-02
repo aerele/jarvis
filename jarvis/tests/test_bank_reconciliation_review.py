@@ -1062,16 +1062,14 @@ class TestBankReconApprovalPermissions(FrappeTestCase):
 		doc = frappe.get_doc("Jarvis Approval Request", names[0])
 		self.assertEqual(doc.conversation, conversation.name)
 		self.assertTrue(doc.assessment_evidence)
-		self.assertTrue(
-			frappe.db.exists(
-				"DocShare",
-				{
-					"share_doctype": "Jarvis Approval Request",
-					"share_name": doc.name,
-					"user": self.reviewer,
-					"read": 1,
-				},
-			)
+		shares = frappe.get_all(
+			"DocShare",
+			filters={"share_doctype": "Jarvis Approval Request", "share_name": doc.name},
+			fields=["user", "read", "write", "submit", "share", "everyone"],
+		)
+		self.assertEqual(
+			[dict(share) for share in shares],
+			[{"user": self.reviewer, "read": 1, "write": 0, "submit": 0, "share": 0, "everyone": 0}],
 		)
 
 	def test_foreign_existing_review_blocks_all_staged_changes(self):

@@ -7,7 +7,10 @@
 		<div class="pcal-panel-heading">
 			<div>
 				<h2 id="upcoming-heading">Upcoming payments</h2>
-				<p>
+				<p v-if="snapshot.scope.month">
+					After {{ dateLabel(selected) }} · {{ monthLabel(selected.slice(0, 7)) }}
+				</p>
+				<p v-else>
 					{{ dateLabel(addDays(selected, 1)) }} – {{ dateLabel(addDays(selected, 30)) }}
 				</p>
 			</div>
@@ -15,9 +18,16 @@
 		<p v-if="snapshot.unavailable?.Payable" class="pcal-empty">
 			Upcoming payments unavailable for this scope.
 		</p>
+		<p v-else-if="loadError" class="pcal-empty">
+			Payments will appear after this month is loaded.
+		</p>
 		<p v-else-if="loading" class="pcal-empty" role="status">Loading upcoming payments…</p>
 		<p v-else-if="!rows.length" class="pcal-empty">
-			No upcoming payments in the next 30 days.
+			{{
+				snapshot.scope.month
+					? "No further payments in this month."
+					: "No upcoming payments in the next 30 days."
+			}}
 		</p>
 		<ul v-else class="upcoming-list">
 			<li v-for="row in visible" :key="row.date" :data-upcoming-date="row.date">
@@ -49,19 +59,25 @@
 			{{ expanded ? "Show fewer dates" : `Show all ${rows.length} dates` }}
 		</button>
 		<p class="pcal-footnote">
-			After the selected date, through day 30 inclusive. Select a date to see its details.
+			{{
+				snapshot.scope.month
+					? "After the selected date, through the end of this month."
+					: "After the selected date, through day 30 inclusive."
+			}}
+			Select a date to see its details.
 		</p>
 	</section>
 </template>
 <script setup>
 import { computed, ref, watch } from "vue";
-import { addDays, dateLabel, isSelectable } from "@/lib/paymentCalendar/dates";
+import { addDays, dateLabel, isSelectable, monthLabel } from "@/lib/paymentCalendar/dates";
 import { exactMoney } from "@/lib/paymentCalendar/format";
 const props = defineProps({
 	snapshot: { type: Object, required: true },
 	selected: { type: String, required: true },
 	rows: { type: Array, default: () => [] },
 	loading: Boolean,
+	loadError: Boolean,
 });
 const emit = defineEmits(["select"]);
 const expanded = ref(false),

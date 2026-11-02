@@ -21,6 +21,9 @@ SUMMARY_MAX = 280
 class JarvisPendingAction(NotRenamable, Document):
 	def validate(self):
 		refuse_orm_write(self)
+		from jarvis.chat.collaboration_actions import validate_park_identity
+
+		validate_park_identity(self)
 		# Plain text before the seal (Desk renders it as HTML); the card hash is over this.
 		self.summary = plain_text(self.summary)[:SUMMARY_MAX]
 		# Canonical JSON text, stored verbatim (the fields skip the XSS filter), so the

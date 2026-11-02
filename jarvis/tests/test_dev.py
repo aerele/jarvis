@@ -171,7 +171,7 @@ class TestResetOnboardingWipe(FrappeTestCase):
 
 class TestWipeCoversConversationLinks(FrappeTestCase):
 	# Linked to a conversation, yet outside the reset's content set.
-	KEEP = {"Jarvis Agent Run", "Jarvis Import Announcement"}
+	KEEP = {"Jarvis Agent Run", "Jarvis Import Announcement", "Jarvis Chat Binding"}
 
 	def test_every_doctype_linking_a_conversation_is_wiped_or_kept(self):
 		from jarvis.onboarding import _WIPE_DOCTYPES

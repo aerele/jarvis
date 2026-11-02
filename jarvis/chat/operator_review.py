@@ -175,7 +175,7 @@ def stage_reviews(run, inst, findings, adapter):
 		doc.flags.jarvis_server_write = True
 		# Create permission is checked above. Keep the server-owned evidence at permlevel 1.
 		doc.insert(ignore_permissions=True)
-		frappe.share.add(
+		frappe.share.add_docshare(
 			"Jarvis Approval Request",
 			doc.name,
 			user=reviewer,
