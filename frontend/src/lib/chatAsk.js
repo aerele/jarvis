@@ -93,9 +93,16 @@ export function parseAsk(content) {
 				if (type === "field") {
 					const doctype = String((nested || q).doctype || "").trim();
 					const fieldname = String((nested || q).fieldname || "").trim();
+					const parent = String((nested || q).parent || "").trim();
+					const parentfield = String((nested || q).parentfield || "").trim();
 					// A bad identifier must not reach the API call; the question
 					// degrades to a typed answer instead of vanishing.
-					if (!DOCTYPE_RE.test(doctype) || !FIELDNAME_RE.test(fieldname)) {
+					if (
+						!DOCTYPE_RE.test(doctype) ||
+						!FIELDNAME_RE.test(fieldname) ||
+						(parent && !DOCTYPE_RE.test(parent)) ||
+						(parentfield && (!parent || !FIELDNAME_RE.test(parentfield)))
+					) {
 						return {
 							q: text || humanizeFieldname(fieldname),
 							type: "text",
@@ -103,7 +110,15 @@ export function parseAsk(content) {
 							doctype: "",
 						};
 					}
-					return { q: text, type, options: [], doctype, fieldname };
+					return {
+						q: text,
+						type,
+						options: [],
+						doctype,
+						fieldname,
+						...(parent ? { parent } : {}),
+						...(parentfield ? { parentfield } : {}),
+					};
 				}
 				return {
 					q: text,
