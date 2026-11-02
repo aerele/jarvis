@@ -1777,6 +1777,8 @@ class PumpContext:
 	# OARF-5: in-flight RPCs the reactor polls (never blocks on) each slice.
 	pending_acks: dict[str, _PendingAck] = field(default_factory=dict)
 	pending_recoveries: dict[str, _PendingRecovery] = field(default_factory=dict)
+	# Lane keys whose tool-event request waits for IO time (_observe_tool_events).
+	pending_observes: set[str] = field(default_factory=set)
 	# CDX-17: the in-flight mid-hop capacity-refresh RPC (issue-and-poll, never blocked on).
 	pending_snapshot: _PendingSnapshot | None = None
 	shared_preflights: dict = field(default_factory=dict)
@@ -2066,6 +2068,7 @@ def drain_slice(ctx: PumpContext) -> str:
 	soft budget.
 	"""
 	drain_wake(ctx.relay_target_id)
+	_flush_pending_observes(ctx)
 
 	# CDX-11 + CDX-17: issue -> POLL -> promote. ISSUE the due mid-hop capacity refresh
 	# (non-blocking), then RESOLVE it BEFORE promotion so an already-resolved refresh that
@@ -3763,6 +3766,12 @@ def _resolve_recovery_tail(ctx: PumpContext, pr: _PendingRecovery, frame: dict) 
 	from jarvis.chat.turn_recovery import _latest_assistant_raw
 
 	raw = _latest_assistant_raw(messages, min_seq=pr.min_seq, max_seq=pr.max_seq)
+	# The relay never saw this turn's terminal, so its step strip never ran, and the
+	# runtime's stored final carries the narration the user saw as steps (#2367: 5 of 6
+	# leaked replies in the 2026-10-29 bake-off were recovered turns). Strip what the
+	# pump cached for this run, the same rules the relay's terminal applies, BEFORE
+	# redaction so both sides of the match are the same raw text.
+	raw = _strip_cached_steps(pr.r["run_id"], raw)
 	text, rels, marker_stripped = egress_rules.redact_final_with_media(raw)
 	# A media/marker-only reply strips to "" but IS real in-window output — settle
 	# final with the clean (empty) text so the raw marker never lingers in stored
@@ -3774,6 +3783,28 @@ def _resolve_recovery_tail(ctx: PumpContext, pr: _PendingRecovery, frame: dict) 
 		_settle_recovered_final(ctx, pr.r, text, media_rels=rels, marker_stripped=marker_stripped)
 	else:
 		_settle_recovered_errored(ctx, pr.r)
+
+
+def _strip_cached_steps(run_id: str, raw: str) -> str:
+	"""``raw`` minus the step text this run cached (relay terminal rules, #2367).
+	Best-effort: a cache miss (TTL, a lane that never offered a step) returns ``raw``."""
+	from jarvis.chat.steps import is_step, strip_loose_preambles, strip_preambles, strip_steps
+
+	if not raw:
+		return raw
+	try:
+		steps = _read_run_steps(run_id)
+		flagged = set(_read_run_preambles(run_id))
+	except Exception:
+		return raw
+	if not steps:
+		return raw
+	preambles = [step for step in steps if step in flagged]
+	sentences = [step for step in steps if step not in flagged and is_step(step)]
+	out = strip_steps(strip_preambles(raw, preambles), sentences)
+	# Steps the relay offered but could not anchor (never-streamed preambles) are
+	# cached too; cut them only where they lead the text.
+	return strip_loose_preambles(out, steps)
 
 
 def _settle_recovered_final(
@@ -3906,6 +3937,41 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 			steps=_read_run_steps(run_id),
 			preamble_steps=_read_run_preambles(run_id),
 		)
+		_observe_tool_events(ctx, lane_key)
+
+
+# The agent plugin's method that adds this connection as a tool-event recipient of a
+# run (the plugin's src/run-observer.ts). The gateway sends a run's tool starts only to
+# the connection that sent it, so without this a re-attached lane never sees one and
+# records no step after the hop (#2367).
+OBSERVE_RUN_METHOD = "jarvis.observe_run"
+
+
+def _observe_tool_events(ctx: PumpContext, lane_key: str) -> None:
+	"""Ask the gateway for this run's tool events on the hop's own connection. Not
+	awaited: the answer only matters to the gateway, and an older plugin without the
+	method answers with an error the lane can ignore (it then behaves as before)."""
+	if ctx.mux is None:
+		return
+	if not _io_admit(ctx):
+		# Like every gateway write: no time left in this lease window. The next slice
+		# asks again (_flush_pending_observes).
+		ctx.pending_observes.add(lane_key)
+		return
+	ctx.pending_observes.discard(lane_key)
+	try:
+		ctx.mux.issue_rpc(OBSERVE_RUN_METHOD, {"runId": lane_key}, timeout_s=ACK_TIMEOUT_S)
+	except Exception as e:
+		# A refused or failed write: the transport handles its own poisoning, and the
+		# lane still streams without tool events.
+		_telemetry("observe_run_failed", run_id=lane_key, error=type(e).__name__)
+
+
+def _flush_pending_observes(ctx: PumpContext) -> None:
+	for lane_key in list(ctx.pending_observes):
+		_observe_tool_events(ctx, lane_key)
+		if lane_key in ctx.pending_observes:
+			return  # still no IO time; the rest wait too
 
 
 def _write_message_recovering(assistant_message: str | None) -> None:
@@ -4430,6 +4496,22 @@ def _finish_stop_before_dispatch(conversation: str, row: dict) -> None:
 		)
 
 
+def _drain_before_handoff(ctx: PumpContext) -> None:
+	"""Apply the lane events the reader queued after the last slice (#2367). The next
+	hop never sees those frames again (it re-attaches from the durable seq), so a step
+	left in the queue was never cached: the new lane re-seeded without it and the
+	narration stayed in the saved reply. One non-blocking pass; a failure here must
+	not stop the handoff."""
+	if ctx.mux is None or ctx.lease_lost:
+		return
+	try:
+		ctx.mux.dispatch(block_s=0)
+	except ts.LeaseLostExit:
+		ctx.lease_lost = ctx.relay_target_id
+	except Exception:
+		frappe.log_error(title="pump.drain_before_handoff", message=frappe.get_traceback())
+
+
 def _handoff(ctx: PumpContext) -> None:
 	"""Hop handoff (D6 §3, CDX-1): an EPOCH-GUARDED ATOMIC lease TRANSFER, then a
 	fresh-id successor enqueue. A bare re-enqueue is NOT enough: the running hop
@@ -4449,6 +4531,7 @@ def _handoff(ctx: PumpContext) -> None:
 	if _kill_switch_engaged(ctx.relay_target_id):
 		_halt_for_kill_switch(ctx)
 		return
+	_drain_before_handoff(ctx)
 	# OARF-6: flush any sub-threshold batched deltas so a tail batch is not left in
 	# memory across the hop boundary (the next hop would re-derive it from the
 	# cumulative mirror, but flushing now keeps the streamed text current).
