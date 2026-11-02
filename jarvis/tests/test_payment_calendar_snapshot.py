@@ -10,6 +10,7 @@ from frappe.utils import add_days
 from jarvis.payment_calendar import snapshot
 from jarvis.payment_calendar.access import ScopeChanged, authorize_scope
 from jarvis.payment_calendar.banks import read_bank_balances
+from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.scope import normalize_scope
 from jarvis.payment_calendar.settings import get_settings, update_safety_floor
@@ -116,17 +117,59 @@ class TestPaymentCalendarSnapshot(TestCase):
 	def test_stale_precision_cache_is_bypassed_without_publishing_old_defaults(self):
 		from erpnext.accounts.utils import get_currency_precision
 
-		key = "defaults::__default"
-		original = frappe.client_cache.get_value(key)
+		profile = source_profile()
+		if profile.major == "15":
+
+			def get():
+				return frappe.cache.hget("defaults", "__default")
+
+			def set_value(value):
+				frappe.cache.hset("defaults", "__default", value)
+
+			def delete():
+				frappe.cache.hdel("defaults", "__default")
+		else:
+
+			def get():
+				return frappe.client_cache.get_value("defaults::__default")
+
+			def set_value(value):
+				frappe.client_cache.set_value("defaults::__default", value)
+
+			def delete():
+				frappe.client_cache.delete_value("defaults::__default")
+
+		original = get()
 		try:
-			frappe.client_cache.set_value(key, frappe._dict(currency_precision="7"))
-			with snapshot.consistent_read():
+			set_value(frappe._dict(currency_precision="7"))
+			with snapshot.consistent_read() as hits:
 				self.assertNotEqual(get_currency_precision(), 7)
-			self.assertEqual(frappe.client_cache.get_value(key).currency_precision, "7")
+				self.assertIn(profile.defaults_cache_hit, hits)
+			self.assertEqual(get().currency_precision, "7")
 		finally:
-			frappe.client_cache.delete_value(key)
+			delete()
 			if original is not None:
-				frappe.client_cache.set_value(key, original)
+				set_value(original)
+
+	def test_stale_fiscal_year_cache_is_bypassed_without_publishing_the_read_view(self):
+		from erpnext.accounts.utils import get_fiscal_year
+
+		original = frappe.cache.hget("fiscal_years", self.fx.company)
+		stale = [
+			frappe._dict(name="stale fiscal year", year_start_date="1990-01-01", year_end_date="1990-12-31")
+		]
+		try:
+			frappe.cache.hset("fiscal_years", self.fx.company, stale)
+			with snapshot.consistent_read() as hits:
+				self.assertNotEqual(
+					get_fiscal_year(self.fx.today, company=self.fx.company)[0], "stale fiscal year"
+				)
+				self.assertIn(("hget", "fiscal_years"), hits)
+			self.assertEqual(frappe.cache.hget("fiscal_years", self.fx.company), stale)
+		finally:
+			frappe.cache.hdel("fiscal_years", self.fx.company)
+			if original is not None:
+				frappe.cache.hset("fiscal_years", self.fx.company, original)
 
 	def read(self, side):
 		return read_obligations(

@@ -78,6 +78,15 @@ class TestPaymentCalendarBanks(TestCase):
 		with self.assertRaises(frappe.ValidationError):
 			read_bank_balances(self.fx.company, [self.fx.bank], self.fx.today)
 
+	def test_default_blank_and_null_books_have_identical_bank_balance_semantics(self):
+		default = self.fx.insert("Finance Book", "Book", finance_book_name="Calendar default")
+		frappe.db.set_value("Company", self.fx.company, "default_finance_book", default)
+		frappe.clear_document_cache("Company", self.fx.company)
+		for book in (None, "", default):
+			self.fx.gl(100, finance_book=book)
+		result = read_bank_balances(self.fx.company, [self.fx.bank], self.fx.today)
+		self.assertEqual(Decimal(result["total"]), 300)
+
 	def test_missing_real_fiscal_year_is_unavailable_not_zero(self):
 		# Only this transaction sees disabled fixture years; tearDown rolls it back.
 		frappe.db.set_value("Fiscal Year", {"disabled": 0}, "disabled", 1)

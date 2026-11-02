@@ -8,10 +8,18 @@ import frappe
 from frappe.utils import add_days
 
 from jarvis.payment_calendar.access import ScopeChanged, validate_result_visibility
+from jarvis.payment_calendar.compatibility import has_native_field_masks
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.projection import project_snapshot
 from jarvis.payment_calendar.sources import read_obligations
 from jarvis.tests.payment_calendar_fixtures import CalendarFixtures, require_calendar_test_site
+
+
+def upstream_converts_foreign_advance() -> bool:
+	"""ERPNext 16.53 fixed the advance unit mismatch the invoice-level fallback classifies."""
+	from erpnext.accounts.report.accounts_receivable.accounts_receivable import ReceivablePayableReport
+
+	return hasattr(ReceivablePayableReport, "get_advance_in_report_currency")
 
 
 class TestPaymentCalendarReconciliation(TestCase):
@@ -227,7 +235,15 @@ class TestPaymentCalendarReconciliation(TestCase):
 		rows = [r for r in result["rows"] if r["voucher_no"] == invoice]
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(Decimal(rows[0]["remaining"]), 6400)
-		self.assertEqual(rows[0]["allocation_basis"], "invoice")
+		if upstream_converts_foreign_advance():
+			# Newer ERPNext converts the advance to company currency itself
+			# (get_advance_in_report_currency), so its native term allocation already
+			# equals the ledger residual and no invoice-level fallback is needed.
+			self.assertNotIn("allocation_basis", rows[0])
+			self.assertNotIn("invoice_level", result["notes"])
+		else:
+			self.assertEqual(rows[0]["allocation_basis"], "invoice")
+			self.assertEqual(result["notes"]["invoice_level"]["count"], 1)
 		self.assertEqual(rows[0]["due_date"], add_days(self.fx.today, 10))
 		self.assertEqual(Decimal(result["canonical_total"]), 6400)
 
@@ -281,6 +297,8 @@ class TestPaymentCalendarReconciliation(TestCase):
 	def test_new_classification_fields_cannot_bypass_field_masks(self):
 		from jarvis.payment_calendar.access import _check_masks
 
+		if not has_native_field_masks():
+			self.skipTest("This framework has no native field-mask permissions")
 		user = self.fx.user()
 		fields = {
 			"Purchase Invoice": [

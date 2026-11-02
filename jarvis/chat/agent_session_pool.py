@@ -121,6 +121,11 @@ def checkout(gateway_url: str) -> Iterator[AgentSession]:
 	entry is evicted (next checkout reconnects); other exceptions
 	return the entry to the pool intact.
 	"""
+	# A pool hit never calls connect, so a copy restored under another site name on
+	# a shared bench would reuse the real site's sockets. One Single read per checkout.
+	from jarvis.chat import site_pin
+
+	site_pin.assert_not_copy()
 	group = _get_or_create_group(gateway_url)
 	entry = _acquire_entry(group)
 	evict_on_exit = False

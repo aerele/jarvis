@@ -9,10 +9,15 @@
 	     binding, not here. -->
 	<div class="flex items-start justify-between gap-4 py-3">
 		<div class="flex flex-col gap-0.5">
-			<span class="text-base font-medium text-ink-gray-8">{{ title }}</span>
-			<span v-if="help" class="max-w-lg text-p-sm text-ink-gray-6">{{ help }}</span>
+			<span :id="`${uid}-title`" class="text-base font-medium text-ink-gray-8">{{
+				title
+			}}</span>
+			<span v-if="help" :id="`${uid}-help`" class="max-w-lg text-p-sm text-ink-gray-6">{{
+				help
+			}}</span>
 		</div>
 		<Switch
+			ref="switchRef"
 			class="shrink-0"
 			:modelValue="modelValue"
 			:disabled="disabled"
@@ -22,13 +27,30 @@
 </template>
 
 <script setup>
+import { onMounted, onUpdated, ref, useId } from "vue";
 import { Switch } from "frappe-ui";
 
-defineProps({
+const props = defineProps({
 	title: { type: String, required: true },
 	help: { type: String, default: "" },
 	modelValue: { type: Boolean, default: false },
 	disabled: { type: Boolean, default: false },
 });
 defineEmits(["update:modelValue"]);
+
+// frappe-ui's Switch only names its button when it is given its own `label`, which
+// would draw a second copy of the title. Here the row's title (and help) already say
+// what the switch does, so the button is pointed at them instead: every ToggleRow in
+// the settings then has an accessible name.
+const uid = useId();
+const switchRef = ref(null);
+function nameTheSwitch() {
+	const button = switchRef.value?.$el?.querySelector?.('[role="switch"]');
+	if (!button) return;
+	button.setAttribute("aria-labelledby", `${uid}-title`);
+	if (props.help) button.setAttribute("aria-describedby", `${uid}-help`);
+	else button.removeAttribute("aria-describedby");
+}
+onMounted(nameTheSwitch);
+onUpdated(nameTheSwitch);
 </script>

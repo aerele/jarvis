@@ -130,8 +130,15 @@
 		}
 	}
 
+	// This site is a restored copy of another one (jarvis.chat.site_pin): tell
+	// System Managers instead of nudging them to set up, whatever the onboarding flag says.
+	function isCopy() {
+		return !!(window.frappe && frappe.boot && frappe.boot.jarvis_pairing_blocked);
+	}
+
 	function shouldShow() {
 		if (!window.frappe || !frappe.boot) return false;
+		if (isCopy()) return isSystemManager() && !dismissed();
 		if (frappe.boot.jarvis_onboarded !== false) return false;
 		// is_ready_for_chat returns ready:false for several reasons that read
 		// exactly like a never-set-up workspace here (jarvis_onboarded === false)
@@ -159,6 +166,7 @@
 	// mid-session, and an expiring credential is the degraded path's problem,
 	// not this nudge's.
 	function reverify(force) {
+		if (isCopy()) return;
 		// The nudge's own visibility predicate, reused rather than re-listed.
 		// If the nudge would not be on screen (already onboarded, mid-ERPNext
 		// wizard, not a System Manager, dismissed, or on a hidden route) then
@@ -264,6 +272,19 @@
 	// but the first needs the full wizard and the second only needs a model
 	// reconnected, so they get different copy and a different destination.
 	function nudgeVariant() {
+		if (isCopy()) {
+			// Same sentence as jarvis.chat.site_pin.copy_message. No CTA: only support
+			// can move the pairing.
+			var site = (frappe.boot && frappe.boot.jarvis_paired_site) || "another site";
+			return {
+				name: "Jarvis",
+				aria: "This site is a copy",
+				text:
+					"This site is a copy of " +
+					site +
+					". Jarvis is turned off here. Contact support to use Jarvis on this site.",
+			};
+		}
 		var reason = (window.frappe && frappe.boot && frappe.boot.jarvis_ready_reason) || "";
 		// White-label: the reconnect copy names the agent, so its whole bubble -
 		// text, header and aria-label - must not say "Jarvis" for a tenant that
@@ -450,6 +471,9 @@
 				// the page; every other variant is an <a> that navigates to the wizard
 				// or the settings pane.
 				var cta;
+				if (!variant.href && !variant.action) {
+					return b;
+				}
 				if (variant.action === "resync") {
 					cta = document.createElement("button");
 					cta.type = "button";

@@ -31,6 +31,17 @@ _unrelated(
 
 
 _unrelated(
+	"jarvis.holiday_touch.api",
+	"Holiday occasion lookup, scene-showing record and the admin-only support view; no transcript identifier, so shared chat identifiers grant no authority.",
+	"""
+    explain
+    get_today
+    record_shown
+    """,
+)
+
+
+_unrelated(
 	"jarvis.account",
 	"Workspace billing, subscription and LLM connection metadata; no transcript lookup.",
 	"""
@@ -65,6 +76,23 @@ _unrelated(
 	"Agent credential administration; tool dispatch is separately classified as chat-scoped.",
 	"""
     rotate_agent_token
+    """,
+)
+
+_unrelated(
+	"jarvis.api",
+	"Nonce-authenticated pairing challenge and plugin-signed session-vouch endpoints answering this site's own instance identity; no transcript lookup.",
+	"""
+    pairing_challenge
+    vouch_session
+    """,
+)
+
+_unrelated(
+	"jarvis.chat.site_pin",
+	"System Manager action re-checking this site's registration with admin; no conversation data.",
+	"""
+    reverify
     """,
 )
 
@@ -865,6 +893,7 @@ ENDPOINTS.update(
 			"scope": "chat_scoped",
 		},
 		"jarvis.chat.approvals_api.list_approvals": {"arguments": {}, "scope": "chat_scoped"},
+		"jarvis.chat.approvals_api.list_approval_reviewers": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_approvals_page": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_pending_actions_lane": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_wiki_write_proposals": {"arguments": {}, "scope": "chat_scoped"},

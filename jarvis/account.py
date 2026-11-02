@@ -28,6 +28,7 @@ from jarvis.exceptions import (
 	AdminUnreachableError,
 	AdminValidationError,
 )
+from jarvis.holiday_touch import policy as holiday_policy
 from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
 from jarvis.onboarding import _surface
 from jarvis.permissions import require_jarvis_access, require_jarvis_admin
@@ -592,6 +593,12 @@ def _admin_chat_gate() -> dict:
 	from jarvis.chat import egress_rules
 
 	egress_rules.persist(conn.get("redaction_patterns"))
+	# Same cadence: mirror the operator's holiday-touch policy. daily=False: the gate runs
+	# about every 30 s, so it writes only on change and never stamps the sync time. Skipped
+	# when the request will not commit (the desk's boot GET is rolled back): the write would
+	# be discarded and would take a row lock on Jarvis Settings for nothing. persist never raises.
+	if _write_is_durable():
+		holiday_policy.persist(conn, daily=False)
 	notice = conn.get("billing_notice") or {}
 	if "chat_readiness" in conn and conn["chat_readiness"] != "Ready":
 		# Authority-repair incident (review plan 04 P0-6): admin's strict resolver
@@ -807,6 +814,9 @@ def is_ready_for_chat() -> dict:
 	  ambiguous/invalid and support has been paged. A safe blocked state - the
 	  customer must NOT retry payment or reconnect; ``detail`` carries admin's own
 	  reassurance (see ``_admin_chat_gate``, review plan 04 P0-6).
+	- ``"site_is_copy"`` - this site is not the one Jarvis was first connected from
+	  (a restored copy). Checked FIRST, before anything asks admin, which refuses a
+	  copy. Carries ``copy_notice: {paired_site}``.
 	- ``None`` when ``ready`` is True.
 
 	Also carries one non-blocking worker-health field, merged in AFTER the
@@ -818,6 +828,17 @@ def is_ready_for_chat() -> dict:
 	Fails safe: any exception probing worker health leaves the field False
 	rather than raising or affecting the verdict above.
 	"""
+	from jarvis.chat import site_pin
+
+	pin = site_pin.status()
+	if pin["blocked"]:
+		return {
+			"ready": False,
+			"reason": "site_is_copy",
+			"detail": site_pin.copy_message(pin["paired_site"]),
+			"copy_notice": {"paired_site": pin["paired_site"]},
+			"billing_notice": {},
+		}
 	verdict = _ready_verdict()
 	if verdict.get("ready"):
 		from jarvis.chat.runtime_profile import RuntimeProfileError, ensure_ready

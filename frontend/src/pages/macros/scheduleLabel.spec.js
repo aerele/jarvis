@@ -77,3 +77,25 @@ describe("ranOnceLabel", () => {
 		).toBe("");
 	});
 });
+
+describe("scheduleLabel: cron schedules", () => {
+	it("names every day and time of a cron schedule", () => {
+		expect(
+			scheduleLabel({
+				schedule_frequency: "weekly",
+				schedule_cron: "0 9,18 * * 1,4",
+				schedule_time: "09:00:00",
+				schedule_weekday: "Monday",
+			})
+		).toBe("Weekly on Mon and Thu · 9:00 am, 6:00 pm");
+	});
+
+	it("says hourly and custom schedules in their own words", () => {
+		expect(scheduleLabel({ schedule_frequency: "hourly", schedule_cron: "30 * * * *" })).toBe(
+			"Hourly at :30"
+		);
+		expect(
+			scheduleLabel({ schedule_frequency: "custom", schedule_cron: "0 10 1 1,4,7,10 *" })
+		).toBe("Custom · 0 10 1 1,4,7,10 *");
+	});
+});

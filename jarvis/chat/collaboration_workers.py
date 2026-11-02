@@ -184,6 +184,9 @@ def build_payload(binding, run_id: str, seed_message: str) -> dict:
 		"drained_note_ids": ap.drained_ids,
 		"shared_history_watermark": watermark,
 		"turn_start_ms": int(time.time() * 1000),
+		# The ack window the pump waits after the frame is written, sized from this
+		# actor's assembled prompt exactly as personal prepare does (#773).
+		"ack_timeout_s": turn_handler._ack_timeout_s(len(managed or []), ap.inlined_prompt_chars),
 		"collaboration_runtime": {
 			"skills_root": runtime.policy.skills_root,
 			"model_ref": runtime.policy.model_ref,

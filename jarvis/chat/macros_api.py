@@ -151,6 +151,7 @@ def list_macros() -> list[dict]:
 			"schedule_day_of_month",
 			"schedule_time",
 			*_schedule_date_column(),
+			*_schedule_cron_column(),
 			"next_run_at",
 			"last_run_at",
 			"modified",
@@ -175,7 +176,7 @@ _MACROS_SORTABLE = {
 	"next_run_at": "next_run_at",
 }
 _MACROS_FILTERS = {"enabled", "schedule_enabled", "schedule_frequency"}
-_FREQUENCIES = {"daily", "weekly", "monthly", "once"}
+_FREQUENCIES = {"daily", "weekly", "monthly", "once", "hourly", "custom"}
 
 
 def _schedule_date_column() -> list[str]:
@@ -184,6 +185,13 @@ def _schedule_date_column() -> list[str]:
 	from jarvis.chat.macro_scheduler import once_ready
 
 	return ["schedule_date"] if once_ready() else []
+
+
+def _schedule_cron_column() -> list[str]:
+	"""``schedule_cron`` among the fields read, once the migrate that adds it ran."""
+	from jarvis.chat.macro_scheduler import cron_ready
+
+	return ["schedule_cron"] if cron_ready() else []
 
 
 # C08-5: ``_lk`` / ``_clamp_page`` / ``_bool01`` / ``_load_filters`` /
@@ -249,6 +257,7 @@ def list_macros_page(
 
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params)[0][0]
 	once_columns = "schedule_date, " if _schedule_date_column() else ""
+	once_columns += "schedule_cron, " if _schedule_cron_column() else ""
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, macro_name, description, enabled, stop_on_error, skip_confirmation,
 		schedule_enabled, schedule_frequency, schedule_weekday, schedule_day_of_month,
@@ -423,6 +432,19 @@ def dismiss_macro_notices(names: str | list | None = None) -> dict:
 _LAST_RUN_FIELDS = ("status", "error", "started_at", "finished_at", "conversation", "trigger")
 
 
+def _with_the_wait(run: dict, status: str | None, waiting_on, waiting_since) -> dict:
+	"""Add ``waiting_reports`` (the names of the prepared reports a run parked in
+	``waiting_report`` awaits) and ``waiting_since`` to a run payload, so "Waiting for
+	report: <names>" survives a reload. Empty for every other status. Mutates and
+	returns ``run``."""
+	from jarvis.chat import macro_report_wait
+
+	waiting = status == "waiting_report"
+	run["waiting_reports"] = macro_report_wait.awaited_names(waiting_on) if waiting else []
+	run["waiting_since"] = str(waiting_since) if waiting and waiting_since else ""
+	return run
+
+
 def _last_runs(macro_names: list[str], owner: str) -> dict:
 	"""``{macro: its most recent run}`` for the macros named: how the last run went,
 	for the list and the form. Nothing else on either screen says whether a macro
@@ -439,7 +461,7 @@ def _last_runs(macro_names: list[str], owner: str) -> dict:
 		return {}
 	rows = frappe.db.sql(
 		"""SELECT r.name, r.macro, r.status, r.error, r.started_at, r.finished_at,
-			r.conversation, r.`trigger`
+			r.conversation, r.`trigger`, r.waiting_on, r.waiting_since
 		FROM `tabJarvis Macro Run` r
 		JOIN (
 			SELECT macro, MAX(creation) AS latest FROM `tabJarvis Macro Run`
@@ -455,6 +477,10 @@ def _last_runs(macro_names: list[str], owner: str) -> dict:
 		run = {f: r.get(f) for f in _LAST_RUN_FIELDS}
 		run["error"] = run["error"] or ""
 		run["conversation"] = (run["conversation"] or "") if is_owner else ""
+		_with_the_wait(run, r.status, r.waiting_on, r.waiting_since)
+		if not is_owner:
+			# Like the conversation: an overseer may know a run waits, not what it reads.
+			run["waiting_reports"] = []
 		out[r.macro] = run
 	return out
 
@@ -486,6 +512,9 @@ def get_macro(name: str) -> dict:
 		# `or ""` sent the form "" and it fell back to (then saved) its 09:00 default.
 		"schedule_time": "" if doc.schedule_time is None else str(doc.schedule_time),
 		"schedule_date": str(doc.get("schedule_date") or ""),
+		"schedule_cron": doc.get("schedule_cron") or "",
+		# What the schedule's step count is measured against, for the form's estimate.
+		"scheduled_step_budget": _scheduled_step_budget(),
 		"next_run_at": str(doc.next_run_at or ""),
 		"last_run_at": str(doc.last_run_at or ""),
 		"merged_prompt": doc.merged_prompt or "",
@@ -522,8 +551,20 @@ def get_macro(name: str) -> dict:
 @require_jarvis_user
 def get_new_macro_arming() -> dict:
 	"""``get_macro``'s arming keys for a macro the caller is about to create: the new
-	form has no macro to load, and the caller will be its owner."""
-	return _arming(frappe.session.user, held=0)
+	form has no macro to load, and the caller will be its owner. Also what a schedule's
+	step count is measured against, as ``get_macro`` says it."""
+	return {**_arming(frappe.session.user, held=0), "scheduled_step_budget": _scheduled_step_budget()}
+
+
+def _scheduled_step_budget() -> int:
+	"""The monthly step budget for scheduled runs (``macros.entitlement_block``), or 0
+	when it cannot be read: the form then leaves the estimate out."""
+	from jarvis.chat import macros
+
+	try:
+		return int(macros._scheduled_step_budget_monthly())
+	except Exception:
+		return 0
 
 
 # What an armed macro does without asking, and what still asks: one row per plain
@@ -678,6 +719,7 @@ def create_macro(
 	schedule_weekday: str | None = None,
 	schedule_day_of_month: int | None = None,
 	schedule_date: str | None = None,
+	schedule_cron: str | None = None,
 ) -> dict:
 	"""Create a macro. Validation (name/steps/caps, and the two schedule anchors'
 	ranges) runs in the doctype validate(). Per-step tagged skills arrive INSIDE
@@ -699,6 +741,7 @@ def create_macro(
 			"schedule_weekday": schedule_weekday or None,
 			"schedule_day_of_month": frappe.utils.cint(schedule_day_of_month) or None,
 			"schedule_date": schedule_date or None,
+			**({"schedule_cron": schedule_cron or None} if _schedule_cron_column() else {}),
 			"steps": _parse_steps(steps),
 		}
 	)
@@ -726,6 +769,7 @@ def update_macro(
 	schedule_weekday: str | None = None,
 	schedule_day_of_month: int | None = None,
 	schedule_date: str | None = None,
+	schedule_cron: str | None = None,
 	merged_prompt: str | None = None,
 	merged_prompt_edited: int | None = None,
 ) -> dict:
@@ -788,6 +832,16 @@ def update_macro(
 		doc.schedule_day_of_month = frappe.utils.cint(schedule_day_of_month) or None
 	if schedule_date is not None:
 		doc.schedule_date = schedule_date or None
+	if _schedule_cron_column():
+		if schedule_cron is not None:
+			doc.schedule_cron = schedule_cron or None
+		elif any(
+			sent is not None
+			for sent in (schedule_frequency, schedule_time, schedule_weekday, schedule_day_of_month)
+		):
+			# A caller that sends the old fields without a cron does not know cron: its
+			# fields are the schedule, and a stored cron would silently override them.
+			doc.schedule_cron = None
 	if steps is not None:
 		rows = _parse_steps(steps)
 		# Unchanged steps are left as they are: the rows are not deleted and inserted
@@ -1103,13 +1157,22 @@ def get_macro_run(run: str) -> dict:
 		"current_step": doc.current_step,
 		"total_steps": doc.total_steps,
 		"error": doc.error or "",
+		**_with_the_wait({}, doc.status, doc.waiting_on, doc.waiting_since),
 	}
 
 
 # --------------------------------------------------------------------------- #
 # Run history dashboard (settings → Macro runs)
 # --------------------------------------------------------------------------- #
-_RUN_STATUSES = {"queued", "running", "waiting_capacity", "completed", "failed", "stopped"}
+_RUN_STATUSES = {
+	"queued",
+	"running",
+	"waiting_capacity",
+	"waiting_report",
+	"completed",
+	"failed",
+	"stopped",
+}
 # A run row with no macro is not run history: ``delete_macro`` keeps the month's
 # scheduled rows of a deleted macro so the unattended budget still counts them, and
 # clears their macro. Every query that shows or counts runs for a person carries
@@ -1159,6 +1222,8 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 			r.finished_at,
 			r.error,
 			r.run_mode,
+			r.waiting_on,
+			r.waiting_since,
 			duration_s.as_("duration_s"),
 		)
 		.where(where)
@@ -1167,7 +1232,11 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 		.offset(start)
 		.run(as_dict=True)
 	)
-	return {"runs": rows[:limit], "has_more": len(rows) > limit, "total": total}
+	runs = rows[:limit]
+	for run in runs:
+		# The raw JSON stays on the server; the page gets the names.
+		_with_the_wait(run, run.status, run.pop("waiting_on", None), run.get("waiting_since"))
+	return {"runs": runs, "has_more": len(rows) > limit, "total": total}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1206,6 +1275,10 @@ def macro_run_stats() -> dict:
 		"completed": completed,
 		"failed": failed,
 		"running": by.get("running", 0),
+		# Live too: parked for a report or for capacity. The Runs tab counts them with
+		# `running` ("Running or waiting").
+		"waiting_report": by.get("waiting_report", 0),
+		"waiting_capacity": by.get("waiting_capacity", 0),
 		"queued": by.get("queued", 0),
 		"stopped": by.get("stopped", 0),
 		"success_rate": round(completed * 100 / finished) if finished else None,

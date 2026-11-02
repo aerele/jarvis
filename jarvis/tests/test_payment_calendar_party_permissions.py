@@ -113,7 +113,7 @@ class TestPaymentCalendarPartyPermissions(TestCase):
 		self.assertFalse(result["complete_for_company"])
 
 	def test_permission_applicable_to_another_document_cannot_claim_company_coverage(self):
-		self.user("Expense Claim")
+		self.user("ToDo")
 		result = self.read()
 		self.assertFalse(any(row["party_type"] == "Employee" for row in result["rows"]))
 		self.assertFalse(result["complete_for_company"])

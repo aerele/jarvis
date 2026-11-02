@@ -172,6 +172,18 @@ export function attachGlobalNotifier({ socket, router }) {
 	const runErrorSignalAt = new Map();
 	const MACRO_AFTER_RUN_ERROR_MS = 5000;
 
+	// Conversations seen running a macro (macro:progress / macro:done name them). A
+	// run's chat is not in the chat list, and each of its steps is a turn of its own:
+	// without this every step raised "Reply ready" and an unread dot on a row the
+	// sidebar never shows. The run is announced once, when it ends (macro:done).
+	const macroConvs = new Set();
+	const MACRO_CONVS_MAX = 200;
+	const noteMacroConv = (conv) => {
+		if (!conv || macroConvs.has(conv)) return;
+		macroConvs.add(conv);
+		if (macroConvs.size > MACRO_CONVS_MAX) macroConvs.delete(macroConvs.values().next().value);
+	};
+
 	// Terminal fence, per listener. The server publishes a turn's terminal MORE THAN
 	// ONCE (settlement, then the finalize backstop re-publish), and ChatView has always
 	// deduped it one-shot so its announce + reload fire once. This listener did not, so
@@ -230,6 +242,8 @@ export function attachGlobalNotifier({ socket, router }) {
 					});
 				}
 				if (!conv) return;
+				// A macro step's turn: the run is announced when it ends (macro:done).
+				if (macroConvs.has(conv)) return;
 				// The Triggers pane renders this conversation's turns inline — treat
 				// it like the on-screen chat: no unread dot, no "Reply ready" toast.
 				// A hidden tab still browser-notifies below, same as a hidden chat.
@@ -357,21 +371,21 @@ export function attachGlobalNotifier({ socket, router }) {
 				}
 				return;
 			}
+			case "macro:progress":
+				noteMacroConv(p.conversation);
+				return;
 			case "macro:done": {
-				// A macro run that FAILED. Before this, nothing outside the run's own
-				// conversation said so: the Runs tab had to be opened to find out.
+				// A macro run that finished or FAILED. The run's chat is not in the chat
+				// list (no unread dot to set), so this is the one signal it ends with.
+				const conv = p.conversation || null;
+				noteMacroConv(conv);
 				const sig = macroDoneSignal(p);
 				if (!sig) return;
-				const conv = p.conversation || null;
 				if (
 					conv &&
 					Date.now() - (runErrorSignalAt.get(conv) || 0) < MACRO_AFTER_RUN_ERROR_MS
 				)
 					return; // the step's own failure was just announced
-				if (conv && conv !== onScreenConv()) {
-					store.markUnread(conv);
-					store.applyRemoteNew();
-				}
 				signal({
 					conv,
 					// A run with no conversation left has no screen that shows it.

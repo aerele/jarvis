@@ -22,6 +22,8 @@
   "agent_name",
   "brand_logo",
   "brand_favicon",
+  "holiday_touches_enabled",
+  "birthday_greetings_enabled",
   "documents_section",
   "default_pdf_template",
   "llm_tab",
@@ -81,12 +83,18 @@
   "agent_tab",
   "operator_section",
   "agent_url",
+  "paired_site",
+  "pairing_blocked",
+  "pairing_blocked_reason",
   "agent_token",
+  "callback_key",
   "agent_token_issued_at",
   "agent_token_max_age_days",
   "tenant_authority_generation",
   "operator_col",
   "tenant_authority_handle",
+  "foreign_sessions_seen",
+  "foreign_session_last_at",
   "chat_device_id",
   "chat_device_public_key",
   "chat_device_private_key",
@@ -178,7 +186,12 @@
   "catalogue_visibility_synced_at",
   "connector_catalogue_section",
   "connector_catalogue_disabled",
-  "connector_catalogue_synced_at"
+  "connector_catalogue_synced_at",
+  "holiday_policy_section",
+  "holiday_policy_disabled",
+  "holiday_policy_disabled_designs",
+  "holiday_policy_names",
+  "holiday_policy_synced_at"
  ],
  "fields": [
   {
@@ -276,6 +289,20 @@
    "fieldtype": "Attach Image",
    "label": "Favicon",
    "description": "Browser-tab icon. Square PNG (or .ico) works best."
+  },
+  {
+   "fieldname": "holiday_touches_enabled",
+   "fieldtype": "Check",
+   "label": "Holiday touches",
+   "default": "1",
+   "description": "Holiday and birthday greetings on the Jarvis welcome screen"
+  },
+  {
+   "fieldname": "birthday_greetings_enabled",
+   "fieldtype": "Check",
+   "label": "Birthday greetings",
+   "default": "1",
+   "depends_on": "eval:doc.holiday_touches_enabled"
   },
   {
    "fieldname": "documents_section",
@@ -651,12 +678,46 @@
    "description": "WebSocket URL for the customer's agent (e.g. ws://127.0.0.1:18789 in dev; wss://<subdomain>.<admin-host>:443 in prod)"
   },
   {
+   "fieldname": "paired_site",
+   "fieldtype": "Data",
+   "permlevel": 1,
+   "hidden": 1,
+   "label": "Paired Site",
+   "read_only": 1,
+   "description": "Folder name of the site this agent was first connected from. A different current site means this is a restored copy."
+  },
+  {
+   "fieldname": "pairing_blocked",
+   "fieldtype": "Check",
+   "permlevel": 1,
+   "hidden": 1,
+   "label": "Pairing Blocked",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pairing_blocked_reason",
+   "fieldtype": "Small Text",
+   "permlevel": 1,
+   "hidden": 1,
+   "label": "Pairing Blocked Reason",
+   "read_only": 1
+  },
+  {
    "fieldname": "agent_token",
    "fieldtype": "Password",
    "permlevel": 1,
    "label": "Agent Token",
    "read_only": 1,
    "description": "Bearer token used to authenticate the secrets.reload RPC and the chat worker's WebSocket session"
+  },
+  {
+   "fieldname": "callback_key",
+   "fieldtype": "Password",
+   "permlevel": 1,
+   "hidden": 1,
+   "label": "Callback Key",
+   "read_only": 1,
+   "description": "Per-tenant key the plugin signs its callbacks to this site with. Either this key or the gateway owner token (agent_token) verifies until retirement clears agent_token; after that only this key does."
   },
   {
    "fieldname": "agent_token_issued_at",
@@ -692,6 +753,23 @@
    "hidden": 1,
    "read_only": 1,
    "description": "Opaque, stable identifier (admin's sha256 of the serving container's docname) of the connection last accepted at tenant_authority_generation. Equal handle iff same container; never the internal TEN-* id. A payload at the SAME generation carrying a DIFFERENT handle is an admin invariant breach - the bench holds the current connection rather than overwrite onto an unverifiable container."
+  },
+  {
+   "fieldname": "foreign_sessions_seen",
+   "fieldtype": "Int",
+   "label": "Foreign Sessions Seen",
+   "default": "0",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Unknown agent sessions seen, counted once per session per day: sessions this site received tool calls for but never started. A non-zero value usually means a restored copy of this site is still running Jarvis. Reported to admin."
+  },
+  {
+   "fieldname": "foreign_session_last_at",
+   "fieldtype": "Datetime",
+   "label": "Foreign Session Last Seen",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "When the most recent foreign plugin session was recorded."
   },
   {
    "fieldname": "chat_device_id",
@@ -1313,6 +1391,39 @@
    "label": "Connector Catalogue Synced At",
    "hidden": 1,
    "read_only": 1
+  },
+  {
+   "fieldname": "holiday_policy_section",
+   "fieldtype": "Section Break",
+   "label": "Holiday policy (from Jarvis Cloud)",
+   "collapsible": 1,
+   "description": "Mirror of the operator's holiday-touch policy, pulled from the control plane via get_connection (jarvis.holiday_touch.policy). Read-only here; the pull is the only writer."
+  },
+  {
+   "fieldname": "holiday_policy_disabled",
+   "fieldtype": "Check",
+   "label": "Holiday Touches Disabled By Operator",
+   "read_only": 1
+  },
+  {
+   "fieldname": "holiday_policy_disabled_designs",
+   "fieldtype": "Small Text",
+   "label": "Disabled Holiday Designs",
+   "read_only": 1,
+   "description": "JSON list of design keys the operator has turned off."
+  },
+  {
+   "fieldname": "holiday_policy_names",
+   "fieldtype": "Long Text",
+   "label": "Holiday Policy Names",
+   "read_only": 1,
+   "description": "JSON {aliases, near_misses} of extra holiday names from the operator."
+  },
+  {
+   "fieldname": "holiday_policy_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Holiday Policy Synced At",
+   "read_only": 1
   }
  ],
  "permissions": [
@@ -1352,5 +1463,5 @@
    "write": 1
   }
  ],
- "modified": "2026-10-18 12:00:00.000000"
+ "modified": "2026-10-28 12:00:00.000000"
 }

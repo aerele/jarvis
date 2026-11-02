@@ -45,8 +45,10 @@
 			/>
 		</div>
 
-		<!-- Stack the rail above the detail pane below lg. A fixed 360px rail in
-		     the horizontal split leaves no usable SheetDetail width on a phone. -->
+		<!-- Keep both review panes usable at phone widths. A 360px rail plus a
+		     detail pane previously made the latter unreachable: the page clipped
+		     its horizontal overflow. Stack below lg, like AgentRunsBoard, and let
+		     each pane keep its own vertical scroll. -->
 		<div data-testid="approvals-split-view" class="flex min-h-0 flex-1 flex-col lg:flex-row">
 			<!-- LEFT rail: inbox-style rows on a standing gray-1 surface so the
 			     selected row's white chip + shadow reads in light mode (CRM
@@ -372,6 +374,8 @@
 			</div>
 
 			<!-- RIGHT pane: review + act on the selected approval -->
+			<!-- min-w-0 prevents a long detail/control row from widening the desktop
+			     split view beyond its container. -->
 			<div class="min-h-0 min-w-0 flex-1 overflow-y-auto">
 				<!-- a held write / chat card / wiki note: its own detail, keyed so every
 				     selection mounts (and loads) a fresh one -->
@@ -590,7 +594,8 @@
 										@update:modelValue="(v) => (note = v)"
 									/>
 									<div
-										class="flex items-center gap-2"
+										data-testid="approval-decision-actions"
+										class="flex flex-wrap items-center gap-2"
 										:class="chatAnswerOnly ? '' : 'mt-3'"
 									>
 										<!-- chat asks without options are free-form questions: a
@@ -641,11 +646,10 @@
 											:disabled="deciding !== null"
 											@click="submitDismiss"
 										/>
-										<div class="flex-1" />
 										<!-- tag for review - the DocShare path DocMetaPanel's
 										     "Shared with" block uses (same docmeta object, so the
 										     Record details block stays in sync) -->
-										<Popover placement="bottom-end">
+										<Popover class="ml-auto" placement="bottom-end">
 											<template #target="{ togglePopover }">
 												<Button
 													variant="subtle"
@@ -658,7 +662,8 @@
 											</template>
 											<template #body>
 												<div
-													class="my-2 w-[320px] rounded-lg bg-surface-modal p-3 shadow-2xl ring-1 ring-black ring-opacity-5"
+													data-testid="approval-tag-picker"
+													class="my-2 w-[320px] max-w-[calc(100vw-2rem)] rounded-lg bg-surface-modal p-3 shadow-2xl ring-1 ring-black ring-opacity-5"
 												>
 													<div
 														v-if="shares.length"
@@ -1216,7 +1221,7 @@ async function loadShareUsers() {
 	if (shareUsersLoaded) return;
 	shareUsersLoaded = true;
 	try {
-		shareUsers.value = (await api.listShareableUsers()) || [];
+		shareUsers.value = (await api.listApprovalReviewers()) || [];
 	} catch (e) {
 		shareUsersLoaded = false; // retry on next open
 	}

@@ -14,7 +14,7 @@ from jarvis.chat.collaboration_runtime import RuntimePolicy, verify_before_send
 from jarvis.chat.collaboration_turn import binding_for_run, turn_context
 from jarvis.chat.collaboration_usage import UsagePending
 from jarvis.chat.collaboration_workers import build_payload
-from jarvis.exceptions import AgentUnreachableError
+from jarvis.exceptions import SITE_IS_COPY_CODE, AgentUnreachableError
 
 _FIELDS = [
 	"conversation",
@@ -397,7 +397,8 @@ def handle(payload):
 						binding,
 						run_id,
 						claim,
-						retry_allowed=isinstance(exc, (AgentUnreachableError, UsagePending)),
+						retry_allowed=isinstance(exc, (AgentUnreachableError, UsagePending))
+						and getattr(exc, "code", None) != SITE_IS_COPY_CODE,
 					)
 			except Exception:
 				# A DB outage leaves the durable claim for periodic recovery,
