@@ -306,15 +306,25 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(w.element.children[2].contains(group(w).element)).toBe(true);
 	});
 
-	it("stacks the board and wraps its tag control below lg", async () => {
+	it("keeps the sheet reachable and the tag control wrapped below lg", async () => {
 		const w = await board();
 		const split = w.get('[data-testid="approvals-split-view"]');
 		expect(split.classes()).toContain("flex-col");
 		expect(split.classes()).toContain("lg:flex-row");
-		expect(rail(w).classes()).toContain("w-full");
-		expect(rail(w).classes()).toContain("max-h-[40vh]");
-		expect(rail(w).classes()).toContain("lg:w-[360px]");
-		expect(pane(w).classes()).toContain("min-w-0");
+		expect(rail(w).classes()).toEqual(
+			expect.arrayContaining([
+				"w-full",
+				"max-h-[40vh]",
+				"border-b",
+				"lg:w-[360px]",
+				"lg:max-h-none",
+				"lg:border-b-0",
+				"lg:border-r",
+			])
+		);
+		expect(pane(w).classes()).toEqual(
+			expect.arrayContaining(["min-h-0", "min-w-0", "flex-1", "overflow-y-auto"])
+		);
 
 		const actions = w.get('[data-testid="approval-decision-actions"]');
 		expect(actions.classes()).toContain("flex-wrap");
