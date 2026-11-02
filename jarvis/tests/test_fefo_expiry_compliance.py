@@ -249,6 +249,33 @@ class TestFefoExpiryCompliance(FrappeTestCase):
 		)
 		self.assertIn('fefo_scope_contract="fefo-expiry-compliance-v0.4.1"', prompt)
 
+	def test_live_fefo_scope_json_cannot_replace_or_remove_the_stamped_marker(self):
+		"""An ORM write cannot weaken the server-owned FEFO run boundary."""
+		original = frappe.as_json(SCOPE)
+		run = frappe.get_doc(
+			{
+				"doctype": "Jarvis Agent Run",
+				"agent": fefo.AGENT,
+				"trigger": "manual",
+				"status": "running",
+				"started_at": frappe.utils.now(),
+				"scope_json": original,
+			}
+		)
+		run.insert(ignore_permissions=True, ignore_links=True)
+		self.addCleanup(frappe.db.delete, "Jarvis Agent Run", {"name": run.name})
+
+		for replacement in (
+			frappe.as_json({**SCOPE, "record_scope": {"doctype": "Warehouse", "name": "Other Leaf"}}),
+			frappe.as_json({key: value for key, value in SCOPE.items() if key != "fefo_scope_contract"}),
+		):
+			with self.subTest(replacement=replacement):
+				doc = frappe.get_doc("Jarvis Agent Run", run.name)
+				doc.scope_json = replacement
+				with self.assertRaises(frappe.PermissionError):
+					doc.save(ignore_permissions=True)
+				self.assertEqual(frappe.db.get_value("Jarvis Agent Run", run.name, "scope_json"), original)
+
 	def test_config_api_refuses_unknown_top_level_key_before_save(self):
 		original = frappe.as_json(POLICY)
 		installation = frappe._dict(name="FEFO-CONFIG", agent=fefo.AGENT, config=original)

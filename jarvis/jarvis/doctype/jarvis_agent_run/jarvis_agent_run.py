@@ -35,6 +35,7 @@ _IMMUTABLE_LAUNCH_FIELDS = (
 	"tools_allow_json",
 	"capability_nature",
 	"capability_writes_json",
+	"scope_json",
 	"engagement_config_json",
 	"assessment_config_json",
 	"input_snapshot_json",
