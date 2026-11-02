@@ -239,6 +239,7 @@
         "ali-lwp-9c21",
         "ali-punch-7d14"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -358,6 +359,7 @@
         "bm-fc-1d7a",
         "bm-inv-6b03"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 3600,
@@ -403,6 +405,7 @@
         "bmhd-lat-4c19",
         "bmhd-win-9e2f"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 900,
@@ -452,6 +455,7 @@
         "bmh-ovl-7d12",
         "bmh-win-3ab8"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 1800,
@@ -579,6 +583,7 @@
         "ca-cl-a4e6",
         "ca-cl-c058"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 2400,
@@ -678,6 +683,7 @@
         "Stock Ledger Entry"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": [
         {
           "doctype": "Jarvis Approval Request",
@@ -923,6 +929,7 @@
         "gdp_near_expiry_horizon_convention",
         "shelf_life_horizon_fraction"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -981,6 +988,7 @@
         "fad-mat-7c21",
         "fad-salv-b1a6"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
@@ -1039,6 +1047,7 @@
         "grn-offpo-3d51",
         "grn-uomtol-4b17"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1096,6 +1105,7 @@
         "rule37_180d",
         "s16_4_window"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1293,6 +1303,7 @@
         "ls-sign-9c14",
         "ls-susp-3d7a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
@@ -1419,6 +1430,7 @@
         "nsv-spike-4b1c",
         "nsv-tieout-7d92"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1576,6 +1588,7 @@
         "sb-stat-4d81",
         "sb-win-1e4a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "helpdesk-queue",
       "timeout_s": 1800,
@@ -1636,6 +1649,7 @@
         "pt_slabs_karnataka",
         "pt_slabs_maharashtra"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -1658,34 +1672,32 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.5.0",
       "status": "Published",
-      "description": "Extends the Statutory Payroll auditor onto your own recorded PF/ESI deposit bookings: it reads the Journal Entry or Payment Entry you post against your PF/ESI liability account and reports whether that booking is dated on or before the effective-dated deposit due date. Installable only where ERPNext and HRMS are present. Read-only; reports a booked-liability date only, never that a deposit reached EPFO/ESIC, and never books, edits, or deposits. Custom challan doctypes and portal receipts are not read here; they enter as a declared import artifact.",
+      "description": "Reviews each owner-declared native outgoing payroll booking in one configured Account group against a dated due-date reference. It keeps current interest and damages evidence-review gaps visible and shows VISHWAS as an external-review reference only. It does not decide eligibility, receipt, default or penalty. Gazette text and qualified legal review remain pending.",
       "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__get_doc"
+        "jarvis__get_payroll_deposit_inputs"
       ],
       "tools_allow": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__get_doc",
+        "jarvis__get_payroll_deposit_inputs",
         "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "exec",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
         "Journal Entry",
         "Payment Entry",
-        "Company"
+        "Company",
+        "Account",
+        "Journal Entry Account",
+        "Payment Entry Deduction",
+        "Advance Taxes and Charges"
       ],
       "rule_tokens": [
         "pf_esi_deposit_due_date",
         "s14b_damages_table",
         "s7q_interest_table"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -1698,10 +1710,13 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027",
+      "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "deposit"
+      ]
     },
     {
       "agent_slug": "stock-variance-auditor",
@@ -1738,6 +1753,7 @@
       "rule_tokens": [
         "sv-vtol-7b2c"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1902,6 +1918,7 @@
         "vl-stale-ageing-5f17",
         "vl-tieout-tol-a9e3"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
