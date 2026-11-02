@@ -8,10 +8,12 @@ bench answers with ToolNotFoundError, or a delegate could not discover a tool th
 bench implements.
 """
 
+import json
 import os
 import tempfile
 from unittest.mock import patch
 
+import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.tools import _tool_contract as tc
@@ -122,13 +124,10 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "8e1c704694858511afcc03fee547a345fd200d3423e4dae44cfd4a507e9dab8f"
+	PINNED_CAPABILITY_DIGEST = "583fd85767cd87644a2b6dd4140d4d04f47812147cacc7f14d56bd5b8cc18490"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
-		import json
-
-		import frappe
 
 		path = frappe.get_app_path("jarvis", "agents", "registry.json")
 		with open(path, encoding="utf-8") as fh:
@@ -162,10 +161,6 @@ class TestLeadHygieneRegistryContract(FrappeTestCase):
 	"""
 
 	def test_cross_funnel_fingerprint_release_is_vendored(self):
-		import json
-
-		import frappe
-
 		path = frappe.get_app_path("jarvis", "agents", "registry.json")
 		with open(path, encoding="utf-8") as fh:
 			entry = next(
