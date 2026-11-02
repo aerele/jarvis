@@ -509,8 +509,12 @@ export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkField
 
 // Field metadata for the record-edit action card: powers Link/Select/Date
 // controls (returns {ok, doctype, fields:[{fieldname,label,fieldtype,options}]}).
-export const getDoctypeFields = (doctype) =>
-	call("jarvis.chat.api.get_doctype_fields", { doctype });
+export const getDoctypeFields = (doctype, parentDoctype, parentfield) =>
+	call("jarvis.chat.api.get_doctype_fields", {
+		doctype,
+		...(parentDoctype ? { parent_doctype: parentDoctype } : {}),
+		...(parentfield ? { parentfield } : {}),
+	});
 
 // --- LLM pool / models config (System-Manager only, gated server-side) ---
 export const getLlmConfig = () => call("jarvis.onboarding.get_llm_config");
@@ -920,6 +924,10 @@ export const listApprovals = (status = "Pending") =>
 export const approvalsBadge = () => call("jarvis.chat.approvals_api.pending_badge", {});
 export const decideApproval = (name, decision, approve = 1) =>
 	call("jarvis.chat.approvals_api.decide", { name, decision, approve });
+// The requester sends a decided Chat question's stored decision to their own chat
+// when it did not reach it (requester-only, never resends a delivered decision).
+export const continueApprovalChat = (name) =>
+	call("jarvis.chat.approvals_api.continue_approval_chat", { name });
 // Ignore a request off the board (no verdict, no chat resume); reversible.
 export const dismissApproval = (name) =>
 	call("jarvis.chat.approvals_api.dismiss_approval", { name });
@@ -1011,6 +1019,14 @@ export const listMacrosPage = (p) => call(MC + "list_macros_page", _page(p));
 export const fileboxListPage = (p) => call("jarvis.chat.filebox.list_inbound_page", _page(p));
 export const listApprovalsPage = (p) =>
 	call("jarvis.chat.approvals_api.list_approvals_page", _page(p));
+export const listApprovalReviewers = () =>
+	call("jarvis.chat.approvals_api.list_approval_reviewers");
+// A Chat question's reviewers are explicit grants (requester only), never DocShares.
+// Both answer with the current reviewers: [{ user, full_name }].
+export const tagApprovalReviewer = (name, user) =>
+	call("jarvis.chat.approvals_api.tag_reviewer", { name, user });
+export const untagApprovalReviewer = (name, user) =>
+	call("jarvis.chat.approvals_api.untag_reviewer", { name, user });
 
 // ── File Box FB-1: cascade delete + clear-processed + bulk delete (Q4) ──────
 // delete_inbound: owner-gated cascade (approvals + messages + File docs + the

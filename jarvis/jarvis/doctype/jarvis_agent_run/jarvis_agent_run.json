@@ -39,6 +39,7 @@
   "wm_row_count",
   "wm_gl_max_modified",
   "permission_profile",
+  "visibility_receipt_json",
   "integrity_digest",
   "canvas_ref",
   "model_rendered",
@@ -223,6 +224,15 @@
    "description": "A summary + sha256 of the run-as user's roles + user-permission keys at launch (A12). Lets a drift between mapping-time and run-time perms be detected."
   },
   {
+   "fieldname": "visibility_receipt_json",
+   "fieldtype": "Small Text",
+   "label": "Visibility Receipt",
+   "read_only": 1,
+   "permlevel": 1,
+   "no_copy": 1,
+   "description": "Server-only launch receipt for a reviewed visibility policy. It is never sent in delegate scope or prompts; missing, malformed, or changed profile facts make the run partial."
+  },
+  {
    "fieldname": "integrity_digest",
    "fieldtype": "Data",
    "label": "Integrity Digest",
@@ -337,7 +347,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-28 18:05:00.000000",
+ "modified": "2026-11-01 15:04:45.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Agent Run",

@@ -70,14 +70,21 @@
 					:is-collapsed="collapsed"
 				>
 					<template v-if="!collapsed && badgeCount(link)" #right>
-						<Badge :label="badgeLabel(link)" theme="red" variant="subtle" />
+						<span
+							v-if="link.badge === 'shared'"
+							class="size-1.5 rounded-full bg-blue-500"
+							role="img"
+							:aria-label="__('Unseen shared chats')"
+						/><Badge v-else :label="badgeLabel(link)" theme="red" variant="subtle" />
 					</template>
 				</SidebarLink>
 				<!-- collapsed badge → floating dot (HD pattern; red = pending action;
 				     semantic token so the dot tracks data-theme: #CC2929 light / #E43838 dark) -->
 				<div
 					v-if="collapsed && badgeCount(link)"
-					class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full bg-surface-red-5"
+					class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full"
+					:class="link.badge === 'shared' ? 'bg-blue-500' : 'bg-surface-red-5'"
+					:aria-label="link.badge === 'shared' ? __('Unseen shared chats') : undefined"
 				/>
 			</div>
 			<!-- trailing drop zone: the only way to drop an item into the LAST slot
@@ -113,7 +120,12 @@
 							<!-- a badged item folded away inside More still nudges -->
 							<div
 								v-if="!moreOpen && moreBadged"
-								class="size-1.5 rounded-full bg-surface-red-5"
+								class="size-1.5 rounded-full"
+								:class="
+									moreLinks.some((l) => l.badge !== 'shared' && badgeCount(l))
+										? 'bg-surface-red-5'
+										: 'bg-blue-500'
+								"
 							/>
 							<FeatherIcon
 								:name="moreOpen ? 'chevron-down' : 'chevron-right'"
@@ -124,7 +136,12 @@
 				</SidebarLink>
 				<div
 					v-if="collapsed && !moreOpen && moreBadged"
-					class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full bg-surface-red-5"
+					class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full"
+					:class="
+						moreLinks.some((l) => l.badge !== 'shared' && badgeCount(l))
+							? 'bg-surface-red-5'
+							: 'bg-blue-500'
+					"
 				/>
 			</div>
 			<template v-if="moreOpen">
@@ -158,12 +175,26 @@
 						:is-collapsed="collapsed"
 					>
 						<template v-if="!collapsed && badgeCount(link)" #right>
-							<Badge :label="badgeLabel(link)" theme="red" variant="subtle" />
+							<span
+								v-if="link.badge === 'shared'"
+								class="size-1.5 rounded-full bg-blue-500"
+								role="img"
+								:aria-label="__('Unseen shared chats')"
+							/><Badge
+								v-else
+								:label="badgeLabel(link)"
+								theme="red"
+								variant="subtle"
+							/>
 						</template>
 					</SidebarLink>
 					<div
 						v-if="collapsed && badgeCount(link)"
-						class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full bg-surface-red-5"
+						class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full"
+						:class="link.badge === 'shared' ? 'bg-blue-500' : 'bg-surface-red-5'"
+						:aria-label="
+							link.badge === 'shared' ? __('Unseen shared chats') : undefined
+						"
 					/>
 				</div>
 				<!-- trailing drop zone (see the top group). onDragStart forces
@@ -177,6 +208,22 @@
 			</template>
 		</nav>
 
+		<section
+			v-if="!collapsed && store.sharedConversations?.length"
+			class="mt-2 max-h-48 shrink-0 overflow-y-auto"
+			:aria-label="__('Shared with me')"
+		>
+			<h2 class="px-4 pb-1 text-sm text-ink-gray-5">{{ __("Shared with me") }}</h2>
+			<SharedConversationRow
+				v-for="row in store.sharedConversations.slice(0, 10)"
+				:key="row.name"
+				:conv="row"
+			/><router-link
+				to="/shared"
+				class="mx-4 my-2 inline-block text-xs text-ink-gray-5 underline"
+				>{{ __("View all") }}</router-link
+			>
+		</section>
 		<!-- 4. recent chats (hidden entirely when collapsed, D6) -->
 		<template v-if="!collapsed">
 			<div class="px-4 pb-2.5 pt-[11px] text-sm text-ink-gray-5">Recent chats</div>
@@ -297,6 +344,8 @@ import { reconcileOrder, moveOrderItem } from "@/lib/sidebarOrder";
 import UserMenu from "./UserMenu.vue";
 import SidebarLink from "./SidebarLink.vue";
 import ConversationRow from "./ConversationRow.vue";
+import SharedConversationRow from "./SharedConversationRow.vue";
+import { __ } from "@/lib/i18n";
 
 const store = useShellStore();
 const route = useRoute();
@@ -390,6 +439,14 @@ const TOP_DEFS = [
 		to: { name: "AgentsList" },
 		isActive: () => route.path.startsWith("/agents"),
 	},
+
+	{
+		label: __("Shared with me"),
+		icon: "users",
+		to: { name: "SharedChats" },
+		isActive: () => route.path.startsWith("/shared"),
+		badge: "shared",
+	},
 ];
 // "More" group: macros + triggers are created from the main chat.
 const MORE_DEFS = [
@@ -409,6 +466,7 @@ const MORE_DEFS = [
 // Pending-action badge per def `badge` key (red = something waits on you).
 // "review" is only ever non-zero for skill reviewers (store gates the poll).
 const BADGE_COUNTS = {
+	shared: () => (store.hasUnseenShares ? 1 : 0),
 	approvals: () => store.approvalsCount,
 	review: () => store.reviewCount,
 };
