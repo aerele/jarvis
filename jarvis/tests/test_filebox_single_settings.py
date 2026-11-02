@@ -241,7 +241,7 @@ class TestFileBoxSingleSettings(_ApplyBase):
 		def prior():
 			prior_called.append("prior")
 
-		mark = len(frappe.db.after_rollback)
+		mark = len(frappe.db.after_rollback._functions)
 		frappe.db.after_rollback.add(prior)
 		try:
 			crashes = []
@@ -250,13 +250,13 @@ class TestFileBoxSingleSettings(_ApplyBase):
 			self.assertIn("fixture original save failure", raised.exception.message)
 			self.assertEqual(called, ["broken", "last"])
 			self.assertEqual(prior_called, [])
-			self.assertEqual(frappe.db.after_rollback.cut(mark), [prior])
-			self.assertEqual(len(frappe.db.after_rollback), mark)
+			self.assertEqual(_sheet._cut_callback_queue(frappe.db.after_rollback, mark), [prior])
+			self.assertEqual(len(frappe.db.after_rollback._functions), mark)
 			logs = "\n".join(crashes)
 			self.assertIn("fixture original save failure", logs)
 			self.assertIn("fixture cleanup failure", logs)
 		finally:
-			frappe.db.after_rollback.cut(mark)
+			_sheet._cut_callback_queue(frappe.db.after_rollback, mark)
 		self.assertEqual(self.value(), 1)
 		self.assertEqual(frappe.get_cached_doc(DT, DT).get(FIELD), 1)
 
