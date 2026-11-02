@@ -28,6 +28,57 @@ from jarvis.exceptions import InvalidArgumentError
 INSTALLATION = "Jarvis Agent Installation"
 
 
+def authoritative_writeback_scope(run_doc, submitted_scope) -> dict:
+	"""Return the launch-stamped scope after checking the evaluator echo.
+
+	The evaluator receives the scope in its run message and returns the scope it
+	used with its findings. That return value is useful as a consistency check,
+	but it is not an authority to change a run. In particular, it must never
+	select the company used for finding persistence or auto-resolution.
+
+	An evaluator may return only the dimensions that apply to its data model. For
+	example, a CRM evaluator does not bind a Company dimension. Each supplied key
+	must therefore exist in, and exactly match, the server-stamped launch scope.
+	A scoped run also requires a non-empty evaluator scope, so a missing result
+	cannot silently bypass the check. An unscoped legacy run may return an empty
+	scope, but it may not introduce a scope of its own.
+	"""
+	# Older unscoped launches leave scope_json unset. Treat that as an empty server
+	# scope, never as permission for the evaluator to add a replacement scope.
+	stamped = _scope_object(run_doc.get("scope_json"), label="server-stamped run scope", allow_missing=True)
+	submitted = _scope_object(submitted_scope, label="evaluator scope", allow_missing=True)
+
+	if not stamped:
+		if submitted:
+			raise InvalidArgumentError("evaluator scope cannot add dimensions to an unscoped run")
+		return {}
+	if not submitted:
+		raise InvalidArgumentError("evaluator scope is required for a scoped run")
+
+	for key, value in submitted.items():
+		if key not in stamped:
+			raise InvalidArgumentError(f"evaluator scope has unstamped dimension: {key}")
+		if stamped[key] != value:
+			raise InvalidArgumentError(f"evaluator scope does not match server-stamped {key}")
+
+	# A fresh dict prevents later code from mutating the run's trusted stamp.
+	return dict(stamped)
+
+
+def _scope_object(value, *, label: str, allow_missing: bool = False) -> dict:
+	"""Parse one scope object without the old silent fallback-to-empty behavior."""
+	if value is None and allow_missing:
+		return {}
+	if isinstance(value, str):
+		try:
+			value = frappe.parse_json(value)
+		except Exception:
+			raise InvalidArgumentError(f"{label} must be a JSON object") from None
+	if not isinstance(value, dict):
+		raise InvalidArgumentError(f"{label} must be a JSON object")
+	return value
+
+
 def _configuration(config) -> dict:
 	"""Return a config object, preserving the legacy malformed-config fallback."""
 	if isinstance(config, dict):

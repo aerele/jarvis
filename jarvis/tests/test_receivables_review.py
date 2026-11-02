@@ -280,6 +280,7 @@ class TestReceivablesReview(FrappeTestCase):
 				agent=review.AGENT,
 				installation="INST-AR",
 				status="running",
+				scope_json=json.dumps(source["scope"]),
 				input_snapshot_json=json.dumps(source),
 				preparation_mode=mode,
 				owner="Administrator",

@@ -394,7 +394,7 @@
 			<!-- RIGHT pane: review + act on the selected approval -->
 			<!-- min-w-0 prevents a long detail/control row from widening the desktop
 			     split view beyond its container. -->
-			<div class="min-w-0 flex-1 overflow-y-auto">
+			<div class="min-h-0 min-w-0 flex-1 overflow-y-auto">
 				<!-- a held write / chat card / wiki note: its own detail, keyed so every
 				     selection mounts (and loads) a fresh one -->
 				<div v-if="selectedKey" class="mx-auto w-full max-w-3xl px-4 py-6 sm:px-8">

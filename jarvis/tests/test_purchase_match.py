@@ -722,6 +722,7 @@ class TestPurchaseMatch(FrappeTestCase):
 				agent=matching.AGENT,
 				installation="INST-AP",
 				status="running",
+				scope_json=json.dumps(captured["scope"]),
 				input_snapshot_json=json.dumps(captured),
 				preparation_mode=mode,
 				owner="Administrator",

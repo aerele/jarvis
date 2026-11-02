@@ -444,6 +444,29 @@ class TestHopHandoff(_PumpTestCase):
 		# control row hop_counter bumped so the next hop mints a fresh id.
 		self.assertEqual(int(frappe.db.get_value(PUMP, self._target, "hop_counter")), 5)
 
+	def test_handoff_applies_the_queued_lane_events_first(self):
+		# #2367: a step the reader queued after the last slice was never applied, so it
+		# was never cached and the next hop re-seeded without it.
+		order = []
+		rec = _Recorder()
+		deps = pump.PumpDeps()
+		deps.enqueue_pump_job = lambda **kw: (order.append("enqueue"), rec(**kw))
+		ctx = self._make_ctx(deps, hop_counter=4, with_mux=False)
+		ctx.mux = MagicMock()
+		ctx.mux.dispatch.side_effect = lambda **kw: order.append(("dispatch", kw)) or 1
+		pump._handoff(ctx)
+		self.assertEqual(order, [("dispatch", {"block_s": 0}), "enqueue"])
+
+	def test_a_failed_drain_still_hands_off(self):
+		rec = _Recorder()
+		deps = pump.PumpDeps()
+		deps.enqueue_pump_job = rec
+		ctx = self._make_ctx(deps, hop_counter=4, with_mux=False)
+		ctx.mux = MagicMock()
+		ctx.mux.dispatch.side_effect = RuntimeError("lane callback blew up")
+		pump._handoff(ctx)
+		self.assertEqual(rec.count, 1)
+
 
 # --------------------------------------------------------------------------- #
 # 4. Takeover fencing — the old context's write affects 0 rows

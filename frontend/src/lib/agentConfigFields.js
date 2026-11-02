@@ -1,6 +1,6 @@
 /**
  * The engagement-config keys ConfigForm.vue renders as real, purpose-built
- * form fields (link pickers / dates / numbers / a select), in display order.
+ * form fields (link pickers / dates / numbers / selects / short lists), in display order.
  *
  * Verified against the run path that actually reads them - not a schema:
  *   - agent_scope.py's `_resolve`: company, fiscal_year, from_date, to_date -
@@ -12,7 +12,8 @@
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
  *     CRITICAL fix, they are NOT flat top-level keys), and the GRN Hygiene
- *     auditor reads its reviewer settings under `grn_hygiene`. Rendered only
+ *     auditor reads its reviewer settings under `grn_hygiene`. GST has flat
+ *     turnover and HSN exclusion settings. Rendered only
  *     when the listing's own `config_keys` (agents_api.py get_agent,
  *     jarvis#1063) names the field's `configKey` or, when that is absent, its
  *     storage `path` (a dot path for a nested key). The SLA team's
@@ -40,6 +41,7 @@
  *   - {key, path, label, type: "text", help, maxLength?}
  *   - {key, path, label, type: "number", help, suffix?}
  *   - {key, path, label, type: "select", options: [{label, value}, ...]}
+ *   - {key, path, label, type: "text-list", help}
  */
 export const CONFIG_FIELD_SET = [
 	{
@@ -199,6 +201,20 @@ export const CONFIG_FIELD_SET = [
 		help: "Optional plain-text notice for a test review (up to 500 characters).",
 	},
 	{
+		key: "annual_aggregate_turnover",
+		path: "annual_aggregate_turnover",
+		label: "Previous financial-year aggregate turnover",
+		type: "number",
+		help: "Whole-rupee turnover for the preceding financial year. The GST return-prep HSN check uses this saved value to select its reporting band.",
+	},
+	{
+		key: "same_hsn_rate_allowlist",
+		path: "same_hsn_rate_allowlist",
+		label: "Same-HSN rate review exclusions",
+		type: "text-list",
+		help: "Optional comma-separated HSN or SAC codes that have an approved mixed-rate reason. This only suppresses the review-only rate-drift worklist item.",
+	},
+	{
 		key: "stale_floor_days",
 		path: "ageing.stale_floor_days",
 		label: "Stale-invoice floor",
@@ -258,6 +274,11 @@ export const NUMBER_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "num
  * aligned. */
 export const CONFIG_FIELD_MAX_LENGTHS = Object.fromEntries(
 	CONFIG_FIELD_SET.filter((f) => Number.isInteger(f.maxLength)).map((f) => [f.key, f.maxLength])
+);
+
+/** Known keys stored as a JSON string array but edited as a short comma-separated list. */
+export const TEXT_LIST_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "text-list").map(
+	(f) => f.key
 );
 
 /** local form key -> its storage dot path ("company" flat, or

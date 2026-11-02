@@ -10,6 +10,7 @@ dedupe (O2), and catalog-sync idempotency.
 
 import json
 import unittest
+from copy import deepcopy
 from unittest.mock import patch
 
 import frappe
@@ -539,6 +540,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 			],
 		)
 		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "gst-return-prep-auditor", "config_keys")),
+			["annual_aggregate_turnover", "same_hsn_rate_allowlist"],
+		)
+		self.assertEqual(
 			json.loads(frappe.db.get_value(LISTING, "grn-hygiene-auditor", "config_keys")),
 			["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
 		)
@@ -769,7 +774,37 @@ class TestAgentsMarketplace(unittest.TestCase):
 		finally:
 			frappe.set_user(original)
 
-	def test_ticket_triage_stays_coming_soon_with_no_runtime_surface(self):
+	def _use_unshipped_ticket_triage_catalog(self):
+		"""Exercise the old teaser guards without treating the shipped v0.2 bundle as a teaser."""
+		registry = deepcopy(agent_catalog._load_registry())
+		entry = next(a for a in registry["agents"] if a["agent_slug"] == "ticket-triage-operator")
+		entry.update(
+			status="Coming Soon",
+			version="0.1.1",
+			description="Coming Soon: no runtime tool or write surface",
+			tools_required=[],
+			tools_allow=[],
+			doctypes_required=[],
+			writes=None,
+		)
+		stub = patch.object(agent_catalog, "_load_registry", return_value=registry)
+		# Cleanup runs in reverse order: restore the real bundle, then resync its listing.
+		self.addCleanup(agent_catalog.sync_agent_listings)
+		self.addCleanup(stub.stop)
+		stub.start()
+		agent_catalog.sync_agent_listings()
+
+	def test_ticket_triage_publishes_only_the_native_review_tools(self):
+		agent_catalog.sync_agent_listings()
+		listing = frappe.get_doc(LISTING, "ticket-triage-operator")
+		tools = ["jarvis__get_ticket_triage_inputs", "jarvis__stage_ticket_triage_proposals"]
+		self.assertEqual((listing.status, listing.version), ("Published", "0.2.0"))
+		self.assertEqual(frappe.parse_json(listing.tools_required), tools)
+		self.assertEqual(agent_catalog.registry_tools_allow(listing.name), [*tools, "exec"])
+		self.assertFalse(agent_catalog.registry_is_coming_soon_no_runtime(listing.name))
+
+	def test_unshipped_ticket_triage_stays_coming_soon_with_no_runtime_surface(self):
+		self._use_unshipped_ticket_triage_catalog()
 		agent_catalog.sync_agent_listings()
 		listing = frappe.get_doc(LISTING, "ticket-triage-operator")
 		self.assertEqual(listing.status, "Coming Soon")
@@ -787,7 +822,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 			"a Coming Soon agent must never reach the delegate payload",
 		)
 
-	def test_ticket_triage_refuses_install(self):
+	def test_unshipped_ticket_triage_refuses_install(self):
+		self._use_unshipped_ticket_triage_catalog()
 		frappe.set_user(self.owner)
 		try:
 			with self.assertRaisesRegex(frappe.ValidationError, "not available to install"):
@@ -801,7 +837,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 			)
 		)
 
-	def test_ticket_triage_admin_cannot_publish_the_no_runtime_bundle(self):
+	def test_unshipped_ticket_triage_admin_cannot_publish_the_no_runtime_bundle(self):
+		self._use_unshipped_ticket_triage_catalog()
 		frappe.set_user(self.admin)
 		try:
 			with self.assertRaisesRegex(frappe.PermissionError, "Coming Soon teaser"):
@@ -814,7 +851,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 			frappe.set_user("Administrator")
 		self.assertEqual(frappe.db.get_value(LISTING, "ticket-triage-operator", "status"), "Coming Soon")
 
-	def test_ticket_triage_legacy_published_listing_cannot_install(self):
+	def test_unshipped_ticket_triage_legacy_published_listing_cannot_install(self):
+		self._use_unshipped_ticket_triage_catalog()
 		frappe.db.set_value(LISTING, "ticket-triage-operator", "status", "Published", update_modified=False)
 		frappe.db.commit()
 		frappe.set_user(self.owner)
@@ -831,7 +869,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 			)
 		)
 
-	def test_ticket_triage_stale_install_cannot_enable_but_can_disable(self):
+	def test_unshipped_ticket_triage_stale_install_cannot_enable_but_can_disable(self):
+		self._use_unshipped_ticket_triage_catalog()
 		frappe.db.set_value(LISTING, "ticket-triage-operator", "status", "Published", update_modified=False)
 		frappe.db.commit()
 		inst = self._insert_ticket_triage_stale_install(enabled=0)
@@ -856,7 +895,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(res["data"]["enabled"], 0)
 		self.assertEqual(persisted_enabled, 0)
 
-	def test_ticket_triage_stale_rows_never_reach_any_push_payload_leg(self):
+	def test_unshipped_ticket_triage_stale_rows_never_reach_any_push_payload_leg(self):
+		self._use_unshipped_ticket_triage_catalog()
 		frappe.db.set_value(LISTING, "ticket-triage-operator", "status", "Published", update_modified=False)
 		frappe.db.commit()
 		inst = self._insert_ticket_triage_stale_install(enabled=1)
@@ -873,7 +913,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(self._count_slug(owner_payload, "agent-ticket-triage-operator"), 0)
 		self.assertEqual(self._count_slug(bench_payload, "agent-ticket-triage-operator"), 0)
 
-	def test_ticket_triage_refuses_stale_launch_before_creating_a_run(self):
+	def test_unshipped_ticket_triage_refuses_stale_launch_before_creating_a_run(self):
+		self._use_unshipped_ticket_triage_catalog()
 		inst = self._ticket_triage_stale_install()
 		conversations_before = frappe.db.count("Jarvis Conversation")
 		runs_before = frappe.db.count(RUN, {"agent": inst.agent})

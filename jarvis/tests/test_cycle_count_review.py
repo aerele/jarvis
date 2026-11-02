@@ -1263,6 +1263,7 @@ class TestCycleCountOutput(FrappeTestCase):
 		output.update({"truncated": False, "rows_consumed": sum(data["source_counts"].values())})
 		run = frappe._dict(
 			name="RUN-CYCLE-POLICY-TAMPER",
+			scope_json=frappe.as_json(data["scope"]),
 			agent=review.AGENT,
 			installation="INST-CYCLE-POLICY-TAMPER",
 			status="completed",
