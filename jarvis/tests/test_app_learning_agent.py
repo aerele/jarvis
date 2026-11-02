@@ -18,7 +18,7 @@ custom-app learning pipeline:
     operator still refused).
 
 Run:
-  bench --site patterntest.localhost run-tests --app jarvis \
+  bench --site test_jarvis run-tests --app jarvis \
     --module jarvis.tests.test_app_learning_agent
 """
 
@@ -36,7 +36,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
 from jarvis.exceptions import InvalidArgumentError
-from jarvis.learning import app_source
+from jarvis.learning import app_source, app_source_receipts
 from jarvis.tools import _agent_run_ctx
 from jarvis.tools import _app_learning_ctx as ctx
 from jarvis.tools.finish_app_learning_run import finish_app_learning_run
@@ -109,10 +109,17 @@ def _mk_run(
 	status: str = "running",
 	source_apps: tuple[str, ...] | list[str] | None = ("fakeapp",),
 ) -> str:
-	"""A ``Jarvis Agent Run`` fixture. ``source_apps`` is the CX5-2 admin
-	authorization the launch path stamps into ``scope_json``; the tools read it
-	back from there, so a fixture run needs it to be able to touch any app at all
-	(``None`` = a run with NO authorized apps — it must read/write nothing)."""
+	"""Create a run with launch-owned, signed source selection when requested.
+
+	``scope_json`` remains in the fixture only as the model prompt convenience.
+	The tools authorize only the immutable ``source_selection_json`` stamp.
+	``None`` creates an old/incomplete row that must fail closed.
+	"""
+	profile = (
+		app_source_receipts.permission_profile_for_user(frappe.session.user)
+		if source_apps is not None
+		else None
+	)
 	doc = frappe.get_doc(
 		{
 			"doctype": RUN,
@@ -124,10 +131,20 @@ def _mk_run(
 			"scope_json": (
 				frappe.as_json({"source_apps": list(source_apps)}) if source_apps is not None else None
 			),
+			"permission_profile": profile,
 		}
 	)
 	doc.flags.ignore_permissions = True
 	doc.insert(ignore_permissions=True)
+	if source_apps is not None:
+		profile_digest = app_source_receipts.permission_profile_digest(profile)
+		frappe.db.set_value(
+			RUN,
+			doc.name,
+			"source_selection_json",
+			app_source_receipts.encode_selection(doc.name, list(source_apps), profile_digest),
+			update_modified=False,
+		)
 	return doc.name
 
 
@@ -194,6 +211,32 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self._runs.append(run)
 		_agent_run_ctx.set_session_key(sk)
 		return run
+
+	def _read_cited_source(self, *paths: str) -> None:
+		"""Issue the server receipt that a valid fixture wiki page must cite."""
+		for path in paths or ("hooks.py",):
+			read_app_source("fakeapp", path)
+
+	def _page(self, title: str, body_md: str, *, source_paths=None, **extra) -> dict:
+		"""Build an honest model payload. Source paths are explicit contract data."""
+		return {
+			"title": title,
+			"body_md": body_md,
+			"source_paths": list(source_paths or ["hooks.py"]),
+			**extra,
+		}
+
+	def _record_cited_pages(self, *, app: str = "fakeapp", pages: list[dict]) -> dict:
+		"""Read each cited fake file, then call the real write tool."""
+		normalized = []
+		paths = []
+		for page in pages:
+			item = dict(page)
+			item.setdefault("source_paths", ["hooks.py"])
+			normalized.append(item)
+			paths.extend(item["source_paths"])
+		self._read_cited_source(*dict.fromkeys(paths))
+		return record_app_wiki(app=app, pages=normalized)
 
 	# ------------------------------------------------------------------ #
 	# self-gate
@@ -292,6 +335,10 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# intact-looking gate. With the counters on the run row, a cache that RAISES on
 		# every call changes nothing about enforcement.
 		run = self._bind_scribe_run()
+		# Seed a valid receipt before consuming the remaining source budget. The
+		# wiki call below must still be rejected only by the page cap, not by a
+		# missing citation.
+		self._read_cited_source("hooks.py")
 		frappe.db.set_value(
 			RUN,
 			run,
@@ -306,7 +353,8 @@ class TestAppLearningAgentTools(FrappeTestCase):
 			with self.assertRaises(InvalidArgumentError):
 				read_app_source("fakeapp", "hooks.py")
 			res = record_app_wiki(
-				app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+				app="fakeapp",
+				pages=[self._page("Overview", "a", key="overview")],
 			)
 		self.assertEqual(res["applied"], 0)  # page cap still exhausted
 		self.assertTrue(res["truncated"])
@@ -388,9 +436,65 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(list_app_modules()["apps"], [])
 		with self.assertRaises(InvalidArgumentError):
 			read_app_source("fakeapp", "hooks.py")
-		res = record_app_wiki(app="fakeapp", pages=[{"title": "X", "key": "overview", "body_md": "b"}])
-		self.assertEqual(res["applied"], 0)
-		self.assertEqual(res["rejected"], 1)
+		with self.assertRaises(InvalidArgumentError):
+			record_app_wiki(app="fakeapp", pages=[{"title": "X", "key": "overview", "body_md": "b"}])
+
+	def test_scope_json_cannot_widen_the_signed_source_selection(self):
+		"""The prompt scope is not an authorization channel."""
+		self._install_second_app()
+		with mock.patch.object(app_source, "_installed_custom_apps", return_value=["fakeapp", "otherapp"]):
+			run = self._bind_scribe_run(source_apps=["fakeapp"])
+			# Simulate a model/config mutation after launch. The signed selection remains
+			# authoritative, so this cosmetic scope change cannot authorize otherapp.
+			frappe.db.set_value(
+				RUN,
+				run,
+				"scope_json",
+				frappe.as_json({"source_apps": ["otherapp"]}),
+				update_modified=False,
+			)
+			self.assertEqual(read_app_source("fakeapp", "hooks.py")["app"], "fakeapp")
+			with self.assertRaises(InvalidArgumentError):
+				read_app_source("otherapp", "hooks.py")
+
+	def test_run_as_profile_change_refuses_source_access(self):
+		"""A role change after launch invalidates its signed source contract."""
+		self._bind_scribe_run()
+		role = "App Learning Receipt Drift Test"
+		_ensure_role(role)
+		admin = frappe.get_doc("User", "Administrator")
+		admin.add_roles(role)
+		try:
+			with self.assertRaises(InvalidArgumentError):
+				read_app_source("fakeapp", "hooks.py")
+		finally:
+			frappe.get_doc("User", "Administrator").remove_roles(role)
+
+	def test_expired_launch_selection_refuses_first_read_and_first_write(self):
+		"""A still-running but expired run cannot mint a fresh receipt on first use."""
+		run = self._bind_scribe_run()
+		old = frappe.utils.add_to_date(
+			frappe.utils.now_datetime(), seconds=-(app_source_receipts.SOURCE_RECEIPT_TTL_SECONDS + 1)
+		)
+		profile = frappe.db.get_value(RUN, run, "permission_profile")
+		selection = app_source_receipts.encode_selection(
+			run,
+			["fakeapp"],
+			app_source_receipts.permission_profile_digest(profile),
+			started_at=old,
+		)
+		frappe.db.set_value(
+			RUN,
+			run,
+			{"started_at": old, "source_selection_json": selection, "source_receipt_json": None},
+			update_modified=False,
+		)
+		with self.assertRaises(InvalidArgumentError):
+			read_app_source("fakeapp", "hooks.py")
+		with self.assertRaises(InvalidArgumentError):
+			record_app_wiki(app="fakeapp", pages=[self._page("Overview", "late", key="overview")])
+		self.assertEqual(int(frappe.db.get_value(RUN, run, "source_bytes_read") or 0), 0)
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 0)
 
 	# ------------------------------------------------------------------ #
 	# CX5-4: outbound DLP — secret redaction, sensitive filenames, page guard
@@ -438,11 +542,91 @@ class TestAppLearningAgentTools(FrappeTestCase):
 				read_app_source("fakeapp", hidden)
 			self.assertIn("indicates credentials", str(cm.exception))
 		self.assertIn("hooks.py", paths)  # ordinary files still listed
-		self.assertTrue(any("filename indicates credentials" in c for c in manifest["coverage_caveats"]))
+		self.assertTrue(any("credential-named" in c for c in manifest["coverage_caveats"]))
+
+	def test_wiki_requires_a_server_signed_complete_source_receipt(self):
+		"""A model cannot forge, omit, or partially alter source evidence."""
+		run = self._bind_scribe_run()
+		page = self._page("Overview", "documented from source", key="overview")
+		missing = record_app_wiki(app="fakeapp", pages=[page])
+		self.assertEqual(missing["applied"], 0)
+		self.assertEqual(missing["rejected"], 1)
+
+		self._read_cited_source("hooks.py")
+		forged = json.loads(frappe.db.get_value(RUN, run, "source_receipt_json"))
+		forged["apps"]["fakeapp"]["reads"]["hooks.py"]["sha256"] = "0" * 64
+		frappe.db.set_value(RUN, run, "source_receipt_json", frappe.as_json(forged), update_modified=False)
+		forged_result = record_app_wiki(app="fakeapp", pages=[page])
+		self.assertEqual(forged_result["applied"], 0)
+		self.assertEqual(forged_result["rejected"], 1)
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 0)
+
+	def test_source_mutation_after_read_refuses_the_wiki_write(self):
+		self._bind_scribe_run()
+		self._read_cited_source("hooks.py")
+		self._write({"hooks.py": "app_title = 'Changed after receipt'\n"})
+		res = record_app_wiki(
+			app="fakeapp",
+			pages=[self._page("Overview", "must not write stale source", key="overview")],
+		)
+		self.assertEqual(res["applied"], 0)
+		self.assertEqual(res["rejected"], 1)
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 0)
+
+	def test_citation_path_traversal_is_refused_before_write(self):
+		self._bind_scribe_run()
+		self._read_cited_source("hooks.py")
+		res = record_app_wiki(
+			app="fakeapp",
+			pages=[self._page("Overview", "invalid citation", key="overview", source_paths=["../secret.py"])],
+		)
+		self.assertEqual(res["applied"], 0)
+		self.assertEqual(res["rejected"], 1)
+		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 0)
+
+	def test_same_run_retry_is_idempotent_and_conflicting_retry_is_refused(self):
+		run = self._bind_scribe_run()
+		self._read_cited_source("hooks.py")
+		page = self._page("Overview", "original source summary", key="overview")
+		first = record_app_wiki(app="fakeapp", pages=[page])
+		self.assertEqual(first["applied"], 1)
+		body = frappe.db.get_value(WIKI, "fakeapp-overview", "body_md")
+		exact_retry = record_app_wiki(app="fakeapp", pages=[page])
+		self.assertEqual(exact_retry["applied"], 0)
+		self.assertEqual(exact_retry["idempotent"], 1)
+		self.assertEqual(frappe.db.get_value(RUN, run, "pages_written"), 1)
+		self.assertEqual(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md"), body)
+		conflict = record_app_wiki(
+			app="fakeapp",
+			pages=[self._page("Overview", "changed body on same retry", key="overview")],
+		)
+		self.assertEqual(conflict["applied"], 0)
+		self.assertEqual(conflict["rejected"], 1)
+		self.assertEqual(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md"), body)
+
+	def test_older_run_cannot_overwrite_a_later_run_page(self):
+		"""A-read, B-write, then A-write must preserve B under the page lock."""
+		run_a = self._bind_scribe_run()
+		self._read_cited_source("hooks.py")
+		page_a = self._page("Overview", "A delayed body", key="overview")
+
+		sk_b = frappe.generate_hash(length=24)
+		run_b = self._bind_scribe_run(sk_b)
+		self._read_cited_source("hooks.py")
+		page_b = self._page("Overview", "B newer body", key="overview")
+		fresh = record_app_wiki(app="fakeapp", pages=[page_b])
+		self.assertEqual(fresh["applied"], 1)
+		self.assertNotEqual(run_a, run_b)
+
+		_agent_run_ctx.set_session_key(self.session_key)
+		late = record_app_wiki(app="fakeapp", pages=[page_a])
+		self.assertEqual(late["applied"], 0)
+		self.assertEqual(late["failed"], 1)
+		self.assertTrue(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md").startswith("B newer body\n"))
 
 	def test_page_carrying_the_session_key_is_refused_and_flags_the_run(self):
 		run = self._bind_scribe_run()
-		res = record_app_wiki(
+		res = self._record_cited_pages(
 			app="fakeapp",
 			pages=[
 				{"title": "Leak", "key": "leak", "body_md": f"Call with {self.session_key} to continue."},
@@ -461,7 +645,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 
 	def test_page_carrying_a_credential_is_refused(self):
 		run = self._bind_scribe_run()
-		res = record_app_wiki(
+		res = self._record_cited_pages(
 			app="fakeapp",
 			pages=[
 				{"title": "Creds", "key": "creds", "body_md": "The app uses AKIAIOSFODNN7EXAMPLE."},
@@ -510,7 +694,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# The other half: even if the delegate WERE steered by the planted text, the
 		# outbound guard refuses to publish the session key it was told to reveal.
 		run = self._bind_scribe_run()
-		res = record_app_wiki(
+		res = self._record_cited_pages(
 			app="fakeapp",
 			pages=[
 				{
@@ -553,7 +737,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# (1) wrote pages -> reconciled to completed
 		run = self._bind_scribe_run()
 		self._mint_real_session(self.session_key)
-		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		self._record_cited_pages(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+		)
 		# (2) wrote nothing -> failed
 		sk2 = frappe.generate_hash(length=24)
 		run2 = self._bind_scribe_run(sk2)
@@ -578,7 +764,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 
 	def test_record_app_wiki_applies_via_funnel_and_updates_in_place(self):
 		self._bind_scribe_run()
-		res = record_app_wiki(
+		res = self._record_cited_pages(
 			app="fakeapp",
 			pages=[
 				{
@@ -598,7 +784,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		sk2 = frappe.generate_hash(length=24)
 		self._extra_keys = {sk2}
 		self._bind_scribe_run(sk2)
-		res2 = record_app_wiki(
+		res2 = self._record_cited_pages(
 			app="fakeapp",
 			pages=[
 				{
@@ -617,7 +803,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 			{"title": f"Page {i}", "page_type": "Process", "body_md": f"body {i}"}
 			for i in range(ctx.PER_RUN_PAGE_CAP + 3)
 		]
-		res = record_app_wiki(app="fakeapp", pages=pages)
+		res = self._record_cited_pages(app="fakeapp", pages=pages)
 		self.assertTrue(res["truncated"])
 		self.assertLessEqual(res["applied"], ctx.PER_RUN_PAGE_CAP)
 
@@ -640,7 +826,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 
 	def test_record_app_wiki_slug_is_forced_app_prefixed(self):
 		self._bind_scribe_run()
-		res = record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "b"}])
+		res = self._record_cited_pages(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "b"}]
+		)
 		self.assertEqual(res["applied"], 1)
 		self.assertEqual(res["slugs"], ["fakeapp-overview"])
 		self.assertTrue(all(s.startswith("fakeapp-") for s in res["slugs"]))
@@ -664,7 +852,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 			}
 		).insert(ignore_permissions=True)
 		self._bind_scribe_run()
-		res = record_app_wiki(
+		res = self._record_cited_pages(
 			app="fakeapp",
 			pages=[{"title": "Overview", "key": "overview", "body_md": "SCRIBE OVERWRITE ATTEMPT"}],
 		)
@@ -675,7 +863,8 @@ class TestAppLearningAgentTools(FrappeTestCase):
 	def test_record_app_wiki_may_refresh_legacy_pipeline_page(self):
 		# Migration reconciliation: a page the RETIRED chat-batch pipeline created
 		# (kind ``app-learning:<app>``) IS agent provenance, so the scribe MAY refresh
-		# it in place — the fence blocks only human-authored pages.
+		# it in place when the page predates this signed run receipt — the fence blocks
+		# human-authored pages and later generations.
 		frappe.get_doc(
 			{
 				"doctype": WIKI,
@@ -697,27 +886,79 @@ class TestAppLearningAgentTools(FrappeTestCase):
 				),
 			}
 		).insert(ignore_permissions=True)
+		# This old pipeline row has no ``last_confirmed_at``. The page's locked
+		# server-owned ``modified`` value is the migration fallback and must predate
+		# the new run's receipt.
+		frappe.db.set_value(
+			WIKI,
+			"fakeapp-overview",
+			{"modified": frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-5)},
+			update_modified=False,
+		)
 		self._bind_scribe_run()
-		res = record_app_wiki(
+		res = self._record_cited_pages(
 			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "REFRESHED"}]
 		)
 		self.assertEqual(res["applied"], 1)
-		self.assertEqual(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md"), "REFRESHED")
+		self.assertTrue(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md").startswith("REFRESHED\n"))
+
+	def test_record_app_wiki_refuses_legacy_page_changed_after_receipt(self):
+		"""A delayed run cannot replace a legacy page changed after its receipt."""
+		run = self._bind_scribe_run()
+		frappe.get_doc(
+			{
+				"doctype": WIKI,
+				"slug": "fakeapp-overview",
+				"title": "Fakeapp Overview",
+				"page_type": "Process",
+				"body_md": "LATER LEGACY BODY",
+				"status": "Active",
+				"scope": "Org",
+				"sources": frappe.as_json(
+					[
+						{
+							"kind": "app-learning:fakeapp",
+							"date": frappe.utils.today(),
+							"ref": None,
+							"user": "Administrator",
+						}
+					]
+				),
+			}
+		).insert(ignore_permissions=True)
+		started_at = frappe.utils.get_datetime(frappe.db.get_value(RUN, run, "started_at"))
+		frappe.db.set_value(
+			WIKI,
+			"fakeapp-overview",
+			{
+				"last_confirmed_at": None,
+				"modified": frappe.utils.add_to_date(started_at, seconds=1),
+			},
+			update_modified=False,
+		)
+		res = self._record_cited_pages(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "DELAYED"}]
+		)
+		self.assertEqual(res["applied"], 0)
+		self.assertEqual(res["failed"], 1)
+		self.assertEqual(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md"), "LATER LEGACY BODY")
 
 	def test_record_app_wiki_updates_its_own_prior_page(self):
 		# The fence must NOT break legit re-run-in-place: an agent updating a page a
 		# prior agent run created still works (its provenance matches).
 		self._bind_scribe_run()
-		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "FIRST"}])
+		self._record_cited_pages(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "FIRST"}]
+		)
 		sk2 = frappe.generate_hash(length=24)
 		self._extra_keys = {sk2}
 		self._bind_scribe_run(sk2)
-		res = record_app_wiki(
+		res = self._record_cited_pages(
 			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "SECOND"}]
 		)
 		self.assertEqual(res["applied"], 1)
 		self.assertEqual(frappe.db.count(WIKI, {"slug": "fakeapp-overview"}), 1)
-		self.assertEqual(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md"), "SECOND")
+		self.assertTrue(frappe.db.get_value(WIKI, "fakeapp-overview", "body_md").startswith("SECOND\n"))
 
 	def test_record_app_wiki_will_not_overwrite_human_edited_agent_page(self):
 		# CA-2: a page the SCRIBE created, then a HUMAN edited (a `manual` source is
@@ -725,7 +966,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# the next run. Historical agent provenance does not authorize replacing a
 		# later human edit — the fence refuses after ANY human touch.
 		self._bind_scribe_run()
-		record_app_wiki(
+		self._record_cited_pages(
 			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "SCRIBE V1"}]
 		)
 		slug = "fakeapp-overview"
@@ -739,7 +980,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		sk2 = frappe.generate_hash(length=24)
 		self._extra_keys = {sk2}
 		self._bind_scribe_run(sk2)
-		res = record_app_wiki(
+		res = self._record_cited_pages(
 			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "SCRIBE V2"}]
 		)
 		self.assertEqual(res["applied"], 0)
@@ -767,7 +1008,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 			}
 		).insert(ignore_permissions=True)
 		run = self._bind_scribe_run()
-		res = record_app_wiki(
+		res = self._record_cited_pages(
 			app="fakeapp",
 			pages=[
 				{"title": "Overview", "key": "overview", "body_md": "SCRIBE COLLIDE"},  # -> refused
@@ -793,7 +1034,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 
 	def test_finish_completes_run_with_pages_tally(self):
 		run = self._bind_scribe_run()
-		record_app_wiki(
+		self._record_cited_pages(
 			app="fakeapp",
 			pages=[
 				{"title": "Overview", "key": "overview", "body_md": "a"},
@@ -824,7 +1065,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# CA-4: with completion now SERVER-owned, a late/duplicate finish must report
 		# the terminal state idempotently rather than raising "already finalized".
 		run = self._bind_scribe_run()
-		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		self._record_cited_pages(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+		)
 		finish_app_learning_run()
 		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")
 		# calling finish AGAIN on the same (now completed) run is a no-op fast-path
@@ -839,7 +1082,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		from jarvis.chat.agent_scheduler import STALE_RUN_AFTER_SECONDS, reap_stale_agent_runs
 
 		run = self._bind_scribe_run()
-		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		self._record_cited_pages(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+		)
 		self.assertEqual(frappe.db.get_value(RUN, run, "pages_written"), 1)
 		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "running")
 		old = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-(STALE_RUN_AFTER_SECONDS + 3600))
@@ -865,7 +1110,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		from jarvis.chat import agents_api
 
 		run = self._bind_scribe_run()
-		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		self._record_cited_pages(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+		)
 		finish_app_learning_run()
 		# Every launched run carries its installation; the run list leaves out a run with
 		# none (one an uninstall kept for the monthly budget). The fixture has none.
@@ -894,6 +1141,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		from jarvis.chat import wiki
 
 		run = self._bind_scribe_run()
+		self._read_cited_source("hooks.py")
 		real = wiki._apply_one_update
 		calls = {"n": 0}
 
@@ -908,8 +1156,8 @@ class TestAppLearningAgentTools(FrappeTestCase):
 				record_app_wiki(
 					app="fakeapp",
 					pages=[
-						{"title": "Alpha", "key": "a-alpha", "body_md": "x"},  # deterministic order:
-						{"title": "Beta", "key": "b-beta", "body_md": "y"},  # a-alpha < b-beta
+						self._page("Alpha", "x", key="a-alpha"),  # deterministic order:
+						self._page("Beta", "y", key="b-beta"),  # a-alpha < b-beta
 					],
 				)
 		# no phantom tally: nothing was recorded as written on the run
@@ -922,6 +1170,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		import pymysql
 
 		run = self._bind_scribe_run()
+		self._read_cited_source("hooks.py")
 		real_set = frappe.db.set_value
 
 		def _sv(dt, *a, **k):
@@ -931,9 +1180,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 
 		with mock.patch.object(frappe.db, "set_value", side_effect=_sv):
 			with self.assertRaises(pymysql.err.OperationalError):
-				record_app_wiki(
-					app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
-				)
+				record_app_wiki(app="fakeapp", pages=[self._page("Overview", "a", key="overview")])
 		# the tally was never persisted (the write failed and propagated)
 		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
 
@@ -1002,7 +1249,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		from jarvis.tools.record_app_wiki import _tally_run
 
 		run = self._bind_scribe_run()
-		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		self._record_cited_pages(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+		)
 		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 1)
 		# a concurrent sweep failed the run; the straggler tally must NOT stamp onto it
 		frappe.db.set_value(RUN, run, "status", "failed", update_modified=False)
@@ -1019,7 +1268,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		from jarvis.chat import agent_scheduler
 
 		run = self._bind_scribe_run()
-		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		self._record_cited_pages(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+		)
 		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 1)
 		frappe.db.commit()  # the writeback's pages + tally are durable before the sweep runs
 		stale = [
@@ -1053,6 +1304,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		run = self._bind_scribe_run()  # binds the session_key context + creates the running run
 		frappe.db.commit()  # persist the run row so the rollback discards only the writeback
 		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
+		self._read_cited_source("hooks.py")
 		real_set = frappe.db.set_value
 
 		def _sv(dt, *a, **k):
@@ -1062,9 +1314,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 
 		with mock.patch.object(frappe.db, "set_value", side_effect=_sv):
 			with self.assertRaises(pymysql.err.OperationalError):
-				record_app_wiki(
-					app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
-				)
+				record_app_wiki(app="fakeapp", pages=[self._page("Overview", "a", key="overview")])
 		frappe.db.rollback()  # the request/job wrapper rolls back on the propagated error
 		# budget NOT leaked: the full per-run page capacity remains available for the retry
 		self.assertEqual(int(frappe.db.get_value(RUN, run, "pages_written") or 0), 0)
@@ -1077,7 +1327,9 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		from jarvis.chat.agent_scheduler import STALE_RUN_AFTER_SECONDS, reap_stale_agent_runs
 
 		run = self._bind_scribe_run()
-		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
+		self._record_cited_pages(
+			app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}]
+		)
 		# simulate a LOST durable tally: zero the stored count/list though the page exists
 		frappe.db.set_value(RUN, run, {"pages_written": 0, "pages_json": ""}, update_modified=False)
 		old = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-(STALE_RUN_AFTER_SECONDS + 3600))
@@ -1118,6 +1370,7 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# write all the pages); the UNDER-lock read sees N and truncates to the ``CAP - N``
 		# that actually remains.
 		run = self._bind_scribe_run()  # binds the running run + session_key
+		self._read_cited_source("hooks.py")
 		cap = ctx.PER_RUN_PAGE_CAP
 		prior = cap - 2  # a prior writeback consumed all but 2 of the per-run cap
 		real_get = frappe.db.get_value
@@ -1136,7 +1389,10 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		# truncate), but above the 2 that remain once the prior batch is seen under the lock.
 		pages = [{"title": f"Page {i}", "key": f"k-{i:02d}", "body_md": f"body {i}"} for i in range(6)]
 		with mock.patch.object(frappe.db, "get_value", side_effect=_get):
-			res = record_app_wiki(app="fakeapp", pages=pages)
+			res = record_app_wiki(
+				app="fakeapp",
+				pages=[self._page(page["title"], page["body_md"], key=page["key"]) for page in pages],
+			)
 		self.assertTrue(armed["fired"])  # the lock read really fired the prior-batch counter
 		# the UNDER-lock read saw ``prior`` consumed -> only ``cap - prior`` (== 2) may be written
 		self.assertTrue(res["truncated"])
