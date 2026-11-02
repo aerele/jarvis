@@ -300,6 +300,8 @@ export function attachGlobalNotifier({ socket, router }) {
 				const conv = p.conversation_id || null;
 				const dashboardApproval = p.origin_page === "dashboards";
 				if (dashboardApproval && conv === dashboardsPaneConv() && !document.hidden) return;
+				if (p.source === "Chat" && conv && conv === onScreenConv() && !document.hidden)
+					return;
 				signal({
 					conv: null,
 					toastAnywhere: true, // waiting-on-you is worth a toast even on-conversation
