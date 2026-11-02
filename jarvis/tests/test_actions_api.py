@@ -409,8 +409,6 @@ class TestApplyAction(FrappeTestCase):
 		self.assertEqual(msgs[0].tool_name, "create_doc")
 		self.assertIn(r["name"], msgs[1].content)
 
-<<<<<<< HEAD
-=======
 	def _apply_todo(self, conv, **extra):
 		payload = {
 			"verb": "create",
@@ -544,7 +542,6 @@ class TestApplyAction(FrappeTestCase):
 		self.assertNotIn("It is on.", content)
 		self.assertNotIn("It is paused.", content)
 
->>>>>>> 5952a8a (Tell the agent about a draft Confirm that queues no turn)
 	def test_conversation_ownership_enforced(self):
 		conv = self._conv()  # owner = Administrator
 		frappe.set_user("Guest")
