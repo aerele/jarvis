@@ -1142,6 +1142,10 @@ class TestAgentDispatchStatusGate(FrappeTestCase):
 		frappe.db.commit()
 
 	def setUp(self):
+		# These cases test dispatch gates and sweep isolation, not monthly usage.
+		budget = patch.object(agent_scheduler, "_agent_run_budget_monthly", return_value=1000000)
+		self.addCleanup(budget.stop)
+		budget.start()
 		frappe.set_user("Administrator")
 		_wipe([self.SLUG])
 		frappe.db.set_value(
@@ -1463,6 +1467,10 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 		frappe.db.commit()
 
 	def setUp(self):
+		# These cases test dispatch gates and sweep isolation, not monthly usage.
+		budget = patch.object(agent_scheduler, "_agent_run_budget_monthly", return_value=1000000)
+		self.addCleanup(budget.stop)
+		budget.start()
 		frappe.set_user("Administrator")
 		_wipe([self.SLUG, self.SLUG2])
 		frappe.db.commit()
