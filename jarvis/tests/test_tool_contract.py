@@ -151,3 +151,39 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			"agents repo and update BOTH pinned digests in the same change set "
 			"(see lib/check_registry_capability_contract.py there)",
 		)
+
+
+class TestLeadHygieneRegistryContract(FrappeTestCase):
+	"""Keep the installed CRM delegate contract at the evaluator release version.
+
+	The private bundle carries the implementation, while this vendored entry is the
+	bench authority for installation and run capability. A version mismatch can leave
+	the tenant running an older evaluator after Apply even when the bundle PR is ready.
+	"""
+
+	def test_cross_funnel_fingerprint_release_is_vendored(self):
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			entry = next(
+				item for item in json.load(fh)["agents"] if item["agent_slug"] == "lead-hygiene-auditor"
+			)
+		self.assertEqual(entry["version"], "0.2.4")
+		self.assertEqual(entry["config_keys"], ["open_workable_status_set", "fingerprint_salt"])
+		self.assertEqual(
+			entry["tools_allow"],
+			[
+				"jarvis__query",
+				"jarvis__get_list",
+				"jarvis__run_report",
+				"jarvis__get_doc",
+				"jarvis__record_agent_run",
+				"jarvis__save_agent_dashboard",
+				"exec",
+				"canvas",
+				"message",
+			],
+		)
