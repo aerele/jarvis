@@ -341,7 +341,9 @@ def identities(item: dict) -> list[str]:
 
 
 def category(doctype: str) -> str:
-	"""The sheet section: party · address · item · other."""
+	"""The sheet section: party · address · item · other · settings."""
+	if frappe.db.exists("DocType", doctype) and frappe.get_meta(doctype).issingle:
+		return "settings"
 	if doctype in ("Address", "Contact"):
 		return "address"
 	if doctype == "Item":
@@ -349,7 +351,12 @@ def category(doctype: str) -> str:
 	return "party" if held_parties.is_party(doctype) else "other"
 
 
-def _record(item: dict) -> dict:
+def category_map(doctypes) -> dict[str, str]:
+	"""One fresh, bounded category lookup per distinct doctype in an operation."""
+	return {doctype: category(doctype) for doctype in dict.fromkeys(doctypes)}
+
+
+def _record(item: dict, *, section: str | None = None) -> dict:
 	from jarvis.chat.pending_actions import snapshot_targets
 
 	record = {
@@ -357,7 +364,7 @@ def _record(item: dict) -> dict:
 		"op": item["op"],
 		"values": item["values"],
 		"identity": identities(item),
-		"category": category(item["doctype"]),
+		"category": section if section is not None else category(item["doctype"]),
 		"depends_on": [],
 	}
 	if item["op"] == "update":
@@ -667,6 +674,11 @@ def name_of(record: dict) -> str:
 
 
 def _title(record: dict) -> str:
+	section = record.get("category")
+	if section is None:  # A pre-section legacy record has no stored category.
+		section = category(record["doctype"])
+	if section == "settings":
+		return held_writes._clean_title(record["doctype"])
 	return held_writes._clean_title(f"{record['doctype']} {name_of(record)}")
 
 
@@ -872,7 +884,8 @@ def _collect_locked(conversation: str, items: list[dict], sheet) -> dict:
 			records = _seal.unseal_call(row)["args"]["records"]
 		except _seal.SealError as e:
 			return _tampered(row, e)
-	records, targets = _merge(records, [_record(i) for i in items])
+	sections = category_map(i["doctype"] for i in items)
+	records, targets = _merge(records, [_record(i, section=sections[i["doctype"]]) for i in items])
 	if not targets:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return _added(records, targets, {})
