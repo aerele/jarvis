@@ -112,11 +112,17 @@ def save_agent_dashboard(
 	run_row = frappe.db.get_value(
 		RUN,
 		{"session_key": session_key},
-		["name", "status", "installation", "dashboard"],
+		["name", "agent", "status", "installation", "dashboard"],
 		as_dict=True,
 	)
 	if not run_row:
 		raise InvalidArgumentError("no agent run is bound to this session")
+	if run_row.get("agent") == "statutory-payroll-deposit-status":
+		# Deposit output is a compact reference-only contract.  The server creates
+		# the ordinary fallback dashboard after it persists that safe projection;
+		# accepting delegate HTML here would create a second persistence route for
+		# private source rows or model-authored prose.
+		raise InvalidArgumentError("Payroll deposit writeback creates its dashboard server-side.")
 	if run_row.status != "running":
 		# Idempotency: the run already finalized — return its dashboard (if any)
 		# without creating a second one.
