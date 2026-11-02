@@ -195,6 +195,22 @@
 			</div>
 
 			<!-- ============ Saved tab ============ -->
+			<router-link
+				v-if="activeTab === 'saved'"
+				to="/dashboards/payment-calendar"
+				class="mx-5 mt-4 flex shrink-0 items-center justify-between gap-4 rounded-lg border bg-surface-white px-4 py-4 hover:bg-surface-gray-1"
+			>
+				<span class="flex min-w-0 items-center gap-3"
+					><FeatherIcon name="calendar" class="size-5 shrink-0 text-ink-gray-6" /><span
+						><strong class="block text-sm font-medium text-ink-gray-9"
+							>Payment Calendar</strong
+						><span class="mt-1 block text-xs text-ink-gray-6"
+							>Supplier dues, customer collections and projected cash</span
+						></span
+					></span
+				>
+				<FeatherIcon name="arrow-right" class="size-4 shrink-0 text-ink-gray-6" />
+			</router-link>
 			<SavedDashboardsTab v-if="activeTab === 'saved'" class="min-h-0 flex-1" />
 
 			<SaveDashboardDialog

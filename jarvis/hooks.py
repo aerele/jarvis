@@ -587,8 +587,6 @@ doc_events = {
 	for dt in ("DocType", "Custom Field", "Property Setter", "Workflow", "Client Script")
 }
 
-<<<<<<< HEAD
-=======
 # Generic RPCs must use the same source gate as dedicated LCV tools. The
 # handler is a no-op outside the scoped tool call, including ordinary Desk.
 doc_events["Landed Cost Voucher"] = {
@@ -596,14 +594,6 @@ doc_events["Landed Cost Voucher"] = {
 	"before_submit": "jarvis.tools._lcv_tool_writes.guard_tool_document",
 }
 
-# Error capture (jarvis.api_errors): name the jarvis caller on an Error Log row
-# written without a traceback, and buffer a jarvis API call that answered 4xx
-# (Frappe writes no Error Log row for those). Both are no-ops for anything that
-# isn't jarvis, and neither ever raises.
-doc_events["Error Log"] = {"before_insert": "jarvis.api_errors.tag_error_log_origin"}
-after_request = ["jarvis.api_errors.capture_failed_request"]
-
->>>>>>> e1e7be6 (fix: close generic LCV writes and reconcile net claims)
 # Org-scope wiki pages are mirrored as markdown into the tenant container
 # workspace; every page write/delete enqueues a debounced mirror sync (the
 # handler filters to Org scope itself and no-ops when the tenant is
@@ -629,8 +619,17 @@ doc_events["Jarvis Personalise Question Rule"] = {
 # raises, never sprays RQ jobs under tests): see
 # jarvis.chat.role_profiles.on_user_update / enqueue_sync.
 doc_events["User"] = {
-	"on_update": ["jarvis.chat.role_profiles.on_user_update", "jarvis.chat.sharing.on_user_update"],
-	"on_trash": "jarvis.chat.sharing.on_user_trash",
+	"on_update": [
+		"jarvis.chat.role_profiles.on_user_update",
+		"jarvis.chat.sharing.on_user_update",
+		"jarvis.payment_calendar.lifecycle.on_user_update",
+	],
+	"on_trash": ["jarvis.chat.sharing.on_user_trash", "jarvis.payment_calendar.lifecycle.on_user_trash"],
+}
+
+doc_events["User Permission"] = {
+	"on_update": "jarvis.payment_calendar.lifecycle.on_permission_change",
+	"on_trash": "jarvis.payment_calendar.lifecycle.on_permission_change",
 }
 
 # Phase-0 admission (chat concurrency, WP-0): a deleted conversation must not
@@ -1034,6 +1033,7 @@ has_permission.update(
 # (``after_migrate`` and ``doc_events`` after commit), never by deleting keys (``delete_keys``
 # is a ``KEYS`` scan); answers expire by TTL (2 h at most, 10 min for an error).
 persistent_cache_keys = [
+	"jarvis:pcal:",  # Financial snapshots retain bounded TTLs across watchdog cache clears.
 	"jarvis:query:",  # Saved result IDs retain their own 24-hour TTL across cache clears.
 	"jarvis:llm_switch",
 	"jarvis:macro_reconcile",
