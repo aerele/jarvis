@@ -594,6 +594,9 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 		"not a browsable document list"
 	),
 	"jarvis.chat.approvals_api.list_approvals": "unpaginated companion of approvals (list_approvals_page)",
+	"jarvis.chat.approvals_api.list_approval_reviewers": (
+		"capped role-filtered Tag-for-review people picker, not a browsable document list"
+	),
 	# The Approval Board's reviewer-only wiki-write-proposal panel feed
 	# (review-before-landing): reviewer-gated (require_skill_reviewer), a small
 	# ACTIONABLE set (pending decisions + failed landings to retry) with no
