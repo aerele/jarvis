@@ -129,7 +129,6 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
 
-
 		path = frappe.get_app_path("jarvis", "agents", "registry.json")
 		with open(path, encoding="utf-8") as fh:
 			doc = json.load(fh)
@@ -162,8 +161,6 @@ class TestLeadHygieneRegistryContract(FrappeTestCase):
 	"""
 
 	def test_cross_funnel_fingerprint_release_is_vendored(self):
-
-
 		path = frappe.get_app_path("jarvis", "agents", "registry.json")
 		with open(path, encoding="utf-8") as fh:
 			entry = next(
