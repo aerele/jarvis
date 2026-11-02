@@ -129,7 +129,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	try:
 		from jarvis.chat import chat_asks
 
-		chat_asks.resolve_on_user_message(conversation)
+		chat_asks.resolve_on_user_message(conversation, seed_message=turn["seed_message"])
 	except Exception:
 		frappe.log_error(title="prepare.chat_asks_resolve", message=frappe.get_traceback())
 
