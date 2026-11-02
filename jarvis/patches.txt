@@ -75,3 +75,5 @@ jarvis.patches.v2_29_chat_approval_reviewers
 jarvis.patches.v2_29_deleted_document_audit_index
 jarvis.patches.v2_29_backfill_holiday_touch_switches
 jarvis.patches.v2_30_macro_run_conversation_index
+jarvis.patches.v2_31_disable_reorder_replenishment_installations
+jarvis.patches.v2_31_disable_ticket_triage_installations

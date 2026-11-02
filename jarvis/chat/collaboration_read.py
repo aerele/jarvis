@@ -111,29 +111,38 @@ def _control(row, reader):
 	binding = _current_binding(row.get("collaboration_binding"), reader)
 	if not binding:
 		return None
-	action = frappe.db.get_value(
-		"Jarvis Pending Action",
-		row.tool_call_id,
-		[
-			"name",
-			"status",
-			"actor",
-			"exec_user",
-			"owner_user",
-			"conversation",
-			"collaboration_binding",
-			"collaboration_grant_revision",
-			"collaboration_epoch",
-			"run_id",
-			"card",
-			"summary",
-			"tool",
-		],
-		as_dict=True,
-	)
+	from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, pending_action_fences_ready
+	from jarvis.chat.pending_confirm import pending_action_is_safe_to_render
+
+	fields = [
+		"name",
+		"kind",
+		"status",
+		"actor",
+		"exec_user",
+		"owner_user",
+		"conversation",
+		"collaboration_binding",
+		"collaboration_grant_revision",
+		"collaboration_epoch",
+		"run_id",
+		"card",
+		"summary",
+		"tool",
+	]
+	if pending_action_fences_ready():
+		fields.append(PENDING_ACTION_FENCE_FIELD)
+	try:
+		action = frappe.db.get_value("Jarvis Pending Action", row.tool_call_id, fields, as_dict=True)
+	except Exception:
+		return None
+
 	if (
 		not action
 		or action.status != "Pending"
+		or not pending_action_is_safe_to_render(
+			action, owner=reader.user, conversation=reader.doc.name, lock=False
+		)
 		or (
 			action.actor,
 			action.exec_user,
@@ -161,6 +170,7 @@ def _control(row, reader):
 		"tool": action.tool,
 		"card": rewrite_common_files(safe_value(_json(action.card), reader.doc.name)),
 		"summary": safe_value(action.summary or "", reader.doc.name),
+		"pending_card_safe": True,
 	}
 
 

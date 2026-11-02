@@ -22,7 +22,31 @@ ARGS = {"doctype": "Task", "subject": "hello", "nested": {"b": 2, "a": 1}}
 RUN_ID = "run-1"
 
 
-class TestArgsHash(FrappeTestCase):
+def _activate_test_fences():
+	"""Make every legacy-storage fixture a valid post-close generic record.
+
+	This module tests Redis ownership, single-use, and recovery behavior. Its
+	``mint`` calls represent new records, not historical credentials, so they must
+	carry the shared close map once model sync has created its normal fence table.
+	Missing-map rejection remains covered by ``test_agent_closure``.
+	"""
+	from jarvis.chat.agent_closure import CLOSED_AGENT_SPECS, FENCE_DOCTYPE, activate_close_fence
+
+	if not frappe.db.table_exists(FENCE_DOCTYPE):
+		return
+	for spec in CLOSED_AGENT_SPECS:
+		activate_close_fence(spec)
+	frappe.db.commit()
+
+
+class _FenceReadyFrappeTestCase(FrappeTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_activate_test_fences()
+
+
+class TestArgsHash(_FenceReadyFrappeTestCase):
 	def test_stable_across_key_ordering(self):
 		a = {"x": 1, "y": 2, "nested": {"b": 2, "a": 1}}
 		b = {"nested": {"a": 1, "b": 2}, "y": 2, "x": 1}
@@ -46,7 +70,7 @@ class TestArgsHash(FrappeTestCase):
 		)
 
 
-class TestMint(FrappeTestCase):
+class TestMint(_FenceReadyFrappeTestCase):
 	def test_two_mints_are_distinct_tokens(self):
 		t1 = pending_confirm.mint(
 			conversation=CONV,
@@ -68,7 +92,7 @@ class TestMint(FrappeTestCase):
 		self.assertIsNotNone(pending_confirm.peek(t2))
 
 
-class TestMintReliableIndex(FrappeTestCase):
+class TestMintReliableIndex(_FenceReadyFrappeTestCase):
 	"""C1: a token can NEVER be persisted without being findable by
 	list_for_owner. An unindexed record is invisible to the resync endpoint -> a
 	silent, unrecoverable confirmation card (the bulk-create card that never
@@ -287,7 +311,7 @@ class TestMintReliableIndex(FrappeTestCase):
 		self.assertIsNotNone(pending_confirm.peek(token))
 
 
-class TestExecUser(FrappeTestCase):
+class TestExecUser(_FenceReadyFrappeTestCase):
 	def test_exec_user_stored_and_returned(self):
 		token = pending_confirm.mint(
 			conversation=CONV,
@@ -317,7 +341,7 @@ class TestExecUser(FrappeTestCase):
 		self.assertEqual(pending_confirm.peek(token)["exec_user"], OWNER)
 
 
-class TestPreview(FrappeTestCase):
+class TestPreview(_FenceReadyFrappeTestCase):
 	def test_preview_stored_and_returned(self):
 		"""F2: the park-time preview is stored so resync can return it verbatim
 		(instead of re-running the side-effecting dry-run)."""
@@ -348,7 +372,7 @@ class TestPreview(FrappeTestCase):
 		self.assertIsNone(pending_confirm.peek(token).get("preview"))
 
 
-class TestListForOwner(FrappeTestCase):
+class TestListForOwner(_FenceReadyFrappeTestCase):
 	_A = "owner-a@example.invalid"
 	_B = "owner-b@example.invalid"
 
@@ -424,8 +448,19 @@ class TestListForOwner(FrappeTestCase):
 		it = items[0]
 		self.assertEqual(
 			set(it.keys()),
-			{"token", "tool", "preview", "summary", "conversation", "run_id", "expires_at", "created_at"},
+			{
+				"token",
+				"tool",
+				"preview",
+				"summary",
+				"conversation",
+				"run_id",
+				"expires_at",
+				"created_at",
+				"pending_card_safe",
+			},
 		)
+		self.assertTrue(it["pending_card_safe"])
 		self.assertEqual(it["tool"], "create_doc")
 		# P0c: created_at is exact for a Redis record - always expires_at - TTL.
 		self.assertEqual(it["created_at"], it["expires_at"] - pending_confirm._TTL_S)
@@ -504,7 +539,7 @@ class TestListForOwner(FrappeTestCase):
 		self.assertIsNotNone(pending_confirm.peek(t_r2))  # sibling run kept
 
 
-class TestPeek(FrappeTestCase):
+class TestPeek(_FenceReadyFrappeTestCase):
 	def test_unknown_token_is_none(self):
 		self.assertIsNone(pending_confirm.peek("does-not-exist"))
 
@@ -540,7 +575,7 @@ class TestPeek(FrappeTestCase):
 		self.assertIsNone(pending_confirm.peek(token))
 
 
-class TestConsume(FrappeTestCase):
+class TestConsume(_FenceReadyFrappeTestCase):
 	def _mint(self):
 		return pending_confirm.mint(
 			conversation=CONV,
@@ -647,7 +682,23 @@ class TestConsume(FrappeTestCase):
 
 		# _get_and_delete is a module-level function, so patching it on the
 		# pending_confirm module affects both threads (they call the same one).
-		with patch.object(pending_confirm, "_get_and_delete", side_effect=_synced_get_and_delete):
+		# The fixture copies one Frappe context into two Python threads. That is
+		# correct for the Redis race, but it intentionally shares its test DB
+		# connection, unlike independent request workers. Keep this test scoped to
+		# Redis atomicity and use the already-stamped map check here; normal
+		# consume tests and the closure suite exercise the DB-locked fence path.
+		from jarvis.chat import agent_closure
+
+		with (
+			patch.object(pending_confirm, "_get_and_delete", side_effect=_synced_get_and_delete),
+			patch.object(
+				agent_closure,
+				"confirmation_is_current",
+				side_effect=lambda record, *, lock=False: agent_closure.legacy_confirmation_is_current(
+					record
+				),
+			),
+		):
 			t1.start()
 			t2.start()
 			t1.join(timeout=5)

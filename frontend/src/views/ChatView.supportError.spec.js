@@ -46,6 +46,7 @@ function harness({
 	const s = {
 		supportOn: enabled,
 		openSupportInFlight: Vue.ref(false),
+		hasCurrentMessageSnapshot: Vue.ref(true),
 		currentId: Vue.ref("conv788fixture"),
 		_shownConvId: "conv788fixture",
 		route: { params: { id: "conv788fixture" } },
@@ -74,6 +75,7 @@ function harness({
 				methods: { __: (x) => x },
 				setup: () => ({
 					openSupportInFlight: s.openSupportInFlight,
+					hasCurrentMessageSnapshot: s.hasCurrentMessageSnapshot,
 					errorInfo: s.errorInfo,
 					...actions,
 					m,
@@ -110,6 +112,20 @@ describe("Report error in the real ChatView card", () => {
 		await b.trigger("click");
 		expect(h.reconnect).toHaveBeenCalledWith("anthropic");
 		expect(h.s.router.push).not.toHaveBeenCalled();
+		h.w.unmount();
+	});
+	it.each([
+		["Request timed out", "Retry"],
+		["Please run /login", "Reconnect"],
+	])("hides %s actions when the message snapshot becomes stale", async (error, label) => {
+		const h = harness({ error });
+		const action = () => h.w.findAll("button").find((b) => b.text().startsWith(label));
+		expect(action()).toBeDefined();
+		h.s.hasCurrentMessageSnapshot.value = false;
+		await Vue.nextTick();
+		expect(action()).toBeUndefined();
+		expect(h.retry).not.toHaveBeenCalled();
+		expect(h.reconnect).not.toHaveBeenCalled();
 		h.w.unmount();
 	});
 	it("blocks Report while the existing header consent flow waits", async () => {
