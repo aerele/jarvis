@@ -54,6 +54,53 @@ def _refuse_if_wiki_write(doc) -> None:
 		)
 
 
+def _refuse_if_ticket_triage(doc) -> None:
+	"""Ticket Triage has a typed sidecar, never a generic decision/resume path."""
+	from jarvis.chat.ticket_triage import is_ticket_triage_approval
+
+	if is_ticket_triage_approval(doc):
+		frappe.throw(
+			"This is a Ticket Triage proposal. Use the typed Ticket Triage reviewer controls.",
+			frappe.PermissionError,
+		)
+
+
+def _ticket_triage_visible(a):
+	"""Query predicate for rows that remain on the generic Approval Board.
+
+	A typed Ticket Triage shell has its own reviewer endpoint and no conversation
+	resume.  Hide only that exact three-field contract.  In particular, do not
+	hide ordinary Agent Review rows or a legacy row with an empty assessment key.
+	"""
+	from jarvis.chat.ticket_triage import AGENT, APPROVAL_SOURCE
+
+	return (
+		(Coalesce(a.agent, "") != AGENT)
+		| (Coalesce(a.source, "") != APPROVAL_SOURCE)
+		| (Coalesce(a.assessment_key, "") == "")
+	)
+
+
+def _approval_visibility(a, me, legacy_access):
+	"""Keep Chat review grants and native Cycle-Count read checks in one query."""
+	visible = approval_reviewers.visible_condition(a, me, legacy_access)
+	if me == "Administrator":
+		return visible
+	from jarvis.chat.cycle_count_permissions import CYCLE_COUNT_PLANNER, visible_count_plan_approval_names
+
+	readable = visible_count_plan_approval_names(me)
+	not_count_plan = a.agent.isnull() | (a.agent != CYCLE_COUNT_PLANNER)
+	ordinary = visible & not_count_plan
+	return ordinary | ((a.agent == CYCLE_COUNT_PLANNER) & a.name.isin(readable)) if readable else ordinary
+
+
+def _without_ticket_triage(rows):
+	"""Remove only typed Ticket Triage shells from a generic list response."""
+	from jarvis.chat.ticket_triage import is_ticket_triage_approval
+
+	return [row for row in rows if not is_ticket_triage_approval(row)]
+
+
 def _refuse_if_linked(doc) -> None:
 	"""A question linked to a File Box sheet is answered in the sheet, never on its own."""
 	if doc.get("sheet"):
@@ -111,6 +158,24 @@ def _may_act_on(conversation: str | None) -> bool:
 	return frappe.db.get_value("Jarvis Conversation", conversation, "owner") == frappe.session.user
 
 
+def _require_cycle_count_plan_read(doc) -> None:
+	"""Apply the stock-source read gate before an Approval path reveals a plan."""
+	if doc.get("agent") != "cycle-count-planner-operator":
+		return
+	from jarvis.chat.cycle_count_permissions import require_count_plan_read
+
+	require_count_plan_read(doc)
+
+
+def _may_list_approval(row) -> bool:
+	"""Filter the legacy list API, which intentionally bypasses DocType hooks."""
+	if row.get("agent") != "cycle-count-planner-operator":
+		return True
+	from jarvis.chat.cycle_count_permissions import may_read_count_plan
+
+	return may_read_count_plan(row)
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_approval_reviewers() -> list[dict]:
@@ -149,7 +214,12 @@ def untag_reviewer(name: str, user: str) -> list[dict]:
 @require_jarvis_user
 def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 	"""Approvals visible to the current user (owner of the linked
-	conversation, or any System Manager)."""
+	conversation, or any System Manager).
+
+	Cycle-Count plans also require current native Warehouse, Item, and Bin read. Keep
+	that filter in SQL, before the legacy endpoint's limit, so inaccessible plans
+	cannot consume an otherwise visible page.
+	"""
 	if status not in ("Pending", "Approved", "Rejected", "Answered", "Dismissed", "Decided", "All"):
 		frappe.throw("Invalid status filter")
 	a = frappe.qb.DocType(APPROVAL)
@@ -179,19 +249,26 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 		query = query.where(a.status == status)
 	if _ar.sheet_ready():
 		query = query.where(Coalesce(a.sheet, "") == "")
+	legacy = _legacy_approval(a)
+	if legacy is not None:
+		query = query.where(legacy)
 	me = frappe.session.user
 	legacy_access = (
 		a.name.isnotnull() if "System Manager" in frappe.get_roles() else _owns_conversation(a, me)
 	)
 	rows = (
-		query.where(approval_reviewers.visible_condition(a, me, legacy_access))
+		query.where(_approval_visibility(a, me, legacy_access))
+		.where(_ticket_triage_visible(a))
 		.orderby(a.creation, order=frappe.qb.desc)
 		.limit(int(limit))
 		.run(as_dict=True)
 	)
-	rows = [r for r in rows if not is_collaborative(r.get("conversation"))]
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
+		r.pop("assessment_evidence", None)
+		r.pop("agent", None)
+		r.pop("source", None)
+		r.pop("assessment_key", None)
 	conversation_names = [r.get("conversation") for r in rows if r.get("conversation")]
 	conversation_origins = {}
 	if conversation_names:
@@ -335,14 +412,14 @@ def list_approvals_page(
 	# Wiki-write proposals live on the reviewer lane only (SoD) - keep them OFF
 	# the customer decide board and its facet/badge counts. NULL-safe so legacy
 	# rows (source NULL = File Box) still show.
-	base = [a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE)]
+	base = [a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE), _ticket_triage_visible(a)]
 	legacy = _legacy_approval(a)
 	if legacy is not None:
 		base.append(legacy)
 	if _ar.sheet_ready():
 		base.append(IfNull(a.sheet, "") == "")  # answered in its File Box sheet
 	legacy_access = a.name.isnotnull() if is_sm else (_owns_conversation(a, me) | _tagged(a, me))
-	base.append(approval_reviewers.visible_condition(a, me, legacy_access))
+	base.append(_approval_visibility(a, me, legacy_access))
 	status = f.get("status") or "Pending"
 	if status not in _APPROVAL_STATUSES:
 		frappe.throw("Invalid status filter")
@@ -612,6 +689,8 @@ def get_approval(name: str) -> dict:
 	READ but gets ``can_act=0`` so the UI hides the decide controls. ``can_act``
 	mirrors what ``decide()`` would permit; the UI combines it with status."""
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.conversation)
@@ -636,6 +715,11 @@ def get_approval(name: str) -> dict:
 		)
 	):
 		frappe.throw("Not permitted", frappe.PermissionError)
+	count_entry = 0
+	if doc.agent == "cycle-count-planner-operator" and doc.status == "Approved":
+		from jarvis.chat.cycle_count_entry import can_record_count_plan
+
+		count_entry = int(can_record_count_plan(doc))
 	return {
 		"name": doc.name,
 		"title": doc.title,
@@ -668,6 +752,7 @@ def get_approval(name: str) -> dict:
 		"creation": str(doc.creation or ""),
 		"owner": doc.owner,
 		"can_act": int(can_act and not doc.get("sheet")),  # a sheet's question: answered in the sheet
+		"count_entry": count_entry,
 		"can_manage": int(is_requester) if chat_question else int(can_act),
 		"is_requester": int(is_requester) if chat_question else int(_may_act_on(doc.conversation)),
 		"requester": requester,
@@ -729,6 +814,7 @@ def _ar_pending_count() -> int:
 		.select(Count("*"))
 		.where(a.status == "Pending")
 		.where(a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE))
+		.where(_ticket_triage_visible(a))
 	)
 	if _ar.sheet_ready():
 		query = query.where(IfNull(a.sheet, "") == "")
@@ -741,7 +827,7 @@ def _ar_pending_count() -> int:
 		if "System Manager" in frappe.get_roles()
 		else (_owns_conversation(a, me) | _tagged(a, me))
 	)
-	query = query.where(approval_reviewers.visible_condition(a, me, legacy_access))
+	query = query.where(_approval_visibility(a, me, legacy_access))
 	return query.run()[0][0]
 
 
@@ -813,6 +899,8 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	if not decision:
 		frappe.throw("Decision text is required")
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.get("conversation"))
@@ -1106,6 +1194,8 @@ def dismiss_approval(name: str) -> dict:
 	"""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.conversation)
@@ -1152,6 +1242,8 @@ def restore_approval(name: str) -> dict:
 	accidental dismiss."""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.conversation)

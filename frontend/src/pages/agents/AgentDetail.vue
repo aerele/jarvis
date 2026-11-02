@@ -44,6 +44,11 @@
 				</template>
 				<template v-else-if="agent">
 					<Button
+						v-if="agent.name === 'ticket-triage-operator'"
+						label="Review proposals"
+						@click="router.push({ name: 'TicketTriageReviews' })"
+					/>
+					<Button
 						variant="solid"
 						label="Run Now"
 						iconLeft="play"
@@ -419,7 +424,26 @@
 							<!-- mt-2, matching AgentAccessEditor's own heading->content gap
 							     (its "Access" heading is immediately followed by an
 							     mt-2 description) - the Admin tab is the reference. -->
+							<CycleCountConfigForm
+								v-if="agent.name === 'cycle-count-planner-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
+							<TicketTriageConfigForm
+								v-else-if="agent.name === 'ticket-triage-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
 							<ConfigForm
+								v-else
 								class="mt-2"
 								:config="parsedConfig"
 								:config-keys="configKeys"
@@ -731,6 +755,8 @@ import AgentAccessEditor from "@/pages/agents/AgentAccessEditor.vue";
 import AgentModelCard from "@/pages/agents/AgentModelCard.vue";
 import AgentInstallDialog from "@/pages/agents/AgentInstallDialog.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
+import CycleCountConfigForm from "@/pages/agents/CycleCountConfigForm.vue";
+import TicketTriageConfigForm from "@/pages/agents/TicketTriageConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import ShadowChip from "@/components/ShadowChip.vue";

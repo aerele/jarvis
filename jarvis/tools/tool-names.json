@@ -18,7 +18,7 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
-  "digest": "sha256:f966cdcc042bc7ec56b9a6203819765398c41e2df19ddf76ccccaa9fac6785ef",
+  "digest": "sha256:fa482bce664d249d0d7af3eeb53472598adea2edb122d6909fccd3fd65f002ed",
   "tools": [
     "add_comment",
     "add_tag",
@@ -47,6 +47,7 @@
     "get_comments",
     "get_creation_context",
     "get_customer_outstanding",
+    "get_cycle_count_inputs",
     "get_doc",
     "get_employee_shift",
     "get_engagement_config",
@@ -71,6 +72,7 @@
     "get_skill",
     "get_stock_balance",
     "get_submitted_linked_docs",
+    "get_ticket_triage_inputs",
     "get_valuation_rate",
     "get_workflow_transitions",
     "list_app_modules",
@@ -99,6 +101,7 @@
     "schedule_run",
     "send_email",
     "share_doc",
+    "stage_ticket_triage_proposals",
     "submit_doc",
     "summarize_dataset",
     "unassign_from",

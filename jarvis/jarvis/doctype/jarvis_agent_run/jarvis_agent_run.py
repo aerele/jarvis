@@ -63,7 +63,7 @@ class JarvisAgentRun(NotRenamable, Document):
 
 
 def on_doctype_update():
-	"""Composite (owner, started_at, creation) index.
+	"""Indexes for Runs paging and narrow retained-plan locks.
 
 	Neither ``owner`` nor ``started_at`` carries a default Frappe index (only
 	``name``, ``creation`` and ``modified`` do), so ``list_runs_page``
@@ -82,5 +82,13 @@ def on_doctype_update():
 		"Jarvis Agent Run",
 		["owner", "started_at", "creation"],
 		index_name="owner_started_creation_index",
+	)
+	# Clear Chat History locks the narrow running Cycle-Count row before it
+	# decides whether a conversation can be removed. Without this exact prefix,
+	# its ``FOR UPDATE`` would scan and next-key lock unrelated agent runs.
+	frappe.db.add_index(
+		"Jarvis Agent Run",
+		["conversation", "agent", "status"],
+		index_name="conversation_agent_status_index",
 	)
 	# finished_at index: DocType JSON search_index=1 (updatedb-managed, survives migrate).

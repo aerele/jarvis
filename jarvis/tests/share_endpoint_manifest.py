@@ -156,6 +156,7 @@ _unrelated(
     get_ap_review_defaults
     get_ar_review_defaults
     get_bank_recon_review_defaults
+    get_cycle_count_review_defaults
     get_installations
     install_agent
     list_agent_activity_page
@@ -181,6 +182,17 @@ _unrelated(
     stop_agent_run
     take_finding_to_chat
     uninstall_agent
+    """,
+)
+
+_unrelated(
+	"jarvis.chat.ticket_triage",
+	"Sealed Ticket Triage proposals require the named reviewer and current ticket permissions; conversation shares grant no review or write authority.",
+	"""
+    list_ticket_triage_proposals
+    get_ticket_triage_proposal
+    reject_ticket_triage_proposal
+    confirm_ticket_triage_proposal
     """,
 )
 
@@ -856,6 +868,33 @@ ENDPOINTS.update(
 			"scope": "chat_scoped",
 		},
 		"jarvis.chat.approvals_api.apply_sheet": {"arguments": {"name": "$approval"}, "scope": "chat_scoped"},
+		# Cycle-count plans are sealed Agent Review records. A chat share does not
+		# grant their reviewer / direct-DocShare visibility or permission to create
+		# a physical-count fact, so probe them with a real foreign approval id.
+		"jarvis.chat.cycle_count_entry.list_count_plans": {"arguments": {}, "scope": "chat_scoped"},
+		"jarvis.chat.cycle_count_entry.get_count_plan": {
+			"arguments": {"request": "$approval", "entry_key": "cycle-count-share"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.cycle_count_entry.record_counts": {
+			"arguments": {
+				"request": "$approval",
+				"counted_at": "2026-10-01 10:00:00",
+				"entries": [{"item_code": "share-probe-item", "counted_qty": "1"}],
+				"entry_key": "cycle-count-share",
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.cycle_count_entry.correct_counts": {
+			"arguments": {
+				"request": "$approval",
+				"replaces": "$approval",
+				"counted_at": "2026-10-01 10:00:00",
+				"entries": [{"item_code": "share-probe-item", "counted_qty": "1"}],
+				"entry_key": "cycle-count-share-correct",
+			},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.approvals_api.approve_wiki_write": {
 			"arguments": {"name": "$approval"},
 			"scope": "chat_scoped",
