@@ -1678,14 +1678,14 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "status": "Published",
       "description": "Reviews each owner-declared native outgoing payroll booking in one configured Account group against a dated due-date reference. It keeps current interest and damages evidence-review gaps visible and shows VISHWAS as an external-review reference only. It does not decide eligibility, receipt, default or penalty. Gazette text and qualified legal review remain pending.",
       "tools_required": [
-        "jarvis__query"
+        "jarvis__get_payroll_deposit_inputs"
       ],
       "tools_allow": [
-        "jarvis__query",
+        "jarvis__get_payroll_deposit_inputs",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",

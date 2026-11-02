@@ -1183,6 +1183,13 @@ def _launch_audit(
 
 	review_backend = operator_review.backend(inst.agent)
 	review_config = review_backend.configuration(inst) if review_backend else None
+	deposit_launch = None
+	if inst.agent == _PAYROLL_DEPOSIT_AGENT:
+		# Capture this before the Run exists. The source tool later reads only this
+		# immutable Run value, never the mutable installation row.
+		from jarvis.chat import payroll_deposit_snapshot
+
+		deposit_launch = payroll_deposit_snapshot.launch_config(inst)
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1348,7 +1355,11 @@ def _launch_audit(
 				"preparation_mode": preparation_mode,
 				"initiating_human": initiating_human,
 				"model_source": model_gate.get("model_source"),
-				"assessment_config_json": frappe.as_json(review_config) if review_config else None,
+				"assessment_config_json": frappe.as_json(deposit_launch)
+				if deposit_launch
+				else frappe.as_json(review_config)
+				if review_config
+				else None,
 				**capability,
 			}
 		)
@@ -1412,11 +1423,16 @@ def _launch_audit(
 	from jarvis.chat.agent_catalog import registry_timeout_s
 
 	try:
+		prompt_config = None
+		if deposit_launch:
+			from jarvis.chat import payroll_deposit_snapshot
+
+			prompt_config = payroll_deposit_snapshot.prompt_config(deposit_launch)
 		started = admin_client.post_agent_run(
 			run_id=run.name,
 			agent_id=f"agent-{slug}",
 			session_key=session_key,
-			message=_audit_prompt(listing, inst, trigger, scope),
+			message=_audit_prompt(listing, inst, trigger, scope, explicit_config=prompt_config),
 			timeout_s=registry_timeout_s(slug),
 		)
 	except admin_client.AdminAmbiguousError:
@@ -1639,8 +1655,18 @@ def _stamp_scope_and_watermark(
 	if visibility_receipt is not None:
 		values["visibility_receipt_json"] = frappe.as_json(visibility_receipt)
 	scope = None
+	deposit_launch = None
+	if inst.get("agent") == _PAYROLL_DEPOSIT_AGENT:
+		from jarvis.chat import payroll_deposit_snapshot
+
+		deposit_launch = payroll_deposit_snapshot.load_launch_config(
+			frappe.db.get_value(RUN, run_name, "assessment_config_json")
+		)
 	try:
-		scope = agent_scope.resolve_scope(inst)
+		scope = agent_scope.resolve_scope(
+			inst,
+			config=payroll_deposit_snapshot.scope_config(deposit_launch) if deposit_launch else None,
+		)
 	except Exception:
 		if inst.get("agent") == _PAYROLL_DEPOSIT_AGENT:
 			raise
@@ -1679,6 +1705,11 @@ def _stamp_scope_and_watermark(
 			else:
 				scope.pop("scoped_visibility", None)
 		values["scope_json"] = frappe.as_json(scope)
+		if deposit_launch:
+			# This receipt holds only launch scope/config digests. It is stamped
+			# before dispatch and prevents a later installation edit from changing
+			# the source plan or a writeback scope.
+			payroll_deposit_snapshot.stamp_launch(run_name, deposit_launch, scope)
 
 	if scope and scope.get("company") and scope.get("to_date"):
 		# A17: row-count + max(modified) over the scope's GL as-of window. The old
@@ -1793,7 +1824,9 @@ def _explicit_config(listing, inst) -> dict:
 	return {**explicit, **derived_config.derive(namespaces, inst, explicit)}
 
 
-def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str:
+def _audit_prompt(
+	listing, inst, trigger: str, scope: dict | None = None, explicit_config: dict | None = None
+) -> str:
 	"""The GENERIC, non-leaky run message handed to the delegate (A2/A6).
 
 	It names NO rule, tool, threshold, engagement step, or domain — the delegate's
@@ -1864,7 +1897,8 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
 			additional_scope
 		)
-	explicit_config = _explicit_config(listing, inst)
+	if explicit_config is None:
+		explicit_config = _explicit_config(listing, inst)
 	if explicit_config:
 		# ADDITIVE, never a replacement: config.json legitimately carries fields the delegate
 		# fetches or derives at run time (e.g. balances, or a run-as permission set used to

@@ -146,6 +146,9 @@ def record_agent_run(
 	findings=None,
 	coverage=None,
 	scope=None,
+	input_snapshot_id: str | None = None,
+	input_snapshot_digest: str | None = None,
+	report_sha256: str | None = None,
 	truncated: bool = False,
 	canvas_ref: str | None = None,
 	integrity_digest: str | None = None,
@@ -171,6 +174,10 @@ def record_agent_run(
 	  scope: the resolved run scope ``{company, fiscal_year, from_date, to_date,
 	    ...}`` — company is stamped on each Finding + scopes auto-resolve + the
 	    watermark recompute.
+	  input_snapshot_id/input_snapshot_digest/report_sha256: required only by the
+	    statutory payroll Deposit-Status agent. They bind the evaluator result and
+	    its original dashboard report to the exact server-owned private input
+	    snapshot captured for this run.
 	  truncated: True when the delegate's fetch hit its budget — auto-resolve is
 	    skipped entirely and the run is partial (A16).
 	  canvas_ref: the delegate's saved canvas/dashboard ref (stored for Phase 4).
@@ -250,6 +257,15 @@ def record_agent_run(
 	coverage = _as_dict(coverage)
 	scope = _as_dict(scope)
 	truncated = bool(truncated)
+	if run_doc.agent == "statutory-payroll-deposit-status":
+		from jarvis.chat import payroll_deposit_snapshot
+
+		# Do not merge a model-supplied scope for this agent. The result may only
+		# use the scope stamped at launch and the one private source receipt the
+		# server captured for this session.
+		scope = payroll_deposit_snapshot.validate_writeback(
+			run_doc, scope, input_snapshot_id, input_snapshot_digest, dashboard, report_sha256
+		)
 	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(run_doc.agent)
