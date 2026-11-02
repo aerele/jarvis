@@ -7,6 +7,7 @@ import uuid
 
 import frappe
 from frappe.utils.password import get_encryption_key
+from werkzeug.wrappers import Response
 
 from jarvis.chat import admission, policy, txn
 from jarvis.chat.collaboration_admission import SharedAdmission
@@ -156,12 +157,14 @@ def get_conversation(
 
 
 @frappe.whitelist(methods=["GET"])
-def get_file(conversation: str, file_url: str) -> None:
+def get_file(conversation: str, file_url: str) -> Response:
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	from jarvis.chat.collaboration_files import get_file as download
 
-	txn.replay_on_conflict(lambda: download(conversation, file_url), label="collaboration.file", fresh=True)
+	return txn.replay_on_conflict(
+		lambda: download(conversation, file_url), label="collaboration.file", fresh=True
+	)
 
 
 @frappe.whitelist(methods=["POST"])

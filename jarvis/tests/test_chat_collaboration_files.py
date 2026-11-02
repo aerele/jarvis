@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import frappe
-from werkzeug.wrappers import Request
+from werkzeug.wrappers import Request, Response
 
 from jarvis.chat import collaboration as c
 from jarvis.chat.collaboration_bindings import insert_message
@@ -72,9 +72,12 @@ class TestCollaborationFiles(CommittedCollaborationCase):
 		with as_user(OWNER), patch("frappe.set_user", side_effect=AssertionError("impersonation")):
 			from jarvis.chat.collaboration_api import get_file
 
-			get_file(self.conversation, doc.file_url)
+			response = get_file(self.conversation, doc.file_url)
 		self.assertEqual(frappe.local.response.filecontent, "shared actor bytes")
-		self.assertEqual(frappe.local.response_headers["X-Content-Type-Options"], "nosniff")
+		self.assertIsInstance(response, Response)
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.get_data(), b"shared actor bytes")
+		self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
 
 	def test_owner_readable_row_does_not_replace_source_actor_unreadable_row(self):
 		doc, _ = self.file(actor=OUTSIDER)
