@@ -132,6 +132,7 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__list_app_modules",
 	"jarvis__list_connector_actions",
 	"jarvis__preview_doc",
+	"jarvis__preview_landed_cost_voucher",
 	"jarvis__preview_import",
 	"jarvis__query",
 	"jarvis__read_file",
@@ -165,7 +166,7 @@ _STANDARD_TOOLS_ALLOW = [
 
 
 def standard_tools_allow() -> list[str]:
-	"""The 71-tool allow list for the ``standard`` tier (spec §3 sized 68;
+	"""The 72-tool allow list for the ``standard`` tier (spec §3 sized 68;
 	session_status pulled to the drop list for the fleet-wide white-label deny;
 	the two MCP connector tools added after; memory_get/memory_search pulled to
 	the drop list for the fleet-wide native cross-user memory deny; the per-user

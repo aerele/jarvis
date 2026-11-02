@@ -384,19 +384,24 @@ class TestOnceFinishedNotice(MacroSchedulerBase):
 		with patch.object(macros, "_post_closing_message"), patch.object(macros, "_publish_done"):
 			macros._announce(run, frappe.get_doc(MACRO, m.name), status, error)
 
-	def test_a_finished_one_time_run_tells_the_owner_with_a_link(self):
+	def test_a_finished_one_time_run_tells_the_owner_it_ran_at_its_time(self):
 		m = _mk_once("done")
-		self._announce(m, "completed")
+		with patch.object(macros, "_run_link", return_value="/jarvis/c/conv-once-1"):
+			self._announce(m, "completed")
 		[note] = _notes("done")
-		self.assertIn("Your scheduled run finished", note.subject)
+		self.assertIn("Macro run finished", note.subject)
+		self.assertIn("ran at the time you set", note.email_content)
 		self.assertEqual(note.link, "/jarvis/c/conv-once-1")
 
-	def test_recurring_and_manual_successes_stay_quiet(self):
-		m = _mk_once("quiet")
+	def test_recurring_and_manual_successes_are_told_too(self):
+		# A run's chat is not in the chat list: the notice is how the owner hears.
+		m = _mk_once("told")
 		self._announce(m, "completed", trigger="manual")
 		frappe.db.set_value(MACRO, m.name, "schedule_frequency", "daily")
 		self._announce(m, "completed")
-		self.assertEqual(_notes("quiet"), [])
+		notes = _notes("told")
+		self.assertEqual(len(notes), 2)
+		self.assertTrue(all("ran at the time you set" not in n.email_content for n in notes))
 
 
 class TestOnceApi(MacroSchedulerBase):

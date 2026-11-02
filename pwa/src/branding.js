@@ -3,11 +3,16 @@
 // window.brand_favicon_url). Blank falls back to the Jarvis defaults. Mirrors
 // the desktop SPA's src/branding.js.
 
+import { isWhitelabelBrand } from "./lib/brand";
+
 const DEFAULT_NAME = "Jarvis";
 
 export const agentName = (window.agent_name || "").trim() || DEFAULT_NAME;
 export const brandLogoUrl = (window.brand_logo_url || "").trim();
 export const brandFaviconUrl = (window.brand_favicon_url || "").trim();
+// A custom name or logo: the product is not presented as Jarvis (holiday touches wear
+// nothing then; the words still show).
+export const isWhitelabeled = isWhitelabelBrand(agentName, brandLogoUrl, DEFAULT_NAME);
 
 // Patch the tab title + favicon and repoint the manifest link to the per-tenant
 // manifest (jarvis/pwa.py ManifestRenderer). The new manifest URL is OUTSIDE the

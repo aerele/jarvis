@@ -1612,6 +1612,58 @@ class TestQueryExprDSLPhase1Dates(FrappeTestCase):
 			f"expected a date-trunc construct, got: {sql}",
 		)
 
+	def test_date_diff_is_end_minus_start_in_days(self):
+		sql = self._build_sql(
+			{
+				"from": "DocType",
+				"alias": "dt",
+				"select": [
+					{
+						"expr": {
+							"fn": "date_diff",
+							"args": [{"field": "dt.modified"}, {"field": "dt.creation"}],
+						},
+						"as": "days",
+					}
+				],
+			}
+		)
+		call = sql[sql.upper().index("DATEDIFF") :]
+		self.assertLess(call.index("modified"), call.index("creation"))
+
+	def test_date_diff_runs_and_gives_whole_days(self):
+		result = query(
+			{
+				"from": "DocType",
+				"alias": "dt",
+				"select": [
+					"dt.name",
+					{
+						"expr": {
+							"fn": "date_diff",
+							"args": [{"field": "dt.modified"}, {"field": "dt.creation"}],
+						},
+						"as": "days",
+					},
+				],
+				"where": [{"field": "dt.name", "op": "=", "value": "DocType"}],
+			}
+		)
+		days = result["rows"][0]["days"]
+		self.assertIsInstance(days, int)
+		self.assertGreaterEqual(days, 0)
+
+	def test_date_diff_needs_both_dates(self):
+		with patch("frappe.has_permission", return_value=True):
+			with self.assertRaises(InvalidArgumentError) as cm:
+				query(
+					{
+						"from": "DocType",
+						"select": [{"expr": {"fn": "date_diff", "args": [{"field": "modified"}]}, "as": "d"}],
+					}
+				)
+			self.assertIn("date_diff", str(cm.exception))
+
 	def test_date_add_in_where_predicate(self):
 		sql = self._build_sql(
 			{

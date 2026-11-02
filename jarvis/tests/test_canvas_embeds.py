@@ -14,6 +14,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat.canvas import detect_canvas_names, persist_canvases, strip_canvas_refs
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+from jarvis.tests._plugin_route_fixtures import patch_signer
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -104,7 +105,7 @@ class TestCanvasPathTraversal(FrappeTestCase):
 class TestPersistCanvasesGatewayFallback(FrappeTestCase):
 	"""End-to-end ``persist_canvases`` behavior when the gateway's canvas route
 	is (and is not) actually serving the published document, driven entirely
-	through a mocked ``requests.get`` — no live container needed.
+	through a mocked ``requests.request`` — no live container needed.
 
 	Live repro (2026-08-15, e2e.localhost): a main-chat dashboard build's
 	``[embed ref=... /]`` resolved to the agent runtime's own web-UI shell
@@ -114,6 +115,9 @@ class TestPersistCanvasesGatewayFallback(FrappeTestCase):
 	titled after the runtime's own product name."""
 
 	def setUp(self):
+		signer = patch_signer()
+		signer.start()
+		self.addCleanup(signer.stop)
 		self.conv = frappe.get_doc({"doctype": CONV, "title": "canvas fallback test"}).insert(
 			ignore_permissions=True
 		)
@@ -143,7 +147,10 @@ class TestPersistCanvasesGatewayFallback(FrappeTestCase):
 		markup instead of clean prose with no canvas."""
 		shell_resp = Mock(status_code=200, content=b"<html>runtime web UI shell</html>")
 
-		with patch("requests.get", return_value=shell_resp), patch.object(frappe, "log_error") as log_error:
+		with (
+			patch("requests.request", return_value=shell_resp),
+			patch.object(frappe, "log_error") as log_error,
+		):
 			items = persist_canvases(self.msg.name, self.msg.content, "ws://127.0.0.1:19000", "tok")
 
 		self.assertEqual(items, [])
@@ -159,12 +166,12 @@ class TestPersistCanvasesGatewayFallback(FrappeTestCase):
 		before."""
 		real_doc = b"<!doctype html><html><head><title>Real Dashboard</title></head><body>ok</body></html>"
 
-		def fake_get(url, headers=None, timeout=None, **kwargs):
+		def fake_get(method, url, headers=None, timeout=None, **kwargs):
 			if "jarvis-canvas-probe-" in url:
 				return Mock(status_code=404, content=b"not found")
 			return Mock(status_code=200, content=real_doc)
 
-		with patch("requests.get", side_effect=fake_get), patch.object(frappe, "log_error") as log_error:
+		with patch("requests.request", side_effect=fake_get), patch.object(frappe, "log_error") as log_error:
 			items = persist_canvases(self.msg.name, self.msg.content, "ws://127.0.0.1:19000", "tok")
 
 		log_error.assert_not_called()

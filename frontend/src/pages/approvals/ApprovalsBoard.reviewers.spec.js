@@ -237,7 +237,7 @@ async function mountRoute() {
 const pane = (w) => w.find(".flex-1.overflow-y-auto");
 const buttons = (w) => w.findAll("button").map((b) => b.text());
 const button = (w, label) => w.findAll("button").find((b) => b.text() === label);
-const rail = (w) => w.find(".w-\\[360px\\]");
+const rail = (w) => w.find('[data-testid="approvals-rail"]');
 const panel = (w) => w.find(".panel");
 
 describe("ApprovalsBoard reviewer scoping (#756)", () => {

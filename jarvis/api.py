@@ -35,6 +35,24 @@ from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def call_tool(tool: str, args: dict | str | None = None) -> dict:
+	"""The agent's one tool endpoint (see ``_call_tool``). Every ``{ok: false}``
+	it answers is recorded for the admin error feed: a rejected call (unsigned,
+	unknown session, stale pairing) happens before the chat user is known, and an
+	argument, contract or focus refusal before the tool runs, so neither reaches
+	``_dispatch_and_wrap``, which records the tools that failed (the flag below
+	keeps those from being counted twice). A 401 from a caller nobody knows is
+	not recorded: it is an internet probe, or a plugin-auth rejection that is
+	already in the Error Log."""
+	frappe.local.jarvis_tool_failure_recorded = False
+	frappe.local.jarvis_call_tool_user = None
+	result = _call_tool(tool, args)
+	from jarvis import api_errors
+
+	api_errors.record_call_tool_failure(tool, result)
+	return result
+
+
+def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 	"""Whitelisted entry point for Jarvis tool dispatch.
 
 	Two authentication modes are supported:
@@ -79,7 +97,7 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 
 			site_pin.pin_if_unset()
 		except Exception:
-			frappe.log_error(title="site_pin: pin failed")
+			frappe.log_error(title="site_pin: pin failed", message=frappe.get_traceback())
 
 		from jarvis.chat.collaboration import is_collaborative_session, legacy_session_user, resolve_binding
 
@@ -92,14 +110,17 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 				resolve_binding(session_key).actor if shared_session else legacy_session_user(session_key)
 			)
 		except frappe.PermissionError:
+			_record_foreign_session(session_key)
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", "Collaborative chat execution is unavailable on this server.")
 		if not plugin_user:
+			_record_foreign_session(session_key)
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
 				f"unknown session: {session_key}",
 			)
+		frappe.local.jarvis_call_tool_user = plugin_user
 		enabled = frappe.db.get_value("User", plugin_user, "enabled")
 		if enabled is None:
 			frappe.local.response.http_status_code = 400
@@ -192,6 +213,76 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 		return _error("PermissionError", "you do not have access to Jarvis")
 
 	return _dispatch_current_user(tool, args)
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def pairing_challenge(nonce: str) -> dict:
+	"""Does this site hold the one-time proof nonce? The nonce is the only credential:
+	128 random bits, single-use, 10 minutes, known to this site and admin alone. There
+	is deliberately no plugin signature, so the proof works whatever key state the
+	container is in (a rotated or never-delivered key must not lock the real site out
+	of the proof that re-syncs it). Any X-Jarvis-* headers are ignored.
+
+	Order: strict format check (400, nothing touched), atomic consume, then a held
+	nonce is answered and is never rate limited. Only a nonce this site does not hold
+	counts toward the flood limits (429 once over), so a flood cannot lock out a real
+	proof."""
+	from jarvis.chat import pairing_proof
+
+	if not pairing_proof.is_well_formed(nonce):
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", "malformed nonce")
+	if pairing_proof.consume_nonce(nonce):
+		try:
+			from jarvis.chat import site_pin
+
+			site_pin.pin_if_unset()
+		except Exception:
+			frappe.log_error(title="site_pin: pin failed", message=frappe.get_traceback())
+		return {"ok": True, "held": True}
+	if pairing_proof.failed_challenge_rate_limited():
+		frappe.local.response.http_status_code = 429
+		return _error("RateLimitExceededError", "too many requests")
+	return {"ok": True, "held": False}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def vouch_session(pinned_instance_id: str | None = None) -> dict:
+	"""Does this site know the plugin session key? Signed exactly like ``call_tool``.
+
+	``known`` comes only from an exact-key record this site wrote: a row in the chat
+	tables or a claim made at session creation. Never from the key's shape. An unknown
+	key, or a plugin pinned to another instance id, is recorded as a foreign session so
+	the site that answers reports it to admin."""
+	try:
+		session_key = validate_plugin_request(_request_body_bytes())
+	except PluginAuthError as e:
+		frappe.local.response.http_status_code = e.http_status
+		return _error(e.code, e.message)
+
+	from jarvis.chat import foreign_session, session_claims, site_identity
+
+	key = str(session_key).lower()
+	try:
+		# Strict: a lookup error must never read as "known" (that would be fail-open).
+		known = foreign_session.has_row_for_key(key) or session_claims.is_claimed_strict(key)
+	except Exception:
+		frappe.log_error(title="vouch_session: lookup failed", message=frappe.get_traceback())
+		frappe.local.response.http_status_code = 503
+		return _error("ServiceUnavailable", "vouch lookup failed")
+	own_id = site_identity.instance_id()
+	if not known:
+		foreign_session.record(key)
+	else:
+		if own_id and pinned_instance_id and pinned_instance_id != own_id:
+			foreign_session.record_instance_mismatch(key)
+		try:
+			from jarvis.chat import site_pin
+
+			site_pin.pin_if_unset()
+		except Exception:
+			frappe.log_error(title="site_pin: pin failed", message=frappe.get_traceback())
+	return {"known": known, "instance_id": own_id}
 
 
 def _dispatch_current_user(tool: str, args: dict | str | None) -> dict:
@@ -319,7 +410,7 @@ def _dispatch_from_session(
 	"""
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
-	from jarvis.chat import agent_run_steps, connector_focus
+	from jarvis.chat import agent_run_steps, connector_focus, macro_report_wait
 	from jarvis.chat.collaboration import require_legacy_session
 	from jarvis.tools import _agent_run_ctx, _delegate_capability
 
@@ -425,6 +516,19 @@ def _dispatch_from_session(
 					tool_call_id=tool_call_id,
 				)
 				return focus_refusal
+			# A macro step that was told to wait for a background report (or whose report
+			# failed) changes nothing until Jarvis continues it. Here too, and not in
+			# _run_tool, for the same reason as focus: a card confirm must still run.
+			wait_refusal = macro_report_wait.write_refusal(conv, tool)
+			if wait_refusal:
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=parsed_args,
+					result=wait_refusal,
+					tool_call_id=tool_call_id,
+				)
+				return wait_refusal
 			# STEP TIMELINE (#1062): the run to file this call's step against, taken
 			# from the contract resolved above - BEFORE the tool executes.
 			# record_agent_run flips the run off ``running`` from inside the tool, so
@@ -744,6 +848,9 @@ def persist_tool_receipt(
 	already carries one of these chips (a pending-action settle whose executed or
 	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``)."""
 	result = result or {}
+	from jarvis.chat.source_receipts import source_receipt
+
+	stored_args, stored_result = source_receipt(tool, args, result)
 	# discarded/cancelled/superseded/expired executed NOTHING; unknown/partial's
 	# write state is UNVERIFIED (an interrupted or mid-dispatch outcome) - none of
 	# these get envelope_ok's binary completed/error classification. The chip
@@ -836,8 +943,8 @@ def persist_tool_receipt(
 					"Jarvis Chat Message",
 					existing,
 					{
-						"tool_args": frappe.as_json(args),
-						"tool_result": frappe.as_json(result) if result else None,
+						"tool_args": frappe.as_json(stored_args),
+						"tool_result": frappe.as_json(stored_result) if stored_result else None,
 						"tool_status": status,
 						"action_outcome": action_outcome or None,
 						"armed_by_macro": armed_by_macro or None,
@@ -858,8 +965,8 @@ def persist_tool_receipt(
 				{
 					"role": "tool",
 					"tool_name": tool,
-					"tool_args": frappe.as_json(args),
-					"tool_result": frappe.as_json(result) if result else None,
+					"tool_args": frappe.as_json(stored_args),
+					"tool_result": frappe.as_json(stored_result) if stored_result else None,
 					"tool_status": status,
 					"tool_call_id": tool_call_id or flip_token or None,
 					"action_outcome": action_outcome or None,
@@ -890,8 +997,8 @@ def persist_tool_receipt(
 			tool_message_id=msg_name,
 			tool_call_id=tool_call_id or flip_token or None,
 			tool_name=tool,
-			args=args,
-			result=result,
+			args=stored_args,
+			result=stored_result,
 			status=status,
 			action_outcome=action_outcome,
 		)
@@ -2596,6 +2703,12 @@ def _dispatch_and_wrap(
 				provenance_name=provenance_name,
 				ref_doctype=err_obj.get("doctype") if refused else None,
 			)
+		# The agent got {ok: false}, a 200, so no other error lane sees it. Placed
+		# after every rollback above so the row rides the envelope's commit.
+		from jarvis import api_errors
+
+		api_errors.record_tool_failure(tool, envelope.get("error"))
+		frappe.local.jarvis_tool_failure_recorded = True
 		return envelope
 	if sp:
 		try:
@@ -2621,6 +2734,14 @@ def _dispatch_and_wrap(
 			provenance=provenance,
 			provenance_name=provenance_name,
 		)
+	if not envelope_ok(tool, {"ok": True, "data": data}):
+		# A connector call that dispatched but answered {ok: false} inside its own
+		# envelope: the agent got a failure under an outer ok:true, so no failure
+		# branch above saw it.
+		from jarvis import api_errors
+
+		api_errors.record_tool_failure(tool, data.get("error") if isinstance(data, dict) else None)
+		frappe.local.jarvis_tool_failure_recorded = True
 	return {"ok": True, "data": data}
 
 
@@ -4148,6 +4269,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				frappe.clear_messages()
 				return refusal
 			preview["card"] = card
+			if tool == "create_doc" and isinstance(card, dict) and _risk != "sensitive" and not _guarded:
+				# The ORIGINAL proposal's identity: saving a draft card of the very same
+				# proposal retires this card (#777, jarvis.chat.one_approval). Not on a
+				# sensitive or structure card: its draft parks a card instead of saving.
+				from jarvis.chat.one_approval import create_key
+
+				card["proposal_key"] = create_key(args.get("doctype"), args.get("values"))
 			if from_draft and isinstance(preview.get("card"), dict):
 				# On the card too: a reloaded desktop seeds the card from its message
 				# row (pending_card), which carries only the card.
@@ -4540,6 +4668,16 @@ def _with_note(result: dict, note: str) -> dict:
 from jarvis._responses import err as _error
 
 
+def _record_foreign_session(session_key: str) -> None:
+	"""Best effort: note a plugin session this site never started. Never raises."""
+	try:
+		from jarvis.chat.foreign_session import record
+
+		record(session_key)
+	except Exception:
+		frappe.logger("jarvis.foreign_session").warning("foreign session hook failed", exc_info=True)
+
+
 def _get_header(name: str) -> str:
 	"""Read a request header, returning empty string when no request is bound.
 
@@ -4606,6 +4744,13 @@ def rotate_agent_token() -> dict:
 	# expansion shipping with relaxed defaults.
 	frappe.only_for("System Manager")
 
+	# A site holding a per-tenant callback key no longer holds the owner token, so
+	# rotating it from here would hand the site a key it must not have.
+	from jarvis import _plugin_auth
+
+	if _plugin_auth._callback_key():
+		frappe.throw("Token rotation is handled by Jarvis support.", frappe.PermissionError)
+
 	new_token = secrets.token_hex(32)  # 64 hex chars
 
 	# Push to admin FIRST. We only persist locally after admin confirms
@@ -4614,9 +4759,10 @@ def rotate_agent_token() -> dict:
 	# holds the old token (fleet-agent rolled back per PR-3A), so both
 	# ends stay in lockstep.
 	from jarvis import admin_client
+	from jarvis.chat import pairing_proof
 
 	try:
-		admin_client.post_rotate_agent_token(new_token=new_token)
+		admin_client.post_rotate_agent_token(new_token=new_token, proof_nonce=pairing_proof.issue_nonce())
 	except admin_client.AdminAuthError as e:
 		frappe.local.response.http_status_code = 502
 		return {

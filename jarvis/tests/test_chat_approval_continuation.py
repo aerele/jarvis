@@ -805,6 +805,17 @@ class TestChatApprovalContinuation(ComposedChatReviewFixture, FrappeTestCase):
 					for log in self.new_error_logs()
 					if log.method == "jarvis.approval.continuation_failed" and name in log.error
 				]
+				self.assertEqual(len(logs), 1)
+				# The error-capture hook can append a source location. It must not
+				# change the bounded message or include the exception's private text.
+				summary, marker, caller = logs[0].partition("\n\nLogged from:\n")
+				self.assertEqual(summary, f"{name} RuntimeError")
+				if marker:
+					self.assertRegex(
+						caller,
+						r'\A  File "apps/jarvis/jarvis/chat/approval_reviewers\.py", line \d+, in log_bounded\n\Z',
+					)
+				self.assertEqual(self.private_values_in_error_logs(), [])
 				with as_user(self.owner):
 					view = approvals_api.get_approval(name)
 				self.assertEqual(
@@ -814,7 +825,6 @@ class TestChatApprovalContinuation(ComposedChatReviewFixture, FrappeTestCase):
 						"turns": frappe.db.count("Jarvis Chat Turn", {"conversation": conv}),
 						"view": (view.get("continuation"), view.get("can_continue")),
 						"failure_events": realtime.payloads(self.owner, FAILED_KIND),
-						"logs": logs,
 					},
 					{
 						"continuation": "done",
@@ -822,7 +832,6 @@ class TestChatApprovalContinuation(ComposedChatReviewFixture, FrappeTestCase):
 						"turns": 0,
 						"view": ("done", 0),
 						"failure_events": [],
-						"logs": [f"{name} RuntimeError"],
 					},
 				)
 

@@ -8,7 +8,7 @@ from frappe.core.doctype.prepared_report.prepared_report import (
 	process_filters_for_prepared_report,
 )
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import add_to_date, now
+from frappe.utils import add_to_date, now, now_datetime
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools import _prepared_reports
@@ -374,6 +374,34 @@ class TestRunReportPrepared(FrappeTestCase):
 		# must NOT re-fire a fresh doomed job
 		self.assertEqual(frappe.db.count("Prepared Report", {"report_name": PREP_REPORT}), before)
 
+	def test_a_permission_refusal_is_shown_and_offers_no_filter_change(self):
+		run = _make_pr("Error")
+		frappe.db.set_value("Prepared Report", run, "error_message", PERMISSION_TB, update_modified=False)
+		env = run_report(report_name=PREP_REPORT)
+		self.assertEqual(env["status"], "failed")
+		self.assertEqual(env["reason"], "permission")
+		self.assertEqual(env["error"], PERMISSION_DETAIL)
+		self.assertIn(PERMISSION_DETAIL, env["message"])
+		self.assertNotIn("tell me and I'll run it again", env["message"])
+
+	def test_an_internal_error_keeps_the_traceback_out(self):
+		run = _make_pr("Error")
+		frappe.db.set_value("Prepared Report", run, "error_message", INTERNAL_TB, update_modified=False)
+		env = run_report(report_name=PREP_REPORT)
+		self.assertEqual((env["reason"], env["error"]), ("internal", ""))
+		for leak in ("KeyError", "warehouse", "Traceback", "Sales User"):
+			self.assertNotIn(leak, json.dumps(env))
+		self.assertIn(run, env["message"])  # where an administrator finds the details
+
+	def test_a_stalled_run_reads_as_timed_out(self):
+		run = _make_pr("Failed")
+		frappe.db.set_value(
+			"Prepared Report", run, "error_message", "Report timed out.", update_modified=False
+		)
+		env = run_report(report_name=PREP_REPORT)
+		self.assertEqual(env["reason"], "timed_out")
+		self.assertIn("took too long", env["message"])
+
 	def test_newer_inflight_wins_over_older_error(self):
 		# An old Error must not shadow a newer in-flight run: the newest attempt
 		# decides. Older failed row, then a fresh Started -> generating, not failed.
@@ -460,3 +488,285 @@ class TestRunReportPrepared(FrappeTestCase):
 			frappe.set_user("Administrator")
 		# denied BEFORE any generation is triggered
 		self.assertEqual(frappe.db.count("Prepared Report", {"report_name": gated}), before)
+
+
+# A Prepared Report's stored error_message is Frappe's "traceback with variables":
+# the user's roles, the filters and the report's config ride along in it.
+PERMISSION_TB = "\n".join(
+	[
+		"Traceback with variables (most recent call last):",
+		'  File "apps/frappe/frappe/core/doctype/prepared_report/prepared_report.py", line 124',
+		"    result = generate_report_result(report=report, filters=instance.filters)",
+		"      filters = {'company': 'Acme', 'from_date': '2026-04-01'}",
+		"      user_roles = ['Sales User', 'Stock Manager']",
+		'  File "apps/frappe/frappe/__init__.py", line 537, in _raise_exception',
+		"    raise exc",
+		"      exc = PermissionError('You do not have permission to access the report.')",
+		"frappe.exceptions.PermissionError: You do not have permission to access the "
+		"<b>Batch-Wise Balance History</b> report.<br><br>Access is restricted for all "
+		"users with the Sales User role.",
+	]
+)
+PERMISSION_DETAIL = (
+	"You do not have permission to access the Batch-Wise Balance History report. "
+	"Access is restricted for all users with the Sales User role."
+)
+INTERNAL_TB = "\n".join(
+	[
+		"Traceback with variables (most recent call last):",
+		'  File "apps/erpnext/erpnext/stock/report/stock_balance/stock_balance.py", line 40',
+		'    warehouse = filters["warehouse"]',
+		"      filters = {'company': 'Acme'}",
+		"      user_roles = ['Sales User']",
+		"KeyError: 'warehouse'",
+	]
+)
+
+
+_WAITING_MESSAGE = (
+	"This report is generating in the background. Start any other reports this step needs now, "
+	"then stop: Jarvis will continue this step automatically when they are ready. Do not send, "
+	"create or change anything in this step until then."
+)
+
+
+class TestPreparedReportsSince(FrappeTestCase):
+	"""``since`` (a macro run's ``started_at``): only a copy or a run created at/after it
+	counts. ``since=None`` is today's behaviour, byte for byte."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_ensure_report(PREP_REPORT, prepared=1)
+		frappe.db.delete("Prepared Report", {"report_name": PREP_REPORT})
+		frappe.db.commit()
+		self.since = add_to_date(now_datetime(), seconds=-600)
+
+	def _handle(self, filters=None, *, since="default"):
+		since = self.since if since == "default" else since
+		return _prepared_reports.handle_prepared(
+			PREP_REPORT, filters or {}, user="Administrator", since=since
+		)
+
+	def _count(self):
+		return frappe.db.count("Prepared Report", {"report_name": PREP_REPORT})
+
+	def test_a_copy_from_before_since_is_ignored_and_a_run_starts(self):
+		with _completed([{"name": "OLD"}]) as old:
+			frappe.db.set_value("Prepared Report", old, "creation", add_to_date(self.since, seconds=-60))
+			before = self._count()
+			with patch(_ENQUEUE):
+				env = self._handle()
+		self.assertEqual(env["status"], "started")
+		self.assertIs(env["waiting"], True)
+		self.assertEqual(env["message"], _WAITING_MESSAGE)
+		self.assertEqual(self._count(), before + 1)
+		self.assertNotEqual(env["run"], old)
+
+	def test_a_copy_from_after_since_is_served(self):
+		with _completed([{"name": "NEW"}]) as new:
+			frappe.db.set_value("Prepared Report", new, "creation", add_to_date(self.since, seconds=60))
+			env = self._handle()
+		self.assertEqual(env["status"], "ready")
+		self.assertEqual(env["result"], [{"name": "NEW"}])
+		self.assertEqual(env["run"], new)
+		self.assertNotIn("waiting", env)
+
+	def test_a_copy_created_exactly_at_since_is_served(self):
+		# `>=`, not `>`: the boundary copy counts (mutation-pinned).
+		with _completed([{"name": "EDGE"}]) as edge:
+			frappe.db.set_value("Prepared Report", edge, "creation", self.since)
+			env = self._handle()
+		self.assertEqual(env["status"], "ready")
+		self.assertEqual(env["run"], edge)
+
+	def test_the_newest_copy_at_or_after_since_is_the_one_read(self):
+		older = _make_pr("Completed")
+		newer = _make_pr("Completed")
+		frappe.db.set_value("Prepared Report", older, "creation", add_to_date(self.since, seconds=30))
+		frappe.db.set_value("Prepared Report", newer, "creation", add_to_date(self.since, seconds=90))
+		with patch.object(_prepared_reports, "_read_completed", return_value={"status": "ready"}) as read:
+			self._handle()
+		read.assert_called_once_with(newer)
+
+	def test_an_in_flight_run_from_after_since_is_generating_and_waiting(self):
+		pending = _make_pr("Queued")
+		frappe.db.set_value("Prepared Report", pending, "creation", add_to_date(self.since, seconds=5))
+		before = self._count()
+		with patch(_ENQUEUE):
+			env = self._handle()
+		self.assertEqual(env["status"], "generating")
+		self.assertIs(env["waiting"], True)
+		self.assertEqual(env["message"], _WAITING_MESSAGE)
+		self.assertEqual(env["run"], pending)
+		self.assertEqual(self._count(), before)
+
+	def test_an_in_flight_run_from_before_since_is_not_waited_on(self):
+		stale = _make_pr("Queued")
+		frappe.db.set_value("Prepared Report", stale, "creation", add_to_date(self.since, seconds=-60))
+		before = self._count()
+		with patch(_ENQUEUE):
+			env = self._handle()
+		self.assertEqual(env["status"], "started")
+		self.assertNotEqual(env["run"], stale)
+		self.assertEqual(self._count(), before + 1)
+
+	def test_a_failure_from_before_since_is_not_surfaced(self):
+		old = _make_pr("Error")
+		frappe.db.set_value("Prepared Report", old, "creation", add_to_date(self.since, seconds=-60))
+		with patch(_ENQUEUE):
+			env = self._handle()
+		self.assertEqual(env["status"], "started")
+
+	def test_a_failure_from_after_since_is_surfaced_without_waiting(self):
+		bad = _make_pr("Error")
+		frappe.db.set_value("Prepared Report", bad, "creation", add_to_date(self.since, seconds=5))
+		before = self._count()
+		env = self._handle()
+		self.assertEqual(env["status"], "failed")
+		self.assertEqual(env["run"], bad)
+		self.assertNotIn("waiting", env)
+		self.assertEqual(self._count(), before)
+
+	def test_an_unreadable_copy_from_after_since_fails_and_starts_nothing(self):
+		bad = _make_pr("Completed")  # no stored output: the real get_prepared_data throws
+		frappe.db.set_value("Prepared Report", bad, "creation", add_to_date(self.since, seconds=5))
+		before = self._count()
+		with patch(_ENQUEUE):
+			env = self._handle()
+		self.assertEqual(env["status"], "failed")
+		self.assertEqual(env["run"], bad)
+		self.assertEqual(env["error"], "the report's output could not be read")
+		self.assertNotIn("waiting", env)
+		self.assertEqual(self._count(), before)
+
+	def test_an_unreadable_copy_from_before_since_is_just_ignored(self):
+		bad = _make_pr("Completed")
+		frappe.db.set_value("Prepared Report", bad, "creation", add_to_date(self.since, seconds=-60))
+		with patch(_ENQUEUE):
+			env = self._handle()
+		self.assertEqual(env["status"], "started")
+
+	def test_without_since_nothing_changes(self):
+		# The same fixtures with since=None: today's envelopes, no `waiting`, the old copy served.
+		with _completed([{"name": "OLD"}]) as old:
+			frappe.db.set_value("Prepared Report", old, "creation", add_to_date(self.since, seconds=-3600))
+			env = self._handle(since=None)
+		self.assertEqual(env["status"], "ready")
+		self.assertEqual(env["run"], old)
+		self.assertNotIn("waiting", env)
+
+	def test_without_since_started_and_generating_keep_their_messages(self):
+		with patch(_ENQUEUE):
+			started = self._handle(since=None)
+		self.assertEqual(
+			started["message"],
+			"This report is heavy, so it runs in the background - I've started it. "
+			"Ask me again in a little while and I'll have the results.",
+		)
+		self.assertNotIn("waiting", started)
+		generating = self._handle(since=None)
+		self.assertEqual(generating["status"], "generating")
+		self.assertEqual(
+			generating["message"],
+			"Your report is still running in the background. Ask me again in a "
+			"little while and I'll have the results.",
+		)
+		self.assertNotIn("waiting", generating)
+		self.assertEqual(set(generating), {"prepared_report", "status", "report_name", "message", "run"})
+
+	def test_an_unreadable_copy_without_since_still_regenerates(self):
+		_make_pr("Completed")
+		with patch(_ENQUEUE):
+			env = self._handle(since=None)
+		self.assertEqual(env["status"], "started")
+
+	def test_run_report_passes_the_macro_runs_start_as_since(self):
+		ctx = frappe._dict(name="r", started_at=self.since, current_step=1, resume_turn="")
+		with (
+			patch("jarvis.chat.macro_report_wait.current_context", return_value=ctx),
+			patch.object(_prepared_reports, "handle_prepared", return_value={"status": "x"}) as handle,
+		):
+			run_report(report_name=PREP_REPORT)
+		self.assertEqual(handle.call_args.kwargs["since"], self.since)
+
+	def test_run_report_passes_no_since_outside_a_macro_run(self):
+		with (
+			patch("jarvis.chat.macro_report_wait.current_context", return_value=None),
+			patch.object(_prepared_reports, "handle_prepared", return_value={"status": "x"}) as handle,
+		):
+			run_report(report_name=PREP_REPORT)
+		self.assertIsNone(handle.call_args.kwargs["since"])
+
+
+def _tb(last_line: str) -> str:
+	return f'Traceback (most recent call last):\n  File "x.py", line 1, in execute\n{last_line}'
+
+
+class TestFailureReason(FrappeTestCase):
+	"""failure_reason keeps only what the run's owner may read: a frappe.* exception's
+	own message (what Desk would show them), never the traceback around it."""
+
+	def test_a_permission_refusal_keeps_its_message_as_plain_text(self):
+		self.assertEqual(_prepared_reports.failure_reason(PERMISSION_TB), ("permission", PERMISSION_DETAIL))
+
+	def test_a_frappe_throw_is_a_report_error_with_its_message(self):
+		tb = _tb("frappe.exceptions.ValidationError: From Date must be before To Date")
+		self.assertEqual(
+			_prepared_reports.failure_reason(tb), ("report_error", "From Date must be before To Date.")
+		)
+
+	def test_a_message_over_several_lines_is_one_line(self):
+		tb = _tb("frappe.exceptions.ValidationError: Row 3:\nItem &amp; batch missing.")
+		self.assertEqual(
+			_prepared_reports.failure_reason(tb), ("report_error", "Row 3: Item & batch missing.")
+		)
+
+	def test_the_last_of_chained_exceptions_decides(self):
+		tb = (
+			_tb("KeyError: 'x'")
+			+ "\n\nDuring handling of the above exception, another exception occurred:\n\n"
+			+ _tb("frappe.exceptions.ValidationError: Please set Company.")
+		)
+		self.assertEqual(_prepared_reports.failure_reason(tb), ("report_error", "Please set Company."))
+
+	def test_non_frappe_errors_are_internal_with_no_detail(self):
+		self.assertEqual(_prepared_reports.failure_reason(INTERNAL_TB), ("internal", ""))
+		sql = _tb("pymysql.err.OperationalError: (1054, \"Unknown column 'x' in 'where clause'\")")
+		self.assertEqual(_prepared_reports.failure_reason(sql), ("internal", ""))
+
+	def test_timeouts(self):
+		self.assertEqual(_prepared_reports.failure_reason("Report timed out.")[0], "timed_out")
+		tb = _tb("rq.timeouts.JobTimeoutException: Task exceeded maximum timeout value (1500 seconds)")
+		self.assertEqual(_prepared_reports.failure_reason(tb)[0], "timed_out")
+		tb = _tb("frappe.exceptions.QueryTimeoutError: (3024, 'Query execution was interrupted')")
+		self.assertEqual(
+			_prepared_reports.failure_reason(tb),
+			("timed_out", "It took too long to generate and was stopped."),
+		)
+
+	def test_frappe_errors_wrapping_the_database_are_internal(self):
+		tb = _tb("frappe.exceptions.QueryDeadlockError: (1213, 'Deadlock found when trying to get lock')")
+		self.assertEqual(_prepared_reports.failure_reason(tb), ("internal", ""))
+
+	def test_nothing_stored_or_unparseable_is_internal(self):
+		for text in (None, "", "   ", "something went wrong"):
+			self.assertEqual(_prepared_reports.failure_reason(text), ("internal", ""))
+
+	def test_a_bare_permission_error_still_says_why(self):
+		self.assertEqual(
+			_prepared_reports.failure_reason(_tb("frappe.exceptions.PermissionError")),
+			("permission", "You don't have permission to run this report."),
+		)
+
+	def test_a_frappe_error_with_no_message_is_internal(self):
+		self.assertEqual(
+			_prepared_reports.failure_reason(_tb("frappe.exceptions.ValidationError")), ("internal", "")
+		)
+
+	def test_a_long_message_is_capped(self):
+		reason, detail = _prepared_reports.failure_reason(
+			_tb("frappe.exceptions.ValidationError: " + "word " * 200)
+		)
+		self.assertEqual(reason, "report_error")
+		self.assertLessEqual(len(detail), 300)
+		self.assertTrue(detail.endswith("…"))

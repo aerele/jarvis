@@ -71,6 +71,22 @@ describe("skills admin api", () => {
 			SA + "admin_handover",
 			{ skill: "s1", new_owner: "ben@x.test", expected_owner: "asha@x.test" },
 		]);
+		// Several people, or a copy kept with the owner: the list as JSON, and keep.
+		await api.adminHandover("s1", ["ben@x.test", "cy@x.test"], "asha@x.test");
+		expect(sent()).toEqual([
+			SA + "admin_handover",
+			{
+				skill: "s1",
+				new_owners: '["ben@x.test","cy@x.test"]',
+				expected_owner: "asha@x.test",
+				keep: 0,
+			},
+		]);
+		await api.adminHandover("s1", "ben@x.test", "asha@x.test", true);
+		expect(sent()).toEqual([
+			SA + "admin_handover",
+			{ skill: "s1", new_owners: '["ben@x.test"]', expected_owner: "asha@x.test", keep: 1 },
+		]);
 	});
 
 	it("dismisses owner notices by name, as a JSON list", async () => {
