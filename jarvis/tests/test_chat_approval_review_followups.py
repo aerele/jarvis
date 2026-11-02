@@ -245,7 +245,7 @@ class TestChatApprovalReviewFollowups(continuation_fixture.ComposedChatReviewFix
 	def test_both_turn_start_paths_pass_their_real_seed(self):
 		"""N23: the pump prepare and the legacy handler call sites, run for real
 		up to the answer step (only the turn claim / Redis bindings are stubbed)."""
-		from jarvis.chat import connector_focus, prepare, turn_handler, turn_message_binding
+		from jarvis.chat import prepare, turn_handler, turn_message_binding
 
 		conv, _q2, seed = self.board_answer_with_two_open_questions()
 		calls = []
@@ -263,7 +263,6 @@ class TestChatApprovalReviewFollowups(continuation_fixture.ComposedChatReviewFix
 			as_user(self.owner),
 			patch.object(chat_asks, "resolve_on_user_message", side_effect=resolve),
 			patch.object(turn_message_binding, "bind_turn_message"),
-			patch.object(connector_focus, "bind_turn"),
 			patch.object(prepare.txn, "replay_on_conflict", return_value=claimed),
 		):
 			with self.assertRaises(_Stop):

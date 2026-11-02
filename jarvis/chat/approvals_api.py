@@ -23,6 +23,7 @@ from jarvis.chat import approval_reviewers, filebox_skills
 from jarvis.chat.approval_backport import legacy_approval_condition as _legacy_approval
 from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as _ar
 from jarvis.permissions import (
+	JARVIS_ADMIN_ROLES,
 	message_origin,
 	refuse_in_tool_dispatch,
 	require_jarvis_user,
