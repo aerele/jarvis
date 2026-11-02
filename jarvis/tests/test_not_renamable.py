@@ -32,6 +32,7 @@ NOT_RENAMABLE = (
 	"Jarvis Skill Admin Log",
 	"Jarvis Agent Activity",
 	"Jarvis Agent Catalog Lock",
+	"Jarvis Agent Close Fence",
 	"Jarvis Agent Finding",
 	"Jarvis Agent Run",
 	"Jarvis Agent Run Step",

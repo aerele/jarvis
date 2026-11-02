@@ -259,15 +259,15 @@ def _sweep_one(row, now, seen: set) -> None:
 	"""Handle ONE due installation. Extracted from the loop so ``run_due_agent_audits``
 	can wrap it whole (#648); every ``return`` here was a ``continue`` in the loop it
 	came from. ``seen`` is the caller's dedupe set and is mutated in place."""
-	from jarvis.chat import reorder_replenishment_gate
+	from jarvis.chat.agent_closure import closed_agent_spec, retire_legacy_installation
 	from jarvis.chat.agents_api import _mark_catalog_dirty, _user_allowed_for_agent
 
-	if reorder_replenishment_gate.is_reorder(row.agent):
-		# A raw legacy row can survive until its migration runs. Retire it without a
-		# failure run, a dispatch, or a recurring scheduler wake-up.
-		reorder_replenishment_gate.retire_legacy_installation(row.name)
+	if closed_agent_spec(row.agent):
+		# A raw historic row can survive until migrate or a failed import repair.
+		# Retire it without a run, dispatch, or another scheduler wake-up.
+		retire_legacy_installation(row.name, row.agent)
 		_mark_catalog_dirty()
-		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- retire and unship a legacy operator
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- retire closed legacy installation
 		return
 
 	key = (row.owner, row.agent, row.schedule_frequency, str(row.schedule_time))
@@ -1334,9 +1334,9 @@ def _launch_audit(
 	neither author nor widen it. Both launch paths (manual + cron) must supply it
 	for that agent; ``None`` leaves the run with no authorized apps, i.e. the tools
 	refuse everything."""
-	from jarvis.chat import reorder_replenishment_gate
+	from jarvis.chat.agent_closure import assert_launch_allowed
 
-	reorder_replenishment_gate.assert_launch_allowed(inst.agent)
+	assert_launch_allowed(inst.agent, inst)
 	listing = frappe.get_doc(LISTING, inst.agent)
 	owner = inst.owner
 	from jarvis.chat import operator_review, reorder_review

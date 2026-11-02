@@ -32,10 +32,6 @@ from jarvis.chat.pending_actions._store import (
 from jarvis.permissions import refuse_in_tool_dispatch
 
 _BULK_LIMIT = 500
-# A close migration takes a finite snapshot. Records beyond this cap remain
-# non-dispatchable through the runtime generation fence, rather than letting an
-# old worker keep a schema migration in an unbounded cancellation loop.
-_CLOSE_FENCE_SNAPSHOT_LIMIT = 2_000
 # A File Box sheet's questions close with the sheet (``held_sheet_seal.close_ended``).
 SHEET_CLOSE = "jarvis.chat.held_sheet_seal.close_ended"
 
@@ -249,41 +245,6 @@ def cancel_all_chat_pending() -> int:
 		CANCELLED,
 		"cancelled",
 	)
-
-
-def cancel_chat_pending_before_generation(generation: str) -> int:
-	"""Cancel a bounded snapshot of old chat cards after a safety close.
-
-	Cards stamped with ``generation`` were parked after the durable close fence
-	and must remain available. A card that races in unmarked after this snapshot
-	cannot execute because the executor checks the same fence. This avoids both a
-	global user-impact sweep and an unbounded migration loop.
-	"""
-	names = frappe.db.sql_list(
-		"""SELECT name FROM `tabJarvis Pending Action`
-		WHERE kind='chat' AND status='Pending'
-		AND IFNULL(reorder_close_generation, '') != %(generation)s
-		ORDER BY creation, name LIMIT %(limit)s""",
-		{"generation": generation, "limit": _CLOSE_FENCE_SNAPSHOT_LIMIT + 1},
-	)
-	if len(names) > _CLOSE_FENCE_SNAPSHOT_LIMIT:
-		frappe.log_error(
-			title="jarvis.pending_action.close_fence_snapshot_capped",
-			message=f"cancelled_at_most={_CLOSE_FENCE_SNAPSHOT_LIMIT}",
-		)
-		names = names[:_CLOSE_FENCE_SNAPSHOT_LIMIT]
-	done = 0
-	for start in range(0, len(names), _BULK_LIMIT):
-		moved = [
-			name
-			for name in names[start : start + _BULK_LIMIT]
-			if _transition(name, [PENDING], CANCELLED, reason_code="safety_update") == "ok"
-		]
-		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
-		for name in moved:
-			settle(name)
-		done += len(moved)
-	return done
 
 
 def withdraw_all_held() -> int:

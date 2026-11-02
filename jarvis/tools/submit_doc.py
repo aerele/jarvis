@@ -43,6 +43,9 @@ def _submit_one(doctype: str, name: str) -> "frappe.model.document.Document":
 	"""Guards + submit for ONE doc. Returns the submitted Document. Shared by
 	the single and batch paths so the guards (submittable, workflow-refusal,
 	submit perm, Draft state) never drift."""
+	from jarvis.tools._delegate_write_caps import enforce_closed_agent_direct_write
+
+	enforce_closed_agent_direct_write("submit", doctype)
 	meta = frappe.get_meta(doctype)
 	if not meta.is_submittable:
 		raise InvalidArgumentError(

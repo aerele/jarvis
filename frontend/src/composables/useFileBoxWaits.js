@@ -56,7 +56,7 @@ export function useFileBoxWaits({ conversation, activeAsk, load, onChanged }) {
 		try {
 			const result = await load(id);
 			if (alive && request === generation && conversation.value === id)
-				items.value = result?.items || [];
+				items.value = (result?.items || []).map((item) => ({ ...item, conversation: id }));
 		} catch {
 			// Preserve the known list. The native decision API rejects stale actions.
 		}

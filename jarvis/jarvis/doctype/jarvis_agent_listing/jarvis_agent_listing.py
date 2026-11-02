@@ -18,13 +18,11 @@ from jarvis.permissions import NotRenamable
 
 class JarvisAgentListing(NotRenamable, Document):
 	def validate(self):
-		from jarvis.chat import reorder_replenishment_gate
+		# ``name`` is immutable and is therefore the authority even if a crafted
+		# save tries to spoof agent_slug before Frappe restores it.
+		from jarvis.chat.agent_closure import assert_listing_status
 
-		# ``agent_slug`` is a mutable field until Frappe restores its autoname
-		# invariant. Check both identities so a Desk or REST save cannot spoof the
-		# slug during validation and publish the fixed Reorder listing.
-		reorder_replenishment_gate.assert_listing_status(self.name, self.status)
-		reorder_replenishment_gate.assert_listing_status(self.agent_slug, self.status)
+		assert_listing_status(self.name or self.agent_slug, self.status)
 		self._guard_operator_visibility_authority()
 
 	def _guard_operator_visibility_authority(self):

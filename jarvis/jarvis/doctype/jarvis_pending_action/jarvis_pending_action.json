@@ -23,7 +23,7 @@
   "decided_by",
   "skill_docname",
   "run_id",
-  "reorder_close_generation",
+  "agent_close_fences",
   "actor",
   "collaboration_binding",
   "collaboration_grant_revision",
@@ -171,11 +171,11 @@
    "search_index": 1
   },
   {
-   "description": "Server-only close-fence generation. An old unmarked chat card cannot run after the Reorder safety migration.",
-   "fieldname": "reorder_close_generation",
-   "fieldtype": "Data",
+   "description": "Server-only normalized close-fence generations for a generic chat confirmation.",
+   "fieldname": "agent_close_fences",
+   "fieldtype": "JSON",
    "hidden": 1,
-   "label": "Reorder Close Generation",
+   "label": "Agent Close Fences",
    "no_copy": 1,
    "read_only": 1
   },

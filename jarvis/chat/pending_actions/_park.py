@@ -193,14 +193,18 @@ def park(
 	try:
 		if not locked:
 			lock_conversation(conversation)
-		from jarvis.chat.collaboration_actions import park_identity
-		from jarvis.chat.reorder_replenishment_gate import (
+		from jarvis.chat.agent_closure import (
 			PENDING_ACTION_FENCE_FIELD,
-			stamp_pending_confirmation,
+			pending_action_fences_ready,
+			stamp_confirmation_fences,
 		)
+		from jarvis.chat.collaboration_actions import park_identity
 
 		identity = park_identity(conversation, owner_user, exec_user, tool, run_id, kind)
-		close_generation = stamp_pending_confirmation() if kind == "chat" else ""
+		# A generic chat card has no durable per-agent provenance. Stamp the full
+		# code-owned close map while its fence rows are locked; a partial or
+		# code-before-migration state deliberately produces no usable card map.
+		close_fences = stamp_confirmation_fences() if kind == "chat" else None
 		if identity and frappe.db.exists(PA, {"collaboration_call_key": identity["collaboration_call_key"]}):
 			raise ConfirmationPendingError(
 				"This tool call already proposed an action; do not execute it again."
@@ -225,12 +229,11 @@ def park(
 				"exec_user": exec_user,
 				"skill_docname": skill_docname or "",
 				"run_id": run_id or "",
-				# A close migration globally retires untaggable old chat cards. Every
-				# card parked after it carries this server-side generation, so the
-				# executor can distinguish it from a historic RRO credential. Before
-				# the migration no field is sent, which also permits code-before-schema
-				# deployment while the fence is still inactive.
-				**({PENDING_ACTION_FENCE_FIELD: close_generation} if close_generation else {}),
+				**(
+					{PENDING_ACTION_FENCE_FIELD: close_fences}
+					if close_fences and pending_action_fences_ready()
+					else {}
+				),
 				"corrects": correction_of(conversation) if kind == "chat" else "",
 				"open_key": _seal.open_key(owner_user, dedup_key) if dedup_key else None,
 				"dedup_keys": _seal.canonical([_seal.open_key(owner_user, k) for k in dedup_keys])

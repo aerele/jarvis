@@ -69,6 +69,18 @@ _COLS = (
 )
 
 
+def _select_cols() -> tuple[str, ...]:
+	"""Return readable Pending Action columns on this schema generation.
+
+	``agent_close_fences`` arrived after the durable card table. A server can run
+	briefly while that column is not present. Keep the row readable for lifecycle
+	work, but leave the map absent so every card admission fails closed.
+	"""
+	from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, pending_action_fences_ready
+
+	return (*_COLS, PENDING_ACTION_FENCE_FIELD) if pending_action_fences_ready() else _COLS
+
+
 def _db_errors() -> tuple:
 	# v15's MariaDBExceptionUtil has no InterfaceError.
 	return tuple(e for e in (frappe.db.OperationalError, getattr(frappe.db, "InterfaceError", None)) if e)
@@ -95,7 +107,7 @@ def _select(filters: dict, *, strict: bool) -> list:
 	if not _pa_ready():
 		return []
 	pa = frappe.qb.DocType("Jarvis Pending Action")
-	query = frappe.qb.from_(pa).select(*_COLS).where(pa.kind == "chat")
+	query = frappe.qb.from_(pa).select(*_select_cols()).where(pa.kind == "chat")
 	for field, value in filters.items():
 		query = query.where(pa[field] == value)
 	try:
@@ -137,6 +149,53 @@ def _record(row) -> dict:
 		"created_at": created,
 		"pending_action": True,
 	}
+
+
+def pending_action_is_safe_to_render(
+	row,
+	*,
+	owner: str | None = None,
+	conversation: str | None = None,
+	strict: bool = False,
+	lock: bool = True,
+	expected_fences: dict[str, str] | None = None,
+) -> bool:
+	"""Return the positive admission attestation for one durable chat card.
+
+	A transcript token is not authority to render Confirm. The live action must
+	still be a chat ``Pending`` row for this owner/conversation and its complete
+	close-fence map must match the current close state. This intentionally does
+	not try to repair a bad row: callers either suppress it or let the bounded
+	migration settle it later. A storage uncertainty never becomes a card.
+	"""
+	if not row or row.get("kind") != "chat" or row.get("status") != "Pending":
+		return False
+	if owner is not None and row.get("owner_user") != owner:
+		return False
+	if conversation is not None and row.get("conversation") != conversation:
+		return False
+	try:
+		from jarvis.chat.agent_closure import confirmation_is_current
+
+		if expected_fences is None:
+			return bool(confirmation_is_current(row, lock=lock))
+		return bool(confirmation_is_current(row, lock=lock, expected_fences=expected_fences))
+	except _db_errors() as exc:
+		frappe.logger("jarvis.pending_confirm").error(
+			"pending action fence read failed: %s", type(exc).__name__
+		)
+		if strict:
+			raise PendingConfirmStorageError("pending action fence read failed") from exc
+		return False
+	except Exception as exc:
+		# This also runs under collaboration's read-only projection transaction.
+		# Do not try to write an Error Log while deciding to fail closed.
+		frappe.logger("jarvis.pending_confirm").error(
+			"pending action card attestation failed: %s", type(exc).__name__
+		)
+		if strict:
+			raise PendingConfirmStorageError("pending action fence read failed") from exc
+		return False
 
 
 def _legacy_strict(strict: bool) -> bool:
@@ -323,17 +382,37 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 
 
 def list_for_owner(owner: str, conversation: str | None = None, *, strict: bool = False) -> list[dict]:
-	"""The owner's live cards from both stores (each with its ``token``), unordered.
-	``conversation`` filters; a legacy conversation-less token still surfaces under
-	any filter (F1). Never another user's card. ``strict=True`` raises on a read
-	failure (on Redis only while it is the minting store, ``_legacy_strict``)."""
+	"""The owner's positively-attested live cards from both stores, unordered.
+
+	A status filter is not enough for a durable card. Its close map must also be
+	current at this read. A mapless/stale row is omitted rather than being handed
+	to a resync or terminal event as a Confirm control. ``strict=True`` preserves
+	the storage-error contract for both the action table and its close fences.
+	"""
 	if not owner:
 		return []
-	filters = {"owner_user": owner, "status": "Pending"}
+	filters = {"owner_user": owner}
 	if conversation is not None:
 		filters["conversation"] = conversation
-	cards = [_record(r) for r in _select(filters, strict=strict)]
-	return cards + legacy.list_for_owner(owner, conversation=conversation, strict=_legacy_strict(strict))
+	# Read every durable token for this owner/scope, not only the live ones. A
+	# cancelled or mapless durable row still owns its token and must shield it
+	# from an old Redis record with the same token. Otherwise the legacy fallback
+	# could re-enable exactly the card this read just rejected.
+	durable_rows = _select(filters, strict=strict)
+	durable_tokens = {row.name for row in durable_rows}
+	cards = []
+	for row in durable_rows:
+		if row.status != "Pending":
+			continue
+		if not pending_action_is_safe_to_render(row, owner=owner, conversation=conversation, strict=strict):
+			continue
+		cards.append({**_record(row), "pending_card_safe": True})
+	legacy_cards = legacy.list_for_owner(owner, conversation=conversation, strict=_legacy_strict(strict))
+	return cards + [
+		{**card, "pending_card_safe": True}
+		for card in legacy_cards
+		if card.get("token") not in durable_tokens
+	]
 
 
 def list_items_for_owner(owner: str, conversation: str | None = None, *, strict: bool = False) -> list[dict]:
@@ -347,7 +426,11 @@ def list_items_for_owner(owner: str, conversation: str | None = None, *, strict:
 		if r.get("pending_action"):
 			items.append(
 				{k: r.get(k) for k in ("token", "tool", "preview", "summary", "conversation", "run_id")}
-				| {"expires_at": r["expires_at"], "created_at": r["created_at"]}
+				| {
+					"expires_at": r["expires_at"],
+					"created_at": r["created_at"],
+					"pending_card_safe": True,
+				}
 			)
 			continue
 		items.append(
@@ -360,9 +443,27 @@ def list_items_for_owner(owner: str, conversation: str | None = None, *, strict:
 				run_id=r.get("run_id"),
 				expires_at=r.get("expires_at"),
 				created_at=r.get("created_at"),
+				pending_card_safe=True,
 			)
 		)
 	return with_recency(items, strict=strict)
+
+
+def item_for_owner_token(
+	token: str, owner: str, conversation: str | None, *, strict: bool = False
+) -> dict | None:
+	"""Return one current, positively-attested client item for realtime delivery.
+
+	The live push must use the same read contract as list resync and terminal
+	payloads. It never reconstructs a card from the raw model/tool arguments.
+	"""
+	token = (token or "").strip()
+	if not token or not owner:
+		return None
+	for item in list_items_for_owner(owner, conversation=conversation, strict=strict):
+		if item.get("token") == token and item.get("pending_card_safe") is True:
+			return item
+	return None
 
 
 def latest_human_seq(conversation: str) -> int | None:

@@ -479,8 +479,26 @@ def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=No
 	return _refusal(code, REASON_TEXT[code], pa_status=FAILED, outcome="failed")
 
 
-def _fail_claimed_safety_update(row, approver: str, *, batch_id=None, defer=False) -> dict:
-	"""End a just-claimed old card if the close fence changed before dispatch."""
+def _cancel_unrun_safety_update(row, approver: str, *, batch_id=None, defer=False) -> dict:
+	"""Cancel a stale generic card before it can be claimed or dispatched."""
+	cols = {"batch_id": batch_id} if batch_id else {}
+	_terminal_update(row.name, [PENDING], CANCELLED, reason_code="safety_update", decided_by=approver, **cols)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
+	if row.kind == "chat" and not row.get("collaboration_binding"):
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.end_skill_autorun_if_open(row.conversation, "card_failed")
+	if not defer:
+		settle(row.name)
+	return _refusal(
+		*_SAFETY_UPDATE,
+		pa_status=CANCELLED,
+		outcome=outcome_of(CANCELLED, "safety_update", row.tool),
+	)
+
+
+def _cancel_claimed_safety_update(row, approver: str, *, batch_id=None, defer=False) -> dict:
+	"""Cancel a claimed card when a close lands before final dispatch."""
 	cols = {"batch_id": batch_id} if batch_id else {}
 	_terminal_update(
 		row.name, [EXECUTING], CANCELLED, reason_code="safety_update", decided_by=approver, **cols
@@ -548,7 +566,6 @@ def _execute_locked(
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	# An old generic chat card has no reliable agent identity. It must never reach
 	# a generic tool, including during the code-before-migration drain window.
-	from jarvis.chat.reorder_replenishment_gate import pending_confirmation_allowed
 
 	if lock_authorizer:
 		lock_authorizer()
@@ -566,8 +583,13 @@ def _execute_locked(
 		if row.status in TERMINAL and not row.settled:
 			settle(name)
 		return handled(row)
-	if not pending_confirmation_allowed(row):
-		return _fail_unrun(row, approver, "safety_update", batch_id=batch_id, defer=defer_continuation)
+	from jarvis.chat.agent_closure import confirmation_is_current
+
+	# Generic chat cards cannot be attributed to a closed agent after the fact.
+	# Check before claim under the shared fence lock; malformed, partial, and
+	# code-before-migration maps all fail closed.
+	if not confirmation_is_current(row, lock=True):
+		return _cancel_unrun_safety_update(row, approver, batch_id=batch_id, defer=defer_continuation)
 
 	refused = _preflight(row, approver, arm)
 	if refused:
@@ -650,18 +672,19 @@ def _claim_and_run(
 		from jarvis.chat import turn_message_binding
 
 		turn_message_binding.keep_skill_autorun_open(row.conversation)
+	from jarvis.chat.agent_closure import confirmation_is_current
+
+	# Claiming and the approved-run helper may commit. Re-lock immediately before
+	# the only generic dispatch so a migration between claim and dispatch cannot
+	# execute an old card.
+	if not confirmation_is_current(row, lock=True):
+		return _cancel_claimed_safety_update(row, approver, batch_id=batch_id, defer=defer_continuation)
 	args = call.get("args") or {}
 	with ExitStack() as stamped:
 		if structure is not None:
 			from jarvis.tools._guarded_structure import stamping
 
 			stamped.enter_context(stamping(name, structure.undo))
-		# Claim-first and the approved-run helper can commit. Re-check the immutable
-		# server stamp at the final dispatch point: an old generic card never runs.
-		from jarvis.chat.reorder_replenishment_gate import pending_confirmation_allowed
-
-		if not pending_confirmation_allowed(row):
-			return _fail_claimed_safety_update(row, approver, batch_id=batch_id, defer=defer_continuation)
 		result, interfered, crash_tb = _dispatch(row, args)
 	if structure is not None and not crash_tb and isinstance(result, dict) and result.get("ok"):
 		result = _held_to_the_card(name, args, structure, result)

@@ -37,7 +37,7 @@ describe("reply Copy wiring", () => {
 	});
 	it("document links escape the DocType they put in the page", () => {
 		const fn = body("linkifyDocs");
-		expect(fn).toMatch(/title="Open \$\{_escAttr\(\s*dt\s*\)\} in ERPNext"/);
+		expect(fn).toMatch(/title="Open \$\{_escAttr\(\s*dt\s*,?\s*\)\} in ERPNext"/);
 		expect(fn).toMatch(/encodeURIComponent\(_deskSlug\(dt\)\)/);
 		expect(fn).not.toMatch(/title="Open \$\{dt\}/);
 	});

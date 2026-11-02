@@ -93,6 +93,7 @@ function harness(initial = "A") {
 		resetAutoModeFor: vi.fn(),
 		loadContext: noop,
 		_loadConnectorFocusFor: () => null,
+		observePassiveSafetyUpdates: noop,
 		seedPendingFromRows: noop,
 		pendingSeedRows: () => [],
 		resyncPendingConfirmations: noop,
@@ -124,6 +125,26 @@ function harness(initial = "A") {
 		originPage: ref("dashboards"),
 		originOf: ref("A"),
 		composerRef: ref({ focusInput: vi.fn() }),
+	});
+	let viewGeneration = 0;
+	watch(
+		state.currentId,
+		(id, previous) => {
+			if (id !== previous) viewGeneration++;
+		},
+		{ flush: "sync" }
+	);
+	Object.assign(state, {
+		directActionViewGeneration: ref(0),
+		captureChatView: (token = "") => ({
+			generation: viewGeneration,
+			conversation: state.currentId.value,
+			token,
+		}),
+		chatViewIsCurrent: (view) =>
+			!!view &&
+			view.generation === viewGeneration &&
+			view.conversation === state.currentId.value,
 	});
 	const functions = new Function(
 		...Object.keys(state),

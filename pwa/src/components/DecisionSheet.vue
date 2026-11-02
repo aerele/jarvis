@@ -27,6 +27,9 @@ import { agentName } from "@/branding";
 // already behind the Frappe session, so the confirmation itself is the gate.
 const props = defineProps({
 	action: { type: Object, default: null },
+	// The parent increments this whenever the visible conversation changes.
+	// Capture it with an RPC so late callbacks cannot settle a different view.
+	viewGeneration: { type: Number, default: 0 },
 	// PR-1: true while the parent reply is still streaming. A card is parked
 	// mid-turn, so Approve/Deny stay disabled until the parent turn settles (the
 	// SPA gates the same way via convStreaming) - a confirm must not run a
@@ -37,9 +40,9 @@ const props = defineProps({
 // parent can exclude this card's token from its pending-list resync while it
 // settles (see ChatView.vue's inflightToken) - a stale resync must not
 // resurrect a card the user just acted on.
-const emit = defineEmits(["close", "resolved", "busy"]);
+const emit = defineEmits(["close", "resolved", "settled", "busy"]);
 
-const state = ref("review"); // review | busy | approved | denied
+const state = ref("review"); // review | busy | approved | denied | cancelled
 const error = ref("");
 // A failed confirmation's own id, for support (the bench's error.reference).
 const reference = ref("");
@@ -49,9 +52,11 @@ const reference = ref("");
 // approve-and-run, §3.5).
 const approveMode = ref("step"); // "step" | "run"
 
-// Fresh card → fresh sheet.
+// Fresh card or fresh chat view → fresh sheet. The generation check matters
+// when a user returns to A after A → B: a late A RPC must not change the new
+// A sheet, even if it happens to use the same token.
 watch(
-	() => props.action?.token,
+	() => [props.action?.token, props.action?.conversation, props.viewGeneration],
 	() => {
 		state.value = "review";
 		error.value = "";
@@ -75,6 +80,32 @@ const rawDetails = computed(() => {
 // F15: the server's wall-clock expiry (epoch seconds) for this parked token.
 const expired = computed(() => pendingExpiry(props.action?.expires_at, Date.now()).expired);
 
+function closeSheet() {
+	// A safety update has already spent the server-side confirmation. Keep the
+	// terminal explanation open until the person acknowledges it, then remove
+	// the card locally. A bare close during normal review still only closes the
+	// sheet and keeps a live card available.
+	if (state.value === "cancelled" && props.action?.token) {
+		emit(
+			"resolved",
+			props.action.token,
+			"cancelled",
+			props.action.conversation,
+			props.viewGeneration
+		);
+		return;
+	}
+	emit("close", props.action?.token, props.action?.conversation, props.viewGeneration);
+}
+
+function actionIsCurrent(token, conversation, generation) {
+	return (
+		props.action?.token === token &&
+		props.action?.conversation === conversation &&
+		props.viewGeneration === generation
+	);
+}
+
 // The preview is either a ready-made string or {note, would} — `described` means
 // the note already says it all and the payload dump would just be noise.
 const previewHtml = computed(() => {
@@ -97,21 +128,33 @@ const previewHtml = computed(() => {
 // approve.
 async function deny() {
 	if (state.value === "busy" || props.streaming) return;
+	const token = props.action?.token;
+	const conversation = props.action?.conversation;
+	const generation = props.viewGeneration;
+	if (!token) return;
 	if (!window.confirm("Discard this action?")) return;
 	error.value = "";
 	state.value = "busy";
-	emit("busy", true);
+	emit("busy", true, token, conversation, generation);
 	try {
-		const r = await api.dismissTool(props.action.token, props.action.conversation);
+		const r = await api.dismissTool(token, conversation);
 		const outcome = denyOutcome(r);
-		state.value = outcome.state;
-		error.value = outcome.error;
-		if (outcome.resolved) emit("resolved", props.action.token, outcome.resolved);
+		// Match Approve's close-migration path. A direct Deny can receive the
+		// terminal safety response too; exclude its token before the in-flight
+		// guard clears, then leave only the cancellation Done control visible.
+		if (outcome.state === "cancelled") emit("settled", token, conversation, generation);
+		if (actionIsCurrent(token, conversation, generation)) {
+			state.value = outcome.state;
+			error.value = outcome.error;
+		}
+		if (outcome.resolved) emit("resolved", token, outcome.resolved, conversation, generation);
 	} catch (e) {
-		error.value = e?.message || "Couldn't discard this action.";
-		state.value = "review";
+		if (actionIsCurrent(token, conversation, generation)) {
+			error.value = e?.message || "Couldn't discard this action.";
+			state.value = "review";
+		}
 	} finally {
-		emit("busy", false);
+		emit("busy", false, token, conversation, generation);
 	}
 }
 
@@ -125,21 +168,41 @@ async function deny() {
 // like to the user.
 async function approve(mode = "step") {
 	if (state.value === "busy" || props.streaming) return;
+	const token = props.action?.token;
+	const conversation = props.action?.conversation;
+	const generation = props.viewGeneration;
+	if (!token) return;
 	error.value = "";
 	reference.value = "";
 	state.value = "busy";
 	approveMode.value = mode;
-	emit("busy", true);
+	emit("busy", true, token, conversation, generation);
 	try {
 		const r =
 			mode === "run"
-				? await api.approveAndRun(props.action.token, props.action.conversation)
-				: await api.confirmTool(props.action.token, props.action.conversation);
+				? await api.approveAndRun(token, conversation)
+				: await api.confirmTool(token, conversation);
 		if (r && r.ok === false) {
 			const kept = keptCardMessage(r);
 			if (kept) {
-				error.value = kept;
-				state.value = "review";
+				if (actionIsCurrent(token, conversation, generation)) {
+					error.value = kept;
+					state.value = "review";
+				}
+				return;
+			}
+			// A safety update cancels the token before any action runs. It is a
+			// terminal result, not a retryable approval failure. Keep the sheet
+			// open so the person sees that no action ran before its card is removed.
+			// Tell the parent first: the finally block clears its in-flight guard,
+			// and a stale transcript row must not re-create this spent card while
+			// the terminal explanation is still open or after Done.
+			if (r.reason_code === "safety_update") {
+				emit("settled", token, conversation, generation);
+				if (actionIsCurrent(token, conversation, generation)) {
+					error.value = settledReasonMessage(r);
+					state.value = "cancelled";
+				}
 				return;
 			}
 			// The token is single-use and short-lived: a stale card must say so
@@ -150,36 +213,46 @@ async function approve(mode = "step") {
 				// says why. Only a bare legacy token (no reason_code at all) gets
 				// the opaque guess: use the card's own wall-clock expiry (F15).
 				const settledReason = settledReasonMessage(r);
-				error.value =
-					settledReason ||
-					(pendingExpiry(props.action?.expires_at, Date.now()).expired
-						? `This confirmation expired. Tell ${agentName} the action again to retry it.`
-						: `Couldn't confirm. It may have been handled elsewhere. Refresh, or ask ${agentName} to try again.`);
-				state.value = "review";
-				emit("resolved", props.action.token, "expired");
+				if (actionIsCurrent(token, conversation, generation)) {
+					error.value =
+						settledReason ||
+						(pendingExpiry(props.action?.expires_at, Date.now()).expired
+							? `This confirmation expired. Tell ${agentName} the action again to retry it.`
+							: `Couldn't confirm. It may have been handled elsewhere. Refresh, or ask ${agentName} to try again.`);
+					state.value = "review";
+				}
+				emit("resolved", token, "expired", conversation, generation);
 				return;
 			}
 			// The person's words for a refusal written for the model (error.person_message).
-			error.value = personError(r.error).message || r.reason || "Couldn't run this action.";
-			reference.value = failureReferenceOf(r);
-			state.value = "review";
+			if (actionIsCurrent(token, conversation, generation)) {
+				error.value =
+					personError(r.error).message || r.reason || "Couldn't run this action.";
+				reference.value = failureReferenceOf(r);
+				state.value = "review";
+			}
 			return;
 		}
-		state.value = "approved";
-		emit("resolved", props.action.token, "approved");
+		if (actionIsCurrent(token, conversation, generation)) state.value = "approved";
+		emit("resolved", token, "approved", conversation, generation);
 	} catch (e) {
-		error.value = e?.message || "Couldn't run this action.";
-		state.value = "review";
+		if (actionIsCurrent(token, conversation, generation)) {
+			error.value = e?.message || "Couldn't run this action.";
+			state.value = "review";
+		}
 	} finally {
-		emit("busy", false);
+		emit("busy", false, token, conversation, generation);
 	}
 }
 </script>
 
 <template>
-	<Sheet :open="!!props.action" @close="emit('close')">
+	<Sheet :open="!!props.action" @close="closeSheet">
 		<div v-if="props.action" class="jv-dsheet">
-			<div v-if="state === 'approved' || state === 'denied'" class="jv-dresult">
+			<div
+				v-if="state === 'approved' || state === 'denied' || state === 'cancelled'"
+				class="jv-dresult"
+			>
 				<div class="jv-dresult-icon" :class="state === 'approved' ? 'is-ok' : 'is-no'">
 					<svg
 						v-if="state === 'approved'"
@@ -208,16 +281,24 @@ async function approve(mode = "step") {
 					</svg>
 				</div>
 				<div class="jv-dresult-title">
-					{{ state === "approved" ? "Approved" : "Denied" }}
+					{{
+						state === "approved"
+							? "Approved"
+							: state === "cancelled"
+							? "Confirmation cancelled"
+							: "Denied"
+					}}
 				</div>
 				<div class="jv-dresult-sub">
 					{{
 						state === "approved"
 							? `${agentName} is running the action now. You'll see the result in the thread.`
+							: state === "cancelled"
+							? error
 							: `The change was rejected. ${agentName} won't run this action.`
 					}}
 				</div>
-				<button class="jv-btn is-primary" @click="emit('close')">Done</button>
+				<button class="jv-btn is-primary" @click="closeSheet">Done</button>
 			</div>
 
 			<template v-else>

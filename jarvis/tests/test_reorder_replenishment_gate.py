@@ -19,23 +19,24 @@ from jarvis import api
 from jarvis.chat import (
 	actions_api,
 	agent_catalog,
+	agent_closure,
 	agent_scheduler,
 	agents_api,
 	pending_confirm,
 	pending_confirm_legacy,
 )
-from jarvis.chat.reorder_replenishment_gate import (
+from jarvis.chat.agent_closure import (
 	CLOSED_STATUS,
-	CLOSURE_GENERATION,
 	FENCE_DOCTYPE,
-	FENCE_NAME,
 	PENDING_ACTION_FENCE_FIELD,
-	REORDER_AGENT,
-	RUN_UNAVAILABLE,
-	activate_legacy_confirmation_fence,
-	legacy_confirmation_generation,
-	stamp_pending_confirmation,
 )
+from jarvis.chat.agent_closure import (
+	expected_confirmation_fences as legacy_confirmation_generation,
+)
+from jarvis.chat.agent_closure import (
+	stamp_confirmation_fences as stamp_pending_confirmation,
+)
+from jarvis.chat.reorder_replenishment_gate import REORDER_AGENT, RUN_UNAVAILABLE
 from jarvis.exceptions import PermissionDeniedError
 from jarvis.tools import _delegate_capability, _delegate_write_caps
 from jarvis.tools.create_doc import create_doc
@@ -56,6 +57,16 @@ CURRENT_SESSION_PREFIX = f"agent:agent-{REORDER_AGENT}:rro-gate-"
 HISTORIC_SESSION_PREFIX = f"agent:{REORDER_AGENT}:rro-gate-"
 _CONFIRMATION_TITLE = "RRO close-fence fixture"
 ODD_SESSION_KEY = "rro-gate-unusual-bearer"
+
+
+FENCE_NAME = agent_closure.closed_agent_spec(REORDER_AGENT).fence_name
+CLOSURE_GENERATION = {spec.slug: spec.generation for spec in agent_closure.CLOSED_AGENT_SPECS}
+
+
+def activate_legacy_confirmation_fence():
+	# Both immutable close generations are needed for an ordinary new card.
+	for spec in agent_closure.CLOSED_AGENT_SPECS:
+		agent_closure.activate_close_fence(spec)
 
 
 def _ensure_owner() -> str:
@@ -107,7 +118,11 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		frappe.db.commit()
 
 	def setUp(self):
-		closed_release = patch("jarvis.chat.reorder_review.release_available", return_value=False)
+		self._fence_names = [spec.fence_name for spec in agent_closure.CLOSED_AGENT_SPECS]
+		self._fence_rows = frappe.get_all(
+			FENCE_DOCTYPE, filters={"name": ["in", self._fence_names]}, fields=["*"]
+		)
+		closed_release = patch("jarvis.chat.agent_closure.native_release_spec", return_value=None)
 		closed_release.start()
 		self.addCleanup(closed_release.stop)
 		frappe.set_user("Administrator")
@@ -121,6 +136,11 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		self._wipe()
 		if frappe.db.exists(LISTING, REORDER_AGENT):
 			frappe.db.set_value(LISTING, REORDER_AGENT, "status", CLOSED_STATUS, update_modified=False)
+		# These are shared persistent fences. Restore the pre-test rows so a
+		# pre-Patch-Log fixture cannot break later ordinary confirmation tests.
+		frappe.db.delete(FENCE_DOCTYPE, {"name": ["in", self._fence_names]})
+		for row in self._fence_rows:
+			frappe.get_doc({"doctype": FENCE_DOCTYPE, **row}).db_insert()
 		frappe.db.commit()
 
 	def _wipe(self):
@@ -185,7 +205,7 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 			run_id="",
 			preview={"card": {"title": "Create test material request", "fields": []}},
 		)
-		frappe.db.set_value(PENDING_ACTION, token, PENDING_ACTION_FENCE_FIELD, "", update_modified=False)
+		frappe.db.set_value(PENDING_ACTION, token, PENDING_ACTION_FENCE_FIELD, None, update_modified=False)
 		frappe.db.commit()
 		return token, conversation
 
@@ -490,7 +510,7 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 			PENDING_ACTION,
 			post_close_token,
 			PENDING_ACTION_FENCE_FIELD,
-			CLOSURE_GENERATION,
+			json.dumps(CLOSURE_GENERATION),
 			update_modified=False,
 		)
 		frappe.db.commit()
@@ -599,7 +619,7 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		dispatch_confirmed.assert_not_called()
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["reason_code"], "safety_update")
-		self.assertEqual(frappe.db.get_value(PENDING_ACTION, token, "status"), "Failed")
+		self.assertEqual(frappe.db.get_value(PENDING_ACTION, token, "status"), "Cancelled")
 		self.assertTrue(frappe.db.get_value(PENDING_ACTION, token, "settled"))
 		self.assertIsNone(frappe.db.get_value(PENDING_ACTION, token, "sealed_call"))
 		self.assertEqual(frappe.db.count("Material Request"), before)
@@ -612,7 +632,7 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		dispatch_confirmed.assert_not_called()
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["reason_code"], "safety_update")
-		self.assertEqual(frappe.db.get_value(PENDING_ACTION, token, "status"), "Failed")
+		self.assertEqual(frappe.db.get_value(PENDING_ACTION, token, "status"), "Cancelled")
 
 	def test_unmarked_legacy_import_never_reaches_generic_dispatch(self):
 		"""The untagged path cannot stage or queue an import during migration."""
@@ -631,6 +651,8 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 
 	def test_post_close_legacy_tokens_are_stamped_and_stay_confirmable(self):
 		"""The close does not break later ordinary legacy confirmation cards."""
+		agent_closure.activate_close_fence("ticket-triage-operator")
+		frappe.db.commit()
 		patch_module = importlib.import_module(
 			"jarvis.patches.v2_31_disable_reorder_replenishment_installations"
 		)
@@ -655,7 +677,7 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		activate_legacy_confirmation_fence()
 		frappe.db.commit()
 		settings.update_single(settings.get_valid_dict())
-		with patch("jarvis.chat.reorder_replenishment_gate._closure_patch_logged", return_value=False):
+		with patch("jarvis.chat.agent_closure._patch_logged", return_value=False):
 			self.assertEqual(legacy_confirmation_generation(), CLOSURE_GENERATION)
 
 	def test_settings_save_cannot_clear_the_server_owned_apply_marker(self):
@@ -689,14 +711,14 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 	def test_activation_updates_a_preexisting_blank_primary_key_row(self):
 		"""A blank fixed row cannot make the pre-Patch-Log close inactive."""
 		frappe.db.sql(
-			"""INSERT INTO `tabJarvis Reorder Safety Fence`
+			"""INSERT INTO `tabJarvis Agent Close Fence`
 			(`name`, `creation`, `modified`, `modified_by`, `owner`, `docstatus`, `idx`,
-			`legacy_confirmation_generation`)
-			VALUES (%s, NOW(6), NOW(6), %s, %s, 0, 0, '')""",
-			(FENCE_NAME, "Administrator", "Administrator"),
+			`agent_slug`, `generation`)
+			VALUES (%s, NOW(6), NOW(6), %s, %s, 0, 0, %s, '')""",
+			(FENCE_NAME, "Administrator", "Administrator", REORDER_AGENT),
 		)
 		frappe.db.commit()
-		with patch("jarvis.chat.reorder_replenishment_gate._closure_patch_logged", return_value=False):
+		with patch("jarvis.chat.agent_closure._patch_logged", return_value=False):
 			self.assertIsNone(legacy_confirmation_generation())
 			activate_legacy_confirmation_fence()
 			self.assertEqual(legacy_confirmation_generation(), CLOSURE_GENERATION)
@@ -705,7 +727,7 @@ class TestReorderReplenishmentGate(FrappeTestCase):
 		"""New code does not crash while model sync has not made the table yet."""
 		with (
 			patch.object(frappe.db, "table_exists", return_value=False),
-			patch("jarvis.chat.reorder_replenishment_gate._closure_patch_logged", return_value=False),
+			patch("jarvis.chat.agent_closure._patch_logged", return_value=False),
 		):
 			self.assertIsNone(legacy_confirmation_generation())
-			self.assertEqual(stamp_pending_confirmation(), "")
+			self.assertIsNone(stamp_pending_confirmation())

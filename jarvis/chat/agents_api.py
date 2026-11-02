@@ -46,6 +46,7 @@ ALLOWED_USER = "Jarvis Agent Allowed User"
 _SETTINGS = "Jarvis Settings"
 _CATALOG_LOCK = "Jarvis Agent Catalog Lock"
 _CATALOG_LOCK_NAME = "agent-catalog-lock"
+_CATALOG_STATE_FIELDS = ("agent_catalog_version", "agent_catalog_dirty")
 
 # PP-6 — the stage-maximum global activation ceiling. The initial ceiling is 1
 # (every customer starts with a single live module); a Jarvis Admin may raise it
@@ -510,6 +511,7 @@ def get_agent(agent_slug: str) -> dict:
 	(DESIGN-V3 §8.3 / D39). Any authenticated user may read (listing perms =
 	All read); the ``installation`` block is the caller's own install or None.
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
+	from jarvis.chat.agent_closure import is_closed_agent, is_closed_installation
 	from jarvis.chat.fefo_expiry_compliance import AGENT as FEFO_EXPIRY_AGENT
 	from jarvis.chat.fefo_expiry_compliance import configuration_issues as fefo_configuration_issues
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
@@ -598,6 +600,11 @@ def get_agent(agent_slug: str) -> dict:
 	# The owner reads a withdrawn (teaser/hidden) install as DISABLED — visible so they can
 	# view / uninstall it, but not runnable while the operator keeps it withdrawn.
 	out["install_disabled"] = 1 if (installed_by_caller and vis in ("teaser", "hidden")) else 0
+	# A reviewed code closure is not a normal marketplace lifecycle state: a
+	# tenant operator cannot re-enable it later. The owner still receives the
+	# installation so they can remove it, but the client needs this distinct
+	# signal to avoid offering controls that the server must reject.
+	out["runtime_closed"] = 1 if (installed_by_caller and is_closed_agent(listing.agent_slug)) else 0
 	if _masked:
 		# Redact the teaser for a non-admin non-owner via the SAME helper the list uses,
 		# so the detail seam can never drift from the list seam.
@@ -627,6 +634,7 @@ def get_agent(agent_slug: str) -> dict:
 	if inst:
 		i = inst[0]
 		i["enabled"] = int(i.enabled or 0)
+		out["runtime_closed"] = int(is_closed_installation(frappe._dict(agent=listing.agent_slug, **i)))
 		i["schedule_enabled"] = int(i.schedule_enabled or 0)
 		i["schedule_day_of_month"] = i.schedule_day_of_month or None
 		i["schedule_time"] = str(i.schedule_time) if i.schedule_time else None
@@ -907,9 +915,9 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 	require_jarvis_admin()
 	if status not in _ADMIN_STATUSES:
 		frappe.throw(_("Status must be one of: {0}.").format(", ".join(_ADMIN_STATUSES)))
-	from jarvis.chat import reorder_replenishment_gate
+	from jarvis.chat.agent_closure import assert_listing_status
 
-	reorder_replenishment_gate.assert_listing_status(agent_slug, status)
+	assert_listing_status(agent_slug, status)
 	doc = frappe.get_doc(LISTING, agent_slug)
 	doc.check_permission("write")
 	before = doc.status
@@ -1079,13 +1087,10 @@ def _mark_catalog_dirty(*, strict: bool = False) -> None:
 	cleared by that push (TOCTOU). Best-effort — the flag must never break the
 	mutation it annotates, bar a deadlock over its uncommitted writes (rolled back
 	with it), which re-raises so the mutation is not reported as done. ``strict``
-	is for a safety migration whose Patch Log must never say complete without a
-	durable fleet reconciliation request."""
+	is for a safety migration: it must not receive a completed Patch Log row
+	without a durable Apply marker."""
 	pending = frappe.db.transaction_writes
 	try:
-		# The final Apply worker locks this version row before it compares and
-		# clears dirty. Mutations must take the same lock FIRST, or a worker that
-		# holds version could wait on dirty while this request waits on version.
 		_bump_catalog_version()
 		frappe.db.set_single_value(_SETTINGS, "agent_catalog_dirty", 1)
 	except Exception as e:
@@ -1100,68 +1105,66 @@ def _mark_catalog_dirty(*, strict: bool = False) -> None:
 		frappe.log_error(title="Jarvis: agent catalog dirty flag failed", message=frappe.get_traceback())
 
 
-def _bump_catalog_version() -> None:
-	"""Increment the catalog version under its fixed primary-key lock row.
-
-	``tabSingles`` has no unique key on ``(doctype, field)``. Never use an
-	``INSERT IGNORE`` row there as a lock seed: concurrent first writes could
-	create duplicate version rows. The normal lock DocType has a primary-key
-	``name`` and serializes every version bump with the Apply worker's final
-	dirty-clear decision. The Settings fields remain the stored compatibility
-	values and are read only while that row lock is held.
-	"""
-	_lock_catalog_version()
-	# A mutation request can have made ordinary reads before it waited on the
-	# fixed lock. Under REPEATABLE READ, a plain cache=False SELECT would then
-	# still see that old snapshot. A locking read sees the current committed value
-	# after the prior lock holder releases it, so no version bump is lost.
-	version = frappe.utils.cint(
-		frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False, for_update=True)
-	)
-	frappe.db.set_single_value(_SETTINGS, "agent_catalog_version", version + 1)
-
-
-def _locked_catalog_version() -> int:
-	"""Lock and read the catalog version for the worker's terminal decision.
-
-	The lock covers both the fresh comparison and the subsequent dirty clear.
-	``_mark_catalog_dirty`` takes the same fixed normal-table row before it
-	writes Settings, so either the worker clears first and the mutation re-dirties
-	afterwards, or the mutation bumps first and the worker sees the newer version.
-	"""
-	_lock_catalog_version()
-	return frappe.utils.cint(
-		frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False, for_update=True)
-	)
-
-
 def _catalog_lock_table_ready() -> bool:
-	"""Return whether model sync has installed the primary-key lock table."""
-	return frappe.db.table_exists(_CATALOG_LOCK, cached=False)
+	"""Return whether model sync created the primary-key catalog lock table."""
+	try:
+		return bool(frappe.db.table_exists(_CATALOG_LOCK, cached=False))
+	except Exception:
+		return False
 
 
-def _lock_catalog_version() -> None:
-	"""Take the catalog mutation lock until this transaction commits or rolls back.
+def _lock_catalog_state() -> None:
+	"""Take the first lock in the catalog state order.
 
-	The pre-model-sync fallback keeps a newly deployed web process usable during
-	the short migration window. The v2_31 safety migration runs after model sync,
-	so its strict Apply marker always uses the fixed primary-key row.
+	Every writer then locks ``agent_catalog_version`` and
+	``agent_catalog_dirty`` in that fixed order through
+	:func:`_locked_catalog_state`. The fallback keeps a newly deployed web process
+	usable before model sync; the close migrations run only after model sync.
 	"""
 	if not _catalog_lock_table_ready():
 		return
 	params = {"name": _CATALOG_LOCK_NAME, "user": "Administrator"}
 	frappe.db.sql(
-		f"""INSERT IGNORE INTO `tab{_CATALOG_LOCK}`
+		"""INSERT IGNORE INTO `tabJarvis Agent Catalog Lock`
 		(`name`, `creation`, `modified`, `modified_by`, `owner`, `docstatus`, `idx`, `state_key`)
 		VALUES (%(name)s, NOW(6), NOW(6), %(user)s, %(user)s, 0, 0, %(name)s)""",
 		params,
 	)
 	rows = frappe.db.sql(
-		f"SELECT `name` FROM `tab{_CATALOG_LOCK}` WHERE `name`=%(name)s FOR UPDATE",
-		params,
+		"SELECT `name` FROM `tabJarvis Agent Catalog Lock` WHERE `name`=%(name)s FOR UPDATE", params
 	)
 	if not rows:
 		frappe.throw("The agent catalog lock could not be acquired.", frappe.ValidationError)
+
+
+def _locked_catalog_state() -> dict[str, int]:
+	"""Lock and read catalog state in the one global order.
+
+	Order is fixed: catalog lock row, version Single row, then dirty Single row.
+	Do not open-code a Settings read for either field in an Apply, mutation,
+	migration, or Settings save; a reversed pair deadlocks under concurrent Apply.
+	"""
+	_lock_catalog_state()
+	return {
+		field: frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, field, cache=False, for_update=True))
+		for field in _CATALOG_STATE_FIELDS
+	}
+
+
+def _locked_catalog_version() -> int:
+	"""Compatibility reader for the Apply worker's terminal version check."""
+	return _locked_catalog_state()["agent_catalog_version"]
+
+
+def _bump_catalog_version() -> None:
+	"""Increment the version under the shared catalog lock order.
+
+	This helper deliberately keeps its historic ``None`` return contract. Several
+	callers use it only for its durable side effect while building an Apply result.
+	"""
+	state = _locked_catalog_state()
+	version = state["agent_catalog_version"] + 1
+	frappe.db.set_single_value(_SETTINGS, "agent_catalog_version", version)
 
 
 def _default_schedule_weekday(sched: dict) -> str | None:
@@ -1209,9 +1212,9 @@ def install_agent(
 	model, validated before and saved in the same request as the install (enforced
 	min-model only; ignored with the flag off). ``pick_if_unpinned``: the pick is the
 	dialog's unchanged shown model, kept out of a row someone has pinned since."""
-	from jarvis.chat import reorder_replenishment_gate
+	from jarvis.chat.agent_closure import assert_new_install_allowed
 
-	reorder_replenishment_gate.assert_new_install_allowed(agent_slug)
+	assert_new_install_allowed(agent_slug)
 	listing = frappe.get_doc(LISTING, agent_slug)  # All-role read
 	me = frappe.session.user
 	# FIX 11: an agent runs AS a named user (run_as_user defaults to the installer),
@@ -1359,12 +1362,12 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	bundle only reaches the container on the next Apply)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	via_admin = _check_installation_write(doc)  # S3 owner-gate, or a tenant admin
-	before = int(doc.enabled or 0)
-	from jarvis.chat import reorder_replenishment_gate
+	from jarvis.chat.agent_closure import assert_enabled, is_closed_installation, retire_document
 
-	reorder_replenishment_gate.assert_enabled(doc.agent, enabled)
-	if reorder_replenishment_gate.is_reorder(doc.agent) and doc.installed_version != "0.2.0":
-		reorder_replenishment_gate.retire_document(doc)
+	assert_enabled(doc.agent, enabled, doc)
+	before = int(doc.enabled or 0)
+	if is_closed_installation(doc):
+		retire_document(doc)
 	# R5-J8: never enable a non-installable capability (a min_apps dependency
 	# absent at install, or one that vanished after install and was reconciled to
 	# installable=0). Disabling is always allowed.
@@ -1440,17 +1443,17 @@ def set_schedule(
 		from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
 
 		assert_schedule_configuration(doc)
-	was_enabled = frappe.utils.cint(doc.enabled)
-	from jarvis.chat import reorder_replenishment_gate
+	from jarvis.chat.agent_closure import assert_scheduled, is_closed_installation, retire_document
 
+	was_enabled = frappe.utils.cint(doc.enabled)
 	final_schedule_enabled = (
 		frappe.utils.cint(schedule_enabled)
 		if schedule_enabled is not None
 		else frappe.utils.cint(doc.schedule_enabled)
 	)
-	reorder_replenishment_gate.assert_scheduled(doc.agent, final_schedule_enabled)
-	if reorder_replenishment_gate.is_reorder(doc.agent) and doc.installed_version != "0.2.0":
-		reorder_replenishment_gate.retire_document(doc)
+	assert_scheduled(doc.agent, final_schedule_enabled)
+	if is_closed_installation(doc):
+		retire_document(doc)
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
 	# non-installable capability (a scheduled run would only fail its preflight).
 	if int(schedule_enabled or 0):
@@ -1485,9 +1488,6 @@ def set_schedule(
 	else:
 		doc.next_run_at = None
 	doc.save()
-	# Reorder's supported "schedule off" recovery can also retire a legacy
-	# enabled installation. That changes the fleet roster, so signal Apply just
-	# like set_enabled does.
 	if was_enabled != frappe.utils.cint(doc.enabled):
 		_mark_catalog_dirty()
 	log_activity(
@@ -1870,9 +1870,9 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	# model fallback or Custom App Learning's source_apps_json selection).
 	if agent_scope.record_scope_requested(doc.config):
 		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
-	from jarvis.chat import reorder_replenishment_gate
+	from jarvis.chat.agent_closure import assert_launch_allowed
 
-	reorder_replenishment_gate.assert_launch_allowed(doc.agent)
+	assert_launch_allowed(doc.agent, doc)
 	# Operator-visibility gate: a teaser/hidden (operator-withdrawn) agent does not run, even
 	# for an existing install — the install stays but is DISABLED. Reversible (agent -> available
 	# runs it again; never mutates ``enabled``), and applies to everyone incl. an admin
@@ -3243,8 +3243,12 @@ def _enqueued_push_agent_skills() -> None:
 			# successful push whose payload saw every mutation (version
 			# unchanged) and whose model stamps all landed; failures, mid-push
 			# mutations and an unstamped model row leave it set.
-			fresh = _locked_catalog_version()
-			if fresh == version and stamped:
+			# Terminal Apply takes the same catalog-lock -> version -> dirty order as
+			# every mutation. The lock covers both this comparison and a possible
+			# dirty clear, so a concurrent close or catalog edit re-dirties after us
+			# or is observed here; it cannot be lost between read and clear.
+			state = _locked_catalog_state()
+			if state["agent_catalog_version"] == version and stamped:
 				values["agent_catalog_dirty"] = 0
 			frappe.db.set_single_value(_SETTINGS, values)
 			terminal_written = True

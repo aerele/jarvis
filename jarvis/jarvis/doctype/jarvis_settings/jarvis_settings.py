@@ -900,21 +900,17 @@ class JarvisSettings(Document):
 		self.flags.shortcut_visibility_changed = self.has_value_changed("hide_shortcut_without_access")
 
 	def _preserve_agent_catalog_state(self):
-		"""Keep fleet reconciliation state server-owned on every Settings save.
+		"""Keep server-owned Apply state out of a crafted Settings save.
 
-		These hidden fields are written only by the Apply/mutation server paths.
-		A Settings form has permlevel-0 write for tenant administration, and Frappe
-		does not enforce a DocField's ``read_only`` flag for a crafted document
-		save. Reload the current locked values so neither a stale form nor a tenant
-		admin can clear an Apply-pending marker or choose its version.
+		The shared helper takes catalog lock -> version FOR UPDATE -> dirty FOR
+		UPDATE. A Settings form must not invert that order while an Apply worker or
+		close migration is changing the same state.
 		"""
-		for field in ("agent_catalog_dirty", "agent_catalog_version"):
-			self.set(
-				field,
-				frappe.utils.cint(
-					frappe.db.get_single_value("Jarvis Settings", field, cache=False, for_update=True)
-				),
-			)
+		from jarvis.chat.agents_api import _locked_catalog_state
+
+		state = _locked_catalog_state()
+		for field, value in state.items():
+			self.set(field, value)
 
 	def _validate_public_address(self):
 		"""Private network (design 5.2): in Private mode the public address must pass the
@@ -1250,11 +1246,12 @@ class JarvisSettings(Document):
 			agent_models.on_enforcement_enabled()
 		else:
 			agent_models.on_enforcement_disabled()
-		# This in-memory doc must not write the catalog flag/version back on a later save.
-		for field in ("agent_catalog_dirty", "agent_catalog_version"):
-			self.set(
-				field, frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", field, cache=False))
-			)
+		# This in-memory doc must not write the catalog flag/version back on a later
+		# save. Re-read through the same lock order as mutation and Apply paths.
+		from jarvis.chat.agents_api import _locked_catalog_state
+
+		for field, value in _locked_catalog_state().items():
+			self.set(field, value)
 		# The dirty mark moved `modified`; keep this doc current so saving it again
 		# (a Desk form, a second save in one request) is not a TimestampMismatch.
 		# Raw text, exactly as load_from_db reads it back for check_if_latest.
