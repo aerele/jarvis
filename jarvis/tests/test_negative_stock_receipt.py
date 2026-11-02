@@ -98,6 +98,18 @@ def _receipt_value(run, capture, source):
 
 
 class TestNegativeStockReceipt(unittest.TestCase):
+	def test_receipt_accepts_the_current_published_negative_stock_bundle(self):
+		with open(frappe.get_app_path("jarvis", "agents", "registry.json"), encoding="utf-8") as source:
+			entry = next(row for row in json.load(source)["agents"] if row["agent_slug"] == receipt.AGENT)
+		self.assertEqual(entry["status"], "Published")
+		with patch.object(receipt.frappe.db, "exists", return_value=False):
+			receipt._complete(_run(bundle_version=entry["version"]))
+
+	def test_old_or_unknown_negative_stock_bundles_cannot_supply_a_receipt(self):
+		for version in ("0.3.1", "0.3.3", "", None):
+			with self.subTest(version=version), self.assertRaises(receipt.ReceiptRefused):
+				receipt._complete(_run(bundle_version=version))
+
 	def test_scope_binds_effective_as_of_date(self):
 		scope = receipt._scope(SCOPE_RAW)
 		self.assertEqual(scope["effective_as_of"], "2026-10-30")
@@ -206,7 +218,7 @@ class TestNegativeStockReceipt(unittest.TestCase):
 
 		def get_value(doctype, name, field, **kwargs):
 			if doctype == receipt.SESSION:
-				self.assertEqual(name, "reorder-session")
+				self.assertEqual(name, {"session_key": "reorder-session"})
 				return USER
 			if doctype == receipt.RUN:
 				self.assertEqual(name, negative.name)

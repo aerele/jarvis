@@ -87,6 +87,26 @@ function mountBoard() {
 	return mount(AgentRunsBoard, { props: { agentName: "close-auditor" } });
 }
 
+it("opens the native buyer review from a completed Reorder run", async () => {
+	apiAgents.listRunsPage.mockResolvedValue(
+		envelope([
+			runRow({
+				status: "completed",
+				agent: "reorder-replenishment-operator",
+				nature: "Operator",
+			}),
+		])
+	);
+	const wrapper = mount(AgentRunsBoard, {
+		props: { agentName: "reorder-replenishment-operator" },
+	});
+	await flushPromises();
+	const button = wrapper.findAll("button").find((b) => b.text() === "Open buyer review");
+	expect(button).toBeTruthy();
+	await button.trigger("click");
+	expect(router.push).toHaveBeenLastCalledWith("/reorder-reviews");
+});
+
 function setVisibility(state) {
 	Object.defineProperty(document, "visibilityState", {
 		value: state,

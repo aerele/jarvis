@@ -123,8 +123,8 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "713d4d022b2245dd1e841751b4e1e32df649de88a0bd889fe6c71239289ff107"
-	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "3bca5faa9337568cc955bbff866bc275b25d0bcab3111a59c0f629ab1f87ec02"
+	PINNED_CAPABILITY_DIGEST = "d4b5e1683150e3dc3cd9928b7696ffc35c333670e81714aec3de28ac991d7072"
+	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "7b009e6a873dffef3cf7a911ed919a65ce8b43d4452dd62b88eb133d23841ecc"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
@@ -181,10 +181,8 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			"private agents repo)",
 		)
 
-
-class TestReorderClosedGateContract(FrappeTestCase):
-	def test_reorder_remains_coming_soon_without_inventory_or_erp_write_capability(self):
-		"""A future receipt gate must not silently restore the retired operator."""
+	def test_reorder_native_release_has_only_metadata_preparation_authority(self):
+		"""Publication cannot restore the retired generic read or write tools."""
 		import json
 
 		import frappe
@@ -195,11 +193,11 @@ class TestReorderClosedGateContract(FrappeTestCase):
 		entry = next(
 			item for item in doc["agents"] if item.get("agent_slug") == "reorder-replenishment-operator"
 		)
-		self.assertEqual(entry["status"], "Coming Soon")
-		self.assertEqual(entry["tools_required"], [])
+		self.assertEqual(entry["status"], "Published")
+		self.assertEqual(entry["tools_required"], ["jarvis__prepare_reorder_review"])
 		self.assertEqual(
 			sorted(entry["tools_allow"]),
-			["canvas", "jarvis__record_agent_run", "jarvis__save_agent_dashboard", "message"],
+			["jarvis__prepare_reorder_review"],
 		)
-		self.assertEqual(entry["doctypes_required"], [])
+		self.assertNotIn("Jarvis Approval Request", entry["doctypes_required"])
 		self.assertIsNone(entry["writes"])

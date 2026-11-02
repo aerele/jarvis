@@ -441,6 +441,10 @@ def _dispatch_from_session(
 			# #1062 step timeline further down, which needs the run's name, owner and
 			# status. A non-delegate session resolves to None and both are no-ops.
 			cap = _delegate_capability.resolve(session_key)
+			if isinstance(cap, dict) and cap.get("agent") == "reorder-replenishment-operator":
+				from jarvis.chat import reorder_review
+
+				return reorder_review.dispatch(session_key, tool, args, cap=cap)
 			denial = _delegate_capability.tool_denial(session_key, tool, cap=cap)
 			if denial:
 				code = CapabilityDeniedError.__name__

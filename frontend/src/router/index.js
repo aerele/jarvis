@@ -112,6 +112,11 @@ const routes = [
 		beforeEnter: supportGuard,
 	},
 	{
+		path: "/reorder-reviews",
+		name: "ReorderReviews",
+		component: () => import("@/pages/agents/ReorderReviews.vue"),
+	},
+	{
 		path: "/macros",
 		name: "MacrosList",
 		component: () => import("@/pages/macros/MacrosList.vue"),

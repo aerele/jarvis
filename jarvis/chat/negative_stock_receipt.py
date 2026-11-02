@@ -37,7 +37,9 @@ REQUIRED_TOKENS = frozenset(
 RECEIPT_KEY = "negative_stock_trust_receipt"
 RECEIPT_SCHEMA = "negative-stock-trust-receipt-v1"
 SOURCE_SCHEMA = "negative-stock-source-receipt-v2"
-SUPPORTED_BUNDLE_VERSION = "0.3.1"
+# The reviewed native lifecycle release supplies the same six complete coverage tokens.
+# Older runs must be repeated; do not accept an unknown future evaluator contract.
+SUPPORTED_BUNDLE_VERSION = "0.3.2"
 RUN = "Jarvis Agent Run"
 FINDING = "Jarvis Agent Finding"
 SESSION = "Jarvis Chat Session"
@@ -150,7 +152,7 @@ def _session_user(run) -> str:
 	key = run.get("session_key")
 	if not isinstance(key, str) or not key:
 		raise ReceiptRefused("run session is unavailable")
-	user = frappe.db.get_value(SESSION, key, "user")
+	user = frappe.db.get_value(SESSION, {"session_key": key}, "user")
 	if not isinstance(user, str) or not user.strip() or user == "Guest":
 		raise ReceiptRefused("run-as identity is unavailable")
 	return user.strip()
@@ -599,14 +601,30 @@ def persist(capture: dict) -> dict | None:
 		return None
 
 
-def verify_for_reorder(negative_run_name: str, reorder_run) -> dict:
+@contextmanager
+def verified_source(negative_run_name: str, reorder_run, *, review_execution_user=None):
 	"""Verify every cross-run precondition before a future native Reorder action.
 
 	This internal function accepts no receipt bytes, company, date, or Warehouse
 	arguments from a delegate. It loads the immutable receipt bytes from the
 	Negative Stock Run, then reads the Reorder Run's server-stamped scope itself.
 	"""
-	if reorder_run.get("agent") != REORDER_AGENT or reorder_run.get("status") != "running":
+	if reorder_run.get("agent") != REORDER_AGENT:
+		raise ReceiptRefused("Reorder run is not an active server-bound run")
+	if review_execution_user is not None:
+		from jarvis.chat import reorder_review
+
+		state = reorder_review.load_state(reorder_run)
+		if (
+			reorder_run.get("status") != "completed"
+			or not reorder_review.modern_run(reorder_run)
+			or state.get("mode") != "live"
+			or state.get("execution_user") != review_execution_user
+			or state.get("reviewer") != frappe.session.user
+			or not frappe.db.get_value("User", review_execution_user, "enabled")
+		):
+			raise ReceiptRefused("Reorder review identity is unavailable")
+	elif reorder_run.get("status") != "running":
 		raise ReceiptRefused("Reorder run is not an active server-bound run")
 	if not isinstance(negative_run_name, str) or not negative_run_name:
 		raise ReceiptRefused("Negative Stock run identity is unavailable")
@@ -628,7 +646,7 @@ def verify_for_reorder(negative_run_name: str, reorder_run) -> dict:
 	if _config_fingerprint(negative) != receipt["negative_engagement_config_digest"]:
 		raise ReceiptRefused("Negative Stock engagement configuration identity changed")
 
-	reorder_user = _session_user(reorder_run)
+	reorder_user = review_execution_user or _session_user(reorder_run)
 	reorder_identity = _user_fingerprint(reorder_user)
 	reorder_profile = _profile_fingerprint(reorder_run.get("permission_profile"))
 	if (
@@ -640,6 +658,11 @@ def verify_for_reorder(negative_run_name: str, reorder_run) -> dict:
 		raise ReceiptRefused("Reorder run-as permission profile changed")
 	with fresh_source_snapshot():
 		current_source = _source_state(reorder_scope, negative.get("started_at"))
-	if receipt.get("source") != current_source:
-		raise ReceiptRefused("Negative Stock source is stale")
-	return receipt
+		if receipt.get("source") != current_source:
+			raise ReceiptRefused("Negative Stock source is stale")
+		yield receipt
+
+
+def verify_for_reorder(negative_run_name: str, reorder_run) -> dict:
+	with verified_source(negative_run_name, reorder_run) as receipt:
+		return receipt
