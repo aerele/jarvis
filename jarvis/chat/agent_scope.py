@@ -240,6 +240,57 @@ _FEFO_QUERY_SOURCE_FIELDS = (
 )
 
 
+def authoritative_writeback_scope(run_doc, submitted_scope) -> dict:
+	"""Return the launch-stamped scope after checking the evaluator echo.
+
+	The evaluator receives the scope in its run message and returns the scope it
+	used with its findings. That return value is useful as a consistency check,
+	but it is not an authority to change a run. In particular, it must never
+	select the company used for finding persistence or auto-resolution.
+
+	An evaluator may return only the dimensions that apply to its data model. For
+	example, a CRM evaluator does not bind a Company dimension. Each supplied key
+	must therefore exist in, and exactly match, the server-stamped launch scope.
+	A scoped run also requires a non-empty evaluator scope, so a missing result
+	cannot silently bypass the check. An unscoped legacy run may return an empty
+	scope, but it may not introduce a scope of its own.
+	"""
+	# Older unscoped launches leave scope_json unset. Treat that as an empty server
+	# scope, never as permission for the evaluator to add a replacement scope.
+	stamped = _scope_object(run_doc.get("scope_json"), label="server-stamped run scope", allow_missing=True)
+	submitted = _scope_object(submitted_scope, label="evaluator scope", allow_missing=True)
+
+	if not stamped:
+		if submitted:
+			raise InvalidArgumentError("evaluator scope cannot add dimensions to an unscoped run")
+		return {}
+	if not submitted:
+		raise InvalidArgumentError("evaluator scope is required for a scoped run")
+
+	for key, value in submitted.items():
+		if key not in stamped:
+			raise InvalidArgumentError(f"evaluator scope has unstamped dimension: {key}")
+		if stamped[key] != value:
+			raise InvalidArgumentError(f"evaluator scope does not match server-stamped {key}")
+
+	# A fresh dict prevents later code from mutating the run's trusted stamp.
+	return dict(stamped)
+
+
+def _scope_object(value, *, label: str, allow_missing: bool = False) -> dict:
+	"""Parse one scope object without the old silent fallback-to-empty behavior."""
+	if value is None and allow_missing:
+		return {}
+	if isinstance(value, str):
+		try:
+			value = frappe.parse_json(value)
+		except Exception:
+			raise InvalidArgumentError(f"{label} must be a JSON object") from None
+	if not isinstance(value, dict):
+		raise InvalidArgumentError(f"{label} must be a JSON object")
+	return value
+
+
 def fefo_record_scope(value) -> dict | None:
 	"""Return the exact optional FEFO Warehouse leaf declaration."""
 	if (
@@ -1509,6 +1560,16 @@ def resolve_scope(installation, *, allow_record_scope: bool = False) -> dict:
 	"""Resolve the explicit run scope for an installation."""
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
+	# Statutory Payroll is a batch-bound monthly audit, not a generic accounting
+	# period scan.  Its selected Payroll Entry is validated as the run-as user and
+	# is the sole source for company, period, preceding month and report cutoff.
+	# Do this before parsing generic config so a stored company/fiscal-year/range
+	# can never widen or replace the batch boundary.
+	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
+	from jarvis.chat.statutory_payroll_scope import resolve_scope as statutory_scope
+
+	if is_statutory_payroll(installation.get("agent")):
+		return statutory_scope(installation.get("config") or "{}")
 
 	cfg = _configuration(installation.get("config"))
 	agent_slug = str(installation.get("agent") or installation.get("agent_slug") or "").strip()

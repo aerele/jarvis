@@ -421,6 +421,17 @@ def _enriched_catalog() -> list[dict]:
 	return out
 
 
+def _statutory_payroll_issues_for_run_as(installation: str, config: str) -> dict:
+	"""Return Payroll Entry setup faults as the configured execution identity."""
+	from jarvis.chat.statutory_payroll_scope import configuration_issues
+
+	run_as_user = (frappe.db.get_value(INSTALLATION, installation, "run_as_user") or "").strip()
+	if not run_as_user:
+		return {"run_as_user": "Set a run-as user before configuring the Payroll Entry."}
+	with impersonate(run_as_user):
+		return configuration_issues(config or "{}")
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_agents_page(
@@ -499,6 +510,7 @@ def get_agent(agent_slug: str) -> dict:
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 	from jarvis.chat.operator_review import backend
+	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
 
 	try:
 		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
@@ -617,6 +629,8 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif is_statutory_payroll(listing.agent_slug):
+			i["configuration_issues"] = _statutory_payroll_issues_for_run_as(i.name, i.config or "{}")
 		elif listing.agent_slug == "fefo-expiry-compliance-auditor":
 			from jarvis.chat.fefo_expiry_compliance import configuration_issues
 
