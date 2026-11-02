@@ -34,6 +34,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 					"jarvis__get_cycle_count_inputs",
 					"jarvis__get_purchase_match_inputs",
 					"jarvis__get_receivables_review_inputs",
+					"jarvis__get_ticket_triage_inputs",
 				],
 				"auditor",
 				[],
@@ -138,6 +139,53 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			self.assertEqual(json.loads(message.tool_result)["data"], result["private_output"])
 			step = frappe.get_last_doc("Jarvis Agent Run Step", {"run": self.run})
 			self.assertNotIn(CANARY, step.detail)
+
+	def test_ticket_triage_private_marker_never_reaches_receipt_realtime_step_or_error(self):
+		"""Exercise the real dispatcher, not only the private-output formatter."""
+		marker = "TT-RAW-MARKER-DO-NOT-PERSIST"
+		payload = {
+			"rows": [
+				{
+					"source_digest": "a" * 64,
+					"capture_id": "TT-private-capture",
+					"tickets": [
+						{
+							"name": "TT-0001",
+							"subject": marker,
+							"description": marker,
+							"raised_by": marker,
+						}
+					],
+				}
+			]
+		}
+		with patch("jarvis.api.publish_realtime_tool_result") as published:
+			result = self._dispatch(payload, tool="get_ticket_triage_inputs")
+		self.assertTrue(result["ok"], result)
+		self.assertIn(marker, result["data"])
+		self.assertNotIn(marker, str(published.call_args))
+		for message in frappe.get_all(
+			"Jarvis Chat Message", {"conversation": self.conv.name}, ["tool_result"]
+		):
+			self.assertNotIn(marker, message.tool_result)
+		for step in frappe.get_all("Jarvis Agent Run Step", {"run": self.run}, ["detail"]):
+			self.assertNotIn(marker, step.detail)
+
+		# A malformed private source is a real persisted error receipt.  It must
+		# not echo the rejected source row into the chat, realtime, step, or error
+		# envelope.
+		bad_payload = {"rows": [{"source_digest": "not-a-digest", "subject": marker}]}
+		with patch("jarvis.api.publish_realtime_tool_result") as published:
+			result = self._dispatch(bad_payload, tool="get_ticket_triage_inputs")
+		self.assertFalse(result["ok"], result)
+		self.assertNotIn(marker, str(result))
+		self.assertNotIn(marker, str(published.call_args))
+		for message in frappe.get_all(
+			"Jarvis Chat Message", {"conversation": self.conv.name}, ["tool_result"]
+		):
+			self.assertNotIn(marker, message.tool_result)
+		for step in frappe.get_all("Jarvis Agent Run Step", {"run": self.run}, ["detail"]):
+			self.assertNotIn(marker, step.detail)
 
 	def test_private_review_input_uses_sorted_canonical_source_bytes(self):
 		payload = {"rows": [{"z_key": "last", "source_digest": "a" * 64, "a_key": "first"}]}

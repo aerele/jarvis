@@ -55,6 +55,40 @@ def _refuse_if_wiki_write(doc) -> None:
 		)
 
 
+def _refuse_if_ticket_triage(doc) -> None:
+	"""Ticket Triage has a typed sidecar, never a generic decision/resume path."""
+	from jarvis.chat.ticket_triage import is_ticket_triage_approval
+
+	if is_ticket_triage_approval(doc):
+		frappe.throw(
+			"This is a Ticket Triage proposal. Use the typed Ticket Triage reviewer controls.",
+			frappe.PermissionError,
+		)
+
+
+def _ticket_triage_visible(a):
+	"""Query predicate for rows that remain on the generic Approval Board.
+
+	A typed Ticket Triage shell has its own reviewer endpoint and no conversation
+	resume.  Hide only that exact three-field contract.  In particular, do not
+	hide ordinary Agent Review rows or a legacy row with an empty assessment key.
+	"""
+	from jarvis.chat.ticket_triage import AGENT, APPROVAL_SOURCE
+
+	return (
+		(Coalesce(a.agent, "") != AGENT)
+		| (Coalesce(a.source, "") != APPROVAL_SOURCE)
+		| (Coalesce(a.assessment_key, "") == "")
+	)
+
+
+def _without_ticket_triage(rows):
+	"""Remove only typed Ticket Triage shells from a generic list response."""
+	from jarvis.chat.ticket_triage import is_ticket_triage_approval
+
+	return [row for row in rows if not is_ticket_triage_approval(row)]
+
+
 def _refuse_if_linked(doc) -> None:
 	"""A question linked to a File Box sheet is answered in the sheet, never on its own."""
 	if doc.get("sheet"):
@@ -216,16 +250,22 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 			"creation",
 			"agent",
 			"assessment_evidence",
+			"source",
+			"assessment_key",
 		],
 		order_by="creation desc",
 		limit_page_length=int(limit),
 		or_filters=or_filters,
 	)
-	rows = [r for r in rows if not is_collaborative(r.get("conversation")) and _may_list_approval(r)]
+	rows = _without_ticket_triage(
+		[r for r in rows if not is_collaborative(r.get("conversation")) and _may_list_approval(r)]
+	)
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
 		r.pop("assessment_evidence", None)
 		r.pop("agent", None)
+		r.pop("source", None)
+		r.pop("assessment_key", None)
 	conversation_names = [r.get("conversation") for r in rows if r.get("conversation")]
 	conversation_origins = {}
 	if conversation_names:
@@ -365,7 +405,7 @@ def list_approvals_page(
 	# Wiki-write proposals live on the reviewer lane only (SoD) - keep them OFF
 	# the customer decide board and its facet/badge counts. NULL-safe so legacy
 	# rows (source NULL = File Box) still show.
-	base = [a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE)]
+	base = [a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE), _ticket_triage_visible(a)]
 	legacy = _legacy_approval(a)
 	if legacy is not None:
 		base.append(legacy)
@@ -665,6 +705,7 @@ def get_approval(name: str) -> dict:
 	READ but gets ``can_act=0`` so the UI hides the decide controls. ``can_act``
 	mirrors what ``decide()`` would permit; the UI combines it with status."""
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
 	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
@@ -760,6 +801,7 @@ def _ar_pending_count() -> int:
 		.select(Count("*"))
 		.where(a.status == "Pending")
 		.where(a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE))
+		.where(_ticket_triage_visible(a))
 	)
 	if _ar.sheet_ready():
 		query = query.where(IfNull(a.sheet, "") == "")
@@ -847,6 +889,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	if not decision:
 		frappe.throw("Decision text is required")
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
 	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
@@ -954,6 +997,7 @@ def dismiss_approval(name: str) -> dict:
 	"""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
 	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
@@ -997,6 +1041,7 @@ def restore_approval(name: str) -> dict:
 	accidental dismiss."""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
 	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 

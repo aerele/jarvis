@@ -7,6 +7,8 @@ from frappe.model.document import Document
 from jarvis.permissions import NotRenamable
 
 WIKI_SOURCE = "File Box Wiki"
+TICKET_TRIAGE_SOURCE = "Ticket Triage"
+_SERVER_SOURCES = (WIKI_SOURCE, "Agent Review", TICKET_TRIAGE_SOURCE)
 # Written only by server code that sets ``flags.jarvis_server_write`` (raw-SQL
 # transitions never reach validate). No Administrator / ignore_permissions exemption.
 _SERVER_FIELDS = (
@@ -68,15 +70,12 @@ class JarvisApprovalRequest(NotRenamable, Document):
 				for f in _SERVER_FIELDS
 				if meta.has_field(f) and (self.get(f) or "") not in ("", meta.get_field(f).default or "")
 			]
-			if self.source in (WIKI_SOURCE, "Agent Review"):
+			if self.source in _SERVER_SOURCES:
 				touched.append("source")
 		else:
 			touched = [f for f in _SERVER_FIELDS if self.has_value_changed(f)]
 			before = self.get_doc_before_save()
-			if (before and before.source in (WIKI_SOURCE, "Agent Review")) or self.source in (
-				WIKI_SOURCE,
-				"Agent Review",
-			):
+			if (before and before.source in _SERVER_SOURCES) or self.source in _SERVER_SOURCES:
 				touched += [f for f in _WIKI_FIELDS if self.has_value_changed(f)]
 			if any((before and before.get(f)) or self.get(f) for f in ("routing", "sheet")):
 				touched += [f for f in _ROUTING_FIELDS if self.has_value_changed(f)]

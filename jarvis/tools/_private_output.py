@@ -16,7 +16,7 @@ MAX_ROWS = 20_000
 # here is not enough by itself: its tool implementation must reject the ordinary
 # transport and its bundle must verify the returned receipt before it can assess.
 PRIVATE_SOURCE_TOOLS = frozenset(
-	{"get_cycle_count_inputs", "get_purchase_match_inputs", "get_receivables_review_inputs"}
+	{"get_cycle_count_inputs", "get_purchase_match_inputs", "get_receivables_review_inputs", "get_ticket_triage_inputs"}
 )
 TOOLS = frozenset({"query", "run_report"}) | PRIVATE_SOURCE_TOOLS
 _active = ContextVar("jarvis_private_audit_output", default=False)

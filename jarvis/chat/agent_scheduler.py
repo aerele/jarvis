@@ -1025,8 +1025,12 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 		# reaper's "exceeded max duration".
 		return _terminalize_stuck_run(
 			row.name,
-			error=_fleet_error_message(state),
-			detail="polled: the delegate reported a failure",
+			error=_fleet_error_message(state, agent=row.agent),
+			detail=(
+				"polled: Ticket Triage host result was refused"
+				if _is_ticket_triage_agent(row.agent)
+				else "polled: the delegate reported a failure"
+			),
 		)
 
 	if status not in _FLEET_FINISHED_STATUSES:
@@ -1047,8 +1051,12 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 		if aborted:
 			return _terminalize_stuck_run(
 				row.name,
-				error=_gateway_abort_error_message(result, gateway_status),
-				detail=f"polled: gateway reported {gateway_status}",
+				error=_gateway_abort_error_message(result, gateway_status, agent=row.agent),
+				detail=(
+					"polled: Ticket Triage gateway result was refused"
+					if _is_ticket_triage_agent(row.agent)
+					else f"polled: gateway reported {gateway_status}"
+				),
 			)
 
 	# Finished on the host, still ``running`` on the bench: the writeback is either in
@@ -1066,11 +1074,13 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 	)
 
 
-def _gateway_abort_error_message(result: dict, gateway_status) -> str:
+def _gateway_abort_error_message(result: dict, gateway_status, *, agent: str | None = None) -> str:
 	"""The delegate's real abort sentence out of the fleet result's ``reply`` - its
 	first line, trimmed to the same 140-char budget every polled error uses - falling
 	back to a generic-but-honest sentence naming the gateway status when there is no
 	reply to read."""
+	if _is_ticket_triage_agent(agent):
+		return "Ticket Triage stopped before it could safely complete."
 	reply = result.get("reply")
 	if isinstance(reply, str) and reply.strip():
 		first_line = reply.strip().splitlines()[0].strip()
@@ -1079,10 +1089,12 @@ def _gateway_abort_error_message(result: dict, gateway_status) -> str:
 	return f"the agent turn was aborted by the gateway ({gateway_status})"
 
 
-def _fleet_error_message(state: dict) -> str:
+def _fleet_error_message(state: dict, *, agent: str | None = None) -> str:
 	"""The delegate's real failure sentence out of the fleet run-state ``error``
 	(``{code, message}``), falling back to something honest rather than empty — an
 	error field the customer reads as blank is worse than a generic sentence."""
+	if _is_ticket_triage_agent(agent):
+		return "Ticket Triage stopped before it could safely complete."
 	err = state.get("error")
 	if isinstance(err, dict):
 		msg = (err.get("message") or "").strip() or (err.get("code") or "").strip()
@@ -1194,12 +1206,6 @@ def _launch_audit(
 	refuse everything."""
 	listing = frappe.get_doc(LISTING, inst.agent)
 	owner = inst.owner
-	from jarvis.chat import operator_review
-
-	review_backend = operator_review.backend(inst.agent)
-	review_config = review_backend.configuration(inst) if review_backend else None
-	if review_config and trigger != "manual":
-		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
 	# run_agent_now) has already switched the session to this user, so
 	# frappe.session.user == run_as_user here — scope + watermark below are
@@ -1308,6 +1314,16 @@ def _launch_audit(
 				"contact support: nothing was started."
 			)
 		)
+
+	from jarvis.chat import operator_review, ticket_triage
+
+	review_backend = operator_review.backend(inst.agent)
+	# Ticket Triage is a typed private workflow.  It never joins operator_review,
+	# whose generic snapshot/decision paths are unsafe for Helpdesk raw text.
+	ticket_config = ticket_triage.configuration(inst) if _is_ticket_triage_agent(inst.agent) else None
+	review_config = ticket_config or (review_backend.configuration(inst) if review_backend else None)
+	if review_config and trigger != "manual":
+		frappe.throw("This evidence review supports manual runs only.")
 
 	# Enforced min-model backstop for a launch path that did not gate itself; the
 	# manual and scheduled paths pass the verdict they already reached.
@@ -1652,7 +1668,20 @@ def _stamp_scope_and_watermark(
 	the best-effort try, so an ERP scope-resolution failure can never drop the
 	authorization the source-read tools read back — a scribe run either carries its
 	admin-authorized app list or reads nothing."""
-	from jarvis.chat import agent_scope, operator_review
+	from jarvis.chat import agent_scope, operator_review, ticket_triage
+
+	if _is_ticket_triage_agent(inst.agent):
+		config = ticket_triage.configuration(
+			frappe._dict(config=frappe.db.get_value(RUN, run_name, "assessment_config_json") or "")
+		)
+		scope = ticket_triage.scope_from_config(config)
+		frappe.db.set_value(
+			RUN,
+			run_name,
+			{"scope_json": frappe.as_json(scope), "permission_profile": _permission_profile(run_as_user)},
+			update_modified=False,
+		)
+		return scope
 
 	review_backend = operator_review.backend(inst.agent)
 	if review_backend:
@@ -1789,6 +1818,16 @@ def _audit_prompt(
 	    bench code, injected — never LLM prose.
 	Kept short: the delegate resolves the run/installation linkage for its Phase-3
 	writeback from the session_key the bench minted, not from this text."""
+	if _is_ticket_triage_agent(listing.get("agent_slug") or listing.get("name")):
+		# The Ticket bundle receives ticket text only from its sealed local file.
+		# Do not point it at installation/get_doc, generic tools, or a conversation.
+		return (
+			"[Manual Ticket Triage run] Follow the bundled typed workflow. Use only the named private "
+			"Ticket Triage source and typed staging tools. Do not send ticket text, write a message, "
+			"change status, team, assignment, or any field other than a reviewer-confirmed type/priority. "
+			"The server owns scope, evidence, approval, and completion."
+		)
+
 	scope_block = ""
 	# CX5-2: name the admin-authorized apps explicitly. The bench ENFORCES the same
 	# list on every source-read/wiki call, so this is a courtesy so the delegate does
@@ -1900,6 +1939,11 @@ def _is_app_learning(agent: str) -> bool:
 	from jarvis.tools import _app_learning_ctx
 
 	return _app_learning_ctx.is_app_learning_agent(agent)
+
+
+def _is_ticket_triage_agent(agent: str | None) -> bool:
+	"""Exact slug check used by the private Ticket Triage egress gate."""
+	return (agent or "").strip() == "ticket-triage-operator"
 
 
 def _valid_owner(owner: str) -> bool:

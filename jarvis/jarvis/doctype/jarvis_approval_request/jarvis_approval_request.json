@@ -90,7 +90,7 @@
    "fieldtype": "Select",
    "in_standard_filter": 1,
    "label": "Source",
-   "options": "File Box\nChat\nFile Box Wiki\nAgent Review"
+   "options": "File Box\nChat\nFile Box Wiki\nAgent Review\nTicket Triage"
   },
   {
    "description": "The business document type this decision concerns (e.g. Purchase Invoice). Blank = the document type itself is undetermined (Unclassified tab).",

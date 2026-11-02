@@ -107,6 +107,10 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"get_engagement_config",
 	"get_purchase_match_inputs",
 	"get_receivables_review_inputs",
+	# Ticket Triage is a named private source plus a typed staging endpoint.  It
+	# intentionally receives no generic document/query/message/write surface.
+	"get_ticket_triage_inputs",
+	"stage_ticket_triage_proposals",
 	"get_bank_recon_inputs",
 	"get_cycle_count_inputs",
 	"get_itemised_tax_breakup",
