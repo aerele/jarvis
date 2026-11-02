@@ -11,7 +11,7 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), and the GRN Hygiene
+ *     CRITICAL fix, they are NOT flat top-level keys), the Fixed Asset and FEFO settings, and the GRN Hygiene
  *     auditor reads its reviewer settings under `grn_hygiene`. GST has flat
  *     turnover and HSN exclusion settings; Deposit uses its typed `deposit` object. Rendered only
  *     when the listing's own `config_keys` (agents_api.py get_agent,
@@ -118,6 +118,37 @@ export const CONFIG_FIELD_SET = [
 		],
 	},
 	{
+		key: "depr_run_posted",
+		path: "depr_run_posted",
+		label: "Depreciation run status",
+		type: "select",
+		options: [
+			{ label: "Confirm posting status", value: "" },
+			{ label: "Posted for this period", value: "true" },
+			{ label: "Not posted", value: "false" },
+		],
+		help: "Required before the Fixed Asset auditor can assess missing depreciation postings. Leave it unconfirmed to mark that check not evaluable.",
+	},
+	{
+		key: "enable_capex_signal",
+		path: "enable_capex_signal",
+		label: "Capex/opex review signal",
+		type: "select",
+		options: [
+			{ label: "Off (default)", value: "" },
+			{ label: "On", value: "true" },
+		],
+		help: "Optional review signal only. It does not create a scored audit finding.",
+	},
+	{
+		key: "payroll_entry",
+		path: "payroll_entry",
+		label: "Payroll Entry",
+		type: "link",
+		linkDoctype: "Payroll Entry",
+		help: "Select one submitted, completed monthly Payroll Entry. Jarvis derives the company and period from this record.",
+	},
+	{
 		key: "company",
 		path: "company",
 		label: "Company",
@@ -187,6 +218,31 @@ export const CONFIG_FIELD_SET = [
 		label: "Rounding step",
 		type: "number",
 		help: "Step used to detect round-number plugs",
+	},
+	{
+		key: "fefo_reviewer",
+		path: "fefo.reviewer",
+		label: "Expiry reviewer",
+		type: "text",
+		help: "Name the person who reviews expiry candidates.",
+	},
+	{
+		key: "fefo_near_expiry_days",
+		path: "fefo.near_expiry_days",
+		label: "Near-expiry window",
+		type: "number",
+		integer: true,
+		min: 1,
+		max: 3650,
+		suffix: "calendar days",
+		help: "Required. Include batches that expire within 1 to 3650 calendar days.",
+	},
+	{
+		key: "fefo_test_declaration",
+		path: "fefo.test_declaration",
+		label: "Test declaration",
+		type: "text",
+		help: "Optional plain-text notice for a test review.",
 	},
 	{
 		key: "grn_hygiene_reviewer",
@@ -278,6 +334,14 @@ export const CONFIG_FIELD_LABELS = Object.fromEntries(
  * plain string, cleared to absent when blank). */
 export const NUMBER_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "number").map(
 	(f) => f.key
+);
+
+/** Optional per-number constraints used by ConfigForm before it emits a save.
+ * Values absent from this map retain the existing generic numeric behaviour. */
+export const NUMBER_CONFIG_CONSTRAINTS = Object.fromEntries(
+	CONFIG_FIELD_SET.filter(
+		(f) => f.type === "number" && (f.integer || f.min != null || f.max != null)
+	).map(({ key, integer, min, max }) => [key, { integer: !!integer, min, max }])
 );
 
 /** Local form key -> its maximum permitted saved text length. This is derived

@@ -67,7 +67,17 @@ vi.mock("frappe-ui", () => ({
 	},
 	FormControl: {
 		name: "FormControl",
-		props: ["modelValue", "type", "label", "options", "description", "maxlength"],
+		props: [
+			"modelValue",
+			"type",
+			"label",
+			"options",
+			"description",
+			"min",
+			"max",
+			"step",
+			"maxlength",
+		],
 		emits: ["update:modelValue"],
 		template: `<div>
 			<span class="fc-label">{{ label }}</span>
@@ -91,6 +101,9 @@ vi.mock("frappe-ui", () => ({
 				:type="type"
 				:maxlength="maxlength"
 				:value="modelValue"
+				:min="min"
+				:max="max"
+				:step="step"
 				@input="$emit('update:modelValue', $event.target.value)"
 			/>
 			<slot name="suffix" />
@@ -854,6 +867,65 @@ describe("an unknown config key survives untouched in Advanced (JSON)", () => {
 // listing's config_keys, matched against each field's storage PATH (a dot
 // path for a nested key) - the scope fields never are.
 describe("per-agent gating via the configKeys prop", () => {
+	it("statutory payroll selects one Payroll Entry and hides the generic period controls", () => {
+		const w = mountForm(
+			{ payroll_entry: "PAY-FAKE-2026-10" },
+			{ configKeys: ["payroll_entry", "statutory", "statutory_schema"] }
+		);
+		expect(w.text()).toContain("Payroll Entry");
+		expect(w.text()).toContain("Jarvis fixes the company and period from that record.");
+		expect(w.text()).not.toContain("Fiscal year");
+		expect(w.text()).not.toContain("Period from");
+		expect(
+			w
+				.findAllComponents({ name: "Autocomplete" })
+				.find((component) => component.props("placeholder") === "Search Payroll Entry…")
+				.props("modelValue")
+		).toEqual({ label: "PAY-FAKE-2026-10", value: "PAY-FAKE-2026-10" });
+	});
+
+	it("fixed-asset controls preserve the server-evaluated posting gate", async () => {
+		const w = mountForm(
+			{ depr_run_posted: "false", enable_capex_signal: "true" },
+			{ configKeys: ["depr_run_posted", "enable_capex_signal"] }
+		);
+		expect(field(w, "Depreciation run status").element.value).toBe("false");
+		expect(field(w, "Capex/opex review signal").element.value).toBe("true");
+		expect(w.text()).not.toContain("Materiality percentage");
+
+		await field(w, "Depreciation run status").setValue("true");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			depr_run_posted: "true",
+			enable_capex_signal: "true",
+		});
+	});
+
+	it("FEFO policy controls serialize to fefo and preserve the structured scope declaration", async () => {
+		const configKeys = ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"];
+		const recordScope = { doctype: "Warehouse", name: "Fake FEFO Warehouse" };
+		const w = mountForm({ record_scope: recordScope }, { configKeys });
+		expect(field(w, "Expiry reviewer").element.value).toBe("");
+		expect(field(w, "Near-expiry window").element.value).toBe("");
+		expect(field(w, "Test declaration").element.value).toBe("");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({
+			record_scope: recordScope,
+		});
+
+		await field(w, "Expiry reviewer").setValue("reviewer@example.invalid");
+		await field(w, "Near-expiry window").setValue("90");
+		await field(w, "Test declaration").setValue("Fake records only.");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			record_scope: recordScope,
+			fefo: {
+				reviewer: "reviewer@example.invalid",
+				near_expiry_days: 90,
+				test_declaration: "Fake records only.",
+			},
+		});
+	});
+
 	it("configKeys=[] (e.g. bank-recon-operator) renders only the scope fields, plus the note", () => {
 		const w = mountForm({}, { configKeys: [] });
 		expect(w.text()).toContain("Company");
@@ -885,90 +957,66 @@ describe("per-agent gating via the configKeys prop", () => {
 		expect(w.text()).toContain("This agent has no additional settings.");
 	});
 
-	it("GRN hygiene dot paths render the receiving fields and save their namespace", async () => {
-		const w = mountForm(
-			{},
-			{
-				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
-			}
-		);
-		expect(w.text()).toContain("Receiving reviewer");
+	it("FEFO renders only its policy fields and stores the public scope at top level", async () => {
+		const configKeys = ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"];
+		const recordScope = { doctype: "Warehouse", name: "Fake FEFO Warehouse" };
+		const w = mountForm({ record_scope: recordScope }, { configKeys });
+		expect(w.text()).toContain("Expiry reviewer");
+		expect(w.text()).toContain("Near-expiry window");
 		expect(w.text()).toContain("Test declaration");
-		expect(w.text()).not.toContain("This agent has no additional settings.");
+		expect(w.text()).not.toContain("Company");
+		expect(w.text()).not.toContain("Fiscal year");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({
+			record_scope: recordScope,
+		});
 
-		await field(w, "Receiving reviewer").setValue("Receiving Controller");
-		await field(w, "Test declaration").setValue("Pre-release review");
+		await field(w, "Expiry reviewer").setValue("Stock Controller");
+		await field(w, "Near-expiry window").setValue("30");
+		await field(w, "Test declaration").setValue("Fake records only.");
 		await w.find('[data-label="Save configuration"]').trigger("click");
 		expect(w.emitted("save")[0][0]).toEqual({
-			grn_hygiene: {
-				reviewer: "Receiving Controller",
-				test_declaration: "Pre-release review",
+			record_scope: recordScope,
+			fefo: {
+				reviewer: "Stock Controller",
+				near_expiry_days: 30,
+				test_declaration: "Fake records only.",
 			},
 		});
 	});
 
-	it("lets incomplete GRN hygiene setup save and explains the run-time reviewer requirement", async () => {
+	it("does not claim blank FEFO policy fields use defaults", () => {
 		const w = mountForm(
-			{},
+			{ fefo: {} },
 			{
-				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+				configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"],
+				validationErrors: {
+					fefo_reviewer: "Name the expiry reviewer in the agent settings.",
+					fefo_near_expiry_days:
+						"Set near-expiry days to a whole number from 1 through 3650.",
+				},
 			}
 		);
-		expect(w.text()).toContain("Required before a run.");
-		expect(w.text()).toContain("You can save this blank while you finish setup.");
-
-		await w.find('[data-label="Save configuration"]').trigger("click");
-		expect(w.emitted("save")[0][0]).toEqual({});
-	});
-
-	it("bounds GRN text in the input and on save, then lets the user recover", async () => {
-		const w = mountForm(
-			{},
-			{
-				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
-			}
+		expect(w.text()).toContain(
+			"Expiry compliance needs a named reviewer and a near-expiry window."
 		);
-		const reviewer = field(w, "Receiving reviewer");
-		const declaration = field(w, "Test declaration");
-		expect(reviewer.attributes("maxlength")).toBe("140");
-		expect(declaration.attributes("maxlength")).toBe("500");
-
-		// A programmatic input event can bypass the browser maxlength guard.
-		// Save must still reject a value the native bundle will reject.
-		await reviewer.setValue("r".repeat(141));
-		await w.find('[data-label="Save configuration"]').trigger("click");
-		expect(w.emitted("save")).toBeUndefined();
-		expect(w.text()).toContain('"Receiving reviewer" must be at most 140 characters.');
-
-		await reviewer.setValue("r".repeat(140));
-		await declaration.setValue("d".repeat(501));
-		await w.find('[data-label="Save configuration"]').trigger("click");
-		expect(w.emitted("save")).toBeUndefined();
-		expect(w.text()).toContain('"Test declaration" must be at most 500 characters.');
-
-		await declaration.setValue("d".repeat(500));
-		await w.find('[data-label="Save configuration"]').trigger("click");
-		expect(w.emitted("save")[0][0]).toEqual({
-			grn_hygiene: {
-				reviewer: "r".repeat(140),
-				test_declaration: "d".repeat(500),
-			},
-		});
-		expect(w.text()).not.toContain('"Receiving reviewer" must be at most 140 characters.');
-		expect(w.text()).not.toContain('"Test declaration" must be at most 500 characters.');
+		expect(w.text()).not.toContain("Leave a field empty to use the default.");
+		expect(w.text()).toContain("Name the expiry reviewer in the agent settings.");
+		expect(w.text()).toContain("Set near-expiry days to a whole number from 1 through 3650.");
 	});
 
-	it("GRN hygiene fields load saved values and leave only unrelated values in Advanced JSON", async () => {
-		const configKeys = ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"];
+	it("FEFO fields load and preserve a saved owner policy", async () => {
+		const configKeys = ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"];
 		const config = {
-			grn_hygiene: {
-				reviewer: "Receiving Controller",
+			fefo: {
+				reviewer: "Stock Controller",
+				near_expiry_days: 30,
 				test_declaration: "Pre-release review",
 			},
 			custom_flag: true,
 		};
 		const w = mountForm(config, { configKeys });
-		expect(field(w, "Receiving reviewer").element.value).toBe("Receiving Controller");
+		expect(field(w, "Expiry reviewer").element.value).toBe("Stock Controller");
+		expect(field(w, "Near-expiry window").element.value).toBe("30");
 		expect(field(w, "Test declaration").element.value).toBe("Pre-release review");
 		expect(JSON.parse(w.find("textarea").element.value)).toEqual({ custom_flag: true });
 
@@ -976,25 +1024,59 @@ describe("per-agent gating via the configKeys prop", () => {
 		expect(w.emitted("save")[0][0]).toEqual(config);
 	});
 
-	it("GRN hygiene omits an empty optional test declaration", async () => {
+	it.each(["0", "3651", "30.5", "1e2"])(
+		"FEFO rejects an invalid near-expiry window of %s before save",
+		async (value) => {
+			const w = mountForm(
+				{},
+				{
+					configKeys: [
+						"fefo.reviewer",
+						"fefo.near_expiry_days",
+						"fefo.test_declaration",
+					],
+				}
+			);
+			await field(w, "Near-expiry window").setValue(value);
+			await w.find('[data-label="Save configuration"]').trigger("click");
+			expect(w.emitted("save")).toBeUndefined();
+			expect(w.text()).toContain(
+				'"Near-expiry window" must be a whole number from 1 to 3650.'
+			);
+		}
+	);
+
+	it("FEFO accepts a whole near-expiry window in range and exposes browser constraints", async () => {
 		const w = mountForm(
 			{},
 			{
-				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+				configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"],
 			}
 		);
-		await field(w, "Receiving reviewer").setValue("Receiving Controller");
+		const nearExpiry = field(w, "Near-expiry window");
+		expect(nearExpiry.attributes("min")).toBe("1");
+		expect(nearExpiry.attributes("max")).toBe("3650");
+		expect(nearExpiry.attributes("step")).toBe("1");
+		await nearExpiry.setValue("30");
 		await w.find('[data-label="Save configuration"]').trigger("click");
-		const saved = w.emitted("save")[0][0];
-		expect(saved).toEqual({ grn_hygiene: { reviewer: "Receiving Controller" } });
-		expect(saved.grn_hygiene).not.toHaveProperty("test_declaration");
+		expect(w.emitted("save")[0][0]).toEqual({ fefo: { near_expiry_days: 30 } });
 	});
 
-	it("a bare GRN hygiene namespace in configKeys renders no fields", () => {
-		const w = mountForm({}, { configKeys: ["grn_hygiene"] });
-		expect(w.text()).not.toContain("Receiving reviewer");
-		expect(w.text()).not.toContain("Test declaration");
-		expect(w.text()).toContain("This agent has no additional settings.");
+	it("FEFO omits an empty optional test declaration", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["fefo.reviewer", "fefo.near_expiry_days", "fefo.test_declaration"],
+			}
+		);
+		await field(w, "Expiry reviewer").setValue("Stock Controller");
+		await field(w, "Near-expiry window").setValue("30");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		const saved = w.emitted("save")[0][0];
+		expect(saved).toEqual({
+			fefo: { reviewer: "Stock Controller", near_expiry_days: 30 },
+		});
+		expect(saved.fefo).not.toHaveProperty("test_declaration");
 	});
 
 	it("the full configKeys set (close-auditor) renders every agent-specific field, no note", () => {
@@ -1246,5 +1328,119 @@ describe("legacy flat-key migration (materiality.* used to be saved flat)", () =
 		await field(w, "Materiality percentage").setValue("7");
 		await w.find('[data-label="Save configuration"]').trigger("click");
 		expect(w.emitted("save")[0][0]).toEqual({ materiality: { percentage: 7 } });
+	});
+});
+
+describe("GRN receiving configuration", () => {
+	it("GRN hygiene dot paths render the receiving fields and save their namespace", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		expect(w.text()).toContain("Receiving reviewer");
+		expect(w.text()).toContain("Test declaration");
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+
+		await field(w, "Receiving reviewer").setValue("Receiving Controller");
+		await field(w, "Test declaration").setValue("Pre-release review");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			grn_hygiene: {
+				reviewer: "Receiving Controller",
+				test_declaration: "Pre-release review",
+			},
+		});
+	});
+
+	it("lets incomplete GRN hygiene setup save and explains the run-time reviewer requirement", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		expect(w.text()).toContain("Required before a run.");
+		expect(w.text()).toContain("You can save this blank while you finish setup.");
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({});
+	});
+
+	it("bounds GRN text in the input and on save, then lets the user recover", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		const reviewer = field(w, "Receiving reviewer");
+		const declaration = field(w, "Test declaration");
+		expect(reviewer.attributes("maxlength")).toBe("140");
+		expect(declaration.attributes("maxlength")).toBe("500");
+
+		// A programmatic input event can bypass the browser maxlength guard.
+		// Save must still reject a value the native bundle will reject.
+		await reviewer.setValue("r".repeat(141));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")).toBeUndefined();
+		expect(w.text()).toContain('"Receiving reviewer" must be at most 140 characters.');
+
+		await reviewer.setValue("r".repeat(140));
+		await declaration.setValue("d".repeat(501));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")).toBeUndefined();
+		expect(w.text()).toContain('"Test declaration" must be at most 500 characters.');
+
+		await declaration.setValue("d".repeat(500));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			grn_hygiene: {
+				reviewer: "r".repeat(140),
+				test_declaration: "d".repeat(500),
+			},
+		});
+		expect(w.text()).not.toContain('"Receiving reviewer" must be at most 140 characters.');
+		expect(w.text()).not.toContain('"Test declaration" must be at most 500 characters.');
+	});
+
+	it("GRN hygiene fields load saved values and leave only unrelated values in Advanced JSON", async () => {
+		const configKeys = ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"];
+		const config = {
+			grn_hygiene: {
+				reviewer: "Receiving Controller",
+				test_declaration: "Pre-release review",
+			},
+			custom_flag: true,
+		};
+		const w = mountForm(config, { configKeys });
+		expect(field(w, "Receiving reviewer").element.value).toBe("Receiving Controller");
+		expect(field(w, "Test declaration").element.value).toBe("Pre-release review");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({ custom_flag: true });
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual(config);
+	});
+
+	it("GRN hygiene omits an empty optional test declaration", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		await field(w, "Receiving reviewer").setValue("Receiving Controller");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		const saved = w.emitted("save")[0][0];
+		expect(saved).toEqual({ grn_hygiene: { reviewer: "Receiving Controller" } });
+		expect(saved.grn_hygiene).not.toHaveProperty("test_declaration");
+	});
+
+	it("a bare GRN hygiene namespace in configKeys renders no fields", () => {
+		const w = mountForm({}, { configKeys: ["grn_hygiene"] });
+		expect(w.text()).not.toContain("Receiving reviewer");
+		expect(w.text()).not.toContain("Test declaration");
+		expect(w.text()).toContain("This agent has no additional settings.");
 	});
 });

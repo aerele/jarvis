@@ -564,6 +564,9 @@ def _execute_locked(
 ) -> dict:
 	"""Steps 3-5: lock, preflight, unseal, staleness; then ``_claim_and_run``."""
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
+	# An old generic chat card has no reliable agent identity. It must never reach
+	# a generic tool, including during the code-before-migration drain window.
+
 	if lock_authorizer:
 		lock_authorizer()
 	try:

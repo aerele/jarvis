@@ -431,8 +431,17 @@
 							<!-- mt-2, matching AgentAccessEditor's own heading->content gap
 							     (its "Access" heading is immediately followed by an
 							     mt-2 description) - the Admin tab is the reference. -->
+							<ReorderConfigForm
+								v-if="agent?.agent_slug === 'reorder-replenishment-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
 							<CycleCountConfigForm
-								v-if="agent.name === 'cycle-count-planner-operator'"
+								v-else-if="agent.name === 'cycle-count-planner-operator'"
 								class="mt-2"
 								:config="parsedConfig"
 								:validation-errors="configurationIssues"
@@ -480,8 +489,11 @@
 							</p>
 							<div v-else-if="scheduleConfigurationBlocked" class="mt-2 space-y-3">
 								<p class="text-sm text-ink-gray-6" role="status">
-									Complete the Helpdesk team configuration before enabling an
-									automatic schedule.
+									{{
+										isFefoExpiryComplianceAuditor
+											? "Complete the expiry reviewer and near-expiry window in Configure before enabling an automatic schedule."
+											: "Complete the Helpdesk team configuration before enabling an automatic schedule."
+									}}
 								</p>
 								<Button
 									v-if="sched.enabled"
@@ -766,6 +778,7 @@ import AgentAccessEditor from "@/pages/agents/AgentAccessEditor.vue";
 import AgentModelCard from "@/pages/agents/AgentModelCard.vue";
 import AgentInstallDialog from "@/pages/agents/AgentInstallDialog.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
+import ReorderConfigForm from "@/pages/agents/ReorderConfigForm.vue";
 import CycleCountConfigForm from "@/pages/agents/CycleCountConfigForm.vue";
 import TicketTriageConfigForm from "@/pages/agents/TicketTriageConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
@@ -1152,21 +1165,28 @@ async function doInstall(pick) {
 
 const running = ref(false);
 const configurationDirty = ref(false);
-const SLA_BREACH_AGEING_AUDITOR = "sla-breach-ageing-auditor";
+const FEFO_EXPIRY_COMPLIANCE_AUDITOR = "fefo-expiry-compliance-auditor";
 const isOperatorReview = computed(
 	() => agent.value?.nature === "Operator" && !!agent.value?.supports_manual_run
 );
+const isFefoExpiryComplianceAuditor = computed(
+	() => agent.value?.agent_slug === FEFO_EXPIRY_COMPLIANCE_AUDITOR
+);
+const SLA_BREACH_AGEING_AUDITOR = "sla-breach-ageing-auditor";
 const isSlaBreachAgeingAuditor = computed(
 	() => agent.value?.agent_slug === SLA_BREACH_AGEING_AUDITOR
 );
-// Most agents can run with ordinary optional settings. The three review
-// operators and the SLA queue auditor each have a required launch contract.
+// Review operators, FEFO and SLA have required launch configuration.
 const requiresRunConfiguration = computed(
-	() => isOperatorReview.value || isSlaBreachAgeingAuditor.value
+	() =>
+		isOperatorReview.value ||
+		isFefoExpiryComplianceAuditor.value ||
+		isSlaBreachAgeingAuditor.value
 );
 const configurationIssues = computed(
 	() => (requiresRunConfiguration.value && installation.value?.configuration_issues) || {}
 );
+
 const configurationBlocked = computed(
 	() =>
 		requiresRunConfiguration.value &&
@@ -1175,15 +1195,17 @@ const configurationBlocked = computed(
 			!installation.value?.configuration_issues ||
 			Object.keys(configurationIssues.value).length > 0)
 );
-// The SLA auditor is the only scheduled agent with a mandatory launch
-// boundary. Do not offer a schedule that will fail on its first unattended
-// tick; a legacy active schedule still gets a dedicated turn-off control.
+// Keep an invalid legacy schedule disableable while required setup is incomplete.
 const scheduleConfigurationBlocked = computed(
-	() => isSlaBreachAgeingAuditor.value && configurationBlocked.value
+	() =>
+		(isFefoExpiryComplianceAuditor.value || isSlaBreachAgeingAuditor.value) &&
+		configurationBlocked.value
 );
 const configurationHint = computed(() =>
 	configurationDirty.value
 		? "Save your configuration changes before running."
+		: isFefoExpiryComplianceAuditor.value
+		? "Enter and save the expiry reviewer and near-expiry window in Configure before running."
 		: isSlaBreachAgeingAuditor.value
 		? "Select and save one readable Helpdesk team in Configure before running."
 		: "Complete and save the required review settings in Configure before running."
@@ -1245,7 +1267,9 @@ const runTooltip = computed(() => {
 		return canReview.value
 			? "Still in shadow preview - promote it to live under Configure first"
 			: "Not yet enabled for live runs - ask your administrator";
-	return agent.value.agent_slug === "bank-recon-operator"
+	return agent.value.agent_slug === "reorder-replenishment-operator"
+		? "Prepare reorder suggestions for buyer review"
+		: agent.value.agent_slug === "bank-recon-operator"
 		? "Review bank lines, proposals only"
 		: agent.value.agent_slug === "ar-collections-operator"
 		? "Review receivables: unsent drafts only"

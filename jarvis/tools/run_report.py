@@ -25,11 +25,25 @@ def run_report(report_name: str, filters: dict | str | None = None) -> dict:
 	"""
 	if not report_name:
 		raise InvalidArgumentError("report_name is required")
+	filters = _normalize_filters(filters)
+	# Apply the FEFO scope gate before report lookup or execution. A forged
+	# request must not reveal another source or reach the report engine.
+	from jarvis.chat.agent_scope import assert_active_fefo_report_scope
+
+	assert_active_fefo_report_scope(report_name, filters)
+	# A snapshot-config delegate gets configuration only from its immutable Run.
+	# Saved report definitions are mutable data-access policy, so this execution-
+	# boundary guard refuses them even for an already-started run that still carries
+	# an old report declaration. New bundle contracts do not declare this tool.
+	from jarvis.tools import _delegate_capability
+
+	refusal = _delegate_capability.snapshot_config_report_refusal(report_name)
+	if refusal:
+		raise PermissionDeniedError(refusal)
 
 	if not frappe.db.exists("Report", report_name):
 		raise InvalidArgumentError(f"unknown Report: {report_name}")
-
-	filters, scope = resolve_scope(report_name, _normalize_filters(filters))
+	filters, scope = resolve_scope(report_name, filters)
 
 	# A raw get_value on the named report reads the correct flag even for a
 	# Custom Report (get_report_doc carries the custom doc's own prepared_report).
