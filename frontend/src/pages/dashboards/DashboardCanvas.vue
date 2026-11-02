@@ -215,8 +215,9 @@ watch(
 );
 
 // ── data bridge ──────────────────────────────────────────────────────────────
-// run_report results resolve inside the iframe as {columns, rows}; query/
-// get_list results resolve as the plain rows array (documented in RUNTIME_JS).
+// run_report results cross as {columns, rows}; the iframe runtime turns them
+// into the rows array carrying .rows/.columns. query/get_list results are the
+// plain rows array (documented in RUNTIME_JS).
 function dataPayload(data) {
 	if (data && typeof data === "object" && !Array.isArray(data)) {
 		if (data.columns) return { columns: data.columns, rows: data.rows || [] };
