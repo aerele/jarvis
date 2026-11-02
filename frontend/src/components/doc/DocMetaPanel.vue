@@ -238,6 +238,10 @@ import { uploadEach } from "@/lib/uploadEach";
 const props = defineProps({
 	docmeta: { type: Object, required: true }, // useDocmeta() object
 	canWrite: { type: Boolean, default: false },
+	// A page that manages sharing / assignment itself (a review-scoped Chat question
+	// tags reviewers through its own endpoints) switches the generic blocks off.
+	allowShares: { type: Boolean, default: true },
+	allowAssignees: { type: Boolean, default: true },
 });
 
 const SHARE_DOCTYPES = ["Jarvis Macro", "Jarvis Approval Request", "Jarvis Agent Installation"];
@@ -249,14 +253,18 @@ const attachments = computed(() => (meta.value && meta.value.attachments) || [])
 const shares = computed(() => (meta.value && meta.value.shares) || []);
 
 // §14 DA-09: skills keep the child-table share model; no assignees block
-const showAssignees = computed(() => props.docmeta.doctype !== "Jarvis Custom Skill");
-const showShares = computed(() => SHARE_DOCTYPES.includes(props.docmeta.doctype));
+const showAssignees = computed(
+	() => props.allowAssignees && props.docmeta.doctype !== "Jarvis Custom Skill"
+);
+const showShares = computed(
+	() => props.allowShares && SHARE_DOCTYPES.includes(props.docmeta.doctype)
+);
 
 // ── people pickers (one fetch, lazily once the panel is writable) ─────────────
 const users = ref([]);
 let usersLoaded = false;
 watch(
-	() => props.canWrite,
+	() => props.canWrite && (showAssignees.value || showShares.value),
 	async (v) => {
 		if (!v || usersLoaded) return;
 		usersLoaded = true;
