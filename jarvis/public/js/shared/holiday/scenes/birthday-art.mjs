@@ -5,6 +5,7 @@
 import { r2, rng } from "../stage.mjs";
 import { CLEAR } from "../scene-geometry.mjs";
 import { styleSVG } from "./scene-art.mjs";
+import { clearOfHero, squeezeX } from "./scene-place.mjs";
 
 export const SKY_STOPS = [
   [0, "#fbcfe8", 0.45],
@@ -58,13 +59,14 @@ function curlLength(c, h) {
 
 /**
  * The streamers: each hangs from the top edge and, however long it is listed, stops above the
- * hero (`airBottom`, never shorter than STREAMER.min). `ends` is the lowest y reached.
+ * hero (`airBottom`, never shorter than STREAMER.min). `ends` is the lowest y reached. `at(x)`
+ * is where a streamer listed at x hangs on this stage (the phone squeezes them in).
  */
-export function streamerPlan(airBottom) {
+export function streamerPlan(airBottom, at = (x) => x) {
   const rand = rng(83);
   const cap = Math.max(STREAMER.min, airBottom);
   return STREAMER.xs.map((x0, i) => {
-    const x = r2(x0 + (rand() - 0.5) * 16);
+    const x = r2(at(x0) + (rand() - 0.5) * 16);
     const len = r2(Math.min(46 + rand() * 40, cap));
     const seg = len / STREAMER.curls;
     let d = `M${x} 0`;
@@ -131,8 +133,43 @@ const balloonSVG = (
     <ellipse cx="-5.6" cy="-7" rx="4.2" ry="6.4" fill="${hi}" opacity=".55" transform="rotate(-22 -5.6 -7)"/>
   </g></g></g>`;
 
-export const balloonsSVG = (p) =>
-  BALLOONS.map((b) => balloonSVG(p, b)).join("");
+/** The balloons drawn: `xs` is each one's x (null: left out), from balloonXs. */
+export const balloonsSVG = (p, xs = BALLOONS.map((b) => b[0])) =>
+  BALLOONS.flatMap((b, i) =>
+    xs[i] === null ? [] : [balloonSVG(p, [xs[i], ...b.slice(1)])]
+  ).join("");
+
+/**
+ * Where each balloon hangs across the stage, or null for one left out. On a phone they are
+ * squeezed in, pushed to the strip beside the hero and left out when there is no room there or
+ * another balloon already hangs in it (outer ones first, so the outer pair stays); the
+ * desktop's are at their listed x.
+ */
+export function balloonXs(geo) {
+  const listed = BALLOONS.map((b) => b[0]);
+  if (!(geo.squeeze < 1)) return listed;
+  const tops = balloonTops(geo);
+  const placed = [];
+  const xs = listed.map(() => null);
+  const outerFirst = listed
+    .map((x, i) => i)
+    .sort((i, j) => Math.abs(listed[j] - 400) - Math.abs(listed[i] - 400));
+  outerFirst.forEach((i) => {
+    const hw = BALLOON.rx;
+    const hh = (BALLOON.ry + BALLOON.string) / 2;
+    const box = {
+      x: squeezeX(listed[i], geo, { hw }),
+      y: tops[i] + hh - BALLOON.ry,
+      hw,
+      hh,
+    };
+    const x = clearOfHero(box, geo.keep, geo.from, geo.to);
+    if (x === null || placed.some((q) => Math.abs(q - x) < 2 * hw + 2)) return;
+    placed.push(x);
+    xs[i] = x;
+  });
+  return xs;
+}
 
 // ---- confetti --------------------------------------------------------------------------
 
