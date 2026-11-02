@@ -66,23 +66,45 @@ def is_immutable_deposit_dashboard(doc) -> bool:
 	return bool(frappe.db.exists(RUN, {"agent": DEPOSIT_AGENT, "dashboard": name}))
 
 
-def release_deposit_dashboard_for_retention(run_name: str, dashboard_name: str) -> None:
-	"""Clear a Deposit report link for a trusted retention or uninstall job.
+def _delete_deposit_dashboard_for_run_removal(
+	run_name: str, *, expected_installation: str | None
+) -> str | None:
+	"""Remove one linked Deposit report inside a trusted lifecycle transaction.
 
-	This is intentionally not a whitelisted endpoint and never grants a caller a
-	permission bypass.  A server job must clear the exact locked link first; only
-	then can normal dashboard deletion proceed.
+	A normal caller cannot clear the Run link.  This helper locks the exact Run,
+	verifies its current installation, clears only that link, then deletes the
+	Dashboard before the Run itself is removed.  It is intentionally not
+	whitelisted and does not accept an ``ignore_permissions`` escape hatch.
 	"""
 	run = frappe.db.get_value(
 		RUN,
 		run_name,
-		["name", "agent", "dashboard"],
+		["name", "agent", "installation", "dashboard"],
 		as_dict=True,
 		for_update=True,
 	)
-	if not run or run.agent != DEPOSIT_AGENT or run.dashboard != dashboard_name:
-		frappe.throw("Deposit report link cannot be released.", frappe.PermissionError)
+	if not run:
+		frappe.throw("Deposit report lifecycle cannot be verified.", frappe.PermissionError)
+	if run.agent != DEPOSIT_AGENT:
+		return None
+	if run.installation != expected_installation:
+		frappe.throw("Deposit report lifecycle cannot be verified.", frappe.PermissionError)
+	if not run.dashboard:
+		return None
+	dashboard_name = run.dashboard
 	frappe.db.set_value(RUN, run.name, "dashboard", None, update_modified=False)
+	frappe.delete_doc(DASHBOARD, dashboard_name, ignore_permissions=True, force=True)
+	return dashboard_name
+
+
+def delete_deposit_dashboard_for_uninstall(run_name: str, installation: str) -> str | None:
+	"""Server-only cleanup of a Deposit report during its installation uninstall."""
+	return _delete_deposit_dashboard_for_run_removal(run_name, expected_installation=installation)
+
+
+def delete_deposit_dashboard_for_retention(run_name: str) -> str | None:
+	"""Server-only cleanup of a detached Deposit report during retention purge."""
+	return _delete_deposit_dashboard_for_run_removal(run_name, expected_installation=None)
 
 
 def can_read_dashboard(doc, user: str | None = None) -> bool:

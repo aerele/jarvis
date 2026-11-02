@@ -2224,13 +2224,32 @@ def purge_kept_budget_rows(owner: str | None = None) -> int:
 	)
 	if not names:
 		return 0
+	run_rows = frappe.get_all(
+		RUN,
+		filters={"name": ["in", names]},
+		fields=["name", "agent"],
+		ignore_permissions=True,
+	)
+	from jarvis.chat.dashboard_permissions import (
+		DEPOSIT_AGENT,
+		delete_deposit_dashboard_for_retention,
+	)
+	from jarvis.jarvis.doctype.jarvis_agent_run.jarvis_agent_run import trusted_deposit_run_removal
+
+	deposit_names = [row.name for row in run_rows if row.agent == DEPOSIT_AGENT]
 	for file in frappe.get_all(
 		"File", filters={"attached_to_doctype": RUN, "attached_to_name": ["in", names]}, pluck="name"
 	):
 		frappe.delete_doc("File", file, ignore_permissions=True, force=True)
 	for doctype, dt_field, name_field in _KEPT_ROW_TRACES:
 		frappe.db.delete(doctype, {dt_field: RUN, name_field: ["in", names]})
-	frappe.db.delete(RUN, {"name": ["in", names]})
+	for name in deposit_names:
+		delete_deposit_dashboard_for_retention(name)
+		with trusted_deposit_run_removal(None):
+			frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
+	generic_names = list(set(names) - set(deposit_names))
+	if generic_names:
+		frappe.db.delete(RUN, {"name": ["in", generic_names]})
 	return len(names)
 
 

@@ -45,6 +45,7 @@ _SEVERITIES = {"blocker", "warning", "note"}
 # doctype must be readable by the run-as user or the row is dropped (a
 # mistranscribed / out-of-scope ref).
 _PERM_EXEMPT_REFS = frozenset({"Company", "Account"})
+_MISSING = object()
 
 
 def _as_list(value) -> list:
@@ -151,7 +152,7 @@ def record_agent_run(
 	report_sha256: str | None = None,
 	truncated: bool = False,
 	canvas_ref: str | None = None,
-	integrity_digest: str | None = None,
+	integrity_digest: str | None = _MISSING,
 	dashboard: str | None = None,
 	rows_consumed=None,
 ) -> dict:
@@ -178,16 +179,15 @@ def record_agent_run(
 	    payroll Deposit-Status agent. That agent accepts the strict v3 compact
 	    handoff only: reference-only findings, closed coverage states, the frozen
 	    scope, and an exact sealed-source row count. The server computes the
-	    SHA-256 integrity digest after safe projection. A legacy lower-hex digest
-	    is accepted only for in-flight compatibility and is discarded.
+	    SHA-256 integrity digest after safe projection. It rejects any delegate
+	    integrity digest.
 	    It rejects delegate dashboard, report-hash, and canvas output. The server
 	    creates the normal fallback dashboard after safe persistence.
 	  truncated: True when the delegate's fetch hit its budget — auto-resolve is
 	    skipped entirely and the run is partial (A16).
 	  canvas_ref: the delegate's saved canvas/dashboard ref (stored for Phase 4).
 	    It is not accepted for statutory payroll Deposit-Status.
-	  integrity_digest: legacy Deposit v2 compatibility only; never trusted or
-	    persisted for Deposit v3.
+	  integrity_digest: supported for generic agents only; Deposit v3 rejects it.
 	  dashboard: the ``Jarvis Dashboard`` name a generic delegate got back from
 	    ``jarvis__save_agent_dashboard`` — linked on the Run. When omitted, a
 	    minimal A2-safe dashboard is built server-side from the persisted findings
@@ -224,6 +224,11 @@ def record_agent_run(
 	)
 	if not run_row:
 		raise InvalidArgumentError("no agent run is bound to this session")
+	# Keep the Deposit v3 grammar exact even on a duplicate terminal call. A
+	# legacy payload must fail closed and be re-run, rather than using the
+	# generic idempotency response as a compatibility bypass.
+	if run_row.agent == "statutory-payroll-deposit-status" and integrity_digest is not _MISSING:
+		raise InvalidArgumentError("Payroll deposit writeback does not accept a delegate integrity digest.")
 	if run_row.status != "running":
 		# Idempotency: the run already finalized (a retried / duplicate writeback).
 		# Return current state without touching anything.
@@ -269,20 +274,23 @@ def record_agent_run(
 		# and source-bearing values fail closed instead of being converted and saved.
 		# The run row is already locked above, so a concurrent writeback waits and
 		# then observes the terminal state through the idempotency branch.
-		deposit = payroll_deposit_snapshot.validate_writeback(
-			run_doc,
-			findings=findings,
-			coverage=coverage,
-			scope=scope,
-			truncated=truncated,
-			rows_consumed=rows_consumed,
-			integrity_digest=integrity_digest,
-			input_snapshot_id=input_snapshot_id,
-			input_snapshot_digest=input_snapshot_digest,
-			dashboard=dashboard,
-			report_sha256=report_sha256,
-			canvas_ref=canvas_ref,
-		)
+		deposit_args = {
+			"findings": findings,
+			"coverage": coverage,
+			"scope": scope,
+			"truncated": truncated,
+			"rows_consumed": rows_consumed,
+			"input_snapshot_id": input_snapshot_id,
+			"input_snapshot_digest": input_snapshot_digest,
+			"dashboard": dashboard,
+			"report_sha256": report_sha256,
+			"canvas_ref": canvas_ref,
+		}
+		# The exact v3 grammar omits this key. A supplied JSON null must not
+		# collapse into an indistinguishable omitted Python default.
+		if integrity_digest is not _MISSING:
+			deposit_args["integrity_digest"] = integrity_digest
+		deposit = payroll_deposit_snapshot.validate_writeback(run_doc, **deposit_args)
 		raw_findings = deposit["findings"]
 		coverage = deposit["coverage"]
 		scope = deposit["scope"]
@@ -298,6 +306,8 @@ def record_agent_run(
 		canvas_ref = None
 		dashboard = None
 	else:
+		if integrity_digest is _MISSING:
+			integrity_digest = None
 		raw_findings = _as_list(findings)
 		coverage = _as_dict(coverage)
 		scope = _as_dict(scope)

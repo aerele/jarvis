@@ -1698,12 +1698,21 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 	# The month's counted runs are KEPT, detached from the installation, so uninstalling
 	# and installing again does not hand the month's run budget back (A14). For the user
 	# the run history is gone all the same: no screen lists a run with no installation.
+	# A Deposit report is immutable while its Run links it. Remove each such
+	# report through the narrow server lifecycle helper before either deleting a
+	# Run or detaching a kept budget row. A generic dashboard is untouched.
+	from jarvis.chat.dashboard_permissions import delete_deposit_dashboard_for_uninstall
+
+	for name in run_names:
+		delete_deposit_dashboard_for_uninstall(name, doc.name)
 	from jarvis.chat.agent_scheduler import keep_budget_rows_of_uninstalled
+	from jarvis.jarvis.doctype.jarvis_agent_run.jarvis_agent_run import trusted_deposit_run_removal
 
 	kept = set(keep_budget_rows_of_uninstalled(doc.name, doc.owner))
 	for name in run_names:
 		if name not in kept:
-			frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
+			with trusted_deposit_run_removal(doc.name):
+				frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	# honors if_owner for an owner; the admin path was authorised above. The append-only
 	# provenance ledger is preserved (immutable audit trail); see the helper.
 	_delete_installation_preserving_provenance(doc, via_admin)

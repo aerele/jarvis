@@ -9,6 +9,9 @@ only — the customer sees their own run history but cannot forge rows.
 as ``completed``).
 """
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -42,10 +45,35 @@ _IMMUTABLE_LAUNCH_FIELDS = (
 	"visibility_receipt_json",
 )
 
+DEPOSIT_AGENT = "statutory-payroll-deposit-status"
+_NO_TRUSTED_DEPOSIT_REMOVAL = object()
+_trusted_deposit_removal_installation = ContextVar(
+	"jarvis_deposit_run_removal_installation", default=_NO_TRUSTED_DEPOSIT_REMOVAL
+)
+
+
+@contextmanager
+def trusted_deposit_run_removal(installation: str | None):
+	"""Allow one server-owned uninstall/retention deletion of a Deposit Run.
+
+	This is a process-local capability, not a document flag supplied by a Desk or
+	REST caller.  The caller must first remove the linked immutable dashboard via
+	the matching server helper.
+	"""
+	token = _trusted_deposit_removal_installation.set(installation)
+	try:
+		yield
+	finally:
+		_trusted_deposit_removal_installation.reset(token)
+
 
 class JarvisAgentRun(NotRenamable, Document):
 	def validate(self):
 		self._guard_immutable_launch_fields()
+		self._guard_immutable_deposit_report_link()
+
+	def on_trash(self):
+		self._guard_deposit_run_removal()
 
 	def _guard_immutable_launch_fields(self):
 		if self.is_new():
@@ -60,6 +88,48 @@ class JarvisAgentRun(NotRenamable, Document):
 					_("{0} is stamped immutably at launch (PP-5) and cannot be changed.").format(field),
 					frappe.PermissionError,
 				)
+
+	def _guard_immutable_deposit_report_link(self):
+		"""Keep a Deposit report link and agent identity immutable on every save.
+
+		The stored identity is checked as well as the incoming one.  Without both,
+		a privileged caller could first relabel a Deposit Run as a generic agent,
+		then clear or repoint its Dashboard link and make the report editable.
+		"""
+		if self.is_new():
+			return
+		before = self.get_doc_before_save()
+		if not before:
+			return
+		stored_agent = before.get("agent")
+		stored_dashboard = before.get("dashboard")
+		is_deposit = stored_agent == DEPOSIT_AGENT or self.get("agent") == DEPOSIT_AGENT
+		if not is_deposit:
+			return
+		if self.get("agent") != stored_agent:
+			frappe.throw(_("A payroll deposit run cannot change its agent identity."), frappe.PermissionError)
+		if self.get("dashboard") != stored_dashboard:
+			frappe.throw(_("A payroll deposit run cannot change its dashboard link."), frappe.PermissionError)
+
+	def _guard_deposit_run_removal(self):
+		"""Reject Desk/REST/administrator deletion of a Deposit Run.
+
+		Only a process-local server capability can remove the Run.  It must match
+		the current installation (or ``None`` for the detached retention purge),
+		and the Dashboard link must already be gone through the server cleanup path.
+		"""
+		if self.get("agent") != DEPOSIT_AGENT:
+			return
+		expected_installation = _trusted_deposit_removal_installation.get()
+		if (
+			expected_installation is _NO_TRUSTED_DEPOSIT_REMOVAL
+			or expected_installation != self.get("installation")
+			or self.get("dashboard")
+		):
+			frappe.throw(
+				_("This payroll deposit run is server-retained and cannot be deleted directly."),
+				frappe.PermissionError,
+			)
 
 
 def on_doctype_update():

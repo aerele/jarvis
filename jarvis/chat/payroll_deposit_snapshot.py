@@ -57,9 +57,9 @@ _DEPOSIT_KEYS = frozenset(
 )
 _SCOPE_CONFIG_KEYS = ("company", "fiscal_year", "from_date", "to_date")
 _MONTH = re.compile(r"^\d{4}-\d{2}$")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _WRITEBACK_TOKENS = frozenset({"pf_esi_deposit_due_date", "s7q_interest_table", "s14b_damages_table"})
 _WRITEBACK_FINDING_KEYS = frozenset({"token", "ref_doctype", "ref_name"})
+_MISSING = object()
 
 
 def _fail(message: str = "Payroll deposit inputs cannot be captured safely.") -> None:
@@ -869,7 +869,7 @@ def validate_writeback(
 	rows_consumed,
 	input_snapshot_id,
 	input_snapshot_digest,
-	integrity_digest=None,
+	integrity_digest: str | None = _MISSING,
 	dashboard=None,
 	report_sha256=None,
 	canvas_ref=None,
@@ -878,9 +878,9 @@ def validate_writeback(
 
 	There is no delegate dashboard in this contract.  A generic server fallback
 	dashboard is rendered only after this function has accepted the compact,
-	row-free projection and the writeback has persisted it.  ``integrity_digest``
-	is accepted only for an in-flight v2 caller.  It is never trusted, returned,
-	or persisted; v3 receives no such field and the server creates the digest.
+	row-free projection and the writeback has persisted it.  V3 accepts exactly
+	the seven compact handoff fields.  A delegate integrity digest is rejected;
+	the server creates the only persisted digest.
 	"""
 	if run.get("agent") != AGENT or run.get("status") != "running":
 		_fail("Payroll deposit writeback requires its active delegate run.")
@@ -908,13 +908,8 @@ def validate_writeback(
 	expected_rows = sum(row["data"]["rows"] for row in metadata["source_receipts"])
 	if rows_consumed != expected_rows:
 		_fail("Payroll deposit writeback row count does not match the sealed input.")
-	# Keep a narrow compatibility window for an already-running v2 bundle.  The
-	# caller-owned value can encode source bytes, so it must never influence a
-	# durable record, dashboard, response, or digest calculation.
-	if integrity_digest is not None and (
-		not isinstance(integrity_digest, str) or not _SHA256.fullmatch(integrity_digest)
-	):
-		_fail("Payroll deposit writeback integrity digest is malformed.")
+	if integrity_digest is not _MISSING:
+		_fail("Payroll deposit writeback does not accept a delegate integrity digest.")
 	safe_findings = _safe_findings(findings, launch)
 	safe_coverage = _safe_coverage(coverage)
 	safe_scope = deepcopy(launch_scope)

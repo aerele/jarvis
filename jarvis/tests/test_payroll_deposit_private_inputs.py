@@ -362,14 +362,19 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 		self.assertNotIn("SECRET-PRIVATE-ROW", json.dumps(projected))
 		self.assertRegex(projected["integrity_digest"], r"^[0-9a-f]{64}$")
 
-	def test_server_digest_is_stable_and_ignores_legacy_delegate_digest(self):
+	def test_server_digest_is_stable_and_rejects_delegate_digest(self):
 		captured, _ = _captured_snapshot()
 		run = _run(source_snapshot=snapshot._metadata(captured))
 		v3 = _v2_output(captured)
 		first = snapshot.validate_writeback(run, **v3)
 		second = snapshot.validate_writeback(run, **deepcopy(v3))
-		sentinel = "73" * 32
-		legacy = snapshot.validate_writeback(run, **_v2_output(captured, integrity_digest=sentinel))
+		hex_sentinel = "73" * 32
+		for supplied_digest in (None, hex_sentinel):
+			with self.subTest(supplied_digest=supplied_digest), self.assertRaises(InvalidArgumentError):
+				snapshot.validate_writeback(
+					run,
+					**_v2_output(captured, integrity_digest=supplied_digest),
+				)
 		changed = snapshot.validate_writeback(
 			run,
 			**_v2_output(captured, findings=[]),
@@ -401,10 +406,9 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 			},
 		)
 		self.assertEqual(first["integrity_digest"], second["integrity_digest"])
-		self.assertEqual(first["integrity_digest"], legacy["integrity_digest"])
 		self.assertNotEqual(first["integrity_digest"], changed["integrity_digest"])
 		self.assertNotEqual(first["integrity_digest"], coverage_changed["integrity_digest"])
-		self.assertNotIn(sentinel, json.dumps(legacy))
+		self.assertNotIn(hex_sentinel, json.dumps(first))
 
 	def test_v3_writeback_refuses_scope_snapshot_and_row_count_changes(self):
 		captured, _ = _captured_snapshot()
@@ -413,7 +417,7 @@ class TestPayrollDepositPrivateSnapshot(TestCase):
 			{"scope": {**SCOPE, "company": "Other Company"}},
 			{"input_snapshot_id": "other"},
 			{"rows_consumed": 0},
-			{"integrity_digest": "A" * 64},
+			{"integrity_digest": "a" * 64},
 			{
 				"coverage": {
 					**_v2_output(captured)["coverage"],
@@ -664,6 +668,138 @@ class TestPayrollDepositPrivateTransport(TestCase):
 
 
 class TestPayrollDepositWritebackClaim(TestCase):
+	def test_record_agent_run_claims_one_terminal_dashboard_across_connections(self):
+		"""The real Deposit tool path admits one terminal writer across connections.
+
+		The first worker pauses only after ``record_agent_run`` has acquired its
+		``FOR UPDATE`` claim. Both workers then use the real v3 validator and the
+		real fallback-dashboard persister. The loser must return the idempotent
+		terminal response without creating a second report.
+		"""
+		from jarvis.chat import agent_runs
+		from jarvis.tools import _agent_run_ctx
+		from jarvis.tools import record_agent_run as tool
+
+		captured, _ = _captured_snapshot()
+		launch = _launch()
+		run_as = _ensure_run_as_user("payroll-deposit-race@example.test")
+		installation_name = None
+		run_name = None
+		created: list[str] = []
+		try:
+			installation = frappe.get_doc(
+				{
+					"doctype": "Jarvis Agent Installation",
+					"agent": snapshot.AGENT,
+					"run_as_user": run_as,
+					"reviewer": run_as,
+					"activation_state": "live",
+				}
+			)
+			installation.owner = "Administrator"
+			# The fixture needs a real persisted installation, but it deliberately
+			# does not grant the fake run-as user every payroll DocType. The tool
+			# path below carries no finding reference, so this avoids testing the
+			# unrelated installation-permission preflight here.
+			installation.flags.ignore_links = True
+			installation.db_insert()
+			installation_name = installation.name
+			session_key = f"agent:{snapshot.AGENT}:deposit-race-{frappe.generate_hash(length=12)}"
+			run = frappe.get_doc(
+				{
+					"doctype": "Jarvis Agent Run",
+					"agent": snapshot.AGENT,
+					"installation": installation_name,
+					"trigger": "manual",
+					"status": "running",
+					"started_at": frappe.utils.now(),
+					"session_key": session_key,
+					"preparation_mode": "shadow",
+					"assessment_config_json": json.dumps(launch),
+					"scope_json": json.dumps(SCOPE),
+					"input_snapshot_json": json.dumps(_receipt(launch, snapshot._metadata(captured))),
+				}
+			)
+			run.owner = "Administrator"
+			run.insert(ignore_permissions=True)
+			run_name = run.name
+			frappe.db.commit()
+
+			site, sites_path = frappe.local.site, frappe.local.sites_path
+			locked, release = threading.Event(), threading.Event()
+			thread_state = threading.local()
+			results, errors = [], []
+			real_validate = snapshot.validate_writeback
+			real_persist = agent_runs.persist_agent_dashboard
+
+			def held_validate(*args, **kwargs):
+				if getattr(thread_state, "is_first", False):
+					locked.set()
+					if not release.wait(10):
+						raise TimeoutError("test did not release the claimed Deposit run")
+				return real_validate(*args, **kwargs)
+
+			def observed_persist(*args, **kwargs):
+				name = real_persist(*args, **kwargs)
+				created.append(name)
+				return name
+
+			def writeback(first: bool):
+				try:
+					frappe.init(site, sites_path=sites_path)
+					frappe.connect()
+					frappe.set_user(run_as)
+					thread_state.is_first = first
+					_agent_run_ctx.set_session_key(session_key)
+					results.append(tool.record_agent_run(**_v2_output(captured, findings=[])))
+					frappe.db.commit()
+				except Exception as exc:
+					errors.append(repr(exc))
+				finally:
+					_agent_run_ctx.clear_session_key()
+					try:
+						frappe.destroy()
+					except Exception:
+						pass
+
+			with (
+				patch.object(snapshot, "validate_writeback", side_effect=held_validate),
+				patch.object(agent_runs, "persist_agent_dashboard", side_effect=observed_persist),
+			):
+				first = threading.Thread(target=writeback, args=(True,))
+				second = threading.Thread(target=writeback, args=(False,))
+				first.start()
+				self.assertTrue(locked.wait(10), errors)
+				second.start()
+				time.sleep(0.1)
+				release.set()
+				first.join(15)
+				second.join(15)
+
+			self.assertFalse(first.is_alive())
+			self.assertFalse(second.is_alive())
+			self.assertEqual(errors, [])
+			self.assertEqual(len([r for r in results if not r.get("idempotent")]), 1)
+			self.assertEqual(len([r for r in results if r.get("idempotent")]), 1)
+			final = frappe.db.get_value("Jarvis Agent Run", run_name, ["status", "dashboard"], as_dict=True)
+			self.assertEqual(final.status, "completed")
+			self.assertEqual(len(created), 1)
+			self.assertEqual(final.dashboard, created[0])
+			self.assertEqual(frappe.db.count("Jarvis Dashboard", {"name": final.dashboard}), 1)
+		finally:
+			# The test owns these fake rows. Raw cleanup is deliberate: it models the
+			# trusted database retention path and avoids using an external permission
+			# bypass on the immutable report controller.
+			if run_name:
+				frappe.db.delete("Jarvis Agent Run Step", {"run": run_name})
+				frappe.db.delete("Jarvis Agent Activity", {"run": run_name})
+				frappe.db.delete("Jarvis Agent Run", {"name": run_name})
+			for name in created:
+				frappe.db.delete("Jarvis Dashboard", {"name": name})
+			if installation_name:
+				frappe.db.delete("Jarvis Agent Installation", {"name": installation_name})
+			frappe.db.commit()
+
 	def test_real_db_row_lock_allows_one_deposit_finalizer_and_dashboard(self):
 		"""Two MariaDB connections serialize one Deposit terminal writeback.
 
@@ -768,6 +904,8 @@ class TestPayrollDepositWritebackClaim(TestCase):
 		try:
 			with patch.object(frappe.db, "get_value", return_value=row) as get_value:
 				result = tool.record_agent_run(findings=[{"note": "PRIVATE-SOURCE-SENTINEL"}])
+				with self.assertRaises(InvalidArgumentError):
+					tool.record_agent_run(integrity_digest="73" * 32)
 		finally:
 			_agent_run_ctx.clear_session_key()
 		self.assertTrue(result["idempotent"])
@@ -864,7 +1002,6 @@ class TestPayrollDepositWritebackClaim(TestCase):
 			raise AssertionError(f"unexpected read: {doctype}")
 
 		inst = frappe._dict(agent=snapshot.AGENT, activation_state="shadow")
-		legacy_digest = "73" * 32
 		_agent_run_ctx.set_session_key("private-writeback-session")
 		try:
 			with (
@@ -882,19 +1019,20 @@ class TestPayrollDepositWritebackClaim(TestCase):
 				patch("jarvis.chat.agent_runs.record_delegate_run", return_value=final) as persist,
 				patch("jarvis.chat.agent_run_steps.record_step"),
 			):
-				result = tool.record_agent_run(**_v2_output(captured, integrity_digest=legacy_digest))
+				result = tool.record_agent_run(**_v2_output(captured))
+				with self.assertRaises(InvalidArgumentError):
+					tool.record_agent_run(**_v2_output(captured, integrity_digest=None))
 		finally:
 			_agent_run_ctx.clear_session_key()
 
 		self.assertEqual(result["dashboard"], "SERVER-FALLBACK-DASHBOARD")
 		self.assertIsNone(persist.call_args.kwargs["dashboard"])
 		self.assertIsNone(persist.call_args.kwargs["canvas_ref"])
-		self.assertNotEqual(persist.call_args.kwargs["integrity_digest"], legacy_digest)
 		self.assertRegex(persist.call_args.kwargs["integrity_digest"], r"^[0-9a-f]{64}$")
 		persisted = persist.call_args.args[2][0]
 		self.assertEqual(persisted["severity"], "warning")
 		self.assertNotIn("SECRET-PRIVATE-ROW", json.dumps(persist.call_args))
-		self.assertNotIn(legacy_digest, json.dumps(persist.call_args))
+		self.assertEqual(persist.call_count, 1)
 
 
 class TestPayrollDepositPrivateAuditRedaction(TestCase):
