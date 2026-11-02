@@ -762,7 +762,7 @@ def _assert_safe_state(state: dict) -> None:
 
 def _lock_run(run_name: str):
 	try:
-		frappe.db.sql(f"select name from `tab{RUN}` where name=%s for update", (run_name,))
+		frappe.db.sql("select name from `tabJarvis Agent Run` where name=%s for update", (run_name,))
 		return frappe.get_doc(RUN, run_name)
 	except Exception:
 		_refuse(_STATE_INVALID)
