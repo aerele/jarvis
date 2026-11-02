@@ -157,7 +157,7 @@
       "read_only": 1,
       "hidden": 1,
       "no_copy": 1,
-      "description": "JSON {date, times[iso utc]}: when today's holiday scene played for this person (Christmas cadence). Permlevel 1: server-owned app state, written only by jarvis.holiday_touch.cadence.record_shown with update_modified=False; deliberately absent from update_my_settings, which saves with ignore_permissions."
+      "description": "JSON {date, times[iso utc]}: when today's holiday scene played for this person (Christmas cadence). Permlevel 1: server-owned app state, written only by jarvis.holiday_touch.api.record_shown with update_modified=False; deliberately absent from update_my_settings, which saves with ignore_permissions."
     },
     {
       "fieldname": "pulse_last_period_key",

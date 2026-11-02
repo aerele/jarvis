@@ -462,12 +462,12 @@ def _claim_once(m, now, current):
 
 def _run_started(run) -> bool:
 	"""Whether a scheduled run got as far as sending its first step: its cursor
-	moved, it is parked for capacity (the resume sends it later), or its first
+	moved, it is parked for capacity (the resume sends it later) or for a report, or its first
 	step's turn exists (a worker killed between that turn's commit and the cursor's
 	leaves the cursor at 0)."""
 	from jarvis.chat import macros
 
-	if cint(run.current_step) >= 1 or run.status == "waiting_capacity":
+	if cint(run.current_step) >= 1 or run.status in ("waiting_capacity", "waiting_report"):
 		return True
 	return bool(run.conversation) and macros._step_is_out(run, 0)
 

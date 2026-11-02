@@ -75,4 +75,9 @@ class TestCallToolPinsSite(FrappeTestCase):
 		):
 			result = self._call()
 		self.assertEqual(result, baseline)
-		log_error.assert_called_once_with(title="site_pin: pin failed")
+		log_error.assert_called_once()
+		self.assertEqual(log_error.call_args.kwargs["title"], "site_pin: pin failed")
+		# A plain traceback: passing a message keeps Frappe from dumping frame locals.
+		message = log_error.call_args.kwargs["message"]
+		self.assertIn("Exception: db down", message)
+		self.assertNotIn("Local variables", message)

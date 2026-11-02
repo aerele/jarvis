@@ -68,6 +68,23 @@ describe("ChatView holiday call sites", () => {
 		expect(template).toMatch(/<JarvisMark :size="30" :radius="8" \/>/);
 	});
 
+	it("the stage layout is its own branch ahead of the normal one, with the same cards", () => {
+		const stage = template.indexOf("<HolidayStage");
+		const normal = template.indexOf('<div v-else-if="showWelcome" class="jv-welcome-scroll">');
+		expect(stage).toBeGreaterThan(-1);
+		expect(stage).toBeLessThan(normal);
+		const open = /<HolidayStage\b([^>]*)>/.exec(template.slice(stage));
+		expect(open[1]).toMatch(/v-else-if="showWelcome && stageOn"/);
+		expect(open[1]).toMatch(/:hold-active="holdActive"/);
+		expect(open[1]).toMatch(/:composer-empty="!input"/);
+		// Both layouts render the starters through the one component, so they cannot drift.
+		expect(template.match(/<WelcomeStarters\b/g)).toHaveLength(2);
+		expect(template).not.toContain("<CapabilityCatalog");
+		expect(src).toContain("stageEligible");
+		expect(src).toContain("holdAtMount: holdAtWelcomeMount.value");
+		expect(src).toContain("phone: store.mobile");
+	});
+
 	it("takes the first name from a trimmed full name", () => {
 		expect(src).toContain("fullName.trim().split(/\\s+/)[0]");
 	});
