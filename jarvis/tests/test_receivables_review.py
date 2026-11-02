@@ -496,6 +496,7 @@ class TestReceivablesReview(FrappeTestCase):
 		forged["findings"][0].update(review_state="settled", reminder_draft=None)
 		run = frappe._dict(
 			name="RUN-AR-FORGED",
+			scope_json=json.dumps(source["scope"]),
 			agent=review.AGENT,
 			installation="INST-AR-FORGED",
 			status="running",
