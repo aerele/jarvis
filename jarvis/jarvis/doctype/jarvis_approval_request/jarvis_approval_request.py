@@ -45,6 +45,9 @@ class JarvisApprovalRequest(NotRenamable, Document):
 	"""
 
 	def validate(self):
+		from jarvis.chat.collaboration_asks import guard_record
+
+		guard_record(self)
 		self._guard_server_fields()
 		self._guard_decided_fields()
 		if self.status != "Pending" and not self.decision:

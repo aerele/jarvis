@@ -8,6 +8,8 @@ import json
 
 import frappe
 
+from jarvis.tools.registry import list_tools
+
 READ_TOOLS = frozenset(
 	"""
 describe_customizations download_pdf download_vcard export_document export_excel
@@ -39,6 +41,14 @@ recall record_agent_run record_app_wiki remember save_agent_dashboard
 save_dashboard schedule_run update_wiki
 """.split()
 )
+
+
+# These known tools arrive in separate release backports. All other explicit
+# names stay in the sets, so a stale policy still fails registry coverage.
+_optional_tools = {"preview_landed_cost_voucher", "list_connector_actions", "call_connector"}
+_unavailable_optional = _optional_tools - set(list_tools())
+READ_TOOLS = (READ_TOOLS | {"preview_landed_cost_voucher"}) - _unavailable_optional
+WRITE_TOOLS = WRITE_TOOLS - _unavailable_optional
 
 
 def tool_kind(name: str) -> str:
