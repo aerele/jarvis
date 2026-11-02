@@ -88,7 +88,13 @@ class TestPayrollDepositPrivateRecovery(JarvisSettingsSnapshot, FrappeTestCase):
 		# the Settings singleton after a test that commits its callback outcome.
 		set_settings_password(settings, "agent_token", TOKEN)
 		self.user = _ensure_user("payroll-deposit-recovery@example.test")
+		self._dashboard_names = set(frappe.get_all("Jarvis Dashboard", pluck="name"))
 		self.record = self._new_record()
+
+	def _assert_no_new_dashboards(self):
+		# Dashboard has no agent_run column. Compare real rows to catch an
+		# orphan artifact even if a failed run never received its dashboard link.
+		self.assertEqual(set(frappe.get_all("Jarvis Dashboard", pluck="name")), self._dashboard_names)
 
 	def tearDown(self):
 		# These rows are fake test data. Direct deletes are the trusted retention
@@ -564,7 +570,7 @@ class TestPayrollDepositPrivateRecovery(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertEqual(final.status, "failed")
 		self.assertEqual(final.error, payroll_deposit_recovery.PRIVATE_SOURCE_UNAVAILABLE)
 		self.assertEqual(frappe.db.count("Jarvis Agent Activity", {"run": self.record.run}), 1)
-		self.assertEqual(frappe.db.count("Jarvis Dashboard", {"agent_run": self.record.run}), 0)
+		self._assert_no_new_dashboards()
 
 	def test_callback_waits_for_source_capture_then_terminalizes(self):
 		from jarvis.chat import payroll_deposit_snapshot
@@ -769,7 +775,7 @@ class TestPayrollDepositPrivateRecovery(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertEqual(final.error, payroll_deposit_recovery.PRIVATE_SOURCE_UNAVAILABLE)
 		self.assertIsNone(final.dashboard)
 		self.assertFalse(frappe.db.exists("Jarvis Chat Session", {"session_key": self.record.session_key}))
-		self.assertEqual(frappe.db.count("Jarvis Dashboard", {"agent_run": self.record.run}), 0)
+		self._assert_no_new_dashboards()
 		self.assertEqual(frappe.db.count("Jarvis Agent Finding", {"run": self.record.run}), 0)
 		self.assertEqual(frappe.db.count("Jarvis Agent Finding", {"last_seen_run": self.record.run}), 0)
 		self.assertEqual(frappe.db.count("Jarvis Agent Run Step", {"run": self.record.run}), 0)
@@ -818,7 +824,7 @@ class TestPayrollDepositPrivateRecovery(JarvisSettingsSnapshot, FrappeTestCase):
 		final = self._status(self.record)
 		self.assertEqual(final.status, "running")
 		self.assertIsNone(final.dashboard)
-		self.assertEqual(frappe.db.count("Jarvis Dashboard", {"agent_run": self.record.run}), 0)
+		self._assert_no_new_dashboards()
 		self.assertEqual(frappe.db.count("Jarvis Agent Finding", {"run": self.record.run}), 0)
 		self.assertEqual(frappe.db.count("Jarvis Agent Run Step", {"run": self.record.run}), 0)
 

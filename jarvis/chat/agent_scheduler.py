@@ -790,7 +790,7 @@ def fail_run(run_name: str, error: str, *, detail: str | None = None) -> bool:
 		cur = frappe.db.get_value(
 			RUN,
 			run_name,
-			["status", "agent", "installation", "session_key", "owner"],
+			["name", "status", "agent", "installation", "session_key", "owner"],
 			as_dict=True,
 			for_update=True,
 		)
