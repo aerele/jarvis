@@ -307,7 +307,10 @@ def call_tool(tool: str, args: dict | str | None = None, result_mode: str | None
 	result = _call_tool(tool, args, result_mode=result_mode)
 	from jarvis import api_errors
 
-	api_errors.record_call_tool_failure(tool, result)
+	# A private app-learning failure may contain an OS path or source fragment.
+	# The delegate keeps its wire result, but the server-error buffer receives
+	# only the fixed safe shape below.
+	api_errors.record_call_tool_failure(tool, _app_learning_safe_failure_result(tool, result))
 	return result
 
 
@@ -377,6 +380,13 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 				_private_output.end_delegate_redaction(redaction_token)
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", "Private memory is unavailable in shared chats.")
+		# Custom App Learning has a private source-to-delegate data path. A shared
+		# conversation can never become that delegate, even for its metadata tool:
+		# the shared dispatcher must not see source names, source text, or Org-wiki
+		# bodies from an unattended source-learning run.
+		if shared_session and _is_private_app_learning_tool(tool):
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Custom App Learning tools are unavailable in shared chats.")
 		try:
 			plugin_user = (
 				resolve_binding(session_key).actor if shared_session else legacy_session_user(session_key)
@@ -872,12 +882,17 @@ def _dispatch_from_session(
 					attempted = _parse_args(args, tool)
 				except JarvisError:
 					attempted = {}
+				audit_args, _safe_denial = _app_learning_receipt_payload(tool, attempted, result)
 				audit.record(
 					tool=tool,
-					args=attempted,
+					args=audit_args,
 					ok=False,
 					error_code=code,
-					error_message=delegate_message,
+					error_message=(
+						"private app-learning tool was denied"
+						if _is_private_app_learning_tool(tool) and not private_message
+						else delegate_message
+					),
 				)
 				# The CUSTOMER reads this one. The transcript receipt renders verbatim
 				# in chat, so it carries plain language plus the remedy — the contract
@@ -1115,12 +1130,24 @@ def _record_tool_step(
 
 		if agent_run_steps.bare_tool(tool) in _SELF_NARRATING_TOOLS:
 			return
-		# Keep the raw name only for the self-narrating decision above.  A
-		# Deposit tool value is caller-controlled and must not reach a step label,
-		# stored tool field, or even this hook's fallback logger.
+		# A step is durable customer-visible history. Private source text, source
+		# paths, wiki bodies, and tool errors can never enter it. The delegate wire
+		# still receives the original result from _dispatch_from_session.
+		if _is_private_app_learning_tool(tool):
+			safe_args, safe_envelope = _app_learning_receipt_payload(
+				tool,
+				args if isinstance(args, dict) else {},
+				({"ok": True, "data": data} if ok else {"ok": False, "error": {}}),
+			)
+			safe_data = safe_envelope.get("data") if isinstance(safe_envelope, dict) and ok else None
+			error_message = "The private app-learning tool call failed." if not ok else ""
+		else:
+			safe_args, safe_data = args, data if ok else None
+		# Apply the Deposit metadata boundary after the app-learning projection too.
+		# Both kinds of private calls can reach this shared timeline hook.
 		safe_tool = _private_output.redact_delegate_tool(tool)
 		label, detail = agent_run_steps.humanize_tool_call(
-			safe_tool, _private_output.redact_delegate_args(args), data if ok else None
+			safe_tool, _private_output.redact_delegate_args(safe_args), safe_data
 		)
 		if not ok:
 			detail = agent_run_steps.error_detail(error_message) or detail
@@ -1199,6 +1226,86 @@ def _notify_stale_pairing(*, session_key: str, tool: str, tool_call_id: str | No
 		pass
 
 
+_PRIVATE_APP_LEARNING_TOOLS = frozenset(
+	{"list_app_modules", "read_app_source", "record_app_wiki", "finish_app_learning_run"}
+)
+
+
+def _is_private_app_learning_tool(tool: str) -> bool:
+	"""True for each registered private tool spelling.
+
+	Both the registry spelling and the plugin's ``jarvis__`` spelling reach API
+	boundaries. Keep the privacy gate on the normalized name, not one caller.
+	"""
+	return str(tool or "").removeprefix("jarvis__") in _PRIVATE_APP_LEARNING_TOOLS
+
+
+def _app_learning_safe_error(tool: str, error=None) -> dict:
+	"""Return the only error shape durable private-tool sinks may retain.
+
+	A lower layer can put a source path or a source fragment in either an error
+	code or a message. Do not rely on a downstream scrubber to recognize every
+	programming-language token: transcript, realtime, audit, timeline, and error
+	capture lanes all receive this fixed shape instead.
+	"""
+	if _is_private_app_learning_tool(tool):
+		return {
+			"code": "AppLearningToolError",
+			"message": "The private app-learning tool call was refused or failed.",
+		}
+	return error if isinstance(error, dict) else {}
+
+
+def _app_learning_safe_failure_result(tool: str, result):
+	"""Project an ``ok:false`` result before the server-error capture lane."""
+	if _is_private_app_learning_tool(tool) and isinstance(result, dict) and result.get("ok") is False:
+		return {"ok": False, "error": _app_learning_safe_error(tool)}
+	return result
+
+
+def _app_learning_receipt_payload(tool: str, args: dict, result: dict) -> tuple[dict, dict]:
+	"""Remove app-learning material before transcript/realtime persistence.
+
+	The authenticated delegate wire still receives the original return value from
+	``_dispatch_from_session``. This projection is only for bench chat receipts
+	and realtime, which must never retain source text, source paths, or wiki body
+	text. Error messages are projected too because an OS/file error can quote a
+	path or a source fragment.
+	"""
+	name = str(tool or "").removeprefix("jarvis__")
+	if not _is_private_app_learning_tool(tool):
+		return args, result
+	page_count = len(args.get("pages") or []) if isinstance(args, dict) else 0
+	safe_args = {"private_app_learning": True}
+	if name == "record_app_wiki":
+		safe_args["page_count"] = page_count
+	if not isinstance(result, dict) or not result.get("ok"):
+		return safe_args, {"ok": False, "error": _app_learning_safe_error(tool)}
+	data = result.get("data") if isinstance(result.get("data"), dict) else {}
+	if name == "read_app_source":
+		safe_data = {
+			"status": "source delivered privately to the delegated run",
+			"bytes": int(data.get("size") or 0),
+			"redactions": int(data.get("redactions") or 0),
+		}
+	elif name == "record_app_wiki":
+		safe_data = {
+			"status": "private wiki write processed",
+			"applied": int(data.get("applied") or 0),
+			"failed": int(data.get("failed") or 0),
+			"rejected": int(data.get("rejected") or 0),
+			"idempotent": int(data.get("idempotent") or 0),
+		}
+	elif name == "finish_app_learning_run":
+		safe_data = {
+			"status": data.get("status") or "completed",
+			"pages_written": int(data.get("pages_written") or 0),
+		}
+	else:
+		safe_data = {"status": "private app-source metadata delivered to the delegated run"}
+	return safe_args, {"ok": True, "data": safe_data}
+
+
 def _persist_and_publish_tool_call(
 	*,
 	session_key: str,
@@ -1211,6 +1318,7 @@ def _persist_and_publish_tool_call(
 
 	Best-effort: if no conversation owns this session_key, return silently.
 	"""
+	args, result = _app_learning_receipt_payload(tool, args, result)
 	conv_name = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
 	if not conv_name:
 		return
@@ -3100,17 +3208,46 @@ def _record_tool_audit(tool: str, args: dict, data) -> None:
 	an :data:`_ENVELOPE_TOOLS` tool whose data is itself an ``{ok: false}`` envelope,
 	record the connector's own failure (code + message) instead of a false success;
 	every other tool records ok=True with its result exactly as before."""
+	safe_args, safe_data = _app_learning_audit_payload(tool, args, data)
 	if tool in _ENVELOPE_TOOLS and isinstance(data, dict) and data.get("ok") is False:
 		err = data.get("error") if isinstance(data.get("error"), dict) else {}
 		audit.record(
 			tool=tool,
-			args=args,
+			args=safe_args,
 			ok=False,
 			error_code=err.get("code") or "connector_error",
 			error_message=err.get("message") or "",
 		)
 		return
-	audit.record(tool=tool, args=args, ok=True, result=data)
+	audit.record(tool=tool, args=safe_args, ok=True, result=safe_data)
+
+
+def _app_learning_audit_args(tool: str, args: dict | None) -> dict:
+	"""Safe structured-audit projection for app-learning write payloads."""
+	name = str(tool or "").removeprefix("jarvis__")
+	if not _is_private_app_learning_tool(tool):
+		return args if isinstance(args, dict) else {}
+	out = {"private_app_learning": True}
+	if name == "record_app_wiki":
+		out["page_count"] = len((args or {}).get("pages") or [])
+	return out
+
+
+def _app_learning_audit_payload(tool: str, args: dict | None, data) -> tuple[dict, object]:
+	"""Return the only app-learning shape that audit code may retain.
+
+	This is deliberately the same projection used for chat persistence and
+	realtime.  A new audit sink must receive this value, not the delegate return,
+	because a successful ``read_app_source`` return contains private source text.
+	"""
+	safe_args, envelope = _app_learning_receipt_payload(
+		tool,
+		args if isinstance(args, dict) else {},
+		{"ok": True, "data": data},
+	)
+	if isinstance(envelope, dict) and envelope.get("ok"):
+		return safe_args, envelope.get("data")
+	return safe_args, {"status": "private app-learning tool result unavailable"}
 
 
 def _dispatch_and_wrap(
@@ -3176,10 +3313,22 @@ def _dispatch_and_wrap(
 			e = hidden  # re-raised as something else: still the refusal
 		a = args if isinstance(args, dict) else {}
 		envelope = _translate_write_error(e, mark, doctype=a.get("doctype") or "", is_write=is_write)
+		# Private app-source tool errors may quote an OS path or source bytes. A
+		# generic envelope is safer for BOTH known and unexpected exceptions: even
+		# a known InvalidArgumentError can contain a file-system path. Other tools
+		# retain the normal detailed-envelope / 500 paths.
+		if _is_private_app_learning_tool(tool):
+			envelope = {"ok": False, "error": _app_learning_safe_error(tool)}
 		if envelope is None:  # unexpected - audit then re-raise to Frappe (500)
 			if is_write:
 				audit.record(
-					tool=tool, args=args, ok=False, error_code=type(e).__name__, error_message=str(e)
+					tool=tool,
+					args=_app_learning_audit_args(tool, args),
+					ok=False,
+					error_code=type(e).__name__,
+					error_message=(
+						"private app-learning tool failed" if _is_private_app_learning_tool(tool) else str(e)
+					),
 				)
 			raise
 		if sp:
@@ -3213,7 +3362,15 @@ def _dispatch_and_wrap(
 		if is_write:
 			err_obj = envelope["error"]
 			audit.record(
-				tool=tool, args=args, ok=False, error_code=err_obj["code"], error_message=err_obj["message"]
+				tool=tool,
+				args=_app_learning_audit_args(tool, args),
+				ok=False,
+				error_code=err_obj["code"],
+				error_message=(
+					"private app-learning tool failed"
+					if _is_private_app_learning_tool(tool)
+					else err_obj["message"]
+				),
 			)
 			# Manager audit: a KNOWN failure. Recorded AFTER the savepoint rollback so
 			# the tool's partial write is undone but this row rides the envelope commit.
@@ -3225,7 +3382,7 @@ def _dispatch_and_wrap(
 			agent_audit.record_write(
 				actor=frappe.session.user,
 				tool=tool,
-				args=args,
+				args=_app_learning_audit_args(tool, args),
 				result=None,
 				outcome="refused" if refused else "failed",
 				provenance=provenance,
@@ -3236,7 +3393,7 @@ def _dispatch_and_wrap(
 		# after every rollback above so the row rides the envelope's commit.
 		from jarvis import api_errors
 
-		api_errors.record_tool_failure(tool, envelope.get("error"))
+		api_errors.record_tool_failure(tool, _app_learning_safe_error(tool, envelope.get("error")))
 		frappe.local.jarvis_tool_failure_recorded = True
 		return envelope
 	if sp:
@@ -3254,11 +3411,12 @@ def _dispatch_and_wrap(
 		from jarvis import agent_audit
 
 		outcome = "applied" if envelope_ok(tool, {"ok": True, "data": data}) else "failed"
+		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
 		agent_audit.record_write(
 			actor=frappe.session.user,
 			tool=tool,
-			args=args,
-			result=data,
+			args=audit_args,
+			result=audit_data,
 			outcome=outcome,
 			provenance=provenance,
 			provenance_name=provenance_name,
@@ -3269,7 +3427,10 @@ def _dispatch_and_wrap(
 		# branch above saw it.
 		from jarvis import api_errors
 
-		api_errors.record_tool_failure(tool, data.get("error") if isinstance(data, dict) else None)
+		api_errors.record_tool_failure(
+			tool,
+			_app_learning_safe_error(tool, data.get("error") if isinstance(data, dict) else None),
+		)
 		frappe.local.jarvis_tool_failure_recorded = True
 	return {"ok": True, "data": data}
 
