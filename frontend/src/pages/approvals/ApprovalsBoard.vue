@@ -1547,7 +1547,11 @@ async function submitDecide(approve) {
 				? "Review acknowledged: no accounting or sending action"
 				: "Approved"
 			: "Rejected";
-		if (wasScoped && delivery === "done") {
+		if (res.reason === "source_unavailable") {
+			toast.warning(
+				"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue."
+			);
+		} else if (wasScoped && delivery === "done") {
 			toast.success(
 				verdict + (requester ? " - sent to your chat" : " - sent to the requester's chat")
 			);
@@ -1621,7 +1625,7 @@ async function submitDismiss() {
 	const id = selected.value?.name;
 	if (!claimApprovalAction(id, "dismiss")) return;
 	try {
-		await api.dismissApproval(id);
+		const res = (await api.dismissApproval(id)) || {};
 		const r = railRows.value.find((x) => x.name === id);
 		if (r) {
 			r.status = "Dismissed";
@@ -1642,7 +1646,13 @@ async function submitDismiss() {
 			note.value = "";
 			selectedOption.value = "";
 		}
-		toast.success("Ignored. The assistant was not notified");
+		if (res.reason === "source_unavailable") {
+			toast.warning(
+				"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue."
+			);
+		} else {
+			toast.success("Ignored. The assistant was not notified");
+		}
 		store.refreshApprovalsCount();
 		if ((filters.status || "Pending") === "Pending") advanceAfterDecide(id);
 		else loadRecord(id, { keep: true });

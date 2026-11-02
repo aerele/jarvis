@@ -1350,9 +1350,9 @@
       "domain": "india-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.6",
       "status": "Published",
-      "description": "For suppliers you have already classified as Micro/Small MSME, this overlays each open payable's elapsed days against its 15/45-day window and projects whether it will still be unpaid on 31-March, when s.43B(h) defers the deduction. Ships a pay-before-year-end worklist on top of ERPNext's native AP Ageing report. Read-only; never records a payment, edits a voucher, classifies a supplier, or decides what you may deduct.",
+      "description": "For suppliers you have already classified as Micro/Small MSME, this overlays each open payable's elapsed days against its 15/45-day window and projects whether it will still be unpaid on 31-March, when s.43B(h) defers the deduction. It reconciles its open-Purchase-Invoice population against ERPNext's private native Accounts Payable report at the same company and as-of date before it can report clean coverage. Read-only; never records a payment, edits a voucher, classifies a supplier, or decides what you may deduct.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
@@ -1383,6 +1383,7 @@
         "msmed_s15_windows",
         "s43bh_yearend_test"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1399,7 +1400,14 @@
       "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "supplier_group_mapping",
+        "reviewer",
+        "reviewer_capacity",
+        "applicable_tax_rate",
+        "currency"
+      ]
     },
     {
       "agent_slug": "negative-stock-valuation-auditor",
@@ -1831,22 +1839,14 @@
       "domain": "tds-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.4.2",
       "status": "Published",
       "description": "Prepares your monthly TDS/TCS data before each deposit due date and before each 26Q/24Q quarter: reconciles the TDS booked in your ledger against the challan payments recorded in your books, tracks each supplier's running total against the section thresholds, checks the rate deducted against the effective section rate, and lists the deductee fields your return is missing. Read-only worklist; never edits a voucher, books TDS, deposits a challan, files a return, or decides what is legally deductible.",
       "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc",
-        "jarvis__get_balance_on"
+        "jarvis__query"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc",
-        "jarvis__get_balance_on",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -1859,7 +1859,8 @@
         "Supplier",
         "Tax Withholding Category",
         "GL Entry",
-        "Company"
+        "Company",
+        "Journal Entry"
       ],
       "rule_tokens": [
         "deposit_due_dates",
@@ -1869,6 +1870,7 @@
         "section_rates",
         "section_thresholds"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1881,11 +1883,19 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027",
+      "validated_for_fy": null,
       "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "tds_payable_accounts",
+        "deductor_class",
+        "reviewer",
+        "reviewer_capacity",
+        "currency",
+        "tax_withholding_model"
+      ]
     },
     {
       "agent_slug": "ticket-triage-operator",
