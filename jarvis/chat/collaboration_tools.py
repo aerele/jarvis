@@ -20,7 +20,7 @@ get_list get_my_access get_naming_series_preview get_party_dashboard_info
 get_purchase_match_inputs get_receivables_review_inputs get_report_filters
 get_schema get_skill get_stock_balance get_submitted_linked_docs get_valuation_rate
 get_workflow_transitions list_app_modules list_connector_actions preview_doc
-preview_import preview_landed_cost_voucher query read_app_source read_file read_wiki report_pdf resolve_links
+preview_import preview_landed_cost_voucher query query_file read_app_source read_file read_wiki report_pdf resolve_links
 run_report scan_barcode summarize_dataset validate_script
 """.split()
 )

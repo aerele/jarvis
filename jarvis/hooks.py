@@ -490,7 +490,7 @@ scheduler_events = {
 		"jarvis.oauth.pending_capture.sweep_expired",
 	],
 	"daily": [
-		"jarvis.onboarding.sync_connection",
+		"jarvis.onboarding.scheduled_sync_connection",
 		# Jarvis Pending Action purge (D3): settled terminal rows older than 7 days,
 		# in committed batches; never Pending/Executing or a held row still resuming.
 		"jarvis.chat.pending_actions.purge",
@@ -1095,6 +1095,8 @@ has_permission.update(
 # list from it. Without it the watchdog tick wiped a long turn's steps mid-turn, so the saved
 # reply kept the narration and showed no steps. Every key keeps its one-hour TTL.
 persistent_cache_keys = [
+	"jarvis:pairing_proof:",  # One-time site-proof nonces: 600 s TTL must survive watchdog clears.
+	"jarvis:key_resync:",  # The 10-minute stale-key self-heal throttle must survive the 5-minute clear.
 	"jarvis:pcal:",  # Financial snapshots retain bounded TTLs across watchdog cache clears.
 	"jarvis:query:",  # Saved result IDs retain their own 24-hour TTL across cache clears.
 	"jarvis:llm_switch",
@@ -1110,6 +1112,8 @@ persistent_cache_keys = [
 	"jarvis:pump:steps:",
 	"jarvis:pump:step_lines:",
 	"jarvis:pump:preambles:",
+	"jarvis:session_claim:",  # Claims must outlive the 5-minute watchdog cache clear.
+	"jarvis:foreign_session:",  # Once-a-day throttles must survive the 5-minute watchdog cache clear.
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.

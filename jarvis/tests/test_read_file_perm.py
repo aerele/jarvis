@@ -97,6 +97,15 @@ class TestResolveFileByFilenamePermissionAware(ReadFilePermTestCase):
 	files being visible to (and satisfying) another test's fuzzy search.
 	"""
 
+	def test_missing_and_unreadable_urls_have_the_same_refusal(self):
+		private = _make_file("oracle-private.txt", b"private", USER_OTHER)
+		messages = []
+		for url in (private.file_url, "/private/files/oracle-missing.txt"):
+			with _as(USER_CALLER), self.assertRaises(PermissionDeniedError) as caught:
+				read_file(file_url=url)
+			messages.append(str(caught.exception))
+		self.assertEqual(messages, ["no matching file found", "no matching file found"])
+
 	def test_fuzzy_match_skips_unreadable_newer_file_and_finds_own_older_one(self):
 		# caller's own (older) file, matches the "invoicealpha" substring
 		mine = _make_file("my-invoicealpha-draft.txt", b"my own draft", USER_CALLER)
