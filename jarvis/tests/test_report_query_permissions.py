@@ -31,8 +31,6 @@ class TestStoredReportPermissions(unittest.TestCase):
 			("test_", "test.", "jarvis-ci.")
 		):
 			self.skipTest("Requires a connected disposable Frappe site")
-		from frappe.utils.file_manager import save_file
-
 		from jarvis.tools.query_report import query_report
 
 		tag = uuid.uuid4().hex[:8]
@@ -104,14 +102,21 @@ class TestStoredReportPermissions(unittest.TestCase):
 				"result": [{"public_value": "visible", "secret_value": "PRIVATE-SALARY-" + tag}],
 				"skip_total_row": 1,
 			}
-			file = save_file(
-				"report-gate-" + tag + ".json.gz",
-				gzip.compress(json.dumps(body).encode()),
-				"Prepared Report",
-				run.name,
-				is_private=1,
+			compressed = gzip.compress(json.dumps(body).encode())
+			# Match Prepared Report's binary File insertion. The legacy save_file
+			# helper re-reads the blob as text and can corrupt valid gzip bytes when
+			# its fallback Windows encoding happens to accept the compressed data.
+			file = save(
+				{
+					"doctype": "File",
+					"file_name": "report-gate-" + tag + ".json.gz",
+					"content": compressed,
+					"attached_to_doctype": "Prepared Report",
+					"attached_to_name": run.name,
+					"is_private": 1,
+				}
 			)
-			created.append(("File", file.name))
+			self.assertEqual(frappe.get_doc("File", file.name).get_content(encodings=()), compressed)
 			frappe.db.commit()
 			frappe.set_user(email)
 			initial = query_report(run.name)
