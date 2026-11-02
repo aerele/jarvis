@@ -317,6 +317,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	gates)."""
 	# Lazy import — agents_api imports build_agent_push_payload from this module
 	# at module level, so a top-level back-import would be circular.
+	from jarvis.chat import reorder_replenishment_gate
 	from jarvis.chat.agents_api import _allowed_roles_map, _allowed_users_map, _is_allowed
 
 	# The whole catalog's grants in TWO queries, shared by both legs. The install
@@ -374,6 +375,10 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	# on either therefore ships exactly the same set of slugs.
 	seen_agents: set[str] = set()
 	for row in installs:
+		# Reorder remains closed even if an old installation or a privileged listing
+		# edit says otherwise. Do not advertise its delegate to the fleet.
+		if reorder_replenishment_gate.is_reorder(row.agent):
+			continue
 		# De-dupe by AGENT. An install is per-(owner, agent) but the container's
 		# agent_skills namespace is per-slug, so two users who each install AND
 		# enable the same agent produce two rows for ONE slug. Admin REJECTS a
@@ -475,6 +480,8 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 			order_by="name asc",
 		)
 		for lst in allowed_listings:
+			if reorder_replenishment_gate.is_reorder(lst.name):
+				continue
 			if lst.name in seen_agents or lst.name not in granted:
 				continue
 			# Operator overlay: a teaser (coming-soon) / hidden (withdrawn) agent is not

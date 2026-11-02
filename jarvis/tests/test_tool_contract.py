@@ -123,7 +123,7 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "d2439fb7dc5c271c63ffa667558e55b42ce2a6b82e20e41414232d10c5e0d489"
+	PINNED_CAPABILITY_DIGEST = "05ec7351dc5991cd8373393653c6270eae4b1ce4faec4af3664862906eeb68a4"
 	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "3bca5faa9337568cc955bbff866bc275b25d0bcab3111a59c0f629ab1f87ec02"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
@@ -216,3 +216,26 @@ class TestLeadHygieneRegistryContract(FrappeTestCase):
 				"message",
 			],
 		)
+
+
+class TestReorderClosedGateContract(FrappeTestCase):
+	def test_reorder_remains_coming_soon_without_inventory_or_erp_write_capability(self):
+		"""A future receipt gate must not silently restore the retired operator."""
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			doc = json.load(fh)
+		entry = next(
+			item for item in doc["agents"] if item.get("agent_slug") == "reorder-replenishment-operator"
+		)
+		self.assertEqual(entry["status"], "Coming Soon")
+		self.assertEqual(entry["tools_required"], [])
+		self.assertEqual(
+			sorted(entry["tools_allow"]),
+			["canvas", "jarvis__record_agent_run", "jarvis__save_agent_dashboard", "message"],
+		)
+		self.assertEqual(entry["doctypes_required"], [])
+		self.assertIsNone(entry["writes"])

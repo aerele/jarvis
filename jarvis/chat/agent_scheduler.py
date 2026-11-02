@@ -243,7 +243,16 @@ def _sweep_one(row, now, seen: set) -> None:
 	"""Handle ONE due installation. Extracted from the loop so ``run_due_agent_audits``
 	can wrap it whole (#648); every ``return`` here was a ``continue`` in the loop it
 	came from. ``seen`` is the caller's dedupe set and is mutated in place."""
-	from jarvis.chat.agents_api import _user_allowed_for_agent
+	from jarvis.chat import reorder_replenishment_gate
+	from jarvis.chat.agents_api import _mark_catalog_dirty, _user_allowed_for_agent
+
+	if reorder_replenishment_gate.is_reorder(row.agent):
+		# A raw legacy row can survive until its migration runs. Retire it without a
+		# failure run, a dispatch, or a recurring scheduler wake-up.
+		reorder_replenishment_gate.retire_legacy_installation(row.name)
+		_mark_catalog_dirty()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- retire and unship a legacy operator
+		return
 
 	key = (row.owner, row.agent, row.schedule_frequency, str(row.schedule_time))
 	if key in seen:
@@ -1236,6 +1245,9 @@ def _launch_audit(
 	neither author nor widen it. Both launch paths (manual + cron) must supply it
 	for that agent; ``None`` leaves the run with no authorized apps, i.e. the tools
 	refuse everything."""
+	from jarvis.chat import reorder_replenishment_gate
+
+	reorder_replenishment_gate.assert_launch_allowed(inst.agent)
 	listing = frappe.get_doc(LISTING, inst.agent)
 	owner = inst.owner
 	from jarvis.chat import operator_review
