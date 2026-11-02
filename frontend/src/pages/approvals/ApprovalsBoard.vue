@@ -45,11 +45,14 @@
 			/>
 		</div>
 
-		<div class="flex min-h-0 flex-1">
+		<div class="flex min-h-0 flex-1 flex-col lg:flex-row" data-testid="approvals-split-view">
 			<!-- LEFT rail: inbox-style rows on a standing gray-1 surface so the
 			     selected row's white chip + shadow reads in light mode (CRM
 			     sidebar pattern; dark gray-1 ≠ surface-selected per §2.5) -->
-			<div class="w-[360px] shrink-0 overflow-y-auto border-r bg-surface-gray-1">
+			<div
+				class="max-h-[40vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
+				data-testid="approvals-rail"
+			>
 				<!-- "Waiting for your reply" strip (notify-approvals Part 3): prose
 				     questions the agent asked in chat — derived server-side
 				     (envelope.awaiting_reply, page 1 only), no approval row behind
@@ -367,7 +370,9 @@
 			</div>
 
 			<!-- RIGHT pane: review + act on the selected approval -->
-			<div class="flex-1 overflow-y-auto">
+			<!-- min-w-0 prevents a long detail/control row from widening the desktop
+			     split view beyond its container. -->
+			<div class="min-h-0 min-w-0 flex-1 overflow-y-auto">
 				<!-- a held write / chat card / wiki note: its own detail, keyed so every
 				     selection mounts (and loads) a fresh one -->
 				<div v-if="selectedKey" class="mx-auto w-full max-w-3xl px-8 py-6">

@@ -17,8 +17,8 @@ export const ACTION_LABEL = {
 const TERMINAL = ["Executed", "Discarded", "Failed", "Cancelled", "Superseded"];
 const SKIP_FILE = "Skip this file"; // a routing answer that skips the whole file: matches
 // the server's option text, never translated
-const ORDER = ["party", "address", "item", "other"];
-const FIXED_LABEL = { item: __("Items"), other: __("Other masters") };
+const ORDER = ["party", "address", "item", "other", "settings"];
+const FIXED_LABEL = { item: __("Items"), other: __("Other masters"), settings: __("Settings") };
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const isEmpty = (v) => v == null || String(v).trim() === "";
@@ -55,6 +55,7 @@ export function sections(records) {
 		if (!rows.length) continue;
 		out.push({
 			key,
+			...(key === "settings" && { notice: __("This changes a setting for every user.") }),
 			label: FIXED_LABEL[key] || [...new Set(rows.map((r) => r.doctype))].join(" / "),
 			records: rows,
 			updatesOnly: rows.every((r) => r.op === "update"),
@@ -445,7 +446,10 @@ const OUTCOME = {
 					e.title,
 			  ])
 			: __("Used the existing {0} {1} for {2}", [e.doctype, e.name, e.title]),
-	updated: (e) => __("Updated {0} {1}", [e.doctype, e.name || e.title]),
+	updated: (e) =>
+		(e.name || e.title) === e.doctype
+			? __("Updated {0}", [e.doctype])
+			: __("Updated {0} {1}", [e.doctype, e.name || e.title]),
 	skipped: (e) =>
 		e.cascade
 			? __("Skipped {0} {1} (it needed a skipped record)", [e.doctype, e.title])
