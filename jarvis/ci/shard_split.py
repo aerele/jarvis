@@ -244,6 +244,8 @@ def install(timings_path: Path = TIMINGS_FILE, out=sys.stdout):
 def _cmd_timings(args) -> int:
 	per_log = []
 	for log in args.logs:
+		# A developer-run CLI reading the CI logs named on its argv; never reached from a request.
+		# nosemgrep: frappe-security-file-traversal -- dev CLI, argv paths only
 		with open(log, encoding="utf-8", errors="replace") as handle:
 			totals = module_seconds(handle)
 		if not totals:
