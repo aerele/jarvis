@@ -256,6 +256,26 @@
 										>
 									</span>
 								</button>
+								<button
+									v-if="
+										store.conversations.some(
+											(c) =>
+												c.name === currentId &&
+												!c.file_box &&
+												c.origin_page !== 'dashboards'
+										)
+									"
+									type="button"
+									role="menuitem"
+									data-create-item="share"
+									class="jv-create-item"
+									@click="
+										createMenuOpen = false;
+										openChatShare(currentId, loadedConvTitle);
+									"
+								>
+									<span class="jv-create-item-t">{{ __("Share…") }}</span>
+								</button>
 								<Dropdown
 									:options="downloadMenuOption.submenu"
 									:disabled="downloadMenuOption.disabled"
@@ -588,38 +608,50 @@
 				</svg>
 			</div>
 			<!-- ===== WELCOME ===== -->
+			<!-- Scene-day layout (lib/holidayStage.js says when): a big centred mark and the
+			     greeting over the same starter cards, link and catalog, with the holiday scene's
+			     art on a layer above. Every other day takes the normal layout below. -->
+			<HolidayStage
+				v-else-if="showWelcome && stageOn"
+				:greeting="greeting"
+				:first-name="firstName"
+				:mood="holdActive ? 'upgrading' : 'star'"
+				:hold-active="holdActive"
+				:composer-empty="!input"
+			>
+				<template #sub>
+					<p class="jv-welcome-sub">
+						Ask about your ERP data, run a workflow or draft something.
+						{{ brand.agentName }}
+						is connected to your
+						<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
+						instance.
+					</p>
+				</template>
+				<template #bottom>
+					<WelcomeStarters
+						:cards="welcomeCards"
+						:tint="starterTint"
+						@select="onWelcomeSuggestion"
+					/>
+				</template>
+			</HolidayStage>
 			<!-- Scroll viewport + inner column are CLASSES, not inline styles: inline
 			     styles cannot be overridden, and the overflow-safe centring below
 			     (jv-welcome-scroll/jv-welcome-col) has to win on short/zoomed
 			     viewports. See the style block for the centre-when-it-fits rationale. -->
 			<div v-else-if="showWelcome" class="jv-welcome-scroll">
 				<div class="jv-welcome-col">
-					<!-- The brand mark inline with the greeting, then one line of
-					     orienting copy. The copy earns its place on an empty screen: it
-					     is the only thing that says what this box is for and that the
-					     agent is wired to real ERP data. -->
-					<h1
-						class="jv-welcome-h1"
-						style="
-							display: flex;
-							align-items: center;
-							justify-content: center;
-							gap: 16px;
-							font-size: 40px;
-							font-weight: 640;
-							letter-spacing: -0.03em;
-							margin: 0;
-							overflow-wrap: anywhere;
-						"
-					>
-						<JarvisMark
-							:size="38"
-							:radius="11"
-							:mood="holdActive ? 'upgrading' : 'star'"
-							style="flex: none"
-						/>
-						<span>{{ greeting }}, {{ firstName }}</span>
-					</h1>
+					<!-- The brand mark inline with the greeting (a holiday heading and
+					     advance wish on those days), then one line of orienting copy.
+					     The copy earns its place on an empty screen: it is the only
+					     thing that says what this box is for and that the agent is
+					     wired to real ERP data. -->
+					<WelcomeHero
+						:greeting="greeting"
+						:first-name="firstName"
+						:mood="holdActive ? 'upgrading' : 'star'"
+					/>
 					<p class="jv-welcome-sub">
 						Ask about your ERP data, run a workflow or draft something.
 						{{ brand.agentName }}
@@ -633,78 +665,11 @@
 					     the original four defaults for a workspace with no history yet.
 					     They FILL the composer, never send: the do-not-regress rule the old
 					     cards had. -->
-					<div
-						class="jv-welcome-grid"
-						style="
-							display: grid;
-							grid-template-columns: 1fr 1fr;
-							gap: 11px;
-							text-align: left;
-							margin-top: 26px;
-						"
-					>
-						<button
-							v-for="(s, i) in starterCards"
-							:key="s.prompt"
-							type="button"
-							class="jv-suggest"
-							@click="onWelcomeSuggestion(s)"
-							style="
-								display: flex;
-								gap: 11px;
-								padding: 14px;
-								background: var(--surface);
-								border: 1px solid var(--border);
-								border-radius: 10px;
-								cursor: pointer;
-								transition: border-color 0.12s, background 0.12s;
-								text-align: left;
-								font-family: inherit;
-								color: inherit;
-								width: 100%;
-							"
-						>
-							<div
-								:style="{
-									width: '30px',
-									height: '30px',
-									flex: 'none',
-									borderRadius: '8px',
-									background: starterTint(i).bg,
-									color: starterTint(i).fg,
-									display: 'flex',
-									alignItems: 'center',
-									justifyContent: 'center',
-								}"
-								v-html="starterTint(i).icon"
-							></div>
-							<div style="min-width: 0">
-								<div
-									v-if="s.title"
-									style="font-size: 13.5px; font-weight: 550; margin-bottom: 2px"
-								>
-									{{ s.title }}
-								</div>
-								<div
-									style="
-										font-size: 12.5px;
-										color: var(--text-3);
-										line-height: 1.4;
-									"
-								>
-									{{ s.prompt }}
-								</div>
-							</div>
-						</button>
-					</div>
-					<router-link
-						to="/dashboards/payment-calendar"
-						class="mt-4 flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm text-ink-gray-7 hover:bg-surface-gray-1"
-					>
-						<span>Payment Calendar · plan supplier dues and cash</span>
-						<span aria-hidden="true">→</span>
-					</router-link>
-					<CapabilityCatalog @select="onWelcomeSuggestion" />
+					<WelcomeStarters
+						:cards="welcomeCards"
+						:tint="starterTint"
+						@select="onWelcomeSuggestion"
+					/>
 				</div>
 			</div>
 
@@ -777,6 +742,20 @@
 								></span
 							>
 							<button class="jv-macrobar-stop" @click="stopMacro">Stop</button>
+						</template>
+						<template v-else-if="macroRun.status === 'waiting_report'">
+							<span class="jv-macrobar-dot"></span>
+							<span class="jv-macrobar-txt"
+								>Step {{ macroRun.step }}/{{ macroRun.total }}:
+								{{ macroRun.label || "Waiting for report" }}</span
+							>
+							<button
+								class="jv-macrobar-stop"
+								:title="STOP_WHILE_WAITING"
+								@click="stopMacro"
+							>
+								Stop
+							</button>
 						</template>
 						<template v-else-if="macroRun.status === 'completed'"
 							><span class="jv-macrobar-chip">✓ Macro completed</span></template
@@ -881,7 +860,7 @@
 							@open-attachment="openArtifact(m, $event)"
 						>
 							<template #avatar>
-								<JarvisMark
+								<HolidayMark
 									:size="28"
 									:radius="7"
 									:mood="
@@ -1191,6 +1170,21 @@
 											@click="goReconnectSubscription(errorInfo(m).upstream)"
 										>
 											{{ errorInfo(m).actionLabel }}
+										</button>
+										<button
+											v-if="canReportError(m)"
+											type="button"
+											class="jv-retry"
+											:disabled="openSupportInFlight"
+											:style="{
+												cursor: openSupportInFlight
+													? 'default'
+													: 'pointer',
+												opacity: openSupportInFlight ? 0.6 : 1,
+											}"
+											@click="openErrorSupport(m)"
+										>
+											{{ __("Report error") }}
 										</button>
 									</div>
 								</div>
@@ -2012,10 +2006,11 @@
 					</template>
 					<!-- a File Box file's open questions, also on the Approval Board -->
 					<FileBoxWaits
-						v-if="fileboxWaits.length"
-						:items="fileboxWaits"
+						v-if="visibleFileboxWaits.length"
+						:items="visibleFileboxWaits"
 						:busy="fileboxWaitBusy"
 						@decide="decideFileboxWait"
+						@review="reviewFileboxSheet"
 					/>
 					<!-- background reports this chat started, until their results are shown -->
 					<ReportRunCards
@@ -2136,7 +2131,7 @@
 					     StepsBox's own Cancel button (queued mode) calls the same
 					     cancelQueued the old chip's button did. -->
 					<div v-if="inFlightRowVisible" style="display: flex; gap: 12px">
-						<JarvisMark
+						<HolidayMark
 							:size="28"
 							:radius="7"
 							:mood="queuedTurn ? 'star' : 'thinking'"
@@ -4299,6 +4294,13 @@
 			@confirm="onPreviewConfirm"
 		/>
 
+		<FileBoxSheetReview
+			v-if="fileboxReviewSession"
+			:key="fileboxReviewSession.id"
+			:session="fileboxReviewSession"
+			:onChanged="fileboxReviewChanged"
+			:onClosed="closeFileboxReview"
+		/>
 		<ConnectPhoneDialog v-model="showConnect" />
 
 		<CompactDialog
@@ -4433,6 +4435,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
+import { supportErrorDraft } from "@/lib/supportErrorDraft";
 import {
 	supportPillLabel as supportPillLabelFor,
 	supportAwaitingPhrase,
@@ -4450,14 +4453,29 @@ import { report as reportError } from "@/lib/errorReporter";
 import JvChart from "@/charts/JvChart.vue";
 import ConnectPhoneDialog from "@/components/ConnectPhoneDialog.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
-import CapabilityCatalog from "@/components/CapabilityCatalog.vue";
+import HolidayMark from "@/components/holiday/HolidayMark.vue";
+import WelcomeHero from "@/components/holiday/WelcomeHero.vue";
+import HolidayStage from "@/components/holiday/HolidayStage.vue";
+import { holidayTouch } from "@/holidayTouch";
+import { stageEligible, withFestiveCard } from "@/lib/holidayStage";
+import WelcomeStarters from "@/components/chat/WelcomeStarters.vue";
 import DraftPreview from "@/components/doc/DraftPreview.vue";
 import ActionError from "@/components/ActionError.vue";
 import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
-import { newSendRequestId, observeDelivery, deliveryFailureCopy } from "@/lib/sendDelivery.js";
+import {
+	newSendRequestId,
+	observeDelivery,
+	deliveryFailureCopy,
+	deliveryTimeoutError,
+	DELIVERY_TOAST,
+} from "@/lib/sendDelivery.js";
+// How long a send, a same-request retry, and a delivery check wait before the
+// bubble turns "not confirmed" and says so. The late answer still lands.
+const SEND_DEADLINE_MS = 30000;
+const CHECK_DEADLINE_MS = 15000;
 import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
@@ -4466,6 +4484,8 @@ import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
+import FileBoxSheetReview from "@/components/chat/FileBoxSheetReview.vue";
+import { useFileBoxWaits } from "@/composables/useFileBoxWaits";
 import ReportRunCards from "@/components/chat/ReportRunCards.vue";
 import VersionPill from "@/components/chat/VersionPill.vue";
 import UpdateBanner from "@/components/chat/UpdateBanner.vue";
@@ -4557,6 +4577,7 @@ import {
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { __ } from "@/lib/i18n";
 import { conversationLoadFailure } from "@/lib/conversationLoadFailure";
+import { openChatShare } from "@/composables/useChatSharing";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
 	dashboardThumbnailTransform,
@@ -4584,6 +4605,7 @@ import {
 	turnToolNames,
 } from "@/lib/liveTurn";
 import { mergeCanvasItems } from "@/lib/canvasMerge";
+import { progressStatus, STOP_WHILE_WAITING } from "@/lib/macroRunOutcome";
 import { candidateTextFor } from "@/lib/candidateSnap";
 import { pickGreeting } from "@/lib/greeting";
 import { dashboardForConversation } from "@/api/dashboards";
@@ -5089,7 +5111,7 @@ function recentMessagesForSupport() {
 // a double-click firing openSupport() twice concurrently: without this, a
 // second click could race the first to SupportNew before the first's prompt
 // even resolves.
-let openSupportInFlight = false;
+const openSupportInFlight = ref(false);
 async function openSupport() {
 	if (!supportOn) {
 		// Unconfigured-but-visible state (see supportEntryVisible): explain rather
@@ -5103,12 +5125,12 @@ async function openSupport() {
 	// supportMenuOptions below), and its "New ticket from this chat" row calls
 	// straight into this same function - so openSupport() itself never needs to
 	// know which of the two paths got it here.
-	if (openSupportInFlight) return;
-	openSupportInFlight = true;
+	if (openSupportInFlight.value) return;
+	openSupportInFlight.value = true;
 	try {
 		const recent = recentMessagesForSupport();
 		if (!recent.length) {
-			router.push({ name: "SupportNew" });
+			await router.push({ name: "SupportNew" });
 			return;
 		}
 		let copyBody = "";
@@ -5135,9 +5157,49 @@ async function openSupport() {
 				supportStore.setCopyPref("No");
 			}
 		}
-		router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
+		await router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
 	} finally {
-		openSupportInFlight = false;
+		openSupportInFlight.value = false;
+	}
+}
+
+function canReportError(m) {
+	const id = currentId.value;
+	// During selection, currentId/route can already name the next chat while the
+	// old history remains on screen. Never pair those IDs in a support draft.
+	if (!supportOn || !id || _shownConvId !== id || (route.params.id && route.params.id !== id))
+		return false;
+	const row = m?.name && messages.value.find((item) => item.name === m.name);
+	return !!(
+		row &&
+		row.role === "assistant" &&
+		row.error &&
+		!row.hidden &&
+		!row.stopped &&
+		!row.streaming &&
+		errorInfo(row).code !== "cancelled"
+	);
+}
+
+async function openErrorSupport(m) {
+	if (openSupportInFlight.value || !canReportError(m)) return;
+	const row = messages.value.find((item) => item.name === m.name);
+	const info = errorInfo(row);
+	const draft = supportErrorDraft({
+		code: info.code,
+		upstream: info.upstream,
+		conversation: currentId.value,
+		message: row.name,
+		at: row.modified || row.creation,
+	});
+	if (!draft) return;
+	openSupportInFlight.value = true;
+	try {
+		await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		notify(__("Could not open Support. Try again."), { type: "error" });
+	} finally {
+		openSupportInFlight.value = false;
 	}
 }
 // Waiting-reply count pill (header headphones button). awaiting_count is a
@@ -5575,7 +5637,7 @@ function patchMacroRunRow(p, done) {
 	const row = macroRuns.value.find((r) => r.name === p.macro_run);
 	if (row) {
 		if (p.step != null) row.current_step = p.step;
-		row.status = done ? p.status || "completed" : "running";
+		row.status = done ? p.status || "completed" : progressStatus(p);
 	}
 	loadMacroRunStats();
 }
@@ -6177,7 +6239,7 @@ const jarvisTools = ref([
 
 // Shared with the shell via @/lib/user (see the cookie double-decode note there).
 const fullName = displayName(session.user);
-const firstName = computed(() => fullName.split(/\s+/)[0]);
+const firstName = computed(() => fullName.trim().split(/\s+/)[0]);
 // The empty-chat greeting. `now` is captured ONCE per mount, not read per render:
 // the phrase must not change under the user while they sit on the screen (and a
 // session left open past midnight keeping its line is the calmer behaviour).
@@ -6429,14 +6491,17 @@ const visibleMessages = computed(() =>
 		// placeholder that is not (or no longer) the turn THIS tab has live —
 		// a missed terminal, a different in-flight turn, or a reload landing
 		// between runs. A placeholder that has text, an error, or a canvas is
-		// a real reply and always renders regardless.
+		// a real reply and always renders regardless. So does the row parked for
+		// background recovery: its "Finishing in the background" copy renders
+		// inside it (overrideFor), and run:recovering clears currentRunId.
 		if (
 			m.role === "assistant" &&
 			m.streaming &&
 			!(m.content || "").trim() &&
 			!m.error &&
 			!(m.canvas && m.canvas.length) &&
-			!(currentRunId.value && m.name === currentMsgId.value)
+			!(currentRunId.value && m.name === currentMsgId.value) &&
+			recovering.value?.message_id !== m.name
 		)
 			return false;
 		return true;
@@ -6663,6 +6728,32 @@ const showWelcome = computed(
 	() =>
 		!booting.value &&
 		(!currentId.value || (visibleMessages.value.length === 0 && !isExistingTitledConv.value))
+);
+
+// The scene-day stage layout (lib/holidayStage.js): decided from the answer, the phone
+// flag and white label, plus whether a hold was showing when this welcome screen opened.
+// A hold that starts later does not swap the layout; the stage just settles its scene.
+const holdAtWelcomeMount = ref(false);
+watch(
+	showWelcome,
+	(on) => {
+		if (on) holdAtWelcomeMount.value = holdActive.value;
+	},
+	{ immediate: true }
+);
+const stageOn = computed(() =>
+	stageEligible({
+		answer: holidayTouch.answer.value,
+		phone: store.mobile,
+		whiteLabel: brand.isWhitelabeled,
+		holdAtMount: holdAtWelcomeMount.value,
+	})
+);
+// The festive greeting card replaces the last starter on a scene day.
+const welcomeCards = computed(() =>
+	stageOn.value
+		? withFestiveCard(starterCards.value, holidayTouch.answer.value)
+		: starterCards.value
 );
 
 // settings/overview derived metrics (all from data we already hold)
@@ -7379,6 +7470,11 @@ function onOverlayBackdropClick(close) {
 
 // one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<row __key>:<col>"
 const draftLink = ref({ key: "", items: [], open: false, anchor: null });
+// Each popup belongs to one search, including its pending blur and response.
+let draftLinkGeneration = 0;
+onBeforeUnmount(() => {
+	draftLinkGeneration++;
+});
 const draftLinkError = ref("");
 // Company / row dependency changes invalidate suggestions even if a request is
 // still pending or its field remains focused. Existing field values stay intact.
@@ -7608,6 +7704,7 @@ function dismissDraftPanel() {
 	closeDraftPanel();
 }
 function closeDraftPanel() {
+	draftLinkGeneration++;
 	draftLinkError.value = "";
 	draftPanel.value = null;
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
@@ -7615,6 +7712,7 @@ function closeDraftPanel() {
 
 // Link search shared by panel fields + grid cells.
 async function onDraftLink(key, target, doctype, ev) {
+	const generation = ++draftLinkGeneration;
 	const anchor = ev && ev.target;
 	draftLink.value = { key, items: [], open: true, anchor };
 	const search = draftLink.value;
@@ -7633,6 +7731,7 @@ async function onDraftLink(key, target, doctype, ev) {
 			args.filters
 		);
 		if (
+			generation !== draftLinkGeneration ||
 			draftLink.value !== search ||
 			draftLinkContext(draftPanel.value, key) !== filterContext
 		)
@@ -7647,7 +7746,7 @@ async function onDraftLink(key, target, doctype, ev) {
 			filterContext,
 		};
 	} catch (e) {
-		if (draftLink.value === search) {
+		if (generation === draftLinkGeneration && draftLink.value === search) {
 			draftLink.value = { ...draftLink.value, open: false, items: [] };
 			draftLinkError.value =
 				e instanceof DraftLinkFilterError
@@ -7676,6 +7775,7 @@ async function fillRuleValues(doctype, tables, isCurrent = () => true) {
 	);
 }
 function pickDraftLink(setter, item) {
+	draftLinkGeneration++;
 	if (
 		draftLink.value.filterContext !== draftLinkContext(draftPanel.value, draftLink.value.key)
 	) {
@@ -7688,8 +7788,12 @@ function pickDraftLink(setter, item) {
 	const panel = draftPanel.value;
 	if (panel) fillRuleValues(panel.doctype, panel.tables, () => draftPanel.value === panel);
 }
-function closeDraftLink() {
+function closeDraftLink(ev) {
+	const generation = draftLinkGeneration;
+	const anchor = ev?.target || draftLink.value.anchor;
 	setTimeout(() => {
+		if (generation !== draftLinkGeneration || document.activeElement === anchor) return;
+		draftLinkGeneration++;
 		draftLink.value = { ...draftLink.value, open: false };
 	}, 160);
 }
@@ -9570,7 +9674,21 @@ function _checkPulseOnce(id) {
 // A File Box file's chat shows what the file waits on, the same items the Approval
 // Board lists: its questions are answered here as on the board. Re-read on every load
 // (a run's end reloads the chat, which is when a new question appears).
-const fileboxWaits = ref([]);
+const {
+	items: fileboxWaits,
+	visibleItems: visibleFileboxWaits,
+	refresh: refreshFileboxWaits,
+	onEvent: onFileboxWaitEvent,
+	reviewSession: fileboxReviewSession,
+	openReview: reviewFileboxSheet,
+	reviewChanged: fileboxReviewChanged,
+	closeReview: closeFileboxReview,
+} = useFileBoxWaits({
+	conversation: currentId,
+	activeAsk,
+	load: api.fileboxOpenWaits,
+	onChanged: () => store.refreshApprovalsCount?.(),
+});
 const fileboxWaitBusy = ref("");
 // Background reports this chat started: a card each until Jarvis shows the results.
 // Re-read on every load, on Frappe's report_generated event, and every 15s while one
@@ -9608,18 +9726,6 @@ function onReportGenerated() {
 function showReportResults(item) {
 	if (busy.value || convStreaming.value) return;
 	send(`Show me the ${item.report_name} results${item.filters ? ` (${item.filters})` : ""}.`);
-}
-async function refreshFileboxWaits(id, isFileBox) {
-	if (!id || !isFileBox) {
-		fileboxWaits.value = [];
-		return;
-	}
-	try {
-		const r = await api.fileboxOpenWaits(id);
-		if (currentId.value === id) fileboxWaits.value = (r && r.items) || [];
-	} catch (e) {
-		// best-effort: the board still lists them
-	}
 }
 async function decideFileboxWait(item, text, approve) {
 	if (fileboxWaitBusy.value || !text) return;
@@ -9692,7 +9798,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	const refresh = holding ? refreshNames(messages.value) : [];
 	// The newest seq held, so the page reaches back to it and the older pages join.
 	const after = holding ? heldNewestSeq(messages.value, historyPaging.value) : null;
-	const d = await api.getConversation(id, { refresh, after }).catch((error) => {
+	const d = await api.getConversation(id, { refresh, after }).catch(async (error) => {
 		const failure = conversationLoadFailure(error, {
 			requestedId: id,
 			currentId: currentId.value,
@@ -9702,14 +9808,34 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 		});
 		if (failure === "throw") throw error;
 		if (failure === "unavailable") {
+			// Keep the shared-link probe off the normal chat bundle/load path.
+			let sharedTarget = null;
+			try {
+				const { sharedConversationRoute } = await import("@/lib/sharedConversationRoute");
+				sharedTarget = await sharedConversationRoute(
+					id,
+					undefined,
+					() =>
+						_recoveryViewActive &&
+						id === currentId.value &&
+						loadId === _conversationLoadId
+				);
+			} catch {
+				/* Fall through to existing unavailable-chat recovery. */
+			}
+			if (!_recoveryViewActive || id !== currentId.value || loadId !== _conversationLoadId)
+				return null;
 			// Restore home's draft before changing the scope. Never create a chat
 			// or stop a server turn just because this read was refused.
 			swapDraft(null);
 			currentId.value = null;
 			resetRunState();
 			loadConversation(null);
-			notify(__("That chat isn't available"), { type: "error" });
-			router.replace({ name: "Chat" });
+			if (sharedTarget) router.replace(sharedTarget);
+			else {
+				notify(__("That chat isn't available"), { type: "error" });
+				router.replace({ name: "Chat" });
+			}
 		}
 		return null;
 	});
@@ -10562,15 +10688,17 @@ async function recoverSend(m, retrySame = false) {
 		const operation = retrySame
 			? api.sendMessage(...m.sendRequest.args)
 			: api.checkMessageDelivery(id);
+		const deadline = retrySame ? SEND_DEADLINE_MS : CHECK_DEADLINE_MS;
 		const r = await observeDelivery(
 			operation,
 			() => {
 				if (m.deliveryReadEpoch === epoch && m.deliveryState === "checking") {
 					m.deliveryState = "uncertain";
 					m.deliveryBusy = false;
+					m.deliveryNote = deliveryFailureCopy(deliveryTimeoutError(deadline), id);
 				}
 			},
-			retrySame ? 30000 : 15000
+			deadline
 		);
 		if (m.sendRequest.requestId === id) await settleRecoveredSend(m, r);
 	} catch (error) {
@@ -10581,7 +10709,7 @@ async function recoverSend(m, retrySame = false) {
 			m.deliveryState === "checking"
 		) {
 			m.deliveryState = "uncertain";
-			m.deliveryNote = deliveryFailureCopy(error);
+			m.deliveryNote = deliveryFailureCopy(error, id);
 		}
 	} finally {
 		if (m.sendRequest.requestId === id && m.deliveryReadEpoch === epoch)
@@ -10880,21 +11008,33 @@ async function send(textArg, resendAck) {
 			return;
 		_optBubble.failed = true;
 		_optBubble.deliveryState = "uncertain";
+		// The deadline is the one path here that is not an exception, so without
+		// this the bubble showed the bare title and no reason. A later throw or
+		// late answer still overwrites it.
+		if (!_optBubble.deliveryNote)
+			_optBubble.deliveryNote = deliveryFailureCopy(
+				deliveryTimeoutError(SEND_DEADLINE_MS),
+				sendRequest.requestId
+			);
 		const scope = _pendingSends.scopeOf(_optBubble) || _sentScope;
 		_pendingSends.add(scope, _optBubble);
 		if (_recoveryViewActive && _currentScope() === scope)
 			messages.value = injectPendingBubbles(messages.value, [_optBubble]);
 	};
 	try {
-		const r = await observeDelivery(api.sendMessage(...sendRequest.args), () => {
-			expired = true;
-			markUncertain();
-			// Do not interrupt a reply which has already started or another chat.
-			if (_currentScope() === _sentScope && !currentMsgId.value) {
-				sending.value = false;
-				waiting.value = false;
-			}
-		});
+		const r = await observeDelivery(
+			api.sendMessage(...sendRequest.args),
+			() => {
+				expired = true;
+				markUncertain();
+				// Do not interrupt a reply which has already started or another chat.
+				if (_currentScope() === _sentScope && !currentMsgId.value) {
+					sending.value = false;
+					waiting.value = false;
+				}
+			},
+			SEND_DEADLINE_MS
+		);
 		if (
 			expired ||
 			!_recoveryViewActive ||
@@ -11138,7 +11278,7 @@ async function send(textArg, resendAck) {
 				(_optBubble.deliveryReadEpoch || 0) === initialEpoch &&
 				!["delivered", "rejected"].includes(_optBubble.deliveryState)
 			)
-				_optBubble.deliveryNote = deliveryFailureCopy(e);
+				_optBubble.deliveryNote = deliveryFailureCopy(e, sendRequest.requestId);
 			markUncertain();
 			return;
 		}
@@ -11149,13 +11289,13 @@ async function send(textArg, resendAck) {
 		// and show it now if the origin is still on screen.
 		_optBubble.failed = true;
 		_optBubble.deliveryState = "uncertain";
-		_optBubble.deliveryNote = deliveryFailureCopy(e);
+		_optBubble.deliveryNote = deliveryFailureCopy(e, sendRequest.requestId);
 		_pendingSends.add(_sentScope, _optBubble);
 		if (_currentScope() === _sentScope && !messages.value.some((x) => x.name === tmpName))
 			messages.value = [...messages.value, _optBubble];
 		sending.value = false;
 		waiting.value = false;
-		notify(deliveryFailureCopy(e), { type: "info" });
+		notify(DELIVERY_TOAST, { type: "info" });
 	}
 }
 
@@ -11203,7 +11343,7 @@ function onEvent(p) {
 				step: p.step || 0,
 				total: p.total || (macroRun.value && macroRun.value.total) || 0,
 				label: p.label || "",
-				status: "running",
+				status: progressStatus(p),
 			};
 		}
 		patchMacroRunRow(p, false); // live-advance the open run-history dashboard
@@ -13133,6 +13273,7 @@ onMounted(async () => {
 		})
 		.catch(() => {});
 	socket?.on("jarvis:event", onEvent);
+	socket?.on("jarvis:event", onFileboxWaitEvent);
 	socket?.on("jarvis:llm_switch", onLlmSwitch);
 	socket?.on("connect", onResync);
 	socket?.on("report_generated", onReportGenerated);
@@ -13348,6 +13489,7 @@ onBeforeUnmount(() => {
 	// away, app close) — nothing here is visible to blank.
 	flushReveal(); // cancels the frame loop and leaves every row whole
 	socket?.off("jarvis:event", onEvent);
+	socket?.off("jarvis:event", onFileboxWaitEvent);
 	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
 	socket?.off("report_generated", onReportGenerated);
@@ -13432,7 +13574,9 @@ onUnmounted(() => {
 
 <style scoped>
 /* The brand mark is now <JarvisMark> everywhere on this surface (hero, assistant
-   avatars, proactive toast), so it carries its own gradient in BOTH themes.
+   avatars, proactive toast; the hero and avatars through <HolidayMark>, which draws
+   a JarvisMark and adds the holiday item on top), so it carries its own gradient in
+   BOTH themes.
    Deleted with this comment: a `.jv-dark .jv-logo, .jv-dark .jv-toast-ic` rule
    that force-painted the gradient with !important in dark only. It existed
    because those chips were `background: var(--cta)` — near-black in light, and
@@ -14309,15 +14453,7 @@ onUnmounted(() => {
 	line-height: 1.5;
 	margin: 12px 0 0;
 }
-/* Starter cards (the original card treatment, now carrying synthesised copy). */
-.jv-suggest:hover {
-	border-color: var(--border-2);
-	background: var(--surface-1);
-}
-.jv-suggest:focus-visible {
-	outline: 2px solid var(--cta);
-	outline-offset: 2px;
-}
+/* Starter card styles live in components/chat/WelcomeStarters.vue. */
 /* mobile layout (UX #12): the chat had fixed 40px desktop paddings + a 2-col
    welcome grid; inline styles win over class rules, so these override with
    !important. The "Connect phone" QR flow ships people straight here. */
@@ -14336,19 +14472,9 @@ onUnmounted(() => {
 	.jv-welcome-scroll {
 		padding: 24px 16px;
 	}
-	.jv-welcome-h1 {
-		/* Scaled with the desktop bump (32 -> 40), kept a step smaller so a long
-		   "Long time no see, <name>" still fits a phone without wrapping oddly. */
-		font-size: 28px !important;
-	}
 	.jv-welcome-sub {
 		font-size: 14px;
 		margin-top: 10px;
-	}
-	/* Starter cards stack: two 14px-padded cards side by side are unreadable at
-	   phone width. Inline styles set the grid, so this has to win with !important. */
-	.jv-welcome-grid {
-		grid-template-columns: 1fr !important;
 	}
 }
 /* Phone mode (< 768px, matches the shell store `mobile` flag that swaps the

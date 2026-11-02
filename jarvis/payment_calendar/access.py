@@ -14,6 +14,7 @@ from jarvis.payment_calendar.permissions import (
 	incomplete_scope_reasons,
 	require_company,
 	require_report,
+	row_filter_columns,
 	visible_names,
 )
 from jarvis.payment_calendar.scope import normalize_scope
@@ -266,7 +267,7 @@ def validate_result_visibility(scope: dict, result: dict) -> None:
 		try:
 			proofs = [frappe._dict(deepcopy(row["_permission"])) for row in rows]
 			filtered = get_filtered_data(
-				report.ref_doctype, source["permission_columns"], proofs, scope["actor"]
+				report.ref_doctype, row_filter_columns(source["permission_columns"]), proofs, scope["actor"]
 			)
 		except (KeyError, TypeError, AttributeError) as exc:
 			raise ScopeChanged("Refresh the Payment Calendar snapshot.") from exc
@@ -295,7 +296,7 @@ def authorize_scope(scope: dict, expected_fingerprint: str | None = None, result
 		for doctype in _doctypes():
 			frappe.get_meta(doctype, cached=False)
 		frappe.local.role_permissions = {}
-	if normalize_scope(scope["company"], scope["accounts"]) != scope:
+	if normalize_scope(scope["company"], scope["accounts"], month=scope.get("month")) != scope:
 		raise ScopeChanged("Refresh the Payment Calendar snapshot.")
 	company = require_company(scope["company"])
 	if not company.default_currency or not frappe.db.exists("Currency", company.default_currency):

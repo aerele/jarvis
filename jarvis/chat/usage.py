@@ -491,6 +491,17 @@ def record_turn_usage(
 	re-raised, because it has already aborted the caller's whole transaction and only
 	the caller can replay it (finalize's usage effect replays its guard + this call as
 	one unit). Any other usage-accounting bug still must not break chat."""
+	from jarvis.chat.collaboration import is_collaborative_session
+
+	if is_collaborative_session(session_key):
+		from jarvis.chat.collaboration_usage import record
+
+		return record(session_key, row, run_id, reply_chars=reply_chars)
+	return _record_turn_usage(session_key, row, run_id, reply_chars)
+
+
+def _record_turn_usage(session_key, row, run_id=None, reply_chars=None):
+	"""Legacy accrual body; shared callers must first win their bound usage claim."""
 	try:
 		# No fresh snapshot here, on purpose: this must not commit before its own commit
 		# below, or the retry paths would commit finalize's uncommitted guard CAS and a
@@ -796,9 +807,20 @@ def _turn_tool_call_count(run_id: str | None) -> int:
 	turn = frappe.db.get_value(
 		CHAT_TURN,
 		run_id,
-		["conversation", "seed_message", "assistant_message"],
+		["conversation", "seed_message", "assistant_message", "actor", "collaboration_binding"],
 		as_dict=True,
 	)
+	if turn and turn.collaboration_binding:
+		return frappe.db.count(
+			CHAT_MESSAGE,
+			{
+				"conversation": turn.conversation,
+				"actor": turn.actor,
+				"collaboration_binding": turn.collaboration_binding,
+				"collaboration_run_id": run_id,
+				"role": "tool",
+			},
+		)
 	if (
 		not turn
 		or not turn.get("conversation")

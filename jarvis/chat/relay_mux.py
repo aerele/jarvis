@@ -39,8 +39,15 @@ HARD INVARIANTS (this component is TRANSPORT-PURE):
     callback ever sees it (the #1449 regression was exactly this rule broken:
     a reader-thread ``egress_rules`` call needs a site the reader does not
     have).
-  * The send path is serialized by the session's one ``_lock`` (reused here) so
-    the reader loop and any RPC issuance never interleave partial frames.
+  * Every socket call goes through the session's IO gate (``socket_io``): one
+    operation at a time, so the reader loop and any RPC issuance never interleave
+    partial frames or TLS calls. Writes still take the session's one ``_lock``
+    first, and the wait for both is one bounded budget.
+  * A write that started and failed, or hit a socket error before its first byte,
+    POISONS the transport at once (``is_closed``): no later write starts, and the
+    reader's ``Closing`` fails every other pending RPC with the ambiguous
+    ``ack-timeout`` sentinel, never a definite error. A write refused as closed,
+    busy or past its deadline leaves the transport as it was.
   * No second reader ever touches ``_recv`` (R-15): one thread owns the socket
     read; RPC futures are resolved on that SAME reader loop.
   * Only THREE causes end a hop (D5 §2/§5): socket failure, lease loss, or
@@ -72,8 +79,12 @@ from dataclasses import dataclass
 
 from jarvis.chat import egress_rules
 from jarvis.chat.agent_client import (
+	IO_GATE_WAIT_S,
+	IO_WRITE_TIMEOUT_S,
 	MEDIA_GEN_TOOL_NAMES,
 	AgentSession,
+	SendNotStarted,
+	SendUncertain,
 	_build_request_frame,
 	_chat_final_failed,
 	_chat_final_media_urls,
@@ -448,6 +459,11 @@ class RelayMux:
 		self._stopping = threading.Event()  # graceful stop requested
 		self._closed = threading.Event()  # socket dead / torn down
 		self._wake = threading.Event()  # reader poked dispatch: work available
+		# #773: a write that started and failed poisons the transport immediately, so
+		# the slice loop stops before the reader has even noticed the abort.
+		self._poisoned = threading.Event()
+		# Monotonic instant no write may run past (the pump's lease bound); None = no bound.
+		self._write_deadline: float | None = None
 
 		# circuit breaker
 		self._on_breaker = on_breaker
@@ -468,6 +484,10 @@ class RelayMux:
 		# stray/late/unknown frame): see _on_reader_fault. Should stay at 0 in
 		# healthy operation - any nonzero count here is a bug, not routine noise.
 		self._reader_errors = 0
+		# #773: writes refused before any byte (``SendNotStarted``), and transports
+		# poisoned by a write (started-and-failed, or a socket error before its first byte).
+		self._writes_refused = 0
+		self._writes_poisoned = 0
 
 	# -- lifecycle ---------------------------------------------------------- #
 
@@ -511,7 +531,12 @@ class RelayMux:
 			pass
 
 	def is_closed(self) -> bool:
-		return self._closed.is_set()
+		return self._closed.is_set() or self._poisoned.is_set()
+
+	def set_write_deadline(self, deadline: float | None) -> None:
+		"""No write may run past ``deadline`` (monotonic): a write that could not finish
+		by then is refused with ``SendNotStarted`` before any byte goes out."""
+		self._write_deadline = deadline
 
 	def is_breaker_open(self) -> bool:
 		with self._breaker_lock:
@@ -694,7 +719,9 @@ class RelayMux:
 		# redact=False: this runs on the reader thread, which has no frappe.local
 		# site. The pump redacts the text fields itself, on its own thread, in
 		# _apply, right before they reach a lane callback.
-		parsed = parse_event(payload, redact=False)
+		parsed = parse_event(payload, redact=False, collaboration=":dashboard:collab:" in lane.session_key)
+		if parsed and parsed.get("kind") == "tool_boundary" and parsed.get("tool_call_id"):
+			parsed = {**parsed, "kind": "tool", "phase": "start"}
 		if parsed is None or parsed.get("kind") == "lifecycle":
 			# lifecycle frames are dropped on the managed relay path (mirror of
 			# relay_turn_events); not a stray — it's an expected known-run drop.
@@ -1076,25 +1103,73 @@ class RelayMux:
 	def issue_rpc(self, method: str, params: dict, *, timeout_s: float = DEFAULT_RPC_TIMEOUT_S) -> PendingRpc:
 		"""Issue one RPC and return its bounded cancellable future. Registers the
 		future in the pending-RPC map BEFORE the frame is written (so a fast
-		response can never arrive before the map knows about it), then sends under
-		the serialized send lock. The reader resolves the future when the response
-		arrives; the caller awaits ``future.result(timeout)``."""
-		if self._closed.is_set() or self._stopping.is_set():
-			raise AgentUnreachableError(f"{method} on a closed mux", code="ack-timeout")
+		response can never arrive before the map knows about it), then writes it
+		through the session's IO gate. The reader resolves the future when the
+		response arrives; the caller awaits ``future.result(timeout)``.
+
+		Raises ``SendNotStarted`` (no byte of the frame went out) or, once the write
+		started, ``SendUncertain`` (code ``ack-timeout``) or the original non-socket
+		exception. Those two poison the transport, and so does a ``SendNotStarted``
+		with reason ``local`` (a socket error before the first byte: the socket may be
+		broken), so ``is_closed()`` is already true when this raises. A closed, busy or
+		deadline refusal leaves the transport as it was. The pending entry is removed
+		on every failure."""
+		if self.is_closed() or self._stopping.is_set():
+			self._bump("writes_refused")
+			raise SendNotStarted(f"{method} was not sent: the relay connection is closed")
+		write_s = IO_WRITE_TIMEOUT_S
+		deadline = self._write_deadline
+		if deadline is not None and time.monotonic() + write_s > deadline:
+			self._bump("writes_refused")
+			raise SendNotStarted(
+				f"{method} was not sent: no time left in this delivery window", reason="deadline"
+			)
 		payload, req_id = _build_request_frame(method, params)
 		fut = PendingRpc(method, req_id, timeout_s)
 		fut._on_settle = self._drop_pending
 		with self._pending_lock:
 			self._pending[req_id] = fut
 		try:
-			# Serialized send: the session's one _lock guards every socket write,
-			# so the reader loop and this issuance never interleave partial frames.
-			with self._session._lock:
-				self._session._ws.send(payload)
-		except Exception as exc:
+			self._write(method, payload, write_s, deadline)
+		except SendNotStarted as exc:
 			self._drop_pending(req_id)
-			raise AgentUnreachableError(f"{method} send failed: {exc}") from exc
+			self._bump("writes_refused")
+			if exc.reason == "local":
+				self._poison(method, exc)
+			raise
+		except BaseException as exc:
+			self._drop_pending(req_id)
+			self._poison(method, exc)
+			raise
 		return fut
+
+	def _poison(self, method: str, exc: BaseException) -> None:
+		"""No later write starts on this transport. Called with no lock held; warns
+		once per mux, naming only the method and the exception class."""
+		first = not self._poisoned.is_set()
+		self._poisoned.set()
+		self._wake.set()
+		self._bump("writes_poisoned")
+		if first:
+			try:
+				_logger.warning("relay_mux: transport poisoned by %s (%s)", method, type(exc).__name__)
+			except Exception:
+				pass  # diagnostics only: never replace the caller's outcome
+
+	def _write(self, method: str, payload: str, write_s: float, deadline: float | None) -> None:
+		session = self._session
+		if isinstance(session, AgentSession):
+			session._write_frame(
+				payload, wait_s=IO_GATE_WAIT_S, write_s=write_s, not_after=deadline, method=method
+			)
+			return
+		# Transport doubles (tests): the serialized send they model. Whatever its
+		# failure, the write had started, so it is ambiguous.
+		try:
+			with session._lock:
+				session._ws.send(payload)
+		except Exception as exc:
+			raise SendUncertain(f"{method} send failed: {exc}") from exc
 
 	def send_chat(
 		self,
@@ -1108,6 +1183,7 @@ class RelayMux:
 		thinking: str | None = None,
 		deliver: bool = False,
 		attachments: list[dict] | None = None,
+		verified_session_id: str | None = None,
 	) -> PendingRpc:
 		"""FRESH-send fast path with early-frame routing (OAR-15). PRE-REGISTERS
 		the run map under ``run_id == idempotencyKey`` at ISSUANCE (before the
@@ -1117,6 +1193,8 @@ class RelayMux:
 		Retry-attach (an ack of ``status:"in_flight"`` returning an EXISTING
 		run's id) is NOT handled here: the caller inspects the ack and calls
 		``rekey_run(run_id, ack_run_id)`` when the returned id differs."""
+		if ":dashboard:collab:" in session_key and not verified_session_id:
+			raise AgentUnreachableError("Shared sessions require a verified physical session before sending.")
 		self.register_run(run_id, handler, session_key=session_key, start_seq=start_seq)
 		params: dict = {
 			"sessionKey": session_key,
@@ -1124,11 +1202,19 @@ class RelayMux:
 			"idempotencyKey": run_id,
 			"deliver": deliver,
 		}
+		if verified_session_id:
+			params.update(sessionId=verified_session_id, expectedPermissionMode="read-only")
 		if thinking:
 			params["thinking"] = thinking
 		if attachments:
 			params["attachments"] = attachments
-		return self.issue_rpc("chat.send", params, timeout_s=timeout_s)
+		try:
+			return self.issue_rpc("chat.send", params, timeout_s=timeout_s)
+		except BaseException:
+			# No lane may outlive a send that failed at issuance (a ghost lane would
+			# swallow a later run's frames). A poisoned transport delivers nothing more.
+			self.unregister_run(run_id)
+			raise
 
 	def set_session_model(
 		self, session_key: str, model_ref: str | None, *, timeout_s: float = DEFAULT_RPC_TIMEOUT_S
@@ -1503,8 +1589,13 @@ class RelayMux:
 					_logger.debug("relay_mux: on_closing callback raised", exc_info=True)
 		self._closed.set()
 		self._wake.set()
+		# On the reader thread: abort only (no graceful CLOSE, no descriptor close
+		# under a possibly active writer); the owner's stop() closes the socket.
 		try:
-			self._session.close()
+			if isinstance(self._session, AgentSession):
+				self._session.abort_transport()
+			else:
+				self._session.close()
 		except Exception:
 			pass
 
@@ -1550,6 +1641,8 @@ class RelayMux:
 				"rpc_failed_on_close": self._rpc_failed_on_close,
 				"chat_delta_ignored": self._chat_delta_ignored,
 				"reader_errors": self._reader_errors,
+				"writes_refused": self._writes_refused,
+				"writes_poisoned": self._writes_poisoned,
 				"breaker_open": self.is_breaker_open(),
 				"active_runs": len(self._runs),
 			}

@@ -13,6 +13,9 @@ app_license = "AGPL-3.0-only"
 # access state (see jarvis/boot.py) so JS can branch on it without a
 # round-trip back to the server.
 boot_session = "jarvis.boot.set_jarvis_boot"
+# Runs after Frappe reads the cached boot_session blob, on every Desk load: the holiday
+# touch answer depends on the date, so it cannot live in the cached blob.
+extend_bootinfo = "jarvis.holiday_touch.boot.extend_bootinfo"
 
 # ---------------------------------------------------------------------------
 # Deployment constants
@@ -241,6 +244,9 @@ after_migrate = [
 	# File "Home/Jarvis Exports", where finished background exports are kept. A fresh install
 	# never reaches this hook; the first publish creates the folder then.
 	"jarvis.tools._export.jobs.after_migrate",
+	# Holiday touch: rotate the cache generation so a release's matcher fixes apply at once
+	# (migrate clears the cache but not the persistent jarvis:holiday: prefix). Never raises.
+	"jarvis.holiday_touch.cache.on_after_migrate",
 ]
 
 # Scheduled Tasks
@@ -248,6 +254,11 @@ after_migrate = [
 
 scheduler_events = {
 	"cron": {
+		"* * * * *": [
+			# Shared delivery recovery also runs with rollout/admission off.
+			# Never re-send an ambiguous model request or revive an owner session.
+			"jarvis.chat.collaboration_recovery.sweep",
+		],
 		"*/5 * * * *": [
 			"jarvis.chat.stale_scan.scan_and_mark_errored",
 			# Phase-0 admission backstop (chat concurrency, WP-0): reclaim lost
@@ -289,6 +300,12 @@ scheduler_events = {
 			# path. Bounded per run (capacity_attempts), then the run fails honestly.
 			# Cheap no-op (one indexed status query) when nothing is parked.
 			"jarvis.chat.macros.resume_waiting_capacity_runs",
+			# A macro run parked in `waiting_report` (its step started a prepared
+			# report) is continued when the report is ready, or ended when it failed or
+			# overran its deadline. The Prepared Report on_update hook wakes it at once;
+			# this is the guarantee. Cheap no-op (one indexed status query) when nothing
+			# is parked.
+			"jarvis.chat.macro_report_wait.resume_report_waits",
 			# A macro run moves when its step's turn end reaches the chaining hook, and
 			# several ends never do (a turn that fails before it is sent, ages out of the
 			# queue or is cancelled queued has no finalize job; a finalize job that died
@@ -401,6 +418,12 @@ scheduler_events = {
 		],
 	},
 	"hourly": [
+		"jarvis.chat.collaboration_tool_claims.reconcile",
+		"jarvis.chat.collaboration_lifecycle.sweep",
+		"jarvis.chat.collaboration_lifecycle.reclaim_sessions",
+		# Admin model + preset catalogs into Redis and the site snapshot. Hot paths
+		# only read (jarvis.catalog_store), so this bounds how stale a site can be.
+		"jarvis.catalog_store.refresh_all",
 		# Session lifecycle: free dormant conversations' agent sessions, reap
 		# abandoned empty chats, and reap orphaned throwaway sessions
 		# (title/prewarm/polish, deleted conversations). Batch-capped; bench
@@ -619,6 +642,7 @@ doc_events["User Permission"] = {
 doc_events["Jarvis Conversation"] = {
 	"on_update": "jarvis.chat.sharing.on_conversation_update",
 	"on_trash": [
+		"jarvis.chat.collaboration_lifecycle.on_conversation_trash",
 		"jarvis.chat.admission.on_conversation_trash",
 		# Slice B: delete the conversation's Jarvis Import Announcement rows so the
 		# Link never blocks deletion (LinkExistsError) or orphans the poll.
@@ -634,9 +658,35 @@ doc_events["Jarvis Conversation"] = {
 # A saved report's background export waits for Frappe's prepared copy; the moment
 # the run saves its Completed (or Error) state, the export dispatcher is woken so the
 # file follows within seconds rather than at the next five-minute reap (#2102).
+#
+# A macro run parked while its step's report generates is woken by the same event, by a
+# handler of its own: neither can fail the other or the save. The */5 cron
+# (`resume_report_waits`) is the guarantee; this is the speed.
 doc_events["Prepared Report"] = {
-	"on_update": "jarvis.tools._export.jobs.on_prepared_report_update",
+	"on_update": [
+		"jarvis.tools._export.jobs.on_prepared_report_update",
+		"jarvis.chat.macro_report_wait.on_prepared_report_update",
+	],
 }
+
+# Holiday touches: a change to the data an occasion is read from rotates the
+# cache generation once it is COMMITTED (never on a rollback). The handler only queues the
+# rotation on frappe.db.after_commit (once per transaction, and for an Employee or a Company
+# only when a field an occasion depends on changed) and never raises into the save. Holiday List Assignment
+# exists on HRMS 16 only; on a site without it the entry is inert. setdefault + append so
+# another app's or this file's handlers on the same doctype are kept.
+_HOLIDAY_ROTATE = "jarvis.holiday_touch.cache.rotate_after_commit"
+for _holiday_dt, _holiday_events in (
+	("Holiday List", ("on_update", "on_trash")),
+	("Holiday List Assignment", ("on_submit", "on_cancel")),
+	("Company", ("on_update",)),
+	("Employee", ("on_update", "on_trash")),
+):
+	for _holiday_event in _holiday_events:
+		_holiday_handlers = doc_events.setdefault(_holiday_dt, {}).setdefault(_holiday_event, [])
+		if isinstance(_holiday_handlers, str):
+			_holiday_handlers = doc_events[_holiday_dt][_holiday_event] = [_holiday_handlers]
+		_holiday_handlers.append(_HOLIDAY_ROTATE)
 
 # A pending action never blocks deleting the conversation it points at; the
 # on_trash hook above cleans it up instead.
@@ -647,6 +697,8 @@ doc_events["Prepared Report"] = {
 # approve is refused). The hook is keyed on the doctype that HOLDS the Link, so a
 # Role or User a request names is not blocked by it either.
 ignore_links_on_delete = [
+	# A retired binding is immutable audit; its delete hook first removes auth.
+	"Jarvis Chat Binding",
 	"Jarvis Pending Action",
 	"Jarvis Skill Promotion Request",
 	"Jarvis Conversation Share",
@@ -758,6 +810,7 @@ permission_query_conditions.update(
 		"Jarvis Conversation": "jarvis.chat.chat_permissions.conversation_query_conditions",
 		"Jarvis Chat Message": "jarvis.chat.chat_permissions.message_query_conditions",
 		"Jarvis Chat Turn": "jarvis.chat.chat_permissions.turn_query_conditions",
+		"Jarvis Chat Session": "jarvis.chat.chat_permissions.session_query_conditions",
 		# A pattern mined from someone's chats stays theirs until they answer (#18).
 		"Jarvis Learned Pattern": "jarvis.learning.chat_pattern_privacy.pattern_query_conditions",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.approval_query_conditions",
@@ -769,6 +822,7 @@ has_permission.update(
 		"Jarvis Conversation": "jarvis.chat.chat_permissions.has_conversation_permission",
 		"Jarvis Chat Message": "jarvis.chat.chat_permissions.has_message_permission",
 		"Jarvis Chat Turn": "jarvis.chat.chat_permissions.has_turn_permission",
+		"Jarvis Chat Session": "jarvis.chat.chat_permissions.has_session_permission",
 		"Jarvis Learned Pattern": "jarvis.learning.chat_pattern_privacy.has_pattern_permission",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.has_approval_permission",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.has_voice_note_permission",
@@ -979,6 +1033,14 @@ has_permission.update(
 # (``tools._user_memory.SEEN_PREFIX``), the base a memory save without ``base_version`` is
 # checked against. Without it every tick wiped every chat's base, and each chat's next
 # save came back as a conflict it had to re-read and merge. One-week TTL.
+#
+# jarvis:holiday: (2026-10-28): the holiday touch's cached occasions, the placeholder
+# birth-date sets, the random generation token (``jarvis:holiday:gen``) (``holiday_touch.cache``)
+# and the per-kind hourly log markers (``jarvis:holiday:log_hour:<kind>``,
+# ``holiday_touch.report``). Without it the pump's tick, and ERPNext's ``Employee.on_update``,
+# wiped them: the cache never held, and an error logged on every tick instead of once an hour. The cache is invalidated by rotating ``gen``
+# (``after_migrate`` and ``doc_events`` after commit), never by deleting keys (``delete_keys``
+# is a ``KEYS`` scan); answers expire by TTL (2 h at most, 10 min for an error).
 persistent_cache_keys = [
 	"jarvis:pcal:",  # Financial snapshots retain bounded TTLs across watchdog cache clears.
 	"jarvis:query:",  # Saved result IDs retain their own 24-hour TTL across cache clears.
@@ -989,6 +1051,7 @@ persistent_cache_keys = [
 	"jarvis:subscription_",
 	"jarvis.oauth.codex_signin",
 	"jarvis:memory_seen:",
+	"jarvis:holiday:",
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.

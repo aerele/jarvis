@@ -24,7 +24,7 @@ import { cookieUser } from "./sessionCookie.js";
 // properties of undefined (reading 'exc_type')") and the pre-2021 form
 // ("Cannot read property 'exc_type' of undefined") both match.
 const INTERNAL_CRASH_MESSAGE = /^Cannot read propert(y|ies) (?:'[^']*' )?of (undefined|null)\b/;
-function isInternalCrash(e) {
+export function isInternalCrash(e) {
 	return e instanceof TypeError && INTERNAL_CRASH_MESSAGE.test((e && e.message) || "");
 }
 
@@ -50,6 +50,16 @@ export function isSessionExpired(e) {
 	if (typeof document === "undefined") return false;
 	const authFailure = e.status === 401 || e.status === 403 || e.exc_type === "PermissionError";
 	return authFailure && !cookieUser();
+}
+
+// Only what the server said ON PURPOSE (frappe.throw / _server_messages), or "".
+// Never e.message: frappe-ui composes that from the method name, the exception
+// class and the traceback head, which is not a sentence for a customer. For a
+// caller (lib/sendDelivery.js) that builds its own cause sentence from the
+// transport facts and only wants to quote the server when it actually spoke.
+export function serverSentMessage(e) {
+	const first = e && Array.isArray(e.messages) ? e.messages[0] : "";
+	return typeof first === "string" ? first : "";
 }
 
 export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {

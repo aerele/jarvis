@@ -277,15 +277,13 @@ def _set_shares(conversation: str, wanted: set[str]) -> dict:
 	}
 	added, removed = wanted - existing.keys(), existing.keys() - wanted
 	if added:
-		if len(wanted) > MAX_RECIPIENTS:
-			frappe.throw(_("A chat can have at most 25 recipients, including hidden users."))
 		# A roles-cache miss can read the earlier request snapshot even after
 		# a User lock sees the latest row. Validate live role rows as well.
 		current_roles = set(
 			frappe.db.get_values(
 				"Has Role",
 				filters={
-					"parent": ["in", sorted(added | {doc.owner})],
+					"parent": ["in", sorted(wanted | {doc.owner})],
 					"parenttype": "User",
 					"role": ["in", JARVIS_ACCESS_ROLES],
 				},
@@ -305,6 +303,19 @@ def _set_shares(conversation: str, wanted: set[str]) -> dict:
 				frappe.throw(_("Choose enabled users with Jarvis access."), frappe.PermissionError)
 		for user in added:
 			_validate_addition(doc, user)
+		# Existing hidden grants are retained without consuming visible capacity.
+		# User and role rows above are locked and read fresh for the whole request.
+		visible = sum(
+			1
+			for user in wanted
+			if user in current_roles
+			and user in locked_users
+			and locked_users[user].enabled
+			and locked_users[user].user_type == "System User"
+			and user not in {"Guest", "Administrator", doc.owner}
+		)
+		if visible > MAX_RECIPIENTS:
+			frappe.throw(_("A chat can have at most 25 visible recipients."))
 	# Validate the full request before deleting anything. Revoking requires no
 	# enabled/shareable check and remains possible while sharing is switched off.
 	for user in removed:
@@ -405,6 +416,15 @@ def _read_shared_conversation(conversation, limit, before, after, refresh) -> di
 		doc, limit=max(1, min(200, cint(limit))), before=cint(before), after=cint(after), refresh=refresh
 	)
 	result = project_conversation(body, doc)
+	from jarvis.chat import collaboration
+
+	# Old clients keep their inert projection. New clients discover the
+	# separately authorized common reader, including after the rollout pauses.
+	if collaboration.writes_ready() or collaboration.is_collaborative(conversation):
+		result["conversation"].update(
+			collaboration_available=collaboration.writes_ready(),
+			collaboration_active=collaboration.is_collaborative(conversation),
+		)
 	_mark_seen(share.name, latest)
 	return result
 
@@ -476,7 +496,7 @@ def set_sharing_setting(enabled: bool) -> dict:
 
 
 @frappe.whitelist(methods=["POST"])
-def list_all_shares(start: int = 0, page_length: int = 50, search: str = "") -> dict:
+def list_all_shares(start: int = 0, page_length: int = 50, search: str = "", include_modes: int = 0) -> dict:
 	require_jarvis_access()
 	require_jarvis_admin()
 	start, page_length = max(0, cint(start)), max(1, min(200, cint(page_length)))
@@ -486,14 +506,18 @@ def list_all_shares(start: int = 0, page_length: int = 50, search: str = "") -> 
 		JOIN `tabUser` o ON o.name=s.shared_by JOIN `tabUser` u ON u.name=s.user
 		WHERE (o.name LIKE %(search)s OR o.full_name LIKE %(search)s
 		 OR u.name LIKE %(search)s OR u.full_name LIKE %(search)s)"""
+	mode_column = "s.access_mode" if frappe.db.has_column(SHARE, "access_mode") else "'View'"
+	mode_select = f", {mode_column} AS access_mode" if cint(include_modes) else ""
 	rows = frappe.db.sql(
-		"SELECT s.name, s.conversation, s.user, s.creation AS shared_on, c.title AS conversation_title, o.full_name AS owner_name, u.full_name AS recipient_name "
+		f"SELECT s.name, s.conversation, s.user, s.creation AS shared_on, c.title AS conversation_title, o.full_name AS owner_name, u.full_name AS recipient_name{mode_select} "
 		+ where
 		+ " ORDER BY s.creation DESC, s.name LIMIT %(length)s OFFSET %(start)s",
 		params,
 		as_dict=True,
 	)
 	for row in rows:
+		if cint(include_modes):
+			row["access_mode"] = "Chat" if row.get("access_mode") == "Chat" else "View"
 		doc = frappe.get_doc(CONVERSATION, row.pop("conversation"))
 		row["hidden"] = bool(_hidden_reason(doc, row.pop("user")))
 	return {"rows": rows, "total": frappe.db.sql("SELECT COUNT(*) " + where, params)[0][0]}

@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from "vue-router";
 import { isWorkspaceReady } from "@/onboarding/readiness.js";
+import { createPreloadErrorHandler } from "@/router/preloadGuard";
 // STATIC import: the main chunk = shell + store + ChatView (chat is the app
 // home, D33); every other page is a route-level dynamic import.
 import ChatView from "@/views/ChatView.vue";
@@ -13,6 +14,16 @@ export function supportGuard(to, from, next) {
 }
 
 const routes = [
+	{
+		path: "/shared",
+		name: "SharedChats",
+		component: () => import("@/views/SharedChatsList.vue"),
+	},
+	{
+		path: "/shared/:id",
+		name: "SharedConversation",
+		component: () => import("@/views/SharedChatView.vue"),
+	},
 	{ path: "/", name: "Chat", component: ChatView, meta: { chat: true } },
 	{ path: "/c/:id", name: "Conversation", component: ChatView, meta: { chat: true } },
 	// /skills renders the two-tab shell (Skills | Learning). The name stays
@@ -338,13 +349,15 @@ router.onError((error, to) => {
 // Vite's own signal when a preloaded module fails to fetch — fires before the
 // import promise rejects, so it's the earliest chance to recover. Both handlers
 // share the sessionStorage guard, so at most one reload happens.
-window.addEventListener("vite:preloadError", (event) => {
-	if (_isChunkLoadError(event && event.payload)) {
-		event.preventDefault();
-		// Reload straight to the route being navigated to (recorded in
-		// beforeEach), not the page currently in memory.
-		_recoverFromStaleChunk(_pendingTarget);
-	}
-});
+// A failed holiday art chunk is not recovered here (see router/preloadGuard.js).
+window.addEventListener(
+	"vite:preloadError",
+	createPreloadErrorHandler({
+		isChunkLoadError: _isChunkLoadError,
+		// Reload straight to the route being navigated to (recorded in beforeEach),
+		// not the page currently in memory.
+		recover: () => _recoverFromStaleChunk(_pendingTarget),
+	})
+);
 
 export default router;
