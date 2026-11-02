@@ -115,6 +115,7 @@ def get_creation_context(
 	child_fields = _child_fields(meta)
 	if child_fields:
 		field_lists["child_fields"] = child_fields
+		field_lists["child_doctypes"] = {name: meta.get_field(name).options for name in child_fields}
 
 	# Derived record? The agent already tells us the source - it passes
 	# {"sales_order": "SAL-ORD-2026-00002"} as a hint - so if the ERP has a
@@ -216,7 +217,13 @@ def _result(
 			"default is wrong for this record; a symbolic default (`Today`, "
 			"`:Company`) is resolved by Frappe - never copy the token as a "
 			"value. Set every remaining `mandatory` field before create_doc. "
-			"Ask the user only about mandatory fields you cannot determine."
+			"Ask the user only about mandatory fields you cannot determine. "
+			"For a missing child-row value, use a jarvis-ask field question with "
+			'"doctype" from child_doctypes, "fieldname", "parent" set to this '
+			'document type and "parentfield" set to the table field. For example: '
+			'{"q":"Item","type":"field","doctype":"Sales Invoice Item",'
+			'"fieldname":"item_code","parent":"Sales Invoice","parentfield":"items"}. '
+			"This keeps the field's record eligibility filters; a bare link picker is a generic lookup."
 		),
 	}
 	out.update(field_lists or {})
@@ -249,7 +256,9 @@ def _doctype_for_key(key: str) -> str | None:
 	if not key or not isinstance(key, str):
 		return None
 	guess = key.replace("_", " ").title()
-	return guess if frappe.db.exists("DocType", guess) else None
+	# On MariaDB DocType lookup is case-insensitive; use the stored spelling for its table
+	# and mapper ("Bill of Entry", "BOM"), not the title-cased context key.
+	return frappe.db.exists("DocType", guess) or None
 
 
 def _mapped_from_context(target_doctype: str, context: dict) -> tuple:

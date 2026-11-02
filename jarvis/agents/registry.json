@@ -471,13 +471,13 @@
     },
     {
       "agent_slug": "cash-limit-269st-40a3-auditor",
-      "title": "Cash-Limit Breach-Candidate Worklist — s.40A(3) / s.269ST (auditor)",
+      "title": "Cash-Limit Breach-Candidate Worklist (auditor)",
       "domain": "india-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "status": "Published",
-      "description": "Scans your cash payments and cash receipts and lists the ones that cross India's income-tax cash limits: expenses paid in cash above ₹10,000 to one payee in a day (₹35,000 for transporters), and cash received of ₹2,00,000 or more in aggregate from one person. Ships a monthly preventive worklist and a pre-flighted Form 3CD data pack. Read-only breach-candidate list for your CA to review; never edits a voucher, books anything, files a return, or decides that any payment is actually disallowed or penalised.",
+      "description": "Uses effective-dated India income-tax cash-payment and cash-receipt rules for the server-stamped period. It lists cash-account review candidates, applies the matching statutory rule version, and provides a tax-audit review pack. Read-only: it never edits a voucher, books anything, files a return, or decides that a deduction, exception, or penalty applies.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
@@ -512,8 +512,10 @@
         "s269st_limit",
         "s271da_penalty_measure",
         "s40a3_disallowance_measure",
-        "s40a3_limits"
+        "s40a3_limits",
+        "s40a3_prior_liability_measure"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -708,7 +710,7 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only inventory-ageing review: derives each item's last genuine outward movement, buckets it by age, separates slow-moving from non-moving and dead stock, overlays batch-expiry write-off candidates, and totals the working capital frozen per ageing bucket and warehouse. Ships a ranked disposition worklist and dashboard. Never moves, adjusts, or writes off stock, and never sets a write-down value.",
       "tools_required": [
@@ -765,7 +767,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Weekly read-only pipeline-hygiene scrub of your open CRM deals: surfaces deals that have gone quiet, aged in their current stage, run past their expected close date, or have no next step scheduled, then ranks them into a per-owner worklist so the forecast reflects deals that are actually moving. Never edits a deal, moves a stage, changes a date, or creates a task.",
       "tools_required": [
@@ -822,20 +824,22 @@
       "domain": "ap",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only AP hygiene sweep. Retrospectively surfaces duplicate-payment candidates — payments that appear to have been made twice (same vendor, same amount, close dates, look-alike references) — pairing documents and cross-checking settlement evidence. Also flags near-duplicate purchase invoices, one vendor entered as two masters, check-digit-invalid GSTIN/PAN, and bank-detail changes just before a payment. Hands finance a ranked, evidence-linked candidate worklist and dashboard. Never edits a master, touches a payment, or decides claw-backs.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__get_doc",
+        "jarvis__get_engagement_config"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
+        "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -863,6 +867,7 @@
         "gst_gstin_checkdigit_algorithm",
         "pan_format"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "ap-exception-family",
       "timeout_s": 1800,
@@ -1189,7 +1194,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "status": "Published",
       "description": "Read-only hygiene sweep of your Frappe CRM: finds duplicate and near-duplicate leads (the same person entered twice across leads and deals), flags leads marked converted with no matching deal, and surfaces uncontactable, unassigned, or SLA-breached leads into a ranked worklist. Never merges, edits, assigns, or deletes a record — it hands sales-ops the exceptions and a human decides.",
       "tools_required": [

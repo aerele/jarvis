@@ -58,6 +58,7 @@ _TERMINAL_COLS = frozenset(
 		"adopted_conversation",
 		"edited",
 		"sheet_outcome",
+		"dedup_keys",  # Account Edit & create: recent identity follows the approved company.
 	}
 )
 _TERMINAL_JSON = frozenset({"sheet_outcome"})
