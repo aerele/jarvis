@@ -183,6 +183,32 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 		ResultTooLargeError: result exceeds ``ROW_GUARD`` and
 			``confirm_large`` is False.
 	"""
+	return _execute_query(spec, confirm_large=confirm_large, model_output=True)
+
+
+def _query_private_server(spec: dict, confirm_large: bool = False) -> dict:
+	"""Run a fixed server query without applying the model-output byte budget.
+
+	This is deliberately private and unregistered.  It is only for a server-owned
+	private-source transport; it still uses the public query compiler, permission
+	weave, field masking, row guard, and requested row limit.  It omits only the
+	model-facing result text budget and the saved-query escape hatch that budget
+	creates.
+	"""
+	from jarvis.tools import _private_output
+
+	if not _private_output.is_private():
+		raise InvalidArgumentError("Private server queries require the private source transport.")
+	return _execute_query(spec, confirm_large=confirm_large, model_output=False)
+
+
+def _execute_query(spec: dict, *, confirm_large: bool, model_output: bool) -> dict:
+	"""Run the shared guarded query pipeline.
+
+	``model_output`` controls only serialization-facing metadata.  Every data
+	access control stays before this switch, so the private path cannot broaden a
+	query or exceed its normal row limit.
+	"""
 	q = compile_spec(spec)
 	# Frappe 16 field masking (a no-op on 15); a computed column over a masked
 	# field is refused here, before the SELECT runs.
@@ -205,29 +231,36 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 			tool="query",
 		)
 
-	# Resolve the SQL for the operator triage payload. ``get_sql()``
-	# is the qb call that produces the final dialect-specific SQL
-	# string; safe to expose since the spec doesn't carry secrets.
-	try:
-		resolved_sql = q.get_sql()
-	except Exception:
-		resolved_sql = "<sql resolution failed>"
-
-	result = {"sql": resolved_sql, "rows": rows}
+	result = {}
+	if model_output:
+		# Resolve the SQL for the operator triage payload. ``get_sql()``
+		# is the qb call that produces the final dialect-specific SQL
+		# string; safe to expose since the spec doesn't carry secrets.
+		try:
+			result["sql"] = q.get_sql()
+		except Exception:
+			result["sql"] = "<sql resolution failed>"
+	result["rows"] = rows
 	if more_rows and spec.get("limit"):
 		result["more_rows"] = True
 		result["note"] = f"Showing the requested first {limit} rows; more rows match."
-	from jarvis.tools._result_guard import enforce_result_budget
+	if model_output:
+		from jarvis.tools._result_guard import enforce_result_budget
 
-	_, budget_event = enforce_result_budget(result, tool="query")
-	# Only a cut answer gets a saved id; an event that cut nothing ("uncapped", "measure_failed")
-	# is a complete answer and must not tell the agent to export it again.
-	if partial or (budget_event and budget_event["kind"] in _CUTTING_EVENTS):
-		from jarvis.tools._export.saved_queries import save
+		_, budget_event = enforce_result_budget(result, tool="query")
+		# Only a cut answer gets a saved id; an event that cut nothing ("uncapped", "measure_failed")
+		# is a complete answer and must not tell the agent to export it again.
+		if partial or (budget_event and budget_event["kind"] in _CUTTING_EVENTS):
+			from jarvis.tools._export.saved_queries import save
 
-		result["result_id"] = save(spec, preserve_limit=bool(spec.get("limit")))
+			result["result_id"] = save(spec, preserve_limit=bool(spec.get("limit")))
+			result["partial"] = True
+			result["note"] = _saved_note(result["result_id"], spec.get("limit"))
+	elif partial:
+		# Preserve the public incomplete-result signal without offering a model
+		# export path.  Deposit source specs always have an explicit cap, but this
+		# keeps the helper safe if a future fixed source omits one by mistake.
 		result["partial"] = True
-		result["note"] = _saved_note(result["result_id"], spec.get("limit"))
 	return result
 
 

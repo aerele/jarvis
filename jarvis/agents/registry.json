@@ -239,6 +239,7 @@
         "ali-lwp-9c21",
         "ali-punch-7d14"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -358,6 +359,7 @@
         "bm-fc-1d7a",
         "bm-inv-6b03"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 3600,
@@ -403,6 +405,7 @@
         "bmhd-lat-4c19",
         "bmhd-win-9e2f"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 900,
@@ -452,6 +455,7 @@
         "bmh-ovl-7d12",
         "bmh-win-3ab8"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 1800,
@@ -514,6 +518,7 @@
         "s40a3_disallowance_measure",
         "s40a3_limits"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -577,6 +582,7 @@
         "ca-cl-a4e6",
         "ca-cl-c058"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 2400,
@@ -599,9 +605,9 @@
       "domain": "knowledge",
       "nature": "scribe",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "status": "Published",
-      "description": "Reads your installed CUSTOM Frappe apps' source and writes business-first wiki pages about them — what each app does, its doctypes, workflows, validations and integrations — so your team and the assistant can rely on it later. Runs on demand in the Jarvis container (your bench never sees a source-laden chat), never reads core-app source, writes only the org wiki (no ERP write tool), and updates pages in place on re-run. Only run it on apps whose code you trust: source is treated as data, not instructions, but could still try to steer the agent. Admin-restricted (System Manager / Jarvis Admin).",
+      "description": "Reads the CUSTOM Frappe apps you select and writes business-first wiki pages about them — what each app does, its doctypes, workflows, validations and integrations — so your team and the assistant can rely on it later. You name the exact apps at launch: it reads only those (never core-app source). Runs on demand in the Jarvis container (your bench never sees a source-laden chat), writes only the org wiki (no ERP write tool), and updates its own pages in place on re-run. Only select apps whose code you trust: source is treated as data, not instructions, but could still try to steer the agent. Admin-restricted (System Manager / Jarvis Admin).",
       "tools_required": [
         "jarvis__list_app_modules",
         "jarvis__read_app_source",
@@ -622,6 +628,7 @@
         "Jarvis Wiki Page"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "",
       "timeout_s": 5400,
@@ -677,6 +684,7 @@
         "Stock Ledger Entry"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": [
         {
           "doctype": "Jarvis Approval Request",
@@ -922,6 +930,7 @@
         "gdp_near_expiry_horizon_convention",
         "shelf_life_horizon_fraction"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -980,6 +989,7 @@
         "fad-mat-7c21",
         "fad-salv-b1a6"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
@@ -1038,6 +1048,7 @@
         "grn-offpo-3d51",
         "grn-uomtol-4b17"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1095,6 +1106,7 @@
         "rule37_180d",
         "s16_4_window"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1118,7 +1130,7 @@
       "domain": "gst-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Pre-file data-quality worklist for your GST returns: on an india_compliance bench it works only the manual-override and data-import residue — lines with a blank or short HSN, invoices whose place-of-supply contradicts the tax head charged, one HSN billed at inconsistent rates across the period, and a books-vs-return tie-out where GSTR-1/3B are generated through india_compliance. Read-only; ranks the residue by rupees. Never edits an invoice, amends or files a return, and asserts no filing-correctness verdict.",
       "tools_required": [
@@ -1126,6 +1138,7 @@
         "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
+        "jarvis__get_gstr1_summary",
         "jarvis__get_balance_on"
       ],
       "tools_allow": [
@@ -1285,6 +1298,7 @@
         "ls-sign-9c14",
         "ls-susp-3d7a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
@@ -1340,6 +1354,7 @@
         "msmed_s15_windows",
         "s43bh_yearend_test"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1403,6 +1418,7 @@
         "nsv-spike-4b1c",
         "nsv-tieout-7d92"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1533,6 +1549,7 @@
         "Purchase Order Item"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": [
         {
           "doctype": "Jarvis Approval Request",
@@ -1596,6 +1613,7 @@
         "sb-stat-4d81",
         "sb-win-1e4a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "helpdesk-queue",
       "timeout_s": 1800,
@@ -1656,6 +1674,7 @@
         "pt_slabs_karnataka",
         "pt_slabs_maharashtra"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
@@ -1678,19 +1697,16 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "status": "Published",
       "description": "Reviews each owner-declared native outgoing payroll booking in one configured Account group against a dated due-date reference. It keeps current interest and damages evidence-review gaps visible and shows VISHWAS as an external-review reference only. It does not decide eligibility, receipt, default or penalty. Gazette text and qualified legal review remain pending.",
       "tools_required": [
-        "jarvis__query"
+        "jarvis__get_payroll_deposit_inputs"
       ],
       "tools_allow": [
-        "jarvis__query",
+        "jarvis__get_payroll_deposit_inputs",
         "jarvis__record_agent_run",
-        "jarvis__save_agent_dashboard",
-        "exec",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
         "Journal Entry",
@@ -1762,6 +1778,7 @@
       "rule_tokens": [
         "sv-vtol-7b2c"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
@@ -1822,6 +1839,7 @@
         "section_rates",
         "section_thresholds"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1876,6 +1894,7 @@
         "HD Agent"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": [
         {
           "doctype": "Jarvis Approval Request",
@@ -1952,6 +1971,7 @@
         "vl-stale-ageing-5f17",
         "vl-tieout-tol-a9e3"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,

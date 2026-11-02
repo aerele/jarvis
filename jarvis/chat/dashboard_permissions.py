@@ -35,6 +35,8 @@ from jarvis.chat.wiki_permissions import _NON_TARGETABLE_ROLES
 from jarvis.permissions import JARVIS_ADMIN_ROLE, has_jarvis_admin_access
 
 DASHBOARD = "Jarvis Dashboard"
+RUN = "Jarvis Agent Run"
+DEPOSIT_AGENT = "statutory-payroll-deposit-status"
 
 # ptypes that reveal dashboard content; everything read-shaped maps to
 # visibility (mirrors wiki_permissions).
@@ -50,6 +52,59 @@ def _is_sm(user: str) -> bool:
 def _get(doc, field: str):
 	# dict rows (frappe.get_all) and Document both expose .get.
 	return doc.get(field)
+
+
+def is_immutable_deposit_dashboard(doc) -> bool:
+	"""True when this dashboard is the server-owned Deposit report.
+
+	The link on the Agent Run is the authority.  It is checked before owner or
+	admin privileges so an ordinary dashboard keeps its normal edit behavior.
+	"""
+	name = _get(doc, "name")
+	if not name:
+		return False
+	return bool(frappe.db.exists(RUN, {"agent": DEPOSIT_AGENT, "dashboard": name}))
+
+
+def _delete_deposit_dashboard_for_run_removal(
+	run_name: str, *, expected_installation: str | None
+) -> str | None:
+	"""Remove one linked Deposit report inside a trusted lifecycle transaction.
+
+	A normal caller cannot clear the Run link.  This helper locks the exact Run,
+	verifies its current installation, clears only that link, then deletes the
+	Dashboard before the Run itself is removed.  It is intentionally not
+	whitelisted and does not accept an ``ignore_permissions`` escape hatch.
+	"""
+	run = frappe.db.get_value(
+		RUN,
+		run_name,
+		["name", "agent", "installation", "dashboard"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not run:
+		frappe.throw("Deposit report lifecycle cannot be verified.", frappe.PermissionError)
+	if run.agent != DEPOSIT_AGENT:
+		return None
+	if run.installation != expected_installation:
+		frappe.throw("Deposit report lifecycle cannot be verified.", frappe.PermissionError)
+	if not run.dashboard:
+		return None
+	dashboard_name = run.dashboard
+	frappe.db.set_value(RUN, run.name, "dashboard", None, update_modified=False)
+	frappe.delete_doc(DASHBOARD, dashboard_name, ignore_permissions=True, force=True)
+	return dashboard_name
+
+
+def delete_deposit_dashboard_for_uninstall(run_name: str, installation: str) -> str | None:
+	"""Server-only cleanup of a Deposit report during its installation uninstall."""
+	return _delete_deposit_dashboard_for_run_removal(run_name, expected_installation=installation)
+
+
+def delete_deposit_dashboard_for_retention(run_name: str) -> str | None:
+	"""Server-only cleanup of a detached Deposit report during retention purge."""
+	return _delete_deposit_dashboard_for_run_removal(run_name, expected_installation=None)
 
 
 def can_read_dashboard(doc, user: str | None = None) -> bool:
@@ -72,6 +127,10 @@ def can_read_dashboard(doc, user: str | None = None) -> bool:
 
 def can_edit_dashboard(doc, user: str | None = None) -> bool:
 	"""Write matrix: the owner, or the admin tier."""
+	# This check must come before the owner/admin tier.  The linked report is an
+	# immutable server receipt, not an editable dashboard owned by its reviewer.
+	if is_immutable_deposit_dashboard(doc):
+		return False
 	user = user or frappe.session.user
 	if has_jarvis_admin_access(user):
 		return True

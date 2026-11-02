@@ -107,7 +107,13 @@ class TestCollaborationCallbacks(CollaborationCase):
 			self.authorize()
 
 	def test_unknown_new_tool_and_private_memory_never_admit_callbacks(self):
-		for tool in ("recall", "remember", "future_unknown_tool", "record_app_wiki"):
+		for tool in (
+			"recall",
+			"remember",
+			"future_unknown_tool",
+			"record_app_wiki",
+			"get_payroll_deposit_inputs",
+		):
 			with self.subTest(tool=tool):
 				self.record(call=tool, tool="jarvis__" + tool)
 				with self.assertRaises(frappe.PermissionError):

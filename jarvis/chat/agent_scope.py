@@ -29,7 +29,7 @@ INSTALLATION = "Jarvis Agent Installation"
 _PAYROLL_DEPOSIT_AGENT = "statutory-payroll-deposit-status"
 
 
-def resolve_scope(installation) -> dict:
+def resolve_scope(installation, *, config: dict | None = None) -> dict:
 	"""Resolve the explicit run scope for an installation.
 
 	``installation`` may be a ``Jarvis Agent Installation`` doc or its name.
@@ -44,7 +44,13 @@ def resolve_scope(installation) -> dict:
 		installation = frappe.get_doc(INSTALLATION, installation)
 
 	cfg: dict = {}
-	if installation.get("config"):
+	if config is not None:
+		# Deposit-status passes a server-stamped launch snapshot here. It must
+		# never re-read mutable installation configuration after launch.
+		if not isinstance(config, dict):
+			raise InvalidArgumentError("agent scope configuration is invalid")
+		cfg = dict(config)
+	elif installation.get("config"):
 		try:
 			parsed = frappe.parse_json(installation.config)
 			if isinstance(parsed, dict):

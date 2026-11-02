@@ -69,11 +69,14 @@ def record_write(actor, tool, args, result, outcome, provenance, provenance_name
 	try:
 		from jarvis.api import _BULK_ARG_KEYS, _bulk_len, _is_bulk_call
 		from jarvis.audit import _ref
+		from jarvis.tools import _private_output
 
 		if outcome not in OUTCOMES:
 			outcome = "applied"
+		tool = _private_output.redact_delegate_tool(tool)
 		provenance = _coerce_provenance(provenance, tool)
-		a = args if isinstance(args, dict) else {}
+		a = _private_output.redact_delegate_args(args)
+		a = a if isinstance(a, dict) else {}
 
 		# _ref returns a 3-tuple (doctype, name, method); we keep the first two.
 		ref_doctype_from_args = ref_name = ""
@@ -135,8 +138,11 @@ def record_write(actor, tool, args, result, outcome, provenance, provenance_name
 		# File logger only (never frappe.log_error): an Error Log insert is itself a
 		# DB write that could touch this same transaction. Carry tool/actor/outcome
 		# so a wholesale failure is triageable from the log without the row.
+		from jarvis.tools import _private_output
+
 		frappe.logger("jarvis.agent_audit").error(
-			f"agent-write audit failed (tool={tool} actor={actor} outcome={outcome})", exc_info=True
+			f"agent-write audit failed (tool={_private_output.redact_delegate_tool(tool)} actor={actor} outcome={outcome})",
+			exc_info=True,
 		)
 		return None
 

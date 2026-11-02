@@ -38,14 +38,19 @@ def dispatch(session_key: str, tool: str, raw_args, call_id: str) -> dict:
 			)
 			if cached and cached.tool_result:
 				complete(permit, cached.name)
-				stored = json.loads(cached.tool_result)
-				from jarvis.chat.source_receipts import SOURCE_TOOLS, is_source_receipt
+				from jarvis.chat.source_receipts import SOURCE_TOOLS
 
-				if tool in SOURCE_TOOLS and is_source_receipt(stored):
+				# Old receipts can predate the source-reference marker.  Do not replay
+				# any cached result for a source-reading tool: an old result can contain
+				# source rows or file-page bytes that the current receipt projection
+				# would remove. Check before JSON parsing too: the old value can be
+				# arbitrarily large and is neither needed nor safe to deserialize here.
+				if tool.removeprefix("jarvis__") in SOURCE_TOOLS:
 					return api._error(
 						"SourceReadRequired",
 						"Source values are not retained. Make a new read call; current permissions and source versions will be checked again.",
 					)
+				stored = json.loads(cached.tool_result)
 				return scrub_for_share(stored)
 			existing = frappe.db.get_value(
 				"Jarvis Pending Action", {"collaboration_call_key": call_key(permit)}, "status"

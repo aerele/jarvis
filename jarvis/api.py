@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from collections import deque
 from contextlib import contextmanager, nullcontext
@@ -9,7 +10,11 @@ from frappe.utils.caching import request_cache
 
 from jarvis import audit, telemetry
 from jarvis._http import validate_bearer as _validate_bearer
-from jarvis._plugin_auth import PluginAuthError, validate_plugin_request
+from jarvis._plugin_auth import (
+	PluginAuthError,
+	validate_plugin_request,
+	validate_private_input_recovery_request,
+)
 from jarvis._session import impersonate
 from jarvis.chat import txn
 from jarvis.exceptions import (
@@ -32,9 +37,259 @@ from jarvis.permissions import (
 from jarvis.tools._result_guard import enforce_result_budget
 from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
+_REGISTERED_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+_PRIVATE_INPUT_RECOVERY_BODY = b"{}"
+_PRIVATE_INPUT_RECOVERY_ACK = {"ok": True}
+_PRIVATE_INPUT_RECOVERY_BODY_ERROR = "Invalid private input recovery request."
+_PRIVATE_INPUT_RECOVERY_CMD = "jarvis.api.terminalize_unusable_payroll_deposit_private_source"
+_PRIVATE_INPUT_RECOVERY_ALLOWED_REQUEST_KEYS = frozenset({"cmd"})
+_PRIVATE_INPUT_RECOVERY_FORBIDDEN_HEADERS = frozenset({"x-jarvis-tool", "x-jarvis-tool-call-id"})
+_PRIVATE_INPUT_RECOVERY_UNAVAILABLE = "Private payroll input recovery is unavailable."
+_TERMINAL_DEPOSIT_RUN_MESSAGE = "This private payroll delegate run is no longer active."
+_LEGACY_DEPOSIT_RUN_MESSAGE = (
+	"This private payroll delegate run must be started again with the current protocol."
+)
+_LEGACY_DEPOSIT_RUN_ERROR = "private payroll delegate uses an unsupported legacy protocol; restart the run"
+_DEPOSIT_V3_WRITEBACK_KEYS = frozenset(
+	{
+		"findings",
+		"coverage",
+		"scope",
+		"truncated",
+		"rows_consumed",
+		"input_snapshot_id",
+		"input_snapshot_digest",
+	}
+)
+_DEPOSIT_V3_WRITEBACK_ERROR = "This private payroll delegate writeback must use the exact v3 handoff."
+
+
+def _canonical_registered_tool(tool) -> str | None:
+	"""Return a valid bare registry name, never an attacker display value."""
+	name = str(tool or "").strip()
+	return name if _REGISTERED_TOOL_NAME.fullmatch(name) and name in _ACCEPTED_PARAMS else None
+
+
+def _terminal_deposit_run_refusal() -> dict:
+	"""Return the fixed, data-free refusal for a terminal Deposit bearer.
+
+	``tool_denial`` enforces the frozen tool list, but deliberately has no Run
+	status rule: a terminal run can still have a valid source/writeback entry in
+	that list. This refusal must therefore stay before tool-name, call-id, and
+	argument processing in every signed-session dispatch path.
+	"""
+	return _error(RunHaltedError.__name__, _TERMINAL_DEPOSIT_RUN_MESSAGE)
+
+
+def _deposit_dispatch_refusal(cap) -> dict | None:
+	"""Refuse Deposit bearers that cannot safely enter generic dispatch.
+
+	This runs before caller-selected tool metadata, arguments, receipts, audit,
+	realtime, steps, or artifacts.  A legacy Deposit run has no sealed private
+	output contract, so it cannot safely use newer source tools even while its
+	Run row still says ``running``.  The legacy exception remains unchanged for
+	all non-Deposit agents.
+	"""
+	from jarvis.tools import _private_output
+
+	if _private_output.is_legacy_deposit_delegate(cap):
+		# A Deposit legacy run has no safe path to its structured writeback.  Do
+		# not leave it running for the stale reaper to call this an ordinary timeout.
+		# ``fail_run`` locks and compares ``status='running'``, so a concurrent
+		# writeback or stop wins without being overwritten.  Its input is fixed
+		# server metadata only; no caller tool, call-id, or arguments reach it.
+		if cap.get("status") == "running":
+			from jarvis.chat import agent_scheduler
+
+			agent_scheduler.fail_run(cap.get("run"), _LEGACY_DEPOSIT_RUN_ERROR)
+		return _error(RunHaltedError.__name__, _LEGACY_DEPOSIT_RUN_MESSAGE)
+	if _private_output.is_terminal_deposit_delegate(cap):
+		return _terminal_deposit_run_refusal()
+	return None
+
+
+def _deposit_v3_writeback_args(args: dict | str | None) -> dict | None:
+	"""Decode and admit only the Deposit v3 top-level handoff shape.
+
+	This runs before :func:`_parse_args`, which intentionally removes legacy
+	identity keys for generic callers, and before registry dispatch filters
+	unknown keys. A private Deposit writeback cannot use either compatibility
+	behavior because even a JSON ``null`` legacy dashboard field is evidence that
+	the delegate did not emit the sealed seven-field contract.
+	"""
+	decoded = args
+	if isinstance(decoded, str):
+		try:
+			decoded = json.loads(decoded)
+		except (TypeError, ValueError):
+			return None
+	if not isinstance(decoded, dict) or set(decoded) != _DEPOSIT_V3_WRITEBACK_KEYS:
+		return None
+	return decoded
+
+
+def _requires_deposit_v3_writeback(tool: str, cap) -> bool:
+	"""True only for a running Deposit Run's final structured handoff."""
+	return bool(
+		tool == "record_agent_run"
+		and isinstance(cap, dict)
+		and cap.get("agent") == "statutory-payroll-deposit-status"
+		and cap.get("status") == "running"
+	)
+
+
+def _private_input_recovery_request_is_neutral(ignored: dict) -> bool:
+	"""Accept only the plugin's JSON ``{}`` request shape.
+
+	Frappe passes RPC data as keyword arguments and, for JSON requests, keeps URL
+	query data outside ``form_dict``. Inspect both sources before authentication so
+	text/form bodies and caller-selected query data cannot reach a later log,
+	receipt, or state transition. ``cmd`` is the framework's own RPC selector and
+	must name this exact endpoint when it is present.
+	"""
+	try:
+		request = frappe.request
+		media_type = (
+			getattr(request, "mimetype", None)
+			or getattr(request, "content_type", None)
+			or request.headers.get("Content-Type")
+		)
+	except (AttributeError, RuntimeError):
+		return False
+	if str(media_type or "").split(";", 1)[0].strip().lower() != "application/json":
+		return False
+	if not _private_input_recovery_headers_are_safe(request):
+		return False
+	if not _private_input_recovery_keys_are_safe(ignored):
+		return False
+	try:
+		sources = (getattr(request, "args", None), getattr(request, "form", None))
+	except (AttributeError, RuntimeError):
+		return False
+	for source in sources:
+		if not _private_input_recovery_keys_are_safe(source):
+			return False
+	return True
+
+
+def _private_input_recovery_headers_are_safe(request) -> bool:
+	"""Reject tool-dispatch metadata before it crosses the neutral boundary."""
+	try:
+		header_names = {str(name).lower() for name in request.headers.keys()}
+	except (AttributeError, TypeError, ValueError):
+		return False
+	return not bool(header_names & _PRIVATE_INPUT_RECOVERY_FORBIDDEN_HEADERS)
+
+
+def _private_input_recovery_keys_are_safe(values) -> bool:
+	"""Check only fixed framework keys without retaining caller values."""
+	if values is None:
+		return True
+	try:
+		keys = set(values.keys())
+	except (AttributeError, TypeError, ValueError):
+		return False
+	if not keys.issubset(_PRIVATE_INPUT_RECOVERY_ALLOWED_REQUEST_KEYS):
+		return False
+	if "cmd" not in keys:
+		return True
+	try:
+		cmd_values = values.getlist("cmd") if hasattr(values, "getlist") else [values.get("cmd")]
+		return len(cmd_values) == 1 and str(cmd_values[0] or "") == _PRIVATE_INPUT_RECOVERY_CMD
+	except (AttributeError, TypeError, ValueError):
+		return False
+
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-def call_tool(tool: str, args: dict | str | None = None) -> dict:
+def terminalize_unusable_payroll_deposit_private_source(**_ignored) -> dict:
+	"""Close one unusable Deposit private-source run through a neutral callback.
+
+	This is deliberately not a model tool. Its signed raw request is exactly
+	``{}``; the session bearer is the only selector. The fixed acknowledgement
+	reveals neither a run state nor a source transport outcome.
+	"""
+	if not _private_input_recovery_request_is_neutral(_ignored):
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", _PRIVATE_INPUT_RECOVERY_BODY_ERROR)
+	body = _request_body_bytes()
+	if body != _PRIVATE_INPUT_RECOVERY_BODY:
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", _PRIVATE_INPUT_RECOVERY_BODY_ERROR)
+	try:
+		session_key = validate_private_input_recovery_request(body)
+	except PluginAuthError as exc:
+		frappe.local.response.http_status_code = exc.http_status
+		return _error(exc.code, exc.message)
+
+	try:
+		from jarvis.chat import payroll_deposit_recovery
+
+		user = _private_input_recovery_user(session_key)
+		if user:
+			recovered = payroll_deposit_recovery.recover_private_input(session_key, user)
+		else:
+			recovered = False
+		# A 200 acknowledgement is safe only after this callback changed the
+		# active Run, or the locked current view proves there is no eligible
+		# running source Run left for this signed bearer. A false helper result can
+		# otherwise be a concurrent/corrupt identity mismatch that left the Run
+		# open; tell the plugin to retain its local private input in that case.
+		if not recovered and payroll_deposit_recovery.has_unresolved_private_input_run(session_key):
+			return _private_input_recovery_unavailable()
+	except Exception:
+		# The request carries no caller content other than the signed empty body.
+		# Do not let an unexpected server failure echo an internal exception or
+		# leave an open transaction behind this neutral recovery path. A fixed
+		# failure is required here: a success acknowledgement tells the plugin the
+		# Run is safely terminal, so it must not be sent before that transition
+		# committed (or the request was safely inert).
+		frappe.db.rollback()
+		# Keep this log line fixed too. An unexpected database/helper exception can
+		# include a run or session value, and this endpoint must not turn it into an
+		# Error Log payload.
+		frappe.logger("jarvis").error("private payroll input recovery failed")
+		return _private_input_recovery_unavailable()
+
+	frappe.local.response.http_status_code = 200
+	return dict(_PRIVATE_INPUT_RECOVERY_ACK)
+
+
+def _private_input_recovery_unavailable() -> dict:
+	"""Return the fixed non-success response when terminal state is not proved."""
+	frappe.local.response.http_status_code = 503
+	return _error("ServiceUnavailable", _PRIVATE_INPUT_RECOVERY_UNAVAILABLE)
+
+
+def _private_input_recovery_user(session_key: str) -> str | None:
+	"""Return a live legacy Deposit run-as user, without a customer receipt."""
+	from jarvis.chat.collaboration import is_collaborative_session, legacy_session_user
+	from jarvis.chat.device import session_device_is_stale
+	from jarvis.permissions import is_valid_unattended_owner
+
+	try:
+		if is_collaborative_session(session_key):
+			return None
+		user = legacy_session_user(session_key)
+		if not is_valid_unattended_owner(user):
+			return None
+		try:
+			row_device = (
+				frappe.db.get_value("Jarvis Chat Session", {"session_key": session_key}, "chat_device_id")
+				or ""
+			).strip()
+		except Exception:
+			# Preserve normal plugin-call compatibility during the column rollout.
+			row_device = ""
+		current_device = (frappe.db.get_single_value("Jarvis Settings", "chat_device_id") or "").strip()
+		if session_device_is_stale(row_device, current_device):
+			return None
+		return user
+	except (frappe.PermissionError, AttributeError, TypeError):
+		return None
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def call_tool(tool: str, args: dict | str | None = None, result_mode: str | None = None) -> dict:
 	"""The agent's one tool endpoint (see ``_call_tool``). Every ``{ok: false}``
 	it answers is recorded for the admin error feed: a rejected call (unsigned,
 	unknown session, stale pairing) happens before the chat user is known, and an
@@ -45,14 +300,18 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 	already in the Error Log."""
 	frappe.local.jarvis_tool_failure_recorded = False
 	frappe.local.jarvis_call_tool_user = None
-	result = _call_tool(tool, args)
+	# A stale-device refusal can happen before normal delegate dispatch.  Reset
+	# this request marker here so an outer failure reporter can still use the
+	# Deposit-safe metadata decision made below.
+	frappe.local.jarvis_private_delegate_metadata = False
+	result = _call_tool(tool, args, result_mode=result_mode)
 	from jarvis import api_errors
 
 	api_errors.record_call_tool_failure(tool, result)
 	return result
 
 
-def _call_tool(tool: str, args: dict | str | None = None) -> dict:
+def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | None = None) -> dict:
 	"""Whitelisted entry point for Jarvis tool dispatch.
 
 	Two authentication modes are supported:
@@ -103,6 +362,19 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 
 		shared_session = is_collaborative_session(session_key)
 		if shared_session and tool in {"recall", "remember"}:
+			# This early shared-session refusal predates normal capability dispatch.
+			# Inspect the run before returning so a legacy Deposit bearer cannot use
+			# it to bypass the same metadata boundary as every other tool route.
+			from jarvis.tools import _delegate_capability, _private_output
+
+			cap = _delegate_capability.resolve(session_key)
+			redaction_token = _private_output.begin_delegate_redaction(cap)
+			_private_output.mark_delegate_metadata(cap)
+			try:
+				if refusal := _deposit_dispatch_refusal(cap):
+					return refusal
+			finally:
+				_private_output.end_delegate_redaction(redaction_token)
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", "Private memory is unavailable in shared chats.")
 		try:
@@ -182,8 +454,26 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 			# the NEXT turn on this conversation, so this call_tool rejection
 			# is expected to be transient in practice - but the in-flight turn
 			# that hit it still needs an honest, visible outcome now.
-			tool_call_id = (_get_header("X-Jarvis-Tool-Call-Id") or "").strip() or None
-			_notify_stale_pairing(session_key=session_key, tool=tool, tool_call_id=tool_call_id)
+			# This branch predates _dispatch_from_session.  Resolve the capability
+			# enough to apply the same Deposit metadata boundary before a receipt,
+			# realtime event, or outer error reporter can see caller-controlled text.
+			from jarvis.tools import _delegate_capability, _private_output
+
+			with impersonate(plugin_user):
+				cap = _delegate_capability.resolve(session_key)
+			redaction_token = _private_output.begin_delegate_redaction(cap)
+			_private_output.mark_delegate_metadata(cap)
+			try:
+				# A terminal Deposit Run can retain its signed Chat Session only for
+				# the commit-to-teardown interval. Do not read caller metadata or
+				# create the normal stale-device notice in that interval: it would
+				# retain an attacker-selected tool name or call id after the Run ended.
+				if refusal := _deposit_dispatch_refusal(cap):
+					return refusal
+				tool_call_id = _private_output.safe_tool_call_id(_get_header("X-Jarvis-Tool-Call-Id"))
+				_notify_stale_pairing(session_key=session_key, tool=tool, tool_call_id=tool_call_id)
+			finally:
+				_private_output.end_delegate_redaction(redaction_token)
 			return _error(
 				"AuthenticationError",
 				"session is bound to a previous device pairing; "
@@ -193,17 +483,74 @@ def _call_tool(tool: str, args: dict | str | None = None) -> dict:
 				"start a new chat to continue. Then stop.",
 			)
 
+		# A payroll input snapshot is a sealed delegate-only transport. A shared
+		# conversation, ordinary tool result, or generic private result must never
+		# receive its raw source rows.
+		from jarvis.tools import _private_output
+
+		# Most plugin calls enter _dispatch_from_session, which resolves the
+		# capability before it reads a call id or parses arguments. These two
+		# transport refusals return before that dispatcher, though. Resolve only
+		# their non-shared sessions here so a Run which became terminal after its
+		# status commit cannot use this shortcut to send caller metadata to the
+		# outer error sink. Generic calls retain their existing fast path.
+		if not shared_session and (result_mode is not None or tool in _private_output.PRIVATE_SOURCE_TOOLS):
+			from jarvis.tools import _delegate_capability
+
+			with impersonate(plugin_user):
+				cap = _delegate_capability.resolve(session_key)
+			redaction_token = _private_output.begin_delegate_redaction(cap)
+			_private_output.mark_delegate_metadata(cap)
+			try:
+				if refusal := _deposit_dispatch_refusal(cap):
+					return refusal
+			finally:
+				_private_output.end_delegate_redaction(redaction_token)
+
+		# Collaborative sessions normally have no delegate capability, but resolve
+		# one before their dispatcher reads a caller-supplied call id.  This keeps a
+		# legacy Deposit bearer from using the shared route as a metadata or source
+		# receipt bypass.  Non-delegate and generic legacy sessions retain the
+		# existing collaborative dispatch behavior.
+		if shared_session:
+			from jarvis.tools import _delegate_capability
+
+			with impersonate(plugin_user):
+				cap = _delegate_capability.resolve(session_key)
+			redaction_token = _private_output.begin_delegate_redaction(cap)
+			_private_output.mark_delegate_metadata(cap)
+			try:
+				if refusal := _deposit_dispatch_refusal(cap):
+					return refusal
+			finally:
+				_private_output.end_delegate_redaction(redaction_token)
+
+		if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Private payroll evidence requires private audit output.")
+		if result_mode is not None and (
+			result_mode != _private_output.MODE or tool not in _private_output.TOOLS or shared_session
+		):
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", "Private audit output is unavailable for this request.")
+
 		if shared_session:
 			from jarvis.chat.collaboration_dispatch import dispatch
 
 			return dispatch(session_key, tool, args, (_get_header("X-Jarvis-Tool-Call-Id") or "").strip())
-		return _dispatch_from_session(plugin_user, session_key, tool, args)
+		return _dispatch_from_session(plugin_user, session_key, tool, args, result_mode=result_mode)
 
 	# Standard Frappe auth path - Guest is rejected; everything else dispatches
 	# under the current Frappe session user.
 	if frappe.session.user == "Guest":
 		frappe.local.response.http_status_code = 401
 		return _error("AuthenticationError", "authentication required")
+
+	from jarvis.tools import _private_output
+
+	if result_mode is not None or tool in _private_output.PRIVATE_SOURCE_TOOLS:
+		frappe.local.response.http_status_code = 403
+		return _error("PermissionError", "Private payroll evidence requires an authenticated delegate run.")
 
 	# Same app-access gate as the plugin path (defense in depth): a logged-in
 	# user without Jarvis access can't drive Jarvis tools even by POSTing
@@ -333,13 +680,15 @@ def _log_read_too_slow(result, tool: str, user: str, conversation: str | None, s
 	often it fires, and for which tool, can be read from the log. Never raises. The
 	session key is left out on purpose: it is a bearer."""
 	try:
+		from jarvis.tools import _private_output
+
 		error = result.get("error") if isinstance(result, dict) else None
 		if not isinstance(error, dict) or error.get("code") != "QueryTooSlowError":
 			return
 		frappe.logger("jarvis").warning(
 			"agent read stopped at the statement time limit: tool=%s user=%s conversation=%s "
 			"limit_s=%s duration_ms=%s",
-			tool,
+			_private_output.redact_delegate_tool(tool),
 			user,
 			conversation,
 			_agent_read_timeout_s(),
@@ -404,6 +753,8 @@ def _dispatch_from_session(
 	session_key: str,
 	tool: str,
 	args: dict | str | None,
+	*,
+	result_mode: str | None = None,
 ) -> dict:
 	"""Run the dispatch under ``user``, then attribute the tool call to the
 	chat session so the UI sees it.
@@ -412,7 +763,7 @@ def _dispatch_from_session(
 	# would gut the caller's cookie session sid + data and log them out.
 	from jarvis.chat import agent_run_steps, connector_focus, macro_report_wait
 	from jarvis.chat.collaboration import require_legacy_session
-	from jarvis.tools import _agent_run_ctx, _delegate_capability
+	from jarvis.tools import _agent_run_ctx, _delegate_capability, _private_output
 
 	require_legacy_session(session_key)
 
@@ -422,8 +773,9 @@ def _dispatch_from_session(
 	# R-6: the agent tool-call id, when the plugin sends it (forward-compatible
 	# header), keys the out-of-band receipt idempotency. Absent today => no dedupe,
 	# but the seq race is still fixed under the conversation lock.
-	tool_call_id = (_get_header("X-Jarvis-Tool-Call-Id") or "").strip() or None
+	tool_call_id = None
 	_agent_run_ctx.set_session_key(session_key)
+	redaction_token = None
 	try:
 		with impersonate(user):
 			# JF-017 — the delegate capability gate, BEFORE anything is dispatched.
@@ -440,14 +792,78 @@ def _dispatch_from_session(
 			# #1062 step timeline further down, which needs the run's name, owner and
 			# status. A non-delegate session resolves to None and both are no-ops.
 			cap = _delegate_capability.resolve(session_key)
+			# A denied Deposit call can still carry source-bearing arguments. Enable
+			# the fixed safe projection before every denial, receipt, audit, and step
+			# branch below.
+			redaction_token = _private_output.begin_delegate_redaction(cap)
+			_private_output.mark_delegate_metadata(cap)
+			# ``tool_denial`` intentionally checks the frozen tool list only. A Run
+			# that just became terminal still has its source/writeback tools in that
+			# list, so it would otherwise reach the normal denial/receipt paths. Stop
+			# before reading caller metadata or parsing caller arguments instead.
+			if refusal := _deposit_dispatch_refusal(cap):
+				return refusal
+			# Deposit v3 is a closed seven-field handoff. Validate the decoded
+			# caller object before the generic parser can remove ``_user``/
+			# ``_session`` or registry dispatch can drop a legacy dashboard key.
+			# A malformed private handoff leaves no receipt, audit, step, or realtime
+			# row: those generic observability paths are not a safe compatibility lane.
+			deposit_v3_args = None
+			if _requires_deposit_v3_writeback(tool, cap):
+				deposit_v3_args = _deposit_v3_writeback_args(args)
+				if deposit_v3_args is None:
+					return _error("InvalidArgumentError", _DEPOSIT_V3_WRITEBACK_ERROR)
+			# Only a bounded opaque id is valid for normal delegates.  A Deposit
+			# delegate intentionally retains no client-provided id at all.
+			raw_tool_call_id = _get_header("X-Jarvis-Tool-Call-Id")
+			tool_call_id = _private_output.safe_tool_call_id(raw_tool_call_id)
+			# Active Deposit calls get an early fixed tool grammar/registered-name
+			# check and a bounded opaque call-id check. The raw values remain only in
+			# this stack frame for authorization and execution; none can reach a
+			# durable or realtime sink.
 			denial = _delegate_capability.tool_denial(session_key, tool, cap=cap)
+			if _private_output.metadata_redacted() and (
+				_canonical_registered_tool(tool) is None
+				or not _private_output.is_opaque_tool_call_id(raw_tool_call_id)
+			):
+				code = CapabilityDeniedError.__name__
+				message = "This private payroll delegate call is not permitted by its run contract."
+				result = _error(code, message, hint=_hint_for(code, ""))
+				audit.record(tool=tool, args={}, ok=False, error_code=code, error_message=message)
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args={},
+					result=_error(
+						code,
+						"This private payroll review cannot complete this tool request.",
+						hint=_hint_for(code, ""),
+					),
+					tool_call_id=tool_call_id,
+				)
+				if denial and denial["fatal"]:
+					from jarvis.chat import agent_scheduler
+
+					agent_scheduler.fail_run(denial["run"], denial["run_error"])
+				return result
 			if denial:
 				code = CapabilityDeniedError.__name__
 				hint = _hint_for(code, "")
+				private_message = _private_output.metadata_redacted()
+				delegate_message = (
+					"This private payroll delegate call is not permitted by its run contract."
+					if private_message
+					else denial["message"]
+				)
+				chat_message = (
+					"This private payroll review cannot complete this tool request."
+					if private_message
+					else denial["chat_message"]
+				)
 				# The DELEGATE reads this one: the contract vocabulary, and (inside the
 				# message, the only field the plugin relays to the model) the fact that
 				# retrying can never help because the snapshot is fixed for the run.
-				result = _error(code, denial["message"], hint=hint)
+				result = _error(code, delegate_message, hint=hint)
 				# What was ATTEMPTED is the forensic value of a refusal, so record the
 				# args too — scrubbed + truncated by audit.record. Parsed only here,
 				# inside the deny branch, so the gate itself stays the first thing that
@@ -461,7 +877,7 @@ def _dispatch_from_session(
 					args=attempted,
 					ok=False,
 					error_code=code,
-					error_message=denial["message"],
+					error_message=delegate_message,
 				)
 				# The CUSTOMER reads this one. The transcript receipt renders verbatim
 				# in chat, so it carries plain language plus the remedy — the contract
@@ -470,7 +886,7 @@ def _dispatch_from_session(
 					session_key=session_key,
 					tool=tool,
 					args=attempted,
-					result=_error(code, denial["chat_message"], hint=hint),
+					result=_error(code, chat_message, hint=hint),
 					tool_call_id=tool_call_id,
 				)
 				if denial["fatal"]:
@@ -482,11 +898,44 @@ def _dispatch_from_session(
 
 					agent_scheduler.fail_run(denial["run"], denial["run_error"])
 				return result
+			if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
+				message = "Private payroll evidence requires private audit output."
+				result = _error("InvalidArgumentError", message)
+				audit.record(
+					tool=tool,
+					args={},
+					ok=False,
+					error_code="InvalidArgumentError",
+					error_message=message,
+				)
+				_persist_and_publish_tool_call(
+					session_key=session_key, tool=tool, args={}, result=result, tool_call_id=tool_call_id
+				)
+				return result
+			if result_mode is not None and not _private_output.allowed(result_mode, tool, cap):
+				message = "Private audit output requires an active payroll delegate contract."
+				result = _error("CapabilityDeniedError", message)
+				audit.record(
+					tool=tool,
+					args={},
+					ok=False,
+					error_code="CapabilityDeniedError",
+					error_message=message,
+				)
+				_persist_and_publish_tool_call(
+					session_key=session_key, tool=tool, args={}, result=result, tool_call_id=tool_call_id
+				)
+				return result
 			# Parse args up front so persist_and_publish gets the same
 			# dict shape the tool ran against (or the empty dict on a
 			# malformed-args rejection).
 			try:
-				parsed_args = _parse_args(args, tool)
+				parsed_args = _parse_args(
+					deposit_v3_args if deposit_v3_args is not None else args,
+					tool,
+				)
+				if result_mode is not None:
+					_private_output.validate_args(tool, parsed_args)
 			except InvalidArgumentError as e:
 				result = _error("InvalidArgumentError", str(e))
 				_persist_and_publish_tool_call(
@@ -538,7 +987,7 @@ def _dispatch_from_session(
 			step_run = agent_run_steps.step_target(cap)
 			started_ms = time.monotonic()
 			try:
-				with _agent_read_time_limit(tool):
+				with _private_output.request(result_mode is not None), _agent_read_time_limit(tool):
 					result = _run_tool(tool, parsed_args, conversation=conv)
 			except Exception as exc:
 				# A tool that raised past _run_tool's envelope translation is a real
@@ -556,10 +1005,33 @@ def _dispatch_from_session(
 					None,
 					ok=False,
 					started_ms=started_ms,
-					error_message=str(exc),
+					error_message=(
+						"Private payroll delegate call failed."
+						if _private_output.metadata_redacted()
+						else str(exc)
+					),
 				)
+				if _private_output.metadata_redacted():
+					raise InvalidArgumentError("Private payroll delegate call failed.") from None
 				raise
 			_log_read_too_slow(result, tool, user, conv, started_ms)
+			result = _private_output.redact_delegate_result(result)
+			receipt = result
+			if result_mode is not None:
+				try:
+					result, receipt = _private_output.prepare(result, tool=tool)
+				except InvalidArgumentError as exc:
+					message = str(exc)
+					# The source tool may have read rows, but an invalid private envelope
+					# must not hand those rows to an audit, transcript, or run step.
+					audit.record(
+						tool=_private_output.redact_delegate_tool(tool),
+						args=parsed_args,
+						ok=False,
+						error_code="InvalidArgumentError",
+						error_message=message,
+					)
+					result = receipt = _error("InvalidArgumentError", message)
 			# Recorded BEFORE the result budget trims the payload, so a step's row
 			# count is the count the tool actually returned, not the truncated one.
 			_ok = bool(isinstance(result, dict) and result.get("ok"))
@@ -567,7 +1039,7 @@ def _dispatch_from_session(
 				step_run,
 				tool,
 				parsed_args,
-				result.get("data") if isinstance(result, dict) else None,
+				receipt.get("data") if isinstance(receipt, dict) else None,
 				ok=_ok,
 				started_ms=started_ms,
 				error_message=(
@@ -579,12 +1051,12 @@ def _dispatch_from_session(
 			# Agent-boundary model-facing size cap. ONLY on this (agent session)
 			# path - the dashboard builder/desk/external call_tool callers go through
 			# _dispatch_current_user and are deliberately uncapped.
-			if isinstance(result, dict) and result.get("ok"):
+			if result_mode is None and isinstance(result, dict) and result.get("ok"):
 				guarded, event = enforce_result_budget(result["data"], tool=tool)
 				if event:
 					result["data"] = guarded
 					telemetry.record_budget_event(
-						tool=tool,
+						tool=_private_output.redact_delegate_tool(tool),
 						outcome=event["kind"],
 						original_chars=event["original_chars"],
 						shown=event["shown"],
@@ -594,11 +1066,13 @@ def _dispatch_from_session(
 				session_key=session_key,
 				tool=tool,
 				args=parsed_args,
-				result=result,
+				result=receipt,
 				tool_call_id=tool_call_id,
 			)
 			return result
 	finally:
+		if redaction_token is not None:
+			_private_output.end_delegate_redaction(redaction_token)
 		_agent_run_ctx.clear_session_key()
 		_agent_run_ctx.take_armed_by_macro()  # belt: never leak an armed marker across dispatches
 		_agent_run_ctx.take_armed_by_skill()  # belt: same for the approved-skill-run marker
@@ -637,10 +1111,17 @@ def _record_tool_step(
 		return
 	try:
 		from jarvis.chat import agent_run_steps
+		from jarvis.tools import _private_output
 
 		if agent_run_steps.bare_tool(tool) in _SELF_NARRATING_TOOLS:
 			return
-		label, detail = agent_run_steps.humanize_tool_call(tool, args, data if ok else None)
+		# Keep the raw name only for the self-narrating decision above.  A
+		# Deposit tool value is caller-controlled and must not reach a step label,
+		# stored tool field, or even this hook's fallback logger.
+		safe_tool = _private_output.redact_delegate_tool(tool)
+		label, detail = agent_run_steps.humanize_tool_call(
+			safe_tool, _private_output.redact_delegate_args(args), data if ok else None
+		)
 		if not ok:
 			detail = agent_run_steps.error_detail(error_message) or detail
 		elif agent_run_steps.is_pending_confirmation(data):
@@ -652,7 +1133,7 @@ def _record_tool_step(
 		agent_run_steps.record_step(
 			step_run.get("name"),
 			kind="tool",
-			tool=tool,
+			tool=safe_tool,
 			label=label,
 			detail=detail,
 			status="ok" if ok else "error",
@@ -661,8 +1142,10 @@ def _record_tool_step(
 		)
 	except Exception:
 		try:
+			from jarvis.tools import _private_output
+
 			frappe.logger("jarvis.agents").warning(
-				f"run-step hook failed for tool {tool}: {frappe.get_traceback()}"
+				f"run-step hook failed for tool {_private_output.redact_delegate_tool(tool)}: {frappe.get_traceback()}"
 			)
 		except Exception:
 			pass
@@ -847,10 +1330,41 @@ def persist_tool_receipt(
 	``overwrite_outcomes``: with ``flip_token``, also re-flip that token's row when it
 	already carries one of these chips (a pending-action settle whose executed or
 	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``)."""
-	result = result or {}
-	from jarvis.chat.source_receipts import source_receipt
+	from jarvis.tools import _private_output
 
-	stored_args, stored_result = source_receipt(tool, args, result)
+	# Preserve the execution name only long enough to classify a source result.
+	# Deposit metadata uses a fixed label at every durable/realtime boundary, but
+	# source_receipt must see the original name or a future permissive contract
+	# could store a generic file reader's raw result under that fixed label.
+	classification_tool = tool
+	redacted_delegate = _private_output.metadata_redacted()
+	args = _private_output.redact_delegate_args(args)
+	tool_call_id = _private_output.safe_tool_call_id(tool_call_id)
+	result = result or {}
+	from jarvis.chat.source_receipts import SOURCE_TOOLS, source_receipt
+
+	is_source_tool = classification_tool.removeprefix("jarvis__") in SOURCE_TOOLS
+	# A denied Deposit call already carries a fixed error envelope. Keep it as a
+	# normal denial, rather than making a refused tool look like a source read.
+	# A successful source result is the only case that can contain rows/page bytes
+	# and therefore needs the source-reference projection under the fixed label.
+	redacted_source = (
+		redacted_delegate and is_source_tool and isinstance(result, dict) and result.get("ok") is True
+	)
+	if redacted_source:
+		_unused_source_args, stored_result = source_receipt(classification_tool, args, result)
+		stored_args = args
+	elif redacted_delegate:
+		# Capability/argument refusals already have a fixed private error envelope.
+		# Do not turn those into a source receipt merely because the attempted name
+		# happens to be a source reader.
+		stored_args, stored_result = args, result
+	else:
+		stored_args, stored_result = source_receipt(classification_tool, args, result)
+	tool = _private_output.redact_delegate_tool(classification_tool)
+	# A source reader can return a file URL which the generic artifact helper would
+	# attach to a customer-visible canvas. A Deposit source result is metadata-only
+	# for every durable surface, so it cannot create that attachment either.
 	# discarded/cancelled/superseded/expired executed NOTHING; unknown/partial's
 	# write state is UNVERIFIED (an interrupted or mid-dispatch outcome) - none of
 	# these get envelope_ok's binary completed/error classification. The chip
@@ -881,9 +1395,12 @@ def persist_tool_receipt(
 		try:
 			from jarvis.chat.entities import refs_from_tool
 
-			# refs_from_tool expects the tool's raw data, not the {ok, data} envelope.
+			# Source rows are untrusted private data. For a redacted Deposit source
+			# result, use the metadata projection here too: a source-provided ``name``
+			# must not become the durable ``ref_name`` field.
+			entity_result = stored_result if redacted_source else result
 			ref_doctype, ref_name = refs_from_tool(
-				args, result.get("data") if isinstance(result, dict) else None
+				args, entity_result.get("data") if isinstance(entity_result, dict) else None
 			)
 		except Exception:
 			ref_doctype = ref_name = None
@@ -1006,7 +1523,8 @@ def persist_tool_receipt(
 		# export_excel, …), attach it to the in-flight assistant message's
 		# canvas field + publish a canvas event so it renders inline - the
 		# same surface the agent's own canvas files use.
-		_maybe_attach_artifact(conv_name, conv_owner, result)
+		if not redacted_delegate:
+			_maybe_attach_artifact(conv_name, conv_owner, result)
 
 
 def persist_pending_action(
@@ -1301,6 +1819,11 @@ def publish_realtime_tool_result(
 	SPA can bind a live report to the reply it belongs to (the "Reports
 	consulted" card) the same way the saved rows do."""
 	from jarvis.chat.collaboration_realtime import is_shared
+	from jarvis.tools import _private_output
+
+	tool_name = _private_output.redact_delegate_tool(tool_name)
+	tool_call_id = _private_output.safe_tool_call_id(tool_call_id)
+	args = _private_output.redact_delegate_args(args)
 
 	payload = {
 		"kind": "tool:result",

@@ -8,6 +8,7 @@ from jarvis.exceptions import InvalidArgumentError
 DOCUMENT_EXTENSIONS = frozenset({"json", "md", "markdown", "txt"})
 DOCUMENT_CONTRACT = "document-query-v1"
 MAX_JSON_DEPTH = 64
+DEFAULT_MAX_TOTAL_ROWS = 100_000
 
 DOCUMENT_NOTE = (
 	"All JSON nodes or all text lines were loaded before the query. source_rows counts stored nodes/lines "
@@ -58,23 +59,32 @@ def _json_rows(text):
 		raise InvalidArgumentError(
 			"JSON is malformed or too deeply nested. Supply valid JSON with depth at most 64."
 		) from None
-	stack = [("", None, None, root, 0)]
+	# Keep one iterator continuation per nesting level, rather than pushing every
+	# child of a wide object/list onto a Python stack before the row cap can stop
+	# loading it. ``json.loads`` must construct the valid JSON value, but traversal
+	# itself stays depth-bounded and lets the caller reject at its source-row cap.
+	stack = [("node", "", None, None, root, 0)]
 	while stack:
-		path, parent, key, item, depth = stack.pop()
+		frame, path, parent, key, item, depth = stack.pop()
+		if frame == "children":
+			try:
+				child_key, child = next(item)
+			except StopIteration:
+				continue
+			stack.append(("children", path, None, None, item, depth))
+			stack.append(
+				("node", path + "/" + _pointer(str(child_key)), path, str(child_key), child, depth + 1)
+			)
+			continue
 		if depth > MAX_JSON_DEPTH:
 			raise InvalidArgumentError("JSON exceeds the maximum depth of 64. Split or simplify the file.")
+		children = None
 		if isinstance(item, dict):
 			kind, value = "object", None
-			stack.extend(
-				(path + "/" + _pointer(key), path, key, child, depth + 1)
-				for key, child in reversed(list(item.items()))
-			)
+			children = iter(item.items())
 		elif isinstance(item, list):
 			kind, value = "array", None
-			stack.extend(
-				(path + "/" + str(index), path, str(index), item[index], depth + 1)
-				for index in range(len(item) - 1, -1, -1)
-			)
+			children = enumerate(item)
 		elif isinstance(item, _Number):
 			kind, value = "number", str(item)
 		elif isinstance(item, str):
@@ -92,6 +102,8 @@ def _json_rows(text):
 				"JSON contains an invalid Unicode surrogate. Supply valid Unicode strings."
 			) from None
 		yield [path, parent, key, kind, value, depth]
+		if children is not None:
+			stack.append(("children", path, None, None, children, depth))
 
 
 def _lines(text, markdown):
@@ -122,6 +134,22 @@ def _lines(text, markdown):
 			label = re.sub(r"[ \t]+#+[ \t]*$", "", heading[2] or "").strip()
 			sections.append((level, label))
 		yield number, [line, ending, " / ".join(label for _, label in sections)]
+
+
+def _bounded_lines(text, markdown, max_rows):
+	"""Yield text lines until the caller's source-row cap is reached.
+
+	Markdown table discovery needs the original source-positioned line list after
+	``text_lines`` loads. Bound the generator before ``list()`` materializes it,
+	so an allowed text upload cannot make an unbounded worker allocation.
+	"""
+	for number, row in _lines(text, markdown):
+		if number > max_rows:
+			raise InvalidArgumentError(
+				f"Selected sources exceed {max_rows} stored rows/nodes. "
+				"Select fewer sources or split the file. No query was run."
+			)
+		yield number, row
 
 
 def _escaped(text, index):
@@ -196,7 +224,7 @@ def _markdown_tables(lines, warnings):
 		yield count, rows
 
 
-def load_document(content, filename, selected, load, *, warnings=None):
+def load_document(content, filename, selected, load, *, warnings=None, max_rows=DEFAULT_MAX_TOTAL_ROWS):
 	"""All identifiers are fixed here; source names and values never become SQL code."""
 	if selected is not None:
 		raise InvalidArgumentError(
@@ -218,7 +246,9 @@ def load_document(content, filename, selected, load, *, warnings=None):
 		)
 		return
 	markdown = ext in {"md", "markdown"}
-	lines = list(_lines(text, markdown))
+	# Markdown table discovery requires a line list. It is bounded as generated;
+	# derived rows remain subject to the caller's shared total-row cap.
+	lines = list(_bounded_lines(text, markdown, max_rows))
 	load("Text lines", "text_lines", lines, columns=["text", "ending", "section"], positions=True)
 	if markdown:
 		for index, rows in _markdown_tables(lines, warnings if warnings is not None else {}):

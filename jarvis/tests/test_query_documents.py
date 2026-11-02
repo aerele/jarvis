@@ -113,6 +113,42 @@ class TestDocumentQuery(unittest.TestCase):
 			"".join(text + ending for text, ending in result["rows"]), "first\r\nsecond\rthird\nlast"
 		)
 
+	def test_document_row_cap_stops_wide_text_markdown_and_json_before_load(self):
+		from jarvis.tools._document_query_sources import load_document
+
+		for filename, content in (
+			("too-many-lines.txt", b"line\n" * 100_001),
+			("too-many-lines.md", b"line\n" * 100_001),
+		):
+			loaded = []
+			with (
+				self.subTest(filename=filename),
+				self.assertRaisesRegex(
+					InvalidArgumentError, "Selected sources exceed 100000 stored rows/nodes"
+				),
+			):
+				load_document(
+					content,
+					filename,
+					None,
+					lambda *args, **kwargs: loaded.append((args, kwargs)),
+					max_rows=100_000,
+				)
+			self.assertEqual(loaded, [])
+
+		# JSON nodes stream into the shared loader instead of being made into a
+		# wide traversal stack. The loader sees the cap before a full result exists.
+		with self.assertRaisesRegex(InvalidArgumentError, "Selected sources exceed 100000 stored rows/nodes"):
+			self.query(
+				b"[" + b"0," * 100_000 + b"0]", "too-many-nodes.json", "SELECT COUNT(*) FROM json_nodes"
+			)
+		with self.assertRaisesRegex(InvalidArgumentError, "Selected sources exceed 100000 stored rows/nodes"):
+			run_query(
+				b"line\n" * 100_001,
+				"too-many-lines.txt",
+				sql="SELECT COUNT(*) FROM text_lines",
+			)
+
 	def test_empty_text_and_unicode_separators(self):
 		result = self.query("", "empty.txt", "SELECT COUNT(*) FROM text_lines")
 		self.assertEqual(result["rows"], [[0]])

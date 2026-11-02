@@ -107,6 +107,9 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"get_engagement_config",
 	"get_purchase_match_inputs",
 	"get_receivables_review_inputs",
+	# Payroll Deposit-Status: one server-owned, fixed private snapshot. The
+	# delegate never selects generic queries for this evidence path.
+	"get_payroll_deposit_inputs",
 	"get_bank_recon_inputs",
 	"get_itemised_tax_breakup",
 	# Read-only GSTR-1 return-side period totals from india_compliance's filed

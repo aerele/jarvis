@@ -1,10 +1,11 @@
 # Source-read retention
 
-`query_file`, `query_report`, and `read_file` return source data to the authorized
-live tool call. New bench tool receipts retain bounded source references and
-coverage metadata. They do not retain rows, samples, text, SQL, or source-bearing
-error messages. Activity events use the same minimized receipt. Other tools and
-intentional assistant replies keep their existing behavior.
+`query_file`, `query_report`, `read_file`, and `get_file_pages` return source data
+to the authorized live tool call. New bench tool receipts retain bounded source
+references and coverage metadata. They do not retain rows, samples, text, SQL,
+page images or base64 data, or source-bearing error messages. Activity events use
+the same minimized receipt. Other tools and intentional assistant replies keep
+their existing behavior.
 
 Small UTF-8 JSON, Markdown and TXT attachments (up to 20,000 characters) remain
 fenced inline prompt input. Larger documents use the source readers. Inline
