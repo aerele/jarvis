@@ -1861,16 +1861,30 @@
     },
     {
       "agent_slug": "ticket-triage-operator",
-      "title": "Ticket-Triage & Assignment Operator",
+      "title": "Ticket Triage Review",
       "domain": "helpdesk",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.1",
-      "status": "Coming Soon",
-      "description": "Coming Soon. Ticket routing is not available. This agent has no runtime tool or write surface. It cannot read tickets, create approvals, change tickets, or send messages. A later server-owned workflow will require private source transport and a human-confirmed routing action.",
-      "tools_required": [],
-      "tools_allow": [],
-      "doctypes_required": [],
+      "version": "0.2.0",
+      "status": "Published",
+      "description": "Suggests a controlled ticket type or priority when the subject names one unique allowed label. A named reviewer confirms each change. Ambiguous tickets stay for manual review. Manual runs only; no assignment, status change, message, or automatic ticket update.",
+      "tools_required": [
+        "jarvis__get_ticket_triage_inputs",
+        "jarvis__stage_ticket_triage_proposals"
+      ],
+      "tools_allow": [
+        "jarvis__get_ticket_triage_inputs",
+        "jarvis__stage_ticket_triage_proposals",
+        "exec"
+      ],
+      "doctypes_required": [
+        "HD Ticket",
+        "HD Team",
+        "HD Ticket Type",
+        "HD Ticket Priority",
+        "HD Ticket Status",
+        "Jarvis Approval Request"
+      ],
       "rule_tokens": [],
       "advisory_tokens": [],
       "writes": null,
@@ -1888,7 +1902,18 @@
       "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
-      }
+      },
+      "config_keys": [
+        "policy_version",
+        "from_at",
+        "to_at",
+        "eligible_team_names",
+        "eligible_status_names",
+        "allowed_ticket_types",
+        "allowed_priorities",
+        "max_tickets",
+        "assignment_mode"
+      ]
     },
     {
       "agent_slug": "vendor-ledger-recon-auditor",

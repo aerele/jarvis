@@ -83,7 +83,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 		module = importlib.import_module(f"jarvis.tools.{tool}")
 		# Cycle Count captures from its review module. AP and AR expose the
 		# same capture seam directly from their tool wrapper.
-		return getattr(module, "cycle_count_review", module)
+		return getattr(module, "ticket_triage", getattr(module, "cycle_count_review", module))
 
 	def test_full_private_query_and_report_leave_only_safe_receipts(self):
 		for tool, row_key in (("query", "rows"), ("run_report", "result")):
@@ -219,7 +219,9 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			"scope": {"company": "Fake Co"},
 			"datasets": {"invoices": [{"bill_no": CANARY, "amount": 0.0}]},
 		}
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		# Ticket Triage uses its own session-bound capture and typed dispatcher;
+		# its real-record dispatch tests live in test_ticket_triage.
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS - {"get_ticket_triage_inputs"}):
 			module = self._source_capture_module(tool)
 			with (
 				self.subTest(tool=tool),
@@ -241,7 +243,7 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			self.assertNotIn(CANARY, step.detail)
 
 	def test_private_review_handlers_refuse_malformed_captured_snapshot_without_leak(self):
-		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
+		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS - {"get_ticket_triage_inputs"}):
 			module = self._source_capture_module(tool)
 			for snapshot in (None, {}, {"source_digest": "not-a-digest", "secret": CANARY}):
 				with (
@@ -426,7 +428,12 @@ class TestPrivateAuditOutput(FrappeTestCase):
 		self.assertEqual(
 			_private_output.PRIVATE_SOURCE_TOOLS,
 			frozenset(
-				{"get_cycle_count_inputs", "get_purchase_match_inputs", "get_receivables_review_inputs"}
+				{
+					"get_cycle_count_inputs",
+					"get_purchase_match_inputs",
+					"get_receivables_review_inputs",
+					"get_ticket_triage_inputs",
+				}
 			),
 		)
 		for tool in sorted(_private_output.PRIVATE_SOURCE_TOOLS):
@@ -434,7 +441,10 @@ class TestPrivateAuditOutput(FrappeTestCase):
 			for mode in (None, _private_output.MODE):
 				with (
 					self.subTest(tool=tool, mode=mode),
-					patch.object(module, "get_inputs") as source,
+					patch.object(
+						module,
+						"capture_private_inputs" if tool == "get_ticket_triage_inputs" else "get_inputs",
+					) as source,
 					patch("jarvis.api._get_header", return_value=None),
 					patch("jarvis.api._dispatch_current_user") as dispatch,
 					patch("jarvis.api._run_tool") as run_tool,

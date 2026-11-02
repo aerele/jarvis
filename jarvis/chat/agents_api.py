@@ -555,7 +555,8 @@ def get_agent(agent_slug: str) -> dict:
 		"category": listing.category,
 		"nature": listing.nature,
 		"supports_manual_run": listing.nature in ("Auditor", "Scribe")
-		or listing.agent_slug in REVIEW_OPERATORS,
+		or listing.agent_slug in REVIEW_OPERATORS
+		or listing.agent_slug == "ticket-triage-operator",
 		"version": listing.version,
 		"publisher": listing.publisher,
 		"status": listing.status,
@@ -622,6 +623,10 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif listing.agent_slug == "ticket-triage-operator":
+			from jarvis.chat import ticket_triage
+
+			i["configuration_issues"] = ticket_triage.configuration_issues(i.config or "{}")
 		elif listing.agent_slug == SLA_BREACH_AGENT:
 			# The selected Helpdesk team is an explicit, permission-bounded launch
 			# boundary. Surface its saved-state issues so Run Now can fail closed in
@@ -1398,7 +1403,7 @@ def set_schedule(
 
 		if agent_scope.record_scope_requested(doc.config):
 			agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
-		if doc.agent in REVIEW_OPERATORS:
+		if doc.agent in REVIEW_OPERATORS or doc.agent == "ticket-triage-operator":
 			frappe.throw(_("Operator evidence review supports manual runs only."))
 		assert_installable(doc.agent)
 		_assert_sla_schedule_configuration(doc)
@@ -1941,7 +1946,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 
 	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
 	nature = listing.get("nature")
-	if nature not in ("Auditor", "Scribe") and doc.agent not in REVIEW_OPERATORS:
+	if (
+		nature not in ("Auditor", "Scribe")
+		and doc.agent not in REVIEW_OPERATORS
+		and doc.agent != "ticket-triage-operator"
+	):
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
 		)

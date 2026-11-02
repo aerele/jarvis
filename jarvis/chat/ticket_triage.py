@@ -14,6 +14,7 @@ State contract (``Jarvis Agent Run.assessment_output_json``)::
         "config_hmac": "64 lower-case hex chars",
         "source_hmac": "64 lower-case hex chars",
         "captured_at": "UTC timestamp",
+        "execution_user": "authenticated run-as user",
         "reviewer": "named user",
         "scope": {"safe immutable controls only"},
         "ticket_count": 1,
@@ -127,6 +128,7 @@ _STATE_KEYS = frozenset(
 		"config_hmac",
 		"source_hmac",
 		"captured_at",
+		"execution_user",
 		"reviewer",
 		"scope",
 		"ticket_count",
@@ -478,6 +480,64 @@ def run_from_session(session_key: str, *, allow_staged_retry: bool = False):
 	return run
 
 
+def dispatch_private_call(session_key, tool, args, *, cap, result_mode=None):
+	"""Keep caller text out of generic receipts, audit, steps, and errors.
+
+	The normal dispatcher records attempted arguments on a refusal. Ticket text
+	cannot use that lane, including when a delegate calls an ungranted tool.
+	Only the two typed handlers execute here, inside a rollback boundary.
+	"""
+	from jarvis import api
+	from jarvis.tools import _delegate_capability, _private_output
+
+	if (
+		not isinstance(cap, dict)
+		or cap.get("agent") != AGENT
+		or cap.get("status") != "running"
+		or cap.get("legacy")
+		or tool not in {SOURCE_TOOL, STAGE_TOOL}
+		or _delegate_capability.tool_denial(session_key, tool, cap=cap)
+	):
+		return api._error("PermissionError", "This private Ticket Triage call is not permitted.")
+	if (tool == SOURCE_TOOL and result_mode != _private_output.MODE) or (
+		tool == STAGE_TOOL and result_mode is not None
+	):
+		return api._error("InvalidArgumentError", _PRIVATE_REQUIRED)
+	point = "ticket_triage_dispatch_" + frappe.generate_hash(length=8)
+	frappe.db.savepoint(point)
+	try:
+		if isinstance(args, str):
+			if len(args.encode("utf-8")) > MAX_STATE_BYTES:
+				_refuse(_PROPOSAL_INVALID)
+			args = json.loads(args)
+		if args is None:
+			args = {}
+		if not isinstance(args, dict):
+			_refuse(_PROPOSAL_INVALID)
+		run = run_from_session(session_key)
+		if tool == SOURCE_TOOL:
+			if args != {}:
+				_refuse(_PROPOSAL_INVALID)
+			with _private_output.request(True):
+				data = capture_private_inputs(run)
+			wire, receipt = _private_output.prepare({"ok": True, "data": data}, tool=tool)
+		else:
+			if set(args) != {"capture_id", "rows"}:
+				_refuse(_PROPOSAL_INVALID)
+			wire = receipt = {"ok": True, "data": stage_proposals(run, args["capture_id"], args["rows"])}
+	except Exception:
+		frappe.db.rollback(save_point=point)
+		wire = receipt = api._error(
+			"InvalidArgumentError", "Private Ticket Triage could not complete. Start a new review."
+		)
+	# All customer-visible metadata is server selected. In particular, an invalid
+	# tool name, call ID, JSON field, or exception must never be retained here.
+	conversation = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
+	if conversation:
+		api.persist_tool_receipt(conversation, "private_ticket_triage", {}, receipt)
+	return wire
+
+
 def _raw_ticket_projection(doc) -> dict:
 	"""Get the model's private row and fail if any selected field is redacted."""
 	try:
@@ -586,7 +646,14 @@ def _collect(config: dict, capture_id: str, config_hmac: str) -> dict:
 		"tickets": rows,
 	}
 	snapshot["source_digest"] = _hmac(
-		"source", {"config_hmac": config_hmac, "capture_id": capture_id, "snapshot": snapshot}
+		"source",
+		{
+			"config_hmac": config_hmac,
+			"capture_id": capture_id,
+			# Collection time is provenance, not source identity. A retry or a
+			# later staging read must match unchanged tickets across clock ticks.
+			"snapshot": {key: value for key, value in snapshot.items() if key != "captured_at"},
+		},
 	)
 	return snapshot
 
@@ -610,6 +677,7 @@ def _capture_state(*, capture_id: str, config: dict, config_hmac: str, snapshot:
 		"config_hmac": config_hmac,
 		"source_hmac": snapshot["source_digest"],
 		"captured_at": snapshot["captured_at"],
+		"execution_user": frappe.session.user,
 		"reviewer": reviewer,
 		"scope": scope_from_config(config),
 		"ticket_count": len(snapshot["tickets"]),
@@ -653,6 +721,7 @@ def _assert_safe_state(state: dict) -> None:
 	):
 		_refuse(_STATE_INVALID)
 	_assert_safe_scope(state["scope"])
+	_safe_string(state.get("execution_user"))
 	_safe_string(state.get("reviewer"))
 	_utc_timestamp(state.get("captured_at"), error=_STATE_INVALID)
 	tickets = set()
@@ -721,7 +790,11 @@ def capture_private_inputs(run) -> dict:
 	state_raw = (locked.get("assessment_output_json") or "").strip()
 	if state_raw:
 		state = _parse_state(state_raw)
-		if state["config_hmac"] != config_hmac or state["stage"] != "captured":
+		if (
+			state["config_hmac"] != config_hmac
+			or state["stage"] != "captured"
+			or state["execution_user"] != frappe.session.user
+		):
 			_refuse(_EVIDENCE_CHANGED)
 		capture_id = state["capture_id"]
 		reviewer = state["reviewer"]
@@ -778,7 +851,9 @@ def _proposal_row(row: dict, state_row: dict, config: dict) -> dict:
 	# turn this endpoint into a generic note, assignment, status, or free-text path.
 	if ticket_type is None and priority is None:
 		_refuse(_PROPOSAL_INVALID)
-	if ticket_type == state_row["ticket_type"] and priority == state_row["priority"]:
+	if (ticket_type is None or ticket_type == state_row["ticket_type"]) and (
+		priority is None or priority == state_row["priority"]
+	):
 		_refuse(_PROPOSAL_INVALID)
 	return {
 		"ticket": ticket,
@@ -993,10 +1068,10 @@ def _stage_result(state: dict) -> dict:
 	proposed = [row for row in state["proposals"] if row["disposition"] == "propose"]
 	manual = [row for row in state["proposals"] if row["disposition"] == "manual_review"]
 	return {
-		"status": "staged",
+		"status": "preview" if any(row["approval"].startswith("preview:") for row in proposed) else "staged",
 		"proposed_count": len(proposed),
 		"manual_review_count": len(manual),
-		"approvals": [row["approval"] for row in proposed],
+		"approvals": [row["approval"] for row in proposed if not row["approval"].startswith("preview:")],
 	}
 
 
@@ -1029,7 +1104,7 @@ def stage_proposals(run, capture_id: str, rows) -> dict:
 	locked = _lock_run(run.name)
 	_require_stage_run(locked)
 	state = _parse_state(locked.get("assessment_output_json"))
-	if state["capture_id"] != capture_id:
+	if state["capture_id"] != capture_id or state["execution_user"] != frappe.session.user:
 		_refuse(_PROPOSAL_INVALID)
 	if state["stage"] == "staged":
 		proposals = _validate_stage_rows(state, state["scope"], rows)
@@ -1047,6 +1122,10 @@ def stage_proposals(run, capture_id: str, rows) -> dict:
 		_refuse(_EVIDENCE_CHANGED)
 	proposals = _validate_stage_rows(state, config, rows)
 	_fresh_capture_evidence(state, config)
+	# A proposal cannot hand evidence to a reviewer with a narrower source view.
+	# Recheck the full scoped cohort under that person's native permissions.
+	with impersonate(state["reviewer"]):
+		_fresh_capture_evidence(state, config)
 	staged = []
 	by_ticket = {row["ticket"]: row for row in state["tickets"]}
 	for proposal in proposals:
@@ -1067,7 +1146,11 @@ def stage_proposals(run, capture_id: str, rows) -> dict:
 			{
 				"ticket": proposal["ticket"],
 				"proposal_hmac": proposal_hmac,
-				"approval": _approval_shell(locked, evidence),
+				"approval": (
+					_approval_shell(locked, evidence)
+					if locked.get("preparation_mode") == "live"
+					else f"preview:{proposal_hmac[:24]}"
+				),
 				"disposition": "propose",
 			}
 		)
@@ -1290,14 +1373,40 @@ def _safe_proposal_view(doc, evidence: dict, can_confirm: bool) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
+def list_ticket_triage_proposals(start: int = 0) -> dict:
+	"""List one bounded page for the sealed named reviewer."""
+	refuse_in_tool_dispatch()
+	if type(start) is not int or start < 0 or start > 100_000:
+		_refuse(_STATE_INVALID)
+	names = frappe.get_all(
+		APPROVAL,
+		filters={"agent": AGENT, "source": APPROVAL_SOURCE, "owner": frappe.session.user},
+		pluck="name",
+		order_by="creation desc, name asc",
+		start=start,
+		page_length=51,
+	)
+	rows = []
+	for name in names[:50]:
+		try:
+			rows.append(get_ticket_triage_proposal(name))
+		except (frappe.PermissionError, frappe.ValidationError, frappe.DoesNotExistError):
+			continue
+	return {"rows": rows, "has_more": len(names) > 50, "next_start": start + min(len(names), 50)}
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
 def get_ticket_triage_proposal(name: str) -> dict:
 	"""Return safe controlled values to the named reviewer only."""
 	refuse_in_tool_dispatch()
-	run, doc, _state, evidence, _proposal = _proposal_context(name, lock=False)
+	run, doc, state, evidence, _proposal = _proposal_context(name, lock=False)
 	_require_reviewer(run, evidence, write=False)
-	return _safe_proposal_view(
+	view = _safe_proposal_view(
 		doc, evidence, can_confirm=frappe.has_permission(TICKET, "write", evidence["ticket"])
 	)
+	view.update(execution_user=state["execution_user"], reviewer=evidence["reviewer"])
+	return view
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1311,7 +1420,7 @@ def reject_ticket_triage_proposal(name: str) -> dict:
 		return {"ok": True, "status": "Rejected", "idempotent": True}
 	if doc.status != "Pending":
 		_refuse(_STATE_INVALID)
-	changed = frappe.db.sql(
+	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status='Rejected', decision=%s, decided_by=%s, decided_at=%s,
 			modified=%s, modified_by=%s
@@ -1325,7 +1434,7 @@ def reject_ticket_triage_proposal(name: str) -> dict:
 			name,
 		),
 	)
-	if not changed:
+	if frappe.db._cursor.rowcount != 1:
 		_refuse(_STATE_INVALID)
 	return {"ok": True, "status": "Rejected", "idempotent": False}
 
@@ -1359,7 +1468,7 @@ def confirm_ticket_triage_proposal(name: str) -> dict:
 			frappe.db.rollback(save_point=savepoint)
 			_mark_apply_failed(doc.name, "safety_check_blocked")
 			return {"ok": False, "status": "blocked", "reason": "safety_check_blocked"}
-	changed = frappe.db.sql(
+	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status='Approved', decision=%s, decided_by=%s, decided_at=%s,
 			apply_status='Applied', apply_reason='', modified=%s, modified_by=%s
@@ -1373,10 +1482,9 @@ def confirm_ticket_triage_proposal(name: str) -> dict:
 			name,
 		),
 	)
-	if not changed:
+	if frappe.db._cursor.rowcount != 1:
 		# The ticket write remains inside this transaction.  A loser must roll it
 		# back instead of leaving a duplicate or unacknowledged change behind.
 		frappe.db.rollback(save_point=savepoint)
 		_refuse(_STATE_INVALID)
 	return {"ok": True, "status": "Approved", "idempotent": False}
-

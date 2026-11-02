@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -29,6 +30,7 @@ def safe_state() -> dict:
 		"config_hmac": "a" * 64,
 		"source_hmac": "b" * 64,
 		"captured_at": "2026-11-01T09:00:00Z",
+		"execution_user": "Administrator",
 		"reviewer": "reviewer@example.test",
 		"scope": {
 			"policy_version": triage.POLICY_VERSION,
@@ -58,6 +60,39 @@ def safe_state() -> dict:
 
 
 class TestTicketTriageStateContract(FrappeTestCase):
+	def test_private_dispatch_refuses_ungranted_metadata_without_any_receipt(self):
+		from jarvis import api
+
+		marker = "TT-RAW-CALLER-MARKER"
+		cap = {"agent": triage.AGENT, "status": "running", "legacy": False}
+		with patch.object(api, "persist_tool_receipt") as persist:
+			result = triage.dispatch_private_call("test-session", marker, {marker: marker}, cap=cap)
+		self.assertFalse(result["ok"])
+		self.assertNotIn(marker, json.dumps(result))
+		persist.assert_not_called()
+
+	def test_private_dispatch_rolls_back_and_redacts_handler_failures(self):
+		from jarvis import api
+		from jarvis.tools import _delegate_capability
+
+		marker = "TT-RAW-CALLER-MARKER"
+		cap = {"agent": triage.AGENT, "status": "running", "legacy": False}
+		with (
+			patch.object(_delegate_capability, "tool_denial", return_value=None),
+			patch.object(triage, "run_from_session", side_effect=RuntimeError(marker)),
+			patch.object(frappe.db, "get_value", return_value="TEST-CONVERSATION"),
+			patch.object(frappe.db, "rollback") as rollback,
+			patch.object(api, "persist_tool_receipt") as persist,
+		):
+			result = triage.dispatch_private_call(
+				"test-session", triage.STAGE_TOOL, {"capture_id": marker, "rows": []}, cap=cap
+			)
+		self.assertFalse(result["ok"])
+		rollback.assert_called_once()
+		persist.assert_called_once()
+		self.assertNotIn(marker, json.dumps(persist.call_args.args))
+		self.assertEqual(persist.call_args.args[1:3], ("private_ticket_triage", {}))
+
 	def test_capture_state_contract_contains_safe_metadata_only(self):
 		state = safe_state()
 		triage._assert_safe_state(state)
@@ -135,6 +170,24 @@ class TestTicketTriageStateContract(FrappeTestCase):
 		):
 			with self.subTest(rows=rows), self.assertRaises(frappe.ValidationError):
 				triage._validate_stage_rows(state, state["scope"], rows)
+
+	def test_stage_refuses_a_proposal_that_keeps_both_current_values(self):
+		state = safe_state()
+		for ticket_type, priority in (("Question", None), (None, "Medium"), ("Question", "Medium")):
+			with self.subTest(ticket_type=ticket_type, priority=priority):
+				with self.assertRaises(frappe.ValidationError):
+					triage._validate_stage_rows(
+						state,
+						state["scope"],
+						[
+							{
+								"ticket": "TT-0001",
+								"disposition": "propose",
+								"ticket_type": ticket_type,
+								"priority": priority,
+							}
+						],
+					)
 
 	def test_stage_refuses_a_capture_id_from_another_run_before_any_approval(self):
 		state = safe_state()
@@ -321,6 +374,12 @@ class TestTicketTriageFakeRecords(FrappeTestCase):
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
+		if getattr(self, "conversation_name", None):
+			frappe.db.delete("Jarvis Chat Message", {"conversation": self.conversation_name})
+			frappe.db.set_value("Jarvis Agent Run", self.run_name, "conversation", None)
+			frappe.delete_doc(
+				"Jarvis Conversation", self.conversation_name, force=True, ignore_permissions=True
+			)
 		for name in frappe.get_all(
 			"Jarvis Approval Request", {"run": getattr(self, "run_name", "")}, pluck="name"
 		):
@@ -407,7 +466,15 @@ class TestTicketTriageFakeRecords(FrappeTestCase):
 			}
 		)
 		ticket.insert(ignore_permissions=True)
+		ticket.reload()
+		# Helpdesk selects its default Open status on insert. Save the owned
+		# status through its normal update path before capturing the scope.
+		ticket.status = self.status
+		ticket.save(ignore_permissions=True)
 		self.ticket_name = ticket.name
+		# The saved scope has whole-second UTC bounds. Let the real clock pass
+		# this ticket's fractional modified time; do not forge source timestamps.
+		time.sleep(1.05)
 		to_at = triage._server_now_utc(error=triage._CONFIG_INVALID)
 		from_at = to_at - timedelta(minutes=5)
 		config = {
@@ -421,6 +488,7 @@ class TestTicketTriageFakeRecords(FrappeTestCase):
 			"max_tickets": 5,
 			"assignment_mode": "none",
 		}
+		config = triage.configuration(frappe._dict(config=json.dumps(config)))
 		inst = frappe.get_doc(
 			{
 				"doctype": "Jarvis Agent Installation",
@@ -441,6 +509,7 @@ class TestTicketTriageFakeRecords(FrappeTestCase):
 				"installation": inst.name,
 				"trigger": "manual",
 				"status": "running",
+				"preparation_mode": "live",
 				"started_at": frappe.utils.now_datetime(),
 				"session_key": self.session_key,
 				"assessment_config_json": json.dumps(config),
@@ -519,6 +588,7 @@ class TestTicketTriageFakeRecords(FrappeTestCase):
 			["status", "agent_group", "_assign", "subject", "description", "raised_by", "ticket_type"],
 			as_dict=True,
 		)
+		guard_before = triage._write_guard(frappe.get_doc("HD Ticket", self.ticket_name))
 		result = triage.confirm_ticket_triage_proposal(approval.name)
 		self.assertEqual(result, {"ok": True, "status": "Approved", "idempotent": False})
 		ticket = frappe.get_doc("HD Ticket", self.ticket_name)
@@ -531,14 +601,9 @@ class TestTicketTriageFakeRecords(FrappeTestCase):
 		approval.reload()
 		self.assertEqual(approval.status, "Approved")
 		self.assertEqual(approval.apply_status, "Applied")
-		for doctype, filters in (
-			("ToDo", {"reference_type": "HD Ticket", "reference_name": self.ticket_name}),
-			("Communication", {"reference_doctype": "HD Ticket", "reference_name": self.ticket_name}),
-			("Comment", {"reference_doctype": "HD Ticket", "reference_name": self.ticket_name}),
-			("HD Ticket Comment", {"reference_ticket": self.ticket_name}),
-			("HD Notification", {"reference_ticket": self.ticket_name}),
-		):
-			self.assertEqual(frappe.db.count(doctype, filters), 0)
+		# Native ticket creation can already have a Communication. Confirmation
+		# must add none and must preserve every prohibited field.
+		self.assertEqual(triage._write_guard(ticket), guard_before)
 
 	def test_fake_tt_source_drift_refuses_before_any_approval(self):
 		run, snapshot = self._capture()
@@ -547,3 +612,74 @@ class TestTicketTriageFakeRecords(FrappeTestCase):
 			self._stage(run, snapshot["capture_id"])
 		self.assertFalse(frappe.db.exists("Jarvis Approval Request", {"run": self.run_name}))
 
+	def test_shadow_staging_creates_no_approval_or_ticket_change(self):
+		frappe.db.set_value("Jarvis Agent Run", self.run_name, "preparation_mode", "shadow")
+		run, snapshot = self._capture()
+		result = self._stage(run, snapshot["capture_id"])
+		self.assertEqual(result["status"], "preview")
+		self.assertEqual(result["approvals"], [])
+		self.assertFalse(frappe.db.exists("Jarvis Approval Request", {"run": self.run_name}))
+		self.assertEqual(frappe.db.get_value("HD Ticket", self.ticket_name, "priority"), self.priority_before)
+
+	def test_rejection_is_idempotent_and_never_updates_the_ticket(self):
+		run, snapshot = self._capture()
+		staged = self._stage(run, snapshot["capture_id"])
+		name = staged["approvals"][0]
+		self.assertEqual(triage.reject_ticket_triage_proposal(name)["status"], "Rejected")
+		self.assertTrue(triage.reject_ticket_triage_proposal(name)["idempotent"])
+		self.assertEqual(frappe.db.get_value("HD Ticket", self.ticket_name, "priority"), self.priority_before)
+
+	def test_unchanged_capture_and_stage_survive_a_later_clock_tick(self):
+		run, first = self._capture()
+		later = triage._server_now_utc(error=triage._CONFIG_INVALID) + timedelta(seconds=5)
+		with patch.object(triage, "_server_now_utc", return_value=later):
+			with _private_output.request(True):
+				second = triage.capture_private_inputs(run)["rows"][0]
+			self.assertNotEqual(first["captured_at"], second["captured_at"])
+			self.assertEqual(first["source_digest"], second["source_digest"])
+			self.assertEqual(self._stage(run, first["capture_id"])["proposed_count"], 1)
+
+	def test_list_exposes_only_the_named_reviewers_safe_view(self):
+		run, snapshot = self._capture()
+		self._stage(run, snapshot["capture_id"])
+		page = triage.list_ticket_triage_proposals()
+		self.assertEqual(len(page["rows"]), 1)
+		self.assertEqual(page["rows"][0]["execution_user"], self.reviewer)
+		self.assertEqual(page["rows"][0]["reviewer"], self.reviewer)
+		self.assertNotIn(self.marker, json.dumps(page))
+		frappe.set_user("Administrator")
+		self.assertEqual(triage.list_ticket_triage_proposals()["rows"], [])
+
+	def test_bound_dispatch_keeps_source_and_malformed_arguments_out_of_chat(self):
+		from jarvis import api
+
+		frappe.set_user(self.reviewer)
+		conversation = frappe.get_doc(
+			{"doctype": "Jarvis Conversation", "title": "TT test", "session_key": self.session_key}
+		).insert()
+		self.conversation_name = conversation.name
+		frappe.db.set_value("Jarvis Agent Run", self.run_name, "conversation", conversation.name)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- isolated test dispatch fixture
+		with patch("jarvis.api.publish_realtime_tool_result") as published:
+			result = api._dispatch_from_session(
+				self.reviewer, self.session_key, triage.SOURCE_TOOL, {}, result_mode=_private_output.MODE
+			)
+			self.assertTrue(result["ok"], result)
+			self.assertIn(self.marker, result["data"])
+			self.assertNotIn(self.marker, str(published.call_args_list))
+			result = api._dispatch_from_session(
+				self.reviewer,
+				self.session_key,
+				triage.STAGE_TOOL,
+				{"capture_id": self.marker, "rows": [], "description": self.marker},
+			)
+			self.assertFalse(result["ok"])
+			self.assertNotIn(self.marker, str(published.call_args_list))
+		for message in frappe.get_all(
+			"Jarvis Chat Message",
+			{"conversation": conversation.name},
+			["tool_name", "tool_args", "tool_result", "tool_call_id"],
+		):
+			self.assertNotIn(self.marker, json.dumps(message))
+			self.assertEqual(message.tool_name, "private_ticket_triage")
+			self.assertIsNone(message.tool_call_id)

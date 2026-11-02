@@ -8,4 +8,3 @@ def stage_ticket_triage_proposals(capture_id: str, rows: list) -> dict:
 	"""Accept only all-ticket typed rows; no text, record path, or write field."""
 	run = ticket_triage.run_from_session(get_session_key(), allow_staged_retry=True)
 	return ticket_triage.stage_proposals(run, capture_id, rows)
-

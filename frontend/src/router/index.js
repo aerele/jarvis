@@ -202,6 +202,11 @@ const routes = [
 		component: () => import("@/pages/count-plans/CountPlansList.vue"),
 	},
 	{
+		path: "/ticket-triage",
+		name: "TicketTriageReviews",
+		component: () => import("@/pages/agents/TicketTriageReviews.vue"),
+	},
+	{
 		path: "/count-plans/:request",
 		name: "CountPlanDetail",
 		component: () => import("@/pages/count-plans/CountPlanDetail.vue"),

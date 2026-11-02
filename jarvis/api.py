@@ -171,6 +171,15 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 
 		if session_device_is_stale(row_device, current_device):
 			frappe.local.response.http_status_code = 401
+			from jarvis.tools import _delegate_capability
+
+			with impersonate(plugin_user):
+				stale_cap = _delegate_capability.resolve(session_key)
+			if isinstance(stale_cap, dict) and stale_cap.get("agent") == "ticket-triage-operator":
+				return _error(
+					"AuthenticationError",
+					"Private Ticket Triage connection is out of date. Start a new review.",
+				)
 			# jarvis #712: this rejection is deliberate (it bounds a leaked
 			# session key's replay window to the next re-pair) and MUST NOT
 			# self-heal here - that would defeat the check. But left as a bare
@@ -399,6 +408,12 @@ def _dispatch_from_session(
 			# #1062 step timeline further down, which needs the run's name, owner and
 			# status. A non-delegate session resolves to None and both are no-ops.
 			cap = _delegate_capability.resolve(session_key)
+			if isinstance(cap, dict) and cap.get("agent") == "ticket-triage-operator":
+				from jarvis.chat import ticket_triage
+
+				return ticket_triage.dispatch_private_call(
+					session_key, tool, args, cap=cap, result_mode=result_mode
+				)
 			denial = _delegate_capability.tool_denial(session_key, tool, cap=cap)
 			if denial:
 				code = CapabilityDeniedError.__name__
