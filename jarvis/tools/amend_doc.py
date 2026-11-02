@@ -92,6 +92,14 @@ def _amend_one(doctype: str, name: str) -> "frappe.model.document.Document":
 	new_doc = frappe.copy_doc(source)
 	new_doc.amended_from = source.name
 	new_doc.docstatus = 0
+	if doctype == "Landed Cost Voucher":
+		from jarvis.tools._lcv_legacy import source_names
+		from jarvis.tools._lcv_source_tax import gate_lcv
+
+		previous_links = source_names(source) | {
+			row.vendor_invoice for row in source.get("vendor_invoices") or [] if row.vendor_invoice
+		}
+		gate_lcv(new_doc, lock=True, previous_links=previous_links)
 	new_doc.insert()  # runs validate(); autoname appends suffix
 	return new_doc
 
