@@ -93,7 +93,7 @@ def read_file(
 		not preview
 		and read_mode == "file-cursor-v1"
 		and (
-			ext in _PDF_EXT | _TABLE_EXT | _TEXT_EXT
+			ext in _PDF_EXT | _TABLE_EXT | _TEXT_EXT | {"docx"}
 			or (ext not in _IMAGE_EXT | {"xls"} and _looks_text(content))
 		)
 	):
@@ -101,6 +101,10 @@ def read_file(
 
 		return {**base, **read_sections(fdoc, content, sheet=sheet, cursor=cursor, version=version)}
 
+	if ext == "docx":
+		from jarvis.tools._docx_preview import preview_docx
+
+		return {**base, **preview_docx(content, fdoc.file_name, max_chars, max_rows)}
 	if ext in _PDF_EXT:
 		return {**base, **_read_pdf(content, max_chars)}
 	if ext == "xlsx":
@@ -120,8 +124,8 @@ def _resolve_file(file_url: str | None, filename: str | None):
 	if file_url:
 		name = frappe.db.get_value("File", {"file_url": file_url}, "name")
 		if not name:
-			raise InvalidArgumentError(f"no file found for url {file_url!r}")
-		return frappe.get_doc("File", name)
+			raise PermissionDeniedError("no matching file found")
+		return frappe.get_cached_doc("File", name)
 	if filename:
 		# Gather name-matching candidates unfiltered, then gate EACH with the
 		# row-level has_permission check File actually enforces, returning the
@@ -148,7 +152,7 @@ def _resolve_file(file_url: str | None, filename: str | None):
 		)
 		for row in candidates:
 			if frappe.has_permission("File", "read", doc=row.name):
-				return frappe.get_doc("File", row.name)
+				return frappe.get_cached_doc("File", row.name)
 		# Generic on purpose - covers both "nothing matched" and "something
 		# matched but you can't read it"; the latter must not confirm the
 		# existence/name of a private file the caller can't otherwise see.

@@ -1,5 +1,6 @@
 <script setup>
-import { ref, watch } from "vue";
+import { ref, watch, onBeforeUnmount } from "vue";
+import DocumentBlocks from "@shared/components/DocumentBlocks.vue";
 import Sheet from "./Sheet.vue";
 import CanvasFrame from "./CanvasFrame.vue";
 import * as api from "../api";
@@ -67,9 +68,15 @@ async function reformat(key) {
 	}
 }
 
+let previewSeq = 0;
+onBeforeUnmount(() => {
+	previewSeq++;
+});
 watch(
 	() => props.item?.file_url,
 	async (url) => {
+		const seq = ++previewSeq;
+		loading.value = false;
 		preview.value = null;
 		error.value = "";
 		reformatErr.value = "";
@@ -81,11 +88,12 @@ watch(
 		if (!url || ["image", "pdf", "html", "svg"].includes(kind())) return;
 		loading.value = true;
 		try {
-			preview.value = await api.previewFile(url);
+			const result = await api.previewFile(url);
+			if (seq === previewSeq) preview.value = result;
 		} catch (e) {
-			error.value = e?.message || "Couldn't open this file.";
+			if (seq === previewSeq) error.value = e?.message || "Couldn't open this file.";
 		} finally {
-			loading.value = false;
+			if (seq === previewSeq) loading.value = false;
 		}
 	},
 	{ immediate: true }
@@ -201,12 +209,19 @@ watch(
 					</div>
 				</template>
 
+				<DocumentBlocks
+					v-else-if="preview?.document"
+					:document="preview.document"
+					:file-url="props.item.file_url"
+				/>
 				<pre v-else-if="preview?.kind === 'text'" class="jv-preview-text">{{
 					preview.text
 				}}</pre>
 
 				<div v-else class="jv-preview-state">
-					<div>{{ fileExt(props.item) }} file. No inline preview.</div>
+					<div>
+						{{ preview?.error || `${fileExt(props.item)} file. No inline preview.` }}
+					</div>
 					<a
 						class="jv-preview-open"
 						:href="props.item.file_url"
