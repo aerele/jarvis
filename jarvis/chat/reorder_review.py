@@ -745,7 +745,7 @@ def reviewer_state(name, *, lock=False):
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def get_review(name: str):
+def get_review(name: str) -> dict:
 	refuse_in_tool_dispatch()
 	_run, state = reviewer_state(name)
 	scope = state["config"]["scope"]
@@ -760,7 +760,7 @@ def get_review(name: str):
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def list_reviews(start: int = 0):
+def list_reviews(start: int = 0) -> dict:
 	refuse_in_tool_dispatch()
 	if type(start) is not int or not 0 <= start <= 100_000:
 		refuse(_STATE)
@@ -783,7 +783,7 @@ def list_reviews(start: int = 0):
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def decide(name: str, row_id: str, approve: int):
+def decide(name: str, row_id: str, approve: int) -> dict:
 	refuse_in_tool_dispatch()
 	if type(approve) is not int or approve not in (0, 1):
 		refuse(_STATE)
@@ -799,10 +799,11 @@ def decide(name: str, row_id: str, approve: int):
 	if approve:
 		# The run bearer is removed after preparation. The recorded execution user
 		# remains authoritative; the reviewer never becomes a replacement run-as.
-		if (
-			collect(run, state["config"], review_execution_user=state["execution_user"])["source_digest"]
-			!= state["source_digest"]
-		):
+		try:
+			current = collect(run, state["config"], review_execution_user=state["execution_user"])
+		except trust.ReceiptRefused:
+			refuse(_STALE)
+		if current["source_digest"] != state["source_digest"]:
 			refuse(_STALE)
 	row.update(status=decision, decided_by=frappe.session.user, decided_at=frappe.utils.now())
 	store_state(run, state)

@@ -176,11 +176,7 @@ def assert_listing_status(agent: str | None, status: str | None) -> None:
 	"""Keep the Reorder listing closed on every ORM save surface."""
 	from jarvis.chat.reorder_review import release_available
 
-	if (
-		is_reorder(agent)
-		and (status or "").strip() != CLOSED_STATUS
-		and not (status == "Published" and release_available())
-	):
+	if is_reorder(agent) and (status or "").strip() != CLOSED_STATUS and not release_available():
 		frappe.throw(_(_LISTING_UNAVAILABLE), frappe.PermissionError)
 
 

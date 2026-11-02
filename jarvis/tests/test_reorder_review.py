@@ -197,6 +197,14 @@ class TestReorderRules(unittest.TestCase):
 		self.assertFalse(result["ok"])
 		self.assertNotIn("PRIVATE-MODEL-MARKER", json.dumps(result))
 
+	def test_native_release_can_be_withdrawn_without_reopening_legacy_writes(self):
+		from jarvis.chat import reorder_replenishment_gate as gate
+
+		gate.assert_listing_status(review.AGENT, "Deprecated")
+		for tool in ("create_doc", "update_doc", "submit_doc", review.TOOL):
+			denial = gate.delegate_tool_denial({"agent": review.AGENT, "run": "old", "legacy": True}, tool)
+			self.assertTrue(denial["fatal"])
+
 
 class TestNativeReorderJourney(FrappeTestCase):
 	"""Committed, uniquely named fake fixtures allow the real read-only connection.
