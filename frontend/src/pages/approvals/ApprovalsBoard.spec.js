@@ -315,7 +315,7 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(rail(w).classes()).toEqual(
 			expect.arrayContaining([
 				"w-full",
-				"max-h-[40vh]",
+				"max-h-[35%]",
 				"border-b",
 				"lg:w-[360px]",
 				"lg:max-h-none",
