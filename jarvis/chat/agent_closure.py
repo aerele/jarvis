@@ -101,6 +101,81 @@ CLOSED_AGENT_SPECS = (
 _CLOSED_BY_SLUG = {spec.slug: spec for spec in CLOSED_AGENT_SPECS}
 
 
+@dataclass(frozen=True)
+class NativeAgentRelease:
+	"""A reviewed replacement runtime; historic fences remain permanent."""
+
+	version: str
+	tools: tuple[str, ...]
+	policy: str
+	configuration_validator: str
+
+
+_NATIVE_RELEASES = {
+	"ticket-triage-operator": NativeAgentRelease(
+		version="0.2.0",
+		tools=("jarvis__get_ticket_triage_inputs", "jarvis__stage_ticket_triage_proposals", "exec"),
+		policy="ticket-triage-v1",
+		configuration_validator="jarvis.chat.ticket_triage.configuration_issues",
+	),
+}
+
+
+def native_release_spec(agent: str | None) -> NativeAgentRelease | None:
+	"""Require a reviewed code pin AND the matching bundled registry contract.
+
+	Read the raw code artifact, not registry_tools_allow (which calls this gate),
+	and never consult a mutable tenant listing to grant a native release.
+	"""
+	from jarvis.chat.agent_catalog import _load_registry
+
+	slug = (agent or "").strip()
+	release = _NATIVE_RELEASES.get(slug)
+	if release is None:
+		return None
+	entries = [a for a in _load_registry().get("agents", []) if a.get("agent_slug") == slug]
+	if len(entries) != 1:
+		return None
+	entry = entries[0]
+	if (
+		entry.get("version") == release.version
+		and entry.get("status") == "Published"
+		and entry.get("tools_allow") == list(release.tools)
+		and entry.get("writes") in (None, [])
+		and not (entry.get("default_schedule") or {}).get("schedule_enabled")
+	):
+		return release
+	return None
+
+
+def is_closed_installation(doc) -> bool:
+	"""An old install cannot acquire replacement authority through a listing edit."""
+	if not closed_agent_spec(doc.get("agent")):
+		return False
+	release = native_release_spec(doc.get("agent"))
+	return release is None or doc.get("installed_version") != release.version
+
+
+def is_native_run(run, release: NativeAgentRelease) -> bool:
+	"""Allow only the server-snapshotted manual native contract."""
+	try:
+		tools = json.loads(run.get("tools_allow_json") or "null")
+		return bool(
+			run.get("bundle_version") == release.version
+			and run.get("trigger") == "manual"
+			and run.get("capability_contract") == "snapshot"
+			and isinstance(tools, list)
+			and len(tools) == len(set(tools))
+			and set(tools).issubset(release.tools)
+			and {t for t in tools if t.startswith("jarvis__")}
+			== {t for t in release.tools if t.startswith("jarvis__")}
+			and json.loads(run.get("capability_writes_json") or "null") == []
+			and json.loads(run.get("assessment_config_json") or "{}").get("policy_version") == release.policy
+		)
+	except (AttributeError, TypeError, ValueError):
+		return False
+
+
 def closed_agent_spec(agent: str | None) -> ClosedAgentSpec | None:
 	"""Return the reviewed close contract for ``agent``, if one exists."""
 	return _CLOSED_BY_SLUG.get((agent or "").strip())
@@ -108,7 +183,7 @@ def closed_agent_spec(agent: str | None) -> ClosedAgentSpec | None:
 
 def is_closed_agent(agent: str | None) -> bool:
 	"""Return whether ``agent`` is closed by reviewed server code."""
-	return closed_agent_spec(agent) is not None
+	return closed_agent_spec(agent) is not None and native_release_spec(agent) is None
 
 
 def closed_agent_for_session(session_key: str | None) -> ClosedAgentSpec | None:
@@ -137,21 +212,23 @@ def assert_listing_status(agent: str | None, status: str | None) -> None:
 		frappe.throw(_(_LISTING_UNAVAILABLE), frappe.PermissionError)
 
 
-def assert_enabled(agent: str | None, enabled: int | bool) -> None:
+def assert_enabled(agent: str | None, enabled: int | bool, installation=None) -> None:
 	"""Refuse an attempt to enable a closed agent."""
-	if is_closed_agent(agent) and frappe.utils.cint(enabled):
+	if frappe.utils.cint(enabled) and (
+		is_closed_agent(agent) or (installation is not None and is_closed_installation(installation))
+	):
 		refuse()
 
 
 def assert_scheduled(agent: str | None, schedule_enabled: int | bool) -> None:
 	"""Refuse an attempt to schedule a closed agent."""
-	if is_closed_agent(agent) and frappe.utils.cint(schedule_enabled):
+	if closed_agent_spec(agent) and frappe.utils.cint(schedule_enabled):
 		refuse()
 
 
-def assert_launch_allowed(agent: str | None) -> None:
+def assert_launch_allowed(agent: str | None, installation=None) -> None:
 	"""Refuse before a launch can create a run, session, or conversation."""
-	if is_closed_agent(agent):
+	if is_closed_agent(agent) or (installation is not None and is_closed_installation(installation)):
 		refuse()
 
 
@@ -163,7 +240,7 @@ def assert_session_dispatch_allowed(session_key: str | None) -> None:
 
 def retire_document(doc) -> None:
 	"""Make a historic installation inert before a supported retirement save."""
-	if not is_closed_agent(doc.get("agent")):
+	if not is_closed_installation(doc):
 		return
 	doc.enabled = 0
 	doc.schedule_enabled = 0
@@ -172,7 +249,16 @@ def retire_document(doc) -> None:
 
 def validate_installation(doc) -> None:
 	"""Guard every installation ORM save, including Desk and import paths."""
-	if not is_closed_agent(doc.get("agent")):
+	if not closed_agent_spec(doc.get("agent")):
+		return
+	release = native_release_spec(doc.get("agent"))
+	if release and doc.get("installed_version") == release.version:
+		if frappe.utils.cint(doc.get("schedule_enabled")):
+			refuse()
+		if frappe.utils.cint(doc.get("enabled")):
+			if frappe.get_attr(release.configuration_validator)(doc.get("config")):
+				refuse()
+		doc.next_run_at = None
 		return
 	if doc.is_new():
 		refuse()
@@ -207,6 +293,14 @@ def delegate_tool_denial(cap: dict, tool: str) -> dict | None:
 	if not spec:
 		return None
 	name = str(tool or "").strip()
+	release = native_release_spec(spec.slug)
+	if release and not cap.get("legacy") and "jarvis__" + name in release.tools:
+		try:
+			run = frappe.get_doc(_RUN, cap.get("run"))
+			if run.get("agent") == spec.slug and is_native_run(run, release):
+				return None
+		except frappe.DoesNotExistError:
+			pass
 	return {
 		"run": cap.get("run"),
 		"agent": spec.slug,
