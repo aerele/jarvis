@@ -89,6 +89,7 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"export_document",
 	"read_file",
 	"query_file",
+	"query_report",
 	"get_file_pages",
 	"attach_to_doc",
 	"download_vcard",

@@ -243,7 +243,7 @@ class TestDocxWindows(unittest.TestCase):
 			name="docx790", file_name="document.docx", file_url="/private/files/document.docx"
 		)
 		with (
-			patch("jarvis.tools.read_file._resolve_file", return_value=doc),
+			patch("jarvis.tools.read_file.resolve_file", return_value=doc),
 			patch.object(frappe, "has_permission", return_value=True),
 			patch("jarvis.compat.file_bytes", return_value=data),
 		):
@@ -287,7 +287,7 @@ class TestDocxWindows(unittest.TestCase):
 		):
 			with (
 				patch(
-					"jarvis.tools.read_file._resolve_file",
+					"jarvis.tools.read_file.resolve_file",
 					return_value=SimpleNamespace(name="private", file_name="secret.docx"),
 				),
 				patch.object(frappe, "has_permission", return_value=False),

@@ -89,9 +89,7 @@
       "version": "0.2.0",
       "status": "Published",
       "description": "Reviews existing draft Purchase Invoices against exact PO and receipt links, cumulative invoice allocations and an explicitly configured price policy. Preview produces findings; live runs create evidence-backed human review requests. Never creates duplicate invoices, submits, pays, or certifies tax compliance. Manual runs only.",
-      "tools_required": [
-        "jarvis__get_purchase_match_inputs"
-      ],
+      "tools_required": ["jarvis__get_purchase_match_inputs"],
       "tools_allow": [
         "jarvis__get_purchase_match_inputs",
         "jarvis__record_agent_run",
@@ -109,16 +107,12 @@
         "Purchase Invoice Item",
         "Company"
       ],
-      "rule_tokens": [
-        "ap3-match-v1"
-      ],
+      "rule_tokens": ["ap3-match-v1"],
       "advisory_tokens": [],
       "writes": null,
       "rule_pack": "ap-exception-family",
       "timeout_s": 600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -148,9 +142,7 @@
       "version": "0.2.0",
       "status": "Published",
       "description": "Reviews submitted receivables and opening balances against typed payment-ledger evidence and recorded payment terms. Produces findings and neutral, unsent reminder text for a named reviewer. Detects India Compliance context when applicable. No sending, Dunning creation, reconciliation, posting, interest or write-offs. Manual runs only.",
-      "tools_required": [
-        "jarvis__get_receivables_review_inputs"
-      ],
+      "tools_required": ["jarvis__get_receivables_review_inputs"],
       "tools_allow": [
         "jarvis__get_receivables_review_inputs",
         "jarvis__record_agent_run",
@@ -166,16 +158,12 @@
         "Customer",
         "Company"
       ],
-      "rule_tokens": [
-        "ar-review-v1"
-      ],
+      "rule_tokens": ["ar-review-v1"],
       "advisory_tokens": [],
       "writes": null,
       "rule_pack": "revops-hygiene",
       "timeout_s": 600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -202,19 +190,21 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Read-only pre-payroll integrity checks across your attendance and leave records: cross-references marked Attendance, biometric check-ins, approved Leave Applications, and leave balances per employee to surface unaccounted working days, leave taken without approval, check-in-vs-mark mismatches, and over-drawn balances before payroll runs. Reproducible; never marks attendance, approves leave, edits a balance, or touches payroll.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -239,12 +229,11 @@
         "ali-lwp-9c21",
         "ali-punch-7d14"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
-      "min_apps": [
-        "hrms"
-      ],
+      "min_apps": ["hrms"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -264,9 +253,7 @@
       "version": "0.3.0",
       "status": "Published",
       "description": "Reviews unreconciled bank lines for one company bank account and statement window against booked Payment Entries and Journal Entries. Proposes matches, flags ambiguous lines and reversals, and describes entries a person may create for bank charges or interest. A named reviewer confirms each proposal and reconciles in ERPNext. No reconciliation, allocation, document creation or posting. Manual runs only.",
-      "tools_required": [
-        "jarvis__get_bank_recon_inputs"
-      ],
+      "tools_required": ["jarvis__get_bank_recon_inputs"],
       "tools_allow": [
         "jarvis__get_bank_recon_inputs",
         "jarvis__record_agent_run",
@@ -282,16 +269,12 @@
         "Account",
         "Company"
       ],
-      "rule_tokens": [
-        "bank-recon-review-v1"
-      ],
+      "rule_tokens": ["bank-recon-review-v1"],
       "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
@@ -317,19 +300,21 @@
       "domain": "measurement",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Reads 6-12 months of your own ERP history and reports the facts that size everything else: how long receipts take to become invoices, how quickly sales invoices get settled, how many entries were reversed, what your books already carry under interest and late-fee heads, how much stock is aged, and how many documents you process each period. Read-only; writes nothing, decides nothing, and never labels anything good or bad - it reports what your database already knows.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -358,12 +343,11 @@
         "bm-fc-1d7a",
         "bm-inv-6b03"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 3600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Quarterly"
@@ -383,10 +367,7 @@
       "version": "0.2.0",
       "status": "Published",
       "description": "Extends the Retrospective Baseline Meter onto Helpdesk records: how quickly tickets get a first response, how quickly they get resolved, and how many tickets you handle each period. Installable only where Helpdesk is present. Read-only; reads timestamps, statuses, and counts - never ticket conversation content.",
-      "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list"
-      ],
+      "tools_required": ["jarvis__query", "jarvis__get_list"],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
@@ -396,20 +377,13 @@
         "canvas",
         "message"
       ],
-      "doctypes_required": [
-        "HD Ticket"
-      ],
-      "rule_tokens": [
-        "bmhd-lat-4c19",
-        "bmhd-win-9e2f"
-      ],
+      "doctypes_required": ["HD Ticket"],
+      "rule_tokens": ["bmhd-lat-4c19", "bmhd-win-9e2f"],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 900,
-      "min_apps": [
-        "erpnext",
-        "helpdesk"
-      ],
+      "min_apps": ["erpnext", "helpdesk"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Quarterly"
@@ -429,10 +403,7 @@
       "version": "0.2.0",
       "status": "Published",
       "description": "Extends the Retrospective Baseline Meter onto HRMS payroll records: how often payroll was re-run for the same period, how many corrections were booked as additional salary, and how many salary slips were changed after submission. Installable only where HRMS is present. Read-only; reports run counts, correction counts, and dates - never individual pay values.",
-      "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list"
-      ],
+      "tools_required": ["jarvis__query", "jarvis__get_list"],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
@@ -448,17 +419,12 @@
         "Additional Salary",
         "Version"
       ],
-      "rule_tokens": [
-        "bmh-ovl-7d12",
-        "bmh-win-3ab8"
-      ],
+      "rule_tokens": ["bmh-ovl-7d12", "bmh-win-3ab8"],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "measurement",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "hrms"
-      ],
+      "min_apps": ["erpnext", "hrms"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Quarterly"
@@ -519,10 +485,7 @@
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "india_compliance"
-      ],
+      "min_apps": ["erpnext", "india_compliance"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -539,7 +502,7 @@
       "domain": "close",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "status": "Published",
       "description": "Read-only period-end integrity checks: the trial balance must balance (opening and closing), and no ledger may carry a material balance on the wrong side of its group. Structural and reproducible — the same books yield the same findings every run. Never writes; reports and hands off.",
       "tools_required": [
@@ -561,17 +524,7 @@
         "canvas",
         "message"
       ],
-      "doctypes_required": [
-        "GL Entry",
-        "Account",
-        "Company"
-      ],
-      "config_keys": [
-        "materiality.benchmark_value",
-        "materiality.percentage",
-        "materiality.engagement_risk_level",
-        "materiality.rounding_step"
-      ],
+      "doctypes_required": ["GL Entry", "Account", "Company"],
       "rule_tokens": [
         "ca-cl-2b9d",
         "ca-cl-7f31",
@@ -579,12 +532,11 @@
         "ca-cl-a4e6",
         "ca-cl-c058"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 2400,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -593,7 +545,13 @@
       "validated_for_fy": "2026-2027",
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "materiality.benchmark_value",
+        "materiality.percentage",
+        "materiality.engagement_risk_level",
+        "materiality.rounding_step"
+      ]
     },
     {
       "agent_slug": "custom-app-learning",
@@ -620,9 +578,7 @@
         "canvas",
         "message"
       ],
-      "doctypes_required": [
-        "Jarvis Wiki Page"
-      ],
+      "doctypes_required": ["Jarvis Wiki Page"],
       "rule_tokens": [],
       "writes": null,
       "rule_pack": "",
@@ -632,10 +588,7 @@
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
       },
-      "default_allowed_roles": [
-        "System Manager",
-        "Jarvis Admin"
-      ],
+      "default_allowed_roles": ["System Manager", "Jarvis Admin"],
       "validated_for_fy": null,
       "min_model": {
         "tier": "Standard"
@@ -647,7 +600,7 @@
       "domain": "inventory-count",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "status": "Coming Soon",
       "description": "Runs a rolling cycle-count programme ERPNext has no native planner for: ranks the SKU book by value (ABC) and movement (velocity), reads how long since each item/warehouse was last counted, and for the lines due this cycle stages a docstatus-0 draft Stock Reconciliation per warehouse with item rows pre-filled and the counted quantity left blank for the human counter, plus one evidence-carrying Approval Request so a store lead approves the count list first. Proposes only; it never counts, never fills a quantity, and never submits a reconciliation.",
       "tools_required": [
@@ -655,6 +608,7 @@
         "jarvis__get_doc",
         "jarvis__query",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__create_doc",
         "jarvis__update_doc"
       ],
@@ -663,6 +617,7 @@
         "jarvis__get_doc",
         "jarvis__query",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__create_doc",
         "jarvis__update_doc",
         "jarvis__record_agent_run",
@@ -679,6 +634,7 @@
         "Stock Ledger Entry"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": [
         {
           "doctype": "Jarvis Approval Request",
@@ -691,9 +647,7 @@
       ],
       "rule_pack": "inventory-health",
       "timeout_s": 600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
@@ -717,12 +671,14 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -748,9 +704,7 @@
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -805,9 +759,7 @@
       "writes": null,
       "rule_pack": "revops-hygiene",
       "timeout_s": 1800,
-      "min_apps": [
-        "crm"
-      ],
+      "min_apps": ["crm"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
@@ -831,6 +783,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_engagement_config"
       ],
@@ -838,6 +791,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
@@ -871,9 +825,7 @@
       "writes": null,
       "rule_pack": "ap-exception-family",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -890,7 +842,7 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "For batch-tracked pharma/FMCG/food stock: replays each day's outward movements to catch FEFO violations — a dispatch that skipped an older-expiry batch that still had stock — and lists on-hand batches inside the near-expiry and past-expiry horizon, ranked by value. Read-only; hyperlinks every finding to its batch and dispatch. Never touches stock, holds a shipment, or writes off a batch.",
       "tools_required": [
@@ -924,12 +876,11 @@
         "gdp_near_expiry_horizon_convention",
         "shelf_life_horizon_fraction"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -946,13 +897,14 @@
       "domain": "accounting",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Read-only month-end fixed-asset integrity checks: ties every due depreciation schedule row to its posted journal, reconciles scheduled vs posted depreciation, lists zero / near-salvage assets still in use as write-off candidates, and ages capital-work-in-progress not yet placed in service. Produces a reproducible, provenance-linked worklist and dashboard. Never edits the register, posts a journal, or signs the close.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -960,6 +912,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -982,12 +935,11 @@
         "fad-mat-7c21",
         "fad-salv-b1a6"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1004,19 +956,21 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "Published",
       "description": "Sweeps goods receipts (Purchase Receipts) for receiving-discipline gaps: UOM-conversion anomalies that distort stock quantity, receipts missing the batch/serial capture the Item mandates, ageing received-but-not-billed (GRNI) balances, and direct receipts booked with no Purchase Order to match against. Ranks each gap with a rupee or count figure and hyperlinks it to the offending receipt line. Read-only; never edits a receipt, posts, chases a vendor, or touches stock or valuation.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1040,12 +994,11 @@
         "grn-offpo-3d51",
         "grn-uomtol-4b17"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Weekly"
@@ -1069,6 +1022,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1076,6 +1030,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1092,18 +1047,12 @@
         "Supplier",
         "Company"
       ],
-      "rule_tokens": [
-        "rule36_4_in2b",
-        "rule37_180d",
-        "s16_4_window"
-      ],
+      "rule_tokens": ["rule36_4_in2b", "rule37_180d", "s16_4_window"],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "india_compliance"
-      ],
+      "min_apps": ["erpnext", "india_compliance"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1127,6 +1076,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_engagement_config",
         "jarvis__get_gstr1_summary",
@@ -1136,6 +1086,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_engagement_config",
         "jarvis__get_gstr1_summary",
@@ -1163,17 +1114,11 @@
         "hsn_rate_drift",
         "notified_rcm_categories"
       ],
-      "advisory_tokens": [
-        "books_ic_consistency",
-        "hsn_rate_drift"
-      ],
+      "advisory_tokens": ["books_ic_consistency", "hsn_rate_drift"],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "india_compliance"
-      ],
+      "min_apps": ["erpnext", "india_compliance"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1183,10 +1128,7 @@
       "min_model": {
         "tier": "Advanced"
       },
-      "config_keys": [
-        "annual_aggregate_turnover",
-        "same_hsn_rate_allowlist"
-      ]
+      "config_keys": ["annual_aggregate_turnover", "same_hsn_rate_allowlist"]
     },
     {
       "agent_slug": "lead-hygiene-auditor",
@@ -1214,12 +1156,7 @@
         "canvas",
         "message"
       ],
-      "doctypes_required": [
-        "CRM Lead",
-        "CRM Deal",
-        "CRM Task",
-        "CRM Call Log"
-      ],
+      "doctypes_required": ["CRM Lead", "CRM Deal", "CRM Task", "CRM Call Log"],
       "rule_tokens": [
         "lh-email-4a1c",
         "lh-name-3e0f",
@@ -1236,9 +1173,7 @@
       "writes": null,
       "rule_pack": "revops-hygiene",
       "timeout_s": 900,
-      "min_apps": [
-        "crm"
-      ],
+      "min_apps": ["crm"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -1248,10 +1183,7 @@
       "min_model": {
         "tier": "Advanced"
       },
-      "config_keys": [
-        "open_workable_status_set",
-        "fingerprint_salt"
-      ]
+      "config_keys": ["open_workable_status_set", "fingerprint_salt"]
     },
     {
       "agent_slug": "ledger-scrutiny-auditor",
@@ -1259,13 +1191,14 @@
       "domain": "accounting",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only pre-close ledger scrutiny: scans your general ledger for postings worth a human look — uncleared suspense/clearing balances, dormant accounts that moved, balances on the wrong side of an account, round-number plugs, and possible duplicate manual journal entries. Isolates human-authored journals from system-generated ones. Hands your accountant a ranked, evidence-linked worklist and a dashboard. Never edits the ledger, never books a correction, never decides whether a flag is truly an error.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1273,6 +1206,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1281,12 +1215,7 @@
         "canvas",
         "message"
       ],
-      "doctypes_required": [
-        "GL Entry",
-        "Account",
-        "Journal Entry",
-        "Company"
-      ],
+      "doctypes_required": ["GL Entry", "Account", "Journal Entry", "Company"],
       "rule_tokens": [
         "ls-dup-5f06",
         "ls-mat-a81c",
@@ -1294,12 +1223,11 @@
         "ls-sign-9c14",
         "ls-susp-3d7a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1323,6 +1251,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1330,6 +1259,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1345,17 +1275,11 @@
         "Supplier",
         "Company"
       ],
-      "rule_tokens": [
-        "msmed_s15_windows",
-        "s43bh_yearend_test"
-      ],
+      "rule_tokens": ["msmed_s15_windows", "s43bh_yearend_test"],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "india_compliance"
-      ],
+      "min_apps": ["erpnext", "india_compliance"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1364,7 +1288,15 @@
       "validated_for_fy": "2026-2027",
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "supplier_group_mapping",
+        "reviewer",
+        "reviewer_capacity",
+        "applicable_tax_rate",
+        "currency"
+      ],
+      "supports_record_scope": false
     },
     {
       "agent_slug": "negative-stock-valuation-auditor",
@@ -1372,7 +1304,7 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Runs ERPNext's stock-value vs account-value comparison on a schedule and works the residue: flags negative on-hand balances, zero-rate receipts, abnormal valuation-rate jumps, internal stock-value inconsistencies, and where your perpetual stock value drifts from its stock-in-hand GL account. Ranks each exception by rupees with a link to the offending ledger row. Read-only; never adjusts a quantity, books a journal entry, or posts a stock reconciliation.",
       "tools_required": [
@@ -1412,12 +1344,11 @@
         "nsv-spike-4b1c",
         "nsv-tieout-7d92"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1484,9 +1415,7 @@
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
-      "min_apps": [
-        "hrms"
-      ],
+      "min_apps": ["hrms"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1496,10 +1425,7 @@
       "min_model": {
         "tier": "Advanced"
       },
-      "config_keys": [
-        "payroll_entry",
-        "reviewer_of_record"
-      ]
+      "config_keys": ["payroll_entry", "reviewer_of_record"]
     },
     {
       "agent_slug": "reorder-replenishment-operator",
@@ -1554,9 +1480,7 @@
       ],
       "rule_pack": "inventory-health",
       "timeout_s": 600,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -1573,19 +1497,21 @@
       "domain": "helpdesk",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "A scheduled, reproducible queue-health sweep for Frappe Helpdesk. Reads each ticket's already-stored SLA state and folds breached, about-to-breach, unassigned, unacknowledged, reopened and stalled tickets into one de-duplicated, severity-ranked worklist, hyperlinked to each ticket with the deadline it missed and its age. Read-only; never reassigns, replies, re-prioritises, or closes a ticket.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1605,12 +1531,11 @@
         "sb-stat-4d81",
         "sb-win-1e4a"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "helpdesk-queue",
       "timeout_s": 1800,
-      "min_apps": [
-        "helpdesk"
-      ],
+      "min_apps": ["helpdesk"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -1627,19 +1552,21 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Reads your computed Salary Slips each month before the PF/ESI/PT deposit and surfaces the employees whose statutory deduction lines don't reconcile with their reconstructed wage bases — PF against the ceiling, ESI at the eligibility boundary and its mid-period continuity, PT against the state slab, LWF presence, and bonus/gratuity eligibility transitions. UAN/ESI identity and challan/portal deposit evidence come only from sources you declare at install; checks needing them stay not-evaluable until then. Read-only; never edits a slip or files a return; a named reviewer owns every decision.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1665,12 +1592,11 @@
         "pt_slabs_karnataka",
         "pt_slabs_maharashtra"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
-      "min_apps": [
-        "hrms"
-      ],
+      "min_apps": ["hrms"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1705,23 +1631,17 @@
         "canvas",
         "message"
       ],
-      "doctypes_required": [
-        "Journal Entry",
-        "Payment Entry",
-        "Company"
-      ],
+      "doctypes_required": ["Journal Entry", "Payment Entry", "Company"],
       "rule_tokens": [
         "pf_esi_deposit_due_date",
         "s14b_damages_table",
         "s7q_interest_table"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "payroll-integrity",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "hrms"
-      ],
+      "min_apps": ["erpnext", "hrms"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1738,19 +1658,21 @@
       "domain": "inventory-count",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Reconciles a physical stock count against system on-hand: ranks the SKUs whose counted quantity differs from the system by rupees-at-risk into an investigation worklist. Requires a docstatus=0 physical-count source (manufactured by the paired cycle-count-planner-operator). Read-only; never posts a stock reconciliation, adjusts a quantity, guesses a cause, or touches valuation. Negative-stock and valuation-integrity classes are owned by negative-stock-valuation-auditor, not here.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1764,15 +1686,12 @@
         "Item",
         "Stock Ledger Entry"
       ],
-      "rule_tokens": [
-        "sv-vtol-7b2c"
-      ],
+      "rule_tokens": ["sv-vtol-7b2c"],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -1830,10 +1749,7 @@
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext",
-        "india_compliance"
-      ],
+      "min_apps": ["erpnext", "india_compliance"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1889,9 +1805,7 @@
       ],
       "rule_pack": "helpdesk-queue",
       "timeout_s": 300,
-      "min_apps": [
-        "helpdesk"
-      ],
+      "min_apps": ["helpdesk"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Daily"
@@ -1908,7 +1822,7 @@
       "domain": "ap",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Ranks the vendor sub-ledger exceptions worth a human look at AP close: suppliers sitting in a debit balance, advances left unlinked to an invoice, goods received but not yet billed, and any gap between the supplier-wise balances and the creditors control account. A book-to-book self-consistency check with per-finding provenance and a saved worklist. Read-only; never books an entry, clears a balance, or releases a payment.",
       "tools_required": [
@@ -1916,6 +1830,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1924,6 +1839,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1942,12 +1858,6 @@
         "Purchase Receipt",
         "Company"
       ],
-      "config_keys": [
-        "ageing.stale_floor_days",
-        "ageing.advance_floor_days",
-        "ageing.grir_floor_days",
-        "ageing.band_edges"
-      ],
       "rule_tokens": [
         "grir_itc_s16_4_window",
         "vl-adv-ageing-3d92",
@@ -1957,12 +1867,11 @@
         "vl-stale-ageing-5f17",
         "vl-tieout-tol-a9e3"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "finance-close-control",
       "timeout_s": 1800,
-      "min_apps": [
-        "erpnext"
-      ],
+      "min_apps": ["erpnext"],
       "default_schedule": {
         "schedule_enabled": 0,
         "schedule_frequency": "Monthly"
@@ -1971,7 +1880,13 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "ageing.stale_floor_days",
+        "ageing.advance_floor_days",
+        "ageing.grir_floor_days",
+        "ageing.band_edges"
+      ]
     }
   ]
 }
