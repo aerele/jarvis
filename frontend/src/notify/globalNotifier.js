@@ -201,6 +201,10 @@ export function attachGlobalNotifier({ socket, router }) {
 	}
 
 	function onEvent(p) {
+		if (p?.kind === "share:changed") {
+			store.loadSharedConversations?.({ refresh: true });
+			return;
+		}
 		if (!p || !p.kind) return;
 		if (p.conversation_id) store.scheduleConversationActivityRefresh();
 		switch (p.kind) {
