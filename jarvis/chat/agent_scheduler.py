@@ -746,6 +746,28 @@ def _terminalize_failed(
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- failure survives later runs
 
 
+def fail_locked_run(run, error: str, *, detail: str | None = None) -> bool:
+	"""Fail a Run whose caller already holds its ``FOR UPDATE`` row lock.
+
+	The status check and terminal write stay in one lock interval. This is for
+	server paths which already proved a run identity and must not release it only
+	to have :func:`fail_run` lock a newer state. The terminal tail commits before
+	session teardown, as required by :func:`_terminalize_failed`.
+	"""
+	if not isinstance(run, dict) or run.get("status") != "running" or not run.get("name"):
+		return False
+	_terminalize_failed(
+		run.name,
+		agent=run.get("agent"),
+		installation=run.get("installation"),
+		session_key=run.get("session_key"),
+		owner=run.get("owner"),
+		error=error,
+		detail=detail,
+	)
+	return True
+
+
 def fail_run(run_name: str, error: str, *, detail: str | None = None) -> bool:
 	"""Terminalize a RUNNING agent run as ``failed`` with ``error``. Returns True
 	iff this call is the one that transitioned it.
@@ -775,16 +797,7 @@ def fail_run(run_name: str, error: str, *, detail: str | None = None) -> bool:
 		if not cur or cur.status != "running":
 			frappe.db.commit()  # release the lock; a concurrent finish already won
 			return False
-		_terminalize_failed(
-			run_name,
-			agent=cur.agent,
-			installation=cur.installation,
-			session_key=cur.session_key,
-			owner=cur.owner,
-			error=error,
-			detail=detail,
-		)
-		return True
+		return fail_locked_run(cur, error, detail=detail)
 	except Exception:
 		frappe.log_error(
 			title=f"jarvis agent: run failure stamp failed: {run_name}",

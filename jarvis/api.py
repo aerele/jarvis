@@ -10,7 +10,11 @@ from frappe.utils.caching import request_cache
 
 from jarvis import audit, telemetry
 from jarvis._http import validate_bearer as _validate_bearer
-from jarvis._plugin_auth import PluginAuthError, validate_plugin_request
+from jarvis._plugin_auth import (
+	PluginAuthError,
+	validate_plugin_request,
+	validate_private_input_recovery_request,
+)
 from jarvis._session import impersonate
 from jarvis.chat import txn
 from jarvis.exceptions import (
@@ -34,12 +38,78 @@ from jarvis.tools._result_guard import enforce_result_budget
 from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
 _REGISTERED_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+_PRIVATE_INPUT_RECOVERY_BODY = b"{}"
+_PRIVATE_INPUT_RECOVERY_ACK = {"ok": True}
+_PRIVATE_INPUT_RECOVERY_BODY_ERROR = "Invalid private input recovery request."
 
 
 def _canonical_registered_tool(tool) -> str | None:
 	"""Return a valid bare registry name, never an attacker display value."""
 	name = str(tool or "").strip()
 	return name if _REGISTERED_TOOL_NAME.fullmatch(name) and name in _ACCEPTED_PARAMS else None
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def terminalize_unusable_payroll_deposit_private_source(**_ignored) -> dict:
+	"""Close one unusable Deposit private-source run through a neutral callback.
+
+	This is deliberately not a model tool. Its signed raw request is exactly
+	``{}``; the session bearer is the only selector. The fixed acknowledgement
+	reveals neither a run state nor a source transport outcome.
+	"""
+	body = _request_body_bytes()
+	try:
+		session_key = validate_private_input_recovery_request(body)
+	except PluginAuthError as exc:
+		frappe.local.response.http_status_code = exc.http_status
+		return _error(exc.code, exc.message)
+	if body != _PRIVATE_INPUT_RECOVERY_BODY:
+		frappe.local.response.http_status_code = 400
+		return _error("InvalidArgumentError", _PRIVATE_INPUT_RECOVERY_BODY_ERROR)
+
+	try:
+		user = _private_input_recovery_user(session_key)
+		if user:
+			from jarvis.chat import payroll_deposit_recovery
+
+			payroll_deposit_recovery.recover_private_input(session_key, user)
+	except Exception:
+		# The request carries no caller content other than the signed empty body.
+		# Do not let an unexpected server failure echo an internal exception or
+		# leave an open transaction behind this neutral recovery path.
+		frappe.db.rollback()
+		frappe.logger("jarvis").error("private payroll input recovery failed", exc_info=True)
+
+	frappe.local.response.http_status_code = 200
+	return dict(_PRIVATE_INPUT_RECOVERY_ACK)
+
+
+def _private_input_recovery_user(session_key: str) -> str | None:
+	"""Return a live legacy Deposit run-as user, without a customer receipt."""
+	from jarvis.chat.collaboration import is_collaborative_session, legacy_session_user
+	from jarvis.chat.device import session_device_is_stale
+	from jarvis.permissions import is_valid_unattended_owner
+
+	try:
+		if is_collaborative_session(session_key):
+			return None
+		user = legacy_session_user(session_key)
+		if not is_valid_unattended_owner(user):
+			return None
+		try:
+			row_device = (
+				frappe.db.get_value("Jarvis Chat Session", {"session_key": session_key}, "chat_device_id")
+				or ""
+			).strip()
+		except Exception:
+			# Preserve normal plugin-call compatibility during the column rollout.
+			row_device = ""
+		current_device = (frappe.db.get_single_value("Jarvis Settings", "chat_device_id") or "").strip()
+		if session_device_is_stale(row_device, current_device):
+			return None
+		return user
+	except (frappe.PermissionError, AttributeError, TypeError):
+		return None
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
