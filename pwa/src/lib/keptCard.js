@@ -19,7 +19,7 @@ const KEPT = {
 	storage_outcome_unknown: "Lost track of whether that went through. Check before retrying.",
 };
 const SETTLED_STATUS = ["Executed", "Failed", "Discarded", "Cancelled", "Superseded"];
-const SETTLED_CODE = ["not_found", "already_handled"];
+const SETTLED_CODE = ["not_found", "already_handled", "safety_update"];
 
 export function keptCardMessage(res) {
 	if (!res || res.ok !== false || !res.reason_code) return "";
@@ -38,6 +38,8 @@ const SETTLED_REASONS = {
 	target_missing: "The record this targets no longer exists. Nothing ran.",
 	tampered: "This action failed an integrity check. Nothing ran.",
 	unverifiable: "This action can no longer be verified on this site. Nothing ran.",
+	safety_update:
+		"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
 };
 export function settledReasonMessage(res) {
 	if (!res || res.ok !== false || !res.reason_code) return "";
