@@ -55,7 +55,7 @@
 			     sidebar pattern; dark gray-1 ≠ surface-selected per §2.5) -->
 			<div
 				data-testid="approvals-rail"
-				class="max-h-[40vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
+				class="max-h-[35%] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
 			>
 				<!-- "Waiting for your reply" strip (notify-approvals Part 3): prose
 				     questions the agent asked in chat — derived server-side
@@ -397,7 +397,10 @@
 			<div class="min-h-0 min-w-0 flex-1 overflow-y-auto">
 				<!-- a held write / chat card / wiki note: its own detail, keyed so every
 				     selection mounts (and loads) a fresh one -->
-				<div v-if="selectedKey" class="mx-auto w-full max-w-3xl px-4 py-6 sm:px-8">
+				<div
+					v-if="selectedKey"
+					class="approval-record-preview mx-auto w-full max-w-3xl px-4 py-6 sm:px-8"
+				>
 					<div class="flex items-center gap-3">
 						<h1 class="min-w-0 flex-1 truncate text-xl font-semibold text-ink-gray-9">
 							{{ selectedAction ? selectedAction.title : KIND_LABEL[selectedKind] }}
@@ -1852,3 +1855,17 @@ function onVisibility() {
 onMounted(() => document.addEventListener("visibilitychange", onVisibility));
 onBeforeUnmount(() => document.removeEventListener("visibilitychange", onVisibility));
 </script>
+
+<style scoped>
+/* Every action kind on the Board shares the detail pane's scroll. Cards in
+   chat retain their compact scrolling region. */
+.approval-record-preview :deep(.jv-pcard-recs) {
+	max-height: none;
+	overflow: visible;
+}
+.approval-record-preview :deep(.jv-rec-id) {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+</style>

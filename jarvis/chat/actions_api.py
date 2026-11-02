@@ -1192,6 +1192,17 @@ _CONFIRMATION_OUTCOME_UNKNOWN = {
 	},
 }
 
+_CONFIRMATION_REVOKED = {
+	"ok": False,
+	"error": {
+		"type": "InvalidConfirmation",
+		"message": (
+			"This confirmation was cancelled during an agent safety update. "
+			"Submit the action again if it is still needed."
+		),
+	},
+}
+
 
 # ── "Approve & run" refusals (skill "Approve & run the plan", design §3.3/§3.4) ──
 # Stable "nothing changed" envelopes for approve_and_run. Each is returned WITHOUT
@@ -1243,10 +1254,21 @@ _APPROVE_RUN_NEVER_TOOL = {
 }
 
 
-def _confirmation_storage_error(exc) -> dict:
+def _confirmation_storage_error(exc, *, token: str | None = None) -> dict:
 	"""Stable user envelope for a Redis failure; never mislabel it as expiry."""
 	from jarvis.chat import pending_confirm
 
+	if isinstance(exc, pending_confirm.LegacyConfirmationRevoked):
+		# A fenced legacy token can have a durable pre-action chat row even after
+		# its Redis credential is gone. Turn that row into a safe terminal receipt
+		# before returning, so a hard reload cannot offer Confirm again. This is
+		# deliberately outside the Redis primitive's pre-claim path: concurrent
+		# claims must not share a Frappe database connection.
+		if token:
+			from jarvis.chat.agent_closure import settle_revoked_legacy_chat_card
+
+			settle_revoked_legacy_chat_card(token)
+		return {**_CONFIRMATION_REVOKED, "reason_code": "safety_update"}
 	frappe.logger("jarvis.pending_confirm").error(
 		"confirmation endpoint stopped before the business action: %s", type(exc).__name__
 	)
@@ -1541,7 +1563,9 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 		guard_conv = passed_conv if passed_conv else record.get("conversation")
 		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
 	except pending_confirm.PendingConfirmStorageError as exc:
-		res = _confirmation_storage_error(exc)
+		res = _confirmation_storage_error(exc, token=token)
+		if res.get("reason_code"):
+			return res
 		unknown = res is _CONFIRMATION_OUTCOME_UNKNOWN
 		return {**res, "reason_code": "storage_outcome_unknown" if unknown else "storage_unavailable"}
 	if not record:
@@ -1552,6 +1576,13 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 	from jarvis.chat import turn_message_binding
 
 	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
+	try:
+		# The helper above can commit. Re-check immediately before generic
+		# dispatch so a close migration landing after consume still wins.
+		pending_confirm.legacy.assert_dispatch_allowed(record)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
+		return _confirmation_storage_error(exc, token=token)
 	# STEP 1: execute the parked write AS the scoped exec_user the gate stored.
 	result = _dispatch_call(record, token, guard_conv, "approve_and_run dispatch crashed")
 	ok = isinstance(result, dict) and bool(result.get("ok"))
@@ -1679,7 +1710,7 @@ def _confirm_core(
 		guard_conv = passed_conv if passed_conv else record.get("conversation")
 		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
 	except pending_confirm.PendingConfirmStorageError as exc:
-		return _confirmation_storage_error(exc)
+		return _confirmation_storage_error(exc, token=token)
 	if not record:
 		return _INVALID_CONFIRM
 
@@ -1688,6 +1719,13 @@ def _confirm_core(
 	from jarvis.chat import turn_message_binding
 
 	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
+	try:
+		# The card was consumed before this helper's commit. Fence it once more at
+		# the final dispatch point so an in-flight migration cannot write ERP data.
+		pending_confirm.legacy.assert_dispatch_allowed(record)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
+		return _confirmation_storage_error(exc, token=token)
 	result = _dispatch_call(record, token, guard_conv, "confirm dispatch crashed")
 	if not (isinstance(result, dict) and result.get("ok")):
 		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
@@ -1971,7 +2009,7 @@ def _dismiss_core(token: str, conversation: str | None = None, *, typed: bool = 
 		guard_conv = passed_conv if passed_conv else record.get("conversation")
 		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
 	except pending_confirm.PendingConfirmStorageError as exc:
-		return _confirmation_storage_error(exc)
+		return _confirmation_storage_error(exc, token=token)
 	if not record:
 		return {"ok": True, "data": {"status": "already_handled"}, "reason_code": "already_handled"}
 

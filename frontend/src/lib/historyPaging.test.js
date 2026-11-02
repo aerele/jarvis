@@ -125,6 +125,33 @@ test("an older page goes above the held rows without duplicates and moves the cu
 	assert.equal(first.paging.hasMore, false);
 });
 
+test("an older page can carry a cancelled receipt beside a valid pending sibling", () => {
+	const held = rows(30, 40);
+	const older = prependOlderPage(
+		held,
+		{ hasMore: true, before: 30, newest: 40 },
+		{
+			messages: [
+				row(28, {
+					role: "tool",
+					tool_call_id: "cancelled-token",
+					action_outcome: "cancelled",
+					tool_result: { reason_code: "safety_update" },
+				}),
+				row(29, {
+					role: "tool",
+					tool_call_id: "safe-sibling",
+					tool_status: "pending",
+					pending_card_safe: true,
+				}),
+			],
+			paging: { has_more: true, before: 28 },
+		}
+	);
+	assert.deepEqual(names(older.messages).slice(0, 2), ["m28", "m29"]);
+	assert.equal(older.messages[1].pending_card_safe, true);
+});
+
 test("a compact tool row is fetched once, then shown whole", () => {
 	const compact = row(7, { role: "tool", tool_result: '{"ok":true}', tool_result_compact: 1 });
 	assert.equal(needsToolDetail(compact, {}), true);
@@ -256,6 +283,12 @@ test("the desktop chat merges the newest page, seeds old cards and loads older p
 	const older = fnBody(chat, "async function loadOlder(");
 	assert.match(older, /api\.getConversation\(id, \{ before: paging\.before \}\)/);
 	assert.match(older, /prependOlderPage\(/);
+	assert.match(older, /observePassiveSafetyUpdates\(d\?\.messages \|\| \[\]\)/);
+	assert.ok(
+		older.indexOf("observePassiveSafetyUpdates(d?.messages || [])") >
+			older.indexOf("messages.value = page.messages"),
+		"the older receipt is observed only after its page is merged"
+	);
 	assert.match(older, /holdFromBottom\(fromBottom\)/);
 	assert.match(fnBody(chat, "function onThreadScroll("), /loadOlder\(\{ auto: true \}\)/);
 	assert.match(fnBody(chat, "function toggleTool("), /loadToolDetail\(name\)/);

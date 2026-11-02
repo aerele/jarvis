@@ -17,6 +17,8 @@ const REFUSALS = {
 	target_missing: "The record this targets no longer exists. Nothing ran.",
 	tampered: "This action failed an integrity check. Nothing ran.",
 	unverifiable: "This action can no longer be verified on this site. Nothing ran.",
+	safety_update:
+		"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
 	// approve_and_run (C5): the server keeps the response shape + one of these on
 	// every refusal, and the card stays Pending - keepsChatCard already keeps it
 	// (none of these mark pa_status settled), so only the words live here.

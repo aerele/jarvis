@@ -23,6 +23,13 @@ afterEach(() => {
 });
 
 describe("File Box waits in the current chat", () => {
+	it("binds each answer to the loaded conversation without changing the response", async () => {
+		const unbound = { ...question };
+		const w = setup([unbound]);
+		await w.refresh("A", true);
+		expect(w.items.value[0]).toEqual({ ...unbound, conversation: "A" });
+		expect(unbound).not.toHaveProperty("conversation");
+	});
 	it("hides only the Chat question with the full visible ask label", async () => {
 		const w = setup([question, { ...question, name: "AR-2", source: "File Box" }]);
 		await w.refresh("A", true);
@@ -34,7 +41,7 @@ describe("File Box waits in the current chat", () => {
 		const w = setup([{ ...question, question: "Supplier\n  Company" }, question]);
 		w.activeAsk.value = { questions: [{ q: "", fieldname: "supplier" }, { q: "Company" }] };
 		await w.refresh("A", true);
-		expect(w.visibleItems.value).toEqual([question]);
+		expect(w.visibleItems.value).toEqual([{ ...question, conversation: "A" }]);
 	});
 	it("keeps a mismatched server last-fence question", async () => {
 		const w = setup([question]);
@@ -42,7 +49,7 @@ describe("File Box waits in the current chat", () => {
 			'```jarvis-ask\n[{"q":"First?","type":"text"}]\n```\n```jarvis-ask\n[{"q":"Which supplier?","type":"text"}]\n```'
 		);
 		await w.refresh("A", true);
-		expect(w.visibleItems.value).toEqual([question]);
+		expect(w.visibleItems.value).toEqual([{ ...question, conversation: "A" }]);
 	});
 	it("does not expose an empty duplicate panel", async () => {
 		const w = setup([question]);
@@ -59,14 +66,18 @@ describe("File Box waits in the current chat", () => {
 		await w.refresh("A", true);
 		resolve({ items: [] });
 		await old;
-		expect(w.items.value).toEqual([sheet, question]);
+		expect(w.items.value).toEqual(
+			[sheet, question].map((item) => ({ ...item, conversation: "A" }))
+		);
 	});
 	it("retains known decisions on a failed refresh", async () => {
 		const w = setup();
 		await w.refresh("A", true);
 		w.load.mockRejectedValueOnce(new Error("offline"));
 		await w.refresh("A", true);
-		expect(w.items.value).toEqual([sheet, question]);
+		expect(w.items.value).toEqual(
+			[sheet, question].map((item) => ({ ...item, conversation: "A" }))
+		);
 	});
 	it("coalesces terminal events and matches an AR settled name without conversation", async () => {
 		vi.useFakeTimers();
