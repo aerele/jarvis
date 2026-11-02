@@ -4,10 +4,12 @@
 import { tr } from "../stage.mjs";
 import { Scene, playScene } from "./scene-runtime.mjs";
 import { skyWashSVG } from "./scene-art.mjs";
+import { squeezeX } from "./scene-place.mjs";
 import {
   SKY_STOPS,
   SKY_STOPS_DARK,
   balloonTops,
+  balloonXs,
   balloonsSVG,
   birthdayStyle,
   confettiSVG,
@@ -44,6 +46,11 @@ class BirthdayScene extends Scene {
     super(host, opts, CFG);
   }
 
+  // Which balloons hang, and where, follows the page as it stands (a phone leaves some out).
+  extra(_b, geo) {
+    return { balloonX: balloonXs(geo) };
+  }
+
   px(geo) {
     const { p } = this;
     return `${birthdayStyle(p)}${skyWashSVG(
@@ -57,9 +64,10 @@ class BirthdayScene extends Scene {
 
   inner(geo) {
     const { p } = this;
-    return `${streamersSVG(p, streamerPlan(geo.airBottom))}${balloonsSVG(
-      p
-    )}${this.item("birthday")}${confettiSVG(p, geo.from, geo.to)}`;
+    const plan = streamerPlan(geo.airBottom, (x) => squeezeX(x, geo));
+    return `${streamersSVG(p, plan)}${balloonsSVG(p, geo.balloonX)}${this.item(
+      "birthday"
+    )}${confettiSVG(p, geo.from, geo.to)}`;
   }
 
   playArt() {
@@ -74,28 +82,30 @@ class BirthdayScene extends Scene {
         easing: "ease-out",
       });
     });
-    // Balloons float up from below and settle at the sides, bobbing.
+    // Balloons float up from below and settle at the sides, bobbing. `live` are the listed
+    // balloons that were drawn, in order (all of them on desktop).
     const tops = balloonTops(geo);
-    q("bal").forEach((b, i) =>
+    const live = geo.balloonX.flatMap((x, i) => (x === null ? [] : [i]));
+    q("bal").forEach((b, n) =>
       stage.animate(
         b,
         [
           { transform: tr(0, geo.hu + 70), opacity: 1 },
-          { transform: tr(0, tops[i]), opacity: 1 },
+          { transform: tr(0, tops[live[n]]), opacity: 1 },
         ],
         {
-          duration: 2300 + i * 120,
-          delay: 150 + i * 160,
+          duration: 2300 + live[n] * 120,
+          delay: 150 + live[n] * 160,
           easing: "cubic-bezier(.2,.7,.3,1)",
         }
       )
     );
-    q("bsw").forEach((b, i) =>
+    q("bsw").forEach((b, n) =>
       this.sway(
         b,
         "rotate(-4deg) translateY(0)",
         "rotate(4deg) translateY(-4px)",
-        2400 + i * 230
+        2400 + live[n] * 230
       )
     );
     this.fall("bconf", 87, 1200);

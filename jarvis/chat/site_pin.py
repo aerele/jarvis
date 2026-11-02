@@ -47,7 +47,7 @@ def _log_read_failure() -> None:
 		return
 	_read_failure_logged = True
 	try:
-		frappe.log_error(title="site_pin: status read failed")
+		frappe.log_error(title="site_pin: status read failed", message=frappe.get_traceback())
 	except Exception:
 		pass
 
@@ -132,3 +132,30 @@ def clear_pairing_block() -> dict:
 		"cleared_paired_site": before["paired_site"],
 		"cleared_reason": before["reason"],
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+def reverify() -> dict:
+	"""The way back from a false block: ask admin to prove, through the tenant
+	container, that this is the registered site. On a pass the block is cleared and
+	this site becomes the paired site. A failed proof keeps the block."""
+	frappe.only_for("System Manager")
+	from jarvis import admin_client
+	from jarvis.chat import pairing_proof
+	from jarvis.exceptions import AdminAuthError
+
+	try:
+		proved = admin_client.verify_site(pairing_proof.issue_nonce()).get("proved") is True
+	except AdminAuthError:
+		proved = False
+	if proved:
+		frappe.db.set_single_value(
+			SETTINGS,
+			{
+				"pairing_blocked": 0,
+				"pairing_blocked_reason": "",
+				"paired_site": _current_site(),
+			},
+			update_modified=False,
+		)
+	return {**status(), "proved": proved}

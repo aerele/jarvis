@@ -165,4 +165,83 @@ describe("PWA HolidayMark", () => {
 		await flushPromises();
 		expect(wrapper.find(".jv-mood-star").exists()).toBe(true);
 	});
+
+	describe("driven by the welcome scene (stage)", () => {
+		const stage = (over = {}) => ({
+			face: false,
+			item: false,
+			happy: false,
+			look: null,
+			...over,
+		});
+
+		it("is the plain star, with no item and no smile of its own, until the scene shows a face", async () => {
+			await today_is(answer({ scene: true }));
+			await mountMark({ stage: stage() });
+			expect(wrapper.find(".jv-mood-star").exists()).toBe(true);
+			expect(item().exists()).toBe(false);
+			vi.advanceTimersByTime(100);
+			await flushPromises();
+			expect(wrapper.find(".jv-mood-happy").exists()).toBe(false);
+		});
+
+		it("shows a face without the item at peek, and the item once it is delivered", async () => {
+			await today_is(answer({ scene: true }));
+			await mountMark({ stage: stage({ face: true }) });
+			expect(wrapper.find(".jv-mood-peek").exists()).toBe(true);
+			expect(item().exists()).toBe(false);
+			await wrapper.setProps({ stage: stage({ face: true, item: true }) });
+			await flushPromises();
+			expect(item().exists()).toBe(true);
+		});
+
+		it("smiles on the happy beat", async () => {
+			await today_is(answer({ scene: true }));
+			await mountMark({ stage: stage({ face: true, item: true, happy: true }) });
+			expect(wrapper.find(".jv-mood-happy").exists()).toBe(true);
+		});
+
+		it("points the eyes where the scene looks, until it smiles", async () => {
+			await today_is(answer({ scene: true }));
+			await mountMark({ stage: stage({ face: true, look: [10, -14] }) });
+			const root = wrapper.get(".jvh");
+			expect(root.attributes("data-look")).toBeDefined();
+			expect(root.attributes("style")).toContain("--jvh-lx: 10px");
+			expect(root.attributes("style")).toContain("--jvh-ly: -14px");
+			await wrapper.setProps({ stage: stage({ face: true, happy: true, look: [10, -14] }) });
+			expect(wrapper.get(".jvh").attributes("data-look")).toBeUndefined();
+		});
+
+		it("a tap tells the stage instead of smiling on its own", async () => {
+			await today_is(answer({ scene: true }));
+			await mountMark({ stage: stage({ face: true, item: true }) });
+			await wrapper.get("button.jvh-button").trigger("click");
+			expect(wrapper.emitted("tap")).toHaveLength(1);
+			await flushPromises();
+			expect(wrapper.find(".jv-mood-happy").exists()).toBe(false);
+		});
+
+		it("is labelled for what the tap does: the scene on a scene day, the greeting otherwise", async () => {
+			await today_is(answer({ scene: true }));
+			await mountMark({ stage: stage({ face: true, item: true }) });
+			expect(wrapper.get("button.jvh-button").attributes("aria-label")).toBe(
+				"Replay the holiday scene"
+			);
+			wrapper.unmount();
+			await mountMark();
+			expect(wrapper.get("button.jvh-button").attributes("aria-label")).toBe(
+				"Show the greeting again"
+			);
+		});
+
+		it("keeps the upgrade hold's face and wears nothing in it", async () => {
+			await today_is(answer({ scene: true }));
+			await mountMark({
+				mood: "upgrading",
+				stage: stage({ face: true, item: true, happy: true }),
+			});
+			expect(wrapper.find(".jv-mood-upgrading").exists()).toBe(true);
+			expect(item().exists()).toBe(false);
+		});
+	});
 });
