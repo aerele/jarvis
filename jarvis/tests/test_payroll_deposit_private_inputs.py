@@ -1124,6 +1124,100 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 					)
 		return result, receipts, logs
 
+	def _dispatch_with_full_egress_capture(self, cap, tool, args, tool_call_id):
+		"""Exercise receipt, realtime, and audit egress for one private denial."""
+		from jarvis import api
+
+		frappe.local.jarvis_private_delegate_metadata = False
+		receipts, events, audit_entries = [], [], []
+
+		class Logger:
+			def info(self, value, *_args, **_kwargs):
+				audit_entries.append(value)
+
+			def warning(self, value, *_args, **_kwargs):
+				audit_entries.append(value)
+
+			def error(self, value, *_args, **_kwargs):
+				audit_entries.append(value)
+
+		def insert(_conversation, fields, **_kwargs):
+			receipts.append(deepcopy(fields))
+			return "TOOL-MESSAGE"
+
+		with (
+			patch("jarvis.chat.collaboration.require_legacy_session"),
+			patch.object(api, "impersonate"),
+			patch.object(_delegate_capability, "resolve", return_value=cap),
+			patch.object(
+				api,
+				"_get_header",
+				side_effect=lambda name: tool_call_id if name == "X-Jarvis-Tool-Call-Id" else None,
+			),
+			patch.object(frappe.db, "get_value", return_value="owner@example.test"),
+			patch.object(frappe.db, "commit"),
+			patch.object(api, "_locked_insert_chat_message", side_effect=insert),
+			patch.object(
+				api,
+				"publish_realtime_tool_result",
+				side_effect=lambda **event: events.append(deepcopy(event)),
+			),
+			patch.object(api, "_maybe_attach_artifact"),
+			patch("jarvis.chat.collaboration_turn.current_turn", return_value=None),
+			# The audit timestamp is outside this egress-boundary assertion.
+			patch.object(frappe.utils, "now", return_value="2026-11-02 00:00:00"),
+			patch.object(frappe, "logger", return_value=Logger()),
+		):
+			result = api._dispatch_from_session("owner@example.test", "private-session", tool, args)
+		return result, receipts, events, audit_entries
+
+	def test_source_receipts_preserve_deposit_redaction_and_terminal_boundary(self):
+		"""A source-tool denial must not turn a Deposit egress into a source receipt."""
+		from jarvis import api
+		from jarvis.chat import source_receipts
+		from jarvis.tools import query_file
+
+		self.assertIn("query_file", source_receipts.SOURCE_TOOLS)
+		self.assertTrue(callable(query_file.query_file))
+		sentinel = "PRIVATE-QUERY-FILE-SOURCE"
+		call_id = "PRIVATE-QUERY-FILE-CALL-ID"
+		args = {"file_url": sentinel, "sql": f"SELECT '{sentinel}'"}
+
+		result, receipts, events, audit_entries = self._dispatch_with_full_egress_capture(
+			self._cap(["jarvis__record_agent_run"]), "query_file", args, call_id
+		)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], api.CapabilityDeniedError.__name__)
+		self.assertEqual(len(receipts), 1)
+		self.assertEqual(len(events), 1)
+		self.assertEqual(len(audit_entries), 1)
+		stored_result = json.loads(receipts[0]["tool_result"])
+		self.assertFalse(source_receipts.is_source_receipt(stored_result))
+		self.assertEqual(receipts[0]["tool_name"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+		self.assertEqual(json.loads(receipts[0]["tool_args"]), {"private_delegate_args_redacted": True})
+		self.assertIsNone(receipts[0]["tool_call_id"])
+		self.assertFalse(source_receipts.is_source_receipt(events[0]["result"]))
+		self.assertEqual(events[0]["tool_name"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+		self.assertEqual(events[0]["args"], {"private_delegate_args_redacted": True})
+		self.assertIsNone(events[0]["tool_call_id"])
+		audit_entry = json.loads(audit_entries[0])
+		self.assertEqual(audit_entry["tool"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+		self.assertEqual(audit_entry["args"], {"private_delegate_args_redacted": True})
+		for surface in (result, receipts, events, audit_entries):
+			self.assertNotIn(sentinel, json.dumps(surface, default=str))
+			self.assertNotIn(call_id, json.dumps(surface, default=str))
+
+		terminal, terminal_receipts, terminal_events, terminal_audit = self._dispatch_with_full_egress_capture(
+			self._cap(["jarvis__record_agent_run"], status="failed"), "query_file", args, call_id
+		)
+		self.assertFalse(terminal["ok"])
+		self.assertEqual(terminal["error"]["code"], api.RunHaltedError.__name__)
+		self.assertEqual(terminal_receipts, [])
+		self.assertEqual(terminal_events, [])
+		self.assertEqual(terminal_audit, [])
+		self.assertNotIn(sentinel, json.dumps(terminal))
+		self.assertNotIn(call_id, json.dumps(terminal))
+
 	def test_caller_tool_and_call_id_are_redacted_on_allowed_and_denied_paths(self):
 		from jarvis import api
 
