@@ -1062,7 +1062,7 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 		}
 
 	def _dispatch_with_receipt_capture(
-		self, cap, tool, args, run_result=None, tool_call_id=None, result_mode=None
+		self, cap, tool, args, run_result=None, tool_call_id=None, result_mode=None, capture_artifact=False
 	):
 		from jarvis import api
 
@@ -1106,7 +1106,7 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			patches[5],
 			patches[6],
 			patches[7],
-			patches[8],
+			patches[8] as artifact,
 			patches[9],
 			patches[10],
 		):
@@ -1122,6 +1122,8 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 					result = api._dispatch_from_session(
 						"owner@example.test", "private-session", tool, args, result_mode=result_mode
 					)
+		if capture_artifact:
+			return result, receipts, logs, artifact
 		return result, receipts, logs
 
 	def _dispatch_with_full_egress_capture(self, cap, tool, args, tool_call_id):
@@ -1282,6 +1284,143 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			serialized = json.dumps(surface, default=str)
 			self.assertNotIn(sentinel, serialized)
 			self.assertNotIn(call_id, serialized)
+
+	def test_permissive_deposit_source_results_are_projected_before_tool_redaction(self):
+		"""A future source-tool grant cannot hide raw output behind the fixed label."""
+		from jarvis import api
+		from jarvis.chat import agent_run_steps, source_receipts
+
+		for tool, args, source_data in (
+			(
+				"query_file",
+				{"file_url": "/private/files/safe.csv", "sql": "SELECT amount FROM source"},
+				lambda sentinel: {
+					"file_url": "/private/files/safe.csv",
+					"filename": "safe.csv",
+					"name": sentinel,
+					"source_rows": 1,
+					"rows": [[sentinel]],
+					"sql": sentinel,
+				},
+			),
+			(
+				"get_file_pages",
+				{"file_url": "/private/files/safe.pdf", "first_page": 1, "max_pages": 1},
+				lambda sentinel: {
+					"file_url": "/private/files/safe.pdf",
+					"filename": "safe.pdf",
+					"file_name": "safe.pdf",
+					"name": sentinel,
+					"page_count": 1,
+					"pages": [{"page": 1, "data_b64": sentinel}],
+				},
+			),
+		):
+			with self.subTest(tool=tool):
+				frappe.local.jarvis_private_delegate_metadata = False
+				sentinel = f"PRIVATE-ALLOWED-{tool}-SOURCE"
+				call_id = f"PRIVATE-ALLOWED-{tool}-CALL-ID"
+				raw_result = {"ok": True, "data": source_data(sentinel)}
+				receipts, events, logs = [], [], []
+
+				class Logger:
+					def info(self, value, *_args, **_kwargs):
+						logs.append(value)
+
+					def warning(self, value, *_args, **_kwargs):
+						logs.append(value)
+
+					def error(self, value, *_args, **_kwargs):
+						logs.append(value)
+
+				def insert(_conversation, fields, **_kwargs):
+					receipts.append(deepcopy(fields))
+					return "TOOL-MESSAGE"
+
+				try:
+					with (
+						patch("jarvis.chat.collaboration.require_legacy_session"),
+						patch.object(api, "impersonate"),
+						patch.object(
+							_delegate_capability,
+							"resolve",
+							return_value=self._cap([f"jarvis__{tool}"]),
+						),
+						patch.object(
+							api,
+							"_get_header",
+							side_effect=lambda name: call_id if name == "X-Jarvis-Tool-Call-Id" else None,
+						),
+						patch.object(frappe.db, "get_value", return_value="owner@example.test"),
+						patch.object(frappe.db, "commit"),
+						patch.object(api, "_locked_insert_chat_message", side_effect=insert),
+						patch.object(
+							api,
+							"publish_realtime_tool_result",
+							side_effect=lambda **event: events.append(deepcopy(event)),
+						),
+						patch.object(api, "_maybe_attach_artifact") as artifact,
+						patch.object(agent_run_steps, "record_step") as step,
+						patch.object(api.audit, "record") as audit_record,
+						patch("jarvis.chat.collaboration_turn.current_turn", return_value=None),
+						patch.object(frappe, "logger", return_value=Logger()),
+						patch.object(api, "_run_tool", return_value=raw_result),
+						patch("jarvis.chat.connector_focus.refusal", return_value=None),
+					):
+						result = api._dispatch_from_session(
+							"owner@example.test", "private-session", tool, args
+						)
+
+					self.assertTrue(result["ok"])
+					self.assertIn(sentinel, json.dumps(result))  # live delegate response only
+					self.assertEqual(len(receipts), 1)
+					self.assertEqual(len(events), 1)
+					stored = json.loads(receipts[0]["tool_result"])
+					self.assertTrue(source_receipts.is_source_receipt(stored))
+					self.assertEqual(receipts[0]["tool_name"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+					self.assertEqual(
+						json.loads(receipts[0]["tool_args"]), {"private_delegate_args_redacted": True}
+					)
+					self.assertIsNone(receipts[0]["tool_call_id"])
+					self.assertIsNone(receipts[0]["ref_name"])
+					self.assertEqual(events[0]["tool_name"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+					self.assertEqual(events[0]["args"], {"private_delegate_args_redacted": True})
+					self.assertIsNone(events[0]["tool_call_id"])
+					artifact.assert_not_called()
+					audit_record.assert_not_called()
+					for surface in (receipts, events, logs, step.call_args_list):
+						serialized = json.dumps(surface, default=str)
+						self.assertNotIn(sentinel, serialized)
+						self.assertNotIn(tool, serialized)
+						self.assertNotIn(call_id, serialized)
+				finally:
+					frappe.local.jarvis_private_delegate_metadata = False
+
+	def test_permissive_deposit_non_source_result_cannot_attach_an_artifact(self):
+		"""The fixed Deposit metadata boundary also excludes canvas artifacts."""
+		call_id = "PRIVATE-NON-SOURCE-ARTIFACT-CALL-ID"
+		result, receipts, _logs, artifact = self._dispatch_with_receipt_capture(
+			self._cap(["jarvis__get_doc"]),
+			"get_doc",
+			{"doctype": "ToDo", "name": "SAFE-TODO"},
+			run_result={
+				"ok": True,
+				"data": {
+					"doctype": "ToDo",
+					"name": "SAFE-TODO",
+					"file_url": "/private/files/safe.pdf",
+					"filename": "safe.pdf",
+				},
+			},
+			tool_call_id=call_id,
+			capture_artifact=True,
+		)
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(len(receipts), 1)
+		self.assertEqual(receipts[0]["tool_name"], _private_output.PRIVATE_DELEGATE_TOOL_LABEL)
+		self.assertIsNone(receipts[0]["tool_call_id"])
+		artifact.assert_not_called()
 
 	def test_legacy_deposit_refusal_failure_is_fixed_and_a_terminal_race_is_inert(self):
 		"""The legacy refusal can only request the fixed CAS failure transition."""

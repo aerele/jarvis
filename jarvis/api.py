@@ -1332,15 +1332,39 @@ def persist_tool_receipt(
 	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``)."""
 	from jarvis.tools import _private_output
 
-	# Do this before entity extraction and JSON persistence. It covers normal
-	# calls, capability refusals, parse errors, and failed Deposit writebacks.
+	# Preserve the execution name only long enough to classify a source result.
+	# Deposit metadata uses a fixed label at every durable/realtime boundary, but
+	# source_receipt must see the original name or a future permissive contract
+	# could store a generic file reader's raw result under that fixed label.
+	classification_tool = tool
+	redacted_delegate = _private_output.metadata_redacted()
 	args = _private_output.redact_delegate_args(args)
-	tool = _private_output.redact_delegate_tool(tool)
 	tool_call_id = _private_output.safe_tool_call_id(tool_call_id)
 	result = result or {}
-	from jarvis.chat.source_receipts import source_receipt
+	from jarvis.chat.source_receipts import SOURCE_TOOLS, source_receipt
 
-	stored_args, stored_result = source_receipt(tool, args, result)
+	is_source_tool = classification_tool.removeprefix("jarvis__") in SOURCE_TOOLS
+	# A denied Deposit call already carries a fixed error envelope. Keep it as a
+	# normal denial, rather than making a refused tool look like a source read.
+	# A successful source result is the only case that can contain rows/page bytes
+	# and therefore needs the source-reference projection under the fixed label.
+	redacted_source = (
+		redacted_delegate and is_source_tool and isinstance(result, dict) and result.get("ok") is True
+	)
+	if redacted_source:
+		_unused_source_args, stored_result = source_receipt(classification_tool, args, result)
+		stored_args = args
+	elif redacted_delegate:
+		# Capability/argument refusals already have a fixed private error envelope.
+		# Do not turn those into a source receipt merely because the attempted name
+		# happens to be a source reader.
+		stored_args, stored_result = args, result
+	else:
+		stored_args, stored_result = source_receipt(classification_tool, args, result)
+	tool = _private_output.redact_delegate_tool(classification_tool)
+	# A source reader can return a file URL which the generic artifact helper would
+	# attach to a customer-visible canvas. A Deposit source result is metadata-only
+	# for every durable surface, so it cannot create that attachment either.
 	# discarded/cancelled/superseded/expired executed NOTHING; unknown/partial's
 	# write state is UNVERIFIED (an interrupted or mid-dispatch outcome) - none of
 	# these get envelope_ok's binary completed/error classification. The chip
@@ -1371,9 +1395,12 @@ def persist_tool_receipt(
 		try:
 			from jarvis.chat.entities import refs_from_tool
 
-			# refs_from_tool expects the tool's raw data, not the {ok, data} envelope.
+			# Source rows are untrusted private data. For a redacted Deposit source
+			# result, use the metadata projection here too: a source-provided ``name``
+			# must not become the durable ``ref_name`` field.
+			entity_result = stored_result if redacted_source else result
 			ref_doctype, ref_name = refs_from_tool(
-				args, result.get("data") if isinstance(result, dict) else None
+				args, entity_result.get("data") if isinstance(entity_result, dict) else None
 			)
 		except Exception:
 			ref_doctype = ref_name = None
@@ -1496,7 +1523,8 @@ def persist_tool_receipt(
 		# export_excel, …), attach it to the in-flight assistant message's
 		# canvas field + publish a canvas event so it renders inline - the
 		# same surface the agent's own canvas files use.
-		_maybe_attach_artifact(conv_name, conv_owner, result)
+		if not redacted_delegate:
+			_maybe_attach_artifact(conv_name, conv_owner, result)
 
 
 def persist_pending_action(
