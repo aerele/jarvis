@@ -128,10 +128,6 @@ def save_agent_dashboard(
 		}
 	if not run_row.installation:
 		raise InvalidArgumentError("run has no installation")
-	if run_row.dashboard:
-		# Already attached this run (a retried author step) — reuse it.
-		return {"run": run_row.name, "dashboard": run_row.dashboard, "idempotent": True}
-
 	inst = frappe.get_doc(INSTALLATION, run_row.installation)
 	run_doc = frappe.get_doc(RUN, run_row.name)
 	# A delegate can save a dashboard before it calls record_agent_run. Recheck the
@@ -140,6 +136,42 @@ def save_agent_dashboard(
 	from jarvis.chat.agent_scope import assert_fefo_run_artifact_scope
 
 	assert_fefo_run_artifact_scope(run_doc)
+	visibility_state = agent_runs.visibility_receipt_state(run_doc, inst)
+	if visibility_state in ("sliced", "unknown"):
+		# The receipt is a server-only visibility proof.  Never persist the
+		# delegate's HTML when it cannot prove a complete workforce view; save a
+		# partial server fallback instead, even when a retried call already linked
+		# an authored dashboard before the profile changed.
+		try:
+			dashboard = agent_runs.persist_visibility_fallback(run_doc, inst, visibility_state)
+			if not frappe.flags.in_test:
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the run worker
+			return {
+				"run": run_doc.name,
+				"dashboard": dashboard,
+				"withheld": True,
+				"visibility_state": visibility_state,
+				"note": "delegate dashboard withheld; server partial dashboard saved",
+			}
+		except Exception:
+			# A failed fallback must still not let the authored HTML through.  The
+			# terminal writeback repeats the same server-only gate.
+			frappe.db.set_value(RUN, run_doc.name, "dashboard", None, update_modified=False)
+			frappe.log_error(
+				title="jarvis agent: visibility fallback dashboard failed before writeback",
+				message=frappe.get_traceback(),
+			)
+			return {
+				"run": run_doc.name,
+				"dashboard": None,
+				"withheld": True,
+				"visibility_state": visibility_state,
+				"note": "delegate dashboard withheld; terminal writeback will save the partial result",
+			}
+	if run_row.dashboard:
+		# Already attached this run (a retried author step) — reuse it only after
+		# the fresh server visibility check above confirms that it is allowed.
+		return {"run": run_row.name, "dashboard": run_row.dashboard, "idempotent": True}
 
 	# PP-4: the delegate-authored dashboard WINS the precedence in
 	# ``record_delegate_run`` (richer artifact), so it must carry the SAME shadow

@@ -1393,8 +1393,8 @@ class TestFefoExpiryCompliance(FrappeTestCase):
 				resolved_scope=stamped,
 				record_scope_supported=True,
 			)
-		self.assertEqual(result, stamped)
-		proof.assert_called_once_with(stamped)
+		self.assertEqual(result, {**stamped, "scoped_visibility": False})
+		proof.assert_called_once_with(result)
 		self.assertEqual(frappe.parse_json(values["fefo_visibility_proof_json"]), PROOF)
 		self.assertNotIn("fefo_visibility_proof", frappe.parse_json(values["scope_json"]))
 

@@ -23,6 +23,7 @@ resolved for that user.
 import hashlib
 import json
 import re
+from datetime import date
 
 import frappe
 from frappe import _
@@ -1691,6 +1692,17 @@ def resolve_scope(installation, *, allow_record_scope: bool = False) -> dict:
 		return str(val).strip() if val is not None and str(val).strip() else None
 
 	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	prior_from, prior_to = _s("prior_period_from"), _s("prior_period_to")
+	if prior_from or prior_to:
+		try:
+			if not prior_from or not prior_to:
+				raise ValueError
+			start, end = date.fromisoformat(prior_from), date.fromisoformat(prior_to)
+			if start > end or end >= frappe.utils.getdate(scope["from_date"]):
+				raise ValueError
+		except (ValueError, TypeError):
+			raise InvalidArgumentError("prior_period_from and prior_period_to must define an earlier period")
+		scope.update(prior_period_from=start.isoformat(), prior_period_to=end.isoformat())
 	if agent_slug == NEGATIVE_STOCK_AGENT:
 		scope["record_scope"] = _negative_stock_warehouse_scope(cfg, scope["company"])
 	elif agent_slug == FEFO_AGENT:

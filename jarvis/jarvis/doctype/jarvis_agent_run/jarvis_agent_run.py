@@ -41,6 +41,8 @@ _IMMUTABLE_LAUNCH_FIELDS = (
 	"assessment_config_json",
 	"input_snapshot_json",
 	"assessment_output_json",
+	"permission_profile",
+	"visibility_receipt_json",
 )
 
 
