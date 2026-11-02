@@ -19,14 +19,18 @@
 //   toAdd - the `items` entries not already in `kept` and not in-flight, in
 //           order, ready for the caller to shape into queue entries.
 export function reconcilePending(existing, conversationId, items, inflightTokens) {
-	const live = new Set((items || []).map((it) => it.token));
+	// The list endpoint is a card-read surface, not a hint. A raw, delayed, or
+	// older-server item must never make (or keep) a Confirm card. The server
+	// stamps the positive attestation only after it proves the action is still
+	// Pending and its close fence is current.
+	const attestedItems = (items || []).filter((it) => it?.token && it.pending_card_safe === true);
+	const live = new Set(attestedItems.map((it) => it.token));
 	const kept = (existing || []).filter(
 		(pa) => pa.conversation !== conversationId || pa.busy || live.has(pa.token)
 	);
 	const keptTokens = new Set(kept.map((pa) => pa.token));
 	const toAdd = [];
-	for (const it of items || []) {
-		if (!it.token) continue;
+	for (const it of attestedItems) {
 		if (inflightTokens && inflightTokens.has(it.token)) continue;
 		if (keptTokens.has(it.token)) continue;
 		keptTokens.add(it.token);

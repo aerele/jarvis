@@ -130,6 +130,14 @@ class TestCollaborationRead(CommittedCollaborationCase):
 		actor = self.read(RECIPIENT)
 		controls = [r["control"] for r in actor["messages"] if r.get("control")]
 		self.assertEqual([control["action"] for control in controls], [token])
+		self.assertTrue(controls[0]["pending_card_safe"])
+
+	def test_a_mapless_pending_action_never_projects_a_collaboration_control(self):
+		token = self.pending()
+		frappe.db.set_value("Jarvis Pending Action", token, "agent_close_fences", None, update_modified=False)
+		frappe.db.commit()
+		body = self.read(RECIPIENT)
+		self.assertFalse(any(row.get("control") for row in body["messages"]))
 
 	def test_downgraded_actor_keeps_reading_but_loses_all_action_controls(self):
 		token = self.pending()

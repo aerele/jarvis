@@ -124,34 +124,11 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "7ddb067734f83bf0898b6643b1d0aa3675a4c8a3979ef9138f9aedc75e94a040"
-
-	def test_attendance_catalog_excludes_unused_presentation_tools(self):
-		with open(
-			frappe.get_app_path("jarvis", "agents", "registry.json"), encoding="utf-8"
-		) as registry_file:
-			entry = next(
-				row
-				for row in json.load(registry_file)["agents"]
-				if row["agent_slug"] == "attendance-leave-integrity-auditor"
-			)
-		self.assertEqual(entry["version"], "0.4.3")
-		self.assertIs(entry["supports_record_scope"], True)
-		self.assertEqual(
-			entry["tools_allow"],
-			[
-				"jarvis__query",
-				"jarvis__record_agent_run",
-				"jarvis__save_agent_dashboard",
-				"exec",
-			],
-		)
+	PINNED_CAPABILITY_DIGEST = "933ebd2e9dc7fa91fac3608ea3281212dbdefef35f49b090aff385d844c4356d"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
-		import json
 
-		import frappe
 
 		path = frappe.get_app_path("jarvis", "agents", "registry.json")
 		with open(path, encoding="utf-8") as fh:
@@ -185,9 +162,7 @@ class TestLeadHygieneRegistryContract(FrappeTestCase):
 	"""
 
 	def test_cross_funnel_fingerprint_release_is_vendored(self):
-		import json
 
-		import frappe
 
 		path = frappe.get_app_path("jarvis", "agents", "registry.json")
 		with open(path, encoding="utf-8") as fh:

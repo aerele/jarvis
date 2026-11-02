@@ -814,7 +814,16 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 	# are shaped exactly like the thread's own.
 	rows = messages + page.get("older_pending", []) + page.get("refreshed", [])
 	# A pending-action card renders from its row's card (the sealed record's own copy).
-	_pending_action_cards(rows)
+	pending_action_tokens = _pending_action_cards(rows, owner=doc.owner, conversation=conversation)
+	# A legacy card's transcript row is display-only; Redis remains its execution
+	# authority. Fence it before the row reaches any client so getConversation
+	# winning a reload race cannot resurrect a close-revoked confirmation.
+	_fence_legacy_pending_cards(
+		rows,
+		owner=doc.owner,
+		conversation=conversation,
+		pending_action_tokens=pending_action_tokens,
+	)
 	_pending_recency(conversation, rows)
 	# T2 (live-turn-steps, R3): a still-streaming row's stored content keeps its
 	# step text by design (the RAW streaming mirror) - strip it and carry the
@@ -1125,12 +1134,17 @@ def get_tool_detail(message: str) -> dict:
 	return {"name": message, "tool_args": row.tool_args, "tool_result": row.tool_result}
 
 
-def _pending_action_cards(messages: list) -> None:
-	"""Every still-pending row carries epoch ``created_at`` (the clients' age label and
-	order; no timezone guessing): a legacy card its row's own creation (stamped with
-	the mint), a chat pending action its mint time plus its ``card`` (that column is
-	never sealed and never holds args)."""
-	from jarvis.chat.pending_confirm import _epoch
+def _pending_action_cards(messages: list, *, owner: str, conversation: str) -> set[str]:
+	"""Attach only positively-attested durable cards to a history response.
+
+	A transcript row can outlive its Pending Action, its full close-fence map, or
+	the bounded migration cleanup. Treat the action table as authority: any known
+	durable token that is not a current chat ``Pending`` action for this owner and
+	conversation becomes a terminal no-action response. Return *all* durable
+	tokens, including unsafe ones, so the legacy path cannot re-enable one.
+	"""
+	from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, pending_action_fences_ready
+	from jarvis.chat.pending_confirm import _epoch, pending_action_is_safe_to_render
 
 	pending = [m for m in messages if m.get("tool_status") == "pending" and m.get("tool_call_id")]
 	for m in pending:
@@ -1138,24 +1152,82 @@ def _pending_action_cards(messages: list) -> None:
 			m["created_at"] = _epoch(m.creation)
 	tokens = [m.tool_call_id for m in pending]
 	if not tokens:
-		return
+		return set()
 	from jarvis.chat.pending_actions._store import table_ready
 
 	if not table_ready():
-		return
-	cards = {
-		r.name: r
-		for r in frappe.db.sql(
-			"SELECT name, card, creation FROM `tabJarvis Pending Action` WHERE kind='chat' AND name IN %(t)s",
-			{"t": tuple(tokens)},
-			as_dict=True,
-		)
-	}
-	for m in messages:
-		row = cards.get(m.get("tool_call_id")) if m.get("tool_status") == "pending" else None
-		if row:
-			m["pending_card"] = row.card
-			m["created_at"] = _epoch(row.creation)
+		return set()
+	columns = ["name", "kind", "status", "owner_user", "conversation", "card", "creation"]
+	if pending_action_fences_ready():
+		columns.append(PENDING_ACTION_FENCE_FIELD)
+	try:
+		cards = {
+			r.name: r
+			for r in frappe.db.sql(
+				"SELECT "
+				+ ", ".join(f"`{column}`" for column in columns)
+				+ " FROM `tabJarvis Pending Action` WHERE name IN %(t)s",
+				{"t": tuple(tokens)},
+				as_dict=True,
+			)
+		}
+	except Exception:
+		# A table/fence read uncertainty must not turn an old transcript payload
+		# into Confirm. Keep every token out of the legacy fallback too.
+		frappe.log_error(title="jarvis.chat.pending_action_card_read_failed", message=frappe.get_traceback())
+		for message in pending:
+			_redact_unsafe_pending_card(message)
+		return set(tokens)
+
+	for message in pending:
+		row = cards.get(message.get("tool_call_id"))
+		if not row:
+			continue
+		if pending_action_is_safe_to_render(row, owner=owner, conversation=conversation):
+			message["pending_card"] = row.card
+			message["created_at"] = _epoch(row.creation)
+			message["pending_card_safe"] = True
+			continue
+		_redact_unsafe_pending_card(message)
+	return set(cards)
+
+
+def _redact_unsafe_pending_card(row) -> None:
+	"""Return a terminal, no-card response for an unsafe transcript card."""
+	from jarvis.chat.agent_closure import _SAFETY_UPDATE_RECEIPT
+
+	row["tool_args"] = {}
+	row["tool_result"] = dict(_SAFETY_UPDATE_RECEIPT)
+	row["tool_status"] = ""
+	row["action_outcome"] = "cancelled"
+	row["pending_card"] = None
+	row["pending_card_safe"] = False
+	row["content"] = f"{row.get('tool_name') or 'action'} → cancelled"
+
+
+def _fence_legacy_pending_cards(
+	messages: list, *, owner: str, conversation: str, pending_action_tokens: set[str]
+) -> None:
+	"""Stamp or redact every pending transcript card before history leaves the server.
+
+	Pending Action rows have their own durable sealed lifecycle. Every other pending
+	chat row is a legacy Redis confirmation, so it must pass the shared close fence
+	before it can be used as a UI card. This is deliberately in the history/read
+	path, not the later resync path: both PWA loads begin concurrently.
+	"""
+	from jarvis.chat.agent_closure import legacy_confirmation_is_safe_to_render
+
+	for row in messages:
+		if row.get("role") != "tool" or row.get("tool_status") != "pending" or not row.get("tool_call_id"):
+			continue
+		# This set is private read-path state. Do not infer the durable lifecycle
+		# from a client-visible row field or from a transcript token alone.
+		if row.get("tool_call_id") in pending_action_tokens:
+			continue
+		if legacy_confirmation_is_safe_to_render(row.tool_call_id, owner=owner, conversation=conversation):
+			row["pending_card_safe"] = True
+			continue
+		_redact_unsafe_pending_card(row)
 
 
 def _pending_recency(conversation: str, messages: list) -> None:

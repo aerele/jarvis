@@ -74,7 +74,7 @@ export function isSettled(res) {
 	if (res.ok) return true;
 	return (
 		["Executed", "Failed", "Discarded", "Cancelled", "Superseded"].includes(res.pa_status) ||
-		["not_found", "already_handled"].includes(res.reason_code)
+		["not_found", "already_handled", "safety_update"].includes(res.reason_code)
 	);
 }
 
