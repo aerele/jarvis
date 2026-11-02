@@ -1598,7 +1598,9 @@ def _stamp_scope_and_watermark(
 	All best-effort: a bench without a resolvable Company (e.g. no erpnext setup)
 	must NOT abort the launch — it degrades to an unscoped run (no watermark). The
 	watermark + scope are resolved AS the run-as user (this runs under that
-	session). Returns the resolved scope dict (or None).
+	session). A reviewed visibility policy also produces a compact server-only
+	receipt; it is never added to scope_json or the delegate prompt. Returns the
+	resolved scope dict (or None).
 
 	``source_apps`` (CX5-2) is folded into the SAME ``scope_json`` stamp OUTSIDE
 	the best-effort try, so an ERP scope-resolution failure can never drop the
@@ -1610,23 +1612,48 @@ def _stamp_scope_and_watermark(
 	if review_backend:
 		config = frappe.parse_json(frappe.db.get_value(RUN, run_name, "assessment_config_json"))
 		scope = review_backend.scope_from_config(config)
+		permission_profile = _permission_profile_or_none(run_name, run_as_user)
+		visibility_receipt = _visibility_receipt(permission_profile, inst)
+		if visibility_receipt is not None and isinstance(scope, dict):
+			# Keep a reviewed receipt wholly server-side on every scheduler path,
+			# including the operator-review backend path.
+			scope = {k: v for k, v in scope.items() if k != "scoped_visibility"}
+		values = {"scope_json": frappe.as_json(scope)}
+		if permission_profile is not None:
+			values["permission_profile"] = permission_profile
+		if visibility_receipt is not None:
+			values["visibility_receipt_json"] = frappe.as_json(visibility_receipt)
 		frappe.db.set_value(
 			RUN,
 			run_name,
-			{"scope_json": frappe.as_json(scope), "permission_profile": _permission_profile(run_as_user)},
+			values,
 			update_modified=False,
 		)
 		return scope
 
 	values: dict = {}
+	permission_profile = _permission_profile_or_none(run_name, run_as_user)
+	if permission_profile is not None:
+		values["permission_profile"] = permission_profile
+	visibility_receipt = _visibility_receipt(permission_profile, inst)
+	if visibility_receipt is not None:
+		values["visibility_receipt_json"] = frappe.as_json(visibility_receipt)
 	scope = None
 	try:
 		scope = agent_scope.resolve_scope(inst)
 	except Exception:
-		# Deposit-status cannot safely degrade to an unscoped delegate run. Its
-		# bundle uses the declared Account group before it can evaluate source
-		# records, so an invalid period or account scope must abort before dispatch.
 		if inst.get("agent") == _PAYROLL_DEPOSIT_AGENT:
+			raise
+		try:
+			config = frappe.parse_json(inst.get("config") or "{}")
+		except (TypeError, ValueError):
+			config = {}
+		if isinstance(config, dict) and any(
+			config.get(k) for k in ("record_scope", "prior_period_from", "prior_period_to")
+		):
+			frappe.log_error(
+				title="jarvis agent: explicit scope resolution failed", message=frappe.get_traceback()
+			)
 			raise
 		frappe.log_error(
 			title="jarvis agent: scope resolution failed (unscoped run)",
@@ -1636,6 +1663,21 @@ def _stamp_scope_and_watermark(
 		scope = dict(scope or {})
 		scope["source_apps"] = list(source_apps)
 	if scope is not None:
+		scope = dict(scope)
+		if visibility_receipt is not None:
+			# The reviewed receipt is a server-only proof.  Do not mirror either its
+			# state or a legacy visibility bit into delegate-readable scope.
+			scope.pop("scoped_visibility", None)
+		else:
+			# This value is bench-derived from the launch-time permission snapshot. It
+			# is scope metadata, not user configuration, so a delegate cannot turn a
+			# record-sliced read into a whole-workforce conclusion. Payroll leaves an
+			# unknown snapshot absent so its typed bundle fails closed.
+			scoped_visibility = _scope_has_scoped_visibility(permission_profile, inst)
+			if type(scoped_visibility) is bool:
+				scope["scoped_visibility"] = scoped_visibility
+			else:
+				scope.pop("scoped_visibility", None)
 		values["scope_json"] = frappe.as_json(scope)
 
 	if scope and scope.get("company") and scope.get("to_date"):
@@ -1658,11 +1700,6 @@ def _stamp_scope_and_watermark(
 				message=frappe.get_traceback(),
 			)
 
-	try:
-		values["permission_profile"] = _permission_profile(run_as_user)
-	except Exception:
-		pass
-
 	if values:
 		frappe.db.set_value(RUN, run_name, values, update_modified=False)
 	return scope
@@ -1677,10 +1714,7 @@ def _permission_profile(user: str) -> str:
 	from frappe.permissions import get_user_permissions
 
 	roles = sorted(frappe.get_roles(user))
-	try:
-		perms = get_user_permissions(user) or {}
-	except Exception:
-		perms = {}
+	perms = get_user_permissions(user) or {}
 	up_keys: dict = {}
 	for dt, entries in perms.items():
 		vals = sorted({(e.get("doc") if isinstance(e, dict) else str(e)) for e in (entries or [])})
@@ -1688,6 +1722,48 @@ def _permission_profile(user: str) -> str:
 	summary = {"roles": roles, "user_permissions": up_keys}
 	digest = hashlib.sha256(json.dumps(summary, sort_keys=True).encode()).hexdigest()
 	return json.dumps({"hash": digest, **summary})
+
+
+def _permission_profile_or_none(run_name: str, user: str) -> str | None:
+	"""Capture a profile without manufacturing an empty permission snapshot."""
+	try:
+		return _permission_profile(user)
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis agent: permission profile failed: {run_name}",
+			message=frappe.get_traceback(),
+		)
+		return None
+
+
+def _scope_has_scoped_visibility(permission_profile, inst) -> bool | None:
+	"""Use a fresh profile; payroll does not fall back from an unknown snapshot."""
+	from jarvis.chat.agent_catalog import registry_domain
+	from jarvis.chat.agent_visibility import is_payroll_domain, profile_scoped_visibility
+
+	domain = registry_domain(inst.get("agent"))
+	profile_state = profile_scoped_visibility(permission_profile, domain)
+	if is_payroll_domain(domain):
+		return profile_state
+	if profile_state is True:
+		return True
+	# Preserve the legacy non-payroll installation fallback exactly.
+	return bool(inst.get("scoped_visibility"))
+
+
+def _visibility_receipt(permission_profile, inst) -> dict | None:
+	"""Build a reviewed visibility receipt without exposing it to the delegate.
+
+	A missing selector retains the legacy policy.  An explicitly malformed
+	selector returns an ``unknown`` receipt so the terminal writeback fails closed.
+	"""
+	from jarvis.chat.agent_catalog import registry_visibility_domain
+	from jarvis.chat.agent_visibility import make_visibility_receipt
+
+	domain = registry_visibility_domain(inst.get("agent"))
+	if domain is None:
+		return None
+	return make_visibility_receipt(permission_profile, domain)
 
 
 def _explicit_config(listing, inst) -> dict:
@@ -1770,6 +1846,24 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 	# delegate spills this JSON verbatim into config.json - it does NOT read its own installation
 	# for these tunables. Note ``Run.scope_json`` is a bench-side field that never reaches the
 	# container; the run MESSAGE is the only bench->delegate channel, so config must ride HERE.
+	additional_scope = {}
+	if scope:
+		for key in ("prior_period_from", "prior_period_to", "record_scope"):
+			if scope.get(key):
+				additional_scope[key] = (
+					{k: scope[key][k] for k in ("doctype", "name") if k in scope[key]}
+					if key == "record_scope" and isinstance(scope[key], dict)
+					else scope[key]
+				)
+		from jarvis.chat.agent_visibility import exact_bool
+
+		scoped_visibility = exact_bool(scope.get("scoped_visibility"))
+		if scoped_visibility is not None:
+			additional_scope["scoped_visibility"] = scoped_visibility
+	if additional_scope:
+		scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + frappe.as_json(
+			additional_scope
+		)
 	explicit_config = _explicit_config(listing, inst)
 	if explicit_config:
 		# ADDITIVE, never a replacement: config.json legitimately carries fields the delegate

@@ -64,6 +64,26 @@ def resolve_scope(installation) -> dict:
 	if is_payroll_deposit and not (_s("from_date") and _s("to_date")):
 		raise InvalidArgumentError("statutory payroll deposit status requires explicit from_date and to_date")
 	scope = _resolve(_s("company"), _s("fiscal_year"), _s("from_date"), _s("to_date"))
+	prior_from, prior_to = _s("prior_period_from"), _s("prior_period_to")
+	if prior_from or prior_to:
+		try:
+			if not prior_from or not prior_to:
+				raise ValueError
+			start, end = date.fromisoformat(prior_from), date.fromisoformat(prior_to)
+			if start > end or end >= frappe.utils.getdate(scope["from_date"]):
+				raise ValueError
+		except (ValueError, TypeError):
+			raise InvalidArgumentError("prior_period_from and prior_period_to must define an earlier period")
+		scope.update(prior_period_from=start.isoformat(), prior_period_to=end.isoformat())
+	if not is_payroll_deposit and cfg.get("record_scope"):
+		record = cfg["record_scope"]
+		if not isinstance(record, dict) or not all(record.get(k) for k in ("doctype", "name")):
+			raise InvalidArgumentError("record_scope requires a doctype and name")
+		doc = frappe.get_doc(record["doctype"], record["name"])
+		doc.check_permission("read")
+		if doc.get("company") and doc.company != scope["company"]:
+			raise InvalidArgumentError("record_scope must belong to the selected company")
+		scope["record_scope"] = {k: str(record[k]) for k in ("doctype", "name")}
 	if is_payroll_deposit:
 		_validate_payroll_deposit_period(scope, cfg)
 		scope["record_scope"] = _payroll_deposit_record_scope(cfg, scope["company"])
