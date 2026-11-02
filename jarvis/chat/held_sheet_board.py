@@ -101,7 +101,7 @@ def detail(row, me: str) -> dict:
 	survive a bounce), its progress while it runs, and the outcome once applied.
 	Never the sealed call."""
 	from jarvis.chat import approvals_api
-	from jarvis.chat.filebox import _source_file
+	from jarvis.chat.filebox_source import display_file
 	from jarvis.chat.pending_actions import _sheet
 	from jarvis.chat.pending_actions._store import REASON_TEXT
 
@@ -130,7 +130,7 @@ def detail(row, me: str) -> dict:
 				"needs_fix": _fix(fix.get(str(r.get("index")))),
 			}
 		)
-	source = _source_file(row.conversation) if row.conversation else None
+	source = display_file(row.conversation) if row.conversation else None
 	code = row.reason_code or ""
 	return {
 		"name": row.name,

@@ -775,7 +775,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		return {"ok": True, "status": doc.status, "resumed": False}
 
 	if doc.get("routing"):
-		return {"ok": True, "status": doc.status, "resumed": _apply_routing_answer(doc)}
+		return {"ok": True, "status": doc.status, **_apply_routing_answer(doc)}
 	resumed = False
 	if doc.conversation and frappe.db.exists("Jarvis Conversation", doc.conversation):
 		verdict = "APPROVED" if doc.status == "Approved" else "REJECTED"
@@ -810,6 +810,20 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		# The decision is durably recorded above; a resume failure must
 		# not 500 the endpoint (the SPA would re-show a decided row).
 		try:
+			from jarvis.chat.filebox_source import SourceLost, selected_file
+
+			owner = frappe.db.get_value("Jarvis Conversation", doc.conversation, "owner")
+			try:
+				selected = selected_file(doc.conversation, read_as=owner)
+			except SourceLost:
+				return {
+					"ok": True,
+					"status": doc.status,
+					"resumed": False,
+					"reason": "source_unavailable",
+				}
+			if selected is not None:
+				attachments = json.dumps([dict(selected)])
 			res = _resume_conversation(doc.conversation, msg, origin="board_answer", attachments=attachments)
 			resumed = bool(res.get("ok"))
 		except Exception:
@@ -819,15 +833,18 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	return {"ok": True, "status": doc.status, "resumed": resumed}
 
 
-def _apply_routing_answer(doc) -> bool:
+def _apply_routing_answer(doc) -> dict:
 	"""A routing question's answer runs INSTEAD of the generic resume. The decision
 	is recorded already, so a failure is logged, never raised."""
 	try:
-		return filebox_skills.apply_answer(doc)
+		outcome = filebox_skills.apply_answer(doc)
+		if outcome is filebox_skills._SOURCE_UNAVAILABLE:
+			return {"resumed": False, "reason": "source_unavailable"}
+		return {"resumed": bool(outcome)}
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(title="jarvis.file_box.routing_apply_failed", message=frappe.get_traceback())
-		return False
+		return {"resumed": False}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -870,11 +887,11 @@ def dismiss_approval(name: str) -> dict:
 	):
 		frappe.throw(f"Approval {name} was decided concurrently")
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before resuming agent
-	resumed = False
+	result = {"ok": True, "status": "Dismissed", "resumed": False}
 	if doc.get("routing"):
 		doc.decision = decision
-		resumed = _apply_routing_answer(doc)
-	return {"ok": True, "status": "Dismissed", "resumed": resumed}
+		result.update(_apply_routing_answer(doc))
+	return result
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1414,6 +1431,12 @@ def list_pending_actions_lane() -> dict:
 			as_dict=True,
 		)
 	rows.sort(key=lambda r: (r.creation, r.name))
+	from jarvis.chat.filebox_source import selection_previews
+
+	selected = selection_previews([r.conversation for r in rows if r.kind == SHEET and r.conversation])
+	for r in rows:
+		if r.kind == SHEET and r.conversation in selected:
+			r.file_name = (selected[r.conversation] or {}).get("file_name") or ""
 	out = []
 	for r in rows:
 		if r.kind == SHEET:
