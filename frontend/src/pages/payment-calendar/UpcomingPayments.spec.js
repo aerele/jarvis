@@ -32,4 +32,25 @@ describe("Upcoming payment date selection", () => {
 		expect(wrapper.text()).not.toContain("No upcoming payments");
 		wrapper.unmount();
 	});
+	it("describes the loaded month without promising unloaded next-month records", () => {
+		const snapshot = complete();
+		snapshot.scope.month = "2026-10";
+		const wrapper = mount(UpcomingPayments, {
+			props: { snapshot, selected: "2026-10-31", rows: [] },
+		});
+		expect(wrapper.text()).toContain("October 2026");
+		expect(wrapper.text()).toContain("No further payments in this month.");
+		expect(wrapper.text()).not.toContain("next 30 days");
+		wrapper.unmount();
+	});
+	it("does not call unloaded payments empty after a paused refresh", () => {
+		const snapshot = complete();
+		snapshot.scope.month = "2026-10";
+		const wrapper = mount(UpcomingPayments, {
+			props: { snapshot, selected: "2026-10-24", rows: [], loadError: true },
+		});
+		expect(wrapper.text()).toContain("Payments will appear after this month is loaded.");
+		expect(wrapper.text()).not.toContain("No further payments");
+		wrapper.unmount();
+	});
 });
