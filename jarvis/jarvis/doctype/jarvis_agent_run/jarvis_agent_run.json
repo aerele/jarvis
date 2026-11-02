@@ -33,6 +33,7 @@
   "pages_json",
   "coverage_json",
   "scope_json",
+  "fefo_visibility_proof_json",
   "engagement_config_json",
   "assessment_config_json",
   "input_snapshot_json",
@@ -209,6 +210,15 @@
    "label": "Scope JSON",
    "read_only": 1,
    "description": "The explicit resolved scope {company, fiscal_year, from_date, to_date, prior_fy_start, prior_fy_end} stamped at launch (A6). Injected verbatim into the run message so the container never infers dates."
+  },
+  {
+   "fieldname": "fefo_visibility_proof_json",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "FEFO Visibility Proof",
+   "permlevel": 1,
+   "read_only": 1,
+   "description": "Server-only opaque FEFO native-visibility proof. It is stamped at launch and never sent to the delegate."
   },
   {
    "default": "0",

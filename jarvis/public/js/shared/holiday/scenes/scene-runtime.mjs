@@ -20,18 +20,23 @@
 //     "instant" does nothing visible. `done` always resolves and never rejects.
 //   `replay` plays again over a screen whose cards are showing: no floor props, no greeting
 //   swap.
-// A play() that throws leaves nothing mounted. Desktop layout with motion gets the scene; the
-// phone layout and reduced motion get the resting state at once.
+// A play() that throws leaves nothing mounted. The desktop and phone layouts with motion get
+// the scene; reduced motion and any other layout get the resting state at once. (Whether a
+// phone screen has room for the scene is the page's call, scene-phone.mjs phoneSceneFits: it
+// asks before loading the art and passes "rest" when there is none.)
 //
 // The stage: 800 units wide with x centred on the mark's column (400) and y down from the top
-// of the art layer; the page scales a unit to s = min(width / 800, 1.25) px.
+// of the art layer; the page scales a unit to s = min(width / 800, 1.25) px. The phone
+// layout draws the same stage through the 540-unit window 130..670, at width / 540 px a
+// unit (scene-phone.mjs).
 import { r2 } from "../stage.mjs";
 import { SceneLayout } from "./scene-layout.mjs";
 
 export const FADE_MS = { end: 600, early: 250, instant: 0 };
 const HAPPY_MS = 1500;
+const DRAWN_LAYOUTS = ["desktop", "phone"];
 
-/** A scene that only puts the page in its resting state (reduced motion, phone layout). */
+/** A scene that only puts the page in its resting state (reduced motion, no room). */
 function restingScene(onBeat) {
   let done = false;
   const rest = () => {
@@ -45,9 +50,9 @@ function restingScene(onBeat) {
   return { settle: rest, done: Promise.resolve() };
 }
 
-/** The entry every scene's play() is: desktop with motion gets the scene, the rest get rest. */
+/** The entry every scene's play() is: desktop or phone with motion gets the scene, the rest get rest. */
 export function playScene(SceneClass, host, opts) {
-  if (opts.layout !== "desktop" || opts.reduced)
+  if (!DRAWN_LAYOUTS.includes(opts.layout) || opts.reduced)
     return restingScene(opts.onBeat);
   const scene = new SceneClass(host, opts);
   try {

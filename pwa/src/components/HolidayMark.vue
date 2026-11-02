@@ -6,10 +6,11 @@
 		class="jvh"
 		:class="{ 'jvh-button': clickable }"
 		:type="clickable ? 'button' : undefined"
-		:aria-label="clickable ? 'Show the greeting again' : undefined"
-		:style="clickable ? { borderRadius: `${radius}px` } : undefined"
+		:aria-label="clickable ? tapLabel : undefined"
+		:style="wrapperStyle"
 		:data-design="art.design"
-		@click="clickable && replay()"
+		:data-look="lookOn ? '' : undefined"
+		@click="clickable && onTap()"
 	>
 		<BrandMark v-bind="markProps" @face="faceActive = $event" />
 		<Transition name="jvh">
@@ -50,13 +51,21 @@ import { computed, getCurrentInstance, nextTick, onBeforeUnmount, ref, watch } f
 import BrandMark from "./BrandMark.vue";
 import { wornAnswer } from "../holidayTouch";
 import { loadWorn, loadedWorn } from "../lib/holidayWorn";
-import { effectiveMood as moodFor } from "../lib/holidayFace";
+import { effectiveMood as moodFor, stageMood } from "../lib/holidayFace";
 
 const props = defineProps({
 	size: { type: Number, default: 56 },
 	radius: { type: Number, default: 14 },
 	mood: { type: String, default: "star" },
+	/**
+	 * The welcome scene drives the mark instead of its own smile: {face, item, happy, look}.
+	 * The face shows while `face` is set, the item while `item` is set, `happy` is the smile
+	 * and `look` is [dx, dy] in the 56-unit tile space. A tap is then the stage's to answer
+	 * (the "tap" event). Null (the default) is the mark's own behaviour.
+	 */
+	stage: { type: Object, default: null },
 });
+const emit = defineEmits(["tap"]);
 
 const WELCOME_SMILE_MS = 2500;
 const SMILE_KINDS = ["leadup", "day", "birthday"];
@@ -114,6 +123,10 @@ async function smile() {
 	if (gone || run !== smileRun) return;
 	smileTimer = setTimeout(() => (smiling.value = false), WELCOME_SMILE_MS);
 }
+function onTap() {
+	if (props.stage) emit("tap");
+	else replay();
+}
 async function replay() {
 	clearTimeout(smileTimer);
 	smiling.value = false; // off for a tick, so the face and the item start over
@@ -123,14 +136,21 @@ async function replay() {
 watch(
 	clickable,
 	(ok) => {
-		if (!ok || smiled) return;
+		if (!ok || smiled || props.stage) return;
 		smiled = true;
 		smile();
 	},
 	{ immediate: true }
 );
 
-const effectiveMood = computed(() => moodFor(props.mood, smiling.value));
+// What a tap does: the stage replays the scene, otherwise the mark smiles again.
+const tapLabel = computed(() =>
+	props.stage ? "Replay the holiday scene" : "Show the greeting again"
+);
+
+const effectiveMood = computed(() =>
+	props.stage ? stageMood(props.mood, props.stage) : moodFor(props.mood, smiling.value)
+);
 const markProps = computed(() => ({
 	size: props.size,
 	radius: props.radius,
@@ -143,7 +163,21 @@ const faceActive = ref(false);
 watch(wearing, (yes) => {
 	if (!yes) faceActive.value = false;
 });
-const layerOn = computed(() => wearing.value && faceActive.value && !!worn.value);
+const layerOn = computed(
+	() => wearing.value && faceActive.value && !!worn.value && (!props.stage || props.stage.item)
+);
+
+// The stage points the eyes at something (the sky, the flame) until the smile.
+const lookOn = computed(() => !!(props.stage && props.stage.look) && !props.stage.happy);
+const wrapperStyle = computed(() => {
+	const style = clickable.value ? { borderRadius: `${props.radius}px` } : {};
+	if (lookOn.value) {
+		const unit = props.size / 56;
+		style["--jvh-lx"] = `${props.stage.look[0] * unit}px`;
+		style["--jvh-ly"] = `${props.stage.look[1] * unit}px`;
+	}
+	return Object.keys(style).length ? style : undefined;
+});
 
 // ---- reduced motion, read live: the OS setting can change while the page is open.
 const reducedMotion = ref(false);
@@ -217,6 +251,11 @@ const layerStyle = computed(() => {
 .jvh-button:focus-visible {
 	outline: 2px solid var(--accent);
 	outline-offset: 3px;
+}
+/* The stage's "look": the eyes hold a fixed offset. */
+.jvh[data-look] :deep(.bm-eyes) {
+	transform: translate(var(--jvh-lx), var(--jvh-ly));
+	transition: transform 0.35s ease-in-out;
 }
 .jvh-layer {
 	position: absolute;

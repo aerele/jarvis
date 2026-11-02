@@ -53,9 +53,10 @@ from frappe.utils import now_datetime
 from rq.timeouts import JobTimeoutException
 
 from jarvis._session import authenticated_user, impersonate
-from jarvis.chat import derived_config
+from jarvis.chat import agent_scope, derived_config
 from jarvis.chat.agent_activity import ACTIVITY, log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.permissions import is_system_manager, is_valid_unattended_owner
 from jarvis.tools import _delegate_capability
 
@@ -184,6 +185,7 @@ def run_due_agent_audits() -> None:
 			"schedule_weekday",
 			"schedule_day_of_month",
 			"installable",
+			"config",
 			"source_apps_json",
 			"activation_state",
 			"next_run_at",
@@ -297,6 +299,21 @@ def _sweep_one(row, now, seen: set) -> None:
 		_advance(row, now)
 		return
 
+	# An old configuration can outlive the API save guard. Refuse it before the
+	# per-installation claim and dispatch, record the reason, and consume the
+	# slot. The bundled registry, not a mutable Listing row, is authoritative.
+	if agent_scope.record_scope_requested(row.get("config")):
+		from jarvis.chat.agent_catalog import registry_supports_record_scope
+
+		if not registry_supports_record_scope(row.agent):
+			_record_failed(
+				row,
+				"scheduled audit skipped: this agent does not support record-scoped runs; "
+				"remove record_scope from its configuration",
+			)
+			_advance(row, now)
+			return
+
 	# CX5-5: a scribe writes the LIVE Org wiki with no confirmation gate, so there is
 	# no such thing as a shadow scribe run — refuse it here exactly as the manual path
 	# does, and consume the slot so the cadence does not busy-retry.
@@ -372,6 +389,20 @@ def _sweep_one(row, now, seen: set) -> None:
 		_advance(row, now)
 		return
 
+	if row.agent == "fefo-expiry-compliance-auditor":
+		# A direct DB edit can bypass both the SPA endpoint and the Installation
+		# controller.  Check the FEFO policy and optional leaf before _dispatch can
+		# claim a slot or create a failed run.  Return without advancing so the owner
+		# can repair or disable the legacy schedule without generated side effects.
+		try:
+			from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
+
+			assert_schedule_configuration(row)
+		except Exception:
+			frappe.logger("jarvis.agent_scheduler").warning(
+				{"event": "fefo_schedule_scope_refused", "installation": row.name}
+			)
+			return
 	# A14 cost cap — per installation + per-tenant aggregate (the subscription is
 	# the tenant's). Manual + scheduled counted together; failed rows excluded, so
 	# the _record_failed row we write below can never self-perpetuate the cap.
@@ -1199,6 +1230,13 @@ def _launch_audit(
 
 	review_backend = operator_review.backend(inst.agent)
 	review_config = review_backend.configuration(inst) if review_backend else None
+	# The delegate's engagement settings are a launch-time fact, not a live view of
+	# ``Installation.config``.  Resolve ONLY the bundle-declared/bench-derived keys
+	# before a Run exists, stamp that exact object on the Run, and use the same object
+	# in the dispatch prompt below.  A later settings save must never alter an active
+	# run's evidence or make a model guess a gate value.
+	engagement_config = _explicit_config(listing, inst)
+	engagement_config_json = frappe.as_json(engagement_config)
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
@@ -1290,6 +1328,34 @@ def _launch_audit(
 				"This agent is no longer published ({0}); uninstall it or ask an admin to republish it."
 			).format(listing.status or "unknown")
 		)
+
+	# A record boundary controls the evidence delivered to the private bundle.
+	# Refuse a legacy or manually edited unsupported configuration before a
+	# savepoint can create a conversation, run, session, activity, or dispatch.
+	# The bundled registry is authoritative; a Listing row cannot opt in.
+	record_scope_supported = False
+	is_fefo = inst.agent == "fefo-expiry-compliance-auditor"
+	if agent_scope.record_scope_requested(inst.config):
+		from jarvis.chat.agent_catalog import registry_supports_record_scope
+
+		record_scope_supported = registry_supports_record_scope(listing.agent_slug)
+		agent_scope.assert_record_scope_supported(record_scope_supported, inst.config)
+
+	pre_resolved_scope = None
+	if is_fefo:
+		try:
+			# FEFO has a mandatory owner policy and an optional but binding leaf.
+			# Do both checks before the savepoint can create any run state.
+			from jarvis.chat.fefo_expiry_compliance import assert_configuration
+
+			assert_configuration(inst)
+			pre_resolved_scope = agent_scope.resolve_scope(inst, allow_record_scope=True)
+		except Exception:
+			frappe.log_error(
+				title="jarvis agent: FEFO scope resolution refused launch",
+				message=frappe.get_traceback(),
+			)
+			raise
 
 	# JF-017: the run's CAPABILITY CONTRACT. Resolved HERE, before any row exists,
 	# because an empty declared surface is not a runnable state: the bench would
@@ -1421,7 +1487,14 @@ def _launch_audit(
 
 		# A6 explicit scope + A17 consistency watermark + A12 permission profile —
 		# all best-effort (never abort the launch) and computed AS the run-as user.
-		scope = _stamp_scope_and_watermark(run.name, inst, run_as_user, source_apps=source_apps)
+		scope = _stamp_scope_and_watermark(
+			run.name,
+			inst,
+			run_as_user,
+			source_apps=source_apps,
+			record_scope_supported=record_scope_supported,
+			resolved_scope=pre_resolved_scope,
+		)
 
 	except Exception:
 		# Undo every row this launch wrote, so a caller that later commits (and both
@@ -1455,7 +1528,14 @@ def _launch_audit(
 			run_id=run.name,
 			agent_id=f"agent-{slug}",
 			session_key=session_key,
-			message=_audit_prompt(listing, inst, trigger, scope, engagement_config=engagement_config),
+			message=_audit_prompt(
+				listing,
+				inst,
+				trigger,
+				scope,
+				engagement_config=engagement_config,
+				record_scope_supported=record_scope_supported,
+			),
 			timeout_s=registry_timeout_s(slug),
 		)
 	except admin_client.AdminAmbiguousError:
@@ -1629,7 +1709,12 @@ def _mint_run_session(session_key: str, user: str) -> None:
 
 
 def _stamp_scope_and_watermark(
-	run_name: str, inst, run_as_user: str, source_apps: list[str] | None = None
+	run_name: str,
+	inst,
+	run_as_user: str,
+	source_apps: list[str] | None = None,
+	record_scope_supported: bool = False,
+	resolved_scope: dict | None = None,
 ) -> dict | None:
 	"""Resolve the explicit scope (A6), compute the GL consistency watermark
 	(A17) and the run-as permission profile (A12), and stamp them on the Run.
@@ -1643,7 +1728,7 @@ def _stamp_scope_and_watermark(
 	the best-effort try, so an ERP scope-resolution failure can never drop the
 	authorization the source-read tools read back — a scribe run either carries its
 	admin-authorized app list or reads nothing."""
-	from jarvis.chat import agent_scope, operator_review
+	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(inst.agent)
 	if review_backend:
@@ -1658,26 +1743,27 @@ def _stamp_scope_and_watermark(
 		return scope
 
 	values: dict = {}
-	scope = None
+	scope = resolved_scope if isinstance(resolved_scope, dict) else None
 	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
 
 	try:
 		if is_statutory_payroll(inst.agent):
-			# The batch selection can change after the pre-launch guard. Resolve it
-			# again as the run-as user, never as a scheduler or direct caller.
+			# Recheck the batch as its execution user immediately before stamping.
 			from jarvis._session import impersonate
 
 			with impersonate(run_as_user):
 				scope = agent_scope.resolve_scope(inst)
-		else:
-			scope = agent_scope.resolve_scope(inst)
+		elif scope is None:
+			scope = agent_scope.resolve_scope(inst, allow_record_scope=record_scope_supported)
 	except Exception:
-		# This agent has no safe generic fallback. A permission or date change after
-		# its pre-launch validation must roll the launch back, not dispatch a run with
-		# an all-company/fiscal-year scope.
-		if is_statutory_payroll(inst.agent):
+		# An explicit batch or record boundary must never fall back to wider scope.
+		if (
+			is_statutory_payroll(inst.agent)
+			or agent_scope.record_scope_requested(inst.get("config"))
+			or inst.agent == "fefo-expiry-compliance-auditor"
+		):
 			frappe.log_error(
-				title="jarvis statutory payroll: scope resolution failed",
+				title="jarvis agent: explicit record scope resolution failed",
 				message=frappe.get_traceback(),
 			)
 			raise
@@ -1690,6 +1776,15 @@ def _stamp_scope_and_watermark(
 		scope["source_apps"] = list(source_apps)
 	if scope is not None:
 		values["scope_json"] = frappe.as_json(scope)
+	if inst.agent == agent_scope.FEFO_AGENT:
+		# Resolve the opaque visibility proof again immediately before dispatch.  The
+		# early FEFO preflight prevents row creation for a bad policy; this second
+		# proof catches a permission/hook change between preflight and the stamp.
+		# It stays in a hidden Run field and is never included in scope_json or the
+		# delegate prompt.
+		if not scope:
+			raise InvalidArgumentError("FEFO native visibility could not be verified")
+		values["fefo_visibility_proof_json"] = frappe.as_json(agent_scope.fefo_visibility_proof(scope))
 
 	if scope and scope.get("company") and scope.get("to_date"):
 		# A17: row-count + max(modified) over the scope's GL as-of window. The old
@@ -1780,7 +1875,12 @@ def _explicit_config(listing, inst) -> dict:
 
 
 def _audit_prompt(
-	listing, inst, trigger: str, scope: dict | None = None, engagement_config: dict | None = None
+	listing,
+	inst,
+	trigger: str,
+	scope: dict | None = None,
+	engagement_config: dict | None = None,
+	record_scope_supported: bool = False,
 ) -> str:
 	"""The GENERIC, non-leaky run message handed to the delegate (A2/A6).
 
@@ -1829,6 +1929,13 @@ def _audit_prompt(
 			payroll_scope, sort_keys=True
 		)
 	elif scope and scope.get("company"):
+		fefo_contract = ""
+		if (
+			listing.get("agent_slug") or listing.get("name")
+		) == "fefo-expiry-compliance-auditor" and scope.get("fefo_scope_contract"):
+			# FEFO's private evaluator requires this server-owned replacement
+			# marker. It is launch data, not mutable owner configuration.
+			fefo_contract = f', fefo_scope_contract="{scope.get("fefo_scope_contract")}"'
 		scope_block += (
 			"\n\nEXPLICIT SCOPE (use these EXACT values; never infer the period or the current date): "
 			f'company="{scope.get("company")}", '
@@ -1837,7 +1944,7 @@ def _audit_prompt(
 			f'to_date="{scope.get("to_date")}", '
 			f'report_date="{scope.get("report_date")}", '
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
-			f'prior_fy_end="{scope.get("prior_fy_end")}".'
+			f'prior_fy_end="{scope.get("prior_fy_end")}"{fefo_contract}.'
 		)
 	# Some agents use a server-bound scope narrower than the generic accounting
 	# window. Send these values only after the bench has resolved them. Do not copy
@@ -1847,7 +1954,7 @@ def _audit_prompt(
 		additional_scope = {
 			key: scope[key]
 			for key in ("record_scope", "prior_period_from", "prior_period_to")
-			if key in scope
+			if key in scope and (key != "record_scope" or record_scope_supported)
 		}
 		if additional_scope:
 			scope_block += "\n\nADDITIONAL SCOPE (copy these values unchanged): " + json.dumps(
