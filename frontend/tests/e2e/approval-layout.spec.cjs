@@ -111,6 +111,7 @@ async function openBoard(page, baseURL, sheet = false, options = {}) {
           }
         : {
             ...row,
+            ...(options.chat ? { pending_card_safe: true } : {}),
             card: batch(),
             doctype: "Supplier",
             can_act: 1,
