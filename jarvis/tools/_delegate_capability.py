@@ -575,6 +575,13 @@ def tool_denial(session_key: str | None, tool: str, cap=_UNRESOLVED) -> dict | N
 	# patched resolve already produced before the contract was passed in.
 	if not isinstance(cap, dict):
 		return None
+	# Reorder is unreleased. This check is intentionally before the legacy
+	# bypass: an old run contract must never regain generic tool authority.
+	from jarvis.chat import reorder_replenishment_gate
+
+	reorder_denial = reorder_replenishment_gate.delegate_tool_denial(cap, tool)
+	if reorder_denial:
+		return reorder_denial
 	name = normalize_tool(tool)
 
 	# _ALWAYS_GATED tools are refused for a legacy run OUTRIGHT, before the

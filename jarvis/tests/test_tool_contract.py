@@ -123,8 +123,8 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "64a7eab736c71246bd199e773d28e055c42d739588b7d414758b38e8087292c3"
-	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "3bca5faa9337568cc955bbff866bc275b25d0bcab3111a59c0f629ab1f87ec02"
+	PINNED_CAPABILITY_DIGEST = "d4b5e1683150e3dc3cd9928b7696ffc35c333670e81714aec3de28ac991d7072"
+	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "7b009e6a873dffef3cf7a911ed919a65ce8b43d4452dd62b88eb133d23841ecc"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
@@ -180,3 +180,24 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			"and update BOTH pinned digests (see lib/check_registry_capability_contract.py in the "
 			"private agents repo)",
 		)
+
+	def test_reorder_native_release_has_only_metadata_preparation_authority(self):
+		"""Publication cannot restore the retired generic read or write tools."""
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			doc = json.load(fh)
+		entry = next(
+			item for item in doc["agents"] if item.get("agent_slug") == "reorder-replenishment-operator"
+		)
+		self.assertEqual(entry["status"], "Published")
+		self.assertEqual(entry["tools_required"], ["jarvis__prepare_reorder_review"])
+		self.assertEqual(
+			sorted(entry["tools_allow"]),
+			["jarvis__prepare_reorder_review"],
+		)
+		self.assertNotIn("Jarvis Approval Request", entry["doctypes_required"])
+		self.assertIsNone(entry["writes"])

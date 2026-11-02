@@ -44,6 +44,8 @@ PROVENANCE = "Jarvis Agent Provenance Event"
 ALLOWED_ROLE = "Jarvis Agent Allowed Role"
 ALLOWED_USER = "Jarvis Agent Allowed User"
 _SETTINGS = "Jarvis Settings"
+_CATALOG_LOCK = "Jarvis Agent Catalog Lock"
+_CATALOG_LOCK_NAME = "agent-catalog-lock"
 
 # PP-6 — the stage-maximum global activation ceiling. The initial ceiling is 1
 # (every customer starts with a single live module); a Jarvis Admin may raise it
@@ -564,7 +566,8 @@ def get_agent(agent_slug: str) -> dict:
 		"category": listing.category,
 		"nature": listing.nature,
 		"supports_manual_run": listing.nature in ("Auditor", "Scribe")
-		or listing.agent_slug in REVIEW_OPERATORS,
+		or listing.agent_slug in REVIEW_OPERATORS
+		or listing.agent_slug == "reorder-replenishment-operator",
 		"version": listing.version,
 		"publisher": listing.publisher,
 		"status": listing.status,
@@ -631,6 +634,10 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif listing.agent_slug == "reorder-replenishment-operator":
+			from jarvis.chat.reorder_review import configuration_issues
+
+			i["configuration_issues"] = configuration_issues(i.config or "{}")
 		elif is_statutory_payroll(listing.agent_slug):
 			i["configuration_issues"] = _statutory_payroll_issues_for_run_as(i.name, i.config or "{}")
 		elif listing.agent_slug == FEFO_EXPIRY_AGENT:
@@ -900,6 +907,9 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 	require_jarvis_admin()
 	if status not in _ADMIN_STATUSES:
 		frappe.throw(_("Status must be one of: {0}.").format(", ".join(_ADMIN_STATUSES)))
+	from jarvis.chat import reorder_replenishment_gate
+
+	reorder_replenishment_gate.assert_listing_status(agent_slug, status)
 	doc = frappe.get_doc(LISTING, agent_slug)
 	doc.check_permission("write")
 	before = doc.status
@@ -1059,7 +1069,7 @@ def get_agent_admin_overview() -> dict:
 # --------------------------------------------------------------------------- #
 # install / enable / schedule / uninstall (mutations — all owner-gated)
 # --------------------------------------------------------------------------- #
-def _mark_catalog_dirty() -> None:
+def _mark_catalog_dirty(*, strict: bool = False) -> None:
 	"""Flag that the container-pushed ENABLED set changed since the last Apply
 	(install / uninstall / enable-disable). Cleared only on a SUCCESSFUL push
 	inside ``_enqueued_push_agent_skills``; surfaced to the SPA as ``dirty`` in
@@ -1068,12 +1078,19 @@ def _mark_catalog_dirty() -> None:
 	payload, so a mutation landing MID-push can never have its dirty flag
 	cleared by that push (TOCTOU). Best-effort — the flag must never break the
 	mutation it annotates, bar a deadlock over its uncommitted writes (rolled back
-	with it), which re-raises so the mutation is not reported as done."""
+	with it), which re-raises so the mutation is not reported as done. ``strict``
+	is for a safety migration whose Patch Log must never say complete without a
+	durable fleet reconciliation request."""
 	pending = frappe.db.transaction_writes
 	try:
-		frappe.db.set_single_value(_SETTINGS, "agent_catalog_dirty", 1)
+		# The final Apply worker locks this version row before it compares and
+		# clears dirty. Mutations must take the same lock FIRST, or a worker that
+		# holds version could wait on dirty while this request waits on version.
 		_bump_catalog_version()
+		frappe.db.set_single_value(_SETTINGS, "agent_catalog_dirty", 1)
 	except Exception as e:
+		if strict:
+			raise
 		if pending and isinstance(e, frappe.QueryDeadlockError):
 			# RES8-1: same exception type (existing catches still match), friendly message.
 			frappe.throw(
@@ -1084,38 +1101,67 @@ def _mark_catalog_dirty() -> None:
 
 
 def _bump_catalog_version() -> None:
-	"""Increment ``agent_catalog_version`` in ONE statement (#458).
+	"""Increment the catalog version under its fixed primary-key lock row.
 
-	The obvious read-modify-write (``get_single_value`` + ``set_single_value``)
-	loses updates: two mutations racing both read V and both write V+1, so the
-	second mutation leaves the version looking untouched. The push worker's TOCTOU
-	recheck compares against that version, so a lost increment is exactly the case
-	where the worker clears the dirty flag for a change that never made the
-	payload.
-
-	Frappe stores one Single field as one ``tabSingles`` row, so a single
-	``UPDATE ... SET value = value + 1`` runs under that row's write lock and
-	cannot lose an increment however the two writers interleave.
-	``set_single_value`` survives only as the SEED path: a Single field that was
-	never written has no ``tabSingles`` row at all, and the UPDATE above would
-	silently match nothing.
+	``tabSingles`` has no unique key on ``(doctype, field)``. Never use an
+	``INSERT IGNORE`` row there as a lock seed: concurrent first writes could
+	create duplicate version rows. The normal lock DocType has a primary-key
+	``name`` and serializes every version bump with the Apply worker's final
+	dirty-clear decision. The Settings fields remain the stored compatibility
+	values and are read only while that row lock is held.
 	"""
-	params = {"dt": _SETTINGS, "field": "agent_catalog_version"}
+	_lock_catalog_version()
+	# A mutation request can have made ordinary reads before it waited on the
+	# fixed lock. Under REPEATABLE READ, a plain cache=False SELECT would then
+	# still see that old snapshot. A locking read sees the current committed value
+	# after the prior lock holder releases it, so no version bump is lost.
+	version = frappe.utils.cint(
+		frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False, for_update=True)
+	)
+	frappe.db.set_single_value(_SETTINGS, "agent_catalog_version", version + 1)
+
+
+def _locked_catalog_version() -> int:
+	"""Lock and read the catalog version for the worker's terminal decision.
+
+	The lock covers both the fresh comparison and the subsequent dirty clear.
+	``_mark_catalog_dirty`` takes the same fixed normal-table row before it
+	writes Settings, so either the worker clears first and the mutation re-dirties
+	afterwards, or the mutation bumps first and the worker sees the newer version.
+	"""
+	_lock_catalog_version()
+	return frappe.utils.cint(
+		frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False, for_update=True)
+	)
+
+
+def _catalog_lock_table_ready() -> bool:
+	"""Return whether model sync has installed the primary-key lock table."""
+	return frappe.db.table_exists(_CATALOG_LOCK, cached=False)
+
+
+def _lock_catalog_version() -> None:
+	"""Take the catalog mutation lock until this transaction commits or rolls back.
+
+	The pre-model-sync fallback keeps a newly deployed web process usable during
+	the short migration window. The v2_31 safety migration runs after model sync,
+	so its strict Apply marker always uses the fixed primary-key row.
+	"""
+	if not _catalog_lock_table_ready():
+		return
+	params = {"name": _CATALOG_LOCK_NAME, "user": "Administrator"}
 	frappe.db.sql(
-		"""UPDATE `tabSingles`
-		SET `value` = CAST(COALESCE(NULLIF(`value`, ''), '0') AS UNSIGNED) + 1
-		WHERE `doctype` = %(dt)s AND `field` = %(field)s""",
+		f"""INSERT IGNORE INTO `tab{_CATALOG_LOCK}`
+		(`name`, `creation`, `modified`, `modified_by`, `owner`, `docstatus`, `idx`, `state_key`)
+		VALUES (%(name)s, NOW(6), NOW(6), %(user)s, %(user)s, 0, 0, %(name)s)""",
 		params,
 	)
-	if not frappe.db.sql(
-		"""SELECT 1 FROM `tabSingles` WHERE `doctype` = %(dt)s AND `field` = %(field)s LIMIT 1""",
+	rows = frappe.db.sql(
+		f"SELECT `name` FROM `tab{_CATALOG_LOCK}` WHERE `name`=%(name)s FOR UPDATE",
 		params,
-	):
-		frappe.db.set_single_value(_SETTINGS, "agent_catalog_version", 1)
-	# Raw SQL bypasses both the Single's redis document cache and
-	# ``frappe.db.value_cache``, which would otherwise keep serving the
-	# pre-increment value for the rest of this request.
-	frappe.clear_document_cache(_SETTINGS, _SETTINGS)
+	)
+	if not rows:
+		frappe.throw("The agent catalog lock could not be acquired.", frappe.ValidationError)
 
 
 def _default_schedule_weekday(sched: dict) -> str | None:
@@ -1163,6 +1209,9 @@ def install_agent(
 	model, validated before and saved in the same request as the install (enforced
 	min-model only; ignored with the flag off). ``pick_if_unpinned``: the pick is the
 	dialog's unchanged shown model, kept out of a row someone has pinned since."""
+	from jarvis.chat import reorder_replenishment_gate
+
+	reorder_replenishment_gate.assert_new_install_allowed(agent_slug)
 	listing = frappe.get_doc(LISTING, agent_slug)  # All-role read
 	me = frappe.session.user
 	# FIX 11: an agent runs AS a named user (run_as_user defaults to the installer),
@@ -1310,6 +1359,12 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	bundle only reaches the container on the next Apply)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	via_admin = _check_installation_write(doc)  # S3 owner-gate, or a tenant admin
+	before = int(doc.enabled or 0)
+	from jarvis.chat import reorder_replenishment_gate
+
+	reorder_replenishment_gate.assert_enabled(doc.agent, enabled)
+	if reorder_replenishment_gate.is_reorder(doc.agent) and doc.installed_version != "0.2.0":
+		reorder_replenishment_gate.retire_document(doc)
 	# R5-J8: never enable a non-installable capability (a min_apps dependency
 	# absent at install, or one that vanished after install and was reconciled to
 	# installable=0). Disabling is always allowed.
@@ -1317,7 +1372,6 @@ def set_enabled(installation: str, enabled: int) -> dict:
 		from jarvis.chat.agent_installability import assert_installable
 
 		assert_installable(doc.agent)
-	before = int(doc.enabled or 0)
 	doc.enabled = int(enabled or 0)
 	doc.save(ignore_permissions=via_admin)
 	# jarvis#1062 polish: only an ACTUAL flip changes the pushed bundle set - a
@@ -1371,6 +1425,17 @@ def set_schedule(
 
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
+	was_enabled = frappe.utils.cint(doc.enabled)
+	from jarvis.chat import reorder_replenishment_gate
+
+	final_schedule_enabled = (
+		frappe.utils.cint(schedule_enabled)
+		if schedule_enabled is not None
+		else frappe.utils.cint(doc.schedule_enabled)
+	)
+	reorder_replenishment_gate.assert_scheduled(doc.agent, final_schedule_enabled)
+	if reorder_replenishment_gate.is_reorder(doc.agent) and doc.installed_version != "0.2.0":
+		reorder_replenishment_gate.retire_document(doc)
 	# An old or directly edited record scope must not survive any save that leaves
 	# this schedule enabled. Explicitly turning the schedule off remains allowed
 	# so the owner has a safe recovery path.
@@ -1420,6 +1485,11 @@ def set_schedule(
 	else:
 		doc.next_run_at = None
 	doc.save()
+	# Reorder's supported "schedule off" recovery can also retire a legacy
+	# enabled installation. That changes the fleet roster, so signal Apply just
+	# like set_enabled does.
+	if was_enabled != frappe.utils.cint(doc.enabled):
+		_mark_catalog_dirty()
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
@@ -1795,6 +1865,9 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	the run's immutable ``initiating_human`` (JF-021) — three distinct identities."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3: who may trigger
+	from jarvis.chat import reorder_replenishment_gate
+
+	reorder_replenishment_gate.assert_launch_allowed(doc.agent)
 	# A legacy or directly edited configuration can predate set_config's guard.
 	# Check it before any manual-launch preparation can persist state (including a
 	# model fallback or Custom App Learning's source_apps_json selection).
@@ -1851,7 +1924,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 
 	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
 	nature = listing.get("nature")
-	if nature not in ("Auditor", "Scribe") and doc.agent not in REVIEW_OPERATORS:
+	if (
+		nature not in ("Auditor", "Scribe")
+		and doc.agent not in REVIEW_OPERATORS
+		and doc.agent != "reorder-replenishment-operator"
+	):
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
 		)
@@ -3158,9 +3235,7 @@ def _enqueued_push_agent_skills() -> None:
 			# successful push whose payload saw every mutation (version
 			# unchanged) and whose model stamps all landed; failures, mid-push
 			# mutations and an unstamped model row leave it set.
-			fresh = frappe.utils.cint(
-				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False)
-			)
+			fresh = _locked_catalog_version()
 			if fresh == version and stamped:
 				values["agent_catalog_dirty"] = 0
 			frappe.db.set_single_value(_SETTINGS, values)
