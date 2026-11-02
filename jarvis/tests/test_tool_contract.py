@@ -124,7 +124,7 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "ae0350dbed40b953fd3938e5d61a1a8dcd03d1baddad76588de1b73b4e8d2f79"
+	PINNED_CAPABILITY_DIGEST = "7ddb067734f83bf0898b6643b1d0aa3675a4c8a3979ef9138f9aedc75e94a040"
 
 	def test_attendance_catalog_excludes_unused_presentation_tools(self):
 		with open(
@@ -136,6 +136,7 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 				if row["agent_slug"] == "attendance-leave-integrity-auditor"
 			)
 		self.assertEqual(entry["version"], "0.4.3")
+		self.assertIs(entry["supports_record_scope"], True)
 		self.assertEqual(
 			entry["tools_allow"],
 			[

@@ -254,7 +254,8 @@
       },
       "config_keys": [
         "attendance"
-      ]
+      ],
+      "supports_record_scope": true
     },
     {
       "agent_slug": "bank-recon-operator",
@@ -602,9 +603,9 @@
       "domain": "knowledge",
       "nature": "scribe",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.2.2",
       "status": "Published",
-      "description": "Reads your installed CUSTOM Frappe apps' source and writes business-first wiki pages about them — what each app does, its doctypes, workflows, validations and integrations — so your team and the assistant can rely on it later. Runs on demand in the Jarvis container (your bench never sees a source-laden chat), never reads core-app source, writes only the org wiki (no ERP write tool), and updates pages in place on re-run. Only run it on apps whose code you trust: source is treated as data, not instructions, but could still try to steer the agent. Admin-restricted (System Manager / Jarvis Admin).",
+      "description": "Reads the CUSTOM Frappe apps you select and writes business-first wiki pages about them — what each app does, its doctypes, workflows, validations and integrations — so your team and the assistant can rely on it later. You name the exact apps at launch: it reads only those (never core-app source). Each page cites server-verified source reads. Runs on demand in the Jarvis container (your bench never sees a source-laden chat), writes only the org wiki (no ERP write tool), and updates its own pages in place on re-run. Only select apps whose code you trust: source is treated as data, not instructions, but could still try to steer the agent. Admin-restricted (System Manager / Jarvis Admin).",
       "tools_required": [
         "jarvis__list_app_modules",
         "jarvis__read_app_source",
@@ -617,14 +618,13 @@
         "jarvis__read_app_source",
         "jarvis__record_app_wiki",
         "jarvis__finish_app_learning_run",
-        "jarvis__read_wiki",
-        "canvas",
-        "message"
+        "jarvis__read_wiki"
       ],
       "doctypes_required": [
         "Jarvis Wiki Page"
       ],
       "rule_tokens": [],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "",
       "timeout_s": 5400,
@@ -1317,9 +1317,9 @@
       "domain": "india-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.6",
       "status": "Published",
-      "description": "For suppliers you have already classified as Micro/Small MSME, this overlays each open payable's elapsed days against its 15/45-day window and projects whether it will still be unpaid on 31-March, when s.43B(h) defers the deduction. Ships a pay-before-year-end worklist on top of ERPNext's native AP Ageing report. Read-only; never records a payment, edits a voucher, classifies a supplier, or decides what you may deduct.",
+      "description": "For suppliers you have already classified as Micro/Small MSME, this overlays each open payable's elapsed days against its 15/45-day window and projects whether it will still be unpaid on 31-March, when s.43B(h) defers the deduction. It reconciles its open-Purchase-Invoice population against ERPNext's private native Accounts Payable report at the same company and as-of date before it can report clean coverage. Read-only; never records a payment, edits a voucher, classifies a supplier, or decides what you may deduct.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
@@ -1350,6 +1350,7 @@
         "msmed_s15_windows",
         "s43bh_yearend_test"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "india-compliance-workbench",
       "timeout_s": 1800,
@@ -1365,7 +1366,14 @@
       "validated_for_fy": "2026-2027",
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "supplier_group_mapping",
+        "reviewer",
+        "reviewer_capacity",
+        "applicable_tax_rate",
+        "currency"
+      ]
     },
     {
       "agent_slug": "negative-stock-valuation-auditor",
