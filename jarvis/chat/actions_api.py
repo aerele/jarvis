@@ -626,8 +626,9 @@ def _append_receipt(
 	submitted: int = 0,
 ) -> None:
 	"""Tool message first (feeds the SPA's docRefs → the receipt's doc id
-	linkifies to Desk), then a short assistant receipt the agent also sees in
-	the transcript on its next turn - so it never re-applies the change."""
+	linkifies to Desk), then a short assistant receipt for the human. The agent
+	does NOT see these rows (the bench never replays the transcript to the model);
+	it learns of the write from a continuation or ``_note_applied``."""
 	data = {"doctype": doctype, "name": name}
 	if verb == "create" and submitted:
 		# So the chip itself says "Created and submitted" (the assistant row repeating it is
@@ -671,6 +672,18 @@ def _append_receipt(
 		}
 	).insert(ignore_permissions=True)
 	frappe.db.set_value(CONV, conversation, "last_active_at", frappe.utils.now(), update_modified=False)
+
+
+def _note_applied(conversation: str, receipt: str) -> None:
+	"""jarvis#2253: a Confirm without ``continue`` queues no turn, and the agent's own
+	session memory still says the write is pending. Queue the receipt as an agent note
+	so the next turn's context bracket carries it. Best-effort: the write is committed."""
+	from jarvis.chat import agent_notes
+
+	try:
+		agent_notes.append(conversation, f"the user confirmed the draft and it was saved: {receipt}")
+	except Exception:
+		frappe.log_error(title="apply_action agent note failed", message=frappe.get_traceback())
 
 
 @frappe.whitelist(methods=["POST"])
@@ -938,6 +951,8 @@ def apply_action(action: dict | str | None = None) -> dict:
 			# Best-effort like the receipt: the write is committed, and the
 			# user can always nudge the agent manually if dispatch hiccups.
 			frappe.log_error(title="apply_action continuation failed", message=frappe.get_traceback())
+	if not _cont:
+		_note_applied(conversation, receipt)
 	slug = doctype.lower().replace(" ", "-")
 	resp = {"ok": True, "verb": verb, "name": name, "doc_url": f"/app/{slug}/{name}"}
 	if suggested_next:
