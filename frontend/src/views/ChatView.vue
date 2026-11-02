@@ -3801,6 +3801,11 @@
 								</table>
 							</div>
 						</template>
+						<DocumentBlocks
+							v-else-if="artifact.document"
+							:document="artifact.document"
+							:file-url="artifact.url"
+						/>
 						<pre v-else-if="artifact.kind === 'text'" class="jv-artifact-text">{{
 							artifact.text
 						}}</pre>
@@ -3808,7 +3813,9 @@
 							Loading preview…
 						</div>
 						<div v-else class="jv-artifact-nopreview">
-							<p class="jv-preview-note">No inline preview for this file type.</p>
+							<p class="jv-preview-note">
+								{{ artifact.error || "No inline preview for this file type." }}
+							</p>
 							<a
 								:href="artifact.url"
 								:download="cvFile(artifact.cv)"
@@ -4504,6 +4511,7 @@ import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
 import FileBoxUseAsSource from "@/components/chat/FileBoxUseAsSource.vue";
+import DocumentBlocks from "@/components/DocumentBlocks.vue";
 import SheetCharts from "@/components/SheetCharts.vue";
 import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
@@ -8955,7 +8963,14 @@ async function openArtifact(m, cv) {
 	const url = cv.file_url || cvOf(m, cv);
 	const t = cv.type;
 	const conv = currentId.value;
-	const isCurrent = (request) => artifact.value === request && currentId.value === conv;
+	function isCurrent(req) {
+		if (artifact.value !== req) return false;
+		if (currentId.value !== conv) {
+			artifact.value = null;
+			return false;
+		}
+		return true;
+	}
 	if (t === "pdf" || t === "image") {
 		artifact.value = { m, cv, url, conv, kind: t };
 		if (t === "pdf") ensurePdfTemplates();
