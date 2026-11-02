@@ -53,6 +53,7 @@ describe("CONFIG_FIELD_SET", () => {
 				"baseline_hrms_reviewer_capacity",
 				"baseline_hrms_history_from",
 				"baseline_hrms_test_declaration",
+				"deposit",
 				"annual_aggregate_turnover",
 				"same_hsn_rate_allowlist",
 				"stale_floor_days",
@@ -62,7 +63,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders scope, materiality, payroll baseline and vendor-ledger ageing fields", () => {
+	it("orders scope, materiality, payroll baseline, deposit and vendor-ledger fields", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -84,6 +85,7 @@ describe("CONFIG_FIELD_SET", () => {
 			"baseline_hrms_reviewer_capacity",
 			"baseline_hrms_history_from",
 			"baseline_hrms_test_declaration",
+			"deposit",
 			"annual_aggregate_turnover",
 			"same_hsn_rate_allowlist",
 			"stale_floor_days",
@@ -122,6 +124,12 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
+	it("declares the payroll deposit panel at its one nested namespace", () => {
+		expect(CONFIG_FIELD_SET).toContainEqual(
+			expect.objectContaining({ key: "deposit", path: "deposit", type: "deposit-status" })
+		);
+	});
+
 	it("stores the GST same-HSN exclusions as a short text list", () => {
 		expect(TEXT_LIST_CONFIG_KEYS).toEqual(["same_hsn_rate_allowlist"]);
 	});
@@ -145,7 +153,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes materiality, payroll, GST and vendor-ledger settings", () => {
+	it("agent-specific includes payroll baseline, deposit, materiality, GST and vendor-ledger settings", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -163,6 +171,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"baseline_hrms_reviewer_capacity",
 			"baseline_hrms_history_from",
 			"baseline_hrms_test_declaration",
+			"deposit",
 			"annual_aggregate_turnover",
 			"same_hsn_rate_allowlist",
 			"stale_floor_days",
@@ -207,6 +216,10 @@ describe("KEY_TO_PATH (local form key -> storage dot path)", () => {
 		);
 		expect(KEY_TO_PATH.baseline_hrms_history_from).toBe("baseline_hrms.history_from");
 		expect(KEY_TO_PATH.baseline_hrms_test_declaration).toBe("baseline_hrms.test_declaration");
+	});
+
+	it("the deposit panel owns the whole declared namespace", () => {
+		expect(KEY_TO_PATH.deposit).toBe("deposit");
 	});
 });
 

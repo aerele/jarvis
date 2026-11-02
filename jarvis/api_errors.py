@@ -103,6 +103,10 @@ def _capture_warning(what: str) -> None:
 
 def _known_tool(tool) -> str:
 	"""``tool`` when the registry has it, else ``unknown_tool``."""
+	from jarvis.tools import _private_output
+
+	if _private_output.metadata_redacted():
+		return _private_output.PRIVATE_DELEGATE_TOOL_LABEL
 	from jarvis.tools.registry import _TOOL_NAMES
 
 	name = str(tool or "")
@@ -974,6 +978,14 @@ def record_call_tool_failure(tool: str, result) -> None:
 		if capture_off() or getattr(frappe.local, "jarvis_tool_failure_recorded", False):
 			return
 		error = result.get("error") if isinstance(result.get("error"), dict) else {}
+		from jarvis.tools import _private_output
+
+		private_metadata = _private_output.metadata_redacted()
+		if private_metadata:
+			error = {
+				"code": str(error.get("code") or "CapabilityDeniedError"),
+				"message": "Private payroll delegate call failed.",
+			}
 		user = getattr(frappe.local, "jarvis_call_tool_user", None) or frappe.session.user
 		status = int((getattr(frappe.local, "response", None) or {}).get("http_status_code") or 200)
 		if status >= 400:
@@ -1005,6 +1017,14 @@ def record_tool_failure(
 	write guard is policy working, not a failure, and is not recorded."""
 	try:
 		error = error or {}
+		from jarvis.tools import _private_output
+
+		private_metadata = _private_output.metadata_redacted()
+		if private_metadata:
+			error = {
+				"code": str(error.get("code") or "CapabilityDeniedError"),
+				"message": "Private payroll delegate call failed.",
+			}
 		code = str(error.get("code") or "")
 		from jarvis.tools import _write_risk
 
