@@ -1,0 +1,116 @@
+[
+  {
+    "filename": "tdf144642_RowHeight_10mm_SavedByCalc.xlsx",
+    "origin": "LibreOffice/core XLSX test corpus",
+    "source": "https://api.github.com/repos/LibreOffice/core/git/blobs/d85d94c107fc88952a3c87e83038b1076c37e231",
+    "upstream_path": "https://github.com/LibreOffice/core/blob/master/sc/qa/unit/data/xlsx/tdf144642_RowHeight_10mm_SavedByCalc.xlsx",
+    "git_blob_sha": "d85d94c107fc88952a3c87e83038b1076c37e231",
+    "sha256": "4afb117e21fe531e77ccbc5f3a9d7bd9fbdb898f10a60e944050ee764563815e",
+    "producer_metadata": [
+      "LibreOfficeDev/7.3.0.0.alpha0$Windows_X86_64 LibreOffice_project/6b851810d43e4a9ea8119d97436f658593ff8f1b"
+    ],
+    "source_rows": 30,
+    "scan_records": 30
+  },
+  {
+    "filename": "tdf144642_RowHeight_28.35pt_SavedByExcel.xlsx",
+    "origin": "LibreOffice/core XLSX test corpus",
+    "source": "https://api.github.com/repos/LibreOffice/core/git/blobs/367922d6581f55ea43baf1430506f985200f2370",
+    "upstream_path": "https://github.com/LibreOffice/core/blob/master/sc/qa/unit/data/xlsx/tdf144642_RowHeight_28.35pt_SavedByExcel.xlsx",
+    "git_blob_sha": "367922d6581f55ea43baf1430506f985200f2370",
+    "sha256": "d7e705d8d0968514461afd1050c739f91db38b3c8968ac0a938d593980dffee7",
+    "producer_metadata": [
+      "Microsoft Excel"
+    ],
+    "source_rows": 27,
+    "scan_records": 27
+  },
+  {
+    "filename": "tdf145129_DefaultRowHeight_28.35pt_SavedByExcel.xlsx",
+    "origin": "LibreOffice/core XLSX test corpus",
+    "source": "https://api.github.com/repos/LibreOffice/core/git/blobs/f8041d58eb65d0686035002784783f40d83dda8c",
+    "upstream_path": "https://github.com/LibreOffice/core/blob/master/sc/qa/unit/data/xlsx/tdf145129_DefaultRowHeight_28.35pt_SavedByExcel.xlsx",
+    "git_blob_sha": "f8041d58eb65d0686035002784783f40d83dda8c",
+    "sha256": "31fbca7039d7eff4ab06d77ee81a3fb5fa312f0af6877b678a13ac96cdc1404e",
+    "producer_metadata": [
+      "Microsoft Excel"
+    ],
+    "source_rows": 52,
+    "scan_records": 52
+  },
+  {
+    "filename": "different-column-width-excel2010.xlsx",
+    "origin": "LibreOffice/core XLSX test corpus",
+    "source": "https://api.github.com/repos/LibreOffice/core/git/blobs/93f133f8db49879aecd46537f7469dfff756b769",
+    "upstream_path": "https://github.com/LibreOffice/core/blob/master/sc/qa/unit/data/xlsx/different-column-width-excel2010.xlsx",
+    "git_blob_sha": "93f133f8db49879aecd46537f7469dfff756b769",
+    "sha256": "8360cf592f6e79a75995b5356837ac35f2fa57cc74c0707e939158d5f552ffcb",
+    "producer_metadata": [
+      "Microsoft Excel"
+    ],
+    "source_rows": 0,
+    "scan_records": 1
+  },
+  {
+    "filename": "escape-unicode.xlsx",
+    "origin": "LibreOffice/core XLSX test corpus",
+    "source": "https://api.github.com/repos/LibreOffice/core/git/blobs/ec43688b74b862ee7f2cec92e10b1af25ccc4146",
+    "upstream_path": "https://github.com/LibreOffice/core/blob/master/sc/qa/unit/data/xlsx/escape-unicode.xlsx",
+    "git_blob_sha": "ec43688b74b862ee7f2cec92e10b1af25ccc4146",
+    "sha256": "4fc5bfed83c80264b6bb06e321e404f86a0b99bd5f1c1fbabe1cef3f44c284e0",
+    "producer_metadata": [
+      "Microsoft Excel"
+    ],
+    "source_rows": 2,
+    "scan_records": 2
+  },
+  {
+    "filename": "dateAutofilter.xlsx",
+    "origin": "LibreOffice/core XLSX test corpus",
+    "source": "https://api.github.com/repos/LibreOffice/core/git/blobs/1c836511d0dc9e53245f469480d7935a0c2d5100",
+    "upstream_path": "https://github.com/LibreOffice/core/blob/master/sc/qa/unit/data/xlsx/dateAutofilter.xlsx",
+    "git_blob_sha": "1c836511d0dc9e53245f469480d7935a0c2d5100",
+    "sha256": "d7ab3dbb59388d245ee779bf8547748dc6bac70f3c7216e673e0d97dbbbd6bc4",
+    "producer_metadata": [
+      "Microsoft Excel"
+    ],
+    "source_rows": 4,
+    "scan_records": 4
+  },
+  {
+    "filename": "TableEmptyHeaders.xlsx",
+    "origin": "LibreOffice/core XLSX test corpus",
+    "source": "https://api.github.com/repos/LibreOffice/core/git/blobs/a21b0de4972cbc2303e7fe2e1b92c5151717686f",
+    "upstream_path": "https://github.com/LibreOffice/core/blob/master/sc/qa/unit/data/xlsx/TableEmptyHeaders.xlsx",
+    "git_blob_sha": "a21b0de4972cbc2303e7fe2e1b92c5151717686f",
+    "sha256": "1b46aa492d18ab18f8718befaf23249fbf9ebe45312d4b4b1960c891bae38fd0",
+    "producer_metadata": [
+      "Microsoft Macintosh Excel"
+    ],
+    "source_rows": 1,
+    "scan_records": 1
+  },
+  {
+    "filename": "chart_hyperlink.xlsx",
+    "origin": "LibreOffice/core XLSX test corpus",
+    "source": "https://api.github.com/repos/LibreOffice/core/git/blobs/95d48266f0fb1082765d2f46a2e5f00cd821c22b",
+    "upstream_path": "https://github.com/LibreOffice/core/blob/master/sc/qa/unit/data/xlsx/chart_hyperlink.xlsx",
+    "git_blob_sha": "95d48266f0fb1082765d2f46a2e5f00cd821c22b",
+    "sha256": "b6dc58cd4e3d357e429ffc1cf16cdea1bf909593f1fc8d939f0a5fbac8218b08",
+    "producer_metadata": [
+      "Microsoft Excel"
+    ],
+    "source_rows": 2,
+    "scan_records": 2
+  },
+  {
+    "filename": "google-sheets-quickstart.xlsx",
+    "origin": "Google Sheets public API Quickstart Class Data export",
+    "source": "https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/export?format=xlsx",
+    "documentation": "https://developers.google.com/workspace/sheets/api/quickstart/python",
+    "sha256": "bd8fa6424fed4c92384f8d1527da2bcda70e66ee703ee77eecfac5af0219d8e0",
+    "producer_metadata": [],
+    "source_rows": 31,
+    "scan_records": 31
+  }
+]

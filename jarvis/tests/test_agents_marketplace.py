@@ -561,6 +561,18 @@ class TestAgentsMarketplace(unittest.TestCase):
 				self.assertEqual(json.loads(frappe.db.get_value(LISTING, slug, "config_keys")), config_keys)
 		self.assertEqual(frappe.db.get_value(LISTING, "grn-hygiene-auditor", "version"), "0.4.1")
 
+	def test_sync_preserves_vendor_ledger_configuration_keys(self):
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "vendor-ledger-recon-auditor", "config_keys")),
+			[
+				"ageing.stale_floor_days",
+				"ageing.advance_floor_days",
+				"ageing.grir_floor_days",
+				"ageing.band_edges",
+			],
+		)
+
 	def test_sync_agent_listings_writes_cycle_count_config_keys(self):
 		"""Cycle Count owns a closed configuration namespace, including its list field."""
 		agent_catalog.sync_agent_listings()

@@ -24,6 +24,11 @@ These changes apply to new writes. They do not delete earlier transcripts,
 backups, original uploads, report artifacts, or user-requested exported files.
 Gateway hooks do not establish retention guarantees for native Claude CLI or
 other provider-owned transcripts. Those paths need separate lifecycle checks.
+Protected reads require gateway runtime 2026.9.3 or later, the Jarvis plugin's
+explicit conversation-access hook permission, and runtime trajectory capture
+switched off before gateway startup. Native trajectory snapshots
+bypass the transcript hooks. The plugin refuses reads while capture is enabled
+or its setting is absent. It also refuses reads on CLI or unknown runners.
 An older runtime without the persistence hook API logs an explicit compatibility
 warning. The paired plugin refuses source reads before network dispatch until
 the runtime is upgraded. Other tools retain their existing behavior.
@@ -36,3 +41,27 @@ retention from this hook.
 The file and report child processes disable core dumps before reading input.
 Their 512 MiB address-space limit is enforced on Linux. macOS does not have this
 address-space guarantee; byte, row, SQL-work, and parent wall limits still apply.
+
+## Paired rollout
+
+Use a maintenance window for the source-reader release group. Pause chat and
+agent traffic before deploying the backend. A completed `run_report` now returns
+metadata and requires `query_report`; an old plugin cannot finish that handoff.
+
+1. Deploy the backend file-query change (#2245), then the prepared-report change
+   (#2247). Run `bench migrate` and restart the backend workers.
+2. Deploy the matching plugin file-query change (#136), then the prepared-report
+   change (#137). Restart the gateway. Require a runtime that supports the
+   synchronous persistence hooks; a function named `api.on` alone is not proof.
+3. Compare `jarvis/tools/tool-names.json` with the plugin's
+   `contracts/tool-names.json`. Both must contain `query_report` and have the same
+   digest. Check a completed report through the live tool path, then check the
+   stored receipt and transcript with a non-sensitive canary value.
+4. Deploy the agent bundles and Admin provisioning changes only after those tools
+   are registered. Refresh role profiles and confirm the effective permissions.
+5. Resume traffic only after the paired checks pass. Keep archive reads off until
+   their separate backend/plugin release and runtime checks pass.
+
+For rollback, pause traffic and restore a matching backend/plugin pair before
+resuming it. A backend-only or plugin-only rollback is not a supported mixed
+version state. This procedure does not delete historical source data.
