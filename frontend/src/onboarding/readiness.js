@@ -188,7 +188,8 @@ export async function replacedNoticeOf() {
 // is onboarded, it just must not drive the original's agent. Null unless it applies.
 export async function copyNoticeOf() {
 	const r = await checkReady();
-	if (r && r.reason === "site_instance_changed") return { instance_changed: true };
+	if (r && r.reason === "site_instance_changed")
+		return { instance_changed: true, message: r.detail || "" };
 	if (!r || r.reason !== "site_is_copy") return null;
 	return r.copy_notice || null;
 }
@@ -251,7 +252,9 @@ export function copyBanner(notice) {
 		return {
 			tone: "warning",
 			title: "This site changed",
+			// The server's own sentence (readiness `detail`) wins; this is the fallback.
 			message:
+				notice.message ||
 				"Jarvis paused because this site's identity changed, for example after a restore or a move. Re-verify to reconnect Jarvis here.",
 		};
 	}

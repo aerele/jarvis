@@ -522,6 +522,32 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertTrue(enq.call_args.kwargs["deduplicate"])
 		self.assertTrue(enq.call_args.kwargs["job_id"])
 
+	def test_retired_without_key_queues_the_resync_even_inside_the_throttle_window(self):
+		"""A retirement always triggers one fetch: the 10-minute self-heal throttle is
+		bypassed (the job id dedupes it)."""
+		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
+		gate = frappe.cache().make_key(onboarding._KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site)
+		frappe.cache().setex(gate, 500, 1)
+		self.addCleanup(frappe.cache().delete, gate)
+		with patch("frappe.enqueue") as enq:
+			onboarding.write_connection({"owner_key_retired": True})
+		enq.assert_called_once()
+		self.assertEqual(enq.call_args.args[0], "jarvis.onboarding.run_key_resync")
+		self.assertEqual(enq.call_args.kwargs["queue"], "short")
+		self.assertEqual(enq.call_args.kwargs["job_id"], f"jarvis_key_resync:{frappe.local.site}")
+		self.assertTrue(enq.call_args.kwargs["deduplicate"])
+		self.assertTrue(enq.call_args.kwargs["enqueue_after_commit"])
+
+	def test_a_retire_enqueue_failure_is_logged_and_never_fails_the_write(self):
+		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
+		with (
+			patch("frappe.enqueue", side_effect=RuntimeError("queue down")),
+			patch.object(frappe, "log_error") as log_error,
+		):
+			onboarding.write_connection({"owner_key_retired": True})
+		self.assertEqual(log_error.call_args.kwargs["title"], "callback key resync: enqueue failed")
+		self.assertFalse(frappe.get_single(SETTINGS).get_password("agent_token", raise_exception=False))
+
 	def test_retired_with_a_key_queues_nothing(self):
 		set_settings_password(frappe.get_single(SETTINGS), "callback_key", CALLBACK)
 		with patch("frappe.enqueue") as enq:
@@ -613,11 +639,27 @@ class TestReverify(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertTrue(out["proved"])
 		self.assertFalse(out["pin_rebound"])
 
-	def test_reverify_clears_the_instance_changed_record_when_proved(self):
+	def test_reverify_clears_the_instance_changed_record_when_the_pin_was_rebound(self):
 		frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
-		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}):
-			site_pin.reverify()
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True, "pin_rebound": True}):
+			out = site_pin.reverify()
+		self.assertTrue(out["proved"] and out["pin_rebound"])
 		self.assertFalse(frappe.db.get_single_value(SETTINGS, "instance_changed"))
+
+	def test_reverify_keeps_the_instance_changed_record_when_proved_but_nothing_rebound(self):
+		"""An older admin/fleet proves but rebinds nothing: the agent would block the
+		site again, so the record (and the banner) stays."""
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
+		for answer in ({"proved": True}, {"proved": True, "pin_rebound": False}):
+			with self.subTest(answer=answer):
+				with patch("jarvis.admin_client.verify_site", return_value=answer):
+					out = site_pin.reverify()
+				self.assertTrue(out["proved"])
+				self.assertFalse(out["pin_rebound"])
+				self.assertNotIn("error", out)
+				self.assertTrue(frappe.db.get_single_value(SETTINGS, "instance_changed"))
+				# The pairing block is still lifted by a pass.
+				self.assertFalse(out["blocked"])
 
 	def test_reverify_keeps_the_instance_changed_record_when_not_proved(self):
 		frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
@@ -657,6 +699,17 @@ class TestReverify(JarvisSettingsSnapshot, FrappeTestCase):
 				self.assertFalse(out["proved"])
 				self.assertFalse(out["pin_rebound"])
 				self.assertEqual(out["error"], "not_verified")
+
+	def test_reverify_rejected_proof_is_not_verified_but_ambiguous_stays_unreachable(self):
+		from jarvis.exceptions import AdminAmbiguousError, AdminRejectedError
+
+		with patch(
+			"jarvis.admin_client.verify_site",
+			side_effect=AdminRejectedError("admin returned 502", code="FleetConfigError"),
+		):
+			self.assertEqual(site_pin.reverify()["error"], "not_verified")
+		with patch("jarvis.admin_client.verify_site", side_effect=AdminAmbiguousError("read timeout")):
+			self.assertEqual(site_pin.reverify()["error"], "unreachable")
 
 	def test_a_normal_answer_carries_no_error(self):
 		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}):
