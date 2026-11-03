@@ -14,6 +14,14 @@ def _unrelated(module, reason, names):
 
 
 _unrelated(
+	"jarvis.network_check",
+	"Signed network-check challenge callback; identifiers do not grant conversation access.",
+	"""
+    answer
+    """,
+)
+
+_unrelated(
 	"jarvis.payment_calendar.api",
 	"Company/report/ledger finance scope and actor-owned snapshots/preferences; shared chat identifiers grant no authority.",
 	"""
@@ -655,6 +663,20 @@ _unrelated(
 	"Workspace readiness checks; no transcript lookup.",
 	"""
     run_chat_preflight
+    """,
+)
+
+_unrelated(
+	"jarvis.private_network",
+	"Operator network setup and workspace connectivity, not chat content.",
+	"""
+    check_admin_connection
+    connection_test_status
+    network_status
+    private_setup_targets
+    reserve_host
+    save_public_address
+    start_connection_test
     """,
 )
 
