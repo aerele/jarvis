@@ -344,12 +344,19 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 		from jarvis.chat.agent_scope import InvalidFefoRecordScopeError
 
 		inst = self._due_install()
-		now = now_datetime()
+		# The daily slot can be sooner than the 55-minute transient retry.
+		# Exercise that boundary explicitly, independent of the CI clock.
+		now = now_datetime().replace(hour=8, minute=30, second=0, microsecond=0)
+		frappe.db.set_value(INSTALLATION, inst, "schedule_time", "09:00:00", update_modified=False)
+		frappe.db.commit()
 
 		def _invalid_root(inst_doc, **kw):
 			raise InvalidFefoRecordScopeError("FEFO record_scope must name one Warehouse leaf")
 
-		with patch.object(agent_scheduler.frappe, "log_error") as log_error:
+		with (
+			patch.object(agent_scheduler, "now_datetime", return_value=now),
+			patch.object(agent_scheduler.frappe, "log_error") as log_error,
+		):
 			self._sweep(launch=_invalid_root)
 
 		failed = frappe.get_all(
@@ -365,10 +372,10 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 		)
 		self.assertEqual(self._dispatched_for(inst), [], "an invalid root never reaches the delegate")
 		log_error.assert_not_called()
-		self.assertGreater(
+		self.assertEqual(
 			self._next_run_at(inst),
-			add_to_date(now, seconds=agent_scheduler._RETRY_AFTER_S + 60),
-			"the next normal cadence replaces the hourly retry",
+			now.replace(hour=9, minute=0),
+			"the normal 09:00 cadence replaces the transient 09:25 retry",
 		)
 
 	def test_fefo_database_scope_verification_failure_remains_retryable(self):
