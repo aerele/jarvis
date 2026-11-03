@@ -217,23 +217,48 @@ def admin_delete(skill: str) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def admin_handover(skill: str, new_owner: str, expected_owner: str | None = None) -> dict:
+def admin_handover(
+	skill: str,
+	new_owner: str | None = None,
+	expected_owner: str | None = None,
+	new_owners: str | list | None = None,
+	keep: bool | int | str = False,
+) -> dict:
 	"""Hand any user's skill to ``new_owner`` (``skills_handover``): it arrives switched
 	off and disarmed, with no shares, no File Box opt-in, no assignments and no hold,
 	and the old owner's Pending promotion requests are rejected. ``expected_owner`` is the
 	owner the dialog showed (required). An admin may hand a skill to themselves and may
 	hand their own skill away.
-	``{ok, new_owner, cleared: {shares, armed, file_box, assignments}, hold_lifted,
-	requests_cancelled, needs_apply}``."""
+
+	Several people (``new_owners``, a list or a comma separated text, with or without
+	``new_owner``): the first is handed the skill, each of the others gets a private
+	copy (``skills_handover.give_copies``). With ``keep`` the skill stays where it is
+	and everyone named gets a copy. Every person is checked before anything is written.
+	``{ok, handed_over, new_owner, cleared: {shares, armed, file_box, assignments},
+	hold_lifted, requests_cancelled, needs_apply, copies: [{user, skill}],
+	copy_failed: [{user, reason}]}`` (the hand-over's keys only when it was handed)."""
 	_write_gate()
 	name = _name_arg(skill, _("Skill"))
-	new_owner = _new_owner_arg(new_owner)
+	targets = _new_owners_arg(new_owner, new_owners)
+	keep = _bool_arg(keep, _("Keep"))
 	# As stored, as the new owner is: a name in another case is the same person.
 	expected_owner = _name_arg(expected_owner, _("Current owner"))
 	expected_owner = skills_handover.stored_user(expected_owner) or expected_owner
 	if not skills_handover.available():
 		frappe.throw(_("Handing over a skill is not available yet on this site."), frappe.ValidationError)
-	return skills_handover.handover(skills_admin.load(name), new_owner, expected_owner)
+	row = skills_admin.load(name)
+	if len(targets) == 1 and not keep:
+		res = skills_handover.handover(row, targets[0], expected_owner)
+		return {**res, "handed_over": True, "copies": [], "copy_failed": []}
+	skills_handover.refuse_all(row, targets, expected_owner, keep=keep)
+	res = {"ok": True, "handed_over": False, "new_owner": None, "needs_apply": False}
+	moved_to = None
+	if not keep:
+		moved_to = targets[0]
+		res = {**skills_handover.handover(row, moved_to, expected_owner), "handed_over": True}
+	copies, failed = skills_handover.give_copies(row.name, targets[1:] if moved_to else targets, row.owner)
+	skills_handover.tell_about_copies(row, row.owner, [c["user"] for c in copies], moved_to=moved_to)
+	return {**res, "copies": copies, "copy_failed": failed}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -514,6 +539,41 @@ def _new_owner_arg(value) -> str:
 			skills_handover.SkillHandoverError,
 		)
 	return stored
+
+
+# How many people one hand-over can name (the skill to the first, copies to the rest).
+HANDOVER_MAX = 10
+
+
+def _new_owners_arg(new_owner, new_owners) -> list[str]:
+	"""Who the skill goes to, in the order picked, each as stored and named once:
+	``new_owner`` first when given, then ``new_owners`` (a list, a JSON list or a comma
+	separated text). At least one and at most ``HANDOVER_MAX``. Modelled on
+	``macros_admin_api._new_owners_arg``."""
+	listed = new_owners
+	if isinstance(listed, str):
+		text = listed.strip()
+		listed = (
+			frappe.parse_json(text) if text.startswith("[") else [p for p in text.split(",") if p.strip()]
+		)
+	if listed is None:
+		listed = []
+	if not isinstance(listed, list):
+		frappe.throw(_("New owners must be a list of users."), frappe.ValidationError)
+	names = ([new_owner] if new_owner not in (None, "") else []) + listed
+	if not names:
+		frappe.throw(_("Pick who gets the skill."), skills_handover.SkillHandoverError)
+	too_many = _("A skill can go to at most {0} people at once.").format(HANDOVER_MAX)
+	if len(names) > HANDOVER_MAX * 2:  # before a database read per name
+		frappe.throw(too_many, skills_handover.SkillHandoverError)
+	targets = []
+	for name in names:
+		stored = _new_owner_arg(name)
+		if stored not in targets:
+			targets.append(stored)
+	if len(targets) > HANDOVER_MAX:
+		frappe.throw(too_many, skills_handover.SkillHandoverError)
+	return targets
 
 
 def _bool_arg(value, what: str) -> bool:
