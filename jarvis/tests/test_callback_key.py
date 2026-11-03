@@ -124,25 +124,33 @@ class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 	def test_retired_payload_without_a_key_clears_agent_token_and_queues_resync(self):
 		"""Fail closed: the old owner token also sits in every pre-retirement copy of
 		the site, so it must stop verifying even with no callback key stored. The key
-		is fetched by the throttled resync (and every later plugin call re-queues it)."""
-		onboarding.write_connection({"owner_key_retired": True})
+		is fetched by a resync job queued directly (not through the throttle)."""
+		with patch("frappe.enqueue") as enq:
+			onboarding.write_connection({"owner_key_retired": True})
 		self.assertEqual(_plugin_auth._agent_token(), "")
 		self.assertEqual(_plugin_auth._callback_key(), "")
-		self.resync.assert_called_once_with()
+		resyncs = [c for c in enq.call_args_list if c.args[0] == "jarvis.onboarding.run_key_resync"]
+		self.assertEqual(len(resyncs), 1)
+		self.resync.assert_not_called()
 
 	def test_retired_payload_with_a_malformed_key_clears_agent_token_and_queues_resync(self):
-		onboarding.write_connection({"owner_key_retired": True, "callback_key": "short"})
+		with patch("frappe.enqueue") as enq:
+			onboarding.write_connection({"owner_key_retired": True, "callback_key": "short"})
 		self.assertEqual(_plugin_auth._agent_token(), "")
-		self.resync.assert_called_once_with()
+		self.assertEqual(
+			len([c for c in enq.call_args_list if c.args[0] == "jarvis.onboarding.run_key_resync"]), 1
+		)
 
 	def test_retired_payload_inside_a_key_sync_queues_no_nested_job(self):
 		with (
 			patch.object(frappe.flags, "jarvis_key_fetch", True, create=True),
 			patch("jarvis.onboarding._shorten_key_resync_throttle") as shorten,
+			patch("frappe.enqueue") as enq,
 		):
 			onboarding.write_connection({"owner_key_retired": True})
 		self.assertEqual(_plugin_auth._agent_token(), "")
 		self.resync.assert_not_called()
+		enq.assert_not_called()
 		shorten.assert_called_once_with()
 
 	def test_not_retired_payload_keeps_agent_token(self):

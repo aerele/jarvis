@@ -627,9 +627,21 @@ describe("copied-site banner", () => {
 		);
 	});
 
+	it("uses the server's own sentence for the instance-changed banner when it sends one", () => {
+		const b = copyBanner({ instance_changed: true, message: "Server wording." });
+		expect(b.title).toBe("This site changed");
+		expect(b.message).toBe("Server wording.");
+	});
+
 	it("reads the instance-changed reason off the readiness verdict", async () => {
 		verdict({ ready: false, reason: "site_instance_changed" });
-		expect(await copyNoticeOf()).toEqual({ instance_changed: true });
+		expect(await copyNoticeOf()).toEqual({ instance_changed: true, message: "" });
+		forgetReady();
+		verdict({ ready: false, reason: "site_instance_changed", detail: "Server wording." });
+		expect(await copyNoticeOf()).toEqual({
+			instance_changed: true,
+			message: "Server wording.",
+		});
 		forgetReady();
 		verdict({ ready: true });
 		expect(await copyNoticeOf()).toBeNull();
