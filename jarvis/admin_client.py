@@ -2705,14 +2705,18 @@ def _with_proof(body: dict, proof_nonce: str | None) -> dict:
 	return body
 
 
-def verify_site(proof_nonce: str) -> dict:
+def verify_site(proof_nonce: str, instance_id: str | None = None) -> dict:
 	"""Ask admin to prove, through the tenant container, that this is the registered
-	site. Allowed on a blocked site: it is the way back from a false block."""
-	return _post(
-		path=_m("api.tenant.verify_site"),
-		body={"proof_nonce": proof_nonce},
-		allow_copy=True,
-	)
+	site. Allowed on a blocked site: it is the way back from a false block.
+
+	``instance_id`` is this site's own id (``""`` when it cannot be read). Admin that
+	supports it rebinds the agent's pinned id to it once the proof passes and answers
+	``pin_rebound``. An older admin drops the argument (Frappe ignores kwargs a
+	whitelisted method does not declare) and answers ``proved`` alone."""
+	body = {"proof_nonce": proof_nonce}
+	if instance_id is not None:
+		body["instance_id"] = instance_id
+	return _post(path=_m("api.tenant.verify_site"), body=body, allow_copy=True)
 
 
 def confirm_callback_key(key_digest: str) -> dict:

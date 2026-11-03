@@ -79,8 +79,38 @@ def record(session_key: str) -> bool:
 
 def record_instance_mismatch(session_key: str) -> bool:
 	"""Like ``record`` for a key this site DOES know but whose plugin is pinned to another
-	instance id (a database restored elsewhere). Own 24 h throttle; no known-key guard."""
+	instance id (a database restored elsewhere). Own 24 h throttle; no known-key guard.
+	Also marks the site "instance changed" (every time, not once a day) so chat readiness
+	says so until a Re-verify passes."""
+	mark_instance_changed()
 	return _record(_KEY_PREFIX + "mismatch:" + _digest(session_key), session_key, skip_known=False)
+
+
+def instance_changed() -> bool:
+	"""True while a plugin pinned to another instance id has been seen and no Re-verify
+	has passed since. Fails OPEN (False) on a read error."""
+	try:
+		return bool(frappe.db.get_single_value("Jarvis Settings", "instance_changed"))
+	except Exception:
+		return False
+
+
+def mark_instance_changed() -> None:
+	"""Never raises."""
+	try:
+		if not instance_changed():
+			frappe.db.set_single_value("Jarvis Settings", "instance_changed", 1, update_modified=False)
+	except Exception:
+		frappe.logger("jarvis.foreign_session").warning("could not mark instance changed", exc_info=True)
+
+
+def clear_instance_changed() -> None:
+	"""Never raises."""
+	try:
+		if instance_changed():
+			frappe.db.set_single_value("Jarvis Settings", "instance_changed", 0, update_modified=False)
+	except Exception:
+		frappe.logger("jarvis.foreign_session").warning("could not clear instance changed", exc_info=True)
 
 
 def _digest(session_key: str) -> str:

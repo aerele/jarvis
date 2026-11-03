@@ -172,6 +172,46 @@ class TestVouchSession(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertEqual(enq.call_count, 1)
 		self.assertEqual(enq.call_args.args[0], "jarvis.chat.foreign_session.report")
 
+	def _instance_changed(self) -> bool:
+		return bool(frappe.db.get_single_value(SETTINGS, "instance_changed"))
+
+	def test_readiness_reports_site_instance_changed_after_a_recorded_mismatch(self):
+		import jarvis.account
+
+		session_claims.claim(KEY)
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 0, update_modified=False)
+		with self._request(), patch("frappe.enqueue"):
+			vouch_session(pinned_instance_id="f" * 32)
+		self.assertTrue(self._instance_changed())
+		with patch("jarvis.admin_client.get_connection") as get_connection:
+			out = jarvis.account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "site_instance_changed")
+		get_connection.assert_not_called()
+
+	def test_the_instance_changed_marker_is_set_on_every_mismatch_not_once_a_day(self):
+		session_claims.claim(KEY)
+		with self._request(), patch("frappe.enqueue"):
+			vouch_session(pinned_instance_id="f" * 32)
+			frappe.db.set_single_value(SETTINGS, "instance_changed", 0, update_modified=False)
+			vouch_session(pinned_instance_id="f" * 32)  # report throttled, marker is not
+		self.assertTrue(self._instance_changed())
+
+	def test_a_matching_or_absent_pin_clears_the_instance_changed_marker(self):
+		session_claims.claim(KEY)
+		with self._request(), patch("frappe.enqueue"):
+			own = vouch_session()["instance_id"]
+			for pinned in (own, None):
+				frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
+				vouch_session(pinned_instance_id=pinned)
+				self.assertFalse(self._instance_changed())
+
+	def test_an_unknown_session_never_marks_the_instance_changed(self):
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 0, update_modified=False)
+		with self._request(key="agent:main:dashboard:never-seen"), patch("frappe.enqueue"):
+			vouch_session(pinned_instance_id="f" * 32)
+		self.assertFalse(self._instance_changed())
+
 	def test_vouch_lookup_error_is_503_never_known(self):
 		with (
 			self._request(),
