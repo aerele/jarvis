@@ -39,6 +39,9 @@ then `python -m jarvis.ci.runtime_branding --policy /tmp/jarvis-policy.json`.
 - Never push directly to any of these five branches; everything lands through a PR.
   The `version-N` rulesets enforce this today, and the `version-N-hotfix` rulesets should
   match them (PR required, no force-push, no deletion).
+- Before merging a stacked feature or fix PR, retarget it to `develop` and run its
+  checks against that base. A merge into a parent feature branch does not put the
+  change on `develop`. Backport only the reviewed trunk integration.
 - On a release PR the same check also fails unless `__version__` moved up and its major
   matches the line, so a release cannot ship without the bump.
 
