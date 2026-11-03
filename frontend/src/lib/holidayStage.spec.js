@@ -45,9 +45,16 @@ describe("stageEligible", () => {
 		);
 	});
 
+	it("a lead-up day the server marked as a scene day: the stage layout too", () => {
+		expect(stageEligible(ok({ answer: { ...DAY, kind: "leadup" } }))).toBe(true);
+	});
+
 	it.each([
 		["an ordinary day", { answer: { v: 1, kind: "none" } }],
-		["a lead-up day", { answer: { ...DAY, kind: "leadup" } }],
+		[
+			"a lead-up day without a scene (scene false)",
+			{ answer: { ...DAY, kind: "leadup", scene: false } },
+		],
 		["day 2 of a run (scene false)", { answer: { ...DAY, scene: false } }],
 		[
 			"a design with no scene in the loader map",
@@ -97,6 +104,7 @@ describe("withFestiveCard", () => {
 			cards
 		);
 		expect(withFestiveCard([], DAY)).toEqual([]);
+		expect(withFestiveCard(cards, { ...DAY, kind: "leadup" })).toBe(cards);
 		expect(withFestiveCard(cards, { ...DAY, occasion: "nope" })).toBe(cards);
 		withFestiveCard(cards, DAY);
 		expect(cards.at(-1).title).toBe("T4");

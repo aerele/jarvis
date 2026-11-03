@@ -12,7 +12,8 @@
 //     "look", dx, dy    the eyes move, in the mark's 56-unit tile space
 //     "deliver"         the item appears on the mark
 //     "happy"           the smile
-//     "swap", {instant} the greeting changes to the day greeting
+//     "swap", {instant} the greeting changes to the day greeting (a page on a lead-up day keeps
+//                       the normal greeting and the advance wish, and ignores the beat)
 //     "settle", mode    the scene is ending: the page fades its cards in
 //   onError(error): a failure inside a timer or a beat; the scene goes on and reaches rest.
 //   relayout(boxes): the page changed size while it plays; boxes as getBoxes().

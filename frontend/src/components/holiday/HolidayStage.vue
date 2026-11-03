@@ -40,7 +40,9 @@
 							></button>
 						</div>
 						<!-- Both greetings sit in one grid cell, so the swap never changes the
-						     height. The heading is named by its visible text alone. -->
+						     height. The heading is named by its visible text alone. On a
+						     lead-up day there is no day greeting at all: the heading stays
+						     the normal one and the advance wish is its own line below. -->
 						<h1
 							ref="h1El"
 							class="jv-stage-h1"
@@ -55,6 +57,7 @@
 								>{{ normalText }}</span
 							>
 							<span
+								v-if="!isLeadup"
 								:id="dayId"
 								class="jv-stage-t"
 								:class="swapClass(showDay)"
@@ -62,6 +65,9 @@
 								>{{ dayText }}</span
 							>
 						</h1>
+						<p v-if="leadup" class="jv-stage-leadup" data-testid="stage-leadup">
+							{{ leadup }}
+						</p>
 						<div class="jv-stage-sub">
 							<div
 								class="jv-stage-t"
@@ -71,6 +77,7 @@
 								<slot name="sub" />
 							</div>
 							<p
+								v-if="!isLeadup"
 								class="jv-stage-subd jv-stage-t"
 								:class="swapClass(showDay)"
 								:aria-hidden="!showDay"
@@ -95,10 +102,10 @@
 </template>
 
 <script setup>
-// The scene-day welcome layout: a big Jarvis and the greeting, with the scene's art on a
-// layer over it, above a bottom block (starter cards, Payment Calendar link, capability
-// catalog). ChatView uses this only when lib/holidayStage.js says so; otherwise the normal
-// WelcomeHero layout is untouched.
+// The scene-day welcome layout (a lead-up day, the first day of a run or a birthday): a big
+// Jarvis and the greeting, with the scene's art on a layer over it, above a bottom block
+// (starter cards, Payment Calendar link, capability catalog). ChatView uses this only when
+// lib/holidayStage.js says so; otherwise the normal WelcomeHero layout is untouched.
 //
 // Where the hero sits: at rest, at a 0.6 / 0.4 split of the space above the bottom block.
 // While a scene may still play it is centred in the whole stage instead, never above the
@@ -131,7 +138,7 @@ import { holidayTouch } from "@/holidayTouch";
 import { heroOffset, restLift, wornOverhangPx, wornTop } from "@/lib/holidayStage";
 import { sceneClearance } from "@/lib/holidayScenes";
 import { createHolidayScene } from "@/lib/useHolidayScene";
-import { DAY_SUB_LINE, headingFor } from "@jsshared/holiday/copy.mjs";
+import { DAY_SUB_LINE, headingFor, leadupLineFor } from "@jsshared/holiday/copy.mjs";
 import { heroFloorTop } from "@jsshared/holiday/scene-geometry.mjs";
 
 const props = defineProps({
@@ -256,7 +263,11 @@ const normalText = computed(() =>
 	name.value ? `${props.greeting}, ${name.value}` : props.greeting
 );
 const dayText = computed(() => headingFor(answer.value.occasion, name.value) || normalText.value);
-const showDay = computed(() => scene.text.swapped);
+// The advance wish on a lead-up day (null otherwise). Before the day the heading never
+// swaps to "Happy <occasion>" and the day sub-line is not rendered, whatever the scene does.
+const isLeadup = computed(() => answer.value.kind === "leadup");
+const leadup = computed(() => (isLeadup.value ? leadupLineFor(answer.value.occasion) : null));
+const showDay = computed(() => !isLeadup.value && scene.text.swapped);
 // A swap fades in; "instant" (rest, or a settle) has no motion at all.
 const swapClass = (on) => ({ "is-off": !on, "is-instant": scene.text.instant });
 
@@ -431,6 +442,13 @@ onBeforeUnmount(() => {
 	flex-direction: column;
 	align-items: center;
 	padding: 12px 32px 16px;
+}
+/* The advance wish reads like WelcomeHero's .jv-hero-leadup (pinned equal in the spec). */
+.jv-stage-leadup {
+	font-size: 15px;
+	color: var(--text-2);
+	line-height: 1.5;
+	margin: 12px 0 0;
 }
 /* The day sub-line looks like the orienting line ChatView renders in the slot. */
 .jv-stage-subd {
