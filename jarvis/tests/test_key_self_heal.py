@@ -236,6 +236,8 @@ class TestErrorLogCarriesNoSecrets(JarvisSettingsSnapshot, FrappeTestCase):
 		titles = {
 			"callback key resync failed",
 			"callback key resync: enqueue failed",
+			"callback key confirm failed",
+			"callback key confirm: enqueue failed",
 			"site_pin: pin failed",
 			"site_pin: status read failed",
 			"vouch_session: lookup failed",

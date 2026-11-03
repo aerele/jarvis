@@ -2715,6 +2715,17 @@ def verify_site(proof_nonce: str) -> dict:
 	)
 
 
+def confirm_callback_key(key_digest: str) -> dict:
+	"""Tell admin this site stored the callback key, by digest (see
+	``onboarding.callback_key_digest``). Not allowed on a flagged copy: only the real
+	site confirms. An admin without the endpoint answers Frappe's missing-method 417
+	(``is_method_not_found``); the caller treats that as "not supported yet"."""
+	return _post(
+		path=_m("api.tenant.confirm_callback_key"),
+		body={"key_digest": key_digest},
+	)
+
+
 def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S, allow_copy: bool = False) -> dict:
 	"""Authenticated POST. Prefers a short-lived OAuth bearer token (password
 	grant, cached in Redis) and falls back to the legacy native
