@@ -94,6 +94,10 @@ def _insert_one(
 	doc = build_doc(doctype, values)
 	if ignore_mandatory:
 		doc.flags.ignore_mandatory = True
+	if doctype == "Landed Cost Voucher":
+		from jarvis.tools._lcv_source_tax import gate_lcv
+
+		gate_lcv(doc, lock=True)
 	doc.insert()  # runs DocType validate() + on_insert hooks; sets autoname
 	return doc
 
@@ -114,6 +118,9 @@ def build_doc(doctype: str, values: dict) -> "frappe.model.document.Document":
 	cast_numbers(doc)
 	apply_tax_template(doc)
 	_set_title_from_title_field(doc)
+	from jarvis.tools._client_defaults import landed_cost_receipt_details
+
+	landed_cost_receipt_details(doc)
 	return doc
 
 
