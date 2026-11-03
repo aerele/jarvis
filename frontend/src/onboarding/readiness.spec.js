@@ -618,6 +618,23 @@ describe("copied-site banner", () => {
 		expect(copyBanner(null)).toBeNull();
 	});
 
+	it("says the site changed, with its own wording, when the identity changed", () => {
+		const b = copyBanner({ instance_changed: true });
+		expect(b.tone).toBe("warning");
+		expect(b.title).toBe("This site changed");
+		expect(b.message).toBe(
+			"Jarvis paused because this site's identity changed, for example after a restore or a move. Re-verify to reconnect Jarvis here."
+		);
+	});
+
+	it("reads the instance-changed reason off the readiness verdict", async () => {
+		verdict({ ready: false, reason: "site_instance_changed" });
+		expect(await copyNoticeOf()).toEqual({ instance_changed: true });
+		forgetReady();
+		verdict({ ready: true });
+		expect(await copyNoticeOf()).toBeNull();
+	});
+
 	it("reads the notice off the readiness verdict", async () => {
 		verdict({
 			ready: false,
