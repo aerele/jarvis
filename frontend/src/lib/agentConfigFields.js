@@ -11,7 +11,7 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), the Fixed Asset and FEFO settings, and the GRN Hygiene
+ *     CRITICAL fix, they are NOT flat top-level keys), the payroll baseline, Fixed Asset and FEFO settings, and the GRN Hygiene
  *     auditor reads its reviewer settings under `grn_hygiene`. GST has flat
  *     turnover and HSN exclusion settings; Deposit uses its typed `deposit` object. Rendered only
  *     when the listing's own `config_keys` (agents_api.py get_agent,
@@ -218,6 +218,34 @@ export const CONFIG_FIELD_SET = [
 		label: "Rounding step",
 		type: "number",
 		help: "Step used to detect round-number plugs",
+	},
+	{
+		key: "baseline_hrms_reviewer",
+		path: "baseline_hrms.reviewer",
+		label: "Payroll reviewer",
+		type: "text",
+		help: "Name the reviewer for this payroll activity report.",
+	},
+	{
+		key: "baseline_hrms_reviewer_capacity",
+		path: "baseline_hrms.reviewer_capacity",
+		label: "Payroll reviewer role",
+		type: "text",
+		help: "State the reviewer's role or capacity for this report.",
+	},
+	{
+		key: "baseline_hrms_history_from",
+		path: "baseline_hrms.history_from",
+		label: "Retained payroll history starts",
+		type: "date",
+		help: "The first date for which the owner says payroll records are retained.",
+	},
+	{
+		key: "baseline_hrms_test_declaration",
+		path: "baseline_hrms.test_declaration",
+		label: "Payroll test declaration",
+		type: "text",
+		help: "Optional text shown with the payroll activity report.",
 	},
 	{
 		key: "fefo_reviewer",
