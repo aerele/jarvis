@@ -5,7 +5,7 @@ Spec: ``docs/superpowers/specs/2026-08-16-role-profile-agents-design.md``.
 Two independent axes, both curated data (spec §5), never runtime discovery:
 
 * **Tool tier**: the jarvis-plane role decides ``full`` (today's 100 tools)
-  vs ``standard`` (71 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
+  vs ``standard`` (72 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
   list). Spec §3 sized these 68/26; ``session_status`` was later pulled to the
   drop list (denied fleet-wide for the white-label leak, not a tier call), and
   ``memory_get`` / ``memory_search`` were pulled to the drop list (native
@@ -87,7 +87,7 @@ STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 	}
 )
 
-# The full 100-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
+# The full 101-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
 # sorted (spec §2 evidence capture: ~/.claude/jobs/bce488ac/tmp/postfix-cap.jsonl).
 # An allow list must be explicit here: deriving it at runtime from a live
 # agent container is not possible bench-side.
@@ -132,6 +132,7 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__get_workflow_transitions",
 	"jarvis__list_app_modules",
 	"jarvis__preview_doc",
+	"jarvis__preview_landed_cost_voucher",
 	"jarvis__preview_import",
 	"jarvis__query",
 	"jarvis__query_file",
