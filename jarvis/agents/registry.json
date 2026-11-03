@@ -1679,7 +1679,7 @@
       "nature": "auditor",
       "delivery": "delegate",
       "version": "0.5.0",
-      "status": "Coming Soon",
+      "status": "Published",
       "description": "Checks selected submitted Jarvis physical-count facts against book stock at the saved count time. The protected service keeps material lines together in one finding per count and shows the scope, controls and source links. Read-only; it does not post stock adjustments.",
       "tools_required": [
         "jarvis__run_stock_variance_evaluation"
@@ -1714,6 +1714,7 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
+      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
       },

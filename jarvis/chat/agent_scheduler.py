@@ -466,13 +466,17 @@ def _sweep_one(row, now, seen: set) -> None:
 			_advance(row, now)
 			return
 
-	from jarvis.chat.stock_variance_scope import configuration_issues as stock_issues, is_stock_variance
+	from jarvis.chat.stock_variance_scope import configuration_issues as stock_issues
+	from jarvis.chat.stock_variance_scope import is_stock_variance
 
 	if is_stock_variance(row.agent):
 		with impersonate(run_as):
 			issues = stock_issues(row.config or "{}")
 		if issues:
-			_record_failed(row, "scheduled run skipped: complete the Stock Variance company, Warehouse scope and reviewer in Configure")
+			_record_failed(
+				row,
+				"scheduled run skipped: complete the Stock Variance company, Warehouse scope and reviewer in Configure",
+			)
 			_advance(row, now)
 			return
 
@@ -1450,7 +1454,8 @@ def _launch_audit(
 		with impersonate(run_as_user):
 			require_configuration(inst.config or "{}")
 
-	from jarvis.chat.stock_variance_scope import is_stock_variance, require_configuration as require_stock_configuration
+	from jarvis.chat.stock_variance_scope import is_stock_variance
+	from jarvis.chat.stock_variance_scope import require_configuration as require_stock_configuration
 
 	if is_stock_variance(inst.agent):
 		from jarvis._session import impersonate
@@ -2203,6 +2208,7 @@ def _stock_variance_assessment_config(validated_config: dict) -> dict:
 	require_configuration validates the input before this helper is called.
 	"""
 	return {"stock_variance": validated_config["stock_variance"]}
+
 
 def _sanitize_delegated_engagement_config(listing, engagement_config: dict | None) -> dict:
 	"""Return the safe immutable config snapshot for a delegate run.
