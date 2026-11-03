@@ -164,6 +164,9 @@ class TestCanvasUsesPluginRoute(FrappeTestCase):
 
 		with (
 			patch("frappe.get_single", return_value=settings),
+			# The hotfix runs a FEFO artifact-scope proof first; this test is about the
+			# canvas signing, so let the proof pass.
+			patch("jarvis.chat.agent_scope.assert_fefo_message_artifact_scope"),
 			patch("frappe.db.get_value", side_effect=fake_get_value),
 			patch("jarvis.chat.canvas.persist_canvases", return_value=[]) as persist,
 			patch("jarvis.chat.turn_handler._publish_to_user"),
@@ -186,6 +189,9 @@ class TestMediaUsesDeviceBearer(FrappeTestCase):
 		with (
 			patch("frappe.get_single", return_value=settings),
 			patch("frappe.utils.password.get_decrypted_password", get_decrypted_password),
+			# The hotfix runs a FEFO artifact-scope proof first; this test is about the
+			# media bearer, so let the proof pass.
+			patch("jarvis.chat.agent_scope.assert_fefo_message_artifact_scope"),
 			patch("frappe.db.get_value", return_value=""),
 			patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
 			patch("jarvis.chat.generated_media.seed_media", return_value=[]) as seed,
