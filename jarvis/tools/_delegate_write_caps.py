@@ -98,11 +98,29 @@ def _refuse_non_operator(cap: dict, operation: str, doctype: str) -> None:
 		)
 
 
+def enforce_closed_agent_direct_write(operation: str, doctype: str) -> dict | None:
+	"""Refuse a closed delegate before a generic write can touch ERP state.
+
+	The capability resolver covers both legacy live-listing contracts and launch
+	snapshots. Ordinary delegates still get the exact old behavior; only a
+	code-owned closed slug is refused here. Call this before ``get_doc``, meta
+	mutation, submit/cancel hooks, or workflow dispatch.
+	"""
+	cap = resolve_delegate()
+	if cap is None:
+		return None
+	from jarvis.chat.agent_closure import direct_write_refusal
+
+	if refusal := direct_write_refusal(cap.get("agent"), operation, doctype):
+		raise PermissionDeniedError(refusal)
+	return cap
+
+
 def enforce_create(doctype: str) -> None:
 	"""R5-J9 gate for a delegate create. No-op for non-delegate callers. A create is
 	inherently a draft (``docstatus`` is a refused protected field on the way in), so
 	the docstatus==0 constraint is structural; there is no owner constraint on create."""
-	cap = resolve_delegate()
+	cap = enforce_closed_agent_direct_write("create", doctype)
 	if cap is None:
 		return
 	_refuse_non_operator(cap, "create", doctype)
@@ -119,7 +137,7 @@ def enforce_update(doctype: str, name: str) -> None:
 	row it owns (the run-as identity). Enforced BEFORE Frappe permission checks — the
 	docstatus/owner probe uses a permission-agnostic ``db.get_value`` so the contract
 	boundary is decided independently of the run-as user's roles."""
-	cap = resolve_delegate()
+	cap = enforce_closed_agent_direct_write("update", doctype)
 	if cap is None:
 		return
 	_refuse_non_operator(cap, "update", doctype)

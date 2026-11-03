@@ -14,7 +14,19 @@ from jarvis.exceptions import JarvisError
 
 def dispatch(session_key: str, tool: str, raw_args, call_id: str) -> dict:
 	from jarvis import api
+	from jarvis.chat.agent_closure import assert_session_dispatch_allowed
 	from jarvis.tools import _agent_run_ctx
+
+	# A persisted collaboration binding can outlive its ordinary auth/session
+	# row. Check the immutable historical bearer before callback authorization,
+	# claims, or any source lookup so a closed agent cannot reach _run_tool
+	# through the shared dispatch path. Preserve the close gate's specific
+	# no-action refusal instead of translating it to the generic shared refusal.
+	try:
+		assert_session_dispatch_allowed(session_key)
+	except frappe.PermissionError as exc:
+		frappe.local.response.http_status_code = 403
+		return api._error("PermissionError", str(exc))
 
 	try:
 		with callback_scope(session_key, tool, call_id) as permit:
