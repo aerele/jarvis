@@ -594,6 +594,72 @@ class TestReverify(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertTrue(out["blocked"])
 		self.assertEqual(frappe.db.get_single_value(SETTINGS, "paired_site"), "other.site")
 
+	def test_reverify_sends_this_sites_instance_id(self):
+		from jarvis.chat import site_identity
+
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}) as vs:
+			site_pin.reverify()
+		self.assertEqual(vs.call_args.kwargs["instance_id"], site_identity.instance_id())
+
+	def test_reverify_returns_pin_rebound(self):
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True, "pin_rebound": True}):
+			out = site_pin.reverify()
+		self.assertTrue(out["proved"])
+		self.assertTrue(out["pin_rebound"])
+
+	def test_reverify_against_an_old_admin_reports_no_rebind(self):
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}):
+			out = site_pin.reverify()
+		self.assertTrue(out["proved"])
+		self.assertFalse(out["pin_rebound"])
+
+	def test_reverify_clears_the_instance_changed_record_when_proved(self):
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}):
+			site_pin.reverify()
+		self.assertFalse(frappe.db.get_single_value(SETTINGS, "instance_changed"))
+
+	def test_reverify_keeps_the_instance_changed_record_when_not_proved(self):
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
+		err = AdminAuthError("no", status_code=403, code="SiteProofFailed")
+		with patch("jarvis.admin_client.verify_site", side_effect=err):
+			out = site_pin.reverify()
+		self.assertFalse(out["proved"])
+		self.assertFalse(out["pin_rebound"])
+		self.assertTrue(frappe.db.get_single_value(SETTINGS, "instance_changed"))
+
+	def test_reverify_admin_unreachable_returns_not_proved_with_reason(self):
+		from jarvis.exceptions import AdminRateLimitedError, AdminUnreachableError
+
+		for exc in (
+			AdminUnreachableError("admin 503", status_code=503),
+			AdminUnreachableError("connection refused"),
+			AdminRateLimitedError("slow down"),
+		):
+			with self.subTest(exc=type(exc).__name__, msg=str(exc)):
+				with patch("jarvis.admin_client.verify_site", side_effect=exc):
+					out = site_pin.reverify()
+				self.assertFalse(out["proved"])
+				self.assertFalse(out["pin_rebound"])
+				self.assertEqual(out["error"], "unreachable")
+				self.assertTrue(out["blocked"])
+
+	def test_a_normal_answer_carries_no_error(self):
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}):
+			self.assertNotIn("error", site_pin.reverify())
+
+	def test_verify_site_sends_instance_id_only_when_given(self):
+		with patch.object(admin_client, "_post", return_value={"proved": True}) as post:
+			admin_client.verify_site("n" * 32)
+			self.assertEqual(post.call_args.kwargs["body"], {"proof_nonce": "n" * 32})
+			admin_client.verify_site("n" * 32, instance_id="ab" * 16)
+			self.assertEqual(
+				post.call_args.kwargs["body"], {"proof_nonce": "n" * 32, "instance_id": "ab" * 16}
+			)
+			admin_client.verify_site("n" * 32, instance_id="")
+			self.assertEqual(post.call_args.kwargs["body"]["instance_id"], "")
+			self.assertTrue(post.call_args.kwargs["allow_copy"])
+
 	def test_reverify_requires_system_manager(self):
 		with (
 			patch("frappe.only_for", side_effect=frappe.PermissionError),
