@@ -62,6 +62,9 @@ def amend_doc(doctype: str, name: str | None = None, names: list | None = None) 
 def _amend_one(doctype: str, name: str) -> "frappe.model.document.Document":
 	"""Guards + amend for ONE doc. Returns the new Draft Document. Shared by
 	the single and batch paths so the guards never drift."""
+	from jarvis.tools._delegate_write_caps import enforce_closed_agent_direct_write
+
+	enforce_closed_agent_direct_write("amend", doctype)
 	meta = frappe.get_meta(doctype)
 	if not meta.is_submittable:
 		raise InvalidArgumentError(

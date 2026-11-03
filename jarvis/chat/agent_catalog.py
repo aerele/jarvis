@@ -82,6 +82,34 @@ def _load_registry() -> dict:
 	return frappe.get_file_json(_REGISTRY_PATH)
 
 
+def _is_coming_soon_no_runtime(agent) -> bool:
+	"""True for the reviewed no-runtime teaser shape in the bundled registry."""
+	return bool(
+		isinstance(agent, dict)
+		and agent.get("status") == "Coming Soon"
+		and agent.get("tools_required") == []
+		and agent.get("tools_allow") == []
+		and agent.get("doctypes_required") == []
+		and agent.get("writes") is None
+	)
+
+
+def registry_is_coming_soon_no_runtime(agent_slug: str) -> bool:
+	"""Whether a bundled agent is a fixed no-runtime Coming Soon teaser.
+
+	A mutable marketplace listing cannot make this reviewed bundle runnable. The
+	strict registry shape deliberately leaves ordinary Coming Soon agents with a
+	real reviewed tool surface alone.
+	"""
+	slug = (agent_slug or "").strip()
+	if not slug:
+		return False
+	for agent in _load_registry().get("agents") or []:
+		if isinstance(agent, dict) and (agent.get("agent_slug") or "").strip() == slug:
+			return _is_coming_soon_no_runtime(agent)
+	return False
+
+
 # --------------------------------------------------------------------------- #
 # sync
 # --------------------------------------------------------------------------- #
@@ -160,6 +188,10 @@ def sync_agent_listings() -> dict:
 			# (company/fiscal_year/from_date/to_date, which stay flat). Drives
 			# ConfigForm.vue's per-agent field set; [] for an agent with none.
 			"config_keys": frappe.as_json(a.get("config_keys") or []),
+			# An evidence boundary is declared only by the reviewed bundled registry.
+			# Missing or malformed metadata stays false so a mutable Listing row can
+			# never opt a delegate into record-scope injection.
+			"supports_record_scope": 1 if a.get("supports_record_scope") is True else 0,
 			# A2/A16: the delegate auditor's OPAQUE rule-token set, id-only. The
 			# bench needs it to validate a finding's rule in record_agent_run
 			# without ever holding a rule body/threshold. Empty for operators /
@@ -191,6 +223,12 @@ def sync_agent_listings() -> dict:
 			# Minimum model capability the bundle declares ({"tier": ...}); None when absent.
 			"min_model": frappe.as_json(a["min_model"]) if isinstance(a.get("min_model"), dict) else None,
 		}
+		# A reviewed server closure outranks bundled display metadata. This protects
+		# a future registry re-vendor from re-publishing or re-advertising an agent
+		# before it has a typed safe runtime path.
+		from jarvis.chat.agent_closure import closed_catalog_values
+
+		values = closed_catalog_values(slug, values)
 
 		if frappe.db.exists(LISTING, slug):
 			doc = frappe.get_doc(LISTING, slug)
@@ -313,6 +351,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	gates)."""
 	# Lazy import — agents_api imports build_agent_push_payload from this module
 	# at module level, so a top-level back-import would be circular.
+	from jarvis.chat.agent_closure import is_closed_agent, is_closed_installation
 	from jarvis.chat.agents_api import _allowed_roles_map, _allowed_users_map, _is_allowed
 
 	# The whole catalog's grants in TWO queries, shared by both legs. The install
@@ -345,6 +384,10 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		for a in (_load_registry().get("agents") or [])
 		if (a.get("agent_slug") or "").strip()
 	}
+	# A mutable listing must never turn a reviewed no-runtime teaser into a
+	# provisioned delegate. This final payload filter also contains legacy or
+	# manually modified DB rows that bypass controller validation.
+	closed_slugs = {slug for slug, agent in reg_by_slug.items() if _is_coming_soon_no_runtime(agent)}
 
 	filters = {"enabled": 1}
 	if owner:
@@ -352,7 +395,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	installs = frappe.get_all(
 		"Jarvis Agent Installation",
 		filters=filters,
-		fields=["agent", "owner", "installable", "run_as_user"],
+		fields=["agent", "owner", "installable", "run_as_user", "installed_version"],
 		# ``agent`` alone is not a total order once two owners install the same
 		# agent; the ``name`` tiebreak makes the iteration — and therefore which
 		# install wins the de-dupe below — stable across runs. The payload is a
@@ -370,6 +413,8 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	# on either therefore ships exactly the same set of slugs.
 	seen_agents: set[str] = set()
 	for row in installs:
+		if row.agent in closed_slugs or is_closed_installation(row):
+			continue
 		# De-dupe by AGENT. An install is per-(owner, agent) but the container's
 		# agent_skills namespace is per-slug, so two users who each install AND
 		# enable the same agent produce two rows for ONE slug. Admin REJECTS a
@@ -471,6 +516,8 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 			order_by="name asc",
 		)
 		for lst in allowed_listings:
+			if is_closed_agent(lst.name) or lst.name in closed_slugs:
+				continue
 			if lst.name in seen_agents or lst.name not in granted:
 				continue
 			# Operator overlay: a teaser (coming-soon) / hidden (withdrawn) agent is not
@@ -597,6 +644,10 @@ def registry_tools_allow(agent_slug: str) -> list[str]:
 	contract that authorises NOTHING, which is the intended fail-closed outcome for
 	a run whose bundle the bench cannot describe."""
 	slug = (agent_slug or "").strip()
+	from jarvis.chat.agent_closure import is_closed_agent
+
+	if is_closed_agent(slug):
+		return []
 	if not slug:
 		return []
 	for a in _load_registry().get("agents") or []:
@@ -606,6 +657,21 @@ def registry_tools_allow(agent_slug: str) -> list[str]:
 				return []
 			return [str(t).strip() for t in declared if str(t or "").strip()]
 	return []
+
+
+def registry_supports_record_scope(agent_slug: str) -> bool:
+	"""Whether the bundled agent declaration explicitly supports ``record_scope``.
+
+	The registry is a reviewed deploy artifact. Listing rows are mutable local
+	state and must not enable a boundary that the private bundle did not declare.
+	"""
+	slug = (agent_slug or "").strip()
+	if not slug:
+		return False
+	for agent in _load_registry().get("agents") or []:
+		if (agent.get("agent_slug") or "").strip() == slug:
+			return agent.get("supports_record_scope") is True
+	return False
 
 
 def after_migrate() -> None:

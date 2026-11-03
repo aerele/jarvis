@@ -56,9 +56,22 @@ import time
 
 import frappe
 
+from jarvis._http import constant_time_equal
+
 _MAX_CLOCK_SKEW_S = 60
 _NONCE_TTL_S = 120
 _NONCE_REDIS_PREFIX = "jarvis:plugin_nonce:"
+
+# The normal plugin channel can make many read calls in a turn.  The private
+# input recovery channel has exactly one job: close a Deposit run after the
+# source transport cannot finish.  Keep its budget separate so a normal-channel
+# 429 cannot strand that run, while a leaked bearer cannot use recovery as a
+# second high-volume channel.
+_NORMAL_RATE_PREFIX = "jarvis:plugin_rl:"
+_NORMAL_RATE_PER_MINUTE = 60
+_RECOVERY_RATE_PREFIX = "jarvis:plugin_recovery_rl:"
+_RECOVERY_RATE_PER_MINUTE = 3
+_RATE_WINDOW_S = 60
 
 # Throttle for the unsigned-reject audit row. See the module docstring.
 _UNSIGNED_AUDIT_GATE_PREFIX = "jarvis:plugin_unsigned_audit:"
@@ -92,6 +105,22 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 	``body_bytes`` is the raw request body needed for HMAC validation -
 	only used when the optional signature headers are present.
 	"""
+	return _validate_plugin_request(body_bytes, recovery=False)
+
+
+def validate_private_input_recovery_request(body_bytes: bytes) -> str:
+	"""Validate a signed Deposit private-input recovery callback.
+
+	This keeps the bearer, session, HMAC, clock, and nonce checks identical to
+	:func:`validate_plugin_request`.  Only its tiny rate bucket differs.  A source
+	call can therefore hit the ordinary tool budget and still close its own run,
+	but a recovery callback cannot become a general-purpose tool channel.
+	"""
+	return _validate_plugin_request(body_bytes, recovery=True)
+
+
+def _validate_plugin_request(body_bytes: bytes, *, recovery: bool) -> str:
+	"""Shared signed plugin validator with a fixed internal rate profile."""
 	headers = _safe_headers()
 
 	# Caller IP is read once and threaded through every audit row in
@@ -119,10 +148,10 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			code="ServiceUnavailable",
 			message="plugin auth not configured on this bench",
 		)
-	if not hmac.compare_digest(presented_token, expected_token):
+	if not constant_time_equal(presented_token, expected_token):
 		_audit_log(
 			"plugin_auth: bearer mismatch",
-			f"remote_ip={caller_ip!r} session={headers.get('X-Jarvis-Session', '')!r}",
+			f"remote_ip={caller_ip!r} session_hash={_log_hash(headers.get('X-Jarvis-Session', ''))}",
 		)
 		raise PluginAuthError(
 			http_status=401,
@@ -173,7 +202,7 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 		if _should_audit_unsigned_reject(session_key):
 			_audit_log(
 				"plugin_auth: unsigned request rejected",
-				f"remote_ip={caller_ip!r} session={session_key!r}; no signature headers",
+				f"remote_ip={caller_ip!r} session_hash={_log_hash(session_key)}; no signature headers",
 			)
 		raise PluginAuthError(
 			http_status=400,
@@ -183,10 +212,9 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			"agent plugin to a signing build.",
 		)
 
-	# 5. Rate limit per session_key (after signature validation so the
-	# rate-limit counter is for *valid* callers; spammers exhaust their
-	# own keys, not the counter we'd care about for legitimate use).
-	_enforce_rate_limit(session_key)
+	# 5. Rate-limit only after every cryptographic check. The caller selects no
+	# profile: the public wrappers above choose one fixed bucket each.
+	_enforce_rate_limit(session_key, recovery=recovery)
 
 	return session_key
 
@@ -304,8 +332,11 @@ def _validate_signature(
 		timestamp_s=ts,
 	)
 	expected = hmac.new(token.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
-	if not hmac.compare_digest(expected, signature):
-		_audit_log("plugin_auth: signature mismatch", f"session={session_key!r} nonce_prefix={nonce[:8]!r}")
+	if not constant_time_equal(expected, signature):
+		_audit_log(
+			"plugin_auth: signature mismatch",
+			f"session_hash={_log_hash(session_key)} nonce_hash={_log_hash(nonce)}",
+		)
 		raise PluginAuthError(
 			http_status=401,
 			code="AuthenticationError",
@@ -329,7 +360,8 @@ def _validate_signature(
 		return
 	if not got:
 		_audit_log(
-			"plugin_auth: nonce replay rejected", f"session={session_key!r} nonce_prefix={nonce[:8]!r}"
+			"plugin_auth: nonce replay rejected",
+			f"session_hash={_log_hash(session_key)} nonce_hash={_log_hash(nonce)}",
 		)
 		raise PluginAuthError(
 			http_status=401,
@@ -338,11 +370,12 @@ def _validate_signature(
 		)
 
 
-def _enforce_rate_limit(session_key: str) -> None:
-	"""60 calls/min per session_key. The 60s tick window resets on first
-	call so a quiet session isn't penalized for past activity."""
+def _enforce_rate_limit(session_key: str, *, recovery: bool = False) -> None:
+	"""Apply the fixed normal or private-input recovery budget for one session."""
 	cache = frappe.cache()
-	key = f"jarvis:plugin_rl:{session_key}"
+	prefix = _RECOVERY_RATE_PREFIX if recovery else _NORMAL_RATE_PREFIX
+	limit = _RECOVERY_RATE_PER_MINUTE if recovery else _NORMAL_RATE_PER_MINUTE
+	key = f"{prefix}{session_key}"
 	try:
 		count = cache.incr(key)
 	except Exception:
@@ -350,16 +383,21 @@ def _enforce_rate_limit(session_key: str) -> None:
 		return
 	if count == 1:
 		try:
-			cache.expire(key, 60)
+			cache.expire(key, _RATE_WINDOW_S)
 		except Exception:
 			pass
-	if count > 60:
-		_audit_log("plugin_auth: rate limit exceeded", f"session={session_key!r} count={count}")
+	if count > limit:
+		_audit_log("plugin_auth: rate limit exceeded", f"session_hash={_log_hash(session_key)} count={count}")
 		raise PluginAuthError(
 			http_status=429,
 			code="RateLimitExceededError",
 			message="plugin-auth rate limit exceeded for this session",
 		)
+
+
+def _log_hash(value) -> str:
+	"""Correlate refusals without forwarding the session bearer or caller text."""
+	return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if isinstance(value, str) else "absent"
 
 
 def _audit_log(title: str, detail: str) -> None:

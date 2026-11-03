@@ -14,7 +14,19 @@ from jarvis.exceptions import JarvisError
 
 def dispatch(session_key: str, tool: str, raw_args, call_id: str) -> dict:
 	from jarvis import api
+	from jarvis.chat.agent_closure import assert_session_dispatch_allowed
 	from jarvis.tools import _agent_run_ctx
+
+	# A persisted collaboration binding can outlive its ordinary auth/session
+	# row. Check the immutable historical bearer before callback authorization,
+	# claims, or any source lookup so a closed agent cannot reach _run_tool
+	# through the shared dispatch path. Preserve the close gate's specific
+	# no-action refusal instead of translating it to the generic shared refusal.
+	try:
+		assert_session_dispatch_allowed(session_key)
+	except frappe.PermissionError as exc:
+		frappe.local.response.http_status_code = 403
+		return api._error("PermissionError", str(exc))
 
 	try:
 		with callback_scope(session_key, tool, call_id) as permit:
@@ -38,14 +50,19 @@ def dispatch(session_key: str, tool: str, raw_args, call_id: str) -> dict:
 			)
 			if cached and cached.tool_result:
 				complete(permit, cached.name)
-				stored = json.loads(cached.tool_result)
-				from jarvis.chat.source_receipts import SOURCE_TOOLS, is_source_receipt
+				from jarvis.chat.source_receipts import SOURCE_TOOLS
 
-				if tool in SOURCE_TOOLS and is_source_receipt(stored):
+				# Old receipts can predate the source-reference marker.  Do not replay
+				# any cached result for a source-reading tool: an old result can contain
+				# source rows or file-page bytes that the current receipt projection
+				# would remove. Check before JSON parsing too: the old value can be
+				# arbitrarily large and is neither needed nor safe to deserialize here.
+				if tool.removeprefix("jarvis__") in SOURCE_TOOLS:
 					return api._error(
 						"SourceReadRequired",
 						"Source values are not retained. Make a new read call; current permissions and source versions will be checked again.",
 					)
+				stored = json.loads(cached.tool_result)
 				return scrub_for_share(stored)
 			existing = frappe.db.get_value(
 				"Jarvis Pending Action", {"collaboration_call_key": call_key(permit)}, "status"

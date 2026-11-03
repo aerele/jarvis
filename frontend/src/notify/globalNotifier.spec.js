@@ -155,9 +155,19 @@ describe("the fence does not touch the other signals", () => {
 			kind: "action:pending",
 			conversation: "conv-a",
 			tool: "jarvis__create_doc",
+			pending_card_safe: true,
 		});
 		socket.emit(terminal());
 		expect(useToasts().value).toHaveLength(2);
+	});
+
+	it("does not announce a raw or delayed pending frame", () => {
+		socket.emit({
+			kind: "action:pending",
+			conversation: "conv-a",
+			tool: "jarvis__create_doc",
+		});
+		expect(useToasts().value).toHaveLength(0);
 	});
 
 	it("stops signalling once detached", () => {
@@ -176,6 +186,7 @@ describe("dashboard-origin attention stays in Dashboard Builder", () => {
 			conversation: "conv-a",
 			origin_page: "dashboards",
 			tool: "jarvis__save_dashboard",
+			pending_card_safe: true,
 		});
 		expect(useToasts().value).toHaveLength(0);
 	});
@@ -186,6 +197,7 @@ describe("dashboard-origin attention stays in Dashboard Builder", () => {
 			conversation: "dash-conv",
 			origin_page: "dashboards",
 			tool: "jarvis__save_dashboard",
+			pending_card_safe: true,
 		});
 		expect(useToasts().value).toHaveLength(1);
 		useToasts().value[0].onClick();
