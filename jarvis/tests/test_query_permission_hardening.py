@@ -197,6 +197,45 @@ class TestChildReadThroughParentField(_NonAdmin):
 		scope.assert_called_once()
 
 
+class TestChildJoinedToAnotherParent(_NonAdmin):
+	"""A child joined to a DocType with no Table field for it (Sales Team on a
+	Quotation) is a wrong query, not a permission problem."""
+
+	OWNING = ["Customer", "Delivery Note", "Sales Order"]
+	ALIASES = {"q": ("Quotation", None), "so": ("Sales Order", None), "st": ("Sales Team", None)}
+
+	def _resolve(self, spec):
+		with (
+			patch.object(get_list_mod, "_child_table_parents", return_value=self.OWNING),
+			patch.object(get_list_mod, "_readable_child_parents", return_value=self.OWNING),
+			patch("frappe.has_permission", return_value=True),
+		):
+			return query_mod._child_scoping_parent("Sales Team", "st", spec, self.ALIASES)
+
+	def test_a_join_to_a_parent_without_the_table_names_the_real_parents(self):
+		spec = {"joins": [{"alias": "st", "doctype": "Sales Team", "on": {"st.parent": "q.name"}}]}
+		with self.assertRaisesRegex(
+			InvalidArgumentError, "'Quotation' has no 'Sales Team' table.*Sales Order"
+		):
+			self._resolve(spec)
+
+	def test_a_parenttype_naming_a_parent_without_the_table_is_refused_the_same_way(self):
+		spec = {
+			"joins": [{"alias": "st", "doctype": "Sales Team", "on": {"st.parent": "q.name"}}],
+			"where": [{"field": "st.parenttype", "op": "=", "value": "Quotation"}],
+		}
+		with self.assertRaisesRegex(InvalidArgumentError, "'Quotation' has no 'Sales Team' table"):
+			self._resolve(spec)
+
+	def test_a_join_to_an_owning_parent_still_scopes_to_it(self):
+		spec = {"joins": [{"alias": "st", "doctype": "Sales Team", "on": {"st.parent": "so.name"}}]}
+		self.assertEqual(self._resolve(spec), "Sales Order")
+
+	def test_no_signal_with_several_readable_parents_is_still_the_ambiguous_denial(self):
+		with self.assertRaisesRegex(PermissionDeniedError, "multiple parent DocTypes"):
+			self._resolve({})
+
+
 class TestQueryRowMasking(_NonAdmin):
 	"""Frappe 16 masks a ``mask=1`` field for a user without the mask permission.
 	The query tool builds rows with the query builder directly, so it masks them
