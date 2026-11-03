@@ -114,7 +114,7 @@ export function recordEvent(e) {
 			at,
 			read: false,
 		});
-	} else if (e.kind === "action:pending") {
+	} else if (e.kind === "action:pending" && e.pending_card_safe === true) {
 		push({
 			id: `dec:${e.token || e.run_id}`,
 			kind: "needs-decision",

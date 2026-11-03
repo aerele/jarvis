@@ -19,6 +19,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import pending_confirm
 from jarvis.chat.actions_api import apply_action, confirm_tool, dismiss_tool
+from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD
 from jarvis.chat.api import _next_seq
 from jarvis.chat.one_approval import create_key
 from jarvis.tests._pending_action_helpers import OWNER, PendingActionTestMixin, as_user
@@ -147,6 +148,23 @@ class TestOneApprovalPerCreate(PendingActionTestMixin, FrappeTestCase):
 		self.assertFalse(again.get("ok"))
 		self.assertEqual(again.get("outcome"), "superseded")
 		self.assertEqual(self.dates(), ["2026-10-29"])  # the edited date, once
+
+	def test_mapless_pending_card_cannot_block_a_real_draft_create(self):
+		"""A closed-agent cleanup cap can leave an old durable row behind.
+
+		The one-approval guard must not tell the person to confirm or discard that
+		hidden card. The actual draft save remains the observable recovery path.
+		"""
+		token = self.card(self.values("2026-11-05"))
+		frappe.db.set_value(PA, token, PENDING_ACTION_FENCE_FIELD, None, update_modified=False)
+		frappe.db.commit()
+
+		draft = self.draft()
+		result = self.save(draft)
+
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(self.status(token), "Pending")
+		self.assertEqual(self.dates(), ["2026-10-29"])
 
 	def test_card_confirmed_first_refuses_the_same_proposals_draft(self):
 		draft = self.draft()
