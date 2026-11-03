@@ -192,25 +192,15 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.1",
+      "version": "0.4.3",
       "status": "Published",
       "description": "Read-only pre-payroll integrity checks across your attendance and leave records: cross-references marked Attendance, biometric check-ins, approved Leave Applications, and leave balances per employee to surface unaccounted working days, leave taken without approval, check-in-vs-mark mismatches, and over-drawn balances before payroll runs. Reproducible; never marks attendance, approves leave, edits a balance, or touches payroll.",
-      "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
-      ],
+      "tools_required": ["jarvis__query"],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
-        "exec",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
         "Attendance",
@@ -219,7 +209,12 @@
         "Leave Ledger Entry",
         "Leave Allocation",
         "Employee",
-        "Holiday List"
+        "Holiday List",
+        "Company",
+        "Department",
+        "Holiday",
+        "Holiday List Assignment",
+        "Leave Type"
       ],
       "rule_tokens": [
         "ali-bal-5e63",
@@ -240,10 +235,11 @@
       },
       "default_allowed_roles": [],
       "validated_for_fy": null,
-      "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": ["attendance"],
+      "supports_record_scope": true
     },
     {
       "agent_slug": "bank-recon-operator",
@@ -1229,14 +1225,15 @@
       "delivery": "delegate",
       "version": "0.2.2",
       "status": "Published",
-      "description": "Read-only pre-close ledger scrutiny: scans your general ledger for postings worth a human look — uncleared suspense/clearing balances, dormant accounts that moved, balances on the wrong side of an account, round-number plugs, and possible duplicate manual journal entries. Isolates human-authored journals from system-generated ones. Hands your accountant a ranked, evidence-linked worklist and a dashboard. Never edits the ledger, never books a correction, never decides whether a flag is truly an error.",
+      "description": "Read-only pre-close ledger scrutiny: scans your general ledger for postings worth a human look — uncleared suspense/clearing balances, dormant accounts that moved, balances on the wrong side of an account, round-number postings, and possible duplicate manual journal entries. Isolates human-authored journals from system-generated ones. Hands your accountant a ranked, evidence-linked worklist and a dashboard. Never edits the ledger, never books a correction, never decides whether a flag is truly an error.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__query_report",
         "jarvis__get_doc",
-        "jarvis__get_balance_on"
+        "jarvis__get_balance_on",
+        "jarvis__get_engagement_config"
       ],
       "tools_allow": [
         "jarvis__query",
@@ -1245,6 +1242,7 @@
         "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
+        "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -1273,7 +1271,15 @@
       "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "materiality",
+        "suspense_accounts",
+        "subledger_owned_accounts",
+        "subledger_account_owner",
+        "chart_standard",
+        "suspense_confirmed"
+      ]
     },
     {
       "agent_slug": "msme-43bh-auditor",
@@ -1524,7 +1530,7 @@
       "delivery": "delegate",
       "version": "0.3.0",
       "status": "Published",
-      "description": "Read-only review of the visible tickets in one selected Helpdesk team. Checks SLA deadlines, assignment, first replies, recorded reopen activity, calendar age and policy gaps at a bench-stamped instant.",
+      "description": "Read-only review of the visible tickets in one selected Helpdesk team. Checks SLA deadlines, assignment, first replies, recorded status reopens, calendar age and policy gaps at a bench-stamped instant.",
       "tools_required": ["jarvis__get_my_access", "jarvis__query"],
       "tools_allow": [
         "jarvis__get_my_access",
@@ -1613,7 +1619,7 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027",
+      "validated_for_fy": null,
       "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"

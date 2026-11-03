@@ -483,6 +483,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(r2["created"], 0)  # nothing created the second time
 		published = set(frappe.get_all(LISTING, filters={"status": "Published"}, pluck="name"))
 		self.assertIn("close-auditor", published)
+		self.assertEqual(
+			frappe.db.get_value(LISTING, "attendance-leave-integrity-auditor", "version"),
+			"0.4.3",
+		)
 		# bank-recon-operator ships Published at 0.3.0 (proposals-only review).
 		self.assertEqual(frappe.db.get_value(LISTING, "bank-recon-operator", "status"), "Published")
 		# Every shipped agent is delegate and BODY-FREE: the proprietary SKILL must
@@ -566,6 +570,14 @@ class TestAgentsMarketplace(unittest.TestCase):
 			],
 			"grn-hygiene-auditor": ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
 			"statutory-payroll-deposit-status": ["deposit"],
+			"ledger-scrutiny-auditor": [
+				"materiality",
+				"suspense_accounts",
+				"subledger_owned_accounts",
+				"subledger_account_owner",
+				"chart_standard",
+				"suspense_confirmed",
+			],
 			"gst-return-prep-auditor": ["annual_aggregate_turnover", "same_hsn_rate_allowlist"],
 		}
 		for slug, config_keys in expected.items():
