@@ -441,7 +441,8 @@ def notify_user(user: str, row, kind: str, body: str) -> None:
 				"doctype": "Notification Log",
 				"for_user": user,
 				"type": "Alert",
-				"subject": f"{kind}: {row.skill_name}"[:140],
+				# The desk bell renders a subject as HTML.
+				"subject": f"{kind}: {frappe.utils.escape_html(row.skill_name)}"[:140],
 				"email_content": body,
 			}
 		).insert(ignore_permissions=True)

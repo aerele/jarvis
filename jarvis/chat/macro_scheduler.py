@@ -42,9 +42,13 @@ FAILED is retried 55 minutes later, not on every sweep (``_retry_later``). Model
 
 import calendar
 import datetime
+import itertools
+import re
 from traceback import format_tb
 
 import frappe
+from croniter import croniter
+from frappe import _
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 from frappe.utils.user import get_users_with_role
 
@@ -180,6 +184,8 @@ def run_due_macros() -> None:
 			"next_run_at",
 			# One-time schedules: the day (with the time, the slot the owner chose).
 			*(["schedule_date"] if once_ready() else []),
+			# Cron schedules: what decides the next slot when it is set.
+			*(["schedule_cron"] if cron_ready() else []),
 			# Before the migrate the column is not there: nothing is held.
 			*([HOLD_FIELD] if hold_fields_exist() else []),
 		],
@@ -572,6 +578,8 @@ def is_retry_pending(row, now=None) -> bool:
 	next_run_at = get_datetime(row.get("next_run_at"))
 	if not now < next_run_at <= add_to_date(now, seconds=_RETRY_AFTER_S):
 		return False
+	if uses_cron(row):
+		return not cron_matches(cron_lines(row.get("schedule_cron")), next_run_at)
 	secs = _time_to_seconds(row.get("schedule_time"))
 	return next_run_at.time() != datetime.time(secs // 3600, (secs % 3600) // 60)
 
@@ -587,14 +595,7 @@ def _stamp_last_run(m, now) -> None:
 def _next_occurrence(m, now) -> datetime.datetime:
 	"""The next slot strictly after ``now``. Taken from *now*, not from the slot being
 	handled, so even a long outage yields ONE next slot rather than a backfill storm."""
-	return compute_next_run(
-		m.get("schedule_frequency"),
-		m.get("schedule_time"),
-		from_dt=now,
-		weekday=m.get("schedule_weekday"),
-		day_of_month=m.get("schedule_day_of_month"),
-		schedule_date=m.get("schedule_date"),
-	)
+	return macro_next_run(m, now)
 
 
 def _consume_slot(m, now, *, stamp_last_run: bool = True) -> None:
@@ -871,7 +872,8 @@ def _notify_owner(m, reason: str) -> None:
 
 	macros.notify_owner(
 		m.owner,
-		subject=f"Scheduled macro did not run: {m.get('macro_name') or m.name}",
+		# The desk bell renders a subject as HTML.
+		subject=f"Scheduled macro did not run: {frappe.utils.escape_html(m.get('macro_name') or m.name)}",
 		body=reason,
 	)
 
@@ -949,6 +951,160 @@ def once_slot(schedule_date, schedule_time) -> datetime.datetime | None:
 		return None
 	secs = _time_to_seconds(schedule_time)
 	return datetime.datetime.combine(day, datetime.time(secs // 3600, (secs % 3600) // 60))
+
+
+# Frequencies that only a cron schedule can say. Daily, weekly and monthly may carry
+# one too (several times a day, several days); without one they keep the old fields.
+CRON_FREQUENCIES = ("hourly", "custom")
+# One line per distinct minute of the form's times, and the form allows six times.
+MAX_CRON_LINES = 6
+# The sweep in hooks.py looks for due macros every 5 minutes, so two runs closer than
+# that would merge into one. Keep it equal to the sweep's interval.
+MIN_GAP_MINUTES = 5
+# One element of a cron part, read the way the form's parser reads it
+# (frontend/src/lib/macroCron.js parseField): ``*`` or ``low`` or ``low-high``, then an
+# optional ``/step``. croniter also takes a sixth (seconds) part, "@daily" nicknames,
+# ``L``, reversed ranges and "n-n" ranges: none is a schedule the form can show, so all are refused.
+_CRON_ELEMENT = re.compile(r"^(?:\*|([0-9a-z]+)(?:-([0-9a-z]+))?)(?:/\d+)?$", re.I)
+_CRON_NAMES = {
+	name: number for number, name in enumerate(("sun", "mon", "tue", "wed", "thu", "fri", "sat"))
+} | {
+	name: number
+	for number, name in enumerate(
+		("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1
+	)
+}
+
+
+def cron_ready() -> bool:
+	"""``schedule_cron`` exists (see ``once_ready``: code can be served before the migrate)."""
+	return bool(frappe.get_meta(MACRO).has_field("schedule_cron"))
+
+
+def cron_lines(value) -> list[str]:
+	"""The cron expressions a ``schedule_cron`` value holds, one per line, each with its
+	parts single-spaced. Blank lines are dropped."""
+	return [" ".join(line.split()) for line in str(value or "").splitlines() if line.strip()]
+
+
+def uses_cron(m) -> bool:
+	"""Whether ``m`` (a row or a document) is timed by its cron schedule. A one-time
+	schedule never is: it runs on its date."""
+	return not is_once(m) and bool(cron_lines(m.get("schedule_cron")))
+
+
+def next_cron_run(lines: list[str], from_dt=None) -> datetime.datetime | None:
+	"""The earliest slot strictly after ``from_dt`` (default now) over all ``lines``, or
+	None when none of them ever comes round. Never raises, like ``compute_next_run``:
+	a line croniter cannot read is skipped."""
+	base = get_datetime(from_dt) if from_dt else now_datetime()
+	best = None
+	for line in lines:
+		try:
+			cand = croniter(line, base).get_next(datetime.datetime)
+		except Exception:
+			continue
+		if best is None or cand < best:
+			best = cand
+	return best
+
+
+def cron_matches(lines: list[str], moment) -> bool:
+	"""Whether ``moment`` is a slot of any of ``lines``. Never raises."""
+	moment = get_datetime(moment)
+	for line in lines:
+		try:
+			if croniter.match(line, moment):
+				return True
+		except Exception:
+			continue
+	return False
+
+
+def macro_next_run(m, from_dt=None) -> datetime.datetime | None:
+	"""The next slot of macro ``m`` strictly after ``from_dt``: from its cron schedule
+	when it has one, else from the daily/weekly/monthly/once fields as before."""
+	if uses_cron(m):
+		return next_cron_run(cron_lines(m.get("schedule_cron")), from_dt)
+	return compute_next_run(
+		m.get("schedule_frequency"),
+		m.get("schedule_time"),
+		from_dt=from_dt,
+		weekday=m.get("schedule_weekday"),
+		day_of_month=m.get("schedule_day_of_month"),
+		schedule_date=m.get("schedule_date"),
+	)
+
+
+def _cron_part_ok(part: str) -> bool:
+	"""Whether one cron part is spelled the way the form can read it: digits or a
+	3-letter name, an optional range, an optional step. croniter checks the bounds."""
+	for element in part.split(","):
+		found = _CRON_ELEMENT.match(element)
+		if not found:
+			return False
+		ends = [end.lower() for end in found.groups() if end]
+		if any(not end.isdigit() and end not in _CRON_NAMES for end in ends):
+			return False
+		values = [int(end) if end.isdigit() else _CRON_NAMES[end] for end in ends]
+		# Reversed is refused; so is "n-n", which croniter reads as "*" (3-3 would run every minute).
+		if len(values) == 2 and values[0] >= values[1]:
+			return False
+	return True
+
+
+def shortest_gap_minutes(lines: list[str]) -> int:
+	"""The fewest minutes between two runs of valid ``lines``. Days are ignored, so
+	this errs on the side of refusing: 09:00 on Mondays and 09:02 on Tuesdays count as
+	2 apart. One run a day gives 1440."""
+	slots = set()
+	for line in lines:
+		minutes, hours = croniter(line).expanded[:2]
+		slots.update(
+			hour * 60 + minute
+			for hour in (range(24) if hours == ["*"] else hours)
+			for minute in (range(60) if minutes == ["*"] else minutes)
+		)
+	ordered = sorted(slots)
+	gaps = [b - a for a, b in itertools.pairwise(ordered)]
+	return min([*gaps, ordered[0] + 1440 - ordered[-1]])
+
+
+def cron_problem(value) -> str:
+	"""Why ``value`` cannot be saved as a cron schedule, or "" when it can."""
+	lines = cron_lines(value)
+	if not lines:
+		return _("Add a cron schedule for this frequency.")
+	if len(lines) > MAX_CRON_LINES:
+		return _("A schedule can have at most {0} cron lines.").format(MAX_CRON_LINES)
+	for line in lines:
+		parts = line.split(" ")
+		if len(parts) != 5 or not all(_cron_part_ok(p) for p in parts) or not croniter.is_valid(line):
+			return _(
+				"“{0}” is not a cron schedule. It needs 5 parts: minute, hour, day, month and weekday."
+			).format(line)
+	if next_cron_run(lines) is None:
+		return _("This schedule never comes round. Check its day and month.")
+	return _gap_problem(lines)
+
+
+def _gap_problem(lines: list[str]) -> str:
+	gap = shortest_gap_minutes(lines)
+	if gap >= MIN_GAP_MINUTES:
+		return ""
+	problem = _(
+		"Two runs of this schedule can be {0} minute(s) apart. Macros are checked every {1} minutes, "
+		"so leave at least {1} minutes between runs."
+	).format(gap, MIN_GAP_MINUTES)
+	if any(line.split(" ")[0] == "*" for line in lines):
+		problem += " " + _("A “*” in the first part means every minute: for 9:00 each day write “0 9 * * *”.")
+	return problem
+
+
+def validate_cron_or_throw(value) -> None:
+	problem = cron_problem(value)
+	if problem:
+		frappe.throw(problem, title=_("Invalid schedule"))
 
 
 def _advance(dt: datetime.datetime, frequency: str) -> datetime.datetime:

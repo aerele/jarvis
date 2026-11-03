@@ -73,6 +73,8 @@ const selfButton = (w) => w.find(".jv-skill-handover-self");
 const radio = (w, user) => w.find(`.jv-skill-handover-user[data-user="${user}"] input`);
 const pick = (w, user) => radio(w, user).setValue(true);
 const summary = (w) => w.find(".jv-skill-handover-summary");
+const chips = (w) => w.findAll(".jv-skill-handover-chip").map((c) => c.attributes("data-user"));
+const CARA = { user: "cara@example.test", full_name: "Cara Lim", at_cap: false };
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -141,19 +143,21 @@ describe("SkillHandoverDialog, the picker", () => {
 		expect(summary(w).text()).toContain("Ben Ode");
 	});
 
-	it("searches when the typing stops, and drops a pick the new results do not show", async () => {
+	it("searches when the typing stops, and keeps a pick the new results do not show", async () => {
 		vi.useFakeTimers();
 		const w = await open();
 		await pick(w, "ben@example.test");
 		api.adminHandoverTargets.mockResolvedValue({ targets: [FULL], more: false });
-		await w.find(".stub-search").setValue("ful");
+		await w.find(".jv-skill-handover-search").setValue("ful");
 		expect(api.adminHandoverTargets).toHaveBeenCalledTimes(1);
 		vi.advanceTimersByTime(300);
 		await flushPromises();
 		expect(api.adminHandoverTargets).toHaveBeenLastCalledWith("ful", "s1");
 		expect(w.findAll(".jv-skill-handover-user")).toHaveLength(1);
-		expect(handButton(w).attributes("disabled")).toBe("");
-		expect(summary(w).exists()).toBe(false);
+		// Several people are gathered from several searches: the pick stays, as a chip.
+		expect(chips(w)).toEqual(["ben@example.test"]);
+		expect(handButton(w).attributes("disabled")).toBeUndefined();
+		expect(summary(w).text()).toContain("Ben Ode");
 	});
 
 	it("shows that a new search is under way until its answer comes", async () => {
@@ -162,7 +166,7 @@ describe("SkillHandoverDialog, the picker", () => {
 		expect(w.find(".jv-skill-handover-searching").exists()).toBe(false);
 		let answer;
 		api.adminHandoverTargets.mockReturnValue(new Promise((r) => (answer = r)));
-		await w.find(".stub-search").setValue("be");
+		await w.find(".jv-skill-handover-search").setValue("be");
 		vi.advanceTimersByTime(300);
 		await flushPromises();
 		expect(w.find(".jv-skill-handover-searching").text()).toBe("Searching…");
@@ -229,7 +233,7 @@ describe("SkillHandoverDialog, the picker", () => {
 		w.find(".stub-close").element.focus();
 		await flushPromises();
 		await new Promise((r) => requestAnimationFrame(r));
-		expect(document.activeElement).toBe(w.find(".stub-search").element);
+		expect(document.activeElement).toBe(w.find(".jv-skill-handover-search").element);
 		await pick(w, "ben@example.test");
 		await w.setProps({ modelValue: false });
 		await w.setProps({ modelValue: true });
@@ -252,7 +256,8 @@ describe("SkillHandoverDialog, hand to myself", () => {
 		expect(api.adminHandover).toHaveBeenCalledWith(
 			"s1",
 			"boss@example.test",
-			"asha@example.test"
+			"asha@example.test",
+			false
 		);
 	});
 
@@ -357,13 +362,14 @@ describe("SkillHandoverDialog, handing over", () => {
 		expect(api.adminHandover).toHaveBeenCalledWith(
 			"s1",
 			"ben@example.test",
-			"asha@example.test"
+			"asha@example.test",
+			false
 		);
 		expect(toast.success).toHaveBeenCalledWith(
 			"Handed “Month end” to Ben Ode (ben@example.test)."
 		);
 		expect(w.emitted("handed")).toEqual([
-			[{ name: "s1", new_owner: "ben@example.test", needs_apply: false }],
+			[{ name: "s1", new_owner: "ben@example.test", needs_apply: false, copies: [] }],
 		]);
 		expect(w.emitted("update:modelValue")).toEqual([[false]]);
 	});
@@ -484,8 +490,113 @@ describe("SkillHandoverDialog, refusals", () => {
 		expect(api.adminHandover).toHaveBeenLastCalledWith(
 			"s1",
 			"ben@example.test",
-			"cara@example.test"
+			"cara@example.test",
+			false
 		);
 		expect(summary(w).text()).toContain("from Cara");
+	});
+});
+
+describe("SkillHandoverDialog, several people", () => {
+	it("picks several as chips, says the first gets it, and sends them in order", async () => {
+		api.adminHandoverTargets.mockResolvedValue({ targets: [...TARGETS, CARA], more: false });
+		api.adminHandover.mockResolvedValue({
+			ok: true,
+			handed_over: true,
+			new_owner: "cara@example.test",
+			needs_apply: false,
+			copies: [{ user: "ben@example.test", skill: "s2" }],
+			copy_failed: [],
+		});
+		const w = await open();
+		await pick(w, "cara@example.test");
+		await pick(w, "ben@example.test");
+		expect(chips(w)).toEqual(["cara@example.test", "ben@example.test"]);
+		expect(w.find(".jv-skill-handover-search").attributes("placeholder")).toBe(
+			"Add someone else"
+		);
+		expect(summary(w).find("p").text()).toBe(
+			"Hand “Month end” from Asha Rao (asha@example.test) to Cara Lim and Ben Ode?"
+		);
+		expect(summary(w).findAll("li")[0].text()).toBe(
+			"The first person picked gets it; each of the others gets their own private copy."
+		);
+		const button = w.find(".jv-skill-handover-confirm");
+		expect(button.text()).toBe("Hand over to 2 people");
+		await button.trigger("click");
+		await flushPromises();
+		expect(api.adminHandover).toHaveBeenCalledWith(
+			"s1",
+			["cara@example.test", "ben@example.test"],
+			"asha@example.test",
+			false
+		);
+		expect(toast.success).toHaveBeenCalledWith(
+			"Handed “Month end” to Cara Lim (cara@example.test); copies went to Ben Ode (ben@example.test)."
+		);
+		expect(w.emitted("handed")[0][0].copies).toEqual([
+			{ user: "ben@example.test", skill: "s2" },
+		]);
+	});
+
+	it("unpicks with a chip's x", async () => {
+		const w = await open();
+		await pick(w, "ben@example.test");
+		const x = w.find('.jv-skill-handover-chip[data-user="ben@example.test"] button');
+		expect(x.attributes("aria-label")).toBe("Remove Ben Ode (ben@example.test)");
+		await x.trigger("click");
+		expect(chips(w)).toEqual([]);
+		expect(summary(w).exists()).toBe(false);
+	});
+
+	it("with Keep, gives a copy and leaves the skill where it is", async () => {
+		api.adminHandover.mockResolvedValue({
+			ok: true,
+			handed_over: false,
+			new_owner: null,
+			needs_apply: false,
+			copies: [{ user: "ben@example.test", skill: "s2" }],
+			copy_failed: [],
+		});
+		const w = await open();
+		await pick(w, "ben@example.test");
+		await w.find(".jv-skill-handover-keep input").setValue(true);
+		expect(summary(w).find("p").text()).toBe(
+			"Give Ben Ode (ben@example.test) a copy of “Month end” from Asha Rao (asha@example.test)?"
+		);
+		expect(w.find(".jv-skill-handover-confirm").text()).toBe("Give a copy");
+		await w.find(".jv-skill-handover-confirm").trigger("click");
+		await flushPromises();
+		expect(api.adminHandover).toHaveBeenCalledWith(
+			"s1",
+			"ben@example.test",
+			"asha@example.test",
+			true
+		);
+		expect(toast.success).toHaveBeenCalledWith(
+			"Gave a copy of “Month end” to Ben Ode (ben@example.test)."
+		);
+		expect(w.emitted("handed")[0][0].new_owner).toBeNull();
+	});
+
+	it("says which copies the server could not make", async () => {
+		api.adminHandoverTargets.mockResolvedValue({ targets: [...TARGETS, CARA], more: false });
+		api.adminHandover.mockResolvedValue({
+			ok: true,
+			handed_over: true,
+			new_owner: "cara@example.test",
+			copies: [],
+			copy_failed: [
+				{ user: "ben@example.test", reason: "Ben has a skill named month-end." },
+			],
+		});
+		const w = await open();
+		await pick(w, "cara@example.test");
+		await pick(w, "ben@example.test");
+		await w.find(".jv-skill-handover-confirm").trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith(
+			"Not copied for Ben Ode (ben@example.test): Ben has a skill named month-end."
+		);
 	});
 });
