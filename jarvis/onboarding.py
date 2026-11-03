@@ -23,6 +23,7 @@ from jarvis.exceptions import (
 	AdminUnreachableError,
 	AdminValidationError,
 )
+from jarvis.holiday_touch import policy as holiday_policy
 from jarvis.hooks import get_default_admin_url
 from jarvis.permissions import grant_onboarding_admin, is_system_manager, require_jarvis_admin
 
@@ -312,6 +313,9 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	# Marker-aware + KEEP-on-doubt (jarvis.catalogue_visibility) so an old/rolled-back CP
 	# never un-hides a withdrawn agent fleet-wide.
 	catalogue_visibility.persist_from_connection(data)
+	# Same cadence: mirror the operator's holiday-touch policy. This is the daily path, the
+	# only one that stamps holiday_policy_synced_at (jarvis.holiday_touch.policy). Never raises.
+	holiday_policy.persist(data, daily=True)
 	if data.get("agent_url"):
 		write_connection(data)
 		return {"synced": True, "tenant_status": data.get("tenant_status")}
@@ -1030,6 +1034,42 @@ def _clear_llm_secrets(settings) -> None:
 	clear_settings_password(settings, "llm_api_key")
 
 
+#: Shown when private-network setup is off on admin (design 5.3, 10). Same sentence the
+#: Network step uses (frontend privateNetwork.js SETUP_UNAVAILABLE).
+PRIVATE_NETWORK_UNAVAILABLE = "Private network setup isn't available yet. Contact support."
+#: A bare 429 on the gate is a rate limit, not "off" (ruling R6). Shared with private_network.
+PRIVATE_NETWORK_BUSY = "Too many attempts. Try again in a minute."
+
+
+def _require_private_setup_enabled() -> None:
+	"""Private mode only: ask admin whether private onboarding is on BEFORE the customer
+	signs up. Admin stays the final authority (it refuses a forced signup with
+	``PRIVATE_NETWORK_DISABLED``); asking first turns "the operator has not switched this on"
+	into one clear sentence now instead of a coded refusal later. An unreachable admin is
+	reported as unreachable and a rate limit as "try again", neither as "off"; any other
+	failure, including an admin that does not know the method yet, reads as off."""
+	try:
+		info = admin_client.private_setup_info(timeout_s=8) or {}
+	except AdminUnreachableError as e:
+		_throw_admin_error(e)  # always raises
+	except AdminRateLimitedError as e:
+		error, _status = onboarding_contract.error_object(e)
+		error["message"] = PRIVATE_NETWORK_BUSY
+		onboarding_contract.stamp_error(error)
+		frappe.throw(PRIVATE_NETWORK_BUSY)
+	except _ADMIN_ERRORS:
+		info = {}
+	if isinstance(info, dict) and info.get("enabled"):
+		return
+	error = {
+		"code": "PRIVATE_NETWORK_DISABLED",
+		"message": PRIVATE_NETWORK_UNAVAILABLE,
+		"recovery": onboarding_contract.RECOVERY_CONTACT_SUPPORT,
+	}
+	onboarding_contract.stamp_error(error)
+	frappe.throw(PRIVATE_NETWORK_UNAVAILABLE)
+
+
 @frappe.whitelist(methods=["POST"])
 def start_signup(
 	email: str,
@@ -1104,6 +1144,11 @@ def start_signup(
 	if onboarding_contract.awaiting_reconciliation():
 		_refuse_while_money_is_parked()  # always raises
 	_require_contact_number(billing)
+	# Private network (design 5.3): the host gate above already passes for a completed
+	# private setup. Last of the local checks, so a parked-money refusal or a missing
+	# contact number never costs an admin call; asks admin whether the feature is on.
+	if admin_client.is_private_mode():
+		_require_private_setup_enabled()
 	# The identity the customer TYPED, before admin is asked anything. Two
 	# reasons it is written first: a response lost in transit still leaves the
 	# bench knowing whose signup this was (plan 03's "bench response lost after
@@ -1167,6 +1212,11 @@ def start_signup(
 	# above: admin's envelope carries the account's real email and company, the
 	# plan label, and what is actually due today.
 	onboarding_contract.absorb(data)
+	# Private network: remember the address this signup succeeded with. Admin keeps it as the
+	# account's ``frappe_site_url``, so the bench must neither drift from it nor lose the
+	# proof that a later "address already taken" is this customer's own (see
+	# ``_own_address_taken``).
+	onboarding_contract.record_signup_address(admin_client.private_public_address())
 	# Credentials do not go back to the browser. This response is the one that
 	# CARRIES them — api_key, api_secret and (on the flag-off path) the OAuth
 	# login password — and write_connection above has already stored every one.
@@ -1219,7 +1269,7 @@ def _try_resume_pending_signup(
 	error. A resume that itself fails (e.g. a genuinely different account's
 	duplicate) also returns None: the original duplicate error is the honest
 	message for that case."""
-	if not onboarding_contract.is_duplicate_signup(err):
+	if not (onboarding_contract.is_duplicate_signup(err) or _own_address_taken(err)):
 		return None
 	settings = frappe.get_single("Jarvis Settings")
 	if not _has_admin_credentials(settings):
@@ -1242,6 +1292,18 @@ def _try_resume_pending_signup(
 			message=frappe.get_traceback(),
 		)
 		return None
+
+
+def _own_address_taken(err) -> bool:
+	"""``PRIVATE_ADDRESS_TAKEN`` raised by this customer's OWN earlier signup: admin runs its
+	address gate before its duplicate check, so a re-signup from the same account and the
+	same address answers "taken". Resumable only when the address now configured equals the
+	one recorded at the successful signup; the caller also requires stored credentials, which
+	authenticate the resume. Any other "taken" stays a refusal."""
+	if getattr(err, "code", "") != "PRIVATE_ADDRESS_TAKEN":
+		return False
+	recorded = onboarding_contract.signup_address()
+	return bool(recorded) and recorded == admin_client.private_public_address()
 
 
 def _reserve_idempotency_key(*, supplied: str | None = None, context: dict | None = None) -> str:
@@ -1274,6 +1336,9 @@ def _absorb_signup_state(data: dict, *, from_check: bool = False) -> dict:
 	``onboarding_contract.absorb_check``."""
 	if not isinstance(data, dict):
 		return onboarding_contract.load()
+	# Private network: the poll that follows the email click carries the held host
+	# (data.private_hold, contract 4.4). Stored before the context is read back below.
+	onboarding_contract.absorb_private_hold(data)
 	if data.get("customer_password"):
 		write_connection({"customer_password": data["customer_password"]})
 	if from_check:
@@ -2174,6 +2239,9 @@ def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_ll
 		except Exception:
 			pass
 	out = _surface(admin_client.reset_workspace, reason)
+	from jarvis.payment_calendar.lifecycle import reset_workspace
+
+	reset_workspace()
 	if cint(wipe_data):
 		_wipe_workspace_content()
 	if cint(revoke_llm):

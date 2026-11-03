@@ -27,6 +27,8 @@ corrupted learning material.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 
 REDACTION = "[REDACTED-SECRET]"
@@ -68,34 +70,32 @@ _SENSITIVE_BASENAME_RE = re.compile(
 _SESSION_HEADER_RE = re.compile(r"(?i)x-jarvis-session")
 
 
-def redact_secrets(text: str) -> tuple[str, int]:
+def redact_secrets(text: str, tag_key: bytes | None = None) -> tuple[str, int]:
 	"""``(redacted_text, replacement_count)``.
 
 	Replaces the VALUE of anything credential-shaped with ``[REDACTED-SECRET]``,
-	leaving the surrounding code intact so the material is still learnable."""
+	leaving the surrounding code intact so the material is still learnable.
+	A ``tag_key`` adds a short keyed hash of the value (``[REDACTED-SECRET:1a2b3c]``), so
+	two different secrets stay different once masked (an approval diff needs it).
+	Keyed (HMAC) so the tag can't be used to guess a weak secret; use a fresh key
+	per card so tags can't link one secret across cards."""
 	if not text:
 		return text or "", 0
 	count = 0
 
-	def _whole(_m):
+	def _mark(value):
 		nonlocal count
 		count += 1
-		return REDACTION
+		if tag_key is None:
+			return REDACTION
+		return f"{REDACTION[:-1]}:{hmac.new(tag_key, value.encode(), hashlib.sha256).hexdigest()[:6]}]"
 
-	def _tail(m):
-		nonlocal count
-		count += 1
-		return f"{m.group(1)}{REDACTION}"
-
-	def _assign(m):
-		nonlocal count
-		count += 1
-		return f"{m.group(1)}{m.group(2)}{m.group(3)}{REDACTION}{m.group(3)}"
-
-	out = _PEM_RE.sub(_whole, text)
-	out = _AWS_KEY_RE.sub(_whole, out)
-	out = _BEARER_RE.sub(_tail, out)
-	out = _ASSIGN_RE.sub(_assign, out)
+	out = _PEM_RE.sub(lambda m: _mark(m.group(0)), text)
+	out = _AWS_KEY_RE.sub(lambda m: _mark(m.group(0)), out)
+	out = _BEARER_RE.sub(lambda m: m.group(1) + _mark(m.group(2)), out)
+	out = _ASSIGN_RE.sub(
+		lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{_mark(m.group(4))}{m.group(3)}", out
+	)
 	return out, count
 
 

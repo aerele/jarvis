@@ -432,6 +432,19 @@ def dismiss_macro_notices(names: str | list | None = None) -> dict:
 _LAST_RUN_FIELDS = ("status", "error", "started_at", "finished_at", "conversation", "trigger")
 
 
+def _with_the_wait(run: dict, status: str | None, waiting_on, waiting_since) -> dict:
+	"""Add ``waiting_reports`` (the names of the prepared reports a run parked in
+	``waiting_report`` awaits) and ``waiting_since`` to a run payload, so "Waiting for
+	report: <names>" survives a reload. Empty for every other status. Mutates and
+	returns ``run``."""
+	from jarvis.chat import macro_report_wait
+
+	waiting = status == "waiting_report"
+	run["waiting_reports"] = macro_report_wait.awaited_names(waiting_on) if waiting else []
+	run["waiting_since"] = str(waiting_since) if waiting and waiting_since else ""
+	return run
+
+
 def _last_runs(macro_names: list[str], owner: str) -> dict:
 	"""``{macro: its most recent run}`` for the macros named: how the last run went,
 	for the list and the form. Nothing else on either screen says whether a macro
@@ -448,7 +461,7 @@ def _last_runs(macro_names: list[str], owner: str) -> dict:
 		return {}
 	rows = frappe.db.sql(
 		"""SELECT r.name, r.macro, r.status, r.error, r.started_at, r.finished_at,
-			r.conversation, r.`trigger`
+			r.conversation, r.`trigger`, r.waiting_on, r.waiting_since
 		FROM `tabJarvis Macro Run` r
 		JOIN (
 			SELECT macro, MAX(creation) AS latest FROM `tabJarvis Macro Run`
@@ -464,6 +477,10 @@ def _last_runs(macro_names: list[str], owner: str) -> dict:
 		run = {f: r.get(f) for f in _LAST_RUN_FIELDS}
 		run["error"] = run["error"] or ""
 		run["conversation"] = (run["conversation"] or "") if is_owner else ""
+		_with_the_wait(run, r.status, r.waiting_on, r.waiting_since)
+		if not is_owner:
+			# Like the conversation: an overseer may know a run waits, not what it reads.
+			run["waiting_reports"] = []
 		out[r.macro] = run
 	return out
 
@@ -1140,13 +1157,22 @@ def get_macro_run(run: str) -> dict:
 		"current_step": doc.current_step,
 		"total_steps": doc.total_steps,
 		"error": doc.error or "",
+		**_with_the_wait({}, doc.status, doc.waiting_on, doc.waiting_since),
 	}
 
 
 # --------------------------------------------------------------------------- #
 # Run history dashboard (settings → Macro runs)
 # --------------------------------------------------------------------------- #
-_RUN_STATUSES = {"queued", "running", "waiting_capacity", "completed", "failed", "stopped"}
+_RUN_STATUSES = {
+	"queued",
+	"running",
+	"waiting_capacity",
+	"waiting_report",
+	"completed",
+	"failed",
+	"stopped",
+}
 # A run row with no macro is not run history: ``delete_macro`` keeps the month's
 # scheduled rows of a deleted macro so the unattended budget still counts them, and
 # clears their macro. Every query that shows or counts runs for a person carries
@@ -1196,6 +1222,8 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 			r.finished_at,
 			r.error,
 			r.run_mode,
+			r.waiting_on,
+			r.waiting_since,
 			duration_s.as_("duration_s"),
 		)
 		.where(where)
@@ -1204,7 +1232,11 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 		.offset(start)
 		.run(as_dict=True)
 	)
-	return {"runs": rows[:limit], "has_more": len(rows) > limit, "total": total}
+	runs = rows[:limit]
+	for run in runs:
+		# The raw JSON stays on the server; the page gets the names.
+		_with_the_wait(run, run.status, run.pop("waiting_on", None), run.get("waiting_since"))
+	return {"runs": runs, "has_more": len(rows) > limit, "total": total}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1243,6 +1275,10 @@ def macro_run_stats() -> dict:
 		"completed": completed,
 		"failed": failed,
 		"running": by.get("running", 0),
+		# Live too: parked for a report or for capacity. The Runs tab counts them with
+		# `running` ("Running or waiting").
+		"waiting_report": by.get("waiting_report", 0),
+		"waiting_capacity": by.get("waiting_capacity", 0),
 		"queued": by.get("queued", 0),
 		"stopped": by.get("stopped", 0),
 		"success_rate": round(completed * 100 / finished) if finished else None,

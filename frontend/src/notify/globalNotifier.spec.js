@@ -155,9 +155,19 @@ describe("the fence does not touch the other signals", () => {
 			kind: "action:pending",
 			conversation: "conv-a",
 			tool: "jarvis__create_doc",
+			pending_card_safe: true,
 		});
 		socket.emit(terminal());
 		expect(useToasts().value).toHaveLength(2);
+	});
+
+	it("does not announce a raw or delayed pending frame", () => {
+		socket.emit({
+			kind: "action:pending",
+			conversation: "conv-a",
+			tool: "jarvis__create_doc",
+		});
+		expect(useToasts().value).toHaveLength(0);
 	});
 
 	it("stops signalling once detached", () => {
@@ -176,6 +186,7 @@ describe("dashboard-origin attention stays in Dashboard Builder", () => {
 			conversation: "conv-a",
 			origin_page: "dashboards",
 			tool: "jarvis__save_dashboard",
+			pending_card_safe: true,
 		});
 		expect(useToasts().value).toHaveLength(0);
 	});
@@ -186,6 +197,7 @@ describe("dashboard-origin attention stays in Dashboard Builder", () => {
 			conversation: "dash-conv",
 			origin_page: "dashboards",
 			tool: "jarvis__save_dashboard",
+			pending_card_safe: true,
 		});
 		expect(useToasts().value).toHaveLength(1);
 		useToasts().value[0].onClick();
@@ -219,6 +231,23 @@ describe("dashboard-origin attention stays in Dashboard Builder", () => {
 		});
 		expect(store.refreshApprovalsCount).toHaveBeenCalledTimes(1);
 		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it("re-reads the approvals badge when a reviewer is tagged or untagged, silently", () => {
+		store.refreshApprovalsCount.mockClear();
+		socket.emit({ kind: "approval:tagged", name: "AR-1" });
+		expect(store.refreshApprovalsCount).toHaveBeenCalledTimes(1);
+		socket.emit({ kind: "approval:untagged", name: "AR-1" });
+		expect(store.refreshApprovalsCount).toHaveBeenCalledTimes(2);
+		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it("tells the requester their decision did not reach the chat and opens the question", () => {
+		socket.emit({ kind: "approval:continuation_failed", name: "AR 1" });
+		expect(useToasts().value).toHaveLength(1);
+		expect(JSON.stringify(useToasts().value[0])).not.toContain("conv");
+		useToasts().value[0].onClick();
+		expect(router.push).toHaveBeenCalledWith("/approvals/AR%201");
 	});
 
 	it("re-reads the reviewer badge on review:pending without a toast", () => {
@@ -552,5 +581,40 @@ describe("authoritative activity reconciliation (#591)", () => {
 		vi.advanceTimersByTime(4 * 60 * 1000);
 		expect(store.stopConversationActivity).toHaveBeenCalled();
 		expect(store.refreshConversationActivity).not.toHaveBeenCalled();
+	});
+});
+
+describe("Chat questions keep the current native answer surface", () => {
+	const question = {
+		kind: "approval:new",
+		conversation_id: "conv-a",
+		source: "Chat",
+		question: "Which supplier?",
+	};
+	it("keeps the badge and omits the Board toast on the visible chat", () => {
+		store.currentConvId = "conv-a";
+		router.currentRoute.value = { meta: { chat: true } };
+		socket.emit(question);
+		expect(store.refreshApprovalsCount).toHaveBeenCalledOnce();
+		expect(useToasts().value).toHaveLength(0);
+	});
+	it.each([undefined, "File Box", "File Box Wiki", "Agent"])(
+		"preserves same-chat alerts for source %s",
+		(source) => {
+			store.currentConvId = "conv-a";
+			router.currentRoute.value = { meta: { chat: true } };
+			socket.emit({ ...question, source });
+			expect(useToasts().value).toHaveLength(1);
+		}
+	);
+	it("keeps a Chat notice away from its conversation", () => {
+		socket.emit(question);
+		expect(useToasts().value).toHaveLength(1);
+	});
+	it("keeps the dashboard rule for typed Chat questions", () => {
+		localStorage.setItem("jarvis-dash-conv-u@example.com", "conv-a");
+		router.currentRoute.value = { name: "DashboardsPage", hash: "", params: {}, meta: {} };
+		socket.emit({ ...question, origin_page: "dashboards" });
+		expect(useToasts().value).toHaveLength(0);
 	});
 });

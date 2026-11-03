@@ -77,7 +77,8 @@ def preview_doc(doctype: str, values: dict) -> dict:
 	``{valid, resolved, server_filled, empty_fields, items_count, totals}``; a
 	document its own validation rejects returns ``{valid: false, error}`` instead
 	of raising. Use before ``create_doc`` on consequential documents (invoices,
-	orders).
+	orders). This checks draft-save validation, not submit-only conditions. Use
+	preview_landed_cost_voucher for source-backed LCV allocation reconciliation.
 	"""
 	# A structure change is refused before any dry run (round 2): it is set up in
 	# Desk, and its trial would only reach Frappe's implicit-commit refusal.
@@ -88,6 +89,11 @@ def preview_doc(doctype: str, values: dict) -> dict:
 
 	try:
 		with preview_sandbox():
+			source_tax = None
+			if doctype == "Landed Cost Voucher":
+				from jarvis.tools._lcv_source_tax import gate_lcv
+
+				source_tax = gate_lcv(doc)
 			doc.insert()
 	except PreviewSandboxLost:
 		# Not "this document is invalid": the dry run could not be undone
@@ -99,10 +105,17 @@ def preview_doc(doctype: str, values: dict) -> dict:
 			# statement time limit (#707 B3).
 			raise
 		frappe.clear_messages()
+		from jarvis.tools._lcv_source_tax import LCVSourceTaxNeedsInput
+
+		if isinstance(e, LCVSourceTaxNeedsInput):
+			return {"valid": False, **e.assessment}
 		return {"valid": False, "error": _error_text(e)}
 	# Outside the try: a summarization bug must never mislabel a document
 	# that validated cleanly. The in-memory doc survives the rollback.
-	return _summarize(doc, values)
+	result = _summarize(doc, values)
+	if source_tax is not None:
+		result["source_tax"] = source_tax
+	return result
 
 
 def _summarize(doc, caller_values: dict) -> dict:

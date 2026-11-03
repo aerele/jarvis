@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { mergePendingSources, withExcluded } from "./pendingResync.js";
+import {
+	admitRealtimePendingCards,
+	mergePendingSources,
+	pendingActionsFromRows,
+	settleSafetyUpdate,
+	withExcluded,
+} from "./pendingResync.js";
 
 // P0c in-flight suppression: a Confirm/Discard RPC in flight for token T must
 // not have its card re-added by a stale resync read racing the RPC's own
@@ -82,6 +88,237 @@ test("a token settled locally (typed no) is never resurrected by a stale transcr
 	assert.deepEqual(out, []);
 });
 
+test("a safety-update token stays excluded after Done when a stale pending row resyncs", () => {
+	// Safety update keeps DecisionSheet visible until Done, then removes the card.
+	// The old tool row may still report pending when a fresh resync lands. Its token
+	// must be retained in settledTokens before the sheet's busy guard clears.
+	const settled = withExcluded(new Set(), ["safety-token"]);
+	const staleFromRows = [{ token: "safety-token" }, { token: "ordinary-token" }];
+	const afterDone = mergePendingSources([], [staleFromRows], settled);
+	assert.deepEqual(afterDone, [{ token: "ordinary-token" }]);
+});
+
+test("a safety update removes only its card and creates one terminal receipt", () => {
+	const cards = [
+		{ token: "safety-token", conversation: "A" },
+		{ token: "safe-sibling", conversation: "A" },
+	];
+	const passive = settleSafetyUpdate(cards, new Set(), new Set(), "safety-token");
+	assert.equal(passive.newlySettled, true);
+	assert.deepEqual(passive.pending, [{ token: "safe-sibling", conversation: "A" }]);
+
+	// A direct response after the passive transcript result removes the target
+	// again if it reappeared, but it cannot add a second Done-only receipt.
+	const direct = settleSafetyUpdate(
+		[...passive.pending, { token: "safety-token", conversation: "A" }],
+		passive.settledTokens,
+		passive.safetyNoticeTokens,
+		"safety-token"
+	);
+	assert.equal(direct.newlySettled, false);
+	assert.deepEqual(direct.pending, [{ token: "safe-sibling", conversation: "A" }]);
+});
+
+test("a typed discard does not suppress a later safety-update explanation", () => {
+	const update = settleSafetyUpdate(
+		[
+			{ token: "typed-token", conversation: "A" },
+			{ token: "safe-sibling", conversation: "A" },
+		],
+		new Set(["typed-token"]),
+		new Set(),
+		"typed-token"
+	);
+	assert.equal(update.newlySettled, true);
+	assert.deepEqual(update.pending, [{ token: "safe-sibling", conversation: "A" }]);
+});
+
+test("a hard reload does not rebuild a terminal safety receipt into a Confirm card", () => {
+	// A new mount has no settledTokens memory. The server's durable state must be
+	// enough: only a real pending sibling is returned from the transcript rows.
+	const rows = [
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "",
+			tool_call_id: "revoked-token",
+			pending_card: null,
+			tool_args: {},
+			action_outcome: "cancelled",
+		},
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "pending",
+			tool_call_id: "ordinary-token",
+			pending_card: { title: "Ordinary pending change" },
+			pending_card_safe: true,
+			created_at: 123,
+			expires_at: null,
+		},
+	];
+	const cards = pendingActionsFromRows(rows, "CONV-RELOAD");
+	assert.deepEqual(
+		cards.map((card) => card.token),
+		["ordinary-token"]
+	);
+	assert.equal(cards[0].conversation, "CONV-RELOAD");
+	assert.deepEqual(cards[0].preview, { card: { title: "Ordinary pending change" } });
+});
+
+test("a transcript row needs the server's safe-read attestation before it can make a card", () => {
+	// getConversation can finish before list_pending_confirmations. The transcript
+	// endpoint therefore stamps every safe pending row itself; an unsafe or old
+	// server row must fail closed instead of becoming a client-side Confirm card.
+	const rows = [
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "pending",
+			tool_call_id: "revoked-token",
+			pending_card: { title: "Never show this" },
+			pending_card_safe: false,
+		},
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "pending",
+			tool_call_id: "ordinary-token",
+			pending_card: { title: "Still confirmable" },
+			pending_card_safe: true,
+		},
+	];
+	assert.deepEqual(
+		pendingActionsFromRows(rows, "CONV-TRANSCRIPT").map((card) => card.token),
+		["ordinary-token"]
+	);
+});
+
+test("a capped legacy cleanup resync keeps its terminal card out after a hard reload", () => {
+	// The legacy list path must settle the stale row before its backstop response
+	// returns. A fresh mount then has neither an in-memory exclusion nor a chance
+	// to merge the revoked token back from its transcript row.
+	const rows = [
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "",
+			tool_call_id: "revoked-token",
+			pending_card: null,
+			action_outcome: "cancelled",
+		},
+		{
+			role: "tool",
+			tool_name: "create_doc",
+			tool_status: "pending",
+			tool_call_id: "ordinary-token",
+			pending_card: { title: "Ordinary pending change" },
+			pending_card_safe: true,
+		},
+	];
+	const fromRows = pendingActionsFromRows(rows, "CONV-CAPPED");
+	const fromBackstop = [{ token: "ordinary-token", conversation: "CONV-CAPPED" }];
+	const cards = mergePendingSources([], [fromRows, fromBackstop], new Set());
+	assert.deepEqual(
+		cards.map((card) => card.token),
+		["ordinary-token"]
+	);
+});
+
+for (const kind of ["action:pending", "run:end", "run:error"]) {
+	test(`${kind} does not restore a settled safety-update card`, () => {
+		const settled = new Set(["safety-token"]);
+		const card = (token) => ({
+			token,
+			tool: "write_todo",
+			summary: `${token} summary`,
+			pending_card_safe: true,
+		});
+		let pending = [];
+
+		if (kind === "action:pending") {
+			pending = admitRealtimePendingCards(
+				pending,
+				{ kind, ...card("safety-token") },
+				settled,
+				null,
+				"CONV-1"
+			);
+			pending = admitRealtimePendingCards(
+				pending,
+				{ kind, ...card("ordinary-token") },
+				settled,
+				null,
+				"CONV-1"
+			);
+		} else {
+			pending = admitRealtimePendingCards(
+				pending,
+				{ kind, pending: [card("safety-token"), card("ordinary-token")] },
+				settled,
+				null,
+				"CONV-1"
+			);
+		}
+
+		assert.deepEqual(
+			pending.map((item) => item.token),
+			["ordinary-token"]
+		);
+		assert.equal(pending[0].conversation, "CONV-1");
+	});
+}
+
+test("realtime terminal admission ignores a malformed pending list", () => {
+	assert.deepEqual(
+		admitRealtimePendingCards([], { kind: "run:end", pending: {} }, new Set(), null, "CONV-1"),
+		[]
+	);
+});
+
+for (const kind of ["action:pending", "run:end", "run:error"]) {
+	test(`${kind} rejects a raw or delayed pending frame without attestation`, () => {
+		const raw = { token: "raw", tool: "write_todo", summary: "raw" };
+		const safe = {
+			token: "safe-sibling",
+			tool: "write_todo",
+			summary: "safe sibling",
+			pending_card_safe: true,
+		};
+		const event =
+			kind === "action:pending" ? { kind, ...raw } : { kind, pending: [raw, safe] };
+		let admitted = admitRealtimePendingCards([], event, new Set(), null, "CONV-1");
+		if (kind === "action:pending") {
+			admitted = admitRealtimePendingCards(
+				admitted,
+				{ kind, ...safe },
+				new Set(),
+				null,
+				"CONV-1"
+			);
+		}
+		assert.deepEqual(
+			admitted.map((card) => card.token),
+			["safe-sibling"]
+		);
+	});
+}
+
+test("ChatView routes every realtime pending event through the settled-token admission gate", () => {
+	const src = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	const cases = [
+		["run:end", "run:error"],
+		["run:error", "action:pending"],
+		["action:pending", "canvas"],
+	];
+	for (const [kind, next] of cases) {
+		const start = src.indexOf(`case "${kind}"`);
+		const end = src.indexOf(`case "${next}"`, start + 1);
+		assert.ok(start > -1 && end > start, `${kind} case must be present`);
+		assert.match(src.slice(start, end), /admitRealtimePendingCards\(/);
+	}
+});
+
 test("ChatView folds a typed no's discarded tokens into loadPending's exclusion set", () => {
 	const src = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
 	const settle = src.indexOf(
@@ -91,4 +328,131 @@ test("ChatView folds a typed no's discarded tokens into loadPending's exclusion 
 	const load = src.indexOf("async function loadPending(");
 	const inflight = src.indexOf("const inflight = withExcluded(", load);
 	assert.ok(inflight > -1, "loadPending must build its exclusion set from settledTokens");
+});
+
+test("PWA only admits attested list, transcript, and notification cards", () => {
+	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	const loadPending = view.indexOf("async function loadPending(");
+	assert.ok(loadPending > -1);
+	assert.match(view.slice(loadPending), /p\.pending_card_safe === true/);
+	assert.match(view, /observePassiveSafetyUpdates\(/);
+	const notice = view.indexOf('v-if="safetyUpdateNotice"');
+	const decision = view.indexOf("<DecisionCard", notice);
+	assert.ok(notice > -1 && decision > notice);
+	const noticeMarkup = view.slice(notice, decision);
+	assert.match(noticeMarkup, />\s*Done\s*</);
+	assert.doesNotMatch(noticeMarkup, /Confirm|Retry|Discard/);
+
+	const app = fs.readFileSync(new URL("../App.vue", import.meta.url), "utf8");
+	const notification = app.indexOf('p.kind === "action:pending"');
+	assert.ok(notification > -1);
+	assert.match(app.slice(notification, notification + 180), /p\.pending_card_safe === true/);
+
+	const notifications = fs.readFileSync(new URL("./notifications.js", import.meta.url), "utf8");
+	assert.match(notifications, /e\.kind === "action:pending" && e\.pending_card_safe === true/);
+});
+
+test("PWA queues every passive safety receipt and shows the next one after Done", () => {
+	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	assert.match(view, /const safetyUpdateQueue = ref\(\[\]\)/);
+	assert.match(view, /function enqueueSafetyUpdateNotice\(notice\)/);
+	const observe = view.slice(
+		view.indexOf("function observePassiveSafetyUpdates(rows)"),
+		view.indexOf("function dismissSafetyUpdateNotice()")
+	);
+	assert.doesNotMatch(observe, /if \(safetyUpdateNotice\.value\) return/);
+	assert.match(observe, /enqueueSafetyUpdateNotice\(notice\)/);
+	assert.match(observe, /const newlySettled = settleSafetyUpdateInView\(notice\.token\);/);
+	assert.match(observe, /if \(!newlySettled\) continue;/);
+	assert.match(observe, /if \(decision\.value\?\.token === notice\.token\) clearDecision\(\);/);
+	const dismiss = view.slice(
+		view.indexOf("function dismissSafetyUpdateNotice()"),
+		view.indexOf("const preview", view.indexOf("function dismissSafetyUpdateNotice()"))
+	);
+	assert.match(dismiss, /safetyUpdateNotice\.value = safetyUpdateQueue\.value\[0\] \|\| null/);
+	assert.match(dismiss, /safetyUpdateQueue\.value = safetyUpdateQueue\.value\.slice\(1\)/);
+	assert.match(view, /safetyUpdateQueue\.value = \[\];/);
+});
+
+test("safety update settles its token before DecisionSheet clears the busy guard", () => {
+	const sheet = fs.readFileSync(
+		new URL("../components/DecisionSheet.vue", import.meta.url),
+		"utf8"
+	);
+	const safety = sheet.indexOf('r.reason_code === "safety_update"');
+	const settled = sheet.indexOf('emit("settled", token, conversation, generation)', safety);
+	const cancelled = sheet.indexOf('state.value = "cancelled"', safety);
+	const busyClear = sheet.indexOf(
+		'emit("busy", false, token, conversation, generation)',
+		safety
+	);
+	assert.ok(settled > safety && settled < cancelled && settled < busyClear);
+
+	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	const handler = view.indexOf("function onDecisionSettled(token, conversation, generation)");
+	const exclude = view.indexOf("settleSafetyUpdateInView(token);", handler);
+	const listener = view.indexOf('@settled="onDecisionSettled"');
+	assert.ok(handler > -1 && exclude > handler);
+	assert.ok(listener > -1);
+});
+
+test("PWA keeps a later sheet out of an earlier request's terminal events", () => {
+	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	const busy = view.slice(
+		view.indexOf("function onDecisionBusy(busy, token, conversation, generation)"),
+		view.indexOf("function onDecisionSettled(token, conversation, generation)")
+	);
+	assert.match(busy, /inflightToken\.value = token/);
+	assert.match(
+		busy,
+		/if \(isCurrent\(conversation, generation\) && inflightToken\.value === token\)/
+	);
+	const resolved = view.slice(
+		view.indexOf("function onResolved(token, kind, conversation, generation)"),
+		view.indexOf("const onResync")
+	);
+	assert.match(resolved, /if \(decision\.value\?\.token === token\) clearDecision\(\);/);
+});
+
+test("PWA fences a sheet and pending read to the view that started them", () => {
+	const view = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	assert.match(
+		view,
+		/import \{ advanceViewGeneration, isViewCurrent \} from "\.\.\/lib\/viewGeneration\.js";/
+	);
+	assert.match(view, /const decisionContext = ref\(null\)/);
+	assert.match(view, /function decisionIsCurrent\(token, conversation, generation\)/);
+	assert.match(view, /function openDecision\(card\)/);
+	assert.match(view, /viewGeneration = advanceViewGeneration\(viewGeneration\)/);
+	const switcher = view.slice(view.indexOf("() => props.id,"), view.indexOf("onMounted("));
+	assert.match(switcher, /clearDecision\(\);/);
+	assert.match(switcher, /inflightToken\.value = null;/);
+	assert.match(switcher, /\{ flush: "sync" \}/);
+	const loadPending = view.slice(
+		view.indexOf("async function loadPending("),
+		view.indexOf("// Auto-heal", view.indexOf("async function loadPending("))
+	);
+	assert.match(loadPending, /const generation = viewGeneration;/);
+	assert.match(loadPending, /if \(!isCurrent\(cid, generation\)\) return;/);
+	assert.match(view, /:view-generation="decisionContext\?\.generation \?\? viewGeneration"/);
+	assert.match(view, /@close="onDecisionClose"/);
+	assert.match(view, /@settled="onDecisionSettled"/);
+	assert.match(view, /@busy="onDecisionBusy"/);
+});
+
+test("DecisionSheet carries its original conversation and generation through async events", () => {
+	const sheet = fs.readFileSync(
+		new URL("../components/DecisionSheet.vue", import.meta.url),
+		"utf8"
+	);
+	assert.match(sheet, /viewGeneration: \{ type: Number, default: 0 \}/);
+	assert.match(sheet, /const conversation = props\.action\?\.conversation;/);
+	assert.match(sheet, /const generation = props\.viewGeneration;/);
+	assert.match(sheet, /emit\("settled", token, conversation, generation\)/);
+	assert.match(sheet, /emit\("busy", false, token, conversation, generation\)/);
+	assert.match(
+		sheet,
+		/emit\(\s*"close",\s*props\.action\?\.token,\s*props\.action\?\.conversation,\s*props\.viewGeneration\s*\)/
+	);
+	assert.match(sheet, /function actionIsCurrent\(token, conversation, generation\)/);
 });

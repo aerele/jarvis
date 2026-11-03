@@ -380,9 +380,10 @@ class _Readable:
 			return False
 		if self.state.get(name) is None and name in self.state:
 			try:
-				self.state[name] = bool(frappe.has_permission(self.doctype, "read", doc=name))
+				allowed = frappe.has_permission(self.doctype, "read", doc=name)
 			except frappe.DoesNotExistError:
-				self.state[name] = False
+				allowed = False
+			self.state[name] = bool(allowed)
 		return bool(self.state.get(name))
 
 

@@ -3,6 +3,7 @@ import json
 import frappe
 from frappe.desk.query_report import run as frappe_run_report
 
+from jarvis.chat import macro_report_wait
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools import _prepared_reports
 from jarvis.tools._report_scope import attach_scope, resolve_scope
@@ -24,17 +25,36 @@ def run_report(report_name: str, filters: dict | str | None = None) -> dict:
 	"""
 	if not report_name:
 		raise InvalidArgumentError("report_name is required")
+	filters = _normalize_filters(filters)
+	# Apply the FEFO scope gate before report lookup or execution. A forged
+	# request must not reveal another source or reach the report engine.
+	from jarvis.chat.agent_scope import assert_active_fefo_report_scope
+
+	assert_active_fefo_report_scope(report_name, filters)
+	# A snapshot-config delegate gets configuration only from its immutable Run.
+	# Saved report definitions are mutable data-access policy, so this execution-
+	# boundary guard refuses them even for an already-started run that still carries
+	# an old report declaration. New bundle contracts do not declare this tool.
+	from jarvis.tools import _delegate_capability
+
+	refusal = _delegate_capability.snapshot_config_report_refusal(report_name)
+	if refusal:
+		raise PermissionDeniedError(refusal)
 
 	if not frappe.db.exists("Report", report_name):
 		raise InvalidArgumentError(f"unknown Report: {report_name}")
-
-	filters, scope = resolve_scope(report_name, _normalize_filters(filters))
+	filters, scope = resolve_scope(report_name, filters)
 
 	# A raw get_value on the named report reads the correct flag even for a
 	# Custom Report (get_report_doc carries the custom doc's own prepared_report).
 	if frappe.db.get_value("Report", report_name, "prepared_report"):
+		# Inside a macro run's own step a copy must be as new as the run (see macro_report_wait).
+		ctx = macro_report_wait.current_context()
 		return attach_scope(
-			_prepared_reports.handle_prepared(report_name, filters, user=frappe.session.user), scope
+			_prepared_reports.handle_prepared(
+				report_name, filters, user=frappe.session.user, since=ctx.started_at if ctx else None
+			),
+			scope,
 		)
 
 	try:

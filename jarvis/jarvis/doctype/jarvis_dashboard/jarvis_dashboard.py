@@ -53,6 +53,7 @@ class ThemeStandardError(frappe.ValidationError):
 
 class JarvisDashboard(NotRenamable, Document):
 	def validate(self):
+		self._guard_immutable_deposit_report()
 		self._validate_title()
 		self._validate_theme()
 		self._validate_scope()
@@ -63,6 +64,27 @@ class JarvisDashboard(NotRenamable, Document):
 		# live data at view time", so the type simply reflects the sources table.
 		self.dashboard_type = "Connected" if (self.sources or []) else "Static"
 		self._validate_filters()
+
+	def on_trash(self):
+		self._guard_immutable_deposit_report()
+
+	def _guard_immutable_deposit_report(self):
+		"""Reject save/delete of a linked server-owned Deposit report.
+
+		The permission hook blocks normal Desk/API writes.  This controller guard
+		also covers ``ignore_permissions`` paths such as client set_value and force
+		delete.  A trusted retention job must first use the explicit link-release
+		route in dashboard_permissions.
+		"""
+		if self.is_new():
+			return
+		from jarvis.chat.dashboard_permissions import is_immutable_deposit_dashboard
+
+		if is_immutable_deposit_dashboard(self):
+			frappe.throw(
+				_("This payroll deposit report is immutable. Retention must release its run link first."),
+				frappe.PermissionError,
+			)
 
 	# ------------------------------------------------------------------ #
 	# validate

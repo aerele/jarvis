@@ -4,6 +4,8 @@
   wrong type, a link to a record that does not exist, a duplicate name). The assistant
   may correct only the fields named in the failure and ask again with a NEW card, once.
   A read stopped by the statement time limit is fixable too: a narrower question runs.
+  So is a read refused for returning too many rows (``ResultTooLargeError``): narrow the
+  filter or aggregate.
 - ``retry_later``: the site was busy (a deadlock, a lock wait that timed out, a lock
   held by another write). Nothing was saved; the user can try again in a moment.
 - ``not_fixable``: everything else (insufficient stock, credit limit, a closed period,
@@ -27,7 +29,7 @@ import re
 
 import frappe
 
-from jarvis.exceptions import InvalidFieldValueError, RetryLaterError
+from jarvis.exceptions import InvalidFieldValueError, ResultTooLargeError, RetryLaterError
 
 FIXABLE = "fixable"
 NOT_FIXABLE = "not_fixable"
@@ -53,6 +55,10 @@ FIXABLE_CLASSES: tuple[type[BaseException], ...] = (
 	InvalidFieldValueError,
 )
 
+# Read tools only (``query``, ``get_list``). Kept apart from FIXABLE_CLASSES: nothing
+# here is a field to correct, the remedy is a narrower question.
+NARROWABLE_CLASSES: tuple[type[BaseException], ...] = (ResultTooLargeError,)
+
 RETRY_LATER_CLASSES: tuple[type[BaseException], ...] = (
 	frappe.QueryDeadlockError,
 	frappe.QueryTimeoutError,
@@ -63,7 +69,7 @@ RETRY_LATER_CLASSES: tuple[type[BaseException], ...] = (
 # maps every FIXABLE class to ``InvalidArgumentError``). A ``kind`` next to any other
 # code is not trusted.
 _CODES_BY_KIND = {
-	FIXABLE: frozenset({"InvalidArgumentError", "QueryTooSlowError"}),
+	FIXABLE: frozenset({"InvalidArgumentError", "QueryTooSlowError", "ResultTooLargeError"}),
 	RETRY_LATER: frozenset({"RetryLaterError"}),
 }
 
@@ -155,7 +161,7 @@ def kind_of(exc: BaseException) -> str:
 		return NOT_FIXABLE
 	if isinstance(exc, RETRY_LATER_CLASSES):
 		return RETRY_LATER
-	if isinstance(exc, FIXABLE_CLASSES) or bad_date(exc) or too_slow(exc):
+	if isinstance(exc, FIXABLE_CLASSES + NARROWABLE_CLASSES) or bad_date(exc) or too_slow(exc):
 		return FIXABLE
 	return NOT_FIXABLE
 

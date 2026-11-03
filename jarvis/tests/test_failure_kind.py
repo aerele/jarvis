@@ -18,7 +18,12 @@ from jarvis import _failure_kind as fk
 from jarvis import api
 from jarvis.chat import actions_api
 from jarvis.chat import api as chat_api
-from jarvis.exceptions import InvalidArgumentError, InvalidFieldValueError, RetryLaterError
+from jarvis.exceptions import (
+	InvalidArgumentError,
+	InvalidFieldValueError,
+	ResultTooLargeError,
+	RetryLaterError,
+)
 from jarvis.tests import _erpnext_masters as masters
 
 # Every class the plan allows as FIXABLE, imported here so a silent addition or
@@ -73,6 +78,10 @@ class TestKindOf(FrappeTestCase):
 		):
 			with self.subTest(exc=type(exc).__name__):
 				self.assertEqual(fk.kind_of(exc), fk.NOT_FIXABLE)
+
+	def test_a_too_large_read_is_fixable_but_a_plain_invalid_argument_is_not(self):
+		self.assertEqual(fk.kind_of(ResultTooLargeError(909, 200, "query")), fk.FIXABLE)
+		self.assertEqual(fk.kind_of(InvalidArgumentError("x")), fk.NOT_FIXABLE)
 
 	def test_a_refusal_code_is_never_fixable(self):
 		class Refused(frappe.MandatoryError):
@@ -130,6 +139,8 @@ class TestEnvelopeKind(FrappeTestCase):
 		rows = [
 			({"ok": False, "error": {"code": "InvalidArgumentError", "kind": "fixable"}}, fk.FIXABLE),
 			({"ok": False, "error": {"code": "RetryLaterError", "kind": "retry_later"}}, fk.RETRY_LATER),
+			({"ok": False, "error": {"code": "ResultTooLargeError", "kind": "fixable"}}, fk.FIXABLE),
+			({"ok": False, "error": {"code": "ResultTooLargeError", "kind": "not_fixable"}}, fk.NOT_FIXABLE),
 			({"ok": False, "error": {"code": "InvalidArgumentError", "message": "x"}}, fk.NOT_FIXABLE),
 			({"ok": False, "error": {"code": "SomeNewCode", "kind": "fixable"}}, fk.NOT_FIXABLE),
 			({"ok": False, "error": {"code": "RetryLaterError", "kind": "fixable"}}, fk.NOT_FIXABLE),
@@ -194,6 +205,17 @@ class TestRealSavesClassified(FrappeTestCase):
 		self.assertEqual(
 			(r["ok"], r["error"]["code"], r["error"]["kind"]), (False, "InvalidArgumentError", "not_fixable")
 		)
+
+	def test_a_too_large_read_is_fixable_with_a_narrowing_hint(self):
+		def _too_large(tool, args):
+			raise ResultTooLargeError(909, 200, "query")
+
+		with patch("jarvis.api.dispatch", side_effect=_too_large):
+			r = api._dispatch_and_wrap("query", {"from": "ToDo"}, False)
+		self.assertEqual(
+			(r["ok"], r["error"]["code"], r["error"]["kind"]), (False, "ResultTooLargeError", "fixable")
+		)
+		self.assertIn("GROUP BY", r["error"]["hint"])
 
 	def test_a_deadlock_is_retry_later_and_enveloped(self):
 		def _deadlock(tool, args):

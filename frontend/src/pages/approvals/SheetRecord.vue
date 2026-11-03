@@ -9,7 +9,7 @@
 		:aria-labelledby="rowId + '-title'"
 		:aria-describedby="describedBy || undefined"
 	>
-		<div class="flex flex-wrap items-start gap-x-3 gap-y-2">
+		<div class="jv-sheet-record-heading flex flex-wrap items-start gap-x-3 gap-y-2">
 			<div class="min-w-0 flex-1">
 				<div class="flex flex-wrap items-center gap-2">
 					<span class="text-sm tabular-nums text-ink-gray-5">#{{ n }}</span>
@@ -18,7 +18,12 @@
 						class="min-w-0 truncate text-base font-medium text-ink-gray-9"
 						>{{ record.title || record.name || record.doctype }}</span
 					>
-					<Badge variant="subtle" theme="gray" :label="record.doctype" />
+					<Badge
+						v-if="record.category !== 'settings'"
+						variant="subtle"
+						theme="gray"
+						:label="record.doctype"
+					/>
 					<Badge
 						v-if="record.op === 'update'"
 						variant="subtle"

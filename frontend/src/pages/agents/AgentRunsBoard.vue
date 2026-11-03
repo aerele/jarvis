@@ -214,6 +214,18 @@
 			     title, an action-button row), which is how the row overflowed
 			     the page instead of the CONTENT wrapping/scrolling in place. -->
 			<div class="min-w-0 flex-1 overflow-y-auto">
+				<div v-if="agentName === 'reorder-replenishment-operator'" class="border-b p-5">
+					<p class="text-sm text-ink-gray-6">
+						The named reviewer can open the purchase suggestions for this run. Approval
+						does not create a Material Request.
+					</p>
+					<Button
+						class="mt-3"
+						label="Open buyer review"
+						:disabled="!selectedRun || selectedRun.status !== 'completed'"
+						@click="router.push('/reorder-reviews')"
+					/>
+				</div>
 				<!-- PP-4 shadow banner: the honest "Preview (shadow) - not a compliant
 				     attestation" statement must live in the reviewer's primary screen,
 				     not only in the detached fallback-dashboard HTML. Shown whenever the
