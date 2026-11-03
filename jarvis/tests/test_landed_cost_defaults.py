@@ -27,6 +27,7 @@ class LandedCostFixtures(FrappeTestCase):
 		):
 			raise unittest.SkipTest("ERPNext does not have vendor-invoice cost fetching")
 		frappe.set_user("Administrator")
+		masters.ensure_party_type("Supplier", "Payable")
 		cls.company = masters.ensure_ledger_company()
 		masters.ensure_fiscal_years(nowdate())
 		masters.ensure_item_group_and_uom()
