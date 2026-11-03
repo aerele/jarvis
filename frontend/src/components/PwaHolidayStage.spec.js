@@ -73,6 +73,7 @@ const RECT_TABLE = {
 	mark: [167, 240, 56, 56],
 	heading: [80, 310, 230, 26],
 	cards: [14, 520, 362, 190],
+	leadup: [60, 336, 270, 44], // the advance line, on a lead-up day only
 };
 let RECTS;
 let hostHeight;
@@ -130,6 +131,8 @@ function mountStage(props = {}, options = {}) {
 					h("div", { "data-hs": "hero" }, [
 						h("div", { "data-hs": "mark" }),
 						h("h1", { "data-hs": "heading" }, p.showDay ? "day" : "normal"),
+						holidayTouch.answer.value.kind === "leadup" &&
+							h("p", { "data-hs": "leadup" }, "advance"),
 					]),
 					h(
 						"div",
@@ -242,6 +245,27 @@ describe("PWA HolidayStage", () => {
 			mark: { x: 167, y: 240, w: 56, h: 56 },
 			cards: { y: 520 },
 		});
+	});
+
+	it("a lead-up day plays too, and the advance line is inside the hero box the scene keeps clear of", async () => {
+		await today_is(answer({ kind: "leadup", date: today() }));
+		const { mod, made } = fakeScenes();
+		mountStage();
+		expect(slot.active).toBe(true);
+		expect(cardsHidden()).toBe(true);
+		await flushPromises();
+		expect(api.recordHolidayShown).toHaveBeenCalledTimes(1);
+		expect(mod.play).toHaveBeenCalledTimes(1);
+		// The mark (y 240-296), heading (310-336) and advance line (336-380) together.
+		expect(made[0].opts.getBoxes()).toMatchObject({ hero: { x: 60, y: 240, w: 270, h: 140 } });
+	});
+
+	it("a day's hero box is the mark and heading alone", async () => {
+		await today_is(answer());
+		const { made } = fakeScenes();
+		mountStage();
+		await flushPromises();
+		expect(made[0].opts.getBoxes()).toMatchObject({ hero: { x: 80, y: 240, w: 230, h: 96 } });
 	});
 
 	it("puts the art's theme on its own wrapper: pinned, or the system's when not pinned", async () => {

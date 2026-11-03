@@ -14,7 +14,7 @@
 			"occasion": "diwali",
 			"year": null,
 			"worn": true,
-			"scene": false,
+			"scene": true,
 			"may_play": true
 		}
 	},
