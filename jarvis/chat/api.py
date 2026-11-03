@@ -106,6 +106,7 @@ def _att_canvas_item(att: dict) -> dict:
 		"name": frappe.generate_hash(length=10),
 		"type": kind,
 		"file_url": att["file_url"],
+		"file_id": att.get("file_id"),
 		"title": att.get("file_name") or ("image" if kind == "image" else "file"),
 	}
 
@@ -882,7 +883,19 @@ TOOL_RESULT_INLINE_MAX = 2048
 # lib/docRefs.js, actionSummary.toolFailureCopy): everything else waits for
 # get_tool_detail, which the Activity view calls when a tool row is expanded.
 _COMPACT_RESULT_KEYS = ("ok", "error")
-_COMPACT_DATA_KEYS = ("doctype", "name", "report_scope", "prepared_report", "status", "as_of", "row_note")
+_COMPACT_DATA_KEYS = (
+	"doctype",
+	"name",
+	"report_scope",
+	"prepared_report",
+	"status",
+	"as_of",
+	"row_note",
+	"read_status",
+	"preview_complete",
+	"coverage",
+	"run",
+)
 
 
 def _history_page(conversation: str, fields: list, limit, before, refresh, after=0) -> dict:
