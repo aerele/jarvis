@@ -42,7 +42,7 @@ import re
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
-from jarvis.learning import source_guard
+from jarvis.learning import app_source_receipts, source_guard
 from jarvis.tools import _app_learning_ctx as ctx
 
 # Body cap matches the wiki controller's MAX_BODY_LEN; the funnel clips too, but
@@ -109,6 +109,32 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	default_app = (app or "").strip()
 
 	raw = _as_list(pages)
+	# Lock and validate the run-owned authority BEFORE a model-authored page is
+	# accepted. The receipt is not a tool argument: every citation is checked
+	# against this server-held row under the same lock as the wiki write/tally.
+	locked = ctx.lock_run_budget(
+		run_name,
+		[
+			"pages_written",
+			"source_selection_json",
+			"permission_profile",
+			"source_receipt_json",
+		],
+	)
+	already = int(locked.get("pages_written") or 0)
+	if locked.get("status") != "running":
+		return {
+			"run": run_name,
+			"applied": 0,
+			"failed": 0,
+			"rejected": 0,
+			"guard_violations": [],
+			"pages_remaining": max(0, ctx.PER_RUN_PAGE_CAP - already),
+			"truncated": False,
+			"slugs": [],
+			"idempotent": 0,
+		}
+	selection, profile_digest = ctx.source_selection_from_row(locked, run_name)
 	# Each accepted page is kept as a flat entry {app, slug, title, update} in
 	# arrival order, so an outcome can be mapped back to the EXACT page it wrote
 	# (see the writeback loop). ``update`` carries the funnel payload; app/slug/
@@ -116,6 +142,9 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	accepted: list[dict] = []
 	rejected = 0
 	guard_tripped: list[str] = []
+	idempotent = 0
+	batch_keys: set[str] = set()
+	receipt = None
 	for item in raw:
 		if not isinstance(item, dict):
 			continue
@@ -153,45 +182,69 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 		if not slug:
 			rejected += 1
 			continue
+		try:
+			page_receipt, source_paths, evidence_digest, caveats = app_source_receipts.verify_page_sources(
+				locked,
+				run_name=run_name,
+				app=page_app,
+				source_paths=item.get("source_paths"),
+				selection=selection,
+				profile_digest=profile_digest,
+			)
+			if receipt is None:
+				receipt = page_receipt
+		except InvalidArgumentError:
+			rejected += 1
+			continue
+		mode = "append" if str(item.get("mode") or "").strip().lower() == "append" else "create"
+		body_digest = app_source_receipts.page_body_digest(
+			app=page_app,
+			stable_key=page_key,
+			title=title,
+			page_type=page_type,
+			mode=mode,
+			body=body,
+			source_paths=source_paths,
+			evidence_digest=evidence_digest,
+		)
+		write_key = app_source_receipts.page_write_key(page_app, page_key)
+		if write_key in batch_keys:
+			rejected += 1
+			continue
+		batch_keys.add(write_key)
+		try:
+			if app_source_receipts.retry_state(
+				page_receipt,
+				app=page_app,
+				stable_key=page_key,
+				body_digest=body_digest,
+				evidence_digest=evidence_digest,
+			):
+				idempotent += 1
+				continue
+		except InvalidArgumentError:
+			rejected += 1
+			continue
+		attestation = app_source_receipts.coverage_attestation(len(source_paths), caveats)
+		body = (body[: max(0, _BODY_CLIP - len(attestation))] + attestation).strip()
 		update = {"slug": slug, "title": title, "page_type": page_type, "scope": "Org"}
-		if str(item.get("mode") or "").strip().lower() == "append":
+		if mode == "append":
 			update["append_md"] = body
 		else:
 			update["body_md"] = body
-		accepted.append({"app": page_app, "slug": slug, "title": title, "update": update})
+		accepted.append(
+			{
+				"app": page_app,
+				"slug": slug,
+				"title": title,
+				"stable_key": page_key,
+				"body_digest": body_digest,
+				"evidence_digest": evidence_digest,
+				"update": update,
+			}
+		)
 
 	total = len(accepted)
-
-	# CA3-1 + CA4-1: LOCK the run row + verify it is STILL ``running`` (``for_update``) BEFORE
-	# ANY budget/truncation work, and HOLD that lock through the page writes + tally + the
-	# request-end commit. Two properties ride on acquiring the lock FIRST:
-	#   * CA4-1 — the per-run page budget is read UNDER this lock (below), so two writebacks for
-	#     the SAME run serialize on this row: the second reads the budget only AFTER the first's
-	#     pages + durable ``pages_written`` tally are committed, so they can never both reserve
-	#     the full remaining allowance (a soft-cap overrun);
-	#   * CA3-1 — it orders the writeback AHEAD of the stale-run sweep on the SAME row: a sweep
-	#     that reaches this run now BLOCKS on the row lock until we commit, then sees a running
-	#     run with our pages durably tallied — so it can never fail a run whose writeback is in
-	#     progress, and our pages can never land on a row it already terminalized.
-	# A run finalized (cancelled / reaped / finished) in the window between ``resolve_scribe_run``
-	# and here is refused with the normal shape: nothing is written, nothing tallied, no budget
-	# consumed — and its ``pages_remaining`` is read under the lock too, so it stays honest.
-	locked = ctx.lock_run_budget(run_name, ["pages_written"])
-	# CX5-3: ``pages_written`` on the LOCKED row is the durable page tally — the same
-	# column ``_tally_run`` advances in this transaction. A cache outage can no longer
-	# reset the cap to zero, and ``lock_run_budget`` fails closed if the row is gone.
-	already = int(locked.get("pages_written") or 0)
-	if locked.get("status") != "running":
-		return {
-			"run": run_name,
-			"applied": 0,
-			"failed": 0,
-			"rejected": rejected,
-			"guard_violations": sorted(set(guard_tripped)),
-			"pages_remaining": max(0, ctx.PER_RUN_PAGE_CAP - already),
-			"truncated": False,  # nothing written -> nothing truncated
-			"slugs": [],
-		}
 
 	# Per-run page cap: bound how many pages one run may write. Read UNDER the run-row lock
 	# (above) so ``already`` reflects any prior writeback for this run that committed before
@@ -213,11 +266,12 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 			marker = f"\n\n_Partial coverage: {dropped} further page(s) exceeded the per-run cap and were not written._"
 			last[key] = (last[key] + marker)[:_BODY_CLIP]
 
-	# Group into per-app batches (order preserved) so each app's pages are stamped
-	# with their own provenance source (``app-learning-agent:<app>``).
-	by_app: dict[str, list[dict]] = {}
+	# Group by app + opaque server evidence digest. The provenance records that the
+	# page came from a verified source snapshot without exposing a source path or
+	# source text in the Org wiki.
+	by_app: dict[tuple[str, str], list[dict]] = {}
 	for entry in accepted:
-		by_app.setdefault(entry["app"], []).append(entry)
+		by_app.setdefault((entry["app"], entry["evidence_digest"]), []).append(entry)
 
 	# Apply through the funnel and record ONLY the pages actually written: the
 	# per-update outcome is zipped back to its accepted entry, so a refused
@@ -226,20 +280,26 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	applied = 0
 	failed = 0
 	applied_pages: list[dict] = []
-	for page_app, entries in by_app.items():
+	applied_entries: list[dict] = []
+	for (page_app, evidence_digest), entries in by_app.items():
 		for i in range(0, len(entries), MAX_PAGES_PER_NOTE):
 			chunk = entries[i : i + MAX_PAGES_PER_NOTE]
 			outcomes = apply_extracted_page_updates(
 				[e["update"] for e in chunk],
-				source=f"{PROVENANCE_KIND_PREFIX}{page_app}",
+				source=f"{PROVENANCE_KIND_PREFIX}{page_app}:receipt:{evidence_digest[:16]}",
 				user=frappe.session.user,
 				ref=run["name"],
 				provenance_prefix=PROVENANCE_FENCE_PREFIX,
 				return_outcomes=True,
+				# The signed receipt time is a server-owned generation boundary. The
+				# funnel checks it again under the target page lock, so this older
+				# run cannot replace a page a later run has already refreshed.
+				provenance_not_after=receipt["issued_at"],
 			)
 			for entry, outcome in zip(chunk, outcomes, strict=True):
 				if outcome["ok"]:
 					applied += 1
+					applied_entries.append(entry)
 					applied_pages.append(
 						{"app": entry["app"], "slug": entry["slug"], "title": entry["title"]}
 					)
@@ -252,6 +312,26 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 	# than leaking it, and a retry sees the FULL remaining capacity. The separate
 	# after-commit cache increment this replaced could diverge from the pages it metered.
 	_tally_run(run_name, applied_pages, truncated, dropped, guard_tripped=bool(guard_tripped))
+	if applied_entries:
+		# Persist exact page-write markers in the same transaction as page/tally.
+		# A duplicate callback may then report an idempotent result, but it can never
+		# overwrite a page a later run has refreshed.
+		for entry in applied_entries:
+			app_source_receipts.record_page_write(
+				receipt,
+				app=entry["app"],
+				stable_key=entry["stable_key"],
+				slug=entry["slug"],
+				body_digest=entry["body_digest"],
+				evidence_digest=entry["evidence_digest"],
+			)
+		frappe.db.set_value(
+			RUN,
+			run_name,
+			"source_receipt_json",
+			app_source_receipts.encode_receipt(receipt),
+			update_modified=False,
+		)
 	return {
 		"run": run_name,
 		"applied": applied,
@@ -265,6 +345,7 @@ def record_app_wiki(pages=None, app: str | None = None) -> dict:
 		"pages_remaining": max(0, remaining - applied),
 		"truncated": truncated,
 		"slugs": [m["slug"] for m in applied_pages],
+		"idempotent": idempotent,
 	}
 
 
