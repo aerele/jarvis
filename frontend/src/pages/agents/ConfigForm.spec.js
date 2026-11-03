@@ -67,7 +67,7 @@ vi.mock("frappe-ui", () => ({
 	},
 	FormControl: {
 		name: "FormControl",
-		props: ["modelValue", "type", "label", "options", "description"],
+		props: ["modelValue", "type", "label", "options", "description", "maxlength"],
 		emits: ["update:modelValue"],
 		template: `<div>
 			<span class="fc-label">{{ label }}</span>
@@ -89,6 +89,7 @@ vi.mock("frappe-ui", () => ({
 				v-else
 				:data-label="label"
 				:type="type"
+				:maxlength="maxlength"
 				:value="modelValue"
 				@input="$emit('update:modelValue', $event.target.value)"
 			/>
@@ -115,6 +116,12 @@ function fiscalYearPicker(wrapper) {
 	return wrapper
 		.findAllComponents({ name: "Autocomplete" })
 		.find((component) => component.props("placeholder") === "Search Fiscal Year…");
+}
+
+function slaTeamPicker(wrapper) {
+	return wrapper
+		.findAllComponents({ name: "Autocomplete" })
+		.find((component) => component.props("placeholder") === "Search HD Team…");
 }
 
 function apDefaults(company = "Example") {
@@ -878,6 +885,118 @@ describe("per-agent gating via the configKeys prop", () => {
 		expect(w.text()).toContain("This agent has no additional settings.");
 	});
 
+	it("GRN hygiene dot paths render the receiving fields and save their namespace", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		expect(w.text()).toContain("Receiving reviewer");
+		expect(w.text()).toContain("Test declaration");
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+
+		await field(w, "Receiving reviewer").setValue("Receiving Controller");
+		await field(w, "Test declaration").setValue("Pre-release review");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			grn_hygiene: {
+				reviewer: "Receiving Controller",
+				test_declaration: "Pre-release review",
+			},
+		});
+	});
+
+	it("lets incomplete GRN hygiene setup save and explains the run-time reviewer requirement", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		expect(w.text()).toContain("Required before a run.");
+		expect(w.text()).toContain("You can save this blank while you finish setup.");
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({});
+	});
+
+	it("bounds GRN text in the input and on save, then lets the user recover", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		const reviewer = field(w, "Receiving reviewer");
+		const declaration = field(w, "Test declaration");
+		expect(reviewer.attributes("maxlength")).toBe("140");
+		expect(declaration.attributes("maxlength")).toBe("500");
+
+		// A programmatic input event can bypass the browser maxlength guard.
+		// Save must still reject a value the native bundle will reject.
+		await reviewer.setValue("r".repeat(141));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")).toBeUndefined();
+		expect(w.text()).toContain('"Receiving reviewer" must be at most 140 characters.');
+
+		await reviewer.setValue("r".repeat(140));
+		await declaration.setValue("d".repeat(501));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")).toBeUndefined();
+		expect(w.text()).toContain('"Test declaration" must be at most 500 characters.');
+
+		await declaration.setValue("d".repeat(500));
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			grn_hygiene: {
+				reviewer: "r".repeat(140),
+				test_declaration: "d".repeat(500),
+			},
+		});
+		expect(w.text()).not.toContain('"Receiving reviewer" must be at most 140 characters.');
+		expect(w.text()).not.toContain('"Test declaration" must be at most 500 characters.');
+	});
+
+	it("GRN hygiene fields load saved values and leave only unrelated values in Advanced JSON", async () => {
+		const configKeys = ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"];
+		const config = {
+			grn_hygiene: {
+				reviewer: "Receiving Controller",
+				test_declaration: "Pre-release review",
+			},
+			custom_flag: true,
+		};
+		const w = mountForm(config, { configKeys });
+		expect(field(w, "Receiving reviewer").element.value).toBe("Receiving Controller");
+		expect(field(w, "Test declaration").element.value).toBe("Pre-release review");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({ custom_flag: true });
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual(config);
+	});
+
+	it("GRN hygiene omits an empty optional test declaration", async () => {
+		const w = mountForm(
+			{},
+			{
+				configKeys: ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
+			}
+		);
+		await field(w, "Receiving reviewer").setValue("Receiving Controller");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		const saved = w.emitted("save")[0][0];
+		expect(saved).toEqual({ grn_hygiene: { reviewer: "Receiving Controller" } });
+		expect(saved.grn_hygiene).not.toHaveProperty("test_declaration");
+	});
+
+	it("a bare GRN hygiene namespace in configKeys renders no fields", () => {
+		const w = mountForm({}, { configKeys: ["grn_hygiene"] });
+		expect(w.text()).not.toContain("Receiving reviewer");
+		expect(w.text()).not.toContain("Test declaration");
+		expect(w.text()).toContain("This agent has no additional settings.");
+	});
+
 	it("the full configKeys set (close-auditor) renders every agent-specific field, no note", () => {
 		const w = mountForm({});
 		expect(w.text()).not.toContain("This agent has no additional settings.");
@@ -924,6 +1043,55 @@ describe("per-agent gating via the configKeys prop", () => {
 		const w = mountForm({}, { configKeys: [] });
 		await w.find('[data-label="Save configuration"]').trigger("click");
 		expect(w.emitted("save")[0][0]).toEqual({});
+	});
+});
+
+describe("SLA-breach Helpdesk-team configuration", () => {
+	const configKeys = ["sla_config"];
+	const agentSlug = "sla-breach-ageing-auditor";
+
+	it("shows a readable HD Team picker and saves its exact top-level record scope", async () => {
+		api.searchLink.mockResolvedValue([{ value: "Support East" }]);
+		const w = mountForm({}, { configKeys, agentSlug });
+		expect(w.text()).toContain("Select one readable Helpdesk team");
+		expect(w.text()).toContain("Helpdesk team");
+		expect(w.text()).not.toContain("Materiality benchmark amount");
+
+		const picker = slaTeamPicker(w);
+		await picker.find("input").trigger("focusin");
+		await flushPromises();
+		await picker.find('[data-option="Support East"]').trigger("click");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+
+		expect(w.emitted("save")[0][0]).toEqual({
+			record_scope: { doctype: "HD Team", name: "Support East" },
+		});
+	});
+
+	it("pre-fills the selected team and keeps a saved scope issue visible", () => {
+		const scope = { doctype: "HD Team", name: "Support East" };
+		const w = mountForm(
+			{ record_scope: scope },
+			{
+				configKeys,
+				agentSlug,
+				validationErrors: { sla_team: "Select one readable HD Team record." },
+			}
+		);
+		expect(slaTeamPicker(w).props("modelValue")).toEqual({
+			label: "Support East",
+			value: "Support East",
+		});
+		expect(w.text()).toContain("Select one readable HD Team record.");
+	});
+
+	it("does not expose or rewrite a record scope for another agent", async () => {
+		const record_scope = { doctype: "HD Team", name: "Support East" };
+		const w = mountForm({ record_scope }, { configKeys, agentSlug: "close-auditor" });
+		expect(w.text()).not.toContain("Helpdesk team");
+		expect(JSON.parse(w.find("textarea").element.value)).toEqual({ record_scope });
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({ record_scope });
 	});
 });
 

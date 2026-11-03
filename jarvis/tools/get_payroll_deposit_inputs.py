@@ -52,7 +52,9 @@ def get_payroll_deposit_inputs() -> dict:
 		or run.get("status") != "running"
 	):
 		raise InvalidArgumentError("Payroll deposit evidence requires its active private delegate run.")
-	return source_envelope(payroll_deposit_snapshot.capture(frappe._dict(run)))
+	return source_envelope(
+		payroll_deposit_snapshot.capture(frappe._dict(run)), tool="get_payroll_deposit_inputs"
+	)
 
 
 def _private_output_allowed(cap) -> bool:

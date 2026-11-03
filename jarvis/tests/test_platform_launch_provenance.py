@@ -254,7 +254,9 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 		admin_client.post_agent_run = _cap
 		frappe.set_user(self.triggerer)  # A (a System Manager) triggers B's install
 		try:
-			result = agents_api.run_agent_now(inst_name)
+			# This case checks identity; unrelated site activity must not exhaust its budget.
+			with mock.patch.object(agent_scheduler, "_agent_run_budget_monthly", return_value=1000000):
+				result = agents_api.run_agent_now(inst_name)
 			# The caller's own session is intact after the impersonated launch.
 			self.assertEqual(frappe.session.user, self.triggerer)
 		finally:

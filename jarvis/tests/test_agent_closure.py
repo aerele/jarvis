@@ -112,7 +112,7 @@ def _make_safe_listing() -> None:
 
 
 class TestAgentClosureContracts(FrappeTestCase):
-	def test_static_registry_and_catalog_contract_close_both_agents(self):
+	def test_static_registry_retains_both_fences_and_only_pinned_native_release(self):
 		self.assertEqual(
 			{spec.slug for spec in CLOSED_AGENT_SPECS},
 			{
@@ -131,6 +131,14 @@ class TestAgentClosureContracts(FrappeTestCase):
 		}
 		for spec in CLOSED_AGENT_SPECS:
 			contract = registry[spec.slug]
+			release = agent_closure.native_release_spec(spec.slug)
+			if release:
+				self.assertEqual(spec.slug, "ticket-triage-operator")
+				self.assertEqual(contract["version"], "0.2.0")
+				self.assertEqual(contract["status"], "Published")
+				self.assertEqual(contract["tools_allow"], list(release.tools))
+				self.assertIsNone(contract["writes"])
+				continue
 			self.assertEqual(contract["status"], CLOSED_STATUS)
 			self.assertEqual(contract["tools_required"], [])
 			self.assertEqual(contract["tools_allow"], [])
@@ -490,18 +498,19 @@ class TestAgentClosureIntegration(FrappeTestCase):
 	def test_both_agents_refuse_opening_routes_and_fleet_payload(self):
 		for spec in CLOSED_AGENT_SPECS:
 			frappe.db.set_value(LISTING, spec.slug, "status", "Published", update_modified=False)
-			with self.assertRaises(frappe.PermissionError):
-				agents_api.set_listing_status(spec.slug, "Published")
+			if agent_closure.is_closed_agent(spec.slug):
+				with self.assertRaises(frappe.PermissionError):
+					agents_api.set_listing_status(spec.slug, "Published")
 
-			listing = frappe.get_doc(LISTING, spec.slug)
-			listing.status = "Published"
-			with self.assertRaises(frappe.PermissionError):
-				listing.save(ignore_permissions=True)
+				listing = frappe.get_doc(LISTING, spec.slug)
+				listing.status = "Published"
+				with self.assertRaises(frappe.PermissionError):
+					listing.save(ignore_permissions=True)
 
-			frappe.set_user(OWNER)
-			with self.assertRaises(frappe.PermissionError):
-				agents_api.install_agent(spec.slug)
-			frappe.set_user("Administrator")
+				frappe.set_user(OWNER)
+				with self.assertRaises(frappe.PermissionError):
+					agents_api.install_agent(spec.slug)
+				frappe.set_user("Administrator")
 
 			installation = self._legacy_install(spec, enabled=1, schedule_enabled=1)
 			with self.assertRaises(frappe.PermissionError):
@@ -529,13 +538,14 @@ class TestAgentClosureIntegration(FrappeTestCase):
 			frappe.db.set_value(LISTING, spec.slug, "status", "Published", update_modified=False)
 			frappe.db.set_value(INSTALLATION, installation, "enabled", 1, update_modified=False)
 
-		for payload in (
-			agent_catalog.build_agent_push_payload(),
-			agent_catalog.build_agent_push_payload(owner=OWNER),
-		):
+		# An owner payload must never advertise the stale installed version. The
+		# separate fleet listing leg may advertise a granted native release.
+		for owner in (None, OWNER):
+			payload = agent_catalog.build_agent_push_payload(owner=owner)
 			slugs = {entry["slug"] for entry in payload}
 			for spec in CLOSED_AGENT_SPECS:
-				self.assertNotIn(f"agent-{spec.slug}", slugs)
+				if owner or agent_closure.is_closed_agent(spec.slug):
+					self.assertNotIn(f"agent-{spec.slug}", slugs)
 
 	def test_scheduler_retires_raw_rows_without_dispatch_for_both_agents(self):
 		for spec in CLOSED_AGENT_SPECS:

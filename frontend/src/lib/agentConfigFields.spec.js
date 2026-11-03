@@ -45,10 +45,13 @@ describe("CONFIG_FIELD_SET", () => {
 				"fiscal_year",
 				"from_date",
 				"to_date",
+				"sla_team",
 				"benchmark_value",
 				"percentage",
 				"engagement_risk_level",
 				"rounding_step",
+				"grn_hygiene_reviewer",
+				"grn_hygiene_test_declaration",
 				"deposit",
 				"annual_aggregate_turnover",
 				"same_hsn_rate_allowlist",
@@ -59,7 +62,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders scope, the materiality and deposit sets, then the vendor-ledger ageing floors", () => {
+	it("orders scope, the SLA team, materiality, GRN and Deposit settings, then the vendor-ledger ageing floors", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -73,10 +76,13 @@ describe("CONFIG_FIELD_SET", () => {
 			"company",
 			"fiscal_year",
 			"from_date/to_date",
+			"sla_team",
 			"benchmark_value",
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"grn_hygiene_reviewer",
+			"grn_hygiene_test_declaration",
 			"deposit",
 			"annual_aggregate_turnover",
 			"same_hsn_rate_allowlist",
@@ -94,12 +100,24 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(byKey.fiscal_year).toMatchObject({ type: "link", linkDoctype: "Fiscal Year" });
 	});
 
+	it("the SLA team field writes the exact HD Team record-scope shape", () => {
+		const field = CONFIG_FIELD_SET.find((entry) => entry.key === "sla_team");
+		expect(field).toMatchObject({
+			path: "record_scope",
+			type: "link",
+			linkDoctype: "HD Team",
+			recordScopeDoctype: "HD Team",
+			configKey: "sla_config",
+			agentSlugs: ["sla-breach-ageing-auditor"],
+		});
+	});
+
 	it("engagement_risk_level offers exactly Low/Medium/High plus an unset option", () => {
 		const field = CONFIG_FIELD_SET.find((f) => f.key === "engagement_risk_level");
 		expect(field.options.map((o) => o.value)).toEqual(["", "low", "medium", "high"]);
 	});
 
-	it("the materiality amounts, GST turnover, and ageing floors are numeric", () => {
+	it("materiality, GST turnover and ageing floors are numeric; GRN settings are text", () => {
 		expect(NUMBER_CONFIG_KEYS.sort()).toEqual(
 			[
 				"settlement_hold_days",
@@ -114,6 +132,8 @@ describe("CONFIG_FIELD_SET", () => {
 				"grir_floor_days",
 			].sort()
 		);
+		expect(NUMBER_CONFIG_KEYS).not.toContain("grn_hygiene_reviewer");
+		expect(NUMBER_CONFIG_KEYS).not.toContain("grn_hygiene_test_declaration");
 	});
 
 	it("declares the payroll deposit panel at its one nested namespace", () => {
@@ -145,7 +165,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes deposit, materiality, GST, and vendor-ledger settings", () => {
+	it("agent-specific includes SLA, materiality, GRN, Deposit, GST and vendor-ledger settings", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -155,10 +175,13 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"price_tolerance_percent",
 			"basis",
 			"review_scope",
+			"sla_team",
 			"benchmark_value",
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"grn_hygiene_reviewer",
+			"grn_hygiene_test_declaration",
 			"deposit",
 			"annual_aggregate_turnover",
 			"same_hsn_rate_allowlist",
@@ -190,11 +213,17 @@ describe("KEY_TO_PATH (local form key -> storage dot path)", () => {
 		expect(KEY_TO_PATH.to_date).toBe("to_date");
 	});
 
-	it("the materiality keys are nested dot paths", () => {
+	it("the SLA team local key maps to the top-level record scope", () => {
+		expect(KEY_TO_PATH.sla_team).toBe("record_scope");
+	});
+
+	it("the materiality and GRN keys are nested dot paths", () => {
 		expect(KEY_TO_PATH.benchmark_value).toBe("materiality.benchmark_value");
 		expect(KEY_TO_PATH.percentage).toBe("materiality.percentage");
 		expect(KEY_TO_PATH.engagement_risk_level).toBe("materiality.engagement_risk_level");
 		expect(KEY_TO_PATH.rounding_step).toBe("materiality.rounding_step");
+		expect(KEY_TO_PATH.grn_hygiene_reviewer).toBe("grn_hygiene.reviewer");
+		expect(KEY_TO_PATH.grn_hygiene_test_declaration).toBe("grn_hygiene.test_declaration");
 	});
 
 	it("the deposit panel owns the whole declared namespace", () => {

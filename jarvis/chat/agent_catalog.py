@@ -82,6 +82,34 @@ def _load_registry() -> dict:
 	return frappe.get_file_json(_REGISTRY_PATH)
 
 
+def _is_coming_soon_no_runtime(agent) -> bool:
+	"""True for the reviewed no-runtime teaser shape in the bundled registry."""
+	return bool(
+		isinstance(agent, dict)
+		and agent.get("status") == "Coming Soon"
+		and agent.get("tools_required") == []
+		and agent.get("tools_allow") == []
+		and agent.get("doctypes_required") == []
+		and agent.get("writes") is None
+	)
+
+
+def registry_is_coming_soon_no_runtime(agent_slug: str) -> bool:
+	"""Whether a bundled agent is a fixed no-runtime Coming Soon teaser.
+
+	A mutable marketplace listing cannot make this reviewed bundle runnable. The
+	strict registry shape deliberately leaves ordinary Coming Soon agents with a
+	real reviewed tool surface alone.
+	"""
+	slug = (agent_slug or "").strip()
+	if not slug:
+		return False
+	for agent in _load_registry().get("agents") or []:
+		if isinstance(agent, dict) and (agent.get("agent_slug") or "").strip() == slug:
+			return _is_coming_soon_no_runtime(agent)
+	return False
+
+
 # --------------------------------------------------------------------------- #
 # sync
 # --------------------------------------------------------------------------- #
@@ -160,6 +188,10 @@ def sync_agent_listings() -> dict:
 			# (company/fiscal_year/from_date/to_date, which stay flat). Drives
 			# ConfigForm.vue's per-agent field set; [] for an agent with none.
 			"config_keys": frappe.as_json(a.get("config_keys") or []),
+			# A6: explicit bundle capability for the optional record boundary. A
+			# missing or malformed registry value stays false, so an old registry
+			# can never enable scope injection by accident.
+			"supports_record_scope": 1 if a.get("supports_record_scope") is True else 0,
 			# A2/A16: the delegate auditor's OPAQUE rule-token set, id-only. The
 			# bench needs it to validate a finding's rule in record_agent_run
 			# without ever holding a rule body/threshold. Empty for operators /
@@ -319,7 +351,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	gates)."""
 	# Lazy import — agents_api imports build_agent_push_payload from this module
 	# at module level, so a top-level back-import would be circular.
-	from jarvis.chat.agent_closure import is_closed_agent
+	from jarvis.chat.agent_closure import is_closed_agent, is_closed_installation
 	from jarvis.chat.agents_api import _allowed_roles_map, _allowed_users_map, _is_allowed
 
 	# The whole catalog's grants in TWO queries, shared by both legs. The install
@@ -352,6 +384,10 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		for a in (_load_registry().get("agents") or [])
 		if (a.get("agent_slug") or "").strip()
 	}
+	# A mutable listing must never turn a reviewed no-runtime teaser into a
+	# provisioned delegate. This final payload filter also contains legacy or
+	# manually modified DB rows that bypass controller validation.
+	closed_slugs = {slug for slug, agent in reg_by_slug.items() if _is_coming_soon_no_runtime(agent)}
 
 	filters = {"enabled": 1}
 	if owner:
@@ -359,7 +395,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	installs = frappe.get_all(
 		"Jarvis Agent Installation",
 		filters=filters,
-		fields=["agent", "owner", "installable", "run_as_user"],
+		fields=["agent", "owner", "installable", "run_as_user", "installed_version"],
 		# ``agent`` alone is not a total order once two owners install the same
 		# agent; the ``name`` tiebreak makes the iteration — and therefore which
 		# install wins the de-dupe below — stable across runs. The payload is a
@@ -377,9 +413,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	# on either therefore ships exactly the same set of slugs.
 	seen_agents: set[str] = set()
 	for row in installs:
-		# A raw legacy installation or tampered listing must never advertise a
-		# closed delegate to fleet.
-		if is_closed_agent(row.agent):
+		if row.agent in closed_slugs or is_closed_installation(row):
 			continue
 		# De-dupe by AGENT. An install is per-(owner, agent) but the container's
 		# agent_skills namespace is per-slug, so two users who each install AND
@@ -482,7 +516,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 			order_by="name asc",
 		)
 		for lst in allowed_listings:
-			if is_closed_agent(lst.name):
+			if is_closed_agent(lst.name) or lst.name in closed_slugs:
 				continue
 			if lst.name in seen_agents or lst.name not in granted:
 				continue
@@ -623,6 +657,22 @@ def registry_tools_allow(agent_slug: str) -> list[str]:
 				return []
 			return [str(t).strip() for t in declared if str(t or "").strip()]
 	return []
+
+
+def registry_supports_record_scope(agent_slug: str) -> bool:
+	"""Whether the bundled agent declaration explicitly supports ``record_scope``.
+
+	This deliberately reads the reviewed registry artifact rather than the mutable
+	listing row. A record scope controls what evidence reaches a private bundle, so
+	an old, malformed, or manually edited listing must never opt an agent in.
+	"""
+	slug = (agent_slug or "").strip()
+	if not slug:
+		return False
+	for agent in _load_registry().get("agents") or []:
+		if (agent.get("agent_slug") or "").strip() == slug:
+			return agent.get("supports_record_scope") is True
+	return False
 
 
 def after_migrate() -> None:
