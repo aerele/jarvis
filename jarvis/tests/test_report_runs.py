@@ -12,7 +12,13 @@ from jarvis.chat import report_runs
 from jarvis.chat.approvals_api import list_approvals_page
 from jarvis.chat.report_runs import _filters_label, _open_runs, chat_report_runs, ready_reports
 from jarvis.tests.test_chat_asks import _ensure_user
-from jarvis.tests.test_run_report import _ENQUEUE, PREP_REPORT, _ensure_report
+from jarvis.tests.test_run_report import (
+	_ENQUEUE,
+	PERMISSION_DETAIL,
+	PERMISSION_TB,
+	PREP_REPORT,
+	_ensure_report,
+)
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -101,10 +107,79 @@ class TestChatReportCard(FrappeTestCase):
 		_tool(self.conv, 1, "started", run)
 		self.assertEqual(_states(self.conv), [(run, "failed")])
 
+	def test_a_failed_run_carries_its_reason_never_the_traceback(self):
+		run = _pr("Error")
+		frappe.db.set_value("Prepared Report", run, "error_message", PERMISSION_TB, update_modified=False)
+		_tool(self.conv, 1, "started", run)
+		[item] = chat_report_runs(self.conv)["items"]
+		self.assertEqual((item["status"], item["error"]), ("failed", PERMISSION_DETAIL))
+		self.assertNotIn("user_roles", json.dumps(item))
+
+	def test_only_a_failed_run_has_an_error(self):
+		run = _pr("Started")
+		_tool(self.conv, 1, "started", run)
+		[item] = chat_report_runs(self.conv)["items"]
+		self.assertNotIn("error", item)
+
 	def test_a_desk_run_found_still_generating_gets_a_card(self):
 		run = _pr("Queued")
 		_tool(self.conv, 1, "generating", run)
 		self.assertEqual(_states(self.conv), [(run, "preparing")])
+
+	def test_metadata_ready_keeps_card_until_query_answer(self):
+		run, other = _pr("Completed"), _pr("Completed")
+		_tool(self.conv, 1, "ready", run)
+		frappe.db.set_value(
+			MSG,
+			{"conversation": self.conv, "seq": 1},
+			"tool_result",
+			json.dumps(
+				{
+					"ok": True,
+					"data": {
+						"status": "ready",
+						"read_status": "not_read",
+						"run": run,
+						"report_name": PREP_REPORT,
+					},
+				}
+			),
+		)
+		self.assertEqual(_states(self.conv), [(run, "ready")])
+		for seq, source, sql, complete in (
+			(2, run, None, True),
+			(3, run, "SELECT 1", False),
+			(4, other, "SELECT 1", True),
+		):
+			_tool(self.conv, seq, "ready", source)
+			frappe.db.set_value(
+				MSG,
+				{"conversation": self.conv, "seq": seq},
+				{
+					"tool_name": "query_report",
+					"tool_args": json.dumps({"prepared_report": source, "sql": sql}),
+					"tool_result": json.dumps(
+						{"ok": True, "data": {"prepared_report": source, "coverage": {"complete": complete}}}
+					),
+				},
+			)
+			self.assertEqual(_states(self.conv), [(run, "ready")])
+		_tool(self.conv, 5, "ready", run)
+		frappe.db.set_value(
+			MSG,
+			{"conversation": self.conv, "seq": 5},
+			{
+				"tool_name": "query_report",
+				# New receipts keep this server-owned flag instead of the SQL text.
+				"tool_args": json.dumps({"prepared_report": run, "source_query_executed": True}),
+				"tool_result": json.dumps(
+					{"ok": True, "data": {"prepared_report": run, "coverage": {"complete": True}}}
+				),
+			},
+		)
+		self.assertEqual(_states(self.conv), [])
+		with patch.object(report_runs, "_json_functions_available", return_value=False):
+			self.assertEqual(_states(self.conv), [])
 
 	def test_showing_the_results_closes_the_card(self):
 		run = _pr("Completed")

@@ -23,4 +23,7 @@ class JarvisUserSettings(NotRenamable, Document):
 	# Minimal controller: identity is enforced by field constraints (``user``
 	# is a mandatory, unique Link and the autoname source) and the counters
 	# are mutated only by jarvis.chat.usage via SQL. No validation hook needed.
-	pass
+	def validate(self):
+		from jarvis.payment_calendar.preferences import validate_document
+
+		validate_document(self)

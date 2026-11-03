@@ -84,6 +84,9 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 			frappe.logger().info("reset_onboarding: container unpair skipped/failed (non-fatal)")
 
 	settings_reset.apply(s, _FULL)
+	from jarvis.payment_calendar.lifecycle import reset_workspace
+
+	reset_workspace()
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- outside request or job
 
 	wiped: list = []

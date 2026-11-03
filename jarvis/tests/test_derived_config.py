@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import frappe
@@ -13,10 +14,101 @@ class _Inst(frappe._dict):
 
 
 def _inst(name="INST-1", config=None):
-	return _Inst(name=name, config=config)
+	return _Inst(name=name, config=config, installed_version="0.4.0")
 
 
 class TestDerivedConfig(FrappeTestCase):
+	def test_ledger_registry_delivers_declared_controls_without_other_installation_values(self):
+		from jarvis.chat import agent_catalog
+
+		entry = next(
+			e
+			for e in agent_catalog._load_registry()["agents"]
+			if e["agent_slug"] == "ledger-scrutiny-auditor"
+		)
+		controls = {
+			"materiality": {"benchmark_value": 100000, "percentage": 5},
+			"suspense_accounts": ["Suspense - TEST"],
+			"subledger_owned_accounts": ["Payable - TEST"],
+			"subledger_account_owner": {"Payable - TEST": "Accounts Payable"},
+			"chart_standard": "Company chart",
+			"suspense_confirmed": True,
+		}
+		inst = _inst(config=json.dumps({**controls, "undeclared_private_setting": "exclude"}))
+		self.assertEqual(agent_scheduler._explicit_config(entry, inst), controls)
+		self.assertIn(
+			"jarvis__get_engagement_config", agent_catalog.registry_tools_allow(entry["agent_slug"])
+		)
+
+	def test_statutory_schema_is_metadata_only_and_cannot_be_overridden(self):
+		self.assertFalse(derived_config.customer_may_set("statutory_schema"))
+		with patch.object(
+			derived_config.frappe.db, "has_column", side_effect=lambda dt, field: field != "micr_code"
+		):
+			out = agent_scheduler._explicit_config(
+				{"config_keys": ["statutory_schema"]},
+				_inst(config='{"statutory_schema": {"forged": true}}'),
+			)
+		self.assertNotIn("forged", out["statutory_schema"])
+		self.assertFalse(out["statutory_schema"]["india_fields_present"]["micr_code"])
+		self.assertTrue(out["statutory_schema"]["india_fields_present"]["pan_number"])
+
+	def test_statutory_schema_failure_is_omitted_and_cannot_fall_back_to_customer_value(self):
+		inst = _inst(config=json.dumps({"statutory_schema": {"forged": True}}))
+		with (
+			patch.object(
+				derived_config.frappe.db, "has_column", side_effect=RuntimeError("schema unavailable")
+			),
+			patch.object(derived_config.frappe, "log_error") as le,
+		):
+			out = agent_scheduler._explicit_config({"config_keys": ["statutory_schema"]}, inst)
+		self.assertEqual(out, {})
+		le.assert_called_once()
+		self.assertEqual(le.call_args.kwargs["title"], "derived_config provider failed")
+		self.assertIn("statutory_schema", le.call_args.kwargs["message"])
+		self.assertNotIn("forged", str(le.call_args))
+
+	def test_statutory_wage_basis_reaches_the_agent_unchanged(self):
+		basis = {"source": "salary_detail", "component_classes": {"Fake Basic": "included"}}
+		config = {"statutory": {"wage_basis": basis}, "other": {"forged": True}}
+		out = agent_scheduler._explicit_config(
+			{"config_keys": ["statutory"]}, _inst(config=json.dumps(config))
+		)
+		self.assertEqual(out, {"statutory": {"wage_basis": basis}})
+
+	def test_missing_native_field_is_not_recognized(self):
+		invoice = frappe._dict(
+			has_field=lambda _: True,
+			get_field=lambda _: frappe._dict(fieldtype="Table", options="Tax Withholding Entry"),
+		)
+		entry = frappe._dict(has_field=lambda name: name != "taxable_amount")
+		with patch.object(derived_config.frappe, "get_meta", side_effect=[invoice, entry]):
+			self.assertEqual(derived_config._tax_withholding_model(_inst()), "entry_table_unrecognized")
+
+	def test_withholding_model_matches_installed_schema(self):
+		expected = (
+			"entry_table_v16"
+			if frappe.get_meta("Purchase Invoice").has_field("tax_withholding_entries")
+			else "legacy_supplier_unverified"
+		)
+		self.assertEqual(derived_config._tax_withholding_model(_inst()), expected)
+
+	def test_typed_withholding_model_cannot_override_schema(self):
+		inst = _inst(config='{"tax_withholding_model": "legacy_supplier"}')
+		with patch.dict(
+			derived_config.PROVIDERS, {"tax_withholding_model": (lambda _: "entry_table_v16", False)}
+		):
+			out = agent_scheduler._explicit_config({"config_keys": ["tax_withholding_model"]}, inst)
+		self.assertEqual(out, {"tax_withholding_model": "entry_table_v16"})
+
+	def test_withholding_guard_fails_closed_on_provider_error(self):
+		with patch.dict(derived_config.PROVIDERS, {"tax_withholding_model": (lambda _: 1 / 0, False)}):
+			self.assertIn(
+				"unavailable",
+				derived_config.unsupported_reason(["tax_withholding_model"], _inst()),
+			)
+			self.assertIsNone(derived_config.unsupported_reason([], _inst()))
+
 	def test_salt_stable_distinct_and_hex(self):
 		a = derived_config._fingerprint_salt(_inst("A"))
 		self.assertEqual(a, derived_config._fingerprint_salt(_inst("A")))
@@ -76,6 +168,50 @@ class TestDerivedConfig(FrappeTestCase):
 		out = agent_scheduler._explicit_config({"config_keys": ["ageing.stale_floor_days"]}, inst)
 		self.assertEqual(out, {"ageing": {"stale_floor_days": 9}})
 
+	def test_explicit_config_dotted_fefo_keys_pass_the_owner_namespace(self):
+		inst = _inst(config='{"fefo": {"reviewer": "Stock Controller", "near_expiry_days": 30}, "other": 1}')
+		out = agent_scheduler._explicit_config(
+			{
+				"config_keys": [
+					"fefo.reviewer",
+					"fefo.near_expiry_days",
+					"fefo.test_declaration",
+				]
+			},
+			inst,
+		)
+		self.assertEqual(
+			out,
+			{"fefo": {"reviewer": "Stock Controller", "near_expiry_days": 30}},
+		)
+
+	def test_explicit_config_delivers_grn_hygiene_root_for_declared_dot_paths(self):
+		inst = _inst(
+			config=(
+				'{"grn_hygiene": {"reviewer": "Receiving Controller", '
+				'"test_declaration": "Pre-release review"}, '
+				'"materiality": {"percentage": 5}}'
+			)
+		)
+		out = agent_scheduler._explicit_config(
+			{
+				"config_keys": [
+					"grn_hygiene.reviewer",
+					"grn_hygiene.test_declaration",
+				]
+			},
+			inst,
+		)
+		self.assertEqual(
+			out,
+			{
+				"grn_hygiene": {
+					"reviewer": "Receiving Controller",
+					"test_declaration": "Pre-release review",
+				}
+			},
+		)
+
 	def test_failing_provider_is_omitted_and_logged_without_value(self):
 		salt = derived_config._fingerprint_salt(_inst())
 		boom = patch.dict(
@@ -95,3 +231,31 @@ class TestDerivedConfig(FrappeTestCase):
 		with boom, patch.object(derived_config.frappe, "log_error"):
 			out = agent_scheduler._explicit_config({"config_keys": _KEYS}, inst)
 		self.assertEqual(out, {"open_workable_status_set": ["X"]})
+
+	def test_explicit_config_passes_the_declared_hrms_namespace_only(self):
+		keys = [
+			"baseline_hrms.reviewer",
+			"baseline_hrms.reviewer_capacity",
+			"baseline_hrms.history_from",
+			"baseline_hrms.test_declaration",
+		]
+		inst = _inst(
+			config=(
+				'{"baseline_hrms":{"reviewer":"Payroll lead",'
+				'"reviewer_capacity":"HR reviewer",'
+				'"history_from":"2025-10-01",'
+				'"test_declaration":"Quarterly baseline"},"other":1}'
+			)
+		)
+		out = agent_scheduler._explicit_config({"config_keys": keys}, inst)
+		self.assertEqual(
+			out,
+			{
+				"baseline_hrms": {
+					"reviewer": "Payroll lead",
+					"reviewer_capacity": "HR reviewer",
+					"history_from": "2025-10-01",
+					"test_declaration": "Quarterly baseline",
+				}
+			},
+		)

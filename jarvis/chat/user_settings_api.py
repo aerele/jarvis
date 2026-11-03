@@ -127,6 +127,9 @@ def _settings_payload(doc) -> dict:
 		# getattr: same migrate-window guard as preferred_persona below (#581).
 		"default_auto_mode": cint(getattr(doc, "default_auto_mode", 0)),
 		"auto_mode_acknowledged": cint(getattr(doc, "auto_mode_acknowledged", 0)),
+		# Default 1 (ON): same migrate-window getattr guard, and a missing column reads as the
+		# column default. holiday_touch_shown is deliberately NOT in this payload.
+		"show_holiday_touches": cint(getattr(doc, "show_holiday_touches", 1)),
 		# getattr, not a bare read: in the migrate window before preferred_persona
 		# syncs onto the doc's meta, doc.preferred_persona would AttributeError and
 		# 500 get_my_settings / update_my_settings. Default to Jarvis like the rest.
@@ -166,6 +169,7 @@ def update_my_settings(
 	support_context_copy_pref: str | None = None,
 	default_auto_mode: int | None = None,
 	auto_mode_acknowledged: int | None = None,
+	show_holiday_touches: int | None = None,
 ) -> dict:
 	"""Update the caller's own chat preferences only. The usage limit and
 	counters (permlevel 1 / read-only) are never writable here."""
@@ -179,6 +183,8 @@ def update_my_settings(
 		doc.default_auto_mode = 1 if sbool(default_auto_mode) else 0
 	if auto_mode_acknowledged is not None:
 		doc.auto_mode_acknowledged = 1 if sbool(auto_mode_acknowledged) else 0
+	if show_holiday_touches is not None:
+		doc.show_holiday_touches = 1 if sbool(show_holiday_touches) else 0
 	# The default pre-arms every new chat with no dialog, so it can never be on while
 	# the one-time warning is unacknowledged (the app confirms before it enables it).
 	if cint(getattr(doc, "default_auto_mode", 0)):

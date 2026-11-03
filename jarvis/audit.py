@@ -40,6 +40,16 @@ def record(
 
 	Best-effort: never raises (audit must not break or fail the tool)."""
 	try:
+		# Deposit calls can be refused before their tool runs.  Project arguments at
+		# the logging boundary so those failures cannot retain private source values.
+		from jarvis.tools import _private_output
+
+		args = _private_output.redact_delegate_args(args)
+		tool = _private_output.redact_delegate_tool(tool)
+		# A capability denial can include the caller's unknown tool name in its
+		# normal message.  Deposit observability uses a fixed result instead.
+		if _private_output.metadata_redacted() and not ok:
+			error_message = "Private payroll delegate call was refused."
 		doctype, name, method = _ref(args, result)
 		scrubbed = _scrub(args, _password_fields(doctype))
 		rendered = json.dumps(scrubbed, default=str)

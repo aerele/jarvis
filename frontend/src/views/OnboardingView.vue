@@ -56,24 +56,6 @@
 					<div
 						class="w-full overflow-hidden rounded-2xl border border-outline-gray-1 bg-surface-white shadow-2xl"
 					>
-						<!-- ===== Local/non-public host block: first in the chain, ahead of
-							 even the support panel, because a blocked host can never
-							 onboard on any step - the server enforces the same block at
-							 start_signup, this just stops the customer from reaching a dead
-							 CTA. ===== -->
-						<section v-if="showHostBlock" class="ob-screen">
-							<div class="ob-body ob-body--center">
-								<div class="ob-head">
-									<h1>Setup isn't available on this address</h1>
-									<p>
-										This site is running on a local or non-public address, so
-										sign-in links and agent connections can't reach it. Ask
-										your administrator to set a public host name for this site,
-										then reload this page.
-									</p>
-								</div>
-							</div>
-						</section>
 						<!-- ===== Contact support: a real ticket, filed from here. Hoisted
 							 above every step (not just Pay, where it started) so ANY screen
 							 that offers the support action - the payment recovery/terminal/
@@ -83,7 +65,7 @@
 							 binds on its own root. The action it replaces was a bare
 							 mailto:, which did nothing at all on a machine with no mail
 							 client. ===== -->
-						<section v-else-if="supportOpen" class="ob-screen">
+						<section v-if="supportOpen" class="ob-screen">
 							<div class="ob-body">
 								<div class="ob-head">
 									<h1>Get help with this</h1>
@@ -159,6 +141,366 @@
 							@finish="startWizard"
 							@skip="startWizard"
 						/>
+
+						<!-- ===== Private network setup (design: private-network-onboarding §3). Only a bench
+							 with no public host name (or one that finished this setup) ever reaches this
+							 step; the public flow never renders it. It REPLACES the old dead end with three
+							 screens driven by net.state.screen: choose, allow the Jarvis setup server, and
+							 the public address. The setup server's IP is fetched only after the customer
+							 picks the private option (net.loadTargets), never on first paint. ===== -->
+						<section v-else-if="state.step === 'network'" class="ob-screen">
+							<!-- 1. Choose -->
+							<template v-if="net.state.screen === 'choose'">
+								<div class="ob-body ob-body--center">
+									<div class="ob-head">
+										<template v-if="!net.state.statusLoaded">
+											<h1 role="status">Checking your connection…</h1>
+										</template>
+										<template v-else-if="net.state.adminReachable === false">
+											<h1>We can't reach Jarvis from this site</h1>
+											<p>
+												This site can't connect to the Jarvis setup server.
+												If your network blocks outgoing traffic, you can
+												allow Jarvis through it and continue.
+											</p>
+										</template>
+										<template v-else>
+											<h1>This site is on a private network</h1>
+											<p>
+												Jarvis can't reach this site from the internet on
+												its own. You can still set it up: your network team
+												allows a few Jarvis addresses, and we test the
+												connection before anything is shared.
+											</p>
+										</template>
+									</div>
+									<div
+										class="mx-auto grid w-full max-w-[640px] grid-cols-1 gap-3 sm:grid-cols-2"
+										role="radiogroup"
+										aria-label="Setup option"
+									>
+										<div
+											v-for="o in NETWORK_OPTIONS"
+											:key="o.id"
+											class="relative flex cursor-pointer items-start gap-3 rounded-lg border p-4 pr-10 transition-colors focus-visible:outline-none focus-visible:ring focus-visible:ring-outline-gray-3"
+											:class="
+												net.state.pick === o.id
+													? 'border-outline-gray-5 ring-1 ring-outline-gray-5'
+													: 'border-outline-gray-1 hover:border-outline-gray-2 hover:bg-surface-gray-1'
+											"
+											role="radio"
+											:aria-checked="net.state.pick === o.id"
+											tabindex="0"
+											@click="net.pickOption(o.id)"
+											@keydown.enter.prevent="net.pickOption(o.id)"
+											@keydown.space.prevent="net.pickOption(o.id)"
+										>
+											<span
+												class="grid size-8 flex-none place-items-center rounded-lg border border-outline-gray-1 bg-surface-gray-2"
+												aria-hidden="true"
+											>
+												<FeatherIcon
+													:name="o.icon"
+													class="h-4 w-4 text-ink-gray-6"
+												/>
+											</span>
+											<span class="flex flex-col gap-0.5">
+												<span
+													class="text-base font-medium text-ink-gray-9"
+													>{{ o.title }}</span
+												>
+												<span class="text-p-sm text-ink-gray-5">{{
+													o.text
+												}}</span>
+											</span>
+											<span
+												class="absolute right-4 top-4 grid h-4 w-4 place-items-center rounded-full border transition-colors"
+												:class="
+													net.state.pick === o.id
+														? 'border-outline-gray-5 bg-surface-gray-7'
+														: 'border-outline-gray-3'
+												"
+												aria-hidden="true"
+											>
+												<span
+													v-if="net.state.pick === o.id"
+													class="h-1.5 w-1.5 rounded-full bg-surface-white"
+												></span>
+											</span>
+										</div>
+									</div>
+									<p
+										v-if="net.state.pick === 'public'"
+										class="mx-auto mt-4 max-w-[560px] text-center text-p-sm text-ink-gray-5"
+									>
+										Ask your administrator to set a public host name for this
+										site, then reload this page.
+									</p>
+								</div>
+								<div class="ob-foot justify-end">
+									<Button
+										v-if="net.state.pick === 'private'"
+										variant="solid"
+										label="Continue"
+										@click="net.continueFromChoice()"
+									/>
+									<Button
+										v-else
+										variant="solid"
+										label="Reload page"
+										@click="reloadConnect"
+									/>
+								</div>
+							</template>
+							<!-- 2. Allow the Jarvis setup server -->
+							<template v-else-if="net.state.screen === 'allow_admin'">
+								<div class="ob-body">
+									<div class="ob-head">
+										<h1>Allow the Jarvis setup server</h1>
+										<p>
+											Ask your network team to allow this outgoing connection
+											from your ERPNext server. Then check the connection.
+										</p>
+									</div>
+									<div class="mx-auto flex w-full max-w-[680px] flex-col gap-3">
+										<div
+											v-if="net.state.targetsLoading"
+											class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5"
+											role="status"
+										>
+											<JvSpinner :size="20" />
+											Looking up the Jarvis setup server…
+										</div>
+										<template v-else-if="net.state.targetsErr">
+											<Banner
+												type="error"
+												:message="net.state.targetsErr"
+												role="alert"
+											/>
+											<div class="flex justify-center">
+												<Button
+													label="Try again"
+													@click="net.loadTargets()"
+												/>
+											</div>
+										</template>
+										<NetworkRulesTable
+											v-else-if="adminRows.length"
+											variant="admin"
+											title="Rule for your network team"
+											copy-label="Copy rule"
+											:rows="adminRows"
+										/>
+										<p class="text-p-sm text-ink-gray-5">
+											Staff browsers also need to open this address, for
+											sign-in links and the payment page.
+										</p>
+										<div
+											v-if="net.state.adminCheck === 'checking'"
+											class="flex items-center gap-1.5 text-p-sm text-ink-gray-5"
+											role="status"
+										>
+											<JvSpinner :size="20" />
+											Checking the connection…
+										</div>
+										<Banner
+											v-else-if="net.state.adminCheck === 'ok'"
+											type="success"
+											title="Connected"
+											message="This site can reach the Jarvis setup server."
+											role="status"
+										/>
+										<Banner
+											v-else-if="net.state.adminCheck === 'fail'"
+											type="warning"
+											title="Still can't reach the Jarvis setup server"
+											:message="
+												net.state.adminCheckMessage ||
+												'New firewall rules can take a few minutes to apply. Check the rule, then try again.'
+											"
+											role="alert"
+										/>
+										<Banner
+											v-else-if="net.state.adminCheck === 'disabled'"
+											type="error"
+											:message="
+												net.state.adminCheckMessage || SETUP_UNAVAILABLE
+											"
+											role="alert"
+										/>
+									</div>
+								</div>
+								<div class="ob-foot">
+									<button class="ob-back" @click="net.state.screen = 'choose'">
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
+									</button>
+									<Button
+										v-if="net.state.adminCheck !== 'ok'"
+										variant="solid"
+										:disabled="!net.state.targets"
+										:loading="net.state.adminCheck === 'checking'"
+										loading-text="Checking…"
+										:label="
+											net.state.adminCheck === 'fail'
+												? 'Check again'
+												: 'Check connection'
+										"
+										@click="net.runAdminCheck()"
+									/>
+									<Button
+										v-else
+										variant="solid"
+										label="Continue"
+										@click="net.openAddress()"
+									/>
+								</div>
+							</template>
+							<!-- 3. Your public address -->
+							<template v-else>
+								<div class="ob-body">
+									<div class="ob-head">
+										<h1>Your public address</h1>
+										<p>
+											Jarvis calls your ERPNext through this address. We
+											filled in the address your network used to reach us.
+											Change it if your ERPNext uses a different one.
+										</p>
+									</div>
+									<div
+										class="mx-auto flex w-full max-w-[620px] flex-col gap-1.5"
+									>
+										<FormControl
+											type="text"
+											variant="outline"
+											label="Public address"
+											:model-value="net.state.draft"
+											@update:model-value="
+												(v) => {
+													net.state.draft = v;
+													net.state.draftTouched = true;
+												}
+											"
+											placeholder="https://erp.example.com"
+											autocomplete="off"
+											spellcheck="false"
+											required
+											aria-required="true"
+											:aria-invalid="draftError ? 'true' : undefined"
+											:aria-describedby="
+												draftError || net.state.saveErr
+													? 'jv-ob-addr-err'
+													: undefined
+											"
+											@keydown.enter="onNetworkContinue"
+										/>
+										<ErrorMessage
+											id="jv-ob-addr-err"
+											:message="draftError || net.state.saveErr"
+										/>
+										<div
+											v-if="
+												!draftError &&
+												net.state.saveErrCode === 'PRIVATE_ADDRESS_LOCKED'
+											"
+											class="mt-1"
+										>
+											<Button label="Contact support" @click="openSupport" />
+										</div>
+										<div
+											v-if="net.state.detectedIp"
+											class="mt-0.5 flex flex-wrap items-center gap-2"
+										>
+											<span
+												class="inline-flex items-center gap-1.5 rounded-full bg-surface-gray-2 px-2 py-0.5 text-p-xs text-ink-gray-6"
+												>Detected from your connection:
+												<span class="font-mono text-ink-gray-9">{{
+													net.state.detectedIp
+												}}</span></span
+											>
+											<button
+												v-if="addressChanged"
+												type="button"
+												class="ob-link text-p-xs"
+												@click="net.useDetected()"
+											>
+												Use this
+											</button>
+										</div>
+										<div
+											class="mt-4 overflow-hidden rounded-lg border border-outline-gray-1"
+										>
+											<div
+												class="border-b border-outline-gray-1 bg-surface-gray-1 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-ink-gray-5"
+											>
+												This address must
+											</div>
+											<div
+												class="flex items-start gap-2 border-b border-outline-gray-1 px-4 py-3 text-p-sm text-ink-gray-7"
+											>
+												<FeatherIcon
+													name="check"
+													class="mt-0.5 h-3.5 w-3.5 flex-none text-ink-green-3"
+												/>
+												<span
+													>Serve HTTPS with a valid certificate. A domain
+													name or a public IP certificate both
+													work.</span
+												>
+											</div>
+											<div
+												class="flex items-start gap-2 border-b border-outline-gray-1 px-4 py-3 text-p-sm text-ink-gray-7"
+											>
+												<FeatherIcon
+													name="check"
+													class="mt-0.5 h-3.5 w-3.5 flex-none text-ink-green-3"
+												/>
+												<span>Forward requests to this ERPNext site.</span>
+											</div>
+											<div
+												class="flex items-start gap-2 px-4 py-3 text-p-sm text-ink-gray-7"
+											>
+												<FeatherIcon
+													name="x"
+													class="mt-0.5 h-3.5 w-3.5 flex-none text-ink-red-3"
+												/>
+												<span
+													>Not plain HTTP. Your Jarvis key would cross
+													the internet unencrypted.</span
+												>
+											</div>
+										</div>
+									</div>
+								</div>
+								<div class="ob-foot">
+									<button
+										v-if="!privateComplete"
+										class="ob-back"
+										@click="onNetworkBack"
+									>
+										<FeatherIcon
+											name="chevron-left"
+											class="h-3.5 w-3.5 text-ink-gray-5"
+										/>Back
+									</button>
+									<span v-else></span>
+									<Button
+										variant="solid"
+										label="Continue"
+										:disabled="
+											!!draftError ||
+											!net.state.draft.trim() ||
+											net.state.saving
+										"
+										:loading="net.state.saving"
+										loading-text="Saving…"
+										@click="onNetworkContinue"
+									/>
+								</div>
+							</template>
+						</section>
 
 						<!-- ===== Choose Your Plan ===== -->
 						<section v-else-if="state.step === 'plan'" class="ob-screen">
@@ -1151,6 +1493,145 @@
 									</div>
 								</div>
 							</template>
+							<template v-else-if="checkingServer">
+								<div class="ob-body">
+									<div
+										class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5"
+										role="status"
+									>
+										<JvSpinner :size="20" />
+										Checking your server…
+									</div>
+								</div>
+							</template>
+							<!-- Private network (design §3 steps 7-9): the email is confirmed and admin has set
+								 a server aside. The customer allows it in their firewall and tests the connection
+								 BEFORE paying; "Continue to payment" appears only when both halves pass. The
+								 mockup's Back is omitted: the email is already confirmed, so there is no earlier
+								 screen to return to. -->
+							<template v-else-if="showPrivateServerStep">
+								<div class="ob-body">
+									<div class="ob-head">
+										<h1 ref="recoveryHeading" tabindex="-1">
+											Allow your Jarvis server
+										</h1>
+										<p>
+											We've set aside the server that will run Jarvis for
+											you. Ask your network team to add these two rules, then
+											test the connection.
+										</p>
+									</div>
+									<div class="mx-auto flex w-full max-w-[680px] flex-col gap-3">
+										<div
+											v-if="net.state.holdLoading && !net.state.hold"
+											class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5"
+											role="status"
+										>
+											<JvSpinner :size="20" />
+											Setting aside your server…
+										</div>
+										<template v-else-if="net.state.holdErr && !net.state.hold">
+											<Banner
+												type="error"
+												:title="holdErrCard.title"
+												:message="holdErrCard.text"
+												role="alert"
+											/>
+											<div class="flex justify-center gap-2">
+												<Button
+													label="Try again"
+													@click="net.loadHold()"
+												/>
+												<Button
+													label="Contact support"
+													@click="onPayAction(A.SUPPORT)"
+												/>
+											</div>
+										</template>
+										<template v-if="net.state.hold && !serverAddressMissing">
+											<NetworkRulesTable
+												variant="server"
+												title="Rules for your network team"
+												copy-label="Copy rules"
+												:rows="serverRows"
+											/>
+											<p class="text-p-sm text-ink-gray-5">
+												Allow only this address. Don't open port
+												{{ inboundPort }} to everyone. We hold this server
+												for you for 3 days.
+											</p>
+										</template>
+										<template v-if="serverAddressMissing">
+											<Banner
+												type="warning"
+												:title="NO_ADDRESS_CARD.title"
+												:message="NO_ADDRESS_CARD.text"
+												role="alert"
+											/>
+											<div class="flex justify-center gap-2">
+												<Button
+													label="Try again"
+													@click="retryServerLookup"
+												/>
+												<Button
+													label="Contact support"
+													@click="onPayAction(A.SUPPORT)"
+												/>
+											</div>
+										</template>
+										<Banner
+											v-if="holdEndedCard"
+											:type="holdEndedCard.type"
+											:title="holdEndedCard.title"
+											:message="holdEndedCard.text"
+											role="alert"
+										/>
+										<ConnectionTestResult
+											:rows="serverTest.rows"
+											:banner="serverTest.banner"
+										/>
+										<Banner
+											v-if="net.state.test.err"
+											type="warning"
+											:message="net.state.test.err"
+											role="alert"
+										/>
+									</div>
+								</div>
+								<div class="ob-foot">
+									<span
+										v-if="testWait > 0"
+										class="text-p-sm text-ink-gray-5"
+										role="status"
+									>
+										Try again in {{ testWait }}s
+									</span>
+									<span v-else></span>
+									<Button
+										v-if="!serverAddressMissing && privateTestsPassed"
+										variant="solid"
+										label="Continue to payment"
+										@click="onPrivateContinue"
+									/>
+									<Button
+										v-else-if="!serverAddressMissing"
+										variant="solid"
+										:disabled="
+											!net.state.hold ||
+											net.state.test.phase === 'testing' ||
+											testWait > 0
+										"
+										:loading="net.state.test.phase === 'testing'"
+										loading-text="Testing…"
+										:label="
+											net.state.test.phase === 'done'
+												? 'Test again'
+												: 'Test connection'
+										"
+										@click="net.runTest()"
+									/>
+								</div>
+							</template>
 							<!-- Confirming: the customer paid on the admin-hosted page and came
 								 back, and we are asking the control plane whether it landed. Money
 								 has left them and no verdict exists yet.
@@ -1410,7 +1891,9 @@
 										<h1>Review &amp; pay</h1>
 										<p>
 											{{
-												isTrialPlan
+												privateComplete
+													? "Confirm the details below. We'll email you a confirmation link before anything is charged."
+													: isTrialPlan
 													? "Confirm the details below. You'll authorize auto-pay securely. Nothing is charged until your trial ends."
 													: "Confirm the details below. You'll complete payment securely."
 											}}
@@ -1454,6 +1937,15 @@
 											><b class="font-medium text-ink-gray-9">{{
 												state.email
 											}}</b>
+										</div>
+										<div
+											v-if="privateComplete && net.state.publicAddress"
+											class="flex items-center justify-between gap-3 border-b border-outline-gray-1 px-4 py-3 text-p-sm"
+										>
+											<span class="text-ink-gray-5">Network</span
+											><b class="font-medium text-ink-gray-9"
+												>Private, via {{ net.state.publicAddress }}</b
+											>
 										</div>
 										<div
 											v-for="row in billing.reviewRows.value"
@@ -1502,6 +1994,13 @@
 											}}</b>
 										</div>
 									</div>
+									<Banner
+										v-if="privateComplete"
+										type="info"
+										title="One more step before payment"
+										message="After you confirm your email, we'll show the address of your Jarvis server. Your network team allows it, and we test the connection. You pay only after the test passes."
+										class="mx-auto mt-4 max-w-[560px]"
+									/>
 									<!-- Plan 01: an Edit affordance under the review rows. Edit returns to
 										 Details WITHOUT touching the payment intent; once an intent exists
 										 the subsequent Continue persists through the authenticated
@@ -1969,6 +2468,131 @@
 											</p>
 										</div>
 									</template>
+									<!-- Private network: admin is withholding the plugin env until the connection
+										 test passes (is_ready_for_chat reason network_check_required). Waiting cannot
+										 clear it - the customer has to act on their firewall - so the wait STOPS here
+										 with the rules and a Test connection button; passing both halves resumes it. -->
+									<template v-else-if="state.connectPhase === 'network'">
+										<div class="ob-head">
+											<h1>
+												{{
+													state.connectTitle ||
+													"Allow your Jarvis server"
+												}}
+											</h1>
+											<p>
+												Jarvis can't finish setting up until your network
+												allows your Jarvis server. Add these two rules,
+												then test the connection.
+											</p>
+										</div>
+										<div
+											class="mx-auto mt-4 flex w-full max-w-[680px] flex-col gap-3"
+										>
+											<Banner
+												v-if="state.connectMessage"
+												type="info"
+												:message="state.connectMessage"
+											/>
+											<div
+												v-if="!networkLookupDone"
+												class="flex items-center justify-center gap-1.5 text-xs text-ink-gray-5"
+												role="status"
+											>
+												<JvSpinner :size="20" />
+												Looking up your server…
+											</div>
+											<Banner
+												v-else-if="networkLookupErr"
+												type="warning"
+												:title="networkLookupErr.title"
+												:message="networkLookupErr.text"
+												role="alert"
+											/>
+											<template
+												v-if="
+													networkLookupDone &&
+													net.state.hold &&
+													!networkLookupErr
+												"
+											>
+												<NetworkRulesTable
+													variant="server"
+													title="Rules for your network team"
+													copy-label="Copy rules"
+													:rows="serverRows"
+												/>
+												<p class="text-p-sm text-ink-gray-5">
+													Allow only this address. Don't open port
+													{{ inboundPort }} to everyone.
+												</p>
+											</template>
+											<Banner
+												v-if="holdEndedCard"
+												:type="holdEndedCard.type"
+												:title="holdEndedCard.title"
+												:message="holdEndedCard.text"
+												role="alert"
+											/>
+											<ConnectionTestResult
+												:rows="connectTest.rows"
+												:banner="connectTest.banner"
+											/>
+											<Banner
+												v-if="net.state.test.err"
+												type="warning"
+												:message="net.state.test.err"
+												role="alert"
+											/>
+											<div class="mt-1 flex flex-wrap justify-center gap-2">
+												<Button
+													v-if="privateTestsPassed"
+													variant="solid"
+													label="Continue"
+													@click="resumeAfterNetwork"
+												/>
+												<Button
+													v-else-if="networkLookupErr"
+													label="Try again"
+													@click="lookUpNetworkServer"
+												/>
+												<Button
+													v-else
+													variant="solid"
+													:disabled="
+														!networkLookupDone ||
+														!net.state.hold ||
+														!!networkLookupErr ||
+														net.state.test.phase === 'testing' ||
+														testWait > 0
+													"
+													:loading="net.state.test.phase === 'testing'"
+													loading-text="Testing…"
+													:label="
+														net.state.test.phase === 'done'
+															? 'Test again'
+															: 'Test connection'
+													"
+													@click="net.runTest()"
+												/>
+												<span
+													v-if="testWait > 0"
+													class="self-center text-p-sm text-ink-gray-5"
+													role="status"
+												>
+													Try again in {{ testWait }}s
+												</span>
+											</div>
+											<p
+												class="mx-auto mt-2 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+											>
+												Not sure what to do?
+												<button class="ob-link" @click="openSupport">
+													Contact support
+												</button>
+											</p>
+										</div>
+									</template>
 									<!-- A non-ready terminal (retry / superseded / support) or a
 										 deadline timeout: stay HERE with a real recovery action.
 										 Never a "continue anyway" jump into a chat that cannot yet
@@ -2140,9 +2764,24 @@ import Banner from "@/components/Banner.vue";
 import StepProgress from "@/components/StepProgress.vue";
 import TourIntro from "@/onboarding/TourIntro.vue";
 import SetupNeuralNet from "@/onboarding/SetupNeuralNet.vue";
+import NetworkRulesTable from "@/onboarding/NetworkRulesTable.vue";
+import { createPrivateNetwork } from "@/onboarding/usePrivateNetwork";
+import ConnectionTestResult from "@/onboarding/ConnectionTestResult.vue";
+import {
+	adminRuleRows,
+	checkAddress,
+	serverRuleRows,
+	portOf,
+	describeServerTest,
+	holdEndedBanner,
+	publicHostOf,
+	SETUP_UNAVAILABLE,
+	HOLD_UNAVAILABLE,
+} from "@/onboarding/privateNetwork";
 import cashfreeLogo from "@/assets/cashfree.png";
 import {
-	STEPS_MANAGED,
+	stepsFor,
+	railFor,
 	nextStep,
 	prevStep,
 	planDueToday,
@@ -2169,6 +2808,13 @@ import {
 	gstinAutofillAvailable,
 	gstinAutofill,
 	getTermsUrl,
+	networkStatus,
+	privateSetupTargets,
+	checkAdminConnection,
+	savePublicAddress,
+	reserveHost,
+	startConnectionTest,
+	connectionTestStatus,
 } from "@/api";
 import {
 	createOperationController,
@@ -2186,7 +2832,12 @@ import {
 	connectHeadline,
 	phaseProgress,
 } from "@/onboarding/waitPhases.js";
-import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
+import {
+	forgetReady,
+	hasNetworkIntent,
+	hasReconnectIntent,
+	landingStep,
+} from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
 import { brand, WORKER_WARNING_TITLE, workerWarningMessage } from "@/branding";
@@ -2206,6 +2857,7 @@ import {
 	actionLabelFor,
 	copyFor,
 	payLinkDeadlineNote,
+	PRIVATE_SIGNUP_REFUSAL_CODES,
 } from "@/onboarding/paymentCodes";
 import { CHECKOUT_NAV_KEY, shouldHonorCheckoutReturn } from "@/onboarding/checkoutNav";
 import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
@@ -2232,17 +2884,58 @@ const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 // itself a public-looking host_name, same as production.
 const hostOk = window.jarvis_public_host_ok !== false;
 
+// Private-network setup finished ("private") or not (""). jarvis_public_host_ok keeps its
+// own meaning (a public host is configured); the two together say which onboarding this
+// bench gets. A public bench never calls the bench's private-network endpoints at all.
+const bootNetworkMode = window.jarvis_network_mode === "private" ? "private" : "";
+const net = createPrivateNetwork({
+	// Arrows, not bare references: the named imports are read at CALL time, so a spec that
+	// mocks @/api with a closed export list (OnboardingView.spec.js) is unaffected until a
+	// private-network path actually runs.
+	api: {
+		networkStatus: () => networkStatus(),
+		privateSetupTargets: () => privateSetupTargets(),
+		checkAdminConnection: () => checkAdminConnection(),
+		savePublicAddress: (address) => savePublicAddress(address),
+		reserveHost: () => reserveHost(),
+		startConnectionTest: () => startConnectionTest(),
+		connectionTestStatus: (check) => connectionTestStatus(check),
+	},
+	hostOk,
+	bootMode: bootNetworkMode,
+	// Per tab: remembers a cleared checkout across the pay-page round trip and reloads.
+	storage: {
+		get: (k) => {
+			try {
+				return window.sessionStorage.getItem(k);
+			} catch (e) {
+				return null;
+			}
+		},
+		set: (k, v) => {
+			try {
+				window.sessionStorage.setItem(k, v);
+			} catch (e) {
+				/* no-op */
+			}
+		},
+	},
+});
+const {
+	privateBench,
+	complete: privateComplete,
+	onboardingHostOk,
+	draftError,
+	holdsCheckout,
+	testsPassed: privateTestsPassed,
+} = net;
+
 // Non-blocking: warns without gating any step's CTA (Task 5's boot flag).
 const workerWarning = !!window.jarvis_worker_warning;
 
-// The 4 named wizard steps shown on the rail. The intro tour is chromeless
-// (no rail entry).
-const RAIL = [
-	{ id: "details", label: "Details" },
-	{ id: "plan", label: "Plan" },
-	{ id: "pay", label: "Pay" },
-	{ id: "connect", label: "Connect" },
-];
+// The named wizard steps shown on the rail: Details, Plan, Pay, Connect, plus a Network
+// segment in front on a private-network bench. The intro tour is chromeless (no rail entry).
+const RAIL = computed(() => railFor(privateBench.value));
 
 // Unlabelled StepProgress segments for the PROVISIONING wait bar, which counts
 // steps (waitPhases.phaseProgress) without naming them the way RAIL does. The
@@ -2256,6 +2949,7 @@ const WAIT_STEPS = Object.freeze(Array.from({ length: 3 }, (_, i) => Object.free
 // Frame subtitle next to the brand mark, mirroring the active step's title.
 const FRAME_SUBS = {
 	intro: "Meet Your AI Teammate",
+	network: "Private network setup",
 	plan: "Choose your plan",
 	details: "Your details",
 	pay: "Review & pay",
@@ -2266,7 +2960,9 @@ const FRAME_SUBS = {
 // ---- step machine -----------------------------------------------------------
 // `state.step` walks STEPS_MANAGED (intro → plan → details → pay → connect).
 const state = reactive({
-	step: "intro",
+	// A bench with no usable onboarding host opens on the Network step (the old dead-end
+	// block is gone); everything else opens on the intro tour exactly as before.
+	step: onboardingHostOk.value ? "intro" : "network",
 	// details (Your Details step)
 	email: "",
 	company: "",
@@ -2566,11 +3262,11 @@ watch(
 	{ immediate: true }
 );
 
-const steps = computed(() => STEPS_MANAGED);
+const steps = computed(() => stepsFor(privateBench.value));
 const selectedPlan = computed(() => state.plans.find((p) => p.name === state.planName) || {});
 // See planSubtitleFor (onboarding/steps.js) for why this can't be hardcoded.
 const planSubtitle = computed(() => planSubtitleFor(state.plans));
-const railIndex = computed(() => RAIL.findIndex((r) => r.id === state.step));
+const railIndex = computed(() => RAIL.value.findIndex((r) => r.id === state.step));
 // Both halves of the identity must be present before the plane can resolve an
 // account: several company accounts can share one address.
 const reconnectInputsReady = computed(
@@ -2681,7 +3377,13 @@ watch(
 watch([() => state.company, () => state.email], ([company, email]) =>
 	billing.syncInvoicingDefaults(company, email)
 );
-const frameSub = computed(() => FRAME_SUBS[state.step] || "Set up your workspace");
+const frameSub = computed(() =>
+	// The first Network screen is the "set up your workspace" moment, as in the mockup; the
+	// two screens after it carry the private-network subtitle.
+	state.step === "network" && net.state.screen === "choose"
+		? "Set up your workspace"
+		: FRAME_SUBS[state.step] || "Set up your workspace"
+);
 
 // No "Popular" tag: the admin plan catalog carries no recommended/popular
 // flag, and fabricating one positionally (e.g. always the middle card) would
@@ -2794,6 +3496,9 @@ async function loadPaymentProviders() {
 // payment"; an autopay trial keeps its trial wording (C02-4), since that click
 // authorizes the auto-pay mandate rather than charging today.
 const payCta = computed(() => {
+	// Private network: this first click only starts the signup and the email step; payment
+	// comes after the connection test, so "Continue" (as in the mockup) is the honest label.
+	if (privateComplete.value) return "Continue";
 	if (isTrialPlan.value) return "Start free trial";
 	return "Continue to payment";
 });
@@ -2811,7 +3516,11 @@ const payProviderReady = computed(() => !!state.paymentProvider);
 // payBusyView is declared further down; safe to close over here since this
 // getter only runs at render, after the whole setup script has executed.
 const payDisabled = computed(
-	() => payBusyView.value || !payProviderReady.value || !state.termsAccepted || !hostOk
+	() =>
+		payBusyView.value ||
+		!payProviderReady.value ||
+		!state.termsAccepted ||
+		!onboardingHostOk.value
 );
 // #669: how long the checkout link is good for. Reads the machine's own
 // payTokenExpiresInS, which is cleared with the token it belongs to, so this
@@ -2840,12 +3549,83 @@ function goNext() {
 }
 function goBack() {
 	state.step = prevStep(steps.value, state.step);
+	// Back from Details on a private bench lands on the address the customer confirmed, to
+	// edit it; the choice and Allow screens were already behind them.
+	if (state.step === "network") net.openAddress();
 }
 // Intro tour exits (CTA / advancing past the last slide / Skip tour) all land on
 // whatever follows the intro - derived, not hardcoded, so it tracks STEPS_MANAGED
 // instead of silently bypassing the first real step when the order changes.
 function startWizard() {
-	state.step = nextStep(steps.value, "intro");
+	const next = nextStep(steps.value, "intro");
+	// A finished private setup has nothing left to do on the Network step.
+	state.step = next === "network" && privateComplete.value ? nextStep(steps.value, next) : next;
+}
+
+// ---- Private network: the Network step (design: private-network-onboarding §3) -----------
+const NETWORK_OPTIONS = [
+	{
+		id: "private",
+		icon: "shield",
+		title: "Set up on a private network",
+		text: "Allow Jarvis through your firewall. Your network admin adds a few rules.",
+	},
+	{
+		id: "public",
+		icon: "globe",
+		title: "Use a public address instead",
+		text: "Give this site a public HTTPS address, then reload this page.",
+	},
+];
+// The one rule AllowAdmin shows. Empty until the customer has picked the private option and
+// the lookup has answered, so nothing about the Jarvis setup server renders before that.
+const adminRows = computed(() =>
+	net.state.targets
+		? adminRuleRows({
+				ips: net.state.targets.admin_ips,
+				host: net.state.targets.admin_host,
+				port: net.state.targets.port,
+				scheme: net.state.targets.scheme,
+		  })
+		: []
+);
+// "Use this" appears only once the customer has edited the pre-filled address.
+const addressChanged = computed(
+	() => !!net.state.detectedIp && net.state.draft.trim() !== `https://${net.state.detectedIp}`
+);
+
+// A bench with no usable onboarding host (no public host name, no finished private setup)
+// can only ever be on the Network step: nothing later can onboard, and the server refuses
+// start_signup on its own. This keeps a resumed or hand-set step from dead-ending there.
+watch(
+	() => [state.step, onboardingHostOk.value],
+	([step, ok]) => {
+		if (!ok && step !== "network") state.step = "network";
+	},
+	{ immediate: true }
+);
+
+// The composable's test poll must not outlive the screen: end it when the customer leaves
+// the Network step and when the view goes away.
+watch(
+	() => state.step,
+	(step, prev) => {
+		if (prev === "network" && step !== "network") net.dispose();
+	}
+);
+onUnmounted(() => net.dispose());
+
+async function onNetworkContinue() {
+	// Check the spelling here before calling the bench; a server refusal shows as saveErr.
+	if (checkAddress(net.state.draft, { testMode: net.state.testMode }).message) {
+		net.state.draftTouched = true;
+		return;
+	}
+	if (!(await net.saveAddress())) return;
+	state.step = nextStep(steps.value, "network");
+}
+function onNetworkBack() {
+	net.state.screen = "allow_admin";
 }
 // ---- on-mount reconcile: resume a mid-flight signup ------------------------
 // The mount contract (plan 02 §Reload and multi-tab recovery). A mid-flight
@@ -3396,6 +4176,8 @@ function readCheckoutOutcome() {
 
 const flow = createPaymentFlow({
 	api: onboardingPaymentApi,
+	// Private network: no route to checkout until the connection test has passed.
+	holdCheckout: () => holdsCheckout.value,
 	// The DOM half of the top-level navigation (WS7): stamp the external-nav
 	// marker with the live attempt id BEFORE the browser leaves, so the return
 	// path can recognise this attempt's checkout, then same-tab navigate. The URL
@@ -3451,7 +4233,10 @@ const A = ACTIONS;
 // The coded copy for the current state (headline, body, tone, actions), with the
 // reconciliation flag switching the pending row to its money-parked variant.
 const payCopy = computed(() =>
-	copyFor(pay.value.code, { awaitingReconciliation: pay.value.awaitingReconciliation })
+	copyFor(pay.value.code, {
+		awaitingReconciliation: pay.value.awaitingReconciliation,
+		privateSetup: privateComplete.value,
+	})
 );
 
 // Server-truth identity for the resumed/recovery screens (C02-3 / P1-7: never the
@@ -3605,6 +4390,118 @@ const provisioningProgress = computed(() => phaseProgress(provisioningStage.valu
 const payBusyView = computed(
 	() => pay.value.value === S.STARTING_SIGNUP || pay.value.value === S.CHECKOUT_OPEN
 );
+// ---- Private network: allow the held server, then test, then pay (design §3 steps 7-9) ------
+// Shown once the email is confirmed (the machine holds a live, navigable pay-page token) and
+// the customer has not yet passed the connection test in this tab. It sits ahead of the
+// recovery card on purpose: the machine is UNKNOWN with a token here, and that card would
+// offer to go straight to checkout.
+const confirmingReturn = ref(false); // the customer is back from the pay page (declared here: the step reads it)
+// PROOF the customer finished checkout on this mount (?pay=done|pending). Declared here because
+// onPayableCard reads it; the long note on what it gates is further down, at showConfirming.
+const returnedFromCompletedCheckout = ref(false);
+// Not after a completed checkout either: a lost cleared flag (second tab, blocked storage) must
+// never put this screen over the post-payment screens.
+const onPayableCard = computed(
+	() =>
+		!payBusyView.value &&
+		!confirmingReturn.value &&
+		!returnedFromCompletedCheckout.value &&
+		canNavigateToPay(pay.value)
+);
+// A stored "tested OK" is waiting for the hold and the saved address to load (a reload after the
+// pay-page round trip). Fail closed: checkout stays held meanwhile and the recovery card's
+// RESUME / retry are replaced by a short check, so nothing leaves for rules about an old host.
+const checkingServer = computed(() => net.clearedPending.value && onPayableCard.value);
+const showPrivateServerStep = computed(
+	() => holdsCheckout.value && !net.clearedPending.value && onPayableCard.value
+);
+watch(
+	checkingServer,
+	(on) => {
+		if (on) {
+			net.loadHold();
+			// onMounted already asked; each failed probe writes a server Error Log row.
+			if (!net.state.statusLoaded) net.loadStatus();
+		}
+	},
+	{ immediate: true }
+);
+// The saved address came back blank (the status call failed or never answered): there are no
+// rules to show, and Test / Continue would only dead-end. Offer a retry instead.
+const serverAddressMissing = computed(() => net.state.statusLoaded && !net.state.publicAddress);
+function retryServerLookup() {
+	net.loadStatus();
+	net.loadHold();
+}
+// The inbound rule follows the saved public address, the outbound rule the hold's reach URL.
+const inboundPort = computed(() => portOf(net.state.publicAddress));
+const serverRows = computed(() =>
+	net.state.hold
+		? serverRuleRows({
+				hostIp: net.state.hold.hostIp,
+				publicHost: publicHostOf(net.state.publicAddress) || net.state.publicAddress,
+				inboundPort: inboundPort.value,
+				outboundPort: portOf(net.state.hold.reachUrl),
+		  })
+		: []
+);
+const serverTest = computed(() =>
+	describeServerTest({
+		phase: net.state.test.phase,
+		inbound: net.state.test.inbound,
+		outbound: net.state.test.outbound,
+		hostIp: net.state.hold ? net.state.hold.hostIp : "",
+		publicAddress: net.state.publicAddress,
+		reachUrl: net.state.hold ? net.state.hold.reachUrl : "",
+		siteName: window.site_name || "",
+	})
+);
+const holdEndedCard = computed(() =>
+	net.state.holdEnded ? holdEndedBanner(net.state.holdEnded) : null
+);
+// Admin's own sentence for any refusal but the plain "no host fits" one, which has copy of its own.
+const holdErrCard = computed(() => ({
+	title: HOLD_UNAVAILABLE.title,
+	text:
+		net.state.holdErrCode === "PRIVATE_HOLD_UNAVAILABLE"
+			? HOLD_UNAVAILABLE.text
+			: net.state.holdErr,
+}));
+// Entering the screen reserves (or re-reads) the held server. That is also what refreshes a
+// hold that expired while the customer was away.
+watch(
+	showPrivateServerStep,
+	(on) => {
+		if (on) net.loadHold();
+	},
+	{ immediate: true }
+);
+function onPrivateContinue() {
+	if (net.markCleared()) flow.navigateToPay();
+}
+// A rate-limit refusal asks the customer to wait: count it down and keep "Test connection"
+// disabled meanwhile, so the button never hammers the provider check.
+const RETRY_WAIT_CAP_S = 60;
+const testWait = ref(0);
+let testWaitTimer = null;
+watch(
+	() => net.state.test.retryAfter,
+	(secs) => {
+		clearInterval(testWaitTimer);
+		testWait.value = secs > 0 ? Math.min(Math.ceil(secs), RETRY_WAIT_CAP_S) : 0;
+		if (testWait.value <= 0) return;
+		testWaitTimer = setInterval(() => {
+			testWait.value -= 1;
+			if (testWait.value <= 0) clearInterval(testWaitTimer);
+		}, 1000);
+	},
+	{ immediate: true }
+);
+onUnmounted(() => clearInterval(testWaitTimer));
+// Leaving the screen ends any test poll still running.
+watch(showPrivateServerStep, (on, was) => {
+	if (was && !on) net.dispose();
+});
 const checking = computed(() => pay.value.busy === "checking");
 const initiating = computed(() => pay.value.busy === "initiating");
 // The verify round trip OPENS the checkout on success, so an unguarded
@@ -3632,7 +4529,6 @@ const resending = computed(() => pay.value.busy === "resending");
 //     must NOT have its buttons replaced by a full-screen indefinite spinner;
 //     they are disabled in place on the recovery card instead. So this is the
 //     return reconcile only, never any status check.
-const confirmingReturn = ref(false);
 const showConfirming = computed(() => !payBusyView.value && confirmingReturn.value);
 
 // PROOF the customer actually finished checkout on this mount: the pay page appends
@@ -3651,7 +4547,7 @@ const showConfirming = computed(() => !payBusyView.value && confirmingReturn.val
 // ?pay= outcome, so they cannot prove completion and keep the recovery card. The
 // flag is reset to false whenever a checkout (re)opens - see the CHECKOUT_OPEN watch
 // below - so proof from one attempt can never soften a later, unrelated wait.
-const returnedFromCompletedCheckout = ref(false);
+// (Declared above, next to onPayableCard, which reads it.)
 
 /** Hold the confirming screen for the duration of a post-checkout reconcile. */
 async function whileConfirmingReturn(run) {
@@ -3768,10 +4664,6 @@ const provisioningDelayed = computed(() => pay.value.value === S.PROVISIONING_DE
 // fall back to (owner decision 4). Only replaces the FRESH review card; a customer
 // with real server state (paid, verifying, a recovery) still sees their own state.
 const showMaintenanceHold = computed(() => !state.paymentUiV2 && pay.value.value === S.REVIEW);
-// Unlike showMaintenanceHold (a pay-step-only sub-state), a blocked host can
-// never onboard on any step, so this gates the wizard's top-level v-if chain
-// (rendered before even the intro tour) rather than the pay step's sub-chain.
-const showHostBlock = computed(() => !hostOk);
 
 // The busy-screen line. CHECKOUT_OPEN is the copy MOMENT before the browser
 // top-level-navigates to the admin-hosted pay page (WS7).
@@ -3979,7 +4871,15 @@ async function runPendingAutoPoll(myRun) {
 function restartPendingAutoPoll() {
 	pendingPollRun += 1; // supersede whatever was already running
 	pendingPollStuck.value = false;
-	if (isAutoPollable(pay.value.value) && state.step === "pay") {
+	// Not while the allow-your-server screen is up: the customer is editing a firewall, and
+	// the rate-limited provider-truth check would run every 15 s and then announce "we stopped
+	// auto-checking" over a screen that has nothing to do with the payment.
+	if (
+		isAutoPollable(pay.value.value) &&
+		state.step === "pay" &&
+		!showPrivateServerStep.value &&
+		!checkingServer.value
+	) {
 		runPendingAutoPoll(pendingPollRun);
 	}
 	// NOTE: the value-change watch fires restartPendingAutoPoll on a
@@ -3990,6 +4890,9 @@ function restartPendingAutoPoll() {
 	// ceiling on each, never a forever-spinner.
 }
 watch(() => pay.value.value, restartPendingAutoPoll);
+// Entering or leaving the server check / AllowServer screen supersedes a loop already running:
+// its own guards only look at the run token and the machine state.
+watch([showPrivateServerStep, checkingServer], () => restartPendingAutoPoll());
 // Clear the completed-checkout proof the instant a (new or resumed) checkout opens.
 // From CHECKOUT_OPEN, the ONLY thing that may re-arm the calm settling hold is a
 // fresh ?pay=done full-navigation return (set in onMounted). This does two things:
@@ -4241,10 +5144,18 @@ async function onPayAction(a) {
 		// when the reset actually happened - a preserved state keeps the customer on
 		// their recovery card (status/reconnect/support), never on a fresh review
 		// that would re-run start_signup over live money.
+		// An address refusal sends the customer back to the address, not to Details.
+		const privateRefusal = PRIVATE_SIGNUP_REFUSAL_CODES.includes(pay.value.code);
 		const { reset } = flow.restart();
 		if (reset) {
+			net.clearCleared();
 			restartHeldNote.value = "";
-			state.step = "details";
+			if (privateRefusal) {
+				state.step = "network";
+				net.openAddress();
+			} else {
+				state.step = "details";
+			}
 		} else {
 			// The reset was refused: a payment is still recoverable behind the current
 			// state (P1-3). Say so, rather than a button that appears to do nothing (X8).
@@ -4284,12 +5195,20 @@ watch(
 		if (el && typeof el.focus === "function") el.focus();
 	}
 );
+// The held-server screen replaces the verify button the customer just pressed (or a "Checking
+// your server" spinner): move focus to its heading so a keyboard user does not land on <body>.
+watch(showPrivateServerStep, async (on) => {
+	if (!on) return;
+	await nextTick();
+	const el = recoveryHeading.value;
+	if (el && typeof el.focus === "function") el.focus();
+});
 
 // Click handler for the review card's single Pay CTA. Fires start_signup exactly
 // once through the flow; the machine takes it from there (verify / checkout /
 // parked-money / duplicate all land on their own sub-screen).
 async function onPayClick() {
-	if (!hostOk) return; // localhost/non-public bench: server rejects signup anyway
+	if (!onboardingHostOk.value) return; // no public host and no private setup: server rejects signup anyway
 	// plan-09 07-c: the CTA is hidden behind the maintenance hold when the flag is
 	// off; guard the handler too so a stray/programmatic click cannot start a signup.
 	if (!state.paymentUiV2) return;
@@ -5070,6 +5989,17 @@ function noteReadiness(o) {
 		connectModelChangeOffered.value = false;
 		return stage;
 	}
+	// Private network: admin is withholding the plugin env until the connection test passes.
+	// The customer acts on their firewall (rules + Test connection) right here; the wait
+	// resumes when both halves pass (resumeAfterNetwork). Not a model problem, not paged.
+	if (stage.network) {
+		state.connectPhase = "network";
+		state.connectTitle = stage.title || "Allow your Jarvis server";
+		state.connectMessage = stage.detail;
+		state.connectPaged = false;
+		connectModelChangeOffered.value = false;
+		return stage;
+	}
 	// A verdict that waiting cannot resolve is terminal for this wait: stop
 	// polling rather than counting down to a ceiling whose copy invites a retry
 	// that cannot help. Covers a paged authority repair (do nothing, we called
@@ -5256,6 +6186,18 @@ function onTerminal(status) {
 	// rejected/superseded attempt is DONE, so the next Start mints a fresh operation -
 	// drop the idempotency key. A retry re-follows the SAME op, so its key is kept.
 	if (ui.phase === OP_PHASE.REJECTED || ui.phase === OP_PHASE.SUPERSEDED) forgetIdem();
+}
+
+// The wizard's own Connect wait, started cold: the first readiness poll names
+// network_check_required and noteReadiness opens the network panel (or navigates to chat if
+// the workspace is ready by now).
+function openNetworkCheck() {
+	state.step = "connect";
+	state.reconciledConnect = true; // no local pay context
+	navigated.value = false;
+	state.finishing = true;
+	state.connectPhase = "working";
+	waitForChatReadiness();
 }
 
 function enterSupport() {
@@ -5551,6 +6493,65 @@ function reconnectFromStall() {
 	);
 }
 
+// ---- Private network: the Connect panel for network_check_required -------------------------
+// The customer's own saved private address for the inbound rule. Never the browser origin: on a
+// private bench that is the internal address, and a firewall team must not be told to allow it.
+// What the panel renders for the test it runs. `afterPayment` only changes the success line.
+const connectTest = computed(() =>
+	describeServerTest({
+		phase: net.state.test.phase,
+		inbound: net.state.test.inbound,
+		outbound: net.state.test.outbound,
+		hostIp: net.state.hold ? net.state.hold.hostIp : "",
+		publicAddress: net.state.publicAddress,
+		reachUrl: net.state.hold ? net.state.hold.reachUrl : "",
+		siteName: window.site_name || "",
+		afterPayment: true,
+	})
+);
+// The lookup is "done" once loadStatus + loadHold both answered. The rules show only after
+// that: after an operator-confirmed host move the stored hold (and the host in the verdict) can
+// be stale, and a stale "allow this IP" rule is worse than a moment of waiting. The browser
+// never sends a target; reserveHost() is keyed on the signed-in customer, and a
+// PRIVATE_HOLD_UNAVAILABLE refusal re-reserves inside loadHold.
+const networkLookupDone = ref(false);
+const NO_ADDRESS_CARD = {
+	title: "Contact support",
+	text: "We couldn't get your network address. Try again, or contact support.",
+};
+function lookUpNetworkServer() {
+	networkLookupDone.value = false;
+	Promise.all([net.loadStatus(), net.loadHold()]).then(() => {
+		if (state.connectPhase === "network") networkLookupDone.value = true;
+	});
+}
+// Why the rules cannot be shown: admin's hold refusal, a blank host, or no saved address to name.
+const networkLookupErr = computed(() => {
+	if (!networkLookupDone.value) return null;
+	if (net.state.holdErr) return holdErrCard.value;
+	if (!net.state.publicAddress) return NO_ADDRESS_CARD;
+	return null;
+});
+watch(
+	() => state.connectPhase,
+	(phase, prev) => {
+		if (prev === "network" && phase !== "network") net.dispose();
+		networkLookupDone.value = false;
+		if (phase === "network") lookUpNetworkServer();
+	}
+);
+// Both halves passed, so admin will push the plugin env on its next reconcile. Resume the
+// readiness wait where it stopped. If admin has not caught up yet the first poll may stop here
+// again, with a clean panel to test from.
+function resumeAfterNetwork() {
+	net.resetTest();
+	state.connectPhase = "";
+	state.connectMessage = "";
+	state.connectTitle = "";
+	state.finishing = true;
+	waitForChatReadiness();
+}
+
 // (An unreferenced `editConnect` lived here: a partial return-to-the-form that
 // nothing ever called, because onOpUpdate's REJECTED branch inlines its own.
 // Removed rather than reused by jarvis#727's escape - it dropped neither the
@@ -5743,6 +6744,9 @@ function onCheckoutVisibility() {
 }
 
 onMounted(async () => {
+	// Private network: learn reachability (Network step) or the saved address (a reload after
+	// the setup). Not awaited and never reached on a public bench.
+	if (privateBench.value) net.loadStatus();
 	// Did we just come back from the admin-hosted checkout? The pay page appends
 	// `?pay=done|failed|pending` on its way out (jarvis_admin_v2's
 	// billing/checkout/workspace.py owns that vocabulary). Read it BEFORE anything
@@ -5870,6 +6874,13 @@ onMounted(async () => {
 	// The pay page told us where they came from, so honour that.
 	if (checkoutReturn && state.step === "intro") {
 		state.step = "pay";
+	}
+	// Opened from the chat banner for network_check_required: land on the Connect panel (rules and
+	// Test connection) rather than the intro tour. Private benches only, and never over a
+	// resumed apply.
+	if (privateBench.value && hasNetworkIntent(window.location.search) && !state.finishing) {
+		openNetworkCheck();
+		return;
 	}
 	// Prefetch the plan catalog behind the intro tour so the Plan step rarely
 	// first-paints in its loading state. Reconciled resumes land past "plan"

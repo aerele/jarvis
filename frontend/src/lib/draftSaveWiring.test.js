@@ -55,15 +55,15 @@ test("an open panel on the same draft is kept, not rebuilt from the agent's prop
 
 test("the card's Confirm saves the open panel's values when it edits this draft", () => {
 	const fn = body("confirmSummary");
-	const panel = fn.indexOf("applyDraft(0, panel)");
+	const panel = fn.indexOf("applyDraft(0, panel, view)");
 	assert.match(fn, /openPanelFor\(draftPanel\.value, model\.actionKey\)/);
-	assert.ok(panel > 0 && panel < fn.indexOf("applyDraft(0, model)"));
+	assert.ok(panel > 0 && panel < fn.indexOf("applyDraft(0, model, view)"));
 });
 
 test("a re-sent proposal toasts 'updated' only when the panel was rebuilt", () => {
 	assert.match(
 		src,
-		/\.then\(\(rebuilt\) => \{\s*if \(rebuilt && draftPanel\.value\) draftPanel\.value\.updatedToast = true;/
+		/\.then\(\(rebuilt\) => \{\s*if \(rebuilt && draftModelViewIsCurrent\(view, draftPanel\.value\)\)\s*draftPanel\.value\.updatedToast = true;/
 	);
 });
 

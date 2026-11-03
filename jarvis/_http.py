@@ -8,6 +8,16 @@ import hmac
 import frappe
 
 
+def constant_time_equal(a: str, b: str) -> bool:
+	"""Compare text values without allowing non-ASCII input to raise.
+
+	``hmac.compare_digest`` rejects non-ASCII ``str`` values. Compare UTF-8
+	bytes instead so malformed request headers fail closed. ``surrogatepass``
+	also makes a hostile lone surrogate a mismatch rather than a 500.
+	"""
+	return hmac.compare_digest(a.encode("utf-8", "surrogatepass"), b.encode("utf-8", "surrogatepass"))
+
+
 def validate_bearer() -> bool:
 	"""Return True iff the X-Jarvis-Token header contains the correct agent token.
 
@@ -23,4 +33,4 @@ def validate_bearer() -> bool:
 	if not expected:
 		return False
 	# Constant-time comparison to prevent timing-oracle attacks
-	return hmac.compare_digest(presented, expected)
+	return constant_time_equal(presented, expected)

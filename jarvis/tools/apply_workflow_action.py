@@ -23,7 +23,7 @@ Two shapes:
 """
 
 import frappe
-from frappe.model.workflow import apply_workflow, get_workflow_name
+from frappe.model.workflow import apply_workflow, get_transitions, get_workflow, get_workflow_name
 
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools import require_doctype_and_name
@@ -50,6 +50,9 @@ def apply_workflow_action(
 	doc's transition is enqueued rather than committed inline; it reports
 	``queued: True`` (no doc dict, because nothing is committed yet).
 	"""
+	from jarvis.tools._delegate_write_caps import enforce_closed_agent_direct_write
+
+	enforce_closed_agent_direct_write("apply workflow action", doctype)
 	if names is not None:
 		return _apply_batch(doctype, action, names)
 
@@ -65,6 +68,7 @@ def apply_workflow_action(
 		)
 
 	doc = frappe.get_doc(doctype, name)  # raises DoesNotExistError if missing
+	_lcv_tax_gate(doc, action)
 	result = apply_workflow(doc, action)  # validates transition + role + self-approval
 	if result is None:
 		return {"doctype": doctype, "name": name, "action": action, "queued": True}
@@ -76,6 +80,9 @@ def apply_workflow_action(
 def _apply_batch(doctype: str, action: str, names: list) -> dict:
 	"""Apply one ``action`` to every name atomically. If any transition fails
 	(illegal state, role/self-approval, condition), the whole batch rolls back."""
+	from jarvis.tools._delegate_write_caps import enforce_closed_agent_direct_write
+
+	enforce_closed_agent_direct_write("apply workflow action", doctype)
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
 	if not action or not str(action).strip():
@@ -101,8 +108,36 @@ def _apply_batch(doctype: str, action: str, names: list) -> dict:
 
 	def _do(name: str) -> dict:
 		doc = frappe.get_doc(doctype, name)  # raises DoesNotExistError if missing
+		_lcv_tax_gate(doc, action)
 		result = apply_workflow(doc, action)  # validates transition + role + self-approval
 		return {"name": name, "queued": result is None}
 
 	results = run_atomic_batch(names, _do, label=lambda n: n)
 	return {"doctype": doctype, "action": action, "results": results, "count": len(results)}
+
+
+def _lcv_tax_gate(doc, action):
+	if doc.doctype != "Landed Cost Voucher" or doc.docstatus != 0:
+		return
+	doc.check_permission("read")
+	workflow = get_workflow(doc.doctype)
+	transition = next((t for t in get_transitions(doc, workflow) if t.action == action), None)
+	if not transition or not any(
+		s.state == transition.next_state and int(s.doc_status) == 1 for s in workflow.states
+	):
+		return
+	if doc.meta.queue_in_background:
+		raise InvalidArgumentError(
+			"Review this LCV in the ERP form; background workflow cannot recheck source tax here."
+		)
+	from jarvis.tools._lcv_source_tax import gate_lcv
+
+	# Match create/update: retain source PI locks before the LCV row lock.
+	gate_lcv(doc, lock=True)
+	# apply_workflow reloads its target. Keep that reload bound to the document
+	# checked here, including on READ COMMITTED connections.
+	modified = frappe.db.get_value(doc.doctype, doc.name, "modified", for_update=True)
+	if str(modified) != str(doc.modified):
+		raise frappe.TimestampMismatchError(
+			"The LCV changed. Reload it before applying this workflow action."
+		)
