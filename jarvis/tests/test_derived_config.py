@@ -18,6 +18,28 @@ def _inst(name="INST-1", config=None):
 
 
 class TestDerivedConfig(FrappeTestCase):
+	def test_ledger_registry_delivers_declared_controls_without_other_installation_values(self):
+		from jarvis.chat import agent_catalog
+
+		entry = next(
+			e
+			for e in agent_catalog._load_registry()["agents"]
+			if e["agent_slug"] == "ledger-scrutiny-auditor"
+		)
+		controls = {
+			"materiality": {"benchmark_value": 100000, "percentage": 5},
+			"suspense_accounts": ["Suspense - TEST"],
+			"subledger_owned_accounts": ["Payable - TEST"],
+			"subledger_account_owner": {"Payable - TEST": "Accounts Payable"},
+			"chart_standard": "Company chart",
+			"suspense_confirmed": True,
+		}
+		inst = _inst(config=json.dumps({**controls, "undeclared_private_setting": "exclude"}))
+		self.assertEqual(agent_scheduler._explicit_config(entry, inst), controls)
+		self.assertIn(
+			"jarvis__get_engagement_config", agent_catalog.registry_tools_allow(entry["agent_slug"])
+		)
+
 	def test_statutory_schema_is_metadata_only_and_cannot_be_overridden(self):
 		self.assertFalse(derived_config.customer_may_set("statutory_schema"))
 		with patch.object(
