@@ -6,6 +6,7 @@ import {
 	KNOWN_CONFIG_KEYS,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
+	NUMBER_CONFIG_CONSTRAINTS,
 	TEXT_LIST_CONFIG_KEYS,
 	KEY_TO_PATH,
 	getPath,
@@ -41,6 +42,9 @@ describe("CONFIG_FIELD_SET", () => {
 				"price_tolerance_percent",
 				"basis",
 				"review_scope",
+				"depr_run_posted",
+				"enable_capex_signal",
+				"payroll_entry",
 				"company",
 				"fiscal_year",
 				"from_date",
@@ -50,6 +54,9 @@ describe("CONFIG_FIELD_SET", () => {
 				"percentage",
 				"engagement_risk_level",
 				"rounding_step",
+				"fefo_reviewer",
+				"fefo_near_expiry_days",
+				"fefo_test_declaration",
 				"grn_hygiene_reviewer",
 				"grn_hygiene_test_declaration",
 				"deposit",
@@ -62,7 +69,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 	});
 
-	it("orders scope, the SLA team, materiality, GRN and Deposit settings, then the vendor-ledger ageing floors", () => {
+	it("orders review, fixed-asset, payroll, scope, SLA, materiality, FEFO, GRN, Deposit, then vendor-ledger fields", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
@@ -73,6 +80,9 @@ describe("CONFIG_FIELD_SET", () => {
 			"price_tolerance_percent",
 			"basis",
 			"review_scope",
+			"depr_run_posted",
+			"enable_capex_signal",
+			"payroll_entry",
 			"company",
 			"fiscal_year",
 			"from_date/to_date",
@@ -81,6 +91,9 @@ describe("CONFIG_FIELD_SET", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"fefo_reviewer",
+			"fefo_near_expiry_days",
+			"fefo_test_declaration",
 			"grn_hygiene_reviewer",
 			"grn_hygiene_test_declaration",
 			"deposit",
@@ -98,6 +111,7 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 		expect(byKey.company).toMatchObject({ type: "link", linkDoctype: "Company" });
 		expect(byKey.fiscal_year).toMatchObject({ type: "link", linkDoctype: "Fiscal Year" });
+		expect(byKey.payroll_entry).toMatchObject({ type: "link", linkDoctype: "Payroll Entry" });
 	});
 
 	it("the SLA team field writes the exact HD Team record-scope shape", () => {
@@ -117,7 +131,7 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(field.options.map((o) => o.value)).toEqual(["", "low", "medium", "high"]);
 	});
 
-	it("materiality, GST turnover and ageing floors are numeric; GRN settings are text", () => {
+	it("materiality, turnover, FEFO window and ageing floors are numeric; GRN settings are text", () => {
 		expect(NUMBER_CONFIG_KEYS.sort()).toEqual(
 			[
 				"settlement_hold_days",
@@ -126,6 +140,7 @@ describe("CONFIG_FIELD_SET", () => {
 				"benchmark_value",
 				"percentage",
 				"rounding_step",
+				"fefo_near_expiry_days",
 				"annual_aggregate_turnover",
 				"stale_floor_days",
 				"advance_floor_days",
@@ -134,6 +149,32 @@ describe("CONFIG_FIELD_SET", () => {
 		);
 		expect(NUMBER_CONFIG_KEYS).not.toContain("grn_hygiene_reviewer");
 		expect(NUMBER_CONFIG_KEYS).not.toContain("grn_hygiene_test_declaration");
+	});
+
+	it("keeps FEFO policy values in the declared nested namespace", () => {
+		const byKey = Object.fromEntries(
+			CONFIG_FIELD_SET.filter((f) => f.key).map((f) => [f.key, f])
+		);
+		expect(byKey.fefo_reviewer).toMatchObject({ path: "fefo.reviewer", type: "text" });
+		expect(byKey.fefo_near_expiry_days).toMatchObject({
+			path: "fefo.near_expiry_days",
+			type: "number",
+			integer: true,
+			min: 1,
+			max: 3650,
+		});
+		expect(byKey.fefo_test_declaration).toMatchObject({
+			path: "fefo.test_declaration",
+			type: "text",
+		});
+	});
+
+	it("declares the FEFO near-expiry integer range once for the form", () => {
+		expect(NUMBER_CONFIG_CONSTRAINTS.fefo_near_expiry_days).toEqual({
+			integer: true,
+			min: 1,
+			max: 3650,
+		});
 	});
 
 	it("declares the payroll deposit panel at its one nested namespace", () => {
@@ -165,7 +206,7 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific includes SLA, materiality, GRN, Deposit, GST and vendor-ledger settings", () => {
+	it("agent-specific includes review, fixed-asset, payroll, SLA, materiality, FEFO, GRN, Deposit, GST and vendor-ledger settings", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
 			"bank_account",
@@ -175,11 +216,17 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"price_tolerance_percent",
 			"basis",
 			"review_scope",
+			"depr_run_posted",
+			"enable_capex_signal",
+			"payroll_entry",
 			"sla_team",
 			"benchmark_value",
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"fefo_reviewer",
+			"fefo_near_expiry_days",
+			"fefo_test_declaration",
 			"grn_hygiene_reviewer",
 			"grn_hygiene_test_declaration",
 			"deposit",
@@ -224,6 +271,12 @@ describe("KEY_TO_PATH (local form key -> storage dot path)", () => {
 		expect(KEY_TO_PATH.rounding_step).toBe("materiality.rounding_step");
 		expect(KEY_TO_PATH.grn_hygiene_reviewer).toBe("grn_hygiene.reviewer");
 		expect(KEY_TO_PATH.grn_hygiene_test_declaration).toBe("grn_hygiene.test_declaration");
+	});
+
+	it("the FEFO keys are nested dot paths", () => {
+		expect(KEY_TO_PATH.fefo_reviewer).toBe("fefo.reviewer");
+		expect(KEY_TO_PATH.fefo_near_expiry_days).toBe("fefo.near_expiry_days");
+		expect(KEY_TO_PATH.fefo_test_declaration).toBe("fefo.test_declaration");
 	});
 
 	it("the deposit panel owns the whole declared namespace", () => {

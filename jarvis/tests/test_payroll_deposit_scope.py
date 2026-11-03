@@ -206,11 +206,16 @@ class TestPayrollDepositScope(TestCase):
 			}
 		)
 		self.assertEqual(agent_scheduler._explicit_config(listing, inst), {"deposit": DEPOSIT_CONFIG})
+		# The launcher passes its frozen namespace. A later installation save must
+		# not replace the voucher plan or introduce undeclared prompt content.
+		frozen = {"deposit": DEPOSIT_CONFIG}
+		inst.config = frappe.as_json({"deposit": {"changed_after_launch": True}})
 		with patch("jarvis.chat.agent_catalog.registry_tools_allow", return_value=[]):
 			message = agent_scheduler._audit_prompt(
 				listing,
 				inst,
 				trigger="manual",
+				explicit_config=frozen,
 				scope={
 					**BASE_SCOPE,
 					"record_scope": {
@@ -224,6 +229,7 @@ class TestPayrollDepositScope(TestCase):
 		self.assertIn(json.dumps({"deposit": DEPOSIT_CONFIG}, sort_keys=True), message)
 		self.assertNotIn("private_extra", message)
 		self.assertNotIn("unrelated", message)
+		self.assertNotIn("changed_after_launch", message)
 
 	def test_invalid_deposit_scope_aborts_before_an_unscoped_delegate_run(self):
 		inst = frappe._dict({"agent": AGENT})

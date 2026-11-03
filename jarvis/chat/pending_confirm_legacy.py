@@ -441,6 +441,10 @@ def consume(token: str, *, owner: str, conversation: str) -> dict | None:
 	"""
 	if not token:
 		return None
+	# An old generic credential has no reliable agent identity. Refuse every
+	# unmarked token before consume, including during the code-before-migration
+	# drain window. Only server-minted cards after activation carry the generation.
+
 	record = _read_record(token, swallow=False)
 	if not record:
 		return None

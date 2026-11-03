@@ -456,14 +456,12 @@
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
-        "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__get_engagement_config"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
-        "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
@@ -512,22 +510,22 @@
       "domain": "close",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "2.1.0",
+      "version": "2.1.2",
       "status": "Published",
       "description": "Read-only period-end integrity checks: the trial balance must balance (opening and closing), and no ledger may carry a material balance on the wrong side of its group. Structural and reproducible \u2014 the same books yield the same findings every run. Never writes; reports and hands off.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
-        "jarvis__run_report",
         "jarvis__get_doc",
-        "jarvis__get_balance_on"
+        "jarvis__get_balance_on",
+        "jarvis__get_engagement_config"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
-        "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
+        "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -840,24 +838,22 @@
     },
     {
       "agent_slug": "fefo-expiry-compliance-auditor",
-      "title": "FEFO Violation & Expiry Auditor (auditor)",
+      "title": "Batch Rotation and Expiry Reviewer",
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.4.2",
       "status": "Published",
-      "description": "For batch-tracked pharma/FMCG/food stock: replays each day's outward movements to catch FEFO violations \u2014 a dispatch that skipped an older-expiry batch that still had stock \u2014 and lists on-hand batches inside the near-expiry and past-expiry horizon, ranked by value. Read-only; hyperlinks every finding to its batch and dispatch. Never touches stock, holds a shipment, or writes off a batch.",
+      "description": "Read-only review of native batch stock and dispatches. Shows past and near expiry stock under an owner expiry policy and candidates where a dispatch skipped an older valid batch. Compares signed batch quantities and recorded values with the native report. A person reviews reservations, quality holds and dispatch exceptions. No legal or saleability verdict.",
       "tools_required": [
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
+        "jarvis__get_my_access",
+        "jarvis__run_report"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
+        "jarvis__get_my_access",
         "jarvis__run_report",
-        "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -865,18 +861,27 @@
         "message"
       ],
       "doctypes_required": [
-        "Stock Ledger Entry",
-        "Batch",
-        "Serial and Batch Bundle",
+        "Company",
+        "Warehouse",
         "Item",
-        "Company"
+        "Batch",
+        "Stock Ledger Entry",
+        "Serial and Batch Bundle",
+        "Serial and Batch Entry",
+        "Stock Entry",
+        "Delivery Note",
+        "Sales Invoice",
+        "Repost Item Valuation",
+        "Stock Closing Entry",
+        "Stock Closing Balance",
+        "Inventory Dimension"
       ],
       "rule_tokens": [
-        "fef-band-7c30",
-        "fef-mat-2b8e",
-        "fef-order-4a19",
-        "gdp_near_expiry_horizon_convention",
-        "shelf_life_horizon_fraction"
+        "fef-life-3f72",
+        "fef-near-8c30",
+        "fef-past-2d48",
+        "fef-pick-6a91",
+        "fef-total-9b51"
       ],
       "advisory_tokens": [],
       "writes": null,
@@ -892,7 +897,12 @@
       "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "fefo.reviewer",
+        "fefo.near_expiry_days",
+        "fefo.test_declaration"
+      ]
     },
     {
       "agent_slug": "fixed-asset-depreciation-auditor",
@@ -900,22 +910,22 @@
       "domain": "accounting",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.3.0",
+      "version": "0.3.2",
       "status": "Published",
       "description": "Read-only month-end fixed-asset integrity checks: ties every due depreciation schedule row to its posted journal, reconciles scheduled vs posted depreciation, lists zero / near-salvage assets still in use as write-off candidates, and ages capital-work-in-progress not yet placed in service. Produces a reproducible, provenance-linked worklist and dashboard. Never edits the register, posts a journal, or signs the close.",
       "tools_required": [
         "jarvis__query",
         "jarvis__get_list",
-        "jarvis__run_report",
         "jarvis__get_doc",
-        "jarvis__get_balance_on"
+        "jarvis__get_balance_on",
+        "jarvis__get_engagement_config"
       ],
       "tools_allow": [
         "jarvis__query",
         "jarvis__get_list",
-        "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
+        "jarvis__get_engagement_config",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
         "exec",
@@ -950,7 +960,8 @@
       "supports_record_scope": false,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": ["depr_run_posted", "enable_capex_signal"]
     },
     {
       "agent_slug": "grn-hygiene-auditor",
@@ -1305,19 +1316,17 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.3.2",
       "status": "Published",
-      "description": "Runs ERPNext's stock-value vs account-value comparison on a schedule and works the residue: flags negative on-hand balances, zero-rate receipts, abnormal valuation-rate jumps, internal stock-value inconsistencies, and where your perpetual stock value drifts from its stock-in-hand GL account. Ranks each exception by rupees with a link to the offending ledger row. Read-only; never adjusts a quantity, books a journal entry, or posts a stock reconciliation.",
+      "description": "Checks stock balances and receipt costs against retained ledger records. Compares complete stock accounts with native ERPNext reports and shows warehouse review summaries. Read-only; does not change stock or accounting entries.",
       "tools_required": [
         "jarvis__query",
-        "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
@@ -1329,7 +1338,6 @@
       ],
       "doctypes_required": [
         "Stock Ledger Entry",
-        "Bin",
         "Item",
         "Warehouse",
         "GL Entry",
@@ -1337,13 +1345,17 @@
         "Stock Settings",
         "Repost Item Valuation",
         "Landed Cost Voucher",
-        "Company"
+        "Company",
+        "Stock Entry",
+        "Landed Cost Purchase Receipt"
       ],
       "rule_tokens": [
         "nsv-grade-e058",
         "nsv-integ-2a6f",
+        "nsv-neg-2e73",
         "nsv-spike-4b1c",
-        "nsv-tieout-7d92"
+        "nsv-tieout-7d92",
+        "nsv-zero-8c45"
       ],
       "advisory_tokens": [],
       "writes": null,
@@ -1359,7 +1371,8 @@
       "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": ["negative_stock"]
     },
     {
       "agent_slug": "payroll-prerun-auditor",
@@ -1432,16 +1445,33 @@
     },
     {
       "agent_slug": "reorder-replenishment-operator",
-      "title": "Reorder & Replenishment Operator",
+      "title": "Reorder Review",
       "domain": "inventory",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.1",
-      "status": "Coming Soon",
-      "description": "Coming Soon. Replenishment work is not available. This agent has no runtime tool or write surface. It cannot read stock records, create approvals, change Material Requests, or send messages. A later server-owned workflow will require a typed and human-confirmed path.",
-      "tools_required": [],
-      "tools_allow": [],
-      "doctypes_required": [],
+      "version": "0.2.0",
+      "status": "Published",
+      "description": "Prepares purchase suggestions from saved ERPNext reorder levels after a current Negative Stock receipt and fresh native stock checks. A named buyer reviews each suggestion. Manual runs only. Review does not create or submit a Material Request or Purchase Order. Grouped policies and draft supply require manual action.",
+      "tools_required": ["jarvis__prepare_reorder_review"],
+      "tools_allow": ["jarvis__prepare_reorder_review"],
+      "doctypes_required": [
+        "Company",
+        "Warehouse",
+        "Item",
+        "Item Reorder",
+        "Bin",
+        "Stock Ledger Entry",
+        "Account",
+        "GL Entry",
+        "Stock Settings",
+        "Repost Item Valuation",
+        "Landed Cost Voucher",
+        "Material Request",
+        "Material Request Item",
+        "Purchase Order",
+        "Purchase Order Item",
+        "UOM"
+      ],
       "rule_tokens": [],
       "advisory_tokens": [],
       "writes": null,
@@ -1457,7 +1487,8 @@
       "supports_record_scope": false,
       "min_model": {
         "tier": "Standard"
-      }
+      },
+      "config_keys": ["policy_version", "negative_stock_run", "max_proposals"]
     },
     {
       "agent_slug": "sla-breach-ageing-auditor",
@@ -1510,19 +1541,12 @@
       "domain": "hrms-payroll",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.4.3",
       "status": "Published",
-      "description": "Reads your computed Salary Slips each month before the PF/ESI/PT deposit and surfaces the employees whose statutory deduction lines don't reconcile with their reconstructed wage bases \u2014 PF against the ceiling, ESI at the eligibility boundary and its mid-period continuity, PT against the state slab, LWF presence, and bonus/gratuity eligibility transitions. UAN/ESI identity and challan/portal deposit evidence come only from sources you declare at install; checks needing them stay not-evaluable until then. Read-only; never edits a slip or files a return; a named reviewer owns every decision.",
-      "tools_required": [
-        "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
-        "jarvis__get_doc"
-      ],
+      "description": "Reviews one submitted payroll batch using dated PF and ESI rules and owner-classified native remuneration. It keeps missing remuneration, contract sources, unreviewed law periods, and disabled state PT/LWF checks visible. The revised PF ceiling uses an official announcement; the Gazette text and qualified legal review remain pending. The current ESI threshold follows Ministry guidance while final Rules remain pending. Read-only; a named reviewer owns each decision.",
+      "tools_required": ["jarvis__query", "jarvis__get_doc"],
       "tools_allow": [
         "jarvis__query",
-        "jarvis__get_list",
-        "jarvis__run_report",
         "jarvis__get_doc",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1535,7 +1559,11 @@
         "Salary Component",
         "Employee",
         "Salary Structure Assignment",
-        "Company"
+        "Company",
+        "Payroll Entry",
+        "Payroll Employee Detail",
+        "Salary Detail",
+        "Payroll Settings"
       ],
       "rule_tokens": [
         "bonus_wage_ceiling",
@@ -1546,7 +1574,8 @@
         "lwf_state_maharashtra",
         "pf_wage_ceiling",
         "pt_slabs_karnataka",
-        "pt_slabs_maharashtra"
+        "pt_slabs_maharashtra",
+        "statutory_wage_definition"
       ],
       "advisory_tokens": [],
       "writes": null,
@@ -1562,7 +1591,8 @@
       "supports_record_scope": true,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": ["payroll_entry", "statutory", "statutory_schema"]
     },
     {
       "agent_slug": "statutory-payroll-deposit-status",
