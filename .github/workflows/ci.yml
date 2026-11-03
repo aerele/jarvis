@@ -497,6 +497,31 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      - name: Verify v15 landed costs with India Compliance
+        if: matrix.shard == 1
+        working-directory: frappe-bench
+        env:
+          CI: "1"
+        run: |
+          # Keep the ordinary suite unchanged. Run the accounting integration
+          # on a separate site, with a pinned v15 classifier and native schema.
+          bench get-app --branch version-15 --skip-assets https://github.com/resilient-tech/india-compliance.git
+          git -C apps/india_compliance fetch upstream eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
+          git -C apps/india_compliance checkout --detach eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
+          ./env/bin/pip install -e apps/india_compliance
+          bench new-site jarvis-lcv-ci.test \
+            --db-host 127.0.0.1 \
+            --mariadb-user-host-login-scope='%' \
+            --mariadb-root-password root \
+            --db-root-username root \
+            --admin-password admin
+          bench --site jarvis-lcv-ci.test install-app erpnext india_compliance jarvis
+          bench --site jarvis-lcv-ci.test set-config allow_tests true
+          bench --site jarvis-lcv-ci.test set-config -p throttle_user_limit 100000
+          for module in test_landed_cost_defaults test_landed_cost_preview test_landed_cost_v15 test_lcv_source_tax test_lcv_compatibility test_lcv_run_method; do
+            bench --site jarvis-lcv-ci.test run-tests --module "jarvis.tests.${module}"
+          done
+
   # The coverage floor cannot be enforced inside a shard: each one exercises roughly a
   # quarter of the code, so all four would "fail" the gate. Combine the four data files,
   # then gate once. `needs: tests` against a matrix runs this only when EVERY leg
