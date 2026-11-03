@@ -368,9 +368,10 @@ def _retire_owner_token(s) -> None:
 	key stored: the old owner token also sits in every copy of this site made before
 	the retirement, and a site that kept it would accept plugin calls signed by a copy.
 	Failing closed costs availability only until the key arrives, so without one a
-	throttled proof-backed sync fetches it (the 503 path of every plugin call re-queues
-	it). Never inline: this runs under the Jarvis Settings row lock, and the fetch is
-	an admin round trip."""
+	proof-backed sync fetches it. The retirement queues that fetch itself, past the
+	10-minute self-heal throttle (a retirement must always trigger one fetch; the job id
+	dedupes it), and the 503 path of every plugin call re-queues it. Never inline: this
+	runs under the Jarvis Settings row lock, and the fetch is an admin round trip."""
 	from jarvis._password_utils import clear_settings_password
 
 	clear_settings_password(s, "agent_token")
@@ -382,13 +383,27 @@ def _retire_owner_token(s) -> None:
 		# plugin call retry within two minutes instead of ten.
 		_shorten_key_resync_throttle()
 		return
-	request_key_resync()
+	try:
+		_enqueue_key_resync()
+	except Exception:
+		frappe.log_error(title="callback key resync: enqueue failed", message=frappe.get_traceback())
 
 
 KEY_RESYNC_THROTTLE_S = 600
 # A FAILED self-heal retries sooner: the throttle's expiry is cut to this.
 KEY_RESYNC_FAILED_THROTTLE_S = 120
 _KEY_RESYNC_THROTTLE_PREFIX = "jarvis:key_resync:"
+
+
+def _enqueue_key_resync() -> None:
+	"""The key-resync job, after this transaction commits, one per site at a time."""
+	frappe.enqueue(
+		"jarvis.onboarding.run_key_resync",
+		queue="short",
+		job_id=f"jarvis_key_resync:{frappe.local.site}",
+		deduplicate=True,
+		enqueue_after_commit=True,
+	)
 
 
 def request_key_resync() -> bool:
@@ -400,13 +415,7 @@ def request_key_resync() -> bool:
 	try:
 		if not claim_once(_KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site, KEY_RESYNC_THROTTLE_S):
 			return False
-		frappe.enqueue(
-			"jarvis.onboarding.run_key_resync",
-			queue="short",
-			job_id=f"jarvis_key_resync:{frappe.local.site}",
-			deduplicate=True,
-			enqueue_after_commit=True,
-		)
+		_enqueue_key_resync()
 		return True
 	except Exception:
 		return False

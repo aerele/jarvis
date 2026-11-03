@@ -5186,7 +5186,18 @@ async function reverifySite() {
 	reverifyError.value = "";
 	try {
 		const res = await api.reverifySite();
-		if (res && res.proved && !res.blocked) {
+		if (
+			res &&
+			res.proved &&
+			!res.blocked &&
+			copyNotice.value?.instance_changed &&
+			!res.pin_rebound
+		) {
+			// Proof passed but nothing rebound the agent's pin (an older control plane
+			// or a failed rebind): the site would be blocked again, so keep the banner.
+			reverifyError.value =
+				"This site is verified, but Jarvis could not reconnect it yet. Try again in a minute, or contact support if this keeps happening.";
+		} else if (res && res.proved && !res.blocked) {
 			forgetReady();
 			copyNotice.value = null;
 		} else if (res && res.error === "unreachable") {

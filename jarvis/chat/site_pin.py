@@ -146,16 +146,19 @@ def reverify() -> dict:
 	this site becomes the paired site. A failed proof keeps the block.
 
 	Sends this site's instance id with the proof, so an admin that supports it rebinds
-	the agent's pinned id after a restore or a move (``pin_rebound``). A pass also
-	clears the "instance changed" record. Admin down or rate limited answers ``proved:
-	false`` with ``error: "unreachable"``, admin refusing with ``error: "not_verified"``,
-	instead of a 500."""
+	the agent's pinned id after a restore or a move (``pin_rebound``). The "instance
+	changed" record is cleared only when the pin was rebound: a pass that rebound
+	nothing (an older admin or fleet) leaves it, because the agent would block the
+	site again. Admin down or rate limited answers ``proved: false`` with ``error:
+	"unreachable"``; admin refusing, or the proof being rejected, ``error:
+	"not_verified"``; instead of a 500."""
 	frappe.only_for("System Manager")
 	from jarvis import admin_client
 	from jarvis.chat import foreign_session, pairing_proof, site_identity
 	from jarvis.exceptions import (
 		AdminAuthError,
 		AdminRateLimitedError,
+		AdminRejectedError,
 		AdminUnreachableError,
 		AdminValidationError,
 	)
@@ -172,12 +175,14 @@ def reverify() -> dict:
 		pin_rebound = proved and answer.get("pin_rebound") is True
 	except AdminAuthError:
 		proved = False
+	except (AdminValidationError, AdminRejectedError):
+		# Admin answered and refused (no running tenant, a rejected instance id, a
+		# permanent rejection): not a connectivity problem, so the SPA must not say
+		# "try again in a minute". AdminRejectedError subclasses AdminUnreachableError,
+		# so it has to be caught first.
+		error = "not_verified"
 	except (AdminUnreachableError, AdminRateLimitedError):
 		error = "unreachable"
-	except AdminValidationError:
-		# Admin answered and refused (no running tenant, a rejected instance id): not a
-		# connectivity problem, so the SPA must not say "try again in a minute".
-		error = "not_verified"
 	if proved:
 		frappe.db.set_single_value(
 			SETTINGS,
@@ -188,7 +193,8 @@ def reverify() -> dict:
 			},
 			update_modified=False,
 		)
-		foreign_session.clear_instance_changed()
+		if pin_rebound:
+			foreign_session.clear_instance_changed()
 	out = {**status(), "proved": proved, "pin_rebound": pin_rebound}
 	if error:
 		out["error"] = error
