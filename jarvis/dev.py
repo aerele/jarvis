@@ -79,7 +79,9 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 		# would keep chat access to a "reset" workspace. Same ordering reason as
 		# the disconnect above: after the wipe the bench cannot reach admin.
 		try:
-			admin_client.unpair_chat_devices()
+			from jarvis.chat import pairing_proof
+
+			admin_client.unpair_chat_devices(proof_nonce=pairing_proof.issue_nonce())
 		except Exception:
 			frappe.logger().info("reset_onboarding: container unpair skipped/failed (non-fatal)")
 

@@ -66,7 +66,11 @@ class TestSitePinConnect(FrappeTestCase):
 
 	def test_ping_refuses_on_copy_site(self):
 		_set_pin("other.site")
-		with patch("jarvis.agent_ws.create_connection") as create:
+		with (
+			patch("jarvis.chat.agent_client.ensure_paired") as paired,
+			patch("jarvis.chat.agent_client.websocket.create_connection") as create,
+		):
 			with self.assertRaises(SiteIsCopyError):
-				agent_ws.ping("ws://t", "tok")
+				agent_ws.ping("ws://t")
+		paired.assert_not_called()
 		create.assert_not_called()

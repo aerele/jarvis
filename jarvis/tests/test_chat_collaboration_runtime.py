@@ -21,6 +21,15 @@ class Gateway:
 	def get_session_messages(self, key, **options):
 		return []
 
+	def patch_session_policy(self, key, patch):
+		"""The plugin route: sets only the inherited tool policy on an existing session."""
+		self.calls.append(("route:sessions.patch", {"key": key, "patch": deepcopy(patch)}))
+		if not self.entry or key != self.key:
+			raise AgentUnreachableError("planted missing session", code="INVALID_REQUEST")
+		for name, value in patch.items():
+			assert name in ("inheritedToolPolicyVersion", "inheritedToolAllow", "inheritedToolDeny"), name
+			self.entry[name] = deepcopy(value)
+
 	def _request(self, method, params, **kwargs):
 		self.calls.append((method, deepcopy(params)))
 		if method == "sessions.create":
@@ -35,9 +44,8 @@ class Gateway:
 		elif method == "sessions.patch":
 			if not self.entry or params.get("expectedSessionId") != self.entry["sessionId"]:
 				raise AgentUnreachableError("planted missing or replaced session", code="INVALID_REQUEST")
-			for name in ("inheritedToolPolicyVersion", "inheritedToolAllow", "inheritedToolDeny"):
-				if name in params:
-					self.entry[name] = deepcopy(params[name])
+			# Owner-only policy fields never travel on the socket any more.
+			assert not any(name.startswith("inheritedTool") for name in params), params
 		else:
 			raise AssertionError(method)
 		return {

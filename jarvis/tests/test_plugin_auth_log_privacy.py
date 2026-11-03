@@ -112,9 +112,8 @@ class TestPluginAuthLogPrivacy(TestCase):
 		request = Mock(headers={"X-Jarvis-Token": "t\u00f6k\u00e9n"})
 		with (
 			patch.object(_http.frappe, "request", request, create=True),
-			patch.object(
-				_http.frappe, "get_single", return_value=Mock(get_password=Mock(return_value=TOKEN))
-			),
+			patch.object(auth, "_callback_key", return_value=""),
+			patch.object(auth, "_agent_token", return_value=TOKEN),
 		):
 			self.assertFalse(_http.validate_bearer())
 
@@ -124,9 +123,8 @@ class TestPluginAuthLogPrivacy(TestCase):
 				request = Mock(headers={"X-Jarvis-Token": presented})
 				with (
 					patch.object(_http.frappe, "request", request, create=True),
-					patch.object(
-						_http.frappe, "get_single", return_value=Mock(get_password=Mock(return_value=TOKEN))
-					),
+					patch.object(auth, "_callback_key", return_value=""),
+					patch.object(auth, "_agent_token", return_value=TOKEN),
 				):
 					self.assertEqual(_http.validate_bearer(), presented == TOKEN)
 

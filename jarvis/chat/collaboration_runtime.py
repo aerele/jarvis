@@ -331,17 +331,21 @@ def provision(sess, binding: c.ActorBinding, policy: RuntimePolicy, *, _created=
 	physical_id = (payload.get("entry") or {}).get("sessionId")
 	if payload.get("key") != binding.session_key or not physical_id:
 		_refuse(binding)
+	# The model pin stays on the socket (write scope). The inherited tool policy is
+	# owner-only, so it goes through the plugin's signed route. The CAS patch first proves
+	# the session exists with this physical id; the route patch then names the same key.
 	sess._request(
 		"sessions.patch",
+		{"key": binding.session_key, "expectedSessionId": physical_id, "model": policy.model_ref},
+		timeout_s=25,
+	)
+	sess.patch_session_policy(
+		binding.session_key,
 		{
-			"key": binding.session_key,
-			"expectedSessionId": physical_id,
 			"inheritedToolPolicyVersion": 1,
 			"inheritedToolAllow": list(ALLOW),
 			"inheritedToolDeny": list(DENY),
-			"model": policy.model_ref,
 		},
-		timeout_s=25,
 	)
 	response = _detach_fresh_parent(sess, binding, policy, physical_id, _read(sess, binding, physical_id))
 	if not _valid(response, binding, policy, physical_id):
