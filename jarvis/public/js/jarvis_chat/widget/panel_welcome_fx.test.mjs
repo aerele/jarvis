@@ -8,6 +8,7 @@ const view = (extra = {}) => ({
   design: "diwali",
   hasItem: true,
   itemReady: true,
+  scene: true,
   ...extra,
 });
 
@@ -102,11 +103,21 @@ test("play:false draws no particles but the hero still smiles", async () => {
   assert.deepEqual(log.smiling, [true]);
 });
 
-test("a lead-up smiles and never celebrates", async () => {
-  const { fx, log } = setup({ v: view({ kind: "leadup" }) });
+test("a lead-up with a scene celebrates on open, like a day", async () => {
+  const { fx, log, fxEl } = setup({ v: view({ kind: "leadup" }) });
+  fx.open();
+  await settle();
+  assert.equal(log.celebrate, 1);
+  assert.deepEqual(log.particles, [[fxEl, "diwali"]]);
+  assert.deepEqual(log.smiling, [true]);
+});
+
+test("a day with no scene (day 2 of a run) opens and smiles but does not celebrate", async () => {
+  const { fx, log } = setup({ v: view({ scene: false }) });
   fx.open();
   await settle();
   assert.equal(log.celebrate, 0);
+  assert.deepEqual(log.particles, []);
   assert.deepEqual(log.smiling, [true]);
 });
 
@@ -195,11 +206,12 @@ test("a replay plays the smile and particles again with no call", async () => {
   assert.deepEqual(log.smiling, [true, false, true]);
 });
 
-test("a replay on a lead-up smiles only; under reduced motion it holds the smile only", async () => {
+test("a replay on a lead-up drops particles with no call; under reduced motion it holds the smile only", async () => {
   const a = setup({ v: view({ kind: "leadup" }) });
   a.fx.replay();
   await settle();
-  assert.deepEqual(a.log.particles, []);
+  assert.equal(a.log.celebrate, 0);
+  assert.equal(a.log.particles.length, 1);
   assert.deepEqual(a.log.smiling, [true]);
   const b = setup({ reduced: true });
   b.fx.replay();

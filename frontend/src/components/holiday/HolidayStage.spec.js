@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { mount } from "@vue/test-utils";
 import { reactive } from "vue";
 
@@ -203,6 +205,116 @@ describe("HolidayStage", () => {
 		expect(hidden(wrapper)).toBe(false);
 		expect(heading(wrapper)).toBe("Happy Diwali, Priya");
 		expect(wrapper.attributes("data-phase")).toBe("rest");
+	});
+
+	describe("on a lead-up day", () => {
+		const ADVANCE = "Wishing you a happy Diwali in advance!";
+		const ORIENTING = "Ask about your ERP data.";
+		const leadup = () => wrapper.get('[data-testid="stage-leadup"]');
+		const offs = (w) => w.findAll(".is-off");
+		beforeEach(() => {
+			state.answer.value = { ...DAY, kind: "leadup", date: "2026-11-06" };
+		});
+
+		it("the heading is the normal greeting and the advance line shows from first paint", () => {
+			wrapper = stage();
+			expect(wrapper.attributes("data-phase")).toBe("pending");
+			expect(heading(wrapper)).toBe("Good morning, Priya");
+			expect(leadup().text()).toBe(ADVANCE);
+			expect(wrapper.text()).toContain(ORIENTING);
+			// Between the heading and the orienting line, in that order.
+			const order = [wrapper.get("h1"), leadup(), wrapper.get(".jv-stage-sub")].map(
+				(w) => w.element
+			);
+			expect(order[0].compareDocumentPosition(order[1])).toBe(
+				Node.DOCUMENT_POSITION_FOLLOWING
+			);
+			expect(order[1].compareDocumentPosition(order[2])).toBe(
+				Node.DOCUMENT_POSITION_FOLLOWING
+			);
+		});
+
+		it("the swap beat changes nothing: same heading, advance line and orienting line, nothing dimmed", async () => {
+			wrapper = stage();
+			await tick(10);
+			sceneApi.opts.onBeat("swap", { instant: false });
+			await wrapper.vm.$nextTick();
+			expect(heading(wrapper)).toBe("Good morning, Priya");
+			expect(wrapper.get("h1").text()).toBe("Good morning, Priya");
+			expect(leadup().text()).toBe(ADVANCE);
+			expect(wrapper.text()).toContain(ORIENTING);
+			expect(offs(wrapper)).toHaveLength(0);
+		});
+
+		it("pending, playing and rest all read the same, and the day words are not in the page at all", async () => {
+			wrapper = stage();
+			const seen = [];
+			const read = () => {
+				seen.push([
+					wrapper.attributes("data-phase"),
+					heading(wrapper),
+					leadup().text(),
+					wrapper.text().includes(ORIENTING),
+					offs(wrapper).length,
+				]);
+			};
+			read();
+			await tick(10);
+			read();
+			sceneApi.opts.onBeat("swap", { instant: false });
+			sceneApi.settle("early");
+			await tick(10);
+			read();
+			expect(seen.map((row) => row[0])).toEqual(["pending", "playing", "rest"]);
+			for (const [, h, line, orienting, off] of seen) {
+				expect([h, line, orienting, off]).toEqual([
+					"Good morning, Priya",
+					ADVANCE,
+					true,
+					0,
+				]);
+			}
+			expect(wrapper.text()).not.toMatch(/Happy/);
+			expect(wrapper.text()).not.toContain(
+				"Hope you are enjoying the day. I'm here if anything needs doing."
+			);
+			expect(wrapper.find(".jv-stage-subd").exists()).toBe(false);
+		});
+
+		it("the rest state with {play: false} is the same words", async () => {
+			state.record = vi.fn(async () => ({ play: false }));
+			wrapper = stage();
+			await tick(10);
+			expect(wrapper.attributes("data-phase")).toBe("rest");
+			expect(heading(wrapper)).toBe("Good morning, Priya");
+			expect(leadup().text()).toBe(ADVANCE);
+			expect(offs(wrapper)).toHaveLength(0);
+			expect(wrapper.text()).not.toMatch(/Happy/);
+		});
+
+		it("a day keeps the swap, and has no advance line", async () => {
+			state.answer.value = { ...DAY };
+			wrapper = stage();
+			expect(wrapper.find('[data-testid="stage-leadup"]').exists()).toBe(false);
+			await tick(10);
+			sceneApi.opts.onBeat("swap", { instant: false });
+			await wrapper.vm.$nextTick();
+			expect(heading(wrapper)).toBe("Happy Diwali, Priya");
+		});
+
+		it("the advance line is typed like WelcomeHero's, in the hero box the scene keeps clear of", async () => {
+			// jsdom has no layout, so this reads the rule from the source: the same rule as
+			// WelcomeHero's .jv-hero-leadup (the stage is never on a phone, so no step-down).
+			const read = (file) => fs.readFileSync(path.resolve(__dirname, file), "utf8");
+			const rule = (src, selector) =>
+				new RegExp(`${selector.replace(".", "\\.")}\\s*\\{([^}]*)\\}`).exec(src)?.[1];
+			const norm = (css) => css.replace(/\s+/g, " ").trim();
+			expect(norm(rule(read("HolidayStage.vue"), ".jv-stage-leadup"))).toBe(
+				norm(rule(read("WelcomeHero.vue"), ".jv-hero-leadup"))
+			);
+			wrapper = stage();
+			expect(wrapper.get(".jv-stage-hero").element.contains(leadup().element)).toBe(true);
+		});
 	});
 
 	it("a slow 5 s import: the bottom block is visible by 2.5 s and nothing plays", async () => {

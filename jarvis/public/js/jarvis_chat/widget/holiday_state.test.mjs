@@ -125,7 +125,7 @@ test("a lead-up has the advance wish and no heading", () => {
   const { state } = setup({
     boot: {
       jarvis_has_access: true,
-      jarvis_holiday_touch: answerOf({ kind: "leadup", scene: false }),
+      jarvis_holiday_touch: answerOf({ kind: "leadup", scene: true }),
     },
   });
   const view = state.view.value;

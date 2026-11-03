@@ -88,8 +88,7 @@ export function createHolidayScene({
 
 	function mayPlay() {
 		const a = answer();
-		if (!a || (a.kind !== "day" && a.kind !== "birthday")) return false;
-		if (a.scene !== true || a.may_play === false) return false;
+		if (!a || a.scene !== true || a.may_play === false) return false;
 		if (!hasScene(a.design) || spentFor === a || reduced() || !composerEmpty()) return false;
 		return storage ? mayPlayLocal(storage, now(), a.tz) : true;
 	}
