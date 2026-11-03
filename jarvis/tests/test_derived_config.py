@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import frappe
@@ -17,6 +18,42 @@ def _inst(name="INST-1", config=None):
 
 
 class TestDerivedConfig(FrappeTestCase):
+	def test_statutory_schema_is_metadata_only_and_cannot_be_overridden(self):
+		self.assertFalse(derived_config.customer_may_set("statutory_schema"))
+		with patch.object(
+			derived_config.frappe.db, "has_column", side_effect=lambda dt, field: field != "micr_code"
+		):
+			out = agent_scheduler._explicit_config(
+				{"config_keys": ["statutory_schema"]},
+				_inst(config='{"statutory_schema": {"forged": true}}'),
+			)
+		self.assertNotIn("forged", out["statutory_schema"])
+		self.assertFalse(out["statutory_schema"]["india_fields_present"]["micr_code"])
+		self.assertTrue(out["statutory_schema"]["india_fields_present"]["pan_number"])
+
+	def test_statutory_schema_failure_is_omitted_and_cannot_fall_back_to_customer_value(self):
+		inst = _inst(config=json.dumps({"statutory_schema": {"forged": True}}))
+		with (
+			patch.object(
+				derived_config.frappe.db, "has_column", side_effect=RuntimeError("schema unavailable")
+			),
+			patch.object(derived_config.frappe, "log_error") as le,
+		):
+			out = agent_scheduler._explicit_config({"config_keys": ["statutory_schema"]}, inst)
+		self.assertEqual(out, {})
+		le.assert_called_once()
+		self.assertEqual(le.call_args.kwargs["title"], "derived_config provider failed")
+		self.assertIn("statutory_schema", le.call_args.kwargs["message"])
+		self.assertNotIn("forged", str(le.call_args))
+
+	def test_statutory_wage_basis_reaches_the_agent_unchanged(self):
+		basis = {"source": "salary_detail", "component_classes": {"Fake Basic": "included"}}
+		config = {"statutory": {"wage_basis": basis}, "other": {"forged": True}}
+		out = agent_scheduler._explicit_config(
+			{"config_keys": ["statutory"]}, _inst(config=json.dumps(config))
+		)
+		self.assertEqual(out, {"statutory": {"wage_basis": basis}})
+
 	def test_missing_native_field_is_not_recognized(self):
 		invoice = frappe._dict(
 			has_field=lambda _: True,
@@ -109,6 +146,50 @@ class TestDerivedConfig(FrappeTestCase):
 		out = agent_scheduler._explicit_config({"config_keys": ["ageing.stale_floor_days"]}, inst)
 		self.assertEqual(out, {"ageing": {"stale_floor_days": 9}})
 
+	def test_explicit_config_dotted_fefo_keys_pass_the_owner_namespace(self):
+		inst = _inst(config='{"fefo": {"reviewer": "Stock Controller", "near_expiry_days": 30}, "other": 1}')
+		out = agent_scheduler._explicit_config(
+			{
+				"config_keys": [
+					"fefo.reviewer",
+					"fefo.near_expiry_days",
+					"fefo.test_declaration",
+				]
+			},
+			inst,
+		)
+		self.assertEqual(
+			out,
+			{"fefo": {"reviewer": "Stock Controller", "near_expiry_days": 30}},
+		)
+
+	def test_explicit_config_delivers_grn_hygiene_root_for_declared_dot_paths(self):
+		inst = _inst(
+			config=(
+				'{"grn_hygiene": {"reviewer": "Receiving Controller", '
+				'"test_declaration": "Pre-release review"}, '
+				'"materiality": {"percentage": 5}}'
+			)
+		)
+		out = agent_scheduler._explicit_config(
+			{
+				"config_keys": [
+					"grn_hygiene.reviewer",
+					"grn_hygiene.test_declaration",
+				]
+			},
+			inst,
+		)
+		self.assertEqual(
+			out,
+			{
+				"grn_hygiene": {
+					"reviewer": "Receiving Controller",
+					"test_declaration": "Pre-release review",
+				}
+			},
+		)
+
 	def test_failing_provider_is_omitted_and_logged_without_value(self):
 		salt = derived_config._fingerprint_salt(_inst())
 		boom = patch.dict(
@@ -128,3 +209,31 @@ class TestDerivedConfig(FrappeTestCase):
 		with boom, patch.object(derived_config.frappe, "log_error"):
 			out = agent_scheduler._explicit_config({"config_keys": _KEYS}, inst)
 		self.assertEqual(out, {"open_workable_status_set": ["X"]})
+
+	def test_explicit_config_passes_the_declared_hrms_namespace_only(self):
+		keys = [
+			"baseline_hrms.reviewer",
+			"baseline_hrms.reviewer_capacity",
+			"baseline_hrms.history_from",
+			"baseline_hrms.test_declaration",
+		]
+		inst = _inst(
+			config=(
+				'{"baseline_hrms":{"reviewer":"Payroll lead",'
+				'"reviewer_capacity":"HR reviewer",'
+				'"history_from":"2025-10-01",'
+				'"test_declaration":"Quarterly baseline"},"other":1}'
+			)
+		)
+		out = agent_scheduler._explicit_config({"config_keys": keys}, inst)
+		self.assertEqual(
+			out,
+			{
+				"baseline_hrms": {
+					"reviewer": "Payroll lead",
+					"reviewer_capacity": "HR reviewer",
+					"history_from": "2025-10-01",
+					"test_declaration": "Quarterly baseline",
+				}
+			},
+		)

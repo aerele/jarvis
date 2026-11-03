@@ -200,17 +200,27 @@ def has_session_permission(doc, ptype: str = "read", user: str | None = None) ->
 def _legacy_approval_query_conditions(user: str | None = None) -> str:
 	"""Scope Jarvis Approval Request queries exactly like ``approvals_api``'s
 	list: the caller owns the linked conversation, OR holds a DocShare read grant
-	on the approval (tagging). System Manager (and Administrator) see all."""
+	on the approval (tagging). Cycle-Count plans additionally require native
+	Warehouse, Item, and Bin read because their review context carries stock data.
+	System Manager remains subject to that extra count-plan gate; Administrator
+	is the framework superuser exception."""
 	user = user or frappe.session.user
 	legacy = ""
 	if frappe.db.has_column(CONVERSATION, "collaboration_active"):
 		legacy = "NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` cc WHERE cc.name=`tabJarvis Approval Request`.conversation AND COALESCE(cc.collaboration_active, 0)<>0)"
 	if user == "Administrator":
 		return ""
+	from jarvis.chat.cycle_count_permissions import (
+		CYCLE_COUNT_PLANNER,
+		count_plan_approval_query_condition,
+		visible_count_plan_approval_names,
+	)
+
 	if _is_sm(user):
-		return legacy
+		count_plan_gate = count_plan_approval_query_condition(user)
+		return f"({legacy}) AND ({count_plan_gate})" if legacy else count_plan_gate
 	esc = frappe.db.escape(user)
-	return (
+	base = (
 		"(exists (select 1 from `tabJarvis Conversation` c "
 		"where c.name = `tabJarvis Approval Request`.`conversation` "
 		f"and c.owner = {esc}) "
@@ -219,6 +229,20 @@ def _legacy_approval_query_conditions(user: str | None = None) -> str:
 		"and ds.share_name = `tabJarvis Approval Request`.`name` "
 		f"and ds.user = {esc} and ds.`read` = 1))" + (f" AND {legacy}" if legacy else "")
 	)
+	# ``base`` predates sealed review plans, so it knows only conversation
+	# ownership and an Approval DocShare.  A named sealed reviewer is also a
+	# valid Cycle-Count member even if a prior share was revoked.  Do not apply
+	# that reviewer exception to any other approval type.
+	table = "`tabJarvis Approval Request`"
+	not_cycle = f"({table}.agent IS NULL OR {table}.agent <> {frappe.db.escape(CYCLE_COUNT_PLANNER)})"
+	readable = visible_count_plan_approval_names(user)
+	if not readable:
+		return f"({base}) AND ({not_cycle})"
+	quoted = ", ".join(frappe.db.escape(name) for name in readable)
+	cycle = f"({table}.agent = {frappe.db.escape(CYCLE_COUNT_PLANNER)} AND {table}.name IN ({quoted}))"
+	if legacy:
+		cycle = f"({cycle} AND {legacy})"
+	return f"(({base}) AND ({not_cycle})) OR {cycle}"
 
 
 def approval_query_conditions(user: str | None = None) -> str:
@@ -249,6 +273,10 @@ def has_approval_permission(doc, ptype: str = "read", user: str | None = None) -
 	user = user or frappe.session.user
 	if user != "Administrator" and is_collaborative(doc.get("conversation")):
 		return False
+	if doc.get("agent") == "cycle-count-planner-operator" and ptype in _READ_PTYPES:
+		from jarvis.chat.cycle_count_permissions import may_read_count_plan
+
+		return may_read_count_plan(doc, user)
 	from jarvis.chat import approval_reviewers
 
 	if approval_reviewers.is_chat(doc):

@@ -244,7 +244,9 @@ def _execute_query(spec: dict, *, confirm_large: bool, model_output: bool) -> di
 	if more_rows and spec.get("limit"):
 		result["more_rows"] = True
 		result["note"] = f"Showing the requested first {limit} rows; more rows match."
-	if model_output:
+	from jarvis.tools import _private_output
+
+	if model_output and not _private_output.is_private():
 		from jarvis.tools._result_guard import enforce_result_budget
 
 		_, budget_event = enforce_result_budget(result, tool="query")
@@ -282,6 +284,9 @@ def _saved_note(result_id: str, limit) -> str:
 def compile_spec(spec: dict):
 	"""Steps 1-6 of ``query``: validate the spec, run every permission gate, and
 	build the permission-woven qb query, NOT executed."""
+	from jarvis.chat.agent_scope import assert_active_fefo_query_scope
+
+	assert_active_fefo_query_scope(spec)
 	return _compile(spec)[0]
 
 
@@ -377,6 +382,9 @@ def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:
 	``_weave_record_gate`` scopes it to), so its Export permission is that
 	parent's, exactly as Desk exports a child through its parent. Administrator
 	has no scoping parent and exports everything anyway."""
+	from jarvis.chat.agent_scope import assert_active_fefo_query_scope
+
+	assert_active_fefo_query_scope(spec)
 	q, alias_map = _compile(spec, export_limit=export_limit)
 	tables = {alias: dt for alias, (dt, _table) in alias_map.items()}
 	export_doctypes = []
