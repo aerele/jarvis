@@ -8,12 +8,10 @@ bench answers with ToolNotFoundError, or a delegate could not discover a tool th
 bench implements.
 """
 
-import json
 import os
 import tempfile
 from unittest.mock import patch
 
-import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.tools import _tool_contract as tc
@@ -117,17 +115,22 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	Wave-A adversarial P2-2: nothing gated this, so a re-vendor lag would
 	silently split bench authorization from container capability.
 
-	The digest is SEMANTIC (canonical JSON of {slug: {nature, sorted
-	tools_allow}}), so formatting/descriptions may move freely. The SAME literal
-	is pinned in the private agents repo
+	The tool/nature digest is SEMANTIC (canonical JSON of {slug: {nature, sorted
+	tools_allow}}), so formatting/descriptions may move freely. A second digest
+	pins the bench-only record-scope declaration {slug: supports_record_scope}.
+	The SAME literals are pinned in the private agents repo
 	(lib/check_registry_capability_contract.py); its docstring holds the paired
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "ae0350dbed40b953fd3938e5d61a1a8dcd03d1baddad76588de1b73b4e8d2f79"
+	PINNED_CAPABILITY_DIGEST = "f2b94a83279cebb493300936c3015c38f977a467d74b29033a90f5991fe16714"
+	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "0b4cc098bbec4f5c43a8f1c694589793ef85881ba61c5e389db1a2616b71892a"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
+		import json
+
+		import frappe
 
 		path = frappe.get_app_path("jarvis", "agents", "registry.json")
 		with open(path, encoding="utf-8") as fh:
@@ -151,6 +154,33 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			"(see lib/check_registry_capability_contract.py there)",
 		)
 
+	def test_vendored_registry_record_scope_capability_digest_is_pinned(self):
+		import hashlib
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			doc = json.load(fh)
+		contract = {}
+		for entry in doc["agents"]:
+			slug = entry.get("agent_slug") or entry.get("slug")
+			self.assertTrue(slug, "registry entry with no slug")
+			self.assertNotIn(slug, contract, f"duplicate slug {slug}")
+			value = entry.get("supports_record_scope")
+			self.assertIsInstance(value, bool, f"{slug}: record scope capability is not explicit")
+			contract[slug] = value
+		canonical = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+		got = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+		self.assertEqual(
+			got,
+			self.PINNED_RECORD_SCOPE_CAPABILITY_DIGEST,
+			"the vendored record-scope capability contract moved — re-vendor the scope declarations "
+			"and update BOTH pinned digests (see lib/check_registry_capability_contract.py in the "
+			"private agents repo)",
+		)
+
 
 class TestLeadHygieneRegistryContract(FrappeTestCase):
 	"""Keep the installed CRM delegate contract at the evaluator release version.
@@ -161,6 +191,10 @@ class TestLeadHygieneRegistryContract(FrappeTestCase):
 	"""
 
 	def test_cross_funnel_fingerprint_release_is_vendored(self):
+		import json
+
+		import frappe
+
 		path = frappe.get_app_path("jarvis", "agents", "registry.json")
 		with open(path, encoding="utf-8") as fh:
 			entry = next(
@@ -182,3 +216,48 @@ class TestLeadHygieneRegistryContract(FrappeTestCase):
 				"message",
 			],
 		)
+
+
+class TestPrivateSourceReportGrantBoundary(FrappeTestCase):
+	def test_reader_catalog_keeps_removed_private_report_grants_absent(self):
+		from jarvis.chat import agent_catalog
+
+		# These native contracts dropped this grant in jarvis-agents #74. A
+		# general reader update must not restore it through an older catalog.
+		for slug in (
+			"cash-limit-269st-40a3-auditor",
+			"fefo-expiry-compliance-auditor",
+			"negative-stock-valuation-auditor",
+			"payroll-prerun-auditor",
+			"cycle-count-planner-operator",
+			"fixed-asset-depreciation-auditor",
+			"sla-breach-ageing-auditor",
+			"statutory-payroll-compliance-auditor",
+			"vendor-ledger-recon-auditor",
+		):
+			with self.subTest(agent=slug):
+				self.assertNotIn("jarvis__query_report", agent_catalog.registry_tools_allow(slug))
+		self.assertIn("jarvis__query_report", agent_catalog.registry_tools_allow("baseline-meter-auditor"))
+
+
+class TestReorderNativeGateContract(FrappeTestCase):
+	def test_reorder_native_release_has_only_metadata_preparation_authority(self):
+		"""Publication cannot restore the retired generic read or write tools."""
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			doc = json.load(fh)
+		entry = next(
+			item for item in doc["agents"] if item.get("agent_slug") == "reorder-replenishment-operator"
+		)
+		self.assertEqual(entry["status"], "Published")
+		self.assertEqual(entry["tools_required"], ["jarvis__prepare_reorder_review"])
+		self.assertEqual(
+			sorted(entry["tools_allow"]),
+			["jarvis__prepare_reorder_review"],
+		)
+		self.assertNotIn("Jarvis Approval Request", entry["doctypes_required"])
+		self.assertIsNone(entry["writes"])

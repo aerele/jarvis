@@ -44,6 +44,11 @@
 				</template>
 				<template v-else-if="agent">
 					<Button
+						v-if="agent.name === 'ticket-triage-operator'"
+						label="Review proposals"
+						@click="router.push({ name: 'TicketTriageReviews' })"
+					/>
+					<Button
 						variant="solid"
 						label="Run Now"
 						iconLeft="play"
@@ -167,7 +172,7 @@
 							v-if="installation"
 							label="Enabled"
 							:modelValue="!!installation.enabled"
-							:disabled="togglingEnabled"
+							:disabled="togglingEnabled || runtimeClosed"
 							@update:modelValue="setEnabled"
 						/>
 					</div>
@@ -175,7 +180,14 @@
 				<!-- #1062 review fix: an installed-but-not-allowed row (role revoked
 				     after install) must say so visibly, not only via the disabled Run
 				     button's tooltip - a tooltip is easy to miss entirely. -->
-				<div v-if="installation && !agent.allowed" class="mt-3 text-sm text-ink-gray-5">
+				<div v-if="installation && runtimeClosed" class="mt-3 text-sm text-ink-gray-5">
+					This agent is Coming Soon while an agent safety update is active. It cannot be
+					enabled, scheduled, or run. You can still uninstall it.
+				</div>
+				<div
+					v-else-if="installation && !agent.allowed"
+					class="mt-3 text-sm text-ink-gray-5"
+				>
 					You do not have access to run this agent. Ask your administrator.
 				</div>
 				<!-- jarvis#1062 polish: the same visible-hint treatment for the other
@@ -191,11 +203,11 @@
 					Still in shadow preview - promote it to live under Configure first
 				</div>
 				<div
-					v-if="installation && apConfigurationBlocked"
+					v-if="installation && configurationBlocked"
 					class="mt-3 flex items-center gap-3 text-sm text-ink-gray-6"
 					role="status"
 				>
-					<span>{{ apConfigurationHint }}</span>
+					<span>{{ configurationHint }}</span>
 					<Button
 						v-if="tab !== 'configure'"
 						label="Complete configuration"
@@ -205,7 +217,7 @@
 				<!-- Operator withdrew this agent: a visible hint (not only badge/tooltip) that Run
 				     Now is off, it resumes if made available, and it can still be uninstalled. -->
 				<div
-					v-if="installation && agent.install_disabled"
+					v-if="installation && agent.install_disabled && !runtimeClosed"
 					class="mt-3 text-sm text-ink-gray-5"
 				>
 					The operator has made this agent unavailable. It won't run until it's available
@@ -419,10 +431,39 @@
 							<!-- mt-2, matching AgentAccessEditor's own heading->content gap
 							     (its "Access" heading is immediately followed by an
 							     mt-2 description) - the Admin tab is the reference. -->
+							<ReorderConfigForm
+								v-if="agent?.agent_slug === 'reorder-replenishment-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
+							<CycleCountConfigForm
+								v-else-if="agent.name === 'cycle-count-planner-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
+							<TicketTriageConfigForm
+								v-else-if="agent.name === 'ticket-triage-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
 							<ConfigForm
+								v-else
 								class="mt-2"
 								:config="parsedConfig"
 								:config-keys="configKeys"
+								:agent-slug="agent.agent_slug"
 								:validation-errors="configurationIssues"
 								:saving="savingConfig"
 								@dirty="configurationDirty = $event"
@@ -434,14 +475,33 @@
 					<div class="min-w-0">
 						<section>
 							<div class="text-base font-medium text-ink-gray-9">Schedule</div>
+							<p v-if="runtimeClosed" class="mt-2 text-sm text-ink-gray-6">
+								This agent is Coming Soon while an agent safety update is active.
+								Scheduling is not available. You can still uninstall it.
+							</p>
 							<!-- mt-2 for the same reason as Configuration above;
 							     space-y-5 (not -4) to match ConfigForm's own
 							     field-to-field rhythm - one consistent gap across
 							     both columns, not two different densities. -->
-							<p v-if="isOperatorReview" class="mt-2 text-sm text-ink-gray-6">
+							<p v-else-if="isOperatorReview" class="mt-2 text-sm text-ink-gray-6">
 								Manual review only. Confirm the date cutoff and policy before each
 								run.
 							</p>
+							<div v-else-if="scheduleConfigurationBlocked" class="mt-2 space-y-3">
+								<p class="text-sm text-ink-gray-6" role="status">
+									{{
+										isFefoExpiryComplianceAuditor
+											? "Complete the expiry reviewer and near-expiry window in Configure before enabling an automatic schedule."
+											: "Complete the Helpdesk team configuration before enabling an automatic schedule."
+									}}
+								</p>
+								<Button
+									v-if="sched.enabled"
+									label="Turn off automatic schedule"
+									:loading="savingSchedule"
+									@click="disableSchedule"
+								/>
+							</div>
 							<div v-else class="mt-2 space-y-5">
 								<Switch
 									label="Run automatically"
@@ -718,6 +778,9 @@ import AgentAccessEditor from "@/pages/agents/AgentAccessEditor.vue";
 import AgentModelCard from "@/pages/agents/AgentModelCard.vue";
 import AgentInstallDialog from "@/pages/agents/AgentInstallDialog.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
+import ReorderConfigForm from "@/pages/agents/ReorderConfigForm.vue";
+import CycleCountConfigForm from "@/pages/agents/CycleCountConfigForm.vue";
+import TicketTriageConfigForm from "@/pages/agents/TicketTriageConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import ShadowChip from "@/components/ShadowChip.vue";
@@ -1102,23 +1165,49 @@ async function doInstall(pick) {
 
 const running = ref(false);
 const configurationDirty = ref(false);
+const FEFO_EXPIRY_COMPLIANCE_AUDITOR = "fefo-expiry-compliance-auditor";
 const isOperatorReview = computed(
 	() => agent.value?.nature === "Operator" && !!agent.value?.supports_manual_run
 );
-const configurationIssues = computed(
-	() => (isOperatorReview.value && installation.value?.configuration_issues) || {}
+const isFefoExpiryComplianceAuditor = computed(
+	() => agent.value?.agent_slug === FEFO_EXPIRY_COMPLIANCE_AUDITOR
 );
-const apConfigurationBlocked = computed(
+const SLA_BREACH_AGEING_AUDITOR = "sla-breach-ageing-auditor";
+const isSlaBreachAgeingAuditor = computed(
+	() => agent.value?.agent_slug === SLA_BREACH_AGEING_AUDITOR
+);
+// Review operators, FEFO and SLA have required launch configuration.
+const requiresRunConfiguration = computed(
 	() =>
-		isOperatorReview.value &&
+		isOperatorReview.value ||
+		isFefoExpiryComplianceAuditor.value ||
+		isSlaBreachAgeingAuditor.value
+);
+const configurationIssues = computed(
+	() => (requiresRunConfiguration.value && installation.value?.configuration_issues) || {}
+);
+
+const configurationBlocked = computed(
+	() =>
+		requiresRunConfiguration.value &&
 		(configurationDirty.value ||
 			savingConfig.value ||
 			!installation.value?.configuration_issues ||
 			Object.keys(configurationIssues.value).length > 0)
 );
-const apConfigurationHint = computed(() =>
+// Keep an invalid legacy schedule disableable while required setup is incomplete.
+const scheduleConfigurationBlocked = computed(
+	() =>
+		(isFefoExpiryComplianceAuditor.value || isSlaBreachAgeingAuditor.value) &&
+		configurationBlocked.value
+);
+const configurationHint = computed(() =>
 	configurationDirty.value
 		? "Save your configuration changes before running."
+		: isFefoExpiryComplianceAuditor.value
+		? "Enter and save the expiry reviewer and near-expiry window in Configure before running."
+		: isSlaBreachAgeingAuditor.value
+		? "Select and save one readable Helpdesk team in Configure before running."
 		: "Complete and save the required review settings in Configure before running."
 );
 // On-demand run is offered for read-only auditors AND scribes (mirrors the
@@ -1139,20 +1228,27 @@ const shadowScribeBlocked = computed(
 			activation.value.activation_state !== "live"
 		)
 );
+// A server-owned close is terminal until a reviewed release reopens the
+// contract. It differs from a normal operator withdrawal, which can later be
+// made available again, so the page needs distinct no-runtime copy.
+const runtimeClosed = computed(() => !!(agent.value && agent.value.runtime_closed));
 const runDisabled = computed(
 	() =>
 		!installation.value ||
 		!installation.value.enabled ||
+		runtimeClosed.value ||
 		(agent.value && agent.value.install_disabled) ||
 		(agent.value &&
 			!agent.value.supports_manual_run &&
 			!["Auditor", "Scribe"].includes(agent.value.nature)) ||
 		!(agent.value && agent.value.allowed) ||
 		shadowScribeBlocked.value ||
-		apConfigurationBlocked.value
+		configurationBlocked.value
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
+	if (runtimeClosed.value)
+		return "This agent is Coming Soon while an agent safety update is active. It cannot be run.";
 	// The operator withdrew this agent (teaser/hidden): it can't run for anyone until it is
 	// available again. The install is kept so it can be uninstalled; it resumes automatically
 	// if the operator restores availability.
@@ -1163,7 +1259,7 @@ const runTooltip = computed(() => {
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
 	if (!agent.value.allowed) return "You do not have access to this agent";
-	if (apConfigurationBlocked.value) return apConfigurationHint.value;
+	if (configurationBlocked.value) return configurationHint.value;
 	// The shadow vocabulary is reviewer language (jarvis#1062): a plain user has
 	// no promote control and no say in the sign-off, so telling them to go and
 	// promote it names an action they cannot take.
@@ -1171,7 +1267,9 @@ const runTooltip = computed(() => {
 		return canReview.value
 			? "Still in shadow preview - promote it to live under Configure first"
 			: "Not yet enabled for live runs - ask your administrator";
-	return agent.value.agent_slug === "bank-recon-operator"
+	return agent.value.agent_slug === "reorder-replenishment-operator"
+		? "Prepare reorder suggestions for buyer review"
+		: agent.value.agent_slug === "bank-recon-operator"
 		? "Review bank lines, proposals only"
 		: agent.value.agent_slug === "ar-collections-operator"
 		? "Review receivables: unsent drafts only"
@@ -1248,7 +1346,7 @@ function confirmUninstall() {
 
 const togglingEnabled = ref(false);
 async function setEnabled(v) {
-	if (!installation.value || togglingEnabled.value) return;
+	if (!installation.value || togglingEnabled.value || runtimeClosed.value) return;
 	togglingEnabled.value = true;
 	try {
 		await api.setAgentEnabled(installation.value.name, v ? 1 : 0);
@@ -1419,8 +1517,13 @@ const scheduleSummary = computed(() => {
 });
 
 async function saveSchedule() {
-	if (!installation.value || savingSchedule.value) return;
+	if (!installation.value || savingSchedule.value || runtimeClosed.value) return false;
+	if (scheduleConfigurationBlocked.value && sched.value.enabled) {
+		toast.error(configurationHint.value);
+		return false;
+	}
 	savingSchedule.value = true;
+	let scheduleSaved = false;
 	try {
 		await api.setAgentSchedule(installation.value.name, {
 			schedule_enabled: sched.value.enabled ? 1 : 0,
@@ -1430,12 +1533,32 @@ async function saveSchedule() {
 			schedule_day_of_month:
 				sched.value.frequency === "monthly" ? Number(sched.value.day) || 0 : 0,
 		});
+		scheduleSaved = true;
 		toast.success("Schedule saved");
 		await load();
+		return true;
 	} catch (e) {
 		toast.error(errHtml(e));
+		// A refresh failure happens after the API has persisted the schedule.
+		// Keep the draft aligned with that saved state instead of restoring a
+		// legacy schedule that is already off on the server.
+		return scheduleSaved;
 	} finally {
 		savingSchedule.value = false;
+	}
+}
+
+async function disableSchedule() {
+	if (!installation.value || savingSchedule.value) return;
+	// A legacy schedule must always be disableable, even when its current
+	// configuration is no longer valid or visible to the run-as identity.
+	const wasEnabled = sched.value.enabled;
+	sched.value.enabled = false;
+	if (!(await saveSchedule())) {
+		// Keep the only recovery action visible when the server rejects the
+		// change or a transient request fails. The saved schedule is still on
+		// until the next successful request.
+		sched.value.enabled = wasEnabled;
 	}
 }
 

@@ -48,6 +48,26 @@ class TestEnforceResultBudget(unittest.TestCase):
 		self.assertEqual(out["shown"], len(out["result"]))
 		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
 
+	def test_prepared_report_preview_routes_to_complete_run(self):
+		data = {
+			"prepared_report": True,
+			"run": "run-6000",
+			"status": "ready",
+			"source_rows": 6000,
+			"preview_complete": True,
+			"columns": ["a"],
+			"result": _rows(2000, 350),
+			"next_query": {"tool": "query_report", "args": {"prepared_report": "run-6000"}},
+		}
+		out, event = enforce_result_budget(data, tool="run_report")
+		self.assertLess(len(out["result"]), 100)
+		self.assertEqual(out["source_rows"], 6000)
+		self.assertFalse(out["preview_complete"])
+		self.assertIn("query_report", out["note"])
+		self.assertEqual(out["next_query"]["args"]["prepared_report"], "run-6000")
+		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
+		self.assertEqual(event["kind"], "truncated")
+
 	def test_query_huge_sql_bounds_rows_keeps_sql(self):
 		# The non-row bulk (the SQL text) alone exceeds the budget: rows can't be
 		# truncated under the cap, so ALL rows are dropped to bound the blast radius

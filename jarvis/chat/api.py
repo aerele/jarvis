@@ -106,6 +106,7 @@ def _att_canvas_item(att: dict) -> dict:
 		"name": frappe.generate_hash(length=10),
 		"type": kind,
 		"file_url": att["file_url"],
+		"file_id": att.get("file_id"),
 		"title": att.get("file_name") or ("image" if kind == "image" else "file"),
 	}
 
@@ -805,7 +806,16 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 	# are shaped exactly like the thread's own.
 	rows = messages + page.get("older_pending", []) + page.get("refreshed", [])
 	# A pending-action card renders from its row's card (the sealed record's own copy).
-	_pending_action_cards(rows)
+	pending_action_tokens = _pending_action_cards(rows, owner=doc.owner, conversation=conversation)
+	# A legacy card's transcript row is display-only; Redis remains its execution
+	# authority. Fence it before the row reaches any client so getConversation
+	# winning a reload race cannot resurrect a close-revoked confirmation.
+	_fence_legacy_pending_cards(
+		rows,
+		owner=doc.owner,
+		conversation=conversation,
+		pending_action_tokens=pending_action_tokens,
+	)
 	_pending_recency(conversation, rows)
 	# T2 (live-turn-steps, R3): a still-streaming row's stored content keeps its
 	# step text by design (the RAW streaming mirror) - strip it and carry the
@@ -873,7 +883,19 @@ TOOL_RESULT_INLINE_MAX = 2048
 # lib/docRefs.js, actionSummary.toolFailureCopy): everything else waits for
 # get_tool_detail, which the Activity view calls when a tool row is expanded.
 _COMPACT_RESULT_KEYS = ("ok", "error")
-_COMPACT_DATA_KEYS = ("doctype", "name", "report_scope", "prepared_report", "status", "as_of", "row_note")
+_COMPACT_DATA_KEYS = (
+	"doctype",
+	"name",
+	"report_scope",
+	"prepared_report",
+	"status",
+	"as_of",
+	"row_note",
+	"read_status",
+	"preview_complete",
+	"coverage",
+	"run",
+)
 
 
 def _history_page(conversation: str, fields: list, limit, before, refresh, after=0) -> dict:
@@ -1116,12 +1138,17 @@ def get_tool_detail(message: str) -> dict:
 	return {"name": message, "tool_args": row.tool_args, "tool_result": row.tool_result}
 
 
-def _pending_action_cards(messages: list) -> None:
-	"""Every still-pending row carries epoch ``created_at`` (the clients' age label and
-	order; no timezone guessing): a legacy card its row's own creation (stamped with
-	the mint), a chat pending action its mint time plus its ``card`` (that column is
-	never sealed and never holds args)."""
-	from jarvis.chat.pending_confirm import _epoch
+def _pending_action_cards(messages: list, *, owner: str, conversation: str) -> set[str]:
+	"""Attach only positively-attested durable cards to a history response.
+
+	A transcript row can outlive its Pending Action, its full close-fence map, or
+	the bounded migration cleanup. Treat the action table as authority: any known
+	durable token that is not a current chat ``Pending`` action for this owner and
+	conversation becomes a terminal no-action response. Return *all* durable
+	tokens, including unsafe ones, so the legacy path cannot re-enable one.
+	"""
+	from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, pending_action_fences_ready
+	from jarvis.chat.pending_confirm import _epoch, pending_action_is_safe_to_render
 
 	pending = [m for m in messages if m.get("tool_status") == "pending" and m.get("tool_call_id")]
 	for m in pending:
@@ -1129,24 +1156,82 @@ def _pending_action_cards(messages: list) -> None:
 			m["created_at"] = _epoch(m.creation)
 	tokens = [m.tool_call_id for m in pending]
 	if not tokens:
-		return
+		return set()
 	from jarvis.chat.pending_actions._store import table_ready
 
 	if not table_ready():
-		return
-	cards = {
-		r.name: r
-		for r in frappe.db.sql(
-			"SELECT name, card, creation FROM `tabJarvis Pending Action` WHERE kind='chat' AND name IN %(t)s",
-			{"t": tuple(tokens)},
-			as_dict=True,
-		)
-	}
-	for m in messages:
-		row = cards.get(m.get("tool_call_id")) if m.get("tool_status") == "pending" else None
-		if row:
-			m["pending_card"] = row.card
-			m["created_at"] = _epoch(row.creation)
+		return set()
+	columns = ["name", "kind", "status", "owner_user", "conversation", "card", "creation"]
+	if pending_action_fences_ready():
+		columns.append(PENDING_ACTION_FENCE_FIELD)
+	try:
+		cards = {
+			r.name: r
+			for r in frappe.db.sql(
+				"SELECT "
+				+ ", ".join(f"`{column}`" for column in columns)
+				+ " FROM `tabJarvis Pending Action` WHERE name IN %(t)s",
+				{"t": tuple(tokens)},
+				as_dict=True,
+			)
+		}
+	except Exception:
+		# A table/fence read uncertainty must not turn an old transcript payload
+		# into Confirm. Keep every token out of the legacy fallback too.
+		frappe.log_error(title="jarvis.chat.pending_action_card_read_failed", message=frappe.get_traceback())
+		for message in pending:
+			_redact_unsafe_pending_card(message)
+		return set(tokens)
+
+	for message in pending:
+		row = cards.get(message.get("tool_call_id"))
+		if not row:
+			continue
+		if pending_action_is_safe_to_render(row, owner=owner, conversation=conversation):
+			message["pending_card"] = row.card
+			message["created_at"] = _epoch(row.creation)
+			message["pending_card_safe"] = True
+			continue
+		_redact_unsafe_pending_card(message)
+	return set(cards)
+
+
+def _redact_unsafe_pending_card(row) -> None:
+	"""Return a terminal, no-card response for an unsafe transcript card."""
+	from jarvis.chat.agent_closure import _SAFETY_UPDATE_RECEIPT
+
+	row["tool_args"] = {}
+	row["tool_result"] = dict(_SAFETY_UPDATE_RECEIPT)
+	row["tool_status"] = ""
+	row["action_outcome"] = "cancelled"
+	row["pending_card"] = None
+	row["pending_card_safe"] = False
+	row["content"] = f"{row.get('tool_name') or 'action'} → cancelled"
+
+
+def _fence_legacy_pending_cards(
+	messages: list, *, owner: str, conversation: str, pending_action_tokens: set[str]
+) -> None:
+	"""Stamp or redact every pending transcript card before history leaves the server.
+
+	Pending Action rows have their own durable sealed lifecycle. Every other pending
+	chat row is a legacy Redis confirmation, so it must pass the shared close fence
+	before it can be used as a UI card. This is deliberately in the history/read
+	path, not the later resync path: both PWA loads begin concurrently.
+	"""
+	from jarvis.chat.agent_closure import legacy_confirmation_is_safe_to_render
+
+	for row in messages:
+		if row.get("role") != "tool" or row.get("tool_status") != "pending" or not row.get("tool_call_id"):
+			continue
+		# This set is private read-path state. Do not infer the durable lifecycle
+		# from a client-visible row field or from a transcript token alone.
+		if row.get("tool_call_id") in pending_action_tokens:
+			continue
+		if legacy_confirmation_is_safe_to_render(row.tool_call_id, owner=owner, conversation=conversation):
+			row["pending_card_safe"] = True
+			continue
+		_redact_unsafe_pending_card(row)
 
 
 def _pending_recency(conversation: str, messages: list) -> None:
@@ -1495,6 +1580,10 @@ _DELETED = "deleted"
 _ALREADY_GONE = "already gone"
 # The delete raised: not deleted, and not "kept" (no reply is in progress).
 _FAILED = "failed"
+# An approved Cycle-Count plan or submitted observation keeps the conversation
+# that supplies its owner boundary.  This is a normal kept outcome, like a
+# reply in progress; it must not be surfaced as a failed history clear.
+_CYCLE_COUNT_EVIDENCE_RETAINED = "cycle_count_evidence_retained"
 # This many chats failing one after another reads as a fault common to all of them
 # (a broken trash hook, a held lock), not as one bad chat: the request stops there.
 # It bounds the Error Log rows of one request (each is forwarded off the bench with
@@ -1506,16 +1595,17 @@ _FAILURES_IN_A_ROW_THAT_END_THE_REQUEST = 3
 def clear_chat_history() -> dict:
 	"""Permanently delete the current user's conversations and messages (the
 	settings "Danger zone" action), except a conversation that is waiting for a
-	reply: that one is left whole and counted in ``skipped``, to be deleted once
-	the reply has finished. Macros, skills and settings are untouched; macro-run
+	reply or retains a Cycle-Count plan/fact: it is left whole and counted in
+	``skipped``. Macros, skills and settings are untouched; macro-run
 	history rows survive but drop their (now deleted) conversation reference.
 
 	``deleted`` counts the conversations this request deleted. ``kept`` names the
-	skipped ones (kept because a reply is in progress, nothing else), ``failed``
-	counts and ``failed_names`` names the ones an error left undeleted. The names are
-	there so the client can tell whether the chat it has open still exists without
-	reading the list again. Every listed conversation is in exactly one of deleted,
-	skipped, failed, or already gone (deleted by someone else meanwhile, not reported).
+	skipped ones (kept because a reply is in progress or retained count evidence), and
+	``retained_count_plan_names`` identifies the latter subset when it is nonempty.
+	``failed`` counts and ``failed_names`` names the ones an error left undeleted. The
+	names let the client tell whether its open chat still exists without reading the
+	list again. Every listed conversation is in exactly one of deleted, skipped,
+	failed, or already gone (deleted by someone else meanwhile, not reported).
 
 	One conversation at a time, each in its own transaction. A conversation whose
 	delete fails is rolled back, logged by name and counted as failed, and the rest
@@ -1529,6 +1619,7 @@ def clear_chat_history() -> dict:
 	names = frappe.get_all(CONV, filters={"owner": frappe.session.user}, pluck="name")
 	deleted = 0
 	kept: list[str] = []
+	retained_count_plan_names: list[str] = []
 	failed: list[str] = []
 	failures_in_a_row = 0
 	for at, name in enumerate(names):
@@ -1554,7 +1645,9 @@ def clear_chat_history() -> dict:
 			failed.append(name)
 		elif outcome != _ALREADY_GONE:
 			kept.append(name)
-	return {
+			if outcome == _CYCLE_COUNT_EVIDENCE_RETAINED:
+				retained_count_plan_names.append(name)
+	result = {
 		"ok": True,
 		"deleted": deleted,
 		"skipped": len(kept),
@@ -1562,6 +1655,11 @@ def clear_chat_history() -> dict:
 		"failed": len(failed),
 		"failed_names": failed,
 	}
+	if retained_count_plan_names:
+		# Optional for a compatible response shape on older client releases. A
+		# client that does not know this field keeps its existing generic notice.
+		result["retained_count_plan_names"] = retained_count_plan_names
+	return result
 
 
 def _delete_idle_conversation(conversation: str) -> str:
@@ -1603,6 +1701,10 @@ def _delete_idle_conversation(conversation: str) -> str:
 		reason = admission.reply_in_progress(conversation)
 		if reason:
 			return reason
+		from jarvis.chat.cycle_count_permissions import conversation_has_retained_count_plan
+
+		if conversation_has_retained_count_plan(conversation):
+			return _CYCLE_COUNT_EVIDENCE_RETAINED
 		frappe.db.delete(MSG, {"conversation": conversation})
 		_unlink_macro_runs(conversation)
 		frappe.delete_doc(CONV, conversation, force=True, ignore_permissions=True)

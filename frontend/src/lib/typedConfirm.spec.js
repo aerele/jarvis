@@ -68,20 +68,33 @@ describe("send() handles a confirmed response", () => {
 
 	it("routes both outcomes through one shared resolver", () => {
 		// The typed path and the button must not drift in what the user then sees.
-		expect(src).toContain("async function onTypedConfirmResolved(r)");
-		expect(src).toContain("await onTypedConfirmResolved(r);");
+		expect(src).toContain(
+			"async function onTypedConfirmResolved(r, view = captureChatView())"
+		);
+		expect(src).toContain("await onTypedConfirmResolved(r, _sentView);");
+	});
+
+	it("fences a late typed-confirm response to the view that sent it", () => {
+		const sendStart = src.indexOf("async function send(textArg, resendAck)");
+		const sendBody = src.slice(
+			sendStart,
+			src.indexOf("// Proactive (Jarvis-initiated)", sendStart)
+		);
+		expect(sendBody).toContain("const _sentView = captureChatView();");
+		expect(sendConfirmedBlock).toContain("if (!chatViewIsCurrent(_sentView)) return;");
 	});
 });
 
 describe("the shared resolver covers every outcome", () => {
-	const fnAt = src.indexOf("async function onTypedConfirmResolved(r)");
+	const fnAt = src.indexOf("async function onTypedConfirmResolved(r, view = captureChatView())");
 	const fn = src.slice(fnAt, src.indexOf("// Dismiss: consume the token server-side", fnAt));
 
 	it("surfaces a storage outage and re-reads the parked list", () => {
 		// The write did NOT run and the card is already off screen, so the list has
 		// to be re-read or the user loses the card entirely.
 		expect(fn).toContain("confirmationStorageUnavailable(r)");
-		expect(fn).toContain("resyncPendingConfirmations(currentId.value)");
+		expect(fn).toContain("resyncPendingConfirmations(view.conversation)");
+		expect(fn).toContain("if (!chatViewIsCurrent(view)) return;");
 	});
 
 	it("explains an invalid token instead of failing silently", () => {
@@ -89,7 +102,7 @@ describe("the shared resolver covers every outcome", () => {
 	});
 
 	it("reloads so the durable receipt chip is what the user sees", () => {
-		expect(fn).toContain("loadConversation(currentId.value)");
+		expect(fn).toContain("loadConversation(view.conversation)");
 	});
 
 	it("raises the queued chip when the continuation is queued", () => {
@@ -135,7 +148,7 @@ describe("the card advertises both ways to approve", () => {
 
 describe("a typed reply that goes on to Jarvis (decisions 13 and 14)", () => {
 	const at = src.indexOf("const _spokeIn = r?.conversation_id || sentFrom;");
-	const accepted = src.slice(at, src.indexOf("if (r && r.queued)", at));
+	const accepted = src.slice(at, src.indexOf("if (r && r.queued", at));
 
 	it("drops the cards a typed no discarded, without a mid-send reload", () => {
 		expect(accepted).toContain("for (const t of discardedTokens(r)) removePending(t);");
@@ -157,10 +170,9 @@ describe("a typed reply that goes on to Jarvis (decisions 13 and 14)", () => {
 	});
 
 	it("honours a discard that rode a refused send (the admission race)", () => {
-		const refused = src.slice(src.indexOf("if (r && r.ok === false && !r.confirmed) {"));
-		expect(refused.slice(0, 400)).toContain(
-			"for (const t of discardedTokens(r)) removePending(t);"
-		);
+		const start = src.indexOf("if (r && r.ok === false && !r.confirmed) {");
+		const refused = src.slice(start, src.indexOf("const _plan = planRejectedSend", start));
+		expect(refused).toContain("for (const t of discardedTokens(r)) removePending(t);");
 	});
 });
 

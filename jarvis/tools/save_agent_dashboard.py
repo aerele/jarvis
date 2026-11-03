@@ -112,11 +112,17 @@ def save_agent_dashboard(
 	run_row = frappe.db.get_value(
 		RUN,
 		{"session_key": session_key},
-		["name", "status", "installation", "dashboard"],
+		["name", "agent", "status", "installation", "dashboard"],
 		as_dict=True,
 	)
 	if not run_row:
 		raise InvalidArgumentError("no agent run is bound to this session")
+	if run_row.get("agent") == "statutory-payroll-deposit-status":
+		# Deposit output is a compact reference-only contract.  The server creates
+		# the ordinary fallback dashboard after it persists that safe projection;
+		# accepting delegate HTML here would create a second persistence route for
+		# private source rows or model-authored prose.
+		raise InvalidArgumentError("Payroll deposit writeback creates its dashboard server-side.")
 	if run_row.status != "running":
 		# Idempotency: the run already finalized — return its dashboard (if any)
 		# without creating a second one.
@@ -130,6 +136,12 @@ def save_agent_dashboard(
 		raise InvalidArgumentError("run has no installation")
 	inst = frappe.get_doc(INSTALLATION, run_row.installation)
 	run_doc = frappe.get_doc(RUN, run_row.name)
+	# A delegate can save a dashboard before it calls record_agent_run. Recheck the
+	# hidden FEFO visibility proof at this earlier persistence seam so a permission
+	# slice cannot leave a readable artifact when later writeback fails.
+	from jarvis.chat.agent_scope import assert_fefo_run_artifact_scope
+
+	assert_fefo_run_artifact_scope(run_doc)
 	visibility_state = agent_runs.visibility_receipt_state(run_doc, inst)
 	if visibility_state in ("sliced", "unknown"):
 		# The receipt is a server-only visibility proof.  Never persist the

@@ -38,6 +38,8 @@ from jarvis.exceptions import InvalidArgumentError
 RUN = "Jarvis Agent Run"
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
+NEGATIVE_STOCK_AGENT = "negative-stock-valuation-auditor"
+FEFO_AGENT = "fefo-expiry-compliance-auditor"
 
 _SEVERITIES = {"blocker", "warning", "note"}
 # Aggregate-dimension ref doctypes verified by EXISTENCE only, not a read-perm
@@ -46,6 +48,7 @@ _SEVERITIES = {"blocker", "warning", "note"}
 # doctype must be readable by the run-as user or the row is dropped (a
 # mistranscribed / out-of-scope ref).
 _PERM_EXEMPT_REFS = frozenset({"Company", "Account"})
+_MISSING = object()
 
 
 def _as_list(value) -> list:
@@ -64,6 +67,30 @@ def _as_dict(value) -> dict:
 		except Exception:
 			return {}
 	return value if isinstance(value, dict) else {}
+
+
+def _bound_negative_stock_scope(stamped: dict, submitted: dict) -> dict | None:
+	"""Return the safe scope only when it matches the launch boundary exactly.
+
+	The delegate can write a local evaluator config, but it cannot select another
+	Warehouse, company, period, or report-date cutoff at writeback. The launch
+	scope is trusted because the server validated it as the run-as user before
+	dispatch. The submitted object is untrusted model output.
+	"""
+	from jarvis.chat.agent_scope import negative_stock_output_scope
+
+	trusted = negative_stock_output_scope(stamped)
+	output = negative_stock_output_scope(submitted)
+	return trusted if trusted is not None and output == trusted else None
+
+
+def _bound_fefo_scope(stamped: dict, submitted: dict) -> dict | None:
+	"""Return the immutable FEFO scope only on exact safe-projection equality."""
+	from jarvis.chat.agent_scope import fefo_output_scope, fefo_stamped_scope
+
+	trusted = fefo_stamped_scope(stamped)
+	output = fefo_output_scope(submitted)
+	return trusted if trusted is not None and output == trusted else None
 
 
 def _ref_verifiable(ref_doctype: str, ref_name: str) -> tuple[bool, str]:
@@ -143,14 +170,40 @@ def _validate_findings(raw_findings: list, token_set: set, allowed_refs: set):
 	return valid, dropped
 
 
+def _canonical_scope_for_writeback(run_doc, scope: dict) -> dict:
+	"""Keep a Statutory Payroll writeback on its launch-stamped batch scope."""
+	from jarvis.chat.statutory_payroll_scope import (
+		ConfigurationError,
+		canonical_writeback_scope,
+		is_statutory_payroll,
+	)
+
+	if not is_statutory_payroll(run_doc.agent):
+		return scope
+	try:
+		if isinstance(scope, str):
+			scope = frappe.parse_json(scope)
+		stamped_scope = frappe.parse_json(run_doc.scope_json or "{}")
+		if not isinstance(stamped_scope, dict):
+			raise ConfigurationError("scope", "invalid server scope")
+		return canonical_writeback_scope(stamped_scope, scope)
+	except (ConfigurationError, TypeError, ValueError, frappe.ValidationError):
+		raise InvalidArgumentError(
+			"Statutory Payroll output scope does not match this run's server-bound Payroll Entry scope."
+		) from None
+
+
 def record_agent_run(
 	findings=None,
 	coverage=None,
 	scope=None,
+	input_snapshot_id: str | None = None,
+	input_snapshot_digest: str | None = None,
+	report_sha256: str | None = _MISSING,
 	truncated: bool = False,
-	canvas_ref: str | None = None,
-	integrity_digest: str | None = None,
-	dashboard: str | None = None,
+	canvas_ref: str | None = _MISSING,
+	integrity_digest: str | None = _MISSING,
+	dashboard: str | None = _MISSING,
 	rows_consumed=None,
 ) -> dict:
 	"""Land a delegate's evaluator output on its running Jarvis Agent Run.
@@ -173,14 +226,24 @@ def record_agent_run(
 	    dimension must match the server-stamped launch scope. The server stamp,
 	    not this argument, supplies company persistence, auto-resolve, and the
 	    watermark recompute.
+	  input_snapshot_id/input_snapshot_digest: required only by the statutory
+	    payroll Deposit-Status agent. That agent accepts the strict v3 compact
+	    handoff only: reference-only findings, closed coverage states, the frozen
+	    scope, and an exact sealed-source row count. The server computes the
+	    SHA-256 integrity digest after safe projection. It rejects any delegate
+	    integrity digest.
+	    It rejects delegate dashboard, report-hash, and canvas output. The server
+	    creates the normal fallback dashboard after safe persistence.
 	  truncated: True when the delegate's fetch hit its budget — auto-resolve is
 	    skipped entirely and the run is partial (A16).
 	  canvas_ref: the delegate's saved canvas/dashboard ref (stored for Phase 4).
-	  integrity_digest: the evaluator's sha256 over canonicalized findings.
-	  dashboard: the ``Jarvis Dashboard`` name the delegate got back from
-	    ``jarvis__save_agent_dashboard`` — linked on the Run. When omitted (and the
-	    delegate authored none), a minimal A2-safe dashboard is built server-side
-	    from the persisted findings so every run yields one openable dashboard.
+	    It is not accepted for statutory payroll Deposit-Status.
+	  integrity_digest: supported for generic agents only; Deposit v3 rejects it.
+	  dashboard: the ``Jarvis Dashboard`` name a generic delegate got back from
+	    ``jarvis__save_agent_dashboard`` — linked on the Run. When omitted, a
+	    minimal A2-safe dashboard is built server-side from the persisted findings
+	    so every run yields one openable dashboard. It is not accepted for statutory
+	    payroll Deposit-Status.
 	  rows_consumed: the count of rollup rows the evaluator actually read (its
 	    ``rows_consumed`` output). The bench reconciles it against the GL watermark it
 	    stamped at launch — a ZERO-read on a proven-non-empty ledger forces the run
@@ -208,9 +271,17 @@ def record_agent_run(
 		{"session_key": session_key},
 		["name", "status", "installation", "agent"],
 		as_dict=True,
+		for_update=True,
 	)
 	if not run_row:
 		raise InvalidArgumentError("no agent run is bound to this session")
+	# Keep the Deposit v3 grammar exact even on a duplicate terminal call. A
+	# legacy payload must fail closed and be re-run, rather than using the
+	# generic idempotency response as a compatibility bypass.
+	if run_row.agent == "statutory-payroll-deposit-status" and any(
+		value is not _MISSING for value in (integrity_digest, dashboard, report_sha256, canvas_ref)
+	):
+		raise InvalidArgumentError("Payroll deposit writeback does not accept delegate report output.")
 	if run_row.status != "running":
 		# Idempotency: the run already finalized (a retried / duplicate writeback).
 		# Return current state without touching anything.
@@ -225,6 +296,22 @@ def record_agent_run(
 
 	inst = frappe.get_doc(INSTALLATION, run_row.installation)
 	run_doc = frappe.get_doc(RUN, run_row.name)
+	negative_receipt_capture = None
+	if run_doc.agent == "negative-stock-valuation-auditor":
+		# Capture only server-stamped launch facts while the delegate session still
+		# exists. Any missing #2338/#2339 prerequisite is a safe no-receipt, not a
+		# writeback failure. The receipt module rechecks terminal state after this
+		# normal writeback completes.
+		from jarvis.chat import negative_stock_receipt
+
+		try:
+			negative_receipt_capture = negative_stock_receipt.capture_launch(run_doc)
+		except negative_stock_receipt.ReceiptRefused:
+			pass
+		except Exception:
+			frappe.logger("jarvis.negative_stock_receipt").warning(
+				{"event": "negative_stock_receipt_capture_refused", "run": run_doc.name}, exc_info=True
+			)
 
 	# The agent's bench-held id-only token manifest + allowed ref doctypes. Tokens
 	# are opaque (A2); allowed refs = the agent's declared doctypes_required plus the
@@ -248,12 +335,77 @@ def record_agent_run(
 	token_set = set(_as_list(listing.get("rule_tokens")))
 	allowed_refs = set(_as_list(listing.get("doctypes_required"))) | {"Company", "Account", "Journal Entry"}
 
-	raw_findings = _as_list(findings)
-	coverage = _as_dict(coverage)
-	# The model can relay its evaluator's scope, but it cannot select or amend the
-	# scope that controls persistence. Validate before review validation or any
-	# finding/company work, then use only the launch-stamped values downstream.
-	scope = authoritative_writeback_scope(run_doc, scope)
+	if run_doc.agent == "statutory-payroll-deposit-status":
+		from jarvis.chat import payroll_deposit_snapshot
+
+		# This branch intentionally runs before any coercion or persistence.  The
+		# Deposit delegate supplies only the v2 compact grammar; free text, HTML,
+		# and source-bearing values fail closed instead of being converted and saved.
+		# The run row is already locked above, so a concurrent writeback waits and
+		# then observes the terminal state through the idempotency branch.
+		deposit_args = {
+			"findings": findings,
+			"coverage": coverage,
+			"scope": scope,
+			"truncated": truncated,
+			"rows_consumed": rows_consumed,
+			"input_snapshot_id": input_snapshot_id,
+			"input_snapshot_digest": input_snapshot_digest,
+		}
+		deposit = payroll_deposit_snapshot.validate_writeback(run_doc, **deposit_args)
+		raw_findings = deposit["findings"]
+		coverage = deposit["coverage"]
+		scope = deposit["scope"]
+		truncated = deposit["truncated"]
+		rows_consumed_val = deposit["rows_consumed"]
+		integrity_digest = deposit["integrity_digest"]
+		# A valid Deposit finding may name either declared voucher type.  The
+		# server projection above has already proved the pair came from the frozen
+		# launch config; retain the generic existence/read-permission check below.
+		allowed_refs.add("Payment Entry")
+		if "pf_esi_deposit_due_date" not in token_set:
+			raise InvalidArgumentError("Payroll deposit rule tokens do not match the active agent listing.")
+		canvas_ref = None
+		dashboard = None
+	else:
+		# Generic agents retain the historical optional report/dashboard defaults.
+		# Deposit uses ``_MISSING`` above so an explicit JSON null cannot collapse
+		# into an omitted v3 contract field.
+		if report_sha256 is _MISSING:
+			report_sha256 = None
+		if canvas_ref is _MISSING:
+			canvas_ref = None
+		if dashboard is _MISSING:
+			dashboard = None
+		if integrity_digest is _MISSING:
+			integrity_digest = None
+		raw_findings = _as_list(findings)
+		coverage = _as_dict(coverage)
+		# Statutory Payroll requires a complete raw echo of its Payroll Entry scope.
+		# Check that stricter contract before generic scope authority checks the same
+		# raw evaluator object against the trusted launch stamp.
+		submitted_scope = scope
+		_canonical_scope_for_writeback(run_doc, submitted_scope)
+		# The model can relay its evaluator's scope, but it cannot select or amend the
+		# scope that controls persistence. Validate before review validation or any
+		# finding/company work, then use only the launch-stamped values downstream.
+		if run_row.agent in {NEGATIVE_STOCK_AGENT, FEFO_AGENT}:
+			# These agents validate their narrow projection below and finish a rejected
+			# scope as partial, clearing untrusted artifacts. Do not replace the raw
+			# echo with the stamp first: that would hide a mismatch from their guards.
+			scope = _as_dict(submitted_scope)
+		else:
+			scope = authoritative_writeback_scope(run_doc, submitted_scope)
+		truncated = bool(truncated)
+		# A model-supplied rows_consumed is only ever used to DETECT an under-fetch (it
+		# can force a run partial, never mask one — a bogus value cannot upgrade a run to
+		# completed), so coercing a bad value to None (skip reconciliation) is safe.
+		rows_consumed_val = None
+		if rows_consumed is not None:
+			try:
+				rows_consumed_val = int(rows_consumed)
+			except (TypeError, ValueError):
+				rows_consumed_val = None
 	guard_dropped = []
 	guard_reason = derived_config.unsupported_reason(_as_list(listing.get("config_keys")), inst)
 	if guard_reason:
@@ -289,10 +441,78 @@ def record_agent_run(
 		if guard_dropped or guard_changed_coverage:
 			dashboard = canvas_ref = None
 		integrity_digest = None
-	truncated = bool(truncated)
+	scope_dropped = []
+
+	if run_row.agent == NEGATIVE_STOCK_AGENT:
+		trusted_scope = _bound_negative_stock_scope(_as_dict(run_doc.get("scope_json")), scope)
+		if trusted_scope is None:
+			from jarvis.chat.agent_scope import negative_stock_output_scope
+
+			stamped_scope = negative_stock_output_scope(_as_dict(run_doc.get("scope_json"))) or {}
+			raw_findings = []
+			coverage = agent_runs._negative_stock_scope_rejection_coverage(token_set)
+			scope = stamped_scope
+			integrity_digest = None
+			rows_consumed_val = None
+			canvas_ref = None
+			dashboard = None
+			agent_runs.clear_untrusted_negative_stock_artifacts(run_doc, inst)
+			scope_dropped.append(
+				{
+					"ref_doctype": "Warehouse",
+					"ref_name": (stamped_scope.get("record_scope") or {}).get("name") or "?",
+					"reason": "scope did not match server-stamped Warehouse boundary",
+				}
+			)
+		else:
+			# Strip unknown model keys before the downstream Run snapshot merge.
+			scope = trusted_scope
+	if run_row.agent == FEFO_AGENT:
+		# Apply the same boundary before finding validation/review staging as the
+		# direct persistence seam.  The public tool must not briefly trust a forged
+		# scope merely because its later callee would reject it.
+		trusted_scope = _bound_fefo_scope(_as_dict(run_doc.get("scope_json")), scope)
+		if trusted_scope is not None:
+			try:
+				from jarvis.chat.agent_scope import fefo_stamped_scope_as_user
+
+				trusted_scope = fefo_stamped_scope_as_user(
+					_as_dict(run_doc.get("scope_json")),
+					agent_runs._fefo_run_as_user(run_doc),
+					run_doc.get("fefo_visibility_proof_json"),
+				)
+			except Exception:
+				trusted_scope = None
+		if trusted_scope is None:
+			from jarvis.chat.agent_scope import fefo_stamped_scope
+
+			stamped_scope = fefo_stamped_scope(_as_dict(run_doc.get("scope_json"))) or {}
+			raw_findings = []
+			coverage = agent_runs._fefo_scope_rejection_coverage(token_set)
+			# Keep an invalid marker through the direct persistence seam.  It restores
+			# only the server projection and clears artifacts there; passing the stamp
+			# itself here would make a forged public writeback look trusted again.
+			scope = {}
+			integrity_digest = None
+			rows_consumed_val = None
+			canvas_ref = None
+			dashboard = None
+			scope_dropped.append(
+				{
+					"ref_doctype": "Warehouse",
+					"ref_name": (stamped_scope.get("record_scope") or {}).get("name") or "?",
+					"reason": "scope did not match server-stamped FEFO boundary",
+				}
+			)
+		else:
+			scope = trusted_scope
 	from jarvis.chat import operator_review
 
 	review_backend = operator_review.backend(run_doc.agent)
+	if run_doc.agent != "cycle-count-planner-operator" and any(
+		isinstance(row, dict) and "proposal" in row for row in raw_findings
+	):
+		raise InvalidArgumentError("A physical count proposal is supported only by the count-plan agent.")
 	review_ready = False
 	if review_backend:
 		inst.activation_state = run_doc.preparation_mode or "shadow"
@@ -305,20 +525,18 @@ def record_agent_run(
 		raw_findings, coverage, review_ready = review_backend.validate_output(
 			run_doc, raw_findings, coverage, scope, integrity_digest
 		)
+		validate_envelope = getattr(review_backend, "validate_envelope", None)
+		if validate_envelope:
+			envelope_issue = validate_envelope(run_doc, review_ready, truncated, rows_consumed)
+			if envelope_issue:
+				raw_findings = []
+				coverage = review_backend.envelope_failure(envelope_issue)
+				review_ready = False
 		if not review_ready:
 			integrity_digest = None
 
-	# A model-supplied rows_consumed is only ever used to DETECT an under-fetch (it
-	# can force a run partial, never mask one — a bogus value cannot upgrade a run to
-	# completed), so coercing a bad value to None (skip reconciliation) is safe.
-	rows_consumed_val = None
-	if rows_consumed is not None:
-		try:
-			rows_consumed_val = int(rows_consumed)
-		except (TypeError, ValueError):
-			rows_consumed_val = None
-
 	valid, dropped = _validate_findings(raw_findings, token_set, allowed_refs)
+	dropped.extend(scope_dropped)
 	dropped.extend(guard_dropped)
 	if review_backend:
 		frappe.db.set_value(
@@ -388,6 +606,10 @@ def record_agent_run(
 		detail=(f"{plural(len(dropped), 'row')} dropped" if dropped else None),
 		owner=run_doc.owner,
 	)
+	if negative_receipt_capture:
+		# Best-effort only for the completed Negative Stock audit. A refusal leaves
+		# its normal findings intact and holds the future Reorder stage closed.
+		negative_stock_receipt.persist(negative_receipt_capture)
 
 	return {
 		"run": run_doc.name,
