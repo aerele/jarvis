@@ -11,7 +11,7 @@ from jarvis.tests.test_landed_cost_defaults import LandedCostFixtures
 from jarvis.tools._client_defaults import landed_cost_receipt_details
 from jarvis.tools.create_doc import build_doc, create_doc
 from jarvis.tools.preview_doc import preview_doc
-from jarvis.tools.registry import list_tools
+from jarvis.tools.preview_landed_cost_voucher import preview_landed_cost_voucher
 from jarvis.tools.update_doc import update_doc
 
 
@@ -22,7 +22,7 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 		values = self.values(amounts=[120])
 		values["posting_date"] = add_days(nowdate(), 1)
 		if not frappe.get_meta("Landed Cost Voucher").has_field("vendor_invoices"):
-			values.pop("vendor_invoices")
+			values.pop("vendor_invoices", None)
 		return values
 
 	def assert_receipt_summary(self, row, source=None):
@@ -59,14 +59,6 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 		self.assertEqual(values, original)
 
 	def test_prepared_payload_has_receipt_details_without_saving(self):
-		from erpnext.stock.doctype.landed_cost_voucher import landed_cost_voucher
-
-		if "preview_landed_cost_voucher" not in list_tools():
-			self.skipTest("The source-backed preview has a separate v15 adapter backport")
-		if not callable(getattr(landed_cost_voucher, "get_lcv_dimension_fields", None)):
-			self.skipTest("The source-backed preview is not available on this ERP version")
-		from jarvis.tools.preview_landed_cost_voucher import preview_landed_cost_voucher
-
 		before = frappe.db.count("Landed Cost Voucher")
 		result = preview_landed_cost_voucher(
 			company=self.company,
@@ -466,15 +458,12 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 		)
 		with self.assertRaises(PermissionDeniedError):
 			preview_doc("Landed Cost Voucher", self.receipt_values())
-		if "preview_landed_cost_voucher" in list_tools():
-			from jarvis.tools.preview_landed_cost_voucher import preview_landed_cost_voucher
-
-			with self.assertRaises(PermissionDeniedError):
-				preview_landed_cost_voucher(
-					company=self.company,
-					receipts=[{"doctype": "Purchase Receipt", "name": self.receipt.name}],
-					charges=[{"purchase_invoice": self.invoice.name, "basis": "Amount"}],
-				)
+		with self.assertRaises(PermissionDeniedError):
+			preview_landed_cost_voucher(
+				company=self.company,
+				receipts=[{"doctype": "Purchase Receipt", "name": self.receipt.name}],
+				charges=[{"purchase_invoice": self.invoice.name, "basis": "Amount"}],
+			)
 
 	def test_generic_preview_runs_the_same_fetch_then_rolls_back(self):
 		controller = type(frappe.new_doc("Landed Cost Voucher"))
