@@ -2193,6 +2193,37 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		finally:
 			frappe.set_user("Administrator")
 
+	def test_stock_variance_failed_writeback_rolls_back_only_its_output(self):
+		from jarvis.chat import agent_runs, stock_variance_evaluation
+		from jarvis.tools import record_agent_run
+
+		prior = frappe.get_doc({"doctype": "ToDo", "description": "Prior work survives"}).insert()
+		created = []
+
+		def create_output(*args, **kwargs):
+			doc = frappe.get_doc({"doctype": "ToDo", "description": "Uncommitted report output"}).insert()
+			created.append(doc.name)
+			return doc.name
+
+		with (
+			patch.object(stock_variance_evaluation, "_store_evidence"),
+			patch.object(agent_runs, "_visibility_owner", return_value=None),
+			patch.object(agent_runs, "persist_agent_dashboard", side_effect=create_output),
+			patch.object(record_agent_run, "record_agent_run", side_effect=RuntimeError("writeback failed")),
+			self.assertRaisesRegex(RuntimeError, "writeback failed"),
+		):
+			stock_variance_evaluation._persist(
+				frappe._dict(name="RUN-ROLLBACK"),
+				frappe._dict(activation_state="live"),
+				{},
+				{},
+				{},
+				html="<p>Review</p>",
+			)
+		self.assertTrue(frappe.db.exists("ToDo", prior.name))
+		self.assertEqual(len(created), 1)
+		self.assertFalse(frappe.db.exists("ToDo", created[0]))
+
 	def test_stock_variance_server_reads_a_real_count_without_stock_writes(self):
 		from jarvis.chat import cycle_count_entry, stock_variance_evaluation
 		from jarvis.tools import _delegate_capability
