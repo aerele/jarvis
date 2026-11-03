@@ -147,8 +147,9 @@ def reverify() -> dict:
 
 	Sends this site's instance id with the proof, so an admin that supports it rebinds
 	the agent's pinned id after a restore or a move (``pin_rebound``). A pass also
-	clears the "instance changed" record. Admin down, rate limited or refusing answers
-	``proved: false`` with ``error: "unreachable"`` instead of a 500."""
+	clears the "instance changed" record. Admin down or rate limited answers ``proved:
+	false`` with ``error: "unreachable"``, admin refusing with ``error: "not_verified"``,
+	instead of a 500."""
 	frappe.only_for("System Manager")
 	from jarvis import admin_client
 	from jarvis.chat import foreign_session, pairing_proof, site_identity
@@ -171,8 +172,12 @@ def reverify() -> dict:
 		pin_rebound = proved and answer.get("pin_rebound") is True
 	except AdminAuthError:
 		proved = False
-	except (AdminUnreachableError, AdminRateLimitedError, AdminValidationError):
+	except (AdminUnreachableError, AdminRateLimitedError):
 		error = "unreachable"
+	except AdminValidationError:
+		# Admin answered and refused (no running tenant, a rejected instance id): not a
+		# connectivity problem, so the SPA must not say "try again in a minute".
+		error = "not_verified"
 	if proved:
 		frappe.db.set_single_value(
 			SETTINGS,
