@@ -570,6 +570,14 @@ class TestAgentsMarketplace(unittest.TestCase):
 			],
 			"grn-hygiene-auditor": ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
 			"statutory-payroll-deposit-status": ["deposit"],
+			"ledger-scrutiny-auditor": [
+				"materiality",
+				"suspense_accounts",
+				"subledger_owned_accounts",
+				"subledger_account_owner",
+				"chart_standard",
+				"suspense_confirmed",
+			],
 			"gst-return-prep-auditor": ["annual_aggregate_turnover", "same_hsn_rate_allowlist"],
 		}
 		for slug, config_keys in expected.items():
