@@ -123,7 +123,7 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "cb1706f85e3f2e6625867330025481c8eb8577bdd04a158bb486d54bef0b0ec5"
+	PINNED_CAPABILITY_DIGEST = "a793fd1d310ddb02fa7a1e7aff3db9656290106e10191a6ba84bf09de3197afa"
 	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "0b4cc098bbec4f5c43a8f1c694589793ef85881ba61c5e389db1a2616b71892a"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
@@ -216,6 +216,28 @@ class TestLeadHygieneRegistryContract(FrappeTestCase):
 				"message",
 			],
 		)
+
+
+class TestPrivateSourceReportGrantBoundary(FrappeTestCase):
+	def test_reader_catalog_keeps_removed_private_report_grants_absent(self):
+		from jarvis.chat import agent_catalog
+
+		# These native contracts dropped this grant in jarvis-agents #74. A
+		# general reader update must not restore it through an older catalog.
+		for slug in (
+			"cash-limit-269st-40a3-auditor",
+			"fefo-expiry-compliance-auditor",
+			"negative-stock-valuation-auditor",
+			"payroll-prerun-auditor",
+			"cycle-count-planner-operator",
+			"fixed-asset-depreciation-auditor",
+			"sla-breach-ageing-auditor",
+			"statutory-payroll-compliance-auditor",
+			"vendor-ledger-recon-auditor",
+		):
+			with self.subTest(agent=slug):
+				self.assertNotIn("jarvis__query_report", agent_catalog.registry_tools_allow(slug))
+		self.assertIn("jarvis__query_report", agent_catalog.registry_tools_allow("baseline-meter-auditor"))
 
 
 class TestReorderNativeGateContract(FrappeTestCase):

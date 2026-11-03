@@ -20,7 +20,7 @@ from jarvis.tools._document_query_sources import (
 	DOCUMENT_NOTE,
 	load_document,
 )
-from jarvis.tools._file_scan import MAX_BYTES, MAX_COLUMNS, MAX_EXPANDED_BYTES, MAX_SHEETS
+from jarvis.tools._file_scan import MAX_BYTES, MAX_COLUMNS, MAX_SHEETS
 from jarvis.tools.read_file import _cell
 
 MAX_TOTAL_ROWS = 100_000
@@ -35,7 +35,7 @@ _FUNCTIONS = frozenset(
 	"count min max lower upper trim ltrim rtrim length substr substring replace coalesce "
 	"ifnull nullif abs round date datetime strftime julianday instr like glob "
 	"decimal_sum decimal_avg decimal_min decimal_max decimal_add decimal_sub "
-	"decimal_mul decimal_div".split()
+	"decimal_mul decimal_div decimal_cmp".split()
 )
 
 
@@ -43,7 +43,7 @@ def revision_for(filename):
 	return DOCUMENT_CONTRACT if filename.rsplit(".", 1)[-1].lower() in DOCUMENT_EXTENSIONS else REVISION
 
 
-def _amount(value):
+def _amount(value, *, min_exponent=-30):
 	if value is None or (isinstance(value, str) and not value.strip()):
 		return None
 	text = str(value).strip()
@@ -55,15 +55,15 @@ def _amount(value):
 		value = Decimal(text.replace(",", ""))
 	except InvalidOperation:
 		raise ValueError(_AMOUNT_ERROR) from None
-	if not value.is_finite() or value.adjusted() > 30 or value.as_tuple().exponent < -30:
+	if not value.is_finite() or value.adjusted() > 30 or value.as_tuple().exponent < min_exponent:
 		raise ValueError("Numeric value exceeds the supported precision.")
 	return value
 
 
-def _register_amounts(db, errors):
+def _register_amounts(db, errors, *, min_exponent=-30, precision=80):
 	def convert(value):
 		try:
-			return _amount(value)
+			return _amount(value, min_exponent=min_exponent)
 		except ValueError as exc:
 			errors.append(str(exc))
 			raise
@@ -79,7 +79,7 @@ def _register_amounts(db, errors):
 				if number is None:
 					return
 				with localcontext() as context:
-					context.prec = 80
+					context.prec = precision
 					if self.total is None:
 						self.total = number
 					elif operation in {"sum", "avg"}:
@@ -94,7 +94,7 @@ def _register_amounts(db, errors):
 				if self.total is None:
 					return None
 				with localcontext() as context:
-					context.prec = 80
+					context.prec = precision
 					value = self.total / self.count if operation == "avg" else self.total
 					return format(value, "f")
 
@@ -109,7 +109,7 @@ def _register_amounts(db, errors):
 			if left is None or right is None:
 				return None
 			with localcontext() as context:
-				context.prec = 80
+				context.prec = precision
 				try:
 					return format(operation(left, right), "f")
 				except (ArithmeticError, ValueError):
@@ -125,6 +125,14 @@ def _register_amounts(db, errors):
 		("div", lambda a, b: a / b),
 	):
 		db.create_function(f"decimal_{name}", 2, binary(operation))
+
+	def compare(left, right):
+		left, right = convert(left), convert(right)
+		if left is None or right is None:
+			return None
+		return (left > right) - (left < right)
+
+	db.create_function("decimal_cmp", 2, compare)
 
 
 def _letters(number):
@@ -157,13 +165,20 @@ def _missing_formula(archive, worksheet):
 	return empty
 
 
-def _load_sources(db, content, filename, selected, *, warnings=None):
+def _load_sources(db, content, filename, selected, *, prefix="", budget=None, warnings=None):
 	ext = filename.rsplit(".", 1)[-1].lower()
 	manifest = []
-	total_rows = total_cells = sample_chars = 0
+	budget = budget if budget is not None else {}
+	for key in ("rows", "cells", "sample", "tables", "xml"):
+		budget.setdefault(key, 0)
 
 	def load(name, table, rows, hidden=False, *, columns=None, positions=False):
-		nonlocal total_rows, total_cells, sample_chars
+		table = prefix + table
+		budget["tables"] += 1
+		if prefix and budget["tables"] > 32:
+			from jarvis.tools._archive_sources import ArchiveCapacityError
+
+			raise ArchiveCapacityError("Selected archive scope exceeds 32 tables.")
 		# Table/column names come only from ordinal counters, never source labels.
 		db.execute(f'CREATE TABLE "{table}" (_row INTEGER PRIMARY KEY)')
 		width = count = 0
@@ -182,9 +197,9 @@ def _load_sources(db, content, filename, selected, *, warnings=None):
 				raise InvalidArgumentError(
 					f"Worksheet {name!r} exceeds {MAX_COLUMNS} columns. No query was run."
 				)
-			total_rows += 1
-			total_cells += len(row)
-			if total_rows > MAX_TOTAL_ROWS or total_cells > MAX_CELLS:
+			budget["rows"] += 1
+			budget["cells"] += len(row)
+			if budget["rows"] > MAX_TOTAL_ROWS or budget["cells"] > MAX_CELLS:
 				raise InvalidArgumentError(
 					f"Selected sources exceed {MAX_TOTAL_ROWS} stored rows/nodes or {MAX_CELLS} cells. "
 					"Select fewer worksheets or split the file. No query was run."
@@ -210,9 +225,9 @@ def _load_sources(db, content, filename, selected, *, warnings=None):
 			# Discovery samples are explicitly partial; source loading is exhaustive.
 			candidate = [number, *values]
 			size = len(json.dumps(candidate, ensure_ascii=False))
-			if count <= 8 and sample_chars + size <= 6000:
+			if count <= 8 and budget["sample"] + size <= 6000:
 				sample.append(candidate)
-				sample_chars += size
+				budget["sample"] += size
 		manifest.append(
 			{
 				"name": name,
@@ -251,9 +266,10 @@ def _load_sources(db, content, filename, selected, *, warnings=None):
 
 		if content.startswith(bytes.fromhex("d0cf11e0a1b11ae1")):
 			raise InvalidArgumentError("Workbook is encrypted or legacy XLS. Supply an unlocked XLSX copy.")
+		from jarvis.tools._archive_sources import validate_workbook
+
+		validate_workbook(content, budget)
 		with ZipFile(io.BytesIO(content)) as archive:
-			if sum(item.file_size for item in archive.infolist()) > MAX_EXPANDED_BYTES:
-				raise InvalidArgumentError("Expanded workbook exceeds 64 MiB. Split the workbook.")
 			book = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
 			try:
 				if len(book.sheetnames) > MAX_SHEETS:
@@ -292,7 +308,7 @@ def _load_sources(db, content, filename, selected, *, warnings=None):
 		raise InvalidArgumentError(
 			"File queries support XLSX, CSV, TSV, JSON, MD, Markdown and TXT. Re-save legacy XLS as XLSX."
 		)
-	return manifest, total_rows
+	return manifest, budget["rows"]
 
 
 def query_spreadsheet(content, filename, *, sql=None, sheets=None, max_rows=100):
@@ -368,85 +384,100 @@ def query_spreadsheet(content, filename, *, sql=None, sheets=None, max_rows=100)
 				" Some derived Markdown tables were omitted. All original text_lines remain searchable; "
 				"derived-table totals do not cover the omitted tables."
 			)
-		if sql is None:
-			if len(json.dumps(result, ensure_ascii=False)) > MAX_OUTPUT_CHARS:
-				raise InvalidArgumentError(
-					"Source metadata exceeds the output budget. Split the file or select fewer spreadsheet worksheets."
-				)
-			return result
-		# Follow-up answers need source counts and schemas, not repeated header samples.
-		for item in manifest:
-			item.pop("sample")
+		return query_loaded(db, manifest, result=result, sql=sql, max_rows=max_rows, errors=errors)
+
+
+def query_loaded(
+	db, manifest, *, result, sql=None, max_rows=100, errors=None, blocked_columns=None, source_label="File"
+):
+	"""Query already-loaded tables under the same authorizer and result budget."""
+	errors = errors if errors is not None else []
+	if sql is None:
 		if len(json.dumps(result, ensure_ascii=False)) > MAX_OUTPUT_CHARS:
 			raise InvalidArgumentError(
-				"Source metadata exceeds the output budget. Split the file or select fewer spreadsheet worksheets."
+				"Report metadata exceeds the output budget. Narrow the report columns."
+				if source_label == "Report"
+				else "Source metadata exceeds the output budget. Split the file or select fewer spreadsheet worksheets."
 			)
-		tables = {item["table"] for item in manifest}
-
-		def authorize(action, first, second, database, trigger):
-			if action == sqlite3.SQLITE_SELECT:
-				return sqlite3.SQLITE_OK
-			# SQLite reports count(*) as a columnless table read with database=None.
-			if (
-				action == sqlite3.SQLITE_READ
-				and first in tables
-				and (database == "main" or (database is None and second == ""))
-			):
-				return sqlite3.SQLITE_OK
-			if action == sqlite3.SQLITE_FUNCTION and (second or "").lower() in _FUNCTIONS:
-				return sqlite3.SQLITE_OK
-			return sqlite3.SQLITE_DENY
-
-		db.set_authorizer(authorize)
-		# Bound SQL work independently of the child CPU/wall limits.
-		steps = 0
-
-		def progress():
-			nonlocal steps
-			steps += 1
-			return int(steps > 20_000)
-
-		db.set_progress_handler(progress, 1000)
-		try:
-			cursor = db.execute(sql)
-			if cursor.description is None:
-				raise InvalidArgumentError("Only read-only SELECT queries are allowed.")
-			columns = [item[0] for item in cursor.description]
-			if len(columns) > MAX_COLUMNS or any(len(name) > 128 for name in columns):
-				raise InvalidArgumentError(
-					"Query returns too many columns or oversized column labels. Select fewer columns and shorter aliases."
-				)
-			result["columns"] = columns
-			used = len(json.dumps(result, ensure_ascii=False))
-			for row in cursor:
-				if any(
-					isinstance(value, bytes) or (isinstance(value, float) and not math.isfinite(value))
-					for value in row
-				):
-					raise InvalidArgumentError(
-						"File SELECT returned binary or non-finite values. Convert the result to supported text or finite numbers."
-					)
-				size = len(json.dumps(row, ensure_ascii=False))
-				if len(result["rows"]) >= max_rows or used + size + 1 > MAX_OUTPUT_CHARS:
-					if not result["rows"]:
-						raise InvalidArgumentError(
-							"One result row exceeds the output budget. Select fewer columns or shorter values."
-						)
-					result["result_truncated"] = True
-					break
-				result["rows"].append(list(row))
-				used += size + 1
-		except sqlite3.Error as exc:
-			if errors:
-				raise InvalidArgumentError(errors[0]) from None
-			if "interrupted" in str(exc):
-				raise InvalidArgumentError(
-					"Query exceeded the operation budget. Simplify joins or filters; no complete result was returned."
-				) from None
-			# SQLite errors may quote source names or SQL literals. Do not copy them
-			# into a tool response that another runtime might retain.
-			raise InvalidArgumentError(
-				"File SELECT failed. Check the inspected table/column names and SQL syntax. "
-				"Only imported tables and allowed read functions are available."
-			) from None
 		return result
+	# Follow-up answers need source counts and schemas, not repeated header samples.
+	for item in manifest:
+		item.pop("sample")
+	if len(json.dumps(result, ensure_ascii=False)) > MAX_OUTPUT_CHARS:
+		raise InvalidArgumentError(
+			"Report metadata exceeds the output budget. Narrow the report columns."
+			if source_label == "Report"
+			else "Source metadata exceeds the output budget. Split the file or select fewer spreadsheet worksheets."
+		)
+	tables = {item["table"] for item in manifest}
+
+	def authorize(action, first, second, database, trigger):
+		if action == sqlite3.SQLITE_READ and (first, second) in (blocked_columns or set()):
+			return sqlite3.SQLITE_DENY
+		if action == sqlite3.SQLITE_SELECT:
+			return sqlite3.SQLITE_OK
+		# SQLite reports count(*) as a columnless table read with database=None.
+		if (
+			action == sqlite3.SQLITE_READ
+			and first in tables
+			and (database == "main" or (database is None and second == ""))
+		):
+			return sqlite3.SQLITE_OK
+		if action == sqlite3.SQLITE_FUNCTION and (second or "").lower() in _FUNCTIONS:
+			return sqlite3.SQLITE_OK
+		return sqlite3.SQLITE_DENY
+
+	db.set_authorizer(authorize)
+	# Bound SQL work independently of the child CPU/wall limits.
+	steps = 0
+
+	def progress():
+		nonlocal steps
+		steps += 1
+		return int(steps > 20_000)
+
+	db.set_progress_handler(progress, 1000)
+	try:
+		cursor = db.execute(sql)
+		if cursor.description is None:
+			raise InvalidArgumentError("Only read-only SELECT queries are allowed.")
+		columns = [item[0] for item in cursor.description]
+		if len(columns) > MAX_COLUMNS or any(len(name) > 128 for name in columns):
+			raise InvalidArgumentError(
+				"Query returns too many columns or oversized column labels. Select fewer columns and shorter aliases."
+			)
+		result["columns"] = columns
+		used = len(json.dumps(result, ensure_ascii=False))
+		for row in cursor:
+			if any(
+				isinstance(value, bytes) or (isinstance(value, float) and not math.isfinite(value))
+				for value in row
+			):
+				raise InvalidArgumentError(
+					"File SELECT returned binary or non-finite values. Convert the result to supported text or finite numbers."
+				)
+			size = len(json.dumps(row, ensure_ascii=False))
+			if len(result["rows"]) >= max_rows or used + size + 1 > MAX_OUTPUT_CHARS:
+				if not result["rows"]:
+					raise InvalidArgumentError(
+						"One result row exceeds the output budget. Select fewer columns or shorter values."
+					)
+				result["result_truncated"] = True
+				break
+			result["rows"].append(list(row))
+			used += size + 1
+	except sqlite3.Error as exc:
+		if errors:
+			raise InvalidArgumentError(errors[0]) from None
+		if "interrupted" in str(exc):
+			raise InvalidArgumentError(
+				"Query exceeded the operation budget. Simplify joins or filters; no complete result was returned."
+			) from None
+		# SQLite errors may quote source values; return a fixed diagnostic only.
+		raise InvalidArgumentError(
+			f"{source_label} SELECT failed. Check the inspected table/column names and SQL syntax. "
+			"Only loaded tables and allowed read functions are available."
+		) from None
+	if errors:
+		raise InvalidArgumentError(errors[0])
+	return result
