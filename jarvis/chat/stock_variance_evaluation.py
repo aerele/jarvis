@@ -487,8 +487,35 @@ def _summary(result: dict, scope: dict) -> dict:
 	}
 
 
+@contextmanager
+def _result_writeback_savepoint():
+	"""Undo partial output before the runner records a typed failure.
+
+	The terminal writer commits on success in a normal request, so do not release
+	this savepoint afterwards. An error after that commit cannot undo the result:
+	the runner reclaims the run and returns its already stored terminal summary.
+	"""
+	savepoint = f"jarvis_stock_variance_result_{frappe.generate_hash(length=10)}"
+	frappe.db.savepoint(savepoint)
+	try:
+		yield
+	except BaseException:
+		try:
+			frappe.db.rollback(save_point=savepoint)
+		except Exception:
+			# The terminal writer may already have committed, or the connection
+			# may have failed. Clear the transaction before reacquiring the run.
+			frappe.db.rollback()
+		raise
+
+
 def _persist(run_doc, inst, scope: dict, payload: dict, evidence: dict, html: str | None = None) -> dict:
-	"""Use the existing validated writeback and dashboard lifecycle once."""
+	"""Use the validated writeback once, rolling back any uncommitted output."""
+	with _result_writeback_savepoint():
+		return _persist_output(run_doc, inst, scope, payload, evidence, html)
+
+
+def _persist_output(run_doc, inst, scope: dict, payload: dict, evidence: dict, html: str | None) -> dict:
 	from jarvis.chat import agent_runs
 	from jarvis.tools import record_agent_run
 
