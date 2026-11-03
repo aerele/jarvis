@@ -1,9 +1,9 @@
-"""Code-owned hard closure for agents that have no safe runtime path.
+"""Permanent legacy closure beside explicitly reviewed native replacements.
 
 The marketplace listing is tenant data. It is useful for display, but it is not
 authority to re-open an agent after a server safety close. This module keeps the
-closed-agent roster in reviewed code and gives every shared runtime path one
-answer.
+closed-agent roster and replacement contracts in reviewed code. A native release
+never removes the historic bearer or confirmation fences.
 
 Deployment runbook: put the site in maintenance or drain state; stop web and
 background workers that can hold older Jarvis imports; run ``bench migrate``
@@ -112,6 +112,12 @@ class NativeAgentRelease:
 
 
 _NATIVE_RELEASES = {
+	"reorder-replenishment-operator": NativeAgentRelease(
+		version="0.2.0",
+		tools=("jarvis__prepare_reorder_review",),
+		policy="erpnext-reorder-v1",
+		configuration_validator="jarvis.chat.reorder_review.configuration_issues",
+	),
 	"ticket-triage-operator": NativeAgentRelease(
 		version="0.2.0",
 		tools=("jarvis__get_ticket_triage_inputs", "jarvis__stage_ticket_triage_proposals", "exec"),
@@ -182,7 +188,7 @@ def closed_agent_spec(agent: str | None) -> ClosedAgentSpec | None:
 
 
 def is_closed_agent(agent: str | None) -> bool:
-	"""Return whether ``agent`` is closed by reviewed server code."""
+	"""Return whether reviewed code permits no current native runtime."""
 	return closed_agent_spec(agent) is not None and native_release_spec(agent) is None
 
 
@@ -288,7 +294,7 @@ def retire_legacy_installation(name: str | None, agent: str | None = None) -> No
 
 
 def delegate_tool_denial(cap: dict, tool: str) -> dict | None:
-	"""Return a fatal refusal for every tool call of a closed delegate run."""
+	"""Refuse legacy authority; admit only an exact typed native run contract."""
 	spec = closed_agent_spec(cap.get("agent"))
 	if not spec:
 		return None

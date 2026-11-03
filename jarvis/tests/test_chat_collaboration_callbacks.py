@@ -116,6 +116,7 @@ class TestCollaborationCallbacks(CollaborationCase):
 			"remember",
 			"future_unknown_tool",
 			"record_app_wiki",
+			"prepare_reorder_review",
 			"get_payroll_deposit_inputs",
 		):
 			with self.subTest(tool=tool):

@@ -36,7 +36,7 @@ REFUSED_TOOLS = frozenset(
 	"""
 create_custom_skill create_dashboard create_dashboard_chart finish_app_learning_run get_payroll_deposit_inputs
 list_app_modules read_app_source get_cycle_count_inputs get_purchase_match_inputs get_receivables_review_inputs get_ticket_triage_inputs
-recall record_agent_run record_app_wiki remember save_agent_dashboard stage_ticket_triage_proposals
+prepare_reorder_review recall record_agent_run record_app_wiki remember save_agent_dashboard stage_ticket_triage_proposals
 save_dashboard schedule_run update_wiki
 """.split()
 )

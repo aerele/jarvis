@@ -62,6 +62,7 @@ NOT_RENAMABLE = (
 	"Jarvis Connector Log",
 	"Jarvis Learned Pattern",
 	"Jarvis Relay Pump",
+	"Jarvis Reorder Safety Fence",
 	"Jarvis Agent Model Choice",
 	"Jarvis Client Error",
 	"Jarvis Feedback Outbox",

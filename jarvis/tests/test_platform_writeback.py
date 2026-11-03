@@ -271,6 +271,41 @@ class TestWritebackScopeAuthority(FrappeTestCase):
 				writeback.record_agent_run(findings=[], coverage={}, scope={"company": "Scope Company B"})
 		persist.assert_not_called()
 
+	def test_tool_rejects_malformed_scope_before_finding_persistence(self):
+		from jarvis.tools import record_agent_run as writeback
+
+		run_row = frappe._dict(
+			name="UNSCOPED-RUN",
+			status="running",
+			installation="UNSCOPED-INSTALLATION",
+			agent="scope-test-agent",
+		)
+		run_doc = frappe._dict(name=run_row.name, agent=run_row.agent, scope_json=None)
+		installation = frappe._dict(name=run_row.installation)
+
+		def get_value(doctype, *args, **kwargs):
+			if doctype == writeback.RUN:
+				return run_row
+			if doctype == writeback.LISTING:
+				return {"rule_tokens": "[]", "doctypes_required": "[]"}
+			raise AssertionError(f"unexpected get_value for {doctype}")
+
+		with (
+			patch("jarvis.tools._agent_run_ctx.get_session_key", return_value="unscoped-session"),
+			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(
+				frappe,
+				"get_doc",
+				side_effect=lambda doctype, name: installation
+				if doctype == writeback.INSTALLATION
+				else run_doc,
+			),
+			patch("jarvis.chat.agent_runs.record_delegate_run") as persist,
+		):
+			with self.assertRaisesRegex(InvalidArgumentError, "evaluator scope"):
+				writeback.record_agent_run(findings=[], coverage={}, scope="not-json")
+		persist.assert_not_called()
+
 
 # --------------------------------------------------------------------------- #
 # PP-1 — result-class validation (the reject paths) at the tool boundary
