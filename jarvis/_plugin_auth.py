@@ -143,6 +143,10 @@ def _validate_plugin_request(body_bytes: bytes, *, recovery: bool) -> str:
 			"plugin_auth: agent_token unset on bench",
 			"Jarvis Settings.callback_key and agent_token are empty; refusing all plugin requests",
 		)
+		# A site with no key at all (a lost key after a retirement, a restore) would
+		# otherwise 503 until the daily sync. Same throttled, proof-backed self-heal
+		# as a mismatch; the request is still refused.
+		_request_key_resync()
 		raise PluginAuthError(
 			http_status=503,
 			code="ServiceUnavailable",

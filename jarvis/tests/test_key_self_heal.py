@@ -115,10 +115,23 @@ class TestStaleKeySelfHeal(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertEqual(err.http_status, 401)
 		enq.assert_not_called()
 
-	def test_no_stored_key_at_all_queues_nothing(self):
+	def test_no_stored_key_at_all_queues_one_proof_backed_sync(self):
 		settings = frappe.get_single(SETTINGS)
 		clear_settings_password(settings, "agent_token")
 		clear_settings_password(settings, "callback_key")
+		with patch("frappe.enqueue") as enq:
+			err = self._reject("anything")
+			self._reject("anything-else")
+		self.assertEqual(err.http_status, 503)
+		enq.assert_called_once()
+		self.assertEqual(enq.call_args.args[0], "jarvis.onboarding.run_key_resync")
+		self.assertTrue(enq.call_args.kwargs["enqueue_after_commit"])
+
+	def test_no_stored_key_respects_the_throttle(self):
+		settings = frappe.get_single(SETTINGS)
+		clear_settings_password(settings, "agent_token")
+		clear_settings_password(settings, "callback_key")
+		frappe.cache().setex(_throttle_key(), 300, 1)
 		with patch("frappe.enqueue") as enq:
 			err = self._reject("anything")
 		self.assertEqual(err.http_status, 503)
@@ -209,8 +222,8 @@ class TestErrorLogCarriesNoSecrets(JarvisSettingsSnapshot, FrappeTestCase):
 			frappe.get_single(SETTINGS), "jarvis_admin_api_secret", "s", update_modified=False
 		)
 		with patch("jarvis.onboarding.admin_client.get_connection", side_effect=self._boom):
-			onboarding._best_effort_key_sync()
-		row = frappe.get_last_doc("Error Log", filters={"method": "callback key fetch failed"})
+			onboarding.run_key_resync()
+		row = frappe.get_last_doc("Error Log", filters={"method": "callback key resync failed"})
 		self.assertIn("RuntimeError: admin refused", row.error)
 		self.assertNotIn(SECRET, row.error)
 		self.assertNotIn("Local variables", row.error)
@@ -221,9 +234,7 @@ class TestErrorLogCarriesNoSecrets(JarvisSettingsSnapshot, FrappeTestCase):
 		the branch added or touched, by title."""
 		root = pathlib.Path(frappe.get_app_path("jarvis"))
 		titles = {
-			"callback key fetch failed",
 			"callback key resync failed",
-			"callback key fetch: enqueue failed",
 			"callback key resync: enqueue failed",
 			"site_pin: pin failed",
 			"site_pin: status read failed",
