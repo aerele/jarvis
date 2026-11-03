@@ -1,8 +1,9 @@
 """ERPNext masters the J2a tests save against, created when missing.
 
 The CI site is a fresh ERPNext install that never ran the setup wizard, so it has
-no Item Group, UOM, Customer Group, Territory, Price List, Fiscal Year, Stock Entry Type or
-Warehouse Type "Transit" (a Standard chart Company needs that last one). Every
+no Item Group, UOM, Customer Group, Territory, Price List, Fiscal Year, Stock Entry Type,
+Party Type (Customer, Supplier) or Warehouse Type "Transit" (a Standard chart Company needs
+that one). Every
 helper here is "if not exists, insert", under its own ``_J2A`` name where the name
 is ours to pick, so it is a no-op on a populated site. Nothing commits: the
 calling test class rolls back, and ``clear_cache_after_rollback`` drops the
@@ -32,6 +33,25 @@ def clear_cache_after_rollback(test_class) -> None:
 	test_class.addClassCleanup(frappe.clear_cache)
 
 
+STANDARD_PARTY_TYPES = {"Customer": "Receivable", "Supplier": "Payable"}
+
+
+def ensure_party_types() -> None:
+	"""The setup wizard is the only thing that creates the Party Type rows. ERPNext
+	version-15 now rejects a GL Entry or Payment Entry whose party type has no row
+	("Supplier is not a valid Party Type"), so a ledger fixture on a fresh site has to
+	bring its own. Missing rows are inserted inside the calling test's transaction, so
+	the class rollback removes them; an existing row is never touched."""
+	for party_type, account_type in STANDARD_PARTY_TYPES.items():
+		if not frappe.db.exists("Party Type", party_type):
+			frappe.get_doc(
+				{"doctype": "Party Type", "party_type": party_type, "account_type": account_type}
+			).insert(ignore_permissions=True)
+	# ERPNext memoises party type -> account type per request; a lookup made before the
+	# rows existed would otherwise stay answered.
+	frappe.local.party_account_types = {}
+
+
 def ensure_ledger_company() -> str:
 	"""A real Company with the Standard chart, so its ledger, cost center and default
 	warehouses (Stores among them) exist.
@@ -40,6 +60,7 @@ def ensure_ledger_company() -> str:
 	a site makes HRMS add payroll Custom Fields, and that ALTER TABLE commits the open
 	transaction, leaking this company past the class rollback. INR stays the currency, as
 	before; the country decides only which regional setup runs."""
+	ensure_party_types()
 	if frappe.db.exists("Company", COMPANY):
 		return COMPANY
 	if not frappe.db.exists("Warehouse Type", "Transit"):
