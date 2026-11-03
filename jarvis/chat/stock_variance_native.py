@@ -8,6 +8,7 @@ delegate input path.
 import copy
 import hashlib
 import json
+import re
 from bisect import bisect_right
 from datetime import date, datetime, time
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -122,8 +123,14 @@ def day(value):
 def clock(value):
 	try:
 		require(isinstance(value, str), "A source time is invalid")
-		value = value.split(":", 1)[0].zfill(2) + ":" + value.split(":", 1)[1]
-		t = time.fromisoformat(value)
+		# Frappe's query transport can omit padding from every TIME component,
+		# including seconds (for example, 4:19:1.378829). Keep its precision while
+		# normalizing the clock. Reject overflow consistently on every Python version.
+		match = re.fullmatch(r"([0-9]{1,2}):([0-9]{1,2}):([0-9]{1,2})(\.[0-9]{1,6})?", value)
+		require(match is not None, "A source time is invalid")
+		hour, minute, second, fraction = match.groups()
+		require(int(hour) < 24 and int(minute) < 60 and int(second) < 60, "A source time is invalid")
+		t = time.fromisoformat(f"{hour.zfill(2)}:{minute.zfill(2)}:{second.zfill(2)}{fraction or ''}")
 		require(t.tzinfo is None, "A source time has a timezone")
 		return t
 	except (ValueError, TypeError, IndexError):
