@@ -134,7 +134,7 @@ class TestAgentClosureContracts(FrappeTestCase):
 			contract = registry[spec.slug]
 			release = agent_closure.native_release_spec(spec.slug)
 			if release:
-				self.assertEqual(spec.slug, "ticket-triage-operator")
+				self.assertIn(spec.slug, {"reorder-replenishment-operator", "ticket-triage-operator"})
 				self.assertEqual(contract["version"], "0.2.0")
 				self.assertEqual(contract["status"], "Published")
 				self.assertEqual(contract["tools_allow"], list(release.tools))

@@ -58,6 +58,7 @@ NOT_RENAMABLE = (
 	"Jarvis App Learning Run",
 	"Jarvis Learned Pattern",
 	"Jarvis Relay Pump",
+	"Jarvis Reorder Safety Fence",
 	"Jarvis Agent Model Choice",
 	"Jarvis Client Error",
 	"Jarvis Feedback Outbox",

@@ -364,11 +364,18 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(captured.get("timeout_s"), 2400)
 		# Async: the Run stays "running" post-dispatch (Phase 3 writeback marks done).
 		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "running")
-		# The generic prompt is NON-LEAKY (no rule/tool/threshold names).
+		# The generic prompt is non-leaky: it names no rule, threshold, or
+		# domain tool. The one zero-argument snapshot tool is intentional.
 		msg = captured.get("message") or ""
-		for leak in ("jarvis__", "rule_id", "rule_pack", "pl_balance", "bs_balance", "$"):
+		for leak in ("rule_id", "rule_pack", "pl_balance", "bs_balance", "$"):
 			self.assertNotIn(leak, msg)
-		self.assertIn(inst_name, msg)  # installation pointer for the config
+		# The prompt must not hand a mutable Installation row to the delegate.
+		# This install has no declared snapshot values, so it can obtain only its
+		# empty server-stamped Run snapshot, never mutable config after dispatch.
+		self.assertIn("jarvis__get_engagement_config", msg)
+		self.assertNotIn("jarvis__get_doc", msg)
+		self.assertNotIn(inst_name, msg)
+		self.assertNotIn("Jarvis Agent Installation", msg)
 
 	def test_delegate_dispatch_failure_marks_run_failed_and_reraises(self):
 		inst_name = _install_as(self.owner, "close-auditor")
@@ -412,13 +419,17 @@ class TestAgentsMarketplace(unittest.TestCase):
 			"prior_fy_end": "2026-03-31",
 		}
 		gen = agent_scheduler._audit_prompt(delegate, inst, "scheduled", scope)
-		# The bench-injected run message names NO rule/tool/threshold/engine.
-		for leak in ("jarvis__", "rule_id", "rule_pack", "pl_balance", "bs_balance", "$"):
+		# The bench-injected message names no rule, threshold, or domain tool.
+		# Its one allowed infrastructure name is the zero-argument config snapshot.
+		for leak in ("rule_id", "rule_pack", "pl_balance", "bs_balance", "$"):
 			self.assertNotIn(leak, gen)
 		self.assertIn("EXPLICIT SCOPE", gen)
 		self.assertIn("2026-04-01", gen)  # scope injected verbatim (A6)
 		self.assertIn("2026-09-11", gen)  # as-of report_date conveyed to the delegate
-		self.assertIn(inst_name, gen)  # installation pointer
+		self.assertIn("jarvis__get_engagement_config", gen)
+		self.assertNotIn("jarvis__get_doc", gen)
+		self.assertNotIn(inst_name, gen)
+		self.assertNotIn("Jarvis Agent Installation", gen)
 
 	def test_resolve_scope_injects_report_date_and_preserves_to_date(self):
 		"""to_date bounds the analysis window (may be a future FY end) and is left
@@ -535,6 +546,12 @@ class TestAgentsMarketplace(unittest.TestCase):
 				"materiality.engagement_risk_level",
 				"materiality.rounding_step",
 			],
+			"fixed-asset-depreciation-auditor": ["depr_run_posted", "enable_capex_signal"],
+			"fefo-expiry-compliance-auditor": [
+				"fefo.reviewer",
+				"fefo.near_expiry_days",
+				"fefo.test_declaration",
+			],
 			"grn-hygiene-auditor": ["grn_hygiene.reviewer", "grn_hygiene.test_declaration"],
 			"statutory-payroll-deposit-status": ["deposit"],
 			"gst-return-prep-auditor": ["annual_aggregate_turnover", "same_hsn_rate_allowlist"],
@@ -563,7 +580,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 			],
 		)
 
-	def test_sync_agent_listings_writes_record_scope_capability_from_registry(self):
+	def test_sync_agent_listings_derives_record_scope_capability_from_the_registry(self):
+		"""A stale mutable Listing value cannot enable a private-bundle boundary."""
+		frappe.db.set_value(LISTING, "baseline-meter-auditor", "supports_record_scope", 1)
+		frappe.db.set_value(LISTING, "payroll-prerun-auditor", "supports_record_scope", 0)
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(
 			int(frappe.db.get_value(LISTING, "baseline-meter-auditor", "supports_record_scope") or 0),
@@ -573,6 +593,13 @@ class TestAgentsMarketplace(unittest.TestCase):
 			int(frappe.db.get_value(LISTING, "payroll-prerun-auditor", "supports_record_scope") or 0),
 			1,
 		)
+		self.assertEqual(
+			int(
+				frappe.db.get_value(LISTING, "fixed-asset-depreciation-auditor", "supports_record_scope") or 0
+			),
+			0,
+		)
+
 		self.assertEqual(
 			int(frappe.db.get_value(LISTING, "close-auditor", "supports_record_scope") or 0),
 			0,
@@ -729,28 +756,29 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# path were flipped to Coming Soon in the registry; a re-sync must carry
 	# an already-deployed Published row down with it.
 	# ------------------------------------------------------------------ #
-	def test_dispatchless_operators_downgrade_to_coming_soon_on_resync(self):
-		operator_slugs = ["reorder-replenishment-operator"]
-		agent_catalog.sync_agent_listings()
-		# Simulate the pre-change deployed state, as if synced before the flip.
-		for slug in operator_slugs:
-			frappe.db.set_value(LISTING, slug, "status", "Published", update_modified=False)
-		frappe.db.commit()
+	def test_unpublished_operator_downgrades_to_coming_soon_on_resync(self):
+		# Both former closed operators now have exact native releases. Keep the
+		# downgrade regression with a temporary unpublished registry entry.
+		slug = "ap-3way-match-operator"
+		registry = deepcopy(agent_catalog._load_registry())
+		for entry in registry["agents"]:
+			if entry["agent_slug"] == slug:
+				entry["status"] = "Coming Soon"
+		frappe.db.set_value(LISTING, slug, "status", "Published", update_modified=False)
+		try:
+			with patch.object(agent_catalog, "_load_registry", return_value=registry):
+				agent_catalog.sync_agent_listings()
+			self.assertEqual(frappe.db.get_value(LISTING, slug, "status"), "Coming Soon")
+		finally:
+			agent_catalog.sync_agent_listings()
 
-		agent_catalog.sync_agent_listings()
-
-		for slug in operator_slugs:
-			self.assertEqual(
-				frappe.db.get_value(LISTING, slug, "status"),
-				"Coming Soon",
-				f"{slug} must follow the registry's Coming Soon status on re-sync",
-			)
-
-	def test_ap_ar_review_operators_publish_on_resync(self):
+	def test_native_review_operators_publish_on_resync(self):
 		operator_slugs = (
 			"ap-3way-match-operator",
 			"ar-collections-operator",
+			"reorder-replenishment-operator",
 			"cycle-count-planner-operator",
+			"ticket-triage-operator",
 		)
 		for slug in operator_slugs:
 			frappe.db.set_value(LISTING, slug, "status", "Coming Soon", update_modified=False)
