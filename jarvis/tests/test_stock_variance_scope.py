@@ -183,7 +183,10 @@ class TestStockVarianceScope(FrappeTestCase):
 			patch.object(agent_scope, "_resolve", return_value=base_scope),
 			patch.object(frappe, "get_doc", return_value=warehouse),
 		):
-			resolved_scope = agent_scope.resolve_scope(frappe._dict(config=json.dumps(config)))
+			resolved_scope = agent_scope.resolve_scope(
+				frappe._dict(agent=stock_variance_scope.AGENT, config=json.dumps(config)),
+				allow_record_scope=True,
+			)
 		self.assertEqual(resolved_scope["record_scope"], validated_root)
 
 		installation = frappe._dict(
@@ -196,7 +199,7 @@ class TestStockVarianceScope(FrappeTestCase):
 			patch.object(frappe.db, "set_value") as stamp,
 		):
 			stamped_scope = agent_scheduler._stamp_scope_and_watermark(
-				"SV-RUN-1", installation, "warehouse-reader@example.invalid"
+				"SV-RUN-1", installation, "warehouse-reader@example.invalid", record_scope_supported=True
 			)
 		self.assertEqual(stamped_scope["record_scope"], validated_root)
 		stamped_values = stamp.call_args.args[2]
@@ -206,10 +209,14 @@ class TestStockVarianceScope(FrappeTestCase):
 		with patch.object(
 			agent_scheduler, "_explicit_config", return_value={"stock_variance": config["stock_variance"]}
 		):
-			prompt = agent_scheduler._audit_prompt(listing, installation, "manual", stamped_scope)
+			prompt = agent_scheduler._audit_prompt(
+				listing, installation, "manual", stamped_scope, record_scope_supported=True
+			)
 		marker = "ADDITIONAL SCOPE (copy these values unchanged): "
 		scope_block = prompt.split(marker, 1)[1].split("\n\nEXPLICIT CONFIG", 1)[0]
-		self.assertEqual(json.loads(scope_block), {"record_scope": validated_root})
+		self.assertEqual(
+			json.loads(scope_block), {"record_scope": validated_root, "scoped_visibility": False}
+		)
 
 	def test_launch_refuses_an_invalid_scope_before_creating_any_run_rows(self):
 		installation = frappe._dict(
