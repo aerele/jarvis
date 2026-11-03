@@ -93,6 +93,9 @@
 		"container_unavailable",
 		"authority_repair_required",
 		"site_replaced",
+		// Private network: the connection test is pending or failed; the Connect panel
+		// owns it, and the generic "Set up Jarvis" pitch would point the wrong way.
+		"network_check_required",
 	];
 
 	function isSuppressedReason(reason) {
