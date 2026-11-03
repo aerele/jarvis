@@ -238,8 +238,9 @@ export function replacedBanner(notice) {
 	};
 }
 
-// Same sentence as jarvis.chat.site_pin.copy_message. No action: only support can
-// move the pairing, so there is nothing to click.
+// Same sentence as jarvis.chat.site_pin.copy_message. The banner carries no action
+// here; ChatView adds a "Re-verify this site" button for System Managers (site_pin.reverify).
+// Only support can move the pairing.
 export function copyBanner(notice) {
 	if (!notice) return null;
 	// A block with no recorded pin still shows: "another site" matches the desk banner.

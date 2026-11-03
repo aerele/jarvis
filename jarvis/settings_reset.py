@@ -111,6 +111,7 @@ CONNECTION = ResetSpec(
 		"jarvis_admin_api_secret",
 		"jarvis_admin_customer_password",
 		"agent_token",
+		"callback_key",
 		"chat_device_private_key",
 		"chat_device_token",
 	),

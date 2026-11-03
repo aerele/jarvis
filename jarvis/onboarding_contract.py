@@ -295,7 +295,7 @@ _ADMIN_KEYS = (
 
 # Never persisted, and asserted on: the signup response carries the account's
 # credentials in the same dict as its display fields.
-_NEVER_PERSIST = ("api_key", "api_secret", "customer", "customer_password", "agent_token")
+_NEVER_PERSIST = ("api_key", "api_secret", "customer", "customer_password", "agent_token", "callback_key")
 
 # Held locally, never sent to the browser. The key is the bench's receipt for an
 # initiation; handing it to the SPA would invite it to echo the same key back on
@@ -315,7 +315,7 @@ _VOLATILE_KEYS = ("payment_last_checked_at", "gateway_consulted", "updated_at")
 # poll, a plaintext password in an HTTP response body the page had no use for.
 # Stripping is by KEY, on the way out, so a future admin field named like a
 # credential is caught without a bench release.
-_WIRE_STRIP = ("api_key", "api_secret", "customer_password", "agent_token")
+_WIRE_STRIP = ("api_key", "api_secret", "customer_password", "agent_token", "callback_key")
 
 
 def strip_credentials(data: dict | None) -> dict:

@@ -236,10 +236,12 @@ def _log_pinned_oneshot(run_id: str, model: str | None, provider: str | None) ->
 	)
 
 
-# Scopes the chat path needs: operator.write for sessions.create + agent;
-# operator.admin so the same connection can also read state (status snapshots,
-# etc.) without re-pairing.
-_REQUESTED_SCOPES = ["operator.write", "operator.admin"]
+# Scopes the chat path asks for: read for state (history, status snapshots) and write
+# for sessions.create / chat.send / agent. Never operator.admin or operator.pairing: the
+# site must not hold a credential that can do owner-only things. The four owner-only
+# actions (sessions.delete, inherited tool policy, llm-task, canvas) go through signed
+# plugin routes instead (jarvis.chat.plugin_routes).
+_REQUESTED_SCOPES = ["operator.read", "operator.write"]
 _CLIENT_ID = "gateway-client"
 _CLIENT_MODE = "backend"
 _ROLE = "operator"
@@ -363,6 +365,18 @@ PAIRING_PENDING_USER_MESSAGE = "Still getting your assistant ready. Try again in
 _NOT_PAIRED_CODES = frozenset({"NOT_PAIRED"})
 _NOT_PAIRED_DETAIL_CODES = frozenset({"PAIRING_REQUIRED", "NOT_PAIRED"})
 _NOT_PAIRED_REASONS = frozenset({"not-paired"})
+
+
+_BOOTSTRAP_INVALID_CODE = "AUTH_BOOTSTRAP_TOKEN_INVALID"
+
+
+def _is_bootstrap_code_invalid(err: Exception) -> bool:
+	"""True iff the gateway refused the presented bootstrap code. Typed like the
+	other classifiers: only ``.code``/``.details`` are read, never message text."""
+	if getattr(err, "code", None) == _BOOTSTRAP_INVALID_CODE:
+		return True
+	details = getattr(err, "details", None)
+	return isinstance(details, dict) and details.get("code") == _BOOTSTRAP_INVALID_CODE
 
 
 def _is_not_paired(err: Exception) -> bool:
@@ -781,7 +795,7 @@ class AgentSession:
 		chat-turn budget). Fail-CLOSED at the cap (D-d): raise the honest
 		"still getting ready" error, NEVER fabricate a token.
 		"""
-		if not creds.bootstrap_token:
+		if not (creds.current_bootstrap_code or creds.bootstrap_token):
 			# Can neither present nor sign a bootstrap connect without the gateway
 			# token. Fail closed rather than send an unsignable/empty auth.
 			raise AgentUnreachableError(
@@ -802,6 +816,24 @@ class AgentSession:
 					ws.close()
 				except Exception:
 					pass
+				if _is_bootstrap_code_invalid(e):
+					# The presented code was refused (spent or bound elsewhere): move
+					# to the next code once. Both spent ends like any failed pairing;
+					# the next turn re-pairs through a fresh proof.
+					next_creds = creds.with_next_bootstrap_code()
+					if next_creds is None:
+						_logger.warning(
+							"chat pairing: bootstrap codes exhausted device_id=%s attempts=%d",
+							creds.device_id,
+							attempt,
+						)
+						raise AgentUnreachableError(
+							PAIRING_PENDING_USER_MESSAGE,
+							code="pairing-pending",
+						) from None
+					_logger.info("chat pairing: next bootstrap code device_id=%s", creds.device_id)
+					creds = next_creds
+					continue
 				if _is_not_paired(e):
 					# Still pending. Reconnect on our own timer within the deadline;
 					# agent's pauseReconnect hint is deliberately ignored.
@@ -1037,6 +1069,9 @@ class AgentSession:
 		key = (res.get("payload") or {}).get("key")
 		if not key:
 			raise AgentUnreachableError(f"sessions.create returned no key: {res}")
+		from jarvis.chat import session_claims
+
+		session_claims.claim(key)
 		return key
 
 	# -- Gateway-native turn model (chat.send + chat.history + sessions.*) --
@@ -1313,11 +1348,34 @@ class AgentSession:
 		(transcript is archived gateway-side first; ``deleteTranscript``
 		defaults true there). The gateway refuses to delete the agent's
 		main session - callers treat that error as a skip, never retry."""
-		self._request(
-			"sessions.delete",
-			{"key": session_key},
-			timeout_s=timeout_s,
-		)
+		# sessions.delete is owner-only, so it goes through the plugin's signed route.
+		# The plugin vouches the key with this site, so the caller must delete its own
+		# row for the key only AFTER this returns. ``timeout_s`` bounds the reply wait.
+		import frappe
+
+		from jarvis.chat import plugin_routes
+
+		agent_url = frappe.db.get_single_value("Jarvis Settings", "agent_url") or ""
+		try:
+			plugin_routes.delete_session(agent_url, session_key, read_timeout_s=timeout_s)
+		except plugin_routes.PluginRouteError as e:
+			raise AgentUnreachableError(f"sessions.delete failed: {e}") from e
+
+	def patch_session_policy(self, session_key: str, patch: dict) -> None:
+		"""Set a session's inherited tool policy (``inheritedTool*`` fields).
+
+		Owner-only on the gateway, so it goes through the plugin's signed
+		``/jarvis/sessions/patch`` route. Only the three policy fields are accepted;
+		plain fields (model, label) stay on ``sessions.patch`` over this socket."""
+		import frappe
+
+		from jarvis.chat import plugin_routes
+
+		agent_url = frappe.db.get_single_value("Jarvis Settings", "agent_url") or ""
+		try:
+			plugin_routes.patch_session_policy(agent_url, session_key, patch)
+		except plugin_routes.PluginRouteError as e:
+			raise AgentUnreachableError(f"sessions.patch failed: {e}") from e
 
 	def set_session_model(
 		self,
@@ -1566,6 +1624,32 @@ class AgentSession:
 				}
 			continue  # delta (cumulative mirror) / unknown chat states: keep waiting
 
+	def _apply_oneshot_model(
+		self,
+		session_key: str,
+		model: str | None,
+		provider: str | None,
+		idempotency_key: str,
+	) -> None:
+		"""Pin a one-shot's model on its session before the ``agent`` RPC.
+
+		The gateway refuses ``model`` / ``provider`` on the ``agent`` RPC for a caller
+		without operator.admin ("provider/model overrides are not authorized"), and this
+		site never holds admin. ``sessions.patch {key, model}`` is allowed with write
+		scope, so the override rides there instead. The ref is the same ``<provider>/<model>``
+		(or bare ``<model>``) form ``_session_model_patch`` sends for chat turns. A provider
+		without a model has nothing to patch and is dropped. The pin still disables the
+		failover chain, so the pinned-run log line is kept."""
+		if not (model or provider):
+			return
+		_log_pinned_oneshot(idempotency_key, model, provider)
+		if model:
+			self.set_session_model(
+				session_key,
+				f"{provider}/{model}" if provider else model,
+				timeout_s=CONNECT_TIMEOUT_SECONDS,
+			)
+
 	def fire_agent(
 		self,
 		session_key: str,
@@ -1582,7 +1666,8 @@ class AgentSession:
 		the result stays session-only. ``_request`` drops the interleaved
 		event frames and returns the agent ack response.
 
-		Setting ``model`` / ``provider`` disables agent's failover for this
+		Setting ``model`` / ``provider`` patches the session first (see
+		``_apply_oneshot_model``) and disables agent's failover for this
 		run - see PINNED_ONESHOT_RUN_PREFIX."""
 		params = {
 			"message": message,
@@ -1590,12 +1675,7 @@ class AgentSession:
 			"deliver": False,
 			"idempotencyKey": idempotency_key,
 		}
-		if model:
-			params["model"] = model
-		if provider:
-			params["provider"] = provider
-		if model or provider:
-			_log_pinned_oneshot(idempotency_key, model, provider)
+		self._apply_oneshot_model(session_key, model, provider, idempotency_key)
 		res = self._request("agent", params, timeout_s=CONNECT_TIMEOUT_SECONDS)
 		return (res.get("payload") or {}).get("runId") or ""
 
@@ -1611,11 +1691,10 @@ class AgentSession:
 	) -> Iterator[dict[str, Any]]:
 		"""Send an `agent` request, then yield parsed events until lifecycle.end.
 
-		`model` / `provider` are optional per-turn overrides. When set, they
-		flow into agent's agent RPC params; the gateway honours them via
-		the operator.admin-scope-gated modelOverride path (our connect already
-		declares that scope), and the run loses its failover chain for the
-		duration - see PINNED_ONESHOT_RUN_PREFIX. When omitted, agent falls
+		`model` / `provider` are optional overrides. They are NOT sent on the agent RPC
+		(that needs operator.admin, which the site no longer holds): they are applied to
+		the session with ``sessions.patch`` first, and the run loses its failover chain
+		for the duration - see PINNED_ONESHOT_RUN_PREFIX. When omitted, agent falls
 		back to agents.defaults.model.primary from agent configuration AND keeps its
 		fallbacks.
 
@@ -1631,18 +1710,13 @@ class AgentSession:
 			"deliver": False,
 			"idempotencyKey": idempotency_key,
 		}
-		if model:
-			params["model"] = model
-		if provider:
-			params["provider"] = provider
 		if attachments:
 			# Native vision input. agent's `agent` handler reads these and
 			# normalizes them to the active provider's image blocks; the flat
 			# {type:"image", mimeType, fileName, content:<base64>} shape is what
 			# its gateway normalizer accepts.
 			params["attachments"] = attachments
-		if model or provider:
-			_log_pinned_oneshot(idempotency_key, model, provider)
+		self._apply_oneshot_model(session_key, model, provider, idempotency_key)
 		agent_id = self._send("agent", params)
 		deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
 
@@ -1744,8 +1818,12 @@ class AgentSession:
 		# token and the signed token can never drift (invariant #2). Bootstrap
 		# (no device token) presents auth.token=<gateway token>; steady state
 		# presents auth.deviceToken=<device token>.
+		# Precedence: device token, else the current one-time bootstrap code, else
+		# the legacy owner token (older admin, no codes).
 		if creds.device_token:
 			auth = {"deviceToken": creds.device_token}
+		elif creds.current_bootstrap_code:
+			auth = {"bootstrapToken": creds.current_bootstrap_code}
 		else:
 			auth = {"token": creds.bootstrap_token}
 		signing_token = auth.get("token") or auth.get("deviceToken") or auth.get("bootstrapToken") or ""

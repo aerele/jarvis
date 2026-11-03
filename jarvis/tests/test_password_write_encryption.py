@@ -253,7 +253,10 @@ class TestRotateAgentToken(_SecretsSnapshotTestCase):
 	def test_rotate_agent_token_encrypts_new_token(self):
 		from jarvis import api as jarvis_api
 
-		with patch("jarvis.admin_client.post_rotate_agent_token", return_value={}):
+		with (
+			patch("jarvis._plugin_auth._callback_key", return_value=""),
+			patch("jarvis.admin_client.post_rotate_agent_token", return_value={}),
+		):
 			out = jarvis_api.rotate_agent_token()
 
 		self.assertTrue(out["ok"], f"rotation must succeed, got: {out}")
