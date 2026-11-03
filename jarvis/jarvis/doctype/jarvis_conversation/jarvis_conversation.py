@@ -15,6 +15,7 @@ from jarvis.permissions import NotRenamable, has_jarvis_admin_access
 # (or a doc carrying ``flags.jarvis_server_write``). No Admin/SM exemption (M12).
 _FILEBOX_SERVER_FIELDS = (
 	"filebox_source_file",
+	"filebox_active_source_file",
 	"filebox_result_doctype",
 	"filebox_result_name",
 	"filebox_result_count",

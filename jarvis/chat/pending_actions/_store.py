@@ -35,6 +35,7 @@ REASON_TEXT = {
 	"tampered": "This action failed an integrity check.",
 	"interrupted": "The action was interrupted; its outcome is unknown.",
 	"stuck": "The approval sheet got stuck while it was still being listed; nothing was changed.",
+	"safety_update": "This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
 	"partial": "The action failed after part of it was saved.",
 	"owner_disabled": "The user who owns this action is disabled or missing.",
 	"cancelled": "The action was cancelled.",

@@ -314,6 +314,7 @@ class TestShareReads(SharingCase):
 				tool_name="submit_doc",
 				tool_status="pending",
 				tool_call_id="PRIVATE-PENDING-ID",
+				tool_call_ids=json.dumps(["PRIVATE-PENDING-ID"]),
 				pending_card='{"token":"PRIVATE-PENDING-SENTINEL"}',
 			)
 			tool = make_message(
@@ -346,6 +347,10 @@ class TestShareReads(SharingCase):
 		for key in ("messages", "older_pending", "refreshed"):
 			for row in result[key]:
 				self.assertTrue(set(row) <= (PENDING_KEYS if row.get("awaiting_owner") else ROW_KEYS))
+		for key in ("older_pending", "refreshed"):
+			row = next(row for row in result[key] if row["name"] == pending)
+			self.assertIsNone(row["tool_call_id"])
+			self.assertIsNone(row["tool_call_ids"])
 		for secret in ("SESSION", "MODEL", "PENDING", "ARGS", "MCP", "TEXT", "ERROR", "STEP", "CANVAS"):
 			self.assertNotIn(f"PRIVATE-{secret}-SENTINEL", payload(result))
 		self.assertNotIn("PRIVATE-PENDING-ID", payload(result))
@@ -386,6 +391,7 @@ class TestShareReads(SharingCase):
 							"provider",
 							"created_at",
 							"recent",
+							"pending_card_safe",
 							"activity_state",
 						}
 					)
@@ -440,6 +446,7 @@ class TestShareReads(SharingCase):
 				tool_status="pending",
 				tool_name="submit_doc",
 				tool_call_id="PENDING-SENTINEL",
+				tool_call_ids=json.dumps(["PENDING-SENTINEL"]),
 				pending_card='{"token":"PENDING-SECRET"}',
 			)
 			for n in range(8):
@@ -452,9 +459,123 @@ class TestShareReads(SharingCase):
 		refreshed = self.read(limit=1, refresh=json.dumps([pending]))
 		for key in ("older_pending", "refreshed"):
 			row = next(r for r in refreshed[key] if r["name"] == pending)
-			self.assertEqual(set(row), PENDING_KEYS)
-			self.assertTrue(row["awaiting_owner"])
+			self.assertEqual(set(row), ROW_KEYS)
+			self.assertEqual(row["action_outcome"], "cancelled")
+			self.assertIsNone(row["tool_call_id"])
+			self.assertIsNone(row["tool_call_ids"])
 		self.assertNotIn("PENDING-SECRET", payload(refreshed))
+		self.assertNotIn("PENDING-SENTINEL", payload(refreshed))
+
+	def test_persisted_close_receipt_hides_tokens_after_shared_reload(self):
+		"""A close fence persists the receipt but must not expose its action token."""
+		from jarvis.chat import agent_closure
+		from jarvis.chat import api as chat_api
+		from jarvis.chat.sharing import get_shared_tool_detail
+
+		token = "CLOSE-FENCED-ACTION-TOKEN"
+		token_ids = json.dumps([token, "CLOSE-FENCED-ACTION-TOKEN-SECOND"])
+		with as_user(OWNER):
+			receipt = make_message(
+				self.conversation,
+				role="tool",
+				tool_name="submit_doc",
+				tool_status="pending",
+				tool_call_id=token,
+				tool_call_ids=token_ids,
+				pending_card=json.dumps({"token": token}),
+			)
+			# Keep the terminal receipt out of the newest page, so refresh exercises
+			# a new database read rather than the first shared page.
+			for n in range(8):
+				make_message(self.conversation, content=f"later turn {n}")
+
+		# The production close path commits around its row lock. Keep this case in
+		# the suite savepoint while still executing the real close/flip logic.
+		with (
+			patch.object(frappe.db, "commit"),
+			patch("jarvis.api.publish_realtime_tool_result"),
+			patch("jarvis.api._maybe_attach_artifact"),
+		):
+			self.assertTrue(agent_closure.settle_revoked_legacy_chat_card(token))
+
+		stored = frappe.db.get_value(
+			MESSAGE,
+			receipt,
+			["tool_status", "action_outcome", "pending_card", "tool_call_id", "tool_call_ids", "tool_result"],
+			as_dict=True,
+		)
+		self.assertEqual(stored.tool_status, "")
+		self.assertEqual(stored.action_outcome, "cancelled")
+		self.assertIsNone(stored.pending_card)
+		self.assertEqual(stored.tool_call_id, token)
+		self.assertEqual(stored.tool_call_ids, token_ids)
+		self.assertEqual(frappe.parse_json(stored.tool_result)["reason_code"], "safety_update")
+
+		# Owner history remains the reconciliation surface for its local card.
+		with as_user(OWNER):
+			owner_row = next(
+				row
+				for row in chat_api.get_conversation(self.conversation)["messages"]
+				if row["name"] == receipt
+			)
+		self.assertEqual(owner_row["tool_call_id"], token)
+		self.assertEqual(owner_row["tool_call_ids"], token_ids)
+
+		self.share()
+		all_rows = self.read()
+		shared_message = next(row for row in all_rows["messages"] if row["name"] == receipt)
+		reload = self.read(limit=1, refresh=json.dumps([receipt]))
+		shared_refresh = next(row for row in reload["refreshed"] if row["name"] == receipt)
+		self.assertNotIn(receipt, {row["name"] for row in reload["older_pending"]})
+		with as_user(RECIPIENT):
+			shared_detail = get_shared_tool_detail(receipt)
+
+		for row in (shared_message, shared_refresh, shared_detail):
+			self.assertIsNone(row["tool_call_id"])
+			self.assertIsNone(row["tool_call_ids"])
+			self.assertNotIn(token, payload(row))
+			self.assertNotIn("CLOSE-FENCED-ACTION-TOKEN-SECOND", payload(row))
+
+	def test_safety_update_receipt_detection_handles_dict_and_stored_json(self):
+		from jarvis.chat.share_projection import project_row
+
+		for tool_result in ({"reason_code": "safety_update"}, '{"reason_code":"safety_update"}'):
+			with self.subTest(tool_result=tool_result):
+				row = project_row(
+					{
+						"tool_result": tool_result,
+						"tool_call_id": "CLOSE-SAFETY-ID",
+						"tool_call_ids": '["CLOSE-SAFETY-ID"]',
+					},
+					self.conversation,
+				)
+				self.assertIsNone(row["tool_call_id"])
+				self.assertIsNone(row["tool_call_ids"])
+
+	def test_normal_terminal_receipt_keeps_action_identifiers_shared(self):
+		from jarvis.chat.sharing import get_shared_tool_detail
+
+		tool_call_id = "ordinary-auto-applied-id"
+		tool_call_ids = json.dumps([tool_call_id, "ordinary-auto-applied-id-2"])
+		with as_user(OWNER):
+			receipt = make_message(
+				self.conversation,
+				role="tool",
+				tool_name="submit_doc",
+				tool_status="completed",
+				action_outcome="auto_applied",
+				tool_call_id=tool_call_id,
+				tool_call_ids=tool_call_ids,
+				tool_result=json.dumps({"ok": True, "reason_code": "ordinary_completion"}),
+			)
+		self.share()
+		shared_message = next(row for row in self.read()["messages"] if row["name"] == receipt)
+		with as_user(RECIPIENT):
+			shared_detail = get_shared_tool_detail(receipt)
+
+		for row in (shared_message, shared_detail):
+			self.assertEqual(row["tool_call_id"], tool_call_id)
+			self.assertEqual(row["tool_call_ids"], tool_call_ids)
 
 	def test_projection_exact_allowlists_and_nested_secret_scrubbing(self):
 		from jarvis.chat.share_projection import project_conversation

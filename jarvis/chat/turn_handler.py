@@ -42,6 +42,7 @@ from jarvis import compat
 from jarvis.chat import agent_session_pool, empty_reply_recovery, seq_watermark, txn, vision
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
+from jarvis.chat.filebox_source import SourceLost
 from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription, pool_primary_model
@@ -126,6 +127,20 @@ def persist_rich_outputs(
 	media_urls landed on the terminal itself, poll the transcript for the
 	image that arrives moments later (see ``_harvest_post_yield_media``).
 	Never raises."""
+	# All four blocks below persist private Files/canvas metadata.  Do one server
+	# proof gate before any gateway fetch, generated-image pull, native MEDIA seed,
+	# or gateway media-block seed.  ``persist_canvases`` has its own gate because it
+	# is callable independently; this gate covers the later generated-media paths.
+	try:
+		from jarvis.chat.agent_scope import assert_fefo_message_artifact_scope
+
+		assert_fefo_message_artifact_scope(assistant_msg_name)
+	except Exception:
+		frappe.log_error(
+			title="chat worker: FEFO artifact persistence refused",
+			message=frappe.get_traceback(),
+		)
+		return
 	if yield_continuation and not media_rels and not media_urls:
 		try:
 			media_rels, media_urls = _harvest_post_yield_media(conversation_id, turn_start_ms)
@@ -1349,6 +1364,9 @@ def _assemble_prompt(
 	# vision_parts empty, so growth is the only signal that the send is big.
 	# Feeds _ack_timeout_s() below.
 	_prompt_chars_before_attachments = len(user_message)
+	from jarvis.chat.filebox_source import prepare_attachments as source_attachments
+
+	attachments = source_attachments(conv, attachments)
 	user_message, vision_parts = _prepare_attachments(user_message, attachments, vision_ok)
 	if binding is not None:
 		prefix, marker, suffix = user_message.partition(history_marker)
@@ -1497,27 +1515,6 @@ def handle_chat_send(payload: dict) -> None:
 		},
 	)
 
-	# Prompt assembly (shared with the Relay-Pump prepare job so the two paths
-	# emit a byte-identical prompt — clause order + attachment fencing live in
-	# ONE place, jarvis.chat.turn_handler.assemble_prompt). Pure reads + string
-	# building; agent_notes are READ (folded in) but cleared only after a proven
-	# delivery below.
-	_ap = assemble_prompt(
-		conv,
-		message_id=message_id,
-		conversation_id=conversation_id,
-		context=context,
-		attachments=attachments,
-		user=user,
-	)
-	settings = _ap.settings
-	chat_user = _ap.chat_user
-	user_message = _ap.user_message
-	vision_parts = _ap.vision_parts
-	inlined_prompt_chars = _ap.inlined_prompt_chars
-	drained_notes = _ap.drained_notes
-	drained_ids = _ap.drained_ids
-	from jarvis.chat import agent_notes
 	# The /think directive rides the chat_send ``thinking`` param, so
 	# user_message stays unprefixed and the OpenAI prefix cache the warm-up
 	# populates is never busted by a varying prefix.
@@ -1545,6 +1542,28 @@ def handle_chat_send(payload: dict) -> None:
 		_publish_to_user(user, payload)
 
 	try:
+		# Prompt assembly (shared with the Relay-Pump prepare job so the two paths
+		# emit a byte-identical prompt — clause order + attachment fencing live in
+		# ONE place, jarvis.chat.turn_handler.assemble_prompt). Pure reads + string
+		# building; agent_notes are READ (folded in) but cleared only after a proven
+		# delivery below.
+		_ap = assemble_prompt(
+			conv,
+			message_id=message_id,
+			conversation_id=conversation_id,
+			context=context,
+			attachments=attachments,
+			user=user,
+		)
+		settings = _ap.settings
+		chat_user = _ap.chat_user
+		user_message = _ap.user_message
+		vision_parts = _ap.vision_parts
+		inlined_prompt_chars = _ap.inlined_prompt_chars
+		drained_notes = _ap.drained_notes
+		drained_ids = _ap.drained_ids
+		from jarvis.chat import agent_notes
+
 		tool_msg_by_call_id: dict[str, str] = {}
 		batcher = _AssistantContentBatcher(assistant_msg.name)
 		# Own import (not the earlier best-effort one at bind_turn_message): the
@@ -2020,6 +2039,11 @@ def handle_chat_send(payload: dict) -> None:
 				message=frappe.get_traceback(),
 			)
 
+	except SourceLost as e:
+		_publish_run_error(str(e), changed_data=False, code="source_unavailable")
+		_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
+		_admission_settle(run_id, "errored", str(e))
+		return
 	except Exception as e:
 		# Last-resort backstop. Any exception that wasn't an
 		# AgentUnreachableError (e.g. cryptography.InvalidKey from
