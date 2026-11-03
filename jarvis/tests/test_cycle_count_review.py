@@ -2193,6 +2193,114 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 		finally:
 			frappe.set_user("Administrator")
 
+	def test_stock_variance_failed_writeback_rolls_back_only_its_output(self):
+		from jarvis.chat import agent_runs, stock_variance_evaluation
+		from jarvis.tools import record_agent_run
+
+		prior = frappe.get_doc({"doctype": "ToDo", "description": "Prior work survives"}).insert()
+		created = []
+
+		def create_output(*args, **kwargs):
+			doc = frappe.get_doc({"doctype": "ToDo", "description": "Uncommitted report output"}).insert()
+			created.append(doc.name)
+			return doc.name
+
+		with (
+			patch.object(stock_variance_evaluation, "_store_evidence"),
+			patch.object(agent_runs, "_visibility_owner", return_value=None),
+			patch.object(agent_runs, "persist_agent_dashboard", side_effect=create_output),
+			patch.object(record_agent_run, "record_agent_run", side_effect=RuntimeError("writeback failed")),
+			self.assertRaisesRegex(RuntimeError, "writeback failed"),
+		):
+			stock_variance_evaluation._persist(
+				frappe._dict(name="RUN-ROLLBACK"),
+				frappe._dict(activation_state="live"),
+				{},
+				{},
+				{},
+				html="<p>Review</p>",
+			)
+		self.assertTrue(frappe.db.exists("ToDo", prior.name))
+		self.assertEqual(len(created), 1)
+		self.assertFalse(frappe.db.exists("ToDo", created[0]))
+
+	def test_stock_variance_server_reads_a_real_count_without_stock_writes(self):
+		from jarvis.chat import cycle_count_entry, stock_variance_evaluation
+		from jarvis.tools import _delegate_capability
+
+		approved = self._plan()
+		frappe.set_user(self.counter)
+		count = cycle_count_entry.record_counts(
+			approved.name,
+			frappe.utils.now(),
+			[{"item_code": self.item, "counted_qty": "3"}],
+			"stockaudit" + frappe.generate_hash(length=24),
+		)["saved"][0]["name"]
+		frappe.set_user("Administrator")
+		# This run has complete stock-read access; permission-slice refusal is
+		# covered separately by the source and dispatch boundary regressions.
+		frappe.get_doc("User", self.stock_variance_user).add_roles("Stock Manager")
+		scope = {
+			"company": self.company,
+			"record_scope": {"doctype": "Warehouse", "name": self.warehouse},
+			"from_date": frappe.utils.today(),
+			"to_date": frappe.utils.today(),
+			"report_date": frappe.utils.today(),
+			"execution_user": self.stock_variance_user,
+		}
+		stock_before = {
+			"ledger": frappe.db.count("Stock Ledger Entry", {"company": self.company}),
+			"reconciliations": frappe.db.count("Stock Reconciliation", {"company": self.company}),
+			"quantity": frappe.db.get_value(
+				"Bin", {"warehouse": self.warehouse, "item_code": self.item}, "actual_qty"
+			),
+		}
+		with self._delegate_run(stock_variance_evaluation.AGENT, scope) as ctx:
+			frappe.db.set_value(
+				"Jarvis Agent Run",
+				ctx.run,
+				{
+					"assessment_config_json": frappe.as_json({"stock_variance": {"reviewer": self.reviewer}}),
+					"capability_contract": _delegate_capability.CONTRACT_SNAPSHOT,
+					"capability_nature": "auditor",
+					"tools_allow_json": frappe.as_json(["jarvis__run_stock_variance_evaluation", "message"]),
+					"capability_writes_json": "[]",
+				},
+				update_modified=False,
+			)
+			from jarvis.chat import agent_scheduler
+
+			agent_scheduler._stamp_scope_and_watermark(
+				ctx.run,
+				frappe.get_doc("Jarvis Agent Installation", ctx.installation),
+				self.stock_variance_user,
+				record_scope_supported=True,
+				resolved_scope=scope,
+			)
+			result = stock_variance_evaluation.run_stock_variance_evaluation()
+			self.assertEqual(result["status"], "completed", result)
+			self.assertEqual(result["result_state"], "evaluated_clean", result)
+			self.assertTrue(result["dashboard"], result)
+			self.assertGreater(result["findings_count"], 0, result)
+			with patch.object(
+				stock_variance_evaluation, "capture", side_effect=AssertionError("retry recaptured source")
+			):
+				self.assertEqual(stock_variance_evaluation.run_stock_variance_evaluation(), result)
+			self.assertEqual(frappe.db.count("Jarvis Physical Count", {"name": count, "docstatus": 1}), 1)
+			self.assertEqual(
+				frappe.db.count("Stock Ledger Entry", {"company": self.company}), stock_before["ledger"]
+			)
+			self.assertEqual(
+				frappe.db.count("Stock Reconciliation", {"company": self.company}),
+				stock_before["reconciliations"],
+			)
+			self.assertEqual(
+				frappe.db.get_value(
+					"Bin", {"warehouse": self.warehouse, "item_code": self.item}, "actual_qty"
+				),
+				stock_before["quantity"],
+			)
+
 	def test_endpoints_keep_the_server_token_through_insert_submit_and_cancel(self):
 		from jarvis.chat import cycle_count_entry
 
@@ -3549,6 +3657,7 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			"company": self.company,
 			"from_date": today,
 			"to_date": today,
+			"report_date": today,
 			"record_scope": {"doctype": "Warehouse", "name": self.warehouse},
 		}
 		try:
@@ -3599,6 +3708,14 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 					False,
 					"a run scope for a different date leaked this count",
 				)
+				previous_day = frappe.utils.getdate(frappe.utils.add_days(today, -1)).isoformat()
+				set_scope({**scope, "report_date": previous_day})
+				self._assert_physical_count_readable(
+					self.stock_variance_user,
+					fact_name,
+					False,
+					"a report cutoff before the count leaked this source fact",
+				)
 				set_scope(
 					{
 						**scope,
@@ -3620,6 +3737,16 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 				)
 
 				set_scope(scope)
+				frappe.db.set_value("Warehouse", self.warehouse, "disabled", 1, update_modified=False)
+				try:
+					self._assert_physical_count_readable(
+						self.stock_variance_user,
+						fact_name,
+						False,
+						"a disabled Warehouse leaked a source fact to the delegate",
+					)
+				finally:
+					frappe.db.set_value("Warehouse", self.warehouse, "disabled", 0, update_modified=False)
 				session = frappe.db.get_value(
 					"Jarvis Chat Session",
 					{"session_key": delegate.session_key},
