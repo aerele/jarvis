@@ -23,15 +23,15 @@ SESSION = "agent:test:j2"
 class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
 		super().setUp()
-		# The retired-without-key path queues a key fetch, and a wrong key queues the
-		# self-heal sync (both go through admin): never for real.
-		for target in (
-			"jarvis.onboarding.schedule_callback_key_fetch",
-			"jarvis._plugin_auth._request_key_resync",
-		):
+		# The retired-without-key path and a wrong key both queue the self-heal sync
+		# (through admin): never for real.
+		for target in ("jarvis._plugin_auth._request_key_resync",):
 			mocked = patch(target)
 			mocked.start()
 			self.addCleanup(mocked.stop)
+		resync = patch("jarvis.onboarding.request_key_resync")
+		self.resync = resync.start()
+		self.addCleanup(resync.stop)
 		self.settings = frappe.get_single(SETTINGS)
 		set_settings_password(self.settings, "agent_token", OWNER, update_modified=False)
 		clear_settings_password(self.settings, "callback_key")
@@ -105,11 +105,42 @@ class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertEqual(_plugin_auth._callback_key(), CALLBACK)
 		self.assertEqual(_plugin_auth._agent_token(), OWNER)
 
-	def test_retired_payload_clears_agent_token(self):
+	def test_retired_payload_with_a_key_clears_agent_token(self):
 		set_settings_password(self.settings, "callback_key", CALLBACK)
 		onboarding.write_connection({"owner_key_retired": True})
 		self.assertEqual(_plugin_auth._agent_token(), "")
 		self.assertEqual(_plugin_auth._callback_key(), CALLBACK)
+		self.resync.assert_not_called()
+
+	def test_retired_payload_carrying_the_key_clears_agent_token(self):
+		onboarding.write_connection({"owner_key_retired": True, "callback_key": CALLBACK})
+		self.assertEqual(_plugin_auth._agent_token(), "")
+		self.assertEqual(_plugin_auth._callback_key(), CALLBACK)
+		self.resync.assert_not_called()
+
+	def test_retired_payload_without_a_key_clears_agent_token_and_queues_resync(self):
+		"""Fail closed: the old owner token also sits in every pre-retirement copy of
+		the site, so it must stop verifying even with no callback key stored. The key
+		is fetched by the throttled resync (and every later plugin call re-queues it)."""
+		onboarding.write_connection({"owner_key_retired": True})
+		self.assertEqual(_plugin_auth._agent_token(), "")
+		self.assertEqual(_plugin_auth._callback_key(), "")
+		self.resync.assert_called_once_with()
+
+	def test_retired_payload_with_a_malformed_key_clears_agent_token_and_queues_resync(self):
+		onboarding.write_connection({"owner_key_retired": True, "callback_key": "short"})
+		self.assertEqual(_plugin_auth._agent_token(), "")
+		self.resync.assert_called_once_with()
+
+	def test_retired_payload_inside_a_key_sync_queues_no_nested_job(self):
+		with (
+			patch.object(frappe.flags, "jarvis_key_fetch", True, create=True),
+			patch("jarvis.onboarding._shorten_key_resync_throttle") as shorten,
+		):
+			onboarding.write_connection({"owner_key_retired": True})
+		self.assertEqual(_plugin_auth._agent_token(), "")
+		self.resync.assert_not_called()
+		shorten.assert_called_once_with()
 
 	def test_not_retired_payload_keeps_agent_token(self):
 		onboarding.write_connection({"owner_key_retired": False})
