@@ -2,6 +2,8 @@
 Settings, and thin server wrappers the onboarding page calls (so the browser
 never holds admin creds). admin_client returns already-unwrapped admin data."""
 
+import hashlib
+import hmac
 import json
 import re
 import unicodedata
@@ -22,6 +24,7 @@ from jarvis._cache_latch import claim_once
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
+	AdminSiteIsCopyError,
 	AdminUnreachableError,
 	AdminValidationError,
 )
@@ -236,8 +239,8 @@ def write_connection(data: dict) -> None:
 			if data.get("agent_token"):
 				_store_agent_token(s, data["agent_token"])
 		if write_conn:
-			if data.get("callback_key"):
-				_store_callback_key(data["callback_key"])
+			if data.get("callback_key") and _store_callback_key(data["callback_key"]):
+				_queue_callback_key_confirm()
 			if retiring:
 				_retire_owner_token(s)
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
@@ -287,6 +290,8 @@ def _store_agent_token(settings, token: str) -> None:
 
 
 _CALLBACK_KEY_RE = re.compile(r"[0-9a-f]{64}")
+# Fixed label of the key-confirmation digest (contract C1; admin uses the same bytes).
+_CONFIRM_LABEL = b"jarvis-callback-key-confirm:v1"
 
 
 def _store_callback_key(key: str) -> bool:
@@ -300,12 +305,61 @@ def _store_callback_key(key: str) -> bool:
 	return True
 
 
-def has_callback_key() -> bool:
+def callback_key_digest(key: str) -> str:
+	"""What the site tells admin to prove it stored the key: an HMAC of a fixed label
+	keyed with the callback key. Admin recomputes it from its own copy and compares;
+	the key itself never leaves this site in the confirmation."""
+	return hmac.new(key.encode("ascii"), _CONFIRM_LABEL, hashlib.sha256).hexdigest()
+
+
+def _queue_callback_key_confirm() -> None:
+	"""Tell admin, after this transaction commits, that the key was stored. Admin treats
+	the confirmation as "this site can verify plugin calls" and gates enforce and the
+	owner-key retirement on it. Sent on every store (admin stamps once, idempotent), so
+	a confirmation lost to an unreachable admin is re-sent by the next proof-backed
+	sync. Never inline (this runs under the Jarvis Settings row lock) and never raises."""
+	try:
+		frappe.enqueue(
+			"jarvis.onboarding.confirm_callback_key_job",
+			queue="short",
+			job_id=f"jarvis_callback_key_confirm:{frappe.local.site}",
+			deduplicate=True,
+			enqueue_after_commit=True,
+		)
+	except Exception:
+		frappe.log_error(title="callback key confirm: enqueue failed", message=frappe.get_traceback())
+
+
+def confirm_callback_key_job() -> None:
+	"""The confirmation job. An admin that predates the endpoint answers Frappe's
+	"Failed to get method" (417); that is not an error, the site simply never becomes
+	enforce-ready. A site that is a flagged copy never confirms. Failures are logged
+	with the traceback only: no frame locals, which hold the key."""
+	key = _stored_callback_key()
+	if not key:
+		return
+	try:
+		admin_client.confirm_callback_key(callback_key_digest(key))
+	except AdminSiteIsCopyError:
+		return
+	except AdminValidationError as exc:
+		if not admin_client.is_method_not_found(exc):
+			frappe.log_error(title="callback key confirm failed", message=frappe.get_traceback())
+	except Exception:
+		frappe.log_error(title="callback key confirm failed", message=frappe.get_traceback())
+
+
+def _stored_callback_key() -> str:
 	from frappe.utils.password import get_decrypted_password
 
-	return bool(
+	return (
 		get_decrypted_password("Jarvis Settings", "Jarvis Settings", "callback_key", raise_exception=False)
+		or ""
 	)
+
+
+def has_callback_key() -> bool:
+	return bool(_stored_callback_key())
 
 
 def _retire_owner_token(s) -> None:
