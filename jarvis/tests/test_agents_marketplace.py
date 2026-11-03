@@ -462,6 +462,18 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	# (d) catalog sync idempotency
 	# ------------------------------------------------------------------ #
+	def test_stock_review_listing_tracks_the_published_native_bundle(self):
+		# The merged private bundle is 0.3.2. An old listing version would leave
+		# marketplace update checks advertising the earlier evaluator release.
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(frappe.db.get_value(LISTING, "negative-stock-valuation-auditor", "version"), "0.3.2")
+		entry = next(
+			a
+			for a in agent_catalog._load_registry().get("agents") or []
+			if a.get("agent_slug") == "negative-stock-valuation-auditor"
+		)
+		self.assertIs(entry.get("supports_record_scope"), True)
+
 	def test_sync_agent_listings_idempotent(self):
 		agent_catalog.sync_agent_listings()
 		count1 = frappe.db.count(LISTING)
