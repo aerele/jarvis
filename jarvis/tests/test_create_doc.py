@@ -68,6 +68,8 @@ class TestCreateDocValidation(FrappeTestCase):
 				meta = frappe._dict(fields=[], get_field=lambda name: None)
 
 				def __init__(self):
+					self.doctype = dt
+					self.docstatus = 0
 					self._values = {}
 
 				def set(self, f, v):

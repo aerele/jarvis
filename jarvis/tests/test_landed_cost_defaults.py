@@ -1,4 +1,4 @@
-"""LCV creation fetches the same omitted vendor amounts as ERPNext's form."""
+"""Native v15 receipt and service-invoice fixtures for landed-cost tools."""
 
 import unittest
 from unittest.mock import patch
@@ -8,13 +8,14 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import nowdate
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.lcv import SOURCE_INVOICE
 from jarvis.tests import _erpnext_masters as masters
 from jarvis.tools.create_doc import build_doc, create_doc
 from jarvis.tools.preview_doc import preview_doc
 
 
 class LandedCostFixtures(FrappeTestCase):
-	requires_vendor_amounts = True
+	requires_vendor_amounts = False
 
 	@classmethod
 	def setUpClass(cls):
@@ -29,8 +30,11 @@ class LandedCostFixtures(FrappeTestCase):
 		cls.company = masters.ensure_ledger_company()
 		masters.ensure_fiscal_years(nowdate())
 		masters.ensure_item_group_and_uom()
-		cls.stock = cls.make_item("_JLCV Stock", 1, "84821020")
-		cls.service = cls.make_item("_JLCV Service", 0, "996799")
+		# Real multi-connection probes commit their own fixtures. Give each test
+		# class separate stock so those earlier ledgers cannot affect this suite.
+		suffix = frappe.generate_hash(length=7)
+		cls.stock = cls.make_item("_JLCV Stock " + suffix, 1, "84821020")
+		cls.service = cls.make_item("_JLCV Service " + suffix, 0, "996799")
 		group = "_JLCV Suppliers"
 		if not frappe.db.exists("Supplier Group", group):
 			frappe.get_doc({"doctype": "Supplier Group", "supplier_group_name": group}).insert()
@@ -38,7 +42,7 @@ class LandedCostFixtures(FrappeTestCase):
 			frappe.get_doc(
 				{
 					"doctype": "Supplier",
-					"supplier_name": "_JLCV Vendor",
+					"supplier_name": "_JLCV Vendor " + suffix,
 					"supplier_group": group,
 					"supplier_type": "Company",
 					"country": "Maldives",
@@ -89,6 +93,8 @@ class LandedCostFixtures(FrappeTestCase):
 			{
 				"doctype": "Purchase Receipt",
 				"company": self.company,
+				"currency": company.default_currency,
+				"conversion_rate": 1,
 				"supplier": self.supplier,
 				"posting_date": nowdate(),
 				"set_posting_time": 1,
@@ -143,10 +149,6 @@ class LandedCostFixtures(FrappeTestCase):
 			},
 		)
 		voucher.get_items_from_purchase_receipts()
-		rows = [{"vendor_invoice": invoice.name} for invoice in invoices]
-		if amounts is not None:
-			for row, amount in zip(rows, amounts, strict=True):
-				row["amount"] = amount
 		return {
 			"company": self.company,
 			"posting_date": nowdate(),
@@ -174,16 +176,44 @@ class LandedCostFixtures(FrappeTestCase):
 			"taxes": [
 				{
 					"expense_account": self.expense,
-					"cost_center": self.cost_center,
 					"description": "Freight",
-					"amount": charge if charge is not None else sum(i.base_total for i in invoices),
+					"amount": charge
+					if charge is not None and len(invoices) == 1
+					else (amounts[idx] if amounts is not None else invoice.base_net_total),
+					SOURCE_INVOICE: invoice.name,
 				}
+				for idx, invoice in enumerate(invoices)
 			],
-			"vendor_invoices": rows,
 		}
+
+	def claimed_cost(self):
+		from jarvis.tools._lcv_source_tax import _prior_claims
+
+		return sum((_prior_claims(self.invoice.name, None, False) or {}).values())
 
 
 class TestLandedCostDefaults(LandedCostFixtures):
+	# These native vendor-table tests stay separate from the v15 adapter fixtures.
+	requires_vendor_amounts = True
+
+	def values(self, invoices=None, amounts=None, charge=None):
+		invoices = invoices or [self.invoice]
+		values = super().values(invoices, amounts, charge)
+		rows = [{"vendor_invoice": invoice.name} for invoice in invoices]
+		if amounts is not None:
+			for row, amount in zip(rows, amounts, strict=True):
+				row["amount"] = amount
+		values["vendor_invoices"] = rows
+		values["taxes"] = [
+			{
+				"expense_account": self.expense,
+				"cost_center": self.cost_center,
+				"description": "Freight",
+				"amount": charge if charge is not None else sum(i.base_total for i in invoices),
+			}
+		]
+		return values
+
 	def test_preview_and_save_fetch_company_currency_costs(self):
 		frappe.set_user("Administrator")
 		invoices = [self.invoice, self.make_invoice(80), self.make_invoice(2, "USD", 83.4)]
