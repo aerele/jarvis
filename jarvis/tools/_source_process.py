@@ -102,12 +102,13 @@ def _diagnostic(kind, reason, status):
 def check_exit(completed, kind, resource_error):
 	if not completed.returncode:
 		return
-	stderr = getattr(completed, "stderr", "") or ""
-	if completed.returncode in (-signal.SIGKILL, -signal.SIGXCPU, -signal.SIGALRM) or "MemoryError" in stderr:
+	# The parent deliberately never captures parser stderr: an upload can induce
+	# unbounded library warnings there. The fixed stdout protocol describes normal
+	# child failures, while signal exits are the only trustworthy resource marker.
+	if completed.returncode in (-signal.SIGKILL, -signal.SIGXCPU, -signal.SIGALRM):
 		_diagnostic(kind, "resource_limit", completed.returncode)
 		raise InvalidArgumentError(resource_error)
-	reason = "import_failure" if "ImportError" in stderr or "ModuleNotFoundError" in stderr else "worker_exit"
-	_diagnostic(kind, reason, completed.returncode)
+	_diagnostic(kind, "worker_exit", completed.returncode)
 	raise InvalidArgumentError(FAILED) from None
 
 

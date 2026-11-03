@@ -23,6 +23,7 @@
   "decided_by",
   "skill_docname",
   "run_id",
+  "agent_close_fences",
   "actor",
   "collaboration_binding",
   "collaboration_grant_revision",
@@ -81,7 +82,7 @@
    "fieldname": "reason_code",
    "fieldtype": "Select",
    "label": "Reason Code",
-   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired\nuse_existing\nstuck"
+   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired\nuse_existing\nstuck\nsafety_update"
   },
   {
    "description": "Fixed bench text only; never tool args or error text.",
@@ -168,6 +169,15 @@
    "fieldtype": "Data",
    "label": "Run ID",
    "search_index": 1
+  },
+  {
+   "description": "Server-only normalized close-fence generations for a generic chat confirmation.",
+   "fieldname": "agent_close_fences",
+   "fieldtype": "JSON",
+   "hidden": 1,
+   "label": "Agent Close Fences",
+   "no_copy": 1,
+   "read_only": 1
   },
   {
    "fieldname": "actor",
