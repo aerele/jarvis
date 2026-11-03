@@ -116,7 +116,9 @@ class TestStoredReportPermissions(unittest.TestCase):
 					"is_private": 1,
 				}
 			)
-			self.assertEqual(frappe.get_doc("File", file.name).get_content(encodings=()), compressed)
+			from jarvis.tools._file_source import read_bounded
+
+			self.assertEqual(read_bounded(frappe.get_doc("File", file.name)), compressed)
 			frappe.db.commit()
 			frappe.set_user(email)
 			initial = query_report(run.name)
@@ -257,6 +259,37 @@ class TestStoredReportGate(unittest.TestCase):
 				with self.assertRaises(PermissionDeniedError) as caught:
 					self.source()._gate()
 				self.assertNotIn("PRIVATE-FILTER-VALUE", str(caught.exception))
+
+	def test_script_link_permissions_with_the_v15_framework_signature(self):
+		module = "jarvis.tools._report_query_source"
+		field = {"fieldname": "customer", "fieldtype": "Link", "options": "Customer"}
+		for readable, selectable in ((True, False), (False, True), (False, False)):
+			checked = []
+
+			def saved_filter_gate(report_name, filters=None, user=None):
+				checked.append((report_name, filters, user))
+
+			def permission(*, doctype, ptype, doc, user):
+				self.assertEqual(
+					(doctype, doc, user), ("Customer", "PRIVATE-FILTER-VALUE", "report-reader@example.test")
+				)
+				return readable if ptype == "read" else selectable
+
+			with (
+				self.subTest(readable=readable, selectable=selectable),
+				patch(module + ".get_report_doc", return_value=frappe._dict(name="Stored report")),
+				patch(module + ".get_report_filters", return_value={"filters": [field]}),
+				patch(module + ".validate_filters_permissions", saved_filter_gate),
+				patch("frappe.has_permission", side_effect=permission),
+			):
+				source = self.source()
+				if readable or selectable:
+					source._gate()
+				else:
+					with self.assertRaises(PermissionDeniedError) as caught:
+						source._gate()
+					self.assertNotIn("PRIVATE-FILTER-VALUE", str(caught.exception))
+				self.assertEqual(checked, [("Stored report", source.filters, source.user)])
 
 	def test_disabled_report_has_a_safe_argument_error(self):
 		with patch(
