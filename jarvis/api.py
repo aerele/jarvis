@@ -398,7 +398,7 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
-				f"unknown session: {session_key}",
+				"unknown session",
 			)
 		frappe.local.jarvis_call_tool_user = plugin_user
 		enabled = frappe.db.get_value("User", plugin_user, "enabled")
@@ -453,6 +453,15 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 
 		if session_device_is_stale(row_device, current_device):
 			frappe.local.response.http_status_code = 401
+			from jarvis.tools import _delegate_capability
+
+			with impersonate(plugin_user):
+				stale_cap = _delegate_capability.resolve(session_key)
+			if isinstance(stale_cap, dict) and stale_cap.get("agent") == "ticket-triage-operator":
+				return _error(
+					"AuthenticationError",
+					"Private Ticket Triage connection is out of date. Start a new review.",
+				)
 			# jarvis #712: this rejection is deliberate (it bounds a leaked
 			# session key's replay window to the next re-pair) and MUST NOT
 			# self-heal here - that would defeat the check. But left as a bare
@@ -535,7 +544,7 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 
 		if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
 			frappe.local.response.http_status_code = 403
-			return _error("PermissionError", "Private payroll evidence requires private audit output.")
+			return _error("PermissionError", "Private review evidence requires private audit output.")
 		if result_mode is not None and (
 			result_mode != _private_output.MODE or tool not in _private_output.TOOLS or shared_session
 		):
@@ -546,7 +555,9 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 			from jarvis.chat.collaboration_dispatch import dispatch
 
 			return dispatch(session_key, tool, args, (_get_header("X-Jarvis-Tool-Call-Id") or "").strip())
-		return _dispatch_from_session(plugin_user, session_key, tool, args, result_mode=result_mode)
+		if result_mode is not None:
+			return _dispatch_from_session(plugin_user, session_key, tool, args, result_mode=result_mode)
+		return _dispatch_from_session(plugin_user, session_key, tool, args)
 
 	# Standard Frappe auth path - Guest is rejected; everything else dispatches
 	# under the current Frappe session user.
@@ -730,6 +741,12 @@ def _dispatch_from_session(
 			# #1062 step timeline further down, which needs the run's name, owner and
 			# status. A non-delegate session resolves to None and both are no-ops.
 			cap = _delegate_capability.resolve(session_key)
+			if isinstance(cap, dict) and cap.get("agent") == "ticket-triage-operator":
+				from jarvis.chat import ticket_triage
+
+				return ticket_triage.dispatch_private_call(
+					session_key, tool, args, cap=cap, result_mode=result_mode
+				)
 			# A denied Deposit call can still carry source-bearing arguments. Enable
 			# the fixed safe projection before every denial, receipt, audit, and step
 			# branch below.
@@ -842,7 +859,7 @@ def _dispatch_from_session(
 					agent_scheduler.fail_run(denial["run"], denial["run_error"])
 				return result
 			if tool in _private_output.PRIVATE_SOURCE_TOOLS and result_mode != _private_output.MODE:
-				message = "Private payroll evidence requires private audit output."
+				message = "Private review evidence requires private audit output."
 				result = _error("InvalidArgumentError", message)
 				audit.record(
 					tool=tool,
@@ -856,14 +873,15 @@ def _dispatch_from_session(
 				)
 				return result
 			if result_mode is not None and not _private_output.allowed(result_mode, tool, cap):
-				message = "Private audit output requires an active payroll delegate contract."
-				result = _error("CapabilityDeniedError", message)
+				result = _error(
+					"CapabilityDeniedError", "Private audit output requires an active delegate contract."
+				)
 				audit.record(
 					tool=tool,
 					args={},
 					ok=False,
 					error_code="CapabilityDeniedError",
-					error_message=message,
+					error_message="Private audit output requires an active delegate contract.",
 				)
 				_persist_and_publish_tool_call(
 					session_key=session_key, tool=tool, args={}, result=result, tool_call_id=tool_call_id
@@ -1009,6 +1027,7 @@ def _dispatch_from_session(
 						shown=event["shown"],
 						total=event["total"],
 					)
+				receipt = result
 			_persist_and_publish_tool_call(
 				session_key=session_key,
 				tool=tool,
