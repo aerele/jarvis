@@ -81,7 +81,9 @@ class TestPreparedReportIntegration(unittest.TestCase):
 			]
 			company = frappe.db.get_value("Company", {}, "name")
 			cols = [
-				{"fieldname": "party_type", "label": "Party Type", "fieldtype": "Link", "options": "DocType"},
+				# v15 Accounts Receivable uses Select for this Dynamic Link discriminator.
+				# The Customer target still has the read and revocation checks below.
+				{"fieldname": "party_type", "label": "Party Type", "fieldtype": "Select"},
 				{
 					"fieldname": "party",
 					"label": "Customer",
