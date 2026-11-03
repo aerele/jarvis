@@ -503,10 +503,13 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 		stored = frappe.get_single(SETTINGS).get_password("agent_token", raise_exception=False)
 		self.assertEqual(stored, "keep-me")
 
-	def test_retired_without_key_queues_the_fetch_after_commit(self):
+	def test_retired_without_key_queues_the_resync_after_commit(self):
 		"""write_connection holds the Jarvis Settings row lock: the admin round trip must
-		not run inside it."""
+		not run inside it. The retire-time fetch is the throttled key resync."""
 		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
+		gate = frappe.cache().make_key(onboarding._KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site)
+		frappe.cache().delete(gate)
+		self.addCleanup(frappe.cache().delete, gate)
 		with (
 			patch("frappe.enqueue") as enq,
 			patch("jarvis.onboarding.admin_client.get_connection") as get_conn,
@@ -514,7 +517,7 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 			onboarding.write_connection({"owner_key_retired": True})
 		get_conn.assert_not_called()
 		enq.assert_called_once()
-		self.assertEqual(enq.call_args.args[0], "jarvis.onboarding.fetch_callback_key_if_missing")
+		self.assertEqual(enq.call_args.args[0], "jarvis.onboarding.run_key_resync")
 		self.assertTrue(enq.call_args.kwargs["enqueue_after_commit"])
 		self.assertTrue(enq.call_args.kwargs["deduplicate"])
 		self.assertTrue(enq.call_args.kwargs["job_id"])
@@ -525,7 +528,7 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 			onboarding.write_connection({"owner_key_retired": True})
 		enq.assert_not_called()
 
-	def test_the_queued_fetch_runs_a_proof_backed_sync(self):
+	def test_the_resync_job_runs_a_proof_backed_sync(self):
 		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
 		calls = []
 
@@ -537,7 +540,7 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 			patch("frappe.enqueue") as enq,
 			patch("jarvis.onboarding.admin_client.get_connection", side_effect=_conn),
 		):
-			onboarding.fetch_callback_key_if_missing()
+			onboarding.run_key_resync()
 		self.assertEqual(len(calls), 1)
 		self.assertRegex(calls[0]["proof_nonce"], HEX32)
 		enq.assert_not_called()
@@ -545,7 +548,7 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 			frappe.get_single(SETTINGS).get_password("callback_key", raise_exception=False), CALLBACK
 		)
 
-	def test_the_queued_fetch_does_not_loop_when_no_key_returned(self):
+	def test_the_resync_job_does_not_loop_when_no_key_returned(self):
 		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
 		with (
 			patch("frappe.enqueue") as enq,
@@ -554,7 +557,7 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 				return_value={"agent_url": "ws://x.invalid", "owner_key_retired": True},
 			) as get_conn,
 		):
-			onboarding.fetch_callback_key_if_missing()
+			onboarding.run_key_resync()
 		self.assertEqual(get_conn.call_count, 1)
 		enq.assert_not_called()
 

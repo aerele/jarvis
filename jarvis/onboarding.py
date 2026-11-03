@@ -239,14 +239,7 @@ def write_connection(data: dict) -> None:
 			if data.get("callback_key"):
 				_store_callback_key(data["callback_key"])
 			if retiring:
-				# Admin retired the gateway owner key: the plugin now signs with the
-				# callback key only, so the stored owner token must stop verifying.
-				clear_settings_password(s, "agent_token")
-				s.db_set("agent_token_issued_at", None)
-				# Retired with no callback key stored: tool calls 503 until it
-				# arrives, so fetch it with a proof. Never inline: this runs under the
-				# Jarvis Settings row lock, and the fetch is an admin round trip.
-				schedule_callback_key_fetch()
+				_retire_owner_token(s)
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them. Wider than
 	# ``new_admin_login`` above on purpose - a standalone customer_password (the
@@ -315,33 +308,27 @@ def has_callback_key() -> bool:
 	)
 
 
-def fetch_callback_key_if_missing() -> None:
-	"""Run a proof-backed sync when no callback key is stored. The key only ever
-	arrives through ``write_connection`` (behind the tenant-authority guard), never
-	from a pairing response. Best effort and not re-entrant: a sync that returns no
-	key does not start another."""
+def _retire_owner_token(s) -> None:
+	"""Admin retired the gateway owner key: the plugin now signs with the callback key
+	only, so the stored owner token must stop verifying. Always, even with no callback
+	key stored: the old owner token also sits in every copy of this site made before
+	the retirement, and a site that kept it would accept plugin calls signed by a copy.
+	Failing closed costs availability only until the key arrives, so without one a
+	throttled proof-backed sync fetches it (the 503 path of every plugin call re-queues
+	it). Never inline: this runs under the Jarvis Settings row lock, and the fetch is
+	an admin round trip."""
+	from jarvis._password_utils import clear_settings_password
+
+	clear_settings_password(s, "agent_token")
+	s.db_set("agent_token_issued_at", None)
 	if has_callback_key():
 		return
-	_best_effort_key_sync()
-
-
-def schedule_callback_key_fetch() -> None:
-	"""``fetch_callback_key_if_missing`` as a background job that starts after the
-	current transaction commits, so no lock is held across the admin call. Deduplicated
-	per site; skipped inside a key sync already running (its own write must not queue
-	another) and when a key is already stored. Never raises."""
-	if getattr(frappe.flags, "jarvis_key_fetch", False) or has_callback_key():
+	if getattr(frappe.flags, "jarvis_key_fetch", False):
+		# Inside a key sync that returned no key: no nested job, but let the next
+		# plugin call retry within two minutes instead of ten.
+		_shorten_key_resync_throttle()
 		return
-	try:
-		frappe.enqueue(
-			"jarvis.onboarding.fetch_callback_key_if_missing",
-			queue="short",
-			job_id=f"jarvis_callback_key_fetch:{frappe.local.site}",
-			deduplicate=True,
-			enqueue_after_commit=True,
-		)
-	except Exception:
-		frappe.log_error(title="callback key fetch: enqueue failed", message=frappe.get_traceback())
+	request_key_resync()
 
 
 KEY_RESYNC_THROTTLE_S = 600
@@ -423,20 +410,6 @@ def resync_callback_key_after_pairing() -> None:
 		)
 	except Exception:
 		frappe.log_error(title="callback key resync: enqueue failed", message=frappe.get_traceback())
-
-
-def _best_effort_key_sync() -> None:
-	if getattr(frappe.flags, "jarvis_key_fetch", False):
-		return
-	frappe.flags.jarvis_key_fetch = True
-	try:
-		_sync_connection(timeout_s=8, prove=True)
-	except Exception:
-		# message= on purpose: without it Frappe dumps every frame's locals, and these
-		# frames hold the admin Authorization header and the connection payload.
-		frappe.log_error(title="callback key fetch failed", message=frappe.get_traceback())
-	finally:
-		frappe.flags.jarvis_key_fetch = False
 
 
 @frappe.whitelist(methods=["POST"])
