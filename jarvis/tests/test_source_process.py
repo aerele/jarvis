@@ -13,13 +13,36 @@ from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from zipfile import ZIP_DEFLATED, ZipFile
+
+from openpyxl import Workbook
+from openpyxl.styles import numbers
 
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools import _source_process as shared
+from jarvis.tools._file_scan_process import scan_file
 from jarvis.tools._spreadsheet_process import RESOURCE_ERROR, run_query
 
 
 class TestSourceProcess(unittest.TestCase):
+	@staticmethod
+	def _out_of_range_date_workbook(cells=256):
+		"""Make a small valid XLSX that makes openpyxl emit many date warnings."""
+		book = Workbook()
+		for row in range(1, cells + 1):
+			cell = book.active.cell(row, 1, 1)
+			cell.number_format = numbers.FORMAT_DATE_YYYYMMDD2
+		original = io.BytesIO()
+		book.save(original)
+		updated = io.BytesIO()
+		with ZipFile(original) as source, ZipFile(updated, "w", ZIP_DEFLATED) as target:
+			for info in source.infolist():
+				payload = source.read(info.filename)
+				if info.filename.startswith("xl/worksheets/"):
+					payload = payload.replace(b"<v>1</v>", b"<v>999999999</v>")
+				target.writestr(info, payload)
+		return updated.getvalue()
+
 	def test_parser_environment_excludes_secrets_and_pins_numeric_threads(self):
 		with patch.dict(os.environ, {"SOURCE_PRIVATE_TOKEN": "secret", "OPENBLAS_NUM_THREADS": "64"}):
 			env = shared.worker_env()
@@ -79,22 +102,57 @@ class TestSourceProcess(unittest.TestCase):
 
 	def test_failures_are_distinct_and_diagnostics_contain_no_source_values(self):
 		logger = Mock()
+		source_stderr = "PRIVATE-SOURCE-VALUE" * 128
 		with patch("frappe.logger", return_value=logger):
-			for status, stderr, expected in (
-				(1, "ImportError: PRIVATE-SOURCE-VALUE", "failed before"),
-				(1, "Traceback PRIVATE-SOURCE-VALUE", "failed before"),
-				(-signal.SIGKILL, "PRIVATE-SOURCE-VALUE", "resource budget"),
+			for status, expected in (
+				(1, "failed before"),
+				(-signal.SIGKILL, "resource budget"),
 			):
 				with (
-					self.subTest(status=status, stderr=stderr),
+					self.subTest(status=status),
 					patch(
 						"jarvis.tools._spreadsheet_process.subprocess.run",
-						return_value=SimpleNamespace(returncode=status, stdout="", stderr=stderr),
+						return_value=SimpleNamespace(returncode=status, stdout="", stderr=source_stderr),
 					),
 				):
 					with self.assertRaisesRegex(InvalidArgumentError, expected):
 						run_query(b"A\n1", "private.csv")
 			self.assertNotIn("PRIVATE-SOURCE-VALUE", repr(logger.mock_calls))
+			reasons = {call.args[2] for call in logger.warning.call_args_list}
+			self.assertEqual(reasons, {"worker_exit", "resource_limit"})
+
+	def test_real_children_discard_source_controlled_warning_stderr(self):
+		"""A compact malformed-date XLSX cannot fill the parent stderr buffer."""
+		content = self._out_of_range_date_workbook()
+		warning = "outside the limits for dates"
+		original_run = subprocess.run
+		from jarvis.tools import _file_scan_process, _spreadsheet_process
+
+		for module, runner, kwargs, expected_rows in (
+			(_spreadsheet_process, run_query, {"sql": "SELECT COUNT(*) FROM sheet1"}, 256),
+			(_file_scan_process, scan_file, {}, 200),
+		):
+			completed = []
+
+			def run_child(*args, **child_kwargs):
+				self.assertEqual(child_kwargs["stdout"], subprocess.PIPE)
+				self.assertEqual(child_kwargs["stderr"], subprocess.DEVNULL)
+				child = original_run(*args, **child_kwargs)
+				completed.append(child)
+				return child
+
+			with (
+				self.subTest(worker=module.__name__),
+				patch.object(module.subprocess, "run", side_effect=run_child),
+			):
+				result = runner(content, "warning-amplification.xlsx", **kwargs)
+			self.assertEqual(len(completed), 1)
+			self.assertIsNone(completed[0].stderr)
+			self.assertNotIn(warning, json.dumps(result))
+			if module is _spreadsheet_process:
+				self.assertEqual(result["rows"], [[expected_rows]])
+			else:
+				self.assertEqual(len(result["records"]), expected_rows)
 
 	def test_malformed_child_replies_never_become_a_complete_result(self):
 		for stdout in ("not json", "[]", '{"result":null}', '{"result":"wrong"}', "x" * 131073):

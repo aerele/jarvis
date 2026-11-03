@@ -611,6 +611,13 @@ doc_events = {
 	for dt in ("DocType", "Custom Field", "Property Setter", "Workflow", "Client Script")
 }
 
+# Error capture (jarvis.api_errors): name the jarvis caller on an Error Log row
+# written without a traceback, and buffer a jarvis API call that answered 4xx
+# (Frappe writes no Error Log row for those). Both are no-ops for anything that
+# isn't jarvis, and neither ever raises.
+doc_events["Error Log"] = {"before_insert": "jarvis.api_errors.tag_error_log_origin"}
+after_request = ["jarvis.api_errors.capture_failed_request"]
+
 # Generic RPCs must use the same source gate as dedicated LCV tools. The
 # handler is a no-op outside the scoped tool call, including ordinary Desk.
 doc_events["Landed Cost Voucher"] = {
