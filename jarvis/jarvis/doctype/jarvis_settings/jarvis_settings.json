@@ -22,6 +22,8 @@
   "agent_name",
   "brand_logo",
   "brand_favicon",
+  "holiday_touches_enabled",
+  "birthday_greetings_enabled",
   "documents_section",
   "default_pdf_template",
   "llm_tab",
@@ -167,12 +169,20 @@
   "jarvis_admin_customer_email",
   "jarvis_admin_customer_password",
   "signup_context",
+  "private_network_section",
+  "network_mode",
+  "public_address",
   "maintenance_notice_section",
   "maintenance_active",
   "maintenance_message",
   "catalogue_visibility_section",
   "catalogue_visibility_governed",
-  "catalogue_visibility_synced_at"
+  "catalogue_visibility_synced_at",
+  "holiday_policy_section",
+  "holiday_policy_disabled",
+  "holiday_policy_disabled_designs",
+  "holiday_policy_names",
+  "holiday_policy_synced_at"
  ],
  "fields": [
   {
@@ -270,6 +280,20 @@
    "fieldtype": "Attach Image",
    "label": "Favicon",
    "description": "Browser-tab icon. Square PNG (or .ico) works best."
+  },
+  {
+   "fieldname": "holiday_touches_enabled",
+   "fieldtype": "Check",
+   "label": "Holiday touches",
+   "default": "1",
+   "description": "Holiday and birthday greetings on the Jarvis welcome screen"
+  },
+  {
+   "fieldname": "birthday_greetings_enabled",
+   "fieldtype": "Check",
+   "label": "Birthday greetings",
+   "default": "1",
+   "depends_on": "eval:doc.holiday_touches_enabled"
   },
   {
    "fieldname": "documents_section",
@@ -1231,6 +1255,29 @@
    "description": "Non-secret JSON snapshot of the in-flight signup: attempt id, the customer's real email + company as admin holds them, plan/provider, the amount and what is due today, the last contract code, and the contract version. Written by jarvis.onboarding_contract so a reloaded payment page renders whose signup it is showing instead of the site admin's prefill. NO SECRETS EVER GO IN THIS FIELD - permlevel is not a container for one: a Single's value is reachable through frappe.client.get_value / get_single_value by anyone who can read the doctype, and the permlevel only governs the form. Secrets belong in the Password fields above, which encrypt into __Auth. jarvis_admin_customer_email above holds admin's SYNTHETIC login (cust-<hash>@jarvis.invalid), which is not an address and must never be shown to anyone."
   },
   {
+   "fieldname": "private_network_section",
+   "fieldtype": "Section Break",
+   "label": "Private Network",
+   "collapsible": 1,
+   "description": "For a site on a private network behind a public gateway. Set by the onboarding wizard once the customer confirms the public address; a System Manager can edit it here."
+  },
+  {
+   "fieldname": "network_mode",
+   "fieldtype": "Select",
+   "permlevel": 1,
+   "label": "Network Mode",
+   "options": "\nPrivate",
+   "description": "Private makes the bench report the public address below as this site's URL and lifts the localhost onboarding block."
+  },
+  {
+   "fieldname": "public_address",
+   "fieldtype": "Data",
+   "permlevel": 1,
+   "label": "Public Address",
+   "depends_on": "eval:doc.network_mode==\"Private\"",
+   "description": "The public HTTPS address the Jarvis server uses to call this site, for example https://erp.example.com. Must be reachable from the internet through your gateway."
+  },
+  {
    "fieldname": "maintenance_notice_section",
    "fieldtype": "Section Break",
    "label": "Maintenance Hold",
@@ -1271,6 +1318,39 @@
    "label": "Catalogue Visibility Synced At",
    "hidden": 1,
    "read_only": 1
+  },
+  {
+   "fieldname": "holiday_policy_section",
+   "fieldtype": "Section Break",
+   "label": "Holiday policy (from Jarvis Cloud)",
+   "collapsible": 1,
+   "description": "Mirror of the operator's holiday-touch policy, pulled from the control plane via get_connection (jarvis.holiday_touch.policy). Read-only here; the pull is the only writer."
+  },
+  {
+   "fieldname": "holiday_policy_disabled",
+   "fieldtype": "Check",
+   "label": "Holiday Touches Disabled By Operator",
+   "read_only": 1
+  },
+  {
+   "fieldname": "holiday_policy_disabled_designs",
+   "fieldtype": "Small Text",
+   "label": "Disabled Holiday Designs",
+   "read_only": 1,
+   "description": "JSON list of design keys the operator has turned off."
+  },
+  {
+   "fieldname": "holiday_policy_names",
+   "fieldtype": "Long Text",
+   "label": "Holiday Policy Names",
+   "read_only": 1,
+   "description": "JSON {aliases, near_misses} of extra holiday names from the operator."
+  },
+  {
+   "fieldname": "holiday_policy_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Holiday Policy Synced At",
+   "read_only": 1
   }
  ],
  "permissions": [
@@ -1310,5 +1390,5 @@
    "write": 1
   }
  ],
- "modified": "2026-10-06 12:00:00.000000"
+ "modified": "2026-10-28 12:00:00.000000"
 }

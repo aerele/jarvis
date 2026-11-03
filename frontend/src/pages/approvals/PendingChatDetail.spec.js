@@ -42,6 +42,7 @@ const rec = (over = {}) => ({
 	conversation_title: "Quarter close",
 	origin_page: "",
 	can_act: 1,
+	pending_card_safe: true,
 	reason_code: "",
 	reason: "",
 	...over,
@@ -133,6 +134,85 @@ describe("PendingChatDetail", () => {
 		expect(w.text()).toContain("Create a ToDo");
 	});
 
+	it("does not render or act on a raw card without the safety attestation", async () => {
+		const w = await mountWith(rec({ pending_card_safe: false }));
+		expect(w.text()).toContain("Create a ToDo");
+		expect(button(w, "Confirm")).toBeUndefined();
+		expect(button(w, "Discard")).toBeUndefined();
+		expect(core.confirmTool).not.toHaveBeenCalled();
+	});
+
+	it("shows a suppressed safety receipt as one Done-only terminal notice", async () => {
+		const w = await mountWith(
+			rec({
+				pending_card_safe: false,
+				can_act: 0,
+				reason_code: "safety_update",
+				reason: "This action was cancelled during a safety update. Nothing ran.",
+			})
+		);
+		expect(w.find('[role="status"]').attributes("aria-label")).toBe("Action cancelled");
+		expect(w.text()).toContain(
+			"This action was cancelled during a safety update. Nothing ran."
+		);
+		expect(button(w, "Done")).toBeTruthy();
+		for (const label of ["Confirm", "Discard", "Open chat", "Try again"]) {
+			expect(button(w, label)).toBeUndefined();
+		}
+		expect(core.confirmTool).not.toHaveBeenCalled();
+		expect(core.dismissTool).not.toHaveBeenCalled();
+
+		await button(w, "Done").trigger("click");
+		expect(onDecided).toHaveBeenCalledWith({
+			ok: false,
+			pa_status: "Pending",
+			reason_code: "safety_update",
+			outcome: "cancelled",
+		});
+		expect(button(w, "Done")).toBeUndefined();
+	});
+
+	for (const [label, send] of [
+		["Confirm", () => core.confirmTool],
+		["Discard", () => core.dismissTool],
+	]) {
+		it(`${label} turns a direct safety update into Done-only before it removes this row`, async () => {
+			const boardRows = new Set(["PA-9", "safe-sibling"]);
+			onDecided = vi.fn(() => boardRows.delete("PA-9"));
+			const w = await mountWith(rec());
+			send().mockResolvedValue({
+				ok: false,
+				reason_code: "safety_update",
+				error: { message: "This direct action was cancelled. Nothing ran." },
+			});
+
+			await button(w, label).trigger("click");
+			await flushPromises();
+
+			const terminal = w.find('[role="status"]');
+			expect(terminal.attributes("aria-label")).toBe("Action cancelled");
+			expect(terminal.text()).toContain("This direct action was cancelled. Nothing ran.");
+			expect(button(w, "Done")).toBeTruthy();
+			for (const control of ["Confirm", "Discard", "Open chat", "Try again", "Retry"]) {
+				expect(button(w, control)).toBeUndefined();
+			}
+			expect(toast.error).not.toHaveBeenCalled();
+			// The board binds onDecided to this row's key. Until Done, no row is
+			// removed, so a safe sibling cannot be affected by this direct result.
+			expect(onDecided).not.toHaveBeenCalled();
+			expect([...boardRows]).toEqual(["PA-9", "safe-sibling"]);
+
+			await button(w, "Done").trigger("click");
+			expect(onDecided).toHaveBeenCalledWith({
+				ok: false,
+				pa_status: "Cancelled",
+				reason_code: "safety_update",
+				outcome: "cancelled",
+			});
+			expect([...boardRows]).toEqual(["safe-sibling"]);
+		});
+	}
+
 	it("confirms through the chat's confirm_tool, then says the chat continues", async () => {
 		const w = await mountWith(rec());
 		core.confirmTool.mockResolvedValue({ ok: true, pa_status: "Executed" });
@@ -202,6 +282,23 @@ describe("PendingChatDetail", () => {
 		resolve({ ok: true, pa_status: "Executed" });
 		await flushPromises();
 		expect(onDecided).toHaveBeenCalledTimes(1);
+	});
+
+	it("settles a direct safety update after the board switched away", async () => {
+		const w = await mountWith(rec());
+		let resolve;
+		core.confirmTool.mockReturnValue(new Promise((done) => (resolve = done)));
+		await button(w, "Confirm").trigger("click");
+		w.unmount();
+		resolve({
+			ok: false,
+			reason_code: "safety_update",
+			error: { message: "This direct action was cancelled. Nothing ran." },
+		});
+		await flushPromises();
+		expect(onDecided).toHaveBeenCalledWith(
+			expect.objectContaining({ reason_code: "safety_update" })
+		);
 	});
 
 	it("disables both decisions while one is in flight", async () => {

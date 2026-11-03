@@ -201,6 +201,10 @@ export function attachGlobalNotifier({ socket, router }) {
 	}
 
 	function onEvent(p) {
+		if (p?.kind === "share:changed") {
+			store.loadSharedConversations?.({ refresh: true });
+			return;
+		}
 		if (!p || !p.kind) return;
 		if (p.conversation_id) store.scheduleConversationActivityRefresh();
 		switch (p.kind) {
@@ -260,6 +264,9 @@ export function attachGlobalNotifier({ socket, router }) {
 				return;
 			}
 			case "action:pending": {
+				// The live frame is a delivery hint, not proof that a Confirm card is
+				// still safe. Do not tell the user to approve a raw or delayed frame.
+				if (p.pending_card_safe !== true) return;
 				// keyed `conversation` (may be "" when the server can't resolve one —
 				// it still reached THIS user's socket, so fall back to the active chat)
 				const conv = p.conversation || store.currentConvId || null;
@@ -282,6 +289,8 @@ export function attachGlobalNotifier({ socket, router }) {
 				const conv = p.conversation_id || null;
 				const dashboardApproval = p.origin_page === "dashboards";
 				if (dashboardApproval && conv === dashboardsPaneConv() && !document.hidden) return;
+				if (p.source === "Chat" && conv && conv === onScreenConv() && !document.hidden)
+					return;
 				signal({
 					conv: null,
 					toastAnywhere: true, // waiting-on-you is worth a toast even on-conversation
@@ -300,6 +309,24 @@ export function attachGlobalNotifier({ socket, router }) {
 			}
 			case "action:settled":
 				// a card or held write was decided somewhere: the badge may have dropped
+				store.refreshApprovalsCount();
+				return;
+			case "approval:continuation_failed":
+				// a reviewer's decision on the requester's question did not reach their
+				// chat: open the question (no chat id travels), where they can send it
+				signal({
+					conv: null,
+					toastAnywhere: true,
+					title: "Decision not sent to your chat",
+					body: "A reviewer answered your question, but it was not sent to your chat. Open it to send it.",
+					tag: "jarvis-approvals",
+					open: () => go("/approvals/" + encodeURIComponent(p.name || "")),
+				});
+				return;
+			case "approval:tagged":
+			case "approval:untagged":
+				// a Chat question's reviewer grant was added or revoked: the count of what
+				// waits on this user moved. Badge only; the board re-reads its own lists.
 				store.refreshApprovalsCount();
 				return;
 			case "review:pending": {

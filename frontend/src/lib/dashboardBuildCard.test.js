@@ -411,12 +411,16 @@ test("canPromoteDashCanvas combines the builder-origin rule with canvas-presence
 	assert.match(combo, /canOpenDash\(cv\) \|\| isDashboardCanvas\(cv\)/);
 	// openInDashboards must guard on the COMBINED gate — otherwise a click on
 	// a canvas-presence-only thumbnail (no builder origin) would silently no-op
-	const open = fnBody(chatSrc, "async function openInDashboards(m, cv) {");
-	assert.match(open, /if \(!conv \|\| !canPromoteDashCanvas\(cv\)\) return;/);
+	const open = fnBody(chatSrc, "async function openInDashboards(m, cv, source = null) {");
+	assert.match(open, /!messageActionIsCurrent\(view\)/);
+	assert.match(open, /!canPromoteDashCanvas\(cv\)/);
 });
 
 test("the finished thumbnail reuses openInDashboards and the static cvOf srcdoc, never the live builder mode", () => {
-	assert.match(chatSrc, /v-else-if="canPromoteDashCanvas\(cv\)"\s*\n\s*class="jv-dash-thumb"/);
+	assert.match(
+		chatSrc,
+		/v-else-if="\s*hasCurrentMessageSnapshot\s*&&\s*canPromoteDashCanvas\(cv\)\s*"\s*\n\s*class="jv-dash-thumb"/
+	);
 	assert.match(chatSrc, /@click="openInDashboards\(m, cv\)"/);
 	assert.match(chatSrc, /:srcdoc="cvOf\(m, cv\)"/);
 	// DashboardCanvas.vue (the builder's live-query render component) must not

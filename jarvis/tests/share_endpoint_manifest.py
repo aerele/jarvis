@@ -14,6 +14,14 @@ def _unrelated(module, reason, names):
 
 
 _unrelated(
+	"jarvis.network_check",
+	"Signed network-check challenge callback; identifiers do not grant conversation access.",
+	"""
+    answer
+    """,
+)
+
+_unrelated(
 	"jarvis.payment_calendar.api",
 	"Company/report/ledger finance scope and actor-owned snapshots/preferences; shared chat identifiers grant no authority.",
 	"""
@@ -26,6 +34,17 @@ _unrelated(
     get_upcoming
     request_snapshot
     set_preferences
+    """,
+)
+
+
+_unrelated(
+	"jarvis.holiday_touch.api",
+	"Holiday occasion lookup, scene-showing record and the admin-only support view; no transcript identifier, so shared chat identifiers grant no authority.",
+	"""
+    explain
+    get_today
+    record_shown
     """,
 )
 
@@ -65,6 +84,14 @@ _unrelated(
 	"Agent credential administration; tool dispatch is separately classified as chat-scoped.",
 	"""
     rotate_agent_token
+    """,
+)
+
+_unrelated(
+	"jarvis.api",
+	"Neutral signed Deposit recovery: only an authenticated session bearer selects its active run; the raw body is exactly {}, and chat identifiers grant no authority.",
+	"""
+    terminalize_unusable_payroll_deposit_private_source
     """,
 )
 
@@ -128,6 +155,7 @@ _unrelated(
     get_ap_review_defaults
     get_ar_review_defaults
     get_bank_recon_review_defaults
+    get_cycle_count_review_defaults
     get_installations
     install_agent
     list_agent_activity_page
@@ -153,6 +181,27 @@ _unrelated(
     stop_agent_run
     take_finding_to_chat
     uninstall_agent
+    """,
+)
+
+_unrelated(
+	"jarvis.chat.reorder_review",
+	"Sealed Reorder suggestions require the named reviewer and current native source permissions; conversation shares grant no review or write authority.",
+	"""
+    list_reviews
+    get_review
+    decide
+    """,
+)
+
+_unrelated(
+	"jarvis.chat.ticket_triage",
+	"Sealed Ticket Triage proposals require the named reviewer and current ticket permissions; conversation shares grant no review or write authority.",
+	"""
+    list_ticket_triage_proposals
+    get_ticket_triage_proposal
+    reject_ticket_triage_proposal
+    confirm_ticket_triage_proposal
     """,
 )
 
@@ -618,6 +667,20 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.private_network",
+	"Operator network setup and workspace connectivity, not chat content.",
+	"""
+    check_admin_connection
+    connection_test_status
+    network_status
+    private_setup_targets
+    reserve_host
+    save_public_address
+    start_connection_test
+    """,
+)
+
+_unrelated(
 	"jarvis.release_notice",
 	"Workspace release metadata, independent of conversations.",
 	"""
@@ -787,7 +850,38 @@ ENDPOINTS.update(
 			"scope": "chat_scoped",
 		},
 		"jarvis.chat.approvals_api.apply_sheet": {"arguments": {"name": "$approval"}, "scope": "chat_scoped"},
+		# Cycle-count plans are sealed Agent Review records. A chat share does not
+		# grant their reviewer / direct-DocShare visibility or permission to create
+		# a physical-count fact, so probe them with a real foreign approval id.
+		"jarvis.chat.cycle_count_entry.list_count_plans": {"arguments": {}, "scope": "chat_scoped"},
+		"jarvis.chat.cycle_count_entry.get_count_plan": {
+			"arguments": {"request": "$approval", "entry_key": "cycle-count-share"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.cycle_count_entry.record_counts": {
+			"arguments": {
+				"request": "$approval",
+				"counted_at": "2026-10-01 10:00:00",
+				"entries": [{"item_code": "share-probe-item", "counted_qty": "1"}],
+				"entry_key": "cycle-count-share",
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.cycle_count_entry.correct_counts": {
+			"arguments": {
+				"request": "$approval",
+				"replaces": "$approval",
+				"counted_at": "2026-10-01 10:00:00",
+				"entries": [{"item_code": "share-probe-item", "counted_qty": "1"}],
+				"entry_key": "cycle-count-share-correct",
+			},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.approvals_api.approve_wiki_write": {
+			"arguments": {"name": "$approval"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.approvals_api.continue_approval_chat": {
 			"arguments": {"name": "$approval"},
 			"scope": "chat_scoped",
 		},
@@ -823,7 +917,16 @@ ENDPOINTS.update(
 			"arguments": {"name": "$approval"},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.approvals_api.tag_reviewer": {
+			"arguments": {"name": "$approval", "user": "$recipient"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.approvals_api.untag_reviewer": {
+			"arguments": {"name": "$approval", "user": "$recipient"},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.approvals_api.list_approvals": {"arguments": {}, "scope": "chat_scoped"},
+		"jarvis.chat.approvals_api.list_approval_reviewers": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_approvals_page": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_pending_actions_lane": {"arguments": {}, "scope": "chat_scoped"},
 		"jarvis.chat.approvals_api.list_wiki_write_proposals": {"arguments": {}, "scope": "chat_scoped"},
@@ -924,6 +1027,25 @@ ENDPOINTS.update(
 			"arguments": {"conversation": "$conversation"},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.filebox_source.get_source_state": {
+			"arguments": {
+				"conversation": "$conversation",
+				"message": "$message",
+				"item": "artifact",
+				"file_url": "$file_url",
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.filebox_source.set_source": {
+			"arguments": {
+				"conversation": "$conversation",
+				"message": "$message",
+				"item": "artifact",
+				"file_url": "$file_url",
+				"expected": "",
+			},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.macros_admin_api.admin_stop_run": {
 			"arguments": {"run": "$macro_run"},
 			"scope": "chat_scoped",
@@ -997,6 +1119,75 @@ ENDPOINTS.update(
 			"scope": "chat_scoped",
 		},
 		"jarvis.chat.wiki.dismiss_nudge": {
+			"arguments": {"conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+	}
+)
+
+# Actor-aware shared endpoints retain the generic escalation/value sweep.
+ENDPOINTS.update(
+	{
+		"jarvis.chat.collaboration_access.get_access": {
+			"arguments": {"conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_access.set_access": {
+			"arguments": {"access_mode": "Chat", "conversation": "$conversation", "user": "$outsider"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_access.set_recipients": {
+			"arguments": {
+				"conversation": "$conversation",
+				"recipients": [{"access_mode": "Chat", "user": "$outsider"}],
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_actions.confirm_action": {
+			"arguments": {"action": "$pending_action", "conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_actions.discard_action": {
+			"arguments": {"action": "$pending_action", "conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.answer_question": {
+			"arguments": {"conversation": "$conversation", "decision": "yes", "question": "$approval"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.get_canvas": {
+			"arguments": {"message": "$message", "name": "artifact"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.get_conversation": {
+			"arguments": {"conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.get_file": {
+			"arguments": {"conversation": "$conversation", "file_url": "$file_url"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.get_tool_detail": {
+			"arguments": {"message": "$message"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.retry_run": {
+			"arguments": {"conversation": "$conversation", "run_id": "$run"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.send_message": {
+			"arguments": {
+				"conversation": "$conversation",
+				"message": "recipient request",
+				"request_id": "11111111-2222-4333-8444-555555555555",
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.stop_run": {
+			"arguments": {"conversation": "$conversation", "run_id": "$run"},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.collaboration_api.upload_file": {
 			"arguments": {"conversation": "$conversation"},
 			"scope": "chat_scoped",
 		},

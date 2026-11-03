@@ -41,4 +41,13 @@ describe("Payment Calendar transport", () => {
 		call.mockRejectedValue({ status: 401 });
 		expect((await api.getCapabilities()).state).toBe("forbidden");
 	});
+	it("forwards only the selected month in addition to company and account IDs", async () => {
+		call.mockResolvedValue({ ok: true, data: {} });
+		await api.requestSnapshot("Manufacturing", ["Bank"], "2026-11");
+		expect(call).toHaveBeenCalledWith("jarvis.payment_calendar.api.request_snapshot", {
+			company: "Manufacturing",
+			accounts: ["Bank"],
+			month: "2026-11",
+		});
+	});
 });

@@ -1,6 +1,7 @@
 """Server-owned accounting scope; request fields cannot change its as-of date."""
 
 import json
+from datetime import date
 
 import frappe
 from frappe.utils import add_days, add_months, get_first_day, get_last_day, nowdate
@@ -31,7 +32,7 @@ def _account_ids(accounts):
 	return accounts
 
 
-def normalize_scope(company: str, accounts: list[str] | str | None) -> dict:
+def normalize_scope(company: str, accounts: list[str] | str | None, *, month: str | None = None) -> dict:
 	if not isinstance(company, str) or not company.strip() or len(company) > 140:
 		raise frappe.ValidationError("Choose a company.")
 	accounts = _account_ids(accounts)
@@ -45,7 +46,19 @@ def normalize_scope(company: str, accounts: list[str] | str | None) -> dict:
 	anchor = nowdate()
 	first = str(get_first_day(add_months(anchor, -12)))
 	last = str(get_last_day(add_months(anchor, 11)))
+	window_start, window_end = first, add_days(last, 30)
+	if month is not None:
+		try:
+			if not isinstance(month, str) or len(month) != 7:
+				raise ValueError
+			requested = date.fromisoformat(month + "-01")
+			if requested.isoformat()[:7] != month or not first[:7] <= month <= last[:7]:
+				raise ValueError
+		except (TypeError, ValueError) as exc:
+			raise frappe.ValidationError("Choose a month within the calendar range.") from exc
+		window_start, window_end = month + "-01", str(get_last_day(requested))
 	return {
+		**({"month": month} if month is not None else {}),
 		"protocol": PROTOCOL,
 		"actor": frappe.session.user,
 		"company": company,
@@ -53,6 +66,6 @@ def normalize_scope(company: str, accounts: list[str] | str | None) -> dict:
 		"anchor": anchor,
 		"selectable_start": first,
 		"selectable_end": last,
-		"window_start": first,
-		"window_end": add_days(last, 30),
+		"window_start": window_start,
+		"window_end": window_end,
 	}

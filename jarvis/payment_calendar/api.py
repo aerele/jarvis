@@ -270,8 +270,10 @@ def configure_floor(
 
 @frappe.whitelist(methods=["POST"])
 @_safe
-def request_snapshot(company: str, accounts: list[str] | str | None = None) -> dict:
-	return jobs.request_snapshot(normalize_scope(company, accounts))
+def request_snapshot(company: str, accounts: list[str] | str | None = None, month: str | None = None) -> dict:
+	# New clients request "current" explicitly; older clients retain their full window.
+	month = frappe.utils.nowdate()[:7] if month == "current" else month
+	return jobs.request_snapshot(normalize_scope(company, accounts, month=month))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -306,6 +308,8 @@ def get_snapshot_status(snapshot_id: str) -> dict:
 				"window_end",
 			)
 		}
+		if "month" in status["scope"]:
+			data["scope"]["month"] = status["scope"]["month"]
 	return data
 
 

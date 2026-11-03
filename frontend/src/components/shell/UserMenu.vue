@@ -19,8 +19,9 @@
 				     a hand-pasted copy of its gradient + path data. That duplication is
 				     exactly what let the chat welcome mark drift to a different colour
 				     (design.md §2.2). idlePeek: this is the one mark that sits resting on
-				     every route, so it's the chosen surface for the designed idle blink. -->
-				<JarvisMark
+				     every route, so it's the chosen surface for the designed idle blink.
+				     HolidayMark is JarvisMark plus today's holiday item, when there is one. -->
+				<HolidayMark
 					:size="28"
 					:radius="7"
 					:peek="brandPeek"
@@ -52,7 +53,7 @@
 import { computed, inject, onMounted, onUnmounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { Dropdown, FeatherIcon } from "frappe-ui";
-import JarvisMark from "@/components/JarvisMark.vue";
+import HolidayMark from "@/components/holiday/HolidayMark.vue";
 import { focusOpenMenu } from "@/lib/focusOpenMenu";
 import { useShellStore } from "@/stores/shell";
 import { useSupportStore } from "@/stores/support";

@@ -53,6 +53,7 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# dependencies (one gated card).
 	"create_doc",
 	"preview_doc",
+	"preview_landed_cost_voucher",
 	# Read-only: static-check a Server Script / Script Report body against the
 	# safe_exec sandbox (imports, get_all/db.sql, RestrictedPython compile) before
 	# staging its create. See the frappe-scripting skill.
@@ -88,6 +89,8 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# content so a "give me a PDF of this report" ask produces a real download.
 	"export_document",
 	"read_file",
+	"query_file",
+	"query_report",
 	"get_file_pages",
 	"attach_to_doc",
 	"download_vcard",
@@ -105,7 +108,16 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"get_engagement_config",
 	"get_purchase_match_inputs",
 	"get_receivables_review_inputs",
+	# Ticket Triage is a named private source plus a typed staging endpoint.  It
+	# intentionally receives no generic document/query/message/write surface.
+	"get_ticket_triage_inputs",
+	"stage_ticket_triage_proposals",
+	# Payroll Deposit-Status: one server-owned, fixed private snapshot. The
+	# delegate never selects generic queries for this evidence path.
+	"get_payroll_deposit_inputs",
 	"get_bank_recon_inputs",
+	"prepare_reorder_review",
+	"get_cycle_count_inputs",
 	"get_itemised_tax_breakup",
 	# Read-only GSTR-1 return-side period totals from india_compliance's filed
 	# return (the gzip filed_summary File, reduced server-side to the 5 heads), for

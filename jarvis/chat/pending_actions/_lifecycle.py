@@ -53,18 +53,34 @@ def _clear_autorun(conversation: str) -> None:
 		api._request_autorun_clear(conversation)
 
 
-def discard(name: str, *, kind: str = "chat", conversation: str | None = None) -> dict:
+def discard(
+	name: str,
+	*,
+	kind: str = "chat",
+	conversation: str | None = None,
+	lock_authorizer=None,
+	row_authorizer=None,
+) -> dict:
 	"""The human declined: ``Pending -> Discarded`` (authz only; no identity preflight)."""
 	refuse_in_tool_dispatch()
 	approver = authenticated_user()
 	if not approver or approver == "Guest":
 		raise frappe.PermissionError("authentication required")
 	row = get_row(str(name or "").strip()) if name else None
-	allowed, _adopt = authorize(row, approver, kind, conversation)
+	if row_authorizer:
+		row_authorizer(row)
+		allowed = True
+	else:
+		allowed, _adopt = authorize(row, approver, kind, conversation)
 	if not allowed:
 		return _refusal("not_found", "This confirmation is no longer valid.")
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
-	lock_conversation(row.conversation)
+	if lock_authorizer:
+		lock_authorizer()
+	else:
+		lock_conversation(row.conversation)
+	if row_authorizer:
+		row_authorizer(get_row(row.name, lock="update"))
 	moved = _transition(row.name, [PENDING], DISCARDED, reason_code="discarded", decided_by=approver)
 	if moved != "ok":
 		frappe.db.rollback()
@@ -95,7 +111,7 @@ def discard(name: str, *, kind: str = "chat", conversation: str | None = None) -
 			provenance_name=row.name if kind != "chat" else "",
 		)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
-	if kind == "chat" and row.conversation:
+	if kind == "chat" and row.conversation and not row.get("collaboration_binding"):
 		_clear_autorun(row.conversation)
 	settle(row.name)
 	return {"ok": True, "data": {"status": "discarded", "tool": row.tool}, "reason_code": "discarded"}

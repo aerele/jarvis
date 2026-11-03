@@ -78,6 +78,12 @@ export const CODES = {
 	// handles and NO token. The bench opens no sheet for those any more; this is
 	// the CLIENT_UPGRADE_REQUIRED-style honest hold (§R P0-4).
 	CLIENT_UPGRADE_REQUIRED: "CLIENT_UPGRADE_REQUIRED",
+	// Private-network signup refusals (jarvis_admin_v2 billing/codes.py). They arrive on
+	// start_signup through the bench's thrown-error path and are refused BEFORE any provider
+	// object exists, so nothing has been charged and nothing needs checking.
+	PRIVATE_NETWORK_DISABLED: "PRIVATE_NETWORK_DISABLED",
+	PRIVATE_ADDRESS_INVALID: "PRIVATE_ADDRESS_INVALID",
+	PRIVATE_ADDRESS_TAKEN: "PRIVATE_ADDRESS_TAKEN",
 };
 
 export const ADMIN_CODES = [
@@ -110,6 +116,15 @@ export const BENCH_CODES = [
 	CODES.PAYMENT_PAGE_REDIRECT,
 	CODES.BENCH_PAY_ORIGIN_UNCONFIGURED,
 	CODES.CLIENT_UPGRADE_REQUIRED,
+];
+
+// Kept apart from ADMIN_CODES and BENCH_CODES: paymentCodes.test.js pins those two lists to
+// the 15 + 10 = 25 code vocabulary of the contract's first release. These three are the
+// private-network additions; each has a copy row and a machine state of its own.
+export const PRIVATE_SIGNUP_REFUSAL_CODES = [
+	CODES.PRIVATE_NETWORK_DISABLED,
+	CODES.PRIVATE_ADDRESS_INVALID,
+	CODES.PRIVATE_ADDRESS_TAKEN,
 ];
 
 /** The recovery affordances a row may ask for. */
@@ -431,7 +446,46 @@ const TABLE = {
 		tone: TONE.ALERT,
 		actions: [ACTIONS.RESTART, ACTIONS.SUPPORT],
 	},
+	// ---- private network: refusals at signup ------------------------------
+	[CODES.PRIVATE_NETWORK_DISABLED]: {
+		// The operator has not switched private onboarding on (or switched it off between
+		// the Network step and the signup). Nothing the customer can do; support can say when.
+		headline: "Private network setup isn't available yet.",
+		body: "Nothing has been charged. Contact support and we'll tell you when it opens for your site.",
+		tone: TONE.ALERT,
+		actions: [ACTIONS.SUPPORT],
+	},
+	[CODES.PRIVATE_ADDRESS_INVALID]: {
+		headline: "Your public address can't be used.",
+		body: "Nothing has been charged. Change the address and try again.",
+		tone: TONE.ALERT,
+		actions: [ACTIONS.RESTART, ACTIONS.SUPPORT],
+		actionLabels: { [ACTIONS.RESTART]: "Change your address" },
+	},
+	[CODES.PRIVATE_ADDRESS_TAKEN]: {
+		headline: "That address is already used by another account.",
+		body: "Nothing has been charged. Each account needs its own address: use a different host name, port or path on your gateway.",
+		tone: TONE.ALERT,
+		actions: [ACTIONS.RESTART, ACTIONS.SUPPORT],
+		actionLabels: { [ACTIONS.RESTART]: "Change your address" },
+	},
 };
+
+// During a private setup the signup gate is a setup step, not a payment: the two bench-local
+// gate failures must not talk about the payment service. Same actions as the public rows.
+const PRIVATE_SETUP_ROWS = {
+	[CODES.BENCH_ADMIN_UNREACHABLE]: {
+		...TABLE[CODES.BENCH_ADMIN_UNREACHABLE],
+		headline: "We can't reach Jarvis right now.",
+		body: "Try again in a minute.",
+	},
+	[CODES.BENCH_RATE_LIMITED]: {
+		...TABLE[CODES.BENCH_RATE_LIMITED],
+		headline: "Too many attempts.",
+		body: "Try again in a minute.",
+	},
+};
+for (const key of Object.keys(PRIVATE_SETUP_ROWS)) Object.freeze(PRIVATE_SETUP_ROWS[key]);
 
 /**
  * The reconciliation FLAG's variant of the pending row.
@@ -458,12 +512,13 @@ for (const key of Object.keys(TABLE)) Object.freeze(TABLE[key]);
  * The row for one code, or the honest unknown row.
  *
  * @param {string} code
- * @param {{awaitingReconciliation?: boolean}} [flags]
+ * @param {{awaitingReconciliation?: boolean, privateSetup?: boolean}} [flags]
  */
 export function copyFor(code, flags = {}) {
 	if (flags && flags.awaitingReconciliation && code === CODES.PAYMENT_CONFIRMATION_PENDING) {
 		return PENDING_AWAITING_RECONCILIATION;
 	}
+	if (flags && flags.privateSetup && PRIVATE_SETUP_ROWS[code]) return PRIVATE_SETUP_ROWS[code];
 	return TABLE[code] || UNKNOWN_COPY;
 }
 

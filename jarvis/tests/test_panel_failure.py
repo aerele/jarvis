@@ -47,6 +47,24 @@ def _business_rule(*_args, **_kwargs):
 BUSINESS_RULE = patch("jarvis.tools.create_doc.create_doc", side_effect=_business_rule)
 
 
+def _draft_reply(conversation: str, doctype: str) -> str:
+	"""The assistant reply a draft create is saved from (a save names it, #777)."""
+	block = json.dumps({"kind": "doc", "verb": "create", "doctype": doctype, "fields": []})
+	return (
+		frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": conversation,
+				"seq": chat_api._next_seq(conversation),
+				"role": "assistant",
+				"content": f"```jarvis-action\n{block}\n```",
+			}
+		)
+		.insert(ignore_permissions=True)
+		.name
+	)
+
+
 class _Hermetic:
 	"""The continuation's seed message and Turn rows are written for real; starting the
 	turn (the pump, or a legacy job) is stubbed, so the bench's queue depth never
@@ -81,6 +99,14 @@ class _PanelBase(_Hermetic, PendingActionTestMixin, FrappeTestCase):
 	def apply(
 		self, values: dict, *, message: str = "draft-msg-1", verb="create", doctype="ToDo", **extra
 	) -> dict:
+		if verb == "create" and message:
+			# Each draft key is its own real reply, made (and committed, as a real reply
+			# is long before its draft is saved) on first use.
+			replies = self.__dict__.setdefault("_replies", {})
+			if (message, doctype) not in replies:
+				replies[(message, doctype)] = _draft_reply(self.conv, doctype)
+				frappe.db.commit()
+			message = replies[(message, doctype)]
 		action = {
 			"verb": verb,
 			"doctype": doctype,
@@ -793,7 +819,7 @@ class TestPanelOnErpnext(_Hermetic, FrappeTestCase):
 						"doctype": doctype,
 						"values": values,
 						"conversation": conv.name,
-						"message": "j2b-erp-" + frappe.generate_hash(length=6),
+						"message": _draft_reply(conv.name, doctype),
 					}
 				)
 			)
@@ -863,7 +889,7 @@ class TestPanelOnErpnext(_Hermetic, FrappeTestCase):
 						"doctype": "Sales Order",
 						"values": values,
 						"conversation": conv.name,
-						"message": "j2b-perm",
+						"message": _draft_reply(conv.name, "Sales Order"),
 					}
 				)
 			)

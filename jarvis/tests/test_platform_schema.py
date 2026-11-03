@@ -169,6 +169,13 @@ class TestPlatformSchemaRunFields(FrappeTestCase):
 			self.assertEqual(f.read_only, 1, fn)
 		self.assertEqual(_options(self.DT, "preparation_mode"), ["shadow", "live"])
 
+	def test_visibility_receipt_is_server_only_launch_field(self):
+		f = _field(self.DT, "visibility_receipt_json")
+		self.assertIsNotNone(f)
+		self.assertEqual(f.fieldtype, "Small Text")
+		self.assertEqual(f.read_only, 1)
+		self.assertEqual(f.permlevel, 1)
+
 
 class TestPlatformSchemaApprovalFields(FrappeTestCase):
 	DT = "Jarvis Approval Request"

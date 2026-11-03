@@ -34,8 +34,12 @@ const emit = defineEmits(["show"]);
 
 function stateText(it) {
 	if (it.status === "ready") return `Ready ${timeAgo(it.ready_at)}`;
+	// `error` is the report's own reason (a permission refusal, a timeout, a
+	// validation message), never the traceback; without one, the generic hint.
 	if (it.status === "failed")
-		return "Couldn't prepare this report. Tell Jarvis which filter to change.";
+		return it.error
+			? `Couldn't prepare this report. ${it.error}`
+			: "Couldn't prepare this report. Tell Jarvis which filter to change.";
 	return "Preparing in the background…";
 }
 </script>
