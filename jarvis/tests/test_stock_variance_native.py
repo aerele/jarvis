@@ -129,6 +129,13 @@ def _evaluate(rows):
 
 
 class TestStockVarianceNative(TestCase):
+	def test_frappe_unpadded_time_keeps_microsecond_precision(self):
+		self.assertEqual(native.clock("4:9:1.378829").isoformat(), "04:09:01.378829")
+		self.assertEqual(native.clock("0:0:0").isoformat(), "00:00:00")
+		for value in (None, "24:00:00", "12:60:00", "12:00:60", "12:00:00+01:00"):
+			with self.subTest(value=value), self.assertRaises(native.Gap):
+				native.clock(value)
+
 	def test_uses_book_quantity_and_rate_at_the_saved_count_time(self):
 		result = _evaluate(_rows())
 
