@@ -1,0 +1,126 @@
+[
+	{
+		"name": "none",
+		"payload": {"v": 1, "date": "2026-11-08", "tz": "Asia/Kolkata", "kind": "none"}
+	},
+	{
+		"name": "leadup_diwali",
+		"payload": {
+			"v": 1,
+			"date": "2026-11-06",
+			"tz": "Asia/Kolkata",
+			"kind": "leadup",
+			"design": "diwali",
+			"occasion": "diwali",
+			"year": null,
+			"worn": true,
+			"scene": false,
+			"may_play": true
+		}
+	},
+	{
+		"name": "day_diwali",
+		"payload": {
+			"v": 1,
+			"date": "2026-11-08",
+			"tz": "Asia/Kolkata",
+			"kind": "day",
+			"design": "diwali",
+			"occasion": "diwali",
+			"year": null,
+			"worn": true,
+			"scene": true,
+			"may_play": true
+		}
+	},
+	{
+		"name": "day_second_day",
+		"payload": {
+			"v": 1,
+			"date": "2026-11-10",
+			"tz": "Asia/Kolkata",
+			"kind": "day",
+			"design": "diwali",
+			"occasion": "diwali",
+			"year": null,
+			"worn": true,
+			"scene": false,
+			"may_play": true
+		}
+	},
+	{
+		"name": "day_may_not_play",
+		"payload": {
+			"v": 1,
+			"date": "2026-11-08",
+			"tz": "Asia/Kolkata",
+			"kind": "day",
+			"design": "diwali",
+			"occasion": "diwali",
+			"year": null,
+			"worn": true,
+			"scene": true,
+			"may_play": false
+		}
+	},
+	{
+		"name": "day_republic",
+		"payload": {
+			"v": 1,
+			"date": "2026-01-26",
+			"tz": "Asia/Kolkata",
+			"kind": "day",
+			"design": "independence",
+			"occasion": "republic",
+			"year": null,
+			"worn": true,
+			"scene": true,
+			"may_play": true
+		}
+	},
+	{
+		"name": "birthday",
+		"payload": {
+			"v": 1,
+			"date": "2026-11-08",
+			"tz": "Asia/Kolkata",
+			"kind": "birthday",
+			"design": "birthday",
+			"occasion": "birthday",
+			"year": null,
+			"worn": true,
+			"scene": true,
+			"may_play": true
+		}
+	},
+	{
+		"name": "white_label_day",
+		"payload": {
+			"v": 1,
+			"date": "2026-11-08",
+			"tz": "Asia/Kolkata",
+			"kind": "day",
+			"design": "diwali",
+			"occasion": "diwali",
+			"year": null,
+			"worn": false,
+			"scene": false,
+			"may_play": true
+		}
+	},
+	{
+		"name": "newyear",
+		"payload": {
+			"v": 1,
+			"date": "2027-01-01",
+			"tz": "Asia/Kolkata",
+			"kind": "day",
+			"design": "newyear",
+			"occasion": "newyear",
+			"year": 2027,
+			"worn": true,
+			"scene": true,
+			"may_play": true
+		}
+	}
+]

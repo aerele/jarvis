@@ -5,7 +5,7 @@ import { reactive, effect, stop } from "vue";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createPendingSends, planRejectedSend, injectPendingBubbles } from "./voiceSendGlue.js";
-import { deliveryFailureCopy } from "../lib/sendDelivery.js";
+import { deliveryFailureCopy, deliveryTimeoutError } from "../lib/sendDelivery.js";
 import { stampDeltaTime } from "../lib/replyBar.js";
 import { firstSendPicks } from "../lib/firstSendPicks.js";
 import { heldNewestSeq, mergeNewestPage, refreshNames } from "../lib/historyPaging.js";
@@ -24,6 +24,7 @@ function harness(pendingStore) {
 	const s = Object.fromEntries(
 		[...body.matchAll(/\b(\w+)\.value\b/g)].map((m) => [m[1], { value: null }])
 	);
+	let viewGeneration = 0;
 	const calls = [],
 		errors = [];
 	const noop = () => {};
@@ -35,6 +36,10 @@ function harness(pendingStore) {
 		mergeNewestPage,
 		refreshNames,
 		deliveryFailureCopy,
+		deliveryTimeoutError,
+		DELIVERY_TOAST: "Delivery not confirmed. See the note under your message.",
+		SEND_DEADLINE_MS: 30000,
+		CHECK_DEADLINE_MS: 15000,
 		toLocalMs: (value) => Date.parse(value),
 		RUN_ENDED_STATES: new Set(["done", "failed", "cancelled"]),
 		stepsFromTexts: () => [],
@@ -56,6 +61,17 @@ function harness(pendingStore) {
 		},
 		_pendingSends: pendingStore || createPendingSends(),
 		_currentScope: () => s.currentId.value || "NEW",
+		captureChatView: () => ({
+			generation: viewGeneration,
+			conversation: s.currentId.value,
+		}),
+		chatViewIsCurrent: (view) =>
+			!!view &&
+			view.generation === viewGeneration &&
+			view.conversation === s.currentId.value,
+		// This harness isolates delivery state. Its fixture rows are not mounted in
+		// `messages`, so view identity is the relevant part of the message gate.
+		messageActionIsCurrent: (view) => s.chatViewIsCurrent(view),
 		dismissFeedback: noop,
 		notify: noop,
 		notifyActionError: (_label, error) => errors.push(error),
@@ -97,6 +113,7 @@ function harness(pendingStore) {
 		router: { replace: noop },
 		_checkPulseOnce: noop,
 		onTypedConfirmResolved: async () => {
+			s.typedConfirmCalls = (s.typedConfirmCalls || 0) + 1;
 			if (s.failReload) throw new Error("reload failed");
 		},
 		api: {
@@ -149,6 +166,10 @@ function harness(pendingStore) {
 		f,
 		calls,
 		errors,
+		switchView(id) {
+			viewGeneration++;
+			s.currentId.value = id;
+		},
 		failed: () => s._pendingSends.peek(s._currentScope()).find((m) => m.failed),
 	};
 }
@@ -551,6 +572,70 @@ test("confirmed approval remains settled when transcript refresh fails", async (
 	assert.equal(s.sending.value, false);
 });
 
+test("late typed confirmation does not clear or load a newer chat", async () => {
+	const h = harness();
+	let resolve;
+	h.s.api.sendMessage = () =>
+		new Promise((done) => {
+			resolve = done;
+		});
+	const sending = h.f.send();
+	await new Promise((done) => setImmediate(done));
+	h.switchView("B");
+	h.s.messages.value = [{ name: "b-receipt", role: "tool" }];
+	h.s.pendingActions.value = [{ token: "b-token", conversation: "B" }];
+	h.s.sending.value = true;
+	h.s.waiting.value = true;
+
+	resolve({
+		ok: true,
+		confirmed: true,
+		conversation_id: "A",
+		tokens: ["approval-1"],
+		queued: true,
+	});
+	await sending;
+
+	assert.deepEqual(h.s.messages.value, [{ name: "b-receipt", role: "tool" }]);
+	assert.deepEqual(h.s.pendingActions.value, [{ token: "b-token", conversation: "B" }]);
+	assert.equal(h.s.sending.value, true);
+	assert.equal(h.s.waiting.value, true);
+	assert.equal(h.s.typedConfirmCalls, undefined);
+});
+
+test("late accepted send does not change a newer chat's controls", async () => {
+	const h = harness();
+	let resolve;
+	h.s.api.sendMessage = () =>
+		new Promise((done) => {
+			resolve = done;
+		});
+	const sending = h.f.send();
+	await new Promise((done) => setImmediate(done));
+	h.switchView("B");
+	h.s.messages.value = [{ name: "b-message", role: "assistant", content: "B" }];
+	h.s.pendingActions.value = [{ token: "b-token", conversation: "B" }];
+	h.s.queuedTurn.value = { run_id: "b-run", position: 2 };
+	h.s.sending.value = true;
+	h.s.waiting.value = true;
+
+	resolve({
+		ok: true,
+		conversation_id: "A",
+		message_id: "a-message",
+		queued: true,
+		tokens: ["b-token"],
+		older_cards_waiting: true,
+	});
+	await sending;
+
+	assert.deepEqual(h.s.messages.value, [{ name: "b-message", role: "assistant", content: "B" }]);
+	assert.deepEqual(h.s.pendingActions.value, [{ token: "b-token", conversation: "B" }]);
+	assert.deepEqual(h.s.queuedTurn.value, { run_id: "b-run", position: 2 });
+	assert.equal(h.s.sending.value, true);
+	assert.equal(h.s.waiting.value, true);
+});
+
 test("late delivery updates reactive bubble observers without unrelated UI changes", async () => {
 	const h = harness();
 	let finish;
@@ -789,8 +874,18 @@ function eventsHarness() {
 	const s = Object.fromEntries(
 		[...body.matchAll(/\b(\w+)\.value\b/g)].map((m) => [m[1], { value: null }])
 	);
+	let viewGeneration = 0;
 	Object.assign(s, {
 		currentId: { value: "A" },
+		captureChatView: (token = "") => ({
+			generation: viewGeneration,
+			conversation: s.currentId.value,
+			token,
+		}),
+		chatViewIsCurrent: (view) =>
+			!!view &&
+			view.generation === viewGeneration &&
+			view.conversation === s.currentId.value,
 		messages: { value: [] },
 		stoppedMsgIds: { value: new Set() },
 		activeTools: { value: [] },
@@ -825,7 +920,14 @@ function eventsHarness() {
 	const f = new Function(...Object.keys(s), body + "\nreturn {onEvent,stopRun};")(
 		...Object.values(s)
 	);
-	return { s, ...f };
+	return {
+		s,
+		...f,
+		switchView(id) {
+			viewGeneration++;
+			s.currentId.value = id;
+		},
+	};
 }
 for (const kind of ["run:start", "assistant:delta"])
 	test(`a late ${kind} restores actionable Stop after the delivery timeout`, async () => {

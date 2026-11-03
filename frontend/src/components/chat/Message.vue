@@ -720,7 +720,8 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 }
 /* Auto-linked document IDs → open the record in ERPNext Desk. Dashed underline
    marks them as record links, distinct from plain markdown links. */
-.jv-md-body.jv-md :deep(.jv-doclink) {
+.jv-md-body.jv-md :deep(.jv-doclink),
+.jv-md-body.jv-md :deep(.jv-md-link[href^="/app/"]) {
 	color: var(--cta);
 	text-decoration: none;
 	font-weight: 550;
@@ -728,7 +729,8 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 	cursor: pointer;
 	transition: background 0.12s;
 }
-.jv-md-body.jv-md :deep(.jv-doclink:hover) {
+.jv-md-body.jv-md :deep(.jv-doclink:hover),
+.jv-md-body.jv-md :deep(.jv-md-link[href^="/app/"]:hover) {
 	border-bottom-style: solid;
 	background: var(--cta-bg);
 	border-radius: 3px;

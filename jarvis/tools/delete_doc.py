@@ -35,6 +35,9 @@ from jarvis.tools._bulk import run_atomic_batch
 def _delete_one(doctype: str, name: str) -> str:
 	"""Guards + delete for ONE doc. Returns the deleted name. Shared by the
 	single and batch paths so the guards never drift."""
+	from jarvis.tools._delegate_write_caps import enforce_closed_agent_direct_write
+
+	enforce_closed_agent_direct_write("delete", doctype)
 	if not frappe.has_permission(doctype, ptype="delete", doc=name):
 		raise PermissionDeniedError(f"no delete permission on {doctype} '{name}'")
 

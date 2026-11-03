@@ -12,6 +12,23 @@ from jarvis.tools._report_scope import _assert_company_readable
 REPORTS = {"Payable": "Accounts Payable", "Receivable": "Accounts Receivable"}
 
 
+def row_filter_columns(columns):
+	"""Columns for Frappe's per-row report filter, without the Link-to-DocType ones.
+
+	ERPNext (15.124.2 and later) types the AP/AR party_type and voucher_type columns as
+	Link to "DocType" (they were Data). get_filtered_data then asks for a read match
+	condition on DocType itself and raises "No permission to read DocType" for any user
+	who is not a System Manager. A DocType name carries no row-level scope; the real
+	party and voucher visibility is applied by visible_names, so these columns are
+	filtered as the Data columns they used to be."""
+	return [
+		{**col, "fieldtype": "Data", "options": None}
+		if col.get("fieldtype") == "Link" and col.get("options") == "DocType"
+		else col
+		for col in columns
+	]
+
+
 def require_company(company: str) -> dict:
 	if not isinstance(company, str) or not company:
 		raise frappe.ValidationError("Choose a company.")

@@ -15,6 +15,7 @@ from jarvis.permissions import NotRenamable, has_jarvis_admin_access
 # (or a doc carrying ``flags.jarvis_server_write``). No Admin/SM exemption (M12).
 _FILEBOX_SERVER_FIELDS = (
 	"filebox_source_file",
+	"filebox_active_source_file",
 	"filebox_result_doctype",
 	"filebox_result_name",
 	"filebox_result_count",
@@ -47,6 +48,9 @@ class JarvisConversation(NotRenamable, Document):
 			self.status = "Active"
 
 	def validate(self):
+		from jarvis.chat.collaboration import guard_server_fields
+
+		guard_server_fields(self, ("collaboration_active", "collaboration_epoch"))
 		self._guard_file_box_server_fields()
 		self._guard_file_box_enable()
 		self._guard_skip_confirmation_enable()
