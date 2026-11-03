@@ -1,0 +1,31 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-10-24 00:00:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": ["company", "currency", "safety_floor", "revision"],
+ "fields": [
+  {"fieldname": "company", "fieldtype": "Link", "label": "Company", "options": "Company", "reqd": 1, "unique": 1, "in_list_view": 1},
+  {"fieldname": "currency", "fieldtype": "Link", "label": "Currency", "options": "Currency", "read_only": 1},
+  {"fieldname": "safety_floor", "fieldtype": "Currency", "label": "Minimum Cash Balance", "options": "currency", "reqd": 1, "in_list_view": 1},
+  {"fieldname": "revision", "fieldtype": "Int", "label": "Revision", "default": "0", "read_only": 1}
+ ],
+ "links": [],
+ "modified": "2026-10-24 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Payment Calendar Settings",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1},
+  {"role": "Accounts Manager", "read": 1, "write": 1, "create": 1}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1,
+ "title_field": "company"
+}

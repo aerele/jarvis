@@ -27,6 +27,7 @@ import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
 import { isShowCardRequest } from "../lib/showCardRequest.js";
 import { isImeKey } from "../lib/composerEnter.js";
+import { advanceViewGeneration, isViewCurrent } from "../lib/viewGeneration.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
@@ -41,7 +42,13 @@ import {
 import { spanBetween } from "../lib/time";
 import { proposedLabel } from "../lib/cardAge.js";
 import { sortPendingCards } from "../lib/sortPendingCards.js";
-import { mergePendingSources, withExcluded } from "../lib/pendingResync.js";
+import {
+	admitRealtimePendingCards,
+	mergePendingSources,
+	pendingActionsFromRows,
+	settleSafetyUpdate,
+	withExcluded,
+} from "../lib/pendingResync.js";
 import {
 	heldNewestSeq,
 	mergeNewestPage,
@@ -152,13 +159,76 @@ const ignoredRuns = ref(new Set());
 // singleton is what actually delivers "the terminal marker outlives the view".
 
 const decision = ref(null);
+// The sheet can outlive an RPC. Bind every callback to the view that opened it
+// so a late A response cannot settle or close B after a route switch.
+const decisionContext = ref(null);
 // The token whose Confirm/Discard RPC is currently in flight in the open
 // DecisionSheet (P0c). While set, loadPending's fresh reads must not re-show
 // its card: the RPC's own response already removed it, but a resync request
 // issued just before the RPC committed can still return the token as live.
 const inflightToken = ref(null);
-function onDecisionBusy(busy) {
-	inflightToken.value = busy ? decision.value && decision.value.token : null;
+function decisionIsCurrent(token, conversation, generation) {
+	return (
+		!!token &&
+		decisionContext.value?.token === token &&
+		decisionContext.value?.conversation === conversation &&
+		decisionContext.value?.generation === generation &&
+		isCurrent(conversation, generation)
+	);
+}
+function openDecision(card) {
+	if (!card?.token || !isCurrent(card.conversation, viewGeneration)) return;
+	decisionContext.value = {
+		token: card.token,
+		conversation: card.conversation,
+		generation: viewGeneration,
+	};
+	decision.value = card;
+}
+function clearDecision() {
+	decision.value = null;
+	decisionContext.value = null;
+}
+function settleSafetyUpdateInView(token) {
+	const update = settleSafetyUpdate(
+		pending.value,
+		settledTokens.value,
+		safetyNoticeTokens.value,
+		token
+	);
+	pending.value = update.pending;
+	settledTokens.value = update.settledTokens;
+	safetyNoticeTokens.value = update.safetyNoticeTokens;
+	return update.newlySettled;
+}
+function onDecisionClose(token, conversation, generation) {
+	// Sheet close is also asynchronous: an old A sheet can finish its close
+	// transition after B has opened a different sheet. Only its own view may
+	// remove the decision that is currently displayed.
+	if (!decisionIsCurrent(token, conversation, generation)) return;
+	clearDecision();
+}
+function onDecisionBusy(busy, token, conversation, generation) {
+	if (busy) {
+		if (!decisionIsCurrent(token, conversation, generation)) return;
+		inflightToken.value = token;
+		return;
+	}
+	// A successful resolve clears decisionContext before the RPC's finally
+	// emits busy:false. It still belongs to this exact view, so clear only its
+	// matching in-flight token. A late A event after a switch cannot pass the
+	// generation and conversation check.
+	if (isCurrent(conversation, generation) && inflightToken.value === token)
+		inflightToken.value = null;
+}
+function onDecisionSettled(token, conversation, generation) {
+	// A safety update spends its token but leaves DecisionSheet open until Done.
+	// Its old transcript row can still say pending, so retain the exclusion after
+	// the RPC's busy guard clears and after the person acknowledges the notice.
+	// Remove the matching card now as well: the terminal sheet is the only
+	// actionable surface until Done, while independent safe siblings stay visible.
+	if (!decisionIsCurrent(token, conversation, generation)) return;
+	settleSafetyUpdateInView(token);
 }
 // D1: tokens a typed "no" discarded (send()'s discardedTokens, below). The
 // discard only filters pending.value; messages.value keeps tool_status
@@ -167,6 +237,65 @@ function onDecisionBusy(busy) {
 // the card from it. Persists past the single RPC inflightToken covers -
 // reset only on a conversation switch (below).
 const settledTokens = ref(new Set());
+// Typed discard uses settledTokens to keep its card out of stale reads. Keep
+// safety receipts separate: a later safety update still needs its one Done
+// explanation even if an old typed decision already excluded this token.
+const safetyNoticeTokens = ref(new Set());
+// A passive close migration can remove a cached card before the person clicks
+// it. Keep one terminal explanation outside the approval sheet: it has only
+// Done, never Confirm, Discard, or Retry.
+const safetyUpdateNotice = ref(null);
+// Several pre-close cards can be cancelled together. Keep every terminal
+// receipt in order so Done acknowledges one result at a time without making a
+// later cancellation silent until another transcript reload happens.
+const safetyUpdateQueue = ref([]);
+const SAFETY_UPDATE_COPY =
+	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
+function passiveSafetyUpdate(row) {
+	if (row?.role !== "tool" || row.action_outcome !== "cancelled" || !row.tool_call_id)
+		return null;
+	let result = row.tool_result;
+	if (typeof result === "string") {
+		try {
+			result = JSON.parse(result);
+		} catch {
+			return null;
+		}
+	}
+	if (result?.reason_code !== "safety_update") return null;
+	return {
+		token: row.tool_call_id,
+		message: result?.error?.message || SAFETY_UPDATE_COPY,
+	};
+}
+function enqueueSafetyUpdateNotice(notice) {
+	if (!safetyUpdateNotice.value) {
+		safetyUpdateNotice.value = notice;
+		return;
+	}
+	safetyUpdateQueue.value = [...safetyUpdateQueue.value, notice];
+}
+function observePassiveSafetyUpdates(rows) {
+	for (const row of rows || []) {
+		const notice = passiveSafetyUpdate(row);
+		if (!notice) continue;
+		const newlySettled = settleSafetyUpdateInView(notice.token);
+		if (!newlySettled) continue;
+		// A list response may have admitted this card before its terminal
+		// transcript receipt arrived. Remove it at once so a queued receipt can
+		// never leave Confirm or Discard controls on screen while it waits.
+		// The sheet holds a separate card object. A passive cancellation must close
+		// its matching sheet too. A direct sheet cancellation is already in
+		// settledTokens and takes the continue above, so it keeps its own Done
+		// result without adding a duplicate receipt here.
+		if (decision.value?.token === notice.token) clearDecision();
+		enqueueSafetyUpdateNotice(notice);
+	}
+}
+function dismissSafetyUpdateNotice() {
+	safetyUpdateNotice.value = safetyUpdateQueue.value[0] || null;
+	safetyUpdateQueue.value = safetyUpdateQueue.value.slice(1);
+}
 const preview = ref(null);
 const voiceOpen = ref(false);
 const menuOpen = ref(false);
@@ -286,12 +415,13 @@ async function refreshQueue() {
 }
 async function cancelWaiting() {
 	const cid = convId.value;
+	const generation = viewGeneration;
 	const q = queuedTurn.value;
 	if (!q || q.cancelling) return;
 	q.cancelling = true;
 	try {
 		const result = await boundedRead(api.cancelQueuedTurn(q.run_id));
-		if (recoveryState.queued[cid] !== q) return;
+		if (!isCurrent(cid, generation) || recoveryState.queued[cid] !== q) return;
 		if (result?.ok) {
 			queueGeneration++;
 			recoveryState.observedRuns[q.run_id] = true;
@@ -299,16 +429,17 @@ async function cancelWaiting() {
 			if (cid === convId.value) load();
 		} else q.note = "This request may have started. Check its status before trying again.";
 	} catch {
+		if (!isCurrent(cid, generation)) return;
 		q.note = "Cancellation is not confirmed. Check status before trying again.";
 	} finally {
-		q.cancelling = false;
+		if (isCurrent(cid, generation) && recoveryState.queued[cid] === q) q.cancelling = false;
 	}
 }
 let viewActive = true;
 let viewGeneration = 0;
 let loadGeneration = 0;
 const isCurrent = (cid, generation) =>
-	viewActive && cid === convId.value && generation === viewGeneration;
+	viewActive && isViewCurrent(generation, cid, viewGeneration, convId.value);
 
 function saveDraft() {
 	recoveryState.drafts[convId.value] = {
@@ -466,10 +597,11 @@ function onScroll() {
 // While streaming the reply grows downward and you scroll at your own pace; a
 // forced scroll (open / send / stop) always lands, and once the turn ends normal
 // follow resumes so late content still keeps a bottom-parked reader pinned.
-async function scrollToBottom(force = false) {
+async function scrollToBottom(force = false, stillCurrent = () => true) {
 	const stick = force || (follow.value && !live.value);
 	await nextTick();
-	if (stick && scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight;
+	if (stillCurrent() && stick && scroller.value)
+		scroller.value.scrollTop = scroller.value.scrollHeight;
 }
 
 // ── loading ─────────────────────────────────────────────────────────────────
@@ -496,6 +628,7 @@ async function load(force = false, staleRetry = true) {
 		messages.value = page.messages;
 		historyPaging.value = page.paging;
 		olderPending.value = d?.older_pending || [];
+		observePassiveSafetyUpdates([...page.messages, ...olderPending.value]);
 		sendRecovery.reconcile(cid, messages.value);
 		const row = store.conversations.find((c) => c.name === convId.value);
 		if (row) starred.value = !!row.starred;
@@ -519,15 +652,18 @@ async function load(force = false, staleRetry = true) {
 			// A status read started before this transcript must not restore a queue.
 			queueGeneration++;
 		}
-		await scrollToBottom(force);
+		await scrollToBottom(force, current);
+		if (!current()) return;
 		// An older page loaded while this read was in flight brought pending cards it
 		// did not ask about: refresh once more so none stays confirmable once resolved.
 		if (page.stale.length && staleRetry) load(false, false);
 	} catch (e) {
 		console.error("Jarvis PWA: failed to load conversation", e);
 	} finally {
-		if (current()) loading.value = false;
-		armOlderNextFrame();
+		if (current()) {
+			loading.value = false;
+			armOlderNextFrame(current);
+		}
 	}
 }
 
@@ -541,9 +677,10 @@ const OLDER_RETRY_PAUSE_MS = 10000;
 // prepend's hold to be applied: the scrollTop of those in-between frames is not
 // the reader's.
 let olderArmed = false;
-function armOlderNextFrame() {
+
+function armOlderNextFrame(stillCurrent = () => true) {
 	requestAnimationFrame(() => {
-		olderArmed = true;
+		if (stillCurrent()) olderArmed = true;
 	});
 }
 async function loadOlder({ auto = false } = {}) {
@@ -562,50 +699,28 @@ async function loadOlder({ auto = false } = {}) {
 		const page = prependOlderPage(messages.value, historyPaging.value, d);
 		messages.value = page.messages;
 		historyPaging.value = page.paging;
+		observePassiveSafetyUpdates(page.messages);
 		await nextTick();
+		if (!isCurrent(cid, generation)) return;
 		const hold = () => {
 			if (scroller.value && fromBottom !== null)
 				scroller.value.scrollTop = scroller.value.scrollHeight - fromBottom;
 		};
 		hold();
-		requestAnimationFrame(hold); // again once late layout (charts, images) lands
-		armOlderNextFrame();
+		requestAnimationFrame(() => {
+			if (isCurrent(cid, generation)) hold();
+		}); // again once late layout (charts, images) lands
+		armOlderNextFrame(() => isCurrent(cid, generation));
 	} catch (e) {
 		console.error("Jarvis PWA: failed to load earlier messages", e);
-		olderFailedAt = Date.now();
-		if (isCurrent(cid, generation))
+		if (isCurrent(cid, generation)) {
+			olderFailedAt = Date.now();
 			errorBanner.value =
 				"Couldn't load earlier messages. Tap Load earlier messages to try again.";
+		}
 	} finally {
-		loadingOlder.value = false;
+		if (isCurrent(cid, generation)) loadingOlder.value = false;
 	}
-}
-
-// PR-1: build a confirm-card item from a durable pending action-row (role="tool",
-// tool_status="pending"), mirroring the SPA. pendingCardOf reads preview.card.
-function _rowExpiresEpoch(s) {
-	if (!s) return null;
-	// The row's expires_at is a site-timezone datetime string; parse to epoch seconds
-	// (best-effort - a live push carries the authoritative epoch and the server
-	// enforces the real TTL, so null just omits the client countdown).
-	const t = Date.parse(String(s).replace(" ", "T"));
-	return Number.isFinite(t) ? Math.round(t / 1000) : null;
-}
-function pendingActionFromRow(m, cid) {
-	return {
-		conversation: cid,
-		token: m.tool_call_id,
-		tool: m.tool_name,
-		summary: "",
-		preview: { card: m.pending_card },
-		run_id: null,
-		// Server epoch on every pending row (a legacy one: its own creation); never a
-		// local-time parse (sortPendingCards falls back to expires_at when null).
-		created_at: m.created_at ?? null,
-		expires_at: _rowExpiresEpoch(m.expires_at),
-		seq: m.seq ?? null,
-		recent: m.recent !== false,
-	};
 }
 
 // Parked writes survive a reload: re-ask rather than leaving an approval the user
@@ -626,16 +741,12 @@ async function recheckPending() {
 
 async function loadPending(source) {
 	const cid = convId.value;
+	const generation = viewGeneration;
 	if (!cid) return;
-	const fromRows = [...olderPending.value, ...(messages.value || [])]
-		.filter(
-			(m) =>
-				m.role === "tool" &&
-				m.tool_status === "pending" &&
-				m.pending_card &&
-				m.tool_call_id
-		)
-		.map((m) => pendingActionFromRow(m, cid));
+	const fromRows = pendingActionsFromRows(
+		[...olderPending.value, ...(messages.value || [])],
+		cid
+	);
 	let fromBackstop = null; // null = backstop read failed/unavailable (a transient blip)
 	try {
 		const r = await api.listPendingConfirmations(cid, source);
@@ -643,13 +754,16 @@ async function loadPending(source) {
 		// missing/malformed body leaves fromBackstop null so we KEEP the on-screen queue
 		// rather than wipe a live-only card (the fail-closed hole the SPA guards). This
 		// helper is also the open-seed path, so durable rows below always apply.
-		if (r?.ok && r.data) fromBackstop = r.data.pending.filter((p) => p.conversation === cid);
+		if (r?.ok && Array.isArray(r?.data?.pending))
+			fromBackstop = r.data.pending.filter(
+				(p) => p?.conversation === cid && p.pending_card_safe === true
+			);
 	} catch {
 		/* leave null: durable rows still apply, live cards kept */
 	}
 	// A resync in flight across a conversation switch must not write the previous
 	// conversation's cards onto the new one (freshness guard, mirrors the SPA).
-	if (convId.value !== cid) return;
+	if (!isCurrent(cid, generation)) return;
 	// On a blip keep the current cards; on a clean read the server list is authoritative
 	// for this conversation (resolved cards drop). Durable rows always apply. Either
 	// fresh source is excluded from re-adding a token whose Confirm/Discard RPC is
@@ -660,7 +774,19 @@ async function loadPending(source) {
 		settledTokens.value,
 		inflightToken.value ? [inflightToken.value] : []
 	);
-	pending.value = mergePendingSources(base, [fromRows, fromBackstop || []], inflight);
+	const next = mergePendingSources(base, [fromRows, fromBackstop || []], inflight);
+	const removedByCleanResync =
+		fromBackstop !== null &&
+		pending.value.some(
+			(card) =>
+				card?.conversation === cid &&
+				!next.some((candidate) => candidate?.token === card.token) &&
+				!inflight.has(card.token)
+		);
+	pending.value = next;
+	// A clean resync can be the first evidence of a passive close. Reload the
+	// transcript once so its terminal safety receipt gets the Done-only notice.
+	if (removedByCleanResync) load();
 }
 
 // Auto-heal (layered design, phase 1): recover a card the live push dropped with NO user
@@ -755,7 +881,7 @@ async function send() {
 	saveDraft();
 	// Capture/send before awaiting scroll; routing never changes the payload.
 	const completion = dispatchRequest(request);
-	await scrollToBottom(true);
+	await scrollToBottom(true, () => isCurrent(cid, generation));
 	if (isCurrent(cid, generation)) follow.value = false;
 	await completion;
 }
@@ -1039,8 +1165,10 @@ watch(
 
 async function stop() {
 	if (queuedTurn.value && !live.value) return cancelWaiting();
-	const runId = live.value?.runId || recoveryState.starting[convId.value] || "";
-	delete recoveryState.starting[convId.value];
+	const cid = convId.value;
+	const generation = viewGeneration;
+	const runId = live.value?.runId || recoveryState.starting[cid] || "";
+	delete recoveryState.starting[cid];
 	if (runId) recoveryState.observedRuns[runId] = true;
 	// Ignore anything still arriving for this run: the backend may well finish
 	// the turn anyway, and a reply the user stopped must not reappear.
@@ -1048,11 +1176,11 @@ async function stop() {
 	live.value = null;
 	sendBusy.value = false;
 	try {
-		await api.stopRun(convId.value, runId);
+		await api.stopRun(cid, runId);
 	} catch {
 		// Best-effort: the UI stop stands even if the turn finishes server-side.
 	}
-	load();
+	if (isCurrent(cid, generation)) load();
 }
 
 // ── attachments ─────────────────────────────────────────────────────────────
@@ -1075,12 +1203,18 @@ async function attach(files) {
 		staged.map(async (a) => {
 			try {
 				const up = await api.uploadFile(a.file);
+				// `target` belongs to the draft that started this upload. A route
+				// switch replaces `attachments.value`, so completing this captured row
+				// cannot paint another chat. Keep the draft live rather than returning
+				// to A with an upload that stays stuck forever.
 				const row = target.find((x) => x.key === a.key);
 				if (row) {
 					row.file_url = up.file_url;
 					row.uploading = false;
 				}
 			} catch (e) {
+				// Remove the failed captured draft row even off-view. Only the visible
+				// banner is view-bound; a B chat must never receive A's error.
 				const index = target.findIndex((x) => x.key === a.key);
 				if (index !== -1) {
 					if (target[index].preview) URL.revokeObjectURL(target[index].preview);
@@ -1118,12 +1252,16 @@ function onTranscript(text) {
 
 // ── conversation menu ───────────────────────────────────────────────────────
 async function toggleStar() {
+	const generation = viewGeneration;
+	const cid = convId.value;
 	const next = !starred.value;
 	starred.value = next;
 	try {
-		await api.setStar(convId.value, next);
+		await api.setStar(cid, next);
+		if (!isCurrent(cid, generation)) return;
 		store.loadConversations();
 	} catch {
+		if (!isCurrent(cid, generation)) return;
 		starred.value = !next;
 	}
 }
@@ -1135,16 +1273,20 @@ function onRenameEnter(e) {
 }
 
 async function saveRename() {
+	const generation = viewGeneration;
+	const cid = convId.value;
 	const t = renameText.value.trim();
 	if (!t) return;
 	menuError.value = "";
 	try {
-		await api.renameConversation(convId.value, t);
+		await api.renameConversation(cid, t);
+		if (!isCurrent(cid, generation)) return;
 		if (conversation.value) conversation.value.title = t;
-		store.applyRename(convId.value, t);
+		store.applyRename(cid, t);
 		renaming.value = false;
 		menuOpen.value = false;
 	} catch (e) {
+		if (!isCurrent(cid, generation)) return;
 		menuError.value = e?.message || "Couldn't rename this chat.";
 	}
 }
@@ -1155,6 +1297,8 @@ async function saveRename() {
 function onEvent(p) {
 	const conv = p.conversation_id || p.conversation;
 	if (conv !== convId.value) return;
+	const generation = viewGeneration;
+	const current = () => isCurrent(conv, generation);
 	const ignored = p.run_id ? ignoredRuns.value.has(p.run_id) : false;
 
 	// JF-018: fence out a superseded pump's straggler before it touches anything.
@@ -1207,7 +1351,7 @@ function onEvent(p) {
 				live.value = { runId: p.run_id || "", messageId: "", text: "", tools: [] };
 			live.value.messageId = p.message_id || live.value.messageId;
 			live.value.text = p.text || "";
-			scrollToBottom();
+			scrollToBottom(false, current);
 			break;
 
 		case "tool:start": {
@@ -1220,7 +1364,7 @@ function onEvent(p) {
 				toolName: p.tool_name,
 				status: "running",
 			});
-			scrollToBottom();
+			scrollToBottom(false, current);
 			break;
 		}
 
@@ -1239,28 +1383,14 @@ function onEvent(p) {
 			// turn-end WITHOUT a manual reload. Deduped by token; a conv-less token ("")
 			// binds to this conversation, mirroring the action:pending case below. Skip a
 			// run the user STOPPED - its cards were swept server-side; don't resurrect them.
-			if (!ignored && Array.isArray(p.pending)) {
-				for (const card of p.pending) {
-					if (
-						!card.token ||
-						card.token === inflightToken.value ||
-						pending.value.some((x) => x.token === card.token)
-					)
-						continue;
-					pending.value.push({
-						token: card.token,
-						tool: card.tool || "",
-						summary: card.summary || "",
-						preview: card.preview ?? null,
-						conversation: card.conversation || conv,
-						run_id: card.run_id,
-						created_at: card.created_at ?? null,
-						expires_at: card.expires_at ?? null,
-						seq: card.seq ?? null,
-						recent: card.recent !== false,
-					});
-				}
-			}
+			if (!ignored)
+				pending.value = admitRealtimePendingCards(
+					pending.value,
+					p,
+					settledTokens.value,
+					inflightToken.value,
+					conv
+				);
 			// The reply is durable now; reconcile against it (canvas items, final
 			// formatting) instead of trusting the streamed copy.
 			load();
@@ -1279,55 +1409,33 @@ function onEvent(p) {
 			// must still auto-recover — drain p.pending here too, not only on run:end.
 			// Deduped by token; a conv-less token ("") binds to this conversation; a
 			// user-STOPPED run is skipped (its cards were swept server-side).
-			if (!ignored && Array.isArray(p.pending)) {
-				for (const card of p.pending) {
-					if (
-						!card.token ||
-						card.token === inflightToken.value ||
-						pending.value.some((x) => x.token === card.token)
-					)
-						continue;
-					pending.value.push({
-						token: card.token,
-						tool: card.tool || "",
-						summary: card.summary || "",
-						preview: card.preview ?? null,
-						conversation: card.conversation || conv,
-						run_id: card.run_id,
-						created_at: card.created_at ?? null,
-						expires_at: card.expires_at ?? null,
-						seq: card.seq ?? null,
-						recent: card.recent !== false,
-					});
-				}
-			}
+			if (!ignored)
+				pending.value = admitRealtimePendingCards(
+					pending.value,
+					p,
+					settledTokens.value,
+					inflightToken.value,
+					conv
+				);
 			load();
 			break;
 
-		case "action:pending":
-			if (
-				!p.token ||
-				p.token === inflightToken.value ||
-				pending.value.some((x) => x.token === p.token)
-			)
-				return;
-			pending.value.push({
-				token: p.token,
-				tool: p.tool || "",
-				summary: p.summary || "",
-				preview: p.preview ?? null,
-				conversation: conv,
-				run_id: p.run_id,
-				created_at: p.created_at ?? null,
-				expires_at: p.expires_at ?? null,
-				seq: p.seq ?? null,
-				recent: p.recent !== false,
-			});
-			scrollToBottom();
+		case "action:pending": {
+			const before = pending.value.length;
+			pending.value = admitRealtimePendingCards(
+				pending.value,
+				p,
+				settledTokens.value,
+				inflightToken.value,
+				conv
+			);
+			if (pending.value.length === before) return;
+			scrollToBottom(false, current);
 			// This push arrived; keep polling so a SIBLING card whose push was dropped
 			// in the same turn still self-heals (mirrors the desktop SPA).
 			startPendingPoll();
 			break;
+		}
 
 		case "canvas":
 		case "conversation:renamed":
@@ -1354,9 +1462,10 @@ function onEvent(p) {
 	}
 }
 
-function onResolved(token, kind) {
+function onResolved(token, kind, conversation, generation) {
+	if (!decisionIsCurrent(token, conversation, generation)) return;
 	pending.value = pending.value.filter((p) => p.token !== token);
-	decision.value = null;
+	if (decision.value?.token === token) clearDecision();
 	// A real discard (P0c: Deny now calls dismiss_tool) leaves a durable
 	// "discarded" receipt chip, but dismiss_tool fires no agent turn - so
 	// unlike Approve (whose continuation's run:start/run:end already reloads),
@@ -1375,7 +1484,7 @@ watch(
 	() => props.id,
 	(id) => {
 		saveDraft();
-		viewGeneration++;
+		viewGeneration = advanceViewGeneration(viewGeneration);
 		queueGeneration++;
 		loadGeneration++;
 		convId.value = id === "new" ? "" : id;
@@ -1384,9 +1493,17 @@ watch(
 		messages.value = [];
 		historyPaging.value = { hasMore: false, before: null, newest: null };
 		olderPending.value = [];
+		loadingOlder.value = false;
+		olderArmed = false;
+		olderFailedAt = 0;
 		conversation.value = null;
 		pending.value = [];
+		clearDecision();
+		inflightToken.value = null;
 		settledTokens.value = new Set(); // a settled token belonged to the previous conversation
+		safetyNoticeTokens.value = new Set();
+		safetyUpdateNotice.value = null;
+		safetyUpdateQueue.value = [];
 		olderCardsNote.value = false; // the note was about the previous conversation's cards
 		live.value = null;
 		sendBusy.value = false;
@@ -1395,7 +1512,10 @@ watch(
 		stopPendingPoll(); // a poll from the previous conversation must not carry over
 		load(true);
 		loadPending();
-	}
+	},
+	// Route changes normally happen in separate ticks, but a programmatic A → B
+	// → A must still consume two generations before an old response can land.
+	{ flush: "sync" }
 );
 
 onMounted(async () => {
@@ -1424,7 +1544,7 @@ onMounted(async () => {
 onUnmounted(() => {
 	saveDraft();
 	viewActive = false;
-	viewGeneration++;
+	viewGeneration = advanceViewGeneration(viewGeneration);
 	socket?.off("jarvis:event", onEvent);
 	window.removeEventListener("jv:resync", onResync);
 	window.removeEventListener("focus", wakePending);
@@ -1726,6 +1846,17 @@ onUnmounted(() => {
 		<!-- aria-live so a card surfaced by auto-heal / the menu re-check is announced to a
 		     screen reader, not silently inserted. display:contents = zero layout change. -->
 		<div style="display: contents" role="status" aria-live="polite">
+			<section
+				v-if="safetyUpdateNotice"
+				class="jv-safety-update"
+				aria-label="Action cancelled"
+			>
+				<strong>Action cancelled</strong>
+				<p>{{ safetyUpdateNotice.message }}</p>
+				<button type="button" class="jv-btn is-primary" @click="dismissSafetyUpdateNotice">
+					Done
+				</button>
+			</section>
 			<DecisionCard
 				v-for="(p, pi) in orderedPending"
 				:key="p.token"
@@ -1735,7 +1866,7 @@ onUnmounted(() => {
 				"
 				:earlier="!isRecentCard(p)"
 				:proposed="proposedLabel(p.created_at, cardClock)"
-				@open="decision = p"
+				@open="openDecision(p)"
 			/>
 			<p v-if="showOlderCardsNote" class="jv-typehint">
 				An earlier action card is still waiting. Tap it to approve or discard.
@@ -1873,10 +2004,15 @@ onUnmounted(() => {
 	</Sheet>
 
 	<DecisionSheet
+		:key="`${decisionContext?.generation ?? viewGeneration}:${
+			decisionContext?.conversation ?? ''
+		}:${decisionContext?.token ?? ''}`"
 		:action="decision"
+		:view-generation="decisionContext?.generation ?? viewGeneration"
 		:streaming="sending"
-		@close="decision = null"
+		@close="onDecisionClose"
 		@resolved="onResolved"
+		@settled="onDecisionSettled"
 		@busy="onDecisionBusy"
 	/>
 	<FilePreviewSheet
@@ -2256,5 +2392,24 @@ onUnmounted(() => {
 	padding: 0 12px;
 	margin: 6px 6px 0 0;
 	font-size: 13px;
+}
+.jv-safety-update {
+	border: 1px solid var(--border2);
+	border-radius: 12px;
+	background: var(--card);
+	padding: 14px;
+	margin: 10px 0;
+	color: var(--ink8);
+}
+.jv-safety-update strong {
+	color: var(--ink9);
+}
+.jv-safety-update p {
+	margin: 8px 0;
+	line-height: 1.5;
+}
+.jv-safety-update .jv-btn {
+	max-width: 140px;
+	padding: 0 12px;
 }
 </style>

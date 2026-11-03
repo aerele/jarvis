@@ -896,6 +896,271 @@ class TestBankReconStoreContract(FrappeTestCase):
 		return frappe._dict(input_snapshot_json=frappe.as_json(snap), agent=review.AGENT)
 
 
+class TestBankReconApprovalPermissions(FrappeTestCase):
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+		self.caller = "test-bank-review-caller@example.invalid"
+		self.reviewer = "test-bank-review-human@example.invalid"
+		for user in (self.caller, self.reviewer):
+			if not frappe.db.exists("User", user):
+				frappe.get_doc(
+					{
+						"doctype": "User",
+						"email": user,
+						"first_name": "Test Bank Review",
+						"send_welcome_email": 0,
+						"roles": [{"role": "Jarvis User"}],
+					}
+				).insert(ignore_permissions=True)
+		self.snapshot = stored_snapshot()
+		self.run = frappe.get_doc(
+			{
+				"doctype": "Jarvis Agent Run",
+				"agent": review.AGENT,
+				"preparation_mode": "live",
+				"input_snapshot_json": frappe.as_json(self.snapshot),
+			}
+		).insert(ignore_permissions=True)
+		self.installation = frappe._dict(name=f"test-bank-review-{self.run.name}", reviewer=self.reviewer)
+		self.findings = [finding("BT-1", "needs_decision")]
+
+	def _conversation(self, owner):
+		from jarvis._session import impersonate
+
+		with impersonate(owner):
+			return frappe.get_doc(
+				{"doctype": "Jarvis Conversation", "title": "bank-review-permission-test"}
+			).insert(ignore_permissions=True)
+
+	def _set_run_conversation(self, conversation):
+		self.run.conversation = conversation.name
+		self.run.db_set("conversation", conversation.name, update_modified=False)
+
+	def _evidence(self, finding):
+		return {
+			"run": self.run.name,
+			"input_digest": self.snapshot["source_digest"],
+			"scope": self.snapshot["scope"],
+			"policy": self.snapshot["config"],
+			"reviewer": self.reviewer,
+			"finding": finding,
+		}
+
+	def _pending_review(self, conversation, finding):
+		evidence = self._evidence(finding)
+		key = operator_review.digest(
+			{
+				"installation": self.installation.name,
+				**{field: value for field, value in evidence.items() if field != "run"},
+			}
+		)
+		prior = frappe.get_doc(
+			{
+				"doctype": "Jarvis Approval Request",
+				"title": "Foreign bank review",
+				"source": "Agent Review",
+				"status": "Pending",
+				"document_type": finding["ref_doctype"],
+				"conversation": conversation.name,
+				"ref_doctype": finding["ref_doctype"],
+				"ref_name": finding["ref_name"],
+				"agent": self.run.agent,
+				"run": self.run.name,
+				"preparation_mode": self.run.preparation_mode,
+				"result_class": "derived_candidate",
+				"assessment_key": key,
+				"question": review.REVIEW_QUESTION,
+				"context_md": "foreign review",
+				"options": "[]",
+			}
+		)
+		prior.flags.jarvis_server_write = True
+		prior.insert(ignore_permissions=True)
+		return prior, evidence
+
+	def _stage(self, findings):
+		with (
+			patch.object(review, "collect", return_value=self.snapshot),
+			patch.object(review, "review_context", return_value="Test bank review context"),
+		):
+			return operator_review.stage_reviews(self.run, self.installation, findings, review)
+
+	def _reviewer_shares(self):
+		return frappe.db.count(
+			"DocShare", {"share_doctype": "Jarvis Approval Request", "user": self.reviewer}
+		)
+
+	def test_normal_run_as_user_retains_review_evidence_and_named_reviewer(self):
+		from jarvis._session import impersonate
+
+		with (
+			patch.object(review, "collect", return_value=self.snapshot),
+			patch.object(review, "review_context", return_value="Test bank review context"),
+		):
+			with impersonate(self.caller):
+				self.assertNotIn("System Manager", frappe.get_roles())
+				names = operator_review.stage_reviews(self.run, self.installation, self.findings, review)
+				doc = frappe.get_doc("Jarvis Approval Request", names[0])
+				evidence = frappe.parse_json(doc.assessment_evidence or "{}")
+				self.assertEqual(evidence.get("reviewer"), self.reviewer)
+				self.assertEqual(evidence["input_digest"], self.snapshot["source_digest"])
+				self.assertEqual(evidence["finding"], self.findings[0])
+				self.assertEqual(doc.owner, self.caller)
+				self.assertEqual(
+					operator_review.stage_reviews(self.run, self.installation, self.findings, review), names
+				)
+				with self.assertRaises(frappe.PermissionError):
+					operator_review.check_review(doc, True, review)
+			with impersonate(self.reviewer):
+				operator_review.check_review(doc, True, review)
+
+	def test_staging_still_requires_create_permission(self):
+		from jarvis._session import impersonate
+
+		before = frappe.db.count("Jarvis Approval Request")
+		with impersonate("Guest"), self.assertRaises(frappe.PermissionError):
+			operator_review.stage_reviews(self.run, self.installation, self.findings, review)
+		self.assertEqual(frappe.db.count("Jarvis Approval Request"), before)
+
+	def test_caller_cannot_stage_a_review_in_another_users_conversation(self):
+		from jarvis._session import impersonate
+
+		self._set_run_conversation(self._conversation(self.reviewer))
+		before_shares = self._reviewer_shares()
+		with impersonate(self.caller), self.assertRaises(frappe.PermissionError):
+			self._stage(self.findings)
+		self.assertEqual(frappe.db.count("Jarvis Approval Request", {"run": self.run.name}), 0)
+		self.assertEqual(self._reviewer_shares(), before_shares)
+
+	def test_caller_cannot_repair_or_return_a_review_in_another_users_conversation(self):
+		from jarvis._session import impersonate
+
+		prior, evidence = self._pending_review(self._conversation(self.reviewer), self.findings[0])
+		before_shares = self._reviewer_shares()
+		with impersonate(self.caller), self.assertRaises(frappe.PermissionError):
+			self._stage(self.findings)
+		self.assertFalse(frappe.db.get_value("Jarvis Approval Request", prior.name, "assessment_evidence"))
+		self.assertEqual(frappe.db.count("Jarvis Approval Request", {"run": self.run.name}), 1)
+		self.assertEqual(self._reviewer_shares(), before_shares)
+
+		stored_evidence = frappe.as_json(evidence)
+		frappe.db.set_value("Jarvis Approval Request", prior.name, "assessment_evidence", stored_evidence)
+		with impersonate(self.caller), self.assertRaises(frappe.PermissionError):
+			self._stage(self.findings)
+		self.assertEqual(
+			frappe.db.get_value("Jarvis Approval Request", prior.name, "assessment_evidence"), stored_evidence
+		)
+
+	def test_caller_can_stage_a_review_in_their_own_conversation(self):
+		from jarvis._session import impersonate
+
+		conversation = self._conversation(self.caller)
+		self._set_run_conversation(conversation)
+		with impersonate(self.caller):
+			names = self._stage(self.findings)
+		doc = frappe.get_doc("Jarvis Approval Request", names[0])
+		self.assertEqual(doc.conversation, conversation.name)
+		self.assertTrue(doc.assessment_evidence)
+		self.assertTrue(
+			frappe.db.exists(
+				"DocShare",
+				{
+					"share_doctype": "Jarvis Approval Request",
+					"share_name": doc.name,
+					"user": self.reviewer,
+					"read": 1,
+				},
+			)
+		)
+
+	def test_foreign_existing_review_blocks_all_staged_changes(self):
+		from jarvis._session import impersonate
+
+		first, second = self.findings[0], finding("BT-2", "needs_decision")
+		self._pending_review(self._conversation(self.reviewer), second)
+		before_shares = self._reviewer_shares()
+		with impersonate(self.caller), self.assertRaises(frappe.PermissionError):
+			self._stage([first, second])
+		self.assertEqual(
+			frappe.db.count("Jarvis Approval Request", {"run": self.run.name, "ref_name": first["ref_name"]}),
+			0,
+		)
+		self.assertEqual(self._reviewer_shares(), before_shares)
+
+	def test_invalid_existing_review_blocks_all_staged_changes(self):
+		from jarvis._session import impersonate
+
+		conversation = self._conversation(self.caller)
+		self._set_run_conversation(conversation)
+		first, second = self.findings[0], finding("BT-2", "needs_decision")
+		prior, _evidence = self._pending_review(conversation, second)
+		frappe.db.set_value("Jarvis Approval Request", prior.name, "status", "Approved")
+		before_shares = self._reviewer_shares()
+		with impersonate(self.caller), self.assertRaises(frappe.ValidationError):
+			self._stage([first, second])
+		self.assertEqual(
+			frappe.db.count("Jarvis Approval Request", {"run": self.run.name, "ref_name": first["ref_name"]}),
+			0,
+		)
+		self.assertEqual(self._reviewer_shares(), before_shares)
+
+	def test_context_error_blocks_staging_before_any_write(self):
+		from jarvis._session import impersonate
+
+		self._set_run_conversation(self._conversation(self.caller))
+		before_shares = self._reviewer_shares()
+		with (
+			patch.object(review, "collect", return_value=self.snapshot),
+			patch.object(review, "review_context", side_effect=RuntimeError("bad review context")),
+		):
+			with impersonate(self.caller), self.assertRaisesRegex(RuntimeError, "bad review context"):
+				operator_review.stage_reviews(self.run, self.installation, self.findings, review)
+		self.assertEqual(frappe.db.count("Jarvis Approval Request", {"run": self.run.name}), 0)
+		self.assertEqual(self._reviewer_shares(), before_shares)
+
+	def test_rerun_restores_missing_evidence_without_changing_the_original_run(self):
+		from jarvis._session import impersonate
+
+		with (
+			patch.object(review, "collect", return_value=self.snapshot),
+			patch.object(review, "review_context", return_value="Test bank review context"),
+		):
+			with impersonate(self.caller):
+				names = operator_review.stage_reviews(self.run, self.installation, self.findings, review)
+			frappe.db.set_value("Jarvis Approval Request", names[0], "assessment_evidence", None)
+			rerun = frappe._dict(self.run.as_dict(), name="test-later-bank-run")
+			with impersonate(self.caller):
+				self.assertEqual(
+					operator_review.stage_reviews(rerun, self.installation, self.findings, review), names
+				)
+			doc = frappe.get_doc("Jarvis Approval Request", names[0])
+			evidence = frappe.parse_json(doc.assessment_evidence or "{}")
+			self.assertEqual(evidence.get("reviewer"), self.reviewer)
+			self.assertEqual(evidence["run"], self.run.name)
+			self.assertEqual(doc.run, self.run.name)
+
+	def test_decided_or_unmatched_reviews_are_not_repaired(self):
+		from jarvis._session import impersonate
+
+		with (
+			patch.object(review, "collect", return_value=self.snapshot),
+			patch.object(review, "review_context", return_value="Test bank review context"),
+		):
+			with impersonate(self.caller):
+				names = operator_review.stage_reviews(self.run, self.installation, self.findings, review)
+			frappe.db.set_value(
+				"Jarvis Approval Request", names[0], {"assessment_evidence": None, "status": "Approved"}
+			)
+			with impersonate(self.caller), self.assertRaises(frappe.ValidationError):
+				operator_review.stage_reviews(self.run, self.installation, self.findings, review)
+			frappe.db.set_value("Jarvis Approval Request", names[0], "status", "Pending")
+			frappe.db.set_value("Jarvis Agent Run", self.run.name, "input_snapshot_json", "{}")
+			with impersonate(self.caller), self.assertRaises(frappe.ValidationError):
+				operator_review.stage_reviews(self.run, self.installation, self.findings, review)
+			self.assertFalse(frappe.db.get_value("Jarvis Approval Request", names[0], "assessment_evidence"))
+
+
 class TestBankReconTool(FrappeTestCase):
 	def test_tool_refuses_outside_a_delegate_session(self):
 		from jarvis.exceptions import InvalidArgumentError

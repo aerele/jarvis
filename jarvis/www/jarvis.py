@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import frappe
 
 from jarvis import announcement, maintenance_notice, release_notice
@@ -136,6 +138,23 @@ def get_context(context):
 	# fleet-wide. Empty/inactive => the SPA renders nothing.
 	context.boot["announcement"] = announcement.boot_payload()
 
+	# Holiday touch: what the welcome screen shows this user today, a plain JSON dict. Boot
+	# must never fail for it: any error, even an import error of the package, is a "none"
+	# answer. So nothing from holiday_touch is imported at the top of this module, and the
+	# fallback below imports nothing from it either: a broken package must not break boot.
+	try:
+		from jarvis.holiday_touch import resolve
+
+		context.boot["holiday_touch"] = resolve.safe_answer(frappe.session.user)
+	except Exception:
+		# The same four keys and version as holiday_touch.pick.none_payload, inlined on purpose.
+		context.boot["holiday_touch"] = {
+			"v": 1,
+			"date": datetime.now(timezone.utc).date().isoformat(),
+			"tz": "UTC",
+			"kind": "none",
+		}
+
 	# Support panel gating (Plan 3 B5). Support access rides the base Jarvis roles
 	# (support_scope: Jarvis User => own, Jarvis Admin => all), so there's nothing to grant —
 	# just expose the per-user access flag and the fleet kill switch.
@@ -156,9 +175,16 @@ def get_context(context):
 	from jarvis.chat import pump
 
 	try:
-		context.boot["jarvis_public_host_ok"] = admin_client._onboarding_host_ok()
+		context.boot["jarvis_public_host_ok"] = admin_client._public_host_configured()
 	except Exception:
 		context.boot["jarvis_public_host_ok"] = True  # never falsely block the wizard
+	# Private-network setup finished ("private") or not (""). The SPA shows the private
+	# choice screen when the host is not public and this is blank, and lets Review & pay
+	# through when it is "private". Fails to blank: a probe error must not claim a setup.
+	try:
+		context.boot["jarvis_network_mode"] = "private" if admin_client.is_private_mode() else ""
+	except Exception:
+		context.boot["jarvis_network_mode"] = ""
 	try:
 		context.boot["jarvis_worker_warning"] = bool(pump.chat_worker_status().get("degraded"))
 	except Exception:

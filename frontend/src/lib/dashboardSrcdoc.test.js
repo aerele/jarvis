@@ -490,3 +490,37 @@ test("ECharts default theme: no-op without echarts or a theme", () => {
 	new Function("window", ECHARTS_THEME_JS)({});
 	new Function("window", ECHARTS_THEME_JS)({ JARVIS_THEME: { palette: ["#fff"] } });
 });
+
+// Pull asRows out of the runtime text and run it (the runtime itself needs a
+// browser, so there is no harness that executes all of RUNTIME_JS).
+function loadAsRows() {
+	const m = RUNTIME_JS.match(/function asRows\(r\) \{[\s\S]*?\n\t\}/);
+	assert.ok(m, "asRows is in the runtime");
+	return new Function(`${m[0]}; return asRows;`)();
+}
+
+test("asRows: run_report {columns, rows} is a rows array that also has .rows/.columns", () => {
+	const asRows = loadAsRows();
+	const out = asRows({ columns: [{ fieldname: "a" }], rows: [{ a: 1 }, { a: 2 }] });
+	assert.ok(Array.isArray(out));
+	assert.equal(out.filter((x) => x.a > 1).length, 1);
+	const { rows, columns } = out;
+	assert.equal(rows, out);
+	assert.deepEqual(columns, [{ fieldname: "a" }]);
+	assert.deepEqual(Object.keys(out), ["0", "1"]);
+	assert.equal(JSON.stringify(out), '[{"a":1},{"a":2}]');
+});
+
+test("asRows: query/get_list arrays and non-report values are unchanged", () => {
+	const asRows = loadAsRows();
+	const arr = [{ a: 1 }];
+	assert.equal(asRows(arr), arr);
+	assert.ok(!("rows" in arr));
+	assert.equal(asRows(null), null);
+	assert.equal(asRows(5), 5);
+	assert.deepEqual(asRows({ columns: [] }), { columns: [] });
+});
+
+test("RUNTIME_JS: data:result resolves through asRows", () => {
+	assert.ok(RUNTIME_JS.includes("p.resolve(asRows(d.rows))"));
+});

@@ -24,7 +24,10 @@ export const CSP_META =
 // window.jarvis API for dashboard HTML:
 //   jarvis.data(name)        → Promise; `query`/`get_list` sources resolve with
 //                              the rows array; `run_report` sources resolve
-//                              with {columns, rows}. Rejections carry .code
+//                              with the rows array too, which also carries
+//                              non-enumerable `.rows` (itself) and `.columns`,
+//                              so `.filter/.map` and `const {rows, columns} =
+//                              await jarvis.data(n)` both work. Rejections carry .code
 //                              ("PermissionError"|"NotFound"|"Timeout"
 //                              |"FilterRequired"|...).
 //   jarvis.ready()           → tells the parent boot finished (auto-posted on
@@ -316,6 +319,16 @@ export const RUNTIME_JS = `(function () {
 		true
 	);
 
+	// A run_report source arrives as {columns, rows}; hand it back as the rows
+	// array (so .filter/.map work) that also answers to .rows and .columns.
+	function asRows(r) {
+		if (!r || Array.isArray(r) || !Array.isArray(r.rows)) return r;
+		var a = r.rows;
+		Object.defineProperty(a, "rows", { value: a });
+		Object.defineProperty(a, "columns", { value: r.columns || [] });
+		return a;
+	}
+
 	window.addEventListener("message", function (e) {
 		if (e.source !== window.parent) return;
 		var d = e.data;
@@ -325,7 +338,7 @@ export const RUNTIME_JS = `(function () {
 			if (!p) return;
 			delete pending[d.id];
 			clearTimeout(p.timer);
-			if (d.ok) p.resolve(d.rows);
+			if (d.ok) p.resolve(asRows(d.rows));
 			else {
 				var err = new Error((d.error && d.error.message) || "Couldn't load this data");
 				err.code = (d.error && d.error.code) || "InternalError";

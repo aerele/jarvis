@@ -84,7 +84,7 @@ describe("live steps box wiring", () => {
 			"const slot = artifactKind.value ? artifactTickIndex.value : null;"
 		);
 		expect(body).toMatch(
-			/steps: addStep\(\s*sameRun \? liveSteps\.value\.steps : \[\],\s*p\.text,\s*slot,\s*nextActivityOrd\(\)\s*\)/
+			/steps: addStep\(\s*sameRun \? liveSteps\.value\.steps : \[\],\s*p\.text,\s*slot,\s*nextActivityOrd\(\)\s*,?\s*\)/
 		);
 	});
 
@@ -191,7 +191,7 @@ describe("live steps box wiring", () => {
 	it("T5b: exactly one synthetic in-flight row (one JarvisMark + StepsBox), replacing the old queued chip", () => {
 		expect(src).not.toContain("jv-queued-cancel");
 		expect(src).toMatch(
-			/<div v-if="inFlightRowVisible" style="display: flex; gap: 12px">[\s\S]{0,300}<JarvisMark[\s\S]{0,200}<StepsBox :view="inFlightView" @cancel="cancelQueued" \/>/
+			/<div v-if="inFlightRowVisible" style="display: flex; gap: 12px">[\s\S]{0,300}<(?:Holiday|Jarvis)Mark[\s\S]{0,200}<StepsBox :view="inFlightView" @cancel="cancelQueued" \/>/
 		);
 	});
 
