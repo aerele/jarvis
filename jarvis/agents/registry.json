@@ -1288,6 +1288,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on"
       ],
@@ -1295,6 +1296,7 @@
         "jarvis__query",
         "jarvis__get_list",
         "jarvis__run_report",
+        "jarvis__query_report",
         "jarvis__get_doc",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
@@ -1331,7 +1333,8 @@
         "reviewer_capacity",
         "applicable_tax_rate",
         "currency"
-      ]
+      ],
+      "supports_record_scope": false
     },
     {
       "agent_slug": "negative-stock-valuation-auditor",
