@@ -143,7 +143,7 @@ class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 
 	def test_retired_payload_inside_a_key_sync_queues_no_nested_job(self):
 		with (
-			patch.object(frappe.flags, "jarvis_key_fetch", True, create=True),
+			patch.dict(frappe.flags, {"jarvis_key_fetch": True}),
 			patch("jarvis.onboarding._shorten_key_resync_throttle") as shorten,
 			patch("frappe.enqueue") as enq,
 		):
