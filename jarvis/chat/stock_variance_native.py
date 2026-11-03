@@ -29,6 +29,8 @@ RELEVANT_DIMENSION_DOCTYPES = (
 	"Jarvis Physical Count Item",
 	"Stock Ledger Entry",
 )
+# ERPNext v15 has no accounting-only repost mode. Every pending repost in
+# these source queries can affect stock; do not request the v16-only flag.
 FIELDS = {
 	"company": ("Company", "name default_currency is_group creation modified"),
 	"warehouse_root": (
@@ -57,11 +59,11 @@ FIELDS = {
 	),
 	"repost_queue": (
 		"Repost Item Valuation",
-		"name company based_on item_code warehouse status docstatus voucher_type voucher_no posting_date posting_time repost_only_accounting_ledgers creation modified",
+		"name company based_on item_code warehouse status docstatus voucher_type voucher_no posting_date posting_time creation modified",
 	),
 	"repost_transactions": (
 		"Repost Item Valuation",
-		"name company based_on item_code warehouse status docstatus voucher_type voucher_no posting_date posting_time repost_only_accounting_ledgers creation modified",
+		"name company based_on item_code warehouse status docstatus voucher_type voucher_no posting_date posting_time creation modified",
 	),
 	"dimensions_global": ("Inventory Dimension", DIMENSION_FIELDS),
 	"dimensions_scoped": ("Inventory Dimension", DIMENSION_FIELDS),
@@ -70,7 +72,7 @@ NUMBERS = set(
 	"lft rgt idx counted_qty valuation_rate qty_after_transaction stock_value stock_value_difference actual_qty".split()
 )
 FLAGS = set(
-	"is_group disabled is_stock_item has_variants has_batch_no has_serial_no is_cancelled is_adjustment_entry batch_detail_recorded apply_to_all_doctypes repost_only_accounting_ledgers".split()
+	"is_group disabled is_stock_item has_variants has_batch_no has_serial_no is_cancelled is_adjustment_entry batch_detail_recorded apply_to_all_doctypes".split()
 )
 
 
@@ -417,7 +419,6 @@ def query_specs(scope, config):
 				pred("r.docstatus", "=", 1),
 				pred("r.status", "in", ["Queued", "In Progress", "Failed"]),
 				pred("r.based_on", "=", "Item and Warehouse"),
-				pred("r.repost_only_accounting_ledgers", "=", 0),
 				pred("r.posting_date", "<=", p["cutoff"]),
 				exists(
 					"Jarvis Physical Count Item",
@@ -465,7 +466,6 @@ def query_specs(scope, config):
 				pred("r.docstatus", "=", 1),
 				pred("r.status", "in", ["Queued", "In Progress", "Failed"]),
 				pred("r.based_on", "=", "Transaction"),
-				pred("r.repost_only_accounting_ledgers", "=", 0),
 				pred("r.posting_date", "<=", p["cutoff"]),
 				exists(
 					"Stock Ledger Entry",
@@ -799,8 +799,8 @@ def unsettled_reposts_by_pair(rows, count_pairs):
 	"""Map relevant unresolved reposts to the counted item/warehouse pairs.
 
 	A direct repost owns its item and warehouse. A transaction repost owns every
-	selected Stock Ledger Entry pair for its voucher. Accounting-only reposts do
-	not change stock-ledger evidence. The timestamp is checked per physical count
+	selected Stock Ledger Entry pair for its voucher. Every v15 repost can change
+	stock-ledger evidence. The timestamp is checked per physical count
 	below because a repost that starts after a saved count cannot invalidate that
 	count's reconstructed book balance.
 	"""
@@ -811,8 +811,6 @@ def unsettled_reposts_by_pair(rows, count_pairs):
 			by_pair.setdefault(pair, []).append(repost)
 
 	for repost in rows["repost_queue"]:
-		if repost["repost_only_accounting_ledgers"] == 1:
-			continue
 		require(
 			repost["based_on"] == "Item and Warehouse",
 			"A direct stock valuation repost has an unsupported source",
@@ -821,8 +819,6 @@ def unsettled_reposts_by_pair(rows, count_pairs):
 		append((repost["item_code"], repost["warehouse"]), repost)
 
 	for repost in rows["repost_transactions"]:
-		if repost["repost_only_accounting_ledgers"] == 1:
-			continue
 		require(
 			repost["based_on"] == "Transaction",
 			"A transaction stock valuation repost has an unsupported source",

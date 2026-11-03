@@ -202,7 +202,6 @@ class TestStockVarianceNative(TestCase):
 				"voucher_no": "",
 				"posting_date": "2026-10-10",
 				"posting_time": "08:00:00",
-				"repost_only_accounting_ledgers": 0,
 				"creation": "2026-10-10 08:00:00",
 				"modified": "2026-10-10 08:00:00",
 			}

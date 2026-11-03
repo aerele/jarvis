@@ -1,8 +1,8 @@
 """ERPNext masters the J2a tests save against, created when missing.
 
 The CI site is a fresh ERPNext install that never ran the setup wizard, so it has
-no Item Group, UOM, Customer Group, Territory, Price List, Fiscal Year, Stock Entry Type or
-Warehouse Type "Transit" (a Standard chart Company needs that last one). Every
+no Item Group, UOM, Customer Group, Territory, Price List, Fiscal Year, Stock Entry Type,
+Party Type, or Warehouse Type "Transit" (a Standard chart Company needs that last one). Every
 helper here is "if not exists, insert", under its own ``_J2A`` name where the name
 is ours to pick, so it is a no-op on a populated site. Nothing commits: the
 calling test class rolls back, and ``clear_cache_after_rollback`` drops the
@@ -84,7 +84,16 @@ def ensure_item_group_and_uom() -> None:
 		frappe.get_doc({"doctype": "UOM", "uom_name": UOM}).insert(ignore_permissions=True)
 
 
+def ensure_party_type(party_type: str, account_type: str) -> None:
+	"""Create the setup-wizard link row required by real party ledger entries."""
+	if not frappe.db.exists("Party Type", party_type):
+		frappe.get_doc(
+			{"doctype": "Party Type", "party_type": party_type, "account_type": account_type}
+		).insert(ignore_permissions=True)
+
+
 def ensure_customer(name: str, *, credit_limit: float | None = None) -> str:
+	ensure_party_type("Customer", "Receivable")
 	existing = frappe.db.get_value("Customer", {"customer_name": name})
 	if existing:
 		return existing
