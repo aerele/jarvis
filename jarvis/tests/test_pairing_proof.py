@@ -569,7 +569,9 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 			onboarding.run_key_resync()
 		self.assertEqual(len(calls), 1)
 		self.assertRegex(calls[0]["proof_nonce"], HEX32)
-		enq.assert_not_called()
+		# The stored key is confirmed to admin; no nested resync is queued.
+		queued = [c.args[0] for c in enq.call_args_list]
+		self.assertEqual(queued, ["jarvis.onboarding.confirm_callback_key_job"])
 		self.assertEqual(
 			frappe.get_single(SETTINGS).get_password("callback_key", raise_exception=False), CALLBACK
 		)
