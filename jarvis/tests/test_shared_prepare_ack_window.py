@@ -77,7 +77,7 @@ class TestSharedPrepareStoresAckWindow(_shared_prepare.TestCollaborationPrepare)
 			self.addCleanup(
 				lambda n=doc.name: frappe.delete_doc("File", n, force=True, ignore_permissions=True)
 			)
-			attachments.append({"file_url": doc.file_url, "file_name": name})
+			attachments.append({"file_id": doc.name, "file_url": doc.file_url, "file_name": name})
 		frappe.db.set_value(
 			"Jarvis Chat Turn", self.turn.name, "dispatch_payload", json.dumps({"attachments": attachments})
 		)

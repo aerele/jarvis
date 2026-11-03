@@ -1,13 +1,19 @@
 <template>
-	<fieldset :disabled="operatorReview && saving" class="min-w-0">
+	<fieldset :disabled="requiresConfiguration && saving" class="min-w-0">
 		<p class="text-sm text-ink-gray-6">
 			{{
-				operatorReview
+				slaBreachAgeingAuditor
+					? "Select one readable Helpdesk team. Each run reads only tickets in that team."
+					: operatorReview
 					? bankRecon
 						? "Bank reconciliation review reads one company bank account for the statement window below and proposes matches for a named reviewer. Manual runs only; nothing is reconciled, allocated or posted."
 						: arReview
 						? "AR review includes older open receivables, uses the evidence cutoff and prepares unsent reminder text only. Manual runs; no sending, Dunning creation or accounting changes."
 						: "AP document review uses the company, fiscal period, evidence cutoff and matching settings below. Manual runs only. Preview creates no review requests; live review never submits or pays an invoice."
+					: statutoryPayroll
+					? "Select the submitted monthly Payroll Entry. Jarvis fixes the company and period from that record. Complete the statutory mapping in Advanced (JSON)."
+					: fefoConfiguration
+					? "Expiry compliance needs a named reviewer and a near-expiry window. Save both settings before running an audit."
 					: "Settings this agent reads when it runs. Leave a field empty to use the default."
 			}}
 		</p>
@@ -41,7 +47,7 @@
 			<p v-if="defaultsMessage" class="mt-2">{{ defaultsMessage }}</p>
 		</div>
 		<div
-			v-if="operatorReview && Object.keys(shownErrors).length"
+			v-if="requiresConfiguration && Object.keys(shownErrors).length"
 			class="mt-3 rounded-lg border border-outline-gray-2 bg-surface-gray-1 p-3 text-sm text-ink-gray-7"
 			role="status"
 		>
@@ -92,13 +98,151 @@
 					<p class="mt-1.5 text-p-xs text-ink-gray-5">{{ f.help }}</p>
 				</div>
 
+				<div
+					v-else-if="f.type === 'deposit-status'"
+					class="space-y-4 rounded-lg border border-outline-gray-2 p-4"
+				>
+					<div>
+						<p class="text-sm font-medium text-ink-gray-8">{{ f.label }}</p>
+						<p class="mt-1 text-p-xs text-ink-gray-5">{{ f.help }}</p>
+						<p class="mt-1 text-p-xs text-ink-gray-5">
+							Set Company and Period from/to above to one completed calendar month.
+							This agent does not use Fiscal year because it would replace the
+							selected period. The cutoff must be on or after the period end.
+						</p>
+					</div>
+
+					<div>
+						<label class="mb-1.5 block text-xs text-ink-gray-5"
+							>Liability account group</label
+						>
+						<div
+							@focusin="linkFields.depositAccountGroup.prime()"
+							@click="linkFields.depositAccountGroup.prime()"
+						>
+							<Autocomplete
+								:options="linkFields.depositAccountGroup.options.value"
+								:modelValue="depositAccountGroupValue()"
+								placeholder="Search Account…"
+								@update:query="(q) => linkFields.depositAccountGroup.onQuery(q)"
+								@update:modelValue="onDepositAccountGroupPick"
+							/>
+						</div>
+						<p class="mt-1.5 text-p-xs text-ink-gray-5">
+							Select the readable Account group that contains the declared PF and ESI
+							liability accounts. Jarvis does not infer an account group.
+						</p>
+					</div>
+
+					<FormControl
+						type="text"
+						label="Named payroll reviewer"
+						description="Name the reviewer who owns the result."
+						:modelValue="deposit.reviewer"
+						@update:modelValue="(value) => (deposit.reviewer = value)"
+					/>
+					<label class="flex items-start gap-2 text-sm text-ink-gray-7">
+						<input
+							data-label="Reviewer capacity confirmed"
+							type="checkbox"
+							:checked="deposit.reviewer_capacity"
+							@change="deposit.reviewer_capacity = $event.target.checked"
+						/>
+						<span>
+							I confirm that this reviewer has capacity to review the result.
+						</span>
+					</label>
+					<FormControl
+						type="date"
+						label="Booking evidence cutoff"
+						description="Bookings after this date are not assessed. This date does not prove a deposit or payment."
+						:modelValue="deposit.settlement_as_of"
+						@update:modelValue="(value) => (deposit.settlement_as_of = value)"
+					/>
+
+					<div class="space-y-2">
+						<div>
+							<p class="text-sm font-medium text-ink-gray-8">
+								Liability account mapping
+							</p>
+							<p class="mt-1 text-p-xs text-ink-gray-5">
+								Map each direct liability account to PF or ESI. The evaluator
+								checks that each account belongs to the selected group and company.
+							</p>
+						</div>
+						<div
+							v-for="(row, index) in deposit.liability_accounts"
+							:key="`deposit-account-${index}`"
+							class="grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_9rem_auto] md:items-end"
+						>
+							<FormControl
+								type="text"
+								:label="`Liability account ${index + 1}`"
+								:modelValue="row.account"
+								@update:modelValue="(value) => (row.account = value)"
+							/>
+							<FormControl
+								type="select"
+								:label="`Scheme ${index + 1}`"
+								:options="depositSchemeOptions"
+								:modelValue="row.scheme"
+								@update:modelValue="(value) => (row.scheme = value)"
+							/>
+							<Button label="Remove account" @click="removeDepositAccount(index)" />
+						</div>
+						<Button label="Add liability account" @click="addDepositAccount" />
+					</div>
+
+					<div class="space-y-2">
+						<div>
+							<p class="text-sm font-medium text-ink-gray-8">
+								Declared source vouchers
+							</p>
+							<p class="mt-1 text-p-xs text-ink-gray-5">
+								Declare the Journal Entry or Payment Entry and its liability month.
+								Jarvis does not infer a liability month from a booking date or
+								remark.
+							</p>
+						</div>
+						<div
+							v-for="(row, index) in deposit.vouchers"
+							:key="`deposit-voucher-${index}`"
+							class="grid grid-cols-1 gap-2 md:grid-cols-2 md:items-end"
+						>
+							<FormControl
+								type="select"
+								:label="`Voucher type ${index + 1}`"
+								:options="depositVoucherTypeOptions"
+								:modelValue="row.doctype"
+								@update:modelValue="(value) => (row.doctype = value)"
+							/>
+							<FormControl
+								type="text"
+								:label="`Voucher name ${index + 1}`"
+								:modelValue="row.name"
+								@update:modelValue="(value) => (row.name = value)"
+							/>
+							<FormControl
+								type="month"
+								:label="`Liability month ${index + 1}`"
+								:modelValue="row.liability_month"
+								@update:modelValue="(value) => (row.liability_month = value)"
+							/>
+							<Button label="Remove voucher" @click="removeDepositVoucher(index)" />
+						</div>
+						<Button label="Add source voucher" @click="addDepositVoucher" />
+					</div>
+					<ErrorMessage v-if="depositError" :message="depositError" />
+				</div>
+
 				<FormControl
 					v-else-if="['text', 'date'].includes(f.type)"
 					:type="f.type"
 					:label="f.label"
 					:description="f.help"
+					:maxlength="f.maxLength"
 					:modelValue="form[f.key]"
-					@update:modelValue="(value) => (form[f.key] = value)"
+					@update:modelValue="(value) => onTextInput(f.key, value)"
 				/>
 
 				<FormControl
@@ -117,6 +261,9 @@
 					:label="f.label"
 					:description="f.help"
 					:placeholder="f.placeholder"
+					:min="f.min"
+					:max="f.max"
+					:step="f.integer ? 1 : undefined"
 					:modelValue="form[f.key]"
 					@update:modelValue="(v) => (form[f.key] = v)"
 				>
@@ -167,9 +314,17 @@
 
 		<div class="mt-4">
 			<Button label="Save configuration" :loading="saving" @click="save" />
-			<p v-if="operatorReview" class="mt-2 text-p-xs text-ink-gray-5">
-				You can save unfinished setup. Run Now stays unavailable until all required
-				settings are valid and saved. Suggestions are not applied to a run until you save.
+			<ErrorMessage class="mt-2" :message="saveError" />
+			<p v-if="requiresConfiguration" class="mt-2 text-p-xs text-ink-gray-5">
+				<template v-if="operatorReview">
+					You can save unfinished setup. Run Now stays unavailable until all required
+					settings are valid and saved. Suggestions are not applied to a run until you
+					save.
+				</template>
+				<template v-else>
+					You can save unfinished setup. Run Now stays unavailable until all required
+					settings are valid and saved.
+				</template>
 			</p>
 		</div>
 	</fieldset>
@@ -200,7 +355,9 @@ import {
 	SCOPE_CONFIG_FIELDS,
 	AGENT_SPECIFIC_CONFIG_FIELDS,
 	CONFIG_FIELD_LABELS,
+	CONFIG_FIELD_MAX_LENGTHS,
 	NUMBER_CONFIG_KEYS,
+	NUMBER_CONFIG_CONSTRAINTS,
 	TEXT_LIST_CONFIG_KEYS,
 	KEY_TO_PATH,
 	getPath,
@@ -212,18 +369,24 @@ const props = defineProps({
 	config: { type: Object, default: () => ({}) }, // parsed installation config
 	// jarvis#1063 (jarvis-only half): the current agent's Jarvis Agent Listing
 	// config_keys (get_agent), already parsed to a plain array by the parent.
-	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - the scope fields
-	// (SCOPE_CONFIG_FIELDS) always render regardless.
+	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - each field matches its
+	// declared configKey or storage path. The universal SCOPE_CONFIG_FIELDS
+	// always render regardless.
 	configKeys: { type: Array, default: () => [] },
+	// The listing identity determines the one record-scoped field whose storage
+	// is a `{doctype, name}` object rather than a plain config value.
+	agentSlug: { type: String, default: "" },
 	validationErrors: { type: Object, default: () => ({}) },
 	saving: { type: Boolean, default: false },
 });
 
-// The agent-specific fields this agent's config_keys actually names, in
-// CONFIG_FIELD_SET's display order.
+// The agent-specific fields this agent's config_keys actually names (through
+// configKey or storage path), in CONFIG_FIELD_SET's display order.
 const agentSpecificFields = computed(() =>
-	AGENT_SPECIFIC_CONFIG_FIELDS.filter((f) =>
-		(f.paths || [f.path]).some((p) => props.configKeys.includes(p))
+	AGENT_SPECIFIC_CONFIG_FIELDS.filter(
+		(f) =>
+			(!f.agentSlugs || f.agentSlugs.includes(props.agentSlug)) &&
+			(f.paths || [f.path]).some((p) => props.configKeys.includes(f.configKey || p))
 	)
 );
 // Scope fields first (always), then whichever agent-specific fields apply -
@@ -231,14 +394,29 @@ const agentSpecificFields = computed(() =>
 const operatorReview = computed(() => props.configKeys.includes("review_scope"));
 const arReview = computed(() => props.configKeys.includes("settlement_hold_days"));
 const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
+const statutoryPayroll = computed(() => props.configKeys.includes("payroll_entry"));
+const fefoConfiguration = computed(() => props.configKeys.includes("fefo.reviewer"));
+const slaBreachAgeingAuditor = computed(() => props.agentSlug === "sla-breach-ageing-auditor");
+const requiresConfiguration = computed(
+	() => operatorReview.value || fefoConfiguration.value || slaBreachAgeingAuditor.value
+);
+const payrollDepositReview = computed(() => props.configKeys.includes("deposit"));
 const defaultsData = ref(null);
 const defaultsLoading = ref(false);
 const defaultsMessage = ref("");
 let defaultsRequest = 0;
 const visibleFields = computed(() => [
 	// Bank reconciliation reads a statement window only; a fiscal year does not apply.
-	...SCOPE_CONFIG_FIELDS.filter(
-		(field) => !(bankRecon.value && field.key === "fiscal_year")
+	...(statutoryPayroll.value
+		? []
+		: SCOPE_CONFIG_FIELDS.filter(
+				(field) =>
+					!fefoConfiguration.value &&
+					!(
+						(bankRecon.value || payrollDepositReview.value) &&
+						field.key === "fiscal_year"
+					)
+		  )
 	).map((field) => {
 		if (!operatorReview.value || field.key === "fiscal_year") return field;
 		if (bankRecon.value && field.type === "date-range")
@@ -300,15 +478,30 @@ const visibleKeys = computed(() => new Set(visibleFields.value.flatMap((f) => f.
 // Server issues describe the SAVED config. Hide a field's issue once its value
 // differs from what is saved (a filled default or an edit) until the next save
 // re-checks it; issues without a form field always show.
-const shownErrors = computed(() =>
-	Object.fromEntries(
+const localValidationErrors = ref({});
+const shownErrors = computed(() => ({
+	...Object.fromEntries(
 		Object.entries(props.validationErrors || {}).filter(([key]) => {
 			if (!(key in form)) return true;
-			const saved = getPath(props.config || {}, KEY_TO_PATH[key] || key);
+			const path = KEY_TO_PATH[key] || key;
+			const field = visibleFields.value.find((entry) =>
+				(entry.keys || [entry.key]).includes(key)
+			);
+			const saved = getPath(props.config || {}, path);
+			if (field?.recordScopeDoctype) {
+				const savedName =
+					saved &&
+					saved.doctype === field.recordScopeDoctype &&
+					typeof saved.name === "string"
+						? saved.name
+						: "";
+				return String(form[key]) === savedName;
+			}
 			return String(form[key]) === String(saved == null ? "" : saved);
 		})
-	)
-);
+	),
+	...localValidationErrors.value,
+}));
 
 const emit = defineEmits(["save", "dirty"]);
 
@@ -323,10 +516,14 @@ const form = reactive({
 	settlement_hold_days: "",
 	basis: "",
 	review_scope: "",
+	depr_run_posted: "",
+	enable_capex_signal: "",
+	payroll_entry: "",
 	company: "",
 	fiscal_year: "",
 	from_date: "",
 	to_date: "",
+	sla_team: "",
 	benchmark_value: "",
 	percentage: "",
 	engagement_risk_level: "",
@@ -335,17 +532,204 @@ const form = reactive({
 	baseline_hrms_reviewer_capacity: "",
 	baseline_hrms_history_from: "",
 	baseline_hrms_test_declaration: "",
+	fefo_reviewer: "",
+	fefo_near_expiry_days: "",
+	fefo_test_declaration: "",
+	grn_hygiene_reviewer: "",
+	grn_hygiene_test_declaration: "",
 	annual_aggregate_turnover: "",
 	same_hsn_rate_allowlist: "",
 });
+
+const depositSchemeOptions = [
+	{ label: "Select scheme", value: "" },
+	{ label: "PF", value: "pf" },
+	{ label: "ESI", value: "esi" },
+];
+const depositVoucherTypeOptions = [
+	{ label: "Select voucher type", value: "" },
+	{ label: "Journal Entry", value: "Journal Entry" },
+	{ label: "Payment Entry", value: "Payment Entry" },
+];
+
+function emptyDeposit() {
+	return {
+		account_group: "",
+		reviewer: "",
+		reviewer_capacity: false,
+		settlement_as_of: "",
+		liability_accounts: [],
+		vouchers: [],
+	};
+}
+
+const deposit = reactive(emptyDeposit());
+const depositError = ref("");
+
+function replaceDeposit(value) {
+	const next = emptyDeposit();
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		next.account_group = typeof value.account_group === "string" ? value.account_group : "";
+		next.reviewer = typeof value.reviewer === "string" ? value.reviewer : "";
+		next.reviewer_capacity = value.reviewer_capacity === true;
+		next.settlement_as_of =
+			typeof value.settlement_as_of === "string" ? value.settlement_as_of : "";
+		if (value.liability_accounts && typeof value.liability_accounts === "object") {
+			next.liability_accounts = Object.entries(value.liability_accounts)
+				.filter(
+					([account, scheme]) =>
+						typeof account === "string" && typeof scheme === "string"
+				)
+				.map(([account, scheme]) => ({ account, scheme }));
+		}
+		if (Array.isArray(value.vouchers)) {
+			next.vouchers = value.vouchers
+				.filter((row) => row && typeof row === "object" && !Array.isArray(row))
+				.map((row) => ({
+					doctype: typeof row.doctype === "string" ? row.doctype : "",
+					name: typeof row.name === "string" ? row.name : "",
+					liability_month:
+						typeof row.liability_month === "string" ? row.liability_month : "",
+				}));
+		}
+	}
+	Object.assign(deposit, next);
+	depositError.value = "";
+}
+
+function addDepositAccount() {
+	deposit.liability_accounts.push({ account: "", scheme: "" });
+}
+
+function removeDepositAccount(index) {
+	deposit.liability_accounts.splice(index, 1);
+}
+
+function addDepositVoucher() {
+	deposit.vouchers.push({ doctype: "", name: "", liability_month: "" });
+}
+
+function removeDepositVoucher(index) {
+	deposit.vouchers.splice(index, 1);
+}
+
+function depositAccountGroupValue() {
+	return deposit.account_group
+		? { label: deposit.account_group, value: deposit.account_group }
+		: null;
+}
+
+function onDepositAccountGroupPick(opt) {
+	deposit.account_group = opt && opt.value ? String(opt.value) : "";
+}
+
+function isIsoDate(value) {
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+	const parsed = new Date(`${value}T00:00:00Z`);
+	return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function isLiabilityMonth(value) {
+	return /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+}
+
+function depositScopeError(cutoff) {
+	const company = String(form.company || "").trim();
+	const fiscalYear = String(form.fiscal_year || "").trim();
+	const fromDate = String(form.from_date || "").trim();
+	const toDate = String(form.to_date || "").trim();
+	if (!company) return "Select the company for this payroll deposit review.";
+	if (fiscalYear)
+		return "Clear Fiscal year and enter one full liability month in Period from/to.";
+	if (!isIsoDate(fromDate) || !isIsoDate(toDate))
+		return "Enter Period from and Period to for one full liability month.";
+	const start = new Date(`${fromDate}T00:00:00Z`);
+	const monthEnd = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0))
+		.toISOString()
+		.slice(0, 10);
+	if (start.getUTCDate() !== 1 || toDate !== monthEnd)
+		return "Period from/to must be one full liability month.";
+	if (cutoff < toDate) return "Booking evidence cutoff must be on or after Period to.";
+	return null;
+}
+
+function normaliseDeposit() {
+	const accountRows = deposit.liability_accounts
+		.map((row) => ({
+			account: String(row.account || "").trim(),
+			scheme: String(row.scheme || "").trim(),
+		}))
+		.filter((row) => row.account || row.scheme);
+	const voucherRows = deposit.vouchers
+		.map((row) => ({
+			doctype: String(row.doctype || "").trim(),
+			name: String(row.name || "").trim(),
+			liability_month: String(row.liability_month || "").trim(),
+		}))
+		.filter((row) => row.doctype || row.name || row.liability_month);
+	const accountGroup = String(deposit.account_group || "").trim();
+	const reviewer = String(deposit.reviewer || "").trim();
+	const cutoff = String(deposit.settlement_as_of || "").trim();
+	if (
+		!accountGroup &&
+		!reviewer &&
+		!deposit.reviewer_capacity &&
+		!cutoff &&
+		!accountRows.length &&
+		!voucherRows.length
+	)
+		return "Complete the payroll deposit-status setup before saving.";
+	if (!accountGroup) return "Select the liability account group.";
+	if (!reviewer) return "Enter the named payroll reviewer.";
+	if (!deposit.reviewer_capacity) return "Confirm the reviewer has capacity.";
+	if (!isIsoDate(cutoff)) return "Enter a valid booking evidence cutoff.";
+	const scopeError = depositScopeError(cutoff);
+	if (scopeError) return scopeError;
+	if (!accountRows.length) return "Add at least one liability account mapping.";
+	if (!voucherRows.length) return "Add at least one declared source voucher.";
+
+	const liabilityAccounts = {};
+	for (const row of accountRows) {
+		if (!row.account || !["pf", "esi"].includes(row.scheme))
+			return "Each liability account mapping needs an account and PF or ESI.";
+		if (liabilityAccounts[row.account]) return "Each liability account can appear only once.";
+		liabilityAccounts[row.account] = row.scheme;
+	}
+
+	const voucherKeys = new Set();
+	const vouchers = [];
+	for (const row of voucherRows) {
+		if (!row.name || !["Journal Entry", "Payment Entry"].includes(row.doctype))
+			return "Each declared source voucher needs a Journal Entry or Payment Entry and a name.";
+		if (!isLiabilityMonth(row.liability_month))
+			return "Each declared source voucher needs a liability month in YYYY-MM format.";
+		const key = `${row.doctype}:${row.name}`;
+		if (voucherKeys.has(key)) return "Each declared source voucher can appear only once.";
+		voucherKeys.add(key);
+		vouchers.push(row);
+	}
+
+	return {
+		account_group: accountGroup,
+		reviewer,
+		reviewer_capacity: true,
+		settlement_as_of: cutoff,
+		liability_accounts: liabilityAccounts,
+		vouchers,
+	};
+}
+
 const advanced = ref("{}");
 const advancedError = ref("");
+const saveError = ref("");
 const initialState = ref("");
 
 // Only rendered fields count: a default filled into a field this agent never
 // shows or saves (e.g. report_date) must not leave the form looking unsaved.
 function formState() {
-	const shown = Object.fromEntries([...visibleKeys.value].sort().map((key) => [key, form[key]]));
+	const shown = Object.fromEntries(
+		[...visibleKeys.value].sort().map((key) => [key, key === "deposit" ? deposit : form[key]])
+	);
 	return JSON.stringify({ form: shown, advanced: advanced.value });
 }
 
@@ -361,6 +745,19 @@ function seed(cfg) {
 			continue;
 		}
 		const path = KEY_TO_PATH[key] || key;
+		const field = visibleFields.value.find((entry) =>
+			(entry.keys || [entry.key]).includes(key)
+		);
+		if (field?.recordScopeDoctype) {
+			const record = getPath(c, path);
+			form[key] =
+				record &&
+				record.doctype === field.recordScopeDoctype &&
+				typeof record.name === "string"
+					? record.name
+					: "";
+			continue;
+		}
 		// jarvis#1063 CRITICAL fix: the nested path (e.g.
 		// "materiality.benchmark_value") is the source of truth. A flat
 		// top-level key of the same name (pre-nesting saves) is a MIGRATION
@@ -375,6 +772,8 @@ function seed(cfg) {
 				? v.join(", ")
 				: String(v);
 	}
+	if (visibleKeys.value.has("deposit")) replaceDeposit(getPath(c, KEY_TO_PATH.deposit));
+	else replaceDeposit(null);
 	// Advanced (JSON) holds everything NOT covered by a visible field's path -
 	// a deep clone with each visible path (and its flat legacy counterpart,
 	// now migrated into `form` above) removed. deletePath also drops a
@@ -387,22 +786,42 @@ function seed(cfg) {
 		deletePath(rest, path);
 		if (path !== key) delete rest[key];
 	}
+	if (payrollDepositReview.value) delete rest.fiscal_year;
 	advanced.value = JSON.stringify(rest, null, 2);
 	advancedError.value = "";
+	localValidationErrors.value = {};
 	initialState.value = formState();
 }
 
 watch([() => props.config, () => [...visibleKeys.value].join(",")], () => seed(props.config), {
 	immediate: true,
 });
-watch([form, advanced, initialState], () => emit("dirty", formState() !== initialState.value), {
-	deep: true,
-	immediate: true,
-});
+watch(
+	[form, deposit, advanced, initialState],
+	() => emit("dirty", formState() !== initialState.value),
+	{
+		deep: true,
+		immediate: true,
+	}
+);
 
 function onAdvancedInput(v) {
 	advanced.value = v;
 	advancedError.value = "";
+}
+
+function clearLocalValidationError(key) {
+	if (!(key in localValidationErrors.value)) return;
+	const remaining = { ...localValidationErrors.value };
+	delete remaining[key];
+	localValidationErrors.value = remaining;
+}
+
+function onTextInput(key, value) {
+	form[key] = value;
+	const maxLength = CONFIG_FIELD_MAX_LENGTHS[key];
+	if (!maxLength || String(value ?? "").trim().length <= maxLength)
+		clearLocalValidationError(key);
 }
 
 // ── Company / Fiscal year: debounced + fenced Link search, primed on open ───
@@ -441,6 +860,9 @@ const linkFields = {
 	company: makeLinkField("Company"),
 	fiscal_year: makeLinkField("Fiscal Year"),
 	bank_account: makeLinkField("Bank Account"),
+	payroll_entry: makeLinkField("Payroll Entry"),
+	sla_team: makeLinkField("HD Team"),
+	depositAccountGroup: makeLinkField("Account"),
 };
 watch([operatorReview, defaultsData], () => {
 	linkFields.fiscal_year.reprime();
@@ -549,8 +971,10 @@ onBeforeUnmount(() => {
 });
 
 function save() {
+	saveError.value = "";
 	// 1) advanced JSON must parse to an object
 	let base = {};
+	depositError.value = "";
 	const raw = advanced.value.trim();
 	if (raw) {
 		try {
@@ -577,16 +1001,51 @@ function save() {
 	const merged = JSON.parse(JSON.stringify(base));
 	for (const key of visibleKeys.value) {
 		const path = KEY_TO_PATH[key] || key;
+		const field = visibleFields.value.find((entry) =>
+			(entry.keys || [entry.key]).includes(key)
+		);
+		if (field?.type === "deposit-status") {
+			const normalised = normaliseDeposit();
+			if (typeof normalised === "string") {
+				depositError.value = normalised;
+				return;
+			}
+			delete merged.fiscal_year;
+			setPath(merged, path, normalised);
+			continue;
+		}
 		const v = String(form[key] ?? "").trim();
 		if (path !== key) delete merged[key];
 		if (v === "") {
 			deletePath(merged, path);
 			continue;
 		}
+		const maxLength = CONFIG_FIELD_MAX_LENGTHS[key];
+		if (maxLength && v.length > maxLength) {
+			localValidationErrors.value = {
+				...localValidationErrors.value,
+				[key]: `"${CONFIG_FIELD_LABELS[key]}" must be at most ${maxLength} characters.`,
+			};
+			return;
+		}
+		if (field?.recordScopeDoctype) {
+			setPath(merged, path, { doctype: field.recordScopeDoctype, name: v });
+			continue;
+		}
 		if (NUMBER_CONFIG_KEYS.includes(key)) {
 			const n = Number(v);
 			if (isNaN(n)) {
-				advancedError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
+				saveError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
+				return;
+			}
+			const constraints = NUMBER_CONFIG_CONSTRAINTS[key];
+			if (
+				constraints &&
+				((constraints.integer && !/^\d+$/.test(v)) ||
+					(constraints.min != null && n < constraints.min) ||
+					(constraints.max != null && n > constraints.max))
+			) {
+				saveError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a whole number from ${constraints.min} to ${constraints.max}.`;
 				return;
 			}
 			setPath(merged, path, n);
@@ -604,6 +1063,7 @@ function save() {
 		}
 	}
 	advancedError.value = "";
+	localValidationErrors.value = {};
 	defaultsRequest += 1;
 	defaultsLoading.value = false;
 	emit("save", merged);

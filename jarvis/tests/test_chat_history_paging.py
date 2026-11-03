@@ -189,13 +189,17 @@ class TestHistoryPaging(FrappeTestCase):
 		)
 		for _ in range(6):
 			self._turn(2)
-		out = self._page(limit=4)
+		# This paging fixture models an already-verified legacy card without
+		# constructing Redis confirmation state. The production history endpoint
+		# fences real legacy credentials before it emits a card.
+		with patch("jarvis.chat.agent_closure.legacy_confirmation_is_safe_to_render", return_value=True):
+			out = self._page(limit=4)
+			older = self._page(limit=4, before=out["paging"]["before"])
 		self.assertNotIn(pending, [m.name for m in out["messages"]])
 		[row] = out["older_pending"]
 		self.assertEqual(row.name, pending)
 		self.assertEqual(row.pending_card, {"title": "Submit SINV-1"})
 		self.assertIn("recent", row)
-		older = self._page(limit=4, before=out["paging"]["before"])
 		self.assertEqual(older["older_pending"], [])
 
 	def test_older_pending_skips_expired_cards_and_keeps_only_the_newest(self):

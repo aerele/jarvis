@@ -10,6 +10,7 @@ const probe = vi.hoisted(() => ({
 	docmetaIds: [],
 	later: null,
 }));
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }));
 
 vi.mock("vue-router", async () => {
 	const { reactive } = await import("vue");
@@ -56,7 +57,7 @@ vi.mock("frappe-ui", () => ({
 			'<div><slot name="target" :togglePopover="() => {}" /><slot name="body" /></div>',
 	},
 	Tooltip: { template: "<span><slot/></span>" },
-	toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+	toast,
 	call: vi.fn(),
 }));
 vi.mock("@/api", () => ({
@@ -314,7 +315,7 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(rail(w).classes()).toEqual(
 			expect.arrayContaining([
 				"w-full",
-				"max-h-[40vh]",
+				"max-h-[35%]",
 				"border-b",
 				"lg:w-[360px]",
 				"lg:max-h-none",
@@ -325,7 +326,6 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(pane(w).classes()).toEqual(
 			expect.arrayContaining(["min-h-0", "min-w-0", "flex-1", "overflow-y-auto"])
 		);
-
 		const actions = w.get('[data-testid="approval-decision-actions"]');
 		expect(actions.classes()).toContain("flex-wrap");
 		expect(button(actions, "Tag for review").exists()).toBe(true);
@@ -424,6 +424,26 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(pane(w).text()).toContain("Ship it?");
 	});
 
+	it("opens the Jarvis count page only for an eligible approved count plan", async () => {
+		state.ar = [ar("AR-COUNT-1", { source: "Agent Review" })];
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, { source: "Agent Review", status: "Approved" }),
+			question: "Approve this count plan.",
+			can_act: 0,
+			count_entry: name === "AR-COUNT-1" ? 1 : 0,
+		}));
+		const w = await board();
+		await flushPromises();
+
+		const record = button(w, "Record physical count");
+		expect(record.exists()).toBe(true);
+		await record.trigger("click");
+		expect(router.push).toHaveBeenLastCalledWith({
+			name: "CountPlanDetail",
+			params: { request: "AR-COUNT-1" },
+		});
+	});
+
 	it("a new selection mounts a fresh detail, so the row shown is the row decided", async () => {
 		const w = await board();
 		await actionRow(w, "1 file waiting").trigger("click");
@@ -512,6 +532,42 @@ describe("ApprovalsBoard one inbox", () => {
 			"Review acknowledged: no posting authorised",
 			1
 		);
+	});
+
+	it("shows source recovery when a saved File Box decision cannot resume", async () => {
+		state.ar = [ar("AR-1", { source: "File Box" })];
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, { source: "File Box" }),
+			can_act: 1,
+			question: "Which supplier?",
+		}));
+		api.decideApproval.mockResolvedValue({ resumed: false, reason: "source_unavailable" });
+		const w = await board();
+		await button(pane(w), "Approve").trigger("click");
+		await flushPromises();
+		expect(toast.warning).toHaveBeenCalledWith(
+			"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue."
+		);
+		expect(toast.success).not.toHaveBeenCalled();
+		expect(refreshApprovalsCount).toHaveBeenCalled();
+	});
+
+	it("shows source recovery when a saved File Box dismissal cannot resume", async () => {
+		state.ar = [ar("AR-1", { source: "File Box" })];
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, { source: "File Box" }),
+			can_act: 1,
+			question: "Which supplier?",
+		}));
+		api.dismissApproval.mockResolvedValue({ resumed: false, reason: "source_unavailable" });
+		const w = await board();
+		await button(pane(w), "Ignore").trigger("click");
+		await flushPromises();
+		expect(toast.warning).toHaveBeenCalledWith(
+			"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue."
+		);
+		expect(toast.success).not.toHaveBeenCalled();
+		expect(refreshApprovalsCount).toHaveBeenCalled();
 	});
 
 	it("a question decided after the board is gone never navigates back to it", async () => {

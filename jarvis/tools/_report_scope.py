@@ -73,7 +73,17 @@ def _report_date(value) -> str:
 def attach_scope(result: dict, scope: dict | None) -> dict:
 	# Queued/failed prepared reports are not answers, even when the outer tool
 	# call succeeded. An empty *completed* result is still a scoped report.
-	if not scope or not isinstance(result, dict) or not isinstance(result.get("result"), list):
+	metadata_ready = (
+		isinstance(result, dict)
+		and result.get("prepared_report")
+		and result.get("status") == "ready"
+		and result.get("read_status") == "not_read"
+	)
+	if (
+		not scope
+		or not isinstance(result, dict)
+		or (not isinstance(result.get("result"), list) and not metadata_ready)
+	):
 		return result
 	if result.get("prepared_report") and result.get("status") != "ready":
 		return result
@@ -87,7 +97,7 @@ def attach_scope(result: dict, scope: dict | None) -> dict:
 	# These standard reports expose their row currency as `currency`. Preserve
 	# mixed currencies; never imply a consolidated monetary total. Missing row
 	# codes make the list incomplete, so retain only the currency basis then.
-	rows = result["result"]
+	rows = result.get("result") or []
 	if rows and all(
 		isinstance(row, dict) and isinstance(row.get("currency"), str) and row["currency"].strip()
 		for row in rows

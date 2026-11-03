@@ -11,11 +11,15 @@
  *     benchmark_value/percentage/engagement_risk_level/rounding_step NESTED
  *     under a top-level `materiality` object
  *     (`config["materiality"]["benchmark_value"]`, etc - jarvis#1063
- *     CRITICAL fix, they are NOT flat top-level keys), the payroll baseline
- *     baseline_hrms fields, and the GST turnover and HSN allow-list. Rendered only when the
- *     listing's own `config_keys` (agents_api.py get_agent, jarvis#1063)
- *     names the field's storage `path` (a dot path for a nested key) -
- *     ConfigForm.vue filters this array by that list at render time.
+ *     CRITICAL fix, they are NOT flat top-level keys), the payroll baseline, Fixed Asset and FEFO settings, and the GRN Hygiene
+ *     auditor reads its reviewer settings under `grn_hygiene`. GST has flat
+ *     turnover and HSN exclusion settings; Deposit uses its typed `deposit` object. Rendered only
+ *     when the listing's own `config_keys` (agents_api.py get_agent,
+ *     jarvis#1063) names the field's `configKey` or, when that is absent, its
+ *     storage `path` (a dot path for a nested key). The SLA team's
+ *     `configKey` is `sla_config` only as a listing gate: its
+ *     `record_scope` value stays bench-owned launch scope and must not enter
+ *     delegate configuration.
  *
  * `key` is the LOCAL form-state / label / validation identity (unchanged by
  * nesting); `path` is WHERE the value actually lives in the saved config
@@ -30,10 +34,17 @@
  * `type` and filters agent-specific entries by `config_keys`.
  *
  * Shapes:
- *   - {key, path, label, type: "link", linkDoctype, help, scope?}
+ *   - {key, path, label, type: "link", linkDoctype, help, scope?, configKey?}
+ *   - a link can set `recordScopeDoctype`; ConfigForm then saves its value as
+ *     `{doctype, name}` at the field's path instead of a bare string
  *   - {keys: [from, to], paths: [from, to], labels: [from, to], type: "date-range", help, scope?}
+ *   - {key, path, label, type: "text", help, maxLength?}
  *   - {key, path, label, type: "number", help, suffix?}
  *   - {key, path, label, type: "select", options: [{label, value}, ...]}
+ *   - {key, path, label, type: "deposit-status", help} for the one
+ *     explicitly typed, nested payroll-deposit setup. The value remains under
+ *     the single declared `deposit` namespace; it is never a free-form
+ *     Advanced JSON payload.
  *   - {key, path, label, type: "text-list", help}
  */
 export const CONFIG_FIELD_SET = [
@@ -107,6 +118,37 @@ export const CONFIG_FIELD_SET = [
 		],
 	},
 	{
+		key: "depr_run_posted",
+		path: "depr_run_posted",
+		label: "Depreciation run status",
+		type: "select",
+		options: [
+			{ label: "Confirm posting status", value: "" },
+			{ label: "Posted for this period", value: "true" },
+			{ label: "Not posted", value: "false" },
+		],
+		help: "Required before the Fixed Asset auditor can assess missing depreciation postings. Leave it unconfirmed to mark that check not evaluable.",
+	},
+	{
+		key: "enable_capex_signal",
+		path: "enable_capex_signal",
+		label: "Capex/opex review signal",
+		type: "select",
+		options: [
+			{ label: "Off (default)", value: "" },
+			{ label: "On", value: "true" },
+		],
+		help: "Optional review signal only. It does not create a scored audit finding.",
+	},
+	{
+		key: "payroll_entry",
+		path: "payroll_entry",
+		label: "Payroll Entry",
+		type: "link",
+		linkDoctype: "Payroll Entry",
+		help: "Select one submitted, completed monthly Payroll Entry. Jarvis derives the company and period from this record.",
+	},
+	{
 		key: "company",
 		path: "company",
 		label: "Company",
@@ -131,6 +173,17 @@ export const CONFIG_FIELD_SET = [
 		labels: ["Period from", "Period to"],
 		help: "Optional; overrides the fiscal year",
 		scope: true,
+	},
+	{
+		key: "sla_team",
+		path: "record_scope",
+		label: "Helpdesk team",
+		type: "link",
+		linkDoctype: "HD Team",
+		recordScopeDoctype: "HD Team",
+		configKey: "sla_config",
+		agentSlugs: ["sla-breach-ageing-auditor"],
+		help: "One readable Helpdesk team. Each run reviews only tickets in this team.",
 	},
 	{
 		key: "benchmark_value",
@@ -195,6 +248,54 @@ export const CONFIG_FIELD_SET = [
 		help: "Optional text shown with the payroll activity report.",
 	},
 	{
+		key: "fefo_reviewer",
+		path: "fefo.reviewer",
+		label: "Expiry reviewer",
+		type: "text",
+		help: "Name the person who reviews expiry candidates.",
+	},
+	{
+		key: "fefo_near_expiry_days",
+		path: "fefo.near_expiry_days",
+		label: "Near-expiry window",
+		type: "number",
+		integer: true,
+		min: 1,
+		max: 3650,
+		suffix: "calendar days",
+		help: "Required. Include batches that expire within 1 to 3650 calendar days.",
+	},
+	{
+		key: "fefo_test_declaration",
+		path: "fefo.test_declaration",
+		label: "Test declaration",
+		type: "text",
+		help: "Optional plain-text notice for a test review.",
+	},
+	{
+		key: "grn_hygiene_reviewer",
+		path: "grn_hygiene.reviewer",
+		label: "Receiving reviewer",
+		type: "text",
+		maxLength: 140,
+		help: "Required before a run. You can save this blank while you finish setup. Name the person who reviews receiving results (up to 140 characters).",
+	},
+	{
+		key: "grn_hygiene_test_declaration",
+		path: "grn_hygiene.test_declaration",
+		label: "Test declaration",
+		type: "text",
+		maxLength: 500,
+		help: "Optional plain-text notice for a test review (up to 500 characters).",
+	},
+	{
+		key: "deposit",
+		path: "deposit",
+		label: "Payroll deposit-status setup",
+		type: "deposit-status",
+		help: "Set the named reviewer, account group, cutoff, account mapping and declared voucher months. This review never proves a deposit, default, penalty or scheme eligibility.",
+	},
+	{
 		key: "annual_aggregate_turnover",
 		path: "annual_aggregate_turnover",
 		label: "Previous financial-year aggregate turnover",
@@ -241,7 +342,7 @@ export const CONFIG_FIELD_SET = [
 export const SCOPE_CONFIG_FIELDS = CONFIG_FIELD_SET.filter((f) => f.scope);
 
 /** The agent-specific subset - each rendered only when the listing's
- * `config_keys` (get_agent) names its key. */
+ * `config_keys` (get_agent) names its `configKey` or storage path. */
 export const AGENT_SPECIFIC_CONFIG_FIELDS = CONFIG_FIELD_SET.filter((f) => !f.scope);
 
 /** Every config key CONFIG_FIELD_SET renders a dedicated field for - anything
@@ -263,6 +364,21 @@ export const NUMBER_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "num
 	(f) => f.key
 );
 
+/** Optional per-number constraints used by ConfigForm before it emits a save.
+ * Values absent from this map retain the existing generic numeric behaviour. */
+export const NUMBER_CONFIG_CONSTRAINTS = Object.fromEntries(
+	CONFIG_FIELD_SET.filter(
+		(f) => f.type === "number" && (f.integer || f.min != null || f.max != null)
+	).map(({ key, integer, min, max }) => [key, { integer: !!integer, min, max }])
+);
+
+/** Local form key -> its maximum permitted saved text length. This is derived
+ * from the field declaration so the input limit and save-time validation stay
+ * aligned. */
+export const CONFIG_FIELD_MAX_LENGTHS = Object.fromEntries(
+	CONFIG_FIELD_SET.filter((f) => Number.isInteger(f.maxLength)).map((f) => [f.key, f.maxLength])
+);
+
 /** Known keys stored as a JSON string array but edited as a short comma-separated list. */
 export const TEXT_LIST_CONFIG_KEYS = CONFIG_FIELD_SET.filter((f) => f.type === "text-list").map(
 	(f) => f.key
@@ -276,6 +392,13 @@ export const KEY_TO_PATH = Object.fromEntries(
 	CONFIG_FIELD_SET.flatMap((f) =>
 		f.keys ? f.keys.map((k, i) => [k, (f.paths || f.keys)[i]]) : [[f.key, f.path || f.key]]
 	)
+);
+
+/** Form-local key -> descriptor. ConfigForm uses this to apply the small
+ * number of typed structured fields without treating their object values as
+ * strings. */
+export const CONFIG_FIELD_BY_KEY = Object.fromEntries(
+	CONFIG_FIELD_SET.flatMap((f) => (f.keys ? f.keys.map((k) => [k, f]) : [[f.key, f]]))
 );
 
 // ── dot-path get/set/delete over a plain JSON-shaped object ─────────────────

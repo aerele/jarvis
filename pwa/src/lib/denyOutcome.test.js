@@ -19,6 +19,19 @@ test("the benign already_handled no-op still resolves as denied", () => {
 	assert.deepEqual(out, { state: "denied", error: "", resolved: "denied" });
 });
 
+test("a direct safety update is terminal and keeps only a Done cancellation result", () => {
+	const out = denyOutcome({
+		ok: false,
+		reason_code: "safety_update",
+		error: { message: "This confirmation was cancelled during an agent safety update." },
+	});
+	assert.deepEqual(out, {
+		state: "cancelled",
+		error: "This confirmation was cancelled during an agent safety update.",
+		resolved: null,
+	});
+});
+
 test("an ok:false response goes back to review with the server's error message", () => {
 	const out = denyOutcome({ ok: false, error: { message: "storage unavailable" } });
 	assert.deepEqual(out, { state: "review", error: "storage unavailable", resolved: null });
