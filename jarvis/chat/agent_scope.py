@@ -22,6 +22,7 @@ from calendar import monthrange
 from datetime import date
 
 import frappe
+from frappe import _
 
 from jarvis.exceptions import InvalidArgumentError
 
@@ -80,7 +81,34 @@ def _scope_object(value, *, label: str, allow_missing: bool = False) -> dict:
 	return value
 
 
-def resolve_scope(installation, *, config: dict | None = None) -> dict:
+def _configuration(config) -> dict:
+	"""Return a config object, preserving the legacy malformed-config fallback."""
+	if isinstance(config, dict):
+		return config
+	if config:
+		try:
+			parsed = frappe.parse_json(config)
+			if isinstance(parsed, dict):
+				return parsed
+		except Exception:
+			pass
+	return {}
+
+
+def record_scope_requested(config) -> bool:
+	"""True when a tenant explicitly supplied the record-scope namespace."""
+	return "record_scope" in _configuration(config)
+
+
+def assert_record_scope_supported(supports_record_scope: bool, config) -> None:
+	"""Refuse an unsupported boundary before config or launch can have effects."""
+	if record_scope_requested(config) and supports_record_scope is not True:
+		frappe.throw(
+			_("This agent does not support record-scoped runs. Remove record_scope from its configuration.")
+		)
+
+
+def resolve_scope(installation, *, allow_record_scope: bool = False, config: dict | None = None) -> dict:
 	"""Resolve the explicit run scope for an installation.
 
 	``installation`` may be a ``Jarvis Agent Installation`` doc or its name.
@@ -94,20 +122,11 @@ def resolve_scope(installation, *, config: dict | None = None) -> dict:
 	if isinstance(installation, str):
 		installation = frappe.get_doc(INSTALLATION, installation)
 
-	cfg: dict = {}
-	if config is not None:
-		# Deposit-status passes a server-stamped launch snapshot here. It must
-		# never re-read mutable installation configuration after launch.
-		if not isinstance(config, dict):
-			raise InvalidArgumentError("agent scope configuration is invalid")
-		cfg = dict(config)
-	elif installation.get("config"):
-		try:
-			parsed = frappe.parse_json(installation.config)
-			if isinstance(parsed, dict):
-				cfg = parsed
-		except Exception:
-			cfg = {}
+	if config is not None and not isinstance(config, dict):
+		raise InvalidArgumentError("agent scope configuration is invalid")
+	cfg = dict(config) if config is not None else _configuration(installation.get("config"))
+	if record_scope_requested(cfg) and not allow_record_scope:
+		raise InvalidArgumentError("record_scope is not supported by this agent")
 
 	def _s(key):
 		val = cfg.get(key)
@@ -132,8 +151,12 @@ def resolve_scope(installation, *, config: dict | None = None) -> dict:
 		except (ValueError, TypeError):
 			raise InvalidArgumentError("prior_period_from and prior_period_to must define an earlier period")
 		scope.update(prior_period_from=start.isoformat(), prior_period_to=end.isoformat())
-	if not is_payroll_deposit and cfg.get("record_scope"):
+	if not is_payroll_deposit and record_scope_requested(cfg):
 		record = cfg["record_scope"]
+		# Keep the supported agents' legacy optional-boundary behavior: a null
+		# record_scope means this particular run is company-wide.
+		if not record:
+			return scope
 		if not isinstance(record, dict) or not all(record.get(k) for k in ("doctype", "name")):
 			raise InvalidArgumentError("record_scope requires a doctype and name")
 		doc = frappe.get_doc(record["doctype"], record["name"])
@@ -250,6 +273,7 @@ def _resolve(company, fiscal_year, from_date, to_date) -> dict:
 			raise InvalidArgumentError("from_date and to_date (or fiscal_year) are required")
 
 	prior = _prior_fiscal_year(from_date)
+	report_datetime = frappe.utils.now_datetime()
 	return {
 		"company": company,
 		"fiscal_year": fiscal_year,
@@ -262,7 +286,10 @@ def _resolve(company, fiscal_year, from_date, to_date) -> dict:
 		# end), but a period-end finding must not assess data that has not happened
 		# yet: an evaluator caps its "due" cutoff at report_date so future-dated
 		# schedule rows (e.g. the rest of the year's depreciation) are never flagged.
-		"report_date": frappe.utils.today(),
+		"report_date": report_datetime.date().isoformat(),
+		# One bench-owned instant in the site time zone, without a UTC offset.
+		"report_datetime": report_datetime.isoformat(sep=" "),
+		"execution_user": frappe.session.user,
 	}
 
 

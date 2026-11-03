@@ -1,7 +1,8 @@
 """Keep record-scoped assessments apart across real writeback transactions."""
 
 import json
-from unittest.mock import Mock, patch
+from datetime import datetime
+from unittest.mock import MagicMock, Mock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -31,7 +32,7 @@ class TestComparisonPeriod(FrappeTestCase):
 			"_resolve",
 			return_value={"company": "Fake Company", "from_date": "2026-09-01", "to_date": "2026-09-30"},
 		):
-			return agent_scope.resolve_scope(inst)
+			return agent_scope.resolve_scope(inst, allow_record_scope=True)
 
 	def test_explicit_prior_period_is_preserved(self):
 		scope = self.resolve({"prior_period_from": "2026-08-01", "prior_period_to": "2026-08-31"})
@@ -81,7 +82,7 @@ class TestComparisonPeriod(FrappeTestCase):
 			self.assertIsNone(agent_scheduler._stamp_scope_and_watermark("unused", inst, "Administrator"))
 
 	def test_comparison_and_record_scope_are_delivered_in_the_prompt(self):
-		listing = frappe._dict(agent_slug="payroll-prerun-auditor", config_keys="[]")
+		listing = frappe._dict(agent_slug="payroll-prerun-auditor", config_keys="[]", supports_record_scope=1)
 		inst = frappe._dict(name="fake-install", config="{}")
 		scope = {
 			"company": "Fake Company",
@@ -93,7 +94,9 @@ class TestComparisonPeriod(FrappeTestCase):
 			"scoped_visibility": True,
 		}
 		with patch.object(agent_scheduler, "_explicit_config", return_value={}):
-			prompt = agent_scheduler._audit_prompt(listing, inst, "manual", scope)
+			prompt = agent_scheduler._audit_prompt(
+				listing, inst, "manual", scope, record_scope_supported=True
+			)
 		for value in (
 			"prior_period_from",
 			"2026-08-01",
@@ -275,6 +278,187 @@ class TestPayrollVisibilityAutoResolve(FrappeTestCase):
 			self.assertTrue(agent_runs._scoped_visibility(run, inst))
 
 
+class TestRecordScopeCapability(FrappeTestCase):
+	"""The bundle declaration must gate config, launch, resolution, and prompt delivery."""
+
+	BASELINE = "baseline-meter-auditor"
+	SCOPED = "payroll-prerun-auditor"
+
+	@staticmethod
+	def _installation(name, agent, config="{}"):
+		doc = frappe._dict(
+			name=name,
+			agent=agent,
+			owner="scope-owner@example.invalid",
+			run_as_user="scope-runas@example.invalid",
+			reviewer="scope-reviewer@example.invalid",
+			config=config,
+		)
+		doc.check_permission = MagicMock()
+		doc.save = MagicMock()
+		return doc
+
+	@staticmethod
+	def _listing(slug, supports_record_scope):
+		return frappe._dict(
+			agent_slug=slug,
+			status="Published",
+			config_keys="[]",
+			supports_record_scope=supports_record_scope,
+		)
+
+	def _config_docs(self, installation, listing):
+		def get_doc(doctype, name=None, *args, **kwargs):
+			if doctype == "Jarvis Agent Installation" and name == installation.name:
+				return installation
+			if doctype == "Jarvis Agent Listing" and name == installation.agent:
+				return listing
+			raise AssertionError(f"unexpected document lookup: {doctype} {name}")
+
+		return get_doc
+
+	def test_baseline_rejects_record_scope_before_config_save(self):
+		original = frappe.as_json({"company": "Fake Company"})
+		inst = self._installation("BASELINE-CONFIG", self.BASELINE, original)
+		# A listing is mutable admin state. A manual true value must not override
+		# the bundled Baseline declaration.
+		listing = self._listing(self.BASELINE, supports_record_scope=1)
+		with (
+			patch.object(frappe, "get_doc", side_effect=self._config_docs(inst, listing)),
+			patch.object(agents_api, "log_activity") as activity,
+			patch.object(frappe.db, "commit") as commit,
+		):
+			with self.assertRaisesRegex(frappe.ValidationError, "does not support record-scoped"):
+				agents_api.set_config(
+					inst.name,
+					frappe.as_json({"record_scope": {"doctype": "Company", "name": "Fake Company"}}),
+				)
+		self.assertEqual(inst.config, original)
+		inst.save.assert_not_called()
+		activity.assert_not_called()
+		commit.assert_not_called()
+
+	def test_baseline_schedule_enable_rejects_record_scope_before_save(self):
+		inst = self._installation(
+			"BASELINE-SCHEDULE",
+			self.BASELINE,
+			frappe.as_json({"record_scope": {"doctype": "Company", "name": "Fake Company"}}),
+		)
+		with patch.object(frappe, "get_doc", side_effect=self._config_docs(inst, None)):
+			with self.assertRaisesRegex(frappe.ValidationError, "does not support record-scoped"):
+				agents_api.set_schedule(inst.name, schedule_enabled=1)
+		inst.save.assert_not_called()
+
+	def test_baseline_rejects_stale_record_scope_before_launch_side_effects(self):
+		inst = self._installation(
+			"BASELINE-LAUNCH",
+			self.BASELINE,
+			frappe.as_json({"record_scope": {"doctype": "Company", "name": "Fake Company"}}),
+		)
+		listing = self._listing(self.BASELINE, supports_record_scope=1)
+		before = frappe.db.count("Jarvis Agent Run")
+		registry_tools = MagicMock(side_effect=AssertionError("must not reach capability gate"))
+		with (
+			patch.object(frappe, "get_doc", return_value=listing),
+			patch("jarvis.chat.agent_catalog.registry_tools_allow", registry_tools),
+			patch.object(frappe.db, "savepoint") as savepoint,
+			patch("jarvis.admin_client.post_agent_run") as dispatch,
+		):
+			with self.assertRaisesRegex(frappe.ValidationError, "does not support record-scoped"):
+				agent_scheduler._launch_audit(inst, trigger="scheduled")
+		self.assertEqual(frappe.db.count("Jarvis Agent Run"), before)
+		registry_tools.assert_not_called()
+		savepoint.assert_not_called()
+		dispatch.assert_not_called()
+
+	def test_scheduled_baseline_scope_never_reaches_dispatch(self):
+		row = frappe._dict(
+			name="BASELINE-SCHEDULED",
+			owner="scope-owner@example.invalid",
+			run_as_user="scope-runas@example.invalid",
+			agent=self.BASELINE,
+			schedule_frequency="daily",
+			schedule_time="00:00",
+			installable=1,
+			config=frappe.as_json({"record_scope": {"doctype": "Company", "name": "Fake Company"}}),
+			activation_state="live",
+		)
+		listing = frappe._dict(nature="Auditor", status="Published", operator_visibility="available")
+		with (
+			patch.object(frappe.db, "get_value", return_value=listing),
+			patch.object(agent_scheduler, "_record_failed") as record_failed,
+			patch.object(agent_scheduler, "_advance") as advance,
+			patch.object(agent_scheduler, "_dispatch") as dispatch,
+		):
+			agent_scheduler._sweep_one(row, object(), set())
+		record_failed.assert_called_once()
+		self.assertIn("does not support record-scoped", record_failed.call_args.args[1])
+		advance.assert_called_once()
+		dispatch.assert_not_called()
+
+	def test_supported_agent_accepts_and_injects_record_scope(self):
+		inst = self._installation("SCOPED-CONFIG", self.SCOPED)
+		# A stale listing must not disable a bundle that explicitly supports scope.
+		listing = self._listing(self.SCOPED, supports_record_scope=0)
+		boundary = {"doctype": "Payroll Entry", "name": "Fake Payroll"}
+		payload = {"company": "Fake Company", "record_scope": boundary}
+		with (
+			patch.object(frappe, "get_doc", side_effect=self._config_docs(inst, listing)),
+			patch.object(agents_api, "log_activity"),
+			patch.object(frappe.db, "commit"),
+		):
+			agents_api.set_config(inst.name, frappe.as_json(payload))
+		self.assertEqual(frappe.parse_json(inst.config), payload)
+		inst.save.assert_called_once_with()
+
+		record = MagicMock()
+		record.get.return_value = None
+		with (
+			patch.object(
+				agent_scope,
+				"_resolve",
+				return_value={"company": "Fake Company", "from_date": "2026-09-01", "to_date": "2026-09-30"},
+			),
+			patch.object(frappe, "get_doc", return_value=record),
+		):
+			scope = agent_scope.resolve_scope(inst, allow_record_scope=True)
+		self.assertEqual(scope["record_scope"], boundary)
+		record.check_permission.assert_called_once_with("read")
+
+	def test_prompt_never_delivers_record_scope_without_launch_capability(self):
+		listing = self._listing(self.BASELINE, supports_record_scope=1)
+		inst = frappe._dict(name="BASELINE-PROMPT", config="{}")
+		scope = {
+			"company": "Fake Company",
+			"record_scope": {"doctype": "Company", "name": "Fake Company"},
+		}
+		with patch.object(agent_scheduler, "_explicit_config", return_value={}):
+			prompt = agent_scheduler._audit_prompt(
+				listing, inst, "manual", scope, record_scope_supported=False
+			)
+		self.assertNotIn("record_scope", prompt)
+
+	def test_undeclared_scope_is_refused_by_the_generic_resolver(self):
+		inst = frappe._dict(
+			config=frappe.as_json({"record_scope": {"doctype": "Company", "name": "Fake Company"}})
+		)
+		with self.assertRaisesRegex(InvalidArgumentError, "not supported"):
+			agent_scope.resolve_scope(inst)
+
+	def test_normal_agent_config_without_record_scope_still_saves(self):
+		inst = self._installation("NORMAL-CONFIG", "close-auditor")
+		listing = self._listing("close-auditor", supports_record_scope=0)
+		payload = {"company": "Fake Company", "materiality": {"percentage": 5}}
+		with (
+			patch.object(frappe, "get_doc", side_effect=self._config_docs(inst, listing)),
+			patch.object(agents_api, "log_activity"),
+			patch.object(frappe.db, "commit"),
+		):
+			agents_api.set_config(inst.name, frappe.as_json(payload))
+		self.assertEqual(frappe.parse_json(inst.config), payload)
+		inst.save.assert_called_once_with()
+
+
 class TestRecordScopedWriteback(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
@@ -298,14 +482,27 @@ class TestRecordScopedWriteback(FrappeTestCase):
 		frappe.set_user("Administrator")
 		frappe.db.delete(FINDING, {"agent": SLUG})
 
-	def record(self, boundary, findings=True, claimed_boundary=None):
+	def record(
+		self,
+		boundary,
+		findings=True,
+		claimed_boundary=None,
+		stamp_values=None,
+		payload_values=None,
+		omit_clock=False,
+		stamp_raw=None,
+	):
 		run = _mk_run(self.owner)
-		stamp = {"company": self.company}
+		stamp = {"company": self.company, **(stamp_values or {})}
 		if boundary:
 			stamp["record_scope"] = boundary
-		frappe.db.set_value(RUN, run.name, "scope_json", json.dumps(stamp))
+		frappe.db.set_value(
+			RUN, run.name, "scope_json", stamp_raw if stamp_raw is not None else json.dumps(stamp)
+		)
 		run.reload()
-		payload = dict(stamp)
+		payload = {**stamp, **(payload_values or {})}
+		if omit_clock:
+			payload.pop("report_datetime", None)
 		if claimed_boundary:
 			payload["record_scope"] = claimed_boundary
 		rows = (
@@ -369,3 +566,101 @@ class TestRecordScopedWriteback(FrappeTestCase):
 		self.assertEqual(run.status, "partial")
 		self.assertEqual(run.findings_count, 0)
 		self.assertEqual(frappe.db.get_value(FINDING, {"run": first.name}, "state"), "open")
+
+	def test_clock_legacy_omission_keeps_the_stamped_value(self):
+		for boundary in (None, self.a):
+			with self.subTest(boundary=boundary):
+				run = self.record(
+					boundary, stamp_values={"report_datetime": "2026-10-31 12:00:00.123456"}, omit_clock=True
+				)
+				self.assertEqual(run.status, "completed")
+				self.assertEqual(run.findings_count, 1)
+				self.assertEqual(json.loads(run.scope_json)["report_datetime"], "2026-10-31 12:00:00.123456")
+
+	def test_wrong_clock_with_or_without_findings_cannot_close_an_open_finding(self):
+		for boundary in (None, self.a):
+			for has_findings in (True, False):
+				with self.subTest(boundary=boundary, has_findings=has_findings):
+					frappe.db.delete(FINDING, {"agent": SLUG})
+					first = self.record(boundary)
+					run = self.record(
+						boundary,
+						findings=has_findings,
+						stamp_values={"report_datetime": "2026-10-31 12:00:00"},
+						payload_values={"report_datetime": "2026-11-01 12:00:00"},
+					)
+					self.assertEqual(run.status, "partial")
+					self.assertEqual(run.findings_count, 0)
+					self.assertEqual(json.loads(run.scope_json)["report_datetime"], "2026-10-31 12:00:00")
+					self.assertEqual(frappe.db.get_value(FINDING, {"run": first.name}, "state"), "open")
+
+	def test_delegate_cannot_add_an_unstamped_clock(self):
+		for boundary in (None, self.a):
+			with self.subTest(boundary=boundary):
+				run = self.record(boundary, payload_values={"report_datetime": "2026-10-31 12:00:00"})
+				self.assertEqual(run.status, "partial")
+				self.assertEqual(run.findings_count, 0)
+				self.assertNotIn("report_datetime", json.loads(run.scope_json))
+
+	def test_new_run_clock_does_not_change_finding_identity(self):
+		first = self.record(self.a, stamp_values={"report_datetime": "2026-10-30 12:00:00"})
+		self.record(self.a, findings=False, stamp_values={"report_datetime": "2026-10-31 12:00:00"})
+		self.assertEqual(frappe.db.get_value(FINDING, {"run": first.name}, "state"), "resolved")
+
+	def test_wrong_execution_identity_cannot_create_findings(self):
+		for boundary in (None, self.a):
+			run = self.record(
+				boundary,
+				stamp_values={"execution_user": self.owner},
+				payload_values={"execution_user": "other@example.invalid"},
+			)
+			self.assertEqual(run.status, "partial")
+			self.assertEqual(run.findings_count, 0)
+			self.assertEqual(json.loads(run.scope_json)["execution_user"], self.owner)
+
+	def test_corrupt_scope_cannot_accept_a_delegate_execution_identity(self):
+		for raw in ("[]", "{broken"):
+			run = self.record(None, stamp_raw=raw, payload_values={"execution_user": self.owner})
+			self.assertEqual(run.status, "partial")
+			self.assertEqual(run.findings_count, 0)
+			self.assertNotIn("execution_user", json.loads(run.scope_json))
+
+	def test_ordinary_run_cannot_change_the_stamped_date(self):
+		run = self.record(
+			None, stamp_values={"report_date": "2026-10-31"}, payload_values={"report_date": "2026-11-01"}
+		)
+		self.assertEqual(run.status, "partial")
+		self.assertEqual(json.loads(run.scope_json)["report_date"], "2026-10-31")
+
+
+class TestLaunchClock(FrappeTestCase):
+	def test_report_date_and_datetime_use_one_site_instant(self):
+		instant = datetime(2026, 10, 31, 23, 59, 59, 123456)
+		with (
+			patch.object(frappe.db, "exists", return_value=True),
+			patch.object(agent_scope, "_prior_fiscal_year", return_value=None),
+			patch.object(frappe.utils, "now_datetime", return_value=instant) as clock,
+		):
+			scope = agent_scope._resolve("Fake Company", None, "2026-01-01", "2026-12-31")
+		self.assertEqual(scope["report_date"], "2026-10-31")
+		self.assertEqual(scope["report_datetime"], "2026-10-31 23:59:59.123456")
+		clock.assert_called_once_with()
+		self.assertEqual(scope["execution_user"], frappe.session.user)
+
+	def test_prompt_delivers_exact_site_datetime(self):
+		listing = frappe._dict(agent_slug="fake-scope-agent", config_keys="[]")
+		inst = frappe._dict(name="fake-install", config="{}")
+		stamp = "2026-10-31 23:59:59.123456"
+		prompt = agent_scheduler._audit_prompt(
+			listing, inst, "manual", {"company": "Fake Company", "report_datetime": stamp}
+		)
+		self.assertIn('report_datetime="' + stamp + '"', prompt)
+
+	def test_legacy_prompt_does_not_invent_a_clock(self):
+		listing = frappe._dict(agent_slug="fake-scope-agent", config_keys="[]")
+		inst = frappe._dict(name="fake-install", config="{}")
+		for value in ({}, {"report_datetime": None}):
+			prompt = agent_scheduler._audit_prompt(
+				listing, inst, "manual", {"company": "Fake Company", **value}
+			)
+			self.assertNotIn("report_datetime=", prompt)

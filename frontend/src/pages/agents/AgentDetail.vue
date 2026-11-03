@@ -44,6 +44,11 @@
 				</template>
 				<template v-else-if="agent">
 					<Button
+						v-if="agent.name === 'ticket-triage-operator'"
+						label="Review proposals"
+						@click="router.push({ name: 'TicketTriageReviews' })"
+					/>
+					<Button
 						variant="solid"
 						label="Run Now"
 						iconLeft="play"
@@ -198,11 +203,11 @@
 					Still in shadow preview - promote it to live under Configure first
 				</div>
 				<div
-					v-if="installation && apConfigurationBlocked"
+					v-if="installation && configurationBlocked"
 					class="mt-3 flex items-center gap-3 text-sm text-ink-gray-6"
 					role="status"
 				>
-					<span>{{ apConfigurationHint }}</span>
+					<span>{{ configurationHint }}</span>
 					<Button
 						v-if="tab !== 'configure'"
 						label="Complete configuration"
@@ -426,10 +431,30 @@
 							<!-- mt-2, matching AgentAccessEditor's own heading->content gap
 							     (its "Access" heading is immediately followed by an
 							     mt-2 description) - the Admin tab is the reference. -->
+							<CycleCountConfigForm
+								v-if="agent.name === 'cycle-count-planner-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
+							<TicketTriageConfigForm
+								v-else-if="agent.name === 'ticket-triage-operator'"
+								class="mt-2"
+								:config="parsedConfig"
+								:validation-errors="configurationIssues"
+								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
+								@save="saveConfig"
+							/>
 							<ConfigForm
+								v-else
 								class="mt-2"
 								:config="parsedConfig"
 								:config-keys="configKeys"
+								:agent-slug="agent.agent_slug"
 								:validation-errors="configurationIssues"
 								:saving="savingConfig"
 								@dirty="configurationDirty = $event"
@@ -453,6 +478,18 @@
 								Manual review only. Confirm the date cutoff and policy before each
 								run.
 							</p>
+							<div v-else-if="scheduleConfigurationBlocked" class="mt-2 space-y-3">
+								<p class="text-sm text-ink-gray-6" role="status">
+									Complete the Helpdesk team configuration before enabling an
+									automatic schedule.
+								</p>
+								<Button
+									v-if="sched.enabled"
+									label="Turn off automatic schedule"
+									:loading="savingSchedule"
+									@click="disableSchedule"
+								/>
+							</div>
 							<div v-else class="mt-2 space-y-5">
 								<Switch
 									label="Run automatically"
@@ -729,6 +766,8 @@ import AgentAccessEditor from "@/pages/agents/AgentAccessEditor.vue";
 import AgentModelCard from "@/pages/agents/AgentModelCard.vue";
 import AgentInstallDialog from "@/pages/agents/AgentInstallDialog.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
+import CycleCountConfigForm from "@/pages/agents/CycleCountConfigForm.vue";
+import TicketTriageConfigForm from "@/pages/agents/TicketTriageConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import ShadowChip from "@/components/ShadowChip.vue";
@@ -1113,23 +1152,40 @@ async function doInstall(pick) {
 
 const running = ref(false);
 const configurationDirty = ref(false);
+const SLA_BREACH_AGEING_AUDITOR = "sla-breach-ageing-auditor";
 const isOperatorReview = computed(
 	() => agent.value?.nature === "Operator" && !!agent.value?.supports_manual_run
 );
-const configurationIssues = computed(
-	() => (isOperatorReview.value && installation.value?.configuration_issues) || {}
+const isSlaBreachAgeingAuditor = computed(
+	() => agent.value?.agent_slug === SLA_BREACH_AGEING_AUDITOR
 );
-const apConfigurationBlocked = computed(
+// Most agents can run with ordinary optional settings. The three review
+// operators and the SLA queue auditor each have a required launch contract.
+const requiresRunConfiguration = computed(
+	() => isOperatorReview.value || isSlaBreachAgeingAuditor.value
+);
+const configurationIssues = computed(
+	() => (requiresRunConfiguration.value && installation.value?.configuration_issues) || {}
+);
+const configurationBlocked = computed(
 	() =>
-		isOperatorReview.value &&
+		requiresRunConfiguration.value &&
 		(configurationDirty.value ||
 			savingConfig.value ||
 			!installation.value?.configuration_issues ||
 			Object.keys(configurationIssues.value).length > 0)
 );
-const apConfigurationHint = computed(() =>
+// The SLA auditor is the only scheduled agent with a mandatory launch
+// boundary. Do not offer a schedule that will fail on its first unattended
+// tick; a legacy active schedule still gets a dedicated turn-off control.
+const scheduleConfigurationBlocked = computed(
+	() => isSlaBreachAgeingAuditor.value && configurationBlocked.value
+);
+const configurationHint = computed(() =>
 	configurationDirty.value
 		? "Save your configuration changes before running."
+		: isSlaBreachAgeingAuditor.value
+		? "Select and save one readable Helpdesk team in Configure before running."
 		: "Complete and save the required review settings in Configure before running."
 );
 // On-demand run is offered for read-only auditors AND scribes (mirrors the
@@ -1165,7 +1221,7 @@ const runDisabled = computed(
 			!["Auditor", "Scribe"].includes(agent.value.nature)) ||
 		!(agent.value && agent.value.allowed) ||
 		shadowScribeBlocked.value ||
-		apConfigurationBlocked.value
+		configurationBlocked.value
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
@@ -1181,7 +1237,7 @@ const runTooltip = computed(() => {
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
 	if (!agent.value.allowed) return "You do not have access to this agent";
-	if (apConfigurationBlocked.value) return apConfigurationHint.value;
+	if (configurationBlocked.value) return configurationHint.value;
 	// The shadow vocabulary is reviewer language (jarvis#1062): a plain user has
 	// no promote control and no say in the sign-off, so telling them to go and
 	// promote it names an action they cannot take.
@@ -1437,8 +1493,13 @@ const scheduleSummary = computed(() => {
 });
 
 async function saveSchedule() {
-	if (!installation.value || savingSchedule.value || runtimeClosed.value) return;
+	if (!installation.value || savingSchedule.value || runtimeClosed.value) return false;
+	if (scheduleConfigurationBlocked.value && sched.value.enabled) {
+		toast.error(configurationHint.value);
+		return false;
+	}
 	savingSchedule.value = true;
+	let scheduleSaved = false;
 	try {
 		await api.setAgentSchedule(installation.value.name, {
 			schedule_enabled: sched.value.enabled ? 1 : 0,
@@ -1448,12 +1509,32 @@ async function saveSchedule() {
 			schedule_day_of_month:
 				sched.value.frequency === "monthly" ? Number(sched.value.day) || 0 : 0,
 		});
+		scheduleSaved = true;
 		toast.success("Schedule saved");
 		await load();
+		return true;
 	} catch (e) {
 		toast.error(errHtml(e));
+		// A refresh failure happens after the API has persisted the schedule.
+		// Keep the draft aligned with that saved state instead of restoring a
+		// legacy schedule that is already off on the server.
+		return scheduleSaved;
 	} finally {
 		savingSchedule.value = false;
+	}
+}
+
+async function disableSchedule() {
+	if (!installation.value || savingSchedule.value) return;
+	// A legacy schedule must always be disableable, even when its current
+	// configuration is no longer valid or visible to the run-as identity.
+	const wasEnabled = sched.value.enabled;
+	sched.value.enabled = false;
+	if (!(await saveSchedule())) {
+		// Keep the only recovery action visible when the server rejects the
+		// change or a transient request fails. The saved schedule is still on
+		// until the next successful request.
+		sched.value.enabled = wasEnabled;
 	}
 }
 
