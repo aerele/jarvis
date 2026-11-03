@@ -2508,8 +2508,8 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			"""
 			INSERT INTO `tabBin`
 				(`name`, `creation`, `modified`, `modified_by`, `owner`, `docstatus`, `idx`,
-				 `item_code`, `warehouse`, `actual_qty`, `stock_uom`, `company`)
-			VALUES (%s, NOW(6), NOW(6), %s, %s, 0, 0, %s, %s, %s, %s, %s)
+				 `item_code`, `warehouse`, `actual_qty`, `stock_uom`)
+			VALUES (%s, NOW(6), NOW(6), %s, %s, 0, 0, %s, %s, %s, %s)
 			""",
 			(
 				marker_bin,
@@ -2519,7 +2519,6 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 				self.warehouse,
 				original_qty,
 				"Nos",
-				self.company,
 			),
 		)
 
