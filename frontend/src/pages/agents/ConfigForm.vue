@@ -1,13 +1,19 @@
 <template>
-	<fieldset :disabled="operatorReview && saving" class="min-w-0">
+	<fieldset :disabled="requiresConfiguration && saving" class="min-w-0">
 		<p class="text-sm text-ink-gray-6">
 			{{
-				operatorReview
+				slaBreachAgeingAuditor
+					? "Select one readable Helpdesk team. Each run reads only tickets in that team."
+					: operatorReview
 					? bankRecon
 						? "Bank reconciliation review reads one company bank account for the statement window below and proposes matches for a named reviewer. Manual runs only; nothing is reconciled, allocated or posted."
 						: arReview
 						? "AR review includes older open receivables, uses the evidence cutoff and prepares unsent reminder text only. Manual runs; no sending, Dunning creation or accounting changes."
 						: "AP document review uses the company, fiscal period, evidence cutoff and matching settings below. Manual runs only. Preview creates no review requests; live review never submits or pays an invoice."
+					: statutoryPayroll
+					? "Select the submitted monthly Payroll Entry. Jarvis fixes the company and period from that record. Complete the statutory mapping in Advanced (JSON)."
+					: fefoConfiguration
+					? "Expiry compliance needs a named reviewer and a near-expiry window. Save both settings before running an audit."
 					: "Settings this agent reads when it runs. Leave a field empty to use the default."
 			}}
 		</p>
@@ -41,7 +47,7 @@
 			<p v-if="defaultsMessage" class="mt-2">{{ defaultsMessage }}</p>
 		</div>
 		<div
-			v-if="operatorReview && Object.keys(shownErrors).length"
+			v-if="requiresConfiguration && Object.keys(shownErrors).length"
 			class="mt-3 rounded-lg border border-outline-gray-2 bg-surface-gray-1 p-3 text-sm text-ink-gray-7"
 			role="status"
 		>
@@ -201,7 +207,7 @@
 						<div
 							v-for="(row, index) in deposit.vouchers"
 							:key="`deposit-voucher-${index}`"
-							class="grid grid-cols-1 gap-2 md:grid-cols-[9rem_minmax(0,1fr)_9rem_auto] md:items-end"
+							class="grid grid-cols-1 gap-2 md:grid-cols-2 md:items-end"
 						>
 							<FormControl
 								type="select"
@@ -234,8 +240,9 @@
 					:type="f.type"
 					:label="f.label"
 					:description="f.help"
+					:maxlength="f.maxLength"
 					:modelValue="form[f.key]"
-					@update:modelValue="(value) => (form[f.key] = value)"
+					@update:modelValue="(value) => onTextInput(f.key, value)"
 				/>
 
 				<FormControl
@@ -254,6 +261,9 @@
 					:label="f.label"
 					:description="f.help"
 					:placeholder="f.placeholder"
+					:min="f.min"
+					:max="f.max"
+					:step="f.integer ? 1 : undefined"
 					:modelValue="form[f.key]"
 					@update:modelValue="(v) => (form[f.key] = v)"
 				>
@@ -304,9 +314,17 @@
 
 		<div class="mt-4">
 			<Button label="Save configuration" :loading="saving" @click="save" />
-			<p v-if="operatorReview" class="mt-2 text-p-xs text-ink-gray-5">
-				You can save unfinished setup. Run Now stays unavailable until all required
-				settings are valid and saved. Suggestions are not applied to a run until you save.
+			<ErrorMessage class="mt-2" :message="saveError" />
+			<p v-if="requiresConfiguration" class="mt-2 text-p-xs text-ink-gray-5">
+				<template v-if="operatorReview">
+					You can save unfinished setup. Run Now stays unavailable until all required
+					settings are valid and saved. Suggestions are not applied to a run until you
+					save.
+				</template>
+				<template v-else>
+					You can save unfinished setup. Run Now stays unavailable until all required
+					settings are valid and saved.
+				</template>
 			</p>
 		</div>
 	</fieldset>
@@ -336,9 +354,10 @@ import { useLinkSearch } from "@/composables/useLinkSearch";
 import {
 	SCOPE_CONFIG_FIELDS,
 	AGENT_SPECIFIC_CONFIG_FIELDS,
-	CONFIG_FIELD_BY_KEY,
 	CONFIG_FIELD_LABELS,
+	CONFIG_FIELD_MAX_LENGTHS,
 	NUMBER_CONFIG_KEYS,
+	NUMBER_CONFIG_CONSTRAINTS,
 	TEXT_LIST_CONFIG_KEYS,
 	KEY_TO_PATH,
 	getPath,
@@ -350,18 +369,24 @@ const props = defineProps({
 	config: { type: Object, default: () => ({}) }, // parsed installation config
 	// jarvis#1063 (jarvis-only half): the current agent's Jarvis Agent Listing
 	// config_keys (get_agent), already parsed to a plain array by the parent.
-	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - the scope fields
-	// (SCOPE_CONFIG_FIELDS) always render regardless.
+	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - each field matches its
+	// declared configKey or storage path. The universal SCOPE_CONFIG_FIELDS
+	// always render regardless.
 	configKeys: { type: Array, default: () => [] },
+	// The listing identity determines the one record-scoped field whose storage
+	// is a `{doctype, name}` object rather than a plain config value.
+	agentSlug: { type: String, default: "" },
 	validationErrors: { type: Object, default: () => ({}) },
 	saving: { type: Boolean, default: false },
 });
 
-// The agent-specific fields this agent's config_keys actually names, in
-// CONFIG_FIELD_SET's display order.
+// The agent-specific fields this agent's config_keys actually names (through
+// configKey or storage path), in CONFIG_FIELD_SET's display order.
 const agentSpecificFields = computed(() =>
-	AGENT_SPECIFIC_CONFIG_FIELDS.filter((f) =>
-		(f.paths || [f.path]).some((p) => props.configKeys.includes(p))
+	AGENT_SPECIFIC_CONFIG_FIELDS.filter(
+		(f) =>
+			(!f.agentSlugs || f.agentSlugs.includes(props.agentSlug)) &&
+			(f.paths || [f.path]).some((p) => props.configKeys.includes(f.configKey || p))
 	)
 );
 // Scope fields first (always), then whichever agent-specific fields apply -
@@ -369,6 +394,12 @@ const agentSpecificFields = computed(() =>
 const operatorReview = computed(() => props.configKeys.includes("review_scope"));
 const arReview = computed(() => props.configKeys.includes("settlement_hold_days"));
 const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
+const statutoryPayroll = computed(() => props.configKeys.includes("payroll_entry"));
+const fefoConfiguration = computed(() => props.configKeys.includes("fefo.reviewer"));
+const slaBreachAgeingAuditor = computed(() => props.agentSlug === "sla-breach-ageing-auditor");
+const requiresConfiguration = computed(
+	() => operatorReview.value || fefoConfiguration.value || slaBreachAgeingAuditor.value
+);
 const payrollDepositReview = computed(() => props.configKeys.includes("deposit"));
 const defaultsData = ref(null);
 const defaultsLoading = ref(false);
@@ -376,9 +407,16 @@ const defaultsMessage = ref("");
 let defaultsRequest = 0;
 const visibleFields = computed(() => [
 	// Bank reconciliation reads a statement window only; a fiscal year does not apply.
-	...SCOPE_CONFIG_FIELDS.filter(
-		(field) =>
-			!((bankRecon.value || payrollDepositReview.value) && field.key === "fiscal_year")
+	...(statutoryPayroll.value
+		? []
+		: SCOPE_CONFIG_FIELDS.filter(
+				(field) =>
+					!fefoConfiguration.value &&
+					!(
+						(bankRecon.value || payrollDepositReview.value) &&
+						field.key === "fiscal_year"
+					)
+		  )
 	).map((field) => {
 		if (!operatorReview.value || field.key === "fiscal_year") return field;
 		if (bankRecon.value && field.type === "date-range")
@@ -440,15 +478,30 @@ const visibleKeys = computed(() => new Set(visibleFields.value.flatMap((f) => f.
 // Server issues describe the SAVED config. Hide a field's issue once its value
 // differs from what is saved (a filled default or an edit) until the next save
 // re-checks it; issues without a form field always show.
-const shownErrors = computed(() =>
-	Object.fromEntries(
+const localValidationErrors = ref({});
+const shownErrors = computed(() => ({
+	...Object.fromEntries(
 		Object.entries(props.validationErrors || {}).filter(([key]) => {
 			if (!(key in form)) return true;
-			const saved = getPath(props.config || {}, KEY_TO_PATH[key] || key);
+			const path = KEY_TO_PATH[key] || key;
+			const field = visibleFields.value.find((entry) =>
+				(entry.keys || [entry.key]).includes(key)
+			);
+			const saved = getPath(props.config || {}, path);
+			if (field?.recordScopeDoctype) {
+				const savedName =
+					saved &&
+					saved.doctype === field.recordScopeDoctype &&
+					typeof saved.name === "string"
+						? saved.name
+						: "";
+				return String(form[key]) === savedName;
+			}
 			return String(form[key]) === String(saved == null ? "" : saved);
 		})
-	)
-);
+	),
+	...localValidationErrors.value,
+}));
 
 const emit = defineEmits(["save", "dirty"]);
 
@@ -463,10 +516,14 @@ const form = reactive({
 	settlement_hold_days: "",
 	basis: "",
 	review_scope: "",
+	depr_run_posted: "",
+	enable_capex_signal: "",
+	payroll_entry: "",
 	company: "",
 	fiscal_year: "",
 	from_date: "",
 	to_date: "",
+	sla_team: "",
 	benchmark_value: "",
 	percentage: "",
 	engagement_risk_level: "",
@@ -475,6 +532,11 @@ const form = reactive({
 	baseline_hrms_reviewer_capacity: "",
 	baseline_hrms_history_from: "",
 	baseline_hrms_test_declaration: "",
+	fefo_reviewer: "",
+	fefo_near_expiry_days: "",
+	fefo_test_declaration: "",
+	grn_hygiene_reviewer: "",
+	grn_hygiene_test_declaration: "",
 	annual_aggregate_turnover: "",
 	same_hsn_rate_allowlist: "",
 });
@@ -659,6 +721,7 @@ function normaliseDeposit() {
 
 const advanced = ref("{}");
 const advancedError = ref("");
+const saveError = ref("");
 const initialState = ref("");
 
 // Only rendered fields count: a default filled into a field this agent never
@@ -682,6 +745,19 @@ function seed(cfg) {
 			continue;
 		}
 		const path = KEY_TO_PATH[key] || key;
+		const field = visibleFields.value.find((entry) =>
+			(entry.keys || [entry.key]).includes(key)
+		);
+		if (field?.recordScopeDoctype) {
+			const record = getPath(c, path);
+			form[key] =
+				record &&
+				record.doctype === field.recordScopeDoctype &&
+				typeof record.name === "string"
+					? record.name
+					: "";
+			continue;
+		}
 		// jarvis#1063 CRITICAL fix: the nested path (e.g.
 		// "materiality.benchmark_value") is the source of truth. A flat
 		// top-level key of the same name (pre-nesting saves) is a MIGRATION
@@ -713,6 +789,7 @@ function seed(cfg) {
 	if (payrollDepositReview.value) delete rest.fiscal_year;
 	advanced.value = JSON.stringify(rest, null, 2);
 	advancedError.value = "";
+	localValidationErrors.value = {};
 	initialState.value = formState();
 }
 
@@ -731,6 +808,20 @@ watch(
 function onAdvancedInput(v) {
 	advanced.value = v;
 	advancedError.value = "";
+}
+
+function clearLocalValidationError(key) {
+	if (!(key in localValidationErrors.value)) return;
+	const remaining = { ...localValidationErrors.value };
+	delete remaining[key];
+	localValidationErrors.value = remaining;
+}
+
+function onTextInput(key, value) {
+	form[key] = value;
+	const maxLength = CONFIG_FIELD_MAX_LENGTHS[key];
+	if (!maxLength || String(value ?? "").trim().length <= maxLength)
+		clearLocalValidationError(key);
 }
 
 // ── Company / Fiscal year: debounced + fenced Link search, primed on open ───
@@ -769,6 +860,8 @@ const linkFields = {
 	company: makeLinkField("Company"),
 	fiscal_year: makeLinkField("Fiscal Year"),
 	bank_account: makeLinkField("Bank Account"),
+	payroll_entry: makeLinkField("Payroll Entry"),
+	sla_team: makeLinkField("HD Team"),
 	depositAccountGroup: makeLinkField("Account"),
 };
 watch([operatorReview, defaultsData], () => {
@@ -878,6 +971,7 @@ onBeforeUnmount(() => {
 });
 
 function save() {
+	saveError.value = "";
 	// 1) advanced JSON must parse to an object
 	let base = {};
 	depositError.value = "";
@@ -907,7 +1001,9 @@ function save() {
 	const merged = JSON.parse(JSON.stringify(base));
 	for (const key of visibleKeys.value) {
 		const path = KEY_TO_PATH[key] || key;
-		const field = CONFIG_FIELD_BY_KEY[key];
+		const field = visibleFields.value.find((entry) =>
+			(entry.keys || [entry.key]).includes(key)
+		);
 		if (field?.type === "deposit-status") {
 			const normalised = normaliseDeposit();
 			if (typeof normalised === "string") {
@@ -924,10 +1020,32 @@ function save() {
 			deletePath(merged, path);
 			continue;
 		}
+		const maxLength = CONFIG_FIELD_MAX_LENGTHS[key];
+		if (maxLength && v.length > maxLength) {
+			localValidationErrors.value = {
+				...localValidationErrors.value,
+				[key]: `"${CONFIG_FIELD_LABELS[key]}" must be at most ${maxLength} characters.`,
+			};
+			return;
+		}
+		if (field?.recordScopeDoctype) {
+			setPath(merged, path, { doctype: field.recordScopeDoctype, name: v });
+			continue;
+		}
 		if (NUMBER_CONFIG_KEYS.includes(key)) {
 			const n = Number(v);
 			if (isNaN(n)) {
-				advancedError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
+				saveError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
+				return;
+			}
+			const constraints = NUMBER_CONFIG_CONSTRAINTS[key];
+			if (
+				constraints &&
+				((constraints.integer && !/^\d+$/.test(v)) ||
+					(constraints.min != null && n < constraints.min) ||
+					(constraints.max != null && n > constraints.max))
+			) {
+				saveError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a whole number from ${constraints.min} to ${constraints.max}.`;
 				return;
 			}
 			setPath(merged, path, n);
@@ -945,6 +1063,7 @@ function save() {
 		}
 	}
 	advancedError.value = "";
+	localValidationErrors.value = {};
 	defaultsRequest += 1;
 	defaultsLoading.value = false;
 	emit("save", merged);
