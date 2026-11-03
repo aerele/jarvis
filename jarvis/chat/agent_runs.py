@@ -1236,6 +1236,7 @@ def record_delegate_run(
 	coverage: dict | None = None,
 	scope: dict | None = None,
 	truncated: bool = False,
+	partial: bool = False,
 	dropped: list | None = None,
 	canvas_ref: str | None = None,
 	integrity_digest: str | None = None,
@@ -1250,7 +1251,9 @@ def record_delegate_run(
 	invalid rows already dropped by the tool and passed as ``dropped``).
 	``coverage`` is the per-rule manifest; ``scope`` the resolved run scope
 	(carries ``company`` stamped on every Finding + used to scope auto-resolve and
-	recompute the watermark). Returns the reloaded Run doc.
+	recompute the watermark). ``partial`` preserves a trusted evaluator's
+	completed-subset result and blocks auto-resolution. Returns the reloaded Run
+	doc.
 	"""
 	import json as _json
 
@@ -1273,6 +1276,7 @@ def record_delegate_run(
 	coverage = coverage or {}
 	scope = scope if isinstance(scope, dict) else {}
 	dropped = dropped or []
+	partial = bool(partial)
 	scope_rejected = False
 	if agent == NEGATIVE_STOCK_AGENT:
 		# ``record_delegate_run`` is also a server-side API. Normalize its scope
@@ -1559,6 +1563,7 @@ def record_delegate_run(
 	if (
 		not truncated
 		and not scope_rejected
+		and not partial
 		and not dropped
 		and not scope_mismatch
 		and not wm_drift
@@ -1679,6 +1684,7 @@ def record_delegate_run(
 	execution_partial = (
 		bool(truncated)
 		or scope_rejected
+		or partial
 		or wm_drift
 		or scoped
 		or row_shortfall
@@ -1707,6 +1713,8 @@ def record_delegate_run(
 	note_parts = []
 	if truncated:
 		note_parts.append("scan truncated; findings incomplete")
+	if partial:
+		note_parts.append("source review incomplete; findings not auto-resolved")
 	if wm_drift:
 		note_parts.append("GL changed during scan - re-run advised")
 	if visibility_state in ("sliced", "unknown"):
@@ -1753,6 +1761,7 @@ def record_delegate_run(
 			"rows_consumed": rows_consumed,
 			"wm_row_count": run_doc.get("wm_row_count"),
 			"truncated": bool(truncated),
+			"partial": partial,
 		},
 		sort_keys=True,
 		default=str,

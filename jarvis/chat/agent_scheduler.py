@@ -466,6 +466,20 @@ def _sweep_one(row, now, seen: set) -> None:
 			_advance(row, now)
 			return
 
+	from jarvis.chat.stock_variance_scope import configuration_issues as stock_issues
+	from jarvis.chat.stock_variance_scope import is_stock_variance
+
+	if is_stock_variance(row.agent):
+		with impersonate(run_as):
+			issues = stock_issues(row.config or "{}")
+		if issues:
+			_record_failed(
+				row,
+				"scheduled run skipped: complete the Stock Variance company, Warehouse scope and reviewer in Configure",
+			)
+			_advance(row, now)
+			return
+
 	_dispatch(row, now, run_as=run_as, source_apps=source_apps, model_gate=model_gate)
 
 
@@ -1376,6 +1390,7 @@ def _launch_audit(
 		review_config = ticket_triage.configuration(inst)
 	else:
 		review_config = review_backend.configuration(inst) if review_backend else None
+	stock_variance_config = None
 	if review_config and trigger != "manual":
 		frappe.throw("Operator evidence review supports manual runs only.")
 	deposit_launch = None
@@ -1438,6 +1453,16 @@ def _launch_audit(
 
 		with impersonate(run_as_user):
 			require_configuration(inst.config or "{}")
+
+	from jarvis.chat.stock_variance_scope import is_stock_variance
+	from jarvis.chat.stock_variance_scope import require_configuration as require_stock_configuration
+
+	if is_stock_variance(inst.agent):
+		from jarvis._session import impersonate
+
+		with impersonate(run_as_user):
+			validated_stock_config = require_stock_configuration(inst.config or "{}")
+		stock_variance_config = _stock_variance_assessment_config(validated_stock_config)
 
 	# The delegate's engagement settings are a launch-time fact, not a live view of
 	# ``Installation.config``. Resolve only declared, non-scope values after the
@@ -1613,8 +1638,8 @@ def _launch_audit(
 				"model_source": model_gate.get("model_source"),
 				"assessment_config_json": frappe.as_json(deposit_launch)
 				if deposit_launch
-				else frappe.as_json(review_config)
-				if review_config
+				else frappe.as_json(review_config or stock_variance_config)
+				if (review_config or stock_variance_config)
 				else None,
 				"engagement_config_json": engagement_config_json,
 				**capability,
@@ -2173,6 +2198,16 @@ def _explicit_config(listing, inst) -> dict:
 			full = {}
 	explicit = {k: full[k] for k in namespaces if k in full and derived_config.customer_may_set(k)}
 	return {**explicit, **derived_config.derive(namespaces, inst, explicit)}
+
+
+def _stock_variance_assessment_config(validated_config: dict) -> dict:
+	"""The immutable evaluator namespace for a Stock Variance launch.
+
+	Company and Warehouse data belong in the separately stamped run scope. This
+	prevents a later installation edit from widening an already launched review.
+	require_configuration validates the input before this helper is called.
+	"""
+	return {"stock_variance": validated_config["stock_variance"]}
 
 
 def _sanitize_delegated_engagement_config(listing, engagement_config: dict | None) -> dict:
