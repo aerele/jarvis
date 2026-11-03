@@ -5324,7 +5324,8 @@ async function reverifySite() {
 			forgetReady();
 			copyNotice.value = null;
 		} else if (res && res.error === "unreachable") {
-			reverifyError.value = "Could not reach Jarvis to verify this site. Try again in a minute.";
+			reverifyError.value =
+				"Could not reach Jarvis to verify this site. Try again in a minute.";
 		} else {
 			reverifyError.value = "Re-verify did not confirm this site.";
 		}
