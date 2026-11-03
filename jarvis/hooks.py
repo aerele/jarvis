@@ -213,7 +213,11 @@ website_redirects = [
 # needs that DocType sync does not produce has to be seeded here: the roles no
 # DocType names ("Knowledge Wiki Manager", the two support roles) plus the
 # Personalisation Settings defaults. See jarvis/install.py.
-after_install = ["jarvis.legacy_compatibility.seed", "jarvis.install.after_install"]
+after_install = [
+	"jarvis.legacy_compatibility.seed",
+	"jarvis.install.after_install",
+	"jarvis.lcv.setup_source_link",
+]
 
 before_migrate = "jarvis.legacy_compatibility.seed"
 
@@ -221,6 +225,7 @@ before_migrate = "jarvis.legacy_compatibility.seed"
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
 # fetch — bundles are reviewed deploy artifacts, adversarial S2).
 after_migrate = [
+	"jarvis.lcv.setup_source_link",
 	"jarvis.chat.runtime_profile.after_migrate",
 	"jarvis.chat.agent_catalog.after_migrate",
 	# Behavioural pattern learning: seed Jarvis Pattern Detector State rows
@@ -604,6 +609,13 @@ doc_events = {
 # isn't jarvis, and neither ever raises.
 doc_events["Error Log"] = {"before_insert": "jarvis.api_errors.tag_error_log_origin"}
 after_request = ["jarvis.api_errors.capture_failed_request"]
+
+# Generic RPCs must use the same source gate as dedicated LCV tools. The
+# handler is a no-op outside the scoped tool call, including ordinary Desk.
+doc_events["Landed Cost Voucher"] = {
+	"before_validate": "jarvis.tools._lcv_tool_writes.guard_tool_document",
+	"before_submit": "jarvis.tools._lcv_tool_writes.guard_tool_document",
+}
 
 # Org-scope wiki pages are mirrored as markdown into the tenant container
 # workspace; every page write/delete enqueues a debounced mirror sync (the
