@@ -63,6 +63,51 @@ def _capabilities(doctype: str, user: str) -> dict:
 	return {pt: bool(frappe.has_permission(doctype, ptype=pt, user=user)) for pt in ptypes}
 
 
+def _read_scope(doctype: str, user: str) -> dict:
+	"""Report read constraints, without claiming that an arbitrary hook is complete.
+
+	This is metadata for the current actor. No script bodies or other users are
+	read. A consumer must understand the reported hooks before it attests coverage.
+	"""
+	from frappe.core.doctype.server_script.server_script_utils import get_server_script_map
+	from frappe.permissions import get_role_permissions
+
+	perms = get_role_permissions(frappe.get_meta(doctype), user=user)
+	truncated = False
+
+	def hooks(kind):
+		nonlocal truncated
+		config = frappe.get_hooks(kind, {})
+		values = []
+		for key in ("*", doctype):
+			items = config.get(key, [])
+			if isinstance(items, str):
+				items = [items]
+			if not isinstance(items, (list, tuple)):
+				truncated = True
+				continue
+			values.extend(items)
+		if len(values) > 4:
+			truncated = True
+		result = []
+		for item in values[:4]:
+			if not isinstance(item, str) or len(item) > 180:
+				truncated = True
+			else:
+				result.append(item)
+		return result
+
+	query_hooks = hooks("permission_query_conditions")
+	record_hooks = hooks("has_permission")
+	return {
+		"role_unrestricted_read": bool(perms.get("read") and "read" not in perms.get("if_owner", {})),
+		"query_hooks": query_hooks,
+		"record_hooks": record_hooks,
+		"hooks_truncated": truncated,
+		"query_script_present": bool(get_server_script_map().get("permission_query", {}).get(doctype)),
+	}
+
+
 def _record_capabilities(doctype: str, name: str, user: str) -> dict:
 	"""The calling user's actions on ONE specific record. Passing ``doc`` to
 	has_permission is what makes this User-Permission aware (plus DocShare + owner
@@ -92,6 +137,8 @@ def get_my_access(doctypes: list[str] | None = None, docs: list[dict] | None = N
 	      },
 	      "can": {"<DocType>": {"create", "read", "write", "delete", "submit"?, "cancel"?}},
 	      "can_doc": [{"doctype", "name", "can": {"read", "write", "delete", "submit"?, "cancel"?}}],
+	      "read_scope": {"<DocType>": {"role_unrestricted_read", "query_hooks", "record_hooks",
+	                     "query_script_present", "hooks_truncated"}},
 	    }
 
 	``restrictions`` are the user's User Permission rows — each limits the records of
@@ -101,9 +148,9 @@ def get_my_access(doctypes: list[str] | None = None, docs: list[dict] | None = N
 	``_MAX_DETAIL``), where ``applies_to`` (the row narrowed to one linked doctype)
 	and, for a tree DocType, ``includes_descendants`` (covers ``value``'s whole
 	subtree unless False) stay exact. Empty ``by_doctype`` means no record-level
-	restriction: access is governed by roles alone.
+	restriction of that type. Role rules and custom permission hooks can still narrow access.
 
-	Pass ``doctypes`` (max 50) to also get ``can`` — the role-based action map per
+	Pass ``doctypes`` (max 50) to also get ``can`` and ``read_scope`` — the role-based action map per
 	DocType (so "can I create a Sales Invoice?" is one deterministic call instead of
 	drafting a write that dies at save). Omitted entirely when ``doctypes`` is not
 	given, so the plain "my access" call stays lean.
@@ -190,11 +237,14 @@ def get_my_access(doctypes: list[str] | None = None, docs: list[dict] | None = N
 		if len(doctypes) > _MAX_DOCTYPES:
 			raise InvalidArgumentError(f"at most {_MAX_DOCTYPES} doctypes per call")
 		can = {}
+		read_scope = {}
 		for dt in doctypes:
 			if not isinstance(dt, str) or not frappe.db.exists("DocType", dt):
 				raise InvalidArgumentError(f"unknown DocType: {dt!r}")
 			can[dt] = _capabilities(dt, user)
+			read_scope[dt] = _read_scope(dt, user)
 		result["can"] = can
+		result["read_scope"] = read_scope
 
 	if docs is not None:
 		if not isinstance(docs, (list, tuple)):
