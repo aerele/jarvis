@@ -115,6 +115,7 @@ def get_creation_context(
 	child_fields = _child_fields(meta)
 	if child_fields:
 		field_lists["child_fields"] = child_fields
+		field_lists["child_doctypes"] = {name: meta.get_field(name).options for name in child_fields}
 
 	# Derived record? The agent already tells us the source - it passes
 	# {"sales_order": "SAL-ORD-2026-00002"} as a hint - so if the ERP has a
@@ -216,7 +217,13 @@ def _result(
 			"default is wrong for this record; a symbolic default (`Today`, "
 			"`:Company`) is resolved by Frappe - never copy the token as a "
 			"value. Set every remaining `mandatory` field before create_doc. "
-			"Ask the user only about mandatory fields you cannot determine."
+			"Ask the user only about mandatory fields you cannot determine. "
+			"For a missing child-row value, use a jarvis-ask field question with "
+			'"doctype" from child_doctypes, "fieldname", "parent" set to this '
+			'document type and "parentfield" set to the table field. For example: '
+			'{"q":"Item","type":"field","doctype":"Sales Invoice Item",'
+			'"fieldname":"item_code","parent":"Sales Invoice","parentfield":"items"}. '
+			"This keeps the field's record eligibility filters; a bare link picker is a generic lookup."
 		),
 	}
 	out.update(field_lists or {})

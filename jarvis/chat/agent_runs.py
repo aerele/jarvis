@@ -381,9 +381,103 @@ def persist_agent_dashboard(
 	doc.owner = owner
 	doc.flags.ignore_permissions = True
 	doc.insert(ignore_permissions=True)
+	# Frappe stamps the active session user as ``owner`` on insert, even when a
+	# trusted server caller pre-set a different owner.  Re-home both the owner and
+	# User-scope target so a fallback never lands on a run-as account's dashboard
+	# surface by accident.
+	if owner and frappe.db.get_value(DASHBOARD, doc.name, "owner") != owner:
+		frappe.db.set_value(
+			DASHBOARD,
+			doc.name,
+			{"owner": owner, "target_user": owner},
+			update_modified=False,
+		)
 	if set_on_run:
 		frappe.db.set_value(RUN, run_doc.name, "dashboard", doc.name, update_modified=False)
 	return doc.name
+
+
+def _visibility_coverage_note(visibility_state: str) -> str:
+	"""Customer-safe explanation for a receipt that cannot prove full HR view."""
+	if visibility_state == "sliced":
+		return "The scheduled user sees only part of the HR data; this is not a complete workforce result."
+	return "HR visibility could not be verified for this run; this is not a complete workforce result."
+
+
+def persist_visibility_fallback(
+	run_doc,
+	inst,
+	visibility_state: str,
+	*,
+	findings: list | None = None,
+	counts: dict | None = None,
+	coverage_note: str | None = None,
+	advisory_findings_count: int = 0,
+	integrity_digest: str | None = None,
+) -> str:
+	"""Replace or create the one safe dashboard for a restricted run.
+
+	A delegate-authored dashboard must never survive a sliced or unverified
+	receipt.  If this run already owns a dashboard, replace its body in place so
+	it cannot remain readable from the dashboard list during terminal writeback.
+	An untrusted link is detached rather than edited; then a new server dashboard
+	is created.  This helper intentionally accepts no delegate HTML.
+	"""
+	if visibility_state not in ("sliced", "unknown"):
+		raise ValueError("visibility fallback requires sliced or unknown state")
+	findings = list(findings or [])
+	counts = counts or {"blocker": 0, "warning": 0, "note": 0}
+	note = coverage_note or _visibility_coverage_note(visibility_state)
+	listing_title = frappe.db.get_value(LISTING, run_doc.agent, "title") or run_doc.agent
+	title = _default_dashboard_title(run_doc, listing_title)
+	html = _fallback_dashboard_html(
+		title,
+		findings,
+		counts,
+		note,
+		result_state="partial",
+		advisory_findings_count=advisory_findings_count,
+		integrity_digest=integrity_digest,
+	)
+	visibility_owner = _visibility_owner(inst)
+	dashboard_name = frappe.db.get_value(RUN, run_doc.name, "dashboard")
+	if dashboard_name and frappe.db.exists(DASHBOARD, dashboard_name):
+		# The only dashboard we may overwrite is one the run itself created.  The
+		# source conversation is server-stamped by persist_agent_dashboard; an
+		# arbitrary dashboard link must be detached, never repurposed.
+		source = frappe.db.get_value(DASHBOARD, dashboard_name, "source_conversation") or ""
+		if source == (run_doc.get("conversation") or ""):
+			# A saved delegate dashboard is static, but clear any unexpected child
+			# sources/filters before repurposing it.  A safe fallback must never keep
+			# a stale live-data path from an earlier artifact.
+			frappe.db.delete("Jarvis Dashboard Source", {"parent": dashboard_name})
+			frappe.db.delete("Jarvis Dashboard Filter", {"parent": dashboard_name})
+			frappe.db.set_value(
+				DASHBOARD,
+				dashboard_name,
+				{
+					"dashboard_title": title,
+					"description": note[:255],
+					"html": html,
+					"scope": "User",
+					"target_role": None,
+					"target_user": visibility_owner,
+					"theme": "Custom",
+					"dashboard_type": "Static",
+				},
+				update_modified=False,
+			)
+			_reassign_owner(DASHBOARD, dashboard_name, visibility_owner)
+			return dashboard_name
+	frappe.db.set_value(RUN, run_doc.name, "dashboard", None, update_modified=False)
+	return persist_agent_dashboard(
+		run_doc,
+		inst,
+		html,
+		title=title,
+		description=note[:255],
+		owner_override=visibility_owner,
+	)
 
 
 def _notify_owner_dashboard(
@@ -433,11 +527,28 @@ def _notify_owner_dashboard(
 		pass
 
 
-def _fingerprint(rule_id, ref_doctype, ref_name) -> str:
+def _fingerprint(rule_id, ref_doctype, ref_name, record_scope=None) -> str:
 	"""Stable dedupe key for a finding — identity only (rule + the doc it hit),
 	NOT the amount (which can drift run to run while it stays the same finding)."""
 	raw = "|".join([str(rule_id or ""), str(ref_doctype or ""), str(ref_name or "")])
+	if record_scope:
+		import json
+
+		raw += "|" + json.dumps(record_scope, sort_keys=True, separators=(",", ":"))
 	return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+
+
+def _record_scope(raw):
+	"""Use the record boundary saved by the launcher, never a delegate claim."""
+	import json
+
+	try:
+		value = json.loads(raw or "{}").get("record_scope")
+		if isinstance(value, dict) and all(value.get(k) for k in ("doctype", "name")):
+			return {k: str(value[k]) for k in ("doctype", "name")}
+	except (ValueError, TypeError, AttributeError):
+		pass
+	return None
 
 
 def _safe_date(value):
@@ -640,37 +751,106 @@ def _watermark_drift(run_doc, scope: dict) -> bool:
 	return False
 
 
-def _scoped_visibility(run_doc, inst) -> bool:
-	"""FIX 1 / A12: is this run's run-as identity record-sliced on a GL dimension?
+_VISIBILITY_UNSET = object()
 
-	A User Permission on a GL dimension (Cost Center / Project / Account / party …)
-	makes every aggregate the run-as user reads a SLICE — a numerically WRONG total,
-	not merely a narrower one — so a scoped run must NEVER auto-resolve findings it
-	could not see (closing an unseen blocker on a partial view is a silent
-	regression). Derived FRESH from the Run's stamped ``permission_profile`` (the
-	run-as user's user_permissions snapshotted AT LAUNCH — the authoritative signal),
-	so a User Permission added AFTER install is caught even though the installation's
-	``scoped_visibility`` flag (stamped only at map/backfill time) has gone stale.
-	Falls back to that stamped flag when the profile is absent (a legacy run, or one
-	whose profile computation failed)."""
+
+def _run_session_user(run_doc) -> str:
+	"""Return the server-bound run-as identity, never an installation fallback."""
+	key = (run_doc.get("session_key") or "").strip()
+	if not key:
+		return ""
+	user = frappe.db.get_value(SESSION, {"session_key": key}, "user")
+	return user.strip() if isinstance(user, str) else ""
+
+
+def visibility_receipt_state(run_doc, inst) -> str | None:
+	"""Return ``complete``, ``sliced``, ``unknown``, or no extra policy.
+
+	A reviewed registry ``visibility_domain`` activates this gate.  The receipt is
+	checked against the immutable launch profile and, for a clean launch, against
+	a fresh server profile for the identity bound to the live run session.  The
+	delegate never receives either object.  Any missing, malformed, or changed
+	fact is ``unknown`` and the caller must treat the result as partial.
+	"""
+	from jarvis.chat.agent_catalog import registry_visibility_domain
+	from jarvis.chat.agent_visibility import make_visibility_receipt, parse_visibility_receipt
+
+	domain = registry_visibility_domain(run_doc.get("agent") or inst.get("agent"))
+	raw_receipt = run_doc.get("visibility_receipt_json")
+	if domain is None:
+		# The catalog is mutable, but a receipt means this run launched under a
+		# reviewed policy.  A later catalog rollback/removal must not silently turn
+		# that protected run back into the legacy measurement classifier.
+		return "unknown" if raw_receipt else None
+	receipt = parse_visibility_receipt(raw_receipt, domain)
+	if receipt is None:
+		return "unknown"
+	state = receipt["state"]
+	if state != "complete":
+		# A sliced or unknown launch can never become clean in flight.
+		return state
+
+	# The receipt must still match the server-captured launch profile.  A durable
+	# complete bit is not enough: it must carry the profile digest that produced it.
+	launch = make_visibility_receipt(run_doc.get("permission_profile"), domain)
+	if launch.get("state") != "complete" or launch.get("profile_hash") != receipt.get("profile_hash"):
+		return "unknown"
+
+	# The session row is the launch's server-side identity binding.  Do not use the
+	# mutable installation.run_as_user as a fallback: a missing session cannot prove
+	# who the delegate was and therefore cannot prove complete visibility.
+	run_as_user = _run_session_user(run_doc)
+	if not run_as_user:
+		return "unknown"
+	try:
+		from jarvis.chat.agent_scheduler import _permission_profile
+
+		current_profile = _permission_profile(run_as_user)
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis agent: visibility profile refresh failed: {run_doc.name}",
+			message=frappe.get_traceback(),
+		)
+		return "unknown"
+	current = make_visibility_receipt(current_profile, domain)
+	if current.get("state") != "complete" or current.get("profile_hash") != receipt.get("profile_hash"):
+		return "unknown"
+	return "complete"
+
+
+def _scoped_visibility(run_doc, inst, *, visibility_state=_VISIBILITY_UNSET) -> bool:
+	"""Return whether this run must be treated as record-scoped.
+
+	A reviewed receipt policy is authoritative when present.  Otherwise payroll
+	keeps its existing two-fact launch-profile + scope rule and other domains keep
+	the established profile-then-installation fallback.
+	"""
 	import json as _json
 
+	from jarvis.chat.agent_catalog import registry_domain
+	from jarvis.chat.agent_visibility import exact_bool, is_payroll_domain, profile_scoped_visibility
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
-	from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
-		_GL_SCOPED_DIMENSIONS,
-	)
 
+	if visibility_state is _VISIBILITY_UNSET:
+		visibility_state = visibility_receipt_state(run_doc, inst)
+	if visibility_state is not None:
+		return visibility_state != "complete"
 	if run_doc.get("agent") in REVIEW_OPERATORS:
 		return False
-	profile = run_doc.get("permission_profile")
-	if profile:
+	domain = registry_domain(run_doc.get("agent") or inst.get("agent"))
+	profile_state = profile_scoped_visibility(run_doc.get("permission_profile"), domain)
+	if is_payroll_domain(domain):
 		try:
-			ups = (_json.loads(profile) or {}).get("user_permissions") or {}
-			# A GL-dimension key present AND carrying at least one value = a live slice.
-			if any(ups.get(dt) for dt in _GL_SCOPED_DIMENSIONS):
-				return True
-		except Exception:
-			pass
+			scope = _json.loads(run_doc.get("scope_json") or "{}")
+		except (TypeError, ValueError):
+			scope = {}
+		persisted_state = exact_bool(scope.get("scoped_visibility")) if isinstance(scope, dict) else None
+		# Only the pair (profile=False, persisted=False) proves a complete payroll
+		# view. It also prevents a delegate's later writeback from widening a run.
+		return not (profile_state is False and persisted_state is False)
+	if profile_state is True:
+		return True
+	# Preserve the legacy non-payroll fallback exactly.
 	return bool(inst.get("scoped_visibility"))
 
 
@@ -753,13 +933,51 @@ def record_delegate_run(
 	scope = scope or {}
 	dropped = dropped or []
 	company = (scope.get("company") or "").strip()
+	record_scope = _record_scope(run_doc.get("scope_json"))
+	if record_scope:
+		import json
+
+		stamp = json.loads(run_doc.get("scope_json") or "{}")
+		matches = scope.get("record_scope") == record_scope and all(
+			str(scope.get(k) or "") == str(stamp.get(k) or "")
+			for k in (
+				"company",
+				"from_date",
+				"to_date",
+				"report_date",
+				"prior_period_from",
+				"prior_period_to",
+			)
+		)
+		if not matches:
+			dropped = [
+				*dropped,
+				*[
+					{
+						"ref_doctype": f.get("ref_doctype"),
+						"ref_name": f.get("ref_name"),
+						"reason": "assessment scope mismatch",
+					}
+					for f in findings or []
+				],
+			]
+			findings = []
+			coverage = {
+				token: {
+					"state": "not_evaluable",
+					"reason_code": "unsupported_customisation",
+					"detail": "assessment record or period scope",
+				}
+				for token in required_coverage_tokens
+			}
+			dashboard = canvas_ref = integrity_digest = None
 
 	# Collapse this run's findings by fingerprint (token + doc identity), so a doc
 	# flagged twice by one rule is ONE finding and counts stay consistent.
 	by_fp: dict = {}
 	for f in findings or []:
 		token = f.get("token") or f.get("rule_id")
-		fp = _fingerprint(token, f.get("ref_doctype"), f.get("ref_name"))
+		fp = _fingerprint(token, f.get("ref_doctype"), f.get("ref_name"), record_scope)
 		by_fp.setdefault(fp, f)
 	seen_fps = set(by_fp)
 
@@ -866,9 +1084,11 @@ def record_delegate_run(
 
 	# --- A12 scoped-visibility recheck (FIX 1) --------------------------------
 	# A record-sliced run-as identity computes numerically WRONG aggregates, so a
-	# scoped run must never auto-resolve findings it could not see. Derived FRESH
-	# from the run's stamped permission_profile (not the install's stale flag).
-	scoped = _scoped_visibility(run_doc, inst)
+	# scoped run must never auto-resolve findings it could not see.  A reviewed
+	# visibility receipt wins over the legacy catalog-domain classifier: it is
+	# checked against the fresh server profile and is never model-visible scope.
+	visibility_state = visibility_receipt_state(run_doc, inst)
+	scoped = _scoped_visibility(run_doc, inst, visibility_state=visibility_state)
 
 	# --- ledger under-read reconciliation (FIX 6) -----------------------------
 	# The watermark proves the ledger is non-empty; a zero-read means the evaluator
@@ -900,6 +1120,7 @@ def record_delegate_run(
 
 	if (
 		not truncated
+		and not dropped
 		and not wm_drift
 		and not scoped
 		and not row_shortfall
@@ -914,9 +1135,22 @@ def record_delegate_run(
 				"state": "open",
 				"rule_id": ["in", list(evaluated_tokens)],
 			},
-			fields=["name", "fingerprint", "company"],
+			fields=["name", "fingerprint", "company", "run", "last_seen_run"],
+		)
+		candidate_runs = {c.last_seen_run or c.run for c in candidates if c.last_seen_run or c.run}
+		run_scopes = (
+			{
+				r.name: _record_scope(r.scope_json)
+				for r in frappe.get_all(
+					RUN, filters={"name": ["in", list(candidate_runs)]}, fields=["name", "scope_json"]
+				)
+			}
+			if candidate_runs
+			else {}
 		)
 		for c in candidates:
+			if run_scopes.get(c.last_seen_run or c.run) != record_scope:
+				continue
 			if c.fingerprint in seen_fps:
 				continue  # still present this run
 			# Company scope gate: only resolve a finding whose company matches this
@@ -975,7 +1209,9 @@ def record_delegate_run(
 		note_parts.append("scan truncated; findings incomplete")
 	if wm_drift:
 		note_parts.append("GL changed during scan - re-run advised")
-	if scoped:
+	if visibility_state in ("sliced", "unknown"):
+		note_parts.append(_visibility_coverage_note(visibility_state))
+	elif scoped:
 		note_parts.append("scoped visibility - findings not auto-resolved")
 	if row_shortfall:
 		note_parts.append("ledger under-read vs watermark - re-run advised")
@@ -1048,7 +1284,29 @@ def record_delegate_run(
 				base = {}
 		except Exception:
 			base = {}
+		pinned_keys = (
+			("company", "from_date", "to_date", "report_date", "prior_period_from", "prior_period_to")
+			if record_scope
+			else ("prior_period_from", "prior_period_to")
+		) + ("scoped_visibility",)
+		pinned = {k: base[k] for k in pinned_keys if k in base and k != "scoped_visibility"}
+		# Keep only the typed launch fact. A malformed legacy value is treated as
+		# unknown and removed rather than copied into a delegate-controlled scope.
+		from jarvis.chat.agent_visibility import exact_bool
+
+		scoped_visibility = exact_bool(base.get("scoped_visibility"))
+		if scoped_visibility is not None:
+			pinned["scoped_visibility"] = scoped_visibility
 		base.update(scope)
+		for key in pinned_keys:
+			if key in pinned:
+				base[key] = pinned[key]
+			else:
+				base.pop(key, None)
+		if record_scope:
+			base["record_scope"] = record_scope
+		else:
+			base.pop("record_scope", None)
 		run_values["scope_json"] = frappe.as_json(base)[:60000]
 	if integrity_digest:
 		run_values["integrity_digest"] = str(integrity_digest)[:64]
@@ -1063,18 +1321,40 @@ def record_delegate_run(
 		frappe.db.set_value(RUN, run_doc.name, "owner", visibility_owner, update_modified=False)
 
 	# --- Phase 4: exactly ONE saved Jarvis Dashboard per run ------------------
-	# Precedence: (1) a dashboard the delegate already authored via
-	# jarvis__save_agent_dashboard this turn (Run.dashboard already set — richer,
-	# model-authored HTML wins); (2) an explicit ``dashboard`` name reported at
-	# writeback; (3) a server-generated A2-safe FLOOR built from the persisted
-	# findings, so a findings-only run (no canvas) STILL yields an openable
-	# dashboard. Best-effort: a dashboard hiccup must never fail the writeback.
+	# Precedence: for a reviewed sliced/unknown receipt, ONLY the server fallback
+	# may be retained.  This removes both authored-dashboard paths before they can
+	# claim a clean workforce result.  Complete and legacy runs retain the existing
+	# authored -> explicit -> fallback precedence.  Best-effort: a dashboard hiccup
+	# must never fail the writeback.
 	agent_title = frappe.db.get_value(LISTING, agent, "title")
 	dashboard_name = frappe.db.get_value(RUN, run_doc.name, "dashboard")
-	if not dashboard_name and dashboard and frappe.db.exists(DASHBOARD, dashboard):
-		frappe.db.set_value(RUN, run_doc.name, "dashboard", dashboard, update_modified=False)
-		dashboard_name = dashboard
-	if not dashboard_name:
+	if visibility_state in ("sliced", "unknown"):
+		try:
+			dashboard_name = persist_visibility_fallback(
+				run_doc,
+				inst,
+				visibility_state,
+				findings=list(by_fp.values()),
+				counts=counts,
+				coverage_note=coverage_note,
+				advisory_findings_count=advisory_count,
+				integrity_digest=integrity_digest,
+			)
+		except Exception:
+			# Do not let a prior authored link win if a fallback persistence failure
+			# occurs.  The unlinked artifact can be investigated without presenting it
+			# as this run's result.
+			frappe.db.set_value(RUN, run_doc.name, "dashboard", None, update_modified=False)
+			dashboard_name = None
+			frappe.log_error(
+				title="jarvis agent: visibility fallback dashboard failed",
+				message=frappe.get_traceback(),
+			)
+	else:
+		if not dashboard_name and dashboard and frappe.db.exists(DASHBOARD, dashboard):
+			frappe.db.set_value(RUN, run_doc.name, "dashboard", dashboard, update_modified=False)
+			dashboard_name = dashboard
+	if not dashboard_name and visibility_state not in ("sliced", "unknown"):
 		try:
 			title = _default_dashboard_title(run_doc, agent_title)
 			html = _fallback_dashboard_html(

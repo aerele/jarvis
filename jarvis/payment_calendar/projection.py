@@ -150,7 +150,7 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 	if isinstance(precision, bool) or not isinstance(precision, int) or not 0 <= precision <= 9:
 		raise ProjectionError("invalid_precision")
 	anchor, start, end = _date(anchor), _date(start), _date(end)
-	if start > end or end < anchor or (end - min(start, anchor)).days > 800:
+	if start > end or (max(end, anchor) - min(start, anchor)).days > 800:
 		raise ProjectionError("invalid_range")
 	payables, ap_buckets = _source(ap, anchor, end, precision)
 	receivables, ar_buckets = _source(ar, anchor, end, precision)
@@ -253,8 +253,10 @@ def upcoming_days(snapshot, selected):
 	if snapshot.get("reconciliation", {}).get("Payable") is None:
 		raise ProjectionError("payables_unavailable")
 	selected, end = _date(selected), _date(snapshot["end"])
-	until = selected + timedelta(days=30)
-	if selected < _date(snapshot["start"]) or until > end:
+	until = (
+		min(selected + timedelta(days=30), end) if snapshot.get("month") else selected + timedelta(days=30)
+	)
+	if selected < _date(snapshot["start"]) or selected > end or until > end:
 		raise ProjectionError("invalid_range")
 	rows = []
 	day = selected + timedelta(days=1)

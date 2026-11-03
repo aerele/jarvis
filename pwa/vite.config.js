@@ -4,6 +4,58 @@ import vue from "@vitejs/plugin-vue";
 import frappeui from "frappe-ui/vite";
 import { VitePWA } from "vite-plugin-pwa";
 import path from "path";
+import fs from "fs";
+
+// Walks up from `dir` to the bench root (the directory with both `sites/` and `apps/`),
+// the same signal frontend/vite.config.js uses. Walking up, not counting levels, is what
+// lets the build run from a git worktree nested deeper than apps/<app>/pwa.
+function findBenchRoot(dir) {
+	for (;;) {
+		if (fs.existsSync(path.join(dir, "sites")) && fs.existsSync(path.join(dir, "apps"))) {
+			return dir;
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
+// src/socket.js imports the bench's common_site_config.json by a FIXED relative depth
+// ("../../../../sites/..."), which only resolves when pwa/ sits at apps/<app>/pwa. Point
+// the alias at the file findBenchRoot found. With no bench above us (a bare checkout, CI)
+// fall back to the original literal, so the failure mode is unchanged: CI provides a stub
+// at $HOME/sites/common_site_config.json, which is exactly where that literal lands.
+function commonSiteConfigPath() {
+	const benchRoot = findBenchRoot(__dirname);
+	return benchRoot
+		? path.join(benchRoot, "sites", "common_site_config.json")
+		: path.resolve(__dirname, "../../../../sites/common_site_config.json");
+}
+
+// The holiday art is lazy and must stay out of the service worker's precache, so its chunks
+// are named `holiday-*` (globIgnores below skips them and the build gate looks for the name):
+// the worn item, and each welcome scene with the runtime and art helpers the scenes share.
+// Only a chunk made ENTIRELY of art modules gets the name: a chunk that mixes art with app
+// code must not be hidden from the precache by its name. Add a module here only when it is
+// art. The words, the answer reader, the cadence and the numbers the welcome needs before
+// the art arrives (scene-geometry.mjs, scene-phone.mjs) are not art: the page imports them
+// statically, so they live outside holiday-* chunks, which the precached view may import.
+const HOLIDAY_ART = [
+	"/js/shared/holiday/worn.mjs",
+	"/js/shared/holiday/stage.mjs",
+	"/js/shared/holiday/scenes/", // every scene, its art, runtime, layout, motion and placement
+];
+function isHolidayArt(id) {
+	const path = id.replaceAll("\\", "/");
+	return HOLIDAY_ART.some((art) =>
+		art.endsWith("/") ? path.includes(art) : path.endsWith(art)
+	);
+}
+function holidayChunkNames(chunk) {
+	const ids = (chunk.moduleIds || []).filter((id) => !id.includes("\0"));
+	const artOnly = ids.length > 0 && ids.every(isHolidayArt);
+	return artOnly ? "assets/holiday-[name]-[hash].js" : "assets/[name]-[hash].js";
+}
 
 // vite-plugin-pwa lazy-loads workbox-build through an esbuild `require` shim that
 // throws under ESM on Node < 20 ("Dynamic require of workbox-build is not
@@ -89,7 +141,9 @@ export default defineConfig({
 				// data), so a cached copy would go stale and hand the app a dead
 				// token. Offline navigations fall back to offline.html instead.
 				globPatterns: ["**/*.{js,css,woff,woff2,svg,png,ico}", "offline.html"],
-				globIgnores: ["**/index.html"],
+				// holiday-* is the lazy worn-item and scene art: not precached, so a cold
+				// offline open has no item or scene (and no 404 for one).
+				globIgnores: ["**/index.html", "**/holiday-*"],
 				// Workbox emits precache URLs relative to the worker, and resolves
 				// them against wherever the worker is SERVED from. Ours is served
 				// from the site root (/jarvis-mobile.sw.js — see jarvis/pwa.py), not
@@ -111,8 +165,14 @@ export default defineConfig({
 			// is an esbuild bundle that can only reach that tree — see
 			// jarvis/public/js/shared/pump_fence.mjs.
 			"@jsshared": path.resolve(__dirname, "../jarvis/public/js/shared"),
+			"../../../../sites/common_site_config.json": commonSiteConfigPath(),
 		},
 		dedupe: ["vue"],
+	},
+	build: {
+		rollupOptions: {
+			output: { chunkFileNames: holidayChunkNames },
+		},
 	},
 	server: {
 		// @shared and @jsshared reach outside this app's root.

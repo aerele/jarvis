@@ -78,6 +78,7 @@ vi.mock("@/components/JvSpinner.vue", () => ({
 vi.mock("@/api", () => ({
 	getUsage: vi.fn(() => Promise.resolve(null)),
 	getMySettings: vi.fn(() => Promise.resolve({ ok: false })),
+	updateMySettings: vi.fn(() => Promise.resolve({ ok: true })),
 	workspaceResetState: vi.fn(() => Promise.resolve({})),
 	requestWorkspaceReset: vi.fn(() => Promise.resolve({})),
 	resetOnboarding: vi.fn(() => Promise.resolve({ ok: true })),
@@ -86,7 +87,11 @@ vi.mock("@/api", () => ({
 	getLlmConnectionHealth: vi.fn(() => new Promise(() => {})),
 }));
 
+vi.mock("@/holidayTouch", () => ({ holidayTouch: { setShown: vi.fn() } }));
+
 import * as api from "@/api";
+import { holidayTouch } from "@/holidayTouch";
+import { toast } from "frappe-ui";
 import GeneralPane from "./GeneralPane.vue";
 
 /** The Status row's badge: its label and its theme, as rendered. */
@@ -503,5 +508,97 @@ describe("GeneralPane, first load (jarvis-admin-v2#641)", () => {
 		await mountAs({ admin: true });
 		expect(api.getLlmConnectionStatus).toHaveBeenCalledTimes(1);
 		expect(api.getMySettings).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("GeneralPane personal holiday switch", () => {
+	const row = (w) =>
+		w
+			.findAllComponents({ name: "ToggleRow" })
+			.find((r) => r.props("title") === "Show holiday touches");
+
+	it("is on by default and follows the server row when it says off", async () => {
+		const w = await mountAs({ admin: false });
+		expect(row(w).props("modelValue")).toBe(true);
+		api.getMySettings.mockImplementation(() =>
+			Promise.resolve({ ok: true, data: { show_holiday_touches: 0 } })
+		);
+		const off = await mountAs({ admin: false });
+		expect(row(off).props("modelValue")).toBe(false);
+		expect(holidayTouch.setShown).toHaveBeenCalledWith(false);
+	});
+
+	it("saves show_holiday_touches, then tells the page", async () => {
+		const w = await mountAs({ admin: false });
+		row(w).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(api.updateMySettings).toHaveBeenCalledWith({ show_holiday_touches: 0 });
+		expect(holidayTouch.setShown).toHaveBeenCalledWith(false);
+		expect(row(w).props("modelValue")).toBe(false);
+		row(w).vm.$emit("update:modelValue", true);
+		await flushPromises();
+		expect(api.updateMySettings).toHaveBeenLastCalledWith({ show_holiday_touches: 1 });
+	});
+
+	it("puts the switch back and says so when the save fails", async () => {
+		api.updateMySettings.mockImplementationOnce(() => Promise.reject(new Error("nope")));
+		const w = await mountAs({ admin: false });
+		row(w).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(row(w).props("modelValue")).toBe(true);
+		expect(holidayTouch.setShown).not.toHaveBeenCalled();
+		expect(toast.error).toHaveBeenCalled();
+	});
+
+	it("says what it does in words that hold on a white-label site", async () => {
+		const w = await mountAs({ admin: false });
+		expect(row(w).props("help")).toBe("Holiday and birthday greetings on the welcome screen.");
+		expect(row(w).props("help")).not.toMatch(/jarvis/i);
+	});
+
+	it("stays disabled until the settings have answered, then turns on", async () => {
+		let answer;
+		api.getMySettings.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+		const w = mount(GeneralPane);
+		await flushPromises();
+		expect(row(w).props("disabled")).toBe(true);
+		answer({ ok: true, data: { show_holiday_touches: 0 } });
+		await flushPromises();
+		expect(row(w).props("disabled")).toBe(false);
+		expect(row(w).props("modelValue")).toBe(false);
+	});
+
+	it("is usable once the settings call has failed, with the default (on)", async () => {
+		api.getMySettings.mockImplementation(() => Promise.reject(new Error("offline")));
+		const w = await mountAs({ admin: false });
+		expect(row(w).props("disabled")).toBe(false);
+		expect(row(w).props("modelValue")).toBe(true);
+	});
+
+	it("is disabled while a save runs, and a second change during it is ignored", async () => {
+		let finish;
+		api.updateMySettings.mockImplementationOnce(
+			() => new Promise((resolve) => (finish = resolve))
+		);
+		const w = await mountAs({ admin: false });
+		row(w).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(row(w).props("disabled")).toBe(true);
+		row(w).vm.$emit("update:modelValue", true);
+		await flushPromises();
+		expect(api.updateMySettings).toHaveBeenCalledTimes(1);
+		finish({ ok: true });
+		await flushPromises();
+		expect(row(w).props("disabled")).toBe(false);
+		expect(row(w).props("modelValue")).toBe(false);
+		expect(holidayTouch.setShown).toHaveBeenCalledWith(false);
+	});
+
+	it("is enabled again after a failed save", async () => {
+		api.updateMySettings.mockImplementationOnce(() => Promise.reject(new Error("nope")));
+		const w = await mountAs({ admin: false });
+		row(w).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(row(w).props("disabled")).toBe(false);
 	});
 });

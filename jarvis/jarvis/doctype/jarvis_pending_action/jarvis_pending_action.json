@@ -23,6 +23,11 @@
   "decided_by",
   "skill_docname",
   "run_id",
+  "actor",
+  "collaboration_binding",
+  "collaboration_grant_revision",
+  "collaboration_epoch",
+  "collaboration_call_key",
   "batch_id",
   "corrects",
   "correction_message",
@@ -163,6 +168,44 @@
    "fieldtype": "Data",
    "label": "Run ID",
    "search_index": 1
+  },
+  {
+   "fieldname": "actor",
+   "fieldtype": "Data",
+   "label": "Initiating Actor",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_binding",
+   "fieldtype": "Data",
+   "label": "Collaboration Binding",
+   "read_only": 1,
+   "no_copy": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "collaboration_grant_revision",
+   "fieldtype": "Int",
+   "label": "Collaboration Grant Revision",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_epoch",
+   "fieldtype": "Int",
+   "label": "Collaboration Epoch",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_call_key",
+   "fieldtype": "Data",
+   "label": "Collaboration Call Key",
+   "read_only": 1,
+   "no_copy": 1,
+   "unique": 1,
+   "length": 64
   },
   {
    "description": "Groups a typed multi-card approval so it settles with one continuation.",

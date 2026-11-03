@@ -260,22 +260,41 @@
 						v-else-if="!shownMessages.length && !stream.live && !thinking"
 						class="jvp-welcome"
 					>
-						<div class="jvp-hero" :class="{ 'jvp-sleeping': maintenanceActive }">
+						<!-- Holiday particles drift here for a few seconds on a played day or birthday
+						     (panel_welcome_fx.mjs). Empty the rest of the time. -->
+						<svg
+							ref="fxEl"
+							class="jvp-fx"
+							viewBox="0 0 350 260"
+							preserveAspectRatio="xMidYMin slice"
+							focusable="false"
+							aria-hidden="true"
+						></svg>
+						<WelcomeHero
+							:sleeping="maintenanceActive"
+							:smiling="heroSmiling"
+							:clickable="heroClickable"
+							:design="holidayView.design"
+							:item-markup="heroItemMarkup"
+							:layer-box="heroLayerBox"
+							:style="heroStyle"
+							@replay="welcomeFx?.replay()"
+						>
 							<!-- Upgrading: the hero mark sleeps too, so it matches the header
 							     avatar instead of showing a wide-awake face during a hold. -->
-							<span v-if="maintenanceActive" class="jvp-face" aria-hidden="true">
-								<i class="jvp-eye"></i><i class="jvp-eye"></i>
-							</span>
-							<span v-if="maintenanceActive" class="jvp-zzz" aria-hidden="true"
-								><i>z</i><i>z</i><i>z</i></span
-							>
-							<svg v-else viewBox="0 0 24 24" fill="#fff" aria-hidden="true">
-								<path
-									d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z"
-								/>
-							</svg>
-						</div>
-						<div class="jvp-greet">{{ greeting }}</div>
+							<template #sleeping>
+								<span class="jvp-face" aria-hidden="true">
+									<i class="jvp-eye"></i><i class="jvp-eye"></i>
+								</span>
+								<span class="jvp-zzz" aria-hidden="true"
+									><i>z</i><i>z</i><i>z</i></span
+								>
+							</template>
+						</WelcomeHero>
+						<div class="jvp-greet">{{ welcomeText.greeting }}</div>
+						<p v-if="welcomeText.leadupLine" class="jvp-greet-sub jvp-greet-leadup">
+							{{ welcomeText.leadupLine }}
+						</p>
 						<p class="jvp-greet-sub">
 							<template v-if="contextText">
 								Jarvis can see <b>{{ contextText }}</b> while you are on this page.
@@ -788,7 +807,20 @@ import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
 import { isShowCardRequest } from "./showCardRequest.mjs";
 import { resizeFrom } from "./panel_size.mjs";
-import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
+import {
+	HERO_PX,
+	HERO_RADIUS_PX,
+	greetingLine,
+	heroTopRoom,
+	isWelcomeOpen,
+	suggestionsFor,
+	welcomeLines,
+} from "./panel_welcome.mjs";
+import { createWelcomeFx } from "./panel_welcome_fx.mjs";
+import WelcomeHero from "./WelcomeHero.vue";
+import { wornLayerBox } from "./fab_worn.mjs";
+import { tileUnits } from "../../shared/holiday/worn-room.mjs";
+import { prefersReduced, watchReducedMotion } from "./reduced_motion.mjs";
 import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
 import { sendRefusalMessage } from "./panel_send_copy.mjs";
 import { maintenance, foldSend, startPollIfHeld } from "./maintenance_state.mjs";
@@ -838,6 +870,8 @@ const props = defineProps({
 	// fullscreen (see .jvp-root--expanding) so the transition reads as the panel
 	// growing INTO the big chat rather than a hard cut.
 	leaving: { type: Boolean, default: false },
+	// The Desk holiday touch (holiday_state.mjs), or null when the widget has none.
+	holiday: { type: Object, default: null },
 });
 const emit = defineEmits(["close", "open-full", "dismiss-context", "resize", "resize-commit"]);
 
@@ -1187,6 +1221,62 @@ const greeting = computed(() => {
 	return greetingLine(new Date().getHours(), who);
 });
 const suggestions = computed(() => suggestionsFor(props.context));
+
+// ---- Holiday touch in the welcome: the words, the hero's room, smile and particles. All
+// of it is inert without props.holiday, and nothing here runs under the upgrade hold. ----
+const holidayView = computed(() => props.holiday?.view.value || { kind: "none", hasItem: false });
+const welcomeText = computed(() =>
+	welcomeLines(greeting.value, props.holiday ? holidayView.value : null, {
+		hold: maintenanceActive.value,
+	})
+);
+const heroSmiling = ref(false);
+const fxEl = ref(null);
+// Reactive, so the hero stops being a button the moment the user asks for less motion.
+const reducedMotion = ref(prefersReduced());
+const stopWatchingMotion = watchReducedMotion((reduced) => {
+	reducedMotion.value = reduced;
+});
+const hasHolidayItem = computed(
+	() =>
+		!!props.holiday &&
+		!maintenanceActive.value &&
+		holidayView.value.hasItem === true &&
+		["leadup", "day", "birthday"].includes(holidayView.value.kind)
+);
+// Room above the hero for the item, taken from the answer (not from the art) so the hero never
+// jumps: the room is there before the art arrives, and stays if the art is blocked. A blocked
+// art leaves an empty gap above the hero on Christmas, which is the lesser evil next to a
+// hero that moves a few px just as the greeting begins.
+const heroStyle = computed(() => {
+	const room = hasHolidayItem.value ? heroTopRoom(holidayView.value.design) : 0;
+	return room ? { marginTop: `${room}px` } : undefined;
+});
+// A replay is motion, so under reduced motion the hero is inert: no role, no tab stop.
+const heroClickable = computed(
+	() => hasHolidayItem.value && holidayView.value.itemReady === true && !reducedMotion.value
+);
+const heroLayerBox = wornLayerBox(HERO_PX);
+const heroItemMarkup = computed(() => {
+	const art = props.holiday?.art.value;
+	if (!heroSmiling.value || !hasHolidayItem.value || !holidayView.value.itemReady || !art)
+		return "";
+	return art.wornMarkup(holidayView.value.design, {
+		idPrefix: "jvwp",
+		radius: tileUnits(HERO_RADIUS_PX, HERO_PX),
+		motion: !prefersReduced(),
+	});
+});
+const welcomeFx = props.holiday
+	? createWelcomeFx({
+			holiday: props.holiday,
+			getFxEl: () => fxEl.value,
+			setSmiling: (on) => {
+				heroSmiling.value = on;
+			},
+			reduced: prefersReduced,
+	  })
+	: null;
 
 // Lucide-shaped paths for the starter-card chips, indexed alongside suggestions.
 const CARD_ICONS = [
@@ -1930,6 +2020,33 @@ function onRealtime(payload) {
 	}
 }
 
+// A "welcome open": the welcome block becomes visible while the panel is open (a first open
+// with no conversation, or a new chat). A restored conversation never shows it, so the
+// welcome counts only once this open's load has finished (the empty frame before it is not one).
+const openSettled = ref(false);
+const welcomeShown = computed(() =>
+	isWelcomeOpen({
+		open: props.open,
+		settled: openSettled.value,
+		enabled: !!welcomeFx,
+		maintenance: maintenanceActive.value,
+		readiness: readiness.value,
+		loading: loading.value,
+		hasMessages: shownMessages.value.length > 0,
+		loadError: !!loadError.value,
+		streaming: !!stream.value.live,
+		thinking: !!thinking.value,
+	})
+);
+watch(
+	welcomeShown,
+	(on) => {
+		if (on) welcomeFx.open();
+		else welcomeFx?.close();
+	},
+	{ flush: "post" }
+);
+
 // Load lazily on first open, not at mount: the FAB is on every Desk page and
 // most page views never open the panel.
 // Refresh on EVERY open, not just the first. A reply can land while the panel
@@ -1940,9 +2057,11 @@ watch(
 	() => props.open,
 	async (isOpen) => {
 		if (!isOpen) {
+			openSettled.value = false;
 			unwatchBodyGrowth();
 			return;
 		}
+		props.holiday?.onPanelOpen(); // capped by the store's gap: the answer survives a reopen
 		await nextTick();
 		watchBodyGrowth();
 		// Focus the box, not the panel shell: opening the widget is always a
@@ -1951,6 +2070,7 @@ watch(
 		(textareaEl.value || panelEl.value)?.focus();
 		ensureRealtime();
 		await load();
+		openSettled.value = props.open;
 		// The composer only renders once readiness resolves, so on a cold open the
 		// textarea did not exist for the focus above. Claim it now that it does,
 		// unless the reader has already put focus somewhere else in the panel.
@@ -2079,6 +2199,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+	stopWatchingMotion();
+	welcomeFx?.close(); // no smile timer or particle animation outlives the panel
 	// A live recording outlives this component otherwise: the mic stays hot and
 	// the getUserMedia tracks are never released.
 	abortRecording();
@@ -2584,13 +2706,39 @@ defineExpose({ load, startNewChat, convId });
 
 /* ---- welcome ---- */
 .jvp-welcome {
+	position: relative; /* the particle layer is absolutely placed against it */
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	padding: 24px 9px 8px;
 }
-.jvp-hero {
+/* Holiday particles: behind the welcome's own content, never in the way of a click. */
+.jvp-fx {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	--snow: #a5b4fc;
+}
+.jvp-panel--dark .jvp-fx {
+	--snow: #e0e7ff;
+}
+.jvp-fx :deep(.mfx) {
+	transform-box: fill-box;
+	transform-origin: 50% 50%;
+}
+.jvp-fx :deep(.mfx-snow) {
+	stroke: var(--snow);
+}
+.jvp-welcome > :not(.jvp-fx) {
+	position: relative;
+}
+/* :deep too: WelcomeHero's root does not carry this component's scope attribute in the Desk
+   build, so the bare selector alone never reaches it. */
+.jvp-hero,
+:deep(.jvp-hero) {
 	/* position: relative so the sleepy .jvp-face (position:absolute) centres inside
 	   this 52px tile, not against the whole panel - matching .jvp-avatar. */
 	position: relative;
@@ -2621,6 +2769,11 @@ defineExpose({ load, startNewChat, convId });
 	line-height: 1.55;
 	color: var(--jv-ink-2);
 	text-align: center;
+}
+/* The lead-up wish sits closer to the greeting than the sub-line does. Needs both classes to
+   outrank .jvp-greet-sub above. */
+.jvp-greet-sub.jvp-greet-leadup {
+	margin-top: 4px;
 }
 .jvp-greet-sub b {
 	font-weight: 600;

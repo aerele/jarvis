@@ -242,10 +242,19 @@ class AgentUnreachableError(JarvisError):
 	alone cannot distinguish an auth rejection from any other
 	malformed-request rejection."""
 
-	def __init__(self, message: str, *, code: str | None = None, details: dict | None = None):
+	def __init__(
+		self,
+		message: str,
+		*,
+		code: str | None = None,
+		details: dict | None = None,
+		rejected_method: str | None = None,
+	):
 		super().__init__(message)
 		self.code = code
 		self.details = details
+		# Set only from an explicit negative response to this exact RPC.
+		self.rejected_method = rejected_method
 
 
 class AgentReloadFailedError(JarvisError):

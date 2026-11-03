@@ -96,6 +96,12 @@ def authorize(
 	conversation a conversation-less card adopts (D9)."""
 	if not row or row.kind != kind or (acting and kind == SHEET and row.get("collecting")):
 		return False, None
+	from jarvis.chat.collaboration import is_collaborative
+
+	# C1 rollback boundary, before claim/unseal/dispatch. Covers individual,
+	# batch, typed-confirm and approve-and-run callers, including card adoption.
+	if is_collaborative(row.conversation) or is_collaborative(conversation):
+		return False, None
 	if row.owner_user != approver and not (
 		kind in _SM_KINDS and _SYSTEM_MANAGER in frappe.get_roles(approver)
 	):
@@ -457,7 +463,7 @@ def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=No
 			title=f"jarvis.pending_action.{code}", message=f"{row.name}: failed binding {binding}"
 		)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
-	if row.kind == "chat":
+	if row.kind == "chat" and not row.get("collaboration_binding"):
 		# A card that fails before it runs ends an approved skill run, as one that
 		# fails when it runs does (``_claim_and_run``).
 		from jarvis.chat import turn_message_binding
@@ -503,10 +509,20 @@ def execute(
 
 
 def _execute_locked(
-	name: str, approver: str, adopt: str | None, *, defer_continuation: bool, batch_id, arm
+	name: str,
+	approver: str,
+	adopt: str | None,
+	*,
+	defer_continuation: bool,
+	batch_id,
+	arm,
+	lock_authorizer=None,
+	row_authorizer=None,
 ) -> dict:
 	"""Steps 3-5: lock, preflight, unseal, staleness; then ``_claim_and_run``."""
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
+	if lock_authorizer:
+		lock_authorizer()
 	try:
 		row = get_row(name, lock="nowait")
 	except (frappe.QueryTimeoutError, frappe.QueryDeadlockError):
@@ -514,6 +530,8 @@ def _execute_locked(
 		return _refusal(*_BUSY)
 	if not row:
 		return _refusal(*_NOT_FOUND)
+	if row_authorizer:
+		row_authorizer(row)
 	if row.status != PENDING:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 		if row.status in TERMINAL and not row.settled:
@@ -595,7 +613,7 @@ def _claim_and_run(
 			frappe.log_error(title="jarvis.pending_action.arm_claimed_failed", message=frappe.get_traceback())
 			frappe.db.commit()
 
-	if row.kind == "chat":
+	if row.kind == "chat" and not row.get("collaboration_binding"):
 		# A card of an approved skill run: the wait for this click does not count
 		# against the run (outside the row lock; the claim is committed).
 		from jarvis.chat import turn_message_binding
@@ -613,7 +631,7 @@ def _claim_and_run(
 	if crash_tb or not (isinstance(result, dict) and result.get("ok")):
 		_discard_failed_dispatch(row, args, crash_tb, result=result, record=structure is None)
 	ok = not crash_tb and bool(isinstance(result, dict) and result.get("ok"))
-	if not ok and row.kind == "chat":
+	if not ok and row.kind == "chat" and not row.get("collaboration_binding"):
 		# ...and a card that fails ends the run, as a failed write does.
 		from jarvis.chat import turn_message_binding
 

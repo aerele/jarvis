@@ -68,14 +68,18 @@ import { dateLabel } from "@/lib/paymentCalendar/dates";
 const props = defineProps({ snapshot: { type: Object, required: true } });
 defineEmits(["bucket"]);
 const sides = ["Payable", "Receivable"];
-const buckets = [
+const buckets = computed(() => [
 	{ key: "canonical_total", label: "Total outstanding" },
 	{ key: "current_future", label: "Due today & later" },
 	{ key: "overdue", label: "Overdue", drill: true },
 	{ key: "undated", label: "No due date", drill: true },
-	{ key: "outside_horizon", label: "Outside forecast", drill: true },
+	{
+		key: "outside_horizon",
+		label: props.snapshot.scope.month ? "After selected month" : "Outside forecast",
+		drill: true,
+	},
 	{ key: "adjustments", label: "Adjustments", drill: true },
-];
+]);
 const hasExchangeDifference = computed(() =>
 	sides.some(
 		(side) => props.snapshot.projection.source_notes?.[side]?.currency_residue_excluded?.count

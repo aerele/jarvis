@@ -256,6 +256,130 @@ site `logs/`):
   `redispatch_reason=empty_reply`. The refused-session re-send adds no reason;
   it logs `pump redispatch_refused_session`.
 
+## Macro runs waiting for a report
+
+A macro step that needs a Prepared Report (one that takes longer than a tool call
+can wait) asks for a copy made at or after the run started. The run then parks in
+status `waiting_report` without holding a worker or a turn. The Runs tab, the
+macro's page and the Macros list show "Waiting for report: <names>", and the names
+come from the run row, so they survive a reload.
+
+How it moves on:
+
+- A `Prepared Report` update wakes the parked runs that await it (one pending wake
+  per run, job id `macro-report-wake-<run>`, so a burst of updates is one job). A
+  wake that finds the run lock held leaves the run to the next cron.
+- The `*/5` cron `jarvis.chat.macro_report_wait.resume_report_waits` is the
+  guarantee; the wake is only speed. When every awaited report is Completed it
+  sends one continuation turn to the same chat, and the same step goes on. When one
+  failed, was cancelled or was deleted, the chat is disarmed and the model gets one
+  turn with no write or email tool to say why, then the run ends `failed`. If that
+  turn cannot be sent the run ends `failed` at once, with the report's own reason.
+- A report still Queued or Started is waited for until its `Report.timeout` (25
+  minutes when unset) plus a 5 minute stall margin plus 60 minutes of grace (90
+  minutes by default), counted from when the run parked, and never past 6 hours.
+  After that the run ends `failed`, and says how long it waited, that the report
+  may still finish, and what to do ("Run the macro later, or ask an admin to
+  raise its timeout"). The `deadline` of
+  `report_waits()` (below) is this moment. The hourly stale-run sweep closes a run
+  still parked 7 hours after its last update; the cron should always get there
+  first, so a run the sweep had to close is logged (`Jarvis: macro report wait
+  reaped`) and means the cron was not reaching it.
+- A report that ended in an error that is not the owner's to read (SQL, an internal
+  fault) fails the run with "the report hit an internal error; an administrator can
+  see it on Prepared Report <name>". The detail is in that Prepared Report's
+  `error_message`.
+- A run may resume up to 5 times more than it has steps (a step that waits once
+  costs one), and a step up to 3 times. Past either the run ends `failed`.
+- A site that is overloaded leaves the run parked; nothing is lost. The same for a
+  wait whose reports are all ready while the turn machine is off or draining:
+  continuing it needs a model turn, so it stays parked (logged once an hour as
+  `Jarvis: macro report resume deferred`) until the turn machine is back, or ends
+  at the 7 hour sweep. A wait that has FAILED or EXPIRED needs no model turn: with
+  the turn machine off it ends `failed` at once (the chat is disarmed, the owner is
+  told, and no explanation turn is sent).
+- A step that would park while the site scheduler is paused or disabled does not
+  park: it ends as it does with the kill switch off (the next step goes out), and
+  `Jarvis: macro report wait not parked, scheduler off` is logged once an hour.
+  Every way out of the wait but the report's own update is a scheduler job.
+- The owner is told (Notification Log) of every ending of a run that waited,
+  including their own Stop.
+
+What to check:
+
+- `Report.timeout`. Frappe kills a generation after the report's timeout, 25
+  minutes when unset. A report that needs longer must have `Report.timeout` raised
+  first, or every run waiting for it ends "it was not ready after N minutes".
+- The scheduler. The cron and the update hook both depend on it: while the scheduler
+  is paused or the `short` queue is down, parked runs wait and nothing is lost; they
+  go on when it resumes (a run past its deadline ends then). A report whose worker
+  was killed (OOM) never fires the update hook; only the cron, and then the wait
+  limit, end that run.
+- Stuck or just long? Read `report_waits()` (below). A run whose `deadline` has
+  passed by more than about 10 minutes while its report is still `Queued` or
+  `Started` is stuck: check that the scheduler runs (`bench doctor`, the Scheduled
+  Job Log for `resume_report_waits`) and that the `short` queue has a worker. A run
+  whose `deadline` is still ahead is only waiting: a `Queued` report is behind the
+  `long` queue (look at its workers), a `Started` one is running. A run whose
+  report is `Completed` or failed and still parked is waiting on the turn machine
+  or the queue (see the bullet above).
+- Kill switch: `bench --site <site> set-config jarvis_macro_report_wait 0` turns it
+  off (new steps then never park and a report is served as before; the switch is
+  also off on a bench without the turn machine), and
+  `bench --site <site> set-config jarvis_macro_report_wait 1` turns it back on. The
+  switch is not looked at by the wake-up or the cron: a run already parked is still
+  continued when its report is ready (its step is then read without the freshness
+  bound), as long as the turn machine is on. Drain first: run `end_all_report_waits`
+  (below) when turning it off, or when the turn machine goes off for good, so no
+  run is left parked for a continuation that cannot be sent.
+
+Two helpers, run from the bench:
+
+```bash
+# read only: each waiting run, the status of every report it awaits, since when, deadline
+bench --site <site> execute jarvis.chat.macro_report_wait.report_waits
+
+# ends every waiting run failed with a clear reason, tells the owner, disarms the chat
+bench --site <site> execute jarvis.chat.macro_report_wait.end_all_report_waits
+```
+
+`end_all_report_waits` answers `{"ended": [...], "skipped": [...]}`. A skipped run was
+being moved by another worker or raised; run it again. Use it after switching the kill
+switch off, and before rolling the release back (an older release does not know
+`waiting_report`, so nothing would ever continue those runs).
+
+Error Log titles, at most one per run or chat an hour (the run is in the body):
+
+- `Jarvis: macro report wait expired`: a wait ran past its limit.
+- `Jarvis: macro report wait reaped`: the 7 hour sweep had to close a parked run, so
+  `resume_report_waits` was not reaching it (scheduler off for hours, or the cron
+  entry missing before a migrate).
+- `Jarvis: macro report wait not parked, scheduler off`: a step did not park because
+  the scheduler is paused or disabled.
+- `Jarvis: macro report resume deferred`: a ready wait could not be continued
+  because the turn machine is off.
+- `Jarvis: macro report resume compensated` and `Jarvis: macro report resume not
+  delivered`: a continuation did not go out and was put back; the second means it
+  gave up after 3 tries and the run ended.
+- `jarvis macro report resume failed`: the cron could not list the waiting runs (a
+  database fault; not rate limited, so one per five minutes while it lasts).
+- `jarvis macro report resume failed: <run>`: one run raised; the title carries the
+  run, so it is the one title that is per run.
+- `jarvis macro report wait end failed: <run>`: `end_all_report_waits` could not end
+  that run.
+- `jarvis macro stale-run sweep failed`: the hourly sweep raised on a run.
+- `jarvis macro report wake failed`: the wake-up could not be queued; the cron still
+  continues the run, within five minutes.
+- `jarvis macro report wait read failed` and `jarvis macro report wait row skipped`:
+  a step's report rows could not be read; the step is not blocked.
+- `jarvis macro report wait guard failed`: the write guard raised. It fails open for a
+  step that is waiting (the call goes through), and closed for the turn that
+  explains a failed report (every write is refused).
+
+Stopping a waiting run does not cancel its Prepared Report: it keeps generating (up
+to the report's timeout) and nothing uses it. The Stop button and the owner's
+notification say so. The owner can cancel it from the Prepared Report list.
+
 ## Customer wording
 
 Headlines state the failure; the next line gives the customer an action.

@@ -25,13 +25,20 @@
   "decision",
   "decided_by",
   "decided_at",
+  "resume_state",
   "trace_comment_added",
   "wiki_payload",
   "apply_status",
   "apply_reason",
   "wiki_digest",
   "routing",
-  "sheet"
+  "sheet",
+  "actor",
+  "collaboration_binding",
+  "collaboration_run_id",
+  "collaboration_grant_revision",
+  "collaboration_epoch",
+  "collaboration_question_key"
  ],
  "fields": [
   {
@@ -139,6 +146,17 @@
    "label": "Decided At"
   },
   {
+   "description": "Server-managed: whether the decision was sent to the requester's chat (empty = not tracked).",
+   "fieldname": "resume_state",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Chat Continuation",
+   "no_copy": 1,
+   "options": "\ndue\nfailed\ndone",
+   "permlevel": 1,
+   "read_only": 1
+  },
+  {
    "default": "0",
    "fieldname": "trace_comment_added",
    "permlevel": 1,
@@ -240,11 +258,62 @@
    "no_copy": 1,
    "search_index": 1,
    "description": "The File Box approval sheet (Jarvis Pending Action) this question is answered in, with the document's other decisions. Server-set only; a linked question is frozen and never decided on its own."
+  },
+  {
+   "fieldname": "actor",
+   "fieldtype": "Data",
+   "label": "Initiating Actor",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_binding",
+   "fieldtype": "Link",
+   "label": "Collaboration Binding",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "options": "Jarvis Chat Binding",
+   "search_index": 1
+  },
+  {
+   "fieldname": "collaboration_run_id",
+   "fieldtype": "Data",
+   "label": "Collaboration Run",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_grant_revision",
+   "fieldtype": "Int",
+   "label": "Collaboration Grant Revision",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_epoch",
+   "fieldtype": "Int",
+   "label": "Collaboration Epoch",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_question_key",
+   "fieldtype": "Data",
+   "label": "Collaboration Question Key",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "unique": 1
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-24 00:00:00.000000",
+ "modified": "2026-10-28 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Approval Request",

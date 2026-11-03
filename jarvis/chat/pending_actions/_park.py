@@ -50,6 +50,26 @@ def target_state(doctype: str, name: str) -> list:
 	return [frappe.utils.get_datetime(cur.modified).strftime("%Y-%m-%d %H:%M:%S.%f"), int(cur.docstatus or 0)]
 
 
+def single_has_version(doctype: str) -> bool:
+	"""A stored native stamp, never the synthetic now from get_datetime(None)."""
+	# get_single_value also casts a missing Datetime to now; read the stored row.
+	rows = frappe.db.sql("SELECT value FROM `tabSingles` WHERE doctype=%s AND field='modified'", doctype)
+	return bool(rows and rows[0][0])
+
+
+def valid_single_snapshot(snapshot, doctype: str) -> bool:
+	"""A Single update must keep the complete snapshot of that exact settings doc."""
+	return (
+		isinstance(snapshot, list)
+		and len(snapshot) == 4
+		and snapshot[:2] == [doctype, doctype]
+		and isinstance(snapshot[2], str)
+		and bool(snapshot[2].strip())
+		and type(snapshot[3]) is int
+		and snapshot[3] in (0, 1, 2)
+	)
+
+
 def snapshot_targets(tool: str, args: dict) -> list[list]:
 	"""``[[doctype, name, modified_us, docstatus], ...]`` for a target-bound call."""
 	if tool not in TARGET_BOUND or not isinstance(args, dict):
@@ -57,7 +77,7 @@ def snapshot_targets(tool: str, args: dict) -> list[list]:
 	doctype = args.get("doctype")
 	if not isinstance(doctype, str) or not frappe.db.exists("DocType", doctype):
 		return []
-	if frappe.get_meta(doctype).issingle:
+	if frappe.get_meta(doctype).issingle and not single_has_version(doctype):
 		return []
 	return [[doctype, n, *target_state(doctype, n)] for n in _target_names(args)]
 
@@ -173,6 +193,13 @@ def park(
 	try:
 		if not locked:
 			lock_conversation(conversation)
+		from jarvis.chat.collaboration_actions import park_identity
+
+		identity = park_identity(conversation, owner_user, exec_user, tool, run_id, kind)
+		if identity and frappe.db.exists(PA, {"collaboration_call_key": identity["collaboration_call_key"]}):
+			raise ConfirmationPendingError(
+				"This tool call already proposed an action; do not execute it again."
+			)
 		superseded = (
 			_check_single_flight(conversation, owner_user, legacy_pending)
 			if kind == "chat" and conversation
@@ -204,6 +231,7 @@ def park(
 					{"conversation": c, "role": "primary" if i == 0 else "waiter"}
 					for i, c in enumerate(waiters)
 				],
+				**identity,
 			}
 		)
 		doc.flags.jarvis_server_write = True

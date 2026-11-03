@@ -64,6 +64,34 @@ class TestPaymentCalendarAPI(TestCase):
 		frappe.db.rollback(save_point="calendar_api")
 		frappe.clear_cache(doctype="Purchase Invoice")
 
+	def test_month_requests_keep_the_server_anchor_and_narrow_only_the_window(self):
+		month = add_days(self.fx.today, 35)[:7]
+		with patch(
+			"jarvis.payment_calendar.api.jobs.request_snapshot", return_value={"state": "queued"}
+		) as request:
+			for requested, expected in ((month, month), ("current", self.fx.today[:7]), (None, None)):
+				with self.subTest(month=requested):
+					result = api.request_snapshot(self.fx.company, [], month=requested)
+					self.assertTrue(result["ok"], result)
+					scope = request.call_args.args[0]
+					self.assertEqual(scope["anchor"], self.fx.today)
+					self.assertEqual(scope["actor"], self.user)
+					self.assertEqual(scope.get("month"), expected)
+					if expected:
+						self.assertEqual(scope["window_start"], expected + "-01")
+						self.assertEqual(scope["window_end"][:7], expected)
+					else:
+						self.assertEqual(scope["window_start"], scope["selectable_start"])
+
+	def test_bad_or_out_of_range_month_never_dispatches_a_job(self):
+		with patch("jarvis.payment_calendar.api.jobs.request_snapshot") as request:
+			for month in ("1900-01", "9999-12", "2026-13", "2026-1", {}, True, ""):
+				with self.subTest(month=month):
+					result = api.request_snapshot(self.fx.company, [], month=month)
+					self.assertFalse(result["ok"], result)
+					self.assertEqual(result["code"], "invalid_request")
+			request.assert_not_called()
+
 	def test_status_delivers_aggregates_without_private_permission_proof_or_source_rows(self):
 		api._load(self.sid)
 		result = api.get_snapshot_status(self.sid)

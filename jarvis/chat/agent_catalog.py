@@ -544,6 +544,45 @@ def registry_timeout_s(agent_slug: str, default: int = 600) -> int:
 	return default
 
 
+def registry_domain(agent_slug: str) -> str:
+	"""Return an agent's domain from the BUNDLED registry only.
+
+	A listing row is tenant data and must not decide which permission dimensions
+	make an audit partial. The vendored registry is reviewed deploy code, so it
+	is the single source for this policy selector.
+	"""
+	slug = (agent_slug or "").strip()
+	if not slug:
+		return ""
+	for agent in _load_registry().get("agents") or []:
+		if (agent.get("agent_slug") or "").strip() == slug:
+			domain = agent.get("domain")
+			return domain.strip() if isinstance(domain, str) else ""
+	return ""
+
+
+def registry_visibility_domain(agent_slug: str) -> str | None:
+	"""Return the reviewed visibility policy selector for one bundled agent.
+
+	``domain`` remains the customer-facing catalog category.  A separate optional
+	``visibility_domain`` lets a cross-domain extension use the permission
+	dimensions that its data actually needs without relabeling the marketplace
+	entry.  ``None`` means a legacy agent has no extra policy; ``""`` means an
+	explicit but malformed policy and callers must fail closed.
+	"""
+	slug = (agent_slug or "").strip()
+	if not slug:
+		return None
+	for agent in _load_registry().get("agents") or []:
+		if (agent.get("agent_slug") or "").strip() != slug:
+			continue
+		if "visibility_domain" not in agent:
+			return None
+		value = agent.get("visibility_domain")
+		return value.strip() if isinstance(value, str) else ""
+	return None
+
+
 def registry_tools_allow(agent_slug: str) -> list[str]:
 	"""The agent's DECLARED tool surface from the BUNDLED registry, verbatim.
 

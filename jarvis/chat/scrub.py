@@ -32,8 +32,8 @@ _WHOLE_KEY = ("password", "secret", "credential", "authorization")
 _CAMEL = re.compile(r"([a-z0-9])([A-Z])|([A-Z])([A-Z][a-z])")
 _ASSIGNMENT = re.compile(
 	r"""(?<![\w.-])(?P<keyquote>["']?)(?P<key>[A-Za-z_][\w.-]*)(?P=keyquote)(?P<sep>\s*[:=]\s*)"""
-	r"""(?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;{}\[\]*`]+)"""
 )
+_ASSIGNMENT_VALUE = re.compile(r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;{}\[\]*`]+""")
 _VALUES = re.compile(
 	r"\bBearer\s+[^\s\"'`,;<>]+"
 	r"|\b(?:eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
@@ -54,12 +54,23 @@ def _sensitive_key(key: str, *, prose: bool = False) -> bool:
 	return any(part in lower for part in _WHOLE_KEY) or segments[-1] in _SECRET_SEGMENTS
 
 
-def _assignment(match: re.Match) -> str:
-	if not _sensitive_key(match["key"], prose=not match["keyquote"]):
-		return match[0]
-	value = match["value"]
-	quote = value[0] if value.startswith(('"', "'")) else ""
-	return match["keyquote"] + match["key"] + match["keyquote"] + match["sep"] + quote + REDACTED + quote
+def _scrub_assignments(text: str) -> str:
+	# Scan labels only, then read a value ONLY for a sensitive label. An ordinary
+	# "Details:" cannot swallow "api_key=...". Reading every label's value with
+	# overlapping lookahead would rescan long URL/text tails quadratically.
+	parts, cursor = [], 0
+	for match in _ASSIGNMENT.finditer(text):
+		if match.end() < cursor or not _sensitive_key(match["key"], prose=not match["keyquote"]):
+			continue
+		value = _ASSIGNMENT_VALUE.match(text, match.end())
+		if not value:
+			continue
+		start, end = value.span()
+		quote = value[0][0] if value[0].startswith(('"', "'")) else ""
+		parts.extend((text[cursor:start], quote + REDACTED + quote))
+		cursor = end
+	parts.append(text[cursor:])
+	return "".join(parts)
 
 
 def _json_text(value) -> str:
@@ -104,7 +115,7 @@ def _scrub_text(value: str) -> str:
 	# HTTP authentication schemes are case-insensitive; ordinary prose is not
 	# an Authorization header (for example, "the bearer cheque was deposited").
 	value = _AUTH_BEARER.sub(lambda match: match[1] + REDACTED, value)
-	return egress_rules.redact(_ASSIGNMENT.sub(_assignment, _VALUES.sub(REDACTED, value)))
+	return egress_rules.redact(_scrub_assignments(_VALUES.sub(REDACTED, value)))
 
 
 def scrub_for_share(value):
