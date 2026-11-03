@@ -644,6 +644,20 @@ class TestReverify(JarvisSettingsSnapshot, FrappeTestCase):
 				self.assertEqual(out["error"], "unreachable")
 				self.assertTrue(out["blocked"])
 
+	def test_reverify_admin_refusing_returns_not_verified_not_unreachable(self):
+		from jarvis.exceptions import AdminContractError, AdminValidationError
+
+		for exc in (
+			AdminValidationError("no running tenant", exc_type="DuplicateEntryError"),
+			AdminContractError("bad instance_id", code="NoRunningTenant"),
+		):
+			with self.subTest(exc=type(exc).__name__):
+				with patch("jarvis.admin_client.verify_site", side_effect=exc):
+					out = site_pin.reverify()
+				self.assertFalse(out["proved"])
+				self.assertFalse(out["pin_rebound"])
+				self.assertEqual(out["error"], "not_verified")
+
 	def test_a_normal_answer_carries_no_error(self):
 		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}):
 			self.assertNotIn("error", site_pin.reverify())

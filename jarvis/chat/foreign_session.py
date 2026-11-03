@@ -21,6 +21,7 @@ from jarvis.exceptions import (
 _ONE_DAY = 24 * 3600
 _KEY_PREFIX = "jarvis:foreign_session:"
 _NOTICE_KEY = "jarvis:foreign_session:notice"
+_INSTANCE_CHANGED = "instance_changed"
 
 NOTICE_SUBJECT = "Another site is using this site's Jarvis connection"
 NOTICE_MESSAGE = (
@@ -88,18 +89,40 @@ def record_instance_mismatch(session_key: str) -> bool:
 
 def instance_changed() -> bool:
 	"""True while a plugin pinned to another instance id has been seen and no Re-verify
-	has passed since. Fails OPEN (False) on a read error."""
+	has passed since. Read straight off ``tabSingles``, not ``get_single_value``: that
+	validates the field against the DocType meta and pops a "Field does not exist"
+	message on a site whose Jarvis Settings is not migrated yet. A missing row is False.
+	Fails OPEN (False) on a read error."""
 	try:
-		return bool(frappe.db.get_single_value("Jarvis Settings", "instance_changed"))
+		singles = frappe.qb.DocType("Singles")
+		rows = (
+			frappe.qb.from_(singles)
+			.select(singles.value)
+			.where(singles.doctype == "Jarvis Settings")
+			.where(singles.field == _INSTANCE_CHANGED)
+			.run()
+		)
+		return bool(rows) and str(rows[0][0] or "0") not in ("", "0")
 	except Exception:
 		return False
+
+
+def _field_migrated() -> bool:
+	"""``set_single_value`` throws (and queues a user message) for a field the DocType
+	meta does not have yet; check first so an unmigrated site never raises."""
+	return bool(frappe.get_meta("Jarvis Settings").has_field(_INSTANCE_CHANGED))
+
+
+def _set_instance_changed(value: int) -> None:
+	if _field_migrated():
+		frappe.db.set_single_value("Jarvis Settings", _INSTANCE_CHANGED, value, update_modified=False)
 
 
 def mark_instance_changed() -> None:
 	"""Never raises."""
 	try:
 		if not instance_changed():
-			frappe.db.set_single_value("Jarvis Settings", "instance_changed", 1, update_modified=False)
+			_set_instance_changed(1)
 	except Exception:
 		frappe.logger("jarvis.foreign_session").warning("could not mark instance changed", exc_info=True)
 
@@ -108,7 +131,7 @@ def clear_instance_changed() -> None:
 	"""Never raises."""
 	try:
 		if instance_changed():
-			frappe.db.set_single_value("Jarvis Settings", "instance_changed", 0, update_modified=False)
+			_set_instance_changed(0)
 	except Exception:
 		frappe.logger("jarvis.foreign_session").warning("could not clear instance changed", exc_info=True)
 
