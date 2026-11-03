@@ -28,6 +28,14 @@ MAX_ROWS = 20_000
 MAX_PROPOSALS = 100
 EPS = Decimal("0.000001")
 MONEY_EPS = Decimal("0.01")
+# ERPNext v15 Bin.set_projected_qty uses these fields but exports no constants.
+_PROJECTED_QTY_ADDITIONS = ("actual_qty", "ordered_qty", "indented_qty", "planned_qty")
+_PROJECTED_QTY_DEDUCTIONS = (
+	"reserved_qty",
+	"reserved_qty_for_production",
+	"reserved_qty_for_sub_contract",
+	"reserved_qty_for_production_plan",
+)
 RUN = "Jarvis Agent Run"
 _INVALID = "Reorder settings are invalid. Select a current Negative Stock run and save the settings."
 _SOURCE = "Stock evidence is incomplete, changed, or needs manual review. Run Negative Stock again after checking the source."
@@ -275,7 +283,6 @@ def native_stock_guard(data, scope):
 			refuse()
 		positions[key] = balance, value
 	bin_keys = set()
-	from erpnext.stock.doctype.bin.bin import PROJECTED_QTY_ADDITIONS, PROJECTED_QTY_DEDUCTIONS
 
 	for row in data["bins"]:
 		key = row.item_code, row.warehouse
@@ -287,8 +294,8 @@ def native_stock_guard(data, scope):
 			refuse()
 		if qty > 0 and abs(number(row.valuation_rate) * qty - value) > MONEY_EPS:
 			refuse()
-		projected = sum((number(row.get(f)) for f in PROJECTED_QTY_ADDITIONS), Decimal(0)) - sum(
-			(number(row.get(f)) for f in PROJECTED_QTY_DEDUCTIONS), Decimal(0)
+		projected = sum((number(row.get(f)) for f in _PROJECTED_QTY_ADDITIONS), Decimal(0)) - sum(
+			(number(row.get(f)) for f in _PROJECTED_QTY_DEDUCTIONS), Decimal(0)
 		)
 		if abs(number(row.projected_qty) - projected) > EPS:
 			refuse()

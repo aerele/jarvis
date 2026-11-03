@@ -221,9 +221,18 @@ class ReportSource:
 				) from None
 			metadata = get_report_filters(self.meta.report_name)
 			self.filter_defs = metadata.get("filters") or []
-			validate_filters_permissions(
-				self.meta.report_name, self.filters, self.user, js_filters=metadata.get("filters") or []
-			)
+			# Frappe v15 checks saved Report.filters, but has no js_filters argument.
+			# Keep that gate and check the script-declared Links before reading bytes.
+			validate_filters_permissions(self.meta.report_name, self.filters, self.user)
+			for field in self.filter_defs:
+				name = field.get("fieldname")
+				if name in self.filters and field.get("fieldtype") == "Link":
+					if not frappe.has_permission(
+						doctype=field.get("options"), ptype="read", doc=self.filters[name], user=self.user
+					) and not frappe.has_permission(
+						doctype=field.get("options"), ptype="select", doc=self.filters[name], user=self.user
+					):
+						raise frappe.PermissionError
 			company = self.filters.get("company")
 			if company:
 				companies = [company] if isinstance(company, str) else company

@@ -128,6 +128,28 @@ class TestReorderRules(unittest.TestCase):
 		self.assertEqual(rows[0]["status"], "Pending")
 		self.assertEqual(rows[0]["projected_qty"], "5")
 
+	def test_pending_and_reserved_quantities_match_native_bin(self):
+		from erpnext.stock.doctype.bin.bin import Bin
+
+		row = self.data["bins"][0]
+		row.update(
+			ordered_qty=11,
+			indented_qty=13,
+			planned_qty=17,
+			reserved_qty=2,
+			reserved_qty_for_production=3,
+			reserved_qty_for_sub_contract=5,
+			reserved_qty_for_production_plan=7,
+		)
+		native = Bin({"doctype": "Bin", **row})
+		native.set_projected_qty()
+		self.assertEqual(native.projected_qty, 29)
+		row.projected_qty = native.projected_qty
+		self.assertIn("Stores", review.native_stock_guard(self.data, self.scope))
+		row.projected_qty += 1
+		with self.assertRaises(frappe.ValidationError):
+			review.native_stock_guard(self.data, self.scope)
+
 	def test_native_guard_refuses_poisoned_source_even_with_no_model_findings(self):
 		for family, field, value in [
 			("ledger", "qty_after_transaction", -1),
