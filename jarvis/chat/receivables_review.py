@@ -5,6 +5,9 @@ freshness and permissions, and never mutates accounting or communication records
 """
 
 import json
+from collections import defaultdict
+from datetime import date
+from decimal import Decimal, InvalidOperation, localcontext
 
 import frappe
 
@@ -94,6 +97,271 @@ NUMBERS = {
 	"paid_amount",
 	"discounted_amount",
 }
+
+
+def _server_number(value):
+	"""Read a bounded Decimal from captured evidence, never defaulting bad data to zero."""
+	if value is None or isinstance(value, bool):
+		raise ValueError("Missing numeric evidence")
+	result = Decimal(str(value))
+	if not result.is_finite() or abs(result) > Decimal("1e18"):
+		raise ValueError("Invalid numeric evidence")
+	return result
+
+
+def _server_date(value):
+	if not isinstance(value, str) or date.fromisoformat(value).isoformat() != value:
+		raise ValueError("An ISO date is required")
+	return value
+
+
+def _server_index(rows):
+	if not isinstance(rows, list):
+		raise ValueError("Missing dataset")
+	result = {}
+	for row in rows:
+		if not isinstance(row, dict) or not row.get("name") or row["name"] in result:
+			raise ValueError("Missing or duplicate record identity")
+		result[row["name"]] = row
+	return result
+
+
+def _server_pending_parties(payments, journals):
+	parties = set()
+	for payment in payments:
+		if payment["docstatus"] == 0 and payment.get("party_type") == "Customer":
+			parties.add(payment.get("party"))
+	for journal in journals:
+		if journal["docstatus"] != 0:
+			continue
+		for row in journal["accounts"]:
+			if row.get("party_type") == "Customer":
+				parties.add(row.get("party"))
+	return parties
+
+
+def _server_ledger_groups(rows, company):
+	groups = defaultdict(list)
+	for row in rows:
+		if row.get("company") != company or row.get("party_type") != "Customer":
+			raise ValueError("Ledger scope differs from the captured company/customer scope")
+		if row.get("delinked") not in (0, 1):
+			raise ValueError("Unknown ledger cancellation state")
+		_server_date(row.get("posting_date"))
+		_server_number(row.get("amount_in_account_currency"))
+		identity = tuple(
+			row.get(key)
+			for key in (
+				"party",
+				"account",
+				"account_currency",
+				"against_voucher_type",
+				"against_voucher_no",
+			)
+		)
+		if not all(identity) or not row.get("voucher_type") or not row.get("voucher_no"):
+			raise ValueError("Incomplete typed ledger identity")
+		if not row["delinked"]:
+			groups[identity].append(row)
+	return groups
+
+
+def _server_terms(invoice, residual, cutoff, quantum):
+	terms = invoice.get("payment_schedule")
+	if not isinstance(terms, list):
+		raise ValueError("Payment schedule was not fetched")
+	_server_index(terms)
+	if len(terms) <= 1:
+		due = _server_date(terms[0].get("due_date") if terms else invoice.get("due_date"))
+		return [(due, residual)] if due < cutoff else []
+	if invoice.get("currency") != invoice.get("party_account_currency"):
+		raise ValueError("Instalment currency differs from the receivable account currency")
+	total = Decimal(0)
+	overdue = []
+	for term in terms:
+		due = _server_date(term.get("due_date"))
+		outstanding = _server_number(term.get("outstanding"))
+		expected = (
+			_server_number(term.get("payment_amount"))
+			- _server_number(term.get("paid_amount"))
+			- _server_number(term.get("discounted_amount"))
+		)
+		if outstanding < 0 or abs(expected - outstanding) > quantum / 2:
+			raise ValueError("Instalment allocation needs manual reconciliation")
+		total += outstanding
+		if outstanding > 0 and due < cutoff:
+			overdue.append((due, outstanding))
+	if abs(total - residual) > quantum / 2:
+		raise ValueError("Instalments do not reconcile to the receivable balance")
+	return overdue
+
+
+def _server_terminal_state(invoice, snapshot, groups, credits, pending, customers, returns, vouchers):
+	"""Return only a server-proven no-action state, otherwise ``None``.
+
+	A private evaluator can produce a hold or a review candidate, but it must not
+	decide that an invoice is settled or still within terms. Those states suppress
+	the Approval Request path, so the bench proves them from the sealed evidence.
+	"""
+	scope, config = snapshot["scope"], snapshot["config"]
+	cutoff = scope["report_date"]
+	party, account, currency = (
+		invoice.get(key) for key in ("customer", "debit_to", "party_account_currency")
+	)
+	if not all((party, account, currency)) or party not in customers:
+		raise ValueError("Customer or receivable account evidence is missing")
+	precision = invoice.get("outstanding_precision")
+	if isinstance(precision, bool) or not isinstance(precision, int) or not 0 <= precision <= 9:
+		raise ValueError("Source currency precision is missing")
+	quantum = Decimal(1).scaleb(-precision)
+	identity = (party, account, currency, "Sales Invoice", invoice["name"])
+	rows = groups.get(identity, [])
+	if not rows:
+		raise ValueError("No active invoice ledger evidence")
+	for row in rows:
+		voucher = vouchers.get((row["voucher_type"], row["voucher_no"]))
+		if row.get("account_type") != "Receivable" or not voucher or voucher.get("docstatus") != 1:
+			raise ValueError("Active ledger source is not a submitted receivables voucher")
+	if any(key[-2:] == identity[-2:] and key != identity for key in groups):
+		raise ValueError("Invoice ledger party, account or currency identities disagree")
+	if any(row.get("finance_book") for row in rows):
+		raise ValueError("Finance-book-specific balances need a separately scoped review")
+	current = sum((_server_number(row["amount_in_account_currency"]) for row in rows), Decimal(0))
+	header_balance = _server_number(invoice.get("outstanding_amount"))
+	if header_balance.quantize(quantum) != header_balance or abs(current - header_balance) > quantum / 2:
+		raise ValueError("Ledger and current invoice outstanding disagree")
+	if (
+		invoice.get("currency") == currency
+		and header_balance
+		> max(_server_number(invoice.get("grand_total")), _server_number(invoice.get("rounded_total")))
+		+ quantum / 2
+	):
+		raise ValueError("Recorded receivable exceeds the invoice total")
+	eligible = [row for row in rows if row["posting_date"] <= cutoff]
+	if len(eligible) != len(rows):
+		return None
+	if header_balance <= 0:
+		return "settled"
+	if customers[party].get("disabled"):
+		return None
+	jurisdiction = snapshot.get("jurisdiction") or {}
+	if (
+		jurisdiction.get("india_compliance_installed")
+		and jurisdiction.get("company_country") == "India"
+		and (invoice.get("india") or {}).get("einvoice_status")
+		in ("Cancelled", "Manually Cancelled", "Pending Cancellation")
+	):
+		return None
+	if party in credits or party in pending or invoice["name"] in returns:
+		return None
+	if scope["report_date"] != snapshot.get("site_date"):
+		return None
+	settlements = [
+		row["posting_date"] for row in eligible if _server_number(row["amount_in_account_currency"]) < 0
+	]
+	if (
+		settlements
+		and (date.fromisoformat(cutoff) - date.fromisoformat(max(settlements))).days
+		<= config["settlement_hold_days"]
+	):
+		return None
+	return "within_terms" if not _server_terms(invoice, header_balance, cutoff, quantum) else None
+
+
+def server_terminal_states(snapshot):
+	"""Return invoice states that may suppress an Approval Request.
+
+	The result is intentionally conservative. Any malformed, unreadable, changed,
+	or ambiguous source returns no terminal state. A delegate can then only submit a
+	hold or review candidate, never hide the invoice as settled or within terms.
+	"""
+	try:
+		with localcontext() as context:
+			context.prec = 48
+			sealed = {
+				key: value
+				for key, value in snapshot.items()
+				if key not in ("source_digest", "captured_at", "captured_by")
+			}
+			if snapshot.get("source_digest") != digest(sealed):
+				return {}
+			scope, config = snapshot["scope"], snapshot["config"]
+			start, end, cutoff = (
+				_server_date(scope.get(key)) for key in ("from_date", "to_date", "report_date")
+			)
+			if (
+				not scope.get("company")
+				or scope.get("basis") != "current_records"
+				or not start <= cutoff <= end
+				or cutoff > _server_date(snapshot.get("site_date"))
+				or config.get("review_scope") != "review_and_drafts_only"
+				or not isinstance(config.get("policy_version"), str)
+				or not config["policy_version"].strip()
+				or type(config.get("settlement_hold_days")) is not int
+				or not 0 <= config["settlement_hold_days"] <= 30
+				or snapshot.get("complete") is not True
+			):
+				return {}
+			indexed = {
+				key: _server_index(snapshot["datasets"].get(key))
+				for key in ("invoices", "ledger", "payments", "journals", "customers")
+			}
+			for key in ("invoices", "payments", "journals"):
+				if any(row.get("company") != scope["company"] for row in indexed[key].values()):
+					raise ValueError("Source company differs from scope")
+			for invoice in indexed["invoices"].values():
+				_server_date(invoice.get("posting_date"))
+				if invoice.get("docstatus") not in (0, 1, 2) or invoice.get("is_return") not in (0, 1):
+					raise ValueError("Unknown invoice state")
+			groups = _server_ledger_groups(indexed["ledger"].values(), scope["company"])
+			if any(key[3] == "Sales Invoice" and key[4] not in indexed["invoices"] for key in groups):
+				raise ValueError("An active invoice ledger reference has no captured invoice")
+			credits = {
+				key[0]
+				for key, rows in groups.items()
+				if sum((_server_number(row["amount_in_account_currency"]) for row in rows), Decimal(0)) < 0
+			}
+			credits.update(
+				row.get("customer")
+				for row in indexed["invoices"].values()
+				if row.get("is_return") and row["docstatus"] != 2 and not row.get("return_against")
+			)
+			pending = _server_pending_parties(indexed["payments"].values(), indexed["journals"].values())
+			returns = {
+				row.get("return_against")
+				for row in indexed["invoices"].values()
+				if row["docstatus"] != 2 and row.get("is_return")
+			}
+			vouchers = {
+				(doctype, name): row
+				for key, doctype in (
+					("invoices", "Sales Invoice"),
+					("payments", "Payment Entry"),
+					("journals", "Journal Entry"),
+				)
+				for name, row in indexed[key].items()
+			}
+			return {
+				invoice["name"]: state
+				for invoice in indexed["invoices"].values()
+				if invoice["docstatus"] == 1
+				and not invoice.get("is_return")
+				and invoice["posting_date"] <= cutoff
+				and (
+					state := _server_terminal_state(
+						invoice,
+						snapshot,
+						groups,
+						credits,
+						pending,
+						indexed["customers"],
+						returns,
+						vouchers,
+					)
+				)
+			}
+	except (AttributeError, KeyError, TypeError, ValueError, InvalidOperation):
+		return {}
 
 
 def configuration_defaults(company=None):
@@ -302,6 +570,7 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 		frappe.throw(
 			"AR output must account for every submitted invoice through cutoff, including opening receivables."
 		)
+	terminal_states = server_terminal_states(stored)
 	for row in findings:
 		if (
 			row.get("token") != TOKEN
@@ -316,6 +585,12 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 			row["review_state"] != "reminder_candidate" or scope["report_date"] != stored["site_date"]
 		):
 			frappe.throw("Historical or held assessments cannot carry reminder drafts.")
+		expected_state = terminal_states.get(row["ref_name"])
+		if expected_state:
+			if row["review_state"] != expected_state:
+				frappe.throw("Only server evidence may mark an invoice settled or within terms.")
+		elif row["review_state"] in ("settled", "within_terms"):
+			frappe.throw("Only server evidence may mark an invoice settled or within terms.")
 	current = collect(stored["scope"], stored["config"])
 	if current["source_digest"] != stored["source_digest"]:
 		return (

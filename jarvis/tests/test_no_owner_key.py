@@ -159,12 +159,20 @@ class TestCanvasUsesPluginRoute(FrappeTestCase):
 		settings = Mock(agent_url=AGENT_URL)
 		settings.get_password = Mock(return_value="dev-tok")
 
-		def fake_get_value(doctype, name, field):
+		def fake_get_value(doctype, name, field, **kwargs):
+			if (
+				doctype == "Jarvis Chat Message"
+				and name == "MSG-1"
+				and field == ["conversation", "role"]
+				and kwargs.get("as_dict")
+			):
+				return {"conversation": "C1", "role": "assistant"}
 			return SESSION if field == "session_key" else ""
 
 		with (
 			patch("frappe.get_single", return_value=settings),
 			patch("frappe.db.get_value", side_effect=fake_get_value),
+			patch("frappe.get_all", return_value=[]),
 			patch("jarvis.chat.canvas.persist_canvases", return_value=[]) as persist,
 			patch("jarvis.chat.turn_handler._publish_to_user"),
 		):
@@ -183,10 +191,21 @@ class TestMediaUsesDeviceBearer(FrappeTestCase):
 			asked.append(fieldname)
 			return {"chat_device_token": "dev-tok"}.get(fieldname, "")
 
+		def fake_get_value(doctype, name, field, **kwargs):
+			if (
+				doctype == "Jarvis Chat Message"
+				and name == "MSG-1"
+				and field == ["conversation", "role"]
+				and kwargs.get("as_dict")
+			):
+				return {"conversation": "C1", "role": "assistant"}
+			return ""
+
 		with (
 			patch("frappe.get_single", return_value=settings),
 			patch("frappe.utils.password.get_decrypted_password", get_decrypted_password),
-			patch("frappe.db.get_value", return_value=""),
+			patch("frappe.db.get_value", side_effect=fake_get_value),
+			patch("frappe.get_all", return_value=[]),
 			patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
 			patch("jarvis.chat.generated_media.seed_media", return_value=[]) as seed,
 			patch("jarvis.chat.generated_media.seed_media_urls", return_value=[]) as seed_urls,

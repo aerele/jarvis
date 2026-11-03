@@ -115,14 +115,16 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 	Wave-A adversarial P2-2: nothing gated this, so a re-vendor lag would
 	silently split bench authorization from container capability.
 
-	The digest is SEMANTIC (canonical JSON of {slug: {nature, sorted
-	tools_allow}}), so formatting/descriptions may move freely. The SAME literal
-	is pinned in the private agents repo
+	The tool/nature digest is SEMANTIC (canonical JSON of {slug: {nature, sorted
+	tools_allow}}), so formatting/descriptions may move freely. A second digest
+	pins the bench-only record-scope declaration {slug: supports_record_scope}.
+	The SAME literals are pinned in the private agents repo
 	(lib/check_registry_capability_contract.py); its docstring holds the paired
 	update flow. Changing one side without the other fails that repo's validate
 	or this test."""
 
-	PINNED_CAPABILITY_DIGEST = "7563acc66c5514e1e7368c4f7020254edd95c8a178f1c418997316e4167e6d72"
+	PINNED_CAPABILITY_DIGEST = "a793fd1d310ddb02fa7a1e7aff3db9656290106e10191a6ba84bf09de3197afa"
+	PINNED_RECORD_SCOPE_CAPABILITY_DIGEST = "0b4cc098bbec4f5c43a8f1c694589793ef85881ba61c5e389db1a2616b71892a"
 
 	def test_vendored_registry_capability_digest_is_pinned(self):
 		import hashlib
@@ -150,6 +152,33 @@ class TestRegistryCapabilityContract(FrappeTestCase):
 			"the vendored registry's capability contract moved — re-vendor from the "
 			"agents repo and update BOTH pinned digests in the same change set "
 			"(see lib/check_registry_capability_contract.py there)",
+		)
+
+	def test_vendored_registry_record_scope_capability_digest_is_pinned(self):
+		import hashlib
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			doc = json.load(fh)
+		contract = {}
+		for entry in doc["agents"]:
+			slug = entry.get("agent_slug") or entry.get("slug")
+			self.assertTrue(slug, "registry entry with no slug")
+			self.assertNotIn(slug, contract, f"duplicate slug {slug}")
+			value = entry.get("supports_record_scope")
+			self.assertIsInstance(value, bool, f"{slug}: record scope capability is not explicit")
+			contract[slug] = value
+		canonical = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+		got = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+		self.assertEqual(
+			got,
+			self.PINNED_RECORD_SCOPE_CAPABILITY_DIGEST,
+			"the vendored record-scope capability contract moved — re-vendor the scope declarations "
+			"and update BOTH pinned digests (see lib/check_registry_capability_contract.py in the "
+			"private agents repo)",
 		)
 
 
@@ -200,7 +229,35 @@ class TestPrivateSourceReportGrantBoundary(FrappeTestCase):
 			"fefo-expiry-compliance-auditor",
 			"negative-stock-valuation-auditor",
 			"payroll-prerun-auditor",
+			"cycle-count-planner-operator",
+			"fixed-asset-depreciation-auditor",
+			"sla-breach-ageing-auditor",
+			"statutory-payroll-compliance-auditor",
+			"vendor-ledger-recon-auditor",
 		):
 			with self.subTest(agent=slug):
 				self.assertNotIn("jarvis__query_report", agent_catalog.registry_tools_allow(slug))
 		self.assertIn("jarvis__query_report", agent_catalog.registry_tools_allow("baseline-meter-auditor"))
+
+
+class TestReorderNativeGateContract(FrappeTestCase):
+	def test_reorder_native_release_has_only_metadata_preparation_authority(self):
+		"""Publication cannot restore the retired generic read or write tools."""
+		import json
+
+		import frappe
+
+		path = frappe.get_app_path("jarvis", "agents", "registry.json")
+		with open(path, encoding="utf-8") as fh:
+			doc = json.load(fh)
+		entry = next(
+			item for item in doc["agents"] if item.get("agent_slug") == "reorder-replenishment-operator"
+		)
+		self.assertEqual(entry["status"], "Published")
+		self.assertEqual(entry["tools_required"], ["jarvis__prepare_reorder_review"])
+		self.assertEqual(
+			sorted(entry["tools_allow"]),
+			["jarvis__prepare_reorder_review"],
+		)
+		self.assertNotIn("Jarvis Approval Request", entry["doctypes_required"])
+		self.assertIsNone(entry["writes"])
