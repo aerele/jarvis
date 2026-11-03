@@ -209,3 +209,31 @@ class TestDerivedConfig(FrappeTestCase):
 		with boom, patch.object(derived_config.frappe, "log_error"):
 			out = agent_scheduler._explicit_config({"config_keys": _KEYS}, inst)
 		self.assertEqual(out, {"open_workable_status_set": ["X"]})
+
+	def test_explicit_config_passes_the_declared_hrms_namespace_only(self):
+		keys = [
+			"baseline_hrms.reviewer",
+			"baseline_hrms.reviewer_capacity",
+			"baseline_hrms.history_from",
+			"baseline_hrms.test_declaration",
+		]
+		inst = _inst(
+			config=(
+				'{"baseline_hrms":{"reviewer":"Payroll lead",'
+				'"reviewer_capacity":"HR reviewer",'
+				'"history_from":"2025-10-01",'
+				'"test_declaration":"Quarterly baseline"},"other":1}'
+			)
+		)
+		out = agent_scheduler._explicit_config({"config_keys": keys}, inst)
+		self.assertEqual(
+			out,
+			{
+				"baseline_hrms": {
+					"reviewer": "Payroll lead",
+					"reviewer_capacity": "HR reviewer",
+					"history_from": "2025-10-01",
+					"test_declaration": "Quarterly baseline",
+				}
+			},
+		)
