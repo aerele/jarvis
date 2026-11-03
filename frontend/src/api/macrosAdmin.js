@@ -63,8 +63,26 @@ export const adminDelete = (macro) => call(MA + "admin_delete", { macro });
 // Refused on the admin's own macro, and on one whose owner is no longer
 // `expectedOwner` (the owner the dialog showed).
 // -> { ok, handed_over, new_owner, stopped_runs }
-export const adminHandover = (macro, newOwner, expectedOwner) =>
-	call(MA + "admin_handover", { macro, new_owner: newOwner, expected_owner: expectedOwner });
+//
+// Several people: `newOwner` may be a list. The first is handed the macro, each of
+// the others gets a copy; with `keep` the macro stays and everyone gets a copy. One
+// person and no `keep` sends exactly what a single hand-over always sent.
+// -> also { copies: [{ user, macro }], copy_failed: [{ user, reason }] }
+export const adminHandover = (macro, newOwner, expectedOwner, keep = false) => {
+	const people = Array.isArray(newOwner) ? newOwner : [newOwner];
+	if (people.length === 1 && !keep)
+		return call(MA + "admin_handover", {
+			macro,
+			new_owner: people[0],
+			expected_owner: expectedOwner,
+		});
+	return call(MA + "admin_handover", {
+		macro,
+		new_owners: JSON.stringify(people),
+		expected_owner: expectedOwner,
+		keep: keep ? 1 : 0,
+	});
+};
 
 // Who a macro can be handed to: enabled users with the Jarvis User role matching
 // `search` (address or full name), at most 20.

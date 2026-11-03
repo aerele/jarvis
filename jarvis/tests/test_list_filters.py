@@ -561,7 +561,7 @@ class TestFailsClosed(unittest.TestCase):
 		self.assertEqual(self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_INVALID_VALUE)
 
 	def test_select_value_must_be_an_option(self):
-		clause = [{"doctype": MACRO, "fieldname": "schedule_frequency", "operator": "=", "value": "hourly"}]
+		clause = [{"doctype": MACRO, "fieldname": "schedule_frequency", "operator": "=", "value": "yearly"}]
 		self.assertEqual(self._code(compile_list_filters, "macros", clause, user=USER_A), ERR_INVALID_VALUE)
 
 	def test_empty_in_list_is_rejected(self):
