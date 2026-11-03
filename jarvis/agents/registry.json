@@ -1296,7 +1296,8 @@
         "reviewer_capacity",
         "applicable_tax_rate",
         "currency"
-      ]
+      ],
+      "supports_record_scope": false
     },
     {
       "agent_slug": "negative-stock-valuation-auditor",
