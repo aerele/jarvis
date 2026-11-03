@@ -23,6 +23,16 @@ describe("Compact balance details", () => {
 		expect(wrapper.emitted("bucket")).toEqual([["Payable", "overdue"]]);
 		wrapper.unmount();
 	});
+	it("labels the month boundary without claiming it is the full forecast", async () => {
+		const snapshot = complete();
+		snapshot.scope.month = "2026-10";
+		const wrapper = mount(CalendarReconciliation, { props: { snapshot } });
+		expect(wrapper.text()).toContain("After selected month");
+		expect(wrapper.text()).not.toContain("Outside forecast");
+		await wrapper.get('[aria-label="Supplier After selected month records"]').trigger("click");
+		expect(wrapper.emitted("bucket")).toEqual([["Payable", "outside_horizon"]]);
+		wrapper.unmount();
+	});
 	it("omits exchange differences when none are supplied", () => {
 		const wrapper = mount(CalendarReconciliation, { props: { snapshot: complete() } });
 		expect(wrapper.text()).not.toContain("Exchange differences");
@@ -32,6 +42,7 @@ describe("Compact balance details", () => {
 	it.each([
 		["withholding", "Tax withholding"],
 		["foreign_advance", "Advance adjustment"],
+		["foreign_rounding", "Currency rounding"],
 		["unrecognized", "Invoice balance"],
 	])("uses a short adjustment label for %s without inventing paid cash", (reason, label) => {
 		const data = detail();

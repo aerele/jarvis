@@ -14,10 +14,12 @@
 				</div>
 				<button
 					class="pcal-button pcal-primary"
-					:disabled="!model.company || busy"
-					@click="model.refresh()"
+					:disabled="!model.company || busy || model.refreshing"
+					@click="model.refresh({ background: true })"
 				>
-					<FeatherIcon name="refresh-cw" class="size-4" />Refresh
+					<FeatherIcon name="refresh-cw" class="size-4" />{{
+						model.refreshing ? "Refreshing…" : "Refresh"
+					}}
 				</button>
 			</div>
 			<section class="pcal-toolbar" aria-label="Calendar filters">
@@ -73,17 +75,31 @@
 				</button>
 			</p>
 			<p v-if="model.notice" class="pcal-notice" role="status">{{ model.notice }}</p>
-			<template v-if="model.snapshot">
+			<template v-if="viewSnapshot">
 				<div class="pcal-asof">
-					<span
+					<span v-if="model.snapshot"
 						><i class="snapshot-dot"></i>As of
 						{{ snapshotTime(model.snapshot.generated_at, timezone()) }} ({{
 							timezone() || "UTC"
 						}})</span
-					><span>{{ model.snapshot.currency }} · Expires after 5 minutes</span>
+					><span v-else>{{
+						model.refreshIssue
+							? "Waiting for fresh balances…"
+							: "Loading current balances…"
+					}}</span
+					><span role="status"
+						>{{ viewSnapshot.currency }} ·
+						{{
+							model.refreshIssue
+								? "Update paused"
+								: model.refreshing
+								? "Refreshing data…"
+								: "Updates automatically while this page is visible"
+						}}</span
+					>
 				</div>
 				<div
-					v-if="!model.snapshot.projection.forecast_available"
+					v-if="model.snapshot && !model.snapshot.projection.forecast_available"
 					class="pcal-warning"
 					role="status"
 				>
@@ -97,7 +113,8 @@
 					Choose bank and cash accounts to include book cash in the forecast.
 				</p>
 				<CalendarKpis
-					:snapshot="model.snapshot"
+					:snapshot="viewSnapshot"
+					:loading="model.refreshing || !!model.refreshIssue"
 					:day="model.day"
 					:selected="model.selectedDate"
 				/>
@@ -120,31 +137,36 @@
 				</div>
 				<div class="pcal-calendar-layout">
 					<CalendarGrid
-						:snapshot="model.snapshot"
+						:snapshot="viewSnapshot"
 						:selected="model.selectedDate"
 						:month="model.month"
 						:mode="mode"
+						:loading="model.refreshing"
+						:waiting="model.waitingForWorker"
+						:load-error="!!model.refreshIssue"
+						@retry="model.refresh({ background: true })"
 						@select="model.selectDate"
 						@browse="model.browseMonth"
 						@today="model.goToday"
 					/><UpcomingPayments
-						:snapshot="model.snapshot"
+						:snapshot="viewSnapshot"
 						:selected="model.selectedDate"
 						:rows="model.upcoming"
-						:loading="model.upcomingLoading"
+						:load-error="!!model.refreshIssue"
+						:loading="model.upcomingLoading || (!model.snapshot && model.refreshing)"
 						@select="model.selectDate"
 					/>
 				</div>
 				<CalendarDetails
-					:snapshot="model.snapshot"
+					:snapshot="viewSnapshot"
 					:selected="model.selectedDate"
 					:data="model.detail"
-					:loading="model.detailLoading"
+					:loading="model.detailLoading || (!model.snapshot && model.refreshing)"
 					:view="model.activeView"
 					@view="model.setDetailView"
 					@page="model.changeDetailPage"
 				/>
-				<CalendarReconciliation :snapshot="model.snapshot" @bucket="model.openBucket" />
+				<CalendarReconciliation :snapshot="viewSnapshot" @bucket="model.openBucket" />
 			</template>
 			<section v-else class="pcal-state pcal-panel" aria-live="polite" :aria-busy="busy">
 				<FeatherIcon
@@ -255,7 +277,7 @@
 				><div class="pcal-dialog pcal-root">
 					<CalendarDetails
 						v-if="model.bucket && model.snapshot"
-						:snapshot="model.snapshot"
+						:snapshot="viewSnapshot"
 						:data="model.bucketData"
 						:loading="model.bucketLoading"
 						view="terms"
@@ -290,6 +312,7 @@ const model = reactive(
 		initialDate: typeof route.query.date === "string" ? route.query.date : "",
 	})
 );
+const viewSnapshot = computed(() => model.snapshot || model.loadingSnapshot);
 const mode = ref(shell.mobile ? "list" : "month");
 const accountsOpen = ref(false),
 	accountDraft = ref([]),
@@ -324,7 +347,9 @@ const stateTitle = computed(
 		}[model.phase] || "Calendar unavailable")
 );
 const stateMessage = computed(() =>
-	busy.value
+	model.waitingForWorker
+		? "Waiting for calendar data. This page will update automatically."
+		: busy.value
 		? "Reading complete ERPNext balances. Large companies can take a few minutes. You can change company while this runs."
 		: model.phase === "choose_company"
 		? "Select a permitted company, then choose the bank and cash accounts to include."
@@ -337,7 +362,9 @@ const bucketTitle = computed(
 				overdue: "overdue balances",
 				undated: "balances without a due date",
 				adjustments: "signed adjustments",
-				outside_horizon: "balances outside the forecast",
+				outside_horizon: model.snapshot?.scope.month
+					? "balances after the selected month"
+					: "balances outside the forecast",
 			}[model.bucket?.name] || "balances"
 		}`
 );

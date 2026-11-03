@@ -16,6 +16,8 @@ from jarvis.tests.test_part3_security import _as, _ensure_user
 USER = "nr-user@example.com"
 
 NOT_RENAMABLE = (
+	"Jarvis Approval Reviewer",
+	"Jarvis Chat Binding",
 	"Jarvis Export Job",
 	"Jarvis Chat Send Request",
 	"Jarvis User Settings",
@@ -28,6 +30,8 @@ NOT_RENAMABLE = (
 	"Jarvis Macro Run",
 	"Jarvis Skill Admin Log",
 	"Jarvis Agent Activity",
+	"Jarvis Agent Catalog Lock",
+	"Jarvis Agent Close Fence",
 	"Jarvis Agent Finding",
 	"Jarvis Agent Run",
 	"Jarvis Agent Run Step",
@@ -54,6 +58,7 @@ NOT_RENAMABLE = (
 	"Jarvis App Learning Run",
 	"Jarvis Learned Pattern",
 	"Jarvis Relay Pump",
+	"Jarvis Reorder Safety Fence",
 	"Jarvis Agent Model Choice",
 	"Jarvis Client Error",
 	"Jarvis Feedback Outbox",
@@ -65,6 +70,7 @@ NOT_RENAMABLE = (
 	"Jarvis Shared Skill Slug",
 	"Jarvis Trigger Activity",
 	"Jarvis Wiki Graph History",
+	"Jarvis Physical Count",
 )
 
 NOT_RENAMABLE_CHILD = (
@@ -80,6 +86,7 @@ NOT_RENAMABLE_CHILD = (
 	"Jarvis Macro Step",
 	"Jarvis Pending Action Waiter",
 	"Jarvis User Model Usage",
+	"Jarvis Physical Count Item",
 )
 
 # Doctypes whose definition allows renaming (System Manager, from Desk). Kept.

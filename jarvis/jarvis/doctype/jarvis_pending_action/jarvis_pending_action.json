@@ -23,6 +23,12 @@
   "decided_by",
   "skill_docname",
   "run_id",
+  "agent_close_fences",
+  "actor",
+  "collaboration_binding",
+  "collaboration_grant_revision",
+  "collaboration_epoch",
+  "collaboration_call_key",
   "batch_id",
   "corrects",
   "correction_message",
@@ -76,7 +82,7 @@
    "fieldname": "reason_code",
    "fieldtype": "Select",
    "label": "Reason Code",
-   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired\nuse_existing\nstuck"
+   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired\nuse_existing\nstuck\nsafety_update"
   },
   {
    "description": "Fixed bench text only; never tool args or error text.",
@@ -163,6 +169,53 @@
    "fieldtype": "Data",
    "label": "Run ID",
    "search_index": 1
+  },
+  {
+   "description": "Server-only normalized close-fence generations for a generic chat confirmation.",
+   "fieldname": "agent_close_fences",
+   "fieldtype": "JSON",
+   "hidden": 1,
+   "label": "Agent Close Fences",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "actor",
+   "fieldtype": "Data",
+   "label": "Initiating Actor",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_binding",
+   "fieldtype": "Data",
+   "label": "Collaboration Binding",
+   "read_only": 1,
+   "no_copy": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "collaboration_grant_revision",
+   "fieldtype": "Int",
+   "label": "Collaboration Grant Revision",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_epoch",
+   "fieldtype": "Int",
+   "label": "Collaboration Epoch",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "collaboration_call_key",
+   "fieldtype": "Data",
+   "label": "Collaboration Call Key",
+   "read_only": 1,
+   "no_copy": 1,
+   "unique": 1,
+   "length": 64
   },
   {
    "description": "Groups a typed multi-card approval so it settles with one continuation.",

@@ -93,7 +93,11 @@ function onEvent(p) {
 		// in the chat has the details, and ChatView refreshes it when that chat is open; this
 		// handler owns only the off-screen unread dot. No browser push.
 		if (conv !== openConversationId()) store.markUnread(conv);
-	} else if (p.kind === "action:pending" && prefs.notifyDecision) {
+	} else if (
+		p.kind === "action:pending" &&
+		p.pending_card_safe === true &&
+		prefs.notifyDecision
+	) {
 		notify(
 			`${agentName} needs your approval`,
 			p.summary || p.tool || "A change is waiting for you",

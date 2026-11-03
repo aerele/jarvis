@@ -115,6 +115,32 @@ class InvoiceReconciler:
 		):
 			return "withholding"
 		if (
+			not tds
+			and not doc.total_advance
+			and not doc.write_off_amount
+			and doc.currency
+			and doc.currency == doc.party_account_currency == row.account_currency
+			and doc.currency != self.engine.company_currency
+			and self.money(row.invoiced) == self.money(doc.base_grand_total)
+			and self.money(row.invoiced_in_account_currency)
+			== self.money(doc.rounded_total or doc.grand_total)
+			and scheduled == chosen
+			and chosen
+			== self.money(
+				flt(
+					flt(doc.rounded_total or doc.grand_total) * doc.conversion_rate,
+					self.engine.currency_precision,
+				)
+			)
+			and abs(chosen - self.money(doc.base_grand_total))
+			== Decimal(1).scaleb(-self.engine.currency_precision)
+		):
+			# Converting the foreign grand total can differ by one minor unit
+			# from the posted sum of converted lines. Classify only that exact
+			# single-term pattern; native() still supplies the ledger residual.
+			return "foreign_rounding"
+
+		if (
 			doc.total_advance
 			and doc.party_account_currency
 			and doc.party_account_currency == row.account_currency

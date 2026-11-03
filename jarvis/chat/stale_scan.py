@@ -68,6 +68,10 @@ def _scan_one_row(r: dict, now, managed_cutoff, error_cutoff) -> int:
 	crash the whole cycle - only this row is skipped (logged), every other row in
 	the batch still gets processed. Returns 1 iff this row was ERRORED (never
 	'recovering'), matching the caller's original count contract."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(r.get("conversation")):
+		return 0
 	creation = r.get("creation")
 	recoverable = bool((r.get("session_key") or "").strip())
 
@@ -211,6 +215,10 @@ def _sweep_orphan_turns(now) -> int:
 
 	errored = 0
 	for r in rows:
+		from jarvis.chat.collaboration import is_collaborative
+
+		if is_collaborative(r.get("conversation")):
+			continue
 		# The conversation was deleted out from under this orphan (the LEFT JOIN
 		# surfaces it as owner IS NULL). Redispatching or erroring onto a gone
 		# conversation can only raise LinkValidationError — the Turn.conversation /

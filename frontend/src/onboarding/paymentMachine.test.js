@@ -834,3 +834,29 @@ test("noteVerificationResent starts a client-side cooldown read by remainingRese
 	assert.equal(remainingResendCooldownSeconds(resent, 1_030_000), 0);
 	assert.equal(remainingResendCooldownSeconds(resent, 1_999_999), 0);
 });
+
+test("private-network refusals at signup: address problems are restart-safe, 'disabled' is terminal", () => {
+	const refuse = (code) =>
+		reduce(initialState(), {
+			type: EVENTS.CONTRACT_STATE,
+			decoded: {
+				ok: false,
+				code,
+				message: "m",
+				recovery: "",
+				data: {},
+				context: {},
+				httpStatus: 417,
+			},
+		});
+	for (const code of [CODES.PRIVATE_ADDRESS_INVALID, CODES.PRIVATE_ADDRESS_TAKEN]) {
+		const s = refuse(code);
+		assert.equal(s.value, STATES.FAILED_RETRYABLE, code);
+		assert.equal(s.code, code);
+		// admin refuses BEFORE it creates any provider object: nothing recoverable behind it.
+		assert.equal(canSafelyRestart(s), true, code);
+	}
+	const disabled = refuse(CODES.PRIVATE_NETWORK_DISABLED);
+	assert.equal(disabled.value, STATES.FAILED_TERMINAL);
+	assert.equal(canSafelyRestart(disabled), false);
+});

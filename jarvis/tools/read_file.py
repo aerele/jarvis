@@ -29,6 +29,8 @@ import frappe
 
 from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools._archive_sources import ArchiveModeError, ArchiveSelectionError
+from jarvis.tools._file_source import prepared_handoff, require_file_read, resolve_file
 
 _TABLE_EXT = {"xlsx", "csv", "tsv"}
 _PDF_EXT = {"pdf"}
@@ -46,15 +48,44 @@ def read_file(
 	max_rows: int = 500,
 	max_chars: int = 20000,
 	preview: bool = False,
-	read_mode: str = "preview",
+	read_mode: str | None = None,
 	cursor: str | None = None,
 	version: str | None = None,
+	file_id: str | None = None,
+	member: str | None = None,
+	archive_version: str | None = None,
+	payload_format: str | None = None,
 ) -> dict:
 	"""Read a bounded preview, or opt into the file-cursor-v1 exact text contract.
 
 	Cursor continuations require the returned version and identical worksheet scope.
 	Each call rechecks permissions and bytes. No jobs, model calls or cached content.
 	"""
+	from jarvis.tools._archive_api import analyze, enabled, is_archive
+
+	fdoc = resolve_file(file_url or None, filename or None, file_id or None)
+	handoff = prepared_handoff(fdoc)
+	if handoff is not None:
+		return handoff
+	require_file_read(fdoc)
+	archive_scope = any(value is not None for value in (member, archive_version, payload_format))
+	if is_archive(fdoc) and (enabled() or archive_scope):
+		if preview:
+			raise ArchiveModeError("Archive members cannot be read through preview mode.")
+		return analyze(
+			fdoc,
+			member=member,
+			archive_version=archive_version,
+			payload_format=payload_format,
+			sheet=sheet,
+			cursor=cursor,
+			version=version or None,
+			read=True,
+			read_mode=read_mode or "file-cursor-v1",
+		)
+	if archive_scope:
+		raise ArchiveSelectionError("Archive member arguments require an archive source.")
+	read_mode = read_mode or "preview"
 	if read_mode not in {"preview", "file-cursor-v1"}:
 		# Independently upgraded plugins must degrade truthfully, never execute
 		# an unknown mode. A continuation remains distinguishable as a preview.
@@ -66,13 +97,6 @@ def read_file(
 		raise InvalidArgumentError("Cursor and version must be supplied together, without preview.")
 	if cursor is not None and read_mode != "file-cursor-v1":
 		raise InvalidArgumentError("Cursor references require file-cursor-v1 mode.")
-	fdoc = _resolve_file(file_url, filename)
-	if not frappe.has_permission("File", "read", doc=fdoc.name):
-		# Generic on purpose - do not echo the resolved file's real name back
-		# to a caller who isn't permitted to read it (see F12 in
-		# audit-findings.md: that would confirm the existence/name of a
-		# private file the caller has no other way to see).
-		raise PermissionDeniedError("no matching file found")
 
 	ext = (fdoc.file_name or "").rsplit(".", 1)[-1].lower() if "." in (fdoc.file_name or "") else ""
 	# Raw bytes, on either Frappe major. Calling get_content(encodings=[])
@@ -93,7 +117,7 @@ def read_file(
 		not preview
 		and read_mode == "file-cursor-v1"
 		and (
-			ext in _PDF_EXT | _TABLE_EXT | _TEXT_EXT
+			ext in _PDF_EXT | _TABLE_EXT | _TEXT_EXT | {"docx"}
 			or (ext not in _IMAGE_EXT | {"xls"} and _looks_text(content))
 		)
 	):
@@ -101,6 +125,10 @@ def read_file(
 
 		return {**base, **read_sections(fdoc, content, sheet=sheet, cursor=cursor, version=version)}
 
+	if ext == "docx":
+		from jarvis.tools._docx_preview import preview_docx
+
+		return {**base, **preview_docx(content, fdoc.file_name, max_chars, max_rows)}
 	if ext in _PDF_EXT:
 		return {**base, **_read_pdf(content, max_chars)}
 	if ext == "xlsx":
@@ -120,8 +148,8 @@ def _resolve_file(file_url: str | None, filename: str | None):
 	if file_url:
 		name = frappe.db.get_value("File", {"file_url": file_url}, "name")
 		if not name:
-			raise InvalidArgumentError(f"no file found for url {file_url!r}")
-		return frappe.get_doc("File", name)
+			raise PermissionDeniedError("no matching file found")
+		return frappe.get_cached_doc("File", name)
 	if filename:
 		# Gather name-matching candidates unfiltered, then gate EACH with the
 		# row-level has_permission check File actually enforces, returning the
@@ -148,7 +176,7 @@ def _resolve_file(file_url: str | None, filename: str | None):
 		)
 		for row in candidates:
 			if frappe.has_permission("File", "read", doc=row.name):
-				return frappe.get_doc("File", row.name)
+				return frappe.get_cached_doc("File", row.name)
 		# Generic on purpose - covers both "nothing matched" and "something
 		# matched but you can't read it"; the latter must not confirm the
 		# existence/name of a private file the caller can't otherwise see.

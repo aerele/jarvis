@@ -1308,6 +1308,61 @@ def _page_is_agent_updatable(name: str, prefix: str) -> bool:
 	return _sources_agent_updatable(frappe.db.get_value(WIKI, name, "sources"), prefix)
 
 
+def _has_newer_provenance_generation(
+	raw_sources,
+	last_confirmed_at,
+	modified,
+	provenance_prefix: str | None,
+	current_ref: str | None,
+	not_after: str,
+) -> bool:
+	"""True if a different matching run refreshed a page after a receipt.
+
+	The source receipt's signed issuance time is the generation boundary. This
+	function is called while the wiki row is locked. It does not trust a model
+	value: both the current page provenance and ``last_confirmed_at`` are server
+	owned, and ``not_after`` came from a verified server receipt.
+
+	Malformed state fails closed. Retired app-learning sources have no run
+	reference. For those rows, use the locked server-owned page ``modified``
+	time as a fallback generation marker: a legacy page is refreshable only when
+	it predates this run's signed receipt. This retains the supported migration
+	path without permitting a delayed run to replace a later legacy repair.
+	"""
+	if not provenance_prefix or not current_ref:
+		return True
+	try:
+		cutoff = frappe.utils.get_datetime(not_after)
+		confirmed = frappe.utils.get_datetime(last_confirmed_at or modified)
+		sources = json.loads(raw_sources) if raw_sources else []
+	except Exception:
+		return True
+	if not cutoff or not isinstance(sources, list):
+		return True
+	latest = next(
+		(
+			entry
+			for entry in reversed(sources)
+			if isinstance(entry, dict) and str(entry.get("kind") or "").startswith(provenance_prefix)
+		),
+		None,
+	)
+	# Retired app-learning pages have no run ref. They may pass the ownership
+	# fence for migration only when their server-owned page generation predates
+	# this receipt. A row modified at or after this receipt is a later generation
+	# and must remain intact.
+	latest_ref = str(latest.get("ref") or "") if isinstance(latest, dict) else ""
+	if not latest:
+		return False
+	if not confirmed:
+		return True
+	if not latest_ref:
+		return confirmed >= cutoff
+	if latest_ref == str(current_ref):
+		return False
+	return confirmed >= cutoff
+
+
 def apply_extracted_page_updates(
 	updates,
 	source: str,
@@ -1320,6 +1375,7 @@ def apply_extracted_page_updates(
 	preserve_curated: bool = False,
 	return_outcomes: bool = False,
 	refuse_overflow: bool = False,
+	provenance_not_after: str | None = None,
 ) -> tuple[int, int] | list[dict]:
 	"""Create/update wiki pages from extracted updates (the note ingest above
 	and ``jarvis.learning.voice_facts`` both land here). At most
@@ -1385,6 +1441,11 @@ def apply_extracted_page_updates(
 	outcome reason is ``"page_full"`` (visible via ``return_outcomes=True``, and threaded
 	into the plain ``(applied, failed)`` tuple callers as an ordinary refusal). Default
 	False preserves every other caller's clip-and-save behavior byte-for-byte.
+
+	``provenance_not_after`` is a server-issued receipt time used by Custom App
+	Learning. Under the page-row lock, a page refreshed by another matching
+	provenance run at or after that time is refused. This stops an older run from
+	overwriting a later run after it captured source evidence.
 	"""
 	if not isinstance(updates, list):
 		return [] if return_outcomes else (0, 0)
@@ -1429,6 +1490,7 @@ def apply_extracted_page_updates(
 				allow_body_replace,
 				preserve_curated,
 				refuse_overflow,
+				provenance_not_after,
 			)
 			reason = "applied" if ok else (refuse_reason or "refused")
 			if ok:
@@ -1533,6 +1595,7 @@ def _apply_one_update(
 	allow_body_replace: bool = True,
 	preserve_curated: bool = False,
 	refuse_overflow: bool = False,
+	provenance_not_after: str | None = None,
 ) -> tuple[bool, str | None]:
 	"""(ok, reason) — reason is None for the ordinary "refused"/"applied" cases
 	(the caller falls back to its own generic label); only a distinguished
@@ -1628,6 +1691,7 @@ def _apply_one_update(
 		preserve_curated,
 		tuser,
 		refuse_overflow,
+		provenance_not_after,
 	)
 	try:
 		return _merge_update_into_page(*args)
@@ -1648,6 +1712,7 @@ def _merge_update_into_page(
 	preserve_curated: bool = False,
 	expect_target_user: str | None = None,
 	refuse_overflow: bool = False,
+	provenance_not_after: str | None = None,
 ) -> tuple[bool, str | None]:
 	"""(ok, reason) — see ``_apply_one_update``."""
 	body_md = update.get("body_md")
@@ -1670,12 +1735,28 @@ def _merge_update_into_page(
 	#    in the gap must still downgrade this write to add-only.
 	if provenance_prefix is not None or expect_target_user is not None or preserve_curated:
 		locked = (
-			frappe.db.get_value(WIKI, name, ["sources", "target_user"], as_dict=True, for_update=True) or {}
+			frappe.db.get_value(
+				WIKI,
+				name,
+				["sources", "target_user", "last_confirmed_at", "modified"],
+				as_dict=True,
+				for_update=True,
+			)
+			or {}
 		)
 		if provenance_prefix is not None and not _sources_agent_updatable(
 			locked.get("sources"), provenance_prefix
 		):
 			return False, None
+		if provenance_not_after is not None and _has_newer_provenance_generation(
+			locked.get("sources"),
+			locked.get("last_confirmed_at"),
+			locked.get("modified"),
+			provenance_prefix,
+			ref,
+			provenance_not_after,
+		):
+			return False, "newer_run"
 		if expect_target_user is not None and locked.get("target_user") != expect_target_user:
 			return False, None
 		curated = bool(preserve_curated) and _sources_are_curated(locked.get("sources"))
